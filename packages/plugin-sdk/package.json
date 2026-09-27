@@ -1,0 +1,29 @@
+{
+  "name": "@harness-forge/plugin-sdk",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Plugin types, definePlugin, manifest and settings schemas for harness-forge plugins.",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/google": "^4.0.0",
+    "@ai-sdk/openai": "^4.0.0",
+    "@ai-sdk/openai-compatible": "^3.0.0",
+    "@ai-sdk/provider": "catalog:",
+    "@harness-forge/shared": "workspace:*",
+    "ai": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

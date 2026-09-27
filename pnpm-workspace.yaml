@@ -1,0 +1,32 @@
+# pnpm 11 reads all settings from this file (the "pnpm" field in package.json is ignored).
+packages:
+  - apps/*
+  - packages/*
+
+# Shared versions. Reference them from package.json files as "catalog:".
+catalog:
+  '@ai-sdk/provider': ^4.0.18
+  '@types/node': ^22.20.4
+  '@vitest/coverage-v8': ^4.1.11
+  ai: ^7.0.0
+  hono: ^4.13.0
+  tsx: ^4.23.15
+  typescript: ~6.0.3
+  vitest: ^4.0.0
+  zod: ^4.1.0
+
+overrides:
+  # TypeScript 7 breaks .vue files that import prop types (ADR-013). Never upgrade.
+  typescript: ~6.0.3
+  # AI Elements Vue was written against vue-stream-markdown 1.x (2.0 is breaking, ADR-007).
+  vue-stream-markdown: ^1.0.0
+
+# Dependency build scripts are blocked unless listed here (true = run, false = skip silently).
+allowBuilds:
+  # Verifies and links the native binary (used by tsx, drizzle-kit, vite tooling and the plugin compiler).
+  esbuild: true
+  # Postinstall only re-selects the Vue 2/3 entry; the published files already target Vue 3.
+  vue-demi: false
+
+# Fail the install when a dependency has a build script that is not listed in allowBuilds.
+strictDepBuilds: true

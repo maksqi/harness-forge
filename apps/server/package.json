@@ -1,0 +1,59 @@
+{
+  "name": "@harness-forge/server",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "description": "harness-forge API server (Hono) that also serves the built web app.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "tsx watch --clear-screen=false src/main.ts",
+    "build": "tsdown",
+    "start": "node dist/main.mjs",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@ai-sdk/alibaba": "^2.0.0",
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/deepseek": "^3.0.0",
+    "@ai-sdk/google": "^4.0.0",
+    "@ai-sdk/groq": "^4.0.0",
+    "@ai-sdk/mcp": "^2.0.0",
+    "@ai-sdk/minimax": "^3.0.0",
+    "@ai-sdk/mistral": "^4.0.0",
+    "@ai-sdk/moonshotai": "^3.0.0",
+    "@ai-sdk/openai": "^4.0.0",
+    "@ai-sdk/openai-compatible": "^3.0.0",
+    "@ai-sdk/provider": "catalog:",
+    "@ai-sdk/xai": "^5.0.0",
+    "@ai-sdk/zai": "^3.0.0",
+    "@harness-forge/plugin-sdk": "workspace:*",
+    "@harness-forge/shared": "workspace:*",
+    "@hono/node-server": "^2.1.0",
+    "@hono/zod-validator": "^0.9.0",
+    "@libsql/client": "^0.18.0",
+    "@lobehub/icons-static-svg": "^1.95.0",
+    "@openrouter/ai-sdk-provider": "^3.1.0",
+    "ai": "catalog:",
+    "drizzle-orm": "^0.45.3",
+    "esbuild": "^0.28.0",
+    "fflate": "^0.8.2",
+    "hono": "catalog:",
+    "semver": "^7.7.0",
+    "tar": "^7.5.0",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/semver": "^7.7.0",
+    "drizzle-kit": "^0.31.0",
+    "tsdown": "^0.23.0",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

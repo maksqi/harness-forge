@@ -1,0 +1,38 @@
+{
+  "name": "harness-forge",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.20.0",
+  "description": "Self-hosted, single-user, BYOK AI chat and agent harness with a plugin system.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @harness-forge/server --filter @harness-forge/web run dev",
+    "build": "pnpm --filter @harness-forge/web run build && pnpm --filter @harness-forge/server run build",
+    "start": "node apps/server/dist/main.mjs",
+    "start:e2e": "HF_MOCK_PROVIDER=1 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e node apps/server/dist/main.mjs",
+    "test": "vitest run",
+    "test:e2e": "playwright test --pass-with-no-tests",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.json && pnpm --recursive --workspace-concurrency=1 run typecheck",
+    "check:english": "node scripts/check-english.mjs",
+    "check": "pnpm run check:english && pnpm run lint && pnpm run typecheck && pnpm run test",
+    "db:generate": "pnpm --filter @harness-forge/server run db:generate",
+    "catalog:update": "tsx scripts/update-catalog.ts",
+    "audit:ownership": "node scripts/audit-ownership.mjs"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "^9.5.1",
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "eslint": "^10.11.0",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

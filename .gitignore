@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Build output
+.nuxt/
+.output/
+.nitro/
+.cache/
+# No trailing slash: `nuxt generate` also creates apps/web/dist as a symlink to .output/public.
+dist
+
+# Runtime data and scratch space
+data/
+.data/
+.tmp/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Tests
+coverage/
+playwright-report/
+test-results/
+blob-report/
+
+# Logs
+*.log
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
