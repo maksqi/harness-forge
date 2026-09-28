@@ -15,7 +15,7 @@
     "typecheck:fast": "vue-tsc -b --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/vue": "^4.0.0",
+    "@ai-sdk/vue": "^4.0.118",
     "@codemirror/commands": "^6.11.1",
     "@codemirror/lang-javascript": "^6.2.0",
     "@codemirror/lang-json": "^6.0.0",
