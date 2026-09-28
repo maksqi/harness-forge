@@ -2,8 +2,10 @@
 // Code plugin creation (docs/UI.md 8.6, 10.4): name, id (derived from the name until edited, checked like the server
 // checks it) and one template card; Create plugin -> `POST /api/plugins/scaffold` (a fresh-auth route: a
 // `403 forbidden` + `action: 'login'` opens ConfirmPasswordDialog and retries once) -> toast -> `created(id)`. The page
-// (W3.3) then navigates to `/plugins/<id>?tab=source`. Files are JavaScript ESM with JSDoc types (`index.mjs`).
+// (W3.3) then navigates to `/plugins/<id>?tab=source`. Files are JavaScript ESM with JSDoc types (`index.mjs`, the
+// default) or TypeScript (`index.ts`, compiled by the server; `language: 'ts'`).
 import type { PluginTemplateId } from '@harness-forge/shared'
+import type { CodePluginLanguage } from './code-plugin-form'
 import { BlocksIcon, CircleCheckIcon, PlugIcon, TerminalSquareIcon, WrenchIcon } from '@lucide/vue'
 import { RadioGroupIndicator, RadioGroupItem, RadioGroupRoot } from 'reka-ui'
 import { computed, onMounted, ref, useId, watch } from 'vue'
@@ -12,6 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Spinner } from '@/components/ui/spinner'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { cn } from '@/lib/utils'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
 import { errorTitle } from '~/components/common/harness-error'
@@ -19,7 +22,7 @@ import { useApi } from '~/composables/useApi'
 import { usePluginsStore } from '~/stores/plugins'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import { CODE_TEMPLATES, PLUGIN_ID_MAX, PLUGIN_NAME_MAX, pluginIdProblem, pluginNameProblem, slugifyPluginId } from './code-plugin-form'
+import { CODE_LANGUAGES, CODE_TEMPLATES, PLUGIN_ID_MAX, PLUGIN_NAME_MAX, pluginIdProblem, pluginNameProblem, slugifyPluginId } from './code-plugin-form'
 import { isFreshAuthCancelled, useFreshAuth } from './fresh-auth'
 
 const emit = defineEmits<{
@@ -42,6 +45,7 @@ const name = ref('')
 const id = ref('')
 const idEdited = ref(false)
 const template = ref<PluginTemplateId | null>(null)
+const language = ref<CodePluginLanguage>('js')
 const submitted = ref(false)
 const pending = ref(false)
 /** Server answers that belong to a field (the id became taken meanwhile, a reserved id, ...). */
@@ -52,6 +56,16 @@ const idId = useId()
 const nameErrorId = useId()
 const idErrorId = useId()
 const templateLabelId = useId()
+const languageLabelId = useId()
+const languageHintId = useId()
+
+const languageHint = computed(() => CODE_LANGUAGES.find(option => option.value === language.value)?.hint ?? '')
+
+/** A single ToggleGroup emits an empty value when the active item is clicked again: keep the choice. */
+function onLanguage(value: unknown) {
+  if (value === 'js' || value === 'ts')
+    language.value = value
+}
 
 onMounted(() => {
   if (!plugins.loaded)
@@ -91,7 +105,8 @@ async function submit() {
   submitted.value = true
   if (!valid.value || pending.value || template.value === null)
     return
-  const body = { id: id.value, name: name.value.trim(), template: template.value }
+  // `js` is the server default, so JavaScript requests stay as they were.
+  const body = { id: id.value, name: name.value.trim(), template: template.value, ...(language.value === 'ts' ? { language: 'ts' as const } : {}) }
   pending.value = true
   try {
     const detail = await freshAuth.run(() => api.pluginFiles.scaffold({ body }))
@@ -198,9 +213,32 @@ async function submit() {
       <p v-if="submitted && templateProblem" class="text-sm text-destructive" role="alert">
         {{ templateProblem }}
       </p>
+    </div>
+
+    <div class="grid gap-2">
+      <span :id="languageLabelId" class="text-sm font-medium">Language</span>
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          :model-value="language"
+          :disabled="pending"
+          :aria-labelledby="languageLabelId"
+          :aria-describedby="languageHintId"
+          :data-testid="testIds.codePluginLanguage"
+          :data-value="language"
+          @update:model-value="onLanguage"
+        >
+          <ToggleGroupItem v-for="option in CODE_LANGUAGES" :key="option.value" :value="option.value" :data-value="option.value">
+            {{ option.label }}
+          </ToggleGroupItem>
+        </ToggleGroup>
+        <p :id="languageHintId" class="text-sm text-muted-foreground">
+          {{ languageHint }}
+        </p>
+      </div>
       <p class="text-sm text-muted-foreground">
-        The plugin is written in JavaScript (index.mjs with JSDoc types). Plugins created here are trusted to run code
-        on this server.
+        Plugins created here are trusted to run code on this server.
       </p>
     </div>
 

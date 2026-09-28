@@ -45,7 +45,7 @@ const iconMode = computed(() => state.value === 'collapsed' && !isMobile.value)
       size="icon-sm"
       aria-label="Close sidebar"
       :data-testid="testIds.sidebarTrigger"
-      class="ml-auto text-muted-foreground hover:text-foreground"
+      class="ml-auto text-muted-foreground hover:text-foreground pointer-coarse:size-10"
       @click="setOpenMobile(false)"
     >
       <XIcon />

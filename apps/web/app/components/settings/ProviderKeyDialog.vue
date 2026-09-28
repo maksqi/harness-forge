@@ -281,7 +281,7 @@ const outcomeTitle = computed(() => (outcome.value && outcome.value.kind !== 'ok
     <DialogContent
       :data-testid="testIds.keyDialog"
       :data-provider-id="providerId"
-      class="gap-5 sm:max-w-lg"
+      class="max-h-[calc(100dvh-2rem)] overflow-y-auto gap-5 sm:max-w-lg"
       v-bind="$attrs"
       @open-auto-focus="onOpenAutoFocus"
     >

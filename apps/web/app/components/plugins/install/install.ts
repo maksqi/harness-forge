@@ -4,6 +4,7 @@
 import type {
   PluginContributions,
   PluginInspection,
+  PluginInstallBody,
   PluginInstallSource,
   PluginManifest,
   PluginPermission,
@@ -132,13 +133,31 @@ export function buildRequest(tab: InstallTab, draft: InstallDraft): DraftCheck {
   }
 }
 
-/** Multipart body of a zip inspect / install (`trust` only for installs). */
-export function zipForm(file: File, trust?: boolean): FormData {
+/** What an install adds to its source: trust, and the hash the user reviewed in the preview. */
+export interface InstallOptions {
+  trust?: boolean
+  /** `PluginInspection.sha256` of the reviewed preview; the server answers `409 conflict` (`stale`) when it changed. */
+  sha256?: string
+}
+
+/** Multipart body of a zip inspect / install (`trust` and `sha256` only for installs). */
+export function zipForm(file: File, options: InstallOptions = {}): FormData {
   const form = new FormData()
   form.append('file', file, file.name)
-  if (trust)
+  if (options.trust)
     form.append('trust', 'true')
+  if (options.sha256)
+    form.append('sha256', options.sha256)
   return form
+}
+
+/** JSON body of a npm / URL / folder install: the inspected source plus the reviewed hash and trust. */
+export function installBody(source: PluginInstallSource, options: InstallOptions = {}): PluginInstallBody {
+  return {
+    ...source,
+    ...(options.sha256 ? { sha256: options.sha256 } : {}),
+    ...(options.trust ? { trust: true } : {}),
+  }
 }
 
 /**
@@ -170,7 +189,17 @@ function urlHost(url: string): string {
   }
 }
 
-/** "{source}" of "I trust {source}" in the install dialog: file name, package, URL host or folder path. */
+/**
+ * "{source}" of "I trust {source}" in the install dialog: the source the server resolved for the preview
+ * (`PluginInspection.sourceRef`: `name@1.2.3` for npm, the URL, the folder's real path) when it sent one, else the
+ * request's file name, package, URL host or folder path.
+ */
+export function inspectionSourceLabel(inspection: Pick<PluginInspection, 'sourceRef'>, request: InstallRequest): string {
+  const resolved = inspection.sourceRef?.trim()
+  return resolved || requestSourceLabel(request)
+}
+
+/** "{source}" of an install request: file name, package, URL host or folder path. */
 export function requestSourceLabel(request: InstallRequest): string {
   if (request.kind === 'zip')
     return request.file.name

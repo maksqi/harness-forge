@@ -10,8 +10,17 @@ const MIN_SECRET_LENGTH = 4
 const MAX_STRING_LENGTH = 16_384
 const MAX_DEPTH = 8
 
-/** Field names whose values are masked: auth headers and anything that looks like a key, secret, password or token. */
-const SENSITIVE_KEY = /authorization|cookie|key|secret|passw(?:or)?d|token/i
+/**
+ * Field names whose values are masked: auth headers and anything that looks like a key, secret, password, passphrase,
+ * token, credential or signature.
+ */
+const SENSITIVE_KEY = /authorization|cookie|key|secret|passw(?:or)?d|passphrase|token|credential|signature/i
+
+/**
+ * A value after a secret-looking name in free text (`password=...`, `"api_key": "..."`, `x-api-key: ...`): at least 6
+ * characters with a digit, or at least 12 characters, so ordinary words ("token: none", "password: must ...") stay.
+ */
+const SECRET_VALUE = String.raw`(?=[^\s"',;}&]*\d)[^\s"',;}&]{6,}|[^\s"',;}&]{12,}`
 
 /** Text patterns masked by `redactText()`, with their replacement (`$1` keeps a non-secret prefix). */
 const TEXT_PATTERNS: readonly (readonly [RegExp, string])[] = [
@@ -23,8 +32,11 @@ const TEXT_PATTERNS: readonly (readonly [RegExp, string])[] = [
   // Groq, xAI, GitHub, Hugging Face and Google API keys.
   [/\b(?:gsk_|xai-|ghp_|gho_|github_pat_|hf_)\w{16,}/gi, REDACTED],
   [/\bAIza[\w-]{20,}/g, REDACTED],
-  // Secrets in URL query strings.
-  [/([?&](?:api[_-]?key|key|token|access_token|secret|password|sig|signature)=)[^&\s#"']+/gi, `$1${REDACTED}`],
+  // Secrets in URL query strings, also with a prefixed name (`X-Amz-Signature`, `X-Amz-Security-Token`,
+  // `client_secret`, `access_token`, `X-Goog-Credential`).
+  [/([?&;](?:[\w.~-]*[-_.])?(?:api[_-]?key|key|token|secret|password|passwd|sig|signature|credential|auth)=)[^&\s#"']+/gi, `$1${REDACTED}`],
+  // Name / value pairs in free text and JSON excerpts (upstream error bodies, plugin log lines).
+  [new RegExp(String.raw`((?:^|[^\w-])["']?[\w-]*?(?:api[-_]?key|secret|passw(?:or)?d|passphrase|token|credential|authorization)["']?\s*[:=]\s*["']?)(?:${SECRET_VALUE})`, 'gi'), `$1${REDACTED}`],
   // The session cookie.
   [/(hf_session=)[^;\s"']+/g, `$1${REDACTED}`],
 ]

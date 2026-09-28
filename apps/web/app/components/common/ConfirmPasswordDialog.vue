@@ -60,7 +60,7 @@ function onSubmit() {
 
 <template>
   <Dialog :open="open" @update:open="onOpenChange">
-    <DialogContent :data-testid="testIds.confirmPasswordDialog" class="sm:max-w-sm" v-bind="$attrs">
+    <DialogContent :data-testid="testIds.confirmPasswordDialog" class="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-sm" v-bind="$attrs">
       <form class="grid gap-5" @submit.prevent="onSubmit">
         <DialogHeader>
           <DialogTitle>Confirm your password</DialogTitle>

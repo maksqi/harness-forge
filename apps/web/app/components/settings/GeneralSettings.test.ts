@@ -62,6 +62,18 @@ describe('generalSettings', () => {
     expect(wrapper.get(`[data-testid="${testIds.settingsAltShortcuts}"]`).attributes('aria-checked')).toBe('true')
   })
 
+  it('says so when the settings cannot be loaded, and retries', async () => {
+    api.settings.get.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'The database is locked.' }))
+    const wrapper = await mountGeneral()
+    const alert = wrapper.get('[data-slot="settings-load-error"]')
+    expect(alert.text()).toContain('Could not load your settings')
+    expect(alert.text()).toContain('The database is locked.')
+    await alert.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-slot="settings-load-error"]').exists()).toBe(false)
+    expect((wrapper.get(`[data-testid="${testIds.settingsDisplayName}"]`).element as HTMLInputElement).value).toBe('Maks')
+  })
+
   it('saves the display name trimmed on blur, and only when it changed', async () => {
     const wrapper = await mountGeneral()
     const input = wrapper.get(`[data-testid="${testIds.settingsDisplayName}"]`)

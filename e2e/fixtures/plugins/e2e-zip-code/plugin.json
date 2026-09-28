@@ -1,0 +1,11 @@
+{
+  "manifestVersion": 1,
+  "id": "e2e-zip-code",
+  "name": "E2E Zip Code",
+  "version": "1.0.0",
+  "description": "Code plugin installed from a zip by the e2e suite: one safe tool.",
+  "author": "harness-forge e2e",
+  "engines": { "harness": "^1.0.0" },
+  "main": "index.mjs",
+  "permissions": ["storage"]
+}

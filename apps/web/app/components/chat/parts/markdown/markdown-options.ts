@@ -1,7 +1,7 @@
 // Renderer options of `Markdown` (docs/UI.md 10.4): the markstream custom id our node components are registered
 // under, the link policy (http, https and mailto only; raw HTML anchors stay text) and the lazily loaded KaTeX
 // stylesheet.
-import type { ParsedNode, ParseOptions } from 'markstream-vue'
+import type { NodeRendererProps, ParsedNode, ParseOptions } from 'markstream-vue'
 
 /** markstream `custom-id` of every `Markdown` renderer (scopes the code block and image overrides). */
 export const MARKDOWN_CUSTOM_ID = 'hf-markdown'
@@ -85,6 +85,16 @@ function sanitizeValue(value: unknown, depth: number): unknown {
  */
 export function sanitizeMarkdownNodes(nodes: ParsedNode[]): ParsedNode[] {
   return nodes.map(node => sanitizeValue(node, 0) as ParsedNode)
+}
+
+/**
+ * `custom-markdown-it` hook of every renderer (module-level, so its identity is stable): model text renders verbatim.
+ * The parser turns markdown-it's typographer on by default, which rewrites straight quotes into curly ones and `--`,
+ * `(c)` or `...` into typographic characters, so JSON-like text in a reply would read {“echoed”: …}.
+ */
+export const configureMarkdownIt: NonNullable<NodeRendererProps['customMarkdownIt']> = (md) => {
+  md.set({ typographer: false })
+  return md
 }
 
 /** Parser options shared by every renderer. */

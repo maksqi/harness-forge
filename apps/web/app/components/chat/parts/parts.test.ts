@@ -10,6 +10,7 @@ import { createMockApi } from '~/utils/testing/mock-api'
 import { CHAT_VIEW_ACTIONS } from '../chat-context'
 import ErrorPart from './ErrorPart.vue'
 import FilePart from './FilePart.vue'
+import NoticePart from './NoticePart.vue'
 import ReasoningPart from './ReasoningPart.vue'
 import SourcesPart from './SourcesPart.vue'
 
@@ -135,5 +136,29 @@ describe('filePart', () => {
     expect(pdf.get(`[data-testid="${testIds.fileChip}"]`).text()).toContain('spec.pdf')
     const unsafe = withShell(() => h(FilePart, { part: { type: 'file', mediaType: 'image/png', filename: 'x.png', url: 'javascript:alert(1)' } }))
     expect(unsafe.find('img').exists()).toBe(false)
+  })
+})
+
+describe('noticePart', () => {
+  it('names what happened with a per-code icon and reads warnings as warnings', () => {
+    const wrapper = mount(NoticePart, { props: { notice: { level: 'warning', code: 'attachments-unsupported', message: 'This model cannot read the attached file, so it was not sent.' } } })
+    const row = wrapper.get('[data-slot="notice-part"]')
+    expect(row.attributes('data-code')).toBe('attachments-unsupported')
+    expect(row.attributes('data-level')).toBe('warning')
+    expect(row.text()).toBe('Warning: This model cannot read the attached file, so it was not sent.')
+    expect(row.find('svg').classes().join(' ')).toMatch(/paperclip/)
+    expect(row.find('svg').classes()).toContain('text-warning')
+  })
+
+  it('uses its own icons for the other codes and muted info notices', () => {
+    const icons = (['context-trimmed', 'approvals-superseded', 'tools-unsupported'] as const).map((code) => {
+      const wrapper = mount(NoticePart, { props: { notice: { level: 'info', code, message: 'm' } } })
+      expect(wrapper.text()).toBe('m')
+      expect(wrapper.find('svg').classes()).not.toContain('text-warning')
+      return wrapper.find('svg').classes().join(' ')
+    })
+    expect(icons[0]).toMatch(/fold-vertical/)
+    expect(icons[1]).toMatch(/ban/)
+    expect(icons[2]).toMatch(/wrench/)
   })
 })

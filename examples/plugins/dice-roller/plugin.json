@@ -1,0 +1,12 @@
+{
+  "manifestVersion": 1,
+  "id": "dice-roller",
+  "name": "Dice roller",
+  "version": "1.0.0",
+  "description": "Adds a roll_dice tool that rolls dice in standard notation (2d6+3).",
+  "author": "harness-forge examples",
+  "icon": "icon.svg",
+  "engines": { "harness": "^1.0.0" },
+  "main": "index.mjs",
+  "permissions": []
+}

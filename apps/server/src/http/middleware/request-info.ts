@@ -48,6 +48,31 @@ export function serverOrigin(c: AppContext): string | null {
   return normalizeOrigin(`${requestProtocol(c)}://${host}`)
 }
 
+/**
+ * The host name the request was addressed to (`Host` header, else the request URL's host): lowercase, without the
+ * port, IPv6 brackets or a trailing dot. Null when it cannot be parsed.
+ */
+export function requestHostname(c: AppContext): string | null {
+  let host = c.req.header('host')?.trim()
+  if (host === undefined || host === '') {
+    try {
+      host = new URL(c.req.url).host
+    }
+    catch {
+      return null
+    }
+  }
+  if (host === '' || /[\s/\\?#@]/.test(host))
+    return null
+  try {
+    const hostname = new URL(`http://${host}`).hostname.toLowerCase()
+    return hostname.replace(/^\[(.*)\]$/, '$1').replace(/\.$/, '') || null
+  }
+  catch {
+    return null
+  }
+}
+
 /** Placeholder address when the request carries no node-server socket bindings (a bare `app.request()`). */
 export const UNKNOWN_CLIENT_ADDRESS = 'unknown'
 

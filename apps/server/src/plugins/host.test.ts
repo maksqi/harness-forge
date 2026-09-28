@@ -1,5 +1,10 @@
 import type { PluginDetail } from '@harness-forge/shared'
+import type { FSWatcher } from 'node:fs'
+import type { TestApp } from '../testing/create-test-app.ts'
 import type { PluginTestApp } from './__fixtures__/harness.ts'
+import type { PluginStateChange } from './types.ts'
+import type { WatchFunction } from './watch.ts'
+import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import process from 'node:process'
@@ -8,10 +13,15 @@ import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getBuiltinPlugins } from '../builtin-plugins/index.ts'
 import { pluginKv, plugins, providerConfigs } from '../db/schema.ts'
+import { createTestApp } from '../testing/create-test-app.ts'
+import { createFakeIconService, createMemorySecretStore, createRecordingEventBus } from '../testing/fakes.ts'
 import { createPluginTestApp, fixturePath, manifest, removeTempDirs, tempDir, waitFor, writeFiles } from './__fixtures__/harness.ts'
+import { createPluginHost } from './host.ts'
 import { pathPin } from './loader.ts'
 
 const apps: PluginTestApp[] = []
+/** Other apps to close after each test. */
+const closers: Array<() => Promise<void>> = []
 
 async function app(options: Parameters<typeof createPluginTestApp>[0] = {}): Promise<PluginTestApp> {
   const created = await createPluginTestApp(options)
@@ -23,6 +33,8 @@ afterEach(async () => {
   vi.useRealTimers()
   for (const created of apps.splice(0))
     await created.close()
+  for (const close of closers.splice(0))
+    await close()
   removeTempDirs()
 })
 
@@ -542,55 +554,253 @@ describe('logs, icons and events', () => {
   })
 })
 
+// ---------- hot reload ----------
+
+/** Debounce of the hosts built by `watchedApp` (production: 300 ms). */
+const TEST_DEBOUNCE_MS = 10
+
+interface ManualWatch {
+  watch: WatchFunction
+  /** Directories with an open watcher. */
+  dirs: () => string[]
+  /** Delivers a change event to the watcher of `dir`, like `fs.watch` would. */
+  emit: (dir: string, filename: string) => void
+}
+
+/** A controllable `fs.watch`: events are delivered when the test says so, never missed or delayed by the OS. */
+function manualWatch(): ManualWatch {
+  const listeners = new Map<string, (event: string, filename: string | null) => void>()
+  return {
+    watch: (path, _options, listener) => {
+      listeners.set(path, listener as (event: string, filename: string | null) => void)
+      return Object.assign(new EventEmitter(), {
+        close: () => {
+          if (listeners.get(path) === listener)
+            listeners.delete(path)
+        },
+      }) as unknown as FSWatcher
+    },
+    dirs: () => [...listeners.keys()],
+    emit: (dir, filename) => listeners.get(dir)?.('change', filename),
+  }
+}
+
+/** A plugin test app (no builtins) whose host receives its file events from `watch`. */
+async function watchedApp(watch: WatchFunction, env: Record<string, string> = {}): Promise<TestApp> {
+  const t = await createTestApp({
+    env,
+    start: false,
+    builtins: [],
+    overrides: { events: createRecordingEventBus(), secrets: createMemorySecretStore(), icons: createFakeIconService() },
+    factories: { plugins: deps => createPluginHost(deps, { watch, watchDebounceMs: TEST_DEBOUNCE_MS }) },
+  })
+  closers.push(() => t.close())
+  return t
+}
+
+/** Lets a delivered event pass the debounce, then waits for the host work it queued for `id` (the plugin lock). */
+async function settleWatch(t: TestApp, id: string): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, TEST_DEBOUNCE_MS * 5))
+  await t.deps.plugins.refresh!(id)
+}
+
+function liveCode(description: string): string {
+  return [
+    'export default {',
+    '  setup(ctx) {',
+    `    ctx.tools.register({ name: 'live_tool', description: ${JSON.stringify(description)}, inputSchema: ctx.ai.z.object({}), execute: async () => ${JSON.stringify(description)} })`,
+    '  },',
+    '}',
+    '',
+  ].join('\n')
+}
+
+async function loadCount(t: TestApp, id: string): Promise<number> {
+  return (await t.deps.plugins.logs(id)).filter(entry => entry.message.startsWith('Loaded in ')).length
+}
+
 describe('hot reload', () => {
-  it('reloads a linked folder when its files change and serves the new version', async () => {
+  it('watches a linked folder and reloads it when its files change, serving the new version', async () => {
+    const fake = manualWatch()
     const linked = join(tempDir(), 'live-plugin')
-    const code = (description: string): string => [
-      'export default {',
-      '  setup(ctx) {',
-      `    ctx.tools.register({ name: 'live_tool', description: ${JSON.stringify(description)}, inputSchema: ctx.ai.z.object({}), execute: async () => ${JSON.stringify(description)} })`,
-      '  },',
-      '}',
-      '',
-    ].join('\n')
-    writeFiles(linked, { 'plugin.json': manifest('live-plugin', { main: 'index.mjs' }), 'index.mjs': code('first version') })
+    writeFiles(linked, { 'plugin.json': manifest('live-plugin', { main: 'index.mjs' }), 'index.mjs': liveCode('first version') })
+    const real = realpathSync(linked)
+    const t = await watchedApp(fake.watch)
+    const host = t.deps.plugins
+    await host.saveRecord({ id: 'live-plugin', source: 'link', sourceRef: real, version: '1.0.0', trustedHash: pathPin(real) })
+    await host.start()
+    const { registry } = t.deps
+    expect(fake.dirs()).toEqual([real])
+    expect(registry.tools.get('live_tool')?.definition.description).toBe('first version')
+
+    // An event without a content change does not reload.
+    fake.emit(real, 'index.mjs')
+    await settleWatch(t, 'live-plugin')
+    expect(await loadCount(t, 'live-plugin')).toBe(1)
+
+    writeFileSync(join(linked, 'index.mjs'), liveCode('second version'))
+    fake.emit(real, 'index.mjs')
+    await waitFor(() => registry.tools.get('live_tool')?.definition.description === 'second version', 15_000)
+    expect(host.state('live-plugin')).toBe('active')
+    expect(await registry.tools.get('live_tool')?.definition.execute({}, {} as never)).toBe('second version')
+    expect(await loadCount(t, 'live-plugin')).toBe(2)
+  }, 20_000)
+
+  it('watches data/plugins only with HF_PLUGIN_WATCH=1 (declarative plugins reload on manifest change)', async () => {
+    const commands = (template: string): Record<string, unknown> => manifest('watched', { contributes: { commands: [{ name: 'watched', description: 'Watched', template }] } })
+    const idle = manualWatch()
+    const unwatched = await watchedApp(idle.watch)
+    writeFiles(join(unwatched.env.paths.plugins, 'watched'), { 'plugin.json': commands('one {{input}}') })
+    await unwatched.deps.plugins.start()
+    expect(unwatched.deps.plugins.state('watched')).toBe('active')
+    expect(idle.dirs()).toEqual([])
+
+    const fake = manualWatch()
+    const watched = await watchedApp(fake.watch, { HF_PLUGIN_WATCH: '1' })
+    const dir = join(watched.env.paths.plugins, 'watched')
+    writeFiles(dir, { 'plugin.json': commands('one {{input}}') })
+    await watched.deps.plugins.start()
+    const real = realpathSync(dir)
+    expect(fake.dirs()).toEqual([real])
+    writeFileSync(join(dir, 'plugin.json'), JSON.stringify(commands('two {{input}}')))
+    fake.emit(real, 'plugin.json')
+    await waitFor(() => watched.deps.registry.commands.get('watched')?.definition.template === 'two {{input}}', 15_000)
+  }, 20_000)
+
+  it('does not reload for writes made through withoutWatch; later changes on disk still reload (also after a refresh)', async () => {
+    const fake = manualWatch()
+    const linked = join(tempDir(), 'quiet-plugin')
+    const quiet = (template: string): Record<string, unknown> => manifest('quiet-plugin', { contributes: { commands: [{ name: 'quiet', description: 'Quiet', template }] } })
+    writeFiles(linked, { 'plugin.json': quiet('one {{input}}') })
+    const real = realpathSync(linked)
+    const t = await watchedApp(fake.watch)
+    const host = t.deps.plugins
+    await host.saveRecord({ id: 'quiet-plugin', source: 'link', sourceRef: real, version: '1.0.0' })
+    await host.start()
+    expect(fake.dirs()).toEqual([real])
+    const template = (): string | undefined => t.deps.registry.commands.get('quiet')?.definition.template
+
+    await host.withoutWatch('quiet-plugin', async () => {
+      writeFileSync(join(linked, 'plugin.json'), JSON.stringify(quiet('two {{input}}')))
+      // Dropped: the watcher is suppressed while the editor writes.
+      fake.emit(real, 'plugin.json')
+    })
+    // The same write reported late: the host already knows these files.
+    fake.emit(real, 'plugin.json')
+    await settleWatch(t, 'quiet-plugin')
+    expect(template()).toBe('one {{input}}')
+    expect(await loadCount(t, 'quiet-plugin')).toBe(1)
+
+    // A change made outside the editor reloads, even when a refresh re-read the files before the event arrived.
+    writeFileSync(join(linked, 'plugin.json'), JSON.stringify(quiet('three {{input}}')))
+    await host.refresh!('quiet-plugin')
+    fake.emit(real, 'plugin.json')
+    await waitFor(() => template() === 'three {{input}}', 15_000)
+  }, 20_000)
+
+  it('reloads a linked folder on a real file change (fs.watch)', async () => {
+    const linked = join(tempDir(), 'live-plugin')
+    writeFiles(linked, { 'plugin.json': manifest('live-plugin', { main: 'index.mjs' }), 'index.mjs': liveCode('first version') })
     const real = realpathSync(linked)
     const h = await app({ start: false })
     await h.t.deps.plugins.saveRecord({ id: 'live-plugin', source: 'link', sourceRef: real, version: '1.0.0', trustedHash: pathPin(real) })
     await h.t.deps.plugins.start()
     const { registry } = h.t.deps
     expect(registry.tools.get('live_tool')?.definition.description).toBe('first version')
-
-    writeFileSync(join(linked, 'index.mjs'), code('second version'))
-    await waitFor(() => registry.tools.get('live_tool')?.definition.description === 'second version', 10_000)
+    // `fs.watch` can miss events written right after it starts (macOS FSEvents under load): write again every second
+    // (longer than the debounce) until the reload is observed.
+    let nextWrite = 0
+    await waitFor(() => {
+      if (Date.now() >= nextWrite) {
+        writeFileSync(join(linked, 'index.mjs'), liveCode('second version'))
+        nextWrite = Date.now() + 1000
+      }
+      return registry.tools.get('live_tool')?.definition.description === 'second version'
+    }, 25_000)
     expect(h.t.deps.plugins.state('live-plugin')).toBe('active')
     expect(await registry.tools.get('live_tool')?.definition.execute({}, {} as never)).toBe('second version')
+  }, 30_000)
+})
+
+describe('refresh', () => {
+  it('re-reads the files of a plugin without loading it, so its detail shows the current trust hash', async () => {
+    const h = await app({ plugins: [{ fixture: 'dice-roller', trust: true }] })
+    const host = h.t.deps.plugins
+    const before = await detail(h, 'dice-roller')
+    // An editor save: the entry changes and its new hash is pinned.
+    const file = join(h.pluginDir('dice-roller'), 'index.mjs')
+    writeFileSync(file, `${readFileSync(file, 'utf8')}\n// edited\n`)
+    const pinned = await host.inspectDirectory(h.pluginDir('dice-roller'))
+    await host.saveRecord({ id: 'dice-roller', source: 'copy', version: '1.0.0', trustedHash: pinned.sha256 })
+    // Stale until refreshed: the hash of the files read at load time and the new pin disagree.
+    expect((await detail(h, 'dice-roller')).trust).toMatchObject({ hash: before.trust.hash, trustedHash: pinned.sha256, trusted: false })
+
+    h.events.clear()
+    const refreshed = pluginDetailSchema.parse(await host.refresh!('dice-roller'))
+    expect(refreshed).toMatchObject({ state: 'active', trust: { required: true, trusted: true, hash: pinned.sha256, trustedHash: pinned.sha256 } })
+    expect(await detail(h, 'dice-roller')).toEqual(refreshed)
+    expect(h.events.ofType('plugin.changed').map(event => event.data.id)).toEqual(['dice-roller'])
+    // Nothing was loaded again; a refresh without a change announces nothing.
+    const [loads] = await h.t.db.select().from(pluginKv).where(eq(pluginKv.key, 'loads'))
+    expect(loads?.value).toBe(1)
+    await host.refresh!('dice-roller')
+    expect(h.events.ofType('plugin.changed')).toHaveLength(1)
+    await expect(host.refresh!('missing')).rejects.toMatchObject({ code: 'not_found' })
   })
 
-  it('watches data/plugins only with HF_PLUGIN_WATCH=1 (declarative plugins reload on manifest change)', async () => {
-    const commands = (template: string): Record<string, unknown> => manifest('watched', { contributes: { commands: [{ name: 'watched', description: 'Watched', template }] } })
-    const unwatched = await app({ plugins: [{ id: 'watched', files: { 'plugin.json': commands('one {{input}}') } }] })
-    writeFileSync(join(unwatched.pluginDir('watched'), 'plugin.json'), JSON.stringify(commands('two {{input}}')))
-    await new Promise(resolve => setTimeout(resolve, 800))
-    expect(unwatched.t.deps.registry.commands.get('watched')?.definition.template).toBe('one {{input}}')
-
-    const watched = await app({ env: { HF_PLUGIN_WATCH: '1' }, plugins: [{ id: 'watched', files: { 'plugin.json': commands('one {{input}}') } }] })
-    writeFileSync(join(watched.pluginDir('watched'), 'plugin.json'), JSON.stringify(commands('two {{input}}')))
-    await waitFor(() => watched.t.deps.registry.commands.get('watched')?.definition.template === 'two {{input}}', 10_000)
+  it('shows files changed without a new pin as untrusted while the running version keeps serving', async () => {
+    const h = await app({ plugins: [{ fixture: 'dice-roller', trust: true }] })
+    const host = h.t.deps.plugins
+    const file = join(h.pluginDir('dice-roller'), 'index.mjs')
+    writeFileSync(file, `${readFileSync(file, 'utf8')}\n// edited on disk\n`)
+    const refreshed = await host.refresh!('dice-roller')
+    expect(refreshed.state).toBe('active')
+    expect(refreshed.trust).toMatchObject({ required: true, trusted: false })
+    expect(refreshed.trust.hash).not.toBe(refreshed.trust.trustedHash)
+    expect(h.t.deps.registry.tools.get('roll_dice')).toBeDefined()
+    // The next load applies the trust check.
+    expect((await host.reload('dice-roller')).state).toBe('untrusted')
   })
 
-  it('does not reload for writes made through withoutWatch', async () => {
-    const linked = join(tempDir(), 'quiet-plugin')
-    writeFiles(linked, { 'plugin.json': manifest('quiet-plugin', { contributes: { commands: [{ name: 'quiet', description: 'Quiet', template: 'one {{input}}' }] } }) })
-    const real = realpathSync(linked)
-    const h = await app({ start: false })
-    await h.t.deps.plugins.saveRecord({ id: 'quiet-plugin', source: 'link', sourceRef: real, version: '1.0.0' })
-    await h.t.deps.plugins.start()
-    await h.t.deps.plugins.withoutWatch('quiet-plugin', async () => {
-      writeFileSync(join(linked, 'plugin.json'), JSON.stringify(manifest('quiet-plugin', { contributes: { commands: [{ name: 'quiet', description: 'Quiet', template: 'two {{input}}' }] } })))
+  it('returns the detail of a builtin unchanged', async () => {
+    const h = await app({ builtins: getBuiltinPlugins({ mockProvider: false }) })
+    expect(await h.t.deps.plugins.refresh!('core-tools')).toEqual(await h.t.deps.plugins.get('core-tools'))
+  })
+})
+
+describe('onStateChange', () => {
+  it('reports every transition and removals in-process, without an event-bus subscriber', async () => {
+    const h = await app({ plugins: [{ fixture: 'acme-docs' }] })
+    const host = h.t.deps.plugins
+    const subscribers = h.events.subscriberCount()
+    const changes: PluginStateChange[] = []
+    const subscription = host.onStateChange!(change => changes.push(change))
+    const failing = host.onStateChange!(() => {
+      throw new Error('listener failed')
     })
-    await new Promise(resolve => setTimeout(resolve, 800))
-    expect(h.t.deps.registry.commands.get('quiet')?.definition.template).toBe('one {{input}}')
+    expect(h.events.subscriberCount()).toBe(subscribers)
+
+    await host.disable('acme-docs')
+    await host.enable('acme-docs')
+    await host.reload('acme-docs')
+    await host.uninstall('acme-docs', { keepData: true })
+    expect(changes).toEqual([
+      { id: 'acme-docs', state: 'disabled', previous: 'active' },
+      { id: 'acme-docs', state: 'loading', previous: 'disabled' },
+      { id: 'acme-docs', state: 'active', previous: 'loading' },
+      { id: 'acme-docs', state: 'loading', previous: 'active' },
+      { id: 'acme-docs', state: 'active', previous: 'loading' },
+      { id: 'acme-docs', state: null, previous: 'active' },
+    ])
+    // A throwing listener is logged and breaks neither the host nor the other listeners.
+    expect(h.t.logs.records.filter(record => record.msg === 'plugin state listener failed')).toHaveLength(6)
+
+    subscription.dispose()
+    failing.dispose()
+    await h.install({ fixture: 'acme-docs' })
+    expect((await host.load('acme-docs')).state).toBe('active')
+    expect(changes).toHaveLength(6)
+    expect(h.events.subscriberCount()).toBe(subscribers)
   })
 })
 

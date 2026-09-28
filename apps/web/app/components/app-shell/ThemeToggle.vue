@@ -88,7 +88,7 @@ function select(value: unknown) {
             :value="option.value"
             :aria-label="option.label"
             :data-testid="option.testId"
-            class="size-7 min-w-7 rounded-md px-0 text-muted-foreground hover:bg-transparent hover:text-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow-xs dark:data-[state=on]:bg-muted"
+            class="size-7 min-w-7 rounded-md px-0 text-muted-foreground pointer-coarse:size-10 pointer-coarse:min-w-10 hover:bg-transparent hover:text-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow-xs dark:data-[state=on]:bg-muted"
           >
             <component :is="option.icon" aria-hidden="true" class="size-3.5" />
           </ToggleGroupItem>

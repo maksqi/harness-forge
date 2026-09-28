@@ -193,7 +193,11 @@ preferences, the `core-tools` builtin, and `@plugins` e2e specs.
   4. **W3.5-T4 core-tools** — `current_time` (policy `safe`) and `web_fetch` (policy `ask`; http/https only; DNS
      resolved and loopback, private, link-local, CGNAT, cloud-metadata and IPv6 ULA/link-local targets blocked;
      re-checked on every redirect (≤5); 10 s timeout; 2 MB response cap (ARCHITECTURE.md 10.4); text extraction).
-  5. **W3.5-T5 core-mcp** — builtin that exposes the stored MCP servers as its contributions; not removable.
+     As built: setting `allowLocalhost` (default off) admits loopback targets only; inputs and outputs of both tools
+     are listed in PLUGINS.md section 1.
+  5. **W3.5-T5 core-mcp** — builtin that exposes the stored MCP servers as its contributions; not removable. As
+     built: settings `autoReconnect` (default on) and `connectTimeoutSeconds` (5-120, default 20) apply to every MCP
+     server.
   6. **W3.5-T6 Web** — `McpServersPanel.vue` (+ sub-components): list with status dot, add/edit dialog (stdio
      command/args/env, http/sse URL/headers), policy select, enable switch, reconnect, delete with confirm.
 - **Tests.** stdio echo MCP server spawned in-test, name truncation + hash, hint → policy, clients closed on
@@ -282,7 +286,7 @@ Fixed in UI.md before launch (names, props, emits); consumers import by path.
 
 | Component / endpoint | Owner | Used by |
 |---|---|---|
-| `components/plugins/code/PluginSourceTab.vue` | W3.4 | `pages/plugins/[id].vue` Source tab, code plugins only (W3.1) |
+| `components/plugins/code/PluginSourceTab.vue` | W3.4 | `pages/plugins/[id].vue` Source tab of code plugins and of editable (`created` / `copy` / `link`) declarative plugins (W3.1) |
 | `components/plugins/mcp/McpServersPanel.vue` | W3.5 | `pages/plugins/[id].vue` Overview of `core-mcp` (W3.1) |
 | `components/plugins/code/CodePluginForm.vue` | W3.4 | `pages/plugins/new.vue` with `?type=code` (W3.3) |
 | `components/plugins/install/InstallDialog.vue`, `TrustWarning.vue`, `TrustDialog.vue` | W3.2 | `InstallDialog`: one instance in `pages/plugins.vue`, opened by `ui.openInstall()` from the list page and `PluginsNav` "Install…" (W3.1); `TrustWarning` / `TrustDialog` also on the card and detail page of `untrusted` plugins |

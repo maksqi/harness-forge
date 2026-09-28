@@ -1,0 +1,44 @@
+{
+  "manifestVersion": 1,
+  "id": "together-ai",
+  "name": "Together AI",
+  "version": "1.0.0",
+  "description": "Together AI models through the OpenAI-compatible API.",
+  "author": "harness-forge examples",
+  "homepage": "https://www.together.ai",
+  "icon": "lobe:together",
+  "engines": { "harness": "^1.0.0" },
+  "contributes": {
+    "providers": [
+      {
+        "id": "together-ai",
+        "name": "Together AI",
+        "baseURL": "https://api.together.xyz/v1",
+        "apiFormat": "openai-chat",
+        "auth": { "type": "bearer" },
+        "credentials": [
+          {
+            "key": "apiKey",
+            "label": "API key",
+            "type": "secret",
+            "required": true,
+            "helpUrl": "https://api.together.ai/settings/api-keys"
+          }
+        ],
+        "listModels": { "exclude": "embed|rerank|whisper|flux|stable-diffusion|tts|guard" },
+        "reasoningStyle": "openai-effort",
+        "modelsDevId": "togetherai",
+        "smallModelId": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "models": [
+          {
+            "id": "openai/gpt-oss-120b",
+            "name": "gpt-oss 120B",
+            "contextWindow": 131072,
+            "capabilities": { "tools": true, "reasoning": true },
+            "reasoningEfforts": ["low", "medium", "high"]
+          }
+        ]
+      }
+    ]
+  }
+}

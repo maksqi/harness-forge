@@ -1,0 +1,29 @@
+{
+  "manifestVersion": 1,
+  "id": "e2e-zip-provider",
+  "name": "E2E Zip Provider",
+  "version": "1.0.0",
+  "description": "Declarative OpenAI-compatible provider installed from a zip by the e2e suite.",
+  "author": "harness-forge e2e",
+  "icon": "icon.svg",
+  "engines": { "harness": "^1.0.0" },
+  "contributes": {
+    "providers": [
+      {
+        "id": "e2e-zip-provider",
+        "name": "E2E Zip",
+        "baseURL": "http://127.0.0.1:8894/v1",
+        "apiFormat": "openai-chat",
+        "auth": { "type": "bearer" },
+        "credentials": [{ "key": "apiKey", "label": "API key", "type": "secret", "required": true }],
+        "listModels": false,
+        "models": [
+          { "id": "zip-chat", "name": "Zip Chat", "contextWindow": 32000, "capabilities": { "tools": true } }
+        ]
+      }
+    ],
+    "commands": [
+      { "name": "e2e-zip", "description": "Ask the e2e zip provider", "template": "Answer briefly: {{input}}" }
+    ]
+  }
+}

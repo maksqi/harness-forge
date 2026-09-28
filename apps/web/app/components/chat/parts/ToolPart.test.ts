@@ -74,6 +74,37 @@ describe('toolPart: row states', () => {
     expect(row(wrapper).text()).not.toContain('mcp__')
   })
 
+  it('loads the MCP servers once to name the server of a reloaded transcript', async () => {
+    const api = mock.api as ReturnType<typeof createMockApi>
+    api.mcp.list.mockResolvedValue({ items: [{
+      id: 'e2e-echo',
+      name: 'E2E Echo',
+      pluginId: 'core-mcp',
+      editable: true,
+      transport: { type: 'stdio', command: 'node', args: [], env: {} },
+      policy: 'ask',
+      enabled: true,
+      status: 'connected',
+      error: null,
+      tools: ['mcp__e2e-echo__echo'],
+      connectedAt: 1,
+    }] })
+    const tool = { type: 'dynamic-tool', toolName: 'mcp__e2e-echo__echo', toolCallId: 'c', state: 'output-available', input: { text: 'x' }, output: 'y' } as ToolPartLike
+    const first = mountPart(tool)
+    const second = mountPart({ ...tool, toolCallId: 'd' } as ToolPartLike)
+    await flushPromises()
+    expect(api.mcp.list).toHaveBeenCalledTimes(1)
+    expect(row(first).text()).toContain('E2E Echo')
+    expect(row(second).text()).not.toContain('e2e-echo')
+    mountPart({ ...tool, toolCallId: 'e' } as ToolPartLike)
+    await flushPromises()
+    expect(api.mcp.list).toHaveBeenCalledTimes(1)
+    // Plain tools never ask for the MCP list.
+    mountPart(part({ state: 'output-available', output: 'ok' }))
+    await flushPromises()
+    expect(api.mcp.list).toHaveBeenCalledTimes(1)
+  })
+
   it('never opens by itself; a click shows input and output', async () => {
     const wrapper = mountPart(part({ state: 'output-available', output: { title: 'Nuxt' } }))
     const closed = wrapper.get(`[data-testid="${testIds.toolRowOutput}"]`)

@@ -16,7 +16,8 @@ function options(env: Record<string, string>) {
 
 beforeAll(async () => {
   dev = await createTestApp(options({}))
-  production = await createTestApp(options({ NODE_ENV: 'production' }))
+  // A password, so requests for other host names (a reverse proxy) reach the Origin check (session-auth.ts).
+  production = await createTestApp(options({ NODE_ENV: 'production', HF_PASSWORD: 'a password 123' }))
   protectedApp = await createTestApp(options({ HF_PASSWORD: 'a password 123' }))
 })
 

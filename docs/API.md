@@ -13,7 +13,7 @@ Contents: 1 Conventions · 2 Errors · 3 `packages/shared` naming contract · 4 
 | Topic | Rule |
 |---|---|
 | Base path | Everything under `/api` (paths below omit it). Unknown `/api/*` paths return `404 not_found` JSON. |
-| Format | JSON (`application/json; charset=utf-8`) request and response bodies unless a route says otherwise (SSE, UI message stream, multipart, binary). Request bodies are validated with zod; unknown keys are rejected (`.strict()`) except inside UI messages. |
+| Format | JSON (`application/json; charset=utf-8`) request and response bodies unless a route says otherwise (SSE, UI message stream, multipart, binary). Request bodies are validated with zod; unknown keys are rejected (`.strict()`) except inside UI messages. A non-empty body sent to a JSON route must be `application/json` (or `+json`); routes with a multipart `form` also accept `multipart/form-data`; anything else -> `400 validation_error` (no form-encoded CSRF). |
 | Auth | Session cookie `hf_session` (HttpOnly, SameSite=Strict). When a password is configured, every route except the public ones (marked **public**) returns `401 unauthorized` without a valid session. Without a password every request is authenticated. |
 | CSRF | Origin check on every non-`GET`/`HEAD` request (ARCHITECTURE.md 10.2): a foreign `Origin` or a cross-site `Sec-Fetch-Site` -> `403 forbidden`. |
 | Fresh auth | ADR-017. Sensitive routes (marked **fresh**) additionally require a login within the last 10 minutes when a password is set, else `403 forbidden` with `action: 'login'`. The proof is the session itself (`authAt`, `AuthStatus.freshUntil`): the web asks for the password, calls `POST /auth/login` and retries. |
@@ -87,7 +87,7 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | `provider_error` | 502 | `retry` | Any other upstream error (provider, MCP server, npm registry, install URL). |
 | `plugin_error` | 500 | - | Plugin code threw, timed out, or failed to load/build (`details.pluginId`). |
 | `internal_error` | 500 | `retry` | Unexpected server error (`details.requestId`). Message is generic; details are logged. |
-| `not_implemented` | 501 | - | Route stub of Phase 0 (every endpoint except `GET /health` until its owner implements it). |
+| `not_implemented` | 501 | - | Phase 0 route and service stubs. Every route is implemented now; the code stays in the contract. |
 
 `HarnessErrorAction` = `configure-provider | refresh-models | login | retry`.
 
@@ -165,7 +165,8 @@ export interface ApiRouteDef {
   fresh?: true              // ALWAYS requires fresh auth when a password is set; conditional cases
                             // (mcp.create / mcp.update with stdio, pluginInstall.install of a plugin that
                             // requires trust, pluginDrafts.create / pluginDrafts.updateManifest with a stdio MCP
-                            // server) are enforced by the server only
+                            // server, plugins.reload of a code plugin, pluginFiles.write / pluginFiles.remove of a
+                            // plugin that runs code) are enforced by the server only
   params?: z.ZodType        // path params
   query?: z.ZodType
   body?: z.ZodType          // JSON body
@@ -233,7 +234,7 @@ Other exports:
 | `createChatId` | `() => string` uuidv7 |
 | `createMessageId` | `() => string` `msg_` + 16 chars of `[0-9A-Za-z]`; the server passes it as `generateMessageId` (equivalent to AI SDK `createIdGenerator({ prefix: 'msg', separator: '_', size: 16 })`; the SDK default separator is `-`) |
 | `parseModelRef` / `formatModelRef` | `(ref) => { providerId, modelId }` (throws on invalid) / `(providerId, modelId) => string` |
-| `LIMITS` | `{ uploadBytes: 20971520, pluginFileBytes: 1048576, jsonBodyBytes: 1048576, chatBodyBytes: 2097152, pluginZipBytes: 20971520, pageLimitDefault: 50, pageLimitMax: 100, toolOutputBytes: 65536, sseHeartbeatMs: 25000 }` |
+| `LIMITS` | `{ uploadBytes: 20971520, pluginFileBytes: 1048576, jsonBodyBytes: 1048576, chatBodyBytes: 2097152, pluginZipBytes: 20971520, pageLimitDefault: 50, pageLimitMax: 100, toolOutputBytes: 65536, sseHeartbeatMs: 25000, ... }`; the schemas add `iconFileBytes` / `manifestBytes` (256 KB), `chatImportMessagesMax` (2000), `messagePartsMax` (1000), `instructionsMaxChars` (20000), `credentialValueMaxChars` (4096), `pluginLogsLimitDefault` / `pluginLogsLimitMax` (200 / 500), `commandTemplateBytes` (16 KB), `commandExpansionBytes` (64 KB) |
 | `UPLOAD_MIME_PATTERNS` | `['image/*', 'application/pdf', 'text/*']` |
 
 ## 4. Schemas
@@ -580,7 +581,7 @@ type HarnessDataTypes = { notice: NoticeData }  // data parts: 'data-notice'; ha
                                                 // { notice: noticeDataSchema } for useChat dataPartSchemas
 type NoticeData = {                     // noticeDataSchema
   level: 'info' | 'warning'
-  code: 'context-trimmed' | 'approvals-superseded' | 'tools-unsupported'
+  code: 'context-trimmed' | 'approvals-superseded' | 'tools-unsupported' | 'attachments-unsupported'
   message: string
 }
 ```
@@ -645,7 +646,7 @@ type McpTransportInput =                // mcpTransportInputSchema
 
 type McpServerInput = {                 // mcpServerInputSchema (POST /mcp)
   id: McpServerId
-  name: string                          // 1..100 chars
+  name: string                          // 1..64 chars
   transport: McpTransportInput          // header / env VALUES are stored as secrets
   policy?: ToolPolicy                   // default 'ask'; per-tool MCP hints still apply
   enabled?: boolean                     // default true
@@ -768,17 +769,21 @@ type PluginInspectBody = PluginInstallSource      // pluginInspectBodySchema
 type PluginInstallBody = PluginInstallSource & {  // pluginInstallBodySchema
   trust?: boolean                       // pin the sha256 in the same step (code plugins need it to become active)
   enable?: boolean                      // default true
-}
+  sha256?: Sha256Hex                    // the hash reviewed in the inspect preview; the install is refused with
+}                                       // 409 conflict (reason 'stale') when the package now differs
 
 type PluginInstallForm = {              // pluginInstallFormSchema; multipart fields next to the zip part `file`
   trust?: 'true' | 'false'
   enable?: 'true' | 'false'
+  sha256?: Sha256Hex                    // see PluginInstallBody.sha256
 }
 
 type PluginInspection = {               // pluginInspectionSchema
   manifest: PluginManifest
   kind: PluginKind
   source: PluginSource                  // 'zip' | 'npm' | 'url' | 'link' | 'copy'
+  sourceRef?: string                    // resolved source shown in "I trust <source>": 'name@1.2.3' (npm), the URL,
+                                        // the folder path, or the zip file name
   sha256: Sha256Hex                     // the hash that trust pins
   contributions: PluginContributions    // declared in the manifest (code plugins may register more at runtime)
   networkHosts: string[]                // hosts of provider baseURLs and MCP http/sse URLs (code plugins: unknown)
@@ -805,7 +810,8 @@ type IconFileInput = {                  // iconFileInputSchema
 type PluginDraft = {                    // pluginDraftSchema (POST /plugins)
   manifest: PluginManifest              // declarative only (no `main`); id free and not reserved
   iconFile?: IconFileInput
-  credentials?: Record<ProviderId, Record<string, string>>   // saved as provider credentials after creation
+  credentials?: Record<ProviderId, Record<string, string>>   // saved as provider credentials after creation;
+                                                             // keys must be provider ids of the manifest
   enable?: boolean                      // default true
 }
 
@@ -837,7 +843,7 @@ type PluginTemplateId = 'tool' | 'provider' | 'mcp-bridge' | 'command-pack'   //
 
 type ScaffoldRequest = {                // scaffoldRequestSchema (POST /plugins/scaffold)
   id: PluginId                          // free, not reserved
-  name: string                          // 1..100 chars
+  name: string                          // 1..64 chars, no control characters (same bound as the manifest name)
   template: PluginTemplateId
   language?: 'js' | 'ts'                // default 'js' (index.mjs with JSDoc types); 'ts' -> index.ts compiled by the host
 }
@@ -951,7 +957,8 @@ params/query/body; `413 payload_too_large` when a body exceeds its limit; `500 i
 - Response `200 AuthStatus` + `Set-Cookie: hf_session=...`. When no password is configured: `200` with
   `enabled: false, authenticated: true`, no cookie.
 - Errors: `401 unauthorized` (wrong password, message "Invalid password"); `429 rate_limited` (`retryAfterMs`,
-  `Retry-After`).
+  `Retry-After`). The limiter counts per TCP peer address (never `X-Forwarded-For`); behind a reverse proxy every
+  client shares the proxy's address (ARCHITECTURE.md 10.1).
 
 **`POST /auth/logout`** — `auth.logout` · public
 - Response `204`, clears the cookie (`Max-Age=0`). Idempotent.
@@ -1070,7 +1077,8 @@ params/query/body; `413 payload_too_large` when a body exceeds its limit; `500 i
 **`POST /chats`** — `chats.create`
 - Body `ChatCreate`. Without `messages` it creates an empty chat; with `messages` it imports them (e.g. the
   `chat` of a JSON export): deep-validated with `validateUIMessages`, `seq` from array order, invalid or already
-  used message ids replaced with new ones, pending approvals resolved as denied.
+  used message ids replaced with new ones, pending approvals resolved as denied. Body limit 20 MB (imports), <= 2000
+  messages.
 - Response `201 ChatDetail`. Emits `chat.created`.
 - Errors: `409 conflict` (`reason: 'exists'`, id already used).
 - Note: the normal "new chat" flow does not call this: the web generates a uuidv7 and the first `POST /chat`
@@ -1139,11 +1147,11 @@ params/query/body; `413 payload_too_large` when a body exceeds its limit; `500 i
 
 **`GET /files/:id`** — `files.get` · response `'binary'`
 - Params `{ id: FileId }`.
-- Response `200` bytes with `Content-Type: <mime>`, `Content-Length`, `ETag: "<sha256>"`,
-  `Cache-Control: private, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`,
+- Response `200` bytes with `Content-Type: <mime>` (`text/*` with `; charset=utf-8`), `Content-Length`,
+  `ETag: "<sha256>"`, `Cache-Control: private, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`,
   `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox` (PDF: same without
   `sandbox`), and `Content-Disposition: inline; filename*=UTF-8''<name>` for PNG, JPEG, GIF, WebP, AVIF and PDF,
-  `attachment` for everything else (SVG and text included).
+  `attachment` for everything else (SVG and text included). A matching `If-None-Match` gets `304 Not Modified`.
 - Errors: `404 not_found`.
 
 ### 5.12 `tools.ts`
@@ -1153,8 +1161,8 @@ params/query/body; `413 payload_too_large` when a body exceeds its limit; `500 i
   successful listing of a currently disconnected server (`available: false`).
 
 **`PATCH /tools/:name`** — `tools.update`
-- Params `{ name: ToolName }`. Body `ToolUpdate`. Used by the Overview tab and by "Don't ask again" on an approval
-  card (`override: 'allow'`).
+- Params `{ name: ToolName }`. Body `ToolUpdate`. Used by the Overview tab and by the "Always allow {tool}" checkbox
+  of an approval card (`override: 'allow'`).
 - Response `200 ToolSummary`.
 - Errors: `404 not_found` (unknown tool name).
 
@@ -1274,9 +1282,14 @@ params/query/body; `413 payload_too_large` when a body exceeds its limit; `500 i
   `POST /plugins/:id/trust`.
 - Installs via staging + atomic swap (ARCHITECTURE.md 6.5). Same id and same source = update (the previous
   version is restored if the new one fails to load).
+- What was reviewed is what gets installed: `sha256` (optional) is the hash shown by `inspect`. The server also
+  remembers the hash of npm and folder sources inspected in the last 30 minutes; when the source now yields other
+  files (a moved npm tag or range, an edited folder), the install is refused. Zip uploads and URL installs are
+  pinned by their bytes / SRI integrity.
 - Response `201 PluginDetail`. Emits `plugin.changed` (+ `catalog.changed`, `provider.changed`).
-- Errors: as `inspect`; `403 forbidden` (reserved or builtin id, fresh auth missing); `409 conflict`
-  (`reason: 'exists'`, id installed from a different source).
+- Errors: as `inspect`; `400 validation_error` (incompatible `engines.harness`); `403 forbidden` (reserved or
+  builtin id, fresh auth missing); `409 conflict` (`reason: 'exists'`, id installed from a different source;
+  `reason: 'stale'`, the package changed since it was reviewed).
 
 **`POST /plugins/:id/trust`** — `pluginInstall.trust` · **fresh**
 - Params `{ id: PluginId }`. Body `PluginTrustBody`.
@@ -1293,20 +1306,22 @@ params/query/body; `413 payload_too_large` when a body exceeds its limit; `500 i
 
 ### 5.17 `plugin-drafts.ts`
 
-**`POST /plugins`** — `pluginDrafts.create`
+**`POST /plugins`** — `pluginDrafts.create` · **fresh** when the manifest declares a stdio MCP server
 - Body `PluginDraft`. Creates a declarative plugin (`source: 'created'`, `kind: 'declarative'`) through staging:
-  `plugin.json` (+ `iconFile`), then saves `credentials` per provider and loads it. A manifest that declares a
-  stdio MCP server requires fresh auth and is trusted on creation.
+  `plugin.json` (+ `iconFile`, SVG sanitized), loads it, then saves `credentials` as provider credentials (never in
+  `plugin.json`) and validates / lists them in the background like `PUT /providers/:id/credentials`. A manifest that
+  declares a stdio MCP server requires fresh auth and is trusted on creation.
 - Response `201 PluginDetail`. Emits `plugin.changed`, `provider.changed`, `catalog.changed`.
 - Errors: `400 validation_error` (manifest with `main`, provider ids not `<pluginId>` / `<pluginId>-<suffix>`,
-  icon mismatch); `403 forbidden` (reserved id); `409 conflict` (`reason: 'exists'`).
+  icon mismatch, credentials for an undeclared provider); `403 forbidden` (reserved id); `409 conflict`
+  (`reason: 'exists'`: the plugin id, or a provider / MCP server id already used by another plugin).
 
 **`POST /plugins/drafts/test`** — `pluginDrafts.test`
 - Body `DraftTestRequest`. Builds a temporary provider from the draft (nothing stored) and runs `action`
   (15 s timeout).
 - Response `200 DraftTestResult` (`ok: false` + `error` on failure, not an HTTP error).
 
-**`PUT /plugins/:id/manifest`** — `pluginDrafts.updateManifest`
+**`PUT /plugins/:id/manifest`** — `pluginDrafts.updateManifest` · **fresh** when a stdio MCP server is declared or changed
 - Params `{ id: PluginId }`. Body `PluginManifestUpdate`. Replaces `plugin.json` of a declarative editable plugin
   and reloads it (hot reload on save). A manifest that declares or changes a stdio MCP server requires fresh auth
   and re-pins the trust hash.
@@ -1320,6 +1335,14 @@ Path rules for `*` (`params.path`): relative POSIX path, 1..256 chars, segments 
 segments; no leading `/`, no `.` or `..` segments, no backslashes, no NUL; resolved with `realpath` inside the
 plugin dir. Violations -> `400 validation_error`. Files are text only (valid UTF-8, no NUL) and at most 1 MB.
 
+Additional guards (all `400 validation_error`):
+
+- `.git` and `node_modules` are never listed or opened, even for reading.
+- Hidden files and folders (a segment starting with `.`) are listed with `editable: false` and cannot be created,
+  changed or deleted, so a stolen session cannot plant `.git/hooks` or editor tasks in a linked folder.
+- Symbolic links are neither listed nor followed; a path that differs only in letter case from an existing entry
+  (`PLUGIN.JSON`) is refused.
+
 **`POST /plugins/scaffold`** — `pluginFiles.scaffold` · **fresh**
 - Body `ScaffoldRequest`. Creates `data/plugins/<id>/` from the template (`plugin.json` + `index.mjs` or
   `index.ts`), `source: 'created'`, trusted (hash pinned), enabled and loaded.
@@ -1328,9 +1351,9 @@ plugin dir. Violations -> `400 validation_error`. Files are text only (valid UTF
 
 **`GET /plugins/:id/files`** — `pluginFiles.list`
 - Params `{ id: PluginId }`.
-- Response `200 ListResponse<PluginFileEntry>`: recursive, directories first then files, sorted by path; skips
-  `node_modules` and `.git` (build output lives in `data/cache/plugins/<id>/`, outside the plugin dir); at most
-  2000 entries.
+- Response `200 ListResponse<PluginFileEntry>`: recursive (at most 8 levels), directories first then files, sorted
+  by path; skips `node_modules`, `.git`, symbolic links and temporary files of atomic writes (build output lives in
+  `data/cache/plugins/<id>/`, outside the plugin dir); at most 2000 entries.
 - Errors: `404 not_found`; `403 forbidden` (builtin).
 
 **`GET /plugins/:id/files/*`** — `pluginFiles.read`
@@ -1339,33 +1362,38 @@ plugin dir. Violations -> `400 validation_error`. Files are text only (valid UTF
 - Errors: `404 not_found`; `400 validation_error` (bad path, binary file); `413 payload_too_large` (> 1 MB);
   `403 forbidden` (builtin).
 
-**`PUT /plugins/:id/files/*`** — `pluginFiles.write` · **fresh** for code plugins
+**`PUT /plugins/:id/files/*`** — `pluginFiles.write` · **fresh** for plugins that run code
 - Params `PluginFileParams`. Body `PluginFileWrite` (creates missing parent directories).
-- Writes never trigger the file watcher. `plugin.json` must stay a valid manifest with the same id. Declarative
-  plugins reload when `plugin.json` is written; code changes take effect on `POST /plugins/:id/build`.
-- Fresh auth (ADR-017): writing a file of a **code** plugin requires fresh auth when a password is set
-  (declarative-only plugins do not).
-- Trust (ADR-017): a write to a plugin with source `created` re-pins its trust hash automatically; for source
-  `copy` a change of the hashed files (`plugin.json`, the entry) makes a code or stdio-MCP plugin `untrusted` until
-  it is trusted again; `link` plugins are pinned by path.
+- Writes are atomic and never trigger the file watcher. `plugin.json` must stay a valid manifest with the same id.
+  Declarative plugins reload when `plugin.json` is written; code changes take effect on `POST /plugins/:id/build`.
+- Fresh auth (ADR-017): writing a file of a plugin that runs code (a code plugin or a stdio MCP server), or a
+  `plugin.json` that would make it run code, requires fresh auth when a password is set.
+- Trust (ADR-017): a write to a plugin with source `created` re-pins its trust hash only when the plugin was trusted
+  before the write (or needed no trust); a plugin whose files had already changed outside the editor stays
+  `untrusted` (a `warn` entry in its log) until it is trusted explicitly. For source `copy` a change of the hashed
+  files (`plugin.json`, the entry) makes a code or stdio-MCP plugin `untrusted` until it is trusted again; `link`
+  plugins are pinned by path.
 - Response `200 PluginFileEntry`.
 - Errors: `404 not_found` (plugin); `403 forbidden` (not editable); `409 conflict` (`reason: 'stale'`);
   `400 validation_error`; `413 payload_too_large`.
 
-**`DELETE /plugins/:id/files/*`** — `pluginFiles.remove` · **fresh** for code plugins
-- Params `PluginFileParams`. Deletes one file; directories left empty are removed. Rename in the editor = write
-  the new path, then delete the old one. `plugin.json` and the file named by `main` cannot be deleted.
-- Fresh auth and trust: as for writes (code plugins need fresh auth; a `created` plugin is re-pinned automatically).
+**`DELETE /plugins/:id/files/*`** — `pluginFiles.remove` · **fresh** for plugins that run code
+- Params `PluginFileParams`. Deletes one file (not a folder); directories left empty are removed. Rename in the
+  editor = write the new path, then delete the old one. `plugin.json` and the files it references (the `main` entry
+  and a file `icon`) cannot be deleted.
+- Fresh auth and trust: as for writes (plugins that run code need fresh auth; a trusted `created` plugin is
+  re-pinned automatically).
 - Response `204`.
 - Errors: `404 not_found` (plugin or file); `403 forbidden` (not editable, builtin); `400 validation_error` (bad
-  path, `plugin.json` or the entry file).
+  path, a folder, `plugin.json` or a file it references).
 
 **`POST /plugins/:id/build`** — `pluginFiles.build` · **fresh**
 - Params `{ id: PluginId }`. Body `PluginBuildBody`.
 - Compiles/checks the entry with esbuild (`.ts`: bundled into `data/cache/plugins/<id>/<sha256>.mjs` with the SDK
-  aliased to the host shim; `.mjs`/`.js`: syntax check), collects diagnostics, and when there are no errors re-pins
-  the trust hash and (if `reload`) reloads the plugin. Build log lines are written to the plugin log (`plugin.log`
-  events).
+  aliased to the host shim; `.mjs`/`.js`: syntax and import check), collects diagnostics, and when there are no
+  errors re-pins the trust hash of a `created` plugin (the hash of the files that were built) and (if `reload`)
+  reloads the plugin; a failed reload is added as an error diagnostic. Build log lines are written to the plugin log
+  (`plugin.log` events).
 - Response `200 BuildResult` (a failed build is `ok: false` with diagnostics, not an HTTP error).
 - Errors: `404 not_found`; `403 forbidden` (not editable, builtin, declarative plugin).
 
@@ -1459,7 +1487,7 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 |---|---|---|
 | `input-streaming` | arguments streaming (`input` partial) | spinner |
 | `input-available` | arguments complete, executing | spinner |
-| `approval-requested` | waits for the user (`approval.id`) | amber, `AiConfirmation` card: Deny / Allow / Don't ask again |
+| `approval-requested` | waits for the user (`approval.id`) | amber, `AiConfirmation` card: Deny / Allow + "Always allow {tool}" checkbox |
 | `approval-responded` | decision sent, continuation pending (`approval.approved`) | spinner (allowed) or "Denied" |
 | `output-available` | `output` (may be `preliminary: true`) | check mark, expandable input/output (4 KB cap in UI) |
 | `output-error` | `errorText` | cross, error text |
@@ -1501,7 +1529,8 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 - The continuation request carries the whole last assistant message, but the server merges only
   `approval.approved` / `approval.reason` per `approval.id` into the stored copy; any other client change is
   ignored.
-- "Don't ask again" = `PATCH /api/tools/:name` `{ override: 'allow' }` + `addToolApprovalResponse(...approved: true)`.
+- Allow with "Always allow {tool}" checked = `PATCH /api/tools/:name` `{ override: 'allow' }` +
+  `addToolApprovalResponse(...approved: true)`.
 
 ## 7. Server events (`GET /api/events`)
 
@@ -1518,7 +1547,8 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   ```
 
   `id` is a per-process increasing integer; `event` equals `type`; `data` is the full `ServerEvent` JSON.
-- Heartbeat: a comment line `: ping` every **25 s**.
+- Heartbeat: a comment line `: ping` every **25 s**. Each heartbeat re-checks the session: the stream ends when it
+  is no longer valid (password changed, logged out, expired). Shutdown also ends every stream.
 - No replay: `Last-Event-ID` is ignored. After a reconnect (`EventSource` `open` following an `error`) the web
   refetches its stores. A slow connection whose queue exceeds 256 events is closed by the server.
 
@@ -1537,6 +1567,8 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 ## 8. Route key index
 
 Every key of `apiRoutes` (62 routes). `P` = params, `Q` = query, `B` = JSON body, `F` = multipart form.
+`fresh` = always requires fresh auth when a password is set (the route table `fresh` flag); `fresh*` = only in the
+cases of section 5 (stdio MCP servers, plugins that run code), enforced by the server.
 
 | Key | Method | Path | Input | Response | Flags |
 |---|---|---|---|---|---|
@@ -1574,8 +1606,8 @@ Every key of `apiRoutes` (62 routes). `P` = params, `Q` = query, `B` = JSON body
 | `tools.list` | GET | `/tools` | - | `ListResponse<ToolSummary>` | |
 | `tools.update` | PATCH | `/tools/:name` | P `ToolParams`, B `ToolUpdate` | `ToolSummary` | |
 | `mcp.list` | GET | `/mcp` | - | `ListResponse<McpServer>` | |
-| `mcp.create` | POST | `/mcp` | B `McpServerInput` | `McpServer` | 201 |
-| `mcp.update` | PATCH | `/mcp/:id` | P `McpServerParams`, B `McpServerUpdate` | `McpServer` | |
+| `mcp.create` | POST | `/mcp` | B `McpServerInput` | `McpServer` | 201, fresh* |
+| `mcp.update` | PATCH | `/mcp/:id` | P `McpServerParams`, B `McpServerUpdate` | `McpServer` | fresh* |
 | `mcp.remove` | DELETE | `/mcp/:id` | P `McpServerParams` | `'empty'` | |
 | `mcp.reconnect` | POST | `/mcp/:id/reconnect` | P `McpServerParams` | `McpServer` | |
 | `commands.list` | GET | `/commands` | - | `ListResponse<CommandSummary>` | |
@@ -1584,23 +1616,23 @@ Every key of `apiRoutes` (62 routes). `P` = params, `Q` = query, `B` = JSON body
 | `plugins.remove` | DELETE | `/plugins/:id` | P `PluginParams`, Q `PluginRemoveQuery` | `'empty'` | |
 | `plugins.enable` | POST | `/plugins/:id/enable` | P `PluginParams` | `PluginDetail` | |
 | `plugins.disable` | POST | `/plugins/:id/disable` | P `PluginParams` | `PluginDetail` | |
-| `plugins.reload` | POST | `/plugins/:id/reload` | P `PluginParams` | `PluginDetail` | |
+| `plugins.reload` | POST | `/plugins/:id/reload` | P `PluginParams` | `PluginDetail` | fresh* |
 | `plugins.getSettings` | GET | `/plugins/:id/settings` | P `PluginParams` | `PluginSettingsView` | |
 | `plugins.updateSettings` | PUT | `/plugins/:id/settings` | P `PluginParams`, B `PluginSettingsUpdate` | `PluginSettingsView` | |
 | `plugins.icon` | GET | `/plugins/:id/icon` | P `PluginParams` | `'binary'` | |
 | `plugins.logs` | GET | `/plugins/:id/logs` | P `PluginParams`, Q `PluginLogsQuery` | `ListResponse<PluginLogEntry>` | |
 | `pluginInstall.inspect` | POST | `/plugins/inspect` | B `PluginInspectBody` or F `FileUploadForm` + `file` | `PluginInspection` | |
-| `pluginInstall.install` | POST | `/plugins/install` | B `PluginInstallBody` or F `PluginInstallForm` + `file` | `PluginDetail` | 201 |
+| `pluginInstall.install` | POST | `/plugins/install` | B `PluginInstallBody` or F `PluginInstallForm` + `file` | `PluginDetail` | 201, fresh* |
 | `pluginInstall.trust` | POST | `/plugins/:id/trust` | P `PluginParams`, B `PluginTrustBody` | `PluginDetail` | fresh |
 | `pluginInstall.export` | GET | `/plugins/:id/export` | P `PluginParams` | `'binary'` | |
-| `pluginDrafts.create` | POST | `/plugins` | B `PluginDraft` | `PluginDetail` | 201 |
+| `pluginDrafts.create` | POST | `/plugins` | B `PluginDraft` | `PluginDetail` | 201, fresh* |
 | `pluginDrafts.test` | POST | `/plugins/drafts/test` | B `DraftTestRequest` | `DraftTestResult` | |
-| `pluginDrafts.updateManifest` | PUT | `/plugins/:id/manifest` | P `PluginParams`, B `PluginManifestUpdate` | `PluginDetail` | |
+| `pluginDrafts.updateManifest` | PUT | `/plugins/:id/manifest` | P `PluginParams`, B `PluginManifestUpdate` | `PluginDetail` | fresh* |
 | `pluginFiles.scaffold` | POST | `/plugins/scaffold` | B `ScaffoldRequest` | `PluginDetail` | 201, fresh |
 | `pluginFiles.list` | GET | `/plugins/:id/files` | P `PluginParams` | `ListResponse<PluginFileEntry>` | |
 | `pluginFiles.read` | GET | `/plugins/:id/files/*` | P `PluginFileParams` | `PluginFileContent` | |
-| `pluginFiles.write` | PUT | `/plugins/:id/files/*` | P `PluginFileParams`, B `PluginFileWrite` | `PluginFileEntry` | |
-| `pluginFiles.remove` | DELETE | `/plugins/:id/files/*` | P `PluginFileParams` | `'empty'` | |
+| `pluginFiles.write` | PUT | `/plugins/:id/files/*` | P `PluginFileParams`, B `PluginFileWrite` | `PluginFileEntry` | fresh* |
+| `pluginFiles.remove` | DELETE | `/plugins/:id/files/*` | P `PluginFileParams` | `'empty'` | fresh* |
 | `pluginFiles.build` | POST | `/plugins/:id/build` | P `PluginParams`, B `PluginBuildBody` | `BuildResult` | fresh |
 
 Server registration order note: within `plugins.ts`, `plugin-install.ts`, `plugin-drafts.ts` and

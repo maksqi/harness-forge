@@ -1,0 +1,42 @@
+# Build context of the Dockerfile: sources, manifests and the lockfile only. Everything below is either rebuilt inside
+# the image, not needed to build it, or must never end up in an image layer (secrets, runtime data).
+
+# Version control and CI
+.git
+.github
+
+# Secrets and runtime data (the image uses the /data volume)
+.env
+.env.*
+data
+.data
+.tmp
+
+# Dependencies and build output (installed and built inside the image for its platform)
+**/node_modules
+**/.nuxt
+**/.output
+**/.nitro
+**/.cache
+**/dist
+
+# Tests, reports and docs (not needed by `pnpm build`)
+e2e
+docs
+**/coverage
+playwright-report
+test-results
+blob-report
+
+# Logs, OS and editor files
+**/*.log
+**/.DS_Store
+**/Thumbs.db
+.idea
+.vscode
+**/*.swp
+
+# Container files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore

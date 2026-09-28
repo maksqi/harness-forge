@@ -69,7 +69,7 @@ function onSubmit() {
 
 <template>
   <Dialog :open="open" @update:open="onOpenChange">
-    <DialogContent class="sm:max-w-md">
+    <DialogContent class="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-md">
       <form class="grid gap-5" @submit.prevent="onSubmit">
         <DialogHeader>
           <DialogTitle>{{ mode === 'create' ? 'New file' : 'Rename file' }}</DialogTitle>

@@ -1,10 +1,13 @@
 <script setup lang="ts">
 // New chat (docs/UI.md 2.2, 6, 7.13): greeting, the "Connect a provider" callout while nothing is usable, and the
-// composer of a fresh chat id. The first send moves to /chat/<id>; the session and its stream stay alive in the
-// registry, so the transcript continues there. Never renders its own <main> (the layout's SidebarInset is).
+// composer of a fresh chat id; the header only holds the sidebar trigger (mobile, collapsed sidebar). The first send
+// moves to /chat/<id>; the session and its stream stay alive in the registry, so the transcript continues there.
+// Never renders its own <main> (the layout's SidebarInset is).
 import { computed } from 'vue'
+import { useHead } from '#imports'
 import ChatGreeting from '~/components/chat/ChatGreeting.vue'
 import ChatView from '~/components/chat/ChatView.vue'
+import NewChatHeader from '~/components/chat/NewChatHeader.vue'
 import NoProviderCallout from '~/components/chat/NoProviderCallout.vue'
 import { useRouter } from '~/components/chat/nuxt-imports'
 import { releaseDraftChatId, useDraftChatId } from '~/composables/useChatSession'
@@ -12,6 +15,8 @@ import { useProvidersStore } from '~/stores/providers'
 
 const router = useRouter()
 const providers = useProvidersStore()
+
+useHead({ title: 'New chat · harness-forge' })
 
 const chatId = useDraftChatId()
 const showCallout = computed(() => providers.loaded && !providers.hasUsableProvider)
@@ -24,6 +29,9 @@ function onCreated(id: string) {
 
 <template>
   <ChatView :chat-id="chatId" is-new @created="onCreated">
+    <template #header>
+      <NewChatHeader />
+    </template>
     <template #empty>
       <ChatGreeting />
       <NoProviderCallout v-if="showCallout" />

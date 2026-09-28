@@ -2,12 +2,14 @@
 // Reasoning part (docs/UI.md 7.1): one row, "Thinking… 4s" (shimmer, live seconds) while it streams, then "Thought
 // for 12s" (metadata.reasoningMs when known, so it survives reloads; else the measured time; else "Thought").
 // Collapsed unless Show thinking is on and never opened automatically; the body is markdown in a
-// CollapsibleContent (AiReasoning without its auto open/close: isStreaming stays false).
+// CollapsibleContent (AiReasoning without its auto open/close: isStreaming stays false). The row is the plain
+// CollapsibleTrigger that AiReasoningTrigger wraps: that component statically imports its motion-v shimmer, which
+// this row never shows (it has its own "Thinking…" label), so using it would ship motion-v with every chat.
 import type { ReasoningUIPart } from 'ai'
 import { ChevronRightIcon } from '@lucide/vue'
 import { computed, inject, onBeforeUnmount, ref, watch } from 'vue'
-import { Reasoning as AiReasoning, ReasoningTrigger as AiReasoningTrigger } from '@/components/ai-elements/reasoning'
-import { CollapsibleContent } from '@/components/ui/collapsible'
+import AiReasoning from '@/components/ai-elements/reasoning/Reasoning.vue'
+import { CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import Markdown from '~/components/common/Markdown.vue'
 import { testIds } from '~/utils/testids'
 import { TRANSCRIPT_SCROLL } from '../chat-context'
@@ -82,10 +84,10 @@ const doneLabel = computed(() => {
       :data-testid="testIds.reasoningRow"
       :data-state="active ? 'streaming' : 'done'"
       :data-expanded="open ? 'true' : 'false'"
-      class="flex h-(--row-height) items-center"
+      class="flex h-(--row-height) items-center pointer-coarse:h-10"
     >
-      <AiReasoningTrigger
-        class="group/reasoning -mx-1.5 h-full w-[calc(100%+0.75rem)] rounded-md px-1.5 outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+      <CollapsibleTrigger
+        class="group/reasoning -mx-1.5 flex h-full w-[calc(100%+0.75rem)] items-center gap-2 rounded-md px-1.5 text-sm text-muted-foreground outline-none transition-colors duration-(--duration-fast) hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
       >
         <ChevronRightIcon
           aria-hidden="true"
@@ -93,7 +95,7 @@ const doneLabel = computed(() => {
         />
         <span v-if="active" class="hf-shimmer-text tabular-nums">Thinking… {{ liveSeconds }}s</span>
         <span v-else class="tabular-nums">{{ doneLabel }}</span>
-      </AiReasoningTrigger>
+      </CollapsibleTrigger>
     </div>
     <CollapsibleContent
       class="overflow-hidden data-closed:animate-out data-closed:fade-out-0 data-open:animate-in data-open:fade-in-0"

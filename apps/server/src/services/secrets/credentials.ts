@@ -2,7 +2,8 @@
 // `CredentialService` (./types.ts).
 //
 // Storage: `secret` fields are encrypted in `secrets` (scope `provider:<id>`, name = field key); `text` / `url` /
-// `select` fields live in `provider_configs.options`. The fields come from the registered `ProviderDefinition`.
+// `select` fields live in `provider_configs.options`. The fields come from the registered `ProviderDefinition`, or from
+// the caller for `setFor` (a provider that is not registered right now, e.g. a declarative plugin created disabled).
 //
 // Resolution of one field (`resolve`, used by the providers service for every call and test):
 //   candidate value (`overrides`, provider test only; `''` means "as if cleared")
@@ -246,8 +247,8 @@ export function createCredentialService(deps: AppDeps): CredentialService {
     return out
   }
 
-  async function set(providerId: string, values: CredentialValues): Promise<void> {
-    const fields = fieldsOf(providerId)
+  /** Validates `values` against `fields` and stores them (`set` / `setFor`). */
+  async function store(providerId: string, fields: readonly CredentialField[], values: CredentialValues): Promise<void> {
     const parsed = validateCredentialValues(fields, values)
     const byKey = new Map(fields.map(field => [field.key, field]))
     const scope = providerSecretScope(providerId)
@@ -255,10 +256,14 @@ export function createCredentialService(deps: AppDeps): CredentialService {
       const optionChanges = new Map<string, string | null>()
       for (const [key, value] of Object.entries(parsed)) {
         if (byKey.get(key)?.type === 'secret') {
-          if (value === '')
+          if (value === '') {
             await deps.secrets.delete(scope, key)
-          else
+          }
+          else {
+            // Registered first, so the value is masked even if storing it fails and the error is logged.
+            deps.redactor.addSecret(value)
             await deps.secrets.set(scope, key, value)
+          }
         }
         else {
           optionChanges.set(key, value === '' ? null : value)
@@ -266,6 +271,16 @@ export function createCredentialService(deps: AppDeps): CredentialService {
       }
       await writeOptions(providerId, optionChanges)
     })
+  }
+
+  async function set(providerId: string, values: CredentialValues): Promise<void> {
+    await store(providerId, fieldsOf(providerId), values)
+  }
+
+  async function setFor(providerId: string, fields: readonly CredentialField[], values: CredentialValues): Promise<void> {
+    if (typeof providerId !== 'string' || !PROVIDER_ID_PATTERN.test(providerId))
+      throw validationError([{ path: ['providerId'], message: 'Invalid provider id.', code: 'custom' }], 'Invalid provider id.')
+    await store(providerId, fields, values)
   }
 
   async function clear(providerId: string): Promise<void> {
@@ -276,5 +291,5 @@ export function createCredentialService(deps: AppDeps): CredentialService {
     })
   }
 
-  return { resolve, states, set, clear }
+  return { resolve, states, set, setFor, clear }
 }

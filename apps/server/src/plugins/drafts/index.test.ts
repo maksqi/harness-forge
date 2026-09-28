@@ -6,7 +6,9 @@ import { Buffer } from 'node:buffer'
 import { cpSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { HarnessError } from '@harness-forge/shared'
+import { eq } from 'drizzle-orm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { providerConfigs } from '../../db/schema.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { fixturePath } from '../__fixtures__/harness.ts'
 import { createPluginDraftsWith, serializeManifest } from './index.ts'
@@ -105,6 +107,60 @@ describe('updateManifest and trust', () => {
     }, fresh())
     expect(saved.icon?.color).toMatch(/^\/api\/plugins\/tools\/icon\?v=/)
     expect(readFileSync(join(t.env.paths.plugins, 'tools', 'icon.svg'), 'utf8')).toBe('<svg xmlns="http://www.w3.org/2000/svg"><rect width="2" height="2"/></svg>\n')
+  })
+})
+
+describe('credentials of a provider that is not registered', () => {
+  const KEY = 'sk-unregistered-value-0000000000'
+
+  function keyed(id: string): PluginManifest {
+    return manifest(id, {
+      contributes: {
+        providers: [{
+          id,
+          name: 'Keyed',
+          baseURL: 'http://127.0.0.1:9/v1',
+          apiFormat: 'openai-chat',
+          listModels: false,
+          credentials: [
+            { key: 'apiKey', label: 'API key', type: 'secret', required: true },
+            { key: 'team', label: 'Team', type: 'text' },
+          ],
+        }],
+      },
+    })
+  }
+
+  /** The layout of the credential service: the secret in `provider:<id>`, the other fields in `provider_configs`. */
+  async function expectStored(app: TestApp, id: string): Promise<void> {
+    expect((await app.deps.secrets.list(`provider:${id}`)).map(entry => entry.name)).toEqual(['apiKey'])
+    expect(await app.deps.secrets.get(`provider:${id}`, 'apiKey')).toBe(KEY)
+    const [row] = await app.db.select().from(providerConfigs).where(eq(providerConfigs.providerId, id))
+    expect(row?.options).toEqual({ team: 'blue' })
+  }
+
+  it('stores them through the credential service for a plugin created disabled', async () => {
+    const created = await drafts.create({ manifest: keyed('later'), credentials: { later: { apiKey: KEY, team: 'blue' } }, enable: false }, fresh())
+    expect(created).toMatchObject({ state: 'disabled', enabled: false })
+    expect(t.deps.registry.providers.get('later')).toBeUndefined()
+    await expectStored(t, 'later')
+    // Enabling registers the provider: the credential service resolves what was stored before.
+    expect((await t.deps.plugins.enable('later')).state).toBe('active')
+    expect(await t.deps.credentials.resolve('later')).toMatchObject({ values: { apiKey: KEY, team: 'blue' }, sources: { apiKey: 'stored', team: 'stored' }, missing: [] })
+  })
+
+  it('stores them in safe mode (user plugins are not loaded)', async () => {
+    const safe = await createTestApp({ builtins: [], env: { HF_SAFE_MODE: '1' }, overrides: { mcp: createInertMcpManager() } })
+    try {
+      const service = createPluginDraftsWith(safe.deps, {})
+      const created = await service.create({ manifest: keyed('safe-later'), credentials: { 'safe-later': { apiKey: KEY, team: 'blue' } } }, fresh())
+      expect(created.state).toBe('disabled')
+      expect(safe.deps.registry.providers.get('safe-later')).toBeUndefined()
+      await expectStored(safe, 'safe-later')
+    }
+    finally {
+      await safe.close()
+    }
   })
 })
 

@@ -701,13 +701,13 @@ All pages are `ssr: false` SPA routes. C5 creates every page as a stub in Phase 
 
 | Route | File | Contents | Owner |
 |---|---|---|---|
-| `/` | `pages/index.vue` | empty state: greeting, no-provider callout, composer; generates a uuidv7 and renders `ChatView` with `isNew` | W2.2 |
-| `/chat/[id]` | `pages/chat/[id].vue` | `ChatHeader` + `ChatView` for an existing chat; "Chat not found" empty state with "New chat" when 404 | W2.2 |
+| `/` | `pages/index.vue` | empty state: `ChatView` with `isNew` for the draft chat id (`useDraftChatId()`: a uuidv7 kept until the first send, so an unsent draft survives leaving `/`); `ChatGreeting` + `NoProviderCallout` fill its `empty` slot; the first send replaces the route with `/chat/<id>` | W2.2 |
+| `/chat/[id]` | `pages/chat/[id].vue` | `ChatView` for an existing chat with `ChatHeader` in its `header` slot; `ChatNotFound` ("Chat not found" + "New chat") for malformed ids and on 404 | W2.2 |
 | (parent) | `pages/plugins.vue` | plugins shell: `<NuxtPage />` + the single `InstallDialog` instance bound to `ui.installDialogOpen` (`@installed` → `/plugins/<id>`) | W3.1 |
 | `/plugins` | `pages/plugins/index.vue` | `PageHeader` "Plugins" (search, Install…, New plugin ▾), filter from `?filter=` and `?q=`, `PluginCard` grid | W3.1 |
-| `/plugins/new?type=provider` | `pages/plugins/new.vue` | `ProviderWizard` (`?edit=<id>` edits an existing declarative plugin) | W3.3 |
+| `/plugins/new?type=provider` | `pages/plugins/new.vue` | `ProviderWizard` (`?edit=<id>` edits an existing declarative plugin); without `type` the page shows a Provider / Code plugin chooser | W3.3 |
 | `/plugins/new?type=code` | `pages/plugins/new.vue` | `CodePluginForm` (W3.4 component) | W3.3 (page), W3.4 (form) |
-| `/plugins/[id]` | `pages/plugins/[id].vue` | `PluginHeader` + tabs from `?tab=`: Overview · Configuration (only with a settings schema) · Source (`PluginSourceTab`, code plugins only) · Logs; `McpServersPanel` inside Overview for `core-mcp` | W3.1 (page), W3.4, W3.5 |
+| `/plugins/[id]` | `pages/plugins/[id].vue` → `PluginDetailView` | `PluginHeader` + tabs from `?tab=`: Overview · Configuration (only with a settings schema) · Source (`PluginSourceTab`: code plugins, and declarative plugins whose files are editable, 8.7) · Logs; `McpServersPanel` inside Overview for `core-mcp` | W3.1 (page), W3.4, W3.5 |
 | `/settings` | `pages/settings/index.vue` | redirects to `/settings/providers` | W2.5 |
 | `/settings/providers` | `pages/settings/providers.vue` | provider list, key dialog (`?configure=<providerId>` opens it) | W2.5 |
 | `/settings/models` | `pages/settings/models.vue` | default + title model, per-provider model tables | W2.5 |
@@ -715,7 +715,7 @@ All pages are `ssr: false` SPA routes. C5 creates every page as a stub in Phase 
 | `/settings/appearance` | `pages/settings/appearance.vue` | theme cards, reading font, text size, density, expand thinking | W2.5 |
 | `/settings/about` | `pages/settings/about.vue` | versions, license, copy diagnostics | W2.5 |
 | `/login` | `pages/login.vue` (`layout: 'auth'`) | password form; `?redirect=` | W2.5 |
-| unknown | `app/error.vue` | "Page not found" + "Back to chats" | C5 |
+| unknown | `app/error.vue` (`auth` layout) | "Page not found" (404) or "Something went wrong" (other errors, no raw details) + "Back to chats" (`clearError({ redirect: '/' })`) | C5 |
 
 Route middleware `middleware/auth.global.ts` (C5): loads `auth.fetchStatus()` once; when a password is required
 and there is no session, redirects to `/login?redirect=<path>`; `/login` redirects to `/` when already
@@ -852,9 +852,10 @@ request outside the transcript → `toast.error(title, { description })` with th
 | `streaming` | parts render incrementally (`Markdown final=false` on the growing text part) | Stop; Esc stops |
 | `error` | `ErrorPart` on the last assistant message | Send |
 
-Stop = `session.stop()`: aborts the client request and calls `POST /api/chat/:id/stop` (the server run
-survives disconnects). Leaving the page never stops a run; returning resumes it: `@ai-sdk/vue` 4 has no `resume`
-option, so the session calls `chat.resumeStream()` on mount when the chat has an active run (11.1).
+Stop = `session.stop()`: calls `POST /api/chat/:id/stop`, then aborts the client request (the server run
+survives disconnects, so a client abort alone would only disconnect). Leaving the page never stops a run;
+returning resumes it: `@ai-sdk/vue` 4 has no `resume` option, so the session calls `chat.resumeStream()` on mount
+when the chat has an active run (11.1).
 
 ### 7.7 Composer (`ChatComposer`, W2.3)
 
@@ -970,9 +971,10 @@ rows, "Chat cost $0.12" (sum of message `costUsd`, hidden when unknown). Hidden 
 
 Source badge labels: `builtin` → Core · `created` + declarative → Declarative · `created` + code → Code · `zip` →
 zip · `npm` → npm · `url` → URL · `link` / `copy` → Local. State overlays: `error` → `border-destructive/60` and
-the error message (1 line) + "View logs" link; `untrusted` → warning badge "Untrusted" + "Review" button
-(opens `TrustDialog`); `incompatible` → badge "Incompatible" with tooltip "Needs harness {range}"; `loading` →
-`Spinner` next to the name; `disabled` → card at 70% opacity, switch off. Builtins appear as one non-removable
+the error message (1 line) + "View logs" link (emits `view-logs`; the list opens `/plugins/<id>?tab=logs`);
+`untrusted` → warning badge "Untrusted" + "Review" button (emits `review`; the list opens `TrustDialog`);
+`incompatible` → badge "Incompatible" with tooltip "Needs harness {range}"; `loading` → `Spinner` next to the name;
+`disabled` → card at 70% opacity, switch off. Builtins appear as one non-removable
 "Core providers" card (plus `core-tools`, `core-commands`, `core-mcp` cards); they have no Uninstall.
 
 ### 8.2 List page (`/plugins`)
@@ -1036,7 +1038,7 @@ disabled until the step is valid) · on the last step **Create provider**. Compl
 |---|---|---|
 | 1 | Basics | Name ("Together AI"); Id (slug from the name, editable; validated against the plugin id pattern, reserved ids and existing plugins; hint "Model refs look like `together:model-id`"); Icon: `Tabs` Upload (svg/png ≤ 256 KB) · LobeHub (`LobeIconPicker`: search + virtualized grid from `GET /api/icons/lobe`) · Monogram (auto); Description (optional) |
 | 2 | API | Templates row: Together · Fireworks · LM Studio · vLLM · LiteLLM (prefill everything); API format cards: OpenAI-compatible (`openai-chat`), OpenAI Responses (`openai-responses`), Anthropic-compatible (`anthropic`), Google (`google`); Base URL (warning when `http:` and not localhost) |
-| 3 | Credentials | fields list (default: one required secret "API key"; add/edit key, label, type, required, env var, help URL); auth style `ToggleGroup` Bearer / Custom header (header name) / None; extra headers (key/value; values may use `{{credentials.apiKey}}`); values for testing (stored as secrets on create) |
+| 3 | Credentials | fields list (default: one required secret "API key"; add/edit key, label, type, required, options for `select`, "Get a key" link, default, "Advanced" flag; no env var: declarative providers cannot read environment variables); auth style `ToggleGroup` Bearer / Custom header (header name) / None; extra headers (key/value; values may use `{{credentials.apiKey}}`); values for testing (stored as secrets on create) |
 | 4 | Models | "Fetch models" (runs `POST /api/plugins/drafts/test` in list mode → table with checkboxes) or manual rows: id, name, context window, max output, capabilities (Tools, Vision, Reasoning, PDF), reasoning efforts, $ per 1M input/output; switch "Fetch the model list at runtime" (`listModels`) |
 | 5 | Review | read-only manifest JSON (CodeMirror, read-only); **Test connection** (1-token ping) → "Connected · 412 ms" or the error alert; **Create provider** → `POST /api/plugins` → toast "Provider created" → emit `created(id)` |
 
@@ -1066,7 +1068,9 @@ Uninstall uses `ConfirmDialog`: title "Uninstall {name}?", description "Its prov
 removed.", checkbox "Keep settings and stored data" (`keepData`), confirm "Uninstall".
 
 Tabs (`Tabs`, value synced to `?tab=`): **Overview** · **Configuration** (only when the plugin has a settings
-schema) · **Source** (only `kind === 'code'`) · **Logs**. A missing or hidden tab falls back to Overview.
+schema) · **Source** (not for builtins: every code plugin, read-only unless its files are editable, plus declarative
+plugins with editable files, `PluginDetail.editable` = source `created`, `copy` or `link`, whose `plugin.json` is
+edited there) · **Logs**. A missing or hidden tab falls back to Overview.
 
 ### 8.8 Overview tab (W3.1)
 
@@ -1090,15 +1094,22 @@ Rendered from the plugin's `SettingsSchema`; values from `GET /api/plugins/:id/s
 | `string` + `enum` | `Select` |
 | `string` + `format: url` | `Input type="url"` |
 | `string` + `format: multiline` | `Textarea` (autosize) |
-| `string` + `format: secret` | password `Input` + reveal toggle; shows "Stored" when set; the value is never read back |
+| `string` + `format: secret` | `SchemaSecretInput`, write-only: once stored it shows "Stored" + the masked hint (`secretHints`) with **Replace** (empty password `Input` + reveal toggle) and **Clear** (marks it for removal on save, "Undo" restores; not offered for required secrets); the value is never read back. Form value: omitted keeps, a string replaces, `''` clears |
 | `number` / `integer` | `Input type="number"` with `min`/`max` (`step=1` for integer) |
 | `boolean` | `Switch` |
 | `array` of `string` + `enum` | checkbox group |
 | `array` of `string` | tag input (Enter or comma adds, Backspace removes) |
 
-`title` → label, `description` → help text, `required` → asterisk + validation, `default` → initial value and
-"Reset to defaults". Save is disabled until dirty; success toast "Settings saved". Validation messages come from
-`settingsValuesSchema(schema)` of `@harness-forge/plugin-sdk` (the same validator the server uses).
+`title` → label, `description` → help text, `required` → asterisk + validation, `default` → initial value.
+Buttons (sticky footer): **Reset to defaults** sets every non-secret property back to its `default` (unset when it
+has none; secret fields keep their pending value), disabled when already at defaults · **Discard** (only while
+dirty) and the exposed `reset()` return to the values the form started from, without messages · **Save** is
+disabled until dirty and shows a spinner while the parent saves (`saving`, which also locks the fields). A new
+`modelValue` object from the parent (e.g. the saved settings) becomes the new starting point; the form's own
+`update:modelValue` echo does not. Success toast "Settings saved". Validation messages come from
+`settingsValuesSchema(schema, { secretsSet })` of `@harness-forge/plugin-sdk` (the same validator the server
+uses); they show once a field was left or changed, and for every field after a submit attempt (focus moves to the
+first invalid one).
 
 ### 8.10 Source tab (`PluginSourceTab`, W3.4)
 
@@ -1114,7 +1125,13 @@ Rendered from the plugin's `SettingsSchema`; values from `GET /api/plugins/:id/s
   Build diagnostics show in the lint gutter and the build panel.
 - `BuildLogPanel`: build output lines and live `plugin.log` events for this plugin (time, level, message);
   auto-scrolls unless the user scrolled up; "Clear".
-- Read-only for plugins from zip / npm / URL and builtins: banner "Installed from npm. Editing is disabled."
+- Declarative plugins with editable files (8.7) use the same tab: saving `plugin.json` reloads the plugin (the
+  server validates the manifest; writes that would make it run code need fresh auth).
+- Read-only when the files are not editable (code plugins from zip / npm / URL): banner "Installed from npm.
+  Editing is disabled." Builtins have no Source tab.
+- A save answered `409 conflict` (`details.reason: 'stale'`, the file changed on the server since it was opened)
+  opens `SourceConflictDialog`: keep editing, load the server version (drops the edits) or overwrite. Unsaved edits
+  survive tab switches (the workspace is cached per plugin); leaving the plugin with unsaved edits asks first.
 - File tree: "New file" (name input, relative path, `.js/.mjs/.ts/.json/.md`), "Rename" (writes the new path, then
   `DELETE /api/plugins/:id/files/*` on the old one) and "Delete" (`ConfirmDialog`, then `DELETE`); `plugin.json`
   and the `main` entry cannot be renamed or deleted (items disabled).
@@ -1180,8 +1197,10 @@ except dialogs and text fields, which save on blur or Enter.
 
 ### 9.3 Models (`/settings/models`)
 
-- "Default model" and "Title model" rows, each a `ModelPicker` (`variant="field"`). Title model has
-  `allowNone` with the label "Automatic (small model of the chat's provider)".
+- "Default model" and "Title model" rows, each a `SettingsModelSelect` (select-like trigger + searchable popover of
+  the visible models grouped by connected provider; the composer's `ModelPicker` is not reused here). Both have
+  `allowNone`: "Automatic (last used model)" for the default model, "Automatic (small model of the chat's
+  provider)" for the title model.
 - Search input "Filter models"; then one `Collapsible` section per connected provider: header `ProviderIcon`
   + name + count + "Updated 3h ago" (`RelativeTime`) + **Refresh** (`RotateCw`, spinner while running) +
   **Add custom model**.
@@ -1206,7 +1225,9 @@ except dialogs and text fields, which save on blur or Enter.
 Password section: status text "No password" / "Password set" / "Set by HF_PASSWORD" (read-only);
 **Set password** / **Change password** (`PasswordDialog`: current, new, confirm → `PUT /api/auth/password`, a
 fresh-auth route: when the session is not fresh, `changePassword` first calls `auth.login(current)`);
-**Log out** when a session exists. Bulk data export/import/delete is **not in v1** (ADR-020); a single chat is
+**Remove password** (ghost destructive, `password-remove`; the same dialog with the current password only →
+`newPassword: null`); **Log out** when a session exists. Set / Change / Remove are hidden when the password comes
+from `HF_PASSWORD`. Bulk data export/import/delete is **not in v1** (ADR-020); a single chat is
 exported from its chat menus (Markdown / JSON).
 
 ### 9.5 Appearance (`/settings/appearance`)
@@ -1291,6 +1312,9 @@ render markdown with vue-stream-markdown, so W2.2 does not use them and renders 
 | `CommandPalette` × | Mod+K palette; also registers global shortcuts (`useGlobalShortcuts`) | W2.4 (stub C3) |
 | `ShortcutsDialog` × | Mod+/ list of shortcuts from the registry | W2.4 (stub C3) |
 
+Internal to `ChatNav` / `CommandPalette` (`app-shell/chat-nav/`, W2.4): `ChatNavRow`, `ChatNavDeletedToast` (the
+"Chat deleted" toast with Undo), `PaletteSearchInput`.
+
 **`providers/`** (C3)
 
 | Component | Purpose |
@@ -1318,34 +1342,42 @@ render markdown with vue-stream-markdown, so W2.2 does not use them and renders 
 | `Markdown` × | markstream-vue wrapper (escape HTML, Shiki, links in new tab) | W2.2 |
 
 **`chat/`** (W2.2) — `ChatView` ×, `ChatHeader`, `ChatTranscript`, `ChatMessage`, `UserMessageBubble`,
-`MessageEditor`, `MessageActions`, `MessageMeta`, `ChatGreeting`, `NoProviderCallout`, `SubmittedPlaceholder`.
+`MessageEditor`, `MessageActions`, `MessageMeta`, `ChatGreeting`, `NoProviderCallout`, `ChatNotFound`,
+`SubmittedPlaceholder`.
 
-**`chat/parts/`** (W2.2) — `TextPart`, `ReasoningPart`, `ToolPart`, `ToolApprovalCard`, `FilePart`,
-`SourcesPart`, `ErrorPart`, `CommandBadge`.
+**`chat/parts/`** (W2.2) — `TextPart`, `ReasoningPart`, `ToolPart`, `ToolValueBlock` (one Input / Output block of a
+tool row), `ToolApprovalCard`, `FilePart`, `SourcesPart`, `NoticePart` (`data-notice` line, API.md 6.4),
+`ErrorPart`, `CommandBadge`; `parts/markdown/` — `MarkdownCodeBlock`, `MarkdownImage` (renderers used by `Markdown`).
 
-**`chat/composer/`** (W2.3) — `ChatComposer` ×, `ComposerAttachments`, `ComposerAddMenu`, `ModelPicker` ×,
-`EffortMenu`, `PermissionMenu`, `SlashMenu`, `ContextRing`, `SendStopButton`, `DropOverlay`.
+**`chat/composer/`** (W2.3) — `ChatComposer` ×, `ComposerAttachments`, `ComposerAddMenu`, `ModelPicker` ×
+(+ `ModelPickerTrigger`, `ModelPickerList`), `EffortMenu`, `PermissionMenu`, `SlashMenu`, `ContextRing`,
+`SendStopButton`, `DropOverlay`.
 
-**`plugins/list/`** (W3.1) — `PluginCard`, `PluginGrid`, `PluginFilterSelect`, `PluginSourceBadge`,
-`PluginStateBadge`.
+**`plugins/list/`** (W3.1) — `PluginListView` (content of `/plugins`), `PluginCard`, `PluginGrid`,
+`PluginFilterSelect`, `PluginNewMenu`, `PluginIcon`, `PluginSourceBadge`, `PluginStateBadge`, `PluginRunsCodeBadge`.
 
-**`plugins/detail/`** (W3.1) — `PluginHeader`, `PluginOverviewTab`, `PluginContributions`, `PluginToolsTable`,
-`PluginConfigurationTab`, `PluginLogsTab`.
+**`plugins/detail/`** (W3.1) — `PluginDetailView` (content of `/plugins/[id]`), `PluginHeader`,
+`PluginStatusBanner`, `PluginOverviewTab`, `PluginDetailSection`, `PluginContributions`, `PluginToolsTable`,
+`PluginMcpServerList`, `PluginConfigurationTab`, `PluginLogsTab`.
 
-**`plugins/forms/`** (W3.1) — `SchemaForm` ×, `SchemaField`.
+**`plugins/forms/`** (W3.1) — `SchemaForm` ×, `SchemaField`, `SchemaSecretInput`, `SchemaTagInput`.
 
-**`plugins/install/`** (W3.2) — `InstallDialog` ×, `InspectPreview`, `TrustWarning` ×, `TrustDialog` ×.
+**`plugins/install/`** (W3.2) — `InstallDialog` ×, `InspectPreview`, `TrustWarning` ×, `TrustConsent` (the
+"I trust {source}" checkbox + password field of both dialogs), `TrustDialog` ×.
 
 **`plugins/wizard/`** (W3.3) — `ProviderWizard`, `WizardBasicsStep`, `WizardApiStep`, `WizardCredentialsStep`,
-`WizardModelsStep`, `WizardReviewStep`, `LobeIconPicker`, `provider-templates.ts`.
+`WizardModelsStep`, `WizardReviewStep`, `WizardManifestView`, `WizardErrorAlert`, `LobeIconPicker`,
+`provider-templates.ts`.
 
 **`plugins/code/`** (W3.4) — `CodePluginForm` ×, `PluginSourceTab` ×, `SourceFileTree`, `SourceEditorTabs`,
-`SourceEditor`, `BuildLogPanel`.
+`SourceEditor`, `SourceFileDialog` (new file / rename), `SourceConflictDialog` (stale save), `BuildLogPanel`.
 
-**`plugins/mcp/`** (W3.5) — `McpServersPanel` ×, `McpServerDialog`, `McpTransportBadge`.
+**`plugins/mcp/`** (W3.5) — `McpServersPanel` ×, `McpServerDialog`, `McpSecretRows`, `McpTransportBadge`.
 
-**`settings/`** (W2.5) — `SettingsSection`, `ProviderList`, `ProviderRow`, `ProviderKeyDialog` ×,
-`InsecureBanner`, `ModelsTable`, `CustomModelDialog`, `PasswordDialog`, `ThemeCard`, `AboutPanel`, `LoginForm`.
+**`settings/`** (W2.5) — `SettingsPage` (frame of every settings page), `SettingsSection`, `SettingsLoadError`,
+`ProviderList`, `ProviderRow`, `ProviderKeyDialog` ×, `CredentialFieldInput`, `InsecureBanner`, `ModelsSettings`,
+`ProviderModelsSection`, `ModelsTable`, `SettingsModelSelect`, `CustomModelDialog`, `GeneralSettings`,
+`PasswordSection`, `PasswordDialog`, `AppearanceSettings`, `ThemeCard`, `ThemePreview`, `AboutPanel`, `LoginForm`.
 
 W4.2 (UX polish) may edit every file above in Phase 4.
 
@@ -1467,13 +1499,22 @@ defineProps<{ content: string; final?: boolean }>()   // final default true; fal
 // ChatView (W2.2) — transcript + composer for one chat
 defineProps<{ chatId: string; isNew?: boolean }>()   // isNew: '/' page, no fetch; first send → router.replace('/chat/<id>')
 defineEmits<{ created: [chatId: string] }>()          // after the first send of a new chat
+defineSlots<{
+  header?: (p: { scrolled: boolean; title: string | null; loading: boolean }) => any  // above the transcript (ChatHeader);
+                                                      // scrolled = the transcript left its top; not rendered on 404
+  empty?: () => any                                   // above the inline composer of an empty new chat (greeting, callout)
+}>()
 
-// ChatMessage (W2.2)
+// ChatMessage (W2.2) — rendered by ChatTranscript
 defineProps<{
   message: HarnessUIMessage       // UI message with harness metadata (API.md, @harness-forge/shared)
   isLast: boolean
   streaming: boolean              // this message is being streamed
   showThinking: boolean
+  busy?: boolean                  // default false; a request is in flight in this chat: no Edit / Regenerate
+  error?: unknown                 // live error of the last request (shown on the last assistant message;
+                                  // stored errors come from metadata.error)
+  commandReply?: boolean          // default false; the previous user message ran a `reply` command: meta reads "Command reply"
 }>()
 defineEmits<{
   regenerate: []
@@ -1481,6 +1522,8 @@ defineEmits<{
   approval: [response: { id: string; approved: boolean; toolName: string; alwaysAllow: boolean }]
   retry: []
 }>()
+defineExpose<{ startEdit(): void }>()   // opens MessageEditor on a user message unless busy
+                                        // (ChatTranscript calls it for ↑ in an empty composer, via ChatView 'edit-last')
 
 // ChatComposer (W2.3) — used by ChatView (W2.2): the key cross-owner contract
 type ChatStatus = 'ready' | 'submitted' | 'streaming' | 'error'   // useChat status
@@ -1505,7 +1548,7 @@ defineEmits<{
 }>()
 defineExpose<{ focus(): void; setText(text: string): void; openModelPicker(): void }>()
 
-// ModelPicker (W2.3) — also used by settings/models (W2.5)
+// ModelPicker (W2.3) — used by the composer; settings/models uses its own SettingsModelSelect (W2.5)
 defineProps<{
   modelValue: string | null       // v-model (model ref)
   open?: boolean                  // v-model:open (Alt+M, /model)
@@ -1513,29 +1556,35 @@ defineProps<{
   allowNone?: boolean             // adds a first item that emits null
   noneLabel?: string              // default 'None'
   disabled?: boolean
+  returnFocusTo?: HTMLElement | null   // receives focus on close (the composer textarea); default the trigger
 }>()
 defineEmits<{ 'update:modelValue': [value: string | null]; 'update:open': [value: boolean] }>()
 
 // EffortMenu (W2.3)
-defineProps<{ modelValue: ReasoningEffort; modelRef: string | null; open?: boolean }>()
+defineProps<{ modelValue: ReasoningEffort; modelRef: string | null; open?: boolean; returnFocusTo?: HTMLElement | null }>()
 defineEmits<{ 'update:modelValue': [value: ReasoningEffort]; 'update:open': [value: boolean] }>()
 
 // PermissionMenu (W2.3)
-defineProps<{ modelValue: ToolMode; open?: boolean }>()
+defineProps<{ modelValue: ToolMode; open?: boolean; returnFocusTo?: HTMLElement | null }>()
 defineEmits<{ 'update:modelValue': [value: ToolMode]; 'update:open': [value: boolean] }>()
 
 // SlashMenu (W2.3, internal to the composer)
 interface SlashItem { name: string; description: string; kind: 'client' | 'server'; source?: string }
 defineProps<{ open: boolean; query: string; items: SlashItem[] }>()
 defineEmits<{ select: [item: SlashItem]; close: [] }>()
+defineExpose<{ handleKeydown(e: KeyboardEvent): boolean; activeId: string | undefined; listId: string }>()
+// the textarea keeps focus and forwards its keydowns (true = consumed: ↑/↓/Enter/Tab/Esc while the menu shows);
+// activeId / listId feed the textarea's aria-activedescendant / aria-controls
 ```
 
 #### Plugins (W3.1–W3.5)
 
 ```ts
-// PluginCard (W3.1)
+// PluginCard (W3.1) — rendered by PluginGrid, which re-emits with the plugin (viewLogs / review / update:enabled)
 defineProps<{ plugin: PluginSummary }>()
 defineEmits<{ 'update:enabled': [value: boolean]; 'view-logs': []; review: [] }>()
+// view-logs: "View logs" link of an `error` card (the list opens /plugins/<id>?tab=logs);
+// review: "Review" button of an `untrusted` card (the list opens TrustDialog)
 
 // InstallDialog (W3.2) — mounted once by pages/plugins.vue (W3.1)
 defineProps<{ open: boolean; initialSource?: 'zip' | 'npm' | 'url' | 'folder' }>()  // default 'zip'
@@ -1553,15 +1602,21 @@ defineEmits<{ 'update:open': [value: boolean]; trusted: [id: string] }>()
 // SchemaForm (W3.1)
 defineProps<{
   schema: SettingsSchema
-  modelValue: Record<string, unknown>   // v-model values
-  secretsSet?: string[]                 // keys of secret fields that already have a stored value
+  modelValue: Record<string, unknown>   // v-model values; a new object from the parent = a new starting point
+  secretsSet?: string[]                 // default []; keys of secret fields that already have a stored value
+  secretHints?: Record<string, string | null>  // default {}; masked hints of stored secrets ("sk-…9fQ2")
   disabled?: boolean
+  saving?: boolean                      // default false; the parent is saving: Save shows a spinner, fields lock
 }>()
 defineEmits<{ 'update:modelValue': [value: Record<string, unknown>]; submit: [value: Record<string, unknown>] }>()
-defineExpose<{ validate(): Promise<boolean>; reset(): void }>()
+defineExpose<{
+  validate(): Promise<boolean>          // runs the validator, shows every message, focuses the first invalid field
+  reset(): void                         // back to the starting point (not to the schema defaults), no messages
+}>()
+// Secret values: omitted = keep the stored secret, a string replaces it, '' clears it (8.9).
 
-// PluginSourceTab (W3.4) — rendered by pages/plugins/[id].vue (W3.1)
-defineProps<{ pluginId: string; readonly?: boolean }>()
+// PluginSourceTab (W3.4) — rendered by PluginDetailView (pages/plugins/[id].vue, W3.1) for the Source tab (8.7)
+defineProps<{ pluginId: string; readonly?: boolean }>()   // read-only also when PluginDetail.editable is false
 
 // CodePluginForm (W3.4) — rendered by pages/plugins/new.vue (W3.3)
 defineEmits<{ created: [id: string]; cancel: [] }>()
@@ -1588,7 +1643,8 @@ defineEmits<{ 'update:open': [value: boolean]; saved: [providerId: string] }>()
 
 C5 implements every store over the typed client (`useApi()` → `useNuxtApp().$api`, created with
 `createApiClient()` from `@harness-forge/shared`). Store signatures (state keys, getter and action names) are
-frozen after Phase 0. Actions throw `HarnessError`; callers show toasts. Setup-style stores, `use<Name>Store`.
+frozen after Phase 0; `+` marks additive members added since. Actions throw `HarnessError`; callers show toasts.
+Setup-style stores, `use<Name>Store`.
 DTO names are exactly those of `docs/API.md` section 4 (`AuthStatus`, `Settings`, `ProviderSummary`,
 `CatalogModel`, `ChatSummary`, `ChatDetail`, `HarnessUIMessage`, `MessageUsage`, `PluginSummary`,
 `PluginDetail`, `PluginLogEntry`, `ToolSummary`, `McpServer`, `CommandSummary`, `ServerEvent`, ...).
@@ -1598,7 +1654,8 @@ DTO names are exactly those of `docs/API.md` section 4 (`AuthStatus`, `Settings`
 state:   { status: AuthStatus | null; loaded: boolean }
 getters: requiresLogin, authenticated, passwordFromEnv,
          fresh (no password, or AuthStatus.freshUntil in the future: fresh-auth routes pass without a prompt)
-actions: fetchStatus(), login(password) /* also refreshes freshUntil */, logout(), changePassword({ current, next })
+actions: fetchStatus(), login(password) /* also refreshes freshUntil */, logout(), changePassword({ current, next }),
+         markUnauthenticated() /* + : the $api plugin calls it on a 401 before redirecting to /login */
 
 // stores/settings.ts — useSettingsStore
 state:   { settings: Settings | null; loaded: boolean; saving: boolean }
@@ -1620,22 +1677,29 @@ actions: fetchAll(), refresh(providerId), setPref(ref, { favorite?, hidden?, ali
 
 // stores/chats.ts — useChatsStore
 state:   { items: ChatSummary[]; cursor: string | null; hasMore: boolean; loading: boolean
+           loaded: boolean /* + : the first page arrived */
            runState: Record<string, 'running' | 'approval'>; unread: Record<string, true> }
 getters: byId(id), groups (Array<{ label: string; chats: ChatSummary[] }>), statusOf(id): 'running' | 'approval' | 'unread' | null
-actions: fetchPage({ reset? }), search(q) /* returns results, list untouched */, get(id) /* ChatDetail */,
-         create(input), rename(id, title), update(id, patch), remove(id, { undoMs = 5000 }) /* → { undo() } */,
+actions: fetchPage({ reset? }) /* pages of 50 */, search(q, { limit?, signal? }) /* returns results, list untouched */,
+         get(id) /* ChatDetail */, create(input), rename(id, title), update(id, patch),
+         remove(id, { undoMs = 5000 }) /* → { undo(), done } */,
          exportChat(id, format: 'md' | 'json'), setRunState(id, state | null), markRead(id), applyEvent(event)
-// remove(): hides the row now, calls DELETE when the undo window ends; flushes pending deletes on pagehide
-// (fetch keepalive). unread persists in localStorage['hf-unread'].
+// remove(): hides the row now, calls DELETE when the undo window ends; `done` (+) settles with
+// { status: 'deleted' | 'undone' | 'failed', error? } and never rejects (a failed delete restores the row).
+// Pending deletes are flushed on pagehide (fetch keepalive). unread persists in localStorage['hf-unread'].
 
 // stores/plugins.ts — usePluginsStore
 state:   { items: PluginSummary[]; details: Record<string, PluginDetail>; logs: Record<string, PluginLogEntry[]>
-           tools: ToolSummary[]; mcp: McpServer[]; commands: CommandSummary[]; loaded: boolean }
+           tools: ToolSummary[]; mcp: McpServer[]; commands: CommandSummary[]; loaded: boolean
+           toolsLoaded: boolean; mcpLoaded: boolean; commandsLoaded: boolean /* + : that list was fetched */ }
 getters: byId(id), counts ({ all, providers, tools, mcp, commands, disabled }), filtered(filter, q), hasTools
 // filter = the /plugins?filter= value: 'all' | 'providers' | 'tools' | 'mcp' | 'commands' | 'disabled'
-actions: fetchAll(), fetchOne(id), enable(id), disable(id), reload(id), uninstall(id, { keepData }), trust(id),
-         fetchSettings(id), saveSettings(id, values), fetchLogs(id), fetchTools(), setToolPref(name, patch),
-         fetchMcp(), saveMcp(input), removeMcp(id), reconnectMcp(id), fetchCommands(), applyEvent(event)
+actions: fetchAll(), fetchOne(id), enable(id), disable(id), reload(id), uninstall(id, { keepData }),
+         trust(id, sha256?) /* default: the detail's trust.hash */, fetchSettings(id), saveSettings(id, values),
+         fetchLogs(id), fetchTools(), setToolPref(name, patch), fetchMcp(),
+         saveMcp(input: McpServerInput | { id, patch }) /* create or update */, removeMcp(id), reconnectMcp(id),
+         fetchCommands(), applyEvent(event),
+         refreshLoaded() /* + : refetches every loaded list, detail and log after an event-stream reconnect */
 // One-shot calls stay in components via useApi(): inspect/install, drafts test/create/manifest, scaffold,
 // files read/write, build, export.
 
@@ -1649,12 +1713,19 @@ actions: openPalette(), closePalette(), togglePalette(), openShortcuts(), openIn
          applyAppearance({ density, textSize, readingFont })
 ```
 
-Server events (`plugins/events.client.ts`, C5): one `EventSource('/api/events')` with backoff reconnect;
-`chat.*` and `run.*` → `chats.applyEvent`; `provider.changed` → `providers.applyEvent` + `models.fetchAll()`;
-`catalog.changed` → `models.applyEvent`; `plugin.changed` → `plugins.applyEvent` (+ providers, models,
-commands refetch); `plugin.log` → `plugins.applyEvent`. On reconnect every loaded store refetches.
-`run.finished` for a chat that is not `ui.activeChatId` marks it unread; `awaitingApproval: true` sets its run
-state to `approval`.
+Server events (`plugins/events.client.ts` + `composables/useServerEvents.ts`, C5): one
+`EventSource('/api/events')` while the user has access (auth loaded, no login required), with backoff reconnect;
+`chat.*` and `run.*` → `chats.applyEvent`; `provider.changed` → `providers.applyEvent` + `models.applyEvent`;
+`catalog.changed` → `models.applyEvent`; `plugin.changed` → `plugins.applyEvent` + `providers.applyEvent` +
+`models.applyEvent`; `plugin.log` → `plugins.applyEvent`. The stores patch rows from event payloads and refetch
+only lists they already loaded (bursts coalesced into one request, `utils/coalesce.ts`): models on
+`catalog.changed` / `provider.changed` / `plugin.changed`; providers, tools, MCP servers, commands and that
+plugin's opened detail on `plugin.changed`. `chat.deleted` of the open chat navigates to `/`. On reconnect
+(missed events are not replayed) `refetchLoadedStores()` refetches the auth status, settings,
+`plugins.refreshLoaded()` and the loaded providers / models / first chat page. `run.finished` for a chat that is
+not `ui.activeChatId` marks it unread; `awaitingApproval: true` sets its run state to `approval`. Components
+subscribe to single events with `useServerEvents().on(type | '*', handler)` (runs after the stores applied the
+event; unsubscribes with the scope).
 
 ### 11.1 `useChatSession(id)` (W2.2)
 
@@ -1663,23 +1734,36 @@ interface ChatSession {
   id: string
   chat: UseChatHelpers<HarnessUIMessage>  // messages, status, error, sendMessage, regenerate, stop,
                                           // addToolApprovalResponse, resumeStream — verify in @ai-sdk/vue types
-  modelRef: Ref<string | null>
-  reasoningEffort: Ref<ReasoningEffort>
-  toolMode: Ref<ToolMode>
-  loaded: Ref<boolean>
-  notFound: Ref<boolean>
+  modelRef: WritableComputedRef<string | null>        // composer state sent with every request; writing records
+  reasoningEffort: WritableComputedRef<ReasoningEffort> // the choice (and saves it on the chat)
+  toolMode: WritableComputedRef<ToolMode>
+  loaded: Ref<boolean>                    // history arrived (always true for a new chat)
+  notFound: Ref<boolean>                  // GET /api/chats/:id answered 404
+  loadError: Ref<HarnessError | null>     // + any other load failure
+  summary: Ref<ChatSummary | null>        // + the chat as the server last described it; null for a new chat
+  persisted: Ref<boolean>                 // + the server knows the chat (loaded, or a request reached the model)
   runState: ComputedRef<'idle' | 'submitted' | 'streaming' | 'approval' | 'error'>
+  busy: ComputedRef<boolean>              // + a request is in flight (submitted or streaming)
   send(input: { text: string; files: FileRef[] }): Promise<void>
   edit(messageId: string, text: string): Promise<void>
   regenerate(messageId?: string): Promise<void>
   approve(r: { id: string; approved: boolean; toolName: string; alwaysAllow: boolean }): Promise<void>
-  stop(): Promise<void>                   // client abort + POST /api/chat/:id/stop
+  stop(): Promise<void>                   // POST /api/chat/:id/stop, then the client abort (an abort alone only disconnects)
+  load(): Promise<void>                   // + GET /api/chats/:id, then resumeIfRunning()
+  refresh(): Promise<void>                // + reloads the history unless a request is in flight
+  resumeIfRunning(): Promise<void>        // + chat.resumeStream() when the server or the chats store reports a run
 }
 function useChatSession(id: string, opts?: { isNew?: boolean }): ChatSession
-function useChatSessionRegistry(): { get(id: string): ChatSession | undefined; ids: Readonly<Ref<string[]>> }
+function useChatSessionRegistry(): { get(id: string): ChatSession | undefined; ids: Readonly<Ref<readonly string[]>> }
+// + forgetChatSession(id) (a deleted chat: stops its stream, drops the session),
+//   useDraftChatId() / releaseDraftChatId(id) (the `/` page's chat id, kept until the first send)
 ```
 
+`+` = added after the Phase 0 freeze (additive).
+
 - Sessions live in a registry inside a detached `effectScope(true)`, so route changes never stop a stream.
+  `useChatSession()` loads the history unless `isNew` (otherwise it calls `resumeIfRunning()`); called from a
+  component setup, it holds the session until that component unmounts.
 - `useChat({ id, messages, generateId: createMessageId, transport: new DefaultChatTransport({ api: '/api/chat',
   prepareSendMessagesRequest }), sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses })`
   (API.md 6.1); the body sends only the last message plus `{ chatId, trigger, messageId?, modelRef,
@@ -1688,7 +1772,9 @@ function useChatSessionRegistry(): { get(id: string): ChatSession | undefined; i
 - `@ai-sdk/vue` 4 has no `resume` option: on mount, when the chat has an active run (`ChatSummary.running`, or the
   chats store saw `run.started`), the session calls `chat.resumeStream()` (`GET /api/chat/:id/stream`, 204 when
   idle).
-- Keeps the 8 most recently used sessions; never evicts one that is `submitted`, `streaming` or `approval`.
+- Keeps the 8 most recently used sessions; never evicts one that is `submitted`, `streaming` or `approval`, or
+  held by a mounted component. `useChat` also gets `messageMetadataSchema` and `dataPartSchemas:
+  harnessDataSchemas` from `@harness-forge/shared`.
 - Pushes run state into `chats.setRunState()` so sidebar dots read one source.
 
 ### 11.2 `useShortcuts()` (C5)
@@ -1700,22 +1786,27 @@ interface ShortcutDef {
   description: string           // shown in ShortcutsDialog
   group: 'General' | 'Chat' | 'Composer' | 'Editor'
   handler?: (e: KeyboardEvent) => void   // omitted = display-only (Mod+B is handled by SidebarProvider)
-  when?: () => boolean
+  when?: () => boolean          // evaluated per key press
   allowInInputs?: boolean       // default false; mod-combos usually true
-  alt?: boolean                 // Alt shortcut: inactive when settings altShortcuts === false
+  allowInEditor?: boolean       // + default false; also fire inside CodeMirror (only Mod+K and Mod+S use it)
+  alt?: boolean                 // Alt shortcut (default: the keys contain alt): inactive when altShortcuts === false
 }
-function useShortcuts(): {
+function useShortcuts(): {      // one app-wide registry (createShortcutRegistry)
   register(defs: ShortcutDef | ShortcutDef[]): () => void   // unregisters automatically on scope dispose
-  list(): ShortcutDef[]
+  list(): ShortcutDef[]                                     // one per id (the latest), grouped General, Chat, Composer, Editor
   format(keys: string): string[]                            // ['⌘', '⇧', 'O'] or ['Ctrl', 'Shift', 'O']
   isMac: boolean
+  handleKeydown(e: KeyboardEvent): void                     // + the window listener (plugins/shortcuts.client.ts)
+  setAltEnabled(fn: () => boolean): void                    // + connects the altShortcuts setting
 }
 ```
 
 One `keydown` listener on `window` (installed by `plugins/shortcuts.client.ts`, C5). `mod` = Meta on macOS,
-Ctrl elsewhere. Later registrations win for the same keys. Ignored while an IME composition is active.
-Other composables: `useApi()` (C5), `useGlobalShortcuts()` (W2.4), `useComposerAttachments()` and
-`useComposerDraft(chatId)` (W2.3).
+Ctrl elsewhere. Later registrations win for the same keys. A matching shortcut calls `preventDefault()` (also on
+auto-repeat, where the handler does not run again). Ignored while an IME composition is active.
+Other composables: `useApi()` / `useApiFetch()` (C5), `useServerEvents()` (C5, 11), `useChatSession()` (W2.2,
+11.1), `useGlobalShortcuts()` (W2.4), `useComposerAttachments()`, `useComposerDraft(chatId)`,
+`useComposerModel(modelRef)`, `useComposerShortcuts()` and `useComposerDropZone()` (W2.3).
 
 ---
 
@@ -1725,14 +1816,14 @@ Other composables: `useApi()` (C5), `useGlobalShortcuts()` (W2.4), `useComposerA
 
 | Keys | Action | Scope | Registered by |
 |---|---|---|---|
-| Mod+K | open command palette / search chats | global, also in inputs | W2.4 `useGlobalShortcuts` |
+| Mod+K | toggle the command palette (search chats and commands) | global, also in inputs and CodeMirror | W2.4 `useGlobalShortcuts` |
 | Mod+Shift+O | new chat (go to `/`, focus composer) | global, also in inputs | W2.4 |
 | Mod+B | toggle sidebar | global | handled by shadcn `SidebarProvider`; W2.4 registers a display-only entry |
-| Mod+/ | show keyboard shortcuts | global, also in inputs | W2.4 |
-| Shift+Esc | focus the composer | chat pages | W2.4 (→ `ui.requestComposerFocus()`) |
-| Alt+M | open model picker | chat pages | W2.3 (`code:KeyM`, `alt: true`) |
-| Alt+R | open effort menu (reasoning models) | chat pages | W2.3 (`code:KeyR`, `alt: true`) |
-| Alt+P | open permission menu (when tools exist) | chat pages | W2.3 (`code:KeyP`, `alt: true`) |
+| Mod+/ | toggle the keyboard shortcuts dialog | global, also in inputs | W2.4 |
+| Shift+Esc | focus the composer | chat pages, no overlay open | W2.4 (→ `ui.requestComposerFocus()`) |
+| Alt+M | open model picker | chat pages, also in inputs | W2.3 (`alt+code:KeyM`, `alt: true`) |
+| Alt+R | open effort menu (reasoning models) | chat pages, also in inputs | W2.3 (`alt+code:KeyR`, `alt: true`) |
+| Alt+P | open permission menu (when tools exist) | chat pages, also in inputs | W2.3 (`alt+code:KeyP`, `alt: true`) |
 | Enter | send (`sendKey = enter`) | composer | W2.3 |
 | Mod+Enter | send (`sendKey = mod-enter`) | composer | W2.3 |
 | Shift+Enter | new line | composer | W2.3 |
@@ -1764,14 +1855,15 @@ export const testIds = {
   modeTabChat: 'mode-tab-chat',
   // … one entry per id below; key = camelCase of the id
 } as const
-export type TestId = (typeof testIds)[keyof typeof testIds]
+export type TestIdKey = keyof typeof testIds
+export type TestId = (typeof testIds)[TestIdKey]
 ```
 
 Usage: `<Button :data-testid="testIds.newChat">`. Ids are kebab-case and static; the identity of repeated
 elements goes into data attributes (`data-chat-id`, `data-message-id`, `data-model-ref`, `data-provider-id`,
 `data-plugin-id`, `data-tool-name`, `data-server-id`, `data-state`, `data-status`, `data-value`, `data-step`,
-`data-path`, `data-kind`, `data-action`). Playwright uses `getByTestId()` plus attribute filters. Ids are never
-reused for a different element; removing one is a CCR.
+`data-step-item`, `data-path`, `data-kind`, `data-action`). Playwright uses `getByTestId()` plus attribute
+filters. Ids are never reused for a different element; removing one is a CCR.
 
 ### 13.1 Shell and navigation
 
@@ -1797,6 +1889,7 @@ reused for a different element; removing one is a CCR.
 | `command-palette` · `command-palette-input` · `command-palette-item` | palette dialog, input, items | item: `data-value` |
 | `shortcuts-dialog` | shortcuts dialog | |
 | `page-header` | `PageHeader` root | |
+| `error-page` · `error-back` | error page (`app/error.vue`) root and its "Back to chats" button | page: `data-status` (HTTP status, e.g. 404) |
 
 ### 13.2 Chat
 
@@ -1864,7 +1957,7 @@ reused for a different element; removing one is a CCR.
 | `model-row` · `model-favorite` · `model-visible` · `model-remove` | table row and its controls | `data-model-ref` |
 | `custom-model-dialog` · `custom-model-id` · `custom-model-save` | custom model dialog | |
 | `settings-display-name` · `settings-send-key` · `settings-default-mode` · `settings-default-effort` · `settings-max-steps` · `settings-alt-shortcuts` · `settings-instructions` | general fields | |
-| `password-set` · `password-dialog` · `password-current` · `password-new` · `password-confirm` · `password-save` · `logout` | password section | |
+| `password-set` · `password-remove` · `password-dialog` · `password-current` · `password-new` · `password-confirm` · `password-save` · `logout` | password section (`password-set` = Set password / Change password; `password-remove` = Remove password) | remove: `data-action="remove-password"` |
 | `appearance-theme-card` | theme card | `data-value` (dark / light / system) |
 | `appearance-reading-font` · `appearance-text-size` · `appearance-density` · `appearance-show-thinking` | appearance controls | |
 | `about-copy-diagnostics` | copy diagnostics button | |
@@ -1900,7 +1993,7 @@ reused for a different element; removing one is a CCR.
 | `mcp-server-row` · `mcp-status` · `mcp-enabled` · `mcp-restart` · `mcp-edit` · `mcp-delete` | server row controls | `data-server-id`, status: `data-status` |
 | `mcp-dialog` · `mcp-transport-tab` · `mcp-save` | add/edit dialog | tab: `data-value` |
 | `wizard` | provider wizard root | `data-step` |
-| `wizard-step-basics` · `wizard-step-api` · `wizard-step-credentials` · `wizard-step-models` · `wizard-step-review` | step panels (and stepper items) | |
+| `wizard-step-basics` · `wizard-step-api` · `wizard-step-credentials` · `wizard-step-models` · `wizard-step-review` | the body of the current step panel only (stepper items have no test id) | stepper items: `data-step-item` (basics / api / credentials / models / review) |
 | `wizard-name` · `wizard-id` · `wizard-icon-tab` · `wizard-icon-search` · `wizard-icon-option` | basics fields | icon: `data-value` (slug) |
 | `wizard-template` · `wizard-api-format` · `wizard-base-url` | API step | `data-value` |
 | `wizard-credential-row` · `wizard-auth-style` · `wizard-header-row` · `wizard-credential-value` | credentials step | |

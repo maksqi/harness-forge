@@ -128,7 +128,7 @@ function messages(meta: { errors: ReadonlyArray<unknown>, isBlurred: boolean }, 
 
 <template>
   <Dialog :open="open" @update:open="onOpenChange">
-    <DialogContent :data-testid="testIds.passwordDialog" :data-mode="mode" class="sm:max-w-sm">
+    <DialogContent :data-testid="testIds.passwordDialog" :data-mode="mode" class="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-sm">
       <form class="grid gap-5" novalidate @submit.prevent.stop="form.handleSubmit()">
         <DialogHeader>
           <DialogTitle>{{ copy.title }}</DialogTitle>

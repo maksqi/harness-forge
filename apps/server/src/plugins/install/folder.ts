@@ -5,12 +5,38 @@
 // directory nor contains it (a folder holding `data/` would expose the database and the master key through the
 // plugin files API). A copy is "treated like a zip": the same name rules and limits apply, `node_modules` and `.git`
 // folders are skipped, symbolic links and special files are refused, and files are opened without following links.
+// A linked folder is trusted by its path (content changes reload without another review), so on POSIX it must not be
+// writable by every user of the machine, and no folder above it may let every user replace it (world-writable without
+// the sticky bit): otherwise any local account could change the code the server runs.
 import type { ArchiveEntry, EntryCollector } from './archive.ts'
 import { constants } from 'node:fs'
 import { lstat, open, readdir, realpath, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import process from 'node:process'
 import { isInside } from '../loader.ts'
 import { invalid, quoteName } from './errors.ts'
+
+const WORLD_WRITABLE = 0o002
+const STICKY = 0o1000
+
+/**
+ * Refuses a folder to link when any local user could change its files: the folder world-writable, or a folder above
+ * it world-writable without the sticky bit (anyone could rename it and put another one in its place). POSIX only.
+ */
+export async function checkLinkableFolder(real: string): Promise<void> {
+  if (process.platform === 'win32')
+    return
+  const own = await stat(real)
+  if ((own.mode & WORLD_WRITABLE) !== 0)
+    throw invalid(`Every user of this machine can write to ${quoteName(real)}, so anyone could change the code harness-forge runs from it. Run "chmod o-w" on it, or install a copy instead.`, ['path'])
+  for (let dir = dirname(real); ; dir = dirname(dir)) {
+    const info = await stat(dir)
+    if ((info.mode & WORLD_WRITABLE) !== 0 && (info.mode & STICKY) === 0)
+      throw invalid(`Every user of this machine can replace ${quoteName(real)} (its parent folder ${quoteName(dir)} is world-writable). Move the plugin elsewhere, or install a copy instead.`, ['path'])
+    if (dirname(dir) === dir)
+      break
+  }
+}
 
 /** Folders never copied (they are also left out of exports). */
 export const SKIPPED_FOLDERS: ReadonlySet<string> = new Set(['node_modules', '.git'])

@@ -1,0 +1,12 @@
+{
+  "manifestVersion": 1,
+  "id": "echo-provider",
+  "name": "Echo provider",
+  "version": "1.0.0",
+  "description": "A keyless provider whose models repeat your message: a hand-written AI SDK language model in TypeScript.",
+  "author": "harness-forge examples",
+  "icon": "icon.svg",
+  "engines": { "harness": "^1.0.0" },
+  "main": "index.ts",
+  "permissions": []
+}

@@ -150,6 +150,8 @@ function versionWarning(existing: ExistingPlugin, next: string): string {
 export interface InspectionInput {
   directory: PluginDirectoryInspection
   source: InstallSourceKind
+  /** Resolved source shown in "I trust <source>": npm `name@version`, the URL, the folder realpath, the zip name. */
+  sourceRef?: string
   existing: ExistingPlugin | null
   /** Notes of the source (npm deprecation, install scripts). */
   notes?: string[]
@@ -186,6 +188,7 @@ export function buildInspection(input: InspectionInput): PluginInspection {
     manifest,
     kind: directory.kind,
     source,
+    ...(input.sourceRef === undefined || input.sourceRef === '' ? {} : { sourceRef: input.sourceRef }),
     sha256: directory.sha256,
     contributions: directory.contributions,
     networkHosts: report.hosts,

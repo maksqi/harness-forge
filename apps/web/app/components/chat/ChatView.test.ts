@@ -192,6 +192,35 @@ describe('chatView: existing chat', () => {
     expect(input.element.value).toBe('First question')
   })
 
+  it('shows a skeleton only for a slow history, and Retry after a failed load', async () => {
+    let answer!: (value: unknown) => void
+    api.chats.get.mockReset()
+    api.chats.get.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = resolve
+    }))
+    const { wrapper } = mountView({ chatId: chatId(2) })
+    await flushPromises()
+    // Fast loads never flash a skeleton.
+    expect(wrapper.find(`[data-testid="${testIds.transcriptSkeleton}"]`).exists()).toBe(false)
+    await until(() => wrapper.find(`[data-testid="${testIds.transcriptSkeleton}"]`).exists())
+    answer(chatDetail({ id: chatId(2), messages: [{ id: 'msg_user000000000001', role: 'user', parts: [{ type: 'text', text: 'Hi' }] }] }))
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    expect(wrapper.find(`[data-testid="${testIds.transcriptSkeleton}"]`).exists()).toBe(false)
+    wrapper.unmount()
+
+    resetChatSessions()
+    api.chats.get.mockRejectedValueOnce(new Error('offline'))
+    const failed = mountView({ chatId: chatId(3) })
+    await until(() => failed.wrapper.text().includes('Could not load this chat'))
+    await new Promise(resolve => setTimeout(resolve, 350))
+    expect(failed.wrapper.find(`[data-testid="${testIds.transcriptSkeleton}"]`).exists()).toBe(false)
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(3), messages: [{ id: 'msg_user000000000002', role: 'user', parts: [{ type: 'text', text: 'Back' }] }] }))
+    const retry = failed.wrapper.findAll('button').find(button => button.text() === 'Retry')!
+    await retry.trigger('click')
+    await until(() => failed.wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    expect(failed.wrapper.text()).not.toContain('Could not load this chat')
+  })
+
   it('takes a message back when a reply is already running (409)', async () => {
     const { wrapper } = mountView({ chatId: chatId(2) })
     await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)

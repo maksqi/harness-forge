@@ -4,7 +4,7 @@
 // text fields save on blur or Enter (Mod+Enter in the instructions), Esc restores the saved value. Bulk data
 // export/import is not part of v1 (ADR-020): chats are exported one at a time from their menus.
 import type { ReasoningEffort, SendKey, Settings, ToolMode } from '@harness-forge/shared'
-import { computed, onMounted, ref, useId, watch } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
@@ -26,6 +26,8 @@ import {
 } from './general'
 import { toastError } from './notify'
 import PasswordSection from './PasswordSection.vue'
+import { useSettingsLoad } from './settings-load'
+import SettingsLoadError from './SettingsLoadError.vue'
 import SettingsSection from './SettingsSection.vue'
 
 const settings = useSettingsStore()
@@ -41,10 +43,7 @@ const ids = {
   instructions: useId(),
 }
 
-onMounted(() => {
-  if (!settings.loaded)
-    settings.fetch().catch(() => {})
-})
+const { loading: settingsLoading, loadError: settingsLoadError, load: loadSettings } = useSettingsLoad()
 
 async function save(patch: Partial<Settings>) {
   try {
@@ -148,6 +147,14 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
 </script>
 
 <template>
+  <SettingsLoadError
+    v-if="settingsLoadError && !settings.loaded"
+    title="Could not load your settings"
+    :error="settingsLoadError"
+    :pending="settingsLoading"
+    class="mb-4"
+    @retry="loadSettings"
+  />
   <SettingsSection title="Profile">
     <FieldGroup>
       <Field orientation="responsive" :data-invalid="displayName.error.value ? true : undefined">

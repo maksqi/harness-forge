@@ -78,6 +78,24 @@ describe('codePluginForm', () => {
     wrapper.unmount()
   })
 
+  it('writes JavaScript by default and TypeScript when chosen', async () => {
+    api.pluginFiles.scaffold.mockResolvedValue(pluginDetail({ id: 'typed-tools', name: 'Typed Tools' }))
+    const wrapper = mountForm()
+    await flushPromises()
+    const group = byTestId(testIds.codePluginLanguage)!
+    expect(group.dataset.value).toBe('js')
+    expect(document.body.textContent).toContain('index.mjs with JSDoc types')
+    await type(testIds.codePluginName, 'Typed Tools')
+    await chooseTemplate('tool')
+    document.body.querySelector<HTMLButtonElement>(`[data-testid="${testIds.codePluginLanguage}"] [data-value="ts"]`)!.click()
+    await flushPromises()
+    expect(byTestId(testIds.codePluginLanguage)!.dataset.value).toBe('ts')
+    expect(document.body.textContent).toContain('index.ts, compiled by the server')
+    await create()
+    expect(api.pluginFiles.scaffold).toHaveBeenCalledWith({ body: { id: 'typed-tools', name: 'Typed Tools', template: 'tool', language: 'ts' } })
+    wrapper.unmount()
+  })
+
   it('offers the four templates and validates before sending', async () => {
     const wrapper = mountForm()
     await flushPromises()

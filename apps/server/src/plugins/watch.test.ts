@@ -121,11 +121,23 @@ describe('plugin watcher', () => {
     writeFileSync(join(dir, 'src', 'index.mjs'), 'export default {}\n')
     const changes: string[] = []
     const watcher = createPluginWatcher({ logger: createMemoryLogger().logger, onChange: id => changes.push(id) })
-    watcher.watch('real', dir)
-    await new Promise(resolve => setTimeout(resolve, 100))
-    writeFileSync(join(dir, 'src', 'index.mjs'), 'export default { changed: true }\n')
-    await waitFor(() => changes.length > 0, 5000)
-    expect(changes[0]).toBe('real')
-    watcher.close()
-  })
+    try {
+      watcher.watch('real', dir)
+      expect(watcher.isWatching('real')).toBe(true)
+      // `fs.watch` can miss events written right after it starts (macOS FSEvents under load): write again, less often
+      // than the debounce, until a change is reported.
+      let nextWrite = 0
+      await waitFor(() => {
+        if (Date.now() >= nextWrite) {
+          writeFileSync(join(dir, 'src', 'index.mjs'), `export default { changed: ${Date.now()} }\n`)
+          nextWrite = Date.now() + WATCH_DEBOUNCE_MS * 3
+        }
+        return changes.length > 0
+      }, 25_000)
+      expect(changes[0]).toBe('real')
+    }
+    finally {
+      watcher.close()
+    }
+  }, 30_000)
 })

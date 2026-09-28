@@ -410,7 +410,7 @@ onBeforeRouteUpdate((to, from) => (to.params.id === from.params.id || dirtyPaths
             <div class="flex h-9 shrink-0 items-stretch border-b bg-muted/30">
               <SourceEditorTabs class="min-w-0 flex-1" :tabs="tabs" :active-path="activePath" @select="openFile" @close="closeTab" />
               <div class="flex shrink-0 items-center gap-2 pr-2 pl-3">
-                <span role="status" aria-live="polite" class="hidden text-xs whitespace-nowrap text-muted-foreground xl:inline">{{ status }}</span>
+                <span role="status" aria-live="polite" class="sr-only text-xs whitespace-nowrap text-muted-foreground xl:not-sr-only xl:inline">{{ status }}</span>
                 <Button
                   type="button"
                   variant="ghost"

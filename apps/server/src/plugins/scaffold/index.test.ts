@@ -415,6 +415,21 @@ describe('trust re-pinning (ADR-017)', () => {
     expect(h.t.deps.registry.tools.get('keeps_trust_text_stats')?.definition.description).toContain('estimate the reading time')
   })
 
+  it('a save shows the new trust hash right away, without a reload (the code runs until a build)', async () => {
+    await files.scaffold({ id: 'fresh-hash', name: 'Fresh hash', template: 'tool' })
+    const before = await h.t.deps.plugins.get('fresh-hash')
+    const source = (await files.read('fresh-hash', 'index.mjs')).content
+    h.events.clear()
+    await files.write('fresh-hash', 'index.mjs', { content: source.replace('estimate its reading time', 'estimate the reading time') }, freshAuth())
+    const pinned = (await h.t.deps.plugins.inspectDirectory(h.pluginDir('fresh-hash'))).sha256
+    const after = await h.t.deps.plugins.get('fresh-hash')
+    expect(after.trust).toEqual({ required: true, trusted: true, hash: pinned, trustedHash: pinned })
+    expect(after.trust.hash).not.toBe(before.trust.hash)
+    expect(after.state).toBe('active')
+    expect(h.t.deps.registry.tools.get('fresh_hash_text_stats')?.definition.description).toContain('estimate its reading time')
+    expect(h.events.ofType('plugin.changed').some(event => event.data.id === 'fresh-hash')).toBe(true)
+  })
+
   it('files changed outside the editor still need re-trust after an editor save', async () => {
     await files.scaffold({ id: 'tampered', name: 'Tampered', template: 'tool' })
     const entryPath = join(h.pluginDir('tampered'), 'index.mjs')
@@ -433,7 +448,12 @@ describe('trust re-pinning (ADR-017)', () => {
     })
     await h.t.deps.plugins.load('copied')
     expect((await h.t.deps.plugins.get('copied')).state).toBe('active')
+    const pin = (await h.t.deps.plugins.get('copied')).trust.trustedHash
     await files.write('copied', 'index.mjs', { content: 'export default { setup() { } }\n' }, freshAuth())
+    // Not re-pinned: the detail shows the new hash as untrusted while the loaded version keeps running.
+    const saved = await h.t.deps.plugins.get('copied')
+    expect(saved).toMatchObject({ state: 'active', trust: { required: true, trusted: false, trustedHash: pin } })
+    expect(saved.trust.hash).toBe((await h.t.deps.plugins.inspectDirectory(h.pluginDir('copied'))).sha256)
     expect(await h.t.deps.plugins.reload('copied')).toMatchObject({ state: 'untrusted' })
   })
 })
@@ -506,6 +526,19 @@ describe('build', () => {
     const result = await files.build('thrower', {})
     expect(result).toMatchObject({ ok: false, state: 'error' })
     expect(result.diagnostics.at(-1)?.message).toContain('boom')
+  })
+
+  it('without reload pins the built files and shows the new hash right away', async () => {
+    await files.scaffold({ id: 'pinned-only', name: 'Pinned only', template: 'tool' })
+    const source = (await files.read('pinned-only', 'index.mjs')).content
+    // Changed on disk (not through the editor): the build makes the reviewed code the trusted version.
+    writeFileSync(join(h.pluginDir('pinned-only'), 'index.mjs'), source.replace('policy: \'ask\'', 'policy: \'safe\''))
+    const result = await files.build('pinned-only', { reload: false })
+    const pinned = (await h.t.deps.plugins.inspectDirectory(h.pluginDir('pinned-only'))).sha256
+    expect(result).toMatchObject({ ok: true, hash: pinned, state: 'active' })
+    expect((await h.t.deps.plugins.get('pinned-only')).trust).toEqual({ required: true, trusted: true, hash: pinned, trustedHash: pinned })
+    // Not reloaded: the running version keeps its policy until the next load.
+    expect(h.t.deps.registry.tools.get('pinned_only_text_stats')?.definition.policy).toBe('ask')
   })
 
   it('without reload only checks and pins; a disabled plugin stays disabled', async () => {

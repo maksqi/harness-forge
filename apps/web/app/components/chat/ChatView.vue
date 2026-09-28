@@ -230,7 +230,7 @@ function onToolModeChange(value: ToolMode) {
 </script>
 
 <template>
-  <div data-slot="chat-view" :data-chat-id="chatId" class="flex h-dvh min-h-0 flex-col" :style="composerStyle">
+  <div data-slot="chat-view" :data-chat-id="chatId" class="relative flex h-dvh min-h-0 flex-col" :style="composerStyle">
     <slot v-if="!notFound" name="header" :scrolled="scrolled" :title="title" :loading="!loaded" />
 
     <ChatNotFound v-if="notFound" />
@@ -272,7 +272,7 @@ function onToolModeChange(value: ToolMode) {
         :status="status"
         :error="error"
         :show-thinking="ui.showThinking"
-        :loading="!loaded"
+        :loading="!loaded && !loadError"
         @regenerate="onRegenerate"
         @edit="onEdit"
         @approval="onApproval"

@@ -1,0 +1,128 @@
+# CI: the gate commands of docs/phases/phase-4-hardening.md. No secrets are needed: e2e runs against the mock provider.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    # bash -eo pipefail
+    shell: bash
+
+jobs:
+  check:
+    name: Check (English, lint, typecheck, unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      # Node first: pnpm 11 needs Node >= 22.13 to run.
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      # Installs the pnpm version of "packageManager" in package.json and caches its store.
+      - uses: pnpm/action-setup@v6
+        with:
+          cache: true
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+
+  e2e:
+    name: Build and e2e (Playwright, Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - uses: pnpm/action-setup@v6
+        with:
+          cache: true
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Start the e2e server (pnpm start:e2e)
+        env:
+          # Keep the run hermetic: no models.dev refresh while the suite runs.
+          HF_OFFLINE: '1'
+        run: |
+          nohup pnpm start:e2e > e2e-server.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8899/api/health > /dev/null; then
+              echo "The e2e server answers on :8899 (after ${attempt} s)."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "The e2e server did not answer /api/health within 60 s."
+          cat e2e-server.log
+          exit 1
+      - name: Run the e2e suite
+        env:
+          # The server is already running: this also disables the webServer block of playwright.config.ts.
+          E2E_BASE_URL: http://localhost:8899
+        run: pnpm test:e2e
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+            e2e-server.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the image
+        run: docker build --tag harness-forge:ci .
+      - name: Refuse to listen on 0.0.0.0 without a password
+        run: |
+          if docker run --rm harness-forge:ci > refusal.log 2>&1; then
+            echo "The container started without HF_PASSWORD or HF_INSECURE=1."
+            exit 1
+          fi
+          cat refusal.log
+          grep -q 'Refusing to listen' refusal.log
+      - name: Smoke test
+        run: |
+          docker run --detach --name hf-ci --publish 127.0.0.1:8787:8787 \
+            --env HF_PASSWORD=ci-password --env HF_OFFLINE=1 harness-forge:ci
+          status=starting
+          for _ in $(seq 1 60); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' hf-ci)
+            if [ "$status" = healthy ]; then
+              break
+            fi
+            sleep 1
+          done
+          echo "Container health: $status"
+          test "$status" = healthy
+          curl -sf http://127.0.0.1:8787/api/health
+          echo
+          curl -sf -H 'Accept: text/html' -o spa.html http://127.0.0.1:8787/
+          grep -q '<div id="__nuxt">' spa.html
+          curl -sf -o /dev/null http://127.0.0.1:8787/api/icons/lobe/claude-color
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/api/models)" = 401
+          test "$(docker exec hf-ci id -u)" = 1000
+      - name: Container logs
+        if: always()
+        run: docker logs hf-ci || true

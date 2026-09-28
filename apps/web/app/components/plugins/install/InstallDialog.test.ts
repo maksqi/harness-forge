@@ -155,6 +155,8 @@ describe('installDialog', () => {
     const installForm = api.pluginInstall.install.mock.calls[0]![0].form as FormData
     expect((installForm.get('file') as File).name).toBe('acme.zip')
     expect(installForm.get('trust')).toBeNull()
+    // The install carries the hash the user reviewed (409 `stale` when the package changed meanwhile).
+    expect(installForm.get('sha256')).toBe(HASH)
     expect(toasts.success).toHaveBeenCalledWith('Installed Acme')
     expect(installed).toHaveBeenCalledWith('acme')
     expect(open.value).toBe(false)
@@ -265,7 +267,7 @@ describe('installDialog', () => {
     await type(byTestId<HTMLInputElement>(testIds.installIntegrityInput), SHA256)
     await click(byTestId(testIds.installInspect))
     await click(byTestId(testIds.installSubmit))
-    expect(api.pluginInstall.install).toHaveBeenCalledWith({ body: { source: 'url', url: 'https://cdn.example.com/acme.zip', integrity: SHA256 } })
+    expect(api.pluginInstall.install).toHaveBeenCalledWith({ body: { source: 'url', url: 'https://cdn.example.com/acme.zip', integrity: SHA256, sha256: HASH } })
     url.wrapper.unmount()
     document.body.replaceChildren()
 
@@ -315,12 +317,44 @@ describe('installDialog', () => {
     await click(byTestId(testIds.trustCheckbox))
     await click(byTestId(testIds.installSubmit))
 
+    expect(api.pluginInstall.install).toHaveBeenLastCalledWith({ body: { source: 'npm', spec: 'dice', sha256: HASH, trust: true } })
     expect(api.pluginInstall.inspect).toHaveBeenCalledTimes(2)
-    expect(byTestId(testIds.installError)!.textContent).toContain('changed since you reviewed it')
+    // The error gives way to a notice about the new preview; the consent starts over.
+    expect(byTestId(testIds.installError)).toBeNull()
+    expect(byTestId(testIds.installStale)!.textContent).toContain('changed since you reviewed it')
     expect(byTestId(testIds.installPreview)!.textContent).toContain('2.0.0')
     expect(byTestId(testIds.trustCheckbox)!.getAttribute('aria-checked')).toBe('false')
     expect(submitDisabled()).toBe(true)
     expect(installed).not.toHaveBeenCalled()
+
+    // Reviewing again installs the new hash; the notice goes away with the new attempt.
+    api.pluginInstall.install.mockResolvedValueOnce(pluginDetail({ id: 'dice', name: 'Dice' }))
+    await click(byTestId(testIds.trustCheckbox))
+    await click(byTestId(testIds.installSubmit))
+    expect(installed).toHaveBeenCalledWith('dice')
+  })
+
+  it('keeps the error when the new inspection fails as well', async () => {
+    api.pluginInstall.inspect
+      .mockResolvedValueOnce(codeInspection({ source: 'npm' }))
+      .mockRejectedValueOnce(new HarnessError({ code: 'provider_unreachable', message: 'The npm registry did not answer.' }))
+    api.pluginInstall.install.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'The plugin changed since you reviewed it (a new version or changed files): inspect it again before installing.', details: { reason: 'stale' } }))
+    await mountDialog('npm')
+    await type(byTestId<HTMLInputElement>(testIds.installNpmInput), 'dice')
+    await click(byTestId(testIds.installInspect))
+    await click(byTestId(testIds.trustCheckbox))
+    await click(byTestId(testIds.installSubmit))
+    expect(byTestId(testIds.installStale)).toBeNull()
+    expect(byTestId(testIds.installError)!.textContent).toContain('inspect it again')
+  })
+
+  it('names the resolved source in "I trust" when the server sent one', async () => {
+    api.pluginInstall.inspect.mockResolvedValue(codeInspection({ source: 'npm', sourceRef: 'dice@1.4.2' }))
+    await mountDialog('npm')
+    await type(byTestId<HTMLInputElement>(testIds.installNpmInput), 'dice')
+    await click(byTestId(testIds.installInspect))
+    expect(document.body.textContent).toContain('I trust dice@1.4.2')
+    expect(byTestId(testIds.installPreview)!.textContent).toContain('npm · dice@1.4.2')
   })
 
   it('starts fresh every time it opens', async () => {

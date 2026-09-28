@@ -49,7 +49,7 @@ function onSpace(to: string) {
   </SidebarMenu>
 
   <Tabs v-else :model-value="mode" activation-mode="manual" class="w-full gap-0">
-    <TabsList aria-label="Sidebar mode" class="h-8 w-full rounded-lg bg-sidebar-accent/60 p-0.5 dark:bg-sidebar-accent/70">
+    <TabsList aria-label="Sidebar mode" class="h-8 w-full rounded-lg bg-sidebar-accent/60 p-0.5 dark:bg-sidebar-accent/70 pointer-coarse:h-10">
       <TabsTrigger
         v-for="tab in tabs"
         :key="tab.value"

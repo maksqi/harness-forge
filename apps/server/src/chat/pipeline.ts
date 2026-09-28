@@ -3,7 +3,7 @@
 // - model runs: `streamText({ model, instructions, messages, tools, toolApproval, stopWhen: isStepCount(maxSteps),
 //   abortSignal: run.signal, maxRetries: 2, ... })`, `result.consumeStream()` (the run survives a client disconnect)
 //   and `toUIMessageStream({ stream: result.stream, originalMessages, generateMessageId, sendReasoning, sendSources,
-//   messageMetadata, onError, onEnd })`;
+//   messageMetadata, onError, onEnd })`; a request without tools gets earlier tool calls as text (`tool-history.ts`);
 // - reply commands and failures before the model call: `createUIMessageStream` without a model call.
 // `createUIMessageStreamResponse({ stream, consumeSseStream })` tees the SSE text into the run buffer (resume). The end
 // callback persists the message idempotently (upsert by id, `aborted` / `error` in the metadata), writes the usage
@@ -41,6 +41,7 @@ import { finalizeParts, hasPendingApproval, plainText } from './history.ts'
 import { buildRunParams } from './params.ts'
 import { SseReplayBuffer } from './runs.ts'
 import { generateChatTitle } from './title.ts'
+import { toolPartsAsText } from './tool-history.ts'
 import { assembleTools } from './tools.ts'
 import { addMessageUsage, roundUsd, RunTracker, toMessageUsage } from './usage.ts'
 
@@ -63,10 +64,9 @@ export const NOTICES = {
     code: 'tools-unsupported',
     message: 'This model does not support tools, so no tools were sent.',
   }),
-  // The notice codes have no attachment code yet (CCR): the capability notice code is reused with its own message.
   filesNotSent: (count: number): NoticeData => ({
     level: 'warning',
-    code: 'tools-unsupported',
+    code: 'attachments-unsupported',
     message: count === 1
       ? 'This model cannot read the attached file, so it was not sent.'
       : `This model cannot read ${count} of the attached files, so they were not sent.`,
@@ -492,7 +492,10 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
   if (files.dropped > 0)
     session.notices.push(NOTICES.filesNotSent(files.dropped))
 
-  const converted = await convertToModelMessages<HarnessUIMessage>(files.messages, { tools: assembled.tools, ignoreIncompleteToolCalls: true })
+  const tools = Object.keys(assembled.tools).length > 0 ? assembled.tools : undefined
+  // Without tool definitions, earlier tool calls go to the model as text: providers reject tool content without tools.
+  const history = tools === undefined ? toolPartsAsText(files.messages) : files.messages
+  const converted = await convertToModelMessages<HarnessUIMessage>(history, { tools: assembled.tools, ignoreIncompleteToolCalls: true })
   const messagesDraft: { messages: ModelMessage[] } = { messages: converted }
   await deps.registry.hooks.run('chat.messages', { chatId, modelRef }, messagesDraft)
   const hooked = validModelMessages(messagesDraft.messages)
@@ -502,7 +505,6 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
   if (trimmed.removed > 0)
     session.notices.push(NOTICES.contextTrimmed())
 
-  const tools = Object.keys(assembled.tools).length > 0 ? assembled.tools : undefined
   const result = streamText({
     model: resolved.model,
     instructions: params.instructions,

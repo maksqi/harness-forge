@@ -7,7 +7,14 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { API_SAMPLES, sampleRequest } from '../../testing/api-samples.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createMemorySecretStore, createMemorySettingsService } from '../../testing/fakes.ts'
-import { SESSION_COOKIE_MAX_AGE_SECONDS, SESSION_COOKIE_NAME, SESSION_ROLL_AFTER_MS, UNAUTHORIZED_MESSAGE } from './session-auth.ts'
+import {
+  isLocalHostname,
+  LOCAL_HOST_ONLY_MESSAGE,
+  SESSION_COOKIE_MAX_AGE_SECONDS,
+  SESSION_COOKIE_NAME,
+  SESSION_ROLL_AFTER_MS,
+  UNAUTHORIZED_MESSAGE,
+} from './session-auth.ts'
 
 /** The password of the `auth.login` sample, so the public login route answers 200 in the matrix. */
 const PASSWORD = (API_SAMPLES['auth.login'].body as { password: string }).password
@@ -60,6 +67,63 @@ describe('without a password', () => {
   })
 })
 
+describe('without a password: DNS rebinding guard (only local host names)', () => {
+  const REBOUND = { host: 'rebind.attacker.example:8787' }
+
+  it.each([
+    ['GET', '/api/settings'],
+    ['GET', '/api/health'],
+    ['GET', '/api/auth/status'],
+    ['GET', '/api/events'],
+  ])('%s %s for a foreign host name -> 403 forbidden', async (method, path) => {
+    const t = await testApp({})
+    const response = await t.request(path, { method, headers: REBOUND })
+    expect(response.status).toBe(403)
+    expect(await errorOf(response)).toEqual({ code: 'forbidden', message: LOCAL_HOST_ONLY_MESSAGE })
+  })
+
+  it('a rebound page is same-origin with itself: it passes the Origin check and is still refused', async () => {
+    const t = await testApp({})
+    const install = await t.request('/api/plugins/install', {
+      method: 'POST',
+      headers: { ...REBOUND, 'origin': 'http://rebind.attacker.example:8787', 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+      body: JSON.stringify({ source: 'npm', spec: 'evil-plugin', trust: true }),
+    })
+    expect(install.status).toBe(403)
+    expect((await errorOf(install)).message).toBe(LOCAL_HOST_ONLY_MESSAGE)
+  })
+
+  it.each(['localhost:8787', '127.0.0.1:8787', '127.8.9.10', '[::1]:8787', 'LOCALHOST.:8787', 'app.localhost:3000'])('host %s is local and authenticated', async (host) => {
+    const t = await testApp({})
+    const response = await t.request('/api/auth/status', { headers: { host } })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ enabled: false, authenticated: true })
+  })
+
+  it('no Host header: the request URL host counts (in-process requests)', async () => {
+    const t = await testApp({})
+    expect((await t.request('/api/settings')).status).toBe(200)
+  })
+
+  it('hF_INSECURE=1 or a password lets other host names through (LAN, reverse proxy, tunnel)', async () => {
+    const insecure = await testApp({ HF_INSECURE: '1' })
+    expect((await insecure.request('/api/settings', { headers: REBOUND })).status).toBe(200)
+    const protectedApp = await testApp()
+    const anonymous = await protectedApp.request('/api/settings', { headers: { host: 'harness.example.com' } })
+    expect(anonymous.status).toBe(401)
+    const token = await protectedApp.deps.sessions.issue({ authAt: Date.now() })
+    const withSession = await protectedApp.request('/api/settings', { headers: { host: 'harness.example.com', ...cookieHeader(token) } })
+    expect(withSession.status).toBe(200)
+  })
+
+  it('isLocalHostname', () => {
+    for (const name of ['localhost', 'localhost.', 'a.b.localhost', '127.0.0.1', '127.255.0.9', '::1', '[::1]', '::ffff:127.0.0.1'])
+      expect(isLocalHostname(name), name).toBe(true)
+    for (const name of ['example.com', 'localhost.example.com', '127.0.0.1.nip.io', '0.0.0.0', '::', '10.0.0.1', '192.168.1.2', 'localhost0', ''])
+      expect(isLocalHostname(name), name).toBe(false)
+  })
+})
+
 describe('with a password and no session', () => {
   let shared: TestApp
 
@@ -103,6 +167,27 @@ describe('with a password and no session', () => {
   ])('unknown route %s %s answers 401 (no route enumeration)', async (method, path) => {
     const response = await shared.request(path, { method })
     expect(response.status).toBe(401)
+  })
+
+  it.each([
+    '/api/%73ettings',
+    '/api/settings/',
+    '/api//settings',
+    '/api/Settings',
+    '/api/auth/status/../../settings',
+    '/api/auth/%2e%2e/settings',
+    '/api/auth%2fstatus',
+    '/api/health/..%2fsettings',
+    '/api/icons/lobe/..%2f..%2fsettings',
+    '/api/icons/lobe/%2e%2e/%2e%2e/providers',
+    '/api/chats%3F/x',
+  ])('path confusion %s never reaches a private route without a session', async (path) => {
+    const response = await shared.request(path)
+    // Private routes answer 401; a public route may answer, but only as itself (the slug is refused).
+    expect([400, 401, 404], path).toContain(response.status)
+    const body = await response.text()
+    expect(body).not.toContain('"displayName"')
+    expect(body).not.toContain('"items"')
   })
 })
 

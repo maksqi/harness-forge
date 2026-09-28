@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // Tool call row (docs/UI.md 7.2): `▸ icon name "first argument" [server] … status`, the whole row toggles the body
 // (input / output / error, 4 KB previews) and never opens by itself. MCP tools (`mcp__<server>__<tool>`) show the tool
-// name plus a server badge. While approval is requested, ToolApprovalCard renders below the row.
+// name plus a server badge (the server's name; the MCP list loads on first need). While approval is requested,
+// ToolApprovalCard renders below the row.
 import type { ToolPartLike } from '../chat-format'
 import {
   BanIcon,
@@ -67,6 +68,11 @@ const serverName = computed(() => {
   return plugins.mcp.find(server => server.id === serverId.value)?.name ?? serverId.value
 })
 const displayName = computed(() => mcp.value?.tool ?? name.value)
+// The badge names the server; a transcript opened after a reload may be the first place that needs the MCP list.
+watch(serverId, (id) => {
+  if (id && !plugins.mcpLoaded)
+    plugins.fetchMcp().catch(() => {})
+}, { immediate: true })
 const firstArg = computed(() => firstStringArg(props.part.input))
 
 type RowStatus = 'running' | 'approval' | 'done' | 'error' | 'denied' | 'stopped'
@@ -134,7 +140,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
         :data-status="status"
       >
         <CollapsibleTrigger
-          class="group/tool-row -mx-1.5 flex h-(--row-height) w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-md px-1.5 text-left text-sm outline-none transition-colors duration-(--duration-fast) hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50"
+          class="group/tool-row -mx-1.5 flex h-(--row-height) pointer-coarse:h-10 w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-md px-1.5 text-left text-sm outline-none transition-colors duration-(--duration-fast) hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50"
         >
           <ChevronRightIcon
             aria-hidden="true"

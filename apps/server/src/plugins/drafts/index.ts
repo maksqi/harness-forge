@@ -30,7 +30,7 @@ import {
   pluginManifestUpdateSchema,
   validationError,
 } from '@harness-forge/shared'
-import { checkCredentialValues, storeUnregisteredCredentials } from './credentials.ts'
+import { checkCredentialValues } from './credentials.ts'
 import { decodeIconFile } from './icon.ts'
 import { runDraftTest } from './test-provider.ts'
 
@@ -210,7 +210,11 @@ export function createPluginDraftsWith(deps: AppDeps, options: PluginDraftsOptio
           checkInBackground(entry.providerId)
         }
         else if (registered === undefined) {
-          await storeUnregisteredCredentials(deps, entry.providerId, entry.fields, entry.values)
+          // Not registered (created disabled, safe mode, failed load): stored against the declared fields.
+          const setFor = deps.credentials.setFor
+          if (setFor === undefined)
+            throw new Error('The credential service cannot store credentials of a provider that is not registered.')
+          await setFor(entry.providerId, entry.fields, entry.values)
         }
         else {
           deps.plugins.log(pluginId, 'warn', `The credentials of "${entry.providerId}" were not saved: the plugin "${registered.pluginId}" uses this provider id.`)

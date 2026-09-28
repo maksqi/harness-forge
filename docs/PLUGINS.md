@@ -48,13 +48,34 @@ Builtins ship with the server, are statically imported, always trusted, loaded e
 uninstalled (`source = builtin`). They use the same `PluginContext` API as user plugins (ADR-009); because they are
 part of the server they may import server dependencies (for example the official `@ai-sdk/*` packages) directly.
 
-| Id | Contributes | Notes |
+| Id (card name) | Contributes | Notes |
 |---|---|---|
-| `core-providers` | the 13 builtin providers ([PROVIDERS.md](./PROVIDERS.md)) | individual providers can be disabled (`PATCH /api/providers/:id`); shown as one "Core providers" card |
-| `core-tools` | tools `current_time` (policy `safe`) and `web_fetch` (policy `ask`, SSRF guard) | |
-| `core-commands` | server-side slash commands | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server |
-| `core-mcp` | MCP servers configured in the MCP panel (`mcp_servers` table) | |
-| `mock` | provider `mock` and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
+| `core-providers` (Core providers) | the 13 builtin providers ([PROVIDERS.md](./PROVIDERS.md)) | individual providers can be disabled (`PATCH /api/providers/:id`) |
+| `core-tools` (Core tools) | tools `current_time` (policy `safe`) and `web_fetch` (policy `ask`, SSRF guard) | setting `allowLocalhost` (below) |
+| `core-commands` (Core commands) | 10 template slash commands (below) | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server |
+| `core-mcp` (MCP servers) | MCP servers configured in the MCP panel (`mcp_servers` table); the panel is its Overview | settings `autoReconnect`, `connectTimeoutSeconds` (below) |
+| `mock` (Mock provider) | provider `mock` and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
+
+Builtin tools (`core-tools`):
+
+| Tool | Input | Output |
+|---|---|---|
+| `current_time` | `{ timezone? }`: IANA name (`Europe/Berlin`, `UTC`); default the server time zone; an unknown zone is a `validation_error` | `{ iso, unixMs, timezone, local, utcOffset, weekday }` (`local` = `YYYY-MM-DD HH:mm:ss`, `utcOffset` = `+02:00`) |
+| `web_fetch` | `{ url, maxChars? }`: `http:` / `https:` URL (<= 2048 characters); `maxChars` 1000-40000, default 20000 | `{ url, status, contentType, title, text, truncated }`: `url` after redirects, the readable text of an HTML page (`title` from `<title>` or `og:title`) or the text of a text document (plain, markdown, JSON, XML, ...); other content types are refused |
+
+`web_fetch` goes through the SSRF guard: public addresses only, every redirect re-checked (at most 5), 10 s timeout,
+2 MB body. The `core-tools` setting **Allow localhost in web_fetch** (`allowLocalhost`, default off) also admits
+loopback addresses (a local dev server); private, link-local and cloud metadata addresses stay blocked.
+
+Builtin commands (`core-commands`, all `template` commands): `/explain` (code or a concept, step by step),
+`/summarize` (text, or the conversation so far when no text is given), `/review` (bugs, security, readability),
+`/fix` (root cause and fix), `/refactor` (clarity without behavior changes), `/tests` (unit tests), `/docs`
+(documentation comments), `/commit` (a commit message for a diff), `/translate` (into English, or into the language
+named first), `/proofread` (grammar, spelling, style).
+
+`core-mcp` settings apply to every MCP server (panel and plugins): **Reconnect automatically** (`autoReconnect`,
+default on: retries a failed or dropped connection with increasing delays, up to about 9 minutes) and **Connect
+timeout (seconds)** (`connectTimeoutSeconds`, 5-120, default 20).
 
 ### API version
 
@@ -341,9 +362,10 @@ With `openai-responses`, the adapter also sets `providerOptions.openai.forceReas
 stdio details:
 
 - Spawned without a shell (`shell: false`), working directory = the plugin directory, stdin/stdout = the MCP
-  protocol. stderr is not part of the protocol: the stock `Experimental_StdioMCPTransport` lets the child inherit the
-  server's stderr (it does not expose the child process); an MCP manager that wants stderr in the plugin log must
-  spawn the child through its own `MCPTransport` with the same environment rules.
+  protocol (newline-delimited JSON-RPC). The MCP manager spawns the child through its own `MCPTransport`
+  (`mcp/stdio-transport.ts`): stderr lines go to the owning plugin's log (`core-mcp` for servers of the MCP panel),
+  and closing ends stdin, sends `SIGTERM`, then `SIGKILL` after a grace period. On Windows, where `.cmd` shims such as
+  `npx` need resolving, the stock `Experimental_StdioMCPTransport` is used and stderr is ignored.
 - Environment: only a minimal inherited set (POSIX `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`; Windows
   `APPDATA`, `HOMEDRIVE`, `HOMEPATH`, `LOCALAPPDATA`, `PATH`, `PROCESSOR_ARCHITECTURE`, `SYSTEMDRIVE`, `SYSTEMROOT`,
   `TEMP`, `USERNAME`, `USERPROFILE`) plus the declared `env`. `HF_*` variables and provider keys of the server are
@@ -356,9 +378,11 @@ plugin's settings (secret settings are decrypted at connect time). An empty valu
 empty value in `url` or an `args` item makes the connection fail with a message naming the missing setting. Prefer
 `env` or `headers` for secrets: command lines are visible to other local users. `command` cannot be templated.
 
-Connection lifecycle: servers connect in the background after the plugin is `active` (20 s connect timeout), never
-block boot, show status in the MCP panel, reconnect with `POST /api/mcp/:id/reconnect`, and are closed when their
-plugin is disabled. Tool names are `mcp__<serverId>__<tool>` ([section 14](#14-naming-rules)).
+Connection lifecycle: servers connect in the background after the plugin is `active` (connect timeout 20 s, the
+`core-mcp` setting `connectTimeoutSeconds`), never block boot, show their status on the plugin's detail page (with
+**Restart**, `POST /api/mcp/:id/reconnect`), retry a failed or dropped connection with increasing delays (unless the
+`core-mcp` setting `autoReconnect` is off), and are closed when their plugin is disabled. Tool names are
+`mcp__<serverId>__<tool>` ([section 14](#14-naming-rules)). Step-by-step: [Adding an MCP server](./guides/adding-an-mcp-server.md).
 
 ## 6. Declarative commands
 
@@ -422,9 +446,19 @@ Storage and API:
 
 - Non-secret values: `plugin_settings.values`. Secret values: encrypted in `secrets`, scope `plugin:<id>`, name
   `settings.<key>`.
-- `GET /api/plugins/:id/settings` returns secrets only as set/unset markers with a masked hint; `PUT` validates with
-  a zod schema generated from `SettingsSchema` (unknown keys -> `validation_error`); an omitted secret keeps its
-  stored value and `null` clears it ([API.md](./API.md)).
+- `GET /api/plugins/:id/settings` returns secrets only as set/unset markers with a masked hint; `PUT` validates the
+  patch with `settingsValuesSchema(schema, { partial: true })` (unknown keys -> `validation_error`,
+  [API.md](./API.md)):
+
+  | `PUT` value | Non-secret property | Secret property (`format: 'secret'`) |
+  |---|---|---|
+  | key omitted | unchanged | unchanged (the stored secret is kept) |
+  | `null` | stored value removed (the `default` applies again) | stored secret deleted |
+  | `''` | stored as the empty string (optional strings may be empty) | stored secret deleted |
+  | any other value | validated and stored | stored encrypted (any non-empty string) |
+
+  A `required` property cannot be removed: `null` is rejected, and a required string (secret or not) must not be
+  blank. The Configuration tab sends only changed fields; its secret input's **Clear** sends `''`.
 - `ctx.settings.get()` returns stored values merged over defaults, with secrets decrypted (server memory only).
 - After a successful `PUT`, `ctx.settings.onChange` callbacks run (guarded, 3 s) and MCP servers that use
   `{{settings.*}}` reconnect.
@@ -496,7 +530,11 @@ export default {
 ```
 
 If the SDK types cannot be resolved by your editor, JSDoc types degrade to `any`; the host validates everything at
-runtime anyway.
+runtime anyway. To resolve them without installing anything, put a copy of `harness-forge.d.ts` next to the entry and
+reference it at the top of the entry, after `// @ts-check` (`/// <reference path="./harness-forge.d.ts" />`): every
+code template writes this
+file (an ambient `declare module '@harness-forge/plugin-sdk'` mirroring section 9, with the `ctx.ai` libraries typed
+as `any`), and the code examples ship it. The host ignores the file and it is not part of the trust hash.
 
 ### `.ts` entries
 
@@ -505,7 +543,13 @@ Compiled by the host with esbuild when the plugin loads and on "Build & reload" 
 `alias: { '@harness-forge/plugin-sdk': <host shim> }`, Node built-ins external. The output goes to
 `data/cache/plugins/<id>/<sha256>.mjs` and is imported from there. esbuild strips types without type checking; build
 errors are returned as diagnostics (Source tab) and written to the plugin log. The shim exports `definePlugin` and
-`PLUGIN_API_VERSION`; everything else in the SDK is types.
+`PLUGIN_API_VERSION`; everything else in the SDK is types. Type-only imports of other packages
+(`import type { LanguageModelV4 } from '@ai-sdk/provider'`) compile too, because esbuild removes them, but an editor
+resolves them only where that package is installed.
+
+The **Code plugin** form of the UI creates `index.mjs` entries; `POST /api/plugins/scaffold` with
+`"language": "ts"` creates the same templates as `index.ts`. Both write `plugin.json`, the entry,
+`harness-forge.d.ts` and a `README.md`. Walkthrough: [Writing a code plugin](./guides/writing-a-code-plugin.md).
 
 ## 9. API reference
 
@@ -634,7 +678,7 @@ export interface HarnessErrorInit {                // shape of API.md section 2.
 export interface ProviderDefinition {
   id: string
   name: string
-  icon?: string                                   // 'lobe:<slug>'; default: the plugin icon
+  icon?: string | { color?: string; mono?: string } // 'lobe:<slug>' (or a pair); default: the plugin icon
   credentials: CredentialField[]
   modelsDevId?: string
   smallModelId?: string
@@ -788,7 +832,7 @@ All `register` calls are valid during and after `setup` until the plugin is disp
 |---|---|---|
 | `id` | yes | builtins: models.dev keys (DECISIONS); plugins: `<pluginId>` or `<pluginId>-<suffix>` |
 | `name` | yes | UI name (Settings -> Providers, picker group header) |
-| `icon` | no | `lobe:<slug>`; omitted -> the plugin icon, else a monogram |
+| `icon` | no | `lobe:<slug>`, or `{ color?: 'lobe:<slug>', mono?: 'lobe:<slug>' }` when the two variants have different slugs (`{ color: 'lobe:zhipu-color', mono: 'lobe:zai' }`); a single `lobe:<x>` also offers `<x>-color`, and `lobe:<x>-color` also offers `<x>`, when those files exist; omitted or unresolvable -> the plugin icon (file icons included), else a monogram |
 | `credentials` | yes | fields of the key dialog; `[]` for keyless providers |
 | `modelsDevId` | no | models.dev key for metadata (default: `id`) |
 | `smallModelId` | no | cheap model for chat titles and the default credential ping |
@@ -892,8 +936,8 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
 - `toolMode = off`: no tools are sent to the model. Tools disabled in prefs (`enabled = false`) or with override
   `deny` are not sent either; step 1 only catches calls to them that still arrive.
 - `approved` / `denied` are recorded as automatic decisions (no card; denials render as `output-denied`);
-  `user-approval` shows the approval card ("Allow **tool**?" with Deny / Allow / "Don't ask again"). "Don't ask
-  again" writes override `allow` (`PATCH /api/tools/:name`).
+  `user-approval` shows the approval card ("Allow **tool**?" with Deny / Allow and an "Always allow **tool**"
+  checkbox). Allow with the checkbox checked also writes override `allow` (`PATCH /api/tools/:name`).
 - Policy defaults to `ask`. A policy **function** is guarded (3 s); a throw or timeout is treated as `always`.
 - MCP tool policy: `readOnlyHint: true` -> `safe`; else `destructiveHint: true` -> `always`; else the server's
   `policy` (default `ask`). Annotations come from the MCP server and are advisory: if you do not fully trust a
@@ -977,7 +1021,7 @@ Reload = disable + load (state `loading`), keeping settings, storage and secrets
 
 | Plugin | Trigger |
 |---|---|
-| declarative | saving the manifest (`PUT /api/plugins/:id/manifest`, wizard) reloads it |
+| declarative | saving the manifest reloads it: the wizard (`PUT /api/plugins/:id/manifest`) or `plugin.json` in the Source tab of an editable plugin (`PUT /api/plugins/:id/files/plugin.json`) |
 | code, linked folder (`source = link`) | always watched: `fs.watch` on the folder, 300 ms debounce |
 | code in `data/plugins/*` | watched only with `HF_PLUGIN_WATCH=1`; otherwise "Build & reload" / "Reload" |
 
@@ -1073,8 +1117,10 @@ again by:
 
 - the Trust action (`POST /api/plugins/:id/trust`) or trusting in the install dialog (installs and updates);
 - for plugins with source `created`: saving or deleting a file in the in-browser editor (`PUT` / `DELETE
-  /api/plugins/:id/files/*`) re-pins automatically (ADR-017), and so does a successful "Build & reload"
-  (`POST /api/plugins/:id/build`); for code plugins these writes require fresh auth when a password is set;
+  /api/plugins/:id/files/*`) re-pins automatically (ADR-017) when the plugin was trusted before the edit (a plugin
+  whose files had changed outside the editor stays `untrusted` and logs a warning), and a successful "Build & reload"
+  (`POST /api/plugins/:id/build`) re-pins it; for code plugins these writes require fresh auth when a password is
+  set. Editor saves of `copy` plugins never re-pin (use Trust); `link` plugins are pinned to their path;
 - creating a declarative plugin with a stdio MCP server in the UI (`POST /api/plugins`) pins it at creation.
 
 Files changed on disk outside the editor require re-trust, except in linked folders (pinned to the path). Which
@@ -1115,11 +1161,15 @@ Declarative plugins without stdio servers run no code and need no trust:
 
 ## 15. Authoring guide
 
-Workflow: create the plugin folder, install it with **Install -> Local folder -> Link** (hot reload on save), watch
+Workflow: create the plugin folder, install it with **Install… -> Local folder -> Link** (hot reload on save), watch
 the Logs tab, then publish it as a zip, an npm package (with `plugin.json` at the package root) or a URL with an
-integrity hash. The in-browser alternative is Plugins -> New plugin -> Code (templates: tool, provider, MCP bridge,
-command pack). Runnable versions of these examples live in `examples/plugins/<id>/` (`together-ai`, `dice-roller`,
-`mcp-everything`, plus `lmstudio` and `echo-provider`).
+integrity hash. The in-browser alternative is Plugins -> New plugin -> Code plugin (templates: tool, provider, MCP
+bridge, command pack). Step-by-step guides: [declarative provider](./guides/writing-a-declarative-provider.md),
+[code plugin](./guides/writing-a-code-plugin.md), [MCP server](./guides/adding-an-mcp-server.md).
+
+The examples below are copies of runnable plugins in [`examples/plugins/`](../examples/plugins/) (`together-ai`,
+`dice-roller`, `mcp-everything`, plus `lmstudio` and the TypeScript provider `echo-provider`); `examples.test.ts`
+loads each of them into the plugin host. Example (c) is a pattern without a folder (it needs a real gateway).
 
 ### (a) Declarative OpenAI-compatible provider: Together AI
 
@@ -1132,6 +1182,8 @@ command pack). Runnable versions of these examples live in `examples/plugins/<id
   "name": "Together AI",
   "version": "1.0.0",
   "description": "Together AI models through the OpenAI-compatible API.",
+  "author": "harness-forge examples",
+  "homepage": "https://www.together.ai",
   "icon": "lobe:together",
   "engines": { "harness": "^1.0.0" },
   "contributes": {
@@ -1184,16 +1236,19 @@ After install: Settings -> Providers -> Together AI -> paste the key -> Test -> 
   "name": "Dice roller",
   "version": "1.0.0",
   "description": "Adds a roll_dice tool that rolls dice in standard notation (2d6+3).",
+  "author": "harness-forge examples",
+  "icon": "icon.svg",
   "engines": { "harness": "^1.0.0" },
   "main": "index.mjs",
   "permissions": []
 }
 ```
 
-`dice-roller/index.mjs`:
+`dice-roller/index.mjs` (the folder also holds `icon.svg` and the editor types `harness-forge.d.ts`):
 
 ```js
 // @ts-check
+/// <reference path="./harness-forge.d.ts" />
 import { randomInt } from 'node:crypto'
 
 const NOTATION = /^(\d{1,3})d(\d{1,4})([+-]\d{1,5})?$/
@@ -1345,7 +1400,10 @@ export default {
   "id": "mcp-everything",
   "name": "MCP Everything (demo)",
   "version": "1.0.0",
-  "description": "The MCP reference test server, started with npx.",
+  "description": "The MCP reference test server, started with npx over stdio.",
+  "author": "harness-forge examples",
+  "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/everything",
+  "icon": "lobe:mcp",
   "engines": { "harness": "^1.0.0" },
   "permissions": ["process", "network"],
   "contributes": {
@@ -1441,3 +1499,14 @@ permission shown in the trust dialog.
 
 **How do I debug?** `ctx.logger` entries appear in the plugin's Logs tab and in the server log; link the folder for
 hot reload; set `HF_PLUGIN_WATCH=1` to hot-reload code plugins installed in `data/plugins/`.
+
+## Hardening notes (Phase 4)
+
+- **Export exclusions:** `GET /api/plugins/:id/export` never includes `.env*`, `.npmrc`, build output, `node_modules`
+  or `.git`.
+- **Linked folders:** a folder linked with `mode: 'link'` is refused when it (or a parent folder) is writable by other
+  users, because another account could replace trusted code.
+- **Reviewed hash:** the install request may carry the `sha256` shown in the inspect preview; a different staged hash
+  fails with `409 conflict` (`reason: 'stale'`) and the dialog re-inspects.
+- **MCP manager:** follows the `core-mcp` plugin through `PluginHost.onStateChange` (disabling `core-mcp` closes the
+  user-managed servers).

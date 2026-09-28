@@ -3,7 +3,7 @@
 // value as the sidebar ThemeToggle), reading font, text size, density and "Expand thinking by default". The
 // appearance keys apply instantly through `settings.update()` -> `ui.applyAppearance()`; a live sample shows them.
 import type { Settings } from '@harness-forge/shared'
-import { computed, onMounted, useId } from 'vue'
+import { computed, useId } from 'vue'
 import { Field, FieldContent, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { RadioGroup } from '@/components/ui/radio-group'
 import { Switch } from '@/components/ui/switch'
@@ -20,6 +20,8 @@ import {
 } from './appearance'
 import { toastError } from './notify'
 import { useColorMode } from './nuxt-imports'
+import { useSettingsLoad } from './settings-load'
+import SettingsLoadError from './SettingsLoadError.vue'
 import SettingsSection from './SettingsSection.vue'
 import ThemeCard from './ThemeCard.vue'
 
@@ -29,10 +31,7 @@ const resolved = computed(() => settings.resolved)
 
 const ids = { readingFont: useId(), textSize: useId(), density: useId(), showThinking: useId() }
 
-onMounted(() => {
-  if (!settings.loaded)
-    settings.fetch().catch(() => {})
-})
+const { loading: settingsLoading, loadError: settingsLoadError, load: loadSettings } = useSettingsLoad()
 
 const preference = computed(() => normalizeThemePreference(colorMode.preference))
 
@@ -67,6 +66,14 @@ function onDensity(value: unknown) {
 </script>
 
 <template>
+  <SettingsLoadError
+    v-if="settingsLoadError && !settings.loaded"
+    title="Could not load your settings"
+    :error="settingsLoadError"
+    :pending="settingsLoading"
+    class="mb-4"
+    @retry="loadSettings"
+  />
   <SettingsSection title="Theme" description="Dark is the default. System follows your device.">
     <RadioGroup
       :model-value="preference"

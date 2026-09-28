@@ -128,7 +128,7 @@ const ABOVE_LINK = 'relative z-10'
           {{ incompatibleMessage }}
         </TooltipContent>
       </Tooltip>
-      <span :class="cn('min-w-0 truncate pl-0.5 text-xs text-muted-foreground', !summary && 'text-muted-foreground/70')">
+      <span :class="cn('min-w-0 truncate pl-0.5 text-xs text-muted-foreground', !summary && 'italic')">
         {{ summary || 'No contributions' }}
       </span>
       <Button

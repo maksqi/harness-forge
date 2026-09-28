@@ -28,7 +28,7 @@ const showTrigger = computed(() => !!sidebar && (sidebar.isMobile.value || sideb
           <SidebarTrigger
             :data-testid="testIds.sidebarTrigger"
             aria-label="Toggle sidebar"
-            class="-ml-2 text-muted-foreground hover:text-foreground"
+            class="-ml-2 text-muted-foreground hover:text-foreground pointer-coarse:size-10"
           />
         </TooltipTrigger>
         <TooltipContent side="bottom">

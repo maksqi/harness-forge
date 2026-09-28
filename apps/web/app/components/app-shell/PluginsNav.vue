@@ -139,7 +139,7 @@ function openInstall() {
               v-if="plugins.loaded"
               data-slot="plugins-filter-count"
               :data-value="option.value"
-              :class="cn('top-1/2! -translate-y-1/2 font-normal text-sidebar-foreground/55', plugins.counts[option.value] === 0 && 'text-sidebar-foreground/35')"
+              :class="cn('top-1/2! -translate-y-1/2 font-normal text-muted-foreground tabular-nums', plugins.counts[option.value] === 0 && 'font-light')"
             >
               {{ plugins.counts[option.value] }}
             </SidebarMenuBadge>

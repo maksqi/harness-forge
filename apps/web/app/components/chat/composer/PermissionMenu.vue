@@ -78,7 +78,7 @@ function onCloseAutoFocus(event: Event) {
               :data-value="current.value"
               :aria-label="`Permission mode: ${current.label}`"
               :class="cn(
-                'h-8 gap-1.5 px-2 font-normal',
+                'h-8 gap-1.5 px-2 font-normal pointer-coarse:h-10',
                 current.value === 'auto'
                   ? 'text-primary hover:text-primary aria-expanded:text-primary'
                   : 'text-muted-foreground hover:text-foreground aria-expanded:text-foreground',
@@ -89,7 +89,7 @@ function onCloseAutoFocus(event: Event) {
               <ChevronDownIcon aria-hidden="true" class="size-3.5 opacity-60" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent side="top" align="end" class="w-72 rounded-xl" @open-auto-focus="onOpenAutoFocus" @close-auto-focus="onCloseAutoFocus">
+          <DropdownMenuContent side="top" align="end" :collision-padding="8" class="w-72 max-w-[calc(100vw-1rem)] rounded-xl" @open-auto-focus="onOpenAutoFocus" @close-auto-focus="onCloseAutoFocus">
             <DropdownMenuLabel>Permission mode</DropdownMenuLabel>
             <DropdownMenuRadioGroup :model-value="current.value" @update:model-value="select">
               <DropdownMenuRadioItem

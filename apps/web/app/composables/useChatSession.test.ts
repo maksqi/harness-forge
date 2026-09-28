@@ -13,6 +13,7 @@ import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import {
   buildChatRequestBody,
+  chatDataPartSchemas,
   MAX_CHAT_SESSIONS,
   resetChatSessions,
   useChatSession,
@@ -278,6 +279,39 @@ describe('useChatSession: requests', () => {
     expect(body.message.parts).toEqual([{ type: 'text', text: 'hello' }])
     expect(body.message.id).not.toBe(failedId)
     expect(session.chat.messages.value.map(message => message.role)).toEqual(['user', 'assistant'])
+  })
+})
+
+describe('useChatSession: data parts', () => {
+  it('registers every data-part schema under its chunk type as well (AI SDK 7 looks up `data-<name>`)', () => {
+    expect(Object.keys(chatDataPartSchemas).sort()).toEqual(['data-notice', 'notice'])
+    expect(chatDataPartSchemas['data-notice' as 'notice']).toBe(chatDataPartSchemas.notice)
+  })
+
+  it('streams valid notices into the reply', async () => {
+    const session = newSession()
+    const notice = { level: 'warning', code: 'attachments-unsupported', message: 'This model cannot read the attached file, so it was not sent.' }
+    server.reply((write) => {
+      write({ type: 'start', messageId: ASSISTANT_ID, messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'data-notice', data: notice } as UIMessageChunk)
+      write({ type: 'finish', finishReason: 'stop' })
+    })
+    await session.send({ text: 'look', files: [] })
+    expect(session.chat.messages.value[1]!.parts).toContainEqual({ type: 'data-notice', data: notice })
+    expect(session.chat.status.value).toBe('ready')
+  })
+
+  it('rejects a malformed notice instead of rendering it', async () => {
+    const session = newSession()
+    server.reply((write) => {
+      write({ type: 'start', messageId: ASSISTANT_ID, messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'data-notice', data: { level: 'fatal', code: 'nope', message: 42 } } as UIMessageChunk)
+      write({ type: 'finish', finishReason: 'stop' })
+    })
+    await session.send({ text: 'look', files: [] })
+    expect(session.chat.status.value).toBe('error')
+    const parts = session.chat.messages.value.flatMap(message => message.parts)
+    expect(parts.some(part => part.type === 'data-notice')).toBe(false)
   })
 })
 

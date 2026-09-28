@@ -30,7 +30,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` not started.
 Web UI agents depend only on frozen contracts, stores and shell components, so waves are merged:
 - **Wave A** = W1.1–W1.5 (server core) + W2.2–W2.5 (chat/composer/sidebar/settings UI) — 9 agents.
 - **Wave B** = W2.1 (chat server) + W3.1–W3.5 (plugins UI, install, wizard, code plugins, tools/MCP) — 6 agents.
-- **Wave C** = W2.6 + W3.6 (e2e) + W4.1–W4.4 (security, UX polish, packaging, docs/examples) — 6 agents.
+- **Wave C** = W2.6 + W3.6 (e2e) + W4.1–W4.4 (security, UX polish, packaging, docs/examples) + W4.6 (core fixes) — 7 agents.
 - **Wave D** = W4.5 (full e2e ×3, screenshots) + fix-ups.
 
 ## Phase 1 — Core services
@@ -49,8 +49,8 @@ Web UI agents depend only on frozen contracts, stores and shell components, so w
 - [x] W2.3 composer-web (composer, attachments, model picker, effort, permission, slash menu)
 - [x] W2.4 sidebar-web (chat list, status dots, palette, shortcuts dialog, global shortcuts)
 - [x] W2.5 settings-web (providers & keys, models, general, appearance, about, login)
-- [ ] W2.6 e2e-core (smoke specs)
-- [ ] Gate + checkpoint commit
+- [x] W2.6 e2e-core (smoke specs)
+- [x] Gate + checkpoint commit (Wave B)
 
 ## Phase 3 — Plugins, tools, MCP
 
@@ -59,15 +59,16 @@ Web UI agents depend only on frozen contracts, stores and shell components, so w
 - [x] W3.3 provider-wizard (declarative provider plugin wizard + test)
 - [x] W3.4 code-plugins (scaffold templates, file API, CodeMirror editor, build & reload)
 - [x] W3.5 tools-mcp (MCP manager, tool prefs, core-tools, MCP panel)
-- [ ] W3.6 e2e-plugins
-- [ ] Gate + checkpoint commit
+- [x] W3.6 e2e-plugins
+- [x] Gate + checkpoint commit (Waves B + C)
 
 ## Phase 4 — Hardening and release
 
-- [ ] W4.1 security audit + fixes
-- [ ] W4.2 UX polish (Claude Code parity, mobile, a11y, states, perf)
-- [ ] W4.3 packaging (tsdown build, start, Docker, CI)
-- [ ] W4.4 docs + example plugins
+- [x] W4.1 security audit + fixes
+- [x] W4.2 UX polish (Claude Code parity, mobile, a11y, states, perf)
+- [x] W4.3 packaging (tsdown build, start, Docker, CI)
+- [x] W4.4 docs + example plugins
+- [x] W4.6 core fixes (tool history with tools off, host refresh/onStateChange, credentials setFor, flaky watcher tests)
 - [ ] W4.5 full e2e (3 green runs, screenshots)
 - [ ] Final gate + checkpoint commit
 
@@ -111,4 +112,5 @@ conversation branching · sharing links · knowledge/RAG · image generation · 
 | P0.4 C-a | C1+C2, C3 | audit ok; 205 tests; check + build green; dark 200.html verified | b10eb2d |
 | P0.5 C-b | C4, C5, C6 | audit ok; 834 tests; check + build green; 501 stubs verified; pins ok | 15915a4 |
 | Wave A | W1.1–W1.5, W2.2–W2.5 | audit ok; 2064 tests; build ok; providers/keys/persistence/auth/SSE/icons probes ok | b72bb90 |
-| Wave B | W2.1, W3.1–W3.5 | audit ok; 3108/3109 tests (known flaky fs.watch test passes alone); build ok; chat stream, approval, commands, tools, plugins, scaffold probes ok | (this commit) |
+| Wave B | W2.1, W3.1–W3.5 | audit ok; 3108/3109 tests (known flaky fs.watch test passes alone); build ok; chat stream, approval, commands, tools, plugins, scaffold probes ok | 43070f5 |
+| Wave C | W2.6, W3.6, W4.1–W4.4, W4.6 | audit ok; 3530 tests; frozen install ok; build ok; e2e 27/27 (core 15 + plugins 12) | (this commit) |

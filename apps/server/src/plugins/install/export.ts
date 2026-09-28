@@ -1,8 +1,10 @@
 // Plugin export (`GET /plugins/:id/export`, PLUGINS.md 12 "Uninstall and export"): a zip of the plugin directory
 // inside a top-level `<id>/` folder, installable again with `POST /plugins/install`. `node_modules` and `.git` are left
 // out (build output lives in `data/cache`, outside the plugin directory, and settings, storage and secrets are never
-// part of the directory). Links are not followed and not exported; names the installer would refuse, more than 2000
-// entries or more than 100 MB make the export fail instead of producing an archive that cannot be installed again.
+// part of the directory), and so are local credential files a developer may keep next to the code (`.env`, `.env.*`,
+// `.npmrc`), so a shared export never carries them (SEC-D5). Links are not followed and not exported; names the
+// installer would refuse, more than 2000 entries or more than 100 MB make the export fail instead of producing an
+// archive that cannot be installed again.
 import type { Zippable } from 'fflate'
 import type { InstallLimits } from './errors.ts'
 import { lstat, readdir, readFile } from 'node:fs/promises'
@@ -18,6 +20,12 @@ const ZIP_MAX_TIME = Date.UTC(2099, 11, 31)
 /** Unix regular file, mode 0644, in the upper 16 bits of the external attributes (host 3 = Unix). */
 const FILE_ATTRIBUTES = (0o100644 << 16) >>> 0
 const UNIX_HOST = 3
+
+/** Local credential files never exported: `.env`, `.env.<anything>` and `.npmrc` (any case). */
+export function isCredentialFile(name: string): boolean {
+  const lower = name.toLowerCase()
+  return lower === '.env' || lower.startsWith('.env.') || lower === '.npmrc'
+}
 
 export interface PluginExport {
   fileName: string
@@ -43,6 +51,8 @@ export async function exportPluginDirectory(id: string, version: string, dir: st
       if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile()))
         continue
       if (info.isDirectory() && SKIPPED_FOLDERS.has(name))
+        continue
+      if (info.isFile() && isCredentialFile(name))
         continue
       const checked = checkEntryPath(shown)
       if (!checked.ok)

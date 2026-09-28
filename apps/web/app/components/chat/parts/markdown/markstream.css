@@ -1,0 +1,7 @@
+/*
+ * markstream-vue's stylesheet, imported into the `components` cascade layer (the approach its README recommends for
+ * Tailwind). The file also ships global rules outside its `.markstream-vue` scope (a Tailwind v3 `.container` utility,
+ * `.icon-slot`, `.code-block-header`, ...): in a layer they rank below Tailwind's utilities and every unlayered app
+ * style, so they can no longer override anything in the app. Markdown.vue's own overrides stay unlayered.
+ */
+@import "markstream-vue/index.css" layer(components);

@@ -75,7 +75,8 @@ onBeforeUnmount(stopTicker)
 
 // Tinted surfaces keep readable foreground text (docs/UI.md 14.3); the title and the icon carry the color.
 const WARNING_CLASS = 'border-warning/40 bg-warning/5 dark:bg-warning/10 *:[svg]:text-warning'
-const ERROR_CLASS = 'border-destructive/35 bg-destructive/5 dark:bg-destructive/10'
+// The title mixes a little foreground into the red: plain --destructive on the red tint misses 4.5:1 in dark mode.
+const ERROR_CLASS = 'border-destructive/35 bg-destructive/5 dark:bg-destructive/10 *:data-[slot=alert-title]:text-[color-mix(in_oklch,var(--destructive)_80%,var(--foreground))]'
 
 function label(action: HarnessErrorUiAction): string {
   if (action === 'retry' && retryWaitSeconds.value > 0)

@@ -1,71 +1,36 @@
 // CodeMirror 6 setup of the Source tab (docs/UI.md 8.10): one EditorView whose state is swapped per open file (each
 // file keeps its own undo history and selection), languages by extension, the one-dark theme in dark mode and a light
-// theme from the design tokens, JetBrains Mono 13px, a read-only mode, Tab indentation, and build diagnostics shown as
-// lint markers: a gutter marker per line, a wavy underline and a hover tooltip (all rendered with textContent).
+// theme from the design tokens, JetBrains Mono 13px, a read-only mode, Tab indentation (`@codemirror/commands`), and
+// build diagnostics through `@codemirror/lint` (wavy underline, hover tooltip, the keyboard-accessible diagnostics
+// panel on Mod-Shift-M and F8) plus a gutter marker per line (its title shows the messages on hover; the gutter is
+// hidden from assistive technology, so new diagnostics are also announced through the editor's live region).
+// Messages are text only.
 // Loaded with a dynamic import by SourceEditor.vue, so CodeMirror is only downloaded when the Source tab opens.
-import type { ChangeSpec, Extension, Text } from '@codemirror/state'
-import type { DecorationSet, Tooltip } from '@codemirror/view'
+import type { Diagnostic } from '@codemirror/lint'
+import type { Extension, Text } from '@codemirror/state'
 import type { BuildDiagnostic } from '@harness-forge/shared'
 import type { SourceLanguage } from './source-files'
+import { indentLess, indentMore } from '@codemirror/commands'
 import { javascript } from '@codemirror/lang-javascript'
 import { json } from '@codemirror/lang-json'
 import { markdown } from '@codemirror/lang-markdown'
-import { Compartment, EditorSelection, EditorState, RangeSet, StateEffect, StateField } from '@codemirror/state'
+import { forEachDiagnostic, setDiagnostics } from '@codemirror/lint'
+import { Compartment, EditorState, RangeSet } from '@codemirror/state'
 import { oneDark } from '@codemirror/theme-one-dark'
-import { Decoration, EditorView, gutter, GutterMarker, hoverTooltip, keymap } from '@codemirror/view'
+import { EditorView, gutter, GutterMarker, keymap } from '@codemirror/view'
 import { basicSetup } from 'codemirror'
 import { byteColumnToIndex, languageOf } from './source-files'
 
-/** A diagnostic placed in the document (UTF-16 offsets). */
-export interface EditorDiagnostic {
-  from: number
-  to: number
+/** A build diagnostic placed in the document (UTF-16 offsets), as `@codemirror/lint` shows it. */
+export interface EditorDiagnostic extends Diagnostic {
   severity: 'error' | 'warning'
-  message: string
 }
 
+/** The indent unit (the `indentUnit` default, matching `tabSize` 2). */
 const INDENT = '  '
 const WORD_START = /^[\w$]+/
-const LEADING_INDENT = /^ {0,2}/
 
 // ---------- diagnostics ----------
-
-const setDiagnosticsEffect = StateEffect.define<EditorDiagnostic[]>()
-
-interface DiagnosticsValue {
-  items: EditorDiagnostic[]
-  marks: DecorationSet
-}
-
-function markDecorations(items: readonly EditorDiagnostic[], length: number): DecorationSet {
-  const ranges = items
-    .map((item) => {
-      const from = Math.min(item.from, length)
-      const to = Math.min(Math.max(item.to, from + 1), length)
-      return to > from ? Decoration.mark({ class: `cm-hf-diagnostic-${item.severity}` }).range(from, to) : null
-    })
-    .filter(range => range !== null)
-  return Decoration.set(ranges, true)
-}
-
-const diagnosticsField = StateField.define<DiagnosticsValue>({
-  create: () => ({ items: [], marks: Decoration.none }),
-  update(value, transaction) {
-    let next = value
-    if (transaction.docChanged) {
-      next = {
-        items: value.items.map(item => ({ ...item, from: transaction.changes.mapPos(item.from), to: transaction.changes.mapPos(item.to, 1) })),
-        marks: value.marks.map(transaction.changes),
-      }
-    }
-    for (const effect of transaction.effects) {
-      if (effect.is(setDiagnosticsEffect))
-        next = { items: effect.value, marks: markDecorations(effect.value, transaction.state.doc.length) }
-    }
-    return next
-  },
-  provide: field => EditorView.decorations.from(field, value => value.marks),
-})
 
 class DiagnosticMarker extends GutterMarker {
   constructor(readonly severity: 'error' | 'warning', readonly message: string) {
@@ -85,53 +50,30 @@ class DiagnosticMarker extends GutterMarker {
     }
     marker.className = `cm-hf-lint-marker cm-hf-lint-marker-${this.severity}`
     marker.title = this.message
-    marker.setAttribute('aria-label', this.message)
-    marker.setAttribute('role', 'img')
     return marker
   }
 }
 
-function lintGutter(): Extension {
+/** One marker per line with diagnostics, read from the `@codemirror/lint` state; hovering shows its messages. */
+function diagnosticsGutter(): Extension {
   return gutter({
     class: 'cm-hf-lint-gutter',
     markers: (view) => {
-      const { items } = view.state.field(diagnosticsField)
-      const byLine = new Map<number, EditorDiagnostic[]>()
-      for (const item of items) {
-        const line = view.state.doc.lineAt(Math.min(item.from, view.state.doc.length))
-        byLine.set(line.from, [...(byLine.get(line.from) ?? []), item])
-      }
-      const markers = [...byLine.entries()].map(([from, lineItems]) => {
-        const severity = lineItems.some(item => item.severity === 'error') ? 'error' : 'warning'
-        return new DiagnosticMarker(severity, lineItems.map(item => item.message).join('\n')).range(from)
+      const { doc } = view.state
+      const byLine = new Map<number, { error: boolean, messages: string[] }>()
+      forEachDiagnostic(view.state, (diagnostic, from) => {
+        const line = doc.lineAt(Math.min(from, doc.length))
+        const entry = byLine.get(line.from) ?? { error: false, messages: [] }
+        entry.error ||= diagnostic.severity === 'error'
+        entry.messages.push(diagnostic.message)
+        byLine.set(line.from, entry)
       })
+      const markers = [...byLine].map(([from, entry]) => new DiagnosticMarker(entry.error ? 'error' : 'warning', entry.messages.join('\n')).range(from))
       return RangeSet.of(markers, true)
     },
     initialSpacer: () => new DiagnosticMarker('error', ''),
   })
 }
-
-const diagnosticsTooltip = hoverTooltip((view, pos): Tooltip | null => {
-  const hits = view.state.field(diagnosticsField).items.filter(item => pos >= item.from && pos <= Math.max(item.to, item.from + 1))
-  if (hits.length === 0)
-    return null
-  return {
-    pos: Math.min(...hits.map(item => item.from)),
-    end: Math.max(...hits.map(item => item.to)),
-    above: true,
-    create: () => {
-      const dom = document.createElement('div')
-      dom.className = 'cm-hf-lint-tooltip'
-      for (const hit of hits) {
-        const row = document.createElement('div')
-        row.className = `cm-hf-lint-tooltip-row cm-hf-lint-tooltip-${hit.severity}`
-        row.textContent = hit.message
-        dom.append(row)
-      }
-      return { dom }
-    },
-  }
-})
 
 /** Places build diagnostics of one file in `doc` (1-based lines, 1-based UTF-8 byte columns). */
 export function placeDiagnostics(doc: Text, diagnostics: readonly BuildDiagnostic[]): EditorDiagnostic[] {
@@ -140,68 +82,68 @@ export function placeDiagnostics(doc: Text, diagnostics: readonly BuildDiagnosti
     const line = doc.line(lineNumber)
     const offset = diagnostic.column === null ? 0 : Math.min(byteColumnToIndex(line.text, diagnostic.column), line.length)
     // Underline the word at the position (or one character); a diagnostic at the end of a line marks the whole line.
+    const markClass = `cm-hf-diagnostic-${diagnostic.severity}`
     if (offset >= line.length)
-      return { from: line.from, to: line.to, severity: diagnostic.severity, message: diagnostic.message }
+      return { from: line.from, to: line.to, severity: diagnostic.severity, message: diagnostic.message, markClass }
     const word = line.text.slice(offset).match(WORD_START)?.[0].length ?? 0
     const from = line.from + offset
-    return { from, to: from + Math.max(word, 1), severity: diagnostic.severity, message: diagnostic.message }
+    return { from, to: from + Math.max(word, 1), severity: diagnostic.severity, message: diagnostic.message, markClass }
   })
+}
+
+/**
+ * What screen readers hear when diagnostics arrive (CodeMirror's gutters are `aria-hidden`): the count and the first
+ * problem, e.g. "2 problems in this file. Line 3: Expected identifier".
+ */
+export function diagnosticsAnnouncement(doc: Text, diagnostics: readonly EditorDiagnostic[]): string {
+  const first = diagnostics[0]
+  if (!first)
+    return ''
+  const count = diagnostics.length === 1 ? '1 problem' : `${diagnostics.length} problems`
+  const line = doc.lineAt(Math.min(first.from, doc.length)).number
+  return `${count} in this file. Line ${line}: ${first.message}`
 }
 
 // ---------- editing ----------
 
-/** Tab: two spaces at an empty cursor, else indents the selected lines; Shift-Tab removes up to two spaces. */
-function indentSelection(view: EditorView, direction: 1 | -1): boolean {
+/**
+ * Tab: the indent unit at the cursor when nothing is selected, else `indentMore` on the selected lines; Shift-Tab:
+ * `indentLess`. Both do nothing in read-only mode.
+ */
+function insertIndent(view: EditorView): boolean {
   const { state } = view
   if (state.readOnly)
     return false
-  const transaction = state.changeByRange((range) => {
-    if (direction === 1 && range.empty)
-      return { changes: { from: range.from, insert: INDENT }, range: EditorSelection.cursor(range.from + INDENT.length) }
-    const changes: ChangeSpec[] = []
-    const first = state.doc.lineAt(range.from)
-    const last = state.doc.lineAt(range.to)
-    for (let number = first.number; number <= last.number; number++) {
-      const line = state.doc.line(number)
-      if (number > first.number && number === last.number && range.to === line.from)
-        break
-      if (direction === 1) {
-        changes.push({ from: line.from, insert: INDENT })
-      }
-      else {
-        const spaces = line.text.match(LEADING_INDENT)?.[0].length ?? 0
-        if (spaces > 0)
-          changes.push({ from: line.from, to: line.from + spaces })
-      }
-    }
-    const set = state.changes(changes)
-    return { changes: set, range: EditorSelection.range(set.mapPos(range.anchor, 1), set.mapPos(range.head, 1)) }
-  })
-  view.dispatch(state.update(transaction, { scrollIntoView: true, userEvent: direction === 1 ? 'input.indent' : 'delete.dedent' }))
+  if (state.selection.ranges.some(range => !range.empty))
+    return indentMore(view)
+  view.dispatch(state.update(state.replaceSelection(INDENT), { scrollIntoView: true, userEvent: 'input.indent' }))
   return true
 }
 
-const indentKeymap = keymap.of([
-  { key: 'Tab', run: view => indentSelection(view, 1), shift: view => indentSelection(view, -1) },
-])
+const indentKeymap = keymap.of([{ key: 'Tab', run: insertIndent, shift: indentLess }])
 
 // ---------- themes ----------
 
+// `@codemirror/lint` draws its underlines and tooltips with fixed colors; these rules use the design tokens instead.
 const baseTheme = EditorView.theme({
   '&': { height: '100%', fontSize: '13px' },
   '&.cm-focused': { outline: 'none' },
-  '.cm-scroller': { fontFamily: 'var(--font-mono)', lineHeight: '1.6' },
+  '.cm-scroller': { fontFamily: 'var(--font-mono)', lineHeight: '1.6', fontVariantLigatures: 'none', fontFeatureSettings: '"calt" 0, "liga" 0' },
   '.cm-hf-lint-gutter .cm-gutterElement': { display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 2px' },
   '.cm-hf-lint-marker': { display: 'inline-block', width: '8px', height: '8px', borderRadius: '9999px' },
   '.cm-hf-lint-marker-error': { backgroundColor: 'var(--destructive)' },
   '.cm-hf-lint-marker-warning': { backgroundColor: 'var(--warning)' },
-  '.cm-hf-diagnostic-error': { textDecoration: 'underline wavy var(--destructive)', textDecorationSkipInk: 'none', textUnderlineOffset: '3px' },
-  '.cm-hf-diagnostic-warning': { textDecoration: 'underline wavy var(--warning)', textDecorationSkipInk: 'none', textUnderlineOffset: '3px' },
-  '.cm-tooltip.cm-tooltip-hover': { border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden' },
-  '.cm-hf-lint-tooltip': { maxWidth: '36rem', fontFamily: 'var(--font-sans)', fontSize: '12px', backgroundColor: 'var(--popover)', color: 'var(--popover-foreground)' },
-  '.cm-hf-lint-tooltip-row': { padding: '4px 8px', whiteSpace: 'pre-wrap', borderLeft: '3px solid transparent' },
-  '.cm-hf-lint-tooltip-error': { borderLeftColor: 'var(--destructive)' },
-  '.cm-hf-lint-tooltip-warning': { borderLeftColor: 'var(--warning)' },
+  '.cm-lintRange-error, .cm-lintRange-warning': { backgroundImage: 'none', paddingBottom: '0', textDecorationSkipInk: 'none', textUnderlineOffset: '3px' },
+  '.cm-lintRange-error': { textDecoration: 'underline wavy var(--destructive)' },
+  '.cm-lintRange-warning': { textDecoration: 'underline wavy var(--warning)' },
+  '.cm-lintRange-active': { backgroundColor: 'color-mix(in oklch, var(--warning) 22%, transparent)' },
+  '.cm-tooltip.cm-tooltip-hover, .cm-tooltip.cm-tooltip-lint': { border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden' },
+  '.cm-tooltip-lint': { maxWidth: '36rem', fontFamily: 'var(--font-sans)', fontSize: '12px', backgroundColor: 'var(--popover)', color: 'var(--popover-foreground)' },
+  '.cm-diagnostic': { padding: '4px 8px', borderLeftWidth: '3px' },
+  '.cm-diagnostic-error': { borderLeftColor: 'var(--destructive)' },
+  '.cm-diagnostic-warning': { borderLeftColor: 'var(--warning)' },
+  '.cm-panel.cm-panel-lint': { fontFamily: 'var(--font-sans)', fontSize: '12px' },
+  '.cm-panel.cm-panel-lint ul [aria-selected]': { backgroundColor: 'var(--accent)', color: 'var(--accent-foreground)' },
 })
 
 const lightTheme = EditorView.theme({
@@ -287,9 +229,7 @@ export function createSourceEditor(parent: HTMLElement, options: SourceEditorOpt
         languageExtension(languageOf(path)),
         theme.of(themeExtension(dark)),
         editable.of(readOnlyExtension(readonly)),
-        diagnosticsField,
-        lintGutter(),
-        diagnosticsTooltip,
+        diagnosticsGutter(),
         EditorView.contentAttributes.of({ 'aria-label': `Contents of ${path}` }),
         EditorView.updateListener.of((update) => {
           if (!update.docChanged || activePath === null)
@@ -327,13 +267,17 @@ export function createSourceEditor(parent: HTMLElement, options: SourceEditorOpt
       if (view.state.doc.toString() === content)
         return
       view.dispatch({
+        ...setDiagnostics(view.state, []),
         changes: { from: 0, to: view.state.doc.length, insert: content },
         userEvent: SILENT_USER_EVENT,
-        effects: setDiagnosticsEffect.of([]),
       })
     },
     setDiagnostics: (diagnostics) => {
-      view.dispatch({ effects: setDiagnosticsEffect.of(placeDiagnostics(view.state.doc, diagnostics)) })
+      const placed = placeDiagnostics(view.state.doc, diagnostics)
+      const spec = setDiagnostics(view.state, placed)
+      const announcement = diagnosticsAnnouncement(view.state.doc, placed)
+      const effects = [spec.effects ?? []].flat()
+      view.dispatch(announcement ? { ...spec, effects: [...effects, EditorView.announce.of(announcement)] } : spec)
     },
     setDark: (value) => {
       dark = value

@@ -98,7 +98,7 @@ first.
 | `moonshotai` | `GET {baseURL}/models` | Bearer | ids; metadata from models.dev and seeds | verified (route) |
 | `alibaba` | `GET {baseURL}/models` | Bearer | ids (OpenAI shape **(unverified)**); keep ids starting with `qwen` or `qwq`; drop `embed`, `tts`, `asr`, `image`, `wan`, `realtime`, `livetranslate`, `-mt-` | verified (route) |
 | `zai` | `GET {baseURL}/models` | Bearer | ids (OpenAI shape) | **(unverified)** on the general endpoint (documented for the Coding Plan endpoint); fall back to seeds + models.dev |
-| `minimax` | `GET {baseURL}/models` | `x-api-key` | ids | route exists, response shape **(unverified)**; fall back to seeds |
+| `minimax` | `GET {baseURL}/models` | `x-api-key`, `anthropic-version` | parsed like the Anthropic listing (`id`, `display_name`); tools on; vision for M3; `reasoningEfforts` by model family ([section 6](#6-provider-notes)) | response shape **(unverified)**; fall back to seeds |
 | `mistral` | `GET {baseURL}/models` | Bearer | keep `capabilities.completion_chat`; drop `archived` / deprecated; `max_context_length`; `capabilities.function_calling` -> tools, `capabilities.vision` -> vision; hide duplicate `aliases` | verified (docs) |
 | `groq` | `GET {baseURL}/models` | Bearer | keep `active`; `context_window`, `max_completion_tokens`; drop `whisper`, `orpheus`, `tts`, `prompt-guard`, `safeguard` | verified (docs) |
 | `openrouter` | `GET {baseURL}/models` (public, no key needed; send the key when set) | Bearer | `name`; `context_length`; `top_provider.max_completion_tokens`; keep `architecture.output_modalities` containing `text`; `architecture.input_modalities` (`image` -> vision, `file` -> pdf); `supported_parameters` (`tools` -> tools, `reasoning` -> reasoning, `structured_outputs` -> structuredOutput); `pricing` (below) | verified |
@@ -141,7 +141,7 @@ from the model's `reasoningEfforts`.
 | `moonshotai` | `reasoning: 'none'` -> `thinking: { type: 'disabled' }` (K2.5 / K2.6 only) | `reasoning: 'low'` (K3: `reasoning_effort: 'low'`) | not offered on K3 | `reasoning: 'high'` (K3: `high`; K2.x: thinking enabled) | `reasoning: 'xhigh'` (K3: `max`) |
 | `alibaba` | `reasoning: 'none'` -> `enable_thinking: false` | `reasoning: 'low'` -> `enable_thinking: true`, `thinking_budget: 1638` | `reasoning: 'medium'` -> budget 4915 | `reasoning: 'high'` -> budget 9830 | `reasoning: 'xhigh'` -> budget 14746 |
 | `zai` | `po.zai = { thinking: { type: 'disabled' } }` | `po.zai = { thinking: { type: 'enabled' }, reasoningEffort: 'low' }` | same with `'medium'` | same with `'high'` | same with `'max'` |
-| `minimax` | `po.minimax = { thinking: { type: 'disabled' } }` | not offered | not offered | `po.minimax = { thinking: { type: 'adaptive' } }` | not offered |
+| `minimax` | `po.minimax = { thinking: { type: 'disabled' } }` (MiniMax-M3 only) | not offered | not offered | `po.minimax = { thinking: { type: 'adaptive' } }` (MiniMax-M3 only) | not offered |
 | `mistral` | `reasoning: 'none'` | not offered | not offered | `reasoning: 'high'` | not offered |
 | `groq` | `po.groq = { reasoningEffort: 'none' }` (Qwen models only; gpt-oss cannot disable) | `reasoning: 'low'` | `reasoning: 'medium'` | `reasoning: 'high'` | not offered |
 | `openrouter` | `po.openrouter = { reasoning: { effort: 'none' } }` | `po.openrouter = { reasoning: { effort: 'low' } }` | `{ effort: 'medium' }` | `{ effort: 'high' }` | `{ effort: 'xhigh' }` |
@@ -164,9 +164,11 @@ Details:
   thinking; MiniMax accepts only `adaptive` / `disabled`, so `core-providers` always uses `providerOptions`.
 - `zai`: `reasoningEffort` applies to GLM-5.2 and later; for earlier GLM models send only `thinking` (their accepted
   efforts are `off` and `high`).
-- `ollama`: accepted values are model-specific; `POST /api/show` reports them for thinking models
-  (`thinking.values` **(unverified)**); boolean-only models map any non-`none` value to thinking on
-  **(unverified)**.
+- `ollama`: the effort menu of a local model comes from `POST /api/show` `thinking.values`: `false` (or `"none"`)
+  offers `off`; named levels (`low`, `medium`, `high`, `max`) are offered as reported; a boolean-only control
+  (`[true, false]`) offers `off` and `high` (thinking on). A model whose values are all `false` is not a reasoning
+  model; a model without `thinking` metadata but with the `thinking` capability gets the host defaults
+  (`off, low, medium, high`). The field shape follows Ollama's API docs **(unverified against every model)**.
 
 ### Provider options reference
 
@@ -237,7 +239,8 @@ with `capabilities.reasoning`.
 - **Google**: invalid keys come back as HTTP 400 with reason `API_KEY_INVALID`; `mapError` maps that to
   `auth_invalid`. Model ids are listed as `models/<id>`; the prefix is stripped.
 - **xAI**: `@ai-sdk/xai` 5.x uses only the Responses API (`/v1/responses`). `grok-4.20-*-reasoning` /
-  `-non-reasoning` variants do not accept an effort.
+  `-non-reasoning` variants do not accept an effort. An invalid key is answered with HTTP **400** "Incorrect API key
+  provided" (not 401); the common auth message rule maps it to `auth_invalid` (action `configure-provider`).
 - **DeepSeek**: base URL without `/v1`. V4 models think by default (with `auto`); `temperature` / `topP` are ignored
   while thinking.
 - **Moonshot AI (Kimi)**: the console moved to `platform.kimi.ai`; the API host stays `api.moonshot.ai`. Kimi K3
@@ -246,8 +249,14 @@ with `capabilities.reasoning`.
   many non-chat models (filtered, section 3).
 - **Z.ai (GLM)**: general and Coding Plan keys use different base URLs (section 2) and are not interchangeable.
 - **MiniMax**: the builtin uses the Anthropic-compatible endpoint; the OpenAI-compatible endpoint
-  (`https://api.minimax.io/v1`) is not used. Pay-as-you-go keys and Token Plan subscription keys are reportedly not
-  interchangeable **(unverified)**.
+  (`https://api.minimax.io/v1`) is not used. Default `max_tokens` (the MiniMax recommendation): **131072** for the
+  M3 family (`MiniMax-M3`, `MiniMax-M3.x`) and **65536** for other models, applied through the model wrapper
+  (section 2) because the package's Anthropic internals would cap unknown models at 4096 output tokens, thinking
+  included; a call value still wins. Effort menu: MiniMax-M3 offers `off` / `high` (thinking disabled / adaptive);
+  M3.1 and later and the M2 family always think (no effort menu; M3.1+ rejects `disabled` with HTTP 400). MiniMax
+  `base_resp.status_code` errors are mapped (`1004` / `2049` -> `auth_invalid`, `1008` -> balance `provider_error`,
+  `2056` and `1002` / `1039` / `1041` / `2045` -> `rate_limited`). Pay-as-you-go keys and Token Plan subscription keys
+  are reportedly not interchangeable **(unverified)**.
 - **Mistral**: only some models accept an effort, and only `none` / `high`.
 - **Groq**: `reasoning_format` and `include_reasoning` are mutually exclusive; the always-on `reasoningFormat:
   'parsed'` is skipped for `openai/gpt-oss-*`.
@@ -256,6 +265,9 @@ with `capabilities.reasoning`.
   `X-OpenRouter-Title` (the current name of the legacy `X-Title` header, which OpenRouter still accepts) and `appUrl`
   as `HTTP-Referer` (required for attribution). With `usage: { include: true }` the response carries the charged
   cost in `providerMetadata.openrouter.usage.cost`, which is used as `costUsd` (ARCHITECTURE.md, Model catalog).
+  The model listing is public, so it cannot prove a key: `validate` (the **Test** button) calls `GET {baseURL}/key`,
+  which fails without a valid key; when that endpoint is missing (a proxy base URL), it falls back to a 1-token call
+  on `smallModelId`.
 - **Ollama**: no key; the base URL is the main (not advanced) field so remote Ollama hosts work
   (`http://gpu-box:11434/v1`). `ECONNREFUSED` maps to `provider_unreachable` with the message "Cannot reach Ollama at
   <origin>. Is Ollama running?". The OpenAI-compatible API also accepts `reasoning_effort` (see mapping);
@@ -272,6 +284,8 @@ errors -> `context_overflow`; `ECONNREFUSED` / `ENOTFOUND` -> `provider_unreacha
 |---|---|---|
 | `anthropic` | HTTP 529 `overloaded_error` | `provider_error`, action `retry` |
 | `google` | HTTP 400 with `API_KEY_INVALID` | `auth_invalid`, action `configure-provider` |
+| `xai` | HTTP 400 "Incorrect API key provided" (common auth message rule) | `auth_invalid`, action `configure-provider` |
+| `minimax` | `base_resp.status_code` `1004` / `2049`; `1008`; `2056`, `1002`, `1039`, `1041`, `2045` | `auth_invalid`; `provider_error` (balance); `rate_limited` |
 | `deepseek` | HTTP 402 (insufficient balance) | `provider_error` "DeepSeek account balance is insufficient" |
 | `openrouter` | HTTP 402 (no credits) | `provider_error` "OpenRouter credits are exhausted" |
 | `ollama` | connection refused | `provider_unreachable` with the hint above |
@@ -280,7 +294,7 @@ errors -> `context_overflow`; `ECONNREFUSED` / `ENOTFOUND` -> `provider_unreacha
 
 | | OpenRouter | Ollama |
 |---|---|---|
-| Key | required for chat, not for the listing | none (optional Bearer) |
+| Key | required for chat, not for the listing; tested with `GET /key` | none (optional Bearer) |
 | Listing | public `GET /api/v1/models` with pricing, context, capabilities | `GET /api/tags` (+ `POST /api/show`) |
 | Model ids | `vendor/model` (`anthropic/claude-sonnet-5`, `~openai/gpt-luna-latest`) | `name:tag` (`llama3:8b`), refs like `ollama:llama3:8b` |
 | Cost | provider-reported (`usage.include`) | none (local) |
@@ -333,7 +347,11 @@ Step 2 of the provider wizard offers these templates; each fills a `DeclarativeP
 | LiteLLM proxy (`litellm`) | `http://localhost:4000/v1` | `openai-chat` | `bearer`, `apiKey` optional (master or virtual key) | `true` (ids are the proxy's `model_name` aliases) | `openai-effort` (LiteLLM translates `reasoning_effort`) | — | monogram (no LobeHub icon) | none |
 
 The wizard also offers "Anthropic-compatible" (`apiFormat: 'anthropic'`, `auth` header `x-api-key`, base URL ending
-in `/v1`) without a template. Every template field stays editable; the Review step runs a 1-token test.
+in `/v1`) without a template. Every template field stays editable; the Review step runs a 1-token test. Declarative
+credentials cannot name an environment variable (`envVar` is rejected in manifests), so the wizard has no env-var
+field: keys are entered in Settings -> Providers after the plugin is created. Runnable manifests of two templates:
+[`examples/plugins/lmstudio`](../examples/plugins/lmstudio/) and [`examples/plugins/together-ai`](../examples/plugins/together-ai/);
+walkthrough: [Writing a declarative provider](./guides/writing-a-declarative-provider.md).
 
 ## 10. Icons
 
@@ -398,5 +416,5 @@ Verified on 2026-09-28:
 
 Unverified (re-check during implementation): `grok-4.7` accepted efforts and the `/v1/language-models` response shape;
 Z.ai `/models` on the general endpoint and per-model effort support of GLM models; MiniMax listing shape and model id
-casing; Alibaba listing shape and which Qwen models accept `enable_thinking`; Ollama `/api/show` `thinking.values` and
-boolean-only thinking models; the MiniMax China base URL.
+casing; Alibaba listing shape and which Qwen models accept `enable_thinking`; Ollama `/api/show` `thinking.values` on
+real models (the mapping of section 4 is implemented from Ollama's docs); the MiniMax China base URL.

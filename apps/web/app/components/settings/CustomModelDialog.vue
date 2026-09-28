@@ -102,7 +102,7 @@ function errorsOf(meta: { errors: ReadonlyArray<unknown>, isBlurred: boolean }):
 
 <template>
   <Dialog :open="open" @update:open="onOpenChange">
-    <DialogContent :data-testid="testIds.customModelDialog" class="sm:max-w-md">
+    <DialogContent :data-testid="testIds.customModelDialog" class="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-md">
       <form class="grid gap-5" novalidate @submit.prevent.stop="form.handleSubmit()">
         <DialogHeader>
           <DialogTitle>Add a custom model</DialogTitle>

@@ -44,6 +44,8 @@ describe('notices', () => {
     expect(NOTICES.superseded(1).message).toBe('A pending tool call was denied because a new message was sent.')
     expect(NOTICES.superseded(3).message).toBe('3 pending tool calls were denied because a new message was sent.')
     expect(NOTICES.filesNotSent(2).message).toBe('This model cannot read 2 of the attached files, so they were not sent.')
+    expect(NOTICES.filesNotSent(1)).toEqual({ level: 'warning', code: 'attachments-unsupported', message: 'This model cannot read the attached file, so it was not sent.' })
+    expect(NOTICES.toolsUnsupported().code).toBe('tools-unsupported')
     const notice = NOTICES.toolsUnsupported()
     const history: HarnessUIMessage[] = [
       { id: 'msg_u000000000000001', role: 'user', parts: [{ type: 'text', text: 'x' }] },

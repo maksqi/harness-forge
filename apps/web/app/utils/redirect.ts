@@ -1,4 +1,6 @@
-// Login redirects (docs/UI.md 6): `/login?redirect=<path>` accepts only in-app paths. Auto-imported (utils/).
+// Login redirects (docs/UI.md 6): `/login?redirect=<path>` accepts only in-app paths; the access-blocked answer of the
+// auth status request. Auto-imported (utils/).
+import { toHarnessError } from './errors'
 
 export const LOGIN_PATH = '/login'
 
@@ -65,4 +67,14 @@ export function authRedirectFor(to: AuthRedirectTarget, auth: AuthRedirectState)
   if (to.path === LOGIN_PATH)
     return auth.authenticated ? afterLoginPath(to.query.redirect) : null
   return auth.requiresLogin ? loginPath(to.fullPath) : null
+}
+
+/**
+ * The server's explanation when it refuses the app outright: `GET /api/auth/status` (a public route) answered
+ * `403 forbidden` without the fresh-auth `login` action, e.g. a password-less server reached through a non-local host
+ * name (DNS rebinding protection). Null for every other failure, which leaves auth not required.
+ */
+export function accessBlockedMessage(error: unknown): string | null {
+  const failure = toHarnessError(error)
+  return failure.code === 'forbidden' && failure.action !== 'login' ? failure.message : null
 }

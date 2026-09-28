@@ -45,12 +45,12 @@ function onCloseAutoFocus(event: Event) {
               size="icon-sm"
               :data-testid="testIds.composerAdd"
               aria-label="Add"
-              class="rounded-full text-muted-foreground hover:text-foreground aria-expanded:text-foreground"
+              class="rounded-full text-muted-foreground hover:text-foreground aria-expanded:text-foreground pointer-coarse:size-10"
             >
               <PlusIcon aria-hidden="true" class="size-[18px]" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent side="top" align="start" class="w-48 rounded-xl" @close-auto-focus="onCloseAutoFocus">
+          <DropdownMenuContent side="top" align="start" :collision-padding="8" class="w-48 rounded-xl" @close-auto-focus="onCloseAutoFocus">
             <DropdownMenuItem :data-testid="testIds.composerAttach" class="rounded-md" @select="emit('attach')">
               <PaperclipIcon aria-hidden="true" />
               Attach files

@@ -1,7 +1,7 @@
 // Frozen interfaces of the encrypted secret store and of provider credentials (ARCHITECTURE.md 10.3, 6.6).
 // Implementations (W1.2): `createSecretStore(deps)` in `services/secrets/index.ts`,
 // `createCredentialService(deps)` in `services/secrets/credentials.ts`.
-import type { CredentialState, CredentialValues } from '@harness-forge/shared'
+import type { CredentialField, CredentialState, CredentialValues } from '@harness-forge/shared'
 
 /** `provider:<id>` | `plugin:<id>` | `mcp:<id>` | `auth`. */
 export type SecretScope = `provider:${string}` | `plugin:${string}` | `mcp:${string}` | 'auth'
@@ -72,4 +72,11 @@ export interface CredentialService {
   readonly set: (providerId: string, values: CredentialValues) => Promise<void>
   /** Removes every stored value of the provider (env fallbacks keep working). */
   readonly clear: (providerId: string) => Promise<void>
+  /**
+   * `set` against the given fields instead of the registered provider's, for a provider that is not registered right
+   * now (a declarative plugin created disabled, in safe mode or whose load failed): same validation, storage layout
+   * and per-provider serialization. `validation_error` for an invalid provider id. W4.6 addition, optional so fakes
+   * of this interface keep compiling; `createCredentialService` implements it.
+   */
+  readonly setFor?: (providerId: string, fields: readonly CredentialField[], values: CredentialValues) => Promise<void>
 }

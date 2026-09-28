@@ -83,14 +83,14 @@ function onCloseAutoFocus(event: Event) {
               :data-testid="testIds.effortMenuTrigger"
               :data-value="current"
               :aria-label="`Reasoning effort: ${label}`"
-              class="h-8 gap-1.5 px-2 font-normal text-muted-foreground hover:text-foreground aria-expanded:text-foreground"
+              class="h-8 gap-1.5 px-2 font-normal text-muted-foreground hover:text-foreground aria-expanded:text-foreground pointer-coarse:h-10"
             >
               <BrainIcon aria-hidden="true" class="size-4" />
               <span class="hidden sm:inline">{{ label }}</span>
               <ChevronDownIcon aria-hidden="true" class="size-3.5 opacity-60" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent side="top" align="start" class="w-56 rounded-xl" @open-auto-focus="onOpenAutoFocus" @close-auto-focus="onCloseAutoFocus">
+          <DropdownMenuContent side="top" align="start" :collision-padding="8" class="w-56 rounded-xl" @open-auto-focus="onOpenAutoFocus" @close-auto-focus="onCloseAutoFocus">
             <DropdownMenuLabel>Reasoning effort</DropdownMenuLabel>
             <DropdownMenuRadioGroup :model-value="current" @update:model-value="select">
               <DropdownMenuRadioItem

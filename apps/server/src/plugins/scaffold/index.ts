@@ -9,9 +9,10 @@
 //   (`options.requireFreshAuth()`), also when the new `plugin.json` would make the plugin run code. Writes are atomic,
 //   bypass the hot-reload watcher and check `baseEtag`. A `created` plugin that was trusted before the edit is
 //   re-pinned, so editor saves never make it untrusted while files changed outside the editor still need re-trust.
-//   Writing `plugin.json` of a declarative plugin reloads it; code changes take effect on build.
+//   Writing `plugin.json` of a declarative plugin reloads it; code changes take effect on build. Otherwise the host
+//   refreshes the plugin (`PluginHost.refresh`), so its detail shows the new trust hash and pin right away.
 // - `build`: compiles / checks the entry through the host (diagnostics and build log lines as `plugin.log` events),
-//   re-pins a `created` plugin on success and reloads it unless `reload: false`.
+//   re-pins a `created` plugin on success and reloads it unless `reload: false` (then it refreshes it).
 import type { PluginManifest } from '@harness-forge/plugin-sdk'
 import type { BuildDiagnostic, BuildResult, PluginDetail, PluginFileEntry, PluginSource, ScaffoldRequest } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
@@ -157,6 +158,19 @@ export function createPluginFiles(deps: AppDeps): PluginFiles {
     if (hash === null || hash === record.trustedHash)
       return
     await deps.plugins.saveRecord({ id, source: 'created', version: record.version, trustedHash: hash })
+  }
+
+  /**
+   * After files changed without a load: the host re-reads the plugin so its detail shows the current trust hash and
+   * pin (and announces the change). Best effort: the files are already written.
+   */
+  async function refreshDetail(id: string): Promise<void> {
+    try {
+      await deps.plugins.refresh?.(id)
+    }
+    catch (error) {
+      deps.logger.warn('cannot refresh the plugin after a file change', { pluginId: id, err: error })
+    }
   }
 
   function entryOf(path: string, type: 'file' | 'dir', size: number, mtimeMs: number, editable: boolean): PluginFileEntry {
@@ -327,6 +341,8 @@ export function createPluginFiles(deps: AppDeps): PluginFiles {
         // Declarative plugins reload when their manifest is written; code changes take effect on build.
         if (nextManifest !== null && nextManifest.main === undefined)
           await deps.plugins.load(id)
+        else
+          await refreshDetail(id)
         const written = await lstat(resolved.absolute)
         return entryOf(resolved.path, 'file', written.size, written.mtimeMs, true)
       })
@@ -356,6 +372,7 @@ export function createPluginFiles(deps: AppDeps): PluginFiles {
           await removeEmptyParents(dir, resolved.path)
         })
         await repinAfterEdit(id, dir, before)
+        await refreshDetail(id)
       })
     },
 
@@ -392,6 +409,9 @@ export function createPluginFiles(deps: AppDeps): PluginFiles {
           if (problem)
             diagnostics.push(problem)
           deps.plugins.log(id, problem ? 'error' : 'info', problem ? `Reload failed: ${problem.message}` : `Reloaded (${state}).`)
+        }
+        else {
+          await refreshDetail(id)
         }
         return {
           ok: diagnostics.every(diagnostic => diagnostic.severity !== 'error'),

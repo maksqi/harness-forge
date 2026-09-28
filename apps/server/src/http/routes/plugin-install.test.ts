@@ -125,17 +125,48 @@ describe('inspect and install without a password', () => {
     expect(readdirSync(a.stagingDir)).toEqual([])
   })
 
-  it('answers 413 for an upload over 20 MB', async () => {
+  it('installs only the reviewed package when the body or form carries its sha256 (409 stale otherwise)', async () => {
     const a = await start()
-    // A byte body with a declared length (a FormData stream cancelled half-way trips an undici bug in tests).
+    const inspected = pluginInspectionSchema.parse((await send(a, '/api/plugins/inspect', multipart(declarativePlugin('pin-route')))).body)
+    expect(inspected.sourceRef).toBe('plugin.zip')
+
+    const changed = declarativePlugin('pin-route', { version: '1.0.1' })
+    const staleForm = await send(a, '/api/plugins/install', multipart(changed, { sha256: inspected.sha256 }))
+    expect(staleForm.status).toBe(409)
+    expect(error(staleForm)).toMatchObject({ code: 'conflict', details: { reason: 'stale' } })
+    const badForm = await send(a, '/api/plugins/install', multipart(changed, { sha256: 'not-a-hash' }))
+    expect(error(badForm)).toMatchObject({ code: 'validation_error', details: { issues: [{ path: ['sha256'] }] } })
+    expect(await a.t.deps.plugins.record('pin-route')).toBeNull()
+
+    const folder = writeFileSet(tempDir(), declarativePlugin('pin-folder'))
+    const reviewed = pluginInspectionSchema.parse((await send(a, '/api/plugins/inspect', json({ source: 'path', path: folder, mode: 'copy' }))).body)
+    const staleJson = await send(a, '/api/plugins/install', json({ source: 'path', path: folder, mode: 'copy', sha256: 'f'.repeat(64) }))
+    expect(error(staleJson)).toMatchObject({ code: 'conflict', details: { reason: 'stale' } })
+    expect(error(await send(a, '/api/plugins/install', json({ source: 'path', path: folder, mode: 'copy', sha256: 'F'.repeat(64) }))).code).toBe('validation_error')
+
+    const installed = await send(a, '/api/plugins/install', json({ source: 'path', path: folder, mode: 'copy', sha256: reviewed.sha256 }))
+    expect(installed.status).toBe(201)
+    const fromForm = await send(a, '/api/plugins/install', multipart(declarativePlugin('pin-route'), { sha256: inspected.sha256, enable: 'true' }))
+    expect(fromForm.status).toBe(201)
+    expect(pluginDetailSchema.parse(fromForm.body)).toMatchObject({ id: 'pin-route', version: '1.0.0' })
+  })
+
+  it('answers 413 for an upload over 20 MB (declared length or streamed multipart)', async () => {
+    const a = await start()
     const size = INSTALL_LIMITS.compressedBytes + 70 * 1024
-    const tooBig = await send(a, '/api/plugins/install', {
+    const declared = await send(a, '/api/plugins/install', {
       method: 'POST',
       headers: { 'content-type': 'multipart/form-data; boundary=hf', 'content-length': String(size) },
       body: new Uint8Array(size),
     })
-    expect(tooBig.status).toBe(413)
-    expect(error(tooBig)).toMatchObject({ code: 'payload_too_large', details: { limitBytes: INSTALL_LIMITS.compressedBytes } })
+    expect(declared.status).toBe(413)
+    expect(error(declared)).toMatchObject({ code: 'payload_too_large', details: { limitBytes: INSTALL_LIMITS.compressedBytes } })
+
+    // A FormData body streams without a Content-Length: it is counted and abandoned half-way.
+    const streamed = await send(a, '/api/plugins/install', multipart(new Uint8Array(size), { trust: 'true' }))
+    expect(streamed.status).toBe(413)
+    expect(error(streamed)).toMatchObject({ code: 'payload_too_large', details: { limitBytes: INSTALL_LIMITS.compressedBytes } })
+    expect(readdirSync(a.stagingDir)).toEqual([])
   })
 })
 

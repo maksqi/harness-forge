@@ -88,12 +88,14 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | Path | Responsibility |
 |---|---|
 | `main.ts` | Process entry: runs the boot sequence (section 5), installs signal handlers for graceful shutdown. |
-| `env.ts` | Parses and validates `HF_*` environment variables (zod) into a frozen `Env` object; resolves `HF_DATA_DIR`. |
+| `env.ts` | Loads `<repo root>/.env`, parses and validates `HF_*` environment variables (zod) into a frozen `Env` object; resolves `HF_DATA_DIR` and `HF_WEB_DIR`; bind-safety check. |
+| `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5). |
 | `app.ts` | `createApp(deps)` app factory: mounts middleware and every route module under `/api`; used by `main.ts` and `createTestApp()`. |
-| `http/middleware/` | Request id, structured access log, secure headers + CSP, Origin check on non-GET, session auth, body-size limits, zod validation error mapping, the global error handler that renders `HarnessErrorEnvelope`. |
-| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`); thin: validate, call services, map DTOs. |
-| `http/static.ts` | Production SPA serving from the web build output with `200.html` fallback for client routes. |
-| `security/` | `keyring.ts` (master key + HKDF subkeys), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers), `ssrf.ts` (outbound URL guard), `rate-limit.ts` (login limiter). |
+| `paths.ts`, `logger.ts` | Package-relative locations (server package root, migrations, bundled assets, the SPA build, installed package versions); JSON-lines logger with redaction. |
+| `http/middleware/` | Request id, structured access log, secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`. |
+| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. |
+| `http/static.ts` | Production SPA serving from `HF_WEB_DIR` (default `apps/web/.output/public`) with `200.html` fallback for client routes. |
+| `security/` | `keyring.ts` (master key + HKDF subkeys), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors). |
 | `db/` | Drizzle schema (`schema.ts`), libsql client, `migrate()` at boot, pragmas (WAL, foreign keys, busy timeout), transaction helper. |
 | `services/settings/` | Typed global settings (defaults, validation, cache) over the `settings` table. |
 | `services/secrets/` | Encrypted secret store (AES-256-GCM) over the `secrets` table: `get/set/delete/list(scope)`, masked hints, env fallback lookup. |
@@ -109,21 +111,23 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `plugins/compile.ts` | esbuild compile of `.ts` entries into one ESM file in `data/cache/plugins/<id>/` (SDK aliased to a shim), returns diagnostics. |
 | `plugins/watch.ts` | `fs.watch` for linked folders or `HF_PLUGIN_WATCH=1`, 300 ms debounce, triggers reloads. |
 | `plugins/state.ts` | Persistence of plugin rows (`plugins`, `plugin_settings`, `plugin_kv`), trust hashes, `loading_since`. |
-| `plugins/install/` | Inspect + install from zip / npm / URL / folder into `plugins/.staging/<uuid>`, validation, atomic swap, uninstall, export. |
-| `plugins/scaffold/` | Creates code/declarative plugin skeletons from templates; plugin file tree API helpers (traversal-safe). |
-| `plugins/templates/` | Template sources: tool, provider, MCP bridge, command pack (JSDoc-typed `index.mjs`). |
+| `plugins/install/` | Inspect + install from zip / npm / URL / folder into `plugins/.staging/<uuid>`, validation, review check (what was inspected is what gets installed), atomic swap, crash recovery of staging, export. |
+| `plugins/drafts/` | Declarative plugins created and edited in the browser (provider wizard): draft validation, SVG icon sanitizing, credentials saved as provider credentials, temporary-provider draft test. |
+| `plugins/scaffold/` | Code plugins created from a template (`POST /plugins/scaffold`) and the traversal-safe files API: tree, read, atomic write, delete, build + reload, trust re-pinning of `created` plugins. |
+| `plugins/templates/` | Template sources (tool, provider, MCP bridge, command pack): a JSDoc-typed `index.mjs` or a TypeScript `index.ts`, the vendored API types `harness-forge.d.ts` and a README. |
 | `catalog/` | Model catalog: live listings with 24 h cache (`model_cache`), models.dev snapshot + weekly refresh, seeds, plugin models, custom ids, prefs, `classify()`, cost lookup. |
-| `providers/` | Model resolution: `modelRef` -> provider -> credentials (stored or env) -> `LanguageModel`; provider test; provider status; error mapping to `HarnessError`. |
-| `chat/` | Chat pipeline (Appendix C of the plan): runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, titles, usage/cost, persistence. |
-| `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable. |
+| `providers/` | Model resolution: `modelRef` -> provider -> credentials (stored or env) -> `LanguageModel`; provider test; provider status; error mapping to `HarnessError`; the LobeHub icon service (`/api/icons/lobe`). |
+| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence. |
+| `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect with backoff, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable; `{{settings.*}}` templating of plugin-declared servers; its own stdio transport (minimal environment, stderr lines in the owning plugin's log); the user-configured servers of the MCP panel (`mcp_servers`). |
 | `builtin-plugins/index.ts` | Static list of builtin plugin modules, loaded first and trusted. |
 | `builtin-plugins/core-providers/` | The 13 builtin providers (see PROVIDERS.md): definitions, seeds, reasoning mapping, error mapping. |
-| `builtin-plugins/core-tools/` | Builtin tools: `current_time` (policy `safe`) and `web_fetch` (policy `ask`, SSRF guard). |
-| `builtin-plugins/core-commands/` | Builtin slash commands (server-side prompt/reply commands). |
-| `builtin-plugins/core-mcp/` | Owns user-configured MCP servers (`mcp_servers` table) and registers them with the MCP manager. |
+| `builtin-plugins/core-tools/` | Builtin tools: `current_time` (policy `safe`) and `web_fetch` (policy `ask`, SSRF guard; setting "Allow localhost in web_fetch"). |
+| `builtin-plugins/core-commands/` | Builtin server-side slash commands (prompt templates such as `/explain`, `/review`, `/commit`; list in PLUGINS.md). |
+| `builtin-plugins/core-mcp/` | Owns the user-configured MCP servers (`mcp_servers` table): they are declared as its contributions, so disabling `core-mcp` closes them. Its settings (reconnect automatically, connect timeout) apply to every MCP server. |
 | `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, plus the tool `mock_approval_tool` (behavior in PROVIDERS.md section 8). |
-| `assets/catalog/models-dev.json` (package root) | Bundled models.dev snapshot (updated by `pnpm catalog:update`). |
-| `drizzle/` (package root) | Generated SQL migrations, applied by `migrate()` at boot. |
+| `testing/` | In-process test harness: `createTestApp()` (real composition over an in-memory database) and fakes. |
+| `assets/catalog/models-dev.json` (package root) | Bundled models.dev snapshot (updated by `pnpm catalog:update`); read at runtime, so it ships next to `dist/` (section 11). |
+| `drizzle/` (package root) | Generated SQL migrations, applied by `migrate()` at boot; ship next to `dist/`. |
 
 Dependency direction (no cycles): `http/routes` -> `services`, `chat`, `catalog`, `providers`, `plugins`, `mcp` ->
 `registry`, `db`, `security`. Plugin code never imports server modules; it only sees `ctx`.
@@ -159,34 +163,37 @@ sequenceDiagram
   autonumber
   participant Main as main.ts
   participant Env as env.ts
-  participant FS as data dir
-  participant KR as security/keyring
   participant DB as db/
+  participant Deps as deps.ts
   participant Host as plugins/host
   participant Cat as catalog/
+  participant MCP as mcp/
   participant HTTP as Hono + node-server
-  Main->>Env: parse HF_* (zod), fail fast on invalid values
+  Main->>Env: load <repo root>/.env (variables already set win), parse HF_* (zod), fail fast on invalid values
   Env-->>Main: Env
-  Main->>Main: bind check: non-loopback HF_HOST requires a password or HF_INSECURE=1 (else exit 1)
-  Main->>FS: mkdir -p data/{plugins/.staging,files,cache}, recover or clean plugins/.staging
-  Main->>KR: load master key (HF_MASTER_KEY or data/secret.key, generated 0600 on first boot)
-  KR-->>Main: HKDF subkeys: encryption, session, approval
+  Main->>Main: bind check: non-loopback HF_HOST without HF_PASSWORD or HF_INSECURE=1 and no database yet -> exit 1
+  Main->>Main: create the data dir (0700) and plugins/, plugins/.staging/, plugins/.data/, files/, cache/plugins/
   Main->>DB: open data/harness.db (WAL, foreign_keys=ON, busy_timeout=5000), migrate()
-  Main->>Host: start()
-  Host->>Host: load builtin plugins (static imports, trusted)
-  Host->>Host: unless HF_SAFE_MODE=1: discover data/plugins/* + linked folders, sort by id, load each (guarded)
-  Host-->>Main: registry populated (providers, models, tools, MCP decls, commands, hooks)
-  Main->>Cat: warmUp(): load models.dev snapshot (+ data/cache refresh), read model_cache
+  Main->>Deps: createDeps(): keyring (HF_MASTER_KEY or data/secret.key, generated 0600 on first boot) and every service
+  Main->>Main: bind check again: a password stored in the database also allows a non-loopback bind (else exit 1)
+  Main->>Deps: startDeps()
+  Deps->>Deps: installer.recover(): restore an interrupted swap, clean plugins/.staging
+  Deps->>Host: start(): builtins (static imports, trusted), then unless HF_SAFE_MODE=1 data/plugins/* + linked folders, sorted by id, each guarded
+  Host-->>Deps: registry populated (providers, models, tools, MCP decls, commands, hooks)
+  Deps->>Cat: start(): models.dev snapshot (bundled or data/cache refresh), model_cache
   Cat-)Cat: background: refresh stale listings (>24 h) and weekly models.dev (unless HF_OFFLINE=1)
-  Main->>HTTP: createApp(deps), serve /api/*, in production also static SPA with 200.html fallback
+  Deps->>MCP: start(): connect declared MCP servers in the background (never blocks boot)
+  Main->>HTTP: createApp(deps): /api/*, plus the SPA with 200.html fallback when the web build exists
   HTTP-->>Main: listening on HF_HOST:HF_PORT
 ```
 
 Notes:
 
-- Boot fails (exit code 1, clear log line) on: invalid env, non-loopback bind without password or `HF_INSECURE=1`,
-  unreadable/invalid master key, failed migration. A broken **plugin** never fails boot: it ends in `error` or
-  `incompatible` state and is reported in the Plugins tab.
+- Boot fails (exit code 1, clear log line) on: invalid env, non-loopback bind without a password (env or stored) or
+  `HF_INSECURE=1`, unreadable/invalid master key (or a group/world readable `secret.key`), failed migration, a
+  failing service factory. A broken **plugin** never fails boot: it ends in `error` or `incompatible` state and is
+  reported in the Plugins tab. `unhandledRejection` and `uncaughtException` (typically from plugin code) are logged,
+  never fatal.
 - Boot sentinel: before loading a user plugin the host writes `plugins.loading_since = now`; after the load
   finishes it clears it. A row that still has `loading_since` at the next boot (the process crashed while loading
   it) is skipped and put into `error` with a "crashed during load" message until the user re-enables it.
@@ -194,8 +201,10 @@ Notes:
   middle of an atomic swap) is moved back; every other staging entry is deleted.
 - MCP clients connect lazily in the background after their owning plugin is `active`; a failing MCP server never
   blocks boot.
-- Graceful shutdown (`SIGINT`/`SIGTERM`): stop accepting connections, abort active runs (persisted as
-  `aborted`), dispose plugins (5 s guard each), close MCP clients (terminates stdio children), close the DB.
+- Graceful shutdown (`SIGINT`/`SIGTERM`, `stopDeps()`): stop accepting connections, abort active runs (persisted as
+  `aborted`), dispose plugins (5 s guard each), close MCP clients (terminates stdio children), stop catalog timers,
+  close SSE streams, then close the DB. Every step runs even when an earlier one fails; a shutdown longer than 10 s
+  exits with code 1, and a second signal exits immediately.
 
 ## 6. Flows
 
@@ -277,6 +286,10 @@ Notes:
   `capabilities.tools` (no tools for models without it, with a `tools-unsupported` notice). Every tool is wrapped:
   owner-plugin-active check, `tool.before` / `tool.after` hooks, `guard()` timeout (default 60 s), output capped at
   64 KB (truncated with a marker).
+- When a request sends no tools (tool mode `off`, a model without tool support, or no usable tool), earlier tool
+  calls and results in the history are sent to the model as compact text (`[tool name(input) → ok: output]`,
+  input ≤ 500 chars, output ≤ 2000) so providers that reject tool parts without tool definitions still work; the
+  stored transcript is unchanged. The `tools-unsupported` notice appears at most once per chat and model.
 - Errors after the stream started are sent as an `error` chunk whose `errorText` is the JSON envelope
   `{"error":{...HarnessErrorInit}}` and are persisted in `metadata.error` (see API.md, "Chat stream protocol").
 
@@ -316,9 +329,9 @@ sequenceDiagram
   P-->>W: tool-input-available, tool-approval-request (approvalId), finish-step, finish
   P->>P: onEnd: persist message (part state approval-requested), chats.pending_approval = 1
   P-)W: event run.finished (awaitingApproval true), sidebar shows amber dot
-  W->>U: AiConfirmation card "Allow web_fetch?" [Deny] [Allow] [Don't ask again]
-  U->>W: Allow (optionally Don't ask again)
-  opt Don't ask again
+  W->>U: AiConfirmation card "Allow web_fetch?" [Deny] [Allow] [x] Always allow web_fetch
+  U->>W: Allow (optionally with Always allow checked)
+  opt Always allow checked
     W->>S: PATCH /api/tools/web_fetch (override allow)
   end
   W->>W: addToolApprovalResponse({ id: approvalId, approved: true })
@@ -415,10 +428,11 @@ Runtime failures of an `active` plugin (a tool throws or times out, a hook fails
 returned as `plugin_error`, written to the plugin log ring buffer, and a hook handler that fails 5 times in a row is
 disabled until the next reload.
 
-Validation order in `loading`: manifest zod -> directory name equals `id` and id not reserved -> `engines.harness`
-satisfies `PLUGIN_API_VERSION` (else `incompatible`) -> realpath of `main` inside the plugin dir -> code plugins
-and stdio MCP declarations require `trusted_hash == sha256(plugin.json + main)` (else `untrusted`) -> import
-(cache-busted URL) or declarative adapter -> guarded `setup(ctx)` -> `active`.
+Validation order in `loading` (PLUGINS.md 11): `plugin.json` readable (<= 256 KB, JSON) -> lenient pre-parse:
+`engines.harness` satisfies `PLUGIN_API_VERSION` (else `incompatible`) -> strict manifest zod -> directory name
+equals `id` and id not reserved -> realpath of `main` (and of a file `icon`) inside the plugin dir -> code plugins
+and stdio MCP declarations require `trusted_hash == sha256(plugin.json + main)` (else `untrusted`) -> build or import
+scan, import (cache-busted URL) or declarative adapter -> guarded `setup(ctx)` -> `active`.
 
 Disable / reload / uninstall: guarded `dispose()` (5 s) -> the plugin's `DisposableStore` unregisters every
 contribution (providers, models, tools, MCP servers, commands, hooks) -> MCP clients closed -> `ctx.signal`
@@ -448,6 +462,11 @@ sequenceDiagram
     I->>FS: delete staging dir
     I-->>W: 400 validation_error / plugin_error, nothing changed
   end
+  alt the source now yields other files than the reviewed ones (moved npm tag, edited folder)
+    I->>FS: delete staging dir
+    I-->>W: 409 conflict (stale): inspect again
+  end
+  I->>I: requires trust (code or stdio MCP)? fresh auth when a password is set
   opt a previous version exists
     I->>FS: rename plugins/{id} to plugins/.staging/{id}.prev-{uuid} (kept until the new one is active)
     I->>H: disable old version (dispose)
@@ -659,7 +678,7 @@ by the API, e.g. `_auth.sessionEpoch`).
 | `role` | text | NOT NULL; `user` \| `assistant` \| `system` |
 | `parts` | json `UIMessage['parts']` | NOT NULL |
 | `metadata` | json `MessageMetadata` | NULL |
-| `search_text` | text | NOT NULL DEFAULT `''`; concatenated text parts, used by `GET /chats?q=` |
+| `search_text` | text | NOT NULL DEFAULT `''`; concatenated text parts, Unicode-normalized and lowercased (ADR-021), used by `GET /chats?q=`; not for display |
 | `created_at` | timestamp | NOT NULL |
 | `updated_at` | timestamp | NOT NULL; changes on approval continuations |
 | | | unique index `messages_chat_seq_idx` (`chat_id`, `seq`) |
@@ -791,11 +810,12 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
 |---|---|
 | Password | Optional. Source: `HF_PASSWORD` (wins) or a hash stored in `secrets` (scope `auth`, name `password`), set with `PUT /api/auth/password`. Hash = scrypt (N = 2^15, r = 8, p = 1, 32-byte key, 16-byte random salt, `maxmem` 64 MB), encoded `scrypt$15$8$1$<salt b64>$<hash b64>`. `HF_PASSWORD` is hashed in memory at boot; comparisons use `timingSafeEqual`. |
 | No password | Every request is authenticated. Allowed only on a loopback bind unless `HF_INSECURE=1`. |
-| Bind safety | At boot, `HF_HOST` not in `127.0.0.1`, `::1`, `localhost` requires a configured password or `HF_INSECURE=1` (else exit 1). At runtime, removing the password while bound to a non-loopback host is rejected (`409 conflict`). |
+| DNS-rebinding guard | Without a password, `/api` answers `403 forbidden` to any request whose `Host` is not `localhost`, `*.localhost` or a loopback IP (unless `HF_INSECURE=1`): a web page whose DNS name is rebound to 127.0.0.1 would otherwise be same-origin with itself and drive the whole API. With a password every host name is allowed (sessions protect it). |
+| Bind safety | At boot, `HF_HOST` outside `127.0.0.0/8`, `::1`, `localhost` requires a configured password (`HF_PASSWORD` or one stored in the data directory) or `HF_INSECURE=1` (else exit 1). At runtime, removing the password while bound to a non-loopback host is rejected (`409 conflict`). |
 | Session cookie | Name `hf_session`; value `v1.<payload b64url>.<HMAC-SHA256 b64url>` signed with the HKDF `session` subkey; payload `{ iat, exp, authAt, epoch }` (ms). Attributes: `HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` (30 days) plus `Secure` when the request is HTTPS (`X-Forwarded-Proto: https` counts). Re-issued when older than 24 h (rolling). |
 | Revocation | `epoch` must equal the internal setting `_auth.sessionEpoch`; changing or removing the password increments it, which invalidates every session (the caller gets a fresh cookie). Logout clears the cookie. |
-| Fresh auth | ADR-017. When a password is set, sensitive operations require `now - authAt <= 10 min`, else `403 forbidden` with `action: 'login'` (the web asks for the password — inline in the install and trust dialogs, else in `ConfirmPasswordDialog` — calls `POST /api/auth/login` and retries): installing a plugin that requires trust (code or stdio MCP, with or without `trust`), `POST /api/plugins/:id/trust`, scaffolding a code plugin, `POST /api/plugins/:id/build`, creating or changing a stdio MCP server (also inside a created declarative plugin), `PUT /api/auth/password`. Editor saves of a `created` plugin re-pin its trust without fresh auth (10.4). |
-| Login rate limit | Failed logins: 5 per 15 min per remote address and 50 per 15 min globally, then `429 rate_limited` with `retryAfterMs` and a `Retry-After` header. Successful login resets the per-address counter. |
+| Fresh auth | ADR-017. When a password is set, sensitive operations require `now - authAt <= 10 min`, else `403 forbidden` with `action: 'login'` (the web asks for the password — inline in the install and trust dialogs, else in `ConfirmPasswordDialog` — calls `POST /api/auth/login` and retries): installing a plugin that requires trust (code or stdio MCP, with or without `trust`), `POST /api/plugins/:id/trust`, scaffolding a code plugin, `POST /api/plugins/:id/build`, `POST /api/plugins/:id/reload` of a code plugin, writing or deleting files of a plugin that runs code (`PUT` / `DELETE /api/plugins/:id/files/*`), creating or changing a stdio MCP server (also inside a created declarative plugin), `PUT /api/auth/password`. The window is 10 minutes, so the editor asks at most once per window; such an editor save also re-pins a trusted `created` plugin (10.4). |
+| Login rate limit | Failed password checks (`POST /api/auth/login` and the current-password check of `PUT /api/auth/password`): 5 per 15 min per remote address and 50 per 15 min globally, then `429 rate_limited` with `retryAfterMs` and a `Retry-After` header. A successful login resets the per-address counter. The address is the TCP peer: `X-Forwarded-For` is ignored because any client can forge it. **Reverse-proxy caveat:** behind a proxy every client shares the proxy's address, so 5 failed attempts from anyone lock out every client (including you) for up to 15 minutes; limit access at the proxy (IP allow list, VPN, basic auth) when the server is reachable from the internet. |
 | Public endpoints | `GET /api/health`, `GET /api/auth/status`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/icons/lobe`, `GET /api/icons/lobe/:slug`, and the SPA static files. Everything else returns `401 unauthorized` without a valid session. |
 
 ### 10.2 CSRF and headers
@@ -807,12 +827,14 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
   `SameSite=Strict` this closes CSRF. No CORS headers are ever sent.
 - **Secure headers** (all responses): `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
   `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`,
-  `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `Strict-Transport-Security` only over HTTPS.
-- **CSP for the SPA HTML**: `default-src 'self'; script-src 'self' <sha256 hashes of the inline scripts in the
-  generated HTML, computed at boot>; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;
-  font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none';
-  form-action 'self'; frame-ancestors 'none'`. Remote images in model output are therefore blocked (no data
-  exfiltration through image URLs); the markdown renderer shows them as links.
+  `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `Strict-Transport-Security: max-age=31536000`
+  only over HTTPS (`X-Forwarded-Proto: https` counts).
+- **CSP for the SPA HTML**: `default-src 'self'; script-src 'self' 'wasm-unsafe-eval' <sha256 hashes of the inline
+  scripts of the served HTML document, recomputed when the file changes>; style-src 'self' 'unsafe-inline';
+  img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:;
+  object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`. `'wasm-unsafe-eval'` only allows
+  compiling WebAssembly (the syntax highlighter of code blocks), not JavaScript `eval`. Remote images in model output
+  are therefore blocked (no data exfiltration through image URLs); the markdown renderer shows them as links.
 - **CSP for API responses**: `default-src 'none'; frame-ancestors 'none'`; icons and files use their own CSP (API.md).
 
 ### 10.3 Secrets at rest
@@ -835,9 +857,11 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
   `trusted_hash` equals sha256 of `plugin.json` + entry file; any change (update, edit, hot reload of an unpinned
   file) makes them `untrusted` until re-trusted. Plugins created in the browser (`source = created`) are re-pinned
   automatically when a file is saved or deleted through the in-browser editor (`PUT` / `DELETE
-  /api/plugins/:id/files/*`, ADR-017) and by `POST /api/plugins/:id/build` (a fresh-auth operation); their files
-  changed on disk still require re-trust. Linked folders (`source = link`) pin trust to the realpath: content
-  changes under a trusted linked path hot-reload without re-trust (developer workflow).
+  /api/plugins/:id/files/*`, ADR-017), as long as they were trusted before that edit, and by
+  `POST /api/plugins/:id/build` (a fresh-auth operation); files changed on disk still require an explicit Trust.
+  The editor never opens `.git` or `node_modules` and cannot create or change hidden files. Linked folders
+  (`source = link`) pin trust to the realpath: content changes under a trusted linked path hot-reload without
+  re-trust (developer workflow).
 - **Guards**: every call into plugin code runs through `guard()` (setup 10 s, dispose 5 s, hooks 3 s, tools
   default 60 s); failures become `plugin_error`; 5 consecutive hook failures disable that handler;
   `unhandledRejection` is logged, never fatal. `HF_SAFE_MODE=1` loads builtins only.
@@ -848,10 +872,13 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
   reject loopback, private (RFC 1918), link-local (incl. `169.254.169.254`), CGNAT, multicast, unspecified,
   IPv6 ULA / link-local and IPv4-mapped forms of these; connect to the checked IP (no re-resolve); at most 5
   redirects, each re-checked; 10 s timeout; response body capped (2 MB for `web_fetch`, 20 MB for installs).
-  Provider base URLs are exempt (local providers such as Ollama are legitimate) but are set only by the user.
-- **Limits**: JSON bodies 1 MB (plugin file writes 1 MB + envelope, chat requests 2 MB), uploads 20 MB per file
-  (`image/*`, `application/pdf`, `text/*`), plugin zips 20 MB compressed / 100 MB expanded / 2000 entries, tool
-  output 64 KB, chat title 200 chars.
+  The `core-tools` setting "Allow localhost in web_fetch" (default off) lets `web_fetch` reach loopback addresses
+  only; private, link-local and metadata addresses stay blocked. Provider base URLs are exempt (local providers such
+  as Ollama are legitimate) but are set only by the user or a plugin manifest they reviewed.
+- **Limits**: JSON bodies 1 MB (plugin file writes 1 MB + envelope, chat requests 2 MB, chat imports 20 MB), uploads
+  20 MB per file (`image/*`, `application/pdf`, `text/*`), plugin zips 20 MB compressed / 100 MB expanded / 2000
+  entries, tool output 64 KB, chat title 200 chars. A non-empty body of a JSON route must be `application/json`
+  (multipart routes also accept `multipart/form-data`), so HTML forms cannot post to the API.
 
 ### 10.5 XSS rules (web)
 
@@ -888,18 +915,27 @@ flowchart LR
   B["Browser"] -- "HTTPS (optional reverse proxy)" --> RP["Caddy / nginx<br/>(optional, TLS)"]
   RP --> S["node apps/server/dist/main.mjs :8787"]
   B -. "direct on LAN or localhost" .-> S
-  S --> SPA["SPA files: apps/web/.output/public<br/>(200.html fallback)"]
+  S --> SPA["SPA files: HF_WEB_DIR or apps/web/.output/public<br/>(200.html fallback)"]
   S --> API["/api/*"]
   S --> V[("HF_DATA_DIR<br/>Docker volume /data")]
 ```
 
-- One Node process (`tsdown` build of the server) serves `/api/*` and the generated SPA from
-  `apps/web/.output/public`: existing files are served with long cache headers for hashed assets
-  (`/_nuxt/*`: `public, max-age=31536000, immutable`); any other non-`/api` GET that accepts `text/html` gets
-  `200.html` (`Cache-Control: no-cache`). Unknown `/api/*` paths return `404 not_found` JSON, never the SPA.
-- Docker: `node:24-alpine`, `HF_HOST=0.0.0.0`, `HF_DATA_DIR=/data` (named volume), `EXPOSE 8787`; a password
-  (`HF_PASSWORD`) or `HF_INSECURE=1` is therefore required by the bind rule. Put TLS in front (reverse proxy) when
-  exposing beyond localhost; the session cookie becomes `Secure` automatically.
+- One Node process (`tsdown` build of the server) serves `/api/*` and the generated SPA from `HF_WEB_DIR` (default
+  `apps/web/.output/public`, picked up even when it is built after the server started): existing files are served
+  with long cache headers for hashed assets (`/_nuxt/*`: `public, max-age=31536000, immutable`), other files with
+  `no-cache` + `ETag`; any other non-`/api` GET that accepts `text/html` gets `200.html` (`Cache-Control: no-cache`).
+  Unknown `/api/*` paths return `404 not_found` JSON, never the SPA.
+- What a deployment needs: `dist/main.mjs` bundles the workspace packages only, and the server locates its package
+  root by walking up to `apps/server/package.json`, so ship the server package as a whole: `package.json`, `dist/`,
+  `drizzle/` (migrations), `assets/catalog/models-dev.json` (bundled model metadata) and its production
+  `node_modules` (AI SDK providers, `@lobehub/icons-static-svg` for icons, `esbuild` for `.ts` plugins), plus the
+  generated SPA (or point `HF_WEB_DIR` at it). The app version comes from the root `package.json`.
+- Docker: `docker compose up -d` starts the image on port 8787 with the data directory on the `/data`
+  volume (`HF_DATA_DIR=/data`). The container listens on all interfaces, so the bind rule requires `HF_PASSWORD`
+  (or `HF_INSECURE=1`, not recommended): set it in the compose environment before the first start.
+- Reverse proxy (TLS): forward the original `Host` header (the Origin check compares it with `Origin`) and set
+  `X-Forwarded-Proto: https`, which makes the session cookie `Secure` and enables HSTS. The login rate limiter sees
+  only the proxy's address (section 10.1).
 - Stdio MCP servers and code plugins run inside the same container/user as the server.
 
 ## 12. Observability

@@ -1,13 +1,15 @@
 import type { PluginInstallInput } from '../types.ts'
 import type { FileSet, InstallTestApp, InstallTestAppOptions } from './testing.ts'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import process from 'node:process'
 import { HarnessError, pluginDetailSchema, pluginInspectionSchema } from '@harness-forge/shared'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createSafeFetch } from '../../security/ssrf.ts'
 import { pathPin } from '../loader.ts'
 import { EntryCollector } from './archive.ts'
 import { INSTALL_LIMITS } from './errors.ts'
+import { isCredentialFile } from './export.ts'
 import { integrityOf } from './integrity.ts'
 import {
   allowAll,
@@ -342,6 +344,26 @@ describe('install from a local folder', () => {
     expect((await rejection(a.t.deps.installer.inspect({ source: 'path', path: '/definitely/not/here', mode: 'copy' }))).message).toContain('does not exist')
   })
 
+  it.skipIf(process.platform === 'win32')('refuses to link a folder any local user could change (world-writable, or in a replaceable parent)', async () => {
+    const a = await start()
+    const open = writeFileSet(join(tempDir(), 'open-plugin'), codePlugin('open-plugin'))
+    chmodSync(open, 0o777)
+    const refused = await rejection(a.t.deps.installer.inspect({ source: 'path', path: open, mode: 'link' }))
+    expect(refused).toMatchObject({ code: 'validation_error', details: { issues: [{ path: ['path'] }] } })
+    expect(refused.message).toContain('chmod o-w')
+    // A copy snapshots the files and pins their hash: it stays allowed.
+    expect((await a.t.deps.installer.inspect({ source: 'path', path: open, mode: 'copy' })).source).toBe('copy')
+
+    const shared = join(tempDir(), 'shared')
+    const inShared = writeFileSet(join(shared, 'shared-plugin'), codePlugin('shared-plugin'))
+    chmodSync(shared, 0o777)
+    expect((await rejection(a.t.deps.installer.inspect({ source: 'path', path: inShared, mode: 'link' }))).message).toContain('world-writable')
+    // With the sticky bit (like /tmp) nobody else can rename the folder: linking is fine.
+    chmodSync(shared, 0o1777)
+    expect((await a.t.deps.installer.inspect({ source: 'path', path: inShared, mode: 'link' })).source).toBe('link')
+    chmodSync(shared, 0o755)
+  })
+
   it('copies a folder without node_modules and .git, refusing links inside', async () => {
     const a = await start()
     const folder = writeFileSet(tempDir(), {
@@ -365,16 +387,18 @@ describe('install from a local folder', () => {
 })
 
 describe('export', () => {
-  it('exports an installable zip without node_modules and .git', async () => {
+  it('exports an installable zip without node_modules, .git and local credential files', async () => {
     const a = await start()
-    await a.t.deps.installer.install(zip({ ...declarativePlugin('exported'), 'docs/readme.md': 'docs' }), { authorize: allowAll })
+    await a.t.deps.installer.install(zip({ ...declarativePlugin('exported'), 'docs/readme.md': 'docs', '.env': 'API_KEY=local-secret', '.env.local': 'X=1', '.npmrc': '//registry.npmjs.org/:_authToken=npm_secret', 'docs/.ENV.production': 'Y=2', '.envrc': 'kept' }), { authorize: allowAll })
     mkdirSync(join(a.pluginsDir, 'exported', 'node_modules'))
     writeFileSync(join(a.pluginsDir, 'exported', 'node_modules', 'x.js'), 'x')
     symlinkSync('/etc/hosts', join(a.pluginsDir, 'exported', 'hosts-link'))
     const exported = await a.t.deps.installer.export('exported')
     expect(exported.fileName).toBe('exported-1.0.0.zip')
     const entries = await readZip(exported.data, new EntryCollector(INSTALL_LIMITS))
-    expect(entries.map(entry => entry.path)).toEqual(['exported/docs/readme.md', 'exported/plugin.json'])
+    expect(entries.map(entry => entry.path)).toEqual(['exported/.envrc', 'exported/docs/readme.md', 'exported/plugin.json'])
+    expect(isCredentialFile('.Env')).toBe(true)
+    expect(isCredentialFile('env.example')).toBe(false)
     const reinstalled = await a.t.deps.installer.install({ source: 'zip', fileName: exported.fileName, data: exported.data }, { authorize: allowAll })
     expect(reinstalled).toMatchObject({ id: 'exported', state: 'active', sourceRef: 'exported-1.0.0.zip' })
     expect((await rejection(a.t.deps.installer.export('unknown-plugin'))).code).toBe('not_found')

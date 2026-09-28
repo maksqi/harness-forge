@@ -1,11 +1,17 @@
 // Request body gate: size limits per route (`payload_too_large`, `details.limitBytes`) and JSON-only content types
 // for JSON routes (SEC-B3).
+import type { AddressInfo } from 'node:net'
 import type { TestApp } from '../../testing/create-test-app.ts'
+import { Buffer } from 'node:buffer'
+import http from 'node:http'
+import process from 'node:process'
 import { apiRoutes, HarnessError, harnessErrorEnvelopeSchema, LIMITS } from '@harness-forge/shared'
+import { serve } from '@hono/node-server'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createMemorySecretStore, createMemorySettingsService } from '../../testing/fakes.ts'
 import { bodyLimitFor, checkBodyContentType } from './body-limit.ts'
+import { SESSION_COOKIE_NAME } from './session-auth.ts'
 
 const PASSWORD = 'a password 123'
 let t: TestApp
@@ -91,6 +97,97 @@ describe('limits by route', () => {
       duplex: 'half',
     } as RequestInit)
     expect(response.status).toBe(200)
+  })
+
+  it('a streamed multipart upload over the limit -> 413, and the abandoned FormData stream never rejects', async () => {
+    const rejections: unknown[] = []
+    const onRejection = (reason: unknown): void => {
+      rejections.push(reason)
+    }
+    process.on('unhandledRejection', onRejection)
+    try {
+      const form = new FormData()
+      form.append('file', new Blob([new Uint8Array(LIMITS.pluginZipBytes + 128 * 1024)]), 'big.zip')
+      const cookie = `${SESSION_COOKIE_NAME}=${await t.deps.sessions.issue({ authAt: Date.now() })}`
+      // An in-process FormData body has no Content-Length header: it is counted while it streams.
+      const response = await t.request('/api/plugins/install', { method: 'POST', headers: { cookie }, body: form })
+      expect(response.status).toBe(413)
+      expect((await errorOf(response)).details).toEqual({ limitBytes: LIMITS.pluginZipBytes })
+      // undici pumps the rest of the form into the released stream; a cancelled one would reject here.
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(rejections).toEqual([])
+    }
+    finally {
+      process.off('unhandledRejection', onRejection)
+    }
+  })
+
+  it('an oversized chunked upload over a real socket still receives the 413 answer', async () => {
+    const server = serve({ fetch: t.app.fetch, port: 0, hostname: '127.0.0.1' })
+    try {
+      await new Promise(resolve => server.once('listening', resolve))
+      const { port } = server.address() as AddressInfo
+      const cookie = `${SESSION_COOKIE_NAME}=${await t.deps.sessions.issue({ authAt: Date.now() })}`
+      const answer = await new Promise<{ status: number | undefined, body: string }>((resolve, reject) => {
+        const request = http.request({
+          host: '127.0.0.1',
+          port,
+          method: 'PUT',
+          path: '/api/settings',
+          headers: { 'content-type': 'application/json', 'transfer-encoding': 'chunked', cookie },
+        }, (response) => {
+          let body = ''
+          response.setEncoding('utf8')
+          response.on('data', (chunk: string) => {
+            body += chunk
+          })
+          response.on('end', () => resolve({ status: response.statusCode, body }))
+        })
+        request.on('error', reject)
+        const chunk = Buffer.alloc(64 * 1024, 0x61)
+        let sent = 0
+        const pump = (): void => {
+          while (sent < 4 * LIMITS.jsonBodyBytes) {
+            sent += chunk.length
+            if (!request.write(chunk)) {
+              request.once('drain', pump)
+              return
+            }
+          }
+          request.end()
+        }
+        pump()
+      })
+      expect(answer.status).toBe(413)
+      expect(harnessErrorEnvelopeSchema.parse(JSON.parse(answer.body)).error.code).toBe('payload_too_large')
+    }
+    finally {
+      if ('closeAllConnections' in server)
+        server.closeAllConnections()
+      server.close()
+    }
+  })
+
+  it('a body that fails while it is read -> 400 validation_error, not an internal error', async () => {
+    const cookie = `${SESSION_COOKIE_NAME}=${await t.deps.sessions.issue({ authAt: Date.now() })}`
+    let pulls = 0
+    const broken = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1
+        if (pulls === 1)
+          controller.enqueue(new TextEncoder().encode('{"displayName":'))
+        else
+          controller.error(new Error('client aborted'))
+      },
+    })
+    const response = await t.request('/api/settings', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', cookie },
+      body: broken,
+      duplex: 'half',
+    } as RequestInit)
+    expect(response.status).toBe(400)
+    expect((await errorOf(response)).details).toEqual({ issues: [expect.objectContaining({ code: 'body_unreadable' })] })
   })
 
   it('checks authentication first: an anonymous large body is never read', async () => {

@@ -1,7 +1,7 @@
-// Shared classes for sidebar rows (docs/UI.md 3.5, 3.7): density-aware height, muted until hovered or active,
-// inset focus ring that never changes the layout.
+// Shared classes for sidebar rows (docs/UI.md 3.5, 3.7, 14.5): density-aware height (40px touch targets on coarse
+// pointers), muted until hovered or active, inset focus ring that never changes the layout.
 export const SIDEBAR_ROW_CLASS = [
-  'h-(--row-height) text-sidebar-foreground/75 hover:text-sidebar-foreground',
+  'h-(--row-height) pointer-coarse:h-10 text-sidebar-foreground/75 hover:text-sidebar-foreground',
   'data-active:text-sidebar-foreground',
   'focus-visible:ring-inset focus-visible:ring-sidebar-ring/50',
   '[&>svg]:text-sidebar-foreground/60 hover:[&>svg]:text-sidebar-foreground data-active:[&>svg]:text-sidebar-foreground',

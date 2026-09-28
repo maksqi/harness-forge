@@ -20,4 +20,9 @@ export default antfu({
     'playwright-report/**',
     'test-results/**',
   ],
+}, {
+  // Never render untrusted HTML (AGENT.md golden rule 7); antfu's preset leaves this off.
+  rules: {
+    'vue/no-v-html': 'error',
+  },
 })

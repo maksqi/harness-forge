@@ -5,8 +5,10 @@
 // `source = 'link'`), sorted by id, each loaded independently and guarded. Loading a user plugin validates it
 // (loader.ts steps 1-5), checks the trust pin (step 6), registers its manifest contributions through its own `ctx`,
 // compiles / scans code entries (compile.ts), imports them cache-busted and runs the guarded `setup` (10 s for module
-// evaluation + setup). Every state transition emits `plugin.changed`; loads and unloads that change providers or
-// models also emit `provider.changed` / `catalog.changed`.
+// evaluation + setup). Every state transition emits `plugin.changed` and then calls the in-process `onStateChange`
+// listeners (the MCP manager follows `core-mcp` this way); loads and unloads that change providers or models also emit
+// `provider.changed` / `catalog.changed`. `refresh` re-reads a plugin's row and files for its DTO without loading it
+// (after the editor re-pinned its trust hash).
 //
 // Robustness: operations on one plugin are serialized; a failing plugin ends in `error` / `incompatible` /
 // `untrusted` and never breaks `start()` or other plugins; the boot sentinel (`plugins.loading_since`) skips a plugin
@@ -36,7 +38,9 @@ import type {
   PluginHost,
   PluginIconFile,
   PluginRecord,
+  PluginStateChange,
 } from './types.ts'
+import type { WatchFunction } from './watch.ts'
 import { chmod, lstat, mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -162,11 +166,21 @@ function fingerprintOf(read: PluginDirectoryRead): string {
   return `${read.hash ?? '-'}:${read.iconVersion ?? '-'}`
 }
 
-export function createPluginHost(deps: AppDeps): PluginHost {
+/** Test seams of the host (production uses the defaults). */
+export interface PluginHostOptions {
+  /** Replaces `fs.watch` for hot reload (tests drive a fake watcher). */
+  readonly watch?: WatchFunction
+  /** Hot-reload debounce (default `WATCH_DEBOUNCE_MS`). */
+  readonly watchDebounceMs?: number
+}
+
+export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {}): PluginHost {
   const entries = new Map<string, PluginEntry>()
   const locks = new Map<string, Promise<unknown>>()
   /** Provider ids each plugin registered during this process (uninstall purges their stored configuration). */
   const knownProviders = new Map<string, Set<string>>()
+  /** `onStateChange` listeners (in-process; the event bus is for clients). */
+  const stateListeners = new Set<(change: PluginStateChange) => void>()
   let started = false
   let stopped = false
   let userAgentVersion: string | undefined
@@ -181,6 +195,8 @@ export function createPluginHost(deps: AppDeps): PluginHost {
   const watcher = createPluginWatcher({
     logger: deps.logger,
     onChange: pluginId => void onWatchedChange(pluginId),
+    ...(options.watch === undefined ? {} : { watch: options.watch }),
+    ...(options.watchDebounceMs === undefined ? {} : { debounceMs: options.watchDebounceMs }),
   })
 
   const guardServices: GuardServices = {
@@ -317,13 +333,27 @@ export function createPluginHost(deps: AppDeps): PluginHost {
     }
   }
 
+  /** Calls the `onStateChange` listeners; a throwing listener is logged and never breaks the host. */
+  function notifyState(id: string, state: PluginState | null, previous: PluginState): void {
+    for (const listener of [...stateListeners]) {
+      try {
+        listener({ id, state, previous })
+      }
+      catch (error) {
+        deps.logger.warn('plugin state listener failed', { pluginId: id, err: error })
+      }
+    }
+  }
+
   function setState(entry: PluginEntry, state: PluginState, lastError: HarnessErrorInit | null): void {
-    if (!isAllowedTransition(entry.state, state))
-      deps.logger.debug('unexpected plugin state transition', { pluginId: entry.id, from: entry.state, to: state })
+    const previous = entry.state
+    if (!isAllowedTransition(previous, state))
+      deps.logger.debug('unexpected plugin state transition', { pluginId: entry.id, from: previous, to: state })
     entry.state = state
     entry.lastError = lastError
     entry.announcedLoading = state === 'loading'
     emitChanged(entry)
+    notifyState(entry.id, state, previous)
   }
 
   /** Enters `loading` once per load (a single `plugin.changed`). */
@@ -1004,6 +1034,7 @@ export function createPluginHost(deps: AppDeps): PluginHost {
       await Promise.all(users.map(entry => teardown(entry, true).catch(() => {})))
       await Promise.all(builtins.map(entry => teardown(entry, true).catch(() => {})))
       logStore.stop()
+      stateListeners.clear()
     },
 
     list: async () => [...entries.values()]
@@ -1067,6 +1098,7 @@ export function createPluginHost(deps: AppDeps): PluginHost {
       ])
       await teardown(entry, true)
       watcher.unwatch(id)
+      const lastState = entry.state
       const record = entry.record ?? await records.get(id)
       if (record?.source !== 'link')
         await removeInstalledDirectory(id)
@@ -1095,6 +1127,7 @@ export function createPluginHost(deps: AppDeps): PluginHost {
         deps.events.emit('plugin.changed', { id, plugin: null })
       }
       catch {}
+      notifyState(id, null, lastState)
       emitContributionEvents(before, { providers: [], models: 0 })
     }),
 
@@ -1257,6 +1290,7 @@ export function createPluginHost(deps: AppDeps): PluginHost {
           deps.events.emit('plugin.changed', { id, plugin: null })
         }
         catch {}
+        notifyState(id, null, entry.state)
         emitContributionEvents(before, { providers: [], models: 0 })
       }
     }),
@@ -1304,6 +1338,32 @@ export function createPluginHost(deps: AppDeps): PluginHost {
     },
 
     declarativeProvider: (_pluginId, provider) => createDeclarativeProvider(provider),
+
+    refresh: id => withLock(id, async () => {
+      const entry = requireEntry(id)
+      if (entry.builtin !== null)
+        return detailOf(entry)
+      const before = JSON.stringify(detailOf(entry))
+      const record = await refreshRecord(entry)
+      const read = await readPluginDirectory(pluginDirOf(id, record), { expectedId: id })
+      // The fingerprint keeps describing the files the host saw (loaded, or written through `withoutWatch`), so a
+      // change made on disk in the meantime still hot-reloads.
+      const fingerprint = entry.fingerprint
+      applyRead(entry, read)
+      entry.fingerprint = fingerprint
+      syncWatch(entry)
+      const detail = detailOf(entry)
+      if (JSON.stringify(detail) !== before)
+        emitChanged(entry)
+      return detail
+    }),
+
+    onStateChange: (listener) => {
+      // A wrapper per subscription: subscribing the same function twice needs two disposals.
+      const subscription = (change: PluginStateChange): void => listener(change)
+      stateListeners.add(subscription)
+      return { dispose: () => void stateListeners.delete(subscription) }
+    },
   }
   return host
 }

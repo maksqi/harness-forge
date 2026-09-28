@@ -73,7 +73,7 @@ function headingId(group: ShortcutGroup) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent :data-testid="testIds.shortcutsDialog" class="gap-5 sm:max-w-md" @open-auto-focus="onOpenAutoFocus">
+    <DialogContent :data-testid="testIds.shortcutsDialog" class="max-h-[calc(100dvh-2rem)] overflow-y-auto gap-5 sm:max-w-md" @open-auto-focus="onOpenAutoFocus">
       <DialogHeader>
         <DialogTitle>Keyboard shortcuts</DialogTitle>
         <DialogDescription class="sr-only">

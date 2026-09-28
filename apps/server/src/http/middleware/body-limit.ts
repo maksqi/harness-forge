@@ -4,6 +4,9 @@
 // 1. Size: `payload_too_large` (`details.limitBytes` = the documented limit) when the body exceeds the limit of the
 //    matched route. A declared `Content-Length` is checked without reading (node's HTTP parser never delivers more
 //    bytes than it announces); a body of unknown length (chunked) is counted while it is buffered, then replayed.
+//    An oversized stream is released, never cancelled: cancelling can reset the connection before the 413 is sent,
+//    and undici's FormData body pump keeps enqueueing after a cancel (an unhandled rejection in-process); the rest
+//    of the body is drained or dropped by the HTTP server after the answer.
 //    Limits: `chat.send` `LIMITS.chatBodyBytes`; `files.upload` `LIMITS.uploadBytes` + multipart overhead;
 //    `pluginInstall.inspect` / `pluginInstall.install` `LIMITS.pluginZipBytes` + overhead; `pluginFiles.write`
 //    `LIMITS.pluginFileBytes` as JSON (escaping can double the size) + envelope; every other route
@@ -90,18 +93,38 @@ function declaredLength(c: AppContext): number | null {
   return bytes
 }
 
+/** Stops reading an oversized body without cancelling it (see the module comment); no read is pending here. */
+function abandonBody(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  try {
+    reader.releaseLock()
+  }
+  catch {
+    // Already released.
+  }
+}
+
+/** A failed read (the client aborted the upload): a `validation_error` rather than an `internal_error` in the log. */
+async function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>): ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']> {
+  try {
+    return await reader.read()
+  }
+  catch {
+    throw requestError('The request body could not be read.', 'body_unreadable')
+  }
+}
+
 /** Reads a body of unknown length up to the limit and puts it back on the request; returns its size. */
 async function bufferBody(c: AppContext, body: ReadableStream<Uint8Array>, limit: BodyLimit): Promise<number> {
   const reader = body.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
   for (;;) {
-    const { done, value } = await reader.read()
+    const { done, value } = await readChunk(reader)
     if (done)
       break
     size += value.byteLength
     if (size > limit.maxBytes) {
-      await reader.cancel().catch(() => {})
+      abandonBody(reader)
       throw payloadTooLargeError(limit.limitBytes)
     }
     chunks.push(value)

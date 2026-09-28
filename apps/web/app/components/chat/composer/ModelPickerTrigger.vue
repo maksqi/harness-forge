@@ -50,7 +50,7 @@ const ariaLabel = computed(() => {
     :class="cn(
       'gap-1.5 font-normal',
       variant === 'composer'
-        ? 'h-8 max-w-full min-w-0 shrink px-2 text-muted-foreground hover:text-foreground aria-expanded:text-foreground'
+        ? 'h-8 max-w-full min-w-0 shrink px-2 text-muted-foreground hover:text-foreground aria-expanded:text-foreground pointer-coarse:h-10'
         : 'h-9 w-full justify-between px-3',
     )"
   >

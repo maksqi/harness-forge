@@ -36,8 +36,25 @@ export const MAX_CHAT_SESSIONS = 8
 /** Endpoint of `POST /api/chat`; `GET {api}/{id}/stream` is the resume URL of `DefaultChatTransport`. */
 export const CHAT_API = '/api/chat'
 
-/** Lifecycle of a session as the UI sees it. */
-export type ChatRunState = 'idle' | 'submitted' | 'streaming' | 'approval' | 'error'
+/**
+ * Data-part schemas for `useChat`. AI SDK 7.0.116 looks them up by the full chunk type (`data-notice`) while its types
+ * (and the server's `validateUIMessages`) key them by name (`notice`), so every schema is registered under both keys:
+ * streamed notices are validated, and a malformed one fails the request instead of rendering.
+ */
+export const chatDataPartSchemas: typeof harnessDataSchemas = withStreamKeys(harnessDataSchemas)
+
+function withStreamKeys<T extends Record<string, unknown>>(schemas: T): T {
+  const keyed: Record<string, unknown> = { ...schemas }
+  for (const [name, schema] of Object.entries(schemas))
+    keyed[`data-${name}`] = schema
+  return keyed as T
+}
+
+/**
+ * Lifecycle of a session as the UI sees it. (Not named `ChatRunState`: the chats store exports that name for the
+ * sidebar dot, and Nuxt auto-imports both files.)
+ */
+export type ChatSessionRunState = 'idle' | 'submitted' | 'streaming' | 'approval' | 'error'
 
 export interface ChatSendInput {
   text: string
@@ -72,7 +89,7 @@ export interface ChatSession {
   summary: Ref<ChatSummary | null>
   /** The server knows the chat (loaded, or a request of this session reached the model). */
   persisted: Ref<boolean>
-  runState: ComputedRef<ChatRunState>
+  runState: ComputedRef<ChatSessionRunState>
   /** A request is in flight (submitted or streaming). */
   busy: ComputedRef<boolean>
   send: (input: ChatSendInput) => Promise<void>
@@ -146,7 +163,7 @@ export function hasPendingApproval(messages: readonly HarnessUIMessage[]): boole
 }
 
 /** The sidebar dot of a session state (`setRunState` of the chats store). */
-export function toListRunState(state: ChatRunState): ChatListRunState | null {
+export function toListRunState(state: ChatSessionRunState): ChatListRunState | null {
   if (state === 'submitted' || state === 'streaming')
     return 'running'
   return state === 'approval' ? 'approval' : null
@@ -267,7 +284,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     throttle: 50,
     generateId: createMessageId,
     messageMetadataSchema,
-    dataPartSchemas: harnessDataSchemas,
+    dataPartSchemas: chatDataPartSchemas,
     transport,
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
     onFinish: ({ message }) => {
@@ -277,7 +294,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   })
 
   const busy = computed(() => chat.status.value === 'submitted' || chat.status.value === 'streaming')
-  const runState = computed<ChatRunState>(() => {
+  const runState = computed<ChatSessionRunState>(() => {
     const status = chat.status.value
     if (status === 'submitted' || status === 'streaming')
       return status

@@ -1,0 +1,25 @@
+{
+  "manifestVersion": 1,
+  "id": "lmstudio",
+  "name": "LM Studio",
+  "version": "1.0.0",
+  "description": "Chat with the models of LM Studio running on this machine (OpenAI-compatible server on port 1234).",
+  "author": "harness-forge examples",
+  "homepage": "https://lmstudio.ai",
+  "icon": "lobe:lmstudio",
+  "engines": { "harness": "^1.0.0" },
+  "contributes": {
+    "providers": [
+      {
+        "id": "lmstudio",
+        "name": "LM Studio",
+        "baseURL": "http://localhost:1234/v1",
+        "apiFormat": "openai-chat",
+        "auth": { "type": "none" },
+        "listModels": { "exclude": "embed" },
+        "reasoningStyle": "openai-effort",
+        "modelsDevId": "lmstudio"
+      }
+    ]
+  }
+}

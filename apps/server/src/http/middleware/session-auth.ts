@@ -1,17 +1,24 @@
-// Session authentication (ARCHITECTURE.md 10.1, API.md 1 "Auth"). Owner: W1.1 (W1.1-T5).
+// Session authentication (ARCHITECTURE.md 10.1, API.md 1 "Auth"). Owner: W1.1 (W1.1-T5), hardened by W4.1.
 //
 // Second `/api` middleware; sets `c.var.auth` (`RequestAuth`) for every `/api` request. Without a password
-// (`deps.passwords.source()` is null) every request is authenticated. With a password the `hf_session` cookie is
-// verified (`deps.sessions.verify`: signature, expiry, epoch); every route that is not `public` in the route table
-// (unknown routes count as non-public) answers `401 unauthorized` (action `login`) without a valid session. A session
-// older than 24 h is re-issued with the same `authAt` (rolling), unless the route set or cleared the cookie itself.
+// (`deps.passwords.source()` is null) every request is authenticated, but only when it is addressed to a local host
+// name (`localhost`, `*.localhost`, a loopback IP) unless `HF_INSECURE=1`: a web page whose DNS name is rebound to
+// 127.0.0.1 is same-origin with itself, passes the Origin check and would otherwise drive the whole API (DNS
+// rebinding); such requests get `403 forbidden`. A password (or `HF_INSECURE=1`) is required to reach a password-less
+// server through any other host name (reverse proxy, tunnel, LAN name).
+// With a password the `hf_session` cookie is verified (`deps.sessions.verify`: signature, expiry, epoch); every route
+// that is not `public` in the route table (unknown routes count as non-public) answers `401 unauthorized` (action
+// `login`) without a valid session. A session older than 24 h is re-issued with the same `authAt` (rolling), unless
+// the route set or cleared the cookie itself.
+import type { Env } from '../../env.ts'
 import type { AppDeps } from '../../types.ts'
 import type { AppContext, AppMiddleware, RequestAuth } from '../types.ts'
 import { HarnessError } from '@harness-forge/shared'
 import { getCookie } from 'hono/cookie'
+import { classifyAddress } from '../../security/ssrf.ts'
 import { getApiRoute } from '../route-match.ts'
 import { FRESH_AUTH_WINDOW_MS } from '../types.ts'
-import { isHttpsRequest } from './request-info.ts'
+import { isHttpsRequest, requestHostname } from './request-info.ts'
 import { updateResponseHeaders } from './response-headers.ts'
 
 /** Name of the session cookie (DECISIONS.md "Identifiers"). */
@@ -32,6 +39,28 @@ export const AUTH_DISABLED: Readonly<RequestAuth> = Object.freeze({
 
 /** Message of the `401 unauthorized` answered to requests without a valid session. */
 export const UNAUTHORIZED_MESSAGE = 'Log in to continue.'
+
+/** Message of the `403 forbidden` answered to a request for a non-local host name while no password is set. */
+export const LOCAL_HOST_ONLY_MESSAGE = 'Without a password this server only answers requests addressed to localhost or 127.0.0.1 '
+  + '(DNS rebinding protection). Open it through localhost, or set a password (HF_PASSWORD) to use another host name.'
+
+/** `localhost`, `*.localhost` (never resolved through DNS by browsers) and loopback IP literals. */
+export function isLocalHostname(hostname: string): boolean {
+  const name = hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1').replace(/\.$/, '')
+  return name === 'localhost' || name.endsWith('.localhost') || classifyAddress(name) === 'loopback'
+}
+
+/**
+ * DNS rebinding guard of a password-less server: throws `403 forbidden` for a request addressed to anything but a local
+ * host name, unless `HF_INSECURE=1` (see the module comment).
+ */
+export function checkPasswordlessHost(c: AppContext, env: Pick<Env, 'insecure'>): void {
+  if (env.insecure)
+    return
+  const hostname = requestHostname(c)
+  if (hostname === null || !isLocalHostname(hostname))
+    throw new HarnessError({ code: 'forbidden', message: LOCAL_HOST_ONLY_MESSAGE })
+}
 
 /** `Set-Cookie` value of the session cookie; an empty token with `maxAgeSeconds` 0 clears it. */
 export function sessionCookieHeader(token: string, options: { secure: boolean, maxAgeSeconds?: number }): string {
@@ -71,6 +100,7 @@ export function sessionAuthMiddleware(deps: AppDeps): AppMiddleware {
   return async (c, next) => {
     const source = await deps.passwords.source()
     if (source === null) {
+      checkPasswordlessHost(c, deps.env)
       c.set('auth', { ...AUTH_DISABLED })
       await next()
       return

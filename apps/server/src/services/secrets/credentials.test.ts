@@ -231,6 +231,46 @@ describe('credentials.set / clear', () => {
   })
 })
 
+describe('credentials.setFor (provider not registered)', () => {
+  const LATER = { ...ACME_PROVIDER, id: 'later-acme' }
+
+  it('stores against the given fields in the layout that resolve / states read once the provider registers', async () => {
+    const t = await app()
+    expect(t.deps.registry.providers.get('later-acme')).toBeUndefined()
+    await t.deps.credentials.setFor!('later-acme', LATER.credentials, { apiKey: `  ${OPENAI_KEY}  `, region: 'us', org: 'my-org' })
+    const [secret] = await t.db.select().from(secrets)
+    expect(secret).toMatchObject({ scope: 'provider:later-acme', name: 'apiKey', hint: 'sk-…9fQ2' })
+    expect(secret?.ciphertext.toString('latin1')).not.toContain(OPENAI_KEY)
+    expect(await configRow(t, 'later-acme')).toMatchObject({ options: { region: 'us', org: 'my-org' }, lastError: null })
+    // The stored secret is masked in logs right away.
+    t.deps.logger.warn(`upstream said: invalid key ${OPENAI_KEY}`)
+    expect(t.logs.text()).not.toContain(OPENAI_KEY)
+
+    t.deps.registry.providers.register('test-plugin', LATER)
+    expect(await t.deps.credentials.resolve('later-acme')).toMatchObject({
+      values: { apiKey: OPENAI_KEY, region: 'us', org: 'my-org' },
+      sources: { apiKey: 'stored', region: 'stored', org: 'stored' },
+      missing: [],
+    })
+    expect((await t.deps.credentials.states('later-acme')).apiKey).toEqual({ set: true, hint: 'sk-…9fQ2', source: 'stored' })
+  })
+
+  it('merges with stored options, clears with an empty string and validates like set', async () => {
+    const t = await app()
+    const setFor = t.deps.credentials.setFor!
+    await setFor('later-acme', LATER.credentials, { region: 'us', org: 'first' })
+    await Promise.all([
+      setFor('later-acme', LATER.credentials, { org: '' }),
+      setFor('later-acme', LATER.credentials, { baseURL: 'https://x.acme.test/v1' }),
+    ])
+    expect((await configRow(t, 'later-acme'))?.options).toEqual({ region: 'us', baseURL: 'https://x.acme.test/v1' })
+    await expect(setFor('later-acme', LATER.credentials, { nope: 'x' })).rejects.toMatchObject({ code: 'validation_error', details: { issues: [expect.objectContaining({ path: ['values', 'nope'] })] } })
+    await expect(setFor('later-acme', LATER.credentials, { region: 'mars' })).rejects.toMatchObject({ code: 'validation_error' })
+    await expect(setFor('Not An Id', LATER.credentials, { region: 'us' })).rejects.toMatchObject({ code: 'validation_error' })
+    expect(await t.db.select().from(secrets)).toEqual([])
+  })
+})
+
 describe('validateCredentialValues', () => {
   it('returns trimmed values and accepts clearing any known key', () => {
     expect(validateCredentialValues(ACME_PROVIDER.credentials, { apiKey: ' k ', region: '', baseURL: '' })).toEqual({ apiKey: 'k', region: '', baseURL: '' })

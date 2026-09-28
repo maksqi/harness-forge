@@ -7,11 +7,12 @@
 //   2. examine - the host validates the directory (`PluginHost.inspectDirectory`: manifest, entry / icon inside the
 //                directory, trust hash) -> `PluginInspection` (inspection.ts). Reserved ids, incompatible plugins and
 //                an id installed from another source are refused at install time.
-//   3. install only: `authorize(inspection)` (the route requires fresh auth when the plugin requires trust), then an
+//   3. install only: the package must be the one the user reviewed (the request's `sha256`, else a recent inspection
+//                of the same npm spec / folder; `409 conflict` `stale` otherwise, reviews.ts), then
+//                `authorize(inspection)` (the route requires fresh auth when the plugin requires trust), then an
 //                atomic swap under a mutex: the installed version moves to `.staging/<id>.prev-<uuid>`, the staged
 //                directory is renamed to `plugins/<id>`, the row is saved (`trusted_hash` only with `trust`), the host
 //                loads it; a load that ends in `error` restores the previous version (or forgets a fresh install).
-//                A source inspected shortly before that now yields other files is refused first (reviews.ts).
 // The staging directory is removed in every case; `recover()` cleans up after a crash (staging.ts).
 import type { PluginDetail, PluginInspection } from '@harness-forge/shared'
 import type { SafeFetch } from '../../security/types.ts'
@@ -37,11 +38,11 @@ import { isInside, pathPin } from '../loader.ts'
 import { EntryCollector, MANIFEST_NAME, pluginRootPrefix, verifyTree, writeEntries } from './archive.ts'
 import { INSTALL_LIMITS, invalid, megabytes, tooLarge } from './errors.ts'
 import { exportPluginDirectory } from './export.ts'
-import { readFolder, resolveLocalFolder } from './folder.ts'
+import { checkLinkableFolder, readFolder, resolveLocalFolder } from './folder.ts'
 import { buildInspection, sourceLabel } from './inspection.ts'
 import { createMutex, createSemaphore } from './lock.ts'
 import { downloadNpmPackage, NPM_REGISTRY_URL } from './npm.ts'
-import { createReviewLog } from './reviews.ts'
+import { checkReviewedHash, createReviewLog, reviewedHashOf } from './reviews.ts'
 import { createStagingArea } from './staging.ts'
 import { readTarGz } from './tar.ts'
 import { downloadFromUrl } from './url.ts'
@@ -167,8 +168,10 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
 
   async function stageFolder(path: string, mode: 'link' | 'copy'): Promise<StagedPlugin> {
     const real = await resolveLocalFolder(path, paths.root)
-    if (mode === 'link')
+    if (mode === 'link') {
+      await checkLinkableFolder(real)
       return { source: 'link', sourceRef: real, dir: real, staging: null, notes: [] }
+    }
     const entries = await readFolder(real, new EntryCollector(limits, ['path']))
     if (!entries.some(entry => entry.type === 'file' && entry.path === MANIFEST_NAME))
       throw invalid(`The folder has no ${MANIFEST_NAME} at its top level.`, ['path'])
@@ -217,7 +220,7 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
     if (staged.source === 'link' && basename(staged.dir) !== manifest.id)
       throw invalid(`A linked folder must be named after its plugin id: rename "${basename(staged.dir)}" to "${manifest.id}".`, ['path'])
     const existing = await existingPlugin(manifest.id)
-    const inspection = buildInspection({ directory, source: staged.source, existing, notes: staged.notes })
+    const inspection = buildInspection({ directory, source: staged.source, sourceRef: staged.sourceRef, existing, notes: staged.notes })
     if (purpose === 'install') {
       if (!directory.compatible)
         throw invalid(`This plugin needs plugin API ${manifest.engines.harness}; this server provides ${PLUGIN_API_VERSION}.`, ['manifest', 'engines', 'harness'])
@@ -382,8 +385,13 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
       const staged = await stage(input)
       try {
         const { inspection, directory } = await examine(staged, 'install')
-        // What the user reviewed is what gets installed (and trusted): a moved npm tag or changed folder is refused.
-        reviews.check(input, inspection.sha256)
+        // What the user reviewed is what gets installed (and trusted): a moved npm tag, a changed folder or another
+        // upload is refused. The hash sent with the request wins; the in-memory log covers clients that send none.
+        const reviewed = reviewedHashOf(options)
+        if (reviewed === undefined)
+          reviews.check(input, inspection.sha256)
+        else
+          checkReviewedHash(reviewed, inspection.sha256)
         options.authorize(inspection)
         const detail = await commitLock(() => staged.source === 'link'
           ? commitLink(staged, directory, options)

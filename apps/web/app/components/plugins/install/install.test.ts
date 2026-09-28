@@ -1,10 +1,12 @@
-import { HarnessError, LIMITS } from '@harness-forge/shared'
+import { HarnessError, LIMITS, pluginInstallBodySchema, pluginInstallFormSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import {
   buildRequest,
   contributionSummary,
   emptyDraft,
   filesSummary,
+  inspectionSourceLabel,
+  installBody,
   isFreshAuthError,
   manifestIcon,
   npmSpec,
@@ -98,11 +100,31 @@ describe('labels', () => {
     expect(manifestIcon('icon.svg')).toBeNull()
   })
 
-  it('builds multipart bodies', () => {
+  it('builds multipart bodies with trust and the reviewed hash', () => {
     const zip = file('p.zip', 3)
-    const form = zipForm(zip, true)
+    const hash = 'a'.repeat(64)
+    const form = zipForm(zip, { trust: true, sha256: hash })
     expect((form.get('file') as File).name).toBe('p.zip')
     expect(form.get('trust')).toBe('true')
+    expect(form.get('sha256')).toBe(hash)
     expect(zipForm(zip).get('trust')).toBeNull()
+    expect(zipForm(zip).get('sha256')).toBeNull()
+  })
+
+  it('builds JSON install bodies the shared schema accepts', () => {
+    const hash = 'b'.repeat(64)
+    const body = installBody({ source: 'npm', spec: 'pkg@^1.0.0' }, { trust: true, sha256: hash })
+    expect(body).toEqual({ source: 'npm', spec: 'pkg@^1.0.0', sha256: hash, trust: true })
+    expect(pluginInstallBodySchema.safeParse(body).success).toBe(true)
+    expect(installBody({ source: 'path', path: '/srv/p', mode: 'copy' })).toEqual({ source: 'path', path: '/srv/p', mode: 'copy' })
+    const form = zipForm(file('p.zip', 3), { sha256: hash })
+    expect(pluginInstallFormSchema.parse({ sha256: form.get('sha256') })).toEqual({ sha256: hash })
+  })
+
+  it('prefers the source the server resolved for "I trust {source}"', () => {
+    const npm = { kind: 'json' as const, source: { source: 'npm' as const, spec: 'pkg@latest' } }
+    expect(inspectionSourceLabel({ sourceRef: 'pkg@1.4.2' }, npm)).toBe('pkg@1.4.2')
+    expect(inspectionSourceLabel({ sourceRef: undefined }, npm)).toBe('pkg@latest')
+    expect(inspectionSourceLabel({ sourceRef: '  ' }, { kind: 'zip', file: file('dice.zip', 1) })).toBe('dice.zip')
   })
 })

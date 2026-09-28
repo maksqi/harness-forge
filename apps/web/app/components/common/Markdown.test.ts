@@ -31,6 +31,16 @@ afterEach(() => {
   document.body.replaceChildren()
 })
 
+describe('markdown: text is verbatim', () => {
+  it('keeps straight quotes, dashes and ellipses (no typographer)', async () => {
+    const wrapper = await render('Tool result: {"echoed":"it\'s"} -- (c) 1...2\n\nInline `"x" -- y` too.')
+    expect(wrapper.text()).toContain('{"echoed":"it\'s"} -- (c) 1...2')
+    expect(wrapper.text()).toContain('"x" -- y')
+    expect(wrapper.text()).not.toMatch(/[\u2018\u2019\u201C\u201D\u2013\u2014\u2026\u00A9]/)
+    wrapper.unmount()
+  })
+})
+
 describe('markdown: raw HTML is inert', () => {
   it('renders <script> as text', async () => {
     const wrapper = await render('Hello <script>alert(1)</script> world')

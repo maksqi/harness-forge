@@ -1,3 +1,4 @@
+import { diagnosticCount } from '@codemirror/lint'
 import { Text } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -26,7 +27,7 @@ describe('placeDiagnostics', () => {
   it('places 1-based lines and byte columns and underlines the word', () => {
     const [placed] = placeDiagnostics(doc, [{ severity: 'error', file: 'index.mjs', line: 3, column: 11, message: 'Expected identifier' }])
     const line = doc.line(3)
-    expect(placed).toEqual({ from: line.from + 10, to: line.from + 11, severity: 'error', message: 'Expected identifier' })
+    expect(placed).toEqual({ from: line.from + 10, to: line.from + 11, severity: 'error', message: 'Expected identifier', markClass: 'cm-hf-diagnostic-error' })
     const [word] = placeDiagnostics(doc, [{ severity: 'warning', file: null, line: 2, column: 3, message: 'w' }])
     expect(doc.sliceString(word!.from, word!.to)).toBe('setup')
   })
@@ -76,15 +77,30 @@ describe('createSourceEditor', () => {
     expect(editor.content()).toBe('changed elsewhere')
   })
 
-  it('shows diagnostics as gutter markers and underlines', () => {
+  it('shows diagnostics as gutter markers and underlines (@codemirror/lint)', () => {
     const { editor, parent } = mountEditor()
     editor.show('index.mjs', 'export default {\n  setup() { const = 1 },\n}\n')
     editor.setDiagnostics([{ severity: 'error', file: 'index.mjs', line: 2, column: 19, message: 'Expected identifier but found "="' }])
+    expect(diagnosticCount(editor.view.state)).toBe(1)
     const marker = parent.querySelector('.cm-hf-lint-marker-error')
-    expect(marker?.getAttribute('aria-label')).toBe('Expected identifier but found "="')
-    expect(parent.querySelector('.cm-hf-diagnostic-error')?.textContent).toBe('=')
+    expect(marker?.getAttribute('title')).toBe('Expected identifier but found "="')
+    // The gutter is aria-hidden: the problem is announced through the editor's live region instead.
+    expect(parent.querySelector('.cm-announced')?.textContent).toBe('1 problem in this file. Line 2: Expected identifier but found "="')
+    const underline = parent.querySelector('.cm-lintRange-error')
+    expect(underline?.textContent).toBe('=')
+    expect(underline?.classList.contains('cm-hf-diagnostic-error')).toBe(true)
     editor.setDiagnostics([])
+    expect(diagnosticCount(editor.view.state)).toBe(0)
     expect(parent.querySelector('.cm-hf-lint-marker-error')).toBeNull()
+  })
+
+  it('clears diagnostics when the text is replaced', () => {
+    const { editor } = mountEditor()
+    editor.show('index.mjs', 'const = 1')
+    editor.setDiagnostics([{ severity: 'warning', file: 'index.mjs', line: 1, column: 7, message: 'w' }])
+    expect(diagnosticCount(editor.view.state)).toBe(1)
+    editor.replace('const a = 1')
+    expect(diagnosticCount(editor.view.state)).toBe(0)
   })
 
   it('switches between the one-dark and the light theme and honors read-only mode', () => {
@@ -109,5 +125,17 @@ describe('createSourceEditor', () => {
     expect(editor.content()).toBe('a\nb')
     editor.goTo(2, 1)
     expect(editor.view.state.selection.main.head).toBe(2)
+  })
+
+  it('inserts two spaces at an empty cursor and never edits read-only files', () => {
+    const { editor } = mountEditor()
+    editor.show('index.mjs', 'ab')
+    editor.view.dispatch({ selection: { anchor: 1 } })
+    editor.view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
+    expect(editor.content()).toBe('a  b')
+    expect(editor.view.state.selection.main.head).toBe(3)
+    editor.setReadOnly(true)
+    editor.view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
+    expect(editor.content()).toBe('a  b')
   })
 })

@@ -58,7 +58,7 @@ const LEVEL_CLASS = {
         :data-level="view.level"
         :aria-label="`${view.percent}% of context used`"
         :class="cn(
-          'inline-flex size-8 shrink-0 items-center justify-center rounded-full outline-none transition-colors duration-(--duration-fast) hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50',
+          'inline-flex size-8 pointer-coarse:size-10 shrink-0 items-center justify-center rounded-full outline-none transition-colors duration-(--duration-fast) hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50',
           LEVEL_CLASS[view.level],
         )"
       >

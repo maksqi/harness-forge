@@ -1,0 +1,24 @@
+{
+  "manifestVersion": 1,
+  "id": "e2e-tools-llm",
+  "name": "E2E Tools LLM",
+  "version": "1.0.0",
+  "description": "Keyless provider for the e2e suite: a mock OpenAI-compatible model that calls tools.",
+  "author": "harness-forge e2e",
+  "engines": { "harness": "^1.0.0" },
+  "contributes": {
+    "providers": [
+      {
+        "id": "e2e-tools-llm",
+        "name": "E2E Tools LLM",
+        "baseURL": "http://127.0.0.1:8894/v1",
+        "apiFormat": "openai-chat",
+        "auth": { "type": "none" },
+        "listModels": false,
+        "models": [
+          { "id": "tool-caller", "name": "Tool Caller", "contextWindow": 32000, "capabilities": { "tools": true } }
+        ]
+      }
+    ]
+  }
+}

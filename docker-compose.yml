@@ -1,0 +1,48 @@
+# harness-forge with Docker Compose (see the Dockerfile for the image itself).
+#
+#   echo 'HF_PASSWORD=change-me' >> .env      # required: the container listens on 0.0.0.0
+#   docker compose up -d --build              # then open http://localhost:8787
+#
+# Configuration comes from .env next to this file (every variable of .env.example, e.g. ANTHROPIC_API_KEY or
+# HF_MASTER_KEY). Data lives in the named volume "harness-forge_data": `docker compose down` keeps it,
+# `docker compose down --volumes` deletes it (chats, stored keys, plugins, uploads).
+name: harness-forge
+
+services:
+  app:
+    build: .
+    image: harness-forge:latest
+    restart: unless-stopped
+    ports:
+      # Reachable from other machines; use '127.0.0.1:8787:8787' to keep it local, and put a TLS reverse proxy in
+      # front when exposing it (the session cookie becomes Secure behind HTTPS).
+      - '8787:8787'
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Bind safety (docs/ARCHITECTURE.md 10.1): listening on 0.0.0.0 needs a password, so Compose refuses to start
+      # without one. Behind another authentication layer, replace this line with HF_INSECURE: '1' (not recommended).
+      HF_PASSWORD: ${HF_PASSWORD:?Set HF_PASSWORD in .env - the container listens on 0.0.0.0 and needs a password}
+      # Fixed by the image layout; they win over the same variables in .env (e.g. a copy of .env.example made for
+      # development, whose HF_HOST=127.0.0.1 and HF_DATA_DIR=./data would break the port mapping and the volume).
+      HF_HOST: 0.0.0.0
+      HF_PORT: '8787'
+      HF_DATA_DIR: /data
+      HF_WEB_DIR: ''
+    volumes:
+      - data:/data
+    # The server needs up to 10 s to stop runs, plugins and MCP servers after SIGTERM.
+    stop_grace_period: 15s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+volumes:
+  data:

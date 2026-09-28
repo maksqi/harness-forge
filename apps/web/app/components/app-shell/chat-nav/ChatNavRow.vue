@@ -54,7 +54,7 @@ const dotClass = computed(() => cn(
 ))
 
 const triggerClass = computed(() => cn(
-  'pointer-events-auto flex size-5 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/60 outline-none',
+  'pointer-events-auto flex size-5 pointer-coarse:size-8 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/60 outline-none',
   'transition-[opacity,color,background-color] duration-(--duration-fast) hover:bg-sidebar-foreground/10 hover:text-sidebar-foreground',
   'focus-visible:ring-2 focus-visible:ring-sidebar-ring/50 data-[state=open]:bg-sidebar-foreground/10 data-[state=open]:text-sidebar-foreground',
   'pointer-fine:absolute pointer-fine:inset-0',

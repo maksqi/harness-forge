@@ -2,6 +2,9 @@ import type { McpTestApp } from './__fixtures__/harness.ts'
 import process from 'node:process'
 import { HarnessError, mcpServerSchema, mcpToolName } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
+import { BUILTIN_PLUGINS } from '../builtin-plugins/index.ts'
+import { createTestApp } from '../testing/create-test-app.ts'
+import { createRecordingEventBus } from '../testing/fakes.ts'
 import {
   callTool,
   createMcpTestApp,
@@ -14,6 +17,7 @@ import {
   startSseEchoServer,
   waitFor,
 } from './__fixtures__/harness.ts'
+import { CORE_MCP_PLUGIN_ID, createMcpManagerCore } from './index.ts'
 
 const SECRET = 'echo-secret-value-123456'
 
@@ -255,6 +259,21 @@ describe('user stdio servers', () => {
     expect(h.t.deps.registry.contributions('core-mcp').mcpServers).toEqual(['echo'])
   })
 
+  it('follows core-mcp in-process (no event-bus subscriber): a reload re-declares and reconnects the servers', async () => {
+    const h = await open()
+    expect(h.events.subscriberCount()).toBe(0)
+    await h.t.deps.mcp.create({ id: 'echo', name: 'Echo', transport: echoStdio() })
+    await connected(h, 'echo')
+    const pid = await pidOf(h, 'mcp__echo__pid')
+
+    expect((await h.t.deps.plugins.reload('core-mcp')).state).toBe('active')
+    await waitFor(async () => (await pidOf(h, 'mcp__echo__pid')) !== pid)
+    await waitFor(() => !processAlive(pid))
+    expect((await connected(h, 'echo')).pluginId).toBe('core-mcp')
+    expect(h.t.deps.registry.contributions('core-mcp').mcpServers).toEqual(['echo'])
+    expect(h.events.subscriberCount()).toBe(0)
+  })
+
   it('emits plugin.changed for core-mcp on connection changes', async () => {
     const h = await open()
     h.events.clear()
@@ -270,6 +289,38 @@ describe('user stdio servers', () => {
     const pid = await pidOf(h, 'mcp__echo__pid')
     await h.t.deps.mcp.stop()
     expect(processAlive(pid)).toBe(false)
+  })
+})
+
+describe('following core-mcp without host state notifications', () => {
+  it('declares the servers at start() when core-mcp is active (a host without onStateChange)', async () => {
+    const coreMcp = BUILTIN_PLUGINS.filter(plugin => plugin.id === CORE_MCP_PLUGIN_ID)
+    const t = await createTestApp({
+      start: false,
+      builtins: coreMcp,
+      overrides: { events: createRecordingEventBus() },
+      factories: {
+        // The manager sees a host without `onStateChange` (like the fakes of other test suites).
+        mcp: deps => createMcpManagerCore(new Proxy(deps, {
+          get: (target, key) => key === 'plugins'
+            ? new Proxy(target.plugins, { get: (host, name) => (name === 'onStateChange' ? undefined : Reflect.get(host, name)) })
+            : Reflect.get(target, key),
+        }), { retryDelaysMs: [], eventDelayMs: 5 }),
+      },
+    })
+    try {
+      await t.deps.plugins.start()
+      await t.deps.mcp.create({ id: 'later', name: 'Later', enabled: false, transport: { type: 'http', url: 'http://127.0.0.1:9/mcp' } })
+      // Not followed yet: nothing declared before start().
+      expect(t.deps.registry.mcpServers.get('later')).toBeUndefined()
+      await t.deps.mcp.start()
+      await waitFor(() => t.deps.registry.mcpServers.get('later')?.pluginId === CORE_MCP_PLUGIN_ID)
+      expect(t.deps.registry.contributions(CORE_MCP_PLUGIN_ID).mcpServers).toEqual(['later'])
+      expect((await t.deps.mcp.get('later')).status).toBe('disabled')
+    }
+    finally {
+      await t.close()
+    }
   })
 })
 

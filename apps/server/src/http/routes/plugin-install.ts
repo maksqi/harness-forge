@@ -6,6 +6,9 @@
 // Fresh auth (ADR-017): `pluginInstall.trust` is `fresh` in the route table (middleware) and is checked again here;
 // installing a plugin that requires trust (code, or a stdio MCP server) calls `requireFreshAuth` through
 // `PluginInstallOptions.authorize`, after the package was validated and before anything is committed.
+// Review pin: the optional `sha256` of the body / form (the `PluginInspection.sha256` the user reviewed) is handed to
+// the installer, which answers `409 conflict` (`reason: 'stale'`) when the package now hashes differently.
+import type { ReviewedInstallOptions } from '../../plugins/install/reviews.ts'
 import type { PluginInstallInput } from '../../plugins/types.ts'
 import type { AppDeps } from '../../types.ts'
 import type { AppContext, AppEnv } from '../types.ts'
@@ -32,7 +35,12 @@ interface InstallRequest {
   input: PluginInstallInput
   trust?: boolean
   enable?: boolean
+  /** The reviewed `PluginInspection.sha256`. */
+  sha256?: string
 }
+
+/** Multipart fields of `POST /plugins/install` besides the part `file`. */
+const INSTALL_FORM_FIELDS: ReadonlySet<string> = new Set(Object.keys(pluginInstallFormSchema.shape))
 
 function invalidRequest(message: string, path: Array<string | number> = []): HarnessError {
   return validationError([{ path, message, code: 'custom' }], message)
@@ -48,7 +56,8 @@ async function readMultipart(c: AppContext): Promise<{ file: File, fields: Recor
     throw invalidRequest('The multipart body cannot be read.')
   }
   let file: File | undefined
-  const fields: Record<string, string> = {}
+  // No prototype: a part named "__proto__" is an ordinary (unknown, refused) field.
+  const fields: Record<string, string> = Object.create(null) as Record<string, string>
   for (const [key, value] of form.entries()) {
     if (key === 'file') {
       if (typeof value === 'string')
@@ -103,7 +112,7 @@ async function readInspectRequest(c: AppContext): Promise<PluginInstallInput> {
 async function readInstallRequest(c: AppContext): Promise<InstallRequest> {
   if (MULTIPART.test(c.req.header('content-type') ?? '')) {
     const { file, fields } = await readMultipart(c)
-    const unknown = Object.keys(fields).find(key => key !== 'trust' && key !== 'enable')
+    const unknown = Object.keys(fields).find(key => !INSTALL_FORM_FIELDS.has(key))
     if (unknown !== undefined)
       throw invalidRequest(`Unknown field "${unknown}".`, [unknown])
     const parsed = pluginInstallFormSchema.safeParse(fields)
@@ -113,13 +122,19 @@ async function readInstallRequest(c: AppContext): Promise<InstallRequest> {
       input: { source: 'zip', fileName: file.name, data: new Uint8Array(await file.arrayBuffer()) },
       ...(parsed.data.trust === undefined ? {} : { trust: parsed.data.trust === 'true' }),
       ...(parsed.data.enable === undefined ? {} : { enable: parsed.data.enable === 'true' }),
+      ...(parsed.data.sha256 === undefined ? {} : { sha256: parsed.data.sha256 }),
     }
   }
   const parsed = pluginInstallBodySchema.safeParse(await readJson(c))
   if (!parsed.success)
     throw validationError(parsed.error)
-  const { trust, enable, ...input } = parsed.data
-  return { input, ...(trust === undefined ? {} : { trust }), ...(enable === undefined ? {} : { enable }) }
+  const { trust, enable, sha256, ...input } = parsed.data
+  return {
+    input,
+    ...(trust === undefined ? {} : { trust }),
+    ...(enable === undefined ? {} : { enable }),
+    ...(sha256 === undefined ? {} : { sha256 }),
+  }
 }
 
 export function createPluginInstallRoutes(deps: AppDeps): Hono<AppEnv> {
@@ -132,15 +147,17 @@ export function createPluginInstallRoutes(deps: AppDeps): Hono<AppEnv> {
 
   app.post(apiRoutes['pluginInstall.install'].path, async (c) => {
     const request = await readInstallRequest(c)
-    const detail = await deps.installer.install(request.input, {
+    const options: ReviewedInstallOptions = {
       ...(request.trust === undefined ? {} : { trust: request.trust }),
       ...(request.enable === undefined ? {} : { enable: request.enable }),
+      ...(request.sha256 === undefined ? {} : { sha256: request.sha256 }),
       authorize: (inspection) => {
         // ADR-017: code plugins and stdio MCP servers run programs on the server, trusted or not.
         if (inspection.requiresTrust)
           requireFreshAuth(c)
       },
-    })
+    }
+    const detail = await deps.installer.install(request.input, options)
     return c.json(detail, 201)
   })
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
-// Action row under a message (docs/UI.md 7.5): Copy, Regenerate (last assistant message) or Edit (user messages),
-// then the meta slot. Fixed 28px height and always laid out, so revealing it never moves the transcript.
+// Action row under a message (docs/UI.md 7.5): Copy, Regenerate (last assistant message) or Edit (user messages;
+// hidden while the transcript is busy, through its `data-busy`), then the meta slot. Fixed 28px height (40px touch
+// targets on coarse pointers) and always laid out, so revealing it never moves the transcript.
 import { PencilIcon, RotateCcwIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -28,9 +29,9 @@ defineSlots<{ default?: () => any }>()
 <template>
   <div
     data-slot="message-actions"
-    :class="cn('flex h-7 min-w-0 items-center gap-0.5 text-muted-foreground', align === 'end' && 'justify-end')"
+    :class="cn('flex h-7 min-w-0 items-center gap-0.5 text-muted-foreground pointer-coarse:h-10', align === 'end' && 'justify-end')"
   >
-    <CopyButton :text="copyText" :data-testid="testIds.messageCopy" />
+    <CopyButton :text="copyText" :data-testid="testIds.messageCopy" class="pointer-coarse:size-10" />
     <Tooltip v-if="canRegenerate">
       <TooltipTrigger as-child>
         <Button
@@ -39,7 +40,7 @@ defineSlots<{ default?: () => any }>()
           size="icon-xs"
           aria-label="Regenerate"
           :data-testid="testIds.messageRegenerate"
-          class="text-muted-foreground hover:text-foreground"
+          class="text-muted-foreground hover:text-foreground pointer-coarse:size-10"
           @click="emit('regenerate')"
         >
           <RotateCcwIcon class="size-3.5" />
@@ -55,7 +56,7 @@ defineSlots<{ default?: () => any }>()
           size="icon-xs"
           aria-label="Edit"
           :data-testid="testIds.messageEdit"
-          class="text-muted-foreground hover:text-foreground"
+          class="text-muted-foreground hover:text-foreground pointer-coarse:size-10 group-data-[busy=true]/transcript:hidden"
           @click="emit('edit')"
         >
           <PencilIcon class="size-3.5" />

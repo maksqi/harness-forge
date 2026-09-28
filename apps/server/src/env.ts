@@ -51,7 +51,11 @@ export interface Env {
   readonly pluginWatch: boolean
   /** `HF_OFFLINE=1`: never refresh the models.dev snapshot over the network. */
   readonly offline: boolean
-  /** `HF_INSECURE=1`: allow a non-loopback bind without a password. */
+  /**
+   * `HF_INSECURE=1`: allow a non-loopback bind without a password, and (still without a password) requests addressed
+   * to host names other than localhost / loopback IPs, which are otherwise refused as DNS rebinding
+   * (`http/middleware/session-auth.ts`).
+   */
   readonly insecure: boolean
   /** `HF_API_TARGET`: proxy target of `nuxt dev` (unused by the server, kept for completeness). */
   readonly apiTarget: string

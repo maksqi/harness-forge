@@ -207,7 +207,8 @@ describe('pluginSourceTab', () => {
     expect(panel.textContent).toContain('Build failed')
     expect(panel.textContent).toContain('index.mjs:3:5')
     expect(panel.textContent).toContain('Expected ";" but found "ctx"')
-    expect(document.body.querySelector('.cm-hf-lint-marker-error')?.getAttribute('aria-label')).toBe(diagnostic.message)
+    expect(document.body.querySelector('.cm-hf-lint-marker-error')?.getAttribute('title')).toBe(diagnostic.message)
+    expect(document.body.querySelector('.cm-announced')?.textContent).toContain(diagnostic.message)
     expect(document.body.textContent).toContain('1 problem')
 
     api.pluginFiles.build.mockResolvedValue(build())

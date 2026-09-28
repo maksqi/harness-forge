@@ -112,6 +112,7 @@ function onCloseAutoFocus(event: Event) {
       :data-testid="testIds.modelPicker"
       :side="variant === 'composer' ? 'top' : 'bottom'"
       align="start"
+      :collision-padding="8"
       :side-offset="6"
       class="w-[22rem] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl p-0"
       @close-auto-focus="onCloseAutoFocus"

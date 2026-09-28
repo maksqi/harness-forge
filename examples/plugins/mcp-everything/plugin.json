@@ -1,0 +1,25 @@
+{
+  "manifestVersion": 1,
+  "id": "mcp-everything",
+  "name": "MCP Everything (demo)",
+  "version": "1.0.0",
+  "description": "The MCP reference test server, started with npx over stdio.",
+  "author": "harness-forge examples",
+  "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/everything",
+  "icon": "lobe:mcp",
+  "engines": { "harness": "^1.0.0" },
+  "permissions": ["process", "network"],
+  "contributes": {
+    "mcpServers": [
+      {
+        "id": "mcp-everything",
+        "name": "Everything",
+        "transport": {
+          "type": "stdio",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-everything"]
+        }
+      }
+    ]
+  }
+}

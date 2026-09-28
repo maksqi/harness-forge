@@ -24,3 +24,4 @@ Known follow-ups (not patched yet):
 |---|---|---|
 | `ui/command/CommandGroup.vue` | heading styles moved from `[cmdk-group-heading]` selectors onto `ListboxGroupLabel` | reka-ui never sets `cmdk-group-heading`, so headings were unstyled |
 | `ui/sonner/Sonner.vue` | `--gray2` uses `color-mix(in oklch, var(--popover) 90%, transparent)` | `hsl(var(--popover))` is invalid with oklch tokens |
+| `ui/tabs/TabsTrigger.vue` | inactive text `text-foreground/60` → `text-muted-foreground` | 4.5:1 contrast for inactive tabs in light mode (W4.2 a11y audit) |

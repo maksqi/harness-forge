@@ -1,15 +1,17 @@
 <script setup lang="ts">
 // Safe markdown renderer (docs/UI.md 7.1, 10.4) for every assistant text and reasoning part: markstream-vue with raw
 // HTML escaped (`html-policy="escape"`, no HTML strings are ever rendered), links limited to http(s) and mailto
-// (external links open in a new tab with rel="noopener noreferrer"), our own code block (lazy Shiki, dual theme,
-// copy button) and image (lazy, no referrer). KaTeX and Mermaid load on demand. Contract: props `content` + `final`;
+// (external links open in a new tab with rel="noopener noreferrer"), text verbatim (no typographic quotes or
+// dashes), our own code block (lazy Shiki, dual theme,
+// copy button) and image (lazy, no referrer). KaTeX and Mermaid load on demand. The renderer's stylesheet sits in a
+// cascade layer (markstream.css) so its global rules cannot leak into the app. Contract: props `content` + `final`;
 // no slots.
 import MarkdownRender from 'markstream-vue'
 import { computed, watch } from 'vue'
 import { useColorMode } from '~/components/chat/nuxt-imports'
 import { registerMarkdownComponents } from '~/components/chat/parts/markdown/components'
-import { ensureMathStyles, MARKDOWN_CUSTOM_ID, MARKDOWN_PARSE_OPTIONS } from '~/components/chat/parts/markdown/markdown-options'
-import 'markstream-vue/index.css'
+import { configureMarkdownIt, ensureMathStyles, MARKDOWN_CUSTOM_ID, MARKDOWN_PARSE_OPTIONS } from '~/components/chat/parts/markdown/markdown-options'
+import '~/components/chat/parts/markdown/markstream.css'
 
 const props = withDefaults(defineProps<{
   content: string
@@ -36,6 +38,7 @@ watch(() => props.content, ensureMathStyles, { immediate: true })
       html-policy="escape"
       :custom-id="MARKDOWN_CUSTOM_ID"
       :parse-options="MARKDOWN_PARSE_OPTIONS"
+      :custom-markdown-it="configureMarkdownIt"
       :is-dark="isDark"
       :fade="false"
       :show-tooltips="false"

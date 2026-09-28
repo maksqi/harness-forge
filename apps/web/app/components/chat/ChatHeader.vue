@@ -87,7 +87,7 @@ function rename(title: string) {
         <SidebarTrigger
           :data-testid="testIds.sidebarTrigger"
           aria-label="Toggle sidebar"
-          class="-ml-2 text-muted-foreground hover:text-foreground"
+          class="-ml-2 text-muted-foreground hover:text-foreground pointer-coarse:size-10"
         />
       </TooltipTrigger>
       <TooltipContent side="bottom">
@@ -134,7 +134,7 @@ function rename(title: string) {
           size="icon-sm"
           aria-label="Chat options"
           :data-testid="testIds.chatMenuTrigger"
-          class="-mr-2 text-muted-foreground hover:text-foreground"
+          class="-mr-2 text-muted-foreground hover:text-foreground pointer-coarse:size-10"
         >
           <MoreHorizontalIcon />
         </Button>

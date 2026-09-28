@@ -2,15 +2,16 @@
 // (W1.1-T7), unknown `/api/*` stays JSON, no traversal outside the root (SEC-F1). Fixture: a temp `HF_WEB_DIR`.
 import type { TestApp } from '../testing/create-test-app.ts'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { harnessErrorEnvelopeSchema } from '@harness-forge/shared'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { SECURITY_HEADERS } from '../security/headers.ts'
+import { webPublicDir } from '../paths.ts'
+import { inlineScriptHashes, SECURITY_HEADERS } from '../security/headers.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { createMemorySecretStore, createMemorySettingsService } from '../testing/fakes.ts'
-import { IMMUTABLE_CACHE_CONTROL, safePathSegments, SVG_CSP } from './static.ts'
+import { createStaticSite, IMMUTABLE_CACHE_CONTROL, safePathSegments, SPA_FALLBACK_FILE, SVG_CSP } from './static.ts'
 
 const COLOR_MODE = '"use strict";(()=>{const e=document.documentElement;e.classList.add(localStorage.getItem("hf-color-mode")||"dark")})();'
 const NUXT_CONFIG = 'window.__NUXT__={};window.__NUXT__.config={public:{},app:{baseURL:"/"}}'
@@ -278,5 +279,36 @@ describe('health', () => {
   it('reports the Nuxt version of the served build', async () => {
     const response = await t.request('/api/health')
     expect(await response.json()).toMatchObject({ versions: { nuxt: '4.5.2' } })
+  })
+})
+
+describe('the built SPA (apps/web/.output/public, when a build exists)', () => {
+  const built = join(webPublicDir(), SPA_FALLBACK_FILE)
+
+  it.skipIf(!existsSync(built))('sEC-C1: the CSP of the real 200.html allows exactly its inline scripts, nothing inline-executable', async () => {
+    const response = await createStaticSite(webPublicDir()).fallback(new Request('http://127.0.0.1:8787/chat/x', { headers: { accept: 'text/html' } }))
+    expect(response?.status).toBe(200)
+    const document = await response!.text()
+    const csp = response!.headers.get('content-security-policy') ?? ''
+    const directives = new Map(csp.split('; ').map((directive) => {
+      const [name = '', ...values] = directive.split(' ')
+      return [name, values] as const
+    }))
+    // Hashes regenerated from the served file: one per inline script, and no way to run other inline code.
+    const scriptSources = directives.get('script-src') ?? []
+    for (const hashSource of inlineScriptHashes(document))
+      expect(scriptSources).toContain(`'${hashSource}'`)
+    expect(scriptSources.filter(source => source.startsWith('\'sha256-'))).toHaveLength(inlineScriptHashes(document).length)
+    expect(scriptSources).not.toContain('\'unsafe-inline\'')
+    expect(scriptSources).not.toContain('\'unsafe-eval\'')
+    expect(scriptSources).not.toContain('\'unsafe-hashes\'')
+    for (const [name, value] of [['default-src', '\'self\''], ['object-src', '\'none\''], ['base-uri', '\'none\''], ['frame-ancestors', '\'none\'']] as const)
+      expect(directives.get(name), name).toEqual([value])
+    // Inline event handlers and javascript: URLs would be blocked by this CSP: the build must not rely on them.
+    expect(document).not.toMatch(/\son[a-z]+\s*=/i)
+    expect(document).not.toMatch(/javascript:/i)
+    // Every external script and stylesheet is same-origin.
+    for (const [, url] of document.matchAll(/<(?:script|link)\b[^>]*\s(?:src|href)="([^"]*)"/gi))
+      expect(url, url).toMatch(/^\/(?!\/)/)
   })
 })

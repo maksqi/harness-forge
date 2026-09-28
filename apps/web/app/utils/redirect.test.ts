@@ -1,5 +1,6 @@
+import { HarnessError } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { afterLoginPath, authRedirectFor, loginPath, safeRedirectPath } from './redirect'
+import { accessBlockedMessage, afterLoginPath, authRedirectFor, loginPath, safeRedirectPath } from './redirect'
 
 function route(fullPath: string) {
   const url = new URL(fullPath, 'http://localhost')
@@ -49,5 +50,19 @@ describe('authRedirectFor', () => {
     expect(authRedirectFor(route('/login?redirect=%2F%2Fevil.example'), noPassword)).toBe('/')
     expect(authRedirectFor(route('/login'), needsLogin)).toBeNull()
     expect(authRedirectFor(route('/login'), unknown)).toBeNull()
+  })
+})
+
+describe('accessBlockedMessage', () => {
+  it('returns the server message when the auth status is refused (e.g. the DNS rebinding guard)', () => {
+    const message = 'Without a password this server only answers requests addressed to localhost or 127.0.0.1 (DNS rebinding protection).'
+    expect(accessBlockedMessage(new HarnessError({ code: 'forbidden', message }))).toBe(message)
+    expect(accessBlockedMessage({ error: { code: 'forbidden', message } })).toBe(message)
+  })
+
+  it('ignores fresh-auth refusals and every other failure', () => {
+    expect(accessBlockedMessage(new HarnessError({ code: 'forbidden', message: 'x', action: 'login' }))).toBeNull()
+    expect(accessBlockedMessage(new HarnessError({ code: 'not_implemented', message: 'x' }))).toBeNull()
+    expect(accessBlockedMessage(new TypeError('Failed to fetch'))).toBeNull()
   })
 })

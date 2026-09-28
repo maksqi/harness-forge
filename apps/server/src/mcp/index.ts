@@ -1,7 +1,9 @@
 // MCP manager (W3.5-T1, T2; PLUGINS.md 5 / 10 / 14, API.md 5.13): one `@ai-sdk/mcp` client per enabled MCP server
 // declared in the registry. Declarations come from plugin manifests (`contributes.mcpServers`), `ctx.mcp.register` and
-// the user servers of the MCP panel (`mcp_servers` + secrets `mcp:<id>`), which the builtin `core-mcp` declares through
-// its own context while it is active (`core-bridge.ts`), so disabling `core-mcp` removes them like any contribution.
+// the user servers of the MCP panel (`mcp_servers` + secrets `mcp:<id>`). The manager declares the user servers as
+// contributions of the builtin `core-mcp` while that plugin is active: it follows `PluginHost.onStateChange` (and checks
+// the state at `start()`), and the host removes them with every other `core-mcp` contribution when it is disabled,
+// reloaded or stopped.
 //
 // Lifecycle: `start()` (after the plugin host) connects the declared servers in the background and then follows
 // registry changes (20 s connect timeout, never blocking boot); a failed or dropped connection retries with backoff; a
@@ -10,7 +12,7 @@
 // by the declaring plugin (`mcpServerId` set) with the policy from their annotations; they are unregistered on
 // disconnect and listed as `available: false` by the tool service. Status changes emit `plugin.changed` for the owner.
 import type { MCPClient, MCPClientConfig } from '@ai-sdk/mcp'
-import type { Disposable, McpServerDecl, PluginContext, ToolCallContext, ToolDefinition } from '@harness-forge/plugin-sdk'
+import type { Disposable, McpServerDecl, ToolCallContext, ToolDefinition } from '@harness-forge/plugin-sdk'
 import type { HarnessErrorInit, LogLevel, McpServer, McpStatus, ToolPolicy } from '@harness-forge/shared'
 import type { RegisteredMcpServer, RegistryChange } from '../registry/types.ts'
 import type { AppDeps } from '../types.ts'
@@ -25,7 +27,6 @@ import { join } from 'node:path'
 import { createMCPClient } from '@ai-sdk/mcp'
 import { HarnessError } from '@harness-forge/shared'
 import { appVersion } from '../paths.ts'
-import { registerCoreMcpBridge } from './core-bridge.ts'
 import { connectionErrorInit, errorMessage, isConnectionFailure, isPermanentMcpError, mcpConfigError } from './errors.ts'
 import { CORE_MCP_PLUGIN_ID } from './internal.ts'
 import { mcpToolDefinition, mcpToolTitle, offlineToolOf } from './mcp-tools.ts'
@@ -157,8 +158,8 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
   let userOps: Promise<unknown> = Promise.resolve()
   let started = false
   let stopped = false
-  /** Context of the active `core-mcp` (its registrations are its contributions), else null. */
-  let coreCtx: PluginContext | null = null
+  /** `core-mcp` is active: the user servers are declared as its contributions. */
+  let coreActive = false
   let clientVersion: string | undefined
 
   const redact = (text: string): string => deps.redactor.redactText(text)
@@ -644,16 +645,15 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
     })
   }
 
-  /** Declares (or re-declares) a user server through the `core-mcp` context; records a failure as its error. */
+  /** Declares (or re-declares) a user server as a contribution of `core-mcp`; records a failure as its error. */
   function registerUserDecl(row: UserServerRecord): void {
     const previous = userDecls.get(row.id)
     userDecls.delete(row.id)
     previous?.dispose()
-    const ctx = coreCtx
-    if (ctx === null || stopped)
+    if (!coreActive || stopped)
       return
     try {
-      const handle = ctx.mcp.register(userDecl(row))
+      const handle = deps.registry.mcpServers.register(CORE_MCP_PLUGIN_ID, userDecl(row))
       userDecls.set(row.id, handle)
       userErrors.delete(row.id)
     }
@@ -684,19 +684,36 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
     }
   }
 
-  /** `core-mcp` setup: keep its context and declare the stored servers; forget it when the plugin unloads. */
-  async function attachCore(ctx: PluginContext): Promise<void> {
-    if (stopped)
-      return
-    coreCtx = ctx
+  /** Removes the user server declarations (usually already removed by the host with the other `core-mcp` ones). */
+  function disposeUserDecls(): void {
+    const handles = [...userDecls.values()]
     userDecls.clear()
-    ctx.signal.addEventListener('abort', () => {
-      if (coreCtx === ctx) {
-        coreCtx = null
-        userDecls.clear()
+    for (const handle of handles) {
+      try {
+        handle.dispose()
       }
-    }, { once: true })
-    await runUserOp(syncUserServers)
+      catch {}
+    }
+  }
+
+  /** `core-mcp` became active (declare the stored servers) or left `active` (drop them). */
+  function followCore(active: boolean): void {
+    if (stopped || active === coreActive)
+      return
+    coreActive = active
+    if (active)
+      syncInBackground()
+    else
+      disposeUserDecls()
+  }
+
+  function coreIsActive(): boolean {
+    try {
+      return deps.plugins.isActive(CORE_MCP_PLUGIN_ID)
+    }
+    catch {
+      return false
+    }
   }
 
   // ---------- DTOs ----------
@@ -714,7 +731,7 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
   }
 
   function userView(row: UserServerRecord): { status: McpStatus, error: HarnessErrorInit | null } {
-    if (!row.enabled || coreCtx === null)
+    if (!row.enabled || !coreActive)
       return { status: 'disabled', error: null }
     const registered = deps.registry.mcpServers.get(row.id)
     if (registered?.pluginId !== CORE_MCP_PLUGIN_ID) {
@@ -818,7 +835,17 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
 
   // ---------- the manager ----------
 
-  const bridge = registerCoreMcpBridge(join(deps.env.paths.pluginData, CORE_MCP_PLUGIN_ID), { attach: attachCore })
+  // Follows `core-mcp` from construction on (the host starts before `start()`), in-process: no event-bus subscription.
+  let coreSubscription: Disposable | undefined
+  try {
+    coreSubscription = deps.plugins.onStateChange?.((change) => {
+      if (change.id === CORE_MCP_PLUGIN_ID)
+        followCore(change.state === 'active')
+    })
+  }
+  catch (error) {
+    deps.logger.warn('the MCP manager cannot follow the plugin host', { err: error })
+  }
 
   return {
     start: async () => {
@@ -828,6 +855,8 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       // Nothing here may fail the boot: a broken registry or MCP configuration only leaves servers unconnected.
       try {
         subscriptions = [deps.registry.onChange(onRegistryChange)]
+        // A host without state notifications, or a manager created after `core-mcp` became active.
+        followCore(coreIsActive())
         for (const { pluginId, decl } of deps.registry.mcpServers.list()) {
           const runtime = ensureRuntime(decl.id, pluginId)
           if (runtime.status === 'idle' && wanted(decl.id))
@@ -852,15 +881,9 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       const pending = [...attempts]
       for (const runtime of servers.values())
         detach(runtime)
-      for (const handle of userDecls.values()) {
-        try {
-          handle.dispose()
-        }
-        catch {}
-      }
-      userDecls.clear()
-      coreCtx = null
-      bridge.dispose()
+      coreSubscription?.dispose()
+      coreActive = false
+      disposeUserDecls()
       await Promise.allSettled(pending)
       await Promise.allSettled([...closing])
     },

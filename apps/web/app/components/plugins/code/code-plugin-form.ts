@@ -18,6 +18,21 @@ export const CODE_TEMPLATES: readonly CodeTemplateOption[] = [
   { id: 'command-pack', label: 'Command pack', description: 'Adds slash commands' },
 ]
 
+export type CodePluginLanguage = 'js' | 'ts'
+
+export interface CodeLanguageOption {
+  value: CodePluginLanguage
+  label: string
+  /** What the scaffold writes (shown under the choice). */
+  hint: string
+}
+
+/** Languages of `POST /api/plugins/scaffold` (`language`, default `js`). */
+export const CODE_LANGUAGES: readonly CodeLanguageOption[] = [
+  { value: 'js', label: 'JavaScript', hint: 'index.mjs with JSDoc types. Runs as written.' },
+  { value: 'ts', label: 'TypeScript', hint: 'index.ts, compiled by the server when the plugin builds.' },
+]
+
 /** Longest plugin name (`PluginManifest.name`). */
 export const PLUGIN_NAME_MAX = 64
 /** Longest plugin id. */

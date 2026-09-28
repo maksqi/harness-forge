@@ -4,16 +4,20 @@
 // 2. Preview (InspectPreview) of the returned `PluginInspection`.
 // 3. Trust, for code plugins and stdio MCP servers: TrustWarning + the required "I trust {source}" checkbox and, when
 //    a password is set and the session is not fresh (ADR-017), the "Confirm your password" field.
-// 4. Install: logs in first when the password field is shown, then `POST /api/plugins/install` with the same source
-//    (and `trust`). If the server still asks for a fresh login (403 + action `login`), ConfirmPasswordDialog asks for
-//    the password, logs in and retries once. Success: toast, `installed(id)`, close.
+// 4. Install: logs in first when the password field is shown, then `POST /api/plugins/install` with the same source,
+//    `trust` and the reviewed `sha256`. If the server still asks for a fresh login (403 + action `login`),
+//    ConfirmPasswordDialog asks for the password, logs in and retries once. When the package changed since the
+//    preview (409 `conflict`, reason `stale`), the dialog inspects again, shows what changed and asks for a new
+//    review. Success: toast, `installed(id)`, close.
+// "I trust {source}" names the source the server resolved (`sourceRef`, e.g. `name@1.2.3`) when it sent one.
 // "Back" returns to the source step keeping the inputs; closing discards everything.
 import type { PluginDetail, PluginInspection } from '@harness-forge/shared'
 import type { DraftField, FieldErrors, InstallDraft, InstallRequest, InstallTab } from './install'
 import type { HarnessErrorUiAction } from '~/components/common/harness-error'
-import { FileArchiveIcon } from '@lucide/vue'
-import { computed, reactive, ref, useId, watch } from 'vue'
+import { FileArchiveIcon, RefreshCwIcon } from '@lucide/vue'
+import { computed, nextTick, reactive, ref, useId, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -40,11 +44,12 @@ import InspectPreview from './InspectPreview.vue'
 import {
   buildRequest,
   emptyDraft,
+  inspectionSourceLabel,
   INSTALL_TABS,
+  installBody,
   isFreshAuthError,
   isStaleReview,
   passwordErrorText,
-  requestSourceLabel,
   serverFieldErrors,
   TAB_LABELS,
   zipForm,
@@ -106,6 +111,9 @@ const confirmOpen = ref(false)
 const confirmPending = ref(false)
 const confirmError = ref<string | null>(null)
 const dragging = ref(false)
+/** The package changed since the user reviewed it: the preview shows the new inspection. */
+const staleReview = ref(false)
+const formElement = useTemplateRef<HTMLFormElement>('form')
 const fileInput = ref<HTMLInputElement | null>(null)
 // Bumped on every open and close, so a request that outlives its dialog session cannot touch the next one.
 let session = 0
@@ -113,7 +121,7 @@ let session = 0
 const busy = computed(() => phase.value !== 'idle' || confirmPending.value)
 const requiresTrust = computed(() => inspection.value?.requiresTrust === true)
 const needsPassword = computed(() => requiresTrust.value && auth.status?.enabled === true && !auth.fresh)
-const sourceLabel = computed(() => (inspected.value ? requestSourceLabel(inspected.value) : ''))
+const sourceLabel = computed(() => (inspection.value && inspected.value ? inspectionSourceLabel(inspection.value, inspected.value) : ''))
 const sourceConflict = computed(() => {
   const current = inspection.value
   return current !== null && current.existing !== null && current.existing.source !== current.source
@@ -143,6 +151,7 @@ function reset() {
   confirmPending.value = false
   confirmError.value = null
   dragging.value = false
+  staleReview.value = false
   if (fileInput.value)
     fileInput.value.value = ''
 }
@@ -249,6 +258,7 @@ async function inspect() {
     trustChecked.value = false
     password.value = ''
     passwordError.value = null
+    staleReview.value = false
     step.value = 'preview'
   }
   catch (failure) {
@@ -261,14 +271,16 @@ async function inspect() {
   }
 }
 
+/** Installs exactly what the preview showed: the server refuses with `409 conflict` (`stale`) when it changed. */
 function sendInstall(): Promise<PluginDetail> {
   const request = inspected.value
-  if (!request)
+  const reviewed = inspection.value
+  if (!request || !reviewed)
     return Promise.reject(new Error('Nothing to install.'))
-  const trust = requiresTrust.value && trustChecked.value
+  const options = { trust: requiresTrust.value && trustChecked.value, sha256: reviewed.sha256 }
   if (request.kind === 'zip')
-    return withHarnessErrors(api.pluginInstall.install({ form: zipForm(request.file, trust) }))
-  return withHarnessErrors(api.pluginInstall.install({ body: { ...request.source, ...(trust ? { trust: true } : {}) } }))
+    return withHarnessErrors(api.pluginInstall.install({ form: zipForm(request.file, options) }))
+  return withHarnessErrors(api.pluginInstall.install({ body: installBody(request.source, options) }))
 }
 
 function finish(detail: PluginDetail) {
@@ -284,6 +296,7 @@ async function install() {
   const current = session
   error.value = null
   passwordError.value = null
+  staleReview.value = false
   phase.value = 'installing'
   try {
     if (needsPassword.value) {
@@ -317,8 +330,8 @@ async function install() {
 }
 
 /**
- * Shows an install failure. When the source changed since it was reviewed (409 `stale`: a moved npm tag, a changed
- * folder), the preview is refreshed with a new inspection and the trust consent starts over.
+ * Shows an install failure. When the package changed since it was reviewed (409 `stale`: a moved npm tag, a changed
+ * folder), the preview is refreshed with a new inspection, a notice says why, and the trust consent starts over.
  */
 async function installFailed(failure: unknown, current: number) {
   showError(failure)
@@ -334,6 +347,11 @@ async function installFailed(failure: unknown, current: number) {
     inspection.value = result
     trustChecked.value = false
     password.value = ''
+    error.value = null
+    staleReview.value = true
+    // The notice sits above the preview; the user was looking at the Install button at the bottom.
+    await nextTick()
+    formElement.value?.scrollTo({ top: 0 })
   }
   catch {
     // The error above already tells the user to inspect again.
@@ -359,6 +377,7 @@ async function onConfirmPassword(value: string) {
     return
   confirmPending.value = false
   confirmOpen.value = false
+  staleReview.value = false
   phase.value = 'installing'
   try {
     const detail = await sendInstall()
@@ -382,6 +401,7 @@ function back() {
   inspection.value = null
   inspected.value = null
   error.value = null
+  staleReview.value = false
   trustChecked.value = false
   password.value = ''
 }
@@ -421,7 +441,7 @@ function onErrorAction(action: HarnessErrorUiAction) {
         </DialogDescription>
       </DialogHeader>
 
-      <form :id="formId" class="-mx-1 grid min-h-0 gap-4 overflow-y-auto px-1" novalidate @submit.prevent="onSubmit">
+      <form :id="formId" ref="form" class="-mx-1 grid min-h-0 gap-4 overflow-y-auto px-1" novalidate @submit.prevent="onSubmit">
         <Tabs v-if="step === 'source'" :model-value="tab" class="gap-4" @update:model-value="onTabChange">
           <TabsList class="w-full">
             <TabsTrigger
@@ -598,6 +618,17 @@ function onErrorAction(action: HarnessErrorUiAction) {
         </Tabs>
 
         <template v-else-if="inspection">
+          <Alert
+            v-if="staleReview"
+            :data-testid="testIds.installStale"
+            class="border-warning/40 bg-warning/5 *:data-[slot=alert-description]:text-foreground/80 dark:bg-warning/10 *:[svg]:text-warning"
+          >
+            <RefreshCwIcon aria-hidden="true" />
+            <AlertTitle>This plugin changed since you reviewed it</AlertTitle>
+            <AlertDescription>
+              The preview now shows the current version. Review it again before you install.
+            </AlertDescription>
+          </Alert>
           <InspectPreview :inspection="inspection" :source-label="sourceLabel" />
           <template v-if="inspection.requiresTrust">
             <TrustWarning :inspection="inspection" />

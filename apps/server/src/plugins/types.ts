@@ -5,7 +5,7 @@
 // - `PluginDrafts`    -> `createPluginDrafts(deps)` in `plugins/drafts/index.ts` (W3.3)
 // - `PluginFiles`     -> `createPluginFiles(deps)` in `plugins/scaffold/index.ts` (W3.4)
 // Phase 3 agents use only these interfaces (never W1.3 internals); a missing capability is a CCR.
-import type { DeclarativeProvider, PluginManifest, PluginModule, ProviderDefinition } from '@harness-forge/plugin-sdk'
+import type { DeclarativeProvider, Disposable, PluginManifest, PluginModule, ProviderDefinition } from '@harness-forge/plugin-sdk'
 import type {
   BuildDiagnostic,
   BuildResult,
@@ -126,6 +126,15 @@ export interface PluginIconLobe {
 /** A plugin icon for `GET /plugins/:id/icon`. */
 export type PluginIconFile = PluginIconContent | PluginIconLobe
 
+/** A plugin entered a state (`PluginHost.onStateChange`). */
+export interface PluginStateChange {
+  id: string
+  /** The new state; null when the plugin was removed (uninstall, forget). */
+  state: PluginState | null
+  /** The state before the change (a plugin starts in `loading`). */
+  previous: PluginState
+}
+
 /** Output of compiling / checking a code plugin entry (`POST /plugins/:id/build`). */
 export interface PluginCompileResult {
   /** No error diagnostics. */
@@ -240,6 +249,20 @@ export interface PluginHost {
   readonly withoutWatch: <T>(id: string, fn: () => Promise<T>) => Promise<T>
   /** The declarative adapter: a `ProviderDefinition` for a `DeclarativeProvider` (draft test), not registered. */
   readonly declarativeProvider: (pluginId: string, provider: DeclarativeProvider) => ProviderDefinition
+
+  // ----- W4.6 additions (optional so fakes of this interface keep compiling; `createPluginHost` implements both)
+
+  /**
+   * Re-reads the row and the files of a loaded plugin without (re)loading it, so its DTO shows the current trust hash,
+   * pin and manifest (after an editor write re-pinned it). The running code, the state and the hot-reload fingerprint
+   * are unchanged. Emits `plugin.changed` when the detail changed. `not_found`.
+   */
+  readonly refresh?: (id: string) => Promise<PluginDetail>
+  /**
+   * Calls `listener` synchronously on every state transition (when `plugin.changed` is emitted) and when a plugin is
+   * removed (`state: null`). In-process: no event-bus subscription. A throwing listener is logged and ignored.
+   */
+  readonly onStateChange?: (listener: (change: PluginStateChange) => void) => Disposable
 }
 
 // ---------- Phase 3 services ----------
@@ -254,6 +277,8 @@ export interface PluginInstallOptions {
   trust?: boolean
   /** Default true. */
   enable?: boolean
+  /** The hash the user reviewed in the inspect preview; a different staged hash fails with `conflict` (`stale`). */
+  sha256?: string
   /**
    * Called after the staged package is validated and before anything is committed, with the inspection; throws to
    * abort (the staging directory is removed). The route requires fresh auth here when `requiresTrust` (ADR-017).

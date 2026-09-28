@@ -1,5 +1,6 @@
 <script setup lang="ts">
-// Trust warning (docs/UI.md 8.4, docs/PLUGINS.md 13 "Trust warning"): a destructive Alert with the exact warning text,
+// Trust warning (docs/UI.md 8.4, docs/PLUGINS.md 13 "Trust warning"): a destructive Alert (red border, title and icon;
+// the text stays foreground for contrast, docs/UI.md 14.3) with the exact warning text,
 // then what the user is about to trust: the source (installed plugins), the declared permissions, the hosts and the
 // programs the plugin declares, and the sha256 that trust pins. Exactly one of the props is passed: the install
 // dialog passes the inspection (its preview shows the source), installed plugins pass their PluginDetail
@@ -32,9 +33,11 @@ const source = computed(() => (props.plugin ? pluginSourceLabel(props.plugin) : 
     class="border-destructive/35 bg-destructive/5 dark:bg-destructive/10 *:data-[slot=alert-description]:text-foreground/85"
   >
     <ShieldAlertIcon />
-    <AlertTitle>Review before you trust this plugin</AlertTitle>
+    <AlertTitle class="text-[color-mix(in_oklch,var(--destructive)_80%,var(--foreground))]">
+      Review before you trust this plugin
+    </AlertTitle>
     <AlertDescription class="grid gap-3">
-      <p class="text-destructive">
+      <p class="text-foreground">
         {{ TRUST_WARNING_TEXT }}
       </p>
       <div v-if="source" class="grid gap-1">

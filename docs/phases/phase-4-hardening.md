@@ -16,7 +16,7 @@ stability with a full e2e suite that is green three times in a row.
 
 ## Exit criteria
 
-- ROADMAP items W4.1–W4.5 checked; final gate green; final checkpoint commit.
+- ROADMAP items W4.1–W4.6 checked; final gate green; final checkpoint commit.
 - The full e2e suite is green 3× in a row.
 - Production starts from an empty data dir (`pnpm start` and Docker).
 - The security checklist and the release checklist below are closed.
@@ -34,7 +34,10 @@ stability with a full e2e suite that is green three times in a row.
 
 ---
 
-## Wave W4 (5 agents in one launch)
+## Wave W4
+
+As scheduled in the ROADMAP: **Wave C** runs W2.6 and W3.6 (e2e of Phases 2 and 3), W4.1–W4.4 and W4.6 (core fixes)
+in one launch; **Wave D** runs W4.5 (full e2e, 3 green runs) plus fix-ups.
 
 ### W4.1 security
 
@@ -108,22 +111,29 @@ stability with a full e2e suite that is green three times in a row.
 
 - **Mission.** Finalize the documentation against the real code and ship five example plugins that load and pass
   tests.
-- **Owned.** `README.md`, `docs/**` except `docs/ROADMAP.md` and `docs/DECISIONS.md`, `examples/**`.
+- **Owned.** `README.md`, `docs/{ARCHITECTURE,API,PLUGINS,PROVIDERS,UI}.md`, `docs/phases/**`, `docs/guides/**`,
+  `docs/assets/**`, `examples/**`.
 - **Read-only highlights.** `apps/server/src/env.ts`, `packages/shared/src/api/routes.ts`,
   `apps/server/src/db/schema.ts`, `apps/web/app/utils/testids.ts`, `apps/server/src/testing/**`.
 - **Tasks.**
   1. **W4.4-T1 Reconcile docs** — README, ARCHITECTURE, API, PLUGINS, PROVIDERS and UI match the code (endpoints,
-     env vars, tables, test ids, shortcuts); README env table and quick start use W4.3's final commands.
-  2. **W4.4-T2 Tutorial** — `docs/guides/writing-a-plugin.md`: declarative provider, code tool with approval, MCP
-     bridge, local development with a linked folder, packaging as a zip, trust.
+     env vars, tables, test ids, shortcuts) and the ROADMAP "Doc follow-ups" are applied; README env table and quick
+     start use W4.3's final commands; README screenshots (dark + light) in `docs/assets/screenshots/`, captured from
+     the production build with the mock provider (<= 300 KB each).
+  2. **W4.4-T2 Guides** — `docs/guides/writing-a-declarative-provider.md`, `docs/guides/writing-a-code-plugin.md`
+     (tool, provider, command, hooks; JSDoc and TypeScript entries; in-browser editor; linked-folder development;
+     zip packaging; trust) and `docs/guides/adding-an-mcp-server.md`.
   3. **W4.4-T3 Examples** — `examples/plugins/{lmstudio,together-ai,dice-roller,echo-provider,mcp-everything}`
      (declarative LM Studio provider, declarative Together AI provider, code tool `roll_dice`, code provider, and
      `npx @modelcontextprotocol/server-everything` over stdio; PLUGINS.md section 15), each with a README; manifest
      `id` equals the directory name.
-  4. **W4.4-T4 Example tests** — `examples/plugins/examples.test.ts` loads every example through `createTestApp()`
-     and asserts `active` (stdio MCP: trusted and registered; not started in CI); the coordinator adds the path to
-     the Vitest node project if it is not collected.
-- **Verify.** `pnpm test`, `pnpm check:english`.
+  4. **W4.4-T4 Example tests** — `examples/plugins/examples.test.ts` parses every manifest with
+     `pluginManifestSchema`, loads every example through `createTestApp()` and asserts `active` (stdio MCP: trusted
+     and registered, never started), runs the dice tool, streams a chat from the echo provider, runs the LM Studio
+     and Together AI manifests against a fake OpenAI-compatible server, and checks that the PLUGINS.md section 15
+     snippets equal the example files. The coordinator adds `'examples'` to `test.projects` of the root
+     `vitest.config.ts` (a folder without its own config: project name `examples`, default include).
+- **Verify.** `pnpm exec vitest run --project examples`, `pnpm check:english`.
 
 ### W4.5 e2e-full
 
@@ -142,6 +152,20 @@ stability with a full e2e suite that is green three times in a row.
      build for the parts that exist; the final run happens at the gate.
 - **Verify.** `pnpm test:e2e --list`, slot runs (`HF_MOCK_PROVIDER=1 HF_PORT=889k HF_DATA_DIR=.tmp/W4.5
   pnpm start`, `E2E_BASE_URL=http://127.0.0.1:889k`).
+
+### W4.6 core-fixes
+
+- **Mission.** Fix the core issues found at the Wave B gate (ROADMAP "Core fixes for Wave C").
+- **Tasks.**
+  1. Tool-call history when the chat's `toolMode` is `off` or the model has no tool support (earlier tool parts must
+     still convert into valid model messages).
+  2. `PluginHost.refresh(id)` after a trust re-pin, so the plugin detail never shows a stale `trust.hash`.
+  3. `CredentialService.setFor(providerId, fields, values)` for the provider drafts, instead of writing the secret
+     layout directly.
+  4. `PluginHost.onStateChange` instead of the `core-mcp` bridge.
+  5. Stable `plugins/host.test.ts` fs.watch tests under full-suite load; the body-limit streamed-multipart cancel no
+     longer causes an unhandled rejection (with W4.1).
+- **Verify.** Server commands.
 
 ### Wave W4 ownership
 
@@ -188,8 +212,20 @@ stability with a full e2e suite that is green three times in a row.
 | W4.1 → W4.2 | web findings (file, issue, fix) forwarded by the coordinator |
 | W4.2 → W4.5 | existing `data-testid` values never change; new states get new ids in `utils/testids.ts` |
 | W4.3 → W4.4 | final `pnpm start` / Docker commands and env defaults feed the README |
-| W4.5 → W4.4 | screenshots from `.tmp/screenshots/` are copied by the coordinator to `docs/screenshots/`; README links those paths |
+| W4.4 → README | README screenshots are captured by W4.4 into `docs/assets/screenshots/` (W4.5 screenshots stay in `.tmp/screenshots/` for review) |
 | W4.4 → W4.5 | examples are read-only e2e inputs |
+
+## Hardening notes (from earlier gates)
+
+Known issues collected at the Wave A and B gates; each is either fixed in Wave C or stays documented here.
+
+| Note | Where | Status / owner |
+|---|---|---|
+| `plugins/host.test.ts` hot-reload (fs.watch) tests are timing-sensitive under full-suite load | server tests | W4.6 |
+| markstream-vue CSS ships unscoped `.container` rules that can leak into the app layout | web (`Markdown.vue`) | W4.2 to scope or override |
+| The copied AI Elements components that import `vue-stream-markdown` are unused (candidate to drop the dependency and its `overrides` pin) | web dependencies | coordinator decision |
+| The login rate limiter ignores `X-Forwarded-For` | server | documented (reverse-proxy caveat, SEC-A3) |
+| `apps/server/assets/catalog/` (models.dev snapshot) and `apps/server/drizzle/` must ship next to `dist/` | packaging | W4.3 (Dockerfile copies both; ARCHITECTURE.md section 11) |
 
 ## Security checklist
 
@@ -202,7 +238,9 @@ by W4.1 and fixed by the owner or a fix-up agent.
   `GET /icons/lobe`, `GET /icons/lobe/:slug`).
 - [ ] SEC-A2 `hf_session` is HttpOnly, SameSite=Strict, Secure on HTTPS, HMAC-verified, expires, and is invalidated
   by a password change.
-- [ ] SEC-A3 Login is rate-limited with backoff; password checks are constant-time scrypt.
+- [ ] SEC-A3 Login is rate-limited with backoff; password checks are constant-time scrypt. The limiter keys on the
+  socket address and ignores `X-Forwarded-For`, so behind a reverse proxy every client shares one bucket
+  (documented in ARCHITECTURE.md section 10 and the README).
 - [ ] SEC-A4 A non-loopback bind is refused without `HF_PASSWORD` or `HF_INSECURE=1`.
 - [ ] SEC-A5 Fresh auth (ADR-017, API.md): with a password set, installing or trusting code / stdio-MCP plugins,
   scaffolding and building code plugins, creating or changing stdio MCP servers and changing the password need a
@@ -244,7 +282,7 @@ by W4.1 and fixed by the owner or a fix-up agent.
 
 **G. SSRF**
 - [ ] SEC-G1 `web_fetch` blocks loopback, private, link-local, CGNAT, cloud-metadata and IPv6 ULA/link-local targets
-  and re-checks every redirect.
+  and re-checks every redirect. The `core-tools` setting `allowLocalhost` (default off) admits loopback only.
 - [ ] SEC-G2 Documented by design: user-configured provider base URLs and MCP URLs may target localhost; plugin
   `ctx.fetch` is unrestricted in v1 (code plugins run with server permissions).
 
@@ -277,7 +315,7 @@ by W4.1 and fixed by the owner or a fix-up agent.
   route table test; plugin tutorial walked through; ROADMAP fully checked.
 - [ ] **Examples** — the 5 example plugins load `active` in tests; declarative examples appear in
   `GET /api/providers`.
-- [ ] **Screenshots** — dark + light of every main screen in `docs/screenshots/`, linked from README.
+- [ ] **Screenshots** — dark + light screenshots in `docs/assets/screenshots/` (<= 300 KB each), linked from README.
 - [ ] **English** — `pnpm check:english` clean.
 
 ## Final gate (W4)
@@ -287,8 +325,8 @@ by W4.1 and fixed by the owner or a fix-up agent.
 3. `pnpm start:e2e` → `curl -sf :8899/api/health` → `curl -N` chat stream with `mock:echo` (as in the W2 gate).
 4. Full suite 3× with the OS color scheme emulated as light:
    `for i in 1 2 3; do pnpm test:e2e || exit 1; done`.
-5. Screenshots (dark + light) of every main screen into `.tmp/gates/W4/`; selected ones copied to
-   `docs/screenshots/`.
+5. Screenshots (dark + light) of every main screen into `.tmp/gates/W4/`; refresh `docs/assets/screenshots/` when
+   the UI changed visibly.
 6. Security checklist and release checklist closed → ROADMAP + wave log → final checkpoint commit.
 
 ## Final acceptance (from the plan's Verification)
