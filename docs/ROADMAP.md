@@ -126,7 +126,8 @@ Details, owned paths and acceptance criteria: `docs/phases/phase-5-v1-1.md`. Dec
   - [x] W5.10 e2e-features (branching, data, share) · [x] W5.11 docs-final
   - [x] W5.13 web fix-ups (touch targets, sheet width, Mod+B case, Settings → Models test ids); W5.12 (server
     fix-ups) not needed: the P5-A gate was green
-  - [ ] Final gate (e2e ×3, screenshots, audit, Docker upgrade) + checkpoint commit
+  - [x] Final gate (e2e ×3, screenshots, audit, v1 → v1.1 upgrade) + checkpoint commit; Docker re-run and the live
+    provider suite are left to CI / the user (see the wave log)
 
 ## Backlog (not in v1.1)
 
@@ -152,4 +153,5 @@ sidebar buttons on touch tablets (≥ 769 px wide; still 32 px) · `actionlint` 
 | P5-0a | coordinator (K1, K2), C7, D5 | audit ok; 3623 tests; build ok; built-page CSP test 38/38; 11 new routes mounted (501 / 400 body validation); e2e 27/27; `vue-stream-markdown` gone, TypeScript 6.0.3 only | 0b56f45 |
 | P5-0b | coordinator (K3, K4), C8, C9 | audit ok; 3676 tests; build ok; CSP 38/38; e2e 27/27; v1 data upgrade probe ok (12/12 messages, parent chain + active leaves correct); `.gitignore` `data/` → `/data/` (source folders named `data` were ignored); FREEZE | c4207b5 |
 | P5-A | W5.1–W5.9 | audit ok (147 paths); 4202 tests; build ok; CSP 38/38 with `HF_TEST_REQUIRE_WEB_BUILD=1`; probes ok (branch switch + 409 run-active, export v2 round trip, backup without secrets + import/skip on a fresh server, anonymous share view + revoke 404 + masked token logs, trusted-proxy limiter buckets + `X-Forwarded-Host` 403); e2e 41 passed (chromium + mobile) + 4 screenshot tests (96 PNGs reviewed); `pnpm audit --prod` clean | 69f1676 |
-| P5-B | W5.10, W5.11, W5.13 (+ coordinator: Mod+Shift+B left to the browser, 413 `limitEntries`, DECISIONS wording) | audit ok (40 paths); 4211 tests; build ok; CSP 38/38; all P5-A probes again green; e2e 44 passed ×3 (chromium + mobile; 48 tests in 25 files); screenshots of versions, Share dialog, share page reviewed; `pnpm audit --prod` clean; real v1 → v1.1 upgrade (v1 built from `4c461a0` in a worktree, 2 chats seeded, then v1.1 on the same data: parent chains + leaves correct, branching probe 11/11, old chat continues) | (this commit) |
+| P5-B | W5.10, W5.11, W5.13 (+ coordinator: Mod+Shift+B left to the browser, 413 `limitEntries`, DECISIONS wording) | audit ok (40 paths); 4211 tests; build ok; CSP 38/38; all P5-A probes again green; e2e 44 passed ×3 (chromium + mobile; 48 tests in 25 files); screenshots of versions, Share dialog, share page reviewed; `pnpm audit --prod` clean; real v1 → v1.1 upgrade (v1 built from `4c461a0` in a worktree, 2 chats seeded, then v1.1 on the same data: parent chains + leaves correct, branching probe 11/11, old chat continues) | 0a6fa4e |
+| Final gate v1.1 | coordinator | frozen install ok; check 4211 tests; build ok; CSP 38/38; probes green; e2e 44/44 ×3; audit clean; v1 → v1.1 upgrade ok. Docker not re-run locally (daemon off; the CI `docker` job builds the image); live provider suite not run (needs the user's keys) | (this commit) |
