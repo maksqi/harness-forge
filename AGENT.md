@@ -152,6 +152,16 @@ server, use your slot `k` from the task prompt: `HF_PORT=879k HF_DATA_DIR=.tmp/<
 1. Tasks done (task ids). 2. Files touched. 3. Commands run + results (tests, typecheck, check:english).
 4. CCRs. 5. Dependency requests. 6. Open issues / risks. 7. Suggested ROADMAP updates.
 
+## Git workflow
+
+- **All work happens on `main`.** No long-lived feature branches; the repository is `github.com/maksqi/harness-forge`.
+- Commits follow Conventional Commits in English (`feat: …`, `fix: …`, `docs: …`, `chore: …`), subject ≤ 72 chars.
+- Sub-agents never run git write commands; the coordinator commits to `main` after a green gate (`pnpm check`,
+  `pnpm build`, and the e2e suite when the UI or API changed).
+- Push to `origin main` only when the user asks. Never force-push or rewrite history without explicit approval.
+- CI (`.github/workflows/ci.yml`) runs on every push to `main` and on pull requests: check, build + Playwright e2e,
+  Docker image.
+
 ## Progress tracking
 
 `docs/ROADMAP.md` is the single source of truth for progress and is edited only by the coordinator. Agents suggest

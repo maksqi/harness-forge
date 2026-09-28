@@ -5,14 +5,14 @@ from `docs/DECISIONS.md` (contract seed); if this file disagrees with DECISIONS.
 
 ## Goal
 
-Turn the empty `harness-forge` branch into a pnpm monorepo skeleton with **frozen contracts**: shared DTOs and route
+Turn the empty repository into a pnpm monorepo skeleton with **frozen contracts**: shared DTOs and route
 table (`packages/shared`), plugin SDK (`packages/plugin-sdk`), Drizzle schema + migration 0000, server route stubs
 and service interfaces, web layouts + store signatures, and design tokens. After Phase 0 every later agent can work
 in parallel on single-owner paths without editing shared files.
 
 ## Entry criteria
 
-- Branch `harness-forge` created from `main`; the approved plan exists.
+- The previous app is removed; the approved plan exists.
 - Nothing else (the repository is empty except `.git`).
 
 ## Exit criteria
@@ -48,9 +48,11 @@ in parallel on single-owner paths without editing shared files.
 
 ## P0.1 Reset (done)
 
-1. `git switch -c harness-forge` (from `main`; `main` is never touched, nothing is ever pushed).
+1. The rebuild started on a temporary `harness-forge` branch; after v1 it became `main`. All development now happens on
+   `main` (see AGENT.md "Git workflow" and ADR-022).
 2. Move the untracked files of the previous app (`.env`, `chat.db`, `.idea`, `.DS_Store`) to a backup folder outside the repository.
-3. `git rm -r` every tracked file of the old Flask app (they stay in git history); verified that only `.git` remained.
+3. `git rm -r` every tracked file of the old Flask app; verified that only `.git` remained (the old history was later
+   removed at the user's request).
 
 ## P0.2 Core docs (done)
 

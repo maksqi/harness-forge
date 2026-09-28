@@ -7,7 +7,7 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` not started.
 
 ## Phase 0 — Reset, docs, scaffold, contracts
 
-- [x] P0.1 Reset: branch `harness-forge`, back up untracked files outside the repository, wipe repo
+- [x] P0.1 Reset: back up untracked files outside the repository, wipe repo (built on a temporary branch that became `main`)
 - [x] P0.2 Core docs: `AGENT.md`, `CLAUDE.md`, `docs/ROADMAP.md`, `docs/DECISIONS.md` (coordinator)
 - [x] P0.3 Wave D + S (parallel)
   - [x] D1 `docs/ARCHITECTURE.md` + `docs/API.md`
@@ -108,10 +108,10 @@ conversation branching · sharing links · knowledge/RAG · image generation · 
 | Wave | Agents | Gate result | Commit |
 |---|---|---|---|
 | P0.1–P0.2 | coordinator | n/a | — |
-| P0.3 D+S | D1, D2, D3, D4, S0 + R1 (reconcile) | check + build green on skeleton | 34a0940 |
-| P0.4 C-a | C1+C2, C3 | audit ok; 205 tests; check + build green; dark 200.html verified | b10eb2d |
-| P0.5 C-b | C4, C5, C6 | audit ok; 834 tests; check + build green; 501 stubs verified; pins ok | 15915a4 |
-| Wave A | W1.1–W1.5, W2.2–W2.5 | audit ok; 2064 tests; build ok; providers/keys/persistence/auth/SSE/icons probes ok | b72bb90 |
-| Wave B | W2.1, W3.1–W3.5 | audit ok; 3108/3109 tests (known flaky fs.watch test passes alone); build ok; chat stream, approval, commands, tools, plugins, scaffold probes ok | 43070f5 |
-| Wave C | W2.6, W3.6, W4.1–W4.4, W4.6 | audit ok; 3530 tests; frozen install ok; build ok; e2e 27/27 (core 15 + plugins 12) | 146def9 |
-| Final gate | coordinator | e2e 27/27 ×3; `pnpm start` from empty data dir ok (secret.key 0600); Docker image (Node 24, non-root) smoke ok | (this commit) |
+| P0.3 D+S | D1, D2, D3, D4, S0 + R1 (reconcile) | check + build green on skeleton | 9e31ac5 |
+| P0.4 C-a | C1+C2, C3 | audit ok; 205 tests; check + build green; dark 200.html verified | d688e62 |
+| P0.5 C-b | C4, C5, C6 | audit ok; 834 tests; check + build green; 501 stubs verified; pins ok | 8e06bac |
+| Wave A | W1.1–W1.5, W2.2–W2.5 | audit ok; 2064 tests; build ok; providers/keys/persistence/auth/SSE/icons probes ok | 6d2ba77 |
+| Wave B | W2.1, W3.1–W3.5 | audit ok; 3108/3109 tests (known flaky fs.watch test passes alone); build ok; chat stream, approval, commands, tools, plugins, scaffold probes ok | d9dedb0 |
+| Wave C | W2.6, W3.6, W4.1–W4.4, W4.6 | audit ok; 3530 tests; frozen install ok; build ok; e2e 27/27 (core 15 + plugins 12) | f142fcc |
+| Final gate | coordinator | e2e 27/27 ×3; `pnpm start` from empty data dir ok (secret.key 0600); Docker image (Node 24, non-root) smoke ok | 6e3b442 |

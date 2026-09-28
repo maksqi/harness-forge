@@ -241,6 +241,9 @@ on SQLite), and the TypeScript-only packages `packages/shared` (schemas, DTOs, r
 | `pnpm db:generate` | drizzle-kit generate (after schema changes) |
 | `pnpm catalog:update` | refresh the bundled models.dev snapshot |
 
+All development happens on the `main` branch. CI (`.github/workflows/ci.yml`) runs `pnpm check`, the build with the
+Playwright e2e suite, and the Docker image build on every push to `main` and on pull requests.
+
 Everything in the repository is written in English (`pnpm check:english` enforces it). AI coding agents read
 [`AGENT.md`](AGENT.md) first.
 
