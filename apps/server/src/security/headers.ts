@@ -5,7 +5,9 @@ import { createHash } from 'node:crypto'
 
 /**
  * Sent on every response (a route may set its own value first; it is then kept). `X-Robots-Tag` (Phase 5, ADR-025)
- * keeps share links, the SPA and the API out of search engines.
+ * keeps share links, the SPA and the API out of search engines. `Permissions-Policy` allows the microphone for the
+ * app's own origin only (Phase 6, ADR-029: dictation; v1.1 sent `microphone=()`); no frame or other origin gets it, and
+ * the browser still asks the user.
  */
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   'X-Content-Type-Options': 'nosniff',
@@ -13,7 +15,7 @@ export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze(
   'X-Frame-Options': 'DENY',
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Cross-Origin-Resource-Policy': 'same-origin',
-  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  'Permissions-Policy': 'camera=(), microphone=(self), geolocation=()',
   'X-Robots-Tag': 'noindex, nofollow',
 })
 
@@ -30,6 +32,8 @@ export const API_CACHE_CONTROL = 'no-store'
  * The SPA HTML CSP (ARCHITECTURE.md 10.2). `scriptHashes` are CSP hash sources without quotes (`sha256-<base64>`, see
  * `inlineScriptHashes`). Never contains `unsafe-eval` or `unsafe-inline` for scripts. `wasm-unsafe-eval` only allows
  * compiling WebAssembly (Shiki's Oniguruma engine used by markdown code blocks), not JavaScript `eval`.
+ * `media-src 'self' blob:` (Phase 6, ADR-029) lets read-aloud play the object URLs of the speech responses; without it
+ * `media-src` falls back to `default-src 'self'` and blob audio is blocked. The API CSP stays `default-src 'none'`.
  */
 export function spaCsp(scriptHashes: readonly string[]): string {
   const scriptSources = ['\'self\'', '\'wasm-unsafe-eval\'', ...scriptHashes.map(hash => `'${hash}'`)]
@@ -40,6 +44,7 @@ export function spaCsp(scriptHashes: readonly string[]): string {
     'img-src \'self\' data: blob:',
     'font-src \'self\' data:',
     'connect-src \'self\'',
+    'media-src \'self\' blob:',
     'worker-src \'self\' blob:',
     'object-src \'none\'',
     'base-uri \'none\'',

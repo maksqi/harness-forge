@@ -88,6 +88,8 @@ describe('files', () => {
     const csp = response.headers.get('content-security-policy') ?? ''
     expect(csp).toContain(`script-src 'self' 'wasm-unsafe-eval' ${hash('{"imports":{}}')} ${hash(COLOR_MODE)} ${hash(NUXT_CONFIG)};`)
     expect(csp).toContain('frame-ancestors \'none\'')
+    // Read-aloud plays the object URLs of speech responses (Phase 6, ADR-029).
+    expect(csp).toContain('media-src \'self\' blob:')
     expect(csp).not.toContain('\'unsafe-eval\'')
     for (const [name, value] of Object.entries(SECURITY_HEADERS))
       expect(response.headers.get(name), name).toBe(value)
@@ -290,7 +292,7 @@ describe('the built SPA (apps/web/.output/public, when a build exists or HF_TEST
   const built = join(webPublicDir(), SPA_FALLBACK_FILE)
   const requireBuild = process.env.HF_TEST_REQUIRE_WEB_BUILD === '1'
 
-  it.skipIf(!existsSync(built) && !requireBuild)('sEC-C1: the CSP of the real 200.html allows exactly its inline scripts, nothing inline-executable', async () => {
+  it.skipIf(!existsSync(built) && !requireBuild)('sEC-C1: the CSP of the real 200.html allows exactly its inline scripts, nothing inline-executable, blob media', async () => {
     expect(existsSync(built), `${built} is missing: run pnpm build first (HF_TEST_REQUIRE_WEB_BUILD=1 requires the web build)`).toBe(true)
     const response = await createStaticSite(webPublicDir()).fallback(new Request('http://127.0.0.1:8787/chat/x', { headers: { accept: 'text/html' } }))
     expect(response?.status).toBe(200)
@@ -310,6 +312,8 @@ describe('the built SPA (apps/web/.output/public, when a build exists or HF_TEST
     expect(scriptSources).not.toContain('\'unsafe-hashes\'')
     for (const [name, value] of [['default-src', '\'self\''], ['object-src', '\'none\''], ['base-uri', '\'none\''], ['frame-ancestors', '\'none\'']] as const)
       expect(directives.get(name), name).toEqual([value])
+    // Read-aloud plays the object URLs of the speech responses (Phase 6, ADR-029): blob audio, nothing remote.
+    expect(directives.get('media-src'), 'media-src').toEqual(['\'self\'', 'blob:'])
     // Inline event handlers and javascript: URLs would be blocked by this CSP: the build must not rely on them.
     expect(document).not.toMatch(/\son[a-z]+\s*=/i)
     expect(document).not.toMatch(/javascript:/i)

@@ -71,6 +71,7 @@ describe('spaCsp', () => {
       'img-src': ['\'self\'', 'data:', 'blob:'],
       'font-src': ['\'self\'', 'data:'],
       'connect-src': ['\'self\''],
+      'media-src': ['\'self\'', 'blob:'],
       'worker-src': ['\'self\'', 'blob:'],
       'object-src': ['\'none\''],
       'base-uri': ['\'none\''],
@@ -79,6 +80,12 @@ describe('spaCsp', () => {
     })
     expect(directives.get('script-src')).not.toContain('\'unsafe-eval\'')
     expect(directives.get('script-src')).not.toContain('\'unsafe-inline\'')
+  })
+
+  it('lets read-aloud play blob audio (media-src, Phase 6); the API CSP gets no media source', () => {
+    expect(directives.get('media-src')).toEqual(['\'self\'', 'blob:'])
+    expect(csp).toContain('connect-src \'self\'; media-src \'self\' blob:; worker-src')
+    expect(API_CSP).not.toContain('media-src')
   })
 })
 
@@ -91,9 +98,17 @@ describe('static header values', () => {
       'X-Frame-Options': 'DENY',
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Resource-Policy': 'same-origin',
-      'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+      'Permissions-Policy': 'camera=(), microphone=(self), geolocation=()',
       'X-Robots-Tag': 'noindex, nofollow',
     })
     expect(Object.isFrozen(SECURITY_HEADERS)).toBe(true)
+  })
+
+  it('allow the microphone for the app\'s own origin only, never the camera or geolocation (ADR-029)', () => {
+    const policy = new Map(SECURITY_HEADERS['Permissions-Policy']!.split(', ').map((entry) => {
+      const [feature = '', allowlist = ''] = entry.split('=')
+      return [feature, allowlist] as const
+    }))
+    expect(Object.fromEntries(policy)).toEqual({ camera: '()', microphone: '(self)', geolocation: '()' })
   })
 })

@@ -11,7 +11,15 @@ import { createMemoryLogger } from './logger.ts'
 import { createRedactor } from './security/redact.ts'
 import { SAMPLE_SHARE_TOKEN } from './testing/api-samples.ts'
 import { createTestApp } from './testing/create-test-app.ts'
-import { createFakeDataService, createFakeKeyring, createFakeShareService, createMemorySettingsService, createRecordingEventBus } from './testing/fakes.ts'
+import {
+  createFakeAudioService,
+  createFakeDataService,
+  createFakeImageService,
+  createFakeKeyring,
+  createFakeShareService,
+  createMemorySettingsService,
+  createRecordingEventBus,
+} from './testing/fakes.ts'
 
 const cleanups: (() => Promise<void> | void)[] = []
 
@@ -136,6 +144,37 @@ describe('phase 5 services', () => {
     expect(t.deps.data).toBe(data)
     expect(t.deps.shares).toBe(shares)
     expect(t.deps.runs.hasRun('0199a8f0-0000-7000-8000-000000000001')).toBe(false)
+  })
+})
+
+describe('phase 6 skeleton (P6-0b stubs until W6.2 / W6.4 / W6.5 / W6.6)', () => {
+  it('wires the image and audio services; the new members answer not_implemented', async () => {
+    const t = await createTestApp({ start: false })
+    cleanups.push(() => t.close())
+    expect(SERVICE_NAMES).toEqual(expect.arrayContaining(['images', 'audio']))
+    const signal = new AbortController().signal
+    const calls: Array<[string, () => Promise<unknown>]> = [
+      ['images.generate', () => t.deps.images.generate({ modelRef: 'mock:image', prompt: 'a red fox', n: 1, signal, chatId: null, messageId: null })],
+      ['audio.transcribe', () => t.deps.audio.transcribe({ file: new Blob([new Uint8Array(128)], { type: 'audio/webm' }), form: {}, signal })],
+      ['audio.speak', () => t.deps.audio.speak({ text: 'Hello world', signal })],
+      ['files.saveGenerated', () => t.deps.files.saveGenerated({ data: new Uint8Array([0x89, 0x50, 0x4E, 0x47]), mediaType: 'image/png', name: 'image-1.png' })],
+      ['chats.deleteMessage', () => t.deps.chats.deleteMessage('0199a8f0-0000-7000-8000-000000000001', 'msg_AAAAAAAAAAAAAAAA')],
+      ['providers.resolveImageModel', () => t.deps.providers.resolveImageModel('mock:image')],
+      ['providers.resolveTranscriptionModel', () => t.deps.providers.resolveTranscriptionModel('mock:transcribe', { signal })],
+      ['providers.resolveSpeechModel', () => t.deps.providers.resolveSpeechModel('mock:speech')],
+    ]
+    for (const [name, call] of calls)
+      await expect(call(), name).rejects.toMatchObject({ code: 'not_implemented' })
+    // The existing members keep working next to the stubs.
+    await expect(t.deps.chats.list({})).resolves.toMatchObject({ items: [] })
+  })
+
+  it('createTestApp accepts the Phase 6 fakes', async () => {
+    const audio = createFakeAudioService()
+    const t = await createTestApp({ start: false, overrides: { audio }, factories: { images: createFakeImageService } })
+    cleanups.push(() => t.close())
+    expect(t.deps.audio).toBe(audio)
+    expect('calls' in t.deps.images).toBe(true)
   })
 })
 

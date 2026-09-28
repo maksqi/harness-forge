@@ -90,10 +90,10 @@ describe('migrations', () => {
     expect(await indexColumns(database, 'chat_shares_chat_idx')).toEqual(['chat_id'])
   })
 
-  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, ...', async () => {
+  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, ...', async () => {
     const database = await freshDatabase()
     const journal = JSON.parse(readFileSync(join(resolveMigrationsFolder(), 'meta', '_journal.json'), 'utf8')) as { entries: Array<{ tag: string }> }
-    expect(journal.entries.map(entry => entry.tag).slice(0, 2)).toEqual(['0000_initial_schema', '0001_message_tree_and_shares'])
+    expect(journal.entries.map(entry => entry.tag).slice(0, 3)).toEqual(['0000_initial_schema', '0001_message_tree_and_shares', '0002_remembered_versions'])
     const applied = await database.client.execute('SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows).toHaveLength(journal.entries.length)
   })
@@ -169,6 +169,37 @@ describe('phase 5 schema (ADR-023 message tree, ADR-025 share links)', () => {
     await db.delete(messages).where(eq(messages.chatId, chatId))
     await db.delete(chats).where(eq(chats.id, chatId))
     expect(await db.select().from(chatShares)).toEqual([])
+  })
+})
+
+describe('phase 6 schema (ADR-030 remembered versions)', () => {
+  it('adds a nullable selected_child_id column without a default, a foreign key or an index (still 15 tables)', async () => {
+    const database = await freshDatabase()
+    expect((await columns(database, 'messages')).selected_child_id).toEqual({ name: 'selected_child_id', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 })
+    expect(await foreignKeys(database, 'messages')).toEqual(['chat_id -> chats.id (CASCADE)'])
+    const indexes = await database.client.execute(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'messages' AND name NOT LIKE 'sqlite_%'`)
+    for (const row of indexes.rows)
+      expect(await indexColumns(database, String(row.name)), String(row.name)).not.toContain('selected_child_id')
+    expect((await names(database, 'table')).filter(name => name !== '__drizzle_migrations')).toHaveLength(15)
+  })
+
+  it('stores the remembered child as a hint: a pointer may outlive its child', async () => {
+    const { db } = await freshDatabase()
+    const chatId = '0199a8f0-0000-7000-8000-000000000004'
+    await db.insert(chats).values({ id: chatId })
+    await db.insert(messages).values([
+      { id: 'msg_aaaaaaaaaaaaaaaa', chatId, seq: 0, role: 'user', parts: [], selectedChildId: 'msg_bbbbbbbbbbbbbbbb' },
+      { id: 'msg_bbbbbbbbbbbbbbbb', chatId, parentId: 'msg_aaaaaaaaaaaaaaaa', seq: 1, role: 'assistant', parts: [] },
+    ])
+    const rows = await db.select({ id: messages.id, selectedChildId: messages.selectedChildId }).from(messages).orderBy(messages.seq)
+    expect(rows).toEqual([
+      { id: 'msg_aaaaaaaaaaaaaaaa', selectedChildId: 'msg_bbbbbbbbbbbbbbbb' },
+      { id: 'msg_bbbbbbbbbbbbbbbb', selectedChildId: null },
+    ])
+    // No foreign key: deleting the child keeps the pointer (readers fall back to the latest leaf).
+    await db.delete(messages).where(eq(messages.id, 'msg_bbbbbbbbbbbbbbbb'))
+    const [parent] = await db.select({ selectedChildId: messages.selectedChildId }).from(messages)
+    expect(parent?.selectedChildId).toBe('msg_bbbbbbbbbbbbbbbb')
   })
 })
 

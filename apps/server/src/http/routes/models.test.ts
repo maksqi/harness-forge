@@ -42,9 +42,11 @@ describe('gET /api/models', () => {
   it('filters by provider, shows hidden models on request and rejects unknown providers', async () => {
     await t.deps.catalog.updatePrefs({ providerId: 'mock', modelId: 'error', hidden: true })
     const visible = listSchema.parse(await (await send('GET', '/api/models?providerId=mock')).json())
-    expect(visible.items.map(item => item.id)).toEqual(['echo', 'reasoning', 'tool-approval'])
+    // Phase 6: the media models of the mock provider are hidden by default (non-chat kinds); image-chat and image-tool
+    // are chat models.
+    expect(visible.items.map(item => item.id)).toEqual(['echo', 'image-chat', 'image-tool', 'reasoning', 'tool-approval'])
     const all = listSchema.parse(await (await send('GET', '/api/models?providerId=mock&includeHidden=true')).json())
-    expect(all.items.map(item => item.id).sort()).toEqual(['echo', 'error', 'reasoning', 'tool-approval'])
+    expect(all.items.map(item => item.id).sort()).toEqual(['echo', 'error', 'image', 'image-chat', 'image-tool', 'reasoning', 'speech', 'tool-approval', 'transcribe'])
     const unknown = await send('GET', '/api/models?providerId=nope')
     expect(unknown.status).toBe(404)
     expect(await errorCode(unknown)).toBe('not_found')
@@ -58,8 +60,10 @@ describe('pOST /api/providers/:id/models/refresh', () => {
     const response = await send('POST', '/api/providers/mock/models/refresh')
     expect(response.status).toBe(200)
     const { items } = listSchema.parse(await response.json())
-    // Sorted by name: Mock Echo, Mock Error, Mock Reasoning, Mock Tool Approval.
-    expect(items.map(item => [item.id, item.source])).toEqual([['echo', 'live'], ['error', 'live'], ['reasoning', 'live'], ['tool-approval', 'live']])
+    // Sorted by name: Mock Echo, Mock Error, Mock Image, Mock Image Chat, Mock Image Tool, Mock Reasoning, Mock Speech,
+    // Mock Tool Approval, Mock Transcribe (hidden models included).
+    const names = ['echo', 'error', 'image', 'image-chat', 'image-tool', 'reasoning', 'speech', 'tool-approval', 'transcribe']
+    expect(items.map(item => [item.id, item.source])).toEqual(names.map(id => [id, 'live']))
     expect(t.events.ofType('catalog.changed').map(event => event.data)).toContainEqual({ providerId: 'mock' })
     expect(t.events.ofType('provider.changed').map(event => event.data.id)).toContain('mock')
   })

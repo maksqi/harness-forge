@@ -8,6 +8,8 @@
 // Bulk data (ADR-024, W5.3): `importFile` stores one attachment of a data import with the upload checks, deduplicated
 // by content (an existing row with the same sha256 is reused, the backup's id is kept when it is free), and `purge`
 // empties the store (every row, every blob) for delete-all.
+//
+// Phase 6 skeleton (P6-0b): `saveGenerated` (generated images, ADR-028) answers `not_implemented` until W6.4.
 import type { FileRef } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
 import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, StoredFile } from './types.ts'
@@ -18,6 +20,7 @@ import { Readable } from 'node:stream'
 import { createFileId, FILE_ID_PATTERN, HarnessError, LIMITS, SHA256_HEX_PATTERN, validationError } from '@harness-forge/shared'
 import { asc, eq } from 'drizzle-orm'
 import { files } from '../../db/schema.ts'
+import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { guardDb, isConstraintError } from '../chats/db-errors.ts'
 import { sanitizeFileName } from './names.ts'
 import { resolveUploadType } from './sniff.ts'
@@ -244,5 +247,7 @@ export function createFilesService(deps: AppDeps): FilesService {
     importFile,
 
     purge,
+
+    saveGenerated: rejectsNotImplemented('FilesService.saveGenerated (W6.4)'),
   }
 }

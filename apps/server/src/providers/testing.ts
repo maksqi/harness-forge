@@ -3,12 +3,20 @@
 // `createProvidersTestApp()` is `createTestApp()` with a fake registry, fake credentials (stored values in memory, env
 // fallback from `env.vars`, defaults), a fake plugin host that runs the builtin plugins' `setup` against the fake
 // registry, a recording event bus and the catalog without background work. Never imported by production code.
+//
+// Phase 6 (C11-T5): `withFakeMediaResolvers` / `fakeMediaProviders` replace the three media resolvers (stubs until W6.2)
+// with fakes on the real catalog and registry, backed by `MockImageModelV4` / `MockTranscriptionModelV4` /
+// `MockSpeechModelV4` from `ai/test`; the fake plugin host's `ctx.images.generate` delegates to `deps.images` (the stub
+// until W6.4, or a fake / the real service a test wires in).
+import type { ImageModelV4, SpeechModelV4, TranscriptionModelV4 } from '@ai-sdk/provider'
 import type {
   CommandDefinition,
   Disposable,
   HookHandler,
   HookName,
   HostAi,
+  ImageGenerateOptions,
+  ImageGenerateResult,
   KV,
   McpServerDecl,
   ModelInfo,
@@ -16,7 +24,7 @@ import type {
   ProviderDefinition,
   ToolDefinition,
 } from '@harness-forge/plugin-sdk'
-import type { CredentialState, CredentialValues, LogLevel, PluginContributions } from '@harness-forge/shared'
+import type { CredentialState, CredentialValues, LogLevel, ModelKind, PluginContributions } from '@harness-forge/shared'
 import type { ModelCatalogOptions } from '../catalog/index.ts'
 import type { ServiceFactories } from '../deps.ts'
 import type { PluginHost } from '../plugins/types.ts'
@@ -35,11 +43,15 @@ import type { TestApp, TestAppOptions } from '../testing/create-test-app.ts'
 import type { RecordingEventBus } from '../testing/fakes.ts'
 import type { AppDeps } from '../types.ts'
 import type { ProviderServiceOptions } from './index.ts'
+import type { ProviderService, ResolvedModelBase } from './types.ts'
 import { fileURLToPath } from 'node:url'
-import { HarnessError } from '@harness-forge/shared'
+import { HarnessError, LIMITS, parseModelRef, safeParseModelRef, validationError } from '@harness-forge/shared'
 import { generateText, jsonSchema, tool } from 'ai'
+import { MockImageModelV4, MockSpeechModelV4, MockTranscriptionModelV4 } from 'ai/test'
 import { z } from 'zod'
+import { createMockWav, MOCK_TRANSCRIPT, mockImagePng, mockImageSize, mockImageUsage, mockRevisedPrompt } from '../builtin-plugins/mock/media.ts'
 import { createModelCatalogWith } from '../catalog/index.ts'
+import { catalogModelInfo } from '../catalog/merge.ts'
 import { rejectsNotImplemented, throwsNotImplemented } from '../not-implemented.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { createRecordingEventBus } from '../testing/fakes.ts'
@@ -294,6 +306,30 @@ function memoryKv<V>(): KV<V> {
   }
 }
 
+/**
+ * `ctx.images.generate` of the fake plugin host (PLUGINS.md 9): `deps.images.generate` with the plugin signal combined
+ * with `options.signal`, `n` defaulting to 1, no message id; the stored images mapped to `GeneratedImageFile`s
+ * (`costUsd` omitted when null). The real host does the same mapping (W6.4).
+ */
+async function fakeContextImages(deps: AppDeps, pluginSignal: AbortSignal, options: ImageGenerateOptions): Promise<ImageGenerateResult> {
+  const signal = options.signal === undefined ? pluginSignal : AbortSignal.any([pluginSignal, options.signal])
+  const result = await deps.images.generate({
+    ...(options.modelRef === undefined ? {} : { modelRef: options.modelRef }),
+    prompt: options.prompt,
+    n: options.n ?? 1,
+    ...(options.aspectRatio === undefined ? {} : { aspectRatio: options.aspectRatio }),
+    signal,
+    chatId: options.chatId ?? null,
+    messageId: null,
+  })
+  return {
+    modelRef: result.modelRef,
+    images: result.images.map(({ file, url }) => ({ fileId: file.id, url, mediaType: file.mime, name: file.name, size: file.size })),
+    ...(result.costUsd === null ? {} : { costUsd: result.costUsd }),
+    ...(result.revisedPrompt === undefined ? {} : { revisedPrompt: result.revisedPrompt }),
+  }
+}
+
 /** Runs each builtin's `setup` against the (fake) registry; no guard, state machine or user plugins. */
 export function createFakePluginHost(deps: AppDeps): FakePluginHost {
   const logEntries: FakePluginHost['logEntries'] = []
@@ -328,7 +364,7 @@ export function createFakePluginHost(deps: AppDeps): FakePluginHost {
       },
       ai: { z, tool, jsonSchema, generateText } as unknown as HostAi,
       fetch: globalThis.fetch,
-      images: { generate: rejectsNotImplemented('ctx.images.generate') },
+      images: { generate: options => fakeContextImages(deps, controller.signal, options) },
     }
   }
 
@@ -412,4 +448,131 @@ export async function createProvidersTestApp(options: ProvidersTestAppOptions = 
     credentials: t.deps.credentials as FakeCredentialService,
     plugins: t.deps.plugins as FakePluginHost,
   }
+}
+
+// ---------- Phase 6: media resolvers (fakes until W6.2) ----------
+
+/** Model instances per model ref for `withFakeMediaResolvers`; refs not listed get the instant fake models below. */
+export interface FakeMediaResolverOptions {
+  imageModels?: Readonly<Record<string, ImageModelV4>>
+  transcriptionModels?: Readonly<Record<string, TranscriptionModelV4>>
+  speechModels?: Readonly<Record<string, SpeechModelV4>>
+}
+
+/**
+ * An instant `MockImageModelV4` (up to 4 images per call): the solid-color PNGs of `mock:image` sized by `aspectRatio`
+ * or `size`, the usage of `mock:image` and `providerMetadata.<provider>.images[i].revisedPrompt`, without delays or the
+ * "slow" / "fail" prompts.
+ */
+export function createFakeImageModel(modelId = 'image', provider = 'mock'): ImageModelV4 {
+  return new MockImageModelV4({
+    provider,
+    modelId,
+    maxImagesPerCall: LIMITS.imagesPerTurnMax,
+    doGenerate: async (options) => {
+      const prompt = options.prompt ?? ''
+      const size = mockImageSize({ size: options.size, aspectRatio: options.aspectRatio })
+      const images = Array.from({ length: options.n }, (_, index) => mockImagePng(prompt, index, size, options.files ?? []))
+      const revisedPrompt = mockRevisedPrompt(prompt)
+      return {
+        images,
+        warnings: [],
+        providerMetadata: { [provider]: { images: images.map(() => ({ revisedPrompt })) } },
+        response: { timestamp: new Date(0), modelId, headers: undefined },
+        usage: mockImageUsage(prompt, options.n),
+      }
+    },
+  })
+}
+
+/** An instant `MockTranscriptionModelV4` returning `text` (default `This is a mock transcription.`). */
+export function createFakeTranscriptionModel(modelId = 'transcribe', provider = 'mock', text = MOCK_TRANSCRIPT): TranscriptionModelV4 {
+  return new MockTranscriptionModelV4({
+    provider,
+    modelId,
+    doGenerate: async () => ({ text, segments: [], language: undefined, durationInSeconds: undefined, warnings: [], response: { timestamp: new Date(0), modelId } }),
+  })
+}
+
+/** An instant `MockSpeechModelV4` returning the silent WAV of `mock:speech` for the text. */
+export function createFakeSpeechModel(modelId = 'speech', provider = 'mock'): SpeechModelV4 {
+  return new MockSpeechModelV4({
+    provider,
+    modelId,
+    doGenerate: async options => ({ audio: createMockWav(options.text), warnings: [], response: { timestamp: new Date(0), modelId } }),
+  })
+}
+
+const KIND_LABELS: Readonly<Record<'image' | 'transcription' | 'speech', string>> = {
+  image: 'an image model',
+  transcription: 'a speech-to-text model',
+  speech: 'a text-to-speech model',
+}
+
+/**
+ * `base` with fakes of the Phase 6 resolvers on the real catalog and registry (while W6.2 implements them):
+ * - `resolveImageModel` / `resolveTranscriptionModel` / `resolveSpeechModel`: `not_found` for an unknown provider,
+ *   `model_not_found` (action `refresh-models`) for a model missing from the catalog, `validation_error` for a model of
+ *   another kind; else the resolved model with `info` / `entry` / `provider` from the catalog and registry and the model
+ *   instance of `options` (by ref) or an instant fake model (`createFakeImageModel`, ...). The enabled / credential
+ *   checks and the factory guard of the real resolvers are skipped.
+ * - `resolveModel` refuses image models with `validation_error` (the Phase 6 contract), else it is `base.resolveModel`.
+ * With `HF_MOCK_PROVIDER=1` the refs `mock:image`, `mock:transcribe` and `mock:speech` resolve.
+ */
+export function withFakeMediaResolvers(base: ProviderService, deps: AppDeps, options: FakeMediaResolverOptions = {}): ProviderService {
+  async function lookup(modelRef: string, kind: 'image' | 'transcription' | 'speech'): Promise<ResolvedModelBase> {
+    const { providerId, modelId } = parseModelRef(modelRef)
+    const provider = deps.registry.providers.get(providerId)
+    if (provider === undefined)
+      throw new HarnessError({ code: 'not_found', message: `Unknown provider "${providerId}".`, providerId })
+    const entry = await deps.catalog.get(providerId, modelId)
+    if (entry === null) {
+      throw new HarnessError({
+        code: 'model_not_found',
+        message: `The model "${modelId}" is not in the catalog of "${provider.definition.name}". Refresh the model list or pick another model.`,
+        providerId,
+        action: 'refresh-models',
+      })
+    }
+    if (entry.kind !== kind)
+      throw validationError([{ path: ['modelRef'], message: `The model "${providerId}:${modelId}" is not ${KIND_LABELS[kind]}.`, code: 'custom' }])
+    return { modelRef: `${providerId}:${modelId}`, providerId, modelId, info: catalogModelInfo(entry), entry, provider }
+  }
+
+  async function kindOf(modelRef: string): Promise<ModelKind | null> {
+    const parts = safeParseModelRef(modelRef)
+    if (!parts)
+      return null
+    return (await deps.catalog.get(parts.providerId, parts.modelId).catch(() => null))?.kind ?? null
+  }
+
+  return {
+    ...base,
+    resolveModel: async (modelRef, resolveOptions) => {
+      if (await kindOf(modelRef) === 'image')
+        throw validationError([{ path: ['modelRef'], message: `The model "${modelRef}" is an image model: it answers image turns only.`, code: 'custom' }])
+      return base.resolveModel(modelRef, resolveOptions)
+    },
+    resolveImageModel: async (modelRef) => {
+      const resolved = await lookup(modelRef, 'image')
+      return { ...resolved, imageModel: options.imageModels?.[resolved.modelRef] ?? createFakeImageModel(resolved.modelId, resolved.providerId) }
+    },
+    resolveTranscriptionModel: async (modelRef) => {
+      const resolved = await lookup(modelRef, 'transcription')
+      return { ...resolved, model: options.transcriptionModels?.[resolved.modelRef] ?? createFakeTranscriptionModel(resolved.modelId, resolved.providerId) }
+    },
+    resolveSpeechModel: async (modelRef) => {
+      const resolved = await lookup(modelRef, 'speech')
+      return { ...resolved, model: options.speechModels?.[resolved.modelRef] ?? createFakeSpeechModel(resolved.modelId, resolved.providerId) }
+    },
+  }
+}
+
+/**
+ * A `providers` factory for `createTestApp` / `createProvidersTestApp`: the real provider service with the fake media
+ * resolvers, e.g. `createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, factories: { providers: fakeMediaProviders({
+ * transcriptionModels: { 'mock:transcribe': new MockTranscriptionModelV4({ doGenerate }) } }) } })`.
+ */
+export function fakeMediaProviders(options: FakeMediaResolverOptions = {}, serviceOptions: ProviderServiceOptions = {}): ServiceFactories['providers'] {
+  return deps => withFakeMediaResolvers(createProviderServiceWith(deps, serviceOptions), deps, options)
 }

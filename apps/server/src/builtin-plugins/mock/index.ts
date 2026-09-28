@@ -1,10 +1,22 @@
-// Builtin plugin `mock` (PROVIDERS.md 8): the dev-only `mock` provider (`mock:echo`, `mock:reasoning`,
-// `mock:tool-approval`, `mock:error`) and the tool `mock_approval_tool` (policy `ask`), registered through `ctx` like
-// any builtin. Loaded only with `HF_MOCK_PROVIDER=1` (`getBuiltinPlugins`). Every answer is deterministic, for e2e.
+// Builtin plugin `mock` (PROVIDERS.md 8): the dev-only `mock` provider and the tool `mock_approval_tool` (policy `ask`),
+// registered through `ctx` like any builtin. Loaded only with `HF_MOCK_PROVIDER=1` (`getBuiltinPlugins`). Every answer
+// is deterministic, for e2e. Models: `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` (v1) and, since
+// Phase 6 (plugin API 1.1.0), `mock:image` (an image model), `mock:image-chat` (image output), `mock:image-tool`
+// (calls `generate_image`), `mock:transcribe` and `mock:speech` (./media.ts).
 import type { HarnessErrorInit, ModelInfo, PluginManifest, ProviderDefinition, ReasoningLevel, ToolDefinition } from '@harness-forge/plugin-sdk'
 import { APICallError } from '@ai-sdk/provider'
 import { definePlugin } from '@harness-forge/plugin-sdk'
 import { z } from 'zod'
+import {
+  createMockImageModel,
+  createMockSpeechModel,
+  createMockTranscriptionModel,
+  MOCK_IMAGE_MODEL_ID,
+  MOCK_SPEECH_MODEL_ID,
+  MOCK_SPEECH_VOICES,
+  MOCK_TRANSCRIPTION_MODEL_ID,
+  mockImageParams,
+} from './media.ts'
 import {
   createMockLanguageModel,
   MOCK_AUTH_FAILURE,
@@ -13,6 +25,15 @@ import {
   MOCK_TOOL_NAME,
 } from './models.ts'
 
+export {
+  createMockWav,
+  MOCK_IMAGE_MODEL_ID,
+  MOCK_IMAGE_TIMING,
+  MOCK_SPEECH_MODEL_ID,
+  MOCK_SPEECH_VOICES,
+  MOCK_TRANSCRIPT,
+  MOCK_TRANSCRIPTION_MODEL_ID,
+} from './media.ts'
 export { MOCK_MODEL_IDS, MOCK_PROVIDER_ID, MOCK_TIMING, MOCK_TOOL_NAME } from './models.ts'
 
 export const manifest = {
@@ -25,26 +46,45 @@ export const manifest = {
   main: 'index.ts',
 } satisfies PluginManifest
 
-/** A mock model: 32K context, 4096 output tokens, USD 1 / 2 per 1M tokens (so cost displays are non-zero). */
-function mockModel(id: string, name: string, capabilities: Partial<Record<'tools' | 'vision' | 'pdf' | 'reasoning', boolean>>, extra: Partial<ModelInfo> = {}): ModelInfo {
+type MockCapability = 'tools' | 'vision' | 'pdf' | 'reasoning' | 'imageOutput'
+
+const MOCK_COST = { input: 1, output: 2 } as const
+
+/** Capabilities of a mock model: everything off except `capabilities`. */
+function mockCapabilities(capabilities: Partial<Record<MockCapability, boolean>>): NonNullable<ModelInfo['capabilities']> {
+  return { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false, ...capabilities }
+}
+
+/** A mock chat model: 32K context, 4096 output tokens, USD 1 / 2 per 1M tokens (so cost displays are non-zero). */
+function mockModel(id: string, name: string, capabilities: Partial<Record<MockCapability, boolean>>, extra: Partial<ModelInfo> = {}): ModelInfo {
   return {
     id,
     name,
     contextWindow: 32_000,
     maxOutputTokens: 4096,
-    capabilities: { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false, ...capabilities },
-    cost: { input: 1, output: 2 },
+    capabilities: mockCapabilities(capabilities),
+    cost: { ...MOCK_COST },
     ...extra,
   }
 }
 
-/** The four mock models (listing and seeds). */
+/**
+ * The nine mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
+ * PROVIDERS.md 8. The media models carry explicit kinds: `image` (vision, the same cost), `transcription` and `speech`
+ * (with `voices`). `image-chat` and `image-tool` say `kind: 'chat'` explicitly: an explicit kind wins over `classify()`,
+ * whose id fallback would take any id containing "image" for an image model and hide it from the picker.
+ */
 export function mockModels(): ModelInfo[] {
   return [
     mockModel('echo', 'Mock Echo', { vision: true, pdf: true }),
     mockModel('reasoning', 'Mock Reasoning', { reasoning: true }, { reasoningEfforts: ['off', 'low', 'medium', 'high', 'max'] }),
     mockModel('tool-approval', 'Mock Tool Approval', { tools: true }),
     mockModel('error', 'Mock Error', {}),
+    { id: MOCK_IMAGE_MODEL_ID, name: 'Mock Image', kind: 'image', capabilities: mockCapabilities({ vision: true }), cost: { ...MOCK_COST } },
+    mockModel('image-chat', 'Mock Image Chat', { imageOutput: true }, { kind: 'chat' }),
+    mockModel('image-tool', 'Mock Image Tool', { tools: true }, { kind: 'chat' }),
+    { id: MOCK_TRANSCRIPTION_MODEL_ID, name: 'Mock Transcribe', kind: 'transcription' },
+    { id: MOCK_SPEECH_MODEL_ID, name: 'Mock Speech', kind: 'speech', voices: [...MOCK_SPEECH_VOICES] },
   ]
 }
 
@@ -89,6 +129,22 @@ export const mockProvider: ProviderDefinition = {
     if (!isMockAuthError(error))
       return undefined
     return { code: 'auth_invalid', message: MOCK_AUTH_FAILURE, status: 401, providerId: MOCK_PROVIDER_ID, action: 'configure-provider' }
+  },
+  createImageModel(modelId) {
+    return createMockImageModel(modelId)
+  },
+  imageParams(request) {
+    return mockImageParams(request)
+  },
+  createTranscriptionModel(modelId) {
+    return createMockTranscriptionModel(modelId)
+  },
+  createSpeechModel(modelId) {
+    return createMockSpeechModel(modelId)
+  },
+  transcriptionOptions() {
+    // The mock models detect nothing: a language hint is ignored (PROVIDERS.md 13).
+    return undefined
   },
 }
 

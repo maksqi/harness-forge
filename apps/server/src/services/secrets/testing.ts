@@ -128,6 +128,9 @@ export function createTestProviderService(deps: AppDeps, testResult: ProviderTes
       return testResult
     },
     resolveModel: rejectsNotImplemented('providers.resolveModel'),
+    resolveImageModel: rejectsNotImplemented('providers.resolveImageModel'),
+    resolveTranscriptionModel: rejectsNotImplemented('providers.resolveTranscriptionModel'),
+    resolveSpeechModel: rejectsNotImplemented('providers.resolveSpeechModel'),
     runtime: rejectsNotImplemented('providers.runtime'),
     mapError: () => notImplementedError('providers.mapError'),
     recordOutcome: rejectsNotImplemented('providers.recordOutcome'),

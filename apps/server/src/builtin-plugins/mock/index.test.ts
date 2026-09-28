@@ -1,9 +1,11 @@
 import type { PluginContext, ProviderDefinition, ToolDefinition } from '@harness-forge/plugin-sdk'
-import { modelInfoSchema, pluginManifestBaseSchema } from '@harness-forge/shared'
+import { modelInfoListSchema, modelInfoSchema, pluginManifestBaseSchema } from '@harness-forge/shared'
 import { RetryError } from 'ai'
 import { describe, expect, it } from 'vitest'
+import { validateProviderDefinition } from '../../registry/validate.ts'
 import { getBuiltinPlugins } from '../index.ts'
-import mockPlugin, { manifest, mockApprovalTool, mockModels, mockProvider } from './index.ts'
+import mockPlugin, { createMockWav, manifest, MOCK_SPEECH_VOICES, MOCK_TRANSCRIPT, mockApprovalTool, mockModels, mockProvider } from './index.ts'
+import { readWav } from './media.test-util.ts'
 import { mockAuthError } from './models.ts'
 
 describe('mock plugin', () => {
@@ -40,19 +42,37 @@ describe('mock plugin', () => {
 })
 
 describe('mock provider definition', () => {
-  it('has no credentials, no icon, echo as small model and the four models as listing and seeds', async () => {
+  it('has no credentials, no icon, echo as small model and the nine models as listing and seeds', async () => {
     expect(mockProvider).toMatchObject({ id: 'mock', name: 'Mock (dev only)', credentials: [], smallModelId: 'echo' })
     expect(mockProvider.icon).toBeUndefined()
     const listed = await mockProvider.listModels?.({ credentials: {}, fetch: globalThis.fetch })
-    expect(listed?.map(model => model.id)).toEqual(['echo', 'reasoning', 'tool-approval', 'error'])
+    expect(listed?.map(model => model.id)).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image', 'image-chat', 'image-tool', 'transcribe', 'speech'])
     expect(mockProvider.seedModels).toEqual(listed)
-    for (const model of mockModels()) {
-      expect(modelInfoSchema.parse(model)).toMatchObject({ contextWindow: 32_000, maxOutputTokens: 4096, cost: { input: 1, output: 2 } })
-    }
-    expect(mockModels()[0]?.capabilities).toMatchObject({ vision: true, pdf: true })
-    expect(mockModels()[1]).toMatchObject({ capabilities: { reasoning: true }, reasoningEfforts: ['off', 'low', 'medium', 'high', 'max'] })
-    expect(mockModels()[2]?.capabilities).toMatchObject({ tools: true })
+    expect(modelInfoListSchema.parse(mockModels())).toEqual(mockModels())
+    const byId = new Map(mockModels().map(model => [model.id, model]))
+    for (const id of ['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool'])
+      expect(modelInfoSchema.parse(byId.get(id)), id).toMatchObject({ contextWindow: 32_000, maxOutputTokens: 4096, cost: { input: 1, output: 2 } })
+    for (const id of ['echo', 'reasoning', 'tool-approval', 'error'])
+      expect(byId.get(id)?.kind, id).toBeUndefined()
+    expect(byId.get('echo')?.capabilities).toMatchObject({ vision: true, pdf: true })
+    expect(byId.get('reasoning')).toMatchObject({ capabilities: { reasoning: true }, reasoningEfforts: ['off', 'low', 'medium', 'high', 'max'] })
+    expect(byId.get('tool-approval')?.capabilities).toMatchObject({ tools: true })
     await expect(mockProvider.validate?.({ credentials: {}, fetch: globalThis.fetch })).resolves.toBeUndefined()
+  })
+
+  it('lists the Phase 6 models with their kinds and capabilities (PROVIDERS.md 8)', () => {
+    const byId = new Map(mockModels().map(model => [model.id, model]))
+    expect(byId.get('image')).toMatchObject({ name: 'Mock Image', kind: 'image', capabilities: { vision: true, imageOutput: false }, cost: { input: 1, output: 2 } })
+    // Explicit chat kinds: the id classifier would take "image-..." for image models (hidden from the picker).
+    expect(byId.get('image-chat')).toMatchObject({ name: 'Mock Image Chat', kind: 'chat', capabilities: { imageOutput: true, tools: false } })
+    expect(byId.get('image-tool')).toMatchObject({ name: 'Mock Image Tool', kind: 'chat', capabilities: { tools: true, imageOutput: false } })
+    expect(byId.get('transcribe')).toEqual({ id: 'transcribe', name: 'Mock Transcribe', kind: 'transcription' })
+    expect(byId.get('speech')).toEqual({ id: 'speech', name: 'Mock Speech', kind: 'speech', voices: ['mock-voice-a', 'mock-voice-b'] })
+    expect(MOCK_SPEECH_VOICES).toEqual(['mock-voice-a', 'mock-voice-b'])
+  })
+
+  it('passes the registry validation of provider definitions', () => {
+    expect(() => validateProviderDefinition('mock', mockProvider)).not.toThrow()
   })
 
   it('maps efforts to the top-level reasoning option', () => {
@@ -74,6 +94,20 @@ describe('mock provider definition', () => {
   it('creates a model per id', () => {
     const model = mockProvider.createLanguageModel('echo', { credentials: {}, fetch: globalThis.fetch })
     expect(model).toMatchObject({ specificationVersion: 'v4', provider: 'mock', modelId: 'echo' })
+  })
+
+  it('defines the plugin API 1.1.0 media members: image, transcription and speech models, imageParams, transcriptionOptions', async () => {
+    const rt = { credentials: {}, fetch: globalThis.fetch }
+    expect(mockProvider.createImageModel?.('image', rt)).toMatchObject({ specificationVersion: 'v4', provider: 'mock', modelId: 'image', maxImagesPerCall: 4 })
+    expect(mockProvider.createTranscriptionModel?.('transcribe', rt)).toMatchObject({ specificationVersion: 'v4', provider: 'mock', modelId: 'transcribe' })
+    expect(mockProvider.createSpeechModel?.('speech', rt)).toMatchObject({ specificationVersion: 'v4', provider: 'mock', modelId: 'speech' })
+    const image = mockModels().find(model => model.id === 'image')!
+    expect(mockProvider.imageParams?.({ n: 2, aspectRatio: '16:9', inputs: 0 }, image)).toEqual({ aspectRatio: '16:9', providerOptions: { mock: { aspectRatio: '16:9' } } })
+    expect(mockProvider.imageParams?.({ n: 1, inputs: 0 }, image)).toBeUndefined()
+    expect(mockProvider.transcriptionOptions?.({ language: 'de' })).toBeUndefined()
+    expect(mockProvider.transcriptionOptions?.({})).toBeUndefined()
+    expect(MOCK_TRANSCRIPT).toBe('This is a mock transcription.')
+    expect(readWav(createMockWav('one two three four five')).durationMs).toBe(2000)
   })
 })
 

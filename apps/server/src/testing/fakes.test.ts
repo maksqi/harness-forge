@@ -1,25 +1,38 @@
-// The Phase 5 fakes (C8-T6) behave like the frozen contracts they stand in for, so W5.3 / W5.4 can rely on them.
+// The Phase 5 fakes (C8-T6) behave like the frozen contracts they stand in for, so W5.3 / W5.4 can rely on them; the
+// Phase 6 fakes (C11-T5) likewise for W6.1, W6.4, W6.5 and W6.6.
+import type { PluginContext } from '@harness-forge/plugin-sdk'
 import type { ChatCreate, HarnessUIMessage } from '@harness-forge/shared'
+import type { ResolvedImageModel } from '../providers/types.ts'
 import type { ChatsService } from '../services/chats/types.ts'
 import type { TestApp } from './create-test-app.ts'
 import type { FakeChatRunner, RecordingEventBus } from './fakes.ts'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
-import { chatDetailSchema, chatExportSchema, dataImportResultSchema, HarnessError, SHARE_TOKEN_PATTERN, shareSummarySchema, shareViewSchema } from '@harness-forge/shared'
-import { eq } from 'drizzle-orm'
+import { chatDetailSchema, chatExportSchema, dataImportResultSchema, HarnessError, LIMITS, SHARE_TOKEN_PATTERN, shareSummarySchema, shareViewSchema } from '@harness-forge/shared'
+import { generateImage, generateSpeech, transcribe } from 'ai'
+import { MockTranscriptionModelV4 } from 'ai/test'
+import { and, eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
+import { manifest as mockManifest } from '../builtin-plugins/mock/index.ts'
+import { firstPixel, readPng, readWav } from '../builtin-plugins/mock/media.test-util.ts'
+import { MOCK_TRANSCRIPT, mockImageColor } from '../builtin-plugins/mock/media.ts'
+import { encodeSolidPng } from '../builtin-plugins/mock/png.ts'
 import { chats, chatShares, files, messages, usage } from '../db/schema.ts'
+import { createProvidersTestApp, fakeMediaProviders } from '../providers/testing.ts'
 import { messageInsertValues } from '../services/chats/store.ts'
 import { createTestApp } from './create-test-app.ts'
 import {
+  createFakeAudioService,
   createFakeChatRunner,
   createFakeChatsService,
   createFakeDataService,
   createFakeFilesService,
+  createFakeImageService,
   createFakeShareService,
   createRecordingEventBus,
   EMPTY_ZIP,
   fakeShareToken,
+  NO_IMAGE_MODEL_MESSAGE,
   readAllBytes,
 } from './fakes.ts'
 
@@ -472,5 +485,314 @@ describe('createFakeFilesService', () => {
     expect(existsSync(t.env.paths.files)).toBe(true)
     expect(readdirSync(t.env.paths.files)).toEqual([])
     expect(await t.deps.files.purge()).toEqual({ files: 0, bytes: 0 })
+  })
+})
+
+// ---------- Phase 6 (C11-T5) ----------
+
+function signal(): AbortSignal {
+  return new AbortController().signal
+}
+
+function abortedSignal(): AbortSignal {
+  const controller = new AbortController()
+  controller.abort()
+  return controller.signal
+}
+
+describe('createFakeChatsService: deleteMessage (ADR-030)', () => {
+  it('deletes a version on the active path with its subtree; the path moves to the previous version', async () => {
+    const { t, chats, events } = await treeApp()
+    const created = await chats.create(TREE)
+    await chats.addUsage({ chatId: chatId(1), messageId: mid(6), purpose: 'chat', providerId: 'mock', modelId: 'echo', inputTokens: 1, outputTokens: 1, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null })
+    events.clear()
+    const detail = chatDetailSchema.parse(await chats.deleteMessage(chatId(1), mid(5)))
+    expect(ids(detail.messages)).toEqual([mid(1), mid(2), mid(3), mid(4)])
+    expect(detail.branches).toEqual({})
+    expect(detail.updatedAt).toBe(created.updatedAt)
+    expect(ids(await chats.listMessages(chatId(1)))).toEqual([mid(1), mid(2), mid(3), mid(4)])
+    expect(events.ofType('chat.updated').map(event => [event.data.id, event.data.activeLeafId])).toEqual([[chatId(1), mid(4)]])
+    expect(await t.db.select({ id: usage.id }).from(usage)).toHaveLength(1)
+    // The new path is recorded as remembered.
+    const pointers = await t.db.select({ id: messages.id, selectedChildId: messages.selectedChildId }).from(messages).where(eq(messages.chatId, chatId(1)))
+    expect(Object.fromEntries(pointers.map(row => [row.id, row.selectedChildId]))).toEqual({ [mid(1)]: mid(2), [mid(2)]: mid(3), [mid(3)]: mid(4), [mid(4)]: null })
+  })
+
+  it('moves to the remembered leaf under the previous version, not the latest one', async () => {
+    const { t, chats } = await treeApp()
+    // A (1) -> RA (2) -> B (3) -> RB (4); under RA a newer version B2 (7) -> RB2 (8); A2 (5) -> RA2 (6) shown.
+    await chats.create({
+      id: chatId(2),
+      messages: [user(1, 'A'), assistant(2, 'RA'), user(3, 'B'), assistant(4, 'RB'), user(5, 'A2'), assistant(6, 'RA2'), user(7, 'B2'), assistant(8, 'RB2')],
+      parentIds: [null, mid(1), mid(2), mid(3), null, mid(5), mid(2), mid(7)],
+      activeLeafId: mid(6),
+    })
+    for (const [parent, child] of [[1, 2], [2, 3], [3, 4]] as const)
+      await t.db.update(messages).set({ selectedChildId: mid(child) }).where(and(eq(messages.chatId, chatId(2)), eq(messages.id, mid(parent))))
+    const detail = await chats.deleteMessage(chatId(2), mid(5))
+    expect(ids(detail.messages)).toEqual([mid(1), mid(2), mid(3), mid(4)])
+    expect(detail.branches).toEqual({ [mid(3)]: { siblings: [mid(3), mid(7)], index: 0 } })
+  })
+
+  it('deletes a version off the active path without moving the leaf; the first version moves to the next one', async () => {
+    const { chats, events } = await treeApp()
+    await chats.create(TREE)
+    events.clear()
+    // A (1) is off the path (A2 is shown): deleting it keeps A2 -> RA2.
+    const offPath = await chats.deleteMessage(chatId(1), mid(1))
+    expect(ids(offPath.messages)).toEqual([mid(5), mid(6)])
+    expect(offPath.branches).toEqual({})
+    expect(ids(await chats.listMessages(chatId(1)))).toEqual([mid(5), mid(6)])
+    expect(events.ofType('chat.updated').map(event => event.data.activeLeafId)).toEqual([mid(6)])
+
+    // A (20) is shown and has no previous version: the path moves to the next one (A2).
+    await chats.create({ ...TREE, id: chatId(3), activeLeafId: mid(23), messages: TREE.messages!.map((message, index) => ({ ...message, id: mid(20 + index) })), parentIds: [null, mid(20), mid(21), mid(22), null, mid(24)] })
+    expect(ids((await chats.get(chatId(3))).messages)).toEqual([mid(20), mid(21), mid(22), mid(23)])
+    const next = await chats.deleteMessage(chatId(3), mid(20))
+    expect(ids(next.messages)).toEqual([mid(24), mid(25)])
+  })
+
+  it('answers only-version, 404 and run-active; recomputes pending_approval', async () => {
+    const { chats, runs } = await treeApp()
+    await chats.create(TREE)
+    expect((await rejection(chats.deleteMessage(chatId(1), mid(2)))).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'only-version' } })
+    expect((await rejection(chats.deleteMessage(chatId(9), mid(1)))).code).toBe('not_found')
+    expect((await rejection(chats.deleteMessage(chatId(1), mid(9)))).code).toBe('not_found')
+    runs.phases.set(chatId(1), 'streaming')
+    expect((await rejection(chats.deleteMessage(chatId(1), mid(5)))).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'run-active', chatId: chatId(1) } })
+    runs.phases.delete(chatId(1))
+    expect(ids(await chats.listMessages(chatId(1)))).toHaveLength(6)
+
+    const pending: HarnessUIMessage = {
+      id: mid(11),
+      role: 'assistant',
+      parts: [{ type: 'tool-current_time', toolCallId: 'call-1', state: 'approval-requested', input: {}, approval: { id: 'approval-1' } } as never],
+    }
+    await chats.ensure(chatId(4))
+    await chats.appendMessage(chatId(4), user(10), null)
+    await chats.appendMessage(chatId(4), pending, mid(10))
+    await chats.appendMessage(chatId(4), user(12), null)
+    await chats.setActiveLeaf(chatId(4), mid(12))
+    expect((await chats.deleteMessage(chatId(4), mid(12))).pendingApproval).toBe(true)
+  })
+})
+
+describe('createFakeFilesService: saveGenerated', () => {
+  const PNG = encodeSolidPng(4, 3, [10, 20, 30])
+
+  it('stores a raster image once per content and returns the row', async () => {
+    const { t } = await treeApp()
+    const first = await t.deps.files.saveGenerated({ data: PNG, mediaType: 'image/png', name: 'image-1.png' })
+    expect(first).toMatchObject({ name: 'image-1.png', mime: 'image/png', size: PNG.byteLength })
+    expect((await t.deps.files.read(first.id)).data).toEqual(PNG)
+    expect((await t.deps.files.saveGenerated({ data: PNG, mediaType: 'image/png; foo=bar', name: 'other.png' })).id).toBe(first.id)
+    const uploaded = await t.deps.files.upload(new File([encodeSolidPng(2, 2, [1, 1, 1])], 'u.png', { type: 'image/png' }))
+    expect((await t.deps.files.saveGenerated({ data: encodeSolidPng(2, 2, [1, 1, 1]), mediaType: 'image/png', name: 'g.png' })).id).toBe(uploaded.id)
+  })
+
+  it('refuses SVG and other types, a type mismatch and oversized images', async () => {
+    const { t } = await treeApp()
+    const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"></svg>')
+    expect((await rejection(t.deps.files.saveGenerated({ data: svg, mediaType: 'image/svg+xml', name: 'a.svg' }))).code).toBe('validation_error')
+    expect((await rejection(t.deps.files.saveGenerated({ data: PNG, mediaType: 'image/jpeg', name: 'a.jpg' }))).code).toBe('validation_error')
+    expect((await rejection(t.deps.files.saveGenerated({ data: PNG, mediaType: 'application/pdf', name: 'a.pdf' }))).code).toBe('validation_error')
+    const huge = new Uint8Array(LIMITS.generatedImageBytes + 1)
+    huge.set(PNG)
+    expect((await rejection(t.deps.files.saveGenerated({ data: huge, mediaType: 'image/png', name: 'big.png' }))).toJSON().error).toMatchObject({ code: 'payload_too_large', details: { limitBytes: LIMITS.generatedImageBytes } })
+    expect(await t.db.select().from(files)).toEqual([])
+  })
+})
+
+describe('createFakeImageService', () => {
+  async function imageApp(options: Parameters<typeof createFakeImageService>[1] = {}): Promise<TestApp> {
+    const t = await createTestApp({ start: false, factories: { images: deps => createFakeImageService(deps, options) } })
+    apps.push(t)
+    return t
+  }
+
+  it('stores n PNGs at the aspect ratio, writes the usage row and answers the mock usage', async () => {
+    const t = await imageApp()
+    await t.deps.chats.ensure(chatId(1))
+    const result = await t.deps.images.generate({ modelRef: 'mock:image', prompt: '  a red fox ', n: 2, aspectRatio: '16:9', signal: signal(), chatId: chatId(1), messageId: mid(1) })
+    expect(result).toMatchObject({ modelRef: 'mock:image', usage: { inputTokens: 3, outputTokens: 200, totalTokens: 203 }, costUsd: null, revisedPrompt: 'Mock: a red fox', dropped: 0 })
+    expect(result.images.map(image => image.file.name)).toEqual(['image-1.png', 'image-2.png'])
+    for (const image of result.images) {
+      expect(image.url).toBe(`/api/files/${image.file.id}`)
+      expect(image.file.mime).toBe('image/png')
+      expect(readPng((await t.deps.files.read(image.file.id)).data)).toMatchObject({ width: 320, height: 180 })
+    }
+    expect(firstPixel(readPng((await t.deps.files.read(result.images[0]!.file.id)).data))).toEqual(mockImageColor('a red fox', 0))
+    const rows = await t.db.select().from(usage)
+    expect(rows).toEqual([expect.objectContaining({ chatId: chatId(1), messageId: mid(1), purpose: 'image', providerId: 'mock', modelId: 'image', input: 3, output: 200, costUsd: null })])
+    expect((t.deps.images as ReturnType<typeof createFakeImageService>).calls).toHaveLength(1)
+  })
+
+  it('takes the model from resolved, then modelRef, then settings.imageModelRef, else validation_error', async () => {
+    const t = await imageApp({ recordUsage: false })
+    const input = { prompt: 'x', n: 1, signal: signal(), chatId: null, messageId: null }
+    const missing = await rejection(t.deps.images.generate(input))
+    expect(missing).toMatchObject({ code: 'validation_error', message: NO_IMAGE_MODEL_MESSAGE })
+    await t.deps.settings.update({ imageModelRef: 'mock:image' })
+    expect((await t.deps.images.generate(input)).modelRef).toBe('mock:image')
+    expect((await t.deps.images.generate({ ...input, modelRef: 'openai:gpt-image-1' })).modelRef).toBe('openai:gpt-image-1')
+    const resolved = { modelRef: 'xai:grok-imagine-image' } as ResolvedImageModel
+    expect((await t.deps.images.generate({ ...input, resolved, modelRef: 'openai:gpt-image-1' })).modelRef).toBe('xai:grok-imagine-image')
+    expect(await t.db.select().from(usage)).toEqual([])
+  })
+
+  it('checks the prompt, n and the input files; edits change the colors', async () => {
+    const t = await imageApp({ recordUsage: false })
+    const base = { modelRef: 'mock:image', prompt: 'boat', n: 1, signal: signal(), chatId: null, messageId: null }
+    expect((await rejection(t.deps.images.generate({ ...base, prompt: '   ' }))).code).toBe('validation_error')
+    expect((await rejection(t.deps.images.generate({ ...base, prompt: 'p'.repeat(LIMITS.imagePromptMaxChars + 1) }))).code).toBe('validation_error')
+    expect((await rejection(t.deps.images.generate({ ...base, n: 5 }))).code).toBe('validation_error')
+    expect((await rejection(t.deps.images.generate({ ...base, n: 0 }))).code).toBe('validation_error')
+    expect((await rejection(t.deps.images.generate({ ...base, inputFileIds: ['file_0000000000000009'] }))).code).toBe('not_found')
+    const first = await t.deps.images.generate(base)
+    const inputs = Array.from({ length: LIMITS.imageInputsMax + 1 }, () => first.images[0]!.file.id)
+    expect((await rejection(t.deps.images.generate({ ...base, inputFileIds: inputs }))).code).toBe('validation_error')
+    const edit = await t.deps.images.generate({ ...base, inputFileIds: [first.images[0]!.file.id] })
+    const color = async (id: string): Promise<[number, number, number]> => firstPixel(readPng((await t.deps.files.read(id)).data))
+    expect(await color(edit.images[0]!.file.id)).not.toEqual(await color(first.images[0]!.file.id))
+  })
+
+  it('reports dropped images, injects failures and honors the abort signal', async () => {
+    const dropping = await imageApp({ dropped: 1, costUsd: 0.25, recordUsage: false })
+    const base = { modelRef: 'mock:image', prompt: 'boat', n: 2, signal: signal(), chatId: null, messageId: null }
+    expect(await dropping.deps.images.generate(base)).toMatchObject({ dropped: 1, costUsd: 0.25, images: [expect.anything()] })
+
+    const failure = new HarnessError({ code: 'provider_error', message: 'Mock image generation failure', status: 400, providerId: 'mock' })
+    const failing = await imageApp({ failWith: input => (input.prompt.includes('fail') ? failure : undefined), recordUsage: false })
+    expect(await rejection(failing.deps.images.generate({ ...base, prompt: 'please fail' }))).toBe(failure)
+
+    const slow = await imageApp({ delayMs: 5000, recordUsage: false })
+    const controller = new AbortController()
+    const pending = slow.deps.images.generate({ ...base, signal: controller.signal })
+    setTimeout(() => controller.abort(), 10)
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(slow.deps.images.generate({ ...base, signal: abortedSignal() })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(await slow.db.select().from(files)).toEqual([])
+  })
+})
+
+describe('createFakeAudioService', () => {
+  const recording = (bytes = 128, type = 'audio/webm'): Blob => new Blob([new Uint8Array(bytes)], { type })
+
+  it('transcribes with the form model or the default, and speaks a silent WAV', async () => {
+    const audio = createFakeAudioService()
+    expect(await audio.transcribe({ file: recording(), form: {}, signal: signal() })).toEqual({ text: MOCK_TRANSCRIPT, language: null, durationSec: null, modelRef: 'mock:transcribe' })
+    expect((await audio.transcribe({ file: recording(), form: { modelRef: 'groq:whisper-large-v3', language: 'de' }, signal: signal() })).modelRef).toBe('groq:whisper-large-v3')
+    const speech = await audio.speak({ text: 'Hello world', voice: 'mock-voice-a', signal: signal() })
+    expect(speech).toMatchObject({ mediaType: 'audio/wav', modelRef: 'mock:speech' })
+    expect(readWav(speech.audio)).toMatchObject({ riff: 'RIFF', wave: 'WAVE', sampleRate: 8000, durationMs: 1000 })
+    expect(audio.calls).toEqual([
+      { member: 'transcribe', type: 'audio/webm', bytes: 128, form: {} },
+      { member: 'transcribe', type: 'audio/webm', bytes: 128, form: { modelRef: 'groq:whisper-large-v3', language: 'de' } },
+      { member: 'speak', text: 'Hello world', modelRef: undefined, voice: 'mock-voice-a' },
+    ])
+    expect((await createFakeAudioService({ text: '' }).transcribe({ file: recording(), form: {}, signal: signal() })).text).toBe('')
+  })
+
+  it('refuses a missing model, an empty or oversized recording; injects failures; honors abort', async () => {
+    const none = createFakeAudioService({ transcriptionModelRef: null, speechModelRef: null })
+    expect((await rejection(none.transcribe({ file: recording(), form: {}, signal: signal() }))).code).toBe('validation_error')
+    expect((await rejection(none.speak({ text: 'hi', signal: signal() }))).code).toBe('validation_error')
+    expect((await none.speak({ text: 'hi', modelRef: 'mock:speech', signal: signal() })).modelRef).toBe('mock:speech')
+
+    const audio = createFakeAudioService()
+    expect(await rejection(audio.transcribe({ file: recording(63), form: {}, signal: signal() }))).toMatchObject({ code: 'validation_error', message: 'The recording is empty.' })
+    expect((await rejection(audio.transcribe({ file: recording(LIMITS.audioUploadBytes + 1), form: {}, signal: signal() }))).toJSON().error).toMatchObject({ code: 'payload_too_large', details: { limitBytes: LIMITS.audioUploadBytes } })
+    await expect(audio.speak({ text: 'hi', signal: abortedSignal() })).rejects.toMatchObject({ name: 'AbortError' })
+
+    const failure = new HarnessError({ code: 'rate_limited', message: 'Slow down.' })
+    const failing = createFakeAudioService({ failWith: member => (member === 'speak' ? failure : undefined) })
+    expect(await rejection(failing.speak({ text: 'hi', signal: signal() }))).toBe(failure)
+    expect((await failing.transcribe({ file: recording(), form: {}, signal: signal() })).text).toBe(MOCK_TRANSCRIPT)
+
+    const slow = createFakeAudioService({ delayMs: 5000 })
+    const controller = new AbortController()
+    const pending = slow.transcribe({ file: recording(), form: {}, signal: controller.signal })
+    setTimeout(() => controller.abort(), 10)
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  })
+})
+
+describe('fake media resolvers (providers/testing.ts)', () => {
+  async function mediaApp(options: Parameters<typeof fakeMediaProviders>[0] = {}): Promise<TestApp> {
+    const t = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, factories: { providers: fakeMediaProviders(options) } })
+    apps.push(t)
+    return t
+  }
+
+  it('resolves the mock media models from the catalog and registry, backed by instant mock models', async () => {
+    const t = await mediaApp()
+    const image = await t.deps.providers.resolveImageModel('mock:image', { signal: signal() })
+    expect(image).toMatchObject({ modelRef: 'mock:image', providerId: 'mock', modelId: 'image', entry: { kind: 'image', ref: 'mock:image' }, info: { id: 'image', kind: 'image' } })
+    expect(image.provider.definition.id).toBe('mock')
+    const generated = await generateImage({ model: image.imageModel, prompt: 'a red fox', n: 2, aspectRatio: '9:16' })
+    expect(generated.images.map(file => readPng(file.uint8Array).height)).toEqual([320, 320])
+    expect(generated.usage).toEqual({ inputTokens: 3, outputTokens: 200, totalTokens: 203 })
+
+    const transcription = await t.deps.providers.resolveTranscriptionModel('mock:transcribe')
+    expect(transcription.entry.kind).toBe('transcription')
+    expect((await transcribe({ model: transcription.model, audio: new Uint8Array(64) })).text).toBe(MOCK_TRANSCRIPT)
+    const speech = await t.deps.providers.resolveSpeechModel('mock:speech')
+    expect(speech.entry).toMatchObject({ kind: 'speech' })
+    expect((await generateSpeech({ model: speech.model, text: 'Hello world' })).audio.mediaType).toBe('audio/wav')
+  })
+
+  it('answers the resolver errors: wrong kind, unknown model, unknown provider; resolveModel refuses image models', async () => {
+    const t = await mediaApp()
+    expect((await rejection(t.deps.providers.resolveImageModel('mock:echo'))).code).toBe('validation_error')
+    expect((await rejection(t.deps.providers.resolveTranscriptionModel('mock:speech'))).code).toBe('validation_error')
+    expect((await rejection(t.deps.providers.resolveSpeechModel('mock:transcribe'))).code).toBe('validation_error')
+    expect((await rejection(t.deps.providers.resolveImageModel('mock:nope'))).toJSON().error).toMatchObject({ code: 'model_not_found', action: 'refresh-models' })
+    expect((await rejection(t.deps.providers.resolveSpeechModel('acme:speech'))).code).toBe('not_found')
+    expect((await rejection(t.deps.providers.resolveModel('mock:image'))).code).toBe('validation_error')
+    expect((await t.deps.providers.resolveModel('mock:echo')).modelRef).toBe('mock:echo')
+  })
+
+  it('returns the model instances given per ref', async () => {
+    const custom = new MockTranscriptionModelV4({ provider: 'mock', modelId: 'transcribe', doGenerate: async () => ({ text: 'custom', segments: [], language: 'en', durationInSeconds: 1.5, warnings: [], response: { timestamp: new Date(0), modelId: 'transcribe' } }) })
+    const t = await mediaApp({ transcriptionModels: { 'mock:transcribe': custom } })
+    const resolved = await t.deps.providers.resolveTranscriptionModel('mock:transcribe')
+    expect(resolved.model).toBe(custom)
+    expect(await transcribe({ model: resolved.model, audio: new Uint8Array(64) })).toMatchObject({ text: 'custom', language: 'en', durationInSeconds: 1.5 })
+  })
+})
+
+describe('createFakePluginHost: ctx.images', () => {
+  it('delegates to the app image service and maps the result to the plugin API shape', async () => {
+    let ctx: PluginContext | undefined
+    const t = await createProvidersTestApp({
+      builtins: [{ id: 'mock', manifest: mockManifest, module: { setup: (context) => {
+        ctx = context
+      } } }],
+      factories: { images: deps => createFakeImageService(deps, { costUsd: 0.5 }) },
+    })
+    apps.push(t)
+    const result = await ctx!.images.generate({ prompt: 'a lighthouse', modelRef: 'mock:image', n: 2, aspectRatio: '1:1' })
+    expect(result).toMatchObject({ modelRef: 'mock:image', costUsd: 0.5, revisedPrompt: 'Mock: a lighthouse' })
+    expect(result.images).toHaveLength(2)
+    for (const image of result.images) {
+      expect(image).toMatchObject({ url: `/api/files/${image.fileId}`, mediaType: 'image/png', name: expect.stringMatching(/^image-\d\.png$/) })
+      expect(image.size).toBe((await t.deps.files.get(image.fileId))?.size)
+    }
+    const calls = (t.deps.images as ReturnType<typeof createFakeImageService>).calls
+    expect(calls.at(-1)).toMatchObject({ modelRef: 'mock:image', n: 2, aspectRatio: '1:1', chatId: null, messageId: null })
+
+    const controller = new AbortController()
+    controller.abort()
+    await expect(ctx!.images.generate({ prompt: 'x', modelRef: 'mock:image', signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(ctx!.images.generate({ prompt: 'x' })).rejects.toMatchObject({ code: 'validation_error', message: NO_IMAGE_MODEL_MESSAGE })
+  })
+
+  it('answers not_implemented through the P6-0b image service stub', async () => {
+    let ctx: PluginContext | undefined
+    const t = await createProvidersTestApp({ builtins: [{ id: 'mock', manifest: mockManifest, module: { setup: (context) => {
+      ctx = context
+    } } }] })
+    apps.push(t)
+    await expect(ctx!.images.generate({ prompt: 'x', modelRef: 'mock:image' })).rejects.toMatchObject({ code: 'not_implemented' })
   })
 })

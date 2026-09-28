@@ -141,11 +141,11 @@ ADR-027 consequence).
   - [x] C10 contracts: shared DTOs + plugin SDK 1.1.0, 3 new routes (76), `docs/API.md`, 501 stubs
   - [x] D6 docs: `phase-6-v1-2.md`, UI.md, ARCHITECTURE.md, PROVIDERS.md, PLUGINS.md, README, `.env.example`
   - [x] Gate + checkpoint commit
-- [ ] P6-0b Schema, migration `0002`, skeletons, FREEZE
-  - [ ] K3 schema + `pnpm db:generate` + backfill SQL; K4 Playwright config (coordinator)
-  - [ ] C11 server skeleton (types, stub services, mock media models, headers, fakes, upgrade test)
-  - [ ] C12 web skeleton (Media settings page, stub components and composables, test ids, fake media)
-  - [ ] Gate (incl. v1.1 data upgrade probe) + FREEZE + checkpoint commit
+- [x] P6-0b Schema, migration `0002`, skeletons, FREEZE
+  - [x] K3 schema + `pnpm db:generate` + backfill SQL; K4 Playwright config (coordinator)
+  - [x] C11 server skeleton (types, stub services, mock media models, headers, fakes, upgrade test)
+  - [x] C12 web skeleton (Media settings page, stub components and composables, test ids, fake media)
+  - [x] Gate (incl. v1.1 data upgrade probe) + FREEZE + checkpoint commit
 - [ ] P6-A Features (11 agents)
   - [ ] W6.1 image-pipeline · [ ] W6.2 model-runtime · [ ] W6.3 provider-media · [ ] W6.4 image-host
   - [ ] W6.5 voice-server · [ ] W6.6 chats-server
@@ -183,3 +183,4 @@ removed by delete-all) · video generation.
 | Final gate v1.1 | coordinator | frozen install ok; check 4211 tests; build ok; CSP 38/38; probes green; e2e 44/44 ×3; audit clean; v1 → v1.1 upgrade ok. Docker not re-run locally (daemon off; the CI `docker` job builds the image); live provider suite not run (needs the user's keys) | (this commit) |
 | P6-00 | coordinator (hotfix) | `pnpm check` 4212 tests; `main.test.ts` 3× green (the new SIGTERM-during-boot test fails on the old `main.ts`); `actionlint` 1.7.12 exit 0 | a5fd107 |
 | P6-0a | coordinator (K1), C10, D6 | audit ok (67 paths; 7 compile-fix files accepted); 4256 tests; build ok; CSP 38/38; 3 new routes mounted (501); e2e 44 passed; CI on `a5fd107` green; Dependabot now opens separate katex / ai-sdk / minor PRs (#2-#4, green) | (this commit) |
+| P6-0b | coordinator (K3, K4), C11, C12 | audit ok (75 paths; 4 test/fake files accepted); 4374 tests; build ok; CSP 38/38 incl. `media-src 'self' blob:`; `Permissions-Policy: microphone=(self)`; e2e 44 passed (new fake-media Playwright config, empty `tablet` project); upgrade probe on a seeded v1.1 copy: `0002` applied, remembered pointers only on the active path (A → RA → B → RB), 0 invalid, `GET /chats/:id` unchanged, 24 chats; FREEZE | (this commit) |

@@ -16,8 +16,9 @@
 // - Writes are single statements or atomic batches (no interactive transaction holds the connection), except
 //   `transaction()`, which the chat pipeline uses for its commit and persist steps.
 // - Events are emitted after the write: `chat.created` (create, ensure when it creates, importChat), `chat.updated`
-//   (update, touch, setTitle, switchBranch), `chat.deleted` (remove, removeAll: one per chat). Message operations emit
-//   nothing.
+//   (update, touch, setTitle, switchBranch; `ChatUpdatedData` with the active leaf), `chat.deleted` (remove,
+//   removeAll: one per chat). Message operations emit nothing.
+// - Phase 6 skeleton (P6-0b): `deleteMessage` (deleting a version, ADR-030) answers `not_implemented` until W6.6.
 import type { ChatDetail, ChatSettings, ChatSummary, CursorPage, HarnessUIMessage, UsageTotals } from '@harness-forge/shared'
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core'
 import type { ChatRow } from '../../db/schema.ts'
@@ -38,6 +39,7 @@ import {
 } from '@harness-forge/shared'
 import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm'
 import { chats, messages, usage } from '../../db/schema.ts'
+import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { decodeChatCursor, encodeChatCursor } from './cursor.ts'
 import { databaseError, guardDb, isConstraintError } from './db-errors.ts'
 import { buildChatExport } from './export.ts'
@@ -453,6 +455,8 @@ export function createChatsService(deps: AppDeps): ChatsService {
       emitUpdated(updated)
       return detailOf(updated)
     }),
+
+    deleteMessage: rejectsNotImplemented('ChatsService.deleteMessage (W6.6)'),
 
     allIds: () => guardDb(async () => {
       const rows = await db.select({ id: chats.id }).from(chats).orderBy(asc(chats.id))

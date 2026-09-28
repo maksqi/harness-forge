@@ -21,10 +21,12 @@ import { createRegistry } from './registry/index.ts'
 import { createKeyring } from './security/keyring.ts'
 import { createPasswordService } from './security/password.ts'
 import { createSessionService } from './security/session.ts'
+import { createAudioService } from './services/audio/index.ts'
 import { createChatsService } from './services/chats/index.ts'
 import { createDataService } from './services/data/index.ts'
 import { createEventBus } from './services/events/index.ts'
 import { createFilesService } from './services/files/index.ts'
+import { createImageService } from './services/images/index.ts'
 import { createCredentialService } from './services/secrets/credentials.ts'
 import { createSecretStore } from './services/secrets/index.ts'
 import { createSettingsService } from './services/settings/index.ts'
@@ -56,6 +58,8 @@ export const SERVICE_FACTORIES: ServiceFactories = {
   mcp: createMcpManager,
   data: createDataService,
   shares: createShareService,
+  images: createImageService,
+  audio: createAudioService,
 }
 
 /** Instantiation order (dependencies first; construction-time access to later services still works lazily). */

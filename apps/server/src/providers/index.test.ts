@@ -67,7 +67,8 @@ describe('provider list', () => {
     const t = await setup({ env: { HF_MOCK_PROVIDER: '1' } })
     const providers = await t.deps.providers.list()
     expect(providers.map(provider => provider.id)).toEqual([...BUILTIN_PROVIDER_IDS, 'mock'])
-    expect(providers.at(-1)).toMatchObject({ id: 'mock', pluginId: 'mock', status: 'connected', local: true, icon: null, modelCount: 4, credentials: {} })
+    // Visible chat models: the four of v1 plus image-chat and image-tool (the Phase 6 media models are hidden).
+    expect(providers.at(-1)).toMatchObject({ id: 'mock', pluginId: 'mock', status: 'connected', local: true, icon: null, modelCount: 6, credentials: {} })
   })
 
   it('reports statuses: not_configured, env, stored (connected), local and error', async () => {

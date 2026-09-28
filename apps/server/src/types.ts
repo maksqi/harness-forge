@@ -11,10 +11,12 @@ import type { BuiltinPlugin, PluginDrafts, PluginFiles, PluginHost, PluginInstal
 import type { IconService, ProviderService } from './providers/types.ts'
 import type { Registry } from './registry/types.ts'
 import type { Keyring, PasswordService, Redactor, SessionService } from './security/types.ts'
+import type { AudioService } from './services/audio/types.ts'
 import type { ChatsService } from './services/chats/types.ts'
 import type { DataService } from './services/data/types.ts'
 import type { EventBus } from './services/events/types.ts'
 import type { FilesService } from './services/files/types.ts'
+import type { ImageService } from './services/images/types.ts'
 import type { CredentialService, SecretStore } from './services/secrets/types.ts'
 import type { SettingsService } from './services/settings/types.ts'
 import type { ShareService } from './services/shares/types.ts'
@@ -62,9 +64,12 @@ export interface AppServices {
   readonly providers: ProviderService
   /** Model catalog (W1.4). */
   readonly catalog: ModelCatalog
-  /** Chats, messages, usage (W1.5); the message tree and the bulk data members (W5.1, ADR-023 / ADR-024). */
+  /**
+   * Chats, messages, usage (W1.5); the message tree and the bulk data members (W5.1, ADR-023 / ADR-024); remembered
+   * versions and `deleteMessage` (W6.6, ADR-030).
+   */
   readonly chats: ChatsService
-  /** Uploaded files (W1.5); `importFile` / `purge` (W5.3, ADR-024). */
+  /** Uploaded files (W1.5); `importFile` / `purge` (W5.3, ADR-024); `saveGenerated` (W6.4, ADR-028). */
   readonly files: FilesService
   /** Chat runs: stream, resume, stop (W2.1). */
   readonly runs: ChatRunner
@@ -76,6 +81,10 @@ export interface AppServices {
   readonly data: DataService
   /** Read-only share links: owner operations and the public snapshot view (W5.4, ADR-025). */
   readonly shares: ShareService
+  /** Image generation for image turns and `ctx.images` / `generate_image` (W6.4, ADR-028). */
+  readonly images: ImageService
+  /** Dictation (`transcribe`) and read-aloud (`speak`) behind `/api/audio/*` (W6.5, ADR-029). */
+  readonly audio: AudioService
 }
 
 export interface AppDeps extends AppBase, AppServices {}

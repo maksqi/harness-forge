@@ -58,6 +58,14 @@ describe('secure headers', () => {
     expect(response.headers.get('strict-transport-security')).toBeNull()
   })
 
+  it('permissions-Policy allows the microphone for the app\'s own origin only (Phase 6, ADR-029)', async () => {
+    for (const path of ['/api/health', '/api/nope']) {
+      const response = await t.request(path, { headers: { accept: 'application/json' } })
+      expect(response.headers.get('permissions-policy'), path).toBe('camera=(), microphone=(self), geolocation=()')
+    }
+    expect((await app.request('/page')).headers.get('permissions-policy')).toBe('camera=(), microphone=(self), geolocation=()')
+  })
+
   it('error envelopes too (API and non-API paths)', async () => {
     for (const path of ['/api/nope', '/definitely/not/here.json']) {
       const response = await t.request(path, { headers: { accept: 'application/json' } })

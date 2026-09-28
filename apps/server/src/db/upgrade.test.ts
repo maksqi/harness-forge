@@ -1,14 +1,19 @@
-// Upgrade of a v1 database through migration 0001 (C8-T7, ADR-023, ARCHITECTURE.md 8 "Migrations"): a database that
-// only had `0000_initial_schema` (linear chats) is migrated with the real folder; the hand-written backfill must turn
-// every chat into a linear parent chain whose active leaf is its last message (null for an empty chat), add the new
-// index and `chat_shares`, and lose nothing. The same checks run against a copy of the folder without the backfill and
-// must fail there, so this test notices a missing or broken backfill.
+// Upgrades of older databases through the hand-written backfills (ARCHITECTURE.md 8 "Migrations"):
+// - v1 -> v1.1 through migration 0001 (C8-T7, ADR-023): a database that only had `0000_initial_schema` (linear chats)
+//   is migrated with the real folder; the backfill must turn every chat into a linear parent chain whose active leaf is
+//   its last message (null for an empty chat), add the new index and `chat_shares`, and lose nothing.
+// - v1.1 -> v1.2 through migration 0002 (C11-T6, ADR-030): a database with `0000` + `0001` and branched chats is migrated
+//   with the real folder; the backfill must point exactly the parents on each chat's active path at their child on the
+//   path (null everywhere else), so switching away from a version and back restores what the user saw.
+// Each set of checks also runs against a copy of the folder without the backfill and must fail there, so these tests
+// notice a missing or broken backfill.
 import type { Database } from './client.ts'
 import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { chatDetailSchema, chatSummarySchema, cursorPageSchema } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
+import { buildTree, latestLeafUnder } from '../services/chats/tree.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { openDatabase } from './client.ts'
 import { migrateDatabase, resolveMigrationsFolder } from './migrate.ts'
@@ -32,6 +37,7 @@ const REAL_FOLDER = resolveMigrationsFolder()
 const JOURNAL = JSON.parse(readFileSync(join(REAL_FOLDER, 'meta', '_journal.json'), 'utf8')) as Journal
 const INITIAL = JOURNAL.entries.find(entry => entry.tag === '0000_initial_schema')
 const TREE = JOURNAL.entries.find(entry => entry.tag.startsWith('0001_'))
+const REMEMBERED = JOURNAL.entries.find(entry => entry.tag.startsWith('0002_'))
 
 const opened: Database[] = []
 const tempDirs: string[] = []
@@ -280,6 +286,308 @@ describe('upgrade of a v1 database through migration 0001', () => {
       expect((await t.deps.chats.find(CHAT_A))?.activeLeafId).toBe('msg_a000000000000006')
       expect((await t.deps.chats.find(CHAT_EMPTY))?.activeLeafId).toBeNull()
       expect(chatDetailSchema.parse(await (await t.request(`/api/chats/${CHAT_EMPTY}`)).json()).messages).toEqual([])
+    }
+    finally {
+      await t.close()
+    }
+  })
+})
+
+// ---------- v1.1 -> v1.2: migration 0002 (remembered versions) ----------
+
+/** A migrations folder holding only 0000 + 0001 (their SQL + a two-entry journal): the schema of a v1.1 data directory. */
+function v11Folder(): string {
+  if (INITIAL === undefined || TREE === undefined)
+    throw new Error('migration 0000 or 0001 is missing from the journal')
+  const dir = tempDir()
+  mkdirSync(join(dir, 'meta'))
+  for (const entry of [INITIAL, TREE])
+    copyFileSync(join(REAL_FOLDER, `${entry.tag}.sql`), join(dir, `${entry.tag}.sql`))
+  writeFileSync(join(dir, 'meta', '_journal.json'), JSON.stringify({ ...JOURNAL, entries: [INITIAL, TREE] }))
+  return dir
+}
+
+/** The statements of migration 0002 (split like `migrate()` does). */
+function rememberedStatements(folder = REAL_FOLDER): string[] {
+  if (REMEMBERED === undefined)
+    throw new Error('migration 0002 is missing from the journal')
+  return readFileSync(join(folder, `${REMEMBERED.tag}.sql`), 'utf8').split('--> statement-breakpoint')
+}
+
+const REMEMBERED_BACKFILL = /UPDATE\s+`?messages`?\s+SET\s+`?selected_child_id/i
+
+/** A copy of the real folder whose 0002 lacks the hand-written backfill (its recursive UPDATE statement). */
+function folderWithoutRememberedBackfill(): string {
+  const dir = tempDir()
+  cpSync(REAL_FOLDER, dir, { recursive: true })
+  const statements = rememberedStatements(dir)
+  const kept = statements.filter(statement => !REMEMBERED_BACKFILL.test(statement))
+  expect(statements.length - kept.length, 'the backfill of 0002 is one UPDATE statement').toBe(1)
+  writeFileSync(join(dir, `${REMEMBERED!.tag}.sql`), kept.join('--> statement-breakpoint'))
+  return dir
+}
+
+const CHAT_BRANCHED = '0199a8f0-0000-7000-8000-0000000000b1'
+const CHAT_LINEAR = '0199a8f0-0000-7000-8000-0000000000b2'
+const CHAT_RUNNING = '0199a8f0-0000-7000-8000-0000000000b3'
+const CHAT_DANGLING = '0199a8f0-0000-7000-8000-0000000000b4'
+const CHAT_NONE = '0199a8f0-0000-7000-8000-0000000000b5'
+
+/** Message ids by name (`msg_` + 16 characters). */
+const M = {
+  A: 'msg_b100000000000000',
+  RA: 'msg_b100000000000001',
+  B: 'msg_b100000000000002',
+  RB: 'msg_b100000000000003',
+  B2: 'msg_b100000000000004',
+  RB2: 'msg_b100000000000005',
+  A2: 'msg_b100000000000006',
+  RA2: 'msg_b100000000000007',
+  U: 'msg_b200000000000000',
+  R: 'msg_b200000000000001',
+  M1: 'msg_b300000000000000',
+  M2: 'msg_b300000000000001',
+  M3: 'msg_b300000000000002',
+  D1: 'msg_b400000000000000',
+  D2: 'msg_b400000000000001',
+} as const
+
+interface V11Message {
+  id: string
+  chatId: string
+  parentId: string | null
+  seq: number
+  role: 'user' | 'assistant'
+}
+
+/**
+ * v1.1 data (ARCHITECTURE.md 6.8):
+ * - BRANCHED: two first messages A / A2 (A2 = an edit of A, newest), and under A's reply two versions B / B2 (B2 newer);
+ *   the active leaf is B's reply RB although B2, RB2, A2 and RA2 are newer (the user switched back to B);
+ * - LINEAR: U -> R, leaf R; RUNNING: M1 -> M2 -> M3 with the leaf M2 (as while a run holds the chat);
+ * - DANGLING: the stored leaf is not a message of the chat (damaged data); NONE: an empty chat.
+ */
+const V11_MESSAGES: V11Message[] = [
+  { id: M.A, chatId: CHAT_BRANCHED, parentId: null, seq: 0, role: 'user' },
+  { id: M.RA, chatId: CHAT_BRANCHED, parentId: M.A, seq: 1, role: 'assistant' },
+  { id: M.B, chatId: CHAT_BRANCHED, parentId: M.RA, seq: 2, role: 'user' },
+  { id: M.RB, chatId: CHAT_BRANCHED, parentId: M.B, seq: 3, role: 'assistant' },
+  { id: M.B2, chatId: CHAT_BRANCHED, parentId: M.RA, seq: 4, role: 'user' },
+  { id: M.RB2, chatId: CHAT_BRANCHED, parentId: M.B2, seq: 5, role: 'assistant' },
+  { id: M.A2, chatId: CHAT_BRANCHED, parentId: null, seq: 6, role: 'user' },
+  { id: M.RA2, chatId: CHAT_BRANCHED, parentId: M.A2, seq: 7, role: 'assistant' },
+  { id: M.U, chatId: CHAT_LINEAR, parentId: null, seq: 0, role: 'user' },
+  { id: M.R, chatId: CHAT_LINEAR, parentId: M.U, seq: 1, role: 'assistant' },
+  { id: M.M1, chatId: CHAT_RUNNING, parentId: null, seq: 0, role: 'user' },
+  { id: M.M2, chatId: CHAT_RUNNING, parentId: M.M1, seq: 1, role: 'assistant' },
+  { id: M.M3, chatId: CHAT_RUNNING, parentId: M.M2, seq: 2, role: 'user' },
+  { id: M.D1, chatId: CHAT_DANGLING, parentId: null, seq: 0, role: 'user' },
+  { id: M.D2, chatId: CHAT_DANGLING, parentId: M.D1, seq: 1, role: 'assistant' },
+]
+
+const V11_LEAVES: Record<string, string | null> = {
+  [CHAT_BRANCHED]: M.RB,
+  [CHAT_LINEAR]: M.R,
+  [CHAT_RUNNING]: M.M2,
+  [CHAT_DANGLING]: 'msg_missing000000000',
+  [CHAT_NONE]: null,
+}
+
+/** The pointers the backfill must produce: the parents on the active paths only (A -> RA -> B -> RB, U -> R, M1 -> M2). */
+const EXPECTED_POINTERS: Record<string, string | null> = {
+  ...Object.fromEntries(V11_MESSAGES.map(message => [message.id, null])),
+  [M.A]: M.RA,
+  [M.RA]: M.B,
+  [M.B]: M.RB,
+  [M.U]: M.R,
+  [M.M1]: M.M2,
+}
+
+/** The v1.1 columns of every message, as stored. */
+async function v11MessageRows(database: Database): Promise<Record<string, unknown>[]> {
+  const result = await database.client.execute(
+    'SELECT id, chat_id, parent_id, seq, role, parts, metadata, search_text, created_at, updated_at FROM messages ORDER BY chat_id, seq',
+  )
+  return result.rows.map(row => ({ ...row }))
+}
+
+/** Every chat row, as stored. */
+async function chatRows(database: Database): Promise<Record<string, unknown>[]> {
+  const result = await database.client.execute('SELECT * FROM chats ORDER BY id')
+  return result.rows.map(row => ({ ...row }))
+}
+
+/** Creates a v1.1 database file (0000 + 0001 only) with the chats above; returns the stored message and chat rows. */
+async function seedV11Database(path: string): Promise<{ messages: Record<string, unknown>[], chats: Record<string, unknown>[] }> {
+  const database = await open(path)
+  await migrateDatabase(database.db, { migrationsFolder: v11Folder() })
+  const columns = await database.client.execute('PRAGMA table_info(messages)')
+  expect(columns.rows.map(row => String(row.name))).toContain('parent_id')
+  expect(columns.rows.map(row => String(row.name))).not.toContain('selected_child_id')
+  for (const [index, [id, leaf]] of Object.entries(V11_LEAVES).entries()) {
+    await database.client.execute({
+      sql: 'INSERT INTO chats (id, title, title_source, settings, pinned, archived, pending_approval, active_leaf_id, created_at, updated_at) VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?)',
+      args: [id, `Chat ${index}`, 'user', '{}', leaf, 1000 + index, 2000 + index],
+    })
+  }
+  for (const message of V11_MESSAGES) {
+    const text = `${message.role} ${message.id}`
+    await database.client.execute({
+      sql: 'INSERT INTO messages (id, chat_id, parent_id, seq, role, parts, metadata, search_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      args: [message.id, message.chatId, message.parentId, message.seq, message.role, JSON.stringify([{ type: 'text', text }]), JSON.stringify({ modelRef: 'mock:echo', startedAt: 1 }), text, 3000 + message.seq, 4000 + message.seq],
+    })
+  }
+  const rows = { messages: await v11MessageRows(database), chats: await chatRows(database) }
+  database.close()
+  return rows
+}
+
+/** Everything the 0002 backfill must have produced, as a list of problems (empty = upgraded correctly). */
+async function rememberedProblems(database: Database): Promise<string[]> {
+  const problems: string[] = []
+  const pointers = await database.client.execute('SELECT id, selected_child_id FROM messages')
+  for (const row of pointers.rows) {
+    const id = String(row.id)
+    const actual = row.selected_child_id === null ? null : String(row.selected_child_id)
+    if (actual !== EXPECTED_POINTERS[id])
+      problems.push(`pointer of ${id} is ${actual}, expected ${EXPECTED_POINTERS[id]}`)
+  }
+  // The upgrade probe of Gate P6-0b: pointers only on active-path parents, and every active-path parent has one.
+  const path = `WITH RECURSIVE path(chat_id, id, parent_id, seq) AS (
+    SELECT m.chat_id, m.id, m.parent_id, m.seq FROM chats c JOIN messages m ON m.chat_id = c.id AND m.id = c.active_leaf_id
+    UNION ALL SELECT p.chat_id, p.id, p.parent_id, p.seq FROM messages p
+    JOIN path ON p.id = path.parent_id AND p.chat_id = path.chat_id AND p.seq < path.seq)`
+  const offPath = await scalar(database, `${path} SELECT count(*) AS n FROM messages m WHERE m.selected_child_id IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM path WHERE path.parent_id = m.id AND path.id = m.selected_child_id)`)
+  if (offPath !== 0)
+    problems.push(`${offPath} pointers off the active paths`)
+  const missing = await scalar(database, `${path} SELECT count(*) AS n FROM path WHERE path.parent_id IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = path.parent_id AND m.selected_child_id = path.id)`)
+  if (missing !== 0)
+    problems.push(`${missing} active-path parents without a pointer`)
+  // Every pointer names a real child (a message of the same chat whose parent is the pointing message).
+  const strays = await scalar(database, `SELECT count(*) AS n FROM messages m WHERE m.selected_child_id IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM messages c WHERE c.id = m.selected_child_id AND c.parent_id = m.id AND c.chat_id = m.chat_id)`)
+  if (strays !== 0)
+    problems.push(`${strays} pointers that name no child`)
+  return problems
+}
+
+/**
+ * The leaf a switch to `messageId` shows with remembered versions (ADR-030, the rule of `rememberedLeafUnder`): walk
+ * down through the remembered child while it is a child of the node, else the only child, else the latest leaf.
+ */
+async function rememberedLeaf(database: Database, chatId: string, messageId: string): Promise<string | null> {
+  const result = await database.client.execute({ sql: 'SELECT id, parent_id, seq, role, selected_child_id FROM messages WHERE chat_id = ?', args: [chatId] })
+  const rows = result.rows.map(row => ({
+    id: String(row.id),
+    parentId: row.parent_id === null ? null : String(row.parent_id),
+    seq: Number(row.seq),
+    role: String(row.role) as 'user' | 'assistant',
+    selectedChildId: row.selected_child_id === null ? null : String(row.selected_child_id),
+  }))
+  const tree = buildTree(rows)
+  const pointer = new Map(rows.map(row => [row.id, row.selectedChildId]))
+  let node = tree.byId.has(messageId) ? messageId : null
+  while (node !== null) {
+    const children = tree.childrenOf.get(node) ?? []
+    if (children.length === 0)
+      return node
+    const remembered = pointer.get(node)
+    if (remembered !== null && remembered !== undefined && children.includes(remembered))
+      node = remembered
+    else if (children.length === 1)
+      node = children[0]!
+    else
+      return latestLeafUnder(tree, node)
+  }
+  return null
+}
+
+describe('upgrade of a v1.1 database through migration 0002 (remembered versions)', () => {
+  it('0002 is one ALTER TABLE ... ADD plus the hand-written backfill, never a table rebuild', () => {
+    const statements = rememberedStatements()
+    expect(statements).toHaveLength(2)
+    expect(statements[0]?.trim()).toBe('ALTER TABLE `messages` ADD `selected_child_id` text;')
+    expect(REMEMBERED_BACKFILL.test(statements[1] ?? '')).toBe(true)
+    expect(statements[1]).toMatch(/WITH RECURSIVE path/)
+    const sql = statements.join('\n')
+    for (const forbidden of [/DROP\s+TABLE/i, /__new_/i, /PRAGMA\s+foreign_keys/i])
+      expect(sql, String(forbidden)).not.toMatch(forbidden)
+    expect(JOURNAL.entries.slice(0, 3)).toEqual([INITIAL, TREE, REMEMBERED])
+  })
+
+  it('points exactly the active-path parents at their child on the path, keeps every row, matches a fresh schema', async () => {
+    const path = join(tempDir(), 'harness.db')
+    const before = await seedV11Database(path)
+    const database = await open(path)
+    await migrateDatabase(database.db)
+
+    expect(await rememberedProblems(database)).toEqual([])
+    expect(await v11MessageRows(database)).toEqual(before.messages)
+    expect(await chatRows(database)).toEqual(before.chats)
+    const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
+    expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
+    const fresh = await open(':memory:')
+    await migrateDatabase(fresh.db)
+    expect(await schemaShape(database)).toEqual(await schemaShape(fresh))
+    const foreignKeys = await database.client.execute('PRAGMA foreign_keys')
+    expect(Number(foreignKeys.rows[0]?.foreign_keys)).toBe(1)
+
+    // Remembered is not latest: switching back to A restores A -> RA -> B -> RB (what was shown), where v1.1's "latest
+    // leaf" rule would show B2's newer reply.
+    expect(await rememberedLeaf(database, CHAT_BRANCHED, M.A)).toBe(M.RB)
+    const rows = await database.client.execute({ sql: 'SELECT id, parent_id, seq, role FROM messages WHERE chat_id = ?', args: [CHAT_BRANCHED] })
+    const tree = buildTree(rows.rows.map(row => ({ id: String(row.id), parentId: row.parent_id === null ? null : String(row.parent_id), seq: Number(row.seq), role: String(row.role) as 'user' | 'assistant' })))
+    expect(latestLeafUnder(tree, M.A)).toBe(M.RB2)
+    // Versions never shown keep null: their latest leaf wins until they are shown.
+    expect(await rememberedLeaf(database, CHAT_BRANCHED, M.A2)).toBe(M.RA2)
+    expect(await rememberedLeaf(database, CHAT_BRANCHED, M.B2)).toBe(M.RB2)
+
+    // Idempotent: migrating again applies nothing and changes no pointer.
+    await migrateDatabase(database.db)
+    expect(await scalar(database, 'SELECT count(*) AS n FROM __drizzle_migrations')).toBe(JOURNAL.entries.length)
+    expect(await rememberedProblems(database)).toEqual([])
+  })
+
+  it('the same checks fail when 0002 lacks the backfill (the test notices a missing backfill)', async () => {
+    const path = join(tempDir(), 'harness.db')
+    const before = await seedV11Database(path)
+    const database = await open(path)
+    await migrateDatabase(database.db, { migrationsFolder: folderWithoutRememberedBackfill() })
+
+    expect(await v11MessageRows(database)).toEqual(before.messages)
+    expect(await scalar(database, 'SELECT count(*) AS n FROM messages WHERE selected_child_id IS NOT NULL')).toBe(0)
+    expect(await rememberedProblems(database)).toEqual(expect.arrayContaining([
+      `pointer of ${M.A} is null, expected ${M.RA}`,
+      `pointer of ${M.B} is null, expected ${M.RB}`,
+      '5 active-path parents without a pointer',
+    ]))
+    // Without the pointers a switch back to A falls back to the latest leaf: the path the user saw is lost.
+    expect(await rememberedLeaf(database, CHAT_BRANCHED, M.A)).toBe(M.RB2)
+  })
+
+  it('boots on the upgraded database: every chat, path and version is served as before', async () => {
+    const dataDir = tempDir()
+    const databasePath = join(dataDir, 'harness.db')
+    await seedV11Database(databasePath)
+    const t = await createTestApp({ dataDir, databasePath, start: false })
+    try {
+      const list = cursorPageSchema(chatSummarySchema).parse(await (await t.request('/api/chats')).json())
+      expect(list.items.map(chat => chat.id).sort()).toEqual(Object.keys(V11_LEAVES).sort())
+
+      const branched = chatDetailSchema.parse(await (await t.request(`/api/chats/${CHAT_BRANCHED}`)).json())
+      expect(branched.messages.map(message => message.id)).toEqual([M.A, M.RA, M.B, M.RB])
+      expect(branched.branches).toEqual({
+        [M.A]: { siblings: [M.A, M.A2], index: 0 },
+        [M.B]: { siblings: [M.B, M.B2], index: 0 },
+      })
+      const running = chatDetailSchema.parse(await (await t.request(`/api/chats/${CHAT_RUNNING}`)).json())
+      expect(running.messages.map(message => message.id)).toEqual([M.M1, M.M2])
+      // A stored leaf outside the chat falls back to the chat's most recent message (ARCHITECTURE.md 6.8).
+      const dangling = chatDetailSchema.parse(await (await t.request(`/api/chats/${CHAT_DANGLING}`)).json())
+      expect(dangling.messages.map(message => message.id)).toEqual([M.D1, M.D2])
+      expect(chatDetailSchema.parse(await (await t.request(`/api/chats/${CHAT_NONE}`)).json()).messages).toEqual([])
     }
     finally {
       await t.close()

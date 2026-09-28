@@ -1,6 +1,10 @@
 // Provider service (ARCHITECTURE.md 6.6, PROVIDERS.md, API.md 5.5): registered providers joined with
 // `provider_configs`, credentials (W1.2 `CredentialService`, env fallback) and the catalog; model resolution
 // (`modelRef` -> `LanguageModel` with the user's credentials), provider tests, error mapping and call outcomes.
+//
+// Phase 6 skeleton (P6-0b): `resolveImageModel`, `resolveTranscriptionModel` and `resolveSpeechModel` (ADR-028,
+// ADR-029) answer `not_implemented` until W6.2 implements them; tests of other services use the fakes of
+// `providers/testing.ts` (`withFakeMediaResolvers`).
 import type { ProviderDefinition, ProviderRuntime } from '@harness-forge/plugin-sdk'
 import type { CredentialState, HarnessErrorInit, IconRef, ProviderStatus, ProviderSummary, ProviderTestResult } from '@harness-forge/shared'
 import type { ProviderConfigRow } from '../db/schema.ts'
@@ -13,6 +17,7 @@ import { HarnessError, harnessErrorInitSchema, isHarnessError, parseModelRef } f
 import { generateText } from 'ai'
 import { sanitizeListing } from '../catalog/listing.ts'
 import { catalogModelInfo } from '../catalog/merge.ts'
+import { rejectsNotImplemented } from '../not-implemented.ts'
 import { createProviderConfigStore, isEnabledRow } from './configs.ts'
 import { defaultProviderError } from './errors.ts'
 import { createProviderRuntime, VALIDATE_TIMEOUT_MS, withTimeout } from './runtime.ts'
@@ -407,6 +412,12 @@ export function createProviderServiceWith(deps: AppDeps, options: ProviderServic
       const model = createModel(provider, modelId, runtimeFor(provider, credentials, resolveOptions.signal))
       return { modelRef: `${providerId}:${modelId}`, providerId, modelId, model, info: catalogModelInfo(entry), entry, provider }
     },
+
+    resolveImageModel: rejectsNotImplemented('ProviderService.resolveImageModel (W6.2)'),
+
+    resolveTranscriptionModel: rejectsNotImplemented('ProviderService.resolveTranscriptionModel (W6.2)'),
+
+    resolveSpeechModel: rejectsNotImplemented('ProviderService.resolveSpeechModel (W6.2)'),
 
     runtime: async (providerId, runtimeOptions = {}) => {
       const provider = requireRegistered(providerId)

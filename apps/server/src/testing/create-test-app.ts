@@ -7,6 +7,9 @@
 //
 // Phase 5 fakes (`./fakes.ts`): `overrides: { runs: createFakeChatRunner(), data: createFakeDataService(), shares:
 // createFakeShareService() }`, `factories: { chats: createFakeChatsService, files: createFakeFilesService }`.
+// Phase 6 fakes: `factories: { images: createFakeImageService, providers: fakeMediaProviders() }` (the latter from
+// `providers/testing.ts`, with `env: { HF_MOCK_PROVIDER: '1' }` for the `mock:*` media models) and `overrides: { audio:
+// createFakeAudioService() }`.
 import type { ApiClient } from '@harness-forge/shared'
 import type { Hono } from 'hono'
 import type { Database, Db } from '../db/client.ts'

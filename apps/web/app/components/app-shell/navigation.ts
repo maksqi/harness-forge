@@ -1,7 +1,7 @@
 // Sidebar modes and the last route per mode (docs/UI.md 5.2).
 import type { RemovableRef } from '@vueuse/core'
 import type { Component } from 'vue'
-import { BoxesIcon, DatabaseIcon, InfoIcon, KeyRoundIcon, PaletteIcon, SlidersHorizontalIcon } from '@lucide/vue'
+import { BoxesIcon, DatabaseIcon, ImagePlayIcon, InfoIcon, KeyRoundIcon, PaletteIcon, SlidersHorizontalIcon } from '@lucide/vue'
 import { useSessionStorage } from '@vueuse/core'
 import { effectScope } from 'vue'
 import { testIds } from '~/utils/testids'
@@ -69,7 +69,7 @@ export function useLastRoutes(): RemovableRef<LastRoutes> {
 }
 
 export interface SettingsLink {
-  key: 'providers' | 'models' | 'general' | 'appearance' | 'data' | 'about'
+  key: 'providers' | 'models' | 'media' | 'general' | 'appearance' | 'data' | 'about'
   label: string
   to: string
   icon: Component
@@ -80,6 +80,7 @@ export interface SettingsLink {
 export const SETTINGS_LINKS: readonly SettingsLink[] = [
   { key: 'providers', label: 'Providers', to: '/settings/providers', icon: KeyRoundIcon, testId: testIds.settingsNavProviders },
   { key: 'models', label: 'Models', to: '/settings/models', icon: BoxesIcon, testId: testIds.settingsNavModels },
+  { key: 'media', label: 'Media', to: '/settings/media', icon: ImagePlayIcon, testId: testIds.settingsNavMedia },
   { key: 'general', label: 'General', to: '/settings/general', icon: SlidersHorizontalIcon, testId: testIds.settingsNavGeneral },
   { key: 'appearance', label: 'Appearance', to: '/settings/appearance', icon: PaletteIcon, testId: testIds.settingsNavAppearance },
   { key: 'data', label: 'Data', to: '/settings/data', icon: DatabaseIcon, testId: testIds.settingsNavData },

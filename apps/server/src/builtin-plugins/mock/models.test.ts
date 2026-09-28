@@ -1,9 +1,14 @@
-import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4Prompt, LanguageModelV4StreamPart } from '@ai-sdk/provider'
+import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4Prompt, LanguageModelV4StreamPart, LanguageModelV4ToolResultOutput } from '@ai-sdk/provider'
 import { APICallError } from '@ai-sdk/provider'
-import { streamText } from 'ai'
+import { GENERATE_IMAGE_TOOL_NAME, generateImageToolInputSchema } from '@harness-forge/shared'
+import { isStepCount, streamText, tool } from 'ai'
 import { describe, expect, it } from 'vitest'
+import { firstPixel, readPng } from './media.test-util.ts'
+import { mockImageColor } from './media.ts'
 import {
   createMockLanguageModel,
+  generatedImageCount,
+  MOCK_MODEL_IDS,
   MOCK_TIMING,
   MOCK_TOOL_NAME,
   mockPlan,
@@ -203,5 +208,112 @@ describe('mock:error and unknown ids', () => {
     const model = createMockLanguageModel('nope')
     expect(model.provider).toBe('mock')
     await expect(model.doStream({ prompt: [user('x')] })).rejects.toMatchObject({ statusCode: 404 })
+  })
+})
+
+describe('mock:image-chat (Phase 6)', () => {
+  it('streams "Image for: <user text>" word by word, then one PNG file part', async () => {
+    const parts = await collect(createMockLanguageModel('image-chat'), { prompt: [user('a red fox')] })
+    expect(textOf(parts)).toBe('Image for: a red fox')
+    const types = parts.map(part => part.type)
+    expect(types.indexOf('file')).toBeGreaterThan(types.indexOf('text-end'))
+    expect(types.indexOf('file')).toBeLessThan(types.indexOf('finish'))
+    const file = parts.find(part => part.type === 'file')
+    if (file?.type !== 'file' || file.data.type !== 'data' || typeof file.data.data === 'string')
+      throw new Error('expected a file part with raw bytes')
+    expect(file.mediaType).toBe('image/png')
+    const png = readPng(file.data.data)
+    expect(png).toMatchObject({ width: 320, height: 320, crcOk: true })
+    expect(firstPixel(png)).toEqual(mockImageColor('a red fox', 0))
+    const finish = finishOf(parts)
+    expect(finish.finishReason.unified).toBe('stop')
+    expect(finish.usage.outputTokens).toEqual({ total: 5, text: 5, reasoning: 0 })
+  })
+
+  it('sizes the image by the aspect ratio of providerOptions.mock (imageParams)', async () => {
+    const parts = await collect(createMockLanguageModel('image-chat'), { prompt: [user('wide')], providerOptions: { mock: { aspectRatio: '16:9' } } })
+    const file = parts.find(part => part.type === 'file')
+    if (file?.type !== 'file' || file.data.type !== 'data' || typeof file.data.data === 'string')
+      throw new Error('expected a file part with raw bytes')
+    expect(readPng(file.data.data)).toMatchObject({ width: 320, height: 180 })
+  })
+
+  it('a model-side file reaches streamText as a generated file (the pipeline stores it); generate returns it too', async () => {
+    const result = streamText({ model: createMockLanguageModel('image-chat'), prompt: 'draw a boat' })
+    expect(await result.text).toBe('Image for: draw a boat')
+    const files = await result.files
+    expect(files).toHaveLength(1)
+    expect(files[0]?.mediaType).toBe('image/png')
+    expect(readPng(files[0]!.uint8Array).crcOk).toBe(true)
+    const generated = await createMockLanguageModel('image-chat').doGenerate({ prompt: [user('')] })
+    expect(generated.content.map(part => part.type)).toEqual(['text', 'file'])
+    expect(generated.content[0]).toEqual({ type: 'text', text: 'Image for: (empty message)' })
+  })
+})
+
+describe('mock:image-tool (Phase 6)', () => {
+  const IMAGE_TOOL = { type: 'function', name: GENERATE_IMAGE_TOOL_NAME, inputSchema: { type: 'object', properties: { prompt: { type: 'string' } } } } as const
+
+  function afterResult(output: LanguageModelV4ToolResultOutput): LanguageModelV4Prompt {
+    return [
+      user('a castle'),
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'mock_call_1', toolName: GENERATE_IMAGE_TOOL_NAME, input: { prompt: 'a castle' } }] },
+      { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'mock_call_1', toolName: GENERATE_IMAGE_TOOL_NAME, output }] },
+    ]
+  }
+
+  it('says tools are disabled without generate_image, else calls it with the user text as prompt', async () => {
+    expect(textOf(await collect(createMockLanguageModel('image-tool'), { prompt: [user('a castle')], tools: [TOOL] }))).toBe('Tools are disabled.')
+    const parts = await collect(createMockLanguageModel('image-tool'), { prompt: [user('a castle')], tools: [IMAGE_TOOL] })
+    expect(parts.find(part => part.type === 'tool-call')).toEqual({ type: 'tool-call', toolCallId: 'mock_call_1', toolName: GENERATE_IMAGE_TOOL_NAME, input: '{"prompt":"a castle"}' })
+    expect(parts.find(part => part.type === 'tool-input-start')).toMatchObject({ toolName: GENERATE_IMAGE_TOOL_NAME })
+    expect(finishOf(parts).finishReason.unified).toBe('tool-calls')
+    const empty = await collect(createMockLanguageModel('image-tool'), { prompt: [user(' ')], tools: [IMAGE_TOOL] })
+    expect(generateImageToolInputSchema.safeParse(JSON.parse((empty.find(part => part.type === 'tool-call') as { input: string }).input)).success).toBe(true)
+  })
+
+  it('reports the images of the result, or the denial', async () => {
+    const summary = { type: 'text', value: 'Generated 2 images with Mock Image; they are shown to the user below this call.' } as const
+    expect(textOf(await collect(createMockLanguageModel('image-tool'), { prompt: afterResult(summary), tools: [IMAGE_TOOL] }))).toBe('Image tool result: 2 image(s)')
+    const json = { type: 'json', value: { modelRef: 'mock:image', images: [{ fileId: 'file_0000000000000001' }] } } as const
+    expect(textOf(await collect(createMockLanguageModel('image-tool'), { prompt: afterResult(json), tools: [IMAGE_TOOL] }))).toBe('Image tool result: 1 image(s)')
+    const denied = await collect(createMockLanguageModel('image-tool'), { prompt: afterResult({ type: 'execution-denied' }), tools: [IMAGE_TOOL] })
+    expect(textOf(denied)).toBe('The tool call was denied.')
+  })
+
+  it('counts the images of every output kind', () => {
+    expect(generatedImageCount({ type: 'text', value: 'Generated 1 image with X; it is shown below.' })).toBe(1)
+    expect(generatedImageCount({ type: 'text', value: 'nothing' })).toBe(0)
+    expect(generatedImageCount({ type: 'json', value: { images: [1, 2, 3] } })).toBe(3)
+    expect(generatedImageCount({ type: 'json', value: null })).toBe(0)
+    expect(generatedImageCount({ type: 'error-text', value: 'Choose an image model in Settings → Media.' })).toBe(0)
+    expect(generatedImageCount({ type: 'content', value: [{ type: 'file', mediaType: 'image/png', data: { type: 'data', data: new Uint8Array([1]) } }] })).toBe(1)
+    expect(generatedImageCount({ type: 'content', value: [{ type: 'text', text: 'Generated 4 images' }] })).toBe(4)
+  })
+
+  it('runs the whole tool flow through streamText: call, tool result (text summary), answer', async () => {
+    const generate = tool({
+      description: 'Generates images.',
+      inputSchema: generateImageToolInputSchema,
+      execute: async input => ({ modelRef: 'mock:image', images: [{ fileId: 'file_0000000000000001', prompt: input.prompt }] }),
+      toModelOutput: () => ({ type: 'text', value: 'Generated 1 image with Mock Image; they are shown to the user below this call.' }),
+    })
+    const result = streamText({ model: createMockLanguageModel('image-tool'), prompt: 'a castle at night', tools: { [GENERATE_IMAGE_TOOL_NAME]: generate }, stopWhen: isStepCount(3) })
+    expect(await result.text).toBe('Image tool result: 1 image(s)')
+    const steps = await result.steps
+    expect(steps).toHaveLength(2)
+    expect(steps[0]?.toolCalls.map(call => [call.toolName, call.input])).toEqual([[GENERATE_IMAGE_TOOL_NAME, { prompt: 'a castle at night' }]])
+  })
+})
+
+describe('language model ids', () => {
+  it('covers the four v1 models and the two Phase 6 chat models', () => {
+    expect(MOCK_MODEL_IDS).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool'])
+    for (const modelId of ['image', 'transcribe', 'speech'])
+      expect(MOCK_MODEL_IDS as readonly string[]).not.toContain(modelId)
+  })
+
+  it('a media model id used as a language model rejects with a 404', async () => {
+    await expect(createMockLanguageModel('image').doStream({ prompt: [user('x')] })).rejects.toMatchObject({ statusCode: 404 })
   })
 })

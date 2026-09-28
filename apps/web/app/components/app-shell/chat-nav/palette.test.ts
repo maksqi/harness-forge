@@ -48,7 +48,7 @@ describe('buildPaletteSections', () => {
     expect(values(sections)).toEqual([
       ['chats', chats(RECENT_CHATS_LIMIT).map(chat => `chat:${chat.id}`)],
       ['actions', ['new-chat', 'show-shortcuts', 'toggle-sidebar']],
-      ['navigation', ['go-plugins', 'go-settings-providers', 'go-settings-models', 'go-settings-general', 'go-settings-appearance', 'go-settings-data', 'go-settings-about']],
+      ['navigation', ['go-plugins', 'go-settings-providers', 'go-settings-models', 'go-settings-media', 'go-settings-general', 'go-settings-appearance', 'go-settings-data', 'go-settings-about']],
       ['theme', ['theme-dark', 'theme-light', 'theme-system']],
     ])
     const labels = sections.flatMap(section => section.items.map(item => item.label))

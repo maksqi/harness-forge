@@ -6,6 +6,10 @@
 // `importFile` / `purge` on the test database) and `createFakeChatsService` (./fake-chats.ts: the real chats service plus
 // the message tree and bulk data members). The last two are factories: `createTestApp({ factories: { chats:
 // createFakeChatsService, files: createFakeFilesService } })`.
+//
+// Phase 6 (C11-T5): `createFakeFilesService` also has `saveGenerated`, `createFakeChatsService` has `deleteMessage`, and
+// ./fake-media.ts adds `createFakeImageService` (a factory) and `createFakeAudioService`. The fake media resolvers and
+// the fake plugin host's `ctx.images` live in `providers/testing.ts` (`withFakeMediaResolvers`, `fakeMediaProviders`).
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type {
   DataDeleteResult,
@@ -27,7 +31,7 @@ import type { IconService } from '../providers/types.ts'
 import type { Keyring, SubkeyName } from '../security/types.ts'
 import type { DataService } from '../services/data/types.ts'
 import type { EventBus, EventSubscribeOptions, ServerEventListener } from '../services/events/types.ts'
-import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, StoredFile } from '../services/files/types.ts'
+import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, GeneratedFileInput, StoredFile } from '../services/files/types.ts'
 import type { SecretEntry, SecretScope, SecretStore } from '../services/secrets/types.ts'
 import type { InternalSettingKey, SettingsService } from '../services/settings/types.ts'
 import type { ShareFile, ShareService } from '../services/shares/types.ts'
@@ -39,6 +43,7 @@ import {
   createShareId,
   DEFAULT_SETTINGS,
   FILE_ID_PATTERN,
+  GENERATED_IMAGE_MIME_TYPES,
   HarnessError,
   LIMITS,
   settingsSchema,
@@ -46,13 +51,16 @@ import {
   shareOptionsSchema,
   validationError,
 } from '@harness-forge/shared'
-import { eq } from 'drizzle-orm'
+import { asc, eq } from 'drizzle-orm'
 import { files } from '../db/schema.ts'
 import { rejectsNotImplemented } from '../not-implemented.ts'
 import { createFilesService } from '../services/files/index.ts'
+import { sniffBinaryType } from '../services/files/sniff.ts'
 import { secretHint } from '../services/secrets/hint'
 
 export { createFakeChatsService } from './fake-chats.ts'
+export { createFakeAudioService, createFakeImageService, NO_IMAGE_MODEL_MESSAGE } from './fake-media.ts'
+export type { FakeAudioCall, FakeAudioService, FakeAudioServiceOptions, FakeImageService, FakeImageServiceOptions } from './fake-media.ts'
 
 /** Deterministic keyring: HKDF-SHA256 subkeys of `sha256(seed)` (same derivation parameters as the real keyring). */
 export function createFakeKeyring(seed = 'harness-forge-test-master-key'): Keyring {
@@ -519,7 +527,10 @@ export function createFakeShareService(options: FakeShareServiceOptions = {}): F
  * The real `FilesService` with simple versions of the Phase 5 members, for the data service tests while W5.3
  * implements them: `importFile` checks the sha256, reuses a row with the same content (the one with `preferredId`
  * first), else stores the bytes through `upload` (same type checks) and moves the row to `preferredId` when that id is
- * free; `purge` deletes every row and the blob directory. Use as a factory: `factories: { files: createFakeFilesService }`.
+ * free; `purge` deletes every row and the blob directory. Phase 6: `saveGenerated` (while W6.4 implements it) accepts
+ * only `GENERATED_IMAGE_MIME_TYPES` (`validation_error`), at most `LIMITS.generatedImageBytes` (`payload_too_large`),
+ * with matching magic bytes (`validation_error`), returns an existing row with the same sha256, else stores the bytes
+ * through `upload`. Use as a factory: `factories: { files: createFakeFilesService }`.
  */
 export function createFakeFilesService(deps: AppDeps): FilesService {
   const base = createFilesService(deps)
@@ -550,7 +561,31 @@ export function createFakeFilesService(deps: AppDeps): FilesService {
     return { files: rows.length, bytes: rows.reduce((total, row) => total + row.size, 0) }
   }
 
-  const fake = { ...base, importFile, purge }
+  async function saveGenerated(input: GeneratedFileInput): Promise<StoredFile> {
+    const mediaType = (input.mediaType.split(';')[0] ?? '').trim().toLowerCase()
+    if (!(GENERATED_IMAGE_MIME_TYPES as readonly string[]).includes(mediaType))
+      throw validationError([{ path: ['mediaType'], message: `Generated files are stored only as PNG, JPEG, WebP or GIF images, not "${mediaType}".`, code: 'custom' }])
+    if (input.data.byteLength > LIMITS.generatedImageBytes) {
+      throw new HarnessError({
+        code: 'payload_too_large',
+        message: `Generated images are limited to ${LIMITS.generatedImageBytes / 1024 / 1024} MB.`,
+        details: { limitBytes: LIMITS.generatedImageBytes },
+      })
+    }
+    if (sniffBinaryType(input.data) !== mediaType)
+      throw validationError([{ path: ['data'], message: `The generated image does not match its type (${mediaType}).`, code: 'custom' }])
+    const sha256 = createHash('sha256').update(input.data).digest('hex')
+    const [existing] = await db.select().from(files).where(eq(files.sha256, sha256)).orderBy(asc(files.createdAt), asc(files.id)).limit(1)
+    if (existing !== undefined)
+      return existing
+    const uploaded = await base.upload(new File([new Uint8Array(input.data)], input.name, { type: mediaType }))
+    const file = await base.get(uploaded.id)
+    if (file === null)
+      throw new Error(`fake files: the generated file ${uploaded.id} is missing.`)
+    return file
+  }
+
+  const fake = { ...base, importFile, purge, saveGenerated }
   return fake
 }
 

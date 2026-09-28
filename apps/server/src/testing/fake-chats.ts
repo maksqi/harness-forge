@@ -15,8 +15,8 @@
 // - Otherwise the stored tree is used, as the real service does: a parent outside the chat or not older than its child
 //   counts as none, and without an active leaf the path is empty.
 // Overridden: `get`, `find`, `create`, `remove`, `export` (JSON), `listPath`, `appendMessage`, `upsertMessage`,
-// `setActiveLeaf`, `switchBranch`, `allIds`, `importChat`, `removeAll`. Everything else, `transaction()` included, is the
-// real service (its store members stay the real ones).
+// `setActiveLeaf`, `switchBranch`, `allIds`, `importChat`, `removeAll`, and (Phase 6, C11-T5) `deleteMessage`. Everything
+// else, `transaction()` included, is the real service (its store members stay the real ones).
 // Simplifications: writes are not atomic (a failed tree write after `create` leaves a linear chat), `export(id, 'md')`
 // is the real Markdown export, and the `chat.created` event of `importChat` carries the summary from before the title,
 // flags and dates are restored.
@@ -68,6 +68,14 @@ function runActive(chatId: string): HarnessError {
     code: 'conflict',
     message: 'A reply is already being generated for this chat. Stop it or wait until it finishes.',
     details: { reason: 'run-active', chatId },
+  })
+}
+
+function onlyVersion(): HarnessError {
+  return new HarnessError({
+    code: 'conflict',
+    message: 'This is the only version of the message. Delete the chat instead.',
+    details: { reason: 'only-version' },
   })
 }
 
@@ -157,6 +165,43 @@ export function fakeBranchesOf(tree: FakeChatTree, path: readonly string[]): Rec
       branches[id] = { siblings: [...siblings], index: siblings.indexOf(id) }
   }
   return branches
+}
+
+/** The versions of a message: every message with the same effective parent (itself included), in `seq` order. */
+export function fakeSiblingsOf(tree: FakeChatTree, messageId: string): string[] {
+  const parent = tree.parentOf.get(messageId) ?? null
+  return tree.ids.filter(id => (tree.parentOf.get(id) ?? null) === parent)
+}
+
+/** `messageId` and every message after it (its subtree), in `seq` order. */
+export function fakeSubtreeOf(tree: FakeChatTree, messageId: string): string[] {
+  const subtree = new Set([messageId])
+  for (const id of tree.ids) {
+    const parent = tree.parentOf.get(id) ?? null
+    if (parent !== null && subtree.has(parent))
+      subtree.add(id)
+  }
+  return tree.ids.filter(id => subtree.has(id))
+}
+
+/**
+ * The remembered leaf under `messageId` (ADR-030): walking down, the remembered child (`selected_child_id`) while it is
+ * still a child of the node, else the only child, else the most recent leaf.
+ */
+export function fakeRememberedLeafUnder(tree: FakeChatTree, pointers: ReadonlyMap<string, string | null>, messageId: string): string {
+  let node = messageId
+  for (;;) {
+    const children = tree.ids.filter(id => tree.parentOf.get(id) === node)
+    if (children.length === 0)
+      return node
+    const remembered = pointers.get(node) ?? null
+    if (remembered !== null && children.includes(remembered))
+      node = remembered
+    else if (children.length === 1)
+      node = children[0]!
+    else
+      return fakeLatestLeafUnder(tree, node)
+  }
 }
 
 /**
@@ -308,6 +353,43 @@ export function createFakeChatsService(deps: AppDeps): ChatsService {
     return { id: created.id, messages: list.length }
   }
 
+  /**
+   * `deleteMessage` (ADR-030): 404s, `run-active` (`deps.runs.hasRun`), `only-version`; deletes the subtree; when the
+   * active path went through the message the leaf moves to the remembered leaf under its previous sibling (else the
+   * next), `pending_approval` follows and the new path is recorded as remembered; emits `chat.updated` with the leaf.
+   * No compare-and-set (tests run one request at a time).
+   */
+  async function deleteMessage(id: string, messageId: string): Promise<ChatDetail> {
+    const tree = await requireTree(id)
+    if (!tree.seqOf.has(messageId))
+      throw messageNotFound(id, messageId)
+    if (deps.runs.hasRun(id))
+      throw runActive(id)
+    const siblings = fakeSiblingsOf(tree, messageId)
+    if (siblings.length < 2)
+      throw onlyVersion()
+    await materialize(id, tree)
+    const subtree = fakeSubtreeOf(tree, messageId)
+    const onPath = fakePathTo(tree, tree.leaf).includes(messageId)
+    let leaf = tree.leaf
+    if (onPath) {
+      const index = siblings.indexOf(messageId)
+      const target = siblings[index - 1] ?? siblings[index + 1]!
+      const rows = await db.select({ id: messages.id, selectedChildId: messages.selectedChildId }).from(messages).where(eq(messages.chatId, id))
+      leaf = fakeRememberedLeafUnder(tree, new Map(rows.map(row => [row.id, row.selectedChildId])), target)
+    }
+    await db.delete(messages).where(and(eq(messages.chatId, id), inArray(messages.id, subtree)))
+    if (onPath && leaf !== null) {
+      const pendingApproval = awaitsApproval(await base.getMessage(id, leaf))
+      await db.update(chats).set({ activeLeafId: leaf, pendingApproval }).where(eq(chats.id, id))
+      const path = fakePathTo(tree, leaf)
+      for (let index = 1; index < path.length; index++)
+        await db.update(messages).set({ selectedChildId: path[index]! }).where(and(eq(messages.chatId, id), eq(messages.id, path[index - 1]!)))
+    }
+    deps.events.emit('chat.updated', { ...(await base.summary(id)), activeLeafId: leaf })
+    return detail(id)
+  }
+
   async function removeAll(options: ChatRemoveAllOptions): Promise<ChatRemoveAllResult> {
     const usageStatement = options.usage
       ? db.delete(usage).returning({ id: usage.id })
@@ -449,6 +531,7 @@ export function createFakeChatsService(deps: AppDeps): ChatsService {
       return detail(id)
     },
 
+    deleteMessage,
     allIds,
     importChat,
     removeAll,

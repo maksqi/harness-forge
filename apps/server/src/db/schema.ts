@@ -42,8 +42,11 @@ function json<T>(name: string) {
 /** Role of a stored UI message. */
 export type MessageRole = HarnessUIMessage['role']
 
-/** Purpose of a usage row: a chat run or a title generation. */
-export type UsagePurpose = 'chat' | 'title'
+/**
+ * Purpose of a usage row: a chat run, a title generation, an image generation (image turn or the `generate_image`
+ * tool, ADR-028) or a voice request (ADR-029: dictation = `transcription`, read-aloud = `speech`).
+ */
+export type UsagePurpose = 'chat' | 'title' | 'image' | 'transcription' | 'speech'
 
 /**
  * `mcp_servers.transport`: only header / env NAMES are stored; their values are secrets (scope `mcp:<id>`, names
@@ -153,6 +156,12 @@ export const messages = sqliteTable('messages', {
    * foreign key (added by `ALTER TABLE` in migration 0001, which backfills a linear chain).
    */
   parentId: text('parent_id'),
+  /**
+   * The child last shown under this message (ADR-030): switching to a version restores the path last shown under it.
+   * A hint without a foreign key (added by `ALTER TABLE` in migration 0002, which backfills the active paths); null or a
+   * child that no longer exists means "the latest leaf".
+   */
+  selectedChildId: text('selected_child_id'),
   /** Creation order in the chat (unique per chat; a child is always created after its parent). */
   seq: integer('seq', { mode: 'number' }).notNull(),
   role: text('role').$type<MessageRole>().notNull(),

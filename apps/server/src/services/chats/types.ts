@@ -6,6 +6,10 @@
 // parent of `upsertMessage`, `ChatRecord.activeLeafId`) and the bulk data members (ADR-024: `allIds`, `importChat`,
 // `removeAll`), all implemented by W5.1. `createFakeChatsService` (`testing/fake-chats.ts`) implements them on the test
 // database for the tests of other services.
+//
+// Phase 6 additions (ADR-030, implemented by W6.6): remembered versions (`messages.selected_child_id`, written with the
+// active leaf and read by `switchBranch` / `deleteMessage`), `deleteMessage` (deleting a version), totals that include
+// image usage, and the active leaf in every `chat.updated` event (`ChatUpdatedData`).
 import type {
   ChatCreate,
   ChatDetail,
@@ -33,7 +37,7 @@ export interface ChatRecord {
   pendingApproval: boolean
   /**
    * The last message of the active path (ADR-023, `chats.active_leaf_id`); null for an empty chat. Moved only by the
-   * pipeline's commit and persist transactions (`setActiveLeaf`) and by `switchBranch`.
+   * pipeline's commit and persist transactions (`setActiveLeaf`), by `switchBranch` and by `deleteMessage` (Phase 6).
    */
   activeLeafId: string | null
   createdAt: number
@@ -180,15 +184,21 @@ export interface ChatMessageStore {
    * whether it was written (a lost race or a missing chat / message answers false, nothing throws). Changes nothing else:
    * `updated_at` and `pending_approval` stay, no event. Only the pipeline's commit and persist transactions and
    * `switchBranch` call it.
+   *
+   * Phase 6 (ADR-030, W6.6): after a successful compare-and-set it also records the path of `leafId` as the remembered
+   * versions (every parent on the path gets `selected_child_id` = its child on the path; unchanged rows are not
+   * written), atomically inside `transaction()`. A failed compare-and-set writes nothing.
    */
   readonly setActiveLeaf: (chatId: string, leafId: string, onlyFrom?: readonly (string | null)[]) => Promise<boolean>
 }
 
 /**
  * Chats, messages and usage rows. Events: `create`, `ensure` (when it creates) and `importChat` emit `chat.created`;
- * `update`, `touch`, `setTitle` and `switchBranch` emit `chat.updated` with the new `ChatSummary`; `remove` and
- * `removeAll` emit `chat.deleted` (one per chat). Message operations emit nothing (the pipeline calls `touch` when a run
- * ends). `ChatSummary.running` comes from `deps.runs.isActive(id)`.
+ * `update`, `touch`, `setTitle`, `switchBranch` and `deleteMessage` emit `chat.updated` with `ChatUpdatedData` (the new
+ * `ChatSummary` plus the row's `activeLeafId`, ADR-030, so another tab follows a version switch; members that return a
+ * summary return it without `activeLeafId`); `remove` and `removeAll` emit `chat.deleted` (one per chat). Message
+ * operations emit nothing (the pipeline calls `touch` when a run ends). `ChatSummary.running` comes from
+ * `deps.runs.isActive(id)`.
  */
 export interface ChatsService extends ChatMessageStore {
   // ----- HTTP API (chats.ts, W1.5; Phase 5 semantics by W5.1)
@@ -202,7 +212,7 @@ export interface ChatsService extends ChatMessageStore {
    * Summary + settings + `messages` = the active path (first message -> active leaf, `seq` order; during a run it ends
    * at the message committed when the run started) + `branches` (every path message with at least two versions: its
    * siblings in `seq` order and its index among them) + usage totals (every usage row of purpose `chat`, every version
-   * included); `not_found`.
+   * included; since Phase 6 also the rows of purpose `image`, W6.6); `not_found`.
    */
   readonly get: (id: string) => Promise<ChatDetail>
   /**
@@ -233,8 +243,29 @@ export interface ChatsService extends ChatMessageStore {
    * `updated_at` is kept (a switch is not activity) and `chat.updated` is emitted. Returns the new detail (as `get`).
    * `not_found` for an unknown chat or a `messageId` outside it. Refused with `conflict` (`reason: 'run-active'`,
    * `chatId`) while a run holds the chat in any phase (`deps.runs.hasRun(id)`; checked here or by the route).
+   *
+   * Phase 6 (ADR-030, W6.6): the leaf is the remembered leaf under `messageId` (`rememberedLeafUnder`: walking down,
+   * the remembered child when it is still a child of the node, else the only child, else the most recent leaf), so
+   * switching away and back restores the path last shown; the new path is recorded as remembered.
    */
   readonly switchBranch: (id: string, messageId: string) => Promise<ChatDetail>
+  /**
+   * `DELETE /chats/:id/messages/:messageId` (Phase 6, ADR-030, stabilization S7; W6.6): deletes one version and every
+   * message after it (its subtree). Returns the new detail (as `get`).
+   * - `not_found` for an unknown chat or a `messageId` outside it;
+   * - `conflict` (`reason: 'only-version'`) when the message has no sibling (the last version of a message is never
+   *   deleted; delete the chat instead);
+   * - `conflict` (`reason: 'run-active'`, `chatId`) while a run holds the chat (`deps.runs.hasRun(id)`, checked by the
+   *   route) and when the compare-and-set of the active leaf misses (nothing is deleted then).
+   * When the active path goes through the message, the path moves to its previous sibling by `seq` (else the next one):
+   * the new leaf is `rememberedLeafUnder(that sibling)` and `pending_approval` is recomputed like `switchBranch`. A
+   * version off the active path is deleted without moving the leaf. One `db.batch` holds the compare-and-set
+   * `UPDATE chats … WHERE active_leaf_id IS <old leaf>` and a recursive-CTE `DELETE` of the subtree guarded by `EXISTS`
+   * (the new leaf and another sibling still exist); then the new path is recorded as remembered and `chat.updated` is
+   * emitted. `updated_at`, usage rows (totals keep counting deleted versions), share snapshots and files stay; the
+   * deleted rows take their `search_text` with them.
+   */
+  readonly deleteMessage: (id: string, messageId: string) => Promise<ChatDetail>
   /** Every chat id, archived chats included, in `id` order (uuidv7: creation order). */
   readonly allIds: () => Promise<string[]>
   /**

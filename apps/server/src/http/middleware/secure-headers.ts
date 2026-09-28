@@ -3,7 +3,8 @@
 // Third middleware of the chain; runs after the routes and the SPA answered (errors included). Sets, unless the route
 // set its own value: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`,
 // `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`,
-// `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `X-Robots-Tag: noindex, nofollow` (ADR-025), and
+// `Permissions-Policy: camera=(), microphone=(self), geolocation=()` (the microphone for the app's own origin only,
+// Phase 6 / ADR-029), `X-Robots-Tag: noindex, nofollow` (ADR-025), and
 // `Strict-Transport-Security` only over HTTPS (`X-Forwarded-Proto: https` counts from a trusted proxy when
 // `HF_TRUST_PROXY` is set, from any peer when it is unset; ADR-026). `/api` responses (and JSON answers elsewhere, e.g.
 // the not-found envelope) get `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and
