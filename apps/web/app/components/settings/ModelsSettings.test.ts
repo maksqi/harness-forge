@@ -311,6 +311,12 @@ describe('modelsSettings', () => {
     // Chat models keep their capability icons.
     expect(kindOf('anthropic:claude-sonnet-5')).toBeNull()
     expect(row('anthropic:claude-sonnet-5')!.querySelector('[data-slot="model-caps"]')).not.toBeNull()
+    // Favorite and Visible only for the models the chat picker can show (chat and image models).
+    const controls = (ref: string) => [testIds.modelFavorite, testIds.modelVisible].map(id => row(ref)!.querySelector(`[data-testid="${id}"]`) !== null)
+    expect(controls('anthropic:claude-sonnet-5')).toEqual([true, true])
+    expect(controls('anthropic:claude-image')).toEqual([true, true])
+    for (const ref of ['anthropic:claude-ears', 'anthropic:claude-voice', 'anthropic:claude-embed'])
+      expect(controls(ref), ref).toEqual([false, false])
   })
 
   it('adds a custom text-to-speech model: the Kind select, no context window or capabilities, the kind badge', async () => {

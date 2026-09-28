@@ -3,7 +3,9 @@
 // tokens, favorite star, visibility switch (hidden models never appear in the model picker) and a menu with
 // Rename (display-name alias), Reset name and, for custom models, Remove. Changes save at once; failures toast.
 // The Capabilities column shows ModelCaps for chat models (image output included) and the kind as a muted badge
-// ("Image", "Speech to text", "Text to speech", ...) for every other model.
+// ("Image", "Speech to text", "Text to speech", ...) for every other model. Favorite and Visible apply to the models
+// the chat model picker can show (chat and image models); the others are chosen in Settings -> Media, so their rows show
+// a dash there instead.
 import type { CatalogModel } from '@harness-forge/shared'
 import { EllipsisIcon, PencilIcon, StarIcon, Trash2Icon, Undo2Icon } from '@lucide/vue'
 import { ref } from 'vue'
@@ -52,6 +54,11 @@ function toggleFavorite(model: CatalogModel) {
 
 function setVisible(model: CatalogModel, visible: boolean) {
   return run(store.setPref(model.ref, { hidden: !visible }))
+}
+
+/** Chat and image models appear in the chat model picker, so only they can be starred or shown there. */
+function inPicker(model: CatalogModel): boolean {
+  return model.kind === 'chat' || model.kind === 'image'
 }
 
 function rename(model: CatalogModel, name: string) {
@@ -178,7 +185,9 @@ function stopEditing(value: boolean) {
           <span v-else class="text-muted-foreground">—</span>
         </TableCell>
         <TableCell class="px-0 text-center">
+          <span v-if="!inPicker(model)" class="text-xs text-muted-foreground" title="Chosen in Settings → Media">—</span>
           <Button
+            v-else
             type="button"
             variant="ghost"
             size="icon-sm"
@@ -194,7 +203,9 @@ function stopEditing(value: boolean) {
           </Button>
         </TableCell>
         <TableCell class="text-center">
+          <span v-if="!inPicker(model)" class="text-xs text-muted-foreground" title="Chosen in Settings → Media">—</span>
           <Switch
+            v-else
             size="sm"
             :model-value="!model.hidden"
             :aria-label="`Show ${model.name} in the model picker`"

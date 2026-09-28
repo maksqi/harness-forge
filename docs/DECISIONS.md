@@ -200,7 +200,8 @@ The theme itself is stored client-side by `@nuxtjs/color-mode` (key `hf-color-mo
 `settings`, `secrets`, `provider_configs`, `model_cache`, `model_prefs`, `chats`, `messages`, `usage`, `plugins`,
 `plugin_settings`, `plugin_kv`, `tool_prefs`, `mcp_servers`, `files`, `chat_shares` — columns in
 `docs/ARCHITECTURE.md`. Migrations: `0000_initial_schema`, `0001` (message tree + `chat_shares`, Phase 5), `0002` (remembered versions:
-`messages.selected_child_id` + backfill, Phase 6).
+`messages.selected_child_id` + backfill, Phase 6), `0003` (marks every cached model listing stale once, so the v1.2
+listing rules apply right after the upgrade; Phase 6).
 
 ### Chat export and backup formats
 
