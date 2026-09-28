@@ -27,7 +27,7 @@ describe('core-tools manifest', () => {
     expect(webFetchUserAgent()).toMatch(/^harness-forge\/\d+\.\d+\.\d\S* web_fetch$/)
   })
 
-  it('registers current_time and web_fetch through ctx.tools.register', async () => {
+  it('registers current_time, web_fetch and generate_image through ctx.tools.register', async () => {
     const tools: ToolDefinition[] = []
     const ctx = {
       tools: {
@@ -39,7 +39,7 @@ describe('core-tools manifest', () => {
       settings: { get: () => ({ allowLocalhost: false }) },
     } as unknown as PluginContext
     await coreTools.setup(ctx)
-    expect(tools.map(tool => [tool.name, tool.policy])).toEqual([['current_time', 'safe'], ['web_fetch', 'ask']])
+    expect(tools.map(tool => [tool.name, tool.policy])).toEqual([['current_time', 'safe'], ['web_fetch', 'ask'], ['generate_image', 'ask']])
   })
 })
 
@@ -66,11 +66,12 @@ describe('core-tools in the plugin host', () => {
     await new Promise<void>(resolve => server.close(() => resolve()))
   })
 
-  it('is active and contributes both tools with their policies', async () => {
+  it('is active and contributes the three tools with their policies', async () => {
     expect(t.deps.plugins.state('core-tools')).toBe('active')
     expect(t.deps.registry.tools.get('current_time')).toMatchObject({ pluginId: 'core-tools', mcpServerId: null, definition: { policy: 'safe' } })
     expect(t.deps.registry.tools.get('web_fetch')).toMatchObject({ pluginId: 'core-tools', mcpServerId: null, definition: { policy: 'ask' } })
-    expect(t.deps.registry.contributions('core-tools').tools).toEqual(['current_time', 'web_fetch'])
+    expect(t.deps.registry.tools.get('generate_image')).toMatchObject({ pluginId: 'core-tools', mcpServerId: null, definition: { policy: 'ask', timeoutMs: 300_000 } })
+    expect([...t.deps.registry.contributions('core-tools').tools].sort()).toEqual(['current_time', 'generate_image', 'web_fetch'])
     const time = await t.deps.registry.tools.get('current_time')!.definition.execute({ timezone: 'UTC' }, context)
     expect(time).toMatchObject({ timezone: 'UTC' })
   })

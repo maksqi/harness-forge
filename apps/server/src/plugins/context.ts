@@ -1,16 +1,23 @@
-// The per-plugin `PluginContext` (PLUGINS.md 9 "PluginContext"). Owner: W1.3 (W1.3-T4).
+// The per-plugin `PluginContext` (PLUGINS.md 9 "PluginContext"). Owner: W1.3 (W1.3-T4); `ctx.images` W6.4 (ADR-028).
 //
 // Every `register` goes through the registry with the plugin id as owner and is tracked in the plugin's
 // `DisposableStore`; disposing the runtime unregisters everything, and `abort()` aborts `ctx.signal` (disable, reload,
-// uninstall, shutdown). After disposal every registration, `ctx.storage` and `ctx.secrets` call throws. The first use
-// of a capability the manifest does not declare (`network`, `secrets`, `storage`, `hooks`, `process`) writes one `warn`
-// entry (permissions are advisory: code runs in-process).
+// uninstall, shutdown). After disposal every registration, `ctx.storage`, `ctx.secrets` and `ctx.images` call throws.
+// The first use of a capability the manifest does not declare (`network`, `secrets`, `storage`, `hooks`, `process`)
+// writes one `warn` entry (permissions are advisory: code runs in-process).
+//
+// `ctx.images.generate(o)` (plugin API 1.1.0) checks `o`, then calls the image service with `o.modelRef` (the service
+// falls back to the `imageModelRef` setting), `n` (default 1), the aspect ratio, `o.chatId` (usage row) and a signal
+// that `ctx.signal` and `o.signal` both abort; it maps the stored images to `GeneratedImageFile`s (`costUsd` omitted
+// when unknown) and fails with `provider_error` when the provider returned no image that could be stored.
 import type {
   CommandDefinition,
   Disposable,
   HookHandler,
   HookName,
   HostAi,
+  ImageGenerateOptions,
+  ImageGenerateResult,
   KV,
   McpServerDecl,
   ModelInfo,
@@ -24,6 +31,7 @@ import type { LogLevel } from '@harness-forge/shared'
 import type { LanguageModelInstance } from '../providers/types.ts'
 import type { Registry } from '../registry/types.ts'
 import type { Redactor } from '../security/types.ts'
+import type { ImageGenerationInput, ImageGenerationResult } from '../services/images/types.ts'
 import type { SecretScope, SecretStore } from '../services/secrets/types.ts'
 import type { PluginStorage } from './state.ts'
 import { Buffer } from 'node:buffer'
@@ -31,10 +39,17 @@ import { createAnthropic } from '@ai-sdk/anthropic'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
-import { HarnessError, mcpServerDeclSchema, mcpServerDeclSettingsKeys } from '@harness-forge/shared'
+import {
+  generateImageToolInputSchema,
+  HarnessError,
+  mcpServerDeclSchema,
+  mcpServerDeclSettingsKeys,
+  modelRefSchema,
+  safeParseModelRef,
+  validationError,
+} from '@harness-forge/shared'
 import { generateText, jsonSchema, tool } from 'ai'
 import { z } from 'zod'
-import { notImplementedError } from '../not-implemented.ts'
 import { DisposableStore, toDisposable } from '../registry/disposable.ts'
 
 /** The host's copies of the libraries a code plugin needs (`ctx.ai`, PLUGINS.md 8). */
@@ -56,6 +71,26 @@ export const SECRET_VALUE_MAX_BYTES = 16_384
 /** Secret names of `ctx.secrets` entries inside the `plugin:<id>` scope (settings use `settings.<key>`). */
 export const SECRET_KV_PREFIX = 'kv.'
 
+/** Options of `ctx.images.generate`: the `generate_image` tool input plus the model, the chat and a signal. */
+export const imageGenerateOptionsSchema = generateImageToolInputSchema.extend({
+  modelRef: modelRefSchema.optional(),
+  chatId: z.string().min(1).max(128).optional(),
+  signal: z.instanceof(AbortSignal).optional(),
+})
+
+/** The message of `ctx.images.generate` when every generated image was refused by `files.saveGenerated`. */
+export const NO_STORED_IMAGE_MESSAGE = 'The image model returned no image that could be stored: only PNG, JPEG, WebP and GIF images of at most 20 MB are kept.'
+
+/** `ctx.images.generate` result of an image service result. */
+export function toImageGenerateResult(result: ImageGenerationResult): ImageGenerateResult {
+  return {
+    modelRef: result.modelRef,
+    images: result.images.map(({ file, url }) => ({ fileId: file.id, url, mediaType: file.mime, name: file.name, size: file.size })),
+    ...(result.costUsd === null ? {} : { costUsd: result.costUsd }),
+    ...(result.revisedPrompt === undefined ? {} : { revisedPrompt: result.revisedPrompt }),
+  }
+}
+
 export interface PluginRuntimeServices {
   readonly registry: Registry
   readonly secrets: SecretStore
@@ -66,6 +101,8 @@ export interface PluginRuntimeServices {
   readonly log: (level: LogLevel, message: string, data?: unknown) => void
   /** `ctx.models.resolve` (`ProviderService.resolveModel`). */
   readonly resolveModel: (ref: string, signal: AbortSignal) => Promise<LanguageModelInstance>
+  /** `ctx.images.generate` (`ImageService.generate`, ADR-028). */
+  readonly generateImages: (input: ImageGenerationInput) => Promise<ImageGenerationResult>
   /** Default `User-Agent` of `ctx.fetch`: `harness-forge/<appVersion> plugin/<id>`. */
   readonly userAgent: string
   /** Default `globalThis.fetch` (tests inject a fake). */
@@ -325,11 +362,28 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
     }),
     ai: HOST_AI,
     fetch: pluginFetch,
-    // Plugin API 1.1.0 (ADR-028): a Phase 6 stub until the image service backs it (W6.4).
+    // Plugin API 1.1.0 (ADR-028).
     images: Object.freeze({
-      generate: async () => {
+      generate: async (options: ImageGenerateOptions) => {
         assertLive()
-        throw notImplementedError('ctx.images.generate')
+        const parsed = imageGenerateOptionsSchema.safeParse(options)
+        if (!parsed.success)
+          throw validationError(parsed.error)
+        const { prompt, modelRef, n, aspectRatio, chatId, signal } = parsed.data
+        const result = await services.generateImages({
+          ...(modelRef === undefined ? {} : { modelRef }),
+          prompt,
+          n: n ?? 1,
+          ...(aspectRatio === undefined ? {} : { aspectRatio }),
+          signal: signal === undefined ? controller.signal : AbortSignal.any([controller.signal, signal]),
+          chatId: chatId ?? null,
+          messageId: null,
+        })
+        if (result.images.length === 0) {
+          const providerId = safeParseModelRef(result.modelRef)?.providerId
+          throw new HarnessError({ code: 'provider_error', message: NO_STORED_IMAGE_MESSAGE, ...(providerId === undefined ? {} : { providerId }) })
+        }
+        return toImageGenerateResult(result)
       },
     }),
   }

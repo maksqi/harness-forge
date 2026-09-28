@@ -1,4 +1,5 @@
 import type { CatalogModel, Settings } from '@harness-forge/shared'
+import type { VueWrapper } from '@vue/test-utils'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { DEFAULT_SETTINGS } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
@@ -35,6 +36,10 @@ const routed = Array.from({ length: 70 }, (_, index) => catalogModel({ providerI
 let pinia: ReturnType<typeof createPinia>
 let api: MockApi
 let models: CatalogModel[]
+let mounted: VueWrapper[] = []
+
+/** Tests that open a select of 70+ models: slow on a busy machine, so they get more than the default 5 s. */
+const HEAVY_TEST_TIMEOUT = 20_000
 
 beforeEach(() => {
   api = createMockApi()
@@ -59,7 +64,12 @@ beforeEach(() => {
   })
 })
 
-afterEach(() => {
+afterEach(async () => {
+  // Unmount before clearing <body>: a popover closing late must not unmount into removed nodes.
+  for (const wrapper of mounted)
+    wrapper.unmount()
+  mounted = []
+  await flushPromises()
   disposePinia(pinia)
   vi.unstubAllGlobals()
   document.body.replaceChildren()
@@ -68,6 +78,7 @@ afterEach(() => {
 async function mountModels() {
   const Host = defineComponent({ setup: () => () => h(TooltipProvider, null, { default: () => h(ModelsSettings) }) })
   const wrapper = mount(Host, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink } } })
+  mounted.push(wrapper)
   await flushPromises()
   return wrapper
 }
@@ -91,6 +102,17 @@ function selectOption(ref: string) {
 
 function rowMenu(ref: string) {
   return row(ref)!.querySelector<HTMLButtonElement>(`[data-testid="${testIds.modelRowMenu}"]`)!
+}
+
+function press(target: Element, key: string) {
+  target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+}
+
+async function settle(rounds = 3) {
+  for (let round = 0; round < rounds; round++) {
+    await flushPromises()
+    await nextTick()
+  }
 }
 
 /** Opens a reka-ui dropdown menu the way a keyboard user does and returns the labels of its items. */
@@ -176,7 +198,8 @@ describe('modelsSettings', () => {
       body: {
         providerId: 'anthropic',
         modelId: 'claude-sonnet-5-preview',
-        capabilities: { tools: true, vision: false, reasoning: false, pdf: false },
+        kind: 'chat',
+        capabilities: { tools: true, vision: false, reasoning: false, pdf: false, imageOutput: false },
       },
     })
     expect(toasts.success).toHaveBeenCalledWith('Added claude-sonnet-5-preview')
@@ -200,7 +223,7 @@ describe('modelsSettings', () => {
     await flushPromises()
     expect(api.settings.update).toHaveBeenCalledWith({ body: { defaultModelRef: 'anthropic:claude-sonnet-5' } })
     expect(trigger.dataset.value).toBe('anthropic:claude-sonnet-5')
-  })
+  }, HEAVY_TEST_TIMEOUT)
 
   it('lists the title model choices as options with their model refs, Automatic first with an empty ref', async () => {
     await mountModels()
@@ -230,7 +253,7 @@ describe('modelsSettings', () => {
     await flushPromises()
     expect(api.settings.update).toHaveBeenLastCalledWith({ body: { titleModelRef: null } })
     expect(trigger.dataset.value).toBe('')
-  })
+  }, HEAVY_TEST_TIMEOUT)
 
   it('opens a row menu from its ⋯ trigger: Rename for every model, Remove only for custom models', async () => {
     api.models.removeCustom.mockImplementation(async () => {
@@ -249,6 +272,137 @@ describe('modelsSettings', () => {
 
     expect(await openMenu(rowMenu('anthropic:claude-sonnet-5'))).toEqual(['Rename'])
     expect(document.body.querySelector(`[data-testid="${testIds.modelRemove}"]`)).toBeNull()
+  })
+
+  it('lists chat models only in the default and title selects', async () => {
+    const image = catalogModel({ id: 'claude-image', name: 'Claude Image', kind: 'image' })
+    const voice = catalogModel({ id: 'claude-voice', name: 'Claude Voice', kind: 'speech' })
+    const transcribe = catalogModel({ id: 'claude-ears', name: 'Claude Ears', kind: 'transcription', hidden: true })
+    models = [sonnet, image, voice, transcribe]
+    await mountModels()
+    for (const picker of [testIds.modelsDefaultPicker, testIds.modelsTitlePicker]) {
+      const trigger = document.body.querySelector<HTMLButtonElement>(`[data-testid="${picker}"]`)!
+      expect(trigger.dataset.kind).toBe('chat')
+      trigger.click()
+      await flushPromises()
+      // Image, speech-to-text and text-to-speech models are chosen in Settings -> Media, even when visible.
+      expect(selectOptions().map(option => option.dataset.modelRef)).toEqual(['', 'anthropic:claude-sonnet-5'])
+      trigger.click()
+      await settle()
+    }
+  })
+
+  it('shows the kind of non-chat models instead of their capabilities', async () => {
+    models = [
+      sonnet,
+      catalogModel({ id: 'claude-image', name: 'Claude Image', kind: 'image', hidden: true }),
+      catalogModel({ id: 'claude-ears', name: 'Claude Ears', kind: 'transcription', hidden: true }),
+      catalogModel({ id: 'claude-voice', name: 'Claude Voice', kind: 'speech', hidden: true }),
+      catalogModel({ id: 'claude-embed', name: 'Claude Embed', kind: 'embedding', hidden: true }),
+    ]
+    await mountModels()
+    const kindOf = (ref: string) => row(ref)!.querySelector<HTMLElement>('[data-slot="model-kind"]')
+    expect(kindOf('anthropic:claude-image')!.textContent!.trim()).toBe('Image')
+    expect(kindOf('anthropic:claude-ears')!.textContent!.trim()).toBe('Speech to text')
+    expect(kindOf('anthropic:claude-voice')!.textContent!.trim()).toBe('Text to speech')
+    expect(kindOf('anthropic:claude-voice')!.dataset.kind).toBe('speech')
+    expect(kindOf('anthropic:claude-embed')!.textContent!.trim()).toBe('Embedding')
+    expect(row('anthropic:claude-image')!.querySelector('[data-slot="model-caps"]')).toBeNull()
+    // Chat models keep their capability icons.
+    expect(kindOf('anthropic:claude-sonnet-5')).toBeNull()
+    expect(row('anthropic:claude-sonnet-5')!.querySelector('[data-slot="model-caps"]')).not.toBeNull()
+  })
+
+  it('adds a custom text-to-speech model: the Kind select, no context window or capabilities, the kind badge', async () => {
+    api.models.addCustom.mockImplementation(async ({ body }: { body: { providerId: string, modelId: string, name?: string, kind?: CatalogModel['kind'] } }) => {
+      const added = catalogModel({
+        providerId: body.providerId,
+        id: body.modelId,
+        name: body.name ?? body.modelId,
+        kind: body.kind ?? 'chat',
+        hidden: (body.kind ?? 'chat') !== 'chat',
+        custom: true,
+        source: 'custom',
+        contextWindow: null,
+        capabilities: { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false },
+      })
+      models = [...models, added]
+      return added
+    })
+    models = [sonnet]
+    await mountModels()
+    section('anthropic')!.querySelector<HTMLButtonElement>(`[data-testid="${testIds.customModelAdd}"]`)!.click()
+    await flushPromises()
+
+    const dialog = document.body.querySelector<HTMLElement>(`[data-testid="${testIds.customModelDialog}"]`)!
+    const kind = dialog.querySelector<HTMLElement>('[data-slot="select-trigger"]')!
+    const capabilities = dialog.querySelector<HTMLElement>('fieldset')!
+    const contextWindow = [...dialog.querySelectorAll('label')].find(label => label.textContent?.trim() === 'Context window')!.parentElement!
+    expect(kind.dataset.value).toBe('chat')
+    expect(kind.textContent).toContain('Chat')
+    expect(capabilities.style.display).toBe('')
+    expect(contextWindow.style.display).toBe('')
+    expect(dialog.textContent).toContain('It appears in the model picker right away.')
+
+    press(kind, 'Enter')
+    await settle()
+    const items = [...document.body.querySelectorAll<HTMLElement>('[data-slot="select-item"]')]
+    expect(items.map(item => item.textContent?.trim())).toEqual(['Chat', 'Image', 'Speech to text', 'Text to speech'])
+    press(items.find(item => item.dataset.value === 'speech')!, 'Enter')
+    await settle(5)
+
+    expect(kind.dataset.value).toBe('speech')
+    expect(kind.textContent).toContain('Text to speech')
+    expect(capabilities.style.display).toBe('none')
+    expect(contextWindow.style.display).toBe('none')
+    expect(dialog.textContent).toContain('Choose it in Settings → Media.')
+
+    const id = dialog.querySelector<HTMLInputElement>(`[data-testid="${testIds.customModelId}"]`)!
+    id.value = 'claude-voice-preview'
+    id.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    document.body.querySelector<HTMLButtonElement>(`[data-testid="${testIds.customModelSave}"]`)!.click()
+    await flushPromises()
+
+    expect(api.models.addCustom).toHaveBeenCalledWith({
+      body: { providerId: 'anthropic', modelId: 'claude-voice-preview', kind: 'speech' },
+    })
+    expect(document.body.querySelector(`[data-testid="${testIds.customModelDialog}"]`)).toBeNull()
+    const added = row('anthropic:claude-voice-preview')!
+    expect(added.textContent).toContain('Custom')
+    expect(added.querySelector('[data-slot="model-kind"]')!.textContent!.trim()).toBe('Text to speech')
+  })
+
+  it('does not let a hidden context window block a custom model of another kind', async () => {
+    api.models.addCustom.mockImplementation(async ({ body }: { body: { providerId: string, modelId: string, kind?: CatalogModel['kind'] } }) =>
+      catalogModel({ providerId: body.providerId, id: body.modelId, kind: body.kind ?? 'chat', custom: true, source: 'custom' }))
+    models = [sonnet]
+    await mountModels()
+    section('anthropic')!.querySelector<HTMLButtonElement>(`[data-testid="${testIds.customModelAdd}"]`)!.click()
+    await flushPromises()
+    const dialog = document.body.querySelector<HTMLElement>(`[data-testid="${testIds.customModelDialog}"]`)!
+    const inputs = [...dialog.querySelectorAll<HTMLInputElement>('input')]
+    const id = dialog.querySelector<HTMLInputElement>(`[data-testid="${testIds.customModelId}"]`)!
+    const contextWindow = inputs.find(input => input.placeholder === 'Tokens')!
+    id.value = 'gpt-image-2'
+    id.dispatchEvent(new Event('input', { bubbles: true }))
+    contextWindow.value = 'lots'
+    contextWindow.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    document.body.querySelector<HTMLButtonElement>(`[data-testid="${testIds.customModelSave}"]`)!.click()
+    await flushPromises()
+    expect(dialog.textContent).toContain('Enter a number of tokens, e.g. 128000 or 128K.')
+    expect(api.models.addCustom).not.toHaveBeenCalled()
+
+    const kind = dialog.querySelector<HTMLElement>('[data-slot="select-trigger"]')!
+    press(kind, 'Enter')
+    await settle()
+    press(document.body.querySelector<HTMLElement>('[data-slot="select-item"][data-value="image"]')!, 'Enter')
+    await settle(5)
+    expect(dialog.textContent).toContain('Image models appear in the model picker when the provider can generate images.')
+    document.body.querySelector<HTMLButtonElement>(`[data-testid="${testIds.customModelSave}"]`)!.click()
+    await flushPromises()
+    expect(api.models.addCustom).toHaveBeenCalledWith({ body: { providerId: 'anthropic', modelId: 'gpt-image-2', kind: 'image' } })
   })
 
   it('points to the providers page when nothing is connected', async () => {

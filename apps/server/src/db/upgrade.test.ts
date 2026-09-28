@@ -594,3 +594,47 @@ describe('upgrade of a v1.1 database through migration 0002 (remembered versions
     }
   })
 })
+
+// Migration 0003 (Phase 6, coordinator K5): v1.2 changes what a provider listing holds (media ids with their kinds,
+// image output from the listing, new builtin seed models), so every listing cached by v1.1 is marked stale once and
+// refreshed at the next start; the cached models themselves are kept (a failed refresh keeps the last good listing).
+const REFRESH = JOURNAL.entries.find(entry => entry.tag.startsWith('0003_'))
+
+/** A migrations folder holding 0000 – 0002 (the schema of a data directory that ran a v1.2 pre-release). */
+function beforeRefreshFolder(): string {
+  if (INITIAL === undefined || TREE === undefined || REMEMBERED === undefined)
+    throw new Error('migration 0000, 0001 or 0002 is missing from the journal')
+  const dir = tempDir()
+  mkdirSync(join(dir, 'meta'))
+  for (const entry of [INITIAL, TREE, REMEMBERED])
+    copyFileSync(join(REAL_FOLDER, `${entry.tag}.sql`), join(dir, `${entry.tag}.sql`))
+  writeFileSync(join(dir, 'meta', '_journal.json'), JSON.stringify({ ...JOURNAL, entries: [INITIAL, TREE, REMEMBERED] }))
+  return dir
+}
+
+describe('migration 0003 (cached model listings marked stale)', () => {
+  it('0003 is one UPDATE of model_cache.fetched_at, never a schema change', () => {
+    if (REFRESH === undefined)
+      throw new Error('migration 0003 is missing from the journal')
+    const sql = readFileSync(join(REAL_FOLDER, `${REFRESH.tag}.sql`), 'utf8')
+    const statements = sql.split('--> statement-breakpoint').map(statement => statement.replace(/^--.*$/gm, '').trim()).filter(Boolean)
+    expect(statements).toEqual(['UPDATE `model_cache` SET `fetched_at` = NULL;'])
+    expect(JOURNAL.entries.slice(0, 4)).toEqual([INITIAL, TREE, REMEMBERED, REFRESH])
+  })
+
+  it('marks every cached listing stale and keeps its models', async () => {
+    const database = await open(join(tempDir(), 'harness.db'))
+    await migrateDatabase(database.db, { migrationsFolder: beforeRefreshFolder() })
+    const models = JSON.stringify([{ id: 'echo', name: 'Echo' }])
+    await database.client.execute({
+      sql: 'INSERT INTO model_cache (provider_id, models, fetched_at, attempted_at, error) VALUES (?, ?, ?, ?, NULL)',
+      args: ['mock', models, 1_790_000_000_000, 1_790_000_000_000],
+    })
+    await migrateDatabase(database.db)
+    const rows = (await database.client.execute('SELECT provider_id, models, fetched_at FROM model_cache')).rows
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.provider_id).toBe('mock')
+    expect(rows[0]?.models).toBe(models)
+    expect(rows[0]?.fetched_at).toBeNull()
+  })
+})

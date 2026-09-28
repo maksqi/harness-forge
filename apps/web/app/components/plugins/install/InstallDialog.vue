@@ -4,11 +4,12 @@
 // 2. Preview (InspectPreview) of the returned `PluginInspection`.
 // 3. Trust, for code plugins and stdio MCP servers: TrustWarning + the required "I trust {source}" checkbox and, when
 //    a password is set and the session is not fresh (ADR-017), the "Confirm your password" field.
-// 4. Install: logs in first when the password field is shown, then `POST /api/plugins/install` with the same source,
-//    `trust` and the reviewed `sha256`. If the server still asks for a fresh login (403 + action `login`),
-//    ConfirmPasswordDialog asks for the password, logs in and retries once. When the package changed since the
-//    preview (409 `conflict`, reason `stale`), the dialog inspects again, shows what changed and asks for a new
-//    review. Success: toast, `installed(id)`, close.
+// 4. Install: logs in first when the password field is shown (useFreshAuth `login()`), then `POST /api/plugins/install`
+//    with the same source, `trust` and the reviewed `sha256`, through `run(send, { required })`: if the server still
+//    asks for a fresh login (403 + action `login`), ConfirmPasswordDialog asks for the password and the install runs
+//    once more; the "Log in" action of the error alert opens the same prompt (`confirm()`) and submits again. When the
+//    package changed since the preview (409 `conflict`, reason `stale`), the dialog inspects again, shows what changed
+//    and asks for a new review. Success: toast, `installed(id)`, close.
 // "I trust {source}" names the source the server resolved (`sourceRef`, e.g. `name@1.2.3`) when it sent one.
 // "Back" returns to the source step keeping the inputs; closing discards everything.
 import type { PluginDetail, PluginInspection } from '@harness-forge/shared'
@@ -36,6 +37,7 @@ import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue
 import { formatBytes } from '~/components/common/format'
 import HarnessErrorAlert from '~/components/common/HarnessErrorAlert.vue'
 import { useApi } from '~/composables/useApi'
+import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { useAuthStore } from '~/stores/auth'
 import { usePluginsStore } from '~/stores/plugins'
 import { toHarnessError, withHarnessErrors } from '~/utils/errors'
@@ -47,9 +49,7 @@ import {
   inspectionSourceLabel,
   INSTALL_TABS,
   installBody,
-  isFreshAuthError,
   isStaleReview,
-  passwordErrorText,
   serverFieldErrors,
   TAB_LABELS,
   zipForm,
@@ -78,6 +78,7 @@ type Phase = 'idle' | 'inspecting' | 'installing'
 const api = useApi()
 const auth = useAuthStore()
 const plugins = usePluginsStore()
+const freshAuth = useFreshAuth()
 
 const TAB_TEST_IDS: Record<InstallTab, string> = {
   zip: testIds.installTabZip,
@@ -107,9 +108,6 @@ const inspected = ref<InstallRequest | null>(null)
 const trustChecked = ref(false)
 const password = ref('')
 const passwordError = ref<string | null>(null)
-const confirmOpen = ref(false)
-const confirmPending = ref(false)
-const confirmError = ref<string | null>(null)
 const dragging = ref(false)
 /** The package changed since the user reviewed it: the preview shows the new inspection. */
 const staleReview = ref(false)
@@ -118,7 +116,7 @@ const fileInput = ref<HTMLInputElement | null>(null)
 // Bumped on every open and close, so a request that outlives its dialog session cannot touch the next one.
 let session = 0
 
-const busy = computed(() => phase.value !== 'idle' || confirmPending.value)
+const busy = computed(() => phase.value !== 'idle' || freshAuth.pending.value)
 const requiresTrust = computed(() => inspection.value?.requiresTrust === true)
 const needsPassword = computed(() => requiresTrust.value && auth.status?.enabled === true && !auth.fresh)
 const sourceLabel = computed(() => (inspection.value && inspected.value ? inspectionSourceLabel(inspection.value, inspected.value) : ''))
@@ -147,9 +145,8 @@ function reset() {
   trustChecked.value = false
   password.value = ''
   passwordError.value = null
-  confirmOpen.value = false
-  confirmPending.value = false
-  confirmError.value = null
+  // A waiting password prompt belongs to the dialog session that ends here.
+  freshAuth.cancel()
   dragging.value = false
   staleReview.value = false
   if (fileInput.value)
@@ -300,27 +297,20 @@ async function install() {
   phase.value = 'installing'
   try {
     if (needsPassword.value) {
-      try {
-        await auth.login(password.value)
-      }
-      catch (failure) {
+      const failed = await freshAuth.login(password.value)
+      if (failed !== null) {
         if (current === session)
-          passwordError.value = passwordErrorText(failure)
+          passwordError.value = failed
         return
       }
     }
-    const detail = await sendInstall()
+    const detail = await freshAuth.run(sendInstall, { required: requiresTrust.value })
     if (current === session)
       finish(detail)
   }
   catch (failure) {
-    if (current !== session)
+    if (current !== session || isFreshAuthCancelled(failure))
       return
-    if (isFreshAuthError(failure)) {
-      confirmError.value = null
-      confirmOpen.value = true
-      return
-    }
     await installFailed(failure, current)
   }
   finally {
@@ -358,42 +348,6 @@ async function installFailed(failure: unknown, current: number) {
   }
 }
 
-/** Fallback fresh-auth prompt: log in, then retry the install once. */
-async function onConfirmPassword(value: string) {
-  const current = session
-  confirmPending.value = true
-  confirmError.value = null
-  try {
-    await auth.login(value)
-  }
-  catch (failure) {
-    if (current === session) {
-      confirmError.value = passwordErrorText(failure)
-      confirmPending.value = false
-    }
-    return
-  }
-  if (current !== session)
-    return
-  confirmPending.value = false
-  confirmOpen.value = false
-  staleReview.value = false
-  phase.value = 'installing'
-  try {
-    const detail = await sendInstall()
-    if (current === session)
-      finish(detail)
-  }
-  catch (failure) {
-    if (current === session)
-      await installFailed(failure, current)
-  }
-  finally {
-    if (current === session)
-      phase.value = 'idle'
-  }
-}
-
 function back() {
   if (busy.value)
     return
@@ -413,14 +367,25 @@ function onSubmit() {
     void install()
 }
 
-function onErrorAction(action: HarnessErrorUiAction) {
-  if (action === 'login') {
-    confirmError.value = null
-    confirmOpen.value = true
+/** "Log in" of the error alert: the password prompt now, then the step is submitted again. */
+async function logIn() {
+  const current = session
+  try {
+    await freshAuth.confirm()
   }
-  else if (action === 'retry') {
+  catch {
+    // Closed: nothing else happens.
+    return
+  }
+  if (current === session)
     onSubmit()
-  }
+}
+
+function onErrorAction(action: HarnessErrorUiAction) {
+  if (action === 'login')
+    void logIn()
+  else if (action === 'retry')
+    onSubmit()
 }
 </script>
 
@@ -686,11 +651,12 @@ function onErrorAction(action: HarnessErrorUiAction) {
     </DialogContent>
 
     <ConfirmPasswordDialog
-      v-model:open="confirmOpen"
+      :open="freshAuth.open.value"
       description="Confirm your password to install a plugin that runs code on this server."
-      :pending="confirmPending"
-      :error="confirmError"
-      @submit="onConfirmPassword"
+      :pending="freshAuth.pending.value"
+      :error="freshAuth.error.value"
+      @update:open="freshAuth.setOpen"
+      @submit="freshAuth.submit"
     />
   </Dialog>
 </template>

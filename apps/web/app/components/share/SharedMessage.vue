@@ -1,13 +1,15 @@
 <script setup lang="ts">
 // One message of a shared chat (docs/UI.md 7.15), rendered with the chat's own part components and nothing that reads
 // a store: a user message is the transcript's bubble (attachments, command badge, plain text); an assistant message
-// shows its parts in order (markdown text, collapsed reasoning, ShareToolRow, files, merged sources), then the model id
-// (muted mono, not the store-backed ModelLabel) and "Stopped" or "This reply failed." (error details are never
-// shared). No actions, version switchers or status dots.
+// shows its parts in order (markdown text, collapsed reasoning, ShareToolRow, files, consecutive images as one
+// ImageGallery with its lightbox and Download link, merged sources), then the model id (muted mono, not the
+// store-backed ModelLabel) and "Stopped" or "This reply failed." (error details are never shared). No actions, version
+// switchers or status dots.
 import type { ShareMessage } from '@harness-forge/shared'
 import { CircleAlertIcon } from '@lucide/vue'
 import { computed } from 'vue'
 import FilePart from '~/components/chat/parts/FilePart.vue'
+import ImageGallery from '~/components/chat/parts/ImageGallery.vue'
 import ReasoningPart from '~/components/chat/parts/ReasoningPart.vue'
 import SourcesPart from '~/components/chat/parts/SourcesPart.vue'
 import TextPart from '~/components/chat/parts/TextPart.vue'
@@ -23,7 +25,9 @@ const props = defineProps<{
 }>()
 
 const status = computed(() => props.message.status === 'failed' || props.message.status === 'stopped' ? props.message.status : 'done')
-const userMessage = computed(() => (props.message.role === 'user' ? toUserMessage(props.message, `share-message-${props.index}`) : null))
+/** Snapshot messages carry no ids: the key of this one (its gallery's data-message-id). */
+const messageKey = computed(() => `share-message-${props.index}`)
+const userMessage = computed(() => (props.message.role === 'user' ? toUserMessage(props.message, messageKey.value) : null))
 const blocks = computed(() => (props.message.role === 'assistant' ? shareMessageBlocks(props.message.parts) : []))
 const modelId = computed(() => (props.message.modelRef ? modelIdOf(props.message.modelRef) : null))
 </script>
@@ -60,6 +64,7 @@ const modelId = computed(() => (props.message.modelRef ? modelIdOf(props.message
       <div v-else-if="block.kind === 'file'" class="flex">
         <FilePart :part="block.part" />
       </div>
+      <ImageGallery v-else-if="block.kind === 'gallery'" :images="block.parts" :message-id="messageKey" />
       <SourcesPart v-else-if="block.kind === 'sources'" :parts="block.parts" />
     </template>
     <p

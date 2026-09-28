@@ -7,6 +7,7 @@ import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
 import { useShortcuts } from '~/composables/useShortcuts'
+import { useAuthStore } from '~/stores/auth'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
 import { authStatus, logEntry, pluginDetail } from '~/utils/testing/fixtures'
@@ -144,6 +145,16 @@ async function pressModS() {
   await settle()
 }
 
+/** Types into the fresh-auth prompt and confirms. */
+async function confirmPassword(password: string) {
+  const input = byTestId<HTMLInputElement>(testIds.confirmPasswordInput)!
+  input.value = password
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  await nextTick()
+  byTestId<HTMLButtonElement>(testIds.confirmPasswordSubmit)!.click()
+  await settle()
+}
+
 describe('pluginSourceTab', () => {
   it('lists the files and opens the entry in CodeMirror', async () => {
     const wrapper = await mountTab()
@@ -238,6 +249,55 @@ describe('pluginSourceTab', () => {
     expect(disk['index.mjs']).toBe(`// secure\n${SOURCE}`)
     expect(byTestId(testIds.codeEditorTab, '[data-path="index.mjs"]')?.dataset.dirty).toBe('false')
     expect(toasts.error).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('asks for the password before a code plugin saves when the session is not fresh', async () => {
+    useAuthStore().status = authStatus({ enabled: true, source: 'settings', freshUntil: null })
+    api.auth.login.mockResolvedValue(authStatus({ enabled: true, source: 'settings', freshUntil: Date.now() + 600_000 }))
+    const wrapper = await mountTab()
+    await typeInEditor('// first\n')
+    byTestId<HTMLButtonElement>(testIds.codeEditorSave)!.click()
+    await settle()
+    expect(byTestId(testIds.confirmPasswordDialog)).not.toBeNull()
+    expect(api.pluginFiles.write).not.toHaveBeenCalled()
+    await confirmPassword('correct horse')
+    expect(api.auth.login).toHaveBeenCalledTimes(1)
+    expect(api.pluginFiles.write).toHaveBeenCalledTimes(1)
+    expect(disk['index.mjs']).toBe(`// first\n${SOURCE}`)
+
+    // The session is fresh now: the build runs without another prompt.
+    byTestId<HTMLButtonElement>(testIds.codeBuildReload)!.click()
+    await settle()
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.pluginFiles.build).toHaveBeenCalledTimes(1)
+    expect(api.auth.login).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('saves a declarative plugin without asking first, and cancelling a later prompt shows nothing', async () => {
+    useAuthStore().status = authStatus({ enabled: true, source: 'settings', freshUntil: null })
+    usePluginsStore().details = { 'my-tool': detail({ kind: 'declarative', runsCode: false }) }
+    const wrapper = await mountTab()
+    await typeInEditor('// declarative\n')
+    byTestId<HTMLButtonElement>(testIds.codeEditorSave)!.click()
+    await settle()
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.pluginFiles.write).toHaveBeenCalledTimes(1)
+
+    // A change the server refuses without fresh auth (it would make the plugin run code) prompts after the answer.
+    api.pluginFiles.write.mockRejectedValueOnce(new HarnessError({ code: 'forbidden', message: 'Confirm your password to continue.', action: 'login' }))
+    await typeInEditor('// runs code\n')
+    byTestId<HTMLButtonElement>(testIds.codeEditorSave)!.click()
+    await settle()
+    const prompt = byTestId(testIds.confirmPasswordDialog)!
+    const cancel = [...prompt.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Cancel')!
+    cancel.click()
+    await settle()
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.pluginFiles.write).toHaveBeenCalledTimes(2)
+    expect(toasts.error).not.toHaveBeenCalled()
+    expect(byTestId(testIds.codeEditorTab, '[data-path="index.mjs"]')?.dataset.dirty).toBe('true')
     wrapper.unmount()
   })
 

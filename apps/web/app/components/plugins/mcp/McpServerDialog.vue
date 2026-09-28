@@ -3,9 +3,9 @@
 // editing), transport tabs stdio (command, arguments one per line, environment rows) / HTTP / SSE (URL, header rows),
 // and the approval policy. Header and environment VALUES are write-only secrets (scope `mcp:<id>`): stored rows start
 // empty with the masked hint as placeholder, an empty input keeps the stored value, and every typed value is dropped
-// when the dialog closes. Saving a stdio server is a fresh-auth action (docs/UI.md 8.4, ADR-017): with a password set
-// and a stale session the password is asked first, and a `403 forbidden` + `action: 'login'` answer is followed by one
-// login and one retry.
+// when the dialog closes. Saving a stdio server is a fresh-auth action (docs/UI.md 8.4, ADR-017; useFreshAuth with
+// `required` for such a request): with a password set and a stale session the password is asked first, and a
+// `403 forbidden` + `action: 'login'` answer is followed by one prompt and one more run.
 import type { McpServer } from '@harness-forge/shared'
 import type { McpFormErrors, McpFormState, McpSaveRequest, McpTransportType } from './mcp-form'
 import { TerminalIcon } from '@lucide/vue'
@@ -27,7 +27,7 @@ import { Spinner } from '@/components/ui/spinner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
-import { useAuthStore } from '~/stores/auth'
+import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
 import {
@@ -35,8 +35,6 @@ import {
   buildUpdatePatch,
   emptyForm,
   formFromServer,
-  loginFailureMessage,
-  needsLogin,
   newRow,
   POLICY_OPTIONS,
   policyLabel,
@@ -62,12 +60,11 @@ const emit = defineEmits<{
 /** Two example arguments, one per line. */
 const ARGS_PLACEHOLDER = '-y\n@modelcontextprotocol/server-everything'
 
-/** `auth`: waiting for the password of a fresh-auth save. */
-type Phase = 'idle' | 'saving' | 'auth'
+type Phase = 'idle' | 'saving'
 type SecretList = 'headers' | 'env'
 
 const plugins = usePluginsStore()
-const auth = useAuthStore()
+const freshAuth = useFreshAuth()
 
 const ids = {
   name: useId(),
@@ -88,16 +85,14 @@ const phase = ref<Phase>('idle')
 const attempted = ref(false)
 /** Messages of the last failed request (or of the schema check), cleared when the form changes. */
 const serverErrors = ref<McpFormErrors>({})
-const passwordOpen = ref(false)
-const passwordPending = ref(false)
-const passwordError = ref<string | null>(null)
-let pendingRequest: McpSaveRequest | null = null
 // Bumped on every open and close, so a request that outlives its dialog session cannot touch the next one.
 let session = 0
 
 const editing = computed(() => props.server !== null)
 const mode = computed<'create' | 'edit'>(() => (editing.value ? 'edit' : 'create'))
 const busy = computed(() => phase.value !== 'idle')
+/** The save request runs (not while the password prompt waits for the user). */
+const saving = computed(() => phase.value === 'saving' && !freshAuth.open.value)
 const clientErrors = computed<McpFormErrors>(() => (attempted.value ? validateForm(form, mode.value) : {}))
 const errors = computed<McpFormErrors>(() => ({ ...serverErrors.value, ...clientErrors.value }))
 const dirty = computed(() => (props.server ? Object.keys(buildUpdatePatch(props.server, form)).length > 0 : true))
@@ -109,10 +104,8 @@ function resetForm(server: McpServer | null) {
   attempted.value = false
   serverErrors.value = {}
   phase.value = 'idle'
-  passwordOpen.value = false
-  passwordPending.value = false
-  passwordError.value = null
-  pendingRequest = null
+  // A waiting password prompt belongs to the dialog session that ends here.
+  freshAuth.cancel()
 }
 
 watch(() => [props.open, props.server?.id ?? null] as const, ([open]) => {
@@ -173,7 +166,7 @@ function updateRow(list: SecretList, uid: number, field: 'name' | 'value', value
 
 function onOpenChange(value: boolean) {
   // A save in flight finishes first.
-  if (!value && phase.value === 'saving')
+  if (!value && saving.value)
     return
   emit('update:open', value)
 }
@@ -184,20 +177,13 @@ function currentRequest(): McpSaveRequest {
   return { kind: 'create', input: buildCreateInput(form) }
 }
 
-function askPassword(request: McpSaveRequest) {
-  pendingRequest = request
-  passwordError.value = null
-  passwordPending.value = false
-  phase.value = 'auth'
-  passwordOpen.value = true
-}
-
-async function send(request: McpSaveRequest, allowLoginPrompt: boolean): Promise<void> {
+async function send(request: McpSaveRequest): Promise<void> {
   const current = session
   phase.value = 'saving'
   serverErrors.value = {}
   try {
-    const saved = await plugins.saveMcp(request.kind === 'create' ? request.input : { id: request.id, patch: request.patch })
+    const input = request.kind === 'create' ? request.input : { id: request.id, patch: request.patch }
+    const saved = await freshAuth.run(() => plugins.saveMcp(input), { required: requiresFreshAuth(request) })
     if (current !== session)
       return
     phase.value = 'idle'
@@ -208,12 +194,9 @@ async function send(request: McpSaveRequest, allowLoginPrompt: boolean): Promise
   catch (error) {
     if (current !== session)
       return
-    if (allowLoginPrompt && needsLogin(error)) {
-      askPassword(request)
-      return
-    }
-    serverErrors.value = saveErrorFields(error, form, mode.value)
     phase.value = 'idle'
+    if (!isFreshAuthCancelled(error))
+      serverErrors.value = saveErrorFields(error, form, mode.value)
   }
 }
 
@@ -230,46 +213,7 @@ async function onSave() {
     serverErrors.value = problems
     return
   }
-  if (requiresFreshAuth(request) && auth.status?.enabled === true && !auth.fresh) {
-    askPassword(request)
-    return
-  }
-  await send(request, true)
-}
-
-async function onPasswordSubmit(password: string) {
-  const current = session
-  passwordPending.value = true
-  passwordError.value = null
-  try {
-    await auth.login(password)
-  }
-  catch (error) {
-    if (current === session) {
-      passwordError.value = loginFailureMessage(error)
-      passwordPending.value = false
-    }
-    return
-  }
-  if (current !== session)
-    return
-  passwordPending.value = false
-  passwordOpen.value = false
-  const request = pendingRequest
-  pendingRequest = null
-  if (request)
-    await send(request, false)
-  else
-    phase.value = 'idle'
-}
-
-function onPasswordOpenChange(value: boolean) {
-  if (value || passwordPending.value)
-    return
-  passwordOpen.value = false
-  pendingRequest = null
-  if (phase.value === 'auth')
-    phase.value = 'idle'
+  await send(request)
 }
 
 function secretListOf(type: McpTransportType): SecretList {
@@ -487,16 +431,16 @@ function secretListOf(type: McpTransportType): SecretList {
         </p>
 
         <DialogFooter>
-          <Button type="button" variant="outline" :disabled="phase === 'saving'" @click="onOpenChange(false)">
+          <Button type="button" variant="outline" :disabled="saving" @click="onOpenChange(false)">
             Cancel
           </Button>
           <Button
             type="submit"
             :disabled="!canSave"
-            :aria-busy="phase === 'saving' || undefined"
+            :aria-busy="saving || undefined"
             :data-testid="testIds.mcpSave"
           >
-            <Spinner v-if="phase === 'saving'" data-icon="inline-start" />
+            <Spinner v-if="saving" data-icon="inline-start" />
             {{ editing ? 'Save' : 'Add server' }}
           </Button>
         </DialogFooter>
@@ -505,11 +449,11 @@ function secretListOf(type: McpTransportType): SecretList {
   </Dialog>
 
   <ConfirmPasswordDialog
-    :open="passwordOpen"
+    :open="freshAuth.open.value"
     description="Saving a server that runs a local command needs your password."
-    :pending="passwordPending"
-    :error="passwordError"
-    @update:open="onPasswordOpenChange"
-    @submit="onPasswordSubmit"
+    :pending="freshAuth.pending.value"
+    :error="freshAuth.error.value"
+    @update:open="freshAuth.setOpen"
+    @submit="freshAuth.submit"
   />
 </template>

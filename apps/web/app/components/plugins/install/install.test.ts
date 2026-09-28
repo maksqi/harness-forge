@@ -7,10 +7,9 @@ import {
   filesSummary,
   inspectionSourceLabel,
   installBody,
-  isFreshAuthError,
+  isStaleReview,
   manifestIcon,
   npmSpec,
-  passwordErrorText,
   permissionLabel,
   pluginSourceLabel,
   requestSourceLabel,
@@ -59,7 +58,7 @@ describe('buildRequest', () => {
   })
 })
 
-describe('server errors and fresh auth', () => {
+describe('server errors', () => {
   it('maps validation issues to the fields of the tab', () => {
     const error = new HarnessError({ code: 'validation_error', message: 'Bad', details: { issues: [{ path: ['integrity'], message: 'Mismatch', code: 'custom' }] } })
     expect(serverFieldErrors('url', error)).toEqual({ integrity: 'Mismatch' })
@@ -69,11 +68,10 @@ describe('server errors and fresh auth', () => {
     expect(serverFieldErrors('npm', spec)).toEqual({ npmName: 'Unknown' })
   })
 
-  it('recognizes fresh-auth refusals and login failures', () => {
-    expect(isFreshAuthError(new HarnessError({ code: 'forbidden', message: 'x', action: 'login' }))).toBe(true)
-    expect(isFreshAuthError(new HarnessError({ code: 'forbidden', message: 'x' }))).toBe(false)
-    expect(passwordErrorText(new HarnessError({ code: 'unauthorized', message: 'Invalid password' }))).toBe('Wrong password')
-    expect(passwordErrorText(new HarnessError({ code: 'rate_limited', message: 'x', retryAfterMs: 2500 }))).toBe('Too many attempts. Try again in 3 s.')
+  it('recognizes a stale review (the package changed since it was inspected)', () => {
+    expect(isStaleReview(new HarnessError({ code: 'conflict', message: 'Changed.', details: { reason: 'stale' } }))).toBe(true)
+    expect(isStaleReview(new HarnessError({ code: 'conflict', message: 'Exists.', details: { reason: 'exists' } }))).toBe(false)
+    expect(isStaleReview(new HarnessError({ code: 'forbidden', message: 'x', action: 'login' }))).toBe(false)
   })
 })
 

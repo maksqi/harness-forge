@@ -8,8 +8,18 @@ export interface RecordedRequest {
   method: string
   /** Lowercase header names. */
   headers: Record<string, string>
-  /** Parsed JSON body, `undefined` without a body. */
+  /**
+   * Parsed JSON body; for a multipart body (transcriptions, image edits) the form fields as a record (a repeated field
+   * as an array, a file as a `RecordedFile`); `undefined` without a body.
+   */
   body: unknown
+}
+
+/** A file field of a recorded multipart body. */
+export interface RecordedFile {
+  file: string
+  type: string
+  size: number
 }
 
 export type FakeRoute = (request: RecordedRequest) => Response | Promise<Response>
@@ -19,17 +29,30 @@ export interface FakeRuntime {
   requests: RecordedRequest[]
 }
 
+async function readBody(request: Request): Promise<unknown> {
+  if (request.headers.get('content-type')?.startsWith('multipart/form-data')) {
+    const fields: Record<string, unknown> = {}
+    for (const [key, value] of (await request.formData()).entries()) {
+      const item: string | RecordedFile = typeof value === 'string' ? value : { file: value.name, type: value.type, size: value.size }
+      const current = fields[key]
+      fields[key] = current === undefined ? item : [...(Array.isArray(current) ? current : [current]), item]
+    }
+    return fields
+  }
+  const text = await request.text()
+  return text ? JSON.parse(text) as unknown : undefined
+}
+
 /** A runtime with resolved `credentials`; without a route every request fails the test. */
 export function fakeRuntime(credentials: Record<string, string> = {}, route?: FakeRoute): FakeRuntime {
   const requests: RecordedRequest[] = []
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const request = new Request(input, init)
-    const text = await request.text()
     const recorded: RecordedRequest = {
       url: request.url,
       method: request.method,
       headers: Object.fromEntries(request.headers),
-      body: text ? JSON.parse(text) as unknown : undefined,
+      body: await readBody(request),
     }
     requests.push(recorded)
     if (!route)

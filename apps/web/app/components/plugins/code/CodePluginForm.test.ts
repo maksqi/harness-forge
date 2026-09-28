@@ -4,6 +4,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
+import { useAuthStore } from '~/stores/auth'
 import { testIds } from '~/utils/testids'
 import { authStatus, pluginDetail, pluginSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
@@ -145,6 +146,26 @@ describe('codePluginForm', () => {
     await flushPromises()
     expect(api.auth.login).toHaveBeenCalledWith({ body: { password: 'hunter2 hunter2' } })
     expect(api.pluginFiles.scaffold).toHaveBeenCalledTimes(2)
+    expect(wrapper.emitted('created')).toEqual([['secure-tool']])
+    wrapper.unmount()
+  })
+
+  it('asks for the password first when the session is not fresh', async () => {
+    useAuthStore().status = authStatus({ enabled: true, source: 'settings', freshUntil: Date.now() - 1000 })
+    api.pluginFiles.scaffold.mockResolvedValue(pluginDetail({ id: 'secure-tool', name: 'Secure tool' }))
+    api.auth.login.mockResolvedValue(authStatus({ enabled: true, source: 'settings', freshUntil: Date.now() + 600_000 }))
+    const wrapper = mountForm()
+    await flushPromises()
+    await type(testIds.codePluginName, 'Secure tool')
+    await chooseTemplate('tool')
+    await create()
+    expect(byTestId(testIds.confirmPasswordDialog)).not.toBeNull()
+    expect(api.pluginFiles.scaffold).not.toHaveBeenCalled()
+    await type(testIds.confirmPasswordInput, 'hunter2 hunter2')
+    byTestId<HTMLButtonElement>(testIds.confirmPasswordSubmit)!.click()
+    await flushPromises()
+    expect(api.auth.login).toHaveBeenCalledWith({ body: { password: 'hunter2 hunter2' } })
+    expect(api.pluginFiles.scaffold).toHaveBeenCalledTimes(1)
     expect(wrapper.emitted('created')).toEqual([['secure-tool']])
     wrapper.unmount()
   })

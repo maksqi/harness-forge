@@ -9,19 +9,28 @@
 //   version and titles in JavaScript, both Unicode case-insensitive (./text.ts); `snippet` comes from the first matching
 //   message (it may be a version that is not on the active path).
 // - Message tree (./tree.ts): `get` answers the active path (`listPath` from the active leaf) and the versions of its
-//   messages (`branches`, from the light rows of the chat); `switchBranch` moves the active leaf to the most recent
-//   leaf under a message with a compare-and-set against the leaf it read; imports (`create` with `messages`,
+//   messages (`branches`, from the light rows of the chat); `switchBranch` moves the active leaf to the remembered leaf
+//   under a message with a compare-and-set against the leaf it read; imports (`create` with `messages`,
 //   `importChat`) validate the tree before anything is written (./import.ts) and insert the chat, its messages and its
 //   active leaf in one batch.
+// - Remembered versions (Phase 6, ADR-030): every write that moves the active leaf also records the shown path
+//   (`rememberPathSql`: `messages.selected_child_id`) in the same atomic step: `setActiveLeaf` (the pipeline),
+//   `switchBranch`, `deleteMessage` and the import batch. The pointers are never exported (an import re-derives them).
+// - Deleting a version (`deleteMessage`, ADR-030): one batch with the compare-and-set of the leaf and the subtree
+//   delete; the delete checks again when it runs that the leaf is where it expects it (the new leaf, or the unmoved
+//   one for a version off the path) and that the new leaf and another version still exist, so a race never deletes the
+//   shown path or the last version; usage rows, share snapshots, files and `updated_at` stay.
 // - Writes are single statements or atomic batches (no interactive transaction holds the connection), except
 //   `transaction()`, which the chat pipeline uses for its commit and persist steps.
 // - Events are emitted after the write: `chat.created` (create, ensure when it creates, importChat), `chat.updated`
-//   (update, touch, setTitle, switchBranch; `ChatUpdatedData` with the active leaf), `chat.deleted` (remove,
-//   removeAll: one per chat). Message operations emit nothing.
-// - Phase 6 skeleton (P6-0b): `deleteMessage` (deleting a version, ADR-030) answers `not_implemented` until W6.6.
+//   (update, touch, setTitle, switchBranch, deleteMessage; `ChatUpdatedData`: the summary plus the row's active leaf),
+//   `chat.deleted` (remove, removeAll: one per chat). Message operations emit nothing.
+// - Usage totals (`ChatDetail.totals`) sum the usage rows of purpose `chat` and `image` (Phase 6) of the chat, deleted
+//   versions included.
 import type { ChatDetail, ChatSettings, ChatSummary, CursorPage, HarnessUIMessage, UsageTotals } from '@harness-forge/shared'
+import type { SQL } from 'drizzle-orm'
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core'
-import type { ChatRow } from '../../db/schema.ts'
+import type { ChatRow, UsagePurpose } from '../../db/schema.ts'
 import type { AppDeps } from '../../types.ts'
 import type { ChatCursor } from './cursor.ts'
 import type { ChatExportTree } from './export.ts'
@@ -39,7 +48,6 @@ import {
 } from '@harness-forge/shared'
 import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm'
 import { chats, messages, usage } from '../../db/schema.ts'
-import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { decodeChatCursor, encodeChatCursor } from './cursor.ts'
 import { databaseError, guardDb, isConstraintError } from './db-errors.ts'
 import { buildChatExport } from './export.ts'
@@ -48,21 +56,26 @@ import {
   chatNotFound,
   chunk,
   createMessageStore,
+  deleteSubtreeSql,
   INSERT_CHUNK_ROWS,
   listTreeRows,
   MESSAGE_COLUMNS,
+  messageInChatSql,
   messageInsertValues,
   messageNotFound,
+  rememberPathSql,
   rowToMessage,
   TREE_COLUMNS,
 } from './store.ts'
 import { LIKE_ESCAPE, likeContainsPattern, makeSnippet, messagePlainText, normalizeForSearch, sanitizeTitle, titleMatches } from './text.ts'
-import { branchesOf, buildTree, latestLeafUnder, resolveLeaf } from './tree.ts'
+import { branchesOf, buildTree, pathTo, rememberedLeafUnder, resolveLeaf, siblingsOf } from './tree.ts'
 
 /** Chats scanned per query while searching (title matches are decided in JavaScript). */
 const SEARCH_BATCH_ROWS = 200
 /** Ids per `IN (...)` lookup. */
 const ID_LOOKUP_CHUNK = 500
+/** The usage rows counted by `ChatDetail.totals` (Phase 6 adds `image`; title, transcription and speech rows are not). */
+const TOTALS_PURPOSES: readonly UsagePurpose[] = ['chat', 'image']
 
 type ChatUpdateSet = SQLiteUpdateSetSource<typeof chats>
 type ChatInsert = typeof chats.$inferInsert
@@ -104,13 +117,36 @@ function conflictExists(id: string): HarnessError {
   })
 }
 
-/** The active leaf changed between reading and switching it (a run committed meanwhile, or another switch). */
-function leafMoved(id: string): HarnessError {
+/**
+ * The active leaf changed between reading and writing it (a run committed meanwhile, or another switch or delete won),
+ * so the compare-and-set of a version switch or delete missed; nothing was written.
+ */
+function leafMoved(id: string, action: 'switch' | 'delete'): HarnessError {
+  const doing = action === 'switch' ? 'switching versions' : 'deleting the version'
   return new HarnessError({
     code: 'conflict',
-    message: 'The chat changed while switching versions. Wait until the reply finishes, then try again.',
+    message: `The chat changed while ${doing}. Wait until the reply finishes, then try again.`,
     details: { reason: 'run-active', chatId: id },
   })
+}
+
+/** `deleteMessage` of a message without another version (ADR-030): the last version is never deleted. */
+function onlyVersion(): HarnessError {
+  return new HarnessError({
+    code: 'conflict',
+    message: 'This is the only version of the message. Delete the chat instead.',
+    details: { reason: 'only-version' },
+  })
+}
+
+/** An SQL condition on `chats.active_leaf_id` (in an UPDATE of `chats`): it `IS` `leafId` (null-safe). */
+function leafIs(leafId: string | null): SQL {
+  return sql`${chats.activeLeafId} IS ${leafId}`
+}
+
+/** An SQL condition for statements on other tables: the active leaf of the chat `IS` `leafId` (null-safe). */
+function activeLeafIs(chatId: string, leafId: string | null): SQL {
+  return sql`EXISTS (SELECT 1 FROM chats AS l WHERE l.id = ${chatId} AND l.active_leaf_id IS ${leafId})`
 }
 
 function invalidField(path: string, message: string): HarnessError {
@@ -218,7 +254,7 @@ export function createChatsService(deps: AppDeps): ChatsService {
         costUsd: sql<number | null>`sum(${usage.costUsd})`,
       })
       .from(usage)
-      .where(and(eq(usage.chatId, chatId), eq(usage.purpose, 'chat')))
+      .where(and(eq(usage.chatId, chatId), inArray(usage.purpose, [...TOTALS_PURPOSES])))
     return {
       inputTokens: Number(row?.inputTokens ?? 0),
       outputTokens: Number(row?.outputTokens ?? 0),
@@ -267,7 +303,8 @@ export function createChatsService(deps: AppDeps): ChatsService {
 
   /**
    * Inserts a chat with its messages (final ids, `seq` = position), their parents and its active leaf from `tree`, in
-   * one batch. `conflict` (`exists`) when the chat id (or a message id, raced) is taken meanwhile.
+   * one batch that also records the active path as the remembered versions (ADR-030: an import re-derives them, they
+   * are not exported). `conflict` (`exists`) when the chat id (or a message id, raced) is taken meanwhile.
    */
   async function insertChat(row: ChatInsert, list: readonly HarnessUIMessage[], tree: ImportTree, now: number): Promise<void> {
     const rows = list.map((message, seq) => {
@@ -279,6 +316,7 @@ export function createChatsService(deps: AppDeps): ChatsService {
       await db.batch([
         db.insert(chats).values({ ...row, activeLeafId }),
         ...chunk(rows, INSERT_CHUNK_ROWS).map(values => db.insert(messages).values(values)),
+        ...(activeLeafId === null ? [] : [db.run(rememberPathSql(row.id, activeLeafId))]),
       ])
     }
     catch (error) {
@@ -361,6 +399,22 @@ export function createChatsService(deps: AppDeps): ChatsService {
     return summary
   }
 
+  /**
+   * Why the guarded write of a version switch or delete changed nothing although the checks before it passed: the chat
+   * or the message is gone now (404), a delete's message has no other version left (409 `only-version`), else the active
+   * leaf moved (409 `run-active`).
+   */
+  async function missReason(id: string, messageId: string, action: 'switch' | 'delete'): Promise<HarnessError> {
+    if (await findRow(id) === undefined)
+      return chatNotFound(id)
+    const tree = buildTree(await listTreeRows(db, id))
+    if (!tree.byId.has(messageId))
+      return messageNotFound(id, messageId)
+    if (action === 'delete' && siblingsOf(tree, messageId).length < 2)
+      return onlyVersion()
+    return leafMoved(id, action)
+  }
+
   return {
     ...store,
 
@@ -440,23 +494,73 @@ export function createChatsService(deps: AppDeps): ChatsService {
     switchBranch: (id, messageId) => guardDb(async () => {
       const row = await requireRow(id)
       const tree = buildTree(await listTreeRows(db, id))
-      const leaf = latestLeafUnder(tree, messageId)
+      // The path last shown under the message (ADR-030), so switching away and back restores it.
+      const leaf = rememberedLeafUnder(tree, messageId)
       if (leaf === null)
         throw messageNotFound(id, messageId)
       const pendingApproval = tree.byId.get(leaf)?.role === 'assistant' && awaitsApproval(await store.getMessage(id, leaf))
-      // Compare-and-set against the leaf read above: a run that committed meanwhile keeps its path.
-      const [updated] = await db
-        .update(chats)
-        .set({ activeLeafId: leaf, pendingApproval })
-        .where(and(eq(chats.id, id), row.activeLeafId === null ? isNull(chats.activeLeafId) : eq(chats.activeLeafId, row.activeLeafId)))
-        .returning()
+      // Compare-and-set against the leaf read above (a run that committed meanwhile keeps its path) while the new leaf
+      // still exists (a version delete may have taken it); the new path is remembered under the same condition, in the
+      // same batch.
+      const target = and(eq(chats.id, id), leafIs(row.activeLeafId), messageInChatSql(id, leaf))!
+      const [, [updated]] = await db.batch([
+        db.run(rememberPathSql(id, leaf, sql`EXISTS (SELECT 1 FROM ${chats} WHERE ${target})`)),
+        db.update(chats).set({ activeLeafId: leaf, pendingApproval }).where(target).returning(),
+      ])
       if (updated === undefined)
-        throw await findRow(id) === undefined ? chatNotFound(id) : leafMoved(id)
+        throw await missReason(id, messageId, 'switch')
       emitUpdated(updated)
       return detailOf(updated)
     }),
 
-    deleteMessage: rejectsNotImplemented('ChatsService.deleteMessage (W6.6)'),
+    deleteMessage: (id, messageId) => guardDb(async () => {
+      const row = await requireRow(id)
+      const tree = buildTree(await listTreeRows(db, id))
+      if (!tree.byId.has(messageId))
+        throw messageNotFound(id, messageId)
+      const siblings = siblingsOf(tree, messageId)
+      const others = siblings.filter(sibling => sibling !== messageId)
+      if (others.length === 0)
+        throw onlyVersion()
+      // Every write below also checks, when it runs, that another version is still there (a concurrent delete may have
+      // taken the others): the last version of a message is never deleted.
+      const otherVersion = sql`EXISTS (SELECT 1 FROM messages AS v WHERE v.chat_id = ${id}
+        AND v.id IN (${sql.join(others.map(other => sql`${other}`), sql`, `)}))`
+      let deleted: number
+      if (pathTo(tree, resolveLeaf(tree, row.activeLeafId)).includes(messageId)) {
+        // The active path goes through the message: it moves to what was last shown under the previous version by
+        // `seq`, else the next one (`others` is not empty, so one of them exists), like a switch to that version.
+        const index = siblings.indexOf(messageId)
+        const target = siblings[index - 1] ?? siblings[index + 1]!
+        const leaf = rememberedLeafUnder(tree, target)!
+        const pendingApproval = tree.byId.get(leaf)?.role === 'assistant' && awaitsApproval(await store.getMessage(id, leaf))
+        const leafExists = messageInChatSql(id, leaf)
+        // One batch: the new path is remembered and the leaf moved under the compare-and-set against the leaf read
+        // above; the subtree is deleted only when the leaf is the new one by then (a missed compare-and-set deletes
+        // nothing).
+        const cas = and(eq(chats.id, id), leafIs(row.activeLeafId), messageInChatSql(id, messageId), otherVersion, leafExists)!
+        const [, , result] = await db.batch([
+          db.run(rememberPathSql(id, leaf, sql`EXISTS (SELECT 1 FROM ${chats} WHERE ${cas})`)),
+          db.update(chats).set({ activeLeafId: leaf, pendingApproval }).where(cas),
+          db.run(deleteSubtreeSql(id, messageId, sql`${activeLeafIs(id, leaf)} AND ${leafExists} AND ${otherVersion}`)),
+        ])
+        deleted = result.rowsAffected
+      }
+      else {
+        // A version off the active path: the leaf stays, and the subtree is deleted only while it is still the leaf
+        // read above (a switch to this version may have won meanwhile).
+        const [result] = await db.batch([
+          db.run(deleteSubtreeSql(id, messageId, sql`${activeLeafIs(id, row.activeLeafId)} AND ${otherVersion}`)),
+        ])
+        deleted = result.rowsAffected
+      }
+      if (deleted === 0)
+        throw await missReason(id, messageId, 'delete')
+      // `updated_at`, usage rows, share snapshots and files stay; the deleted rows took their search text with them.
+      const updated = await requireRow(id)
+      emitUpdated(updated)
+      return detailOf(updated)
+    }),
 
     allIds: () => guardDb(async () => {
       const rows = await db.select({ id: chats.id }).from(chats).orderBy(asc(chats.id))

@@ -8,13 +8,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, nextTick } from 'vue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
-import { chatDetail, chatId, chatSummary, messageBranch } from '~/utils/testing/fixtures'
+import { catalogModel, chatDetail, chatId, chatSummary, messageBranch } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import {
   buildChatRequestBody,
   chatDataPartSchemas,
   isRunActiveConflict,
+  leafMovedElsewhere,
   MAX_CHAT_SESSIONS,
   mergePath,
   resetChatSessions,
@@ -22,6 +23,7 @@ import {
   useChatSession,
   useChatSessionRegistry,
 } from './useChatSession'
+import { useImageOptions } from './useImageOptions'
 import { dispatchServerEvent } from './useServerEvents'
 
 const mock = vi.hoisted(() => ({ api: null as unknown, fetch: null as unknown }))
@@ -171,6 +173,8 @@ beforeEach(() => {
 afterEach(() => {
   resetChatSessions()
   disposePinia(pinia)
+  // One app-wide state: back to the defaults (1 image, Auto, edit the previous image).
+  useImageOptions().set({ n: undefined, aspectRatio: undefined, editPrevious: undefined })
   vi.unstubAllGlobals()
 })
 
@@ -239,6 +243,38 @@ describe('buildChatRequestBody', () => {
 
   it('refuses to send without a model', () => {
     expect(() => buildChatRequestBody({ ...base, modelRef: null, messages: [user], trigger: 'submit-message', messageId: undefined })).toThrow(HarnessError)
+  })
+
+  it('adds the image options only when given', () => {
+    const plain = buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: undefined, imageOptions: undefined })
+    expect(plain).not.toHaveProperty('imageOptions')
+    const image = buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: undefined, imageOptions: { n: 2 } })
+    expect(image.imageOptions).toEqual({ n: 2 })
+  })
+})
+
+describe('leafMovedElsewhere', () => {
+  const A = 'msg_a000000000000001'
+  const B = 'msg_b000000000000001'
+  const U = 'msg_u000000000000001'
+  const path = [userMessage(A, 'a'), assistantMessage(B, 'b')]
+
+  it('is true when the last message shown is not the leaf', () => {
+    expect(leafMovedElsewhere(path, B, null)).toBe(false)
+    expect(leafMovedElsewhere(path, A, null)).toBe(true)
+    expect(leafMovedElsewhere(path, 'msg_c000000000000001', null)).toBe(true)
+    expect(leafMovedElsewhere(path, null, null)).toBe(true)
+    expect(leafMovedElsewhere([], null, null)).toBe(false)
+    expect(leafMovedElsewhere([], B, null)).toBe(true)
+  })
+
+  it('ignores a trailing message the server never stored', () => {
+    const failed = [...path, userMessage(U, 'refused')]
+    expect(leafMovedElsewhere(failed, B, U)).toBe(false)
+    expect(leafMovedElsewhere(failed, B, null)).toBe(true)
+    expect(leafMovedElsewhere(failed, 'msg_c000000000000001', U)).toBe(true)
+    // An id that is not shown changes nothing.
+    expect(leafMovedElsewhere(path, B, U)).toBe(false)
   })
 })
 
@@ -594,6 +630,381 @@ describe('useChatSession: versions', () => {
     expect(after.map(message => message.id)).toEqual([U1, A1, U2B, A2B])
     expect(after[1]).toBe(before[1])
     expect(session.branches.value[U2B]).toEqual({ siblings: [U2, U2B], index: 1 })
+  })
+})
+
+describe('useChatSession: attachments on edit', () => {
+  const U1 = 'msg_user000000000001'
+  const A1 = 'msg_asst000000000001'
+  const kept = { type: 'file' as const, mediaType: 'image/png', filename: 'a.png', url: '/api/files/file_a000000000000001' }
+  const added = { type: 'file' as const, mediaType: 'text/plain', filename: 'b.txt', url: '/api/files/file_b000000000000001' }
+
+  async function withAttachment() {
+    return loadedSession(8, {
+      messages: [{ id: U1, role: 'user', parts: [kept, { type: 'text', text: 'look' }] }, assistantMessage(A1, 'a picture')],
+    })
+  }
+
+  it('sends exactly the editor\'s files: removed ones are gone, new ones are added', async () => {
+    const session = await withAttachment()
+    server.reply(textReply('another look'))
+    await session.edit(U1, 'look again', [added])
+    expect(chatBodies()[0]!.message.parts).toEqual([added, { type: 'text', text: 'look again' }])
+  })
+
+  it('keeps the edited message\'s files when none are given (the ↑ flow)', async () => {
+    const session = await withAttachment()
+    server.reply(textReply('same picture'))
+    await session.edit(U1, 'look again')
+    expect(chatBodies()[0]!.message.parts).toEqual([kept, { type: 'text', text: 'look again' }])
+  })
+
+  it('removes every file with an empty set, and sends a message of files only', async () => {
+    const session = await withAttachment()
+    server.reply(textReply('no picture'))
+    await session.edit(U1, 'no picture now', [])
+    expect(chatBodies()[0]!.message.parts).toEqual([{ type: 'text', text: 'no picture now' }])
+
+    const again = await loadedSession(9, {
+      messages: [{ id: U1, role: 'user', parts: [kept, { type: 'text', text: 'look' }] }, assistantMessage(A1, 'a picture')],
+    })
+    server.reply(textReply('files only'))
+    await again.edit(U1, '  ', [added])
+    expect(chatBodies()[1]!.message.parts).toEqual([added])
+  })
+
+  it('sends nothing without text and files', async () => {
+    const session = await withAttachment()
+    await session.edit(U1, ' ', [])
+    expect(chatBodies()).toHaveLength(0)
+    expect(session.chat.messages.value.map(message => message.id)).toEqual([U1, A1])
+  })
+})
+
+describe('useChatSession: deleting a version', () => {
+  const U1 = 'msg_user000000000001'
+  const A1 = 'msg_asst000000000001'
+  const U2 = 'msg_user000000000002'
+  const A2 = 'msg_asst000000000002'
+  const U2B = 'msg_user00000000002b'
+  const A2B = 'msg_asst00000000002b'
+
+  function versionOne(): HarnessUIMessage[] {
+    return [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2, 'q2'), assistantMessage(A2, 'a2')]
+  }
+
+  function versionTwo(): HarnessUIMessage[] {
+    return [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2B, 'q2, edited'), assistantMessage(A2B, 'a2b')]
+  }
+
+  function shownVersionTwo() {
+    return loadedSession(10, { messages: versionTwo(), branches: { [U2B]: messageBranch([U2, U2B], 1) } })
+  }
+
+  it('deletes the shown version and shows the returned path, keeping the shared prefix objects', async () => {
+    const session = await shownVersionTwo()
+    const before = session.chat.messages.value
+    let answer!: (detail: ChatDetail) => void
+    api.chats.deleteMessage.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = resolve
+    }))
+    const deleting = session.deleteVersion(U2B)
+    expect(session.switching.value).toBe(true)
+    expect(api.chats.deleteMessage).toHaveBeenCalledWith({ params: { id: chatId(10), messageId: U2B } })
+    answer(chatDetail({ id: chatId(10), messages: fromServer(versionOne()), branches: {} }))
+    await deleting
+
+    const after = session.chat.messages.value
+    expect(after.map(message => message.id)).toEqual([U1, A1, U2, A2])
+    expect(after[0]).toBe(before[0])
+    expect(after[1]).toBe(before[1])
+    expect(session.branches.value).toEqual({})
+    expect(session.switching.value).toBe(false)
+  })
+
+  it('a send waits for the deletion in flight and continues the path it shows', async () => {
+    const session = await shownVersionTwo()
+    let answer!: (detail: ChatDetail) => void
+    api.chats.deleteMessage.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = resolve
+    }))
+    const deleting = session.deleteVersion(U2B)
+    server.reply(textReply('on version one'))
+    const sending = session.send({ text: 'q3', files: [] })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(chatBodies()).toHaveLength(0)
+    answer(chatDetail({ id: chatId(10), messages: fromServer(versionOne()), branches: {} }))
+    await deleting
+    await sending
+    expect(chatBodies()[0]!.parentId).toBe(A2)
+  })
+
+  it('a deletion refused because a run holds the chat (409 run-active) shows the run\'s path and follows it', async () => {
+    const session = await shownVersionTwo()
+    api.chats.deleteMessage.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'A run is active.', details: { reason: 'run-active', chatId: chatId(10) } }))
+    api.chats.get
+      .mockResolvedValueOnce(chatDetail({ id: chatId(10), running: true, messages: versionTwo().slice(0, 3), branches: { [U2B]: messageBranch([U2, U2B], 1) } }))
+      .mockResolvedValueOnce(chatDetail({ id: chatId(10), messages: versionTwo(), branches: { [U2B]: messageBranch([U2, U2B], 1) } }))
+    server.resume(textReply('a2b', A2B))
+
+    await expect(session.deleteVersion(U2B)).rejects.toMatchObject({ code: 'conflict' })
+    expect(session.switching.value).toBe(false)
+    await until(() => server.calls.some(call => call.url === `/api/chat/${chatId(10)}/stream`), 'resume')
+    await until(() => session.chat.status.value === 'ready' && api.chats.get.mock.calls.length === 3, 'reload after the replay')
+    expect(session.chat.messages.value.map(message => message.id)).toEqual([U1, A1, U2B, A2B])
+  })
+
+  it('a deletion of a message the server does not know (404) reloads the chat', async () => {
+    const session = await shownVersionTwo()
+    api.chats.deleteMessage.mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: 'Message not found.' }))
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(10), messages: versionOne() }))
+    await expect(session.deleteVersion(U2B)).rejects.toMatchObject({ code: 'not_found' })
+    await until(() => session.chat.messages.value.at(-1)?.id === A2, 'reload')
+  })
+
+  it('the only version (409 only-version) is refused without reloading', async () => {
+    const session = await shownVersionTwo()
+    api.chats.deleteMessage.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'The message has no other version.', details: { reason: 'only-version' } }))
+    await expect(session.deleteVersion(U2B)).rejects.toMatchObject({ code: 'conflict', details: { reason: 'only-version' } })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(api.chats.get).toHaveBeenCalledTimes(1)
+    expect(useChatsStore().runState[chatId(10)]).toBeUndefined()
+    expect(session.chat.messages.value.map(message => message.id)).toEqual([U1, A1, U2B, A2B])
+  })
+
+  it('does nothing while a request is in flight', async () => {
+    const session = await shownVersionTwo()
+    const gate = deferred()
+    server.reply(textReply('busy', ASSISTANT_ID, gate.promise))
+    const sending = session.send({ text: 'q3', files: [] })
+    await until(() => session.chat.status.value === 'streaming', 'streaming')
+    await session.deleteVersion(U2B)
+    expect(api.chats.deleteMessage).not.toHaveBeenCalled()
+    gate.resolve()
+    await sending
+  })
+})
+
+describe('useChatSession: other tabs', () => {
+  const U1 = 'msg_user000000000001'
+  const A1 = 'msg_asst000000000001'
+  const U2 = 'msg_user000000000002'
+  const A2 = 'msg_asst000000000002'
+  const U2B = 'msg_user00000000002b'
+  const A2B = 'msg_asst00000000002b'
+  const A2C = 'msg_asst00000000002c'
+
+  function versionOne(): HarnessUIMessage[] {
+    return [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2, 'q2'), assistantMessage(A2, 'a2')]
+  }
+
+  function versionTwo(last = A2B): HarnessUIMessage[] {
+    return [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2B, 'q2, edited'), assistantMessage(last, 'a2b')]
+  }
+
+  /** `chat.updated` of chat `n` as the server sends it: the summary plus the active leaf. */
+  function chatUpdated(n: number, activeLeafId: string | null, title = 'Chat') {
+    dispatchServerEvent({ type: 'chat.updated', data: { ...chatSummary({ id: chatId(n), title }), activeLeafId }, at: 1 })
+  }
+
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20))
+
+  it('follows a version switch made in another tab: the path reloads, the shared prefix objects are kept', async () => {
+    const session = await loadedSession(11, { messages: versionOne(), branches: { [U2]: messageBranch([U2, U2B], 0) } })
+    const before = session.chat.messages.value
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(11), messages: fromServer(versionTwo()), branches: { [U2B]: messageBranch([U2, U2B], 1) } }))
+    chatUpdated(11, A2B, 'Renamed elsewhere')
+    // The summary never keeps the leaf.
+    expect(session.summary.value).toMatchObject({ id: chatId(11), title: 'Renamed elsewhere' })
+    expect(session.summary.value).not.toHaveProperty('activeLeafId')
+
+    await until(() => session.chat.messages.value.at(-1)?.id === A2B, 'follow')
+    expect(api.chats.get).toHaveBeenCalledTimes(2)
+    const after = session.chat.messages.value
+    expect(after[0]).toBe(before[0])
+    expect(after[1]).toBe(before[1])
+    expect(session.branches.value).toEqual({ [U2B]: { siblings: [U2, U2B], index: 1 } })
+  })
+
+  it('does not reload for the leaf it already shows (a title change, its own run)', async () => {
+    const session = await loadedSession(11, { messages: versionOne() })
+    chatUpdated(11, A2, 'New title')
+    await settle()
+    expect(api.chats.get).toHaveBeenCalledTimes(1)
+    expect(session.summary.value?.title).toBe('New title')
+  })
+
+  it('does not reload while a request is in flight', async () => {
+    const session = await loadedSession(11, { messages: versionOne() })
+    const gate = deferred()
+    server.reply(textReply('busy', ASSISTANT_ID, gate.promise))
+    const sending = session.send({ text: 'q3', files: [] })
+    await until(() => session.chat.status.value === 'streaming', 'streaming')
+    // Its own user message was stored meanwhile.
+    chatUpdated(11, chatBodies()[0]!.message.id)
+    chatUpdated(11, A2B)
+    await settle()
+    gate.resolve()
+    await sending
+    // The reply of its own run ends the path.
+    chatUpdated(11, ASSISTANT_ID)
+    await settle()
+    expect(api.chats.get).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not reload for its own switch, whether the event comes before or after the answer', async () => {
+    const session = await loadedSession(11, { messages: versionOne(), branches: { [U2]: messageBranch([U2, U2B], 0) } })
+    let answer!: (detail: ChatDetail) => void
+    api.chats.switchBranch.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = resolve
+    }))
+    const switching = session.switchBranch(U2B)
+    chatUpdated(11, A2B)
+    answer(chatDetail({ id: chatId(11), messages: fromServer(versionTwo()), branches: { [U2B]: messageBranch([U2, U2B], 1) } }))
+    await switching
+    // Idle again when the event of its own switch arrives late.
+    await settle()
+    chatUpdated(11, A2B)
+    await settle()
+    expect(api.chats.get).toHaveBeenCalledTimes(1)
+    expect(session.chat.messages.value.at(-1)?.id).toBe(A2B)
+  })
+
+  it('ignores a trailing message the server never stored', async () => {
+    const session = await loadedSession(11, { messages: versionOne() })
+    server.fail(400, { code: 'provider_not_configured', message: 'No key.', providerId: 'anthropic' })
+    await session.send({ text: 'refused', files: [] })
+    expect(session.chat.messages.value).toHaveLength(5)
+    chatUpdated(11, A2)
+    await settle()
+    expect(api.chats.get).toHaveBeenCalledTimes(1)
+    expect(session.chat.messages.value).toHaveLength(5)
+
+    // A leaf that really moved is still followed.
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(11), messages: versionTwo() }))
+    chatUpdated(11, A2B)
+    await until(() => session.chat.messages.value.at(-1)?.id === A2B, 'follow')
+  })
+
+  it('coalesces a burst into one reload, and reloads once more for a leaf announced meanwhile', async () => {
+    const session = await loadedSession(11, { messages: versionOne() })
+    let answer!: (detail: ChatDetail) => void
+    api.chats.get.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = resolve
+    }))
+    chatUpdated(11, A2B)
+    chatUpdated(11, A2C)
+    expect(api.chats.get).toHaveBeenCalledTimes(2)
+    // The reload already shows the newest leaf: no second request.
+    answer(chatDetail({ id: chatId(11), messages: versionTwo(A2C) }))
+    await until(() => session.chat.messages.value.at(-1)?.id === A2C, 'follow')
+    await settle()
+    expect(api.chats.get).toHaveBeenCalledTimes(2)
+
+    // The reload answered before the second switch: one more reload shows it.
+    api.chats.get.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = resolve
+    }))
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(11), messages: versionOne() }))
+    chatUpdated(11, 'msg_asst00000000002d')
+    chatUpdated(11, A2)
+    answer(chatDetail({ id: chatId(11), messages: versionTwo('msg_asst00000000002d') }))
+    await until(() => session.chat.messages.value.at(-1)?.id === A2, 'second follow')
+    expect(api.chats.get).toHaveBeenCalledTimes(4)
+  })
+
+  it('reloads once for a stored leaf its path cannot end at (null or dangling), not for every event repeating it', async () => {
+    const session = await loadedSession(11, { messages: versionOne() })
+    // The server shows its newest path for a leaf it cannot find.
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(11), messages: versionOne() }))
+    chatUpdated(11, 'msg_gone000000000001')
+    await settle()
+    expect(api.chats.get).toHaveBeenCalledTimes(2)
+    chatUpdated(11, 'msg_gone000000000001', 'Renamed')
+    chatUpdated(11, 'msg_gone000000000001', 'Pinned')
+    await settle()
+    expect(api.chats.get).toHaveBeenCalledTimes(2)
+    expect(session.summary.value?.title).toBe('Pinned')
+
+    chatUpdated(11, null)
+    await settle()
+    expect(api.chats.get).toHaveBeenCalledTimes(3)
+    chatUpdated(11, null)
+    await settle()
+    expect(api.chats.get).toHaveBeenCalledTimes(3)
+
+    // A leaf that really moved is followed again, and so is the dangling one after it.
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(11), messages: versionTwo() }))
+    chatUpdated(11, A2B)
+    await until(() => session.chat.messages.value.at(-1)?.id === A2B, 'follow')
+    chatUpdated(11, 'msg_gone000000000001')
+    await until(() => api.chats.get.mock.calls.length === 5, 'dangling again')
+    await settle()
+    expect(api.chats.get).toHaveBeenCalledTimes(5)
+  })
+
+  it('followActiveLeaf() reloads the path on demand, but not while a switch is pending', async () => {
+    const session = await loadedSession(11, { messages: versionOne() })
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(11), messages: versionTwo() }))
+    await session.followActiveLeaf()
+    expect(session.chat.messages.value.at(-1)?.id).toBe(A2B)
+
+    let answer!: (detail: ChatDetail) => void
+    api.chats.switchBranch.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = resolve
+    }))
+    const switching = session.switchBranch(U2)
+    await session.followActiveLeaf()
+    expect(api.chats.get).toHaveBeenCalledTimes(2)
+    answer(chatDetail({ id: chatId(11), messages: versionOne() }))
+    await switching
+  })
+})
+
+describe('useChatSession: image options', () => {
+  const IMAGE_MODEL = 'mock:image'
+  const IMAGE_CHAT_MODEL = 'mock:image-chat'
+  const capabilities = { tools: false, vision: true, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false }
+
+  beforeEach(() => {
+    useModelsStore().items = [
+      catalogModel({ providerId: 'mock', id: 'image', kind: 'image', capabilities }),
+      catalogModel({ providerId: 'mock', id: 'image-chat', kind: 'chat', capabilities: { ...capabilities, imageOutput: true } }),
+      catalogModel({ providerId: 'mock', id: 'echo', kind: 'chat', capabilities }),
+    ]
+    useImageOptions().set({ n: 2, aspectRatio: '16:9', editPrevious: false })
+  })
+
+  async function bodyFor(modelRef: string): Promise<ChatRequestBody> {
+    const session = useChatSession(chatId(12), { isNew: true })
+    session.modelRef.value = modelRef
+    server.reply(textReply('done'))
+    await session.send({ text: 'a red fox', files: [] })
+    return chatBodies().at(-1)!
+  }
+
+  it('an image model sends the number of images, the aspect ratio and editPrevious', async () => {
+    expect((await bodyFor(IMAGE_MODEL)).imageOptions).toEqual({ n: 2, aspectRatio: '16:9', editPrevious: false })
+  })
+
+  it('a chat model with image output sends the aspect ratio only', async () => {
+    expect((await bodyFor(IMAGE_CHAT_MODEL)).imageOptions).toEqual({ aspectRatio: '16:9' })
+  })
+
+  it('other models (and unknown ones) send no image options', async () => {
+    expect(await bodyFor(MODEL)).not.toHaveProperty('imageOptions')
+    resetChatSessions()
+    expect(await bodyFor('mock:unknown')).not.toHaveProperty('imageOptions')
+  })
+
+  it('a regenerate with an image model sends them too; Auto sends no aspect ratio', async () => {
+    useImageOptions().set({ aspectRatio: undefined })
+    const session = await loadedSession(13, { messages: [userMessage('msg_user000000000001', 'a red fox'), assistantMessage(ASSISTANT_ID, '')] })
+    session.modelRef.value = IMAGE_MODEL
+    server.reply(textReply('again'))
+    await session.regenerate(ASSISTANT_ID)
+    expect(chatBodies()[0]).toMatchObject({ trigger: 'regenerate-message', imageOptions: { n: 2, editPrevious: false } })
+    expect(chatBodies()[0]!.imageOptions).not.toHaveProperty('aspectRatio')
   })
 })
 

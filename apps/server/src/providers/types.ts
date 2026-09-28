@@ -120,8 +120,8 @@ export interface ProviderService {
    * A transcription model for `transcribe` (dictation, ADR-029, ARCHITECTURE.md 6.12; implemented by W6.2). The checks
    * of `resolveModel` in the same order (`not_found`, `provider_not_configured`, `model_not_found` as above), then:
    * - a model whose `entry.kind` is not `transcription` -> `validation_error` (the model named);
-   * - a provider without `createTranscriptionModel` -> `validation_error` (the model named: a models.dev entry such as
-   *   `alibaba:qwen3-asr-flash` is listed with its kind but cannot be served);
+   * - a provider without `createTranscriptionModel` -> `validation_error` (the model named; the catalog leaves such
+   *   listing / seed / models.dev entries out, e.g. `alibaba:qwen3-asr-flash`, so this is reached by a custom model);
    * - a throwing factory, a timeout (5 s guard) or a value that is not a transcription model instance -> `plugin_error`.
    */
   readonly resolveTranscriptionModel: (modelRef: string, options?: ResolveModelOptions) => Promise<ResolvedTranscriptionModel>

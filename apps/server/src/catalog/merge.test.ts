@@ -1,6 +1,6 @@
 import { catalogModelSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { buildCatalogModel, catalogModelInfo, effortMenu, mergeLayers, modelsDevLayer, sortEfforts } from './merge.ts'
+import { buildCatalogModel, catalogModelInfo, cleanVoices, effortMenu, hiddenByDefault, MAX_MODEL_VOICES, mergeLayers, modelsDevLayer, sortEfforts } from './merge.ts'
 
 describe('field precedence', () => {
   it('takes each field, capability flag and price from the first layer that defines it', () => {
@@ -24,6 +24,35 @@ describe('field precedence', () => {
 
   it('ignores blank names', () => {
     expect(mergeLayers('m', [{ id: 'm', name: '  ' }, { id: 'm', name: 'Real' }]).name).toBe('Real')
+  })
+
+  it('takes imageOutput and voices from the first layer that defines them', () => {
+    const merged = mergeLayers('m', [
+      { id: 'm', capabilities: { imageOutput: false } },
+      { id: 'm', capabilities: { imageOutput: true }, voices: ['a', 'b'] },
+      { id: 'm', voices: ['c'] },
+    ])
+    expect(merged).toEqual({ id: 'm', capabilities: { imageOutput: false }, voices: ['a', 'b'] })
+  })
+})
+
+describe('models.dev layer', () => {
+  it('derives vision / pdf from the input and imageOutput from a text + image output', () => {
+    expect(modelsDevLayer({ input: ['text', 'image'], output: ['text', 'image'] })?.capabilities).toEqual({ vision: true, pdf: false, imageOutput: true })
+    expect(modelsDevLayer({ input: ['text', 'pdf'], output: ['text'] })?.capabilities).toEqual({ vision: false, pdf: true, imageOutput: false })
+    // An image-only output is a dedicated image model, not a chat model with image output.
+    expect(modelsDevLayer({ output: ['image'] })?.capabilities).toEqual({ imageOutput: false })
+    expect(modelsDevLayer({ name: 'No modalities' })).toEqual({ name: 'No modalities', capabilities: {} })
+    expect(modelsDevLayer(undefined)).toBeUndefined()
+  })
+})
+
+describe('voices', () => {
+  it('keeps valid, unique names (first wins), at most 100', () => {
+    expect(cleanVoices(['alloy', 'echo', 'alloy', '', 'x'.repeat(65), 7, null, 'Kore'])).toEqual(['alloy', 'echo', 'Kore'])
+    const many = Array.from({ length: MAX_MODEL_VOICES + 20 }, (_, index) => `voice-${index}`)
+    expect(cleanVoices(many)).toEqual(many.slice(0, MAX_MODEL_VOICES))
+    expect(cleanVoices([])).toEqual([])
   })
 })
 
@@ -86,6 +115,61 @@ describe('buildCatalogModel', () => {
     expect(explicit).toMatchObject({ kind: 'chat', hidden: false })
     const byModalities = buildCatalogModel({ providerId: 'acme', id: 'paint', layers: [], modalities: { input: ['text'], output: ['image'] }, source: 'live' })
     expect(byModalities).toMatchObject({ kind: 'image', hidden: true })
+  })
+
+  it('shows chat models, image models only when the provider can generate images, and hides every other kind', () => {
+    expect(hiddenByDefault('chat', false)).toBe(false)
+    expect(hiddenByDefault('image', true)).toBe(false)
+    expect(hiddenByDefault('image', false)).toBe(true)
+    for (const kind of ['transcription', 'speech', 'audio', 'embedding', 'other'] as const) {
+      expect(hiddenByDefault(kind, true), kind).toBe(true)
+      expect(hiddenByDefault(kind, false), kind).toBe(true)
+    }
+    const image = (imageModels?: boolean): boolean => buildCatalogModel({ providerId: 'acme', id: 'paint', layers: [{ id: 'paint', kind: 'image' }], source: 'seed', ...(imageModels === undefined ? {} : { imageModels }) }).hidden
+    expect(image()).toBe(true)
+    expect(image(false)).toBe(true)
+    expect(image(true)).toBe(false)
+    const hiddenImage = buildCatalogModel({
+      providerId: 'acme',
+      id: 'paint',
+      layers: [{ id: 'paint', kind: 'image' }],
+      prefs: { hidden: true, favorite: false, alias: null, custom: false, lastUsedAt: null },
+      source: 'seed',
+      imageModels: true,
+    })
+    expect(hiddenImage.hidden).toBe(true)
+    const speech = buildCatalogModel({ providerId: 'acme', id: 'say', layers: [{ id: 'say', kind: 'speech' }], source: 'seed', imageModels: true })
+    expect(speech).toMatchObject({ kind: 'speech', hidden: true })
+  })
+
+  it('reports imageOutput for chat models only and passes the voices through', () => {
+    const gemini = buildCatalogModel({
+      providerId: 'google',
+      id: 'gemini-2.5-flash-image',
+      layers: [modelsDevLayer({ input: ['text', 'image'], output: ['text', 'image'] })],
+      modalities: { input: ['text', 'image'], output: ['text', 'image'] },
+      source: 'live',
+    })
+    expect(gemini).toMatchObject({ kind: 'chat', hidden: false, capabilities: { vision: true, imageOutput: true } })
+    // models.dev lists gpt-image-1-mini with a [text, image] output: an image model, so no imageOutput.
+    const imageModel = buildCatalogModel({
+      providerId: 'openai',
+      id: 'gpt-image-1-mini',
+      layers: [modelsDevLayer({ input: ['text', 'image'], output: ['text', 'image'] })],
+      modalities: { input: ['text', 'image'], output: ['text', 'image'] },
+      source: 'live',
+      imageModels: true,
+    })
+    expect(imageModel).toMatchObject({ kind: 'image', hidden: false, capabilities: { imageOutput: false } })
+    const explicit = buildCatalogModel({ providerId: 'mock', id: 'image-chat', layers: [{ id: 'image-chat', kind: 'chat', capabilities: { imageOutput: true } }], source: 'live' })
+    expect(explicit).toMatchObject({ kind: 'chat', hidden: false, capabilities: { imageOutput: true } })
+
+    const speech = buildCatalogModel({ providerId: 'mock', id: 'speech', layers: [{ id: 'speech', kind: 'speech', voices: ['b', 'a', 'b'] }], source: 'live' })
+    expect(catalogModelSchema.parse(speech)).toMatchObject({ kind: 'speech', hidden: true, voices: ['b', 'a'] })
+    expect(catalogModelInfo(speech)).toMatchObject({ id: 'speech', kind: 'speech', voices: ['b', 'a'] })
+    const chat = buildCatalogModel({ providerId: 'mock', id: 'echo', layers: [{ id: 'echo' }], source: 'live' })
+    expect('voices' in chat).toBe(false)
+    expect('voices' in catalogModelInfo(chat)).toBe(false)
   })
 
   it('treats a model that lists efforts as a reasoning model', () => {

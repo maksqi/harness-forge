@@ -24,7 +24,7 @@ const DAY = 24 * HOUR
 describe('share link helpers', () => {
   it('lists the switches and expiry choices with their test values', () => {
     expect(SHARE_OPTION_FIELDS.map(field => [field.key, field.value, field.label])).toEqual([
-      ['attachments', 'attachments', 'Attachments'],
+      ['attachments', 'attachments', 'Files and images'],
       ['reasoning', 'reasoning', 'Reasoning'],
       ['toolDetails', 'tool-details', 'Tool details'],
     ])

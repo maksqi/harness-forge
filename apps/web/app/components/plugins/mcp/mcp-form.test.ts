@@ -8,11 +8,9 @@ import {
   formFromServer,
   isBlankRow,
   issueField,
-  loginFailureMessage,
   MCP_STATUS_DOTS,
   MCP_STATUS_LABELS,
   mcpStatusText,
-  needsLogin,
   newRow,
   parseArgs,
   policyLabel,
@@ -248,13 +246,5 @@ describe('validation', () => {
     })
     expect(saveErrorFields(invalid, form, 'create')).toEqual({ url: 'Bad URL', form: 'Something else' })
     expect(saveErrorFields(new HarnessError({ code: 'provider_error', message: 'Boom' }), form, 'create')).toEqual({ form: 'Boom' })
-  })
-
-  it('recognizes fresh-auth failures and explains login failures', () => {
-    expect(needsLogin(new HarnessError({ code: 'forbidden', message: 'Confirm', action: 'login' }))).toBe(true)
-    expect(needsLogin(new HarnessError({ code: 'forbidden', message: 'No' }))).toBe(false)
-    expect(loginFailureMessage(new HarnessError({ code: 'unauthorized', message: 'x' }))).toBe('Wrong password')
-    expect(loginFailureMessage(new HarnessError({ code: 'rate_limited', message: 'x', retryAfterMs: 4200 }))).toBe('Too many attempts. Try again in 5s.')
-    expect(loginFailureMessage(new HarnessError({ code: 'provider_error', message: 'Other' }))).toBe('Other')
   })
 })

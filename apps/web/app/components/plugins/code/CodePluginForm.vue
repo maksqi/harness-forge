@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // Code plugin creation (docs/UI.md 8.6, 10.4): name, id (derived from the name until edited, checked like the server
-// checks it) and one template card; Create plugin -> `POST /api/plugins/scaffold` (a fresh-auth route: a
-// `403 forbidden` + `action: 'login'` opens ConfirmPasswordDialog and retries once) -> toast -> `created(id)`. The page
+// checks it) and one template card; Create plugin -> `POST /api/plugins/scaffold` (a fresh-auth route, useFreshAuth with
+// `required`: a session that is not fresh gets ConfirmPasswordDialog first, a later `403 forbidden` + `action:
+// 'login'` prompts and runs once more) -> toast -> `created(id)`. The page
 // (W3.3) then navigates to `/plugins/<id>?tab=source`. Files are JavaScript ESM with JSDoc types (`index.mjs`, the
 // default) or TypeScript (`index.ts`, compiled by the server; `language: 'ts'`).
 import type { PluginTemplateId } from '@harness-forge/shared'
@@ -19,11 +20,11 @@ import { cn } from '@/lib/utils'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
 import { errorTitle } from '~/components/common/harness-error'
 import { useApi } from '~/composables/useApi'
+import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { usePluginsStore } from '~/stores/plugins'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
 import { CODE_LANGUAGES, CODE_TEMPLATES, PLUGIN_ID_MAX, PLUGIN_NAME_MAX, pluginIdProblem, pluginNameProblem, slugifyPluginId } from './code-plugin-form'
-import { isFreshAuthCancelled, useFreshAuth } from './fresh-auth'
 
 const emit = defineEmits<{
   created: [id: string]
@@ -109,7 +110,7 @@ async function submit() {
   const body = { id: id.value, name: name.value.trim(), template: template.value, ...(language.value === 'ts' ? { language: 'ts' as const } : {}) }
   pending.value = true
   try {
-    const detail = await freshAuth.run(() => api.pluginFiles.scaffold({ body }))
+    const detail = await freshAuth.run(() => api.pluginFiles.scaffold({ body }), { required: true })
     void plugins.fetchAll().catch(() => {})
     toast.success(`Created ${detail.name}`)
     emit('created', detail.id)

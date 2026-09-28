@@ -146,12 +146,12 @@ ADR-027 consequence).
   - [x] C11 server skeleton (types, stub services, mock media models, headers, fakes, upgrade test)
   - [x] C12 web skeleton (Media settings page, stub components and composables, test ids, fake media)
   - [x] Gate (incl. v1.1 data upgrade probe) + FREEZE + checkpoint commit
-- [ ] P6-A Features (11 agents)
-  - [ ] W6.1 image-pipeline · [ ] W6.2 model-runtime · [ ] W6.3 provider-media · [ ] W6.4 image-host
-  - [ ] W6.5 voice-server · [ ] W6.6 chats-server
-  - [ ] W6.7 chat-surface-web · [ ] W6.8 media-parts-web · [ ] W6.9 composer-web · [ ] W6.10 media-settings-web
-  - [ ] W6.11 app-web (shared fresh-auth composable, tablet touch targets)
-  - [ ] Gate + checkpoint commit
+- [x] P6-A Features (11 agents)
+  - [x] W6.1 image-pipeline · [x] W6.2 model-runtime · [x] W6.3 provider-media · [x] W6.4 image-host
+  - [x] W6.5 voice-server · [x] W6.6 chats-server
+  - [x] W6.7 chat-surface-web · [x] W6.8 media-parts-web · [x] W6.9 composer-web · [x] W6.10 media-settings-web
+  - [x] W6.11 app-web (shared fresh-auth composable, tablet touch targets)
+  - [x] Gate + checkpoint commit (K5: CCR batch, migration `0003` marks cached model listings stale)
 - [ ] P6-B Feature e2e, docs, live media checks, fix-ups, final gate
   - [ ] W6.12 e2e-features · [ ] W6.13 docs-final · [ ] W6.14 live-media
   - [ ] Final gate (e2e ×3, screenshots, audit, v1.1 → v1.2 upgrade) + checkpoint commit
@@ -184,3 +184,4 @@ removed by delete-all) · video generation.
 | P6-00 | coordinator (hotfix) | `pnpm check` 4212 tests; `main.test.ts` 3× green (the new SIGTERM-during-boot test fails on the old `main.ts`); `actionlint` 1.7.12 exit 0 | a5fd107 |
 | P6-0a | coordinator (K1), C10, D6 | audit ok (67 paths; 7 compile-fix files accepted); 4256 tests; build ok; CSP 38/38; 3 new routes mounted (501); e2e 44 passed; CI on `a5fd107` green; Dependabot now opens separate katex / ai-sdk / minor PRs (#2-#4, green) | (this commit) |
 | P6-0b | coordinator (K3, K4), C11, C12 | audit ok (75 paths; 4 test/fake files accepted); 4374 tests; build ok; CSP 38/38 incl. `media-src 'self' blob:`; `Permissions-Policy: microphone=(self)`; e2e 44 passed (new fake-media Playwright config, empty `tablet` project); upgrade probe on a seeded v1.1 copy: `0002` applied, remembered pointers only on the active path (A → RA → B → RB), 0 invalid, `GET /chats/:id` unchanged, 24 chats; FREEZE | (this commit) |
+| P6-A | W6.1 – W6.11 (+ coordinator K5: 3 stale skeleton tests, 2 frozen doc comments, plugins-list e2e 3 tools, builtin `engines ^1.1.0`, migration `0003`) | audit ok (199 paths, no frozen file touched); 5060 tests; build ok; CSP 38/38; probes 21/21 (image turn 2 stored files + metadata, image-output chat, `generate_image` tool, no `data:` URL saved, transcription + 400 / 413, speech WAV no-store + 400, headers, remembered path, delete version 200 / `only-version` / `run-active`, `chat.updated.activeLeafId`, no transcript in logs); e2e 44 passed; screenshots reviewed (versions trash icon, mic, Image models group, Media nav); `pnpm audit --prod` clean | (this commit) |

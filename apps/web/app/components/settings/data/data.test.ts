@@ -17,8 +17,6 @@ import {
   importItemTitle,
   importKindOf,
   isBusyConflict,
-  loginErrorText,
-  needsFreshAuth,
   summaryLine,
 } from './data'
 
@@ -124,19 +122,10 @@ describe('delete-all texts', () => {
 })
 
 describe('errors', () => {
-  it('recognizes the busy conflict and the fresh-auth refusal', () => {
+  it('recognizes the busy conflict', () => {
     expect(isBusyConflict(new HarnessError({ code: 'conflict', message: 'Busy', details: { reason: 'busy' } }))).toBe(true)
     expect(isBusyConflict(new HarnessError({ code: 'conflict', message: 'Running', details: { reason: 'run-active' } }))).toBe(false)
     expect(isBusyConflict({ error: { code: 'conflict', message: 'Busy', details: { reason: 'busy' } } })).toBe(true)
-    expect(needsFreshAuth(new HarnessError({ code: 'forbidden', message: 'Log in again.', action: 'login' }))).toBe(true)
-    expect(needsFreshAuth(new HarnessError({ code: 'forbidden', message: 'Not allowed.' }))).toBe(false)
-  })
-
-  it('words login failures like the login page', () => {
-    expect(loginErrorText(new HarnessError({ code: 'unauthorized', message: 'Invalid password' }))).toBe('Wrong password')
-    expect(loginErrorText(new HarnessError({ code: 'rate_limited', message: 'Slow down', retryAfterMs: 27_400 })))
-      .toBe('Too many attempts. Try again in 28s.')
-    expect(loginErrorText(new HarnessError({ code: 'internal_error', message: 'The database is locked.' }))).toBe('The database is locked.')
   })
 })
 

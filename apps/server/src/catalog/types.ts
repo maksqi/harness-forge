@@ -11,9 +11,13 @@ export interface CatalogQuery {
 
 /**
  * Entries per provider: live listing (24 h cache in `model_cache`, last good kept; seeds when there is none) + plugin
- * models (registry) + custom ids; field precedence custom -> live -> models.dev -> seed; `classify()` hides non-chat
- * models; prefs from `model_prefs`. Emits `catalog.changed` on every change (listing refresh, prefs, custom models,
- * registry changes, models.dev refresh).
+ * models (registry) + custom ids; field precedence custom -> live -> models.dev -> seed; prefs from `model_prefs`.
+ * Phase 6 (ADR-028 / ADR-029): seeds with an explicit media kind (`image`, `transcription`, `speech`) are listed even
+ * next to a live listing; media entries from listings, seeds, plugin models and models.dev are listed only when the
+ * provider defines the matching factory (`createImageModel` / `createTranscriptionModel` / `createSpeechModel`), custom
+ * models always; an explicit `kind` wins over `classify()`; image models are visible, transcription / speech and other
+ * non-chat models hidden. Emits `catalog.changed` on every change (listing refresh, prefs, custom models, registry
+ * changes, models.dev refresh).
  */
 export interface ModelCatalog {
   /** Boot: loads the models.dev snapshot (+ `data/cache` refresh) and `model_cache`; starts background refreshes. */

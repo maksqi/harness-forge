@@ -1,8 +1,9 @@
 <script setup lang="ts">
-// Capability icons of a model (docs/UI.md 7.9): Eye (vision), Wrench (tools), Brain (reasoning), FileText (PDF),
-// then the context window ("200K", "1M"). Each icon has a tooltip and visually hidden text.
+// Capability icons of a model (docs/UI.md 7.9): Eye (vision), Wrench (tools), Brain (reasoning), Image (image output,
+// Phase 6: a chat model that can return images, `capabilities.imageOutput`), FileText (PDF), then the context window
+// ("200K", "1M"). Each icon has a tooltip and visually hidden text.
 import type { Component } from 'vue'
-import { BrainIcon, EyeIcon, FileTextIcon, WrenchIcon } from '@lucide/vue'
+import { BrainIcon, EyeIcon, FileTextIcon, ImageIcon, WrenchIcon } from '@lucide/vue'
 import { computed } from 'vue'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -15,6 +16,7 @@ interface ModelCapabilitiesLike {
   pdf?: boolean
   reasoning?: boolean
   structuredOutput?: boolean
+  imageOutput?: boolean
 }
 
 const props = withDefaults(defineProps<{
@@ -42,6 +44,8 @@ const items = computed<CapabilityItem[]>(() => {
     list.push({ key: 'tools', label: 'Tools', icon: WrenchIcon })
   if (caps.reasoning)
     list.push({ key: 'reasoning', label: 'Reasoning', icon: BrainIcon })
+  if (caps.imageOutput)
+    list.push({ key: 'imageOutput', label: 'Image output', icon: ImageIcon })
   if (caps.pdf)
     list.push({ key: 'pdf', label: 'PDF input', icon: FileTextIcon })
   return list

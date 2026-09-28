@@ -70,6 +70,8 @@ describe('themeToggle', () => {
     const trigger = wrapper.get(`[data-testid="${testIds.themeToggle}"]`)
     expect(trigger.element.tagName).toBe('BUTTON')
     expect(trigger.attributes('aria-label')).toBe('Theme: Light')
+    // A 40px target on touch devices, like the other icon-rail buttons (UI.md 14.5).
+    expect(trigger.classes()).toEqual(expect.arrayContaining(['size-8', 'pointer-coarse:size-10']))
     expect(wrapper.find(`[data-testid="${testIds.themeDark}"]`).exists()).toBe(false)
 
     await trigger.trigger('keydown', { key: 'Enter' })

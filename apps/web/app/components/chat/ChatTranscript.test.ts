@@ -118,9 +118,11 @@ describe('chatTranscript: versions', () => {
     const record = (name: string) => (...args: unknown[]) => {
       (events[name] ??= []).push(args)
     }
+    const transcript = ref<InstanceType<typeof ChatTranscript> | null>(null)
     const wrapper = mount({
       render: () => h(TooltipProvider, null, {
         default: () => h(ChatTranscript, {
+          ref: transcript,
           messages: state.value.messages,
           status: state.value.status,
           showThinking: false,
@@ -129,10 +131,12 @@ describe('chatTranscript: versions', () => {
           onSelectVersion: record('select-version'),
           onRegenerate: record('regenerate'),
           onRetry: record('retry'),
+          onEdit: record('edit'),
+          onDeleteVersion: record('delete-version'),
         }),
       }),
     }, { attachTo: document.body })
-    return { wrapper, state, events }
+    return { wrapper, state, events, transcript }
   }
 
   function control(wrapper: ReturnType<typeof mountWithVersions>['wrapper'], messageId: string, testId: string) {
@@ -224,5 +228,42 @@ describe('chatTranscript: versions', () => {
     await retry(A2).trigger('click')
     expect(events.regenerate).toEqual([[A1]])
     expect(events.retry).toEqual([[]])
+  })
+
+  it('re-emits "Delete this version" and edits (with their files) with the message id', async () => {
+    const photo = { type: 'file' as const, mediaType: 'image/png', filename: 'photo.png', url: '/api/files/file_photo000000000001' }
+    const { wrapper, events } = mountWithVersions({
+      messages: [userMessage(U1, 'q1', { parts: [photo, { type: 'text', text: 'q1' }] }), assistantMessage(A1, 'a1')],
+      branches: { [A1]: messageBranch([A1, A1B], 0) },
+    })
+    await nextTick()
+    await wrapper.get(`[data-message-id="${A1}"] [data-testid="${testIds.messageDeleteVersion}"]`).trigger('click')
+    expect(events['delete-version']).toEqual([[A1]])
+
+    await wrapper.get(`[data-message-id="${U1}"] [data-testid="${testIds.messageEdit}"]`).trigger('click')
+    await wrapper.get(`[data-testid="${testIds.messageEditSave}"]`).trigger('click')
+    await flushPromises()
+    expect(events.edit).toEqual([[U1, 'q1', [photo]]])
+  })
+
+  it('focuses the version shown after a deletion: its switcher, else its Copy button; or back on the delete button', async () => {
+    const { wrapper, transcript } = mountWithVersions({
+      messages: [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2, 'q2'), assistantMessage(A2, 'a2')],
+      branches: { [U2]: messageBranch([U2B, U2, 'msg_user00000000002c'], 1), [A1]: messageBranch([A1, A1B], 0) },
+    })
+    await nextTick()
+    // The first enabled control of the switcher.
+    expect(transcript.value!.focusShownVersion(U2)).toBe(true)
+    expect(document.activeElement).toBe(control(wrapper, U2, testIds.messageBranchPrevious).element)
+    expect(transcript.value!.focusShownVersion(A1)).toBe(true)
+    expect(document.activeElement).toBe(control(wrapper, A1, testIds.messageBranchNext).element)
+    // Only one version left: its Copy button.
+    expect(transcript.value!.focusShownVersion(A2)).toBe(true)
+    expect(document.activeElement).toBe(wrapper.get(`[data-message-id="${A2}"] [data-testid="${testIds.messageCopy}"]`).element)
+    expect(transcript.value!.focusShownVersion('msg_gone000000000001')).toBe(false)
+
+    expect(transcript.value!.focusDeleteVersion(U2)).toBe(true)
+    expect(document.activeElement).toBe(wrapper.get(`[data-message-id="${U2}"] [data-testid="${testIds.messageDeleteVersion}"]`).element)
+    expect(transcript.value!.focusDeleteVersion(A2)).toBe(false)
   })
 })

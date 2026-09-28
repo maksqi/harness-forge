@@ -147,8 +147,8 @@ describe('phase 5 services', () => {
   })
 })
 
-describe('phase 6 skeleton (P6-0b stubs until W6.2 / W6.4 / W6.5 / W6.6)', () => {
-  it('wires the image and audio services; the new members answer not_implemented', async () => {
+describe('phase 6 services (P6-0b skeleton, implemented in P6-A)', () => {
+  it('wires the image and audio services; no new member answers not_implemented any more', async () => {
     const t = await createTestApp({ start: false })
     cleanups.push(() => t.close())
     expect(SERVICE_NAMES).toEqual(expect.arrayContaining(['images', 'audio']))
@@ -163,8 +163,11 @@ describe('phase 6 skeleton (P6-0b stubs until W6.2 / W6.4 / W6.5 / W6.6)', () =>
       ['providers.resolveTranscriptionModel', () => t.deps.providers.resolveTranscriptionModel('mock:transcribe', { signal })],
       ['providers.resolveSpeechModel', () => t.deps.providers.resolveSpeechModel('mock:speech')],
     ]
-    for (const [name, call] of calls)
-      await expect(call(), name).rejects.toMatchObject({ code: 'not_implemented' })
+    for (const [name, call] of calls) {
+      // Each call may resolve or fail for its own reason (no model set, unknown chat, a bad file), never as a stub.
+      const outcome: unknown = await call().then(() => null, (reason: unknown) => reason)
+      expect((outcome as { code?: unknown } | null)?.code, name).not.toBe('not_implemented')
+    }
     // The existing members keep working next to the stubs.
     await expect(t.deps.chats.list({})).resolves.toMatchObject({ items: [] })
   })

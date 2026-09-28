@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Sidebar header (docs/UI.md 5.1): ember mark + mono wordmark + collapse trigger. In icon mode only the mark
-// shows and clicking it expands the sidebar (the trigger icon appears on hover). On mobile the trigger closes
-// the sheet.
+// shows and clicking it expands the sidebar (the trigger icon appears on hover); on touch devices it is a 40px target
+// like the other rail buttons (docs/UI.md 14.5). On mobile the trigger closes the sheet.
 import { PanelLeftIcon, XIcon } from '@lucide/vue'
 import { computed } from 'vue'
 import { Button } from '@/components/ui/button'
@@ -22,7 +22,7 @@ const iconMode = computed(() => state.value === 'collapsed' && !isMobile.value)
         type="button"
         aria-label="Expand sidebar"
         :data-testid="testIds.sidebarTrigger"
-        class="group/brand flex size-8 items-center justify-center rounded-md text-sidebar-foreground/70 outline-none transition-colors duration-(--duration-fast) hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring/50"
+        class="group/brand flex size-8 items-center justify-center rounded-md text-sidebar-foreground/70 outline-none transition-colors duration-(--duration-fast) pointer-coarse:size-10 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring/50"
         @click="toggleSidebar"
       >
         <BrandMark :size="16" class="group-hover/brand:hidden group-focus-visible/brand:hidden" />

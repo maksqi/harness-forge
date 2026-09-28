@@ -1,6 +1,6 @@
 // Settings -> Data rules (docs/UI.md 2.7, 9.8, 7.4; docs/API.md 4.16, 5.19; ADR-024): the summary and hint texts, the
-// checks of an import file, the wording of an import result, the errors that get special handling (busy, fresh auth)
-// and the browser storage that delete-all clears (composer drafts, unread marks).
+// checks of an import file, the wording of an import result, the error that gets special handling (busy; fresh auth is
+// useFreshAuth's) and the browser storage that delete-all clears (composer drafts, unread marks).
 import type {
   DataDeleteResult,
   DataImportItem,
@@ -14,7 +14,6 @@ import { formatBytes } from '~/components/common/format'
 import { COMPOSER_DRAFT_KEY_PREFIX } from '~/composables/useComposerDraft'
 import { UNREAD_CHATS_KEY } from '~/stores/chats'
 import { toHarnessError } from '~/utils/errors'
-import { rateLimitMessage } from '../login'
 
 /** The typed confirmation of delete-all (`DataDeleteBody.confirm`); case-sensitive. */
 export const DELETE_CONFIRMATION = 'DELETE'
@@ -149,22 +148,6 @@ export function isBusyConflict(error: unknown): boolean {
   const failure = toHarnessError(error)
   const details = failure.details as { reason?: unknown } | undefined
   return failure.code === 'conflict' && details?.reason === 'busy'
-}
-
-/** `403 forbidden` + `action: 'login'`: the session is valid but not fresh (docs/UI.md 8.4). */
-export function needsFreshAuth(error: unknown): boolean {
-  const failure = toHarnessError(error)
-  return failure.code === 'forbidden' && failure.action === 'login'
-}
-
-/** Text under the password field after `auth.login()` failed (docs/UI.md 9.7, 15). */
-export function loginErrorText(error: unknown): string {
-  const failure = toHarnessError(error)
-  if (failure.code === 'unauthorized' || failure.code === 'forbidden')
-    return 'Wrong password'
-  if (failure.code === 'rate_limited')
-    return rateLimitMessage((failure.retryAfterMs ?? 1000) / 1000)
-  return failure.message
 }
 
 /**

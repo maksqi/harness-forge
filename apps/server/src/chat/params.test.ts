@@ -1,10 +1,10 @@
-import type { HookMap, HookName, ReasoningParams } from '@harness-forge/plugin-sdk'
+import type { HookMap, HookName, ProviderOptions, ReasoningParams } from '@harness-forge/plugin-sdk'
 import type { ReasoningEffort } from '@harness-forge/shared'
 import type { ResolvedModel } from '../providers/types.ts'
 import type { RunParamsInput } from './params.ts'
 import { describe, expect, it } from 'vitest'
 import { createSilentLogger } from '../logger.ts'
-import { buildRunParams, joinInstructions, providerReasoning } from './params.ts'
+import { buildRunParams, joinInstructions, mergeProviderOptions, providerImageOptions, providerReasoning } from './params.ts'
 
 function resolved(options: { reasoning?: boolean, efforts?: ReasoningEffort[], fn?: (effort: ReasoningEffort) => ReasoningParams | undefined } = {}): ResolvedModel {
   return {
@@ -123,5 +123,51 @@ describe('buildRunParams', () => {
       providerOptions: { prov: { budget: 1024 } },
       headers: {},
     })
+  })
+})
+
+describe('image output provider options (ADR-028)', () => {
+  function imageModel(imageParams?: (request: unknown) => unknown): ResolvedModel {
+    const base = resolved()
+    return { ...base, provider: { ...base.provider, definition: { ...base.provider.definition, ...(imageParams === undefined ? {} : { imageParams }) } } } as unknown as ResolvedModel
+  }
+
+  it('asks imageParams for one image with the aspect ratio and keeps only valid provider options', () => {
+    const requests: unknown[] = []
+    const model = imageModel((request) => {
+      requests.push(request)
+      return { providerOptions: { google: { responseModalities: ['TEXT', 'IMAGE'] } }, size: '1024x1024' }
+    })
+    expect(providerImageOptions(model, '16:9', createSilentLogger())).toEqual({ google: { responseModalities: ['TEXT', 'IMAGE'] } })
+    expect(providerImageOptions(model, undefined, createSilentLogger())).toEqual({ google: { responseModalities: ['TEXT', 'IMAGE'] } })
+    expect(requests).toEqual([{ n: 1, inputs: 0, aspectRatio: '16:9' }, { n: 1, inputs: 0 }])
+    expect(providerImageOptions(imageModel(), '1:1', createSilentLogger())).toBeUndefined()
+    expect(providerImageOptions(imageModel(() => undefined), '1:1', createSilentLogger())).toBeUndefined()
+    expect(providerImageOptions(imageModel(() => ({ providerOptions: { google: 'x' } })), '1:1', createSilentLogger())).toBeUndefined()
+    expect(providerImageOptions(imageModel(() => {
+      throw new Error('broken plugin')
+    }), '1:1', createSilentLogger())).toBeUndefined()
+  })
+
+  it('deep-merges the reasoning options over the image options, before the hooks see them', async () => {
+    expect(mergeProviderOptions({ google: { a: 1, nested: { x: 1 } }, other: { keep: true } }, { google: { b: 2, nested: { y: 2 } } })).toEqual({
+      google: { a: 1, b: 2, nested: { x: 1, y: 2 } },
+      other: { keep: true },
+    })
+    const polluted = JSON.parse('{"prov":{"__proto__":{"polluted":true},"ok":1}}') as ProviderOptions
+    const merged = mergeProviderOptions({}, polluted)
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+    expect(merged.prov).toMatchObject({ ok: 1 })
+    const seen: unknown[] = []
+    const params = await buildRunParams(input({
+      imageProviderOptions: { prov: { responseModalities: ['TEXT', 'IMAGE'] }, img: { aspectRatio: '16:9' } },
+      run: async (name, ...args) => {
+        if (name === 'chat.params')
+          seen.push(structuredClone((args[1] as { providerOptions: unknown }).providerOptions))
+      },
+    }))
+    const expected = { prov: { responseModalities: ['TEXT', 'IMAGE'], budget: 1024 }, img: { aspectRatio: '16:9' } }
+    expect(seen).toEqual([expected])
+    expect(params.providerOptions).toEqual(expected)
   })
 })

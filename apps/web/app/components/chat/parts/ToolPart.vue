@@ -2,7 +2,9 @@
 // Tool call row (docs/UI.md 7.2): `▸ icon name "first argument" [server] … status`, the whole row toggles the body
 // (input / output / error, 4 KB previews) and never opens by itself. MCP tools (`mcp__<server>__<tool>`) show the tool
 // name plus a server badge (the server's name; the MCP list loads on first need). While approval is requested,
-// ToolApprovalCard renders below the row.
+// ToolApprovalCard renders below the row. The builtin generate_image tool (Phase 6) is a normal row whose first
+// argument is the prompt; its output stays JSON (file references) and its images are the file parts the server appends
+// after the call, rendered as a gallery below the row.
 import type { ToolPartLike } from '../chat-format'
 import {
   BanIcon,
@@ -23,13 +25,13 @@ import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
 import { TRANSCRIPT_SCROLL } from '../chat-context'
 import {
-  firstStringArg,
   formatToolValue,
   isServerTruncated,
   isSupersededDenial,
   splitMcpToolName,
   toolNameOf,
 } from '../chat-format'
+import { toolRowArgument } from './tool-row'
 import ToolApprovalCard from './ToolApprovalCard.vue'
 import ToolValueBlock from './ToolValueBlock.vue'
 
@@ -73,7 +75,7 @@ watch(serverId, (id) => {
   if (id && !plugins.mcpLoaded)
     plugins.fetchMcp().catch(() => {})
 }, { immediate: true })
-const firstArg = computed(() => firstStringArg(props.part.input))
+const firstArg = computed(() => toolRowArgument(name.value, props.part.input))
 
 type RowStatus = 'running' | 'approval' | 'done' | 'error' | 'denied' | 'stopped'
 

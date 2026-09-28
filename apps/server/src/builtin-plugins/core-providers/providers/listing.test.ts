@@ -3,7 +3,9 @@ import type { FakeRoute } from '../testing.ts'
 import { modelInfoListSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { chatCompletion, fakeRuntime, jsonResponse } from '../testing.ts'
+import { GEMINI_TTS_VOICES } from './google.ts'
 import { PROVIDER_DEFINITIONS } from './index.ts'
+import { OPENAI_GPT_TTS_VOICES, OPENAI_TTS_VOICES } from './openai.ts'
 
 function provider(id: string): ProviderDefinition {
   const definition = PROVIDER_DEFINITIONS.find(candidate => candidate.id === id)
@@ -117,20 +119,44 @@ describe('listModels', () => {
     ])
   })
 
-  it('openai: keeps chat models and derives reasoning efforts from the id', async () => {
-    const ids = ['gpt-6-sol', 'text-embedding-3-large', 'gpt-image-2', 'gpt-4.1', 'o4-mini', 'whisper-1', 'gpt-realtime', 'gpt-5-search-api', 'tts-1', 'sora-2']
+  it('openai: keeps chat models (efforts from the id) and the image, transcription and speech models it can run', async () => {
+    const ids = [
+      'gpt-6-sol',
+      'text-embedding-3-large',
+      'gpt-image-2',
+      'gpt-4.1',
+      'o4-mini',
+      'whisper-1',
+      'gpt-realtime',
+      'gpt-5-search-api',
+      'tts-1',
+      'sora-2',
+      'chatgpt-image-latest',
+      'dall-e-3',
+      'gpt-4o-mini-transcribe-2025-12-15',
+      'gpt-4o-mini-tts',
+      'gpt-realtime-whisper',
+      'gpt-4o-audio-preview',
+      'omni-moderation-latest',
+    ]
     const { models, requests } = await list('openai', { apiKey: 'sk-test', baseURL: 'https://proxy.example.com/v1/' }, routes({
       'https://proxy.example.com/v1/models': () => jsonResponse({ object: 'list', data: ids.map(id => ({ id, object: 'model', owned_by: 'openai' })) }),
     }))
     expect(requests[0]?.headers.authorization).toBe('Bearer sk-test')
     expect(models).toEqual([
       { id: 'gpt-6-sol', capabilities: { reasoning: true }, reasoningEfforts: ['off', 'low', 'medium', 'high', 'max'] },
+      { id: 'gpt-image-2', kind: 'image', capabilities: { vision: true } },
       { id: 'gpt-4.1' },
       { id: 'o4-mini', capabilities: { reasoning: true }, reasoningEfforts: ['low', 'medium', 'high'] },
+      { id: 'whisper-1', kind: 'transcription' },
+      { id: 'tts-1', kind: 'speech', voices: [...OPENAI_TTS_VOICES] },
+      { id: 'chatgpt-image-latest', kind: 'image', capabilities: { vision: true } },
+      { id: 'gpt-4o-mini-transcribe-2025-12-15', kind: 'transcription' },
+      { id: 'gpt-4o-mini-tts', kind: 'speech', voices: [...OPENAI_GPT_TTS_VOICES] },
     ])
   })
 
-  it('google: follows nextPageToken, strips models/ and keeps generateContent chat models', async () => {
+  it('google: follows nextPageToken, strips models/ and keeps generateContent chat, image-output and speech models', async () => {
     const gemini = (name: string, extra: Record<string, unknown> = {}) => ({
       name: `models/${name}`,
       displayName: name.toUpperCase(),
@@ -145,15 +171,30 @@ describe('listModels', () => {
           gemini('gemini-3.8-flash', { thinking: true }),
           gemini('text-embedding-004', { supportedGenerationMethods: ['embedContent'] }),
           gemini('gemini-2.5-flash-image'),
+          gemini('imagen-4.0-generate-001', { supportedGenerationMethods: ['predict'] }),
         ],
         nextPageToken: 'page-2',
       }),
       'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&pageToken=page-2': () => jsonResponse({
-        models: [gemini('gemini-2.5-pro', { thinking: true }), gemini('gemini-live-2.5-flash'), gemini('gemma-3-27b-it', { thinking: false })],
+        models: [
+          gemini('gemini-2.5-pro', { thinking: true }),
+          gemini('gemini-live-2.5-flash'),
+          gemini('gemma-3-27b-it', { thinking: false }),
+          gemini('gemini-3-pro-image-preview', { thinking: true }),
+          gemini('gemini-2.5-flash-preview-tts', { inputTokenLimit: 8192, outputTokenLimit: 16_384 }),
+          gemini('gemini-2.5-flash-native-audio-latest'),
+        ],
       }),
     }))
     expect(requests[0]?.headers['x-goog-api-key']).toBe('AIza-test')
-    expect(models.map(model => model.id)).toEqual(['gemini-3.8-flash', 'gemini-2.5-pro', 'gemma-3-27b-it'])
+    expect(models.map(model => model.id)).toEqual([
+      'gemini-3.8-flash',
+      'gemini-2.5-flash-image',
+      'gemini-2.5-pro',
+      'gemma-3-27b-it',
+      'gemini-3-pro-image-preview',
+      'gemini-2.5-flash-preview-tts',
+    ])
     expect(byId(models, 'gemini-3.8-flash')).toEqual({
       id: 'gemini-3.8-flash',
       name: 'GEMINI-3.8-FLASH',
@@ -164,15 +205,39 @@ describe('listModels', () => {
     })
     expect(byId(models, 'gemini-2.5-pro')?.reasoningEfforts).toEqual(['low', 'medium', 'high', 'max'])
     expect(byId(models, 'gemma-3-27b-it')?.capabilities).toEqual({ reasoning: false })
+    // Image output keeps a chat model a chat model: the explicit kind wins over the catalog's id fallback.
+    expect(byId(models, 'gemini-2.5-flash-image')).toEqual({
+      id: 'gemini-2.5-flash-image',
+      name: 'GEMINI-2.5-FLASH-IMAGE',
+      kind: 'chat',
+      contextWindow: 1_048_576,
+      maxOutputTokens: 65_536,
+      capabilities: { imageOutput: true },
+    })
+    expect(byId(models, 'gemini-3-pro-image-preview')).toMatchObject({
+      kind: 'chat',
+      capabilities: { reasoning: true, imageOutput: true },
+      reasoningEfforts: ['low', 'medium', 'high'],
+    })
+    expect(byId(models, 'gemini-2.5-flash-preview-tts')).toEqual({
+      id: 'gemini-2.5-flash-preview-tts',
+      name: 'GEMINI-2.5-FLASH-PREVIEW-TTS',
+      kind: 'speech',
+      voices: [...GEMINI_TTS_VOICES],
+    })
   })
 
-  it('xai: drops grok-imagine models', async () => {
+  it('xai: keeps grok-imagine-image models as image models and drops the video models', async () => {
     const { models } = await list('xai', { apiKey: 'xai-test' }, routes({
-      'https://api.x.ai/v1/models': () => jsonResponse({ data: [{ id: 'grok-4.6' }, { id: 'grok-imagine-image' }, { id: 'grok-4.20-reasoning' }] }),
+      'https://api.x.ai/v1/models': () => jsonResponse({
+        data: [{ id: 'grok-4.6' }, { id: 'grok-imagine-image' }, { id: 'grok-4.20-reasoning' }, { id: 'grok-imagine-video' }, { id: 'grok-imagine-image-pro' }],
+      }),
     }))
     expect(models).toEqual([
       { id: 'grok-4.6', capabilities: { reasoning: true }, reasoningEfforts: ['low', 'medium', 'high', 'max'] },
+      { id: 'grok-imagine-image', kind: 'image', capabilities: { vision: true } },
       { id: 'grok-4.20-reasoning', capabilities: { reasoning: true }, reasoningEfforts: [] },
+      { id: 'grok-imagine-image-pro', kind: 'image', capabilities: { vision: true } },
     ])
   })
 
@@ -280,7 +345,7 @@ describe('listModels', () => {
     ])
   })
 
-  it('groq: active chat models with limits', async () => {
+  it('groq: active chat models with limits and the Whisper transcription models', async () => {
     const { models } = await list('groq', { apiKey: 'gsk_test' }, routes({
       'https://api.groq.com/openai/v1/models': () => jsonResponse({
         object: 'list',
@@ -291,16 +356,21 @@ describe('listModels', () => {
           { id: 'openai/gpt-oss-safeguard-20b', active: true },
           { id: 'llama-3.3-70b-versatile', active: true, context_window: 131_072, max_completion_tokens: 32_768 },
           { id: 'mixtral-8x7b-32768', active: false },
+          { id: 'whisper-large-v3-turbo', active: false },
+          { id: 'distil-whisper-large-v3-en', active: true },
+          { id: 'canopylabs/orpheus-v1-english', active: true },
+          { id: 'playai-tts', active: true },
         ],
       }),
     }))
     expect(models).toEqual([
       { id: 'openai/gpt-oss-120b', contextWindow: 131_072, maxOutputTokens: 65_536, capabilities: { reasoning: true }, reasoningEfforts: ['low', 'medium', 'high'] },
+      { id: 'whisper-large-v3', kind: 'transcription' },
       { id: 'llama-3.3-70b-versatile', contextWindow: 131_072, maxOutputTokens: 32_768 },
     ])
   })
 
-  it('openrouter: public listing with capabilities, efforts and per-token pricing', async () => {
+  it('openrouter: public listing with capabilities, image output, efforts and per-token pricing', async () => {
     const luna = {
       id: 'openai/gpt-6-luna',
       name: 'OpenAI: GPT-6 Luna',
@@ -323,6 +393,14 @@ describe('listModels', () => {
         data: [
           luna,
           { id: 'acme/image-gen', architecture: { input_modalities: ['text'], output_modalities: ['image'] }, pricing: { prompt: '0', completion: '0' } },
+          {
+            id: 'google/gemini-2.5-flash-image',
+            name: 'Google: Nano Banana',
+            context_length: 32_768,
+            architecture: { modality: 'text+image->text+image', input_modalities: ['image', 'text'], output_modalities: ['image', 'text'] },
+            pricing: { prompt: '0.0000003', completion: '0.0000025' },
+            supported_parameters: ['max_tokens', 'response_format', 'structured_outputs', 'temperature'],
+          },
           { id: 'openrouter/auto', name: 'Auto Router', context_length: 2_000_000, pricing: { prompt: '-1', completion: '-1' }, supported_parameters: ['tools'] },
           { id: 'acme/plain', name: 'Plain', pricing: { prompt: '0', completion: '0' } },
         ],
@@ -339,9 +417,18 @@ describe('listModels', () => {
         name: 'OpenAI: GPT-6 Luna',
         contextWindow: 1_050_000,
         maxOutputTokens: 128_000,
-        capabilities: { tools: true, vision: true, pdf: true, reasoning: true, structuredOutput: true },
+        capabilities: { tools: true, vision: true, pdf: true, reasoning: true, structuredOutput: true, imageOutput: false },
         reasoningEfforts: ['off', 'low', 'medium', 'high', 'max'],
         cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+      },
+      {
+        // A chat model although its id says "image": the explicit kind wins over the catalog's id fallback.
+        id: 'google/gemini-2.5-flash-image',
+        name: 'Google: Nano Banana',
+        kind: 'chat',
+        contextWindow: 32_768,
+        capabilities: { tools: false, vision: true, pdf: false, reasoning: false, structuredOutput: true, imageOutput: true },
+        cost: { input: 0.3, output: 2.5 },
       },
       {
         id: 'openrouter/auto',

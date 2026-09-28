@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // One tool call of a shared chat (docs/UI.md 7.2, 7.15): the one-line row of the transcript without approvals —
 // Wrench (Server and a server badge for `mcp__<server>__<tool>`), the tool name, the first argument when the share
-// includes tool details, and the outcome (done, error, denied, stopped). With tool details the row is a button that
-// expands Input / Output (ToolValueBlock) and the error text; without them it is static. Store-free.
+// includes tool details (the prompt for generate_image), and the outcome (done, error, denied, stopped). With tool
+// details the row is a button that expands Input / Output (ToolValueBlock) and the error text; without them it is
+// static. Store-free.
 // Contract (docs/UI.md 10.4): `part` is the snapshot's tool part (toolName, status, input?, output?, errorText?).
 import type { ShareToolPart } from './share-view'
 import { BanIcon, CheckIcon, ChevronRightIcon, CircleSlashIcon, ServerIcon, WrenchIcon, XIcon } from '@lucide/vue'
@@ -10,7 +11,8 @@ import { computed, ref } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
-import { firstStringArg, formatToolValue, isServerTruncated, splitMcpToolName } from '~/components/chat/chat-format'
+import { formatToolValue, isServerTruncated, splitMcpToolName } from '~/components/chat/chat-format'
+import { toolRowArgument } from '~/components/chat/parts/tool-row'
 import ToolValueBlock from '~/components/chat/parts/ToolValueBlock.vue'
 import { testIds } from '~/utils/testids'
 
@@ -24,7 +26,7 @@ const hasInput = computed(() => props.part.input !== undefined)
 const hasOutput = computed(() => props.part.output !== undefined)
 /** Tool details are shared: the server sends inputs, outputs and errors only with `options.toolDetails`. */
 const expandable = computed(() => hasInput.value || hasOutput.value || !!props.part.errorText)
-const firstArg = computed(() => (hasInput.value ? firstStringArg(props.part.input) : null))
+const firstArg = computed(() => (hasInput.value ? toolRowArgument(props.part.toolName, props.part.input) : null))
 const inputText = computed(() => formatToolValue(props.part.input))
 const outputText = computed(() => formatToolValue(props.part.output))
 // A value over the share limit arrives as its JSON text, cut and marked "[truncated]" (ADR-025).

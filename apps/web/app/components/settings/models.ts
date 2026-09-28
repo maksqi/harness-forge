@@ -1,5 +1,72 @@
-// Settings -> Models rules (docs/UI.md 9.3): per-provider sections, the filter, table order and price labels.
-import type { CatalogModel, ModelCost, ProviderSummary } from '@harness-forge/shared'
+// Settings -> Models rules (docs/UI.md 9.3): per-provider sections, the filter, table order and price labels; the
+// model lists of SettingsModelSelect per kind (docs/UI.md 9.3, 9.9, 10.4) and the kind labels of the models table.
+import type { CatalogModel, ModelCost, ModelKind, ProviderSummary } from '@harness-forge/shared'
+
+/**
+ * What a SettingsModelSelect lists (docs/UI.md 10.4): `chat` = the visible chat models (Settings -> Models: default and
+ * title model); `image` = the visible image models (Settings -> Media, the model of the generate_image tool);
+ * `transcription` / `speech` = every speech-to-text / text-to-speech model, hidden ones included (they never appear in
+ * the chat model picker, so they are hidden by default).
+ */
+export type SettingsModelKind = 'chat' | 'image' | 'transcription' | 'speech'
+
+/** One group of a SettingsModelSelect: a connected provider and its models of the requested kind. */
+export interface ModelSelectGroup {
+  provider: ProviderSummary
+  models: CatalogModel[]
+}
+
+/** Kinds whose hidden models stay out of the select (hidden = never shown in the chat model picker either). */
+const VISIBLE_ONLY_KINDS: ReadonlySet<SettingsModelKind> = new Set(['chat', 'image'])
+
+/**
+ * The models of `kind` grouped by connected provider, in the order of `providers` (the connected ones, settings
+ * order); providers without such models are skipped. Inside a group the catalog order is kept (favorites, recent, then
+ * name). Models of providers that are not in `providers` are left out.
+ */
+export function modelSelectGroups(
+  providers: readonly ProviderSummary[],
+  models: readonly CatalogModel[],
+  kind: SettingsModelKind,
+): ModelSelectGroup[] {
+  const visibleOnly = VISIBLE_ONLY_KINDS.has(kind)
+  const byProvider = new Map<string, CatalogModel[]>()
+  for (const model of models) {
+    if (model.kind !== kind || (visibleOnly && model.hidden))
+      continue
+    const list = byProvider.get(model.providerId)
+    if (list)
+      list.push(model)
+    else
+      byProvider.set(model.providerId, [model])
+  }
+  const groups: ModelSelectGroup[] = []
+  for (const provider of providers) {
+    const list = byProvider.get(provider.id)
+    if (list)
+      groups.push({ provider, models: list })
+  }
+  return groups
+}
+
+/** The text of a SettingsModelSelect popover without any model of its kind. */
+export const MODEL_SELECT_EMPTY_TEXT: Readonly<Record<SettingsModelKind, string>> = {
+  chat: 'No chat models from your connected providers.',
+  image: 'No image models from your connected providers.',
+  transcription: 'No speech-to-text models from your connected providers.',
+  speech: 'No text-to-speech models from your connected providers.',
+}
+
+/** The muted kind badge of a non-chat model in the models table (docs/UI.md 9.3). */
+export const MODEL_KIND_LABELS: Readonly<Record<ModelKind, string>> = {
+  chat: 'Chat',
+  image: 'Image',
+  transcription: 'Speech to text',
+  speech: 'Text to speech',
+  embedding: 'Embedding',
+  audio: 'Audio',
+  other: 'Other',
+}
 
 /** A connected provider and its catalog models (hidden ones included) that match the filter. */
 export interface ModelSection {

@@ -1,19 +1,25 @@
 // Message persistence (table `messages`) behind `ChatMessageStore`, on the database or bound to a transaction of
-// `ChatsService.transaction()`. Every member is a single statement, so it is atomic on its own and needs no
-// interactive transaction.
+// `ChatsService.transaction()`. Every member is atomic on its own and needs no interactive transaction: a single
+// statement, or (`setActiveLeaf` on the database) one batch.
 //
 // The messages of a chat form a tree (ADR-023, ARCHITECTURE.md 6.8, ./tree.ts): `appendMessage` and `upsertMessage`
 // store the parent of a new message (a parent must be a message of the same chat), `seq` is the creation order
 // (MAX + 1), `listPath` walks up `parent_id` with a recursive query guarded by `parent.seq < child.seq`, and
 // `setActiveLeaf` is a compare-and-set of `chats.active_leaf_id`.
+//
+// Remembered versions (Phase 6, ADR-030): `messages.selected_child_id` is the child last shown under a message.
+// `rememberPathSql` records the path of a leaf (the backfill of migration 0002 for one leaf); `setActiveLeaf` writes it
+// under the same condition as the move, so the pipeline's commit and persist record every path they show. The
+// services' version switch, version delete (`deleteSubtreeSql`) and import batch use the same helpers.
 import type { HarnessUIMessage } from '@harness-forge/shared'
 import type { SQL } from 'drizzle-orm'
-import type { DbExecutor } from '../../db/client.ts'
+import type { Db, DbExecutor } from '../../db/client.ts'
 import type { MessageRow } from '../../db/schema.ts'
 import type { TreeRow } from './tree.ts'
 import type { ChatMessageStore } from './types.ts'
 import { HarnessError, MESSAGE_ID_PATTERN } from '@harness-forge/shared'
-import { and, asc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, is, isNull, or, sql } from 'drizzle-orm'
+import { SQLiteTransaction } from 'drizzle-orm/sqlite-core'
 import { chats, messages } from '../../db/schema.ts'
 import { guardDb, isConstraintError } from './db-errors.ts'
 import { toSearchText } from './text.ts'
@@ -37,6 +43,7 @@ export const TREE_COLUMNS = {
   parentId: messages.parentId,
   seq: messages.seq,
   role: messages.role,
+  selectedChildId: messages.selectedChildId,
 }
 
 /** A stored row as a UI message (`metadata` omitted when null). */
@@ -115,6 +122,58 @@ export function chunk<T>(items: readonly T[], size: number): T[][] {
 /** The light rows of a chat in `seq` order (empty for an unknown chat), for the tree helpers. */
 export async function listTreeRows(executor: DbExecutor, chatId: string): Promise<TreeRow[]> {
   return executor.select(TREE_COLUMNS).from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.seq))
+}
+
+/** An SQL condition: `messageId` is a message of the chat. */
+export function messageInChatSql(chatId: string, messageId: string): SQL {
+  return sql`EXISTS (SELECT 1 FROM messages AS x WHERE x.chat_id = ${chatId} AND x.id = ${messageId})`
+}
+
+/**
+ * Records the path that ends at `leafId` as the remembered versions (ADR-030): every parent on the path gets
+ * `selected_child_id` = its child on the path. The `UPDATE ... FROM` of migration 0002's backfill anchored on one leaf:
+ * the same walk up `parent_id` (guarded by `parent.seq < child.seq` and the chat, so bad data ends the walk and only
+ * effective parents are written), plus `selected_child_id IS NOT path.id` (a row that already points at its child is
+ * not written), and nothing at all unless `when` holds. `when` defaults to "`leafId` is the chat's active leaf", so the
+ * statement can follow the write of the leaf in a batch; a compare-and-set passes its own condition instead and runs
+ * this statement before the move, so both are written or neither.
+ */
+export function rememberPathSql(chatId: string, leafId: string, when?: SQL): SQL {
+  const condition = when ?? sql`EXISTS (SELECT 1 FROM chats AS c WHERE c.id = ${chatId} AND c.active_leaf_id = ${leafId})`
+  return sql`
+    WITH RECURSIVE path(id, parent_id, seq) AS (
+      SELECT m.id, m.parent_id, m.seq FROM messages AS m WHERE m.chat_id = ${chatId} AND m.id = ${leafId}
+      UNION ALL
+      SELECT p.id, p.parent_id, p.seq FROM messages AS p JOIN path ON p.id = path.parent_id
+      WHERE p.chat_id = ${chatId} AND p.seq < path.seq
+    )
+    UPDATE messages SET selected_child_id = path.id FROM path
+    WHERE messages.chat_id = ${chatId} AND messages.id = path.parent_id AND messages.seq < path.seq
+      AND messages.selected_child_id IS NOT path.id AND ${condition}`
+}
+
+/**
+ * Deletes `messageId` and every message after it (its subtree: a recursive query down `parent_id`, guarded by
+ * `child.seq > parent.seq` and the chat like every walk of the tree) when `when` holds; a version delete (ADR-030).
+ * The rows take their search text with them; nothing else is touched. `rowsAffected` = the deleted messages.
+ */
+export function deleteSubtreeSql(chatId: string, messageId: string, when: SQL): SQL {
+  // Planner hints: `CROSS JOIN` keeps the one queued row outside and `+c.seq` keeps the guard out of index selection, so
+  // each step looks the children up in `messages_chat_parent_idx`. Without them SQLite range-scans the chat by `seq` for
+  // every descendant (a 3000-message subtree took seconds instead of milliseconds).
+  return sql`
+    WITH RECURSIVE subtree(id, seq) AS (
+      SELECT m.id, m.seq FROM messages AS m WHERE m.chat_id = ${chatId} AND m.id = ${messageId}
+      UNION ALL
+      SELECT c.id, c.seq FROM subtree CROSS JOIN messages AS c
+      WHERE c.chat_id = ${chatId} AND c.parent_id = subtree.id AND +c.seq > subtree.seq
+    )
+    DELETE FROM messages WHERE chat_id = ${chatId} AND id IN (SELECT id FROM subtree) AND ${when}`
+}
+
+/** The database itself, not a transaction of `ChatsService.transaction()`: it can send statements as one batch. */
+function isDatabase(executor: DbExecutor): executor is Db {
+  return !is(executor, SQLiteTransaction)
 }
 
 /**
@@ -248,16 +307,18 @@ export function createMessageStore(executor: DbExecutor): ChatMessageStore {
           return false
         current = or(...matches)
       }
-      const rows = await executor
-        .update(chats)
-        .set({ activeLeafId: leafId })
-        .where(and(
-          eq(chats.id, chatId),
-          current,
-          sql`EXISTS (SELECT 1 FROM messages AS m WHERE m.chat_id = ${chatId} AND m.id = ${leafId})`,
-        ))
-        .returning({ id: chats.id })
-      return rows.length > 0
+      const target = and(eq(chats.id, chatId), current, messageInChatSql(chatId, leafId))!
+      // The shown path becomes the remembered versions (ADR-030) under the same condition as the move, written first:
+      // both or neither (in order inside a transaction, one batch on the database). A failed compare-and-set writes
+      // nothing.
+      const remember = executor.run(rememberPathSql(chatId, leafId, sql`EXISTS (SELECT 1 FROM ${chats} WHERE ${target})`))
+      const move = executor.update(chats).set({ activeLeafId: leafId }).where(target).returning({ id: chats.id })
+      if (isDatabase(executor)) {
+        const [, moved] = await executor.batch([remember, move])
+        return moved.length > 0
+      }
+      await remember
+      return (await move).length > 0
     }),
   }
 }

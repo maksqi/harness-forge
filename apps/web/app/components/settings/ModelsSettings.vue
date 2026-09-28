@@ -1,6 +1,7 @@
 <script setup lang="ts">
-// Settings -> Models body (docs/UI.md 9.3): default and title model, then the filter and one collapsible table per
-// connected provider (favorite, visibility, rename, refresh, custom models). Large providers start collapsed.
+// Settings -> Models body (docs/UI.md 9.3): default and title model (chat models only; image, speech-to-text and
+// text-to-speech models are chosen in Settings -> Media), then the filter and one collapsible table per connected
+// provider (favorite, visibility, rename, refresh, custom models). Large providers start collapsed.
 import type { ProviderSummary } from '@harness-forge/shared'
 import { BoxesIcon, SearchIcon } from '@lucide/vue'
 import { computed, onMounted, ref, useId } from 'vue'
@@ -102,6 +103,7 @@ function addCustom(provider: ProviderSummary) {
         <SettingsModelSelect
           :id="ids.defaultModel"
           :model-value="settings.resolved.defaultModelRef"
+          kind="chat"
           allow-none
           none-label="Automatic (last used model)"
           label="Default model"
@@ -120,6 +122,7 @@ function addCustom(provider: ProviderSummary) {
         <SettingsModelSelect
           :id="ids.titleModel"
           :model-value="settings.resolved.titleModelRef"
+          kind="chat"
           allow-none
           none-label="Automatic (small model of the chat's provider)"
           label="Title model"

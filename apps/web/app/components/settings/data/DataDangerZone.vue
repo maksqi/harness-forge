@@ -1,9 +1,10 @@
 <script setup lang="ts">
 // Danger zone of Settings -> Data (docs/UI.md 9.8, 8.4; docs/API.md 5.19): "Delete all data…" opens DataDeleteDialog and
-// "Delete everything" sends `POST /api/data/delete`, a fresh-auth route. With a password set and a session that is not
-// fresh, ConfirmPasswordDialog asks for the password first; a `403 forbidden` + `action: 'login'` answer asks for it and
-// retries once. Afterwards the composer drafts and unread marks of the deleted chats are dropped, the chat list reloads
-// and the app returns to `/`. The server emits `chat.deleted` per chat, so other tabs follow.
+// "Delete everything" sends `POST /api/data/delete`, a fresh-auth route (useFreshAuth with `required`): with a password
+// set and a session that is not fresh, ConfirmPasswordDialog asks for the password first; a `403 forbidden` + `action:
+// 'login'` answer asks for it and retries once. Afterwards the composer drafts and unread marks of the deleted chats are
+// dropped, the chat list reloads and the app returns to `/`. The server emits `chat.deleted` per chat, so other tabs
+// follow.
 import type { DataDeleteResult, DataSummary } from '@harness-forge/shared'
 import type { DeleteAllOptions } from './data'
 import { Trash2Icon } from '@lucide/vue'
@@ -12,7 +13,7 @@ import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
 import { useApi } from '~/composables/useApi'
-import { useAuthStore } from '~/stores/auth'
+import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { useChatsStore } from '~/stores/chats'
 import { withHarnessErrors } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
@@ -25,8 +26,6 @@ import {
   DELETE_CONFIRMATION,
   deletedMessage,
   isBusyConflict,
-  loginErrorText,
-  needsFreshAuth,
 } from './data'
 import DataDeleteDialog from './DataDeleteDialog.vue'
 
@@ -36,20 +35,15 @@ defineProps<{
 }>()
 
 const api = useApi()
-const auth = useAuthStore()
 const chats = useChatsStore()
+const freshAuth = useFreshAuth()
 
 const deleteDialog = ref<InstanceType<typeof DataDeleteDialog> | null>(null)
 const dialogOpen = ref(false)
 const deleting = ref(false)
-const passwordOpen = ref(false)
-const passwordPending = ref(false)
-const passwordError = ref<string | null>(null)
-/** The choices of a delete waiting for the password prompt. */
-let waiting: DeleteAllOptions | null = null
 
 /** A delete runs or waits for the password: nothing else starts and the dialog stays open. */
-const busy = computed(() => deleting.value || passwordOpen.value)
+const busy = computed(() => deleting.value || freshAuth.open.value)
 
 function onDialogOpenChange(value: boolean): void {
   if (!value && busy.value)
@@ -57,42 +51,35 @@ function onDialogOpenChange(value: boolean): void {
   dialogOpen.value = value
 }
 
-function askPassword(options: DeleteAllOptions): void {
-  waiting = options
-  passwordError.value = null
-  passwordOpen.value = true
+/** `POST /data/delete`; `deleting` covers the request only, not the password prompt. */
+async function deleteAll(options: DeleteAllOptions): Promise<DataDeleteResult> {
+  deleting.value = true
+  try {
+    return await withHarnessErrors(api.data.deleteAll({
+      body: { confirm: DELETE_CONFIRMATION, files: options.files, usage: options.usage },
+    }))
+  }
+  finally {
+    deleting.value = false
+  }
 }
 
 async function onConfirm(options: DeleteAllOptions): Promise<void> {
   if (busy.value)
     return
-  if (auth.status?.enabled === true && !auth.fresh) {
-    askPassword(options)
-    return
-  }
-  await send(options, true)
-}
-
-/** `POST /data/delete`; `promptOnFreshAuth` = a fresh-auth refusal may still ask for the password (once). */
-async function send(options: DeleteAllOptions, promptOnFreshAuth: boolean): Promise<void> {
-  deleting.value = true
   let result: DataDeleteResult
   try {
-    result = await withHarnessErrors(api.data.deleteAll({
-      body: { confirm: DELETE_CONFIRMATION, files: options.files, usage: options.usage },
-    }))
+    result = await freshAuth.run(() => deleteAll(options), { required: true })
   }
   catch (error) {
-    deleting.value = false
-    if (promptOnFreshAuth && needsFreshAuth(error))
-      askPassword(options)
-    else if (isBusyConflict(error))
+    if (isFreshAuthCancelled(error))
+      return
+    if (isBusyConflict(error))
       toast.error(BUSY_MESSAGE)
     else
       toastError(error)
     return
   }
-  deleting.value = false
   dialogOpen.value = false
   toast.success(deletedMessage(result))
   await forgetDeletedChats()
@@ -107,36 +94,6 @@ async function forgetDeletedChats(): Promise<void> {
   // The chats store writes its unread marks to localStorage in a watcher: remove the key after that ran.
   await nextTick()
   clearStoredChatState()
-}
-
-async function onPasswordSubmit(password: string): Promise<void> {
-  if (passwordPending.value)
-    return
-  passwordPending.value = true
-  passwordError.value = null
-  try {
-    await auth.login(password)
-  }
-  catch (error) {
-    passwordError.value = loginErrorText(error)
-    return
-  }
-  finally {
-    passwordPending.value = false
-  }
-  passwordOpen.value = false
-  const options = waiting
-  waiting = null
-  if (options)
-    await send(options, false)
-}
-
-function onPasswordOpenChange(value: boolean): void {
-  if (value || passwordPending.value)
-    return
-  passwordOpen.value = false
-  passwordError.value = null
-  waiting = null
 }
 
 function onPasswordCloseAutoFocus(event: Event): void {
@@ -159,7 +116,7 @@ function onPasswordCloseAutoFocus(event: Event): void {
         ref="deleteDialog"
         :open="dialogOpen"
         :summary="summary"
-        :pending="deleting || passwordPending"
+        :pending="deleting || freshAuth.pending.value"
         @update:open="onDialogOpenChange"
         @confirm="onConfirm"
       >
@@ -178,12 +135,12 @@ function onPasswordCloseAutoFocus(event: Event): void {
     </div>
 
     <ConfirmPasswordDialog
-      :open="passwordOpen"
+      :open="freshAuth.open.value"
       description="Deleting all data needs your password."
-      :pending="passwordPending"
-      :error="passwordError"
-      @update:open="onPasswordOpenChange"
-      @submit="onPasswordSubmit"
+      :pending="freshAuth.pending.value"
+      :error="freshAuth.error.value"
+      @update:open="freshAuth.setOpen"
+      @submit="freshAuth.submit"
       @close-auto-focus="onPasswordCloseAutoFocus"
     />
   </SettingsSection>

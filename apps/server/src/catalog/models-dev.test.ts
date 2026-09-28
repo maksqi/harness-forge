@@ -101,7 +101,7 @@ describe('snapshot files', () => {
     expect(parseModelsDevSnapshot('x')).toBeNull()
   })
 
-  it('the bundled snapshot covers the builtin providers and every seed and small model id', () => {
+  it('the bundled snapshot covers the builtin providers and every chat seed and small model id', () => {
     const snapshot = parseModelsDevSnapshot(JSON.parse(readFileSync(bundledSnapshotPath(), 'utf8')))
     expect(snapshot).not.toBeNull()
     expect(snapshot?.complete).toBe(false)
@@ -112,7 +112,10 @@ describe('snapshot files', () => {
       if (definition.id === 'openrouter' || definition.id === 'ollama')
         continue
       const models = snapshot?.providers[definition.modelsDevId ?? definition.id] ?? {}
-      for (const id of [...(definition.seedModels ?? []).map(model => model.id), definition.smallModelId].filter(Boolean))
+      // Media seeds carry explicit kinds and may be missing from models.dev (`whisper-1`, `tts-1`, the xAI keys `stt` /
+      // `tts`; PROVIDERS.md 13), so only chat seeds need catalog metadata.
+      const chatSeeds = (definition.seedModels ?? []).filter(model => (model.kind ?? 'chat') === 'chat').map(model => model.id)
+      for (const id of [...chatSeeds, definition.smallModelId].filter(Boolean))
         expect(models[id as string], `${definition.id}:${id}`).toBeDefined()
     }
   })

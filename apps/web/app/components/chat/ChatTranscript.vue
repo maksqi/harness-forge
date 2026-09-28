@@ -9,9 +9,10 @@
 // own; a submitted request shows the "Thinking…" placeholder. A history that takes longer than a moment to arrive
 // shows a skeleton (never for fast loads, so nothing flashes). Messages with versions (`branches`, ADR-023) show a
 // switcher and re-render when a request or a switch starts or ends (it disables them); after a switch, focus moves
-// to the same control of the new version's switcher (docs/UI.md 14.1).
+// to the same control of the new version's switcher (docs/UI.md 14.1). "Delete this version" (ADR-030) is re-emitted
+// with the message id; ChatView confirms it and uses the exposed focus helpers afterwards.
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
-import type { ChatStatus } from 'ai'
+import type { ChatStatus, FileUIPart } from 'ai'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
 import { usePreferredReducedMotion, useScroll } from '@vueuse/core'
 import { computed, defineComponent, onBeforeUnmount, provide, ref, useTemplateRef, watch } from 'vue'
@@ -44,12 +45,15 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   'regenerate': [messageId: string]
-  'edit': [messageId: string, text: string]
+  /** A new version of a user message: its text and the full new set of files. */
+  'edit': [messageId: string, text: string, files: FileUIPart[]]
   'approval': [decision: ToolApprovalDecision]
   /** Retry of the last request (the failed last reply, or a request that failed before any reply). */
   'retry': []
   /** Show another version of a message (a sibling of a shown message). */
   'select-version': [messageId: string]
+  /** "Delete this version" was clicked on a shown message (ChatView asks for confirmation). */
+  'delete-version': [messageId: string]
   /** The transcript is scrolled away from the top (the header shows its border). */
   'update:scrolled': [value: boolean]
 }>()
@@ -115,6 +119,42 @@ watch([() => props.switching, () => props.messages], ([switching]) => {
     .find(element => element.dataset.messageId === target.messageId)
   switcher?.querySelector<HTMLElement>(`[data-testid="${target.control}"]`)?.focus()
 }, { flush: 'post' })
+
+function onDeleteVersion(messageId: string) {
+  // eslint-disable-next-line vue/custom-event-name-casing -- contract name from docs/UI.md 10.4
+  emit('delete-version', messageId)
+}
+
+/** The rendered row of a shown message, or null. */
+function messageElement(messageId: string): HTMLElement | null {
+  const rows = column.value?.querySelectorAll<HTMLElement>(`[data-testid="${testIds.messageUser}"], [data-testid="${testIds.messageAssistant}"]`)
+  return [...(rows ?? [])].find(row => row.dataset.messageId === messageId) ?? null
+}
+
+/**
+ * After a version was deleted (docs/UI.md 7.5, 14.1): focus on the switcher of the version now shown (its first enabled
+ * control), or on its Copy button when no other version is left (else the first button of its action row). False when
+ * the message is not rendered.
+ */
+function focusShownVersion(messageId: string): boolean {
+  const row = messageElement(messageId)
+  if (!row)
+    return false
+  const controls = [...row.querySelectorAll<HTMLElement>(`[data-testid="${testIds.messageBranch}"] button`)]
+  const target = controls.find(control => control.getAttribute('aria-disabled') !== 'true')
+    ?? controls[0]
+    ?? row.querySelector<HTMLElement>(`[data-testid="${testIds.messageCopy}"]`)
+    ?? row.querySelector<HTMLElement>('[data-slot="message-action-row"] button')
+  target?.focus()
+  return target !== null && target !== undefined
+}
+
+/** A canceled or failed deletion: focus back on "Delete this version" of that message. False when it is not shown. */
+function focusDeleteVersion(messageId: string): boolean {
+  const button = messageElement(messageId)?.querySelector<HTMLElement>(`[data-testid="${testIds.messageDeleteVersion}"]`)
+  button?.focus()
+  return !!button
+}
 
 // ---------- loading ----------
 
@@ -250,6 +290,8 @@ function editLastUserMessage(): boolean {
 defineExpose({
   editLastUserMessage,
   scrollToBottom: (behavior?: 'instant' | 'smooth') => controls.value?.scrollToBottom(behavior),
+  focusShownVersion,
+  focusDeleteVersion,
 })
 </script>
 
@@ -290,10 +332,11 @@ defineExpose({
             :branch="branches[message.id] ?? null"
             :switching="switching"
             @regenerate="emit('regenerate', message.id)"
-            @edit="text => emit('edit', message.id, text)"
+            @edit="(text, files) => emit('edit', message.id, text, files)"
             @approval="decision => emit('approval', decision)"
             @retry="onRetry(message.id)"
             @select-version="onSelectVersion"
+            @delete-version="onDeleteVersion(message.id)"
           />
         </div>
         <SubmittedPlaceholder v-if="showPlaceholder" />

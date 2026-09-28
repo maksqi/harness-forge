@@ -7,17 +7,21 @@
 //
 // Branching (ADR-023): the transcript is the chat's active path and `branches` lists the versions of its messages. A
 // new user message names its parent (the message before it on the shown path), an edit is a new user message under
-// the edited message's parent, a regenerate names its target, and `switchBranch()` shows another version. A user
-// message whose request failed with an HTTP error was never stored, so it is never named as a parent; a `404` means
-// the shown path is stale and reloads it.
+// the edited message's parent (with the editor's files, S8), a regenerate names its target, `switchBranch()` shows
+// another version and `deleteVersion()` removes one (ADR-030). A user message whose request failed with an HTTP error
+// was never stored, so it is never named as a parent; a `404` means the shown path is stale and reloads it. Another tab
+// that moves the active leaf is followed: `chat.updated` carries it, and an idle session whose path ends elsewhere
+// reloads the path (`followActiveLeaf()`, S5). Image-capable models get the composer's image options (ADR-028).
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   ChatDetail,
   ChatRequestBody,
   ChatSummary,
   ChatTrigger,
+  ChatUpdatedData,
   FileRef,
   HarnessUIMessage,
+  ImageOptions,
   MessageBranch,
   ReasoningEffort,
   ToolMode,
@@ -37,6 +41,7 @@ import {
 } from 'ai'
 import { computed, effectScope, getCurrentScope, nextTick, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { useApi, useApiFetch } from '~/composables/useApi'
+import { useImageOptions } from '~/composables/useImageOptions'
 import { useServerEvents } from '~/composables/useServerEvents'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
@@ -108,12 +113,26 @@ export interface ChatSession {
   busy: ComputedRef<boolean>
   /** `ChatDetail.branches` of the shown path: the versions of every path message that has more than one. */
   branches: Ref<Record<string, MessageBranch>>
-  /** A `switchBranch()` request is in flight. */
+  /** A `switchBranch()` or `deleteVersion()` request is in flight. */
   switching: Ref<boolean>
   /** A new user message; its parent is the message before it on the shown path. */
   send: (input: ChatSendInput) => Promise<void>
-  /** A new version of a user message: the messages from it on are replaced by the new version and its reply. */
-  edit: (messageId: string, text: string) => Promise<void>
+  /**
+   * A new version of a user message: the messages from it on are replaced by the new version and its reply. `files`
+   * is the full new set of attachments (`[]` removes them all); omitted, the edited message keeps its files.
+   */
+  edit: (messageId: string, text: string, files?: readonly FileUIPart[]) => Promise<void>
+  /**
+   * Deletes a version of a message and everything after it (`DELETE /api/chats/:id/messages/:messageId`), then shows
+   * the returned path, like `switchBranch()`: nothing while a request or a switch is in flight; `409 conflict`
+   * (`run-active`) follows the running reply, `404` reloads the path; the `HarnessError` is thrown after handling.
+   */
+  deleteVersion: (messageId: string) => Promise<void>
+  /**
+   * Another tab moved the active leaf (`chat.updated`): reloads the path (`GET /api/chats/:id`, the shared prefix
+   * kept) while the session is idle. Coalesced: calls during a reload share it.
+   */
+  followActiveLeaf: () => Promise<void>
   /**
    * A new version of a reply (default: the last message), or a first reply to a user message. A user message whose
    * request failed with an HTTP error (never stored) is sent again instead.
@@ -129,9 +148,9 @@ export interface ChatSession {
   /** Resumes the active run of the chat, if the server or the chats store says there is one. */
   resumeIfRunning: () => Promise<void>
   /**
-   * Shows another version of a message (`POST /api/chats/:id/branch`): the path to the most recent leaf under it.
-   * Does nothing while a request or another switch is in flight. Throws the `HarnessError` of a refused switch after
-   * handling it: `409 conflict` follows the running reply, `404 not_found` reloads the path.
+   * Shows another version of a message (`POST /api/chats/:id/branch`): the path last shown under it (ADR-030; else
+   * the most recent one). Does nothing while a request or another switch is in flight. Throws the `HarnessError` of a
+   * refused switch after handling it: `409 conflict` follows the running reply, `404 not_found` reloads the path.
    */
   switchBranch: (messageId: string) => Promise<void>
   /** Refetches the chat after this session's own edit or regenerate, so the new version shows in `branches`. */
@@ -186,6 +205,8 @@ export function buildChatRequestBody(input: {
   modelRef: string | null
   reasoningEffort: ReasoningEffort
   toolMode: ToolMode
+  /** `useImageOptions().forModel(model)`: set only for image models and chat models with image output (ADR-028). */
+  imageOptions?: ImageOptions
 }): ChatRequestBody {
   const message = input.messages.at(-1)
   if (!message)
@@ -205,6 +226,8 @@ export function buildChatRequestBody(input: {
     body.parentId = input.messages.at(-2)?.id ?? null
   else if (kind === 'regenerate' && input.messageId)
     body.messageId = input.messageId
+  if (input.imageOptions)
+    body.imageOptions = input.imageOptions
   return body
 }
 
@@ -244,6 +267,17 @@ export function mergePath(current: readonly HarnessUIMessage[], next: readonly H
   return [...current.slice(0, shared), ...next.slice(shared)]
 }
 
+/**
+ * The chat's active leaf is not the end of the shown path (docs/UI.md 7.5, 11.1; ADR-030): true when the last stored
+ * message shown is not `leaf`. A trailing message the server never stored (`unstoredId`, and anything after it) is
+ * ignored.
+ */
+export function leafMovedElsewhere(messages: readonly HarnessUIMessage[], leaf: string | null, unstoredId: string | null): boolean {
+  const unstored = unstoredId === null ? -1 : messages.findIndex(message => message.id === unstoredId)
+  const stored = unstored === -1 ? messages : messages.slice(0, unstored)
+  return (stored.at(-1)?.id ?? null) !== leaf
+}
+
 /** Both paths show the same messages (ids, in order). */
 export function samePathIds(a: readonly HarnessUIMessage[], b: readonly HarnessUIMessage[]): boolean {
   return a.length === b.length && a.every((message, index) => message.id === b[index]!.id)
@@ -272,6 +306,12 @@ function summaryOf(chat: ChatDetail): ChatSummary {
   return summary
 }
 
+/** The summary part of `chat.updated` data (the active leaf is not a summary field). */
+function summaryOfUpdate(data: ChatUpdatedData): ChatSummary {
+  const { activeLeafId: _activeLeafId, ...summary } = data
+  return summary
+}
+
 function missingModel(): HarnessError {
   return new HarnessError({ code: 'validation_error', message: 'Choose a model first.' })
 }
@@ -285,6 +325,7 @@ interface SessionDeps {
   models: ReturnType<typeof useModelsStore>
   plugins: ReturnType<typeof usePluginsStore>
   settings: ReturnType<typeof useSettingsStore>
+  imageOptions: ReturnType<typeof useImageOptions>
 }
 
 interface ChatChoices {
@@ -294,7 +335,7 @@ interface ChatChoices {
 }
 
 function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSession {
-  const { api, apiFetch, chats, models, plugins, settings } = deps
+  const { api, apiFetch, chats, models, plugins, settings, imageOptions } = deps
   // Watchers created later (resume, stop) belong to the session, not to whichever component is active then.
   const sessionScope = getCurrentScope()
   function inSession<T>(create: () => T): T {
@@ -370,6 +411,20 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   /** This session's edit or regenerate added a version: `branches` is refetched once its run finished. */
   let branchesStale = false
 
+  // ---------- other tabs (ADR-030) ----------
+
+  /** The active leaf named by the latest `chat.updated` of this chat (undefined before the first one). */
+  let latestLeaf: string | null | undefined
+  /** The `followActiveLeaf()` reload in flight. */
+  let following: Promise<void> | null = null
+  /** Another `chat.updated` arrived while the reload ran: check the path again once it ends. */
+  let followAgain = false
+  /**
+   * A leaf the last reload could not reach: the stored leaf can be null or dangling while the server shows its newest
+   * path. Events that repeat it (a rename, a pin) are not followed again until another leaf is announced.
+   */
+  let unreachableLeaf: string | null | undefined
+
   const transport = new DefaultChatTransport<HarnessUIMessage>({
     api: CHAT_API,
     fetch: apiFetch,
@@ -382,6 +437,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
         modelRef: modelRef.value,
         reasoningEffort: reasoningEffort.value,
         toolMode: toolMode.value,
+        imageOptions: imageOptions.forModel(modelRef.value ? models.byRef(modelRef.value) : null),
       })
       const kind = chatRequestKind(trigger, body.message)
       request = { kind, userMessageId: kind === 'new' ? body.message.id : null }
@@ -594,8 +650,20 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       onRunFinished(event.data)
   })
   events.on('chat.updated', (event) => {
-    if (event.data.id === id)
-      summary.value = event.data
+    if (event.data.id !== id)
+      return
+    summary.value = summaryOfUpdate(event.data)
+    const leaf = event.data.activeLeafId
+    latestLeaf = leaf
+    if (leaf !== unreachableLeaf)
+      unreachableLeaf = undefined
+    if (following) {
+      followAgain = true
+      return
+    }
+    // A switch or deletion in another tab; this session's own changes end at that leaf already.
+    if (unreachableLeaf === undefined && isIdle() && leafMovedElsewhere(chat.messages.value, leaf, unstoredMessageId))
+      void followActiveLeaf()
   })
   events.on('chat.created', (event) => {
     if (event.data.id === id) {
@@ -654,7 +722,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     await chat.sendMessage(text.trim() ? { text, files } : { files })
   }
 
-  async function edit(messageId: string, text: string): Promise<void> {
+  async function edit(messageId: string, text: string, nextFiles?: readonly FileUIPart[]): Promise<void> {
     if (busy.value)
       return
     if (pendingSwitch)
@@ -663,7 +731,8 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     const index = messages.findIndex(item => item.id === messageId && item.role === 'user')
     if (index === -1)
       return
-    const files = messages[index]!.parts.filter(isFileUIPart)
+    // The editor's full new set (`[]` removes every attachment); omitted, the edited message keeps its files.
+    const files = nextFiles ? [...nextFiles] : messages[index]!.parts.filter(isFileUIPart)
     if (!text.trim() && files.length === 0)
       return
     if (!modelRef.value)
@@ -714,13 +783,18 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     void refresh().then(() => resumeIfRunning())
   }
 
-  function switchBranch(messageId: string): Promise<void> {
+  /**
+   * Shows the path a version switch or deletion answers with, keeping the shared prefix objects. Does nothing while a
+   * request or another switch is in flight; `409 conflict` (`run-active`) follows the running reply, `404` reloads the
+   * path, and the `HarnessError` is thrown after handling it.
+   */
+  function changePath(request: () => Promise<ChatDetail>): Promise<void> {
     if (busy.value || switching.value || resuming || !persisted.value)
       return Promise.resolve()
     switching.value = true
     const task = (async () => {
       try {
-        const detail = await api.chats.switchBranch({ params: { id }, body: { messageId } })
+        const detail = await request()
         applyDetail(detail, { keepPrefix: true })
       }
       catch (error) {
@@ -740,6 +814,71 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       if (pendingSwitch === task)
         pendingSwitch = null
     })
+    return task
+  }
+
+  function switchBranch(messageId: string): Promise<void> {
+    return changePath(() => api.chats.switchBranch({ params: { id }, body: { messageId } }))
+  }
+
+  function deleteVersion(messageId: string): Promise<void> {
+    return changePath(() => api.chats.deleteMessage({ params: { id, messageId } }))
+  }
+
+  /** Loaded, known to the server, and nothing runs: no request, switch or resume in flight. */
+  function isIdle(): boolean {
+    return loaded.value && persisted.value && !busy.value && !switching.value && !pendingSwitch && !resuming
+  }
+
+  /**
+   * One reload of the path while idle; dropped when the transcript changed meanwhile (the newer local state wins).
+   * True when the server's path was applied.
+   */
+  async function followOnce(): Promise<boolean> {
+    if (!isIdle())
+      return false
+    const before = chat.messages.value
+    try {
+      const detail = await chats.get(id)
+      if (!isIdle() || chat.messages.value !== before)
+        return false
+      applyDetail(detail, { keepPrefix: true })
+      return true
+    }
+    catch {
+      // Keep the transcript; the next event or visit reloads it.
+      return false
+    }
+  }
+
+  function followActiveLeaf(): Promise<void> {
+    if (following) {
+      followAgain = true
+      return following
+    }
+    const task = (async () => {
+      try {
+        for (;;) {
+          followAgain = false
+          const applied = await followOnce()
+          const leaf = latestLeaf
+          if (leaf === undefined || !isIdle() || !leafMovedElsewhere(chat.messages.value, leaf, unstoredMessageId))
+            break
+          // A leaf announced during the reload that the path does not end at yet: one more reload.
+          if (followAgain)
+            continue
+          // The server's own path does not end at the leaf it announced: not again for that leaf.
+          if (applied)
+            unreachableLeaf = leaf
+          break
+        }
+      }
+      finally {
+        following = null
+        followAgain = false
+      }
+    })()
+    following = task
     return task
   }
 
@@ -813,6 +952,8 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     switching,
     send,
     edit,
+    deleteVersion,
+    followActiveLeaf,
     regenerate,
     approve,
     stop,
@@ -883,6 +1024,7 @@ export function useChatSession(id: string, options: { isNew?: boolean } = {}): C
       models: useModelsStore(),
       plugins: usePluginsStore(),
       settings: useSettingsStore(),
+      imageOptions: useImageOptions(),
     }
     const scope = effectScope(true)
     const session = scope.run(() => createSession(id, options.isNew === true, deps))!

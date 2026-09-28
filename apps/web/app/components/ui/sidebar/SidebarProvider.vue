@@ -4,7 +4,7 @@ import { defaultDocument, useEventListener, useMediaQuery, useVModel } from '@vu
 import { TooltipProvider } from 'reka-ui'
 import { computed, ref } from 'vue'
 import { cn } from '@/lib/utils'
-import { provideSidebarContext, SIDEBAR_COOKIE_MAX_AGE, SIDEBAR_COOKIE_NAME, SIDEBAR_KEYBOARD_SHORTCUT, SIDEBAR_WIDTH, SIDEBAR_WIDTH_ICON } from './utils'
+import { provideSidebarContext, SIDEBAR_COOKIE_MAX_AGE, SIDEBAR_COOKIE_NAME, SIDEBAR_KEYBOARD_SHORTCUT, SIDEBAR_WIDTH } from './utils'
 
 const props = withDefaults(defineProps<{
   defaultOpen?: boolean
@@ -75,6 +75,10 @@ provideSidebarContext({
   setOpenMobile,
   toggleSidebar,
 })
+
+// Local patch (AI_ELEMENTS_PATCHES.md, docs/UI.md 14.5): the template sets the icon-rail width with classes on the
+// wrapper instead of the inline style (`[--sidebar-width-icon:3rem]`, the SIDEBAR_WIDTH_ICON value), so touch devices
+// (`pointer: coarse`) get a 3.5rem rail around their 40px icon buttons.
 </script>
 
 <template>
@@ -83,9 +87,8 @@ provideSidebarContext({
       data-slot="sidebar-wrapper"
       :style="{
         '--sidebar-width': SIDEBAR_WIDTH,
-        '--sidebar-width-icon': SIDEBAR_WIDTH_ICON,
       }"
-      :class="cn('group/sidebar-wrapper has-data-[variant=inset]:bg-sidebar flex min-h-svh w-full', props.class)"
+      :class="cn('group/sidebar-wrapper has-data-[variant=inset]:bg-sidebar flex min-h-svh w-full [--sidebar-width-icon:3rem] pointer-coarse:[--sidebar-width-icon:3.5rem]', props.class)"
       v-bind="$attrs"
     >
       <slot />

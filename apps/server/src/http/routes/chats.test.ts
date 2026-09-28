@@ -222,7 +222,7 @@ describe('message tree routes (ADR-023)', () => {
     expect((await t.request(`/api/chats/${chatId(21)}`)).status).toBe(404)
   })
 
-  it('pOST /api/chats/:id/branch switches to the most recent leaf under the message and emits chat.updated', async () => {
+  it('pOST /api/chats/:id/branch switches to the remembered leaf under the message and emits chat.updated', async () => {
     await t.request('/api/chats', json('POST', treeBody(chatId(22), 220)))
     const before = chatSummarySchema.parse(await (await t.request(`/api/chats/${chatId(22)}`)).json())
     received = []
@@ -288,6 +288,79 @@ describe('message tree routes (ADR-023)', () => {
     expect(detail.messages.map(message => (message.parts[0] as { text: string }).text)).toEqual(['A2', 'RA2'])
     expect(Object.values(detail.branches)).toHaveLength(1)
     expect(ids(detail.messages).some(id => ids(body.chat.messages).includes(id))).toBe(false)
+  })
+})
+
+describe('dELETE /api/chats/:id/messages/:messageId (ADR-030)', () => {
+  function del(id: string, messageId: string): Promise<Response> {
+    return t.request(`/api/chats/${id}/messages/${messageId}`, { method: 'DELETE' })
+  }
+
+  it('deletes a version and everything after it: 200 ChatDetail, chat.updated with the new active leaf', async () => {
+    await t.request('/api/chats', json('POST', treeBody(chatId(40), 400)))
+    const before = chatDetailSchema.parse(await (await t.request(`/api/chats/${chatId(40)}`)).json())
+    received = []
+    const response = await del(chatId(40), mid(404))
+    expect(response.status).toBe(200)
+    const detail = chatDetailSchema.parse(await response.json())
+    // A2 was shown: the path moves to the previous version A and what was last shown under it.
+    expect(ids(detail.messages)).toEqual([mid(400), mid(401), mid(402), mid(403)])
+    expect(detail.branches).toEqual({})
+    expect(detail.updatedAt).toBe(before.updatedAt)
+    expect(chatDetailSchema.parse(await (await t.request(`/api/chats/${chatId(40)}`)).json())).toEqual(detail)
+    expect(received.map(event => event.type)).toEqual(['chat.updated'])
+    expect(received[0]).toMatchObject({ data: { id: chatId(40), activeLeafId: mid(403) } })
+    // The deleted versions are gone from the JSON export too.
+    const exported = chatExportSchema.parse(await (await t.request(`/api/chats/${chatId(40)}/export?format=json`)).json())
+    expect(ids(exported.chat.messages)).toEqual([mid(400), mid(401), mid(402), mid(403)])
+  })
+
+  it('answers 404 for an unknown chat or message and 400 for malformed params', async () => {
+    await t.request('/api/chats', json('POST', treeBody(chatId(41), 410)))
+    const unknownChat = await del(chatId(99), mid(410))
+    expect(unknownChat.status).toBe(404)
+    expect(await errorOf(unknownChat)).toEqual({ code: 'not_found', message: `Chat ${chatId(99)} not found.` })
+    const unknownMessage = await del(chatId(41), mid(400))
+    expect(unknownMessage.status).toBe(404)
+    expect(await errorOf(unknownMessage)).toEqual({ code: 'not_found', message: `Message ${mid(400)} not found in chat ${chatId(41)}.` })
+    for (const path of [`/api/chats/not-a-chat/messages/${mid(410)}`, `/api/chats/${chatId(41)}/messages/msg_short`]) {
+      const response = await t.request(path, { method: 'DELETE' })
+      expect(response.status, path).toBe(400)
+      expect((await errorOf(response)).code).toBe('validation_error')
+    }
+    expect(received.filter(event => event.type === 'chat.updated')).toEqual([])
+  })
+
+  it('answers 409 conflict (only-version) for a message without another version', async () => {
+    await t.request('/api/chats', json('POST', treeBody(chatId(42), 420)))
+    received = []
+    const response = await del(chatId(42), mid(425))
+    expect(response.status).toBe(409)
+    expect(await errorOf(response)).toEqual({
+      code: 'conflict',
+      message: 'This is the only version of the message. Delete the chat instead.',
+      details: { reason: 'only-version' },
+    })
+    expect(received).toEqual([])
+    expect(ids(chatDetailSchema.parse(await (await t.request(`/api/chats/${chatId(42)}`)).json()).messages)).toEqual([mid(424), mid(425)])
+  })
+
+  it('answers 409 conflict (run-active) while a run holds the chat, in any phase, and deletes nothing', async () => {
+    await t.request('/api/chats', json('POST', treeBody(chatId(43), 430)))
+    holding.add(chatId(43))
+    received = []
+    const response = await del(chatId(43), mid(434))
+    expect(response.status).toBe(409)
+    expect(await errorOf(response)).toEqual({
+      code: 'conflict',
+      message: 'A reply is already being generated for this chat. Stop it or wait until it finishes.',
+      details: { reason: 'run-active', chatId: chatId(43) },
+    })
+    expect(received).toEqual([])
+    const body = chatExportSchema.parse(await (await t.request(`/api/chats/${chatId(43)}/export?format=json`)).json())
+    expect(body.chat.messages).toHaveLength(6)
+    holding.delete(chatId(43))
+    expect((await del(chatId(43), mid(434))).status).toBe(200)
   })
 })
 

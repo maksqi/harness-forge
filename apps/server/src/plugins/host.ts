@@ -541,6 +541,7 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
         redactor: deps.redactor,
         log: (level, message, data) => log(id, level, message, data),
         resolveModel: async (ref, signal) => (await deps.providers.resolveModel(ref, { signal })).model,
+        generateImages: input => deps.images.generate(input),
         userAgent: userAgent(id),
       },
     })

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
 import { rememberListRoute } from '~/components/plugins/list/list-route'
 import { byTestId, hrefOf, mountInShell, openWithKeyboard, settle } from '~/components/plugins/list/testing'
+import { useAuthStore } from '~/stores/auth'
 import { testIds } from '~/utils/testids'
 import { authStatus, logEntry, pluginDetail, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
@@ -232,6 +233,37 @@ describe('pluginDetailView: header', () => {
     expect(api.plugins.reload).toHaveBeenCalledTimes(2)
     expect(mocks.toast.success).toHaveBeenCalledWith('Reloaded Dice roller')
     expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+  })
+
+  it('asks for the password before reloading a code plugin when the session is not fresh', async () => {
+    useAuthStore().status = authStatus({ enabled: true, source: 'settings', freshUntil: null })
+    api.auth.login.mockResolvedValue(authStatus({ enabled: true, source: 'settings', freshUntil: Date.now() + 600_000 }))
+    api.plugins.reload.mockResolvedValue(structuredClone(DETAILS['dice-roller']!))
+    await mountDetail('dice-roller')
+    byTestId<HTMLButtonElement>(testIds.pluginReload)!.click()
+    await settle(5)
+    expect(byTestId(testIds.confirmPasswordDialog)).not.toBeNull()
+    expect(api.plugins.reload).not.toHaveBeenCalled()
+
+    const input = byTestId<HTMLInputElement>(testIds.confirmPasswordInput)!
+    input.value = 'correct-horse'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await settle()
+    byTestId<HTMLButtonElement>(testIds.confirmPasswordSubmit)!.click()
+    await settle(5)
+    expect(api.plugins.reload).toHaveBeenCalledTimes(1)
+    expect(mocks.toast.success).toHaveBeenCalledWith('Reloaded Dice roller')
+  })
+
+  it('reloads a declarative plugin without asking for the password first', async () => {
+    useAuthStore().status = authStatus({ enabled: true, source: 'settings', freshUntil: null })
+    api.plugins.reload.mockResolvedValue(structuredClone(DETAILS['zip-provider']!))
+    await mountDetail('zip-provider')
+    byTestId<HTMLButtonElement>(testIds.pluginReload)!.click()
+    await settle(5)
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.plugins.reload).toHaveBeenCalledTimes(1)
+    expect(mocks.toast.success).toHaveBeenCalledWith('Reloaded Zip provider')
   })
 
   it('does not retry the reload when the password prompt is cancelled', async () => {

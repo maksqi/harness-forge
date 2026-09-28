@@ -12,13 +12,14 @@ import {
   MESSAGE_ID_PATTERN,
   serverEventSchema,
 } from '@harness-forge/shared'
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { chats, chatShares, messages, usage } from '../../db/schema.ts'
 import { SAMPLE_CHAT_EXPORT } from '../../testing/api-samples.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createRecordingEventBus } from '../../testing/fakes.ts'
 import { IMPORT_DENIAL_REASON } from './import.ts'
+import { createChatsService } from './index.ts'
 
 const META = { modelRef: 'mock:echo', startedAt: 1 }
 
@@ -186,6 +187,24 @@ describe('create and get', () => {
     expect(totals).toEqual({ inputTokens: 15, outputTokens: 25, reasoningTokens: 2, cacheReadTokens: 4, cacheWriteTokens: 6, costUsd: 0.25 })
   })
 
+  it('counts image usage rows in totals (Phase 6); title, transcription, speech and other chats are left out', async () => {
+    const id = chatId(1)
+    await service.create(treeInput())
+    await service.create({ id: chatId(2) })
+    const base = { chatId: id, messageId: messageId(6), providerId: 'mock', modelId: 'image', reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+    await service.addUsage({ ...base, purpose: 'chat', inputTokens: 10, outputTokens: 20, costUsd: 0.5 })
+    // An image turn and a generate_image call: counted, with their (estimated) cost.
+    await service.addUsage({ ...base, purpose: 'image', inputTokens: 7, outputTokens: 4000, costUsd: 0.25 })
+    await service.addUsage({ ...base, purpose: 'image', inputTokens: 3, outputTokens: 0, costUsd: null })
+    await service.addUsage({ ...base, messageId: null, purpose: 'title', inputTokens: 100, outputTokens: 100, costUsd: 1 })
+    await service.addUsage({ ...base, messageId: null, purpose: 'transcription', inputTokens: 0, outputTokens: 0, costUsd: null })
+    await service.addUsage({ ...base, messageId: null, purpose: 'speech', inputTokens: 50, outputTokens: 0, costUsd: 2 })
+    await service.addUsage({ ...base, chatId: chatId(2), purpose: 'image', inputTokens: 1000, outputTokens: 1000, costUsd: 9 })
+    const { totals } = await service.get(id)
+    expect(totals).toEqual({ inputTokens: 20, outputTokens: 4020, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.75 })
+    expect((await service.get(chatId(2))).totals).toMatchObject({ inputTokens: 1000, outputTokens: 1000, costUsd: 9 })
+  })
+
   it('reports running from the runs registry', async () => {
     const id = chatId(1)
     await service.create({ id })
@@ -233,7 +252,7 @@ describe('the active path and branches (get)', () => {
 })
 
 describe('switchBranch', () => {
-  it('shows the most recent leaf under the message, keeps updatedAt and emits chat.updated', async () => {
+  it('shows the remembered leaf under the message (the only path here), keeps updatedAt and emits chat.updated', async () => {
     await service.create(treeInput())
     await t.db.update(chats).set({ updatedAt: 1000 }).where(eq(chats.id, chatId(1)))
     events.clear()
@@ -277,6 +296,411 @@ describe('switchBranch', () => {
     expect((await rejection(service.switchBranch(chatId(1), messageId(9)))).code).toBe('not_found')
     expect((await rejection(service.switchBranch(chatId(1), 'msg_unknown000000001'))).code).toBe('not_found')
     expect(ids((await service.get(chatId(1))).messages)).toEqual([messageId(5), messageId(6)])
+  })
+})
+
+/** `selected_child_id` of every message of a chat, by message id. */
+async function pointersOf(id: string): Promise<Record<string, string | null>> {
+  const rows = await t.db.select({ id: messages.id, selectedChildId: messages.selectedChildId }).from(messages).where(eq(messages.chatId, id))
+  return Object.fromEntries(rows.map(row => [row.id, row.selectedChildId]))
+}
+
+/** Every message id of a chat, in `seq` order (every version). */
+async function allIds(id: string): Promise<string[]> {
+  return ids(await service.listMessages(id))
+}
+
+/**
+ * A second chats service on the same database whose first batch runs `race` before it: a concurrent write (a run's
+ * commit, another tab's switch or delete) that lands between the reads of a switch or delete and its guarded write.
+ */
+function racingService(race: () => Promise<unknown>): ChatsService {
+  let pending = true
+  const db = new Proxy(t.db, {
+    get(target, property) {
+      if (property === 'batch') {
+        return async (items: Parameters<typeof target.batch>[0]) => {
+          if (pending) {
+            pending = false
+            await race()
+          }
+          return target.batch(items)
+        }
+      }
+      const value: unknown = Reflect.get(target, property, target)
+      return typeof value === 'function' ? (value as (...args: never[]) => unknown).bind(target) : value
+    },
+  })
+  return createChatsService({ ...t.deps, db })
+}
+
+/**
+ * The chat of `treeInput()` plus a newer version B2 (7) -> RB2 (8) of B under RA: A (1) -> RA (2) -> B (3) -> RB (4);
+ * A2 (5) -> RA2 (6); the active leaf is RB (4), so the remembered path under A (-> RB) differs from its latest leaf (RB2).
+ */
+function versionsInput(n = 1): ChatCreate {
+  const base = treeInput(n)
+  return {
+    ...base,
+    messages: [...base.messages!, userMessage(messageId(7), 'bravo question, edited'), assistantMessage(messageId(8), 'bravo answer, edited')],
+    parentIds: [...base.parentIds!, messageId(2), messageId(7)],
+    activeLeafId: messageId(4),
+  }
+}
+
+describe('remembered versions (ADR-030)', () => {
+  it('an import records the active path; switching away and back restores the path last shown, not the latest leaf', async () => {
+    const id = chatId(1)
+    const created = await service.create(versionsInput())
+    expect(ids(created.messages)).toEqual([1, 2, 3, 4].map(messageId))
+    // Only the parents on the active path point at their child on it; versions never shown keep null.
+    expect(await pointersOf(id)).toEqual({
+      [messageId(1)]: messageId(2),
+      [messageId(2)]: messageId(3),
+      [messageId(3)]: messageId(4),
+      [messageId(4)]: null,
+      [messageId(5)]: null,
+      [messageId(6)]: null,
+      [messageId(7)]: null,
+      [messageId(8)]: null,
+    })
+    expect(ids((await service.switchBranch(id, messageId(5))).messages)).toEqual([messageId(5), messageId(6)])
+    expect((await pointersOf(id))[messageId(5)]).toBe(messageId(6))
+    // Back to A: A -> RA -> B -> RB (remembered), where v1.1's "latest leaf" would show B2 -> RB2.
+    const back = await service.switchBranch(id, messageId(1))
+    expect(ids(back.messages)).toEqual([1, 2, 3, 4].map(messageId))
+    expect(back.branches).toEqual({
+      [messageId(1)]: { siblings: [messageId(1), messageId(5)], index: 0 },
+      [messageId(3)]: { siblings: [messageId(3), messageId(7)], index: 0 },
+    })
+    // Showing B2 moves the pointer of RA; away and back to A now restores B2's path.
+    expect(ids((await service.switchBranch(id, messageId(7))).messages)).toEqual([1, 2, 7, 8].map(messageId))
+    expect((await pointersOf(id))[messageId(2)]).toBe(messageId(7))
+    await service.switchBranch(id, messageId(5))
+    expect(ids((await service.switchBranch(id, messageId(1))).messages)).toEqual([1, 2, 7, 8].map(messageId))
+    // A switch to the version already shown under its parent changes nothing but the leaf.
+    expect(ids((await service.switchBranch(id, messageId(3))).messages)).toEqual([1, 2, 3, 4].map(messageId))
+  })
+
+  it('the pipeline commit and persist (setActiveLeaf) record every shown path: A -> B -> A restores the deep path of A', async () => {
+    const id = chatId(1)
+    await service.ensure(id)
+    // Turn 1 (commit in a transaction, then persist in a transaction): A -> RA.
+    await service.transaction(async (store) => {
+      await store.appendMessage(id, userMessage(messageId(1), 'alpha'), null)
+      expect(await store.setActiveLeaf(id, messageId(1), [null])).toBe(true)
+    })
+    await service.transaction(async (store) => {
+      await store.upsertMessage(id, assistantMessage(messageId(2), 'alpha reply'), messageId(1))
+      expect(await store.setActiveLeaf(id, messageId(2), [messageId(1), messageId(2)])).toBe(true)
+    })
+    // Turn 2: B -> RB.
+    await service.transaction(async (store) => {
+      await store.appendMessage(id, userMessage(messageId(3), 'bravo'), messageId(2))
+      expect(await store.setActiveLeaf(id, messageId(3))).toBe(true)
+    })
+    await service.transaction(async (store) => {
+      await store.upsertMessage(id, assistantMessage(messageId(4), 'bravo reply'), messageId(3))
+      expect(await store.setActiveLeaf(id, messageId(4), [messageId(3), messageId(4)])).toBe(true)
+    })
+    expect(await pointersOf(id)).toEqual({ [messageId(1)]: messageId(2), [messageId(2)]: messageId(3), [messageId(3)]: messageId(4), [messageId(4)]: null })
+    // Regenerate RB (the commit moves only the leaf, outside a transaction), then show the first reply again.
+    expect(await service.setActiveLeaf(id, messageId(3))).toBe(true)
+    await service.transaction(async (store) => {
+      await store.upsertMessage(id, assistantMessage(messageId(5), 'bravo reply, again'), messageId(3))
+      expect(await store.setActiveLeaf(id, messageId(5), [messageId(3), messageId(5)])).toBe(true)
+    })
+    expect((await pointersOf(id))[messageId(3)]).toBe(messageId(5))
+    expect(ids((await service.switchBranch(id, messageId(4))).messages)).toEqual([1, 2, 3, 4].map(messageId))
+    // Edit A: A2 -> RA2.
+    await service.transaction(async (store) => {
+      await store.appendMessage(id, userMessage(messageId(6), 'alpha, edited'), null)
+      expect(await store.setActiveLeaf(id, messageId(6))).toBe(true)
+    })
+    await service.transaction(async (store) => {
+      await store.upsertMessage(id, assistantMessage(messageId(7), 'alpha, edited reply'), messageId(6))
+      expect(await store.setActiveLeaf(id, messageId(7), [messageId(6), messageId(7)])).toBe(true)
+    })
+    // Back to A: the path last shown under A ends at the first reply to B (remembered), not at the regenerated one
+    // (the latest leaf under A).
+    const back = await service.switchBranch(id, messageId(1))
+    expect(ids(back.messages)).toEqual([1, 2, 3, 4].map(messageId))
+    expect(back.branches[messageId(4)]).toEqual({ siblings: [messageId(4), messageId(5)], index: 0 })
+  })
+
+  it('a failed compare-and-set writes nothing; a rolled-back transaction keeps no pointer', async () => {
+    const id = chatId(1)
+    await service.create(treeInput())
+    const before = await pointersOf(id)
+    expect(before).toMatchObject({ [messageId(1)]: null, [messageId(2)]: null, [messageId(3)]: null, [messageId(5)]: messageId(6) })
+    expect(await service.setActiveLeaf(id, messageId(4), [messageId(2)])).toBe(false)
+    expect(await service.setActiveLeaf(id, messageId(4), [null])).toBe(false)
+    expect(await service.setActiveLeaf(id, 'msg_unknown000000001')).toBe(false)
+    expect(await service.setActiveLeaf(chatId(9), messageId(4))).toBe(false)
+    expect(await service.transaction(async store => store.setActiveLeaf(id, messageId(4), [messageId(2)]))).toBe(false)
+    expect(await pointersOf(id)).toEqual(before)
+    await expect(service.transaction(async (store) => {
+      expect(await store.setActiveLeaf(id, messageId(4), [messageId(6)])).toBe(true)
+      throw new Error('persist failed')
+    })).rejects.toThrow('persist failed')
+    expect(await pointersOf(id)).toEqual(before)
+    expect((await service.find(id))?.activeLeafId).toBe(messageId(6))
+    // A successful one records the path of the new leaf; pointers off it are kept.
+    expect(await service.setActiveLeaf(id, messageId(4), [messageId(6)])).toBe(true)
+    expect(await pointersOf(id)).toEqual({ ...before, [messageId(1)]: messageId(2), [messageId(2)]: messageId(3), [messageId(3)]: messageId(4) })
+  })
+
+  it('a switch whose compare-and-set misses writes no pointer and emits nothing (409 run-active)', async () => {
+    const id = chatId(1)
+    await service.create(treeInput())
+    const before = await pointersOf(id)
+    events.clear()
+    // A run commits a new message on the shown path between the reads of the switch and its write.
+    const racing = racingService(async () => {
+      await service.appendMessage(id, userMessage(messageId(7), 'delta'), messageId(6))
+      await service.setActiveLeaf(id, messageId(7))
+    })
+    const error = await rejection(racing.switchBranch(id, messageId(1)))
+    expect(error.toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'run-active', chatId: id } })
+    expect(error.message).toContain('switching versions')
+    expect(await pointersOf(id)).toEqual({ ...before, [messageId(6)]: messageId(7), [messageId(7)]: null })
+    expect((await service.find(id))?.activeLeafId).toBe(messageId(7))
+    expect(events.ofType('chat.updated')).toEqual([])
+  })
+})
+
+describe('deleteMessage (ADR-030)', () => {
+  it('deletes a version on the active path with its subtree; the path moves to the previous version', async () => {
+    const id = chatId(1)
+    await service.create(treeInput())
+    await t.db.update(chats).set({ updatedAt: 1000 }).where(eq(chats.id, id))
+    events.clear()
+    const detail = chatDetailSchema.parse(await service.deleteMessage(id, messageId(5)))
+    expect(ids(detail.messages)).toEqual([1, 2, 3, 4].map(messageId))
+    expect(detail.branches).toEqual({})
+    expect(detail.updatedAt).toBe(1000)
+    expect(await allIds(id)).toEqual([1, 2, 3, 4].map(messageId))
+    expect(await service.find(id)).toMatchObject({ activeLeafId: messageId(4), updatedAt: 1000, pendingApproval: false })
+    expect(await service.get(id)).toEqual(detail)
+    // The new path is remembered.
+    expect(await pointersOf(id)).toEqual({ [messageId(1)]: messageId(2), [messageId(2)]: messageId(3), [messageId(3)]: messageId(4), [messageId(4)]: null })
+    const updated = events.ofType('chat.updated')
+    expect(updated.map(event => event.data)).toEqual([expect.objectContaining({ id, updatedAt: 1000, activeLeafId: messageId(4) })])
+    expect(serverEventSchema.parse(updated[0])).toEqual(updated[0])
+  })
+
+  it('moves to the remembered leaf under the previous version, not its latest leaf', async () => {
+    const id = chatId(1)
+    // Pointers A -> RA -> B -> RB from the import (leaf RB), then A2 is shown.
+    await service.create(versionsInput())
+    await service.switchBranch(id, messageId(5))
+    const detail = await service.deleteMessage(id, messageId(5))
+    expect(ids(detail.messages)).toEqual([1, 2, 3, 4].map(messageId))
+    expect(detail.branches).toEqual({ [messageId(3)]: { siblings: [messageId(3), messageId(7)], index: 0 } })
+  })
+
+  it('the first version moves the path to the next one; a deeper version moves within its parent', async () => {
+    const id = chatId(1)
+    await service.create({ ...versionsInput(), activeLeafId: messageId(4) })
+    // A (the first of A / A2) is shown: the path moves to A2 and what was last shown under it (its only reply).
+    const next = await service.deleteMessage(id, messageId(1))
+    expect(ids(next.messages)).toEqual([messageId(5), messageId(6)])
+    expect(next.branches).toEqual({})
+    expect(await allIds(id)).toEqual([messageId(5), messageId(6)])
+
+    await service.create(versionsInput(2))
+    const other = chatId(2)
+    // Some of the ids are still used by chat 1 (replaced on import): read them back in `seq` order.
+    const [a, ra, b, rb, , , b2, rb2] = await allIds(other)
+    await service.switchBranch(other, b2!)
+    const deeper = await service.deleteMessage(other, b2!)
+    expect(ids(deeper.messages)).toEqual([a, ra, b, rb])
+    expect(await allIds(other)).not.toContain(rb2)
+    expect((await pointersOf(other))[ra!]).toBe(b)
+  })
+
+  it('deletes a version off the active path without moving the leaf', async () => {
+    const id = chatId(1)
+    await service.create(versionsInput())
+    await service.switchBranch(id, messageId(5))
+    events.clear()
+    // B2 is off the shown path (A2 -> RA2): deleting it leaves the path; B loses its only other version.
+    const offPath = await service.deleteMessage(id, messageId(7))
+    expect(ids(offPath.messages)).toEqual([messageId(5), messageId(6)])
+    expect(await allIds(id)).toEqual([1, 2, 3, 4, 5, 6].map(messageId))
+    expect((await service.find(id))?.activeLeafId).toBe(messageId(6))
+    expect(events.ofType('chat.updated').map(event => event.data.activeLeafId)).toEqual([messageId(6)])
+    // A itself is off the shown path too (A2 is shown): its whole subtree goes.
+    const first = await service.deleteMessage(id, messageId(1))
+    expect(ids(first.messages)).toEqual([messageId(5), messageId(6)])
+    expect(first.branches).toEqual({})
+    expect(await allIds(id)).toEqual([messageId(5), messageId(6)])
+  })
+
+  it('refuses the only version of a message (409 only-version) and deletes nothing', async () => {
+    const id = chatId(1)
+    await service.create(treeInput())
+    events.clear()
+    for (const n of [2, 3, 4, 6]) {
+      const error = await rejection(service.deleteMessage(id, messageId(n)))
+      expect(error.toJSON().error).toEqual({
+        code: 'conflict',
+        message: 'This is the only version of the message. Delete the chat instead.',
+        details: { reason: 'only-version' },
+      })
+    }
+    await service.deleteMessage(id, messageId(1))
+    // A2 is the only first message now.
+    expect((await rejection(service.deleteMessage(id, messageId(5)))).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'only-version' } })
+    expect(await allIds(id)).toEqual([messageId(5), messageId(6)])
+    expect(events.ofType('chat.updated')).toHaveLength(1)
+  })
+
+  it('answers not_found for an unknown chat, a malformed id or a message outside the chat', async () => {
+    await service.create(treeInput())
+    await service.create({ id: chatId(2), messages: [userMessage(messageId(9), 'other chat')] })
+    events.clear()
+    expect((await rejection(service.deleteMessage(chatId(8), messageId(1)))).code).toBe('not_found')
+    expect((await rejection(service.deleteMessage('bad', messageId(1)))).code).toBe('not_found')
+    expect((await rejection(service.deleteMessage(chatId(1), messageId(9)))).toJSON().error).toEqual({
+      code: 'not_found',
+      message: `Message ${messageId(9)} not found in chat ${chatId(1)}.`,
+    })
+    expect((await rejection(service.deleteMessage(chatId(1), 'msg_unknown000000001'))).code).toBe('not_found')
+    expect(await allIds(chatId(1))).toHaveLength(6)
+    expect(events.events).toEqual([])
+  })
+
+  it('recomputes pending_approval from the new path', async () => {
+    const id = await insertChat(3, 1000)
+    await service.appendMessage(id, userMessage(messageId(1), 'first'), null)
+    await service.appendMessage(id, pendingMessage(messageId(2)), messageId(1))
+    await service.appendMessage(id, userMessage(messageId(3), 'first, edited'), null)
+    await service.setActiveLeaf(id, messageId(3))
+    const toPending = await service.deleteMessage(id, messageId(3))
+    expect(ids(toPending.messages)).toEqual([messageId(1), messageId(2)])
+    expect(toPending.pendingApproval).toBe(true)
+    expect((await service.find(id))?.pendingApproval).toBe(true)
+    expect(events.ofType('chat.updated').at(-1)?.data).toMatchObject({ pendingApproval: true, activeLeafId: messageId(2) })
+
+    await service.appendMessage(id, userMessage(messageId(4), 'first, again'), null)
+    const away = await service.deleteMessage(id, messageId(1))
+    expect(ids(away.messages)).toEqual([messageId(4)])
+    expect(away.pendingApproval).toBe(false)
+    expect(away.updatedAt).toBe(1000)
+  })
+
+  it('keeps usage rows (totals still count deleted versions) and share snapshots; the search text goes', async () => {
+    const id = chatId(1)
+    await service.create(treeInput())
+    const row = { chatId: id, providerId: 'mock', modelId: 'echo', reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+    await service.addUsage({ ...row, messageId: messageId(4), purpose: 'chat', inputTokens: 10, outputTokens: 10, costUsd: 0.5 })
+    await service.addUsage({ ...row, messageId: messageId(6), purpose: 'chat', inputTokens: 1, outputTokens: 1, costUsd: 0.25 })
+    await t.db.insert(chatShares).values({
+      id: 'shr_0000000000000001',
+      chatId: id,
+      options: { reasoning: false, toolDetails: false, attachments: true },
+      snapshot: { title: 'Branches', messages: [{ role: 'user', parts: [{ type: 'text', text: 'bravo question' }] }] },
+      snapshotAt: 1,
+    })
+    expect((await service.list({ q: 'bravo' })).items.map(chat => chat.id)).toEqual([id])
+    const detail = await service.deleteMessage(id, messageId(1))
+    expect(detail.totals).toMatchObject({ inputTokens: 11, outputTokens: 11, costUsd: 0.75 })
+    expect(await t.db.select({ messageId: usage.messageId }).from(usage)).toEqual([{ messageId: messageId(4) }, { messageId: messageId(6) }])
+    expect(await t.db.select({ id: chatShares.id }).from(chatShares)).toEqual([{ id: 'shr_0000000000000001' }])
+    expect((await service.list({ q: 'bravo' })).items).toEqual([])
+    expect((await service.list({ q: 'charlie' })).items.map(chat => chat.id)).toEqual([id])
+  })
+
+  describe('races (the checks run again inside the write)', () => {
+    it('the active leaf moved meanwhile: 409 run-active, nothing deleted, no event', async () => {
+      const id = chatId(1)
+      await service.create(treeInput())
+      const before = await pointersOf(id)
+      events.clear()
+      // A run commits a new message under the shown reply before the delete writes.
+      const racing = racingService(async () => {
+        await service.appendMessage(id, userMessage(messageId(7), 'delta'), messageId(6))
+        await service.setActiveLeaf(id, messageId(7))
+      })
+      const error = await rejection(racing.deleteMessage(id, messageId(5)))
+      expect(error.toJSON().error).toEqual({
+        code: 'conflict',
+        message: 'The chat changed while deleting the version. Wait until the reply finishes, then try again.',
+        details: { reason: 'run-active', chatId: id },
+      })
+      expect(await allIds(id)).toEqual([1, 2, 3, 4, 5, 6, 7].map(messageId))
+      expect((await service.find(id))?.activeLeafId).toBe(messageId(7))
+      expect(await pointersOf(id)).toEqual({ ...before, [messageId(6)]: messageId(7), [messageId(7)]: null })
+      expect(events.ofType('chat.updated')).toEqual([])
+    })
+
+    it('a version off the path that became shown meanwhile is not deleted (409 run-active)', async () => {
+      const id = chatId(1)
+      await service.create(treeInput())
+      const racing = racingService(async () => service.switchBranch(id, messageId(1)))
+      expect((await rejection(racing.deleteMessage(id, messageId(1)))).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'run-active' } })
+      expect(await allIds(id)).toHaveLength(6)
+      expect(ids((await service.get(id)).messages)).toEqual([1, 2, 3, 4].map(messageId))
+    })
+
+    it('the other version was deleted meanwhile: 409 only-version; the message was deleted meanwhile: 404', async () => {
+      const id = chatId(1)
+      await service.create(treeInput())
+      const otherGone = racingService(async () => t.db.delete(messages).where(inArray(messages.id, [1, 2, 3, 4].map(messageId))))
+      expect((await rejection(otherGone.deleteMessage(id, messageId(5)))).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'only-version' } })
+      expect(await allIds(id)).toEqual([messageId(5), messageId(6)])
+      expect((await service.find(id))?.activeLeafId).toBe(messageId(6))
+
+      await service.create(treeInput(2))
+      const [a, , , , a2] = await allIds(chatId(2))
+      const selfGone = racingService(async () => service.deleteMessage(chatId(2), a2!))
+      expect((await rejection(selfGone.deleteMessage(chatId(2), a2!))).code).toBe('not_found')
+      expect(ids((await service.get(chatId(2))).messages)[0]).toBe(a)
+    })
+
+    it('a leaf moved meanwhile to exactly the new leaf still deletes (the path no longer goes through the message)', async () => {
+      const id = chatId(1)
+      await service.create(treeInput())
+      const racing = racingService(async () => service.setActiveLeaf(id, messageId(4)))
+      const detail = await racing.deleteMessage(id, messageId(5))
+      expect(ids(detail.messages)).toEqual([1, 2, 3, 4].map(messageId))
+      expect(await allIds(id)).toEqual([1, 2, 3, 4].map(messageId))
+    })
+  })
+})
+
+describe('chat.updated carries the active leaf (ADR-030)', () => {
+  it('update, touch, setTitle, switchBranch and deleteMessage emit the stored activeLeafId; results omit it', async () => {
+    const id = chatId(1)
+    const { title: _title, ...untitled } = treeInput()
+    await service.create(untitled)
+    await t.db.update(chats).set({ updatedAt: 1000 }).where(eq(chats.id, id))
+    events.clear()
+    const updated = await service.update(id, { pinned: true })
+    const touched = await service.touch(id, { at: 5000 })
+    const titled = await service.setTitle(id, 'Automatic title', 'auto')
+    await service.switchBranch(id, messageId(1))
+    await service.deleteMessage(id, messageId(5))
+    await service.switchBranch(id, messageId(2))
+    const emitted = events.ofType('chat.updated')
+    expect(emitted.map(event => event.data.activeLeafId)).toEqual([6, 6, 6, 4, 4, 4].map(messageId))
+    for (const event of emitted)
+      expect(serverEventSchema.parse(event)).toEqual(event)
+    for (const summary of [updated, touched, titled]) {
+      expect(summary).not.toHaveProperty('activeLeafId')
+      expect(chatSummarySchema.parse(summary)).toEqual(summary)
+    }
+    // The emitted summary is the row after the write.
+    expect(emitted[2]!.data).toMatchObject({ title: 'Automatic title', titleSource: 'auto', pinned: true, updatedAt: 5000 })
+  })
+
+  it('a chat whose leaf was never stored emits null (its detail falls back to the latest message)', async () => {
+    const id = await insertChat(1, 1000)
+    await service.appendMessage(id, userMessage(messageId(1), 'q1'), null)
+    events.clear()
+    await service.touch(id)
+    expect(events.ofType('chat.updated').map(event => event.data.activeLeafId)).toEqual([null])
   })
 })
 

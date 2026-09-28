@@ -17,6 +17,10 @@
 // Overridden: `get`, `find`, `create`, `remove`, `export` (JSON), `listPath`, `appendMessage`, `upsertMessage`,
 // `setActiveLeaf`, `switchBranch`, `allIds`, `importChat`, `removeAll`, and (Phase 6, C11-T5) `deleteMessage`. Everything
 // else, `transaction()` included, is the real service (its store members stay the real ones).
+// Phase 6 (ADR-030, W6.6): remembered versions like the real service: `create`, `importChat`, `setActiveLeaf` (after a
+// successful compare-and-set), `switchBranch` and `deleteMessage` record the shown path in `messages.selected_child_id`,
+// and `switchBranch` / `deleteMessage` show the remembered leaf. Every `chat.updated` carries the stored active leaf
+// (`update`, `touch` and `setTitle` are the real ones).
 // Simplifications: writes are not atomic (a failed tree write after `create` leaves a linear chat), `export(id, 'md')`
 // is the real Markdown export, and the `chat.created` event of `importChat` carries the summary from before the title,
 // flags and dates are restored.
@@ -291,15 +295,29 @@ export function createFakeChatsService(deps: AppDeps): ChatsService {
     tree.linear = false
   }
 
+  /** `selected_child_id` of every message of a chat. */
+  async function pointersOf(chatId: string): Promise<Map<string, string | null>> {
+    const rows = await db.select({ id: messages.id, selectedChildId: messages.selectedChildId }).from(messages).where(eq(messages.chatId, chatId))
+    return new Map(rows.map(row => [row.id, row.selectedChildId]))
+  }
+
+  /** Records the path that ends at `leafId` as the remembered versions (ADR-030): each parent points at its child. */
+  async function rememberPath(chatId: string, tree: FakeChatTree, leafId: string): Promise<void> {
+    const path = fakePathTo(tree, leafId)
+    for (let index = 1; index < path.length; index++)
+      await db.update(messages).set({ selectedChildId: path[index]! }).where(and(eq(messages.chatId, chatId), eq(messages.id, path[index - 1]!)))
+  }
+
   /** Writes the planned tree over the messages of a chat that was just created (same order as the plan). */
   async function applyTree(chatId: string, plan: TreePlan): Promise<void> {
     const stored = (await base.listMessages(chatId)).map(message => message.id)
     if (stored.length !== plan.parentIndex.length)
       throw new Error(`fake chats: chat ${chatId} holds ${stored.length} messages, the import had ${plan.parentIndex.length}.`)
+    // The pointers the real `create` wrote for its linear chain are cleared; the planned path is remembered below.
     const statements: BatchItem<'sqlite'>[] = stored.map((id, index) => {
       const parent = plan.parentIndex[index] ?? -1
       return db.update(messages)
-        .set({ parentId: parent < 0 ? null : stored[parent] ?? null })
+        .set({ parentId: parent < 0 ? null : stored[parent] ?? null, selectedChildId: null })
         .where(and(eq(messages.chatId, chatId), eq(messages.id, id)))
     })
     statements.push(db.update(chats)
@@ -307,6 +325,10 @@ export function createFakeChatsService(deps: AppDeps): ChatsService {
       .where(eq(chats.id, chatId)))
     treeChats.add(chatId)
     await db.batch(statements as Batch)
+    // The active path is remembered (an import re-derives the pointers, which are never exported).
+    const tree = await requireTree(chatId)
+    if (tree.leaf !== null)
+      await rememberPath(chatId, tree, tree.leaf)
   }
 
   async function detail(id: string): Promise<ChatDetail> {
@@ -375,16 +397,13 @@ export function createFakeChatsService(deps: AppDeps): ChatsService {
     if (onPath) {
       const index = siblings.indexOf(messageId)
       const target = siblings[index - 1] ?? siblings[index + 1]!
-      const rows = await db.select({ id: messages.id, selectedChildId: messages.selectedChildId }).from(messages).where(eq(messages.chatId, id))
-      leaf = fakeRememberedLeafUnder(tree, new Map(rows.map(row => [row.id, row.selectedChildId])), target)
+      leaf = fakeRememberedLeafUnder(tree, await pointersOf(id), target)
     }
     await db.delete(messages).where(and(eq(messages.chatId, id), inArray(messages.id, subtree)))
     if (onPath && leaf !== null) {
       const pendingApproval = awaitsApproval(await base.getMessage(id, leaf))
       await db.update(chats).set({ activeLeafId: leaf, pendingApproval }).where(eq(chats.id, id))
-      const path = fakePathTo(tree, leaf)
-      for (let index = 1; index < path.length; index++)
-        await db.update(messages).set({ selectedChildId: path[index]! }).where(and(eq(messages.chatId, id), eq(messages.id, path[index - 1]!)))
+      await rememberPath(id, tree, leaf)
     }
     deps.events.emit('chat.updated', { ...(await base.summary(id)), activeLeafId: leaf })
     return detail(id)
@@ -514,7 +533,11 @@ export function createFakeChatsService(deps: AppDeps): ChatsService {
         current = or(...matches)
       }
       const rows = await db.update(chats).set({ activeLeafId: leafId }).where(and(eq(chats.id, chatId), current)).returning({ id: chats.id })
-      return rows.length > 0
+      if (rows.length === 0)
+        return false
+      // The shown path is remembered after a successful compare-and-set only (ADR-030).
+      await rememberPath(chatId, tree, leafId)
+      return true
     },
 
     switchBranch: async (id: string, messageId: string) => {
@@ -524,9 +547,11 @@ export function createFakeChatsService(deps: AppDeps): ChatsService {
       if (deps.runs.hasRun(id))
         throw runActive(id)
       await materialize(id, tree)
-      const leaf = fakeLatestLeafUnder(tree, messageId)
+      // The path last shown under the message (ADR-030); the new path is remembered.
+      const leaf = fakeRememberedLeafUnder(tree, await pointersOf(id), messageId)
       const pendingApproval = awaitsApproval(await base.getMessage(id, leaf))
       await db.update(chats).set({ activeLeafId: leaf, pendingApproval }).where(eq(chats.id, id))
+      await rememberPath(id, tree, leaf)
       deps.events.emit('chat.updated', { ...(await base.summary(id)), activeLeafId: leaf })
       return detail(id)
     },

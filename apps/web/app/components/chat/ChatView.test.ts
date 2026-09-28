@@ -1,4 +1,5 @@
 import type { ChatRequestBody } from '@harness-forge/shared'
+import type { VueWrapper } from '@vue/test-utils'
 import type { UIMessageChunk } from 'ai'
 import type { Mock } from 'vitest'
 import type { MockApi } from '~/utils/testing/mock-api'
@@ -42,7 +43,7 @@ vi.mock('~/components/chat/composer/ChatComposer.vue', async () => {
   return {
     default: define({
       name: 'ChatComposer',
-      props: ['chatId', 'status', 'modelRef', 'reasoningEffort', 'toolMode', 'usage', 'chatCostUsd', 'disabled', 'placeholder'],
+      props: ['chatId', 'status', 'modelRef', 'reasoningEffort', 'toolMode', 'usage', 'chatCostUsd', 'disabled', 'placeholder', 'previousImages'],
       emits: ['update:modelRef', 'update:reasoningEffort', 'update:toolMode', 'submit', 'stop', 'edit-last'],
       setup(props, { emit, expose }) {
         expose({
@@ -56,6 +57,7 @@ vi.mock('~/components/chat/composer/ChatComposer.vue', async () => {
           'data-placeholder': props.placeholder,
           'data-model-ref': props.modelRef,
           'data-disabled': String(props.disabled),
+          'data-previous-images': String(props.previousImages),
           'onSubmit': (event: Event) => {
             event.preventDefault()
             emit('submit', { text: 'Hello', files: [] })
@@ -92,6 +94,8 @@ function textReply(text: string): () => Response {
 
 let api: MockApi
 let pinia: ReturnType<typeof createPinia>
+/** Views mounted by the current test: unmounted before the body is cleared (dialogs render into the body). */
+const mounted: VueWrapper[] = []
 
 beforeEach(() => {
   stubLocalStorage()
@@ -122,6 +126,10 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  for (const wrapper of mounted.splice(0)) {
+    if (wrapper.exists())
+      wrapper.unmount()
+  }
   resetChatSessions()
   disposePinia(pinia)
   document.body.replaceChildren()
@@ -137,6 +145,7 @@ function mountView(props: { chatId: string, isNew?: boolean }) {
       }),
     }),
   }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
+  mounted.push(wrapper)
   return { wrapper, created }
 }
 
@@ -341,5 +350,152 @@ describe('chatView: versions', () => {
     await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 2)
     expect(wrapper.text()).toContain('From another tab')
     expect(wrapper.find(`[data-testid="${testIds.chatError}"]`).exists()).toBe(false)
+  })
+})
+
+describe('chatView: images', () => {
+  it('tells the composer how many images the last reply holds', async () => {
+    const image = (n: number) => ({ type: 'file' as const, mediaType: 'image/png', url: `/api/files/file_image00000000000${n}`, filename: `image-${n}.png` })
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(6),
+      modelRef: MODEL,
+      messages: [
+        userMessage('msg_user000000000001', 'A red fox'),
+        assistantMessage('msg_asst000000000001', '', { parts: [image(1), image(2)] }),
+      ],
+    }))
+    const { wrapper } = mountView({ chatId: chatId(6) })
+    await until(() => wrapper.find(`[data-testid="${testIds.imageGallery}"]`).exists())
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-previous-images')).toBe('2')
+
+    // A new chat has none.
+    const fresh = mountView({ chatId: chatId(7), isNew: true })
+    expect(fresh.wrapper.get('[data-testid="composer"]').attributes('data-previous-images')).toBe('0')
+  })
+})
+
+describe('chatView: edit attachments', () => {
+  it('sends the files left in the editor with the new version', async () => {
+    const photo = { type: 'file' as const, mediaType: 'image/png', filename: 'photo.png', url: '/api/files/file_photo000000000001' }
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(8),
+      modelRef: MODEL,
+      messages: [userMessage('msg_user000000000001', 'What is this?', { parts: [photo, { type: 'text', text: 'What is this?' }] }), assistantMessage('msg_asst000000000009', 'A photo')],
+    }))
+    const { wrapper } = mountView({ chatId: chatId(8) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    replies.push(textReply('Without the photo'))
+    await wrapper.get(`[data-testid="${testIds.messageEdit}"]`).trigger('click')
+    await wrapper.get('[aria-label="Remove photo.png"]').trigger('click')
+    await wrapper.get(`[data-testid="${testIds.messageEditSave}"]`).trigger('click')
+    await until(() => calls.some(call => call.url === '/api/chat'))
+    expect(calls.find(call => call.url === '/api/chat')!.body!.message.parts).toEqual([{ type: 'text', text: 'What is this?' }])
+  })
+})
+
+describe('chatView: delete a version', () => {
+  const U1 = 'msg_user00000000000a'
+  const A1 = 'msg_asst00000000000a'
+  const U1B = 'msg_user00000000000b'
+  const A1B = 'msg_asst00000000000b'
+  const U1C = 'msg_user00000000000c'
+
+  function confirmButton(): HTMLButtonElement | null {
+    return document.body.querySelector<HTMLButtonElement>(`[data-testid="${testIds.messageDeleteVersionConfirm}"]`)
+  }
+
+  async function mountWithVersions(siblings: string[]) {
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(9),
+      modelRef: MODEL,
+      messages: [userMessage(U1B, 'Second question'), assistantMessage(A1B, 'Second answer')],
+      branches: { [U1B]: messageBranch(siblings, siblings.indexOf(U1B)) },
+    }))
+    const view = mountView({ chatId: chatId(9) })
+    await until(() => view.wrapper.find(`[data-testid="${testIds.messageDeleteVersion}"]`).exists())
+    return view
+  }
+
+  async function askToDelete(wrapper: ReturnType<typeof mountView>['wrapper']) {
+    await wrapper.get(`[data-message-id="${U1B}"] [data-testid="${testIds.messageDeleteVersion}"]`).trigger('click')
+    await until(() => confirmButton() !== null)
+  }
+
+  it('asks first, then deletes: the previous version shows, the live region says so, focus lands on it', async () => {
+    api.chats.deleteMessage.mockResolvedValue(chatDetail({
+      id: chatId(9),
+      messages: [userMessage(U1, 'First question'), assistantMessage(A1, 'First answer')],
+      branches: {},
+    }))
+    const { wrapper } = await mountWithVersions([U1, U1B])
+    await askToDelete(wrapper)
+    expect(document.body.textContent).toContain('Delete this version?')
+    expect(document.body.textContent).toContain('This version and every message after it are deleted. Other versions stay.')
+    expect(confirmButton()!.textContent?.trim()).toBe('Delete version')
+    expect(api.chats.deleteMessage).not.toHaveBeenCalled()
+
+    confirmButton()!.click()
+    expect(api.chats.deleteMessage).toHaveBeenCalledWith({ params: { id: chatId(9), messageId: U1B } })
+    await until(() => wrapper.get(`[data-testid="${testIds.messageUser}"]`).attributes('data-message-id') === U1)
+    await until(() => wrapper.get('[role="status"]').text() === 'Version deleted')
+    expect(confirmButton()).toBeNull()
+    // One version left: no switcher, focus on its Copy button.
+    expect(wrapper.find(`[data-testid="${testIds.messageBranch}"]`).exists()).toBe(false)
+    expect(document.activeElement).toBe(wrapper.get(`[data-message-id="${U1}"] [data-testid="${testIds.messageCopy}"]`).element)
+    expect(mock.toast).not.toHaveBeenCalled()
+  })
+
+  it('focuses the switcher of the version shown when versions are left', async () => {
+    api.chats.deleteMessage.mockResolvedValue(chatDetail({
+      id: chatId(9),
+      messages: [userMessage(U1, 'First question'), assistantMessage(A1, 'First answer')],
+      branches: { [U1]: messageBranch([U1, U1C], 0) },
+    }))
+    const { wrapper } = await mountWithVersions([U1, U1B, U1C])
+    await askToDelete(wrapper)
+    confirmButton()!.click()
+    await until(() => wrapper.get('[role="status"]').text() === 'Version deleted')
+    const switcher = wrapper.get(`[data-testid="${testIds.messageBranch}"]`)
+    expect(switcher.attributes('data-message-id')).toBe(U1)
+    expect(document.activeElement).toBe(switcher.get(`[data-testid="${testIds.messageBranchNext}"]`).element)
+  })
+
+  it('cancel deletes nothing and returns focus to "Delete this version"', async () => {
+    const { wrapper } = await mountWithVersions([U1, U1B])
+    await askToDelete(wrapper)
+    const cancel = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.trim() === 'Cancel')!
+    cancel.click()
+    await until(() => confirmButton() === null)
+    await flushPromises()
+    expect(api.chats.deleteMessage).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(wrapper.get(`[data-message-id="${U1B}"] [data-testid="${testIds.messageDeleteVersion}"]`).element)
+  })
+
+  it('reports failures: the last version, a running reply, a stale path', async () => {
+    const { wrapper } = await mountWithVersions([U1, U1B])
+    api.chats.deleteMessage.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'The message has no other version.', details: { reason: 'only-version' } }))
+    await askToDelete(wrapper)
+    confirmButton()!.click()
+    await until(() => mock.toast.mock.calls.length === 1)
+    expect(mock.toast).toHaveBeenCalledWith('Could not delete the version', { description: 'The message has no other version.' })
+    await until(() => confirmButton() === null)
+    await flushPromises()
+    expect(wrapper.get('[role="status"]').text()).not.toBe('Version deleted')
+    expect(document.activeElement).toBe(wrapper.get(`[data-message-id="${U1B}"] [data-testid="${testIds.messageDeleteVersion}"]`).element)
+
+    api.chats.deleteMessage.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'A run is active.', details: { reason: 'run-active', chatId: chatId(9) } }))
+    await askToDelete(wrapper)
+    confirmButton()!.click()
+    await until(() => mock.toast.mock.calls.length === 2)
+    expect(mock.toast).toHaveBeenLastCalledWith('A response is already running in this chat.')
+    await until(() => confirmButton() === null)
+    await until(() => calls.some(call => call.url === `/api/chat/${chatId(9)}/stream`))
+
+    await until(() => wrapper.find(`[data-message-id="${U1B}"] [data-testid="${testIds.messageDeleteVersion}"]`).exists())
+    api.chats.deleteMessage.mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: 'Message not found.' }))
+    await askToDelete(wrapper)
+    confirmButton()!.click()
+    await until(() => mock.toast.mock.calls.length === 3)
+    expect(mock.toast).toHaveBeenLastCalledWith('This chat changed elsewhere and was reloaded.')
   })
 })

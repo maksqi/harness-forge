@@ -1,21 +1,44 @@
-// Everything `POST /chat` does before the stream starts (ARCHITECTURE.md 6.1 / 6.8): classify the request, upsert the
-// chat (mode and effort saved as chat settings), resolve the model (`provider_not_configured` before any streaming),
-// plan the history operation in memory (the path it continues, slash commands, superseded approvals, the approval
-// merge), validate the new message with `validateUIMessages`, then commit the history change and the active leaf in one
-// transaction. A failure here is a normal JSON error response and leaves the history untouched. Nothing is ever deleted
-// (ADR-023): an edit adds a sibling user message, a regenerate a sibling reply.
-import type { ChatRequestBody, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, Settings } from '@harness-forge/shared'
+// Everything `POST /chat` does before the stream starts (ARCHITECTURE.md 6.1 / 6.8 / 6.11): classify the request,
+// upsert the chat (mode and effort saved as chat settings), resolve the model (`provider_not_configured` before any
+// streaming; an image model, catalog kind `image`, through `resolveImageModel`), check the image options, plan the
+// history operation in memory (the path it continues, slash commands, superseded approvals, the approval merge; for an
+// image turn the prompt and the input images), validate the new message with `validateUIMessages`, then commit the
+// history change and the active leaf in one transaction. A failure here is a normal JSON error response and leaves the
+// history untouched. Nothing is ever deleted (ADR-023): an edit adds a sibling user message, a regenerate a sibling
+// reply.
+import type {
+  CatalogModel,
+  ChatRequestBody,
+  HarnessUIMessage,
+  HarnessUIMessagePart,
+  ImageAspectRatio,
+  ImageOptions,
+  MessageMetadata,
+  Settings,
+} from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
-import type { ResolvedModel } from '../providers/types.ts'
+import type { ResolvedImageModel, ResolvedModel, ResolvedModelBase } from '../providers/types.ts'
 import type { ChatRecord } from '../services/chats/types.ts'
+import type { FilesService } from '../services/files/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { CommandResolution } from './commands.ts'
 import type { RequestKind } from './history.ts'
 import type { Run } from './runs.ts'
-import { createMessageId, harnessDataSchemas, HarnessError, isHarnessError, messageMetadataSchema, validationError } from '@harness-forge/shared'
+import {
+  createMessageId,
+  harnessDataSchemas,
+  HarnessError,
+  isHarnessError,
+  LIMITS,
+  messageMetadataSchema,
+  safeParseModelRef,
+  validationError,
+} from '@harness-forge/shared'
 import { safeValidateUIMessages } from 'ai'
 import { resolveCommand } from './commands.ts'
+import { applyCommandExpansions } from './context.ts'
 import { normalizeUserParts } from './files.ts'
+import { isGeneratedImageType } from './generated-files.ts'
 import { badRequest, classifyRequest, mergeApprovalDecisions, notFound, supersedeApprovals } from './history.ts'
 
 /** A message write of the history transaction. */
@@ -35,10 +58,35 @@ export interface HistoryWrites {
   activeLeafId: string
 }
 
+/** What an image turn sends to `ImageService.generate` (ADR-028; an image turn sends no history). */
+export interface ImageTurnOptions {
+  /** The text of the answered user message after slash-command expansion, trimmed (1..`imagePromptMaxChars`). */
+  prompt: string
+  /** Images to generate (`imageOptions.n`, default 1). */
+  n: number
+  aspectRatio?: ImageAspectRatio
+  /** Stored images sent with the prompt: the attached images, or the generated images of the parent reply. */
+  inputFileIds: string[]
+  /** Attachments of the new user message that are not sent (the `attachments-unsupported` notice). */
+  dropped: number
+}
+
+/** The model a run calls: a chat model (`streamText`), or an image model (an image turn, `chat/images.ts`). */
+export type RunTarget
+  = | {
+    kind: 'chat'
+    model: ResolvedModel
+    /** `imageOptions.aspectRatio` for a chat model with `capabilities.imageOutput` (its `imageParams`). */
+    aspectRatio?: ImageAspectRatio
+  }
+  | { kind: 'image', model: ResolvedImageModel, options: ImageTurnOptions }
+
 export interface PreparedRun {
   kind: RequestKind
   chat: ChatRecord
-  resolved: ResolvedModel
+  /** The model of the run (chat or image model): `target.model`. */
+  resolved: ResolvedModelBase
+  target: RunTarget
   settings: Settings
   /** The path the reply is generated from, first message first; for a continuation the continued message is last. */
   history: HarnessUIMessage[]
@@ -66,10 +114,10 @@ export function stoppedBeforeStart(chatId: string): HarnessError {
   return new HarnessError({ code: 'conflict', message: 'The run was stopped before it started.', details: { reason: 'stale', chatId } })
 }
 
-/** `resolveModel`, with an unknown provider reported as `provider_not_configured` (API.md 2.2). */
-export async function resolveChatModel(deps: Pick<AppDeps, 'providers'>, modelRef: string, signal: AbortSignal): Promise<ResolvedModel> {
+/** A resolution with an unknown provider reported as `provider_not_configured` (API.md 2.2). */
+async function withProviderCheck<T>(resolve: () => Promise<T>): Promise<T> {
   try {
-    return await deps.providers.resolveModel(modelRef, { signal })
+    return await resolve()
   }
   catch (error) {
     if (isHarnessError(error) && error.code === 'not_found' && error.providerId !== undefined) {
@@ -80,6 +128,96 @@ export async function resolveChatModel(deps: Pick<AppDeps, 'providers'>, modelRe
     }
     throw error
   }
+}
+
+/** `resolveModel`, with an unknown provider reported as `provider_not_configured` (API.md 2.2). */
+export async function resolveChatModel(deps: Pick<AppDeps, 'providers'>, modelRef: string, signal: AbortSignal): Promise<ResolvedModel> {
+  return withProviderCheck(() => deps.providers.resolveModel(modelRef, { signal }))
+}
+
+/** The resolved model of a request, before its turn is planned. */
+export type ResolvedTarget = { kind: 'chat', model: ResolvedModel } | { kind: 'image', model: ResolvedImageModel }
+
+/**
+ * The model of a request (ADR-028): a model of catalog kind `image` resolves with `resolveImageModel` (an image turn),
+ * anything else with `resolveModel` (which refuses image models). Resolution errors as in `resolveChatModel`.
+ */
+export async function resolveTarget(deps: Pick<AppDeps, 'providers' | 'catalog'>, modelRef: string, signal: AbortSignal): Promise<ResolvedTarget> {
+  const parts = safeParseModelRef(modelRef)
+  const entry = parts === null ? null : await deps.catalog.get(parts.providerId, parts.modelId).catch(() => null)
+  if (entry?.kind === 'image')
+    return { kind: 'image', model: await withProviderCheck(() => deps.providers.resolveImageModel(modelRef, { signal })) }
+  return { kind: 'chat', model: await resolveChatModel(deps, modelRef, signal) }
+}
+
+/**
+ * `imageOptions` (ADR-028): accepted for an image model; for a chat model only with `capabilities.imageOutput` and then
+ * only `aspectRatio`. Otherwise `validation_error` on `['imageOptions']`.
+ */
+export function checkImageOptions(options: ImageOptions | undefined, kind: ResolvedTarget['kind'], entry: Pick<CatalogModel, 'ref' | 'capabilities'>): void {
+  if (options === undefined || kind === 'image')
+    return
+  if (!entry.capabilities.imageOutput)
+    throw badRequest(`The model "${entry.ref}" does not generate images: image options are only for image models and chat models with image output.`, ['imageOptions'])
+  if (options.n !== undefined || options.editPrevious !== undefined)
+    throw badRequest('A chat model with image output takes only the aspect ratio: n and editPrevious are for image models.', ['imageOptions'])
+}
+
+/** The prompt of an image turn: the text parts of the user message after slash-command expansion, trimmed. */
+export function imagePrompt(message: HarnessUIMessage): string {
+  const [expanded] = applyCommandExpansions([message])
+  return (expanded?.parts ?? []).flatMap(part => (part.type === 'text' ? [part.text] : [])).join('\n').trim()
+}
+
+/** Ids of the generated images of an assistant reply that are still stored (the last `LIMITS.imageInputsMax`). */
+export async function generatedImageIds(message: HarnessUIMessage | null | undefined, files: Pick<FilesService, 'idFromUrl' | 'get'>): Promise<string[]> {
+  if (message?.role !== 'assistant')
+    return []
+  const ids: string[] = []
+  for (const part of message.parts) {
+    if (part.type !== 'file' || !isGeneratedImageType(part.mediaType))
+      continue
+    const id = files.idFromUrl(part.url)
+    if (id === null || ids.includes(id))
+      continue
+    const file = await files.get(id)
+    if (file !== null && isGeneratedImageType(file.mime))
+      ids.push(id)
+  }
+  return ids.slice(-LIMITS.imageInputsMax)
+}
+
+/**
+ * Input images of an image turn (ADR-028): the images attached to the message when the model has `vision` (at most
+ * `LIMITS.imageInputsMax`); else, when none are attached and `editPrevious !== false`, the generated images of the
+ * parent reply (vision models only). Other attachments, and images the model cannot take, are `dropped`.
+ */
+export async function imageTurnInputs(
+  message: HarnessUIMessage,
+  parent: HarnessUIMessage | null | undefined,
+  model: ResolvedModelBase,
+  editPrevious: boolean | undefined,
+  files: Pick<FilesService, 'idFromUrl' | 'get'>,
+): Promise<{ inputFileIds: string[], dropped: number }> {
+  const vision = model.entry.capabilities.vision
+  const attached: string[] = []
+  let dropped = 0
+  for (const part of message.parts) {
+    if (part.type !== 'file')
+      continue
+    const id = files.idFromUrl(part.url)
+    if (id !== null && isGeneratedImageType(part.mediaType))
+      attached.push(id)
+    else
+      dropped += 1
+  }
+  if (attached.length > 0) {
+    const inputFileIds = vision ? attached.slice(0, LIMITS.imageInputsMax) : []
+    return { inputFileIds, dropped: dropped + attached.length - inputFileIds.length }
+  }
+  if (!vision || editPrevious === false)
+    return { inputFileIds: [], dropped }
+  return { inputFileIds: await generatedImageIds(parent, files), dropped }
 }
 
 /** Deep check of one message (AI SDK `validateUIMessages` with the metadata and data part schemas). */
@@ -113,7 +251,7 @@ interface PrepareContext {
   deps: AppDeps
   run: Run
   body: ChatRequestBody
-  resolved: ResolvedModel
+  resolved: ResolvedModelBase
   logger: Logger
 }
 
@@ -154,7 +292,11 @@ export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody,
     modelRef: body.modelRef,
     settings: { toolMode: body.toolMode, reasoningEffort: body.reasoningEffort },
   })
-  const resolved = await resolveChatModel(deps, body.modelRef, run.signal)
+  const resolvedTarget = await resolveTarget(deps, body.modelRef, run.signal)
+  const resolved: ResolvedModelBase = resolvedTarget.model
+  checkImageOptions(body.imageOptions, resolvedTarget.kind, resolved.entry)
+  if (resolvedTarget.kind === 'image' && kind === 'continuation')
+    throw badRequest('An image model cannot continue a tool call. Pick a chat model to answer the pending tool call.', ['modelRef'])
   deps.catalog.markUsed(resolved.providerId, resolved.modelId).catch((error: unknown) => logger.debug('cannot record the model use', { err: error }))
   const settings = await deps.settings.get()
   const context: PrepareContext = { deps, run, body, resolved, logger }
@@ -171,14 +313,16 @@ export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody,
       await validateMessage(message)
       // Only the approvals of this path: those of other versions stay pending.
       const superseded = supersedeApprovals(path)
+      const decides = command?.kind === 'prompt' ? null : command
       return {
         ...base,
+        target: await planTarget(context, resolvedTarget, { message, parent: path.at(-1), decides, countDropped: true }),
         history: [...superseded.messages, message],
         userMessage: message,
         continued: null,
         assistantId: createMessageId(),
         replyParentId: message.id,
-        command: command?.kind === 'prompt' ? null : command,
+        command: decides,
         superseded: superseded.count,
         writes: { updates: pathWrites(superseded.changed, path), append: { message, parentId }, activeLeafId: message.id },
       }
@@ -193,14 +337,16 @@ export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody,
         throw badRequest('There is no user message to answer.', ['messageId'])
       const kept = path.slice(0, answeredIndex + 1)
       const superseded = supersedeApprovals(kept)
+      const command = await regeneratedCommand(context, answered)
       return {
         ...base,
+        target: await planTarget(context, resolvedTarget, { message: answered, parent: kept.at(-2), decides: command, countDropped: false }),
         history: superseded.messages,
         userMessage: null,
         continued: null,
         assistantId: createMessageId(),
         replyParentId: answered.id,
-        command: await regeneratedCommand(context, answered),
+        command,
         superseded: superseded.count,
         writes: { updates: pathWrites(superseded.changed, kept), append: null, activeLeafId: answered.id },
       }
@@ -219,6 +365,7 @@ export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody,
       const parentId = path.at(-2)?.id ?? null
       return {
         ...base,
+        target: await planTarget(context, resolvedTarget, { message, parent: path.at(-2), decides: null, countDropped: false }),
         history: [...path.slice(0, -1), message],
         userMessage: null,
         continued: message,
@@ -229,6 +376,48 @@ export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody,
         writes: { updates: [{ message, parentId }], append: null, activeLeafId: message.id },
       }
     }
+  }
+}
+
+/** The turn a request answers: the user message, its parent on the path, the command that decides the reply. */
+interface PlannedTurn {
+  message: HarnessUIMessage
+  parent: HarnessUIMessage | undefined
+  /** A reply or failed command writes the reply without a model call (the image prompt is not checked then). */
+  decides: CommandResolution | null
+  /** Count the attachments an image turn does not send (the new user message only, like chat runs). */
+  countDropped: boolean
+}
+
+/**
+ * The target of a run. For an image model: the prompt (the user text after slash-command expansion, `400` when empty
+ * or longer than `LIMITS.imagePromptMaxChars` unless a command writes the reply), `n`, the aspect ratio and the input
+ * images (see `imageTurnInputs`). For a chat model with image output: the requested aspect ratio.
+ */
+async function planTarget(context: PrepareContext, resolved: ResolvedTarget, turn: PlannedTurn): Promise<RunTarget> {
+  const options = context.body.imageOptions
+  if (resolved.kind === 'chat') {
+    const aspectRatio = resolved.model.entry.capabilities.imageOutput ? options?.aspectRatio : undefined
+    return { kind: 'chat', model: resolved.model, ...(aspectRatio === undefined ? {} : { aspectRatio }) }
+  }
+  const prompt = imagePrompt(turn.message)
+  if (turn.decides === null) {
+    if (prompt === '')
+      throw badRequest('Describe the image to generate: an image model needs a text prompt.', ['message', 'parts'])
+    if (prompt.length > LIMITS.imagePromptMaxChars)
+      throw badRequest(`Image prompts are limited to ${LIMITS.imagePromptMaxChars} characters.`, ['message', 'parts'])
+  }
+  const inputs = await imageTurnInputs(turn.message, turn.parent, resolved.model, options?.editPrevious, context.deps.files)
+  return {
+    kind: 'image',
+    model: resolved.model,
+    options: {
+      prompt,
+      n: options?.n ?? 1,
+      ...(options?.aspectRatio === undefined ? {} : { aspectRatio: options.aspectRatio }),
+      inputFileIds: inputs.inputFileIds,
+      dropped: turn.countDropped ? inputs.dropped : 0,
+    },
   }
 }
 

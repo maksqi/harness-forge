@@ -4,10 +4,11 @@
 // fallback from `env.vars`, defaults), a fake plugin host that runs the builtin plugins' `setup` against the fake
 // registry, a recording event bus and the catalog without background work. Never imported by production code.
 //
-// Phase 6 (C11-T5): `withFakeMediaResolvers` / `fakeMediaProviders` replace the three media resolvers (stubs until W6.2)
-// with fakes on the real catalog and registry, backed by `MockImageModelV4` / `MockTranscriptionModelV4` /
-// `MockSpeechModelV4` from `ai/test`; the fake plugin host's `ctx.images.generate` delegates to `deps.images` (the stub
-// until W6.4, or a fake / the real service a test wires in).
+// Phase 6 (C11-T5): `withFakeMediaResolvers` / `fakeMediaProviders` replace the three media resolvers (implemented by
+// W6.2 in `providers/index.ts`) with fakes on the real catalog and registry, backed by `MockImageModelV4` /
+// `MockTranscriptionModelV4` / `MockSpeechModelV4` from `ai/test` (instant models, no credential or factory checks);
+// the fake plugin host's `ctx.images.generate` delegates to `deps.images` (the stub until W6.4, or a fake / the real
+// service a test wires in).
 import type { ImageModelV4, SpeechModelV4, TranscriptionModelV4 } from '@ai-sdk/provider'
 import type {
   CommandDefinition,
@@ -450,7 +451,7 @@ export async function createProvidersTestApp(options: ProvidersTestAppOptions = 
   }
 }
 
-// ---------- Phase 6: media resolvers (fakes until W6.2) ----------
+// ---------- Phase 6: media resolvers (fakes of the real resolvers) ----------
 
 /** Model instances per model ref for `withFakeMediaResolvers`; refs not listed get the instant fake models below. */
 export interface FakeMediaResolverOptions {
@@ -510,7 +511,8 @@ const KIND_LABELS: Readonly<Record<'image' | 'transcription' | 'speech', string>
 }
 
 /**
- * `base` with fakes of the Phase 6 resolvers on the real catalog and registry (while W6.2 implements them):
+ * `base` with fakes of the Phase 6 resolvers on the real catalog and registry (instant models for tests of the image,
+ * audio and chat services; the real resolvers are in `providers/index.ts`):
  * - `resolveImageModel` / `resolveTranscriptionModel` / `resolveSpeechModel`: `not_found` for an unknown provider,
  *   `model_not_found` (action `refresh-models`) for a model missing from the catalog, `validation_error` for a model of
  *   another kind; else the resolved model with `info` / `entry` / `provider` from the catalog and registry and the model

@@ -1,13 +1,17 @@
 // The message tree of one chat (ADR-023, ARCHITECTURE.md 6.8): pure functions over its light rows
-// `(id, parent_id, seq, role)`. `parent_id` is the previous message of a path (`null` for a first message); siblings
-// (the same parent; the first messages of a chat are siblings of each other) are the versions of a message; `seq` is
-// the creation order, so a parent always has a lower `seq` than its children; the active leaf (`chats.active_leaf_id`)
-// is the last message of the path the user sees.
+// `(id, parent_id, seq, role, selected_child_id)`. `parent_id` is the previous message of a path (`null` for a first
+// message); siblings (the same parent; the first messages of a chat are siblings of each other) are the versions of a
+// message; `seq` is the creation order, so a parent always has a lower `seq` than its children; the active leaf
+// (`chats.active_leaf_id`) is the last message of the path the user sees.
 //
 // Bad data never loops: a parent counts only when it is a message of the same chat with a lower `seq` (the guard of
 // the recursive `listPath` query); any other parent (missing, in another chat, part of a cycle) makes the message a
 // first message. Every walk up the tree therefore sees strictly decreasing `seq` values and every walk down strictly
 // increasing ones.
+//
+// Remembered versions (Phase 6, ADR-030): `selected_child_id` is the child last shown under a message, a hint without a
+// foreign key. `rememberedLeafUnder` follows it down; a pointer that names no child of its message (a deleted version,
+// bad data) is ignored.
 import type { MessageBranch } from '@harness-forge/shared'
 import type { MessageRole } from '../../db/schema.ts'
 
@@ -18,6 +22,11 @@ export interface TreeRow {
   parentId: string | null
   seq: number
   role: MessageRole
+  /**
+   * The stored `selected_child_id` (ADR-030): the child last shown under this message. Absent or null = none; a value
+   * that is not one of the message's children is ignored by `rememberedLeafUnder`.
+   */
+  selectedChildId?: string | null
 }
 
 /** An index over the rows of one chat (`buildTree`). */
@@ -105,6 +114,31 @@ export function latestLeafUnder(tree: MessageTree, messageId: string): string | 
     }
   }
   return latest
+}
+
+/**
+ * The remembered leaf under `messageId` (ADR-030): the path last shown under a message. Walking down from the message:
+ * the remembered child (`selectedChildId`) while it is still one of the node's children, else the only child, else
+ * the most recent leaf under the node (`latestLeafUnder`). The message itself when it has no children; null when it is
+ * not a message of the chat.
+ */
+export function rememberedLeafUnder(tree: MessageTree, messageId: string): string | null {
+  if (!tree.byId.has(messageId))
+    return null
+  let node: string = messageId
+  // Every step goes to an effective child, whose `seq` is higher: the walk ends.
+  for (;;) {
+    const children: readonly string[] = tree.childrenOf.get(node) ?? []
+    const remembered: string | null = tree.byId.get(node)?.selectedChildId ?? null
+    if (remembered !== null && children.includes(remembered))
+      node = remembered
+    else if (children.length === 1)
+      node = children[0]!
+    else if (children.length === 0)
+      return node
+    else
+      return latestLeafUnder(tree, node)
+  }
 }
 
 /**

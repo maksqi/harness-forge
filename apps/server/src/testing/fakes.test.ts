@@ -787,12 +787,14 @@ describe('createFakePluginHost: ctx.images', () => {
     await expect(ctx!.images.generate({ prompt: 'x' })).rejects.toMatchObject({ code: 'validation_error', message: NO_IMAGE_MODEL_MESSAGE })
   })
 
-  it('answers not_implemented through the P6-0b image service stub', async () => {
+  it('reaches the real image service (P6-A) instead of the P6-0b stub', async () => {
     let ctx: PluginContext | undefined
     const t = await createProvidersTestApp({ builtins: [{ id: 'mock', manifest: mockManifest, module: { setup: (context) => {
       ctx = context
     } } }] })
     apps.push(t)
-    await expect(ctx!.images.generate({ prompt: 'x', modelRef: 'mock:image' })).rejects.toMatchObject({ code: 'not_implemented' })
+    // This mock plugin registers no provider, so the real resolver cannot find `mock:image`.
+    const error: unknown = await ctx!.images.generate({ prompt: 'x', modelRef: 'mock:image' }).then(() => null, (reason: unknown) => reason)
+    expect(error).toMatchObject({ code: 'not_found' })
   })
 })

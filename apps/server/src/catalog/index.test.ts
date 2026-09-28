@@ -11,7 +11,7 @@ import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { modelCache } from '../db/schema.ts'
 import { createProvidersTestApp } from '../providers/testing.ts'
-import { LISTING_RETRY_MS, LISTING_TTL_MS, MODELS_DEV_MAX_AGE_MS } from './index.ts'
+import { bundledSnapshotPath, LISTING_RETRY_MS, LISTING_TTL_MS, MODELS_DEV_MAX_AGE_MS } from './index.ts'
 import { MODELS_DEV_URL } from './models-dev.ts'
 
 const T0 = Date.parse('2026-09-28T00:00:00Z')
@@ -101,16 +101,17 @@ describe('entries and field precedence', () => {
     t.events.clear()
     const refreshed = await t.deps.catalog.refresh('acme')
     expect(control.calls).toBe(1)
-    expect(refreshed.map(model => model.id).sort()).toEqual(['acme-embed-1', 'acme-large', 'acme-paint', 'acme-vision-image'])
+    // acme-paint is an image model (models.dev: image output only) and Acme cannot generate images: left out.
+    expect(refreshed.map(model => model.id).sort()).toEqual(['acme-embed-1', 'acme-large', 'acme-vision-image'])
     const large = refreshed.find(model => model.id === 'acme-large')
     expect(large).toMatchObject({ source: 'live', name: 'Acme Large', contextWindow: 150_000, maxOutputTokens: 64_000, reasoningEfforts: ['auto', 'low', 'high'] })
     // classify(): models.dev modalities first, the id pattern for embeddings.
     expect(refreshed.find(model => model.id === 'acme-embed-1')).toMatchObject({ kind: 'embedding', hidden: true })
-    expect(refreshed.find(model => model.id === 'acme-paint')).toMatchObject({ kind: 'image', hidden: true })
-    expect(refreshed.find(model => model.id === 'acme-vision-image')).toMatchObject({ kind: 'chat', hidden: false })
+    expect(refreshed.find(model => model.id === 'acme-vision-image')).toMatchObject({ kind: 'chat', hidden: false, capabilities: { imageOutput: true } })
+    expect(await t.deps.catalog.get('acme', 'acme-paint')).toBeNull()
     const visible = await t.deps.catalog.list({ providerId: 'acme' })
     expect(visible.map(model => model.id)).toEqual(['acme-large', 'acme-vision-image'])
-    expect((await t.deps.catalog.list({ providerId: 'acme', includeHidden: true })).length).toBe(4)
+    expect((await t.deps.catalog.list({ providerId: 'acme', includeHidden: true })).length).toBe(3)
     expect(t.events.ofType('catalog.changed').map(event => event.data)).toContainEqual({ providerId: 'acme' })
     expect(t.events.ofType('provider.changed').at(-1)?.data).toMatchObject({ id: 'acme', provider: { modelCount: 2, modelsFetchedAt: T0 } })
     expect(await t.deps.catalog.stats('acme')).toEqual({ modelCount: 2, fetchedAt: T0 })
@@ -141,6 +142,159 @@ describe('entries and field precedence', () => {
     expect(await t.deps.catalog.get('nope', 'x')).toBeNull()
     expect(await t.deps.catalog.stats('nope')).toEqual({ modelCount: 0, fetchedAt: null })
     await expect(t.deps.catalog.list({ providerId: 'nope' })).rejects.toMatchObject({ code: 'not_found' })
+  })
+})
+
+function unusedFactory(): never {
+  throw new Error('unused')
+}
+
+/** Media factories of a provider (never called by the catalog: only their presence matters). */
+const MEDIA_FACTORIES = {
+  createImageModel: unusedFactory,
+  createTranscriptionModel: unusedFactory,
+  createSpeechModel: unusedFactory,
+} satisfies Partial<ProviderDefinition>
+
+/** Seeds of every kind: one chat model and one explicit seed per media kind. */
+const MEDIA_SEEDS: ModelInfo[] = [
+  { id: 'studio-chat', name: 'Studio Chat' },
+  { id: 'studio-paint', name: 'Studio Paint', kind: 'image', capabilities: { vision: true } },
+  { id: 'studio-listen', name: 'Studio Listen', kind: 'transcription' },
+  { id: 'studio-say', name: 'Studio Say', kind: 'speech', voices: ['ava', 'ben', 'ava'] },
+]
+
+describe('media models (Phase 6)', () => {
+  it('lists the media seeds even next to a live listing; image models visible, voice models hidden', async () => {
+    const { t } = await setup()
+    const studio: AcmeControl = { calls: 0, listing: [{ id: 'studio-chat-2', name: 'Studio Chat 2' }, { id: 'studio-say', name: 'Studio Say (live)' }] }
+    t.registry.providers.register('studio-plugin', acmeProvider(studio, { id: 'studio', name: 'Studio', modelsDevId: 'studio', smallModelId: undefined, seedModels: MEDIA_SEEDS, ...MEDIA_FACTORIES }))
+    // No listing yet: every seed.
+    expect((await t.deps.catalog.list({ providerId: 'studio', includeHidden: true })).map(model => [model.id, model.kind, model.hidden, model.source])).toEqual([
+      ['studio-chat', 'chat', false, 'seed'],
+      ['studio-listen', 'transcription', true, 'seed'],
+      ['studio-paint', 'image', false, 'seed'],
+      ['studio-say', 'speech', true, 'seed'],
+    ])
+    await t.credentials.set('studio', { apiKey: 'studio-key-00000000001' })
+    const refreshed = await t.deps.catalog.refresh('studio')
+    // With a listing: the listed models plus the media seeds (the chat seed is replaced by the listing).
+    expect(refreshed.map(model => [model.id, model.kind, model.hidden, model.source])).toEqual([
+      ['studio-chat-2', 'chat', false, 'live'],
+      ['studio-listen', 'transcription', true, 'seed'],
+      ['studio-paint', 'image', false, 'seed'],
+      ['studio-say', 'speech', true, 'live'],
+    ])
+    for (const model of refreshed)
+      catalogModelSchema.parse(model)
+    // A listed media model keeps the seed's explicit kind and voices (unique) under the live name.
+    expect(refreshed.find(model => model.id === 'studio-say')).toMatchObject({ name: 'Studio Say (live)', voices: ['ava', 'ben'] })
+    expect(refreshed.find(model => model.id === 'studio-paint')).toMatchObject({ capabilities: { vision: true, imageOutput: false } })
+    // The chat picker list: chat models and the image model; the model count counts visible chat models only.
+    expect((await t.deps.catalog.list({ providerId: 'studio' })).map(model => model.id)).toEqual(['studio-chat-2', 'studio-paint'])
+    expect(await t.deps.catalog.stats('studio')).toEqual({ modelCount: 1, fetchedAt: T0 })
+    expect((await t.deps.providers.get('studio')).modelCount).toBe(1)
+  })
+
+  it('leaves out media models of a kind the provider cannot serve; custom models stay (hidden)', async () => {
+    const { t } = await setup()
+    const bare: AcmeControl = {
+      calls: 0,
+      listing: [
+        { id: 'bare-chat' },
+        { id: 'gpt-image-1' }, // image by the id pattern
+        { id: 'bare-whisper' }, // transcription by the id
+        { id: 'bare-tts' }, // speech by the id
+        { id: 'bare-listed-say', kind: 'speech', voices: ['x'] },
+      ],
+    }
+    // Only an image factory: image models are listed, voice models are not.
+    t.registry.providers.register('bare-plugin', acmeProvider(bare, { id: 'bare', name: 'Bare', modelsDevId: 'bare', seedModels: MEDIA_SEEDS, createImageModel: unusedFactory }))
+    t.registry.models.register('other-plugin', 'bare', [{ id: 'bare-plugin-listen', kind: 'transcription' }, { id: 'bare-plugin-chat' }])
+    await t.credentials.set('bare', { apiKey: 'bare-key-000000000001' })
+    const refreshed = await t.deps.catalog.refresh('bare')
+    expect(refreshed.map(model => [model.id, model.kind, model.hidden])).toEqual([
+      ['bare-chat', 'chat', false],
+      ['bare-plugin-chat', 'chat', false],
+      ['gpt-image-1', 'image', false],
+      ['studio-paint', 'image', false],
+    ])
+    for (const id of ['bare-whisper', 'bare-tts', 'bare-listed-say', 'studio-listen', 'studio-say', 'bare-plugin-listen'])
+      expect(await t.deps.catalog.get('bare', id), id).toBeNull()
+    await expect(t.deps.catalog.updatePrefs({ providerId: 'bare', modelId: 'studio-say', favorite: true })).rejects.toMatchObject({ code: 'not_found' })
+
+    // A provider without any factory: its image models are left out too.
+    t.registry.providers.register('plain-plugin', acmeProvider({ calls: 0, listing: [] }, { id: 'plain', name: 'Plain', modelsDevId: 'plain', seedModels: MEDIA_SEEDS }))
+    expect((await t.deps.catalog.list({ providerId: 'plain', includeHidden: true })).map(model => model.id)).toEqual(['studio-chat'])
+
+    // Custom models of any kind stay listed: the resolvers explain why they cannot be served.
+    await t.deps.catalog.addCustom({ providerId: 'plain', modelId: 'plain-paint', kind: 'image' })
+    await t.deps.catalog.addCustom({ providerId: 'plain', modelId: 'plain-listen', kind: 'transcription' })
+    expect(await t.deps.catalog.get('plain', 'plain-paint')).toMatchObject({ kind: 'image', custom: true, hidden: true })
+    expect(await t.deps.catalog.get('plain', 'plain-listen')).toMatchObject({ kind: 'transcription', custom: true, hidden: true })
+    expect((await t.deps.catalog.list({ providerId: 'plain' })).map(model => model.id)).toEqual(['studio-chat'])
+  })
+
+  it('lets an explicit kind win over classify() and passes voices and imageOutput of a listing through', async () => {
+    const { t, control } = await setup()
+    await t.credentials.set('acme', { apiKey: 'acme-key-000000000001' })
+    control.listing = [
+      { id: 'acme-image-chat', kind: 'chat', capabilities: { imageOutput: true } },
+      { id: 'acme-paint', kind: 'chat' }, // models.dev says image output only; the listing says chat
+      { id: 'acme-vision-image', capabilities: { imageOutput: false } }, // the listing wins over models.dev
+      { id: 'acme-say', voices: ['one', 'two'] }, // chat by default (no kind): voices are passed through anyway
+    ]
+    const refreshed = await t.deps.catalog.refresh('acme')
+    const byId = new Map(refreshed.map(model => [model.id, model]))
+    expect(byId.get('acme-image-chat')).toMatchObject({ kind: 'chat', hidden: false, capabilities: { imageOutput: true } })
+    expect(byId.get('acme-paint')).toMatchObject({ kind: 'chat', hidden: false, capabilities: { imageOutput: false } })
+    expect(byId.get('acme-vision-image')).toMatchObject({ kind: 'chat', capabilities: { imageOutput: false } })
+    expect(byId.get('acme-say')).toMatchObject({ kind: 'chat', voices: ['one', 'two'] })
+  })
+
+  it('classifies the models of the bundled models.dev snapshot (image id pattern, image output, voice kinds)', async () => {
+    const { t } = await setup({ catalog: { bundledSnapshotPath: bundledSnapshotPath() } })
+    const register = (id: string, modelsDevId: string, models: string[], factories: Partial<ProviderDefinition>): void => {
+      t.registry.providers.register(`${id}-plugin`, acmeProvider({ calls: 0, listing: [] }, {
+        id,
+        name: id,
+        modelsDevId,
+        credentials: [],
+        smallModelId: undefined,
+        listModels: undefined,
+        seedModels: models.map(model => ({ id: model })),
+        ...factories,
+      }))
+    }
+    register('pics', 'openai', ['gpt-image-1-mini', 'gpt-image-1.5', 'chatgpt-image-latest'], { createImageModel: unusedFactory })
+    register('gem', 'google', ['gemini-2.5-flash-image', 'gemini-2.5-flash-preview-tts'], { createSpeechModel: unusedFactory })
+    register('fast', 'groq', ['whisper-large-v3'], { createTranscriptionModel: unusedFactory })
+    const kinds = async (providerId: string): Promise<unknown[]> => (await t.deps.catalog.list({ providerId, includeHidden: true }))
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map(model => [model.id, model.kind, model.capabilities.imageOutput, model.hidden])
+    // models.dev lists these three with a [text, image] output: the id pattern still makes them image models.
+    expect(await kinds('pics')).toEqual([
+      ['chatgpt-image-latest', 'image', false, false],
+      ['gpt-image-1-mini', 'image', false, false],
+      ['gpt-image-1.5', 'image', false, false],
+    ])
+    expect(await kinds('gem')).toEqual([
+      ['gemini-2.5-flash-image', 'chat', true, false],
+      ['gemini-2.5-flash-preview-tts', 'speech', false, true],
+    ])
+    expect(await kinds('fast')).toEqual([['whisper-large-v3', 'transcription', false, true]])
+  })
+
+  it('shows the mock image model in the picker and keeps the voice models for Settings -> Media', async () => {
+    const t = await createProvidersTestApp({ env: { HF_MOCK_PROVIDER: '1' } })
+    app = t
+    const visible = await t.deps.catalog.list({ providerId: 'mock' })
+    expect(visible.map(model => model.id)).toEqual(['echo', 'error', 'image', 'image-chat', 'image-tool', 'reasoning', 'tool-approval'])
+    const all = await t.deps.catalog.list({ providerId: 'mock', includeHidden: true })
+    expect(all.filter(model => model.hidden).map(model => [model.id, model.kind])).toEqual([['speech', 'speech'], ['transcribe', 'transcription']])
+    expect(all.find(model => model.id === 'speech')?.voices).toEqual(['mock-voice-a', 'mock-voice-b'])
+    expect(all.find(model => model.id === 'image-chat')).toMatchObject({ kind: 'chat', capabilities: { imageOutput: true } })
+    expect(await t.deps.catalog.stats('mock')).toMatchObject({ modelCount: 6 })
   })
 })
 

@@ -189,6 +189,46 @@ describe('sharedChatView', () => {
     expect(document.body.querySelector('[data-testid="message-branch"]')).toBeNull()
   })
 
+  it('shows the generated images of a reply as a gallery with its lightbox and Download link', async () => {
+    const imageUrl = (id: string) => `/api/share/${TOKEN}/files/file_${id.repeat(16)}`
+    respond(shareView({
+      messages: [
+        { role: 'user', parts: [{ type: 'text', text: 'Draw a red fox.' }] },
+        {
+          role: 'assistant',
+          modelRef: 'mock:image',
+          parts: [
+            { type: 'tool', toolName: 'generate_image', status: 'done' },
+            { type: 'file', mediaType: 'image/png', filename: 'image-1.png', url: imageUrl('A') },
+            { type: 'file', mediaType: 'image/png', filename: 'image-2.png', url: imageUrl('B') },
+            { type: 'text', text: 'Here are two foxes.' },
+            { type: 'file', mediaType: 'application/pdf', filename: 'notes.pdf', url: imageUrl('C') },
+          ],
+        },
+      ],
+    }))
+    mountView()
+    await settle()
+    const reply = allByTestId(testIds.shareMessage)[1]!
+    const gallery = byTestId(testIds.imageGallery, reply)!
+    expect(gallery.dataset.messageId).toBe('share-message-1')
+    expect(gallery.dataset.count).toBe('2')
+    const tiles = allByTestId<HTMLButtonElement>(testIds.imageTile, gallery)
+    expect(tiles.map(tile => tile.querySelector('img')?.getAttribute('src'))).toEqual([imageUrl('A'), imageUrl('B')])
+    // The PDF stays a chip, outside the gallery.
+    expect(byTestId(testIds.fileChip, reply)?.textContent).toContain('notes.pdf')
+    expect(byTestId(testIds.fileChip, gallery)).toBeNull()
+
+    tiles[1]!.click()
+    await settle()
+    const lightbox = byTestId(testIds.imageLightbox)!
+    expect(lightbox.dataset.index).toBe('1')
+    const download = byTestId<HTMLAnchorElement>(testIds.imageDownload)!
+    expect(download.getAttribute('href')).toBe(imageUrl('B'))
+    expect(download.getAttribute('download')).toBe('image-2.png')
+    expect(mocks.calls).toEqual(['shares.view'])
+  })
+
   it('calls nothing but shares.view with the token, without any store', async () => {
     mountView()
     await settle()

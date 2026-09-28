@@ -4,9 +4,12 @@
 // chat (`isNew`, the `/` page) shows the `empty` slot above an inline composer; its first send emits `created` so
 // the page can move to /chat/<id> while the same session keeps streaming. Otherwise the transcript fills the pane and
 // the composer is docked over its bottom (fade above it); `--hf-composer-h` feeds the transcript's bottom padding
-// and the scroll pill position. A polite live region announces finished / stopped replies, approvals, errors and the
-// version shown after a switch (ADR-023).
-import type { ReasoningEffort, ToolMode } from '@harness-forge/shared'
+// and the scroll pill position. A polite live region announces finished / stopped replies, approvals, errors, the
+// version shown after a switch (ADR-023) and a deleted version. "Delete this version" (ADR-030) is confirmed here, in
+// one ConfirmDialog; afterwards focus moves to the version now shown (or back to the button when nothing changed).
+// The composer learns how many images the last reply holds ("Edit the previous image", ADR-028).
+import type { MessageBranch, ReasoningEffort, ToolMode } from '@harness-forge/shared'
+import type { FileUIPart } from 'ai'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
 import { useElementSize } from '@vueuse/core'
@@ -16,6 +19,7 @@ import { toast } from 'vue-sonner'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import ChatComposer from '~/components/chat/composer/ChatComposer.vue'
+import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import { toHarnessErrorView } from '~/components/common/harness-error'
 import { isRunActiveConflict, useChatSession } from '~/composables/useChatSession'
 import { useChatsStore } from '~/stores/chats'
@@ -24,8 +28,9 @@ import { usePluginsStore } from '~/stores/plugins'
 import { useProvidersStore } from '~/stores/providers'
 import { useUiStore } from '~/stores/ui'
 import { toHarnessError } from '~/utils/errors'
+import { testIds } from '~/utils/testids'
 import { CHAT_VIEW_ACTIONS } from './chat-context'
-import { messageText, toolNameOf } from './chat-format'
+import { imageFileParts, messageText, toolNameOf } from './chat-format'
 import ChatNotFound from './ChatNotFound.vue'
 import ChatTranscript from './ChatTranscript.vue'
 
@@ -91,6 +96,15 @@ const lastUsage = computed(() => {
       return message.metadata.usage
   }
   return null
+})
+/** Images of the last reply on the path: the composer offers "Edit the previous image" when there are any. */
+const previousImages = computed(() => {
+  for (let index = messages.value.length - 1; index >= 0; index--) {
+    const message = messages.value[index]!
+    if (message.role === 'assistant')
+      return imageFileParts(message).length
+  }
+  return 0
 })
 const chatCostUsd = computed(() => {
   let total = 0
@@ -214,8 +228,8 @@ function onEditLast() {
   transcript.value?.editLastUserMessage()
 }
 
-function onEdit(messageId: string, text: string) {
-  session.edit(messageId, text).catch(failure => reportFailure('Could not send the message', failure))
+function onEdit(messageId: string, text: string, files: FileUIPart[]) {
+  session.edit(messageId, text, files).catch(failure => reportFailure('Could not send the message', failure))
   transcript.value?.scrollToBottom('smooth')
 }
 
@@ -247,6 +261,62 @@ function onSelectVersion(messageId: string) {
       else
         reportFailure('Could not switch versions', failure)
     })
+}
+
+// ---------- delete a version (ADR-030) ----------
+
+/** The version waiting for confirmation, with its versions when the dialog opened. */
+const deleteTarget = ref<{ messageId: string, branch: MessageBranch } | null>(null)
+const deleting = ref(false)
+
+function onDeleteVersion(messageId: string) {
+  const branch = session.branches.value[messageId]
+  if (!branch || session.busy.value || session.switching.value)
+    return
+  deleteTarget.value = { messageId, branch }
+}
+
+function onDeleteOpenChange(open: boolean) {
+  if (open || deleting.value)
+    return
+  const target = deleteTarget.value
+  deleteTarget.value = null
+  // Canceled: back on the button (the dialog has no trigger of its own).
+  if (target)
+    void nextTick(() => transcript.value?.focusDeleteVersion(target.messageId))
+}
+
+async function confirmDeleteVersion() {
+  const target = deleteTarget.value
+  if (!target || deleting.value)
+    return
+  deleting.value = true
+  let answered = false
+  try {
+    await session.deleteVersion(target.messageId)
+    answered = true
+  }
+  catch (failure) {
+    if (isRunActiveConflict(failure))
+      toast(RUN_ACTIVE_MESSAGE)
+    else if (toHarnessError(failure).code === 'not_found')
+      toast(STALE_CHAT_MESSAGE)
+    else
+      reportFailure('Could not delete the version', failure)
+  }
+  deleting.value = false
+  deleteTarget.value = null
+  const onPath = (messageId: string) => messages.value.some(message => message.id === messageId)
+  // Still shown after an answer: nothing was done (a request started meanwhile).
+  const deleted = answered && !onPath(target.messageId)
+  const shown = deleted ? target.branch.siblings.find(sibling => sibling !== target.messageId && onPath(sibling)) : undefined
+  await nextTick()
+  if (deleted)
+    void announce('Version deleted')
+  if (shown)
+    transcript.value?.focusShownVersion(shown)
+  else if (!deleted)
+    transcript.value?.focusDeleteVersion(target.messageId)
 }
 
 function onModelChange(value: string) {
@@ -284,6 +354,7 @@ function onToolModeChange(value: ToolMode) {
             :tool-mode="toolMode"
             :usage="lastUsage"
             :chat-cost-usd="chatCostUsd"
+            :previous-images="previousImages"
             :disabled="noProvider"
             placeholder="Ask anything…"
             @update:model-ref="onModelChange"
@@ -313,6 +384,7 @@ function onToolModeChange(value: ToolMode) {
         @approval="onApproval"
         @retry="onRetry"
         @select-version="onSelectVersion"
+        @delete-version="onDeleteVersion"
       />
       <div
         v-if="loadError && !loaded"
@@ -343,6 +415,7 @@ function onToolModeChange(value: ToolMode) {
               :tool-mode="toolMode"
               :usage="lastUsage"
               :chat-cost-usd="chatCostUsd"
+              :previous-images="previousImages"
               :disabled="noProvider"
               placeholder="Reply…"
               @update:model-ref="onModelChange"
@@ -356,6 +429,17 @@ function onToolModeChange(value: ToolMode) {
         </div>
       </div>
     </div>
+
+    <ConfirmDialog
+      :open="deleteTarget !== null"
+      title="Delete this version?"
+      description="This version and every message after it are deleted. Other versions stay."
+      confirm-label="Delete version"
+      :pending="deleting"
+      :data-testid="testIds.messageDeleteVersionConfirm"
+      @update:open="onDeleteOpenChange"
+      @confirm="confirmDeleteVersion"
+    />
 
     <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
       {{ announcement }}

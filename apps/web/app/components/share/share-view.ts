@@ -1,6 +1,7 @@
 // Pure helpers of the public share page (docs/UI.md 7.15, ADR-025): the snapshot parts turned into the shapes the
-// reused chat components read (TextPart, ReasoningPart, FilePart, SourcesPart, UserMessageBubble), consecutive sources
-// merged into one row, the model id and the page's error text. No Vue, no stores.
+// reused chat components read (TextPart, ReasoningPart, FilePart, ImageGallery, SourcesPart, UserMessageBubble),
+// consecutive sources merged into one row, consecutive images of an assistant message into one gallery (Phase 6,
+// 7.16), the model id and the page's error text. No Vue, no stores.
 import type { HarnessError, HarnessUIMessage, MessageMetadata, ShareMessage, SharePart } from '@harness-forge/shared'
 import type { FileUIPart, ReasoningUIPart, TextUIPart } from 'ai'
 import type { SourcePart } from '~/components/chat/chat-format'
@@ -16,6 +17,7 @@ export type ShareBlock
     | { kind: 'reasoning', key: string, part: ReasoningUIPart }
     | { kind: 'tool', key: string, part: ShareToolPart }
     | { kind: 'file', key: string, part: FileUIPart }
+    | { kind: 'gallery', key: string, parts: FileUIPart[] }
     | { kind: 'sources', key: string, parts: SourcePart[] }
 
 /** A token in the documented format; anything else is unavailable without asking the server (it answers 404). */
@@ -39,7 +41,15 @@ function toSourcePart(part: ShareSourcePart): SourcePart {
   }
 }
 
-/** Renderable blocks of an assistant message: parts in order, consecutive sources merged into one row. */
+/** An image file part: generated images of an assistant message render as a gallery (docs/UI.md 7.16). */
+export function isImageFilePart(part: Pick<ShareFilePart, 'mediaType'>): boolean {
+  return part.mediaType.toLowerCase().startsWith('image/')
+}
+
+/**
+ * Renderable blocks of an assistant message: parts in order, consecutive sources merged into one row, consecutive
+ * image files into one gallery (other files stay chips).
+ */
 export function shareMessageBlocks(parts: readonly SharePart[]): ShareBlock[] {
   const blocks: ShareBlock[] = []
   parts.forEach((part, index) => {
@@ -53,9 +63,16 @@ export function shareMessageBlocks(parts: readonly SharePart[]): ShareBlock[] {
       case 'tool':
         blocks.push({ kind: 'tool', key: `tool-${index}`, part })
         break
-      case 'file':
-        blocks.push({ kind: 'file', key: `file-${index}`, part: toFilePart(part) })
+      case 'file': {
+        const previous = blocks.at(-1)
+        if (!isImageFilePart(part))
+          blocks.push({ kind: 'file', key: `file-${index}`, part: toFilePart(part) })
+        else if (previous?.kind === 'gallery')
+          previous.parts.push(toFilePart(part))
+        else
+          blocks.push({ kind: 'gallery', key: `gallery-${index}`, parts: [toFilePart(part)] })
         break
+      }
       case 'source-url':
       case 'source-document': {
         const previous = blocks.at(-1)

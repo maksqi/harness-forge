@@ -184,3 +184,82 @@ describe('runSession metadata', () => {
     expect(JSON.parse(s.errorText(new HarnessError({ code: 'rate_limited', message: 'Slow down', retryAfterMs: 1000 })))).toEqual({ error: { code: 'rate_limited', message: 'Slow down', retryAfterMs: 1000 } })
   })
 })
+
+describe('runSession: images (ADR-028)', () => {
+  function imageSession(options: { n?: number, aspectRatio?: '16:9', inputs?: number } = {}): RunSession {
+    const s = session()
+    const target = {
+      kind: 'image',
+      model: s.ctx.prepared.resolved,
+      options: { prompt: 'fox', n: options.n ?? 2, ...(options.aspectRatio === undefined ? {} : { aspectRatio: options.aspectRatio }), inputFileIds: Array.from({ length: options.inputs ?? 0 }, (_, i) => `file_${i}`), dropped: 0 },
+    }
+    Object.assign(s.ctx.prepared, { target })
+    return s
+  }
+
+  it('adds the image request to the start metadata of an image turn only', () => {
+    const s = imageSession({ aspectRatio: '16:9', inputs: 2 })
+    expect(s.startMetadata().image).toBeUndefined()
+    s.mode = 'image'
+    expect(s.startMetadata()).toEqual({ modelRef: 'prov:model', startedAt: 1000, image: { n: 2, aspectRatio: '16:9', inputs: 2 } })
+  })
+
+  it('finishes an image turn with its usage, estimated cost and revised prompt', () => {
+    const s = imageSession()
+    s.mode = 'image'
+    s.image = { modelRef: 'prov:model', images: [], usage: { inputTokens: 3.4, outputTokens: 200, totalTokens: 203 }, costUsd: 0.0123456789012, revisedPrompt: `  ${'r'.repeat(40_000)}`, dropped: 0 }
+    const metadata = s.buildFinishMetadata(1500, 'completed')
+    expect(metadata).toMatchObject({ usage: { inputTokens: 3, outputTokens: 200, totalTokens: 203 }, costUsd: 0.0123456789, finishReason: 'stop', image: { n: 2, inputs: 0 } })
+    expect(metadata.image?.revisedPrompt).toHaveLength(32_000)
+    // Without usage or cost (xAI) the fields stay absent; a failure keeps the request.
+    s.image = { modelRef: 'prov:model', images: [], usage: null, costUsd: null, dropped: 0 }
+    const bare = s.buildFinishMetadata(1500, 'completed')
+    expect(bare.usage).toBeUndefined()
+    expect(bare.costUsd).toBeUndefined()
+    expect(bare.image).toEqual({ n: 2, inputs: 0 })
+    s.image = null
+    s.recordFatal(new HarnessError({ code: 'provider_error', message: 'No image' }))
+    expect(s.buildFinishMetadata(1500, 'failed')).toMatchObject({ finishReason: 'error', error: { code: 'provider_error' }, image: { n: 2, inputs: 0 } })
+  })
+
+  it('adds the cost of generate_image outputs to the message cost and rebuilds the finish metadata', () => {
+    const clock = { now: 1000 }
+    const s = session(undefined, clock)
+    s.observe({ type: 'finish-step', usage: usage(10, 5), finishReason: 'stop', rawFinishReason: 'stop', providerMetadata: undefined, response: {} as never, performance: {} as never })
+    clock.now = 1250
+    const observed = s.observe({ type: 'finish', finishReason: 'stop', rawFinishReason: 'stop', totalUsage: usage(10, 5) })
+    expect(observed?.costUsd).toBe(0.00002)
+    expect(s.finishWithToolCost(observed)).toBe(observed)
+    s.addToolCost(0.04)
+    s.addToolCost(Number.NaN)
+    s.addToolCost(-1)
+    clock.now = 9999
+    const rebuilt = s.finishWithToolCost(observed)
+    expect(rebuilt).toEqual({ ...observed, costUsd: 0.04002 })
+    expect(s.finishMetadata).toBe(rebuilt)
+    expect(s.buildFinishMetadata(2000, 'aborted').costUsd).toBe(0.04002)
+  })
+
+  it('saves stored files with their names and never a data URL; notices go where the run content starts', () => {
+    const s = session({ modelRef: 'prov:model', startedAt: 1 })
+    const url = s.generated.add({ id: 'file_gen0000000000001', name: 'image-1.png' })
+    s.notices.push(NOTICES.contextTrimmed())
+    const continued = s.ctx.prepared.continued!
+    const response: HarnessUIMessage = {
+      ...continued,
+      parts: [
+        ...continued.parts,
+        { type: 'file', mediaType: 'image/png', url: 'data:image/png;base64,AAAA' },
+        { type: 'file', mediaType: 'image/png', url },
+        { type: 'text', text: 'done', state: 'streaming' },
+      ],
+    }
+    const saved = s.finalMessage(response, 'completed')
+    expect(saved.parts).toEqual([
+      { type: 'step-start' },
+      { type: 'data-notice', data: NOTICES.contextTrimmed() },
+      { type: 'file', mediaType: 'image/png', url, filename: 'image-1.png' },
+      { type: 'text', text: 'done', state: 'done' },
+    ])
+  })
+})

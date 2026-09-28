@@ -1,8 +1,14 @@
-// Model catalog (ARCHITECTURE.md 9, PROVIDERS.md 3 / 5, API.md 5.7). Entries per provider: the live listing (24 h
+// Model catalog (ARCHITECTURE.md 9, PROVIDERS.md 3 / 5 / 13, API.md 5.7). Entries per provider: the live listing (24 h
 // cache in `model_cache`, last good kept on failure; seeds when there never was one) + plugin models + custom ids.
 // Field precedence: custom -> live -> models.dev -> plugin models / seeds. `classify()` hides non-chat models; prefs
 // come from `model_prefs`. Listing failures never break `GET /models`: the cache (else the seeds) is served and the
 // error is recorded in `model_cache.error` and `provider_configs.last_error`.
+//
+// Phase 6 (ADR-028, ADR-029): seeds with an explicit media kind (`image`, `transcription`, `speech`) are listed even
+// next to a live listing; a media model is listed only when its provider defines the matching factory
+// (`createImageModel`, `createTranscriptionModel`, `createSpeechModel`), so Settings -> Media never offers a model that
+// cannot be served (user custom models stay listed: the resolvers explain the error); image models are visible when
+// listed, transcription and speech models hidden; `stats().modelCount` counts visible chat models.
 //
 // Background work (off under Vitest unless enabled through `createModelCatalogWith`): a refresh cycle shortly after
 // `start()` and every 15 minutes (listings of enabled, configured providers that are stale or whose credentials
@@ -26,6 +32,7 @@ import { BUILTIN_PLUGIN_IDS, HarnessError, modelIdSchema } from '@harness-forge/
 import { serverPackageRoot } from '../paths.ts'
 import { createProviderConfigStore, isEnabledRow } from '../providers/configs.ts'
 import { createProviderRuntime, LIST_MODELS_TIMEOUT_MS, withTimeout } from '../providers/runtime.ts'
+import { isMediaModelKind, MEDIA_MODEL_KINDS, providerServesKind } from './classify.ts'
 import { sanitizeListing } from './listing.ts'
 import { buildCatalogModel, modelsDevLayer } from './merge.ts'
 import { MODELS_DEV_URL, parseModelsDevSnapshot, serializeModelsDevSnapshot, trimModelsDev } from './models-dev.ts'
@@ -287,13 +294,18 @@ export function createModelCatalogWith(deps: AppDeps, options: ModelCatalogOptio
     return map
   }
 
-  /** Every entry of a provider (hidden included), or only `onlyId`. */
+  /**
+   * Every entry of a provider (hidden included), or only `onlyId`. Ids: the live listing (else the seeds) plus the
+   * seeds with an explicit media kind, plugin models and custom ids; media models of a kind the provider has no factory
+   * for are left out unless the user added them.
+   */
   function buildEntries(registered: RegisteredProvider, prefsRows: readonly ModelPrefRow[], onlyId?: string): CatalogModel[] {
     const definition = registered.definition
     const providerId = definition.id
     const listing = listings.get(providerId)
     const live = listing !== undefined && listing.fetchedAt !== null ? indexById(listing.models) : null
     const seeds = indexById(definition.seedModels ?? [])
+    const served = new Set(MEDIA_MODEL_KINDS.filter(kind => providerServesKind(definition, kind)))
     const plugin = new Map<string, ModelLayer[]>()
     for (const model of pluginModels(providerId)) {
       if (!isValidModelId(model.id))
@@ -315,6 +327,13 @@ export function createModelCatalogWith(deps: AppDeps, options: ModelCatalogOptio
     }
     for (const id of (live ?? seeds).keys())
       add(id)
+    if (live !== null) {
+      // Media seeds exist whatever the provider's `/models` endpoint returns.
+      for (const [id, seed] of seeds) {
+        if (isMediaModelKind(seed.kind))
+          add(id)
+      }
+    }
     for (const id of plugin.keys())
       add(id)
     for (const row of prefsRows) {
@@ -322,7 +341,7 @@ export function createModelCatalogWith(deps: AppDeps, options: ModelCatalogOptio
         add(row.modelId)
     }
 
-    return ids.map((id) => {
+    const entries = ids.map((id) => {
       const pref = prefs.get(id)
       const custom = pref?.custom === true
       const dev = devModels?.[id]
@@ -340,8 +359,10 @@ export function createModelCatalogWith(deps: AppDeps, options: ModelCatalogOptio
         modalities: dev === undefined ? undefined : { input: dev.input, output: dev.output },
         prefs: prefsState(pref),
         source,
+        imageModels: served.has('image'),
       })
     })
+    return entries.filter(entry => entry.custom || !isMediaModelKind(entry.kind) || served.has(entry.kind))
   }
 
   async function prefsByProvider(providerId?: string): Promise<Map<string, ModelPrefRow[]>> {
@@ -826,7 +847,8 @@ export function createModelCatalogWith(deps: AppDeps, options: ModelCatalogOptio
         return { modelCount: 0, fetchedAt: null }
       const entries = await providerEntries(registered)
       return {
-        modelCount: entries.filter(entry => !entry.hidden).length,
+        // Visible chat models (API.md 4.4): visible image models are not counted.
+        modelCount: entries.filter(entry => !entry.hidden && entry.kind === 'chat').length,
         fetchedAt: listings.get(providerId)?.fetchedAt ?? null,
       }
     },

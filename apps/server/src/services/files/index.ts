@@ -9,10 +9,13 @@
 // by content (an existing row with the same sha256 is reused, the backup's id is kept when it is free), and `purge`
 // empties the store (every row, every blob) for delete-all.
 //
-// Phase 6 skeleton (P6-0b): `saveGenerated` (generated images, ADR-028) answers `not_implemented` until W6.4.
+// Generated images (ADR-028, W6.4): `saveGenerated` stores one image a model generated (raster types only, at most
+// `LIMITS.generatedImageBytes`, magic bytes matching the type: ./generated.ts), deduplicated by content: a row with the
+// same sha256 and type is returned as is (its blob written again when missing), else a new row is inserted. Saves of the
+// same bytes are serialized, so they give one row even when they run concurrently.
 import type { FileRef } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
-import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, StoredFile } from './types.ts'
+import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, GeneratedFileInput, StoredFile } from './types.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -20,8 +23,8 @@ import { Readable } from 'node:stream'
 import { createFileId, FILE_ID_PATTERN, HarnessError, LIMITS, SHA256_HEX_PATTERN, validationError } from '@harness-forge/shared'
 import { asc, eq } from 'drizzle-orm'
 import { files } from '../../db/schema.ts'
-import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { guardDb, isConstraintError } from '../chats/db-errors.ts'
+import { checkGeneratedFile, generatedFileName } from './generated.ts'
 import { sanitizeFileName } from './names.ts'
 import { resolveUploadType } from './sniff.ts'
 
@@ -158,6 +161,38 @@ export function createFilesService(deps: AppDeps): FilesService {
     return { file: { id, ...row }, reused: false }
   }
 
+  /** The tail of the pending `saveGenerated` calls per sha256 (removed once the last one settles). */
+  const contentLocks = new Map<string, Promise<void>>()
+
+  /** Runs `fn` after every earlier call for the same content has settled. */
+  function withContentLock<T>(sha256: string, fn: () => Promise<T>): Promise<T> {
+    const previous = contentLocks.get(sha256) ?? Promise.resolve()
+    const run = previous.then(fn)
+    const settled = run.then(() => {}, () => {})
+    contentLocks.set(sha256, settled)
+    void settled.then(() => {
+      if (contentLocks.get(sha256) === settled)
+        contentLocks.delete(sha256)
+    })
+    return run
+  }
+
+  async function saveGenerated(input: GeneratedFileInput): Promise<StoredFile> {
+    const mime = checkGeneratedFile(input.data, input.mediaType)
+    const data = input.data
+    const sha256 = createHash('sha256').update(data).digest('hex')
+    return withContentLock(sha256, async () => {
+      const same = await guardDb(() => db.select().from(files).where(eq(files.sha256, sha256)).orderBy(asc(files.createdAt), asc(files.id)))
+      const reuse = same.find(row => row.mime === mime)
+      // Written again when a reused row lost its blob (a no-op when the blob is there).
+      await storeBlob(sha256, data)
+      if (reuse !== undefined)
+        return reuse
+      const row = { sha256, name: generatedFileName(input.name, mime), mime, size: data.byteLength, createdAt: Date.now() }
+      return { id: await insertRow(row), ...row }
+    })
+  }
+
   async function purge(): Promise<FilePurgeResult> {
     // Rows first: an interrupted purge leaves orphan blobs (removed by the next purge), never rows without blobs.
     const rows = await guardDb(() => db.delete(files).returning({ size: files.size }))
@@ -248,6 +283,6 @@ export function createFilesService(deps: AppDeps): FilesService {
 
     purge,
 
-    saveGenerated: rejectsNotImplemented('FilesService.saveGenerated (W6.4)'),
+    saveGenerated,
   }
 }

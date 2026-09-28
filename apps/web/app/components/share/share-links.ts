@@ -16,14 +16,17 @@ export interface ShareOptionField {
   label: string
 }
 
-/** The include switches of a link card and of the new-link form, in display order. */
+/**
+ * The include switches of a link card and of the new-link form, in display order. "Files and images" (Phase 6, was
+ * "Attachments") also covers generated images: they are file parts like attachments.
+ */
 export const SHARE_OPTION_FIELDS: readonly ShareOptionField[] = [
-  { key: 'attachments', value: 'attachments', label: 'Attachments' },
+  { key: 'attachments', value: 'attachments', label: 'Files and images' },
   { key: 'reasoning', value: 'reasoning', label: 'Reasoning' },
   { key: 'toolDetails', value: 'tool-details', label: 'Tool details' },
 ]
 
-/** A new link starts with the server defaults: attachments on, reasoning and tool details off. */
+/** A new link starts with the server defaults: files and images on, reasoning and tool details off. */
 export const DEFAULT_SHARE_OPTIONS: Readonly<ShareOptions> = { attachments: true, reasoning: false, toolDetails: false }
 
 /** One changed option, the body of an options-only `PATCH /shares/:id` (applied to the page at once). */

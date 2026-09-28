@@ -291,7 +291,7 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
           <FieldLabel :for="ids.altShortcuts">
             Alt shortcuts
           </FieldLabel>
-          <FieldDescription>Use Alt+M, Alt+R and Alt+P for composer menus.</FieldDescription>
+          <FieldDescription>Use Alt+M, Alt+R and Alt+P for composer menus, and Alt+V to dictate.</FieldDescription>
         </FieldContent>
         <Switch
           :id="ids.altShortcuts"

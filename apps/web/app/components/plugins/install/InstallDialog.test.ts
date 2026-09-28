@@ -228,6 +228,58 @@ describe('installDialog', () => {
     expect(installed).toHaveBeenCalledWith('dice')
   })
 
+  it('shows a refusal after the prompt with Log in, which asks again and installs once more', async () => {
+    const refusal = () => new HarnessError({ code: 'forbidden', message: 'Confirm your password to continue.', action: 'login' })
+    api.pluginInstall.inspect.mockResolvedValue(codeInspection())
+    api.pluginInstall.install
+      .mockRejectedValueOnce(refusal())
+      .mockRejectedValueOnce(refusal())
+      .mockResolvedValueOnce(pluginDetail({ id: 'dice', name: 'Dice' }))
+    api.auth.login.mockResolvedValue(authStatus({ enabled: true, source: 'settings', freshUntil: Date.now() + 600_000 }))
+    const { installed } = await mountDialog()
+    await chooseZip('dice.zip')
+    await click(byTestId(testIds.installInspect))
+    await click(byTestId(testIds.trustCheckbox))
+    await click(byTestId(testIds.installSubmit))
+    await type(byTestId<HTMLInputElement>(testIds.confirmPasswordInput), 'secret')
+    await click(byTestId(testIds.confirmPasswordSubmit))
+
+    // The install ran once more after the prompt; the second refusal is shown, not asked again.
+    expect(api.pluginInstall.install).toHaveBeenCalledTimes(2)
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    const alert = byTestId(testIds.installError)!
+    expect(alert.dataset.code).toBe('forbidden')
+    const logIn = [...alert.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Log in')!
+    await click(logIn)
+    expect(byTestId(testIds.confirmPasswordDialog)).not.toBeNull()
+    await type(byTestId<HTMLInputElement>(testIds.confirmPasswordInput), 'secret')
+    await click(byTestId(testIds.confirmPasswordSubmit))
+    expect(api.auth.login).toHaveBeenCalledTimes(2)
+    expect(api.pluginInstall.install).toHaveBeenCalledTimes(3)
+    expect(installed).toHaveBeenCalledWith('dice')
+  })
+
+  it('installs nothing and shows nothing when the fallback prompt is cancelled', async () => {
+    api.pluginInstall.inspect.mockResolvedValue(codeInspection())
+    api.pluginInstall.install.mockRejectedValue(new HarnessError({ code: 'forbidden', message: 'Confirm your password to continue.', action: 'login' }))
+    const { installed, open } = await mountDialog()
+    await chooseZip('dice.zip')
+    await click(byTestId(testIds.installInspect))
+    await click(byTestId(testIds.trustCheckbox))
+    await click(byTestId(testIds.installSubmit))
+    const prompt = byTestId(testIds.confirmPasswordDialog)!
+    const cancel = [...prompt.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Cancel')!
+    await click(cancel)
+
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.pluginInstall.install).toHaveBeenCalledTimes(1)
+    expect(api.auth.login).not.toHaveBeenCalled()
+    expect(byTestId(testIds.installError)).toBeNull()
+    expect(submitDisabled()).toBe(false)
+    expect(installed).not.toHaveBeenCalled()
+    expect(open.value).toBe(true)
+  })
+
   it('sends npm specs, keeps inputs on Back and shows field errors from the server', async () => {
     api.pluginInstall.inspect
       .mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: 'The npm package "missing" was not found.', status: 404 }))

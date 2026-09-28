@@ -2,22 +2,34 @@
 // `provider_configs`, credentials (W1.2 `CredentialService`, env fallback) and the catalog; model resolution
 // (`modelRef` -> `LanguageModel` with the user's credentials), provider tests, error mapping and call outcomes.
 //
-// Phase 6 skeleton (P6-0b): `resolveImageModel`, `resolveTranscriptionModel` and `resolveSpeechModel` (ADR-028,
-// ADR-029) answer `not_implemented` until W6.2 implements them; tests of other services use the fakes of
-// `providers/testing.ts` (`withFakeMediaResolvers`).
+// Phase 6 (ADR-028, ADR-029, ARCHITECTURE.md 6.11 / 6.12): `resolveImageModel`, `resolveTranscriptionModel` and
+// `resolveSpeechModel` run the checks of `resolveModel` (provider, enabled, credentials, catalog entry), then the kind
+// (`validation_error`), the factory (`model_not_found` for images, `validation_error` for voice) and the guarded
+// factory call (5 s; a throw, a timeout or a value that is not a model instance is a `plugin_error`). `resolveModel`
+// refuses image models. The credential ping picks chat models only.
 import type { ProviderDefinition, ProviderRuntime } from '@harness-forge/plugin-sdk'
-import type { CredentialState, HarnessErrorInit, IconRef, ProviderStatus, ProviderSummary, ProviderTestResult } from '@harness-forge/shared'
+import type { CatalogModel, CredentialState, HarnessErrorInit, IconRef, ProviderStatus, ProviderSummary, ProviderTestResult } from '@harness-forge/shared'
+import type { MediaModelKind } from '../catalog/classify.ts'
 import type { ProviderConfigRow } from '../db/schema.ts'
 import type { RegisteredProvider } from '../registry/types.ts'
 import type { ResolvedCredentials } from '../services/secrets/types.ts'
 import type { AppDeps } from '../types.ts'
-import type { LanguageModelInstance, ProviderService, ResolvedModel, ResolveModelOptions } from './types.ts'
+import type {
+  ImageModelInstance,
+  LanguageModelInstance,
+  ProviderService,
+  ResolvedModel,
+  ResolvedModelBase,
+  ResolveModelOptions,
+  SpeechModelInstance,
+  TranscriptionModelInstance,
+} from './types.ts'
 import { performance } from 'node:perf_hooks'
-import { HarnessError, harnessErrorInitSchema, isHarnessError, parseModelRef } from '@harness-forge/shared'
+import { HarnessError, harnessErrorInitSchema, isHarnessError, parseModelRef, validationError } from '@harness-forge/shared'
 import { generateText } from 'ai'
+import { classify, MEDIA_MODEL_FACTORIES, providerServesKind } from '../catalog/classify.ts'
 import { sanitizeListing } from '../catalog/listing.ts'
 import { catalogModelInfo } from '../catalog/merge.ts'
-import { rejectsNotImplemented } from '../not-implemented.ts'
 import { createProviderConfigStore, isEnabledRow } from './configs.ts'
 import { defaultProviderError } from './errors.ts'
 import { createProviderRuntime, VALIDATE_TIMEOUT_MS, withTimeout } from './runtime.ts'
@@ -28,12 +40,31 @@ const STATUS_ERROR_CODES: ReadonlySet<string> = new Set(['auth_invalid', 'provid
 /** Output budget of the credential ping (the OpenAI Responses API rejects less than 16). */
 const PING_MAX_OUTPUT_TOKENS = 16
 
+/** Guard of `createImageModel`, `createTranscriptionModel` and `createSpeechModel` (PLUGINS.md 11 "Guards"). */
+export const MODEL_FACTORY_TIMEOUT_MS = 5000
+
+/** How the resolver errors name a model of each media kind. */
+const MEDIA_KIND_LABELS: Readonly<Record<MediaModelKind, string>> = {
+  image: 'an image model',
+  transcription: 'a speech-to-text model',
+  speech: 'a text-to-speech model',
+}
+
+/** What a provider without the factory of a media kind cannot do (resolver errors). */
+const MEDIA_KIND_ABILITIES: Readonly<Record<MediaModelKind, string>> = {
+  image: 'generate images',
+  transcription: 'transcribe speech',
+  speech: 'read text aloud',
+}
+
 export interface ProviderServiceOptions {
   now?: () => number
   /** Base fetch handed to provider code (default `globalThis.fetch`, read at call time). */
   fetch?: typeof globalThis.fetch
   /** `POST /providers/:id/test` timeout; default 15 s. */
   testTimeoutMs?: number
+  /** Guard of the media model factories; default `MODEL_FACTORY_TIMEOUT_MS` (tests). */
+  factoryTimeoutMs?: number
 }
 
 /** No required secret field ("Local — no key"). */
@@ -76,6 +107,24 @@ function isLanguageModel(value: unknown): value is LanguageModelInstance {
   const model = value as Record<string, unknown>
   return (model.specificationVersion === 'v4' || model.specificationVersion === 'v3' || model.specificationVersion === 'v2')
     && typeof model.doStream === 'function' && typeof model.doGenerate === 'function'
+}
+
+/** An image, transcription or speech model instance (`ImageModelV4`, `TranscriptionModelV4`, `SpeechModelV4`, ...). */
+function isMediaModel(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null)
+    return false
+  const model = value as Record<string, unknown>
+  return (model.specificationVersion === 'v4' || model.specificationVersion === 'v3' || model.specificationVersion === 'v2')
+    && typeof model.doGenerate === 'function'
+}
+
+function isFactoryTimeout(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'TimeoutError'
+}
+
+/** The `validation_error` of a model used for the wrong purpose (the issue sits on `modelRef`). */
+function wrongModelError(message: string): HarnessError {
+  return validationError([{ path: ['modelRef'], message, code: 'custom' }])
 }
 
 export function createProviderService(deps: AppDeps): ProviderService {
@@ -153,6 +202,50 @@ export function createProviderServiceWith(deps: AppDeps, options: ProviderServic
         providerId,
         details: { pluginId: provider.pluginId },
       })
+    }
+    return model
+  }
+
+  /**
+   * Guarded media factory (`createImageModel`, `createTranscriptionModel`, `createSpeechModel`): the call is awaited for
+   * at most `factoryTimeoutMs` (a factory that returns a promise is awaited within the guard). A throw, a timeout or a
+   * value that is not a model instance is a `plugin_error` of the owner plugin; a `HarnessError` passes through.
+   */
+  async function createMediaModel(provider: RegisteredProvider, kind: MediaModelKind, modelId: string, rt: ProviderRuntime): Promise<unknown> {
+    const definition = provider.definition
+    const providerId = definition.id
+    const factory = MEDIA_MODEL_FACTORIES[kind]
+    const timeoutMs = options.factoryTimeoutMs ?? MODEL_FACTORY_TIMEOUT_MS
+    const call = (): unknown => {
+      switch (kind) {
+        case 'image': return definition.createImageModel?.(modelId, rt)
+        case 'transcription': return definition.createTranscriptionModel?.(modelId, rt)
+        case 'speech': return definition.createSpeechModel?.(modelId, rt)
+      }
+    }
+    const failure = (message: string, cause?: unknown): HarnessError => new HarnessError(
+      { code: 'plugin_error', message, providerId, details: { pluginId: provider.pluginId } },
+      cause === undefined ? undefined : { cause },
+    )
+    let model: unknown
+    try {
+      model = await withTimeout(timeoutMs, call)
+    }
+    catch (error) {
+      if (isHarnessError(error))
+        throw error
+      if (isFactoryTimeout(error)) {
+        logger.warn('model factory timed out', { providerId, modelId, factory, timeoutMs })
+        pluginLog(provider.pluginId, `${factory}("${modelId}") of "${providerId}" did not return within ${timeoutMs} ms.`)
+        throw failure(`The provider "${providerId}" did not create the model "${modelId}" in time.`, error)
+      }
+      logger.warn('model factory failed', { providerId, modelId, factory, err: error })
+      pluginLog(provider.pluginId, `${factory}("${modelId}") of "${providerId}" threw an error.`)
+      throw failure(`The provider "${providerId}" failed to create the model "${modelId}".`, error)
+    }
+    if (!isMediaModel(model)) {
+      pluginLog(provider.pluginId, `${factory}("${modelId}") of "${providerId}" did not return ${MEDIA_KIND_LABELS[kind]} instance.`)
+      throw failure(`The provider "${providerId}" returned an invalid model for "${modelId}".`)
     }
     return model
   }
@@ -275,9 +368,18 @@ export function createProviderServiceWith(deps: AppDeps, options: ProviderServic
 
   // ---------- tests ----------
 
-  async function firstCatalogModelId(providerId: string): Promise<string | undefined> {
-    const models = await deps.catalog.list({ providerId, includeHidden: false }).catch(() => [])
-    return models[0]?.id
+  /**
+   * The model of the default credential ping: `smallModelId`, else the first chat seed (explicit kind, else the id),
+   * else the first visible chat model of the catalog. Never an image, transcription or speech model.
+   */
+  async function pingModelId(definition: ProviderDefinition): Promise<string | undefined> {
+    if (definition.smallModelId !== undefined)
+      return definition.smallModelId
+    const seed = (definition.seedModels ?? []).find(model => (model.kind ?? classify(model.id)) === 'chat')
+    if (seed !== undefined)
+      return seed.id
+    const models = await deps.catalog.list({ providerId: definition.id, includeHidden: false }).catch((): CatalogModel[] => [])
+    return models.find(model => model.kind === 'chat')?.id
   }
 
   /** Runs the credential test; resolves with the listed model count when the test listed models. */
@@ -297,7 +399,7 @@ export function createProviderServiceWith(deps: AppDeps, options: ProviderServic
       }
       return sanitizeListing(await definition.listModels(rt)).length
     }
-    const modelId = definition.smallModelId ?? definition.seedModels?.[0]?.id ?? await firstCatalogModelId(providerId)
+    const modelId = await pingModelId(definition)
     if (modelId === undefined)
       throw new HarnessError({ code: 'provider_error', message: `The provider "${providerId}" has no model to test the credentials with.`, providerId })
     await generateText({
@@ -362,6 +464,60 @@ export function createProviderServiceWith(deps: AppDeps, options: ProviderServic
     return result
   }
 
+  // ---------- resolution ----------
+
+  /**
+   * The checks every resolver shares, in order: the ref (`validation_error`), a registered provider (`not_found`), an
+   * enabled provider and its required credentials (`provider_not_configured`, before any network call), the catalog
+   * entry (`model_not_found`, action `refresh-models`).
+   */
+  async function resolveBase(modelRef: string): Promise<{ base: ResolvedModelBase, credentials: ResolvedCredentials }> {
+    const { providerId, modelId } = parseModelRef(modelRef)
+    const provider = registered(providerId)
+    if (provider === undefined)
+      throw new HarnessError({ code: 'not_found', message: `Unknown provider "${providerId}".`, providerId })
+    if (!isEnabledRow(await configs.get(providerId)))
+      throw notConfigured(providerId, `The provider "${provider.definition.name}" is disabled.`)
+    const credentials = await deps.credentials.resolve(providerId)
+    if (credentials.missing.length > 0)
+      throw notConfigured(providerId, `The provider "${provider.definition.name}" is not configured (missing: ${credentials.missing.join(', ')}).`)
+    const entry = await deps.catalog.get(providerId, modelId)
+    if (entry === null) {
+      throw new HarnessError({
+        code: 'model_not_found',
+        message: `The model "${modelId}" is not in the catalog of "${provider.definition.name}". Refresh the model list or pick another model.`,
+        providerId,
+        action: 'refresh-models',
+      })
+    }
+    return { base: { modelRef: `${providerId}:${modelId}`, providerId, modelId, info: catalogModelInfo(entry), entry, provider }, credentials }
+  }
+
+  /**
+   * `resolveBase` plus the media rules: a model of another kind -> `validation_error`; a provider without the factory
+   * -> `model_not_found` for image models (their models are not offered), `validation_error` for transcription and
+   * speech models (the model named).
+   */
+  async function resolveMediaBase(modelRef: string, kind: MediaModelKind): Promise<{ base: ResolvedModelBase, credentials: ResolvedCredentials }> {
+    const resolved = await resolveBase(modelRef)
+    const { base } = resolved
+    if (base.entry.kind !== kind)
+      throw wrongModelError(`The model "${base.modelRef}" is not ${MEDIA_KIND_LABELS[kind]}.`)
+    if (!providerServesKind(base.provider.definition, kind)) {
+      const message = `The provider "${base.provider.definition.name}" cannot ${MEDIA_KIND_ABILITIES[kind]}, so the model "${base.modelRef}" cannot be used.`
+      if (kind === 'image')
+        throw new HarnessError({ code: 'model_not_found', message, providerId: base.providerId })
+      throw wrongModelError(message)
+    }
+    return resolved
+  }
+
+  /** The guarded factory call with the resolved credentials and the run signal. */
+  function resolveMediaModel(resolved: { base: ResolvedModelBase, credentials: ResolvedCredentials }, kind: MediaModelKind, resolveOptions: ResolveModelOptions): Promise<unknown> {
+    const { base, credentials } = resolved
+    return createMediaModel(base.provider, kind, base.modelId, runtimeFor(base.provider, credentials, resolveOptions.signal))
+  }
+
   // ---------- service ----------
 
   return {
@@ -391,33 +547,30 @@ export function createProviderServiceWith(deps: AppDeps, options: ProviderServic
     test,
 
     resolveModel: async (modelRef, resolveOptions: ResolveModelOptions = {}): Promise<ResolvedModel> => {
-      const { providerId, modelId } = parseModelRef(modelRef)
-      const provider = registered(providerId)
-      if (provider === undefined)
-        throw new HarnessError({ code: 'not_found', message: `Unknown provider "${providerId}".`, providerId })
-      if (!isEnabledRow(await configs.get(providerId)))
-        throw notConfigured(providerId, `The provider "${provider.definition.name}" is disabled.`)
-      const credentials = await deps.credentials.resolve(providerId)
-      if (credentials.missing.length > 0)
-        throw notConfigured(providerId, `The provider "${provider.definition.name}" is not configured (missing: ${credentials.missing.join(', ')}).`)
-      const entry = await deps.catalog.get(providerId, modelId)
-      if (entry === null) {
-        throw new HarnessError({
-          code: 'model_not_found',
-          message: `The model "${modelId}" is not in the catalog of "${provider.definition.name}". Refresh the model list or pick another model.`,
-          providerId,
-          action: 'refresh-models',
-        })
-      }
-      const model = createModel(provider, modelId, runtimeFor(provider, credentials, resolveOptions.signal))
-      return { modelRef: `${providerId}:${modelId}`, providerId, modelId, model, info: catalogModelInfo(entry), entry, provider }
+      const { base, credentials } = await resolveBase(modelRef)
+      if (base.entry.kind === 'image')
+        throw wrongModelError(`The model "${base.modelRef}" is an image model: it answers image turns only.`)
+      const model = createModel(base.provider, base.modelId, runtimeFor(base.provider, credentials, resolveOptions.signal))
+      return { ...base, model }
     },
 
-    resolveImageModel: rejectsNotImplemented('ProviderService.resolveImageModel (W6.2)'),
+    resolveImageModel: async (modelRef, resolveOptions: ResolveModelOptions = {}) => {
+      const base = await resolveMediaBase(modelRef, 'image')
+      const imageModel = await resolveMediaModel(base, 'image', resolveOptions)
+      return { ...base.base, imageModel: imageModel as ImageModelInstance }
+    },
 
-    resolveTranscriptionModel: rejectsNotImplemented('ProviderService.resolveTranscriptionModel (W6.2)'),
+    resolveTranscriptionModel: async (modelRef, resolveOptions: ResolveModelOptions = {}) => {
+      const base = await resolveMediaBase(modelRef, 'transcription')
+      const model = await resolveMediaModel(base, 'transcription', resolveOptions)
+      return { ...base.base, model: model as TranscriptionModelInstance }
+    },
 
-    resolveSpeechModel: rejectsNotImplemented('ProviderService.resolveSpeechModel (W6.2)'),
+    resolveSpeechModel: async (modelRef, resolveOptions: ResolveModelOptions = {}) => {
+      const base = await resolveMediaBase(modelRef, 'speech')
+      const model = await resolveMediaModel(base, 'speech', resolveOptions)
+      return { ...base.base, model: model as SpeechModelInstance }
+    },
 
     runtime: async (providerId, runtimeOptions = {}) => {
       const provider = requireRegistered(providerId)

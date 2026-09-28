@@ -76,6 +76,52 @@ describe('models store', () => {
     expect(models.defaultRef).toBe('openai:gpt-luna')
   })
 
+  it('groups chat models only; image, speech and transcription models stay out of the provider groups', async () => {
+    const NO_CAPS = { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false }
+    const image = catalogModel({ id: 'painter-1', kind: 'image', capabilities: { ...NO_CAPS, vision: true } })
+    const imageChat = catalogModel({ id: 'claude-canvas', capabilities: { ...NO_CAPS, imageOutput: true } })
+    const tts = catalogModel({ providerId: 'ollama', id: 'voice-1', kind: 'speech', capabilities: NO_CAPS })
+    const onlyImages = catalogModel({ providerId: 'ollama', id: 'pixels', kind: 'image', capabilities: NO_CAPS })
+    api.providers.list.mockResolvedValue({ items: [providerSummary(), providerSummary({ id: 'ollama', local: true })] })
+    api.models.list.mockResolvedValue({ items: [image, sonnet, imageChat, tts, onlyImages] })
+    const models = useModelsStore()
+    await Promise.all([useProvidersStore().fetchAll(), models.fetchAll()])
+    expect(models.visible.map(model => model.id)).toEqual(['painter-1', 'claude-sonnet-5', 'claude-canvas', 'voice-1', 'pixels'])
+    expect(models.groupedByProvider.map(group => [group.provider.id, group.models.map(model => model.id)]))
+      .toEqual([['anthropic', ['claude-sonnet-5', 'claude-canvas']]])
+  })
+
+  it('never picks an image model as the default: settings, recent and the first visible model skip it', async () => {
+    const image = catalogModel({ id: 'painter-1', kind: 'image' })
+    const speech = catalogModel({ id: 'voice-1', kind: 'speech' })
+    api.providers.list.mockResolvedValue({ items: [providerSummary(), providerSummary({ id: 'ollama', local: true })] })
+    api.models.list.mockResolvedValue({ items: [image, speech, sonnet, llama] })
+    const models = useModelsStore()
+    await Promise.all([useProvidersStore().fetchAll(), models.fetchAll()])
+    expect(models.defaultRef).toBe('anthropic:claude-sonnet-5')
+    models.touchRecent('anthropic:painter-1')
+    expect(models.defaultRef).toBe('anthropic:claude-sonnet-5')
+    models.touchRecent('ollama:llama3:8b')
+    models.touchRecent('anthropic:painter-1')
+    expect(models.defaultRef).toBe('ollama:llama3:8b')
+    useSettingsStore().settings = { ...DEFAULT_SETTINGS, defaultModelRef: 'anthropic:painter-1' }
+    expect(models.defaultRef).toBe('ollama:llama3:8b')
+    useSettingsStore().settings = { ...DEFAULT_SETTINGS, defaultModelRef: 'anthropic:voice-1' }
+    expect(models.defaultRef).toBe('ollama:llama3:8b')
+    // A default the catalog does not know yet (still loading, or its provider has no key) is kept.
+    useSettingsStore().settings = { ...DEFAULT_SETTINGS, defaultModelRef: 'openai:gpt-luna' }
+    expect(models.defaultRef).toBe('openai:gpt-luna')
+  })
+
+  it('has no default when only image models are visible', async () => {
+    api.providers.list.mockResolvedValue({ items: [providerSummary()] })
+    api.models.list.mockResolvedValue({ items: [catalogModel({ id: 'painter-1', kind: 'image' })] })
+    const models = useModelsStore()
+    await Promise.all([useProvidersStore().fetchAll(), models.fetchAll()])
+    models.touchRecent('anthropic:painter-1')
+    expect(models.defaultRef).toBeNull()
+  })
+
   it('keeps five recent refs, newest first, in localStorage', async () => {
     const models = await loadCatalog()
     for (const id of ['a', 'b', 'c', 'd', 'e', 'f'])

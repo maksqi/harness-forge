@@ -44,7 +44,7 @@ describe('gET /api/models', () => {
     const visible = listSchema.parse(await (await send('GET', '/api/models?providerId=mock')).json())
     // Phase 6: the media models of the mock provider are hidden by default (non-chat kinds); image-chat and image-tool
     // are chat models.
-    expect(visible.items.map(item => item.id)).toEqual(['echo', 'image-chat', 'image-tool', 'reasoning', 'tool-approval'])
+    expect(visible.items.map(item => item.id)).toEqual(['echo', 'image', 'image-chat', 'image-tool', 'reasoning', 'tool-approval'])
     const all = listSchema.parse(await (await send('GET', '/api/models?providerId=mock&includeHidden=true')).json())
     expect(all.items.map(item => item.id).sort()).toEqual(['echo', 'error', 'image', 'image-chat', 'image-tool', 'reasoning', 'speech', 'tool-approval', 'transcribe'])
     const unknown = await send('GET', '/api/models?providerId=nope')

@@ -105,6 +105,11 @@ describe('title text', () => {
     expect(fallbackTitle('   ')).toBeNull()
   })
 
+  it('never tries the model of an image turn', () => {
+    expect(titleModelCandidates('other:title', chatModel, false)).toEqual(['other:title', 'prov:small'])
+    expect(titleModelCandidates(null, resolved('prov:image', textModel('x')), false)).toEqual([])
+  })
+
   it('tries titleModelRef, then the small model of the chat provider, then the chat model', () => {
     expect(titleModelCandidates('other:title', chatModel)).toEqual(['other:title', 'prov:small', 'prov:big'])
     expect(titleModelCandidates(null, chatModel)).toEqual(['prov:small', 'prov:big'])
@@ -148,6 +153,19 @@ describe('generateChatTitle', () => {
     })
     await generateChatTitle(failing.services, { chatId: 'chat', text: 'hello world', chatModel, logger: createSilentLogger() })
     expect(failing.titles).toEqual([{ title: 'hello world', source: 'fallback' }])
+  })
+
+  it('keeps the default title of an image turn without a title model (nothing resolved or stored)', async () => {
+    const image = resolved('prov:image', textModel('never called'))
+    const none = harness({ 'prov:image': textModel('Image model title') })
+    expect(await generateChatTitle(none.services, { chatId: 'chat', text: 'a red fox', chatModel: image, includeRunModel: false, logger: createSilentLogger() })).toBeNull()
+    expect(none.resolvedRefs).toEqual([])
+    expect(none.titles).toEqual([])
+    // With a title model the image turn gets a title like any chat.
+    const titled = harness({ 'other:title': textModel('Red fox') }, { titleModelRef: 'other:title' })
+    await generateChatTitle(titled.services, { chatId: 'chat', text: 'a red fox', chatModel: image, includeRunModel: false, logger: createSilentLogger() })
+    expect(titled.resolvedRefs).toEqual(['other:title'])
+    expect(titled.titles).toEqual([{ title: 'Red fox', source: 'auto' }])
   })
 
   it('never stores anything for an empty message or when a user title exists', async () => {

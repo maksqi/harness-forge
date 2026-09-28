@@ -5,9 +5,10 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } f
 import { join } from 'node:path'
 import { fileRefSchema, HarnessError, LIMITS } from '@harness-forge/shared'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { encodeSolidPng } from '../../builtin-plugins/mock/png.ts'
 import { files } from '../../db/schema.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
-import { PDF, PNG, TEXT } from './fixtures.test-util.ts'
+import { GIF, JPEG, PDF, PNG, SVG, TEXT } from './fixtures.test-util.ts'
 
 let t: TestApp
 
@@ -175,6 +176,66 @@ describe('files service: bulk data imports (importFile)', () => {
     expect((await rejection(t.deps.files.importFile(input(TEXT, { mime: 'image/png', name: 'x.png' })))).code).toBe('validation_error')
     const big = new Uint8Array(LIMITS.uploadBytes + 1)
     expect((await rejection(t.deps.files.importFile(input(big))))).toMatchObject({ code: 'payload_too_large', details: { limitBytes: LIMITS.uploadBytes } })
+    expect(storedBlobs()).toEqual([])
+    expect(await t.db.select().from(files)).toHaveLength(0)
+  })
+})
+
+describe('files service: generated images (saveGenerated)', () => {
+  const RED = encodeSolidPng(4, 3, [255, 0, 0])
+
+  it('stores a generated image content-addressed with private permissions and a sanitized name', async () => {
+    const file = await t.deps.files.saveGenerated({ data: RED, mediaType: 'image/png', name: 'dir/image-1' })
+    expect(file).toEqual({ id: expect.stringMatching(/^file_[\dA-Za-z]{16}$/), sha256: sha256(RED), name: 'image-1.png', mime: 'image/png', size: RED.byteLength, createdAt: expect.any(Number) })
+    expect(await t.deps.files.get(file.id)).toEqual(file)
+    expect((await t.deps.files.read(file.id)).data).toEqual(RED)
+    expect(t.deps.files.idFromUrl(`/api/files/${file.id}`)).toBe(file.id)
+    if (process.platform !== 'win32')
+      expect(statSync(blobPath(RED)).mode & 0o777).toBe(0o600)
+    const jpeg = await t.deps.files.saveGenerated({ data: JPEG, mediaType: 'image/jpg', name: 'photo' })
+    expect(jpeg).toMatchObject({ mime: 'image/jpeg', name: 'photo.jpg' })
+  })
+
+  it('gives the same file id for the same bytes, keeping the first row and its name', async () => {
+    const first = await t.deps.files.saveGenerated({ data: RED, mediaType: 'image/png', name: 'image-1.png' })
+    const again = await t.deps.files.saveGenerated({ data: RED, mediaType: 'image/png; foo=bar', name: 'image-2.png' })
+    expect(again).toEqual(first)
+    const upload = await t.deps.files.upload(new File([GIF], 'upload.gif', { type: 'image/gif' }))
+    expect(await t.deps.files.saveGenerated({ data: GIF, mediaType: 'image/gif', name: 'image-1.gif' })).toMatchObject({ id: upload.id, name: 'upload.gif' })
+    expect(await t.db.select().from(files)).toHaveLength(2)
+    expect(storedBlobs().sort()).toEqual([blobPath(RED), blobPath(GIF)].sort())
+  })
+
+  it('stores concurrent saves of the same bytes as one row', async () => {
+    const saved = await Promise.all(Array.from({ length: 5 }, (_, index) => t.deps.files.saveGenerated({ data: RED, mediaType: 'image/png', name: `image-${index + 1}.png` })))
+    expect(new Set(saved.map(file => file.id)).size).toBe(1)
+    expect(await t.db.select().from(files)).toHaveLength(1)
+  })
+
+  it('writes the blob again when a reused row lost it', async () => {
+    const first = await t.deps.files.saveGenerated({ data: RED, mediaType: 'image/png', name: 'image-1.png' })
+    rmSync(blobPath(RED))
+    expect(await t.deps.files.saveGenerated({ data: RED, mediaType: 'image/png', name: 'image-1.png' })).toEqual(first)
+    expect((await t.deps.files.read(first.id)).data).toEqual(RED)
+  })
+
+  it('does not reuse a row of the same bytes stored under another type', async () => {
+    await t.db.insert(files).values({ id: 'file_0000000000000001', sha256: sha256(RED), name: 'odd.bin', mime: 'text/plain', size: RED.byteLength, createdAt: 1 })
+    const file = await t.deps.files.saveGenerated({ data: RED, mediaType: 'image/png', name: 'image-1.png' })
+    expect(file).toMatchObject({ mime: 'image/png', name: 'image-1.png' })
+    expect(file.id).not.toBe('file_0000000000000001')
+  })
+
+  it('refuses SVG, other types, a type mismatch and an oversized image, storing nothing', async () => {
+    const svg = await rejection(t.deps.files.saveGenerated({ data: SVG, mediaType: 'image/svg+xml', name: 'a.svg' }))
+    expect(svg).toMatchObject({ code: 'validation_error', details: { issues: [{ path: ['mediaType'] }] } })
+    expect((await rejection(t.deps.files.saveGenerated({ data: PDF, mediaType: 'application/pdf', name: 'a.pdf' }))).code).toBe('validation_error')
+    const mismatch = await rejection(t.deps.files.saveGenerated({ data: RED, mediaType: 'image/jpeg', name: 'a.jpg' }))
+    expect(mismatch).toMatchObject({ code: 'validation_error', details: { issues: [{ path: ['data'] }] } })
+    const huge = new Uint8Array(LIMITS.generatedImageBytes + 1)
+    huge.set(RED)
+    const large = await rejection(t.deps.files.saveGenerated({ data: huge, mediaType: 'image/png', name: 'big.png' }))
+    expect(large.toJSON().error).toMatchObject({ code: 'payload_too_large', details: { limitBytes: LIMITS.generatedImageBytes } })
     expect(storedBlobs()).toEqual([])
     expect(await t.db.select().from(files)).toHaveLength(0)
   })

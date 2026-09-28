@@ -5,7 +5,10 @@ import {
   firstStringArg,
   formatCost,
   formatDuration,
+  formatImageTurn,
   formatToolValue,
+  imageFileParts,
+  isImageFilePart,
   isServerTruncated,
   isSupersededDenial,
   messageBlocks,
@@ -34,6 +37,42 @@ describe('messageBlocks', () => {
     const firstSources = blocks[2]!
     expect(firstSources.kind === 'sources' && firstSources.parts.map(part => part.sourceId)).toEqual(['s1', 's2'])
     expect(blocks[1]!.key).toBe('tool-c1')
+  })
+
+  it('turns every run of image file parts into one gallery (generated images, docs/UI.md 7.16)', () => {
+    const image = (n: number, mediaType = 'image/png') => ({ type: 'file' as const, mediaType, url: `/api/files/file_${n}`, filename: `image-${n}.png` })
+    const parts: HarnessUIMessagePart[] = [
+      { type: 'step-start' },
+      image(1),
+      { type: 'step-start' },
+      image(2, 'image/webp'),
+      { type: 'text', text: 'Here is a PDF too', state: 'done' },
+      { type: 'file', mediaType: 'application/pdf', url: '/api/files/file_3', filename: 'a.pdf' },
+      image(4),
+      { type: 'data-notice', data: { level: 'warning', code: 'generated-file-dropped', message: 'Dropped' } },
+      image(5),
+      { type: 'reasoning-file', mediaType: 'image/png', url: '/api/files/file_6' },
+    ]
+    const blocks = messageBlocks(parts)
+    expect(blocks.map(block => block.kind)).toEqual(['gallery', 'text', 'file', 'gallery', 'notice', 'gallery', 'file'])
+    const galleries = blocks.filter(block => block.kind === 'gallery')
+    expect(galleries.map(block => block.parts.map(part => part.url))).toEqual([
+      ['/api/files/file_1', '/api/files/file_2'],
+      ['/api/files/file_4'],
+      ['/api/files/file_5'],
+    ])
+    // Keys stay stable while more images stream into a gallery.
+    expect(galleries[0]!.key).toBe('gallery-1')
+    expect(messageBlocks(parts.slice(0, 2))[0]!.key).toBe('gallery-1')
+  })
+
+  it('finds the image file parts of a message', () => {
+    const png = { type: 'file' as const, mediaType: 'IMAGE/PNG', url: '/api/files/file_1' }
+    const pdf = { type: 'file' as const, mediaType: 'application/pdf', url: '/api/files/file_2' }
+    expect(isImageFilePart(png)).toBe(true)
+    expect(isImageFilePart(pdf)).toBe(false)
+    expect(isImageFilePart({ type: 'reasoning-file', mediaType: 'image/png', url: '/api/files/file_3' })).toBe(false)
+    expect(imageFileParts({ parts: [png, pdf, { type: 'text', text: 'x' }] })).toEqual([png])
   })
 })
 
@@ -96,8 +135,16 @@ describe('formatting', () => {
     expect(formatCost(null)).toBe('')
   })
 
+  it('describes an image turn for the meta hover', () => {
+    expect(formatImageTurn({ n: 2, aspectRatio: '16:9', inputs: 1 })).toBe('2 images · 16:9 · edited 1 image')
+    expect(formatImageTurn({ n: 1 })).toBe('1 image')
+    expect(formatImageTurn({ n: 4, inputs: 0 })).toBe('4 images')
+    expect(formatImageTurn({ n: 1, aspectRatio: '1:1', inputs: 3 })).toBe('1 image · 1:1 · edited 3 images')
+  })
+
   it('joins text parts for copying', () => {
     expect(messageText({ parts: [{ type: 'text', text: 'a' }, { type: 'reasoning', text: 'r' }, { type: 'text', text: 'b' }] })).toBe('a\n\nb')
+    expect(messageText({ parts: [{ type: 'file', mediaType: 'image/png', url: '/api/files/file_1' }] })).toBe('')
   })
 
   it('accepts only http(s) URLs as external links', () => {

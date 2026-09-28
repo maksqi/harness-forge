@@ -1,6 +1,7 @@
 // Models store (docs/UI.md 11, docs/API.md 5.7): the model catalog (hidden models included), preferences, custom
 // models, per-provider refresh and the recently used refs (localStorage['hf-recent-models'], max 5).
-// Signatures are frozen after Phase 0.
+// Signatures are frozen after Phase 0. Phase 6 (ADR-028, ADR-029): the provider groups list chat models only (the
+// picker adds the "Image models" group itself) and the default model of a new chat is never an image model.
 import type {
   CatalogModel,
   CustomModelInput,
@@ -73,10 +74,15 @@ export const useModelsStore = defineStore('models', () => {
   const recent = computed(() => recentRefs.value
     .map(modelRef => visibleIndex.value.get(modelRef))
     .filter((model): model is CatalogModel => model !== undefined))
-  /** Visible models grouped by configured provider, in settings order; providers without visible models are skipped. */
+  /**
+   * Visible chat models grouped by configured provider, in settings order; providers without visible chat models are
+   * skipped. Image, transcription, speech and other models never appear here (docs/UI.md 7.9).
+   */
   const groupedByProvider = computed<ProviderModelGroup[]>(() => {
     const byProvider = new Map<string, CatalogModel[]>()
     for (const model of visible.value) {
+      if (model.kind !== 'chat')
+        continue
       const list = byProvider.get(model.providerId)
       if (list)
         list.push(model)
@@ -93,10 +99,17 @@ export const useModelsStore = defineStore('models', () => {
   })
   /**
    * Model of a new chat (docs/UI.md 7.9): the `defaultModelRef` setting (even when its provider is not configured,
-   * so sending explains what is missing), else the most recent visible model, else the first visible one.
+   * so sending explains what is missing), else the most recent visible chat model, else the first visible chat model.
+   * Never an image model (nor another non-chat kind): a setting that names one is skipped.
    */
-  const defaultRef = computed<string | null>(() =>
-    useSettingsStore().resolved.defaultModelRef ?? recent.value[0]?.ref ?? visible.value[0]?.ref ?? null)
+  const defaultRef = computed<string | null>(() => {
+    const setting = useSettingsStore().resolved.defaultModelRef
+    const known = setting ? index.value.get(setting) : undefined
+    if (setting && (!known || known.kind === 'chat'))
+      return setting
+    const isChat = (model: CatalogModel) => model.kind === 'chat'
+    return recent.value.find(isChat)?.ref ?? visible.value.find(isChat)?.ref ?? null
+  })
 
   // ---------- helpers ----------
 

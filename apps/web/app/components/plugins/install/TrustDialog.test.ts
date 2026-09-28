@@ -129,7 +129,7 @@ describe('trustDialog', () => {
 
     await type(byTestId<HTMLInputElement>(testIds.trustPassword), 'pw')
     await click(byTestId(testIds.trustConfirm))
-    expect(document.body.textContent).toContain('Too many attempts. Try again in 4 s.')
+    expect(document.body.textContent).toContain('Too many attempts. Try again in 4s.')
     expect(api.pluginInstall.trust).not.toHaveBeenCalled()
 
     await type(byTestId<HTMLInputElement>(testIds.trustPassword), 'pw2')
@@ -152,6 +152,49 @@ describe('trustDialog', () => {
     await click(byTestId(testIds.confirmPasswordSubmit))
     expect(api.pluginInstall.trust).toHaveBeenCalledTimes(2)
     expect(trusted).toHaveBeenCalledWith('dice-roller')
+  })
+
+  it('shows a refusal after the prompt with Log in, which asks again and trusts once more', async () => {
+    const refusal = () => new HarnessError({ code: 'forbidden', message: 'Confirm your password to continue.', action: 'login' })
+    api.plugins.get.mockResolvedValue(untrusted())
+    api.pluginInstall.trust
+      .mockRejectedValueOnce(refusal())
+      .mockRejectedValueOnce(refusal())
+      .mockResolvedValueOnce(untrusted({ state: 'active' }))
+    api.auth.login.mockResolvedValue(authStatus({ enabled: true, source: 'settings', freshUntil: Date.now() + 600_000 }))
+    const { trusted } = await mountDialog()
+    await click(byTestId(testIds.trustCheckbox))
+    await click(byTestId(testIds.trustConfirm))
+    await type(byTestId<HTMLInputElement>(testIds.confirmPasswordInput), 'secret')
+    await click(byTestId(testIds.confirmPasswordSubmit))
+    expect(api.pluginInstall.trust).toHaveBeenCalledTimes(2)
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(trusted).not.toHaveBeenCalled()
+
+    const logIn = [...byTestId(testIds.trustDialog)!.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Log in')!
+    await click(logIn)
+    await type(byTestId<HTMLInputElement>(testIds.confirmPasswordInput), 'secret')
+    await click(byTestId(testIds.confirmPasswordSubmit))
+    expect(api.pluginInstall.trust).toHaveBeenCalledTimes(3)
+    expect(trusted).toHaveBeenCalledWith('dice-roller')
+  })
+
+  it('trusts nothing and shows nothing when the password prompt is cancelled', async () => {
+    api.plugins.get.mockResolvedValue(untrusted())
+    api.pluginInstall.trust.mockRejectedValue(new HarnessError({ code: 'forbidden', message: 'Confirm your password to continue.', action: 'login' }))
+    const { trusted, open } = await mountDialog()
+    await click(byTestId(testIds.trustCheckbox))
+    await click(byTestId(testIds.trustConfirm))
+    const prompt = byTestId(testIds.confirmPasswordDialog)!
+    const cancel = [...prompt.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Cancel')!
+    await click(cancel)
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.pluginInstall.trust).toHaveBeenCalledTimes(1)
+    // No error alert (the trust warning stays).
+    expect(byTestId(testIds.trustDialog)!.querySelector('[data-code]')).toBeNull()
+    expect(confirmDisabled()).toBe(false)
+    expect(trusted).not.toHaveBeenCalled()
+    expect(open.value).toBe(true)
   })
 
   it('reloads the plugin when its files changed since the dialog opened', async () => {

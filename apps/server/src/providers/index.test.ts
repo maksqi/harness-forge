@@ -1,12 +1,14 @@
-import type { ProviderDefinition } from '@harness-forge/plugin-sdk'
+import type { ProviderDefinition, ProviderRuntime } from '@harness-forge/plugin-sdk'
 import type { ProvidersTestApp, ProvidersTestAppOptions } from './testing.ts'
 import { APICallError } from '@ai-sdk/provider'
 import { BUILTIN_PROVIDER_IDS, HarnessError, providerSummarySchema, providerTestResultSchema } from '@harness-forge/shared'
-import { MockLanguageModelV4 } from 'ai/test'
+import { generateImage, generateSpeech, transcribe } from 'ai'
+import { MockImageModelV4, MockLanguageModelV4, MockSpeechModelV4, MockTranscriptionModelV4 } from 'ai/test'
 import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { MOCK_TRANSCRIPT } from '../builtin-plugins/mock/index.ts'
 import { providerConfigs } from '../db/schema.ts'
-import { isLocalProvider, providerStatus } from './index.ts'
+import { isLocalProvider, MODEL_FACTORY_TIMEOUT_MS, providerStatus } from './index.ts'
 import { createProvidersTestApp } from './testing.ts'
 
 const KEY = 'sk-ant-test-key-0123456789abcdef'
@@ -49,6 +51,30 @@ function testProvider(overrides: Partial<ProviderDefinition> = {}): ProviderDefi
   }
 }
 
+/** Seeds of every kind (one chat model, one explicit seed per media kind) under `<prefix>-...` ids. */
+function mediaSeeds(prefix: string): NonNullable<ProviderDefinition['seedModels']> {
+  return [
+    { id: `${prefix}-chat` },
+    { id: `${prefix}-paint`, kind: 'image', capabilities: { vision: true } },
+    { id: `${prefix}-listen`, kind: 'transcription' },
+    { id: `${prefix}-say`, kind: 'speech', voices: ['ava', 'ben'] },
+  ]
+}
+
+/** A provider with media seeds and factories built on the `ai/test` mocks. */
+function mediaProvider(id: string, overrides: Partial<ProviderDefinition> = {}): ProviderDefinition {
+  return testProvider({
+    id,
+    name: `Provider ${id}`,
+    smallModelId: `${id}-chat`,
+    seedModels: mediaSeeds(id),
+    createImageModel: modelId => new MockImageModelV4({ provider: id, modelId }),
+    createTranscriptionModel: modelId => new MockTranscriptionModelV4({ provider: id, modelId }),
+    createSpeechModel: modelId => new MockSpeechModelV4({ provider: id, modelId }),
+    ...overrides,
+  })
+}
+
 function http401(): APICallError {
   return new APICallError({ message: 'unauthorized', url: 'https://api.acme.test/v1/models', requestBodyValues: {}, statusCode: 401 })
 }
@@ -67,7 +93,8 @@ describe('provider list', () => {
     const t = await setup({ env: { HF_MOCK_PROVIDER: '1' } })
     const providers = await t.deps.providers.list()
     expect(providers.map(provider => provider.id)).toEqual([...BUILTIN_PROVIDER_IDS, 'mock'])
-    // Visible chat models: the four of v1 plus image-chat and image-tool (the Phase 6 media models are hidden).
+    // Visible chat models: the four of v1 plus image-chat and image-tool (mock:image is visible but not a chat model; the
+    // transcription and speech models are hidden).
     expect(providers.at(-1)).toMatchObject({ id: 'mock', pluginId: 'mock', status: 'connected', local: true, icon: null, modelCount: 6, credentials: {} })
   })
 
@@ -198,6 +225,136 @@ describe('resolveModel', () => {
   })
 })
 
+describe('media resolvers (Phase 6)', () => {
+  it('resolves image, transcription and speech models with their catalog entry, credentials and the run signal', async () => {
+    const t = await setup({ builtins: [] })
+    const runtimes: ProviderRuntime[] = []
+    t.registry.providers.register('studio-plugin', mediaProvider('studio', {
+      createImageModel: (modelId, rt) => {
+        runtimes.push(rt)
+        return new MockImageModelV4({ provider: 'studio', modelId })
+      },
+    }))
+    await t.credentials.set('studio', { apiKey: 'studio-key' })
+    const controller = new AbortController()
+    const image = await t.deps.providers.resolveImageModel('studio:studio-paint', { signal: controller.signal })
+    expect(image).toMatchObject({
+      modelRef: 'studio:studio-paint',
+      providerId: 'studio',
+      modelId: 'studio-paint',
+      entry: { ref: 'studio:studio-paint', kind: 'image', hidden: false },
+      info: { id: 'studio-paint', kind: 'image', capabilities: { vision: true, imageOutput: false } },
+      provider: { pluginId: 'studio-plugin' },
+    })
+    expect(image.imageModel).toMatchObject({ specificationVersion: 'v4', provider: 'studio', modelId: 'studio-paint' })
+    expect(runtimes).toHaveLength(1)
+    expect(runtimes[0]?.credentials).toMatchObject({ apiKey: 'studio-key' })
+    expect(runtimes[0]?.signal).toBe(controller.signal)
+
+    const transcription = await t.deps.providers.resolveTranscriptionModel('studio:studio-listen')
+    expect(transcription).toMatchObject({ modelRef: 'studio:studio-listen', entry: { kind: 'transcription', hidden: true }, model: { modelId: 'studio-listen' } })
+    const speech = await t.deps.providers.resolveSpeechModel('studio:studio-say')
+    expect(speech).toMatchObject({ modelRef: 'studio:studio-say', entry: { kind: 'speech', voices: ['ava', 'ben'] }, info: { voices: ['ava', 'ben'] }, model: { modelId: 'studio-say' } })
+  })
+
+  it('answers the resolver error table', async () => {
+    const fetch = vi.fn(async () => new Response('{}'))
+    vi.stubGlobal('fetch', fetch)
+    const t = await setup({ builtins: [], providerService: { factoryTimeoutMs: 30 } })
+    t.registry.providers.register('studio-plugin', mediaProvider('studio'))
+    // No media factory: its media seeds are left out of the catalog; custom media models stay listed.
+    t.registry.providers.register('bare-plugin', testProvider({ id: 'bare', name: 'Bare', smallModelId: 'bare-chat', seedModels: mediaSeeds('bare') }))
+    t.registry.providers.register('broken-plugin', mediaProvider('broken', {
+      createImageModel: () => {
+        throw new Error('boom')
+      },
+      createTranscriptionModel: () => 'a-string' as never,
+      createSpeechModel: () => new Promise(() => {}) as never,
+    }))
+    t.registry.providers.register('strict-plugin', mediaProvider('strict', {
+      createImageModel: () => {
+        throw new HarnessError({ code: 'provider_not_configured', message: 'Set a region first.', providerId: 'strict' })
+      },
+    }))
+    t.registry.providers.register('off-plugin', mediaProvider('off'))
+    t.registry.providers.register('nokey-plugin', mediaProvider('nokey'))
+    for (const id of ['studio', 'bare', 'broken', 'strict', 'off'])
+      await t.credentials.set(id, { apiKey: `${id}-key` })
+    await t.deps.providers.setEnabled('off', false)
+    for (const [modelId, kind] of [['bare-custom-paint', 'image'], ['bare-custom-listen', 'transcription'], ['bare-custom-say', 'speech']] as const)
+      await t.deps.catalog.addCustom({ providerId: 'bare', modelId, kind })
+
+    const providers = t.deps.providers
+    const table: Array<[string, () => Promise<unknown>, Record<string, unknown>]> = [
+      ['an invalid ref', () => providers.resolveImageModel('nocolon'), { code: 'validation_error' }],
+      ['an unknown provider', () => providers.resolveTranscriptionModel('nope:model'), { code: 'not_found', providerId: 'nope' }],
+      ['a disabled provider', () => providers.resolveImageModel('off:off-paint'), { code: 'provider_not_configured', action: 'configure-provider' }],
+      ['missing credentials', () => providers.resolveSpeechModel('nokey:nokey-say'), { code: 'provider_not_configured', action: 'configure-provider', providerId: 'nokey' }],
+      ['an unknown model', () => providers.resolveImageModel('studio:nope'), { code: 'model_not_found', action: 'refresh-models' }],
+      ['a chat model as an image model', () => providers.resolveImageModel('studio:studio-chat'), { code: 'validation_error', message: 'modelRef: The model "studio:studio-chat" is not an image model.' }],
+      ['a speech model as an image model', () => providers.resolveImageModel('studio:studio-say'), { code: 'validation_error' }],
+      ['a speech model for dictation', () => providers.resolveTranscriptionModel('studio:studio-say'), { code: 'validation_error', message: 'modelRef: The model "studio:studio-say" is not a speech-to-text model.' }],
+      ['a transcription model for read-aloud', () => providers.resolveSpeechModel('studio:studio-listen'), { code: 'validation_error', message: 'modelRef: The model "studio:studio-listen" is not a text-to-speech model.' }],
+      ['an image model for read-aloud', () => providers.resolveSpeechModel('studio:studio-paint'), { code: 'validation_error' }],
+      ['an image model as a chat model', () => providers.resolveModel('studio:studio-paint'), { code: 'validation_error', message: 'modelRef: The model "studio:studio-paint" is an image model: it answers image turns only.' }],
+      ['a seeded image model without createImageModel', () => providers.resolveImageModel('bare:bare-paint'), { code: 'model_not_found' }],
+      ['a custom image model without createImageModel', () => providers.resolveImageModel('bare:bare-custom-paint'), { code: 'model_not_found', providerId: 'bare', message: 'The provider "Bare" cannot generate images, so the model "bare:bare-custom-paint" cannot be used.' }],
+      ['a custom transcription model without the factory', () => providers.resolveTranscriptionModel('bare:bare-custom-listen'), { code: 'validation_error', message: 'modelRef: The provider "Bare" cannot transcribe speech, so the model "bare:bare-custom-listen" cannot be used.' }],
+      ['a custom speech model without the factory', () => providers.resolveSpeechModel('bare:bare-custom-say'), { code: 'validation_error', message: 'modelRef: The provider "Bare" cannot read text aloud, so the model "bare:bare-custom-say" cannot be used.' }],
+      ['a throwing factory', () => providers.resolveImageModel('broken:broken-paint'), { code: 'plugin_error', providerId: 'broken', details: { pluginId: 'broken-plugin' } }],
+      ['a factory that returns no model', () => providers.resolveTranscriptionModel('broken:broken-listen'), { code: 'plugin_error', details: { pluginId: 'broken-plugin' } }],
+      ['a factory that does not return in time', () => providers.resolveSpeechModel('broken:broken-say'), { code: 'plugin_error', details: { pluginId: 'broken-plugin' } }],
+      ['a factory that throws a HarnessError', () => providers.resolveImageModel('strict:strict-paint'), { code: 'provider_not_configured', message: 'Set a region first.' }],
+    ]
+    for (const [label, call, expected] of table) {
+      const error = await call().then(() => null, (caught: unknown) => caught)
+      expect(error, label).toBeInstanceOf(HarnessError)
+      expect((error as HarnessError).toJSON().error, label).toMatchObject(expected)
+    }
+    // The model_not_found of a missing image factory has no refresh action (refreshing cannot help).
+    const noFactory = await providers.resolveImageModel('bare:bare-custom-paint').then(() => null, (caught: unknown) => caught)
+    expect(noFactory).toBeInstanceOf(HarnessError)
+    expect((noFactory as HarnessError).action).toBeUndefined()
+    expect(t.plugins.logEntries.map(entry => entry.pluginId)).toEqual(['broken-plugin', 'broken-plugin', 'broken-plugin'])
+    expect(t.plugins.logEntries.map(entry => entry.message)).toEqual([
+      'createImageModel("broken-paint") of "broken" threw an error.',
+      'createTranscriptionModel("broken-listen") of "broken" did not return a speech-to-text model instance.',
+      'createSpeechModel("broken-say") of "broken" did not return within 30 ms.',
+    ])
+    expect(fetch).not.toHaveBeenCalled()
+    // resolveModel still resolves the chat models of the same provider.
+    expect((await providers.resolveModel('studio:studio-chat')).model).toMatchObject({ modelId: 'studio-chat' })
+  })
+
+  it('guards the factories for 5 s by default and awaits a factory that returns a promise', async () => {
+    expect(MODEL_FACTORY_TIMEOUT_MS).toBe(5000)
+    const t = await setup({ builtins: [] })
+    t.registry.providers.register('async-plugin', mediaProvider('async', {
+      createSpeechModel: (async (modelId: string) => new MockSpeechModelV4({ provider: 'async', modelId })) as never,
+    }))
+    await t.credentials.set('async', { apiKey: 'async-key' })
+    expect((await t.deps.providers.resolveSpeechModel('async:async-say')).model).toMatchObject({ specificationVersion: 'v4', modelId: 'async-say' })
+  })
+
+  it('resolves the mock media models end to end', async () => {
+    const t = await setup({ env: { HF_MOCK_PROVIDER: '1' } })
+    const image = await t.deps.providers.resolveImageModel('mock:image')
+    expect(image).toMatchObject({ modelRef: 'mock:image', entry: { kind: 'image', hidden: false }, provider: { pluginId: 'mock' } })
+    const generated = await generateImage({ model: image.imageModel, prompt: 'a red fox', n: 2, aspectRatio: '16:9' })
+    expect(generated.images).toHaveLength(2)
+    expect(generated.images.every(file => file.mediaType === 'image/png')).toBe(true)
+    const transcription = await t.deps.providers.resolveTranscriptionModel('mock:transcribe')
+    expect((await transcribe({ model: transcription.model, audio: new Uint8Array(64) })).text).toBe(MOCK_TRANSCRIPT)
+    const speech = await t.deps.providers.resolveSpeechModel('mock:speech')
+    expect(speech.entry.voices).toEqual(['mock-voice-a', 'mock-voice-b'])
+    expect((await generateSpeech({ model: speech.model, text: 'Hello world' })).audio.mediaType).toBe('audio/wav')
+    // Chat models with image output and tools stay chat models; image models are refused by resolveModel.
+    expect((await t.deps.providers.resolveModel('mock:image-chat')).entry).toMatchObject({ kind: 'chat', capabilities: { imageOutput: true } })
+    await expect(t.deps.providers.resolveModel('mock:image')).rejects.toMatchObject({ code: 'validation_error' })
+    await expect(t.deps.providers.resolveImageModel('mock:image-chat')).rejects.toMatchObject({ code: 'validation_error' })
+  })
+})
+
 describe('provider test', () => {
   it('uses validate() and stores the result', async () => {
     const t = await setup({ env: { HF_MOCK_PROVIDER: '1' } })
@@ -265,6 +422,39 @@ describe('provider test', () => {
     }))
     await t.credentials.set('broken', { apiKey: 'stored-key' })
     expect(await t.deps.providers.test('broken')).toMatchObject({ ok: false, error: { code: 'auth_invalid' } })
+  })
+
+  it('never pings an image, transcription or speech model', async () => {
+    const t = await setup({ builtins: [] })
+    const pinged: string[] = []
+    const pingProvider = (id: string, extra: Partial<ProviderDefinition>): ProviderDefinition => testProvider({
+      id,
+      name: id,
+      smallModelId: undefined,
+      createLanguageModel: (modelId) => {
+        pinged.push(`${id}:${modelId}`)
+        return testProvider().createLanguageModel(modelId, { credentials: {}, fetch: globalThis.fetch }) as MockLanguageModelV4
+      },
+      ...extra,
+    })
+    // Seeds: media models first (a whisper id without a kind is a transcription model), then the chat model.
+    t.registry.providers.register('seeds-plugin', pingProvider('seeds', {
+      seedModels: [{ id: 'paint', kind: 'image' }, { id: 'whisper-small' }, { id: 'say', kind: 'speech' }, { id: 'chat-1' }],
+      createImageModel: () => new MockImageModelV4(),
+      createSpeechModel: () => new MockSpeechModelV4(),
+    }))
+    // No seeds: the first visible chat model of the catalog, not the visible image model that sorts first.
+    t.registry.providers.register('plugged-plugin', pingProvider('plugged', { seedModels: undefined, createImageModel: () => new MockImageModelV4() }))
+    t.registry.models.register('other-plugin', 'plugged', [{ id: 'a-paint', name: 'A Paint', kind: 'image' }, { id: 'b-chat', name: 'B Chat' }])
+    // Only media models: nothing to ping.
+    t.registry.providers.register('media-plugin', pingProvider('media', { seedModels: [{ id: 'paint', kind: 'image' }], createImageModel: () => new MockImageModelV4() }))
+    for (const id of ['seeds', 'plugged', 'media'])
+      await t.credentials.set(id, { apiKey: `${id}-key` })
+    expect((await t.deps.catalog.list({ providerId: 'plugged' })).map(model => model.id)).toEqual(['a-paint', 'b-chat'])
+    expect(await t.deps.providers.test('seeds')).toMatchObject({ ok: true })
+    expect(await t.deps.providers.test('plugged')).toMatchObject({ ok: true })
+    expect(await t.deps.providers.test('media')).toMatchObject({ ok: false, error: { code: 'provider_error' } })
+    expect(pinged).toEqual(['seeds:chat-1', 'plugged:b-chat'])
   })
 
   it('times out after the test timeout', async () => {

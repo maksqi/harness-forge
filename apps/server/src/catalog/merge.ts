@@ -1,6 +1,10 @@
 // Field precedence of a catalog entry (ARCHITECTURE.md 9): user custom -> live provider data -> models.dev -> plugin
 // models / seeds. Each field (and each capability flag and price) comes from the first layer that defines it;
-// unknown capabilities are false.
+// unknown capabilities are false. An explicit `kind` of any layer wins over `classify()`.
+//
+// Phase 6: `capabilities.imageOutput` (chat models only; models.dev sets it from a text + image output), `voices`
+// (`ModelInfo.voices` -> `CatalogModel.voices`, <= 100 unique names) and the default visibility: chat models are
+// visible, image models only when their provider defines `createImageModel`, every other kind is hidden.
 import type {
   CatalogModel,
   ModelCapabilities,
@@ -20,8 +24,13 @@ export const EFFORT_ORDER: readonly ReasoningEffort[] = ['auto', 'off', 'low', '
 /** Efforts offered on a reasoning model that lists none (PLUGINS.md `ModelInfo.reasoningEfforts`). */
 export const DEFAULT_REASONING_EFFORTS: readonly ReasoningEffort[] = ['off', 'low', 'medium', 'high']
 
-const CAPABILITY_KEYS = ['tools', 'vision', 'pdf', 'reasoning', 'structuredOutput'] as const satisfies readonly (keyof ModelCapabilities)[]
+const CAPABILITY_KEYS = ['tools', 'vision', 'pdf', 'reasoning', 'structuredOutput', 'imageOutput'] as const satisfies readonly (keyof ModelCapabilities)[]
 const COST_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite'] as const satisfies readonly (keyof ModelCost)[]
+
+/** Upper bound of `CatalogModel.voices` (`ModelInfo.voices`, ADR-029). */
+export const MAX_MODEL_VOICES = 100
+/** Upper bound of one voice name. */
+export const MAX_VOICE_CHARS = 64
 
 /** A metadata layer: a `ModelInfo` whose fields may be missing. */
 export type ModelLayer = Partial<ModelInfo>
@@ -44,9 +53,17 @@ export interface CatalogEntryInput {
   modalities?: ModalityHints
   prefs?: ModelPrefsState
   source: ModelSource
+  /**
+   * The provider defines `createImageModel`: its image models are visible by default (the composer's "Image models"
+   * group). Default false (image models are hidden).
+   */
+  imageModels?: boolean
 }
 
-/** models.dev metadata as a layer (`vision` / `pdf` from the input modalities). */
+/**
+ * models.dev metadata as a layer: `vision` / `pdf` from the input modalities, `imageOutput` from the output modalities
+ * (text and image: a chat model that can answer with images, e.g. Gemini `*-image`).
+ */
 export function modelsDevLayer(model: ModelsDevModel | undefined): ModelLayer | undefined {
   if (model === undefined)
     return undefined
@@ -68,10 +85,27 @@ export function modelsDevLayer(model: ModelsDevModel | undefined): ModelLayer | 
     capabilities.vision = model.input.includes('image')
     capabilities.pdf = model.input.includes('pdf')
   }
+  if (model.output !== undefined)
+    capabilities.imageOutput = model.output.includes('text') && model.output.includes('image')
   layer.capabilities = capabilities
   if (model.cost !== undefined)
     layer.cost = { ...model.cost }
   return layer
+}
+
+/**
+ * Voice names of a speech model as the catalog serves them: non-empty strings of at most 64 characters, unique (first
+ * wins), at most 100.
+ */
+export function cleanVoices(voices: readonly unknown[]): string[] {
+  const unique = new Set<string>()
+  for (const voice of voices) {
+    if (typeof voice === 'string' && voice.length > 0 && voice.length <= MAX_VOICE_CHARS)
+      unique.add(voice)
+    if (unique.size >= MAX_MODEL_VOICES)
+      break
+  }
+  return [...unique]
 }
 
 /** Unique efforts without `auto`, in menu order. */
@@ -124,6 +158,9 @@ export function mergeLayers(id: string, input: readonly (ModelLayer | undefined)
   }
   if (Object.keys(cost).length > 0)
     merged.cost = cost
+  const voices = first(layers, layer => (Array.isArray(layer.voices) ? layer.voices : undefined))
+  if (voices !== undefined)
+    merged.voices = cleanVoices(voices)
   return merged
 }
 
@@ -133,6 +170,19 @@ export function effortMenu(info: ModelInfo, reasoning: boolean): ReasoningEffort
     return []
   const offered = sortEfforts(info.reasoningEfforts ?? DEFAULT_REASONING_EFFORTS)
   return offered.length === 0 ? [] : ['auto', ...offered]
+}
+
+/**
+ * The default of `hidden` (`model_prefs.hidden` overrides it): chat models are visible, image models only when their
+ * provider defines `createImageModel`; transcription, speech and every other kind are hidden (Settings -> Media lists
+ * transcription and speech models with `includeHidden`).
+ */
+export function hiddenByDefault(kind: ModelKind, imageModels: boolean): boolean {
+  if (kind === 'chat')
+    return false
+  if (kind === 'image')
+    return !imageModels
+  return true
 }
 
 /** The `CatalogModel` of an entry. */
@@ -148,12 +198,12 @@ export function buildCatalogModel(entry: CatalogEntryInput): CatalogModel {
     pdf: info.capabilities?.pdf ?? false,
     reasoning,
     structuredOutput: info.capabilities?.structuredOutput ?? false,
-    // Image output of chat models (ADR-028) is not derived from the layers yet (P6-A, W6.2).
-    imageOutput: false,
+    // Image output is a capability of chat models (ADR-028); dedicated image models are `kind: 'image'` instead.
+    imageOutput: kind === 'chat' && (info.capabilities?.imageOutput ?? false),
   }
   const prefs = entry.prefs
   const alias = prefs?.alias ?? null
-  return {
+  const model: CatalogModel = {
     ref: `${entry.providerId}:${entry.id}`,
     providerId: entry.providerId,
     id: entry.id,
@@ -166,11 +216,14 @@ export function buildCatalogModel(entry: CatalogEntryInput): CatalogModel {
     reasoningEfforts: effortMenu(info, reasoning),
     cost: info.cost ?? null,
     favorite: prefs?.favorite ?? false,
-    hidden: prefs?.hidden ?? kind !== 'chat',
+    hidden: prefs?.hidden ?? hiddenByDefault(kind, entry.imageModels === true),
     custom: prefs?.custom ?? false,
     source: entry.source,
     lastUsedAt: prefs?.lastUsedAt ?? null,
   }
+  if (info.voices !== undefined)
+    model.voices = info.voices
+  return model
 }
 
 /** The effective metadata of a catalog entry as `ModelInfo` (`ResolvedModel.info`, input of `reasoning()`). */
@@ -188,5 +241,7 @@ export function catalogModelInfo(model: CatalogModel): ModelInfo {
     info.maxOutputTokens = model.maxOutputTokens
   if (model.cost !== null)
     info.cost = { ...model.cost }
+  if (model.voices !== undefined)
+    info.voices = [...model.voices]
   return info
 }

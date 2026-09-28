@@ -48,6 +48,11 @@ function expectedOf(definition: ProviderDefinition): Expected {
   return expected
 }
 
+/** Seeds of chat models (no kind or `chat`); the other seeds are image, transcription and speech models. */
+function chatSeeds(definition: ProviderDefinition): ModelInfo[] {
+  return (definition.seedModels ?? []).filter(seed => (seed.kind ?? 'chat') === 'chat')
+}
+
 /** Seeds plus a few ids per provider that exercise the model-specific branches of `reasoning()`. */
 function sampleModels(definition: ProviderDefinition): ModelInfo[] {
   const extra = ['claude-sonnet-4-5', 'gemini-2.5-flash', 'kimi-k2.5', 'glm-4.6', 'openai/gpt-oss-20b', 'llama3:8b']
@@ -115,12 +120,13 @@ describe('builtin provider definitions', () => {
       if (id === 'openrouter' || id === 'ollama')
         expect(seeds).toEqual([])
       else
-        expect(seeds.length).toBeGreaterThan(0)
+        expect(chatSeeds(definition).length).toBeGreaterThan(0)
     })
 
     it('creates a provider instance model without network access', () => {
       const { rt, requests } = fakeRuntime({ apiKey: 'test-key' })
-      for (const modelId of [...(definition.seedModels ?? []).map(seed => seed.id), 'custom-model:latest']) {
+      // Media seeds (image, transcription, speech) have their own factories (media.test.ts).
+      for (const modelId of [...chatSeeds(definition).map(seed => seed.id), 'custom-model:latest']) {
         const model = definition.createLanguageModel(modelId, rt)
         expect(typeof model).toBe('object')
         expect(model.specificationVersion).toBe('v4')

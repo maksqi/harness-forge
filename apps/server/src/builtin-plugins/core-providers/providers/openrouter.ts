@@ -1,5 +1,6 @@
 // OpenRouter: `@openrouter/ai-sdk-provider` (PROVIDERS.md sections 1-7). The model listing is public, so the key is
-// checked with `GET /key`. Every request asks for usage accounting (the charged cost becomes `costUsd`).
+// checked with `GET /key`. Every request asks for usage accounting (the charged cost becomes `costUsd`). Images come
+// from chat models with image output (PROVIDERS.md section 13); no dedicated image, transcription or speech models.
 import type { ModelInfo, ProviderDefinition, ProviderRuntime, ReasoningEffort } from '@harness-forge/plugin-sdk'
 import { createOpenRouter } from '@openrouter/ai-sdk-provider'
 import { apiKeyField, apiKeyOf, baseUrlField, baseUrlOf } from '../lib/credentials.ts'
@@ -83,6 +84,7 @@ export const openrouterProvider: ProviderDefinition = {
       const outputs = stringsOf(architecture?.output_modalities)
       if (outputs.length > 0 && !outputs.includes('text'))
         continue
+      const imageOutput = outputs.length > 0 ? outputs.includes('image') : undefined
       const inputs = stringsOf(architecture?.input_modalities)
       const parameters = stringsOf(record.supported_parameters)
       const known = parameters.length > 0
@@ -91,6 +93,9 @@ export const openrouterProvider: ProviderDefinition = {
       models.push(modelInfo({
         id,
         name: stringOf(record.name),
+        // A chat model even when its id says "image" (e.g. `google/gemini-2.5-flash-image`): an explicit kind wins over
+        // the id fallback of the catalog's `classify()`.
+        kind: imageOutput === true ? 'chat' : undefined,
         contextWindow: positiveIntOf(record.context_length),
         maxOutputTokens: positiveIntOf(recordOf(record.top_provider)?.max_completion_tokens),
         capabilities: {
@@ -99,6 +104,7 @@ export const openrouterProvider: ProviderDefinition = {
           pdf: inputs.length > 0 ? inputs.includes('file') : undefined,
           reasoning,
           structuredOutput: known ? parameters.includes('structured_outputs') : undefined,
+          imageOutput,
         },
         reasoningEfforts: reasoning === true ? openrouterReasoningEfforts(record.reasoning) : undefined,
         // USD per token -> per 1M tokens; long-prompt `overrides` are ignored.
@@ -127,5 +133,11 @@ export const openrouterProvider: ProviderDefinition = {
   },
   mapError(err) {
     return mapProviderError(err, PROVIDER, [paymentRequiredRule('OpenRouter credits are exhausted. Add credits and try again.')])
+  },
+  imageParams(request) {
+    // Only called for chat models with `capabilities.imageOutput`. The package has no typed option for this: it spreads
+    // `providerOptions.openrouter` into the request body.
+    const imageConfig = request.aspectRatio === undefined ? {} : { image_config: { aspect_ratio: request.aspectRatio } }
+    return { providerOptions: { openrouter: { modalities: ['image', 'text'], ...imageConfig } } }
   },
 }

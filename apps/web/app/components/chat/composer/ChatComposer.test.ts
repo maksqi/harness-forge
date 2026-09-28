@@ -1,33 +1,41 @@
-import type { FileRef, MessageUsage, ReasoningEffort, ToolMode } from '@harness-forge/shared'
+import type { AudioTranscription, FileRef, MessageUsage, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { Mock } from 'vitest'
 import type { ChatComposerExposed } from './types'
+import type { FakeMedia } from '~/utils/testing/fake-media'
 import type { MockApi } from '~/utils/testing/mock-api'
+import { HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h, nextTick, reactive } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { IMAGE_OPTIONS_KEY, useImageOptions } from '~/composables/useImageOptions'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { useProvidersStore } from '~/stores/providers'
+import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
-import { chatId } from '~/utils/testing/fixtures'
+import { installFakeMedia } from '~/utils/testing/fake-media'
+import { catalogModel, chatId } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import ChatComposer from './ChatComposer.vue'
-import { anthropic, bodyAll, byTestId, haiku, llama, NuxtLinkStub, ollama, seedStores, sonnet } from './composer-test-utils'
+import { anthropic, bodyAll, byTestId, haiku, llama, NuxtLinkStub, ollama, openai, seedStores, sonnet } from './composer-test-utils'
 
 const mock = vi.hoisted(() => ({
   api: null as unknown,
   navigateTo: null as unknown as Mock<(...args: unknown[]) => unknown>,
+  toast: null as unknown as Mock<(...args: unknown[]) => unknown>,
   toastError: null as unknown as Mock<(...args: unknown[]) => unknown>,
+  player: { stop: null as unknown as Mock<() => void> },
 }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
 vi.mock('./nuxt-imports', () => ({ navigateTo: (...args: unknown[]) => mock.navigateTo(...args) }))
 vi.mock('vue-sonner', () => ({
-  toast: Object.assign(() => {}, { error: (...args: unknown[]) => mock.toastError(...args) }),
+  toast: Object.assign((...args: unknown[]) => mock.toast(...args), { error: (...args: unknown[]) => mock.toastError(...args) }),
 }))
+vi.mock('~/composables/useSpeechPlayer', () => ({ useSpeechPlayer: () => mock.player }))
 
 interface HarnessState {
   chatId: string
@@ -38,6 +46,7 @@ interface HarnessState {
   usage: MessageUsage | null
   chatCostUsd: number | null
   disabled: boolean
+  previousImages: number
 }
 
 let pinia: ReturnType<typeof createPinia>
@@ -53,6 +62,7 @@ function mountComposer(overrides: Partial<HarnessState> = {}) {
     usage: null,
     chatCostUsd: null,
     disabled: false,
+    previousImages: 0,
     ...overrides,
   })
   const wrapper = mount({
@@ -74,7 +84,9 @@ function mountComposer(overrides: Partial<HarnessState> = {}) {
   const composer = () => wrapper.findComponent(ChatComposer)
   const textarea = () => wrapper.get<HTMLTextAreaElement>(byTestId(testIds.composerInput))
   const send = () => wrapper.find(byTestId(testIds.composerSend))
-  return { wrapper, state, composer, textarea, send }
+  const mic = () => wrapper.get(byTestId(testIds.composerMic))
+  const announcer = () => wrapper.get('[data-slot="composer-announcer"]')
+  return { wrapper, state, composer, textarea, send, mic, announcer }
 }
 
 async function type(textarea: ReturnType<ReturnType<typeof mountComposer>['textarea']>, value: string) {
@@ -101,6 +113,35 @@ function dragEvent(type: string, files: File[]) {
 }
 
 const shortcuts = useShortcuts()
+let media: FakeMedia | null = null
+
+const TRANSCRIPT = 'This is a mock transcription.'
+
+function transcription(text = TRANSCRIPT): AudioTranscription {
+  return { text, language: 'en', durationSec: 1.4, modelRef: 'mock:transcribe' }
+}
+
+/** Settings -> Media: a speech-to-text model is chosen. */
+function configureDictation() {
+  const settings = useSettingsStore()
+  settings.settings = { ...settings.settings!, transcriptionModelRef: 'mock:transcribe' }
+}
+
+/** Moves the clock past the 0.5 s minimum clip (only Date is faked, timers stay real). */
+function recordFor(ms: number) {
+  vi.setSystemTime(Date.now() + ms)
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
+const NO_CAPS = { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false }
+const gptImage = catalogModel({ providerId: 'openai', id: 'gpt-image-1', name: 'GPT Image 1', kind: 'image', contextWindow: null, capabilities: { ...NO_CAPS, vision: true } })
 
 describe('chatComposer', () => {
   beforeAll(() => {
@@ -111,8 +152,11 @@ describe('chatComposer', () => {
     api = createMockApi()
     mock.api = api
     mock.navigateTo = vi.fn()
+    mock.toast = vi.fn()
     mock.toastError = vi.fn()
+    mock.player.stop = vi.fn()
     stubLocalStorage()
+    useImageOptions().set({ n: undefined, aspectRatio: undefined, editPrevious: undefined })
     sessionStorage.clear()
     pinia = createPinia()
     setActivePinia(pinia)
@@ -120,6 +164,10 @@ describe('chatComposer', () => {
   })
 
   afterEach(() => {
+    media?.()
+    media = null
+    shortcuts.setAltEnabled(() => true)
+    vi.useRealTimers()
     disposePinia(pinia)
     document.body.replaceChildren()
     vi.unstubAllGlobals()
@@ -603,6 +651,322 @@ describe('chatComposer', () => {
     await flushPromises()
     expect(bodyAll(byTestId(testIds.modelPicker))).toHaveLength(1)
     wrapper.unmount()
+  })
+
+  describe('dictation', () => {
+    beforeEach(() => {
+      api.audio.transcribe.mockResolvedValue(transcription())
+    })
+
+    it('has no mic without MediaRecorder; with one the mic sits right before Send', async () => {
+      const bare = mountComposer()
+      expect(bare.wrapper.find(byTestId(testIds.composerMic)).exists()).toBe(false)
+      bare.wrapper.unmount()
+
+      media = installFakeMedia()
+      const { wrapper, mic, send } = mountComposer()
+      expect(mic().attributes()).toMatchObject({ 'data-state': 'setup', 'aria-keyshortcuts': 'Alt+V' })
+      expect(mic().element.compareDocumentPosition(send().element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      configureDictation()
+      await nextTick()
+      expect(mic().attributes('data-state')).toBe('idle')
+      wrapper.unmount()
+    })
+
+    it('records, replaces the left tools, holds Send, then inserts the transcript at the saved caret', async () => {
+      media = installFakeMedia()
+      configureDictation()
+      vi.useFakeTimers({ toFake: ['Date'] })
+      const { wrapper, composer, textarea, send, mic, announcer } = mountComposer()
+      await type(textarea(), 'Hello ')
+      await mic().trigger('click')
+      await flushPromises()
+
+      expect(mic().attributes()).toMatchObject({ 'data-state': 'recording', 'aria-pressed': 'true', 'aria-label': 'Stop and transcribe' })
+      expect(mock.player.stop).toHaveBeenCalledTimes(1)
+      expect(media.getUserMedia).toHaveBeenCalledTimes(1)
+      expect(wrapper.get(byTestId(testIds.composerRecordingTime)).text()).toBe('0:00')
+      for (const hidden of [testIds.composerAdd, testIds.modelPickerTrigger, testIds.effortMenuTrigger, testIds.permissionMenuTrigger])
+        expect(wrapper.find(byTestId(hidden)).exists()).toBe(false)
+      expect(send().attributes('aria-disabled')).toBe('true')
+      expect(announcer().text()).toBe('Recording started')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(composer().emitted('submit')).toBeUndefined()
+
+      recordFor(1_500)
+      await mic().trigger('click')
+      await flushPromises()
+      expect(api.audio.transcribe).toHaveBeenCalledTimes(1)
+      const { form } = api.audio.transcribe.mock.calls[0]![0] as { form: FormData }
+      expect((form.get('file') as File).type).toBe('audio/webm;codecs=opus')
+      expect(textarea().element.value).toBe(`Hello ${TRANSCRIPT}`)
+      expect(textarea().element.selectionStart).toBe(`Hello ${TRANSCRIPT}`.length)
+      expect(document.activeElement).toBe(textarea().element)
+      expect(mic().attributes('data-state')).toBe('idle')
+      expect(wrapper.find(byTestId(testIds.composerRecording)).exists()).toBe(false)
+      expect(wrapper.find(byTestId(testIds.composerAdd)).exists()).toBe(true)
+      expect(send().attributes('aria-disabled')).toBeUndefined()
+      expect(announcer().text()).toBe('Transcript added')
+      expect(media.streams[0]!.stopped).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('inserts into the middle of the text where the caret was when the recording started', async () => {
+      media = installFakeMedia()
+      configureDictation()
+      vi.useFakeTimers({ toFake: ['Date'] })
+      const { wrapper, textarea, mic } = mountComposer()
+      await type(textarea(), 'Hello world')
+      textarea().element.setSelectionRange(5, 5)
+      await mic().trigger('click')
+      await flushPromises()
+      recordFor(900)
+      await mic().trigger('click')
+      await flushPromises()
+      expect(textarea().element.value).toBe(`Hello ${TRANSCRIPT} world`)
+      wrapper.unmount()
+    })
+
+    it('shows "Transcribing…" with the stopped timer; a click on the mic then cancels the request', async () => {
+      media = installFakeMedia()
+      configureDictation()
+      vi.useFakeTimers({ toFake: ['Date'] })
+      const pending = deferred<AudioTranscription>()
+      api.audio.transcribe.mockReturnValue(pending.promise)
+      const { wrapper, textarea, mic, announcer } = mountComposer()
+      await mic().trigger('click')
+      await flushPromises()
+      recordFor(12_000)
+      await mic().trigger('click')
+      await flushPromises()
+      expect(mic().attributes()).toMatchObject({ 'data-state': 'transcribing', 'aria-label': 'Cancel transcription' })
+      expect(mic().text()).toContain('Transcribing…')
+      expect(wrapper.get(byTestId(testIds.composerRecording)).attributes('data-state')).toBe('transcribing')
+      expect(wrapper.get(byTestId(testIds.composerRecordingTime)).text()).toBe('0:12')
+      expect(announcer().text()).toBe('Transcribing…')
+
+      await mic().trigger('click')
+      await flushPromises()
+      const { signal } = api.audio.transcribe.mock.calls[0]![0] as { signal: AbortSignal }
+      expect(signal.aborted).toBe(true)
+      expect(mic().attributes('data-state')).toBe('idle')
+      expect(announcer().text()).toBe('Recording canceled')
+      pending.resolve(transcription())
+      await flushPromises()
+      expect(textarea().element.value).toBe('')
+      wrapper.unmount()
+    })
+
+    it('esc cancels a recording before it stops a running response, in the textarea and outside inputs', async () => {
+      media = installFakeMedia()
+      configureDictation()
+      const { wrapper, composer, textarea, mic, announcer } = mountComposer({ status: 'streaming' })
+      await mic().trigger('click')
+      await flushPromises()
+      const escape = press(textarea().element, { key: 'Escape' })
+      await flushPromises()
+      expect(escape.defaultPrevented).toBe(true)
+      expect(mic().attributes('data-state')).toBe('idle')
+      expect(composer().emitted('stop')).toBeUndefined()
+      expect(announcer().text()).toBe('Recording canceled')
+      expect(api.audio.transcribe).not.toHaveBeenCalled()
+      expect(media.streams[0]!.stopped).toBe(true)
+      press(textarea().element, { key: 'Escape' })
+      expect(composer().emitted('stop')).toHaveLength(1)
+
+      await mic().trigger('click')
+      await flushPromises()
+      textarea().element.blur()
+      press(document.body, { key: 'Escape' })
+      await flushPromises()
+      expect(mic().attributes('data-state')).toBe('idle')
+      expect(composer().emitted('stop')).toHaveLength(1)
+      press(document.body, { key: 'Escape' })
+      expect(composer().emitted('stop')).toHaveLength(2)
+      wrapper.unmount()
+    })
+
+    it('cancel of the recording indicator drops the clip and gives the textarea the focus', async () => {
+      media = installFakeMedia()
+      configureDictation()
+      const { wrapper, textarea, mic, announcer } = mountComposer()
+      await mic().trigger('click')
+      await flushPromises()
+      textarea().element.blur()
+      await wrapper.get(byTestId(testIds.composerMicCancel)).trigger('click')
+      await flushPromises()
+      expect(mic().attributes('data-state')).toBe('idle')
+      expect(api.audio.transcribe).not.toHaveBeenCalled()
+      expect(announcer().text()).toBe('Recording canceled')
+      expect(document.activeElement).toBe(textarea().element)
+      wrapper.unmount()
+    })
+
+    it('alt+V starts and stops dictation, and is off with altShortcuts', async () => {
+      media = installFakeMedia()
+      configureDictation()
+      vi.useFakeTimers({ toFake: ['Date'] })
+      const { wrapper, textarea, mic } = mountComposer()
+      expect(shortcuts.list().find(def => def.id === 'composer-dictate')).toMatchObject({ keys: 'alt+code:KeyV', group: 'Composer' })
+      const start = press(textarea().element, { key: '√', code: 'KeyV', altKey: true })
+      await flushPromises()
+      expect(start.defaultPrevented).toBe(true)
+      expect(mic().attributes('data-state')).toBe('recording')
+      recordFor(2_000)
+      press(textarea().element, { key: '√', code: 'KeyV', altKey: true })
+      await flushPromises()
+      expect(textarea().element.value).toBe(TRANSCRIPT)
+
+      const settings = useSettingsStore()
+      shortcuts.setAltEnabled(() => settings.resolved.altShortcuts)
+      settings.settings = { ...settings.settings!, altShortcuts: false }
+      const off = press(textarea().element, { key: '√', code: 'KeyV', altKey: true })
+      await flushPromises()
+      expect(off.defaultPrevented).toBe(false)
+      expect(mic().attributes('data-state')).toBe('idle')
+      wrapper.unmount()
+      expect(shortcuts.list().some(def => def.id === 'composer-dictate' || def.id === 'composer-dictation-cancel')).toBe(false)
+    })
+
+    it('without a speech-to-text model the mic (or Alt+V) opens the setup popover to Settings -> Media', async () => {
+      media = installFakeMedia()
+      const { wrapper, textarea, mic } = mountComposer()
+      await mic().trigger('click')
+      await flushPromises()
+      expect(bodyAll(byTestId(testIds.composerMicSetup))).toHaveLength(1)
+      expect(bodyAll(byTestId(testIds.composerMicSetupLink))[0]!.getAttribute('href')).toBe('/settings/media')
+      expect(media.getUserMedia).not.toHaveBeenCalled()
+      await mic().trigger('click')
+      await flushPromises()
+      expect(bodyAll(byTestId(testIds.composerMicSetup))).toHaveLength(0)
+
+      textarea().element.focus()
+      press(textarea().element, { key: '√', code: 'KeyV', altKey: true })
+      await flushPromises()
+      expect(bodyAll(byTestId(testIds.composerMicSetup))).toHaveLength(1)
+      wrapper.unmount()
+    })
+
+    it('on an insecure origin the mic is disabled and Alt+V is left to the browser', async () => {
+      media = installFakeMedia({ secure: false })
+      configureDictation()
+      const { wrapper, textarea, mic } = mountComposer()
+      expect(mic().attributes()).toMatchObject({ 'data-state': 'insecure', 'aria-disabled': 'true' })
+      await mic().trigger('click')
+      const altV = press(textarea().element, { key: '√', code: 'KeyV', altKey: true })
+      await flushPromises()
+      expect(altV.defaultPrevented).toBe(false)
+      expect(mic().attributes('data-state')).toBe('insecure')
+      wrapper.unmount()
+    })
+
+    it('says "No speech detected" for an empty transcript and keeps the text', async () => {
+      media = installFakeMedia()
+      configureDictation()
+      vi.useFakeTimers({ toFake: ['Date'] })
+      api.audio.transcribe.mockResolvedValue(transcription(''))
+      const { wrapper, textarea, mic } = mountComposer()
+      await type(textarea(), 'Keep me')
+      await mic().trigger('click')
+      await flushPromises()
+      recordFor(1_000)
+      await mic().trigger('click')
+      await flushPromises()
+      expect(mock.toast).toHaveBeenCalledWith('No speech detected')
+      expect(textarea().element.value).toBe('Keep me')
+      wrapper.unmount()
+    })
+
+    it('shows microphone and provider errors as toasts', async () => {
+      media = installFakeMedia({ deny: true })
+      configureDictation()
+      const denied = mountComposer()
+      await denied.mic().trigger('click')
+      await flushPromises()
+      expect(mock.toastError).toHaveBeenCalledWith('Microphone access is blocked. Allow it in the browser\'s site settings.')
+      expect(denied.mic().attributes('data-state')).toBe('idle')
+      denied.wrapper.unmount()
+      media()
+
+      media = installFakeMedia()
+      vi.useFakeTimers({ toFake: ['Date'] })
+      api.audio.transcribe.mockRejectedValue(new HarnessError({ code: 'provider_not_configured', message: 'Add an API key in Settings.', providerId: 'anthropic' }))
+      const failing = mountComposer()
+      await failing.mic().trigger('click')
+      await flushPromises()
+      recordFor(1_000)
+      await failing.mic().trigger('click')
+      await flushPromises()
+      expect(mock.toastError).toHaveBeenLastCalledWith('No API key for Anthropic (Claude)', { description: 'Add an API key in Settings.' })
+      expect(failing.announcer().text()).not.toBe('Recording canceled')
+      failing.wrapper.unmount()
+    })
+
+    it('a chat switch cancels a running dictation', async () => {
+      media = installFakeMedia()
+      configureDictation()
+      const { wrapper, state, mic } = mountComposer()
+      await mic().trigger('click')
+      await flushPromises()
+      state.chatId = chatId(2)
+      await flushPromises()
+      expect(mic().attributes('data-state')).toBe('idle')
+      expect(media.streams[0]!.stopped).toBe(true)
+      wrapper.unmount()
+    })
+  })
+
+  describe('image models', () => {
+    beforeEach(() => {
+      seedStores({ providers: [anthropic, ollama, { ...openai, status: 'connected', modelCount: 2 }], models: [sonnet, haiku, llama, gptImage] })
+    })
+
+    it('shows "Describe an image…", the image options and no context ring; the prompt is required', async () => {
+      const usage = { inputTokens: 80_000, outputTokens: 4_000, contextTokens: 84_000 }
+      const { wrapper, state, textarea, send } = mountComposer({ modelRef: gptImage.ref, usage })
+      expect(textarea().attributes('placeholder')).toBe('Describe an image…')
+      expect(wrapper.find(byTestId(testIds.imageOptionsTrigger)).exists()).toBe(true)
+      expect(wrapper.find(byTestId(testIds.effortMenuTrigger)).exists()).toBe(false)
+      expect(wrapper.find(byTestId(testIds.permissionMenuTrigger)).exists()).toBe(false)
+      expect(wrapper.find(byTestId(testIds.contextRing)).exists()).toBe(false)
+      expect(send().attributes('aria-disabled')).toBe('true')
+      await type(textarea(), '   ')
+      expect(send().attributes('aria-disabled')).toBe('true')
+      await type(textarea(), 'a red fox')
+      expect(send().attributes('aria-disabled')).toBeUndefined()
+      await type(textarea(), 'x'.repeat(32_001))
+      expect(send().attributes('aria-disabled')).toBe('true')
+
+      state.modelRef = sonnet.ref
+      await nextTick()
+      expect(textarea().attributes('placeholder')).toBe('Reply…')
+      expect(wrapper.find(byTestId(testIds.imageOptionsTrigger)).exists()).toBe(false)
+      expect(wrapper.find(byTestId(testIds.contextRing)).exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('stores the picked options for the next request and offers "Edit the previous image" after images', async () => {
+      const { wrapper, state } = mountComposer({ modelRef: gptImage.ref })
+      await wrapper.get(byTestId(testIds.imageOptionsTrigger)).trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+      expect(bodyAll(byTestId(testIds.imageEditPrevious))).toHaveLength(0)
+      bodyAll(byTestId(testIds.imageAspectOption, '[data-value="16:9"]'))[0]!.click()
+      await flushPromises()
+      expect(useImageOptions().options.value).toEqual({ aspectRatio: '16:9' })
+      expect(useImageOptions().forModel(gptImage)).toEqual({ aspectRatio: '16:9' })
+      expect(JSON.parse(localStorage.getItem(IMAGE_OPTIONS_KEY) ?? 'null')).toEqual({ aspectRatio: '16:9' })
+      expect(wrapper.get(byTestId(testIds.imageOptionsTrigger)).text()).toContain('16:9')
+
+      state.previousImages = 2
+      await nextTick()
+      await wrapper.get(byTestId(testIds.imageOptionsTrigger)).trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+      bodyAll(byTestId(testIds.imageEditPrevious))[0]!.click()
+      await flushPromises()
+      expect(useImageOptions().options.value).toEqual({ aspectRatio: '16:9', editPrevious: false })
+      wrapper.unmount()
+    })
   })
 
   it('focuses itself on ui.requestComposerFocus()', async () => {

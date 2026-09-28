@@ -134,6 +134,55 @@ describe('toolPart: 4 KB previews', () => {
   })
 })
 
+describe('toolPart: generate_image', () => {
+  const output = {
+    modelRef: 'mock:image',
+    images: [
+      { fileId: 'file_AAAAAAAAAAAAAAAA', url: '/api/files/file_AAAAAAAAAAAAAAAA', mediaType: 'image/png', name: 'image-1.png' },
+      { fileId: 'file_BBBBBBBBBBBBBBBB', url: '/api/files/file_BBBBBBBBBBBBBBBB', mediaType: 'image/png', name: 'image-2.png' },
+    ],
+    revisedPrompt: 'Mock: a red fox in the snow',
+  }
+  const imagePart = (overrides: Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>) => part({
+    type: 'tool-generate_image',
+    toolCallId: 'call_img',
+    input: { aspectRatio: '16:9', n: 2, prompt: 'A red fox in the snow' },
+    ...overrides,
+  } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+
+  it('is a normal row whose first argument is the prompt, even when other keys come first', () => {
+    const wrapper = mountPart(imagePart({ state: 'input-available' }))
+    expect(row(wrapper).attributes()).toMatchObject({ 'data-tool-name': 'generate_image', 'data-status': 'running' })
+    expect(row(wrapper).text()).toContain('generate_image')
+    expect(row(wrapper).text()).toContain('"A red fox in the snow"')
+    expect(row(wrapper).text()).not.toContain('16:9')
+  })
+
+  it('asks for approval like any tool with policy ask', () => {
+    const wrapper = mountPart(imagePart({ state: 'approval-requested', approval: { id: 'appr_img' } }))
+    expect(row(wrapper).text()).toContain('Needs approval')
+    expect(wrapper.get(`[data-testid="${testIds.toolApproval}"]`).text()).toContain('Allow generate_image?')
+  })
+
+  it('keeps the JSON output (file references) in the expanded body', async () => {
+    const wrapper = mountPart(imagePart({ state: 'output-available', output }))
+    expect(row(wrapper).attributes('data-status')).toBe('done')
+    await row(wrapper).get('button').trigger('click')
+    await flushPromises()
+    const outputBlock = wrapper.get('[data-slot="tool-value"][data-label="output"]')
+    expect(outputBlock.get('pre').text()).toBe(JSON.stringify(output, null, 2))
+    expect(wrapper.find(`[data-testid="${testIds.imageGallery}"]`).exists()).toBe(false)
+  })
+
+  it('ends in an error without an image model', async () => {
+    const wrapper = mountPart(imagePart({ state: 'output-error', errorText: 'Choose an image model in Settings → Media.' }))
+    expect(row(wrapper).attributes('data-status')).toBe('error')
+    await row(wrapper).get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-slot="tool-value"][data-label="error"]').text()).toContain('Choose an image model in Settings → Media.')
+  })
+})
+
 describe('toolPart: approval card', () => {
   const requested = () => part({ state: 'approval-requested', approval: { id: 'appr_1' } })
 

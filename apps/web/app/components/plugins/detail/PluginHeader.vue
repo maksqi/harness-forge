@@ -2,9 +2,10 @@
 // Header of the plugin detail page (docs/UI.md 2.4, 8.7): "← Plugins" (back to the last list state), icon, name,
 // version, source / "Runs code" / state badges; on the right the Enabled switch, Reload and the ⋯ menu (Edit in
 // wizard for wizard-made providers, Export as zip, Uninstall… with "Keep settings and stored data"). Builtins cannot
-// be exported or uninstalled. Reloading a code plugin needs a recent login (ADR-017): on 403 + action `login` the
-// password prompt opens and the reload runs once more. Below the header: the untrusted / error / incompatible banner
-// and the trust dialog (TrustDialog, W3.2).
+// be exported or uninstalled. Reloading a code plugin needs a recent login (ADR-017, useFreshAuth with `required` for
+// code plugins): a session that is not fresh gets the password prompt first, and a 403 + action `login` prompts and
+// runs the reload once more. Below the header: the untrusted / error / incompatible banner and the trust dialog
+// (TrustDialog, W3.2).
 import type { PluginDetail } from '@harness-forge/shared'
 import { ArrowLeftIcon, DownloadIcon, MoreHorizontalIcon, PencilIcon, RotateCwIcon, Trash2Icon } from '@lucide/vue'
 import { computed, ref } from 'vue'
@@ -28,6 +29,7 @@ import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue
 import { errorTitle } from '~/components/common/harness-error'
 import KbdCombo from '~/components/common/KbdCombo.vue'
 import { useApi } from '~/composables/useApi'
+import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { usePluginsStore } from '~/stores/plugins'
 import { downloadResponse } from '~/utils/download'
 import { toHarnessError } from '~/utils/errors'
@@ -39,7 +41,6 @@ import PluginIcon from '../list/PluginIcon.vue'
 import PluginRunsCodeBadge from '../list/PluginRunsCodeBadge.vue'
 import PluginSourceBadge from '../list/PluginSourceBadge.vue'
 import PluginStateBadge from '../list/PluginStateBadge.vue'
-import { isFreshAuthCancelled, useFreshAuth } from './fresh-auth'
 import { canEditInWizard, canExport, canUninstall } from './plugin-detail'
 import PluginStatusBanner from './PluginStatusBanner.vue'
 
@@ -98,7 +99,7 @@ async function reload() {
     return
   reloading.value = true
   try {
-    const next = await freshAuth.run(() => plugins.reload(props.plugin.id))
+    const next = await freshAuth.run(() => plugins.reload(props.plugin.id), { required: props.plugin.kind === 'code' })
     if (next.state === 'active')
       toast.success(`Reloaded ${next.name}`)
     else if (next.state === 'error')

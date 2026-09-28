@@ -116,7 +116,25 @@ const providerDataSchema = z.object({
 })
 
 /**
- * Checks a provider definition: data fields, functions, and for plugins other than builtins the id namespace
+ * Optional functions of `ProviderDefinition`: the members of plugin API 1.0 and the media members of 1.1.0 (ADR-028,
+ * ADR-029). The record makes the compiler check that every name is a member.
+ */
+const OPTIONAL_PROVIDER_FUNCTIONS = {
+  listModels: true,
+  validate: true,
+  reasoning: true,
+  mapError: true,
+  createImageModel: true,
+  imageParams: true,
+  createTranscriptionModel: true,
+  createSpeechModel: true,
+  transcriptionOptions: true,
+} as const satisfies Partial<Record<keyof ProviderDefinition, true>>
+
+/**
+ * Checks a provider definition: data fields, functions (`createLanguageModel` is required; `listModels`, `validate`,
+ * `reasoning`, `mapError`, `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel` and
+ * `transcriptionOptions` must be functions when present), and for plugins other than builtins the id namespace
  * (`<pluginId>` or `<pluginId>-<suffix>`).
  */
 export function validateProviderDefinition(pluginId: string, definition: ProviderDefinition): void {
@@ -128,7 +146,7 @@ export function validateProviderDefinition(pluginId: string, definition: Provide
     throw withPrefix(label, validationError(parsed.error))
   const record = definition as unknown as Record<string, unknown>
   checkFunction(label, record, 'createLanguageModel', true)
-  for (const key of ['listModels', 'validate', 'reasoning', 'mapError'])
+  for (const key of Object.keys(OPTIONAL_PROVIDER_FUNCTIONS))
     checkFunction(label, record, key, false)
   if (!isBuiltinPluginId(pluginId) && !isPluginNamespacedId(pluginId, definition.id))
     throw invalid(`Provider id "${definition.id}" must be "${pluginId}" or start with "${pluginId}-".`, ['id'])

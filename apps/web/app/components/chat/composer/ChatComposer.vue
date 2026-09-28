@@ -1,15 +1,24 @@
 <script setup lang="ts">
-// Chat composer (docs/UI.md 5.8, 7.7-7.12, 10.4), rendered by ChatView (W2.2). A 20px-rounded card on the AI
-// Elements `PromptInput`: attachment chips, an autosizing textarea (1 line up to 40vh), and the toolbar
-// [+ | model | effort] ... [permission | context ring | send/stop]. The composer never calls `useChat`: it emits
-// `submit` with the trimmed text and the uploaded files, `stop`, `edit-last` (↑ in an empty composer) and the
-// v-model updates of model, effort and permission mode. Client slash commands (`/new`, `/model`, `/effort`, `/mode`,
-// `/help`) run here and never reach the server. The unsent text is kept per chat (useComposerDraft).
-import type { ClientCommand, MessageUsage, ReasoningEffort, ToolMode } from '@harness-forge/shared'
+// Chat composer (docs/UI.md 2.11, 5.8, 7.7-7.12, 7.17, 10.4), rendered by ChatView (W2.2). A 20px-rounded card on the
+// AI Elements `PromptInput`: attachment chips, an autosizing textarea (1 line up to 40vh), and the toolbar
+// [+ | model | effort | image options] ... [permission | context ring | mic | send/stop]. The composer never calls
+// `useChat`: it emits `submit` with the trimmed text and the uploaded files, `stop`, `edit-last` (↑ in an empty
+// composer) and the v-model updates of model, effort and permission mode. Client slash commands (`/new`, `/model`,
+// `/effort`, `/mode`, `/help`) run here and never reach the server. The unsent text is kept per chat
+// (useComposerDraft).
+// Phase 6: image models (ADR-028) get the placeholder "Describe an image…", ImageOptionsMenu (useImageOptions; "Edit
+// the previous image" when `previousImages` > 0), no context ring, and Send needs a prompt of at most 32,000
+// characters. Dictation (ADR-029, useVoiceInput): MicButton before Send (click or Alt+V), RecordingIndicator instead of
+// the left tools while recording or transcribing, the transcript inserted at the caret saved when the recording
+// started (insertDictation), Esc cancels a recording or a transcription before it stops a response, starting a
+// recording stops read-aloud, Send stays disabled while voice input runs, and a polite live region announces the
+// dictation steps.
+import type { ClientCommand, ImageOptions, MessageUsage, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
+import type { DictationRange } from './dictation'
 import type { SlashItem } from './slash-commands'
 import type { ChatComposerExposed, ComposerSubmitInput } from './types'
-import { isClientCommand } from '@harness-forge/shared'
+import { isClientCommand, LIMITS } from '@harness-forge/shared'
 import { useMediaQuery } from '@vueuse/core'
 import { computed, nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
@@ -24,7 +33,11 @@ import { useComposerAttachments } from '~/composables/useComposerAttachments'
 import { useComposerDraft } from '~/composables/useComposerDraft'
 import { useComposerDropZone } from '~/composables/useComposerDropZone'
 import { loadComposerCatalog, useComposerModel } from '~/composables/useComposerModel'
-import { useComposerShortcuts } from '~/composables/useComposerShortcuts'
+import { focusInOverlay, useComposerShortcuts } from '~/composables/useComposerShortcuts'
+import { useImageOptions } from '~/composables/useImageOptions'
+import { useShortcuts } from '~/composables/useShortcuts'
+import { useSpeechPlayer } from '~/composables/useSpeechPlayer'
+import { useVoiceInput } from '~/composables/useVoiceInput'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProvidersStore } from '~/stores/providers'
@@ -35,12 +48,16 @@ import { capabilityWarnings, COMPOSER_ACCEPT } from './attachments'
 import ComposerAddMenu from './ComposerAddMenu.vue'
 import ComposerAttachments from './ComposerAttachments.vue'
 import ContextRing from './ContextRing.vue'
+import { DICTATION_SHORTCUT, dictationErrorToast, insertDictation } from './dictation'
 import DropOverlay from './DropOverlay.vue'
 import EffortMenu from './EffortMenu.vue'
-import { resolveModelQuery } from './model-picker'
+import ImageOptionsMenu from './ImageOptionsMenu.vue'
+import MicButton from './MicButton.vue'
+import { isPickerModel, resolveModelQuery } from './model-picker'
 import ModelPicker from './ModelPicker.vue'
 import { navigateTo } from './nuxt-imports'
 import PermissionMenu from './PermissionMenu.vue'
+import RecordingIndicator from './RecordingIndicator.vue'
 import { enterKeyAction, isComposingEvent } from './send-key'
 import SendStopButton from './SendStopButton.vue'
 import { clientSlashItems, filterSlashItems, parseClientCommand, resolveClientCommand, serverSlashItems, slashQueryAt } from './slash-commands'
@@ -57,12 +74,16 @@ const props = withDefaults(defineProps<{
   chatCostUsd?: number | null
   /** E.g. no usable provider: Send stays disabled. */
   disabled?: boolean
+  /** An image model always shows "Describe an image…" instead. */
   placeholder?: string
+  /** Images of the last assistant message on the path; > 0 shows "Edit the previous image" (ImageOptionsMenu). */
+  previousImages?: number
 }>(), {
   usage: null,
   chatCostUsd: null,
   disabled: false,
   placeholder: 'Reply…',
+  previousImages: 0,
 })
 
 const emit = defineEmits<{
@@ -85,6 +106,7 @@ const root = useTemplateRef<HTMLElement>('root')
 const textareaComponent = useTemplateRef<InstanceType<typeof InputGroupTextarea>>('textarea')
 const fileInput = useTemplateRef<HTMLInputElement>('fileInput')
 const slashMenu = useTemplateRef<InstanceType<typeof SlashMenu>>('slashMenu')
+const micButton = useTemplateRef<InstanceType<typeof MicButton>>('micButton')
 const textarea = computed(() => (textareaComponent.value?.$el as HTMLTextAreaElement | undefined) ?? null)
 
 const isTouch = useMediaQuery('(pointer: coarse)')
@@ -106,6 +128,7 @@ const attachmentItems = attachments.items
 const pickerOpen = ref(false)
 const effortOpen = ref(false)
 const permissionOpen = ref(false)
+const imageOptionsOpen = ref(false)
 const pendingSubmit = ref(false)
 const caret = ref(0)
 /** First token at which the user closed the slash menu (Esc); it reopens once the token changes. */
@@ -114,6 +137,41 @@ const slashDismissed = ref<string | null>(null)
 const running = computed(() => props.status === 'submitted' || props.status === 'streaming')
 const sendKey = computed(() => settings.resolved.sendKey)
 const focusTarget = computed(() => (isTouch.value ? null : textarea.value))
+
+// ---------- image models (ADR-028) ----------
+
+const imageOptions = useImageOptions()
+const isImageModel = computed(() => current.model.value?.kind === 'image')
+const effectivePlaceholder = computed(() => (isImageModel.value ? 'Describe an image…' : props.placeholder))
+
+function onImageOptionsChange(value: ImageOptions) {
+  imageOptions.set({ n: value.n, aspectRatio: value.aspectRatio, editPrevious: value.editPrevious })
+}
+
+// ---------- dictation (ADR-029) ----------
+
+const voice = useVoiceInput({ onTranscript: onDictation, onError: onDictationError })
+const voiceState = voice.state
+/** Voice input runs (asking for the microphone, recording or transcribing): Send is disabled, Esc cancels it. */
+const voiceBusy = computed(() => voiceState.value !== 'idle')
+/** The recording indicator replaces the left tools (and the permission menu and context ring step aside). */
+const voiceIndicator = computed(() => voiceState.value === 'recording' || voiceState.value === 'transcribing')
+/** A running dictation finishes even if the setting changes meanwhile. */
+const dictationConfigured = computed(() => settings.resolved.transcriptionModelRef !== null || voiceBusy.value)
+
+/** The caret (or selection) and the text when the recording started: where the transcript goes. */
+let dictationStart: (DictationRange & { text: string }) | null = null
+/** How the current dictation ended, for the live region: a transcript or an error (else it was canceled). */
+let dictationOutcome: 'transcript' | 'error' | null = null
+
+const announcement = ref('')
+/** The polite live region (the same text twice is announced twice). */
+function announce(message: string) {
+  announcement.value = ''
+  void nextTick(() => {
+    announcement.value = message
+  })
+}
 
 // ---------- slash menu ----------
 
@@ -139,6 +197,8 @@ const hasContent = computed(() => text.value.trim() !== '' || attachmentItems.va
 
 /** Why Send is disabled (tooltip), or enabled. Client commands always run. */
 const sendState = computed<{ disabled: boolean, reason: string | null }>(() => {
+  if (voiceBusy.value)
+    return { disabled: true, reason: 'Finish dictation first' }
   if (typedClientCommand.value)
     return { disabled: false, reason: null }
   if (props.disabled)
@@ -151,6 +211,14 @@ const sendState = computed<{ disabled: boolean, reason: string | null }>(() => {
     return { disabled: true, reason: 'Remove or retry the failed uploads' }
   if (warnings.value.length > 0)
     return { disabled: true, reason: warnings.value[0] ?? null }
+  if (isImageModel.value) {
+    // The text is the prompt of an image turn (docs/UI.md 7.7).
+    const prompt = text.value.trim()
+    if (!prompt)
+      return { disabled: true, reason: null }
+    if (prompt.length > LIMITS.imagePromptMaxChars)
+      return { disabled: true, reason: `The prompt can be up to ${LIMITS.imagePromptMaxChars.toLocaleString('en-US')} characters` }
+  }
   if (!hasContent.value)
     return { disabled: true, reason: null }
   return { disabled: false, reason: null }
@@ -211,6 +279,9 @@ function onModelPicked(modelRef: string | null) {
 }
 
 function openMenu(menu: 'model' | 'effort' | 'mode') {
+  // The menus sit in the tools the recording indicator replaces.
+  if (voiceIndicator.value)
+    return
   if (menu === 'model')
     pickerOpen.value = true
   else if (menu === 'effort')
@@ -221,7 +292,7 @@ function openMenu(menu: 'model' | 'effort' | 'mode') {
 
 function runClientCommand(name: ClientCommand, args: string) {
   const action = resolveClientCommand(name, args, {
-    resolveModel: query => resolveModelQuery(query, models.visible, modelRef => models.byRef(modelRef)),
+    resolveModel: query => resolveModelQuery(query, models.visible.filter(isPickerModel), modelRef => models.byRef(modelRef)),
     efforts: current.efforts.value,
     toolsAvailable: current.toolsAvailable.value,
   })
@@ -325,7 +396,7 @@ const drop = useComposerDropZone({
 let submitting = false
 
 async function submit() {
-  if (submitting || running.value)
+  if (submitting || running.value || voiceBusy.value)
     return
   const command = parseClientCommand(text.value)
   if (command) {
@@ -367,6 +438,11 @@ function onKeydown(event: KeyboardEvent) {
     return
   const plain = !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey
   if (event.key === 'Escape') {
+    if (plain && voiceBusy.value) {
+      event.preventDefault()
+      cancelDictation()
+      return
+    }
     if (plain && running.value) {
       event.preventDefault()
       emit('stop')
@@ -388,21 +464,108 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 useComposerShortcuts({
-  openModelPicker: () => {
-    pickerOpen.value = true
-  },
-  openEffortMenu: () => {
-    effortOpen.value = true
-  },
-  openPermissionMenu: () => {
-    permissionOpen.value = true
-  },
+  openModelPicker: () => openMenu('model'),
+  openEffortMenu: () => openMenu('effort'),
+  openPermissionMenu: () => openMenu('mode'),
   stop: () => emit('stop'),
-  canOpenEffort: () => current.efforts.value.length > 0,
-  canOpenPermission: () => current.toolsAvailable.value,
+  canOpenEffort: () => !voiceIndicator.value && current.efforts.value.length > 0,
+  canOpenPermission: () => !voiceIndicator.value && current.toolsAvailable.value,
   canStop: () => running.value,
   sendKey: () => sendKey.value,
 })
+
+// ---------- dictation ----------
+
+function saveDictationStart() {
+  const element = textarea.value
+  const start = element?.selectionStart ?? caret.value
+  dictationStart = { start, end: element?.selectionEnd ?? start, text: text.value }
+}
+
+/** The saved caret, unless the text changed during the recording (then the current caret). */
+function dictationTarget(): DictationRange {
+  if (dictationStart && dictationStart.text === text.value)
+    return dictationStart
+  const element = textarea.value
+  const start = element?.selectionStart ?? text.value.length
+  return { start, end: element?.selectionEnd ?? start }
+}
+
+/** The mic (click or Alt+V): idle -> record, recording -> transcribe, transcribing -> cancel. */
+function onMicToggle() {
+  if (voiceState.value === 'idle') {
+    dictationOutcome = null
+    saveDictationStart()
+    useSpeechPlayer().stop()
+  }
+  void voice.toggle()
+}
+
+function cancelDictation() {
+  if (voiceBusy.value)
+    voice.cancel()
+}
+
+/** Cancel of the recording indicator: the button goes away with it, so the textarea takes the focus (desktop). */
+function onRecordingCancel() {
+  cancelDictation()
+  focusTextarea()
+}
+
+function onDictation(transcript: string) {
+  dictationOutcome = 'transcript'
+  const target = dictationTarget()
+  dictationStart = null
+  if (!transcript) {
+    toast('No speech detected')
+    return
+  }
+  const result = insertDictation(text.value, transcript, target)
+  setTextAndCaret(result.text, result.caret)
+  announce('Transcript added')
+}
+
+function onDictationError(error: unknown) {
+  dictationOutcome = 'error'
+  dictationStart = null
+  const { title, description } = dictationErrorToast(error, providerId => providers.byId(providerId)?.name)
+  if (description)
+    toast.error(title, { description })
+  else
+    toast.error(title)
+}
+
+watch(voiceState, (next, previous) => {
+  if (next === 'recording')
+    announce('Recording started')
+  else if (next === 'transcribing')
+    announce('Transcribing…')
+  else if (next === 'idle' && (previous === 'recording' || previous === 'transcribing') && dictationOutcome === null)
+    announce('Recording canceled')
+})
+
+// Registered after the composer shortcuts: for Esc the latest registration whose `when` passes wins, so a running
+// dictation is canceled before a response is stopped (docs/UI.md 12).
+useShortcuts().register([
+  {
+    id: 'composer-dictate',
+    keys: DICTATION_SHORTCUT,
+    description: 'Dictate',
+    group: 'Composer',
+    alt: true,
+    allowInInputs: true,
+    when: () => voice.supported && voice.secure && (!props.disabled || voiceBusy.value) && !focusInOverlay(),
+    handler: () => micButton.value?.activate(),
+  },
+  {
+    id: 'composer-dictation-cancel',
+    keys: 'escape',
+    description: 'Cancel dictation',
+    group: 'Composer',
+    when: () => voiceBusy.value && !focusInOverlay(),
+    handler: () => cancelDictation(),
+  },
+])
 
 // ---------- lifecycle ----------
 
@@ -410,6 +573,8 @@ watch(() => props.chatId, () => {
   attachments.clear()
   slashDismissed.value = null
   pendingSubmit.value = false
+  cancelDictation()
+  dictationStart = null
   void nextTick(() => {
     syncCaret()
     autosize()
@@ -428,9 +593,7 @@ onMounted(() => {
 const exposed: ChatComposerExposed = {
   focus: () => focusTextarea(),
   setText: (value: string) => setTextAndCaret(value, value.length),
-  openModelPicker: () => {
-    pickerOpen.value = true
-  },
+  openModelPicker: () => openMenu('model'),
 }
 defineExpose(exposed)
 
@@ -493,7 +656,7 @@ const TEXTAREA_CLASS = [
         v-model="text"
         name="message"
         rows="1"
-        :placeholder="placeholder"
+        :placeholder="effectivePlaceholder"
         aria-label="Message"
         aria-autocomplete="list"
         :aria-controls="slashOpen ? slashMenu?.listId : undefined"
@@ -512,31 +675,62 @@ const TEXTAREA_CLASS = [
 
       <AiPromptInputFooter class="cursor-default gap-2 px-2 pt-1 pb-2">
         <AiPromptInputTools class="min-w-0 flex-1 gap-0.5">
-          <ComposerAddMenu :return-focus-to="focusTarget" @attach="openFilePicker" @commands="startCommand" />
-          <ModelPicker
-            v-model:open="pickerOpen"
-            :model-value="modelRef"
-            :return-focus-to="focusTarget"
-            class="min-w-0"
-            @update:model-value="onModelPicked"
+          <RecordingIndicator
+            v-if="voiceIndicator"
+            :elapsed-ms="voice.elapsedMs.value"
+            :transcribing="voiceState === 'transcribing'"
+            @cancel="onRecordingCancel"
           />
-          <EffortMenu
-            v-model:open="effortOpen"
-            :model-value="reasoningEffort"
-            :model-ref="modelRef"
-            :return-focus-to="focusTarget"
-            @update:model-value="value => emit('update:reasoningEffort', value)"
-          />
+          <template v-else>
+            <ComposerAddMenu :return-focus-to="focusTarget" @attach="openFilePicker" @commands="startCommand" />
+            <ModelPicker
+              v-model:open="pickerOpen"
+              :model-value="modelRef"
+              :return-focus-to="focusTarget"
+              class="min-w-0"
+              @update:model-value="onModelPicked"
+            />
+            <EffortMenu
+              v-model:open="effortOpen"
+              :model-value="reasoningEffort"
+              :model-ref="modelRef"
+              :return-focus-to="focusTarget"
+              @update:model-value="value => emit('update:reasoningEffort', value)"
+            />
+            <ImageOptionsMenu
+              v-model:open="imageOptionsOpen"
+              :model-value="imageOptions.options.value"
+              :model-ref="modelRef"
+              :previous-images="previousImages"
+              :return-focus-to="focusTarget"
+              @update:model-value="onImageOptionsChange"
+            />
+          </template>
         </AiPromptInputTools>
         <AiPromptInputTools class="shrink-0 gap-1">
           <PermissionMenu
-            v-if="current.toolsAvailable.value"
+            v-if="current.toolsAvailable.value && !voiceIndicator"
             v-model:open="permissionOpen"
             :model-value="toolMode"
             :return-focus-to="focusTarget"
             @update:model-value="value => emit('update:toolMode', value)"
           />
-          <ContextRing :usage="usage" :context-window="current.contextWindow.value" :chat-cost-usd="chatCostUsd" />
+          <ContextRing
+            v-if="!isImageModel && !voiceIndicator"
+            :usage="usage"
+            :context-window="current.contextWindow.value"
+            :chat-cost-usd="chatCostUsd"
+          />
+          <MicButton
+            v-if="voice.supported"
+            ref="micButton"
+            :state="voiceState"
+            :configured="dictationConfigured"
+            :secure="voice.secure"
+            :level="voice.level.value"
+            :disabled="disabled && !voiceBusy"
+            @toggle="onMicToggle"
+          />
           <SendStopButton
             :running="running"
             :disabled="sendState.disabled"
@@ -551,5 +745,9 @@ const TEXTAREA_CLASS = [
     </AiPromptInput>
 
     <DropOverlay :active="drop.active.value" :rect="drop.rect.value" />
+
+    <p class="sr-only" aria-live="polite" aria-atomic="true" data-slot="composer-announcer">
+      {{ announcement }}
+    </p>
   </div>
 </template>

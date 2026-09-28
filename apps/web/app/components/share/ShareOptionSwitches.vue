@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// What a share link includes besides the text (docs/UI.md 2.8, 7.14): the Attachments, Reasoning and Tool details
-// switches of a link card and of the new-link form. Presentational: emits the changed key; the card sends it as an
-// options-only update, the form keeps it until "Create link".
+// What a share link includes besides the text (docs/UI.md 2.8, 7.14): the "Files and images" (attachments and
+// generated images; option key `attachments`), Reasoning and Tool details switches of a link card and of the new-link
+// form. Presentational: emits the changed key; the card sends it as an options-only update, the form keeps it until
+// "Create link".
 import type { ShareOptions } from '@harness-forge/shared'
 import type { ShareOptionKey } from './share-links'
 import { useId } from 'vue'

@@ -1,10 +1,9 @@
 // Image options of the composer (docs/UI.md 7.7, 11.3; ADR-028): the aspect ratio, the number of images and "Edit the
-// previous image", remembered per browser for every chat in localStorage['hf-image-options'] and sent as the chat
-// request's `imageOptions` only with image-capable models (useChatSession: `forModel(model)`). One state for the whole
-// app: ImageOptionsMenu writes it (v-model), the chat request reads it. Storage that is missing, full or blocked
-// degrades to options kept in memory.
-// Stub (C12, P6-0b): implemented by W6.9 in P6-A; the signature of useImageOptions is frozen. This minimal version is
-// already complete: defaults, validated persistence and the forModel() rules.
+// previous image", remembered per browser for every chat in localStorage['hf-image-options'] (validated with
+// imageOptionsSchema; an invalid stored value is dropped) and sent as the chat request's `imageOptions` only with
+// image-capable models (useChatSession: `forModel(model)`). One state for the whole app: ImageOptionsMenu writes it
+// through ChatComposer (the defaults 1 image, Auto and "edit" are stored as absent keys), the chat request reads it.
+// Storage that is missing, full or blocked degrades to options kept in memory. The signature is frozen since P6-0b.
 import type { CatalogModel, ImageOptions } from '@harness-forge/shared'
 import type { Ref } from 'vue'
 import { imageOptionsSchema } from '@harness-forge/shared'

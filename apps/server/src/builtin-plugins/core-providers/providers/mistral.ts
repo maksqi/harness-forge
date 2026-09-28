@@ -1,11 +1,13 @@
 // Mistral: `@ai-sdk/mistral` (PROVIDERS.md sections 1-6). Only some models accept an effort, and only `none` / `high`.
-import type { ModelInfo, ProviderDefinition, ReasoningEffort } from '@harness-forge/plugin-sdk'
+// Voxtral models serve transcription and speech (PROVIDERS.md section 13).
+import type { ModelInfo, ProviderDefinition, ProviderRuntime, ReasoningEffort } from '@harness-forge/plugin-sdk'
 import type { JsonRecord } from '../lib/json.ts'
 import { createMistral } from '@ai-sdk/mistral'
 import { apiKeyField, apiKeyOf, baseUrlField, baseUrlOf } from '../lib/credentials.ts'
 import { mapProviderError } from '../lib/errors.ts'
 import { requestJson, unexpectedListing } from '../lib/http.ts'
 import { booleanOf, positiveIntOf, recordOf, stringOf } from '../lib/json.ts'
+import { speechSeed, transcriptionLanguage, transcriptionSeed } from '../lib/media.ts'
 import { finalizeListing, modelInfo } from '../lib/models.ts'
 import { ON_OFF_EFFORTS } from '../lib/reasoning.ts'
 
@@ -80,6 +82,10 @@ export function mistralModels(data: readonly unknown[], now: number = Date.now()
   return finalizeListing(models)
 }
 
+function client(rt: ProviderRuntime) {
+  return createMistral({ apiKey: apiKeyOf(rt), baseURL: baseUrlOf(rt, MISTRAL_BASE_URL), fetch: rt.fetch })
+}
+
 export const mistralProvider: ProviderDefinition = {
   id: 'mistral',
   name: 'Mistral',
@@ -106,9 +112,12 @@ export const mistralProvider: ProviderDefinition = {
       capabilities: { tools: true, vision: true, reasoning: false },
       cost: { input: 0.5, output: 1.5 },
     },
+    transcriptionSeed('voxtral-mini-latest', 'Voxtral Mini (latest)'),
+    // No voice list is known: the voice field takes a voice id from the Mistral console.
+    speechSeed('voxtral-mini-tts-latest', 'Voxtral Mini TTS (latest)'),
   ],
   createLanguageModel(modelId, rt) {
-    return createMistral({ apiKey: apiKeyOf(rt), baseURL: baseUrlOf(rt, MISTRAL_BASE_URL), fetch: rt.fetch })(modelId)
+    return client(rt)(modelId)
   },
   async listModels(rt) {
     const body = recordOf(await requestJson(rt, `${baseUrlOf(rt, MISTRAL_BASE_URL)}/models`, {
@@ -126,5 +135,15 @@ export const mistralProvider: ProviderDefinition = {
   },
   mapError(err) {
     return mapProviderError(err, PROVIDER)
+  },
+  createTranscriptionModel(modelId, rt) {
+    return client(rt).transcription(modelId)
+  },
+  createSpeechModel(modelId, rt) {
+    return client(rt).speech(modelId)
+  },
+  transcriptionOptions(hints) {
+    const language = transcriptionLanguage(hints)
+    return language === undefined ? undefined : { mistral: { language } }
   },
 }

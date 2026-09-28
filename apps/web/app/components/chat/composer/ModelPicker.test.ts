@@ -7,6 +7,7 @@ import { h, nextTick, reactive } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useModelsStore } from '~/stores/models'
 import { testIds } from '~/utils/testids'
+import { catalogModel } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { anthropic, bodyAll, byTestId, haiku, llama, NuxtLinkStub, ollama, openai, seedStores, sonnet } from './composer-test-utils'
@@ -115,6 +116,48 @@ describe('modelPicker', () => {
     const current = bodyAll(byTestId(testIds.modelPickerItem, `[data-model-ref="${sonnet.ref}"]`))
     expect(current.every(item => item.dataset.checked === 'true')).toBe(true)
     expect(current[0]!.getAttribute('aria-label')).toBe('Claude Sonnet 5, Anthropic (Claude), vision, tools, reasoning, 200K context')
+    wrapper.unmount()
+  })
+
+  it('lists the image models of connected providers in an "Image models" group after the providers', async () => {
+    const IMAGE_CAPS = { tools: false, vision: true, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false }
+    const gptImage = catalogModel({ providerId: 'openai', id: 'gpt-image-1', name: 'GPT Image 1', kind: 'image', contextWindow: null, capabilities: IMAGE_CAPS })
+    const imageChat = catalogModel({ providerId: 'openai', id: 'gemini-like-image', name: 'Painter Chat', capabilities: { ...IMAGE_CAPS, imageOutput: true } })
+    const tts = catalogModel({ providerId: 'openai', id: 'gpt-4o-mini-tts', name: 'GPT-4o mini TTS', kind: 'speech' })
+    const hiddenImage = catalogModel({ providerId: 'openai', id: 'dall-e-3', name: 'DALL-E 3', kind: 'image', hidden: true })
+    seedStores({
+      providers: [anthropic, ollama, { ...openai, status: 'connected', modelCount: 4 }],
+      models: [sonnet, haiku, llama, gptImage, imageChat, tts, hiddenImage],
+    })
+    const { wrapper } = mountPicker({ modelValue: gptImage.ref, open: true })
+    await flushPromises()
+    expect(groups()).toEqual([
+      { value: 'favorites', refs: [haiku.ref] },
+      { value: 'anthropic', refs: [sonnet.ref, haiku.ref] },
+      { value: 'ollama', refs: [llama.ref] },
+      { value: 'openai', refs: [imageChat.ref] },
+      { value: 'images', refs: [gptImage.ref] },
+    ])
+    const imagesGroup = bodyAll(byTestId(testIds.modelPickerGroup, '[data-value="images"]'))[0]!
+    expect(imagesGroup.textContent).toContain('Image models')
+    const item = bodyAll(byTestId(testIds.modelPickerItem, `[data-model-ref="${gptImage.ref}"]`))[0]!
+    expect(item.dataset.checked).toBe('true')
+    expect(item.querySelector('[data-slot="provider-icon"]')).not.toBeNull()
+    expect(item.getAttribute('aria-label')).toBe('GPT Image 1, OpenAI, vision')
+    // The image-output badge of a chat model (ModelCaps).
+    const chatItem = bodyAll(byTestId(testIds.modelPickerItem, `[data-model-ref="${imageChat.ref}"]`))[0]!
+    expect(chatItem.querySelector('[data-value="imageOutput"]')?.textContent).toContain('Image output')
+    expect(document.body.textContent).not.toContain('GPT-4o mini TTS')
+    expect(document.body.textContent).not.toContain('DALL-E 3')
+
+    await search('gpt image')
+    expect(groups()).toEqual([{ value: 'images', refs: [gptImage.ref] }])
+    await search('openai')
+    expect(groups()).toEqual([{ value: 'openai', refs: [imageChat.ref] }, { value: 'images', refs: [gptImage.ref] }])
+
+    bodyAll(byTestId(testIds.modelPickerItem, `[data-model-ref="${gptImage.ref}"]`))[0]!.click()
+    await flushPromises()
+    expect(useModelsStore().recentRefs[0]).toBe(gptImage.ref)
     wrapper.unmount()
   })
 

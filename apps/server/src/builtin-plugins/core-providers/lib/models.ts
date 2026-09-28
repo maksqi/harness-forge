@@ -1,19 +1,23 @@
 // Helpers that turn vendor model listings into `ModelInfo` objects that pass `modelInfoSchema`.
-import type { ModelInfo, ReasoningEffort } from '@harness-forge/plugin-sdk'
+import type { ModelInfo, ModelKind, ReasoningEffort } from '@harness-forge/plugin-sdk'
 import { modelInfoSchema } from '@harness-forge/plugin-sdk'
 
-type Capability = 'tools' | 'vision' | 'pdf' | 'reasoning' | 'structuredOutput'
+type Capability = 'tools' | 'vision' | 'pdf' | 'reasoning' | 'structuredOutput' | 'imageOutput'
 type CostKey = 'input' | 'output' | 'cacheRead' | 'cacheWrite'
 
 /** A `ModelInfo` draft whose unknown fields may be `undefined` (they are dropped). */
 export interface ModelDraft {
   id: string
   name?: string
+  /** An explicit kind wins over the catalog's `classify()`; absent = classified by the catalog. */
+  kind?: ModelKind
   contextWindow?: number
   maxOutputTokens?: number
   capabilities?: Partial<Record<Capability, boolean | undefined>>
   reasoningEfforts?: readonly ReasoningEffort[]
   cost?: Partial<Record<CostKey, number | undefined>>
+  /** `speech` models: voice names to suggest; an empty list is dropped. */
+  voices?: readonly string[]
 }
 
 /** Display order of the effort menu. */
@@ -37,6 +41,8 @@ export function modelInfo(draft: ModelDraft): ModelInfo {
   const name = draft.name?.trim().slice(0, 256)
   if (name && name !== draft.id)
     info.name = name
+  if (draft.kind !== undefined)
+    info.kind = draft.kind
   if (draft.contextWindow !== undefined)
     info.contextWindow = draft.contextWindow
   if (draft.maxOutputTokens !== undefined)
@@ -53,6 +59,8 @@ export function modelInfo(draft: ModelDraft): ModelInfo {
     cost[key] = value
   if (Object.keys(cost).length > 0)
     info.cost = cost
+  if (draft.voices !== undefined && draft.voices.length > 0)
+    info.voices = [...draft.voices]
   return info
 }
 

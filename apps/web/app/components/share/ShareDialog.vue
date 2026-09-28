@@ -3,10 +3,11 @@
 // links (newest first, skeleton cards meanwhile, "Try again" on a failure); each card copies its absolute URL, changes
 // its include options (options only, applied to the link at once), its expiry, updates its snapshot (the URL never
 // changes) and revokes it after a confirmation; the form below creates a link (at most 20 per chat). Creating and
-// changing a link are fresh-auth requests (the password prompt comes first when the session is not fresh, and once
-// more after a 403 `login`); revoking is not. Without a password the dialog warns that links open only where the
-// app is reachable without one. Focus: "Create link" when the chat has no link, else the first card's "Copy link";
-// a new link's URL is focused and selected; closing returns focus to the control that opened the dialog.
+// changing a link are fresh-auth requests (useFreshAuth with `required`: the password prompt comes first when the
+// session is not fresh, and once more after a 403 `login`); revoking is not. Without a password the dialog warns that
+// links open only where the app is reachable without one. Focus: "Create link" when the chat has no link, else the
+// first card's "Copy link"; a new link's URL is focused and selected; closing returns focus to the control that opened
+// the dialog.
 // Contract (docs/UI.md 10.4): no props, no emits; mounted once by layouts/default.vue; open while ui.shareChatId is
 // set (ui.openShare(chatId) from "Share…" in the chat menus); closing calls ui.closeShare().
 import type { ShareOptions, ShareSummary, ShareUpdate } from '@harness-forge/shared'
@@ -22,11 +23,11 @@ import { Spinner } from '@/components/ui/spinner'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
 import { useApi } from '~/composables/useApi'
+import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { useAuthStore } from '~/stores/auth'
 import { useUiStore } from '~/stores/ui'
 import { hasErrorCode } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import { isFreshAuthCancelled, useShareFreshAuth } from './fresh-auth'
 import {
   DEFAULT_SHARE_OPTIONS,
   expiresAtFor,
@@ -42,7 +43,12 @@ import ShareOptionSwitches from './ShareOptionSwitches.vue'
 const ui = useUiStore()
 const auth = useAuthStore()
 const api = useApi()
-const { open: passwordOpen, pending: passwordPending, error: passwordError, run: withFreshAuth, submit: submitPassword, setOpen: setPasswordOpen } = useShareFreshAuth()
+const { open: passwordOpen, pending: passwordPending, error: passwordError, run, submit: submitPassword, setOpen: setPasswordOpen, cancel: cancelPassword } = useFreshAuth()
+
+/** Creating and changing a link always need fresh auth: the prompt comes first when the session is not fresh. */
+function withFreshAuth<T>(task: () => Promise<T>): Promise<T> {
+  return run(task, { required: true })
+}
 
 const open = computed({
   get: () => ui.shareChatId !== null,
@@ -102,7 +108,7 @@ watch(() => ui.shareChatId, (chatId, previous) => {
   session += 1
   if (!chatId) {
     // Closing cancels a waiting password prompt; the content keeps its state while it animates out.
-    setPasswordOpen(false)
+    cancelPassword()
     return
   }
   if (!previous)

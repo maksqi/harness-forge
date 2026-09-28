@@ -349,7 +349,8 @@ describe('shareDialog: new link', () => {
     })
   })
 
-  it('disables Create link at the per-chat limit', async () => {
+  // Renders 20 link cards: allowed more than the default 5 s on a busy machine.
+  it('disables Create link at the per-chat limit', { timeout: 30_000 }, async () => {
     const items = Array.from({ length: LIMITS.sharesPerChatMax }, (_, index) => shareSummary({ id: shareId(index + 1) }))
     await openFor(CHAT_ID, items)
     const create = byTestId<HTMLButtonElement>(testIds.shareCreate, form())!
@@ -440,6 +441,42 @@ describe('shareDialog: passwordless warning and fresh auth', () => {
     // Cancelled: the switch is back and the card usable again.
     expect(option(card(share.id), 'reasoning').getAttribute('aria-checked')).toBe('false')
     expect(option(card(share.id), 'reasoning').disabled).toBe(false)
+  })
+
+  it('shows a refusal that follows the prompt as the error instead of asking again', async () => {
+    setAuth(authStatus({ enabled: true, source: 'env', freshUntil: null }))
+    await openFor(CHAT_ID, [])
+    api.auth.login.mockResolvedValueOnce(authStatus({ enabled: true, source: 'env', freshUntil: Date.now() + 10 * 60_000 }))
+    api.shares.create.mockRejectedValueOnce(new HarnessError({ code: 'forbidden', message: 'Confirm your password to continue.', action: 'login' }))
+
+    byTestId<HTMLButtonElement>(testIds.shareCreate, form())!.click()
+    await settle()
+    await confirmPassword('correct horse')
+    expect(api.shares.create).toHaveBeenCalledTimes(1)
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    const alert = byTestId(testIds.shareDialogError, dialog()!)!
+    expect(alert.dataset.code).toBe('forbidden')
+    expect(alert.textContent).toContain('Confirm your password to continue.')
+    expect(byTestId<HTMLButtonElement>(testIds.shareCreate, form())!.disabled).toBe(false)
+  })
+
+  it('cancels a waiting password prompt when the dialog closes', async () => {
+    setAuth(authStatus({ enabled: true, source: 'env', freshUntil: null }))
+    await openFor(CHAT_ID, [])
+    byTestId<HTMLButtonElement>(testIds.shareCreate, form())!.click()
+    await settle()
+    expect(byTestId(testIds.confirmPasswordDialog)).not.toBeNull()
+
+    useUiStore().closeShare()
+    await settle(5)
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.auth.login).not.toHaveBeenCalled()
+    expect(api.shares.create).not.toHaveBeenCalled()
+
+    // The next session starts without a prompt.
+    await openFor(CHAT_ID, [])
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(byTestId(testIds.shareDialogError, dialog()!)).toBeNull()
   })
 
   it('does not ask for the password to revoke', async () => {

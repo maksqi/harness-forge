@@ -1,9 +1,11 @@
 <script setup lang="ts">
-// Action row under a message (docs/UI.md 7.5): Copy, Regenerate (every finished assistant message) or Edit (user
-// messages), both hidden while the transcript is busy through its `data-busy`, then the meta slot. Fixed 28px height
-// (40px touch targets on coarse pointers) and always laid out, so revealing it never moves the transcript. The version
-// switcher sits before this row (ChatMessage), outside its hover fade.
-import { PencilIcon, RotateCcwIcon } from '@lucide/vue'
+// Action row under a message (docs/UI.md 7.5, 10.4): Copy (hidden with `canCopy` false: a reply without text), the
+// `after-copy` slot (Read aloud), Regenerate (every finished assistant message) or Edit (user messages), both hidden
+// while the transcript is busy through its `data-busy`, Delete this version (a message with versions while nothing
+// runs), then the meta slot. Fixed 28px height (40px touch targets on coarse pointers) and always laid out, so
+// revealing it never moves the transcript. The version switcher sits before this row (ChatMessage), outside its hover
+// fade.
+import { PencilIcon, RotateCcwIcon, Trash2Icon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -13,18 +15,36 @@ import { testIds } from '~/utils/testids'
 withDefaults(defineProps<{
   /** Text copied by "Copy" (resolved on click). */
   copyText: () => string
+  /** False hides Copy (a reply without text, e.g. images only). */
+  canCopy?: boolean
   canRegenerate?: boolean
   canEdit?: boolean
+  /** "Delete this version": the message has versions and nothing runs. */
+  canDeleteVersion?: boolean
   align?: 'start' | 'end'
 }>(), {
+  canCopy: true,
   canRegenerate: false,
   canEdit: false,
+  canDeleteVersion: false,
   align: 'start',
 })
 
-const emit = defineEmits<{ regenerate: [], edit: [] }>()
+const emit = defineEmits<{ 'regenerate': [], 'edit': [], 'delete-version': [] }>()
 
-defineSlots<{ default?: () => any }>()
+defineSlots<{
+  /** Right after Copy (ReadAloudButton). */
+  'after-copy'?: () => any
+  /** The meta (MessageMeta). */
+  'default'?: () => any
+}>()
+
+const iconButtonClass = 'text-muted-foreground hover:text-foreground pointer-coarse:size-10 group-data-[busy=true]/transcript:hidden'
+
+function deleteVersion() {
+  // eslint-disable-next-line vue/custom-event-name-casing -- contract name from docs/UI.md 10.4
+  emit('delete-version')
+}
 </script>
 
 <template>
@@ -32,7 +52,8 @@ defineSlots<{ default?: () => any }>()
     data-slot="message-actions"
     :class="cn('flex h-7 min-w-0 items-center gap-0.5 text-muted-foreground pointer-coarse:h-10', align === 'end' && 'justify-end')"
   >
-    <CopyButton :text="copyText" :data-testid="testIds.messageCopy" class="pointer-coarse:size-10" />
+    <CopyButton v-if="canCopy" :text="copyText" :data-testid="testIds.messageCopy" class="pointer-coarse:size-10" />
+    <slot name="after-copy" />
     <Tooltip v-if="canRegenerate">
       <TooltipTrigger as-child>
         <Button
@@ -41,7 +62,7 @@ defineSlots<{ default?: () => any }>()
           size="icon-xs"
           aria-label="Regenerate"
           :data-testid="testIds.messageRegenerate"
-          class="text-muted-foreground hover:text-foreground pointer-coarse:size-10 group-data-[busy=true]/transcript:hidden"
+          :class="iconButtonClass"
           @click="emit('regenerate')"
         >
           <RotateCcwIcon class="size-3.5" />
@@ -57,13 +78,29 @@ defineSlots<{ default?: () => any }>()
           size="icon-xs"
           aria-label="Edit"
           :data-testid="testIds.messageEdit"
-          class="text-muted-foreground hover:text-foreground pointer-coarse:size-10 group-data-[busy=true]/transcript:hidden"
+          :class="iconButtonClass"
           @click="emit('edit')"
         >
           <PencilIcon class="size-3.5" />
         </Button>
       </TooltipTrigger>
       <TooltipContent>Edit</TooltipContent>
+    </Tooltip>
+    <Tooltip v-if="canDeleteVersion">
+      <TooltipTrigger as-child>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label="Delete this version"
+          :data-testid="testIds.messageDeleteVersion"
+          :class="iconButtonClass"
+          @click="deleteVersion"
+        >
+          <Trash2Icon class="size-3.5" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>Delete this version</TooltipContent>
     </Tooltip>
     <slot />
   </div>

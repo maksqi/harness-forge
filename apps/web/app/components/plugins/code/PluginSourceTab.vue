@@ -3,10 +3,12 @@
 // log panel, in resizable panels (below lg: a file select above the editor, the build panel starts collapsed).
 // Mod+S saves the active file (`PUT /api/plugins/:id/files/*` with its etag); "Build & reload" saves dirty files and
 // runs `POST /api/plugins/:id/build`, whose diagnostics become editor lint markers and problems in the panel. Writes of
-// code plugins and builds need fresh auth: a `403 forbidden` + `action: 'login'` opens ConfirmPasswordDialog and the
-// request runs again (the server then re-pins a `created` plugin, so saves never make it untrusted). Unsaved edits
-// survive tab switches (the workspace is cached per plugin); leaving the plugin with unsaved edits asks first.
+// code plugins and builds need fresh auth (useFreshAuth, `required` for code plugins): a session that is not fresh gets
+// ConfirmPasswordDialog first, and a `403 forbidden` + `action: 'login'` prompts and runs the request once more (the
+// server then re-pins a `created` plugin, so saves never make it untrusted). Unsaved edits survive tab switches (the
+// workspace is cached per plugin); leaving the plugin with unsaved edits asks first.
 import type { BuildDiagnostic } from '@harness-forge/shared'
+import type { RequestRunner } from './source-workspace'
 import type { SourceTabItem } from './SourceEditorTabs.vue'
 import { FileCodeIcon, FilePlusIcon, HammerIcon, LockIcon, MoreHorizontalIcon, PencilIcon, SaveIcon, TerminalIcon, Trash2Icon } from '@lucide/vue'
 import { useMediaQuery } from '@vueuse/core'
@@ -27,12 +29,12 @@ import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue
 import { errorTitle } from '~/components/common/harness-error'
 import KbdCombo from '~/components/common/KbdCombo.vue'
 import { useApi } from '~/composables/useApi'
+import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { usePluginsStore } from '~/stores/plugins'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
 import BuildLogPanel from './BuildLogPanel.vue'
-import { isFreshAuthCancelled, useFreshAuth } from './fresh-auth'
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useColorMode } from './nuxt-imports'
 import { baseName, clockTime, existingPaths, folderOf, problemsText } from './source-files'
 import { getSourceWorkspace, releaseSourceWorkspace } from './source-workspace'
@@ -66,10 +68,14 @@ const editor = useTemplateRef<InstanceType<typeof SourceEditor>>('editor')
 
 // ---------- workspace ----------
 
-const workspace = computed(() => getSourceWorkspace(props.pluginId, api))
-let detach = workspace.value.attach(freshAuth.run)
-
 const detail = computed(() => plugins.details[props.pluginId])
+/** Writes and builds of a code plugin always need fresh auth: the prompt comes first when the session is not fresh. */
+const isCode = computed(() => detail.value?.kind === 'code')
+const freshAuthRunner: RequestRunner = task => freshAuth.run(task, { required: isCode.value })
+
+const workspace = computed(() => getSourceWorkspace(props.pluginId, api))
+let detach = workspace.value.attach(freshAuthRunner)
+
 const isReadonly = computed(() => props.readonly || detail.value?.editable === false)
 const readonlyText = computed(() => {
   const source = detail.value?.source
@@ -139,7 +145,7 @@ onMounted(() => {
 watch(workspace, (next, previous) => {
   detach()
   releaseSourceWorkspace(previous.pluginId)
-  detach = next.attach(freshAuth.run)
+  detach = next.attach(freshAuthRunner)
   if (!plugins.details[next.pluginId])
     void plugins.fetchOne(next.pluginId).catch(() => {})
   void init()

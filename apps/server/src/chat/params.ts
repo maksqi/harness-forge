@@ -1,10 +1,11 @@
 // Call parameters of a run (ARCHITECTURE.md 6.1, PLUGINS.md 9 "Hooks"): global + chat instructions, the portable
-// `reasoning` level and `providerOptions` from `provider.reasoning()`, then the `chat.params` and `chat.headers` hooks.
-// Hook output is plugin data: every value is checked before it reaches `streamText`.
+// `reasoning` level and `providerOptions` from `provider.reasoning()` (deep-merged over the `imageParams()` provider
+// options of a chat model with image output, ADR-028), then the `chat.params` and `chat.headers` hooks. Provider and
+// hook output is plugin data: every value is checked before it reaches `streamText`.
 import type { ProviderOptions, ReasoningLevel, ReasoningParams } from '@harness-forge/plugin-sdk'
-import type { ReasoningEffort, ToolMode } from '@harness-forge/shared'
+import type { ImageAspectRatio, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
-import type { ResolvedModel } from '../providers/types.ts'
+import type { ResolvedModelBase } from '../providers/types.ts'
 import type { Registry } from '../registry/types.ts'
 import { HTTP_HEADER_NAME_PATTERN } from '@harness-forge/shared'
 
@@ -39,6 +40,46 @@ function isProviderOptions(value: unknown): value is ProviderOptions {
   return isPlainObject(value) && Object.values(value).every(isPlainObject)
 }
 
+const UNSAFE_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype'])
+
+function deepMerge(base: Record<string, unknown>, override: Record<string, unknown>): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...base }
+  for (const [key, value] of Object.entries(override)) {
+    if (UNSAFE_KEYS.has(key))
+      continue
+    const current = merged[key]
+    merged[key] = isPlainObject(current) && isPlainObject(value) ? deepMerge(current, value) : value
+  }
+  return merged
+}
+
+/** `override` deep-merged over `base` (objects merge key by key; arrays and other values of `override` win). */
+export function mergeProviderOptions(base: ProviderOptions, override: ProviderOptions): ProviderOptions {
+  return deepMerge(base, override) as ProviderOptions
+}
+
+/**
+ * The provider options of `provider.imageParams({ n: 1, aspectRatio, inputs: 0 }, model)` for a chat model with
+ * `capabilities.imageOutput` (ADR-028, e.g. `{ google: { responseModalities: ['TEXT', 'IMAGE'] } }`). A throw or an
+ * invalid result is ignored (undefined).
+ */
+export function providerImageOptions(resolved: ResolvedModelBase, aspectRatio: ImageAspectRatio | undefined, logger: Logger): ProviderOptions | undefined {
+  const definition = resolved.provider.definition
+  if (definition.imageParams === undefined)
+    return undefined
+  let value: unknown
+  try {
+    value = definition.imageParams({ n: 1, inputs: 0, ...(aspectRatio === undefined ? {} : { aspectRatio }) }, resolved.info)
+  }
+  catch (error) {
+    logger.warn('provider imageParams() failed', { providerId: resolved.providerId, err: error })
+    return undefined
+  }
+  if (!isPlainObject(value) || !isProviderOptions(value.providerOptions))
+    return undefined
+  return value.providerOptions
+}
+
 function isReasoningLevel(value: unknown): value is ReasoningLevel {
   return typeof value === 'string' && REASONING_LEVELS.has(value)
 }
@@ -51,7 +92,7 @@ function positiveInt(value: unknown): number | undefined {
  * `provider.reasoning(effort, model)` when the effort applies: not `auto`, the model reasons and the effort is offered
  * for it (an effort that is not offered is treated as `auto`). A throw or an invalid result is ignored.
  */
-export function providerReasoning(resolved: ResolvedModel, effort: ReasoningEffort, logger: Logger): ReasoningParams | undefined {
+export function providerReasoning(resolved: ResolvedModelBase, effort: ReasoningEffort, logger: Logger): ReasoningParams | undefined {
   if (effort === 'auto' || !resolved.entry.capabilities.reasoning || !resolved.entry.reasoningEfforts.includes(effort))
     return undefined
   const definition = resolved.provider.definition
@@ -81,7 +122,9 @@ export function providerReasoning(resolved: ResolvedModel, effort: ReasoningEffo
 export interface RunParamsInput {
   chatId: string
   modelRef: string
-  resolved: ResolvedModel
+  resolved: ResolvedModelBase
+  /** `providerImageOptions` of a chat model with image output: the base the reasoning options are merged over. */
+  imageProviderOptions?: ProviderOptions
   reasoningEffort: ReasoningEffort
   toolMode: ToolMode
   globalInstructions: string
@@ -140,7 +183,7 @@ export async function buildRunParams(input: RunParamsInput): Promise<RunParams> 
   const original: ParamsDraft = {
     instructions: joinInstructions(input.globalInstructions, input.chatInstructions),
     maxSteps: input.maxSteps,
-    providerOptions: reasoning?.providerOptions ?? {},
+    providerOptions: mergeProviderOptions(input.imageProviderOptions ?? {}, reasoning?.providerOptions ?? {}),
     ...(reasoning?.reasoning === undefined ? {} : { reasoning: reasoning.reasoning }),
     ...(reasoning?.maxOutputTokens === undefined ? {} : { maxOutputTokens: reasoning.maxOutputTokens }),
   }

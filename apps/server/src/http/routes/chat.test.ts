@@ -1,6 +1,7 @@
 import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider'
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type { ChatDetail, HarnessErrorInit, HarnessUIMessage, McpServer, ServerEvent } from '@harness-forge/shared'
+import type { MediaTestApp } from '../../chat/testing.ts'
 import type { McpManager, ToolPref, ToolService } from '../../mcp/types.ts'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import { Buffer } from 'node:buffer'
@@ -14,6 +15,7 @@ import { SUPERSEDED_REASON } from '../../chat/history.ts'
 import { createChatRunnerWith } from '../../chat/index.ts'
 import {
   chatBody,
+  createMediaTestApp,
   messageText,
   nextEvent,
   postChat,
@@ -1201,5 +1203,144 @@ describe('shutdown', () => {
     finally {
       await app.close()
     }
+  })
+})
+
+describe('pOST /api/chat: image options and image turns (ADR-028)', () => {
+  let media: MediaTestApp
+  let chat = 700
+
+  function mediaChatId(): string {
+    chat += 1
+    return testChatId(chat)
+  }
+
+  async function mediaDetail(chatId: string): Promise<ChatDetail> {
+    return chatDetailSchema.parse(await (await media.request(`/api/chats/${chatId}`)).json())
+  }
+
+  /** A request refused before streaming: 400 validation_error on `path`, nothing stored, no run started. */
+  async function refused(body: unknown, path: (string | number)[]): Promise<HarnessErrorInit> {
+    media.events.length = 0
+    const response = await postChat(media, body)
+    expect(response.status, JSON.stringify(body).slice(0, 300)).toBe(400)
+    expect(response.headers.get('content-type')).toContain('application/json')
+    const error = await errorOf(response)
+    expect(error.code).toBe('validation_error')
+    expect((error.details as { issues: { path: unknown[] }[] }).issues[0]?.path).toEqual(path)
+    const chatId = (body as { chatId: string }).chatId
+    expect(media.events.some(event => event.type === 'run.started' && event.data.chatId === chatId)).toBe(false)
+    expect(media.deps.runs.hasRun(chatId)).toBe(false)
+    return error
+  }
+
+  beforeAll(async () => {
+    media = await createMediaTestApp()
+  })
+
+  afterAll(async () => {
+    await media.close()
+  })
+
+  it('refuses imageOptions for a model that generates no images (mock:echo)', async () => {
+    const chatId = mediaChatId()
+    for (const imageOptions of [{}, { aspectRatio: '1:1' as const }, { n: 1 }, { editPrevious: true }])
+      await refused(chatBody(chatId, 'hello', { imageOptions }), ['imageOptions'])
+    expect((await mediaDetail(chatId)).messages).toEqual([])
+    // Without imageOptions the same request streams.
+    const ok = await postChat(media, chatBody(chatId, 'hello'))
+    expect(ok.status).toBe(200)
+    await readSse(ok)
+    await runnerOf(media).idle()
+  })
+
+  it('takes only the aspect ratio for a chat model with image output', async () => {
+    const chatId = mediaChatId()
+    const error = await refused(chatBody(chatId, 'a fox', { modelRef: 'mock:image-chat', imageOptions: { n: 2 } }), ['imageOptions'])
+    expect(error.message).toContain('aspect ratio')
+    await refused(chatBody(chatId, 'a fox', { modelRef: 'mock:image-chat', imageOptions: { editPrevious: false } }), ['imageOptions'])
+    await refused(chatBody(chatId, 'a fox', { modelRef: 'mock:image-chat', imageOptions: { n: 1, aspectRatio: '16:9' } }), ['imageOptions'])
+    const ok = await postChat(media, chatBody(chatId, 'a fox', { modelRef: 'mock:image-chat', imageOptions: { aspectRatio: '16:9' } }))
+    expect(ok.status).toBe(200)
+    expect(streamedText((await readSse(ok)).chunks)).toBe('Image for: a fox')
+    await runnerOf(media).idle()
+  })
+
+  it('validates the image options of an image model (strict schema, 1-4 images, known aspect ratios)', async () => {
+    const chatId = mediaChatId()
+    for (const imageOptions of [{ n: 5 }, { n: 0 }, { n: 1.5 }, { aspectRatio: '5:4' }, { quality: 'high' }, { editPrevious: 'yes' }]) {
+      const response = await postChat(media, { ...chatBody(chatId, 'a fox', { modelRef: 'mock:image' }), imageOptions })
+      expect(response.status, JSON.stringify(imageOptions)).toBe(400)
+      expect((await errorOf(response)).code).toBe('validation_error')
+    }
+    expect(media.images.calls.filter(call => call.chatId === chatId)).toEqual([])
+    // Every option of an image model is accepted.
+    const ok = await postChat(media, chatBody(chatId, 'a fox', { modelRef: 'mock:image', imageOptions: { n: 4, aspectRatio: '9:16', editPrevious: false } }))
+    expect(ok.status).toBe(200)
+    expect((await readSse(ok)).chunks.filter(chunk => chunk.type === 'file')).toHaveLength(4)
+    await runnerOf(media).idle()
+  })
+
+  it('needs a text prompt of at most 32000 characters for an image turn', async () => {
+    const chatId = mediaChatId()
+    await refused(chatBody(chatId, '   ', { modelRef: 'mock:image' }), ['message', 'parts'])
+    const tooLong = await refused(chatBody(chatId, 'x'.repeat(LIMITS.imagePromptMaxChars + 1), { modelRef: 'mock:image' }), ['message', 'parts'])
+    expect(tooLong.message).toBe('Image prompts are limited to 32000 characters.')
+    // An attached image alone is no prompt.
+    const upload = await media.deps.files.upload(new File([PNG], 'only.png', { type: 'image/png' }))
+    await refused({ ...chatBody(chatId, '', { modelRef: 'mock:image' }), message: { ...userMessage(''), parts: [{ type: 'file', mediaType: 'image/png', url: upload.url }] } }, ['message', 'parts'])
+    expect((await mediaDetail(chatId)).messages).toEqual([])
+    expect(media.images.calls.filter(call => call.chatId === chatId)).toEqual([])
+  })
+
+  it('refuses to regenerate a message without text with an image model', async () => {
+    const chatId = mediaChatId()
+    const upload = await media.deps.files.upload(new File([PNG], 'photo.png', { type: 'image/png' }))
+    const body = { ...chatBody(chatId, ''), message: { ...userMessage(''), parts: [{ type: 'file' as const, mediaType: 'image/png', url: upload.url }] } }
+    await readSse(await postChat(media, body))
+    const reply = (await mediaDetail(chatId)).messages[1]!
+    await refused({ ...body, modelRef: 'mock:image', trigger: 'regenerate-message', messageId: reply.id }, ['message', 'parts'])
+    expect((await mediaDetail(chatId)).messages.map(message => message.id)).toEqual([body.message.id, reply.id])
+    await runnerOf(media).idle()
+  })
+
+  it('refuses an approval continuation with an image model', async () => {
+    const chatId = mediaChatId()
+    await readSse(await postChat(media, chatBody(chatId, 'echo me', { modelRef: 'mock:tool-approval' })))
+    const pending = (await mediaDetail(chatId)).messages[1]!
+    await refused({ ...chatBody(chatId, '', { modelRef: 'mock:image' }), message: answered(pending, true) }, ['modelRef'])
+    expect((await mediaDetail(chatId)).pendingApproval).toBe(true)
+    await runnerOf(media).idle()
+  })
+
+  it('sends the expansion of a prompt command as the image prompt; a reply command needs no image model call', async () => {
+    const template = media.deps.registry.commands.register('mock', { name: 'sketch', description: 'A pencil sketch', template: 'A pencil sketch of {{input}}' })
+    const reply = media.deps.registry.commands.register('mock', { name: 'noimage', description: 'Answers itself', run: async () => ({ type: 'reply', markdown: 'Nothing to draw.' }) })
+    try {
+      const chatId = mediaChatId()
+      const body = chatBody(chatId, '/sketch a cat', { modelRef: 'mock:image' })
+      await readSse(await postChat(media, body))
+      expect(media.images.calls.at(-1)).toMatchObject({ chatId, prompt: 'A pencil sketch of a cat' })
+      const user = (await mediaDetail(chatId)).messages[0]
+      expect(messageText(user)).toBe('/sketch a cat')
+      expect(user?.metadata?.command).toMatchObject({ name: 'sketch', type: 'prompt', expansion: 'A pencil sketch of a cat' })
+
+      const other = mediaChatId()
+      const { chunks } = await readSse(await postChat(media, chatBody(other, '/noimage', { modelRef: 'mock:image' })))
+      expect(streamedText(chunks)).toBe('Nothing to draw.')
+      expect(chunks[0]?.type === 'start' ? (chunks[0].messageMetadata as { image?: unknown }).image : 'missing').toBeUndefined()
+      expect(media.images.calls.filter(call => call.chatId === other)).toEqual([])
+      await runnerOf(media).idle()
+    }
+    finally {
+      template.dispose()
+      reply.dispose()
+    }
+  })
+
+  it('answers an image turn of an unknown image provider or model like a chat run', async () => {
+    const unknownModel = await postChat(media, chatBody(mediaChatId(), 'a fox', { modelRef: 'mock:image-none' }))
+    expect(unknownModel.status).toBe(404)
+    expect((await errorOf(unknownModel)).code).toBe('model_not_found')
   })
 })

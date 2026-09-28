@@ -1,13 +1,15 @@
 // Sanitizing of model lists that come from provider or plugin code (live listings, seeds, plugin models): every entry
 // must pass `modelInfoSchema`, unknown keys are dropped instead of failing the entry, ids are unique (first wins).
+// Phase 6: `capabilities.imageOutput` and `voices` are kept (voices cleaned: valid names, unique, at most 100).
 import type { ModelInfo } from '@harness-forge/shared'
 import { modelIdSchema, modelInfoSchema } from '@harness-forge/shared'
+import { cleanVoices } from './merge.ts'
 
 /** Upper bound of a stored listing (`modelInfoListSchema`). */
 export const MAX_LISTED_MODELS = 5000
 
-const MODEL_KEYS = ['id', 'name', 'kind', 'contextWindow', 'maxOutputTokens', 'capabilities', 'reasoningEfforts', 'cost'] as const
-const CAPABILITY_KEYS = ['tools', 'vision', 'pdf', 'reasoning', 'structuredOutput'] as const
+const MODEL_KEYS = ['id', 'name', 'kind', 'contextWindow', 'maxOutputTokens', 'capabilities', 'reasoningEfforts', 'cost', 'voices'] as const
+const CAPABILITY_KEYS = ['tools', 'vision', 'pdf', 'reasoning', 'structuredOutput', 'imageOutput'] as const
 const COST_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite'] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -32,6 +34,8 @@ export function sanitizeModelInfo(value: unknown): ModelInfo | null {
     candidate.capabilities = pick(candidate.capabilities, CAPABILITY_KEYS)
   if (isRecord(candidate.cost))
     candidate.cost = pick(candidate.cost, COST_KEYS)
+  if (Array.isArray(candidate.voices))
+    candidate.voices = cleanVoices(candidate.voices)
   const parsed = modelInfoSchema.safeParse(candidate)
   if (parsed.success)
     return parsed.data

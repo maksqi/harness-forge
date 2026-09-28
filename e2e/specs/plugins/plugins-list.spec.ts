@@ -51,7 +51,7 @@ test.describe('Plugins tab @plugins', () => {
     }
     const coreProviders = plugins.find(plugin => plugin.id === 'core-providers')?.contributions.providers.length
     await expect(pluginCard(page, 'core-providers')).toContainText(`${coreProviders} providers`)
-    await expect(pluginCard(page, 'core-tools')).toContainText('2 tools')
+    await expect(pluginCard(page, 'core-tools')).toContainText('3 tools')
 
     for (const filter of PLUGIN_FILTERS) {
       const expected = plugins.filter(plugin => inFilter(plugin, filter)).length
@@ -100,9 +100,10 @@ test.describe('Plugins tab @plugins', () => {
     await expect(page.getByTestId(testIds.pluginState)).toHaveText('Active')
     await expect(page.getByTestId(testIds.pluginTabSource)).toHaveCount(0)
     const tools = page.getByTestId(testIds.pluginToolRow)
-    await expect(tools).toHaveCount(2)
+    await expect(tools).toHaveCount(3)
     await expect(tools.and(page.locator('[data-tool-name="current_time"]'))).toBeVisible()
     await expect(tools.and(page.locator('[data-tool-name="web_fetch"]'))).toBeVisible()
+    await expect(tools.and(page.locator('[data-tool-name="generate_image"]'))).toBeVisible()
 
     const menu = page.getByTestId(testIds.pluginMenu)
     if (await menu.count() > 0)

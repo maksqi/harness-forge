@@ -10,9 +10,9 @@ export const manifest = {
   manifestVersion: 1,
   id: 'core-providers',
   name: 'Core providers',
-  version: '1.0.0',
+  version: '1.1.0',
   description: 'Builtin LLM providers: Anthropic, OpenAI, Google, xAI, DeepSeek, Moonshot AI, Alibaba, Z.ai, MiniMax, Mistral, Groq, OpenRouter and Ollama.',
-  engines: { harness: '^1.0.0' },
+  engines: { harness: '^1.1.0' },
   main: 'index.ts',
 } satisfies PluginManifest
 

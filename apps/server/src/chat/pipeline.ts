@@ -1,9 +1,14 @@
-// Streaming and persistence of a run (ARCHITECTURE.md 6.1-6.3, API.md 6). After the history is committed the run
-// always answers with an AI SDK v7 UI message stream:
+// Streaming and persistence of a run (ARCHITECTURE.md 6.1-6.3 / 6.11, API.md 6). After the history is committed the
+// run always answers with an AI SDK v7 UI message stream built with `createUIMessageStream`, whose end callback saves
+// exactly what was streamed:
 // - model runs: `streamText({ model, instructions, messages, tools, toolApproval, stopWhen: isStepCount(maxSteps),
-//   abortSignal: run.signal, maxRetries: 2, ... })`, `result.consumeStream()` (the run survives a client disconnect)
-//   and `toUIMessageStream({ stream: result.stream, originalMessages, generateMessageId, sendReasoning, sendSources,
-//   messageMetadata, onError, onEnd })`; a request without tools gets earlier tool calls as text (`tool-history.ts`);
+//   abortSignal: run.signal, maxRetries: 2, ... })`, `result.consumeStream()` (the run survives a client disconnect),
+//   `const ui = toUIMessageStream({ stream: result.stream, originalMessages, generateMessageId, sendReasoning,
+//   sendSources, messageMetadata, onError })` (no end callback of its own) and `writer.merge(ui.pipeThrough(
+//   storeGeneratedFiles(...)))`: generated files are stored before they are streamed or saved (`generated-files.ts`);
+//   a request without tools gets earlier tool calls as text (`tool-history.ts`); a chat model with image output gets
+//   the provider options of `imageParams` (ADR-028);
+// - image turns (an image model): `imageStream` (`images.ts`), one `ImageService.generate` call;
 // - reply commands and failures before the model call: `createUIMessageStream` without a model call.
 // `createUIMessageStreamResponse({ stream, consumeSseStream })` tees the SSE text into the run buffer (resume). The end
 // callback persists the message idempotently (one transaction: an upsert by id under the reply parent, `aborted` /
@@ -12,12 +17,14 @@
 // `message.completed`. A stream that fails without reaching the end callback is finalized when the SSE copy ends, so a
 // run is always released.
 import type { HarnessError, HarnessUIMessage, MessageMetadata, NoticeData, ReasoningEffort, ToolMode } from '@harness-forge/shared'
-import type { ModelMessage, TextStreamPart, ToolSet, UIMessageChunk, UIMessageStreamOnEndCallback } from 'ai'
+import type { LanguageModelUsage, ModelMessage, TextStreamPart, ToolSet, UIMessageChunk, UIMessageStreamOnEndCallback } from 'ai'
 import type { Logger } from '../logger.ts'
+import type { ImageGenerationResult } from '../services/images/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { RunEnding } from './history.ts'
 import type { PreparedRun } from './prepare.ts'
 import type { Run, RunRegistry } from './runs.ts'
+import { LIMITS } from '@harness-forge/shared'
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -38,8 +45,11 @@ import {
   toolErrorText,
 } from './errors.ts'
 import { prepareModelFiles } from './files.ts'
+import { GeneratedFiles, storeGeneratedFiles } from './generated-files.ts'
 import { finalizeParts, hasPendingApproval, plainText } from './history.ts'
-import { buildRunParams } from './params.ts'
+import { imageStream } from './images.ts'
+import { NOTICES } from './notices.ts'
+import { buildRunParams, providerImageOptions } from './params.ts'
 import { SseReplayBuffer } from './runs.ts'
 import { generateChatTitle } from './title.ts'
 import { toolPartsAsText } from './tool-history.ts'
@@ -52,32 +62,7 @@ const REPLY_TEXT_ID = 'text-0'
 
 // ---------- notices ----------
 
-export const NOTICES = {
-  superseded: (count: number): NoticeData => ({
-    level: 'info',
-    code: 'approvals-superseded',
-    message: count === 1
-      ? 'A pending tool call was denied because a new message was sent.'
-      : `${count} pending tool calls were denied because a new message was sent.`,
-  }),
-  toolsUnsupported: (): NoticeData => ({
-    level: 'warning',
-    code: 'tools-unsupported',
-    message: 'This model does not support tools, so no tools were sent.',
-  }),
-  filesNotSent: (count: number): NoticeData => ({
-    level: 'warning',
-    code: 'attachments-unsupported',
-    message: count === 1
-      ? 'This model cannot read the attached file, so it was not sent.'
-      : `This model cannot read ${count} of the attached files, so they were not sent.`,
-  }),
-  contextTrimmed: (): NoticeData => ({
-    level: 'info',
-    code: 'context-trimmed',
-    message: 'Older messages were left out to fit the context window of this model.',
-  }),
-} as const
+export { NOTICES } from './notices.ts'
 
 /** An earlier reply of the same model already shows this notice (shown once per chat and model, not on every reply). */
 export function alreadyNoticed(history: readonly HarnessUIMessage[], notice: NoticeData, modelRef: string): boolean {
@@ -158,17 +143,51 @@ export interface RunContext {
   titleTimeoutMs: number
   /** Aborted at shutdown (title attempts). */
   lifecycle: AbortSignal
+  /** Interval of the `message-metadata` keep-alive of image turns (default `IMAGE_KEEPALIVE_MS`). */
+  imageKeepAliveMs?: number
 }
 
-type StreamMode = 'model' | 'reply' | 'error'
+type StreamMode = 'model' | 'reply' | 'error' | 'image'
+
+/** An image generation usage as the `LanguageModelUsage` of the `message.completed` hook. */
+function imageHookUsage(usage: ImageGenerationResult['usage']): LanguageModelUsage {
+  return {
+    inputTokens: usage?.inputTokens,
+    inputTokenDetails: { noCacheTokens: usage?.inputTokens, cacheReadTokens: undefined, cacheWriteTokens: undefined },
+    outputTokens: usage?.outputTokens,
+    outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
+    totalTokens: usage?.totalTokens,
+  }
+}
+
+/** A token count as stored in `MessageUsage` (integer >= 0). */
+function tokens(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0
+}
+
+/** `text` cut to at most `max` UTF-16 code units, never inside a surrogate pair. */
+function cutText(text: string, max: number): string {
+  if (text.length <= max)
+    return text
+  const last = text.charCodeAt(max - 1)
+  return text.slice(0, last >= 0xD800 && last <= 0xDBFF ? max - 1 : max)
+}
 
 /** State of one run between the stream start and its persistence. */
 export class RunSession {
   readonly tracker: RunTracker
   readonly notices: NoticeData[] = []
+  /** Files this run stored (image turns, generated files, `generate_image` images): names for the saved parts. */
+  readonly generated: GeneratedFiles
   mode: StreamMode = 'model'
   fatal: HarnessError | null = null
   finishMetadata: MessageMetadata | null = null
+  /** Estimated costs of the `generate_image` outputs of this run (added to the message cost). */
+  toolCostUsd = 0
+  /** The result of an image turn. */
+  image: ImageGenerationResult | null = null
+  /** The pipeline wrote the `finish` chunk itself (a reply command, an image turn): the run completed. */
+  finished = false
   readonly startedAt: number
   #finalized = false
   #finalizing: Promise<void> | null = null
@@ -179,6 +198,7 @@ export class RunSession {
     this.ctx = ctx
     this.tracker = new RunTracker(ctx.now)
     this.startedAt = ctx.now()
+    this.generated = new GeneratedFiles(ctx.prepared.continued?.parts.filter(part => part.type === 'file').length ?? 0)
   }
 
   get chatId(): string {
@@ -194,8 +214,32 @@ export class RunSession {
     return this.ctx.prepared.continued?.metadata
   }
 
+  /** `{ modelRef, startedAt }`; an image turn adds `image: { n, aspectRatio?, inputs }` (placeholder tiles). */
   startMetadata(): MessageMetadata {
-    return { modelRef: this.ctx.prepared.resolved.modelRef, startedAt: this.previous?.startedAt ?? this.startedAt }
+    const metadata: MessageMetadata = { modelRef: this.ctx.prepared.resolved.modelRef, startedAt: this.previous?.startedAt ?? this.startedAt }
+    const target = this.ctx.prepared.target
+    if (this.mode === 'image' && target.kind === 'image') {
+      const { n, aspectRatio, inputFileIds } = target.options
+      metadata.image = { n, ...(aspectRatio === undefined ? {} : { aspectRatio }), inputs: inputFileIds.length }
+    }
+    return metadata
+  }
+
+  /** Adds the estimated cost of a `generate_image` output to the message cost. */
+  addToolCost(usd: number): void {
+    if (Number.isFinite(usd) && usd > 0)
+      this.toolCostUsd = roundUsd(this.toolCostUsd + usd)
+  }
+
+  /**
+   * The `finish` metadata once every chunk before `finish` was handled: rebuilt when `generate_image` costs were added
+   * (the model's `finish` part may have been observed before the last tool output was handled).
+   */
+  finishWithToolCost(metadata: MessageMetadata | undefined): MessageMetadata | undefined {
+    if (this.toolCostUsd === 0 || metadata === undefined)
+      return metadata
+    this.finishMetadata = this.buildFinishMetadata(metadata.finishedAt ?? this.ctx.now(), 'completed')
+    return this.finishMetadata
   }
 
   /** The complete metadata of the message when the run ends at `finishedAt`. */
@@ -217,6 +261,10 @@ export class RunSession {
       if (cost !== undefined || previous?.costUsd !== undefined)
         metadata.costUsd = roundUsd((previous?.costUsd ?? 0) + (cost ?? 0))
     }
+    if (this.mode === 'image' && this.image !== null)
+      this.#addImageResult(metadata, this.image)
+    if (this.toolCostUsd > 0)
+      metadata.costUsd = roundUsd((metadata.costUsd ?? 0) + this.toolCostUsd)
     if (ending === 'failed')
       metadata.finishReason = 'error'
     else if (this.tracker.finishReason !== undefined)
@@ -228,6 +276,22 @@ export class RunSession {
     if (ending === 'failed' && this.fatal !== null)
       metadata.error = errorInit(this.fatal)
     return metadata
+  }
+
+  /** Usage, estimated cost and revised prompt of an image turn (`ImageService` wrote the usage row). */
+  #addImageResult(metadata: MessageMetadata, result: ImageGenerationResult): void {
+    if (result.usage !== null) {
+      metadata.usage = {
+        inputTokens: tokens(result.usage.inputTokens),
+        outputTokens: tokens(result.usage.outputTokens),
+        totalTokens: tokens(result.usage.totalTokens),
+      }
+    }
+    if (result.costUsd !== null && Number.isFinite(result.costUsd) && result.costUsd >= 0)
+      metadata.costUsd = roundUsd(result.costUsd)
+    const revisedPrompt = result.revisedPrompt?.trim()
+    if (metadata.image !== undefined && revisedPrompt !== undefined && revisedPrompt !== '')
+      metadata.image = { ...metadata.image, revisedPrompt: cutText(revisedPrompt, LIMITS.imagePromptMaxChars) }
   }
 
   map(error: unknown): HarnessError {
@@ -282,7 +346,13 @@ export class RunSession {
     }
   }
 
-  readonly onEnd: UIMessageStreamOnEndCallback<HarnessUIMessage> = async ({ responseMessage, isAborted }) => {
+  /**
+   * The end callback of every run stream (`createUIMessageStream`). A failed outcome is a merged stream or `execute`
+   * that threw (the stream already got an `error` chunk): it ends the run as failed.
+   */
+  readonly onEnd: UIMessageStreamOnEndCallback<HarnessUIMessage> = async ({ responseMessage, isAborted, outcome }) => {
+    if (outcome?.status === 'failed' && outcome.error !== undefined)
+      this.recordFatal(outcome.error)
     await this.finalize(responseMessage, isAborted)
   }
 
@@ -305,18 +375,24 @@ export class RunSession {
   }
 
   #ending(isAborted: boolean): RunEnding {
-    if (isAborted || (this.ctx.run.signal.aborted && this.fatal === null && this.tracker.finishReason === undefined))
+    if (isAborted || (this.ctx.run.signal.aborted && this.fatal === null && this.tracker.finishReason === undefined && !this.finished))
       return 'aborted'
     return this.fatal === null ? 'completed' : 'failed'
   }
 
+  /**
+   * The message as saved: the streamed parts (streaming parts finalized), stored files named, no `data:` part left
+   * (ADR-028), the notices of this run where its content starts, and the finish metadata.
+   */
   finalMessage(responseMessage: HarnessUIMessage | undefined, ending: RunEnding): HarnessUIMessage {
     const base = responseMessage ?? this.ctx.prepared.continued ?? { id: this.assistantId, role: 'assistant' as const, parts: [] }
-    let parts = finalizeParts(base.parts, ending)
-    if (this.notices.length > 0) {
-      const at = Math.min(this.ctx.prepared.continued?.parts.length ?? 0, parts.length)
-      parts = [...parts.slice(0, at), ...this.notices.map(data => ({ type: 'data-notice' as const, data })), ...parts.slice(at)]
-    }
+    // The continued message's parts come first; this run's parts follow (the notices go between them).
+    const continuedLength = Math.min(this.ctx.prepared.continued?.parts.length ?? 0, base.parts.length)
+    const head = this.generated.finalizeParts(base.parts.slice(0, continuedLength))
+    const tail = this.generated.finalizeParts(base.parts.slice(continuedLength))
+    let parts = finalizeParts([...head, ...tail], ending)
+    if (this.notices.length > 0)
+      parts = [...parts.slice(0, head.length), ...this.notices.map(data => ({ type: 'data-notice' as const, data })), ...parts.slice(head.length)]
     const metadata = ending === 'completed' && this.finishMetadata !== null ? this.finishMetadata : this.buildFinishMetadata(this.ctx.now(), ending)
     return { id: this.assistantId, role: 'assistant', parts, metadata }
   }
@@ -411,14 +487,24 @@ export class RunSession {
     }
   }
 
+  /** The cost of this run (model or image turn, plus `generate_image` outputs), for `message.completed`. */
+  #runCost(): number | undefined {
+    const own = this.mode === 'model'
+      ? this.tracker.cost(this.ctx.prepared.resolved.entry.cost)
+      : this.mode === 'image' ? (this.image?.costUsd ?? undefined) : undefined
+    if (own === undefined && this.toolCostUsd === 0)
+      return undefined
+    return roundUsd((own ?? 0) + this.toolCostUsd)
+  }
+
   #fireMessageCompleted(message: HarnessUIMessage, ending: RunEnding): void {
     const { deps, prepared } = this.ctx
-    const cost = this.mode === 'model' ? this.tracker.cost(prepared.resolved.entry.cost) : undefined
+    const cost = this.#runCost()
     this.ctx.tasks.track(deps.registry.hooks.run('message.completed', {
       chatId: this.chatId,
       modelRef: prepared.resolved.modelRef,
       message,
-      usage: this.tracker.usage,
+      usage: this.mode === 'image' ? imageHookUsage(this.image?.usage ?? null) : this.tracker.usage,
       ...(cost === undefined ? {} : { costUsd: cost }),
       aborted: ending === 'aborted',
     }, undefined))
@@ -442,6 +528,7 @@ export function replyStream(session: RunSession, markdown: string): ReadableStre
         writer.write({ type: 'text-delta', id: REPLY_TEXT_ID, delta: markdown })
       writer.write({ type: 'text-end', id: REPLY_TEXT_ID })
       writer.write({ type: 'finish-step' })
+      session.finished = true
       session.finishMetadata = session.buildFinishMetadata(session.ctx.now(), 'completed')
       writer.write({ type: 'finish', finishReason: 'stop', messageMetadata: session.finishMetadata })
     },
@@ -467,10 +554,16 @@ export function errorStream(session: RunSession, error: HarnessError): ReadableS
   }) as ReadableStream<UIMessageChunk>
 }
 
-/** Tools, parameters, model messages and the `streamText` call of a model run. */
+/**
+ * Tools, parameters, model messages and the `streamText` call of a model run, streamed through
+ * `storeGeneratedFiles` inside `createUIMessageStream` (what is saved equals what is streamed, ADR-028).
+ */
 export async function modelStream(session: RunSession): Promise<ReadableStream<UIMessageChunk>> {
   const { deps, run, prepared, logger } = session.ctx
-  const { resolved } = prepared
+  const target = prepared.target
+  if (target.kind !== 'chat')
+    throw new Error('modelStream needs a chat model.')
+  const resolved = target.model
   const chatId = run.chatId
   const modelRef = resolved.modelRef
 
@@ -492,10 +585,15 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
       session.notices.push(notice)
   }
 
+  // A chat model with image output gets the provider options of `imageParams` (e.g. Gemini's response modalities).
+  const imageProviderOptions = resolved.entry.capabilities.imageOutput
+    ? providerImageOptions(resolved, target.aspectRatio, logger)
+    : undefined
   const params = await buildRunParams({
     chatId,
     modelRef,
     resolved,
+    ...(imageProviderOptions === undefined ? {} : { imageProviderOptions }),
     reasoningEffort: session.ctx.reasoningEffort,
     toolMode: session.ctx.toolMode,
     globalInstructions: prepared.settings.instructions,
@@ -559,7 +657,9 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
   })
   void Promise.resolve(result.consumeStream({ onError: () => {} })).catch(() => {})
 
-  return toUIMessageStream<ToolSet, HarnessUIMessage>({
+  // No end callback here: `toUIMessageStream` would save the chunks it produced itself, before the generated files are
+  // stored. The outer stream saves the transformed chunks.
+  const ui = toUIMessageStream<ToolSet, HarnessUIMessage>({
     stream: catchStreamErrors(result.stream),
     ...(tools === undefined ? {} : { tools }),
     originalMessages: prepared.history,
@@ -567,6 +667,21 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     sendReasoning: true,
     sendSources: true,
     messageMetadata: ({ part }) => session.observe(part),
+    onError: error => session.errorText(error),
+  })
+  const generatedFiles = storeGeneratedFiles({
+    files: deps.files,
+    generated: session.generated,
+    logger,
+    toolOwner: name => assembled.byName.get(name)?.pluginId,
+    continued: prepared.continued,
+    onToolCost: usd => session.addToolCost(usd),
+    finishMetadata: metadata => session.finishWithToolCost(metadata),
+  })
+  return createUIMessageStream<HarnessUIMessage>({
+    originalMessages: prepared.history,
+    generateId: () => session.assistantId,
+    execute: ({ writer }) => writer.merge(ui.pipeThrough(generatedFiles)),
     onError: error => session.errorText(error),
     onEnd: session.onEnd,
   }) as ReadableStream<UIMessageChunk>
@@ -581,7 +696,10 @@ function startTitle(session: RunSession): void {
   const text = first === undefined ? '' : plainText(first)
   if (text === '')
     return
-  tasks.track(generateChatTitle(deps, { chatId: session.chatId, text, chatModel: prepared.resolved, logger, signal: lifecycle }, titleTimeoutMs))
+  // An image turn never asks its image model for a title: `titleModelRef`, else the provider's `smallModelId`, else the
+  // default title stays (ADR-028).
+  const includeRunModel = prepared.target.kind === 'chat'
+  tasks.track(generateChatTitle(deps, { chatId: session.chatId, text, chatModel: prepared.resolved, includeRunModel, logger, signal: lifecycle }, titleTimeoutMs))
 }
 
 /**
@@ -615,6 +733,8 @@ export async function launchRun(ctx: RunContext): Promise<Response> {
       stream = replyStream(session, command.markdown)
     else if (command?.kind === 'failed')
       stream = errorStream(session, command.error)
+    else if (prepared.target.kind === 'image')
+      stream = imageStream(session)
     else
       stream = await modelStream(session)
   }

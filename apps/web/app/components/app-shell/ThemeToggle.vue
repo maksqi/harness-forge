@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // Dark / Light / System switch (docs/UI.md 4.2). Writes useColorMode().preference (stored in
 // localStorage['hf-color-mode'] by @nuxtjs/color-mode). Expanded: a three-item ToggleGroup; `collapsed`: one icon
-// button with a dropdown. Clicking the active item keeps it selected (the group is never empty).
+// button with a dropdown (40px on touch devices, like the rail buttons, docs/UI.md 14.5). Clicking the active item keeps
+// it selected (the group is never empty).
 // Collapsed, the Tooltip wraps the whole DropdownMenu: a Tooltip inside DropdownMenu would provide the popper
 // context nearest to the menu trigger and capture its anchor, leaving the menu unpositioned.
 import { computed } from 'vue'
@@ -42,7 +43,7 @@ function select(value: unknown) {
           <DropdownMenuTrigger
             :data-testid="testIds.themeToggle"
             :aria-label="`Theme: ${current.label}`"
-            class="flex size-8 items-center justify-center rounded-md text-sidebar-foreground/70 outline-none transition-colors duration-(--duration-fast) hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring/50 data-[state=open]:bg-sidebar-accent"
+            class="flex size-8 items-center justify-center rounded-md text-sidebar-foreground/70 outline-none transition-colors duration-(--duration-fast) pointer-coarse:size-10 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring/50 data-[state=open]:bg-sidebar-accent"
           >
             <component :is="current.icon" aria-hidden="true" class="size-4" />
           </DropdownMenuTrigger>

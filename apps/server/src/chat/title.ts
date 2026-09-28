@@ -1,10 +1,12 @@
 // Chat titles (ARCHITECTURE.md 6.1): generated in parallel with the first reply of a chat that has no title yet. Model:
 // `titleModelRef`, else the chat provider's `smallModelId`, else the chat model (the first one that resolves). At most
 // 8 words, 10 s for the whole attempt; on failure or timeout the first 60 characters of the message are used. A title
-// set by the user is never overwritten (`ChatsService.setTitle`), which also emits `chat.updated`.
+// set by the user is never overwritten (`ChatsService.setTitle`), which also emits `chat.updated`. An image turn
+// (ADR-028) never asks its image model: `titleModelRef`, else the provider's `smallModelId`; without either the default
+// title stays (nothing is stored).
 import type { ChatSummary } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
-import type { ProviderService, ResolvedModel } from '../providers/types.ts'
+import type { ProviderService, ResolvedModel, ResolvedModelBase } from '../providers/types.ts'
 import type { ChatsService } from '../services/chats/types.ts'
 import type { SettingsService } from '../services/settings/types.ts'
 import { generateText } from 'ai'
@@ -61,19 +63,23 @@ export interface TitleInput {
   chatId: string
   /** Text of the first user message. */
   text: string
-  chatModel: ResolvedModel
+  /** The model of the run: its provider's `smallModelId` is a candidate, and the model itself unless excluded. */
+  chatModel: ResolvedModelBase
+  /** The run model is the last candidate (default true); false for an image turn (never titled by its image model). */
+  includeRunModel?: boolean
   logger: Logger
   /** Aborts the attempt (shutdown); the fallback is not stored then. */
   signal?: AbortSignal
 }
 
 /** Model refs to try, in order, without duplicates. */
-export function titleModelCandidates(titleModelRef: string | null, chatModel: ResolvedModel): string[] {
+export function titleModelCandidates(titleModelRef: string | null, chatModel: ResolvedModelBase, includeRunModel = true): string[] {
   const refs = [titleModelRef]
   const small = chatModel.provider.definition.smallModelId
   if (small !== undefined && small !== '')
     refs.push(`${chatModel.providerId}:${small}`)
-  refs.push(chatModel.modelRef)
+  if (includeRunModel)
+    refs.push(chatModel.modelRef)
   return [...new Set(refs.filter((ref): ref is string => typeof ref === 'string' && ref !== ''))]
 }
 
@@ -89,9 +95,8 @@ async function resolveFirst(services: TitleServices, refs: readonly string[], si
   return null
 }
 
-async function modelTitle(services: TitleServices, input: TitleInput, signal: AbortSignal): Promise<string | null> {
-  const settings = await services.settings.get()
-  const resolved = await resolveFirst(services, titleModelCandidates(settings.titleModelRef, input.chatModel), signal, input.logger)
+async function modelTitle(services: TitleServices, input: TitleInput, candidates: readonly string[], signal: AbortSignal): Promise<string | null> {
+  const resolved = await resolveFirst(services, candidates, signal, input.logger)
   if (resolved === null)
     return null
   const reasoning = providerReasoning(resolved, 'off', input.logger)
@@ -130,6 +135,17 @@ export async function generateChatTitle(services: TitleServices, input: TitleInp
   const fallback = fallbackTitle(input.text)
   if (fallback === null)
     return null
+  let titleModelRef: string | null = null
+  try {
+    titleModelRef = (await services.settings.get()).titleModelRef
+  }
+  catch (error) {
+    input.logger.debug('cannot read the title model setting', { err: error })
+  }
+  const candidates = titleModelCandidates(titleModelRef, input.chatModel, input.includeRunModel ?? true)
+  // An image turn without a title model: the default title stays.
+  if (candidates.length === 0)
+    return null
   const controller = new AbortController()
   const onAbort = (): void => controller.abort(input.signal?.reason)
   input.signal?.addEventListener('abort', onAbort, { once: true })
@@ -142,7 +158,7 @@ export async function generateChatTitle(services: TitleServices, input: TitleInp
   })
   let title: string | null = null
   try {
-    title = await Promise.race([modelTitle(services, input, controller.signal), expired])
+    title = await Promise.race([modelTitle(services, input, candidates, controller.signal), expired])
   }
   catch (error) {
     input.logger.debug('title generation failed, using the fallback', { err: error })

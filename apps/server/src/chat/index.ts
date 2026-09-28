@@ -1,5 +1,6 @@
 // Chat runs (W2.1): implements `ChatRunner` (./types.ts) behind `createChatRunner(deps)`. `POST /chat` acquires the
-// chat (one run per chat), prepares and commits the history (./prepare.ts), then streams (./pipeline.ts).
+// chat (one run per chat), prepares and commits the history (./prepare.ts), then streams (./pipeline.ts; image turns:
+// ./images.ts).
 // `GET /chat/:id/stream` replays the run buffer; `POST /chat/:id/stop` aborts the run into the normal persistence path
 // and waits for it; shutdown stops every run the same way.
 import type { AppDeps } from '../types.ts'
@@ -22,6 +23,8 @@ export interface ChatRunnerOptions {
   titleTimeoutMs?: number
   stopWaitMs?: number
   shutdownStopWaitMs?: number
+  /** Interval of the `message-metadata` keep-alive of image turns (default `IMAGE_KEEPALIVE_MS`, 15 s). */
+  imageKeepAliveMs?: number
 }
 
 /** `ChatRunner` plus test and shutdown helpers. */
@@ -96,6 +99,7 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
           tasks,
           titleTimeoutMs: options.titleTimeoutMs ?? TITLE_TIMEOUT_MS,
           lifecycle: lifecycle.signal,
+          ...(options.imageKeepAliveMs === undefined ? {} : { imageKeepAliveMs: options.imageKeepAliveMs }),
         })
       }
       catch (error) {

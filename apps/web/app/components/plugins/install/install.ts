@@ -1,6 +1,6 @@
 // Rules of the install and trust dialogs (docs/UI.md 8.3, 8.4; docs/PLUGINS.md 12, 13): the source draft of each tab,
 // its client-side validation with the shared schemas, the request it becomes, how server validation issues map back
-// to fields, the "I trust {source}" label, permission labels and the fresh-auth (ADR-017) error texts.
+// to fields, the "I trust {source}" label, permission labels and the stale-review answer (fresh auth is useFreshAuth's).
 import type {
   PluginContributions,
   PluginInspection,
@@ -291,29 +291,11 @@ export function manifestIcon(icon: string | undefined): { color?: string, mono?:
   return { color: `/api/icons/lobe/${encodeURIComponent(`${base}-color`)}`, mono: `/api/icons/lobe/${encodeURIComponent(base)}` }
 }
 
-// ---------- fresh auth (ADR-017) ----------
-
-/** The server refused a fresh-auth route: `403 forbidden` with action `login`. */
-export function isFreshAuthError(error: unknown): boolean {
-  const harnessError = toHarnessError(error)
-  return harnessError.code === 'forbidden' && harnessError.action === 'login'
-}
+// ---------- stale review ----------
 
 /** The source changed since it was inspected (`409 conflict`, reason `stale`): inspect again before installing. */
 export function isStaleReview(error: unknown): boolean {
   const harnessError = toHarnessError(error)
   const reason = (harnessError.details as { reason?: unknown } | undefined)?.reason
   return harnessError.code === 'conflict' && reason === 'stale'
-}
-
-/** Text under a password field after `auth.login()` failed. */
-export function passwordErrorText(error: unknown): string {
-  const harnessError = toHarnessError(error)
-  if (harnessError.code === 'unauthorized')
-    return 'Wrong password'
-  if (harnessError.code === 'rate_limited') {
-    const seconds = Math.max(1, Math.ceil((harnessError.retryAfterMs ?? 1000) / 1000))
-    return `Too many attempts. Try again in ${seconds} s.`
-  }
-  return harnessError.message
 }

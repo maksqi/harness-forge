@@ -21,7 +21,7 @@ describe('share view helpers', () => {
       { type: 'source-document', sourceId: 'b', title: 'B', mediaType: 'text/plain', filename: 'b.txt' },
       { type: 'tool', toolName: 'web_fetch', status: 'done' },
       { type: 'source-url', sourceId: 'c', url: 'https://c.example' },
-      { type: 'file', mediaType: 'image/png', url: '/api/share/t/files/f' },
+      { type: 'file', mediaType: 'application/pdf', filename: 'spec.pdf', url: '/api/share/t/files/f' },
     ])
     expect(blocks.map(block => block.kind)).toEqual(['reasoning', 'text', 'sources', 'tool', 'sources', 'file'])
     expect(blocks[0]).toMatchObject({ part: { type: 'reasoning', text: 'plan', state: 'done' } })
@@ -33,7 +33,33 @@ describe('share view helpers', () => {
       ],
     })
     expect(blocks[4]).toMatchObject({ parts: [{ type: 'source-url', sourceId: 'c', url: 'https://c.example' }] })
-    expect(blocks[5]).toMatchObject({ part: { type: 'file', mediaType: 'image/png', url: '/api/share/t/files/f' } })
+    expect(blocks[5]).toMatchObject({ part: { type: 'file', mediaType: 'application/pdf', filename: 'spec.pdf', url: '/api/share/t/files/f' } })
+    expect(new Set(blocks.map(block => block.key)).size).toBe(blocks.length)
+  })
+
+  it('turns every run of consecutive images into one gallery; other files stay chips', () => {
+    const image = (id: string) => ({ type: 'file' as const, mediaType: 'image/png', filename: `${id}.png`, url: `/api/share/t/files/${id}` })
+    const blocks = shareMessageBlocks([
+      image('a'),
+      image('b'),
+      { type: 'text', text: 'Here they are.' },
+      { type: 'tool', toolName: 'generate_image', status: 'done' },
+      image('c'),
+      { type: 'file', mediaType: 'text/plain', filename: 'notes.txt', url: '/api/share/t/files/n' },
+      { type: 'file', mediaType: 'IMAGE/JPEG', url: '/api/share/t/files/d' },
+    ])
+    expect(blocks.map(block => block.kind)).toEqual(['gallery', 'text', 'tool', 'gallery', 'file', 'gallery'])
+    expect(blocks[0]).toEqual({
+      kind: 'gallery',
+      key: 'gallery-0',
+      parts: [
+        { type: 'file', mediaType: 'image/png', filename: 'a.png', url: '/api/share/t/files/a' },
+        { type: 'file', mediaType: 'image/png', filename: 'b.png', url: '/api/share/t/files/b' },
+      ],
+    })
+    expect(blocks[3]).toMatchObject({ parts: [{ url: '/api/share/t/files/c' }] })
+    expect(blocks[4]).toMatchObject({ kind: 'file', part: { filename: 'notes.txt' } })
+    expect(blocks[5]).toMatchObject({ parts: [{ type: 'file', mediaType: 'IMAGE/JPEG', url: '/api/share/t/files/d' }] })
     expect(new Set(blocks.map(block => block.key)).size).toBe(blocks.length)
   })
 

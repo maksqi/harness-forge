@@ -6,7 +6,8 @@
 // Create: `POST /api/plugins` (credentials travel in the draft and are stored encrypted by the server) -> toast
 // "Provider created" -> emit `created(id)`. Edit (`editId`, from `?edit=`): the declarative plugin's manifest is loaded
 // into the same steps and saved with `PUT /api/plugins/:id/manifest`; `created(id)` is emitted after "Save changes"
-// too. A fresh-auth refusal (403 + action login, stdio MCP servers) asks for the password and retries once.
+// too. Both requests run through useFreshAuth without `required`: a fresh-auth refusal (403 + action login, stdio MCP
+// servers) asks for the password once and runs the request once more; a second refusal is shown like any error.
 import type { IconRef, ModelInfo, PluginDetail, PluginManifest, ValidationIssue } from '@harness-forge/shared'
 import type { WizardIssues, WizardStep, WizardValues } from './wizard'
 import type { WizardContext } from './wizard-context'
@@ -28,7 +29,7 @@ import {
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
 import { useApi } from '~/composables/useApi'
-import { useAuthStore } from '~/stores/auth'
+import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProvidersStore } from '~/stores/providers'
 import { toHarnessError } from '~/utils/errors'
@@ -64,7 +65,7 @@ const props = defineProps<{ editId?: string }>()
 const emit = defineEmits<{ created: [id: string], cancel: [] }>()
 
 const api = useApi()
-const auth = useAuthStore()
+const freshAuth = useFreshAuth()
 const plugins = usePluginsStore()
 const providers = useProvidersStore()
 
@@ -96,9 +97,6 @@ const restored = ref(stored !== null && hasDraftContent(stored.values))
 const submitting = ref(false)
 const submitError = ref<unknown>(null)
 const discardOpen = ref(false)
-const passwordOpen = ref(false)
-const passwordPending = ref(false)
-const passwordError = ref<string | null>(null)
 const panel = ref<HTMLElement | null>(null)
 let created = false
 
@@ -309,12 +307,9 @@ function showServerIssues(error: HarnessError) {
 }
 
 function handleSubmitError(error: unknown) {
-  const failure = toHarnessError(error)
-  if (failure.code === 'forbidden' && failure.action === 'login') {
-    passwordError.value = null
-    passwordOpen.value = true
+  if (isFreshAuthCancelled(error))
     return
-  }
+  const failure = toHarnessError(error)
   if (failure.code === 'validation_error') {
     showServerIssues(failure)
     return
@@ -343,14 +338,17 @@ async function submit() {
   submitError.value = null
   try {
     if (props.editId && base.value) {
-      const saved = await api.pluginDrafts.updateManifest({ params: { id: props.editId }, body: buildManifestUpdate(values.value, base.value) })
+      const params = { id: props.editId }
+      const body = buildManifestUpdate(values.value, base.value)
+      const saved = await freshAuth.run(() => api.pluginDrafts.updateManifest({ params, body }))
       await saveEditedCredentials()
       toast.success('Changes saved')
       void plugins.fetchOne(saved.id).catch(() => {})
       emit('created', saved.id)
     }
     else {
-      const createdPlugin = await api.pluginDrafts.create({ body: buildDraft(values.value) })
+      const body = buildDraft(values.value)
+      const createdPlugin = await freshAuth.run(() => api.pluginDrafts.create({ body }))
       created = true
       clearWizardDraft()
       toast.success('Provider created')
@@ -364,24 +362,6 @@ async function submit() {
   finally {
     submitting.value = false
   }
-}
-
-async function confirmPassword(password: string) {
-  passwordPending.value = true
-  passwordError.value = null
-  try {
-    await auth.login(password)
-  }
-  catch (error) {
-    const failure = toHarnessError(error)
-    passwordError.value = failure.code === 'unauthorized' ? 'Wrong password' : failure.message
-    return
-  }
-  finally {
-    passwordPending.value = false
-  }
-  passwordOpen.value = false
-  await submit()
 }
 </script>
 
@@ -527,11 +507,12 @@ async function confirmPassword(password: string) {
       @confirm="discardDraft"
     />
     <ConfirmPasswordDialog
-      v-model:open="passwordOpen"
+      :open="freshAuth.open.value"
       description="This provider starts a program on the server. Confirm your password to continue."
-      :pending="passwordPending"
-      :error="passwordError"
-      @submit="confirmPassword"
+      :pending="freshAuth.pending.value"
+      :error="freshAuth.error.value"
+      @update:open="freshAuth.setOpen"
+      @submit="freshAuth.submit"
     />
   </div>
 </template>

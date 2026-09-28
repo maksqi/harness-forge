@@ -1,6 +1,7 @@
-// Pure helpers of the chat transcript (docs/UI.md 7): part grouping, tool names and arguments, size caps, durations
-// and costs. No Vue, no stores: unit tested on their own.
-import type { HarnessUIMessage, HarnessUIMessagePart, NoticeData } from '@harness-forge/shared'
+// Pure helpers of the chat transcript (docs/UI.md 7): part grouping (galleries of generated images, merged sources),
+// tool names and arguments, size caps, durations, costs and the image-turn meta line. No Vue, no stores: unit tested
+// on their own.
+import type { HarnessUIMessage, HarnessUIMessagePart, ImageTurnMetadata, NoticeData } from '@harness-forge/shared'
 import type {
   DynamicToolUIPart,
   FileUIPart,
@@ -23,6 +24,8 @@ export type MessageBlock
     | { kind: 'reasoning', key: string, index: number, part: ReasoningUIPart }
     | { kind: 'tool', key: string, index: number, part: ToolPartLike }
     | { kind: 'file', key: string, index: number, part: FileUIPart | ReasoningFileUIPart }
+    /** A run of consecutive `image/*` file parts (generated images, docs/UI.md 7.16): one `ImageGallery`. */
+    | { kind: 'gallery', key: string, index: number, parts: FileUIPart[] }
     | { kind: 'sources', key: string, index: number, parts: SourcePart[] }
     | { kind: 'notice', key: string, index: number, notice: NoticeData }
 
@@ -37,6 +40,21 @@ function isSourcePart(part: HarnessUIMessagePart): part is SourcePart {
   return part.type === 'source-url' || part.type === 'source-document'
 }
 
+/** An `image/*` media type. */
+export function isImageMediaType(mediaType: string): boolean {
+  return mediaType.trim().toLowerCase().startsWith('image/')
+}
+
+/** A `file` part holding an image: generated images in assistant messages, attachments in user ones. */
+export function isImageFilePart(part: HarnessUIMessagePart): part is FileUIPart {
+  return part.type === 'file' && isImageMediaType(part.mediaType)
+}
+
+/** The image file parts of a message, in part order. */
+export function imageFileParts(message: Pick<HarnessUIMessage, 'parts'>): FileUIPart[] {
+  return message.parts.filter(isImageFilePart)
+}
+
 function isNoticeData(value: unknown): value is NoticeData {
   if (typeof value !== 'object' || value === null)
     return false
@@ -45,8 +63,9 @@ function isNoticeData(value: unknown): value is NoticeData {
 }
 
 /**
- * Renderable blocks of a message: consecutive sources merge into one row, `step-start`, unknown `data-*` and custom
- * parts render nothing, `data-notice` becomes a notice row.
+ * Renderable blocks of an assistant message: consecutive sources merge into one row, image file parts with no other
+ * rendered block between them form one gallery (a `reasoning-file` draft image stays a thumbnail), `step-start`,
+ * unknown `data-*` and custom parts render nothing, `data-notice` becomes a notice row.
  */
 export function messageBlocks(parts: readonly HarnessUIMessagePart[]): MessageBlock[] {
   const blocks: MessageBlock[] = []
@@ -59,6 +78,14 @@ export function messageBlocks(parts: readonly HarnessUIMessagePart[]): MessageBl
     }
     else if (isToolUIPart(part)) {
       blocks.push({ kind: 'tool', key: `tool-${part.toolCallId || index}`, index, part })
+    }
+    else if (part.type === 'file' && isImageMediaType(part.mediaType)) {
+      // Invisible parts (e.g. `step-start`) render nothing, so they never split a gallery.
+      const previous = blocks.at(-1)
+      if (previous?.kind === 'gallery')
+        previous.parts.push(part)
+      else
+        blocks.push({ kind: 'gallery', key: `gallery-${index}`, index, parts: [part] })
     }
     else if (part.type === 'file' || part.type === 'reasoning-file') {
       blocks.push({ kind: 'file', key: `file-${index}`, index, part })
@@ -77,7 +104,7 @@ export function messageBlocks(parts: readonly HarnessUIMessagePart[]): MessageBl
   return blocks
 }
 
-/** All text parts of a message as markdown (message "Copy"). */
+/** All text parts of a message as markdown (message "Copy", read aloud); '' when it has none. */
 export function messageText(message: Pick<HarnessUIMessage, 'parts'>): string {
   return message.parts
     .filter((part): part is TextUIPart => part.type === 'text')
@@ -201,6 +228,23 @@ export function formatCost(usd: number | undefined | null): string {
 /** Exact token counts with thousands separators. */
 export function formatTokens(tokens: number | undefined | null): string {
   return typeof tokens === 'number' && Number.isFinite(tokens) ? Math.round(tokens).toLocaleString('en-US') : ''
+}
+
+function countLabel(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
+}
+
+/**
+ * The meta line of an image turn (`metadata.image`, docs/UI.md 7.5): "2 images · 16:9 · edited 1 image". The aspect
+ * ratio is left out for Auto, the edit part when no input image was sent.
+ */
+export function formatImageTurn(image: Pick<ImageTurnMetadata, 'n' | 'aspectRatio' | 'inputs'>): string {
+  const items = [countLabel(image.n, 'image')]
+  if (image.aspectRatio)
+    items.push(image.aspectRatio)
+  if (image.inputs && image.inputs > 0)
+    items.push(`edited ${countLabel(image.inputs, 'image')}`)
+  return items.join(' · ')
 }
 
 /** Host name of a URL for source rows; the input when it does not parse. */

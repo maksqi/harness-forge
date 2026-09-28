@@ -1,8 +1,10 @@
+import type { PluginContext } from '@harness-forge/plugin-sdk'
 import type { PluginDetail } from '@harness-forge/shared'
 import type { FSWatcher } from 'node:fs'
 import type { TestApp } from '../testing/create-test-app.ts'
+import type { FakeImageService } from '../testing/fake-media.ts'
 import type { PluginTestApp } from './__fixtures__/harness.ts'
-import type { PluginStateChange } from './types.ts'
+import type { BuiltinPlugin, PluginStateChange } from './types.ts'
 import type { WatchFunction } from './watch.ts'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
@@ -14,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getBuiltinPlugins } from '../builtin-plugins/index.ts'
 import { pluginKv, plugins, providerConfigs } from '../db/schema.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
+import { createFakeImageService } from '../testing/fake-media.ts'
 import { createFakeIconService, createMemorySecretStore, createRecordingEventBus } from '../testing/fakes.ts'
 import { createPluginTestApp, fixturePath, manifest, removeTempDirs, tempDir, waitFor, writeFiles } from './__fixtures__/harness.ts'
 import { createPluginHost } from './host.ts'
@@ -812,5 +815,33 @@ describe('declarative provider API', () => {
     expect(typeof definition.createLanguageModel).toBe('function')
     expect(h.t.deps.registry.providers.get('draft')).toBeUndefined()
     expect(() => h.t.deps.plugins.declarativeProvider('draft', { id: 'draft', name: 'Draft', baseURL: 'ftp://x', apiFormat: 'openai-chat' })).toThrow(/URL/)
+  })
+})
+
+describe('ctx.images (plugin API 1.1.0)', () => {
+  it('generates through deps.images with the plugin signal; unloading the plugin aborts a running generation', async () => {
+    let ctx: PluginContext | undefined
+    const capture: BuiltinPlugin = {
+      id: 'mock',
+      manifest: { manifestVersion: 1, id: 'mock', name: 'Image user', version: '1.0.0', engines: { harness: '^1.1.0' }, main: 'index.ts' },
+      module: {
+        setup: (context) => {
+          ctx = context
+        },
+      },
+    }
+    const t = await createTestApp({ builtins: [capture], factories: { images: deps => createFakeImageService(deps, { delayMs: 30_000 }) } })
+    closers.push(() => t.close())
+    const images = t.deps.images as FakeImageService
+    expect(t.deps.plugins.state('mock')).toBe('active')
+
+    const pending = ctx!.images.generate({ prompt: 'a red fox', modelRef: 'mock:image', n: 2, chatId: '0199a8f0-0000-7000-8000-000000000001' })
+    await waitFor(() => images.calls.length === 1)
+    expect(images.calls[0]).toMatchObject({ modelRef: 'mock:image', prompt: 'a red fox', n: 2, chatId: '0199a8f0-0000-7000-8000-000000000001', messageId: null })
+    expect(images.calls[0]?.signal.aborted).toBe(false)
+    await t.deps.plugins.disable('mock')
+    await expect(pending).rejects.toThrow(/was unloaded/)
+    expect(images.calls[0]?.signal.aborted).toBe(true)
+    await expect(ctx!.images.generate({ prompt: 'a red fox' })).rejects.toMatchObject({ code: 'plugin_error' })
   })
 })

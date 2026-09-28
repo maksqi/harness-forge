@@ -7,6 +7,16 @@ describe('sanitizeModelInfo', () => {
       .toEqual({ id: 'm', name: 'M', capabilities: { tools: true }, cost: { input: 1 } })
   })
 
+  it('keeps imageOutput and cleans the voices (valid names, unique, at most 100)', () => {
+    expect(sanitizeModelInfo({ id: 'gemini-image', capabilities: { imageOutput: true, vision: true } }))
+      .toEqual({ id: 'gemini-image', capabilities: { imageOutput: true, vision: true } })
+    expect(sanitizeModelInfo({ id: 'tts', kind: 'speech', voices: ['alloy', 'alloy', '', 'echo', 42] }))
+      .toEqual({ id: 'tts', kind: 'speech', voices: ['alloy', 'echo'] })
+    expect(sanitizeModelInfo({ id: 'tts', voices: Array.from({ length: 150 }, (_, index) => `v${index}`) })?.voices).toHaveLength(100)
+    // Voices that are not a list are dropped, the model stays.
+    expect(sanitizeModelInfo({ id: 'tts', name: 'TTS', voices: 'alloy' })).toEqual({ id: 'tts', name: 'TTS' })
+  })
+
   it('salvages the valid fields of a partially invalid model', () => {
     expect(sanitizeModelInfo({ id: 'm', name: 'M', contextWindow: -5, cost: { input: -1 }, reasoningEfforts: ['low', 'bogus'] }))
       .toEqual({ id: 'm', name: 'M' })

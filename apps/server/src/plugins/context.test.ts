@@ -1,6 +1,8 @@
 import type { PluginManifest } from '@harness-forge/plugin-sdk'
 import type { Database } from '../db/client.ts'
+import type { ImageGenerationInput, ImageGenerationResult } from '../services/images/types.ts'
 import type { PluginRuntime, PluginRuntimeServices } from './context.ts'
+import { HarnessError } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase } from '../db/client.ts'
 import { migrateDatabase } from '../db/migrate.ts'
@@ -8,7 +10,7 @@ import { createMemoryLogger } from '../logger.ts'
 import { createRegistryCore } from '../registry/index.ts'
 import { createRedactor } from '../security/redact.ts'
 import { createMemorySecretStore } from '../testing/fakes.ts'
-import { createPluginRuntime, HOST_AI } from './context.ts'
+import { createPluginRuntime, HOST_AI, NO_STORED_IMAGE_MESSAGE } from './context.ts'
 import { guardCall } from './guard.ts'
 import { createPluginStorage } from './state.ts'
 
@@ -41,15 +43,33 @@ interface Setup {
   requests: Request[]
   secrets: ReturnType<typeof createMemorySecretStore>
   resolved: string[]
+  /** Inputs of `generateImages` (the image service). */
+  imageCalls: ImageGenerationInput[]
 }
 
-async function setup(manifest: PluginManifest = BASE_MANIFEST, settings: Record<string, unknown> = { host: 'example.com' }): Promise<Setup> {
+/** A stored image of the fake image service. */
+function storedImage(index: number): ImageGenerationResult['images'][number] {
+  const id = `file_000000000000000${index}`
+  return { file: { id, sha256: 'a'.repeat(64), name: `image-${index}.png`, mime: 'image/png', size: 100 + index, createdAt: 1 }, url: `/api/files/${id}` }
+}
+
+/** The answer of the fake image service (`images` as given, the rest fixed). */
+function imageResult(images: ImageGenerationResult['images'], extra: Partial<ImageGenerationResult> = {}): ImageGenerationResult {
+  return { modelRef: 'mock:image', images, usage: { inputTokens: 3, outputTokens: 200, totalTokens: 203 }, costUsd: 0.000403, revisedPrompt: 'Mock: a red fox', dropped: 0, ...extra }
+}
+
+async function setup(
+  manifest: PluginManifest = BASE_MANIFEST,
+  settings: Record<string, unknown> = { host: 'example.com' },
+  generateImages: PluginRuntimeServices['generateImages'] = async input => imageResult(Array.from({ length: input.n }, (_, index) => storedImage(index + 1))),
+): Promise<Setup> {
   const database = await openDatabase({ path: ':memory:' })
   databases.push(database)
   await migrateDatabase(database.db)
   const logs: Setup['logs'] = []
   const requests: Request[] = []
   const resolved: string[] = []
+  const imageCalls: ImageGenerationInput[] = []
   const secrets = createMemorySecretStore()
   const registry = createRegistryCore(() => ({
     logger: createMemoryLogger().logger,
@@ -67,6 +87,10 @@ async function setup(manifest: PluginManifest = BASE_MANIFEST, settings: Record<
       resolved.push(ref)
       return { specificationVersion: 'v4', provider: 'fake', modelId: ref } as never
     },
+    generateImages: async (input) => {
+      imageCalls.push(input)
+      return generateImages(input)
+    },
     userAgent: `harness-forge/0.0.0 plugin/${manifest.id}`,
     fetch: async (input, init) => {
       requests.push(new Request(input, init))
@@ -74,7 +98,7 @@ async function setup(manifest: PluginManifest = BASE_MANIFEST, settings: Record<
     },
   }
   const runtime = createPluginRuntime({ manifest, dir: '/plugins/ctx-test', dataDir: '/data/plugins/.data/ctx-test', settings, services })
-  return { runtime, registry, logs, requests, secrets, resolved }
+  return { runtime, registry, logs, requests, secrets, resolved, imageCalls }
 }
 
 describe('plugin context', () => {
@@ -196,13 +220,85 @@ describe('plugin context', () => {
     expect(other.resolved).toEqual(['openai:gpt-x'])
   })
 
-  it('exposes ctx.images (plugin API 1.1.0) as a not_implemented stub until the image service lands', async () => {
-    const { runtime } = await setup()
-    const { ctx } = runtime
-    expect(Object.isFrozen(ctx.images)).toBe(true)
-    await expect(ctx.images.generate({ prompt: 'A red fox' })).rejects.toMatchObject({ code: 'not_implemented' })
-    runtime.disposeContributions()
-    await expect(ctx.images.generate({ prompt: 'A red fox' })).rejects.toMatchObject({ code: 'plugin_error' })
+  describe('ctx.images (plugin API 1.1.0)', () => {
+    it('generates through the image service and maps the stored files to the plugin API shape', async () => {
+      const { runtime, imageCalls } = await setup()
+      const { ctx } = runtime
+      expect(Object.isFrozen(ctx.images)).toBe(true)
+      const result = await ctx.images.generate({ prompt: '  a red fox  ', modelRef: 'mock:image', n: 2, aspectRatio: '16:9', chatId: '0199a8f0-0000-7000-8000-000000000001' })
+      expect(result).toEqual({
+        modelRef: 'mock:image',
+        images: [
+          { fileId: 'file_0000000000000001', url: '/api/files/file_0000000000000001', mediaType: 'image/png', name: 'image-1.png', size: 101 },
+          { fileId: 'file_0000000000000002', url: '/api/files/file_0000000000000002', mediaType: 'image/png', name: 'image-2.png', size: 102 },
+        ],
+        costUsd: 0.000403,
+        revisedPrompt: 'Mock: a red fox',
+      })
+      expect(imageCalls).toHaveLength(1)
+      expect(imageCalls[0]).toMatchObject({ modelRef: 'mock:image', prompt: 'a red fox', n: 2, aspectRatio: '16:9', chatId: '0199a8f0-0000-7000-8000-000000000001', messageId: null })
+    })
+
+    it('defaults to one image, the model of the settings (no modelRef), no chat; omits an unknown cost', async () => {
+      const { runtime, imageCalls } = await setup(BASE_MANIFEST, {}, async () => imageResult([storedImage(1)], { costUsd: null, revisedPrompt: undefined }))
+      expect(await runtime.ctx.images.generate({ prompt: 'a lighthouse' })).toEqual({
+        modelRef: 'mock:image',
+        images: [{ fileId: 'file_0000000000000001', url: '/api/files/file_0000000000000001', mediaType: 'image/png', name: 'image-1.png', size: 101 }],
+      })
+      expect(imageCalls[0]).toEqual({ prompt: 'a lighthouse', n: 1, signal: expect.any(AbortSignal), chatId: null, messageId: null })
+      expect('modelRef' in imageCalls[0]!).toBe(false)
+    })
+
+    it('aborts the generation with ctx.signal and with the given signal', async () => {
+      const { runtime, imageCalls } = await setup()
+      await runtime.ctx.images.generate({ prompt: 'a red fox' })
+      const controller = new AbortController()
+      await runtime.ctx.images.generate({ prompt: 'a red fox', signal: controller.signal })
+      const [plain, combined] = imageCalls.map(call => call.signal)
+      expect(plain?.aborted).toBe(false)
+      controller.abort()
+      expect(combined?.aborted).toBe(true)
+      expect(plain?.aborted).toBe(false)
+      runtime.abort()
+      expect(plain?.aborted).toBe(true)
+    })
+
+    it('refuses invalid options with validation_error before calling the service', async () => {
+      const { runtime, imageCalls } = await setup()
+      const invalid: unknown[] = [
+        {},
+        { prompt: '   ' },
+        { prompt: 'x'.repeat(32_001) },
+        { prompt: 'x', n: 0 },
+        { prompt: 'x', n: 5 },
+        { prompt: 'x', n: 1.5 },
+        { prompt: 'x', aspectRatio: '5:4' },
+        { prompt: 'x', modelRef: 'no-colon' },
+        { prompt: 'x', chatId: '' },
+        { prompt: 'x', signal: 'abort' },
+        undefined,
+      ]
+      for (const options of invalid)
+        await expect(runtime.ctx.images.generate(options as never), JSON.stringify(options)).rejects.toMatchObject({ code: 'validation_error' })
+      expect(imageCalls).toEqual([])
+    })
+
+    it('passes service errors through and fails with provider_error when no image could be stored', async () => {
+      const missing = new HarnessError({ code: 'validation_error', message: 'Choose an image model in Settings → Media.' })
+      const failing = await setup(BASE_MANIFEST, {}, async () => {
+        throw missing
+      })
+      await expect(failing.runtime.ctx.images.generate({ prompt: 'x' })).rejects.toBe(missing)
+      const dropped = await setup(BASE_MANIFEST, {}, async () => imageResult([], { dropped: 2 }))
+      await expect(dropped.runtime.ctx.images.generate({ prompt: 'x', n: 2 })).rejects.toMatchObject({ code: 'provider_error', message: NO_STORED_IMAGE_MESSAGE, providerId: 'mock' })
+    })
+
+    it('throws plugin_error once the plugin is disposed', async () => {
+      const { runtime, imageCalls } = await setup()
+      runtime.disposeContributions()
+      await expect(runtime.ctx.images.generate({ prompt: 'A red fox' })).rejects.toMatchObject({ code: 'plugin_error' })
+      expect(imageCalls).toEqual([])
+    })
   })
 
   it('warns about undeclared hooks and stdio process permissions', async () => {

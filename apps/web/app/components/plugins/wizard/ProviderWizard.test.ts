@@ -276,6 +276,46 @@ describe('providerWizard: create', () => {
     expect(created).toHaveBeenCalledWith('acme-ai')
   })
 
+  it('asks only once: a refusal after the prompt is shown as the error', async () => {
+    seedDraft('review', completeDraftValues())
+    api.pluginDrafts.create.mockRejectedValue(new HarnessError({ code: 'forbidden', message: 'Confirm your password to continue.', action: 'login' }))
+    api.auth.login.mockResolvedValue({ enabled: true, authenticated: true, source: 'settings', freshUntil: Date.now() + 600_000 })
+    const { created } = mountWizard()
+    await flushPromises()
+    await click(byTestId(testIds.wizardCreate))
+    await type(byTestId(testIds.confirmPasswordInput), 'hunter2')
+    await click(byTestId(testIds.confirmPasswordSubmit))
+
+    expect(api.auth.login).toHaveBeenCalledTimes(1)
+    expect(api.pluginDrafts.create).toHaveBeenCalledTimes(2)
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    const alert = document.body.querySelector<HTMLElement>('[data-slot="wizard-error"]')!
+    expect(alert.dataset.code).toBe('forbidden')
+    expect(alert.textContent).toContain('Confirm your password to continue.')
+    expect(byTestId<HTMLButtonElement>(testIds.wizardCreate)!.disabled).toBe(false)
+    expect(created).not.toHaveBeenCalled()
+  })
+
+  it('shows the rate-limit wait in the prompt, and a cancelled prompt creates nothing', async () => {
+    seedDraft('review', completeDraftValues())
+    api.pluginDrafts.create.mockRejectedValue(new HarnessError({ code: 'forbidden', message: 'Confirm your password to continue.', action: 'login' }))
+    api.auth.login.mockRejectedValue(new HarnessError({ code: 'rate_limited', message: 'Too many attempts.', retryAfterMs: 4_200 }))
+    const { created } = mountWizard()
+    await flushPromises()
+    await click(byTestId(testIds.wizardCreate))
+    await type(byTestId(testIds.confirmPasswordInput), 'guess')
+    await click(byTestId(testIds.confirmPasswordSubmit))
+    expect(byTestId(testIds.confirmPasswordDialog)!.textContent).toContain('Too many attempts. Try again in 5s.')
+
+    const cancel = [...byTestId(testIds.confirmPasswordDialog)!.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Cancel')!
+    await click(cancel)
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.pluginDrafts.create).toHaveBeenCalledTimes(1)
+    expect(document.body.querySelector('[data-slot="wizard-error"]')).toBeNull()
+    expect(byTestId<HTMLButtonElement>(testIds.wizardCreate)!.disabled).toBe(false)
+    expect(created).not.toHaveBeenCalled()
+  })
+
   it('maps server validation errors and conflicts back to their step', async () => {
     seedDraft('review', completeDraftValues())
     api.pluginDrafts.create.mockRejectedValueOnce(new HarnessError({

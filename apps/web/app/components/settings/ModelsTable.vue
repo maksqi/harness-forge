@@ -2,6 +2,8 @@
 // Models of one provider (docs/UI.md 9.3): name + mono id ("Custom" badge), capabilities, context, price per 1M
 // tokens, favorite star, visibility switch (hidden models never appear in the model picker) and a menu with
 // Rename (display-name alias), Reset name and, for custom models, Remove. Changes save at once; failures toast.
+// The Capabilities column shows ModelCaps for chat models (image output included) and the kind as a muted badge
+// ("Image", "Speech to text", "Text to speech", ...) for every other model.
 import type { CatalogModel } from '@harness-forge/shared'
 import { EllipsisIcon, PencilIcon, StarIcon, Trash2Icon, Undo2Icon } from '@lucide/vue'
 import { ref } from 'vue'
@@ -23,7 +25,7 @@ import InlineRename from '~/components/common/InlineRename.vue'
 import ModelCaps from '~/components/providers/ModelCaps.vue'
 import { useModelsStore } from '~/stores/models'
 import { testIds } from '~/utils/testids'
-import { formatPrice } from './models'
+import { formatPrice, MODEL_KIND_LABELS } from './models'
 import { toastError } from './notify'
 
 defineProps<{ models: CatalogModel[], providerName: string }>()
@@ -70,10 +72,10 @@ async function remove(model: CatalogModel) {
   }
 }
 
-/** ModelCaps shows vision, tools, reasoning and PDF input. */
+/** ModelCaps shows vision, tools, reasoning, PDF input and image output. */
 function hasShownCaps(model: CatalogModel): boolean {
-  const { vision, tools, reasoning, pdf } = model.capabilities
-  return vision || tools || reasoning || pdf
+  const { vision, tools, reasoning, pdf, imageOutput } = model.capabilities
+  return vision || tools || reasoning || pdf || imageOutput
 }
 
 function requestRename(model: CatalogModel) {
@@ -153,8 +155,19 @@ function stopEditing(value: boolean) {
           </p>
         </TableCell>
         <TableCell class="hidden sm:table-cell">
-          <ModelCaps :capabilities="model.capabilities" />
-          <span v-if="!hasShownCaps(model)" class="text-muted-foreground">—</span>
+          <template v-if="model.kind === 'chat'">
+            <ModelCaps :capabilities="model.capabilities" />
+            <span v-if="!hasShownCaps(model)" class="text-muted-foreground">—</span>
+          </template>
+          <Badge
+            v-else
+            variant="outline"
+            data-slot="model-kind"
+            :data-kind="model.kind"
+            class="h-4.5 max-w-full px-1.5 text-[11px] font-normal text-muted-foreground"
+          >
+            <span class="truncate">{{ MODEL_KIND_LABELS[model.kind] }}</span>
+          </Badge>
         </TableCell>
         <TableCell class="hidden text-right text-xs tabular-nums md:table-cell">
           <span v-if="model.contextWindow">{{ formatTokenCount(model.contextWindow) }}</span>

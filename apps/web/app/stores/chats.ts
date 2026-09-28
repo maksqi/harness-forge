@@ -1,13 +1,15 @@
 // Chats store (docs/UI.md 5.3, 5.10, 11; docs/API.md 5.9): the sidebar chat list (cursor pages, date groups), chat
 // CRUD with undoable delete, exports, and the per-chat status dot: run state from `ChatSummary.running` /
 // `pendingApproval`, `run.*` events and the chat session (`setRunState`), plus client-side unread marks
-// (localStorage['hf-unread']). Signatures are frozen after Phase 0.
+// (localStorage['hf-unread']). Rows hold summary fields only: the active leaf of `chat.updated` (ADR-030) is the open
+// chat session's business. Signatures are frozen after Phase 0.
 import type {
   ChatCreate,
   ChatDetail,
   ChatExportFormat,
   ChatSummary,
   ChatUpdate,
+  ChatUpdatedData,
   HarnessError,
   ServerEvent,
 } from '@harness-forge/shared'
@@ -59,8 +61,8 @@ function readUnread(): Record<string, true> {
   return Object.fromEntries(ids.slice(-UNREAD_MAX).map(id => [id, true as const]))
 }
 
-/** The summary fields of a chat detail. */
-function summaryOf(chat: ChatSummary | ChatDetail): ChatSummary {
+/** The summary fields of a chat detail or of `chat.updated` data (without its `activeLeafId`). */
+function summaryOf(chat: ChatSummary | ChatDetail | ChatUpdatedData): ChatSummary {
   const summary: ChatSummary = {
     id: chat.id,
     title: chat.title,
@@ -423,9 +425,9 @@ export const useChatsStore = defineStore('chats', () => {
   }
 
   /**
-   * `chat.created` / `chat.updated` refresh the row (and its run state), `chat.deleted` drops it, `run.started`
-   * sets `running`, `run.finished` clears it (or sets `approval` when `awaitingApproval`) and marks the chat unread
-   * unless it is the open one (`ui.activeChatId`).
+   * `chat.created` / `chat.updated` refresh the row (and its run state; the `activeLeafId` of `chat.updated` is not
+   * kept), `chat.deleted` drops it, `run.started` sets `running`, `run.finished` clears it (or sets `approval` when
+   * `awaitingApproval`) and marks the chat unread unless it is the open one (`ui.activeChatId`).
    */
   function applyEvent(event: ServerEvent): void {
     switch (event.type) {
@@ -433,8 +435,9 @@ export const useChatsStore = defineStore('chats', () => {
       case 'chat.updated': {
         if (pendingDeletes.has(event.data.id))
           return
-        seedRunState([event.data])
-        upsertSummary(event.data)
+        const summary = summaryOf(event.data)
+        seedRunState([summary])
+        upsertSummary(summary)
         return
       }
       case 'chat.deleted': {

@@ -490,24 +490,6 @@ export function saveErrorFields(error: unknown, state: McpFormState, mode: 'crea
   return { form: failure.message }
 }
 
-/** The save failed because the session is not fresh: ask for the password and retry. */
-export function needsLogin(error: unknown): boolean {
-  const failure = toHarnessError(error)
-  return failure.code === 'forbidden' && failure.action === 'login'
-}
-
-/** Text under the password field of ConfirmPasswordDialog for a failed `auth.login` (docs/UI.md 15). */
-export function loginFailureMessage(error: unknown): string {
-  const failure = toHarnessError(error)
-  if (failure.code === 'unauthorized')
-    return 'Wrong password'
-  if (failure.code === 'rate_limited') {
-    const seconds = Math.max(1, Math.ceil((failure.retryAfterMs ?? 1000) / 1000))
-    return `Too many attempts. Try again in ${seconds}s.`
-  }
-  return failure.message
-}
-
 /** Placeholder of a stored secret input: its masked hint, else "Stored" (the value itself is never sent back). */
 export function storedPlaceholder(state: SecretState | null): string {
   if (!state?.set)

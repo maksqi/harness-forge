@@ -42,7 +42,7 @@ export const manifest = {
   name: 'Mock provider',
   version: '1.0.0',
   description: 'Deterministic mock models and a mock approval tool for development and end-to-end tests.',
-  engines: { harness: '^1.0.0' },
+  engines: { harness: '^1.1.0' },
   main: 'index.ts',
 } satisfies PluginManifest
 

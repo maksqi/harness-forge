@@ -285,6 +285,28 @@ describe('mcpServerDialog: create', () => {
     expect(one('[data-field="form-error"]', dialog())!.textContent).toContain('Confirm your password to continue.')
   })
 
+  it('keeps the form and sends nothing when the password prompt is cancelled', async () => {
+    const auth = useAuthStore()
+    auth.status = authStatus({ enabled: true, source: 'settings', freshUntil: null })
+    const { open, saved } = mountDialog()
+    await settle()
+    await fillStdio()
+    await save()
+    const prompt = passwordDialog()!
+    const cancel = [...prompt.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Cancel')!
+    cancel.click()
+    await settle(5)
+
+    expect(passwordDialog()).toBeNull()
+    expect(api.mcp.create).not.toHaveBeenCalled()
+    expect(api.auth.login).not.toHaveBeenCalled()
+    expect(saved).not.toHaveBeenCalled()
+    expect(open.value).toBe(true)
+    expect(field('command').value).toBe('npx')
+    expect(one('[data-field="form-error"]', dialog())).toBeNull()
+    expect(one<HTMLButtonElement>(`[data-testid="${testIds.mcpSave}"]`, dialog())!.disabled).toBe(false)
+  })
+
   it('drops typed secrets when the dialog closes', async () => {
     const { open } = mountDialog()
     await settle()

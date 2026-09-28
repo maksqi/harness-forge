@@ -2,8 +2,9 @@ import { mount } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, reactive } from 'vue'
-import { SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
+import { sidebarMenuButtonVariants, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 import { testIds } from '~/utils/testids'
 import { createMockApi } from '~/utils/testing/mock-api'
 import AppSidebar from './AppSidebar.vue'
@@ -46,10 +47,13 @@ function go(fullPath: string) {
   mocks.route!.query = Object.fromEntries(new URLSearchParams(search))
 }
 
-/** The layout's shell; `withTrigger` adds a SidebarTrigger like the page headers have (it opens the mobile sheet). */
-function mountSidebar({ withTrigger = false } = {}) {
+/**
+ * The layout's shell; `withTrigger` adds a SidebarTrigger like the page headers have (it opens the mobile sheet),
+ * `collapsed` starts in icon mode.
+ */
+function mountSidebar({ withTrigger = false, collapsed = false } = {}) {
   return mount({
-    render: () => h(SidebarProvider, null, {
+    render: () => h(SidebarProvider, collapsed ? { defaultOpen: false } : null, {
       default: () => h(TooltipProvider, null, { default: () => [h(AppSidebar), withTrigger && h(SidebarTrigger)] }),
     }),
   }, { attachTo: document.body, global: { stubs: { NuxtLink } } })
@@ -147,6 +151,44 @@ describe('appSidebar', () => {
     expect(widths).toContain('data-[side=left]:w-(--sidebar-width)')
     expect(widths.filter(name => !name.endsWith('w-(--sidebar-width)'))).toEqual([])
     wrapper.unmount()
+  })
+})
+
+describe('appSidebar: the icon rail on touch devices (UI.md 14.5)', () => {
+  const RAIL_BUTTON = ['pointer-coarse:group-data-[collapsible=icon]:size-10!', 'pointer-coarse:group-data-[collapsible=icon]:p-3!']
+
+  it('is 3.5rem wide on a coarse pointer and 3rem otherwise, set by classes instead of the inline style', () => {
+    const wrapper = mountSidebar({ collapsed: true })
+    const shell = wrapper.get<HTMLElement>('[data-slot="sidebar-wrapper"]')
+    expect(shell.classes()).toEqual(expect.arrayContaining(['[--sidebar-width-icon:3rem]', 'pointer-coarse:[--sidebar-width-icon:3.5rem]']))
+    // An inline value would outrank both classes.
+    expect(shell.element.style.getPropertyValue('--sidebar-width-icon')).toBe('')
+    expect(shell.element.style.getPropertyValue('--sidebar-width')).toBe('16rem')
+    wrapper.unmount()
+  })
+
+  it('makes every rail button, the brand and the theme menu a 40px target on a coarse pointer', () => {
+    const wrapper = mountSidebar({ collapsed: true })
+    expect(wrapper.get(`[data-testid="${testIds.sidebar}"]`).attributes('data-state')).toBe('collapsed')
+    const buttons = wrapper.findAll('[data-sidebar="menu-button"]')
+    // Chat | Plugins, New chat, Search and Settings.
+    expect(buttons.length).toBeGreaterThanOrEqual(4)
+    for (const button of buttons) {
+      expect(button.classes(), button.attributes('data-testid')).toEqual(expect.arrayContaining(RAIL_BUTTON))
+      // The row height classes of the app (SIDEBAR_ROW_CLASS) keep the rail rules.
+      expect(button.classes()).toContain('group-data-[collapsible=icon]:size-8!')
+    }
+    const brand = wrapper.get('button[aria-label="Expand sidebar"]')
+    expect(brand.classes()).toEqual(expect.arrayContaining(['size-8', 'pointer-coarse:size-10']))
+    expect(wrapper.get(`[data-testid="${testIds.themeToggle}"]`).classes()).toEqual(expect.arrayContaining(['size-8', 'pointer-coarse:size-10']))
+    wrapper.unmount()
+  })
+
+  it('keeps the zero padding of large menu buttons on a coarse pointer', () => {
+    const large = cn(sidebarMenuButtonVariants({ size: 'lg' })).split(' ')
+    expect(large).toEqual(expect.arrayContaining(['group-data-[collapsible=icon]:p-0!', 'pointer-coarse:group-data-[collapsible=icon]:p-0!']))
+    expect(large).not.toContain('pointer-coarse:group-data-[collapsible=icon]:p-3!')
+    expect(cn(sidebarMenuButtonVariants()).split(' ')).toEqual(expect.arrayContaining(RAIL_BUTTON))
   })
 })
 

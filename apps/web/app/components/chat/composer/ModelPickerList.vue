@@ -1,12 +1,14 @@
 <script setup lang="ts">
 // Content of the model picker (docs/UI.md 7.9): a search field ("Search models…") over a command list with
-// Favorites, Recent and one group per connected provider (`ProviderIcon` headers). Items show the provider icon, the
-// name, capability icons, the context size and a star toggling the favorite. Enabled providers without credentials
-// follow as "Not connected" rows that open their key dialog. Footer: "Manage models", "Connect providers".
+// Favorites, Recent, one group per connected provider (`ProviderIcon` headers, chat models only) and "Image models"
+// (Phase 6: the visible image models of connected providers, `data-value="images"`). Items show the provider icon, the
+// name, capability icons (image output included), the context size and a star toggling the favorite. Enabled
+// providers without credentials follow as "Not connected" rows that open their key dialog. Footer: "Manage models",
+// "Connect providers".
 // Keyboard: the search field keeps focus, ↑/↓ move, Enter picks; the selected model is highlighted on open.
 import type { CatalogModel } from '@harness-forge/shared'
 import type { ListboxItemSelectEvent } from 'reka-ui'
-import { ClockIcon, PlugZapIcon, SearchIcon, Settings2Icon, StarIcon } from '@lucide/vue'
+import { ClockIcon, ImageIcon, PlugZapIcon, SearchIcon, Settings2Icon, StarIcon } from '@lucide/vue'
 import { ListboxFilter, ListboxGroupLabel } from 'reka-ui'
 import { computed, ref } from 'vue'
 import { toast } from 'vue-sonner'
@@ -20,7 +22,7 @@ import { useModelsStore } from '~/stores/models'
 import { useProvidersStore } from '~/stores/providers'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import { modelItemLabel, modelPickerGroups, unconnectedProviders } from './model-picker'
+import { imagePickerModels, modelItemLabel, modelPickerGroups, unconnectedProviders } from './model-picker'
 
 const props = withDefaults(defineProps<{
   modelValue: string | null
@@ -48,10 +50,13 @@ const models = useModelsStore()
 const providers = useProvidersStore()
 const query = ref('')
 
+const imageModels = computed(() => imagePickerModels(models.visible, providers.connected))
 const groups = computed(() => modelPickerGroups({
   favorites: models.favorites,
   recent: models.recent,
   byProvider: models.groupedByProvider,
+  images: imageModels.value,
+  providerName: providerId => providers.byId(providerId)?.name ?? providerId,
 }, query.value))
 const unconnected = computed(() => unconnectedProviders(providers.items, query.value))
 const showNone = computed(() => props.allowNone && !query.value.trim())
@@ -148,6 +153,7 @@ async function toggleFavorite(model: CatalogModel) {
           />
           <StarIcon v-else-if="group.key === 'favorites'" aria-hidden="true" class="size-3.5" />
           <ClockIcon v-else-if="group.key === 'recent'" aria-hidden="true" class="size-3.5" />
+          <ImageIcon v-else-if="group.key === 'images'" aria-hidden="true" class="size-3.5" />
           <span class="truncate">{{ group.label }}</span>
         </ListboxGroupLabel>
         <CommandItem

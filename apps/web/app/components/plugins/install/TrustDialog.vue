@@ -2,9 +2,11 @@
 // Trust dialog (docs/UI.md 8.4) for an installed plugin in the `untrusted` state (an update changed its hash, or its
 // files changed on disk), opened from PluginCard "Review" and the detail header (W3.1). Shows TrustWarning for the
 // plugin, the required "I trust {source}" checkbox and, when a password is set and the session is not fresh
-// (ADR-017), the "Confirm your password" field; Trust logs in first when needed, then pins the current hash
-// (`POST /api/plugins/:id/trust` with `{ sha256: trust.hash }`) and emits `trusted(id)`. A server that still asks for
-// a fresh login gets ConfirmPasswordDialog and one retry; a stale hash (files changed meanwhile) reloads the plugin.
+// (ADR-017), the "Confirm your password" field; Trust logs in first when needed (useFreshAuth `login()`), then pins the
+// current hash (`POST /api/plugins/:id/trust` with `{ sha256: trust.hash }`, through `run(pin, { required: true })`) and
+// emits `trusted(id)`. A server that still asks for a fresh login gets ConfirmPasswordDialog and one more run, the
+// "Log in" action of the error alert opens the same prompt (`confirm()`); a stale hash (files changed meanwhile)
+// reloads the plugin.
 import type { PluginDetail } from '@harness-forge/shared'
 import type { HarnessErrorUiAction } from '~/components/common/harness-error'
 import { computed, ref, useId, watch } from 'vue'
@@ -21,11 +23,12 @@ import {
 import { Spinner } from '@/components/ui/spinner'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
 import HarnessErrorAlert from '~/components/common/HarnessErrorAlert.vue'
+import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { useAuthStore } from '~/stores/auth'
 import { usePluginsStore } from '~/stores/plugins'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import { isFreshAuthError, passwordErrorText, pluginSourceLabel } from './install'
+import { pluginSourceLabel } from './install'
 import TrustConsent from './TrustConsent.vue'
 import TrustWarning from './TrustWarning.vue'
 
@@ -41,6 +44,7 @@ const emit = defineEmits<{
 
 const auth = useAuthStore()
 const plugins = usePluginsStore()
+const freshAuth = useFreshAuth()
 const formId = useId()
 
 const loading = ref(false)
@@ -50,16 +54,13 @@ const trusting = ref(false)
 const checked = ref(false)
 const password = ref('')
 const passwordError = ref<string | null>(null)
-const confirmOpen = ref(false)
-const confirmPending = ref(false)
-const confirmError = ref<string | null>(null)
 // Bumped on every open and close, so a request that outlives its dialog session cannot touch the next one.
 let session = 0
 
 const detail = computed<PluginDetail | undefined>(() => plugins.details[props.pluginId])
 const name = computed(() => detail.value?.name ?? props.pluginId)
 const source = computed(() => (detail.value ? pluginSourceLabel(detail.value) : props.pluginId))
-const busy = computed(() => trusting.value || confirmPending.value)
+const busy = computed(() => trusting.value || freshAuth.pending.value)
 const needsTrust = computed(() => detail.value !== undefined && detail.value.trust.required && !detail.value.trust.trusted)
 const needsPassword = computed(() => needsTrust.value && auth.status?.enabled === true && !auth.fresh)
 const canTrust = computed(() => needsTrust.value && !busy.value && checked.value && detail.value?.trust.hash != null
@@ -88,9 +89,8 @@ watch(() => [props.open, props.pluginId] as const, ([open]) => {
   checked.value = false
   password.value = ''
   passwordError.value = null
-  confirmOpen.value = false
-  confirmPending.value = false
-  confirmError.value = null
+  // A waiting password prompt belongs to the dialog session that ends here.
+  freshAuth.cancel()
   loadError.value = null
   if (!open)
     return
@@ -109,27 +109,15 @@ function onOpenChange(value: boolean) {
   emit('update:open', value)
 }
 
-async function pin(current: number): Promise<void> {
-  const plugin = detail.value
-  const hash = plugin?.trust.hash
-  if (!plugin || !hash)
-    return
-  const result = await plugins.trust(plugin.id, hash)
-  if (current !== session)
-    return
-  toast.success(`Trusted ${result.name}`)
-  emit('trusted', result.id)
-  emit('update:open', false)
+/** `POST /plugins/:id/trust` with the reviewed hash. */
+async function pin(): Promise<PluginDetail | null> {
+  const hash = detail.value?.trust.hash
+  return detail.value && hash ? await plugins.trust(detail.value.id, hash) : null
 }
 
 async function handleFailure(failure: unknown, current: number) {
-  if (current !== session)
+  if (current !== session || isFreshAuthCancelled(failure))
     return
-  if (isFreshAuthError(failure)) {
-    confirmError.value = null
-    confirmOpen.value = true
-    return
-  }
   const harnessError = toHarnessError(failure)
   error.value = harnessError
   if (harnessError.code === 'conflict') {
@@ -148,16 +136,20 @@ async function trust() {
   trusting.value = true
   try {
     if (needsPassword.value) {
-      try {
-        await auth.login(password.value)
-      }
-      catch (failure) {
+      const failed = await freshAuth.login(password.value)
+      if (failed !== null) {
         if (current === session)
-          passwordError.value = passwordErrorText(failure)
+          passwordError.value = failed
         return
       }
     }
-    await pin(current)
+    // Trusting a plugin that runs code always needs fresh auth.
+    const result = await freshAuth.run(pin, { required: true })
+    if (current !== session || !result)
+      return
+    toast.success(`Trusted ${result.name}`)
+    emit('trusted', result.id)
+    emit('update:open', false)
   }
   catch (failure) {
     await handleFailure(failure, current)
@@ -168,47 +160,29 @@ async function trust() {
   }
 }
 
-/** Fallback fresh-auth prompt: log in, then retry the trust request once. */
-async function onConfirmPassword(value: string) {
+/** "Log in" of an error alert: the password prompt now, then the trust (or the failed load) runs again. */
+async function logIn() {
   const current = session
-  confirmPending.value = true
-  confirmError.value = null
   try {
-    await auth.login(value)
+    await freshAuth.confirm()
   }
-  catch (failure) {
-    if (current === session) {
-      confirmError.value = passwordErrorText(failure)
-      confirmPending.value = false
-    }
+  catch {
+    // Closed: nothing else happens.
     return
   }
   if (current !== session)
     return
-  confirmPending.value = false
-  confirmOpen.value = false
-  trusting.value = true
-  try {
-    await pin(current)
-  }
-  catch (failure) {
-    if (current === session)
-      error.value = toHarnessError(failure)
-  }
-  finally {
-    if (current === session)
-      trusting.value = false
-  }
+  if (detail.value)
+    void trust()
+  else
+    void load(current)
 }
 
 function onErrorAction(action: HarnessErrorUiAction) {
-  if (action === 'login') {
-    confirmError.value = null
-    confirmOpen.value = true
-  }
-  else if (action === 'retry') {
+  if (action === 'login')
+    void logIn()
+  else if (action === 'retry')
     void load(session)
-  }
 }
 </script>
 
@@ -273,11 +247,12 @@ function onErrorAction(action: HarnessErrorUiAction) {
     </DialogContent>
 
     <ConfirmPasswordDialog
-      v-model:open="confirmOpen"
+      :open="freshAuth.open.value"
       description="Confirm your password to trust a plugin that runs code on this server."
-      :pending="confirmPending"
-      :error="confirmError"
-      @submit="onConfirmPassword"
+      :pending="freshAuth.pending.value"
+      :error="freshAuth.error.value"
+      @update:open="freshAuth.setOpen"
+      @submit="freshAuth.submit"
     />
   </Dialog>
 </template>

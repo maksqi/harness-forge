@@ -94,6 +94,19 @@ describe('shareToolRow', () => {
     expect(blocks.map(block => block.querySelector('[data-slot="server-truncated"]') !== null)).toEqual([false, true])
   })
 
+  it('shows the prompt of generate_image as its first argument', () => {
+    mountRow({
+      type: 'tool',
+      toolName: 'generate_image',
+      status: 'done',
+      input: { aspectRatio: '16:9', n: 2, prompt: 'A red fox in the snow' },
+      output: { modelRef: 'mock:image', images: [{ fileId: 'file_AAAAAAAAAAAAAAAA', url: '/api/files/file_AAAAAAAAAAAAAAAA', mediaType: 'image/png', name: 'image-1.png' }] },
+    })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain('"A red fox in the snow"')
+    expect(row.textContent).not.toContain('16:9')
+  })
+
   it('shows "{}" for an empty shared input and a string output as is', async () => {
     mountRow({ type: 'tool', toolName: 'now', status: 'done', input: {}, output: '12:00' })
     const row = byTestId(testIds.shareToolRow)!

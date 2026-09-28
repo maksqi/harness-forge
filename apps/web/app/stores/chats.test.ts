@@ -186,6 +186,19 @@ describe('chats store: events', () => {
     expect(chats.items.map(chat => chat.id)).toEqual([yesterday.id])
   })
 
+  it('keeps summary fields only: the active leaf of chat.updated is not stored in the row', async () => {
+    api.chats.list.mockResolvedValue({ items: [today], nextCursor: null })
+    const chats = useChatsStore()
+    await chats.fetchPage()
+    chats.applyEvent({ type: 'chat.updated', data: { ...today, title: 'Switched', activeLeafId: 'msg_asst000000000001' }, at: 1 })
+    expect(chats.byId(today.id)).toEqual({ ...today, title: 'Switched' })
+    expect(chats.byId(today.id)).not.toHaveProperty('activeLeafId')
+
+    const created = chatSummary({ id: chatId(8), updatedAt: NOW })
+    chats.applyEvent({ type: 'chat.updated', data: { ...created, activeLeafId: null }, at: 2 })
+    expect(chats.byId(created.id)).toEqual(created)
+  })
+
   it('does not insert rows before the list is loaded or outside the loaded window', async () => {
     const chats = useChatsStore()
     chats.applyEvent({ type: 'chat.created', data: today, at: 1 })
