@@ -23,7 +23,7 @@ flowchart LR
     Reg["registry/<br/>providers, models, tools, MCP, commands, hooks"]
     Cat["catalog/<br/>model catalog"]
     MCPM["mcp/ manager"]
-    Svc["services/<br/>settings, secrets, chats, files, events"]
+    Svc["services/<br/>settings, secrets, chats, files, events, data, shares"]
     DB[("SQLite WAL<br/>data/harness.db")]
   end
   subgraph DataDir["HF_DATA_DIR (data/)"]
@@ -37,6 +37,7 @@ flowchart LR
   MD["models.dev api.json"]
 
   SPA -- "fetch JSON, UI message stream (SSE),<br/>GET /api/events (SSE)" --> API
+  Visitor["Share link visitor<br/>(no session)"] -- "GET /api/share/:token<br/>(public, rate-limited)" --> API
   SPA -- "GET / (assets)" --> Static
   API --> Chat
   API --> Svc
@@ -69,6 +70,10 @@ Key properties:
   `web_fetch`, MCP servers, commands) are builtin plugins that use the same public SDK as user plugins (ADR-009).
 - **The chat run is decoupled from the HTTP request**: a run survives client disconnects, can be resumed
   (`GET /api/chat/:id/stream`) and is stopped only by `POST /api/chat/:id/stop`.
+- **Conversations are trees** (ADR-023): edits and regenerations add versions; the server keeps the chosen path
+  (section 6.8).
+- **Small public surface**: without a session only health, login, icons, the SPA files and the read-only share
+  routes answer (section 10.1); share links serve sanitized snapshots, never live data (section 6.10).
 
 ## 2. Packages
 
@@ -92,14 +97,16 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5). |
 | `app.ts` | `createApp(deps)` app factory: mounts middleware and every route module under `/api`; used by `main.ts` and `createTestApp()`. |
 | `paths.ts`, `logger.ts` | Package-relative locations (server package root, migrations, bundled assets, the SPA build, installed package versions); JSON-lines logger with redaction. |
-| `http/middleware/` | Request id, structured access log, secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`. |
-| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. |
+| `http/middleware/` | Request id, structured access log (share tokens masked), secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`; `request-info.ts` resolves the client address and scheme, trusting forwarded headers only from `HF_TRUST_PROXY` peers (section 10.6). |
+| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `shares`); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes. |
 | `http/static.ts` | Production SPA serving from `HF_WEB_DIR` (default `apps/web/.output/public`) with `200.html` fallback for client routes. |
-| `security/` | `keyring.ts` (master key + HKDF subkeys), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors). |
+| `security/` | `keyring.ts` (master key + HKDF subkeys), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). |
 | `db/` | Drizzle schema (`schema.ts`), libsql client, `migrate()` at boot, pragmas (WAL, foreign keys, busy timeout), transaction helper. |
 | `services/settings/` | Typed global settings (defaults, validation, cache) over the `settings` table. |
 | `services/secrets/` | Encrypted secret store (AES-256-GCM) over the `secrets` table: `get/set/delete/list(scope)`, masked hints, env fallback lookup. |
-| `services/chats/` | Chat + message persistence, search, cursor pagination, export (md/json), usage rows, title updates. |
+| `services/chats/` | Chat + message persistence, the message tree (`tree.ts`: active path, versions, latest leaf; section 6.8), version switching, search, cursor pagination, export (md / json v2) and import (v1 / v2), usage rows, title updates, `allIds` / `importChat` / `removeAll` for bulk data. |
+| `services/data/` | Bulk data (ADR-024, section 6.9): summary, streamed zip export, import of a backup or a single chat, delete-all, the import / delete mutex. |
+| `services/shares/` | Share links (ADR-025, section 6.10): HMAC tokens, the allowlist sanitizer, snapshots, owner CRUD, the public view and file access, expiry, rate limits. |
 | `services/files/` | Content-addressed upload store (`data/files/<aa>/<sha256>`), MIME/size validation, `files` rows, read streams. |
 | `services/events/` | In-process event bus + SSE fan-out for `/api/events` (section 6.7). |
 | `registry/` | Typed registries for providers, models, tools, MCP server declarations, commands and hooks; every registration returns a `Disposable` and is tagged with its owner plugin id. |
@@ -126,6 +133,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `builtin-plugins/core-mcp/` | Owns the user-configured MCP servers (`mcp_servers` table): they are declared as its contributions, so disabling `core-mcp` closes them. Its settings (reconnect automatically, connect timeout) apply to every MCP server. |
 | `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, plus the tool `mock_approval_tool` (behavior in PROVIDERS.md section 8). |
 | `testing/` | In-process test harness: `createTestApp()` (real composition over an in-memory database) and fakes. |
+| `live/` | Opt-in live provider suite (`*.live.test.ts`, `pnpm test:live`, ADR-027): real provider calls with the keys in the environment; excluded from `pnpm test` (PROVIDERS.md section 12). |
 | `assets/catalog/models-dev.json` (package root) | Bundled models.dev snapshot (updated by `pnpm catalog:update`); read at runtime, so it ships next to `dist/` (section 11). |
 | `drizzle/` (package root) | Generated SQL migrations, applied by `migrate()` at boot; ship next to `dist/`. |
 
@@ -138,20 +146,22 @@ Dependency direction (no cycles): `http/routes` -> `services`, `chat`, `catalog`
 |---|---|
 | `app.vue`, `spa-loading-template.html` | Root component; dark-styled inline loading template (no light flash). |
 | `assets/css/main.css` | Tailwind 4 entry + oklch design tokens (dark default, light) + fonts. |
-| `layouts/` | App shell layout (sidebar + inset, settings variant) and the login layout; names and structure in UI.md. |
-| `middleware/` | Route middleware: auth guard (redirect to `/login` when `AuthStatus.authenticated` is false). |
+| `layouts/` | App shell layout (sidebar + inset, settings variant; also mounts the Share dialog), the login layout and the public `share` layout (no sidebar); names and structure in UI.md. |
+| `middleware/` | Route middleware: auth guard (redirect to `/login` when `AuthStatus.authenticated` is false); `/share/*` is exempt and never loads the auth status. |
 | `plugins/` | `$api` plugin (`createApiClient` with a `fetch` wrapper: `unauthorized` -> `/login`), `events.client.ts` (`EventSource('/api/events')` -> store updates), `shortcuts.client.ts` (the single `keydown` listener of the shortcuts registry). |
 | `pages/index.vue` | Empty state: greeting + composer; first send navigates to `/chat/:id`. |
 | `pages/chat/[id].vue` | Chat transcript + composer for one chat. |
 | `pages/plugins.vue`, `pages/plugins/{index,new,[id]}.vue` | Parent route (hosts the single `InstallDialog`); plugin list (`?filter=`), new plugin (provider wizard / code template), plugin detail tabs. |
-| `pages/settings/{providers,models,general,appearance,about}.vue` | Settings pages (`/settings` redirects to providers). |
+| `pages/settings/{providers,models,general,appearance,data,about}.vue` | Settings pages (`/settings` redirects to providers); `data` = backup, import, shared links, delete-all. |
+| `pages/share/[token].vue` | Public read-only share page (`share` layout): a store-free transcript of a share snapshot. |
 | `pages/login.vue` | Password login. |
 | `components/ui/` | shadcn-vue primitives (generated, frozen, no prefix). |
 | `components/ai-elements/` | AI Elements Vue subset (copied, frozen, used with `Ai` prefix). |
 | `components/app-shell/` | `AppSidebar`, `ChatNav`, `PluginsNav`, `SettingsNav`, `ThemeToggle`, `CommandPalette`, `ShortcutsDialog`. |
-| `components/chat/`, `components/chat/parts/`, `components/chat/composer/` | Transcript, message and part renderers, composer (ModelPicker, EffortMenu, PermissionMenu, SlashMenu). |
+| `components/chat/`, `components/chat/parts/`, `components/chat/composer/` | Transcript, message and part renderers (with the `BranchSwitcher` of message versions), composer (ModelPicker, EffortMenu, PermissionMenu, SlashMenu). |
 | `components/plugins/*` | `list`, `detail`, `forms`, `install`, `wizard`, `code`, `mcp` component groups. |
-| `components/settings/`, `components/providers/`, `components/common/` | Settings forms, `ProviderIcon`, shared pieces (`Markdown.vue`, empty states). |
+| `components/share/` | `ShareDialog`, `SharesSettingsSection`, `SharedChatView`, `ShareToolRow`. |
+| `components/settings/`, `components/settings/data/`, `components/providers/`, `components/common/` | Settings forms (incl. the Data page), `ProviderIcon`, shared pieces (`Markdown.vue`, empty states). |
 | `composables/` | `useChatSession` (detached `useChat` registry), `useComposer*`, `useShortcuts`, `useGlobalShortcuts`, helpers. |
 | `stores/` | Pinia stores `auth`, `chats`, `providers`, `models`, `plugins`, `settings`, `ui` (each `use<Name>Store`), implemented over the typed client and refreshed by `/api/events`. |
 | `utils/` | Pure helpers (date grouping, formatting, `data-testid` constants). |
@@ -201,6 +211,10 @@ Notes:
   middle of an atomic swap) is moved back; every other staging entry is deleted.
 - MCP clients connect lazily in the background after their owning plugin is `active`; a failing MCP server never
   blocks boot.
+- `HF_TRUST_PROXY` is parsed with the other variables: `1`, `true`, hop counts and unknown tokens fail the boot with
+  an explanation of the format; when it is set, the boot log lists the trusted ranges (section 10.6).
+- The first boot of v1.1 on a v1 data directory applies migration `0001`, which backfills a linear message tree for
+  every existing chat (section 8, Migrations).
 - Graceful shutdown (`SIGINT`/`SIGTERM`, `stopDeps()`): stop accepting connections, abort active runs (persisted as
   `aborted`), dispose plugins (5 s guard each), close MCP clients (terminates stdio children), stop catalog timers,
   close SSE streams, then close the DB. Every step runs even when an earlier one fails; a shutdown longer than 10 s
@@ -217,7 +231,8 @@ The client keeps one `useChat` instance per open chat (`useChatSession(id)`), co
 (React only), so `useChatSession` calls `resumeStream()` itself on mount when the chat has an active run
 (`ChatSummary.running`, or a `run.started` event).
 `prepareSendMessagesRequest` sends only the last message plus the composer state (`ChatRequestBody`, see API.md);
-the server owns history.
+the server owns history. A new user message also carries `parentId` (the message before it on the path the user
+sees, `null` for a first message); a regenerate carries `messageId` (section 6.8, ADR-023).
 
 ```mermaid
 sequenceDiagram
@@ -230,7 +245,7 @@ sequenceDiagram
   participant DB as services/chats
   participant M as LLM provider
   participant Ev as events bus
-  W->>R: ChatRequestBody (chatId, message, trigger, messageId?, modelRef, reasoningEffort, toolMode)
+  W->>R: ChatRequestBody (chatId, message, trigger, parentId?, messageId?, modelRef, reasoningEffort, toolMode)
   R->>R: zod validate (400 validation_error)
   R->>Runs: acquire(chatId)
   alt a run is active for chatId
@@ -241,7 +256,8 @@ sequenceDiagram
   alt provider missing or required credentials absent
     Prov-->>W: 400 provider_not_configured (action configure-provider), run released
   end
-  P->>DB: transaction: expand slash command, supersede pending approvals, apply edit / regenerate / continuation, save user message
+  P->>DB: commit (kind new / regenerate / continuation): expand command, supersede approvals on the path, append user message, set active leaf
+  P->>DB: history = listPath(active leaf): the root-to-leaf path only
   P->>P: validateUIMessages, file parts -> bytes, tools (registry + MCP, filtered), params + hooks
   P->>P: await convertToModelMessages(history, tools), hook chat.messages, trim to 85 percent of context
   P->>M: streamText(model, instructions, messages, tools, toolApproval, stopWhen isStepCount(maxSteps), abortSignal run.signal)
@@ -251,7 +267,7 @@ sequenceDiagram
   R-)Ev: run.started (chatId, messageId, modelRef)
   M-->>W: start (metadata modelRef, startedAt), start-step, text / reasoning / tool chunks, finish-step ...
   M-->>W: finish (metadata finishedAt, durationMs, reasoningMs, usage, costUsd, finishReason) then [DONE]
-  P->>DB: onEnd: idempotent upsert of the assistant message, usage row, chats.updated_at, pending_approval
+  P->>DB: onEnd persist: upsert reply under its parent + CAS of the active leaf, usage row, updated_at, pending_approval
   P->>Prov: provider status update (connected / error)
   P-)P: hook message.completed (guarded)
   P->>Runs: release(chatId), drop the resume buffer
@@ -268,15 +284,27 @@ Notes:
 - The assistant message id is generated by the server (`generateMessageId` = `createMessageId`, `msg_` + 16 chars).
   User message ids are generated by the client with the same `createMessageId` helper and validated by the server
   (format + uniqueness), so edits and regenerations can address them.
-- History operations (step "transaction"):
-  - `submit-message` with a new user message: append it. Pending `approval-requested` parts of the previous
-    assistant message are resolved as denied with reason `superseded`.
-  - `submit-message` with `messageId` (edit): replace that user message and delete every later message.
-  - `regenerate-message`: delete the assistant message `messageId` (default: the last assistant message) and every
-    later message, then generate from the remaining history.
-  - `submit-message` whose `message` is the last assistant message (approval continuation, see 6.2): only the
-    approval decisions (`approval.id` -> `approved`, `reason`) are merged into the stored message; every other
-    client-side change is ignored.
+- History operations (the "commit transaction" step; the message tree is described in 6.8). Every request is one of
+  three kinds (`RequestKind`), and nothing is ever deleted:
+  - **new** (`submit-message` with a new user message): the parent is `parentId`, or the chat's active leaf when the
+    field is omitted (`null` = a new first message). An unknown parent -> `404 not_found`, an id already used ->
+    `409 conflict`. The history is the path from the root to that parent plus the new message. Pending
+    `approval-requested` parts on that path are resolved as denied with reason `superseded`; approvals on other
+    versions stay pending. The commit appends the user message and makes it the active leaf. An **edit** is a new
+    request whose parent is the edited message's parent, so the edited message gets a sibling version.
+  - **regenerate** (`regenerate-message`): the target is `messageId` or the active leaf. A user target is answered
+    itself; an assistant target answers the previous message on its path, which must be a user message (else
+    `400`). The active leaf becomes the answered message and the new reply becomes a sibling of the old one.
+  - **continuation** (`submit-message` whose `message` is the active leaf, an assistant message with approval
+    responses, see 6.2): only the approval decisions (`approval.id` -> `approved`, `reason`) are merged into the stored
+    message; every other client-side change is ignored. Any other assistant message -> `404`.
+  - `messageId` on a user submit, or `parentId` on a regenerate or a continuation -> `400 validation_error` (the
+    in-place edit of v1 was removed, ADR-023).
+- Persisting the reply (`onEnd`): one transaction upserts the assistant message under its reply parent (the new user
+  message, the answered message, or the continued message's parent) and moves the active leaf to it with a
+  compare-and-set that succeeds only while the leaf is still the reply parent or the reply itself, so nothing
+  overwrites a leaf moved by someone else; `touch` follows as before. A run released by force stores nothing and leaves
+  the leaf on the user message. Title generation, context trimming and notices work on the path.
 - Slash commands (`/name args` at the start of a user text part, name registered in the commands registry): the
   user message keeps the original text and gets `metadata.command`; `prompt` commands replace the text sent to the
   model with the expansion; `reply` commands write the assistant reply with `createUIMessageStream` without a model
@@ -345,7 +373,9 @@ sequenceDiagram
 
 Deny path: `addToolApprovalResponse({ id, approved: false, reason })` -> continuation -> the SDK emits
 `tool-output-denied`; the model is told the call was not approved. A new user message sent while approvals are
-pending resolves them as denied (`superseded`). Only `user-approval` results show a card; `approved` and
+pending resolves the ones on its path as denied (`superseded`). Approvals pending on another version stay pending:
+switching back to that version sets `chats.pending_approval` again, and the card works because the continuation
+targets the active leaf (6.8). Only `user-approval` results show a card; `approved` and
 `not-applicable` calls run directly, and automatic denials render as `output-denied` with
 `approval.isAutomatic = true`.
 
@@ -361,9 +391,13 @@ Resume consistency rules (replayed chunks are applied on top of the client's las
 overlap with persisted content):
 
 - The in-flight assistant message is persisted only when the run ends (`onEnd`, including abort). While a run is
-  active, `GET /api/chats/:id` returns history as it was when the run started: a new reply is absent, an approval
-  continuation shows the stored message with the merged decisions (persisted before streaming). Replaying the
-  run from its first chunk on top of that snapshot rebuilds the message exactly once.
+  active, `GET /api/chats/:id` returns the active path as the commit left it: it ends at the new user message, at the
+  answered message of a regenerate, or at the continued message (whose merged approval decisions were persisted
+  before streaming); the reply in flight is absent. Replaying the run from its first chunk on top of that path
+  rebuilds the message exactly once.
+- Version switches (`POST /api/chats/:id/branch`) are refused with `409 conflict` (`details.reason: 'run-active'`)
+  while the runs registry holds the chat in any phase (`ChatRunner.hasRun`, including `preparing`), so a switch never
+  races a commit or a persist.
 - The buffer is dropped when the run is released (after persistence); from then on the resume endpoint returns
   `204`. The web refetches a chat on `run.finished` unless its own `useChat` instance is streaming it, which covers
   a run that ends between loading the chat and resuming.
@@ -555,6 +589,151 @@ sequenceDiagram
   store from the payload. No replay of missed events (`Last-Event-ID` is ignored).
 - Event names and payloads: API.md, "Server events".
 
+### 6.8 Message tree and version switching (ADR-023)
+
+The messages of a chat form a tree. `messages.parent_id` points at the previous message of the path (`null` for a
+first message) and siblings share a parent: they are the **versions** of a message. `seq` stays unique per chat and is
+the creation order, so a parent always has a lower `seq` than its children and the most recent leaf under a message is
+the message with the highest `seq` in its subtree. `chats.active_leaf_id` is the last message of the path the user
+sees (`null` for an empty chat).
+
+```mermaid
+flowchart LR
+  A["user A (seq 0)"] --> RA["reply (seq 1)"] --> B["user B (seq 2)"] --> RB["reply (seq 3)"]
+  A2["user A2, edit of A (seq 4)"] --> RA2["reply (seq 5)"]
+  RA2 -.- L(["active leaf"])
+```
+
+Here A and A2 are siblings (both first messages). The active path is A2 -> reply, so `GET /api/chats/:id` returns
+those two messages with `branches = { <A2>: { siblings: [<A>, <A2>], index: 1 } }`. Switching to A makes the latest
+leaf under A (the reply at seq 3) active again, which brings back A -> reply -> B -> reply.
+
+- **Reading**: `listPath(chatId, leafId)` walks up `parent_id` with a recursive query (guard `m.seq < path.seq`, so bad
+  data cannot loop). `branches` comes from the pure helpers of `services/chats/tree.ts` (`pathTo`, `branchesOf`,
+  `latestLeafUnder`, `resolveLeaf`) over a light `(id, parent_id, seq, role)` query: every path message with at least
+  two versions maps to its siblings (`seq` order) and the index of the shown one. `ChatDetail` has no `activeLeafId`:
+  it always equals the id of the last message of `messages`, also during a run.
+- **Writing**: `appendMessage(chatId, message, parentId)` (404 for a parent outside the chat, 409 for a used id),
+  `upsertMessage(chatId, message, parentId)` (the parent is used on insert only) and `setActiveLeaf(chatId, leafId,
+  onlyFrom?)` (compare-and-set). Only the commit and persist transactions of the pipeline (6.1) and the switch route
+  move the active leaf.
+- **Switching** (`POST /api/chats/:id/branch { messageId }`, any message of the chat): 404 for an unknown chat or
+  message; `409 conflict` (`details.reason: 'run-active'`) while a run holds the chat (6.3); otherwise the active leaf
+  becomes the latest leaf under `messageId`, `pending_approval` is recomputed from the new path, `chat.updated` is
+  emitted, `updated_at` stays (a switch is not activity), and the response is the new `ChatDetail`.
+- **Clients**: the web sends `parentId` explicitly (the message before the new one on the path it shows), so a stale
+  tab or a failed request cannot attach a message to a path the user did not see; an unknown parent answers 404 and
+  the web reloads the chat (UI.md 11.1).
+- **Search** covers every version, so a snippet may come from a hidden version. **Totals** (`ChatDetail.totals`) sum
+  every usage row: the cost actually paid. The composer's chat cost sums the visible path only (UI.md 7.12).
+- **Export and import**: JSON export v2 carries every version in `seq` order, `parentIds` aligned by index and
+  `activeLeafId`; Markdown exports the active path. `POST /api/chats` and the data import (6.9) accept v1 (linear) and
+  v2: each parent must be an earlier message (else 400 with the field path), ids are remapped, and the active leaf is
+  the latest leaf under `activeLeafId` (or under the last message).
+- Versions are never deleted on their own (backlog); deleting a chat deletes all of them.
+
+### 6.9 Backup, import and delete-all (ADR-024)
+
+Settings -> Data uses the four routes of `http/routes/data.ts` (API.md): `GET /api/data` (summary),
+`GET /api/data/export?files&settings` (the backup), `POST /api/data/import` (multipart) and `POST /api/data/delete`
+(fresh auth). `services/data/` implements them on top of `ChatsService` (`allIds`, `importChat`, `removeAll`),
+`FilesService` (`importFile`, `purge`) and the settings service. There are no new event types: imports emit
+`chat.created` and deletions `chat.deleted`, one per chat.
+
+Zip layout (every entry mode 0644, mtime = `exportedAt`):
+
+```
+manifest.json          BackupManifest { format: 'harness-forge.backup', version: 1, exportedAt, appVersion,
+                       chatExportVersion: 2, includes: { files, settings }, counts } (written last)
+settings.json          the public Settings (only when includes.settings)
+chats/<chatId>.json    exactly GET /api/chats/:id/export?format=json (chat export v2)
+files/index.json       BackupFileIndex { items: [{ id, sha256, name, mime, size, createdAt }] } (only when includes.files)
+files/<sha256>         attachment bytes: stored for images and PDF, deflated for text/*
+```
+
+A backup never contains secrets, credentials, the password, plugins, MCP servers, model or tool preferences, share
+links or usage rows (the per-message `metadata.usage` survives, so `ChatDetail.totals` restarts at 0 after an import).
+
+- **Export** is streamed: an fflate `Zip` with `ZipPassThrough` / `ZipDeflate` entries inside a pull-based
+  `ReadableStream`; each pull produces one chat or one 64 KB chunk of a file, so memory stays flat. `manifest.json` is
+  written last so its counts are exact. fflate cannot write zip64, so a pre-check refuses backups above 3.5 GiB or
+  65k entries with `413 payload_too_large` (the message suggests `files=false`). A HEAD request cancels the stream at
+  once.
+- **Import**:
+  1. the body limit is 256 MiB + 64 KiB; the first bytes decide: `PK` = a backup, `{` = a single chat JSON (v1 or v2);
+  2. a zip is read lazily by `openZip()` in `plugins/install/zip.ts`, which reuses the plugin installer's guards:
+     path traversal, symlinks, duplicate names, entry count, declared vs actual size, exact inflation, CRC and
+     overlapping entries; a single top-level folder is accepted; per-entry caps apply before inflating (64 MiB per
+     chat, 20 MiB per file); unknown entries become warnings; a newer manifest version is refused;
+  3. chats are imported one at a time, each atomically through `chats.importChat`: with `skip` a chat whose id exists
+     is left alone (so running an import twice is idempotent), with `copy` it is imported with new ids and
+     " (imported)" appended to its title; pinned, archived, dates and titles are restored;
+  4. the files a chat references are imported first: each blob is re-hashed against the index and its type sniffed
+     again; `files.importFile` dedupes by sha256 and keeps the original id when it is free; `/api/files/<id>` URLs in
+     `file` and `reasoning-file` parts are rewritten to the resulting ids; missing blobs are counted and reported;
+  5. with `restoreSettings`, only known settings keys are applied, each validated on its own;
+  6. the answer (`DataImportResult`) lists every chat with its status; one failing chat never stops the others.
+- **Delete-all** (`{ confirm: 'DELETE', files?, usage? }`): take the mutex -> `chats.allIds()` -> `runs.stop` for
+  every id (this also covers runs that are still `preparing`) -> `chats.removeAll({ usage })` in one batch (share links
+  cascade; usage rows are deleted or kept detached) -> optionally `files.purge()` (rows and blobs) -> stop any run whose
+  chat appeared meanwhile. Settings, keys and plugins stay.
+- **Mutex**: one import or delete-all at a time per process; another one gets `409 conflict` with
+  `details.reason: 'busy'`. Exports do not take it.
+- The zip is a portable backup of conversations. Moving a whole server (keys, plugins, settings) still means copying
+  the data directory (section 7).
+
+### 6.10 Share links (ADR-025)
+
+A share is a `chat_shares` row holding a sanitized **snapshot** of a chat's active path, taken when the link is created
+and again only when the owner asks ("Update snapshot", `PATCH /api/shares/:id { refresh: true }`). The public routes
+never read live messages.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant O as Owner (Share dialog)
+  participant S as /api/shares (session, fresh auth)
+  participant Sh as services/shares
+  participant C as services/chats
+  participant V as Visitor (/share/token page)
+  participant P as /api/share/:token (public)
+  O->>S: POST /api/shares { chatId, options, expiresAt }
+  S->>Sh: create
+  Sh->>C: get(chatId): the active path
+  Sh->>Sh: allowlist sanitizer, collect file ids, size check (10 MiB)
+  Sh->>Sh: insert chat_shares (snapshot, options, file_ids, message_count, snapshot_at)
+  S-->>O: 201 ShareSummary { path: '/share/{token}' } (token recomputed, never stored)
+  V->>P: GET /api/share/{token}
+  P->>P: rate limits, parse the token, recompute the HMAC, timing-safe compare
+  P->>Sh: row by share id, not expired, chat still exists
+  P-->>V: 200 ShareView (file URLs /api/share/{token}/files/{id}), or the same 404 for every failure
+```
+
+- **Token** = the 16-char suffix of the share id (`shr_` + 16 chars) + the first 22 base64url chars of
+  `HMAC-SHA256(keyring subkey 'share', 'harness-forge/share/v1:' + shareId)`, i.e. `^[0-9A-Za-z]{16}[\w-]{22}$`.
+  Nothing token-like is stored: the owner's list recomputes it (the link can be copied again), revoking deletes the
+  row, and a new master key invalidates every link.
+- **Sanitizer (allowlist)**, applied when the snapshot is taken: kept are `user` and `assistant` messages with their
+  text parts, `file` parts (data URLs only for raster images), `source-url` / `source-document` parts, reasoning text,
+  tool parts (name and status, plus input, output and error text, each value capped at 16 KB), the model ref, the
+  command name and a `stopped` / `failed` status. Dropped: system messages, chat and global instructions,
+  `metadata.error`, usage and cost, `command.expansion`, provider metadata, approvals, `data-*`, `step-start` and
+  `reasoning-file` parts and anything unknown. A snapshot above 10 MiB -> `413`. `file_ids` stores the only files the
+  share may serve.
+- **Options** (`{ reasoning: false, toolDetails: false, attachments: true }` by default) are applied when the view is
+  served: without `reasoning` the reasoning parts are left out, without `toolDetails` tool parts keep only their name
+  and status, without `attachments` the file parts are left out and `shares.file` serves nothing. A changed option
+  therefore applies to the share page at once, without a new snapshot (API.md, `shares.ts`); `refresh: true` takes a
+  new snapshot of the current active path.
+- **Freshness**: `ShareSummary.outdated` = the chat changed after the snapshot (`chats.updated_at > snapshot_at`, or
+  the active path length differs from `message_count`); `expired` = `expires_at <= now`. At most 20 links per chat;
+  `expiresAt` must be in the future and at most 365 days ahead.
+- **Owner routes** (`shares.list`, `shares.create`, `shares.update`, `shares.remove`) need a session; create and update
+  also need fresh auth, because publishing a link turns brief session access into lasting remote access (ADR-017).
+  There are no share events; the owner UI refetches.
+- **Public routes** (`shares.view`, `shares.file`) are listed in 10.1 and protected as described in 10.7.
+- Deleting a chat, or delete-all, removes its shares (`ON DELETE CASCADE`).
+
 ## 7. Data directory
 
 ```
@@ -571,9 +750,11 @@ data/                      HF_DATA_DIR (default ./data, resolved against the rep
 ```
 
 The directory is created with mode 0700 when missing. Backups: copy the whole directory while the server is
-stopped (or use `sqlite3 .backup` for the DB). Losing `secret.key` (or changing `HF_MASTER_KEY`) makes every stored
-secret unreadable; the server then reports affected providers as `not_configured` and logs a warning, it does not
-crash.
+stopped (or use `sqlite3 .backup` for the DB); that is the full backup. Settings -> Data additionally exports a
+portable zip of every chat and attachment (section 6.9), without keys, plugins or MCP servers. Losing `secret.key` (or
+changing `HF_MASTER_KEY`) makes every stored secret unreadable and invalidates every share link (their tokens are
+HMACs of the master key's `share` subkey); the server then reports affected providers as `not_configured` and logs a
+warning, it does not crash.
 
 ## 8. Data model
 
@@ -663,9 +844,10 @@ by the API, e.g. `_auth.sessionEpoch`).
 | `settings` | json `ChatSettings` | NOT NULL DEFAULT `{}` |
 | `pinned` | boolean | NOT NULL DEFAULT 0 |
 | `archived` | boolean | NOT NULL DEFAULT 0 |
-| `pending_approval` | boolean | NOT NULL DEFAULT 0; last assistant message waits for an approval |
+| `pending_approval` | boolean | NOT NULL DEFAULT 0; the last message of the active path waits for an approval |
+| `active_leaf_id` | text | NULL; last message of the shown path (ADR-023, 6.8); `null` = empty chat; no FK (see Migrations) |
 | `created_at` | timestamp | NOT NULL |
-| `updated_at` | timestamp | NOT NULL |
+| `updated_at` | timestamp | NOT NULL; last activity (a version switch does not change it) |
 | | | index `chats_list_idx` (`archived`, `updated_at` DESC, `id` DESC) |
 
 **`messages`**
@@ -674,14 +856,15 @@ by the API, e.g. `_auth.sessionEpoch`).
 |---|---|---|
 | `id` | text | PK; `msg_` + 16 chars |
 | `chat_id` | text | NOT NULL; FK -> `chats.id` ON DELETE CASCADE |
-| `seq` | integer | NOT NULL; 0-based position in the chat |
+| `parent_id` | text | NULL; the previous message of its path (`null` = a first message); siblings are versions (ADR-023, 6.8); no FK (see Migrations) |
+| `seq` | integer | NOT NULL; creation order within the chat (0-based, unique; a parent's `seq` is lower than its children's) |
 | `role` | text | NOT NULL; `user` \| `assistant` \| `system` |
 | `parts` | json `UIMessage['parts']` | NOT NULL |
 | `metadata` | json `MessageMetadata` | NULL |
 | `search_text` | text | NOT NULL DEFAULT `''`; concatenated text parts, Unicode-normalized and lowercased (ADR-021), used by `GET /chats?q=`; not for display |
 | `created_at` | timestamp | NOT NULL |
 | `updated_at` | timestamp | NOT NULL; changes on approval continuations |
-| | | unique index `messages_chat_seq_idx` (`chat_id`, `seq`) |
+| | | unique index `messages_chat_seq_idx` (`chat_id`, `seq`); index `messages_chat_parent_idx` (`chat_id`, `parent_id`) |
 
 **`usage`** — one row per model call (chat run or title generation); kept when a chat is deleted.
 
@@ -770,8 +953,49 @@ by the API, e.g. `_auth.sessionEpoch`).
 | `created_at` | timestamp | NOT NULL |
 | | | index `files_sha256_idx` (`sha256`) |
 
+**`chat_shares`** — read-only share links (ADR-025, 6.10). There is no token column: tokens are recomputed from the id.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | text | PK; `shr_` + 16 chars |
+| `chat_id` | text | NOT NULL; FK -> `chats.id` ON DELETE CASCADE; index `chat_shares_chat_idx` |
+| `title` | text | NULL; a custom title of the share (`null` = the chat title) |
+| `options` | json `ShareOptions` | NOT NULL; `{ reasoning, toolDetails, attachments }` |
+| `snapshot` | json `ShareSnapshot` | NOT NULL; the sanitized active path; file URLs stored as `/api/files/<id>` |
+| `file_ids` | json `string[]` | NOT NULL; the only files the share may serve |
+| `message_count` | integer | NOT NULL; messages in the snapshot |
+| `snapshot_at` | timestamp | NOT NULL; when the snapshot was taken |
+| `expires_at` | timestamp | NULL = never expires |
+| `created_at` | timestamp | NOT NULL |
+| `updated_at` | timestamp | NOT NULL |
+
+### Migrations
+
+| Migration | Content |
+|---|---|
+| `0000_initial_schema` | the 14 tables of v1 |
+| `0001` (Phase 5) | `ALTER TABLE messages ADD parent_id`, `ALTER TABLE chats ADD active_leaf_id`, index `messages_chat_parent_idx`, table `chat_shares` + index `chat_shares_chat_idx`, then a hand-written backfill |
+
+The backfill turns every existing chat into a linear chain: each message's parent is the previous message by `seq`,
+and the active leaf is the last message (`null` for an empty chat):
+
+```sql
+UPDATE `messages` SET `parent_id` = (SELECT p.`id` FROM `messages` p WHERE p.`chat_id` = `messages`.`chat_id`
+  AND p.`seq` < `messages`.`seq` ORDER BY p.`seq` DESC LIMIT 1);
+UPDATE `chats` SET `active_leaf_id` = (SELECT m.`id` FROM `messages` m WHERE m.`chat_id` = `chats`.`id`
+  ORDER BY m.`seq` DESC LIMIT 1);
+```
+
+Why the two new columns have no foreign keys: drizzle-kit writes `ALTER TABLE … ADD … REFERENCES` without the
+`ON DELETE` clause, and a `chats.active_leaf_id -> messages.id` key would break chat deletion, which removes a chat's
+messages before the chat. Both columns are nullable without a default, so SQLite adds them in place. A generated
+migration that rebuilds a table (`DROP TABLE`, `__new_…`) is rejected at review: foreign keys are on, and the rebuild's
+`DROP` would cascade-delete messages inside the migration transaction. `migrate()` applies a migration in one
+transaction, so a half-done backfill cannot happen; `db.test.ts` migrates a v1-shaped database through `0001`.
+
 Not stored in the DB: sessions (stateless HMAC cookie), active runs and resume buffers (memory), plugin logs
-(memory ring buffer), SSE subscribers (memory).
+(memory ring buffer), SSE subscribers (memory), share tokens (recomputed from the share id), rate-limit counters and
+the data import / delete-all mutex (memory).
 
 ## 9. Model catalog
 
@@ -810,39 +1034,43 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
 |---|---|
 | Password | Optional. Source: `HF_PASSWORD` (wins) or a hash stored in `secrets` (scope `auth`, name `password`), set with `PUT /api/auth/password`. Hash = scrypt (N = 2^15, r = 8, p = 1, 32-byte key, 16-byte random salt, `maxmem` 64 MB), encoded `scrypt$15$8$1$<salt b64>$<hash b64>`. `HF_PASSWORD` is hashed in memory at boot; comparisons use `timingSafeEqual`. |
 | No password | Every request is authenticated. Allowed only on a loopback bind unless `HF_INSECURE=1`. |
-| DNS-rebinding guard | Without a password, `/api` answers `403 forbidden` to any request whose `Host` is not `localhost`, `*.localhost` or a loopback IP (unless `HF_INSECURE=1`): a web page whose DNS name is rebound to 127.0.0.1 would otherwise be same-origin with itself and drive the whole API. With a password every host name is allowed (sessions protect it). |
+| DNS-rebinding guard | Without a password, `/api` answers `403 forbidden` to any request whose `Host` is not `localhost`, `*.localhost` or a loopback IP (unless `HF_INSECURE=1`): a web page whose DNS name is rebound to 127.0.0.1 would otherwise be same-origin with itself and drive the whole API. With a password every host name is allowed (sessions protect it). The guard reads only `Host`, never `X-Forwarded-Host` (10.6), and also covers the public share routes: exposing share links requires a password. |
 | Bind safety | At boot, `HF_HOST` outside `127.0.0.0/8`, `::1`, `localhost` requires a configured password (`HF_PASSWORD` or one stored in the data directory) or `HF_INSECURE=1` (else exit 1). At runtime, removing the password while bound to a non-loopback host is rejected (`409 conflict`). |
-| Session cookie | Name `hf_session`; value `v1.<payload b64url>.<HMAC-SHA256 b64url>` signed with the HKDF `session` subkey; payload `{ iat, exp, authAt, epoch }` (ms). Attributes: `HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` (30 days) plus `Secure` when the request is HTTPS (`X-Forwarded-Proto: https` counts). Re-issued when older than 24 h (rolling). |
+| Session cookie | Name `hf_session`; value `v1.<payload b64url>.<HMAC-SHA256 b64url>` signed with the HKDF `session` subkey; payload `{ iat, exp, authAt, epoch }` (ms). Attributes: `HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` (30 days) plus `Secure` when the request is HTTPS (`X-Forwarded-Proto: https` counts: only from a trusted proxy when `HF_TRUST_PROXY` is set, from any peer when it is unset; 10.6). Re-issued when older than 24 h (rolling). |
 | Revocation | `epoch` must equal the internal setting `_auth.sessionEpoch`; changing or removing the password increments it, which invalidates every session (the caller gets a fresh cookie). Logout clears the cookie. |
-| Fresh auth | ADR-017. When a password is set, sensitive operations require `now - authAt <= 10 min`, else `403 forbidden` with `action: 'login'` (the web asks for the password — inline in the install and trust dialogs, else in `ConfirmPasswordDialog` — calls `POST /api/auth/login` and retries): installing a plugin that requires trust (code or stdio MCP, with or without `trust`), `POST /api/plugins/:id/trust`, scaffolding a code plugin, `POST /api/plugins/:id/build`, `POST /api/plugins/:id/reload` of a code plugin, writing or deleting files of a plugin that runs code (`PUT` / `DELETE /api/plugins/:id/files/*`), creating or changing a stdio MCP server (also inside a created declarative plugin), `PUT /api/auth/password`. The window is 10 minutes, so the editor asks at most once per window; such an editor save also re-pins a trusted `created` plugin (10.4). |
-| Login rate limit | Failed password checks (`POST /api/auth/login` and the current-password check of `PUT /api/auth/password`): 5 per 15 min per remote address and 50 per 15 min globally, then `429 rate_limited` with `retryAfterMs` and a `Retry-After` header. A successful login resets the per-address counter. The address is the TCP peer: `X-Forwarded-For` is ignored because any client can forge it. **Reverse-proxy caveat:** behind a proxy every client shares the proxy's address, so 5 failed attempts from anyone lock out every client (including you) for up to 15 minutes; limit access at the proxy (IP allow list, VPN, basic auth) when the server is reachable from the internet. |
-| Public endpoints | `GET /api/health`, `GET /api/auth/status`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/icons/lobe`, `GET /api/icons/lobe/:slug`, and the SPA static files. Everything else returns `401 unauthorized` without a valid session. |
+| Fresh auth | ADR-017. When a password is set, sensitive operations require `now - authAt <= 10 min`, else `403 forbidden` with `action: 'login'` (the web asks for the password — inline in the install and trust dialogs, else in `ConfirmPasswordDialog` — calls `POST /api/auth/login` and retries): installing a plugin that requires trust (code or stdio MCP, with or without `trust`), `POST /api/plugins/:id/trust`, scaffolding a code plugin, `POST /api/plugins/:id/build`, `POST /api/plugins/:id/reload` of a code plugin, writing or deleting files of a plugin that runs code (`PUT` / `DELETE /api/plugins/:id/files/*`), creating or changing a stdio MCP server (also inside a created declarative plugin), `PUT /api/auth/password`, creating or updating a share link (`POST /api/shares`, `PATCH /api/shares/:id`) and deleting all data (`POST /api/data/delete`). The window is 10 minutes, so the editor asks at most once per window; such an editor save also re-pins a trusted `created` plugin (10.4). |
+| Login rate limit | Failed password checks (`POST /api/auth/login` and the current-password check of `PUT /api/auth/password`): 5 per 15 min per client address and 50 per 15 min globally, then `429 rate_limited` with `retryAfterMs` and a `Retry-After` header. A successful login resets the per-address counter. The client address is the TCP peer, or, when the peer is a proxy listed in `HF_TRUST_PROXY`, the client named by `X-Forwarded-For` (10.6); a forwarded header from any other peer is ignored because any client can forge it. **Without `HF_TRUST_PROXY`** every client behind a proxy shares the proxy's address, so 5 failed attempts from anyone lock out every client (including you) for up to 15 minutes: set `HF_TRUST_PROXY` for your proxy, and limit access at the proxy (IP allow list, VPN, basic auth) when the server is reachable from the internet. The global cap stays the backstop against forged addresses. |
+| Public endpoints | `GET /api/health`, `GET /api/auth/status`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/icons/lobe`, `GET /api/icons/lobe/:slug`, the share routes `GET /api/share/:token` and `GET /api/share/:token/files/:fileId` (a valid share token is the credential; rate-limited; 10.7), and the SPA static files (the `/share/<token>` page is a client route of the SPA). Everything else returns `401 unauthorized` without a valid session. |
 
 ### 10.2 CSRF and headers
 
 - **Origin check** on every non-`GET`/`HEAD`/`OPTIONS` request under `/api`: if `Origin` is present it must equal the
-  server origin (scheme + `Host`) or, in development, `http://localhost:3000` / `http://127.0.0.1:3000`; if `Origin`
+  server origin (the request scheme of 10.6 + `Host`; `X-Forwarded-Host` never counts) or, in development,
+  `http://localhost:3000` / `http://127.0.0.1:3000`; if `Origin`
   is absent, `Sec-Fetch-Site` must be absent, `same-origin` or `none`. Violations -> `403 forbidden`. Non-browser
   clients (curl) without these headers pass; they cannot ride on the user's cookie. Together with
   `SameSite=Strict` this closes CSRF. No CORS headers are ever sent.
 - **Secure headers** (all responses): `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
   `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`,
-  `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `Strict-Transport-Security: max-age=31536000`
-  only over HTTPS (`X-Forwarded-Proto: https` counts).
+  `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `X-Robots-Tag: noindex, nofollow` (Phase 5: keeps
+  share links and everything else out of search engines), `Strict-Transport-Security: max-age=31536000` only over
+  HTTPS (`X-Forwarded-Proto: https` counts under the rule of 10.6).
 - **CSP for the SPA HTML**: `default-src 'self'; script-src 'self' 'wasm-unsafe-eval' <sha256 hashes of the inline
   scripts of the served HTML document, recomputed when the file changes>; style-src 'self' 'unsafe-inline';
   img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:;
   object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`. `'wasm-unsafe-eval'` only allows
   compiling WebAssembly (the syntax highlighter of code blocks), not JavaScript `eval`. Remote images in model output
   are therefore blocked (no data exfiltration through image URLs); the markdown renderer shows them as links.
-- **CSP for API responses**: `default-src 'none'; frame-ancestors 'none'`; icons and files use their own CSP (API.md).
+- **CSP for API responses**: `default-src 'none'; frame-ancestors 'none'`; icons, files and share files use their own
+  CSP (API.md).
 
 ### 10.3 Secrets at rest
 
 - Master key: `HF_MASTER_KEY` (base64, 32 bytes) or `data/secret.key` (generated with `crypto.randomBytes(32)`,
   mode 0600; the server refuses to start if the file is group/world readable).
-- Subkeys: HKDF-SHA256(masterKey, salt `harness-forge/v1`, info `encryption` | `session` | `approval`, 32 bytes).
-  `approval` feeds `experimental_toolApprovalSecret`.
+- Subkeys: HKDF-SHA256(masterKey, salt `harness-forge/v1`, info `encryption` | `session` | `approval` | `share`,
+  32 bytes). `approval` feeds `experimental_toolApprovalSecret`; `share` signs share tokens (10.7), so a new master
+  key invalidates every share link.
 - Encryption: AES-256-GCM, random 12-byte IV per write, AAD = UTF-8 of `<scope>/<name>` (a ciphertext copied to
   another row fails to decrypt), stored with `key_version` for future rotation.
 - The secrets API is **write-only**: credentials, plugin secret settings, MCP headers/env are never returned; DTOs
@@ -877,8 +1105,10 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
   as Ollama are legitimate) but are set only by the user or a plugin manifest they reviewed.
 - **Limits**: JSON bodies 1 MB (plugin file writes 1 MB + envelope, chat requests 2 MB, chat imports 20 MB), uploads
   20 MB per file (`image/*`, `application/pdf`, `text/*`), plugin zips 20 MB compressed / 100 MB expanded / 2000
-  entries, tool output 64 KB, chat title 200 chars. A non-empty body of a JSON route must be `application/json`
-  (multipart routes also accept `multipart/form-data`), so HTML forms cannot post to the API.
+  entries, tool output 64 KB, chat title 200 chars; data imports 256 MiB + 64 KiB (a backup zip or a chat JSON; 64 MiB
+  per chat entry, 20 MiB per file entry, 6.9); share snapshots 10 MiB with tool values capped at 16 KB (6.10). A
+  non-empty body of a JSON route must be `application/json` (multipart routes also accept `multipart/form-data`), so
+  HTML forms cannot post to the API.
 
 ### 10.5 XSS rules (web)
 
@@ -889,6 +1119,55 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
   server URLs (`/api/icons/lobe/<slug>`, `/api/plugins/<id>/icon`) served with a restrictive CSP.
 - Uploaded files are served with `nosniff`, a sandboxing CSP and `Content-Disposition: attachment` except raster
   images and PDF (API.md, `GET /files/:id`).
+
+### 10.6 Trusted reverse proxies (ADR-026)
+
+`HF_TRUST_PROXY` is a comma-separated list of `loopback` (127.0.0.0/8, ::1), `private` (10.0.0.0/8, 172.16.0.0/12,
+192.168.0.0/16, fc00::/7), IP addresses and CIDR ranges. `1`, `true`, hop counts and unknown tokens fail the boot with
+an explanation of the format: a hop count would trust anyone who can reach the port directly. Unset keeps the v1
+behavior. The matcher (`security/proxy-trust.ts`) uses `node:net` `BlockList`; IPv4-mapped IPv6 addresses are
+normalized first.
+
+| Header | Honored when | Effect |
+|---|---|---|
+| `X-Forwarded-For` | the TCP peer is trusted | client address = the list walked right to left, skipping trusted hops (at most 32 entries; a malformed entry stops the walk) |
+| `X-Forwarded-Proto` | with `HF_TRUST_PROXY` set: only from a trusted peer; unset: from any peer (v1) | the request scheme: the `Secure` session cookie, HSTS, the scheme of the Origin check |
+| `X-Forwarded-Host` | never | proxies must forward the original `Host` |
+| `Forwarded` | never | ignored |
+
+- The client address keys the login rate limiter (10.1) and the share rate limits (10.7); auth warnings log both the
+  resolved `address` and the TCP `peer`; the access log is unchanged.
+- `X-Forwarded-Host` is never honored, neither by the Origin check nor by the password-less host guard: a DNS-rebinding
+  page is same-origin with itself, reaches the server from 127.0.0.1 and can set any header, so with `loopback` trusted,
+  honoring it would bypass the guard. Caddy and Traefik forward `Host` by default; nginx needs `proxy_set_header Host
+  $host`.
+- The boot log lists the trusted ranges; a peer that is not trusted but sends forwarded headers is logged once per
+  address (a hint that `HF_TRUST_PROXY` is missing or too narrow).
+- Unset, `X-Forwarded-Proto` is still honored from anyone: harmless, because browsers ignore HSTS over plain HTTP and a
+  cross-site page cannot send the header without a failing preflight.
+- Misconfiguration: `private` on a LAN where other machines reach :8787 directly lets them choose their limiter bucket
+  with a forged `X-Forwarded-For`. Prefer the proxy's exact address; the global cap (50 failures per 15 min) stays the
+  backstop.
+
+### 10.7 Share links (ADR-025)
+
+- The public routes answer the same `404 not_found` for an invalid, bad-MAC, revoked or expired token and for a
+  deleted chat (re-checked on every request); the MAC comparison is timing-safe.
+- `GET /api/share/:token/files/:fileId` serves only ids listed in the share's `file_ids`, with `Cache-Control:
+  no-store`, `X-Content-Type-Options: nosniff`, a sandboxing CSP and `Content-Disposition: inline` only for raster
+  images and PDF (`attachment` otherwise); `HEAD` is supported. The session-only `GET /api/files/:id` is never used by
+  the share page. GET routes write nothing (no view counters).
+- Rate limits (memory, `429 rate_limited` + `Retry-After`): views 60 per minute per client address, files 600 per
+  minute per address, invalid tokens 20 per 10 minutes per address, 6000 requests per minute globally; behind a proxy
+  the client address follows 10.6.
+- `X-Robots-Tag: noindex, nofollow` is on every response and the share page adds `robots` and `referrer` meta tags;
+  `Referrer-Policy: no-referrer` keeps the token out of `Referer` headers when a visitor follows a link.
+- Tokens never reach logs: the access log writes `/api/share/[redacted]…` and `redactText` masks `/share/<token>` in
+  any text (12).
+- The password-less host guard (10.1) is unchanged: without `HF_PASSWORD` the share routes answer only on local host
+  names, so exposing share links requires a password (the Share dialog warns when there is none).
+- Snapshots are sanitized by an allowlist (6.10), so a new AI SDK part type is dropped rather than leaked; the view
+  and the file route apply the share's options on every request.
 
 ## 11. Topology
 
@@ -933,9 +1212,15 @@ flowchart LR
 - Docker: `docker compose up -d` starts the image on port 8787 with the data directory on the `/data`
   volume (`HF_DATA_DIR=/data`). The container listens on all interfaces, so the bind rule requires `HF_PASSWORD`
   (or `HF_INSECURE=1`, not recommended): set it in the compose environment before the first start.
-- Reverse proxy (TLS): forward the original `Host` header (the Origin check compares it with `Origin`) and set
-  `X-Forwarded-Proto: https`, which makes the session cookie `Secure` and enables HSTS. The login rate limiter sees
-  only the proxy's address (section 10.1).
+- Reverse proxy (TLS): forward the original `Host` header (the Origin check compares it with `Origin`;
+  `X-Forwarded-Host` is never used), set `X-Forwarded-For` and `X-Forwarded-Proto`, and list the proxy in
+  `HF_TRUST_PROXY`: `loopback` when it runs on the same machine, its exact address, or `private` for a proxy container
+  on a Docker network. Then the session cookie is `Secure`, HSTS is on, and the login limiter and the share rate limits
+  see the real clients (section 10.6); without `HF_TRUST_PROXY` every client shares the proxy's address (10.1). The
+  proxy must allow request bodies of at least 256 MB for data imports (nginx: `client_max_body_size`) and must not
+  buffer the SSE responses (the server sends `X-Accel-Buffering: no`). The README has Caddy, nginx and Docker Compose
+  examples.
+- Share links need `HF_PASSWORD`: without it, `/api` answers only local host names (section 10.1).
 - Stdio MCP servers and code plugins run inside the same container/user as the server.
 
 ## 12. Observability
@@ -944,9 +1229,12 @@ flowchart LR
   new one), echoed as the `X-Request-Id` response header and attached to every log line of that request. The web
   shows it in "copy diagnostics" for failed calls.
 - **Structured logs**: JSON lines on stdout: `{ time, level, msg, reqId?, pluginId?, chatId?, ...fields }`. Access log
-  per request: method, path (no query string values for secrets), status, duration, bytes. Level `info` in
-  production, `debug` in development. Never logged: API keys and other secrets (redactor, section 10.3), cookies,
-  message contents and tool inputs/outputs (only at `debug`, still redacted), uploaded file contents.
+  per request: method, path (no query string values for secrets; share tokens masked as `/api/share/[redacted]…`),
+  status, duration, bytes. Level `info` in production, `debug` in development. Never logged: API keys and other
+  secrets (redactor, section 10.3), cookies, share tokens (`redactText` masks `/share/<token>`), message contents and
+  tool inputs/outputs (only at `debug`, still redacted), uploaded file contents.
+- **Proxy trust**: the boot log lists the `HF_TRUST_PROXY` ranges; one warning per untrusted peer address that sends
+  forwarded headers; failed-login warnings carry the resolved `address` and the TCP `peer` (section 10.6).
 - **Chat runs**: `run.started` / `run.finished` log lines with chat id, model ref, duration, token usage, cost,
   finish reason, outcome, error code.
 - **Plugin logs**: `ctx.logger` and guard failures write to a per-plugin ring buffer (last 500 entries, each

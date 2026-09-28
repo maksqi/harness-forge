@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { FRESH_AUTH_REQUIRED_MESSAGE } from '../http/middleware/fresh-auth.ts'
 import { SESSION_COOKIE_NAME } from '../http/middleware/session-auth.ts'
 import { FRESH_AUTH_WINDOW_MS } from '../http/types.ts'
+import { stubRouteKeys } from '../http/validate.ts'
 import {
   allowAll,
   codePlugin,
@@ -27,6 +28,9 @@ import {
 
 const PASSWORD = 'correct horse battery staple'
 const NO_CHECK = { requireFreshAuth: () => {} }
+/** Chats prepared for the bulk data and share cases. */
+const DATA_CHAT_ID = '0199a8f0-0000-7000-8000-00000000da7a'
+const SHARE_CHAT_ID = '0199a8f0-0000-7000-8000-00000000517e'
 
 /** Routes that the server checks conditionally (`ApiRouteDef.fresh` documents them; ADR-017). */
 const CONDITIONAL_FRESH_KEYS: readonly ApiRouteKey[] = [
@@ -63,7 +67,7 @@ interface FreshCase {
   /** Prepares the state (services called directly, so no fresh auth is involved). */
   prepare?: (a: InstallTestApp) => Promise<void>
   attempt: Attempt
-  /** Status of the fresh attempt. */
+  /** Status of the fresh attempt (a route that is still a Phase 5 stub answers 501 from its own handler instead). */
   ok: number
   /** Proves the refused attempt changed nothing. */
   unchanged: (a: InstallTestApp) => Promise<void>
@@ -245,6 +249,38 @@ const CASES: FreshCase[] = [
     ok: 200,
     unchanged: async a => expect((await a.t.deps.plugins.get('fresh-manifest')).trust.required).toBe(false),
   },
+  {
+    name: 'deleting all data',
+    key: 'data.deleteAll',
+    prepare: async (a) => {
+      await a.t.deps.chats.create({ id: DATA_CHAT_ID, title: 'Keep me' })
+    },
+    attempt: { method: 'POST', path: '/api/data/delete', json: { confirm: 'DELETE', files: true, usage: true } },
+    ok: 200,
+    unchanged: async a => expect(await a.t.deps.chats.find(DATA_CHAT_ID)).not.toBeNull(),
+  },
+  {
+    name: 'publishing a share link',
+    key: 'shares.create',
+    prepare: async (a) => {
+      await a.t.deps.chats.create({
+        id: SHARE_CHAT_ID,
+        title: 'Shared',
+        messages: [{ id: 'msg_share00000000001', role: 'user', metadata: { modelRef: 'mock:echo', startedAt: 1 }, parts: [{ type: 'text', text: 'Hello' }] }],
+      })
+    },
+    attempt: { method: 'POST', path: '/api/shares', json: { chatId: SHARE_CHAT_ID } },
+    ok: 201,
+    // Share rows are checked by the shares route tests; a refused request never reaches the service.
+    unchanged: async () => {},
+  },
+  {
+    name: 'changing a share link (the unknown share proves the request reached the route)',
+    key: 'shares.update',
+    attempt: { method: 'PATCH', path: '/api/shares/shr_fresh00000000001', json: { refresh: true } },
+    ok: 404,
+    unchanged: async () => {},
+  },
 ]
 
 async function cookie(a: InstallTestApp, authAgeMs: number): Promise<string> {
@@ -285,7 +321,15 @@ describe('sEC-A5 fresh auth table', () => {
     const covered = new Set(CASES.map(entry => entry.key))
     for (const key of [...ALWAYS_FRESH_KEYS, ...CONDITIONAL_FRESH_KEYS])
       expect(covered.has(key), key).toBe(true)
-    expect([...ALWAYS_FRESH_KEYS].sort()).toEqual(['auth.setPassword', 'pluginFiles.build', 'pluginFiles.scaffold', 'pluginInstall.trust'])
+    expect([...ALWAYS_FRESH_KEYS].sort()).toEqual([
+      'auth.setPassword',
+      'data.deleteAll',
+      'pluginFiles.build',
+      'pluginFiles.scaffold',
+      'pluginInstall.trust',
+      'shares.create',
+      'shares.update',
+    ])
   })
 
   it.each(CASES)('$key: $name', async (entry) => {
@@ -301,7 +345,7 @@ describe('sEC-A5 fresh auth table', () => {
 
     const fresh = await send(a, attempt, await cookie(a, 60_000))
     const text = await fresh.text()
-    expect(fresh.status, text).toBe(entry.ok)
+    expect(fresh.status, text).toBe(stubRouteKeys().has(entry.key) ? 501 : entry.ok)
   })
 
   it('the window is 10 minutes from the password login (inclusive)', async () => {

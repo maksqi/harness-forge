@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { chatBody } from '../chat/testing.ts'
 import { CROSS_ORIGIN_MESSAGE, CROSS_SITE_MESSAGE } from '../http/middleware/origin-check.ts'
 import { SESSION_COOKIE_NAME } from '../http/middleware/session-auth.ts'
+import { stubRouteKeys } from '../http/validate.ts'
 import { createInstaller } from '../plugins/install/index.ts'
 import { createFakeRegistry, FAKE_REGISTRY } from '../plugins/install/testing.ts'
 import { API_SAMPLES, sampleRequest } from '../testing/api-samples.ts'
@@ -231,7 +232,11 @@ describe('sEC-B2: GET and HEAD never change stored state', () => {
       for (const method of ['GET', 'HEAD']) {
         const response = await t.request(path, { method })
         await drain(response)
-        expect(response.status, `${method} ${path}`).toBeLessThan(500)
+        // A route that is still a Phase 5 stub answers 501 from its own handler (and writes nothing).
+        if (stubRouteKeys().has(key))
+          expect(response.status, `${method} ${path}`).toBe(501)
+        else
+          expect(response.status, `${method} ${path}`).toBeLessThan(500)
       }
     }
     expect(await storedState(t)).toEqual(before)

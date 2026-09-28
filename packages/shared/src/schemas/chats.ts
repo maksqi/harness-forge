@@ -2,12 +2,20 @@
 import { z } from 'zod'
 import { harnessUIMessageSchema } from '../chat.ts'
 import { reasoningEffortSchema, titleSourceSchema, toolModeSchema } from '../enums.ts'
-import { chatIdSchema, modelRefSchema, timestampSchema } from '../ids.ts'
+import { chatIdSchema, messageIdSchema, modelRefSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { cursorSchema, queryBooleanSchema, queryIntSchema } from './common.ts'
 
 const instructionsSchema = z.string().max(LIMITS.instructionsMaxChars)
-const titleInputSchema = z.string().trim().min(1).max(200)
+
+/** A title sent by the client (chats, share links): trimmed, 1..200 characters. */
+export const titleInputSchema = z.string().trim().min(1).max(200)
+
+/**
+ * A message id inside an import or an export (`POST /chats`, chat JSON): as lenient as the ids of
+ * `harnessUIMessageSchema`, because imported ids that are invalid or already used are replaced.
+ */
+const importedMessageIdSchema = z.string().min(1).max(256)
 
 /** Per-chat settings; an absent key means the global default. */
 export const chatSettingsSchema = z.strictObject({
@@ -37,7 +45,7 @@ export const chatSummarySchema = z.object({
   archived: z.boolean(),
   /** A run is active (live, from the runs registry). */
   running: z.boolean(),
-  /** The last assistant message waits for a tool approval. */
+  /** The active leaf (an assistant message) waits for a tool approval. */
   pendingApproval: z.boolean(),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
@@ -46,7 +54,7 @@ export const chatSummarySchema = z.object({
 })
 export type ChatSummary = z.infer<typeof chatSummarySchema>
 
-/** Sums over the chat's usage rows (purpose `chat`). */
+/** Sums over the chat's usage rows (purpose `chat`), every message version included (the cost actually paid). */
 export const usageTotalsSchema = z.object({
   inputTokens: z.int().min(0),
   outputTokens: z.int().min(0),
@@ -58,13 +66,36 @@ export const usageTotalsSchema = z.object({
 })
 export type UsageTotals = z.infer<typeof usageTotalsSchema>
 
+/**
+ * The versions of a message on the active path (ADR-023): every message with the same parent (the first messages of a
+ * chat are siblings of each other), in `seq` order, and the position of the path message among them.
+ */
+export const messageBranchSchema = z.object({
+  /** At least 2 message ids. */
+  siblings: z.array(messageIdSchema).min(2),
+  /** Index of the path message in `siblings`. */
+  index: z.int().min(0),
+})
+export type MessageBranch = z.infer<typeof messageBranchSchema>
+
 export const chatDetailSchema = chatSummarySchema.extend({
   settings: chatSettingsSchema,
-  /** Ordered by `seq`; pass directly to `useChat({ messages })`. */
+  /**
+   * The active path (first message -> active leaf) in `seq` order; pass directly to `useChat({ messages })`. During a
+   * run it ends at the message committed when the run started (the in-flight reply is excluded).
+   */
   messages: z.array(harnessUIMessageSchema),
+  /** Versions of the path messages that have siblings, keyed by the path message id (absent: a single version). */
+  branches: z.record(messageIdSchema, messageBranchSchema),
   totals: usageTotalsSchema,
 })
 export type ChatDetail = z.infer<typeof chatDetailSchema>
+
+/** Body of `POST /chats/:id/branch`: show the most recent leaf under `messageId` (any message of the chat). */
+export const chatBranchBodySchema = z.strictObject({
+  messageId: messageIdSchema,
+})
+export type ChatBranchBody = z.infer<typeof chatBranchBodySchema>
 
 /** Query of `GET /chats`; order: `updatedAt` desc, `id` desc. `limit` defaults to 50, `archived` to false. */
 export const chatsQuerySchema = z.object({
@@ -85,8 +116,15 @@ export const chatCreateSchema = z.strictObject({
   title: titleInputSchema.optional(),
   modelRef: modelRefSchema.optional(),
   settings: chatSettingsSchema.optional(),
-  /** Import (e.g. the `chat.messages` of a JSON export). */
+  /** Import (e.g. the `chat.messages` of a JSON export), in `seq` order. */
   messages: z.array(harnessUIMessageSchema).max(LIMITS.chatImportMessagesMax).optional(),
+  /**
+   * Import: the parent of each message, aligned with `messages` by index (`null` = a first message). Each parent must
+   * be the id of an earlier message of the import (else `400` with the field path). Omitted = a linear chat.
+   */
+  parentIds: z.array(importedMessageIdSchema.nullable()).max(LIMITS.chatImportMessagesMax).optional(),
+  /** Import: the path to show; the active leaf becomes the most recent leaf under it (default: the last message). */
+  activeLeafId: importedMessageIdSchema.optional(),
 })
 export type ChatCreate = z.infer<typeof chatCreateSchema>
 
@@ -112,11 +150,49 @@ export const chatExportQuerySchema = z.object({
 })
 export type ChatExportQuery = z.infer<typeof chatExportQuerySchema>
 
-/** Body of a `format=json` export (`running` / `pendingApproval` are false). */
-export const chatExportSchema = z.object({
+const exportedMessagesSchema = z.array(harnessUIMessageSchema).max(LIMITS.backupChatMessagesMax)
+
+/**
+ * Chat JSON export version 1 (linear chats, written before ADR-023; still accepted by imports): `chat` is the detail
+ * without `branches`. `running` / `pendingApproval` are false.
+ */
+export const chatExportV1Schema = z.object({
   format: z.literal('harness-forge.chat'),
   version: z.literal(1),
   exportedAt: timestampSchema,
-  chat: chatDetailSchema,
+  chat: chatDetailSchema.omit({ branches: true }).extend({ messages: exportedMessagesSchema }),
 })
+export type ChatExportV1 = z.infer<typeof chatExportV1Schema>
+
+/**
+ * Chat JSON export version 2 (ADR-023): `chat` = summary + settings + totals + every message version in `seq` order +
+ * the parent of each message (aligned by index) + the active leaf. Messages carry no parent field of their own.
+ * `running` / `pendingApproval` are false.
+ */
+export const chatExportV2Schema = z.object({
+  format: z.literal('harness-forge.chat'),
+  version: z.literal(2),
+  exportedAt: timestampSchema,
+  chat: chatSummarySchema.extend({
+    settings: chatSettingsSchema,
+    totals: usageTotalsSchema,
+    /** Every version, in `seq` order. */
+    messages: exportedMessagesSchema,
+    /** The parent of `messages[i]` (`null` = a first message); each parent is an earlier message. */
+    parentIds: z.array(importedMessageIdSchema.nullable()).max(LIMITS.backupChatMessagesMax),
+    /** Last message of the shown path; null for an empty chat. */
+    activeLeafId: importedMessageIdSchema.nullable(),
+  }),
+})
+export type ChatExportV2 = z.infer<typeof chatExportV2Schema>
+
+/**
+ * Body of a `format=json` export (`GET /chats/:id/export`) and of `chats/<chatId>.json` in a backup: the version
+ * written today (2). Imports accept `chatExportAnySchema`.
+ */
+export const chatExportSchema = chatExportV2Schema
 export type ChatExport = z.infer<typeof chatExportSchema>
+
+/** Every chat JSON export an import accepts (versions 1 and 2), discriminated on `version`. */
+export const chatExportAnySchema = z.discriminatedUnion('version', [chatExportV1Schema, chatExportV2Schema])
+export type ChatExportAny = z.infer<typeof chatExportAnySchema>

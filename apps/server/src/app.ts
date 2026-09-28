@@ -24,6 +24,7 @@ import { createChatRoutes } from './http/routes/chat.ts'
 import { createChatsRoutes } from './http/routes/chats.ts'
 import { createCommandsRoutes } from './http/routes/commands.ts'
 import { createCredentialsRoutes } from './http/routes/credentials.ts'
+import { createDataRoutes } from './http/routes/data.ts'
 import { createEventsRoutes } from './http/routes/events.ts'
 import { createFilesRoutes } from './http/routes/files.ts'
 import { createHealthRoutes } from './http/routes/health.ts'
@@ -36,13 +37,15 @@ import { createPluginInstallRoutes } from './http/routes/plugin-install.ts'
 import { createPluginsRoutes } from './http/routes/plugins.ts'
 import { createProvidersRoutes } from './http/routes/providers.ts'
 import { createSettingsRoutes } from './http/routes/settings.ts'
+import { createSharesRoutes } from './http/routes/shares.ts'
 import { createToolsRoutes } from './http/routes/tools.ts'
 import { createStaticRoutes } from './http/static.ts'
 
 /**
- * The 18 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
+ * The 20 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
  * with static `/plugins/<word>` paths are mounted before `plugins` (`/plugins/:id...`); no route shadows another
- * (they differ in method or segment count, API.md 8), the order is a second line of defense.
+ * (they differ in method or segment count, API.md 8), the order is a second line of defense. `shares` also serves the
+ * public `/share/:token` routes.
  */
 export const ROUTE_MODULES = {
   health: createHealthRoutes,
@@ -59,6 +62,8 @@ export const ROUTE_MODULES = {
   tools: createToolsRoutes,
   mcp: createMcpRoutes,
   commands: createCommandsRoutes,
+  data: createDataRoutes,
+  shares: createSharesRoutes,
   pluginInstall: createPluginInstallRoutes,
   pluginDrafts: createPluginDraftsRoutes,
   pluginFiles: createPluginFilesRoutes,

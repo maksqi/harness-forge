@@ -89,6 +89,7 @@ data/                                          runtime data (gitignored)
 | `pnpm start` | production server on :8787 serving API + SPA |
 | `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` |
 | `pnpm test` | Vitest (all projects); `pnpm -F <pkg> test` for one package |
+| `pnpm test:live` | opt-in live provider suite (`*.live.test.ts`; needs `HF_LIVE=1` + provider keys; paid calls) — never in `pnpm test` |
 | `pnpm test:e2e` | Playwright |
 | `pnpm lint` | ESLint (agents: `--fix` only on owned paths) |
 | `pnpm typecheck` | `tsc --noEmit` for packages/server + `nuxi typecheck` for web |
@@ -124,8 +125,12 @@ data/                                          runtime data (gitignored)
 
 `HF_PORT` (8787), `HF_HOST` (127.0.0.1), `HF_DATA_DIR` (`./data`, resolved against the repo root in dev),
 `HF_PASSWORD`, `HF_MASTER_KEY`, `HF_MOCK_PROVIDER`, `HF_SAFE_MODE`, `HF_PLUGIN_WATCH`, `HF_OFFLINE`, `HF_INSECURE`,
-`HF_API_TARGET` (web dev proxy target), plus provider key fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...).
-See `.env.example` and `docs/DECISIONS.md` (Contract seed).
+`HF_TRUST_PROXY` (trusted reverse proxies, ADR-026), `HF_API_TARGET` (web dev proxy target), plus provider key
+fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). Test-only: `HF_LIVE`, `HF_LIVE_PROVIDERS`,
+`HF_LIVE_MAX_COST_USD`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`. See `.env.example` and `docs/DECISIONS.md`
+(Contract seed).
+
+**Never run `pnpm test:live` unless your task prompt says so** — it makes paid provider calls with real keys.
 
 ## Ports and data for agents
 

@@ -187,7 +187,8 @@ export function createChatsService(deps: AppDeps): ChatsService {
   async function detailOf(row: ChatRow): Promise<ChatDetail> {
     const list = await store.listMessages(row.id)
     const totals = await usageTotals(row.id)
-    return { ...toSummary(row), settings: row.settings, messages: list, totals }
+    // The store is still linear (one version per message) until the message tree lands (ADR-023, W5.1).
+    return { ...toSummary(row), settings: row.settings, messages: list, branches: {}, totals }
   }
 
   /** Message ids of `ids` that already exist (any chat). */

@@ -18,8 +18,6 @@ catalog:
 overrides:
   # TypeScript 7 breaks .vue files that import prop types (ADR-013). Never upgrade.
   typescript: ~6.0.3
-  # AI Elements Vue was written against vue-stream-markdown 1.x (2.0 is breaking, ADR-007).
-  vue-stream-markdown: ^1.0.0
 
 # Dependency build scripts are blocked unless listed here (true = run, false = skip silently).
 allowBuilds:

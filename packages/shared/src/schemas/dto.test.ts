@@ -11,12 +11,35 @@ import {
   harnessUIMessageSchema,
   messageMetadataSchema,
 } from '../chat.ts'
+import { conflictDetailsSchema } from '../errors.ts'
 import { createServerEvent, SERVER_EVENT_TYPES, serverEventSchema } from '../events.ts'
 import { createMessageId } from '../ids.ts'
 import { isAllowedUploadMime, LIMITS, UPLOAD_MIME_PATTERNS } from '../limits.ts'
-import { chatCreateSchema, chatDetailSchema, chatsQuerySchema, chatSummarySchema, chatUpdateSchema } from './chats.ts'
+import {
+  chatBranchBodySchema,
+  chatCreateSchema,
+  chatDetailSchema,
+  chatExportAnySchema,
+  chatExportSchema,
+  chatExportV1Schema,
+  chatExportV2Schema,
+  chatsQuerySchema,
+  chatSummarySchema,
+  chatUpdateSchema,
+  messageBranchSchema,
+} from './chats.ts'
+import {
+  backupFileIndexSchema,
+  backupManifestSchema,
+  dataDeleteBodySchema,
+  dataDeleteResultSchema,
+  dataExportQuerySchema,
+  dataImportFormSchema,
+  dataImportResultSchema,
+  dataSummarySchema,
+} from './data.ts'
 import { modelPrefsUpdateSchema, modelsQuerySchema } from './models.ts'
-import { pluginFileParamsSchema } from './params.ts'
+import { pluginFileParamsSchema, shareFileParamsSchema, shareParamsSchema, sharePublicParamsSchema } from './params.ts'
 import {
   draftTestRequestSchema,
   iconFileInputSchema,
@@ -29,10 +52,24 @@ import {
   pluginTrustSchema,
 } from './plugins.ts'
 import { credentialsUpdateSchema } from './providers.ts'
+import {
+  shareCreateSchema,
+  shareOptionsInputSchema,
+  shareOptionsSchema,
+  sharePartSchema,
+  sharesQuerySchema,
+  shareSummarySchema,
+  shareUpdateSchema,
+  shareViewSchema,
+} from './shares.ts'
 import { DEFAULT_SETTINGS, passwordUpdateSchema, SETTINGS_KEYS, settingsSchema, settingsUpdateSchema } from './system.ts'
 import { mcpServerInputSchema, mcpServerUpdateSchema, toolUpdateSchema } from './tools.ts'
 
 const CHAT_ID = '0199a8f0-0000-7000-8000-000000000001'
+const MESSAGE_A = 'msg_A000000000000001'
+const MESSAGE_B = 'msg_B000000000000001'
+const SHARE_TOKEN = `sample0000000001${'A'.repeat(20)}_-`
+const EMPTY_TOTALS = { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null }
 
 describe('settings', () => {
   it('applies the defaults of DECISIONS.md', () => {
@@ -106,6 +143,13 @@ describe('chat contract', () => {
     expect(chatRequestBodySchema.parse(body)).toEqual(body)
   })
 
+  it('accepts parentId (a message id or null) and messageId', () => {
+    const body = { chatId: CHAT_ID, message: userMessage, trigger: 'submit-message', modelRef: 'mock:echo', reasoningEffort: 'auto', toolMode: 'ask' }
+    expect(chatRequestBodySchema.parse({ ...body, parentId: null })).toMatchObject({ parentId: null })
+    expect(chatRequestBodySchema.parse({ ...body, parentId: MESSAGE_A })).toMatchObject({ parentId: MESSAGE_A })
+    expect(chatRequestBodySchema.parse({ ...body, trigger: 'regenerate-message', messageId: MESSAGE_B })).toMatchObject({ messageId: MESSAGE_B })
+  })
+
   it('rejects invalid chat requests', () => {
     const body = { chatId: CHAT_ID, message: userMessage, trigger: 'submit-message', modelRef: 'mock:echo', reasoningEffort: 'auto', toolMode: 'ask' }
     for (const change of [
@@ -114,6 +158,8 @@ describe('chat contract', () => {
       { message: { ...userMessage, parts: [{ text: 'no type' }] } },
       { trigger: 'resume' },
       { messageId: 'msg_short' },
+      { parentId: 'msg_short' },
+      { parentId: '' },
       { modelRef: 'mock' },
       { toolMode: 'yolo' },
       { extra: true },
@@ -177,8 +223,50 @@ describe('chats', () => {
 
   it('parses summaries and details', () => {
     expect(chatSummarySchema.parse(summary)).toEqual(summary)
-    const detail = { ...summary, settings: { toolMode: 'auto' }, messages: [], totals: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null } }
+    const detail = { ...summary, settings: { toolMode: 'auto' }, messages: [], branches: {}, totals: EMPTY_TOTALS }
     expect(chatDetailSchema.parse(detail)).toEqual(detail)
+  })
+
+  it('requires branches on details: path messages with at least two versions', () => {
+    const detail = { ...summary, settings: {}, messages: [], totals: EMPTY_TOTALS }
+    expect(chatDetailSchema.safeParse(detail).success).toBe(false)
+    const branches = { [MESSAGE_B]: { siblings: [MESSAGE_A, MESSAGE_B], index: 1 } }
+    expect(chatDetailSchema.parse({ ...detail, branches }).branches).toEqual(branches)
+    expect(chatDetailSchema.safeParse({ ...detail, branches: { 'not-an-id': { siblings: [MESSAGE_A, MESSAGE_B], index: 0 } } }).success).toBe(false)
+    expect(messageBranchSchema.safeParse({ siblings: [MESSAGE_A], index: 0 }).success).toBe(false)
+    expect(messageBranchSchema.safeParse({ siblings: [MESSAGE_A, MESSAGE_B], index: -1 }).success).toBe(false)
+    expect(chatBranchBodySchema.parse({ messageId: MESSAGE_A })).toEqual({ messageId: MESSAGE_A })
+    expect(chatBranchBodySchema.safeParse({ messageId: MESSAGE_A, extra: 1 }).success).toBe(false)
+    expect(chatBranchBodySchema.safeParse({}).success).toBe(false)
+  })
+
+  it('accepts a message tree on import (parentIds aligned by index, activeLeafId)', () => {
+    const messages = [
+      { id: MESSAGE_A, role: 'user', parts: [{ type: 'text', text: 'v1' }] },
+      { id: MESSAGE_B, role: 'user', parts: [{ type: 'text', text: 'v2' }] },
+    ]
+    const input = { messages, parentIds: [null, null], activeLeafId: MESSAGE_A }
+    expect(chatCreateSchema.parse(input)).toEqual(input)
+    expect(chatCreateSchema.safeParse({ parentIds: Array.from({ length: LIMITS.chatImportMessagesMax + 1 }).fill(null) }).success).toBe(false)
+    expect(chatCreateSchema.safeParse({ activeLeafId: '' }).success).toBe(false)
+    expect(chatCreateSchema.safeParse({ parentIds: [''] }).success).toBe(false)
+  })
+
+  it('reads chat exports of version 1 and 2 and writes version 2', () => {
+    const message = { id: MESSAGE_A, role: 'user', metadata: { modelRef: 'mock:echo', startedAt: 1 }, parts: [{ type: 'text', text: 'hi' }] }
+    const base = { ...summary, settings: {}, totals: EMPTY_TOTALS }
+    const v1 = { format: 'harness-forge.chat', version: 1, exportedAt: 5, chat: { ...base, messages: [message] } }
+    const v2 = { format: 'harness-forge.chat', version: 2, exportedAt: 5, chat: { ...base, messages: [message], parentIds: [null], activeLeafId: MESSAGE_A } }
+    expect(chatExportV1Schema.parse(v1)).toEqual(v1)
+    expect(chatExportV2Schema.parse(v2)).toEqual(v2)
+    expect(chatExportSchema).toBe(chatExportV2Schema)
+    expect(chatExportAnySchema.parse(v1).version).toBe(1)
+    expect(chatExportAnySchema.parse(v2).version).toBe(2)
+    expect(chatExportAnySchema.safeParse({ ...v2, version: 3 }).success).toBe(false)
+    expect(chatExportV2Schema.safeParse({ ...v2, chat: { ...v2.chat, activeLeafId: undefined } }).success).toBe(false)
+    expect(chatExportV2Schema.parse({ ...v2, chat: { ...v2.chat, messages: [], parentIds: [], activeLeafId: null } }).chat.activeLeafId).toBeNull()
+    // Version 1 carries no branches; exports never carry them.
+    expect(chatExportV1Schema.parse({ ...v1, chat: { ...v1.chat, branches: {} } }).chat).not.toHaveProperty('branches')
   })
 
   it('validates creates and updates', () => {
@@ -188,6 +276,118 @@ describe('chats', () => {
     expect(chatUpdateSchema.safeParse({}).success).toBe(false)
     expect(chatUpdateSchema.parse({ modelRef: null, settings: { instructions: null } })).toEqual({ modelRef: null, settings: { instructions: null } })
     expect(chatUpdateSchema.safeParse({ title: '   ' }).success).toBe(false)
+  })
+})
+
+describe('bulk data (ADR-024)', () => {
+  it('validates the backup manifest and file index', () => {
+    const manifest = {
+      format: 'harness-forge.backup',
+      version: 1,
+      exportedAt: 5,
+      appVersion: '1.1.0',
+      chatExportVersion: 2,
+      includes: { files: true, settings: false },
+      counts: { chats: 1, messages: 2, files: 1, fileBytes: 5 },
+    }
+    expect(backupManifestSchema.parse(manifest)).toEqual(manifest)
+    expect(backupManifestSchema.safeParse({ ...manifest, version: 2 }).success).toBe(false)
+    expect(backupManifestSchema.safeParse({ ...manifest, chatExportVersion: 1 }).success).toBe(false)
+    const entry = { id: 'file_ABCdef0123456789', sha256: 'a'.repeat(64), name: 'notes.txt', mime: 'text/plain', size: 5, createdAt: 1 }
+    expect(backupFileIndexSchema.parse({ items: [entry] })).toEqual({ items: [entry] })
+    expect(backupFileIndexSchema.safeParse({ items: [{ ...entry, size: LIMITS.uploadBytes + 1 }] }).success).toBe(false)
+    expect(backupFileIndexSchema.safeParse({ items: [{ ...entry, sha256: 'A'.repeat(64) }] }).success).toBe(false)
+  })
+
+  it('coerces the export query and the import form fields', () => {
+    expect(dataExportQuerySchema.parse({ files: 'false', settings: '1' })).toEqual({ files: false, settings: true })
+    expect(dataExportQuerySchema.parse({})).toEqual({})
+    expect(dataExportQuerySchema.safeParse({ files: 'no' }).success).toBe(false)
+    const file = new File(['{}'], 'chat.json', { type: 'application/json' })
+    expect(dataImportFormSchema.parse({ file, onConflict: 'copy', restoreSettings: 'true' })).toEqual({ onConflict: 'copy', restoreSettings: true })
+    expect(dataImportFormSchema.safeParse({ onConflict: 'overwrite' }).success).toBe(false)
+  })
+
+  it('validates the summary, the import result and delete-all', () => {
+    expect(dataSummarySchema.parse({ chats: 2, archivedChats: 1, messages: 9, files: 1, fileBytes: 5 })).toBeTruthy()
+    const result = {
+      kind: 'backup',
+      counts: { imported: 1, copied: 0, skipped: 1, failed: 1, filesImported: 1, filesReused: 0, filesMissing: 1 },
+      settingsRestored: false,
+      items: [
+        { sourceId: CHAT_ID, chatId: CHAT_ID, title: 'Trip', status: 'imported' },
+        { sourceId: 'chats/broken.json', chatId: null, title: null, status: 'failed', error: 'Invalid chat export.' },
+      ],
+      warnings: ['Unknown entry: notes.txt'],
+    }
+    expect(dataImportResultSchema.parse(result)).toEqual(result)
+    expect(dataDeleteBodySchema.parse({ confirm: 'DELETE', files: true })).toEqual({ confirm: 'DELETE', files: true })
+    for (const body of [{}, { confirm: 'delete' }, { confirm: 'DELETE', extra: true }, { confirm: 'DELETE', usage: 'yes' }])
+      expect(dataDeleteBodySchema.safeParse(body).success, JSON.stringify(body)).toBe(false)
+    expect(dataDeleteResultSchema.parse({ chats: 1, messages: 2, files: 0, fileBytes: 0, usageRows: 0 })).toBeTruthy()
+    expect(conflictDetailsSchema.parse({ reason: 'busy' })).toEqual({ reason: 'busy' })
+  })
+})
+
+describe('share links (ADR-025)', () => {
+  it('applies option defaults only where options are complete', () => {
+    expect(shareOptionsSchema.parse({})).toEqual({ reasoning: false, toolDetails: false, attachments: true })
+    // A partial update must never reset the options it does not name.
+    expect(shareOptionsInputSchema.parse({ reasoning: true })).toEqual({ reasoning: true })
+    expect(shareOptionsInputSchema.safeParse({ comments: true }).success).toBe(false)
+  })
+
+  it('validates creates, updates and the list query', () => {
+    expect(shareCreateSchema.parse({ chatId: CHAT_ID, title: ' Trip ', options: { toolDetails: true }, expiresAt: null }))
+      .toEqual({ chatId: CHAT_ID, title: 'Trip', options: { toolDetails: true }, expiresAt: null })
+    expect(shareCreateSchema.safeParse({ chatId: CHAT_ID, extra: 1 }).success).toBe(false)
+    expect(shareCreateSchema.safeParse({ chatId: 'x' }).success).toBe(false)
+    expect(shareUpdateSchema.parse({ refresh: true })).toEqual({ refresh: true })
+    expect(shareUpdateSchema.parse({ title: null, expiresAt: 10 })).toEqual({ title: null, expiresAt: 10 })
+    for (const body of [{}, { refresh: false }, { title: '   ' }, { token: 'x' }])
+      expect(shareUpdateSchema.safeParse(body).success, JSON.stringify(body)).toBe(false)
+    expect(sharesQuerySchema.parse({ chatId: CHAT_ID, _: '1' })).toEqual({ chatId: CHAT_ID })
+  })
+
+  it('parses summaries, parts and the public view', () => {
+    const summary = {
+      id: 'shr_sample0000000001',
+      chatId: CHAT_ID,
+      chatTitle: 'Trip',
+      title: null,
+      options: { reasoning: false, toolDetails: false, attachments: true },
+      path: `/share/${SHARE_TOKEN}`,
+      messageCount: 2,
+      snapshotAt: 5,
+      outdated: false,
+      expiresAt: null,
+      expired: false,
+      createdAt: 5,
+    }
+    expect(shareSummarySchema.parse(summary)).toEqual(summary)
+    expect(shareSummarySchema.safeParse({ ...summary, id: 'share_1' }).success).toBe(false)
+    expect(sharePartSchema.parse({ type: 'tool', toolName: 'current_time', status: 'done', input: {}, output: { now: 1 } })).toBeTruthy()
+    for (const part of [{ type: 'step-start' }, { type: 'data-notice', data: {} }, { type: 'tool', toolName: 'x', status: 'approval-requested' }, { type: 'text' }])
+      expect(sharePartSchema.safeParse(part).success, JSON.stringify(part)).toBe(false)
+    const view = {
+      title: 'Trip',
+      snapshotAt: 5,
+      options: summary.options,
+      messages: [
+        { role: 'user', command: { name: 'tldr' }, parts: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', modelRef: 'mock:echo', status: 'stopped', parts: [{ type: 'file', mediaType: 'image/png', url: `/api/share/${SHARE_TOKEN}/files/file_ABCdef0123456789` }] },
+      ],
+    }
+    expect(shareViewSchema.parse(view)).toEqual(view)
+    expect(shareViewSchema.safeParse({ ...view, messages: [{ role: 'system', parts: [] }] }).success).toBe(false)
+  })
+
+  it('validates share params', () => {
+    expect(shareParamsSchema.safeParse({ id: 'shr_sample0000000001' }).success).toBe(true)
+    expect(sharePublicParamsSchema.safeParse({ token: SHARE_TOKEN }).success).toBe(true)
+    expect(shareFileParamsSchema.safeParse({ token: SHARE_TOKEN, fileId: 'file_ABCdef0123456789' }).success).toBe(true)
+    for (const token of ['', SHARE_TOKEN.slice(1), `${SHARE_TOKEN}x`, `sample000000000!${'A'.repeat(22)}`, `sample0000000001${'A'.repeat(21)}=`])
+      expect(sharePublicParamsSchema.safeParse({ token }).success, token).toBe(false)
   })
 })
 

@@ -41,6 +41,7 @@ export function chatDetail(overrides: Partial<ChatDetail> = {}): ChatDetail {
     ...chatSummary(),
     settings: {},
     messages: [],
+    branches: {},
     totals: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null },
     ...overrides,
   }

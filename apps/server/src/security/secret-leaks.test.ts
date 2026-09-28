@@ -17,6 +17,8 @@ import { unzipSync } from 'fflate'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { chatBody } from '../chat/testing.ts'
 import { SESSION_COOKIE_NAME } from '../http/middleware/session-auth.ts'
+import { stubRouteKeys } from '../http/validate.ts'
+import { SAMPLE_SHARE_TOKEN } from '../testing/api-samples.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { createKeyring } from './keyring.ts'
 
@@ -223,6 +225,8 @@ function getInputs(): Partial<Record<ApiRouteKey, Array<{ params?: Record<string
     'pluginFiles.list': [{ params: { id: PLUGIN_ID } }],
     'pluginFiles.read': [{ params: { id: PLUGIN_ID, path: 'plugin.json' } }],
     'models.list': [{}, { query: { includeHidden: 'true' } }],
+    'shares.view': [{ params: { token: SAMPLE_SHARE_TOKEN } }],
+    'shares.file': [{ params: { token: SAMPLE_SHARE_TOKEN, fileId } }],
   }
 }
 
@@ -265,13 +269,19 @@ describe('sEC-D1 / SEC-D5: no secret in any answer', () => {
     for (const input of inputs) {
       const path = (apiUrl as (key: ApiRouteKey, input?: unknown, baseUrl?: string) => string)(key, input, '/api')
       const response = await call('GET', path)
-      expect(response.status, path).toBeLessThan(500)
+      // A route that is still a Phase 5 stub answers 501 from its own handler; every implemented route answers < 500.
+      if (stubRouteKeys().has(key))
+        expect(response.status, path).toBe(501)
+      else
+        expect(response.status, path).toBeLessThan(500)
       const headers = [...response.headers.entries()].filter(([name]) => name !== 'set-cookie').join('\n')
       let text = `${headers}\n${await bodyText(response)}`
-      if (key === 'pluginInstall.export' && response.status === 200) {
+      // Zips (the plugin export, the data backup) are searched entry by entry: deflated bytes hide a sentinel.
+      if ((key === 'pluginInstall.export' || key === 'data.export') && response.status === 200) {
         const entries = unzipSync(new Uint8Array(Buffer.from(text.slice(text.indexOf('\n', headers.length) + 1), 'latin1')))
         text += Object.values(entries).map(bytes => Buffer.from(bytes).toString('latin1')).join('\n')
-        expect(Object.keys(entries)).toContain(`${PLUGIN_ID}/plugin.json`)
+        if (key === 'pluginInstall.export')
+          expect(Object.keys(entries)).toContain(`${PLUGIN_ID}/plugin.json`)
       }
       expect(leaksIn(text), path).toEqual([])
       for (const token of sessionTokens)

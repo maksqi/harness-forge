@@ -2,6 +2,7 @@
 import type { z } from 'zod'
 import { chatRequestBodySchema, chatStopResultSchema } from '../chat.ts'
 import {
+  chatBranchBodySchema,
   chatCreateSchema,
   chatDetailSchema,
   chatExportQuerySchema,
@@ -10,6 +11,14 @@ import {
   chatUpdateSchema,
 } from '../schemas/chats.ts'
 import { cursorPageSchema, listResponseSchema } from '../schemas/common.ts'
+import {
+  dataDeleteBodySchema,
+  dataDeleteResultSchema,
+  dataExportQuerySchema,
+  dataImportFormSchema,
+  dataImportResultSchema,
+  dataSummarySchema,
+} from '../schemas/data.ts'
 import { fileRefSchema } from '../schemas/files.ts'
 import { lobeIconListSchema } from '../schemas/icons.ts'
 import {
@@ -28,6 +37,9 @@ import {
   pluginFileParamsSchema,
   pluginParamsSchema,
   providerParamsSchema,
+  shareFileParamsSchema,
+  shareParamsSchema,
+  sharePublicParamsSchema,
   toolParamsSchema,
 } from '../schemas/params.ts'
 import {
@@ -61,6 +73,13 @@ import {
   providerTestResultSchema,
   providerUpdateSchema,
 } from '../schemas/providers.ts'
+import {
+  shareCreateSchema,
+  sharesQuerySchema,
+  shareSummarySchema,
+  shareUpdateSchema,
+  shareViewSchema,
+} from '../schemas/shares.ts'
 import {
   authStatusSchema,
   healthSchema,
@@ -106,6 +125,8 @@ export const API_MODULES = [
   'pluginInstall',
   'pluginDrafts',
   'pluginFiles',
+  'data',
+  'shares',
 ] as const
 export type ApiModule = (typeof API_MODULES)[number]
 
@@ -139,7 +160,7 @@ export interface ApiRouteDef {
   status?: 200 | 201 | 204
 }
 
-/** Every endpoint of API.md (62 routes), keyed `<module>.<action>`. */
+/** Every endpoint of API.md (73 routes), keyed `<module>.<action>`. */
 export const apiRoutes = {
   // health.ts
   'health.get': { module: 'health', method: 'GET', path: '/health', public: true, response: healthSchema },
@@ -184,6 +205,7 @@ export const apiRoutes = {
   'chats.update': { module: 'chats', method: 'PATCH', path: '/chats/:id', params: chatParamsSchema, body: chatUpdateSchema, response: chatSummarySchema },
   'chats.remove': { module: 'chats', method: 'DELETE', path: '/chats/:id', params: chatParamsSchema, response: 'empty' },
   'chats.export': { module: 'chats', method: 'GET', path: '/chats/:id/export', params: chatParamsSchema, query: chatExportQuerySchema, response: 'binary' },
+  'chats.switchBranch': { module: 'chats', method: 'POST', path: '/chats/:id/branch', params: chatParamsSchema, body: chatBranchBodySchema, response: chatDetailSchema },
 
   // chat.ts
   'chat.send': { module: 'chat', method: 'POST', path: '/chat', body: chatRequestBodySchema, response: 'ui-message-stream' },
@@ -238,6 +260,20 @@ export const apiRoutes = {
   'pluginFiles.write': { module: 'pluginFiles', method: 'PUT', path: '/plugins/:id/files/*', params: pluginFileParamsSchema, body: pluginFileWriteSchema, response: pluginFileEntrySchema },
   'pluginFiles.remove': { module: 'pluginFiles', method: 'DELETE', path: '/plugins/:id/files/*', params: pluginFileParamsSchema, response: 'empty' },
   'pluginFiles.build': { module: 'pluginFiles', method: 'POST', path: '/plugins/:id/build', fresh: true, params: pluginParamsSchema, body: pluginBuildBodySchema, response: buildResultSchema },
+
+  // data.ts (ADR-024)
+  'data.summary': { module: 'data', method: 'GET', path: '/data', response: dataSummarySchema },
+  'data.export': { module: 'data', method: 'GET', path: '/data/export', query: dataExportQuerySchema, response: 'binary' },
+  'data.import': { module: 'data', method: 'POST', path: '/data/import', form: dataImportFormSchema, response: dataImportResultSchema },
+  'data.deleteAll': { module: 'data', method: 'POST', path: '/data/delete', fresh: true, body: dataDeleteBodySchema, response: dataDeleteResultSchema },
+
+  // shares.ts (ADR-025): owner routes under `/shares`, public routes under `/share/:token`
+  'shares.list': { module: 'shares', method: 'GET', path: '/shares', query: sharesQuerySchema, response: listResponseSchema(shareSummarySchema) },
+  'shares.create': { module: 'shares', method: 'POST', path: '/shares', fresh: true, body: shareCreateSchema, response: shareSummarySchema, status: 201 },
+  'shares.update': { module: 'shares', method: 'PATCH', path: '/shares/:id', fresh: true, params: shareParamsSchema, body: shareUpdateSchema, response: shareSummarySchema },
+  'shares.remove': { module: 'shares', method: 'DELETE', path: '/shares/:id', params: shareParamsSchema, response: 'empty' },
+  'shares.view': { module: 'shares', method: 'GET', path: '/share/:token', public: true, params: sharePublicParamsSchema, response: shareViewSchema },
+  'shares.file': { module: 'shares', method: 'GET', path: '/share/:token/files/:fileId', public: true, params: shareFileParamsSchema, response: 'binary' },
 } as const satisfies Record<string, ApiRouteDef>
 
 export type ApiRoutes = typeof apiRoutes

@@ -7,6 +7,8 @@ import {
   mcpServerIdSchema,
   pluginIdSchema,
   providerIdSchema,
+  shareIdSchema,
+  shareTokenSchema,
   toolNameSchema,
 } from '../ids.ts'
 import { isSafeRelativePath } from '../util/paths.ts'
@@ -31,6 +33,21 @@ export type PluginParams = z.infer<typeof pluginParamsSchema>
 
 export const iconParamsSchema = z.object({ slug: iconSlugSchema })
 export type IconParams = z.infer<typeof iconParamsSchema>
+
+/** Owner routes `/shares/:id`. */
+export const shareParamsSchema = z.object({ id: shareIdSchema })
+export type ShareParams = z.infer<typeof shareParamsSchema>
+
+/**
+ * Public route `/share/:token`. The server answers every failure of the public share routes (a malformed token
+ * included) with the same `404`, so it checks these params itself instead of answering `400` (API.md 5.20).
+ */
+export const sharePublicParamsSchema = z.object({ token: shareTokenSchema })
+export type SharePublicParams = z.infer<typeof sharePublicParamsSchema>
+
+/** Public route `/share/:token/files/:fileId` (same `404` rule as `sharePublicParamsSchema`). */
+export const shareFileParamsSchema = z.object({ token: shareTokenSchema, fileId: fileIdSchema })
+export type ShareFileParams = z.infer<typeof shareFileParamsSchema>
 
 /**
  * A file inside a plugin directory (API.md section 5.18): relative POSIX path, 1..256 characters, at most 8 segments of

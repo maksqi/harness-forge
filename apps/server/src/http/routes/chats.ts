@@ -1,10 +1,12 @@
 // Chat CRUD routes (API.md 5.9). Owner: W1.5 (W1.5-T4). Keep the export name `createChatsRoutes`. Thin: validate with
 // the shared schemas, call `deps.chats`, map to the response. `DELETE /chats/:id` stops an active run first
-// (`deps.runs.stop`, which waits until the partial message is persisted).
+// (`deps.runs.stop`, which waits until the partial message is persisted). `POST /chats/:id/branch` (ADR-023) is a
+// Phase 5 stub (501) until W5.1.
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import {
   apiRoutes,
+  chatBranchBodySchema,
   chatCreateSchema,
   chatExportQuerySchema,
   chatParamsSchema,
@@ -13,7 +15,7 @@ import {
 } from '@harness-forge/shared'
 import { Hono } from 'hono'
 import { contentDisposition } from '../../services/files/names.ts'
-import { validate } from '../validate.ts'
+import { notImplemented, validate } from '../validate.ts'
 
 export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
@@ -51,6 +53,8 @@ export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
       'Content-Security-Policy': 'default-src \'none\'; sandbox',
     })
   })
+
+  app.post(apiRoutes['chats.switchBranch'].path, validate('param', chatParamsSchema), validate('json', chatBranchBodySchema), notImplemented('chats.switchBranch'))
 
   return app
 }

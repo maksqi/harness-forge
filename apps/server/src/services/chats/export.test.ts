@@ -1,5 +1,5 @@
 import type { ChatDetail } from '@harness-forge/shared'
-import { chatExportSchema } from '@harness-forge/shared'
+import { chatExportAnySchema, chatExportSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { buildChatExport, EXPORT_TOOL_OUTPUT_BYTES, exportFilename, renderChatMarkdown, titleSlug } from './export.ts'
 
@@ -20,6 +20,7 @@ function sampleChat(): ChatDetail {
     updatedAt: 2,
     settings: { toolMode: 'ask' },
     totals: { inputTokens: 10, outputTokens: 20, reasoningTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.01 },
+    branches: {},
     messages: [
       {
         id: 'msg_user000000000001',
@@ -133,18 +134,32 @@ describe('markdown export', () => {
 })
 
 describe('json export', () => {
-  it('is a ChatExport of the chat with running and pendingApproval false', () => {
+  it('is a version 2 ChatExport of the chat with running and pendingApproval false', () => {
     const file = buildChatExport(sampleChat(), 'json', NOW)
     expect(file.filename).toBe('plan-the-trip-2026-09-28.json')
     expect(file.contentType).toBe('application/json; charset=utf-8')
     const parsed = chatExportSchema.parse(JSON.parse(file.body))
+    const { branches: _branches, ...chat } = sampleChat()
     expect(parsed).toEqual({
       format: 'harness-forge.chat',
-      version: 1,
+      version: 2,
       exportedAt: NOW,
-      chat: { ...sampleChat(), running: false, pendingApproval: false },
+      chat: {
+        ...chat,
+        running: false,
+        pendingApproval: false,
+        parentIds: [null, 'msg_user000000000001'],
+        activeLeafId: 'msg_asst000000000001',
+      },
     })
+    expect(JSON.parse(file.body).chat).not.toHaveProperty('branches')
+    expect(chatExportAnySchema.parse(JSON.parse(file.body)).version).toBe(2)
     expect(file.body.endsWith('}\n')).toBe(true)
+  })
+
+  it('exports an empty chat without an active leaf', () => {
+    const file = buildChatExport({ ...sampleChat(), messages: [] }, 'json', NOW)
+    expect(chatExportSchema.parse(JSON.parse(file.body)).chat).toMatchObject({ messages: [], parentIds: [], activeLeafId: null })
   })
 
   it('names markdown exports .md', () => {

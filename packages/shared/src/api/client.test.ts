@@ -1,4 +1,6 @@
 import type { ChatDetail } from '../schemas/chats.ts'
+import type { DataImportResult } from '../schemas/data.ts'
+import type { ShareSummary, ShareView } from '../schemas/shares.ts'
 import type { Settings } from '../schemas/system.ts'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { HarnessError } from '../errors.ts'
@@ -118,6 +120,30 @@ describe('createApiClient', () => {
     expect(calls[1]?.init.headers).not.toHaveProperty('content-type')
   })
 
+  it('sends the backup import as a multipart form and streams the export as a raw Response', async () => {
+    const zip = new Response(new Uint8Array([0x50, 0x4B]), { status: 200, headers: { 'content-type': 'application/zip' } })
+    const { calls, fetch } = fakeFetch(call => (call.url.startsWith('/api/data/export') ? zip : json({}, 200)))
+    const client = createApiClient({ fetch })
+    const form = new FormData()
+    form.append('file', new Blob(['{}'], { type: 'application/json' }), 'chat.json')
+    form.append('onConflict', 'copy')
+    await client.data.import({ form })
+    expect(calls[0]).toMatchObject({ url: '/api/data/import', init: { method: 'POST', body: form } })
+    expect(calls[0]?.init.headers).not.toHaveProperty('content-type')
+    await expect(client.data.export({ query: { files: false } })).resolves.toBe(zip)
+    expect(calls[1]?.url).toBe('/api/data/export?files=false')
+    expect(calls[1]?.init.headers).toEqual({ accept: '*/*' })
+  })
+
+  it('switches branches and deletes all data with JSON bodies', async () => {
+    const { calls, fetch } = fakeFetch(() => json({}))
+    const client = createApiClient({ fetch })
+    await client.chats.switchBranch({ params: { id: '0199a8f0-0000-7000-8000-000000000001' }, body: { messageId: 'msg_sample0000000001' } })
+    expect(calls[0]).toMatchObject({ url: '/api/chats/0199a8f0-0000-7000-8000-000000000001/branch', init: { method: 'POST', body: '{"messageId":"msg_sample0000000001"}' } })
+    await client.data.deleteAll({ body: { confirm: 'DELETE', files: true } })
+    expect(calls[1]).toMatchObject({ url: '/api/data/delete', init: { method: 'POST', body: '{"confirm":"DELETE","files":true}' } })
+  })
+
   it('resolves void for 204 responses', async () => {
     const { fetch } = fakeFetch(() => new Response(null, { status: 204 }))
     const client = createApiClient({ fetch })
@@ -212,6 +238,14 @@ describe('createApiClient', () => {
     expectTypeOf(client.chats.remove).returns.resolves.toEqualTypeOf<void>()
     expectTypeOf(client.chat.send).returns.resolves.toEqualTypeOf<Response>()
     expectTypeOf(client.settings.get).returns.resolves.toEqualTypeOf<Settings>()
+    expectTypeOf(client.chats.switchBranch).returns.resolves.toEqualTypeOf<ChatDetail>()
+    expectTypeOf(client.data.import).parameter(0).toHaveProperty('form')
+    expectTypeOf(client.data.import).returns.resolves.toEqualTypeOf<DataImportResult>()
+    expectTypeOf(client.data.export).returns.resolves.toEqualTypeOf<Response>()
+    expectTypeOf(client.shares.create).returns.resolves.toEqualTypeOf<ShareSummary>()
+    expectTypeOf(client.shares.remove).returns.resolves.toEqualTypeOf<void>()
+    expectTypeOf(client.shares.view).returns.resolves.toEqualTypeOf<ShareView>()
+    expectTypeOf(client.shares.file).returns.resolves.toEqualTypeOf<Response>()
   })
 })
 
@@ -223,5 +257,9 @@ describe('apiUrl', () => {
       .toBe('/api/chats/0199a8f0-0000-7000-8000-000000000001/export?format=md')
     expect(apiUrl('plugins.icon', { params: { id: 'my-plugin' } }, 'http://localhost:8787/api')).toBe('http://localhost:8787/api/plugins/my-plugin/icon')
     expect(apiUrl('models.list', { query: { providerId: 'openai', includeHidden: false } })).toBe('/api/models?providerId=openai&includeHidden=false')
+    expect(apiUrl('data.export', { query: { files: false, settings: true } })).toBe('/api/data/export?files=false&settings=true')
+    const token = `sample0000000001${'A'.repeat(20)}_-`
+    expect(apiUrl('shares.view', { params: { token } })).toBe(`/api/share/${token}`)
+    expect(apiUrl('shares.file', { params: { token, fileId: 'file_sample0000000001' } })).toBe(`/api/share/${token}/files/file_sample0000000001`)
   })
 })

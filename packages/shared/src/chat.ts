@@ -115,13 +115,29 @@ export const harnessUIMessageSchema = uiMessageSchema(z.string().min(1).max(256)
 export const chatTriggerSchema = z.enum(['submit-message', 'regenerate-message'])
 export type ChatTrigger = z.infer<typeof chatTriggerSchema>
 
-/** Body of `POST /chat` (max 2 MB): only the last UI message is sent, the server owns history. */
+/**
+ * Body of `POST /chat` (max 2 MB): only the last UI message is sent, the server owns history. The messages of a chat
+ * form a tree (ADR-023): a new user message names its parent (`parentId`), a regenerate names its target
+ * (`messageId`), an approval continuation names neither.
+ */
 export const chatRequestBodySchema = z.strictObject({
   chatId: chatIdSchema,
-  /** The last UI message: a new or edited user message, or the last assistant message (approval continuation). */
+  /**
+   * The last UI message: a new user message (an edit is a new user message too, with a new id), or the active leaf
+   * assistant message (approval continuation).
+   */
   message: uiMessageSchema(messageIdSchema),
   trigger: chatTriggerSchema,
-  /** Edit: the user message being replaced; regenerate: the assistant message to regenerate (default: the last). */
+  /**
+   * `submit-message` with a user message only: the parent of the new message (`null` = a first message). An edit sends
+   * the parent of the edited message, so the new message becomes a sibling version of it. Omitted = the chat's active
+   * leaf. Sent with a regenerate or an approval continuation -> `400`; unknown -> `404`.
+   */
+  parentId: messageIdSchema.nullable().optional(),
+  /**
+   * `regenerate-message` only: the reply to regenerate, or the user message to answer (default: the active leaf).
+   * A user message sent with `messageId` is rejected (`400`): in-place edits were removed (ADR-023).
+   */
   messageId: messageIdSchema.optional(),
   modelRef: modelRefSchema,
   reasoningEffort: reasoningEffortSchema,

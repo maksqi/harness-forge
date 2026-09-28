@@ -15,6 +15,7 @@
     "start": "node apps/server/dist/main.mjs",
     "start:e2e": "HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e node apps/server/dist/main.mjs",
     "test": "vitest run",
+    "test:live": "vitest run --config apps/server/vitest.live.config.ts",
     "test:e2e": "playwright test --pass-with-no-tests",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json && pnpm --recursive --workspace-concurrency=1 run typecheck",

@@ -7,7 +7,7 @@ waits for your approval. A **Plugins** tab adds LLM providers, models, tools, MC
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **Status:** Phase 4 (hardening and release). Progress lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status:** v1 released; Phase 5 (v1.1) in progress. Progress lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ![Chat with a code block, a reasoning row and a tool approval card (dark theme)](docs/assets/screenshots/chat-dark.png)
 
@@ -22,7 +22,13 @@ desktop app, and it starts in dark mode.
 - **Chat**:
   - Streaming markdown with highlighted code, "Thinking" rows for reasoning, and collapsible tool-call rows.
   - Inline approval cards for tool calls, file attachments, and edit, regenerate, copy and stop.
+  - Conversation branching: editing a message or regenerating a reply keeps the old version, and a `‹ 2/3 ›`
+    switcher moves between versions. The chosen version is remembered.
   - Automatic chat titles, per-message token usage and cost, and a context-usage ring.
+- **Your data** (Settings -> Data): back up every chat, with every version and attachment, to one zip file; restore it
+  here or on another server (existing chats are skipped or copied); or delete all chats at once.
+- **Share links**: publish a read-only snapshot of a chat at an unguessable link, choose whether reasoning, tool
+  details and attachments are included, update the snapshot or revoke the link at any time.
 - **Composer**:
   - A model picker with provider icons and capability badges.
   - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode (Ask, Auto, Off) for tools.
@@ -114,7 +120,8 @@ docker run -d --name harness-forge -p 8787:8787 -v harness-forge-data:/data -e H
 ```
 
 The container runs as the unprivileged `node` user (uid 1000); a bind-mounted data directory must be writable by
-it. Put a TLS reverse proxy in front before exposing it beyond your machine or LAN.
+it. Put a TLS reverse proxy in front before exposing it beyond your machine or LAN (see
+[Behind a reverse proxy](#behind-a-reverse-proxy)).
 
 ## Configuration
 
@@ -132,13 +139,16 @@ Every variable is optional. [`.env.example`](.env.example) lists them with comme
 | `HF_PLUGIN_WATCH` | unset | `1` hot-reloads code plugins in the data directory when their files change (linked folders always reload) |
 | `HF_OFFLINE` | unset | `1` never downloads the models.dev catalog (the bundled snapshot is used) |
 | `HF_INSECURE` | unset | `1` allows a non-loopback bind without a password (only behind another authentication layer); it also disables the DNS-rebinding guard that restricts a password-less server to `localhost` host names |
+| `HF_TRUST_PROXY` | unset | reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` headers are trusted: a comma list of `loopback`, `private`, IP addresses and CIDRs (`X-Forwarded-Host` is never used; `1`, `true` and hop counts are rejected). See [Behind a reverse proxy](#behind-a-reverse-proxy) |
 | `HF_WEB_DIR` | `apps/web/.output/public` | directory of the built web app served in production |
 | `HF_API_TARGET` | `http://localhost:8787` | where `nuxt dev` proxies `/api` (development only) |
 | `NODE_ENV` | unset | `development` forces dev mode (debug logs, `:3000` origins allowed), `production` forces production; by default dev mode means running from TypeScript sources |
 | `<VENDOR>_API_KEY` | unset | provider key fallbacks, see [Supported providers](#supported-providers) |
 
 A key saved in Settings wins over its environment variable; the key dialog shows which source is active ("From env").
-Flags accept `1` / `true` / `yes` / `on` and `0` / `false` / `no` / `off`.
+Flags accept `1` / `true` / `yes` / `on` and `0` / `false` / `no` / `off`. Test-only variables (`HF_LIVE_PROVIDERS`,
+`HF_LIVE_MAX_COST_USD`, ...) are described in [`docs/PROVIDERS.md`](docs/PROVIDERS.md#12-live-provider-suite) and
+[`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Plugins
 
@@ -184,15 +194,22 @@ harness-forge is built for **one user** on their own machine or server.
 
 - **Network exposure.** The server binds to `127.0.0.1` by default and refuses a non-loopback bind without a
   password. Set `HF_PASSWORD` (or a password in Settings -> General) before exposing it, and use TLS through a
-  reverse proxy for anything beyond your LAN.
-- **Reverse proxies.** Forward the `Host` header and set `X-Forwarded-Proto: https`, which makes the session cookie
-  `Secure` and turns on HSTS. The login rate limiter counts failures per TCP peer and ignores `X-Forwarded-For`,
-  which any client can forge. Behind a proxy, all clients therefore share one limit, and 5 failed logins lock
-  everyone out for up to 15 minutes. Restrict access at the proxy (allow list, VPN or basic auth) when the server is
-  reachable from the internet.
+  reverse proxy for anything beyond your LAN. Share links need a password too: without one the server answers only
+  on `localhost` host names.
+- **Reverse proxies.** Forward the `Host` header, set `X-Forwarded-For` and `X-Forwarded-Proto`, and list the proxy in
+  `HF_TRUST_PROXY`. Forwarded headers are honored only from those proxies, so the login rate limiter (5 failures per
+  client per 15 minutes, 50 overall) sees the real clients, and `X-Forwarded-Proto: https` makes the session cookie
+  `Secure` and turns on HSTS. Without `HF_TRUST_PROXY`, `X-Forwarded-For` is ignored (any client can forge it), all
+  clients behind the proxy share one limit, and 5 failed logins lock everyone out for up to 15 minutes.
+  `X-Forwarded-Host` is never used. Examples: [Behind a reverse proxy](#behind-a-reverse-proxy).
 - **Sessions and CSRF.** An HttpOnly, SameSite=Strict HMAC session cookie; state-changing requests must come from
-  the same origin. With a password set, installing or trusting code plugins, building them and changing the password
-  require a login within the last 10 minutes.
+  the same origin. With a password set, installing or trusting code plugins, building them, changing the password,
+  creating or updating share links and deleting all data require a login within the last 10 minutes.
+- **Share links.** A link shows a sanitized snapshot of one conversation path: no instructions, errors, usage, costs
+  or approvals; reasoning, tool details and attachments only when you include them. Its token is an HMAC that is never
+  stored and never logged; revoking the link or changing the master key ends it, and every response carries
+  `X-Robots-Tag: noindex, nofollow`.
+- **Backups.** The Settings -> Data zip never contains API keys, the password, plugins or MCP servers.
 - **Secrets.** Provider keys and plugin secrets are encrypted with AES-256-GCM under a master key from
   `HF_MASTER_KEY` or `data/secret.key`. The API never returns a secret, and logs are redacted.
 - **Plugins.** Code plugins and stdio MCP servers run **with the full rights of the server process**. They load only
@@ -203,6 +220,75 @@ harness-forge is built for **one user** on their own machine or server.
   output is rendered as escaped markdown, never as raw HTML.
 
 Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#10-security-model).
+
+### Behind a reverse proxy
+
+Terminate TLS at a proxy, keep harness-forge on `127.0.0.1` (or on an internal network), and tell it which proxy to
+trust with `HF_TRUST_PROXY`. The proxy must pass the original `Host` header (harness-forge never reads
+`X-Forwarded-Host`, which a DNS-rebinding page could forge), set `X-Forwarded-For` and `X-Forwarded-Proto`, accept
+request bodies of at least 256 MB (backup imports) and stream responses without buffering.
+
+**Caddy** on the same machine. Caddy forwards `Host`, `X-Forwarded-For` and `X-Forwarded-Proto` by default, streams
+responses and has no body limit:
+
+```caddyfile
+chat.example.com {
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+```sh
+HF_TRUST_PROXY=loopback HF_PASSWORD='a long passphrase' pnpm start
+```
+
+**nginx** on the same machine, with harness-forge started the same way (`HF_TRUST_PROXY=loopback`):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name chat.example.com;
+    # ssl_certificate and ssl_certificate_key ...
+
+    client_max_body_size 300m;          # uploads and backup imports (up to 256 MB)
+
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;        # long replies stream over one request
+    }
+}
+```
+
+**Docker Compose** with a proxy container, for example Caddy in a `docker-compose.override.yml` next to
+`docker-compose.yml` (its `Caddyfile` contains `chat.example.com { reverse_proxy app:8787 }`):
+
+```yaml
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ['80:80', '443:443']
+    volumes: ['./Caddyfile:/etc/caddy/Caddyfile:ro', 'caddy-data:/data']
+volumes:
+  caddy-data:
+```
+
+The proxy reaches the app from the Compose network, a private address, so add this line to the `.env` next to
+`docker-compose.yml`:
+
+```sh
+HF_TRUST_PROXY=private
+```
+
+Then stop publishing the app's port to the network (remove the `ports` mapping of `app` in `docker-compose.yml`, or
+change it to `127.0.0.1:8787:8787`) so every request goes through the proxy. `private` trusts every private address:
+when other machines on your LAN can reach port 8787 directly, list the proxy's exact address or the Compose network's
+subnet instead (`docker network inspect harness-forge_default`).
+
+Set `HF_PASSWORD` before exposing the server; share links need it.
 
 ## Documentation
 
@@ -217,7 +303,7 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#10-security-model).
 | [`docs/UI.md`](docs/UI.md) | layout, design tokens, components, routes, shortcuts, test ids |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | phases, tasks and progress |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture decision records and the contract seed |
-| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md) |
+| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md) |
 | [`AGENT.md`](AGENT.md) | rules for AI agents working on this repository |
 
 ## Development
@@ -233,7 +319,8 @@ on SQLite), and the TypeScript-only packages `packages/shared` (schemas, DTOs, r
 | `pnpm start` | production server on :8787 serving the API and the web app |
 | `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` |
 | `pnpm test` | Vitest (all projects); `pnpm -F <pkg> test` for one package; `pnpm exec vitest run --project examples` for the example plugins |
-| `pnpm test:e2e` | Playwright |
+| `pnpm test:live` | opt-in live provider suite: **paid** calls with the provider keys in your environment or `.env` (`ANTHROPIC_API_KEY=… pnpm test:live`); never part of `pnpm test` ([details](docs/PROVIDERS.md#12-live-provider-suite)) |
+| `pnpm test:e2e` | Playwright (projects `chromium` and `mobile`) |
 | `pnpm lint` | ESLint |
 | `pnpm typecheck` | `tsc --noEmit` for packages and server + `nuxi typecheck` for web |
 | `pnpm check:english` | fails on any Cyrillic character in the repository |

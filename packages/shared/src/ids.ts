@@ -14,6 +14,13 @@ export const CHAT_ID_PATTERN = /^[\da-f]{8}-[\da-f]{4}-7[\da-f]{3}-[89ab][\da-f]
 export const MESSAGE_ID_PATTERN = /^msg_[\dA-Za-z]{16}$/
 /** `file_` + 16 characters of `[0-9A-Za-z]`. */
 export const FILE_ID_PATTERN = /^file_[\dA-Za-z]{16}$/
+/** `shr_` + 16 characters of `[0-9A-Za-z]` (ADR-025). */
+export const SHARE_ID_PATTERN = /^shr_[\dA-Za-z]{16}$/
+/**
+ * Share token (ADR-025): the 16-character suffix of the share id + the first 22 base64url characters of
+ * `HMAC-SHA256(subkey 'share', 'harness-forge/share/v1:' + shareId)`. Never stored; the share page is `/share/<token>`.
+ */
+export const SHARE_TOKEN_PATTERN = /^[\dA-Z]{16}[\w-]{22}$/i
 /** Plugin id: 1..40 characters of `[a-z0-9-]`, no leading or trailing `-`. */
 export const PLUGIN_ID_PATTERN = /^[\da-z](?:[\da-z-]{0,38}[\da-z])?$/
 /** Provider id: 1..64 characters of `[a-z0-9-]`, no leading or trailing `-`. */
@@ -54,6 +61,12 @@ export type MessageId = z.infer<typeof messageIdSchema>
 
 export const fileIdSchema = z.string().regex(FILE_ID_PATTERN, 'Expected a file id "file_" + 16 characters.')
 export type FileId = z.infer<typeof fileIdSchema>
+
+export const shareIdSchema = z.string().regex(SHARE_ID_PATTERN, 'Expected a share id "shr_" + 16 characters.')
+export type ShareId = z.infer<typeof shareIdSchema>
+
+export const shareTokenSchema = z.string().regex(SHARE_TOKEN_PATTERN, 'Expected a share token of 38 characters.')
+export type ShareToken = z.infer<typeof shareTokenSchema>
 
 export const pluginIdSchema = z.string().regex(PLUGIN_ID_PATTERN, 'Plugin ids use 1-40 characters of a-z, 0-9 and "-", without a leading or trailing "-".')
 export type PluginId = z.infer<typeof pluginIdSchema>
@@ -267,4 +280,9 @@ export function createMessageId(): MessageId {
 /** A new file id: `file_` + 16 random characters of `[0-9A-Za-z]`. */
 export function createFileId(): FileId {
   return `file_${randomString(16)}`
+}
+
+/** A new share id: `shr_` + 16 random characters of `[0-9A-Za-z]` (its suffix starts the share token, ADR-025). */
+export function createShareId(): ShareId {
+  return `shr_${randomString(16)}`
 }

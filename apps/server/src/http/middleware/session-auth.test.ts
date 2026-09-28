@@ -143,7 +143,7 @@ describe('with a password and no session', () => {
   const PRIVATE_KEYS = API_ROUTE_KEYS.filter(key => (apiRoutes[key] as ApiRouteDef).public !== true)
 
   it('the public routes are exactly the ones of ARCHITECTURE.md 10.1', () => {
-    expect(PUBLIC_KEYS.sort()).toEqual(['auth.login', 'auth.logout', 'auth.status', 'health.get', 'icons.get', 'icons.list'])
+    expect(PUBLIC_KEYS.sort()).toEqual(['auth.login', 'auth.logout', 'auth.status', 'health.get', 'icons.get', 'icons.list', 'shares.file', 'shares.view'])
   })
 
   it.each(PRIVATE_KEYS)('%s answers 401 unauthorized (action login)', async (key: ApiRouteKey) => {

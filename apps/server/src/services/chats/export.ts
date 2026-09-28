@@ -1,6 +1,7 @@
-// `GET /chats/:id/export?format=md|json` (API.md 5.9): Markdown or JSON (`ChatExport`) of a chat, with a sanitized
-// `<title-slug>-<yyyy-mm-dd>.<md|json>` file name. Exports carry the chat as the API shows it (no secrets, no internal
-// ids beyond the chat's own and its messages'); `running` and `pendingApproval` are always false.
+// `GET /chats/:id/export?format=md|json` (API.md 5.9): Markdown (the active path) or JSON (`ChatExport` version 2) of a
+// chat, with a sanitized `<title-slug>-<yyyy-mm-dd>.<md|json>` file name. Exports carry the chat as the API shows it
+// (no secrets, no internal ids beyond the chat's own and its messages'); `running` and `pendingApproval` are always
+// false.
 import type { ChatDetail, ChatExport, ChatExportFormat, HarnessUIMessage } from '@harness-forge/shared'
 import type { ChatExportFile } from './types.ts'
 import { Buffer } from 'node:buffer'
@@ -144,13 +145,27 @@ export function renderChatMarkdown(chat: ChatDetail, at: number): string {
   return `${sections.join('\n\n')}\n`
 }
 
-/** JSON export (`ChatExport`). */
+/**
+ * JSON export (`ChatExport`, version 2, ADR-023): every message version in `seq` order, the parent of each message
+ * (aligned by index) and the active leaf. The store is still linear (one version per message, W5.1 adds the tree), so
+ * every message is the child of the one before it and the active leaf is the last message.
+ */
 export function renderChatJson(chat: ChatDetail, at: number): string {
+  const { branches: _branches, settings, totals, messages, ...summary } = chat
   const body: ChatExport = {
     format: 'harness-forge.chat',
-    version: 1,
+    version: 2,
     exportedAt: at,
-    chat: { ...chat, running: false, pendingApproval: false },
+    chat: {
+      ...summary,
+      running: false,
+      pendingApproval: false,
+      settings,
+      totals,
+      messages,
+      parentIds: messages.map((_message, index) => messages[index - 1]?.id ?? null),
+      activeLeafId: messages.at(-1)?.id ?? null,
+    },
   }
   return `${JSON.stringify(body, null, 2)}\n`
 }

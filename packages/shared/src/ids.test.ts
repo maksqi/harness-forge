@@ -9,6 +9,7 @@ import {
   createChatId,
   createFileId,
   createMessageId,
+  createShareId,
   fileIdSchema,
   formatModelRef,
   isPluginNamespacedId,
@@ -22,6 +23,8 @@ import {
   pluginIdSchema,
   providerIdSchema,
   safeParseModelRef,
+  shareIdSchema,
+  shareTokenSchema,
   toolNameSchema,
 } from './ids.ts'
 import { fnv1a32Hex } from './util/hash.ts'
@@ -86,6 +89,18 @@ describe('id schemas', () => {
     expect(messageIdSchema.safeParse('msg_gate000000000001').success).toBe(true)
     expect(messageIdSchema.safeParse('msg-gate000000000001').success).toBe(false)
     expect(fileIdSchema.safeParse('file_ABCdef0123456789').success).toBe(true)
+  })
+
+  it('validates share ids and share tokens (ADR-025)', () => {
+    expect(shareIdSchema.safeParse('shr_ABCdef0123456789').success).toBe(true)
+    for (const id of ['shr_ABCdef012345678', 'shr_ABCdef0123456789x', 'shr-ABCdef0123456789', 'shr_ABCdef012345678_'])
+      expect(shareIdSchema.safeParse(id).success, id).toBe(false)
+    // The 16-character share id suffix + 22 base64url characters of the HMAC.
+    const token = `ABCdef0123456789${'aZ09_-'.repeat(3)}xyzw`
+    expect(token).toHaveLength(38)
+    expect(shareTokenSchema.safeParse(token).success).toBe(true)
+    for (const bad of [token.slice(0, 37), `${token}a`, `_${token.slice(1)}`, `${token.slice(0, 37)}=`, `${token.slice(0, 37)}/`])
+      expect(shareTokenSchema.safeParse(bad).success, bad).toBe(false)
   })
 })
 
@@ -154,6 +169,13 @@ describe('id generators', () => {
 
   it('creates file ids', () => {
     expect(createFileId()).toMatch(/^file_[\dA-Za-z]{16}$/)
+  })
+
+  it('creates share ids whose suffix can start a share token', () => {
+    const id = createShareId()
+    expect(shareIdSchema.safeParse(id).success).toBe(true)
+    expect(shareTokenSchema.safeParse(`${id.slice(4)}${'A'.repeat(22)}`).success).toBe(true)
+    expect(createShareId()).not.toBe(id)
   })
 
   it('creates lowercase uuidv7 chat ids with the current timestamp', () => {

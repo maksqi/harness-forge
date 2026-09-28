@@ -40,6 +40,22 @@ export const LIMITS = {
   commandTemplateBytes: 16_384,
   /** Bytes of a prompt command expansion stored in `metadata.command.expansion`. */
   commandExpansionBytes: 65_536,
+
+  // Bulk data (ADR-024) and share links (ADR-025).
+  /** `POST /data/import`: bytes of the uploaded backup zip or chat JSON. */
+  backupImportBytes: 268_435_456,
+  /** Entries of a backup zip, and items of its `files/index.json`. */
+  backupEntriesMax: 50_000,
+  /** Uncompressed bytes of one `chats/<chatId>.json` entry of a backup. */
+  backupChatEntryBytes: 67_108_864,
+  /** Messages (every version) of one chat in a chat export or a backup. */
+  backupChatMessagesMax: 20_000,
+  /** Serialized bytes of one share snapshot. */
+  shareSnapshotBytes: 10_485_760,
+  /** Characters of one tool input or output value in a share snapshot (`toolDetails`). */
+  shareToolValueChars: 16_384,
+  /** Share links of one chat. */
+  sharesPerChatMax: 20,
 } as const
 
 /** MIME families accepted by `POST /files` (the server also checks the content). */

@@ -90,8 +90,8 @@ function tableSignatures(): string[] {
 }
 
 describe('route table', () => {
-  it('has 62 routes keyed <module>.<action>', () => {
-    expect(API_ROUTE_KEYS).toHaveLength(62)
+  it('has 73 routes keyed <module>.<action>', () => {
+    expect(API_ROUTE_KEYS).toHaveLength(73)
     for (const key of API_ROUTE_KEYS) {
       const route: ApiRouteDef = apiRoutes[key]
       expect(key.startsWith(`${route.module}.`), key).toBe(true)
@@ -107,7 +107,7 @@ describe('route table', () => {
 
   it('equals the route key index of API.md (key, method, path, module)', () => {
     const index = routeIndex()
-    expect(index).toHaveLength(62)
+    expect(index).toHaveLength(73)
     expect(index.map(row => `${row.key} ${signature(row)}`).sort()).toEqual(
       API_ROUTE_KEYS.map(key => `${key} ${signature(apiRoutes[key])}`).sort(),
     )
@@ -185,6 +185,27 @@ describe('matchApiRoute', () => {
     })
     expect(matchApiRoute('GET', '/plugins/my-tool/files')?.key).toBe('pluginFiles.list')
     expect(matchApiRoute('PATCH', '/tools/mcp__srv__a%20b')?.params).toEqual({ name: 'mcp__srv__a b' })
+  })
+
+  it('matches the branch, data and share routes without shadowing', () => {
+    const chat = '0199a8f0-0000-7000-8000-000000000001'
+    const token = `sample0000000001${'A'.repeat(20)}_-`
+    expect(matchApiRoute('POST', `/chats/${chat}/branch`)).toMatchObject({ key: 'chats.switchBranch', params: { id: chat } })
+    expect(matchApiRoute('GET', '/data')?.key).toBe('data.summary')
+    expect(matchApiRoute('GET', '/data/export')?.key).toBe('data.export')
+    expect(matchApiRoute('POST', '/data/import')?.key).toBe('data.import')
+    expect(matchApiRoute('POST', '/data/delete')?.key).toBe('data.deleteAll')
+    expect(matchApiRoute('GET', '/shares')?.key).toBe('shares.list')
+    expect(matchApiRoute('POST', '/shares')?.key).toBe('shares.create')
+    expect(matchApiRoute('PATCH', '/shares/shr_sample0000000001')).toMatchObject({ key: 'shares.update', params: { id: 'shr_sample0000000001' } })
+    expect(matchApiRoute('DELETE', '/shares/shr_sample0000000001')?.key).toBe('shares.remove')
+    expect(matchApiRoute('GET', `/share/${token}`)).toMatchObject({ key: 'shares.view', params: { token } })
+    expect(matchApiRoute('GET', `/share/${token}/files/file_sample0000000001`)).toMatchObject({
+      key: 'shares.file',
+      params: { token, fileId: 'file_sample0000000001' },
+    })
+    for (const [method, path] of [['GET', '/shares/shr_sample0000000001'], ['GET', '/share'], ['POST', '/share/x'], ['DELETE', '/data'], ['GET', '/data/import'], ['GET', `/share/${token}/files`]] as const)
+      expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
   })
 
   it('returns null for unknown routes, methods and bad encodings', () => {

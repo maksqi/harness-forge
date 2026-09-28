@@ -38,7 +38,15 @@ async function cookieFor(authAt: number): Promise<Record<string, string>> {
 
 describe('fresh routes of the route table', () => {
   it('are the sensitive operations of ADR-017', () => {
-    expect(FRESH_KEYS.sort()).toEqual(['auth.setPassword', 'pluginFiles.build', 'pluginFiles.scaffold', 'pluginInstall.trust'])
+    expect(FRESH_KEYS.sort()).toEqual([
+      'auth.setPassword',
+      'data.deleteAll',
+      'pluginFiles.build',
+      'pluginFiles.scaffold',
+      'pluginInstall.trust',
+      'shares.create',
+      'shares.update',
+    ])
     expect(FRESH_AUTH_WINDOW_MS).toBe(10 * MINUTE)
   })
 

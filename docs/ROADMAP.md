@@ -98,10 +98,39 @@ Web UI agents depend only on frozen contracts, stores and shell components, so w
   writing the secret layout directly; `PluginHost.onStateChange` instead of the core-mcp bridge; flaky
   `host.test.ts` fs.watch tests; body-limit streamed-multipart cancel → unhandled rejection (W4.1).
 
-## Backlog (not in v1)
+## Phase 5 — v1.1: stabilization, branching, data, share
+
+Details, owned paths and acceptance criteria: `docs/phases/phase-5-v1-1.md`. Decisions: ADR-023 … ADR-027.
+
+- [x] P5-0a Decisions, docs, contracts
+  - [x] K1 DECISIONS (ADR-023 … ADR-027, contract seed), ROADMAP, AGENT.md (coordinator)
+  - [x] K2 remove `vue-stream-markdown` + configs (Playwright `mobile` project, `test:live`, live Vitest config;
+    `pnpm audit` flags live in CI, no workspace `audit` key) (coordinator)
+  - [x] C7 contracts: shared DTOs, 11 new routes, `docs/API.md`, 501 stubs (chat JSON export writes v2)
+  - [x] D5 docs: `phase-5-v1-1.md`, UI.md, ARCHITECTURE.md, PROVIDERS.md, README, `.env.example`
+  - [x] Gate + checkpoint commit
+- [ ] P5-0b Schema, migration `0001`, skeletons, FREEZE
+  - [ ] K3 schema + `pnpm db:generate` + backfill SQL (coordinator)
+  - [ ] C8 server skeleton (types, stub services, keyring `share`, `X-Robots-Tag`, upgrade test)
+  - [ ] C9 web skeleton (share layout, stub pages/components, test ids, Data nav, `ui.openShare`)
+  - [ ] Gate (incl. v1 data upgrade probe) + FREEZE + checkpoint commit
+- [ ] P5-A Features + stabilization (9 agents)
+  - [ ] W5.1 branching-server · [ ] W5.2 branching-web
+  - [ ] W5.3 data-server · [ ] W5.5 data-web
+  - [ ] W5.4 shares-server · [ ] W5.6 shares-web
+  - [ ] W5.7 security-proxy (`HF_TRUST_PROXY`, CSP test gating, share-token masking)
+  - [ ] W5.8 e2e-stabilization (resume, keyboard, settings, mobile, screenshots)
+  - [ ] W5.9 quality (live provider suite, CI audit + CSP step, Dependabot, phase-4 checklist)
+  - [ ] Gate + checkpoint commit
+- [ ] P5-B Feature e2e, docs, fix-ups, final gate
+  - [ ] W5.10 e2e-features (branching, data, share) · [ ] W5.11 docs-final · [ ] W5.12/13 fix-ups
+  - [ ] Final gate (e2e ×3, screenshots, audit, Docker upgrade) + checkpoint commit
+
+## Backlog (not in v1.1)
 
 Multi-user accounts · child-process isolation for code plugins · plugin marketplace/registry index ·
-conversation branching · sharing links · knowledge/RAG · image generation · voice · desktop/CLI clients.
+knowledge/RAG · image generation · voice · desktop/CLI clients · attachment editing when editing a message ·
+deleting a message version · remembering the selected version per message · master-key rotation.
 
 ## Wave log
 
@@ -115,3 +144,4 @@ conversation branching · sharing links · knowledge/RAG · image generation · 
 | Wave B | W2.1, W3.1–W3.5 | audit ok; 3108/3109 tests (known flaky fs.watch test passes alone); build ok; chat stream, approval, commands, tools, plugins, scaffold probes ok | d9dedb0 |
 | Wave C | W2.6, W3.6, W4.1–W4.4, W4.6 | audit ok; 3530 tests; frozen install ok; build ok; e2e 27/27 (core 15 + plugins 12) | f142fcc |
 | Final gate | coordinator | e2e 27/27 ×3; `pnpm start` from empty data dir ok (secret.key 0600); Docker image (Node 24, non-root) smoke ok | 6e3b442 |
+| P5-0a | coordinator (K1, K2), C7, D5 | audit ok; 3623 tests; build ok; built-page CSP test 38/38; 11 new routes mounted (501 / 400 body validation); e2e 27/27; `vue-stream-markdown` gone, TypeScript 6.0.3 only | (this commit) |

@@ -1,6 +1,6 @@
 // One valid request per route of the shared route table (typed against the client input types), for route-table
 // driven tests: every endpoint is mounted (C4), every non-public route answers 401 without a session (W1.1), ...
-import type { ApiInput, ApiRouteKey, DeclarativeProvider, PluginManifest } from '@harness-forge/shared'
+import type { ApiInput, ApiRouteKey, ChatExport, DeclarativeProvider, PluginManifest } from '@harness-forge/shared'
 import { apiRoutes, apiUrl } from '@harness-forge/shared'
 
 export const SAMPLE_CHAT_ID = '0199a8f0-0000-7000-8000-000000000001'
@@ -9,6 +9,33 @@ export const SAMPLE_FILE_ID = 'file_sample0000000001'
 export const SAMPLE_PLUGIN_ID = 'sample-plugin'
 export const SAMPLE_PROVIDER_ID = 'openai'
 export const SAMPLE_MCP_SERVER_ID = 'everything'
+export const SAMPLE_SHARE_ID = 'shr_sample0000000001'
+/** The share id suffix + 22 base64url characters (the shape of a share token; its MAC is not valid). */
+export const SAMPLE_SHARE_TOKEN = 'sample0000000001AbCdEfGhIjKlMnOpQrSt_-'
+
+/** A chat JSON export (version 2) with one user message: the upload of the `data.import` sample. */
+export const SAMPLE_CHAT_EXPORT = {
+  format: 'harness-forge.chat',
+  version: 2,
+  exportedAt: 1_759_000_000_000,
+  chat: {
+    id: SAMPLE_CHAT_ID,
+    title: 'Sample chat',
+    titleSource: 'user',
+    modelRef: 'mock:echo',
+    pinned: false,
+    archived: false,
+    running: false,
+    pendingApproval: false,
+    createdAt: 1_759_000_000_000,
+    updatedAt: 1_759_000_000_000,
+    settings: {},
+    totals: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null },
+    messages: [{ id: SAMPLE_MESSAGE_ID, role: 'user', metadata: { modelRef: 'mock:echo', startedAt: 1_759_000_000_000 }, parts: [{ type: 'text', text: 'ping' }] }],
+    parentIds: [null],
+    activeLeafId: SAMPLE_MESSAGE_ID,
+  },
+} satisfies ChatExport
 
 export const SAMPLE_DECLARATIVE_PROVIDER = {
   id: SAMPLE_PLUGIN_ID,
@@ -70,6 +97,7 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
   'chats.update': { params: { id: SAMPLE_CHAT_ID }, body: { pinned: true } },
   'chats.remove': { params: { id: SAMPLE_CHAT_ID } },
   'chats.export': { params: { id: SAMPLE_CHAT_ID }, query: { format: 'md' } },
+  'chats.switchBranch': { params: { id: SAMPLE_CHAT_ID }, body: { messageId: SAMPLE_MESSAGE_ID } },
 
   'chat.send': {
     body: {
@@ -130,6 +158,26 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
   'pluginFiles.write': { params: { id: SAMPLE_PLUGIN_ID, path: 'lib/tools.mjs' }, body: { content: 'export const answer = 42\n' } },
   'pluginFiles.remove': { params: { id: SAMPLE_PLUGIN_ID, path: 'lib/old.mjs' } },
   'pluginFiles.build': { params: { id: SAMPLE_PLUGIN_ID }, body: { reload: true } },
+
+  'data.summary': {},
+  'data.export': { query: { files: 'false', settings: 'true' } },
+  'data.import': {
+    form: () => {
+      const form = new FormData()
+      form.append('file', new File([JSON.stringify(SAMPLE_CHAT_EXPORT)], 'sample-chat.json', { type: 'application/json' }))
+      form.append('onConflict', 'copy')
+      form.append('restoreSettings', 'false')
+      return form
+    },
+  },
+  'data.deleteAll': { body: { confirm: 'DELETE', files: false, usage: false } },
+
+  'shares.list': { query: { chatId: SAMPLE_CHAT_ID } },
+  'shares.create': { body: { chatId: SAMPLE_CHAT_ID, title: 'Sample share', options: { reasoning: true }, expiresAt: null } },
+  'shares.update': { params: { id: SAMPLE_SHARE_ID }, body: { title: 'Renamed share', options: { attachments: false } } },
+  'shares.remove': { params: { id: SAMPLE_SHARE_ID } },
+  'shares.view': { params: { token: SAMPLE_SHARE_TOKEN } },
+  'shares.file': { params: { token: SAMPLE_SHARE_TOKEN, fileId: SAMPLE_FILE_ID } },
 }
 
 export interface SampleRequest {

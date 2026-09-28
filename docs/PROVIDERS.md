@@ -13,7 +13,8 @@ mappings) were read from the published source of the versions installed in this 
 `@ai-sdk/minimax` 3.0.42, `@ai-sdk/mistral` 4.0.52, `@ai-sdk/groq` 4.0.50, `@ai-sdk/openai-compatible` 3.0.57,
 `@openrouter/ai-sdk-provider` 3.1.0, `@lobehub/icons-static-svg` 1.95.1). Key URLs and listing endpoints were checked
 against vendor docs and live HTTP responses. Anything not confirmed is marked **(unverified)**; re-check those items
-when implementing ([section 11](#11-verification-log)).
+when implementing ([section 11](#11-verification-log)). The opt-in live provider suite
+([section 12](#12-live-provider-suite)) exercises every provider you have a key for.
 
 ## 1. Builtin providers
 
@@ -418,3 +419,82 @@ Unverified (re-check during implementation): `grok-4.7` accepted efforts and the
 Z.ai `/models` on the general endpoint and per-model effort support of GLM models; MiniMax listing shape and model id
 casing; Alibaba listing shape and which Qwen models accept `enable_thinking`; Ollama `/api/show` `thinking.values` on
 real models (the mapping of section 4 is implemented from Ollama's docs); the MiniMax China base URL.
+
+## 12. Live provider suite
+
+v1 was exercised only with the `mock` provider. The live suite (ADR-027) runs real requests against every builtin
+provider you have a key for. It is **opt-in and paid**: `pnpm test` never runs it, even with keys exported.
+
+### Running it
+
+```sh
+ANTHROPIC_API_KEY=sk-ant-... pnpm test:live                       # one provider
+HF_LIVE_PROVIDERS=anthropic,openai pnpm test:live                  # only these (keys from the environment or .env)
+HF_LIVE_MAX_COST_USD=0.20 pnpm test:live                           # a smaller budget
+```
+
+- `pnpm test:live` runs `vitest run --config apps/server/vitest.live.config.ts`: only
+  `apps/server/src/**/*.live.test.ts`, one file at a time, 60 s timeouts, with `HF_LIVE=1` set by the config. Every
+  live file also guards itself with `describe.runIf(process.env.HF_LIVE === '1')`, and the normal server config
+  excludes `*.live.test.ts`.
+- Keys come from the environment; the repository `.env` is read as well (variables already set win), like the server
+  does at start.
+- A provider without a key is reported as SKIP. Ollama runs when `http://localhost:11434/api/tags` answers within 1 s.
+
+### Environment variables per provider
+
+The suite reads the names from each provider's `credentials[].envVar` in `core-providers` (aliases included; the first
+non-empty one wins), so they match section 1:
+
+| Provider | Key variables | Model used (`smallModelId`) |
+|---|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-haiku-4-5` |
+| `openai` | `OPENAI_API_KEY` | `gpt-6-luna` |
+| `google` | `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` | `gemini-3.5-flash-lite` |
+| `xai` | `XAI_API_KEY` | `grok-4.3` |
+| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-flash` |
+| `moonshotai` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
+| `alibaba` | `ALIBABA_API_KEY`, `DASHSCOPE_API_KEY` | `qwen3.8-flash` |
+| `zai` | `ZAI_API_KEY`, `ZHIPU_API_KEY` | `glm-5.3-flash` |
+| `minimax` | `MINIMAX_API_KEY` | `MiniMax-M3` |
+| `mistral` | `MISTRAL_API_KEY` | `mistral-small-latest` |
+| `groq` | `GROQ_API_KEY` | `openai/gpt-oss-20b` |
+| `openrouter` | `OPENROUTER_API_KEY` | `openai/gpt-6-luna` |
+| `ollama` | none (a local server on `localhost:11434`) | the first model of its local listing (Ollama has no `smallModelId`) |
+
+| Variable | Meaning |
+|---|---|
+| `HF_LIVE` | `1` enables the live files; set by `pnpm test:live` itself, never needed in `.env` |
+| `HF_LIVE_PROVIDERS` | comma list of provider ids to run (default: every provider with a key) |
+| `HF_LIVE_MAX_COST_USD` | budget of one run in USD (default 0.50); once the summed `costUsd` reaches it, the remaining checks are reported as SKIP |
+
+### What it checks
+
+Providers run one after another. Each gets its own in-process server,
+`createTestApp({ env: { HF_OFFLINE: '1', <its key only> } })`, with an in-memory database, so nothing is written to
+`data/`. Per provider:
+
+1. `POST /api/providers/:id/test` returns `ok: true`.
+2. A model refresh succeeds and `GET /api/models` lists the chosen model.
+3. `POST /api/chat` on `smallModelId` in a chat with a user-set title (no title call): text deltas stream, the finish
+   `usage` reports input and output tokens above 0, and the message is persisted.
+4. A request with reasoning effort `low` answers without an error (reasoning-capable models only).
+5. A tool round trip in permission mode `auto` with the builtin `current_time` tool.
+6. A deliberately wrong key sent as `values.apiKey` to the provider test returns `ok: false` with an `auth_invalid`
+   error (costs nothing; not for Ollama, which has no key).
+
+Cost and safety:
+
+- A `chat.params` hook registered by the suite caps output at 256 tokens (2048 with reasoning) and `maxSteps` at 3.
+- `HF_LIVE_MAX_COST_USD` stops the run once the budget is spent; a `429` from a provider is reported as SKIP, not FAIL.
+- Keys are never printed: the summary names the env var, never its value, and a test asserts that no log record
+  contains a key.
+- The summary table (provider, env var, model, one PASS / SKIP / FAIL per check, cost) goes to stdout and, in GitHub
+  Actions, to `$GITHUB_STEP_SUMMARY`. The matrix and the table are unit-tested by `apps/server/src/live/support.test.ts`
+  as part of `pnpm test`.
+
+### In CI
+
+Never on push or pull requests. `.github/workflows/live.yml` runs it on manual dispatch only, inside a GitHub
+environment with a required reviewer that holds the provider keys as secrets. Results of a run update the unverified
+items of [section 11](#11-verification-log).

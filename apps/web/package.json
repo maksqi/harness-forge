@@ -58,7 +58,6 @@
     "vue-router": "^5.0.0",
     "vue-sonner": "^2.0.9",
     "vue-stick-to-bottom": "^1.0.1",
-    "vue-stream-markdown": "^1.1.0",
     "zod": "catalog:"
   },
   "devDependencies": {

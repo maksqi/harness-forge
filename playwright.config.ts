@@ -20,6 +20,13 @@ export default defineConfig({
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
+      testIgnore: /specs\/mobile\//,
+    },
+    {
+      // Pixel 7 is a Chromium device, so CI needs no extra browser.
+      name: 'mobile',
+      use: { ...devices['Pixel 7'], viewport: { width: 390, height: 844 } },
+      testMatch: /specs\/mobile\/.*\.spec\.ts$/,
     },
   ],
   // Started only when no server answers on the health URL (a coordinator build or E2E_BASE_URL).
