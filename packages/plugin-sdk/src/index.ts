@@ -1,2 +1,75 @@
-// Placeholder. The public API of this package is defined in wave P0.4.
-export {}
+// @harness-forge/plugin-sdk: the public plugin contract (docs/PLUGINS.md section 9). Plugin authors import everything
+// from here. The plugin data shapes and enums are defined in @harness-forge/shared (ADR-018) and re-exported unchanged.
+export { definePlugin } from './define-plugin.ts'
+export { settingsValuesSchema } from './settings.ts'
+export type { SettingsValuesSchemaOptions } from './settings.ts'
+export type {
+  CommandDefinition,
+  CommandRunInput,
+  CommandRunResult,
+  Disposable,
+  HookChatContext,
+  HookHandler,
+  HookMap,
+  HookName,
+  HostAi,
+  KV,
+  Logger,
+  PluginContext,
+  PluginModule,
+  ProviderDefinition,
+  ProviderOptions,
+  ProviderRuntime,
+  ReasoningLevel,
+  ReasoningParams,
+  ToolCallContext,
+  ToolDefinition,
+  ToolPolicyFunction,
+  ToolResultOutput,
+} from './types.ts'
+export { PLUGIN_API_VERSION } from './version.ts'
+export {
+  apiFormatSchema,
+  credentialFieldSchema,
+  declarativeCommandSchema,
+  declarativeProviderSchema,
+  harnessErrorActionSchema,
+  harnessErrorCodeSchema,
+  harnessErrorInitSchema,
+  mcpServerDeclSchema,
+  modelInfoSchema,
+  pluginKindSchema,
+  pluginManifestBaseSchema,
+  pluginManifestSchema,
+  pluginPermissionSchema,
+  pluginSourceSchema,
+  pluginStateSchema,
+  reasoningEffortSchema,
+  reasoningStyleSchema,
+  settingsPropertySchema,
+  settingsSchemaSchema,
+  toolModeSchema,
+  toolPolicySchema,
+} from '@harness-forge/shared'
+export type {
+  ApiFormat,
+  CredentialField,
+  DeclarativeCommand,
+  DeclarativeProvider,
+  HarnessErrorAction,
+  HarnessErrorCode,
+  HarnessErrorInit,
+  McpServerDecl,
+  ModelInfo,
+  PluginKind,
+  PluginManifest,
+  PluginPermission,
+  PluginSource,
+  PluginState,
+  ReasoningEffort,
+  ReasoningStyle,
+  SettingsProperty,
+  SettingsSchema,
+  ToolMode,
+  ToolPolicy,
+} from '@harness-forge/shared'

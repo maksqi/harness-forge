@@ -258,6 +258,7 @@ noted, strings are trimmed and non-empty in request schemas.
 | `mcpServerIdSchema` / `McpServerId` | `^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$` |
 | `iconSlugSchema` / `IconSlug` | `^[a-z0-9-]{1,64}$` |
 | `sha256HexSchema` / `Sha256Hex` | `^[0-9a-f]{64}$` |
+| `trustPinSchema` / `TrustPin` | `Sha256Hex`, or `path:<Sha256Hex>` for linked folders pinned by path |
 | `toolModeSchema` / `ToolMode` | `'off' \| 'ask' \| 'auto'` |
 | `reasoningEffortSchema` / `ReasoningEffort` | `'auto' \| 'off' \| 'low' \| 'medium' \| 'high' \| 'max'` (re-exported by plugin-sdk) |
 | `toolPolicySchema` / `ToolPolicy` | `'safe' \| 'ask' \| 'always'` (re-exported by plugin-sdk) |
@@ -701,7 +702,7 @@ type PluginTrust = {                    // pluginTrustSchema
   required: boolean                     // code plugin, or declares a stdio MCP server
   trusted: boolean                      // !required, or trustedHash === hash (source 'link': path pinned)
   hash: Sha256Hex | null                // current sha256 of plugin.json + entry; null for builtins
-  trustedHash: Sha256Hex | null
+  trustedHash: TrustPin | null          // Sha256Hex, or path:<sha256> for linked folders
 }
 
 type PluginSummary = {                  // pluginSummarySchema
@@ -878,7 +879,7 @@ type BuildResult = {                    // buildResultSchema
   ok: boolean                           // no error diagnostics and, when reloaded, state is 'active'
   durationMs: number
   diagnostics: BuildDiagnostic[]
-  hash: Sha256Hex | null                // trust hash pinned by this build (null when the build failed)
+  hash: TrustPin | null                 // trust pin set by this build (null when the build failed)
   state: PluginState                    // state after the optional reload
 }
 ```

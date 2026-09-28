@@ -19,7 +19,11 @@ export default defineNuxtConfig({
       htmlAttrs: { lang: 'en' },
       meta: [
         { name: 'color-scheme', content: 'dark light' },
+        // sRGB approximation of the dark --background; app.vue keeps it in sync with the active theme.
+        { name: 'theme-color', content: '#1a1918' },
       ],
+      // Paint the dark background before CSS loads so the first frame is never light (ADR-006).
+      style: [{ innerHTML: 'html{background:#1a1918}html.light{background:#faf9f5}' }],
       link: [
         { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' },
       ],

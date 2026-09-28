@@ -17,3 +17,10 @@ Known follow-ups (not patched yet):
 - `message/MessageResponse.vue` and `reasoning/ReasoningContent.vue` render markdown with `vue-stream-markdown` 1.x
   (pinned `^1` through `overrides` in `pnpm-workspace.yaml`). The plan replaces them with the `Markdown.vue`
   wrapper around markstream-vue (W2.2); drop `vue-stream-markdown` once nothing imports it.
+
+## shadcn-vue `ui/` patches (coordinator)
+
+| File | Change | Reason |
+|---|---|---|
+| `ui/command/CommandGroup.vue` | heading styles moved from `[cmdk-group-heading]` selectors onto `ListboxGroupLabel` | reka-ui never sets `cmdk-group-heading`, so headings were unstyled |
+| `ui/sonner/Sonner.vue` | `--gray2` uses `color-mix(in oklch, var(--popover) 90%, transparent)` | `hsl(var(--popover))` is invalid with oklch tokens |

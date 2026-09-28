@@ -1107,7 +1107,7 @@ Declarative plugins without stdio servers run no code and need no trust:
 | Provider id | builtins: models.dev keys; plugins: `<pluginId>` or `<pluginId>-<suffix>` with `<suffix>` matching `[a-z0-9-]+`, total <= 64 characters | first registration wins, later ones throw `conflict` |
 | Model ref | `providerId:modelId`, split on the **first** `:` (`ollama:llama3:8b`); never in URL paths | |
 | Tool name | `^[a-zA-Z0-9_-]{1,64}$`; the prefix `mcp__` is reserved for MCP tools; prefer a plugin-specific prefix (`dice_roll`) | global; duplicates throw `conflict` |
-| MCP tool name | `mcp__<serverId>__<tool>`; characters of `<tool>` outside `[a-zA-Z0-9_-]` become `_`; longer than 64 characters -> the first 57 characters + `_` + the first 6 hex characters of the SHA-256 of the full name | global |
+| MCP tool name | `mcp__<serverId>__<tool>`; characters of `<tool>` outside `[a-zA-Z0-9_-]` become `_`; longer than 64 characters -> the first 55 characters + `_` + 8 hex characters of the FNV-1a hash of the full name (`mcpToolName()` in `@harness-forge/shared`, synchronous and browser-safe) | global |
 | MCP server id | `^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`; plugin servers: `<pluginId>` or `<pluginId>-<suffix>` (so plugins with ids longer than 32 characters cannot declare MCP servers) | across plugins and the MCP panel |
 | Command name | `^[a-z][a-z0-9-]{0,31}$`; reserved client-only: `new`, `model`, `effort`, `mode`, `help` | first wins |
 | Credential key, setting key | `^[a-zA-Z][a-zA-Z0-9_]{0,63}$` | within the provider / schema |

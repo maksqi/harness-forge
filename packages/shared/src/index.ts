@@ -1,2 +1,23 @@
-// Placeholder. The public API of this package is defined in wave P0.4.
-export {}
+// @harness-forge/shared: zod schemas and types of the HTTP contract (docs/API.md), the plugin data shapes (ADR-018),
+// errors, ids, the route table and the typed API client. Isomorphic: runs in the browser and in Node.
+export * from './api/client.ts'
+export * from './api/routes.ts'
+export * from './chat.ts'
+export * from './enums.ts'
+export * from './errors.ts'
+export * from './events.ts'
+export * from './ids.ts'
+export * from './limits.ts'
+export * from './schemas/chats.ts'
+export * from './schemas/common.ts'
+export * from './schemas/files.ts'
+export * from './schemas/icons.ts'
+export * from './schemas/models.ts'
+export * from './schemas/params.ts'
+export * from './schemas/plugin-data.ts'
+export * from './schemas/plugin-manifest.ts'
+export * from './schemas/plugin-settings.ts'
+export * from './schemas/plugins.ts'
+export * from './schemas/providers.ts'
+export * from './schemas/system.ts'
+export * from './schemas/tools.ts'

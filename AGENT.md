@@ -113,6 +113,10 @@ data/                                          runtime data (gitignored)
   `@hono/zod-validator`.
 - **UI**: shadcn-vue + Tailwind tokens only (no hard-coded colors); interactive elements get `data-testid` from the
   shared constants file; every icon-only button has `aria-label`; keyboard shortcuts follow `docs/UI.md`.
+- **Web unit tests**: Vitest cannot resolve Nuxt's `#imports`. Components/composables that need Nuxt composables
+  (`useRoute`, `useColorMode`, `navigateTo`, ...) import them through a small local module (pattern:
+  `apps/web/app/components/app-shell/nuxt-imports.ts`) that tests `vi.mock`. Keep pages thin; put logic in
+  composables/stores that are testable with a mocked `$api`.
 - **Server state** belongs in SQLite via Drizzle; plugin code never touches the DB directly (only via `ctx`).
 - **Logging**: no API keys, no message contents at info level; use the request id.
 

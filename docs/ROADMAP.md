@@ -16,9 +16,9 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` not started.
   - [x] D4 `docs/phases/phase-{0..4}-*.md` + `README.md` + `LICENSE`
   - [x] S0 scaffold: root configs, scripts, package.json files, install, Nuxt + shadcn-vue + AI Elements Vue, pins
   - [x] Gate D+S: docs consistency, `pnpm check && pnpm build` on skeleton, checkpoint commit
-- [ ] P0.4 Wave C-a
-  - [ ] C1+C2 contracts: `packages/shared` (schemas, DTOs, errors, route table, API client) + `packages/plugin-sdk` (plugin API types, `definePlugin`, re-exports)
-  - [ ] C3 web shell visuals (tokens, fonts, dark default, sidebar with Chat | Plugins, ProviderIcon, stub slots)
+- [x] P0.4 Wave C-a
+  - [x] C1+C2 contracts: `packages/shared` (schemas, DTOs, errors, route table, API client) + `packages/plugin-sdk` (plugin API types, `definePlugin`, re-exports)
+  - [x] C3 web shell visuals (tokens, fonts, dark default, sidebar with Chat | Plugins, ProviderIcon, stub slots)
 - [ ] P0.5 Wave C-b
   - [ ] C4 server skeleton (env, app factory, 501 route stubs, Drizzle schema + migration, interfaces, test harness)
   - [ ] C5 web skeleton (stub pages, Pinia stores, `$api`, SSE client, shortcuts registry, test ids)
@@ -73,4 +73,5 @@ conversation branching · sharing links · knowledge/RAG · image generation · 
 | Wave | Agents | Gate result | Commit |
 |---|---|---|---|
 | P0.1–P0.2 | coordinator | n/a | — |
-| P0.3 D+S | D1, D2, D3, D4, S0 + R1 (reconcile) | check + build green on skeleton | (this commit) |
+| P0.3 D+S | D1, D2, D3, D4, S0 + R1 (reconcile) | check + build green on skeleton | 34a0940 |
+| P0.4 C-a | C1+C2, C3 | audit ok; 205 tests; check + build green; dark 200.html verified | (this commit) |

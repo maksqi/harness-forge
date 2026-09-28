@@ -1,0 +1,25 @@
+<style>
+  /* SPA splash (docs/UI.md 4.3): self-contained, no external CSS, fonts or scripts. Dark by default; the
+     color-mode head script has already put `dark` or `light` on <html>. Replaced when the app mounts. */
+  html { background: #1a1918; background: oklch(0.215 0.004 60); }
+  html.light { background: #faf9f5; background: oklch(0.984 0.005 90); }
+  .hf-splash { position: fixed; inset: 0; display: grid; place-items: center; }
+  .hf-splash svg { width: 28px; height: 28px; opacity: 0; animation: hf-splash-in 240ms ease-out 150ms forwards, hf-splash-pulse 1.6s ease-in-out 390ms infinite; }
+  .hf-splash .hf-outer { fill: #e0773f; fill: oklch(0.70 0.155 45); }
+  .hf-splash .hf-inner { fill: #f3a27a; fill: oklch(0.84 0.124 55); }
+  html.light .hf-splash .hf-outer { fill: #c2531f; fill: oklch(0.57 0.165 40); }
+  html.light .hf-splash .hf-inner { fill: #e0773f; fill: oklch(0.71 0.132 50); }
+  .hf-splash-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  @keyframes hf-splash-in { to { opacity: 1; } }
+  @keyframes hf-splash-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(0.88); } }
+  @media (prefers-reduced-motion: reduce) {
+    .hf-splash svg { opacity: 1; animation: none; }
+  }
+</style>
+<div class="hf-splash" role="status">
+  <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <path class="hf-outer" d="M7.293 1.707Q8 1 8.707 1.707L14.293 7.293Q15 8 14.293 8.707L8.707 14.293Q8 15 7.293 14.293L1.707 8.707Q1 8 1.707 7.293Z" />
+    <path class="hf-inner" d="M7.646 5.354Q8 5 8.354 5.354L10.646 7.646Q11 8 10.646 8.354L8.354 10.646Q8 11 7.646 10.646L5.354 8.354Q5 8 5.354 7.646Z" />
+  </svg>
+  <span class="hf-splash-label">Loading harness-forge</span>
+</div>
