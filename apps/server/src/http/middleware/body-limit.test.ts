@@ -58,6 +58,22 @@ describe('limits by route', () => {
     expect(bodyLimitFor('pluginFiles.write').maxBytes).toBeGreaterThan(2 * LIMITS.pluginFileBytes)
     expect(bodyLimitFor('settings.update')).toEqual({ maxBytes: LIMITS.jsonBodyBytes, limitBytes: LIMITS.jsonBodyBytes })
     expect(bodyLimitFor(undefined).limitBytes).toBe(LIMITS.jsonBodyBytes)
+    expect(bodyLimitFor('data.import')).toEqual({ maxBytes: LIMITS.backupImportBytes + 64 * 1024, limitBytes: LIMITS.backupImportBytes })
+    // Dictation (ADR-029): 25 MB of audio + multipart overhead; read-aloud text is an ordinary JSON body.
+    expect(bodyLimitFor('audio.transcribe')).toEqual({ maxBytes: LIMITS.audioUploadBytes + 64 * 1024, limitBytes: LIMITS.audioUploadBytes })
+    expect(bodyLimitFor('audio.speech')).toEqual({ maxBytes: LIMITS.jsonBodyBytes, limitBytes: LIMITS.jsonBodyBytes })
+  })
+
+  it('a dictation over 25 MB -> 413 before the body is read', async () => {
+    const cookie = `${SESSION_COOKIE_NAME}=${await t.deps.sessions.issue({ authAt: Date.now() })}`
+    const tooLarge = String(LIMITS.audioUploadBytes + 64 * 1024 + 1)
+    const response = await t.request('/api/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'content-type': 'multipart/form-data; boundary=x', 'content-length': tooLarge, cookie },
+      body: 'x',
+    })
+    expect(response.status).toBe(413)
+    expect(await errorOf(response)).toMatchObject({ code: 'payload_too_large', details: { limitBytes: LIMITS.audioUploadBytes } })
   })
 
   it('a declared Content-Length over the limit -> 413 before the body is read', async () => {

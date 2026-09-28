@@ -281,6 +281,11 @@ ctx.providers.register({
   `doGenerate` and `doStream`. [`echo-provider`](../../examples/plugins/echo-provider/index.ts) implements a
   streaming one, with usage and Stop support.
 - `ctx.models.register('openrouter', [{ id: 'vendor/new-model' }])` adds models to any provider, builtins included.
+- Image and voice models (plugin API 1.1.0): add `createImageModel`, `createTranscriptionModel` or `createSpeechModel`
+  (plus `imageParams`, `transcriptionOptions` and `voices` on speech models) and declare the models with
+  `kind: 'image'`, `'transcription'` or `'speech'`; use `"engines": { "harness": "^1.1.0" }`. A local Whisper server
+  for dictation is [PLUGINS.md 15 (e)](../PLUGINS.md#e-code-provider-plugin-dictation-through-a-local-whisper-server-plugin-api-110);
+  `ctx.images.generate()` creates images from plugin code (stored as files, usage recorded).
 
 ## Commands
 
@@ -335,8 +340,9 @@ Calls are billed to the user's key, so say in your description that the plugin m
 ## Lifecycle, debugging and trust
 
 - **States**: `active`, `disabled`, `untrusted` (the files changed since they were trusted), `incompatible`
-  (`engines.harness` does not match the plugin API `1.0.0`, so use `"^1.0.0"`), `error` (invalid manifest, `setup`
-  threw or timed out, build failed). The plugin card and the detail header show the state and the last error.
+  (`engines.harness` does not match the plugin API `1.1.0`, so use `"^1.0.0"`, or `"^1.1.0"` for the 1.1 members),
+  `error` (invalid manifest, `setup` threw or timed out, build failed). The plugin card and the detail header show the
+  state and the last error.
 - **Logs**: `ctx.logger.debug/info/warn/error(message, data)` shows up in the Logs tab (last 500 entries) and the
   server log.
 - **Reloading**: linked folders reload on save. Code plugins inside the data directory reload on **Build & reload**

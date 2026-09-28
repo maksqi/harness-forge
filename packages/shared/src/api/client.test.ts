@@ -1,3 +1,4 @@
+import type { AudioTranscription } from '../schemas/audio.ts'
 import type { ChatDetail } from '../schemas/chats.ts'
 import type { DataImportResult } from '../schemas/data.ts'
 import type { ShareSummary, ShareView } from '../schemas/shares.ts'
@@ -39,6 +40,12 @@ const settings: Settings = {
   density: 'comfortable',
   readingFont: 'sans',
   textSize: 'md',
+  imageModelRef: null,
+  transcriptionModelRef: null,
+  transcriptionLanguage: 'auto',
+  speechModelRef: null,
+  speechVoice: null,
+  speechSpeed: 1,
 }
 
 describe('createApiClient', () => {
@@ -144,6 +151,28 @@ describe('createApiClient', () => {
     expect(calls[1]).toMatchObject({ url: '/api/data/delete', init: { method: 'POST', body: '{"confirm":"DELETE","files":true}' } })
   })
 
+  it('sends a dictation as a multipart form, reads speech as a raw Response and deletes a version', async () => {
+    const audio = new Response(new Uint8Array([0x52, 0x49, 0x46, 0x46]), { status: 200, headers: { 'content-type': 'audio/wav' } })
+    const transcription: AudioTranscription = { text: 'Hello', language: 'en', durationSec: 1.5, modelRef: 'mock:transcribe' }
+    const { calls, fetch } = fakeFetch((call) => {
+      if (call.url === '/api/audio/speech')
+        return audio
+      return json(call.url === '/api/audio/transcriptions' ? transcription : {})
+    })
+    const client = createApiClient({ fetch })
+    const form = new FormData()
+    form.append('file', new Blob([new Uint8Array([0x1A, 0x45, 0xDF, 0xA3])], { type: 'audio/webm' }), 'dictation.webm')
+    form.append('language', 'en')
+    await expect(client.audio.transcribe({ form })).resolves.toEqual(transcription)
+    expect(calls[0]).toMatchObject({ url: '/api/audio/transcriptions', init: { method: 'POST', body: form } })
+    expect(calls[0]?.init.headers).toEqual({ accept: 'application/json' })
+    await expect(client.audio.speech({ body: { text: 'Hello world', voice: 'alloy' } })).resolves.toBe(audio)
+    expect(calls[1]).toMatchObject({ url: '/api/audio/speech', init: { method: 'POST', body: '{"text":"Hello world","voice":"alloy"}' } })
+    expect(calls[1]?.init.headers).toEqual({ 'accept': '*/*', 'content-type': 'application/json' })
+    await client.chats.deleteMessage({ params: { id: '0199a8f0-0000-7000-8000-000000000001', messageId: 'msg_sample0000000001' } })
+    expect(calls[2]).toMatchObject({ url: '/api/chats/0199a8f0-0000-7000-8000-000000000001/messages/msg_sample0000000001', init: { method: 'DELETE', body: undefined } })
+  })
+
   it('resolves void for 204 responses', async () => {
     const { fetch } = fakeFetch(() => new Response(null, { status: 204 }))
     const client = createApiClient({ fetch })
@@ -246,6 +275,12 @@ describe('createApiClient', () => {
     expectTypeOf(client.shares.remove).returns.resolves.toEqualTypeOf<void>()
     expectTypeOf(client.shares.view).returns.resolves.toEqualTypeOf<ShareView>()
     expectTypeOf(client.shares.file).returns.resolves.toEqualTypeOf<Response>()
+    expectTypeOf(client.chats.deleteMessage).parameter(0).toHaveProperty('params')
+    expectTypeOf(client.chats.deleteMessage).returns.resolves.toEqualTypeOf<ChatDetail>()
+    expectTypeOf(client.audio.transcribe).parameter(0).toHaveProperty('form')
+    expectTypeOf(client.audio.transcribe).returns.resolves.toEqualTypeOf<AudioTranscription>()
+    expectTypeOf(client.audio.speech).parameter(0).toHaveProperty('body')
+    expectTypeOf(client.audio.speech).returns.resolves.toEqualTypeOf<Response>()
   })
 })
 

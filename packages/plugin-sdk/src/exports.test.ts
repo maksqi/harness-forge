@@ -1,15 +1,34 @@
-import type { Tool } from 'ai'
 import type {
+  ImageModelV3,
+  ImageModelV4,
+  SharedV4ProviderOptions,
+  SpeechModelV3,
+  SpeechModelV4,
+  TranscriptionModelV3,
+  TranscriptionModelV4,
+} from '@ai-sdk/provider'
+import type { generateImage, Tool } from 'ai'
+import type {
+  GeneratedImageFile,
   HarnessErrorInit,
   HookMap,
+  ImageAspectRatio,
+  ImageGenerateOptions,
+  ImageGenerateResult,
+  ImageParamsRequest,
+  ImageParamsResult,
   ModelInfo,
+  ModelKind,
   PluginContext,
+  PluginImagesApi,
   PluginManifest,
   PluginModule,
+  ProviderDefinition,
   ReasoningLevel,
   SettingsSchema,
   ToolDefinition,
   ToolResultOutput,
+  TranscriptionHints,
 } from './index.ts'
 import * as shared from '@harness-forge/shared'
 import { describe, expect, expectTypeOf, it } from 'vitest'
@@ -51,8 +70,8 @@ describe('exports', () => {
     expect(Object.keys(sdk).sort()).toEqual([...REEXPORTED_VALUES, 'PLUGIN_API_VERSION', 'definePlugin', 'settingsValuesSchema'].sort())
   })
 
-  it('has plugin API version 1.0.0', () => {
-    expect(sdk.PLUGIN_API_VERSION).toBe('1.0.0')
+  it('has plugin API version 1.1.0 (Phase 6: image, transcription and speech models, ctx.images)', () => {
+    expect(sdk.PLUGIN_API_VERSION).toBe('1.1.0')
   })
 
   it('definePlugin is the identity', () => {
@@ -65,6 +84,33 @@ describe('exports', () => {
     expectTypeOf<ModelInfo>().toEqualTypeOf<shared.ModelInfo>()
     expectTypeOf<SettingsSchema>().toEqualTypeOf<shared.SettingsSchema>()
     expectTypeOf<HarnessErrorInit>().toEqualTypeOf<shared.HarnessErrorInit>()
+    expectTypeOf<ImageAspectRatio>().toEqualTypeOf<shared.ImageAspectRatio>()
+    expectTypeOf<ModelKind>().toEqualTypeOf<shared.ModelKind>()
+  })
+
+  it('types the media additions of plugin API 1.1.0 (ADR-028, ADR-029)', () => {
+    type MediaMethod = 'createImageModel' | 'createTranscriptionModel' | 'createSpeechModel' | 'imageParams' | 'transcriptionOptions'
+    type Factory<K extends MediaMethod> = ReturnType<NonNullable<ProviderDefinition[K]>>
+    expectTypeOf<Factory<'createImageModel'>>().toEqualTypeOf<ImageModelV4 | ImageModelV3>()
+    expectTypeOf<Factory<'createTranscriptionModel'>>().toEqualTypeOf<TranscriptionModelV4 | TranscriptionModelV3>()
+    expectTypeOf<Factory<'createSpeechModel'>>().toEqualTypeOf<SpeechModelV4 | SpeechModelV3>()
+    expectTypeOf<Factory<'imageParams'>>().toEqualTypeOf<ImageParamsResult | undefined>()
+    expectTypeOf<Factory<'transcriptionOptions'>>().toEqualTypeOf<SharedV4ProviderOptions | undefined>()
+    expectTypeOf<Parameters<NonNullable<ProviderDefinition['imageParams']>>>().toEqualTypeOf<[ImageParamsRequest, ModelInfo]>()
+    expectTypeOf<Parameters<NonNullable<ProviderDefinition['transcriptionOptions']>>>().toEqualTypeOf<[TranscriptionHints]>()
+    expectTypeOf<ImageParamsRequest>().toEqualTypeOf<{ n: number, aspectRatio?: shared.ImageAspectRatio, inputs: number }>()
+    // The call options of `generateImage` accept what `imageParams` returns.
+    type GenerateImageOptions = Parameters<typeof generateImage>[0]
+    expectTypeOf<NonNullable<ImageParamsResult['size']>>().toExtend<NonNullable<GenerateImageOptions['size']>>()
+    expectTypeOf<NonNullable<ImageParamsResult['aspectRatio']>>().toExtend<NonNullable<GenerateImageOptions['aspectRatio']>>()
+    expectTypeOf<NonNullable<ImageParamsResult['providerOptions']>>().toExtend<NonNullable<GenerateImageOptions['providerOptions']>>()
+    expectTypeOf<PluginContext['images']>().toEqualTypeOf<PluginImagesApi>()
+    expectTypeOf<PluginImagesApi['generate']>().toEqualTypeOf<(options: ImageGenerateOptions) => Promise<ImageGenerateResult>>()
+    expectTypeOf<ImageGenerateOptions['aspectRatio']>().toEqualTypeOf<shared.ImageAspectRatio | undefined>()
+    expectTypeOf<ImageGenerateResult['images']>().toEqualTypeOf<GeneratedImageFile[]>()
+    expectTypeOf<keyof GeneratedImageFile>().toEqualTypeOf<'fileId' | 'url' | 'mediaType' | 'name' | 'size'>()
+    // `ctx.ai` gains no image function: plugins generate images through `ctx.images` (stored files, usage rows).
+    expectTypeOf<keyof PluginContext['ai']>().toEqualTypeOf<'z' | 'tool' | 'jsonSchema' | 'generateText' | 'createOpenAICompatible' | 'createAnthropic' | 'createOpenAI' | 'createGoogleGenerativeAI'>()
   })
 
   it('derives the AI SDK types of PLUGINS.md section 9', () => {

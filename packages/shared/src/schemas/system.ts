@@ -10,6 +10,7 @@ import {
 } from '../enums.ts'
 import { modelRefSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
+import { speechVoiceSchema, transcriptionLanguageSchema } from './audio.ts'
 
 /** `GET /health` (public). */
 export const healthSchema = z.object({
@@ -81,6 +82,19 @@ const settingsFields = {
   density: densitySchema,
   readingFont: readingFontSchema,
   textSize: textSizeSchema,
+  // Images and voice (Phase 6): opt-in, no model is chosen automatically.
+  /** Image model of the `generate_image` tool (ADR-028); null = the tool is off. */
+  imageModelRef: modelRefSchema.nullable(),
+  /** Speech-to-text model of dictation (ADR-029); null = dictation is off. */
+  transcriptionModelRef: modelRefSchema.nullable(),
+  /** Language of dictation: `auto` (detected) or an ISO 639 code. */
+  transcriptionLanguage: transcriptionLanguageSchema,
+  /** Text-to-speech model of read-aloud (ADR-029); null = read-aloud is off. */
+  speechModelRef: modelRefSchema.nullable(),
+  /** Voice of read-aloud; null = the provider default (the web clears it when the speech model changes). */
+  speechVoice: speechVoiceSchema.nullable(),
+  /** Playback speed of read-aloud, 0.5..2 (applied by the browser, never sent to the provider). */
+  speechSpeed: z.number().min(0.5).max(2),
 }
 
 /** `GET /settings`: every key always present (defaults applied by `settingsSchema.parse`). */
@@ -98,6 +112,12 @@ export const settingsSchema = z.object({
   density: settingsFields.density.default('comfortable'),
   readingFont: settingsFields.readingFont.default('sans'),
   textSize: settingsFields.textSize.default('md'),
+  imageModelRef: settingsFields.imageModelRef.default(null),
+  transcriptionModelRef: settingsFields.transcriptionModelRef.default(null),
+  transcriptionLanguage: settingsFields.transcriptionLanguage.default('auto'),
+  speechModelRef: settingsFields.speechModelRef.default(null),
+  speechVoice: settingsFields.speechVoice.default(null),
+  speechSpeed: settingsFields.speechSpeed.default(1),
 })
 export type Settings = z.infer<typeof settingsSchema>
 

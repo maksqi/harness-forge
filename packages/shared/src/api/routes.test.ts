@@ -90,8 +90,8 @@ function tableSignatures(): string[] {
 }
 
 describe('route table', () => {
-  it('has 73 routes keyed <module>.<action>', () => {
-    expect(API_ROUTE_KEYS).toHaveLength(73)
+  it('has 76 routes keyed <module>.<action>', () => {
+    expect(API_ROUTE_KEYS).toHaveLength(76)
     for (const key of API_ROUTE_KEYS) {
       const route: ApiRouteDef = apiRoutes[key]
       expect(key.startsWith(`${route.module}.`), key).toBe(true)
@@ -107,7 +107,7 @@ describe('route table', () => {
 
   it('equals the route key index of API.md (key, method, path, module)', () => {
     const index = routeIndex()
-    expect(index).toHaveLength(73)
+    expect(index).toHaveLength(76)
     expect(index.map(row => `${row.key} ${signature(row)}`).sort()).toEqual(
       API_ROUTE_KEYS.map(key => `${key} ${signature(apiRoutes[key])}`).sort(),
     )
@@ -165,6 +165,25 @@ describe('route table', () => {
         expect(route.body ?? route.form, key).toBeUndefined()
     }
   })
+
+  it('declares the audio and version routes as the contract says (ADR-029, ADR-030)', () => {
+    const transcribe: ApiRouteDef = apiRoutes['audio.transcribe']
+    const speech: ApiRouteDef = apiRoutes['audio.speech']
+    const deleteMessage: ApiRouteDef = apiRoutes['chats.deleteMessage']
+    // Multipart with a JSON response; JSON body with a binary response; params with the chat detail.
+    expect(transcribe.form).toBeDefined()
+    expect(transcribe.body).toBeUndefined()
+    expect(isJsonResponse(transcribe)).toBe(true)
+    expect(speech.body).toBeDefined()
+    expect(speech.form).toBeUndefined()
+    expect(speech.response).toBe('binary')
+    expect(deleteMessage.response).toBe(apiRoutes['chats.get'].response)
+    for (const route of [transcribe, speech, deleteMessage]) {
+      expect(route.public).toBeUndefined()
+      expect(route.fresh).toBeUndefined()
+      expect(routeSuccessStatus(route)).toBe(200)
+    }
+  })
 })
 
 describe('matchApiRoute', () => {
@@ -205,6 +224,19 @@ describe('matchApiRoute', () => {
       params: { token, fileId: 'file_sample0000000001' },
     })
     for (const [method, path] of [['GET', '/shares/shr_sample0000000001'], ['GET', '/share'], ['POST', '/share/x'], ['DELETE', '/data'], ['GET', '/data/import'], ['GET', `/share/${token}/files`]] as const)
+      expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
+  })
+
+  it('matches the version delete and audio routes (Phase 6) without shadowing', () => {
+    const chat = '0199a8f0-0000-7000-8000-000000000001'
+    expect(matchApiRoute('DELETE', `/chats/${chat}/messages/msg_sample0000000001`)).toMatchObject({
+      key: 'chats.deleteMessage',
+      params: { id: chat, messageId: 'msg_sample0000000001' },
+    })
+    expect(matchApiRoute('DELETE', `/chats/${chat}`)?.key).toBe('chats.remove')
+    expect(matchApiRoute('POST', '/audio/transcriptions')?.key).toBe('audio.transcribe')
+    expect(matchApiRoute('POST', '/audio/speech')?.key).toBe('audio.speech')
+    for (const [method, path] of [['GET', `/chats/${chat}/messages/msg_sample0000000001`], ['DELETE', `/chats/${chat}/messages`], ['GET', '/audio/speech'], ['POST', '/audio'], ['PUT', '/audio/transcriptions']] as const)
       expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
   })
 

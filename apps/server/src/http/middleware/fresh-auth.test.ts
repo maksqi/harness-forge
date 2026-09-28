@@ -38,6 +38,7 @@ async function cookieFor(authAt: number): Promise<Record<string, string>> {
 
 describe('fresh routes of the route table', () => {
   it('are the sensitive operations of ADR-017', () => {
+    // The Phase 6 routes (audio, deleting a version) run no code and create nothing lasting: no fresh auth.
     expect(FRESH_KEYS.sort()).toEqual([
       'auth.setPassword',
       'data.deleteAll',

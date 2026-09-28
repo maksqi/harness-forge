@@ -26,6 +26,8 @@ A **plugin** is a directory with a `plugin.json` manifest. It can contribute:
 |---|---|---|
 | LLM providers | `contributes.providers` | `ctx.providers.register()` |
 | Models for any provider (incl. builtins) | `contributes.models`, `providers[].models` | `ctx.models.register()` |
+| Image, speech-to-text and text-to-speech models (API 1.1.0) | — (backlog) | `ProviderDefinition.createImageModel` / `createTranscriptionModel` / `createSpeechModel` |
+| Generated images from plugin code (API 1.1.0) | — | `ctx.images.generate()` |
 | Tools | — | `ctx.tools.register()` |
 | MCP servers (their tools become tools) | `contributes.mcpServers` | `ctx.mcp.register()` |
 | Slash commands | `contributes.commands` (template) | `ctx.commands.register()` (template or `run`) |
@@ -51,10 +53,10 @@ part of the server they may import server dependencies (for example the official
 | Id (card name) | Contributes | Notes |
 |---|---|---|
 | `core-providers` (Core providers) | the 13 builtin providers ([PROVIDERS.md](./PROVIDERS.md)) | individual providers can be disabled (`PATCH /api/providers/:id`) |
-| `core-tools` (Core tools) | tools `current_time` (policy `safe`) and `web_fetch` (policy `ask`, SSRF guard) | setting `allowLocalhost` (below) |
+| `core-tools` (Core tools) | tools `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard) and `generate_image` (Phase 6, policy `ask`) | setting `allowLocalhost` (below); `generate_image` uses the image model of Settings → Media (`imageModelRef`) |
 | `core-commands` (Core commands) | 10 template slash commands (below) | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server |
 | `core-mcp` (MCP servers) | MCP servers configured in the MCP panel (`mcp_servers` table); the panel is its Overview | settings `autoReconnect`, `connectTimeoutSeconds` (below) |
-| `mock` (Mock provider) | provider `mock` and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
+| `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
 
 Builtin tools (`core-tools`):
 
@@ -62,6 +64,7 @@ Builtin tools (`core-tools`):
 |---|---|---|
 | `current_time` | `{ timezone? }`: IANA name (`Europe/Berlin`, `UTC`); default the server time zone; an unknown zone is a `validation_error` | `{ iso, unixMs, timezone, local, utcOffset, weekday }` (`local` = `YYYY-MM-DD HH:mm:ss`, `utcOffset` = `+02:00`) |
 | `web_fetch` | `{ url, maxChars? }`: `http:` / `https:` URL (<= 2048 characters); `maxChars` 1000-40000, default 20000 | `{ url, status, contentType, title, text, truncated }`: `url` after redirects, the readable text of an HTML page (`title` from `<title>` or `og:title`) or the text of a text document (plain, markdown, JSON, XML, ...); other content types are refused |
+| `generate_image` (Phase 6, ADR-028) | `{ prompt, n?, aspectRatio? }`: prompt 1-32000 characters, `n` 1-4 (default 1), `aspectRatio` one of `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `16:9`, `9:16` | `{ modelRef, images: [{ fileId, url, mediaType, name }], costUsd?, revisedPrompt? }`: file references only; the model sees a short text ("Generated 2 images with <model>; they are shown to the user below this call.") and the chat shows the images below the tool row. Fails with "Choose an image model in Settings → Media." while `imageModelRef` is null; timeout 300 s |
 
 `web_fetch` goes through the SSRF guard: public addresses only, every redirect re-checked (at most 5), 10 s timeout,
 2 MB body. The `core-tools` setting **Allow localhost in web_fetch** (`allowLocalhost`, default off) also admits
@@ -80,13 +83,21 @@ timeout (seconds)** (`connectTimeoutSeconds`, 5-120, default 20).
 ### API version
 
 ```ts
-export const PLUGIN_API_VERSION = '1.0.0'
+export const PLUGIN_API_VERSION = '1.1.0'
 ```
 
 `PLUGIN_API_VERSION` versions the plugin API (not the app). Minor versions only add; a major version breaks. A
 manifest declares the API range it supports in `engines.harness`; the host checks
 `semver.satisfies(PLUGIN_API_VERSION, engines.harness)` and marks the plugin `incompatible` when it fails. Use
-`"^1.0.0"`.
+`"^1.0.0"`, or `"^1.1.0"` when the plugin uses a 1.1 member.
+
+| Version | Changes |
+|---|---|
+| `1.0.0` | v1 (Phase 0 – 5) |
+| `1.1.0` | Phase 6 (additive): the optional `ProviderDefinition` members `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel`, `transcriptionOptions`; `PluginContext.images.generate`; model kinds `transcription` and `speech`, `ModelInfo.voices`, `capabilities.imageOutput` |
+
+A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0`). A plugin that uses a 1.1 member should
+declare `"^1.1.0"`, so a 1.0 host reports it `incompatible` instead of silently ignoring the member.
 
 ## 2. Plugin directory layout
 
@@ -502,6 +513,11 @@ Code plugins never install dependencies. The host injects its own copies of the 
 Using the host's copies keeps one AI SDK and one zod in the process (schemas and model instances created by the
 plugin are recognized by the host) and keeps plugins single-file.
 
+Media (1.1.0): `ctx.ai` has no `generateImage`, `transcribe` or `generateSpeech`. A plugin *provides* image,
+transcription and speech models through its `ProviderDefinition` (`createOpenAI(...).transcription(id)`, for example,
+returns a `TranscriptionModelV4`), and *generates* images with `ctx.images.generate()`, which stores the files and
+records the usage.
+
 ### Allowed imports
 
 | Specifier | `.mjs` / `.js` entry | `.ts` entry |
@@ -556,13 +572,16 @@ The **Code plugin** form of the UI creates `index.mjs` entries; `POST /api/plugi
 ### Types (authoritative)
 
 ```ts
-import type { LanguageModelV3, LanguageModelV4, SharedV4ProviderOptions } from '@ai-sdk/provider'
+import type {
+  ImageModelV3, ImageModelV4, LanguageModelV3, LanguageModelV4, SharedV4ProviderOptions,
+  SpeechModelV3, SpeechModelV4, TranscriptionModelV3, TranscriptionModelV4,
+} from '@ai-sdk/provider'
 import type {
   FlexibleSchema, LanguageModel, LanguageModelCallOptions, LanguageModelUsage,
   ModelMessage, Tool, UIMessage,
 } from 'ai'
 
-export const PLUGIN_API_VERSION = '1.0.0'
+export const PLUGIN_API_VERSION = '1.1.0'
 
 /** Same type as the AI SDK `ProviderOptions` (`ai` does not re-export it). */
 export type ProviderOptions = SharedV4ProviderOptions
@@ -580,6 +599,8 @@ export type ReasoningEffort = 'auto' | 'off' | 'low' | 'medium' | 'high' | 'max'
 export type ReasoningLevel = Exclude<NonNullable<LanguageModelCallOptions['reasoning']>, 'provider-default'>
 export type ApiFormat = 'openai-chat' | 'openai-responses' | 'anthropic' | 'google'
 export type ReasoningStyle = 'openai-effort' | 'anthropic-thinking' | 'google-thinking' | 'none'
+export type ModelKind = 'chat' | 'embedding' | 'image' | 'audio' | 'transcription' | 'speech' | 'other'  // 1.1: + transcription, speech
+export type ImageAspectRatio = '1:1' | '3:2' | '2:3' | '4:3' | '3:4' | '16:9' | '9:16'       // 1.1 (IMAGE_ASPECT_RATIOS)
 export type HarnessErrorCode =                   // from @harness-forge/shared (DECISIONS error envelope)
   | 'validation_error' | 'unauthorized' | 'forbidden' | 'not_found' | 'conflict' | 'payload_too_large'
   | 'provider_not_configured' | 'auth_invalid' | 'rate_limited' | 'model_not_found' | 'context_overflow'
@@ -649,12 +670,16 @@ export interface CredentialField {
 export interface ModelInfo {
   id: string
   name?: string
-  kind?: 'chat' | 'embedding' | 'image' | 'audio' | 'other'   // default 'chat'
+  kind?: ModelKind                                // default 'chat'
   contextWindow?: number
   maxOutputTokens?: number
-  capabilities?: { tools?: boolean; vision?: boolean; pdf?: boolean; reasoning?: boolean; structuredOutput?: boolean }
+  capabilities?: {
+    tools?: boolean; vision?: boolean; pdf?: boolean; reasoning?: boolean; structuredOutput?: boolean
+    imageOutput?: boolean                         // 1.1: a chat model that can return images (Gemini *-image)
+  }
   reasoningEfforts?: ReasoningEffort[]
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number }   // USD per 1M tokens
+  voices?: string[]                               // 1.1: speech models: voice names to suggest (<= 100, unique)
 }
 export interface ProviderRuntime {
   credentials: Record<string, string>
@@ -689,7 +714,17 @@ export interface ProviderDefinition {
   validate?(rt: ProviderRuntime): Promise<void>
   reasoning?(effort: ReasoningEffort, model: ModelInfo): ReasoningParams | undefined
   mapError?(err: unknown): HarnessErrorInit | undefined
+  // ---------- 1.1.0 (Phase 6, all optional) ----------
+  createImageModel?(modelId: string, rt: ProviderRuntime): ImageModelV4 | ImageModelV3
+  imageParams?(
+    request: { n: number; aspectRatio?: ImageAspectRatio; inputs: number },
+    model: ModelInfo,
+  ): { size?: `${number}x${number}`; aspectRatio?: `${number}:${number}`; providerOptions?: ProviderOptions } | undefined
+  createTranscriptionModel?(modelId: string, rt: ProviderRuntime): TranscriptionModelV4 | TranscriptionModelV3
+  createSpeechModel?(modelId: string, rt: ProviderRuntime): SpeechModelV4 | SpeechModelV3
+  transcriptionOptions?(hints: TranscriptionHints): ProviderOptions | undefined
 }
+export interface TranscriptionHints { language?: string }   // 1.1: an ISO 639 code; absent = detect automatically
 
 // ---------- tools ----------
 /** The AI SDK tool result output union ('text' | 'json' | 'execution-denied' | 'error-text' | 'error-json' |
@@ -781,6 +816,21 @@ export interface PluginContext {
   hooks: {
     on<K extends HookName>(name: K, fn: (...args: HookMap[K]) => unknown, options?: { priority?: number }): Disposable
   }
+  images: {                                       // 1.1.0 (Phase 6)
+    generate(o: {
+      prompt: string                              // 1..32000 characters
+      modelRef?: string                           // default: the imageModelRef setting (Settings -> Media)
+      n?: number                                  // 1..4, default 1
+      aspectRatio?: ImageAspectRatio
+      chatId?: string                             // attributes the usage row to a chat
+      signal?: AbortSignal
+    }): Promise<{
+      modelRef: string
+      images: { fileId: string; url: string; mediaType: string; name: string; size: number }[]   // stored files
+      costUsd?: number                            // estimated
+      revisedPrompt?: string
+    }>
+  }
   ai: HostAi
   fetch: typeof globalThis.fetch
 }
@@ -795,7 +845,8 @@ Package layering (ADR-018): the data shapes (`PluginManifest`, `DeclarativeProvi
 `DeclarativeCommand`, `CredentialField`, `ModelInfo`, `SettingsSchema`) and every enum are zod schemas in
 `@harness-forge/shared` (`pluginManifestSchema`, `declarativeProviderSchema`, `mcpServerDeclSchema`,
 `credentialFieldSchema`, `modelInfoSchema`, `settingsSchemaSchema`, `reasoningEffortSchema`, `toolPolicySchema`,
-`apiFormatSchema`, `harnessErrorCodeSchema`, ...; see [API.md](./API.md)), and the types above are inferred from
+`apiFormatSchema`, `harnessErrorCodeSchema`, `modelKindSchema`, `imageAspectRatioSchema`, ...; see
+[API.md](./API.md)), and the types above are inferred from
 them. `@harness-forge/plugin-sdk` re-exports them unchanged and adds the runtime contract (`PluginContext`,
 `ProviderDefinition`, `ToolDefinition`, `CommandDefinition`, `HookMap`, `PluginModule`, `definePlugin`,
 `PLUGIN_API_VERSION`) plus `settingsValuesSchema(schema)`, which builds the zod validator of a settings form.
@@ -821,6 +872,7 @@ them. `@harness-forge/plugin-sdk` re-exports them unchanged and adds the runtime
 | `mcp.register(d)` | same rules as `contributes.mcpServers` |
 | `commands.register(d)` | exactly one of `template` / `run`; a duplicate name throws `conflict` |
 | `hooks.on(name, fn, { priority })` | registers a hook handler; see [Hooks](#hooks) |
+| `images.generate(o)` | 1.1.0 (ADR-028): generates images with `o.modelRef` or the `imageModelRef` setting (neither → `validation_error` "Choose an image model in Settings → Media."; a model that is not an image model → `validation_error`), stores every image as a file and returns file references (`url` = `/api/files/<fileId>`); writes a usage row (`purpose: 'image'`, attributed to `o.chatId` when given) with an estimated cost; aborted by `o.signal` and by `ctx.signal`. The builtin `generate_image` tool uses it. `ctx.ai` has no `generateImage`: images made through `ctx.images` are stored and accounted for |
 | `ai` | host library copies ([section 8](#8-code-plugins)) |
 | `fetch` | global `fetch` combined with `ctx.signal` (`AbortSignal.any`) and a default `User-Agent: harness-forge/<appVersion> plugin/<id>`; no SSRF guard (code plugins are trusted); no default timeout |
 
@@ -843,6 +895,11 @@ All `register` calls are valid during and after `setup` until the plugin is disp
 | `validate(rt)` | no | credential test; guarded (15 s). Default: `listModels(rt)` when defined, else a 1-token `generateText` on `smallModelId` (else the first seed) |
 | `reasoning(effort, model)` | no | synchronous; called only when `effort !== 'auto'`, `model.capabilities.reasoning` is true and `effort` is offered for the model; returns request additions or `undefined` |
 | `mapError(err)` | no | synchronous; first chance to map an error of this provider; return `undefined` to fall back to the default mapping |
+| `createImageModel(modelId, rt)` | no (1.1.0) | returns an `ImageModelV4` (or `V3`) instance for a model of kind `image`; called per generation; no network I/O; guarded (5 s). Without it the provider's image models stay hidden from the composer and resolve to `model_not_found` |
+| `imageParams(request, model)` | no (1.1.0) | synchronous; maps `{ n, aspectRatio?, inputs }` (images requested, the aspect ratio, input images) to `{ size?, aspectRatio?, providerOptions? }` for this model, or `undefined`. Used for dedicated image models (`size` / `aspectRatio` go to `generateImage`) and for chat models with `capabilities.imageOutput` (`providerOptions` is merged into the chat call). Examples in [PROVIDERS.md 13](./PROVIDERS.md#13-image-and-voice-models) |
+| `createTranscriptionModel(modelId, rt)` | no (1.1.0) | returns a `TranscriptionModelV4` (or `V3`) instance for a model of kind `transcription` (dictation); no network I/O; guarded (5 s). A provider without it cannot be chosen for dictation (`validation_error`) |
+| `createSpeechModel(modelId, rt)` | no (1.1.0) | returns a `SpeechModelV4` (or `V3`) instance for a model of kind `speech` (read-aloud); no network I/O; guarded (5 s) |
+| `transcriptionOptions(hints)` | no (1.1.0) | synchronous; turns `{ language? }` (an ISO 639 code; absent = detect) into provider options for `transcribe()`, e.g. `{ openai: { language } }`; `undefined` = send nothing |
 
 `ProviderRuntime`:
 
@@ -866,14 +923,16 @@ non-empty wins); a provider whose required fields resolve only from the environm
 |---|---|
 | `id` | model id sent to the API; unique per provider; <= 256 characters, may contain `:` and `/` |
 | `name` | display name (default: `id`) |
-| `kind` | `chat` (default); other kinds are hidden from the picker |
+| `kind` | `chat` (default); `image` models appear in the composer's "Image models" group when the provider defines `createImageModel`; `transcription` and `speech` models (1.1) are chosen in Settings → Media; `embedding`, `audio` and `other` are hidden. An explicit `kind` wins over the host's classification (seeds with a non-chat kind are listed even next to a live listing) |
 | `contextWindow` / `maxOutputTokens` | token limits (positive integers); used for trimming and the usage ring |
 | `capabilities.tools` | `false` -> tools are not sent to this model |
 | `capabilities.vision` / `pdf` | image / PDF attachments are sent as file parts |
 | `capabilities.reasoning` | shows the effort menu |
 | `capabilities.structuredOutput` | informational |
+| `capabilities.imageOutput` | 1.1: a chat model that can return images in its reply; the composer offers the aspect ratio and the provider's `imageParams` adds the provider options |
 | `reasoningEfforts` | efforts offered in the effort menu besides `auto` (which is always offered); when omitted on a reasoning model: `off`, `low`, `medium`, `high`; `max` only when listed; an effort that is not offered is treated as `auto` |
-| `cost` | USD per 1M tokens (`input`, `output`, `cacheRead`, `cacheWrite`) |
+| `cost` | USD per 1M tokens (`input`, `output`, `cacheRead`, `cacheWrite`); image models use `input` / `output` for the image token usage (an estimate) |
+| `voices` | 1.1: speech models only; up to 100 unique voice names (1-64 characters) suggested in Settings → Media; the user may type any other name |
 
 ### Tools
 
@@ -992,6 +1051,7 @@ Every call into plugin code runs through `guard(pluginId, fn, timeoutMs)`:
 | tool `execute` | `timeoutMs` (default 60 s, max 600 s) |
 | command `run` | 30 s |
 | `createLanguageModel` | 5 s |
+| `createImageModel`, `createTranscriptionModel`, `createSpeechModel` (1.1) | 5 s |
 | `listModels`, `validate` | 15 s |
 | MCP connect | 20 s |
 
@@ -1169,7 +1229,8 @@ bridge, command pack). Step-by-step guides: [declarative provider](./guides/writ
 
 The examples below are copies of runnable plugins in [`examples/plugins/`](../examples/plugins/) (`together-ai`,
 `dice-roller`, `mcp-everything`, plus `lmstudio` and the TypeScript provider `echo-provider`); `examples.test.ts`
-loads each of them into the plugin host. Example (c) is a pattern without a folder (it needs a real gateway).
+loads each of them into the plugin host. Examples (c) and (e) are patterns without a folder (they need a real gateway
+or a local Whisper server).
 
 ### (a) Declarative OpenAI-compatible provider: Together AI
 
@@ -1426,6 +1487,87 @@ Because it declares a stdio server, the plugin needs trust. Its tools appear as 
 (for example `mcp__mcp-everything__echo`) with the policy from their annotations, else `ask`. `npx` must be on the
 server's `PATH`; the first start downloads the package.
 
+### (e) Code provider plugin: dictation through a local Whisper server (plugin API 1.1.0)
+
+A speech-to-text provider for a Whisper server on your own machine that offers the OpenAI-compatible
+`POST /v1/audio/transcriptions` endpoint (several local Whisper servers do). Audio then never leaves the machine. Like
+(c), this is a pattern without a folder (it needs a running server). `local-whisper/plugin.json`:
+
+```json
+{
+  "manifestVersion": 1,
+  "id": "local-whisper",
+  "name": "Local Whisper",
+  "version": "1.0.0",
+  "description": "Dictation through a Whisper server on this machine (OpenAI-compatible transcription API).",
+  "engines": { "harness": "^1.1.0" },
+  "main": "index.mjs",
+  "permissions": []
+}
+```
+
+`engines.harness` is `^1.1.0` because the plugin uses `createTranscriptionModel`. `local-whisper/index.mjs`:
+
+```js
+// @ts-check
+const DEFAULT_BASE_URL = 'http://localhost:8000/v1'
+
+/** @param {Record<string, string>} credentials */
+function baseURL(credentials) {
+  return (credentials.baseURL || DEFAULT_BASE_URL).replace(/\/+$/, '')
+}
+
+/** @type {import('@harness-forge/plugin-sdk').PluginModule} */
+export default {
+  setup(ctx) {
+    ctx.providers.register({
+      id: 'local-whisper',
+      name: 'Local Whisper',
+      credentials: [
+        { key: 'baseURL', label: 'Base URL', type: 'url', required: true, default: DEFAULT_BASE_URL },
+        { key: 'apiKey', label: 'API key', type: 'secret', advanced: true },
+      ],
+      // An explicit kind: listed for Settings -> Media -> Speech to text, never in the chat picker.
+      seedModels: [{ id: 'whisper-large-v3-turbo', name: 'Whisper large v3 turbo (local)', kind: 'transcription' }],
+
+      // Required by the API; this provider has no chat model, so nothing calls it.
+      createLanguageModel(modelId) {
+        throw new Error(`${modelId} is a speech-to-text model.`)
+      },
+
+      // Plugin API 1.1.0: the model behind dictation. Pass the key explicitly (a placeholder when the local server
+      // needs none), so the SDK never falls back to OPENAI_API_KEY from the server environment.
+      createTranscriptionModel(modelId, rt) {
+        return ctx.ai.createOpenAI({
+          name: 'local-whisper',
+          baseURL: baseURL(rt.credentials),
+          apiKey: rt.credentials.apiKey || 'local',
+          fetch: rt.fetch,
+        }).transcription(modelId)
+      },
+
+      // Settings -> Media -> Language: an ISO 639 code, or nothing for "Detect automatically".
+      transcriptionOptions({ language }) {
+        return language ? { openai: { language } } : undefined
+      },
+
+      // The Test button: the default ping needs a chat model, so check the server instead.
+      async validate(rt) {
+        const res = await rt.fetch(`${baseURL(rt.credentials)}/models`, { signal: rt.signal })
+        if (!res.ok)
+          throw new Error(`The Whisper server answered HTTP ${res.status}`)
+      },
+    })
+  },
+}
+```
+
+After install and trust: Settings → Providers → Local Whisper → Test; then Settings → Media → Speech to text → "Whisper
+large v3 turbo (local)", and dictate with the microphone button (Alt+V). A text-to-speech provider looks the same with
+`createSpeechModel(modelId, rt)` (for example `ctx.ai.createOpenAI({ … }).speech(modelId)`), seeds with
+`kind: 'speech'` and a `voices` list. An image provider adds `createImageModel` (`.image(modelId)` of a compatible
+factory), seeds with `kind: 'image'` and an `imageParams` that maps the aspect ratio to what the API accepts.
+
 ### TypeScript entry
 
 Set `"main": "index.ts"`. The host compiles it with esbuild on load and on "Build & reload"; `definePlugin` is
@@ -1471,7 +1613,17 @@ Configuration tab; read it with `ctx.settings.get()`). Use `ctx.secrets` for tok
 `created` plugins in the in-browser editor (saves re-pin automatically), use the Trust action, or develop from a
 linked folder (pinned to the path).
 
-**My plugin is `incompatible`.** `engines.harness` does not include `PLUGIN_API_VERSION` (`1.0.0`). Use `"^1.0.0"`.
+**My plugin is `incompatible`.** `engines.harness` does not include `PLUGIN_API_VERSION` (`1.1.0`). Use `"^1.0.0"`
+(or `"^1.1.0"` when the plugin uses a 1.1 member such as `createTranscriptionModel` or `ctx.images`).
+
+**How do I generate an image from a plugin?** `const { images } = await ctx.images.generate({ prompt, chatId })` uses
+the image model the user chose in Settings → Media (or pass `modelRef`) and returns stored files (`images[0].url` is
+`/api/files/<fileId>`). A tool that returns such references can say so in `toModelOutput`; only the builtin
+`generate_image` tool gets its images appended to the chat automatically.
+
+**How do I add a speech-to-text or text-to-speech provider?** Give your `ProviderDefinition` a
+`createTranscriptionModel` or `createSpeechModel` (plus `transcriptionOptions` for languages and `voices` on speech
+models) and declare the models with `kind: 'transcription'` / `'speech'`; example (e) in section 15.
 
 **The server hangs or crashes at start after installing a plugin.** Start with `HF_SAFE_MODE=1` and disable or
 uninstall it. A plugin that crashed the process while loading is skipped automatically at the next start (boot

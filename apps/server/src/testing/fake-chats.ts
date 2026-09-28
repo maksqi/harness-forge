@@ -445,7 +445,7 @@ export function createFakeChatsService(deps: AppDeps): ChatsService {
       const leaf = fakeLatestLeafUnder(tree, messageId)
       const pendingApproval = awaitsApproval(await base.getMessage(id, leaf))
       await db.update(chats).set({ activeLeafId: leaf, pendingApproval }).where(eq(chats.id, id))
-      deps.events.emit('chat.updated', await base.summary(id))
+      deps.events.emit('chat.updated', { ...(await base.summary(id)), activeLeafId: leaf })
       return detail(id)
     },
 

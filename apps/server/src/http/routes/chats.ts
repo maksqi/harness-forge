@@ -3,6 +3,7 @@
 // `DELETE /chats/:id` stops an active run first (`deps.runs.stop`, which waits until the partial message is persisted).
 // `POST /chats/:id/branch` is refused with `409 conflict` (`reason: 'run-active'`) while the runs registry holds the
 // chat in any phase (`deps.runs.hasRun`), so a version switch never races a run's commit or persist.
+// `DELETE /chats/:id/messages/:messageId` (ADR-030) is a Phase 6 stub (501) until W6.6; it follows the same run rule.
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import {
@@ -10,6 +11,7 @@ import {
   chatBranchBodySchema,
   chatCreateSchema,
   chatExportQuerySchema,
+  chatMessageParamsSchema,
   chatParamsSchema,
   chatsQuerySchema,
   chatUpdateSchema,
@@ -17,7 +19,7 @@ import {
 import { Hono } from 'hono'
 import { runConflict } from '../../chat/runs.ts'
 import { contentDisposition } from '../../services/files/names.ts'
-import { validate } from '../validate.ts'
+import { notImplemented, validate } from '../validate.ts'
 
 export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
@@ -62,6 +64,8 @@ export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
       throw runConflict(id)
     return c.json(await deps.chats.switchBranch(id, c.req.valid('json').messageId))
   })
+
+  app.delete(apiRoutes['chats.deleteMessage'].path, validate('param', chatMessageParamsSchema), notImplemented('chats.deleteMessage'))
 
   return app
 }

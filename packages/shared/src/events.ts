@@ -21,6 +21,16 @@ export const SERVER_EVENT_TYPES = [
 
 export const serverEventTypeSchema = z.enum(SERVER_EVENT_TYPES)
 
+/**
+ * Data of `chat.updated` (ADR-030): the chat summary + the active leaf, so another tab that shows the chat follows a
+ * version switch. `chatSummarySchema` itself is unchanged (chat export v2 extends it).
+ */
+export const chatUpdatedDataSchema = chatSummarySchema.extend({
+  /** Last message of the shown path; null for an empty chat. */
+  activeLeafId: messageIdSchema.nullable(),
+})
+export type ChatUpdatedData = z.infer<typeof chatUpdatedDataSchema>
+
 export const runStartedDataSchema = z.object({
   chatId: chatIdSchema,
   messageId: messageIdSchema,
@@ -49,8 +59,8 @@ function eventSchema<const T extends (typeof SERVER_EVENT_TYPES)[number], D exte
 /** `{ type, data, at }`, discriminated on `type`. */
 export const serverEventSchema = z.discriminatedUnion('type', [
   eventSchema('chat.created', chatSummarySchema),
-  /** Includes title changes. */
-  eventSchema('chat.updated', chatSummarySchema),
+  /** Includes title changes and version switches (`activeLeafId`). */
+  eventSchema('chat.updated', chatUpdatedDataSchema),
   eventSchema('chat.deleted', z.object({ id: chatIdSchema })),
   eventSchema('run.started', runStartedDataSchema),
   eventSchema('run.finished', runFinishedDataSchema),

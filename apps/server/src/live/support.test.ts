@@ -306,7 +306,7 @@ describe('live checks: caps, results and stream parsing', () => {
   })
 
   it('picks effort low, else the lowest offered effort, only for reasoning models', () => {
-    const model = (reasoning: boolean, efforts: string[]) => ({ capabilities: { tools: false, vision: false, pdf: false, reasoning, structuredOutput: false }, reasoningEfforts: efforts as never })
+    const model = (reasoning: boolean, efforts: string[]) => ({ capabilities: { tools: false, vision: false, pdf: false, reasoning, structuredOutput: false, imageOutput: false }, reasoningEfforts: efforts as never })
     expect(pickReasoningEffort(model(true, ['auto', 'off', 'low', 'high']))).toBe('low')
     expect(pickReasoningEffort(model(true, ['auto', 'off', 'high']))).toBe('high')
     expect(pickReasoningEffort(model(true, ['auto', 'medium', 'max']))).toBe('medium')

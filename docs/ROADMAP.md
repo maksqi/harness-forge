@@ -129,14 +129,40 @@ Details, owned paths and acceptance criteria: `docs/phases/phase-5-v1-1.md`. Dec
   - [x] Final gate (e2e ×3, screenshots, audit, v1 → v1.1 upgrade) + checkpoint commit; Docker re-run and the live
     provider suite are left to CI / the user (see the wave log)
 
-## Backlog (not in v1.1)
+## Phase 6 — v1.2: multimodal + stabilization
+
+Details, owned paths and acceptance criteria: `docs/phases/phase-6-v1-2.md`. Decisions: ADR-028 … ADR-030 (and an
+ADR-027 consequence).
+
+- [x] P6-00 Hotfix (coordinator): shutdown handlers before boot (red CI on `main`), Dependabot cooldown and groups,
+  `actionlint` CI job
+- [x] P6-0a Decisions, docs, contracts
+  - [x] K1 DECISIONS (ADR-028 … ADR-030, contract seed), ROADMAP, AGENT.md (coordinator)
+  - [x] C10 contracts: shared DTOs + plugin SDK 1.1.0, 3 new routes (76), `docs/API.md`, 501 stubs
+  - [x] D6 docs: `phase-6-v1-2.md`, UI.md, ARCHITECTURE.md, PROVIDERS.md, PLUGINS.md, README, `.env.example`
+  - [x] Gate + checkpoint commit
+- [ ] P6-0b Schema, migration `0002`, skeletons, FREEZE
+  - [ ] K3 schema + `pnpm db:generate` + backfill SQL; K4 Playwright config (coordinator)
+  - [ ] C11 server skeleton (types, stub services, mock media models, headers, fakes, upgrade test)
+  - [ ] C12 web skeleton (Media settings page, stub components and composables, test ids, fake media)
+  - [ ] Gate (incl. v1.1 data upgrade probe) + FREEZE + checkpoint commit
+- [ ] P6-A Features (11 agents)
+  - [ ] W6.1 image-pipeline · [ ] W6.2 model-runtime · [ ] W6.3 provider-media · [ ] W6.4 image-host
+  - [ ] W6.5 voice-server · [ ] W6.6 chats-server
+  - [ ] W6.7 chat-surface-web · [ ] W6.8 media-parts-web · [ ] W6.9 composer-web · [ ] W6.10 media-settings-web
+  - [ ] W6.11 app-web (shared fresh-auth composable, tablet touch targets)
+  - [ ] Gate + checkpoint commit
+- [ ] P6-B Feature e2e, docs, live media checks, fix-ups, final gate
+  - [ ] W6.12 e2e-features · [ ] W6.13 docs-final · [ ] W6.14 live-media
+  - [ ] Final gate (e2e ×3, screenshots, audit, v1.1 → v1.2 upgrade) + checkpoint commit
+
+## Backlog (not in v1.2)
 
 Multi-user accounts · child-process isolation for code plugins · plugin marketplace/registry index ·
-knowledge/RAG · image generation · voice · desktop/CLI clients · attachment editing when editing a message ·
-deleting a message version · remembering the selected version per message · master-key rotation · one shared
-fresh-auth composable (the password-prompt-and-retry flow is repeated in the plugin, data and share UIs) · pushing
-version switches to other open tabs (`chat.updated` carries no leaf id) · 40 px touch targets for the icon-mode
-sidebar buttons on touch tablets (≥ 769 px wide; still 32 px) · `actionlint` in CI.
+knowledge/RAG · agent workspace (file and shell tools; revisits ADR-015) · desktop/CLI clients · master-key rotation ·
+audio attachments to chat models · declarative image and voice providers · provider-native image tools (e.g. the
+OpenAI Responses image tool) · on-device speech synthesis · cleanup of orphaned files (generated images are only
+removed by delete-all) · video generation.
 
 ## Wave log
 
@@ -155,3 +181,5 @@ sidebar buttons on touch tablets (≥ 769 px wide; still 32 px) · `actionlint` 
 | P5-A | W5.1–W5.9 | audit ok (147 paths); 4202 tests; build ok; CSP 38/38 with `HF_TEST_REQUIRE_WEB_BUILD=1`; probes ok (branch switch + 409 run-active, export v2 round trip, backup without secrets + import/skip on a fresh server, anonymous share view + revoke 404 + masked token logs, trusted-proxy limiter buckets + `X-Forwarded-Host` 403); e2e 41 passed (chromium + mobile) + 4 screenshot tests (96 PNGs reviewed); `pnpm audit --prod` clean | 69f1676 |
 | P5-B | W5.10, W5.11, W5.13 (+ coordinator: Mod+Shift+B left to the browser, 413 `limitEntries`, DECISIONS wording) | audit ok (40 paths); 4211 tests; build ok; CSP 38/38; all P5-A probes again green; e2e 44 passed ×3 (chromium + mobile; 48 tests in 25 files); screenshots of versions, Share dialog, share page reviewed; `pnpm audit --prod` clean; real v1 → v1.1 upgrade (v1 built from `4c461a0` in a worktree, 2 chats seeded, then v1.1 on the same data: parent chains + leaves correct, branching probe 11/11, old chat continues) | 0a6fa4e |
 | Final gate v1.1 | coordinator | frozen install ok; check 4211 tests; build ok; CSP 38/38; probes green; e2e 44/44 ×3; audit clean; v1 → v1.1 upgrade ok. Docker not re-run locally (daemon off; the CI `docker` job builds the image); live provider suite not run (needs the user's keys) | (this commit) |
+| P6-00 | coordinator (hotfix) | `pnpm check` 4212 tests; `main.test.ts` 3× green (the new SIGTERM-during-boot test fails on the old `main.ts`); `actionlint` 1.7.12 exit 0 | a5fd107 |
+| P6-0a | coordinator (K1), C10, D6 | audit ok (67 paths; 7 compile-fix files accepted); 4256 tests; build ok; CSP 38/38; 3 new routes mounted (501); e2e 44 passed; CI on `a5fd107` green; Dependabot now opens separate katex / ai-sdk / minor PRs (#2-#4, green) | (this commit) |

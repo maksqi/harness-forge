@@ -9,8 +9,9 @@
 //    of the body is drained or dropped by the HTTP server after the answer.
 //    Limits: `chat.send` `LIMITS.chatBodyBytes`; `files.upload` `LIMITS.uploadBytes` + multipart overhead;
 //    `pluginInstall.inspect` / `pluginInstall.install` `LIMITS.pluginZipBytes` + overhead; `data.import`
-//    `LIMITS.backupImportBytes` + overhead; `pluginFiles.write` `LIMITS.pluginFileBytes` as JSON (escaping can double
-//    the size) + envelope; every other route `LIMITS.jsonBodyBytes`.
+//    `LIMITS.backupImportBytes` + overhead; `audio.transcribe` `LIMITS.audioUploadBytes` + overhead;
+//    `pluginFiles.write` `LIMITS.pluginFileBytes` as JSON (escaping can double the size) + envelope; every other route
+//    `LIMITS.jsonBodyBytes`.
 // 2. Content type (SEC-B3, no form-encoded CSRF): a non-empty body sent to a route with a JSON `body` schema must be
 //    `application/json` (or `+json`); routes with a multipart `form` also accept `multipart/form-data`. Otherwise
 //    `400 validation_error`. Routes without a body or form schema ignore bodies.
@@ -42,6 +43,8 @@ const ROUTE_LIMITS: Partial<Record<ApiRouteKey, BodyLimit>> = {
   'pluginFiles.write': { maxBytes: 2 * LIMITS.pluginFileBytes + ENVELOPE_BYTES, limitBytes: LIMITS.pluginFileBytes },
   // Backup zips and chat JSON exports (ADR-024).
   'data.import': { maxBytes: LIMITS.backupImportBytes + ENVELOPE_BYTES, limitBytes: LIMITS.backupImportBytes },
+  // Dictation recordings (ADR-029).
+  'audio.transcribe': { maxBytes: LIMITS.audioUploadBytes + ENVELOPE_BYTES, limitBytes: LIMITS.audioUploadBytes },
 }
 
 /** The body limit of a route (the JSON default for other and unknown routes). */

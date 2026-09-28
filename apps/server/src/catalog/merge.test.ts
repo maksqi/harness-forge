@@ -52,7 +52,7 @@ describe('buildCatalogModel', () => {
       kind: 'chat',
       contextWindow: null,
       maxOutputTokens: null,
-      capabilities: { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false },
+      capabilities: { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false },
       reasoningEfforts: [],
       cost: null,
       favorite: false,
@@ -106,7 +106,7 @@ describe('buildCatalogModel', () => {
       name: 'M',
       kind: 'chat',
       contextWindow: 10,
-      capabilities: { tools: false, vision: false, pdf: false, reasoning: true, structuredOutput: false },
+      capabilities: { tools: false, vision: false, pdf: false, reasoning: true, structuredOutput: false, imageOutput: false },
       reasoningEfforts: ['off', 'low', 'medium', 'high'],
       cost: { input: 1 },
     })

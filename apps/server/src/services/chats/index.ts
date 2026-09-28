@@ -354,7 +354,8 @@ export function createChatsService(deps: AppDeps): ChatsService {
 
   function emitUpdated(row: ChatRow): ChatSummary {
     const summary = toSummary(row)
-    deps.events.emit('chat.updated', summary)
+    // `chat.updated` carries the active leaf so other tabs follow a version switch (ADR-030); callers get the summary.
+    deps.events.emit('chat.updated', { ...summary, activeLeafId: row.activeLeafId })
     return summary
   }
 

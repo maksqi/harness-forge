@@ -5,6 +5,7 @@ import {
   fileIdSchema,
   iconSlugSchema,
   mcpServerIdSchema,
+  messageIdSchema,
   pluginIdSchema,
   providerIdSchema,
   shareIdSchema,
@@ -18,6 +19,10 @@ export type ProviderParams = z.infer<typeof providerParamsSchema>
 
 export const chatParamsSchema = z.object({ id: chatIdSchema })
 export type ChatParams = z.infer<typeof chatParamsSchema>
+
+/** `/chats/:id/messages/:messageId` (deleting a message version, ADR-030). */
+export const chatMessageParamsSchema = z.object({ id: chatIdSchema, messageId: messageIdSchema })
+export type ChatMessageParams = z.infer<typeof chatMessageParamsSchema>
 
 export const fileParamsSchema = z.object({ id: fileIdSchema })
 export type FileParams = z.infer<typeof fileParamsSchema>

@@ -1,7 +1,8 @@
 # Providers
 
 Reference for the builtin BYOK providers of the `core-providers` builtin plugin, the dev-only `mock` provider, the
-declarative provider templates of the provider wizard, and provider icons. The provider contract
+declarative provider templates of the provider wizard, provider icons, and (Phase 6) the image, transcription and speech
+models of the builtin providers ([section 13](#13-image-and-voice-models)). The provider contract
 (`ProviderDefinition`, `CredentialField`, `ModelInfo`, `ReasoningParams`) is defined in
 [PLUGINS.md](./PLUGINS.md#9-api-reference); the model catalog merge rules are in
 [ARCHITECTURE.md](./ARCHITECTURE.md#9-model-catalog). Ids follow [DECISIONS.md](./DECISIONS.md).
@@ -85,24 +86,26 @@ Known alternative base URLs (Advanced):
 ## 3. Model listing
 
 `listModels` results are cached 24 h in `model_cache`; a failed refresh keeps the last good list; seeds are used only
-when there is neither a listing nor a cached listing. `classify()` hides non-chat models (models.dev modalities, else
-the id regex `embed|tts|whisper|transcri|image|moderation|rerank|audio`); the provider-specific filters below run
-first.
+when there is neither a listing nor a cached listing, except seeds with an explicit non-chat kind (image,
+transcription, speech), which are always listed (Phase 6). `classify()` decides each model's kind (the image id regex
+first, then models.dev modalities, else the id; ARCHITECTURE.md 9) and hides every kind but chat (image models stay
+visible when the provider can generate images); the provider-specific filters below run first. Phase 6: the filters
+keep the media ids a provider can run (the "Phase 6" notes below and [section 13](#13-image-and-voice-models)).
 
 | id | Endpoint | Auth | Fields used / filtering | Status |
 |---|---|---|---|---|
 | `anthropic` | `GET {baseURL}/models?limit=1000` (follow `has_more` with `after_id`) | `x-api-key`, `anthropic-version: 2023-06-01` | `id`, `display_name` -> name, `max_input_tokens` -> contextWindow, `max_tokens` -> maxOutputTokens, `capabilities.image_input` / `pdf_input` / `structured_outputs` / `thinking.supported` -> capabilities, `capabilities.effort.{low,medium,high,xhigh,max}.supported` -> `reasoningEfforts` | verified (docs) |
-| `openai` | `GET {baseURL}/models` | Bearer | ids only (`id`, `owned_by`); drop `embedding`, `tts`, `whisper`, `transcribe`, `dall-e`, `gpt-image`, `moderation`, `realtime`, `audio`, `sora`, `babbage`, `davinci`, `computer-use`, `search`; metadata from models.dev | verified |
-| `google` | `GET {baseURL}/models?pageSize=1000` (follow `nextPageToken`) | `x-goog-api-key` | id = `name` without `models/`; keep `supportedGenerationMethods` containing `generateContent`; drop `embedding`, `aqa`, `imagen`, `veo`, `tts`, `live`, `native-audio`, `-image`; `displayName`, `inputTokenLimit`, `outputTokenLimit`, `thinking` -> capabilities.reasoning | verified (docs) |
-| `xai` | `GET {baseURL}/models` | Bearer | ids; drop `grok-imagine-*`; metadata from models.dev (`GET {baseURL}/language-models` returns richer data **(unverified shape)**) | verified |
+| `openai` | `GET {baseURL}/models` | Bearer | ids only (`id`, `owned_by`); drop `embedding`, `tts`, `whisper`, `transcribe`, `dall-e`, `gpt-image`, `moderation`, `realtime`, `audio`, `sora`, `babbage`, `davinci`, `computer-use`, `search`; Phase 6: keep `gpt-image*` / `chatgpt-image*` (kind `image`), `*transcribe*` and `whisper-1` (`transcription`), `tts-*` and `*-tts*` (`speech`); metadata from models.dev | verified |
+| `google` | `GET {baseURL}/models?pageSize=1000` (follow `nextPageToken`) | `x-goog-api-key` | id = `name` without `models/`; keep `supportedGenerationMethods` containing `generateContent`; drop `embedding`, `aqa`, `imagen`, `veo`, `tts`, `live`, `native-audio`, `-image`; Phase 6: keep `gemini-*-image*` (chat models with `imageOutput`) and `*-tts*` (`speech`); `displayName`, `inputTokenLimit`, `outputTokenLimit`, `thinking` -> capabilities.reasoning | verified (docs) |
+| `xai` | `GET {baseURL}/models` | Bearer | ids; drop `grok-imagine-*`; Phase 6: keep `grok-imagine-image*` (kind `image`); metadata from models.dev (`GET {baseURL}/language-models` returns richer data **(unverified shape)**) | verified |
 | `deepseek` | `GET {baseURL}/models` | Bearer | `id`, `name`, `context_window`, `max_output_tokens`, `input_modalities` (`image` -> vision), `effort.supported_levels` -> `reasoningEfforts` (plus `off`) | verified (docs) |
 | `moonshotai` | `GET {baseURL}/models` | Bearer | ids; metadata from models.dev and seeds | verified (route) |
 | `alibaba` | `GET {baseURL}/models` | Bearer | ids (OpenAI shape **(unverified)**); keep ids starting with `qwen` or `qwq`; drop `embed`, `tts`, `asr`, `image`, `wan`, `realtime`, `livetranslate`, `-mt-` | verified (route) |
 | `zai` | `GET {baseURL}/models` | Bearer | ids (OpenAI shape) | **(unverified)** on the general endpoint (documented for the Coding Plan endpoint); fall back to seeds + models.dev |
 | `minimax` | `GET {baseURL}/models` | `x-api-key`, `anthropic-version` | parsed like the Anthropic listing (`id`, `display_name`); tools on; vision for M3; `reasoningEfforts` by model family ([section 6](#6-provider-notes)) | response shape **(unverified)**; fall back to seeds |
 | `mistral` | `GET {baseURL}/models` | Bearer | keep `capabilities.completion_chat`; drop `archived` / deprecated; `max_context_length`; `capabilities.function_calling` -> tools, `capabilities.vision` -> vision; hide duplicate `aliases` | verified (docs) |
-| `groq` | `GET {baseURL}/models` | Bearer | keep `active`; `context_window`, `max_completion_tokens`; drop `whisper`, `orpheus`, `tts`, `prompt-guard`, `safeguard` | verified (docs) |
-| `openrouter` | `GET {baseURL}/models` (public, no key needed; send the key when set) | Bearer | `name`; `context_length`; `top_provider.max_completion_tokens`; keep `architecture.output_modalities` containing `text`; `architecture.input_modalities` (`image` -> vision, `file` -> pdf); `supported_parameters` (`tools` -> tools, `reasoning` -> reasoning, `structured_outputs` -> structuredOutput); `pricing` (below) | verified |
+| `groq` | `GET {baseURL}/models` | Bearer | keep `active`; `context_window`, `max_completion_tokens`; drop `whisper`, `orpheus`, `tts`, `prompt-guard`, `safeguard`; Phase 6: keep `whisper-*` (kind `transcription`) | verified (docs) |
+| `openrouter` | `GET {baseURL}/models` (public, no key needed; send the key when set) | Bearer | `name`; `context_length`; `top_provider.max_completion_tokens`; keep `architecture.output_modalities` containing `text`; Phase 6: `output_modalities` containing `image` -> `imageOutput`; `architecture.input_modalities` (`image` -> vision, `file` -> pdf); `supported_parameters` (`tools` -> tools, `reasoning` -> reasoning, `structured_outputs` -> structuredOutput); `pricing` (below) | verified |
 | `ollama` | `GET {origin}/api/tags` where origin = `baseURL` without a trailing `/v1`; fallback `GET {baseURL}/models` | none (Bearer when `apiKey` is set) | `models[].name` -> id; optional enrichment `POST {origin}/api/show` `{ "model": id }` (cheap, metadata only): `capabilities` (`tools`, `thinking`, `vision`, `embedding`), context length at `model_info["<general.architecture>.context_length"]` | verified (docs) |
 
 OpenRouter pricing: `pricing.prompt`, `pricing.completion`, `pricing.input_cache_read`, `pricing.input_cache_write` are
@@ -217,7 +220,10 @@ has no listing.
 | `groq` | `openai/gpt-oss-120b` (low, medium, high) · `qwen/qwen3.8-27b` (off, low, medium, high) | `openai/gpt-oss-20b` |
 | `openrouter` | none (the listing is public) | `openai/gpt-6-luna` |
 | `ollama` | none (local models come from `/api/tags`) | none (titles use the chat model) |
-| `mock` | `echo`, `reasoning` (off, low, medium, high, max), `tool-approval`, `error` ([section 8](#8-mock-provider)) | `echo` |
+| `mock` | `echo`, `reasoning` (off, low, medium, high, max), `tool-approval`, `error`; Phase 6: `image`, `image-chat`, `image-tool`, `transcribe`, `speech` ([section 8](#8-mock-provider)) | `echo` |
+
+Phase 6: the image, transcription and speech seeds (with explicit kinds and voices) are listed in
+[section 13](#13-image-and-voice-models); unlike chat seeds they are listed even next to a live listing.
 
 Notes: `deepseek-chat` and `deepseek-reasoner` were retired on 2026-07-24 (`deepseek-v4-flash` is marked deprecated
 in favor of the `deepseek-flash` alias). MiniMax ids are written as in models.dev (`MiniMax-M3`); the package type
@@ -307,8 +313,12 @@ errors -> `context_overflow`; `ECONNREFUSED` / `ENOTFOUND` -> `provider_unreacha
 Dev and e2e only: the builtin plugin `mock` registers provider `mock` and tool `mock_approval_tool` when
 `HF_MOCK_PROVIDER=1` (`pnpm start:e2e` sets it). Models are `MockLanguageModelV4` instances from `ai/test` streaming
 through `simulateReadableStream`. The provider has no credentials (status `connected`), no icon (monogram),
-`smallModelId: 'echo'`, `listModels` returns the four models, and `validate` always succeeds. Its `reasoning()`
-maps `off` -> `none`, `low` / `medium` / `high` -> same, `max` -> `xhigh`.
+`smallModelId: 'echo'`, `listModels` returns its nine models (the four chat models of v1 and the five media models of
+Phase 6), and `validate` always succeeds. Its `reasoning()` maps `off` -> `none`, `low` / `medium` / `high` -> same,
+`max` -> `xhigh`. Since Phase 6 it also defines `createImageModel`, `imageParams` (passes the aspect ratio through),
+`createTranscriptionModel` and `createSpeechModel` (plugin API 1.1.0), with models that implement `ImageModelV4`,
+`TranscriptionModelV4` and `SpeechModelV4` (a small PNG encoder on `zlib.deflateSync` + `zlib.crc32`, and a WAV
+writer exported as `createMockWav()` for tests).
 
 Common behavior (deterministic):
 
@@ -319,8 +329,10 @@ Common behavior (deterministic):
   `abortSignal` aborts.
 - **Usage**: `inputTokens` = number of whitespace-separated words in all prompt text parts; `outputTokens` = number of
   streamed text and reasoning words; `reasoningTokens` = reasoning words.
-- **Model info** (all four): `contextWindow: 32000`, `maxOutputTokens: 4096`,
-  `cost: { input: 1, output: 2 }` (USD per 1M tokens, so cost displays are non-zero).
+- **Model info** (the four chat models and `image-chat`, `image-tool`): `contextWindow: 32000`, `maxOutputTokens: 4096`,
+  `cost: { input: 1, output: 2 }` (USD per 1M tokens, so cost displays are non-zero). The media models have explicit
+  kinds: `image` (`kind: 'image'`, `capabilities.vision: true`, the same cost), `transcribe` (`kind: 'transcription'`),
+  `speech` (`kind: 'speech'`, `voices: ['mock-voice-a', 'mock-voice-b']` so the Voice suggestions can be tested).
 
 | Model ref | Capabilities | Behavior |
 |---|---|---|
@@ -328,11 +340,17 @@ Common behavior (deterministic):
 | `mock:reasoning` | reasoning (`reasoningEfforts`: off, low, medium, high, max) | Received `reasoning` option = `none`: no reasoning part, text `Answer: <user text>`. Otherwise: a reasoning part `Thinking about "<first 8 words of the user text>" with effort <value>.` (value = the received option, `provider-default` for `auto`, `xhigh` for `max`), streamed at 100 ms per word (about 1 s, so the "Thinking" row is visible), then the text `Answer: <user text>`. |
 | `mock:tool-approval` | tools | If `mock_approval_tool` is not in the call's tools (tool mode `off`, tool disabled): text `Tools are disabled.` Else, if the prompt does not end with a result of this tool: one tool call `mock_approval_tool` with input `{ "text": "<user text>" }` and id `mock_call_<n>` (n = number of assistant messages in the prompt + 1), `finishReason: 'tool-calls'`. If it ends with a result: text `Tool result: <JSON of the output>`, or `The tool call was denied.` for a denied result. |
 | `mock:error` | — | `doStream` rejects before any chunk with `APICallError` (`statusCode: 401`, message `Mock authentication failure`, `url: 'mock://error'`, not retryable), mapped to `auth_invalid` with action `configure-provider` and delivered in the stream (the provider is configured, so there is no pre-flight 400). |
+| `mock:image` (Phase 6) | image model, vision | Waits 300 ms (5 s when the prompt contains "slow", for Stop and placeholder tests) and honors the abort signal. Returns `n` solid-color PNG images whose color comes from a hash of the prompt, the image index and the input images (so every image, and every edit, differs); the aspect ratio sets the pixel size (Auto = square). Usage: input tokens = the prompt's words, output tokens = 100 × `n`; `revisedPrompt` = `Mock: <prompt>`. A prompt containing "fail" rejects with a 400 `APICallError` (mapped to `provider_error`). |
+| `mock:image-chat` (Phase 6) | chat, `imageOutput` | Streams `Image for: <user text>` word by word, then one PNG `file` part (a model-side file, so the pipeline must store it and replace the `data:` URL). |
+| `mock:image-tool` (Phase 6) | tools | Like `mock:tool-approval` for the builtin `generate_image` tool: without the tool in the call (tool mode `off`, tool disabled) text `Tools are disabled.`; else, when the prompt does not end with its result, one tool call `generate_image` with input `{ "prompt": "<user text>" }`; after the result, text `Image tool result: <n> image(s)` (n = the images in the output). Needs an image model in Settings → Media (`imageModelRef`, e.g. `mock:image`). |
+| `mock:transcribe` (Phase 6) | transcription | Returns the text `This is a mock transcription.` for any accepted recording (no language or duration reported). |
+| `mock:speech` (Phase 6) | speech | Returns a silent WAV (8 kHz, mono, 16-bit PCM) lasting 400 ms per word of the text, at least 1 s and at most 6 s; `mediaType: 'audio/wav'`. |
 
 Tool `mock_approval_tool`: description "Echoes its input. Mock tool that requires approval.", input
 `{ text: string }`, `policy: 'ask'`, `execute` returns `{ "echoed": "<text>" }`. In tool mode `ask` it shows the
 approval card (Allow -> `Tool result: {"echoed":"..."}`, Deny -> `The tool call was denied.`); in `auto` it runs
-without a card. Stop tests send a long message to `mock:echo` (400 words stream for about 10 s).
+without a card. Stop tests send a long message to `mock:echo` (400 words stream for about 10 s), or a "slow" prompt to
+`mock:image`.
 
 ## 9. Declarative provider templates (wizard)
 
@@ -415,7 +433,9 @@ Verified on 2026-09-28:
 - **Icons**: file list of `@lobehub/icons-static-svg@1.95.1` on jsDelivr.
 - **Seed ids**: models.dev `api.json`.
 
-Unverified (no live run recorded yet): `grok-4.7` accepted efforts and the `/v1/language-models` response shape;
+Unverified (no live run recorded yet): the Phase 6 media behavior of [section 13](#13-image-and-voice-models) (Gemini
+image output and thought signatures, the carry-forward of generated images, the voice lists, the xAI speech and
+transcription endpoints, the cost of xAI images); `grok-4.7` accepted efforts and the `/v1/language-models` response shape;
 Z.ai `/models` on the general endpoint and per-model effort support of GLM models; MiniMax listing shape and model id
 casing; Alibaba listing shape and which Qwen models accept `enable_thinking`; Ollama `/api/show` `thinking.values` on
 real models (the mapping of section 4 is implemented from Ollama's docs); the MiniMax China base URL.
@@ -476,7 +496,8 @@ non-empty one wins), so they match section 1:
 |---|---|
 | `HF_LIVE` | `1` enables the live files; set by `pnpm test:live` itself, never needed in `.env` |
 | `HF_LIVE_PROVIDERS` | comma list of provider ids to run, case-insensitive (default: every provider with a key); `none` is a dry run that makes no request and prints the summary with every provider SKIP; an unknown id fails the run before any request and lists the valid ids |
-| `HF_LIVE_MAX_COST_USD` | budget of one run in USD, a non-negative number (default 0.50); once the summed cost reaches it, the remaining paid checks (chat, reasoning, tools) are reported as SKIP |
+| `HF_LIVE_MAX_COST_USD` | budget of one run in USD, a non-negative number (default 0.50); once the summed cost reaches it, the remaining paid checks (chat, reasoning, tools, and the media checks) are reported as SKIP |
+| `HF_LIVE_MEDIA` | `1` adds the image and voice checks below (Phase 6, W6.14); unset = chat checks only. Like the rest of the suite it runs only under `pnpm test:live` (`HF_LIVE=1`) with keys |
 
 ### What it checks
 
@@ -500,6 +521,26 @@ Providers run one after another. Each gets its own in-process server,
 7. **Key not logged**: no log record captured while the provider's checks ran contains its key (SKIP for Ollama).
 
 Checks 3 to 5 are the paid ones; each starts its own chat.
+
+### Media checks (`HF_LIVE_MEDIA=1`, Phase 6)
+
+Opt-in on top of the opt-in suite: `HF_LIVE_MEDIA=1 pnpm test:live` (paid, never run by agents or CI pushes). Per
+provider with a key and the matching model ([section 13](#13-image-and-voice-models)), each in its own in-process
+server like the chat checks:
+
+1. **Image**: one small image through an image turn (`POST /api/chat` with the cheapest image seed, `imageOptions:
+   { n: 1 }`; OpenAI at `1024x1024`): the reply holds exactly one `file` part with an `/api/files/` URL, the file is a
+   raster image, and no `data:` URL is saved. Google and OpenRouter use an image-output chat model instead
+   (`gemini-2.5-flash-image`; the reply holds text and at least one stored image).
+2. **Speech**: `POST /api/audio/speech` with a short sentence ("The quick brown fox jumps over the lazy dog.") answers
+   an allowlisted audio type with `Cache-Control: no-store` and a non-trivial body.
+3. **Transcription**: that speech audio sent back to every transcription model with a key (`POST
+   /api/audio/transcriptions`) answers a transcript containing "quick brown fox" (case-insensitive).
+
+The media checks count against `HF_LIVE_MAX_COST_USD`; a check whose cost is unknown (xAI images, every speech and
+transcription call) counts at a fixed estimate (W6.14 sets it, for example $0.05 per image and $0.01 per voice call)
+and is marked `~`. A rate limit is SKIP. The summary table gains the columns Image, Speech and Transcription; the media
+matrix and its caps are unit-tested in `support.test.ts`.
 
 Cost and safety:
 
@@ -531,3 +572,83 @@ variables of the table above (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GEN
 secret is an empty variable, which the suite reports as SKIP.
 
 Record the results of a run in [section 11](#11-verification-log).
+
+## 13. Image and voice models
+
+Phase 6 (ADR-028 images, ADR-029 voice). The provider members are optional parts of plugin API 1.1.0
+([PLUGINS.md 9](./PLUGINS.md#providerdefinition)): `createImageModel`, `imageParams`, `createTranscriptionModel`,
+`createSpeechModel`, `transcriptionOptions`. Factories and option keys were read from the installed packages on
+2026-09-28 (`ai` 7.0.116, `@ai-sdk/openai` 4.0.78, `@ai-sdk/google` 4.0.82, `@ai-sdk/xai` 5.0.10, `@ai-sdk/mistral`
+4.0.52, `@ai-sdk/groq` 4.0.50, `@openrouter/ai-sdk-provider` 3.1.0); seed ids exist in the packages' model id unions.
+Nothing here has run against the live APIs yet: the opt-in media checks of [section 12](#12-live-provider-suite)
+(`HF_LIVE_MEDIA=1`) confirm it, and their results go to [section 11](#11-verification-log).
+
+### Support by provider
+
+| Provider | Images | Transcription | Speech | `transcriptionOptions({ language })` |
+|---|---|---|---|---|
+| `openai` | dedicated image models: `createImageModel` → `.image(id)`; `imageParams` maps the aspect ratio to `size`: 1:1 → `1024x1024`; 2:3, 3:4, 9:16 → `1024x1536`; 3:2, 4:3, 16:9 → `1536x1024`; Auto → nothing (the package ignores `aspectRatio` and `seed`); input images make it an edit; token usage reported | `.transcription(id)` | `.speech(id)`; default voice `alloy`, MP3 | `{ openai: { language } }` |
+| `xai` | dedicated image models: `.image(id)`; `aspectRatio` passed through (`size` is ignored); several images per call (the SDK batches `n`); no token usage (the cost arrives in `providerMetadata.xai.costInUsdTicks`, unit unconfirmed, so `costUsd` is null) | `.transcription()` **without an id** (catalog key `stt`) | `.speech()` **without an id** (catalog key `tts`); default voice `eve`, MP3 | `{ xai: { language } }` |
+| `google` | chat models with image output (`gemini-*-image*`, `capabilities.imageOutput`): `imageParams` → `providerOptions.google = { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio } }`; the package's `.image()` factory is not wired in v1.2 | `.transcription(id)` exists, but its only ids (`gemini-3.5-transcribe*`) are in the type union alone **(unverified; not seeded)** | `.speech(id)`; default voice `Kore`, WAV (about 4.5 MB per 1,500 characters) | `{ google: { languageCodes: [language] } }` |
+| `openrouter` | chat models with image output (`architecture.output_modalities` contains `image` → `imageOutput`): `imageParams` → `providerOptions.openrouter = { modalities: ['image', 'text'], image_config: { aspect_ratio } }` (the package spreads it into the request body; there is no typed option) | — | — | — |
+| `mistral` | — | `.transcription(id)` | `.speech(id)`; no default voice, MP3 | `{ mistral: { language } }` |
+| `groq` | — | `.transcription(id)` | — | `{ groq: { language } }` |
+| `anthropic`, `deepseek`, `moonshotai`, `alibaba`, `zai`, `minimax`, `ollama` | — | — | — | — |
+| `mock` (dev) | `mock:image`; `mock:image-chat` (image output) | `mock:transcribe` | `mock:speech` | nothing ([section 8](#8-mock-provider)) |
+
+- **Where images appear**: dedicated image models (`kind: 'image'`) are visible in the composer's "Image models" group
+  only when their provider defines `createImageModel` (`openai`, `xai`, `mock`); chat models with image output stay in
+  their provider's group with the image-output badge and offer the aspect ratio only (one image per reply).
+- **`imageParams(request, model)`** gets `{ n, aspectRatio?, inputs }` and the model's `ModelInfo`, and returns `{ size?,
+  aspectRatio?, providerOptions? }` or `undefined`; the image service passes `size` / `aspectRatio` to `generateImage`,
+  the chat pipeline merges `providerOptions` into image-output chat calls.
+- **History**: of the provider converters only Google's reads images in assistant messages (Anthropic, OpenAI Responses
+  and OpenRouter drop them), so the chat pipeline carries the latest generated images into the next user message for
+  vision models (ARCHITECTURE.md 6.1, 6.11). Gemini thought signatures (`providerMetadata`) are kept on stored image
+  parts **(unverified that they round-trip)**.
+- **Speech options**: never pass `outputFormat`, `speed`, `instructions` or `language` to `generateSpeech`
+  (unsupported options print SDK warnings); the speed setting is the browser's `playbackRate`.
+- **Transcription languages**: `auto` sends nothing (the provider detects it); an ISO 639 code goes through
+  `transcriptionOptions`.
+- **Errors**: media calls use the provider's `mapError` and the default mapping of [section 6](#6-provider-notes); a
+  removed model id answers `model_not_found`. A models.dev entry without a factory (for example
+  `alibaba:qwen3-asr-flash`, a transcription model) is listed with its kind but answers `validation_error` when chosen
+  in Settings → Media.
+- Declarative providers cannot contribute image or voice models (backlog).
+
+### Seeds (explicit kinds, always listed)
+
+| Provider | Image (`kind: 'image'`, `vision: true`) | Transcription (`kind: 'transcription'`) | Speech (`kind: 'speech'`) |
+|---|---|---|---|
+| `openai` | `gpt-image-1`, `gpt-image-1-mini`, `gpt-image-1.5` | `gpt-4o-mini-transcribe`, `gpt-4o-transcribe`, `whisper-1` | `gpt-4o-mini-tts`, `tts-1`, `tts-1-hd` |
+| `xai` | `grok-imagine-image` | `stt` (catalog key; the factory takes no id) | `tts` (catalog key; the factory takes no id) |
+| `google` | — (image output comes from the listed chat models `gemini-*-image*`) | — (`gemini-3.5-transcribe` left out) | `gemini-3.1-flash-tts-preview`, `gemini-2.5-flash-preview-tts`, `gemini-2.5-pro-preview-tts` |
+| `mistral` | — | `voxtral-mini-latest` | `voxtral-mini-tts-latest` |
+| `groq` | — | `whisper-large-v3-turbo`, `whisper-large-v3` | — |
+
+`whisper-1`, `tts-1` and `tts-1-hd` are in the package unions but not in the models.dev snapshot, so they carry no
+catalog metadata. The live listings keep the media ids a provider can run ([section 3](#3-model-listing)), so newer
+models (for example `gpt-image-2`, `gemini-3.8-flash-tts`) appear once a key is set.
+
+### Voices (`ModelInfo.voices`, from vendor docs, all **(unverified)**)
+
+| Model | Voices (suggestions in Settings → Media; the field also accepts any other name) |
+|---|---|
+| `openai:tts-1`, `openai:tts-1-hd` | `alloy`, `ash`, `coral`, `echo`, `fable`, `nova`, `onyx`, `sage`, `shimmer` |
+| `openai:gpt-4o-mini-tts` | the voices above plus `ballad`, `verse`, `marin`, `cedar` |
+| `google:*-tts*` | `Zephyr`, `Puck`, `Charon`, `Kore`, `Fenrir`, `Leda`, `Orus`, `Aoede`, `Callirrhoe`, `Autonoe`, `Enceladus`, `Iapetus`, `Umbriel`, `Algieba`, `Despina`, `Erinome`, `Algenib`, `Rasalgethi`, `Laomedeia`, `Achernar`, `Alnilam`, `Schedar`, `Gacrux`, `Pulcherrima`, `Achird`, `Zubenelgenubi`, `Vindemiatrix`, `Sadachbia`, `Sadaltager`, `Sulafat` |
+| `xai:tts` | `eve` (the package default), `ara`, `leo`, `rex`, `sal` |
+| `mistral:voxtral-mini-tts-latest` | none known (type a voice id from the Mistral console) |
+
+`speechVoice` null means the provider default; the web clears the voice whenever the speech model changes.
+
+### Classification (ARCHITECTURE.md 9)
+
+| Example id | Source | Kind |
+|---|---|---|
+| `gpt-image-1-mini`, `gpt-image-1.5`, `chatgpt-image-latest` | the image id regex, before modalities (models.dev lists `[text, image]` output) | `image` |
+| `grok-imagine-image`, `dall-e-3`, `imagen-4` | the image id regex | `image` |
+| `gemini-2.5-flash-image`, `openai/gpt-5-image` (OpenRouter) | text + image output | `chat` with `imageOutput` |
+| `gpt-4o-mini-tts`, `gemini-2.5-flash-preview-tts` | audio output with a text input (or the `tts` id fallback) | `speech` |
+| `whisper-large-v3`, `gpt-4o-transcribe` | audio input without a text input and a text output (or the `whisper` / `transcri` id fallback) | `transcription` |
+| `stt`, `tts` (xAI), `voxtral-mini-latest` (Mistral) | the seed's explicit kind (an explicit `kind` of any layer wins over `classify()`) | `transcription` / `speech`, `transcription` |

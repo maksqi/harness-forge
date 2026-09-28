@@ -87,7 +87,10 @@ export const modelInfoSchema = z.strictObject({
   id: modelIdSchema,
   /** Display name (default: id). */
   name: z.string().trim().min(1).max(256).optional(),
-  /** Default `chat`; other kinds are hidden from the picker. */
+  /**
+   * Default `chat`; other kinds are hidden from the chat picker (`image` models are shown when the provider defines
+   * `createImageModel`; `transcription` / `speech` models serve dictation and read-aloud).
+   */
   kind: modelKindSchema.optional(),
   contextWindow: z.int().positive().optional(),
   maxOutputTokens: z.int().positive().optional(),
@@ -96,6 +99,8 @@ export const modelInfoSchema = z.strictObject({
   reasoningEfforts: reasoningEffortListSchema.optional(),
   /** USD per 1M tokens. */
   cost: modelCostSchema.optional(),
+  /** `speech` models: voice names to suggest (unique, <= 100; ADR-029). */
+  voices: z.array(z.string().min(1).max(64)).max(100).refine(isUnique, 'Voices must be unique.').optional(),
 })
 export type ModelInfo = z.infer<typeof modelInfoSchema>
 

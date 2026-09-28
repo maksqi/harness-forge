@@ -5,6 +5,7 @@ import { reasoningEffortSchema, toolModeSchema } from './enums.ts'
 import { harnessErrorInitSchema } from './errors.ts'
 import { chatIdSchema, commandNameSchema, messageIdSchema, modelRefSchema, timestampSchema } from './ids.ts'
 import { LIMITS } from './limits.ts'
+import { imageOptionsSchema, imageTurnMetadataSchema } from './schemas/images.ts'
 import { utf8ByteLength } from './util/text.ts'
 
 const tokenCountSchema = z.int().min(0)
@@ -61,11 +62,14 @@ export const messageMetadataSchema = z.object({
   error: harnessErrorInitSchema.optional(),
   /** User messages that invoked a slash command. */
   command: commandInvocationSchema.optional(),
+  /** Image-turn replies (ADR-028): what was requested, set in the `start` metadata (placeholder tiles). */
+  image: imageTurnMetadataSchema.optional(),
 })
 export type MessageMetadata = z.infer<typeof messageMetadataSchema>
 
 export const noticeLevelSchema = z.enum(['info', 'warning'])
-export const noticeCodeSchema = z.enum(['context-trimmed', 'approvals-superseded', 'tools-unsupported', 'attachments-unsupported'])
+/** `generated-file-dropped` (ADR-028): a file the model generated was not stored (not a raster image, or too large). */
+export const noticeCodeSchema = z.enum(['context-trimmed', 'approvals-superseded', 'tools-unsupported', 'attachments-unsupported', 'generated-file-dropped'])
 export type NoticeCode = z.infer<typeof noticeCodeSchema>
 
 /** Data of `data-notice` parts. */
@@ -142,6 +146,11 @@ export const chatRequestBodySchema = z.strictObject({
   modelRef: modelRefSchema,
   reasoningEffort: reasoningEffortSchema,
   toolMode: toolModeSchema,
+  /**
+   * Image options (ADR-028): only for an image model or a chat model with `capabilities.imageOutput`; `n` and
+   * `editPrevious` only for image models (else `400` on `['imageOptions']`, checked by the server).
+   */
+  imageOptions: imageOptionsSchema.optional(),
 })
 export type ChatRequestBody = z.infer<typeof chatRequestBodySchema>
 

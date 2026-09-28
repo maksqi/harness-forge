@@ -54,7 +54,10 @@ export const chatSummarySchema = z.object({
 })
 export type ChatSummary = z.infer<typeof chatSummarySchema>
 
-/** Sums over the chat's usage rows (purpose `chat`), every message version included (the cost actually paid). */
+/**
+ * Sums over the chat's usage rows (purposes `chat` and `image`, ADR-028), every message version included, deleted
+ * versions too (the cost actually paid).
+ */
 export const usageTotalsSchema = z.object({
   inputTokens: z.int().min(0),
   outputTokens: z.int().min(0),
@@ -91,7 +94,10 @@ export const chatDetailSchema = chatSummarySchema.extend({
 })
 export type ChatDetail = z.infer<typeof chatDetailSchema>
 
-/** Body of `POST /chats/:id/branch`: show the most recent leaf under `messageId` (any message of the chat). */
+/**
+ * Body of `POST /chats/:id/branch`: show the path last shown under `messageId` (any message of the chat; ADR-030), else
+ * the most recent leaf under it.
+ */
 export const chatBranchBodySchema = z.strictObject({
   messageId: messageIdSchema,
 })

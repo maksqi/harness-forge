@@ -48,6 +48,16 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   Always pass provider **instances** — a plain string model id is routed to the Vercel AI Gateway.
   Custom providers implement `LanguageModelV4` from `@ai-sdk/provider`. Test models: `MockLanguageModelV4`,
   `simulateReadableStream` from `ai/test`. Verify every name in the installed `.d.ts`.
+- **AI SDK v7 media** (Phase 6): `generateImage`, `transcribe` and `generateSpeech` are stable (`experimental_*` names
+  are deprecated aliases); specs `ImageModelV4`, `TranscriptionModelV4`, `SpeechModelV4`; test doubles
+  `MockImageModelV4`, `MockTranscriptionModelV4`, `MockSpeechModelV4` from `ai/test`. Always pass model instances.
+  `toUIMessageStream`'s own `onEnd` saves the chunks it produced itself, so a transform placed after it never reaches
+  the saved message: wrap it as `createUIMessageStream({ originalMessages, generateId, onEnd, execute: ({ writer }) =>
+  writer.merge(ui.pipeThrough(transform)) })`. Generated files are stored in `files` before they are streamed; no
+  `data:` URL is ever saved in `messages`.
+- **Plugin API 1.1.0** (Phase 6, additive): `ProviderDefinition.createImageModel?`, `imageParams?`,
+  `createTranscriptionModel?`, `createSpeechModel?`, `transcriptionOptions?`; `PluginContext.images.generate`. The
+  template mirror `apps/server/src/plugins/templates/sdk-types.ts` must match the SDK.
 - **@ai-sdk/vue 4**: use the `useChat()` composable (the `Chat` class is deprecated); `DefaultChatTransport` is
   imported from `ai`.
 - **MCP**: `createMCPClient` from `@ai-sdk/mcp`; stdio transport from `@ai-sdk/mcp/mcp-stdio`.
@@ -127,8 +137,8 @@ data/                                          runtime data (gitignored)
 `HF_PASSWORD`, `HF_MASTER_KEY`, `HF_MOCK_PROVIDER`, `HF_SAFE_MODE`, `HF_PLUGIN_WATCH`, `HF_OFFLINE`, `HF_INSECURE`,
 `HF_TRUST_PROXY` (trusted reverse proxies, ADR-026), `HF_API_TARGET` (web dev proxy target), plus provider key
 fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). Test-only: `HF_LIVE`, `HF_LIVE_PROVIDERS`,
-`HF_LIVE_MAX_COST_USD`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`. See `.env.example` and `docs/DECISIONS.md`
-(Contract seed).
+`HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`. See `.env.example` and
+`docs/DECISIONS.md` (Contract seed).
 
 **Never run `pnpm test:live` unless your task prompt says so** — it makes paid provider calls with real keys.
 
@@ -149,6 +159,10 @@ server, use your slot `k` from the task prompt: `HF_PORT=879k HF_DATA_DIR=.tmp/<
   Added in Phase 5 (after Gate P5-0b): `apps/web/app/utils/testids.ts` (a new test id is a CCR), the new
   `services/{data,shares}/types.ts`, `layouts/share.vue` and the ui store members `shareChatId` / `openShare` /
   `closeShare` (see `docs/phases/phase-5-v1-1.md` "FREEZE in Phase 5").
+  Added in Phase 6 (after Gate P6-0b): `services/{images,audio}/types.ts`, the props of the P6-0b stub components
+  (`ImageGallery`, `GeneratingImages`, `ImageOptionsMenu`, `MicButton`, `RecordingIndicator`, `ReadAloudButton`,
+  `MediaSettings`, `ImageSettings`, `VoiceSettings`) and the signatures of `useImageOptions`, `useVoiceInput`,
+  `useSpeechPlayer` (see `docs/phases/phase-6-v1-2.md` "FREEZE in Phase 6").
 - **CCR (contract change request)**: if a frozen contract blocks you, write a local adapter inside your owned
   paths, keep working, and add a CCR to your report: file, current shape, proposed shape, reason.
 - **DEPENDENCY REQUEST**: never install packages. Use existing dependencies or Node built-ins; if something is truly

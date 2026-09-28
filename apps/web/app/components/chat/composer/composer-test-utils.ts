@@ -20,7 +20,7 @@ export const haiku = catalogModel({
   id: 'claude-haiku-5',
   name: 'Claude Haiku 5',
   favorite: true,
-  capabilities: { tools: true, vision: false, pdf: false, reasoning: false, structuredOutput: true },
+  capabilities: { tools: true, vision: false, pdf: false, reasoning: false, structuredOutput: true, imageOutput: false },
 })
 /** No tools. */
 export const llama = catalogModel({
@@ -28,7 +28,7 @@ export const llama = catalogModel({
   id: 'llama3:8b',
   name: 'Llama 3 8B',
   contextWindow: 8192,
-  capabilities: { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false },
+  capabilities: { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false },
 })
 export const hiddenModel = catalogModel({ id: 'claude-embed', name: 'Claude Embed', hidden: true })
 

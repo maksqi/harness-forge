@@ -107,7 +107,7 @@ export function catalogModel(overrides: Partial<CatalogModel> = {}): CatalogMode
     kind: 'chat',
     contextWindow: 200_000,
     maxOutputTokens: 64_000,
-    capabilities: { tools: true, vision: true, pdf: false, reasoning: true, structuredOutput: true },
+    capabilities: { tools: true, vision: true, pdf: false, reasoning: true, structuredOutput: true, imageOutput: false },
     reasoningEfforts: [],
     cost: null,
     favorite: false,

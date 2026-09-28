@@ -98,8 +98,11 @@ export type ValidationIssue = z.infer<typeof validationIssueSchema>
 export const validationErrorDetailsSchema = z.object({ issues: z.array(validationIssueSchema) })
 export type ValidationErrorDetails = z.infer<typeof validationErrorDetailsSchema>
 
-/** `busy`: another bulk import or delete-all is running (ADR-024). */
-export const conflictReasonSchema = z.enum(['run-active', 'exists', 'stale', 'disabled', 'env-password', 'insecure-bind', 'busy'])
+/**
+ * `busy`: another bulk import or delete-all is running (ADR-024); `only-version`: a message without another version
+ * cannot be deleted (ADR-030).
+ */
+export const conflictReasonSchema = z.enum(['run-active', 'exists', 'stale', 'disabled', 'env-password', 'insecure-bind', 'busy', 'only-version'])
 export type ConflictReason = z.infer<typeof conflictReasonSchema>
 
 export const conflictDetailsSchema = z.object({ reason: conflictReasonSchema, chatId: z.string().optional() })

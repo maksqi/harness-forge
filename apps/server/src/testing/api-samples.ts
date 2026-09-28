@@ -13,6 +13,23 @@ export const SAMPLE_SHARE_ID = 'shr_sample0000000001'
 /** The share id suffix + 22 base64url characters (the shape of a share token; its MAC is not valid). */
 export const SAMPLE_SHARE_TOKEN = 'sample0000000001AbCdEfGhIjKlMnOpQrSt_-'
 
+/** Bytes of a hex string (spaces ignored). */
+function hexBytes(hex: string): number[] {
+  return (hex.replace(/\s+/g, '').match(/../g) ?? []).map(byte => Number.parseInt(byte, 16))
+}
+
+/**
+ * The start of a WebM recording (ADR-029): an EBML header with DocType `webm`, a Segment of unknown size and a Void
+ * element, 114 bytes in total (over the 64-byte "empty recording" floor): the upload of the `audio.transcribe` sample.
+ */
+export const SAMPLE_WEBM_BYTES = new Uint8Array([
+  // EBML header (31 bytes): EBML and DocType versions, DocType "webm"
+  ...hexBytes('1A45DFA3 9F 42868101 42F78101 42F28104 42F38108 4282 84 7765626D 42878104 42858102'),
+  // Segment of unknown size, then a Void element of 64 zero bytes
+  ...hexBytes('18538067 01FFFFFFFFFFFFFF EC C0'),
+  ...new Uint8Array(64),
+])
+
 /** A chat JSON export (version 2) with one user message: the upload of the `data.import` sample. */
 export const SAMPLE_CHAT_EXPORT = {
   format: 'harness-forge.chat',
@@ -98,6 +115,7 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
   'chats.remove': { params: { id: SAMPLE_CHAT_ID } },
   'chats.export': { params: { id: SAMPLE_CHAT_ID }, query: { format: 'md' } },
   'chats.switchBranch': { params: { id: SAMPLE_CHAT_ID }, body: { messageId: SAMPLE_MESSAGE_ID } },
+  'chats.deleteMessage': { params: { id: SAMPLE_CHAT_ID, messageId: SAMPLE_MESSAGE_ID } },
 
   'chat.send': {
     body: {
@@ -171,6 +189,17 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
     },
   },
   'data.deleteAll': { body: { confirm: 'DELETE', files: false, usage: false } },
+
+  'audio.transcribe': {
+    form: () => {
+      const form = new FormData()
+      form.append('file', new File([SAMPLE_WEBM_BYTES], 'dictation.webm', { type: 'audio/webm' }))
+      form.append('modelRef', 'mock:transcribe')
+      form.append('language', 'en')
+      return form
+    },
+  },
+  'audio.speech': { body: { text: 'Hello world', modelRef: 'mock:speech' } },
 
   'shares.list': { query: { chatId: SAMPLE_CHAT_ID } },
   'shares.create': { body: { chatId: SAMPLE_CHAT_ID, title: 'Sample share', options: { reasoning: true }, expiresAt: null } },

@@ -269,7 +269,9 @@ describe('sEC-D1 / SEC-D5: no secret in any answer', () => {
     for (const input of inputs) {
       const path = (apiUrl as (key: ApiRouteKey, input?: unknown, baseUrl?: string) => string)(key, input, '/api')
       const response = await call('GET', path)
-      // A route that is still a Phase 5 stub answers 501 from its own handler; every implemented route answers < 500.
+      // A route that is still a stub (a contract wave mounts new routes as 501 stubs) answers 501 from its own handler;
+      // every implemented route answers < 500. Only GET routes are swept: the Phase 6 routes (audio, version delete)
+      // are writes, covered by their own route tests.
       if (stubRouteKeys().has(key))
         expect(response.status, path).toBe(501)
       else

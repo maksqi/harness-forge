@@ -10,6 +10,12 @@ desktop app, and it starts in dark mode.
 > **Status:** v1.1. On top of v1 it adds conversation branching, backup / restore / delete-all in Settings -> Data,
 > read-only share links, trusted reverse proxies (`HF_TRUST_PROXY`) and an opt-in live provider suite
 > (`pnpm test:live`). Progress lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+>
+> **In progress (v1.2):** image generation with your own providers (image models in the composer, chat models that
+> return images, and a `generate_image` tool), voice (dictation into the composer and reading replies aloud, both
+> opt-in in Settings -> Media), and better message versions (the last shown version is remembered, versions can be
+> deleted, and other open tabs follow a switch). Plan and status:
+> [`docs/phases/phase-6-v1-2.md`](docs/phases/phase-6-v1-2.md). The feature list below is updated when v1.2 ships.
 
 ![Chat with a code block, a reasoning row and a tool approval card (dark theme)](docs/assets/screenshots/chat-dark.png)
 
@@ -153,7 +159,7 @@ Every variable is optional. [`.env.example`](.env.example) lists them with comme
 A key saved in Settings wins over its environment variable; the key dialog shows which source is active ("From env").
 Flags accept `1` / `true` / `yes` / `on` and `0` / `false` / `no` / `off`; an empty value counts as unset, and any
 other invalid value stops the start with a message naming the variable. Test-only variables (`HF_LIVE_PROVIDERS`,
-`HF_LIVE_MAX_COST_USD`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`, `E2E_BASE_URL`) are described in
+`HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`, `E2E_BASE_URL`) are described in
 [`docs/PROVIDERS.md`](docs/PROVIDERS.md#12-live-provider-suite), [`e2e/README.md`](e2e/README.md) and
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
@@ -218,6 +224,10 @@ harness-forge is built for **one user** on their own machine or server.
   stored and never logged; revoking the link or changing the master key ends it, and every response carries
   `X-Robots-Tag: noindex, nofollow`.
 - **Backups.** The Settings -> Data zip never contains API keys, the password, plugins or MCP servers.
+- **Microphone (v1.2).** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
+  `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled; use
+  the TLS reverse proxy below. Recordings and the text that is read aloud go only to the provider you pick in
+  Settings -> Media and are never stored or logged.
 - **Secrets.** Provider keys and plugin secrets are encrypted with AES-256-GCM under a master key from
   `HF_MASTER_KEY` or `data/secret.key`. The API never returns a secret, and logs are redacted.
 - **Plugins.** Code plugins and stdio MCP servers run **with the full rights of the server process**. They load only
@@ -234,7 +244,8 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#10-security-model).
 Terminate TLS at a proxy, keep harness-forge on `127.0.0.1` (or on an internal network), and tell it which proxy to
 trust with `HF_TRUST_PROXY`. The proxy must pass the original `Host` header (harness-forge never reads
 `X-Forwarded-Host`, which a DNS-rebinding page could forge), set `X-Forwarded-For` and `X-Forwarded-Proto`, accept
-request bodies of at least 256 MB (backup imports) and stream responses without buffering.
+request bodies of at least 256 MB (backup imports) and stream responses without buffering. HTTPS through the proxy is
+also what enables the microphone for dictation (v1.2) on other machines.
 
 `HF_TRUST_PROXY` takes `loopback`, `private`, exact IP addresses and CIDR ranges, comma separated (for example
 `HF_TRUST_PROXY=10.0.0.2,192.168.1.0/24`). Only a request whose TCP peer is in that list may set `X-Forwarded-For` and
@@ -320,7 +331,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | [`docs/UI.md`](docs/UI.md) | layout, design tokens, components, routes, shortcuts, test ids |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | phases, tasks and progress |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture decision records and the contract seed |
-| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md) |
+| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md) (in progress) |
 | [`AGENT.md`](AGENT.md) | rules for AI agents working on this repository |
 
 ## Development

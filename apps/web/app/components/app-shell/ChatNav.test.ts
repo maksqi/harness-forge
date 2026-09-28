@@ -266,7 +266,7 @@ describe('chatNav: rows', () => {
   it('updates a row live when the store applies chat.updated (e.g. the generated title)', async () => {
     setup()
     await mountNav([chatSummary({ id: chatId(1), title: null, titleSource: null, updatedAt: NOW - 1 })])
-    useChatsStore().applyEvent(createServerEvent('chat.updated', chatSummary({ id: chatId(1), title: 'Generated title', updatedAt: NOW })))
+    useChatsStore().applyEvent(createServerEvent('chat.updated', { ...chatSummary({ id: chatId(1), title: 'Generated title', updatedAt: NOW }), activeLeafId: null }))
     await settle()
     expect(row(chatId(1)).textContent?.trim()).toBe('Generated title')
   })

@@ -1,5 +1,5 @@
 /* eslint-disable -- copy of the harness-forge.d.ts that the code plugin templates write */
-// harness-forge plugin API 1.0.0: types for your editor.
+// harness-forge plugin API 1.1.0: types for your editor.
 //
 // This file lets "// @ts-check" with JSDoc types (index.mjs) and "import type" (index.ts) resolve
 // "@harness-forge/plugin-sdk" without installing anything. The host never loads it and it is not part of the trust
@@ -30,6 +30,10 @@ declare module '@harness-forge/plugin-sdk' {
       | 'provider_not_configured' | 'auth_invalid' | 'rate_limited' | 'model_not_found' | 'context_overflow'
       | 'provider_unreachable' | 'provider_error' | 'plugin_error' | 'internal_error' | 'not_implemented'
   export type HarnessErrorAction = 'configure-provider' | 'refresh-models' | 'login' | 'retry'
+  /** Kind of a model; only 'chat' (and 'image' with createImageModel) models appear in the chat picker. */
+  export type ModelKind = 'chat' | 'embedding' | 'image' | 'audio' | 'transcription' | 'speech' | 'other'
+  /** Aspect ratios of generated images. */
+  export type ImageAspectRatio = '1:1' | '3:2' | '2:3' | '4:3' | '3:4' | '16:9' | '9:16'
 
   // ---------- library values (ctx.ai) ----------
 
@@ -37,6 +41,12 @@ declare module '@harness-forge/plugin-sdk' {
   export type LibraryValue = any
   /** An AI SDK model instance, e.g. ctx.ai.createOpenAICompatible({ ... }).chatModel(modelId). */
   export type LanguageModel = LibraryValue
+  /** An AI SDK image model instance, e.g. ctx.ai.createOpenAI({ ... }).image(modelId). */
+  export type ImageModel = LibraryValue
+  /** An AI SDK transcription model instance, e.g. ctx.ai.createOpenAI({ ... }).transcription(modelId). */
+  export type TranscriptionModel = LibraryValue
+  /** An AI SDK speech model instance, e.g. ctx.ai.createOpenAI({ ... }).speech(modelId). */
+  export type SpeechModel = LibraryValue
   /** An AI SDK model message. */
   export type ModelMessage = LibraryValue
   /** An AI SDK UI message. */
@@ -80,14 +90,24 @@ declare module '@harness-forge/plugin-sdk' {
     /** Model id sent to the API (may contain ":" and "/"). */
     id: string
     name?: string
-    /** Default 'chat'; other kinds are hidden from the model picker. */
-    kind?: 'chat' | 'embedding' | 'image' | 'audio' | 'other'
+    /** Default 'chat'; other kinds are hidden from the chat model picker. */
+    kind?: ModelKind
     contextWindow?: number
     maxOutputTokens?: number
-    capabilities?: { tools?: boolean, vision?: boolean, pdf?: boolean, reasoning?: boolean, structuredOutput?: boolean }
+    capabilities?: {
+      tools?: boolean
+      vision?: boolean
+      pdf?: boolean
+      reasoning?: boolean
+      structuredOutput?: boolean
+      /** A chat model that can return images in its reply. */
+      imageOutput?: boolean
+    }
     reasoningEfforts?: ReasoningEffort[]
     /** USD per 1M tokens. */
     cost?: { input?: number, output?: number, cacheRead?: number, cacheWrite?: number }
+    /** Speech models: voice names to suggest (unique, at most 100). */
+    voices?: string[]
   }
 
   export interface CredentialField {
@@ -191,6 +211,32 @@ declare module '@harness-forge/plugin-sdk' {
     maxOutputTokens?: number
   }
 
+  /** What an image request asks for (input of imageParams). */
+  export interface ImageParamsRequest {
+    /** Images to generate, 1..4. */
+    n: number
+    /** Omitted: the provider default. */
+    aspectRatio?: ImageAspectRatio
+    /** Input images sent with the prompt (an edit); 0 for a new image. */
+    inputs: number
+  }
+
+  /** Call additions returned by imageParams. */
+  export interface ImageParamsResult {
+    /** Image models: the image size, e.g. '1536x1024'. */
+    size?: `${number}x${number}`
+    /** Image models: the aspect ratio, e.g. '16:9'. */
+    aspectRatio?: `${number}:${number}`
+    /** Merged into the provider options of the call (also for chat models with image output). */
+    providerOptions?: ProviderOptions
+  }
+
+  /** Hints of a transcription request (input of transcriptionOptions). */
+  export interface TranscriptionHints {
+    /** ISO 639 code of the spoken language; absent: detect automatically. */
+    language?: string
+  }
+
   export interface ProviderDefinition {
     /** The plugin id, or the plugin id + "-" + a suffix. Model refs look like "<id>:<model id>". */
     id: string
@@ -215,6 +261,16 @@ declare module '@harness-forge/plugin-sdk' {
     reasoning?(effort: ReasoningEffort, model: ModelInfo): ReasoningParams | undefined
     /** Maps an error of this provider; undefined falls back to the default mapping. */
     mapError?(err: unknown): HarnessErrorInit | undefined
+    /** Image models (kind 'image'): an image model instance; no network I/O (5 s). */
+    createImageModel?(modelId: string, rt: ProviderRuntime): ImageModel
+    /** Maps an image request to call options (synchronous). */
+    imageParams?(request: ImageParamsRequest, model: ModelInfo): ImageParamsResult | undefined
+    /** Transcription models (kind 'transcription'): a transcription model instance (5 s). */
+    createTranscriptionModel?(modelId: string, rt: ProviderRuntime): TranscriptionModel
+    /** Speech models (kind 'speech'): a speech model instance (5 s). */
+    createSpeechModel?(modelId: string, rt: ProviderRuntime): SpeechModel
+    /** Turns transcription hints into provider options (synchronous). */
+    transcriptionOptions?(hints: TranscriptionHints): ProviderOptions | undefined
   }
 
   // ---------- tools ----------
@@ -326,6 +382,44 @@ declare module '@harness-forge/plugin-sdk' {
     list(prefix?: string): Promise<string[]>
   }
 
+  /** Options of ctx.images.generate. */
+  export interface ImageGenerateOptions {
+    /** 1..32000 characters. */
+    prompt: string
+    /** An image model; default: the image model chosen in Settings. */
+    modelRef?: string
+    /** Images to generate, 1..4 (default 1). */
+    n?: number
+    aspectRatio?: ImageAspectRatio
+    /** The chat the images are made for. */
+    chatId?: string
+    signal?: AbortSignal
+  }
+
+  /** One image generated by ctx.images.generate, stored as a file. */
+  export interface GeneratedImageFile {
+    fileId: string
+    /** '/api/files/<fileId>'. */
+    url: string
+    mediaType: string
+    name: string
+    /** Bytes. */
+    size: number
+  }
+
+  export interface ImageGenerateResult {
+    /** The image model used. */
+    modelRef: string
+    images: GeneratedImageFile[]
+    costUsd?: number
+    revisedPrompt?: string
+  }
+
+  export interface PluginImagesApi {
+    /** Generates images with an image model, stores them as files and records usage. */
+    generate(options: ImageGenerateOptions): Promise<ImageGenerateResult>
+  }
+
   export interface PluginContext {
     plugin: {
       id: string
@@ -374,6 +468,8 @@ declare module '@harness-forge/plugin-sdk' {
     ai: HostAi
     /** Global fetch combined with ctx.signal and a plugin User-Agent (no timeout). */
     fetch: typeof globalThis.fetch
+    /** Image generation with the user's image models (stored as files). */
+    images: PluginImagesApi
   }
 
   /** The default export of the entry module. */

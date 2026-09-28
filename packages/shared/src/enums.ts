@@ -46,7 +46,12 @@ export type ReasoningStyle = z.infer<typeof reasoningStyleSchema>
 export const credentialFieldTypeSchema = z.enum(['secret', 'text', 'url', 'select'])
 export type CredentialFieldType = z.infer<typeof credentialFieldTypeSchema>
 
-export const modelKindSchema = z.enum(['chat', 'embedding', 'image', 'audio', 'other'])
+/**
+ * Kind of a model. Only `chat` models (and `image` models of providers that can generate images, ADR-028) are shown in
+ * the chat model picker; `transcription` (speech to text) and `speech` (text to speech) models serve dictation and
+ * read-aloud (Phase 6, ADR-029); `audio` covers other audio models.
+ */
+export const modelKindSchema = z.enum(['chat', 'embedding', 'image', 'audio', 'transcription', 'speech', 'other'])
 export type ModelKind = z.infer<typeof modelKindSchema>
 
 /** Where a catalog entry comes from. */

@@ -328,6 +328,7 @@ export function createFakePluginHost(deps: AppDeps): FakePluginHost {
       },
       ai: { z, tool, jsonSchema, generateText } as unknown as HostAi,
       fetch: globalThis.fetch,
+      images: { generate: rejectsNotImplemented('ctx.images.generate') },
     }
   }
 

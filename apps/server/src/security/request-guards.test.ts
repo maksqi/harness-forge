@@ -232,7 +232,8 @@ describe('sEC-B2: GET and HEAD never change stored state', () => {
       for (const method of ['GET', 'HEAD']) {
         const response = await t.request(path, { method })
         await drain(response)
-        // A route that is still a Phase 5 stub answers 501 from its own handler (and writes nothing).
+        // A route that is still a stub (a contract wave mounts new routes as 501 stubs) answers 501 from its own
+        // handler and writes nothing.
         if (stubRouteKeys().has(key))
           expect(response.status, `${method} ${path}`).toBe(501)
         else

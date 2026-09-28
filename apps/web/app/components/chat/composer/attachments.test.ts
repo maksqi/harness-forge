@@ -39,7 +39,7 @@ describe('capability warnings', () => {
   const pdfs = [{ mime: 'application/pdf' }]
 
   it('warns when the model cannot see images or read PDFs', () => {
-    const haiku = catalogModel({ id: 'claude-haiku-5', name: 'Claude Haiku 5', capabilities: { tools: true, vision: false, pdf: false, reasoning: false, structuredOutput: true } })
+    const haiku = catalogModel({ id: 'claude-haiku-5', name: 'Claude Haiku 5', capabilities: { tools: true, vision: false, pdf: false, reasoning: false, structuredOutput: true, imageOutput: false } })
     expect(capabilityWarnings([...images, ...pdfs], haiku)).toEqual([
       'Claude Haiku 5 can\'t see images. Remove them or choose another model.',
       'Claude Haiku 5 can\'t read PDFs. Remove them or choose another model.',
@@ -47,10 +47,10 @@ describe('capability warnings', () => {
   })
 
   it('stays quiet for capable or unknown models and for text files', () => {
-    const sonnet = catalogModel({ capabilities: { tools: true, vision: true, pdf: true, reasoning: true, structuredOutput: true } })
+    const sonnet = catalogModel({ capabilities: { tools: true, vision: true, pdf: true, reasoning: true, structuredOutput: true, imageOutput: false } })
     expect(capabilityWarnings([...images, ...pdfs], sonnet)).toEqual([])
     expect(capabilityWarnings(images, undefined)).toEqual([])
-    const textOnly = catalogModel({ capabilities: { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false } })
+    const textOnly = catalogModel({ capabilities: { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false } })
     expect(capabilityWarnings([{ mime: 'text/plain' }], textOnly)).toEqual([])
   })
 })

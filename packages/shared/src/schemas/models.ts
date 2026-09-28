@@ -12,6 +12,11 @@ export const modelCapabilitiesSchema = z.strictObject({
   pdf: z.boolean(),
   reasoning: z.boolean(),
   structuredOutput: z.boolean(),
+  /**
+   * A chat model that can return images in its reply (`file` parts, e.g. Gemini `*-image`); its provider options come
+   * from `ProviderDefinition.imageParams` (ADR-028). Dedicated image models are `kind: 'image'` instead.
+   */
+  imageOutput: z.boolean(),
 })
 export type ModelCapabilities = z.infer<typeof modelCapabilitiesSchema>
 
@@ -54,6 +59,8 @@ export const catalogModelSchema = z.object({
   custom: z.boolean(),
   source: modelSourceSchema,
   lastUsedAt: timestampSchema.nullable(),
+  /** `speech` models: voice names suggested by the provider (`ModelInfo.voices`, ADR-029); absent = unknown. */
+  voices: z.array(z.string().min(1).max(64)).max(100).optional(),
 })
 export type CatalogModel = z.infer<typeof catalogModelSchema>
 

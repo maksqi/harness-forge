@@ -34,6 +34,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { HarnessError, mcpServerDeclSchema, mcpServerDeclSettingsKeys } from '@harness-forge/shared'
 import { generateText, jsonSchema, tool } from 'ai'
 import { z } from 'zod'
+import { notImplementedError } from '../not-implemented.ts'
 import { DisposableStore, toDisposable } from '../registry/disposable.ts'
 
 /** The host's copies of the libraries a code plugin needs (`ctx.ai`, PLUGINS.md 8). */
@@ -324,6 +325,13 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
     }),
     ai: HOST_AI,
     fetch: pluginFetch,
+    // Plugin API 1.1.0 (ADR-028): a Phase 6 stub until the image service backs it (W6.4).
+    images: Object.freeze({
+      generate: async () => {
+        assertLive()
+        throw notImplementedError('ctx.images.generate')
+      },
+    }),
   }
 
   return {

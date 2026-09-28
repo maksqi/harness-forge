@@ -148,6 +148,8 @@ export function buildCatalogModel(entry: CatalogEntryInput): CatalogModel {
     pdf: info.capabilities?.pdf ?? false,
     reasoning,
     structuredOutput: info.capabilities?.structuredOutput ?? false,
+    // Image output of chat models (ADR-028) is not derived from the layers yet (P6-A, W6.2).
+    imageOutput: false,
   }
   const prefs = entry.prefs
   const alias = prefs?.alias ?? null

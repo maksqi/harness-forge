@@ -56,6 +56,26 @@ export const LIMITS = {
   shareToolValueChars: 16_384,
   /** Share links of one chat. */
   sharesPerChatMax: 20,
+
+  // Image generation (ADR-028) and voice (ADR-029).
+  /** Images of one image turn and of one `generate_image` call (`ImageOptions.n`). */
+  imagesPerTurnMax: 4,
+  /** Input images of one image turn: the attached images, or the generated images of the previous reply. */
+  imageInputsMax: 4,
+  /** Bytes of one generated image stored as a file (= `uploadBytes`, so a backup restores every generated image). */
+  generatedImageBytes: 20_971_520,
+  /** Characters of an image prompt (the text of an image turn, the `generate_image` prompt). */
+  imagePromptMaxChars: 32_000,
+  /** `POST /audio/transcriptions`: bytes of the uploaded recording. */
+  audioUploadBytes: 26_214_400,
+  /** `POST /audio/speech`: characters of the text read aloud by one request. */
+  speechTextMaxChars: 4096,
+  /** Longest dictation the web records, in seconds (the server does not parse durations). */
+  transcriptionMaxSeconds: 600,
+  /** Read aloud: maximum characters of the first chunk of a reply (a fast start). */
+  speechFirstChunkChars: 300,
+  /** Read aloud: maximum characters of every later chunk. */
+  speechChunkChars: 1500,
 } as const
 
 /** MIME families accepted by `POST /files` (the server also checks the content). */

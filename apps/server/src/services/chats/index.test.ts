@@ -243,7 +243,8 @@ describe('switchBranch', () => {
     expect(switched.updatedAt).toBe(1000)
     expect((await service.find(chatId(1)))?.activeLeafId).toBe(messageId(4))
     const updated = events.ofType('chat.updated')
-    expect(updated.map(event => event.data)).toEqual([expect.objectContaining({ id: chatId(1), updatedAt: 1000 })])
+    // The event carries the new active leaf (ADR-030), so other tabs follow the switch.
+    expect(updated.map(event => event.data)).toEqual([expect.objectContaining({ id: chatId(1), updatedAt: 1000, activeLeafId: messageId(4) })])
     expect(await service.get(chatId(1))).toEqual(switched)
 
     // Any message of the chat: the middle of a path, the current version, a leaf.
@@ -543,6 +544,9 @@ describe('pipeline operations', () => {
     expect((await service.touch(id, { at: 10 })).updatedAt).toBe(5000)
     expect((await service.find(id))!.settings).toEqual({ toolMode: 'off' })
     expect(events.ofType('chat.updated')).toHaveLength(2)
+    // Every `chat.updated` carries the row's active leaf (null for a chat without messages); the result does not.
+    expect(events.ofType('chat.updated').map(event => event.data.activeLeafId)).toEqual([null, null])
+    expect(touched).not.toHaveProperty('activeLeafId')
     expect((await rejection(service.touch(chatId(2)))).code).toBe('not_found')
   })
 

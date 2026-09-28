@@ -83,6 +83,11 @@ function fakeContext() {
     } },
     ai: { z, tool, jsonSchema, generateText, createOpenAICompatible, createAnthropic, createOpenAI, createGoogleGenerativeAI },
     fetch: globalThis.fetch,
+    images: {
+      generate: async () => {
+        throw new Error('not used')
+      },
+    },
   }
   return { ctx, providers, tools, commands, hooks, logs }
 }
@@ -122,6 +127,24 @@ describe('sample plugin', () => {
     expect(provider.reasoning?.('max', info)).toEqual({ reasoning: 'xhigh' })
     expect(provider.mapError?.(Object.assign(new Error('Payment required'), { statusCode: 402 }))).toMatchObject({ code: 'rate_limited' })
     expect(provider.mapError?.(new Error('other'))).toBeUndefined()
+  })
+
+  it('creates image model instances and maps image and transcription requests (plugin API 1.1.0)', async () => {
+    const { ctx, providers } = fakeContext()
+    await samplePlugin.setup(ctx)
+    const provider = providers[0]!
+    const image = provider.createImageModel?.('sample-image', { credentials: { apiKey: 'k' }, fetch: globalThis.fetch })
+    expect(image?.modelId).toBe('sample-image')
+    expect(image?.specificationVersion).toBe('v4')
+    const info = modelInfoSchema.parse(provider.seedModels?.find(model => model.kind === 'image'))
+    expect(provider.imageParams?.({ n: 1, inputs: 0 }, info)).toBeUndefined()
+    expect(provider.imageParams?.({ n: 2, aspectRatio: '1:1', inputs: 0 }, info)).toEqual({ size: '1024x1024' })
+    expect(provider.imageParams?.({ n: 1, aspectRatio: '16:9', inputs: 1 }, info)).toEqual({ size: '1536x1024' })
+    expect(provider.imageParams?.({ n: 1, aspectRatio: '2:3', inputs: 0 }, info)).toEqual({ size: '1024x1536' })
+    expect(provider.transcriptionOptions?.({})).toBeUndefined()
+    expect(provider.transcriptionOptions?.({ language: 'de' })).toEqual({ 'sample-kit': { language: 'de' } })
+    expect(provider.createTranscriptionModel).toBeUndefined()
+    expect(provider.createSpeechModel).toBeUndefined()
   })
 
   it('runs its tools, commands and hooks', async () => {

@@ -67,7 +67,7 @@ interface FreshCase {
   /** Prepares the state (services called directly, so no fresh auth is involved). */
   prepare?: (a: InstallTestApp) => Promise<void>
   attempt: Attempt
-  /** Status of the fresh attempt (a route that is still a Phase 5 stub answers 501 from its own handler instead). */
+  /** Status of the fresh attempt (a route that is still a stub answers 501 from its own handler instead). */
   ok: number
   /** Proves the refused attempt changed nothing. */
   unchanged: (a: InstallTestApp) => Promise<void>

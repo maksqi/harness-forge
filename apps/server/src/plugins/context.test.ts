@@ -196,6 +196,15 @@ describe('plugin context', () => {
     expect(other.resolved).toEqual(['openai:gpt-x'])
   })
 
+  it('exposes ctx.images (plugin API 1.1.0) as a not_implemented stub until the image service lands', async () => {
+    const { runtime } = await setup()
+    const { ctx } = runtime
+    expect(Object.isFrozen(ctx.images)).toBe(true)
+    await expect(ctx.images.generate({ prompt: 'A red fox' })).rejects.toMatchObject({ code: 'not_implemented' })
+    runtime.disposeContributions()
+    await expect(ctx.images.generate({ prompt: 'A red fox' })).rejects.toMatchObject({ code: 'plugin_error' })
+  })
+
   it('warns about undeclared hooks and stdio process permissions', async () => {
     const { runtime, logs } = await setup({ ...BASE_MANIFEST, permissions: [] })
     runtime.ctx.hooks.on('chat.params', () => {})

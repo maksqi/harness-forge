@@ -23,7 +23,7 @@ flowchart LR
     Reg["registry/<br/>providers, models, tools, MCP, commands, hooks"]
     Cat["catalog/<br/>model catalog"]
     MCPM["mcp/ manager"]
-    Svc["services/<br/>settings, secrets, chats, files, events, data, shares"]
+    Svc["services/<br/>settings, secrets, chats, files, events, data, shares, images, audio"]
     DB[("SQLite WAL<br/>data/harness.db")]
   end
   subgraph DataDir["HF_DATA_DIR (data/)"]
@@ -48,6 +48,7 @@ flowchart LR
   Host -- "ctx.*.register()" --> Reg
   Reg --> MCPM
   Chat -- "HTTPS (provider instances)" --> LLM
+  Svc -- "generateImage, transcribe, generateSpeech" --> LLM
   Cat -- "live /models listing" --> LLM
   Cat -- "weekly refresh unless HF_OFFLINE=1" --> MD
   MCPM --> MCPS
@@ -74,6 +75,9 @@ Key properties:
   (section 6.8).
 - **Small public surface**: without a session only health, login, icons, the SPA files and the read-only share
   routes answer (section 10.1); share links serve sanitized snapshots, never live data (section 6.10).
+- **Media through the user's own providers** (Phase 6): generated images are stored as files before they are streamed
+  or saved, so no `data:` URL ever reaches the `messages` table (section 6.11); dictation and read-aloud pass audio and
+  text through the server to the chosen provider and store nothing (sections 6.12, 10.8).
 
 ## 2. Packages
 
@@ -92,27 +96,29 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 
 | Path | Responsibility |
 |---|---|
-| `main.ts` | Process entry: runs the boot sequence (section 5), installs signal handlers for graceful shutdown. |
+| `main.ts` | Process entry: installs the signal handlers for graceful shutdown (before the boot starts, Phase 6 hotfix), then runs the boot sequence (section 5). |
 | `env.ts` | Loads `<repo root>/.env`, parses and validates `HF_*` environment variables (zod) into a frozen `Env` object; resolves `HF_DATA_DIR` and `HF_WEB_DIR`; bind-safety check. |
 | `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5). |
 | `app.ts` | `createApp(deps)` app factory: mounts middleware and every route module under `/api`; used by `main.ts` and `createTestApp()`. |
 | `paths.ts`, `logger.ts` | Package-relative locations (server package root, migrations, bundled assets, the SPA build, installed package versions); JSON-lines logger with redaction. |
 | `http/middleware/` | Request id, structured access log (share tokens masked; it also runs the untrusted-proxy hint of `proxy-warning.ts`), secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`; `request-info.ts` resolves the client address and scheme, trusting forwarded headers only from `HF_TRUST_PROXY` peers (section 10.6). |
-| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `shares`); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes. |
+| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `audio`, `shares`); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes; `audio.ts` (Phase 6) parses the multipart recording of `POST /audio/transcriptions` itself and answers `POST /audio/speech` with audio bytes (section 6.12). |
 | `http/static.ts` | Production SPA serving from `HF_WEB_DIR` (default `apps/web/.output/public`) with `200.html` fallback for client routes. |
-| `security/` | `keyring.ts` (master key + HKDF subkeys), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). |
+| `security/` | `keyring.ts` (master key + HKDF subkeys), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers; Phase 6: `microphone=(self)` and the SPA's `media-src`, section 10.2), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). |
 | `db/` | Drizzle schema (`schema.ts`), libsql client, `migrate()` at boot, pragmas (WAL, foreign keys, busy timeout), transaction helper. |
 | `services/settings/` | Typed global settings (defaults, validation, cache) over the `settings` table. |
 | `services/secrets/` | Encrypted secret store (AES-256-GCM) over the `secrets` table: `get/set/delete/list(scope)`, masked hints, env fallback lookup. |
-| `services/chats/` | Chat + message persistence, the message tree (`tree.ts`: active path, versions, latest leaf; section 6.8), version switching, search, cursor pagination, export (md / json v2) and import (v1 / v2), usage rows, title updates, `allIds` / `importChat` / `removeAll` for bulk data. |
+| `services/chats/` | Chat + message persistence, the message tree (`tree.ts`: active path, versions, latest leaf, the remembered leaf under a message; section 6.8), version switching, deleting a version (Phase 6), search, cursor pagination, export (md / json v2) and import (v1 / v2), usage rows and totals, title updates, `allIds` / `importChat` / `removeAll` for bulk data. |
 | `services/data/` | Bulk data (ADR-024, section 6.9): summary, streamed zip export, import of a backup or a single chat, delete-all, the import / delete mutex. |
 | `services/shares/` | Share links (ADR-025, section 6.10): HMAC tokens, the allowlist sanitizer, snapshots, owner CRUD, the public view and file access, expiry, rate limits. |
-| `services/files/` | Content-addressed upload store (`data/files/<aa>/<sha256>`), MIME/size validation, `files` rows, read streams; for bulk data `importFile` (deduplicated by sha256, keeps the preferred id when it is free) and `purge` (every row and blob). |
+| `services/files/` | Content-addressed upload store (`data/files/<aa>/<sha256>`), MIME/size validation, `files` rows, read streams; for bulk data `importFile` (deduplicated by sha256, keeps the preferred id when it is free) and `purge` (every row and blob); `saveGenerated` (Phase 6) stores a generated raster image (magic bytes checked, 20 MiB cap, an identical file reused). |
+| `services/images/` | `ImageService` (Phase 6, ADR-028, section 6.11): `generate()` runs `generateImage` with the provider's `imageParams`, stores every image through `files.saveGenerated`, writes the usage row (`purpose: 'image'`) and records the provider outcome; used by image turns and by `ctx.images` (the `generate_image` tool). |
+| `services/audio/` | `AudioService` (Phase 6, ADR-029, section 6.12): `transcribe()` (allowlist + magic-byte sniffing in `sniff.ts`, `transcribe()` of the AI SDK) and `speak()` (`generateSpeech()`); usage rows `transcription` / `speech`; stores nothing. |
 | `services/events/` | In-process event bus + SSE fan-out for `/api/events` (section 6.7). |
 | `registry/` | Typed registries for providers, models, tools, MCP server declarations, commands and hooks; every registration returns a `Disposable` and is tagged with its owner plugin id. |
 | `plugins/host.ts` | Plugin host: discovery, load order, lifecycle state machine, enable/disable/reload, boot sentinel, safe mode. |
 | `plugins/loader.ts` | Reads + validates `plugin.json`, checks id/dir/engines/trust, imports the entry module (cache-busted URL). |
-| `plugins/context.ts` | Builds the per-plugin `PluginContext` (`ctx`): scoped logger, settings, secrets, storage, registries, hooks, `ai`, `fetch`, `signal`. |
+| `plugins/context.ts` | Builds the per-plugin `PluginContext` (`ctx`): scoped logger, settings, secrets, storage, registries, hooks, `ai`, `fetch`, `signal`, and `images` (plugin API 1.1.0: `images.generate` through `ImageService`). |
 | `plugins/guard.ts` | `guard(pluginId, fn, timeoutMs)`: timeouts, error capture into `plugin_error`, per-plugin log ring buffer, hook failure counters. |
 | `plugins/declarative.ts` | Adapter that turns declarative `contributes.providers` into `ProviderDefinition`s (OpenAI-chat, OpenAI-responses, Anthropic, Google formats). |
 | `plugins/compile.ts` | esbuild compile of `.ts` entries into one ESM file in `data/cache/plugins/<id>/` (SDK aliased to a shim), returns diagnostics. |
@@ -122,18 +128,18 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `plugins/drafts/` | Declarative plugins created and edited in the browser (provider wizard): draft validation, SVG icon sanitizing, credentials saved as provider credentials, temporary-provider draft test. |
 | `plugins/scaffold/` | Code plugins created from a template (`POST /plugins/scaffold`) and the traversal-safe files API: tree, read, atomic write, delete, build + reload, trust re-pinning of `created` plugins. |
 | `plugins/templates/` | Template sources (tool, provider, MCP bridge, command pack): a JSDoc-typed `index.mjs` or a TypeScript `index.ts`, the vendored API types `harness-forge.d.ts` and a README. |
-| `catalog/` | Model catalog: live listings with 24 h cache (`model_cache`), models.dev snapshot + weekly refresh, seeds, plugin models, custom ids, prefs, `classify()`, cost lookup. |
-| `providers/` | Model resolution: `modelRef` -> provider -> credentials (stored or env) -> `LanguageModel`; provider test; provider status; error mapping to `HarnessError`; the LobeHub icon service (`/api/icons/lobe`). |
-| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence. |
+| `catalog/` | Model catalog: live listings with 24 h cache (`model_cache`), models.dev snapshot + weekly refresh, seeds, plugin models, custom ids, prefs, `classify()` (model kinds incl. `image`, `transcription`, `speech`; `imageOutput`), cost lookup (section 9). |
+| `providers/` | Model resolution: `modelRef` -> provider -> credentials (stored or env) -> `LanguageModel` (`resolveModel`), and since Phase 6 image, transcription and speech models (`resolveImageModel`, `resolveTranscriptionModel`, `resolveSpeechModel`); provider test; provider status; error mapping to `HarnessError`; the LobeHub icon service (`/api/icons/lobe`). |
+| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`). |
 | `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect with backoff, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable; `{{settings.*}}` templating of plugin-declared servers; its own stdio transport (minimal environment, stderr lines in the owning plugin's log); the user-configured servers of the MCP panel (`mcp_servers`). |
 | `builtin-plugins/index.ts` | Static list of builtin plugin modules, loaded first and trusted. |
 | `builtin-plugins/core-providers/` | The 13 builtin providers (see PROVIDERS.md): definitions, seeds, reasoning mapping, error mapping. |
-| `builtin-plugins/core-tools/` | Builtin tools: `current_time` (policy `safe`) and `web_fetch` (policy `ask`, SSRF guard; setting "Allow localhost in web_fetch"). |
+| `builtin-plugins/core-tools/` | Builtin tools: `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard; setting "Allow localhost in web_fetch") and `generate_image` (Phase 6, policy `ask`, the `imageModelRef` setting; section 6.11). |
 | `builtin-plugins/core-commands/` | Builtin server-side slash commands (prompt templates such as `/explain`, `/review`, `/commit`; list in PLUGINS.md). |
 | `builtin-plugins/core-mcp/` | Owns the user-configured MCP servers (`mcp_servers` table): they are declared as its contributions, so disabling `core-mcp` closes them. Its settings (reconnect automatically, connect timeout) apply to every MCP server. |
-| `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, plus the tool `mock_approval_tool` (behavior in PROVIDERS.md section 8). |
+| `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, the Phase 6 media models `mock:image`, `mock:image-chat`, `mock:image-tool`, `mock:transcribe`, `mock:speech` (a PNG encoder and a silent WAV), plus the tool `mock_approval_tool` (behavior in PROVIDERS.md section 8). |
 | `testing/` | In-process test harness: `createTestApp()` (real composition over an in-memory database) and fakes. |
-| `live/` | Opt-in live provider suite (`*.live.test.ts`, `pnpm test:live`, ADR-027): real provider calls with the keys in the environment; excluded from `pnpm test` (PROVIDERS.md section 12). |
+| `live/` | Opt-in live provider suite (`*.live.test.ts`, `pnpm test:live`, ADR-027): real provider calls with the keys in the environment; the image and voice checks only with `HF_LIVE_MEDIA=1`; excluded from `pnpm test` (PROVIDERS.md section 12). |
 | `assets/catalog/models-dev.json` (package root) | Bundled models.dev snapshot (updated by `pnpm catalog:update`); read at runtime, so it ships next to `dist/` (section 11). |
 | `drizzle/` (package root) | Generated SQL migrations, applied by `migrate()` at boot; ship next to `dist/`. |
 
@@ -152,19 +158,19 @@ Dependency direction (no cycles): `http/routes` -> `services`, `chat`, `catalog`
 | `pages/index.vue` | Empty state: greeting + composer; first send navigates to `/chat/:id`. |
 | `pages/chat/[id].vue` | Chat transcript + composer for one chat. |
 | `pages/plugins.vue`, `pages/plugins/{index,new,[id]}.vue` | Parent route (hosts the single `InstallDialog`); plugin list (`?filter=`), new plugin (provider wizard / code template), plugin detail tabs. |
-| `pages/settings/{providers,models,general,appearance,data,about}.vue` | Settings pages (`/settings` redirects to providers); `data` = backup, import, shared links, delete-all. |
+| `pages/settings/{providers,models,media,general,appearance,data,about}.vue` | Settings pages (`/settings` redirects to providers); `media` = image model and voice (Phase 6); `data` = backup, import, shared links, delete-all. |
 | `pages/share/[token].vue` | Public read-only share page (`share` layout): a store-free transcript of a share snapshot. |
 | `pages/login.vue` | Password login. |
 | `components/ui/` | shadcn-vue primitives (generated, frozen, no prefix). |
 | `components/ai-elements/` | AI Elements Vue subset (copied, frozen, used with `Ai` prefix). |
 | `components/app-shell/` | `AppSidebar`, `ChatNav`, `PluginsNav`, `SettingsNav`, `ThemeToggle`, `CommandPalette`, `ShortcutsDialog`. |
-| `components/chat/`, `components/chat/parts/`, `components/chat/composer/` | Transcript, message and part renderers (with the `BranchSwitcher` of message versions), composer (ModelPicker, EffortMenu, PermissionMenu, SlashMenu). |
+| `components/chat/`, `components/chat/parts/`, `components/chat/composer/` | Transcript, message and part renderers (with the `BranchSwitcher` of message versions; Phase 6: `ImageGallery`, `GeneratingImages`, `ReadAloudButton`), composer (ModelPicker, EffortMenu, PermissionMenu, SlashMenu; Phase 6: `ImageOptionsMenu`, `MicButton`, `RecordingIndicator`). |
 | `components/plugins/*` | `list`, `detail`, `forms`, `install`, `wizard`, `code`, `mcp` component groups. |
 | `components/share/` | `ShareDialog`, `SharesSettingsSection`, `SharedChatView`, `ShareToolRow`. |
-| `components/settings/`, `components/settings/data/`, `components/providers/`, `components/common/` | Settings forms (incl. the Data page), `ProviderIcon`, shared pieces (`Markdown.vue`, empty states). |
-| `composables/` | `useChatSession` (detached `useChat` registry), `useComposer*`, `useShortcuts`, `useGlobalShortcuts`, helpers. |
+| `components/settings/`, `components/settings/{data,media,images,voice}/`, `components/providers/`, `components/common/` | Settings forms (incl. the Data and Media pages), `ProviderIcon`, shared pieces (`Markdown.vue`, empty states). |
+| `composables/` | `useChatSession` (detached `useChat` registry), `useComposer*`, `useShortcuts`, `useGlobalShortcuts`, helpers; Phase 6: `useImageOptions`, `useVoiceInput` (dictation), `useSpeechPlayer` (the one read-aloud player), `useFreshAuth` (every password prompt). |
 | `stores/` | Pinia stores `auth`, `chats`, `providers`, `models`, `plugins`, `settings`, `ui` (each `use<Name>Store`), implemented over the typed client and refreshed by `/api/events`. |
-| `utils/` | Pure helpers (date grouping, formatting, `data-testid` constants). |
+| `utils/` | Pure helpers (date grouping, formatting, `data-testid` constants, `speech-text.ts`: what read-aloud speaks), test helpers (`utils/testing/`, incl. `fake-media.ts`). |
 
 ## 5. Boot sequence
 
@@ -215,11 +221,17 @@ Notes:
   or a list that names no proxy fails the boot like any invalid variable (`EnvError` on stderr with the format
   explained, exit code 1); when it is set, the boot log lists the trusted ranges (section 10.6).
 - The first boot of v1.1 on a v1 data directory applies migration `0001`, which backfills a linear message tree for
-  every existing chat (section 8, Migrations).
+  every existing chat (section 8, Migrations). The first boot of v1.2 on a v1.1 data directory applies `0002`, which
+  records the active path of every chat as its remembered versions (`messages.selected_child_id`).
 - Graceful shutdown (`SIGINT`/`SIGTERM`, `stopDeps()`): stop accepting connections, abort active runs (persisted as
   `aborted`), dispose plugins (5 s guard each), close MCP clients (terminates stdio children), stop catalog timers,
   close SSE streams, then close the DB. Every step runs even when an earlier one fails; a shutdown longer than 10 s
   exits with code 1, and a second signal exits immediately.
+- The signal handlers are installed right after the logger, before the data directory, the database or any plugin
+  (Phase 6 hotfix, `a5fd107`): `main.ts` keeps a boot state (database, deps, started, server, the current step,
+  stopping). A signal during the boot waits for the running step (open, migrate, `startDeps`, listen), skips the rest,
+  closes whatever was opened and exits 0; the log says `shutting down` with `phase: 'booting'` or `'listening'`, then
+  `stopped`. `listening` is logged only once the handlers exist and the server is bound.
 
 ## 6. Flows
 
@@ -246,7 +258,7 @@ sequenceDiagram
   participant DB as services/chats
   participant M as LLM provider
   participant Ev as events bus
-  W->>R: ChatRequestBody (chatId, message, trigger, parentId?, messageId?, modelRef, reasoningEffort, toolMode)
+  W->>R: ChatRequestBody (chatId, message, trigger, parentId?, messageId?, modelRef, reasoningEffort, toolMode, imageOptions?)
   R->>R: zod validate (400 validation_error)
   R->>Runs: acquire(chatId)
   alt a run is active for chatId
@@ -257,6 +269,7 @@ sequenceDiagram
   alt provider missing or required credentials absent
     Prov-->>W: 400 provider_not_configured (action configure-provider), run released
   end
+  Note over R,Prov: an image model (kind image) goes to resolveImageModel and runs as an image turn (6.11)
   P->>DB: plan (kind new / regenerate / continuation): history = listPath(parent or target), supersede approvals on it, resolve the command, validate the message
   P->>DB: commit in one transaction: superseded approvals, merged decisions or the new user message, the active leaf
   P-)Ev: run.started (chatId, messageId, modelRef)
@@ -269,9 +282,11 @@ sequenceDiagram
   P->>P: await convertToModelMessages(history, tools), hook chat.messages, trim to 85 percent of context
   P->>M: streamText(model, instructions, messages, tools, toolApproval, stopWhen isStepCount(maxSteps), abortSignal run.signal)
   P->>P: result.consumeStream() so the run survives a client disconnect
-  R-->>W: 200 createUIMessageStreamResponse(toUIMessageStream(result.stream, ...)) as SSE
+  P->>P: createUIMessageStream: writer.merge(toUIMessageStream(result.stream) piped through storeGeneratedFiles)
+  R-->>W: 200 createUIMessageStreamResponse(that stream) as SSE
   Note over R,Runs: consumeSseStream tees the SSE bytes into the run buffer for GET /api/chat/:id/stream
   M-->>W: start (metadata modelRef, startedAt), start-step, text / reasoning / tool chunks, finish-step ...
+  Note over P,W: a generated file chunk (data: URL) is stored first and re-sent as /api/files/{id} (6.11)
   M-->>W: finish (metadata finishedAt, durationMs, reasoningMs, usage, costUsd, finishReason) then [DONE]
   P->>DB: onEnd persist: one transaction (upsert reply under its parent + CAS of the active leaf), usage row, updated_at, pending_approval
   P->>Prov: provider status update (connected / error)
@@ -333,6 +348,24 @@ Notes:
   stored transcript is unchanged. The `tools-unsupported` notice appears at most once per chat and model.
 - Errors after the stream started are sent as an `error` chunk whose `errorText` is the JSON envelope
   `{"error":{...HarnessErrorInit}}` and are persisted in `metadata.error` (see API.md, "Chat stream protocol").
+- **What is saved equals what is streamed** (Phase 6, ADR-028). `toUIMessageStream`'s own `onEnd` builds the saved
+  message from the chunks it produced itself, so a transform placed after it would change what the browser receives
+  but not what is saved. Every chat-model run is therefore wrapped:
+  `const ui = toUIMessageStream({ …, no onEnd })` and the response stream is `createUIMessageStream({ originalMessages:
+  prepared.history, generateId: () => session.assistantId, onError, onEnd: session.onEnd, execute: ({ writer }) =>
+  writer.merge(ui.pipeThrough(storeGeneratedFiles(session))) })`. The persistence of this section (`onEnd`) is
+  unchanged; it now sees the transformed chunks. `storeGeneratedFiles` (`chat/generated-files.ts`) stores generated
+  files and appends the images of the `generate_image` tool (6.11). A model wrapper cannot do the swap: `streamText`
+  turns every model-side file into a `data:` URL (and downloads `url` files).
+- Chat models with `capabilities.imageOutput` (Gemini `*-image`, OpenRouter image models) get
+  `definition.imageParams(...).providerOptions` deep-merged into the call (the aspect ratio of `imageOptions`); their
+  image parts are stored like any generated file. `imageOptions` is refused (`400` on `['imageOptions']`) for a model
+  that is neither an image model nor has `imageOutput`, and `n` / `editPrevious` for anything but an image model.
+- History and generated images (`chat/files.ts` `prepareModelFiles`): most provider converters (Anthropic, OpenAI
+  Responses, OpenRouter) drop images in assistant messages, so the images of the most recent assistant message that
+  has any are carried into the next user message for vision models (after a text part "(Images generated earlier in
+  this chat:)", at most 4), every other generated image becomes the text `[Generated image: <name>]` in place (an
+  assistant message never reaches a provider empty), and `reasoning-file` parts never go back to a model.
 
 ### 6.2 Tool approval round-trip
 
@@ -627,19 +660,42 @@ leaf under A (the reply at seq 3) active again, which brings back A -> reply -> 
 
 - **Reading**: `listPath(chatId, leafId)` walks up `parent_id` with a recursive query (guard `m.seq < path.seq`, so bad
   data cannot loop). `branches` comes from the pure helpers of `services/chats/tree.ts` (`pathTo`, `branchesOf`,
-  `latestLeafUnder`, `resolveLeaf`) over a light `(id, parent_id, seq, role)` query: every path message with at least
+  `latestLeafUnder`, `resolveLeaf`, and since Phase 6 `rememberedLeafUnder`) over a light `(id, parent_id, seq, role,
+  selected_child_id)` query: every path message with at least
   two versions maps to its siblings (`seq` order) and the index of the shown one. A stored leaf that is not a message
   of the chat falls back to its most recent message. `ChatDetail` has no `activeLeafId`: it always equals the id of the
   last message of `messages`, also during a run.
 - **Writing**: `appendMessage(chatId, message, parentId)` (404 for a parent outside the chat, 409 for a used id),
   `upsertMessage(chatId, message, parentId)` (the parent is used on insert only) and `setActiveLeaf(chatId, leafId,
-  onlyFrom?)` (compare-and-set). Only the commit and persist transactions of the pipeline (6.1) and the switch route
-  move the active leaf.
+  onlyFrom?)` (compare-and-set). Only the commit and persist transactions of the pipeline (6.1), the switch route and
+  the delete route move the active leaf.
+- **Remembered versions** (Phase 6, ADR-030): `messages.selected_child_id` is the child last shown under a message, a
+  hint without a foreign key. After every successful compare-and-set, `setActiveLeaf` runs `rememberPathSql(chatId,
+  leafId)`: one `UPDATE … FROM` over the recursive path of that leaf that points each parent at its child on the path
+  (`AND selected_child_id IS NOT path.id`, so unchanged rows are not written); inside the pipeline's transactions it is
+  atomic with the leaf move, so every commit and persist records the path for free. The import batch writes it too.
+  `rememberedLeafUnder(tree, messageId)` walks down from a message: the remembered child when it is still one of the
+  node's children, else the only child, else `latestLeafUnder(node)` (an unknown id → `null`). The pointer is not
+  exported (chat export v2 and backups are unchanged; an import re-derives it from the active path) and share
+  snapshots do not use it.
 - **Switching** (`POST /api/chats/:id/branch { messageId }`, any message of the chat): 404 for an unknown chat or
   message; `409 conflict` (`details.reason: 'run-active'`) while a run holds the chat (6.3), and also when the active
   leaf changed between reading and writing it (the switch is a compare-and-set against the leaf it read); otherwise the
-  active leaf becomes the latest leaf under `messageId`, `pending_approval` is recomputed from the new path,
-  `chat.updated` is emitted, `updated_at` stays (a switch is not activity), and the response is the new `ChatDetail`.
+  active leaf becomes `rememberedLeafUnder(messageId)` (Phase 6: the path last shown under that version; v1.1 took the
+  latest leaf), `pending_approval` is recomputed from the new path, `chat.updated` is emitted, `updated_at` stays (a
+  switch is not activity), and the response is the new `ChatDetail`.
+- **Deleting a version** (Phase 6, `DELETE /api/chats/:id/messages/:messageId` → `ChatDetail`): deletes one version and
+  every message after it. 404 for an unknown chat or message; `409 conflict` with `details.reason: 'only-version'` when
+  the message has no sibling; `409 run-active` while the runs registry holds the chat (checked by the route) and when
+  the compare-and-set misses (nothing is deleted then). When the active path goes through the message, the new target is
+  its previous sibling by `seq`, else the next one, and the new leaf is `rememberedLeafUnder(target)`;
+  `pending_approval` is recomputed like a switch. One `db.batch` holds the compare-and-set `UPDATE chats … WHERE
+  active_leaf_id IS <old leaf>` and a recursive-CTE `DELETE` of the subtree, guarded by `EXISTS` (the new leaf still
+  exists, another sibling still exists); then `rememberPathSql`, `chat.updated` and the detail. `updated_at`, usage rows
+  (totals keep paying for deleted versions), share snapshots and files stay; `search_text` goes with the rows. Deleting
+  a version that is not on the active path does not move the leaf.
+- **Other tabs**: `chat.updated` carries the chat summary plus `activeLeafId` (ADR-030) for every update, touch, title,
+  switch and deletion; an idle web session whose last stored message differs reloads the path (UI.md 11.1).
 - **Clients**: the web sends `parentId` explicitly (the message before the new one on the path it shows), so a stale
   tab or a failed request cannot attach a message to a path the user did not see; an unknown parent answers 404 and
   the web reloads the chat, puts the unsent text back into the composer and says so in a toast (UI.md 11.1, 15). A
@@ -652,7 +708,7 @@ leaf under A (the reply at seq 3) active again, which brings back A -> reply -> 
   the active leaf is the latest leaf under `activeLeafId` (or under the last message). Message ids are kept when they
   are valid and unused, else replaced; an import as a copy gets new ids throughout. Imported messages are
   deep-validated, streaming parts are finalized and pending approvals are resolved as denied (reason `imported`).
-- Versions are never deleted on their own (backlog); deleting a chat deletes all of them.
+- Deleting a chat deletes every version; a single version is deleted with the route above.
 
 ### 6.9 Backup, import and delete-all (ADR-024)
 
@@ -789,6 +845,142 @@ sequenceDiagram
 - **Public routes** (`shares.view`, `shares.file`) are listed in 10.1 and protected as described in 10.7.
 - Deleting a chat, or delete-all, removes its shares (`ON DELETE CASCADE`).
 
+### 6.11 Image generation (ADR-028)
+
+Three ways lead to an image, all through the user's own providers; each ends as `file` parts with `/api/files/<id>`
+URLs, so the transcript, share links (6.10), backups (6.9) and history treat generated images like attachments. There
+is no image route and no image table.
+
+| Way | Model | What runs |
+|---|---|---|
+| Image turn | a dedicated image model (`kind: 'image'`, e.g. `openai:gpt-image-1`, `xai:grok-imagine-image`) picked in the composer | `chat/images.ts` `imageStream()` → `ImageService.generate()` → `generateImage()` |
+| Image output of a chat model | a chat model with `capabilities.imageOutput` (Gemini `*-image`, OpenRouter image models) | the normal chat run (6.1) with `imageParams` provider options; `storeGeneratedFiles` stores the image parts |
+| `generate_image` tool | the model of the `imageModelRef` setting (Settings → Media) | `core-tools` tool → `ctx.images.generate()` → `ImageService.generate()`; the pipeline appends the images after the tool call |
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant W as Web (useChat)
+  participant P as chat/pipeline + chat/images.ts
+  participant I as services/images
+  participant F as services/files
+  participant M as Image model (provider)
+  W->>P: POST /api/chat (modelRef = an image model, imageOptions { n, aspectRatio?, editPrevious? })
+  P->>P: resolveImageModel, prompt = the user text after slash expansion, input images (attached, or the parent reply's)
+  P-->>W: start (metadata modelRef, startedAt, image { n, aspectRatio?, inputs }), start-step
+  loop every 15 s until the images exist
+    P-->>W: message-metadata (keep-alive for proxies)
+  end
+  P->>I: generate({ resolved, prompt, inputFileIds, n, aspectRatio, signal: run.signal, chatId, messageId })
+  I->>M: generateImage({ model, prompt, n, size? / aspectRatio?, providerOptions })
+  M-->>I: images (bytes), usage, provider metadata
+  I->>F: saveGenerated(each image): raster only, 20 MiB, magic bytes, dedupe
+  I->>I: usage row (purpose image), provider outcome, costUsd (estimated)
+  P-->>W: file { url: /api/files/{id}, mediaType } per image, finish-step, finish (usage, costUsd, image.revisedPrompt?)
+  P->>P: onEnd persist (6.1): the reply holds only file parts with stored URLs
+```
+
+- **Image turns** (`chat/prepare.ts`): `catalog.get(ref)?.kind === 'image'` → `providers.resolveImageModel(ref)`, else
+  `resolveModel`, which refuses image models with `validation_error`. `PreparedRun.resolved` is a `ResolvedModelBase`
+  plus `target: { kind: 'chat', model } | { kind: 'image', model, options }`. The prompt is the text of the new user
+  message after slash-command expansion (`400` when empty or longer than 32,000 characters,
+  `LIMITS.imagePromptMaxChars`). Input images: the images attached to the message when the model has `vision`; else,
+  when none are attached and `editPrevious !== false`, the generated images of the parent assistant reply (at most 4,
+  `LIMITS.imageInputsMax`); other attachments produce the `attachments-unsupported` notice. An image turn sends no
+  history. Its chat title comes from `titleModelRef`, else the provider's `smallModelId`, else the default title stays.
+- **The stream** (`imageStream(session)`) is built with `createUIMessageStream({ originalMessages, generateId: () =>
+  assistantId, execute, onError, onEnd: session.onEnd })`, so persistence, `run.finished`, resume and Stop work as for
+  chat runs: a failure is `recordFatal` + an `error` chunk (persisted in `metadata.error`); Stop is an `abort` chunk and
+  the reply is saved with `aborted: true`; a resume replays the buffer, which holds URLs only, and the `start` metadata
+  tells the web how many placeholders to draw. Regenerate adds a version like any reply (6.8).
+- **`ImageService.generate(input)`** (`services/images/`) → `{ modelRef, images: { file, url }[], usage, costUsd | null,
+  revisedPrompt?, dropped }`: `definition.imageParams({ n, aspectRatio, inputs }, model)` maps the request to the
+  provider (OpenAI `size`: 1:1 → 1024x1024, portrait → 1024x1536, landscape → 1536x1024; xAI `aspectRatio`; details in
+  PROVIDERS.md 13); `generateImage()` runs with the run's abort signal; every image goes through `files.saveGenerated`
+  (raster types `GENERATED_IMAGE_MIME_TYPES` only, at most `LIMITS.generatedImageBytes` = the upload cap, so a backup
+  restores it; magic bytes must match; an identical file is reused); refused images count in `dropped`. It writes the
+  usage row (`purpose: 'image'`, `chats.addUsage`) and records the provider outcome. `costUsd` uses the catalog's
+  per-1M-token input and output prices, else `null` (xAI reports no token usage); the web labels it "estimated".
+- **Generated files of chat runs** (`storeGeneratedFiles`, 6.1): a `file` or `reasoning-file` chunk with a `data:` URL
+  is stored through `saveGenerated` and re-sent with the stored URL, keeping `providerMetadata` (Gemini thought
+  signatures); anything that is not an allowed raster image, or too large, is dropped and replaced by an inline
+  `data-notice` with code `generated-file-dropped`. `finalMessage()` adds the file name (a UI `file` chunk cannot carry
+  it) and drops any leftover `data:` part. **No base64 ever reaches the `messages` table.**
+- **The `generate_image` tool** (`core-tools`, policy `ask`, timeout 300 s): input `{ prompt, n?, aspectRatio? }`,
+  output `{ modelRef, images: [{ fileId, url, mediaType, name }], costUsd?, revisedPrompt? }` (file references, far
+  below the 64 KB tool output cap); `toModelOutput` is text only ("Generated 2 images with <model>; they are shown to
+  the user below this call."). When the final `tool-output-available` of `generate_image` comes from `core-tools` and
+  parses with `generateImageToolOutputSchema`, `storeGeneratedFiles` appends one `file` chunk per image and adds the
+  tool's `costUsd` to the message cost (a `toolCallId → toolName` map, seeded from the continued message, covers
+  approval continuations). A tool of the same name from another plugin never injects files. Without `imageModelRef`
+  the tool fails with "Choose an image model in Settings → Media."; `ctx.ai` has no `generateImage` (plugins could not
+  store images or record usage with it), plugins call `ctx.images.generate()`.
+- **Usage and totals**: image usage rows count in `ChatDetail.totals` (the `chat` and `image` purposes); message
+  metadata carries the turn's `usage` and `costUsd`.
+- **Visibility**: image models appear in the composer's "Image models" group only when their provider defines
+  `createImageModel` (section 9); declarative providers cannot generate images (backlog).
+- **Disk**: generated images live in `data/files/` like uploads; they are removed by delete-all with files, not when a
+  chat or a version is deleted (orphan cleanup is in the backlog).
+
+### 6.12 Voice: dictation and read-aloud (ADR-029)
+
+Both features are opt-in: dictation needs `transcriptionModelRef`, read-aloud `speechModelRef` (Settings → Media). The
+browser never transcribes or synthesizes speech itself (browser recognition would send audio to a third party and break
+bring-your-own-key).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser (MediaRecorder / HTMLAudioElement)
+  participant A as /api/audio (session + Origin check)
+  participant S as services/audio
+  participant M as Provider model
+  B->>A: POST /api/audio/transcriptions (multipart: file = the recording, modelRef?, language?)
+  A->>S: transcribe({ file, form, signal: request signal })
+  S->>S: allowlist + magic bytes, model = form.modelRef ?? transcriptionModelRef, language hints
+  S->>M: transcribe({ model, audio, providerOptions, maxRetries 1, abortSignal }) within 120 s
+  M-->>S: { text, language, durationInSeconds }
+  S-->>B: 200 AudioTranscription { text, language, durationSec, modelRef } (text '' = no speech)
+  B->>A: POST /api/audio/speech { text up to 4096, modelRef?, voice? } (one sentence chunk)
+  A->>S: speak(...)
+  S->>M: generateSpeech({ model, text, voice }) within 60 s
+  M-->>B: 200 audio bytes (allowlisted Content-Type, Content-Length, Cache-Control no-store)
+```
+
+- **Routes** (`http/routes/audio.ts`, module `audio`): `audio.transcribe` and `audio.speech` need a session and pass the
+  Origin check; neither needs fresh auth (they run no code and create nothing lasting). Errors go through
+  `providers.mapError` and `recordOutcome` (the provider status in Settings → Providers).
+- **Transcription input**: the multipart body is parsed by the route itself (like the data import): exactly one `file`
+  part plus the `AudioTranscribeForm` fields; unknown or repeated fields → `400`. Accepted types, parameters stripped:
+  `audio/webm` (+ `video/webm`), `audio/ogg`, `audio/mp4` (+ `audio/x-m4a`, `video/mp4`), `audio/mpeg` (+ `audio/mp3`),
+  `audio/wav` (+ `audio/x-wav`, `audio/wave`), `audio/flac` (+ `audio/x-flac`). The declared type must match the magic
+  bytes (`services/audio/sniff.ts`): WebM = an EBML header whose DocType is `webm`, Ogg = `OggS`, MP4 = `ftyp` with a
+  brand that is not an image brand, MP3 = `ID3` or an MPEG frame sync (AAC ADTS is refused), WAV = `RIFF…WAVE`, FLAC =
+  `fLaC`; `application/octet-stream` lets the sniffer decide; fewer than 64 bytes → `400` "The recording is empty.". At
+  most 25 MiB (`LIMITS.audioUploadBytes`, enforced by the body limit and the service; `413` above). This checking
+  applies to this route only: chat uploads keep their own rules. The server does not parse durations; the web stops at
+  10 minutes.
+- **Transcription**: model = `form.modelRef ?? settings.transcriptionModelRef` (neither → `validation_error`); a model of
+  another kind or a provider without `createTranscriptionModel` → `validation_error`. Language = `form.language ??
+  settings.transcriptionLanguage`; `auto` sends nothing, a code goes through the provider's `transcriptionOptions` hook
+  (`openai.language`, `google.languageCodes`, `xai.language`, `mistral.language`, `groq.language`). The call runs in
+  `withTimeout(120 s, …, c.req.raw.signal)` with `maxRetries: 1`, so a client that disconnects aborts the provider call.
+  `NoTranscriptGeneratedError` → `200` with `text: ''`.
+- **Speech**: `AudioSpeechBody` (`text` 1–4,096 characters, `modelRef?`, `voice?`); model and voice come from the settings
+  unless the body names them (no model → `validation_error`; `speechVoice` null = the provider default). Nothing but the
+  text and the voice reaches the provider: `outputFormat`, `speed`, `instructions` and `language` are never passed
+  (unsupported options make the SDK print warnings); the playback speed is applied by the browser. 60 s timeout.
+- **Resolvers** (`providers/`): `resolveTranscriptionModel(ref)` / `resolveSpeechModel(ref)` →
+  `ResolvedAudioModel<M> { modelRef, providerId, modelId, model, entry, provider }`, with the checks of `resolveModel`;
+  a wrong kind or a missing factory → `validation_error`, a throwing factory → `plugin_error` (guarded 5 s).
+- **Usage**: one row per call (`purpose` `transcription` or `speech`, `chat_id` null, 0 tokens, `cost_usd` null).
+- **Nothing is stored**: no audio, transcript or speech text is written to the database or the data directory, and the
+  log line of a call carries provider, model, byte or character count, type, duration and milliseconds only (10.8, 12).
+- **Web**: dictation records with `MediaRecorder` (`audio/webm;codecs=opus` first, 32 kbps) and uploads the recording
+  once it stops; read-aloud splits a reply into sentence chunks (first ≤ 300 characters, then ≤ 1,500) and fetches the
+  next chunk while one plays (UI.md 7.17, 7.18). The microphone needs a secure context (HTTPS or localhost) and the
+  page's `Permissions-Policy` allows it for the app's own origin only (10.2).
+
 ## 7. Data directory
 
 ```
@@ -799,7 +991,8 @@ data/                      HF_DATA_DIR (default ./data, resolved against the rep
   plugins/.staging/        in-progress installs and .prev copies (cleaned at boot)
   plugins/.data/<id>/      plugin private data (ctx.plugin.dataDir, 0700); kept on update, purged on uninstall
                            unless keepData
-  files/<aa>/<sha256>      uploaded attachments, content-addressed (<aa> = first 2 hex chars of the sha256)
+  files/<aa>/<sha256>      uploaded attachments and generated images, content-addressed (<aa> = first 2 hex chars
+                           of the sha256)
   cache/                   models.dev snapshot refreshes (models-dev.json + fetched-at), misc caches
   cache/plugins/<id>/      compiled output of .ts code plugins (<sha256>.mjs), rebuilt on demand
 ```
@@ -919,19 +1112,21 @@ by the API, e.g. `_auth.sessionEpoch`).
 | `role` | text | NOT NULL; `user` \| `assistant` \| `system` |
 | `parts` | json `UIMessage['parts']` | NOT NULL |
 | `metadata` | json `MessageMetadata` | NULL |
+| `selected_child_id` | text | NULL; the child last shown under this message (ADR-030, 6.8), a hint: `null` or a missing child means "the latest leaf"; no FK (see Migrations) |
 | `search_text` | text | NOT NULL DEFAULT `''`; concatenated text parts, Unicode-normalized and lowercased (ADR-021), used by `GET /chats?q=`; not for display |
 | `created_at` | timestamp | NOT NULL |
 | `updated_at` | timestamp | NOT NULL; changes on approval continuations |
 | | | unique index `messages_chat_seq_idx` (`chat_id`, `seq`); index `messages_chat_parent_idx` (`chat_id`, `parent_id`) |
 
-**`usage`** — one row per model call (chat run or title generation); kept when a chat is deleted.
+**`usage`** — one row per model call (chat run, title generation, image generation, transcription or speech); kept
+when a chat is deleted.
 
 | Column | Type | Constraints |
 |---|---|---|
 | `id` | integer | PK AUTOINCREMENT |
 | `chat_id` | text | NULL; FK -> `chats.id` ON DELETE SET NULL |
 | `message_id` | text | NULL |
-| `purpose` | text | NOT NULL DEFAULT `chat`; `chat` \| `title` |
+| `purpose` | text | NOT NULL DEFAULT `chat`; `chat` \| `title` \| `image` \| `transcription` \| `speech` (`UsagePurpose`, a TypeScript type: the Phase 6 values needed no migration; transcription and speech rows have `chat_id` null, 0 tokens and `cost_usd` null) |
 | `provider_id` | text | NOT NULL |
 | `model_id` | text | NOT NULL |
 | `input` | integer | NOT NULL DEFAULT 0; input tokens |
@@ -1033,6 +1228,7 @@ by the API, e.g. `_auth.sessionEpoch`).
 |---|---|
 | `0000_initial_schema` | the 14 tables of v1 |
 | `0001_message_tree_and_shares` (Phase 5) | table `chat_shares` + index `chat_shares_chat_idx`, `ALTER TABLE chats ADD active_leaf_id`, `ALTER TABLE messages ADD parent_id`, index `messages_chat_parent_idx`, then a hand-written backfill |
+| `0002_remembered_versions` (Phase 6) | `ALTER TABLE messages ADD selected_child_id` (nullable, no FK, no index), then a hand-written backfill of every active path |
 
 The backfill turns every existing chat into a linear chain: each message's parent is the previous message by `seq`,
 and the active leaf is the last message (`null` for an empty chat):
@@ -1052,9 +1248,28 @@ migration that rebuilds a table (`DROP TABLE`, `__new_…`) is rejected at revie
 transaction, so a half-done backfill cannot happen; `db/upgrade.test.ts` migrates a v1-shaped database through `0001`
 (and fails when the backfill is missing).
 
+`0002` (Phase 6, ADR-030) adds `messages.selected_child_id` the same way (nullable, no default, no foreign key: it is a
+hint that may name a deleted child) and records every chat's active path, so switching away and back after the upgrade
+restores what the user saw:
+
+```sql
+WITH RECURSIVE path(chat_id, id, parent_id, seq) AS (
+  SELECT m.chat_id, m.id, m.parent_id, m.seq FROM chats c JOIN messages m ON m.chat_id = c.id AND m.id = c.active_leaf_id
+  UNION ALL SELECT p.chat_id, p.id, p.parent_id, p.seq FROM messages p
+  JOIN path ON p.id = path.parent_id AND p.chat_id = path.chat_id AND p.seq < path.seq)
+UPDATE messages SET selected_child_id = path.id FROM path
+WHERE messages.id = path.parent_id AND messages.chat_id = path.chat_id;
+```
+
+Only the parents on active paths get a pointer; every other message keeps `null` (its latest leaf wins until it is
+shown). The generated SQL must be exactly one `ALTER TABLE … ADD` (a `DROP TABLE`, `__new_` or `PRAGMA foreign_keys`
+statement is rejected) and is never regenerated after the hand edit; `db/upgrade.test.ts` migrates a database holding
+only `0000` + `0001` with branched chats and fails when the backfill is missing.
+
 Not stored in the DB: sessions (stateless HMAC cookie), active runs and resume buffers (memory), plugin logs
 (memory ring buffer), SSE subscribers (memory), share tokens (recomputed from the share id), rate-limit counters and
-the data import / delete-all mutex (memory).
+the data import / delete-all mutex (memory), and (Phase 6) recordings, transcripts and speech audio or text, which only
+pass through (10.8). Generated images are stored as files like uploads.
 
 ## 9. Model catalog
 
@@ -1070,15 +1285,35 @@ Summary; the full rules (per-provider listing quirks, seeds, reasoning mapping) 
 | Custom ids | `model_prefs` rows with `custom = 1` | user (`POST /custom-models`) |
 
 - **Entry set** per provider: live listing (seeds when there is no listing and no cached listing) + plugin models +
-  custom ids.
+  custom ids. Phase 6: seeds with an explicit non-chat kind (`image`, `transcription`, `speech`) are always listed,
+  even next to a live listing, so the media models of a provider exist whatever its `/models` endpoint returns.
 - **Field precedence** per model: user custom -> live provider data -> models.dev -> seed (seeds and plugin models
   share the last tier).
-- **`classify()`** marks non-chat models hidden: models.dev modalities when known, else the id regex
-  `embed|tts|whisper|transcri|image|moderation|rerank|audio`. `model_prefs.hidden` (true/false) overrides it.
-- **Picker order**: favorites -> recent (`model_prefs.last_used_at`) -> by provider (registry order), then name.
+- **Kinds** (`ModelKind` = `chat | embedding | image | audio | transcription | speech | other`), decided by `classify()`
+  in this order (Phase 6):
+  1. the id regex `/(?:^|\/)(?:gpt-image|chatgpt-image|dall-e|imagen|grok-imagine-image)/i` → `image` (models.dev lists
+     some OpenAI image models with a text output, so modalities alone would call them chat models);
+  2. models.dev modalities when known: no text output → `image` (image output), `speech` (audio output with a text
+     input) or `other`; audio input without a text input and with a text output → `transcription`; embedding,
+     moderation and rerank ids → `embedding` / `other`; everything else with text in and text out → `chat`;
+  3. without modalities, the id: `embed` → `embedding`, `tts` → `speech`, `whisper|transcri` → `transcription`, other
+     `audio` → `audio`, `image` → `image`, `moderation|rerank` → `other`, else `chat`.
+  An explicit `kind` of any layer (custom, live, plugin or seed, in the field precedence order) wins over `classify()`.
+- **Image output**: `modelsDevLayer` sets `capabilities.imageOutput` for chat models whose models.dev output modalities
+  include `image` (Gemini `*-image`); OpenRouter sets it from `architecture.output_modalities`.
+- **Visibility** (the default of `hidden`; `model_prefs.hidden` true/false overrides it): chat models are visible;
+  image models only when their provider defines `createImageModel` (they then appear in the composer's "Image models"
+  group); every other kind is hidden. Transcription and speech models are never offered by the chat picker; Settings →
+  Media lists them with their kind (UI.md 9.9). `ModelInfo.voices` (≤ 100, unique) becomes `CatalogModel.voices`.
+- **Chat-only choices**: the default model of new chats, the title model fallback and the credential ping (`validate`
+  without a listing) take chat models only.
+- **Picker order**: favorites -> recent (`model_prefs.last_used_at`) -> by provider (registry order), then name; the
+  "Image models" group follows the provider groups.
 - **Cost** (`costUsd`): provider-reported cost when available (OpenRouter), else catalog prices (USD per 1M tokens):
   non-cached input x `cost.input` + cache reads x `cost.cacheRead` + cache writes x `cost.cacheWrite` + output
-  (reasoning included) x `cost.output`. Unknown price -> `costUsd` omitted.
+  (reasoning included) x `cost.output`. Unknown price -> `costUsd` omitted. Image generations (Phase 6) use the image
+  model's input and output token prices (`ImageModelV4Usage`) and are shown as estimates; a provider without token
+  usage (xAI) gives no cost; transcription and speech rows carry no cost.
 - Changes emit `catalog.changed` (`{ providerId? }`); the web refetches `GET /api/models`.
 
 ## 10. Security model
@@ -1111,15 +1346,20 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
   `SameSite=Strict` this closes CSRF. No CORS headers are ever sent.
 - **Secure headers** (all responses): `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
   `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`,
-  `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `X-Robots-Tag: noindex, nofollow` (Phase 5: keeps
+  `Permissions-Policy: camera=(), microphone=(self), geolocation=()`, `X-Robots-Tag: noindex, nofollow` (Phase 5: keeps
   share links and everything else out of search engines), `Strict-Transport-Security: max-age=31536000` only over
-  HTTPS (`X-Forwarded-Proto: https` counts under the rule of 10.6).
+  HTTPS (`X-Forwarded-Proto: https` counts under the rule of 10.6). `microphone=(self)` (Phase 6, ADR-029; v1.1 sent
+  `microphone=()`, which blocked dictation) lets only the app's own origin ask for the microphone; no frame or other
+  origin can, and the browser still asks the user.
 - **CSP for the SPA HTML**: `default-src 'self'; script-src 'self' 'wasm-unsafe-eval' <sha256 hashes of the inline
   scripts of the served HTML document, recomputed when the file changes>; style-src 'self' 'unsafe-inline';
-  img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:;
+  img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' blob:; worker-src 'self' blob:;
   object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`. `'wasm-unsafe-eval'` only allows
   compiling WebAssembly (the syntax highlighter of code blocks), not JavaScript `eval`. Remote images in model output
   are therefore blocked (no data exfiltration through image URLs); the markdown renderer shows them as links.
+  `media-src 'self' blob:` (Phase 6) lets read-aloud play the audio it fetched (object URLs of the speech responses);
+  without it `media-src` falls back to `default-src 'self'` and blob audio would be blocked. Generated images are
+  same-origin files (`img-src 'self'`).
 - **CSP for API responses**: `default-src 'none'; frame-ancestors 'none'`; icons, files and share files use their own
   CSP (API.md).
 
@@ -1167,7 +1407,9 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
   20 MB per file (`image/*`, `application/pdf`, `text/*`), plugin zips 20 MB compressed / 100 MB expanded / 2000
   entries, tool output 64 KB, chat title 200 chars; data imports 256 MiB + 64 KiB (a backup zip or a chat JSON; 64 MiB
   per chat entry, 20 MiB per file entry, 50,000 entries, 6.9); share snapshots 10 MiB, with each tool input or output
-  cut at 16,384 characters and each error text at 4096 (6.10). A
+  cut at 16,384 characters and each error text at 4096 (6.10); Phase 6: a dictation recording 25 MiB (the body limit
+  of `POST /audio/transcriptions` is 25 MiB + 64 KiB), a speech request 4,096 characters, an image prompt 32,000
+  characters, 1–4 images per turn and at most 4 input images, a generated image 20 MiB (6.11, 6.12). A
   non-empty body of a JSON route must be `application/json` (multipart routes also accept `multipart/form-data`), so
   HTML forms cannot post to the API.
 
@@ -1258,6 +1500,31 @@ before every check.
 - Snapshots are sanitized by an allowlist (6.10), so a new AI SDK part type is dropped rather than leaked; the view
   and the file route apply the share's options on every request.
 
+### 10.8 Privacy of media (Phase 6, ADR-028, ADR-029)
+
+- **Opt-in**: no image, transcription or speech model is chosen automatically. `imageModelRef`,
+  `transcriptionModelRef` and `speechModelRef` start as `null` (the `generate_image` tool, dictation and read-aloud are
+  off) and are set by the user in Settings → Media, which says: "Audio and text go to the provider you choose;
+  harness-forge doesn't store them."
+- **What leaves the server**: a dictation's recording goes to the chosen transcription provider; the text of a reply
+  that is read aloud goes, sentence chunk by sentence chunk, to the chosen speech provider; an image prompt (and its
+  input images) goes to the image provider. Nothing else from the chat is sent for these features (an image turn sends
+  no history).
+- **Nothing is stored or logged**: recordings, transcripts and speech text or audio are never written to the database,
+  the data directory or a cache, and never appear in logs at any level; the speech response carries `Cache-Control:
+  no-store`. The log line of an audio call holds the provider, the model, the byte or character count, the media type,
+  the duration and the milliseconds (12). A transcript only becomes chat data when the user sends it as a message.
+  Generated images are chat data: they are stored as files and follow the chat (share links, backups, delete-all).
+- **Secure context for the microphone**: browsers expose `getUserMedia` only on HTTPS or `localhost`, so on plain HTTP
+  across a LAN the mic button is disabled ("Voice input needs HTTPS or localhost"); serve the app through a TLS
+  reverse proxy (README, "Behind a reverse proxy"). `Permissions-Policy: microphone=(self)` keeps every other origin and
+  every frame away from the microphone (10.2); the browser's own permission prompt still applies.
+- **Uploads**: the recording is accepted only by `POST /audio/transcriptions`, only with an allowlisted audio type
+  whose magic bytes match, at most 25 MiB (6.12); chat uploads keep their own rules, so audio files cannot be attached
+  to chat messages (audio attachments are in the backlog).
+- **Generated files**: only PNG, JPEG, WebP and GIF images whose bytes match their type are stored (at most 20 MiB);
+  anything else a model returns is dropped with the `generated-file-dropped` notice, never stored or rendered (6.11).
+
 ## 11. Topology
 
 ### Development (`pnpm dev`, coordinator only)
@@ -1310,6 +1577,9 @@ flowchart LR
   buffer the SSE responses (the server sends `X-Accel-Buffering: no`). The README has Caddy, nginx and Docker Compose
   examples.
 - Share links need `HF_PASSWORD`: without it, `/api` answers only local host names (section 10.1).
+- Dictation needs a secure context: from another machine, reach the app through HTTPS (the TLS proxy above); plain
+  `http://<lan-address>:8787` disables the microphone (section 10.8). A proxy must allow request bodies of at least
+  25 MB for recordings (the 256 MB of data imports covers it).
 - Stdio MCP servers and code plugins run inside the same container/user as the server.
 
 ## 12. Observability
@@ -1322,7 +1592,13 @@ flowchart LR
   error handler's log line), status, duration, bytes; no headers, bodies or client addresses. Level `info` in
   production, `debug` in development. Never logged: API keys and other secrets (redactor, section 10.3), cookies, share
   tokens (`redactText` masks `/share/<token>` in any text), message contents and tool inputs/outputs (only at `debug`,
-  still redacted), uploaded file contents.
+  still redacted), uploaded file contents; Phase 6: image prompts (only at `debug`, like message contents),
+  recordings, transcripts and speech text or audio (at no level, 10.8).
+- **Media calls** (Phase 6): an image generation logs provider, model, `n`, aspect ratio, input image count, stored /
+  dropped counts, token usage, cost and milliseconds; an audio call logs provider, model, byte count (transcription) or
+  character count (speech), the media type, the duration when the provider reports it and milliseconds; both record the
+  provider outcome (Settings → Providers status). None of them logs the prompt, the transcript or the speech text at
+  `info`.
 - **Proxy trust** (texts in section 10.6): the boot log line `trusting reverse proxies (HF_TRUST_PROXY)` lists the
   canonical entries and the trusted ranges; one warning per untrusted peer address that sends a forwarded header the
   server would honor from a trusted proxy (header names only, at most 256 addresses); failed-login warnings carry the

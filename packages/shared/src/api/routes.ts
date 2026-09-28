@@ -1,6 +1,7 @@
 // The route table: one entry per endpoint of API.md, keyed `<module>.<action>` (API.md sections 3.3 and 8).
 import type { z } from 'zod'
 import { chatRequestBodySchema, chatStopResultSchema } from '../chat.ts'
+import { audioSpeechBodySchema, audioTranscribeFormSchema, audioTranscriptionSchema } from '../schemas/audio.ts'
 import {
   chatBranchBodySchema,
   chatCreateSchema,
@@ -29,6 +30,7 @@ import {
   modelsQuerySchema,
 } from '../schemas/models.ts'
 import {
+  chatMessageParamsSchema,
   chatParamsSchema,
   fileParamsSchema,
   fileUploadFormSchema,
@@ -126,6 +128,7 @@ export const API_MODULES = [
   'pluginDrafts',
   'pluginFiles',
   'data',
+  'audio',
   'shares',
 ] as const
 export type ApiModule = (typeof API_MODULES)[number]
@@ -160,7 +163,7 @@ export interface ApiRouteDef {
   status?: 200 | 201 | 204
 }
 
-/** Every endpoint of API.md (73 routes), keyed `<module>.<action>`. */
+/** Every endpoint of API.md (76 routes), keyed `<module>.<action>`. */
 export const apiRoutes = {
   // health.ts
   'health.get': { module: 'health', method: 'GET', path: '/health', public: true, response: healthSchema },
@@ -206,6 +209,7 @@ export const apiRoutes = {
   'chats.remove': { module: 'chats', method: 'DELETE', path: '/chats/:id', params: chatParamsSchema, response: 'empty' },
   'chats.export': { module: 'chats', method: 'GET', path: '/chats/:id/export', params: chatParamsSchema, query: chatExportQuerySchema, response: 'binary' },
   'chats.switchBranch': { module: 'chats', method: 'POST', path: '/chats/:id/branch', params: chatParamsSchema, body: chatBranchBodySchema, response: chatDetailSchema },
+  'chats.deleteMessage': { module: 'chats', method: 'DELETE', path: '/chats/:id/messages/:messageId', params: chatMessageParamsSchema, response: chatDetailSchema },
 
   // chat.ts
   'chat.send': { module: 'chat', method: 'POST', path: '/chat', body: chatRequestBodySchema, response: 'ui-message-stream' },
@@ -266,6 +270,10 @@ export const apiRoutes = {
   'data.export': { module: 'data', method: 'GET', path: '/data/export', query: dataExportQuerySchema, response: 'binary' },
   'data.import': { module: 'data', method: 'POST', path: '/data/import', form: dataImportFormSchema, response: dataImportResultSchema },
   'data.deleteAll': { module: 'data', method: 'POST', path: '/data/delete', fresh: true, body: dataDeleteBodySchema, response: dataDeleteResultSchema },
+
+  // audio.ts (ADR-029): dictation (multipart: the recording in the part `file`) and read-aloud (answers audio bytes)
+  'audio.transcribe': { module: 'audio', method: 'POST', path: '/audio/transcriptions', form: audioTranscribeFormSchema, response: audioTranscriptionSchema },
+  'audio.speech': { module: 'audio', method: 'POST', path: '/audio/speech', body: audioSpeechBodySchema, response: 'binary' },
 
   // shares.ts (ADR-025): owner routes under `/shares`, public routes under `/share/:token`
   'shares.list': { module: 'shares', method: 'GET', path: '/shares', query: sharesQuerySchema, response: listResponseSchema(shareSummarySchema) },

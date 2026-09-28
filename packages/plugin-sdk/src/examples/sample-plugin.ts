@@ -1,8 +1,8 @@
-// Sample code plugin (not exported from the package entry): registers a provider, a tool, a command and a hook using
-// only `ctx` (runtime libraries come from `ctx.ai`). It doubles as a type test of the SDK: it must typecheck without
-// casts. A real plugin would live in `data/plugins/sample-kit/` with this manifest as `plugin.json` and
-// `"main": "index.ts"`.
-import type { PluginManifest, ReasoningLevel, ToolDefinition } from '../index.ts'
+// Sample code plugin (not exported from the package entry): registers a provider (with an image model, plugin API
+// 1.1.0), a tool, a command and a hook using only `ctx` (runtime libraries come from `ctx.ai`). It doubles as a type
+// test of the SDK: it must typecheck without casts. A real plugin would live in `data/plugins/sample-kit/` with this
+// manifest as `plugin.json` and `"main": "index.ts"`.
+import type { PluginManifest, ProviderRuntime, ReasoningLevel, ToolDefinition } from '../index.ts'
 import { definePlugin } from '../index.ts'
 
 export const manifest = {
@@ -38,6 +38,13 @@ function baseURL(credentials: Record<string, string>): string {
 export default definePlugin({
   setup(ctx) {
     const { z } = ctx.ai
+    const compatible = (rt: ProviderRuntime) => ctx.ai.createOpenAICompatible({
+      name: 'sample-kit',
+      baseURL: baseURL(rt.credentials),
+      apiKey: rt.credentials.apiKey,
+      fetch: rt.fetch,
+      includeUsage: true,
+    })
 
     ctx.providers.register({
       id: 'sample-kit',
@@ -51,16 +58,23 @@ export default definePlugin({
       seedModels: [
         { id: 'sample-large', name: 'Sample Large', capabilities: { tools: true, reasoning: true }, reasoningEfforts: ['low', 'medium', 'high'] },
         { id: 'sample-small', name: 'Sample Small', capabilities: { tools: true } },
+        { id: 'sample-image', name: 'Sample Image', kind: 'image', capabilities: { vision: true } },
       ],
       createLanguageModel(modelId, rt) {
-        const provider = ctx.ai.createOpenAICompatible({
-          name: 'sample-kit',
-          baseURL: baseURL(rt.credentials),
-          apiKey: rt.credentials.apiKey,
-          fetch: rt.fetch,
-          includeUsage: true,
-        })
-        return provider.chatModel(modelId)
+        return compatible(rt).chatModel(modelId)
+      },
+      createImageModel(modelId, rt) {
+        return compatible(rt).imageModel(modelId)
+      },
+      imageParams(request) {
+        // An images API with three sizes: the aspect ratio picks the closest one ("Auto" sends nothing).
+        if (request.aspectRatio === undefined)
+          return undefined
+        const [width = 1, height = 1] = request.aspectRatio.split(':').map(Number)
+        return { size: width === height ? '1024x1024' : width > height ? '1536x1024' : '1024x1536' }
+      },
+      transcriptionOptions(hints) {
+        return hints.language === undefined ? undefined : { 'sample-kit': { language: hints.language } }
       },
       async listModels(rt) {
         const response = await rt.fetch(`${baseURL(rt.credentials)}/models`, {

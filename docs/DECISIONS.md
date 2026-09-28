@@ -35,6 +35,9 @@ resolves the conflict.
 | ADR-025 | Read-only share links: a sanitized snapshot of a chat's active path in `chat_shares`, served at `/share/<token>` (public `GET /api/share/:token` + share-scoped files); token = share id suffix + HMAC (keyring subkey `share`) | Share a conversation without exposing the app or live data | No token is stored (the owner can copy the link again; revoke deletes the row; a new master key invalidates every link); allowlist sanitizer; fresh auth to create or update; exposing links requires `HF_PASSWORD` (the passwordless host guard is unchanged); every response carries `X-Robots-Tag: noindex, nofollow`; tokens are masked in logs |
 | ADR-026 | Trusted reverse proxies: `HF_TRUST_PROXY` = comma list of `loopback`, `private`, IP addresses or CIDRs; `X-Forwarded-For` / `X-Forwarded-Proto` are honored only from a trusted peer; `X-Forwarded-Host` is never honored | The login rate limiter and Secure cookies need the real client behind Caddy / nginx | Unset keeps the v1 behavior; proxies must forward `Host`; `1`, `true`, other boolean words, hop counts, `/0` ranges, `localhost` and unknown tokens are rejected at boot |
 | ADR-027 | Opt-in live provider suite (`pnpm test:live`, `HF_LIVE=1` + provider keys) and dependency automation (`pnpm audit` workflow, Dependabot) | v1 was only exercised with the mock provider; supply-chain hygiene | `pnpm test` never calls a paid API; the live suite runs in CI only on manual dispatch; Dependabot ignores TypeScript updates (ADR-013); Phase 6: Dependabot's cooldown equals pnpm 11's built-in minimum-release-age (1 day, a longer one proposed versions older than the lock), 0.x packages never share the minor group (their minor bumps get their own pull requests), the AI SDK packages form one group, and an `actionlint` CI job lints the workflows |
+| ADR-028 | Image generation (Phase 6): image turns with dedicated image models (`kind: 'image'`, `generateImage`), image output from chat models with `capabilities.imageOutput` (provider options from `ProviderDefinition.imageParams`), and a builtin `generate_image` tool (`core-tools`, policy `ask`, model from the `imageModelRef` setting); every generated file is stored in `files` before it is streamed or saved (the chat stream runs inside `createUIMessageStream` + `writer.merge`), so no `data:` URL reaches the `messages` table | Pictures from the user's own providers; the models.dev snapshot already lists image models of both kinds (dedicated and chat models with image output) | Plugin API 1.1.0 (`createImageModel`, `imageParams`, `ctx.images.generate`); history carries the latest generated images into the next user message for vision models (most provider converters drop images in assistant messages) and replaces older ones with `[Generated image: <name>]`; image turns send no history; usage rows with purpose `image` and an estimated cost; no new route or table; declarative image providers stay in the backlog |
+| ADR-029 | Voice (Phase 6): dictation (browser `MediaRecorder` -> `POST /api/audio/transcriptions` -> `transcribe()`) and read-aloud (`POST /api/audio/speech` -> `generateSpeech()`) through the user's own providers; the models are opt-in settings; audio and text pass through the server and are never stored or logged | Voice without browser speech APIs, which break bring-your-own-key (Chrome's recognition sends audio to Google) | Model kinds `transcription` and `speech`, `ModelInfo.voices`; plugin API 1.1.0 (`createTranscriptionModel`, `createSpeechModel`, `transcriptionOptions`); `Permissions-Policy: microphone=(self)` and SPA CSP `media-src 'self' blob:`; the microphone needs HTTPS or localhost; usage rows with purpose `transcription` / `speech` (no cost); audio is accepted only on the transcription route (chat uploads unchanged) |
+| ADR-030 | Versions (Phase 6, amends ADR-023): each message remembers the child last shown under it (`messages.selected_child_id`, a hint without a foreign key; migration `0002` backfills the active paths), so switching to a version restores the path last shown under it; `DELETE /chats/:id/messages/:messageId` deletes one version and everything after it, only when another version exists and never during a run; `chat.updated` carries `activeLeafId` so other tabs follow a switch | Switching back jumped to the newest leaf; unwanted versions piled up; other tabs kept showing an old version | 409 `only-version` / `run-active`; the active path moves to the previous sibling's remembered leaf (else the next); usage rows, share snapshots and files are kept; the pointer is not exported (chat export v2 and backups unchanged) |
 
 ## Contract seed
 
@@ -74,7 +77,7 @@ resolves the conflict.
 Test-only variables: `HF_LIVE` (`1` enables the live provider suite, `pnpm test:live`), `HF_LIVE_PROVIDERS` (comma
 list of provider ids to run), `HF_LIVE_MAX_COST_USD` (budget of one live run), `HF_TEST_REQUIRE_WEB_BUILD` (`1`
 turns the skipped built-page CSP test into a failure when the web build is missing), `E2E_SCREENSHOTS` (`1` runs the
-`@screenshots` Playwright spec).
+`@screenshots` Playwright spec), `HF_LIVE_MEDIA` (`1` adds the image and voice checks to the live suite; Phase 6).
 
 ### Data directory
 
@@ -100,6 +103,9 @@ data/
 - **Plugin provider ids**: `<pluginId>` or `<pluginId>-<suffix>`.
 - **Tool name**: `^[a-zA-Z0-9_-]{1,64}$`, globally unique. MCP tools: `mcp__<serverId>__<tool>` (truncated with a
   short hash when longer than 64).
+- **Builtin tool names**: `current_time`, `web_fetch`, `generate_image` (Phase 6, ADR-028), all from `core-tools`.
+- **Plugin API version** (`PLUGIN_API_VERSION`): `1.1.0` (Phase 6, additive: image, transcription and speech
+  factories, `imageParams`, `transcriptionOptions`, `ctx.images`).
 - **Command name**: `^[a-z][a-z0-9-]{0,31}$` (typed as `/name`). Client-only commands: `/new`, `/model`, `/effort`,
   `/mode`, `/help`.
 - **Chat id**: uuidv7 generated by the client for new chats. **Message id**: `msg_` + 16 chars; user messages get
@@ -109,7 +115,9 @@ data/
   first 22 base64url chars of `HMAC-SHA256(subkey 'share', 'harness-forge/share/v1:' + shareId)`; never stored
   (ADR-025). Share page URL: `/share/<token>`.
 - **Message tree** (ADR-023): `messages.parent_id` (null = a first message; siblings share a parent),
-  `chats.active_leaf_id` (last message of the shown path; null = empty chat); `seq` = creation order.
+  `chats.active_leaf_id` (last message of the shown path; null = empty chat); `seq` = creation order;
+  `messages.selected_child_id` (ADR-030: the child last shown under a message, a hint; null or a missing child = the
+  latest leaf).
 - **Secret scopes**: `provider:<id>`, `plugin:<id>`, `mcp:<id>`, `auth`.
 - **Keyring subkeys** (HKDF of the master key): `encryption`, `session`, `approval`, `share`.
 
@@ -122,6 +130,9 @@ data/
   plugin `state` = `disabled | untrusted | incompatible | loading | active | error`.
 - Provider status = `connected | not_configured | env | error`.
 - Declarative `apiFormat` = `openai-chat | openai-responses | anthropic | google`.
+- Model `kind` = `chat | embedding | image | audio | transcription | speech | other` (`transcription` and `speech`
+  added in Phase 6). Usage `purpose` = `chat | title | image | transcription | speech`.
+- Conflict `details.reason` (409) = `run-active | busy | exists | only-version`.
 
 ### HTTP API (all under `/api`) — endpoint → server route module
 
@@ -135,7 +146,7 @@ data/
 | `credentials.ts` | `PUT /providers/:id/credentials`, `DELETE /providers/:id/credentials` |
 | `models.ts` | `GET /models`, `POST /providers/:id/models/refresh`, `PUT /model-prefs`, `POST /custom-models`, `DELETE /custom-models?providerId&modelId` |
 | `icons.ts` | `GET /icons/lobe`, `GET /icons/lobe/:slug` |
-| `chats.ts` | `GET /chats?cursor&q`, `POST /chats`, `GET /chats/:id`, `PATCH /chats/:id`, `DELETE /chats/:id`, `GET /chats/:id/export?format=md\|json`, `POST /chats/:id/branch` |
+| `chats.ts` | `GET /chats?cursor&q`, `POST /chats`, `GET /chats/:id`, `PATCH /chats/:id`, `DELETE /chats/:id`, `GET /chats/:id/export?format=md\|json`, `POST /chats/:id/branch`, `DELETE /chats/:id/messages/:messageId` |
 | `chat.ts` | `POST /chat` (UI message stream), `GET /chat/:id/stream` (resume; 204 when idle), `POST /chat/:id/stop` |
 | `files.ts` | `POST /files`, `GET /files/:id` |
 | `tools.ts` | `GET /tools`, `PATCH /tools/:name` |
@@ -146,6 +157,7 @@ data/
 | `plugin-drafts.ts` | `POST /plugins` (create declarative), `POST /plugins/drafts/test`, `PUT /plugins/:id/manifest` |
 | `plugin-files.ts` | `POST /plugins/scaffold`, `GET /plugins/:id/files`, `GET /plugins/:id/files/*`, `PUT /plugins/:id/files/*`, `DELETE /plugins/:id/files/*`, `POST /plugins/:id/build` |
 | `data.ts` | `GET /data`, `GET /data/export?files&settings`, `POST /data/import`, `POST /data/delete` |
+| `audio.ts` | `POST /audio/transcriptions`, `POST /audio/speech` |
 | `shares.ts` | `GET /shares?chatId`, `POST /shares`, `PATCH /shares/:id`, `DELETE /shares/:id`, `GET /share/:token` (public), `GET /share/:token/files/:fileId` (public) |
 
 ### Error envelope
@@ -159,32 +171,36 @@ provider status when relevant; the HTTP status is derived from `code` (`errorSta
 
 ### Server-sent events (`GET /api/events`)
 
-`chat.created`, `chat.updated` (incl. title), `chat.deleted`, `run.started`, `run.finished`, `provider.changed`,
+`chat.created`, `chat.updated` (incl. title; data = the chat summary + `activeLeafId`, ADR-030), `chat.deleted`, `run.started`, `run.finished`, `provider.changed`,
 `catalog.changed`, `plugin.changed`, `plugin.log`. Payload: `{ type, data, at }`. `run.finished` data includes
 `awaitingApproval: boolean` (drives the amber sidebar dot; also persisted as `chats.pending_approval`).
 
 ### Chat request (`POST /api/chat`)
 
 `{ chatId, message, trigger: 'submit-message' | 'regenerate-message', parentId?, messageId?, modelRef,
-reasoningEffort, toolMode }` — only the last UI message is sent; the server owns history. `parentId` (a message id or
+reasoningEffort, toolMode, imageOptions? }` — only the last UI message is sent; the server owns history. `parentId` (a message id or
 `null`) only with `submit-message` and a user message: the new message's parent (an edit = a new user message whose
 parent is the edited message's parent); omitted = the chat's active leaf. `messageId` only with `regenerate-message`
 (the reply to regenerate or the user message to answer). A user message sent with `messageId` is rejected (ADR-023).
-Message metadata: `{ modelRef, startedAt, finishedAt?, durationMs?, reasoningMs?, usage?, costUsd?, finishReason?,
-aborted?, error?, command? }`.
+`imageOptions` (`{ n?, aspectRatio?, editPrevious? }`, ADR-028) only with an image model or a chat model with image
+output (`n` / `editPrevious` image models only). Message metadata: `{ modelRef, startedAt, finishedAt?, durationMs?,
+reasoningMs?, usage?, costUsd?, finishReason?, aborted?, error?, command?, image? }`.
 
 ### Global settings keys (`GET/PUT /api/settings`)
 
 `displayName`, `defaultModelRef`, `titleModelRef`, `instructions`, `sendKey` (`enter | mod-enter`),
 `defaultToolMode`, `defaultReasoningEffort`, `maxSteps` (20), `altShortcuts` (true), `showThinking` (false),
-`density` (`comfortable | compact`), `readingFont` (`sans | serif`), `textSize` (`sm | md | lg`).
+`density` (`comfortable | compact`), `readingFont` (`sans | serif`), `textSize` (`sm | md | lg`); Phase 6:
+`imageModelRef` (null), `transcriptionModelRef` (null = dictation off), `transcriptionLanguage` (`auto`),
+`speechModelRef` (null = read-aloud off), `speechVoice` (null = provider default), `speechSpeed` (1).
 The theme itself is stored client-side by `@nuxtjs/color-mode` (key `hf-color-mode`) so it applies before boot.
 
 ### Database tables
 
 `settings`, `secrets`, `provider_configs`, `model_cache`, `model_prefs`, `chats`, `messages`, `usage`, `plugins`,
 `plugin_settings`, `plugin_kv`, `tool_prefs`, `mcp_servers`, `files`, `chat_shares` — columns in
-`docs/ARCHITECTURE.md`. Migrations: `0000_initial_schema`, `0001` (message tree + `chat_shares`, Phase 5).
+`docs/ARCHITECTURE.md`. Migrations: `0000_initial_schema`, `0001` (message tree + `chat_shares`, Phase 5), `0002` (remembered versions:
+`messages.selected_child_id` + backfill, Phase 6).
 
 ### Chat export and backup formats
 
@@ -208,7 +224,9 @@ kind enum).
 ### Mock provider (dev only)
 
 Models `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error`; the approval tool is named
-`mock_approval_tool` (policy `ask`). Behavior is specified in PROVIDERS.md.
+`mock_approval_tool` (policy `ask`). Phase 6 adds `mock:image` (image model), `mock:image-chat` (chat model with image
+output), `mock:image-tool` (calls `generate_image`), `mock:transcribe` (transcription) and `mock:speech` (speech).
+Behavior is specified in PROVIDERS.md.
 
 ### Example plugins
 

@@ -176,10 +176,10 @@ describe('chats store: events', () => {
     chats.applyEvent({ type: 'chat.created', data: created, at: 1 })
     expect(chats.items[0]?.id).toBe(chatId(9))
 
-    chats.applyEvent({ type: 'chat.updated', data: { ...yesterday, title: 'Renamed', updatedAt: NOW + 1 }, at: 2 })
+    chats.applyEvent({ type: 'chat.updated', data: { ...yesterday, title: 'Renamed', updatedAt: NOW + 1, activeLeafId: null }, at: 2 })
     expect(chats.items.map(chat => chat.title)).toEqual(['Renamed', null, 'Today'])
 
-    chats.applyEvent({ type: 'chat.updated', data: { ...today, archived: true }, at: 3 })
+    chats.applyEvent({ type: 'chat.updated', data: { ...today, archived: true, activeLeafId: null }, at: 3 })
     expect(chats.byId(today.id)).toBeUndefined()
 
     chats.applyEvent({ type: 'chat.deleted', data: { id: chatId(9) }, at: 4 })
@@ -193,9 +193,9 @@ describe('chats store: events', () => {
 
     api.chats.list.mockResolvedValue({ items: [today], nextCursor: 'more' })
     await chats.fetchPage()
-    chats.applyEvent({ type: 'chat.updated', data: lastMonth, at: 2 })
+    chats.applyEvent({ type: 'chat.updated', data: { ...lastMonth, activeLeafId: null }, at: 2 })
     expect(chats.byId(lastMonth.id)).toBeUndefined()
-    chats.applyEvent({ type: 'chat.updated', data: { ...lastMonth, running: true }, at: 3 })
+    chats.applyEvent({ type: 'chat.updated', data: { ...lastMonth, running: true, activeLeafId: null }, at: 3 })
     expect(chats.statusOf(lastMonth.id)).toBe('running')
   })
 })
@@ -248,7 +248,7 @@ describe('chats store: actions', () => {
     expect(chats.items.map(chat => chat.id)).toEqual([today.id, yesterday.id])
 
     const deleted = chats.remove(today.id)
-    chats.applyEvent({ type: 'chat.updated', data: today, at: 1 })
+    chats.applyEvent({ type: 'chat.updated', data: { ...today, activeLeafId: null }, at: 1 })
     expect(chats.byId(today.id)).toBeUndefined()
     await vi.advanceTimersByTimeAsync(4999)
     expect(api.chats.remove).not.toHaveBeenCalled()

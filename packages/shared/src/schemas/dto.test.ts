@@ -11,10 +11,18 @@ import {
   harnessUIMessageSchema,
   messageMetadataSchema,
 } from '../chat.ts'
-import { conflictDetailsSchema } from '../errors.ts'
-import { createServerEvent, SERVER_EVENT_TYPES, serverEventSchema } from '../events.ts'
+import { modelKindSchema } from '../enums.ts'
+import { conflictDetailsSchema, conflictReasonSchema } from '../errors.ts'
+import { chatUpdatedDataSchema, createServerEvent, SERVER_EVENT_TYPES, serverEventSchema } from '../events.ts'
 import { createMessageId } from '../ids.ts'
 import { isAllowedUploadMime, LIMITS, UPLOAD_MIME_PATTERNS } from '../limits.ts'
+import {
+  audioSpeechBodySchema,
+  audioTranscribeFormSchema,
+  audioTranscriptionSchema,
+  speechVoiceSchema,
+  transcriptionLanguageSchema,
+} from './audio.ts'
 import {
   chatBranchBodySchema,
   chatCreateSchema,
@@ -38,8 +46,25 @@ import {
   dataImportResultSchema,
   dataSummarySchema,
 } from './data.ts'
-import { modelPrefsUpdateSchema, modelsQuerySchema } from './models.ts'
-import { pluginFileParamsSchema, shareFileParamsSchema, shareParamsSchema, sharePublicParamsSchema } from './params.ts'
+import {
+  GENERATE_IMAGE_TOOL_NAME,
+  GENERATED_IMAGE_MIME_TYPES,
+  generateImageToolInputSchema,
+  generateImageToolOutputSchema,
+  IMAGE_ASPECT_RATIOS,
+  imageAspectRatioSchema,
+  imageOptionsSchema,
+  imageTurnMetadataSchema,
+} from './images.ts'
+import { catalogModelSchema, customModelInputSchema, modelCapabilitiesSchema, modelPrefsUpdateSchema, modelsQuerySchema } from './models.ts'
+import {
+  chatMessageParamsSchema,
+  pluginFileParamsSchema,
+  shareFileParamsSchema,
+  shareParamsSchema,
+  sharePublicParamsSchema,
+} from './params.ts'
+import { modelInfoSchema } from './plugin-data.ts'
 import {
   draftTestRequestSchema,
   iconFileInputSchema,
@@ -87,10 +112,69 @@ describe('settings', () => {
       density: 'comfortable',
       readingFont: 'sans',
       textSize: 'md',
+      imageModelRef: null,
+      transcriptionModelRef: null,
+      transcriptionLanguage: 'auto',
+      speechModelRef: null,
+      speechVoice: null,
+      speechSpeed: 1,
     })
     expect(Object.isFrozen(DEFAULT_SETTINGS)).toBe(true)
-    expect(SETTINGS_KEYS).toHaveLength(13)
+    expect(SETTINGS_KEYS).toHaveLength(19)
     expect(settingsSchema.parse({ maxSteps: 5, _auth: 'internal' })).toEqual({ ...DEFAULT_SETTINGS, maxSteps: 5 })
+  })
+
+  it('reads settings stored by v1.1 (without the Phase 6 keys) with the new defaults', () => {
+    const v11 = {
+      displayName: 'Ada',
+      defaultModelRef: 'openai:gpt-6-sol',
+      titleModelRef: null,
+      instructions: 'Be brief.',
+      sendKey: 'mod-enter',
+      defaultToolMode: 'auto',
+      defaultReasoningEffort: 'high',
+      maxSteps: 30,
+      altShortcuts: false,
+      showThinking: true,
+      density: 'compact',
+      readingFont: 'serif',
+      textSize: 'lg',
+    }
+    expect(settingsSchema.parse(v11)).toEqual({
+      ...v11,
+      imageModelRef: null,
+      transcriptionModelRef: null,
+      transcriptionLanguage: 'auto',
+      speechModelRef: null,
+      speechVoice: null,
+      speechSpeed: 1,
+    })
+  })
+
+  it('validates the image and voice settings (Phase 6)', () => {
+    const update = {
+      imageModelRef: 'openai:gpt-image-2',
+      transcriptionModelRef: 'groq:whisper-large-v3-turbo',
+      transcriptionLanguage: 'de',
+      speechModelRef: 'openai:gpt-4o-mini-tts',
+      speechVoice: '  alloy ',
+      speechSpeed: 1.25,
+    }
+    expect(settingsUpdateSchema.parse(update)).toEqual({ ...update, speechVoice: 'alloy' })
+    expect(settingsUpdateSchema.parse({ transcriptionLanguage: 'auto', speechVoice: null, imageModelRef: null })).toEqual({ transcriptionLanguage: 'auto', speechVoice: null, imageModelRef: null })
+    for (const body of [
+      { imageModelRef: 'gpt-image-2' },
+      { transcriptionLanguage: 'EN' },
+      { transcriptionLanguage: 'english' },
+      { transcriptionLanguage: null },
+      { speechVoice: '' },
+      { speechVoice: 'a<b>' },
+      { speechVoice: 'v'.repeat(65) },
+      { speechSpeed: 0.25 },
+      { speechSpeed: 2.5 },
+      { speechSpeed: null },
+    ])
+      expect(settingsUpdateSchema.safeParse(body).success, JSON.stringify(body)).toBe(false)
   })
 
   it('validates partial updates strictly and without defaults', () => {
@@ -148,6 +232,30 @@ describe('chat contract', () => {
     expect(chatRequestBodySchema.parse({ ...body, parentId: null })).toMatchObject({ parentId: null })
     expect(chatRequestBodySchema.parse({ ...body, parentId: MESSAGE_A })).toMatchObject({ parentId: MESSAGE_A })
     expect(chatRequestBodySchema.parse({ ...body, trigger: 'regenerate-message', messageId: MESSAGE_B })).toMatchObject({ messageId: MESSAGE_B })
+  })
+
+  it('accepts imageOptions on the chat request (shape only; model rules are checked by the server)', () => {
+    const body = { chatId: CHAT_ID, message: userMessage, trigger: 'submit-message', modelRef: 'mock:image', reasoningEffort: 'auto', toolMode: 'ask' }
+    const imageOptions = { n: 2, aspectRatio: '16:9', editPrevious: false }
+    expect(chatRequestBodySchema.parse({ ...body, imageOptions })).toEqual({ ...body, imageOptions })
+    expect(chatRequestBodySchema.parse({ ...body, imageOptions: {} }).imageOptions).toEqual({})
+    for (const change of [{ n: 0 }, { n: 5 }, { aspectRatio: '21:9' }, { size: '1024x1024' }])
+      expect(chatRequestBodySchema.safeParse({ ...body, imageOptions: change }).success, JSON.stringify(change)).toBe(false)
+  })
+
+  it('carries image turn metadata and the generated-file-dropped notice', async () => {
+    const reply: HarnessUIMessage = {
+      id: createMessageId(),
+      role: 'assistant',
+      metadata: { modelRef: 'mock:image', startedAt: 1, image: { n: 2, aspectRatio: '1:1', inputs: 1, revisedPrompt: 'Mock: a cat' } },
+      parts: [
+        { type: 'file', mediaType: 'image/png', url: '/api/files/file_ABCdef0123456789' },
+        { type: 'data-notice', data: { level: 'warning', code: 'generated-file-dropped', message: 'A generated file was not kept.' } },
+      ],
+    }
+    await expect(validateUIMessages<HarnessUIMessage>({ messages: [reply], metadataSchema: messageMetadataSchema, dataSchemas: harnessDataSchemas })).resolves.toHaveLength(1)
+    expect(messageMetadataSchema.safeParse({ modelRef: 'mock:image', startedAt: 1, image: { n: 5 } }).success).toBe(false)
+    expect(messageMetadataSchema.safeParse({ modelRef: 'mock:image', startedAt: 1, image: {} }).success).toBe(false)
   })
 
   it('rejects invalid chat requests', () => {
@@ -489,6 +597,31 @@ describe('plugins', () => {
 })
 
 describe('server events', () => {
+  const summary: z.infer<typeof chatSummarySchema> = {
+    id: CHAT_ID,
+    title: 'Trip',
+    titleSource: 'user',
+    modelRef: 'mock:echo',
+    pinned: false,
+    archived: false,
+    running: false,
+    pendingApproval: false,
+    createdAt: 1,
+    updatedAt: 2,
+  }
+
+  it('chat.updated carries the active leaf (ADR-030): required, a message id or null', () => {
+    expect(chatUpdatedDataSchema.parse({ ...summary, activeLeafId: MESSAGE_A })).toEqual({ ...summary, activeLeafId: MESSAGE_A })
+    expect(serverEventSchema.parse({ type: 'chat.updated', data: { ...summary, activeLeafId: null }, at: 3 })).toMatchObject({ data: { activeLeafId: null } })
+    expect(serverEventSchema.safeParse({ type: 'chat.updated', data: summary, at: 3 }).success).toBe(false)
+    expect(serverEventSchema.safeParse({ type: 'chat.updated', data: { ...summary, activeLeafId: 'msg_short' }, at: 3 }).success).toBe(false)
+    // `chat.created` keeps the plain summary; the summary schema itself has no leaf.
+    expect(serverEventSchema.parse({ type: 'chat.created', data: summary, at: 3 }).data).toEqual(summary)
+    expect(chatSummarySchema.parse({ ...summary, activeLeafId: MESSAGE_A })).not.toHaveProperty('activeLeafId')
+    const event = createServerEvent('chat.updated', { ...summary, activeLeafId: MESSAGE_B }, 4)
+    expect(serverEventSchema.parse(event)).toEqual({ type: 'chat.updated', data: { ...summary, activeLeafId: MESSAGE_B }, at: 4 })
+  })
+
   it('covers the 9 event types', () => {
     expect(SERVER_EVENT_TYPES).toHaveLength(9)
     expectTypeOf<ServerEventType>().toEqualTypeOf<z.infer<typeof serverEventTypeSchema>>()
@@ -501,6 +634,145 @@ describe('server events', () => {
     expect(serverEventSchema.safeParse({ type: 'chat.renamed', data: {}, at: 1 }).success).toBe(false)
     const deleted: ServerEvent = { type: 'chat.deleted', data: { id: CHAT_ID }, at: 1 }
     expect(serverEventSchema.parse(deleted)).toEqual(deleted)
+  })
+})
+
+describe('images (ADR-028)', () => {
+  const image = { fileId: 'file_ABCdef0123456789', url: '/api/files/file_ABCdef0123456789', mediaType: 'image/png', name: 'image-1.png' }
+
+  it('lists the aspect ratios and the stored image types', () => {
+    expect(IMAGE_ASPECT_RATIOS).toEqual(['1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16'])
+    expect(imageAspectRatioSchema.options).toEqual([...IMAGE_ASPECT_RATIOS])
+    expect(GENERATED_IMAGE_MIME_TYPES).toEqual(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+    expect(GENERATE_IMAGE_TOOL_NAME).toBe('generate_image')
+    expect(LIMITS).toMatchObject({ imagesPerTurnMax: 4, imageInputsMax: 4, generatedImageBytes: LIMITS.uploadBytes, imagePromptMaxChars: 32_000 })
+  })
+
+  it('validates image options strictly', () => {
+    expect(imageOptionsSchema.parse({})).toEqual({})
+    expect(imageOptionsSchema.parse({ n: 4, aspectRatio: '9:16', editPrevious: true })).toEqual({ n: 4, aspectRatio: '9:16', editPrevious: true })
+    for (const options of [{ n: 0 }, { n: 5 }, { n: 1.5 }, { aspectRatio: '2:1' }, { aspectRatio: 'auto' }, { editPrevious: 'yes' }, { quality: 'hd' }])
+      expect(imageOptionsSchema.safeParse(options).success, JSON.stringify(options)).toBe(false)
+  })
+
+  it('validates image turn metadata', () => {
+    expect(imageTurnMetadataSchema.parse({ n: 1 })).toEqual({ n: 1 })
+    expect(imageTurnMetadataSchema.parse({ n: 2, aspectRatio: '3:2', inputs: 0, revisedPrompt: 'A cat' })).toMatchObject({ inputs: 0 })
+    for (const metadata of [{}, { n: 0 }, { n: 5 }, { n: 1, inputs: -1 }, { n: 1, inputs: 5 }, { n: 1, aspectRatio: '5:4' }, { n: 1, revisedPrompt: 'x'.repeat(32_001) }])
+      expect(imageTurnMetadataSchema.safeParse(metadata).success, JSON.stringify(metadata).slice(0, 80)).toBe(false)
+  })
+
+  it('validates the generate_image tool input', () => {
+    expect(generateImageToolInputSchema.parse({ prompt: '  a red fox  ', n: 2, aspectRatio: '16:9' })).toEqual({ prompt: 'a red fox', n: 2, aspectRatio: '16:9' })
+    for (const input of [{}, { prompt: '   ' }, { prompt: 'x'.repeat(32_001) }, { prompt: 'fox', n: 0 }, { prompt: 'fox', n: 5 }, { prompt: 'fox', aspectRatio: '1:2' }])
+      expect(generateImageToolInputSchema.safeParse(input).success, JSON.stringify(input).slice(0, 80)).toBe(false)
+  })
+
+  it('validates the generate_image tool output (file references, never bytes)', () => {
+    const output = { modelRef: 'openai:gpt-image-2', images: [image, { ...image, mediaType: 'image/webp', name: 'image-2.webp' }], costUsd: 0.04, revisedPrompt: 'A red fox' }
+    expect(generateImageToolOutputSchema.parse(output)).toEqual(output)
+    expect(generateImageToolOutputSchema.parse({ modelRef: 'mock:image', images: [image] })).toEqual({ modelRef: 'mock:image', images: [image] })
+    for (const change of [
+      { images: [] },
+      { images: Array.from({ length: 5 }).fill(image) },
+      { images: [{ ...image, url: 'data:image/png;base64,AAAA' }] },
+      { images: [{ ...image, url: 'https://example.com/image.png' }] },
+      { images: [{ ...image, mediaType: 'image/svg+xml' }] },
+      { images: [{ ...image, fileId: 'file_short' }] },
+      { images: [{ ...image, name: '' }] },
+      { modelRef: 'no-colon' },
+      { costUsd: -1 },
+    ])
+      expect(generateImageToolOutputSchema.safeParse({ ...output, ...change }).success, JSON.stringify(change).slice(0, 80)).toBe(false)
+  })
+
+  it('adds the required imageOutput capability; plugin models and custom models may omit it', () => {
+    const capabilities = { tools: true, vision: true, pdf: false, reasoning: false, structuredOutput: true }
+    expect(modelCapabilitiesSchema.safeParse(capabilities).success).toBe(false)
+    expect(modelCapabilitiesSchema.parse({ ...capabilities, imageOutput: true })).toEqual({ ...capabilities, imageOutput: true })
+    expect(modelInfoSchema.parse({ id: 'gemini-3-pro-image', capabilities: { imageOutput: true } })).toEqual({ id: 'gemini-3-pro-image', capabilities: { imageOutput: true } })
+    expect(modelInfoSchema.parse({ id: 'sample', capabilities: { tools: true } })).toEqual({ id: 'sample', capabilities: { tools: true } })
+    expect(customModelInputSchema.parse({ providerId: 'openai', modelId: 'gpt-image-2', kind: 'image', capabilities: { vision: true } })).toMatchObject({ kind: 'image' })
+  })
+})
+
+describe('voice (ADR-029)', () => {
+  it('adds the transcription and speech model kinds', () => {
+    expect(modelKindSchema.options).toEqual(['chat', 'embedding', 'image', 'audio', 'transcription', 'speech', 'other'])
+    expect(modelInfoSchema.parse({ id: 'whisper-large-v3-turbo', kind: 'transcription' })).toMatchObject({ kind: 'transcription' })
+    expect(modelInfoSchema.safeParse({ id: 'x', kind: 'tts' }).success).toBe(false)
+    expect(LIMITS).toMatchObject({ audioUploadBytes: 26_214_400, speechTextMaxChars: 4096, transcriptionMaxSeconds: 600, speechFirstChunkChars: 300, speechChunkChars: 1500 })
+  })
+
+  it('suggests voices on speech models (unique, at most 100)', () => {
+    expect(modelInfoSchema.parse({ id: 'gpt-4o-mini-tts', kind: 'speech', voices: ['alloy', 'echo'] }).voices).toEqual(['alloy', 'echo'])
+    for (const voices of [['alloy', 'alloy'], [''], ['v'.repeat(65)], Array.from({ length: 101 }, (_, index) => `voice-${index}`)])
+      expect(modelInfoSchema.safeParse({ id: 'tts', kind: 'speech', voices }).success, JSON.stringify(voices).slice(0, 60)).toBe(false)
+    const model = {
+      ref: 'openai:gpt-4o-mini-tts',
+      providerId: 'openai',
+      id: 'gpt-4o-mini-tts',
+      name: 'GPT-4o mini TTS',
+      alias: null,
+      kind: 'speech',
+      contextWindow: null,
+      maxOutputTokens: null,
+      capabilities: { tools: false, vision: false, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false },
+      reasoningEfforts: [],
+      cost: null,
+      favorite: false,
+      hidden: true,
+      custom: false,
+      source: 'seed',
+      lastUsedAt: null,
+    }
+    expect(catalogModelSchema.parse(model)).toEqual(model)
+    expect(catalogModelSchema.parse({ ...model, voices: ['alloy', 'nova'] }).voices).toEqual(['alloy', 'nova'])
+    expect(catalogModelSchema.safeParse({ ...model, voices: Array.from({ length: 101 }).fill('alloy') }).success).toBe(false)
+  })
+
+  it('validates the language and the voice', () => {
+    for (const language of ['auto', 'en', 'de', 'yue'])
+      expect(transcriptionLanguageSchema.safeParse(language).success, language).toBe(true)
+    for (const language of ['', 'e', 'EN', 'en-US', 'english', 'Auto'])
+      expect(transcriptionLanguageSchema.safeParse(language).success, language).toBe(false)
+    expect(speechVoiceSchema.parse(' en-US-Neural2-A ')).toBe('en-US-Neural2-A')
+    for (const voice of ['alloy', 'Kore', 'voice_1', 'narrator: calm', 'v2.1'])
+      expect(speechVoiceSchema.safeParse(voice).success, voice).toBe(true)
+    for (const voice of ['', '   ', 'a/b', 'a\nb', '<script>', 'v'.repeat(65)])
+      expect(speechVoiceSchema.safeParse(voice).success, voice).toBe(false)
+  })
+
+  it('validates the transcription form fields strictly', () => {
+    expect(audioTranscribeFormSchema.parse({})).toEqual({})
+    expect(audioTranscribeFormSchema.parse({ modelRef: 'groq:whisper-large-v3-turbo', language: 'auto' })).toEqual({ modelRef: 'groq:whisper-large-v3-turbo', language: 'auto' })
+    for (const form of [{ file: 'x' }, { modelRef: 'whisper' }, { language: 'EN' }, { prompt: 'names' }])
+      expect(audioTranscribeFormSchema.safeParse(form).success, JSON.stringify(form)).toBe(false)
+  })
+
+  it('validates transcriptions', () => {
+    const result = { text: 'Hello there.', language: 'en', durationSec: 2.5, modelRef: 'mock:transcribe' }
+    expect(audioTranscriptionSchema.parse(result)).toEqual(result)
+    expect(audioTranscriptionSchema.parse({ text: '', language: null, durationSec: null, modelRef: 'mock:transcribe' }).text).toBe('')
+    for (const change of [{ text: undefined }, { language: undefined }, { durationSec: -1 }, { modelRef: 'mock' }])
+      expect(audioTranscriptionSchema.safeParse({ ...result, ...change }).success, JSON.stringify(change)).toBe(false)
+  })
+
+  it('validates speech bodies strictly', () => {
+    expect(audioSpeechBodySchema.parse({ text: '  Hello world  ' })).toEqual({ text: 'Hello world' })
+    expect(audioSpeechBodySchema.parse({ text: 'x'.repeat(LIMITS.speechTextMaxChars), modelRef: 'mock:speech', voice: 'alloy' })).toMatchObject({ voice: 'alloy' })
+    for (const body of [{}, { text: '   ' }, { text: 'x'.repeat(LIMITS.speechTextMaxChars + 1) }, { text: 'hi', modelRef: 'speech' }, { text: 'hi', voice: '' }, { text: 'hi', speed: 2 }, { text: 'hi', format: 'mp3' }])
+      expect(audioSpeechBodySchema.safeParse(body).success, JSON.stringify(body).slice(0, 80)).toBe(false)
+  })
+})
+
+describe('message versions (ADR-030)', () => {
+  it('validates the params of a version delete and the only-version conflict', () => {
+    expect(chatMessageParamsSchema.parse({ id: CHAT_ID, messageId: MESSAGE_A })).toEqual({ id: CHAT_ID, messageId: MESSAGE_A })
+    for (const params of [{ id: CHAT_ID }, { id: 'x', messageId: MESSAGE_A }, { id: CHAT_ID, messageId: 'msg_short' }])
+      expect(chatMessageParamsSchema.safeParse(params).success, JSON.stringify(params)).toBe(false)
+    expect(conflictReasonSchema.options).toContain('only-version')
+    expect(conflictDetailsSchema.parse({ reason: 'only-version' })).toEqual({ reason: 'only-version' })
   })
 })
 
