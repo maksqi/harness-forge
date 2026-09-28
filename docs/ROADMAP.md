@@ -69,8 +69,8 @@ Web UI agents depend only on frozen contracts, stores and shell components, so w
 - [x] W4.3 packaging (tsdown build, start, Docker, CI)
 - [x] W4.4 docs + example plugins
 - [x] W4.6 core fixes (tool history with tools off, host refresh/onStateChange, credentials setFor, flaky watcher tests)
-- [ ] W4.5 full e2e (3 green runs, screenshots)
-- [ ] Final gate + checkpoint commit
+- [x] W4.5 full e2e (3 green runs, screenshots) — coordinator
+- [x] Final gate + checkpoint commit
 
 ## Doc follow-ups (batched into W4.4)
 
@@ -113,4 +113,5 @@ conversation branching · sharing links · knowledge/RAG · image generation · 
 | P0.5 C-b | C4, C5, C6 | audit ok; 834 tests; check + build green; 501 stubs verified; pins ok | 15915a4 |
 | Wave A | W1.1–W1.5, W2.2–W2.5 | audit ok; 2064 tests; build ok; providers/keys/persistence/auth/SSE/icons probes ok | b72bb90 |
 | Wave B | W2.1, W3.1–W3.5 | audit ok; 3108/3109 tests (known flaky fs.watch test passes alone); build ok; chat stream, approval, commands, tools, plugins, scaffold probes ok | 43070f5 |
-| Wave C | W2.6, W3.6, W4.1–W4.4, W4.6 | audit ok; 3530 tests; frozen install ok; build ok; e2e 27/27 (core 15 + plugins 12) | (this commit) |
+| Wave C | W2.6, W3.6, W4.1–W4.4, W4.6 | audit ok; 3530 tests; frozen install ok; build ok; e2e 27/27 (core 15 + plugins 12) | 146def9 |
+| Final gate | coordinator | e2e 27/27 ×3; `pnpm start` from empty data dir ok (secret.key 0600); Docker image (Node 24, non-root) smoke ok | (this commit) |
