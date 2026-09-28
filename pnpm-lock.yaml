@@ -268,8 +268,8 @@ importers:
         specifier: ^11.17.2
         version: 11.17.2
       motion-v:
-        specifier: ^2.4.4
-        version: 2.4.4(@vueuse/core@15.0.0(vue@3.5.43(typescript@6.0.3)))(vue@3.5.43(typescript@6.0.3))
+        specifier: ^2.5.0
+        version: 2.5.0(@vueuse/core@15.0.0(vue@3.5.43(typescript@6.0.3)))(vue@3.5.43(typescript@6.0.3))
       nanoid:
         specifier: ^6.0.1
         version: 6.0.1
@@ -5361,8 +5361,8 @@ packages:
   motion-utils@13.3.0:
     resolution: {integrity: sha512-sgSschQp7EseHInIlR7hBbMuvet3RA0bs28KPZAXJcGKGdxHGvh1ogpYDilY3bOMtl73EqPNmp75sAKHYPU5sg==}
 
-  motion-v@2.4.4:
-    resolution: {integrity: sha512-AMb3Acnl+xFZhCFqEklnpDK/STntM2BCrySqlnoinLnD7hgHmJ7p09RY5r3exhne2speoKM6KIEg7TMDy8cT9w==}
+  motion-v@2.5.0:
+    resolution: {integrity: sha512-3fFtKB2U421EzhiRrxZCnSOGt+o+Te9XUtgKFG44vpje/mM5Eu23VGc4lbaxm0ky8plhjk5usJgx3l1OEXm6oA==}
     peerDependencies:
       '@vueuse/core': '>=10.0.0'
       vue: '>=3.0.0'
@@ -12427,7 +12427,7 @@ snapshots:
 
   motion-utils@13.3.0: {}
 
-  motion-v@2.4.4(@vueuse/core@15.0.0(vue@3.5.43(typescript@6.0.3)))(vue@3.5.43(typescript@6.0.3)):
+  motion-v@2.5.0(@vueuse/core@15.0.0(vue@3.5.43(typescript@6.0.3)))(vue@3.5.43(typescript@6.0.3)):
     dependencies:
       '@vueuse/core': 15.0.0(vue@3.5.43(typescript@6.0.3))
       framer-motion: 13.4.4
