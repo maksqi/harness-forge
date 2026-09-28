@@ -1,6 +1,10 @@
 // Message persistence (table `messages`) behind `ChatMessageStore`: on the database (multi-statement writes run as one
 // atomic `batch`, so no interactive transaction holds the connection) or bound to a transaction of
 // `ChatsService.transaction()` (statements run in order inside it).
+//
+// Phase 5 skeleton (P5-0b): the message tree members (`listPath`, `appendMessage`, `setActiveLeaf`) answer
+// `not_implemented` and `upsertMessage` does not store a parent yet (every current caller omits it); W5.1 implements the
+// tree (ADR-023) and drops `replaceFrom`.
 import type { HarnessUIMessage } from '@harness-forge/shared'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db, DbExecutor } from '../../db/client.ts'
@@ -9,6 +13,7 @@ import type { ChatMessageStore } from './types.ts'
 import { HarnessError, MESSAGE_ID_PATTERN } from '@harness-forge/shared'
 import { and, asc, eq, gte, sql } from 'drizzle-orm'
 import { chats, messages } from '../../db/schema.ts'
+import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { guardDb, isConstraintError } from './db-errors.ts'
 import { toSearchText } from './text.ts'
 
@@ -113,6 +118,8 @@ export function createMessageStore(executor: DbExecutor, mode: StoreMode): ChatM
       return rows.map(rowToMessage)
     }),
 
+    listPath: rejectsNotImplemented('ChatMessageStore.listPath (W5.1)'),
+
     getMessage: (chatId, messageId) => guardDb(async () => {
       const [row] = await executor
         .select(MESSAGE_COLUMNS)
@@ -121,6 +128,10 @@ export function createMessageStore(executor: DbExecutor, mode: StoreMode): ChatM
         .limit(1)
       return row === undefined ? null : rowToMessage(row)
     }),
+
+    appendMessage: rejectsNotImplemented('ChatMessageStore.appendMessage (W5.1)'),
+
+    setActiveLeaf: rejectsNotImplemented('ChatMessageStore.setActiveLeaf (W5.1)'),
 
     upsertMessage: (chatId, message) => guardDb(async () => {
       checkMessage(message)

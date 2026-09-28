@@ -9,6 +9,8 @@
 //   `transaction()`, which the chat pipeline (W2.1) uses for its history operations.
 // - Events are emitted after the write: `chat.created` (create, ensure when it creates), `chat.updated` (update,
 //   touch, setTitle), `chat.deleted` (remove). Message operations emit nothing.
+// - Phase 5 skeleton (P5-0b): `switchBranch`, `allIds`, `importChat` and `removeAll` (and the tree members of the
+//   store) answer `not_implemented` until W5.1 implements the message tree (ADR-023); `get` still returns every message.
 import type { ChatDetail, ChatSettings, ChatSummary, CursorPage, UsageTotals } from '@harness-forge/shared'
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core'
 import type { ChatRow } from '../../db/schema.ts'
@@ -26,6 +28,7 @@ import {
 } from '@harness-forge/shared'
 import { and, desc, eq, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm'
 import { chats, messages, usage } from '../../db/schema.ts'
+import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { decodeChatCursor, encodeChatCursor } from './cursor.ts'
 import { databaseError, guardDb, isConstraintError } from './db-errors.ts'
 import { buildChatExport } from './export.ts'
@@ -63,6 +66,7 @@ function toRecord(row: ChatRow): ChatRecord {
     pinned: row.pinned,
     archived: row.archived,
     pendingApproval: row.pendingApproval,
+    activeLeafId: row.activeLeafId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -354,6 +358,14 @@ export function createChatsService(deps: AppDeps): ChatsService {
     }),
 
     export: (id, format) => guardDb(async () => buildChatExport(await detailOf(await requireRow(id)), format, Date.now())),
+
+    switchBranch: rejectsNotImplemented('ChatsService.switchBranch (W5.1)'),
+
+    allIds: rejectsNotImplemented('ChatsService.allIds (W5.1)'),
+
+    importChat: rejectsNotImplemented('ChatsService.importChat (W5.1)'),
+
+    removeAll: rejectsNotImplemented('ChatsService.removeAll (W5.1)'),
 
     find: id => guardDb(async () => {
       const row = await findRow(id)

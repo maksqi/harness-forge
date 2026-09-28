@@ -4,10 +4,10 @@
 // - `SessionService`  -> `createSessionService(deps)` in `security/session.ts` (W1.1)
 // - `Redactor`        -> `createRedactor()` in `security/redact.ts` (implemented; hardened in W4.1)
 
-/** HKDF subkeys derived from the master key (ARCHITECTURE.md 10.3). */
-export type SubkeyName = 'encryption' | 'session' | 'approval'
+/** HKDF subkeys derived from the master key (ARCHITECTURE.md 10.3). `share` was added in Phase 5 (ADR-025). */
+export type SubkeyName = 'encryption' | 'session' | 'approval' | 'share'
 
-export const SUBKEY_NAMES = ['encryption', 'session', 'approval'] as const satisfies readonly SubkeyName[]
+export const SUBKEY_NAMES = ['encryption', 'session', 'approval', 'share'] as const satisfies readonly SubkeyName[]
 
 /**
  * Master key + HKDF-SHA256 subkeys (salt `harness-forge/v1`, info = subkey name, 32 bytes).
@@ -21,7 +21,9 @@ export interface Keyring {
   readonly keyVersion: number
   /**
    * 32-byte subkey: `encryption` (AES-256-GCM secrets), `session` (HMAC of `hf_session`), `approval`
-   * (`experimental_toolApprovalSecret` of the chat pipeline). Always returns the same bytes for a name.
+   * (`experimental_toolApprovalSecret` of the chat pipeline), `share` (share link tokens: the first 22 base64url
+   * characters of `HMAC-SHA256(subkey, 'harness-forge/share/v1:' + shareId)`, ADR-025; a new master key invalidates
+   * every link). Always returns the same bytes for a name.
    */
   readonly subkey: (name: SubkeyName) => Uint8Array
 }

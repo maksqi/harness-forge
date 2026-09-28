@@ -6,8 +6,9 @@
 // 2. else `<dataDir>/secret.key`: base64 text of 32 bytes, generated once with `crypto.randomBytes(32)` and mode 0600.
 //    The file is written to a temporary name and hard-linked into place, so it is never partial and never replaces a
 //    key another process created first. A group/world accessible key file is refused (POSIX only).
-// Subkeys: HKDF-SHA256(masterKey, salt `harness-forge/v1`, info = subkey name, 32 bytes), derived eagerly; the master key
-// bytes are then zeroed. `subkey()` returns a fresh copy so a caller can never alter the key seen by others.
+// Subkeys (`SUBKEY_NAMES`: `encryption`, `session`, `approval`, `share`): HKDF-SHA256(masterKey, salt `harness-forge/v1`,
+// info = subkey name, 32 bytes), derived eagerly; the master key bytes are then zeroed. `subkey()` returns a fresh copy
+// so a caller can never alter the key seen by others.
 import type { AppDeps } from '../types.ts'
 import type { Keyring, SubkeyName } from './types.ts'
 import { Buffer } from 'node:buffer'

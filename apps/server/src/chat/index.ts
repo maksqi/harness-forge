@@ -126,6 +126,8 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
 
     isActive: chatId => registry.get(chatId)?.phase === 'streaming',
 
+    hasRun: chatId => registry.get(chatId) !== undefined,
+
     active: () => registry.list().flatMap((run) => {
       const active = toActiveRun(run)
       return active === null ? [] : [active]

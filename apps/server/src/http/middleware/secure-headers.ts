@@ -3,7 +3,8 @@
 // Third middleware of the chain; runs after the routes and the SPA answered (errors included). Sets, unless the route
 // set its own value: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`,
 // `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`,
-// `Permissions-Policy: camera=(), microphone=(), geolocation=()`, and `Strict-Transport-Security` only over HTTPS
+// `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `X-Robots-Tag: noindex, nofollow` (ADR-025), and
+// `Strict-Transport-Security` only over HTTPS
 // (`X-Forwarded-Proto: https` counts). `/api` responses (and JSON answers elsewhere, e.g. the not-found envelope) get
 // `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and `Cache-Control: no-store` unless the route
 // set its own (icons, files, SSE); the SPA HTML CSP (inline-script hashes of `200.html`) is set by `http/static.ts`.

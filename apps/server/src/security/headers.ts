@@ -3,7 +3,10 @@
 // built by `http/static.ts` from the served `200.html` / `index.html`. Owner: W1.1 (W1.1-T7).
 import { createHash } from 'node:crypto'
 
-/** Sent on every response (a route may set its own value first; it is then kept). */
+/**
+ * Sent on every response (a route may set its own value first; it is then kept). `X-Robots-Tag` (Phase 5, ADR-025)
+ * keeps share links, the SPA and the API out of search engines.
+ */
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
@@ -11,6 +14,7 @@ export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze(
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Cross-Origin-Resource-Policy': 'same-origin',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  'X-Robots-Tag': 'noindex, nofollow',
 })
 
 /** `Strict-Transport-Security`, sent only on HTTPS requests (`X-Forwarded-Proto: https` counts). */

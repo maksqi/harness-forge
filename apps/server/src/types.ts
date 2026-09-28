@@ -12,10 +12,12 @@ import type { IconService, ProviderService } from './providers/types.ts'
 import type { Registry } from './registry/types.ts'
 import type { Keyring, PasswordService, Redactor, SessionService } from './security/types.ts'
 import type { ChatsService } from './services/chats/types.ts'
+import type { DataService } from './services/data/types.ts'
 import type { EventBus } from './services/events/types.ts'
 import type { FilesService } from './services/files/types.ts'
 import type { CredentialService, SecretStore } from './services/secrets/types.ts'
 import type { SettingsService } from './services/settings/types.ts'
+import type { ShareService } from './services/shares/types.ts'
 
 /** Values created before the services (by `main.ts` or `createTestApp()`). */
 export interface AppBase {
@@ -60,9 +62,9 @@ export interface AppServices {
   readonly providers: ProviderService
   /** Model catalog (W1.4). */
   readonly catalog: ModelCatalog
-  /** Chats, messages, usage (W1.5). */
+  /** Chats, messages, usage (W1.5); the message tree and the bulk data members (W5.1, ADR-023 / ADR-024). */
   readonly chats: ChatsService
-  /** Uploaded files (W1.5). */
+  /** Uploaded files (W1.5); `importFile` / `purge` (W5.3, ADR-024). */
   readonly files: FilesService
   /** Chat runs: stream, resume, stop (W2.1). */
   readonly runs: ChatRunner
@@ -70,6 +72,10 @@ export interface AppServices {
   readonly tools: ToolService
   /** MCP clients (W3.5). */
   readonly mcp: McpManager
+  /** Bulk data: summary, backup export, import, delete-all (W5.3, ADR-024). */
+  readonly data: DataService
+  /** Read-only share links: owner operations and the public snapshot view (W5.4, ADR-025). */
+  readonly shares: ShareService
 }
 
 export interface AppDeps extends AppBase, AppServices {}

@@ -4,6 +4,9 @@
 //   const t = await createTestApp({ env: { HF_PASSWORD: 'secret' }, overrides: { events: createRecordingEventBus() } })
 //   const res = await t.request('/api/settings')          // or: await t.client.settings.get()
 //   await t.close()
+//
+// Phase 5 fakes (`./fakes.ts`): `overrides: { runs: createFakeChatRunner(), data: createFakeDataService(), shares:
+// createFakeShareService() }`, `factories: { chats: createFakeChatsService, files: createFakeFilesService }`.
 import type { ApiClient } from '@harness-forge/shared'
 import type { Hono } from 'hono'
 import type { Database, Db } from '../db/client.ts'

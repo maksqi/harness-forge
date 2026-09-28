@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // Settings -> General body (docs/UI.md 9.4): display name, send key, default permission mode and effort, max steps,
 // Alt shortcuts, custom instructions and the password block. Choices save at once (optimistic, toast on failure);
-// text fields save on blur or Enter (Mod+Enter in the instructions), Esc restores the saved value. Bulk data
-// export/import is not part of v1 (ADR-020): chats are exported one at a time from their menus.
+// text fields save on blur or Enter (Mod+Enter in the instructions), Esc restores the saved value. Bulk export,
+// import and delete-all live in Settings -> Data (docs/UI.md 9.8, ADR-024); a single chat is still exported from its
+// chat menus.
 import type { ReasoningEffort, SendKey, Settings, ToolMode } from '@harness-forge/shared'
 import { computed, ref, useId, watch } from 'vue'
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'

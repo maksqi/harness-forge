@@ -81,6 +81,31 @@ describe('subkeys', () => {
     expect(new Set(hex).size).toBe(SUBKEY_NAMES.length)
   })
 
+  it('derives the share subkey (ADR-025) like the others: stable and distinct from encryption, session and approval', () => {
+    expect(SUBKEY_NAMES).toEqual(['encryption', 'session', 'approval', 'share'])
+    const master = randomBytes(32)
+    const keyring = createMasterKeyring(master)
+    const share = keyring.subkey('share')
+    expect(share).toHaveLength(MASTER_KEY_BYTES)
+    expect(share).toEqual(new Uint8Array(hkdfSync('sha256', master, HKDF_SALT, 'share', MASTER_KEY_BYTES)))
+    // Stable: the same master key always gives the same share subkey (share tokens survive a restart).
+    expect(createMasterKeyring(master).subkey('share')).toEqual(share)
+    expect(keyring.subkey('share')).toEqual(share)
+    for (const other of ['encryption', 'session', 'approval'] as const)
+      expect(Buffer.from(keyring.subkey(other)).equals(Buffer.from(share)), other).toBe(false)
+    // Another master key gives another share subkey (a new master key invalidates every share link).
+    expect(createMasterKeyring(randomBytes(32)).subkey('share')).not.toEqual(share)
+  })
+
+  it('pins the derivation with known answers (changing salt, info or length would break stored secrets and links)', () => {
+    const keyring = createMasterKeyring(Uint8Array.from({ length: MASTER_KEY_BYTES }, (_value, index) => index))
+    const hex = (name: (typeof SUBKEY_NAMES)[number]): string => Buffer.from(keyring.subkey(name)).toString('hex')
+    expect(hex('encryption')).toBe('a0dde0c0959b7ff5ad308d8a6a270a0d70b6cbed73ea8e4939c508826d749749')
+    expect(hex('session')).toBe('13d1927af2f237c5039e1dc433eecba1399445ab9e2d2e1706ce85a8b11a431c')
+    expect(hex('approval')).toBe('0a674c9286f20bb80a73b4175858a92892df61c0dccd715ae5e2b4a5a19bba70')
+    expect(hex('share')).toBe('2e01ecf94039a337bc078d0d1cace809b1071370e6970e655dd30f487d20b156')
+  })
+
   it('returns a copy, so a caller cannot alter the key others see', () => {
     const keyring = createMasterKeyring(randomBytes(32))
     const first = keyring.subkey('session')

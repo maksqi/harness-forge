@@ -31,6 +31,7 @@ beforeAll(async () => {
     resume: () => null,
     stop,
     isActive: () => false,
+    hasRun: () => false,
     active: () => [],
     stopAll: async () => {},
   }

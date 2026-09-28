@@ -4,6 +4,8 @@
 // Every upload gets its own `files` row (id, sanitized name, validated type); identical bytes are stored once. Blobs are
 // written to a temporary file and renamed into place (never a partial blob), directories 0700, files 0600. Paths come
 // only from a row's validated sha256, never from request input.
+//
+// Phase 5 skeleton (P5-0b): `importFile` and `purge` (bulk data, ADR-024) answer `not_implemented` until W5.3.
 import type { FileRef } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
 import type { FilesService, StoredFile } from './types.ts'
@@ -14,6 +16,7 @@ import { Readable } from 'node:stream'
 import { createFileId, FILE_ID_PATTERN, HarnessError, LIMITS, SHA256_HEX_PATTERN, validationError } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { files } from '../../db/schema.ts'
+import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { guardDb, isConstraintError } from '../chats/db-errors.ts'
 import { sanitizeFileName } from './names.ts'
 import { resolveUploadType } from './sniff.ts'
@@ -168,5 +171,9 @@ export function createFilesService(deps: AppDeps): FilesService {
       const id = url.slice(FILE_URL_PREFIX.length)
       return FILE_ID_PATTERN.test(id) ? id : null
     },
+
+    importFile: rejectsNotImplemented('FilesService.importFile (W5.3)'),
+
+    purge: rejectsNotImplemented('FilesService.purge (W5.3)'),
   }
 }

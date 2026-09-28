@@ -146,6 +146,9 @@ server, use your slot `k` from the task prompt: `HF_PORT=879k HF_DATA_DIR=.tmp/<
   `apps/server/src/builtin-plugins/index.ts`, `apps/web/app/layouts/**`, store signatures in
   `apps/web/app/stores/**`, `apps/web/nuxt.config.ts`, every `package.json` and config file,
   `apps/web/app/components/{ui,ai-elements}/**`, CSS design tokens in `apps/web/app/assets/css/main.css`.
+  Added in Phase 5 (after Gate P5-0b): `apps/web/app/utils/testids.ts` (a new test id is a CCR), the new
+  `services/{data,shares}/types.ts`, `layouts/share.vue` and the ui store members `shareChatId` / `openShare` /
+  `closeShare` (see `docs/phases/phase-5-v1-1.md` "FREEZE in Phase 5").
 - **CCR (contract change request)**: if a frozen contract blocks you, write a local adapter inside your owned
   paths, keep working, and add a CCR to your report: file, current shape, proposed shape, reason.
 - **DEPENDENCY REQUEST**: never install packages. Use existing dependencies or Node built-ins; if something is truly

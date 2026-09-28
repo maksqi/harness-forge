@@ -1,6 +1,6 @@
-// UI store (docs/UI.md 11): overlays (command palette, shortcuts dialog, install dialog), the show-thinking
-// override, composer focus requests, the open chat and the appearance attributes. Signatures are frozen after
-// Phase 0.
+// UI store (docs/UI.md 11): overlays (command palette, shortcuts dialog, install dialog, share dialog), the
+// show-thinking override, composer focus requests, the open chat and the appearance attributes. Signatures are frozen
+// after Phase 0; Phase 5 adds shareChatId, openShare() and closeShare().
 import type { AppearanceSettings } from '~/utils/appearance'
 import { useEventListener } from '@vueuse/core'
 import { defineStore } from 'pinia'
@@ -31,6 +31,8 @@ export const useUiStore = defineStore('ui', () => {
   const composerFocusRequest = ref(0)
   /** Id of the chat shown on /chat/[id] (null elsewhere); run.finished of other chats marks them unread. */
   const activeChatId = ref<string | null>(null)
+  /** The chat whose Share dialog is open (docs/UI.md 7.14); null = the dialog is closed. */
+  const shareChatId = ref<string | null>(null)
 
   // ---------- getters ----------
 
@@ -90,6 +92,15 @@ export const useUiStore = defineStore('ui', () => {
     installDialogOpen.value = true
   }
 
+  /** Opens the single ShareDialog (mounted by layouts/default.vue) for `chatId`: "Share…" in the chat menus. */
+  function openShare(chatId: string) {
+    shareChatId.value = chatId
+  }
+
+  function closeShare() {
+    shareChatId.value = null
+  }
+
   function toggleShowThinking() {
     showThinkingOverride.value = !showThinking.value
   }
@@ -119,12 +130,15 @@ export const useUiStore = defineStore('ui', () => {
     showThinkingOverride,
     composerFocusRequest,
     activeChatId,
+    shareChatId,
     showThinking,
     openPalette,
     closePalette,
     togglePalette,
     openShortcuts,
     openInstall,
+    openShare,
+    closeShare,
     toggleShowThinking,
     requestComposerFocus,
     setActiveChat,

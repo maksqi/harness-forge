@@ -109,11 +109,11 @@ Details, owned paths and acceptance criteria: `docs/phases/phase-5-v1-1.md`. Dec
   - [x] C7 contracts: shared DTOs, 11 new routes, `docs/API.md`, 501 stubs (chat JSON export writes v2)
   - [x] D5 docs: `phase-5-v1-1.md`, UI.md, ARCHITECTURE.md, PROVIDERS.md, README, `.env.example`
   - [x] Gate + checkpoint commit
-- [ ] P5-0b Schema, migration `0001`, skeletons, FREEZE
-  - [ ] K3 schema + `pnpm db:generate` + backfill SQL (coordinator)
-  - [ ] C8 server skeleton (types, stub services, keyring `share`, `X-Robots-Tag`, upgrade test)
-  - [ ] C9 web skeleton (share layout, stub pages/components, test ids, Data nav, `ui.openShare`)
-  - [ ] Gate (incl. v1 data upgrade probe) + FREEZE + checkpoint commit
+- [x] P5-0b Schema, migration `0001`, skeletons, FREEZE
+  - [x] K3 schema + `pnpm db:generate` + backfill SQL (coordinator)
+  - [x] C8 server skeleton (types, stub services, keyring `share`, `X-Robots-Tag`, upgrade test)
+  - [x] C9 web skeleton (share layout, stub pages/components, test ids, Data nav, `ui.openShare`)
+  - [x] Gate (incl. v1 data upgrade probe) + FREEZE + checkpoint commit
 - [ ] P5-A Features + stabilization (9 agents)
   - [ ] W5.1 branching-server · [ ] W5.2 branching-web
   - [ ] W5.3 data-server · [ ] W5.5 data-web
@@ -144,4 +144,5 @@ deleting a message version · remembering the selected version per message · ma
 | Wave B | W2.1, W3.1–W3.5 | audit ok; 3108/3109 tests (known flaky fs.watch test passes alone); build ok; chat stream, approval, commands, tools, plugins, scaffold probes ok | d9dedb0 |
 | Wave C | W2.6, W3.6, W4.1–W4.4, W4.6 | audit ok; 3530 tests; frozen install ok; build ok; e2e 27/27 (core 15 + plugins 12) | f142fcc |
 | Final gate | coordinator | e2e 27/27 ×3; `pnpm start` from empty data dir ok (secret.key 0600); Docker image (Node 24, non-root) smoke ok | 6e3b442 |
-| P5-0a | coordinator (K1, K2), C7, D5 | audit ok; 3623 tests; build ok; built-page CSP test 38/38; 11 new routes mounted (501 / 400 body validation); e2e 27/27; `vue-stream-markdown` gone, TypeScript 6.0.3 only | (this commit) |
+| P5-0a | coordinator (K1, K2), C7, D5 | audit ok; 3623 tests; build ok; built-page CSP test 38/38; 11 new routes mounted (501 / 400 body validation); e2e 27/27; `vue-stream-markdown` gone, TypeScript 6.0.3 only | 0b56f45 |
+| P5-0b | coordinator (K3, K4), C8, C9 | audit ok; 3676 tests; build ok; CSP 38/38; e2e 27/27; v1 data upgrade probe ok (12/12 messages, parent chain + active leaves correct); `.gitignore` `data/` → `/data/` (source folders named `data` were ignored); FREEZE | (this commit) |

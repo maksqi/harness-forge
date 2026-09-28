@@ -10,6 +10,8 @@ import type {
   ModelInfo,
   PluginSource,
   ProviderStatus,
+  ShareOptions,
+  ShareSnapshot,
   TitleSource,
   ToolOverride,
   ToolPolicy,
@@ -129,8 +131,13 @@ export const chats = sqliteTable('chats', {
   settings: json<ChatSettings>('settings').notNull().default({}),
   pinned: bool('pinned').notNull().default(false),
   archived: bool('archived').notNull().default(false),
-  /** The last assistant message waits for a tool approval. */
+  /** The last message of the active path waits for a tool approval. */
   pendingApproval: bool('pending_approval').notNull().default(false),
+  /**
+   * Last message of the path shown (ADR-023); null = empty chat. No foreign key: `remove()` deletes the messages of a
+   * chat before the chat, and drizzle-kit cannot add `ON DELETE` to an `ALTER TABLE ... ADD` column.
+   */
+  activeLeafId: text('active_leaf_id'),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 }, table => [
@@ -141,7 +148,12 @@ export const messages = sqliteTable('messages', {
   /** `msg_` + 16 chars. */
   id: text('id').primaryKey(),
   chatId: text('chat_id').notNull().references(() => chats.id, { onDelete: 'cascade' }),
-  /** 0-based position in the chat. */
+  /**
+   * Parent message in the same chat (ADR-023): null = a first message; versions of a message share a parent. No
+   * foreign key (added by `ALTER TABLE` in migration 0001, which backfills a linear chain).
+   */
+  parentId: text('parent_id'),
+  /** Creation order in the chat (unique per chat; a child is always created after its parent). */
   seq: integer('seq', { mode: 'number' }).notNull(),
   role: text('role').$type<MessageRole>().notNull(),
   parts: json<HarnessUIMessage['parts']>('parts').notNull(),
@@ -153,6 +165,7 @@ export const messages = sqliteTable('messages', {
   updatedAt: updatedAt(),
 }, table => [
   uniqueIndex('messages_chat_seq_idx').on(table.chatId, table.seq),
+  index('messages_chat_parent_idx').on(table.chatId, table.parentId),
 ])
 
 /** One row per model call (chat run or title generation); kept when a chat is deleted. */
@@ -253,11 +266,41 @@ export const files = sqliteTable('files', {
   index('files_sha256_idx').on(table.sha256),
 ])
 
+/**
+ * Read-only share links (ADR-025): a sanitized snapshot of a chat's active path. The public token is derived from the
+ * id with the keyring subkey `share` and never stored; deleting the row revokes the link.
+ */
+export const chatShares = sqliteTable('chat_shares', {
+  /** `shr_` + 16 chars. */
+  id: text('id').primaryKey(),
+  chatId: text('chat_id').notNull().references(() => chats.id, { onDelete: 'cascade' }),
+  /** Title shown on the share page (null = the chat title at snapshot time). */
+  title: text('title'),
+  options: json<ShareOptions>('options').notNull(),
+  snapshot: json<ShareSnapshot>('snapshot').notNull(),
+  /** The only file ids the share may serve. */
+  fileIds: json<string[]>('file_ids').notNull().default([]),
+  /** Messages of the snapshot (the active path length at snapshot time). */
+  messageCount: integer('message_count', { mode: 'number' }).notNull().default(0),
+  snapshotAt: timestamp('snapshot_at').notNull(),
+  /** null = never expires. */
+  expiresAt: timestamp('expires_at'),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, table => [
+  index('chat_shares_chat_idx').on(table.chatId),
+])
+
 // ---------- relations (relational query API: `db.query.chats.findFirst({ with: { messages: true } })`) ----------
 
 export const chatsRelations = relations(chats, ({ many }) => ({
   messages: many(messages),
   usage: many(usage),
+  shares: many(chatShares),
+}))
+
+export const chatSharesRelations = relations(chatShares, ({ one }) => ({
+  chat: one(chats, { fields: [chatShares.chatId], references: [chats.id] }),
 }))
 
 export const messagesRelations = relations(messages, ({ one }) => ({
@@ -268,7 +311,7 @@ export const usageRelations = relations(usage, ({ one }) => ({
   chat: one(chats, { fields: [usage.chatId], references: [chats.id] }),
 }))
 
-/** Every table name (the 14 tables of DECISIONS.md "Database tables"). */
+/** Every table name (the 15 tables of DECISIONS.md "Database tables"). */
 export const TABLE_NAMES = [
   'settings',
   'secrets',
@@ -284,6 +327,7 @@ export const TABLE_NAMES = [
   'tool_prefs',
   'mcp_servers',
   'files',
+  'chat_shares',
 ] as const
 
 // ---------- row types ----------
@@ -302,3 +346,4 @@ export type PluginKvRow = typeof pluginKv.$inferSelect
 export type ToolPrefRow = typeof toolPrefs.$inferSelect
 export type McpServerRow = typeof mcpServers.$inferSelect
 export type FileRow = typeof files.$inferSelect
+export type ChatShareRow = typeof chatShares.$inferSelect

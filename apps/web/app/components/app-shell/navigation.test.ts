@@ -1,5 +1,7 @@
+import { DatabaseIcon } from '@lucide/vue'
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_LAST_ROUTES, isAppPath, modeOfPath, rememberRoute, sanitizeLastRoutes } from './navigation'
+import { testIds } from '~/utils/testids'
+import { DEFAULT_LAST_ROUTES, isAppPath, modeOfPath, rememberRoute, sanitizeLastRoutes, SETTINGS_LINKS } from './navigation'
 
 describe('modeOfPath', () => {
   it('maps route prefixes to sidebar modes', () => {
@@ -53,5 +55,31 @@ describe('sanitizeLastRoutes', () => {
     expect(isAppPath('//host')).toBe(false)
     expect(isAppPath('plugins')).toBe(false)
     expect(isAppPath(42)).toBe(false)
+  })
+})
+
+describe('settings links', () => {
+  it('lists the settings pages in sidebar order, Data between Appearance and About', () => {
+    expect(SETTINGS_LINKS.map(link => [link.key, link.label, link.to])).toEqual([
+      ['providers', 'Providers', '/settings/providers'],
+      ['models', 'Models', '/settings/models'],
+      ['general', 'General', '/settings/general'],
+      ['appearance', 'Appearance', '/settings/appearance'],
+      ['data', 'Data', '/settings/data'],
+      ['about', 'About', '/settings/about'],
+    ])
+  })
+
+  it('gives every link its own nav test id and the Data link the database icon', () => {
+    expect(SETTINGS_LINKS.map(link => link.testId)).toEqual([
+      testIds.settingsNavProviders,
+      testIds.settingsNavModels,
+      testIds.settingsNavGeneral,
+      testIds.settingsNavAppearance,
+      testIds.settingsNavData,
+      testIds.settingsNavAbout,
+    ])
+    expect(SETTINGS_LINKS.find(link => link.key === 'data')?.icon).toBe(DatabaseIcon)
+    expect(SETTINGS_LINKS.every(link => modeOfPath(link.to) === 'settings')).toBe(true)
   })
 })

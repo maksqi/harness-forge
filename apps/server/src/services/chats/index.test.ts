@@ -7,6 +7,7 @@ import { CHAT_ID_PATTERN, chatDetailSchema, chatSummarySchema, HarnessError, ser
 import { eq } from 'drizzle-orm'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { chats, messages, usage } from '../../db/schema.ts'
+import { SAMPLE_CHAT_EXPORT } from '../../testing/api-samples.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createRecordingEventBus } from '../../testing/fakes.ts'
 import { IMPORT_DENIAL_REASON } from './import.ts'
@@ -59,6 +60,7 @@ beforeEach(async () => {
     resume: () => null,
     stop: async () => false,
     isActive: id => activeRuns.has(id),
+    hasRun: id => activeRuns.has(id),
     active: () => [],
     stopAll: async () => {},
   }
@@ -430,5 +432,44 @@ describe('messages', () => {
     expect((await service.listMessages(id)).map(message => message.id)).toEqual([messageId(1), messageId(3)])
     const result = await service.transaction(async store => (await store.listMessages(id)).length)
     expect(result).toBe(2)
+  })
+})
+
+describe('phase 5 skeleton (P5-0b)', () => {
+  it('fills ChatRecord.activeLeafId from the row (find and ensure)', async () => {
+    const created = await service.ensure(chatId(1), { modelRef: 'mock:echo' })
+    expect(created.chat.activeLeafId).toBeNull()
+    await service.upsertMessage(chatId(1), userMessage(messageId(1), 'q1'))
+    await t.db.update(chats).set({ activeLeafId: messageId(1) }).where(eq(chats.id, chatId(1)))
+    expect((await service.find(chatId(1)))?.activeLeafId).toBe(messageId(1))
+    expect((await service.ensure(chatId(1))).chat.activeLeafId).toBe(messageId(1))
+  })
+
+  it('answers not_implemented for the members W5.1 implements', async () => {
+    const id = await insertChat(2, 1000)
+    const calls: Array<[string, () => Promise<unknown>]> = [
+      ['listPath', () => service.listPath(id, null)],
+      ['appendMessage', () => service.appendMessage(id, userMessage(messageId(1), 'x'), null)],
+      ['setActiveLeaf', () => service.setActiveLeaf(id, messageId(1))],
+      ['switchBranch', () => service.switchBranch(id, messageId(1))],
+      ['allIds', () => service.allIds()],
+      ['importChat', () => service.importChat({ exported: SAMPLE_CHAT_EXPORT, id: 'keep', restore: true })],
+      ['removeAll', () => service.removeAll({ usage: false })],
+      ['store.listPath', () => service.transaction(store => store.listPath(id, null))],
+      ['store.appendMessage', () => service.transaction(store => store.appendMessage(id, userMessage(messageId(1), 'x'), null))],
+      ['store.setActiveLeaf', () => service.transaction(store => store.setActiveLeaf(id, messageId(1), [null]))],
+    ]
+    for (const [name, call] of calls)
+      expect((await rejection(call())).code, name).toBe('not_implemented')
+    // Nothing was written by the stubs.
+    expect(await service.listMessages(id)).toEqual([])
+    expect(await service.find(SAMPLE_CHAT_EXPORT.chat.id)).toBeNull()
+  })
+
+  it('upsertMessage still accepts calls without a parent (the v1 pipeline)', async () => {
+    const id = await insertChat(3, 1000)
+    await service.upsertMessage(id, userMessage(messageId(1), 'q1'))
+    await service.upsertMessage(id, assistantMessage(messageId(2), 'a1'), messageId(1))
+    expect((await service.listMessages(id)).map(message => message.id)).toEqual([messageId(1), messageId(2)])
   })
 })

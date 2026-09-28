@@ -9,8 +9,9 @@ import { createDeps, SERVICE_FACTORIES, SERVICE_NAMES, startDeps, stopDeps } fro
 import { loadEnv } from './env.ts'
 import { createMemoryLogger } from './logger.ts'
 import { createRedactor } from './security/redact.ts'
+import { SAMPLE_SHARE_TOKEN } from './testing/api-samples.ts'
 import { createTestApp } from './testing/create-test-app.ts'
-import { createFakeKeyring, createMemorySettingsService, createRecordingEventBus } from './testing/fakes.ts'
+import { createFakeDataService, createFakeKeyring, createFakeShareService, createMemorySettingsService, createRecordingEventBus } from './testing/fakes.ts'
 
 const cleanups: (() => Promise<void> | void)[] = []
 
@@ -116,6 +117,40 @@ describe('remaining stubs (chat runs until W2.1, tool prefs until W3.5)', () => 
   })
 })
 
+describe('phase 5 skeleton (P5-0b stubs until W5.1 / W5.3 / W5.4)', () => {
+  it('wires the data and share services; their members answer not_implemented', async () => {
+    const t = await createTestApp({ start: false })
+    cleanups.push(() => t.close())
+    expect(SERVICE_NAMES).toEqual(expect.arrayContaining(['data', 'shares']))
+    const calls: Array<[string, () => Promise<unknown>]> = [
+      ['data.summary', () => t.deps.data.summary()],
+      ['data.exportBackup', () => t.deps.data.exportBackup({})],
+      ['data.importData', () => t.deps.data.importData(new Blob(['{}']))],
+      ['data.deleteAll', () => t.deps.data.deleteAll({ confirm: 'DELETE' })],
+      ['shares.list', () => t.deps.shares.list({})],
+      ['shares.create', () => t.deps.shares.create({ chatId: '0199a8f0-0000-7000-8000-000000000001' })],
+      ['shares.update', () => t.deps.shares.update('shr_0000000000000001', { refresh: true })],
+      ['shares.remove', () => t.deps.shares.remove('shr_0000000000000001')],
+      ['shares.view', () => t.deps.shares.view(SAMPLE_SHARE_TOKEN)],
+      ['shares.openFile', () => t.deps.shares.openFile(SAMPLE_SHARE_TOKEN, 'file_0000000000000001')],
+      ['files.importFile', () => t.deps.files.importFile({ preferredId: 'file_0000000000000001', sha256: '0'.repeat(64), name: 'a.txt', mime: 'text/plain', data: new Uint8Array(), createdAt: 1 })],
+      ['files.purge', () => t.deps.files.purge()],
+    ]
+    for (const [name, call] of calls)
+      await expect(call(), name).rejects.toMatchObject({ code: 'not_implemented' })
+  })
+
+  it('createTestApp accepts the Phase 5 fakes as overrides', async () => {
+    const data = createFakeDataService()
+    const shares = createFakeShareService()
+    const t = await createTestApp({ start: false, overrides: { data, shares } })
+    cleanups.push(() => t.close())
+    expect(t.deps.data).toBe(data)
+    expect(t.deps.shares).toBe(shares)
+    expect(t.deps.runs.hasRun('0199a8f0-0000-7000-8000-000000000001')).toBe(false)
+  })
+})
+
 describe('testing helpers', () => {
   it('the fake keyring derives stable, distinct 32-byte subkeys', () => {
     const keyring = createFakeKeyring()
@@ -123,6 +158,11 @@ describe('testing helpers', () => {
     expect(session).toHaveLength(32)
     expect(keyring.subkey('session')).toEqual(session)
     expect(keyring.subkey('encryption')).not.toEqual(session)
+    const share = keyring.subkey('share')
+    expect(share).toHaveLength(32)
+    expect(createFakeKeyring().subkey('share')).toEqual(share)
+    for (const other of ['encryption', 'session', 'approval'] as const)
+      expect(keyring.subkey(other)).not.toEqual(share)
   })
 
   it('the recording event bus delivers, records and closes subscribers', async () => {

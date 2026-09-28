@@ -92,6 +92,8 @@ describe('static header values', () => {
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Resource-Policy': 'same-origin',
       'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+      'X-Robots-Tag': 'noindex, nofollow',
     })
+    expect(Object.isFrozen(SECURITY_HEADERS)).toBe(true)
   })
 })

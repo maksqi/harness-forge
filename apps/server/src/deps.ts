@@ -22,11 +22,13 @@ import { createKeyring } from './security/keyring.ts'
 import { createPasswordService } from './security/password.ts'
 import { createSessionService } from './security/session.ts'
 import { createChatsService } from './services/chats/index.ts'
+import { createDataService } from './services/data/index.ts'
 import { createEventBus } from './services/events/index.ts'
 import { createFilesService } from './services/files/index.ts'
 import { createCredentialService } from './services/secrets/credentials.ts'
 import { createSecretStore } from './services/secrets/index.ts'
 import { createSettingsService } from './services/settings/index.ts'
+import { createShareService } from './services/shares/index.ts'
 
 export type ServiceFactories = { readonly [K in ServiceName]: (deps: AppDeps) => AppServices[K] }
 
@@ -52,6 +54,8 @@ export const SERVICE_FACTORIES: ServiceFactories = {
   runs: createChatRunner,
   tools: createToolService,
   mcp: createMcpManager,
+  data: createDataService,
+  shares: createShareService,
 }
 
 /** Instantiation order (dependencies first; construction-time access to later services still works lazily). */

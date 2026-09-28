@@ -9,8 +9,8 @@ node_modules/
 # No trailing slash: `nuxt generate` also creates apps/web/dist as a symlink to .output/public.
 dist
 
-# Runtime data and scratch space
-data/
+# Runtime data and scratch space (`/data/` is the root data directory only: source folders named `data` are tracked)
+/data/
 .data/
 .tmp/
 

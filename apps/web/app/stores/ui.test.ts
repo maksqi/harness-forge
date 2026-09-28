@@ -70,6 +70,19 @@ describe('ui store', () => {
     expect(ui.installSource).toBe('npm')
   })
 
+  it('opens the share dialog for one chat at a time and closes it', () => {
+    const ui = useUiStore()
+    expect(ui.shareChatId).toBeNull()
+    ui.openShare('chat-a')
+    expect(ui.shareChatId).toBe('chat-a')
+    ui.openShare('chat-b')
+    expect(ui.shareChatId).toBe('chat-b')
+    ui.closeShare()
+    expect(ui.shareChatId).toBeNull()
+    ui.closeShare()
+    expect(ui.shareChatId).toBeNull()
+  })
+
   it('shows thinking from the setting until the chat menu overrides it', () => {
     const ui = useUiStore()
     const settings = useSettingsStore()

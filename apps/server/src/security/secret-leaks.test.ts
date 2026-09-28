@@ -81,7 +81,7 @@ function needles(): Array<{ name: string, value: string }> {
   out.push({ name: 'master key (base64)', value: master.toString('base64').slice(4, 36) })
   out.push({ name: 'master key (base64url)', value: master.toString('base64url').slice(4, 36) })
   out.push({ name: 'master key (hex)', value: master.toString('hex').slice(4, 40) })
-  for (const name of ['session', 'encryption', 'approval'] as const) {
+  for (const name of ['session', 'encryption', 'approval', 'share'] as const) {
     const subkey = Buffer.from(t.deps.keyring.subkey(name))
     out.push({ name: `${name} subkey (base64)`, value: subkey.toString('base64').slice(4, 36) })
     out.push({ name: `${name} subkey (base64url)`, value: subkey.toString('base64url').slice(4, 36) })
