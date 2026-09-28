@@ -1,0 +1,18 @@
+{
+  "manifestVersion": 1,
+  "id": "stdio-server",
+  "name": "Stdio server",
+  "version": "1.0.0",
+  "description": "Declares a local MCP server (requires trust).",
+  "engines": { "harness": "^1.0.0" },
+  "permissions": ["process"],
+  "contributes": {
+    "mcpServers": [
+      {
+        "id": "stdio-server",
+        "name": "Everything",
+        "transport": { "type": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-everything"] }
+      }
+    ]
+  }
+}

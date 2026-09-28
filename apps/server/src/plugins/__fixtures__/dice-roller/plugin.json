@@ -1,0 +1,10 @@
+{
+  "manifestVersion": 1,
+  "id": "dice-roller",
+  "name": "Dice roller",
+  "version": "1.0.0",
+  "description": "Adds a roll_dice tool, a /roll command and an instructions hook.",
+  "engines": { "harness": "^1.0.0" },
+  "main": "index.mjs",
+  "permissions": ["storage", "hooks"]
+}

@@ -4,16 +4,21 @@ import type { Health } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import process from 'node:process'
 import { PLUGIN_API_VERSION } from '@harness-forge/plugin-sdk'
 import { apiRoutes } from '@harness-forge/shared'
 import { Hono } from 'hono'
 import { appVersion, packageVersion, webBuildInfoFile, webPublicDir } from '../../paths.ts'
 
-/** Nuxt version recorded by `nuxt generate` next to the served SPA, when there is a build. */
-function builtNuxtVersion(): string | undefined {
-  const file = webBuildInfoFile()
-  if (!existsSync(file) || !existsSync(webPublicDir()))
+/**
+ * Nuxt version recorded by `nuxt generate` in `nitro.json` next to the served SPA (`<webDir>/../nitro.json`), when
+ * there is a build.
+ */
+function builtNuxtVersion(webDir: string | null): string | undefined {
+  const publicDir = webDir ?? webPublicDir()
+  const file = webDir === null ? webBuildInfoFile() : join(webDir, '..', 'nitro.json')
+  if (!existsSync(file) || !existsSync(publicDir))
     return undefined
   try {
     const info = JSON.parse(readFileSync(file, 'utf8')) as { framework?: { name?: unknown, version?: unknown } }
@@ -25,8 +30,8 @@ function builtNuxtVersion(): string | undefined {
 }
 
 /** Library versions read from the installed packages (once, at startup). */
-export function readHealthVersions(): Health['versions'] {
-  const nuxt = builtNuxtVersion()
+export function readHealthVersions(webDir: string | null = null): Health['versions'] {
+  const nuxt = builtNuxtVersion(webDir)
   return {
     ai: packageVersion('ai') ?? 'unknown',
     hono: packageVersion('hono') ?? 'unknown',
@@ -36,7 +41,7 @@ export function readHealthVersions(): Health['versions'] {
 
 export function createHealthRoutes(deps: AppDeps): Hono<AppEnv> {
   const version = appVersion()
-  const versions = readHealthVersions()
+  const versions = readHealthVersions(deps.env.webDir)
   const app = new Hono<AppEnv>()
 
   app.get(apiRoutes['health.get'].path, (c) => {

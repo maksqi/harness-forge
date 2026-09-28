@@ -1,16 +1,24 @@
 import { mount } from '@vue/test-utils'
+import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, reactive } from 'vue'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
+import { createMockApi } from '~/utils/testing/mock-api'
 import AppSidebar from './AppSidebar.vue'
 import { DEFAULT_LAST_ROUTES, LAST_ROUTES_KEY, useLastRoutes } from './navigation'
 
 const mocks = vi.hoisted(() => ({
   route: null as null | { path: string, fullPath: string, query: Record<string, string> },
   colorMode: { preference: 'dark', value: 'dark' },
+  api: null as unknown,
 }))
+
+// ChatNav / PluginsNav read Pinia stores over the typed client ('#imports' does not resolve in Vitest).
+vi.mock('~/composables/useApi', () => ({ useApi: () => mocks.api }))
+
+let pinia: ReturnType<typeof createPinia>
 
 vi.mock('./nuxt-imports', () => ({
   useRoute: () => mocks.route,
@@ -47,12 +55,16 @@ function mountSidebar() {
 
 describe('appSidebar', () => {
   beforeEach(() => {
+    mocks.api = createMockApi()
+    pinia = createPinia()
+    setActivePinia(pinia)
     mocks.route = reactive({ path: '/', fullPath: '/', query: {} })
     useLastRoutes().value = { ...DEFAULT_LAST_ROUTES }
   })
 
   afterEach(() => {
     document.body.replaceChildren()
+    disposePinia(pinia)
   })
 
   it('shows the chat mode on / with the Chat tab active', () => {

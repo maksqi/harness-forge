@@ -4,6 +4,7 @@
 import type { AppDeps } from '../../types.ts'
 import type { AppMiddleware } from '../types.ts'
 import { randomUUID } from 'node:crypto'
+import { updateResponseHeaders } from './response-headers.ts'
 
 export const REQUEST_ID_HEADER = 'X-Request-Id'
 const REQUEST_ID_PATTERN = /^[\w.-]{8,64}$/
@@ -18,6 +19,6 @@ export function requestIdMiddleware(_deps: AppDeps): AppMiddleware {
     const requestId = resolveRequestId(c.req.header(REQUEST_ID_HEADER))
     c.set('requestId', requestId)
     await next()
-    c.res.headers.set(REQUEST_ID_HEADER, requestId)
+    updateResponseHeaders(c, headers => headers.set(REQUEST_ID_HEADER, requestId))
   }
 }

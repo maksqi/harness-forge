@@ -1,23 +1,34 @@
 <script setup lang="ts">
-// STUB (C5). W2.5 replaces this page: InsecureBanner, ProviderList and ProviderKeyDialog (`?configure=<providerId>` opens it)
-// (docs/UI.md 2.5, 9.1, 9.2).
-// Never renders its own <main> (the layout's SidebarInset is).
-import { KeyRoundIcon } from '@lucide/vue'
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
-import PageHeader from '~/components/common/PageHeader.vue'
+// Settings -> Providers (docs/UI.md 2.5, 9.1, 9.2): plain-HTTP warning, provider list and key dialog.
+// `?configure=<providerId>` opens that provider's key dialog (the chat "Open settings" action links here).
+import { computed } from 'vue'
+import InsecureBanner from '~/components/settings/InsecureBanner.vue'
+import { useRoute, useRouter } from '~/components/settings/nuxt-imports'
+import ProviderList from '~/components/settings/ProviderList.vue'
+import SettingsPage from '~/components/settings/SettingsPage.vue'
+
+const route = useRoute()
+const router = useRouter()
+
+const configureId = computed(() => {
+  const value = route.query.configure
+  const id = Array.isArray(value) ? value[0] : value
+  return typeof id === 'string' && id ? id : null
+})
+
+function onConfigureId(value: string | null) {
+  if (value || route.query.configure === undefined)
+    return
+  const { configure: _configure, ...query } = route.query
+  router.replace({ query }).catch(() => {})
+}
 </script>
 
 <template>
-  <div class="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 md:px-6">
-    <PageHeader title="Providers" description="Bring your own API keys. Keys are encrypted on this server." />
-    <Empty class="flex-1">
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <KeyRoundIcon aria-hidden="true" />
-        </EmptyMedia>
-        <EmptyTitle>Provider keys</EmptyTitle>
-        <EmptyDescription>Each provider with its status, an enable switch and a key dialog appears here.</EmptyDescription>
-      </EmptyHeader>
-    </Empty>
-  </div>
+  <SettingsPage title="Providers" description="Bring your own API keys. Keys are encrypted on this server.">
+    <div class="flex flex-col gap-4 py-4">
+      <InsecureBanner />
+      <ProviderList :configure-id="configureId" @update:configure-id="onConfigureId" />
+    </div>
+  </SettingsPage>
 </template>

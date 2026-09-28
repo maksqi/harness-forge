@@ -1,0 +1,63 @@
+{
+  "$schema": "https://example.com/harness-forge/plugin.schema.json",
+  "manifestVersion": 1,
+  "id": "acme-docs",
+  "name": "Acme docs",
+  "version": "1.2.0",
+  "description": "Acme models, docs search and a command.",
+  "author": "Acme Inc.",
+  "homepage": "https://docs.example.com",
+  "icon": "icon.svg",
+  "engines": { "harness": "^1.0.0" },
+  "permissions": ["network"],
+  "settings": {
+    "type": "object",
+    "required": ["token"],
+    "properties": {
+      "token": { "type": "string", "format": "secret", "title": "API token" },
+      "region": { "type": "string", "enum": ["eu", "us"], "title": "Region", "default": "eu" },
+      "limit": { "type": "integer", "title": "Result limit", "minimum": 1, "maximum": 50, "default": 10 },
+      "tags": { "type": "array", "items": { "type": "string" }, "title": "Tags" }
+    }
+  },
+  "contributes": {
+    "providers": [
+      {
+        "id": "acme-docs",
+        "name": "Acme",
+        "baseURL": "https://llm.example.com/v1/",
+        "apiFormat": "openai-chat",
+        "headers": { "X-Acme-Team": "{{credentials.team}}" },
+        "credentials": [
+          { "key": "apiKey", "label": "API key", "type": "secret", "required": true, "helpUrl": "https://example.com/keys" },
+          { "key": "team", "label": "Team", "type": "text" }
+        ],
+        "listModels": false,
+        "reasoningStyle": "openai-effort",
+        "smallModelId": "acme-small",
+        "models": [
+          { "id": "acme-large", "name": "Acme Large", "capabilities": { "tools": true, "reasoning": true } },
+          { "id": "acme-small", "name": "Acme Small" }
+        ]
+      }
+    ],
+    "models": [
+      { "providerId": "openrouter", "models": [{ "id": "acme/router-model", "name": "Acme via OpenRouter" }] }
+    ],
+    "mcpServers": [
+      {
+        "id": "acme-docs",
+        "name": "Acme docs search",
+        "policy": "safe",
+        "transport": {
+          "type": "http",
+          "url": "https://mcp.example.com/mcp",
+          "headers": { "Authorization": "Bearer {{settings.token}}" }
+        }
+      }
+    ],
+    "commands": [
+      { "name": "acme", "description": "Answer using the Acme docs", "template": "Use the Acme docs search tools to answer:\n\n{{input}}" }
+    ]
+  }
+}

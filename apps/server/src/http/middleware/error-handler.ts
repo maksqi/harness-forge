@@ -2,15 +2,19 @@
 // status comes from `errorStatusByCode[code]` (never from the envelope `status`, which is an upstream status).
 // Mapping: `HarnessError` (any copy of the class) -> as is; zod errors -> `validation_error` with `details.issues`;
 // Hono `HTTPException`s (malformed JSON, ...) -> the code of their status; anything else -> `internal_error` with a
-// generic message and `details.requestId` (the original is logged, redacted, never sent). Owner after Phase 0: W1.1.
-import type { HarnessErrorCode } from '@harness-forge/shared'
+// generic message and `details.requestId` (the original is logged, redacted, never sent). As a safety net the sent
+// `message` and `details.upstream` pass through the redactor (registered secrets, `sk-...`-like tokens). Owner after
+// Phase 0: W1.1.
+import type { HarnessErrorCode, HarnessErrorEnvelope } from '@harness-forge/shared'
 import type { ErrorHandler, NotFoundHandler } from 'hono'
+import type { Redactor } from '../../security/types.ts'
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import { randomUUID } from 'node:crypto'
 import { HarnessError, isHarnessError, validationError } from '@harness-forge/shared'
 import { HTTPException } from 'hono/http-exception'
 import { z } from 'zod'
+import { staticSiteFor } from '../static.ts'
 
 /** Message of `internal_error` responses. */
 export const INTERNAL_ERROR_MESSAGE = 'An unexpected error occurred.'
@@ -52,6 +56,18 @@ export function toHarnessError(error: unknown, requestId: string): HarnessError 
   return new HarnessError({ code: 'internal_error', message: INTERNAL_ERROR_MESSAGE, details: { requestId } }, { cause: error })
 }
 
+/** The envelope of an error with secrets masked in `message` and `details.upstream` (API.md 2.3). */
+export function redactedEnvelope(error: HarnessError, redactor: Redactor): HarnessErrorEnvelope {
+  const envelope = error.toJSON()
+  envelope.error.message = redactor.redactText(envelope.error.message)
+  const details = envelope.error.details
+  if (typeof details === 'object' && details !== null && !Array.isArray(details) && typeof (details as { upstream?: unknown }).upstream === 'string') {
+    const upstream = (details as { upstream: string }).upstream
+    envelope.error.details = { ...details, upstream: redactor.redactText(upstream) }
+  }
+  return envelope
+}
+
 /** `app.onError(...)`: renders the envelope, logs server-side failures (redacted) with the request id. */
 export function createErrorHandler(deps: AppDeps): ErrorHandler<AppEnv> {
   return (error, c) => {
@@ -66,7 +82,7 @@ export function createErrorHandler(deps: AppDeps): ErrorHandler<AppEnv> {
     else
       logger.debug(harnessError.message, fields)
 
-    const response = c.json(harnessError.toJSON(), harnessError.httpStatus)
+    const response = c.json(redactedEnvelope(harnessError, deps.redactor), harnessError.httpStatus)
     response.headers.set('Cache-Control', 'no-store')
     if (harnessError.code === 'rate_limited' && harnessError.retryAfterMs !== undefined)
       response.headers.set('Retry-After', String(Math.max(1, Math.ceil(harnessError.retryAfterMs / 1000))))
@@ -74,9 +90,17 @@ export function createErrorHandler(deps: AppDeps): ErrorHandler<AppEnv> {
   }
 }
 
-/** `app.notFound(...)`: unknown paths outside `/api` when no SPA is served (unknown `/api/*` paths throw `not_found`). */
-export function createNotFoundHandler(_deps: AppDeps): NotFoundHandler<AppEnv> {
-  return (c) => {
+/**
+ * `app.notFound(...)`: a request outside `/api` that no route or file answered. A navigation that wants HTML gets the
+ * SPA document (`200.html`, `http/static.ts`), so the fallback only applies after every route; anything else gets the
+ * `not_found` envelope. (Unknown `/api/*` paths never get here: they throw `not_found` inside the API sub-app.)
+ */
+export function createNotFoundHandler(deps: AppDeps): NotFoundHandler<AppEnv> {
+  const site = staticSiteFor(deps)
+  return async (c) => {
+    const spa = await site.fallback(c.req.raw)
+    if (spa !== null)
+      return spa
     const error = new HarnessError({ code: 'not_found', message: `Not found: ${c.req.method} ${c.req.path}` })
     const response = c.json(error.toJSON(), error.httpStatus)
     response.headers.set('Cache-Control', 'no-store')

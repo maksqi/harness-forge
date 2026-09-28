@@ -1,0 +1,8 @@
+{
+  "manifestVersion": 1,
+  "id": "broken-import",
+  "name": "Broken import",
+  "version": "1.0.0",
+  "engines": { "harness": "^1.0.0" },
+  "main": "index.mjs"
+}

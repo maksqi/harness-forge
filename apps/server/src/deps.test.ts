@@ -2,7 +2,6 @@ import type { CreateDepsOptions } from './deps.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { HarnessError } from '@harness-forge/shared'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase } from './db/client.ts'
@@ -102,13 +101,10 @@ describe('createDeps', () => {
   })
 })
 
-describe('phase 0 stubs', () => {
-  it('operations fail with not_implemented; lifecycle, subscriptions and events are no-ops', async () => {
+describe('remaining stubs (chat runs until W2.1, tool prefs until W3.5)', () => {
+  it('stub queries are safe no-ops; lifecycle, subscriptions and events work', async () => {
     const t = await createTestApp()
     cleanups.push(() => t.close())
-    await expect(t.deps.settings.get()).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(t.deps.chats.list({})).rejects.toBeInstanceOf(HarnessError)
-    expect(() => t.deps.registry.providers.list()).toThrow(HarnessError)
     expect(t.deps.runs.isActive('0199a8f0-0000-7000-8000-000000000001')).toBe(false)
     expect(t.deps.runs.active()).toEqual([])
     await expect(t.deps.runs.stop('0199a8f0-0000-7000-8000-000000000001')).resolves.toBe(false)
@@ -169,6 +165,6 @@ describe('testing helpers', () => {
     const t = await createTestApp({ env: { HF_SAFE_MODE: '1' } })
     cleanups.push(() => t.close())
     expect(await t.client.health.get()).toMatchObject({ ok: true, safeMode: true })
-    await expect(t.client.settings.get()).rejects.toMatchObject({ code: 'not_implemented' })
+    expect(await t.client.settings.get()).toMatchObject({ maxSteps: expect.any(Number) })
   })
 })

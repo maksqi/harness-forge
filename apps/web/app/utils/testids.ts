@@ -140,6 +140,7 @@ export const testIds = {
   settingsAltShortcuts: 'settings-alt-shortcuts',
   settingsInstructions: 'settings-instructions',
   passwordSet: 'password-set',
+  passwordRemove: 'password-remove',
   passwordDialog: 'password-dialog',
   passwordCurrent: 'password-current',
   passwordNew: 'password-new',

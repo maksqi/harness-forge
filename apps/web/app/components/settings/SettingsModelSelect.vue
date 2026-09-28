@@ -1,0 +1,113 @@
+<script setup lang="ts">
+// Model field of Settings -> Models (docs/UI.md 9.3): a select-like trigger with a searchable popover of the visible
+// models, grouped by connected provider. The composer's ModelPicker (W2.3) serves the chat; this field only needs
+// the "field" variant. `allowNone` adds a first choice that emits null. Attributes (data-testid) go to the trigger.
+import { ChevronsUpDownIcon } from '@lucide/vue'
+import { computed, ref } from 'vue'
+import { Button } from '@/components/ui/button'
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import ModelCaps from '~/components/providers/ModelCaps.vue'
+import ModelLabel from '~/components/providers/ModelLabel.vue'
+import ProviderIcon from '~/components/providers/ProviderIcon.vue'
+import { useModelsStore } from '~/stores/models'
+
+defineOptions({ inheritAttrs: false })
+
+const props = withDefaults(defineProps<{
+  modelValue: string | null
+  allowNone?: boolean
+  noneLabel?: string
+  placeholder?: string
+  disabled?: boolean
+  /** Accessible name of the trigger (the visible label lives outside). */
+  label?: string
+}>(), {
+  allowNone: false,
+  noneLabel: 'None',
+  placeholder: 'Choose a model',
+  disabled: false,
+  label: undefined,
+})
+
+const emit = defineEmits<{ 'update:modelValue': [value: string | null] }>()
+
+/** Listbox value of the "none" choice (model refs always contain a colon, so they never collide). */
+const NONE = 'none'
+
+const models = useModelsStore()
+const open = ref(false)
+const groups = computed(() => models.groupedByProvider)
+const selected = computed(() => props.modelValue ?? NONE)
+/** "Default model, Claude Sonnet 5": the field label plus the current choice. */
+const accessibleName = computed(() => {
+  if (!props.label)
+    return undefined
+  const current = props.modelValue
+    ? models.byRef(props.modelValue)?.name ?? props.modelValue
+    : props.allowNone ? props.noneLabel : props.placeholder
+  return `${props.label}, ${current}`
+})
+
+function choose(value: string | null) {
+  open.value = false
+  if (value !== props.modelValue)
+    emit('update:modelValue', value)
+}
+</script>
+
+<template>
+  <Popover v-model:open="open">
+    <PopoverTrigger as-child>
+      <Button
+        type="button"
+        variant="outline"
+        role="combobox"
+        :aria-expanded="open"
+        :aria-label="accessibleName"
+        :disabled="disabled"
+        :data-value="modelValue ?? ''"
+        class="h-9 w-full min-w-0 justify-between gap-2 px-2.5 font-normal"
+        v-bind="$attrs"
+      >
+        <ModelLabel v-if="modelValue" :model-ref="modelValue" show-provider class="min-w-0" />
+        <span v-else class="min-w-0 truncate text-muted-foreground" :title="allowNone ? noneLabel : placeholder">{{ allowNone ? noneLabel : placeholder }}</span>
+        <ChevronsUpDownIcon aria-hidden="true" class="size-4 shrink-0 opacity-50" />
+      </Button>
+    </PopoverTrigger>
+    <PopoverContent align="start" class="w-(--reka-popover-trigger-width) min-w-80 p-0">
+      <Command :model-value="selected" class="max-h-[min(24rem,var(--reka-popover-content-available-height))]">
+        <CommandInput placeholder="Search models…" aria-label="Search models" />
+        <CommandList>
+          <CommandEmpty class="py-6 text-center text-sm text-muted-foreground">
+            No models found.
+          </CommandEmpty>
+          <CommandGroup v-if="allowNone">
+            <CommandItem :value="NONE" :data-checked="modelValue === null" @select="choose(null)">
+              <span class="min-w-0 flex-1 truncate">{{ noneLabel }}</span>
+            </CommandItem>
+          </CommandGroup>
+          <CommandGroup v-for="group in groups" :key="group.provider.id" :heading="group.provider.name">
+            <CommandItem
+              v-for="model in group.models"
+              :key="model.ref"
+              :value="model.ref"
+              :data-model-ref="model.ref"
+              :data-checked="model.ref === modelValue"
+              @select="choose(model.ref)"
+            >
+              <ProviderIcon :id="group.provider.id" :icon="group.provider.icon" :name="group.provider.name" size="sm" />
+              <span class="min-w-0 flex-1 truncate">{{ model.name }}</span>
+              <span class="sr-only">{{ model.id }}, {{ group.provider.name }}</span>
+              <ModelCaps
+                :capabilities="model.capabilities"
+                :context-window="model.contextWindow ?? undefined"
+                class="shrink-0"
+              />
+            </CommandItem>
+          </CommandGroup>
+        </CommandList>
+      </Command>
+    </PopoverContent>
+  </Popover>
+</template>

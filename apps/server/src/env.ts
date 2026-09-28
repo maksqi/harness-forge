@@ -1,12 +1,13 @@
-// Environment variables (DECISIONS.md "Environment variables"): parsed once at boot into a frozen `Env`.
-// Owned by W1.1 after Phase 0 (bind safety with a stored password is enforced in `main.ts`).
+// Environment variables (DECISIONS.md "Environment variables"): parsed once at boot into a frozen `Env`, after the
+// optional `<workspace root>/.env` file was loaded (`loadDotEnvFile`; variables already set win). Owned by W1.1 after
+// Phase 0 (bind safety with a stored password is enforced in `main.ts`).
 import type { LogLevel } from './logger.ts'
 import { Buffer } from 'node:buffer'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import process from 'node:process'
 import { z } from 'zod'
-import { findWorkspaceRoot } from './paths.ts'
+import { findWorkspaceRoot, serverPackageRoot } from './paths.ts'
 
 /** Every path inside the data directory (DECISIONS.md "Data directory", ARCHITECTURE.md 7). */
 export interface DataPaths {
@@ -54,6 +55,11 @@ export interface Env {
   readonly insecure: boolean
   /** `HF_API_TARGET`: proxy target of `nuxt dev` (unused by the server, kept for completeness). */
   readonly apiTarget: string
+  /**
+   * `HF_WEB_DIR`: directory of the generated SPA served by the server (absolute; relative paths resolve like
+   * `HF_DATA_DIR`), or null for the default `apps/web/.output/public` (`webPublicDir()` of `paths.ts`).
+   */
+  readonly webDir: string | null
   /**
    * Development mode: `NODE_ENV=development`, or no `NODE_ENV` and running from TypeScript sources (tsx, Vitest).
    * Enables the `:3000` dev origins in the Origin check and `debug` logging.
@@ -115,6 +121,7 @@ const envSchema = z.object({
   HF_OFFLINE: flagSchema,
   HF_INSECURE: flagSchema,
   HF_API_TARGET: z.url({ protocol: /^https?$/ }).default('http://localhost:8787'),
+  HF_WEB_DIR: z.string().trim().min(1).optional(),
   NODE_ENV: z.string().optional(),
 })
 
@@ -170,7 +177,8 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
   const values = parsed.data
   const nodeEnv = values.NODE_ENV
   const dev = options.dev ?? (nodeEnv === 'production' ? false : nodeEnv === 'development' ? true : runningFromSource())
-  const dataDir = resolveDataDir(values.HF_DATA_DIR, options.cwd ?? process.cwd())
+  const cwd = options.cwd ?? process.cwd()
+  const dataDir = resolveDataDir(values.HF_DATA_DIR, cwd)
   return Object.freeze({
     port: values.HF_PORT,
     host: values.HF_HOST,
@@ -184,6 +192,7 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     offline: values.HF_OFFLINE,
     insecure: values.HF_INSECURE,
     apiTarget: values.HF_API_TARGET,
+    webDir: values.HF_WEB_DIR === undefined ? null : resolveDataDir(values.HF_WEB_DIR, cwd),
     dev,
     logLevel: dev ? 'debug' : 'info',
     vars: Object.freeze({ ...source }),
@@ -212,5 +221,30 @@ export function isLoopbackHost(host: string): boolean {
 export function bindSafetyError(env: Pick<Env, 'host' | 'password' | 'insecure'>, options: { storedPassword?: boolean } = {}): string | null {
   if (isLoopbackHost(env.host) || env.insecure || env.password !== null || options.storedPassword === true)
     return null
-  return `Refusing to listen on ${env.host} without a password: set HF_PASSWORD, bind to 127.0.0.1, or set HF_INSECURE=1.`
+  return `Refusing to listen on ${env.host} without a password: set HF_PASSWORD (or set a password in Settings while `
+    + `bound to 127.0.0.1), bind to 127.0.0.1, or set HF_INSECURE=1 (not recommended).`
+}
+
+/** `<workspace root>/.env` of the server package (the current directory's `.env` outside a workspace). */
+export function defaultEnvFile(cwd: string = process.cwd()): string {
+  let root: string | null = null
+  try {
+    root = findWorkspaceRoot(serverPackageRoot())
+  }
+  catch {
+    // Not inside the server package layout (unusual bundling): fall back to the current directory.
+  }
+  return join(root ?? cwd, '.env')
+}
+
+/**
+ * Loads a `.env` file into `process.env` with `process.loadEnvFile` when it exists; variables that are already set
+ * (even to an empty value) win. Returns the loaded path, or null when there is no file. Throws when the file exists
+ * but cannot be read.
+ */
+export function loadDotEnvFile(file: string = defaultEnvFile()): string | null {
+  if (!existsSync(file))
+    return null
+  process.loadEnvFile(file)
+  return file
 }

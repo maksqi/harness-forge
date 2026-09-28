@@ -1,5 +1,6 @@
-// Chat CRUD routes (API.md 5.9) - Phase 0 stubs (501). Owner: W1.5 (W1.5-T4). Keep the export name
-// `createChatsRoutes`. `DELETE /chats/:id` stops an active run first (`deps.runs.stop`).
+// Chat CRUD routes (API.md 5.9). Owner: W1.5 (W1.5-T4). Keep the export name `createChatsRoutes`. Thin: validate with
+// the shared schemas, call `deps.chats`, map to the response. `DELETE /chats/:id` stops an active run first
+// (`deps.runs.stop`, which waits until the partial message is persisted).
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import {
@@ -11,15 +12,45 @@ import {
   chatUpdateSchema,
 } from '@harness-forge/shared'
 import { Hono } from 'hono'
-import { notImplemented, validate } from '../validate.ts'
+import { contentDisposition } from '../../services/files/names.ts'
+import { validate } from '../validate.ts'
 
-export function createChatsRoutes(_deps: AppDeps): Hono<AppEnv> {
+export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
-  app.get(apiRoutes['chats.list'].path, validate('query', chatsQuerySchema), notImplemented('chats.list'))
-  app.post(apiRoutes['chats.create'].path, validate('json', chatCreateSchema), notImplemented('chats.create'))
-  app.get(apiRoutes['chats.get'].path, validate('param', chatParamsSchema), notImplemented('chats.get'))
-  app.patch(apiRoutes['chats.update'].path, validate('param', chatParamsSchema), validate('json', chatUpdateSchema), notImplemented('chats.update'))
-  app.delete(apiRoutes['chats.remove'].path, validate('param', chatParamsSchema), notImplemented('chats.remove'))
-  app.get(apiRoutes['chats.export'].path, validate('param', chatParamsSchema), validate('query', chatExportQuerySchema), notImplemented('chats.export'))
+
+  app.get(apiRoutes['chats.list'].path, validate('query', chatsQuerySchema), async (c) => {
+    return c.json(await deps.chats.list(c.req.valid('query')))
+  })
+
+  app.post(apiRoutes['chats.create'].path, validate('json', chatCreateSchema), async (c) => {
+    return c.json(await deps.chats.create(c.req.valid('json')), 201)
+  })
+
+  app.get(apiRoutes['chats.get'].path, validate('param', chatParamsSchema), async (c) => {
+    return c.json(await deps.chats.get(c.req.valid('param').id))
+  })
+
+  app.patch(apiRoutes['chats.update'].path, validate('param', chatParamsSchema), validate('json', chatUpdateSchema), async (c) => {
+    return c.json(await deps.chats.update(c.req.valid('param').id, c.req.valid('json')))
+  })
+
+  app.delete(apiRoutes['chats.remove'].path, validate('param', chatParamsSchema), async (c) => {
+    const { id } = c.req.valid('param')
+    await deps.runs.stop(id)
+    await deps.chats.remove(id)
+    return c.body(null, 204)
+  })
+
+  app.get(apiRoutes['chats.export'].path, validate('param', chatParamsSchema), validate('query', chatExportQuerySchema), async (c) => {
+    const file = await deps.chats.export(c.req.valid('param').id, c.req.valid('query').format)
+    return c.body(file.body, 200, {
+      'Content-Type': file.contentType,
+      'Content-Disposition': contentDisposition('attachment', file.filename),
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': 'default-src \'none\'; sandbox',
+    })
+  })
+
   return app
 }

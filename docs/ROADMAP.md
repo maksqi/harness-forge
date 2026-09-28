@@ -35,20 +35,20 @@ Web UI agents depend only on frozen contracts, stores and shell components, so w
 
 ## Phase 1 — Core services
 
-- [ ] W1.1 server-core (middleware, auth, password, session, headers, bind safety, SPA serving)
-- [ ] W1.2 secrets-settings (keyring, AES-256-GCM secrets, settings, provider credentials)
-- [ ] W1.3 plugin-host (loader, registry, lifecycle, guard, declarative adapter, compile, hot reload, plugins API)
-- [ ] W1.4 providers-catalog (model resolution, provider test, listings + cache + models.dev, prefs, icons, mock)
-- [ ] W1.5 chats-events-files (chat CRUD/search/export, messages, SSE events, file uploads)
-- [ ] Gate + checkpoint commit
+- [x] W1.1 server-core (middleware, auth, password, session, headers, bind safety, SPA serving)
+- [x] W1.2 secrets-settings (keyring, AES-256-GCM secrets, settings, provider credentials)
+- [x] W1.3 plugin-host (loader, registry, lifecycle, guard, declarative adapter, compile, hot reload, plugins API)
+- [x] W1.4 providers-catalog (model resolution, provider test, listings + cache + models.dev, prefs, icons, mock)
+- [x] W1.5 chats-events-files (chat CRUD/search/export, messages, SSE events, file uploads)
+- [x] Gate + checkpoint commit (Wave A)
 
 ## Phase 2 — Chat MVP + settings
 
 - [ ] W2.1 chat-server (pipeline, runs, approvals, commands, titles, usage/cost, errors)
-- [ ] W2.2 chat-web (useChatSession, transcript, part renderers, Markdown, empty state)
-- [ ] W2.3 composer-web (composer, attachments, model picker, effort, permission, slash menu)
-- [ ] W2.4 sidebar-web (chat list, status dots, palette, shortcuts dialog, global shortcuts)
-- [ ] W2.5 settings-web (providers & keys, models, general, appearance, about, login)
+- [x] W2.2 chat-web (useChatSession, transcript, part renderers, Markdown, empty state)
+- [x] W2.3 composer-web (composer, attachments, model picker, effort, permission, slash menu)
+- [x] W2.4 sidebar-web (chat list, status dots, palette, shortcuts dialog, global shortcuts)
+- [x] W2.5 settings-web (providers & keys, models, general, appearance, about, login)
 - [ ] W2.6 e2e-core (smoke specs)
 - [ ] Gate + checkpoint commit
 
@@ -79,6 +79,14 @@ Web UI agents depend only on frozen contracts, stores and shell components, so w
 - PROVIDERS.md: MiniMax default `max_tokens` (131072 for M3, 65536 otherwise), OpenRouter `validate` via `GET /key`,
   Ollama effort menu from `/api/show` `thinking.values`, xAI returns 400 for a bad key (mapped to `auth_invalid`).
 
+- UI.md 10.4/11: ChatMessage `busy`/`error`/`commandReply` + `startEdit()`, ChatView `header`/`empty` slots;
+  `useChatSession` extra fields (`summary`, `persisted`, `loadError`, `busy`, `load`, `refresh`, `resumeIfRunning`);
+  store additions marked `+` in C5's report (auth `markUnauthenticated`, chats `loaded`/`done`, plugins `*Loaded`,
+  `refreshLoaded`); test ids `error-page`, `error-back`, `password-remove`.
+- Hardening notes: flaky `plugins/host.test.ts` hot-reload timing under full-suite load; markstream CSS has unscoped
+  `.container` rules; AI Elements `vue-stream-markdown` components unused (drop dependency?); rate limiter ignores
+  `X-Forwarded-For` (document reverse-proxy caveat); ship `apps/server/assets/catalog/` with `dist/`.
+
 ## Backlog (not in v1)
 
 Multi-user accounts · child-process isolation for code plugins · plugin marketplace/registry index ·
@@ -91,4 +99,5 @@ conversation branching · sharing links · knowledge/RAG · image generation · 
 | P0.1–P0.2 | coordinator | n/a | — |
 | P0.3 D+S | D1, D2, D3, D4, S0 + R1 (reconcile) | check + build green on skeleton | 34a0940 |
 | P0.4 C-a | C1+C2, C3 | audit ok; 205 tests; check + build green; dark 200.html verified | b10eb2d |
-| P0.5 C-b | C4, C5, C6 | audit ok; 834 tests; check + build green; 501 stubs verified; pins ok | (this commit) |
+| P0.5 C-b | C4, C5, C6 | audit ok; 834 tests; check + build green; 501 stubs verified; pins ok | 15915a4 |
+| Wave A | W1.1–W1.5, W2.2–W2.5 | audit ok; 2064 tests; build ok; providers/keys/persistence/auth/SSE/icons probes ok | (this commit) |

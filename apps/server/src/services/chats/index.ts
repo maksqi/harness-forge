@@ -1,27 +1,441 @@
-// Phase 0 stub. Owner: W1.5 (W1.5-T2, W1.5-T3). Implement `ChatsService` (./types.ts) and keep the export name and
-// signature: `createChatsService(deps: AppDeps): ChatsService` (tables `chats`, `messages`, `usage`).
+// Chats, messages and usage rows (API.md 5.9, ARCHITECTURE.md 6.1 / 6.3, tables `chats`, `messages`, `usage`).
+// Owner: W1.5 (W1.5-T2, W1.5-T3). Implements `ChatsService` (./types.ts) behind `createChatsService(deps)`.
+//
+// - Ordering: `updated_at` desc, `id` desc with an opaque keyset cursor (./cursor.ts). `updated_at` is the last activity
+//   (creation, `touch` when a run ends); renaming, pinning, archiving or changing settings keeps a chat's position.
+// - Search (`q`): message text through `messages.search_text` (normalized, LIKE with `%` / `_` escaped) and titles in
+//   JavaScript, both Unicode case-insensitive (./text.ts); `snippet` comes from the first matching message.
+// - Writes are single statements or atomic batches (no interactive transaction holds the connection), except
+//   `transaction()`, which the chat pipeline (W2.1) uses for its history operations.
+// - Events are emitted after the write: `chat.created` (create, ensure when it creates), `chat.updated` (update,
+//   touch, setTitle), `chat.deleted` (remove). Message operations emit nothing.
+import type { ChatDetail, ChatSettings, ChatSummary, CursorPage, UsageTotals } from '@harness-forge/shared'
+import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core'
+import type { ChatRow } from '../../db/schema.ts'
 import type { AppDeps } from '../../types.ts'
-import type { ChatsService } from './types.ts'
-import { rejectsNotImplemented } from '../../not-implemented.ts'
+import type { ChatCursor } from './cursor.ts'
+import type { ChatListQuery, ChatRecord, ChatsService, UsageInput } from './types.ts'
+import {
+  CHAT_ID_PATTERN,
+  chatSettingsSchema,
+  createChatId,
+  HarnessError,
+  LIMITS,
+  modelRefSchema,
+  validationError,
+} from '@harness-forge/shared'
+import { and, desc, eq, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm'
+import { chats, messages, usage } from '../../db/schema.ts'
+import { decodeChatCursor, encodeChatCursor } from './cursor.ts'
+import { databaseError, guardDb, isConstraintError } from './db-errors.ts'
+import { buildChatExport } from './export.ts'
+import { assignMessageIds, validateImportedMessages } from './import.ts'
+import { chatNotFound, chunk, createMessageStore, INSERT_CHUNK_ROWS, messageInsertValues } from './store.ts'
+import { LIKE_ESCAPE, likeContainsPattern, makeSnippet, messagePlainText, normalizeForSearch, sanitizeTitle, titleMatches } from './text.ts'
 
-export function createChatsService(_deps: AppDeps): ChatsService {
+/** Chats scanned per query while searching (title matches are decided in JavaScript). */
+const SEARCH_BATCH_ROWS = 200
+/** Ids per `IN (...)` lookup. */
+const ID_LOOKUP_CHUNK = 500
+
+type ChatUpdateSet = SQLiteUpdateSetSource<typeof chats>
+
+function clampLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit))
+    return LIMITS.pageLimitDefault
+  return Math.min(LIMITS.pageLimitMax, Math.max(1, Math.trunc(limit)))
+}
+
+/** Keyset condition "after `cursor`" for the order `updated_at` desc, `id` desc. */
+function afterCursor(cursor: ChatCursor | null) {
+  if (cursor === null)
+    return undefined
+  return or(lt(chats.updatedAt, cursor.updatedAt), and(eq(chats.updatedAt, cursor.updatedAt), lt(chats.id, cursor.id)))
+}
+
+function toRecord(row: ChatRow): ChatRecord {
   return {
-    listMessages: rejectsNotImplemented('chats.listMessages'),
-    getMessage: rejectsNotImplemented('chats.getMessage'),
-    upsertMessage: rejectsNotImplemented('chats.upsertMessage'),
-    replaceFrom: rejectsNotImplemented('chats.replaceFrom'),
-    list: rejectsNotImplemented('chats.list'),
-    get: rejectsNotImplemented('chats.get'),
-    create: rejectsNotImplemented('chats.create'),
-    update: rejectsNotImplemented('chats.update'),
-    remove: rejectsNotImplemented('chats.remove'),
-    export: rejectsNotImplemented('chats.export'),
-    find: rejectsNotImplemented('chats.find'),
-    summary: rejectsNotImplemented('chats.summary'),
-    ensure: rejectsNotImplemented('chats.ensure'),
-    touch: rejectsNotImplemented('chats.touch'),
-    setTitle: rejectsNotImplemented('chats.setTitle'),
-    addUsage: rejectsNotImplemented('chats.addUsage'),
-    transaction: rejectsNotImplemented('chats.transaction'),
+    id: row.id,
+    title: row.title,
+    titleSource: row.titleSource,
+    modelRef: row.modelRef,
+    settings: row.settings,
+    pinned: row.pinned,
+    archived: row.archived,
+    pendingApproval: row.pendingApproval,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+function conflictExists(id: string): HarnessError {
+  return new HarnessError({
+    code: 'conflict',
+    message: `Chat ${id} already exists.`,
+    details: { reason: 'exists', chatId: id },
+  })
+}
+
+function invalidField(path: string, message: string): HarnessError {
+  return validationError([{ path: [path], message, code: 'custom' }])
+}
+
+/** A title to store; `validation_error` when nothing printable is left. */
+function requireTitle(raw: string): string {
+  const title = sanitizeTitle(raw)
+  if (title === null)
+    throw invalidField('title', 'The title cannot be empty.')
+  return title
+}
+
+function checkModelRef(value: string): string {
+  const parsed = modelRefSchema.safeParse(value)
+  if (!parsed.success)
+    throw invalidField('modelRef', 'Expected a model ref "<providerId>:<modelId>".')
+  return parsed.data
+}
+
+function checkSettings(value: ChatSettings): ChatSettings {
+  const parsed = chatSettingsSchema.safeParse(value)
+  if (!parsed.success)
+    throw validationError(parsed.error)
+  return parsed.data
+}
+
+/** RFC 7396 merge of a settings patch into the stored JSON (`null` removes a key), done by SQLite in the UPDATE. */
+function mergeSettings(patch: Record<string, unknown>) {
+  return sql`json_patch(${chats.settings}, ${JSON.stringify(patch)})`
+}
+
+function tokenCount(value: number): number {
+  return Number.isFinite(value) && value > 0 ? Math.round(value) : 0
+}
+
+export function createChatsService(deps: AppDeps): ChatsService {
+  const { db } = deps
+  const store = createMessageStore(db, 'database')
+
+  // `deps.runs` and `deps.events` are read at call time: the runner (W2.1) may need this service while it is built.
+  function isRunning(id: string): boolean {
+    try {
+      return deps.runs.isActive(id)
+    }
+    catch {
+      return false
+    }
+  }
+
+  function toSummary(row: ChatRow, snippet?: string): ChatSummary {
+    return {
+      id: row.id,
+      title: row.title,
+      titleSource: row.titleSource,
+      modelRef: row.modelRef,
+      pinned: row.pinned,
+      archived: row.archived,
+      running: isRunning(row.id),
+      pendingApproval: row.pendingApproval,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      ...(snippet === undefined ? {} : { snippet }),
+    }
+  }
+
+  async function findRow(id: string): Promise<ChatRow | undefined> {
+    if (!CHAT_ID_PATTERN.test(id))
+      return undefined
+    const [row] = await db.select().from(chats).where(eq(chats.id, id)).limit(1)
+    return row
+  }
+
+  async function requireRow(id: string): Promise<ChatRow> {
+    const row = await findRow(id)
+    if (row === undefined)
+      throw chatNotFound(id)
+    return row
+  }
+
+  async function updateRow(id: string, set: ChatUpdateSet): Promise<ChatRow | undefined> {
+    if (!CHAT_ID_PATTERN.test(id))
+      return undefined
+    const [row] = await db.update(chats).set(set).where(eq(chats.id, id)).returning()
+    return row
+  }
+
+  async function usageTotals(chatId: string): Promise<UsageTotals> {
+    const [row] = await db
+      .select({
+        inputTokens: sql<number>`coalesce(sum(${usage.input}), 0)`,
+        outputTokens: sql<number>`coalesce(sum(${usage.output}), 0)`,
+        reasoningTokens: sql<number>`coalesce(sum(${usage.reasoning}), 0)`,
+        cacheReadTokens: sql<number>`coalesce(sum(${usage.cacheRead}), 0)`,
+        cacheWriteTokens: sql<number>`coalesce(sum(${usage.cacheWrite}), 0)`,
+        costUsd: sql<number | null>`sum(${usage.costUsd})`,
+      })
+      .from(usage)
+      .where(and(eq(usage.chatId, chatId), eq(usage.purpose, 'chat')))
+    return {
+      inputTokens: Number(row?.inputTokens ?? 0),
+      outputTokens: Number(row?.outputTokens ?? 0),
+      reasoningTokens: Number(row?.reasoningTokens ?? 0),
+      cacheReadTokens: Number(row?.cacheReadTokens ?? 0),
+      cacheWriteTokens: Number(row?.cacheWriteTokens ?? 0),
+      costUsd: row?.costUsd === null || row?.costUsd === undefined ? null : Number(row.costUsd),
+    }
+  }
+
+  async function detailOf(row: ChatRow): Promise<ChatDetail> {
+    const list = await store.listMessages(row.id)
+    const totals = await usageTotals(row.id)
+    return { ...toSummary(row), settings: row.settings, messages: list, totals }
+  }
+
+  /** Message ids of `ids` that already exist (any chat). */
+  async function existingMessageIds(ids: readonly string[]): Promise<Set<string>> {
+    const found = new Set<string>()
+    for (const part of chunk([...new Set(ids)], ID_LOOKUP_CHUNK)) {
+      const rows = await db.select({ id: messages.id }).from(messages).where(inArray(messages.id, part))
+      for (const row of rows)
+        found.add(row.id)
+    }
+    return found
+  }
+
+  function page(rows: readonly { row: ChatRow, snippet?: string }[], limit: number): CursorPage<ChatSummary> {
+    const items = rows.slice(0, limit)
+    const last = items.at(-1)
+    return {
+      items: items.map(({ row, snippet }) => toSummary(row, snippet)),
+      nextCursor: rows.length > limit && last !== undefined ? encodeChatCursor({ updatedAt: last.row.updatedAt, id: last.row.id }) : null,
+    }
+  }
+
+  async function listPlain(archived: boolean, after: ChatCursor | null, limit: number): Promise<CursorPage<ChatSummary>> {
+    const rows = await db
+      .select()
+      .from(chats)
+      .where(and(eq(chats.archived, archived), afterCursor(after)))
+      .orderBy(desc(chats.updatedAt), desc(chats.id))
+      .limit(limit + 1)
+    return page(rows.map(row => ({ row })), limit)
+  }
+
+  async function search(q: string, archived: boolean, after: ChatCursor | null, limit: number): Promise<CursorPage<ChatSummary>> {
+    const needle = normalizeForSearch(q)
+    const pattern = likeContainsPattern(needle)
+    // Plain SQL with explicit aliases: inside a select list Drizzle renders columns unqualified, which would bind
+    // `chats.id` to the subquery's own table.
+    const matchId = sql<string | null>`(
+      SELECT m.id FROM messages AS m
+      WHERE m.chat_id = chats.id AND m.search_text LIKE ${pattern} ESCAPE ${LIKE_ESCAPE}
+      ORDER BY m.seq LIMIT 1
+    )`
+    const found: { row: ChatRow, matchId: string | null }[] = []
+    let cursor = after
+    for (;;) {
+      const rows = await db
+        .select({ chat: chats, matchId })
+        .from(chats)
+        .where(and(eq(chats.archived, archived), afterCursor(cursor)))
+        .orderBy(desc(chats.updatedAt), desc(chats.id))
+        .limit(SEARCH_BATCH_ROWS)
+      for (const { chat, matchId: messageId } of rows) {
+        if (messageId === null && !titleMatches(chat.title, needle))
+          continue
+        found.push({ row: chat, matchId: messageId })
+        if (found.length > limit)
+          break
+      }
+      const last = rows.at(-1)
+      if (found.length > limit || rows.length < SEARCH_BATCH_ROWS || last === undefined)
+        break
+      cursor = { updatedAt: last.chat.updatedAt, id: last.chat.id }
+    }
+
+    // Snippets of the page from the original text of each matching message.
+    const pageMatches = found.slice(0, limit)
+    const matchIds = pageMatches.flatMap(entry => (entry.matchId === null ? [] : [entry.matchId]))
+    const texts = new Map<string, string>()
+    for (const part of chunk(matchIds, ID_LOOKUP_CHUNK)) {
+      const rows = await db.select({ id: messages.id, parts: messages.parts }).from(messages).where(inArray(messages.id, part))
+      for (const row of rows)
+        texts.set(row.id, messagePlainText(row.parts))
+    }
+    return page(found.map(entry => ({
+      row: entry.row,
+      snippet: entry.matchId === null ? undefined : makeSnippet(texts.get(entry.matchId) ?? '', q),
+    })), limit)
+  }
+
+  function emitUpdated(row: ChatRow): ChatSummary {
+    const summary = toSummary(row)
+    deps.events.emit('chat.updated', summary)
+    return summary
+  }
+
+  return {
+    ...store,
+
+    list: (query: ChatListQuery) => guardDb(async () => {
+      const limit = clampLimit(query.limit)
+      const archived = query.archived ?? false
+      const after = query.cursor === undefined ? null : decodeChatCursor(query.cursor)
+      const q = query.q?.trim() ?? ''
+      return q === '' ? listPlain(archived, after, limit) : search(q, archived, after, limit)
+    }),
+
+    get: id => guardDb(async () => detailOf(await requireRow(id))),
+
+    create: input => guardDb(async () => {
+      const id = input.id ?? createChatId()
+      if (!CHAT_ID_PATTERN.test(id))
+        throw invalidField('id', 'Expected a lowercase uuidv7 chat id.')
+      const title = input.title === undefined ? null : requireTitle(input.title)
+      const modelRef = input.modelRef === undefined ? null : checkModelRef(input.modelRef)
+      const settings = input.settings === undefined ? {} : checkSettings(input.settings)
+      const imported = await validateImportedMessages(input.messages ?? [])
+      if (await findRow(id) !== undefined)
+        throw conflictExists(id)
+      const list = assignMessageIds(imported, await existingMessageIds(imported.map(message => message.id)))
+
+      const now = Date.now()
+      const rows = list.map((message, seq) => messageInsertValues(id, message, seq, now))
+      try {
+        await db.batch([
+          db.insert(chats).values({ id, title, titleSource: title === null ? null : 'user', modelRef, settings, createdAt: now, updatedAt: now }),
+          ...chunk(rows, INSERT_CHUNK_ROWS).map(values => db.insert(messages).values(values)),
+        ])
+      }
+      catch (error) {
+        // A concurrent create of the same chat (or of a message id checked above).
+        if (isConstraintError(error))
+          throw conflictExists(id)
+        throw databaseError(error)
+      }
+      const row = await requireRow(id)
+      const detail = await detailOf(row)
+      deps.events.emit('chat.created', toSummary(row))
+      return detail
+    }),
+
+    update: (id, patch) => guardDb(async () => {
+      const set: ChatUpdateSet = {}
+      if (patch.title !== undefined) {
+        set.title = requireTitle(patch.title)
+        set.titleSource = 'user'
+      }
+      if (patch.pinned !== undefined)
+        set.pinned = patch.pinned
+      if (patch.archived !== undefined)
+        set.archived = patch.archived
+      if (patch.modelRef !== undefined)
+        set.modelRef = patch.modelRef === null ? null : checkModelRef(patch.modelRef)
+      if (patch.settings !== undefined)
+        set.settings = mergeSettings(patch.settings)
+      const row = Object.keys(set).length === 0 ? await findRow(id) : await updateRow(id, set)
+      if (row === undefined)
+        throw chatNotFound(id)
+      return emitUpdated(row)
+    }),
+
+    remove: id => guardDb(async () => {
+      if (!CHAT_ID_PATTERN.test(id))
+        throw chatNotFound(id)
+      // Messages go with the chat (also without foreign key enforcement); usage rows are kept, detached.
+      const [, , deleted] = await db.batch([
+        db.update(usage).set({ chatId: null }).where(eq(usage.chatId, id)),
+        db.delete(messages).where(eq(messages.chatId, id)),
+        db.delete(chats).where(eq(chats.id, id)).returning({ id: chats.id }),
+      ])
+      if (deleted.length === 0)
+        throw chatNotFound(id)
+      deps.events.emit('chat.deleted', { id })
+    }),
+
+    export: (id, format) => guardDb(async () => buildChatExport(await detailOf(await requireRow(id)), format, Date.now())),
+
+    find: id => guardDb(async () => {
+      const row = await findRow(id)
+      return row === undefined ? null : toRecord(row)
+    }),
+
+    summary: id => guardDb(async () => toSummary(await requireRow(id))),
+
+    ensure: (id, init = {}) => guardDb(async () => {
+      if (!CHAT_ID_PATTERN.test(id))
+        throw invalidField('id', 'Expected a lowercase uuidv7 chat id.')
+      const modelRef = init.modelRef === undefined ? undefined : checkModelRef(init.modelRef)
+      const settings = init.settings === undefined ? undefined : checkSettings(init.settings)
+      const now = Date.now()
+      const [created] = await db
+        .insert(chats)
+        .values({ id, modelRef: modelRef ?? null, settings: settings ?? {}, createdAt: now, updatedAt: now })
+        .onConflictDoNothing({ target: chats.id })
+        .returning()
+      if (created !== undefined) {
+        deps.events.emit('chat.created', toSummary(created))
+        return { chat: toRecord(created), created: true }
+      }
+      const set: ChatUpdateSet = {}
+      if (modelRef !== undefined)
+        set.modelRef = modelRef
+      if (settings !== undefined)
+        set.settings = mergeSettings(settings)
+      const row = Object.keys(set).length === 0 ? await findRow(id) : await updateRow(id, set)
+      if (row === undefined)
+        throw chatNotFound(id)
+      return { chat: toRecord(row), created: false }
+    }),
+
+    touch: (id, input = {}) => guardDb(async () => {
+      const at = input.at ?? Date.now()
+      // Activity only moves forward: an older `at` never sends a chat down the list.
+      const set: ChatUpdateSet = { updatedAt: sql`max(${chats.updatedAt}, ${Math.max(0, Math.trunc(at))})` }
+      if (input.pendingApproval !== undefined)
+        set.pendingApproval = input.pendingApproval
+      if (input.modelRef !== undefined)
+        set.modelRef = checkModelRef(input.modelRef)
+      if (input.settings !== undefined)
+        set.settings = mergeSettings(checkSettings(input.settings))
+      const row = await updateRow(id, set)
+      if (row === undefined)
+        throw chatNotFound(id)
+      return emitUpdated(row)
+    }),
+
+    setTitle: (id, title, source) => guardDb(async () => {
+      if (source !== 'auto' && source !== 'fallback')
+        throw invalidField('titleSource', 'Automatic titles use the source auto or fallback.')
+      const clean = sanitizeTitle(title)
+      if (clean === null || !CHAT_ID_PATTERN.test(id))
+        return null
+      const [row] = await db
+        .update(chats)
+        .set({ title: clean, titleSource: source })
+        .where(and(eq(chats.id, id), or(isNull(chats.titleSource), ne(chats.titleSource, 'user'))))
+        .returning()
+      return row === undefined ? null : emitUpdated(row)
+    }),
+
+    addUsage: (input: UsageInput) => guardDb(async () => {
+      const cost = input.costUsd
+      await db.insert(usage).values({
+        // The chat may be gone (deleted during the run): the row is kept with `chat_id = NULL`.
+        chatId: input.chatId === null ? null : sql`(SELECT ${chats.id} FROM ${chats} WHERE ${chats.id} = ${input.chatId})`,
+        messageId: input.messageId,
+        purpose: input.purpose,
+        providerId: input.providerId,
+        modelId: input.modelId,
+        input: tokenCount(input.inputTokens),
+        output: tokenCount(input.outputTokens),
+        reasoning: tokenCount(input.reasoningTokens),
+        cacheRead: tokenCount(input.cacheReadTokens),
+        cacheWrite: tokenCount(input.cacheWriteTokens),
+        costUsd: cost === null || !Number.isFinite(cost) || cost < 0 ? null : cost,
+        createdAt: input.createdAt ?? Date.now(),
+      })
+    }),
+
+    transaction: fn => guardDb(async () => db.transaction(async tx => fn(createMessageStore(tx, 'transaction')))),
   }
 }

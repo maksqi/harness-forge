@@ -1,0 +1,8 @@
+{
+  "manifestVersion": 1,
+  "id": "throwing-setup",
+  "name": "Throwing setup",
+  "version": "1.0.0",
+  "engines": { "harness": "^1.0.0" },
+  "main": "index.mjs"
+}

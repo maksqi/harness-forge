@@ -1,0 +1,171 @@
+<script setup lang="ts">
+// Chat page header (docs/UI.md 5.6): h-12 bar whose bottom border shows only once the transcript scrolled (the 1px
+// is always reserved); the sidebar trigger when the sidebar is collapsed or on mobile; the title renames inline on
+// click; `⋯` menu: Rename · Show thinking · Export as Markdown · Export as JSON · Delete. Rename, export and the
+// undoable delete (toast with Undo, back to `/`) are the sidebar's chat actions (W2.4 `useChatActions`).
+import {
+  BrainIcon,
+  FileJsonIcon,
+  FileTextIcon,
+  MoreHorizontalIcon,
+  PencilIcon,
+  Trash2Icon,
+} from '@lucide/vue'
+import { computed, ref } from 'vue'
+import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { SidebarTrigger, useSidebar } from '@/components/ui/sidebar'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
+import { useChatActions } from '~/components/app-shell/chat-nav/chat-actions'
+import InlineRename from '~/components/common/InlineRename.vue'
+import KbdCombo from '~/components/common/KbdCombo.vue'
+import { useUiStore } from '~/stores/ui'
+import { testIds } from '~/utils/testids'
+
+const props = withDefaults(defineProps<{
+  chatId: string
+  /** null until the chat has a title. */
+  title: string | null
+  /** The transcript scrolled away from the top. */
+  scrolled?: boolean
+  /** The chat is still loading: no "New chat" placeholder yet. */
+  loading?: boolean
+}>(), {
+  scrolled: false,
+  loading: false,
+})
+
+const actions = useChatActions()
+const ui = useUiStore()
+const sidebar = useSidebar(null)
+
+const showTrigger = computed(() => !!sidebar && (sidebar.isMobile.value || sidebar.state.value === 'collapsed'))
+const editing = ref(false)
+let renameAfterMenu = false
+
+function startRename() {
+  editing.value = true
+}
+
+function onMenuRename() {
+  // The menu gives focus back to its trigger when it closes; the editor opens after that.
+  renameAfterMenu = true
+}
+
+function onMenuCloseAutoFocus(event: Event) {
+  if (!renameAfterMenu)
+    return
+  renameAfterMenu = false
+  event.preventDefault()
+  startRename()
+}
+
+function rename(title: string) {
+  void actions.rename(props.chatId, title)
+}
+</script>
+
+<template>
+  <header
+    :data-testid="testIds.chatHeader"
+    :data-scrolled="scrolled ? 'true' : 'false'"
+    :class="cn(
+      'z-10 flex h-(--header-height) shrink-0 items-center gap-2 border-b bg-background px-4 transition-colors duration-(--duration-fast) md:px-6',
+      scrolled ? 'border-border' : 'border-transparent',
+    )"
+  >
+    <Tooltip v-if="showTrigger">
+      <TooltipTrigger as-child>
+        <SidebarTrigger
+          :data-testid="testIds.sidebarTrigger"
+          aria-label="Toggle sidebar"
+          class="-ml-2 text-muted-foreground hover:text-foreground"
+        />
+      </TooltipTrigger>
+      <TooltipContent side="bottom">
+        Toggle sidebar
+        <KbdCombo keys="mod+b" />
+      </TooltipContent>
+    </Tooltip>
+
+    <div class="flex min-w-0 flex-1 items-center">
+      <InlineRename
+        v-if="editing"
+        :model-value="title ?? ''"
+        :editing="editing"
+        placeholder="New chat"
+        aria-label="Chat title"
+        :data-testid="testIds.chatTitleInput"
+        class="max-w-xl text-base font-medium"
+        @update:model-value="rename"
+        @update:editing="editing = $event"
+      />
+      <h1 v-else class="-ml-1.5 flex min-w-0">
+        <button
+          type="button"
+          :data-testid="testIds.chatTitle"
+          :title="title ?? undefined"
+          :class="cn(
+            'min-w-0 truncate rounded-md px-1.5 py-0.5 text-left text-base font-medium outline-none',
+            'hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50',
+            !title && 'font-normal text-muted-foreground italic',
+            !title && loading && 'invisible',
+          )"
+          @click="startRename"
+        >
+          {{ title ?? (loading ? '' : 'New chat') }}
+        </button>
+      </h1>
+    </div>
+
+    <DropdownMenu>
+      <DropdownMenuTrigger as-child>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Chat options"
+          :data-testid="testIds.chatMenuTrigger"
+          class="-mr-2 text-muted-foreground hover:text-foreground"
+        >
+          <MoreHorizontalIcon />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" class="w-52" @close-auto-focus="onMenuCloseAutoFocus">
+        <DropdownMenuItem :data-testid="testIds.chatMenuRename" @select="onMenuRename">
+          <PencilIcon />
+          Rename
+        </DropdownMenuItem>
+        <DropdownMenuCheckboxItem
+          :model-value="ui.showThinking"
+          :data-testid="testIds.chatMenuThinking"
+          @update:model-value="ui.toggleShowThinking()"
+        >
+          <BrainIcon />
+          Show thinking
+        </DropdownMenuCheckboxItem>
+        <DropdownMenuItem :data-testid="testIds.chatMenuExportMd" @select="actions.exportChat(chatId, 'md')">
+          <FileTextIcon />
+          Export as Markdown
+        </DropdownMenuItem>
+        <DropdownMenuItem :data-testid="testIds.chatMenuExportJson" @select="actions.exportChat(chatId, 'json')">
+          <FileJsonIcon />
+          Export as JSON
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem variant="destructive" :data-testid="testIds.chatMenuDelete" @select="actions.remove(chatId)">
+          <Trash2Icon />
+          Delete
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  </header>
+</template>

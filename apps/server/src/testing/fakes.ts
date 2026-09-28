@@ -9,6 +9,7 @@ import type { SecretEntry, SecretScope, SecretStore } from '../services/secrets/
 import type { InternalSettingKey, SettingsService } from '../services/settings/types.ts'
 import { createHash, hkdfSync } from 'node:crypto'
 import { createServerEvent, DEFAULT_SETTINGS, settingsSchema, settingsUpdateSchema, validationError } from '@harness-forge/shared'
+import { secretHint } from '../services/secrets/hint'
 
 /** Deterministic keyring: HKDF-SHA256 subkeys of `sha256(seed)` (same derivation parameters as the real keyring). */
 export function createFakeKeyring(seed = 'harness-forge-test-master-key'): Keyring {
@@ -77,9 +78,9 @@ export function createRecordingEventBus(): RecordingEventBus {
   }
 }
 
-/** `sk-…9fQ2` style hint of the fakes (the real rule belongs to W1.2): null for values shorter than 12 chars. */
+/** Hint of the fakes: the real rule of `services/secrets/hint.ts`, so fakes and the service agree. */
 export function fakeSecretHint(value: string): string | null {
-  return value.length >= 12 ? `${value.slice(0, 3)}…${value.slice(-4)}` : null
+  return secretHint(value)
 }
 
 /** Plaintext in-memory secret store (tests only). */

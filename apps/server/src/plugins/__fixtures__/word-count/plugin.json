@@ -1,0 +1,9 @@
+{
+  "manifestVersion": 1,
+  "id": "word-count",
+  "name": "Word count",
+  "version": "0.1.0",
+  "description": "Counts words; written in TypeScript and compiled by the host.",
+  "engines": { "harness": "^1.0.0" },
+  "main": "src/index.ts"
+}

@@ -1,88 +1,131 @@
 <script setup lang="ts">
-// STUB (C3). W2.4 replaces this file: the Mod+/ list built from the useShortcuts() registry and bound to
-// ui.shortcutsOpen (docs/UI.md 10.4, 12). Contract: no props, no emits; mounted once by layouts/default.vue.
-// Until then it opens on Mod+/ or on the `hf:open-shortcuts` window event and lists the shortcuts of UI.md 12.
-import { useEventListener } from '@vueuse/core'
-import { ref } from 'vue'
+// Keyboard shortcuts dialog (docs/UI.md 10.4, 12): Mod+/ or the command palette. Lists the useShortcuts() registry
+// by group (General, Chat, Composer, Editor) with platform key labels (⌘⇧O on macOS, Ctrl Shift O elsewhere).
+// Features register their shortcuts while they are on screen (e.g. the composer's Alt shortcuts on chat pages).
+// While the `altShortcuts` setting is off, Alt shortcuts read "Off". Bound to ui.shortcutsOpen.
+// Contract: no props, no emits; mounted once by layouts/default.vue.
+import type { ShortcutDef, ShortcutGroup } from '~/composables/useShortcuts'
+import { computed, useId } from 'vue'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { cn } from '@/lib/utils'
 import KbdCombo from '~/components/common/KbdCombo.vue'
+import { useShortcuts } from '~/composables/useShortcuts'
+import { useSettingsStore } from '~/stores/settings'
+import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
 
-const open = ref(false)
+interface ShortcutSection {
+  group: ShortcutGroup
+  items: ShortcutDef[]
+}
 
-useEventListener(window, 'keydown', (event: KeyboardEvent) => {
-  if (event.isComposing || event.altKey || !(event.metaKey || event.ctrlKey))
-    return
-  if (event.code === 'Slash' || event.key === '/') {
-    event.preventDefault()
-    open.value = !open.value
+const ui = useUiStore()
+const settings = useSettingsStore()
+const shortcuts = useShortcuts()
+const uid = useId()
+
+const open = computed({
+  get: () => ui.shortcutsOpen,
+  set: (value: boolean) => {
+    if (value)
+      ui.openShortcuts()
+    else
+      ui.shortcutsOpen = false
+  },
+})
+
+/** Same rule as the registry: `alt` when given, else whether the combo holds Alt. */
+function isAltShortcut(def: ShortcutDef): boolean {
+  return def.alt ?? def.keys.split('+').some(token => ['alt', 'option'].includes(token.trim().toLowerCase()))
+}
+
+const altOff = computed(() => !settings.resolved.altShortcuts)
+
+function isOff(def: ShortcutDef): boolean {
+  return altOff.value && isAltShortcut(def)
+}
+
+/** `list()` is ordered by group and reactive to (un)registrations. */
+const sections = computed<ShortcutSection[]>(() => {
+  const result: ShortcutSection[] = []
+  for (const def of shortcuts.list()) {
+    const last = result.at(-1)
+    if (last?.group === def.group)
+      last.items.push(def)
+    else
+      result.push({ group: def.group, items: [def] })
   }
-})
-useEventListener(window, 'hf:open-shortcuts', () => {
-  open.value = true
+  return result
 })
 
-const groups: Array<{ heading: string, items: Array<{ keys: string, description: string }> }> = [
-  {
-    heading: 'General',
-    items: [
-      { keys: 'mod+k', description: 'Search chats and actions' },
-      { keys: 'mod+shift+o', description: 'New chat' },
-      { keys: 'mod+b', description: 'Toggle sidebar' },
-      { keys: 'mod+/', description: 'Show keyboard shortcuts' },
-    ],
-  },
-  {
-    heading: 'Chat',
-    items: [
-      { keys: 'shift+escape', description: 'Focus the composer' },
-      { keys: 'alt+m', description: 'Choose model' },
-      { keys: 'alt+r', description: 'Set reasoning effort' },
-      { keys: 'alt+p', description: 'Set permission mode' },
-    ],
-  },
-  {
-    heading: 'Composer',
-    items: [
-      { keys: 'enter', description: 'Send' },
-      { keys: 'shift+enter', description: 'New line' },
-      { keys: 'escape', description: 'Stop the response' },
-      { keys: 'arrowup', description: 'Edit the last message' },
-    ],
-  },
-]
+const showAltNote = computed(() => altOff.value && sections.value.some(section => section.items.some(isAltShortcut)))
+
+/** A read-only list: focus the dialog itself rather than ringing its close button (Tab still reaches it). */
+function onOpenAutoFocus(event: Event) {
+  event.preventDefault()
+  ;(event.target as HTMLElement | null)?.focus({ preventScroll: true })
+}
+
+function headingId(group: ShortcutGroup) {
+  return `${uid}-${group.toLowerCase()}`
+}
 </script>
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent :data-testid="testIds.shortcutsDialog" class="gap-5 sm:max-w-md">
+    <DialogContent :data-testid="testIds.shortcutsDialog" class="gap-5 sm:max-w-md" @open-auto-focus="onOpenAutoFocus">
       <DialogHeader>
         <DialogTitle>Keyboard shortcuts</DialogTitle>
         <DialogDescription class="sr-only">
-          Shortcuts available in harness-forge.
+          Keyboard shortcuts available on this page.
         </DialogDescription>
       </DialogHeader>
-      <div class="grid gap-5">
-        <section v-for="group in groups" :key="group.heading" class="grid gap-1.5">
-          <h3 class="text-xs font-medium text-muted-foreground">
-            {{ group.heading }}
+
+      <div class="-mx-1 grid max-h-[min(32rem,65dvh)] gap-5 overflow-y-auto px-1">
+        <section
+          v-for="section in sections"
+          :key="section.group"
+          :aria-labelledby="headingId(section.group)"
+          :data-group="section.group"
+          class="grid gap-1.5"
+        >
+          <h3 :id="headingId(section.group)" class="text-xs font-medium text-muted-foreground">
+            {{ section.group }}
           </h3>
           <dl class="grid">
             <div
-              v-for="item in group.items"
-              :key="item.keys"
-              class="flex h-8 items-center justify-between gap-4 border-b border-border/60 last:border-b-0"
+              v-for="def in section.items"
+              :key="def.id"
+              :data-shortcut-id="def.id"
+              :data-state="isOff(def) ? 'off' : 'on'"
+              class="flex min-h-8 items-center justify-between gap-4 border-b border-border/60 py-1 last:border-b-0"
             >
-              <dt class="text-sm">
-                {{ item.description }}
+              <dt :class="cn('min-w-0 text-sm', isOff(def) && 'text-muted-foreground')">
+                {{ def.description }}
               </dt>
-              <dd>
-                <KbdCombo :keys="item.keys" />
+              <dd class="flex shrink-0 items-center gap-2">
+                <span v-if="isOff(def)" class="text-[11px] text-muted-foreground">Off</span>
+                <KbdCombo :keys="def.keys" :class="cn(isOff(def) && 'opacity-50')" />
               </dd>
             </div>
           </dl>
         </section>
+
+        <p v-if="sections.length === 0" class="text-sm text-muted-foreground">
+          No keyboard shortcuts on this page.
+        </p>
       </div>
+
+      <p v-if="showAltNote" class="text-xs text-muted-foreground">
+        Alt shortcuts are off. Turn them on in
+        <NuxtLink
+          to="/settings/general"
+          class="text-foreground underline decoration-primary/60 underline-offset-2 hover:decoration-primary"
+          @click="open = false"
+        >
+          <span>Settings → General</span>
+        </NuxtLink>.
+      </p>
     </DialogContent>
   </Dialog>
 </template>

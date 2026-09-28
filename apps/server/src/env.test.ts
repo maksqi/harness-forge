@@ -2,8 +2,10 @@ import { Buffer } from 'node:buffer'
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import process from 'node:process'
 import { afterEach, describe, expect, it } from 'vitest'
-import { bindSafetyError, ensureDataDir, EnvError, isLoopbackHost, loadEnv } from './env.ts'
+import { bindSafetyError, defaultEnvFile, ensureDataDir, EnvError, isLoopbackHost, loadDotEnvFile, loadEnv } from './env.ts'
+import { findWorkspaceRoot, serverPackageRoot } from './paths.ts'
 
 const tempDirs: string[] = []
 
@@ -34,6 +36,7 @@ describe('loadEnv', () => {
       offline: false,
       insecure: false,
       apiTarget: 'http://localhost:8787',
+      webDir: null,
     })
     expect(env.paths).toMatchObject({
       db: join(cwd, 'data', 'harness.db'),
@@ -60,6 +63,7 @@ describe('loadEnv', () => {
       HF_OFFLINE: 'on',
       HF_INSECURE: '0',
       HF_API_TARGET: 'http://127.0.0.1:8791',
+      HF_WEB_DIR: '/srv/harness-web',
       ANTHROPIC_API_KEY: 'sk-ant-test',
     })
     expect(env).toMatchObject({
@@ -74,8 +78,17 @@ describe('loadEnv', () => {
       offline: true,
       insecure: false,
       apiTarget: 'http://127.0.0.1:8791',
+      webDir: '/srv/harness-web',
     })
     expect(env.vars.ANTHROPIC_API_KEY).toBe('sk-ant-test')
+  })
+
+  it('resolves a relative HF_WEB_DIR like HF_DATA_DIR', () => {
+    const root = tempDir()
+    writeFileSync(join(root, 'pnpm-workspace.yaml'), 'packages: []\n')
+    const cwd = join(root, 'apps', 'server')
+    mkdirSync(cwd, { recursive: true })
+    expect(loadEnv({ HF_WEB_DIR: 'apps/web/.output/public' }, { cwd }).webDir).toBe(join(root, 'apps', 'web', '.output', 'public'))
   })
 
   it('treats empty values as unset', () => {
@@ -146,5 +159,53 @@ describe('ensureDataDir', () => {
       expect(statSync(dir).isDirectory()).toBe(true)
     if (process.platform !== 'win32')
       expect(statSync(env.paths.root).mode & 0o777).toBe(0o700)
+  })
+})
+
+describe('.env file', () => {
+  const NAMES = ['HF_W11_TEST_FROM_FILE', 'HF_W11_TEST_ALREADY_SET', 'HF_W11_TEST_EMPTY'] as const
+
+  afterEach(() => {
+    for (const name of NAMES)
+      delete process.env[name]
+  })
+
+  it('defaults to <workspace root>/.env', () => {
+    expect(defaultEnvFile()).toBe(join(findWorkspaceRoot(serverPackageRoot()) ?? '', '.env'))
+  })
+
+  it('loads missing variables; variables already set (even empty) win', () => {
+    const file = join(tempDir(), '.env')
+    writeFileSync(file, [
+      '# comment',
+      'HF_W11_TEST_FROM_FILE="from file"',
+      'HF_W11_TEST_ALREADY_SET=from-file',
+      'HF_W11_TEST_EMPTY=from-file',
+    ].join('\n'))
+    process.env.HF_W11_TEST_ALREADY_SET = 'from-shell'
+    process.env.HF_W11_TEST_EMPTY = ''
+    expect(loadDotEnvFile(file)).toBe(file)
+    expect(process.env.HF_W11_TEST_FROM_FILE).toBe('from file')
+    expect(process.env.HF_W11_TEST_ALREADY_SET).toBe('from-shell')
+    expect(process.env.HF_W11_TEST_EMPTY).toBe('')
+  })
+
+  it('does nothing without a file', () => {
+    expect(loadDotEnvFile(join(tempDir(), '.env'))).toBeNull()
+  })
+
+  it('fails loudly when the file exists but cannot be read', () => {
+    const dir = join(tempDir(), '.env')
+    mkdirSync(dir)
+    expect(() => loadDotEnvFile(dir)).toThrow()
+  })
+})
+
+describe('bind safety message', () => {
+  it('names every way out', () => {
+    const message = bindSafetyError({ host: '0.0.0.0', password: null, insecure: false }) ?? ''
+    expect(message).toContain('0.0.0.0')
+    for (const hint of ['HF_PASSWORD', 'Settings', '127.0.0.1', 'HF_INSECURE=1'])
+      expect(message).toContain(hint)
   })
 })

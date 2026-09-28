@@ -1,0 +1,8 @@
+{
+  "manifestVersion": 1,
+  "id": "incompatible-api",
+  "name": "Needs plugin API 2",
+  "version": "2.0.0",
+  "engines": { "harness": "^2.0.0" },
+  "futureField": { "introducedIn": "2.0.0" }
+}
