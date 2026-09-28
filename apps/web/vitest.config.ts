@@ -17,5 +17,6 @@ export default defineProject({
     name: 'web',
     environment: 'happy-dom',
     include: ['app/**/*.test.ts'],
+    setupFiles: ['./vitest.setup.ts'],
   },
 })

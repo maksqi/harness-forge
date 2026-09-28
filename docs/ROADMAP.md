@@ -19,11 +19,19 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` not started.
 - [x] P0.4 Wave C-a
   - [x] C1+C2 contracts: `packages/shared` (schemas, DTOs, errors, route table, API client) + `packages/plugin-sdk` (plugin API types, `definePlugin`, re-exports)
   - [x] C3 web shell visuals (tokens, fonts, dark default, sidebar with Chat | Plugins, ProviderIcon, stub slots)
-- [ ] P0.5 Wave C-b
-  - [ ] C4 server skeleton (env, app factory, 501 route stubs, Drizzle schema + migration, interfaces, test harness)
-  - [ ] C5 web skeleton (stub pages, Pinia stores, `$api`, SSE client, shortcuts registry, test ids)
-  - [ ] C6 `core-providers` (13 providers) + `core-commands`
-  - [ ] FREEZE + gate + checkpoint commit
+- [x] P0.5 Wave C-b
+  - [x] C4 server skeleton (env, app factory, 501 route stubs, Drizzle schema + migration, interfaces, test harness)
+  - [x] C5 web skeleton (stub pages, Pinia stores, `$api`, SSE client, shortcuts registry, test ids)
+  - [x] C6 `core-providers` (13 providers) + `core-commands`
+  - [x] FREEZE + gate + checkpoint commit
+
+## Wave schedule (coordinator optimization)
+
+Web UI agents depend only on frozen contracts, stores and shell components, so waves are merged:
+- **Wave A** = W1.1–W1.5 (server core) + W2.2–W2.5 (chat/composer/sidebar/settings UI) — 9 agents.
+- **Wave B** = W2.1 (chat server) + W3.1–W3.5 (plugins UI, install, wizard, code plugins, tools/MCP) — 6 agents.
+- **Wave C** = W2.6 + W3.6 (e2e) + W4.1–W4.4 (security, UX polish, packaging, docs/examples) — 6 agents.
+- **Wave D** = W4.5 (full e2e ×3, screenshots) + fix-ups.
 
 ## Phase 1 — Core services
 
@@ -63,6 +71,14 @@ Legend: `[x]` done · `[~]` in progress · `[ ]` not started.
 - [ ] W4.5 full e2e (3 green runs, screenshots)
 - [ ] Final gate + checkpoint commit
 
+## Doc follow-ups (batched into W4.4)
+
+- PLUGINS.md: list the 10 builtin `core-commands` (explain, summarize, review, fix, refactor, tests, docs, commit,
+  translate, proofread); `ProviderDefinition.icon` accepts `string | { color?, mono? }`; clearing secret settings
+  (`''` vs `null`) wording.
+- PROVIDERS.md: MiniMax default `max_tokens` (131072 for M3, 65536 otherwise), OpenRouter `validate` via `GET /key`,
+  Ollama effort menu from `/api/show` `thinking.values`, xAI returns 400 for a bad key (mapped to `auth_invalid`).
+
 ## Backlog (not in v1)
 
 Multi-user accounts · child-process isolation for code plugins · plugin marketplace/registry index ·
@@ -74,4 +90,5 @@ conversation branching · sharing links · knowledge/RAG · image generation · 
 |---|---|---|---|
 | P0.1–P0.2 | coordinator | n/a | — |
 | P0.3 D+S | D1, D2, D3, D4, S0 + R1 (reconcile) | check + build green on skeleton | 34a0940 |
-| P0.4 C-a | C1+C2, C3 | audit ok; 205 tests; check + build green; dark 200.html verified | (this commit) |
+| P0.4 C-a | C1+C2, C3 | audit ok; 205 tests; check + build green; dark 200.html verified | b10eb2d |
+| P0.5 C-b | C4, C5, C6 | audit ok; 834 tests; check + build green; 501 stubs verified; pins ok | (this commit) |

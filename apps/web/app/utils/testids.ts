@@ -32,6 +32,8 @@ export const testIds = {
   commandPaletteItem: 'command-palette-item',
   shortcutsDialog: 'shortcuts-dialog',
   pageHeader: 'page-header',
+  errorPage: 'error-page',
+  errorBack: 'error-back',
   // Chat
   emptyGreeting: 'empty-greeting',
   noProviderCallout: 'no-provider-callout',

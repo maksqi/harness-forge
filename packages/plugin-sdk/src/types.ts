@@ -71,8 +71,12 @@ export interface ProviderDefinition {
   id: string
   /** UI name (Settings -> Providers, picker group header). */
   name: string
-  /** `lobe:<slug>`; default: the plugin icon, else a monogram. */
-  icon?: string
+  /**
+   * `lobe:<slug>` (or a plugin-relative file), or an explicit pair when the mono and color slugs differ
+   * (e.g. `{ color: 'lobe:zhipu-color', mono: 'lobe:zai' }`). For a single `lobe:<x>-color` string the host also
+   * offers `lobe:<x>` as the mono variant when it exists. Default: the plugin icon, else a monogram.
+   */
+  icon?: string | { color?: string, mono?: string }
   /** Fields of the key dialog; `[]` for keyless providers. */
   credentials: CredentialField[]
   /** models.dev key for metadata (default: `id`). */
