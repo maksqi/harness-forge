@@ -20,6 +20,19 @@ defaults:
     shell: bash
 
 jobs:
+  actionlint:
+    name: Lint workflows (actionlint + shellcheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # The image bundles shellcheck, so the run: scripts are checked too. Dependabot does not update docker://
+      # steps: bump this tag by hand (gh api repos/rhysd/actionlint/releases/latest --jq .tag_name).
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+
   check:
     name: Check (English, lint, typecheck, unit tests)
     runs-on: ubuntu-latest

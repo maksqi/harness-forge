@@ -20,17 +20,45 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    # Let new releases age before they are proposed: 7 days, 30 for major versions.
+    # Let new releases age before they are proposed. The default cooldown equals pnpm 11's built-in
+    # minimum-release-age (1 day): a longer cooldown made Dependabot "update" to the newest release older than the
+    # cooldown, which can be *older* than the locked version (PR #1 downgraded ai 7.0.116 -> 7.0.107).
     cooldown:
-      default-days: 7
+      default-days: 1
       semver-major-days: 30
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     commit-message:
       prefix: chore(deps)
-    # Minor and patch updates share one pull request; every major version gets its own.
+    # A package matches the first group whose patterns and update types fit it; an update that fits no group gets a
+    # pull request of its own. 0.x packages treat a minor bump as breaking, but Dependabot calls it "semver-minor",
+    # so they are kept out of the minor-and-patch group: their patches share one group and each of their minor
+    # bumps gets its own pull request (this is how katex 0.16 -> 0.18 must arrive).
     groups:
+      # ai and @ai-sdk/vue must stay on matching versions (the web's useChat options come from ai).
+      ai-sdk:
+        patterns: [ai, '@ai-sdk/*', '@openrouter/ai-sdk-provider']
+        update-types: [minor, patch]
+      # The ORM and its migration generator move together (both 0.x).
+      drizzle:
+        patterns: [drizzle-orm, drizzle-kit]
+      zero-major-patches:
+        patterns: [katex, '@hono/zod-validator', '@libsql/client', esbuild, fflate, tsdown, class-variance-authority]
+        update-types: [patch]
       minor-and-patch:
         patterns: ['*']
+        exclude-patterns:
+          - ai
+          - '@ai-sdk/*'
+          - '@openrouter/ai-sdk-provider'
+          - drizzle-orm
+          - drizzle-kit
+          - katex
+          - '@hono/zod-validator'
+          - '@libsql/client'
+          - esbuild
+          - fflate
+          - tsdown
+          - class-variance-authority
         update-types: [minor, patch]
     ignore:
       # ADR-013: TypeScript stays on ~6.0.3 (TypeScript 7 breaks .vue files that import prop types).

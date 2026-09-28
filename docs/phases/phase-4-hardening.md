@@ -421,13 +421,11 @@ and re-checked every pointer; the release `actionlint` box stays open (no `actio
   chats and keys in the volume; the container runs as non-root.
   Evidence: wave-log commit `6e3b442` (Final gate: Docker image, Node 24, non-root, smoke ok); the `docker` job of
   `.github/workflows/ci.yml` (health check, `id -u` = 1000).
-- [ ] **CI** — `.github/workflows/ci.yml` runs the gate commands (install, check, build, e2e); validated with
+- [x] **CI** — `.github/workflows/ci.yml` runs the gate commands (install, check, build, e2e); validated with
   `actionlint` when available (agents never push).
-  Open (W5.11, 2026-09-28): `actionlint` is not installed on the development machine and no workflow runs it, so there
-  is no `actionlint` evidence. Every workflow (`ci.yml`, `audit.yml`, `live.yml`) and `dependabot.yml` passes
-  `pnpm exec eslint .github`; the only GitHub Actions run so far (CI of `6e3b442`, green) predates the Phase 5
-  workflow changes. To close: `actionlint .github/workflows/*.yml` locally, or the first green CI and audit runs after
-  the Phase 5 push.
+  Evidence (Phase 6 hotfix P6-00, 2026-09-28): `actionlint` 1.7.12 (`docker run --rm -v "$PWD:/repo" -w /repo
+  rhysd/actionlint:1.7.12 -color`) passes every workflow (`ci.yml`, `audit.yml`, `live.yml`) with exit code 0, and the
+  new `actionlint` job of `.github/workflows/ci.yml` runs it (with shellcheck) on every push and pull request.
 - [x] **Docs** — README quick start verified from a clean checkout; env table matches `env.ts`; API.md matches the
   route table test; plugin tutorial walked through; ROADMAP fully checked.
   Evidence: `packages/shared/src/api/routes.test.ts › route table › equals the route key index of API.md (key, method, path, module)`;

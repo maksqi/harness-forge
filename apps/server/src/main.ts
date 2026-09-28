@@ -1,5 +1,6 @@
 // Process entry (ARCHITECTURE.md section 5): `.env` -> env -> bind check -> data dir -> database + migrations ->
-// services -> bind check with a stored password -> boot sequence -> HTTP server; graceful shutdown on SIGINT / SIGTERM.
+// services -> bind check with a stored password -> boot sequence -> HTTP server; graceful shutdown on SIGINT / SIGTERM
+// (the handlers exist from the start of the boot, so a signal during plugin loading is a graceful shutdown too).
 // Owner after Phase 0: W1.1 (W1.1-T8); the trusted proxy boot log: W5.7.
 //
 // Bind safety: a non-loopback `HF_HOST` needs `HF_PASSWORD`, a password stored in the data directory, or
@@ -59,46 +60,70 @@ function readEnv(): Env {
   }
 }
 
-function listen(deps: AppDeps, logger: Logger): Promise<ServerType> {
+function listen(deps: AppDeps): Promise<{ server: ServerType, info: AddressInfo }> {
   const { env } = deps
   const app = createApp(deps)
   return new Promise((resolve, reject) => {
     const server = serve({ fetch: app.fetch, port: env.port, hostname: env.host }, (info: AddressInfo) => {
-      logger.info('listening', {
-        url: `http://${displayHost(info.address)}:${info.port}`,
-        dataDir: env.dataDir,
-        safeMode: env.safeMode,
-        mockProvider: env.mockProvider,
-      })
-      resolve(server)
+      resolve({ server, info })
     })
     server.once('error', reject)
   })
 }
 
-function installShutdown(server: ServerType, deps: AppDeps, database: Database, logger: Logger): void {
-  let shuttingDown = false
+/**
+ * What a shutdown has to release, filled in while the boot goes on. The signal handlers exist from the start of the
+ * boot, so SIGINT / SIGTERM during plugin loading (or right after `listening` is logged) is a graceful shutdown, never
+ * the default signal action.
+ */
+interface BootState {
+  database: Database | undefined
+  deps: AppDeps | undefined
+  /** `startDeps` was called: plugins, MCP servers and background tasks may be running. */
+  started: boolean
+  server: ServerType | undefined
+  /** The boot step in progress; a shutdown waits for it before it releases anything. */
+  current: Promise<unknown> | null
+  stopping: boolean
+}
 
+/** Runs one boot step so that a shutdown can wait for it. */
+function bootStep<T>(state: BootState, promise: Promise<T>): Promise<T> {
+  state.current = promise
+  return promise
+}
+
+function installShutdown(state: BootState, logger: Logger): void {
   async function shutdown(signal: string): Promise<void> {
-    if (shuttingDown) {
+    if (state.stopping) {
       logger.warn('second signal, exiting now', { signal })
       process.exit(1)
     }
-    shuttingDown = true
-    logger.info('shutting down', { signal })
+    state.stopping = true
+    logger.info('shutting down', { signal, phase: state.server === undefined ? 'booting' : 'listening' })
     const timer = setTimeout(() => {
       logger.error('shutdown timed out', { timeoutMs: SHUTDOWN_TIMEOUT_MS })
       process.exit(1)
     }, SHUTDOWN_TIMEOUT_MS)
     timer.unref()
 
-    // Stop accepting connections, end runs / plugins / MCP / SSE streams, then drop what is left and close the DB.
-    const closed = new Promise<void>(resolve => server.close(() => resolve()))
-    await stopDeps(deps)
-    if ('closeAllConnections' in server)
-      server.closeAllConnections()
-    await closed
-    database.close()
+    try {
+      // A half-finished boot step settles first (the boot stops after it), then everything it created is released:
+      // stop accepting connections, end runs / plugins / MCP / SSE streams, drop what is left and close the DB.
+      await state.current?.catch(() => {})
+      const server = state.server
+      const closed = server === undefined ? Promise.resolve() : new Promise<void>(resolve => server.close(() => resolve()))
+      if (state.started && state.deps !== undefined)
+        await stopDeps(state.deps)
+      if (server !== undefined && 'closeAllConnections' in server)
+        server.closeAllConnections()
+      await closed
+      state.database?.close()
+    }
+    catch (error) {
+      logger.error('shutdown failed', { err: error })
+      process.exit(1)
+    }
     logger.info('stopped')
     process.exit(0)
   }
@@ -141,38 +166,61 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
-  let database: Database | undefined
-  let deps: AppDeps | undefined
-  let started = false
+  const state: BootState = { database: undefined, deps: undefined, started: false, server: undefined, current: null, stopping: false }
+  installShutdown(state, logger)
   try {
     ensureDataDir(env)
-    database = await openDatabase({ path: env.paths.db })
-    await migrateDatabase(database.db)
-    deps = createDeps({ env, logger, redactor, db: database.db, builtins: getBuiltinPlugins(env) })
+    const database = await bootStep(state, openDatabase({ path: env.paths.db }))
+    state.database = database
+    if (state.stopping)
+      return
+    await bootStep(state, migrateDatabase(database.db))
+    if (state.stopping)
+      return
+    const deps = createDeps({ env, logger, redactor, db: database.db, builtins: getBuiltinPlugins(env) })
+    state.deps = deps
 
     if (envBindError !== null) {
-      const bindError = bindSafetyError(env, { storedPassword: await storedPasswordAllowsBind(deps) })
+      const storedPassword = await bootStep(state, storedPasswordAllowsBind(deps))
+      if (state.stopping)
+        return
+      const bindError = bindSafetyError(env, { storedPassword })
       if (bindError !== null) {
         logger.error(bindError, { host: env.host })
         database.close()
         process.exit(1)
       }
     }
-    if (!isLoopbackHost(env.host) && env.insecure && (await deps.passwords.source()) === null)
+    if (!isLoopbackHost(env.host) && env.insecure && (await bootStep(state, deps.passwords.source())) === null)
       logger.warn('listening on a non-loopback address without a password (HF_INSECURE=1)', { host: env.host })
+    if (state.stopping)
+      return
     if (env.trustProxy !== null)
       logger.info('trusting reverse proxies (HF_TRUST_PROXY)', { trustProxy: env.trustProxy, ranges: trustedRanges(env.trustProxy) })
 
-    started = true
-    await startDeps(deps)
-    const server = await listen(deps, logger)
-    installShutdown(server, deps, database, logger)
+    state.started = true
+    await bootStep(state, startDeps(deps))
+    if (state.stopping)
+      return
+    const { server, info } = await bootStep(state, listen(deps))
+    state.server = server
+    if (state.stopping)
+      return
+    logger.info('listening', {
+      url: `http://${displayHost(info.address)}:${info.port}`,
+      dataDir: env.dataDir,
+      safeMode: env.safeMode,
+      mockProvider: env.mockProvider,
+    })
   }
   catch (error) {
+    // A step that failed because a shutdown is releasing its resources is not a boot failure.
+    if (state.stopping)
+      return
     logger.error('boot failed', { err: error })
-    if (started && deps !== undefined)
-      await stopDeps(deps).catch(() => {})
-    database?.close()
+    if (state.started && state.deps !== undefined)
+      await stopDeps(state.deps).catch(() => {})
+    state.database?.close()
     process.exit(1)
   }
 }

@@ -22,6 +22,8 @@ afterEach(() => {
 
 interface RunResult {
   code: number | null
+  /** The signal that ended the child, null when it exited by itself (`process.exit`). */
+  signal: NodeJS.Signals | null
   output: string
 }
 
@@ -67,9 +69,9 @@ function runMain(env: Record<string, string>, timeoutMs = 60_000, stopWhen?: Reg
       clearTimeout(timer)
       reject(error)
     })
-    child.on('exit', (code) => {
+    child.on('exit', (code, signal) => {
       clearTimeout(timer)
-      resolve({ code, output })
+      resolve({ code, signal, output })
     })
   })
 }
@@ -144,6 +146,32 @@ describe('main.ts and HF_TRUST_PROXY (ADR-026)', () => {
     expect(result.output).toContain('"msg":"listening"')
     const trusted = records(result.output).find(record => record.msg === 'trusting reverse proxies (HF_TRUST_PROXY)')
     expect(trusted).toMatchObject({ level: 'info', trustProxy: ['loopback', '10.0.0.2'], ranges: ['127.0.0.0/8', '::1', '10.0.0.2'] })
+    expect(result.signal).toBeNull()
     expect(result.code).toBe(0)
+  }, 90_000)
+})
+
+describe('main.ts graceful shutdown', () => {
+  // The signal handlers exist from the start of the boot: SIGTERM while the plugins load (sent as soon as the line
+  // logged right before `startDeps` appears) is a graceful shutdown with exit code 0, never the default signal action.
+  it('sIGTERM while the plugins load shuts down gracefully with exit code 0', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'harness-forge-main-'))
+    tempDirs.push(dataDir)
+    const blankKeys = Object.fromEntries(PROVIDER_KEY_VARIABLES.map(name => [name, '']))
+    const result = await runMain({
+      ...blankKeys,
+      HF_HOST: '127.0.0.1',
+      HF_PORT: '0',
+      HF_DATA_DIR: dataDir,
+      HF_OFFLINE: '1',
+      HF_TRUST_PROXY: 'loopback',
+      NODE_ENV: 'production',
+    }, 60_000, /"msg":"trusting reverse proxies/)
+    expect(result.signal).toBeNull()
+    expect(result.code).toBe(0)
+    const messages = records(result.output).map(record => record.msg)
+    expect(messages).toContain('shutting down')
+    expect(messages).toContain('stopped')
+    expect(messages).not.toContain('boot failed')
   }, 90_000)
 })
