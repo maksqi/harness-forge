@@ -35,6 +35,7 @@ describe('loadEnv', () => {
       pluginWatch: false,
       offline: false,
       insecure: false,
+      trustProxy: null,
       apiTarget: 'http://localhost:8787',
       webDir: null,
     })
@@ -62,6 +63,7 @@ describe('loadEnv', () => {
       HF_PLUGIN_WATCH: 'yes',
       HF_OFFLINE: 'on',
       HF_INSECURE: '0',
+      HF_TRUST_PROXY: 'loopback,10.0.0.2',
       HF_API_TARGET: 'http://127.0.0.1:8791',
       HF_WEB_DIR: '/srv/harness-web',
       ANTHROPIC_API_KEY: 'sk-ant-test',
@@ -77,6 +79,7 @@ describe('loadEnv', () => {
       pluginWatch: true,
       offline: true,
       insecure: false,
+      trustProxy: ['loopback', '10.0.0.2'],
       apiTarget: 'http://127.0.0.1:8791',
       webDir: '/srv/harness-web',
     })
@@ -128,6 +131,46 @@ describe('loadEnv', () => {
     expect(loadEnv({ NODE_ENV: 'production' }, { cwd: tempDir() })).toMatchObject({ dev: false, logLevel: 'info' })
     expect(loadEnv({ NODE_ENV: 'development' }, { cwd: tempDir() })).toMatchObject({ dev: true, logLevel: 'debug' })
     expect(loadEnv({}, { cwd: tempDir(), dev: false }).dev).toBe(false)
+  })
+})
+
+describe('hF_TRUST_PROXY (ADR-026)', () => {
+  it('unset (or empty) keeps the v1 behavior: null', () => {
+    expect(loadEnv({}, { cwd: tempDir() }).trustProxy).toBeNull()
+    expect(loadEnv({ HF_TRUST_PROXY: '  ' }, { cwd: tempDir() }).trustProxy).toBeNull()
+  })
+
+  it.each([
+    ['loopback', ['loopback']],
+    ['private', ['private']],
+    ['Loopback, 10.0.0.2', ['loopback', '10.0.0.2']],
+    ['192.168.1.0/24,fd00::/8', ['192.168.1.0/24', 'fd00::/8']],
+    ['2001:DB8::1', ['2001:db8::1']],
+    ['::ffff:10.0.0.3', ['10.0.0.3']],
+  ])('%s -> %o (frozen)', (value, entries) => {
+    const env = loadEnv({ HF_TRUST_PROXY: value }, { cwd: tempDir() })
+    expect(env.trustProxy).toEqual(entries)
+    expect(Object.isFrozen(env.trustProxy)).toBe(true)
+  })
+
+  it.each(['1', 'true', 'TRUE', '2', '0', 'yes', '*', 'false', 'localhost', 'proxy.example.com', 'loopback,maybe', '10.0.0.0/33', '0.0.0.0/0', '::/0', '10.0.0.1:8080', ','])('rejects %s with an EnvError that explains the format', (value) => {
+    let error: unknown
+    try {
+      loadEnv({ HF_TRUST_PROXY: value }, { cwd: tempDir() })
+    }
+    catch (caught) {
+      error = caught
+    }
+    expect(error).toBeInstanceOf(EnvError)
+    const message = (error as EnvError).message
+    expect(message).toContain('HF_TRUST_PROXY')
+    for (const part of ['loopback', 'private', 'IP addresses', 'CIDR ranges'])
+      expect(message).toContain(part)
+  })
+
+  it('names the reason for booleans and hop counts', () => {
+    expect(() => loadEnv({ HF_TRUST_PROXY: 'true' }, { cwd: tempDir() })).toThrow(/trust every peer/)
+    expect(() => loadEnv({ HF_TRUST_PROXY: '1' }, { cwd: tempDir() })).toThrow(/hop count/)
   })
 })
 

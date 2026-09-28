@@ -2,17 +2,19 @@
 // The transcript column (docs/UI.md 5.7, 5.9, 7.6) on AiConversation (stick to bottom): opening jumps to the bottom
 // at once, new content is followed only while the reader is near the bottom, scrolling up shows the round
 // scroll-to-bottom pill 12px above the composer. Finished messages are memoized (v-memo): a request starting or
-// ending re-renders only the last message; the Edit buttons of older user messages hide through the column's
-// `data-busy` (CSS), so long transcripts do not re-render as a whole twice per reply. A long history renders its
-// newest messages first and the older ones in batches right after (all at once when the reader scrolls up), so
-// opening it never blocks the page for long. A request that failed before any reply shows its error on its own; a
-// submitted request shows the "Thinking…" placeholder. A history that takes longer than a moment to arrive shows a
-// skeleton (never for fast loads, so nothing flashes).
-import type { HarnessUIMessage } from '@harness-forge/shared'
+// ending re-renders only the last message; the Edit and Regenerate buttons of older messages hide through the
+// column's `data-busy` (CSS), so long transcripts do not re-render as a whole twice per reply. A long history
+// renders its newest messages first and the older ones in batches right after (all at once when the reader scrolls
+// up), so opening it never blocks the page for long. A request that failed before any reply shows its error on its
+// own; a submitted request shows the "Thinking…" placeholder. A history that takes longer than a moment to arrive
+// shows a skeleton (never for fast loads, so nothing flashes). Messages with versions (`branches`, ADR-023) show a
+// switcher and re-render when a request or a switch starts or ends (it disables them); after a switch, focus moves
+// to the same control of the new version's switcher (docs/UI.md 14.1).
+import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
 import { usePreferredReducedMotion, useScroll } from '@vueuse/core'
-import { computed, defineComponent, onBeforeUnmount, provide, ref, watch } from 'vue'
+import { computed, defineComponent, onBeforeUnmount, provide, ref, useTemplateRef, watch } from 'vue'
 import { useStickToBottomContext } from 'vue-stick-to-bottom'
 import AiConversation from '@/components/ai-elements/conversation/Conversation.vue'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -30,15 +32,24 @@ const props = withDefaults(defineProps<{
   showThinking: boolean
   /** Hide the messages until the history arrived (the column keeps its layout). */
   loading?: boolean
+  /** `ChatDetail.branches` of the shown path: the versions of the messages that have more than one. */
+  branches?: Record<string, MessageBranch>
+  /** A version switch is in flight. */
+  switching?: boolean
 }>(), {
   loading: false,
+  branches: () => ({}),
+  switching: false,
 })
 
 const emit = defineEmits<{
   'regenerate': [messageId: string]
   'edit': [messageId: string, text: string]
   'approval': [decision: ToolApprovalDecision]
+  /** Retry of the last request (the failed last reply, or a request that failed before any reply). */
   'retry': []
+  /** Show another version of a message (a sibling of a shown message). */
+  'select-version': [messageId: string]
   /** The transcript is scrolled away from the top (the header shows its border). */
   'update:scrolled': [value: boolean]
 }>()
@@ -62,6 +73,48 @@ function isCommandReply(index: number): boolean {
   const previous = props.messages[index - 1]
   return props.messages[index]?.role === 'assistant' && previous?.role === 'user' && previous.metadata?.command?.type === 'reply'
 }
+
+/**
+ * The `busy` prop of a row. Older rows without versions get false (their Edit / Regenerate hide through the column's
+ * `data-busy`), so a request starting or ending re-renders only the last row and the rows with a switcher.
+ */
+function isBusyRow(index: number, message: HarnessUIMessage): boolean {
+  return busy.value && (index === props.messages.length - 1 || props.branches[message.id] !== undefined)
+}
+
+/** The Retry of a stored error: the last message retries the last request, an older reply gets a new version. */
+function onRetry(messageId: string) {
+  if (props.messages.at(-1)?.id === messageId)
+    emit('retry')
+  else
+    emit('regenerate', messageId)
+}
+
+// ---------- versions ----------
+
+const column = useTemplateRef<HTMLElement>('column')
+const BRANCH_CONTROLS = [testIds.messageBranchPrevious, testIds.messageBranchNext] as const
+/** The switcher control that had focus when a version was chosen: it gets focus again on the new version. */
+let focusAfterSwitch: { messageId: string, control: string } | null = null
+
+function onSelectVersion(messageId: string) {
+  const active = typeof document === 'undefined' ? null : document.activeElement
+  const control = active instanceof HTMLElement ? active.dataset.testid : undefined
+  focusAfterSwitch = control && (BRANCH_CONTROLS as readonly string[]).includes(control) ? { messageId, control } : null
+  // eslint-disable-next-line vue/custom-event-name-casing -- contract name from docs/UI.md 10.4
+  emit('select-version', messageId)
+}
+
+// Runs after the DOM shows the new path: the old switcher is gone with its message, the new one is rendered.
+watch([() => props.switching, () => props.messages], ([switching]) => {
+  const target = focusAfterSwitch
+  if (switching || !target)
+    return
+  focusAfterSwitch = null
+  const switcher = [...(column.value?.querySelectorAll<HTMLElement>(`[data-testid="${testIds.messageBranch}"]`) ?? [])]
+    .find(element => element.dataset.messageId === target.messageId)
+  switcher?.querySelector<HTMLElement>(`[data-testid="${target.control}"]`)?.focus()
+}, { flush: 'post' })
 
 // ---------- loading ----------
 
@@ -211,6 +264,7 @@ defineExpose({
   >
     <ScrollBridge />
     <div
+      ref="column"
       :data-busy="busy ? 'true' : undefined"
       class="group/transcript hf-transcript mx-auto flex w-full max-w-3xl flex-col gap-(--message-gap) px-4 pt-6 pb-[calc(var(--hf-composer-h,8rem)+1.5rem)] md:px-6"
       :aria-busy="loading || undefined"
@@ -219,7 +273,7 @@ defineExpose({
         <div
           v-for="(message, index) in messages"
           :key="message.id"
-          v-memo="[message, index >= renderStart, index === messages.length - 1, isStreaming(index), showThinking, index === messages.length - 1 && busy, errorFor(index)]"
+          v-memo="[message, index >= renderStart, index === messages.length - 1, isStreaming(index), showThinking, index === messages.length - 1 && busy, errorFor(index), branches[message.id], branches[message.id] !== undefined && (busy || switching)]"
           data-slot="transcript-message"
           class="contents"
         >
@@ -230,13 +284,16 @@ defineExpose({
             :is-last="index === messages.length - 1"
             :streaming="isStreaming(index)"
             :show-thinking="showThinking"
-            :busy="index === messages.length - 1 && busy"
+            :busy="isBusyRow(index, message)"
             :error="errorFor(index)"
             :command-reply="isCommandReply(index)"
+            :branch="branches[message.id] ?? null"
+            :switching="switching"
             @regenerate="emit('regenerate', message.id)"
             @edit="text => emit('edit', message.id, text)"
             @approval="decision => emit('approval', decision)"
-            @retry="emit('retry')"
+            @retry="onRetry(message.id)"
+            @select-version="onSelectVersion"
           />
         </div>
         <SubmittedPlaceholder v-if="showPlaceholder" />

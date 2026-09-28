@@ -259,6 +259,17 @@ describe('session cookie', () => {
     expect(sessionCookieOf(await t.request('/api/auth/status', { headers: cookieHeader(recent) }))).toBeNull()
   })
 
+  it('with HF_TRUST_PROXY the re-issued cookie is Secure only when a trusted proxy forwarded HTTPS (ADR-026)', async () => {
+    const t = await testApp({ HF_PASSWORD: PASSWORD, HF_TRUST_PROXY: 'loopback' })
+    const old = await t.deps.sessions.issue({ authAt: Date.now() - 2 * DAY, now: Date.now() - 2 * DAY })
+    const headers = { ...cookieHeader(old), 'x-forwarded-proto': 'https' }
+    const viaProxy = sessionCookieOf(await t.request('/api/auth/status', { headers }))
+    expect(viaProxy?.split('; ')).toContain('Secure')
+    const direct = sessionCookieOf(await t.request('/api/auth/status', { headers }, { remoteAddress: '203.0.113.7' }))
+    expect(direct).not.toBeNull()
+    expect(direct?.split('; ')).not.toContain('Secure')
+  })
+
   it('a rolling re-issue never overrides the cookie cleared by logout', async () => {
     const t = await testApp()
     const old = await t.deps.sessions.issue({ authAt: Date.now() - 2 * DAY, now: Date.now() - 2 * DAY })

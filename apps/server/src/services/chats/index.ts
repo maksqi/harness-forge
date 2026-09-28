@@ -1,24 +1,34 @@
-// Chats, messages and usage rows (API.md 5.9, ARCHITECTURE.md 6.1 / 6.3, tables `chats`, `messages`, `usage`).
-// Owner: W1.5 (W1.5-T2, W1.5-T3). Implements `ChatsService` (./types.ts) behind `createChatsService(deps)`.
+// Chats, messages and usage rows (API.md 5.9, ARCHITECTURE.md 6.1 / 6.3 / 6.8 / 6.9, tables `chats`, `messages`,
+// `usage`). Owner: W1.5; the message tree (ADR-023) and the bulk data members (ADR-024) by W5.1. Implements
+// `ChatsService` (./types.ts) behind `createChatsService(deps)`.
 //
 // - Ordering: `updated_at` desc, `id` desc with an opaque keyset cursor (./cursor.ts). `updated_at` is the last activity
-//   (creation, `touch` when a run ends); renaming, pinning, archiving or changing settings keeps a chat's position.
-// - Search (`q`): message text through `messages.search_text` (normalized, LIKE with `%` / `_` escaped) and titles in
-//   JavaScript, both Unicode case-insensitive (./text.ts); `snippet` comes from the first matching message.
+//   (creation, `touch` when a run ends); renaming, pinning, archiving, changing settings or switching a version keeps a
+//   chat's position.
+// - Search (`q`): message text through `messages.search_text` (normalized, LIKE with `%` / `_` escaped) of every message
+//   version and titles in JavaScript, both Unicode case-insensitive (./text.ts); `snippet` comes from the first matching
+//   message (it may be a version that is not on the active path).
+// - Message tree (./tree.ts): `get` answers the active path (`listPath` from the active leaf) and the versions of its
+//   messages (`branches`, from the light rows of the chat); `switchBranch` moves the active leaf to the most recent
+//   leaf under a message with a compare-and-set against the leaf it read; imports (`create` with `messages`,
+//   `importChat`) validate the tree before anything is written (./import.ts) and insert the chat, its messages and its
+//   active leaf in one batch.
 // - Writes are single statements or atomic batches (no interactive transaction holds the connection), except
-//   `transaction()`, which the chat pipeline (W2.1) uses for its history operations.
-// - Events are emitted after the write: `chat.created` (create, ensure when it creates), `chat.updated` (update,
-//   touch, setTitle), `chat.deleted` (remove). Message operations emit nothing.
-// - Phase 5 skeleton (P5-0b): `switchBranch`, `allIds`, `importChat` and `removeAll` (and the tree members of the
-//   store) answer `not_implemented` until W5.1 implements the message tree (ADR-023); `get` still returns every message.
-import type { ChatDetail, ChatSettings, ChatSummary, CursorPage, UsageTotals } from '@harness-forge/shared'
+//   `transaction()`, which the chat pipeline uses for its commit and persist steps.
+// - Events are emitted after the write: `chat.created` (create, ensure when it creates, importChat), `chat.updated`
+//   (update, touch, setTitle, switchBranch), `chat.deleted` (remove, removeAll: one per chat). Message operations emit
+//   nothing.
+import type { ChatDetail, ChatSettings, ChatSummary, CursorPage, HarnessUIMessage, UsageTotals } from '@harness-forge/shared'
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core'
 import type { ChatRow } from '../../db/schema.ts'
 import type { AppDeps } from '../../types.ts'
 import type { ChatCursor } from './cursor.ts'
+import type { ChatExportTree } from './export.ts'
+import type { ImportTree } from './import.ts'
 import type { ChatListQuery, ChatRecord, ChatsService, UsageInput } from './types.ts'
 import {
   CHAT_ID_PATTERN,
+  chatExportAnySchema,
   chatSettingsSchema,
   createChatId,
   HarnessError,
@@ -26,15 +36,26 @@ import {
   modelRefSchema,
   validationError,
 } from '@harness-forge/shared'
-import { and, desc, eq, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm'
 import { chats, messages, usage } from '../../db/schema.ts'
-import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { decodeChatCursor, encodeChatCursor } from './cursor.ts'
 import { databaseError, guardDb, isConstraintError } from './db-errors.ts'
 import { buildChatExport } from './export.ts'
-import { assignMessageIds, validateImportedMessages } from './import.ts'
-import { chatNotFound, chunk, createMessageStore, INSERT_CHUNK_ROWS, messageInsertValues } from './store.ts'
+import { assignMessageIds, freshMessageIds, planImportTree, validateImportedMessages } from './import.ts'
+import {
+  chatNotFound,
+  chunk,
+  createMessageStore,
+  INSERT_CHUNK_ROWS,
+  listTreeRows,
+  MESSAGE_COLUMNS,
+  messageInsertValues,
+  messageNotFound,
+  rowToMessage,
+  TREE_COLUMNS,
+} from './store.ts'
 import { LIKE_ESCAPE, likeContainsPattern, makeSnippet, messagePlainText, normalizeForSearch, sanitizeTitle, titleMatches } from './text.ts'
+import { branchesOf, buildTree, latestLeafUnder, resolveLeaf } from './tree.ts'
 
 /** Chats scanned per query while searching (title matches are decided in JavaScript). */
 const SEARCH_BATCH_ROWS = 200
@@ -42,6 +63,7 @@ const SEARCH_BATCH_ROWS = 200
 const ID_LOOKUP_CHUNK = 500
 
 type ChatUpdateSet = SQLiteUpdateSetSource<typeof chats>
+type ChatInsert = typeof chats.$inferInsert
 
 function clampLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit))
@@ -80,6 +102,15 @@ function conflictExists(id: string): HarnessError {
   })
 }
 
+/** The active leaf changed between reading and switching it (a run committed meanwhile, or another switch). */
+function leafMoved(id: string): HarnessError {
+  return new HarnessError({
+    code: 'conflict',
+    message: 'The chat changed while switching versions. Wait until the reply finishes, then try again.',
+    details: { reason: 'run-active', chatId: id },
+  })
+}
+
 function invalidField(path: string, message: string): HarnessError {
   return validationError([{ path: [path], message, code: 'custom' }])
 }
@@ -115,9 +146,17 @@ function tokenCount(value: number): number {
   return Number.isFinite(value) && value > 0 ? Math.round(value) : 0
 }
 
+/** The message ends with a tool call waiting for the user (`chats.pending_approval` of the path it ends). */
+function awaitsApproval(message: HarnessUIMessage | null): boolean {
+  if (message?.role !== 'assistant')
+    return false
+  return message.parts.some(part => (part.type.startsWith('tool-') || part.type === 'dynamic-tool')
+    && (part as { state?: unknown }).state === 'approval-requested')
+}
+
 export function createChatsService(deps: AppDeps): ChatsService {
   const { db } = deps
-  const store = createMessageStore(db, 'database')
+  const store = createMessageStore(db)
 
   // `deps.runs` and `deps.events` are read at call time: the runner (W2.1) may need this service while it is built.
   function isRunning(id: string): boolean {
@@ -188,11 +227,29 @@ export function createChatsService(deps: AppDeps): ChatsService {
     }
   }
 
+  /** Summary, settings, the active path, the versions of its messages and the usage totals. */
   async function detailOf(row: ChatRow): Promise<ChatDetail> {
-    const list = await store.listMessages(row.id)
+    const tree = buildTree(await listTreeRows(db, row.id))
+    const path = await store.listPath(row.id, resolveLeaf(tree, row.activeLeafId))
+    const branches = branchesOf(tree, path.map(message => message.id))
     const totals = await usageTotals(row.id)
-    // The store is still linear (one version per message) until the message tree lands (ADR-023, W5.1).
-    return { ...toSummary(row), settings: row.settings, messages: list, branches: {}, totals }
+    return { ...toSummary(row), settings: row.settings, messages: path, branches, totals }
+  }
+
+  /** Every message version of a chat (one query) with its parent and the active leaf, for the JSON export. */
+  async function exportTree(row: ChatRow): Promise<ChatExportTree> {
+    const rows = await db
+      .select({ ...MESSAGE_COLUMNS, parentId: TREE_COLUMNS.parentId, seq: TREE_COLUMNS.seq })
+      .from(messages)
+      .where(eq(messages.chatId, row.id))
+      .orderBy(asc(messages.seq))
+    const tree = buildTree(rows)
+    return {
+      messages: rows.map(rowToMessage),
+      // The effective parents: an export always imports again, even from damaged data.
+      parentIds: rows.map(entry => tree.parentOf.get(entry.id) ?? null),
+      activeLeafId: resolveLeaf(tree, row.activeLeafId),
+    }
   }
 
   /** Message ids of `ids` that already exist (any chat). */
@@ -204,6 +261,29 @@ export function createChatsService(deps: AppDeps): ChatsService {
         found.add(row.id)
     }
     return found
+  }
+
+  /**
+   * Inserts a chat with its messages (final ids, `seq` = position), their parents and its active leaf from `tree`, in
+   * one batch. `conflict` (`exists`) when the chat id (or a message id, raced) is taken meanwhile.
+   */
+  async function insertChat(row: ChatInsert, list: readonly HarnessUIMessage[], tree: ImportTree, now: number): Promise<void> {
+    const rows = list.map((message, seq) => {
+      const parent = tree.parentIndex[seq] ?? -1
+      return messageInsertValues(row.id, message, seq, parent < 0 ? null : list[parent]?.id ?? null, now)
+    })
+    const activeLeafId = tree.leafIndex < 0 ? null : list[tree.leafIndex]?.id ?? null
+    try {
+      await db.batch([
+        db.insert(chats).values({ ...row, activeLeafId }),
+        ...chunk(rows, INSERT_CHUNK_ROWS).map(values => db.insert(messages).values(values)),
+      ])
+    }
+    catch (error) {
+      if (isConstraintError(error))
+        throw conflictExists(row.id)
+      throw databaseError(error)
+    }
   }
 
   function page(rows: readonly { row: ChatRow, snippet?: string }[], limit: number): CursorPage<ChatSummary> {
@@ -229,7 +309,7 @@ export function createChatsService(deps: AppDeps): ChatsService {
     const needle = normalizeForSearch(q)
     const pattern = likeContainsPattern(needle)
     // Plain SQL with explicit aliases: inside a select list Drizzle renders columns unqualified, which would bind
-    // `chats.id` to the subquery's own table.
+    // `chats.id` to the subquery's own table. Every message version is searched.
     const matchId = sql<string | null>`(
       SELECT m.id FROM messages AS m
       WHERE m.chat_id = chats.id AND m.search_text LIKE ${pattern} ESCAPE ${LIKE_ESCAPE}
@@ -299,24 +379,14 @@ export function createChatsService(deps: AppDeps): ChatsService {
       const modelRef = input.modelRef === undefined ? null : checkModelRef(input.modelRef)
       const settings = input.settings === undefined ? {} : checkSettings(input.settings)
       const imported = await validateImportedMessages(input.messages ?? [])
+      const ids = imported.map(message => message.id)
+      const tree = planImportTree(ids, input.parentIds, input.activeLeafId)
       if (await findRow(id) !== undefined)
         throw conflictExists(id)
-      const list = assignMessageIds(imported, await existingMessageIds(imported.map(message => message.id)))
+      const list = assignMessageIds(imported, await existingMessageIds(ids))
 
       const now = Date.now()
-      const rows = list.map((message, seq) => messageInsertValues(id, message, seq, now))
-      try {
-        await db.batch([
-          db.insert(chats).values({ id, title, titleSource: title === null ? null : 'user', modelRef, settings, createdAt: now, updatedAt: now }),
-          ...chunk(rows, INSERT_CHUNK_ROWS).map(values => db.insert(messages).values(values)),
-        ])
-      }
-      catch (error) {
-        // A concurrent create of the same chat (or of a message id checked above).
-        if (isConstraintError(error))
-          throw conflictExists(id)
-        throw databaseError(error)
-      }
+      await insertChat({ id, title, titleSource: title === null ? null : 'user', modelRef, settings, createdAt: now, updatedAt: now }, list, tree, now)
       const row = await requireRow(id)
       const detail = await detailOf(row)
       deps.events.emit('chat.created', toSummary(row))
@@ -357,15 +427,87 @@ export function createChatsService(deps: AppDeps): ChatsService {
       deps.events.emit('chat.deleted', { id })
     }),
 
-    export: (id, format) => guardDb(async () => buildChatExport(await detailOf(await requireRow(id)), format, Date.now())),
+    export: (id, format) => guardDb(async () => {
+      const row = await requireRow(id)
+      const detail = await detailOf(row)
+      const at = Date.now()
+      return format === 'json' ? buildChatExport(detail, 'json', at, await exportTree(row)) : buildChatExport(detail, format, at)
+    }),
 
-    switchBranch: rejectsNotImplemented('ChatsService.switchBranch (W5.1)'),
+    switchBranch: (id, messageId) => guardDb(async () => {
+      const row = await requireRow(id)
+      const tree = buildTree(await listTreeRows(db, id))
+      const leaf = latestLeafUnder(tree, messageId)
+      if (leaf === null)
+        throw messageNotFound(id, messageId)
+      const pendingApproval = tree.byId.get(leaf)?.role === 'assistant' && awaitsApproval(await store.getMessage(id, leaf))
+      // Compare-and-set against the leaf read above: a run that committed meanwhile keeps its path.
+      const [updated] = await db
+        .update(chats)
+        .set({ activeLeafId: leaf, pendingApproval })
+        .where(and(eq(chats.id, id), row.activeLeafId === null ? isNull(chats.activeLeafId) : eq(chats.activeLeafId, row.activeLeafId)))
+        .returning()
+      if (updated === undefined)
+        throw await findRow(id) === undefined ? chatNotFound(id) : leafMoved(id)
+      emitUpdated(updated)
+      return detailOf(updated)
+    }),
 
-    allIds: rejectsNotImplemented('ChatsService.allIds (W5.1)'),
+    allIds: () => guardDb(async () => {
+      const rows = await db.select({ id: chats.id }).from(chats).orderBy(asc(chats.id))
+      return rows.map(row => row.id)
+    }),
 
-    importChat: rejectsNotImplemented('ChatsService.importChat (W5.1)'),
+    importChat: input => guardDb(async () => {
+      const parsed = chatExportAnySchema.safeParse(input.exported)
+      if (!parsed.success)
+        throw validationError(parsed.error)
+      const exported = parsed.data
+      const { chat } = exported
+      const imported = await validateImportedMessages(chat.messages, ['chat'])
+      const ids = imported.map(message => message.id)
+      const tree = exported.version === 2
+        ? planImportTree(ids, exported.chat.parentIds, exported.chat.activeLeafId, ['chat'])
+        : planImportTree(ids, undefined, undefined, ['chat'])
+      const id = input.id === 'keep' ? chat.id : createChatId()
+      if (input.id === 'keep' && await findRow(id) !== undefined)
+        throw conflictExists(id)
+      const list = input.id === 'keep' ? assignMessageIds(imported, await existingMessageIds(ids)) : freshMessageIds(imported)
 
-    removeAll: rejectsNotImplemented('ChatsService.removeAll (W5.1)'),
+      const now = Date.now()
+      const title = input.restore && chat.title !== null ? sanitizeTitle(chat.title) : null
+      await insertChat({
+        id,
+        title,
+        // A title without a source is kept like a user title (never replaced by an automatic one).
+        titleSource: title === null ? null : chat.titleSource ?? 'user',
+        modelRef: chat.modelRef,
+        settings: chat.settings,
+        pinned: input.restore && chat.pinned,
+        archived: input.restore && chat.archived,
+        createdAt: input.restore ? chat.createdAt : now,
+        updatedAt: input.restore ? chat.updatedAt : now,
+      }, list, tree, now)
+      deps.events.emit('chat.created', toSummary(await requireRow(id)))
+      return { id, messages: list.length }
+    }),
+
+    removeAll: options => guardDb(async () => {
+      // One batch: usage rows first (deleted, or detached like `remove` does), then every message and every chat;
+      // share links go with their chats (`chat_shares.chat_id` ON DELETE CASCADE).
+      const usageStatement = options.usage
+        ? db.delete(usage).returning({ id: usage.id })
+        : db.update(usage).set({ chatId: null }).where(isNotNull(usage.chatId)).returning({ id: usage.id })
+      const [usageRows, messageResult, deleted] = await db.batch([
+        usageStatement,
+        db.delete(messages),
+        db.delete(chats).returning({ id: chats.id }),
+      ])
+      const chatIds = deleted.map(entry => entry.id).sort()
+      for (const id of chatIds)
+        deps.events.emit('chat.deleted', { id })
+      return { chatIds, messages: messageResult.rowsAffected, usageRows: options.usage ? usageRows.length : 0 }
+    }),
 
     find: id => guardDb(async () => {
       const row = await findRow(id)
@@ -449,6 +591,6 @@ export function createChatsService(deps: AppDeps): ChatsService {
       })
     }),
 
-    transaction: fn => guardDb(async () => db.transaction(async tx => fn(createMessageStore(tx, 'transaction')))),
+    transaction: fn => guardDb(async () => db.transaction(async tx => fn(createMessageStore(tx)))),
   }
 }

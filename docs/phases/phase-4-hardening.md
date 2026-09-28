@@ -232,91 +232,182 @@ Known issues collected at the Wave A and B gates; each is either fixed in Wave C
 Each item is closed by a named test or documented evidence (W4.1-T1). Items owned outside W4.1's paths are verified
 by W4.1 and fixed by the owner or a fix-up agent.
 
+Evidence was recorded by W5.9 in Phase 5 (P5-A, 2026-09-28): `<file> › <describe> › <test>` with the titles exactly as
+written in the source (`%s`, `%j` and `$key: $name` are the title templates of table-driven `it.each` tests), or a
+commit of the ROADMAP wave log. Every pointer was checked to exist. SEC-A3, SEC-C1, SEC-I1, SEC-I3 and the release
+`actionlint` box stay open for W5.11 (P5-B).
+
 **A. Auth**
-- [ ] SEC-A1 With a password set, every non-public `/api/*` route returns 401 `unauthorized` without a session
+- [x] SEC-A1 With a password set, every non-public `/api/*` route returns 401 `unauthorized` without a session
   (route-table-driven test; public: `GET /health`, `GET /auth/status`, `POST /auth/login`, `POST /auth/logout`,
-  `GET /icons/lobe`, `GET /icons/lobe/:slug`).
-- [ ] SEC-A2 `hf_session` is HttpOnly, SameSite=Strict, Secure on HTTPS, HMAC-verified, expires, and is invalidated
+  `GET /icons/lobe`, `GET /icons/lobe/:slug`; Phase 5 adds the public share routes `shares.view` and `shares.file`,
+  ADR-025).
+  Evidence: `apps/server/src/http/middleware/session-auth.test.ts › with a password and no session › %s answers 401 unauthorized (action login)`.
+- [x] SEC-A2 `hf_session` is HttpOnly, SameSite=Strict, Secure on HTTPS, HMAC-verified, expires, and is invalidated
   by a password change.
+  Evidence: `apps/server/src/http/middleware/session-auth.test.ts › session cookie › is set by login with HttpOnly, SameSite=Strict, Path=/ and a 30-day Max-Age`;
+  `… › session cookie › is Secure over HTTPS (X-Forwarded-Proto: https counts)`;
+  `… › session cookie › rejects a modified, an expired and a revoked cookie`;
+  `apps/server/src/http/routes/auth.test.ts › pUT /auth/password › changes the password: requires the current one; every other session ends`.
 - [ ] SEC-A3 Login is rate-limited with backoff; password checks are constant-time scrypt. The limiter keys on the
   socket address and ignores `X-Forwarded-For`, so behind a reverse proxy every client shares one bucket
   (documented in ARCHITECTURE.md section 10 and the README).
-- [ ] SEC-A4 A non-loopback bind is refused without `HF_PASSWORD` or `HF_INSECURE=1`.
-- [ ] SEC-A5 Fresh auth (ADR-017, API.md): with a password set, installing or trusting code / stdio-MCP plugins,
+  Deferred to W5.11 (P5-B): the item needs rewording for `HF_TRUST_PROXY` (ADR-026).
+- [x] SEC-A4 A non-loopback bind is refused without `HF_PASSWORD` or `HF_INSECURE=1`.
+  Evidence: `apps/server/src/env.test.ts › bind safety › refuses a non-loopback bind without a password unless HF_INSECURE=1`;
+  `apps/server/src/main.test.ts › main.ts bind safety › a non-loopback HF_HOST without a password exits with code 1 and a clear message`.
+- [x] SEC-A5 Fresh auth (ADR-017, API.md): with a password set, installing or trusting code / stdio-MCP plugins,
   scaffolding and building code plugins, creating or changing stdio MCP servers and changing the password need a
   login within the last 10 minutes, else 403 `forbidden` (route-table-driven test). So do file writes/deletes,
   build and reload of code plugins; afterwards a `created` plugin re-pins its trust automatically (ADR-017).
+  Evidence: `apps/server/src/security/fresh-auth-routes.test.ts › sEC-A5 fresh auth table › $key: $name`;
+  `apps/server/src/plugins/scaffold/index.test.ts › trust re-pinning (ADR-017) › a save of a created plugin keeps it trusted across a reload`.
 
 **B. Origin / CSRF**
-- [ ] SEC-B1 Every state-changing request needs a same-origin `Origin` (or `Sec-Fetch-Site: same-origin`); otherwise
+- [x] SEC-B1 Every state-changing request needs a same-origin `Origin` (or `Sec-Fetch-Site: same-origin`); otherwise
   403 `forbidden`.
-- [ ] SEC-B2 No CORS headers are ever sent; GET/HEAD never change state (including `GET /events`).
-- [ ] SEC-B3 JSON endpoints reject non-JSON content types (no form-encoded CSRF).
+  Evidence: `apps/server/src/security/request-guards.test.ts › sEC-B1: every state-changing route refuses cross-site requests › %s`.
+  By design, a request with neither `Origin` nor `Sec-Fetch-Site` (a non-browser client such as curl) passes:
+  `apps/server/src/http/middleware/origin-check.test.ts › state-changing requests › pass: %s`.
+- [x] SEC-B2 No CORS headers are ever sent; GET/HEAD never change state (including `GET /events`).
+  Evidence: `apps/server/src/security/request-guards.test.ts › sEC-B2 / SEC-C1 / SEC-C2: headers of every answer › %s`;
+  `… › sEC-B2: GET and HEAD never change stored state › every GET route, and HEAD of it, leaves every table as it was`.
+- [x] SEC-B3 JSON endpoints reject non-JSON content types (no form-encoded CSRF).
+  Evidence: `apps/server/src/security/request-guards.test.ts › sEC-B3: JSON routes refuse non-JSON bodies › %s`.
 
 **C. CSP and headers**
 - [ ] SEC-C1 CSP on SPA and API responses: `default-src 'self'`, inline scripts only by hash, no `unsafe-eval`,
   `object-src 'none'`, `base-uri 'none'`, `frame-ancestors 'none'`.
-- [ ] SEC-C2 `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy:
+  Deferred to W5.11 (P5-B). Since P5-A the built-page CSP test (`apps/server/src/http/static.test.ts`) runs in the CI
+  `e2e` job right after `pnpm build` with `HF_TEST_REQUIRE_WEB_BUILD=1`, so a missing build fails instead of skipping.
+- [x] SEC-C2 `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy:
   same-origin`.
-- [ ] SEC-C3 SVG icons are served as `image/svg+xml` with `nosniff` and rendered only via `<img>` or CSS mask.
+  Evidence: `apps/server/src/security/request-guards.test.ts › sEC-B2 / SEC-C1 / SEC-C2: headers of every answer › %s`.
+- [x] SEC-C3 SVG icons are served as `image/svg+xml` with `nosniff` and rendered only via `<img>` or CSS mask.
+  Evidence: `apps/server/src/http/routes/icons.test.ts › gET /api/icons/lobe/:slug › serves an svg with immutable caching, nosniff and a restrictive CSP`;
+  `apps/web/app/components/providers/ProviderIcon.test.ts › providerIcon › renders the color icon as an <img> on a muted tile`;
+  `… › providerIcon › renders the mono icon as a CSS mask over the text color`.
 
 **D. Secret redaction**
-- [ ] SEC-D1 No API response contains a stored secret (sentinel secrets in every scope; all GET responses grepped).
-- [ ] SEC-D2 Logs redact `authorization`, `cookie`, `x-api-key` and fields matching `key|secret|password|token`;
+- [x] SEC-D1 No API response contains a stored secret (sentinel secrets in every scope; all GET responses grepped).
+  Evidence: `apps/server/src/security/secret-leaks.test.ts › sEC-D1 / SEC-D5: no secret in any answer › %s`.
+- [x] SEC-D2 Logs redact `authorization`, `cookie`, `x-api-key` and fields matching `key|secret|password|token`;
   message contents never appear at info level.
-- [ ] SEC-D3 Provider error messages are sanitized before they reach clients or logs.
-- [ ] SEC-D4 Secrets use AES-256-GCM with AAD `<scope>/<name>`; `secret.key` is 0600; `HF_MASTER_KEY` is validated.
-- [ ] SEC-D5 Chat exports, diagnostics and plugin exports contain no secrets.
+  Evidence: `apps/server/src/logger.test.ts › logger › redacts sensitive fields, token-like strings and registered secrets`;
+  `apps/server/src/security/secret-leaks.test.ts › sEC-D2: logs › message contents never appear at info level or above`.
+- [x] SEC-D3 Provider error messages are sanitized before they reach clients or logs.
+  Evidence: `apps/server/src/providers/errors.test.ts › defaultProviderError › never copies keys into the message or the upstream excerpt`;
+  `apps/server/src/security/secret-leaks.test.ts › sEC-D2: logs › no secret, password hash or session token in any log record, at any level`.
+- [x] SEC-D4 Secrets use AES-256-GCM with AAD `<scope>/<name>`; `secret.key` is 0600; `HF_MASTER_KEY` is validated.
+  Evidence: `apps/server/src/services/secrets/crypto.test.ts › secret encryption (AES-256-GCM) › binds the ciphertext to <scope>/<name> (AAD)`;
+  `apps/server/src/security/keyring.test.ts › createKeyring with the key file › creates secret.key once (mode 0600) and reuses it on restart`;
+  `… › createKeyring with HF_MASTER_KEY › fails the boot for a key that is %s, without echoing it`.
+- [x] SEC-D5 Chat exports, diagnostics and plugin exports contain no secrets.
+  Evidence: `apps/server/src/security/secret-leaks.test.ts › sEC-D1 / SEC-D5: no secret in any answer › %s`;
+  `apps/web/app/components/settings/AboutPanel.test.ts › aboutPanel › shows versions from /api/health and copies diagnostics without keys`.
 
 **E. Install guards**
-- [ ] SEC-E1 Zip-slip, absolute, drive-letter, backslash and symlink entries are rejected; 20 MB / 100 MB / 2000
+- [x] SEC-E1 Zip-slip, absolute, drive-letter, backslash and symlink entries are rejected; 20 MB / 100 MB / 2000
   entry limits hold.
-- [ ] SEC-E2 npm `dist.integrity` (sha512) and URL `integrity` are verified; lifecycle scripts never run.
-- [ ] SEC-E3 Staging + atomic swap; a failed install leaves the previous version active.
-- [ ] SEC-E4 Code and stdio-MCP plugins load only when `trusted_hash` matches, re-checked at every load.
-- [ ] SEC-E5 Reserved plugin ids and the `<pluginId>` / `<pluginId>-*` provider id rule are enforced.
+  Evidence: `apps/server/src/plugins/install/paths.test.ts › checkEntryPath › refuses %j`;
+  `apps/server/src/plugins/install/zip.test.ts › readZip › refuses symbolic links, devices and FIFOs`;
+  `… › readZip › enforces the entry count and the expanded size before decompressing`;
+  `apps/server/src/http/middleware/body-limit.test.ts › limits by route › uses the documented limits of LIMITS`.
+- [x] SEC-E2 npm `dist.integrity` (sha512) and URL `integrity` are verified; lifecycle scripts never run.
+  Evidence: `apps/server/src/plugins/install/npm.test.ts › downloadNpmPackage › reports unknown packages as not_found and refuses an integrity mismatch`;
+  `apps/server/src/plugins/install/installer.test.ts › install from npm and URL › installs zip and tgz URLs through SafeFetch with a verified integrity`;
+  the installer only unpacks the tarball and warns about declared install scripts:
+  `apps/server/src/plugins/install/npm.test.ts › downloadNpmPackage › downloads the verified tarball of the resolved version`.
+- [x] SEC-E3 Staging + atomic swap; a failed install leaves the previous version active.
+  Evidence: `apps/server/src/plugins/install/installer.test.ts › install from zip › keeps the previous version when the update fails to load`.
+- [x] SEC-E4 Code and stdio-MCP plugins load only when `trusted_hash` matches, re-checked at every load.
+  Evidence: `apps/server/src/plugins/host.test.ts › loading and states › keeps code and stdio plugins untrusted until their hash is pinned, then loads them on trust`.
+- [x] SEC-E5 Reserved plugin ids and the `<pluginId>` / `<pluginId>-*` provider id rule are enforced.
+  Evidence: `apps/server/src/plugins/install/installer.test.ts › install from zip › refuses reserved ids, incompatible plugins and an id installed from another source`;
+  `apps/server/src/registry/index.test.ts › providers › enforces the plugin namespace, validates the definition and rejects duplicates with conflict`.
 
 **F. Path traversal**
-- [ ] SEC-F1 Plugin file API, plugin icon, file download, LobeHub slug, static serving and export filenames reject
+- [x] SEC-F1 Plugin file API, plugin icon, file download, LobeHub slug, static serving and export filenames reject
   `..`, encoded and double-encoded separators, absolute paths, NUL bytes and symlink escapes (realpath checks).
+  Evidence: `apps/server/src/security/path-traversal.test.ts › plugin files and plugin icon › read, write and delete refuse %s`;
+  `… › file downloads, LobeHub slugs and static files › file download %s` (same describe: `lobeHub slug %s`,
+  `static files refuse /%s`, `download and export file names cannot break out of Content-Disposition`).
 
 **G. SSRF**
-- [ ] SEC-G1 `web_fetch` blocks loopback, private, link-local, CGNAT, cloud-metadata and IPv6 ULA/link-local targets
+- [x] SEC-G1 `web_fetch` blocks loopback, private, link-local, CGNAT, cloud-metadata and IPv6 ULA/link-local targets
   and re-checks every redirect. The `core-tools` setting `allowLocalhost` (default off) admits loopback only.
-- [ ] SEC-G2 Documented by design: user-configured provider base URLs and MCP URLs may target localhost; plugin
+  Evidence: `apps/server/src/security/ssrf.test.ts › sSRF table (refused before any connection) › rejects loopback, private, link-local, metadata and other non-public targets`;
+  `apps/server/src/builtin-plugins/core-tools/web-fetch.test.ts › webFetch › surfaces SSRF refusals, also after a redirect`;
+  `… › web_fetch tool › blocks loopback by default and reaches it only while allowLocalhost is on`.
+- [x] SEC-G2 Documented by design: user-configured provider base URLs and MCP URLs may target localhost; plugin
   `ctx.fetch` is unrestricted in v1 (code plugins run with server permissions).
+  Evidence: `docs/ARCHITECTURE.md` section 10.4 "Plugins, tools and outbound requests" (provider base URLs are
+  exempt); `docs/PLUGINS.md` section 9 (`fetch`: no SSRF guard);
+  `apps/server/src/http/routes/mcp.test.ts › mcp routes › creates, lists, updates and deletes a server; header values never come back`
+  (an MCP server on `http://127.0.0.1` is accepted).
 
 **H. XSS**
-- [ ] SEC-H1 No `v-html` anywhere (`vue/no-v-html` is an error; `grep -r "v-html" apps/web/app` finds nothing
+- [x] SEC-H1 No `v-html` anywhere (`vue/no-v-html` is an error; `grep -r "v-html" apps/web/app` finds nothing
   outside `components/ui` and `components/ai-elements`, and those are reviewed).
-- [ ] SEC-H2 Markdown escapes raw HTML; links are limited to `http`, `https`, `mailto` with
+  Evidence: `eslint.config.js` (`'vue/no-v-html': 'error'`);
+  `apps/web/app/components/common/Markdown.test.ts › markdown: no v-html › no chat or markdown component renders HTML strings`;
+  no `.vue` file under `apps/web/app` uses `v-html` (grep, 2026-09-28).
+- [x] SEC-H2 Markdown escapes raw HTML; links are limited to `http`, `https`, `mailto` with
   `rel="noopener noreferrer"`.
-- [ ] SEC-H3 Plugin-provided strings (names, descriptions, logs, tool input/output) render as text; plugin icons
+  Evidence: `apps/web/app/components/common/Markdown.test.ts › markdown: raw HTML is inert › renders <script> as text`;
+  `… › markdown: links › opens http(s) links in a new tab without opener or referrer`.
+- [x] SEC-H3 Plugin-provided strings (names, descriptions, logs, tool input/output) render as text; plugin icons
   only via `<img>` or CSS mask.
+  Evidence: `apps/web/app/components/providers/ProviderIcon.test.ts › providerIcon › never renders raw HTML from the name or the URLs`;
+  every other string renders through Vue text interpolation (SEC-H1: no `v-html`).
 
 **I. Dependency pins**
 - [ ] SEC-I1 `pnpm why typescript` shows only 6.0.x; `pnpm why vue-stream-markdown` shows only 1.x (or none once the
   copied AI Elements components no longer import it).
-- [ ] SEC-I2 CI installs with `--frozen-lockfile`; `allowBuilds` lists only reviewed packages.
+  Deferred to W5.11 (P5-B). The P5-0a gate (wave-log commit `0b56f45`) recorded `vue-stream-markdown` gone
+  (ADR-007) and TypeScript 6.0.3 only.
+- [x] SEC-I2 CI installs with `--frozen-lockfile`; `allowBuilds` lists only reviewed packages.
+  Evidence: `.github/workflows/ci.yml` (`pnpm install --frozen-lockfile` in the `check` and `e2e` jobs);
+  `pnpm-workspace.yaml` (`allowBuilds`: `esbuild`, `vue-demi`, each with its reason; `strictDepBuilds: true`).
 - [ ] SEC-I3 `pnpm audit --prod` reviewed by the coordinator; high/critical findings fixed or documented.
+  Deferred to W5.11 (P5-B). Since P5-A, `.github/workflows/audit.yml` runs
+  `pnpm audit --prod --audit-level high --ignore-registry-errors` on every push to `main`, every pull request and weekly.
 
 ## Release checklist
 
-- [ ] **Build** — `pnpm install --frozen-lockfile && pnpm check && pnpm build` green.
-- [ ] **Empty data dir** — `rm -rf .tmp/release && HF_DATA_DIR=.tmp/release pnpm start` creates the directory,
+- [x] **Build** — `pnpm install --frozen-lockfile && pnpm check && pnpm build` green.
+  Evidence: wave-log commits `f142fcc` (Wave C: frozen install ok, build ok) and `6e3b442` (Final gate).
+- [x] **Empty data dir** — `rm -rf .tmp/release && HF_DATA_DIR=.tmp/release pnpm start` creates the directory,
   `harness.db` and `secret.key` (0600); `GET /api/health` → 200; http://localhost:8787 loads dark.
-- [ ] **Password mode** — `HF_PASSWORD=secret pnpm start` shows the login page; `/api/providers` → 401 without a
+  Evidence: wave-log commit `6e3b442` (Final gate: `pnpm start` from an empty data dir, `secret.key` 0600);
+  `apps/server/src/env.test.ts › ensureDataDir › creates the data directory layout (root 0700) idempotently`;
+  `e2e/specs/core/theme.spec.ts › theme › dark is the default before the first paint with a light OS and empty storage @smoke`.
+- [x] **Password mode** — `HF_PASSWORD=secret pnpm start` shows the login page; `/api/providers` → 401 without a
   session.
-- [ ] **Docker** — `docker compose up -d --build` serves http://localhost:8787; `docker compose restart` keeps
+  Evidence: `e2e/specs/core/login.spec.ts › login › a password-protected server redirects to login, rejects a wrong password and lets the right one in @smoke`;
+  the 401 of every private route: SEC-A1.
+- [x] **Docker** — `docker compose up -d --build` serves http://localhost:8787; `docker compose restart` keeps
   chats and keys in the volume; the container runs as non-root.
+  Evidence: wave-log commit `6e3b442` (Final gate: Docker image, Node 24, non-root, smoke ok); the `docker` job of
+  `.github/workflows/ci.yml` (health check, `id -u` = 1000).
 - [ ] **CI** — `.github/workflows/ci.yml` runs the gate commands (install, check, build, e2e); validated with
   `actionlint` when available (agents never push).
-- [ ] **Docs** — README quick start verified from a clean checkout; env table matches `env.ts`; API.md matches the
+  Deferred to W5.11 (P5-B): `actionlint` validation (not installed for the agents; every workflow passes
+  `pnpm exec eslint .github`).
+- [x] **Docs** — README quick start verified from a clean checkout; env table matches `env.ts`; API.md matches the
   route table test; plugin tutorial walked through; ROADMAP fully checked.
-- [ ] **Examples** — the 5 example plugins load `active` in tests; declarative examples appear in
+  Evidence: `packages/shared/src/api/routes.test.ts › route table › equals the route key index of API.md (key, method, path, module)`;
+  wave-log commit `6e3b442` (Final gate).
+- [x] **Examples** — the 5 example plugins load `active` in tests; declarative examples appear in
   `GET /api/providers`.
-- [ ] **Screenshots** — dark + light screenshots in `docs/assets/screenshots/` (<= 300 KB each), linked from README.
-- [ ] **English** — `pnpm check:english` clean.
+  Evidence: `examples/plugins/examples.test.ts › examples in the plugin host › loads every example as active, with trust required only for code and stdio plugins`;
+  `… › examples in the plugin host › registers the documented contributions` (lists `lmstudio` and `together-ai` in
+  `GET /api/providers`).
+- [x] **Screenshots** — dark + light screenshots in `docs/assets/screenshots/` (<= 300 KB each), linked from README.
+  Evidence: wave-log commit `f142fcc` (W4.4): `chat-dark.png`, `chat-light.png`, `plugins-dark.png`,
+  `provider-wizard-dark.png`, `settings-dark.png` (90-128 KB each), all linked from `README.md`.
+- [x] **English** — `pnpm check:english` clean.
+  Evidence: wave-log commits `f142fcc` and `6e3b442` (`pnpm check` runs `check:english`; so does the CI `check` job).
 
 ## Final gate (W4)
 

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// Action row under a message (docs/UI.md 7.5): Copy, Regenerate (last assistant message) or Edit (user messages;
-// hidden while the transcript is busy, through its `data-busy`), then the meta slot. Fixed 28px height (40px touch
-// targets on coarse pointers) and always laid out, so revealing it never moves the transcript.
+// Action row under a message (docs/UI.md 7.5): Copy, Regenerate (every finished assistant message) or Edit (user
+// messages), both hidden while the transcript is busy through its `data-busy`, then the meta slot. Fixed 28px height
+// (40px touch targets on coarse pointers) and always laid out, so revealing it never moves the transcript. The version
+// switcher sits before this row (ChatMessage), outside its hover fade.
 import { PencilIcon, RotateCcwIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -40,7 +41,7 @@ defineSlots<{ default?: () => any }>()
           size="icon-xs"
           aria-label="Regenerate"
           :data-testid="testIds.messageRegenerate"
-          class="text-muted-foreground hover:text-foreground pointer-coarse:size-10"
+          class="text-muted-foreground hover:text-foreground pointer-coarse:size-10 group-data-[busy=true]/transcript:hidden"
           @click="emit('regenerate')"
         >
           <RotateCcwIcon class="size-3.5" />

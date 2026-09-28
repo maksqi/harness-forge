@@ -5,18 +5,19 @@
 // written to a temporary file and renamed into place (never a partial blob), directories 0700, files 0600. Paths come
 // only from a row's validated sha256, never from request input.
 //
-// Phase 5 skeleton (P5-0b): `importFile` and `purge` (bulk data, ADR-024) answer `not_implemented` until W5.3.
+// Bulk data (ADR-024, W5.3): `importFile` stores one attachment of a data import with the upload checks, deduplicated
+// by content (an existing row with the same sha256 is reused, the backup's id is kept when it is free), and `purge`
+// empties the store (every row, every blob) for delete-all.
 import type { FileRef } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
-import type { FilesService, StoredFile } from './types.ts'
+import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, StoredFile } from './types.ts'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { createFileId, FILE_ID_PATTERN, HarnessError, LIMITS, SHA256_HEX_PATTERN, validationError } from '@harness-forge/shared'
-import { eq } from 'drizzle-orm'
+import { asc, eq } from 'drizzle-orm'
 import { files } from '../../db/schema.ts'
-import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { guardDb, isConstraintError } from '../chats/db-errors.ts'
 import { sanitizeFileName } from './names.ts'
 import { resolveUploadType } from './sniff.ts'
@@ -43,6 +44,16 @@ function fileNotFound(id: string): HarnessError {
 function isMissingFile(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code
   return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+/** A `validation_error` of `importFile` (one issue at `path`). */
+function invalidImport(message: string, path: string): HarnessError {
+  return validationError([{ path: [path], message, code: 'custom' }], message)
+}
+
+/** A stored `created_at`: the given time when it is a valid timestamp, else now. */
+function validTimestamp(value: number): number {
+  return Number.isSafeInteger(value) && value >= 0 ? value : Date.now()
 }
 
 export function createFilesService(deps: AppDeps): FilesService {
@@ -91,6 +102,64 @@ export function createFilesService(deps: AppDeps): FilesService {
           throw error
       }
     }
+  }
+
+  /** Inserts a row under `id`; false when the id is already used (checked by the primary key, so races are safe). */
+  async function insertRowWithId(id: string, row: Omit<StoredFile, 'id'>): Promise<boolean> {
+    try {
+      await guardDb(() => db.insert(files).values({ id, ...row }))
+      return true
+    }
+    catch (error) {
+      if (isConstraintError(error))
+        return false
+      throw error
+    }
+  }
+
+  /** Deletes everything below the files root (blobs, temporary files, orphans); the root itself stays. */
+  async function removeBlobs(): Promise<void> {
+    let names: string[]
+    try {
+      names = await readdir(root)
+    }
+    catch (error) {
+      if (!isMissingFile(error))
+        throw error
+      await mkdir(root, { recursive: true, mode: 0o700 })
+      return
+    }
+    for (const name of names)
+      await rm(join(root, name), { recursive: true, force: true })
+  }
+
+  async function importFile(input: FileImportInput): Promise<FileImportResult> {
+    const data = input.data
+    if (data.byteLength > LIMITS.uploadBytes)
+      throw payloadTooLarge()
+    const sha256 = createHash('sha256').update(data).digest('hex')
+    if (sha256 !== input.sha256)
+      throw invalidImport('The attachment does not match its sha256: it is damaged or was altered.', 'sha256')
+    const type = resolveUploadType(input.mime, input.name, data)
+    if (!type.ok)
+      throw invalidImport(type.reason, 'mime')
+    const same = await guardDb(() => db.select().from(files).where(eq(files.sha256, sha256)).orderBy(asc(files.createdAt), asc(files.id)))
+    // Written again when a row survived without its blob (a no-op when the blob is there).
+    await storeBlob(sha256, data)
+    const reuse = same.find(row => row.id === input.preferredId) ?? same[0]
+    if (reuse !== undefined)
+      return { file: reuse, reused: true }
+    const row = { sha256, name: sanitizeFileName(input.name, type.mime), mime: type.mime, size: data.byteLength, createdAt: validTimestamp(input.createdAt) }
+    const keepId = FILE_ID_PATTERN.test(input.preferredId) && await insertRowWithId(input.preferredId, row)
+    const id = keepId ? input.preferredId : await insertRow(row)
+    return { file: { id, ...row }, reused: false }
+  }
+
+  async function purge(): Promise<FilePurgeResult> {
+    // Rows first: an interrupted purge leaves orphan blobs (removed by the next purge), never rows without blobs.
+    const rows = await guardDb(() => db.delete(files).returning({ size: files.size }))
+    await removeBlobs()
+    return { files: rows.length, bytes: rows.reduce((total, row) => total + row.size, 0) }
   }
 
   async function get(id: string): Promise<StoredFile | null> {
@@ -172,8 +241,8 @@ export function createFilesService(deps: AppDeps): FilesService {
       return FILE_ID_PATTERN.test(id) ? id : null
     },
 
-    importFile: rejectsNotImplemented('FilesService.importFile (W5.3)'),
+    importFile,
 
-    purge: rejectsNotImplemented('FilesService.purge (W5.3)'),
+    purge,
   }
 }

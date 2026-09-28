@@ -1,7 +1,7 @@
 import type { ChatDetail } from '@harness-forge/shared'
 import { chatExportAnySchema, chatExportSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { buildChatExport, EXPORT_TOOL_OUTPUT_BYTES, exportFilename, renderChatMarkdown, titleSlug } from './export.ts'
+import { buildChatExport, EXPORT_TOOL_OUTPUT_BYTES, exportFilename, linearTree, renderChatMarkdown, titleSlug } from './export.ts'
 
 const CHAT_ID = '0199a8f0-0000-7000-8000-000000000001'
 const NOW = Date.UTC(2026, 8, 28, 12, 30)
@@ -155,6 +155,27 @@ describe('json export', () => {
     expect(JSON.parse(file.body).chat).not.toHaveProperty('branches')
     expect(chatExportAnySchema.parse(JSON.parse(file.body)).version).toBe(2)
     expect(file.body.endsWith('}\n')).toBe(true)
+  })
+
+  it('writes every version of the given tree, not only the active path of the detail', () => {
+    const chat = sampleChat()
+    const [question, answer] = chat.messages
+    const retry = { ...answer!, id: 'msg_asst000000000009', parts: [{ type: 'text' as const, text: 'Another answer.' }] }
+    const tree = { messages: [question!, answer!, retry], parentIds: [null, question!.id, question!.id], activeLeafId: retry.id }
+    const parsed = chatExportSchema.parse(JSON.parse(buildChatExport({ ...chat, messages: [question!, retry] }, 'json', NOW, tree).body))
+    expect(parsed.chat.messages.map(message => message.id)).toEqual([question!.id, answer!.id, retry.id])
+    expect(parsed.chat.parentIds).toEqual([null, question!.id, question!.id])
+    expect(parsed.chat.activeLeafId).toBe(retry.id)
+    // Markdown shows the active path of the detail.
+    const markdown = buildChatExport({ ...chat, messages: [question!, retry] }, 'md', NOW, tree).body
+    expect(markdown).toContain('Another answer.')
+    expect(markdown).not.toContain('Here are the options.')
+  })
+
+  it('linearTree chains the messages and ends at the last one', () => {
+    const { messages } = sampleChat()
+    expect(linearTree(messages)).toEqual({ messages, parentIds: [null, messages[0]!.id], activeLeafId: messages[1]!.id })
+    expect(linearTree([])).toEqual({ messages: [], parentIds: [], activeLeafId: null })
   })
 
   it('exports an empty chat without an active leaf', () => {

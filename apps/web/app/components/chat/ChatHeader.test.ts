@@ -2,7 +2,7 @@ import type { Mock } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { h } from 'vue'
+import { h, nextTick } from 'vue'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useUiStore } from '~/stores/ui'
@@ -22,12 +22,17 @@ vi.mock('~/composables/useApi', () => ({ useApi: () => ({}), useApiFetch: () => 
 
 const CHAT_ID = '0199a8f0-0000-7000-8000-000000000001'
 
+/** Unmounted after each test, so an open menu never outlives its test. */
+const mounted: Array<{ unmount: () => void }> = []
+
 function mountHeader(props: { title: string | null, scrolled?: boolean, loading?: boolean }) {
-  return mount({
+  const wrapper = mount({
     render: () => h(SidebarProvider, null, {
       default: () => h(TooltipProvider, null, { default: () => h(ChatHeader, { chatId: CHAT_ID, ...props }) }),
     }),
   }, { attachTo: document.body })
+  mounted.push(wrapper)
+  return wrapper
 }
 
 async function openMenu(wrapper: ReturnType<typeof mountHeader>) {
@@ -54,6 +59,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  for (const wrapper of mounted.splice(0))
+    wrapper.unmount()
   document.body.replaceChildren()
 })
 
@@ -106,5 +113,36 @@ describe('chatHeader', () => {
     menuItem(testIds.chatMenuDelete).click()
     await flushPromises()
     expect(mock.remove).toHaveBeenCalledWith(CHAT_ID)
+  })
+
+  it('lists Share… after Show thinking', async () => {
+    const wrapper = mountHeader({ title: 'Chat' })
+    await openMenu(wrapper)
+    const items = Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemcheckbox"]'))
+    expect(items.map(item => item.textContent?.trim())).toEqual([
+      'Rename',
+      'Show thinking',
+      'Share…',
+      'Export as Markdown',
+      'Export as JSON',
+      'Delete',
+    ])
+  })
+
+  it('opens the Share dialog for this chat once the menu closed and its trigger has focus again', async () => {
+    const wrapper = mountHeader({ title: 'Chat' })
+    const ui = useUiStore()
+    await openMenu(wrapper)
+    menuItem(testIds.chatMenuShare).click()
+    for (let round = 0; round < 5; round++) {
+      await flushPromises()
+      await nextTick()
+    }
+    expect(document.body.querySelector(`[data-testid="${testIds.chatMenuShare}"]`)).toBeNull()
+    expect(ui.shareChatId).toBe(CHAT_ID)
+    // The Share dialog returns focus to whatever had it when it opened: the menu trigger.
+    expect(document.activeElement).toBe(wrapper.get(`[data-testid="${testIds.chatMenuTrigger}"]`).element)
+    expect(mock.rename).not.toHaveBeenCalled()
+    expect(wrapper.find(`[data-testid="${testIds.chatTitleInput}"]`).exists()).toBe(false)
   })
 })

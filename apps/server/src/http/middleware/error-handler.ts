@@ -3,8 +3,8 @@
 // Mapping: `HarnessError` (any copy of the class) -> as is; zod errors -> `validation_error` with `details.issues`;
 // Hono `HTTPException`s (malformed JSON, ...) -> the code of their status; anything else -> `internal_error` with a
 // generic message and `details.requestId` (the original is logged, redacted, never sent). As a safety net the sent
-// `message` and `details.upstream` pass through the redactor (registered secrets, `sk-...`-like tokens). Owner after
-// Phase 0: W1.1.
+// `message` and `details.upstream` pass through the redactor (registered secrets, `sk-...`-like tokens). The logged
+// path masks a share token like the access log (ADR-025). Owner after Phase 0: W1.1.
 import type { HarnessErrorCode, HarnessErrorEnvelope } from '@harness-forge/shared'
 import type { ErrorHandler, NotFoundHandler } from 'hono'
 import type { Redactor } from '../../security/types.ts'
@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { HarnessError, isHarnessError, validationError } from '@harness-forge/shared'
 import { HTTPException } from 'hono/http-exception'
 import { z } from 'zod'
+import { redactSharePath } from '../../security/redact.ts'
 import { staticSiteFor } from '../static.ts'
 
 /** Message of `internal_error` responses. */
@@ -74,7 +75,7 @@ export function createErrorHandler(deps: AppDeps): ErrorHandler<AppEnv> {
     const requestId = c.get('requestId') ?? randomUUID()
     const harnessError = toHarnessError(error, requestId)
     const logger = c.get('logger') ?? deps.logger.child({ reqId: requestId })
-    const fields = { method: c.req.method, path: c.req.path, code: harnessError.code, status: harnessError.httpStatus }
+    const fields = { method: c.req.method, path: redactSharePath(c.req.path), code: harnessError.code, status: harnessError.httpStatus }
     if (harnessError.code === 'internal_error')
       logger.error('request failed', { ...fields, err: error })
     else if (harnessError.httpStatus >= 500 && harnessError.code !== 'not_implemented')

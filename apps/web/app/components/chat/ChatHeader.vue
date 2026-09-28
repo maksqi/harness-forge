@@ -1,17 +1,20 @@
 <script setup lang="ts">
 // Chat page header (docs/UI.md 5.6): h-12 bar whose bottom border shows only once the transcript scrolled (the 1px
 // is always reserved); the sidebar trigger when the sidebar is collapsed or on mobile; the title renames inline on
-// click; `⋯` menu: Rename · Show thinking · Export as Markdown · Export as JSON · Delete. Rename, export and the
-// undoable delete (toast with Undo, back to `/`) are the sidebar's chat actions (W2.4 `useChatActions`).
+// click; `⋯` menu: Rename · Show thinking · Share… · Export as Markdown · Export as JSON · Delete. Rename, export and
+// the undoable delete (toast with Undo, back to `/`) are the sidebar's chat actions (W2.4 `useChatActions`); Share…
+// opens the Share dialog (ui.openShare, docs/UI.md 7.14) once the menu has closed and its trigger has focus again, so
+// the dialog returns focus there when it closes.
 import {
   BrainIcon,
   FileJsonIcon,
   FileTextIcon,
   MoreHorizontalIcon,
   PencilIcon,
+  Share2Icon,
   Trash2Icon,
 } from '@lucide/vue'
-import { computed, ref } from 'vue'
+import { computed, ref, useTemplateRef } from 'vue'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -46,10 +49,12 @@ const props = withDefaults(defineProps<{
 const actions = useChatActions()
 const ui = useUiStore()
 const sidebar = useSidebar(null)
+const root = useTemplateRef<HTMLElement>('root')
 
 const showTrigger = computed(() => !!sidebar && (sidebar.isMobile.value || sidebar.state.value === 'collapsed'))
 const editing = ref(false)
-let renameAfterMenu = false
+/** The menu item that runs once the menu has closed. */
+let afterMenu: 'rename' | 'share' | null = null
 
 function startRename() {
   editing.value = true
@@ -57,15 +62,26 @@ function startRename() {
 
 function onMenuRename() {
   // The menu gives focus back to its trigger when it closes; the editor opens after that.
-  renameAfterMenu = true
+  afterMenu = 'rename'
+}
+
+function onMenuShare() {
+  afterMenu = 'share'
 }
 
 function onMenuCloseAutoFocus(event: Event) {
-  if (!renameAfterMenu)
+  const action = afterMenu
+  afterMenu = null
+  if (!action)
     return
-  renameAfterMenu = false
   event.preventDefault()
-  startRename()
+  if (action === 'rename') {
+    startRename()
+    return
+  }
+  // The trigger takes focus first: the Share dialog returns focus to whatever had it when it opened.
+  root.value?.querySelector<HTMLElement>(`[data-testid="${testIds.chatMenuTrigger}"]`)?.focus()
+  ui.openShare(props.chatId)
 }
 
 function rename(title: string) {
@@ -75,6 +91,7 @@ function rename(title: string) {
 
 <template>
   <header
+    ref="root"
     :data-testid="testIds.chatHeader"
     :data-scrolled="scrolled ? 'true' : 'false'"
     :class="cn(
@@ -152,6 +169,10 @@ function rename(title: string) {
           <BrainIcon />
           Show thinking
         </DropdownMenuCheckboxItem>
+        <DropdownMenuItem :data-testid="testIds.chatMenuShare" @select="onMenuShare">
+          <Share2Icon />
+          Share…
+        </DropdownMenuItem>
         <DropdownMenuItem :data-testid="testIds.chatMenuExportMd" @select="actions.exportChat(chatId, 'md')">
           <FileTextIcon />
           Export as Markdown

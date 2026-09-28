@@ -300,7 +300,10 @@ export const useChatsStore = defineStore('chats', () => {
     return page.items
   }
 
-  /** `GET /chats/:id` (every message, ready for `useChat({ messages })`); refreshes the row and its run state. */
+  /**
+   * `GET /chats/:id`: the active path (ready for `useChat({ messages })`) and its versions (`branches`, ADR-023);
+   * refreshes the row and its run state.
+   */
   async function get(id: string): Promise<ChatDetail> {
     const chat = await withHarnessErrors(api.chats.get({ params: { id } }))
     const summary = summaryOf(chat)

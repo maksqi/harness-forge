@@ -1,4 +1,5 @@
-// Auth routes (W1.1-T4, API.md 5.2): status, login + rate limit, logout, password set / change / remove.
+// Auth routes (W1.1-T4, API.md 5.2): status, login + rate limit, logout, password set / change / remove; behind reverse
+// proxies (W5.7-T4, ADR-026): the limiter buckets, the Secure cookie, HSTS, the Origin scheme and the host guard.
 import type { AuthStatus } from '@harness-forge/shared'
 import type { TestApp, TestRequestOptions } from '../../testing/create-test-app.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -6,10 +7,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { authStatusSchema, harnessErrorEnvelopeSchema } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
+import { HSTS_HEADER_VALUE } from '../../security/headers.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createMemorySecretStore, createMemorySettingsService } from '../../testing/fakes.ts'
 import { FRESH_AUTH_REQUIRED_MESSAGE } from '../middleware/fresh-auth.ts'
-import { SESSION_COOKIE_NAME } from '../middleware/session-auth.ts'
+import { LOGIN_RATE_LIMIT_DEFAULTS } from '../middleware/login-rate-limit.ts'
+import { CROSS_ORIGIN_MESSAGE } from '../middleware/origin-check.ts'
+import { LOCAL_HOST_ONLY_MESSAGE, SESSION_COOKIE_NAME } from '../middleware/session-auth.ts'
 import { FRESH_AUTH_WINDOW_MS } from '../types.ts'
 import { INVALID_PASSWORD_MESSAGE } from './auth.ts'
 
@@ -53,12 +57,17 @@ async function statusOf(response: Response): Promise<AuthStatus> {
   return authStatusSchema.parse(await response.json())
 }
 
-function login(t: TestApp, password: string, options: TestRequestOptions = {}): Promise<Response> {
+function login(t: TestApp, password: string, options: TestRequestOptions = {}, headers: Record<string, string> = {}): Promise<Response> {
   return t.request('/api/auth/login', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify({ password }),
   }, options)
+}
+
+/** A login forwarded by a reverse proxy for `client` (the peer is the proxy, 127.0.0.1 unless `options` say else). */
+function loginVia(t: TestApp, client: string, password: string, options: TestRequestOptions = {}): Promise<Response> {
+  return login(t, password, options, { 'x-forwarded-for': client })
 }
 
 function setPassword(t: TestApp, body: unknown, token?: string): Promise<Response> {
@@ -162,6 +171,111 @@ describe('login rate limit', () => {
     for (let i = 0; i < 5; i += 1)
       expect((await login(t, `wrong again ${i}`)).status).toBe(401)
     expect((await login(t, ENV_PASSWORD)).status).toBe(429)
+  })
+})
+
+describe('behind a reverse proxy (HF_TRUST_PROXY, ADR-026)', () => {
+  it('a trusted proxy: one bucket per forwarded client', async () => {
+    const t = await testApp({ HF_PASSWORD: ENV_PASSWORD, HF_TRUST_PROXY: 'loopback' })
+    for (let i = 0; i < 5; i += 1)
+      expect((await loginVia(t, '203.0.113.10', `wrong ${i}`)).status).toBe(401)
+    expect((await loginVia(t, '203.0.113.10', ENV_PASSWORD)).status).toBe(429)
+    // Another client behind the same proxy has its own bucket.
+    expect((await loginVia(t, '203.0.113.20', 'wrong again')).status).toBe(401)
+    expect((await loginVia(t, '203.0.113.20', ENV_PASSWORD)).status).toBe(200)
+    // A client in front of a proxy chain (forged left-hand entries do not matter).
+    expect((await loginVia(t, '6.6.6.6, 203.0.113.10', ENV_PASSWORD)).status).toBe(429)
+  })
+
+  it('failures log the resolved address and the TCP peer', async () => {
+    const t = await testApp({ HF_PASSWORD: ENV_PASSWORD, HF_TRUST_PROXY: 'loopback' })
+    await loginVia(t, '203.0.113.10', 'wrong password')
+    expect(t.logs.records.find(record => record.msg === 'password check failed')).toMatchObject({ level: 'warn', address: '203.0.113.10', peer: '127.0.0.1' })
+    for (let i = 0; i < 5; i += 1)
+      await loginVia(t, '203.0.113.10', `wrong ${i}`)
+    expect(t.logs.records.find(record => record.msg === 'login rate limit reached')).toMatchObject({ address: '203.0.113.10', peer: '127.0.0.1' })
+  })
+
+  it('without HF_TRUST_PROXY every client behind the proxy shares its bucket (X-Forwarded-For is ignored)', async () => {
+    const t = await testApp({ HF_PASSWORD: ENV_PASSWORD })
+    for (let i = 0; i < 5; i += 1)
+      expect((await loginVia(t, `203.0.113.${i + 1}`, `wrong ${i}`)).status).toBe(401)
+    expect((await loginVia(t, '203.0.113.99', ENV_PASSWORD)).status).toBe(429)
+    expect(t.logs.records.find(record => record.msg === 'password check failed')).toMatchObject({ address: '127.0.0.1', peer: '127.0.0.1' })
+  })
+
+  it('a peer outside HF_TRUST_PROXY cannot choose its bucket', async () => {
+    const t = await testApp({ HF_PASSWORD: ENV_PASSWORD, HF_TRUST_PROXY: '10.0.0.2' })
+    for (let i = 0; i < 5; i += 1)
+      expect((await loginVia(t, `203.0.113.${i + 1}`, `wrong ${i}`, { remoteAddress: '192.0.2.8' })).status).toBe(401)
+    expect((await loginVia(t, '203.0.113.99', ENV_PASSWORD, { remoteAddress: '192.0.2.8' })).status).toBe(429)
+    // The listed proxy still forwards its own clients.
+    expect((await loginVia(t, '203.0.113.99', ENV_PASSWORD, { remoteAddress: '10.0.0.2' })).status).toBe(200)
+  })
+
+  it('rotating forged X-Forwarded-For values still hit the global cap', async () => {
+    const t = await testApp({ HF_PASSWORD: ENV_PASSWORD, HF_TRUST_PROXY: 'loopback' })
+    const { globalLimit } = LOGIN_RATE_LIMIT_DEFAULTS
+    const statuses = await Promise.all(Array.from({ length: globalLimit }, (_, i) =>
+      loginVia(t, `198.51.100.${i + 1}`, `guess ${i}`).then(response => response.status)))
+    expect(statuses).toEqual(Array.from({ length: globalLimit }).fill(401))
+    const blocked = await loginVia(t, '198.51.100.200', ENV_PASSWORD)
+    expect(blocked.status).toBe(429)
+    expect(await errorOf(blocked)).toMatchObject({ code: 'rate_limited', action: 'retry' })
+  }, 60_000)
+
+  const TLS_SITE = { 'host': 'harness.example.com', 'origin': 'https://harness.example.com', 'x-forwarded-proto': 'https' }
+
+  it('x-Forwarded-Proto from the trusted proxy: Secure cookie, HSTS, https Origin', async () => {
+    const t = await testApp({ HF_PASSWORD: ENV_PASSWORD, HF_TRUST_PROXY: 'loopback' })
+    const response = await login(t, ENV_PASSWORD, {}, TLS_SITE)
+    expect(response.status).toBe(200)
+    expect(sessionCookie(response)?.split('; ')).toContain('Secure')
+    expect(response.headers.get('strict-transport-security')).toBe(HSTS_HEADER_VALUE)
+    const logout = await t.request('/api/auth/logout', { method: 'POST', headers: TLS_SITE })
+    expect(sessionCookie(logout)?.split('; ')).toContain('Secure')
+  })
+
+  it('x-Forwarded-Proto from an untrusted peer is ignored: no Secure cookie, no HSTS, the Origin must be http', async () => {
+    const t = await testApp({ HF_PASSWORD: ENV_PASSWORD, HF_TRUST_PROXY: 'loopback' })
+    const direct = { remoteAddress: '203.0.113.7' }
+    const claimed = await login(t, ENV_PASSWORD, direct, TLS_SITE)
+    expect(claimed.status).toBe(403)
+    expect(await errorOf(claimed)).toEqual({ code: 'forbidden', message: CROSS_ORIGIN_MESSAGE })
+
+    const plain = await login(t, ENV_PASSWORD, direct, { ...TLS_SITE, origin: 'http://harness.example.com' })
+    expect(plain.status).toBe(200)
+    expect(sessionCookie(plain)?.split('; ')).not.toContain('Secure')
+    expect(plain.headers.get('strict-transport-security')).toBeNull()
+    const logout = await t.request('/api/auth/logout', { method: 'POST', headers: { ...TLS_SITE, origin: 'http://harness.example.com' } }, direct)
+    expect(logout.status).toBe(204)
+    expect(sessionCookie(logout)?.split('; ')).not.toContain('Secure')
+  })
+
+  it('hF_TRUST_PROXY unset keeps v1: X-Forwarded-Proto counts from any peer', async () => {
+    const t = await testApp({ HF_PASSWORD: ENV_PASSWORD })
+    const response = await login(t, ENV_PASSWORD, { remoteAddress: '203.0.113.7' }, TLS_SITE)
+    expect(response.status).toBe(200)
+    expect(sessionCookie(response)?.split('; ')).toContain('Secure')
+    expect(response.headers.get('strict-transport-security')).toBe(HSTS_HEADER_VALUE)
+  })
+
+  it('x-Forwarded-Host is never honored: Host evil.example + X-Forwarded-Host localhost from 127.0.0.1 -> 403', async () => {
+    const t = await testApp({ HF_TRUST_PROXY: 'loopback' })
+    const rebound = { 'host': 'evil.example', 'x-forwarded-host': 'localhost', 'x-forwarded-for': '127.0.0.1', 'x-forwarded-proto': 'http' }
+    const read = await t.request('/api/settings', { headers: rebound })
+    expect(read.status).toBe(403)
+    expect(await errorOf(read)).toEqual({ code: 'forbidden', message: LOCAL_HOST_ONLY_MESSAGE })
+    // The rebound page is same-origin with itself: the Origin check passes, the host guard refuses.
+    const write = await t.request('/api/auth/logout', { method: 'POST', headers: { ...rebound, origin: 'http://evil.example' } })
+    expect(write.status).toBe(403)
+    expect(await errorOf(write)).toEqual({ code: 'forbidden', message: LOCAL_HOST_ONLY_MESSAGE })
+    // An Origin naming the forwarded host is not the server origin either.
+    const spoofed = await t.request('/api/auth/logout', { method: 'POST', headers: { ...rebound, origin: 'http://localhost' } })
+    expect(spoofed.status).toBe(403)
+    expect(await errorOf(spoofed)).toEqual({ code: 'forbidden', message: CROSS_ORIGIN_MESSAGE })
+    // The guard itself is unchanged: a local Host passes.
+    expect((await t.request('/api/settings', { headers: { 'host': 'localhost:8787', 'x-forwarded-host': 'evil.example' } })).status).toBe(200)
   })
 })
 

@@ -114,14 +114,14 @@ Details, owned paths and acceptance criteria: `docs/phases/phase-5-v1-1.md`. Dec
   - [x] C8 server skeleton (types, stub services, keyring `share`, `X-Robots-Tag`, upgrade test)
   - [x] C9 web skeleton (share layout, stub pages/components, test ids, Data nav, `ui.openShare`)
   - [x] Gate (incl. v1 data upgrade probe) + FREEZE + checkpoint commit
-- [ ] P5-A Features + stabilization (9 agents)
-  - [ ] W5.1 branching-server · [ ] W5.2 branching-web
-  - [ ] W5.3 data-server · [ ] W5.5 data-web
-  - [ ] W5.4 shares-server · [ ] W5.6 shares-web
-  - [ ] W5.7 security-proxy (`HF_TRUST_PROXY`, CSP test gating, share-token masking)
-  - [ ] W5.8 e2e-stabilization (resume, keyboard, settings, mobile, screenshots)
-  - [ ] W5.9 quality (live provider suite, CI audit + CSP step, Dependabot, phase-4 checklist)
-  - [ ] Gate + checkpoint commit
+- [x] P5-A Features + stabilization (9 agents)
+  - [x] W5.1 branching-server · [x] W5.2 branching-web
+  - [x] W5.3 data-server · [x] W5.5 data-web
+  - [x] W5.4 shares-server · [x] W5.6 shares-web
+  - [x] W5.7 security-proxy (`HF_TRUST_PROXY`, CSP test gating, share-token masking)
+  - [x] W5.8 e2e-stabilization (resume, keyboard, settings, mobile, screenshots)
+  - [x] W5.9 quality (live provider suite, CI audit + CSP step, Dependabot, phase-4 checklist)
+  - [x] Gate + checkpoint commit
 - [ ] P5-B Feature e2e, docs, fix-ups, final gate
   - [ ] W5.10 e2e-features (branching, data, share) · [ ] W5.11 docs-final · [ ] W5.12/13 fix-ups
   - [ ] Final gate (e2e ×3, screenshots, audit, Docker upgrade) + checkpoint commit
@@ -145,4 +145,5 @@ deleting a message version · remembering the selected version per message · ma
 | Wave C | W2.6, W3.6, W4.1–W4.4, W4.6 | audit ok; 3530 tests; frozen install ok; build ok; e2e 27/27 (core 15 + plugins 12) | f142fcc |
 | Final gate | coordinator | e2e 27/27 ×3; `pnpm start` from empty data dir ok (secret.key 0600); Docker image (Node 24, non-root) smoke ok | 6e3b442 |
 | P5-0a | coordinator (K1, K2), C7, D5 | audit ok; 3623 tests; build ok; built-page CSP test 38/38; 11 new routes mounted (501 / 400 body validation); e2e 27/27; `vue-stream-markdown` gone, TypeScript 6.0.3 only | 0b56f45 |
-| P5-0b | coordinator (K3, K4), C8, C9 | audit ok; 3676 tests; build ok; CSP 38/38; e2e 27/27; v1 data upgrade probe ok (12/12 messages, parent chain + active leaves correct); `.gitignore` `data/` → `/data/` (source folders named `data` were ignored); FREEZE | (this commit) |
+| P5-0b | coordinator (K3, K4), C8, C9 | audit ok; 3676 tests; build ok; CSP 38/38; e2e 27/27; v1 data upgrade probe ok (12/12 messages, parent chain + active leaves correct); `.gitignore` `data/` → `/data/` (source folders named `data` were ignored); FREEZE | c4207b5 |
+| P5-A | W5.1–W5.9 | audit ok (147 paths); 4202 tests; build ok; CSP 38/38 with `HF_TEST_REQUIRE_WEB_BUILD=1`; probes ok (branch switch + 409 run-active, export v2 round trip, backup without secrets + import/skip on a fresh server, anonymous share view + revoke 404 + masked token logs, trusted-proxy limiter buckets + `X-Forwarded-Host` 403); e2e 41 passed (chromium + mobile) + 4 screenshot tests (96 PNGs reviewed); `pnpm audit --prod` clean | (this commit) |

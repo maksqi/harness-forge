@@ -34,6 +34,7 @@ function mountMessage(props: Props) {
         onEdit: record('edit'),
         onApproval: record('approval'),
         onRetry: record('retry'),
+        onSelectVersion: record('select-version'),
       }),
     }),
   }), { attachTo: document.body })
@@ -138,10 +139,15 @@ describe('chatMessage: assistant', () => {
     expect(root.find(`[data-testid="${testIds.messageRegenerate}"]`).exists()).toBe(true)
   })
 
-  it('offers Regenerate on the last message only, and not while busy', () => {
-    expect(mountMessage({ message: assistant(), isLast: false, streaming: false, showThinking: false })
-      .wrapper.find(`[data-testid="${testIds.messageRegenerate}"]`).exists()).toBe(false)
+  it('offers Regenerate on every finished reply (older ones hide it through data-busy), not while busy or streaming', async () => {
+    const older = mountMessage({ message: assistant(), isLast: false, streaming: false, showThinking: false })
+    const button = older.wrapper.get(`[data-testid="${testIds.messageRegenerate}"]`)
+    expect(button.classes()).toContain('group-data-[busy=true]/transcript:hidden')
+    await button.trigger('click')
+    expect(older.events.regenerate).toHaveLength(1)
     expect(mountMessage({ message: assistant(), isLast: true, streaming: false, showThinking: false, busy: true })
+      .wrapper.find(`[data-testid="${testIds.messageRegenerate}"]`).exists()).toBe(false)
+    expect(mountMessage({ message: assistant(), isLast: true, streaming: true, showThinking: false })
       .wrapper.find(`[data-testid="${testIds.messageRegenerate}"]`).exists()).toBe(false)
   })
 
@@ -177,5 +183,60 @@ describe('chatMessage: assistant', () => {
     const { wrapper, events } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
     await wrapper.get(`[data-testid="${testIds.toolApprovalAllow}"]`).trigger('click')
     expect(events.approval).toEqual([[{ id: 'appr_1', approved: true, toolName: 'mock_approval_tool', alwaysAllow: false }]])
+  })
+})
+
+describe('chatMessage: versions', () => {
+  const branch = { siblings: ['msg_version000000001', user.id, 'msg_version000000003'], index: 1 }
+
+  /** The action row: the switcher first, then the actions that fade in on hover. */
+  function actionRow(wrapper: ReturnType<typeof mountMessage>['wrapper']) {
+    const row = wrapper.get('[data-slot="message-action-row"]')
+    const switcher = row.get(`[data-testid="${testIds.messageBranch}"]`)
+    const actions = row.get('[data-slot="message-actions"]')
+    return { row, switcher, actions }
+  }
+
+  it('starts the action row of a user message with the switcher, outside the hover fade', async () => {
+    const { wrapper, events } = mountMessage({ message: user, isLast: false, streaming: false, showThinking: false, branch })
+    const { row, switcher, actions } = actionRow(wrapper)
+    expect(row.element.firstElementChild).toBe(switcher.element)
+    expect(actions.classes()).toContain('opacity-0')
+    expect(switcher.element.closest('[data-slot="message-actions"]')).toBeNull()
+    expect(switcher.attributes()).toMatchObject({ 'data-message-id': user.id, 'data-index': '1', 'data-count': '3' })
+    expect(actions.find(`[data-testid="${testIds.messageEdit}"]`).exists()).toBe(true)
+
+    await switcher.get(`[data-testid="${testIds.messageBranchNext}"]`).trigger('click')
+    expect(events['select-version']).toEqual([['msg_version000000003']])
+  })
+
+  it('starts the action row of a reply with the switcher, before Copy, Regenerate and the meta', () => {
+    const { wrapper } = mountMessage({
+      message: assistant(),
+      isLast: false,
+      streaming: false,
+      showThinking: false,
+      branch: { siblings: ['msg_assistant0000001', 'msg_assistant0000002'], index: 0 },
+    })
+    const { row, switcher, actions } = actionRow(wrapper)
+    expect(row.element.firstElementChild).toBe(switcher.element)
+    expect(switcher.get(`[data-testid="${testIds.messageBranchCounter}"]`).text()).toBe('1/2')
+    expect(actions.find(`[data-testid="${testIds.messageCopy}"]`).exists()).toBe(true)
+    expect(actions.find(`[data-testid="${testIds.messageRegenerate}"]`).exists()).toBe(true)
+    expect(actions.find(`[data-testid="${testIds.messageMeta}"]`).exists()).toBe(true)
+  })
+
+  it('disables the switcher while a request or a switch is in flight', () => {
+    for (const state of [{ busy: true }, { switching: true }]) {
+      const { wrapper } = mountMessage({ message: user, isLast: false, streaming: false, showThinking: false, branch, ...state })
+      const { switcher } = actionRow(wrapper)
+      expect(switcher.get(`[data-testid="${testIds.messageBranchPrevious}"]`).attributes('aria-disabled')).toBe('true')
+      expect(switcher.get(`[data-testid="${testIds.messageBranchNext}"]`).attributes('aria-disabled')).toBe('true')
+    }
+  })
+
+  it('shows no switcher for a message with a single version', () => {
+    const { wrapper } = mountMessage({ message: user, isLast: false, streaming: false, showThinking: false })
+    expect(wrapper.find(`[data-testid="${testIds.messageBranch}"]`).exists()).toBe(false)
   })
 })

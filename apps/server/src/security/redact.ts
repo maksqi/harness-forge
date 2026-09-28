@@ -1,8 +1,28 @@
-// Secret redaction for logs and error messages (ARCHITECTURE.md 10.3 and 12). W4.1 may extend the patterns.
+// Secret redaction for logs and error messages (ARCHITECTURE.md 10.3 and 12). W4.1 may extend the patterns; share
+// tokens (ADR-025) are masked since Phase 5 (W5.7).
 import type { Redactor } from './types.ts'
+import { SHARE_TOKEN_PATTERN } from '@harness-forge/shared'
 
 /** Replacement for a masked value. */
 export const REDACTED = '[redacted]'
+
+/** `SHARE_TOKEN_PATTERN` without its anchors, to find tokens inside text. */
+const SHARE_TOKEN_SOURCE = SHARE_TOKEN_PATTERN.source.replace(/^\^/, '').replace(/\$$/, '')
+
+/**
+ * The segment after a `share` path segment (`/share/<token>`, `/api/share/<token>/files/<id>`), in any case and with
+ * `%2F` separators; `redactSharePath` masks it whatever its shape.
+ */
+const SHARE_PATH_SEGMENT = /(\/share(?:\/|%2f)+)[^/?#]+/gi
+
+/**
+ * A request path with its share token masked (`/api/share/<token>/files/file_x` -> `/api/share/[redacted]/files/file_x`,
+ * `/share/<token>` -> `/share/[redacted]`), for the access log. Any segment after a `share` segment is masked, not only
+ * a well-formed token: a mistyped or cut link still carries most of one.
+ */
+export function redactSharePath(path: string): string {
+  return path.replace(SHARE_PATH_SEGMENT, `$1${REDACTED}`)
+}
 
 /** Registered secrets shorter than this are ignored (they would mask ordinary words). */
 const MIN_SECRET_LENGTH = 4
@@ -24,6 +44,9 @@ const SECRET_VALUE = String.raw`(?=[^\s"',;}&]*\d)[^\s"',;}&]{6,}|[^\s"',;}&]{12
 
 /** Text patterns masked by `redactText()`, with their replacement (`$1` keeps a non-secret prefix). */
 const TEXT_PATTERNS: readonly (readonly [RegExp, string])[] = [
+  // Share links (ADR-025): `/share/<token>` in paths and URLs, also with `%2F` separators. First, so no other pattern
+  // masks only a part of a token.
+  [new RegExp(String.raw`((?:/|%2f)share(?:/|%2f)+)(?:${SHARE_TOKEN_SOURCE})`, 'gi'), `$1${REDACTED}`],
   // `Bearer <token>` anywhere, `Basic <credentials>` in an authorization header.
   [/\b(Bearer\s+)[\w.~+/=-]{8,}/gi, `$1${REDACTED}`],
   [/(authorization["']?\s*[:=]\s*["']?Basic\s+)[\w.~+/=-]+/gi, `$1${REDACTED}`],

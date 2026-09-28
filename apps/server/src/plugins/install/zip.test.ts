@@ -1,11 +1,13 @@
 import type { ArchiveEntry } from './archive.ts'
+import type { OpenedZip, ZipEntry, ZipSource } from './zip.ts'
 import { Buffer } from 'node:buffer'
 import { crc32, deflateRawSync } from 'node:zlib'
+import { Zip, ZipDeflate, ZipPassThrough } from 'fflate'
 import { describe, expect, it } from 'vitest'
 import { EntryCollector } from './archive.ts'
 import { INSTALL_LIMITS } from './errors.ts'
 import { localRecord, patchZip, storedZip, unixMode, zipOf } from './testing.ts'
-import { looksLikeZip, readZip } from './zip.ts'
+import { looksLikeZip, openZip, readZip } from './zip.ts'
 
 function collector(limits: Partial<typeof INSTALL_LIMITS> = {}): EntryCollector {
   return new EntryCollector({ ...INSTALL_LIMITS, ...limits }, ['file'])
@@ -152,5 +154,144 @@ describe('readZip', () => {
     expect(text(entries[0])).toBe(content.toString())
     const short = patchZip(deflated, (view, central) => view.setUint32(central + 24, content.length + 10, true))
     expect((await rejection(read(short))).message).toContain('does not match its declared size')
+  })
+})
+
+// ---------- openZip (lazy reader of bulk data imports) ----------
+
+/** A zip written by fflate's streaming `Zip` (local headers without sizes, data descriptors), like the data export. */
+function streamedZip(files: Array<[name: string, data: Uint8Array, method: 'store' | 'deflate']>): Uint8Array {
+  const chunks: Uint8Array[] = []
+  const zip = new Zip((error, chunk) => {
+    if (error)
+      throw error
+    chunks.push(chunk)
+  })
+  for (const [name, data, method] of files) {
+    const entry = method === 'store' ? new ZipPassThrough(name) : new ZipDeflate(name, { level: 6 })
+    zip.add(entry)
+    const half = Math.floor(data.length / 2)
+    entry.push(data.subarray(0, half))
+    entry.push(data.subarray(half), true)
+  }
+  zip.end()
+  return new Uint8Array(Buffer.concat(chunks))
+}
+
+function open(source: ZipSource, limits: Partial<typeof INSTALL_LIMITS> = {}): Promise<OpenedZip> {
+  return openZip(source, collector(limits))
+}
+
+function entryOf(opened: OpenedZip, path: string): ZipEntry {
+  const entry = opened.entries.find(candidate => candidate.path === path)
+  if (entry === undefined)
+    throw new Error(`no entry ${path}`)
+  return entry
+}
+
+async function readText(opened: OpenedZip, path: string): Promise<string> {
+  return new TextDecoder().decode(await opened.read(entryOf(opened, path)))
+}
+
+describe('openZip', () => {
+  it('opens bytes and Blobs and reads each entry on demand', async () => {
+    const zip = zipOf({ 'manifest.json': '{"a":1}', 'chats/x.json': 'hello', 'dir/': ['', unixMode(0o040755)], 'empty.txt': '' })
+    for (const source of [zip, new Blob([zip])]) {
+      const opened = await open(source)
+      expect(opened.entries).toEqual([
+        { path: 'manifest.json', type: 'file', size: 7 },
+        { path: 'chats/x.json', type: 'file', size: 5 },
+        { path: 'dir', type: 'dir', size: 0 },
+        { path: 'empty.txt', type: 'file', size: 0 },
+      ])
+      expect(await readText(opened, 'chats/x.json')).toBe('hello')
+      expect(await readText(opened, 'manifest.json')).toBe('{"a":1}')
+      expect(await readText(opened, 'empty.txt')).toBe('')
+    }
+    // Reading never modifies the source.
+    const copy = zip.slice()
+    const opened = await open(zip)
+    const content = await opened.read(entryOf(opened, 'chats/x.json'))
+    content.fill(0)
+    expect(zip).toEqual(copy)
+  })
+
+  it('reads a zip written by the streaming fflate Zip (data descriptors, stored and deflated entries)', async () => {
+    const image = Uint8Array.from({ length: 70_000 }, (_, index) => (index * 7919) % 251)
+    const text = new TextEncoder().encode('line of text\n'.repeat(5000))
+    const zip = streamedZip([['files/a', image, 'store'], ['files/b', text, 'deflate'], ['manifest.json', new TextEncoder().encode('{}'), 'deflate']])
+    const opened = await open(new Blob([zip]))
+    expect(opened.entries.map(entry => [entry.path, entry.size])).toEqual([['files/a', image.length], ['files/b', text.length], ['manifest.json', 2]])
+    expect(await opened.read(entryOf(opened, 'files/a'))).toEqual(image)
+    expect(await opened.read(entryOf(opened, 'files/b'))).toEqual(text)
+    expect(await readText(opened, 'manifest.json')).toBe('{}')
+  })
+
+  it('applies the readZip guards when the archive is opened', async () => {
+    const traversal = await rejection(open(zipOf({ 'manifest.json': '{}', '../evil': 'x' })))
+    expect(traversal).toMatchObject({ code: 'validation_error', details: { issues: [{ path: ['file'] }] } })
+    expect(traversal.message).toContain('".." segment')
+    expect((await rejection(open(zipOf({ 'manifest.json': '{}', 'link': ['/etc/passwd', unixMode(0o120777)] })))).message).toContain('symbolic link')
+    const duplicates = storedZip([{ name: 'a.json', data: Buffer.from('{}') }, { name: 'A.JSON', data: Buffer.from('{}') }])
+    expect((await rejection(open(new Blob([duplicates])))).message).toContain('more than once')
+    const many = Object.fromEntries(Array.from({ length: 11 }, (_, index) => [`f${index}.txt`, 'x']))
+    expect((await rejection(open(zipOf(many), { entries: 10 }))).message).toContain('more than 10 entries')
+    const encrypted = patchZip(zipOf({ 'a.txt': 'x' }), (view, central) => view.setUint16(central + 8, view.getUint16(central + 8, true) | 1, true))
+    expect((await rejection(open(encrypted))).message).toContain('encrypted')
+  })
+
+  it('checks data only when an entry is read: a damaged entry fails alone', async () => {
+    const zip = zipOf({ 'a.txt': 'fine', 'b.txt': 'broken' })
+    const badCrc = patchZip(zip, (view, central) => view.setUint32(central + 16, 0xDEADBEEF, true), 1)
+    const opened = await open(new Blob([badCrc]))
+    expect(await readText(opened, 'a.txt')).toBe('fine')
+    expect((await rejection(opened.read(entryOf(opened, 'b.txt')))).message).toContain('fails its CRC check')
+
+    const renamed = patchZip(zip, (_view, _central, bytes) => {
+      bytes[30] = 'x'.charCodeAt(0)
+    })
+    const inconsistent = await open(renamed)
+    expect((await rejection(inconsistent.read(entryOf(inconsistent, 'a.txt')))).message).toContain('inconsistent headers')
+  })
+
+  it('stops a zip bomb and refuses an entry above maxBytes before reading it', async () => {
+    const bomb = zipOf({ 'bomb.bin': new Uint8Array(8 * 1024 * 1024) })
+    const lying = patchZip(bomb, (view, central) => view.setUint32(central + 24, 1024, true))
+    const opened = await open(new Blob([lying]))
+    expect((await rejection(opened.read(entryOf(opened, 'bomb.bin')))).message).toContain('expands beyond its declared size')
+
+    const honest = await open(bomb)
+    const refused = await rejection(honest.read(entryOf(honest, 'bomb.bin'), { maxBytes: 1024 * 1024 }))
+    expect(refused).toMatchObject({ code: 'payload_too_large', details: { limitBytes: 1024 * 1024 } })
+    expect((await honest.read(entryOf(honest, 'bomb.bin'), { maxBytes: 8 * 1024 * 1024 })).length).toBe(8 * 1024 * 1024)
+  })
+
+  it('refuses overlapping entries when opening, and data that runs into the next entry when reading', async () => {
+    const inner = localRecord('b.txt', Buffer.from('inner'))
+    const reused = storedZip([
+      { name: 'a.txt', data: Buffer.concat([Buffer.from(inner), Buffer.from('tail')]) },
+      { name: 'b.txt', data: Buffer.from('inner'), localOffset: 30 + 'a.txt'.length, centralOnly: true },
+    ])
+    expect((await rejection(open(reused))).message).toContain('overlapping')
+
+    // A local extra field pushes the data of a.txt into b.txt: only visible once the local header is read.
+    const zip = storedZip([{ name: 'a.txt', data: Buffer.from('aaaa') }, { name: 'b.txt', data: Buffer.from('bbbb') }])
+    const shifted = patchZip(zip, (_view, _central, bytes) => {
+      bytes[28] = 4
+    })
+    const opened = await open(new Blob([shifted]))
+    expect((await rejection(opened.read(entryOf(opened, 'a.txt')))).message).toContain('overlapping')
+    expect(await readText(opened, 'b.txt')).toBe('bbbb')
+  })
+
+  it('refuses non-zip and truncated sources and foreign entries', async () => {
+    expect((await rejection(open(new Blob(['hello world, not a zip file at all'])))).message).toContain('not a zip archive')
+    expect((await rejection(open(new Uint8Array(0)))).message).toContain('not a zip archive')
+    const zip = zipOf({ 'a.txt': 'x' })
+    expect((await rejection(open(zip.subarray(0, zip.length - 30)))).message).toMatch(/not a zip|damaged/)
+    const opened = await open(zipOf({ 'dir/': ['', unixMode(0o040755)], 'a.txt': 'x' }))
+    await expect(opened.read(entryOf(opened, 'dir'))).rejects.toThrow(TypeError)
+    await expect(opened.read({ path: 'a.txt', type: 'file', size: 1 })).rejects.toThrow(TypeError)
+    expect(await readText(opened, 'a.txt')).toBe('x')
   })
 })

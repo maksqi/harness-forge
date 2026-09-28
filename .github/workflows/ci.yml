@@ -51,6 +51,12 @@ jobs:
           cache: true
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      # SEC-C1 on the real build: the CSP hashes of the generated 200.html. Skipped without a build in the check job;
+      # here a missing build is a failure.
+      - name: Built-page CSP test
+        env:
+          HF_TEST_REQUIRE_WEB_BUILD: '1'
+        run: pnpm -F @harness-forge/server exec vitest run src/http/static.test.ts
       - name: Install Chromium
         run: pnpm exec playwright install --with-deps chromium
       - name: Start the e2e server (pnpm start:e2e)

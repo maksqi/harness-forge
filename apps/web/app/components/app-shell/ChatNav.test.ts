@@ -308,6 +308,27 @@ describe('chatNav: row menu', () => {
     expect(row(chatId(1)).textContent?.trim()).toBe('Stable')
   })
 
+  it('lists Share… after Rename and opens the Share dialog of the row\'s chat', async () => {
+    setup()
+    await mountNav([
+      chatSummary({ id: chatId(1), title: 'Share me', updatedAt: NOW - 1 }),
+      chatSummary({ id: chatId(2), title: 'Other', updatedAt: NOW - 2 }),
+    ])
+    await openRowMenu(chatId(2))
+    const items = Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'))
+    expect(items.map(item => item.textContent?.trim())).toEqual(['Rename', 'Share…', 'Export as Markdown', 'Export as JSON', 'Delete'])
+
+    await chooseMenuItem(testIds.chatRowShare)
+    const ui = useUiStore()
+    expect(ui.shareChatId).toBe(chatId(2))
+    expect(byTestId(testIds.chatRowShare)).toBeNull()
+    // The menu trigger has focus again: the Share dialog returns focus there when it closes.
+    expect(document.activeElement).toBe(byTestId(testIds.chatRowMenu, rowItem(chatId(2))))
+    expect(byTestId(testIds.chatRowRenameInput)).toBeNull()
+    expect(allByTestId(testIds.chatRow).map(element => element.dataset.chatId)).toEqual([chatId(1), chatId(2)])
+    expect(api.chats.update).not.toHaveBeenCalled()
+  })
+
   it('exports as Markdown and JSON through the store, with a toast on failure', async () => {
     setup()
     await mountNav([chatSummary({ id: chatId(1), title: 'Export me', updatedAt: NOW - 1 })])

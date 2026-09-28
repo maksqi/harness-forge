@@ -9,6 +9,7 @@ import { chatDetailSchema, chatExportSchema, dataImportResultSchema, HarnessErro
 import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { chats, chatShares, files, messages, usage } from '../db/schema.ts'
+import { messageInsertValues } from '../services/chats/store.ts'
 import { createTestApp } from './create-test-app.ts'
 import {
   createFakeChatRunner,
@@ -166,8 +167,11 @@ describe('createFakeChatsService: the message tree', () => {
   it('reads a linear chat (v1 data, the P5-0b pipeline) as a chain and stores it before the first tree write', async () => {
     const { t, chats } = await treeApp()
     await chats.ensure(chatId(4))
-    await chats.upsertMessage(chatId(4), user(1))
-    await chats.upsertMessage(chatId(4), assistant(2))
+    // Rows as the P5-0b pipeline wrote them: seq order, no parent, no active leaf.
+    await t.db.insert(messages).values([
+      messageInsertValues(chatId(4), user(1), 0, null, 1),
+      messageInsertValues(chatId(4), assistant(2), 1, null, 2),
+    ])
     expect(ids((await chats.get(chatId(4))).messages)).toEqual([mid(1), mid(2)])
     expect((await chats.find(chatId(4)))?.activeLeafId).toBe(mid(2))
 

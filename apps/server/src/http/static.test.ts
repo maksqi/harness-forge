@@ -1,10 +1,12 @@
 // SPA serving (W1.1-T9): files, caching, the `200.html` fallback for deep links, the SPA CSP with inline-script hashes
-// (W1.1-T7), unknown `/api/*` stays JSON, no traversal outside the root (SEC-F1). Fixture: a temp `HF_WEB_DIR`.
+// (W1.1-T7), unknown `/api/*` stays JSON, no traversal outside the root (SEC-F1). Fixture: a temp `HF_WEB_DIR`; the last
+// block checks the real web build (W5.7-T5).
 import type { TestApp } from '../testing/create-test-app.ts'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import process from 'node:process'
 import { harnessErrorEnvelopeSchema } from '@harness-forge/shared'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { webPublicDir } from '../paths.ts'
@@ -282,10 +284,14 @@ describe('health', () => {
   })
 })
 
-describe('the built SPA (apps/web/.output/public, when a build exists)', () => {
+// Skipped without a web build, unless `HF_TEST_REQUIRE_WEB_BUILD=1` (CI after `pnpm build`, the gates): then a missing
+// build fails the test instead of skipping it silently (S3).
+describe('the built SPA (apps/web/.output/public, when a build exists or HF_TEST_REQUIRE_WEB_BUILD=1)', () => {
   const built = join(webPublicDir(), SPA_FALLBACK_FILE)
+  const requireBuild = process.env.HF_TEST_REQUIRE_WEB_BUILD === '1'
 
-  it.skipIf(!existsSync(built))('sEC-C1: the CSP of the real 200.html allows exactly its inline scripts, nothing inline-executable', async () => {
+  it.skipIf(!existsSync(built) && !requireBuild)('sEC-C1: the CSP of the real 200.html allows exactly its inline scripts, nothing inline-executable', async () => {
+    expect(existsSync(built), `${built} is missing: run pnpm build first (HF_TEST_REQUIRE_WEB_BUILD=1 requires the web build)`).toBe(true)
     const response = await createStaticSite(webPublicDir()).fallback(new Request('http://127.0.0.1:8787/chat/x', { headers: { accept: 'text/html' } }))
     expect(response?.status).toBe(200)
     const document = await response!.text()

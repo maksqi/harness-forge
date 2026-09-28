@@ -1,27 +1,25 @@
-// Message persistence (table `messages`) behind `ChatMessageStore`: on the database (multi-statement writes run as one
-// atomic `batch`, so no interactive transaction holds the connection) or bound to a transaction of
-// `ChatsService.transaction()` (statements run in order inside it).
+// Message persistence (table `messages`) behind `ChatMessageStore`, on the database or bound to a transaction of
+// `ChatsService.transaction()`. Every member is a single statement, so it is atomic on its own and needs no
+// interactive transaction.
 //
-// Phase 5 skeleton (P5-0b): the message tree members (`listPath`, `appendMessage`, `setActiveLeaf`) answer
-// `not_implemented` and `upsertMessage` does not store a parent yet (every current caller omits it); W5.1 implements the
-// tree (ADR-023) and drops `replaceFrom`.
+// The messages of a chat form a tree (ADR-023, ARCHITECTURE.md 6.8, ./tree.ts): `appendMessage` and `upsertMessage`
+// store the parent of a new message (a parent must be a message of the same chat), `seq` is the creation order
+// (MAX + 1), `listPath` walks up `parent_id` with a recursive query guarded by `parent.seq < child.seq`, and
+// `setActiveLeaf` is a compare-and-set of `chats.active_leaf_id`.
 import type { HarnessUIMessage } from '@harness-forge/shared'
-import type { BatchItem } from 'drizzle-orm/batch'
-import type { Db, DbExecutor } from '../../db/client.ts'
+import type { SQL } from 'drizzle-orm'
+import type { DbExecutor } from '../../db/client.ts'
 import type { MessageRow } from '../../db/schema.ts'
+import type { TreeRow } from './tree.ts'
 import type { ChatMessageStore } from './types.ts'
 import { HarnessError, MESSAGE_ID_PATTERN } from '@harness-forge/shared'
-import { and, asc, eq, gte, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
 import { chats, messages } from '../../db/schema.ts'
-import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { guardDb, isConstraintError } from './db-errors.ts'
 import { toSearchText } from './text.ts'
 
-/** `database`: `deps.db` (atomic batches); `transaction`: a Drizzle transaction (sequential statements). */
-export type StoreMode = 'database' | 'transaction'
-
 const MESSAGE_ROLES: ReadonlySet<string> = new Set(['system', 'user', 'assistant'])
-/** Rows per multi-row INSERT (9 parameters each, far below SQLite's variable limit). */
+/** Rows per multi-row INSERT (10 parameters each, far below SQLite's variable limit). */
 export const INSERT_CHUNK_ROWS = 200
 
 type MessageFields = Pick<MessageRow, 'id' | 'role' | 'parts' | 'metadata'>
@@ -31,6 +29,14 @@ export const MESSAGE_COLUMNS = {
   role: messages.role,
   parts: messages.parts,
   metadata: messages.metadata,
+}
+
+/** The light columns of the tree helpers (`TreeRow`). */
+export const TREE_COLUMNS = {
+  id: messages.id,
+  parentId: messages.parentId,
+  seq: messages.seq,
+  role: messages.role,
 }
 
 /** A stored row as a UI message (`metadata` omitted when null). */
@@ -45,6 +51,10 @@ export function rowToMessage(row: MessageFields): HarnessUIMessage {
 
 export function chatNotFound(id: string): HarnessError {
   return new HarnessError({ code: 'not_found', message: `Chat ${id} not found.` })
+}
+
+export function messageNotFound(chatId: string, messageId: string): HarnessError {
+  return new HarnessError({ code: 'not_found', message: `Message ${messageId} not found in chat ${chatId}.` })
 }
 
 export function messageConflict(): HarnessError {
@@ -73,11 +83,18 @@ export function checkMessage(message: HarnessUIMessage): void {
     throw invalidMessage('Expected an array of parts.', ['message', 'parts'])
 }
 
-/** Insert values of a message at position `seq`. */
-export function messageInsertValues(chatId: string, message: HarnessUIMessage, seq: number, now: number): typeof messages.$inferInsert {
+/** Insert values of a message at position `seq` under `parentId`. */
+export function messageInsertValues(
+  chatId: string,
+  message: HarnessUIMessage,
+  seq: number,
+  parentId: string | null,
+  now: number,
+): typeof messages.$inferInsert {
   return {
     id: message.id,
     chatId,
+    parentId,
     seq,
     role: message.role,
     parts: message.parts,
@@ -95,19 +112,43 @@ export function chunk<T>(items: readonly T[], size: number): T[][] {
   return chunks
 }
 
-/** Runs write statements atomically: one batch on the database, in order inside a transaction. */
-export async function runAtomic(executor: DbExecutor, mode: StoreMode, queries: readonly BatchItem<'sqlite'>[]): Promise<unknown[]> {
-  if (queries.length === 0)
-    return []
-  if (mode === 'database')
-    return (executor as Db).batch(queries as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
-  const results: unknown[] = []
-  for (const query of queries)
-    results.push(await query)
-  return results
+/** The light rows of a chat in `seq` order (empty for an unknown chat), for the tree helpers. */
+export async function listTreeRows(executor: DbExecutor, chatId: string): Promise<TreeRow[]> {
+  return executor.select(TREE_COLUMNS).from(messages).where(eq(messages.chatId, chatId)).orderBy(asc(messages.seq))
 }
 
-export function createMessageStore(executor: DbExecutor, mode: StoreMode): ChatMessageStore {
+/**
+ * `INSERT INTO messages ... SELECT` of one new message: the next `seq` of the chat, `parent_id = parentId`; the SELECT
+ * yields no row (nothing is written) unless the chat exists and `condition` holds.
+ */
+function insertMessageSql(chatId: string, message: HarnessUIMessage, parentId: string | null, condition: SQL): SQL {
+  const now = Date.now()
+  const metadata = message.metadata === undefined ? null : JSON.stringify(message.metadata)
+  return sql`
+    INSERT INTO ${messages} (id, chat_id, parent_id, seq, role, parts, metadata, search_text, created_at, updated_at)
+    SELECT ${message.id}, ${chatId}, ${parentId},
+      COALESCE((SELECT MAX(m.seq) FROM messages AS m WHERE m.chat_id = ${chatId}), -1) + 1,
+      ${message.role}, ${JSON.stringify(message.parts)}, ${metadata}, ${toSearchText(message.parts)}, ${now}, ${now}
+    WHERE EXISTS (SELECT 1 FROM chats AS c WHERE c.id = ${chatId}) AND ${condition}`
+}
+
+/** `parentId` is null or a message of the chat. */
+function parentInChat(chatId: string, parentId: string | null): SQL {
+  return sql`(${parentId} IS NULL OR EXISTS (SELECT 1 FROM messages AS p WHERE p.chat_id = ${chatId} AND p.id = ${parentId}))`
+}
+
+/** Why a message write stored nothing: the chat is missing, the id belongs to another chat, or the parent is missing. */
+async function writeFailure(executor: DbExecutor, chatId: string, messageId: string, parentId: string | null): Promise<HarnessError> {
+  const [chat] = await executor.select({ id: chats.id }).from(chats).where(eq(chats.id, chatId)).limit(1)
+  if (chat === undefined)
+    return chatNotFound(chatId)
+  const [used] = await executor.select({ chatId: messages.chatId }).from(messages).where(eq(messages.id, messageId)).limit(1)
+  if (used !== undefined && used.chatId !== chatId)
+    return messageConflict()
+  return messageNotFound(chatId, parentId ?? messageId)
+}
+
+export function createMessageStore(executor: DbExecutor): ChatMessageStore {
   return {
     listMessages: chatId => guardDb(async () => {
       const rows = await executor
@@ -118,7 +159,29 @@ export function createMessageStore(executor: DbExecutor, mode: StoreMode): ChatM
       return rows.map(rowToMessage)
     }),
 
-    listPath: rejectsNotImplemented('ChatMessageStore.listPath (W5.1)'),
+    listPath: (chatId, leafId) => guardDb(async () => {
+      if (leafId === null)
+        return []
+      // Up from the leaf through `parent_id`, only to messages of the chat with a lower `seq`: bad data (a cycle, a
+      // parent in another chat) ends the walk instead of looping.
+      const pathIds = sql`(
+        WITH RECURSIVE path(id, parent_id, seq) AS (
+          SELECT m.id, m.parent_id, m.seq FROM messages AS m WHERE m.chat_id = ${chatId} AND m.id = ${leafId}
+          UNION ALL
+          SELECT p.id, p.parent_id, p.seq FROM messages AS p JOIN path ON p.id = path.parent_id
+          WHERE p.chat_id = ${chatId} AND p.seq < path.seq
+        )
+        SELECT id FROM path
+      )`
+      const rows = await executor
+        .select(MESSAGE_COLUMNS)
+        .from(messages)
+        .where(and(eq(messages.chatId, chatId), inArray(messages.id, pathIds)))
+        .orderBy(asc(messages.seq))
+      if (rows.length === 0)
+        throw messageNotFound(chatId, leafId)
+      return rows.map(rowToMessage)
+    }),
 
     getMessage: (chatId, messageId) => guardDb(async () => {
       const [row] = await executor
@@ -129,63 +192,72 @@ export function createMessageStore(executor: DbExecutor, mode: StoreMode): ChatM
       return row === undefined ? null : rowToMessage(row)
     }),
 
-    appendMessage: rejectsNotImplemented('ChatMessageStore.appendMessage (W5.1)'),
-
-    setActiveLeaf: rejectsNotImplemented('ChatMessageStore.setActiveLeaf (W5.1)'),
-
-    upsertMessage: (chatId, message) => guardDb(async () => {
+    appendMessage: (chatId, message, parentId) => guardDb(async () => {
       checkMessage(message)
-      const now = Date.now()
-      const metadata = message.metadata === undefined ? null : JSON.stringify(message.metadata)
-      // One statement: append with the next `seq` when the id is new, replace parts / metadata / role when it exists
-      // in this chat (keeping its `seq`), do nothing when the chat is missing or the id belongs to another chat.
-      const result = await executor.run(sql`
-        INSERT INTO ${messages} (id, chat_id, seq, role, parts, metadata, search_text, created_at, updated_at)
-        SELECT ${message.id}, ${chatId},
-          COALESCE((SELECT MAX(${messages.seq}) FROM ${messages} WHERE ${messages.chatId} = ${chatId}), -1) + 1,
-          ${message.role}, ${JSON.stringify(message.parts)}, ${metadata}, ${toSearchText(message.parts)}, ${now}, ${now}
-        WHERE EXISTS (SELECT 1 FROM ${chats} WHERE ${chats.id} = ${chatId})
-        ON CONFLICT (id) DO UPDATE SET
-          role = excluded.role,
-          parts = excluded.parts,
-          metadata = excluded.metadata,
-          search_text = excluded.search_text,
-          updated_at = excluded.updated_at
-        WHERE ${messages.chatId} = excluded.chat_id`)
-      if (result.rowsAffected > 0)
-        return
-      const [chat] = await executor.select({ id: chats.id }).from(chats).where(eq(chats.id, chatId)).limit(1)
-      throw chat === undefined ? chatNotFound(chatId) : messageConflict()
-    }),
-
-    replaceFrom: (chatId, fromMessageId, list) => guardDb(async () => {
-      list.forEach(checkMessage)
-      const [from] = await executor
-        .select({ seq: messages.seq })
-        .from(messages)
-        .where(and(eq(messages.chatId, chatId), eq(messages.id, fromMessageId)))
-        .limit(1)
-      if (from === undefined)
-        throw new HarnessError({ code: 'not_found', message: `Message ${fromMessageId} not found in chat ${chatId}.` })
-      const now = Date.now()
-      const rows = list.map((message, index) => messageInsertValues(chatId, message, from.seq + index, now))
-      const queries: BatchItem<'sqlite'>[] = [
-        executor
-          .delete(messages)
-          .where(and(eq(messages.chatId, chatId), gte(messages.seq, from.seq)))
-          .returning({ id: messages.id }),
-        ...chunk(rows, INSERT_CHUNK_ROWS).map(values => executor.insert(messages).values(values)),
-      ]
-      let results: unknown[]
+      let result
       try {
-        results = await runAtomic(executor, mode, queries)
+        // A plain INSERT: an id that is already used (in any chat) violates the primary key.
+        result = await executor.run(insertMessageSql(chatId, message, parentId, parentInChat(chatId, parentId)))
       }
       catch (error) {
         if (isConstraintError(error))
           throw messageConflict()
         throw error
       }
-      return Array.isArray(results[0]) ? results[0].length : 0
+      if (result.rowsAffected === 0)
+        throw await writeFailure(executor, chatId, message.id, parentId)
+    }),
+
+    upsertMessage: (chatId, message, parentId) => guardDb(async () => {
+      checkMessage(message)
+      // One statement: append under `parentId` with the next `seq` when the id is new, replace role / parts / metadata
+      // when it exists in this chat (keeping its `seq` and its parent, whatever `parentId` says), do nothing when the
+      // chat is missing, the id belongs to another chat or a new message's parent is not in the chat.
+      const condition = sql`(${parentInChat(chatId, parentId)}
+        OR EXISTS (SELECT 1 FROM messages AS e WHERE e.chat_id = ${chatId} AND e.id = ${message.id}))`
+      let result
+      try {
+        result = await executor.run(sql`${insertMessageSql(chatId, message, parentId, condition)}
+          ON CONFLICT (id) DO UPDATE SET
+            role = excluded.role,
+            parts = excluded.parts,
+            metadata = excluded.metadata,
+            search_text = excluded.search_text,
+            updated_at = excluded.updated_at
+          WHERE ${messages.chatId} = excluded.chat_id`)
+      }
+      catch (error) {
+        // A concurrent append took the same `seq`.
+        if (isConstraintError(error))
+          throw messageConflict()
+        throw error
+      }
+      if (result.rowsAffected === 0)
+        throw await writeFailure(executor, chatId, message.id, parentId)
+    }),
+
+    setActiveLeaf: (chatId, leafId, onlyFrom) => guardDb(async () => {
+      let current: SQL | undefined
+      if (onlyFrom !== undefined) {
+        const ids = onlyFrom.filter((value): value is string => value !== null)
+        const matches = [
+          ...(ids.length > 0 ? [inArray(chats.activeLeafId, ids)] : []),
+          ...(onlyFrom.includes(null) ? [isNull(chats.activeLeafId)] : []),
+        ]
+        if (matches.length === 0)
+          return false
+        current = or(...matches)
+      }
+      const rows = await executor
+        .update(chats)
+        .set({ activeLeafId: leafId })
+        .where(and(
+          eq(chats.id, chatId),
+          current,
+          sql`EXISTS (SELECT 1 FROM messages AS m WHERE m.chat_id = ${chatId} AND m.id = ${leafId})`,
+        ))
+        .returning({ id: chats.id })
+      return rows.length > 0
     }),
   }
 }

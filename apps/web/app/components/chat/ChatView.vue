@@ -4,7 +4,8 @@
 // chat (`isNew`, the `/` page) shows the `empty` slot above an inline composer; its first send emits `created` so
 // the page can move to /chat/<id> while the same session keeps streaming. Otherwise the transcript fills the pane and
 // the composer is docked over its bottom (fade above it); `--hf-composer-h` feeds the transcript's bottom padding
-// and the scroll pill position. A polite live region announces finished / stopped replies, approvals and errors.
+// and the scroll pill position. A polite live region announces finished / stopped replies, approvals, errors and the
+// version shown after a switch (ADR-023).
 import type { ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
@@ -16,7 +17,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import ChatComposer from '~/components/chat/composer/ChatComposer.vue'
 import { toHarnessErrorView } from '~/components/common/harness-error'
-import { useChatSession } from '~/composables/useChatSession'
+import { isRunActiveConflict, useChatSession } from '~/composables/useChatSession'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
@@ -69,6 +70,13 @@ const toolMode = session.toolMode
 const loaded = session.loaded
 const notFound = session.notFound
 const loadError = session.loadError
+const branches = session.branches
+const switching = session.switching
+
+/** docs/UI.md 7.4: a run holds the chat (`409 conflict`, reason `run-active`). */
+const RUN_ACTIVE_MESSAGE = 'A response is already running in this chat.'
+/** A `404` to a chat request or a switch: the shown path was stale and the session reloaded it. */
+const STALE_CHAT_MESSAGE = 'This chat changed elsewhere and was reloaded.'
 
 const scrolled = ref(false)
 const showEmpty = computed(() => props.isNew && messages.value.length === 0 && !session.busy.value)
@@ -151,17 +159,24 @@ watch(() => chats.runState[props.chatId] === 'running', (running) => {
     void session.resumeIfRunning()
 })
 
-// `409 conflict`: a reply is already running here. Take the message back into the composer and show the live run.
+// `409 conflict` (`run-active`): a reply is already running here; show the live run. `404 not_found`: the shown path
+// is stale (the chat changed elsewhere) and the session reloads it. Either way a message the server never stored goes
+// back into the composer.
 watch(error, (value) => {
-  if (!value || toHarnessError(value).code !== 'conflict')
+  if (!value)
     return
-  const last = messages.value.at(-1)
-  if (last?.role === 'user') {
-    session.chat.messages.value = messages.value.slice(0, -1)
-    composer.value?.setText(messageText(last))
-  }
+  const stale = toHarnessError(value).code === 'not_found'
+  if (!stale && !isRunActiveConflict(value))
+    return
+  const unsent = session.takeBackUnstored()
+  if (unsent)
+    composer.value?.setText(messageText(unsent))
   session.chat.clearError()
-  toast('A response is already running in this chat.')
+  if (stale) {
+    toast(STALE_CHAT_MESSAGE)
+    return
+  }
+  toast(RUN_ACTIVE_MESSAGE)
   chats.setRunState(props.chatId, 'running')
   void session.resumeIfRunning()
 })
@@ -214,6 +229,24 @@ function onRetry() {
 
 function onApproval(decision: ToolApprovalDecision) {
   session.approve(decision).catch(failure => reportFailure('Could not save the tool preference', failure))
+}
+
+function onSelectVersion(messageId: string) {
+  session.switchBranch(messageId)
+    .then(() => {
+      // Listed only when the switch showed it (a request in flight makes the switch do nothing).
+      const branch = session.branches.value[messageId]
+      if (branch)
+        void announce(`Version ${branch.index + 1} of ${branch.siblings.length}`)
+    })
+    .catch((failure) => {
+      if (isRunActiveConflict(failure))
+        toast(RUN_ACTIVE_MESSAGE)
+      else if (toHarnessError(failure).code === 'not_found')
+        toast(STALE_CHAT_MESSAGE)
+      else
+        reportFailure('Could not switch versions', failure)
+    })
 }
 
 function onModelChange(value: string) {
@@ -273,10 +306,13 @@ function onToolModeChange(value: ToolMode) {
         :error="error"
         :show-thinking="ui.showThinking"
         :loading="!loaded && !loadError"
+        :branches="branches"
+        :switching="switching"
         @regenerate="onRegenerate"
         @edit="onEdit"
         @approval="onApproval"
         @retry="onRetry"
+        @select-version="onSelectVersion"
       />
       <div
         v-if="loadError && !loaded"

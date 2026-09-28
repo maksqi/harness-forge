@@ -1,0 +1,35 @@
+# Dependency audit (ADR-027): a high or critical advisory in a production dependency fails the run. A workflow of its
+# own, so a new advisory never hides the check and e2e results of ci.yml. No install is needed: `pnpm audit` reads the
+# lockfile. Registry errors do not fail the run (--ignore-registry-errors); a weekly run catches new advisories.
+name: Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Mondays, 06:00 UTC.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: pnpm audit (production, high and critical)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # Node first: pnpm 11 needs Node >= 22.13 to run.
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      # The pnpm version of "packageManager" in package.json.
+      - uses: pnpm/action-setup@v6
+      - run: pnpm audit --prod --audit-level high --ignore-registry-errors

@@ -1,8 +1,10 @@
 // SEC-D2: the redactor behind every log line and error message. Secrets hide in URL query strings (with prefixed names
 // such as `X-Amz-Signature`), in name / value pairs of free text and JSON excerpts, and under sensitive field names;
-// ordinary text around them (token counts, messages that merely mention a password) stays readable.
+// ordinary text around them (token counts, messages that merely mention a password) stays readable. Share tokens
+// (ADR-025) never reach a log: `redactText` masks `/share/<token>`, the access log masks the path segment (W5.7-T6).
+import { SHARE_TOKEN_PATTERN } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { createRedactor, REDACTED } from './redact.ts'
+import { createRedactor, REDACTED, redactSharePath } from './redact.ts'
 
 describe('redactText', () => {
   const redactor = createRedactor()
@@ -83,5 +85,62 @@ describe('redact (structured)', () => {
     expect(out.err).toMatchObject({ name: 'Error', message: `call failed with ${REDACTED}`, status: 401 })
     expect(JSON.stringify(out)).not.toContain('body-secret')
     expect(JSON.stringify(out)).not.toContain('session=abc')
+  })
+})
+
+describe('share tokens (ADR-025)', () => {
+  /** A well-formed share token: the 16-character share id suffix + 22 base64url characters. */
+  const TOKEN = 'AbCdEfGh12345678Zz09_-aBcDeFgHiJkLmNoP'
+  const MAC = TOKEN.slice(16)
+  const redactor = createRedactor()
+
+  it('the sample is a token', () => {
+    expect(TOKEN).toMatch(SHARE_TOKEN_PATTERN)
+  })
+
+  it.each([
+    ['a share page URL', `open https://harness.example.com/share/${TOKEN} to read it`],
+    ['a public API path', `Unknown API route: GET /api/share/${TOKEN}/nope`],
+    ['a share file path', `/api/share/${TOKEN}/files/file_0000000000000001`],
+    ['an upper-case segment', `/Share/${TOKEN}`],
+    ['encoded slashes', `GET /api/share%2F${TOKEN} and /api%2Fshare%2f${TOKEN}`],
+    ['a link with a trailing character', `(see /share/${TOKEN})`],
+    ['a token followed by more characters', `/share/${TOKEN}extra`],
+    ['a JSON excerpt', JSON.stringify({ url: `/share/${TOKEN}`, referer: `https://h.example/share/${TOKEN}#x` })],
+  ])('redactText masks %s', (_name, text) => {
+    const out = redactor.redactText(text)
+    expect(out).not.toContain(TOKEN)
+    expect(out).not.toContain(MAC)
+    expect(out).toContain(REDACTED)
+  })
+
+  it('keeps share ids, other paths and short segments', () => {
+    for (const text of ['/api/shares/shr_AbCdEfGh12345678', '/api/shares?chatId=0199a8f0-0000-7000-8000-000000000001', '/share/short', `/shared/${TOKEN}`, `/sharepoint/${TOKEN}`])
+      expect(redactor.redactText(text), text).toBe(text)
+  })
+
+  it('structured values: every string field is masked', () => {
+    const out = JSON.stringify(redactor.redact({ path: `/share/${TOKEN}`, nested: { url: new URL(`https://h.example/share/${TOKEN}`) } }))
+    expect(out).not.toContain(TOKEN)
+    expect(out).not.toContain(MAC)
+  })
+
+  it.each([
+    [`/api/share/${TOKEN}`, `/api/share/${REDACTED}`],
+    [`/api/share/${TOKEN}/files/file_0000000000000001`, `/api/share/${REDACTED}/files/file_0000000000000001`],
+    [`/share/${TOKEN}`, `/share/${REDACTED}`],
+    [`/share/${TOKEN}/`, `/share/${REDACTED}/`],
+    ['/share/abc', `/share/${REDACTED}`],
+    [`/share/${TOKEN}x.y`, `/share/${REDACTED}`],
+    [`/share/${TOKEN.slice(0, 30)}`, `/share/${REDACTED}`],
+    [`//share//${TOKEN}`, `//share//${REDACTED}`],
+    [`/SHARE/${TOKEN}`, `/SHARE/${REDACTED}`],
+    [`/api/share%2F${TOKEN}`, `/api/share%2F${REDACTED}`],
+    ['/api/shares/shr_AbCdEfGh12345678', '/api/shares/shr_AbCdEfGh12345678'],
+    ['/api/shares', '/api/shares'],
+    ['/share/', '/share/'],
+    ['/api/chats/0199a8f0-0000-7000-8000-000000000001', '/api/chats/0199a8f0-0000-7000-8000-000000000001'],
+  ])('redactSharePath(%s) -> %s', (path, expected) => {
+    expect(redactSharePath(path)).toBe(expected)
   })
 })

@@ -4,6 +4,8 @@ import type {
   CatalogModel,
   ChatDetail,
   ChatSummary,
+  HarnessUIMessage,
+  MessageBranch,
   PluginDetail,
   PluginLogEntry,
   PluginSummary,
@@ -14,6 +16,32 @@ import type {
 /** A fixed uuidv7 chat id with a varying last group: chatId(1) -> '...000000000001'. */
 export function chatId(n: number): string {
   return `0199a8f0-0000-7000-8000-${String(n).padStart(12, '0')}`
+}
+
+/** A valid message id (`msg_` + 16 characters) from a short label: messageId('u1') -> 'msg_u100000000000000'. */
+export function messageId(label: string): string {
+  return `msg_${label.replace(/[^\dA-Z]/gi, '').slice(0, 16).padEnd(16, '0')}`
+}
+
+/** A user message with one text part. */
+export function userMessage(id: string, text: string, overrides: Partial<HarnessUIMessage> = {}): HarnessUIMessage {
+  return { id, role: 'user', parts: [{ type: 'text', text }], ...overrides }
+}
+
+/** A finished assistant message with one text part. */
+export function assistantMessage(id: string, text: string, overrides: Partial<HarnessUIMessage> = {}): HarnessUIMessage {
+  return {
+    id,
+    role: 'assistant',
+    metadata: { modelRef: 'mock:echo', startedAt: 1_759_000_000_000 },
+    parts: [{ type: 'text', text, state: 'done' }],
+    ...overrides,
+  }
+}
+
+/** `ChatDetail.branches[id]`: the versions of a message and the position of the shown one. */
+export function messageBranch(siblings: string[], index: number): MessageBranch {
+  return { siblings, index }
 }
 
 export function authStatus(overrides: Partial<AuthStatus> = {}): AuthStatus {

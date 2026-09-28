@@ -167,14 +167,13 @@ export interface ChatMessageStore {
    */
   readonly appendMessage: (chatId: string, message: HarnessUIMessage, parentId: string | null) => Promise<void>
   /**
-   * Idempotent insert-or-replace by message id: a new id is appended (next `seq`, `parent_id = parentId`, omitted =
-   * `null`), an existing one keeps its `seq` and its parent and gets the new role, parts and metadata (approval
-   * continuations, re-persisting a run). Updates `search_text` from the text parts. Does not move the active leaf.
-   * `not_found` when the chat does not exist (on insert also when `parentId` is not a message of the chat); `conflict`
-   * (`reason: 'exists'`) when the id belongs to another chat. `parentId` becomes required once `replaceFrom` is dropped
-   * (W5.1, pre-approved CCR).
+   * Idempotent insert-or-replace by message id: a new id is appended (next `seq`, `parent_id = parentId`, `null` = a
+   * first message), an existing one keeps its `seq` and its parent (`parentId` is ignored) and gets the new role, parts
+   * and metadata (approval continuations, re-persisting a run). Updates `search_text` from the text parts. Does not
+   * move the active leaf. `not_found` when the chat does not exist (on insert also when `parentId` is not a message of
+   * the chat); `conflict` (`reason: 'exists'`) when the id belongs to another chat.
    */
-  readonly upsertMessage: (chatId: string, message: HarnessUIMessage, parentId?: string | null) => Promise<void>
+  readonly upsertMessage: (chatId: string, message: HarnessUIMessage, parentId: string | null) => Promise<void>
   /**
    * Compare-and-set of `chats.active_leaf_id`: writes `leafId` when the chat exists, `leafId` is one of its messages
    * and, with `onlyFrom`, the current active leaf is one of `onlyFrom` (`null` matches a chat without one). Returns
@@ -183,12 +182,6 @@ export interface ChatMessageStore {
    * `switchBranch` call it.
    */
   readonly setActiveLeaf: (chatId: string, leafId: string, onlyFrom?: readonly (string | null)[]) => Promise<boolean>
-  /**
-   * Linear history (v1): deletes `fromMessageId` and every later message, then appends `messages` in order: edit =
-   * `[editedUserMessage]`, regenerate = `[]`. Returns the number of deleted messages; `not_found` when the id is not in
-   * the chat. Dropped by W5.1 (ADR-023: an edit or a regenerate adds a version instead; pre-approved CCR).
-   */
-  readonly replaceFrom: (chatId: string, fromMessageId: string, messages: readonly HarnessUIMessage[]) => Promise<number>
 }
 
 /**

@@ -1,10 +1,12 @@
-import type { HarnessUIMessage } from '@harness-forge/shared'
+import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
+import type { ChatStatus } from 'ai'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h, nextTick, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
+import { assistantMessage, messageBranch, userMessage } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import ChatTranscript from './ChatTranscript.vue'
 
@@ -91,5 +93,136 @@ describe('chatTranscript: long histories', () => {
     const edits = wrapper.findAll(`[data-testid="${testIds.messageEdit}"]`)
     expect(edits).toHaveLength(2)
     expect(edits[0]!.classes()).toContain('group-data-[busy=true]/transcript:hidden')
+  })
+})
+
+describe('chatTranscript: versions', () => {
+  const U1 = 'msg_user000000000001'
+  const A1 = 'msg_asst000000000001'
+  const A1B = 'msg_asst00000000001b'
+  const U2 = 'msg_user000000000002'
+  const A2 = 'msg_asst000000000002'
+  const U2B = 'msg_user00000000002b'
+  const A2B = 'msg_asst00000000002b'
+
+  interface State {
+    messages: HarnessUIMessage[]
+    branches: Record<string, MessageBranch>
+    status: ChatStatus
+    switching: boolean
+  }
+
+  function mountWithVersions(initial: Pick<State, 'messages' | 'branches'>) {
+    const state = ref<State>({ status: 'ready', switching: false, ...initial })
+    const events: Record<string, unknown[][]> = {}
+    const record = (name: string) => (...args: unknown[]) => {
+      (events[name] ??= []).push(args)
+    }
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, {
+        default: () => h(ChatTranscript, {
+          messages: state.value.messages,
+          status: state.value.status,
+          showThinking: false,
+          branches: state.value.branches,
+          switching: state.value.switching,
+          onSelectVersion: record('select-version'),
+          onRegenerate: record('regenerate'),
+          onRetry: record('retry'),
+        }),
+      }),
+    }, { attachTo: document.body })
+    return { wrapper, state, events }
+  }
+
+  function control(wrapper: ReturnType<typeof mountWithVersions>['wrapper'], messageId: string, testId: string) {
+    return wrapper.get(`[data-testid="${testIds.messageBranch}"][data-message-id="${messageId}"] [data-testid="${testId}"]`)
+  }
+
+  it('moves focus to the same control of the new version after a switch', async () => {
+    const { wrapper, state, events } = mountWithVersions({
+      messages: [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2, 'q2'), assistantMessage(A2, 'a2')],
+      branches: { [U2]: messageBranch([U2B, U2], 1) },
+    })
+    await nextTick()
+    const previous = control(wrapper, U2, testIds.messageBranchPrevious)
+    ;(previous.element as HTMLElement).focus()
+    await previous.trigger('click')
+    expect(events['select-version']).toEqual([[U2B]])
+
+    state.value = { ...state.value, switching: true }
+    await nextTick()
+    expect(previous.attributes('aria-disabled')).toBe('true')
+    state.value = {
+      ...state.value,
+      switching: false,
+      messages: [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2B, 'q2, first version'), assistantMessage(A2B, 'a2b')],
+      branches: { [U2B]: messageBranch([U2B, U2], 0) },
+    }
+    await flushPromises()
+    const moved = control(wrapper, U2B, testIds.messageBranchPrevious)
+    expect(document.activeElement).toBe(moved.element)
+    // The first version: the focused button is aria-disabled, but keeps the focus.
+    expect(moved.attributes('aria-disabled')).toBe('true')
+  })
+
+  it('leaves focus alone when the version was not chosen from a focused control, or the switch was refused', async () => {
+    const { wrapper, state } = mountWithVersions({
+      messages: [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2, 'q2'), assistantMessage(A2, 'a2')],
+      branches: { [U2]: messageBranch([U2B, U2], 1) },
+    })
+    await nextTick()
+    const previous = control(wrapper, U2, testIds.messageBranchPrevious)
+    ;(previous.element as HTMLElement).focus()
+    await previous.trigger('click')
+    state.value = { ...state.value, switching: true }
+    await nextTick()
+    // Refused (409): the path did not change, the button keeps its focus.
+    state.value = { ...state.value, switching: false }
+    await flushPromises()
+    expect(document.activeElement).toBe(previous.element)
+
+    ;(document.activeElement as HTMLElement).blur()
+    await previous.trigger('click')
+    state.value = {
+      ...state.value,
+      messages: [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2B, 'q2b'), assistantMessage(A2B, 'a2b')],
+      branches: { [U2B]: messageBranch([U2B, U2], 0) },
+    }
+    await flushPromises()
+    expect(document.activeElement).toBe(document.body)
+  })
+
+  it('disables the switchers of older messages while a request or a switch is in flight', async () => {
+    const { wrapper, state } = mountWithVersions({
+      messages: [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2, 'q2'), assistantMessage(A2, 'a2')],
+      branches: { [A1]: messageBranch([A1, A1B], 0) },
+    })
+    await nextTick()
+    const next = () => control(wrapper, A1, testIds.messageBranchNext)
+    expect(next().attributes('aria-disabled')).toBeUndefined()
+    state.value = { ...state.value, status: 'streaming' }
+    await nextTick()
+    expect(next().attributes('aria-disabled')).toBe('true')
+    state.value = { ...state.value, status: 'ready', switching: true }
+    await nextTick()
+    expect(next().attributes('aria-disabled')).toBe('true')
+    state.value = { ...state.value, switching: false }
+    await nextTick()
+    expect(next().attributes('aria-disabled')).toBeUndefined()
+  })
+
+  it('retries the last request from the last reply, and regenerates an older failed reply', async () => {
+    const failed = { modelRef: 'mock:echo', startedAt: 1, error: { code: 'provider_error' as const, message: 'Upstream failed', providerId: 'mock' } }
+    const { wrapper, events } = mountWithVersions({
+      messages: [userMessage(U1, 'q1'), assistantMessage(A1, 'a1', { metadata: failed }), userMessage(U2, 'q2'), assistantMessage(A2, 'a2', { metadata: failed })],
+      branches: {},
+    })
+    await nextTick()
+    const retry = (messageId: string) => wrapper.get(`[data-message-id="${messageId}"] [data-testid="${testIds.chatError}"] [data-action="retry"]`)
+    await retry(A1).trigger('click')
+    await retry(A2).trigger('click')
+    expect(events.regenerate).toEqual([[A1]])
+    expect(events.retry).toEqual([[]])
   })
 })

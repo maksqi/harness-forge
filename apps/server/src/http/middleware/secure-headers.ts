@@ -4,10 +4,11 @@
 // set its own value: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`,
 // `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`,
 // `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `X-Robots-Tag: noindex, nofollow` (ADR-025), and
-// `Strict-Transport-Security` only over HTTPS
-// (`X-Forwarded-Proto: https` counts). `/api` responses (and JSON answers elsewhere, e.g. the not-found envelope) get
-// `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and `Cache-Control: no-store` unless the route
-// set its own (icons, files, SSE); the SPA HTML CSP (inline-script hashes of `200.html`) is set by `http/static.ts`.
+// `Strict-Transport-Security` only over HTTPS (`X-Forwarded-Proto: https` counts from a trusted proxy when
+// `HF_TRUST_PROXY` is set, from any peer when it is unset; ADR-026). `/api` responses (and JSON answers elsewhere, e.g.
+// the not-found envelope) get `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and
+// `Cache-Control: no-store` unless the route set its own (icons, files, SSE); the SPA HTML CSP (inline-script hashes of
+// `200.html`) is set by `http/static.ts`.
 // CORS headers are never sent: any `Access-Control-*` header is removed.
 import type { AppDeps } from '../../types.ts'
 import type { AppMiddleware } from '../types.ts'
@@ -21,10 +22,10 @@ function isJsonContentType(contentType: string | null): boolean {
   return type === 'application/json' || type.endsWith('+json')
 }
 
-export function secureHeadersMiddleware(_deps: AppDeps): AppMiddleware {
+export function secureHeadersMiddleware(deps: AppDeps): AppMiddleware {
   return async (c, next) => {
     await next()
-    const https = isHttpsRequest(c)
+    const https = isHttpsRequest(c, deps.env)
     const api = apiRelativePath(c.req.path) !== null
     updateResponseHeaders(c, (headers) => {
       for (const [name, value] of Object.entries(SECURITY_HEADERS))

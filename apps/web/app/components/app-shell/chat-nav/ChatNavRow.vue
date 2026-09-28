@@ -3,10 +3,11 @@
 // until a title arrives) and a trailing 20px slot. The slot shows the status dot; on hover, keyboard focus or
 // while the menu is open it shows the actions button instead (touch devices show both). Rename turns the row
 // into InlineRename. Rename and Delete wait until the menu has closed, so its focus return cannot steal focus from
-// the rename input or land on a row that is gone.
+// the rename input or land on a row that is gone. Share… opens the Share dialog (ui.openShare, docs/UI.md 7.14) once
+// the menu has closed and its trigger has focus again, so the dialog returns focus there when it closes.
 import type { ChatExportFormat, ChatSummary } from '@harness-forge/shared'
 import type { ChatListStatus } from '~/stores/chats'
-import { FileBracesIcon, FileTextIcon, MoreHorizontalIcon, PencilIcon, Trash2Icon } from '@lucide/vue'
+import { FileBracesIcon, FileTextIcon, MoreHorizontalIcon, PencilIcon, Share2Icon, Trash2Icon } from '@lucide/vue'
 import { computed, nextTick, ref, useTemplateRef } from 'vue'
 import {
   DropdownMenu,
@@ -19,6 +20,7 @@ import { SidebarMenuButton, SidebarMenuItem, useSidebar } from '@/components/ui/
 import { cn } from '@/lib/utils'
 import InlineRename from '~/components/common/InlineRename.vue'
 import StatusDot from '~/components/common/StatusDot.vue'
+import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
 import { SIDEBAR_ROW_CLASS } from '../sidebar-classes'
 
@@ -35,12 +37,13 @@ const emit = defineEmits<{
 }>()
 
 const { isMobile } = useSidebar()
+const ui = useUiStore()
 const item = useTemplateRef<{ $el: HTMLElement }>('item')
 
 const menuOpen = ref(false)
 const editing = ref(false)
 /** The menu item chosen that runs once the menu has closed. */
-let pending: 'rename' | 'delete' | null = null
+let pending: 'rename' | 'share' | 'delete' | null = null
 
 const title = computed(() => props.chat.title?.trim() ?? '')
 
@@ -66,8 +69,8 @@ function focus() {
   item.value?.$el.querySelector<HTMLElement>(`[data-testid="${testIds.chatRow}"]`)?.focus()
 }
 
-/** Rename and Delete run from onCloseAutoFocus, once the menu is closed. */
-function choose(action: 'rename' | 'delete') {
+/** Rename, Share and Delete run from onCloseAutoFocus, once the menu is closed. */
+function choose(action: 'rename' | 'share' | 'delete') {
   pending = action
 }
 
@@ -77,6 +80,12 @@ function onCloseAutoFocus(event: Event) {
   if (!action)
     return
   event.preventDefault()
+  if (action === 'share') {
+    // The trigger takes focus first: the Share dialog returns focus to whatever had it when it opened.
+    item.value?.$el.querySelector<HTMLElement>(`[data-testid="${testIds.chatRowMenu}"]`)?.focus()
+    ui.openShare(props.chat.id)
+    return
+  }
   void nextTick(() => {
     if (action === 'rename')
       editing.value = true
@@ -151,6 +160,10 @@ defineExpose({ focus })
               <DropdownMenuItem :data-testid="testIds.chatRowRename" @select="choose('rename')">
                 <PencilIcon aria-hidden="true" />
                 Rename
+              </DropdownMenuItem>
+              <DropdownMenuItem :data-testid="testIds.chatRowShare" @select="choose('share')">
+                <Share2Icon aria-hidden="true" />
+                Share…
               </DropdownMenuItem>
               <DropdownMenuItem :data-testid="testIds.chatRowExportMd" @select="emit('export', 'md')">
                 <FileTextIcon aria-hidden="true" />

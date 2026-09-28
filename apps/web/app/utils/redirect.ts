@@ -1,8 +1,17 @@
-// Login redirects (docs/UI.md 6): `/login?redirect=<path>` accepts only in-app paths; the access-blocked answer of the
-// auth status request. Auto-imported (utils/).
+// Login redirects (docs/UI.md 6): `/login?redirect=<path>` accepts only in-app paths; the public share page
+// (`/share/<token>`) never redirects; the access-blocked answer of the auth status request. Auto-imported (utils/).
 import { toHarnessError } from './errors'
 
 export const LOGIN_PATH = '/login'
+
+/**
+ * True for the public share page `/share/<token>` (docs/UI.md 6, 7.15, ADR-025): visitors have no session, so the
+ * auth middleware skips it, it never redirects to /login and nothing on it loads the auth status. Case-insensitive
+ * like the router's path matching.
+ */
+export function isSharePath(path: string): boolean {
+  return /^\/share\//i.test(path)
+}
 
 /** Control characters (C0 and DEL) never belong in a redirect target. */
 function hasControlChars(value: string): boolean {
@@ -61,9 +70,12 @@ export interface AuthRedirectState {
 /**
  * The decision of the global auth middleware for one navigation (docs/UI.md 6): pages redirect to
  * `/login?redirect=<path>` when a login is required; `/login` redirects to the `?redirect=` target (or `/`) when
- * already authenticated and stays put otherwise (including when the auth status is unknown). Null = no redirect.
+ * already authenticated and stays put otherwise (including when the auth status is unknown); the public share page
+ * never redirects. Null = no redirect.
  */
 export function authRedirectFor(to: AuthRedirectTarget, auth: AuthRedirectState): string | null {
+  if (isSharePath(to.path))
+    return null
   if (to.path === LOGIN_PATH)
     return auth.authenticated ? afterLoginPath(to.query.redirect) : null
   return auth.requiresLogin ? loginPath(to.fullPath) : null

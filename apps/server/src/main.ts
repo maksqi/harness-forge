@@ -1,9 +1,11 @@
 // Process entry (ARCHITECTURE.md section 5): `.env` -> env -> bind check -> data dir -> database + migrations ->
 // services -> bind check with a stored password -> boot sequence -> HTTP server; graceful shutdown on SIGINT / SIGTERM.
-// Owner after Phase 0: W1.1 (W1.1-T8).
+// Owner after Phase 0: W1.1 (W1.1-T8); the trusted proxy boot log: W5.7.
 //
 // Bind safety: a non-loopback `HF_HOST` needs `HF_PASSWORD`, a password stored in the data directory, or
-// `HF_INSECURE=1`; otherwise the process exits with code 1 before any plugin starts or any port is opened.
+// `HF_INSECURE=1`; otherwise the process exits with code 1 before any plugin starts or any port is opened. An invalid
+// `HF_TRUST_PROXY` (`1`, `true`, a hop count, an unknown token) fails the boot the same way, with the format explained;
+// a valid one is logged with every trusted range (ADR-026).
 import type { ServerType } from '@hono/node-server'
 import type { AddressInfo } from 'node:net'
 import type { Database } from './db/client.ts'
@@ -20,6 +22,7 @@ import { migrateDatabase } from './db/migrate.ts'
 import { createDeps, startDeps, stopDeps } from './deps.ts'
 import { bindSafetyError, defaultEnvFile, ensureDataDir, EnvError, isLoopbackHost, loadDotEnvFile, loadEnv } from './env.ts'
 import { createLogger } from './logger.ts'
+import { trustedRanges } from './security/proxy-trust.ts'
 import { createRedactor } from './security/redact.ts'
 
 /** A shutdown that takes longer exits with code 1. */
@@ -157,6 +160,8 @@ async function main(): Promise<void> {
     }
     if (!isLoopbackHost(env.host) && env.insecure && (await deps.passwords.source()) === null)
       logger.warn('listening on a non-loopback address without a password (HF_INSECURE=1)', { host: env.host })
+    if (env.trustProxy !== null)
+      logger.info('trusting reverse proxies (HF_TRUST_PROXY)', { trustProxy: env.trustProxy, ranges: trustedRanges(env.trustProxy) })
 
     started = true
     await startDeps(deps)

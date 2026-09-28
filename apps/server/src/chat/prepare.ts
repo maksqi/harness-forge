@@ -1,8 +1,9 @@
-// Everything `POST /chat` does before the stream starts (ARCHITECTURE.md 6.1): classify the request, upsert the chat
-// (mode and effort saved as chat settings), resolve the model (`provider_not_configured` before any streaming), plan
-// the history operation in memory (slash commands, superseded approvals, edit / regenerate, approval merge), validate
-// the new message with `validateUIMessages`, then commit the history change in one transaction. A failure here is a
-// normal JSON error response and leaves the history untouched.
+// Everything `POST /chat` does before the stream starts (ARCHITECTURE.md 6.1 / 6.8): classify the request, upsert the
+// chat (mode and effort saved as chat settings), resolve the model (`provider_not_configured` before any streaming),
+// plan the history operation in memory (the path it continues, slash commands, superseded approvals, the approval
+// merge), validate the new message with `validateUIMessages`, then commit the history change and the active leaf in one
+// transaction. A failure here is a normal JSON error response and leaves the history untouched. Nothing is ever deleted
+// (ADR-023): an edit adds a sibling user message, a regenerate a sibling reply.
 import type { ChatRequestBody, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, Settings } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 import type { ResolvedModel } from '../providers/types.ts'
@@ -15,12 +16,23 @@ import { createMessageId, harnessDataSchemas, HarnessError, isHarnessError, mess
 import { safeValidateUIMessages } from 'ai'
 import { resolveCommand } from './commands.ts'
 import { normalizeUserParts } from './files.ts'
-import { classifyRequest, mergeApprovalDecisions, notFound, supersedeApprovals } from './history.ts'
+import { badRequest, classifyRequest, mergeApprovalDecisions, notFound, supersedeApprovals } from './history.ts'
 
-/** Writes of the history transaction, applied in order: `replace` first, then the upserts. */
+/** A message write of the history transaction. */
+export interface MessageWrite {
+  message: HarnessUIMessage
+  /** The parent when the message is new; an existing message keeps its own. */
+  parentId: string | null
+}
+
+/** Writes of the history transaction, applied in order: `updates`, `append`, then the active leaf. */
 export interface HistoryWrites {
-  replace: { fromId: string, messages: HarnessUIMessage[] } | null
-  upserts: HarnessUIMessage[]
+  /** Stored messages that change: superseded approvals, the merged decisions of a continuation. */
+  updates: MessageWrite[]
+  /** The new user message (kind `new`). */
+  append: MessageWrite | null
+  /** The active leaf after the commit: the new user message, the answered message or the continued message. */
+  activeLeafId: string
 }
 
 export interface PreparedRun {
@@ -28,23 +40,25 @@ export interface PreparedRun {
   chat: ChatRecord
   resolved: ResolvedModel
   settings: Settings
-  /** The history the reply is generated from; for a continuation the continued assistant message is last. */
+  /** The path the reply is generated from, first message first; for a continuation the continued message is last. */
   history: HarnessUIMessage[]
-  /** The new or edited user message. */
+  /** The new user message. */
   userMessage: HarnessUIMessage | null
   /** The continued assistant message (merged decisions), for a continuation. */
   continued: HarnessUIMessage | null
   /** Id of the assistant message of the reply (server-generated, ADR-019; the continued id for a continuation). */
   assistantId: string
+  /**
+   * The parent of the reply: the new user message, the answered message of a regenerate, or the parent of the continued
+   * message. The persisted reply is stored under it and becomes the active leaf only while the leaf is still this
+   * message (or the reply itself).
+   */
+  replyParentId: string | null
   /** A slash command of the (last) user message that decides the reply: a reply command or a failed `run`. */
   command: CommandResolution | null
   /** Approvals resolved as denied (`superseded`). */
   superseded: number
   writes: HistoryWrites
-}
-
-function badRequest(message: string, path: (string | number)[] = []): HarnessError {
-  return new HarnessError({ code: 'validation_error', message, details: { issues: [{ path, message, code: 'custom' }] } })
 }
 
 /** The request was stopped before its history was stored. */
@@ -103,7 +117,7 @@ interface PrepareContext {
   logger: Logger
 }
 
-/** The stored form of the new or edited user message (server metadata, command invocation). */
+/** The stored form of the new user message (server metadata, command invocation). */
 async function buildUserMessage(context: PrepareContext): Promise<{ message: HarnessUIMessage, command: CommandResolution | null }> {
   const { deps, run, body, resolved } = context
   const parts = await normalizeUserParts(body.message.parts, deps.files)
@@ -124,6 +138,12 @@ async function regeneratedCommand(context: PrepareContext, userMessage: HarnessU
   return resolution?.kind === 'prompt' ? null : resolution
 }
 
+/** The writes of changed path messages, each with its parent on the path (unused: they are stored already). */
+function pathWrites(changed: readonly HarnessUIMessage[], path: readonly HarnessUIMessage[]): MessageWrite[] {
+  const parentOf = new Map(path.map((message, index) => [message.id, path[index - 1]?.id ?? null]))
+  return changed.map(message => ({ message, parentId: parentOf.get(message.id) ?? null }))
+}
+
 /**
  * Validates and plans the request. Throws `validation_error`, `not_found`, `conflict`, `provider_not_configured` (and
  * the other resolution errors) before anything but the chat row is written.
@@ -137,104 +157,99 @@ export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody,
   const resolved = await resolveChatModel(deps, body.modelRef, run.signal)
   deps.catalog.markUsed(resolved.providerId, resolved.modelId).catch((error: unknown) => logger.debug('cannot record the model use', { err: error }))
   const settings = await deps.settings.get()
-  const stored = await deps.chats.listMessages(body.chatId)
   const context: PrepareContext = { deps, run, body, resolved, logger }
   const base = { kind, chat, resolved, settings }
 
   switch (kind) {
     case 'new': {
-      if (stored.some(message => message.id === body.message.id))
+      if (await deps.chats.getMessage(body.chatId, body.message.id) !== null)
         throw new HarnessError({ code: 'conflict', message: 'A message with this id already exists.', details: { reason: 'exists', chatId: body.chatId } })
+      // The path the message continues: `parentId`, or the active leaf when it is omitted (`not_found` when unknown).
+      const parentId = body.parentId === undefined ? chat.activeLeafId : body.parentId
+      const path = await deps.chats.listPath(body.chatId, parentId)
       const { message, command } = await buildUserMessage(context)
       await validateMessage(message)
-      const superseded = supersedeApprovals(stored)
+      // Only the approvals of this path: those of other versions stay pending.
+      const superseded = supersedeApprovals(path)
       return {
         ...base,
         history: [...superseded.messages, message],
         userMessage: message,
         continued: null,
         assistantId: createMessageId(),
+        replyParentId: message.id,
         command: command?.kind === 'prompt' ? null : command,
         superseded: superseded.count,
-        writes: { replace: null, upserts: [...superseded.changed, message] },
-      }
-    }
-    case 'edit': {
-      const index = stored.findIndex(message => message.id === body.message.id)
-      if (index < 0 || stored[index]?.role !== 'user')
-        throw notFound(`Message ${body.message.id} is not a user message of this chat.`)
-      const { message, command } = await buildUserMessage(context)
-      await validateMessage(message)
-      const superseded = supersedeApprovals(stored.slice(0, index))
-      return {
-        ...base,
-        history: [...superseded.messages, message],
-        userMessage: message,
-        continued: null,
-        assistantId: createMessageId(),
-        command: command?.kind === 'prompt' ? null : command,
-        superseded: superseded.count,
-        writes: { replace: { fromId: body.message.id, messages: [message] }, upserts: superseded.changed },
+        writes: { updates: pathWrites(superseded.changed, path), append: { message, parentId }, activeLeafId: message.id },
       }
     }
     case 'regenerate': {
-      let cut: number
-      if (body.messageId !== undefined) {
-        const index = stored.findIndex(message => message.id === body.messageId)
-        if (index < 0)
-          throw notFound(`Message ${body.messageId} is not in this chat.`)
-        cut = stored[index]?.role === 'assistant' ? index : index + 1
-      }
-      else {
-        cut = stored.at(-1)?.role === 'assistant' ? stored.length - 1 : stored.length
-      }
-      const kept = stored.slice(0, cut)
-      const last = kept.at(-1)
-      if (last === undefined || last.role !== 'user')
+      // The target is a user message to answer, or a reply whose previous message on its path is answered instead.
+      const target = body.messageId ?? chat.activeLeafId
+      const path = target === null ? [] : await deps.chats.listPath(body.chatId, target)
+      const answeredIndex = path.at(-1)?.role === 'user' ? path.length - 1 : path.length - 2
+      const answered = path[answeredIndex]
+      if (answered === undefined || answered.role !== 'user')
         throw badRequest('There is no user message to answer.', ['messageId'])
+      const kept = path.slice(0, answeredIndex + 1)
       const superseded = supersedeApprovals(kept)
-      const removed = stored[cut]
       return {
         ...base,
         history: superseded.messages,
         userMessage: null,
         continued: null,
         assistantId: createMessageId(),
-        command: await regeneratedCommand(context, last),
+        replyParentId: answered.id,
+        command: await regeneratedCommand(context, answered),
         superseded: superseded.count,
-        writes: { replace: removed === undefined ? null : { fromId: removed.id, messages: [] }, upserts: superseded.changed },
+        writes: { updates: pathWrites(superseded.changed, kept), append: null, activeLeafId: answered.id },
       }
     }
     case 'continuation': {
-      const last = stored.at(-1)
+      if (chat.activeLeafId === null || chat.activeLeafId !== body.message.id)
+        throw notFound('The continuation does not match the active leaf of this chat.')
+      const path = await deps.chats.listPath(body.chatId, chat.activeLeafId)
+      const last = path.at(-1)
       if (last === undefined || last.role !== 'assistant' || last.id !== body.message.id)
-        throw notFound('The continuation does not match the last assistant message of this chat.')
+        throw notFound('The continuation does not match the active leaf of this chat.')
       const { message, merged } = mergeApprovalDecisions(last, body.message)
       if (merged === 0)
         throw badRequest('The continuation carries no approval decision for a pending tool call.', ['message', 'parts'])
       await validateMessage(message)
+      const parentId = path.at(-2)?.id ?? null
       return {
         ...base,
-        history: [...stored.slice(0, -1), message],
+        history: [...path.slice(0, -1), message],
         userMessage: null,
         continued: message,
         assistantId: message.id,
+        replyParentId: parentId,
         command: null,
         superseded: 0,
-        writes: { replace: null, upserts: [message] },
+        writes: { updates: [{ message, parentId }], append: null, activeLeafId: message.id },
       }
     }
   }
 }
 
-/** Applies the history writes atomically. */
+/**
+ * Applies the history writes atomically and moves the active leaf (not a compare-and-set: the request's own message
+ * wins over a concurrent version switch). A write that stores nothing fails the whole commit.
+ */
 export async function commitHistory(deps: Pick<AppDeps, 'chats'>, chatId: string, writes: HistoryWrites): Promise<void> {
-  if (writes.replace === null && writes.upserts.length === 0)
+  const leafMissing = (): HarnessError => notFound(`Message ${writes.activeLeafId} not found in chat ${chatId}.`)
+  if (writes.updates.length === 0 && writes.append === null) {
+    // Only the leaf moves (a regenerate): a single statement.
+    if (!await deps.chats.setActiveLeaf(chatId, writes.activeLeafId))
+      throw leafMissing()
     return
+  }
   await deps.chats.transaction(async (store) => {
-    if (writes.replace !== null)
-      await store.replaceFrom(chatId, writes.replace.fromId, writes.replace.messages)
-    for (const message of writes.upserts)
-      await store.upsertMessage(chatId, message)
+    for (const { message, parentId } of writes.updates)
+      await store.upsertMessage(chatId, message, parentId)
+    if (writes.append !== null)
+      await store.appendMessage(chatId, writes.append.message, writes.append.parentId)
+    if (!await store.setActiveLeaf(chatId, writes.activeLeafId))
+      throw leafMissing()
   })
 }

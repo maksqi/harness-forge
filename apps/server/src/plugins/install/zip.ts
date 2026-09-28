@@ -7,10 +7,14 @@
 // archives, non-UTF-8 names, symbolic links, devices / FIFOs / sockets, local headers that disagree with the central
 // directory, overlapping entries (zip bombs that reuse data), and everything `EntryCollector` refuses (names, count,
 // expanded size, duplicates).
+//
+// `readZip` reads a whole archive at once (plugin installs). `openZip` (bulk data imports, ADR-024) applies the same
+// guards lazily: it checks the central directory when the archive is opened and reads, inflates and CRC-checks one
+// entry at a time on demand, from bytes in memory or from a `Blob` (an upload, read in slices).
 import type { ArchiveEntry, EntryCollector } from './archive.ts'
 import { crc32 } from 'node:zlib'
 import { Inflate } from 'fflate'
-import { invalid, quoteName } from './errors.ts'
+import { invalid, megabytes, quoteName, tooLarge } from './errors.ts'
 
 const EOCD_SIGNATURE = 0x06054B50
 const ZIP64_LOCATOR_SIGNATURE = 0x07064B50
@@ -60,33 +64,41 @@ interface CentralEntry {
   localOffset: number
 }
 
+/**
+ * Little-endian reads at absolute archive offsets. `data` is the whole archive (`base` 0) or a window of it that starts
+ * at the absolute offset `base` (`openZip` reads the tail and the central directory as windows); reads outside the
+ * window fail as `truncated`.
+ */
 class Reader {
   readonly #view: DataView
+  readonly #base: number
+  /** Absolute end of the readable bytes (the archive length when the window is its tail). */
   readonly length: number
 
-  constructor(readonly data: Uint8Array) {
+  constructor(readonly data: Uint8Array, base = 0) {
     this.#view = new DataView(data.buffer, data.byteOffset, data.byteLength)
-    this.length = data.byteLength
+    this.#base = base
+    this.length = base + data.byteLength
   }
 
   #check(offset: number, size: number): void {
-    if (!Number.isSafeInteger(offset) || offset < 0 || offset + size > this.length)
+    if (!Number.isSafeInteger(offset) || offset < this.#base || offset + size > this.length)
       throw new ZipFormatError('truncated')
   }
 
   u16(offset: number): number {
     this.#check(offset, 2)
-    return this.#view.getUint16(offset, true)
+    return this.#view.getUint16(offset - this.#base, true)
   }
 
   u32(offset: number): number {
     this.#check(offset, 4)
-    return this.#view.getUint32(offset, true)
+    return this.#view.getUint32(offset - this.#base, true)
   }
 
   u64(offset: number): number {
     this.#check(offset, 8)
-    const value = this.#view.getBigUint64(offset, true)
+    const value = this.#view.getBigUint64(offset - this.#base, true)
     if (value > BigInt(Number.MAX_SAFE_INTEGER))
       throw new ZipFormatError('size out of range')
     return Number(value)
@@ -94,7 +106,7 @@ class Reader {
 
   bytes(offset: number, size: number): Uint8Array {
     this.#check(offset, size)
-    return this.data.subarray(offset, offset + size)
+    return this.data.subarray(offset - this.#base, offset - this.#base + size)
   }
 }
 
@@ -376,4 +388,153 @@ export async function readZip(data: Uint8Array, collector: EntryCollector): Prom
 export function looksLikeZip(data: Uint8Array): boolean {
   return data.length >= 4 && data[0] === 0x50 && data[1] === 0x4B
     && ((data[2] === 0x03 && data[3] === 0x04) || (data[2] === 0x05 && data[3] === 0x06))
+}
+
+// ---------- lazy reader (bulk data imports, ADR-024) ----------
+
+/** The bytes of a zip archive: in memory, or a `Blob` (an upload) read in slices. */
+export type ZipSource = Uint8Array | Blob
+
+/** A file or folder of an archive opened with `openZip` (admitted by its `EntryCollector`). */
+export interface ZipEntry {
+  /** Normalized relative POSIX path (paths.ts). */
+  readonly path: string
+  readonly type: 'file' | 'dir'
+  /** Declared uncompressed size; 0 for folders. */
+  readonly size: number
+}
+
+export interface ZipReadOptions {
+  /** Refuses (`payload_too_large`) an entry whose declared size is larger, before anything is read. */
+  maxBytes?: number
+}
+
+/** An archive whose central directory passed every guard; file data is read on demand. */
+export interface OpenedZip {
+  /** The admitted entries in central directory order (the archive root and macOS metadata are left out). */
+  readonly entries: readonly ZipEntry[]
+  /**
+   * The content of one file entry of `entries`: its local header must match the central directory, its data must end
+   * before the next entry starts, and it must inflate to exactly its declared size and pass its CRC-32 check (else
+   * `validation_error`).
+   */
+  readonly read: (entry: ZipEntry, options?: ZipReadOptions) => Promise<Uint8Array>
+}
+
+/** Where a file entry's data must end: the next file's local header (`followed`) or the central directory. */
+interface EntryBounds {
+  record: CentralEntry
+  limit: number
+  followed: boolean
+}
+
+/** The end of central directory record with its longest comment, plus room for a zip64 locator and end record. */
+const TAIL_WINDOW_BYTES = EOCD_SIZE + MAX_COMMENT_SIZE + 20 + 56 + 1024
+
+function sourceLength(source: ZipSource): number {
+  return source instanceof Uint8Array ? source.byteLength : source.size
+}
+
+/** Bytes `[start, end)` of the archive (a view for bytes in memory, a copy of the slice for a `Blob`). */
+async function sliceOf(source: ZipSource, start: number, end: number): Promise<Uint8Array> {
+  if (source instanceof Uint8Array)
+    return source.subarray(start, end)
+  return new Uint8Array(await source.slice(start, end).arrayBuffer())
+}
+
+/** A structural failure as the `validation_error` users see (other errors unchanged). */
+function formatFailure(error: unknown): unknown {
+  if (error instanceof ZipFormatError)
+    return invalid(error.message === 'not a zip' ? 'The file is not a zip archive.' : 'The zip archive is damaged or truncated.', ['file'])
+  return error
+}
+
+/**
+ * Opens a zip lazily with the guards of `readZip`: the end record and the central directory are read and every entry
+ * is admitted by `collector` (names, count, declared sizes, duplicates) and checked (encryption, compression method,
+ * multi-disk, UTF-8 names, links and special files, folders without data) before anything else happens; entries whose
+ * smallest possible extent reaches into the next entry are refused as overlapping. Nothing is decompressed until
+ * `read()`, which performs the remaining per-entry checks. The source is never modified.
+ */
+export async function openZip(source: ZipSource, collector: EntryCollector): Promise<OpenedZip> {
+  const length = sourceLength(source)
+  const bounds = new Map<ZipEntry, EntryBounds>()
+  const entries: ZipEntry[] = []
+  try {
+    const tailStart = Math.max(0, length - TAIL_WINDOW_BYTES)
+    const tail = new Reader(await sliceOf(source, tailStart, length), tailStart)
+    const directory = readDirectory(tail, findEndOfCentralDirectory(tail))
+    const listing = new Reader(await sliceOf(source, directory.offset, directory.offset + directory.size), directory.offset)
+    const central = readCentralDirectory(listing, directory, collector)
+
+    const files = central.filter(entry => !entry.dir).sort((a, b) => a.localOffset - b.localOffset)
+    const limits = new Map<CentralEntry, Omit<EntryBounds, 'record'>>()
+    files.forEach((record, index) => {
+      const next = files[index + 1]
+      const limit = next?.localOffset ?? directory.offset
+      // The smallest extent (local header, the same name, the data, no extra field) must end before the next entry.
+      if (record.localOffset + LOCAL_HEADER_SIZE + record.nameBytes.length + record.compressedSize > limit) {
+        if (next !== undefined)
+          throw invalid('The zip contains overlapping entries.', ['file'])
+        throw new ZipFormatError('entry data out of range')
+      }
+      limits.set(record, { limit, followed: next !== undefined })
+    })
+    for (const record of central) {
+      const entry: ZipEntry = Object.freeze({ path: record.path, type: record.dir ? 'dir' : 'file', size: record.dir ? 0 : record.size })
+      entries.push(entry)
+      const limit = limits.get(record)
+      if (limit !== undefined)
+        bounds.set(entry, { record, ...limit })
+    }
+  }
+  catch (error) {
+    throw formatFailure(error)
+  }
+
+  const read = async (entry: ZipEntry, options: ZipReadOptions = {}): Promise<Uint8Array> => {
+    const found = bounds.get(entry)
+    if (found === undefined)
+      throw new TypeError('openZip: read() takes a file entry of the opened archive.')
+    const { record, limit, followed } = found
+    const maxBytes = options.maxBytes ?? Number.MAX_SAFE_INTEGER
+    if (record.size > maxBytes)
+      throw tooLarge(`The entry ${quoteName(record.rawName)} is larger than ${megabytes(maxBytes)}.`, maxBytes)
+    try {
+      const local = record.localOffset
+      const header = new Reader(await sliceOf(source, local, Math.min(length, local + LOCAL_HEADER_SIZE)), local)
+      if (header.u32(local) !== LOCAL_SIGNATURE)
+        throw new ZipFormatError('bad local header')
+      const nameLength = header.u16(local + 26)
+      const extraLength = header.u16(local + 28)
+      const start = local + LOCAL_HEADER_SIZE + nameLength + extraLength
+      const end = start + record.compressedSize
+      if (end > limit) {
+        if (followed)
+          throw invalid('The zip contains overlapping entries.', ['file'])
+        throw new ZipFormatError('entry data out of range')
+      }
+      const body = await sliceOf(source, local + LOCAL_HEADER_SIZE, end)
+      if (!sameBytes(body.subarray(0, nameLength), record.nameBytes))
+        throw invalid(`The entry ${quoteName(record.rawName)} has inconsistent headers.`, ['file'])
+      const compressed = body.subarray(nameLength + extraLength)
+      let content: Uint8Array
+      if (record.method === METHOD_STORE) {
+        if (record.compressedSize !== record.size)
+          throw invalid(`The entry ${quoteName(record.rawName)} does not match its declared size (damaged zip).`, ['file'])
+        content = source instanceof Uint8Array ? compressed.slice() : compressed
+      }
+      else {
+        content = inflateExact(compressed, record.size, record.rawName)
+      }
+      if ((crc32(content) >>> 0) !== (record.crc >>> 0))
+        throw invalid(`The entry ${quoteName(record.rawName)} fails its CRC check (damaged zip).`, ['file'])
+      return content
+    }
+    catch (error) {
+      throw formatFailure(error)
+    }
+  }
+
+  return { entries, read }
 }

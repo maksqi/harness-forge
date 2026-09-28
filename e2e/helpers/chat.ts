@@ -1,8 +1,9 @@
 // UI helpers for the chat flow (docs/UI.md 2.1, 2.2, 7): open a new chat, pick a model in the composer, send, and find
 // messages. Every helper waits with web-first assertions, never with fixed sleeps.
 import type { Locator, Page } from '@playwright/test'
+import type { DataAttributes } from './locators.ts'
 import { expect } from '@playwright/test'
-import { byTestId } from './locators.ts'
+import { byTestId, testIdSelector } from './locators.ts'
 import { testIds } from './testids.ts'
 
 /** Matches `/chat/<uuid>` and captures the chat id. */
@@ -104,7 +105,44 @@ export async function expectMessageStatus(message: Locator, status: MessageStatu
   await expect(message).toHaveAttribute('data-status', status, timeout === undefined ? {} : { timeout })
 }
 
+/** What a message showed at one moment: its text, then its `data-status` (read in that order). */
+export interface MessageSnapshot {
+  text: string
+  status: string | null
+}
+
+/** Reads the text, then the status: a `streaming` status proves the text was read while the message streamed. */
+export async function messageSnapshot(message: Locator): Promise<MessageSnapshot> {
+  const text = await message.textContent() ?? ''
+  return { text, status: await message.getAttribute('data-status') }
+}
+
+/**
+ * Waits until `message` is `streaming` and already shows `text` (read together, see `messageSnapshot`), and returns
+ * that snapshot, e.g. to prove that a later word was not there yet.
+ */
+export async function expectStreamingWith(message: Locator, text: string, timeout = 10_000): Promise<MessageSnapshot> {
+  let snapshot: MessageSnapshot = { text: '', status: null }
+  await expect(async () => {
+    snapshot = await messageSnapshot(message)
+    expect(snapshot.status).toBe('streaming')
+    expect(snapshot.text).toContain(text)
+  }).toPass({ timeout })
+  return snapshot
+}
+
 /** The sidebar row of a chat. */
 export function chatRow(page: Page, chatId: string): Locator {
   return byTestId(page.getByTestId(testIds.sidebar), testIds.chatRow, { 'data-chat-id': chatId })
+}
+
+/**
+ * The status dot of a chat's sidebar row (`data-status` running / approval / unread), optionally with exact data
+ * attributes. It sits next to the row link, in the same list item, not inside the link.
+ */
+export function chatStatusDot(page: Page, chatId: string, attributes: DataAttributes = {}): Locator {
+  return page.getByTestId(testIds.sidebar)
+    .getByRole('listitem')
+    .filter({ has: byTestId(page, testIds.chatRow, { 'data-chat-id': chatId }) })
+    .locator(testIdSelector(testIds.chatStatusDot, attributes))
 }

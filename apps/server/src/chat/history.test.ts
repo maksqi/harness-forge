@@ -33,19 +33,47 @@ function codeOf(fn: () => unknown): string | undefined {
 }
 
 describe('classifyRequest', () => {
-  it('recognizes new, edit, regenerate and continuation requests', () => {
+  it('recognizes new, regenerate and continuation requests (ADR-023)', () => {
     expect(classifyRequest({ trigger: 'submit-message', message: user })).toBe('new')
-    expect(classifyRequest({ trigger: 'submit-message', message: user, messageId: user.id })).toBe('edit')
+    expect(classifyRequest({ trigger: 'submit-message', message: user, parentId: null })).toBe('new')
+    expect(classifyRequest({ trigger: 'submit-message', message: user, parentId: 'msg_a000000000000001' })).toBe('new')
     expect(classifyRequest({ trigger: 'regenerate-message', message: user })).toBe('regenerate')
     expect(classifyRequest({ trigger: 'regenerate-message', message: user, messageId: 'msg_x000000000000001' })).toBe('regenerate')
     expect(classifyRequest({ trigger: 'submit-message', message: assistant([]) })).toBe('continuation')
     expect(classifyRequest({ trigger: 'submit-message', message: assistant([]), messageId: 'msg_a000000000000001' })).toBe('continuation')
   })
 
-  it('rejects inconsistent requests with validation_error', () => {
+  it('rejects messageId on a user message: in-place edits were removed', () => {
+    expect(codeOf(() => classifyRequest({ trigger: 'submit-message', message: user, messageId: user.id }))).toBe('validation_error')
+    expect(codeOf(() => classifyRequest({ trigger: 'submit-message', message: user, messageId: 'msg_other00000000001', parentId: null }))).toBe('validation_error')
+  })
+
+  it('rejects parentId on a regenerate or an approval continuation', () => {
+    expect(codeOf(() => classifyRequest({ trigger: 'regenerate-message', message: user, parentId: null }))).toBe('validation_error')
+    expect(codeOf(() => classifyRequest({ trigger: 'regenerate-message', message: user, parentId: 'msg_u000000000000001' }))).toBe('validation_error')
+    expect(codeOf(() => classifyRequest({ trigger: 'submit-message', message: assistant([]), parentId: 'msg_u000000000000001' }))).toBe('validation_error')
+    expect(codeOf(() => classifyRequest({ trigger: 'submit-message', message: assistant([]), parentId: null }))).toBe('validation_error')
+  })
+
+  it('rejects other inconsistent requests with validation_error', () => {
     expect(codeOf(() => classifyRequest({ trigger: 'submit-message', message: { ...user, role: 'system' } }))).toBe('validation_error')
-    expect(codeOf(() => classifyRequest({ trigger: 'submit-message', message: user, messageId: 'msg_other00000000001' }))).toBe('validation_error')
     expect(codeOf(() => classifyRequest({ trigger: 'submit-message', message: assistant([]), messageId: 'msg_other00000000001' }))).toBe('validation_error')
+  })
+
+  it('names the offending field in the issue path', () => {
+    try {
+      classifyRequest({ trigger: 'regenerate-message', message: user, parentId: null })
+    }
+    catch (error) {
+      expect((error as HarnessError).toJSON().error).toMatchObject({ code: 'validation_error', details: { issues: [{ path: ['parentId'] }] } })
+    }
+    try {
+      classifyRequest({ trigger: 'submit-message', message: user, messageId: user.id })
+    }
+    catch (error) {
+      expect((error as HarnessError).toJSON().error).toMatchObject({ details: { issues: [{ path: ['messageId'] }] } })
+    }
+    expect.assertions(2)
   })
 })
 

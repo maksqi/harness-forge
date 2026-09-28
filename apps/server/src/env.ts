@@ -1,6 +1,6 @@
 // Environment variables (DECISIONS.md "Environment variables"): parsed once at boot into a frozen `Env`, after the
 // optional `<workspace root>/.env` file was loaded (`loadDotEnvFile`; variables already set win). Owned by W1.1 after
-// Phase 0 (bind safety with a stored password is enforced in `main.ts`).
+// Phase 0 (bind safety with a stored password is enforced in `main.ts`); `HF_TRUST_PROXY` by W5.7 (ADR-026).
 import type { LogLevel } from './logger.ts'
 import { Buffer } from 'node:buffer'
 import { existsSync, mkdirSync } from 'node:fs'
@@ -8,6 +8,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import process from 'node:process'
 import { z } from 'zod'
 import { findWorkspaceRoot, serverPackageRoot } from './paths.ts'
+import { parseTrustProxy } from './security/proxy-trust.ts'
 
 /** Every path inside the data directory (DECISIONS.md "Data directory", ARCHITECTURE.md 7). */
 export interface DataPaths {
@@ -57,6 +58,12 @@ export interface Env {
    * (`http/middleware/session-auth.ts`).
    */
   readonly insecure: boolean
+  /**
+   * `HF_TRUST_PROXY` (ADR-026): the trusted reverse proxies as canonical entries (`loopback`, `private`, IP addresses,
+   * CIDR ranges; `security/proxy-trust.ts`), or null when unset (the v1 behavior: `X-Forwarded-For` is never read,
+   * `X-Forwarded-Proto` is honored from any peer). Read through the helpers of `http/middleware/request-info.ts`.
+   */
+  readonly trustProxy: readonly string[] | null
   /** `HF_API_TARGET`: proxy target of `nuxt dev` (unused by the server, kept for completeness). */
   readonly apiTarget: string
   /**
@@ -113,6 +120,18 @@ const masterKeySchema = z
   }, 'Expected the base64 encoding of exactly 32 bytes.')
   .optional()
 
+/** `HF_TRUST_PROXY`: `1`, `true`, hop counts, `/0` ranges and unknown tokens are refused with the format explained. */
+const trustProxySchema = z
+  .string()
+  .transform((value, ctx) => {
+    const parsed = parseTrustProxy(value)
+    if (parsed.ok)
+      return parsed.entries
+    ctx.addIssue({ code: 'custom', message: parsed.message })
+    return z.NEVER
+  })
+  .optional()
+
 const envSchema = z.object({
   HF_PORT: portSchema,
   HF_HOST: z.string().trim().min(1).default('127.0.0.1'),
@@ -124,6 +143,7 @@ const envSchema = z.object({
   HF_PLUGIN_WATCH: flagSchema,
   HF_OFFLINE: flagSchema,
   HF_INSECURE: flagSchema,
+  HF_TRUST_PROXY: trustProxySchema,
   HF_API_TARGET: z.url({ protocol: /^https?$/ }).default('http://localhost:8787'),
   HF_WEB_DIR: z.string().trim().min(1).optional(),
   NODE_ENV: z.string().optional(),
@@ -195,6 +215,7 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     pluginWatch: values.HF_PLUGIN_WATCH,
     offline: values.HF_OFFLINE,
     insecure: values.HF_INSECURE,
+    trustProxy: values.HF_TRUST_PROXY ?? null,
     apiTarget: values.HF_API_TARGET,
     webDir: values.HF_WEB_DIR === undefined ? null : resolveDataDir(values.HF_WEB_DIR, cwd),
     dev,

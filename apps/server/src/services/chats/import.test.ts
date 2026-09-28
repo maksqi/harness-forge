@@ -1,7 +1,7 @@
 import type { HarnessUIMessage } from '@harness-forge/shared'
 import { HarnessError, MESSAGE_ID_PATTERN } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { assignMessageIds, IMPORT_DENIAL_REASON, validateImportedMessages } from './import.ts'
+import { assignMessageIds, freshMessageIds, IMPORT_DENIAL_REASON, planImportTree, validateImportedMessages } from './import.ts'
 
 const META = { modelRef: 'mock:echo', startedAt: 1 }
 
@@ -62,6 +62,13 @@ describe('validateImportedMessages', () => {
     expect(JSON.stringify(error.toJSON())).not.toContain('secret text')
   })
 
+  it('puts the issue paths under a prefix (importChat: chat.messages)', async () => {
+    const bad = { ...user('msg_aaaaaaaaaaaaaaaa', 'x'), metadata: { modelRef: 'no-colon', startedAt: 1 } } as HarnessUIMessage
+    const error = await rejection(validateImportedMessages([bad], ['chat']))
+    const { issues } = error.details as { issues: { path: unknown[] }[] }
+    expect(issues[0]!.path.slice(0, 4)).toEqual(['chat', 'messages', 0, 'metadata'])
+  })
+
   it('rejects unknown data parts and malformed parts', async () => {
     const unknownData = { id: 'msg_aaaaaaaaaaaaaaaa', role: 'assistant', parts: [{ type: 'data-custom', data: {} }] } as unknown as HarnessUIMessage
     expect((await rejection(validateImportedMessages([unknownData]))).code).toBe('validation_error')
@@ -87,5 +94,59 @@ describe('assignMessageIds', () => {
     expect(new Set(result.map(message => message.id)).size).toBe(4)
     expect(result[3]!.id).not.toBe('msg_takentakentaken1')
     expect(result.map(message => (message.parts[0] as { text: string }).text)).toEqual(['keep', 'invalid', 'repeated', 'taken'])
+  })
+})
+
+describe('planImportTree', () => {
+  function issuePath(fn: () => unknown): unknown[] | undefined {
+    try {
+      fn()
+    }
+    catch (error) {
+      expect(error).toBeInstanceOf(HarnessError)
+      expect((error as HarnessError).code).toBe('validation_error')
+      return ((error as HarnessError).details as { issues: { path: unknown[] }[] }).issues[0]?.path
+    }
+    return undefined
+  }
+
+  it('is linear without parentIds (repeated ids allowed), the last message active', () => {
+    expect(planImportTree(['a', 'b', 'a'], undefined, undefined)).toEqual({ parentIndex: [-1, 0, 1], leafIndex: 2 })
+    expect(planImportTree(['a', 'b', 'c'], undefined, 'a')).toEqual({ parentIndex: [-1, 0, 1], leafIndex: 2 })
+    expect(planImportTree([], undefined, undefined)).toEqual({ parentIndex: [], leafIndex: -1 })
+    expect(planImportTree([], [], null)).toEqual({ parentIndex: [], leafIndex: -1 })
+  })
+
+  it('turns parentIds into positions; the active leaf is the most recent leaf under activeLeafId', () => {
+    // A -> RA -> B -> RB; A2 -> RA2; RA3 (a second reply to A).
+    const ids = ['A', 'RA', 'B', 'RB', 'A2', 'RA2', 'RA3']
+    const parents = [null, 'A', 'RA', 'B', null, 'A2', 'A']
+    expect(planImportTree(ids, parents, 'RA2')).toEqual({ parentIndex: [-1, 0, 1, 2, -1, 4, 0], leafIndex: 5 })
+    expect(planImportTree(ids, parents, 'A')).toMatchObject({ leafIndex: 6 })
+    expect(planImportTree(ids, parents, 'RA')).toMatchObject({ leafIndex: 3 })
+    expect(planImportTree(ids, parents, null)).toMatchObject({ leafIndex: 6 })
+    expect(planImportTree(ids, parents, undefined)).toMatchObject({ leafIndex: 6 })
+  })
+
+  it('rejects a misaligned, forward, unknown or self parent, repeated ids and an unknown leaf, with the path', () => {
+    const ids = ['a', 'b', 'c']
+    expect(issuePath(() => planImportTree(ids, [null, 'a'], undefined))).toEqual(['parentIds'])
+    expect(issuePath(() => planImportTree(ids, [null, 'c', 'a'], undefined))).toEqual(['parentIds', 1])
+    expect(issuePath(() => planImportTree(ids, [null, 'b', 'a'], undefined))).toEqual(['parentIds', 1])
+    expect(issuePath(() => planImportTree(ids, [null, 'x', 'a'], undefined))).toEqual(['parentIds', 1])
+    expect(issuePath(() => planImportTree(['a', 'b', 'a'], [null, 'a', 'b'], undefined))).toEqual(['messages', 2, 'id'])
+    expect(issuePath(() => planImportTree(ids, [null, 'a', 'b'], 'x', ['chat']))).toEqual(['chat', 'activeLeafId'])
+    expect(issuePath(() => planImportTree(ids, [null, 'a', 'z'], undefined, ['chat']))).toEqual(['chat', 'parentIds', 2])
+  })
+})
+
+describe('freshMessageIds', () => {
+  it('gives every message a new unique id and keeps the content', () => {
+    const list = [user('msg_aaaaaaaaaaaaaaaa', 'one'), user('msg_aaaaaaaaaaaaaaaa', 'two'), user('bad', 'three')]
+    const result = freshMessageIds(list)
+    expect(result.map(message => message.id).every(id => MESSAGE_ID_PATTERN.test(id))).toBe(true)
+    expect(new Set([...result.map(message => message.id), 'msg_aaaaaaaaaaaaaaaa']).size).toBe(4)
+    expect(result.map(message => (message.parts[0] as { text: string }).text)).toEqual(['one', 'two', 'three'])
+    expect(list[0]!.id).toBe('msg_aaaaaaaaaaaaaaaa')
   })
 })

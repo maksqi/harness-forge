@@ -79,6 +79,19 @@ describe('secure headers', () => {
     expect(http.headers.get('strict-transport-security')).toBeNull()
   })
 
+  it('hSTS with HF_TRUST_PROXY: X-Forwarded-Proto counts only from a trusted proxy (ADR-026)', async () => {
+    const proxied = await createTestApp({ env: { HF_TRUST_PROXY: 'loopback' }, start: false, overrides: { secrets: createMemorySecretStore(), settings: createMemorySettingsService() } })
+    try {
+      const tls = { headers: { 'x-forwarded-proto': 'https' } }
+      expect((await proxied.request('/api/health', tls)).headers.get('strict-transport-security')).toBe('max-age=31536000')
+      expect((await proxied.request('/api/health', tls, { remoteAddress: '::1' })).headers.get('strict-transport-security')).toBe('max-age=31536000')
+      expect((await proxied.request('/api/health', tls, { remoteAddress: '203.0.113.7' })).headers.get('strict-transport-security')).toBeNull()
+    }
+    finally {
+      await proxied.close()
+    }
+  })
+
   it('keeps a CSP and Cache-Control set by the route (icons, files, SSE)', async () => {
     const response = await app.request('/api/own-headers')
     expect(response.headers.get('content-security-policy')).toBe('default-src \'none\'; style-src \'unsafe-inline\'')

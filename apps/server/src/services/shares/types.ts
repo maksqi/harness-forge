@@ -20,7 +20,8 @@ export interface ShareFile {
  * 16-character suffix of the share id + the first 22 base64url characters of
  * `HMAC-SHA256(keyring.subkey('share'), 'harness-forge/share/v1:' + shareId)`: recomputed when needed, never stored or
  * logged. The owner members run behind a session (`create` and `update` also behind fresh auth, route table flags); the
- * routes apply the rate limits of ARCHITECTURE.md 10.7 (per `clientAddress(c)`) before calling `view` / `openFile`.
+ * routes apply the rate limits of ARCHITECTURE.md 10.7 (per `clientAddress(c, deps.env)`, proxy-aware per ADR-026)
+ * before calling `view` / `openFile`.
  * Share actions emit no server event (the owner UI refetches).
  */
 export interface ShareService {

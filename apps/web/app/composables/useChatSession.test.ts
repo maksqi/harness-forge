@@ -1,4 +1,4 @@
-import type { ChatRequestBody, HarnessUIMessage } from '@harness-forge/shared'
+import type { ChatDetail, ChatRequestBody, HarnessUIMessage } from '@harness-forge/shared'
 import type { UIMessageChunk } from 'ai'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { HarnessError } from '@harness-forge/shared'
@@ -8,14 +8,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, nextTick } from 'vue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
-import { chatDetail, chatId, chatSummary } from '~/utils/testing/fixtures'
+import { chatDetail, chatId, chatSummary, messageBranch } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import {
   buildChatRequestBody,
   chatDataPartSchemas,
+  isRunActiveConflict,
   MAX_CHAT_SESSIONS,
+  mergePath,
   resetChatSessions,
+  samePathIds,
   useChatSession,
   useChatSessionRegistry,
 } from './useChatSession'
@@ -44,7 +47,9 @@ interface FakeServer {
   /** Replies to the next GET /api/chat/:id/stream (default 204). */
   resume: (writer: StreamWriter | null) => void
   /** Rejects the next POST /api/chat with an error envelope. */
-  fail: (status: number, error: { code: string, message: string, providerId?: string }) => void
+  fail: (status: number, error: { code: string, message: string, providerId?: string, details?: unknown }) => void
+  /** The next POST /api/chat never gets an answer (a network error): the server may or may not have it. */
+  disconnect: () => void
 }
 
 function streamResponse(writer: StreamWriter): Response {
@@ -87,6 +92,9 @@ function createFakeServer(): FakeServer {
       status,
       headers: { 'content-type': 'application/json' },
     })),
+    disconnect: () => replies.push(() => {
+      throw new TypeError('fetch failed')
+    }),
   }
 }
 
@@ -172,29 +180,92 @@ function newSession(n = 1) {
   return session
 }
 
+/** A stored chat with `messages` (and `branches`), loaded by a new session. */
+async function loadedSession(n: number, detail: Partial<ChatDetail>) {
+  api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(n), modelRef: MODEL, ...detail }))
+  const session = useChatSession(chatId(n))
+  await until(() => session.loaded.value, 'load')
+  return session
+}
+
+/** The bodies of the POST /api/chat requests so far. */
+function chatBodies(): ChatRequestBody[] {
+  return server.calls.filter(call => call.method === 'POST' && call.url === '/api/chat').map(call => call.body!)
+}
+
+/** Fresh copies (new objects, same ids and content), like a second answer of the server. */
+function fromServer(messages: HarnessUIMessage[]): HarnessUIMessage[] {
+  return JSON.parse(JSON.stringify(messages)) as HarnessUIMessage[]
+}
+
 describe('buildChatRequestBody', () => {
   const base = { chatId: chatId(1), modelRef: MODEL, reasoningEffort: 'auto' as const, toolMode: 'ask' as const }
   const user = userMessage('msg_user000000000001', 'hi')
   const assistant = assistantMessage(ASSISTANT_ID, 'hello')
 
-  it('sends only the last message and the composer state', () => {
+  it('sends only the last message, its parent on the shown path and the composer state', () => {
     const body = buildChatRequestBody({ ...base, messages: [assistant, user], trigger: 'submit-message', messageId: undefined })
-    expect(body).toEqual({ chatId: chatId(1), message: user, trigger: 'submit-message', modelRef: MODEL, reasoningEffort: 'auto', toolMode: 'ask' })
+    expect(body).toEqual({ chatId: chatId(1), message: user, trigger: 'submit-message', parentId: ASSISTANT_ID, modelRef: MODEL, reasoningEffort: 'auto', toolMode: 'ask' })
   })
 
-  it('keeps the message id of an edit and a regenerate', () => {
-    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: user.id }).messageId).toBe(user.id)
-    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'regenerate-message', messageId: ASSISTANT_ID }).messageId).toBe(ASSISTANT_ID)
+  it('sends a null parent for a first message', () => {
+    const body = buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: undefined })
+    expect(body.parentId).toBeNull()
+    expect(body).toHaveProperty('parentId')
   })
 
-  it('drops the id of an approval continuation (the last message is the assistant message)', () => {
+  it('never sends messageId with a user message (in-place edits were removed)', () => {
+    const body = buildChatRequestBody({ ...base, messages: [assistant, user], trigger: 'submit-message', messageId: user.id })
+    expect(body).not.toHaveProperty('messageId')
+    expect(body.parentId).toBe(ASSISTANT_ID)
+  })
+
+  it('names the target of a regenerate and no parent', () => {
+    const regenerate = buildChatRequestBody({ ...base, messages: [user], trigger: 'regenerate-message', messageId: ASSISTANT_ID })
+    expect(regenerate.messageId).toBe(ASSISTANT_ID)
+    expect(regenerate).not.toHaveProperty('parentId')
+    // Without a target the server regenerates at the active leaf.
+    const leaf = buildChatRequestBody({ ...base, messages: [user], trigger: 'regenerate-message', messageId: undefined })
+    expect(leaf).not.toHaveProperty('messageId')
+    expect(leaf).not.toHaveProperty('parentId')
+  })
+
+  it('sends neither id with an approval continuation (the last message is the assistant message)', () => {
     const body = buildChatRequestBody({ ...base, messages: [user, assistant], trigger: 'submit-message', messageId: ASSISTANT_ID })
     expect(body.message).toBe(assistant)
     expect(body).not.toHaveProperty('messageId')
+    expect(body).not.toHaveProperty('parentId')
   })
 
   it('refuses to send without a model', () => {
     expect(() => buildChatRequestBody({ ...base, modelRef: null, messages: [user], trigger: 'submit-message', messageId: undefined })).toThrow(HarnessError)
+  })
+})
+
+describe('path helpers', () => {
+  it('keeps the message objects of the shared id prefix', () => {
+    const current = [userMessage('msg_a000000000000001', 'a'), assistantMessage('msg_b000000000000001', 'b'), userMessage('msg_c000000000000001', 'c')]
+    const next = [userMessage('msg_a000000000000001', 'a'), assistantMessage('msg_b000000000000001', 'b'), userMessage('msg_d000000000000001', 'd')]
+    const merged = mergePath(current, next)
+    expect(merged.map(message => message.id)).toEqual(next.map(message => message.id))
+    expect(merged[0]).toBe(current[0])
+    expect(merged[1]).toBe(current[1])
+    expect(merged[2]).toBe(next[2])
+    expect(mergePath([], next)).not.toBe(next)
+  })
+
+  it('tells a conflict with a running reply from other conflicts', () => {
+    expect(isRunActiveConflict(new HarnessError({ code: 'conflict', message: 'x', details: { reason: 'run-active' } }))).toBe(true)
+    expect(isRunActiveConflict({ error: { code: 'conflict', message: 'x' } })).toBe(true)
+    expect(isRunActiveConflict(new HarnessError({ code: 'conflict', message: 'x', details: { reason: 'exists' } }))).toBe(false)
+    expect(isRunActiveConflict(new HarnessError({ code: 'not_found', message: 'x' }))).toBe(false)
+  })
+
+  it('compares paths by message ids', () => {
+    const path = [userMessage('msg_a000000000000001', 'a')]
+    expect(samePathIds(path, [userMessage('msg_a000000000000001', 'other text')])).toBe(true)
+    expect(samePathIds(path, [])).toBe(false)
+    expect(samePathIds(path, [userMessage('msg_b000000000000001', 'a')])).toBe(false)
   })
 })
 
@@ -209,8 +280,8 @@ describe('useChatSession: requests', () => {
     expect(server.calls).toHaveLength(1)
     const { url, method, body } = server.calls[0]!
     expect([method, url]).toEqual(['POST', '/api/chat'])
-    expect(Object.keys(body!).sort()).toEqual(['chatId', 'message', 'modelRef', 'reasoningEffort', 'toolMode', 'trigger'])
-    expect(body).toMatchObject({ chatId: chatId(1), trigger: 'submit-message', modelRef: MODEL, reasoningEffort: 'high', toolMode: 'auto' })
+    expect(Object.keys(body!).sort()).toEqual(['chatId', 'message', 'modelRef', 'parentId', 'reasoningEffort', 'toolMode', 'trigger'])
+    expect(body).toMatchObject({ chatId: chatId(1), trigger: 'submit-message', parentId: null, modelRef: MODEL, reasoningEffort: 'high', toolMode: 'auto' })
     expect(body!.message.role).toBe('user')
     expect(body!.message.id).toMatch(/^msg_[\dA-Za-z]{16}$/)
     expect(body!.message.parts).toEqual([{ type: 'text', text: 'ping' }])
@@ -239,32 +310,82 @@ describe('useChatSession: requests', () => {
     expect(server.calls).toHaveLength(0)
   })
 
-  it('edits a user message: same id, later messages dropped, files kept', async () => {
-    const session = newSession()
+  it('names the last shown message as the parent of a new message', async () => {
+    const session = await loadedSession(2, { messages: [userMessage('msg_user000000000001', 'q'), assistantMessage('msg_asst000000000001', 'a')] })
+    server.reply(textReply('next answer'))
+    await session.send({ text: 'next', files: [] })
+    expect(chatBodies()[0]).toMatchObject({ trigger: 'submit-message', parentId: 'msg_asst000000000001' })
+    expect(chatBodies()[0]).not.toHaveProperty('messageId')
+  })
+
+  it('edits a user message as a new version: a new id under the same parent, files kept', async () => {
     const file = { type: 'file' as const, mediaType: 'text/plain', filename: 'a.txt', url: '/api/files/file_a000000000000001' }
-    session.chat.messages.value = [
-      { id: 'msg_user000000000001', role: 'user', parts: [file, { type: 'text', text: 'first' }] },
-      assistantMessage('msg_old0000000000001', 'old'),
-    ]
+    const session = await loadedSession(2, {
+      messages: [
+        userMessage('msg_user000000000001', 'first'),
+        assistantMessage('msg_asst000000000001', 'first answer'),
+        { id: 'msg_user000000000002', role: 'user', parts: [file, { type: 'text', text: 'second' }] },
+        assistantMessage('msg_asst000000000002', 'old answer'),
+      ],
+    })
     server.reply(textReply('new answer'))
+    await session.edit('msg_user000000000002', 'second, edited')
+
+    const body = chatBodies()[0]!
+    expect(body).toMatchObject({ trigger: 'submit-message', parentId: 'msg_asst000000000001' })
+    expect(body).not.toHaveProperty('messageId')
+    expect(body.message.id).toMatch(/^msg_[\dA-Za-z]{16}$/)
+    expect(body.message.id).not.toBe('msg_user000000000002')
+    expect(body.message.parts).toEqual([file, { type: 'text', text: 'second, edited' }])
+    // The local path continues from the new version; the old one stays on the server.
+    expect(session.chat.messages.value.map(message => message.id))
+      .toEqual(['msg_user000000000001', 'msg_asst000000000001', body.message.id, ASSISTANT_ID])
+  })
+
+  it('edits a first message with a null parent', async () => {
+    const session = await loadedSession(2, { messages: [userMessage('msg_user000000000001', 'first'), assistantMessage('msg_asst000000000001', 'a')] })
+    server.reply(textReply('again'))
     await session.edit('msg_user000000000001', 'first, edited')
-    const body = server.calls[0]!.body!
-    expect(body).toMatchObject({ trigger: 'submit-message', messageId: 'msg_user000000000001' })
+    expect(chatBodies()[0]!.parentId).toBeNull()
+    expect(session.chat.messages.value).toHaveLength(2)
+  })
+
+  it('regenerates any finished reply: messageId names it, the local path ends at its user message', async () => {
+    const session = await loadedSession(2, {
+      messages: [
+        userMessage('msg_user000000000001', 'q1'),
+        assistantMessage('msg_asst000000000001', 'a1'),
+        userMessage('msg_user000000000002', 'q2'),
+        assistantMessage('msg_asst000000000002', 'a2'),
+      ],
+    })
+    server.reply(textReply('a1, again'))
+    await session.regenerate('msg_asst000000000001')
+    const body = chatBodies()[0]!
+    expect(body).toMatchObject({ trigger: 'regenerate-message', messageId: 'msg_asst000000000001' })
+    expect(body).not.toHaveProperty('parentId')
     expect(body.message.id).toBe('msg_user000000000001')
-    expect(body.message.parts).toEqual([file, { type: 'text', text: 'first, edited' }])
     expect(session.chat.messages.value.map(message => message.id)).toEqual(['msg_user000000000001', ASSISTANT_ID])
   })
 
-  it('regenerates the last assistant message', async () => {
+  it('regenerates the last reply at the active leaf, and answers a last user message by its id', async () => {
     const session = newSession()
     session.chat.messages.value = [userMessage('msg_user000000000001', 'q'), assistantMessage('msg_old0000000000001', 'a')]
     server.reply(textReply('again'))
-    await session.regenerate('msg_old0000000000001')
-    expect(server.calls[0]!.body).toMatchObject({ trigger: 'regenerate-message', messageId: 'msg_old0000000000001' })
-    expect(server.calls[0]!.body!.message.id).toBe('msg_user000000000001')
-  })
+    await session.regenerate()
+    expect(chatBodies()[0]).toMatchObject({ trigger: 'regenerate-message' })
+    expect(chatBodies()[0]).not.toHaveProperty('messageId')
 
-  it('retries a request that failed before streaming by sending the user message again', async () => {
+    // A stored user message without a reply (e.g. its regenerate was refused) is answered by name.
+    session.chat.messages.value = [userMessage('msg_user000000000001', 'q')]
+    server.reply(textReply('an answer'))
+    await session.regenerate()
+    expect(chatBodies()[1]).toMatchObject({ trigger: 'regenerate-message', messageId: 'msg_user000000000001' })
+  })
+})
+
+describe('useChatSession: failed unstored messages', () => {
+  it('retries a request that failed with an HTTP error by sending the message again (new id, same parent)', async () => {
     const session = newSession()
     server.fail(400, { code: 'provider_not_configured', message: 'No key.', providerId: 'anthropic' })
     await session.send({ text: 'hello', files: [] })
@@ -274,11 +395,205 @@ describe('useChatSession: requests', () => {
 
     server.reply(textReply('hi'))
     await session.regenerate()
-    const body = server.calls[1]!.body!
+    const body = chatBodies()[1]!
     expect(body.trigger).toBe('submit-message')
+    expect(body.parentId).toBeNull()
     expect(body.message.parts).toEqual([{ type: 'text', text: 'hello' }])
     expect(body.message.id).not.toBe(failedId)
     expect(session.chat.messages.value.map(message => message.role)).toEqual(['user', 'assistant'])
+  })
+
+  it('drops it before the next send, so it is never named as a parent', async () => {
+    const session = await loadedSession(2, { messages: [userMessage('msg_user000000000001', 'q'), assistantMessage('msg_asst000000000001', 'a')] })
+    server.fail(409, { code: 'conflict', message: 'A run is active.', details: { reason: 'run-active', chatId: chatId(2) } })
+    await session.send({ text: 'refused', files: [] })
+    const refusedId = chatBodies()[0]!.message.id
+    expect(session.chat.messages.value.at(-1)!.id).toBe(refusedId)
+
+    server.reply(textReply('ok'))
+    await session.send({ text: 'accepted', files: [] })
+    expect(chatBodies()[1]!.parentId).toBe('msg_asst000000000001')
+    expect(session.chat.messages.value.map(message => message.id)).not.toContain(refusedId)
+    expect(session.chat.messages.value).toHaveLength(4)
+  })
+
+  it('hands it back once (takeBackUnstored), e.g. for the composer', async () => {
+    const session = newSession()
+    server.fail(409, { code: 'conflict', message: 'A run is active.' })
+    await session.send({ text: 'take me back', files: [] })
+    const taken = session.takeBackUnstored()
+    expect(taken?.parts).toEqual([{ type: 'text', text: 'take me back' }])
+    expect(session.chat.messages.value).toEqual([])
+    expect(session.takeBackUnstored()).toBeNull()
+  })
+
+  it('keeps a stored user message whose regenerate failed, and a message whose request never got an answer', async () => {
+    const session = await loadedSession(2, { messages: [userMessage('msg_user000000000001', 'q'), assistantMessage('msg_asst000000000001', 'a')] })
+    server.fail(400, { code: 'provider_not_configured', message: 'No key.', providerId: 'anthropic' })
+    await session.regenerate('msg_asst000000000001')
+    expect(session.chat.messages.value.map(message => message.id)).toEqual(['msg_user000000000001'])
+    expect(session.takeBackUnstored()).toBeNull()
+
+    // A network error: the server may have stored it, so it stays the parent of the next message.
+    server.disconnect()
+    await session.send({ text: 'lost?', files: [] })
+    const lostId = chatBodies()[1]!.message.id
+    server.reply(textReply('ok'))
+    await session.send({ text: 'next', files: [] })
+    expect(chatBodies()[2]!.parentId).toBe(lostId)
+  })
+
+  it('keeps a message the server reports as already stored (409 exists)', async () => {
+    const session = newSession()
+    server.fail(409, { code: 'conflict', message: 'The message already exists.', details: { reason: 'exists' } })
+    await session.send({ text: 'stored already', files: [] })
+    const storedId = chatBodies()[0]!.message.id
+    expect(session.takeBackUnstored()).toBeNull()
+    server.reply(textReply('ok'))
+    await session.send({ text: 'next', files: [] })
+    expect(chatBodies()[1]!.parentId).toBe(storedId)
+  })
+
+  it('reloads a stale path after a 404 and clears the error', async () => {
+    const shown = [userMessage('msg_user000000000001', 'q'), assistantMessage('msg_asst000000000001', 'a')]
+    const session = await loadedSession(2, { messages: shown })
+    // Another tab showed another version meanwhile; this one names a parent the server does not know.
+    const latest = [...fromServer(shown), userMessage('msg_user000000000009', 'elsewhere'), assistantMessage('msg_asst000000000009', 'b')]
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(2), messages: latest }))
+    server.fail(404, { code: 'not_found', message: 'Message not found.' })
+    await session.send({ text: 'hi', files: [] })
+    await until(() => session.chat.messages.value.length === 4, 'reload')
+    expect(session.chat.messages.value.map(message => message.id)).toEqual(latest.map(message => message.id))
+    expect(session.chat.status.value).toBe('ready')
+    expect(session.chat.error.value).toBeUndefined()
+  })
+})
+
+describe('useChatSession: versions', () => {
+  const U1 = 'msg_user000000000001'
+  const A1 = 'msg_asst000000000001'
+  const U2 = 'msg_user000000000002'
+  const A2 = 'msg_asst000000000002'
+  const U2B = 'msg_user00000000002b'
+  const A2B = 'msg_asst00000000002b'
+
+  function versionOne(): HarnessUIMessage[] {
+    return [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2, 'q2'), assistantMessage(A2, 'a2')]
+  }
+
+  function versionTwo(): HarnessUIMessage[] {
+    return [userMessage(U1, 'q1'), assistantMessage(A1, 'a1'), userMessage(U2B, 'q2, edited'), assistantMessage(A2B, 'a2b')]
+  }
+
+  it('shows the versions of the loaded path', async () => {
+    const session = await loadedSession(3, { messages: versionOne(), branches: { [U2]: messageBranch([U2, U2B], 0) } })
+    expect(session.branches.value).toEqual({ [U2]: { siblings: [U2, U2B], index: 0 } })
+    expect(session.summary.value).not.toHaveProperty('branches')
+  })
+
+  it('switches to another version: the returned path, the shared prefix objects kept, new versions', async () => {
+    const session = await loadedSession(3, { messages: versionOne(), branches: { [U2]: messageBranch([U2, U2B], 0) } })
+    const before = session.chat.messages.value
+    let answer!: (detail: ChatDetail) => void
+    api.chats.switchBranch.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = resolve
+    }))
+    const switching = session.switchBranch(U2B)
+    expect(session.switching.value).toBe(true)
+    expect(api.chats.switchBranch).toHaveBeenCalledWith({ params: { id: chatId(3) }, body: { messageId: U2B } })
+    answer(chatDetail({ id: chatId(3), messages: fromServer(versionTwo()), branches: { [U2B]: messageBranch([U2, U2B], 1) } }))
+    await switching
+
+    const after = session.chat.messages.value
+    expect(after.map(message => message.id)).toEqual([U1, A1, U2B, A2B])
+    expect(after[0]).toBe(before[0])
+    expect(after[1]).toBe(before[1])
+    expect(session.branches.value).toEqual({ [U2B]: { siblings: [U2, U2B], index: 1 } })
+    expect(session.switching.value).toBe(false)
+  })
+
+  it('does not switch while a request is in flight', async () => {
+    const session = await loadedSession(3, { messages: versionOne(), branches: { [U2]: messageBranch([U2, U2B], 0) } })
+    const gate = deferred()
+    server.reply(textReply('busy', ASSISTANT_ID, gate.promise))
+    const sending = session.send({ text: 'q3', files: [] })
+    await until(() => session.chat.status.value === 'streaming', 'streaming')
+    await session.switchBranch(U2B)
+    expect(api.chats.switchBranch).not.toHaveBeenCalled()
+    expect(session.switching.value).toBe(false)
+    gate.resolve()
+    await sending
+  })
+
+  it('a send waits for the switch in flight and continues the path it shows', async () => {
+    const session = await loadedSession(3, { messages: versionOne(), branches: { [U2]: messageBranch([U2, U2B], 0) } })
+    let answer!: (detail: ChatDetail) => void
+    api.chats.switchBranch.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = resolve
+    }))
+    const switching = session.switchBranch(U2B)
+    server.reply(textReply('on version two'))
+    const sending = session.send({ text: 'q3', files: [] })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(chatBodies()).toHaveLength(0)
+    answer(chatDetail({ id: chatId(3), messages: fromServer(versionTwo()), branches: {} }))
+    await switching
+    await sending
+    expect(chatBodies()[0]!.parentId).toBe(A2B)
+  })
+
+  it('a switch refused because a run holds the chat (409) shows the run\'s path and follows it', async () => {
+    const session = await loadedSession(3, { messages: versionOne(), branches: { [U2]: messageBranch([U2, U2B], 0) } })
+    api.chats.switchBranch.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'A run is active.', details: { reason: 'run-active', chatId: chatId(3) } }))
+    // The run answers version two, started in another tab.
+    const running = versionTwo().slice(0, 3)
+    api.chats.get
+      .mockResolvedValueOnce(chatDetail({ id: chatId(3), running: true, messages: running, branches: { [U2B]: messageBranch([U2, U2B], 1) } }))
+      .mockResolvedValueOnce(chatDetail({ id: chatId(3), messages: versionTwo(), branches: { [U2B]: messageBranch([U2, U2B], 1) } }))
+    server.resume(textReply('a2b', A2B))
+
+    await expect(session.switchBranch(U2B)).rejects.toMatchObject({ code: 'conflict' })
+    expect(session.switching.value).toBe(false)
+    await until(() => server.calls.some(call => call.url === `/api/chat/${chatId(3)}/stream`), 'resume')
+    await until(() => session.chat.status.value === 'ready' && api.chats.get.mock.calls.length === 3, 'reload after the replay')
+    expect(session.chat.messages.value.map(message => message.id)).toEqual([U1, A1, U2B, A2B])
+  })
+
+  it('a switch to a message the server does not know (404) reloads the chat', async () => {
+    const session = await loadedSession(3, { messages: versionOne() })
+    api.chats.switchBranch.mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: 'Message not found.' }))
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(3), messages: versionTwo() }))
+    await expect(session.switchBranch('msg_gone000000000001')).rejects.toMatchObject({ code: 'not_found' })
+    await until(() => session.chat.messages.value.at(-1)?.id === A2B, 'reload')
+  })
+
+  it('refreshes the versions once its own edit finished: same path, message objects kept', async () => {
+    const session = await loadedSession(3, { messages: versionOne().slice(0, 2) })
+    server.reply(textReply('a1, second version', 'msg_asst00000000001b'))
+    await session.edit(U1, 'q1, edited')
+    const edited = chatBodies()[0]!.message.id
+    const before = session.chat.messages.value
+
+    api.chats.get.mockResolvedValueOnce(chatDetail({
+      id: chatId(3),
+      messages: fromServer(before),
+      branches: { [edited]: messageBranch([U1, edited], 1) },
+    }))
+    dispatchServerEvent({ type: 'run.finished', data: { chatId: chatId(3), messageId: 'msg_asst00000000001b', outcome: 'completed', awaitingApproval: false }, at: 1 })
+    await until(() => session.branches.value[edited] !== undefined, 'versions')
+    expect(session.branches.value[edited]).toEqual({ siblings: [U1, edited], index: 1 })
+    expect(session.chat.messages.value).toBe(before)
+  })
+
+  it('refreshBranches applies another path whole, keeping the shared prefix', async () => {
+    const session = await loadedSession(3, { messages: versionOne() })
+    const before = session.chat.messages.value
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(3), messages: fromServer(versionTwo()), branches: { [U2B]: messageBranch([U2, U2B], 1) } }))
+    await session.refreshBranches()
+    const after = session.chat.messages.value
+    expect(after.map(message => message.id)).toEqual([U1, A1, U2B, A2B])
+    expect(after[1]).toBe(before[1])
+    expect(session.branches.value[U2B]).toEqual({ siblings: [U2, U2B], index: 1 })
   })
 })
 

@@ -47,6 +47,13 @@ async function detailOf(chatId: string): Promise<ChatDetail> {
   return chatDetailSchema.parse(await response.json())
 }
 
+/** `POST /api/chats/:id/branch`: shows the most recent leaf under `messageId`. */
+async function switchTo(chatId: string, messageId: string): Promise<ChatDetail> {
+  const response = await t.request(`/api/chats/${chatId}/branch`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ messageId }) })
+  expect(response.status).toBe(200)
+  return chatDetailSchema.parse(await response.json())
+}
+
 async function errorOf(response: Response): Promise<HarnessErrorInit> {
   return harnessErrorEnvelopeSchema.parse(await response.json()).error
 }
@@ -305,6 +312,13 @@ describe('pOST /api/chat: errors before the stream', () => {
     const again = await postChat(t, { ...body, message: { ...body.message } })
     expect(again.status).toBe(409)
     expect(await errorOf(again)).toMatchObject({ code: 'conflict', details: { reason: 'exists' } })
+    // An id of another chat fails the history commit the same way, before anything streams.
+    const other = newChatId()
+    const stolen = await postChat(t, { ...chatBody(other, 'twice'), message: { ...body.message } })
+    expect(stolen.status).toBe(409)
+    expect(await errorOf(stolen)).toMatchObject({ code: 'conflict', details: { reason: 'exists' } })
+    expect((await detailOf(other)).messages).toEqual([])
+    expect(runnerOf(t).hasRun(other)).toBe(false)
     await runnerOf(t).idle()
   })
 })
@@ -387,33 +401,58 @@ describe('pOST /api/chat: stop, disconnect and resume', () => {
   })
 })
 
-describe('pOST /api/chat: history operations', () => {
-  it('edit replaces the user message and drops later messages', async () => {
+describe('pOST /api/chat: the message tree (ADR-023)', () => {
+  it('an edit adds a sibling version; switching back restores the later messages', async () => {
     const chatId = newChatId()
     const first = chatBody(chatId, 'first question')
     await readSse(await postChat(t, first))
     await readSse(await postChat(t, chatBody(chatId, 'second question')))
-    expect((await detailOf(chatId)).messages).toHaveLength(4)
-    const edited = { ...first.message, parts: [{ type: 'text' as const, text: 'first question edited' }] }
-    const response = await postChat(t, { ...first, message: edited, messageId: first.message.id })
-    expect(streamedText((await readSse(response)).chunks)).toBe('first question edited')
-    const messages = (await detailOf(chatId)).messages
-    expect(messages.map(message => message.role)).toEqual(['user', 'assistant'])
-    expect(messages[0]?.id).toBe(first.message.id)
-    expect(messageText(messages[0])).toBe('first question edited')
+    const before = await detailOf(chatId)
+    expect(before.messages).toHaveLength(4)
+    expect(before.branches).toEqual({})
+
+    // An edit of the first question: a new user message (new id) whose parent is the edited message's parent.
+    const edit = chatBody(chatId, 'first question edited', { parentId: null })
+    expect(streamedText((await readSse(await postChat(t, edit))).chunks)).toBe('first question edited')
+    const edited = await detailOf(chatId)
+    expect(edited.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+    expect(edited.messages[0]?.id).toBe(edit.message.id)
+    expect(edited.branches).toEqual({ [edit.message.id]: { siblings: [first.message.id, edit.message.id], index: 1 } })
+
+    // The old version and everything after it are still there.
+    const back = await switchTo(chatId, first.message.id)
+    expect(back.messages.map(message => message.id)).toEqual(before.messages.map(message => message.id))
+    expect(back.branches).toEqual({ [first.message.id]: { siblings: [first.message.id, edit.message.id], index: 0 } })
+
+    // Without parentId a new message continues the active leaf (the version shown).
+    await readSse(await postChat(t, chatBody(chatId, 'third question')))
+    const continued = await detailOf(chatId)
+    expect(continued.messages.map(message => messageText(message))).toEqual([
+      'first question',
+      'first question',
+      'second question',
+      'second question',
+      'third question',
+      'third question',
+    ])
     await runnerOf(t).idle()
   })
 
-  it('edit of an unknown message is 404; messageId must equal message.id', async () => {
+  it('an edit in the middle keeps the earlier messages and versions the edited one', async () => {
     const chatId = newChatId()
-    const body = chatBody(chatId, 'x')
-    const unknown = await postChat(t, { ...body, messageId: body.message.id })
-    expect(unknown.status).toBe(404)
-    const mismatch = await postChat(t, { ...body, messageId: 'msg_0000000000000000' })
-    expect(mismatch.status).toBe(400)
+    await readSse(await postChat(t, chatBody(chatId, 'one')))
+    const second = chatBody(chatId, 'two')
+    await readSse(await postChat(t, second))
+    const firstReply = (await detailOf(chatId)).messages[1]!
+    const edit = chatBody(chatId, 'two, edited', { parentId: firstReply.id })
+    await readSse(await postChat(t, edit))
+    const detail = await detailOf(chatId)
+    expect(detail.messages.map(message => messageText(message))).toEqual(['one', 'one', 'two, edited', 'two, edited'])
+    expect(detail.branches).toEqual({ [edit.message.id]: { siblings: [second.message.id, edit.message.id], index: 1 } })
+    await runnerOf(t).idle()
   })
 
-  it('regenerate drops the assistant message and every later message', async () => {
+  it('regenerate in the middle of a transcript adds a sibling reply; nothing is deleted', async () => {
     const chatId = newChatId()
     const first = chatBody(chatId, 'alpha')
     await readSse(await postChat(t, first))
@@ -423,19 +462,184 @@ describe('pOST /api/chat: history operations', () => {
     const response = await postChat(t, { ...first, trigger: 'regenerate-message', messageId: firstReply.id })
     const { chunks } = await readSse(response)
     expect(streamedText(chunks)).toBe('alpha')
-    const after = (await detailOf(chatId)).messages
-    expect(after.map(message => message.role)).toEqual(['user', 'assistant'])
-    expect(after[0]?.id).toBe(first.message.id)
-    expect(after[1]?.id).not.toBe(firstReply.id)
+    const after = await detailOf(chatId)
+    expect(after.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+    expect(after.messages[0]?.id).toBe(first.message.id)
+    const newReply = after.messages[1]!
+    expect(newReply.id).not.toBe(firstReply.id)
+    expect(chunks[0]).toMatchObject({ type: 'start', messageId: newReply.id })
+    expect(after.branches).toEqual({ [newReply.id]: { siblings: [firstReply.id, newReply.id], index: 1 } })
+    expect((await switchTo(chatId, firstReply.id)).messages.map(message => message.id)).toEqual(before.messages.map(message => message.id))
 
-    // Without messageId: the last assistant message.
-    const last = after[1]!
+    // Without messageId: the active leaf (the last reply of the version shown).
     await readSse(await postChat(t, { ...first, trigger: 'regenerate-message' }))
-    const again = (await detailOf(chatId)).messages
-    expect(again).toHaveLength(2)
-    expect(again[1]?.id).not.toBe(last.id)
+    const again = await detailOf(chatId)
+    expect(again.messages.map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+    expect(again.branches[again.messages[3]!.id]?.siblings).toEqual([before.messages[3]!.id, again.messages[3]!.id])
     const unknown = await postChat(t, { ...first, trigger: 'regenerate-message', messageId: 'msg_0000000000000000' })
     expect(unknown.status).toBe(404)
+    await runnerOf(t).idle()
+  })
+
+  it('regenerate on a user message answers that message', async () => {
+    const chatId = newChatId()
+    const first = chatBody(chatId, 'alpha')
+    await readSse(await postChat(t, first))
+    const second = chatBody(chatId, 'beta')
+    await readSse(await postChat(t, second))
+    const before = await detailOf(chatId)
+    const { chunks } = await readSse(await postChat(t, { ...second, trigger: 'regenerate-message', messageId: second.message.id }))
+    expect(streamedText(chunks)).toBe('beta')
+    const after = await detailOf(chatId)
+    expect(after.messages.slice(0, 3).map(message => message.id)).toEqual(before.messages.slice(0, 3).map(message => message.id))
+    expect(after.branches).toEqual({ [after.messages[3]!.id]: { siblings: [before.messages[3]!.id, after.messages[3]!.id], index: 1 } })
+    // The first question answered again: a sibling of the first reply.
+    await readSse(await postChat(t, { ...first, trigger: 'regenerate-message', messageId: first.message.id }))
+    const firstAgain = await detailOf(chatId)
+    expect(firstAgain.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+    expect(firstAgain.branches[firstAgain.messages[1]!.id]?.siblings).toHaveLength(2)
+    await runnerOf(t).idle()
+  })
+
+  it('rejects messageId on a user message and parentId on a regenerate or a continuation (400)', async () => {
+    const chatId = newChatId()
+    const body = chatBody(chatId, 'x')
+    await readSse(await postChat(t, body))
+    const cases: unknown[] = [
+      chatBody(chatId, 'edited in place', { messageId: body.message.id }),
+      chatBody(chatId, 'edited in place', { messageId: body.message.id, parentId: null }),
+      { ...body, trigger: 'regenerate-message', parentId: null },
+      { ...body, trigger: 'regenerate-message', parentId: body.message.id },
+      { ...chatBody(chatId, ''), message: (await detailOf(chatId)).messages[1], parentId: body.message.id },
+    ]
+    for (const request of cases) {
+      const response = await postChat(t, request)
+      expect(response.status, JSON.stringify(request)).toBe(400)
+      expect((await errorOf(response)).code).toBe('validation_error')
+    }
+    expect((await detailOf(chatId)).messages).toHaveLength(2)
+    await runnerOf(t).idle()
+  })
+
+  it('answers 404 for an unknown parent or one of another chat, 400 for a regenerate without a user message', async () => {
+    const other = newChatId()
+    const foreign = chatBody(other, 'elsewhere')
+    await readSse(await postChat(t, foreign))
+    const chatId = newChatId()
+    const unknown = await postChat(t, chatBody(chatId, 'x', { parentId: 'msg_0000000000000000' }))
+    expect(unknown.status).toBe(404)
+    expect((await errorOf(unknown)).code).toBe('not_found')
+    expect((await postChat(t, chatBody(chatId, 'x', { parentId: foreign.message.id }))).status).toBe(404)
+    const empty = await postChat(t, { ...chatBody(chatId, 'x'), trigger: 'regenerate-message' })
+    expect(empty.status).toBe(400)
+    expect(await errorOf(empty)).toMatchObject({ code: 'validation_error', details: { issues: [{ path: ['messageId'] }] } })
+    expect((await detailOf(chatId)).messages).toEqual([])
+    expect(events.some(event => event.type === 'run.started' && event.data.chatId === chatId)).toBe(false)
+    await runnerOf(t).idle()
+  })
+
+  it('gET during a regenerate run ends at the answered user message; resume replays the reply exactly once', async () => {
+    const chatId = newChatId()
+    const text = words(10)
+    const first = chatBody(chatId, text)
+    await readSse(await postChat(t, first))
+    const oldReply = (await detailOf(chatId)).messages[1]!
+    const response = await postChat(t, { ...first, trigger: 'regenerate-message', messageId: oldReply.id })
+    const partial = await readUntil(response, chunks => chunks.filter(chunk => chunk.type === 'text-delta').length >= 2)
+    expect(partial.done).toBe(false)
+
+    const during = await detailOf(chatId)
+    expect(during.running).toBe(true)
+    expect(during.messages.map(message => message.id)).toEqual([first.message.id])
+    expect(during.branches).toEqual({})
+
+    const replay = await readSse(await t.request(`/api/chat/${chatId}/stream`))
+    expect(replay.done).toBe(true)
+    const starts = replay.chunks.filter(chunk => chunk.type === 'start')
+    expect(starts).toHaveLength(1)
+    const newId = starts[0]?.type === 'start' ? starts[0].messageId : undefined
+    expect(newId).not.toBe(oldReply.id)
+    expect(streamedText(replay.chunks)).toBe(text)
+
+    const after = await detailOf(chatId)
+    expect(after.messages.map(message => message.id)).toEqual([first.message.id, newId])
+    expect(messageText(after.messages[1])).toBe(text)
+    expect(after.branches).toEqual({ [newId!]: { siblings: [oldReply.id, newId], index: 1 } })
+    await runnerOf(t).idle()
+  })
+
+  it('an approval pending on another version is re-armed by a switch and its continuation completes', async () => {
+    const chatId = newChatId()
+    const ask = chatBody(chatId, 'echo me', { modelRef: 'mock:tool-approval' })
+    await readSse(await postChat(t, ask))
+    const pending = await detailOf(chatId)
+    expect(pending.pendingApproval).toBe(true)
+    const assistant = pending.messages[1]!
+
+    // An edit of the question: the approval of the other version is not superseded.
+    const edit = chatBody(chatId, 'never mind', { parentId: null })
+    const edited = await readSse(await postChat(t, edit))
+    expect(edited.chunks.some(chunk => chunk.type === 'data-notice' && (chunk.data as { code?: string }).code === 'approvals-superseded')).toBe(false)
+    expect((await detailOf(chatId)).pendingApproval).toBe(false)
+    const continuation = { ...chatBody(chatId, '', { modelRef: 'mock:tool-approval' }), message: answered(assistant, true) }
+    // Not the active leaf: 404.
+    expect((await postChat(t, continuation)).status).toBe(404)
+
+    const back = await switchTo(chatId, ask.message.id)
+    expect(back.pendingApproval).toBe(true)
+    expect(toolPart(back.messages[1])).toMatchObject({ state: 'approval-requested' })
+    const finished = waitRunFinished(chatId)
+    const response = await postChat(t, continuation)
+    expect(response.status).toBe(200)
+    expect(streamedText((await readSse(response)).chunks)).toBe('Tool result: {"echoed":"echo me"}')
+    expect((await finished).data).toMatchObject({ outcome: 'completed', awaitingApproval: false, messageId: assistant.id })
+    const done = await detailOf(chatId)
+    expect(done.pendingApproval).toBe(false)
+    expect(done.messages.map(message => message.id)).toEqual([ask.message.id, assistant.id])
+    expect(toolPart(done.messages[1])).toMatchObject({ state: 'output-available', approval: { approved: true } })
+    expect(done.branches).toEqual({ [ask.message.id]: { siblings: [ask.message.id, edit.message.id], index: 0 } })
+    await runnerOf(t).idle()
+  })
+
+  it('the persisted reply never overwrites an active leaf moved during the run', async () => {
+    const chatId = newChatId()
+    const first = chatBody(chatId, 'first')
+    await readSse(await postChat(t, first))
+    const text = words(12)
+    const second = chatBody(chatId, text)
+    const response = await postChat(t, second)
+    await readUntil(response, chunks => chunks.some(chunk => chunk.type === 'text-delta'))
+    // Only the pipeline and a switch move the leaf, and a switch is refused during a run: this simulates a lost race.
+    const firstReply = (await t.deps.chats.listMessages(chatId))[1]!
+    expect(await t.deps.chats.setActiveLeaf(chatId, firstReply.id)).toBe(true)
+    const finished = waitRunFinished(chatId)
+    await readSse(await t.request(`/api/chat/${chatId}/stream`))
+    expect((await finished).data).toMatchObject({ outcome: 'completed', awaitingApproval: false })
+    const detail = await detailOf(chatId)
+    expect(detail.messages.map(message => message.id)).toEqual([first.message.id, firstReply.id])
+    // The reply is stored under its user message, as a version that is not shown.
+    const all = await t.deps.chats.listMessages(chatId)
+    expect(all.map(message => messageText(message))).toEqual(['first', 'first', text, text])
+    expect((await switchTo(chatId, second.message.id)).messages.map(message => messageText(message))).toEqual(['first', 'first', text, text])
+    await runnerOf(t).idle()
+  })
+
+  it('a new message supersedes only the approvals on its own path', async () => {
+    const chatId = newChatId()
+    const ask = chatBody(chatId, 'first tool', { modelRef: 'mock:tool-approval' })
+    await readSse(await postChat(t, ask))
+    const firstPending = (await detailOf(chatId)).messages[1]!
+    // A second version of the question that also waits for an approval.
+    await readSse(await postChat(t, chatBody(chatId, 'second tool', { modelRef: 'mock:tool-approval', parentId: null })))
+    const secondPending = (await detailOf(chatId)).messages[1]!
+    // A follow-up on the second version supersedes its approval only.
+    const { chunks } = await readSse(await postChat(t, chatBody(chatId, 'moving on', { parentId: secondPending.id })))
+    expect(chunks.find(chunk => chunk.type === 'data-notice')).toMatchObject({ data: { code: 'approvals-superseded' } })
+    expect(toolPart((await detailOf(chatId)).messages[1])).toMatchObject({ state: 'output-denied', approval: { reason: SUPERSEDED_REASON } })
+    const first = await switchTo(chatId, ask.message.id)
+    expect(first.pendingApproval).toBe(true)
+    expect(toolPart(first.messages[1])).toMatchObject({ state: 'approval-requested' })
+    expect(first.messages[1]?.id).toBe(firstPending.id)
     await runnerOf(t).idle()
   })
 })
@@ -967,6 +1171,9 @@ describe('a provider that ignores the abort signal', () => {
       expect(await stop.json()).toEqual({ stopped: true })
       expect((await finished).data).toMatchObject({ outcome: 'aborted', awaitingApproval: false })
       expect(app.deps.runs.isActive(chatId)).toBe(false)
+      // Nothing was stored for the run: the active path ends at its user message.
+      const stopped = chatDetailSchema.parse(await (await app.request(`/api/chats/${chatId}`)).json())
+      expect(stopped.messages.map(message => messageText(message))).toEqual(['hang'])
       void response.body?.cancel()
       const again = await postChat(app, chatBody(chatId, 'again'))
       expect(again.status).toBe(200)

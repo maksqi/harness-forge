@@ -2,8 +2,10 @@
 // `auth.status`, `auth.login` and `auth.logout` are public; `auth.setPassword` is fresh (enforced by the middleware).
 //
 // - `GET /auth/status`: the `AuthStatus` of the request (`c.var.auth`, set by the session middleware).
-// - `POST /auth/login`: rate limited (5 failures / 15 min per address, 50 globally); sets `hf_session` with
+// - `POST /auth/login`: rate limited (5 failures / 15 min per client address, 50 globally); sets `hf_session` with
 //   `authAt = now`, which also opens the 10-minute fresh-auth window. Without a password: `enabled: false`, no cookie.
+//   The client address is the TCP peer, or the `X-Forwarded-For` client when the peer is a proxy trusted by
+//   `HF_TRUST_PROXY` (ADR-026, `clientAddress`); failures log both the resolved `address` and the TCP `peer`.
 // - `POST /auth/logout`: clears the cookie (sessions are stateless; changing the password ends all of them).
 // - `PUT /auth/password`: set, change or remove the stored password (current password required when one is set);
 //   every other session ends and the caller gets a new cookie.
@@ -15,7 +17,7 @@ import { apiRoutes, HarnessError, loginBodySchema, passwordUpdateSchema } from '
 import { Hono } from 'hono'
 import { isLoopbackHost } from '../../env.ts'
 import { createLoginRateLimiter } from '../middleware/login-rate-limit.ts'
-import { clientAddress } from '../middleware/request-info.ts'
+import { clientAddress, peerAddress } from '../middleware/request-info.ts'
 import { AUTH_DISABLED, clearSessionCookie, setSessionCookie } from '../middleware/session-auth.ts'
 import { FRESH_AUTH_WINDOW_MS } from '../types.ts'
 import { validate } from '../validate.ts'
@@ -34,29 +36,33 @@ export function createAuthRoutes(deps: AppDeps): Hono<AppEnv> {
   const limiter = createLoginRateLimiter()
   const app = new Hono<AppEnv>()
 
-  /** Checks a password under the rate limit; resets the caller's address on success. */
+  /**
+   * Checks a password under the rate limit, keyed by the client address (behind a trusted proxy: the forwarded
+   * client); resets that address on success.
+   */
   async function checkPassword(c: AppContext, password: string): Promise<boolean> {
-    const address = clientAddress(c)
+    const address = clientAddress(c, deps.env)
+    const peer = peerAddress(c)
     let attempt: LoginAttempt
     try {
       attempt = limiter.attempt(address)
     }
     catch (error) {
-      c.get('logger').warn('login rate limit reached', { address })
+      c.get('logger').warn('login rate limit reached', { address, peer })
       throw error
     }
     const valid = await deps.passwords.check(password)
     if (valid)
       attempt.succeeded()
     else
-      c.get('logger').warn('password check failed', { address })
+      c.get('logger').warn('password check failed', { address, peer })
     return valid
   }
 
   /** Starts a session whose password login happened now (fresh for `FRESH_AUTH_WINDOW_MS`). */
   async function startSession(c: AppContext, source: NonNullable<AuthStatus['source']>): Promise<AuthStatus> {
     const now = Date.now()
-    setSessionCookie(c, await deps.sessions.issue({ authAt: now, now }))
+    setSessionCookie(c, await deps.sessions.issue({ authAt: now, now }), deps.env)
     return { enabled: true, authenticated: true, source, freshUntil: now + FRESH_AUTH_WINDOW_MS }
   }
 
@@ -73,7 +79,7 @@ export function createAuthRoutes(deps: AppDeps): Hono<AppEnv> {
   })
 
   app.post(apiRoutes['auth.logout'].path, (c) => {
-    clearSessionCookie(c)
+    clearSessionCookie(c, deps.env)
     return c.body(null, 204)
   })
 
@@ -104,7 +110,7 @@ export function createAuthRoutes(deps: AppDeps): Hono<AppEnv> {
     await deps.passwords.set(newPassword)
     c.get('logger').info(newPassword === null ? 'password removed' : 'password changed')
     if (newPassword === null) {
-      clearSessionCookie(c)
+      clearSessionCookie(c, deps.env)
       return c.json(DISABLED_STATUS)
     }
     return c.json(await startSession(c, 'settings'))

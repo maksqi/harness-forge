@@ -4,11 +4,15 @@
 // plugin still redirects on any 401 `unauthorized`. A server that refuses the app outright (`403 forbidden`, e.g. a
 // password-less server reached through a non-local host name) gets the full-page error with the server's message
 // instead of an app whose every request fails.
+// The public share page (`/share/<token>`, ADR-025) is exempt: it returns before the status is loaded, so a visitor is
+// never sent to /login, and the event stream and the settings (which wait for a loaded status) never start.
 import { abortNavigation, defineNuxtRouteMiddleware, navigateTo } from '#imports'
 import { useAuthStore } from '~/stores/auth'
-import { accessBlockedMessage, authRedirectFor } from '~/utils/redirect'
+import { accessBlockedMessage, authRedirectFor, isSharePath } from '~/utils/redirect'
 
 export default defineNuxtRouteMiddleware(async (to) => {
+  if (isSharePath(to.path))
+    return
   const auth = useAuthStore()
   if (!auth.loaded) {
     try {

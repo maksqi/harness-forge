@@ -1,7 +1,8 @@
-// Chat CRUD routes (API.md 5.9). Owner: W1.5 (W1.5-T4). Keep the export name `createChatsRoutes`. Thin: validate with
-// the shared schemas, call `deps.chats`, map to the response. `DELETE /chats/:id` stops an active run first
-// (`deps.runs.stop`, which waits until the partial message is persisted). `POST /chats/:id/branch` (ADR-023) is a
-// Phase 5 stub (501) until W5.1.
+// Chat CRUD routes (API.md 5.9). Owner: W1.5 (W1.5-T4); `POST /chats/:id/branch` by W5.1 (ADR-023). Keep the export name
+// `createChatsRoutes`. Thin: validate with the shared schemas, call `deps.chats`, map to the response.
+// `DELETE /chats/:id` stops an active run first (`deps.runs.stop`, which waits until the partial message is persisted).
+// `POST /chats/:id/branch` is refused with `409 conflict` (`reason: 'run-active'`) while the runs registry holds the
+// chat in any phase (`deps.runs.hasRun`), so a version switch never races a run's commit or persist.
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import {
@@ -14,8 +15,9 @@ import {
   chatUpdateSchema,
 } from '@harness-forge/shared'
 import { Hono } from 'hono'
+import { runConflict } from '../../chat/runs.ts'
 import { contentDisposition } from '../../services/files/names.ts'
-import { notImplemented, validate } from '../validate.ts'
+import { validate } from '../validate.ts'
 
 export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
@@ -54,7 +56,12 @@ export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
     })
   })
 
-  app.post(apiRoutes['chats.switchBranch'].path, validate('param', chatParamsSchema), validate('json', chatBranchBodySchema), notImplemented('chats.switchBranch'))
+  app.post(apiRoutes['chats.switchBranch'].path, validate('param', chatParamsSchema), validate('json', chatBranchBodySchema), async (c) => {
+    const { id } = c.req.valid('param')
+    if (deps.runs.hasRun(id))
+      throw runConflict(id)
+    return c.json(await deps.chats.switchBranch(id, c.req.valid('json').messageId))
+  })
 
   return app
 }

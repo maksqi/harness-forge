@@ -42,7 +42,8 @@ export interface DataService {
    * per content, with `files`), the public settings (`settings.json`, with `settings`) and `manifest.json` last; every
    * entry mode 0644 with mtime = `exportedAt`. Never secrets, credentials, the password, plugins, MCP servers, model or
    * tool preferences, share links or usage rows. A pre-check before anything is streamed throws `payload_too_large`
-   * (the message suggests `files=false`) when the zip would exceed 3.5 GiB or 65,000 entries (no zip64).
+   * (the message suggests `files=false` when that would fit) when the zip would exceed 3.5 GiB or
+   * `LIMITS.backupEntriesMax` entries (50,000: every export stays importable; fflate writes no zip64).
    */
   readonly exportBackup: (query: DataExportQuery) => Promise<DataBackup>
   /**

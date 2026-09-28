@@ -2,13 +2,15 @@
 // One transcript message (docs/UI.md 5.7, 7.1, 7.5). User: attachments + a plain-text bubble on the right, Copy and
 // Edit below (Edit turns the bubble into MessageEditor). Assistant: no bubble, parts in order (text, reasoning, tool
 // rows with approval cards, files, sources, notices), the error of the message, then a fixed-height row with Copy,
-// Regenerate (last message only) and the meta. The action row is always laid out (hidden while streaming, revealed on
-// hover / focus, always shown on the last finished reply), so nothing moves when it appears.
-import type { HarnessUIMessage } from '@harness-forge/shared'
+// Regenerate (every finished reply) and the meta. The action row is always laid out (hidden while streaming, revealed
+// on hover / focus, always shown on the last finished reply), so nothing moves when it appears. A message with
+// versions (ADR-023) starts that row with the BranchSwitcher, which stays visible outside the hover fade.
+import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { TextUIPart } from 'ai'
 import { computed, ref } from 'vue'
 import { cn } from '@/lib/utils'
 import { testIds } from '~/utils/testids'
+import BranchSwitcher from './BranchSwitcher.vue'
 import { messageBlocks, messageText } from './chat-format'
 import MessageActions from './MessageActions.vue'
 import MessageEditor from './MessageEditor.vue'
@@ -35,16 +37,24 @@ const props = withDefaults(defineProps<{
   error?: unknown
   /** The previous user message ran a `reply` command: the meta reads "Command reply". */
   commandReply?: boolean
+  /** `ChatDetail.branches[message.id]`: the versions of this message; shows the BranchSwitcher. */
+  branch?: MessageBranch | null
+  /** A version switch is in flight (the switcher is disabled). */
+  switching?: boolean
 }>(), {
   busy: false,
   commandReply: false,
+  branch: null,
+  switching: false,
 })
 
 const emit = defineEmits<{
-  regenerate: []
-  edit: [text: string]
-  approval: [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean }]
-  retry: []
+  'regenerate': []
+  'edit': [text: string]
+  'approval': [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean }]
+  'retry': []
+  /** The version chosen in the BranchSwitcher (a sibling of this message). */
+  'select-version': [messageId: string]
 }>()
 
 const editing = ref(false)
@@ -60,6 +70,11 @@ defineExpose({ startEdit })
 function onSave(text: string) {
   editing.value = false
   emit('edit', text)
+}
+
+function selectVersion(messageId: string) {
+  // eslint-disable-next-line vue/custom-event-name-casing -- contract name from docs/UI.md 10.4
+  emit('select-version', messageId)
 }
 
 const blocks = computed(() => (props.message.role === 'assistant' ? messageBlocks(props.message.parts) : []))
@@ -79,6 +94,10 @@ function isTextFinal(blockIndex: number, part: TextUIPart): boolean {
 }
 
 const copyText = () => messageText(props.message)
+
+/** Every finished reply can get a new version; older ones hide theirs through the transcript's `data-busy`. */
+const canRegenerate = computed(() => !props.streaming && !props.busy)
+const branchDisabled = computed(() => props.busy || props.switching)
 
 const actionsClass = computed(() => {
   if (props.streaming)
@@ -103,7 +122,16 @@ const actionsClass = computed(() => {
     <MessageEditor v-if="editing" :text="copyText()" @save="onSave" @cancel="editing = false" />
     <template v-else>
       <UserMessageBubble :message="message" />
-      <MessageActions align="end" :class="actionsClass" :copy-text="copyText" :can-edit="!busy" @edit="startEdit" />
+      <div data-slot="message-action-row" class="flex h-7 max-w-full min-w-0 items-center justify-end gap-0.5 pointer-coarse:h-10">
+        <BranchSwitcher
+          v-if="branch"
+          :siblings="branch.siblings"
+          :index="branch.index"
+          :disabled="branchDisabled"
+          @select="selectVersion"
+        />
+        <MessageActions align="end" :class="actionsClass" :copy-text="copyText" :can-edit="!busy" @edit="startEdit" />
+      </div>
     </template>
   </div>
 
@@ -143,13 +171,22 @@ const actionsClass = computed(() => {
     </template>
     <SubmittedPlaceholder v-if="streaming && blocks.length === 0" />
     <ErrorPart v-if="displayError && !streaming" :error="displayError" @retry="emit('retry')" />
-    <MessageActions
-      :class="actionsClass"
-      :copy-text="copyText"
-      :can-regenerate="isLast && !busy"
-      @regenerate="emit('regenerate')"
-    >
-      <MessageMeta :metadata="message.metadata" :command-reply="commandReply" />
-    </MessageActions>
+    <div data-slot="message-action-row" class="flex h-7 min-w-0 items-center gap-0.5 pointer-coarse:h-10">
+      <BranchSwitcher
+        v-if="branch"
+        :siblings="branch.siblings"
+        :index="branch.index"
+        :disabled="branchDisabled"
+        @select="selectVersion"
+      />
+      <MessageActions
+        :class="cn('flex-1', actionsClass)"
+        :copy-text="copyText"
+        :can-regenerate="canRegenerate"
+        @regenerate="emit('regenerate')"
+      >
+        <MessageMeta :metadata="message.metadata" :command-reply="commandReply" />
+      </MessageActions>
+    </div>
   </div>
 </template>

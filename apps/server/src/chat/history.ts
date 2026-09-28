@@ -1,16 +1,17 @@
-// History operations of `POST /chat` (ARCHITECTURE.md 6.1, API.md 6.2). The server owns history; the request carries
-// only the last UI message:
-// - new message (`submit-message`, user message, no `messageId`): appended; pending approvals of earlier messages are
-//   resolved as denied with reason `superseded`;
-// - edit (`submit-message` with `messageId` = the edited user message): that message is replaced, later ones dropped;
-// - regenerate (`regenerate-message`): the assistant message `messageId` (default: the last message when it is an
-//   assistant message) and every later message are dropped;
-// - approval continuation (`submit-message`, the last assistant message): only the approval decisions are merged, by
-//   approval id, into the stored copy; every other client change is ignored.
+// History operations of `POST /chat` (ARCHITECTURE.md 6.1 / 6.8, API.md 6.2). The server owns history; the request
+// carries only the last UI message, and the messages of a chat form a tree (ADR-023): nothing is ever deleted.
+// - new (`submit-message` with a user message): the message is stored under `parentId` (omitted = the active leaf,
+//   `null` = a first message) and becomes the active leaf; pending approvals on the path to it are resolved as denied
+//   with reason `superseded`. An edit is a new message whose parent is the edited message's parent (a sibling
+//   version);
+// - regenerate (`regenerate-message`): `messageId` (default: the active leaf) is a user message to answer, or a reply
+//   whose previous message on its path is the user message to answer; the new reply becomes a sibling of the old one;
+// - approval continuation (`submit-message` with the active leaf assistant message): only the approval decisions are
+//   merged, by approval id, into the stored copy; every other client change is ignored.
 import type { ChatRequestBody, HarnessUIMessage, HarnessUIMessagePart } from '@harness-forge/shared'
 import { HarnessError } from '@harness-forge/shared'
 
-export type RequestKind = 'new' | 'edit' | 'regenerate' | 'continuation'
+export type RequestKind = 'new' | 'regenerate' | 'continuation'
 
 /** `approval.reason` of approvals resolved by a newer user message. */
 export const SUPERSEDED_REASON = 'superseded'
@@ -23,7 +24,7 @@ function loose(part: unknown): LoosePart | null {
   return typeof part === 'object' && part !== null && typeof (part as { type?: unknown }).type === 'string' ? part as LoosePart : null
 }
 
-function badRequest(message: string, path: (string | number)[]): HarnessError {
+export function badRequest(message: string, path: (string | number)[] = []): HarnessError {
   return new HarnessError({ code: 'validation_error', message, details: { issues: [{ path, message, code: 'custom' }] } })
 }
 
@@ -31,23 +32,30 @@ export function notFound(message: string): HarnessError {
   return new HarnessError({ code: 'not_found', message })
 }
 
-/** The kind of history operation a request asks for; `validation_error` for inconsistent requests. */
-export function classifyRequest(body: Pick<ChatRequestBody, 'trigger' | 'message' | 'messageId'>): RequestKind {
-  if (body.trigger === 'regenerate-message')
+/**
+ * The kind of history operation a request asks for; `validation_error` for inconsistent requests: `parentId` on a
+ * regenerate or a continuation, `messageId` on a user message (in-place edits were removed, ADR-023) or a
+ * `messageId` other than the continued message, a role other than user / assistant.
+ */
+export function classifyRequest(body: Pick<ChatRequestBody, 'trigger' | 'message' | 'messageId' | 'parentId'>): RequestKind {
+  const { message, messageId, parentId } = body
+  if (body.trigger === 'regenerate-message') {
+    if (parentId !== undefined)
+      throw badRequest('A regenerate names its target with messageId, not parentId.', ['parentId'])
     return 'regenerate'
-  const { message, messageId } = body
+  }
   if (message.role === 'assistant') {
+    if (parentId !== undefined)
+      throw badRequest('An approval continuation continues the active leaf: it sends no parentId.', ['parentId'])
     if (messageId !== undefined && messageId !== message.id)
-      throw badRequest('An approval continuation must send the last assistant message.', ['messageId'])
+      throw badRequest('An approval continuation must send the active leaf assistant message.', ['messageId'])
     return 'continuation'
   }
   if (message.role !== 'user')
-    throw badRequest('Only user messages (or the last assistant message of an approval continuation) can be sent.', ['message', 'role'])
-  if (messageId === undefined)
-    return 'new'
-  if (messageId !== message.id)
-    throw badRequest('An edited message keeps its id: messageId must equal message.id.', ['messageId'])
-  return 'edit'
+    throw badRequest('Only user messages (or the active leaf assistant message of an approval continuation) can be sent.', ['message', 'role'])
+  if (messageId !== undefined)
+    throw badRequest('messageId is only for regenerate-message: an edit is a new user message whose parentId is the parent of the edited message.', ['messageId'])
+  return 'new'
 }
 
 /** A UI tool part (`tool-<name>` or `dynamic-tool`). */

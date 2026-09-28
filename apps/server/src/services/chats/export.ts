@@ -1,7 +1,7 @@
-// `GET /chats/:id/export?format=md|json` (API.md 5.9): Markdown (the active path) or JSON (`ChatExport` version 2) of a
-// chat, with a sanitized `<title-slug>-<yyyy-mm-dd>.<md|json>` file name. Exports carry the chat as the API shows it
-// (no secrets, no internal ids beyond the chat's own and its messages'); `running` and `pendingApproval` are always
-// false.
+// `GET /chats/:id/export?format=md|json` (API.md 5.9): Markdown (the active path) or JSON (`ChatExport` version 2: every
+// message version, ADR-023) of a chat, with a sanitized `<title-slug>-<yyyy-mm-dd>.<md|json>` file name. Exports carry
+// the chat as the API shows it (no secrets, no internal ids beyond the chat's own and its messages'); `running` and
+// `pendingApproval` are always false.
 import type { ChatDetail, ChatExport, ChatExportFormat, HarnessUIMessage } from '@harness-forge/shared'
 import type { ChatExportFile } from './types.ts'
 import { Buffer } from 'node:buffer'
@@ -145,13 +145,32 @@ export function renderChatMarkdown(chat: ChatDetail, at: number): string {
   return `${sections.join('\n\n')}\n`
 }
 
+/** The message tree of a JSON export (every version). */
+export interface ChatExportTree {
+  /** Every message version, in `seq` order. */
+  messages: HarnessUIMessage[]
+  /** The parent of `messages[i]` (`null` = a first message); always an earlier message. */
+  parentIds: (string | null)[]
+  /** The last message of the active path; null for an empty chat. */
+  activeLeafId: string | null
+}
+
+/** The tree of a linear chat: each message the child of the one before it, the last message active. */
+export function linearTree(messages: readonly HarnessUIMessage[]): ChatExportTree {
+  return {
+    messages: [...messages],
+    parentIds: messages.map((_message, index) => messages[index - 1]?.id ?? null),
+    activeLeafId: messages.at(-1)?.id ?? null,
+  }
+}
+
 /**
- * JSON export (`ChatExport`, version 2, ADR-023): every message version in `seq` order, the parent of each message
- * (aligned by index) and the active leaf. The store is still linear (one version per message, W5.1 adds the tree), so
- * every message is the child of the one before it and the active leaf is the last message.
+ * JSON export (`ChatExport`, version 2, ADR-023): the summary, settings and totals of `chat`, every message version in
+ * `seq` order, the parent of each message (aligned by index) and the active leaf (default: `chat.messages` as a linear
+ * chat).
  */
-export function renderChatJson(chat: ChatDetail, at: number): string {
-  const { branches: _branches, settings, totals, messages, ...summary } = chat
+export function renderChatJson(chat: ChatDetail, at: number, tree: ChatExportTree = linearTree(chat.messages)): string {
+  const { branches: _branches, messages: _path, settings, totals, ...summary } = chat
   const body: ChatExport = {
     format: 'harness-forge.chat',
     version: 2,
@@ -162,17 +181,18 @@ export function renderChatJson(chat: ChatDetail, at: number): string {
       pendingApproval: false,
       settings,
       totals,
-      messages,
-      parentIds: messages.map((_message, index) => messages[index - 1]?.id ?? null),
-      activeLeafId: messages.at(-1)?.id ?? null,
+      messages: tree.messages,
+      parentIds: tree.parentIds,
+      activeLeafId: tree.activeLeafId,
     },
   }
   return `${JSON.stringify(body, null, 2)}\n`
 }
 
-export function buildChatExport(chat: ChatDetail, format: ChatExportFormat, at: number): ChatExportFile {
+/** The export file of a chat: Markdown of `chat.messages` (the active path) or JSON of `tree` (every version). */
+export function buildChatExport(chat: ChatDetail, format: ChatExportFormat, at: number, tree?: ChatExportTree): ChatExportFile {
   const exportable: ChatDetail = { ...chat, running: false, pendingApproval: false }
   return format === 'json'
-    ? { filename: exportFilename(chat.title, 'json', at), contentType: 'application/json; charset=utf-8', body: renderChatJson(exportable, at) }
+    ? { filename: exportFilename(chat.title, 'json', at), contentType: 'application/json; charset=utf-8', body: renderChatJson(exportable, at, tree) }
     : { filename: exportFilename(chat.title, 'md', at), contentType: 'text/markdown; charset=utf-8', body: renderChatMarkdown(exportable, at) }
 }

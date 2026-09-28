@@ -13,6 +13,7 @@
 import type { Env } from '../../env.ts'
 import type { AppDeps } from '../../types.ts'
 import type { AppContext, AppMiddleware, RequestAuth } from '../types.ts'
+import type { ProxyTrustSetting } from './request-info.ts'
 import { HarnessError } from '@harness-forge/shared'
 import { getCookie } from 'hono/cookie'
 import { classifyAddress } from '../../security/ssrf.ts'
@@ -52,7 +53,8 @@ export function isLocalHostname(hostname: string): boolean {
 
 /**
  * DNS rebinding guard of a password-less server: throws `403 forbidden` for a request addressed to anything but a local
- * host name, unless `HF_INSECURE=1` (see the module comment).
+ * host name, unless `HF_INSECURE=1` (see the module comment). Only the `Host` header counts, never `X-Forwarded-Host`,
+ * whatever `HF_TRUST_PROXY` says: the rebound page connects from 127.0.0.1 and can send any header (ADR-026).
  */
 export function checkPasswordlessHost(c: AppContext, env: Pick<Env, 'insecure'>): void {
   if (env.insecure)
@@ -71,14 +73,17 @@ export function sessionCookieHeader(token: string, options: { secure: boolean, m
   return attributes.join('; ')
 }
 
-/** Adds the session cookie to the response (`Secure` over HTTPS). Call before the response is built, or after `next()`. */
-export function setSessionCookie(c: AppContext, token: string): void {
-  c.header('Set-Cookie', sessionCookieHeader(token, { secure: isHttpsRequest(c) }), { append: true })
+/**
+ * Adds the session cookie to the response (`Secure` over HTTPS: pass `deps.env` so `X-Forwarded-Proto` counts only
+ * from a trusted proxy when `HF_TRUST_PROXY` is set). Call before the response is built, or after `next()`.
+ */
+export function setSessionCookie(c: AppContext, token: string, trust?: ProxyTrustSetting): void {
+  c.header('Set-Cookie', sessionCookieHeader(token, { secure: isHttpsRequest(c, trust) }), { append: true })
 }
 
-/** Clears the session cookie (`Max-Age=0`). */
-export function clearSessionCookie(c: AppContext): void {
-  c.header('Set-Cookie', sessionCookieHeader('', { secure: isHttpsRequest(c), maxAgeSeconds: 0 }), { append: true })
+/** Clears the session cookie (`Max-Age=0`; `Secure` under the rule of `setSessionCookie`). */
+export function clearSessionCookie(c: AppContext, trust?: ProxyTrustSetting): void {
+  c.header('Set-Cookie', sessionCookieHeader('', { secure: isHttpsRequest(c, trust), maxAgeSeconds: 0 }), { append: true })
 }
 
 function setsSessionCookie(headers: Headers): boolean {
@@ -121,7 +126,7 @@ export function sessionAuthMiddleware(deps: AppDeps): AppMiddleware {
       // Login, logout and password changes set the cookie themselves: never override their answer.
       updateResponseHeaders(c, (headers) => {
         if (!setsSessionCookie(headers))
-          headers.append('Set-Cookie', sessionCookieHeader(rolled, { secure: isHttpsRequest(c) }))
+          headers.append('Set-Cookie', sessionCookieHeader(rolled, { secure: isHttpsRequest(c, deps.env) }))
       })
     }
   }

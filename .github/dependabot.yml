@@ -1,0 +1,43 @@
+# Dependency updates (ADR-027). Dependabot alerts and security updates are switched on in the repository settings
+# (Settings -> Code security); this file only schedules version updates.
+#
+# pnpm 11: Dependabot supports pnpm workspaces and catalogs, but its pnpm 11 support is recent and pnpm 11.23+ breaks
+# indirect-dependency updates. If the npm block below fails on the pnpm 11 lockfile, drop the npm block and use
+# Renovate (renovatebot, which updates pnpm catalogs) as the fallback. pnpm itself is always upgraded by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      github-actions:
+        patterns: ['*']
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # Let new releases age before they are proposed: 7 days, 30 for major versions.
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+    # Minor and patch updates share one pull request; every major version gets its own.
+    groups:
+      minor-and-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
+    ignore:
+      # ADR-013: TypeScript stays on ~6.0.3 (TypeScript 7 breaks .vue files that import prop types).
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major', 'version-update:semver-minor']
+      # Node 22 is the supported floor (engines: >=22.12), so the Node types stay on 22.x.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+      # The pnpm version ("packageManager") is upgraded by hand.
+      - dependency-name: pnpm

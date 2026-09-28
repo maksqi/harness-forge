@@ -2,6 +2,7 @@ import type { ChatRequestBody } from '@harness-forge/shared'
 import type { UIMessageChunk } from 'ai'
 import type { Mock } from 'vitest'
 import type { MockApi } from '~/utils/testing/mock-api'
+import { HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
@@ -9,9 +10,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { resetChatSessions } from '~/composables/useChatSession'
+import { dispatchServerEvent } from '~/composables/useServerEvents'
 import { useChatsStore } from '~/stores/chats'
 import { testIds } from '~/utils/testids'
-import { chatDetail, chatId } from '~/utils/testing/fixtures'
+import { assistantMessage, chatDetail, chatId, messageBranch, userMessage } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import ChatView from './ChatView.vue'
@@ -234,5 +236,110 @@ describe('chatView: existing chat', () => {
     // The running reply is followed: the store knows it runs, and the view asked to resume it.
     await until(() => calls.some(call => call.url === `/api/chat/${chatId(2)}/stream`))
     expect(useChatsStore().runState[chatId(2)]).toBeUndefined()
+  })
+})
+
+describe('chatView: versions', () => {
+  const U1 = 'msg_user00000000000a'
+  const A1 = 'msg_asst00000000000a'
+  const U1B = 'msg_user00000000000b'
+  const A1B = 'msg_asst00000000000b'
+  /** The id `textReply()` streams. */
+  const REPLY = 'msg_asst000000000001'
+
+  beforeEach(() => {
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(4),
+      modelRef: MODEL,
+      messages: [userMessage(U1, 'First question'), assistantMessage(A1, 'Answer')],
+      branches: { [U1]: messageBranch([U1B, U1], 1) },
+    }))
+  })
+
+  async function mountLoaded() {
+    const view = mountView({ chatId: chatId(4) })
+    await until(() => view.wrapper.find(`[data-testid="${testIds.messageBranch}"]`).exists())
+    return view
+  }
+
+  function branchControl(wrapper: ReturnType<typeof mountView>['wrapper'], testId: string) {
+    return wrapper.get(`[data-testid="${testIds.messageBranch}"] [data-testid="${testId}"]`)
+  }
+
+  it('switches to another version: shows the returned path, announces it and keeps the focus on the control', async () => {
+    api.chats.switchBranch.mockResolvedValue(chatDetail({
+      id: chatId(4),
+      messages: [userMessage(U1B, 'Older question'), assistantMessage(A1B, 'Older answer')],
+      branches: { [U1B]: messageBranch([U1B, U1], 0) },
+    }))
+    const { wrapper } = await mountLoaded()
+    expect(wrapper.get(`[data-testid="${testIds.messageBranch}"]`).attributes('data-message-id')).toBe(U1)
+    const previous = branchControl(wrapper, testIds.messageBranchPrevious)
+    ;(previous.element as HTMLElement).focus()
+    await previous.trigger('click')
+
+    expect(api.chats.switchBranch).toHaveBeenCalledWith({ params: { id: chatId(4) }, body: { messageId: U1B } })
+    await until(() => wrapper.get(`[data-testid="${testIds.messageUser}"]`).attributes('data-message-id') === U1B)
+    expect(wrapper.get(`[data-testid="${testIds.messageAssistant}"]`).text()).toContain('Older answer')
+    await until(() => wrapper.get('[role="status"]').text() === 'Version 1 of 2')
+    expect(document.activeElement).toBe(branchControl(wrapper, testIds.messageBranchPrevious).element)
+  })
+
+  it('a switch refused because a reply is running shows the conflict toast', async () => {
+    api.chats.switchBranch.mockRejectedValue(new HarnessError({ code: 'conflict', message: 'A run is active.', details: { reason: 'run-active', chatId: chatId(4) } }))
+    const { wrapper } = await mountLoaded()
+    await branchControl(wrapper, testIds.messageBranchPrevious).trigger('click')
+    await until(() => mock.toast.mock.calls.length > 0)
+    expect(mock.toast).toHaveBeenCalledWith('A response is already running in this chat.')
+    expect(wrapper.get(`[data-testid="${testIds.messageUser}"]`).attributes('data-message-id')).toBe(U1)
+  })
+
+  it('an edit sends a new version: a new message under the edited message\'s parent', async () => {
+    const { wrapper } = await mountLoaded()
+    replies.push(textReply('Another answer'))
+    await wrapper.get(`[data-testid="${testIds.messageEdit}"]`).trigger('click')
+    await wrapper.get(`[data-testid="${testIds.messageEditInput}"]`).setValue('First question, edited')
+    await wrapper.get(`[data-testid="${testIds.messageEditSave}"]`).trigger('click')
+    await until(() => calls.some(call => call.url === '/api/chat'))
+    const body = calls.find(call => call.url === '/api/chat')!.body!
+    expect(body).toMatchObject({ trigger: 'submit-message', parentId: null })
+    expect(body).not.toHaveProperty('messageId')
+    expect(body.message.id).not.toBe(U1)
+    await until(() => wrapper.text().includes('Another answer'))
+    // The new version has no known siblings yet: no switcher until the versions are refetched.
+    expect(wrapper.find(`[data-testid="${testIds.messageBranch}"]`).exists()).toBe(false)
+
+    // Its run finished: the versions are refetched and the switcher shows "2/2" on the new message.
+    api.chats.get.mockResolvedValueOnce(chatDetail({
+      id: chatId(4),
+      messages: [userMessage(body.message.id, 'First question, edited'), assistantMessage(REPLY, 'Another answer')],
+      branches: { [body.message.id]: messageBranch([U1, body.message.id], 1) },
+    }))
+    dispatchServerEvent({ type: 'run.finished', data: { chatId: chatId(4), messageId: REPLY, outcome: 'completed', awaitingApproval: false }, at: 1 })
+    await until(() => wrapper.find(`[data-testid="${testIds.messageBranch}"]`).exists())
+    const switcher = wrapper.get(`[data-testid="${testIds.messageBranch}"]`)
+    expect(switcher.attributes('data-message-id')).toBe(body.message.id)
+    expect(switcher.get(`[data-testid="${testIds.messageBranchCounter}"]`).text()).toBe('2/2')
+  })
+
+  it('a stale path (404): the unsent message goes back into the composer and the chat reloads', async () => {
+    const { wrapper } = await mountLoaded()
+    api.chats.get.mockResolvedValueOnce(chatDetail({
+      id: chatId(4),
+      messages: [
+        userMessage(U1, 'First question'),
+        assistantMessage(A1, 'Answer'),
+        userMessage('msg_user000000000009', 'From another tab'),
+        assistantMessage('msg_asst000000000009', 'Another answer'),
+      ],
+    }))
+    replies.push(() => new Response(JSON.stringify({ error: { code: 'not_found', message: 'Message not found.' } }), { status: 404 }))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => mock.toast.mock.calls.length > 0)
+    expect(mock.toast).toHaveBeenCalledWith('This chat changed elsewhere and was reloaded.')
+    expect(mock.composer.setText).toHaveBeenCalledWith('Hello')
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 2)
+    expect(wrapper.text()).toContain('From another tab')
+    expect(wrapper.find(`[data-testid="${testIds.chatError}"]`).exists()).toBe(false)
   })
 })

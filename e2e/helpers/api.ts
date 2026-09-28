@@ -213,6 +213,18 @@ export class HarnessApi {
     return (await this.client.chats.list({ query: { q } })).items
   }
 
+  /** Stops the run of a chat, if one is active (`POST /api/chat/:id/stop`); resolves to whether a run was stopped. */
+  async stopChat(id: string): Promise<boolean> {
+    try {
+      return (await this.client.chat.stop({ params: { id } })).stopped
+    }
+    catch (error) {
+      if ((error as { code?: unknown }).code === 'not_found')
+        return false
+      throw error
+    }
+  }
+
   /** Deletes a chat; a chat that is already gone is fine. */
   async deleteChat(id: string): Promise<void> {
     try {
@@ -222,6 +234,12 @@ export class HarnessApi {
       if ((error as { code?: unknown }).code !== 'not_found')
         throw error
     }
+  }
+
+  /** Stops the chat's run if it still has one, then deletes the chat (a chat that is already gone is fine). */
+  async removeChat(id: string): Promise<void> {
+    await this.stopChat(id)
+    await this.deleteChat(id)
   }
 
   /** Sends one user message through `POST /api/chat` and waits until its run finished. */

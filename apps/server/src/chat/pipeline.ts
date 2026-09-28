@@ -6,10 +6,11 @@
 //   messageMetadata, onError, onEnd })`; a request without tools gets earlier tool calls as text (`tool-history.ts`);
 // - reply commands and failures before the model call: `createUIMessageStream` without a model call.
 // `createUIMessageStreamResponse({ stream, consumeSseStream })` tees the SSE text into the run buffer (resume). The end
-// callback persists the message idempotently (upsert by id, `aborted` / `error` in the metadata), writes the usage
-// row, touches the chat (`pending_approval`), records the provider outcome, releases the run, emits `run.finished`
-// and fires `message.completed`. A stream that fails without reaching the end callback is finalized when the SSE copy
-// ends, so a run is always released.
+// callback persists the message idempotently (one transaction: an upsert by id under the reply parent, `aborted` /
+// `error` in the metadata, and a compare-and-set of the active leaf, ADR-023), writes the usage row, touches the chat
+// (`pending_approval`), records the provider outcome, releases the run, emits `run.finished` and fires
+// `message.completed`. A stream that fails without reaching the end callback is finalized when the SSE copy ends, so a
+// run is always released.
 import type { HarnessError, HarnessUIMessage, MessageMetadata, NoticeData, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ModelMessage, TextStreamPart, ToolSet, UIMessageChunk, UIMessageStreamOnEndCallback } from 'ai'
 import type { Logger } from '../logger.ts'
@@ -343,9 +344,25 @@ export class RunSession {
         logger.warn('a force-released run ended; its message is not stored', { messageId: this.assistantId })
         return
       }
-      message = this.finalMessage(responseMessage, ending)
-      awaitingApproval = hasPendingApproval(message)
-      const stored = await this.#step('message upsert', () => deps.chats.upsertMessage(this.chatId, message!))
+      const reply = this.finalMessage(responseMessage, ending)
+      message = reply
+      // The reply under its parent, and the active leaf moved to it only while the leaf is still the reply parent (or
+      // the reply itself, a continuation): a leaf moved by someone else is never overwritten.
+      let stored = false
+      let shown = false
+      try {
+        shown = await deps.chats.transaction(async (store) => {
+          await store.upsertMessage(this.chatId, reply, prepared.replyParentId)
+          return store.setActiveLeaf(this.chatId, reply.id, [prepared.replyParentId, reply.id])
+        })
+        stored = true
+      }
+      catch (error) {
+        logger.error('run end: message upsert failed', { err: error })
+      }
+      if (stored && !shown)
+        logger.warn('the active leaf moved during the run; the reply is stored as a hidden version', { messageId: reply.id })
+      awaitingApproval = shown && hasPendingApproval(reply)
       const usage = this.tracker.usage
       if (this.mode === 'model' && this.tracker.hasUsage) {
         await this.#step('usage row', () => deps.chats.addUsage({
@@ -362,8 +379,13 @@ export class RunSession {
           costUsd: this.tracker.cost(resolved.entry.cost) ?? null,
         }))
       }
-      if (stored)
-        await this.#step('chat touch', () => deps.chats.touch(this.chatId, { pendingApproval: awaitingApproval, modelRef: resolved.modelRef }))
+      if (stored) {
+        // `pending_approval` describes the active path: left alone when the reply is not on it.
+        await this.#step('chat touch', () => deps.chats.touch(this.chatId, {
+          ...(shown ? { pendingApproval: awaitingApproval } : {}),
+          modelRef: resolved.modelRef,
+        }))
+      }
       if (this.mode === 'model') {
         if (ending === 'completed')
           await this.#step('provider outcome', () => deps.providers.recordOutcome(resolved.providerId, { ok: true }))

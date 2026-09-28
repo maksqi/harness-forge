@@ -1,9 +1,15 @@
-// Chat sessions (docs/UI.md 7.6, 11.1; docs/API.md 6): one `@ai-sdk/vue` `useChat` instance per chat, kept in a
+// Chat sessions (docs/UI.md 7.5, 7.6, 11.1; docs/API.md 6): one `@ai-sdk/vue` `useChat` instance per chat, kept in a
 // registry inside detached effect scopes so route changes never stop a stream. The registry keeps the 8 most
 // recently used sessions and never evicts one that is submitted, streaming, waiting for an approval or shown by a
 // mounted component. `@ai-sdk/vue` 4 has no `resume` option: `resumeIfRunning()` calls `chat.resumeStream()` when the
 // chat has an active run. Requests carry only the last UI message plus the composer state (`ChatRequestBody`);
 // user message ids come from `createMessageId` (ADR-019). Run state is pushed into the chats store for the sidebar.
+//
+// Branching (ADR-023): the transcript is the chat's active path and `branches` lists the versions of its messages. A
+// new user message names its parent (the message before it on the shown path), an edit is a new user message under
+// the edited message's parent, a regenerate names its target, and `switchBranch()` shows another version. A user
+// message whose request failed with an HTTP error was never stored, so it is never named as a parent; a `404` means
+// the shown path is stale and reloads it.
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   ChatDetail,
@@ -12,6 +18,7 @@ import type {
   ChatTrigger,
   FileRef,
   HarnessUIMessage,
+  MessageBranch,
   ReasoningEffort,
   ToolMode,
 } from '@harness-forge/shared'
@@ -20,15 +27,22 @@ import type { ComputedRef, EffectScope, Ref, WritableComputedRef } from 'vue'
 import type { ChatRunState as ChatListRunState } from '~/stores/chats'
 import { useChat } from '@ai-sdk/vue'
 import { createChatId, createMessageId, harnessDataSchemas, HarnessError, messageMetadataSchema } from '@harness-forge/shared'
-import { DefaultChatTransport, isFileUIPart, isTextUIPart, isToolUIPart, lastAssistantMessageIsCompleteWithApprovalResponses } from 'ai'
-import { computed, effectScope, getCurrentScope, onScopeDispose, ref, shallowRef, watch } from 'vue'
+import {
+  APICallError,
+  DefaultChatTransport,
+  isFileUIPart,
+  isTextUIPart,
+  isToolUIPart,
+  lastAssistantMessageIsCompleteWithApprovalResponses,
+} from 'ai'
+import { computed, effectScope, getCurrentScope, nextTick, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { useApi, useApiFetch } from '~/composables/useApi'
 import { useServerEvents } from '~/composables/useServerEvents'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useSettingsStore } from '~/stores/settings'
-import { toHarnessError } from '~/utils/errors'
+import { hasErrorCode, toHarnessError } from '~/utils/errors'
 
 /** Sessions kept alive at once (the least recently used idle one is evicted first). */
 export const MAX_CHAT_SESSIONS = 8
@@ -92,8 +106,18 @@ export interface ChatSession {
   runState: ComputedRef<ChatSessionRunState>
   /** A request is in flight (submitted or streaming). */
   busy: ComputedRef<boolean>
+  /** `ChatDetail.branches` of the shown path: the versions of every path message that has more than one. */
+  branches: Ref<Record<string, MessageBranch>>
+  /** A `switchBranch()` request is in flight. */
+  switching: Ref<boolean>
+  /** A new user message; its parent is the message before it on the shown path. */
   send: (input: ChatSendInput) => Promise<void>
+  /** A new version of a user message: the messages from it on are replaced by the new version and its reply. */
   edit: (messageId: string, text: string) => Promise<void>
+  /**
+   * A new version of a reply (default: the last message), or a first reply to a user message. A user message whose
+   * request failed with an HTTP error (never stored) is sent again instead.
+   */
   regenerate: (messageId?: string) => Promise<void>
   approve: (decision: ToolApprovalDecision) => Promise<void>
   /** `POST /api/chat/:id/stop`, then the client abort (a client abort alone only disconnects). */
@@ -104,6 +128,19 @@ export interface ChatSession {
   refresh: () => Promise<void>
   /** Resumes the active run of the chat, if the server or the chats store says there is one. */
   resumeIfRunning: () => Promise<void>
+  /**
+   * Shows another version of a message (`POST /api/chats/:id/branch`): the path to the most recent leaf under it.
+   * Does nothing while a request or another switch is in flight. Throws the `HarnessError` of a refused switch after
+   * handling it: `409 conflict` follows the running reply, `404 not_found` reloads the path.
+   */
+  switchBranch: (messageId: string) => Promise<void>
+  /** Refetches the chat after this session's own edit or regenerate, so the new version shows in `branches`. */
+  refreshBranches: () => Promise<void>
+  /**
+   * Removes the user message whose request failed with an HTTP error (the server never stored it) from the transcript
+   * and returns it, e.g. to put its text back into the composer; null when there is none.
+   */
+  takeBackUnstored: () => HarnessUIMessage | null
 }
 
 export interface ChatSessionRegistry {
@@ -126,7 +163,21 @@ let clock = 0
 
 // ---------- pure helpers (exported for tests) ----------
 
-/** The request body of `POST /api/chat` (docs/API.md 6.2): only the last UI message plus the composer state. */
+/** What a `POST /api/chat` asks for (docs/API.md 6.2): a new user message, a regenerate, or an approval continuation. */
+export type ChatRequestKind = 'new' | 'regenerate' | 'continuation'
+
+export function chatRequestKind(trigger: ChatTrigger, message: HarnessUIMessage): ChatRequestKind {
+  if (trigger === 'regenerate-message')
+    return 'regenerate'
+  return message.role === 'user' ? 'new' : 'continuation'
+}
+
+/**
+ * The request body of `POST /api/chat` (docs/API.md 6.2): only the last UI message plus the composer state. A new user
+ * message (also an edit) names its parent: the message before it on the shown path, `null` for a first message. A
+ * regenerate names its target (`messageId`; omitted = the active leaf). An approval continuation names neither (the
+ * SDK passes the continued message's id, which the contract does not send).
+ */
 export function buildChatRequestBody(input: {
   chatId: string
   messages: readonly HarnessUIMessage[]
@@ -149,11 +200,53 @@ export function buildChatRequestBody(input: {
     reasoningEffort: input.reasoningEffort,
     toolMode: input.toolMode,
   }
-  // The SDK names the continued assistant message for approval continuations; the contract sends no id there.
-  const continuation = input.trigger === 'submit-message' && message.role === 'assistant'
-  if (input.messageId && !continuation)
+  const kind = chatRequestKind(input.trigger, message)
+  if (kind === 'new')
+    body.parentId = input.messages.at(-2)?.id ?? null
+  else if (kind === 'regenerate' && input.messageId)
     body.messageId = input.messageId
   return body
+}
+
+/**
+ * A chat request answered with an HTTP error before its stream started (`APICallError` with a status): the server
+ * stored nothing (docs/API.md 6.2).
+ */
+export function isHttpError(error: unknown): boolean {
+  return APICallError.isInstance(error) && typeof error.statusCode === 'number'
+}
+
+function conflictReason(error: unknown): unknown {
+  const failure = toHarnessError(error)
+  return failure.code === 'conflict' ? (failure.details as { reason?: unknown } | undefined)?.reason ?? null : undefined
+}
+
+/** `409 conflict` because a run holds the chat (reason `run-active`, or none given): docs/UI.md 7.4. */
+export function isRunActiveConflict(error: unknown): boolean {
+  const reason = conflictReason(error)
+  return reason === null || reason === 'run-active'
+}
+
+/** The server stored nothing for a new user message whose request failed this way. */
+function isUnstoredFailure(error: unknown): boolean {
+  // Except `409 conflict` reason `exists`: a message with that id is already stored.
+  return isHttpError(error) && conflictReason(error) !== 'exists'
+}
+
+/**
+ * The next shown path, keeping the message objects of the prefix whose ids did not change, so the memoized transcript
+ * rows of that prefix do not render again (docs/UI.md 11.1).
+ */
+export function mergePath(current: readonly HarnessUIMessage[], next: readonly HarnessUIMessage[]): HarnessUIMessage[] {
+  let shared = 0
+  while (shared < current.length && shared < next.length && current[shared]!.id === next[shared]!.id)
+    shared += 1
+  return [...current.slice(0, shared), ...next.slice(shared)]
+}
+
+/** Both paths show the same messages (ids, in order). */
+export function samePathIds(a: readonly HarnessUIMessage[], b: readonly HarnessUIMessage[]): boolean {
+  return a.length === b.length && a.every((message, index) => message.id === b[index]!.id)
 }
 
 /** The last message is an assistant message with a tool call waiting for the user. */
@@ -175,7 +268,7 @@ export function fileRefToPart(file: FileRef): FileUIPart {
 }
 
 function summaryOf(chat: ChatDetail): ChatSummary {
-  const { settings: _settings, messages: _messages, totals: _totals, ...summary } = chat
+  const { settings: _settings, messages: _messages, branches: _branches, totals: _totals, ...summary } = chat
   return summary
 }
 
@@ -262,11 +355,26 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   /** A run of this chat finished while a request was in flight (handled once it settles). */
   let finishedWhileBusy: { messageId: string, outcome: string } | null = null
 
+  // ---------- branching state (ADR-023) ----------
+
+  const branches = shallowRef<Record<string, MessageBranch>>({})
+  const switching = ref(false)
+  /** The switch in flight: a new request waits for it, so it starts from the path the switch shows. */
+  let pendingSwitch: Promise<void> | null = null
+  /** The chat request in flight, from the moment its body is built until it ends. */
+  let request: { kind: ChatRequestKind, userMessageId: string | null } | null = null
+  /** The user message whose request failed with an HTTP error: the server never stored it. */
+  let unstoredMessageId: string | null = null
+  /** The request that just ended was answered `404`: the shown path is stale. */
+  let stalePath = false
+  /** This session's edit or regenerate added a version: `branches` is refetched once its run finished. */
+  let branchesStale = false
+
   const transport = new DefaultChatTransport<HarnessUIMessage>({
     api: CHAT_API,
     fetch: apiFetch,
-    prepareSendMessagesRequest: ({ id: chatId, messages, trigger, messageId }) => ({
-      body: buildChatRequestBody({
+    prepareSendMessagesRequest: ({ id: chatId, messages, trigger, messageId }) => {
+      const body = buildChatRequestBody({
         chatId,
         messages,
         trigger,
@@ -274,8 +382,11 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
         modelRef: modelRef.value,
         reasoningEffort: reasoningEffort.value,
         toolMode: toolMode.value,
-      }),
-    }),
+      })
+      const kind = chatRequestKind(trigger, body.message)
+      request = { kind, userMessageId: kind === 'new' ? body.message.id : null }
+      return { body }
+    },
   })
 
   const chat = useChat<HarnessUIMessage>({
@@ -287,9 +398,24 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     dataPartSchemas: chatDataPartSchemas,
     transport,
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
+    // Called before `chat.error` is set, only for the requests of this session (a failed resume has no `request`).
+    onError: (error) => {
+      if (!request)
+        return
+      if (request.kind === 'new' && isUnstoredFailure(error))
+        unstoredMessageId = request.userMessageId
+      if (hasErrorCode(error, 'not_found'))
+        stalePath = true
+    },
     onFinish: ({ message }) => {
+      request = null
       if (!resuming && message.role === 'assistant')
         ownMessageIds.add(message.id)
+      if (stalePath) {
+        stalePath = false
+        // After the views reacted to the error (the unstored message may go back into the composer), not before.
+        void nextTick().then(recoverStalePath)
+      }
     },
   })
 
@@ -312,15 +438,24 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   })
   watch(runState, () => scheduleTrim())
 
-  function applyDetail(detail: ChatDetail) {
+  /**
+   * Shows a chat detail from the server: the summary and stored choices, and (unless a request is in flight) its
+   * path and versions. `keepPrefix` keeps the message objects of the unchanged prefix (a switch, a branch refresh).
+   */
+  function applyDetail(detail: ChatDetail, options: { keepPrefix?: boolean } = {}) {
     summary.value = summaryOf(detail)
     stored.value = {
       modelRef: detail.modelRef ?? undefined,
       reasoningEffort: detail.settings.reasoningEffort,
       toolMode: detail.settings.toolMode,
     }
-    if (!busy.value)
-      chat.messages.value = detail.messages
+    if (busy.value)
+      return
+    chat.messages.value = options.keepPrefix ? mergePath(chat.messages.value, detail.messages) : [...detail.messages]
+    branches.value = detail.branches
+    branchesStale = false
+    // The server never had it, so it is not on the path it sent.
+    unstoredMessageId = null
   }
 
   let pendingLoad: Promise<void> | null = null
@@ -365,6 +500,39 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     }
   }
 
+  /**
+   * After this session's own edit or regenerate: the transcript already shows the new version, only its siblings are
+   * unknown. The same path replaces only `branches`; another path (the chat changed elsewhere) is applied whole.
+   */
+  async function refreshBranches(): Promise<void> {
+    if (busy.value || !persisted.value)
+      return
+    const before = chat.messages.value
+    try {
+      const detail = await chats.get(id)
+      if (busy.value || switching.value)
+        return
+      if (samePathIds(chat.messages.value, detail.messages)) {
+        summary.value = summaryOf(detail)
+        branches.value = detail.branches
+        branchesStale = false
+      }
+      else if (chat.messages.value === before) {
+        applyDetail(detail, { keepPrefix: true })
+      }
+    }
+    catch {
+      // The versions show on the next load.
+    }
+  }
+
+  /** A request was answered `404` (an unknown parent or target): the shown path is stale, so reload it. */
+  async function recoverStalePath(): Promise<void> {
+    await refresh()
+    if (chat.status.value === 'error' && hasErrorCode(chat.error.value, 'not_found'))
+      chat.clearError()
+  }
+
   function resumeIfRunning(): Promise<void> {
     if (resuming)
       return resuming
@@ -405,8 +573,15 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   // ---------- server events ----------
 
   function onRunFinished(finished: { messageId: string, outcome: string }) {
-    if (finished.outcome === 'completed' && ownMessageIds.has(finished.messageId))
-      return
+    if (ownMessageIds.has(finished.messageId)) {
+      // This session streamed the reply, so its transcript is current; an edit or a regenerate added a version.
+      if (branchesStale) {
+        void refreshBranches()
+        return
+      }
+      if (finished.outcome === 'completed')
+        return
+    }
     void refresh()
   }
   const events = useServerEvents()
@@ -442,6 +617,27 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
 
   // ---------- actions ----------
 
+  /** The tracked unstored user message, while the transcript still shows it. */
+  function unstoredMessage(): HarnessUIMessage | null {
+    if (!unstoredMessageId)
+      return null
+    const message = chat.messages.value.find(item => item.id === unstoredMessageId)
+    if (!message)
+      unstoredMessageId = null
+    return message ?? null
+  }
+
+  function takeBackUnstored(): HarnessUIMessage | null {
+    const message = unstoredMessage()
+    if (!message)
+      return null
+    unstoredMessageId = null
+    const messages = chat.messages.value
+    // Anything after it was never stored either.
+    chat.messages.value = messages.slice(0, messages.indexOf(message))
+    return message
+  }
+
   async function send(input: ChatSendInput): Promise<void> {
     const text = input.text
     const files = input.files.map(fileRefToPart)
@@ -449,39 +645,102 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       return
     if (!modelRef.value)
       throw missingModel()
+    if (pendingSwitch)
+      await pendingSwitch.catch(() => {})
     pinChoices()
     models.touchRecent(modelRef.value)
+    // `parentId` never names a message the server did not store.
+    takeBackUnstored()
     await chat.sendMessage(text.trim() ? { text, files } : { files })
   }
 
   async function edit(messageId: string, text: string): Promise<void> {
-    const message = chat.messages.value.find(item => item.id === messageId && item.role === 'user')
-    if (!message)
+    if (busy.value)
       return
-    const files = message.parts.filter(isFileUIPart)
+    if (pendingSwitch)
+      await pendingSwitch.catch(() => {})
+    const messages = chat.messages.value
+    const index = messages.findIndex(item => item.id === messageId && item.role === 'user')
+    if (index === -1)
+      return
+    const files = messages[index]!.parts.filter(isFileUIPart)
     if (!text.trim() && files.length === 0)
       return
     if (!modelRef.value)
       throw missingModel()
     pinChoices()
-    await chat.sendMessage(text.trim() ? { text, files, messageId } : { files, messageId })
+    // A new version: the SDK gives the new message a new id, and its parent is the edited message's parent (the
+    // message before it). The old version and everything after it stay on the server.
+    chat.messages.value = messages.slice(0, index)
+    // Forgets an unstored message the cut removed.
+    unstoredMessage()
+    branchesStale = true
+    await chat.sendMessage(text.trim() ? { text, files } : { files })
   }
 
   async function regenerate(messageId?: string): Promise<void> {
+    if (busy.value)
+      return
     if (!modelRef.value)
       throw missingModel()
-    pinChoices()
-    const messages = chat.messages.value
-    const last = messages.at(-1)
-    if (!messageId && last?.role === 'user') {
-      // The request failed before any reply existed (the server never stored this message): send it again.
-      const text = last.parts.filter(isTextUIPart).map(part => part.text).join('\n\n')
-      const files = last.parts.filter(isFileUIPart)
-      chat.messages.value = messages.slice(0, -1)
+    if (pendingSwitch)
+      await pendingSwitch.catch(() => {})
+    const unstored = unstoredMessage()
+    if (unstored && (messageId === undefined || messageId === unstored.id)) {
+      // Its request failed before the server stored it (the Retry of docs/UI.md 7.4): send it again as a new message.
+      pinChoices()
+      takeBackUnstored()
+      // It may have been an edit, whose parent has other versions.
+      branchesStale = true
+      const text = unstored.parts.filter(isTextUIPart).map(part => part.text).join('\n\n')
+      const files = unstored.parts.filter(isFileUIPart)
       await chat.sendMessage(text.trim() ? { text, files } : { files })
       return
     }
-    await chat.regenerate(messageId ? { messageId } : {})
+    const messages = chat.messages.value
+    const target = messageId === undefined ? messages.at(-1) : messages.find(item => item.id === messageId)
+    if (!target)
+      return
+    pinChoices()
+    branchesStale = true
+    // A reply gets a new version under its user message; a user message without a reply is answered. The last reply
+    // is named by the active leaf (its id may be local when its stream failed early).
+    await chat.regenerate(messageId !== undefined || target.role === 'user' ? { messageId: target.id } : {})
+  }
+
+  function followRun() {
+    chats.setRunState(id, 'running')
+    // The run may belong to another version: show the path it started from, then follow the reply on top of it.
+    void refresh().then(() => resumeIfRunning())
+  }
+
+  function switchBranch(messageId: string): Promise<void> {
+    if (busy.value || switching.value || resuming || !persisted.value)
+      return Promise.resolve()
+    switching.value = true
+    const task = (async () => {
+      try {
+        const detail = await api.chats.switchBranch({ params: { id }, body: { messageId } })
+        applyDetail(detail, { keepPrefix: true })
+      }
+      catch (error) {
+        const failure = toHarnessError(error)
+        if (isRunActiveConflict(failure))
+          followRun()
+        else if (failure.code === 'not_found')
+          void refresh()
+        throw failure
+      }
+      finally {
+        switching.value = false
+      }
+    })()
+    pendingSwitch = task
+    void task.catch(() => {}).then(() => {
+      if (pendingSwitch === task)
+        pendingSwitch = null
+    })
+    return task
   }
 
   async function approve(decision: ToolApprovalDecision): Promise<void> {
@@ -550,6 +809,8 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     persisted,
     runState,
     busy,
+    branches,
+    switching,
     send,
     edit,
     regenerate,
@@ -558,6 +819,9 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     load,
     refresh,
     resumeIfRunning,
+    switchBranch,
+    refreshBranches,
+    takeBackUnstored,
   }
 }
 
