@@ -71,8 +71,8 @@ function mockModel(id: string, name: string, capabilities: Partial<Record<MockCa
 /**
  * The nine mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
  * PROVIDERS.md 8. The media models carry explicit kinds: `image` (vision, the same cost), `transcription` and `speech`
- * (with `voices`). `image-chat` and `image-tool` say `kind: 'chat'` explicitly: an explicit kind wins over `classify()`,
- * whose id fallback would take any id containing "image" for an image model and hide it from the picker.
+ * (with `voices`). `image-chat` and `image-tool` say `kind: 'chat'` explicitly: an explicit kind always wins over
+ * `classify()`, so their ids can never be read as dedicated image models.
  */
 export function mockModels(): ModelInfo[] {
   return [

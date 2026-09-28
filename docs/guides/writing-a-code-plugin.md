@@ -283,9 +283,13 @@ ctx.providers.register({
 - `ctx.models.register('openrouter', [{ id: 'vendor/new-model' }])` adds models to any provider, builtins included.
 - Image and voice models (plugin API 1.1.0): add `createImageModel`, `createTranscriptionModel` or `createSpeechModel`
   (plus `imageParams`, `transcriptionOptions` and `voices` on speech models) and declare the models with
-  `kind: 'image'`, `'transcription'` or `'speech'`; use `"engines": { "harness": "^1.1.0" }`. A local Whisper server
-  for dictation is [PLUGINS.md 15 (e)](../PLUGINS.md#e-code-provider-plugin-dictation-through-a-local-whisper-server-plugin-api-110);
-  `ctx.images.generate()` creates images from plugin code (stored as files, usage recorded).
+  `kind: 'image'`, `'transcription'` or `'speech'`; use `"engines": { "harness": "^1.1.0" }`. Seeds of these kinds are
+  listed even next to a live listing, but only when the matching factory exists: without `createImageModel` your image
+  models never show up. Image models appear in the composer's "Image models" group; transcription and speech models
+  are picked in Settings → Media. A local Whisper server for dictation is
+  [PLUGINS.md 15 (e)](../PLUGINS.md#e-code-provider-plugin-dictation-through-a-local-whisper-server-plugin-api-110);
+  `ctx.images.generate()` creates images from plugin code (stored as files, usage recorded; errors in
+  [PLUGINS.md 9](../PLUGINS.md#plugincontext)).
 
 ## Commands
 

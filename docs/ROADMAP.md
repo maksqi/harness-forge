@@ -152,9 +152,10 @@ ADR-027 consequence).
   - [x] W6.7 chat-surface-web · [x] W6.8 media-parts-web · [x] W6.9 composer-web · [x] W6.10 media-settings-web
   - [x] W6.11 app-web (shared fresh-auth composable, tablet touch targets)
   - [x] Gate + checkpoint commit (K5: CCR batch, migration `0003` marks cached model listings stale)
-- [ ] P6-B Feature e2e, docs, live media checks, fix-ups, final gate
-  - [ ] W6.12 e2e-features · [ ] W6.13 docs-final · [ ] W6.14 live-media
-  - [ ] Final gate (e2e ×3, screenshots, audit, v1.1 → v1.2 upgrade) + checkpoint commit
+- [x] P6-B Feature e2e, docs, live media checks, fix-ups, final gate
+  - [x] W6.12 e2e-features · [x] W6.13 docs-final · [x] W6.14 live-media (W6.15 / W6.16 fix-ups not needed)
+  - [x] Final gate (e2e ×3, screenshots, audit, v1.1 → v1.2 upgrade) + checkpoint commit; the live provider suite
+    (incl. `HF_LIVE_MEDIA=1`) is left to the user (paid, needs keys)
 
 ## Backlog (not in v1.2)
 
@@ -162,7 +163,10 @@ Multi-user accounts · child-process isolation for code plugins · plugin market
 knowledge/RAG · agent workspace (file and shell tools; revisits ADR-015) · desktop/CLI clients · master-key rotation ·
 audio attachments to chat models · declarative image and voice providers · provider-native image tools (e.g. the
 OpenAI Responses image tool) · on-device speech synthesis · cleanup of orphaned files (generated images are only
-removed by delete-all) · video generation.
+removed by delete-all) · video generation · a `modelName` in the plugin API image result (the `generate_image`
+text names the model ref) · the same error for an unknown provider on the media routes as on chat (404 `not_found` vs
+400 `provider_not_configured`) · verify Alt+V dictation on Firefox / Windows (Alt+J is the documented fallback) · run
+the live provider suite with `HF_LIVE_MEDIA=1` and record the results (PROVIDERS.md 11).
 
 ## Wave log
 
@@ -185,3 +189,5 @@ removed by delete-all) · video generation.
 | P6-0a | coordinator (K1), C10, D6 | audit ok (67 paths; 7 compile-fix files accepted); 4256 tests; build ok; CSP 38/38; 3 new routes mounted (501); e2e 44 passed; CI on `a5fd107` green; Dependabot now opens separate katex / ai-sdk / minor PRs (#2-#4, green) | (this commit) |
 | P6-0b | coordinator (K3, K4), C11, C12 | audit ok (75 paths; 4 test/fake files accepted); 4374 tests; build ok; CSP 38/38 incl. `media-src 'self' blob:`; `Permissions-Policy: microphone=(self)`; e2e 44 passed (new fake-media Playwright config, empty `tablet` project); upgrade probe on a seeded v1.1 copy: `0002` applied, remembered pointers only on the active path (A → RA → B → RB), 0 invalid, `GET /chats/:id` unchanged, 24 chats; FREEZE | (this commit) |
 | P6-A | W6.1 – W6.11 (+ coordinator K5: 3 stale skeleton tests, 2 frozen doc comments, plugins-list e2e 3 tools, builtin `engines ^1.1.0`, migration `0003`) | audit ok (199 paths, no frozen file touched); 5060 tests; build ok; CSP 38/38; probes 21/21 (image turn 2 stored files + metadata, image-output chat, `generate_image` tool, no `data:` URL saved, transcription + 400 / 413, speech WAV no-store + 400, headers, remembered path, delete version 200 / `only-version` / `run-active`, `chat.updated.activeLeafId`, no transcript in logs); e2e 44 passed; screenshots reviewed (versions trash icon, mic, Image models group, Media nav); `pnpm audit --prod` clean | (this commit) |
+| P6-B | W6.12, W6.13, W6.14 (+ coordinator: migration `0003` now ages listings by one TTL instead of clearing them (W6.13 found that null hid cached listings), stale classification comments + the plugin-sdk `seedModels` doc, PROVIDERS.md 12 media subsection, `live.yml` `media` input, the expanded sidebar trigger's 40 px touch target (W6.12 found it)) | audit ok (39 paths); e2e 61 run tests + 4 screenshot tests; new specs 17/17 ×3; docs reconciled; live media unit tests 52 | (final gate commit) |
+| Final gate v1.2 | coordinator | frozen install ok; 5091 tests; build ok; CSP 38/38; probes 21/21; e2e 61 passed ×3 (chromium + mobile + tablet); 5 new screens reviewed; `pnpm audit --prod` clean; real v1.1 → v1.2 upgrade 9/9 (v1.1 from `30da884` in a worktree). Live provider suite not run (needs the user's keys) | (this commit) |

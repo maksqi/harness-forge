@@ -22,8 +22,8 @@ const LIVE_IDS = /live|native-audio/i
 /** Text-to-speech models of the listing (`.speech(id)`). */
 const SPEECH_IDS = /-tts/i
 /**
- * Chat models that answer with images (`capabilities.imageOutput`): kept with an explicit `chat` kind, because the id
- * fallback of the catalog's `classify()` would take an id containing "image" for a dedicated image model.
+ * Chat models that answer with images (`capabilities.imageOutput`): kept with an explicit `chat` kind, which always wins
+ * over the catalog's `classify()`, so they can never be read as dedicated image models.
  */
 const IMAGE_OUTPUT_IDS = /^(?:gemini-.*-image|nano-banana)/i
 

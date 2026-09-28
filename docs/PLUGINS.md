@@ -52,11 +52,15 @@ part of the server they may import server dependencies (for example the official
 
 | Id (card name) | Contributes | Notes |
 |---|---|---|
-| `core-providers` (Core providers) | the 13 builtin providers ([PROVIDERS.md](./PROVIDERS.md)) | individual providers can be disabled (`PATCH /api/providers/:id`) |
-| `core-tools` (Core tools) | tools `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard) and `generate_image` (Phase 6, policy `ask`) | setting `allowLocalhost` (below); `generate_image` uses the image model of Settings → Media (`imageModelRef`) |
+| `core-providers` (Core providers) | the 13 builtin providers ([PROVIDERS.md](./PROVIDERS.md)), since Phase 6 with image, transcription and speech models ([PROVIDERS.md 13](./PROVIDERS.md#13-image-and-voice-models)) | individual providers can be disabled (`PATCH /api/providers/:id`) |
+| `core-tools` (Core tools) | 3 tools: `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard) and `generate_image` (Phase 6, policy `ask`) | setting `allowLocalhost` (below); `generate_image` uses the image model of Settings → Media (`imageModelRef`) |
 | `core-commands` (Core commands) | 10 template slash commands (below) | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server |
 | `core-mcp` (MCP servers) | MCP servers configured in the MCP panel (`mcp_servers` table); the panel is its Overview | settings `autoReconnect`, `connectTimeoutSeconds` (below) |
 | `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
+
+Builtin manifests in v1.2: `core-providers` and `core-tools` are version 1.1.0 and declare `engines.harness`
+`"^1.1.0"` (they use 1.1 members); `mock` stays version 1.0.0 but declares `"^1.1.0"`; `core-commands` and `core-mcp`
+stay 1.0.0 with `"^1.0.0"`.
 
 Builtin tools (`core-tools`):
 
@@ -64,7 +68,7 @@ Builtin tools (`core-tools`):
 |---|---|---|
 | `current_time` | `{ timezone? }`: IANA name (`Europe/Berlin`, `UTC`); default the server time zone; an unknown zone is a `validation_error` | `{ iso, unixMs, timezone, local, utcOffset, weekday }` (`local` = `YYYY-MM-DD HH:mm:ss`, `utcOffset` = `+02:00`) |
 | `web_fetch` | `{ url, maxChars? }`: `http:` / `https:` URL (<= 2048 characters); `maxChars` 1000-40000, default 20000 | `{ url, status, contentType, title, text, truncated }`: `url` after redirects, the readable text of an HTML page (`title` from `<title>` or `og:title`) or the text of a text document (plain, markdown, JSON, XML, ...); other content types are refused |
-| `generate_image` (Phase 6, ADR-028) | `{ prompt, n?, aspectRatio? }`: prompt 1-32000 characters, `n` 1-4 (default 1), `aspectRatio` one of `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `16:9`, `9:16` | `{ modelRef, images: [{ fileId, url, mediaType, name }], costUsd?, revisedPrompt? }`: file references only; the model sees a short text ("Generated 2 images with <model>; they are shown to the user below this call.") and the chat shows the images below the tool row. Fails with "Choose an image model in Settings → Media." while `imageModelRef` is null; timeout 300 s |
+| `generate_image` (Phase 6, ADR-028) | `{ prompt, n?, aspectRatio? }`: prompt 1-32000 characters (trimmed), `n` 1-4 (default 1), `aspectRatio` one of `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `16:9`, `9:16` (default: the model's) | `{ modelRef, images: [{ fileId, url, mediaType, name }], costUsd?, revisedPrompt? }` (1-4 images; `costUsd` when the catalog prices the model; `revisedPrompt` cut to fit 16 KB of JSON): file references only, well under the 64 KB output cap. The model sees a short text instead ("Generated 2 images with <model ref>; they are shown to the user below this call.", or "Generated 1 image with <model ref>; it is shown to the user below this call."), and the chat pipeline appends one image `file` part per image after the call and adds the tool's `costUsd` to the cost of the message, only for this tool of `core-tools` (checked by owner: a tool of the same name from another plugin never gets images appended). The tool is always registered; while `imageModelRef` is null a call fails with "Choose an image model in Settings → Media."; other failures are the `ctx.images` errors (section 9). Timeout 300 s |
 
 `web_fetch` goes through the SSRF guard: public addresses only, every redirect re-checked (at most 5), 10 s timeout,
 2 MB body. The `core-tools` setting **Allow localhost in web_fetch** (`allowLocalhost`, default off) also admits
@@ -97,7 +101,9 @@ manifest declares the API range it supports in `engines.harness`; the host check
 | `1.1.0` | Phase 6 (additive): the optional `ProviderDefinition` members `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel`, `transcriptionOptions`; `PluginContext.images.generate`; model kinds `transcription` and `speech`, `ModelInfo.voices`, `capabilities.imageOutput` |
 
 A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0`). A plugin that uses a 1.1 member should
-declare `"^1.1.0"`, so a 1.0 host reports it `incompatible` instead of silently ignoring the member.
+declare `"^1.1.0"`, so a 1.0 host reports it `incompatible` instead of silently ignoring the member. The builtins
+follow the same rule: `core-providers` and `core-tools` (both 1.1.0) and `mock` declare `"^1.1.0"`. The in-browser
+templates and the example plugins still declare `"^1.0.0"` (they use no 1.1 member).
 
 ## 2. Plugin directory layout
 
@@ -327,6 +333,11 @@ Optional fields picked up when present: name <- `display_name` / `displayName` /
 `type` (`chat`, `language`, `text` -> `chat`; `embedding`, `embeddings` -> `embedding`; `image` -> `image`; `audio`,
 `tts`, `stt`, `transcribe` -> `audio`; anything else -> `other`). Listings are cached for 24 h; a failed refresh
 keeps the last good listing (see [ARCHITECTURE.md, Model catalog](./ARCHITECTURE.md#9-model-catalog)).
+
+Since Phase 6 a declarative provider has no media factories, so the catalog leaves out its listed models of kind
+`image`, `transcription` or `speech` (a `type` of `image`, or an id the host classifies that way, such as `dall-e-3` or
+`whisper-1`); `audio`, `embedding` and `other` models stay listed but hidden. Declarative image and voice providers are
+in the backlog; a code plugin can provide them ([section 9](#providerdefinition)).
 
 ### `reasoningStyle`
 
@@ -670,7 +681,7 @@ export interface CredentialField {
 export interface ModelInfo {
   id: string
   name?: string
-  kind?: ModelKind                                // default 'chat'
+  kind?: ModelKind                                // absent: classified by the host (most models are 'chat')
   contextWindow?: number
   maxOutputTokens?: number
   capabilities?: {
@@ -700,6 +711,20 @@ export interface HarnessErrorInit {                // shape of API.md section 2.
   action?: HarnessErrorAction
   details?: unknown
 }
+// ---------- 1.1.0: image and transcription requests (Phase 6) ----------
+export interface ImageParamsRequest {             // input of ProviderDefinition.imageParams()
+  n: number                                       // images to generate, 1..4 (always 1 for a chat model with image output)
+  aspectRatio?: ImageAspectRatio                  // omitted = the provider default ("Auto")
+  inputs: number                                  // input images sent with the prompt (an edit); 0 = a new image
+}
+export interface ImageParamsResult {              // call additions returned by imageParams()
+  size?: `${number}x${number}`                    // generateImage({ size }) of an image model, e.g. '1536x1024'
+  aspectRatio?: `${number}:${number}`             // generateImage({ aspectRatio }) of an image model, e.g. '16:9'
+  providerOptions?: ProviderOptions               // deep-merged: generateImage (image model) or streamText (imageOutput chat model)
+}
+export interface TranscriptionHints {             // input of ProviderDefinition.transcriptionOptions()
+  language?: string                               // ISO 639 code of the spoken language; absent = detect automatically
+}
 export interface ProviderDefinition {
   id: string
   name: string
@@ -716,15 +741,11 @@ export interface ProviderDefinition {
   mapError?(err: unknown): HarnessErrorInit | undefined
   // ---------- 1.1.0 (Phase 6, all optional) ----------
   createImageModel?(modelId: string, rt: ProviderRuntime): ImageModelV4 | ImageModelV3
-  imageParams?(
-    request: { n: number; aspectRatio?: ImageAspectRatio; inputs: number },
-    model: ModelInfo,
-  ): { size?: `${number}x${number}`; aspectRatio?: `${number}:${number}`; providerOptions?: ProviderOptions } | undefined
+  imageParams?(request: ImageParamsRequest, model: ModelInfo): ImageParamsResult | undefined
   createTranscriptionModel?(modelId: string, rt: ProviderRuntime): TranscriptionModelV4 | TranscriptionModelV3
   createSpeechModel?(modelId: string, rt: ProviderRuntime): SpeechModelV4 | SpeechModelV3
   transcriptionOptions?(hints: TranscriptionHints): ProviderOptions | undefined
 }
-export interface TranscriptionHints { language?: string }   // 1.1: an ISO 639 code; absent = detect automatically
 
 // ---------- tools ----------
 /** The AI SDK tool result output union ('text' | 'json' | 'execution-denied' | 'error-text' | 'error-json' |
@@ -795,6 +816,31 @@ export interface HostAi {
   createOpenAI: typeof import('@ai-sdk/openai').createOpenAI
   createGoogleGenerativeAI: typeof import('@ai-sdk/google').createGoogleGenerativeAI
 }
+// ---------- 1.1.0: ctx.images (Phase 6) ----------
+export interface ImageGenerateOptions {
+  prompt: string                                  // 1..32000 characters (trimmed)
+  modelRef?: string                               // an image model; default: the imageModelRef setting (Settings -> Media)
+  n?: number                                      // 1..4, default 1
+  aspectRatio?: ImageAspectRatio
+  chatId?: string                                 // attributes the usage row to a chat
+  signal?: AbortSignal
+}
+export interface GeneratedImageFile {             // one generated image, stored as a file
+  fileId: string
+  url: string                                     // '/api/files/<fileId>', usable as the url of a UI file part
+  mediaType: string                               // 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+  name: string                                    // e.g. 'image-1.png'
+  size: number                                    // bytes
+}
+export interface ImageGenerateResult {
+  modelRef: string                                // the image model used
+  images: GeneratedImageFile[]
+  costUsd?: number                                // estimated from catalog prices; absent when unknown
+  revisedPrompt?: string                          // the prompt as rewritten by the provider, when it reports one
+}
+export interface PluginImagesApi {
+  generate(options: ImageGenerateOptions): Promise<ImageGenerateResult>
+}
 export interface PluginContext {
   plugin: { id: string; version: string; dir: string; dataDir: string }
   logger: Logger
@@ -816,23 +862,9 @@ export interface PluginContext {
   hooks: {
     on<K extends HookName>(name: K, fn: (...args: HookMap[K]) => unknown, options?: { priority?: number }): Disposable
   }
-  images: {                                       // 1.1.0 (Phase 6)
-    generate(o: {
-      prompt: string                              // 1..32000 characters
-      modelRef?: string                           // default: the imageModelRef setting (Settings -> Media)
-      n?: number                                  // 1..4, default 1
-      aspectRatio?: ImageAspectRatio
-      chatId?: string                             // attributes the usage row to a chat
-      signal?: AbortSignal
-    }): Promise<{
-      modelRef: string
-      images: { fileId: string; url: string; mediaType: string; name: string; size: number }[]   // stored files
-      costUsd?: number                            // estimated
-      revisedPrompt?: string
-    }>
-  }
   ai: HostAi
   fetch: typeof globalThis.fetch
+  images: PluginImagesApi                         // 1.1.0 (Phase 6)
 }
 export interface PluginModule {
   setup(ctx: PluginContext): void | Promise<void>
@@ -847,10 +879,13 @@ Package layering (ADR-018): the data shapes (`PluginManifest`, `DeclarativeProvi
 `credentialFieldSchema`, `modelInfoSchema`, `settingsSchemaSchema`, `reasoningEffortSchema`, `toolPolicySchema`,
 `apiFormatSchema`, `harnessErrorCodeSchema`, `modelKindSchema`, `imageAspectRatioSchema`, ...; see
 [API.md](./API.md)), and the types above are inferred from
-them. `@harness-forge/plugin-sdk` re-exports them unchanged and adds the runtime contract (`PluginContext`,
-`ProviderDefinition`, `ToolDefinition`, `CommandDefinition`, `HookMap`, `PluginModule`, `definePlugin`,
-`PLUGIN_API_VERSION`) plus `settingsValuesSchema(schema)`, which builds the zod validator of a settings form.
-`ModelInfo` must be imported from these packages, not from `ai` (which exports an unrelated type of the same name).
+them. `@harness-forge/plugin-sdk` re-exports them unchanged (the types, and the manifest and plugin data schemas as
+values) and adds the runtime contract (`PluginContext`, `ProviderDefinition`, `ToolDefinition`, `CommandDefinition`,
+`HookMap`, `PluginModule`, `definePlugin`, `PLUGIN_API_VERSION`) plus `settingsValuesSchema(schema)`, which builds the
+zod validator of a settings form. Plugin API 1.1.0 adds the type exports `ImageParamsRequest`, `ImageParamsResult`,
+`TranscriptionHints`, `PluginImagesApi`, `ImageGenerateOptions`, `ImageGenerateResult` and `GeneratedImageFile`, and
+re-exports the types `ImageAspectRatio` and `ModelKind` from shared. `ModelInfo` must be imported from these packages,
+not from `ai` (which exports an unrelated type of the same name).
 
 ### `PluginContext`
 
@@ -872,7 +907,7 @@ them. `@harness-forge/plugin-sdk` re-exports them unchanged and adds the runtime
 | `mcp.register(d)` | same rules as `contributes.mcpServers` |
 | `commands.register(d)` | exactly one of `template` / `run`; a duplicate name throws `conflict` |
 | `hooks.on(name, fn, { priority })` | registers a hook handler; see [Hooks](#hooks) |
-| `images.generate(o)` | 1.1.0 (ADR-028): generates images with `o.modelRef` or the `imageModelRef` setting (neither → `validation_error` "Choose an image model in Settings → Media."; a model that is not an image model → `validation_error`), stores every image as a file and returns file references (`url` = `/api/files/<fileId>`); writes a usage row (`purpose: 'image'`, attributed to `o.chatId` when given) with an estimated cost; aborted by `o.signal` and by `ctx.signal`. The builtin `generate_image` tool uses it. `ctx.ai` has no `generateImage`: images made through `ctx.images` are stored and accounted for |
+| `images.generate(o)` | 1.1.0 (ADR-028): generates `o.n` images (default 1) with `o.modelRef` or the `imageModelRef` setting, stores every image as a file (PNG, JPEG, WebP or GIF, at most 20 MB, the same bytes reuse one file) and returns an `ImageGenerateResult` with file references (`url` = `/api/files/<fileId>`; `costUsd` only when the catalog prices the model). Writes exactly one usage row (`purpose: 'image'`, attributed to `o.chatId` when given, else no chat) with the estimated cost. Aborted by `o.signal` and by `ctx.signal`: the promise rejects with the abort reason (a provider answer that arrives after the abort still writes its usage row but stores no image). Errors (`HarnessError`): options that fail the checks (the `generate_image` input rules, a `modelRef`, `chatId` <= 128 characters) → `validation_error`; no model → `validation_error` "Choose an image model in Settings → Media."; a model that is not an image model → `validation_error` (`modelRef: The model "<ref>" is not an image model.`); an image model whose provider has no `createImageModel` → `model_not_found`; an unknown provider → `not_found`; a disabled provider or missing key → `provider_not_configured`; provider failures mapped as for chats (`auth_invalid`, `rate_limited`, `provider_error`, ...); every returned image refused by the file store → `provider_error` "The image model returned no image that could be stored: only PNG, JPEG, WebP and GIF images of at most 20 MB are kept."; a call after the plugin was disposed → `plugin_error`. The builtin `generate_image` tool uses it. `ctx.ai` has no `generateImage`: images made through `ctx.images` are stored and accounted for |
 | `ai` | host library copies ([section 8](#8-code-plugins)) |
 | `fetch` | global `fetch` combined with `ctx.signal` (`AbortSignal.any`) and a default `User-Agent: harness-forge/<appVersion> plugin/<id>`; no SSRF guard (code plugins are trusted); no default timeout |
 
@@ -888,18 +923,23 @@ All `register` calls are valid during and after `setup` until the plugin is disp
 | `credentials` | yes | fields of the key dialog; `[]` for keyless providers |
 | `modelsDevId` | no | models.dev key for metadata (default: `id`) |
 | `smallModelId` | no | cheap model for chat titles and the default credential ping |
-| `seedModels` | no | used when there is no live listing and no cached listing |
+| `seedModels` | no | chat seeds are used when there is no live listing and no cached listing; seeds with a media kind (`image`, `transcription`, `speech`; 1.1) are always listed, even next to a live listing, when the provider defines the matching factory |
 | `keyUrl` | no | "Get a key" link in the key dialog |
 | `createLanguageModel(modelId, rt)` | yes | returns a provider **instance** model; called per request; must not perform network I/O; guarded (5 s); any model id may be requested (custom ids) |
 | `listModels(rt)` | no | live listing; guarded (15 s); cached 24 h; a failure keeps the last good listing |
-| `validate(rt)` | no | credential test; guarded (15 s). Default: `listModels(rt)` when defined, else a 1-token `generateText` on `smallModelId` (else the first seed) |
+| `validate(rt)` | no | credential test; guarded (15 s). Default: `listModels(rt)` when defined, else a 1-token `generateText` on `smallModelId` (else the first chat seed, else the first visible chat model; never an image, transcription or speech model) |
 | `reasoning(effort, model)` | no | synchronous; called only when `effort !== 'auto'`, `model.capabilities.reasoning` is true and `effort` is offered for the model; returns request additions or `undefined` |
 | `mapError(err)` | no | synchronous; first chance to map an error of this provider; return `undefined` to fall back to the default mapping |
-| `createImageModel(modelId, rt)` | no (1.1.0) | returns an `ImageModelV4` (or `V3`) instance for a model of kind `image`; called per generation; no network I/O; guarded (5 s). Without it the provider's image models stay hidden from the composer and resolve to `model_not_found` |
-| `imageParams(request, model)` | no (1.1.0) | synchronous; maps `{ n, aspectRatio?, inputs }` (images requested, the aspect ratio, input images) to `{ size?, aspectRatio?, providerOptions? }` for this model, or `undefined`. Used for dedicated image models (`size` / `aspectRatio` go to `generateImage`) and for chat models with `capabilities.imageOutput` (`providerOptions` is merged into the chat call). Examples in [PROVIDERS.md 13](./PROVIDERS.md#13-image-and-voice-models) |
-| `createTranscriptionModel(modelId, rt)` | no (1.1.0) | returns a `TranscriptionModelV4` (or `V3`) instance for a model of kind `transcription` (dictation); no network I/O; guarded (5 s). A provider without it cannot be chosen for dictation (`validation_error`) |
-| `createSpeechModel(modelId, rt)` | no (1.1.0) | returns a `SpeechModelV4` (or `V3`) instance for a model of kind `speech` (read-aloud); no network I/O; guarded (5 s) |
-| `transcriptionOptions(hints)` | no (1.1.0) | synchronous; turns `{ language? }` (an ISO 639 code; absent = detect) into provider options for `transcribe()`, e.g. `{ openai: { language } }`; `undefined` = send nothing |
+| `createImageModel(modelId, rt)` | no (1.1.0) | returns an `ImageModelV4` (or `V3`) instance for a model of kind `image`; called per generation; no network I/O; guarded (5 s; a returned promise is awaited inside the guard; a throw, a timeout or a value that is not a model instance is a `plugin_error`). Without it the provider's image models are left out of the catalog; a custom image model id the user adds stays listed and resolves to `model_not_found` |
+| `imageParams(request, model)` | no (1.1.0) | synchronous; maps an `ImageParamsRequest` `{ n, aspectRatio?, inputs }` (images requested, the aspect ratio, input images) to an `ImageParamsResult` `{ size?, aspectRatio?, providerOptions? }` for this model, or `undefined`. Used for dedicated image models (`size`, `aspectRatio` and `providerOptions` go to `generateImage`; without `imageParams` the aspect ratio is passed as is) and for chat models with `capabilities.imageOutput` (called with `n: 1`, `inputs: 0`; only `providerOptions` is used, deep-merged under the `reasoning()` options). The result is checked (`size` as `WxH`, `aspectRatio` as `W:H`, `providerOptions` an object of objects; anything else is dropped); a throw is logged and ignored. Examples in [PROVIDERS.md 13](./PROVIDERS.md#13-image-and-voice-models) |
+| `createTranscriptionModel(modelId, rt)` | no (1.1.0) | returns a `TranscriptionModelV4` (or `V3`) instance for a model of kind `transcription` (dictation); no network I/O; guarded like `createImageModel`. Without it the provider's transcription models are left out of Settings → Media; a custom one answers `validation_error` (`modelRef: The provider "<name>" cannot transcribe speech, so the model "<ref>" cannot be used.`) |
+| `createSpeechModel(modelId, rt)` | no (1.1.0) | returns a `SpeechModelV4` (or `V3`) instance for a model of kind `speech` (read-aloud); no network I/O; guarded like `createImageModel`. Without it the provider's speech models are left out (a custom one answers `validation_error`, "cannot read text aloud") |
+| `transcriptionOptions(hints)` | no (1.1.0) | synchronous; turns `TranscriptionHints` `{ language? }` into provider options for `transcribe()`, e.g. `{ openai: { language } }`; `undefined` = send nothing. The host calls it only with an ISO 639 code (the setting "Detect automatically" never reaches it); a throw or a value that is not an object of objects sends no language |
+
+Registration (`ctx.providers.register`, and the definitions built from declarative providers) checks the data fields
+and the functions: `createLanguageModel` is required; `listModels`, `validate`, `reasoning`, `mapError` and the 1.1
+members `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel` and `transcriptionOptions`
+must be functions when present (`validation_error` `Provider "<id>": "<member>" must be a function.`).
 
 `ProviderRuntime`:
 
@@ -923,16 +963,16 @@ non-empty wins); a provider whose required fields resolve only from the environm
 |---|---|
 | `id` | model id sent to the API; unique per provider; <= 256 characters, may contain `:` and `/` |
 | `name` | display name (default: `id`) |
-| `kind` | `chat` (default); `image` models appear in the composer's "Image models" group when the provider defines `createImageModel`; `transcription` and `speech` models (1.1) are chosen in Settings → Media; `embedding`, `audio` and `other` are hidden. An explicit `kind` wins over the host's classification (seeds with a non-chat kind are listed even next to a live listing) |
+| `kind` | absent: the host classifies the model (the image id pattern, models.dev modalities, else the id; [ARCHITECTURE.md 9](./ARCHITECTURE.md#9-model-catalog)), and most models are `chat`. An explicit `kind` wins over that classification. `image` models appear in the composer's "Image models" group; `transcription` and `speech` models (1.1) are chosen in Settings → Media; `embedding`, `audio` and `other` are hidden. Image, transcription and speech models are listed only when the provider defines the matching factory (a custom model id excepted); seeds of those three kinds are listed even next to a live listing |
 | `contextWindow` / `maxOutputTokens` | token limits (positive integers); used for trimming and the usage ring |
 | `capabilities.tools` | `false` -> tools are not sent to this model |
 | `capabilities.vision` / `pdf` | image / PDF attachments are sent as file parts |
 | `capabilities.reasoning` | shows the effort menu |
 | `capabilities.structuredOutput` | informational |
-| `capabilities.imageOutput` | 1.1: a chat model that can return images in its reply; the composer offers the aspect ratio and the provider's `imageParams` adds the provider options |
+| `capabilities.imageOutput` | 1.1: a chat model that can return images in its reply; the composer offers the aspect ratio and the provider's `imageParams` adds the provider options. Only chat models report it (the catalog sets it to `false` on every other kind); models.dev sets it for a text + image output |
 | `reasoningEfforts` | efforts offered in the effort menu besides `auto` (which is always offered); when omitted on a reasoning model: `off`, `low`, `medium`, `high`; `max` only when listed; an effort that is not offered is treated as `auto` |
-| `cost` | USD per 1M tokens (`input`, `output`, `cacheRead`, `cacheWrite`); image models use `input` / `output` for the image token usage (an estimate) |
-| `voices` | 1.1: speech models only; up to 100 unique voice names (1-64 characters) suggested in Settings → Media; the user may type any other name |
+| `cost` | USD per 1M tokens (`input`, `output`, `cacheRead`, `cacheWrite`); image models use `input` / `output` for the image token usage (an estimate: `(input tokens × input + output tokens × output) / 1e6`; no cost without a price or without token counts) |
+| `voices` | 1.1: speech models only; up to 100 unique voice names (1-64 characters) suggested in Settings → Media; the user may type any other name. Seeds and `models.register` must pass this rule (else `validation_error`); a live listing's list is cleaned instead (invalid names dropped, duplicates removed, capped at 100) |
 
 ### Tools
 
@@ -969,13 +1009,13 @@ logged and the plugin detail shows it).
 
 | Hook | Input (read-only) | Output (mutable) | When it runs | Timeout | Failure behavior |
 |---|---|---|---|---|---|
-| `chat.params` | `chatId`, `modelRef`, `model`, `reasoningEffort`, `toolMode` | `instructions`, `temperature?`, `maxOutputTokens?`, `maxSteps`, `reasoning?`, `providerOptions` | once per run, after model resolution and `provider.reasoning()`, before `streamText` | 3 s | changes discarded, run continues |
-| `chat.headers` | `chatId`, `modelRef` | `headers` (sent with every model request of the run) | once per run, after `chat.params` | 3 s | changes discarded |
-| `chat.messages` | `chatId`, `modelRef` | `messages` (`ModelMessage[]` after `convertToModelMessages`, before context trimming): the path being answered, from the first message to the new or answered user message; other versions of edited or regenerated messages are never included (ADR-023) | once per run | 3 s | changes discarded |
+| `chat.params` | `chatId`, `modelRef`, `model`, `reasoningEffort`, `toolMode` | `instructions`, `temperature?`, `maxOutputTokens?`, `maxSteps`, `reasoning?`, `providerOptions` | once per chat run (not for image turns, which call no chat model), after model resolution and `provider.reasoning()`, before `streamText`; for a chat model with image output `providerOptions` already holds the `imageParams()` options | 3 s | changes discarded, run continues |
+| `chat.headers` | `chatId`, `modelRef` | `headers` (sent with every model request of the run) | once per chat run, after `chat.params` (not for image turns) | 3 s | changes discarded |
+| `chat.messages` | `chatId`, `modelRef` | `messages` (`ModelMessage[]` after `convertToModelMessages`, before context trimming): the path being answered, from the first message to the new or answered user message; other versions of edited or regenerated messages are never included (ADR-023) | once per chat run (image turns send no history and run no `chat.*` hook) | 3 s | changes discarded |
 | `tool.approve` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `decision?` (`allow` / `ask` / `deny`) | per tool call in `ask` / `auto` mode, step 2 of the approval order | 3 s | ignored; resolution falls through to the policy |
 | `tool.before` | `chatId`, `modelRef`, `tool`, `toolCallId` | `input` | per execution, after approval, before `execute` | 3 s | **a throw blocks the call** (error result `Blocked by <pluginId>: <message>`, not counted as a failure); a timeout also blocks and counts |
 | `tool.after` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `output` | per successful execution, before the 64 KB cap | 3 s | changes discarded (original output kept) |
-| `message.completed` | `chatId`, `modelRef`, `message`, `usage`, `costUsd?`, `aborted` | none | once per run after the assistant message is persisted (finished, aborted or failed runs; errors are in `message.metadata.error`) | 3 s | logged only |
+| `message.completed` | `chatId`, `modelRef`, `message`, `usage`, `costUsd?`, `aborted` | none | once per run after the assistant message is persisted (finished, aborted or failed runs; errors are in `message.metadata.error`); image turns included (their `usage` holds the image token counts); `costUsd` includes an image turn's estimated cost and the `costUsd` of `generate_image` outputs | 3 s | logged only |
 
 ## 10. Tool approval
 
@@ -1059,6 +1099,9 @@ A throw or timeout becomes a `plugin_error` (with the plugin id) plus a plugin l
 killed: on timeout the host stops waiting, aborts the related `AbortSignal` and continues; a plugin stuck in a
 synchronous loop blocks the whole server (recover with safe mode). `unhandledRejection` events are logged (attributed
 to a plugin when possible) and never crash the process.
+
+The synchronous provider members `reasoning`, `imageParams` and `transcriptionOptions` (1.1) have no timeout: a throw
+or an invalid result is logged and ignored (the request goes out without those additions).
 
 ### Boot sentinel and safe mode
 
@@ -1619,7 +1662,9 @@ linked folder (pinned to the path).
 **How do I generate an image from a plugin?** `const { images } = await ctx.images.generate({ prompt, chatId })` uses
 the image model the user chose in Settings → Media (or pass `modelRef`) and returns stored files (`images[0].url` is
 `/api/files/<fileId>`). A tool that returns such references can say so in `toModelOutput`; only the builtin
-`generate_image` tool gets its images appended to the chat automatically.
+`generate_image` tool gets its images appended to the chat automatically. Pass the tool's `c.signal` as `signal` so a
+Stop aborts the generation; the errors are listed under `images.generate` in [section 9](#plugincontext) (without an
+image model in Settings → Media the call fails with "Choose an image model in Settings → Media.").
 
 **How do I add a speech-to-text or text-to-speech provider?** Give your `ProviderDefinition` a
 `createTranscriptionModel` or `createSpeechModel` (plus `transcriptionOptions` for languages and `voices` on speech

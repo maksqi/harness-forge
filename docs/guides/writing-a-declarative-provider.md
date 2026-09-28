@@ -133,8 +133,11 @@ Three sources feed the model picker. User custom ids from Settings -> Models are
   appended to the base URL, or an absolute URL on the same origin) and `include` / `exclude` (case-insensitive
   regular expressions on model ids; `exclude` wins).
 - Listing responses are understood in three shapes: `{ "data": [...] }` (OpenAI, Anthropic), `{ "models": [...] }`
-  (Gemini, Ollama) and a bare array (Together). Known fields such as `context_length` or `display_name` are picked
-  up. A `type` of `embedding`, `image` or `audio` hides the model from the picker.
+  (Gemini, Ollama) and a bare array (Together). Known fields such as `context_length` or `display_name` are picked up. A
+  `type` of `embedding` or `audio` (also `tts`, `stt`, `transcribe`) hides the model from the picker. A declarative
+  provider cannot generate images or speech, so image, transcription and speech models of its listing (a `type` of
+  `image`, or ids such as `dall-e-3` or `whisper-1`) are left out; image and voice providers need a code plugin
+  ([PLUGINS.md 15 (e)](../PLUGINS.md#e-code-provider-plugin-dictation-through-a-local-whisper-server-plugin-api-110)).
 - `capabilities.tools: false` stops tools from being sent to that model. `vision` and `pdf` let attachments through
   as file parts. `reasoning` shows the effort menu.
 - `contributes.models` (next to `providers`) adds models to **any** provider, builtins included:

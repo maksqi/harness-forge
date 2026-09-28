@@ -35,7 +35,7 @@ const iconMode = computed(() => state.value === 'collapsed' && !isMobile.value)
     </TooltipContent>
   </Tooltip>
 
-  <div v-else class="flex h-8 items-center gap-2 pr-0.5 pl-2">
+  <div v-else class="flex h-8 items-center gap-2 pr-0.5 pl-2 pointer-coarse:h-10">
     <BrandMark :size="16" />
     <span class="truncate font-mono text-[13px] font-medium tracking-tight text-sidebar-foreground">harness-forge</span>
     <Button
@@ -58,7 +58,7 @@ const iconMode = computed(() => state.value === 'collapsed' && !isMobile.value)
           size="icon-sm"
           aria-label="Toggle sidebar"
           :data-testid="testIds.sidebarTrigger"
-          class="ml-auto text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+          class="ml-auto text-muted-foreground hover:bg-sidebar-accent hover:text-foreground pointer-coarse:size-10"
           @click="toggleSidebar"
         >
           <PanelLeftIcon />

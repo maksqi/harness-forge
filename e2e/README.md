@@ -1,33 +1,45 @@
 # End-to-end tests
 
 Playwright specs that drive the production build (`apps/web/.output/public` served by `apps/server/dist/main.mjs`)
-in Chromium with the dev-only `mock` provider (`HF_MOCK_PROVIDER=1`, docs/PROVIDERS.md 8). Tests tagged `@smoke` in
-their title run at every gate (`--grep @smoke`); every core test is.
+in Chromium with the dev-only `mock` provider (`HF_MOCK_PROVIDER=1`, docs/PROVIDERS.md 8), including its media models
+(images, speech to text, read-aloud). Tests tagged `@smoke` in their title run at every gate (`--grep @smoke`); every
+core test is.
 
 ```
 e2e/
   helpers/            shared helpers (this file documents their API; keep it stable)
   specs/core/         core app: theme, navigation, chat, resume, keyboard, composer, settings, login (W2.6, W5.8),
-                      branching, data (backup, delete-all, import), share links (W5.10)
+                      branching, data (backup, delete-all, import), share links (W5.10), images, voice, versions,
+                      edit attachments (W6.12)
   specs/plugins/      plugins tab, install, wizard, code plugins, MCP (W3.6)
-  specs/mobile/       phone layout, project `mobile` only (W5.8)
-  specs/screenshots/  screenshots for the visual review, opt-in with `E2E_SCREENSHOTS=1` (W5.8)
+  specs/mobile/       phone layout, project `mobile` only (W5.8, W6.12)
+  specs/tablet/       touch tablet (icon rail), project `tablet` only (W6.12)
+  specs/screenshots/  screenshots for the visual review, opt-in with `E2E_SCREENSHOTS=1` (W5.8, W6.12)
   fixtures/           plugin fixtures used by the plugin specs (W3.6)
 ```
 
 ## Running
 
 `playwright.config.ts` (frozen) runs one worker, serially, against `E2E_BASE_URL`; without it the config starts
-`pnpm start:e2e` (:8899, data in `.tmp/e2e`) or reuses a server already answering there. It has two projects:
-`chromium` ("Desktop Chrome", every spec except `specs/mobile/`) and `mobile` (Pixel 7 at 390x844 with touch, only
-`specs/mobile/`). Both use Chromium, so CI needs no other browser.
+`pnpm start:e2e` (:8899, data in `.tmp/e2e`) or reuses a server already answering there. It has three projects:
+`chromium` ("Desktop Chrome", every spec except `specs/mobile/` and `specs/tablet/`), `mobile` (Pixel 7 at 390x844 with
+touch, only `specs/mobile/`) and `tablet` (Galaxy Tab S9 landscape, 1024x640 with touch: `pointer: coarse`, wider than
+the 768 px sheet breakpoint; only `specs/tablet/`). All three use Chromium, so CI needs no other browser.
+
+Media (Phase 6, docs/UI.md 14.7): every project grants `permissions: ['microphone']` and launches Chromium with
+`--use-fake-ui-for-media-stream` (no permission prompt), `--use-fake-device-for-media-stream` (a fake microphone, so
+`MediaRecorder` records a real WebM/Opus clip) and `--autoplay-policy=no-user-gesture-required` (read-aloud chunks play
+without a gesture). Headless Chromium plays the silent WAV clips of `mock:speech` to their end, so the voice specs need
+no `getUserMedia` / `MediaRecorder` / `Audio` mocks; if a CI browser ever refuses the fake devices, mock them with
+`page.addInitScript` in the voice specs (the fallback of docs/UI.md 14.7).
 
 ```sh
-# the coordinator's e2e server (default), both projects
+# the coordinator's e2e server (default), every project
 pnpm test:e2e --grep @smoke
 
 # one project
 pnpm test:e2e --project=mobile
+pnpm test:e2e --project=tablet
 
 # an agent slot k: own server, fresh data directory, own output folder
 rm -rf .tmp/<agent>/data
@@ -71,33 +83,53 @@ one; a spec that wipes data asks for a server of its own (`dedicated: true`).
 | `branching.spec.ts` | message versions with `mock:echo` (docs/UI.md 7.5): A, then B; editing A shows "2/2" on the user message; "Previous version" brings back A, B and their replies (focus stays on the control); Regenerate on the last reply shows "2/2" on it; a reload keeps the versions; ArrowLeft in a switcher picks the previous version, which survives a reload; the server's `branches` match. Asserted through `message-branch*` (`data-index`, `data-count`, `data-message-id`, `aria-disabled`) |
 | `data.spec.ts` | Settings -> Data on a password server of its own (`dedicated: true`): Export backup downloads a zip (`PK` magic, `manifest.json` counts, `chats/<id>.json` per chat, no share link or token); Delete all data needs exactly `DELETE` and, with the browser clock 11 minutes past the login (`page.clock.fastForward`), the password prompt, and also deletes the share links; importing the zip brings the chats back into the sidebar with their messages (no share link); a second import skips every chat |
 | `share.spec.ts` | share links on a password server: "Share…" in the chat header menu, "Create link" (defaults, focused absolute URL); a browser context without cookies opens the link as the read-only transcript (title, messages; no sidebar, composer, actions or switchers; no session); Revoke… in the dialog, then a reload of the link shows "This link is unavailable" |
+| `images.spec.ts` | image generation (docs/UI.md 7.7, 7.16): `mock:image` from the picker's "Image models" group (`model-picker-group` `data-value="images"`), "Describe an image…", no effort / permission / context ring; `image-options-trigger` 16:9 and 2 images; a "slow" prompt shows `image-generating` (`data-count` 2, "Generating 2 images… Ns") until the gallery (`image-gallery` `data-count` 2, two `image-tile`s, `/api/files/` images of 320x180, no Copy or Read aloud); the stored reply has two file parts and `metadata.image`, never a `data:` URL; the lightbox (Previous disabled, Next focused, ArrowLeft, "1 / 2") and its same-origin Download (`image-download`, the stored file name, a PNG); Esc returns focus to the tile; Regenerate shows the placeholders again, then "2/2"; `mock:image-chat` (aspect ratio only, 3:2 → 318x212): text + a one-image gallery; `generate_image` with `mock:image-tool` (`imageModelRef` set through the API): the approval card, Allow → the tool row, the image below it, "Image tool result: 1 image(s)" |
+| `voice.spec.ts` | voice (docs/UI.md 7.17, 7.18, 9.9) with `transcriptionModelRef` / `speechModelRef` set through the API: type "Hello ", record until the timer shows 0:01 (the indicator replaces the left tools, Send disabled), Stop → one multipart request with the part `file` (`dictation.webm`, `audio/webm…`, the WebM magic) and "Hello This is a mock transcription." with the focus back in the textarea; Alt+V starts and stops; Esc in the textarea, Esc on the mic and the indicator's Cancel drop a recording without a request; without a model the mic's setup popover leads to `/settings/media`; read aloud: the request body `{ text }`, `playing` (`aria-pressed`, "Stop reading"), the natural end of a 2 s clip, a second reply stops the first, Stop and Esc → `idle`; Settings → Media: the image, speech-to-text and read-aloud selects list only their kind, the language, the voice suggestions (`mock-voice-a`, `mock-voice-b`) and the speed save, Test voice sends `{ text, modelRef, voice }`, plays and stops; everything survives a reload |
+| `versions.spec.ts` | version management (docs/UI.md 7.5, 14.1; ADR-030): "Delete this version" asks first (Cancel keeps every version and refocuses the button), "Delete version" shows the previous version (3 → 2 versions), announces "Version deleted" and focuses the switcher; down to one version: no switcher, focus on Copy; a remembered deep path (B'1 chosen under B, then an edit of A and back: B'1, not the newest B'2, also after a reload; deleting the edit returns to that path); two tabs: a switch in either tab and a deletion move the other one |
+| `edit-attachments.spec.ts` | attachments on edit (docs/UI.md 7.5, S8): the editor's chips (`message-edit-attachment`), "Remove {name}", the paperclip (`message-edit-attach`, Playwright's `filechooser` event: the hidden input has no test id) with an upload held by `page.route` (chip `uploading`, Send disabled and `aria-busy`), then Send: a new version with exactly the kept and the added file (UI, echo and server), the old version keeps its files; Cancel discards removals and uploads |
 
 ## Mobile specs (`specs/mobile`, project `mobile`)
 
-docs/UI.md 14.6, with the existing test ids (Phase 5 adds none for mobile). They are not tagged `@smoke`: the full
-suite runs them, or `pnpm test:e2e --project=mobile`.
+docs/UI.md 14.6, with the existing test ids (Phases 5 and 6 add none for mobile). They are not tagged `@smoke`: the
+full suite runs them, or `pnpm test:e2e --project=mobile`.
 
 | Spec | Covers |
 |---|---|
 | `shell.spec.ts` | the sidebar is a sheet (dialog on the left edge, narrower than the screen) opened by the header's `sidebar-trigger`, closed by a navigation; its rows are touch targets of at least 40x40 px |
 | `layout.spec.ts` | no sideways scroll at 390 px (`scrollWidth <= 390`) on `/`, a chat with wide markdown, `/plugins`, a plugin and every settings page; the composer inside the viewport on `/` and under a long transcript |
 | `chat.spec.ts` | the model picker is a bottom drawer (full width, on the bottom edge); a `mock:echo` reply streams and finishes; composer toolbar buttons and message actions are touch targets of at least 40x40 px |
+| `media.spec.ts` | Phase 6 at 390 px: the mic is a 40x40 target; recording and transcribing keep the layout (no sideways scroll, the indicator and the composer inside the viewport) and the textarea gets no focus afterwards (touch); a four-image gallery keeps two columns inside the column; the lightbox fits the screen; the image options trigger, Read aloud, Delete this version and the version switcher are 40x40 targets (sizes are polled: a dialog zooms in from 95%) |
+
+## Tablet specs (`specs/tablet`, project `tablet`)
+
+docs/UI.md 14.5, 14.7 (S9), with the existing test ids; not tagged `@smoke` (`pnpm test:e2e --project=tablet`).
+
+| Spec | Covers |
+|---|---|
+| `touch-targets.spec.ts` | `pointer: coarse` and the sidebar in the page (not a sheet); collapsed with its own trigger, the icon rail is 56 px wide (the page, `getByRole('main')`, starts at x = 56; the sidebar fills the rail inside its 1 px border) in the chat, plugins and settings modes, every visible button and link of the rail is at least 40x40 px and inside the rail; the rail's "Expand sidebar" expands it again |
 
 ## Screenshots (`specs/screenshots`)
 
 `screenshots.spec.ts` (`@screenshots`) runs only with `E2E_SCREENSHOTS=1`. It starts its own password-protected server
 from the build (`startServer`, fresh data directory, whatever `E2E_BASE_URL` says), creates a few chats (markdown,
-reasoning, tool result, pending approval, provider error, a chat whose first message and reply have two versions, and
-a chat with an outdated share link that includes reasoning and tool details), and captures every screen in dark and
-light (stored color mode set by an init script), at 1440x900 and on a 390x844 phone (Pixel 7, touch), with reduced
-motion and a browser clock that starts at a fixed time two minutes after the seed (relative times read "2m ago"; the
-clock then runs, because a frozen clock stalls the transcript's scroll-to-bottom). Files:
-`.tmp/screenshots/{dark,light}/<screen>-{desktop,mobile}.png`, for example `chat-desktop.png`, `sidebar-mobile.png`.
-Screens: login, new-chat, chat, chat-reasoning, chat-tools, chat-approval, chat-error, chat-versions (the "‹ 2/2 ›"
-switchers), share-dialog, share-page, share-unavailable, model-picker, command-palette, shortcuts (desktop), sidebar
-(mobile), plugins, plugin-detail, plugin-mcp, plugin-new-provider, plugin-new-code, settings-providers,
-settings-provider-key, settings-models, settings-general, settings-appearance, settings-data (with the share link),
-settings-about, chat-not-found, page-not-found.
+reasoning, tool result, pending approval, provider error, a chat whose first message and reply have two versions, a
+chat with an outdated share link that includes reasoning and tool details, and a chat of two `mock:image` turns: one
+16:9 image, then two variations of it), sets the image and speech-to-text models (no visible change elsewhere), and
+captures every screen in dark and light (stored color mode set by an init script), at 1440x900 and on a 390x844 phone
+(Pixel 7, touch), with reduced motion and a browser clock that starts at a fixed time two minutes after the seed
+(relative times read "2m ago"; the clock then runs, because a frozen clock stalls the transcript's scroll-to-bottom).
+Files: `.tmp/screenshots/{dark,light}/<screen>-{desktop,mobile}.png`, for example `chat-desktop.png`,
+`sidebar-mobile.png`. Screens: login, new-chat, chat, chat-reasoning, chat-tools, chat-approval, chat-error,
+chat-versions (the "‹ 2/2 ›" switchers), chat-delete-version (the "Delete this version?" dialog), chat-images (the
+galleries), chat-images-generating (a "slow" two-image turn in a chat of its own: the placeholder tiles),
+composer-recording (the recording indicator at 0:02), share-dialog, share-page, share-unavailable, model-picker,
+command-palette, shortcuts (desktop), sidebar (mobile), plugins, plugin-detail, plugin-mcp, plugin-new-provider,
+plugin-new-code, settings-providers, settings-provider-key, settings-models, settings-media (every model chosen, voice
+and speed), settings-general, settings-appearance, settings-data (with the share link), settings-about,
+chat-not-found, page-not-found. A screen that starts something undoes it in its `close` step after the picture (cancels the dialog or
+the recording, deletes its chat, turns read-aloud off again, puts the clock offset back), so the other screens look the
+same in every run; the image-turn screen runs the page clock at the real time while it is shown, because its
+"Generating… Ns" counter counts from the server's start time.
 
 ## Writing specs
 
@@ -113,6 +145,16 @@ settings-about, chat-not-found, page-not-found.
 - Keyboard shortcuts: `pressShortcut(page, 'Mod+K')`, not `ControlOrMeta`; text editing keys follow the host:
   `selectAllText(page, field)` (see Keyboard below).
 - Assistant text is markdown: straight quotes render as typographic quotes, match them with `looseQuotes()`.
+- Settings -> Media: save `mediaSettingsOf(await api.getSettings())` and restore it through `cleanup` before changing a
+  media key; start from `NO_MEDIA_SETTINGS` when a test needs a known state (e.g. no speech-to-text model).
+- Request bodies: `Request.postDataBuffer()` of a page request is empty when the body holds a file or a blob (the
+  dictation upload); `recordRequests(page, method, path)` reads bodies through `page.route()` and lets the requests
+  through (`route.fallback()`), so it also proves that an action sent nothing. Hold a request (an upload in flight) with
+  a `page.route` handler that awaits a promise before `route.fallback()`.
+- A file input without a test id (the message editor's) is driven through its button and Playwright's `filechooser`
+  event (`page.waitForEvent('filechooser')`, then `setFiles`).
+- Sizes of elements inside a dialog: poll them (`expect.poll`), dialogs zoom in from 95% (a 40 px button measures 38 px
+  meanwhile).
 - The helpers import `@harness-forge/shared` by path (`packages/shared/src/index.ts`): the root package does not
   depend on it, and Playwright compiles the TypeScript sources directly.
 - The root `tsconfig.json` type-checks `e2e/**` without the DOM library: inside `evaluate` callbacks reach browser
@@ -158,8 +200,8 @@ test('echoes a message @smoke', async ({ page, cleanup }) => {
 | `createChat({ id?, title?, modelRef? })` | `POST /api/chats` (a title here is a user title) |
 | `getChat(id)` / `searchChats(q)` / `deleteChat(id)` | chat detail, `GET /api/chats?q=`, delete (404 ignored) |
 | `stopChat(id)` / `removeChat(id)` | `POST /api/chat/:id/stop` (resolves to whether a run was stopped); stop, then delete (for `cleanup`) |
-| `sendChat({ chatId?, text, parentId?, modelRef?, toolMode?, reasoningEffort? })` | `POST /api/chat` (default `mock:echo`, `ask`, `auto`); resolves when the run finished with `{ chatId, userMessageId, chunks, text }`. `parentId`: omitted = the active leaf, `null` = a first message; an edit sends the parent of the edited message |
-| `regenerateChat({ chatId, messageId?, modelRef?, toolMode?, reasoningEffort? })` | `POST /api/chat` with `regenerate-message`: a new version of the reply `messageId` (default: the active leaf); resolves like `sendChat` (`userMessageId` = the answered user message) |
+| `sendChat({ chatId?, text, parentId?, modelRef?, toolMode?, reasoningEffort?, imageOptions? })` | `POST /api/chat` (default `mock:echo`, `ask`, `auto`); resolves when the run finished with `{ chatId, userMessageId, chunks, text }`. `parentId`: omitted = the active leaf, `null` = a first message; an edit sends the parent of the edited message. `imageOptions` (`{ n?, aspectRatio?, editPrevious? }`) only with image models and chat models with image output, e.g. `{ modelRef: 'mock:image', imageOptions: { n: 2, aspectRatio: '16:9' } }` |
+| `regenerateChat({ chatId, messageId?, modelRef?, toolMode?, reasoningEffort?, imageOptions? })` | `POST /api/chat` with `regenerate-message`: a new version of the reply `messageId` (default: the active leaf); resolves like `sendChat` (`userMessageId` = the answered user message) |
 | `waitForChatTitle(id, timeout?)` | polls until the chat has a title and returns it |
 
 Also exported: `requestFetch(context)` (a `fetch` over an `APIRequestContext`), `parseUiMessageStream(body)`,
@@ -228,6 +270,17 @@ in text fields (Home / End scroll on macOS instead of moving the caret).
 | `boxOf(locator)` | its bounding box (fails when it has none) |
 | `touchTargetSize(locator)` | the size it answers touches in: its box, or a larger positioned `::after` hit area (the 32 px send button is 44 px) |
 
+### Media (`media.ts`)
+
+| Export | Description |
+|---|---|
+| `MEDIA_SETTINGS_KEYS` · `MediaSettings` | the Settings -> Media keys: `imageModelRef`, `transcriptionModelRef`, `transcriptionLanguage`, `speechModelRef`, `speechVoice`, `speechSpeed` |
+| `mediaSettingsOf(settings)` | those keys of a `Settings` (restore them with `cleanup(api => api.updateSettings(before))`) |
+| `NO_MEDIA_SETTINGS` | nothing chosen: every model `null`, language `auto`, voice `null`, speed 1 |
+| `naturalSize(image)` | the pixel size of an `<img>` once it has loaded (e.g. 320x180 for a 16:9 `mock:image`) |
+| `multipartParts(body, contentType)` · `MultipartPart` | the parts of a `multipart/form-data` body: `name`, `filename?`, `contentType?`, `size`, `head` (the first 16 bytes) |
+| `recordRequests(page, method, path)` · `RequestLog` · `RecordedRequest` | records every matching request of the page from now on (`requests`: method, path, headers, `body` with file bytes; `jsonBodies()`), lets it through, `stop()` removes the route |
+
 ### Other helpers
 
 | Export | Description |
@@ -247,4 +300,13 @@ about 15 s),
 `mock:reasoning` streams a reasoning part first ("Thinking about ...", 100 ms per word) and answers
 `Answer: <text>`, `mock:tool-approval` calls `mock_approval_tool` (approval in mode `ask`; Allow ->
 `Tool result: {"echoed":"<text>"}`, Deny -> `The tool call was denied.`), `mock:error` fails with `auth_invalid`
-(action `configure-provider`). Chat titles come from `mock:echo`: the first 8 words of the first message.
+(action `configure-provider`). Chat titles come from `mock:echo`: the first 8 words of the first message. Text files
+attached to a `mock:echo` message reach it inlined (`Attached file "<name>": <contents>`), so its echo names them.
+
+Media models (Phase 6): `mock:image` (an image model in the picker's "Image models" group: 300 ms, 5 s when the prompt
+contains "slow", "fail" fails; solid-color PNGs with a 320 px long edge at the requested aspect ratio, square for Auto),
+`mock:image-chat` (a chat model with image output: `Image for: <text>`, then one PNG), `mock:image-tool` (calls
+`generate_image` when offered, which needs `imageModelRef`; then `Image tool result: <n> image(s)`),
+`mock:transcribe` (`This is a mock transcription.` for any accepted recording) and `mock:speech` (a silent WAV, 400 ms
+per word, 1 s to 6 s; voices `mock-voice-a`, `mock-voice-b`). Read-aloud ends every block with sentence punctuation:
+end a reply you compare with the `{ text }` of `POST /api/audio/speech` with a period.

@@ -9,6 +9,7 @@ import type {
   ChatDetail,
   ChatSummary,
   CredentialValues,
+  ImageOptions,
   ProviderSummary,
   ReasoningEffort,
   Settings,
@@ -114,6 +115,8 @@ export interface SendChatInput {
   toolMode?: ToolMode
   /** Default `auto`. */
   reasoningEffort?: ReasoningEffort
+  /** Image options (docs/API.md 4.18): only for image models and chat models with image output. */
+  imageOptions?: ImageOptions
 }
 
 export interface RegenerateChatInput {
@@ -126,6 +129,8 @@ export interface RegenerateChatInput {
   toolMode?: ToolMode
   /** Default `auto`. */
   reasoningEffort?: ReasoningEffort
+  /** Image options (docs/API.md 4.18): only for image models and chat models with image output. */
+  imageOptions?: ImageOptions
 }
 
 export interface SendChatResult {
@@ -272,6 +277,7 @@ export class HarnessApi {
         modelRef: input.modelRef ?? 'mock:echo',
         reasoningEffort: input.reasoningEffort ?? 'auto',
         toolMode: input.toolMode ?? 'ask',
+        ...(input.imageOptions === undefined ? {} : { imageOptions: input.imageOptions }),
       },
     })
     const chunks = parseUiMessageStream(await response.text())
@@ -300,6 +306,7 @@ export class HarnessApi {
         modelRef: input.modelRef ?? 'mock:echo',
         reasoningEffort: input.reasoningEffort ?? 'auto',
         toolMode: input.toolMode ?? 'ask',
+        ...(input.imageOptions === undefined ? {} : { imageOptions: input.imageOptions }),
       },
     })
     const chunks = parseUiMessageStream(await response.text())

@@ -3,13 +3,19 @@
 // included, the first non-empty one wins, exactly like the credential service resolves them); Ollama runs when its
 // local listing answers within 1 s. Key values only ever reach the in-process test app of their own provider: every
 // report names the variable, never its value.
+//
+// The media matrix (`HF_LIVE_MEDIA=1`, PROVIDERS.md 12 / 13): per provider the image model (the cheapest one; a chat
+// model with image output for Google and OpenRouter), the speech model and every transcription seed, each check run
+// only with the provider's key and only when the provider serves that kind (`createImageModel` / `imageParams`,
+// `createSpeechModel`, `createTranscriptionModel`).
 import type { ProviderDefinition } from '@harness-forge/plugin-sdk'
+import type { LiveMediaCheckId } from './summary.ts'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import process from 'node:process'
 import { parseEnv } from 'node:util'
 import { PROVIDER_DEFINITIONS } from '../builtin-plugins/core-providers/index.ts'
-import { classifyId } from '../catalog/classify.ts'
+import { classifyId, providerServesKind } from '../catalog/classify.ts'
 import { findWorkspaceRoot, serverPackageRoot } from '../paths.ts'
 import { envVarNames } from '../services/secrets/credentials.ts'
 
@@ -124,6 +130,23 @@ export function parseLiveBudget(value: string | undefined): number {
   return Number(text)
 }
 
+/** Flag values of `HF_LIVE_MEDIA`, as the server reads its own flags (`env.ts`). */
+const TRUE_FLAGS: ReadonlySet<string> = new Set(['1', 'true', 'yes', 'on'])
+const FALSE_FLAGS: ReadonlySet<string> = new Set(['0', 'false', 'no', 'off'])
+
+/**
+ * `HF_LIVE_MEDIA`: `1` adds the image and voice checks, unset / empty / `0` keeps the chat checks only. Any other value
+ * throws, so a typo never silently changes what runs (or what is paid for).
+ */
+export function parseLiveMediaFlag(value: string | undefined): boolean {
+  const text = value?.trim().toLowerCase() ?? ''
+  if (text === '' || FALSE_FLAGS.has(text))
+    return false
+  if (TRUE_FLAGS.has(text))
+    return true
+  throw new Error('HF_LIVE_MEDIA must be 1 (add the image and voice checks) or 0 (chat checks only).')
+}
+
 /** Model names of an Ollama `/api/tags` body (`models[].name`, else `models[].model`). */
 export function ollamaModelNames(body: unknown): string[] {
   const models = typeof body === 'object' && body !== null ? (body as { models?: unknown }).models : undefined
@@ -195,6 +218,176 @@ export async function resolveLiveMatrix(env: LiveEnv, options: { specs?: readonl
   const probeNeeded = specs.some(spec => spec.providerId === OLLAMA_PROVIDER_ID && (filter === null || filter.has(spec.providerId)))
   const ollama = probeNeeded ? await (options.probe ?? probeOllama)() : null
   return buildLiveMatrix({ specs, env, filter, ollama })
+}
+
+// ---------- the media matrix (HF_LIVE_MEDIA=1) ----------
+
+/**
+ * Where the image of an image check comes from: an image turn with a dedicated image model (`kind: 'image'`,
+ * `createImageModel`), or a chat model with image output (`capabilities.imageOutput`, the provider's `imageParams`).
+ */
+export type LiveImageSource = 'image-model' | 'image-output'
+
+export interface LiveImageChoice {
+  readonly modelId: string
+  readonly source: LiveImageSource
+}
+
+/** The image and speech model of a provider's media checks. */
+export interface LiveMediaChoice {
+  readonly image?: LiveImageChoice
+  readonly speech?: string
+}
+
+/**
+ * The model of each image and speech check (PROVIDERS.md 12 / 13): the cheapest seed of the kind (`gpt-image-1-mini`,
+ * `gemini-2.5-flash-preview-tts`), the only one where a provider has one; Google and OpenRouter make images with the
+ * image-output chat model `gemini-2.5-flash-image` of their live listings. Transcription checks use every
+ * transcription seed (`liveMediaSpecs`).
+ */
+export const LIVE_MEDIA_MODELS: Readonly<Record<string, LiveMediaChoice>> = {
+  openai: { image: { modelId: 'gpt-image-1-mini', source: 'image-model' }, speech: 'gpt-4o-mini-tts' },
+  google: { image: { modelId: 'gemini-2.5-flash-image', source: 'image-output' }, speech: 'gemini-2.5-flash-preview-tts' },
+  xai: { image: { modelId: 'grok-imagine-image', source: 'image-model' }, speech: 'tts' },
+  mistral: { speech: 'voxtral-mini-tts-latest' },
+  openrouter: { image: { modelId: 'google/gemini-2.5-flash-image', source: 'image-output' } },
+}
+
+/** The media checks of one provider (null / empty: the provider has no such check). */
+export interface LiveMediaSpec {
+  readonly providerId: string
+  readonly image: LiveImageChoice | null
+  readonly speech: string | null
+  /** Every transcription seed (`kind: 'transcription'`), in seed order. */
+  readonly transcription: readonly string[]
+}
+
+/** True when the provider can make the images of `source`. */
+function servesImages(definition: ProviderDefinition, source: LiveImageSource): boolean {
+  return source === 'image-model' ? providerServesKind(definition, 'image') : typeof definition.imageParams === 'function'
+}
+
+/**
+ * Every provider (registry order) with the models of its media checks: the choices of `models` the provider can serve
+ * (a choice whose factory is missing is dropped) and its transcription seeds when it has `createTranscriptionModel`.
+ */
+export function liveMediaSpecs(definitions: readonly ProviderDefinition[] = PROVIDER_DEFINITIONS, models: Readonly<Record<string, LiveMediaChoice>> = LIVE_MEDIA_MODELS): LiveMediaSpec[] {
+  return definitions.map((definition) => {
+    const choice = Object.hasOwn(models, definition.id) ? models[definition.id] : undefined
+    const image = choice?.image !== undefined && servesImages(definition, choice.image.source) ? choice.image : null
+    const speech = choice?.speech !== undefined && providerServesKind(definition, 'speech') ? choice.speech : null
+    const transcription = providerServesKind(definition, 'transcription')
+      ? (definition.seedModels ?? []).filter(model => model.kind === 'transcription').map(model => model.id)
+      : []
+    return { providerId: definition.id, image, speech, transcription }
+  })
+}
+
+/**
+ * Run order of the media checks: speech first (its audio clips are what the transcription checks transcribe), images
+ * last (the most expensive checks, so a small budget still covers the voice checks).
+ */
+export const LIVE_MEDIA_RUN_ORDER: readonly LiveMediaCheckId[] = ['speech', 'transcription', 'image']
+
+/** The models of one media check: the image or speech model, or every transcription model. */
+export function mediaModelsOf(spec: LiveMediaSpec, kind: LiveMediaCheckId): string[] {
+  switch (kind) {
+    case 'image':
+      return spec.image === null ? [] : [spec.image.modelId]
+    case 'speech':
+      return spec.speech === null ? [] : [spec.speech]
+    case 'transcription':
+      return [...spec.transcription]
+  }
+}
+
+/** One media check of one provider. */
+export interface LiveMediaCheckRef {
+  readonly kind: LiveMediaCheckId
+  readonly providerId: string
+}
+
+/** Every media check in run order (kind by kind, providers in registry order): one test each, known at collection. */
+export function liveMediaChecks(specs: readonly LiveMediaSpec[] = liveMediaSpecs()): LiveMediaCheckRef[] {
+  return LIVE_MEDIA_RUN_ORDER.flatMap(kind => specs
+    .filter(spec => mediaModelsOf(spec, kind).length > 0)
+    .map(spec => ({ kind, providerId: spec.providerId })))
+}
+
+interface LiveMediaEntryBase {
+  readonly kind: LiveMediaCheckId
+  readonly providerId: string
+  /** Key variables of the provider, in resolution order. */
+  readonly envVars: readonly string[]
+  /** One model (image, speech) or every transcription model. */
+  readonly modelIds: readonly string[]
+  /** Image checks only; null otherwise. */
+  readonly imageSource: LiveImageSource | null
+}
+
+/** A media check that runs: the key goes to the check's own test app only, never into a report. */
+export interface LiveMediaRunEntry extends LiveMediaEntryBase {
+  readonly status: 'run'
+  readonly keyField: string
+  readonly envVar: string
+  readonly key: string
+}
+
+export interface LiveMediaSkipEntry extends LiveMediaEntryBase {
+  readonly status: 'skip'
+  readonly reason: string
+}
+
+export type LiveMediaEntry = LiveMediaRunEntry | LiveMediaSkipEntry
+
+export interface LiveMediaMatrixInput {
+  readonly media: readonly LiveMediaSpec[]
+  readonly providers: readonly LiveProviderSpec[]
+  readonly env: LiveEnv
+  /** Provider ids to run (`HF_LIVE_PROVIDERS`); null = every provider. */
+  readonly filter: ReadonlySet<string> | null
+  /** `HF_LIVE_MEDIA=1`. */
+  readonly enabled: boolean
+}
+
+/** One entry per media check, in run order. Pure: runs only when enabled, selected and the provider's key is set. */
+export function buildLiveMediaMatrix(input: LiveMediaMatrixInput): LiveMediaEntry[] {
+  const providers = new Map(input.providers.map(spec => [spec.providerId, spec]))
+  const specs = new Map(input.media.map(spec => [spec.providerId, spec]))
+  return liveMediaChecks(input.media).map(({ kind, providerId }): LiveMediaEntry => {
+    const spec = specs.get(providerId)
+    const provider = providers.get(providerId)
+    const base: LiveMediaEntryBase = {
+      kind,
+      providerId,
+      envVars: provider?.envVars ?? [],
+      modelIds: spec === undefined ? [] : mediaModelsOf(spec, kind),
+      imageSource: kind === 'image' ? spec?.image?.source ?? null : null,
+    }
+    const skip = (reason: string): LiveMediaSkipEntry => ({ status: 'skip', ...base, reason })
+    if (!input.enabled)
+      return skip('media checks are off (set HF_LIVE_MEDIA=1)')
+    if (input.filter !== null && !input.filter.has(providerId))
+      return skip('not selected by HF_LIVE_PROVIDERS')
+    if (provider?.keyField === null || provider?.keyField === undefined)
+      return skip('keyless provider')
+    const key = findKey(provider.envVars, input.env)
+    if (key === null)
+      return skip(`no key (set ${provider.envVars.join(' or ')})`)
+    return { status: 'run', ...base, keyField: provider.keyField, envVar: key.name, key: key.value }
+  })
+}
+
+/** The media matrix from the environment (`HF_LIVE_MEDIA`, `HF_LIVE_PROVIDERS` and the keys); throws on bad values. */
+export function resolveLiveMediaMatrix(env: LiveEnv, options: { media?: readonly LiveMediaSpec[], providers?: readonly LiveProviderSpec[] } = {}): LiveMediaEntry[] {
+  const providers = options.providers ?? liveProviderSpecs()
+  return buildLiveMediaMatrix({
+    media: options.media ?? liveMediaSpecs(),
+    providers,
+    env,
+    filter: parseProviderFilter(env.HF_LIVE_PROVIDERS, providers.map(spec => spec.providerId)),
+    enabled: parseLiveMediaFlag(env.HF_LIVE_MEDIA),
+  })
 }
 
 /** `<workspace root>/.env`, the file the server loads at start (`env.ts`). */

@@ -7,9 +7,12 @@ signatures, shortcuts and test ids from `docs/UI.md` (7.16 – 7.18, 9.9, 10.4, 
 rules from `docs/ARCHITECTURE.md` (6.1, 6.8, 6.11, 6.12, 8, 9, 10.2, 10.8, 12); provider media support, mock models and
 the live media checks from `docs/PROVIDERS.md` (8, 12, 13); the plugin API 1.1.0 from `docs/PLUGINS.md` (9).
 
-**Status (2026-09-28):** P6-00 (the hotfix) is done and committed (`a5fd107`). P6-0a is running: K1 is done, C10
-(contracts) and D6 (docs) work in one launch. "Outcome" at the end of this file records what actually happened in each
-wave; the plan sections below are corrected where the implementation differs from the plan.
+**Status (2026-09-29):** Phase 6 is done: P6-00, P6-0a, P6-0b, P6-A (+ the post-gate fix `6e96d85`), P6-B and the
+final gate are committed (`a5fd107`, `11516c7`, `163f5e8`, `3e115cb`, final gate `chore: final gate for harness-forge
+v1.2`). W6.15 / W6.16 (fix-ups) were not needed: the P6-A gate was green; the coordinator fixed the few items found in
+P6-B at the final gate (migration `0003` ages listings instead of clearing them; the expanded sidebar trigger's 40 px
+touch target). "Outcome" at the end of this file records what actually happened in each wave; the plan sections below are
+corrected where the implementation differs from the plan.
 
 ## Goal
 
@@ -34,11 +37,12 @@ browser speech recognition and on-device speech synthesis (they break bring-your
 (`experimental_streamTranscribe`), cleanup of orphaned files (generated images are only removed by delete-all), video
 generation.
 
-Totals after Phase 6 (planned): routes 73 → **76** (`audio.transcribe`, `audio.speech`, `chats.deleteMessage`), tables
-**15** (unchanged: images add no route and no table), migrations `0000_initial_schema`, `0001` + **`0002`** (remembered
-versions: `messages.selected_child_id` + backfill), ADR-028 … ADR-030 (+ an ADR-027 consequence), plugin API
-**1.1.0** (additive). Agents: 2 (P6-0a) + 2 (P6-0b) + 11 (P6-A) + 3 (P6-B) + fix-ups, in the Phase 5 wave method
-(ADR-016).
+Totals after Phase 6: routes 73 → **76** (`audio.transcribe`, `audio.speech`, `chats.deleteMessage`), tables **15**
+(unchanged: images add no route and no table), migrations `0000_initial_schema`, `0001` + **`0002`** (remembered
+versions: `messages.selected_child_id` + backfill) + **`0003`** (`0003_refresh_model_listings`, added at Gate P6-A:
+every successful cached model listing is aged by one TTL so it is stale once), ADR-028 … ADR-030 (+ an ADR-027 consequence), plugin API **1.1.0**
+(additive; the builtin `core-providers` and `core-tools` are 1.1.0 with `engines: ^1.1.0`). Agents: 2 (P6-0a) + 2
+(P6-0b) + 11 (P6-A) + 3 (P6-B), in the Phase 5 wave method (ADR-016); no fix-up agent was needed.
 
 ## Entry criteria
 
@@ -67,10 +71,10 @@ versions: `messages.selected_child_id` + backfill), ADR-028 … ADR-030 (+ an AD
 
 Manual acceptance (coordinator, `HF_MOCK_PROVIDER=1 pnpm dev`):
 
-- Pick "Mock image" → two 16:9 images appear after the placeholder tiles; regenerate gives "‹ 2/2 ›"; "make it blue"
+- Pick "Mock Image" → two 16:9 images appear after the placeholder tiles; regenerate gives "‹ 2/2 ›"; "make it blue"
   edits the previous image (`metadata.image.inputs` = 2).
 - `mock:image-chat` shows text + an image; `generate_image` (with `mock:image-tool` and Settings → Media → Image model
-  "Mock image") asks for approval, then shows the image below the tool row.
+  "Mock Image") asks for approval, then shows the image below the tool row.
 - Settings → Media: pick `mock:transcribe` → Alt+V records, Stop inserts "This is a mock transcription." at the caret;
   pick `mock:speech` → "Read aloud" plays and "Stop reading" stops.
 - Edit a message and remove / add an attachment; delete a version; switch versions in one tab → the other tab follows.
@@ -118,6 +122,65 @@ dictation, OpenAI `gpt-4o-mini-tts` read-aloud.
   /chats/:id/messages/:messageId`); conflict reason `only-version`.
 - **`UsagePurpose`** gains `image`, `transcription` and `speech` as a TypeScript type only (the column is free text): no
   migration.
+
+Implementation deviations found in P6-A and at its gate (the docs were reconciled by W6.13):
+
+- **Migration `0003_refresh_model_listings`** (coordinator, K5 at Gate P6-A; not in the plan): one hand-written
+  `UPDATE model_cache SET fetched_at = fetched_at - 86400000 WHERE fetched_at IS NOT NULL`, so every successful listing
+  cached by v1.1 is stale once and listed again in the catalog's first background cycle after the start, while the
+  catalog keeps serving it meanwhile (the first version set `fetched_at` to null, which the catalog reads as "never
+  listed": W6.13 found that it would have hidden the cached models until a refresh succeeded; fixed before the final
+  gate). Found at the gate: the e2e server's cached mock listing hid the
+  new chat seeds `mock:image-chat` / `mock:image-tool` for up to 24 h, and a real upgrade would keep listings without
+  the v1.2 listing rules (media ids, OpenRouter `output_modalities`) just as long. Tested in `S/db/upgrade.test.ts`;
+  listed in DECISIONS.md. As built, a null `fetched_at` also means "never listed" to the catalog: until a provider's
+  first v1.2 refresh succeeds it serves the provider's seeds (plus plugin and custom models), not the cached listing,
+  and a failed refresh keeps it that way (the migration comment says the cached listing stays visible; reported as a
+  suspected bug by W6.13, see P6-B below).
+- **Media models without a factory are not listed** (W6.2): an image, transcription or speech entry from a listing, a
+  seed or a plugin appears in the catalog only when its provider defines the matching factory (`createImageModel`,
+  `createTranscriptionModel`, `createSpeechModel`); custom models always appear (the resolvers then explain the error:
+  `model_not_found` for an image model, `validation_error` for a voice model). The plan hid such image models instead;
+  models.dev-only voice models such as `alibaba:qwen3-asr-flash` are left out (the Risks row below is settled this way).
+  Image models are visible, transcription and speech models hidden from the chat picker; `modelCount` counts visible
+  chat models only.
+- **Classification** (W6.2): the catch-all "id contains image" fallback is removed; only the image-model id regex
+  matches before the modalities, and the id-only rules add `tts` → speech and `whisper|transcri` → transcription (the
+  mock seeds `mock:image-chat` / `mock:image-tool` keep the explicit `kind: 'chat'` that C11 gave them against the old
+  fallback).
+- **Google** (W6.3) has no `createImageModel` (Imagen through `.image()` is not wired): its images come from the chat
+  models with image output, `gemini-*-image*` and `nano-banana*`.
+- **`generate_image` model output** (W6.4) names the model ref ("Generated 2 images with openai:gpt-image-1; they are
+  shown to the user below this call."), not the model name: the plugin API image result carries no display name (an
+  optional CCR for a `modelName`, backlog).
+- **Builtin manifests** (K5): `core-providers` and `core-tools` 1.1.0 with `engines: ^1.1.0`; `mock` stays 1.0.0 with
+  `engines: ^1.1.0`.
+- **Image turns** (W6.1): an approval continuation sent with an image model is refused with `400 validation_error` on
+  the new issue path `['modelRef']`; the generated images of the parent reply become input images only for vision
+  models (like attached images); the image-prompt check is skipped when a reply command writes the reply; in the
+  history every generated file part of an assistant message becomes a `[Generated image: <name>]` /
+  `[Generated file: <name>]` marker, and the latest images are carried into the next user message in addition (API.md
+  4.18, 5.10).
+- **Settings → Models**: `CustomModelDialog` gained an "Image output" checkbox for custom chat models (W6.10, read by
+  the catalog as `capabilities.imageOutput`); after the gate (`6e96d85`) Favorite and Visible exist only for chat and
+  image models (the models the chat picker can show), speech, transcription and other kinds show a dash ("Chosen in
+  Settings → Media").
+- **Alt+V** stays the dictation shortcut (W6.9, `preventDefault` on a match, respects `altShortcuts`); no Alt+J fallback
+  was needed. Firefox on Windows is unverified.
+- **Web contracts** (W6.8 – W6.10): additions to frozen stubs without prop or emit changes — `MicButton` exposes
+  `activate()` (Alt+V calls it) and the `RecordingIndicator` root carries `data-state`, `role="group"` and `aria-label`;
+  the Voice field suggests the model's voices as a plain list (not a searchable command list); the composer's live
+  region has no `role="status"`; `MediaSettings` renders only the page body (the page frame renders the "Images and
+  voice" header).
+- **Catalog names and prices** (W6.2 / W6.3): models.dev lacks all six OpenAI voice seeds (`gpt-4o-mini-transcribe`,
+  `gpt-4o-transcribe`, `whisper-1`, `gpt-4o-mini-tts`, `tts-1`, `tts-1-hd`) and the xAI `stt` / `tts` ids, and prices
+  no image seed; where models.dev knows a model its name wins over the seed name (`gpt-image-1` shows as
+  "gpt-image-1", Groq's `whisper-large-v3` as "Whisper"). xAI returns at most 3 images per call.
+- **Fresh auth** (W6.11, UI.md 8.4): code-plugin reload, Source saves and builds and creating a code plugin ask for the
+  password first when the session is not fresh; the provider wizard asks once (a second refusal is an error); the
+  rate-limit text counts down everywhere as "Try again in {n}s." (install / trust said "{n} s"); a 403 from login shows
+  the server message (plugin detail and data used to say "Wrong password"); the install / trust "Log in" opens the
+  prompt and then submits again.
 
 ## Rules for every Phase 6 agent
 
@@ -212,7 +275,7 @@ CI green) and close Dependabot PR #1 unmerged with a comment naming the fix comm
 
 ---
 
-## Wave P6-0a — decisions, docs, contracts
+## Wave P6-0a — decisions, docs, contracts (done)
 
 Two agents in one launch (C10, D6) after the coordinator finished K1.
 
@@ -386,7 +449,7 @@ report; the coordinator adds them to `allow` for the audit.
 
 ---
 
-## Wave P6-0b — schema, migration `0002`, skeletons, FREEZE
+## Wave P6-0b — schema, migration `0002`, skeletons, FREEZE (done)
 
 **Entry:** Gate P6-0a green. The coordinator lands K3 first; C11 and C12 start in one launch once the migration exists
 (C11's upgrade test needs it).
@@ -588,7 +651,7 @@ The audit cannot express "except": `S/db/schema.ts` matches C11's glob but is th
    `feat: add phase 6 schema, migration and skeletons`.
 
 ---
-## Wave P6-A — features
+## Wave P6-A — features (done)
 
 Eleven agents in one launch against the P6-0b checkpoint. Only server agents get slots (k1 – k6); web agents run no
 server.
@@ -633,10 +696,12 @@ server.
      model for a title.
   2. **W6.1-T2 Request rules** — `imageOptions` → `400 validation_error` on `['imageOptions']` unless the model is an
      image model or has `capabilities.imageOutput`; `n` / `editPrevious` only for image models. Image-turn prompt = the
-     new user message's text after slash expansion (400 when empty or longer than `LIMITS.imagePromptMaxChars`). Input
-     images = the images attached to the message when the model has `vision`; else, when none are attached and
-     `editPrevious !== false`, the generated images of the parent assistant reply (at most `LIMITS.imageInputsMax`);
-     other attachments → the existing `attachments-unsupported` notice. Image turns send no history. *Accept:* route
+     new user message's text after slash expansion (400 when empty or longer than `LIMITS.imagePromptMaxChars`; as
+     built, not checked when a reply command writes the reply). Input images = the images attached to the message when
+     the model has `vision`; else, when none are attached and `editPrevious !== false`, the generated images of the
+     parent assistant reply (at most `LIMITS.imageInputsMax`; as built, also for vision models only); other attachments
+     → the existing `attachments-unsupported` notice. Image turns send no history. An approval continuation sent with
+     an image model → 400 on `['modelRef']` (added while building). *Accept:* route
      tests for every 400; `mock:echo` + `imageOptions` → 400; "make it blue" after a `mock:image` reply sends 2 inputs.
   3. **W6.1-T3 `chat/images.ts` `imageStream(session)`** — `createUIMessageStream({ originalMessages, generateId: () =>
      assistantId, execute, onError, onEnd: session.onEnd })` emitting `start` (metadata `{ modelRef, startedAt, image:
@@ -666,8 +731,10 @@ server.
      works on an approval continuation.
   6. **W6.1-T6 History** — `chat/files.ts` `prepareModelFiles`: the images of the most recent assistant message that has
      any are carried into the next user message (vision models only; after a text part "(Images generated earlier in
-     this chat:)", at most 4, as data URLs); every other generated image becomes the text `[Generated image: <name>]` in
-     place (an assistant message never reaches a provider empty); `reasoning-file` parts never go back to models.
+     this chat:)", at most 4, as data URLs); every generated file part of an assistant message becomes the text
+     `[Generated image: <name>]` (`[Generated file: <name>]` for other files) in place, the carried ones included (as
+     built; the plan said "every other") — an assistant message never reaches a provider empty; `reasoning-file` parts
+     never go back to models.
      *Accept:* history tests for both markers and a non-vision model.
 - **Tests.** Stream order and metadata; no `data:` URL streamed or saved; abort; resume; regenerate; the tool injection
   only from `core-tools`; history markers; every `imageOptions` 400.
@@ -695,11 +762,12 @@ server.
      `[text, image]` output; `gemini-2.5-flash-image` → `chat` with `imageOutput`; `gpt-4o-mini-tts` → `speech`;
      `whisper-large-v3` → `transcription`.
   3. **W6.2-T3 Catalog** — seeds with an explicit non-chat kind are always listed, even next to a live listing
-     (`buildEntries` uses `live ?? seeds` today); image models are visible by default only when their provider defines
-     `createImageModel`; transcription and speech models are hidden from the chat picker by default; `ModelInfo.voices`
-     (≤ 100, unique) → `CatalogModel.voices`; the default-model choice and the credential ping take chat models only.
-     *Accept:* a live listing plus media seeds lists both; the image model of a provider without `createImageModel` is
-     hidden; the default `validate()` ping never picks a non-chat model.
+     (`buildEntries` used `live ?? seeds`); a media model (image, transcription, speech) is listed only when its
+     provider defines the matching factory (custom models always stay; as built — the plan hid such image models);
+     image models are visible, transcription and speech models are hidden from the chat picker by default;
+     `ModelInfo.voices` (deduplicated, at most 100) → `CatalogModel.voices`; the default-model choice and the credential
+     ping take chat models only. *Accept:* a live listing plus media seeds lists both; the image model of a provider
+     without `createImageModel` is not listed; the default `validate()` ping never picks a non-chat model.
   4. **W6.2-T4 Validation** — `registry/validate.ts`: `createImageModel`, `imageParams`, `createTranscriptionModel`,
      `createSpeechModel`, `transcriptionOptions` must be functions when present. *Accept:* a non-function member →
      `validation_error` naming the member.
@@ -716,7 +784,8 @@ server.
 - **Tasks.**
   1. **W6.3-T1 Images** — `openai`: `createImageModel` → `.image(id)`; `imageParams` maps the aspect ratio to `size`
      (1:1 → `1024x1024`, portrait → `1024x1536`, landscape → `1536x1024`; Auto → nothing). `xai`: `.image(id)`;
-     `aspectRatio` passed through. `google`: `imageParams` for `imageOutput` chat models → `providerOptions.google` =
+     `aspectRatio` passed through. `google` (no `createImageModel`): `imageParams` for `imageOutput` chat models
+     (`gemini-*-image*`, `nano-banana*`) → `providerOptions.google` =
      `{ responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio } }`. `openrouter`: `imageOutput` from
      `architecture.output_modalities`; `imageParams` → `providerOptions.openrouter` = `{ modalities: ['image', 'text'],
      image_config: { aspect_ratio } }` (spread into the request body). *Accept:* per-provider tests with a fake fetch
@@ -725,11 +794,13 @@ server.
      only; `xai`: `.transcription()` / `.speech()` without an id (catalog keys `stt` / `tts`). `transcriptionOptions({
      language })` → `{ openai: { language } }`, `{ google: { languageCodes: [language] } }`, `{ xai: { language } }`,
      `{ mistral: { language } }`, `{ groq: { language } }`; nothing for `auto`. Never pass `outputFormat`, `speed`,
-     `instructions` or `language` to speech (unsupported options print SDK warnings). *Accept:* fake-fetch tests assert
+     `instructions` or `language` to speech (unsupported options print SDK warnings; the xAI package itself always sends
+     `language: 'auto'` for speech). *Accept:* fake-fetch tests assert
      the language field and that no unsupported option is sent.
   3. **W6.3-T3 Listings, seeds, voices** — listings keep the media ids the provider can run (OpenAI `gpt-image*`,
      `chatgpt-image*`, `*transcribe*`, `whisper-1`, `tts-*`, `*-tts*`; xAI `grok-imagine-image*`; Google
-     `gemini-*-image*` (chat models with image output) and `*-tts*`; Groq `whisper-*`); other non-chat ids stay dropped;
+     `gemini-*-image*` and `nano-banana*` (chat models with image output) and `*-tts*`; Groq `whisper-*`); other non-chat
+     ids stay dropped;
      seeds with explicit kinds and `voices` from PROVIDERS.md 13 (voice lists unverified; `gemini-3.5-transcribe` left
      out). *Accept:* listing tests; seeds carry `kind`; `mistral`, `groq`, `xai` voice seeds validate.
 - **Tests.** One test per new factory with a fake fetch; listing filters; seeds.
@@ -759,7 +830,8 @@ server.
   4. **W6.4-T4 `generate_image`** (`core-tools`, policy `ask`, `timeoutMs: 300_000`) — input
      `generateImageToolInputSchema`, execute = `ctx.images.generate({ ...input, chatId: c.chatId, signal: c.signal })`,
      output `generateImageToolOutputSchema` (file references only, well under 64 KB), `toModelOutput` = text only
-     ("Generated 2 images with <model name>; they are shown to the user below this call."); always registered; without
+     ("Generated 2 images with <model ref>; they are shown to the user below this call."; as built the text names the
+     model ref: the result carries no display name); always registered; without
      `imageModelRef` it fails with "Choose an image model in Settings → Media." *Accept:* tool tests incl. the text-only
      model output and the missing-setting error.
 - **Tests.** The four tasks above.
@@ -811,12 +883,14 @@ server.
   1. **W6.6-T1 Tree** — `TreeRow.selectedChildId` (+ `TREE_COLUMNS`); `rememberedLeafUnder(tree, messageId)` walks down:
      the remembered child when it is still a child of the node, else the only child, else `latestLeafUnder(node)`; an
      unknown id → `null`. *Accept:* `tree.test.ts` with a valid, an invalid and a missing pointer.
-  2. **W6.6-T2 Store** — `rememberPathSql(chatId, leafId)` (the backfill's UPDATE…FROM anchored on one leaf, plus `AND
-     selected_child_id IS NOT path.id`), run by `setActiveLeaf` after a successful compare-and-set (atomic inside
-     `transaction()`, so the pipeline's commit and persist get it for free), by `switchBranch` (whose leaf becomes
-     `rememberedLeafUnder(messageId)`) and by the import batch. Not exported (chat export v2 and backups unchanged;
-     import re-derives it). *Accept:* A → B → A restores A's deep path where "latest" differs from "remembered"; a
-     failed CAS writes nothing.
+  2. **W6.6-T2 Store** — `rememberPathSql(chatId, leafId, when?)` (the backfill's UPDATE…FROM anchored on one leaf,
+     plus `AND selected_child_id IS NOT path.id` and the `messages.seq < path.seq` guard; as built it writes only while
+     `when` holds, by default "`leafId` is the chat's active leaf"). `setActiveLeaf` runs it under the condition of its
+     compare-and-set, before the move and in the same batch (as built; the plan said after a successful CAS), so both
+     are written or neither (atomic inside `transaction()`, so the pipeline's commit and persist get it for free);
+     `switchBranch` (whose leaf becomes `rememberedLeafUnder(messageId)`) and the import batch run it too. Not exported
+     (chat export v2 and backups unchanged; import re-derives it). *Accept:* A → B → A restores A's deep path where
+     "latest" differs from "remembered"; a failed CAS writes nothing.
   3. **W6.6-T3 Delete a version** — `deleteMessage(id, messageId)` and the route `DELETE /chats/:id/messages/:messageId`
      → `ChatDetail`: 404 for an unknown chat or message; 409 `conflict` `only-version` when the message has no other
      version; 409 `run-active` while `hasRun` (checked by the route) and on a CAS miss (nothing deleted). When the active
@@ -1137,7 +1211,7 @@ The props below are frozen in the P6-0b stubs or documented in UI.md 10.4; the s
 4. `pnpm test:e2e` (projects `chromium` + `mobile`; `tablet` has no spec until P6-B) green.
 5. `E2E_SCREENSHOTS=1 pnpm test:e2e --grep @screenshots` → review `.tmp/screenshots/{dark,light}/`.
 6. `pnpm audit --prod --audit-level high` clean.
-7. ROADMAP + wave log → commit `feat: add image generation, voice and version management`.
+7. ROADMAP + wave log → commit (as made: `3e115cb` `feat: add image generation, voice and version improvements`).
 
 ---
 
@@ -1223,7 +1297,9 @@ The props below are frozen in the P6-0b stubs or documented in UI.md 10.4; the s
 
 ### W6.15 / W6.16 fix-ups
 
-Launched only for red P6-A gate items (W6.15 server, W6.16 web), with the globs of those items.
+Launched only for red P6-A gate items (W6.15 server, W6.16 web), with the globs of those items. Not launched: the
+P6-A gate was green; the one UI detail found after it (Favorite and Visible for chat and image models only) was fixed
+by the coordinator in `6e96d85`.
 
 ### Wave P6-B ownership
 
@@ -1275,35 +1351,182 @@ Launched only for red P6-A gate items (W6.15 server, W6.16 web), with the globs 
 
 ## Outcome
 
-What actually happened, wave by wave (copied from the ROADMAP wave log; "audit" is the ownership audit of
-`scripts/audit-ownership.mjs`).
+What actually happened, wave by wave (the gate results are copied from the ROADMAP wave log; "audit" is the ownership
+audit of `scripts/audit-ownership.mjs`).
 
 | Wave | Agents | Gate result | Commit |
 |---|---|---|---|
 | P6-00 | coordinator (hotfix) | `pnpm check` 4212 tests; `main.test.ts` 3× green (the new SIGTERM-during-boot test fails on the old `main.ts`); `actionlint` 1.7.12 exit 0 | `a5fd107` |
-| P6-0a | coordinator (K1), C10, D6 | pending | — |
-| P6-0b | coordinator (K3, K4), C11, C12 | pending | — |
-| P6-A | W6.1 – W6.11 | pending | — |
-| P6-B | W6.12 – W6.14 (+ W6.15 / W6.16 if needed) | pending | — |
-| Final gate | coordinator (K6) | pending | — |
+| P6-0a | coordinator (K1), C10, D6 | audit ok (67 paths; 7 compile-fix files accepted); 4256 tests; build ok; CSP 38/38; 3 new routes mounted (501); e2e 44 passed; CI on `a5fd107` green; Dependabot now opens separate katex / ai-sdk / minor pull requests (#2 – #4, green) | `11516c7` |
+| P6-0b | coordinator (K3, K4), C11, C12 | audit ok (75 paths; 4 test / fake files accepted); 4374 tests; build ok; CSP 38/38 incl. `media-src 'self' blob:`; `Permissions-Policy: microphone=(self)`; e2e 44 passed (the fake-media Playwright config, an empty `tablet` project); upgrade probe on a seeded v1.1 copy: `0002` applied, remembered pointers only on the active path (A → RA → B → RB), 0 invalid, `GET /chats/:id` unchanged, 24 chats; FREEZE | `163f5e8` |
+| P6-A | W6.1 – W6.11 (+ coordinator K5: 3 stale skeleton tests, 2 frozen doc comments, the plugins-list e2e with 3 core tools, builtin `engines ^1.1.0`, migration `0003`) | audit ok (199 paths, no frozen file touched); 5060 tests; build ok; CSP 38/38; probes 21/21 (image turn with 2 stored files + metadata, image-output chat, `generate_image` tool, no `data:` URL saved, transcription + 400 / 413, speech WAV `no-store` + 400, headers, remembered path, delete version 200 / `only-version` / `run-active`, `chat.updated.activeLeafId`, no transcript in the logs); e2e 44 passed; screenshots reviewed (versions trash icon, mic, Image models group, Media nav); `pnpm audit --prod` clean | `3e115cb`, post-gate fix `6e96d85` |
+| P6-B | W6.12, W6.13, W6.14 (W6.15 / W6.16 not needed: the P6-A gate was green) | e2e 61 run tests (chromium 53, mobile 7, tablet 1) + 4 screenshot tests; new specs 17/17 ×3; docs reconciled; live media checks 52 unit tests (never run live); the three agents were interrupted once by an account usage limit and resumed from their transcripts | final gate commit |
+| Final gate | coordinator (K6) | audit ok (39 paths; only the approved plugin-sdk doc comment among frozen files); frozen install ok; 5091 tests; build ok; CSP 38/38; probes 21/21; e2e 61 passed ×3 (chromium + mobile + tablet); screenshots incl. the 5 new screens reviewed (dark + light); `pnpm audit --prod` clean; real v1.1 → v1.2 upgrade (v1.1 built from `30da884` in a worktree, data seeded by it, then v1.2 on the same data dir): 9/9 (4 migrations, remembered pointers only on the active path, paths intact, remembered switch, old chat continues, cached listing refreshed after `0003`, image and transcription routes) | `chore: final gate for harness-forge v1.2` |
+
+### P6-0a and P6-0b
+
+- **C10** — `pnpm check` 261 files / 4256 tests (shared 154, plugin-sdk 22, server 3075, web 982); 76 routes. Seven
+  compile or test fixes outside its list were accepted at the audit: `S/plugins/host.test.ts` (the version string),
+  `S/providers/testing.ts` (the fake host's `ctx.images` answered `not_implemented`), `W/stores/chats.test.ts` and
+  `W/components/app-shell/ChatNav.test.ts` (`activeLeafId: null`), `W/components/chat/parts/NoticePart.vue` (the
+  exhaustive notice icon map: `generated-file-dropped` → `ImageOffIcon`) and
+  `examples/plugins/{dice-roller,echo-provider}/harness-forge.d.ts` (regenerated from the template types). Beyond the
+  planned names the SDK re-exports `ImageAspectRatio` and `ModelKind`, and shared exports `generatedImageRefSchema`
+  and `generatedImageMimeTypeSchema` (it checks only the URL prefix; the pipeline checks that the URL matches
+  `fileId`). API.md already described the P6-A behavior (remembered paths, totals with image usage, the stream
+  restructure).
+- **D6** — this file, UI.md, ARCHITECTURE.md, PROVIDERS.md, PLUGINS.md, the code-plugin guide, README and
+  `.env.example`.
+- **C11** — server 144 files / 3135 tests. Out-of-list files accepted: `S/services/secrets/testing.ts` (the fake
+  `ProviderService` gets the three resolver stubs), `S/http/routes/models.test.ts` and `S/providers/index.test.ts` (the
+  mock listing shows 6 visible models instead of 4). Type names as built: `ResolvedModelBase` (includes `info`),
+  `ResolvedImageModel.imageModel`, `ResolvedTranscriptionModel`, `ResolvedSpeechModel`; `ImageGenerationInput` /
+  `ImageGenerationResult` / `StoredImage`; `GeneratedFileInput` (`saveGenerated`); `AudioTranscribeInput`
+  (`file: Blob`), `SpeechAudio` (a strict `mediaType`); the constants `AUDIO_UPLOAD_TYPES` and
+  `SPEECH_AUDIO_MIME_TYPES`. The mock media models work in full (PROVIDERS.md 8). The frozen `services/chats/types.ts`
+  comment now says that `chat.updated` carries `ChatUpdatedData`.
+- **C12** — 31 test ids (UI.md 13.7), the Media nav link (`ImagePlayIcon`) after Models, the `/settings/media` page
+  (the page frame renders the "Images and voice" header; `MediaSettings` is the body), 9 stub components, 3
+  composables and `W/utils/testing/fake-media.ts`; the command palette test needed the `go-settings-media` command
+  (fixed by the coordinator). `useImageOptions` already worked in full; `useVoiceInput().supported` means
+  `MediaRecorder` exists (browsers hide `navigator.mediaDevices` on plain HTTP, so the insecure state stays reachable).
+- **K3 / K4** — migration `0002_remembered_versions` exactly as planned (one `ADD COLUMN` + the backfill);
+  `playwright.config.ts` got the microphone permission, the fake media flags and the `tablet` project (no spec until
+  P6-B). The upgrade probe ran on the `.tmp/upgrade-v11` copy.
+
+### P6-A
+
+- **K5 CCR batch** (applied at the gate): the stale P6-0b skeleton tests (`S/http/routes/models.test.ts`: the visible
+  mock list is `echo, image, image-chat, image-tool, reasoning, tool-approval`; `S/deps.test.ts` "phase 6 skeleton" no
+  longer expects `not_implemented` from the resolvers, `chats.deleteMessage`, `images.generate`,
+  `files.saveGenerated`, `audio.transcribe` and `audio.speak`; `S/testing/fakes.test.ts`: the image service stub
+  answers `not_found`); two frozen doc comments (`S/providers/types.ts`: `alibaba:qwen3-asr-flash` is left out of the
+  catalog; `S/catalog/types.ts`: the media-seed and factory rules); `e2e/specs/plugins/plugins-list.spec.ts` expects
+  3 core tools; the builtin manifests (`engines ^1.1.0`); migration `0003_refresh_model_listings` (see "Implementation
+  deviations" above). W6.1's changes were verified at the gate (audit, a diff review of `S/chat/**`, the full suite,
+  the probes) because the harness safety classifier was unavailable when that agent's work was reviewed.
+- **Post-gate fix** (`6e96d85`, coordinator): Settings → Models shows Favorite and Visible only for chat and image
+  models; DECISIONS.md lists migration `0003`.
+- **Implementation facts** (the docs were reconciled in P6-B; API.md, ARCHITECTURE.md, UI.md and PROVIDERS.md carry
+  the details):
+  - W6.1 image pipeline — 433 chat and route tests (373 before). Stream: `start` → `start-step` → `message-metadata`
+    keep-alive every 15 s (`ChatRunnerOptions.imageKeepAliveMs`) → one `file` chunk per image → `finish-step` →
+    `finish`; a failure is an `error` chunk (saved as `metadata.error`), Stop an `abort` (`aborted: true`); a refused
+    image becomes an inline `generated-file-dropped` notice. Saved file parts carry `filename` (`image-<n>.<ext>` or
+    the name of the existing file); failed or aborted image turns keep `metadata.image` + `finishedAt` but no files.
+    History: `[Generated image: <name>]` / `[Generated file: <name>]` in place, the latest images carried for vision
+    models after "(Images generated earlier in this chat:)". Tool images follow the final `tool-output-available`
+    (core-tools only; the URL is checked against the file id and the stored file) and the tool's `costUsd` is added
+    to the message cost.
+  - W6.2 model runtime — the factory rule and the classification above; resolver messages such as
+    `modelRef: The model "x" is not an image model.`; async factories are awaited inside the 5 s guard
+    (`factoryTimeoutMs`); `voices` are deduplicated and capped at 100; the credential ping and the default choice take
+    chat models only; `models-dev.test.ts` requires only the chat seeds to exist in models.dev.
+  - W6.3 provider media — 266 core-providers tests. xAI transcription and speech instances have an empty `modelId`
+    (logs use the resolved model ref); models.dev lacks all six OpenAI voice seeds (PROVIDERS.md 13); only
+    `gpt-image-2` has a catalog price, so `costUsd` is null for the `gpt-image-1`, `-1-mini` and `-1.5` seeds; the
+    voice lists are unverified and Mistral has none; xAI documents `language` as text normalization (its effect on
+    recognition is unverified).
+  - W6.4 image host — cost = (input tokens × input price + output tokens × output price) / 1e6, rounded to 1e-10;
+    null without a catalog price, without token counts (xAI) or when a used token kind has no price. Exactly one usage
+    row per generation, written by the service. `dropped` counts images refused by `saveGenerated` or undecodable;
+    other storage errors are `internal_error`. Abort rejects with the signal's reason and records no provider outcome;
+    a late answer still writes the usage row and stores nothing; `maxRetries` 1; the same bytes reuse one file row
+    (concurrent-safe, an earlier upload's row and name included). `ctx.images` throws `provider_error` when every
+    image was dropped.
+  - W6.5 voice server — 102 tests; `services/audio/{index,sniff}.ts`. The transcript is trimmed (`''` = no speech);
+    413 carries `details.limitBytes: 26214400` (the body limit answers first above 25 MiB + 64 KiB); a client
+    disconnect aborts the provider call and answers 400 "The request was canceled." (logged only: no outcome, no usage
+    row); the usage row and the provider outcome are written only for 200 answers; one info log line per call
+    (`audio transcription` / `audio speech`); a provider error that repeats the speech text is replaced by a generic
+    one.
+  - W6.6 chats server — `TreeRow.selectedChildId` is optional; `rememberPathSql(chatId, leafId, when?)`;
+    `deleteSubtreeSql` needs planner hints (a 3,000-message subtree went from 4.9 s to 6 ms; a plan test guards it);
+    after a lost race the delete error is derived again (404 / `only-version`); `chat.updated` carries the stored
+    `active_leaf_id` (null or dangling while the detail falls back to the newest message), and an off-path delete
+    still emits it unchanged.
+  - W6.7 chat surface — web suite 130 files / 1373 tests at its end. `followActiveLeaf()` coalesces bursts; a null or
+    dangling leaf gets one reload and is then skipped until a different leaf arrives; `deleteVersion` shares
+    `changePath` with `switchBranch`; `edit(id, text, files?)`; the editor's hidden file input has only
+    `data-slot="message-edit-file-input"` (e2e uses the file chooser of `message-edit-attach`); the meta image line
+    omits the ratio for Auto and "edited" without input images; galleries are not split by invisible parts;
+    `reasoning-file` parts stay thumbnails.
+  - W6.8 media parts — a loading reply already counts as pressed ("Stop reading", `aria-busy`); the Esc shortcut
+    `read-aloud-stop` is registered only while something plays; a system pause (media keys) ends the reading; inline
+    math reads "formula", `\[…\]` blocks "Formula omitted."; the gallery's `data-count` counts the shown tiles;
+    Download only for same-origin, `blob:` or image `data:` URLs; the share option is labelled "Files and images".
+  - W6.9 composer — `MicButton` exposes `activate()` (Alt+V calls it); the `RecordingIndicator` root has
+    `data-state`, `role="group"` and `aria-label`; the transcription request sends the clip as a `File` named
+    `dictation.<ext>` and no model or language (the server settings decide); `groupedByProvider` lists chat models
+    only; `defaultRef` skips a default that names a known non-chat model; the picker's Favorites / Recent show chat and
+    image models only; default image options (1 image, Auto, edit the previous image) are stored as absent keys; the
+    image options menu closes after each pick.
+  - W6.10 media settings — the Media page loads the providers, the catalog and the settings (a Retry alert "Could not
+    load the media settings" on failure); the image select lists visible image models only, the speech-to-text and
+    read-aloud selects include hidden models; Voice saves on blur or Enter; changing Read aloud clears the voice; Test
+    voice (`VOICE_TEST_ID`) stops on leave or when Read aloud is turned off; the Kind select of `CustomModelDialog` has
+    no test id; `ModelsTable` shows a kind badge for non-chat models.
+  - W6.11 app web — `useFreshAuth` and its 8 call sites (the three `fresh-auth.ts` copies and their tests deleted,
+    the duplicate helpers removed); both `ui/sidebar` patches are recorded in `apps/web/AI_ELEMENTS_PATCHES.md`; the
+    user-visible fresh-auth changes are listed in "Implementation deviations" above.
+  - Test timeouts raised for slow renders under full-suite load: the ShareDialog test with 20 link cards (30 s) and
+    two ModelsSettings tests with 72-model popovers (20 s).
+- **Backlog from P6-A:** a `modelName` in the plugin API image result (the tool text names the model ref).
+
+### P6-B
+
+| Agent | Work | State |
+|---|---|---|
+| W6.12 e2e-features | specs `core/images`, `core/voice`, `core/versions`, `core/edit-attachments`, `mobile/media`, `tablet/touch-targets`; the 5 new `@screenshots` screens (`settings-media`, `chat-images`, `chat-images-generating`, `composer-recording`, `chat-delete-version`); `e2e/README.md` | done: new specs 17/17 ×3 (chromium 13, mobile 3, tablet 1); full suite 61 passed; the fake-media launch flags work in headless Chromium (no `addInitScript` mocks); multipart bodies are read through `page.route()` (Playwright's `postDataBuffer()` is empty for file uploads). Found: the expanded sidebar's "Toggle sidebar" button was 32 px on touch tablets — fixed by the coordinator (`AppBrand.vue` `pointer-coarse:size-10`, header `pointer-coarse:h-10`) with a new assertion in the tablet spec |
+| W6.13 docs-final | API.md, UI.md, ARCHITECTURE.md, PROVIDERS.md, PLUGINS.md and the guides reconciled with the code and the P6-A reports; README "v1.2"; this file | done (below) |
+| W6.14 live-media | the `HF_LIVE_MEDIA` image and voice checks, their budget, the summary columns and the unit-tested media matrix | done: `live/media.ts` + matrix / checks / summary changes; 52 unit tests (was 23); the live file stays skipped without `HF_LIVE`; never run live. The coordinator rewrote PROVIDERS.md 12 from the implementation and added the `media` input to `.github/workflows/live.yml` |
+
+- **W6.13** — README reads "v1.2": the feature list covers images, voice, remembered and deletable versions,
+  attachment editing, the single password prompt, tablet touch targets and the microphone's HTTPS requirement. Four
+  README screenshots changed visibly and were replaced by the P6-A gate captures: `chat-dark.png` ←
+  `dark/chat-desktop.png` and `chat-light.png` ← `light/chat-approval-desktop.png` (the composer's microphone
+  button), `settings-dark.png` ← `dark/settings-providers-desktop.png` (the Media item), `plugins-dark.png` ←
+  `dark/plugins-desktop.png` (three core tools, version 1.1.0); `provider-wizard-dark.png` is unchanged. PROVIDERS.md
+  11 stays "Unverified" for the media checks (the live media suite has not run) and explains how to record results.
+  Where the code and the plan or a code comment disagree, the docs describe the code. Suspected code issues, for the
+  final gate:
+  - **Fixed before the final gate — Migration `0003` hid cached listings** (`apps/server/drizzle/0003_refresh_model_listings.sql` with
+    `S/catalog/index.ts` `buildEntries`, which uses a cached listing only when `fetchedAt !== null`). Expected (the
+    migration comment): the stale listing stays visible until it is refreshed. Actual: after the upgrade every provider
+    serves its seeds (plus plugin and custom models) until a refresh succeeds, and a failed refresh keeps `fetched_at`
+    null, so a provider that is down or offline at the upgrade (Ollama not running, a network outage) loses its listed
+    models meanwhile (a chat on such a model answers `model_not_found`). Fix options: a follow-up migration that sets
+    `fetched_at = 0` where `models` is not empty, or a catalog that serves a cached non-empty listing as stale.
+  - **Unknown provider on the media routes** (`S/services/audio/index.ts`, also `S/services/images/index.ts` for
+    `ctx.images` / `generate_image`): the resolvers' `404 not_found` "Unknown provider" passes through, while the chat
+    pipeline answers `400 provider_not_configured` with `action: 'configure-provider'` (API.md 2.2), e.g. for a
+    `speechModelRef` that names the provider of an uninstalled plugin. Documented as built (the 404 is tested).
+  - **Stale comments** (no behavior change): `S/builtin-plugins/mock/index.ts`, `core-providers/providers/google.ts`
+    and `openrouter.ts` still say an id containing "image" is classified as an image model; the frozen
+    `packages/plugin-sdk/src/types.ts` comment on `seedModels` still says seeds are used only without a listing (media
+    seeds are always listed; a CCR).
 
 ---
 
 ## Risks
 
+State after Gate P6-A; "held" means the mitigation worked so far.
+
 | Risk | Mitigation |
 |---|---|
-| The stream restructure (`createUIMessageStream` around every chat run) breaks streaming, resume or approvals | W6.1 keeps `pipeline.test.ts` green and adds a test that fails on any saved `data:` URL; the resume, approval and keyboard e2e specs run in every gate |
-| Unverified provider behavior (Gemini image output and thought signatures, the carry-forward, voice ids and voice lists, a Gemini transcription id) | unverified seeds marked, `gemini-3.5-transcribe` left out, provider 404s mapped to `model_not_found`; the opt-in live media checks (W6.14) |
-| Image cost | the tool's policy is `ask`; costs are labelled "estimated"; the live media checks are opt-in with a budget |
-| Migration `0002` data loss | one nullable `ADD COLUMN` only, the backfill, an upgrade test with a no-backfill negative copy (C11), the `.tmp/upgrade-v11` probe (Gate P6-0b), a real v1.1 → v1.2 upgrade at the final gate |
-| Hot files (`useChatSession`, `ChatMessage`, `MessageActions`, `share/**`, `settings/**`, the composer) | one owner per file per wave (P6-A table); new components as P6-0b stubs with frozen props; explicit globs |
-| Doc-coupled route count (76) | all three routes land in P6-0a together with API.md 8 and the DECISIONS table |
-| The microphone needs a secure context; fake media flags may fail in headless CI | UI states (disabled mic, tooltip) and docs (README: HTTPS or localhost); W6.12 falls back to `page.addInitScript` mocks of `getUserMedia` / `MediaRecorder` |
-| Media selects list a transcription / speech model whose provider has no factory (e.g. a models.dev-only `alibaba:qwen3-asr-flash`) | the resolver answers `validation_error` with the model named and the web shows it as a toast; W6.2 may hide such models (a CCR if it needs a new catalog flag) |
-| Alt+V opens the View menu in Firefox on Windows | `preventDefault` in the registry; if it proves unreliable, W6.9 falls back to Alt+J (a CCR updates UI.md 12) |
-| The fresh-auth behavior changes in eight places | UI.md 8.4 rewritten; the plugin, data and share e2e specs stay green |
-| Disk growth from generated images | delete-all purges files; orphan-file cleanup is in the backlog |
-| Wave size (11 agents) | fix-up agents in P6-B; `generate_image` is the first item to cut |
-| Dependabot still misbehaves on pnpm 11 | watch the next weekly run; Renovate stays the documented fallback |
-| Privacy (audio and reply text leave for the provider) | explicit opt-in, the settings notice, nothing stored or logged (ARCHITECTURE.md 10.8) |
+| The stream restructure (`createUIMessageStream` around every chat run) breaks streaming, resume or approvals | held: W6.1 kept `pipeline.test.ts` green (433 chat and route tests) and added a test that fails on any streamed or saved `data:` URL; the resume, approval and keyboard e2e specs passed at Gate P6-A (44 passed) and run again at the final gate |
+| Unverified provider behavior (Gemini image output and thought signatures, the carry-forward, voice ids and voice lists, a Gemini transcription id, the xAI `language` option) | unverified seeds and voice lists marked, `gemini-3.5-transcribe` left out, provider 404s mapped to `model_not_found`; the opt-in live media checks (W6.14) exist but have not run with real keys: PROVIDERS.md 11 stays "Unverified" |
+| Image cost | the tool's policy is `ask`; costs are labelled "estimated"; `costUsd` is null when the catalog has no price (every OpenAI image seed except `gpt-image-2`) or no token counts are reported (xAI); the live media checks are opt-in with a budget |
+| Migration `0002` data loss | held: one nullable `ADD COLUMN` plus the backfill, an upgrade test with a no-backfill negative copy (C11), the `.tmp/upgrade-v11` probe (Gate P6-0b: 0 invalid pointers, chats unchanged); a real v1.1 → v1.2 upgrade at the final gate |
+| Stale model listings after the upgrade (a v1.1 cache hides the v1.2 media ids and image-output flags for up to 24 h) | found at Gate P6-A; migration `0003` ages every successful cached listing by one TTL (stale once, still served until a refresh succeeds; `S/db/upgrade.test.ts`); the first version (`fetched_at = NULL`) would have hidden cached listings until a refresh succeeded — found by W6.13, fixed before the final gate |
+| Hot files (`useChatSession`, `ChatMessage`, `MessageActions`, `share/**`, `settings/**`, the composer) | held: one owner per file per wave (P6-A table); new components as P6-0b stubs with frozen props; the P6-A audit found no path outside the globs and no frozen file touched |
+| Doc-coupled route count (76) | held: all three routes landed in P6-0a together with API.md 8 and the DECISIONS table |
+| The microphone needs a secure context; fake media flags may fail in headless CI | UI states (a disabled mic with the tooltip "Voice input needs HTTPS or localhost") and docs (README: HTTPS or localhost); the P6-A e2e run was green with the fake media flags; W6.12 falls back to `page.addInitScript` mocks of `getUserMedia` / `MediaRecorder` if needed |
+| Media selects list a transcription / speech model whose provider has no factory (e.g. a models.dev-only `alibaba:qwen3-asr-flash`) | settled: W6.2 lists a media model only when its provider has the matching factory (custom models excepted; the resolver then answers `validation_error` naming the model) |
+| Alt+V opens the View menu in Firefox on Windows | `preventDefault` on a match in the shortcut registry; Alt+V kept (no Alt+J fallback); Firefox on Windows is unverified |
+| The fresh-auth behavior changes in eight places | held: one `useFreshAuth` composable, UI.md 8.4 rewritten, the plugin, data and share e2e specs green at Gate P6-A |
+| Slow version deletes on large chats (a recursive subtree delete) | `deleteSubtreeSql` with planner hints (a 3,000-message subtree in 6 ms instead of 4.9 s) and a query-plan test |
+| Disk growth from generated images | the same bytes reuse one file row; delete-all purges files; orphan-file cleanup is in the backlog |
+| Wave size (11 agents) | held: the P6-A gate was green, W6.15 / W6.16 were not needed and nothing was cut (`generate_image` shipped) |
+| Dependabot still misbehaves on pnpm 11 | the P6-0a gate saw separate katex / ai-sdk / minor pull requests (#2 – #4, green); Renovate stays the documented fallback |
+| Privacy (audio and reply text leave for the provider) | explicit opt-in, the settings notice, nothing stored or logged (ARCHITECTURE.md 10.8); the P6-A log probe found no prompt, transcript or speech text |

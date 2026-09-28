@@ -4,7 +4,10 @@
 // password-protected server from the build with a fresh data directory (`startServer`), so the pictures hold only the
 // chats it creates, and the login page is one of the screens. Phase 5 screens: a chat whose messages have versions
 // (the "‹ 2/2 ›" switchers), the Share dialog with an outdated link, the shared chat page and its unavailable state,
-// and Settings -> Data with that link in its list.
+// and Settings -> Data with that link in its list. Phase 6 screens: a chat with generated images (galleries), an image
+// turn in flight (the placeholder tiles), the composer while it records, the "Delete this version?" dialog and
+// Settings -> Media with every model chosen. A screen that starts something (a run, a recording, a dialog, settings
+// only it needs) undoes it in `close`, so the other screens look the same in every run.
 import type { Page } from '@playwright/test'
 import type { StartedServer } from '../../helpers/index.ts'
 import { mkdir } from 'node:fs/promises'
@@ -19,8 +22,10 @@ import {
   expectMessageStatus,
   HarnessApi,
   lastAssistantMessage,
+  naturalSize,
   pressShortcut,
   REPO_ROOT,
+  sendMessage,
   startServer,
   test,
   testIds,
@@ -46,6 +51,10 @@ interface Seed {
   shared: string
   /** `/share/<token>` of that link. */
   sharePath: string
+  /** Two image turns: one 16:9 image, then two variations of it (an edit). */
+  images: string
+  /** The screenshot server (API calls of the screens that start something). */
+  baseURL: string
   /** The start of the browser clock: a little after the seed, so relative times read "2m ago". */
   now: number
 }
@@ -87,7 +96,23 @@ interface Screen {
   only?: Viewport
   /** Navigates and waits until the screen shows what it should. */
   open: (page: Page, seed: Seed) => Promise<void>
+  /** After the picture: undoes what `open` started (a run, a recording, a dialog, settings only this screen needs). */
+  close?: (page: Page, seed: Seed) => Promise<void>
 }
+
+/** The screenshot server's API as the logged-in browser (the page's cookies). */
+function pageApi(page: Page, seed: Seed): HarnessApi {
+  return new HarnessApi(page.request, seed.baseURL)
+}
+
+/** Read aloud as the Media screen shows it; the other screens keep it off (no Read aloud buttons on their replies). */
+const SPEECH_SETTINGS = { speechModelRef: 'mock:speech', speechVoice: 'mock-voice-a', speechSpeed: 1.25 }
+const NO_SPEECH_SETTINGS = { speechModelRef: null, speechVoice: null, speechSpeed: 1 }
+
+/** The chat an image-turn screen creates for itself (deleted again in `close`). */
+let generatingChatId: string | null = null
+/** How far the page clock ran ahead of the real one before the image-turn screen set it to the real time. */
+let clockOffsetMs = 0
 
 /** The transcript's scrolling element is at its end (opening a chat jumps to the bottom, docs/UI.md 5.9). */
 async function expectTranscriptAtBottom(page: Page): Promise<void> {
@@ -172,6 +197,74 @@ const SCREENS: Screen[] = [
       const replyVersions = lastAssistantMessage(page).getByTestId(testIds.messageBranch)
       await expect(replyVersions).toHaveAttribute('data-count', '2')
       await expect(replyVersions).toHaveAttribute('data-index', '1')
+    },
+  },
+  {
+    name: 'chat-delete-version',
+    open: async (page, seed) => {
+      await openChat(page, seed.versions)
+      await lastAssistantMessage(page).getByTestId(testIds.messageDeleteVersion).click()
+      await expect(page.getByTestId(testIds.messageDeleteVersionConfirm)).toBeVisible()
+      await expect(page.getByRole('alertdialog')).toContainText('Delete this version?')
+    },
+    close: async (page) => {
+      // Cancel: the versions stay.
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.messageDeleteVersionConfirm)).toBeHidden()
+    },
+  },
+  {
+    name: 'chat-images',
+    open: async (page, seed) => {
+      await openChat(page, seed.images)
+      await expectMessageStatus(lastAssistantMessage(page), 'done')
+      const gallery = lastAssistantMessage(page).getByTestId(testIds.imageGallery)
+      await expect(gallery).toHaveAttribute('data-count', '2')
+      for (const image of await gallery.getByRole('img').all())
+        await naturalSize(image)
+      await expectTranscriptAtBottom(page)
+    },
+  },
+  {
+    name: 'chat-images-generating',
+    open: async (page, seed) => {
+      // The caption counts from the server's start time: the page clock (2 minutes ahead for the relative times of the
+      // other screens) runs at the real time here, and `close` puts the offset back.
+      clockOffsetMs = await page.evaluate<number>('Date.now()') - Date.now()
+      await page.clock.setSystemTime(Date.now())
+      // A chat of its own with the image model: a "slow" prompt keeps the placeholders up for 5 s.
+      generatingChatId = (await pageApi(page, seed).createChat({ title: 'Logo sketches', modelRef: 'mock:image' })).id
+      await page.goto(`/chat/${generatingChatId}`)
+      await expect(composer(page).getByTestId(testIds.modelPickerTrigger)).toHaveAttribute('data-model-ref', 'mock:image')
+      const options = composer(page).getByTestId(testIds.imageOptionsTrigger)
+      await options.click()
+      await byTestId(page, testIds.imageAspectOption, { 'data-value': '16:9' }).click()
+      await expect(options).toHaveAccessibleName('Image options: 16:9, 1 image')
+      await options.click()
+      await byTestId(page, testIds.imageCountOption, { 'data-value': '2' }).click()
+      await expect(options).toHaveAccessibleName('Image options: 16:9, 2 images')
+      await sendMessage(page, 'A slow sketch of a forge logo, flat vector, ember orange')
+      await expect(lastAssistantMessage(page).getByTestId(testIds.imageGenerating)).toHaveAttribute('data-count', '2')
+    },
+    close: async (page, seed) => {
+      if (generatingChatId)
+        await pageApi(page, seed).removeChat(generatingChatId)
+      generatingChatId = null
+      await page.clock.setSystemTime(Date.now() + clockOffsetMs)
+    },
+  },
+  {
+    name: 'composer-recording',
+    open: async (page, seed) => {
+      await openChat(page, seed.markdown)
+      const mic = composer(page).getByTestId(testIds.composerMic)
+      await mic.click()
+      await expect(mic).toHaveAttribute('data-state', 'recording')
+      await expect(composer(page).getByTestId(testIds.composerRecordingTime)).toHaveText('0:02', { timeout: 10_000 })
+    },
+    close: async (page) => {
+      await composer(page).getByTestId(testIds.composerMicCancel).click()
+      await expect(composer(page).getByTestId(testIds.composerMic)).toHaveAttribute('data-state', 'idle')
     },
   },
   {
@@ -290,6 +383,22 @@ const SCREENS: Screen[] = [
     }),
   },
   {
+    name: 'settings-media',
+    open: async (page, seed) => {
+      await pageApi(page, seed).updateSettings(SPEECH_SETTINGS)
+      await openSettings(page, '/settings/media', async (page) => {
+        await expect(page.getByTestId(testIds.settingsImageModel)).toHaveAttribute('data-value', 'mock:image')
+        await expect(page.getByTestId(testIds.settingsTranscriptionModel)).toHaveAttribute('data-value', 'mock:transcribe')
+        await expect(page.getByTestId(testIds.settingsSpeechModel)).toHaveAttribute('data-value', 'mock:speech')
+        await expect(page.getByTestId(testIds.settingsSpeechVoice)).toHaveValue('mock-voice-a')
+        await expect(page.getByTestId(testIds.settingsSpeechSpeed)).toHaveAttribute('data-value', '1.25')
+      })
+    },
+    close: async (page, seed) => {
+      await pageApi(page, seed).updateSettings(NO_SPEECH_SETTINGS)
+    },
+  },
+  {
     name: 'settings-general',
     open: page => openSettings(page, '/settings/general', async (page) => {
       await expect(page.getByTestId(testIds.settingsDisplayName)).toHaveValue('Alex')
@@ -336,7 +445,8 @@ async function seed(server: StartedServer): Promise<Seed> {
   const api = await HarnessApi.create(server.baseURL)
   try {
     await api.client.auth.login({ body: { password: PASSWORD } })
-    await api.updateSettings({ displayName: 'Alex', defaultModelRef: 'mock:echo' })
+    // The image and speech-to-text models change nothing on the other screens (the mic looks the same either way).
+    await api.updateSettings({ displayName: 'Alex', defaultModelRef: 'mock:echo', imageModelRef: 'mock:image', transcriptionModelRef: 'mock:transcribe', ...NO_SPEECH_SETTINGS })
     const titled = async (title: string) => (await api.createChat({ title })).id
     // Older chats first: the sidebar lists the newest on top.
     const shared = await titled('Session migration plan')
@@ -353,6 +463,10 @@ async function seed(server: StartedServer): Promise<Seed> {
     await api.regenerateChat({ chatId: versions, modelRef: 'mock:echo', toolMode: 'off' })
     for (const title of ['Kimi vs Qwen for code review', 'Plugin idea: Linear sync', 'Weekly notes'])
       await titled(title)
+    const images = await titled('Launch poster concepts')
+    await api.sendChat({ chatId: images, modelRef: 'mock:image', text: 'A minimalist launch poster for harness-forge v1.2, warm ember colors', imageOptions: { n: 1, aspectRatio: '16:9' } })
+    // The next turn edits the image of the previous reply (the default for image models): two variations.
+    await api.sendChat({ chatId: images, modelRef: 'mock:image', text: 'Two variations with more contrast', imageOptions: { n: 2, aspectRatio: '16:9' } })
     const error = await titled('Check the Anthropic key')
     await api.sendChat({ chatId: error, modelRef: 'mock:error', text: 'Is my key still valid?' })
     const approval = await titled('Echo tool (approval)')
@@ -363,7 +477,7 @@ async function seed(server: StartedServer): Promise<Seed> {
     await api.sendChat({ chatId: reasoning, modelRef: 'mock:reasoning', reasoningEffort: 'high', text: 'Why is a server session safer than a token in local storage for this app?' })
     const markdown = await titled('Refactor auth flow')
     await api.sendChat({ chatId: markdown, modelRef: 'mock:echo', toolMode: 'off', text: MARKDOWN })
-    return { markdown, reasoning, tools, approval, error, versions, shared, sharePath: share.path, now: Date.now() + 2 * 60_000 }
+    return { markdown, reasoning, tools, approval, error, versions, shared, sharePath: share.path, images, baseURL: server.baseURL, now: Date.now() + 2 * 60_000 }
   }
   finally {
     await api.dispose()
@@ -398,6 +512,7 @@ async function captureAll(page: Page, seedData: Seed, theme: Theme, viewport: Vi
       await screen.open(page, seedData)
       await expect(page.locator('html')).toContainClass(theme)
       await shoot(screen.name)
+      await screen.close?.(page, seedData)
     })
   }
 }

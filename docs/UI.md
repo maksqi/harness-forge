@@ -332,12 +332,13 @@ Image model selected: image options instead of effort / permission, no context r
 │ Describe an image…                                                   │
 │ [+] [✱ GPT Image 1 ▾] [▢ 16:9 · 2 ▾]                   [mic]  [(↑)]  │
 └──────────────────────────────────────────────────────────────────────┘
-Recording: the indicator replaces the left tools, the mic becomes Stop (level ring), Send disabled
+Recording: the indicator replaces the left tools (permission menu and context ring step aside too), the mic becomes
+Stop (level ring), Send disabled
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Reply…                                                               │
 │ [● 0:07] [Cancel]                                      [■ mic] [(↑)] │
 └──────────────────────────────────────────────────────────────────────┘
-Transcribing: the timer stops; a click on the mic cancels
+Transcribing: the timer stops, the dot stops pulsing; a click on the mic cancels
 │ [● 0:12] [Cancel]                            [◌ Transcribing…] [(↑)] │
 ```
 
@@ -348,8 +349,9 @@ A reply of an image turn (7.16): the gallery spans the transcript column, the ac
    │                             │ │                             │   2 columns for 2–4 images,
    │          image 1            │ │          image 2            │   one full-width image for 1
    └─────────────────────────────┘ └─────────────────────────────┘
-   ‹ 2/2 ›  ↻   Mock image · 3s                                          no Copy and no Read aloud
-                                                                          without text
+   ‹ 2/2 ›  ↻   Mock Image · 3s                                          no Copy and no Read aloud
+                                                                          without text; Delete this
+                                                                          version follows Regenerate
 ```
 
 ---
@@ -889,10 +891,10 @@ v7 UI message stream; verify the exact names in `node_modules/ai/dist/index.d.ts
 | `tool-*` / `dynamic-tool` | `ToolPart` (`AiTool`) | one row, see 7.2 |
 | approval request (tool part in approval state) | `ToolApprovalCard` (`AiConfirmation`) | below its tool row, see 7.3 |
 | `file` (not an image), `reasoning-file` | `FilePart` → `FileChip` | images (a `reasoning-file` holds a model's draft image): 64px thumbnail (`object-cover rounded-md`), click opens a lightbox `Dialog`; other files: chip with `FileText`, name, size |
-| consecutive `file` parts with an `image/*` type (assistant messages) | `ImageGallery` (Phase 6, W6.8, 7.16) | one gallery block per run of images (`chat-format.ts` block kind `gallery`): generated images of an image turn, of a chat model with image output or of the `generate_image` tool; one image full width, two or more in two columns; a lightbox with previous / next and Download |
+| consecutive `file` parts with an `image/*` type (assistant messages) | `ImageGallery` (Phase 6, W6.8, 7.16) | one gallery block per run of images (`chat-format.ts` block kind `gallery`; parts that render nothing, such as `step-start`, never split a run, any rendered block does): generated images of an image turn, of a chat model with image output or of the `generate_image` tool; one image full width, two or more in two columns; a lightbox with previous / next and Download |
 | `source-url` / `source-document` | `SourcesPart` (`AiSources`) | consecutive sources merge into one row "3 sources" (`Link2` icon); expanded: title + hostname links (`target="_blank" rel="noopener noreferrer"`) |
 | `step-start` | — | renders nothing (no divider) |
-| `data-notice` | `NoticePart` | one muted line with the server's message (codes in API.md 6.4; Phase 6 adds `generated-file-dropped`: a generated file that is not a PNG, JPEG, WebP or GIF image, or larger than 20 MB, was not kept) |
+| `data-notice` | `NoticePart` | one muted line with the server's message and an icon per code (codes in API.md 6.4; Phase 6 adds `generated-file-dropped`, icon `ImageOff`, level warning: a generated file that is not a PNG, JPEG, WebP or GIF image, or larger than 20 MB, was not kept; it stands where the file was) |
 | `data-*` | — | ignored unless listed in `docs/API.md`; unknown data parts never render |
 | error (message `metadata.error` or stream error) | `ErrorPart` | alert at the end of the message, see 7.4 |
 
@@ -900,9 +902,11 @@ A user message whose `metadata.command` is set shows `CommandBadge` (`SquareTerm
 bubble text; the text stays as typed. A `reply` command answer shows "Command reply" instead of the model name
 in the meta row.
 
-An assistant message of an image turn (`metadata.image` set, ADR-028) that has no file part yet renders
-`GeneratingImages` (7.16) in place of its parts: `n` placeholder tiles at the requested aspect ratio. User attachments
-keep rendering above the bubble (5.7); only assistant images form galleries.
+An assistant message of an image turn (`metadata.image` set, ADR-028) that is streaming and has no file part yet
+renders `GeneratingImages` (7.16) after its parts: `n` placeholder tiles at the requested aspect ratio. A finished,
+failed or stopped turn keeps `metadata.image` without files, so `metadata.finishedAt`, an error or `aborted` ends the
+placeholders even before the stream closes. User attachments keep rendering above the bubble (5.7); only assistant
+images form galleries.
 
 ### 7.2 Tool rows
 
@@ -931,8 +935,9 @@ Expanded body (`pl-8`, `text-xs` mono, `bg-muted/50 rounded-md p-3`): **Input** 
 (string → pre-wrap text; object → pretty JSON), each capped at 4 KB with "Show all" (another 60 KB max) and a
 "Truncated by server" note when the server capped it. `CopyButton` on each block. Rows never auto-expand.
 
-`generate_image` (Phase 6, `core-tools`, policy `ask`): a normal tool row whose first argument is the prompt; its
-output holds file references only (`{ modelRef, images: [{ fileId, url, mediaType, name }], costUsd?, revisedPrompt? }`).
+`generate_image` (Phase 6, `core-tools`, policy `ask`): a normal tool row whose first argument is always the prompt
+(even when the model lists `aspectRatio` first; `toolRowArgument` in `parts/tool-row.ts`); its output holds file
+references only (`{ modelRef, images: [{ fileId, url, mediaType, name }], costUsd?, revisedPrompt? }`).
 The images themselves are `file` parts the server appends after the tool call, so they render as a gallery (7.16) right
 below the row, in shares and backups too. Without an image model in Settings → Media the row ends in `output-error`
 with "Choose an image model in Settings → Media."
@@ -1040,8 +1045,10 @@ sibling ids (`seq` order) and the index of the shown one (API.md, `MessageBranch
   `trigger: 'regenerate-message'` with `messageId`), **Delete this version** (below), then the meta text:
   `ModelLabel` (sm) · duration ("14s") · "Stopped" when `metadata.aborted` · "Max tokens reached" when
   `finishReason === 'length'`. Hovering the meta opens a `HoverCard`: input / output / reasoning / cache tokens, cost
-  ("$0.004"), started time; an image turn adds the line "2 images · 16:9 · edited 1 image" (from `metadata.image`:
-  `n`, `aspectRatio`, `inputs`) and labels its cost "Estimated cost". Regenerating adds a new version of that reply
+  ("$0.004"), started time; an image turn adds the line "2 images · 16:9 · edited 1 image" above the rows (from
+  `metadata.image`: `n`, `aspectRatio`, `inputs`; the ratio is left out for Auto and the edit part when no input image
+  was sent) and labels its cost "Estimated cost" (image turns only: a chat model with image output and the
+  `generate_image` tool keep the label "Cost"). Regenerating adds a new version of that reply
   under the same user message; the path continues from the new version, and the older version keeps the messages that
   followed it.
 - User: **Copy**, **Edit** (any user message while no run is active), **Delete this version** (below). Edit turns the
@@ -1051,11 +1058,13 @@ sibling ids (`seq` order) and the index of the shown one (API.md, `MessageBranch
   stay reachable through the switcher. Enter/Mod+Enter follows `sendKey`; Esc cancels.
 - **Attachments on edit** (Phase 6, S8, W6.7): the editor shows the edited message's attachments as removable
   `FileChip`s (`message-edit-attachment`, "Remove {name}") and a paperclip button (`message-edit-attach`, "Attach
-  files") that opens a hidden file input with the composer's accept list; pasting files adds them too. New files upload
-  at once through a private `useComposerAttachments()` instance (chips show the upload state; rejected files show the
-  composer's toasts, e.g. "{name} is too large"). Send waits for the uploads, is disabled while one runs or failed, and
-  is allowed with attachments and no text; Cancel discards the editor and aborts its uploads. The new version carries
-  exactly the chips left in the editor.
+  files", 40px on coarse pointers) that opens a hidden file input with the composer's accept list (the input has no
+  test id, only `data-slot="message-edit-file-input"`); pasting files adds them too (rich text with HTML is pasted as
+  text). New files upload at once through a private `useComposerAttachments()` instance (chips show the upload state;
+  rejected files show the composer's toasts from `attachment-toasts.ts`: "{name} is too large" / "Files can be up to 20
+  MB.", "{name} can't be attached" / "Attach images, PDFs or text files."). Send waits for the uploads, is disabled
+  while one runs or failed, and is allowed with attachments and no text; Cancel (or Esc) discards the editor and aborts
+  its uploads. The new version carries exactly the chips left in the editor, then the new uploads.
 - ↑ in an empty composer opens `MessageEditor` on the last user message.
 - **Delete this version** (Phase 6, ADR-030, W6.7; `Trash2`, `message-delete-version`, 40px on coarse pointers): on
   user and assistant messages listed in `branches` (they have at least two versions), while no request is in flight and
@@ -1064,17 +1073,19 @@ sibling ids (`seq` order) and the index of the shown one (API.md, `MessageBranch
   (`message-delete-version-confirm`, destructive). Confirm → `session.deleteVersion(messageId)` (`DELETE
   /api/chats/:id/messages/:messageId`): the transcript shows the previous version (else the next) with the path last
   shown under it; the polite live region announces "Version deleted"; focus moves to the switcher of the version now
-  shown, or to its Copy button when only one version is left (no switcher). 409 `run-active` → the conflict toast of
-  7.4 and the session follows the run; 404 → the stale-path toast of 7.4 and a reload; every other failure (including
-  409 `only-version`) → toast "Could not delete the version" with the server message. Usage totals, share snapshots and
-  files are kept. Search (Mod+K) covers every version, so a match may come from a version that is not on the active
-  path.
+  shown (its first enabled control), or to its Copy button when only one version is left (no switcher). 409
+  `run-active` → the conflict toast of 7.4 and the session follows the run; 404 → the stale-path toast of 7.4 and a
+  reload; every other failure (including 409 `only-version`) → toast "Could not delete the version" with the server
+  message. While the request runs the dialog cannot be dismissed and the switchers are disabled (`switching`).
+  Canceling the dialog, a failure, or a deletion that changed nothing returns focus to "Delete this version" (when that
+  message is still shown). Usage totals, share snapshots and files are kept. Search (Mod+K) covers every version, so a
+  match may come from a version that is not on the active path.
 - **Other tabs** (Phase 6, ADR-030): `chat.updated` carries the chat's `activeLeafId`, so a switch or a deletion made in
   another tab moves this tab too: an idle session whose last stored message is not that leaf reloads the path
   (`followActiveLeaf()`, 11.1; nothing happens while a request or a switch runs). Known limit: deleting a version that is
-  not on the active path does not move the leaf, so other tabs keep an old counter until they reload the chat. After the
-  session's own edit or regenerate, the new switcher ("2/2") appears once `run.finished` arrives (`refreshBranches()`,
-  11.1).
+  not on the active path does not move the leaf (the event repeats the unchanged leaf), so other tabs keep an old
+  counter until they reload the chat. After the session's own edit or regenerate, the new switcher ("2/2") appears once
+  `run.finished` arrives (`refreshBranches()`, 11.1).
 
 ### 7.6 Streaming states
 
@@ -1109,30 +1120,39 @@ Structure inside `AiPromptInput`:
   records or transcribes, `RecordingIndicator` replaces the left tools (7.17; wireframe 2.11).
 - Right tools: `PermissionMenu` (only when at least one tool exists and the model has `capabilities.tools`),
   `ContextRing` (only after the first assistant message with usage; never for image models), `MicButton` (Phase 6,
-  7.17: right before Send; hidden in browsers without `MediaRecorder`), `SendStopButton`: 32px circle,
+  7.17: right before Send; hidden when the browser cannot record), `SendStopButton`: 32px circle,
   `bg-primary text-primary-foreground`, `ArrowUp` (Send) / filled `Square` (Stop); disabled = `bg-muted
   text-muted-foreground`. Same size in every state. Send is also disabled while voice input runs (tooltip "Finish
-  dictation first").
+  dictation first"). While the recording indicator shows, `PermissionMenu` and `ContextRing` step aside as well, and
+  Alt+M / Alt+R / Alt+P and the `/model`, `/effort`, `/mode` menus do nothing.
 - Placeholder: "Reply…" in a chat, "Ask anything…" on `/`, "Describe an image…" whenever an image model is selected.
   Textarea font 15px (16px below `md`, iOS zoom).
-- **Image models** (Phase 6, ADR-028): the message text is the prompt (at most 32,000 characters; an empty prompt keeps
-  Send disabled). Image models have no reasoning and no tools, so `EffortMenu` and `PermissionMenu` hide themselves;
-  attached images are sent as input images when the model has vision (else the usual warning line, below); a reply
-  with images makes the next message an edit of those images unless "Edit the previous image" is off.
-  `ImageOptionsMenu` (W6.9, `image-options-trigger`): a ghost h-8 trigger with `Image` icon and a summary ("16:9 · 2",
-  "Auto"; the label hides below `sm`), a `DropdownMenu` with "Aspect ratio" (radio: Auto, 1:1, 3:2, 2:3, 4:3, 3:4,
-  16:9, 9:16; `image-aspect-option`, `data-value` `auto` or the ratio), "Images" (radio 1–4, image models only;
-  `image-count-option`, `data-value`) and the checkbox "Edit the previous image" (image models only, shown only when the
-  parent reply has images, checked by default; `image-edit-previous`). Chat models with image output get the aspect
-  ratio only. Choices are remembered per browser (`useImageOptions`, `localStorage['hf-image-options']`, 11) and sent
-  as `imageOptions` only with image-capable models.
+- **Image models** (Phase 6, ADR-028): the message text is the prompt (at most 32,000 characters: a longer one keeps
+  Send disabled with the tooltip "The prompt can be up to 32,000 characters"; an empty prompt keeps it disabled too,
+  also when files are attached). Image models have no reasoning and no tools, so `EffortMenu` and `PermissionMenu` hide
+  themselves; attached images are sent as input images when the model has vision (else the warning line below keeps
+  Send disabled); a reply with images makes the next message an edit of those images unless "Edit the previous image"
+  is off. `ImageOptionsMenu` (W6.9, `image-options-trigger`): a ghost h-8 trigger (40px on coarse pointers) with the
+  `Image` icon and a summary ("16:9 · 2", "Auto"; the text hides below `sm`), tooltip "Image options", accessible name
+  "Image options: 16:9, 2 images" ("Image options: 16:9" for chat models with image output). Its `DropdownMenu` has
+  "Aspect ratio" (radio items drawn as shape tiles in a four-column grid: Auto, 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16;
+  `image-aspect-option`, `data-value` `auto` or the ratio; opening focuses the current one), "Images" (radio 1–4, image
+  models only; `image-count-option`, `data-value`) and the checkbox "Edit the previous image" (image models only, shown
+  only when the last reply on the path has images, checked by default; `image-edit-previous`). Chat models with image
+  output get the aspect ratio only; the menu closes after each pick and gives focus back to the textarea (desktop).
+  Choices are remembered per browser (`useImageOptions`, `localStorage['hf-image-options']`, 11; 1 image, Auto and
+  "Edit the previous image" on are the defaults and are stored as absent keys) and sent as `imageOptions` only with
+  image-capable models.
 - Send key: `sendKey = enter` → Enter sends, Shift+Enter newline; `mod-enter` → Mod+Enter sends, Enter newline.
   Ignore Enter while `event.isComposing` (IME).
 - Attachments: `+` → file picker (multiple), paste of files/images, drag and drop onto the chat pane (overlay
   "Drop files to attach", dashed `border-ring` inset). Each file uploads at once to `POST /api/files`; chips show
   `Spinner` while uploading, destructive border + "Retry" on failure, `X` to remove. Send waits for uploads.
-  `payload_too_large` → toast "{name} is too large". When the model lacks vision and an image is attached,
-  show a warning line under the chips: "Claude Haiku can't see images; they won't be sent."
+  A file over 20 MB → toast "{name} is too large" ("Files can be up to 20 MB."); another type → "{name} can't be
+  attached" ("Attach images, PDFs or text files."). When the model lacks vision and an image is attached (or lacks PDF
+  input and a PDF is attached), a warning line shows under the chips ("Claude Haiku can't see images. Remove them or
+  choose another model." / "… can't read PDFs. Remove them or choose another model.") and Send stays disabled with that
+  text as its tooltip.
 - Drafts: unsent text per chat is kept in `sessionStorage` (`useComposerDraft`) and restored on return.
 - Client commands never reach the server (7.8). Server commands are sent as typed; the server expands them.
 - Focus: autofocus on desktop when a chat opens and after sending; never on touch devices. Shift+Esc focuses.
@@ -1161,18 +1181,21 @@ Server commands insert `/name ` and keep the menu closed.
   (matches display name, model id, provider name), then groups:
   1. **Favorites** (starred), 2. **Recent** (last 5 used, `models.recentRefs`), 3. one group per connected
   provider in settings order, chat models only (`models.groupedByProvider`); group header = `ProviderIcon` (md, color)
-  + provider name, 4. **Image models** (Phase 6, ADR-028; `model-picker-group` with `data-value="images"`): the visible
-  `kind: 'image'` models of connected providers (an image model is visible only when its provider can generate images),
-  each with its provider icon; search matches them too. Transcription and speech models never show here (they are
-  chosen in Settings → Media, 9.9).
+  + provider name, 4. **Image models** (Phase 6, ADR-028; `model-picker-group` with `data-value="images"`, header
+  `Image` icon + "Image models"): the visible `kind: 'image'` models of connected providers in provider order (an image
+  model is visible only when its provider can generate images), each with its provider icon; a search (display name,
+  model id or provider name) matches them too and shows the provider groups and this group only. Favorites and Recent
+  hold chat and image models only: transcription and speech models never show here (they are chosen in Settings →
+  Media, 9.9), and neither does any other kind. `/model <query>` resolves chat and image models only.
 - Item: `ProviderIcon` (sm, auto) · name · `ModelCaps` (Eye = vision, Wrench = tools, Brain = reasoning, Image = image
   output (Phase 6, `capabilities.imageOutput`, tooltip "Image output"), each with a tooltip) · context size right-aligned
   in `text-xs tabular-nums` ("200K", "1M") · a star button on hover (`aria-label="Favorite"`) toggling
   `models.setPref(ref, { favorite })`. Hidden models never show.
 - Footer (sticky): "Manage models" → `/settings/models`, "Connect providers" → `/settings/providers`.
 - Selecting sets the chat's model (`chats.update(id, { modelRef })` through the session), records it in recents
-  and closes. New chats start with `settings.defaultModelRef`, else the most recent chat model, else the first
-  available chat model (`models.defaultRef` never picks an image model). Opened by click, Alt+M, or `/model`.
+  and closes. New chats start with `settings.defaultModelRef` (skipped when it names a known model that is not a chat
+  model), else the most recent visible chat model, else the first visible chat model (`models.defaultRef` never picks
+  an image model). Opened by click, Alt+M, or `/model`.
 
 ### 7.10 Effort menu (`EffortMenu`, W2.3)
 
@@ -1284,14 +1307,17 @@ chats (6: the route is exempt from the auth middleware).
   `metadata.command`):
   - user → `UserMessageBubble` (attachments, command badge, plain text);
   - assistant → parts in order: `text` → `TextPart` (final), `reasoning` → `ReasoningPart` (`streaming` false,
-    collapsed, label "Thought"; present only when the share includes reasoning), `tool` → `ShareToolRow`, `file` →
-    `FilePart`, consecutive `source-url` / `source-document` → one `SourcesPart`; then the model id of `modelRef` in
+    collapsed, label "Thought"; present only when the share includes reasoning), `tool` → `ShareToolRow`, a `file`
+    that is not an image → `FilePart`, consecutive image files → one `ImageGallery` (Phase 6, 7.16; its
+    `data-message-id` is the message's generated key `share-message-<index>`), consecutive `source-url` /
+    `source-document` → one `SourcesPart`; then the model id of `modelRef` in
     muted mono `text-xs` (not `ModelLabel`, which reads the models store); `status: 'stopped'` adds "Stopped",
     `status: 'failed'` adds "This reply failed." (error details are never shared).
   - Never used here: `ChatMessage`, `ToolPart`, `ErrorPart`, `MessageMeta`, `ModelLabel` (they need stores, actions
     or error details).
 - **`ShareToolRow`**: the one-line row of 7.2 without approval states: `Wrench` (or `Server` + the server badge for
-  `mcp__<server>__<tool>`), display name, first argument when the input is shared, status from `status` (`done` →
+  `mcp__<server>__<tool>`), display name, first argument when the input is shared (the prompt for `generate_image`,
+  `parts/tool-row.ts` like `ToolPart`), status from `status` (`done` →
   `Check`, `error` → `X`, `denied` → `Ban` + "Denied", `stopped` → `CircleSlash` + "Stopped"). It expands (chevron,
   `share-tool-row-output`) only when the part carries `input`, `output` or `errorText`, which the server sends only
   when the share includes tool details: **Input** / **Output** through `ToolValueBlock` (a value the server cut
@@ -1310,29 +1336,40 @@ chats (6: the route is exempt from the auth middleware).
 Generated images (ADR-028) are ordinary `file` parts with `/api/files/<id>` URLs (the server stores every image before
 it streams or saves it), so the transcript, share links, backups and history treat them like attachments. Three
 sources produce them: image turns (an image model picked in the composer, 7.7), chat models with image output
-(Gemini `*-image`, OpenRouter image models) and the `generate_image` tool (7.2).
+(Gemini `*-image` and `nano-banana*`, OpenRouter image models) and the `generate_image` tool (7.2).
 
 - **Gallery** (`ImageGallery`, `image-gallery`, `data-message-id`, `data-count`): `chat-format.ts` turns every run of
-  consecutive `image/*` file parts of an assistant message into one block. One image renders at the full column width
-  at its natural aspect ratio (at most `70dvh` tall, `object-contain`); two to four render in a two-column grid
-  (`gap-2`), each tile keeping its image's aspect ratio. Tiles (`image-tile`, `data-index` 0-based) are buttons
-  ("Open image {n} of {m}") with `rounded-lg border bg-muted`, lazy `<img>` elements (alt "Generated image {n} of
-  {m}") and a hover ring; URLs go through `safeAssetUrl` (same origin or http(s) only, like `FilePart`).
+  consecutive `image/*` file parts of an assistant message into one block (parts that render nothing, such as
+  `step-start`, do not split a run; a `reasoning-file` draft image stays a `FilePart` thumbnail). One image renders at
+  the full column width at its natural aspect ratio (at most `70dvh` tall, `object-contain`); two to four render in a
+  two-column grid (`gap-2`), each tile keeping its image's aspect ratio. Tiles (`image-tile`, `data-index` 0-based) are
+  buttons ("Open image {n} of {m}") with `rounded-lg border bg-muted`, lazy `<img>` elements (alt "Generated image {n}
+  of {m}", `referrerpolicy="no-referrer"`) and a hover ring. URLs go through `safeAssetUrl` (a same-origin path,
+  http(s), `blob:` or an image `data:` URL); an image whose URL fails that check is left out, and `data-count` counts
+  the tiles shown. The component reads no store (the share page renders it too).
 - **Lightbox** (`image-lightbox`, `data-index`): the `FilePart` dialog pattern (`Dialog`, at most `90vw` × `85dvh`),
-  the image `object-contain`, **Previous image** / **Next image** buttons (`ChevronLeft` / `ChevronRight`, disabled at
-  the ends, ArrowLeft / ArrowRight keys), the counter "2 / 4", and **Download** (`image-download`): an `<a download>`
-  link to the same-origin URL, named by the part's `filename` (the server sets it, e.g. `image-1.png`), else
-  `image-<n>.<ext>`. Esc closes and focus returns to the tile.
+  the image `object-contain`, and a top row with **Previous image** / **Next image** (`ChevronLeft` / `ChevronRight`,
+  `aria-disabled` at the ends so focus is never lost; ArrowLeft / ArrowRight keys), the counter "2 / 4" (read as "Image
+  2 of 4" by a polite live region; the buttons and the counter show only for two or more images), **Download** and
+  **Close**. Opening focuses Next image (else Download). **Download** (`image-download`, `data-action="download"`) is
+  an `<a download>` link named by the part's `filename` (the server sets it, e.g. `image-1.png`), else
+  `image-<n>.<ext>`; it exists only for a same-origin URL, a `blob:` URL or an image `data:` URL (browsers ignore
+  `download` across origins and would navigate away). Esc closes and focus returns to the tile the lightbox was opened
+  from; images that change while it is open (a streaming turn, a version switch) keep the index in range.
 - **Generating** (`GeneratingImages`, `image-generating`, `data-count`): while an image turn streams (`metadata.image`
-  set by the `start` chunk) and the message has no file part yet, `n` placeholder tiles at the requested aspect ratio
-  (Auto = square; one tile full width, two to four in the grid), `bg-muted` with a shimmer (static under reduced
-  motion), and the caption "Generating image… 12s" / "Generating 2 images… 12s" (seconds since `metadata.startedAt`,
-  updated every second, `aria-live` off). The placeholders give way to the gallery; a stopped turn shows no images and
-  the meta says "Stopped"; a failed one shows `ErrorPart` (7.4). A resumed stream (reload, second tab) shows the
-  placeholders again from the replayed `start` metadata.
+  set by the `start` chunk) and the message has no file part yet, `n` placeholder tiles (clamped to 1–4) at the
+  requested aspect ratio (Auto = square; one tile full width and at most `70dvh` tall, two to four in the grid),
+  `bg-muted` with a shimmer (static under reduced motion), and the caption "Generating image… 12s" / "Generating 2
+  images… 12s" (seconds since `metadata.startedAt`, updated every second, `aria-live` off); the root is
+  `aria-busy="true"` with the sr-only text "Generating images". The placeholders give way to the gallery; they also end
+  as soon as the message has `metadata.finishedAt`, an error or `aborted` (a failed or stopped turn keeps
+  `metadata.image` but has no files): a stopped turn shows no images and the meta says "Stopped"; a failed one shows
+  `ErrorPart` (7.4). A resumed stream (reload, second tab) shows the placeholders again from the replayed `start`
+  metadata.
 - **Actions and meta** (7.5): no Copy and no Read aloud without text; Regenerate makes a new version (a new image);
-  the meta hover adds "2 images · 16:9 · edited 1 image" and labels the cost "Estimated cost" (image prices are
-  estimates; xAI reports none).
+  the meta hover adds "2 images · 16:9 · edited 1 image" (no ratio for Auto, no edit part without input images) and
+  labels the cost "Estimated cost" (image prices are estimates; xAI reports none, and a model without a catalog price
+  has no cost).
 - **Editing the previous image**: after a reply with images, the next message to an image model sends those images
   as input images (at most 4), unless the message has its own image attachments or "Edit the previous image" is off
   (7.7).
@@ -1344,39 +1381,52 @@ Dictation records in the browser and transcribes through the speech-to-text mode
 (`transcriptionModelRef`, 9.9; ADR-029). Nothing is transcribed in the browser and nothing is stored.
 
 - **Mic button** (`composer-mic`, `data-state`): a ghost icon button (32px, 40px on coarse pointers) right before
-  `SendStopButton`, `Mic` icon, tooltip "Dictate" + `KbdCombo` Alt+V, `aria-keyshortcuts="Alt+V"`. It is hidden when
-  the browser has no `MediaRecorder` or `navigator.mediaDevices.getUserMedia`. Click or **Alt+V** (12) toggles.
-- **States** (`data-state`):
+  `SendStopButton`, `Mic` icon, tooltip "Dictate" + `KbdCombo` Alt+V, `aria-keyshortcuts="Alt+V"`, `aria-pressed`
+  always `true` / `false`. It is hidden when the browser cannot record (`useVoiceInput().supported` is false: no
+  `MediaRecorder`, or a secure context without `navigator.mediaDevices.getUserMedia`; browsers leave `mediaDevices` out
+  of insecure contexts, so there `MediaRecorder` alone counts and the button stays visible in the `insecure` state).
+  Click or **Alt+V** (12; the composer calls the exposed `activate()`, which does exactly what a click does) toggles.
+  The button stays enabled while dictation runs even if the composer becomes disabled.
+- **States** (`data-state`; an insecure origin wins over a missing model, which wins over the voice input state):
 
   | State | Look | A click |
   |---|---|---|
-  | `setup` | no speech-to-text model is set | opens a popover (`composer-mic-setup`): "Choose a speech-to-text model to dictate messages." + **Open settings** (`composer-mic-setup-link` → `/settings/media`) |
+  | `setup` | no speech-to-text model is set (a dictation already running finishes even if the setting changes) | toggles a popover (`composer-mic-setup`): "Choose a speech-to-text model to dictate messages." + the **Open settings** link (`composer-mic-setup-link` → `/settings/media`); closing it returns focus to the mic unless the user went elsewhere |
   | `insecure` | not a secure context (plain HTTP on a LAN): `aria-disabled`, tooltip "Voice input needs HTTPS or localhost" | nothing |
   | `idle` | `Mic` | starts: asks for the microphone, then records |
-  | `requesting` | spinner while the browser asks for permission | ignored |
+  | `requesting` | spinner while the browser asks for permission | ignored (Esc or a chat switch cancels; the microphone is released as soon as it arrives) |
   | `recording` | `Square` (Stop) on `bg-destructive/10` with a ring that follows the input level (static under reduced motion), `aria-pressed="true"`, label "Stop and transcribe" | stops and transcribes |
   | `transcribing` | spinner + "Transcribing…" (the text shows from `sm`), label "Cancel transcription" | cancels (aborts the request) |
 
-- **Recording indicator** (`composer-recording`, wireframe 2.11): while recording or transcribing it replaces the left
-  tools (`+`, model, effort, image options): a red dot (`bg-destructive`, pulsing unless reduced motion), the timer
-  (`composer-recording-time`, `m:ss`, not announced; it stops while transcribing) and **Cancel**
-  (`composer-mic-cancel`), which drops the recording or aborts the transcription.
-- **Result**: the transcript is inserted at the caret position saved when the recording started, with a space added
-  before and after when needed (`insertDictation`); focus returns to the textarea on desktop only; the polite live
-  region announces "Transcript added". An empty transcript shows the toast "No speech detected" and changes nothing.
+- **Recording indicator** (`composer-recording`, `data-state` `recording` | `transcribing`, `role="group"`,
+  `aria-label` "Recording" / "Transcribing"; wireframe 2.11): while recording or transcribing it replaces the left
+  tools (`+`, model, effort, image options), and `PermissionMenu` and `ContextRing` step aside: a red dot
+  (`bg-destructive`, pulsing unless reduced motion; still while transcribing), the timer (`composer-recording-time`,
+  `m:ss`, not announced; it stops while transcribing) and **Cancel** (`composer-mic-cancel`, 40px on coarse
+  pointers), which drops the recording or aborts the transcription and gives focus back to the textarea (desktop).
+- **Result**: the transcript is inserted at the caret (or over the selection) saved when the recording started, or at
+  the current caret when the text changed meanwhile, with a space added before and after when needed
+  (`insertDictation`); focus returns to the textarea on desktop only; the polite live region announces "Transcript
+  added". An empty transcript shows the neutral toast "No speech detected" and changes nothing.
 - **Esc** inside the composer cancels a recording or a transcription first (before its usual Stop, 12); the live
-  region announces "Recording canceled". Starting a recording stops read-aloud (7.18). Send and Enter stay disabled
-  while voice input runs.
+  region announces "Recording canceled" (only for a cancel, never after a transcript or an error). The region also
+  announces "Recording started" and "Transcribing…". Starting a recording stops read-aloud (7.18); switching to
+  another chat cancels a running dictation. Send and Enter stay disabled while voice input runs (also while the browser
+  asks for the microphone).
 - **Limits**: recording stops by itself after 10 minutes (`LIMITS.transcriptionMaxSeconds`) and is transcribed; a clip
-  shorter than 0.5 s is discarded without a request; when the audio track ends (a mobile interruption) the recording
-  stops and is transcribed.
+  shorter than 0.5 s is discarded without a request; when the audio track ends (a mobile interruption) or the recorder
+  stops by itself, the recording stops and is transcribed; a recorder error drops the clip (toast). The level ring
+  comes from a Web Audio analyser and stays still where Web Audio is missing.
 - **Recorder**: the first supported type of `audio/webm;codecs=opus`, `audio/webm`, `audio/ogg;codecs=opus`,
   `audio/mp4` (Safari), else the browser default (`pickRecorderMimeType`), at 32 kbps; the recording is sent as the
-  multipart part `file` of `POST /api/audio/transcriptions` (the server uses the model and language of Settings →
-  Media); the microphone tracks are always stopped, also after an error.
-- **Errors** (toasts): "Microphone access is blocked. Allow it in the browser's site settings." (permission denied),
-  "No microphone was found.", "The microphone is in use by another app.", "The recording is too long." (413), and
-  provider errors with the 7.4 title and the server message (for example "No API key for Groq").
+  multipart part `file` of `POST /api/audio/transcriptions`, a `File` named `dictation.<ext>` (`dictation.webm`,
+  `dictation.m4a`, …; `recordingFileName`), without a model or language field (the server uses the model and language
+  of Settings → Media); the microphone tracks are always stopped, also after an error.
+- **Errors** (error toasts, `dictationErrorToast`): "Microphone access is blocked. Allow it in the browser's site
+  settings." (permission denied), "No microphone was found.", "The microphone is in use by another app.", "The
+  recording is too long." (413), and provider errors with the 7.4 title and the server message (for example "No API
+  key for Groq"). A start that cannot happen reports "Voice input needs HTTPS or localhost" or "This browser can't
+  record audio." (normally unreachable: the button is disabled or hidden then).
 - **Mobile**: tap to start and stop, a 40px target, no autofocus, no horizontal scroll at 390px while recording.
 
 ### 7.18 Read aloud (`ReadAloudButton`, `useSpeechPlayer`, W6.8)
@@ -1384,24 +1434,32 @@ Dictation records in the browser and transcribes through the speech-to-text mode
 Read-aloud speaks a reply through the text-to-speech model chosen in Settings → Media (`speechModelRef`, 9.9;
 ADR-029).
 
-- **Button** (`message-read-aloud`, `data-state` `idle` | `loading` | `playing`): a ghost icon button right after Copy on
-  finished assistant replies with text (7.5), only while a speech model is set; `Volume2` icon, label "Read aloud";
-  while this reply loads a spinner, while it plays `Square` with the label "Stop reading" and `aria-pressed="true"`.
-  The action row stays visible while the reply plays.
+- **Button** (`message-read-aloud`, `data-state` `idle` | `loading` | `playing`): a ghost icon button (40px on coarse
+  pointers) right after Copy on finished assistant replies with text (7.5), only while a speech model is set; `Volume2`
+  icon, label "Read aloud". While this reply is being read, loading included, the button is pressed: label "Stop
+  reading", `aria-pressed="true"`, and the tooltip adds the Esc hint; while it loads it shows a spinner and
+  `aria-busy="true"`, while it plays `Square`. A click stops it. The action row stays visible while the reply is read
+  (loading or playing).
 - **One player for the app** (`useSpeechPlayer`, 11): starting another reply stops the first; switching chats, hiding
-  the page, starting a dictation, and Esc outside inputs and overlays (12) stop it; the natural end returns to `idle`.
+  the page (`visibilitychange` / `pagehide`), starting a dictation, and Esc outside inputs and overlays (12) stop it; a
+  pause by the system (media keys, an interruption) ends the reading too; the natural end returns to `idle`. These
+  stop triggers, the Esc shortcut `read-aloud-stop` included, exist only while something is read.
 - **What is read** (`utils/speech-text.ts`, W6.8): the text parts only. A code fence becomes "{Language} code
   omitted." ("Code omitted." without a language; a `mermaid` fence "Diagram omitted."), a table "Table omitted.", a
-  `$$` block "Formula omitted."; links read their label, a bare URL reads "link", an image reads its alt text; the
-  remaining markdown and HTML are stripped.
+  `$$` or `\[…\]` block "Formula omitted.", inline math (`$…$`, `\(…\)`) the word "formula"; code spans keep their
+  text, links read their label, a bare URL or an autolink reads "link", an image reads its alt text; the remaining
+  markdown and HTML are stripped. Every block (paragraph, heading, list item) ends with sentence punctuation, one block
+  per line, so the voice pauses between them. A reply that leaves nothing to read does nothing.
 - **Chunks**: the text is split at sentence ends: the first chunk at most 300 characters (a fast start,
   `LIMITS.speechFirstChunkChars`), then at most 1,500 (`speechChunkChars`), never more than 4,096
-  (`speechTextMaxChars`). Each chunk is one `POST /api/audio/speech` `{ text }` (model and voice from the settings);
-  the next chunk is fetched while the current one plays.
+  (`speechTextMaxChars`); a longer sentence breaks at a clause break or a space. Each chunk is one `POST
+  /api/audio/speech` `{ text }` (model and voice from the settings); the next chunk is fetched while the current one
+  plays.
 - **Playback**: one reused `HTMLAudioElement`, unlocked inside the click with a silent clip (Safari), object URLs
-  revoked after use, one `AbortController` per chunk request (Stop aborts it), `playbackRate` = `speechSpeed` (the
-  speed never reaches the provider).
-- **Errors**: toast "Could not read this reply aloud" with the server message; the player returns to `idle`.
+  revoked after use, one `AbortController` per chunk request (Stop aborts it), `playbackRate` = `speechSpeed` (clamped
+  to 0.5–2; the speed never reaches the provider).
+- **Errors**: toast "Could not read this reply aloud" with the server message ("The browser blocked audio playback."
+  or "The browser could not play the audio." when playback itself fails); the player returns to `idle`.
 
 ---
 
@@ -1450,9 +1508,12 @@ Empty filter result: `Empty` "No plugins match" + "Clear filters". Loading: 6 sk
    not fresh (`AuthStatus.freshUntil` missing or past), a "Confirm your password" field (`trust-password`) is
    required too: installing such a plugin is a fresh-auth route (API.md, ADR-017).
 4. **Install** (primary; disabled until the checkbox is checked and, when shown, the password is filled). With a
-   password field, Install first calls `auth.login(password)` (`POST /api/auth/login`, which makes the session
-   fresh), then `POST /api/plugins/install`. On success: toast "Installed {name}", close, emit `installed(id)`.
-   Errors show inline under the form (validation errors per field; "Wrong password" under the password field).
+   password field, Install first calls `useFreshAuth().login(password)` (`POST /api/auth/login`, which makes the
+   session fresh), then `POST /api/plugins/install` through `run(send, { required })` (8.4). On success: toast
+   "Installed {name}", close, emit `installed(id)`. Errors show inline under the form (validation errors per field;
+   under the password field the login's text: "Wrong password", "Too many attempts. Try again in {n}s." with the wait
+   at the time of the answer, or the server message). The error alert's **Log in** action opens the password prompt and
+   then submits the step again.
 
 "Back" returns from Preview to Source keeping inputs. Closing the dialog discards the staged inspection.
 
@@ -1466,8 +1527,9 @@ Empty filter result: `Empty` "No plugins match" + "Clear filters". Loading: 6 sk
 (Exact text from PLUGINS.md section 13, "Trust warning".) Below the text: requested permissions and the sha256.
 `TrustDialog` reuses it for an installed plugin in the `untrusted` state (after an update changed its hash, or its
 files changed on disk): "I trust {source}" checkbox + the same "Confirm your password" field as the install dialog
-(when a password is set and the session is not fresh) → `auth.login(password)` → `POST /api/plugins/:id/trust`
-(`{ sha256: trust.hash }`) → emits `trusted(id)`.
+(when a password is set and the session is not fresh) → `useFreshAuth().login(password)` → `POST
+/api/plugins/:id/trust` (`{ sha256: trust.hash }`, through `run(pin, { required: true })`) → toast "Trusted {name}",
+emits `trusted(id)`. A stale hash (the files changed meanwhile) reloads the plugin and asks for the consent again.
 
 **Fresh auth everywhere** (Phase 6, S4: one composable, `useFreshAuth`, W6.11; signature in 11). Fresh-auth
 actions (API.md **fresh**): installing or trusting a plugin that runs code (8.3, above), creating a plugin from a
@@ -1481,15 +1543,28 @@ all data (9.8). Every component follows the same rules:
 - After a successful prompt (`auth.login(password)`), the task runs **exactly once more**; a second 403 is thrown and
   shown as the error.
 - Concurrent tasks share one prompt; closing it rejects every waiting task with a cancel error that is never shown;
-  leaving the page (the component's scope ends) cancels too.
-- Prompt errors: 401 "Wrong password", 429 "Too many attempts. Try again in {n}s." (counting down), a 403 from the login
-  itself shows the server message.
+  leaving the page (the component's scope ends) cancels too. While the prompt's login runs it cannot be closed.
+- Prompt errors: 401 "Wrong password", 429 "Too many attempts. Try again in {n}s." (counting down every second and
+  cleared when the wait is over; the same text everywhere, v1.1's install and trust dialogs wrote "{n} s"), anything
+  else, a 403 from the login itself included, shows the server message (v1.1's plugin detail and data prompts said
+  "Wrong password").
 - Where `required` is set: the code plugin form (scaffold), the Share dialog and the delete-all dialog (always), the
-  Source tab (code plugins), the plugin header's Reload (code plugins), the MCP server dialog (when the request needs
-  it: a stdio server); the provider wizard runs without `required` (a 403 prompts once).
+  trust dialog (always), the install dialog (when the inspection says `requiresTrust`: code, or a stdio MCP server),
+  the Source tab (code plugins: saving, deleting or renaming files and Build & reload ask for the password first when
+  the session is not fresh; for a declarative plugin's `plugin.json` the prompt comes only after a refusal), the plugin
+  header's Reload (code plugins), the MCP server dialog (when the request needs it: a stdio server); the provider wizard
+  runs without `required` (a 403 prompts once, and a second refusal is shown as the error instead of prompting again).
 - The install and trust dialogs keep their inline "Confirm your password" field (`trust-password`): it calls
-  `login(password)`, then the request runs through `run(send, { required })`; the error alert's **Log in** action calls
-  `confirm()` (the prompt). `PasswordDialog` keeps its "Current password" field (`changePassword` logs in first).
+  `login(password)` (its error text shows under the field, without a countdown), then the request runs through
+  `run(send, { required })`; the error alert's **Log in** action calls `confirm()` (the prompt) and then submits again.
+  `PasswordDialog` keeps its "Current password" field (`changePassword` logs in first).
+- Prompt texts (`ConfirmPasswordDialog` description): "Creating a plugin that runs code needs your password." (code
+  plugin form), "Changing the code of a plugin needs your password." (Source tab), "Reloading runs the plugin's code
+  again. Confirm your password to continue." (Reload), "Saving a server that runs a local command needs your password."
+  (MCP server dialog), "This provider starts a program on the server. Confirm your password to continue." (provider
+  wizard), "Confirm your password to install a plugin that runs code on this server." (install), "Confirm your password
+  to trust a plugin that runs code on this server." (trust), "Confirm your password to create or change a share link."
+  (7.14), "Deleting all data needs your password." (9.8).
 
 After a fresh-auth save of a `created` code plugin the server re-pins its trust automatically (ADR-017). The v1.1 copies
 of this flow (`plugins/code/fresh-auth.ts`, `plugins/detail/fresh-auth.ts`, `share/fresh-auth.ts` and the helpers in
@@ -1593,7 +1668,8 @@ first invalid one).
 - `BuildLogPanel`: build output lines and live `plugin.log` events for this plugin (time, level, message);
   auto-scrolls unless the user scrolled up; "Clear".
 - Declarative plugins with editable files (8.7) use the same tab: saving `plugin.json` reloads the plugin (the
-  server validates the manifest; writes that would make it run code need fresh auth).
+  server validates the manifest; writes that would make it run code need fresh auth, and the tab prompts only after
+  such a refusal, 8.4).
 - Read-only when the files are not editable (code plugins from zip / npm / URL): banner "Installed from npm.
   Editing is disabled." Builtins have no Source tab.
 - A save answered `409 conflict` (`details.reason: 'stale'`, the file changed on the server since it was opened)
@@ -1669,7 +1745,9 @@ except dialogs and text fields, which save on blur or Enter.
   **chat models only** (`kind="chat"`, the default; Phase 6: image, speech-to-text and text-to-speech models are chosen
   in Settings → Media, 9.9). Both have `allowNone`: "Automatic (last used model)" for the default model, "Automatic
   (small model of the chat's provider)" for the title model. Every option of the popover carries `model-select-option`
-  with `data-model-ref` (empty for the "Automatic" choice).
+  with `data-model-ref` (empty for the "Automatic" choice); the trigger carries `data-value` and `data-kind`. Without a
+  model of its kind the popover has no search field and says "No chat models from your connected providers." ("Loading
+  models…" until the catalog arrived; the Media selects name their own kind, 9.9).
 - Search input "Filter models"; then one `Collapsible` section per connected provider: header `ProviderIcon`
   + name + count + "Updated 3h ago" (`RelativeTime`) + **Refresh** (`RotateCw`, spinner while running) +
   **Add custom model**.
@@ -1678,14 +1756,24 @@ except dialogs and text fields, which save on blur or Enter.
   never appear in the picker) · `⋯` menu (`model-row-menu`, "Actions for {model}"): Rename (inline, saved as the
   display-name alias), Reset name (only when renamed), Remove (custom models only). Capabilities, Context and Price
   hide below `sm`, `md` and `lg`.
-- `CustomModelDialog`: model id (required, mono), display name, **Kind** (Phase 6: `Select` Chat (default) · Image ·
-  Speech to text · Text to speech → `kind` `chat` / `image` / `transcription` / `speech`; the capabilities and the
-  context window apply to chat models), context window, capabilities checkboxes → `POST /api/custom-models`. A custom
-  image model appears in the composer's "Image models" group when its provider can generate images; custom speech
-  models appear in the Media selects.
-- The Capabilities column shows `ModelCaps` with the Phase 6 image-output icon for chat models with
-  `capabilities.imageOutput`; non-chat models show their kind as a muted badge ("Image", "Speech to text", "Text to
-  speech") instead of the capability icons.
+- Favorite and Visible (Phase 6) exist only for the models the chat picker can show: chat and image models. Speech to
+  text, text to speech and every other kind show a muted dash in both columns (tooltip "Chosen in Settings → Media"; no
+  `model-favorite` / `model-visible` in those rows): they are chosen in Settings → Media, whose selects list them even
+  when hidden (9.9).
+- `CustomModelDialog` ("Add a custom model", description "For a model {provider} serves but does not list." plus a
+  line that depends on the kind: "It appears in the model picker right away." (Chat), "Image models appear in the
+  model picker when the provider can generate images." (Image), "Choose it in Settings → Media." (Speech to text, Text
+  to speech)): model id (required, mono), display name, **Kind** (Phase 6: `Select` Chat (default) · Image · Speech to
+  text · Text to speech → `kind` `chat` / `image` / `transcription` / `speech`, always sent; the trigger has no test id
+  and carries `data-value`), then for chat models only the context window and the capabilities checkboxes Tools ·
+  Vision · Reasoning · PDF input · **Image output** (Phase 6, `capabilities.imageOutput`) → `POST /api/custom-models`.
+  For the other kinds the context window and the capabilities are hidden, never validated and not sent. A custom image
+  model appears in the composer's "Image models" group when its provider can generate images; custom speech-to-text
+  and text-to-speech models appear in the Media selects.
+- The Capabilities column shows `ModelCaps` for chat models (with the Phase 6 image-output icon for
+  `capabilities.imageOutput`; a muted "—" when no capability applies); every other model shows its kind as a muted
+  badge instead ("Image", "Speech to text", "Text to speech", "Embedding", "Audio", "Other"; `data-slot="model-kind"`,
+  `data-kind`).
 
 ### 9.4 General (`/settings/general`)
 
@@ -1696,7 +1784,7 @@ except dialogs and text fields, which save on blur or Enter.
 | Default permission mode | `Select` Ask / Auto / Off | `defaultToolMode` |
 | Default reasoning effort | `Select` Auto / Off / Low / Medium / High / Max | `defaultReasoningEffort` |
 | Max steps per response | `Input type="number"` 1–100 | `maxSteps` |
-| Alt shortcuts | `Switch` "Use Alt+M, Alt+R and Alt+P for composer menus" | `altShortcuts` |
+| Alt shortcuts | `Switch` "Use Alt+M, Alt+R and Alt+P for composer menus, and Alt+V to dictate." (Phase 6 added Alt+V) | `altShortcuts` |
 | Custom instructions | `Textarea` ("Sent with every chat") | `instructions` |
 
 Password section: status text "No password" / "Password set" / "Set by HF_PASSWORD" (read-only);
@@ -1803,44 +1891,60 @@ including archived chats, every message version and every share link. API keys, 
 
 ### 9.9 Media (`/settings/media`, W6.10, Phase 6)
 
-Images and voice (ADR-028, ADR-029). `MediaSettings` (`media-settings`) in the usual `SettingsPage` frame: `PageHeader`
-"Images and voice" with the description "Models for generated images, dictation and reading replies aloud." Wireframe:
-2.10. Nav label "Media" (5.5). Every model here is opt-in: nothing is chosen automatically, and each select lists the
-models of connected providers only. Settings save on change (the Voice field on blur or Enter).
+Images and voice (ADR-028, ADR-029). `MediaSettings` (`media-settings`) in the usual `SettingsPage` frame: the page
+(`pages/settings/media.vue`) renders the `PageHeader` "Images and voice" with the description "Models for generated
+images, dictation and reading replies aloud.", `MediaSettings` is the body. Wireframe: 2.10. Nav label "Media" (5.5).
+Every model here is opt-in: nothing is chosen automatically, and each select lists the models of connected providers
+only. On mount `MediaSettings` loads the providers, the whole model catalog (hidden models included) and the settings
+(unless already loaded); the sections render right away, and a failed load shows `SettingsLoadError` "Could not load
+the media settings" with the server message and **Retry** above them. Settings save on change, optimistically (a
+failure shows an error toast with the 7.4 title and rolls back); the Voice field saves on blur or Enter.
 
 **Images** (`ImageSettings`, `image-settings`; `SettingsSection` "Images", description "Generate pictures with your
 own providers."):
 
 - "Image model" (`settings-image-model`, `data-value` = the model ref, empty for None): `SettingsModelSelect
-  kind="image"` with `allowNone` "None (the generate_image tool is off)" → `settings.update({ imageModelRef })`. Help
-  text: "The generate_image tool uses this model. To generate images directly, pick an image model in the composer."
-  Without any image model the popover says "No image models from your connected providers."
+  kind="image"` (the **visible** image models of connected providers: an image model is visible only when its provider
+  can generate images, and one hidden in Settings → Models is not offered) with `allowNone` "None (the generate_image
+  tool is off)" → `settings.update({ imageModelRef })`. Help text: "The generate_image tool uses this model. To
+  generate images directly, pick an image model in the composer." Without any image model the popover says "No image
+  models from your connected providers."
 
 **Voice** (`VoiceSettings`, `voice-settings`; `SettingsSection` "Voice", description = the privacy notice "Audio and
 text go to the provider you choose; harness-forge doesn't store them."):
 
-- "Speech to text" (`settings-transcription-model`, `data-value`): `SettingsModelSelect kind="transcription"`,
-  `allowNone` "Off" → `transcriptionModelRef`. On an insecure origin a warning line follows: "Voice input needs HTTPS or
-  localhost" (the setting still saves; the microphone cannot be used from this address).
+- "Speech to text" (`settings-transcription-model`, `data-value`): `SettingsModelSelect kind="transcription"` (every
+  speech-to-text model of a connected provider, hidden ones included: they are hidden from the chat picker by default),
+  `allowNone` "Off" → `transcriptionModelRef`. On an insecure origin a warning line follows (and describes the select):
+  "Voice input needs HTTPS or localhost" (the setting still saves; the microphone cannot be used from this address).
 - "Language" (`settings-transcription-language`, `data-value` = `auto` or the code): `Select` with "Detect
-  automatically" (`auto`, default) and then common languages by English name with their ISO 639-1 code (Arabic `ar`,
-  Chinese `zh`, Czech `cs`, Danish `da`, Dutch `nl`, English `en`, Finnish `fi`, French `fr`, German `de`, Greek `el`,
-  Hindi `hi`, Italian `it`, Japanese `ja`, Korean `ko`, Norwegian `no`, Polish `pl`, Portuguese `pt`, Russian `ru`,
-  Spanish `es`, Swedish `sv`, Turkish `tr`, Ukrainian `uk`) → `transcriptionLanguage`. Disabled while Speech to text is
-  Off.
-- "Read aloud" (`settings-speech-model`, `data-value`): `SettingsModelSelect kind="speech"`, `allowNone` "Off" →
-  `speechModelRef`; changing it also clears the voice (`settings.update({ speechModelRef, speechVoice: null })`).
-- "Voice" (`settings-speech-voice`): a text `Input` with a suggestion list (a `Popover` with a `Command` filtered by the
-  typed text) from the selected model's `voices`; placeholder "Provider default"; an empty field = `null`; validated
-  like `speechVoiceSchema` (inline error "Voices use letters, digits, spaces and "_", ".", ":", "-"."); saves on blur or
-  Enter → `speechVoice`. Disabled while Read aloud is Off.
+  automatically" (`auto`, default) and then common languages by English name with their ISO 639-1 code shown in mono
+  (Arabic `ar`, Chinese `zh`, Czech `cs`, Danish `da`, Dutch `nl`, English `en`, Finnish `fi`, French `fr`, German
+  `de`, Greek `el`, Hindi `hi`, Italian `it`, Japanese `ja`, Korean `ko`, Norwegian `no`, Polish `pl`, Portuguese `pt`,
+  Russian `ru`, Spanish `es`, Swedish `sv`, Turkish `tr`, Ukrainian `uk`) → `transcriptionLanguage`; a stored code that
+  is not in the list (set through the API) shows as the code. Disabled while Speech to text is Off.
+- "Read aloud" (`settings-speech-model`, `data-value`): `SettingsModelSelect kind="speech"` (every text-to-speech model
+  of a connected provider, hidden ones included), `allowNone` "Off" → `speechModelRef`; changing it also clears the
+  voice (`settings.update({ speechModelRef, speechVoice: null })`).
+- "Voice" (`settings-speech-voice`): a text `Input` (placeholder "Provider default", at most 64 characters) with a
+  suggestion list from the selected model's `voices`: a `Popover` holding a plain `role="listbox"` "Voices" (not a
+  `Command`; the input is a `combobox` only when the model lists voices). Focusing offers every voice, typing filters
+  them (case-insensitive, anywhere in the name); focus stays in the input while the list opens and closes: ArrowDown /
+  ArrowUp move, Enter takes the highlighted voice (else the typed text), leaves the field and saves, Esc closes the
+  list and a second Esc restores the saved value; a click on a suggestion saves it at once; the saved voice has a check
+  mark. An empty field = `null` (the provider default);
+  validated like `speechVoiceSchema` (inline errors "Use at most 64 characters." and "Voices use letters, digits,
+  spaces and "_", ".", ":", "-"."); saves on blur or Enter → `speechVoice` (a failed save restores the saved value).
+  Disabled while Read aloud is Off.
 - "Speed" (`settings-speech-speed`, `data-value`): `Select` 0.75× · 1× (default) · 1.25× · 1.5× · 1.75× · 2× →
-  `speechSpeed` (applied by the browser as `playbackRate`; never sent to the provider). Disabled while Read aloud is
-  Off.
-- **Test voice** (`settings-speech-test`, outline, `Volume2` icon, `data-state` `idle` | `loading` | `playing`): reads
-  "This is how replies sound when they are read aloud." with the chosen model, voice and speed through the app-wide
-  player (`useSpeechPlayer().toggle('voice-test', …)`, 7.18); "Stop" while it plays; disabled while Read aloud is Off;
-  errors → toast "Could not play the test voice" with the server message.
+  `speechSpeed` (applied by the browser as `playbackRate`; never sent to the provider; a stored speed outside the list,
+  e.g. 0.5 set through the API, keeps its own label). Disabled while Read aloud is Off.
+- **Test voice** (`settings-speech-test`, outline, `Volume2` icon, `data-state` `idle` | `loading` | `playing`,
+  `aria-pressed` while playing, `aria-busy` while loading): reads "This is how replies sound when they are read aloud."
+  with the chosen model, voice and speed through the app-wide player (`useSpeechPlayer().toggle('voice-test', …)`,
+  7.18); "Stop" while it plays; disabled while Read aloud is Off; turning Read aloud Off or leaving the page stops it;
+  errors → the player's toast "Could not play the test voice" with the server message (the page adds no toast of its
+  own).
 
 ---
 
@@ -1938,18 +2042,25 @@ Internal to `ChatNav` / `CommandPalette` (`app-shell/chat-nav/`, W2.4): `ChatNav
 `UserMessageBubble`, `MessageEditor`, `MessageActions`, `MessageMeta`, `ChatGreeting`, `NoProviderCallout`,
 `ChatNotFound`, `SubmittedPlaceholder`, `TranscriptScrollButton`; Phase 5: `BranchSwitcher` (W5.2). In Phase 5
 `ChatHeader` belongs to W5.6 (the "Share…" item) and the rest of `chat/` to W5.2. Phase 6: `ReadAloudButton` × (W6.8;
-C12 ships the stub) and the helper `attachment-toasts.ts` (W6.7, the upload rejection toasts shared by the message
-editor); the other top-level chat files belong to W6.7.
+C12 shipped the stub) and the helper `attachment-toasts.ts` (W6.7, the upload rejection toasts of the message editor,
+the same texts as the composer's); `chat-format.ts` gained the gallery block and `isImageMediaType`,
+`isImageFilePart`, `imageFileParts` and `formatImageTurn` (the meta line); the other top-level chat files belong to
+W6.7.
 
 **`chat/parts/`** (W2.2) — `TextPart`, `ReasoningPart`, `ToolPart`, `ToolValueBlock` (one Input / Output block of a
 tool row), `ToolApprovalCard`, `FilePart`, `SourcesPart`, `NoticePart` (`data-notice` line, API.md 6.4),
 `ErrorPart`, `CommandBadge`; `parts/markdown/` — `MarkdownCodeBlock`, `MarkdownImage` (renderers used by `Markdown`).
-Phase 6 (W6.8; C12 ships the stubs): `ImageGallery` × (7.16, also used by the share page) and `GeneratingImages` ×.
+Phase 6 (W6.8; C12 shipped the stubs): `ImageGallery` × (7.16, also used by the share page) and `GeneratingImages` ×,
+with the pure helpers in `image-gallery.ts` (`galleryImages`, `downloadableUrl`, `imageDownloadName`,
+`aspectRatioCss`, `generatingCaption`) and `tool-row.ts` (`toolRowArgument`: the first argument of a tool row, the
+prompt for `generate_image`; also used by `ShareToolRow`).
 
 **`chat/composer/`** (W2.3) — `ChatComposer` ×, `ComposerAttachments`, `ComposerAddMenu`, `ModelPicker` ×
 (+ `ModelPickerTrigger`, `ModelPickerList`), `EffortMenu`, `PermissionMenu`, `SlashMenu`, `ContextRing`,
-`SendStopButton`, `DropOverlay`. Phase 6 (W6.9; C12 ships the stubs): `ImageOptionsMenu`, `MicButton`,
-`RecordingIndicator` and the pure helpers in `dictation.ts` (`insertDictation`, `pickRecorderMimeType`).
+`SendStopButton`, `DropOverlay`. Phase 6 (W6.9; C12 shipped the stubs): `ImageOptionsMenu`, `MicButton`,
+`RecordingIndicator`, the pure helpers in `dictation.ts` (`insertDictation`, `pickRecorderMimeType`,
+`recordingFileName`, `dictationErrorToast`, `DICTATION_SHORTCUT`) and `image-options.ts` (the aspect ratio choices,
+the image counts, the trigger summary and its accessible name).
 
 **`plugins/list/`** (W3.1) — `PluginListView` (content of `/plugins`), `PluginCard`, `PluginGrid`,
 `PluginFilterSelect`, `PluginNewMenu`, `PluginIcon`, `PluginSourceBadge`, `PluginStateBadge`, `PluginRunsCodeBadge`.
@@ -1981,15 +2092,19 @@ Phase 6 (W6.8; C12 ships the stubs): `ImageGallery` × (7.16, also used by the s
 internal pieces `DataExportSection`, `DataImportSection`, `DataImportResultPanel` (the import result), `DataDangerZone`
 and `DataDeleteDialog` (the delete-all dialog); pure helpers in `data.ts`.
 
-**`settings/media/`, `settings/images/`, `settings/voice/`** (W6.10, Phase 6; C12 ships the stubs) — `MediaSettings` ×
-(content of `/settings/media`), `ImageSettings` × (the Images section), `VoiceSettings` × (the Voice section, 9.9).
+**`settings/media/`, `settings/images/`, `settings/voice/`** (W6.10, Phase 6; C12 shipped the stubs) — `MediaSettings` ×
+(the body of `/settings/media`), `ImageSettings` × (the Images section), `VoiceSettings` × (the Voice section, 9.9)
+and the pure helpers in `voice/voice-settings.ts` (the languages, the speeds, `parseVoice`, `filterVoices`, the Test
+voice text). Phase 6 also extended `settings/models.ts` (`modelSelectGroups` per kind, `MODEL_SELECT_EMPTY_TEXT`,
+`MODEL_KIND_LABELS`) and `settings/custom-model.ts` (`CUSTOM_MODEL_KINDS`, the kind-aware request body).
 
 **`share/`** (W5.6, Phase 5) — `ShareDialog` × (mounted once by `layouts/default.vue`), `SharesSettingsSection` ×
 (rendered by `DataSettings`), `SharedChatView` × (content of `/share/[token]`), `ShareToolRow`, and the internal
 pieces `ShareLinkCard` (one link of the dialog), `ShareOptionSwitches`, `ShareExpirySelect` and `SharedMessage` (one
 message of the share page); pure helpers in `share-links.ts` and `share-view.ts`. C9 shipped stubs of the three
-cross-owner components. Phase 6: the dialog's own `fresh-auth.ts` is replaced by `useFreshAuth` (W6.11), and
-`SharedMessage` renders generated images with `ImageGallery` (W6.8).
+cross-owner components. Phase 6: the dialog's own `fresh-auth.ts` was replaced by `useFreshAuth` (W6.11), and
+`SharedMessage` renders generated images with `ImageGallery` (W6.8); `share-view.ts` groups consecutive image files
+into a `gallery` block, and the "Files and images" label lives in `share-links.ts`.
 
 W4.2 (UX polish) may edit every file above in Phase 4. Phase 6 owners: W6.7 (`useChatSession` and the top-level chat
 components), W6.8 (`chat/parts/**`, `ReadAloudButton`, the share rendering files), W6.9 (`chat/composer/**`,
@@ -2040,8 +2155,8 @@ defineProps<{
   contextWindow?: number                     // shown as "200K" / "1M" when set
   size?: 'sm' | 'md'                         // icon 12px / 14px; default 'sm'
 }>()
-// Order: Eye (vision), Wrench (tools), Brain (reasoning), FileText (pdf), Image (imageOutput: "Image output", W6.9).
-// Each icon has a tooltip + sr-only text.
+// Order: Eye (vision), Wrench (tools), Brain (reasoning), Image (imageOutput: "Image output", W6.9), FileText (pdf:
+// "PDF input"). Each icon has a tooltip + sr-only text.
 
 // ModelLabel
 defineProps<{ modelRef: string; size?: 'sm' | 'md'; showProvider?: boolean }>()
@@ -2086,7 +2201,8 @@ defineSlots<{ default?: () => any }>()              // extra body, e.g. the keep
 
 // ConfirmPasswordDialog — fresh-auth prompt (API.md), presentational: password Input + "Confirm". The caller
 // handles submit with auth.login(password), passes pending / error ("Wrong password", rate-limit text), closes
-// the dialog on success and retries its request once.
+// the dialog on success and retries its request once. Phase 6: every caller binds it to useFreshAuth() (open,
+// pending, error, submit, setOpen; 8.4, 11.3). The password is cleared whenever the dialog closes.
 defineProps<{ open: boolean; description?: string; pending?: boolean; error?: string | null }>()
 // description default 'Confirm your password to continue.'
 defineEmits<{ 'update:open': [value: boolean]; submit: [password: string] }>()
@@ -2128,12 +2244,14 @@ defineProps<{
   isLast: boolean
   streaming: boolean              // this message is being streamed
   showThinking: boolean
-  busy?: boolean                  // default false; a request is in flight in this chat: no Edit / Regenerate
+  busy?: boolean                  // default false; a request is in flight in this chat: no Edit / Regenerate /
+                                  // Delete this version
   error?: unknown                 // live error of the last request (shown on the last assistant message;
                                   // stored errors come from metadata.error)
   commandReply?: boolean          // default false; the previous user message ran a `reply` command: meta reads "Command reply"
   branch?: MessageBranch | null   // + Phase 5 (W5.2): ChatDetail.branches[message.id]; renders BranchSwitcher (7.5)
-  switching?: boolean             // + default false; a version switch is pending (the switcher is disabled)
+  switching?: boolean             // + default false; a version switch (Phase 6: or a deletion) is pending (the
+                                  // switcher is disabled)
 }>()
 defineEmits<{
   regenerate: []                  // offered on every finished assistant message (Phase 5)
@@ -2145,10 +2263,12 @@ defineEmits<{
 }>()
 defineExpose<{ startEdit(): void }>()   // opens MessageEditor on a user message unless busy
                                         // (ChatTranscript calls it for ↑ in an empty composer, via ChatView 'edit-last')
-// Phase 6 rendering (W6.7): gallery blocks → ImageGallery; metadata.image without file parts → GeneratingImages;
-// ReadAloudButton after Copy on finished replies with text; canDeleteVersion = branch !== null && !busy && !switching.
-// ChatTranscript re-emits edit as [messageId, text, files] and delete-version as [messageId]; ChatView owns the
-// delete ConfirmDialog.
+// Phase 6 rendering (W6.7): gallery blocks → ImageGallery; metadata.image while streaming without file parts (and
+// without finishedAt, error or aborted) → GeneratingImages; ReadAloudButton after Copy on finished replies with text;
+// Copy only with text (canCopy); canDeleteVersion = branch !== null && !busy && !switching; the action row stays
+// visible while the reply is read aloud. ChatTranscript re-emits edit as [messageId, text, files] and delete-version
+// as [messageId] and exposes focusShownVersion(messageId) / focusDeleteVersion(messageId) (+); ChatView owns the
+// delete ConfirmDialog and passes previousImages to ChatComposer.
 
 // ChatComposer (W2.3) — used by ChatView (W2.2): the key cross-owner contract
 type ChatStatus = 'ready' | 'submitted' | 'streaming' | 'error'   // useChat status
@@ -2278,7 +2398,10 @@ defineProps<{
                                   // (they are hidden from the chat picker by default)
 }>()
 defineEmits<{ 'update:modelValue': [value: string | null] }>()
-// Options carry model-select-option with data-model-ref (empty for the none option).
+// Options carry model-select-option with data-model-ref (empty for the none option). Attributes (data-testid) go to
+// the trigger, which carries data-value (the ref, '' for none) and data-kind. Without a model of the kind the popover
+// has no search field and says "No chat / image / speech-to-text / text-to-speech models from your connected
+// providers." ("Loading models…" until the catalog arrived; models.ts MODEL_SELECT_EMPTY_TEXT).
 ```
 
 #### Branching, sharing and data (Phase 5: W5.2, W5.5, W5.6; C9 ships the stubs)
@@ -2316,12 +2439,14 @@ defineProps<{ part: Extract<SharePart, { type: 'tool' }> }>()   // toolName, sta
 // DataDangerZone.
 ```
 
-#### Multimodal and versions (Phase 6: W6.7 – W6.10; C12 ships the stubs)
+#### Multimodal and versions (Phase 6: W6.7 – W6.10; C12 shipped the stubs)
 
-The nine components marked "stub" are created by C12 in P6-0b with exactly these props, emits and root test ids;
-after Gate P6-0b they are frozen (a change is a CCR). Types: `FileUIPart` from `ai`; `ImageAspectRatio`,
-`ImageOptions`, `AudioTranscription` from `@harness-forge/shared`; `VoiceInputState` from `useVoiceInput` (11). Every
-new component is imported by path during the wave.
+The nine components marked "stub" were created by C12 in P6-0b with exactly these props, emits and root test ids and
+are frozen since Gate P6-0b (a change is a CCR); P6-A implemented them behind those contracts. Additive details that
+P6-A added without changing a prop or an emit: `MicButton` exposes `activate()`, and the `RecordingIndicator` root
+carries `data-state`, `role="group"` and an `aria-label`. Types: `FileUIPart` from `ai`; `ImageAspectRatio`,
+`ImageOptions`, `AudioTranscription` from `@harness-forge/shared`; `VoiceInputState` from `useVoiceInput` (11). The
+components are imported by path (`import ImageGallery from './parts/ImageGallery.vue'`).
 
 ```ts
 // ImageGallery (W6.8; stub) — one gallery block of an assistant message (7.16); also rendered by SharedMessage
@@ -2330,16 +2455,20 @@ defineProps<{
                                   // url /api/files/<id> (share page: /api/share/<token>/files/<id>); filename optional
   messageId: string               // the message holding them (share page: its generated key)
 }>()
-// No emits. Root image-gallery (data-message-id, data-count); tiles image-tile (data-index, 0-based) open the
-// lightbox image-lightbox (data-index) with Previous image / Next image and the Download link image-download.
+// No emits, no store (the share page renders it too). Root image-gallery (data-message-id, data-count = the tiles
+// shown: an image whose URL fails safeAssetUrl is left out); tiles image-tile (data-index, 0-based) open the lightbox
+// image-lightbox (data-index) with Previous image / Next image (data-action previous / next, aria-disabled at the
+// ends) and the Download link image-download (data-action="download"; only for a same-origin, blob: or image data:
+// URL).
 
 // GeneratingImages (W6.8; stub) — placeholders of an image turn in flight (7.16)
 defineProps<{
-  n: number                       // metadata.image.n: placeholder tiles, 1–4
+  n: number                       // metadata.image.n: placeholder tiles, 1–4 (clamped)
   aspectRatio?: ImageAspectRatio  // metadata.image.aspectRatio; omitted (Auto) = square tiles
   startedAt: number               // metadata.startedAt (epoch ms): the "Generating image… 12s" counter
 }>()
-// No emits. Root image-generating (data-count); aria-busy="true", sr-only "Generating images".
+// No emits, no store. Root image-generating (data-count); aria-busy="true", sr-only "Generating images"; the caption
+// is aria-live="off" and updates every second.
 
 // ImageOptionsMenu (W6.9; stub) — composer menu of image-capable models (7.7), after EffortMenu
 defineProps<{
@@ -2352,8 +2481,11 @@ defineProps<{
   returnFocusTo?: HTMLElement | null   // receives focus on close (the composer textarea); default the trigger
 }>()
 defineEmits<{ 'update:modelValue': [value: ImageOptions]; 'update:open': [value: boolean] }>()
-// Trigger image-options-trigger; items image-aspect-option / image-count-option (data-value); checkbox
-// image-edit-previous.
+// update:modelValue carries the whole new value, with undefined for an option back at its default (1 image, Auto,
+// "Edit the previous image" on); ChatComposer stores it through useImageOptions().set, so the defaults are absent
+// keys. Trigger image-options-trigger (tooltip "Image options", aria-label "Image options: 16:9, 2 images"); items
+// image-aspect-option / image-count-option (data-value); checkbox image-edit-previous (data-state checked /
+// unchecked). A model change that hides the menu also closes it.
 
 // MicButton (W6.9; stub) — the dictation toggle right before SendStopButton (7.17)
 defineProps<{
@@ -2364,10 +2496,12 @@ defineProps<{
   disabled?: boolean              // default false (e.g. the composer is disabled)
 }>()
 defineEmits<{ toggle: [] }>()     // idle → start, recording → stop, transcribing → cancel; not emitted while
-                                  // requesting, in the setup state or when insecure
-// Root composer-mic with data-state = setup | insecure | the state, aria-pressed while recording,
-// aria-keyshortcuts="Alt+V"; the popover composer-mic-setup with the link composer-mic-setup-link (/settings/media).
-// The composer renders MicButton only when useVoiceInput().supported is true.
+                                  // requesting, in the setup state, when insecure or when disabled
+defineExpose<{ activate(): void }>()   // + P6-A: what a click does (toggle, or the setup popover); Alt+V calls it
+// Root composer-mic with data-state = setup | insecure | the state (insecure wins over setup, setup over the state),
+// aria-pressed always 'true' (recording) / 'false', aria-keyshortcuts="Alt+V", aria-disabled when insecure or
+// disabled; the popover composer-mic-setup with the link composer-mic-setup-link (/settings/media). The composer
+// renders MicButton only when useVoiceInput().supported is true.
 
 // RecordingIndicator (W6.9; stub) — replaces the composer's left tools while recording or transcribing (7.17)
 defineProps<{
@@ -2375,18 +2509,22 @@ defineProps<{
   transcribing?: boolean          // default false; true stops the timer (the mic shows "Transcribing…")
 }>()
 defineEmits<{ cancel: [] }>()     // Cancel: drops the recording or aborts the transcription
-// Root composer-recording; timer composer-recording-time; the Cancel button composer-mic-cancel.
+// Root composer-recording with data-state = recording | transcribing, role="group" and aria-label "Recording" /
+// "Transcribing" (+ P6-A); timer composer-recording-time (not in a live region); the Cancel button
+// composer-mic-cancel.
 
 // ReadAloudButton (W6.8; stub) — after Copy on a finished assistant reply with text (7.18)
 defineProps<{
   messageId: string               // the reply; compared with useSpeechPlayer().activeId
   markdown: string                // the reply's text parts as markdown (speech-text.ts decides what is read)
 }>()
-// No emits. Renders nothing while settings.speechModelRef is null. Root message-read-aloud with data-state = idle |
-// loading | playing (for this message), aria-pressed while playing, label "Read aloud" / "Stop reading".
+// No emits. Renders nothing while settings.speechModelRef is null. Root message-read-aloud (attributes go to the
+// button) with data-state = idle | loading | playing (for this message); while this reply is read (loading or
+// playing) aria-pressed="true" and the label "Stop reading", else "Read aloud"; aria-busy="true" while loading.
 
-// MediaSettings (W6.10; stub) — content of pages/settings/media.vue (9.9): PageHeader "Images and voice", then
-// ImageSettings and VoiceSettings. No props, no emits. Root media-settings.
+// MediaSettings (W6.10; stub) — the body of pages/settings/media.vue (9.9): the page's SettingsPage renders the
+// PageHeader "Images and voice"; MediaSettings loads the providers, the catalog and the settings, shows the load error
+// with Retry, then ImageSettings and VoiceSettings. No props, no emits. Root media-settings.
 // ImageSettings (W6.10; stub) — the Images section (9.9). No props, no emits. Root image-settings.
 // VoiceSettings (W6.10; stub) — the Voice section (9.9). No props, no emits. Root voice-settings.
 
@@ -2413,8 +2551,9 @@ defineEmits<{
   save: [text: string, files: FileUIPart[]]   // + files: the chips left + the new uploads (the full new set)
   cancel: []                      // aborts the editor's uploads
 }>()
-// Paperclip button message-edit-attach; input message-edit-input; Save message-edit-save (disabled while an upload
-// runs or failed; allowed with files and no text); Cancel message-edit-cancel.
+// Paperclip button message-edit-attach (its hidden file input has only data-slot="message-edit-file-input");
+// input message-edit-input; Save message-edit-save ("Send"; disabled while an upload runs or failed; allowed with
+// files and no text); Cancel message-edit-cancel. The send key follows settings.sendKey; Esc cancels.
 ```
 
 ---
@@ -2455,7 +2594,10 @@ actions: fetchAll(), refresh(providerId), setPref(ref, { favorite?, hidden?, ali
          removeCustom(providerId, modelId), touchRecent(ref), applyEvent(event)
 // recentRefs persist in localStorage['hf-recent-models'] (max 5)
 // Phase 6 (W6.9, implementation only): groupedByProvider lists chat models only (the picker adds the "Image models"
-// group from visible models of kind 'image'); defaultRef prefers chat models and never returns an image model.
+// group from visible models of kind 'image'; SettingsModelSelect builds its own lists per kind); defaultRef returns
+// the defaultModelRef setting unless it names a known model that is not a chat model, else the most recent visible
+// chat model, else the first visible chat model (never an image model). favorites and recent keep every kind; the
+// picker shows only their chat and image models.
 
 // stores/chats.ts — useChatsStore
 state:   { items: ChatSummary[]; cursor: string | null; hasMore: boolean; loading: boolean
@@ -2535,7 +2677,8 @@ interface ChatSession {
   runState: ComputedRef<'idle' | 'submitted' | 'streaming' | 'approval' | 'error'>
   busy: ComputedRef<boolean>              // + a request is in flight (submitted or streaming)
   branches: Ref<Record<string, MessageBranch>>  // + Phase 5: ChatDetail.branches of the shown path (7.5)
-  switching: Ref<boolean>                 // + Phase 5: a switchBranch() request is in flight
+  switching: Ref<boolean>                 // + Phase 5: a switchBranch() request is in flight (Phase 6: or a
+                                          // deleteVersion())
   send(input: { text: string; files: FileRef[] }): Promise<void>  // a new user message; parentId = the visible path
   edit(messageId: string, text: string, files?: readonly FileUIPart[]): Promise<void>
                                           // Phase 5: a new version of that user message; Phase 6 (S8): files omitted =
@@ -2623,8 +2766,12 @@ Branching (Phase 5, W5.2, ADR-023):
 - **Other tabs** (Phase 6, S5). `chat.updated` carries `activeLeafId` (ADR-030). The session strips it before it sets
   `summary`, and when it is idle (loaded, persisted, not busy, no switch pending or in flight, not resuming) and
   `leafMovedElsewhere(messages, leaf, unstoredId)` is true, it calls `followActiveLeaf()` (coalesced: one GET for a
-  burst of events). Its own switches, edits and regenerations never trigger it. Known limit: deleting an off-path version
-  does not move the leaf (7.5).
+  burst of events, plus one more reload when another leaf is announced while it runs; a reload whose result is older
+  than a local change is dropped, and a failed GET keeps the transcript). Its own switches, edits and regenerations
+  never trigger it. The stored leaf can be null or name a deleted message while the server shows its newest path: after
+  one reload that cannot reach the announced leaf, events that repeat it (a rename, a pin) are ignored until a
+  different leaf is announced, so there is no reload loop. Known limit: deleting an off-path version does not move the
+  leaf (7.5).
 
 ### 11.2 `useShortcuts()` (C5)
 
@@ -2660,21 +2807,27 @@ Other composables: `useApi()` / `useApiFetch()` (C5), `useServerEvents()` (C5, 1
 
 ### 11.3 Phase 6 composables
 
-`useImageOptions`, `useVoiceInput` and `useSpeechPlayer` are created by C12 in P6-0b as stubs with exactly these
-signatures, frozen after Gate P6-0b; `useFreshAuth` is W6.11's.
+`useImageOptions`, `useVoiceInput` and `useSpeechPlayer` were created by C12 in P6-0b as stubs with exactly these
+signatures (frozen since Gate P6-0b) and implemented behind them in P6-A; `useFreshAuth` is W6.11's.
 
 ```ts
-// composables/useImageOptions.ts (W6.9) — the image options of the composer, remembered per browser
+// composables/useImageOptions.ts (W6.9) — the image options of the composer, remembered per browser; one shared state
+// for the whole app (created on first use)
 function useImageOptions(): {
   options: Readonly<Ref<ImageOptions>>    // localStorage['hf-image-options'] (every chat); default {} (= 1 image, Auto,
-                                          // edit the previous image)
-  set(patch: Partial<ImageOptions>): void // merged, validated with imageOptionsSchema, persisted; an invalid stored
-                                          // value is dropped
+                                          // edit the previous image); a missing, unreadable or invalid stored value
+                                          // gives {} (and is removed); blocked storage keeps the options in memory
+  set(patch: Partial<ImageOptions>): void // merged (an undefined value clears that option), validated with
+                                          // imageOptionsSchema, persisted; an invalid result changes nothing. The
+                                          // composer passes undefined for the defaults (1 image, Auto, edit on), so
+                                          // they are stored as absent keys
   forModel(model: CatalogModel | null | undefined): ImageOptions | undefined
                                           // what the next chat request sends: an image model → { n?, aspectRatio?,
                                           // editPrevious? }; a chat model with capabilities.imageOutput → { aspectRatio }
                                           // when one is chosen, else undefined; any other model → undefined
 }
+// Also exported: imageOptionsScope(model) ('image' | 'image-output' | null: which options a model takes),
+// imageOptionsForModel(options, model) (the pure forModel rule), readStoredImageOptions(), IMAGE_OPTIONS_KEY.
 
 // composables/useVoiceInput.ts (W6.9) — dictation state machine (7.17)
 type VoiceInputState = 'idle' | 'requesting' | 'recording' | 'transcribing'
@@ -2685,22 +2838,35 @@ interface VoiceInputEnv {                 // injected by tests (utils/testing/fa
   transcribe(audio: Blob, signal: AbortSignal): Promise<AudioTranscription>   // default: POST /api/audio/transcriptions
 }
 function useVoiceInput(opts: {
-  onTranscript: (text: string) => void    // the transcript; '' = no speech detected (the composer shows the toast)
-  onError?: (error: unknown) => void      // permission denied, no microphone, busy microphone, 413, provider errors
+  onTranscript: (text: string) => void    // the transcript, trimmed; '' = no speech detected (the composer shows the
+                                          // toast)
+  onError?: (error: unknown) => void      // permission denied, no microphone, busy microphone, 413, provider errors, a
+                                          // recorder error; a start in an insecure or unsupported browser reports a
+                                          // DOMException (SecurityError / NotSupportedError)
   maxDurationMs?: number                  // default LIMITS.transcriptionMaxSeconds × 1000 (10 min): auto-stop
-  env?: Partial<VoiceInputEnv>
+  env?: Partial<VoiceInputEnv>            // a key given as undefined means "not available"
 }): {
   state: Readonly<Ref<VoiceInputState>>
-  supported: boolean                      // MediaRecorder and getUserMedia exist (false: no mic button)
+  supported: boolean                      // the browser can record: MediaRecorder exists, and in a secure context
+                                          // getUserMedia too (browsers leave navigator.mediaDevices out of insecure
+                                          // contexts, so there MediaRecorder alone counts and the mic shows the
+                                          // insecure state instead of disappearing); false: no mic button
   secure: boolean                         // a secure context (false: the mic is disabled)
-  elapsedMs: Readonly<Ref<number>>        // recording time
-  level: Readonly<Ref<number>>            // 0–1 input level while recording
+  elapsedMs: Readonly<Ref<number>>        // recording time (stops while transcribing)
+  level: Readonly<Ref<number>>            // 0–1 input level while recording (Web Audio analyser; 0 without Web Audio)
   start(): Promise<void>
-  stop(): Promise<void>                   // ends the recording and transcribes it (< 0.5 s is discarded)
-  cancel(): void                          // drops the recording or aborts the transcription
-  toggle(): Promise<void>                 // idle → start, recording → stop, transcribing → cancel
+  stop(): Promise<void>                   // ends the recording and transcribes it (< 0.5 s is discarded); while
+                                          // requesting it cancels
+  cancel(): void                          // drops the recording or aborts the transcription (a late transcript is
+                                          // ignored)
+  toggle(): Promise<void>                 // idle → start, recording → stop, transcribing → cancel; nothing while
+                                          // requesting
 }
-// The microphone tracks are always stopped in a finally; a scope dispose cancels.
+// The microphone tracks are always stopped in a finally; a scope dispose cancels. The default transcribe is
+// `$api.audio.transcribe({ form, signal })` with the clip as a File named dictation.<ext> in the part `file` and no
+// model or language field (the server uses Settings → Media). useVoiceInput calls useApi() when it is created
+// (unless env.transcribe is given), so unit tests that import it mock `~/composables/useApi`. Also exported:
+// browserVoiceInputEnv(), isVoiceInputSupported(env), sampleLevel(samples).
 
 // composables/useSpeechPlayer.ts (W6.8) — one app-wide read-aloud player (module singleton, 7.18)
 type SpeechPlayerState = 'idle' | 'loading' | 'playing'
@@ -2708,11 +2874,15 @@ function useSpeechPlayer(): {
   state: Readonly<Ref<SpeechPlayerState>>
   activeId: Readonly<Ref<string | null>>  // the message being read ('voice-test' for Settings → Media)
   play(id: string, markdown: string, opts?: { modelRef?: string; voice?: string }): Promise<void>
-                                          // stops whatever plays, then reads `markdown` in chunks (speech-text.ts)
+                                          // stops whatever plays, then reads `markdown` in chunks (speech-text.ts);
+                                          // call it inside the click (the audio element is unlocked synchronously);
+                                          // resolves when this reading ends and never rejects (failures are toasts)
   stop(): void
   toggle(id: string, markdown: string, opts?: { modelRef?: string; voice?: string }): Promise<void>
                                           // stop when `id` is active, else play
 }
+// Also exported: VOICE_TEST_ID ('voice-test'; failures read "Could not play the test voice"),
+// READ_ALOUD_STOP_SHORTCUT ('read-aloud-stop', 12) and the test helper resetSpeechPlayer().
 
 // composables/useFreshAuth.ts (W6.11) — every fresh-auth prompt (8.4)
 export class FreshAuthCancelledError extends Error {}
@@ -2723,13 +2893,15 @@ export function loginErrorText(e: unknown, now?: number): string  // 401 'Wrong 
 export interface FreshAuth {
   open: Readonly<Ref<boolean>>            // bind to ConfirmPasswordDialog
   pending: Readonly<Ref<boolean>>
-  error: Readonly<Ref<string | null>>
-  needed: ComputedRef<boolean>            // a password is set && !auth.fresh
+  error: Readonly<Ref<string | null>>     // a rate limit counts down and clears itself when the wait is over
+  needed: ComputedRef<boolean>            // a password is set (auth.status.enabled) && !auth.fresh
   submit: (password: string) => Promise<void>   // ConfirmPasswordDialog @submit
-  setOpen: (value: boolean) => void       // ConfirmPasswordDialog @update:open (closing cancels)
+  setOpen: (value: boolean) => void       // ConfirmPasswordDialog @update:open (closing cancels; ignored while the
+                                          // login runs)
   run: <T>(task: () => Promise<T>, opts?: { required?: boolean }) => Promise<T>
   login: (password: string) => Promise<string | null>   // inline password fields; null = ok, else the error text
-  confirm: () => Promise<void>            // opens the prompt now (the "Log in" action of an error alert)
+  confirm: () => Promise<void>            // opens the prompt now or joins the open one (the "Log in" action of an
+                                          // error alert); rejects with FreshAuthCancelledError when it is closed
   cancel: () => void                      // rejects every waiting task with FreshAuthCancelledError
 }
 export function useFreshAuth(): FreshAuth
@@ -2751,12 +2923,12 @@ export function useFreshAuth(): FreshAuth
 | Alt+M | open model picker | chat pages, also in inputs | W2.3 (`alt+code:KeyM`, `alt: true`) |
 | Alt+R | open effort menu (reasoning models) | chat pages, also in inputs | W2.3 (`alt+code:KeyR`, `alt: true`) |
 | Alt+P | open permission menu (when tools exist) | chat pages, also in inputs | W2.3 (`alt+code:KeyP`, `alt: true`) |
-| Alt+V | start dictation; while recording: stop and transcribe; while transcribing: cancel (the mic button, 7.17) | chat pages with the composer, also in inputs | W6.9 (`alt+code:KeyV`, `alt: true`; Phase 6) |
+| Alt+V | what a click on the mic does (7.17): start dictation; while recording: stop and transcribe; while transcribing: cancel; without a speech-to-text model: the setup popover | chat pages with the composer, also in inputs; not while focus is in a dialog, menu or listbox; only where the browser can record in a secure context; with a disabled composer only while dictation runs | W6.9 (id `composer-dictate`, `alt+code:KeyV`, `alt: true`; calls `MicButton.activate()`; Phase 6) |
 | Enter | send (`sendKey = enter`) | composer | W2.3 |
 | Mod+Enter | send (`sendKey = mod-enter`) | composer | W2.3 |
 | Shift+Enter | new line | composer | W2.3 |
-| Esc | close the open menu/dialog; else cancel a recording or transcription (Phase 6); else stop the running response | composer / chat | W2.3; W6.9 (dictation) |
-| Esc (outside inputs and overlays) | stop reading aloud (Phase 6, 7.18), before stopping a running response | chat pages | W6.8 (registry entry with a `when` guard: the player is not idle) |
+| Esc | close the open menu/dialog; else cancel a recording or transcription (Phase 6); else stop the running response | composer / chat | W2.3; W6.9 (dictation: the textarea's keydown handles Esc inside the composer; outside inputs the registry entry `composer-dictation-cancel`, registered after `composer-stop` so it wins while dictation runs) |
+| Esc (outside inputs and overlays) | stop reading aloud (Phase 6, 7.18), before stopping a running response | chat pages | W6.8 (registry entry `read-aloud-stop`, group Chat; registered only while something is read and removed when the reading ends) |
 | ↑ (empty composer) | edit the last user message | composer | W2.3 |
 | ← / → | previous / next version of a message | focus inside a `BranchSwitcher` | W5.2 (component keydown, not the registry) |
 | Mod+S | save the active file | code editor | W3.4 |
@@ -2767,12 +2939,13 @@ Rules:
   Mod+Tab, Mod+L, Mod+R, Mod+D, Mod+P, Mod+Q. New chat is therefore Mod+Shift+O (as on claude.ai); the page calls
   `preventDefault()` so Chrome's Ctrl+Shift+O (bookmarks manager) and Firefox's Ctrl+K / Ctrl+B do not fire.
 - Alt shortcuts match `event.code` (Option+M types `µ` on macOS), are ignored when Ctrl or Meta is also pressed,
-  and can be turned off in Settings → General (`altShortcuts`). Alt+V calls `preventDefault()` like every matched
-  shortcut, which keeps Firefox on Windows from opening its View menu; if that proves unreliable, W6.9 falls back to
-  Alt+J (a CCR updates this table).
+  and can be turned off in Settings → General (`altShortcuts`, which covers Alt+V too). Alt+V calls
+  `preventDefault()` like every matched shortcut, which should keep Firefox on Windows from opening its View menu
+  (unverified). Phase 6 kept Alt+V; the Alt+J fallback of the plan was not needed.
 - Esc priority: close an open overlay → cancel a recording or transcription (composer) → cancel an inline edit → stop
   reading aloud (outside inputs) → stop streaming. The registry tries the latest registration first and skips an entry
-  whose `when` is false, so the read-aloud entry only takes Esc while something plays.
+  whose `when` is false: `composer-dictation-cancel` only takes Esc while dictation runs, and `read-aloud-stop` exists
+  only while something is read.
 - Shortcuts never fire while an IME composition is active or inside CodeMirror (except Mod+S and Mod+K).
 - `KbdCombo` renders hints: `⌘⇧O` / `⌘K` on macOS, `Ctrl Shift O` / `Ctrl K` elsewhere. Hints are hidden below `lg`
   and on touch devices.
@@ -2869,7 +3042,7 @@ Settings → Models ids added in P5-B (`model-select-option`, `model-row-menu`, 
 | `composer-drop-overlay` | drag-and-drop overlay | |
 | `slash-menu` · `slash-menu-item` | slash menu, items | item: `data-value` (name), `data-kind` |
 | `model-picker-trigger` · `model-picker` · `model-picker-search` | trigger, content, search input | trigger: `data-model-ref` |
-| `model-picker-group` | group | `data-value` (favorites / recent / provider id) |
+| `model-picker-group` | group | `data-value` (favorites / recent / provider id / `images`, Phase 6) |
 | `model-picker-item` · `model-picker-favorite` | item, star button | `data-model-ref` |
 | `model-picker-manage` · `model-picker-connect` | footer links | |
 | `effort-menu-trigger` · `effort-option` | effort trigger, options | `data-value` |
@@ -2890,13 +3063,13 @@ Settings → Models ids added in P5-B (`model-select-option`, `model-row-menu`, 
 | `key-env-badge` | "From env" badge | |
 | `key-advanced` · `key-base-url` | Advanced toggle, base URL input | |
 | `key-test` · `key-test-result` · `key-save` · `key-save-anyway` · `key-remove` | dialog actions and result | result: `data-status` (ok / error) |
-| `models-default-picker` · `models-title-picker` | default / title model pickers (field triggers) | `data-value` (the model ref; empty for "Automatic") |
+| `models-default-picker` · `models-title-picker` | default / title model pickers (field triggers) | `data-value` (the model ref; empty for "Automatic"), `data-kind` (`chat`) |
 | `model-select-option` | one option in the popover of those pickers (`SettingsModelSelect`; Phase 5, W5.13) | `data-model-ref` (empty for the "Automatic" choice) |
 | `models-filter` | filter input | |
 | `models-section` · `models-refresh` · `custom-model-add` | provider section, refresh, add custom | `data-provider-id` |
-| `model-row` · `model-favorite` · `model-visible` · `model-remove` | table row and its controls (`model-remove` = the Remove item of the row menu, custom models only) | row: `data-model-ref`, `data-hidden` (`true` / `false`); favorite: `data-state` (on / off) |
+| `model-row` · `model-favorite` · `model-visible` · `model-remove` | table row and its controls (`model-remove` = the Remove item of the row menu, custom models only; Phase 6: `model-favorite` and `model-visible` exist only in rows of chat and image models, 9.3) | row: `data-model-ref`, `data-hidden` (`true` / `false`); favorite: `data-state` (on / off) |
 | `model-row-menu` | `⋯` actions trigger of a model row (Rename, Reset name, Remove; Phase 5, W5.13) | |
-| `custom-model-dialog` · `custom-model-id` · `custom-model-save` | custom model dialog | |
+| `custom-model-dialog` · `custom-model-id` · `custom-model-save` | custom model dialog (Phase 6: the Kind select has no id; its trigger carries `data-value`) | |
 | `settings-display-name` · `settings-send-key` · `settings-default-mode` · `settings-default-effort` · `settings-max-steps` · `settings-alt-shortcuts` · `settings-instructions` | general fields | |
 | `password-set` · `password-remove` · `password-dialog` · `password-current` · `password-new` · `password-confirm` · `password-save` · `logout` | password section (`password-set` = Set password / Change password; `password-remove` = Remove password) | remove: `data-action="remove-password"` |
 | `appearance-theme-card` | theme card | `data-value` (dark / light / system) |
@@ -3020,21 +3193,24 @@ new id (14.6).
 
 ### 13.7 Multimodal, versions and stabilization (Phase 6)
 
-The new ids of Phase 6. C12 copies this table verbatim into `utils/testids.ts` in P6-0b (the key column is the
+The 31 new ids of Phase 6. C12 copied this table verbatim into `utils/testids.ts` in P6-0b (the key column is the
 `testIds` key, the camelCase of the id) under a `// Multimodal, versions and stabilization (Phase 6)` comment; the file
-is frozen during P6-A. The new components also reuse existing ids: the "Image models" group of the model picker is a
-`model-picker-group` with `data-value="images"` and its items are `model-picker-item`s; the `generate_image` row is a
-`tool-row` with `data-tool-name="generate_image"`; the delete-version dialog is a `ConfirmDialog`; Settings → Media
-renders `page-header` and its selects' options carry `model-select-option`; fresh-auth prompts keep
-`confirm-password-dialog`. The tablet spec needs no new id (14.7).
+stayed frozen through P6-A, and the table matches it id for id. The new components also reuse existing ids: the
+"Image models" group of the model picker is a `model-picker-group` with `data-value="images"` and its items are
+`model-picker-item`s; the `generate_image` row is a `tool-row` with `data-tool-name="generate_image"`; the
+delete-version dialog is a `ConfirmDialog` (its confirm button carries `message-delete-version-confirm`); Settings →
+Media renders `page-header` and its selects' options carry `model-select-option`; fresh-auth prompts keep
+`confirm-password-dialog`. The tablet spec needs no new id (14.7). Two Phase 6 elements have no id on purpose: the
+message editor's hidden file input (`data-slot="message-edit-file-input"`; e2e tests use Playwright's file-chooser
+event on `message-edit-attach`) and the custom model dialog's Kind select (tests use its trigger's `data-value`).
 
 | Id | Key (`testIds.*`) | Element | Data attributes |
 |---|---|---|---|
-| `image-gallery` | `imageGallery` | `ImageGallery` root (one gallery block) | `data-message-id`, `data-count` |
+| `image-gallery` | `imageGallery` | `ImageGallery` root (one gallery block) | `data-message-id`, `data-count` (the tiles shown) |
 | `image-tile` | `imageTile` | one image button of a gallery | `data-index` (0-based) |
 | `image-lightbox` | `imageLightbox` | the gallery's lightbox dialog content | `data-index` (the image shown) |
-| `image-download` | `imageDownload` | "Download" link of the lightbox (`<a download>`) | |
-| `image-generating` | `imageGenerating` | `GeneratingImages` root (placeholder tiles) | `data-count` |
+| `image-download` | `imageDownload` | "Download" link of the lightbox (`<a download>`; only for a same-origin, `blob:` or image `data:` URL) | `data-action="download"` |
+| `image-generating` | `imageGenerating` | `GeneratingImages` root (placeholder tiles) | `data-count` (1–4) |
 | `image-options-trigger` | `imageOptionsTrigger` | `ImageOptionsMenu` trigger in the composer | |
 | `image-aspect-option` | `imageAspectOption` | an "Aspect ratio" item | `data-value` (`auto`, `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `16:9`, `9:16`) |
 | `image-count-option` | `imageCountOption` | an "Images" item | `data-value` (`1` … `4`) |
@@ -3042,15 +3218,15 @@ renders `page-header` and its selects' options carry `model-select-option`; fres
 | `settings-image-model` | `settingsImageModel` | "Image model" select trigger (Settings → Media) | `data-value` (model ref; empty for None) |
 | `composer-mic` | `composerMic` | `MicButton` | `data-state` (`idle` / `requesting` / `recording` / `transcribing` / `setup` / `insecure`) |
 | `composer-mic-cancel` | `composerMicCancel` | "Cancel" of the recording indicator | |
-| `composer-recording` | `composerRecording` | `RecordingIndicator` root | |
+| `composer-recording` | `composerRecording` | `RecordingIndicator` root (`role="group"`, "Recording" / "Transcribing") | `data-state` (`recording` / `transcribing`) |
 | `composer-recording-time` | `composerRecordingTime` | the recording timer ("0:07") | |
 | `composer-mic-setup` | `composerMicSetup` | the "Choose a speech-to-text model" popover | |
-| `composer-mic-setup-link` | `composerMicSetupLink` | its "Open settings" button | |
+| `composer-mic-setup-link` | `composerMicSetupLink` | its "Open settings" link (a button-styled `NuxtLink` to `/settings/media`) | |
 | `message-read-aloud` | `messageReadAloud` | `ReadAloudButton` | `data-state` (`idle` / `loading` / `playing`) |
 | `message-delete-version` | `messageDeleteVersion` | "Delete this version" in a message's action row | |
 | `message-delete-version-confirm` | `messageDeleteVersionConfirm` | confirm button of the delete-version `ConfirmDialog` | |
 | `message-edit-attach` | `messageEditAttach` | paperclip "Attach files" button of `MessageEditor` | |
-| `message-edit-attachment` | `messageEditAttachment` | one attachment chip in `MessageEditor` | `data-state` (`uploading` / `error` / `done`) |
+| `message-edit-attachment` | `messageEditAttachment` | one attachment chip in `MessageEditor` (kept attachments first, then new uploads) | `data-state` (`uploading` / `error` / `done`; kept attachments are `done`) |
 | `settings-nav-media` | `settingsNavMedia` | "Media" settings nav item | `data-state` (active) |
 | `media-settings` | `mediaSettings` | `MediaSettings` root | |
 | `image-settings` | `imageSettings` | `ImageSettings` root (the Images section) | |
@@ -3086,10 +3262,13 @@ renders `page-header` and its selects' options carry `model-select-option`; fres
 - The delete-all dialog focuses the "Type DELETE to confirm" input; closing returns focus to "Delete all data…". When
   the password prompt on top of it closes, focus returns to "Delete everything".
 - Phase 6: after a version is deleted, focus moves to the switcher of the version now shown, or to its Copy button
-  when only one version is left (7.5); a canceled delete dialog returns focus to "Delete this version". The image
-  lightbox traps focus and returns it to the tile it was opened from. After dictation the transcript's end holds the
-  caret and the textarea is focused on desktop only (never on touch). The Media page's Test voice keeps focus on its
-  button while it plays.
+  when only one version is left (7.5); a canceled or failed delete returns focus to "Delete this version". The image
+  lightbox traps focus, opens on Next image (else Download) and returns focus to the tile it was opened from. After
+  dictation the transcript's end holds the caret and the textarea is focused on desktop only (never on touch); the
+  recording indicator's Cancel gives focus back to the textarea (desktop), and the mic's setup popover returns it to
+  the mic unless the user clicked elsewhere. The image options menu opens on the current aspect ratio and returns focus
+  to the textarea (desktop). The voice field keeps focus while its suggestions open and close. The Media page's Test
+  voice keeps focus on its button while it plays.
 
 ### 14.2 Semantics and labels
 
@@ -3101,7 +3280,8 @@ renders `page-header` and its selects' options carry `model-select-option`; fres
   errors.
 - Collapsible rows are buttons with `aria-expanded` and `aria-controls`. Status dots and capability icons carry
   sr-only text. Switches have visible labels or `aria-label`. Tabs use the reka `Tabs` roles.
-- Model picker items read "{model}, {provider}, vision, tools, reasoning, 200K context".
+- Model picker items read "{model}, {provider}, vision, tools, reasoning, image output, 200K context" ("image output"
+  since Phase 6).
 - `BranchSwitcher`: `role="group"` named "Message versions", buttons "Previous version" / "Next version", the counter
   read as "Version 2 of 3"; after a switch the transcript's polite live region announces the new position.
 - Share page: the `share` layout's `<main>` landmark, one `h1` (the title), messages as `<article>` elements in a
@@ -3109,11 +3289,17 @@ renders `page-header` and its selects' options carry `model-select-option`; fres
 - Data page: each section has a heading; "Delete all data…" and "Delete everything" name the destructive action in
   their text; the result panel is announced once through the polite region ("Import finished: 10 imported, 1
   failed").
-- Phase 6 toggles: the mic (`aria-pressed` while recording, `aria-keyshortcuts="Alt+V"`, labels "Dictate" / "Stop and
-  transcribe" / "Cancel transcription") and read-aloud buttons (`aria-pressed` while playing, labels "Read aloud" /
-  "Stop reading"). The polite live region announces "Recording started", "Transcribing…", "Transcript added",
-  "Recording canceled" and "Version deleted"; the recording timer and the "Generating image… 12s" counter are never
-  announced. Gallery tiles are buttons "Open image {n} of {m}"; images have the alt text "Generated image {n} of {m}";
+- Phase 6 toggles: the mic (`aria-pressed` `true` while recording, else `false`; `aria-keyshortcuts="Alt+V"`, labels
+  "Dictate" / "Stop and transcribe" / "Cancel transcription"; `aria-disabled` with the tooltip "Voice input needs HTTPS
+  or localhost" on an insecure origin; `aria-haspopup="dialog"` + `aria-expanded` in the setup state) and read-aloud
+  buttons (`aria-pressed` while the reply loads or plays, `aria-busy` while it loads, labels "Read aloud" / "Stop
+  reading"). The recording indicator is a `role="group"` named "Recording" / "Transcribing". The composer has its own
+  polite live region (`aria-live="polite"`, `aria-atomic`, without `role="status"`, so the `role="status"` region of
+  `ChatView` stays unique) announcing "Recording started", "Transcribing…", "Transcript added" and "Recording
+  canceled"; the `ChatView` region announces "Version deleted". The recording timer and the "Generating image…
+  12s" counter are never announced. Gallery tiles are buttons "Open image {n} of {m}"; images have the alt text
+  "Generated image {n} of {m}"; the lightbox counter is read as "Image {n} of {m}" (polite), its dialog title is the
+  image's alt text and its description "Use the arrow keys to see the other images." ("A generated image." for one);
   `GeneratingImages` is `aria-busy` with the sr-only text "Generating images".
 
 ### 14.3 Contrast targets
@@ -3148,11 +3334,14 @@ instant scroll instead of smooth, no sheet slide (fade only).
 - Touch (`pointer: coarse`): interactive targets ≥ 40×40px (rows 40px tall, icon buttons 40px, hit-area padding
   on the 32px send button); hover-only actions (row `⋯`, message actions) are always visible. The `BranchSwitcher`
   buttons, the Chat | Plugins mode tabs and the chat-row `⋯` follow the same 40px rule (`pointer-coarse:` classes), and
-  so do the Phase 6 controls: the mic, the image options trigger, Read aloud and Delete this version.
+  so do the Phase 6 controls: the mic, the recording indicator's Cancel, the image options trigger, Read aloud, Delete
+  this version, the message editor's paperclip and buttons, the lightbox buttons and Download, and Test voice.
 - Touch tablets (Phase 6, S9, W6.11; ≥ 769px, where the sidebar is not a sheet): the collapsed icon rail is 3.5rem
   (56px) wide instead of 3rem and its buttons are 40px (`pointer-coarse:group-data-[collapsible=icon]:size-10!` and
-  `p-3!` on the sidebar menu buttons, `pointer-coarse:[--sidebar-width-icon:3.5rem]` on `SidebarProvider`,
-  `pointer-coarse:size-10` on `AppBrand` and `ThemeToggle`); both `ui/sidebar` patches are recorded in
+  `p-3!` on the sidebar menu buttons, the `lg` size keeping its zero icon-mode padding; the wrapper's
+  `--sidebar-width-icon` moved from the inline style to the classes `[--sidebar-width-icon:3rem]
+  pointer-coarse:[--sidebar-width-icon:3.5rem]` on `SidebarProvider`, since an inline custom property outranks every
+  class; `pointer-coarse:size-10` on `AppBrand` and `ThemeToggle`); both `ui/sidebar` patches are recorded in
   `apps/web/AI_ELEMENTS_PATCHES.md`.
 - Phase 6 screens: galleries keep their two columns at 390px (tiles never overflow the column); the recording composer
   keeps the 390px layout without horizontal scroll (the indicator shows the dot, the timer and Cancel); the Media page
@@ -3236,15 +3425,19 @@ Key strings:
 | Share page | "Read-only snapshot · {date}" · "This link is unavailable" · "It may have expired or been revoked, or the chat was deleted." · "Couldn't load this chat" · "Too many requests. Try again in {n}s." · "This reply failed." |
 | Data page | "Export backup" · "Choose file…" · "Import" · "Importing…" · "This file is larger than 256 MB." · "Skip it" · "Import a copy" · "Restore settings from the backup" · "Shared links" · "No shared links." · "Delete all data…" · "Delete all data?" · "Type DELETE to confirm" · "Delete everything" · "Deleting all data needs your password." · "Deleted {n} chats" |
 | Busy (409 `busy`) | "Another import or delete is running. Try again when it finishes." |
-| Composer (image model) | "Describe an image…" · "Aspect ratio" · "Auto" · "Images" · "Edit the previous image" · "Finish dictation first" (Send tooltip while voice input runs) |
+| Composer (image model) | "Describe an image…" · "Image options" (tooltip) · "Image options: {ratio}, {n} images" / "Image options: {ratio}" (accessible name) · "Aspect ratio" · "Auto" · "Images" · "Edit the previous image" · "The prompt can be up to 32,000 characters" (Send tooltip) · "Finish dictation first" (Send tooltip while voice input runs) |
+| Attachment warnings | "{model} can't see images. Remove them or choose another model." · "{model} can't read PDFs. Remove them or choose another model." · "{name} is too large" · "Files can be up to 20 MB." · "{name} can't be attached" · "Attach images, PDFs or text files." |
 | Model picker | "Image models" · "Image output" |
-| Generated images | "Generating image… {n}s" · "Generating {n} images… {s}s" · "Generating images" · "Generated image {n} of {m}" · "Open image {n} of {m}" · "Previous image" · "Next image" · "Download" · "{n} images · {ratio} · edited {k} image(s)" · "Estimated cost" |
+| Generated images | "Generating image… {s}s" · "Generating {n} images… {s}s" · "Generating images" · "Generated image {n} of {m}" · "Open image {n} of {m}" · "Previous image" · "Next image" · "Image {n} of {m}" · "Use the arrow keys to see the other images." · "A generated image." · "Download" · "Close" · "{n} images · {ratio} · edited {k} image(s)" · "Estimated cost" |
 | `generate_image` | "Choose an image model in Settings → Media." |
-| Dictation | "Dictate" · "Stop and transcribe" · "Transcribing…" · "Cancel transcription" · "Cancel" · "Choose a speech-to-text model to dictate messages." · "Open settings" · "Voice input needs HTTPS or localhost" · "No speech detected" · "Microphone access is blocked. Allow it in the browser's site settings." · "No microphone was found." · "The microphone is in use by another app." · "The recording is too long." |
+| Dictation | "Dictate" · "Stop and transcribe" · "Transcribing…" · "Cancel transcription" · "Recording" · "Transcribing" · "Cancel" · "Choose a speech-to-text model to dictate messages." · "Open settings" · "Voice input needs HTTPS or localhost" · "No speech detected" · "Microphone access is blocked. Allow it in the browser's site settings." · "No microphone was found." · "The microphone is in use by another app." · "The recording is too long." · "This browser can't record audio." |
 | Live region (Phase 6) | "Recording started" · "Transcribing…" · "Transcript added" · "Recording canceled" · "Version deleted" |
-| Read aloud | "Read aloud" · "Stop reading" · "Could not read this reply aloud" |
+| Read aloud | "Read aloud" · "Stop reading" · "Could not read this reply aloud" · "The browser blocked audio playback." · "The browser could not play the audio." |
 | Versions (Phase 6) | "Delete this version" · "Delete this version?" · "This version and every message after it are deleted. Other versions stay." · "Delete version" · "Could not delete the version" |
-| Edit attachments | "Attach files" · "Remove {name}" |
-| Settings → Media | "Media" · "Images and voice" · "Models for generated images, dictation and reading replies aloud." · "Images" · "Generate pictures with your own providers." · "Image model" · "None (the generate_image tool is off)" · "The generate_image tool uses this model. To generate images directly, pick an image model in the composer." · "No image models from your connected providers." · "Voice" · "Audio and text go to the provider you choose; harness-forge doesn't store them." · "Speech to text" · "Off" · "Language" · "Detect automatically" · "Read aloud" · "Voice" · "Provider default" · "Speed" · "Test voice" · "Stop" · "This is how replies sound when they are read aloud." · "Could not play the test voice" |
-| Custom model kind (Settings → Models) | "Kind" · "Chat" · "Image" · "Speech to text" · "Text to speech" |
+| Edit attachments | "Attach files" · "Remove {name}" · "Send" · "Cancel" |
+| Settings → Media | "Media" · "Images and voice" · "Models for generated images, dictation and reading replies aloud." · "Could not load the media settings" · "Retry" · "Images" · "Generate pictures with your own providers." · "Image model" · "None (the generate_image tool is off)" · "The generate_image tool uses this model. To generate images directly, pick an image model in the composer." · "Loading models…" · "No image models from your connected providers." · "No speech-to-text models from your connected providers." · "No text-to-speech models from your connected providers." · "Voice" · "Audio and text go to the provider you choose; harness-forge doesn't store them." · "Speech to text" · "Off" · "Language" · "Detect automatically" · "Read aloud" · "Voice" · "Provider default" · "Voices" · "Use at most 64 characters." · "Voices use letters, digits, spaces and "_", ".", ":", "-"." · "Speed" · "Test voice" · "Stop" · "This is how replies sound when they are read aloud." · "Could not play the test voice" |
+| Settings → Models (Phase 6) | "No chat models from your connected providers." · "Chosen in Settings → Media" (the dash of Favorite and Visible) · kind badges "Image" · "Speech to text" · "Text to speech" · "Embedding" · "Audio" · "Other" |
+| Custom model kind (Settings → Models) | "Kind" · "Chat" · "Image" · "Speech to text" · "Text to speech" · "Image output" · "For a model {provider} serves but does not list." · "It appears in the model picker right away." · "Image models appear in the model picker when the provider can generate images." · "Choose it in Settings → Media." |
+| General (Phase 6) | "Use Alt+M, Alt+R and Alt+P for composer menus, and Alt+V to dictate." |
+| Fresh-auth prompts | "Creating a plugin that runs code needs your password." · "Changing the code of a plugin needs your password." · "Reloading runs the plugin's code again. Confirm your password to continue." · "Saving a server that runs a local command needs your password." · "This provider starts a program on the server. Confirm your password to continue." · "Confirm your password to install a plugin that runs code on this server." · "Confirm your password to trust a plugin that runs code on this server." (8.4) |
 | Share option (Phase 6) | "Files and images" (was "Attachments") |

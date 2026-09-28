@@ -123,7 +123,11 @@ export interface ProviderDefinition {
   modelsDevId?: string
   /** Cheap model for chat titles and the default credential ping. */
   smallModelId?: string
-  /** Used when there is no live listing and no cached listing. */
+  /**
+   * Used when there is no live listing and no cached listing. Seeds with an explicit media kind (`image`,
+   * `transcription`, `speech`) are listed next to a live listing too, when the provider defines the matching factory
+   * (Phase 6, ADR-028 / ADR-029).
+   */
   seedModels?: ModelInfo[]
   /** "Get a key" link of the key dialog. */
   keyUrl?: string

@@ -88,7 +88,7 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | `provider_error` | 502 | `retry` | Any other upstream error (provider, MCP server, npm registry, install URL). |
 | `plugin_error` | 500 | - | Plugin code threw, timed out, or failed to load/build (`details.pluginId`). |
 | `internal_error` | 500 | `retry` | Unexpected server error (`details.requestId`). Message is generic; details are logged. |
-| `not_implemented` | 501 | - | Route and service stubs: the Phase 0 skeleton and the routes a contract wave adds before its feature wave implements them (Phase 6: `audio.transcribe`, `audio.speech`, `chats.deleteMessage` until P6-A). |
+| `not_implemented` | 501 | - | Route and service stubs between a contract wave and the feature wave that implements them (the Phase 0 skeleton; in Phase 6 `audio.transcribe`, `audio.speech` and `chats.deleteMessage` from P6-0a until P6-A). No route of v1.2 answers it. |
 
 `HarnessErrorAction` = `configure-provider | refresh-models | login | retry`.
 
@@ -389,7 +389,7 @@ type ProviderSummary = {                // providerSummarySchema
   credentials: Record<string, CredentialState>  // key = CredentialField.key, one entry per field
   keyUrl: string | null                 // "Get a key" link
   local: boolean                        // no required secret field ("Local — no key")
-  modelCount: number                    // visible chat models in the catalog
+  modelCount: number                    // visible chat models in the catalog (visible image models are not counted)
   modelsFetchedAt: Timestamp | null     // last successful live listing
   lastError: HarnessErrorInit | null    // last failed validation / listing / call (auth or network)
   validatedAt: Timestamp | null         // last successful validation
@@ -477,11 +477,16 @@ type CustomModelInput = {               // customModelInputSchema
 type CustomModelKey = { providerId: ProviderId; modelId: ModelId }   // customModelKeySchema (query of DELETE)
 ```
 
-Kinds (Phase 6): `chat` models fill the chat model picker; `image` models (ADR-028) join it in an "Image models" group
-only when their provider defines `createImageModel` (else they are hidden); `transcription` and `speech` models
-(ADR-029) are hidden from the picker and chosen in Settings → Media (`GET /models?includeHidden=true`). A seed model
-with an explicit non-chat kind is listed even when the provider also has a live listing. `ModelInfo.voices`
-(unique, <= 100) of plugin and seed models becomes `CatalogModel.voices`.
+Kinds (Phase 6): `chat` models fill the chat model picker. A media model (`image`, `transcription`, `speech`) is listed
+only when its provider defines the matching factory (`createImageModel`, `createTranscriptionModel`,
+`createSpeechModel`; PLUGINS.md 9), so Settings → Media never offers a model that cannot be served; a custom model is
+always listed (the resolvers then say why it cannot be used, sections 5.10 and 5.21). By default, `image` models
+(ADR-028) of a provider with `createImageModel` are visible and join the picker in an "Image models" group (any other
+image model is hidden), `transcription` and `speech` models (ADR-029) are hidden and chosen in Settings → Media
+(`GET /models?includeHidden=true`), and embedding, audio and other models are hidden; `model_prefs.hidden` overrides
+every default. A seed with an explicit media kind is listed even when the provider also has a live listing.
+`capabilities.imageOutput` is only ever true for chat models. `ModelInfo.voices` of a listing, plugin or seed model
+becomes `CatalogModel.voices` (non-empty names of at most 64 characters, duplicates dropped, the first 100).
 
 ### 4.6 Icons
 
@@ -654,8 +659,8 @@ type HarnessDataTypes = { notice: NoticeData }  // data parts: 'data-notice'; ha
 type NoticeData = {                     // noticeDataSchema
   level: 'info' | 'warning'
   code: 'context-trimmed' | 'approvals-superseded' | 'tools-unsupported' | 'attachments-unsupported'
-    | 'generated-file-dropped'          // noticeCodeSchema; a generated file that was not stored (not a raster image
-  message: string                       // of GENERATED_IMAGE_MIME_TYPES, or over 20 MB; ADR-028)
+    | 'generated-file-dropped'          // noticeCodeSchema; a generated file that was not stored (not a PNG, JPEG,
+  message: string                       // WebP or GIF image, over 20 MB, or bytes that do not match the type; ADR-028)
 }
 ```
 
@@ -688,7 +693,8 @@ type ChatStopResult = { stopped: boolean }      // chatStopResultSchema; false w
 In-place edits were removed (ADR-023): a user message sent with `messageId` is rejected with `400`, as is `parentId`
 on a regenerate or an approval continuation; an unknown `parentId` or `messageId` is `404` (section 6.2).
 `imageOptions` is checked against the model: `400 validation_error` on `['imageOptions']` unless the model is an image
-model or a chat model with image output; `n` / `editPrevious` only for image models.
+model or a chat model with image output; `n` / `editPrevious` only for image models. An image model never answers an
+approval continuation (`400` on `['modelRef']`, section 5.10).
 
 ### 4.8 Files
 
@@ -988,8 +994,8 @@ type ServerEvent =                      // serverEventSchema, discriminated unio
   | { type: 'plugin.log';       data: { pluginId: PluginId; entry: PluginLogEntry }; at: Timestamp }
 
 type ChatUpdatedData = ChatSummary & {                                              // chatUpdatedDataSchema (ADR-030)
-  activeLeafId: MessageId | null        // last message of the shown path (null = an empty chat): another tab that
-}                                       // shows the chat follows a version switch or delete
+  activeLeafId: MessageId | null        // the stored active leaf (chats.active_leaf_id; null = an empty chat): another
+}                                       // tab that shows the chat follows a version switch or delete
 type RunStartedData = { chatId: ChatId; messageId: MessageId; modelRef: ModelRef }   // runStartedDataSchema
 type RunFinishedData = {                                                            // runFinishedDataSchema
   chatId: ChatId
@@ -1003,8 +1009,9 @@ type ServerEventType = ServerEvent['type']                                      
 ```
 
 `chat.created` carries a plain `ChatSummary`; `chat.updated` adds the active leaf (`chatSummarySchema` itself has no
-leaf: chat export v2 extends it). `provider: null` / `plugin: null` mean the provider was unregistered / the plugin
-was uninstalled.
+leaf: chat export v2 extends it). The leaf is the stored column as it is: it can be `null`, or name a message that no
+longer exists, while the chat has messages; `GET /chats/:id` then shows the path to the most recent message.
+`provider: null` / `plugin: null` mean the provider was unregistered / the plugin was uninstalled.
 `catalog.changed` with `providerId: null` means "many providers changed" (refetch everything).
 
 ### 4.15 Params and form schemas
@@ -1272,23 +1279,42 @@ type GenerateImageToolOutput = {        // generateImageToolOutputSchema: file r
 
 Rules (the stream is described in sections 5.10 and 6.8):
 
-- **Image turn**: `POST /chat` with an image model. The prompt is the text of the new user message after slash-command
-  expansion (`400` when it is empty or longer than 32,000 characters). Input images: the images attached to the
-  message when the model has `vision`, else (none attached and `editPrevious !== false`) the generated images of the
-  parent reply, at most 4; other attachments get the `attachments-unsupported` notice. An image turn sends no history.
+- **Image turn**: `POST /chat` with a model of `kind: 'image'`. The prompt is the text of the answered user message
+  after slash-command expansion (its text parts joined by line breaks, trimmed); `400` on `['message', 'parts']` when it
+  is empty or longer than 32,000 characters (not checked when a reply command answers without the model). Input images:
+  when the model has `vision`, the raster images (`GENERATED_IMAGE_MIME_TYPES`) attached to the message (the first 4),
+  or, when none are attached and `editPrevious !== false`, the generated images of the parent reply that are still
+  stored (the last 4). Attachments the model does not take (other files, images beyond the first 4, every image for a
+  model without `vision`) get the `attachments-unsupported` notice when the message is new. An image turn sends no
+  history.
 - **`imageOptions`** is accepted only for an image model or a chat model with `capabilities.imageOutput`; `n` and
-  `editPrevious` only for image models; otherwise `400 validation_error` on `['imageOptions']`.
-- **`generate_image`**: the output above (well under the 64 KB tool output cap) goes to the model as a text summary; the
-  chat pipeline appends one `file` part per image after the tool call, only for the output of `core-tools`'
-  `generate_image` that parses with `generateImageToolOutputSchema`. Without an `imageModelRef` the tool fails with
-  "Choose an image model in Settings → Media."
-- A generated file that is not one of `GENERATED_IMAGE_MIME_TYPES` or exceeds `LIMITS.generatedImageBytes` (20 MB, the
-  upload limit, so a backup restores every generated image) is dropped with a `data-notice` (`generated-file-dropped`).
-- History: the images of the latest assistant message that has any are carried into the next user message for models
-  with `vision` (at most 4; most providers ignore images in assistant messages); older generated images are sent as
-  the text `[Generated image: <name>]`; `reasoning-file` parts are never sent back to models.
-- Usage: one usage row per generation (purpose `image`), counted in `ChatDetail.totals`; `costUsd` is estimated from
-  the catalog's per-1M-token prices (absent when unknown). Share links and backups treat generated images as ordinary
+  `editPrevious` only for image models; otherwise `400 validation_error` on `['imageOptions']` (texts in section 5.10).
+- **`generate_image`**: the model never sees the output JSON, only the text "Generated 2 images with <model ref>; they
+  are shown to the user below this call." ("Generated 1 image with <model ref>; it is shown to the user below this
+  call."); the output above (file references, well under the 64 KB tool output cap) is stored in the tool part. The chat
+  pipeline appends one `file` part per image right after the final `tool-output-available` chunk, only for `core-tools`'
+  `generate_image` (also on an approval continuation), only when the output parses with
+  `generateImageToolOutputSchema`, and only for images whose URL is `/api/files/<fileId>` of a stored raster image; the
+  tool's `costUsd` is added to the cost of the message. The tool is always registered: without an `imageModelRef` it
+  fails with "Choose an image model in Settings → Media.", and when every image was refused (see below) with
+  `provider_error` "The image model returned no image that could be stored: only PNG, JPEG, WebP and GIF images of at
+  most 20 MB are kept."
+- A generated file that is not one of `GENERATED_IMAGE_MIME_TYPES`, exceeds `LIMITS.generatedImageBytes` (20 MB, the
+  upload limit, so a backup restores every generated image) or whose bytes do not match its type is dropped and replaced
+  in place by a `data-notice` (`generated-file-dropped`, "A file the model generated was not kept: only PNG, JPEG, WebP
+  and GIF images up to 20 MB are stored."; for several: "3 files the model generated were not kept: …"). Stored images
+  are deduplicated by content: the same bytes reuse the earlier `files` row and its name.
+- History (for chat models): every generated file of an assistant message is sent as the text
+  `[Generated image: <name>]` (`[Generated file: <name>]` for other types) in its place, so no assistant message reaches
+  a provider empty (most providers ignore images in assistant messages); for models with `vision` the images of the
+  latest assistant message that has any (the last 4) are also carried into the next user message, before its own
+  content, after the text "(Images generated earlier in this chat:)". `reasoning-file` parts are never sent back to
+  models.
+- Usage: one usage row per generation (purpose `image`, linked to the chat), written as soon as the provider answered
+  (also when the run was stopped meanwhile) and counted in `ChatDetail.totals`. The estimated `costUsd` = (input
+  tokens × input price + output tokens × output price) / 1,000,000 with the catalog's per-1M-token prices, rounded to
+  1e-10; it is absent (null in the row) when the model has no catalog price, when the provider reports no token counts
+  (xAI), or when a token kind that was used has no price. Share links and backups treat generated images as ordinary
   `file` parts.
 
 ### 4.19 Voice (dictation and read-aloud)
@@ -1309,8 +1335,9 @@ type AudioTranscribeForm = {            // audioTranscribeFormSchema; multipart 
 }
 
 type AudioTranscription = {             // audioTranscriptionSchema (response of POST /audio/transcriptions)
-  text: string                          // '' when no speech was detected
-  language: string | null               // the language the provider detected or used, when it reports one
+  text: string                          // trimmed; '' when no speech was detected
+  language: string | null               // the language the provider detected or used, when it reports one (trimmed,
+                                        // at most 64 characters)
   durationSec: number | null            // length of the recording in seconds, when the provider reports it
   modelRef: ModelRef                    // the model used
 }
@@ -1322,8 +1349,10 @@ type AudioSpeechBody = {                // audioSpeechBodySchema (POST /audio/sp
 }
 ```
 
-Transcription models are `kind: 'transcription'`, speech models `kind: 'speech'`; speech models may suggest `voices`
-(`CatalogModel.voices`). The web records at most 10 minutes (`LIMITS.transcriptionMaxSeconds`) and reads a reply in
+Transcription models are `kind: 'transcription'`, speech models `kind: 'speech'`; both are listed only for providers
+that define the matching factory and are hidden from the chat picker (section 4.5); speech models may suggest `voices`
+(`CatalogModel.voices`). An omitted form field or body key falls back to its setting; an empty value is a `400`, never
+a fallback. The web records at most 10 minutes (`LIMITS.transcriptionMaxSeconds`) and reads a reply in
 sentence chunks: the first up to 300 characters (`LIMITS.speechFirstChunkChars`), then up to 1,500
 (`LIMITS.speechChunkChars`), never more than 4,096; `speechSpeed` is applied by the browser (`playbackRate`).
 
@@ -1425,8 +1454,8 @@ body exceeds its limit; `500 internal_error`.
 **`GET /models`** — `models.list`
 - Query `ModelsQuery`.
 - Response `200 ListResponse<CatalogModel>`: models of enabled providers (regardless of credential status; the web
-  filters by `ProviderSummary.status`), hidden ones only with `includeHidden=true`. Order: favorites, recent,
-  then provider registry order and name.
+  filters by `ProviderSummary.status`; media models only when the provider can serve their kind, section 4.5), hidden
+  ones only with `includeHidden=true`. Order: favorites, recent, then provider registry order and name.
 - Errors: `404 not_found` (unknown `providerId`).
 
 **`POST /providers/:id/models/refresh`** — `models.refresh`
@@ -1525,29 +1554,43 @@ body exceeds its limit; `500 internal_error`.
 **`POST /chats/:id/branch`** — `chats.switchBranch`
 - Params `{ id: ChatId }`. Body `ChatBranchBody` (`messageId`: any message of the chat, ADR-023).
 - Shows the path last shown under `messageId` (ADR-030): every message remembers the child last shown under it, so
-  from `messageId` down the path follows each remembered child while it is still a child, else the only child, else
-  it ends at the most recent leaf (the highest `seq`) under that message. That leaf becomes the active leaf and the
-  shown path is remembered, so switching away and back restores it. `pendingApproval` is recomputed from the new path
-  (approvals on other versions stay pending and are live again when their version is shown); `updatedAt` is not
-  changed.
+  from `messageId` down the path follows each remembered child while it is still a child, else the only child; at a
+  message with several children and no valid remembered one it ends at the most recent leaf (the highest `seq`) under
+  that message. That leaf becomes the active leaf and the shown path is remembered in the same write, so switching away
+  and back restores it. `pendingApproval` is recomputed from the new path (approvals on other versions stay pending
+  and are live again when their version is shown); `updatedAt` is not changed.
 - Response `200 ChatDetail` (the new path and its `branches`). Emits `chat.updated` (`ChatUpdatedData`: other tabs
   that show the chat follow the new `activeLeafId`).
-- Errors: `404 not_found` (unknown chat, or `messageId` not in the chat); `409 conflict` (`reason: 'run-active'`,
-  `chatId`) while a run holds the chat, in any phase, and when the active leaf moved between reading and switching it
-  (a compare-and-set: a run committed or another switch won meanwhile).
+- Errors: `404 not_found` (unknown chat, "Chat <id> not found.", or `messageId` not in the chat, "Message <messageId>
+  not found in chat <id>."); `409 conflict` (`reason: 'run-active'`, `chatId`) while a run holds the chat, in any
+  phase ("A reply is already being generated for this chat. Stop it or wait until it finishes."), and when the active
+  leaf moved between reading and switching it (a compare-and-set: a run committed or another switch won meanwhile; "The
+  chat changed while switching versions. Wait until the reply finishes, then try again."). After a missed
+  compare-and-set the error is derived again: `404` when the chat or the message is gone by then.
 
 **`DELETE /chats/:id/messages/:messageId`** — `chats.deleteMessage`
 - Params `ChatMessageParams` (`messageId`: any message of the chat that has another version, ADR-030).
 - Deletes one version and every message after it (the message and its whole subtree). When the active path goes
   through it, the path moves to what was last shown under the previous version (the previous sibling by `seq`, else
-  the next one), as `POST /chats/:id/branch` shows it; `pendingApproval` is recomputed and `updatedAt` is kept. Usage
-  rows (totals keep counting deleted versions), share links (their snapshots) and uploaded files are untouched; the
-  search text goes with the deleted messages. Deleting a version that is not on the active path leaves the path as it
-  is.
-- Response `200 ChatDetail` (the path and its `branches` after the delete). Emits `chat.updated` (`ChatUpdatedData`).
-- Errors: `404 not_found` (unknown chat, or `messageId` not in the chat); `409 conflict` (`reason: 'only-version'`: the
-  message has no other version; `reason: 'run-active'`, `chatId`: a run holds the chat, or the active leaf moved
-  meanwhile; nothing is deleted).
+  the next one), as `POST /chats/:id/branch` shows it, and that path is remembered; `pendingApproval` is recomputed and
+  `updatedAt` is kept. Usage rows (totals keep counting deleted versions), share links (their snapshots) and uploaded
+  or generated files are untouched; the search text goes with the deleted messages. Deleting a version that is not on
+  the active path leaves the path as it is.
+- One atomic write: the leaf moves under a compare-and-set against the leaf read before, and the subtree is deleted
+  only while the leaf is where the delete expects it and another version of the message still exists, so a race never
+  deletes the shown path or the last version.
+- Response `200 ChatDetail` (the path and its `branches` after the delete). Emits `chat.updated` (`ChatUpdatedData`),
+  also for a version off the active path (with the unchanged leaf).
+- Errors (nothing is deleted):
+  - `404 not_found`: unknown chat ("Chat <id> not found.") or `messageId` not in the chat ("Message <messageId> not
+    found in chat <id>.").
+  - `409 conflict`, `reason: 'only-version'` (no `chatId`): the message has no other version ("This is the only
+    version of the message. Delete the chat instead.").
+  - `409 conflict`, `reason: 'run-active'`, `chatId`: a run holds the chat, in any phase (checked first: "A reply is
+    already being generated for this chat. Stop it or wait until it finishes."), or the active leaf moved meanwhile
+    ("The chat changed while deleting the version. Wait until the reply finishes, then try again."). After such a
+    missed compare-and-set the error is derived again: `404` when the chat or the message is gone by then,
+    `only-version` when the other versions were deleted meanwhile.
 
 ### 5.10 `chat.ts`
 
@@ -1565,17 +1608,29 @@ body exceeds its limit; `500 internal_error`.
   sends.
 - Such an error stores no message: at most the chat row is created (a new chat id, with `chat.created`) or its model,
   mode and effort are updated, so the web can send the same text again under a new message id.
-- Images (ADR-028, section 4.18): `imageOptions` with a model that is neither an image model nor a chat model with
-  `capabilities.imageOutput`, or `n` / `editPrevious` with a chat model -> `400 validation_error` (`['imageOptions']`).
-  A model of `kind: 'image'` makes the request an **image turn** (no history is sent): its prompt is the text of the
-  new user message after slash-command expansion (`400` when empty or over 32,000 chars); the reply streams one `file`
-  chunk per image (section 6.8). Image turns are stopped, resumed, regenerated and branched like other replies; the
-  title of a new image-turn chat comes from `titleModelRef` or the provider's `smallModelId` (else the default title
-  stays).
+- Images (ADR-028, section 4.18): the catalog kind of `modelRef` decides. A model of `kind: 'image'` makes the request
+  an **image turn** (no history is sent; the prompt and the input images as in section 4.18); the reply streams one
+  `file` chunk per image (section 6.8). An image model whose provider has no `createImageModel` (only a custom model
+  can be one) is `404 model_not_found` ("The provider "<name>" cannot generate images, so the model "<ref>" cannot be
+  used."). More `400 validation_error`s, checked after the model resolved:
+  - `imageOptions` with a model that is neither an image model nor a chat model with `capabilities.imageOutput`
+    (`['imageOptions']`: "The model "<ref>" does not generate images: image options are only for image models and chat
+    models with image output."), or `n` / `editPrevious` with a chat model with image output (`['imageOptions']`: "A
+    chat model with image output takes only the aspect ratio: n and editPrevious are for image models.");
+  - an approval continuation sent with an image model (`['modelRef']`: "An image model cannot continue a tool call.
+    Pick a chat model to answer the pending tool call.");
+  - an image turn whose prompt is empty (`['message', 'parts']`: "Describe the image to generate: an image model needs
+    a text prompt.") or longer than 32,000 characters (`['message', 'parts']`: "Image prompts are limited to 32000
+    characters.").
+- Image turns are sent, edited, regenerated, stopped, resumed and branched like other replies. An image model that
+  returns no image ends the reply with `provider_error` ("<Provider> returned no image."). The title of a new
+  image-turn chat comes from `titleModelRef`, else the provider's `smallModelId` (a title model that fails gives the
+  first 60 characters of the message, as for chat runs); without either the default title stays: the image model is
+  never asked for a title.
 - Generated files never travel as `data:` URLs: files a chat model generates (image output, also inside reasoning) and
   the images of the `generate_image` tool are stored first and streamed as `file` chunks with `/api/files/<id>` URLs;
-  the stored message equals the streamed one. A generated file that cannot be stored is dropped with a `data-notice`
-  (`generated-file-dropped`).
+  the stored message equals the streamed one. A generated file that cannot be stored is replaced in place by a
+  `data-notice` (`generated-file-dropped`).
 
 **`GET /chat/:id/stream`** — `chat.resume` · response `'ui-message-stream'`
 - Params `{ id: ChatId }`. This is the default reconnect URL of `DefaultChatTransport` (`{api}/{chatId}/stream`).
@@ -1972,48 +2027,80 @@ actions emit no server event (the owner UI refetches).
 
 Voice (ADR-029, DTOs in section 4.19). Both routes need a session and pass the Origin check; they need no fresh auth
 (they run no code and create nothing lasting). Nothing is stored: the audio or the text goes to the provider of the
-chosen model and the result comes back; the info log records only the provider, the model, the byte or character
-count, the audio type, the duration and the time taken, never the audio or the text. Each call adds a usage row
-(purpose `transcription` or `speech`, no chat, 0 tokens, no cost). Model errors: `400 validation_error` when no model
-is given and none is set in Settings, or the model is not of the route's kind or its provider cannot serve it;
-`400 provider_not_configured`; `500 plugin_error` when the provider's model factory fails. Provider errors are mapped
-as in section 2.3 (`auth_invalid`, `rate_limited`, `model_not_found`, `provider_unreachable`, `provider_error`, with
-`providerId` and `status` when known).
+chosen model and the result comes back.
+
+Common rules:
+
+- **Model errors** (resolver errors pass unchanged): `400 validation_error` on `['modelRef']` when no model is given and
+  none is set in Settings ("Choose a speech-to-text model in Settings → Media." / "Choose a read-aloud model in
+  Settings → Media."), when the model is of another kind ("modelRef: The model "<ref>" is not a speech-to-text model."
+  / "… is not a text-to-speech model.") or when its provider cannot serve it ("modelRef: The provider "<name>"
+  cannot transcribe speech, so the model "<ref>" cannot be used." / "… cannot read text aloud, …"; only a custom
+  model can be one, section 4.5); `404 not_found` for an unknown provider ("Unknown provider "<id>"."; the chat
+  pipeline reports it as `provider_not_configured` instead); `400 provider_not_configured` for a disabled provider or
+  missing credentials; `404 model_not_found` (action `refresh-models`) for a model that is not in the catalog;
+  `500 plugin_error` when the provider's model factory throws, takes longer than 5 s or returns no model.
+- **Provider errors** are mapped as in section 2.3 (`auth_invalid`, `rate_limited`, `model_not_found`,
+  `provider_unreachable` (also for the timeout), `provider_error`, with `providerId` and `status` when known) and
+  recorded as the provider's call outcome (its status). A speech error whose message (or upstream detail) repeats any
+  24 characters in a row of the text (the whole text when it is shorter) is replaced by "<Provider> returned an
+  error.", so the text never reaches a log.
+- **Canceled requests**: the request signal aborts the provider call when the client disconnects; the (unread) answer
+  is `400 validation_error` "The request was canceled.", and neither a provider outcome nor a usage row is recorded.
+- **Usage and outcome**: only a `200` answer writes a usage row (purpose `transcription` or `speech`, no chat, 0
+  tokens, no cost) and records the provider as working.
+- **Logs**: one info line per provider call (`audio transcription` / `audio speech`) with `providerId`, `modelId`,
+  `bytes` (the recording, or the returned audio) or `chars` (the speech text length), `type`, `durationSec` (when the
+  provider reports it), `ms` and `outcome` (`ok`, `empty` for a transcription without speech, `canceled`, or `failed`
+  with the error `code`); never the audio, the transcript or the text.
 
 **`POST /audio/transcriptions`** — `audio.transcribe` · multipart
-- Body `multipart/form-data`: exactly one recording in part `file` + the `AudioTranscribeForm` fields (a second file,
-  an unknown or repeated field -> `400`); limit 25 MB (`LIMITS.audioUploadBytes`). The route reads the multipart body
-  itself.
+- Body `multipart/form-data`: exactly one recording in the part `file` + the `AudioTranscribeForm` fields. The route
+  reads the multipart body itself; every refusal is `400 validation_error`: "Send exactly one recording." (a second
+  file), "Attach the recording in the part named "file"." (none), "The part "file" must be a file." (a text part),
+  "Unknown field "<name>".", "The field "<name>" is sent more than once.", "Only the part "file" may be a file ("<name>"
+  is one).", or the field schema's issue (an invalid or empty `modelRef` / `language`).
+- Size: at most 25 MB (`LIMITS.audioUploadBytes`, 26,214,400 bytes): a larger recording is `413 payload_too_large`
+  "Recordings are limited to 25 MB." (`details.limitBytes: 26214400`); above 25 MB + 64 KB the body-limit middleware
+  answers first ("The request body is larger than the limit of 25 MB.", the same `details`). A recording under 64 bytes
+  is `400` "The recording is empty.".
 - Accepted types, parameters such as `;codecs=opus` ignored (aliases in brackets): `audio/webm` (`video/webm`),
   `audio/ogg`, `audio/mp4` (`audio/x-m4a`, `video/mp4`), `audio/mpeg` (`audio/mp3`), `audio/wav` (`audio/x-wav`,
-  `audio/wave`), `audio/flac` (`audio/x-flac`). The declared type must match the content (EBML with DocType `webm`,
-  `OggS`, an `ftyp` box with a non-image brand, `ID3` or an MPEG frame sync, `RIFF…WAVE`, `fLaC`); with
-  `application/octet-stream` the content decides. Audio is accepted only here (chat uploads keep
-  `UPLOAD_MIME_PATTERNS`).
+  `audio/wave`), `audio/flac` (`audio/x-flac`). The declared type must match the content (an EBML header with DocType
+  `webm`, `OggS`, an `ftyp` box without an image brand, an `ID3` tag or an MPEG audio frame sync (AAC ADTS refused),
+  `RIFF…WAVE`, `fLaC`); with `application/octet-stream` the content decides. A file part sent without a
+  `Content-Type` header counts as `text/plain` and is refused. Refusals (`400`, issue path `file`): "The type <type>
+  is not accepted: send a WebM, Ogg, MP4, MP3, WAV or FLAC recording.", "The recording does not match its type
+  (<type>).", "The recording is not in a supported format: send a WebM, Ogg, MP4, MP3, WAV or FLAC recording."
+  (`application/octet-stream`). Audio is accepted only here (chat uploads keep `UPLOAD_MIME_PATTERNS`).
 - Model: `modelRef`, else the `transcriptionModelRef` setting. Language: `language`, else the `transcriptionLanguage`
-  setting; `auto` sends none, a code goes through the provider's `transcriptionOptions` hook.
-- Timeout 120 s with at most one retry; a client disconnect aborts the provider call.
-- Response `200 AudioTranscription` (`text: ''` when no speech was detected) with `Cache-Control: no-store`.
-- Errors: `400 validation_error` (the model errors above; a missing or repeated part; a type that is not accepted or
-  does not match the content; a recording under 64 bytes: "The recording is empty."); `413 payload_too_large` (over
-  25 MB, `details.limitBytes`); provider errors as above.
+  setting; `auto` sends none, a code goes through the provider's `transcriptionOptions` hook (a hook that throws or
+  returns something invalid sends no hint).
+- Timeout 120 s for the whole call, with at most one retry.
+- Response `200 AudioTranscription` with `Cache-Control: no-store`: `text` trimmed (`''` when no speech was found; the
+  AI SDK's `NoTranscriptGeneratedError` answers `''` too), `language` and `durationSec` as reported (else `null`).
+- Errors: the multipart, size and type refusals above; the model, provider and cancel errors of the common rules.
 
 **`POST /audio/speech`** — `audio.speech` · response `'binary'`
-- Body `AudioSpeechBody` (`text` 1..4096 chars).
+- Body `AudioSpeechBody` (`text` 1..4096 chars after trimming; else `400` on `text`).
 - Model: `modelRef`, else the `speechModelRef` setting. Voice: `voice`, else the `speechVoice` setting, else the
-  provider default. Only the text and the voice are sent (never an output format, a speed, instructions or a
-  language: the browser applies `speechSpeed`).
-- Timeout 60 s with at most one retry; a client disconnect aborts the provider call.
-- Response `200` with the audio bytes, `Content-Type` = the audio type the provider returned (from an allowlist of
-  audio types), `Content-Length`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`.
-- Errors: `400 validation_error` (the text, the model errors above); provider errors as above.
+  provider default (while `speechVoice` is set, a request cannot ask for the provider default). Only the text and the
+  voice are sent (never an output format, a speed, instructions or a language: the browser applies `speechSpeed`).
+- Timeout 60 s for the whole call, with at most one retry.
+- Response `200` with the audio bytes exactly as the provider returned them: `Content-Type` from an allowlist
+  (`audio/mpeg`, `audio/wav`, `audio/ogg`, `audio/webm`, `audio/mp4`, `audio/aac`, `audio/flac`; the reported type is
+  normalized first, e.g. `audio/mp3` -> `audio/mpeg`, `audio/x-wav` -> `audio/wav`), `Content-Length`,
+  `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`.
+- Errors: `400 validation_error` (the text); `502 provider_error` "<Provider> returned no audio." or "<Provider>
+  returned audio in a format that cannot be played (<type>)." (a type outside the allowlist, recorded as a provider
+  failure); the model, provider and cancel errors of the common rules.
 
 ## 6. Chat stream protocol
 
-`POST /api/chat` returns an **AI SDK v7 UI message stream** built with
-`createUIMessageStreamResponse({ stream: toUIMessageStream({ stream: result.stream, ... }), consumeSseStream })`;
-since Phase 6 that stream runs inside `createUIMessageStream` so generated files are stored before they are streamed
-(section 6.3). Verify every AI SDK name against the installed `node_modules/ai` types before implementing.
+`POST /api/chat` returns an **AI SDK v7 UI message stream**: `createUIMessageStreamResponse({ stream,
+consumeSseStream })`, where `stream` is built with `createUIMessageStream` for every run since Phase 6 (section 6.3),
+so generated files are stored before they are streamed and the saved message equals the streamed one. Verify every AI
+SDK name against the installed `node_modules/ai` types before implementing.
 
 ### 6.1 Client setup (reference)
 
@@ -2075,9 +2162,10 @@ regenerate or a continuation (`400`), a regenerate target not answered by a user
 active leaf (`404`), and a user message id that is already stored (`409`, `reason: 'exists'`). The web never sends
 the id of a user message whose request failed with an HTTP error (the server stored nothing).
 
-With an image model (ADR-028) every action works the same (an image turn is a Send, an Edit or a Regenerate);
-`imageOptions` travel next to `modelRef` (section 6.8). A version is deleted with
-`DELETE /chats/:id/messages/:messageId` (ADR-030), never through `POST /chat`.
+With an image model (ADR-028) Send, Edit and Regenerate work the same (each is an image turn); an approval
+continuation needs a chat model (`400` on `['modelRef']` with an image model). `imageOptions` travel next to
+`modelRef` (section 6.8). A version is deleted with `DELETE /chats/:id/messages/:messageId` (ADR-030), never through
+`POST /chat`.
 
 User text parts: plain text (slash commands are expanded server-side, see ARCHITECTURE.md 6.1). File parts:
 `{ type: 'file', mediaType, filename, url: '/api/files/<id>' }` from `POST /files`; the server loads the bytes
@@ -2086,13 +2174,19 @@ only for models with `vision` (images) or `pdf` capability, otherwise the part i
 
 ### 6.3 Response
 
-- Server options: `toUIMessageStream({ stream: result.stream, originalMessages, generateMessageId: createMessageId,
-  sendReasoning: true, sendSources: true, messageMetadata, onError })` (`sendSources` defaults to false in v7; the web
-  renders sources, so it must be true). Headers come from `UI_MESSAGE_STREAM_HEADERS`.
-- Phase 6 (ADR-028): `toUIMessageStream`'s own `onEnd` would save the chunks it produced itself, so the stream is piped
-  through a transform that stores generated files and merged into `createUIMessageStream({ originalMessages,
-  generateId, onError, onEnd, execute: ({ writer }) => writer.merge(ui.pipeThrough(transform)) })`: the saved message
-  equals what was streamed. An image turn is streamed by `createUIMessageStream` alone (section 6.8).
+- Model runs: `const ui = toUIMessageStream({ stream: result.stream, tools, originalMessages, generateMessageId: () =>
+  assistantId, sendReasoning: true, sendSources: true, messageMetadata, onError })` with **no** end callback of its own
+  (`sendSources` defaults to false in v7; the web renders sources, so it must be true). `assistantId` is created with
+  `createMessageId()` before the stream starts (the continued message's id for an approval continuation). Headers come
+  from `UI_MESSAGE_STREAM_HEADERS`.
+- Phase 6 (ADR-028): the end callback of `toUIMessageStream` would save the chunks it produced itself, before generated
+  files are stored, so every run is returned through `createUIMessageStream({ originalMessages, generateId: () =>
+  assistantId, onError, onEnd, execute })`: for a model run `execute` is `({ writer }) =>
+  writer.merge(ui.pipeThrough(storeGeneratedFiles(...)))`, a transform that stores every generated `file` /
+  `reasoning-file` chunk and appends the `generate_image` images (section 6.8); image turns (section 6.8), reply
+  commands and failures before the model call write their chunks in `execute` themselves. The single `onEnd` saves
+  what was streamed. The notices of a run (`data-notice`) follow the `start` chunk, except `generated-file-dropped`,
+  which takes the place of its file.
 - Status `200`, headers `Content-Type: text/event-stream`, `x-vercel-ai-ui-message-stream: v1`,
   `Cache-Control: no-cache`, `X-Accel-Buffering: no`, `X-Request-Id`.
 - Body: SSE events `data: <UIMessageChunk JSON>\n\n`, terminated by `data: [DONE]\n\n`.
@@ -2111,10 +2205,10 @@ only for models with `vision` (images) or `pdf` capability, otherwise the part i
 |---|---|---|
 | `text` | `state: 'streaming' \| 'done'` | `Markdown.vue` (HTML escaped); final render when `done` |
 | `reasoning` | `state: 'streaming' \| 'done'` | "Thinking... Ns" row, then "Thought for Ns", collapsed unless `showThinking` |
-| `reasoning-file` | `mediaType`, `url` | file chip inside the reasoning block |
+| `reasoning-file` | `mediaType`, `url` | a file block where it occurs (a thumbnail for an image draft; never part of a gallery) |
 | `tool-<name>` | static tools (`ctx.ai.tool` / builtin tools) | tool row, see states below |
 | `dynamic-tool` | `toolName`; runtime tools (MCP tools) | same tool row (+ MCP server badge) |
-| `file` | `mediaType`, `filename?`, `url` | image thumbnail (`image/*`) or file chip; consecutive images of a reply form one gallery (generated images, ADR-028) |
+| `file` | `mediaType`, `filename?`, `url` | image thumbnail (`image/*`) or file chip; in an assistant message, image parts with no other rendered part between them form one gallery (generated images, ADR-028) |
 | `source-url` | `sourceId`, `url`, `title?` | grouped "N sources" row |
 | `source-document` | `sourceId`, `mediaType`, `title`, `filename?` | grouped "N sources" row |
 | `step-start` | - | step boundary (no visual, used by the approval helper) |
@@ -2136,9 +2230,13 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 ### 6.5 Metadata and errors
 
 - `start` carries `messageMetadata: { modelRef, startedAt }` (an image turn adds `image: { n, aspectRatio?, inputs }`);
-  `finish` carries `{ finishedAt, durationMs, reasoningMs?, usage, costUsd?, finishReason }` (an image turn adds
-  `image.revisedPrompt?`). Both merge into `message.metadata` (`MessageMetadata`). An aborted message is persisted
-  with `aborted: true`; the live client learns it from the `abort` chunk and `run.finished`.
+  `finish` carries `{ finishedAt, durationMs, reasoningMs?, usage, costUsd?, finishReason }`. Both merge into
+  `message.metadata` (`MessageMetadata`). The estimated cost of `generate_image` outputs is added to `costUsd`. An image
+  turn's `finish` keeps `image` (plus `revisedPrompt` when the provider reported one), has `usage` = `{ inputTokens,
+  outputTokens, totalTokens }` only when the provider reported token counts, `costUsd` only when it could be estimated
+  (section 4.18) and `finishReason: 'stop'`. An aborted message is persisted with `aborted: true`; the live client
+  learns it from the `abort` chunk and `run.finished`. A failed or aborted image turn is saved with its `image` metadata
+  and `finishedAt` but without files.
 - **Before streaming** (validation, `provider_not_configured`, `conflict`, `not_found`): normal JSON error
   response; `DefaultChatTransport` throws an `APICallError` (`statusCode`, `responseBody` = envelope JSON,
   `message` = the same text) that `useChat` exposes as `chat.error`.
@@ -2180,18 +2278,30 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 
 ### 6.8 Images (ADR-028)
 
-- **Image turn** (a model of `kind: 'image'`): `start` (metadata `{ modelRef, startedAt, image: { n, aspectRatio?,
-  inputs } }`, so the web shows `n` placeholder tiles at the aspect ratio) -> `start-step` -> a `message-metadata`
-  keep-alive (the same metadata) every 15 s while the provider works -> one `file` chunk per image
-  (`{ url: '/api/files/<id>', mediaType }`) -> `finish-step` -> `finish` (metadata with `usage`, `costUsd?`,
-  `image.revisedPrompt?`). A failure is an `error` chunk (the message keeps `metadata.error`); Stop is an `abort`
-  chunk (saved with `aborted: true`); resume replays the same chunks (URLs only, never bytes).
-- **Chat models with image output**: `definition.imageParams(...)` provider options are added to the call; every
-  generated `file` / `reasoning-file` chunk is stored first and re-sent with its `/api/files/<id>` URL (provider
-  metadata kept); anything else is dropped with an inline `data-notice` (`generated-file-dropped`).
-- **`generate_image`**: after the final `tool-output-available` chunk of the tool (from `core-tools`, output parsing with
-  `generateImageToolOutputSchema`) one `file` chunk per image follows, and the tool's `costUsd` is added to the cost
-  of the message.
+- **Image turn** (a model of `kind: 'image'`), one `ImageService.generate` call:
+  1. `start` (metadata `{ modelRef, startedAt, image: { n, aspectRatio?, inputs } }`, so the web shows `n` placeholder
+     tiles at the aspect ratio), followed by the run's notices (e.g. `attachments-unsupported`);
+  2. `start-step`;
+  3. a `message-metadata` keep-alive with the same start metadata every 15 s while the provider works (proxies close
+     idle connections);
+  4. one `file` chunk per stored image (`{ url: '/api/files/<id>', mediaType }`), then one inline
+     `generated-file-dropped` notice when some images were refused (the reply may hold only that notice);
+  5. `finish-step`;
+  6. `finish` (`finishReason: 'stop'`, metadata with `usage?`, `costUsd?`, `image.revisedPrompt?`, section 6.5).
+
+  A failure is an `error` chunk (the envelope; the message keeps `metadata.error`); Stop is an `abort` chunk (saved with
+  `aborted: true`); both keep `metadata.image` and `finishedAt` but no files. Resume replays the same chunks (the images
+  are stored before they are streamed, so the buffer holds URLs only, never bytes); a regenerate adds a version.
+- **Chat models with image output**: the `definition.imageParams({ n: 1, aspectRatio, inputs: 0 }, model)` provider
+  options are deep-merged under the reasoning options of the call; every generated `file` / `reasoning-file` chunk with
+  a `data:` URL is stored first and re-sent with its `/api/files/<id>` URL (provider metadata such as Gemini thought
+  signatures kept); anything else is replaced by an inline `data-notice` (`generated-file-dropped`). No `data:` URL is
+  ever streamed or saved.
+- **`generate_image`**: right after the final `tool-output-available` chunk of the tool (from `core-tools`, output
+  parsing with `generateImageToolOutputSchema`, every URL naming its stored image) one `file` chunk per image follows,
+  also on an approval continuation, and the tool's `costUsd` is added to the cost of the message.
+- **File names**: a UI `file` chunk carries no name, so only the saved `file` parts of generated images get `filename`
+  (`image-<n>.<ext>`, or the name of an identical file stored earlier: generated files are deduplicated by content).
 - `imageOptions` (`ChatRequestBody`): `n`, `aspectRatio`, `editPrevious` for image models; `aspectRatio` only for chat
   models with image output; the web sends it only for image-capable models (`400` otherwise, section 5.10).
 
@@ -2218,7 +2328,7 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 | Event | Emitted when | `data` | Web reaction |
 |---|---|---|---|
 | `chat.created` | `POST /chats`, the first `POST /chat` for a new chat id, or `POST /data/import` (one per imported or copied chat) | `ChatSummary` | chats store: insert |
-| `chat.updated` | title generated or renamed, pin/archive/model/settings change, a message persisted, a branch switch (`POST /chats/:id/branch`), a version deleted (`DELETE /chats/:id/messages/:messageId`) | `ChatUpdatedData` (`ChatSummary` + `activeLeafId`) | chats store: patch and re-sort (without `activeLeafId`); an idle open chat whose shown path does not end at `activeLeafId` refetches it |
+| `chat.updated` | title generated or renamed, pin/archive/model/settings change, a message persisted, a branch switch (`POST /chats/:id/branch`), a version deleted (`DELETE /chats/:id/messages/:messageId`, also off the active path) | `ChatUpdatedData` (`ChatSummary` + `activeLeafId`) | chats store: patch and re-sort (without `activeLeafId`); an idle open chat whose shown path does not end at `activeLeafId` refetches it (bursts coalesce into one refetch; a `null` or unknown leaf triggers one refetch, then waits for a different leaf) |
 | `chat.deleted` | `DELETE /chats/:id`, or `POST /data/delete` (one per deleted chat) | `{ id }` | chats store: remove; leave `/chat/:id` if open |
 | `run.started` | a run acquired the chat | `RunStartedData` | running dot |
 | `run.finished` | run completed, aborted or failed; sent after the reply and the active leaf are stored | `RunFinishedData` | clear running; amber dot when `awaitingApproval` |
@@ -2230,8 +2340,9 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 Phases 5 and 6 add no event types: bulk import and delete-all report every chat through `chat.created` /
 `chat.deleted`, a version switch or delete through `chat.updated`; share link actions, dictation and read-aloud emit
 nothing (the owner UI refetches). Since Phase 6 `chat.updated` carries the active leaf (`ChatUpdatedData`, ADR-030),
-so another tab that shows the chat follows a version switch; deleting a version that is not on the active path does
-not move the leaf, so other tabs show stale version counters until they refetch the chat.
+so another tab that shows the chat follows a version switch; deleting a version that is not on the active path emits
+`chat.updated` with the unchanged leaf, so other tabs do not refetch and show stale version counters until they reload
+the chat.
 
 ## 8. Route key index
 

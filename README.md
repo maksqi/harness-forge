@@ -7,55 +7,80 @@ waits for your approval. A **Plugins** tab adds LLM providers, models, tools, MC
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **Status:** v1.1. On top of v1 it adds conversation branching, backup / restore / delete-all in Settings -> Data,
-> read-only share links, trusted reverse proxies (`HF_TRUST_PROXY`) and an opt-in live provider suite
-> (`pnpm test:live`). Progress lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
->
-> **In progress (v1.2):** image generation with your own providers (image models in the composer, chat models that
-> return images, and a `generate_image` tool), voice (dictation into the composer and reading replies aloud, both
-> opt-in in Settings -> Media), and better message versions (the last shown version is remembered, versions can be
-> deleted, and other open tabs follow a switch). Plan and status:
-> [`docs/phases/phase-6-v1-2.md`](docs/phases/phase-6-v1-2.md). The feature list below is updated when v1.2 ships.
+> **Status:** v1.2. On top of v1.1 it adds image generation and voice (dictation and read-aloud) through your own
+> providers, message versions that remember the path shown under them, can be deleted and follow a switch in other open
+> tabs, editing the attachments of a sent message, one password prompt for every sensitive action, and 40 px touch
+> targets on tablets. v1.1 added conversation branching, backup / restore / delete-all, read-only share links, trusted
+> reverse proxies and an opt-in live provider suite. Progress lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-![Chat with a code block, a reasoning row and a tool approval card (dark theme)](docs/assets/screenshots/chat-dark.png)
+![A chat reply with markdown, a table and a highlighted code block; the composer shows the model picker and the microphone button (dark theme)](docs/assets/screenshots/chat-dark.png)
 
 | Plugins | Provider wizard |
 |---|---|
-| ![The Plugins tab with the builtin plugins and a declarative provider](docs/assets/screenshots/plugins-dark.png) | ![The provider wizard, API step, with the LM Studio template](docs/assets/screenshots/provider-wizard-dark.png) |
+| ![The Plugins tab with the builtin plugins; Core tools lists current_time, web_fetch and generate_image](docs/assets/screenshots/plugins-dark.png) | ![The provider wizard, API step, with the LM Studio template](docs/assets/screenshots/provider-wizard-dark.png) |
 | **Settings -> Providers** | **Light theme** |
-| ![Settings, providers with brand icons and status](docs/assets/screenshots/settings-dark.png) | ![The chat in the light theme](docs/assets/screenshots/chat-light.png) |
+| ![Settings, providers with brand icons and status; the settings menu lists Media after Models](docs/assets/screenshots/settings-dark.png) | ![A tool call waiting for approval, in the light theme](docs/assets/screenshots/chat-light.png) |
 
 ## Features
 
 - **Chat**:
   - Streaming markdown with highlighted code, "Thinking" rows for reasoning, and collapsible tool-call rows.
-  - Inline approval cards for tool calls, file attachments, and edit, regenerate, copy and stop.
+  - Inline approval cards for tool calls, file attachments, and edit, regenerate, copy and stop. Editing a message
+    can also remove its attachments or add new ones.
   - Conversation branching: editing a message or regenerating a reply keeps the old version, and a `‹ 2/3 ›`
-    switcher moves between versions. The chosen version stays selected after a reload.
+    switcher moves between versions. Each message remembers the version last shown under it, so switching back
+    restores that whole path; an unwanted version can be deleted (with everything after it); other open tabs follow a
+    switch.
   - Automatic chat titles, per-message token usage and cost, and a context-usage ring.
+- **Images** (with your own keys):
+  - Pick an image model (OpenAI GPT Image, xAI Grok Imagine) in the composer and describe a picture: 1 to 4 images
+    per turn, an aspect ratio (Auto, 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16), and follow-ups such as "make it blue" that
+    edit the previous image.
+  - Chat models with image output (Gemini image models, OpenRouter models that return images) answer with text and
+    pictures.
+  - The builtin `generate_image` tool lets a chat model create an image with the image model chosen in
+    Settings -> Media, after you approve the call.
+  - Every image is stored as a file on your server and shown in a gallery with a lightbox and a download link; image
+    costs are labeled as estimates.
+- **Voice** (opt-in in Settings -> Media):
+  - Dictation: the microphone button (or Alt+V) records, and the transcript from your speech-to-text model (OpenAI,
+    Groq Whisper, Google, Mistral, xAI) is inserted at the cursor. Esc cancels. The microphone needs HTTPS or
+    `localhost` (see [Security](#security)).
+  - Read aloud: a button under a finished reply reads it with your text-to-speech model (OpenAI, Google, Mistral,
+    xAI), in the voice and at the speed you choose; code blocks, tables and formulas are announced as omitted instead
+    of being read out.
+  - Recordings and the text read aloud pass through the server to the provider you picked and are never stored or
+    logged.
 - **Your data** (Settings -> Data): back up every chat, with every version and attachment, to one zip file; restore it
   here or on another server (existing chats are skipped or copied); or delete all chats at once.
 - **Share links**: publish a read-only snapshot of a chat at an unguessable link, choose whether reasoning, tool
-  details and attachments are included, set an expiry date, update the snapshot or revoke the link at any time.
+  details and files and images are included, set an expiry date, update the snapshot or revoke the link at any time.
 - **Composer**:
-  - A model picker with provider icons and capability badges.
-  - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode (Ask, Auto, Off) for tools.
+  - A model picker with provider icons and capability badges, and an "Image models" group.
+  - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode (Ask, Auto, Off) for tools; image
+    options (count, aspect ratio, edit the previous image) for image models.
   - Slash commands: `/explain`, `/review`, `/fix`, `/translate`, `/proofread` and more, plus commands from plugins.
+  - A microphone button for dictation.
 - **Sidebar and navigation**: a Chat | Plugins switch, chats grouped by date with live status dots (running, needs
-  approval, unread), a Mod+K command palette, keyboard shortcuts, and a Light / Dark / System theme toggle.
+  approval, unread), a Mod+K command palette, keyboard shortcuts, a Light / Dark / System theme toggle, and 40 px
+  touch targets in the collapsed icon rail on tablets.
 - **Providers and models**:
   - 13 builtin BYOK providers. Keys are encrypted at rest, shown only as masked hints, and can fall back to
     environment variables.
-  - Live model lists enriched with [models.dev](https://models.dev) metadata (limits, capabilities, prices).
-  - Favorites, hidden models and custom model ids.
+  - Live model lists enriched with [models.dev](https://models.dev) metadata (limits, capabilities, prices), plus the
+    image, speech-to-text and text-to-speech models of the same providers.
+  - Favorites, hidden models and custom model ids (chat, image, speech-to-text or text-to-speech).
   - An opt-in live test suite (`pnpm test:live`, paid) that checks every builtin provider you have a key for against
-    the real API: key test, model listing, streaming, reasoning, a tool call and a rejected bad key.
+    the real API: key test, model listing, streaming, reasoning, a tool call and a rejected bad key; `HF_LIVE_MEDIA=1`
+    adds image and voice checks.
 - **Plugins**:
   - Declarative provider plugins, built with a five-step wizard or written as `plugin.json`.
   - Code plugins (tools, providers, commands, hooks, MCP servers) from templates, edited and rebuilt in the browser.
+    Plugin API 1.1.0 lets a code provider add image, speech-to-text and text-to-speech models, and a code tool
+    generate images.
   - Install from a zip, npm, a URL with an integrity hash, or a local folder, with an explicit trust step for code.
-- **Tools and MCP**: MCP servers over stdio, Streamable HTTP and SSE. The builtin tools are `current_time` and
-  `web_fetch` (SSRF-guarded). Every tool has an approval policy and a per-tool override.
+- **Tools and MCP**: MCP servers over stdio, Streamable HTTP and SSE. The builtin tools are `current_time`,
+  `web_fetch` (SSRF-guarded) and `generate_image`. Every tool has an approval policy and a per-tool override.
 - **Self-hosting**: SQLite storage, one port, an optional password, a loopback-only bind unless you secure it,
   trusted reverse proxies (`HF_TRUST_PROXY`) so rate limits and Secure cookies see the real clients, and a Docker image
   with a `/data` volume.
@@ -65,23 +90,23 @@ desktop app, and it starts in dark mode.
 | Provider | Id | Key environment variable | Notes |
 |---|---|---|---|
 | Anthropic (Claude) | `anthropic` | `ANTHROPIC_API_KEY` | |
-| OpenAI (ChatGPT) | `openai` | `OPENAI_API_KEY` | Responses API |
-| Google (Gemini) | `google` | `GOOGLE_GENERATIVE_AI_API_KEY` (`GEMINI_API_KEY`, `GOOGLE_API_KEY`) | |
-| xAI (Grok) | `xai` | `XAI_API_KEY` | |
+| OpenAI (ChatGPT) | `openai` | `OPENAI_API_KEY` | Responses API; image models (GPT Image), speech to text, text to speech |
+| Google (Gemini) | `google` | `GOOGLE_GENERATIVE_AI_API_KEY` (`GEMINI_API_KEY`, `GOOGLE_API_KEY`) | image output from the Gemini image models, speech to text, text to speech |
+| xAI (Grok) | `xai` | `XAI_API_KEY` | image model (Grok Imagine), speech to text, text to speech |
 | DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | |
 | Moonshot AI (Kimi) | `moonshotai` | `MOONSHOT_API_KEY` | |
 | Alibaba (Qwen) | `alibaba` | `ALIBABA_API_KEY` (`DASHSCOPE_API_KEY`) | international endpoint by default |
 | Z.ai (GLM) | `zai` | `ZAI_API_KEY` (`ZHIPU_API_KEY`) | Coding Plan keys need the Coding Plan base URL |
 | MiniMax | `minimax` | `MINIMAX_API_KEY` | Anthropic-compatible endpoint |
-| Mistral | `mistral` | `MISTRAL_API_KEY` | |
-| Groq | `groq` | `GROQ_API_KEY` | |
-| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | hundreds of models behind one key, with provider-reported cost |
+| Mistral | `mistral` | `MISTRAL_API_KEY` | speech to text and text to speech (Voxtral) |
+| Groq | `groq` | `GROQ_API_KEY` | speech to text (Whisper) |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | hundreds of models behind one key, with provider-reported cost; image output from the models that return images |
 | Ollama (local) | `ollama` | none | base URL `http://localhost:11434/v1`, remote hosts allowed |
 
 Any OpenAI-, Anthropic- or Gemini-compatible endpoint (LM Studio, vLLM, llama.cpp, LiteLLM, Together, Fireworks, …)
 can be added as a declarative provider plugin, without code. Model references have the form `providerId:modelId`, for
-example `anthropic:claude-sonnet-5` or `ollama:llama3:8b`. Base URLs, reasoning mappings, seed models and icons are in
-[`docs/PROVIDERS.md`](docs/PROVIDERS.md).
+example `anthropic:claude-sonnet-5` or `ollama:llama3:8b`. Base URLs, reasoning mappings, seed models, image and voice
+models (with their voices) and icons are in [`docs/PROVIDERS.md`](docs/PROVIDERS.md).
 
 ## Quick start
 
@@ -95,7 +120,8 @@ pnpm dev            # server on :8787 (tsx watch) + web on :3000 (nuxt dev, prox
 ```
 
 Open http://localhost:3000. Go to **Settings** -> **Providers**, add a key, press **Test**, then start a chat.
-`HF_MOCK_PROVIDER=1 pnpm dev` adds a keyless `mock` provider for trying the UI.
+`HF_MOCK_PROVIDER=1 pnpm dev` adds a keyless `mock` provider for trying the UI, with mock image, speech-to-text and
+text-to-speech models (pick them in Settings -> Media).
 
 ### Production
 
@@ -217,17 +243,21 @@ harness-forge is built for **one user** on their own machine or server.
   logins lock everyone out for up to 15 minutes. `X-Forwarded-Host` is never used. Examples:
   [Behind a reverse proxy](#behind-a-reverse-proxy).
 - **Sessions and CSRF.** An HttpOnly, SameSite=Strict HMAC session cookie; state-changing requests must come from
-  the same origin. With a password set, installing or trusting code plugins, building them, changing the password,
-  creating or updating share links and deleting all data require a login within the last 10 minutes.
+  the same origin. With a password set, creating, installing, trusting, editing, building or reloading code plugins,
+  adding stdio MCP servers, changing the password, creating or updating share links and deleting all data require a
+  login within the last 10 minutes; when the last login is older, the app asks for the password once and then carries
+  out the action.
 - **Share links.** A link shows a sanitized snapshot of one conversation path: no instructions, errors, usage, costs
-  or approvals; reasoning, tool details and attachments only when you include them. Its token is an HMAC that is never
-  stored and never logged; revoking the link or changing the master key ends it, and every response carries
+  or approvals; reasoning, tool details and files and images only when you include them. Its token is an HMAC that is
+  never stored and never logged; revoking the link or changing the master key ends it, and every response carries
   `X-Robots-Tag: noindex, nofollow`.
 - **Backups.** The Settings -> Data zip never contains API keys, the password, plugins or MCP servers.
-- **Microphone (v1.2).** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
-  `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled; use
-  the TLS reverse proxy below. Recordings and the text that is read aloud go only to the provider you pick in
-  Settings -> Media and are never stored or logged.
+- **Microphone and media.** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
+  `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled ("Voice
+  input needs HTTPS or localhost"); use the TLS reverse proxy below. The page may use only its own microphone
+  (`Permissions-Policy: microphone=(self)`, camera and location off). Recordings and the text that is read aloud go
+  only to the provider you pick in Settings -> Media and are never stored or logged; generated images are stored as
+  files like attachments, and a `data:` URL is never saved in a chat.
 - **Secrets.** Provider keys and plugin secrets are encrypted with AES-256-GCM under a master key from
   `HF_MASTER_KEY` or `data/secret.key`. The API never returns a secret, and logs are redacted.
 - **Plugins.** Code plugins and stdio MCP servers run **with the full rights of the server process**. They load only
@@ -245,7 +275,7 @@ Terminate TLS at a proxy, keep harness-forge on `127.0.0.1` (or on an internal n
 trust with `HF_TRUST_PROXY`. The proxy must pass the original `Host` header (harness-forge never reads
 `X-Forwarded-Host`, which a DNS-rebinding page could forge), set `X-Forwarded-For` and `X-Forwarded-Proto`, accept
 request bodies of at least 256 MB (backup imports) and stream responses without buffering. HTTPS through the proxy is
-also what enables the microphone for dictation (v1.2) on other machines.
+also what enables the microphone for dictation on other machines.
 
 `HF_TRUST_PROXY` takes `loopback`, `private`, exact IP addresses and CIDR ranges, comma separated (for example
 `HF_TRUST_PROXY=10.0.0.2,192.168.1.0/24`). Only a request whose TCP peer is in that list may set `X-Forwarded-For` and
@@ -331,7 +361,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | [`docs/UI.md`](docs/UI.md) | layout, design tokens, components, routes, shortcuts, test ids |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | phases, tasks and progress |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture decision records and the contract seed |
-| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md) (in progress) |
+| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md) |
 | [`AGENT.md`](AGENT.md) | rules for AI agents working on this repository |
 
 ## Development
@@ -348,7 +378,7 @@ on SQLite), and the TypeScript-only packages `packages/shared` (schemas, DTOs, r
 | `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` |
 | `pnpm test` | Vitest (all projects); `pnpm -F <pkg> test` for one package; `pnpm exec vitest run --project examples` for the example plugins |
 | `pnpm test:live` | opt-in live provider suite: **paid** calls with the provider keys in your environment or `.env` (`ANTHROPIC_API_KEY=… pnpm test:live`); never part of `pnpm test` ([details](docs/PROVIDERS.md#12-live-provider-suite)) |
-| `pnpm test:e2e` | Playwright (projects `chromium` and `mobile`) |
+| `pnpm test:e2e` | Playwright (projects `chromium`, `mobile` and `tablet`) |
 | `pnpm lint` | ESLint |
 | `pnpm typecheck` | `tsc --noEmit` for packages and server + `nuxi typecheck` for web |
 | `pnpm check:english` | fails on any Cyrillic character in the repository |

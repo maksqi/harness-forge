@@ -19,6 +19,11 @@ on:
         description: Budget of the run in USD (HF_LIVE_MAX_COST_USD)
         required: false
         default: '0.50'
+      media:
+        description: Also run the image and voice checks (HF_LIVE_MEDIA)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -47,6 +52,7 @@ jobs:
         env:
           HF_LIVE_PROVIDERS: ${{ inputs.providers }}
           HF_LIVE_MAX_COST_USD: ${{ inputs.max-cost-usd }}
+          HF_LIVE_MEDIA: ${{ inputs.media && '1' || '' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}

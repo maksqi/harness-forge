@@ -10,6 +10,7 @@
 // Cost and safety: a `chat.params` hook caps the output (256 tokens, 2048 when the model reasons) and `maxSteps` (3);
 // every tool except `current_time` is disabled; the paid checks (3-5) are skipped once the budget is spent; a rate limit
 // (`rate_limited`, HTTP 429) is a SKIP, not a FAIL. Chat requests carry no `parentId`: each check starts its own chat.
+// The media checks (`HF_LIVE_MEDIA=1`) live in `./media.ts` and reuse the stream reading and the results below.
 import type { HookMap } from '@harness-forge/plugin-sdk'
 import type {
   CatalogModel,
@@ -17,6 +18,7 @@ import type {
   ChatRequestBody,
   HarnessErrorInit,
   HarnessUIMessage,
+  ImageOptions,
   MessageMetadata,
   ReasoningEffort,
   ToolMode,
@@ -61,7 +63,7 @@ export const LIVE_STREAM_TIMEOUT_MS = 120_000
 /** Longest wait for a finished run to be persisted and released. */
 const RELEASE_TIMEOUT_MS = 20_000
 /** Lowest priority: the caps run after every other `chat.params` handler, so they always win. */
-const CAPS_PRIORITY = -1_000_000
+export const CAPS_PRIORITY = -1_000_000
 /** Efforts tried by the reasoning check, cheapest first (`off` and `auto` are not reasoning requests). */
 const REASONING_EFFORTS: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'max']
 
@@ -104,6 +106,11 @@ export function thrownResult(error: unknown): LiveCheckResult {
   return { status: 'FAIL', detail: error instanceof Error ? `${error.name}: ${error.message}` : String(error) }
 }
 
+/** The SKIP of a paid check once `HF_LIVE_MAX_COST_USD` is spent. */
+export function budgetSpentResult(budget: LiveBudget): LiveCheckResult {
+  return { status: 'SKIP', detail: `the budget of ${formatUsd(budget.limitUsd)} is spent (HF_LIVE_MAX_COST_USD)` }
+}
+
 // ---------- the chat stream ----------
 
 /** What a `POST /api/chat` request delivered. */
@@ -120,6 +127,10 @@ export interface ChatStreamResult {
   toolOutputs: string[]
   /** `tool-input-error` / `tool-output-error` texts. */
   toolErrors: string[]
+  /** `file` chunks (generated images: `/api/files/<id>` URLs). */
+  files: { url: string, mediaType: string }[]
+  /** Codes of the `data-notice` chunks (e.g. `generated-file-dropped`). */
+  notices: string[]
   /** Metadata of the `finish` chunk (usage, cost, finish reason). */
   metadata: MessageMetadata | null
   finished: boolean
@@ -128,7 +139,7 @@ export interface ChatStreamResult {
 }
 
 export function emptyStreamResult(): ChatStreamResult {
-  return { error: null, messageId: null, text: '', reasoning: '', toolCalls: [], toolOutputs: [], toolErrors: [], metadata: null, finished: false, timedOut: false }
+  return { error: null, messageId: null, text: '', reasoning: '', toolCalls: [], toolOutputs: [], toolErrors: [], files: [], notices: [], metadata: null, finished: false, timedOut: false }
 }
 
 /** One SSE event block (`data: <json>`) as a UI message chunk; null for `[DONE]`, comments and invalid JSON. */
@@ -184,6 +195,14 @@ export function collectChunks(chunks: readonly UIMessageChunk[], result: ChatStr
       case 'tool-output-error':
         result.toolErrors.push(chunk.errorText)
         break
+      case 'file':
+        result.files.push({ url: chunk.url, mediaType: chunk.mediaType })
+        break
+      case 'data-notice': {
+        const code = (chunk.data as { code?: unknown } | null)?.code
+        result.notices.push(typeof code === 'string' ? code : 'unknown')
+        break
+      }
       case 'error':
         result.error ??= streamError(chunk.errorText)
         break
@@ -244,8 +263,8 @@ async function readChunks(response: Response, timeoutMs: number): Promise<{ chun
   }
 }
 
-async function envelopeOf(response: Response): Promise<HarnessErrorInit> {
-  const text = await response.text()
+/** The error envelope in a response body, else an `internal_error` naming the status. */
+export function errorEnvelope(text: string, status: number): HarnessErrorInit {
   try {
     const parsed = harnessErrorEnvelopeSchema.safeParse(JSON.parse(text))
     if (parsed.success)
@@ -254,7 +273,11 @@ async function envelopeOf(response: Response): Promise<HarnessErrorInit> {
   catch {
     // Not an error envelope.
   }
-  return { code: 'internal_error', message: `HTTP ${response.status} without an error envelope` }
+  return { code: 'internal_error', message: `HTTP ${status} without an error envelope` }
+}
+
+async function envelopeOf(response: Response): Promise<HarnessErrorInit> {
+  return errorEnvelope(await response.text(), response.status)
 }
 
 /** Waits until the chat's run is released (its message persisted); false after `timeoutMs`. */
@@ -274,6 +297,8 @@ export interface LiveChatRequest {
   modelRef: string
   reasoningEffort: ReasoningEffort
   toolMode: ToolMode
+  /** Image models and chat models with image output only (the media checks). */
+  imageOptions?: ImageOptions
 }
 
 /** `POST /api/chat` with a new user message (no `parentId`), read to the end; returns once the run is released. */
@@ -285,6 +310,7 @@ export async function sendChat(t: TestApp, request: LiveChatRequest, timeoutMs =
     modelRef: request.modelRef,
     reasoningEffort: request.reasoningEffort,
     toolMode: request.toolMode,
+    ...(request.imageOptions === undefined ? {} : { imageOptions: request.imageOptions }),
   }
   const response = await t.request('/api/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
   const result = emptyStreamResult()
@@ -307,7 +333,8 @@ function textOf(message: HarnessUIMessage | undefined): string {
   return message?.parts.flatMap(part => (part.type === 'text' ? [part.text] : [])).join('') ?? ''
 }
 
-function assistantOf(detail: ChatDetail, messageId: string | null): HarnessUIMessage | undefined {
+/** The stored reply of a stream (the assistant message with the `start` chunk's id). */
+export function assistantOf(detail: ChatDetail, messageId: string | null): HarnessUIMessage | undefined {
   return detail.messages.find(message => message.role === 'assistant' && message.id === messageId)
 }
 
@@ -316,7 +343,7 @@ function finishReason(stream: ChatStreamResult): string {
 }
 
 /** A failed or unfinished stream, else null. */
-function streamProblem(stream: ChatStreamResult): LiveCheckResult | null {
+export function streamProblem(stream: ChatStreamResult): LiveCheckResult | null {
   if (stream.error !== null)
     return errorResult(stream.error)
   if (stream.timedOut)
@@ -503,7 +530,7 @@ export async function runProviderChecks(t: TestApp, target: LiveTarget, budget: 
       return
     }
     if (budgetExhausted(budget)) {
-      record(id, { status: 'SKIP', detail: `the budget of ${formatUsd(budget.limitUsd)} is spent (HF_LIVE_MAX_COST_USD)` })
+      record(id, budgetSpentResult(budget))
       return
     }
     await guarded(id, async () => {

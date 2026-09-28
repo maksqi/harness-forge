@@ -93,8 +93,8 @@ export const openrouterProvider: ProviderDefinition = {
       models.push(modelInfo({
         id,
         name: stringOf(record.name),
-        // A chat model even when its id says "image" (e.g. `google/gemini-2.5-flash-image`): an explicit kind wins over
-        // the id fallback of the catalog's `classify()`.
+        // A chat model even when its id says "image" (e.g. `google/gemini-2.5-flash-image`): an explicit kind always
+        // wins over the catalog's `classify()`.
         kind: imageOutput === true ? 'chat' : undefined,
         contextWindow: positiveIntOf(record.context_length),
         maxOutputTokens: positiveIntOf(recordOf(record.top_provider)?.max_completion_tokens),

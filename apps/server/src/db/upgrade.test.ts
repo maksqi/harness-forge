@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { chatDetailSchema, chatSummarySchema, cursorPageSchema } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
+import { LISTING_TTL_MS } from '../catalog/index.ts'
 import { buildTree, latestLeafUnder } from '../services/chats/tree.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { openDatabase } from './client.ts'
@@ -596,8 +597,9 @@ describe('upgrade of a v1.1 database through migration 0002 (remembered versions
 })
 
 // Migration 0003 (Phase 6, coordinator K5): v1.2 changes what a provider listing holds (media ids with their kinds,
-// image output from the listing, new builtin seed models), so every listing cached by v1.1 is marked stale once and
-// refreshed at the next start; the cached models themselves are kept (a failed refresh keeps the last good listing).
+// image output from the listing, new builtin seed models), so every successful listing cached by v1.1 is aged by one
+// listing TTL: the catalog still serves it (its `fetchedAt` is not null) and refreshes it at the next start because it
+// is stale; a failed refresh keeps it. A row that never fetched successfully (`fetched_at` null) is left alone.
 const REFRESH = JOURNAL.entries.find(entry => entry.tag.startsWith('0003_'))
 
 /** A migrations folder holding 0000 – 0002 (the schema of a data directory that ran a v1.2 pre-release). */
@@ -618,23 +620,32 @@ describe('migration 0003 (cached model listings marked stale)', () => {
       throw new Error('migration 0003 is missing from the journal')
     const sql = readFileSync(join(REAL_FOLDER, `${REFRESH.tag}.sql`), 'utf8')
     const statements = sql.split('--> statement-breakpoint').map(statement => statement.replace(/^--.*$/gm, '').trim()).filter(Boolean)
-    expect(statements).toEqual(['UPDATE `model_cache` SET `fetched_at` = NULL;'])
+    expect(statements).toEqual([`UPDATE \`model_cache\` SET \`fetched_at\` = \`fetched_at\` - ${LISTING_TTL_MS} WHERE \`fetched_at\` IS NOT NULL;`])
     expect(JOURNAL.entries.slice(0, 4)).toEqual([INITIAL, TREE, REMEMBERED, REFRESH])
   })
 
-  it('marks every cached listing stale and keeps its models', async () => {
+  it('ages every successful cached listing by one TTL, keeps its models, leaves never-fetched rows alone', async () => {
     const database = await open(join(tempDir(), 'harness.db'))
     await migrateDatabase(database.db, { migrationsFolder: beforeRefreshFolder() })
     const models = JSON.stringify([{ id: 'echo', name: 'Echo' }])
+    const fetchedAt = 1_790_000_000_000
     await database.client.execute({
       sql: 'INSERT INTO model_cache (provider_id, models, fetched_at, attempted_at, error) VALUES (?, ?, ?, ?, NULL)',
-      args: ['mock', models, 1_790_000_000_000, 1_790_000_000_000],
+      args: ['mock', models, fetchedAt, fetchedAt],
+    })
+    // A provider whose first listing failed: no successful fetch yet.
+    await database.client.execute({
+      sql: 'INSERT INTO model_cache (provider_id, models, fetched_at, attempted_at, error) VALUES (?, ?, NULL, ?, ?)',
+      args: ['ollama', '[]', fetchedAt, '{"code":"provider_unreachable","message":"down"}'],
     })
     await migrateDatabase(database.db)
-    const rows = (await database.client.execute('SELECT provider_id, models, fetched_at FROM model_cache')).rows
-    expect(rows).toHaveLength(1)
-    expect(rows[0]?.provider_id).toBe('mock')
-    expect(rows[0]?.models).toBe(models)
-    expect(rows[0]?.fetched_at).toBeNull()
+    const rows = (await database.client.execute('SELECT provider_id, models, fetched_at FROM model_cache ORDER BY provider_id')).rows
+    expect(rows.map(row => [row.provider_id, row.models, row.fetched_at])).toEqual([
+      ['mock', models, fetchedAt - LISTING_TTL_MS],
+      ['ollama', '[]', null],
+    ])
+    // The catalog still serves the aged listing (it only skips listings without a successful fetch) and finds it stale.
+    const aged = Number(rows[0]?.fetched_at)
+    expect(Date.now() - aged).toBeGreaterThanOrEqual(LISTING_TTL_MS)
   })
 })
