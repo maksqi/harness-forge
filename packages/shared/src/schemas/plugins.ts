@@ -196,6 +196,8 @@ const installOptionsShape = {
   trust: z.boolean().optional(),
   /** Default true. */
   enable: z.boolean().optional(),
+  /** The hash the user reviewed in the inspect preview; the install fails with `conflict` (`stale`) when it differs. */
+  sha256: sha256HexSchema.optional(),
 }
 
 /** JSON body of `POST /plugins/install` (multipart: part `file` + `PluginInstallForm`). */
@@ -213,6 +215,8 @@ export type PluginInstallBody = z.infer<typeof pluginInstallBodySchema>
 export const pluginInstallFormSchema = z.object({
   trust: z.enum(['true', 'false']).optional(),
   enable: z.enum(['true', 'false']).optional(),
+  /** See `sha256` of the JSON body. */
+  sha256: sha256HexSchema.optional(),
 })
 export type PluginInstallForm = z.infer<typeof pluginInstallFormSchema>
 
@@ -221,6 +225,8 @@ export const pluginInspectionSchema = z.object({
   kind: pluginKindSchema,
   /** `zip`, `npm`, `url`, `link` or `copy`. */
   source: pluginSourceSchema,
+  /** Resolved source reference shown in "I trust <source>" (e.g. `name@1.2.3` for npm, the URL, the folder path). */
+  sourceRef: z.string().optional(),
   /** The hash that trust pins. */
   sha256: sha256HexSchema,
   /** Declared in the manifest (code plugins may register more at runtime). */
@@ -348,7 +354,8 @@ export type DraftTestResult = z.infer<typeof draftTestResultSchema>
 export const scaffoldRequestSchema = z.strictObject({
   /** Free, not reserved (a reserved id is answered with 403). */
   id: pluginIdSchema,
-  name: z.string().trim().min(1).max(100),
+  // Same bound as the manifest `name` (64); no control characters.
+  name: z.string().trim().min(1).max(64).regex(/^\P{Cc}*$/u, 'Control characters are not allowed.'),
   template: pluginTemplateIdSchema,
   /** `js`: `index.mjs` with JSDoc types; `ts`: `index.ts` compiled by the host. */
   language: z.enum(['js', 'ts']).optional(),

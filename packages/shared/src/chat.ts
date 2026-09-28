@@ -65,7 +65,7 @@ export const messageMetadataSchema = z.object({
 export type MessageMetadata = z.infer<typeof messageMetadataSchema>
 
 export const noticeLevelSchema = z.enum(['info', 'warning'])
-export const noticeCodeSchema = z.enum(['context-trimmed', 'approvals-superseded', 'tools-unsupported'])
+export const noticeCodeSchema = z.enum(['context-trimmed', 'approvals-superseded', 'tools-unsupported', 'attachments-unsupported'])
 export type NoticeCode = z.infer<typeof noticeCodeSchema>
 
 /** Data of `data-notice` parts. */

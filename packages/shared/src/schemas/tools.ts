@@ -67,7 +67,7 @@ export type McpTransportInput = z.infer<typeof mcpTransportInputSchema>
 /** Body of `POST /mcp`. `policy` defaults to `ask`, `enabled` to true. */
 export const mcpServerInputSchema = z.strictObject({
   id: mcpServerIdSchema,
-  name: z.string().trim().min(1).max(100),
+  name: z.string().trim().min(1).max(64),
   transport: mcpTransportInputSchema,
   /** Per-tool MCP hints still apply. */
   policy: toolPolicySchema.optional(),
@@ -97,7 +97,7 @@ export type McpTransportUpdate = z.infer<typeof mcpTransportUpdateSchema>
 /** Body of `PATCH /mcp/:id`: at least one key. */
 export const mcpServerUpdateSchema = z
   .strictObject({
-    name: z.string().trim().min(1).max(100).optional(),
+    name: z.string().trim().min(1).max(64).optional(),
     policy: toolPolicySchema.optional(),
     enabled: z.boolean().optional(),
     /** Replaces the transport. */

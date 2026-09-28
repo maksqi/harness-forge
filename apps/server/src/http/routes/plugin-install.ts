@@ -1,19 +1,168 @@
-// Plugin install / trust / export routes (API.md 5.16) - Phase 0 stubs (501). Owner: W3.2 (W3.2-T6, T7). Keep the
-// export name `createPluginInstallRoutes`. `inspect` and `install` accept JSON (`pluginInspectBodySchema` /
-// `pluginInstallBodySchema`) or multipart (part `file` + `pluginInstallFormSchema`), so their bodies are validated by
-// the implementation, not here. `pluginInstall.trust` is fresh (middleware); `install` of a plugin that requires trust
-// is fresh through `PluginInstallOptions.authorize`.
+// Plugin install / trust / export routes (API.md 5.16). Owner: W3.2 (W3.2-T6, T7).
+//
+// `inspect` and `install` accept JSON (`pluginInspectBodySchema` / `pluginInstallBodySchema`) or multipart (the zip in
+// the part `file`; `install` also takes the `pluginInstallFormSchema` fields), so their bodies are validated here, not
+// by middleware (the body-limit middleware already capped the size and checked the content type).
+// Fresh auth (ADR-017): `pluginInstall.trust` is `fresh` in the route table (middleware) and is checked again here;
+// installing a plugin that requires trust (code, or a stdio MCP server) calls `requireFreshAuth` through
+// `PluginInstallOptions.authorize`, after the package was validated and before anything is committed.
+import type { PluginInstallInput } from '../../plugins/types.ts'
 import type { AppDeps } from '../../types.ts'
-import type { AppEnv } from '../types.ts'
-import { apiRoutes, pluginParamsSchema, pluginTrustBodySchema } from '@harness-forge/shared'
+import type { AppContext, AppEnv } from '../types.ts'
+import {
+  apiRoutes,
+  fileUploadFormSchema,
+  HarnessError,
+  LIMITS,
+  pluginInspectBodySchema,
+  pluginInstallBodySchema,
+  pluginInstallFormSchema,
+  pluginParamsSchema,
+  pluginTrustBodySchema,
+  validationError,
+} from '@harness-forge/shared'
 import { Hono } from 'hono'
-import { notImplemented, validate } from '../validate.ts'
+import { contentDisposition } from '../../services/files/names.ts'
+import { requireFreshAuth } from '../middleware/fresh-auth.ts'
+import { validate } from '../validate.ts'
 
-export function createPluginInstallRoutes(_deps: AppDeps): Hono<AppEnv> {
+const MULTIPART = /^multipart\/form-data\s*;/i
+
+interface InstallRequest {
+  input: PluginInstallInput
+  trust?: boolean
+  enable?: boolean
+}
+
+function invalidRequest(message: string, path: Array<string | number> = []): HarnessError {
+  return validationError([{ path, message, code: 'custom' }], message)
+}
+
+/** The zip part and the other (string) fields of a multipart body. */
+async function readMultipart(c: AppContext): Promise<{ file: File, fields: Record<string, string> }> {
+  let form: FormData
+  try {
+    form = await c.req.formData()
+  }
+  catch {
+    throw invalidRequest('The multipart body cannot be read.')
+  }
+  let file: File | undefined
+  const fields: Record<string, string> = {}
+  for (const [key, value] of form.entries()) {
+    if (key === 'file') {
+      if (typeof value === 'string')
+        throw invalidRequest('The part "file" must be a file.', ['file'])
+      if (file !== undefined)
+        throw invalidRequest('Send exactly one file.', ['file'])
+      file = value
+      continue
+    }
+    if (typeof value !== 'string')
+      throw invalidRequest(`Only the part "file" may be a file ("${key}" is one).`, [key])
+    if (Object.hasOwn(fields, key))
+      throw invalidRequest(`The field "${key}" is sent more than once.`, [key])
+    fields[key] = value
+  }
+  if (file === undefined)
+    throw invalidRequest('Attach the plugin zip in the part named "file".', ['file'])
+  if (file.size > LIMITS.pluginZipBytes) {
+    throw new HarnessError({
+      code: 'payload_too_large',
+      message: `The zip is larger than ${LIMITS.pluginZipBytes / (1024 * 1024)} MB.`,
+      details: { limitBytes: LIMITS.pluginZipBytes },
+    })
+  }
+  return { file, fields }
+}
+
+async function readJson(c: AppContext): Promise<unknown> {
+  try {
+    return await c.req.json()
+  }
+  catch {
+    throw invalidRequest('The request body is not valid JSON.')
+  }
+}
+
+async function readInspectRequest(c: AppContext): Promise<PluginInstallInput> {
+  if (MULTIPART.test(c.req.header('content-type') ?? '')) {
+    const { file, fields } = await readMultipart(c)
+    const extra = Object.keys(fields)
+    if (extra.length > 0)
+      throw invalidRequest(`Unknown field "${extra[0]}": send only the part "file".`, [extra[0]!])
+    fileUploadFormSchema.parse(fields)
+    return { source: 'zip', fileName: file.name, data: new Uint8Array(await file.arrayBuffer()) }
+  }
+  const parsed = pluginInspectBodySchema.safeParse(await readJson(c))
+  if (!parsed.success)
+    throw validationError(parsed.error)
+  return parsed.data
+}
+
+async function readInstallRequest(c: AppContext): Promise<InstallRequest> {
+  if (MULTIPART.test(c.req.header('content-type') ?? '')) {
+    const { file, fields } = await readMultipart(c)
+    const unknown = Object.keys(fields).find(key => key !== 'trust' && key !== 'enable')
+    if (unknown !== undefined)
+      throw invalidRequest(`Unknown field "${unknown}".`, [unknown])
+    const parsed = pluginInstallFormSchema.safeParse(fields)
+    if (!parsed.success)
+      throw validationError(parsed.error)
+    return {
+      input: { source: 'zip', fileName: file.name, data: new Uint8Array(await file.arrayBuffer()) },
+      ...(parsed.data.trust === undefined ? {} : { trust: parsed.data.trust === 'true' }),
+      ...(parsed.data.enable === undefined ? {} : { enable: parsed.data.enable === 'true' }),
+    }
+  }
+  const parsed = pluginInstallBodySchema.safeParse(await readJson(c))
+  if (!parsed.success)
+    throw validationError(parsed.error)
+  const { trust, enable, ...input } = parsed.data
+  return { input, ...(trust === undefined ? {} : { trust }), ...(enable === undefined ? {} : { enable }) }
+}
+
+export function createPluginInstallRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
-  app.post(apiRoutes['pluginInstall.inspect'].path, notImplemented('pluginInstall.inspect'))
-  app.post(apiRoutes['pluginInstall.install'].path, notImplemented('pluginInstall.install'))
-  app.post(apiRoutes['pluginInstall.trust'].path, validate('param', pluginParamsSchema), validate('json', pluginTrustBodySchema), notImplemented('pluginInstall.trust'))
-  app.get(apiRoutes['pluginInstall.export'].path, validate('param', pluginParamsSchema), notImplemented('pluginInstall.export'))
+
+  app.post(apiRoutes['pluginInstall.inspect'].path, async (c) => {
+    const input = await readInspectRequest(c)
+    return c.json(await deps.installer.inspect(input))
+  })
+
+  app.post(apiRoutes['pluginInstall.install'].path, async (c) => {
+    const request = await readInstallRequest(c)
+    const detail = await deps.installer.install(request.input, {
+      ...(request.trust === undefined ? {} : { trust: request.trust }),
+      ...(request.enable === undefined ? {} : { enable: request.enable }),
+      authorize: (inspection) => {
+        // ADR-017: code plugins and stdio MCP servers run programs on the server, trusted or not.
+        if (inspection.requiresTrust)
+          requireFreshAuth(c)
+      },
+    })
+    return c.json(detail, 201)
+  })
+
+  app.post(apiRoutes['pluginInstall.trust'].path, validate('param', pluginParamsSchema), validate('json', pluginTrustBodySchema), async (c) => {
+    requireFreshAuth(c)
+    const { id } = c.req.valid('param')
+    const { sha256 } = c.req.valid('json')
+    return c.json(await deps.plugins.trust(id, sha256))
+  })
+
+  app.get(apiRoutes['pluginInstall.export'].path, validate('param', pluginParamsSchema), async (c) => {
+    const { id } = c.req.valid('param')
+    const { fileName, data } = await deps.installer.export(id)
+    const body = data.buffer instanceof ArrayBuffer ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data)
+    return c.body(body, 200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': contentDisposition('attachment', fileName),
+      'Content-Length': String(data.byteLength),
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    })
+  })
+
   return app
 }

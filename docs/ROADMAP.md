@@ -44,7 +44,7 @@ Web UI agents depend only on frozen contracts, stores and shell components, so w
 
 ## Phase 2 — Chat MVP + settings
 
-- [ ] W2.1 chat-server (pipeline, runs, approvals, commands, titles, usage/cost, errors)
+- [x] W2.1 chat-server (pipeline, runs, approvals, commands, titles, usage/cost, errors)
 - [x] W2.2 chat-web (useChatSession, transcript, part renderers, Markdown, empty state)
 - [x] W2.3 composer-web (composer, attachments, model picker, effort, permission, slash menu)
 - [x] W2.4 sidebar-web (chat list, status dots, palette, shortcuts dialog, global shortcuts)
@@ -54,11 +54,11 @@ Web UI agents depend only on frozen contracts, stores and shell components, so w
 
 ## Phase 3 — Plugins, tools, MCP
 
-- [ ] W3.1 plugins-web (list, detail, settings form, enable/disable/reload/uninstall/export)
-- [ ] W3.2 plugin-install (staging, zip/npm/url/folder, inspect, trust)
-- [ ] W3.3 provider-wizard (declarative provider plugin wizard + test)
-- [ ] W3.4 code-plugins (scaffold templates, file API, CodeMirror editor, build & reload)
-- [ ] W3.5 tools-mcp (MCP manager, tool prefs, core-tools, MCP panel)
+- [x] W3.1 plugins-web (list, detail, settings form, enable/disable/reload/uninstall/export)
+- [x] W3.2 plugin-install (staging, zip/npm/url/folder, inspect, trust)
+- [x] W3.3 provider-wizard (declarative provider plugin wizard + test)
+- [x] W3.4 code-plugins (scaffold templates, file API, CodeMirror editor, build & reload)
+- [x] W3.5 tools-mcp (MCP manager, tool prefs, core-tools, MCP panel)
 - [ ] W3.6 e2e-plugins
 - [ ] Gate + checkpoint commit
 
@@ -87,6 +87,16 @@ Web UI agents depend only on frozen contracts, stores and shell components, so w
   `.container` rules; AI Elements `vue-stream-markdown` components unused (drop dependency?); rate limiter ignores
   `X-Forwarded-For` (document reverse-proxy caveat); ship `apps/server/assets/catalog/` with `dist/`.
 
+- W3.x doc updates: `SchemaForm` extra props (`secretHints`, `saving`) + reset semantics; Source tab also for editable
+  declarative plugins; `PluginCard` event `view-logs`; wizard test ids (`wizard-step-*` on panels only,
+  `data-step-item` on stepper items); declarative credentials cannot use `envVar`; API.md 5.18 file API deviations
+  (`.git`/`node_modules` never opened, hidden files not writable, save re-pins only previously trusted plugins);
+  `core-tools`/`core-mcp` settings and `web_fetch` input/output; install `sha256` + inspection `sourceRef`.
+- Core fixes for Wave C (W4.6): tool-call history when `toolMode` is `off`/model lacks tools; `PluginHost.refresh(id)`
+  after trust re-pin (stale `trust.hash`); `CredentialService.setFor(providerId, fields, values)` instead of drafts
+  writing the secret layout directly; `PluginHost.onStateChange` instead of the core-mcp bridge; flaky
+  `host.test.ts` fs.watch tests; body-limit streamed-multipart cancel → unhandled rejection (W4.1).
+
 ## Backlog (not in v1)
 
 Multi-user accounts · child-process isolation for code plugins · plugin marketplace/registry index ·
@@ -100,4 +110,5 @@ conversation branching · sharing links · knowledge/RAG · image generation · 
 | P0.3 D+S | D1, D2, D3, D4, S0 + R1 (reconcile) | check + build green on skeleton | 34a0940 |
 | P0.4 C-a | C1+C2, C3 | audit ok; 205 tests; check + build green; dark 200.html verified | b10eb2d |
 | P0.5 C-b | C4, C5, C6 | audit ok; 834 tests; check + build green; 501 stubs verified; pins ok | 15915a4 |
-| Wave A | W1.1–W1.5, W2.2–W2.5 | audit ok; 2064 tests; build ok; providers/keys/persistence/auth/SSE/icons probes ok | (this commit) |
+| Wave A | W1.1–W1.5, W2.2–W2.5 | audit ok; 2064 tests; build ok; providers/keys/persistence/auth/SSE/icons probes ok | b72bb90 |
+| Wave B | W2.1, W3.1–W3.5 | audit ok; 3108/3109 tests (known flaky fs.watch test passes alone); build ok; chat stream, approval, commands, tools, plugins, scaffold probes ok | (this commit) |
