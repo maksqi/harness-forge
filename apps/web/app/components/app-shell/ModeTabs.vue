@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // Chat | Plugins switch driven by the route (docs/UI.md 5.1, 5.2). The tabs are links to the last route of each
-// mode, so middle-click works. Expanded sidebar: segmented Tabs; icon mode: two stacked icon buttons.
+// mode, so middle-click works. Expanded sidebar: segmented Tabs; icon mode: two stacked icon buttons. On touch
+// devices (coarse pointer) the list grows to 44px, so the tabs inside its 2px padding are 40px targets (UI.md 14.5).
 import { BlocksIcon, MessageSquareIcon } from '@lucide/vue'
 import { computed } from 'vue'
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from '@/components/ui/sidebar'
@@ -49,7 +50,7 @@ function onSpace(to: string) {
   </SidebarMenu>
 
   <Tabs v-else :model-value="mode" activation-mode="manual" class="w-full gap-0">
-    <TabsList aria-label="Sidebar mode" class="h-8 w-full rounded-lg bg-sidebar-accent/60 p-0.5 dark:bg-sidebar-accent/70 pointer-coarse:h-10">
+    <TabsList aria-label="Sidebar mode" class="h-8 w-full rounded-lg bg-sidebar-accent/60 p-0.5 dark:bg-sidebar-accent/70 pointer-coarse:h-11">
       <TabsTrigger
         v-for="tab in tabs"
         :key="tab.value"

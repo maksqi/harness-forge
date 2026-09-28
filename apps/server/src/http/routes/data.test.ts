@@ -108,7 +108,7 @@ describe('gET /api/data/export', () => {
     const response = await app.t.request('/api/data/export?settings=false')
     expect(response.status).toBe(413)
     const error = await errorOf(response)
-    expect(error).toMatchObject({ code: 'payload_too_large', details: { limitBytes: expect.any(Number) } })
+    expect(error).toMatchObject({ code: 'payload_too_large', details: { limitEntries: 2 } })
     expect(error.message).toContain('entries')
   })
 })

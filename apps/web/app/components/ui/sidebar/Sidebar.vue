@@ -31,12 +31,14 @@ const { isMobile, state, openMobile, setOpenMobile } = useSidebar()
   </div>
 
   <Sheet v-else-if="isMobile" :open="openMobile" v-bind="$attrs" @update:open="setOpenMobile">
+    <!-- Local patch (AI_ELEMENTS_PATCHES.md): the data-[side=*] widths replace SheetContent's data-[side=*]:w-3/4,
+         which outranks a plain w-* class and made the sheet 75% of the screen instead of 18rem. -->
     <SheetContent
       data-sidebar="sidebar"
       data-slot="sidebar"
       data-mobile="true"
       :side="side"
-      class="bg-sidebar text-sidebar-foreground w-(--sidebar-width) p-0 [&>button]:hidden"
+      class="bg-sidebar text-sidebar-foreground w-(--sidebar-width) data-[side=left]:w-(--sidebar-width) data-[side=right]:w-(--sidebar-width) p-0 [&>button]:hidden"
       :style="{
         '--sidebar-width': SIDEBAR_WIDTH_MOBILE,
       }"

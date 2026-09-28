@@ -97,7 +97,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5). |
 | `app.ts` | `createApp(deps)` app factory: mounts middleware and every route module under `/api`; used by `main.ts` and `createTestApp()`. |
 | `paths.ts`, `logger.ts` | Package-relative locations (server package root, migrations, bundled assets, the SPA build, installed package versions); JSON-lines logger with redaction. |
-| `http/middleware/` | Request id, structured access log (share tokens masked), secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`; `request-info.ts` resolves the client address and scheme, trusting forwarded headers only from `HF_TRUST_PROXY` peers (section 10.6). |
+| `http/middleware/` | Request id, structured access log (share tokens masked; it also runs the untrusted-proxy hint of `proxy-warning.ts`), secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`; `request-info.ts` resolves the client address and scheme, trusting forwarded headers only from `HF_TRUST_PROXY` peers (section 10.6). |
 | `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `shares`); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes. |
 | `http/static.ts` | Production SPA serving from `HF_WEB_DIR` (default `apps/web/.output/public`) with `200.html` fallback for client routes. |
 | `security/` | `keyring.ts` (master key + HKDF subkeys), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). |
@@ -107,7 +107,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `services/chats/` | Chat + message persistence, the message tree (`tree.ts`: active path, versions, latest leaf; section 6.8), version switching, search, cursor pagination, export (md / json v2) and import (v1 / v2), usage rows, title updates, `allIds` / `importChat` / `removeAll` for bulk data. |
 | `services/data/` | Bulk data (ADR-024, section 6.9): summary, streamed zip export, import of a backup or a single chat, delete-all, the import / delete mutex. |
 | `services/shares/` | Share links (ADR-025, section 6.10): HMAC tokens, the allowlist sanitizer, snapshots, owner CRUD, the public view and file access, expiry, rate limits. |
-| `services/files/` | Content-addressed upload store (`data/files/<aa>/<sha256>`), MIME/size validation, `files` rows, read streams. |
+| `services/files/` | Content-addressed upload store (`data/files/<aa>/<sha256>`), MIME/size validation, `files` rows, read streams; for bulk data `importFile` (deduplicated by sha256, keeps the preferred id when it is free) and `purge` (every row and blob). |
 | `services/events/` | In-process event bus + SSE fan-out for `/api/events` (section 6.7). |
 | `registry/` | Typed registries for providers, models, tools, MCP server declarations, commands and hooks; every registration returns a `Disposable` and is tagged with its owner plugin id. |
 | `plugins/host.ts` | Plugin host: discovery, load order, lifecycle state machine, enable/disable/reload, boot sentinel, safe mode. |
@@ -118,7 +118,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `plugins/compile.ts` | esbuild compile of `.ts` entries into one ESM file in `data/cache/plugins/<id>/` (SDK aliased to a shim), returns diagnostics. |
 | `plugins/watch.ts` | `fs.watch` for linked folders or `HF_PLUGIN_WATCH=1`, 300 ms debounce, triggers reloads. |
 | `plugins/state.ts` | Persistence of plugin rows (`plugins`, `plugin_settings`, `plugin_kv`), trust hashes, `loading_since`. |
-| `plugins/install/` | Inspect + install from zip / npm / URL / folder into `plugins/.staging/<uuid>`, validation, review check (what was inspected is what gets installed), atomic swap, crash recovery of staging, export. |
+| `plugins/install/` | Inspect + install from zip / npm / URL / folder into `plugins/.staging/<uuid>`, validation, review check (what was inspected is what gets installed), atomic swap, crash recovery of staging, export. `zip.ts` also provides `openZip()`, the lazy reader of data imports with the same guards (section 6.9). |
 | `plugins/drafts/` | Declarative plugins created and edited in the browser (provider wizard): draft validation, SVG icon sanitizing, credentials saved as provider credentials, temporary-provider draft test. |
 | `plugins/scaffold/` | Code plugins created from a template (`POST /plugins/scaffold`) and the traversal-safe files API: tree, read, atomic write, delete, build + reload, trust re-pinning of `created` plugins. |
 | `plugins/templates/` | Template sources (tool, provider, MCP bridge, command pack): a JSDoc-typed `index.mjs` or a TypeScript `index.ts`, the vendored API types `harness-forge.d.ts` and a README. |
@@ -211,8 +211,9 @@ Notes:
   middle of an atomic swap) is moved back; every other staging entry is deleted.
 - MCP clients connect lazily in the background after their owning plugin is `active`; a failing MCP server never
   blocks boot.
-- `HF_TRUST_PROXY` is parsed with the other variables: `1`, `true`, hop counts and unknown tokens fail the boot with
-  an explanation of the format; when it is set, the boot log lists the trusted ranges (section 10.6).
+- `HF_TRUST_PROXY` is parsed with the other variables: a boolean-like word, a hop count, a `/0` range, an unknown token
+  or a list that names no proxy fails the boot like any invalid variable (`EnvError` on stderr with the format
+  explained, exit code 1); when it is set, the boot log lists the trusted ranges (section 10.6).
 - The first boot of v1.1 on a v1 data directory applies migration `0001`, which backfills a linear message tree for
   every existing chat (section 8, Migrations).
 - Graceful shutdown (`SIGINT`/`SIGTERM`, `stopDeps()`): stop accepting connections, abort active runs (persisted as
@@ -249,34 +250,34 @@ sequenceDiagram
   R->>R: zod validate (400 validation_error)
   R->>Runs: acquire(chatId)
   alt a run is active for chatId
-    Runs-->>W: 409 conflict
+    Runs-->>W: 409 conflict (reason run-active)
   end
   R->>DB: upsert chat (client uuidv7), save toolMode / reasoningEffort / modelRef
   R->>Prov: resolve(modelRef): provider, credentials (stored, then env), ModelInfo
   alt provider missing or required credentials absent
     Prov-->>W: 400 provider_not_configured (action configure-provider), run released
   end
-  P->>DB: commit (kind new / regenerate / continuation): expand command, supersede approvals on the path, append user message, set active leaf
-  P->>DB: history = listPath(active leaf): the root-to-leaf path only
-  P->>P: validateUIMessages, file parts -> bytes, tools (registry + MCP, filtered), params + hooks
+  P->>DB: plan (kind new / regenerate / continuation): history = listPath(parent or target), supersede approvals on it, resolve the command, validate the message
+  P->>DB: commit in one transaction: superseded approvals, merged decisions or the new user message, the active leaf
+  P-)Ev: run.started (chatId, messageId, modelRef)
+  opt the chat has no title yet (title_source is null)
+    P-)M: in parallel with the reply: generateText title (titleModelRef, else smallModelId, else chat model), 10 s timeout
+    P->>DB: save title (fallback: first 60 chars), never overwrite a user title
+    P-)Ev: chat.updated (id, title)
+  end
+  P->>P: file parts -> bytes, tools (registry + MCP, filtered), params + hooks
   P->>P: await convertToModelMessages(history, tools), hook chat.messages, trim to 85 percent of context
   P->>M: streamText(model, instructions, messages, tools, toolApproval, stopWhen isStepCount(maxSteps), abortSignal run.signal)
   P->>P: result.consumeStream() so the run survives a client disconnect
   R-->>W: 200 createUIMessageStreamResponse(toUIMessageStream(result.stream, ...)) as SSE
   Note over R,Runs: consumeSseStream tees the SSE bytes into the run buffer for GET /api/chat/:id/stream
-  R-)Ev: run.started (chatId, messageId, modelRef)
   M-->>W: start (metadata modelRef, startedAt), start-step, text / reasoning / tool chunks, finish-step ...
   M-->>W: finish (metadata finishedAt, durationMs, reasoningMs, usage, costUsd, finishReason) then [DONE]
-  P->>DB: onEnd persist: upsert reply under its parent + CAS of the active leaf, usage row, updated_at, pending_approval
+  P->>DB: onEnd persist: one transaction (upsert reply under its parent + CAS of the active leaf), usage row, updated_at, pending_approval
   P->>Prov: provider status update (connected / error)
-  P-)P: hook message.completed (guarded)
   P->>Runs: release(chatId), drop the resume buffer
   P-)Ev: run.finished (chatId, messageId, outcome, awaitingApproval)
-  opt first turn and title_source is null
-    P-)M: generateText title (titleModelRef, else smallModelId, else chat model), 10 s timeout
-    P->>DB: save title (fallback: first 60 chars), never overwrite a user title
-    P-)Ev: chat.updated (id, title)
-  end
+  P-)P: hook message.completed (guarded, background)
 ```
 
 Notes:
@@ -284,27 +285,39 @@ Notes:
 - The assistant message id is generated by the server (`generateMessageId` = `createMessageId`, `msg_` + 16 chars).
   User message ids are generated by the client with the same `createMessageId` helper and validated by the server
   (format + uniqueness), so edits and regenerations can address them.
-- History operations (the "commit transaction" step; the message tree is described in 6.8). Every request is one of
-  three kinds (`RequestKind`), and nothing is ever deleted:
+- History operations (the plan and commit steps of `chat/prepare.ts`; the message tree is described in 6.8). Every
+  request is one of three kinds (`RequestKind`), and nothing is ever deleted:
   - **new** (`submit-message` with a new user message): the parent is `parentId`, or the chat's active leaf when the
     field is omitted (`null` = a new first message). An unknown parent -> `404 not_found`, an id already used ->
-    `409 conflict`. The history is the path from the root to that parent plus the new message. Pending
-    `approval-requested` parts on that path are resolved as denied with reason `superseded`; approvals on other
-    versions stay pending. The commit appends the user message and makes it the active leaf. An **edit** is a new
-    request whose parent is the edited message's parent, so the edited message gets a sibling version.
+    `409 conflict` (`details.reason: 'exists'`). The history is the path from the root to that parent plus the new
+    message. Pending approvals on that path (`approval-requested`, or `approval-responded` but never processed) are
+    resolved as denied with reason `superseded`; approvals on other versions stay pending. The commit appends the user
+    message and makes it the active leaf. An **edit** is a new request whose parent is the edited message's parent, so
+    the edited message gets a sibling version.
   - **regenerate** (`regenerate-message`): the target is `messageId` or the active leaf. A user target is answered
-    itself; an assistant target answers the previous message on its path, which must be a user message (else
-    `400`). The active leaf becomes the answered message and the new reply becomes a sibling of the old one.
+    itself; an assistant target answers the previous message on its path, which must be a user message (else `400`,
+    issue path `messageId`). Pending approvals on the path up to the answered message are superseded the same way; a
+    `reply` command of the answered message runs again (a `prompt` command keeps its stored expansion). The active leaf
+    becomes the answered message and the new reply becomes a sibling of the old one.
   - **continuation** (`submit-message` whose `message` is the active leaf, an assistant message with approval
     responses, see 6.2): only the approval decisions (`approval.id` -> `approved`, `reason`) are merged into the stored
-    message; every other client-side change is ignored. Any other assistant message -> `404`.
+    message; every other client-side change is ignored. Any other assistant message -> `404`; a continuation that
+    answers no pending tool call -> `400`.
   - `messageId` on a user submit, or `parentId` on a regenerate or a continuation -> `400 validation_error` (the
     in-place edit of v1 was removed, ADR-023).
+  - The commit writes the superseded approvals, the merged decisions or the new user message, and the active leaf in
+    one transaction (a regenerate with nothing to supersede only moves the leaf). It sets the leaf unconditionally:
+    version switches are refused while the run exists (6.3). Every failure before the commit is a normal JSON error
+    response that leaves the history untouched (only the chat row may have been created).
 - Persisting the reply (`onEnd`): one transaction upserts the assistant message under its reply parent (the new user
   message, the answered message, or the continued message's parent) and moves the active leaf to it with a
   compare-and-set that succeeds only while the leaf is still the reply parent or the reply itself, so nothing
-  overwrites a leaf moved by someone else; `touch` follows as before. A run released by force stores nothing and leaves
-  the leaf on the user message. Title generation, context trimming and notices work on the path.
+  overwrites a leaf moved by someone else (the reply is then stored as a hidden version, a warning is logged and
+  `pending_approval` is left alone). On a file database the transaction waits up to 5 s for a busy connection (section
+  8). The usage row, `touch` and the provider outcome follow; `run.finished` is emitted only after all of that, so a
+  client that refetches on it finds the reply on the active path. A run released by force (6.3) stores nothing and
+  leaves the active leaf where the commit put it (the user message, or the continued message). Title generation,
+  context trimming and notices work on the path.
 - Slash commands (`/name args` at the start of a user text part, name registered in the commands registry): the
   user message keeps the original text and gets `metadata.command`; `prompt` commands replace the text sent to the
   model with the expansion; `reply` commands write the assistant reply with `createUIMessageStream` without a model
@@ -398,9 +411,10 @@ overlap with persisted content):
 - Version switches (`POST /api/chats/:id/branch`) are refused with `409 conflict` (`details.reason: 'run-active'`)
   while the runs registry holds the chat in any phase (`ChatRunner.hasRun`, including `preparing`), so a switch never
   races a commit or a persist.
-- The buffer is dropped when the run is released (after persistence); from then on the resume endpoint returns
-  `204`. The web refetches a chat on `run.finished` unless its own `useChat` instance is streaming it, which covers
-  a run that ends between loading the chat and resuming.
+- The resume endpoint returns `204` as soon as the run persists its reply (phase `finishing`), and the buffer is
+  dropped when the run is released, so a replay never overlaps the persisted message. The web refetches a chat on
+  `run.finished` unless its own `useChat` instance is streaming it, which covers a run that ends between loading the
+  chat and resuming.
 
 ```mermaid
 sequenceDiagram
@@ -431,7 +445,10 @@ sequenceDiagram
 
 Rules: the web calls `POST /api/chat/:id/stop` first and then `stop()` of `useChat` (a client-side abort alone is
 only a disconnect). Stopping a chat without a run is a no-op (`{ stopped: false }`). `DELETE /api/chats/:id` stops
-the run first. Server shutdown aborts every run through the same path.
+the run first. Server shutdown aborts every run through the same path. `stop` waits up to 15 s (5 s at shutdown) for
+the run to persist; a run that does not settle is released by force: its late end callback stores nothing and, when
+it was streaming, `run.finished` reports `aborted`. A run stopped while still `preparing` ends its request with
+`409 conflict` (`details.reason: 'stale'`) before its history is committed (delete-all relies on this, 6.9).
 
 ### 6.4 Plugin lifecycle
 
@@ -611,25 +628,30 @@ leaf under A (the reply at seq 3) active again, which brings back A -> reply -> 
 - **Reading**: `listPath(chatId, leafId)` walks up `parent_id` with a recursive query (guard `m.seq < path.seq`, so bad
   data cannot loop). `branches` comes from the pure helpers of `services/chats/tree.ts` (`pathTo`, `branchesOf`,
   `latestLeafUnder`, `resolveLeaf`) over a light `(id, parent_id, seq, role)` query: every path message with at least
-  two versions maps to its siblings (`seq` order) and the index of the shown one. `ChatDetail` has no `activeLeafId`:
-  it always equals the id of the last message of `messages`, also during a run.
+  two versions maps to its siblings (`seq` order) and the index of the shown one. A stored leaf that is not a message
+  of the chat falls back to its most recent message. `ChatDetail` has no `activeLeafId`: it always equals the id of the
+  last message of `messages`, also during a run.
 - **Writing**: `appendMessage(chatId, message, parentId)` (404 for a parent outside the chat, 409 for a used id),
   `upsertMessage(chatId, message, parentId)` (the parent is used on insert only) and `setActiveLeaf(chatId, leafId,
   onlyFrom?)` (compare-and-set). Only the commit and persist transactions of the pipeline (6.1) and the switch route
   move the active leaf.
 - **Switching** (`POST /api/chats/:id/branch { messageId }`, any message of the chat): 404 for an unknown chat or
-  message; `409 conflict` (`details.reason: 'run-active'`) while a run holds the chat (6.3); otherwise the active leaf
-  becomes the latest leaf under `messageId`, `pending_approval` is recomputed from the new path, `chat.updated` is
-  emitted, `updated_at` stays (a switch is not activity), and the response is the new `ChatDetail`.
+  message; `409 conflict` (`details.reason: 'run-active'`) while a run holds the chat (6.3), and also when the active
+  leaf changed between reading and writing it (the switch is a compare-and-set against the leaf it read); otherwise the
+  active leaf becomes the latest leaf under `messageId`, `pending_approval` is recomputed from the new path,
+  `chat.updated` is emitted, `updated_at` stays (a switch is not activity), and the response is the new `ChatDetail`.
 - **Clients**: the web sends `parentId` explicitly (the message before the new one on the path it shows), so a stale
   tab or a failed request cannot attach a message to a path the user did not see; an unknown parent answers 404 and
-  the web reloads the chat (UI.md 11.1).
+  the web reloads the chat, puts the unsent text back into the composer and says so in a toast (UI.md 11.1, 15). A
+  user message whose request failed with an HTTP error was never stored, so the web never names it as a parent.
 - **Search** covers every version, so a snippet may come from a hidden version. **Totals** (`ChatDetail.totals`) sum
   every usage row: the cost actually paid. The composer's chat cost sums the visible path only (UI.md 7.12).
 - **Export and import**: JSON export v2 carries every version in `seq` order, `parentIds` aligned by index and
   `activeLeafId`; Markdown exports the active path. `POST /api/chats` and the data import (6.9) accept v1 (linear) and
-  v2: each parent must be an earlier message (else 400 with the field path), ids are remapped, and the active leaf is
-  the latest leaf under `activeLeafId` (or under the last message).
+  v2: each parent must be an earlier message and the ids unique (else 400 with the field path, e.g. `parentIds.1`), and
+  the active leaf is the latest leaf under `activeLeafId` (or under the last message). Message ids are kept when they
+  are valid and unused, else replaced; an import as a copy gets new ids throughout. Imported messages are
+  deep-validated, streaming parts are finalized and pending approvals are resolved as denied (reason `imported`).
 - Versions are never deleted on their own (backlog); deleting a chat deletes all of them.
 
 ### 6.9 Backup, import and delete-all (ADR-024)
@@ -640,39 +662,62 @@ Settings -> Data uses the four routes of `http/routes/data.ts` (API.md): `GET /a
 `FilesService` (`importFile`, `purge`) and the settings service. There are no new event types: imports emit
 `chat.created` and deletions `chat.deleted`, one per chat.
 
-Zip layout (every entry mode 0644, mtime = `exportedAt`):
+Zip layout, in write order (every entry mode 0644, mtime = `exportedAt`; JSON entries deflated):
 
 ```
-manifest.json          BackupManifest { format: 'harness-forge.backup', version: 1, exportedAt, appVersion,
-                       chatExportVersion: 2, includes: { files, settings }, counts } (written last)
 settings.json          the public Settings (only when includes.settings)
-chats/<chatId>.json    exactly GET /api/chats/:id/export?format=json (chat export v2)
-files/index.json       BackupFileIndex { items: [{ id, sha256, name, mime, size, createdAt }] } (only when includes.files)
-files/<sha256>         attachment bytes: stored for images and PDF, deflated for text/*
+chats/<chatId>.json    exactly GET /api/chats/:id/export?format=json (chat export v2), one per chat in id order,
+                       archived chats included
+files/<sha256>         each referenced blob once: stored for images and PDF, deflated for text/* (only when
+                       includes.files)
+files/index.json       BackupFileIndex { items: [{ id, sha256, name, mime, size, createdAt }] }: one item per file row
+                       whose blob was written and still matched its sha256 (only when includes.files)
+manifest.json          BackupManifest { format: 'harness-forge.backup', version: 1, exportedAt, appVersion,
+                       chatExportVersion: 2, includes: { files, settings }, counts: { chats, messages, files,
+                       fileBytes } } (written last)
 ```
 
 A backup never contains secrets, credentials, the password, plugins, MCP servers, model or tool preferences, share
 links or usage rows (the per-message `metadata.usage` survives, so `ChatDetail.totals` restarts at 0 after an import).
 
 - **Export** is streamed: an fflate `Zip` with `ZipPassThrough` / `ZipDeflate` entries inside a pull-based
-  `ReadableStream`; each pull produces one chat or one 64 KB chunk of a file, so memory stays flat. `manifest.json` is
-  written last so its counts are exact. fflate cannot write zip64, so a pre-check refuses backups above 3.5 GiB or
-  65k entries with `413 payload_too_large` (the message suggests `files=false`). A HEAD request cancels the stream at
-  once.
+  `ReadableStream` (high-water mark 0, so nothing is read before the first pull); each pull pushes 64 KB pieces of a
+  chat or chunks of a file until the zip emits bytes, so memory stays flat. `manifest.json` is written last so its
+  counts are exact. fflate cannot write zip64, so a pre-check (database queries only, before anything is streamed)
+  refuses a backup with more than 50,000 entries (`LIMITS.backupEntriesMax`, the import's cap; the referenced file rows
+  count too) or an estimated size above 3.5 GiB with `413 payload_too_large`; the message suggests `files=false` only
+  when the backup without attachments would fit. A zip that still outgrows the format while it is written (65,535
+  entries or 4 GiB, because chats grew meanwhile) fails the stream instead of producing a broken archive. A chat
+  deleted during the export is left out; a blob that is missing on disk or no longer matches its sha256 is left out of
+  the index (the import reports it missing). A HEAD request gets the headers only: the stream is cancelled before
+  anything is read.
 - **Import**:
-  1. the body limit is 256 MiB + 64 KiB; the first bytes decide: `PK` = a backup, `{` = a single chat JSON (v1 or v2);
+  1. the body limit is 256 MiB + 64 KiB (the upload itself at most 256 MiB, `LIMITS.backupImportBytes`); the route
+     parses the multipart body itself (the part `file` plus the `DataImportForm` fields; unknown fields are refused),
+     so the upload is not buffered twice; the first bytes decide: `PK` = a backup, `{` (after an optional BOM and
+     whitespace) = a single chat JSON (v1 or v2, at most 64 MiB); anything else -> `400`;
   2. a zip is read lazily by `openZip()` in `plugins/install/zip.ts`, which reuses the plugin installer's guards:
-     path traversal, symlinks, duplicate names, entry count, declared vs actual size, exact inflation, CRC and
-     overlapping entries; a single top-level folder is accepted; per-entry caps apply before inflating (64 MiB per
-     chat, 20 MiB per file); unknown entries become warnings; a newer manifest version is refused;
-  3. chats are imported one at a time, each atomically through `chats.importChat`: with `skip` a chat whose id exists
-     is left alone (so running an import twice is idempotent), with `copy` it is imported with new ids and
-     " (imported)" appended to its title; pinned, archived, dates and titles are restored;
-  4. the files a chat references are imported first: each blob is re-hashed against the index and its type sniffed
-     again; `files.importFile` dedupes by sha256 and keeps the original id when it is free; `/api/files/<id>` URLs in
-     `file` and `reasoning-file` parts are rewritten to the resulting ids; missing blobs are counted and reported;
-  5. with `restoreSettings`, only known settings keys are applied, each validated on its own;
-  6. the answer (`DataImportResult`) lists every chat with its status; one failing chat never stops the others.
+     path traversal, symlinks, duplicate names, entry count (50,000), declared vs actual size, exact inflation, CRC,
+     encryption, compression methods and overlapping entries; the declared sizes may add up to at most 8 GiB; a single
+     top-level folder is accepted; unknown entries become warnings;
+  3. the whole upload is refused (nothing is imported) for a structural guard failure, a missing, invalid or newer
+     `manifest.json` or an invalid `files/index.json` (`400 validation_error`, `413` for the size caps), and, for a
+     single chat JSON, for an invalid chat;
+  4. then chats are imported one at a time in entry name order, each atomically through `chats.importChat`. A chat
+     entry that is damaged (CRC or inflation mismatch), larger than 64 MiB (checked before inflating), not valid JSON
+     or not a valid export (its tree included) fails only that chat. With `skip` a chat whose id exists is left alone
+     (so running an import twice is idempotent), with `copy` it is imported with new ids and " (imported)" appended to
+     its title; pinned, archived, dates and titles are restored;
+  5. the files a chat references are imported first: each blob is re-hashed against the index and its type checked
+     again (at most 20 MiB each); `files.importFile` dedupes by sha256 and keeps the original id when it is free;
+     `/api/files/<id>` URLs in `file` and `reasoning-file` parts are rewritten to the resulting ids. A blob that is
+     absent or unusable (hash mismatch, too large, a type that is not allowed) is replaced by a file already stored
+     here under the same id (with the same sha256 when the index names it) when there is one; otherwise it counts in
+     `filesMissing` with a warning, and its part keeps its URL;
+  6. with `restoreSettings` (backup zips only), only known settings keys are applied, each validated on its own;
+     unknown or invalid keys become warnings;
+  7. the answer (`DataImportResult`) lists every chat with its status (`imported`, `copied`, `skipped` or `failed` with
+     a message), the counts and at most 100 warnings; one failing chat never stops the others.
 - **Delete-all** (`{ confirm: 'DELETE', files?, usage? }`): take the mutex -> `chats.allIds()` -> `runs.stop` for
   every id (this also covers runs that are still `preparing`) -> `chats.removeAll({ usage })` in one batch (share links
   cascade; usage rows are deleted or kept detached) -> optionally `files.purge()` (rows and blobs) -> stop any run whose
@@ -712,22 +757,32 @@ sequenceDiagram
 - **Token** = the 16-char suffix of the share id (`shr_` + 16 chars) + the first 22 base64url chars of
   `HMAC-SHA256(keyring subkey 'share', 'harness-forge/share/v1:' + shareId)`, i.e. `^[0-9A-Za-z]{16}[\w-]{22}$`.
   Nothing token-like is stored: the owner's list recomputes it (the link can be copied again), revoking deletes the
-  row, and a new master key invalidates every link.
-- **Sanitizer (allowlist)**, applied when the snapshot is taken: kept are `user` and `assistant` messages with their
-  text parts, `file` parts (data URLs only for raster images), `source-url` / `source-document` parts, reasoning text,
-  tool parts (name and status, plus input, output and error text, each value capped at 16 KB), the model ref, the
-  command name and a `stopped` / `failed` status. Dropped: system messages, chat and global instructions,
-  `metadata.error`, usage and cost, `command.expansion`, provider metadata, approvals, `data-*`, `step-start` and
-  `reasoning-file` parts and anything unknown. A snapshot above 10 MiB -> `413`. `file_ids` stores the only files the
-  share may serve.
+  row, and a new master key invalidates every link. Verification recomputes the token from its id suffix and compares
+  the whole string in constant time.
+- **Sanitizer (allowlist)**, applied when the snapshot is taken (`services/shares/snapshot.ts`): only the fields of the
+  share DTOs are copied, so anything unknown (a new AI SDK part type, a new metadata field) is dropped rather than
+  published. Kept are `user` and `assistant` messages with their text parts, `file` parts (app files `/api/files/<id>`,
+  whose ids join `file_ids`, or data URLs of raster images: PNG, JPEG, GIF, WebP, AVIF, never SVG), http(s)
+  `source-url` and `source-document` parts, reasoning text, tool parts (name, status `done` / `error` / `denied` /
+  `stopped`, the input, the output and the error text), the model ref of a reply, the command name of a user message
+  and a `stopped` / `failed` status. A tool input or output longer than 16,384 characters
+  (`LIMITS.shareToolValueChars`; a value that is not a string is measured as its JSON text) becomes a string: the
+  first characters of that text plus `\n[truncated]`, 16,384 characters in total; an error text is cut at 4096
+  characters. Dropped: system messages, chat and global instructions, `metadata.error` (only the `failed` status
+  remains), usage and cost, `command.expansion`, provider metadata, approvals, `data-*`, `step-start`,
+  `reasoning-file` and `custom` parts, other URLs and anything unknown. A snapshot above 10 MiB (serialized) ->
+  `413 payload_too_large`. `file_ids` stores the only files the share may serve.
 - **Options** (`{ reasoning: false, toolDetails: false, attachments: true }` by default) are applied when the view is
   served: without `reasoning` the reasoning parts are left out, without `toolDetails` tool parts keep only their name
   and status, without `attachments` the file parts are left out and `shares.file` serves nothing. A changed option
   therefore applies to the share page at once, without a new snapshot (API.md, `shares.ts`); `refresh: true` takes a
   new snapshot of the current active path.
-- **Freshness**: `ShareSummary.outdated` = the chat changed after the snapshot (`chats.updated_at > snapshot_at`, or
-  the active path length differs from `message_count`); `expired` = `expires_at <= now`. At most 20 links per chat;
-  `expiresAt` must be in the future and at most 365 days ahead.
+- **Freshness**: `ShareSummary.outdated` = the chat changed after the snapshot: `chats.updated_at > snapshot_at`, or
+  the active path now holds another number of `user` and `assistant` messages than `message_count` (a version switch
+  keeps `updated_at`, the count catches it). `snapshot_at` is taken before the chat is read, so a change that races the
+  snapshot marks the share outdated instead of leaving it silently stale. `expired` = `expires_at <= now` (the link
+  answers 404 until a `PATCH` moves or removes `expiresAt`). At most 20 links per chat (`400 validation_error` on
+  `chatId`, checked under a lock); `expiresAt` must be in the future and at most 365 days ahead.
 - **Owner routes** (`shares.list`, `shares.create`, `shares.update`, `shares.remove`) need a session; create and update
   also need fresh auth, because publishing a link turns brief session access into lasting remote access (ADR-017).
   There are no share events; the owner UI refetches.
@@ -759,7 +814,10 @@ warning, it does not crash.
 ## 8. Data model
 
 SQLite via Drizzle ORM 0.45 + `@libsql/client` (`apps/server/src/db/schema.ts`). Pragmas at connect:
-`journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`, `synchronous=NORMAL`. Migrations are generated by
+`journal_mode=WAL`, `foreign_keys=ON`, `synchronous=NORMAL`; the busy timeout of 5000 ms is the libsql client
+`timeout` option, so it applies to every pooled connection (the chat pipeline's commit and persist transactions wait
+for a busy database instead of failing). In-memory test databases use a single connection: while a transaction is
+open, a concurrent query fails fast (a background title write may then log a warning). Migrations are generated by
 drizzle-kit (coordinator) into `apps/server/drizzle/` and applied with `migrate()` at boot.
 
 Column conventions:
@@ -959,11 +1017,11 @@ by the API, e.g. `_auth.sessionEpoch`).
 |---|---|---|
 | `id` | text | PK; `shr_` + 16 chars |
 | `chat_id` | text | NOT NULL; FK -> `chats.id` ON DELETE CASCADE; index `chat_shares_chat_idx` |
-| `title` | text | NULL; a custom title of the share (`null` = the chat title) |
+| `title` | text | NULL; a custom title of the share (`null` = the chat title at snapshot time) |
 | `options` | json `ShareOptions` | NOT NULL; `{ reasoning, toolDetails, attachments }` |
 | `snapshot` | json `ShareSnapshot` | NOT NULL; the sanitized active path; file URLs stored as `/api/files/<id>` |
-| `file_ids` | json `string[]` | NOT NULL; the only files the share may serve |
-| `message_count` | integer | NOT NULL; messages in the snapshot |
+| `file_ids` | json `string[]` | NOT NULL DEFAULT `[]`; the only files the share may serve |
+| `message_count` | integer | NOT NULL DEFAULT 0; `user` and `assistant` messages in the snapshot (compared for `outdated`) |
 | `snapshot_at` | timestamp | NOT NULL; when the snapshot was taken |
 | `expires_at` | timestamp | NULL = never expires |
 | `created_at` | timestamp | NOT NULL |
@@ -974,7 +1032,7 @@ by the API, e.g. `_auth.sessionEpoch`).
 | Migration | Content |
 |---|---|
 | `0000_initial_schema` | the 14 tables of v1 |
-| `0001` (Phase 5) | `ALTER TABLE messages ADD parent_id`, `ALTER TABLE chats ADD active_leaf_id`, index `messages_chat_parent_idx`, table `chat_shares` + index `chat_shares_chat_idx`, then a hand-written backfill |
+| `0001_message_tree_and_shares` (Phase 5) | table `chat_shares` + index `chat_shares_chat_idx`, `ALTER TABLE chats ADD active_leaf_id`, `ALTER TABLE messages ADD parent_id`, index `messages_chat_parent_idx`, then a hand-written backfill |
 
 The backfill turns every existing chat into a linear chain: each message's parent is the previous message by `seq`,
 and the active leaf is the last message (`null` for an empty chat):
@@ -991,7 +1049,8 @@ Why the two new columns have no foreign keys: drizzle-kit writes `ALTER TABLE �
 messages before the chat. Both columns are nullable without a default, so SQLite adds them in place. A generated
 migration that rebuilds a table (`DROP TABLE`, `__new_…`) is rejected at review: foreign keys are on, and the rebuild's
 `DROP` would cascade-delete messages inside the migration transaction. `migrate()` applies a migration in one
-transaction, so a half-done backfill cannot happen; `db.test.ts` migrates a v1-shaped database through `0001`.
+transaction, so a half-done backfill cannot happen; `db/upgrade.test.ts` migrates a v1-shaped database through `0001`
+(and fails when the backfill is missing).
 
 Not stored in the DB: sessions (stateless HMAC cookie), active runs and resume buffers (memory), plugin logs
 (memory ring buffer), SSE subscribers (memory), share tokens (recomputed from the share id), rate-limit counters and
@@ -1103,10 +1162,12 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
   The `core-tools` setting "Allow localhost in web_fetch" (default off) lets `web_fetch` reach loopback addresses
   only; private, link-local and metadata addresses stay blocked. Provider base URLs are exempt (local providers such
   as Ollama are legitimate) but are set only by the user or a plugin manifest they reviewed.
-- **Limits**: JSON bodies 1 MB (plugin file writes 1 MB + envelope, chat requests 2 MB, chat imports 20 MB), uploads
+- **Limits**: JSON bodies 1 MB (plugin file writes: 1 MB of content, the JSON body up to twice that + 64 KiB for
+  string escaping; chat requests 2 MB, chat imports 20 MB), uploads
   20 MB per file (`image/*`, `application/pdf`, `text/*`), plugin zips 20 MB compressed / 100 MB expanded / 2000
   entries, tool output 64 KB, chat title 200 chars; data imports 256 MiB + 64 KiB (a backup zip or a chat JSON; 64 MiB
-  per chat entry, 20 MiB per file entry, 6.9); share snapshots 10 MiB with tool values capped at 16 KB (6.10). A
+  per chat entry, 20 MiB per file entry, 50,000 entries, 6.9); share snapshots 10 MiB, with each tool input or output
+  cut at 16,384 characters and each error text at 4096 (6.10). A
   non-empty body of a JSON route must be `application/json` (multipart routes also accept `multipart/form-data`), so
   HTML forms cannot post to the API.
 
@@ -1117,32 +1178,51 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
 - Links in markdown: only `http:`, `https:`, `mailto:`; `target="_blank" rel="noopener noreferrer"`.
 - Icons are never inlined: mono icons via CSS `mask-image` on a `<span>`, color icons via `<img>`; both point at
   server URLs (`/api/icons/lobe/<slug>`, `/api/plugins/<id>/icon`) served with a restrictive CSP.
-- Uploaded files are served with `nosniff`, a sandboxing CSP and `Content-Disposition: attachment` except raster
-  images and PDF (API.md, `GET /files/:id`).
+- Uploaded files are served with `nosniff`, a sandboxing CSP (not for PDF) and `Content-Disposition: attachment`
+  except raster images and PDF (API.md, `GET /files/:id`); share links serve them the same way (10.7).
 
 ### 10.6 Trusted reverse proxies (ADR-026)
 
 `HF_TRUST_PROXY` is a comma-separated list of `loopback` (127.0.0.0/8, ::1), `private` (10.0.0.0/8, 172.16.0.0/12,
-192.168.0.0/16, fc00::/7), IP addresses and CIDR ranges. `1`, `true`, hop counts and unknown tokens fail the boot with
-an explanation of the format: a hop count would trust anyone who can reach the port directly. Unset keeps the v1
-behavior. The matcher (`security/proxy-trust.ts`) uses `node:net` `BlockList`; IPv4-mapped IPv6 addresses are
-normalized first.
+192.168.0.0/16, fc00::/7), IP addresses and CIDR ranges. Unset keeps the v1 behavior. `security/proxy-trust.ts` parses
+it at boot into canonical entries (`Env.trustProxy`): keywords lowercase, IPv6 lowercase and compressed, IPv4-mapped
+IPv6 written as IPv4 (`::ffff:a.b.c.d/96` or longer is the IPv4 range it maps), a `/32` or `/128` range written as its
+address, duplicates and empty items dropped. Refused with an `EnvError` that explains the format (the boot exits with
+code 1):
+
+- boolean-like words (`true`, `false`, `yes`, `no`, `on`, `off`, `all`, `any`, `everyone`, `*`), hop counts (any
+  number, `1` included) and `/0` ranges (`::ffff:0.0.0.0/96` included): each would trust every peer, so anyone who
+  reaches the port directly could forge `X-Forwarded-For`;
+- prefix lengths above 32 (IPv4) or 128 (IPv6), and unknown tokens: host names, ports, brackets, zone ids, IPv4 with
+  leading zeros; `localhost` gets its own hint ("use loopback");
+- a list that names no proxy (only commas; an empty value counts as unset).
+
+The matcher is a `node:net` `BlockList` compiled once per list; addresses are normalized (IPv4-mapped IPv6 as IPv4)
+before every check.
 
 | Header | Honored when | Effect |
 |---|---|---|
-| `X-Forwarded-For` | the TCP peer is trusted | client address = the list walked right to left, skipping trusted hops (at most 32 entries; a malformed entry stops the walk) |
-| `X-Forwarded-Proto` | with `HF_TRUST_PROXY` set: only from a trusted peer; unset: from any peer (v1) | the request scheme: the `Secure` session cookie, HSTS, the scheme of the Origin check |
+| `X-Forwarded-For` | the TCP peer is trusted | client address = the list walked right to left, skipping trusted hops: the first untrusted entry is the client; a malformed entry or the 32-entry limit stops the walk at the last well-formed address seen (a trusted hop), so a forged or broken header never yields an arbitrary string |
+| `X-Forwarded-Proto` | with `HF_TRUST_PROXY` set: only from a trusted peer; unset: from any peer (v1) | its first value (`http` or `https`) is the request scheme: the `Secure` session cookie, HSTS, the scheme of the Origin check |
 | `X-Forwarded-Host` | never | proxies must forward the original `Host` |
 | `Forwarded` | never | ignored |
 
-- The client address keys the login rate limiter (10.1) and the share rate limits (10.7); auth warnings log both the
-  resolved `address` and the TCP `peer`; the access log is unchanged.
+- The client address (`clientAddress(c, deps.env)`) keys the login rate limiter (10.1) and the share rate limits
+  (10.7); failed-login warnings log both the resolved `address` and the TCP `peer`; the access log records no
+  addresses.
 - `X-Forwarded-Host` is never honored, neither by the Origin check nor by the password-less host guard: a DNS-rebinding
   page is same-origin with itself, reaches the server from 127.0.0.1 and can set any header, so with `loopback` trusted,
   honoring it would bypass the guard. Caddy and Traefik forward `Host` by default; nginx needs `proxy_set_header Host
   $host`.
-- The boot log lists the trusted ranges; a peer that is not trusted but sends forwarded headers is logged once per
-  address (a hint that `HF_TRUST_PROXY` is missing or too narrow).
+- Logs: with `HF_TRUST_PROXY` set, the boot log line `trusting reverse proxies (HF_TRUST_PROXY)` carries `trustProxy`
+  (the canonical entries) and `ranges` (keywords expanded). A request whose TCP peer is not trusted but that carries a
+  forwarded header the server would honor from a trusted proxy is logged once per peer address (`warn`, fields `peer`
+  and `headers`: the header names, never their values), a hint that `HF_TRUST_PROXY` is missing or too narrow. Unset,
+  only `X-Forwarded-For` counts: "X-Forwarded-For ignored: HF_TRUST_PROXY is not set. Behind a reverse proxy, set
+  HF_TRUST_PROXY to its address (for example loopback) so the login rate limit sees the real clients." Set, also
+  `X-Forwarded-Proto`: "Forwarded headers ignored: the peer is not listed in HF_TRUST_PROXY." At most 256 peer
+  addresses are remembered; after them one last warning says "Further peers sending ignored forwarded headers are not
+  logged."
 - Unset, `X-Forwarded-Proto` is still honored from anyone: harmless, because browsers ignore HSTS over plain HTTP and a
   cross-site page cannot send the header without a failing preflight.
 - Misconfiguration: `private` on a LAN where other machines reach :8787 directly lets them choose their limiter bucket
@@ -1151,19 +1231,28 @@ normalized first.
 
 ### 10.7 Share links (ADR-025)
 
-- The public routes answer the same `404 not_found` for an invalid, bad-MAC, revoked or expired token and for a
-  deleted chat (re-checked on every request); the MAC comparison is timing-safe.
-- `GET /api/share/:token/files/:fileId` serves only ids listed in the share's `file_ids`, with `Cache-Control:
-  no-store`, `X-Content-Type-Options: nosniff`, a sandboxing CSP and `Content-Disposition: inline` only for raster
-  images and PDF (`attachment` otherwise); `HEAD` is supported. The session-only `GET /api/files/:id` is never used by
-  the share page. GET routes write nothing (no view counters).
-- Rate limits (memory, `429 rate_limited` + `Retry-After`): views 60 per minute per client address, files 600 per
-  minute per address, invalid tokens 20 per 10 minutes per address, 6000 requests per minute globally; behind a proxy
-  the client address follows 10.6.
+- The public routes answer the same `404 not_found` ("This share link is unavailable.") for a malformed, bad-MAC,
+  revoked or expired token, for a deleted chat (re-checked on every request) and for a file outside the share; they
+  check the token themselves, so a malformed one is a 404 too, never a 400. The MAC comparison is timing-safe. The view
+  answers with `Cache-Control: no-store`.
+- `GET /api/share/:token/files/:fileId` serves only ids listed in the share's `file_ids`, and only while the share's
+  `attachments` option is on, with `Cache-Control: no-store` (no `ETag`: a revoked link stops serving at once),
+  `X-Content-Type-Options: nosniff`, the CSP of `GET /api/files/:id` (sandboxed except for PDF) and
+  `Content-Disposition: inline` only for raster images and PDF (`attachment` otherwise); `HEAD` is supported (the file
+  is released at once). The session-only `GET /api/files/:id` is never used by the share page. GET routes write
+  nothing (no view counters).
+- Rate limits (memory, one sliding-window limiter per app, `429 rate_limited` with `retryAfterMs` + `Retry-After`):
+  views 60 per minute per client address, files 600 per minute per address, 20 refused tokens per 10 minutes per
+  address (the address is then refused on both routes until the oldest refusal leaves the window), 6000 requests per
+  minute over both routes and every address. A refused (429) request is not counted. Only failures about the token
+  (malformed, bad MAC, revoked, expired, deleted chat) count as refused tokens; a file-only failure (an id outside the
+  share, a malformed file id, attachments off, a missing blob) does not. Behind a proxy the client address follows
+  10.6 (`clientAddress(c, deps.env)`).
 - `X-Robots-Tag: noindex, nofollow` is on every response and the share page adds `robots` and `referrer` meta tags;
   `Referrer-Policy: no-referrer` keeps the token out of `Referer` headers when a visitor follows a link.
-- Tokens never reach logs: the access log writes `/api/share/[redacted]…` and `redactText` masks `/share/<token>` in
-  any text (12).
+- Tokens never reach logs: the access log and the error handler log the path with the segment after `/share/` masked,
+  whatever its shape (`/api/share/[redacted]/files/<id>`, `/share/[redacted]`), and `redactText` masks
+  `/share/<token>` (also with `%2F` separators) in any other logged text and in error messages (12).
 - The password-less host guard (10.1) is unchanged: without `HF_PASSWORD` the share routes answer only on local host
   names, so exposing share links requires a password (the Share dialog warns when there is none).
 - Snapshots are sanitized by an allowlist (6.10), so a new AI SDK part type is dropped rather than leaked; the view
@@ -1229,12 +1318,15 @@ flowchart LR
   new one), echoed as the `X-Request-Id` response header and attached to every log line of that request. The web
   shows it in "copy diagnostics" for failed calls.
 - **Structured logs**: JSON lines on stdout: `{ time, level, msg, reqId?, pluginId?, chatId?, ...fields }`. Access log
-  per request: method, path (no query string values for secrets; share tokens masked as `/api/share/[redacted]…`),
-  status, duration, bytes. Level `info` in production, `debug` in development. Never logged: API keys and other
-  secrets (redactor, section 10.3), cookies, share tokens (`redactText` masks `/share/<token>`), message contents and
-  tool inputs/outputs (only at `debug`, still redacted), uploaded file contents.
-- **Proxy trust**: the boot log lists the `HF_TRUST_PROXY` ranges; one warning per untrusted peer address that sends
-  forwarded headers; failed-login warnings carry the resolved `address` and the TCP `peer` (section 10.6).
+  per request: method, path (never the query string; the segment after `/share/` masked as `[redacted]`, as in the
+  error handler's log line), status, duration, bytes; no headers, bodies or client addresses. Level `info` in
+  production, `debug` in development. Never logged: API keys and other secrets (redactor, section 10.3), cookies, share
+  tokens (`redactText` masks `/share/<token>` in any text), message contents and tool inputs/outputs (only at `debug`,
+  still redacted), uploaded file contents.
+- **Proxy trust** (texts in section 10.6): the boot log line `trusting reverse proxies (HF_TRUST_PROXY)` lists the
+  canonical entries and the trusted ranges; one warning per untrusted peer address that sends a forwarded header the
+  server would honor from a trusted proxy (header names only, at most 256 addresses); failed-login warnings carry the
+  resolved `address` and the TCP `peer`.
 - **Chat runs**: `run.started` / `run.finished` log lines with chat id, model ref, duration, token usage, cost,
   finish reason, outcome, error code.
 - **Plugin logs**: `ctx.logger` and guard failures write to a per-plugin ring buffer (last 500 entries, each

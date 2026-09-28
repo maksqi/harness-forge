@@ -7,7 +7,8 @@ their title run at every gate (`--grep @smoke`); every core test is.
 ```
 e2e/
   helpers/            shared helpers (this file documents their API; keep it stable)
-  specs/core/         core app: theme, navigation, chat, resume, keyboard, composer, settings, login (W2.6, W5.8)
+  specs/core/         core app: theme, navigation, chat, resume, keyboard, composer, settings, login (W2.6, W5.8),
+                      branching, data (backup, delete-all, import), share links (W5.10)
   specs/plugins/      plugins tab, install, wizard, code plugins, MCP (W3.6)
   specs/mobile/       phone layout, project `mobile` only (W5.8)
   specs/screenshots/  screenshots for the visual review, opt-in with `E2E_SCREENSHOTS=1` (W5.8)
@@ -40,7 +41,7 @@ E2E_SCREENSHOTS=1 pnpm test:e2e --grep @screenshots
 | Variable | Meaning |
 |---|---|
 | `E2E_BASE_URL` | server under test (disables the config's webServer) |
-| `E2E_AUTH_BASE_URL` | optional server started with `HF_PASSWORD`, used by the login spec; without it the spec starts its own password server from `apps/server/dist/main.mjs` on a free port with a temporary data directory |
+| `E2E_AUTH_BASE_URL` | optional server started with `HF_PASSWORD`, used by the login and share specs; without it they start their own password server from `apps/server/dist/main.mjs` on a free port with a temporary data directory. The data spec never uses it: delete-all wipes every chat, so it always starts a server of its own |
 | `E2E_AUTH_PASSWORD` | password of `E2E_AUTH_BASE_URL` (default `secret`) |
 | `E2E_SCREENSHOTS` | `1` runs the `@screenshots` spec (otherwise its tests are skipped) |
 
@@ -48,7 +49,9 @@ Specs assume a server with `HF_MOCK_PROVIDER=1`, no provider keys in its environ
 share one data directory across runs: every spec creates its own data (unique titles and texts from `uniqueId()`)
 and restores any global state it changes (settings, provider switches, credentials, custom models, chats) through
 the `cleanup` fixture, or in `finally` / `afterEach`. Prefer `cleanup`: it also runs after a timeout, when a
-`finally` block can no longer reach the API (the test's request context is closed by then).
+`finally` block can no longer reach the API (the test's request context is closed by then). Anything that needs a
+password (login, share links, delete-all) runs on a second server from `startPasswordServer()`, never on the shared
+one; a spec that wipes data asks for a server of its own (`dedicated: true`).
 
 ## Core specs (`specs/core`)
 
@@ -65,6 +68,9 @@ the `cleanup` fixture, or in `finally` / `afterEach`. Prefer `cleanup`: it also 
 | `resume.spec.ts` | a running 600-word `mock:echo` reply (about 15 s) resumes after a reload, after leaving the chat and coming back (sidebar dot `running`), and in a second tab: `streaming` again from its first words, `done` with its last word, stored exactly once (one reply, no second version) |
 | `keyboard.spec.ts` | the chat without clicks: Mod+Shift+O, Alt+M (type + Enter picks), Enter, Esc (stop), Shift+Esc, ↑ (edit; checks only that the edited text is the last user message and a reply streams), Alt+R, Alt+P, Shift+Tab / Tab / Enter on the approval card, Mod+/, Mod+B, Mod+K; `toBeFocused()` after every step |
 | `settings.spec.ts` | General (send key Mod+Enter in the composer, custom instructions), Appearance (theme, `data-reading-font` / `data-text-size` / `data-density` on `<html>`, "Expand thinking by default"), Models (default model, a custom model as favorite and hidden in the picker, removed), About (Copy diagnostics with clipboard permission: an allow-list report without secrets) |
+| `branching.spec.ts` | message versions with `mock:echo` (docs/UI.md 7.5): A, then B; editing A shows "2/2" on the user message; "Previous version" brings back A, B and their replies (focus stays on the control); Regenerate on the last reply shows "2/2" on it; a reload keeps the versions; ArrowLeft in a switcher picks the previous version, which survives a reload; the server's `branches` match. Asserted through `message-branch*` (`data-index`, `data-count`, `data-message-id`, `aria-disabled`) |
+| `data.spec.ts` | Settings -> Data on a password server of its own (`dedicated: true`): Export backup downloads a zip (`PK` magic, `manifest.json` counts, `chats/<id>.json` per chat, no share link or token); Delete all data needs exactly `DELETE` and, with the browser clock 11 minutes past the login (`page.clock.fastForward`), the password prompt, and also deletes the share links; importing the zip brings the chats back into the sidebar with their messages (no share link); a second import skips every chat |
+| `share.spec.ts` | share links on a password server: "Share…" in the chat header menu, "Create link" (defaults, focused absolute URL); a browser context without cookies opens the link as the read-only transcript (title, messages; no sidebar, composer, actions or switchers; no session); Revoke… in the dialog, then a reload of the link shows "This link is unavailable" |
 
 ## Mobile specs (`specs/mobile`, project `mobile`)
 
@@ -81,14 +87,16 @@ suite runs them, or `pnpm test:e2e --project=mobile`.
 
 `screenshots.spec.ts` (`@screenshots`) runs only with `E2E_SCREENSHOTS=1`. It starts its own password-protected server
 from the build (`startServer`, fresh data directory, whatever `E2E_BASE_URL` says), creates a few chats (markdown,
-reasoning, tool result, pending approval, provider error), and captures every screen in dark and light (stored color
-mode set by an init script), at 1440x900 and on a 390x844 phone (Pixel 7, touch), with reduced motion and a browser
-clock that starts at a fixed time two minutes after the seed (relative times read "2m ago"; the clock then runs,
-because a frozen clock stalls the transcript's scroll-to-bottom). Files:
+reasoning, tool result, pending approval, provider error, a chat whose first message and reply have two versions, and
+a chat with an outdated share link that includes reasoning and tool details), and captures every screen in dark and
+light (stored color mode set by an init script), at 1440x900 and on a 390x844 phone (Pixel 7, touch), with reduced
+motion and a browser clock that starts at a fixed time two minutes after the seed (relative times read "2m ago"; the
+clock then runs, because a frozen clock stalls the transcript's scroll-to-bottom). Files:
 `.tmp/screenshots/{dark,light}/<screen>-{desktop,mobile}.png`, for example `chat-desktop.png`, `sidebar-mobile.png`.
-Screens: login, new-chat, chat, chat-reasoning, chat-tools, chat-approval, chat-error, model-picker, command-palette,
-shortcuts (desktop), sidebar (mobile), plugins, plugin-detail, plugin-mcp, plugin-new-provider, plugin-new-code,
-settings-providers, settings-provider-key, settings-models, settings-general, settings-appearance, settings-data,
+Screens: login, new-chat, chat, chat-reasoning, chat-tools, chat-approval, chat-error, chat-versions (the "‹ 2/2 ›"
+switchers), share-dialog, share-page, share-unavailable, model-picker, command-palette, shortcuts (desktop), sidebar
+(mobile), plugins, plugin-detail, plugin-mcp, plugin-new-provider, plugin-new-code, settings-providers,
+settings-provider-key, settings-models, settings-general, settings-appearance, settings-data (with the share link),
 settings-about, chat-not-found, page-not-found.
 
 ## Writing specs
@@ -102,7 +110,8 @@ settings-about, chat-not-found, page-not-found.
   CSS or text selector on app internals.
 - Web-first assertions only (`await expect(locator).toHaveAttribute(...)`, `expect.poll`, `toPass`), no fixed sleeps.
 - Tag the tests the gate must run with `@smoke` in the title.
-- Keyboard shortcuts: `pressShortcut(page, 'Mod+K')`, not `ControlOrMeta` (see Keyboard below).
+- Keyboard shortcuts: `pressShortcut(page, 'Mod+K')`, not `ControlOrMeta`; text editing keys follow the host:
+  `selectAllText(page, field)` (see Keyboard below).
 - Assistant text is markdown: straight quotes render as typographic quotes, match them with `looseQuotes()`.
 - The helpers import `@harness-forge/shared` by path (`packages/shared/src/index.ts`): the root package does not
   depend on it, and Playwright compiles the TypeScript sources directly.
@@ -149,7 +158,8 @@ test('echoes a message @smoke', async ({ page, cleanup }) => {
 | `createChat({ id?, title?, modelRef? })` | `POST /api/chats` (a title here is a user title) |
 | `getChat(id)` / `searchChats(q)` / `deleteChat(id)` | chat detail, `GET /api/chats?q=`, delete (404 ignored) |
 | `stopChat(id)` / `removeChat(id)` | `POST /api/chat/:id/stop` (resolves to whether a run was stopped); stop, then delete (for `cleanup`) |
-| `sendChat({ chatId?, text, modelRef?, toolMode?, reasoningEffort? })` | `POST /api/chat` (default `mock:echo`, `ask`, `auto`); resolves when the run finished with `{ chatId, userMessageId, chunks, text }` |
+| `sendChat({ chatId?, text, parentId?, modelRef?, toolMode?, reasoningEffort? })` | `POST /api/chat` (default `mock:echo`, `ask`, `auto`); resolves when the run finished with `{ chatId, userMessageId, chunks, text }`. `parentId`: omitted = the active leaf, `null` = a first message; an edit sends the parent of the edited message |
+| `regenerateChat({ chatId, messageId?, modelRef?, toolMode?, reasoningEffort? })` | `POST /api/chat` with `regenerate-message`: a new version of the reply `messageId` (default: the active leaf); resolves like `sendChat` (`userMessageId` = the answered user message) |
 | `waitForChatTitle(id, timeout?)` | polls until the chat has a title and returns it |
 
 Also exported: `requestFetch(context)` (a `fetch` over an `APIRequestContext`), `parseUiMessageStream(body)`,
@@ -197,12 +207,18 @@ Also exported: `requestFetch(context)` (a `fetch` over an `APIRequestContext`), 
 | `modKey(page)` | `'Meta'` or `'Control'` |
 | `hasFocus(locator)` | whether one of its elements has focus (never waits) |
 | `pressUntilFocused(page, key, locator, max?)` | presses `key` (`Tab`, `Shift+Tab`, `ArrowDown`, ...) until the locator has focus, at most `max` (10) times |
+| `selectAllText(page, field)` | selects the whole value of a focused input or textarea with the host's `ControlOrMeta+A` and checks that all of it is selected |
 
 The app picks `Mod` from the browser's platform (`navigator.userAgentData.platform`). The "Desktop Chrome" device of
 the config reports Windows even on a Mac host, so Playwright's host-based `ControlOrMeta` presses the wrong key there:
 use `pressShortcut`. Letters are case-sensitive in Playwright: Mod+B is `pressShortcut(page, 'Mod+b')`, because the
 sidebar compares `event.key` with a lowercase `b` (the app's own registry lowercases, so `'Mod+K'` works). Text
-editing keys follow the host instead (`ControlOrMeta+A` selects all in a textarea).
+editing keys follow the host instead: `ControlOrMeta` is Meta on macOS and Control on Linux and Windows (resolved
+from the platform of the process that runs Playwright), Chromium selects all with Ctrl+A on Linux and Windows, and
+on macOS Playwright sends Meta+A as the `selectAll:` editing command, so `selectAllText` works on every host (CI runs
+Linux). CodeMirror resolves its `Mod` from `navigator.platform`, which also stays the host's (the device only changes
+the user agent), so the plugin specs use `ControlOrMeta` in the code editor. Avoid keys whose meaning differs by host
+in text fields (Home / End scroll on macOS instead of moving the caret).
 
 ### Layout (`layout.ts`)
 
@@ -216,11 +232,12 @@ editing keys follow the host instead (`ControlOrMeta+A` selects all in a textare
 
 | Export | Description |
 |---|---|
-| `startPasswordServer({ password? })` | `{ baseURL, password, stop() }`: `E2E_AUTH_BASE_URL`, or a password-protected server started with `startServer` (`auth-server.ts`) |
+| `startPasswordServer({ password?, dedicated?, label? })` | `{ baseURL, password, stop() }`: `E2E_AUTH_BASE_URL`, or a password-protected server started with `startServer` (`auth-server.ts`); `dedicated: true` always starts one with an empty data directory (for specs that wipe data); `label` names its temporary directory |
 | `startServer({ env?, label? })` | `{ baseURL, stop() }`: the build on a free port of 127.0.0.1 with a temporary data directory, `HF_MOCK_PROVIDER=1`, `HF_OFFLINE=1` and every provider key variable set empty (which also beats a repository `.env`); `stop()` removes the directory (`server.ts`) |
 | `REPO_ROOT` | the repository root (`server.ts`) |
 | `uniqueId(prefix?)` · `wordList(count, prefix?)` · `firstWords(text, count)` | unique test data (`data.ts`) |
 | `looseQuotes(text)` | a RegExp matching `text` with straight or typographic quotes: assistant markdown renders `"a"` as `“a”` (`data.ts`) |
+| `isZip(bytes)` · `zipEntries(zip)` · `readZipText(zip, name)` · `ZipEntry` | a downloaded zip with Node built-ins (`zip.ts`): the `PK\x03\x04` magic, the central directory entries (`name`, `method`, sizes), the text of one stored or deflated entry (e.g. `manifest.json` of a backup) |
 | `baseUrlFromEnv()` · `apiBaseUrl(baseURL)` · `DEFAULT_BASE_URL` | environment (`env.ts`) |
 
 ## Mock models

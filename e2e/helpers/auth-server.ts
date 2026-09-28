@@ -1,6 +1,7 @@
-// A password-protected server for the login spec (`HF_PASSWORD`, docs/UI.md 9.7). The main e2e server runs without a
-// password, so login is tested against a second instance:
-// - `E2E_AUTH_BASE_URL` (+ `E2E_AUTH_PASSWORD`, default `secret`): use a server that is already running;
+// A password-protected server (`HF_PASSWORD`, docs/UI.md 9.7) for the login, share and data specs. The main e2e server
+// runs without a password, so these specs use a second instance:
+// - `E2E_AUTH_BASE_URL` (+ `E2E_AUTH_PASSWORD`, default `secret`): use a server that is already running (never for
+//   `dedicated: true`);
 // - otherwise the production build is started with `startServer()` (./server.ts: a free port, a temporary data
 //   directory), and `stop()` ends it and removes the directory.
 import { randomBytes } from 'node:crypto'
@@ -17,9 +18,21 @@ export interface PasswordServer {
   stop: () => Promise<void>
 }
 
+export interface PasswordServerOptions {
+  /** The password of a started server (default: a random one). */
+  password?: string
+  /**
+   * Always start a server of its own with an empty data directory, even when `E2E_AUTH_BASE_URL` is set: for specs
+   * that delete every chat or count what the server holds (the data spec).
+   */
+  dedicated?: boolean
+  /** Prefix of the temporary data directory of a started server (default `hf-e2e-auth`). */
+  label?: string
+}
+
 /** Starts (or points at) a server that requires a password. Call `stop()` in `afterAll`. */
-export async function startPasswordServer(options: { password?: string } = {}): Promise<PasswordServer> {
-  const external = process.env.E2E_AUTH_BASE_URL
+export async function startPasswordServer(options: PasswordServerOptions = {}): Promise<PasswordServer> {
+  const external = options.dedicated ? undefined : process.env.E2E_AUTH_BASE_URL
   if (external) {
     return {
       baseURL: external.replace(/\/+$/, ''),
@@ -28,6 +41,6 @@ export async function startPasswordServer(options: { password?: string } = {}): 
     }
   }
   const password = options.password ?? `e2e-${randomBytes(8).toString('hex')}`
-  const server = await startServer({ env: { HF_PASSWORD: password }, label: 'hf-e2e-auth' })
+  const server = await startServer({ env: { HF_PASSWORD: password }, label: options.label ?? 'hf-e2e-auth' })
   return { ...server, password }
 }

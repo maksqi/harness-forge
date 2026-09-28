@@ -2,6 +2,8 @@
 // Model field of Settings -> Models (docs/UI.md 9.3): a select-like trigger with a searchable popover of the visible
 // models, grouped by connected provider. The composer's ModelPicker (W2.3) serves the chat; this field only needs
 // the "field" variant. `allowNone` adds a first choice that emits null. Attributes (data-testid) go to the trigger.
+// Every option carries `model-select-option` with `data-model-ref` (empty for the "none" choice, like the trigger's
+// `data-value`).
 import { ChevronsUpDownIcon } from '@lucide/vue'
 import { computed, ref } from 'vue'
 import { Button } from '@/components/ui/button'
@@ -11,6 +13,7 @@ import ModelCaps from '~/components/providers/ModelCaps.vue'
 import ModelLabel from '~/components/providers/ModelLabel.vue'
 import ProviderIcon from '~/components/providers/ProviderIcon.vue'
 import { useModelsStore } from '~/stores/models'
+import { testIds } from '~/utils/testids'
 
 defineOptions({ inheritAttrs: false })
 
@@ -83,7 +86,13 @@ function choose(value: string | null) {
             No models found.
           </CommandEmpty>
           <CommandGroup v-if="allowNone">
-            <CommandItem :value="NONE" :data-checked="modelValue === null" @select="choose(null)">
+            <CommandItem
+              :value="NONE"
+              :data-testid="testIds.modelSelectOption"
+              data-model-ref=""
+              :data-checked="modelValue === null"
+              @select="choose(null)"
+            >
               <span class="min-w-0 flex-1 truncate">{{ noneLabel }}</span>
             </CommandItem>
           </CommandGroup>
@@ -92,6 +101,7 @@ function choose(value: string | null) {
               v-for="model in group.models"
               :key="model.ref"
               :value="model.ref"
+              :data-testid="testIds.modelSelectOption"
               :data-model-ref="model.ref"
               :data-checked="model.ref === modelValue"
               @select="choose(model.ref)"

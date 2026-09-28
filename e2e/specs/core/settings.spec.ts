@@ -65,8 +65,8 @@ test.describe('settings', () => {
     await openNewChat(page)
     await selectModel(page, 'mock:echo')
     const input = page.getByTestId(testIds.composerInput)
+    // `fill` leaves the caret at the end on every host (no End: macOS scrolls with it, other hosts move the caret).
     await input.fill('First line')
-    await input.press('End')
     await input.press('Enter')
     await input.pressSequentially('Second line')
     await expect(input).toHaveValue('First line\nSecond line')

@@ -103,6 +103,23 @@ export interface SendChatInput {
   /** Default: a new uuidv7 chat (the server creates it). */
   chatId?: string
   text: string
+  /**
+   * The parent of the new message (docs/API.md 6.2): omitted = the chat's active leaf, `null` = a first message. An
+   * edit (a new version of a user message) sends the parent of the edited message.
+   */
+  parentId?: string | null
+  /** Default `mock:echo`. */
+  modelRef?: string
+  /** Default `ask`. */
+  toolMode?: ToolMode
+  /** Default `auto`. */
+  reasoningEffort?: ReasoningEffort
+}
+
+export interface RegenerateChatInput {
+  chatId: string
+  /** The reply to regenerate (a new version of it), or a user message to answer; default: the active leaf. */
+  messageId?: string
   /** Default `mock:echo`. */
   modelRef?: string
   /** Default `ask`. */
@@ -251,6 +268,7 @@ export class HarnessApi {
         chatId,
         message: { id: userMessageId, role: 'user', parts: [{ type: 'text', text: input.text }] },
         trigger: 'submit-message',
+        ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
         modelRef: input.modelRef ?? 'mock:echo',
         reasoningEffort: input.reasoningEffort ?? 'auto',
         toolMode: input.toolMode ?? 'ask',
@@ -258,6 +276,34 @@ export class HarnessApi {
     })
     const chunks = parseUiMessageStream(await response.text())
     return { chatId, userMessageId, chunks, text: streamText(chunks) }
+  }
+
+  /**
+   * Regenerates a reply through `POST /api/chat` (`regenerate-message`: a new version of the reply under the same user
+   * message) and waits until its run finished. `userMessageId` of the result is the answered user message.
+   */
+  async regenerateChat(input: RegenerateChatInput): Promise<SendChatResult> {
+    const { chatId, messageId } = input
+    // The request carries the last UI message of the shown path (the answered user message); the server reads only
+    // `messageId` (default: the active leaf).
+    const path = (await this.getChat(chatId)).messages
+    const target = messageId === undefined ? path.length - 1 : path.findIndex(message => message.id === messageId)
+    const answered = path.slice(0, target + 1).findLast(message => message.role === 'user')
+    if (target < 0 || !answered)
+      throw new Error(`Chat ${chatId} has no user message to answer${messageId ? ` for ${messageId}` : ''} on its active path.`)
+    const response = await this.client.chat.send({
+      body: {
+        chatId,
+        message: answered,
+        trigger: 'regenerate-message',
+        ...(messageId === undefined ? {} : { messageId }),
+        modelRef: input.modelRef ?? 'mock:echo',
+        reasoningEffort: input.reasoningEffort ?? 'auto',
+        toolMode: input.toolMode ?? 'ask',
+      },
+    })
+    const chunks = parseUiMessageStream(await response.text())
+    return { chatId, userMessageId: answered.id, chunks, text: streamText(chunks) }
   }
 
   /** Waits until the chat has a title (auto titles arrive shortly after the first reply) and returns it. */

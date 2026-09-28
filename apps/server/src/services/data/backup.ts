@@ -32,7 +32,7 @@ import { chats, files, messages } from '../../db/schema.ts'
 import { appVersion } from '../../paths.ts'
 import { guardDb } from '../chats/db-errors.ts'
 import { FILE_URL_PREFIX } from '../files/index.ts'
-import { formatBytes, payloadTooLarge } from './limits.ts'
+import { formatBytes, payloadTooLarge, tooManyEntries } from './limits.ts'
 import { referencedFileIds } from './parts.ts'
 
 /** Unix host and a regular file with mode 0644 in the upper 16 bits of the external attributes. */
@@ -135,9 +135,9 @@ export async function planBackup(deps: AppDeps, query: DataExportQuery, limits: 
       : 'Delete some chats, or export chats one by one.'
     if (entries > limits.backupEntries || blobs.rows > limits.backupEntries) {
       const count = Math.max(entries, blobs.rows)
-      throw payloadTooLarge(
+      throw tooManyEntries(
         `The backup would have ${count.toLocaleString('en-US')} entries, more than the ${limits.backupEntries.toLocaleString('en-US')} a backup can hold. ${hint}`,
-        limits.backupBytes,
+        limits.backupEntries,
       )
     }
     if (bytes > limits.backupBytes)

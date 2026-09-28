@@ -5,6 +5,11 @@ from `docs/DECISIONS.md` (ADR-023 … ADR-027 and the contract seed; it wins on 
 `docs/API.md`; components, props, store members and test ids from `docs/UI.md`; tables, flows and security rules
 from `docs/ARCHITECTURE.md`; the live provider suite from `docs/PROVIDERS.md` section 12.
 
+**Status (2026-09-28):** P5-0a, P5-0b and P5-A are done and committed (`0b56f45`, `c4207b5`, `69f1676`). P5-B runs
+W5.10 (feature e2e), W5.11 (docs) and W5.13 (web fix-ups); W5.12 (server fix-ups) was not needed because the P5-A gate
+was green. The final gate is next. "Outcome" at the end of this file records what actually happened in each wave;
+the plan sections below were corrected where the implementation differs from the plan.
+
 ## Goal
 
 Ship v1.1. Pay the v1 debt (the missing W4.5 e2e specs, the built-page CSP test that never ran in CI, dependency
@@ -18,7 +23,9 @@ provider layer exercised only with the mock provider) and add three features:
 - **Read-only share links** (ADR-025): a sanitized snapshot of a chat's active path at `/share/<token>`.
 
 Out of scope (ROADMAP backlog): multimodal/RAG, plugin isolation and registry, multi-user, desktop/CLI clients,
-attachment editing on edit, deleting a message version, a remembered version per message, master-key rotation.
+attachment editing on edit, deleting a message version, a remembered version per message, master-key rotation. Moved
+to the backlog during Phase 5: one shared fresh-auth composable (the password-prompt-and-retry flow is repeated in
+the plugin, data and share UIs) and pushing version switches to other open tabs (`chat.updated` carries no leaf id).
 
 Totals after Phase 5: routes 62 → **73** (11 new), tables 14 → **15** (`chat_shares`), migrations
 `0000_initial_schema` + **`0001`** (message tree + `chat_shares`), ADR-023 … ADR-027.
@@ -66,7 +73,7 @@ Manual acceptance (coordinator, `pnpm dev`):
 | Gate P5-0b | coordinator | audit, check, build, CSP test, e2e regression, v1 upgrade probe, FREEZE, commit |
 | P5-A | W5.1 – W5.9 (one launch) | features + stabilization |
 | Gate P5-A | coordinator (K5) | CCR batch, `nuxi prepare`, check, build, probes, e2e (both projects), screenshots, audit, commit |
-| P5-B | W5.10, W5.11, W5.12/13 | feature e2e, docs reconciliation, fix-ups |
+| P5-B | W5.10, W5.11, W5.13 (W5.12 not needed) | feature e2e, docs reconciliation, web fix-ups |
 | Final gate | coordinator (K6) | e2e ×3, Docker upgrade, optional live suite, ROADMAP, commit |
 
 ## Deviations from the plan (binding)
@@ -597,8 +604,10 @@ Nine agents in one launch against the P5-0b checkpoint (the coordinator builds i
   2. **W5.3-T2 Streamed export** — fflate `Zip` with `ZipPassThrough` / `ZipDeflate` in a pull-based
      `ReadableStream` (one chat or one 64 KB file chunk per pull); layout of ARCHITECTURE.md 6.9; `manifest.json`
      written last with exact counts; `settings.json` = public `Settings` only, when `settings=true`; files stored for
-     images / PDF and deflated for text; entries mode 0644 with mtime = `exportedAt`; a pre-check answers 413
-     (suggesting `files=false`) above 3.5 GiB or 65k entries (no zip64); HEAD cancels the stream at once.
+     images / PDF and deflated for text; entries mode 0644 with mtime = `exportedAt`; a pre-check answers 413 above
+     3.5 GiB or `LIMITS.backupEntriesMax` (50,000) entries (no zip64; the plan said 65k, the coordinator aligned it
+     with the import cap so every export stays importable), suggesting `files=false` only when that would fit; HEAD
+     cancels the stream at once.
      *Accept:* a seeded secret sentinel never appears in the zip.
   3. **W5.3-T3 `openZip()`** — additive lazy reader in `plugins/install/zip.ts` reusing the installer guards
      (traversal, symlinks, duplicates, entry count, declared size, exact inflation, CRC, overlapping entries).
@@ -635,14 +644,16 @@ Nine agents in one launch against the P5-0b checkpoint (the coordinator builds i
   2. **W5.4-T2 Snapshot** — the active path (`chats.get(id).messages`) through the allowlist sanitizer of
      ARCHITECTURE.md 6.10: drop system messages, instructions, `metadata.error`, usage and cost,
      `command.expansion`, provider metadata, approvals, `data-*`, `step-start`, `reasoning-file`, unknown parts and
-     non-raster data URLs; keep reasoning and tool details sanitized (16 KB cap per value) so the options can be
-     applied when the view is served; collect `file_ids`; snapshot > 10 MiB → 413.
+     non-raster data URLs; keep reasoning and tool details sanitized so the options can be applied when the view is
+     served (implemented: a tool input or output longer than `LIMITS.shareToolValueChars`, 16,384 characters, as JSON
+     text becomes a string: that text cut + `\n[truncated]`; `errorText` is clipped to 4,096 characters, the cap of
+     the shared schema); collect `file_ids`; snapshot > 10 MiB → 413.
   3. **W5.4-T3 Owner routes** — `GET /shares?chatId`, `POST /shares` (201, fresh, ≤ 20 per chat, `expiresAt` in the
      future and ≤ 365 days ahead), `PATCH /shares/:id` (title, options, `expiresAt`, `refresh: true`; fresh; the token
      never changes; changed options apply to the page at once, `refresh: true` re-snapshots), `DELETE /shares/:id`
      (not fresh).
-     `outdated` = the chat changed after the snapshot (`chats.updated_at > snapshot_at`, or the active path length
-     differs from `message_count`); `expired` = `expires_at <= now`.
+     `outdated` = the chat changed after the snapshot (`chats.updated_at > snapshot_at`, or the number of user and
+     assistant messages on the active path differs from `message_count`); `expired` = `expires_at <= now`.
   4. **W5.4-T4 Public routes** — `GET /share/:token` → `ShareView` (the options applied: reasoning, tool details and
      file parts left out when disabled; file URLs rewritten to `/api/share/<token>/files/<id>`);
      `GET /share/:token/files/:fileId` (only ids in `file_ids` and only with `options.attachments`; `Cache-Control:
@@ -927,7 +938,9 @@ W5.6's); `apps/server/src/chat/types.ts` and `services/{data,shares,files}/types
 ### Coordinator actions
 
 - Before the launch: the P5-A checkpoint build for W5.10; W5.12 / W5.13 globs from the red P5-A gate items added to
-  `.tmp/waves/P5-B.json`; the agent reports of P5-A handed to W5.11.
+  `.tmp/waves/P5-B.json`; the agent reports of P5-A handed to W5.11. As launched: the P5-A gate was green, so W5.12
+  (server fix-ups) was not needed; W5.13 got the web details found at the gate; the P5-A reports reached W5.11 as
+  the coordinator's digest `.tmp/waves/P5-A-notes.md`.
 - **K6**: the final gate below; ROADMAP (every Phase 5 box, backlog, wave log); the memory file; push only when the
   user asks.
 
@@ -952,17 +965,50 @@ W5.6's); `apps/server/src/chat/types.ts` and `services/{data,shares,files}/types
 
 - **Mission.** Reconcile every doc with the code and the agent reports.
 - **Owned.** `README.md`, `.env.example`, `docs/**` except `DECISIONS.md` and `ROADMAP.md`.
+- **Read-only highlights.** `.tmp/waves/P5-A-notes.md` (the P5-A report digest: contract facts, deviations, the items
+  marked "For W5.11"), the code of every Phase 5 area.
 - **Tasks.**
-  1. **W5.11-T1 Reconcile** — API.md vs the route table, UI.md 13 vs `utils/testids.ts`, component contracts,
-     ARCHITECTURE.md vs the implemented flows (tokens, sanitizer, limits, `outdated`), README env table vs `env.ts`.
-  2. **W5.11-T2 Deferred phase-4 ticks** — SEC-A3 rewritten for `HF_TRUST_PROXY`, SEC-C1, SEC-I1, SEC-I3, `actionlint`.
-  3. **W5.11-T3 PROVIDERS.md** — live results into section 11 (when the coordinator ran the suite).
-  4. **W5.11-T4 Status** — README "v1.1"; refresh `docs/assets/screenshots/` when the UI changed visibly.
+  1. **W5.11-T1 Reconcile** — API.md vs the route table and the implemented behavior (errors and the conflict reasons
+     `run-active` / `busy` / `exists`, limits, the import error split, the share value caps); UI.md 13 vs
+     `utils/testids.ts` (plus W5.13's two ids), the component contracts, `useChatSession` (`takeBackUnstored()`), the
+     copy (15) and the dialog layout (14.5); ARCHITECTURE.md vs the implemented flows (tokens, sanitizer, rate-limit
+     accounting, `outdated`, the reply transaction, the `HF_TRUST_PROXY` parse rules, the boot log and warning texts,
+     share-token masking); README env table vs `env.ts`; PROVIDERS.md 12 vs `S/live/**`.
+  2. **W5.11-T2 Deferred phase-4 ticks** — SEC-A3 rewritten for `HF_TRUST_PROXY`, SEC-C1, SEC-I1, SEC-I3 with
+     evidence; SEC-A1 (8 public routes) and SEC-B1 (no `Origin` and no `Sec-Fetch-Site` passes by design) reworded;
+     the release `actionlint` box stays open unless there is `actionlint` evidence.
+  3. **W5.11-T3 PROVIDERS.md** — live results into section 11 when the suite ran; otherwise section 11 stays
+     "Unverified" and says how to record results.
+  4. **W5.11-T4 Status** — README "v1.1" (features and the user actions for Dependabot and the `live-providers`
+     environment); refresh `docs/assets/screenshots/` only when a README image changed visibly (copied from the gate
+     screenshots in `.tmp/screenshots/`, same file names).
+  5. **W5.11-T5 This file** — describes what actually happened (status, deviations, gate results per wave).
 - **Verify.** `pnpm check:english`; `pnpm -F @harness-forge/shared test` (doc-coupled tests).
 
-### W5.12 / W5.13 fix-ups
+### W5.12 server fix-ups
 
-Red gate items only; their globs are assigned at the P5-A gate and added to `.tmp/waves/P5-B.json`.
+Not launched: the P5-A gate had no red server item.
+
+### W5.13 web fix-ups
+
+- **Mission.** The web details found at the P5-A gate.
+- **Owned.** `W/components/app-shell/{ModeTabs.vue,ModeTabs.test.ts,AppSidebar.test.ts,ChatNav.test.ts}`,
+  `W/components/app-shell/chat-nav/ChatNavRow.vue`, `W/components/ui/sidebar/**` (frozen; opened for this fix,
+  recorded in `apps/web/AI_ELEMENTS_PATCHES.md`), the Settings → Models components
+  (`W/components/settings/{models*,Models*,CustomModel*,custom-model*,ProviderModelsSection*,SettingsModelSelect*}`),
+  `W/pages/settings/models.vue`, `W/utils/testids.ts` (frozen; opened for the two new ids).
+- **Tasks.**
+  1. Touch targets of 40 px on touch screens (coarse pointer, UI.md 14.5): the Chat | Plugins mode tabs and the
+     chat-row actions button (the row title keeps clear of it).
+  2. The mobile sidebar sheet is 18rem wide (`SIDEBAR_WIDTH_MOBILE`) instead of 75 % of the screen: a `ui/sidebar`
+     patch, because `SheetContent`'s `data-[side=*]:w-3/4` outranked the plain width class.
+  3. Mod+B toggles the sidebar with Caps Lock on or a non-Latin layout, too: a `ui/sidebar` patch that matches the key
+     like the shortcut registry (case-insensitive, the physical B key for non-Latin layouts; never with Alt, during
+     IME composition or for an event another handler already took). The coordinator's final edit excludes Shift:
+     Mod+Shift+B stays the browser's bookmarks-bar shortcut.
+  4. Two new test ids for Settings → Models (UI.md 13.4): `model-select-option` (carries `data-model-ref`) and
+     `model-row-menu`.
+- **Verify.** Web commands.
 
 ### Wave P5-B ownership
 
@@ -982,6 +1028,23 @@ Red gate items only; their globs are assigned at the P5-A gate and added to `.tm
       "docs/phases/**",
       "docs/guides/**",
       "docs/assets/**"
+    ],
+    "W5.13": [
+      "apps/web/app/components/app-shell/ModeTabs.vue",
+      "apps/web/app/components/app-shell/ModeTabs.test.ts",
+      "apps/web/app/components/app-shell/AppSidebar.test.ts",
+      "apps/web/app/components/app-shell/chat-nav/ChatNavRow.vue",
+      "apps/web/app/components/app-shell/ChatNav.test.ts",
+      "apps/web/app/components/ui/sidebar/**",
+      "apps/web/AI_ELEMENTS_PATCHES.md",
+      "apps/web/app/components/settings/models*",
+      "apps/web/app/components/settings/Models*",
+      "apps/web/app/components/settings/CustomModel*",
+      "apps/web/app/components/settings/custom-model*",
+      "apps/web/app/components/settings/ProviderModelsSection*",
+      "apps/web/app/components/settings/SettingsModelSelect*",
+      "apps/web/app/pages/settings/models.vue",
+      "apps/web/app/utils/testids.ts"
     ]
   },
   "allow": [
@@ -1004,9 +1067,79 @@ Red gate items only; their globs are assigned at the P5-A gate and added to `.tm
    build the v1 image from `4c461a0` (`git worktree add .tmp/v1 4c461a0 && docker build -t harness-forge:v1
    .tmp/v1`), run it on a fresh volume, create two chats, stop it, start the v1.1 image on the same volume → both
    chats load with a linear parent chain and new messages work.
-8. Optional: `pnpm test:live` with the user's keys (ask first) → results to W5.11 / PROVIDERS.md 11.
+8. Optional: `pnpm test:live` with the user's keys (ask first) → the coordinator records the results in
+   PROVIDERS.md 11 (W5.11 finished before the final gate; section 11 says how).
 9. ROADMAP + wave log → commit `chore: final gate for harness-forge v1.1`; update the memory file
    `harness-forge-rebuild.md`; push only when the user asks.
+
+---
+
+## Outcome
+
+What actually happened, wave by wave. The gate results are copied from the ROADMAP wave log ("audit" there is the
+ownership audit of `scripts/audit-ownership.mjs`).
+
+| Wave | Agents | Gate result | Commit |
+|---|---|---|---|
+| P5-0a | coordinator (K1, K2), C7, D5 | audit ok; 3623 tests; build ok; built-page CSP test 38/38; 11 new routes mounted (501, or 400 where body validation runs before the stub); e2e 27/27; `vue-stream-markdown` gone, TypeScript 6.0.3 only | `0b56f45` |
+| P5-0b | coordinator (K3, K4), C8, C9 | audit ok; 3676 tests; build ok; CSP 38/38; e2e 27/27; v1 data upgrade probe ok (12/12 messages, parent chain and active leaves correct); `.gitignore` `data/` → `/data/`; FREEZE | `c4207b5` |
+| P5-A | W5.1 – W5.9 | audit ok (147 paths); 4202 tests; build ok; CSP 38/38 with `HF_TEST_REQUIRE_WEB_BUILD=1`; probes ok (branch switch + 409 `run-active`, export v2 round trip, backup without secrets + import / skip on a fresh server, anonymous share view + revoke 404 + masked token logs, trusted-proxy limiter buckets + `X-Forwarded-Host` 403); e2e 41 passed (`chromium` + `mobile`) + 4 screenshot tests (96 PNGs reviewed); `pnpm audit --prod` clean | `69f1676` |
+| P5-B | W5.10, W5.11, W5.13 | in progress (W5.12 not needed) | — |
+| Final gate | coordinator (K6) | pending | — |
+
+### P5-0a and P5-0b
+
+- The 501 probe of Gate P5-0a printed 400 for the routes whose body is validated before the stub runs;
+  `routes-mounted.test.ts` covers the full matrix (no new route answers 404).
+- Gate P5-0b changed `.gitignore` from `data/` to `/data/`: source folders named `data` (`S/services/data/`,
+  `W/components/settings/data/`) were ignored.
+
+### P5-A
+
+- **K5 CCR batch** (applied at the gate): `S/http/routes/shares.ts` keys the share rate limits by
+  `clientAddress(c, deps.env)` (trusted proxies) and the frozen `S/services/shares/types.ts` comment says so; the
+  frozen `S/services/data/types.ts` comment names `LIMITS.backupEntriesMax` (50,000) instead of 65,000 entries;
+  `S/deps.test.ts` dropped the skeleton's `not_implemented` rows; `S/testing/fakes.test.ts` follows the required
+  `parentId` (W5.1's pre-approved CCR); `.tmp/e2e` was wiped before the e2e run (chats written by the P5-0b build had
+  no parents; development data only).
+- **Implementation facts that differ from the plan text** (the docs were reconciled in P5-B):
+  - Bulk data: the export pre-check caps entries at `LIMITS.backupEntriesMax` (50,000) and suggests `files=false` only
+    when that would fit. Import errors split three ways: structural guard failures and a bad manifest or file index →
+    400; a damaged, oversized or bomb chat entry fails only that chat; a bad blob → `filesMissing` + a warning. The
+    import route parses the multipart body itself (no double buffering).
+  - Share links: `errorText` is clipped to 4,096 characters (the shared schema); a tool value longer than 16,384
+    characters becomes a string cut + `\n[truncated]`; `outdated` counts user and assistant messages only; a file
+    outside the share (or a malformed file id) answers the same 404 without counting against the invalid-token limit.
+  - Branching: the reply is stored with the active-leaf update in one database transaction (file database:
+    `busy_timeout` 5000 ms through the libsql client `timeout`); retry on an older failed reply regenerates that
+    reply.
+  - Web: `ChatMessage` emits `select-version`; `useChatSession` gained `takeBackUnstored()`; a send whose parent
+    vanished (404) reloads the chat, shows "This chat changed elsewhere and was reloaded." and puts the unsent text back
+    into the composer; the import result component is `DataImportResultPanel`; `SharesSettingsSection` renders its own
+    "Shared links" section; no dialog goes full-screen below `sm` (the Share dialog caps its height and scrolls).
+  - Live suite: the reasoning check uses `low` or the model's lowest offered effort; reasoning-capable models get the
+    2048-token cap even on `auto`; unpriced models count at $3 / $15 per 1M tokens; `HF_LIVE_PROVIDERS=none` is a dry
+    run; a 7th column reports the key-in-logs check.
+- **Moved to the backlog:** one shared fresh-auth composable (the password-prompt-and-retry flow now exists in four
+  copies: two in the plugin UI, one each in the data and share UIs); pushing a version switch to other open tabs
+  (`chat.updated` carries no leaf id, so another tab keeps showing its version until it reloads the chat).
+
+### P5-B
+
+- W5.12 was not launched (no red server item); W5.13 took the four web details listed in its section (the two
+  `ui/sidebar` patches are recorded in `apps/web/AI_ELEMENTS_PATCHES.md`). Known leftover for the backlog: the
+  icon-mode sidebar buttons on touch tablets (≥ 769 px, where the sidebar is not a sheet) stay 32 px.
+- W5.11 reconciled API.md, UI.md, ARCHITECTURE.md, PROVIDERS.md, PLUGINS.md (the `chat.messages` hook sees the path
+  being answered; plugins are not part of a backup), README (status "v1.1", maintainer setup) and `.env.example` with
+  the code; ticked SEC-A3, SEC-C1, SEC-I1 and SEC-I3 in `phase-4-hardening.md` (38 of 39 boxes ticked; the release
+  `actionlint` box stays open: `actionlint` is not installed and no workflow runs it). `pnpm audit --prod` is clean;
+  the full audit reports one accepted, dev-only moderate advisory (GHSA-67mh-4wv8-2f99, esbuild through drizzle-kit).
+  PROVIDERS.md 11 stays "Unverified": the live suite has not run yet. Of the README screenshots only
+  `settings-dark.png` changed visibly (the new "Data" item); it was replaced by the P5-A gate capture
+  `settings-providers-desktop.png` (dark).
+- User actions after the push: enable Dependabot alerts; create the GitHub environment `live-providers` (a required
+  reviewer and the provider key secrets) for `.github/workflows/live.yml`; watch Dependabot's first npm run on pnpm 11
+  (Renovate is the documented fallback).
 
 ---
 

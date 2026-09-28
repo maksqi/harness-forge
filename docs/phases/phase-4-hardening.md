@@ -223,8 +223,8 @@ Known issues collected at the Wave A and B gates; each is either fixed in Wave C
 |---|---|---|
 | `plugins/host.test.ts` hot-reload (fs.watch) tests are timing-sensitive under full-suite load | server tests | W4.6 |
 | markstream-vue CSS ships unscoped `.container` rules that can leak into the app layout | web (`Markdown.vue`) | W4.2 to scope or override |
-| The copied AI Elements components that import `vue-stream-markdown` are unused (candidate to drop the dependency and its `overrides` pin) | web dependencies | coordinator decision |
-| The login rate limiter ignores `X-Forwarded-For` | server | documented (reverse-proxy caveat, SEC-A3) |
+| The copied AI Elements components that import `vue-stream-markdown` are unused (candidate to drop the dependency and its `overrides` pin) | web dependencies | removed in Phase 5 (K2, ADR-007; SEC-I1) |
+| The login rate limiter ignores `X-Forwarded-For` | server | fixed in Phase 5: `HF_TRUST_PROXY` (ADR-026, W5.7; SEC-A3) |
 | `apps/server/assets/catalog/` (models.dev snapshot) and `apps/server/drizzle/` must ship next to `dist/` | packaging | W4.3 (Dockerfile copies both; ARCHITECTURE.md section 11) |
 
 ## Security checklist
@@ -234,25 +234,38 @@ by W4.1 and fixed by the owner or a fix-up agent.
 
 Evidence was recorded by W5.9 in Phase 5 (P5-A, 2026-09-28): `<file> › <describe> › <test>` with the titles exactly as
 written in the source (`%s`, `%j` and `$key: $name` are the title templates of table-driven `it.each` tests), or a
-commit of the ROADMAP wave log. Every pointer was checked to exist. SEC-A3, SEC-C1, SEC-I1, SEC-I3 and the release
-`actionlint` box stay open for W5.11 (P5-B).
+commit of the ROADMAP wave log. Every pointer was checked to exist. W5.11 (P5-B, 2026-09-28) closed the deferred
+items SEC-A3 (rewritten for `HF_TRUST_PROXY`), SEC-C1, SEC-I1 and SEC-I3, reworded SEC-A1 and SEC-B1 to match the code
+and re-checked every pointer; the release `actionlint` box stays open (no `actionlint` run exists yet).
 
 **A. Auth**
 - [x] SEC-A1 With a password set, every non-public `/api/*` route returns 401 `unauthorized` without a session
-  (route-table-driven test; public: `GET /health`, `GET /auth/status`, `POST /auth/login`, `POST /auth/logout`,
-  `GET /icons/lobe`, `GET /icons/lobe/:slug`; Phase 5 adds the public share routes `shares.view` and `shares.file`,
-  ADR-025).
-  Evidence: `apps/server/src/http/middleware/session-auth.test.ts › with a password and no session › %s answers 401 unauthorized (action login)`.
+  (route-table-driven test). Exactly 8 routes are public: `GET /health`, `GET /auth/status`, `POST /auth/login`,
+  `POST /auth/logout`, `GET /icons/lobe`, `GET /icons/lobe/:slug`, and since Phase 5 the share routes
+  `GET /share/:token` (`shares.view`) and `GET /share/:token/files/:fileId` (`shares.file`, ADR-025).
+  Evidence: `apps/server/src/http/middleware/session-auth.test.ts › with a password and no session › %s answers 401 unauthorized (action login)`;
+  `… › with a password and no session › the public routes are exactly the ones of ARCHITECTURE.md 10.1`.
 - [x] SEC-A2 `hf_session` is HttpOnly, SameSite=Strict, Secure on HTTPS, HMAC-verified, expires, and is invalidated
   by a password change.
   Evidence: `apps/server/src/http/middleware/session-auth.test.ts › session cookie › is set by login with HttpOnly, SameSite=Strict, Path=/ and a 30-day Max-Age`;
   `… › session cookie › is Secure over HTTPS (X-Forwarded-Proto: https counts)`;
   `… › session cookie › rejects a modified, an expired and a revoked cookie`;
   `apps/server/src/http/routes/auth.test.ts › pUT /auth/password › changes the password: requires the current one; every other session ends`.
-- [ ] SEC-A3 Login is rate-limited with backoff; password checks are constant-time scrypt. The limiter keys on the
-  socket address and ignores `X-Forwarded-For`, so behind a reverse proxy every client shares one bucket
-  (documented in ARCHITECTURE.md section 10 and the README).
-  Deferred to W5.11 (P5-B): the item needs rewording for `HF_TRUST_PROXY` (ADR-026).
+- [x] SEC-A3 Login is rate-limited (5 failed checks per client address and 50 in total per 15 minutes, then 429
+  `rate_limited` with `Retry-After`); password checks are scrypt with a constant-time comparison (`timingSafeEqual`).
+  The limiter keys on the client address (ADR-026): the TCP peer, or, only when the peer is listed in
+  `HF_TRUST_PROXY`, the client named by `X-Forwarded-For` (walked right to left, skipping trusted hops). Forwarded
+  headers from any other peer are ignored, and rotating forged `X-Forwarded-For` values still hit the global cap.
+  With `HF_TRUST_PROXY` unset (the v1 behavior) every client behind a reverse proxy shares the proxy's bucket
+  (ARCHITECTURE.md 10.6, README "Behind a reverse proxy").
+  Evidence: `apps/server/src/http/routes/auth.test.ts › behind a reverse proxy (HF_TRUST_PROXY, ADR-026) › a trusted proxy: one bucket per forwarded client`;
+  `… › behind a reverse proxy (HF_TRUST_PROXY, ADR-026) › without HF_TRUST_PROXY every client behind the proxy shares its bucket (X-Forwarded-For is ignored)`;
+  `… › behind a reverse proxy (HF_TRUST_PROXY, ADR-026) › a peer outside HF_TRUST_PROXY cannot choose its bucket`;
+  `… › behind a reverse proxy (HF_TRUST_PROXY, ADR-026) › rotating forged X-Forwarded-For values still hit the global cap`;
+  `… › login rate limit › 5 failures per address -> 429 rate_limited with Retry-After, even for the right password`;
+  `apps/server/src/http/middleware/login-rate-limit.test.ts › login rate limiter › defaults to 5 failures per address and 50 globally per 15 minutes`;
+  `apps/server/src/security/password.test.ts › hashPassword / verifyPassword › rejects a wrong password`
+  (`verifyPassword` in `apps/server/src/security/password.ts` compares with `timingSafeEqual`).
 - [x] SEC-A4 A non-loopback bind is refused without `HF_PASSWORD` or `HF_INSECURE=1`.
   Evidence: `apps/server/src/env.test.ts › bind safety › refuses a non-loopback bind without a password unless HF_INSECURE=1`;
   `apps/server/src/main.test.ts › main.ts bind safety › a non-loopback HF_HOST without a password exits with code 1 and a clear message`.
@@ -264,11 +277,15 @@ commit of the ROADMAP wave log. Every pointer was checked to exist. SEC-A3, SEC-
   `apps/server/src/plugins/scaffold/index.test.ts › trust re-pinning (ADR-017) › a save of a created plugin keeps it trusted across a reload`.
 
 **B. Origin / CSRF**
-- [x] SEC-B1 Every state-changing request needs a same-origin `Origin` (or `Sec-Fetch-Site: same-origin`); otherwise
-  403 `forbidden`.
-  Evidence: `apps/server/src/security/request-guards.test.ts › sEC-B1: every state-changing route refuses cross-site requests › %s`.
-  By design, a request with neither `Origin` nor `Sec-Fetch-Site` (a non-browser client such as curl) passes:
-  `apps/server/src/http/middleware/origin-check.test.ts › state-changing requests › pass: %s`.
+- [x] SEC-B1 Every state-changing request (any method except GET, HEAD and OPTIONS) with an `Origin` header needs the
+  server's own origin (scheme + `Host`); without `Origin`, `Sec-Fetch-Site` must be `same-origin` or `none`; otherwise
+  403 `forbidden`. By design, a request with neither `Origin` nor `Sec-Fetch-Site` passes: current browsers send at
+  least one of them with every state-changing request, so in practice only a non-browser client (such as curl) sends
+  neither, and it cannot ride on the user's cookie.
+  Evidence: `apps/server/src/security/request-guards.test.ts › sEC-B1: every state-changing route refuses cross-site requests › %s`;
+  `apps/server/src/http/middleware/origin-check.test.ts › state-changing requests › pass: %s` (the first row: no
+  `Origin`, no `Sec-Fetch-Site`);
+  `… › state-changing requests › 403 forbidden without Origin and Sec-Fetch-Site: %s`.
 - [x] SEC-B2 No CORS headers are ever sent; GET/HEAD never change state (including `GET /events`).
   Evidence: `apps/server/src/security/request-guards.test.ts › sEC-B2 / SEC-C1 / SEC-C2: headers of every answer › %s`;
   `… › sEC-B2: GET and HEAD never change stored state › every GET route, and HEAD of it, leaves every table as it was`.
@@ -276,10 +293,16 @@ commit of the ROADMAP wave log. Every pointer was checked to exist. SEC-A3, SEC-
   Evidence: `apps/server/src/security/request-guards.test.ts › sEC-B3: JSON routes refuse non-JSON bodies › %s`.
 
 **C. CSP and headers**
-- [ ] SEC-C1 CSP on SPA and API responses: `default-src 'self'`, inline scripts only by hash, no `unsafe-eval`,
-  `object-src 'none'`, `base-uri 'none'`, `frame-ancestors 'none'`.
-  Deferred to W5.11 (P5-B). Since P5-A the built-page CSP test (`apps/server/src/http/static.test.ts`) runs in the CI
-  `e2e` job right after `pnpm build` with `HF_TEST_REQUIRE_WEB_BUILD=1`, so a missing build fails instead of skipping.
+- [x] SEC-C1 CSP on SPA and API responses. The SPA HTML: `default-src 'self'`, inline scripts only by hash (computed
+  from the served file), no `unsafe-eval` or `unsafe-inline` for scripts (`'wasm-unsafe-eval'` only allows WebAssembly
+  compilation, ARCHITECTURE.md 10.2), `object-src 'none'`, `base-uri 'none'`, `frame-ancestors 'none'`. API
+  responses: `default-src 'none'; frame-ancestors 'none'`.
+  Evidence: `apps/server/src/http/static.test.ts › the built SPA (apps/web/.output/public, when a build exists or HF_TEST_REQUIRE_WEB_BUILD=1) › sEC-C1: the CSP of the real 200.html allows exactly its inline scripts, nothing inline-executable`
+  (since P5-A it runs in the CI `e2e` job right after `pnpm build` with `HF_TEST_REQUIRE_WEB_BUILD=1`, so a missing
+  build fails instead of skipping; the P5-0a, P5-0b and P5-A gates ran the file after `pnpm build`, 38/38);
+  `apps/server/src/security/headers.test.ts › spaCsp › has the directives of ARCHITECTURE.md 10.2 and never unsafe-eval or inline scripts`;
+  `… › static header values › match ARCHITECTURE.md 10.2`;
+  `apps/server/src/security/request-guards.test.ts › sEC-B2 / SEC-C1 / SEC-C2: headers of every answer › %s`.
 - [x] SEC-C2 `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy:
   same-origin`.
   Evidence: `apps/server/src/security/request-guards.test.ts › sEC-B2 / SEC-C1 / SEC-C2: headers of every answer › %s`.
@@ -362,16 +385,24 @@ commit of the ROADMAP wave log. Every pointer was checked to exist. SEC-A3, SEC-
   every other string renders through Vue text interpolation (SEC-H1: no `v-html`).
 
 **I. Dependency pins**
-- [ ] SEC-I1 `pnpm why typescript` shows only 6.0.x; `pnpm why vue-stream-markdown` shows only 1.x (or none once the
+- [x] SEC-I1 `pnpm why typescript` shows only 6.0.x; `pnpm why vue-stream-markdown` shows only 1.x (or none once the
   copied AI Elements components no longer import it).
-  Deferred to W5.11 (P5-B). The P5-0a gate (wave-log commit `0b56f45`) recorded `vue-stream-markdown` gone
-  (ADR-007) and TypeScript 6.0.3 only.
+  Evidence: `pnpm why -r typescript` lists only `typescript@6.0.3` and `pnpm why -r vue-stream-markdown` prints nothing
+  (W5.11, 2026-09-28); `pnpm-lock.yaml` has a single `typescript@6.0.3` package and no `vue-stream-markdown`
+  (removed in P5-0a, ADR-007); `pnpm-workspace.yaml` pins `typescript: ~6.0.3`; wave-log commit `0b56f45` (P5-0a
+  gate: `vue-stream-markdown` gone, TypeScript 6.0.3 only).
 - [x] SEC-I2 CI installs with `--frozen-lockfile`; `allowBuilds` lists only reviewed packages.
   Evidence: `.github/workflows/ci.yml` (`pnpm install --frozen-lockfile` in the `check` and `e2e` jobs);
   `pnpm-workspace.yaml` (`allowBuilds`: `esbuild`, `vue-demi`, each with its reason; `strictDepBuilds: true`).
-- [ ] SEC-I3 `pnpm audit --prod` reviewed by the coordinator; high/critical findings fixed or documented.
-  Deferred to W5.11 (P5-B). Since P5-A, `.github/workflows/audit.yml` runs
+- [x] SEC-I3 `pnpm audit --prod` reviewed by the coordinator; high/critical findings fixed or documented.
+  Evidence: `pnpm audit --prod` reports "No known vulnerabilities found" (the P5-A gate, wave-log commit `69f1676`,
+  and again W5.11, 2026-09-28); since P5-A, `.github/workflows/audit.yml` runs
   `pnpm audit --prod --audit-level high --ignore-registry-errors` on every push to `main`, every pull request and weekly.
+  Accepted: the full `pnpm audit` (dev dependencies included) reports one moderate advisory, GHSA-67mh-4wv8-2f99
+  (the esbuild development server answers cross-origin requests; esbuild <= 0.24.2), through the dev-only path
+  `apps/server > drizzle-kit > @esbuild-kit/esm-loader > @esbuild-kit/core-utils > esbuild@0.18.20`. drizzle-kit only
+  runs for `pnpm db:generate` (coordinator), never starts an esbuild development server, and is not part of the
+  production install or the Docker image (`--prod --filter=@harness-forge/server`).
 
 ## Release checklist
 
@@ -392,8 +423,11 @@ commit of the ROADMAP wave log. Every pointer was checked to exist. SEC-A3, SEC-
   `.github/workflows/ci.yml` (health check, `id -u` = 1000).
 - [ ] **CI** — `.github/workflows/ci.yml` runs the gate commands (install, check, build, e2e); validated with
   `actionlint` when available (agents never push).
-  Deferred to W5.11 (P5-B): `actionlint` validation (not installed for the agents; every workflow passes
-  `pnpm exec eslint .github`).
+  Open (W5.11, 2026-09-28): `actionlint` is not installed on the development machine and no workflow runs it, so there
+  is no `actionlint` evidence. Every workflow (`ci.yml`, `audit.yml`, `live.yml`) and `dependabot.yml` passes
+  `pnpm exec eslint .github`; the only GitHub Actions run so far (CI of `6e3b442`, green) predates the Phase 5
+  workflow changes. To close: `actionlint .github/workflows/*.yml` locally, or the first green CI and audit runs after
+  the Phase 5 push.
 - [x] **Docs** — README quick start verified from a clean checkout; env table matches `env.ts`; API.md matches the
   route table test; plugin tutorial walked through; ROADMAP fully checked.
   Evidence: `packages/shared/src/api/routes.test.ts › route table › equals the route key index of API.md (key, method, path, module)`;

@@ -80,6 +80,27 @@ function row(ref: string) {
   return document.body.querySelector<HTMLElement>(`[data-testid="${testIds.modelRow}"][data-model-ref="${ref}"]`)
 }
 
+/** Options of the open default / title model select. */
+function selectOptions() {
+  return [...document.body.querySelectorAll<HTMLElement>(`[data-testid="${testIds.modelSelectOption}"]`)]
+}
+
+function selectOption(ref: string) {
+  return document.body.querySelector<HTMLElement>(`[data-testid="${testIds.modelSelectOption}"][data-model-ref="${ref}"]`)
+}
+
+function rowMenu(ref: string) {
+  return row(ref)!.querySelector<HTMLButtonElement>(`[data-testid="${testIds.modelRowMenu}"]`)!
+}
+
+/** Opens a reka-ui dropdown menu the way a keyboard user does and returns the labels of its items. */
+async function openMenu(trigger: HTMLElement) {
+  trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  await flushPromises()
+  await nextTick()
+  return [...document.body.querySelectorAll('[role="menuitem"]')].map(item => item.textContent?.trim())
+}
+
 describe('modelsSettings', () => {
   it('shows one section per connected provider and collapses large ones', async () => {
     await mountModels()
@@ -170,14 +191,64 @@ describe('modelsSettings', () => {
     trigger.click()
     await flushPromises()
 
-    const option = document.body.querySelector<HTMLElement>('[data-slot="command-item"][data-model-ref="anthropic:claude-sonnet-5"]')
+    const option = selectOption('anthropic:claude-sonnet-5')
     expect(option).not.toBeNull()
+    expect(option!.dataset.slot).toBe('command-item')
     // Hidden models never appear in the picker.
-    expect(document.body.querySelector('[data-slot="command-item"][data-model-ref="anthropic:claude-haiku-4-5"]')).toBeNull()
+    expect(selectOption('anthropic:claude-haiku-4-5')).toBeNull()
     option!.click()
     await flushPromises()
     expect(api.settings.update).toHaveBeenCalledWith({ body: { defaultModelRef: 'anthropic:claude-sonnet-5' } })
     expect(trigger.dataset.value).toBe('anthropic:claude-sonnet-5')
+  })
+
+  it('lists the title model choices as options with their model refs, Automatic first with an empty ref', async () => {
+    await mountModels()
+    const trigger = document.body.querySelector<HTMLButtonElement>(`[data-testid="${testIds.modelsTitlePicker}"]`)!
+    trigger.click()
+    await flushPromises()
+
+    const [automatic, ...choices] = selectOptions()
+    expect(automatic!.dataset.modelRef).toBe('')
+    expect(automatic!.textContent).toContain('Automatic (small model of the chat\'s provider)')
+    expect(automatic!.dataset.checked).toBe('true')
+    // Every visible model of the connected providers, each with its ref; the hidden one is left out.
+    expect(choices).toHaveLength(2 + routed.length)
+    expect(choices.slice(0, 2).map(option => option.dataset.modelRef)).toEqual(['anthropic:claude-sonnet-5', 'anthropic:claude-next'])
+    expect(choices.map(option => option.dataset.modelRef)).toContain('openrouter:vendor/model-69')
+    expect(choices.map(option => option.dataset.modelRef)).not.toContain('anthropic:claude-haiku-4-5')
+
+    selectOption('anthropic:claude-next')!.click()
+    await flushPromises()
+    expect(api.settings.update).toHaveBeenLastCalledWith({ body: { titleModelRef: 'anthropic:claude-next' } })
+    expect(trigger.dataset.value).toBe('anthropic:claude-next')
+
+    trigger.click()
+    await flushPromises()
+    expect(selectOption('anthropic:claude-next')!.dataset.checked).toBe('true')
+    selectOption('')!.click()
+    await flushPromises()
+    expect(api.settings.update).toHaveBeenLastCalledWith({ body: { titleModelRef: null } })
+    expect(trigger.dataset.value).toBe('')
+  })
+
+  it('opens a row menu from its ⋯ trigger: Rename for every model, Remove only for custom models', async () => {
+    api.models.removeCustom.mockImplementation(async () => {
+      models = models.filter(model => model !== custom)
+    })
+    await mountModels()
+    expect(rowMenu('anthropic:claude-sonnet-5').getAttribute('aria-label')).toBe('Actions for Claude Sonnet 5')
+    expect(rowMenu('anthropic:claude-next').getAttribute('aria-label')).toBe('Actions for claude-next')
+
+    expect(await openMenu(rowMenu('anthropic:claude-next'))).toEqual(['Rename', 'Remove'])
+    document.body.querySelector<HTMLElement>(`[data-testid="${testIds.modelRemove}"]`)!.click()
+    await flushPromises()
+    expect(api.models.removeCustom).toHaveBeenCalledWith({ query: { providerId: 'anthropic', modelId: 'claude-next' } })
+    expect(toasts.success).toHaveBeenCalledWith('Removed claude-next')
+    expect(row('anthropic:claude-next')).toBeNull()
+
+    expect(await openMenu(rowMenu('anthropic:claude-sonnet-5'))).toEqual(['Rename'])
+    expect(document.body.querySelector(`[data-testid="${testIds.modelRemove}"]`)).toBeNull()
   })
 
   it('points to the providers page when nothing is connected', async () => {

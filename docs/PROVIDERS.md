@@ -415,10 +415,15 @@ Verified on 2026-09-28:
 - **Icons**: file list of `@lobehub/icons-static-svg@1.95.1` on jsDelivr.
 - **Seed ids**: models.dev `api.json`.
 
-Unverified (re-check during implementation): `grok-4.7` accepted efforts and the `/v1/language-models` response shape;
+Unverified (no live run recorded yet): `grok-4.7` accepted efforts and the `/v1/language-models` response shape;
 Z.ai `/models` on the general endpoint and per-model effort support of GLM models; MiniMax listing shape and model id
 casing; Alibaba listing shape and which Qwen models accept `enable_thinking`; Ollama `/api/show` `thinking.values` on
 real models (the mapping of section 4 is implemented from Ollama's docs); the MiniMax China base URL.
+
+Live results: none yet (the live suite of [section 12](#12-live-provider-suite) has not been run). To record results,
+run `pnpm test:live` with the provider keys (or the "Live providers" workflow), then copy each provider's row of the
+summary table (PASS / SKIP / FAIL per check) into this section with the date, and move the items it confirms out of
+"Unverified".
 
 ## 12. Live provider suite
 
@@ -431,15 +436,20 @@ provider you have a key for. It is **opt-in and paid**: `pnpm test` never runs i
 ANTHROPIC_API_KEY=sk-ant-... pnpm test:live                       # one provider
 HF_LIVE_PROVIDERS=anthropic,openai pnpm test:live                  # only these (keys from the environment or .env)
 HF_LIVE_MAX_COST_USD=0.20 pnpm test:live                           # a smaller budget
+HF_LIVE_PROVIDERS=none pnpm test:live                              # dry run: no request, every provider SKIP
 ```
 
 - `pnpm test:live` runs `vitest run --config apps/server/vitest.live.config.ts`: only
-  `apps/server/src/**/*.live.test.ts`, one file at a time, 60 s timeouts, with `HF_LIVE=1` set by the config. Every
-  live file also guards itself with `describe.runIf(process.env.HF_LIVE === '1')`, and the normal server config
-  excludes `*.live.test.ts`.
+  `apps/server/src/**/*.live.test.ts`, one file at a time, with `HF_LIVE=1` set by the config and 60 s default
+  timeouts (each provider test allows 8 minutes, each chat stream 2 minutes before the run is stopped). Every live file
+  also guards itself with `describe.runIf(process.env.HF_LIVE === '1')`, and the normal server config excludes
+  `*.live.test.ts`.
 - Keys come from the environment; the repository `.env` is read as well (variables already set win), like the server
-  does at start.
-- A provider without a key is reported as SKIP. Ollama runs when `http://localhost:11434/api/tags` answers within 1 s.
+  does at start. `HF_LIVE_PROVIDERS` and `HF_LIVE_MAX_COST_USD` may live in `.env` too.
+- A provider without a key is reported as SKIP. Ollama runs when `http://localhost:11434/api/tags` answers within 1 s,
+  with the first chat model of that listing (embedding and other non-chat models are skipped); without a chat model it
+  is SKIP.
+- Each provider is one Vitest test: it fails when any of its checks is FAIL, and a skipped provider is a skipped test.
 
 ### Environment variables per provider
 
@@ -460,13 +470,13 @@ non-empty one wins), so they match section 1:
 | `mistral` | `MISTRAL_API_KEY` | `mistral-small-latest` |
 | `groq` | `GROQ_API_KEY` | `openai/gpt-oss-20b` |
 | `openrouter` | `OPENROUTER_API_KEY` | `openai/gpt-6-luna` |
-| `ollama` | none (a local server on `localhost:11434`) | the first model of its local listing (Ollama has no `smallModelId`) |
+| `ollama` | none (a local server on `localhost:11434`) | the first chat model of its local listing (Ollama has no `smallModelId`) |
 
 | Variable | Meaning |
 |---|---|
 | `HF_LIVE` | `1` enables the live files; set by `pnpm test:live` itself, never needed in `.env` |
-| `HF_LIVE_PROVIDERS` | comma list of provider ids to run (default: every provider with a key) |
-| `HF_LIVE_MAX_COST_USD` | budget of one run in USD (default 0.50); once the summed `costUsd` reaches it, the remaining checks are reported as SKIP |
+| `HF_LIVE_PROVIDERS` | comma list of provider ids to run, case-insensitive (default: every provider with a key); `none` is a dry run that makes no request and prints the summary with every provider SKIP; an unknown id fails the run before any request and lists the valid ids |
+| `HF_LIVE_MAX_COST_USD` | budget of one run in USD, a non-negative number (default 0.50); once the summed cost reaches it, the remaining paid checks (chat, reasoning, tools) are reported as SKIP |
 
 ### What it checks
 
@@ -474,27 +484,50 @@ Providers run one after another. Each gets its own in-process server,
 `createTestApp({ env: { HF_OFFLINE: '1', <its key only> } })`, with an in-memory database, so nothing is written to
 `data/`. Per provider:
 
-1. `POST /api/providers/:id/test` returns `ok: true`.
-2. A model refresh succeeds and `GET /api/models` lists the chosen model.
-3. `POST /api/chat` on `smallModelId` in a chat with a user-set title (no title call): text deltas stream, the finish
-   `usage` reports input and output tokens above 0, and the message is persisted.
-4. A request with reasoning effort `low` answers without an error (reasoning-capable models only).
-5. A tool round trip in permission mode `auto` with the builtin `current_time` tool.
-6. A deliberately wrong key sent as `values.apiKey` to the provider test returns `ok: false` with an `auth_invalid`
-   error (costs nothing; not for Ollama, which has no key).
+1. **Test**: `POST /api/providers/:id/test` returns `ok: true`.
+2. **Models**: a model refresh succeeds and `GET /api/models` lists the chosen model from the live listing (not a seed
+   model) and not hidden.
+3. **Chat**: `POST /api/chat` on the model (effort `auto`, tools off) in a chat with a user-set title (no title call):
+   text deltas stream, the finish `usage` reports input and output tokens above 0, and the reply is persisted.
+4. **Reasoning**: a request with reasoning effort `low` answers with text and is persisted. A model that does not
+   offer `low` gets its lowest offered effort instead: `high` for `kimi-k2.6`, `MiniMax-M3` and `mistral-small-latest`,
+   which offer only Off / High. SKIP for models without reasoning or without effort control.
+5. **Tools**: a round trip in permission mode `auto` with the builtin `current_time` tool (every other tool is
+   disabled): the model calls it, its output streams, a text answer follows and the tool result is persisted. SKIP for
+   models without tool support.
+6. **Bad key**: a deliberately wrong key sent as `values.apiKey` to the provider test returns `ok: false` with an
+   `auth_invalid` error (costs nothing; SKIP for Ollama, which has no key).
+7. **Key not logged**: no log record captured while the provider's checks ran contains its key (SKIP for Ollama).
+
+Checks 3 to 5 are the paid ones; each starts its own chat.
 
 Cost and safety:
 
-- A `chat.params` hook registered by the suite caps output at 256 tokens (2048 with reasoning) and `maxSteps` at 3.
-- `HF_LIVE_MAX_COST_USD` stops the run once the budget is spent; a `429` from a provider is reported as SKIP, not FAIL.
-- Keys are never printed: the summary names the env var, never its value, and a test asserts that no log record
-  contains a key.
-- The summary table (provider, env var, model, one PASS / SKIP / FAIL per check, cost) goes to stdout and, in GitHub
-  Actions, to `$GITHUB_STEP_SUMMARY`. The matrix and the table are unit-tested by `apps/server/src/live/support.test.ts`
-  as part of `pnpm test`.
+- A `chat.params` hook registered by the suite caps output at 256 tokens and `maxSteps` at 3. A reasoning-capable
+  model gets 2048 output tokens whenever its effort is not `off`, including `auto` (such a model may think by default,
+  and thinking counts toward the output cap).
+- `HF_LIVE_MAX_COST_USD`: the cost of every paid check (the recorded `costUsd` of its chat) is added up; once the
+  budget is spent, the remaining paid checks are SKIP. A model without a catalog price is counted at $3 per 1M input
+  and $15 per 1M output tokens, above every small model the suite uses, and its cost is marked `~` (estimated).
+- A rate limit (`rate_limited`, HTTP 429) is reported as SKIP, not FAIL.
+- Keys are never printed: the summary names the env var, never its value, the "Key not logged" check reads every log
+  record, and every text is masked once more before it is written.
+- The summary goes to stdout and, in GitHub Actions, to `$GITHUB_STEP_SUMMARY`: the totals and the spending, a table
+  with the columns Provider, Key variable, Model, Test, Models, Chat, Reasoning, Tools, Bad key, Key not logged and
+  Cost (USD), then one detail line per check (counts, the effort used, or why it failed or was skipped). The matrix,
+  the caps and the table are unit-tested by `apps/server/src/live/support.test.ts` as part of `pnpm test`.
 
 ### In CI
 
-Never on push or pull requests. `.github/workflows/live.yml` runs it on manual dispatch only, inside a GitHub
-environment with a required reviewer that holds the provider keys as secrets. Results of a run update the unverified
-items of [section 11](#11-verification-log).
+Never on push or pull requests. `.github/workflows/live.yml` ("Live providers") runs it on manual dispatch only, with
+two inputs: `providers` (becomes `HF_LIVE_PROVIDERS`; empty = every provider with a key, `none` = a dry run) and
+`max-cost-usd` (becomes `HF_LIVE_MAX_COST_USD`, default 0.50). The job runs in the GitHub environment `live-providers`,
+which requires a reviewer's approval before it starts and holds the provider keys as secrets. Ollama needs a local
+server, so it is always SKIP there; the summary table is written to the job summary.
+
+One-time setup by a repository admin (not done by the repository itself): Settings -> Environments -> New environment
+`live-providers` -> Required reviewers (the maintainer) -> add the keys as environment secrets, named like the
+variables of the table above (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, ...). A missing
+secret is an empty variable, which the suite reports as SKIP.
+
+Record the results of a run in [section 11](#11-verification-log).

@@ -18,6 +18,7 @@ import {
   looseQuotes,
   pressShortcut,
   pressUntilFocused,
+  selectAllText,
   test,
   testIds,
   uniqueId,
@@ -110,12 +111,13 @@ test.describe('keyboard', () => {
     await page.keyboard.press('Shift+Escape')
     await expect(composerInput(page)).toBeFocused()
 
-    // ↑ in the empty composer edits the last user message; Enter sends the edit and a reply streams.
+    // ↑ in the empty composer edits the last user message; Enter sends the edit and a reply streams. The text is
+    // replaced from the keyboard with the host's select-all key (text editing follows the host, not the app's Mod).
     await page.keyboard.press('ArrowUp')
     const editor = page.getByTestId(testIds.messageEditInput)
     await expect(editor).toBeFocused()
     await expect(editor).toHaveValue(text)
-    await page.keyboard.press('ControlOrMeta+A')
+    await selectAllText(page, editor)
     await page.keyboard.insertText(edited)
     await page.keyboard.press('Enter')
     await expect(editor).toBeHidden()

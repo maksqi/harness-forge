@@ -43,8 +43,20 @@ function toggleSidebar() {
   return isMobile.value ? setOpenMobile(!openMobile.value) : setOpen(!open.value)
 }
 
+// Local patch (AI_ELEMENTS_PATCHES.md): Mod+B matches like the shortcut registry (composables/useShortcuts.ts). The key
+// is compared case-insensitively, so Caps Lock still toggles, and non-Latin layouts match the physical key; Shift is
+// left to the browser (Mod+Shift+B toggles its bookmarks bar); Alt combos (AltGr types characters), IME composition
+// and events another handler already took are ignored.
+function isToggleShortcut(event: KeyboardEvent): boolean {
+  if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey || event.defaultPrevented || event.isComposing || event.keyCode === 229)
+    return false
+  if (event.key.toLowerCase() === SIDEBAR_KEYBOARD_SHORTCUT)
+    return true
+  return event.code === `Key${SIDEBAR_KEYBOARD_SHORTCUT.toUpperCase()}` && !/^[\x20-\x7E]$/.test(event.key)
+}
+
 useEventListener('keydown', (event: KeyboardEvent) => {
-  if (event.key === SIDEBAR_KEYBOARD_SHORTCUT && (event.metaKey || event.ctrlKey)) {
+  if (isToggleShortcut(event)) {
     event.preventDefault()
     toggleSidebar()
   }

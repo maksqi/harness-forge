@@ -49,7 +49,11 @@ const title = computed(() => props.chat.title?.trim() ?? '')
 
 // Fine pointers: the dot and the actions button share one 20px slot, and hover, keyboard focus or an open menu
 // shows the button over the dot. The button is hidden with opacity, never display, so it stays focusable: closing
-// the menu with Escape returns focus to it. Touch devices show both side by side.
+// the menu with Escape returns focus to it. Touch devices show both side by side, the button as a 40px target
+// (docs/UI.md 14.5), and the title's right padding keeps clear of them: 40px button + 4px inset, plus 22px for the
+// dot and its gap when there is one.
+const rowClass = computed(() => cn(SIDEBAR_ROW_CLASS, 'pr-7', props.status ? 'pointer-coarse:pr-17' : 'pointer-coarse:pr-12'))
+
 const dotClass = computed(() => cn(
   'transition-opacity duration-(--duration-fast)',
   'pointer-fine:group-hover/menu-item:opacity-0 pointer-fine:group-focus-within/menu-item:opacity-0',
@@ -57,7 +61,7 @@ const dotClass = computed(() => cn(
 ))
 
 const triggerClass = computed(() => cn(
-  'pointer-events-auto flex size-5 pointer-coarse:size-8 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/60 outline-none',
+  'pointer-events-auto flex size-5 pointer-coarse:size-10 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/60 outline-none',
   'transition-[opacity,color,background-color] duration-(--duration-fast) hover:bg-sidebar-foreground/10 hover:text-sidebar-foreground',
   'focus-visible:ring-2 focus-visible:ring-sidebar-ring/50 data-[state=open]:bg-sidebar-foreground/10 data-[state=open]:text-sidebar-foreground',
   'pointer-fine:absolute pointer-fine:inset-0',
@@ -126,7 +130,7 @@ defineExpose({ focus })
         :is-active="active"
         :data-testid="testIds.chatRow"
         :data-chat-id="chat.id"
-        :class="cn(SIDEBAR_ROW_CLASS, 'pr-7 pointer-coarse:pr-12')"
+        :class="rowClass"
       >
         <NuxtLink :to="`/chat/${chat.id}`">
           <span :class="cn('min-w-0 flex-1 truncate', !title && 'text-muted-foreground italic')">

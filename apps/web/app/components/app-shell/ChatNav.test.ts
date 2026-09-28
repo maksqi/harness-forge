@@ -79,6 +79,15 @@ function rowItem(id: string): HTMLElement {
   return row(id).closest('li')!
 }
 
+/** Pixels of the Tailwind spacing utility `utility-N` among the element's classes (4px per step), else null. */
+function spacingPx(element: Element, utility: string): number | null {
+  const prefix = `${utility}-`
+  const steps = [...element.classList]
+    .filter(name => name.startsWith(prefix) && /^\d+(?:\.\d+)?$/.test(name.slice(prefix.length)))
+    .map(name => Number(name.slice(prefix.length)))
+  return steps.length > 0 ? steps[0]! * 4 : null
+}
+
 async function openRowMenu(id: string) {
   const trigger = byTestId(testIds.chatRowMenu, rowItem(id))!
   trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
@@ -227,6 +236,31 @@ describe('chatNav: rows', () => {
     await settle()
     expect(row(chatId(1)).dataset.active).toBe('true')
     expect(row(chatId(2)).dataset.active).toBeUndefined()
+  })
+
+  it('makes the actions button a 40px touch target and keeps the title clear of it (UI.md 14.5)', async () => {
+    setup()
+    await mountNav([
+      chatSummary({ id: chatId(1), title: 'Busy', updatedAt: NOW - 1, running: true }),
+      chatSummary({ id: chatId(2), title: 'Idle', updatedAt: NOW - 2 }),
+    ])
+    // The trailing slot sits 4px from the row's right edge (right-1); the dot takes 20px plus a 2px gap.
+    const inset = 4
+    const dot = spacingPx(byTestId(testIds.chatStatusDot, rowItem(chatId(1)))!, 'size')!
+    expect(dot).toBe(20)
+    for (const id of [chatId(1), chatId(2)]) {
+      const trigger = byTestId(testIds.chatRowMenu, rowItem(id))!
+      expect(trigger.getAttribute('aria-label')).toBe('Chat actions')
+      // Desktop keeps the 20px slot; touch devices get a 40px button.
+      expect(spacingPx(trigger, 'size')).toBe(20)
+      const touch = spacingPx(trigger, 'pointer-coarse:size')!
+      expect(touch).toBeGreaterThanOrEqual(40)
+      // Rows are 40px tall on touch devices, so the button fits the row.
+      expect(spacingPx(row(id), 'pointer-coarse:h')).toBe(touch)
+      const trailing = touch + inset + (id === chatId(1) ? dot + 2 : 0)
+      expect(spacingPx(row(id), 'pointer-coarse:pr')).toBeGreaterThanOrEqual(trailing)
+      expect(spacingPx(row(id), 'pr')).toBeGreaterThanOrEqual(20 + inset)
+    }
   })
 
   it('updates a row live when the store applies chat.updated (e.g. the generated title)', async () => {

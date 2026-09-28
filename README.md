@@ -7,7 +7,9 @@ waits for your approval. A **Plugins** tab adds LLM providers, models, tools, MC
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **Status:** v1 released; Phase 5 (v1.1) in progress. Progress lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status:** v1.1. On top of v1 it adds conversation branching, backup / restore / delete-all in Settings -> Data,
+> read-only share links, trusted reverse proxies (`HF_TRUST_PROXY`) and an opt-in live provider suite
+> (`pnpm test:live`). Progress lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ![Chat with a code block, a reasoning row and a tool approval card (dark theme)](docs/assets/screenshots/chat-dark.png)
 
@@ -23,12 +25,12 @@ desktop app, and it starts in dark mode.
   - Streaming markdown with highlighted code, "Thinking" rows for reasoning, and collapsible tool-call rows.
   - Inline approval cards for tool calls, file attachments, and edit, regenerate, copy and stop.
   - Conversation branching: editing a message or regenerating a reply keeps the old version, and a `‹ 2/3 ›`
-    switcher moves between versions. The chosen version is remembered.
+    switcher moves between versions. The chosen version stays selected after a reload.
   - Automatic chat titles, per-message token usage and cost, and a context-usage ring.
 - **Your data** (Settings -> Data): back up every chat, with every version and attachment, to one zip file; restore it
   here or on another server (existing chats are skipped or copied); or delete all chats at once.
 - **Share links**: publish a read-only snapshot of a chat at an unguessable link, choose whether reasoning, tool
-  details and attachments are included, update the snapshot or revoke the link at any time.
+  details and attachments are included, set an expiry date, update the snapshot or revoke the link at any time.
 - **Composer**:
   - A model picker with provider icons and capability badges.
   - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode (Ask, Auto, Off) for tools.
@@ -40,14 +42,17 @@ desktop app, and it starts in dark mode.
     environment variables.
   - Live model lists enriched with [models.dev](https://models.dev) metadata (limits, capabilities, prices).
   - Favorites, hidden models and custom model ids.
+  - An opt-in live test suite (`pnpm test:live`, paid) that checks every builtin provider you have a key for against
+    the real API: key test, model listing, streaming, reasoning, a tool call and a rejected bad key.
 - **Plugins**:
   - Declarative provider plugins, built with a five-step wizard or written as `plugin.json`.
   - Code plugins (tools, providers, commands, hooks, MCP servers) from templates, edited and rebuilt in the browser.
   - Install from a zip, npm, a URL with an integrity hash, or a local folder, with an explicit trust step for code.
 - **Tools and MCP**: MCP servers over stdio, Streamable HTTP and SSE. The builtin tools are `current_time` and
   `web_fetch` (SSRF-guarded). Every tool has an approval policy and a per-tool override.
-- **Self-hosting**: SQLite storage, one port, an optional password, a loopback-only bind unless you secure it, and a
-  Docker image with a `/data` volume.
+- **Self-hosting**: SQLite storage, one port, an optional password, a loopback-only bind unless you secure it,
+  trusted reverse proxies (`HF_TRUST_PROXY`) so rate limits and Secure cookies see the real clients, and a Docker image
+  with a `/data` volume.
 
 ## Supported providers
 
@@ -139,15 +144,17 @@ Every variable is optional. [`.env.example`](.env.example) lists them with comme
 | `HF_PLUGIN_WATCH` | unset | `1` hot-reloads code plugins in the data directory when their files change (linked folders always reload) |
 | `HF_OFFLINE` | unset | `1` never downloads the models.dev catalog (the bundled snapshot is used) |
 | `HF_INSECURE` | unset | `1` allows a non-loopback bind without a password (only behind another authentication layer); it also disables the DNS-rebinding guard that restricts a password-less server to `localhost` host names |
-| `HF_TRUST_PROXY` | unset | reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` headers are trusted: a comma list of `loopback`, `private`, IP addresses and CIDRs (`X-Forwarded-Host` is never used; `1`, `true` and hop counts are rejected). See [Behind a reverse proxy](#behind-a-reverse-proxy) |
+| `HF_TRUST_PROXY` | unset | reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` headers are trusted: a comma list of `loopback` (127.0.0.0/8, ::1), `private` (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7), IP addresses and CIDR ranges. `1`, `true`, `*` and other booleans, hop counts, `/0` ranges, `localhost` (write `loopback`) and unknown words stop the start with the format explained; `X-Forwarded-Host` is never used. Unset: `X-Forwarded-For` is ignored and `X-Forwarded-Proto` is honored from any peer (v1). See [Behind a reverse proxy](#behind-a-reverse-proxy) |
 | `HF_WEB_DIR` | `apps/web/.output/public` | directory of the built web app served in production |
 | `HF_API_TARGET` | `http://localhost:8787` | where `nuxt dev` proxies `/api` (development only) |
 | `NODE_ENV` | unset | `development` forces dev mode (debug logs, `:3000` origins allowed), `production` forces production; by default dev mode means running from TypeScript sources |
 | `<VENDOR>_API_KEY` | unset | provider key fallbacks, see [Supported providers](#supported-providers) |
 
 A key saved in Settings wins over its environment variable; the key dialog shows which source is active ("From env").
-Flags accept `1` / `true` / `yes` / `on` and `0` / `false` / `no` / `off`. Test-only variables (`HF_LIVE_PROVIDERS`,
-`HF_LIVE_MAX_COST_USD`, ...) are described in [`docs/PROVIDERS.md`](docs/PROVIDERS.md#12-live-provider-suite) and
+Flags accept `1` / `true` / `yes` / `on` and `0` / `false` / `no` / `off`; an empty value counts as unset, and any
+other invalid value stops the start with a message naming the variable. Test-only variables (`HF_LIVE_PROVIDERS`,
+`HF_LIVE_MAX_COST_USD`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`, `E2E_BASE_URL`) are described in
+[`docs/PROVIDERS.md`](docs/PROVIDERS.md#12-live-provider-suite), [`e2e/README.md`](e2e/README.md) and
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Plugins
@@ -197,11 +204,12 @@ harness-forge is built for **one user** on their own machine or server.
   reverse proxy for anything beyond your LAN. Share links need a password too: without one the server answers only
   on `localhost` host names.
 - **Reverse proxies.** Forward the `Host` header, set `X-Forwarded-For` and `X-Forwarded-Proto`, and list the proxy in
-  `HF_TRUST_PROXY`. Forwarded headers are honored only from those proxies, so the login rate limiter (5 failures per
-  client per 15 minutes, 50 overall) sees the real clients, and `X-Forwarded-Proto: https` makes the session cookie
-  `Secure` and turns on HSTS. Without `HF_TRUST_PROXY`, `X-Forwarded-For` is ignored (any client can forge it), all
-  clients behind the proxy share one limit, and 5 failed logins lock everyone out for up to 15 minutes.
-  `X-Forwarded-Host` is never used. Examples: [Behind a reverse proxy](#behind-a-reverse-proxy).
+  `HF_TRUST_PROXY`. Forwarded headers are then honored only from those proxies, so the login rate limiter (5 failures
+  per client per 15 minutes, 50 overall) and the share-link rate limits see the real clients, and
+  `X-Forwarded-Proto: https` makes the session cookie `Secure` and turns on HSTS. Without `HF_TRUST_PROXY`,
+  `X-Forwarded-For` is ignored (any client can forge it), all clients behind the proxy share one limit, and 5 failed
+  logins lock everyone out for up to 15 minutes. `X-Forwarded-Host` is never used. Examples:
+  [Behind a reverse proxy](#behind-a-reverse-proxy).
 - **Sessions and CSRF.** An HttpOnly, SameSite=Strict HMAC session cookie; state-changing requests must come from
   the same origin. With a password set, installing or trusting code plugins, building them, changing the password,
   creating or updating share links and deleting all data require a login within the last 10 minutes.
@@ -227,6 +235,14 @@ Terminate TLS at a proxy, keep harness-forge on `127.0.0.1` (or on an internal n
 trust with `HF_TRUST_PROXY`. The proxy must pass the original `Host` header (harness-forge never reads
 `X-Forwarded-Host`, which a DNS-rebinding page could forge), set `X-Forwarded-For` and `X-Forwarded-Proto`, accept
 request bodies of at least 256 MB (backup imports) and stream responses without buffering.
+
+`HF_TRUST_PROXY` takes `loopback`, `private`, exact IP addresses and CIDR ranges, comma separated (for example
+`HF_TRUST_PROXY=10.0.0.2,192.168.1.0/24`). Only a request whose TCP peer is in that list may set `X-Forwarded-For` and
+`X-Forwarded-Proto`; the client is the first address that is not a trusted proxy when `X-Forwarded-For` is read from
+right to left (the `Forwarded` header is ignored). At start the server logs the trusted ranges. Ignored forwarded
+headers are logged as a warning once per peer address, a hint that the setting is missing or too narrow:
+"X-Forwarded-For ignored: HF_TRUST_PROXY is not set. ..." when it is unset, "Forwarded headers ignored: the peer is not
+listed in HF_TRUST_PROXY." when the peer is not in the list.
 
 **Caddy** on the same machine. Caddy forwards `Host`, `X-Forwarded-For` and `X-Forwarded-Proto` by default, streams
 responses and has no body limit:
@@ -258,6 +274,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 300s;        # long replies stream over one request
+        # Chat and event streams send X-Accel-Buffering: no, so nginx does not buffer them.
     }
 }
 ```
@@ -329,7 +346,24 @@ on SQLite), and the TypeScript-only packages `packages/shared` (schemas, DTOs, r
 | `pnpm catalog:update` | refresh the bundled models.dev snapshot |
 
 All development happens on the `main` branch. CI (`.github/workflows/ci.yml`) runs `pnpm check`, the build with the
-Playwright e2e suite, and the Docker image build on every push to `main` and on pull requests.
+built-page CSP test and the Playwright e2e suite, and the Docker image build on every push to `main` and on pull
+requests. `.github/workflows/audit.yml` runs `pnpm audit --prod --audit-level high` on the same events and weekly;
+`.github/workflows/live.yml` runs the paid live provider suite on manual dispatch only; Dependabot
+(`.github/dependabot.yml`) proposes weekly GitHub Actions and npm updates.
+
+### Repository setup (maintainers)
+
+A few settings live in GitHub, not in the repository:
+
+- **Dependabot alerts**: turn on Dependabot alerts (and security updates) in Settings -> Code security;
+  `.github/dependabot.yml` only schedules version updates.
+- **Live provider suite**: create the environment `live-providers` in Settings -> Environments, add yourself as a
+  required reviewer and add the provider keys as environment secrets named like their variables (`ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, ...; the list is in [`docs/PROVIDERS.md`](docs/PROVIDERS.md#12-live-provider-suite)). Then run
+  the "Live providers" workflow by hand.
+- **Dependabot on pnpm 11**: watch the first npm update run. If it fails on the pnpm 11 lockfile, drop the `npm` block
+  of `.github/dependabot.yml` and use Renovate instead (the fallback noted in that file); pnpm itself is upgraded by
+  hand.
 
 Everything in the repository is written in English (`pnpm check:english` enforces it). AI coding agents read
 [`AGENT.md`](AGENT.md) first.

@@ -2,7 +2,9 @@
 // Dark and light, desktop 1440x900 and a 390x844 phone (touch), a browser clock that starts at a fixed time, reduced
 // motion; the files go to `.tmp/screenshots/{dark,light}/<screen>-{desktop,mobile}.png`. The spec runs its own
 // password-protected server from the build with a fresh data directory (`startServer`), so the pictures hold only the
-// chats it creates, and the login page is one of the screens.
+// chats it creates, and the login page is one of the screens. Phase 5 screens: a chat whose messages have versions
+// (the "‹ 2/2 ›" switchers), the Share dialog with an outdated link, the shared chat page and its unavailable state,
+// and Settings -> Data with that link in its list.
 import type { Page } from '@playwright/test'
 import type { StartedServer } from '../../helpers/index.ts'
 import { mkdir } from 'node:fs/promises'
@@ -38,6 +40,12 @@ interface Seed {
   tools: string
   approval: string
   error: string
+  /** Its first message and that message's reply have two versions each. */
+  versions: string
+  /** Has a share link (reasoning and tool details included) made before its last message, so it is outdated. */
+  shared: string
+  /** `/share/<token>` of that link. */
+  sharePath: string
   /** The start of the browser clock: a little after the seed, so relative times read "2m ago". */
   now: number
 }
@@ -63,6 +71,15 @@ const MARKDOWN = [
   '```',
   '',
   '> Keep the old tokens valid for one release, then remove them.',
+].join('\n')
+
+/** The last question of the shared chat: a short markdown list. */
+const SHARED_SUMMARY = [
+  'Summarize the plan as a list:',
+  '',
+  '1. Add a `sessions` table.',
+  '2. Issue an **HttpOnly** cookie on login.',
+  '3. Drop the token from local storage.',
 ].join('\n')
 
 interface Screen {
@@ -143,6 +160,46 @@ const SCREENS: Screen[] = [
     open: async (page, seed) => {
       await openChat(page, seed.error)
       await expect(page.getByTestId(testIds.chatError)).toBeVisible()
+    },
+  },
+  {
+    name: 'chat-versions',
+    open: async (page, seed) => {
+      await openChat(page, seed.versions)
+      const userVersions = page.getByTestId(testIds.messageUser).getByTestId(testIds.messageBranch)
+      await expect(userVersions).toHaveAttribute('data-count', '2')
+      await expect(userVersions).toHaveAttribute('data-index', '1')
+      const replyVersions = lastAssistantMessage(page).getByTestId(testIds.messageBranch)
+      await expect(replyVersions).toHaveAttribute('data-count', '2')
+      await expect(replyVersions).toHaveAttribute('data-index', '1')
+    },
+  },
+  {
+    name: 'share-dialog',
+    open: async (page, seed) => {
+      await openChat(page, seed.shared)
+      await page.getByTestId(testIds.chatMenuTrigger).click()
+      await page.getByTestId(testIds.chatMenuShare).click()
+      const dialog = page.getByTestId(testIds.shareDialog)
+      await expect(dialog).toBeVisible()
+      await expect(dialog.getByTestId(testIds.shareLink)).toHaveAttribute('data-outdated', 'true')
+      await expect(dialog.getByTestId(testIds.shareCopy)).toBeFocused()
+    },
+  },
+  {
+    name: 'share-page',
+    open: async (page, seed) => {
+      await page.goto(seed.sharePath)
+      await expect(page.getByTestId(testIds.sharePage)).toHaveAttribute('data-state', 'ready')
+      await expect(page.getByTestId(testIds.shareToolRow)).toHaveAttribute('data-status', 'done')
+    },
+  },
+  {
+    name: 'share-unavailable',
+    open: async (page) => {
+      await page.goto('/share/revoked-or-expired-link')
+      await expect(page.getByTestId(testIds.sharePage)).toHaveAttribute('data-state', 'unavailable')
+      await expect(page.getByTestId(testIds.shareUnavailable)).toBeVisible()
     },
   },
   {
@@ -247,7 +304,8 @@ const SCREENS: Screen[] = [
   {
     name: 'settings-data',
     open: page => openSettings(page, '/settings/data', async (page) => {
-      await expect(page.getByTestId(testIds.dataSettings)).toBeAttached()
+      await expect(page.getByTestId(testIds.dataSummary)).toBeVisible()
+      await expect(page.getByTestId(testIds.sharesRow)).toHaveCount(1)
     }),
   },
   {
@@ -281,6 +339,18 @@ async function seed(server: StartedServer): Promise<Seed> {
     await api.updateSettings({ displayName: 'Alex', defaultModelRef: 'mock:echo' })
     const titled = async (title: string) => (await api.createChat({ title })).id
     // Older chats first: the sidebar lists the newest on top.
+    const shared = await titled('Session migration plan')
+    await api.sendChat({ chatId: shared, modelRef: 'mock:reasoning', reasoningEffort: 'high', text: 'Why is a server session safer than a token in local storage?' })
+    await api.sendChat({ chatId: shared, modelRef: 'mock:tool-approval', toolMode: 'auto', text: 'Echo "rotate the session cookie" with the tool.' })
+    await api.sendChat({ chatId: shared, modelRef: 'mock:echo', toolMode: 'off', text: SHARED_SUMMARY })
+    const share = await api.client.shares.create({ body: { chatId: shared, options: { reasoning: true, toolDetails: true } } })
+    // After the snapshot: the link is outdated.
+    await api.sendChat({ chatId: shared, modelRef: 'mock:echo', toolMode: 'off', text: 'Also list the rollout steps.' })
+    const versions = await titled('Where should sessions live?')
+    await api.sendChat({ chatId: versions, modelRef: 'mock:echo', toolMode: 'off', text: 'Should the sessions live in SQLite or in Redis?' })
+    // An edit (a second version of the first message: same parent, none), then a second version of its reply.
+    await api.sendChat({ chatId: versions, parentId: null, modelRef: 'mock:echo', toolMode: 'off', text: 'Should the sessions live in SQLite for a single-user app?' })
+    await api.regenerateChat({ chatId: versions, modelRef: 'mock:echo', toolMode: 'off' })
     for (const title of ['Kimi vs Qwen for code review', 'Plugin idea: Linear sync', 'Weekly notes'])
       await titled(title)
     const error = await titled('Check the Anthropic key')
@@ -293,7 +363,7 @@ async function seed(server: StartedServer): Promise<Seed> {
     await api.sendChat({ chatId: reasoning, modelRef: 'mock:reasoning', reasoningEffort: 'high', text: 'Why is a server session safer than a token in local storage for this app?' })
     const markdown = await titled('Refactor auth flow')
     await api.sendChat({ chatId: markdown, modelRef: 'mock:echo', toolMode: 'off', text: MARKDOWN })
-    return { markdown, reasoning, tools, approval, error, now: Date.now() + 2 * 60_000 }
+    return { markdown, reasoning, tools, approval, error, versions, shared, sharePath: share.path, now: Date.now() + 2 * 60_000 }
   }
   finally {
     await api.dispose()

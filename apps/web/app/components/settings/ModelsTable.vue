@@ -197,6 +197,7 @@ function stopEditing(value: boolean) {
                 variant="ghost"
                 size="icon-sm"
                 :aria-label="`Actions for ${model.name}`"
+                :data-testid="testIds.modelRowMenu"
                 class="text-muted-foreground hover:text-foreground"
               >
                 <EllipsisIcon aria-hidden="true" />

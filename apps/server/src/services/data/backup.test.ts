@@ -249,7 +249,7 @@ describe('backup export', () => {
     await seed(app)
     // settings + 3 chats + manifest = 5 entries; the index and 2 blobs make 8.
     const entries = await rejection(app.deps.data.exportBackup({}))
-    expect(entries).toMatchObject({ code: 'payload_too_large', details: { limitBytes: expect.any(Number) } })
+    expect(entries).toMatchObject({ code: 'payload_too_large', details: { limitEntries: 5 } })
     expect(entries.message).toContain('files=false')
     expect(unzip(await exportBytes(app.deps, { files: false }))['manifest.json']).toBeDefined()
     // Without room for the chats either, the message does not suggest files=false.

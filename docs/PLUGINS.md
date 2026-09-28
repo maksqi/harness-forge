@@ -912,7 +912,7 @@ logged and the plugin detail shows it).
 |---|---|---|---|---|---|
 | `chat.params` | `chatId`, `modelRef`, `model`, `reasoningEffort`, `toolMode` | `instructions`, `temperature?`, `maxOutputTokens?`, `maxSteps`, `reasoning?`, `providerOptions` | once per run, after model resolution and `provider.reasoning()`, before `streamText` | 3 s | changes discarded, run continues |
 | `chat.headers` | `chatId`, `modelRef` | `headers` (sent with every model request of the run) | once per run, after `chat.params` | 3 s | changes discarded |
-| `chat.messages` | `chatId`, `modelRef` | `messages` (`ModelMessage[]` after `convertToModelMessages`, before context trimming) | once per run | 3 s | changes discarded |
+| `chat.messages` | `chatId`, `modelRef` | `messages` (`ModelMessage[]` after `convertToModelMessages`, before context trimming): the path being answered, from the first message to the new or answered user message; other versions of edited or regenerated messages are never included (ADR-023) | once per run | 3 s | changes discarded |
 | `tool.approve` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `decision?` (`allow` / `ask` / `deny`) | per tool call in `ask` / `auto` mode, step 2 of the approval order | 3 s | ignored; resolution falls through to the policy |
 | `tool.before` | `chatId`, `modelRef`, `tool`, `toolCallId` | `input` | per execution, after approval, before `execute` | 3 s | **a throw blocks the call** (error result `Blocked by <pluginId>: <message>`, not counted as a failure); a timeout also blocks and counts |
 | `tool.after` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `output` | per successful execution, before the 64 KB cap | 3 s | changes discarded (original output kept) |
@@ -1494,8 +1494,13 @@ then `await ctx.ai.generateText({ model, prompt })`. Calls are billed to the use
 **What happens to a running tool call when my plugin is disabled?** `c.signal` aborts and the model receives "tool
 unavailable".
 
-**Can hooks see the system prompt and every message?** Yes (`chat.params`, `chat.messages`), which is why `hooks` is a
-permission shown in the trust dialog.
+**Can hooks see the system prompt and every message?** Yes (`chat.params`, `chat.messages`: every message of the
+path being answered), which is why `hooks` is a permission shown in the trust dialog.
+
+**Is my plugin part of a Settings → Data backup?** No. A backup (ADR-024) holds chats, their attachments and, when
+chosen, the public app settings; plugins, plugin settings and storage, secrets, MCP servers and model or tool
+preferences stay out, and "Delete all data" leaves them alone too. To move everything, copy the whole data directory
+(`HF_DATA_DIR`, including `secret.key`, or keep the same `HF_MASTER_KEY`) while the server is stopped.
 
 **How do I debug?** `ctx.logger` entries appear in the plugin's Logs tab and in the server log; link the folder for
 hot reload; set `HF_PLUGIN_WATCH=1` to hot-reload code plugins installed in `data/plugins/`.

@@ -233,7 +233,7 @@ Provider key dialog:
 ┌──────────────────────┬─────────────────────────────────────────────────────────────────┐
 │ ◆ harness-forge    ◧ │ Data                                                            │
 │ ← Back to app        │ Back up and restore your chats, or delete them all.             │
-│                      │ 12 chats (2 archived) · 348 messages · 18 files, 24.3 MB        │ summary
+│                      │ 12 chats (2 archived) · 348 messages · 18 files, 24 MB          │ summary
 │ ⚿  Providers         │ Export                                                          │
 │ ▦  Models            │ ◉ Include attachments   ◉ Include settings    [Export backup]   │
 │ ⚙  General           │ Import                                                          │
@@ -646,9 +646,10 @@ settings) so it applies before boot.
 
 `layouts/auth.vue` (C3): no sidebar; a centered column on `bg-background` for `/login`.
 `layouts/share.vue` (C9, Phase 5): the public share page (7.15). No sidebar, command palette, shortcuts dialog or
-Share dialog: a header bar (`--header-height`, bottom border) with `BrandMark` + the `harness-forge` wordmark as plain
-text (not a link: visitors cannot use the app) and `ThemeToggle collapsed` on the right, then `<main
-class="min-h-dvh bg-background">` with the page slot. It mounts nothing that loads a store.
+Share dialog: a `min-h-dvh` column on `bg-background` with a header bar (`--header-height`, bottom border) holding
+`BrandMark` + the `harness-forge` wordmark as plain text (not a link: visitors cannot use the app) and
+`ThemeToggle collapsed` on the right, then `<main>` (`flex-1`) with the page slot. It mounts nothing that loads a
+store.
 `app.vue` (C3): `<TooltipProvider>`, `<NuxtLayout><NuxtPage /></NuxtLayout>`, `<Toaster>`, theme-color `useHead`.
 
 ### 5.1 Sidebar (`AppSidebar`, C3)
@@ -660,7 +661,7 @@ class="min-h-dvh bg-background">` with the page slot. It mounts nothing that loa
 | Widths | expanded 16.5rem; icon mode 3rem (`--sidebar-width-icon`); mobile sheet 18rem (below `md`) |
 | Toggle | Mod+B (built into `SidebarProvider`), `SidebarTrigger` (`PanelLeft` icon, `aria-label="Toggle sidebar"`); state persists in the shadcn cookie |
 | Header | `AppBrand`: ember `BrandMark` (16px) + `harness-forge` in mono 13px/500; trigger at the right. In icon mode only the mark shows; clicking it expands |
-| Mode tabs | `ModeTabs` below the brand: segmented `Tabs` [Chat \| Plugins], full width, h-8, driven by the route (5.2). Hidden in settings mode |
+| Mode tabs | `ModeTabs` below the brand: segmented `Tabs` [Chat \| Plugins], full width, h-8 (40px tabs on coarse pointers, 14.5), driven by the route (5.2). Hidden in settings mode |
 | Content | `ChatNav` (chat mode) · `PluginsNav` (plugins mode) · `SettingsNav` (settings mode) |
 | Footer | left: "Settings" (`Settings` icon) → `/settings/providers` (hidden in settings mode, where "← Back to app" is at the top); right: `ThemeToggle` |
 | Icon mode | tabs become two stacked icon buttons (`MessageSquare` Chat, `Blocks` Plugins); New chat (`SquarePen`) and Search (`Search`) icons; lists hidden; footer: Settings icon + single theme button; every icon has a tooltip with its label and shortcut |
@@ -721,10 +722,11 @@ Appearance (`Palette`), Data (`Database`, Phase 5: between Appearance and About,
 
 ### 5.6 Main header
 
-- **Chat pages** (`ChatHeader`, W2.2): h-12 (`--header-height`), sticky `top-0 z-10 bg-background`; bottom
-  border appears only after the transcript scrolls (`border-b border-border` when `scrollTop > 0`, fixed 1px
-  reserved so nothing moves). Left: `SidebarTrigger` (only when the sidebar is collapsed or on mobile), then the
-  title (`text-base font-medium`, truncate). Clicking the title starts `InlineRename`. Right: `⋯` menu
+- **Chat pages** (`ChatHeader`, W2.2; W5.6 in Phase 5): h-12 (`--header-height`), `z-10 bg-background`, above the
+  transcript in the chat view's `h-dvh` column (only the transcript scrolls); bottom border appears only after the
+  transcript scrolls (`border-b border-border` when `scrollTop > 0`, fixed 1px reserved so nothing moves). Left:
+  `SidebarTrigger` (only when the sidebar is collapsed or on mobile), then the title (`text-base font-medium`,
+  truncate). Clicking the title starts `InlineRename`. Right: `⋯` menu
   (`aria-label="Chat options"`): Rename · Show thinking (checkbox) · Share… · Export as Markdown · Export as JSON ·
   separator · Delete. Share… calls `ui.openShare(chatId)` (7.14). The empty state `/` shows no title and no menu.
 - **Other pages** (`PageHeader`, C3): same height and trigger rule; title (`text-xl font-semibold`) +
@@ -807,8 +809,9 @@ starts with `/` and not `//`.
 
 `/share/*` is public (Phase 5, W5.6): `auth.global.ts` returns before loading the auth status (so there is no login
 redirect, and `plugins/events.client.ts`, which waits for a loaded status, never opens `/api/events`),
-`authRedirectFor()` in `utils/redirect.ts` returns null for it, and the `$api` plugin never redirects to `/login` while
-the current route is under `/share/`. The share page calls only `GET /api/share/:token`.
+`authRedirectFor()` in `utils/redirect.ts` returns null for it (`isSharePath()`, case-insensitive), and on a 401 the
+`$api` plugin neither marks the auth store unauthenticated nor redirects to `/login` while the current route (or the
+page being loaded) is under `/share/`. The share page calls only `GET /api/share/:token`.
 
 Query parameters used by the UI: `/plugins?filter=&q=` (`filter` = `all | providers | tools | mcp | commands |
 disabled`; not `kind`, which is the plugin kind enum), `/plugins/[id]?tab=`, `/plugins/new?type=&edit=`,
@@ -914,11 +917,22 @@ server message as description, and at most two actions.
 The envelope `action` wins over the table: `configure-provider` → Open settings, `refresh-models` → Refresh
 models, `login` → Log in, `retry` → Retry. Exception: `403 forbidden` with `action: 'login'` while a session exists
 means fresh auth is missing (API.md): the caller opens `ConfirmPasswordDialog` and retries the request once (8.4).
-Retry = `regenerate()` of the failed message. Non-chat 409
-`conflict` (a run is already active, `details.reason: 'run-active'`, also answered to a version switch during a run)
-→ toast "A response is already running in this chat." 409 `conflict` with `details.reason: 'busy'` (a data import or
-delete-all is running, 9.8) → toast "Another import or delete is running. Try again when it finishes." Every other
-failed request outside the transcript → `toast.error(title, { description })` with the same titles.
+Retry = `regenerate()` of the failed message: on the last message it retries the last request (a user message the
+server never stored is sent again, 11.1); on an older failed reply it adds a new version of that reply (7.5).
+
+Two answers to a chat request show a toast instead of the alert, and the user message the server did not store goes
+back into the composer (`takeBackUnstored()`, 11.1):
+
+- 409 `conflict` with `details.reason: 'run-active'` (a run already holds the chat, e.g. one started in another tab)
+  → toast "A response is already running in this chat."; the transcript follows the running reply. A version switch
+  during a run gets the same answer and toast.
+- 404 `not_found` (an unknown `parentId` or `messageId`: the chat changed in another tab, so the shown path is stale)
+  → toast "This chat changed elsewhere and was reloaded."; the session reloads the path. A version switch answered
+  404 does the same.
+
+409 `conflict` with `details.reason: 'busy'` (a data import or delete-all is running, 9.8) → toast "Another import or
+delete is running. Try again when it finishes." Every other failed request outside the transcript →
+`toast.error(title, { description })` with the same titles.
 
 ### 7.5 Message actions, versions and meta
 
@@ -947,7 +961,8 @@ sibling ids (`seq` order) and the index of the shown one (API.md, `MessageBranch
   (`POST /api/chats/:id/branch`): the transcript shows the most recent path under that version and focus lands on the
   same control of the new version's switcher; the polite live region announces "Version 1 of 3". The server keeps
   the choice (the chat's active leaf), so a reload shows it again. During a run the server refuses the switch with 409
-  (7.4). Keyboard: Tab, Enter and Space on the buttons; ArrowLeft / ArrowRight anywhere inside the switcher.
+  and a stale path gets 404 (both 7.4); any other failure → toast "Could not switch versions" with the server message.
+  Keyboard: Tab, Enter and Space on the buttons; ArrowLeft / ArrowRight anywhere inside the switcher.
 - Assistant: **Copy** (all text parts as markdown; icon swaps to `Check` for 1.5s, no toast), **Regenerate** (every
   finished assistant message; hidden while busy through the transcript's `data-busy`, like Edit; uses the model
   currently selected in the composer; `trigger: 'regenerate-message'` with `messageId`), then the meta text:
@@ -964,6 +979,10 @@ sibling ids (`seq` order) and the index of the shown one (API.md, `MessageBranch
 - ↑ in an empty composer opens `MessageEditor` on the last user message.
 - Versions are never deleted (backlog). Search (Mod+K) covers every version, so a match may come from a version that is
   not on the active path.
+- Other tabs are not told about a switch (`chat.updated` carries no leaf id; backlog): an open tab keeps its path
+  until it reloads the chat (a page reload, a reply it did not stream finishing, or a 404 to its next request, 7.4).
+  After the session's own edit or regenerate, the new switcher ("2/2") appears once `run.finished` arrives
+  (`refreshBranches()`, 11.1).
 
 ### 7.6 Streaming states
 
@@ -1083,11 +1102,12 @@ server's `ChatDetail.totals` sums every usage row, including hidden versions (th
 A share link is a read-only link to a **snapshot** of the chat's active path (ADR-025): later messages are not shared
 until the owner updates the snapshot. One `ShareDialog` lives in `layouts/default.vue`; "Share…" in the chat header
 menu (5.6) and the sidebar row menu (5.3) call `ui.openShare(chatId)`, closing calls `ui.closeShare()`. Wireframe:
-2.8. `Dialog` max-w-lg, title "Share chat", description "Anyone with a link can read a snapshot of this chat. Messages
-you add later are not shared until you update the snapshot."
+2.8. `Dialog` (`sm:max-w-lg`, at most the viewport height minus 2rem, scrolling inside), title "Share chat",
+description "Anyone with a link can read a snapshot of this chat. Messages you add later are not shared until you
+update the snapshot."
 
 - **Loading**: on open, `shares.list({ query: { chatId } })`; skeleton cards meanwhile; a failure shows the inline
-  error with **Try again**.
+  error with **Try again**. A chat without links shows "This chat has no links yet." above the new-link form.
 - **Passwordless warning** (`share-passwordless-warning`, warning `Alert` with `TriangleAlert`) when
   `auth.status.enabled === false`: title "No password set", text "Links open only where the app is reachable without
   a password (normally just this computer). Set HF_PASSWORD before exposing the server." (Without a password the
@@ -1105,20 +1125,23 @@ you add later are not shared until you update the snapshot."
   - an expiry `Select` (`share-expiry`): Never · 1 day · 7 days · 30 days · 90 days (items `share-expiry-option`,
     `data-value` `never` / `1d` / `7d` / `30d` / `90d`); the trigger shows the current state ("Never expires",
     "Expires in 5 days", "Expired"); choosing an item sends `shares.update({ expiresAt })` computed from now (`null`
-    for Never), which also revives an expired link;
+    for Never), which also revives an expired link (choosing the same item again extends the link from now);
   - **Update snapshot** (outline, `share-update`): `shares.update({ refresh: true })`; the URL never changes;
   - **Revoke…** (ghost destructive, `share-revoke`) → `ConfirmDialog` "Revoke this link?" / "People with the link can
     no longer open it. This can't be undone." / confirm "Revoke" (`share-revoke-confirm`) → `shares.remove`; the card
-    disappears.
+    disappears (also when the link was already revoked elsewhere: 404).
 
-  A card disables its controls while one of its requests runs and replaces itself with the returned `ShareSummary`.
-- **New link** (`share-create-form`): the same three switches (Attachments on, Reasoning off, Tool details off), the
-  expiry `Select` (Never) and **Create link** (primary, `share-create`) → `shares.create({ chatId, options,
-  expiresAt })` → the new card appears on top with its URL focused and selected. At 20 links the button is disabled
-  with the hint "A chat can have up to 20 links."
+  A card disables its controls while one of its requests runs and replaces itself with the returned `ShareSummary`;
+  an update answered 404 (the link was revoked elsewhere) removes the card and shows the error.
+- **New link** (`share-create-form`, heading "New link"): the same three switches (Attachments on, Reasoning off,
+  Tool details off), the expiry `Select` (trigger "Never expires", "Expires in 7 days", …) and **Create link**
+  (primary, `share-create`) → `shares.create({ chatId, options, expiresAt })` → the new card appears on top with its
+  URL focused and selected. At 20 links the button is disabled with the hint "A chat can have up to 20 links."
 - **Fresh auth** (ADR-017, 8.4): create and update are fresh-auth routes. When `auth.fresh` is false the dialog first
-  opens `ConfirmPasswordDialog` and calls `auth.login(password)`; a `403 forbidden` + `action: 'login'` answer (the
-  window ran out meanwhile) prompts the same way and retries once. Revoke is not a fresh-auth route.
+  opens `ConfirmPasswordDialog` ("Confirm your password to create or change a share link.") and calls
+  `auth.login(password)`; a `403 forbidden` + `action: 'login'` answer (the window ran out meanwhile) prompts the same
+  way and retries once. Concurrent requests share one prompt; closing it cancels them without an error. Revoke is not
+  a fresh-auth route.
 - **Errors**: an inline `Alert` (`share-dialog-error`) with the 7.4 title and message; `payload_too_large` → "This
   chat is too large to share (the snapshot would exceed 10 MB)."
 - A running chat can be shared: the snapshot ends at the last stored message (the reply in flight is not included).
@@ -1132,8 +1155,9 @@ Public and read-only (wireframe 2.9). `pages/share/[token].vue` uses the `share`
 chats (6: the route is exempt from the auth middleware).
 
 - **States** (`share-page`, `data-state`): `loading` (title and message skeletons) · `ready` · `unavailable` (the
-  API answered 404: `Empty` "This link is unavailable" / "It may have expired or been revoked, or the chat was
-  deleted.", `share-unavailable`) · `error` (any other failure: "Couldn't load this chat" + the server message +
+  API answered 404, or the token does not match `SHARE_TOKEN_PATTERN` and no request is made: `Empty` "This link is
+  unavailable" / "It may have expired or been revoked, or the chat was deleted.", `share-unavailable`) · `error` (any
+  other failure: "Couldn't load this chat" + the server message +
   **Try again**, `share-page-error` / `share-page-retry`; 429 reads "Too many requests. Try again in {n}s." from
   `retryAfterMs`).
 - **Header**: `h1` = the snapshot title ("Untitled chat" when null, `share-title`), then "Read-only snapshot · {date
@@ -1152,13 +1176,16 @@ chats (6: the route is exempt from the auth middleware).
     or error details).
 - **`ShareToolRow`**: the one-line row of 7.2 without approval states: `Wrench` (or `Server` + the server badge for
   `mcp__<server>__<tool>`), display name, first argument when the input is shared, status from `status` (`done` →
-  `Check`, `error` → `X`, `denied` → `Ban` + "Denied", `stopped` → "Stopped"). It expands (chevron,
-  `share-tool-row-output`) only when the share includes tool details: **Input** / **Output** through
-  `ToolValueBlock`, `errorText` in the error tone. Without tool details the row is static.
+  `Check`, `error` → `X`, `denied` → `Ban` + "Denied", `stopped` → `CircleSlash` + "Stopped"). It expands (chevron,
+  `share-tool-row-output`) only when the part carries `input`, `output` or `errorText`, which the server sends only
+  when the share includes tool details: **Input** / **Output** through `ToolValueBlock` (a value the server cut
+  arrives as JSON text ending in `[truncated]` and shows the "Truncated by server" note), `errorText` as an **Error**
+  block in the error tone. Otherwise the row is static (no button).
 - **Files**: part URLs are `/api/share/<token>/files/<id>` (images load through `<img>`, other files download);
   attachments are absent when the share excludes them.
-- **Head**: `useHead()` sets the title and the meta tags `robots: noindex, nofollow` and `referrer: no-referrer` (the
-  server also sends `X-Robots-Tag` and `Referrer-Policy` on every response).
+- **Head**: `useHead()` sets the title ("{title} · harness-forge", "Link unavailable · harness-forge", else "Shared
+  chat · harness-forge") and the meta tags `robots: noindex, nofollow` and `referrer: no-referrer` (the server also
+  sends `X-Robots-Tag` and `Referrer-Policy` on every response).
 
 ---
 
@@ -1406,13 +1433,16 @@ except dialogs and text fields, which save on blur or Enter.
 - "Default model" and "Title model" rows, each a `SettingsModelSelect` (select-like trigger + searchable popover of
   the visible models grouped by connected provider; the composer's `ModelPicker` is not reused here). Both have
   `allowNone`: "Automatic (last used model)" for the default model, "Automatic (small model of the chat's
-  provider)" for the title model.
+  provider)" for the title model. Every option of the popover carries `model-select-option` with `data-model-ref`
+  (empty for the "Automatic" choice).
 - Search input "Filter models"; then one `Collapsible` section per connected provider: header `ProviderIcon`
   + name + count + "Updated 3h ago" (`RelativeTime`) + **Refresh** (`RotateCw`, spinner while running) +
   **Add custom model**.
 - `ModelsTable` columns: Model (name + mono id; "Custom" badge) · Capabilities (`ModelCaps`) · Context ·
   Price ("$3 / $15" per 1M, muted "—" when unknown) · Favorite (star toggle) · Visible (`Switch`; hidden models
-  never appear in the picker) · `⋯` (Remove, custom models only).
+  never appear in the picker) · `⋯` menu (`model-row-menu`, "Actions for {model}"): Rename (inline, saved as the
+  display-name alias), Reset name (only when renamed), Remove (custom models only). Capabilities, Context and Price
+  hide below `sm`, `md` and `lg`.
 - `CustomModelDialog`: model id (required, mono), display name, context window, capabilities checkboxes →
   `POST /api/custom-models`.
 
@@ -1463,8 +1493,9 @@ under the field: "Wrong password", "Too many attempts. Try again in {n}s." Succe
 
 Bulk data (ADR-024). `DataSettings` (`data-settings`) in the usual `SettingsPage` frame: `PageHeader` "Data" with the
 description "Back up and restore your chats, or delete them all." Wireframe: 2.7. On load it calls `GET /api/data`
-(`DataSummary`); the summary line (`data-summary`) reads "12 chats (2 archived) · 348 messages · 18 files, 24.3 MB"
-(messages count every version).
+(`DataSummary`); the summary line (`data-summary`) reads "12 chats (2 archived) · 348 messages · 18 files, 24 MB"
+(messages count every version). A skeleton shows while it loads, "Could not load the data summary" with **Retry**
+when it fails; it reloads after every import.
 
 **Export** (`SettingsSection` "Export"): "Download a zip with every chat, including archived chats and every message
 version. API keys, passwords, plugins, MCP servers and share links are never included."
@@ -1482,31 +1513,38 @@ version. API keys, passwords, plugins, MCP servers and share links are never inc
 **Import** (`SettingsSection` "Import"): "Restore a backup zip or a chat exported as JSON. Chats are imported one by
 one; a failed chat does not stop the others."
 
-- a file input (`data-import-file`, accepts `.zip` and `.json`); a file above 256 MB is refused before the upload
-  ("This file is larger than 256 MB.");
+- **Choose file…** opens a visually hidden file input (`data-import-file`, accepts `.zip` and `.json`); the chosen
+  file's name and size show next to it (else "No file chosen. A .zip backup or a .json chat, up to 256 MB."). A
+  `.json` name or type counts as a single chat, anything else as a backup. A file above 256 MB is refused before the
+  upload with the inline error "This file is larger than 256 MB." (`data-import-error`, `data-code`
+  `payload_too_large`);
 - "If a chat already exists": `ToggleGroup` (`data-import-policy`, `data-value`) **Skip it** (`skip`, default) /
   **Import a copy** (`copy`: new ids and " (imported)" appended to the title);
 - `Switch` "Restore settings from the backup" (`data-import-restore-settings`, off; disabled for a `.json` file);
-- **Import** (`data-import`, `Upload` icon; disabled without a file) → `data.import({ form })` (fields `file`,
-  `onConflict`, `restoreSettings`); "Importing…" with a spinner while it runs; errors inline (`data-import-error`);
-  409 `busy` as in 7.4;
-- the result panel (`data-import-result`, `data-kind` = `backup` | `chat`): "Imported {n} chats · copied {n} · skipped
-  {n} · failed {n}", then "{n} files ({reused} reused, {missing} missing)" and "Settings restored" when true; one row
-  per item (`data-import-item`, `data-status` = `imported` | `copied` | `skipped` | `failed`, `data-chat-id`) with the
-  title (a link to `/chat/<id>` for imported and copied chats), a status badge and the error of a failed item;
+- **Import** (`data-import`, `Upload` icon; disabled without a file) → `data.import({ form })` (fields `onConflict`,
+  `restoreSettings`, then `file`); "Importing…" with a spinner while it runs; 409 `busy` (7.4) and 413
+  `payload_too_large` become toasts, every other error shows inline (`data-import-error`, `data-code`);
+- the result panel (`DataImportResultPanel`, `data-import-result`, `data-kind` = `backup` | `chat`): "Imported {n}
+  chats · copied {n} · skipped {n} · failed {n}" (zero counts after the first are left out), then "{n} files
+  ({reused} reused, {missing} missing)" and "Settings restored" when true; one row per item (`data-import-item`,
+  `data-status` = `imported` | `copied` | `skipped` | `failed`, `data-chat-id`) with the title ("Untitled chat" when
+  it has none; a link to `/chat/<id>` for imported and copied chats), a status badge and the error of a failed item;
   warnings as a muted list (`data-import-warning`);
-- afterwards `chats.fetchPage({ reset: true })`, plus `settings.fetch()` when `settingsRestored`.
+- afterwards `chats.fetchPage({ reset: true })`, plus `settings.fetch()` when `settingsRestored`; the summary line
+  reloads and the polite region announces the result (14.2).
 
-**Shared links**: `SharesSettingsSection` (W5.6, contract 10.4) lists every share link of every chat, newest first.
-Row (`shares-row`, `data-share-id`, `data-chat-id`): the chat title (a link to `/chat/<id>`; "Untitled chat" when
-null) · "{n} messages · snapshot {relative time}" · "Expires in 5 days" when set · the Outdated / Expired badges
-(`share-outdated`, `share-expired`) · **Copy link** (`share-copy`) · **Manage…** (`shares-row-manage` →
-`ui.openShare(chatId)`) · **Revoke…** (`share-revoke` → the `ConfirmDialog` of 7.14, `share-revoke-confirm`). Empty:
-"No shared links." (`shares-empty`). The section refetches after a revoke and when the Share dialog closes
+**Shared links**: `SharesSettingsSection` (W5.6, contract 10.4) renders its own `SettingsSection` "Shared links"
+("Read-only links to chat snapshots. Revoking a link stops it at once.") and lists every share link of every chat,
+newest first. Row (`shares-row`, `data-share-id`, `data-chat-id`): the chat title (a link to `/chat/<id>`; "Untitled
+chat" when null) · "{n} messages · snapshot {relative time}" · "Expires in 5 days" when set and not expired · the
+Outdated / Expired badges (`share-outdated`, `share-expired`) · **Copy link** (`share-copy`) · **Manage…**
+(`shares-row-manage` → `ui.openShare(chatId)`) · **Revoke…** (`share-revoke` → the `ConfirmDialog` of 7.14,
+`share-revoke-confirm`). Empty: "No shared links." (`shares-empty`). A failed load shows "Couldn't load the shared
+links" with **Try again** (earlier rows stay). The section refetches after a revoke and when the Share dialog closes
 (`ui.shareChatId` back to `null`).
 
-**Danger zone** (`SettingsSection` "Danger zone", `border-destructive/40`): "Delete every chat, including archived
-chats, every message version and every share link. API keys, plugins and settings are kept."
+**Danger zone** (`SettingsSection` "Danger zone", its content in a `border-destructive/40` box): "Delete every chat,
+including archived chats, every message version and every share link. API keys, plugins and settings are kept."
 
 - **Delete all data…** (`data-delete`, destructive outline) opens a `Dialog` (`data-delete-dialog`): title "Delete all
   data?", text "This deletes {chats} chats and {messages} messages. It can't be undone; export a backup first if you
@@ -1515,8 +1553,9 @@ chats, every message version and every share link. API keys, plugins and setting
   confirm" (`data-delete-confirm-input`, case-sensitive, autofocus) and **Delete everything** (destructive,
   `data-delete-submit`, enabled only when the input is exactly `DELETE`).
 - Submit → `data.deleteAll({ body: { confirm: 'DELETE', files, usage } })`, a fresh-auth route:
-  `ConfirmPasswordDialog` first when `auth.fresh` is false; a `403` + `action: 'login'` answer prompts and retries
-  once (8.4).
+  `ConfirmPasswordDialog` ("Deleting all data needs your password.") first when a password is set and `auth.fresh`
+  is false; a `403` + `action: 'login'` answer prompts and retries once (8.4). While the request or the prompt is
+  pending the dialog stays open.
 - Success → toast "Deleted {n} chats"; the `hf-composer-draft:*` keys are removed from `sessionStorage` and
   `hf-unread` from `localStorage`; `chats.fetchPage({ reset: true })`; navigate to `/`. The server emits
   `chat.deleted` per chat, so other tabs follow.
@@ -1652,14 +1691,15 @@ tool row), `ToolApprovalCard`, `FilePart`, `SourcesPart`, `NoticePart` (`data-no
 `ProviderModelsSection`, `ModelsTable`, `SettingsModelSelect`, `CustomModelDialog`, `GeneralSettings`,
 `PasswordSection`, `PasswordDialog`, `AppearanceSettings`, `ThemeCard`, `ThemePreview`, `AboutPanel`, `LoginForm`.
 
-**`settings/data/`** (W5.5, Phase 5) — `DataSettings` × (content of `/settings/data`; C9 ships the stub), plus
-internal pieces whose names are free (for example `DataExportSection`, `DataImportSection`, `DataImportResult`,
-`DataDangerZone`, `DeleteAllDialog`).
+**`settings/data/`** (W5.5, Phase 5) — `DataSettings` × (content of `/settings/data`; C9 shipped the stub) and its
+internal pieces `DataExportSection`, `DataImportSection`, `DataImportResultPanel` (the import result), `DataDangerZone`
+and `DataDeleteDialog` (the delete-all dialog); pure helpers in `data.ts`.
 
 **`share/`** (W5.6, Phase 5) — `ShareDialog` × (mounted once by `layouts/default.vue`), `SharesSettingsSection` ×
-(rendered by `DataSettings`), `SharedChatView` × (content of `/share/[token]`), `ShareToolRow`, plus internal pieces
-(for example `ShareLinkCard`, `ShareOptionSwitches`, `ShareExpirySelect`). C9 ships stubs of the three cross-owner
-components.
+(rendered by `DataSettings`), `SharedChatView` × (content of `/share/[token]`), `ShareToolRow`, and the internal
+pieces `ShareLinkCard` (one link of the dialog), `ShareOptionSwitches`, `ShareExpirySelect` and `SharedMessage` (one
+message of the share page); pure helpers in `share-links.ts` and `share-view.ts`, the dialog's fresh-auth flow in
+`fresh-auth.ts`. C9 shipped stubs of the three cross-owner components.
 
 W4.2 (UX polish) may edit every file above in Phase 4.
 
@@ -1946,12 +1986,15 @@ defineProps<{ token: string }>()   // the route param; the component calls only 
 
 // ShareToolRow (W5.6, internal to share/)
 defineProps<{ part: Extract<SharePart, { type: 'tool' }> }>()   // toolName, status, input?, output?, errorText?
+// Expandable only when the part carries input, output or errorText (sent only with the toolDetails option, 7.15).
 
 // SharesSettingsSection (W5.6) — rendered by DataSettings (W5.5)
-// No props, no emits: lists every share (shares.list()), refetches when the Share dialog closes (9.8).
+// No props, no emits: renders its own SettingsSection "Shared links" (root data-testid shares-section), lists every
+// share (shares.list()), refetches after a revoke and when the Share dialog closes (9.8).
 
 // DataSettings (W5.5) — content of pages/settings/data.vue
-// No props, no emits (9.8).
+// No props, no emits (9.8): the summary line, then DataExportSection, DataImportSection, SharesSettingsSection and
+// DataDangerZone.
 ```
 
 ---
@@ -2070,7 +2113,8 @@ interface ChatSession {
   switching: Ref<boolean>                 // + Phase 5: a switchBranch() request is in flight
   send(input: { text: string; files: FileRef[] }): Promise<void>  // a new user message; parentId = the visible path
   edit(messageId: string, text: string): Promise<void>            // Phase 5: a new version of that user message
-  regenerate(messageId?: string): Promise<void>   // a new version of that reply (default: the last message)
+  regenerate(messageId?: string): Promise<void>   // a new version of that reply (default: the last message), or a
+                                          // first reply to a user message; re-sends an unstored failed message
   approve(r: { id: string; approved: boolean; toolName: string; alwaysAllow: boolean }): Promise<void>
   stop(): Promise<void>                   // POST /api/chat/:id/stop, then the client abort (an abort alone only disconnects)
   load(): Promise<void>                   // + GET /api/chats/:id, then resumeIfRunning()
@@ -2078,6 +2122,8 @@ interface ChatSession {
   resumeIfRunning(): Promise<void>        // + chat.resumeStream() when the server or the chats store reports a run
   switchBranch(messageId: string): Promise<void>  // + Phase 5: POST /api/chats/:id/branch, then the returned path
   refreshBranches(): Promise<void>        // + Phase 5: GET /api/chats/:id after the session's own edit / regenerate
+  takeBackUnstored(): HarnessUIMessage | null  // + Phase 5: removes the unstored failed user message (and anything
+                                          // after it) from the transcript and returns it; null when there is none
 }
 function useChatSession(id: string, opts?: { isNew?: boolean }): ChatSession
 function useChatSessionRegistry(): { get(id: string): ChatSession | undefined; ids: Readonly<Ref<readonly string[]>> }
@@ -2113,22 +2159,29 @@ Branching (Phase 5, W5.2, ADR-023):
   `chat.sendMessage({ text, files })` with the edited message's files: the SDK generates the new id, and the request's
   `parentId` is the edited message's parent. The old version stays on the server.
 - **Failed unstored messages.** A user message whose request failed with an HTTP error before the stream started
-  (`APICallError` with a `statusCode`) was never stored. The session remembers it: the next `send()` first removes it
-  from `chat.messages`, so `parentId` never names an unstored message, and `regenerate()` (the Retry of 7.4) re-sends
-  exactly that message as a new submit instead of calling `chat.regenerate({ messageId })`. A `404 not_found` answer
-  to a send or a regenerate (an unknown `parentId` or `messageId`: the local path is stale) makes the session call
-  `refresh()`.
-- **`switchBranch(messageId)`** does nothing while `busy` or `switching`; otherwise it calls
-  `api.chats.switchBranch({ params: { id }, body: { messageId } })` directly (the chats store is not involved), then
-  replaces `chat.messages` with the returned path, **keeping the existing message objects of the shared id prefix**
-  (so `v-memo` skips them), and replaces `branches`. 409 `run-active` → the 7.4 toast and `resumeIfRunning()`; 404 →
-  `refresh()`.
+  (`APICallError` with a `statusCode`; except 409 `exists`, whose message id is already stored) was never stored.
+  The session remembers it: the next `send()` first removes it from `chat.messages`, so `parentId` never names an
+  unstored message, and `regenerate()` (the Retry of 7.4) re-sends exactly that message as a new submit instead of
+  calling `chat.regenerate({ messageId })`. `takeBackUnstored()` removes it (and anything after it) and returns it:
+  `ChatView` calls it on a 409 `run-active` or a 404 answer and puts its text back into the composer (7.4). A
+  `404 not_found` answer to any request of the session (an unknown `parentId` or `messageId`: the local path is
+  stale) makes the session call `refresh()` once the request ended, then clear the error; `ChatView` shows the toast
+  "This chat changed elsewhere and was reloaded."
+- **`switchBranch(messageId)`** does nothing while `busy`, `switching` or resuming, or before the chat is persisted;
+  otherwise it calls `api.chats.switchBranch({ params: { id }, body: { messageId } })` directly (the chats store is
+  not involved), then replaces `chat.messages` with the returned path, **keeping the existing message objects of the
+  shared id prefix** (so `v-memo` skips them), and replaces `branches`. 409 `run-active` → it marks the chat running,
+  reloads the path with `refresh()` and calls `resumeIfRunning()` (the run may belong to another version); 404 →
+  `refresh()`. Either way it rethrows, and `ChatView` shows the 7.4 toast. `send()`, `edit()` and `regenerate()` wait
+  for a pending switch first, so a request starts from the path the switch shows.
 - **`refreshBranches()`**: the session still skips the reload after its own runs, except after an edit or a
   regenerate (`run.finished`): then it fetches `GET /api/chats/:id`; unchanged path ids replace only `branches`,
   otherwise the whole path is applied (keeping the shared-prefix objects). `load()` and `refresh()` set `branches`
   from `ChatDetail.branches`.
 - **`v-memo`** of a transcript row adds `branches[message.id]` and `branches[message.id] !== undefined && (busy ||
   switching)`, so only messages with versions re-render when a request starts or ends.
+- **Other tabs.** `chat.updated` carries no leaf id, so a switch made in another tab is not applied here until the
+  session reloads the chat (7.5, backlog).
 
 ### 11.2 `useShortcuts()` (C5)
 
@@ -2171,7 +2224,7 @@ Other composables: `useApi()` / `useApiFetch()` (C5), `useServerEvents()` (C5, 1
 |---|---|---|---|
 | Mod+K | toggle the command palette (search chats and commands) | global, also in inputs and CodeMirror | W2.4 `useGlobalShortcuts` |
 | Mod+Shift+O | new chat (go to `/`, focus composer) | global, also in inputs | W2.4 |
-| Mod+B | toggle sidebar | global | handled by shadcn `SidebarProvider`; W2.4 registers a display-only entry |
+| Mod+B | toggle sidebar (the key matches case-insensitively, so Caps Lock works, and non-Latin layouts use the physical B key; Mod+Shift+B stays the browser's bookmarks-bar shortcut; Alt combos, IME composition and events another handler already took are ignored) | global | handled by shadcn `SidebarProvider` (local patch, `apps/web/AI_ELEMENTS_PATCHES.md`); W2.4 registers a display-only entry |
 | Mod+/ | toggle the keyboard shortcuts dialog | global, also in inputs | W2.4 |
 | Shift+Esc | focus the composer | chat pages, no overlay open | W2.4 (→ `ui.requestComposerFocus()`) |
 | Alt+M | open model picker | chat pages, also in inputs | W2.3 (`alt+code:KeyM`, `alt: true`) |
@@ -2216,10 +2269,11 @@ export type TestId = (typeof testIds)[TestIdKey]
 Usage: `<Button :data-testid="testIds.newChat">`. Ids are kebab-case and static; the identity of repeated
 elements goes into data attributes (`data-chat-id`, `data-message-id`, `data-model-ref`, `data-provider-id`,
 `data-plugin-id`, `data-tool-name`, `data-server-id`, `data-state`, `data-status`, `data-value`, `data-step`,
-`data-step-item`, `data-path`, `data-kind`, `data-action`, `data-code`, `data-level`, `data-dirty`; Phase 5 adds
-`data-index`, `data-count`, `data-share-id`, `data-role`, `data-outdated`, `data-expired`). Playwright uses
-`getByTestId()` plus attribute filters. Ids are never reused for a different element; removing one is a CCR. The
-Phase 5 ids are collected in 13.6.
+`data-step-item`, `data-path`, `data-kind`, `data-action`, `data-code`, `data-level`, `data-dirty`, `data-hidden`;
+Phase 5 adds `data-index`, `data-count`, `data-share-id`, `data-role`, `data-outdated`, `data-expired`). Playwright
+uses `getByTestId()` plus attribute filters. Ids are never reused for a different element; removing one is a CCR. The
+Phase 5 ids are collected in 13.6, except the two Settings → Models ids added in P5-B (`model-select-option`,
+`model-row-menu`, 13.4).
 
 ### 13.1 Shell and navigation
 
@@ -2309,10 +2363,12 @@ Phase 5 ids are collected in 13.6.
 | `key-env-badge` | "From env" badge | |
 | `key-advanced` · `key-base-url` | Advanced toggle, base URL input | |
 | `key-test` · `key-test-result` · `key-save` · `key-save-anyway` · `key-remove` | dialog actions and result | result: `data-status` (ok / error) |
-| `models-default-picker` · `models-title-picker` | default / title model pickers (field triggers) | |
+| `models-default-picker` · `models-title-picker` | default / title model pickers (field triggers) | `data-value` (the model ref; empty for "Automatic") |
+| `model-select-option` | one option in the popover of those pickers (`SettingsModelSelect`; Phase 5, W5.13) | `data-model-ref` (empty for the "Automatic" choice) |
 | `models-filter` | filter input | |
 | `models-section` · `models-refresh` · `custom-model-add` | provider section, refresh, add custom | `data-provider-id` |
-| `model-row` · `model-favorite` · `model-visible` · `model-remove` | table row and its controls | `data-model-ref` |
+| `model-row` · `model-favorite` · `model-visible` · `model-remove` | table row and its controls (`model-remove` = the Remove item of the row menu, custom models only) | row: `data-model-ref`, `data-hidden` (`true` / `false`); favorite: `data-state` (on / off) |
+| `model-row-menu` | `⋯` actions trigger of a model row (Rename, Reset name, Remove; Phase 5, W5.13) | |
 | `custom-model-dialog` · `custom-model-id` · `custom-model-save` | custom model dialog | |
 | `settings-display-name` · `settings-send-key` · `settings-default-mode` · `settings-default-effort` · `settings-max-steps` · `settings-alt-shortcuts` · `settings-instructions` | general fields | |
 | `password-set` · `password-remove` · `password-dialog` · `password-current` · `password-new` · `password-confirm` · `password-save` · `logout` | password section (`password-set` = Set password / Change password; `password-remove` = Remove password) | remove: `data-action="remove-password"` |
@@ -2367,9 +2423,10 @@ Phase 5 ids are collected in 13.6.
 
 ### 13.6 Branching, sharing and data (Phase 5)
 
-Every new id of Phase 5. C9 copies this table verbatim into `utils/testids.ts` in P5-0b (the key column is the
-`testIds` key, the camelCase of the id), under a `// Branching, sharing and data (Phase 5)` comment; the file is
-frozen during P5-A (a missing id is a CCR). The new components also reuse existing ids: the share page renders
+The new ids of the Phase 5 features. C9 copied this table verbatim into `utils/testids.ts` in P5-0b (the key column
+is the `testIds` key, the camelCase of the id), under a `// Branching, sharing and data (Phase 5)` comment; the file
+was frozen during P5-A. W5.13 added `model-select-option` and `model-row-menu` in P5-B, next to the other Settings →
+Models ids (13.4). The new components also reuse existing ids: the share page renders
 `reasoning-row`, `file-chip` and `sources-row` through the reused part components, the `share` layout renders
 `theme-toggle`, fresh-auth prompts use `confirm-password-dialog`, and pages use `page-header`. The mobile specs need no
 new id (14.6).
@@ -2451,8 +2508,12 @@ new id (14.6).
 - Switching a message version keeps focus on the same control (previous / next) of the new version's switcher; the
   buttons use `aria-disabled`, so focus survives reaching the first or last version (7.5).
 - The Share dialog focuses "Create link" when the chat has no link, else the first card's "Copy link"; a new link's
-  URL input receives focus with the text selected. Closing returns focus to the menu trigger that opened it.
-- The delete-all dialog focuses the "Type DELETE to confirm" input; closing returns focus to "Delete all data…".
+  URL input receives focus with the text selected; after a revoke, focus moves to the next card's "Copy link" (else
+  the previous card's, else "Create link"). Closing returns focus to the element that had it when the dialog opened:
+  the dialog has no trigger of its own, so the chat menus run "Share…" after they closed and put focus back on their
+  `⋯` trigger first; from Settings → Data it is the row's "Manage…".
+- The delete-all dialog focuses the "Type DELETE to confirm" input; closing returns focus to "Delete all data…". When
+  the password prompt on top of it closes, focus returns to "Delete everything".
 
 ### 14.2 Semantics and labels
 
@@ -2493,8 +2554,8 @@ instant scroll instead of smooth, no sheet slide (fade only).
 
 | Width | Layout |
 |---|---|
-| < 640 (`sm`) | greeting 24px; effort/permission triggers show icons only; dialogs full-screen (`Drawer` for model picker) |
-| < 768 (`md`) | sidebar becomes a `Sheet` (18rem, from the left) opened by the header trigger; closes on navigation; composer full width with 12px gutters; textarea 16px; plugin filters as a `Select`; settings content full width |
+| < 640 (`sm`) | greeting 24px; effort/permission triggers show icons only; dialogs stay centered, never full-screen: form dialogs span the width minus 1rem on each side (`max-w-[calc(100%-2rem)]`), are capped at the viewport height minus 2rem and scroll inside; confirmations (`AlertDialog`) are 20rem wide |
+| < 768 (`md`) | sidebar becomes a `Sheet` (18rem, from the left; its own query is `max-width: 768px`, so it is still a sheet at exactly 768px) opened by the header trigger; closes on navigation; composer full width with 12px gutters; textarea 16px; model picker as a bottom `Drawer`; plugin filters as a `Select`; settings content full width |
 | 768–1023 | sidebar collapsible to icons; transcript `max-w-3xl` with 16px gutters; kbd hints hidden |
 | ≥ 1024 (`lg`) | full layout, kbd hints visible |
 | ≥ 1280 (`xl`) | plugin grid 3 columns |
@@ -2504,10 +2565,13 @@ instant scroll instead of smooth, no sheet slide (fade only).
 - Source tab below `lg`: file tree collapses into a `Select` above the editor; the build panel starts collapsed.
 - Touch (`pointer: coarse`): interactive targets ≥ 40×40px (rows 40px tall, icon buttons 40px, hit-area padding
   on the 32px send button); hover-only actions (row `⋯`, message actions) are always visible. The `BranchSwitcher`
-  buttons follow the same 40px rule.
+  buttons, the Chat | Plugins mode tabs and the chat-row `⋯` follow the same 40px rule (`pointer-coarse:` classes).
+  Known leftover (backlog): the icon-mode sidebar buttons on touch tablets (≥ 769 px, where the sidebar is not a
+  sheet) stay 32px.
 - Phase 5 screens: the share page keeps the `max-w-3xl` column with 16px gutters below `md` (the header shows the
-  brand and the theme menu only); the Share dialog and the delete-all dialog go full-screen below `sm` like every
-  dialog; on the Data page the switches stack and the section buttons span the full width below `sm`.
+  brand and the theme menu only); the Share dialog and the delete-all dialog follow the form-dialog rule above
+  (centered, height-capped, scrolling inside); on the Data page the switches stack and the section buttons span the
+  full width below `sm`.
 
 ### 14.6 Mobile e2e (Phase 5)
 
@@ -2557,6 +2621,7 @@ Key strings:
 | Approval | "Allow {tool}?" · "Always allow {tool}" · "Deny" · "Allow" |
 | Stopped | "Stopped" |
 | Conflict | "A response is already running in this chat." |
+| Stale path (404 to a chat request or a switch) | "This chat changed elsewhere and was reloaded." |
 | Trust warning | "Runs code on your server with harness-forge's permissions. It can read API keys and conversations and make network requests. Only install plugins from sources you trust." (PLUGINS.md) · "I trust {source}" · "Confirm your password" |
 | HTTP banner | "You're using plain HTTP. Keys you enter can be read on the network. Use HTTPS or localhost." |
 | Key dialog | "Get a key" · "Using {ENV_VAR} from the server environment. A key saved here takes priority." · "Connected · {n} models · {ms} ms" |
@@ -2564,8 +2629,8 @@ Key strings:
 | Read-only source | "Installed from {source}. Editing is disabled." |
 | Login | "Enter your password" · "Wrong password" · "Too many attempts. Try again in {n}s." |
 | Not found page | "Page not found" · "Back to chats" |
-| Message versions | "Message versions" · "Previous version" · "Next version" · "Version {n} of {m}" |
-| Share dialog | "Share chat" · "Anyone with a link can read a snapshot of this chat. Messages you add later are not shared until you update the snapshot." · "Create link" · "Copy link" · "Update snapshot" · "Revoke…" · "Revoke this link?" · "Outdated" · "Expired" · "No password set" · "Changes apply to the link at once." |
-| Share page | "Read-only snapshot · {date}" · "This link is unavailable" · "It may have expired or been revoked, or the chat was deleted." · "Couldn't load this chat" · "This reply failed." |
-| Data page | "Export backup" · "Import" · "Skip it" · "Import a copy" · "Restore settings from the backup" · "No shared links." · "Delete all data…" · "Type DELETE to confirm" · "Delete everything" · "Deleted {n} chats" |
+| Message versions | "Message versions" · "Previous version" · "Next version" · "Version {n} of {m}" · "Could not switch versions" |
+| Share dialog | "Share chat" · "Anyone with a link can read a snapshot of this chat. Messages you add later are not shared until you update the snapshot." · "This chat has no links yet." · "New link" · "Create link" · "Copy link" · "Update snapshot" · "Revoke…" · "Revoke this link?" · "People with the link can no longer open it. This can't be undone." · "Outdated" · "Expired" · "No password set" · "Changes apply to the link at once." · "A chat can have up to 20 links." · "Confirm your password to create or change a share link." |
+| Share page | "Read-only snapshot · {date}" · "This link is unavailable" · "It may have expired or been revoked, or the chat was deleted." · "Couldn't load this chat" · "Too many requests. Try again in {n}s." · "This reply failed." |
+| Data page | "Export backup" · "Choose file…" · "Import" · "Importing…" · "This file is larger than 256 MB." · "Skip it" · "Import a copy" · "Restore settings from the backup" · "Shared links" · "No shared links." · "Delete all data…" · "Delete all data?" · "Type DELETE to confirm" · "Delete everything" · "Deleting all data needs your password." · "Deleted {n} chats" |
 | Busy (409 `busy`) | "Another import or delete is running. Try again when it finishes." |

@@ -15,7 +15,8 @@ Contents: 1 Conventions · 2 Errors · 3 `packages/shared` naming contract · 4 
 | Base path | Everything under `/api` (paths below omit it). Unknown `/api/*` paths return `404 not_found` JSON. |
 | Format | JSON (`application/json; charset=utf-8`) request and response bodies unless a route says otherwise (SSE, UI message stream, multipart, binary). Request bodies are validated with zod; unknown keys are rejected (`.strict()`) except inside UI messages. A non-empty body sent to a JSON route must be `application/json` (or `+json`); routes with a multipart `form` also accept `multipart/form-data`; anything else -> `400 validation_error` (no form-encoded CSRF). |
 | Auth | Session cookie `hf_session` (HttpOnly, SameSite=Strict). When a password is configured, every route except the public ones (marked **public**) returns `401 unauthorized` without a valid session. Without a password every request is authenticated. |
-| CSRF | Origin check on every non-`GET`/`HEAD` request (ARCHITECTURE.md 10.2): a foreign `Origin` or a cross-site `Sec-Fetch-Site` -> `403 forbidden`. |
+| CSRF | Origin check on every state-changing request (not `GET` / `HEAD` / `OPTIONS`; ARCHITECTURE.md 10.2): an `Origin` other than the server origin (the request's scheme + `Host`), or, without `Origin`, a `Sec-Fetch-Site` other than `same-origin` / `none` -> `403 forbidden`. By design a request with neither header (a non-browser client such as curl, which cannot ride on the user's cookie) passes. |
+| Reverse proxies | ADR-026, ARCHITECTURE.md 10.6. `X-Forwarded-For` counts only when `HF_TRUST_PROXY` lists the TCP peer: the client address (the key of the login and share rate limits) is then the first entry that is not a listed proxy, read from the right; otherwise it is the TCP peer. `X-Forwarded-Proto` (HTTPS: `Secure` cookie, HSTS, the scheme of the Origin check) counts only from a listed proxy when `HF_TRUST_PROXY` is set, from any peer when it is unset (v1). `X-Forwarded-Host` and `Forwarded` are never read. |
 | Fresh auth | ADR-017. Sensitive routes (marked **fresh**) additionally require a login within the last 10 minutes when a password is set, else `403 forbidden` with `action: 'login'`. The proof is the session itself (`authAt`, `AuthStatus.freshUntil`): the web asks for the password, calls `POST /auth/login` and retries. |
 | Success codes | `200` with a body; `201` for creations (`POST` that creates a resource); `204` for no body. |
 | Errors | Every non-2xx response is a `HarnessErrorEnvelope` (section 2). |
@@ -77,7 +78,7 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | `forbidden` | 403 | `login` when fresh auth is missing | Origin check failed, fresh auth missing, operation not allowed for this resource (builtin plugin, read-only source). |
 | `not_found` | 404 | - | Unknown route, chat, message, plugin, provider, file, tool, MCP server, icon, share link. Every failure of the public share routes is the same 404 (section 5.20). |
 | `conflict` | 409 | - | State conflict: a run is active for the chat, id already exists, stale file `baseEtag`, password managed by `HF_PASSWORD`, another import or delete-all is running. |
-| `payload_too_large` | 413 | - | Body, upload, zip, backup, share snapshot or file over the limit (`details.limitBytes`). |
+| `payload_too_large` | 413 | - | Body, upload, zip, backup, share snapshot or file over the limit (`details.limitBytes`; a backup with too many entries: `details.limitEntries`). |
 | `provider_not_configured` | 400 | `configure-provider` | Provider unknown/disabled or required credentials missing. Returned before any streaming. |
 | `auth_invalid` | 502 | `configure-provider` | Provider rejected the credentials (upstream 401/403). |
 | `rate_limited` | 429 | `retry` | Upstream rate limit, login rate limit or share link rate limit; `retryAfterMs` when known. |
@@ -96,8 +97,8 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | Code | `details` shape |
 |---|---|
 | `validation_error` | `{ issues: Array<{ path: Array<string \| number>; message: string; code: string }> }` (zod issues, flattened) |
-| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy', chatId?: string }` (`busy`: another import or delete-all is running, section 5.19) |
-| `payload_too_large` | `{ limitBytes: number }` |
+| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy', chatId?: string }` (`run-active`: a run holds the chat, or its active leaf moved during a version switch, section 5.9; `exists`: a chat or message id is already used; `stale`: a plugin file or package changed since it was read or reviewed, or a chat request was stopped before its history was stored, section 5.10; `busy`: another import or delete-all is running, section 5.19) |
+| `payload_too_large` | `{ limitBytes: number }`, or `{ limitEntries: number }` when `GET /data/export` refuses a backup for its entry count (section 5.19) |
 | `plugin_error` | `{ pluginId: string; phase?: 'load' \| 'setup' \| 'dispose' \| 'hook' \| 'tool' \| 'build' \| 'install' }` |
 | `internal_error` | `{ requestId: string }` |
 | others | omitted, or `{ upstream?: string }` (a short, redacted upstream message) |
@@ -187,7 +188,7 @@ export type ApiRouteKey = keyof typeof apiRoutes
 ```
 
 The route table has no flag for secret path params: share tokens (`/share/:token...`) are masked by the server's
-access log and `redactText`, not by the route table.
+access log and error log (`/api/share/[redacted]/...`) and by `redactText`, not by the route table.
 
 Module names (camelCase of the server route module file): `health`, `auth`, `settings`, `events`, `providers`,
 `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`,
@@ -1017,7 +1018,8 @@ type DataImportForm = {                 // dataImportFormSchema; multipart field
 }
 
 type DataImportItem = {                 // dataImportItemSchema; one chat of the upload
-  sourceId: string                      // the chat id in the upload (<= 80 chars)
+  sourceId: string                      // the chat id in the upload (<= 80 chars; for a chat entry that cannot be
+                                        // read: its file name without chats/ and .json)
   chatId: ChatId | null                 // the stored chat: same id (imported, skipped), new id (copied); null if failed
   title: string | null
   status: 'imported' | 'copied' | 'skipped' | 'failed'   // dataImportStatusSchema
@@ -1029,19 +1031,21 @@ type DataImportResult = {               // dataImportResultSchema (POST /data/im
   counts: {
     imported: number; copied: number; skipped: number; failed: number
     filesImported: number               // attachments stored by this import
-    filesReused: number                 // attachments whose content was already stored
-    filesMissing: number                // attachments referenced by a chat but absent from the backup
+    filesReused: number                 // attachments whose content (or the same file id) was already stored
+    filesMissing: number                // attachments referenced by an imported chat but not restored: absent from
+                                        // the upload, or unusable (over 20 MB, damaged, sha256 or type mismatch)
   }
   settingsRestored: boolean
   items: DataImportItem[]
-  warnings: string[]                    // <= 100, each <= 300 chars: unknown entries, missing files, settings keys
-}                                       // that failed validation
+  warnings: string[]                    // <= 100, each <= 300 chars: unknown entries, a chat count that differs from
+}                                       // the manifest, attachments not restored, settings keys that are unknown or
+                                        // failed validation
 
 type DataDeleteBody = {                 // dataDeleteBodySchema (POST /data/delete); strict
   confirm: 'DELETE'                     // typed confirmation
   files?: boolean                       // default false: also delete every uploaded file (rows and blobs)
-  usage?: boolean                       // default false: also delete the usage rows (else kept with
-}                                       // chat_id = NULL, as for DELETE /chats/:id)
+  usage?: boolean                       // default false: also delete every usage row, the rows of chats deleted
+}                                       // earlier included (else kept with chat_id = NULL, as for DELETE /chats/:id)
 
 type DataDeleteResult = {               // dataDeleteResultSchema; what was deleted
   chats: number
@@ -1083,8 +1087,9 @@ Backup zip layout (`GET /data/export`; every entry mode 0644 with mtime = `expor
 | `files/<sha256>` | attachment bytes, deduplicated by sha256: stored for images and PDF, deflated for text |
 
 Never in a backup: secrets, credentials, the password, plugins, MCP servers, model and tool preferences, share links,
-usage rows (`totals` of imported chats restart at 0; `metadata.usage` of each message is kept). An import also
-accepts the same layout inside a single top-level folder.
+usage rows (`totals` of imported chats restart at 0; `metadata.usage` of each message is kept). An attachment whose
+stored blob is missing or no longer matches its sha256 is left out (an import counts it in `filesMissing`); a chat
+deleted while the zip is written is left out. An import also accepts the same layout inside a single top-level folder.
 
 ### 4.17 Share links
 
@@ -1093,8 +1098,8 @@ ADR-025. A share is a sanitized **snapshot** of a chat's active path, never a li
 ```ts
 type ShareOptions = {                   // shareOptionsSchema; defaults apply at creation
   reasoning: boolean                    // default false: reasoning parts
-  toolDetails: boolean                  // default false: tool inputs and outputs, each value <= 16384 chars
-                                        // (tool names and states are always shown)
+  toolDetails: boolean                  // default false: tool inputs, outputs and error texts (tool names and
+                                        // states are always shown)
   attachments: boolean                  // default true: attachments (GET /share/:token/files/:fileId)
 }
 
@@ -1125,9 +1130,11 @@ type ShareSummary = {                   // shareSummarySchema; a share link as i
   options: ShareOptions
   path: string                          // '/share/<token>' (recomputed, never stored); the web copies
                                         // location.origin + path
-  messageCount: number                  // messages in the snapshot
+  messageCount: number                  // messages in the snapshot (user and assistant messages)
   snapshotAt: Timestamp
-  outdated: boolean                     // the chat changed after snapshotAt
+  outdated: boolean                     // the chat changed after snapshotAt: its updatedAt is later, or its active
+                                        // path now holds another number of user and assistant messages (a version
+                                        // switch keeps updatedAt)
   expiresAt: Timestamp | null
   expired: boolean
   createdAt: Timestamp
@@ -1142,7 +1149,8 @@ type SharePart =                        // sharePartSchema, discriminated on `ty
   | { type: 'source-document'; sourceId: string; title: string; mediaType: string; filename?: string }
   | { type: 'tool'; toolName: string                                      // static and dynamic (MCP) tools
       status: 'done' | 'error' | 'denied' | 'stopped'                     // shareToolStatusSchema
-      input?: unknown; output?: unknown; errorText?: string }             // only with options.toolDetails
+      input?: unknown; output?: unknown                                   // toolDetails only; each <= 16384 chars
+      errorText?: string }                                                // toolDetails only; <= 4096 chars
 
 type ShareMessage = {                   // shareMessageSchema; user and assistant messages only, no ids
   role: 'user' | 'assistant'
@@ -1163,10 +1171,17 @@ type ShareView = ShareSnapshot & {      // shareViewSchema (GET /share/:token); 
 }
 ```
 
-The sanitizer is an allowlist. Dropped when the snapshot is taken: system messages, chat and global instructions,
-`metadata.error` (a failed reply keeps only `status: 'failed'`), usage and cost, `command.expansion`, provider
-metadata, approvals, `data-*` and `step-start` parts, `reasoning-file` parts, unknown parts, and data URLs that are not
-raster images.
+The sanitizer is an allowlist: it copies only the fields listed above, so an unknown part type or metadata field is
+dropped rather than published. Dropped when the snapshot is taken: system messages, chat and global instructions,
+`metadata.error` (a failed reply keeps only `status: 'failed'`), usage and cost, `command.expansion` and
+`command.input`, provider metadata, approvals, `data-*`, `step-start`, `reasoning-file`, `custom` and unknown parts,
+source URLs that are not `http(s)`, and file URLs that are neither `/api/files/<id>` nor a raster image data URL
+(never SVG). Reasoning text and tool details are always stored, so an option change applies to the page at once. A
+tool input or output is kept as a JSON copy when its JSON text fits in 16384 chars (`LIMITS.shareToolValueChars`; a
+string: its length); a longer value becomes a string: the start of its JSON text (or of the string) +
+`\n[truncated]`, 16384 chars in total. An error text is cut at 4096 chars. A tool call that never finished shows
+`stopped`; an approval that was never answered shows `stopped` on the last message and `denied` when a later message
+exists.
 
 ## 5. Endpoints
 
@@ -1193,9 +1208,10 @@ body exceeds its limit; `500 internal_error`.
 - Response `200 AuthStatus` + `Set-Cookie: hf_session=...`. When no password is configured: `200` with
   `enabled: false, authenticated: true`, no cookie.
 - Errors: `401 unauthorized` (wrong password, message "Invalid password"); `429 rate_limited` (`retryAfterMs`,
-  `Retry-After`). The limiter counts per client address: the TCP peer, unless the peer is a reverse proxy trusted by
-  `HF_TRUST_PROXY` (ADR-026), in which case the client is read from `X-Forwarded-For`; without `HF_TRUST_PROXY` every
-  client behind a proxy shares the proxy's address (ARCHITECTURE.md 10.1).
+  `Retry-After`) after 5 failed checks in 15 minutes from one client address or 50 from all addresses (a correct
+  password resets the address). The limiter counts per client address: the TCP peer, unless the peer is a reverse
+  proxy trusted by `HF_TRUST_PROXY` (ADR-026), in which case the client is read from `X-Forwarded-For`; without
+  `HF_TRUST_PROXY` every client behind a proxy shares the proxy's address (ARCHITECTURE.md 10.1, 10.6).
 
 **`POST /auth/logout`** — `auth.logout` · public
 - Response `204`, clears the cookie (`Max-Age=0`). Idempotent.
@@ -1204,9 +1220,9 @@ body exceeds its limit; `500 internal_error`.
 - Body `PasswordUpdate`. `newPassword: null` removes the password.
 - Response `200 AuthStatus`; the session epoch is incremented (all other sessions end) and a new cookie is set
   for the caller (none when the password was removed).
-- Errors: `403 forbidden` (`currentPassword` missing or wrong); `409 conflict` (`reason: 'env-password'` when
-  `HF_PASSWORD` is set; `reason: 'insecure-bind'` when removing the password on a non-loopback bind without
-  `HF_INSECURE=1`).
+- Errors: `403 forbidden` (`currentPassword` missing or wrong); `429 rate_limited` (the current-password check
+  shares the login limiter); `409 conflict` (`reason: 'env-password'` when `HF_PASSWORD` is set;
+  `reason: 'insecure-bind'` when removing the password on a non-loopback bind without `HF_INSECURE=1`).
 
 ### 5.3 `settings.ts`
 
@@ -1314,14 +1330,19 @@ body exceeds its limit; `500 internal_error`.
 
 **`POST /chats`** — `chats.create`
 - Body `ChatCreate`. Without `messages` it creates an empty chat; with `messages` it imports them (e.g. the
-  `chat` of a JSON export): deep-validated with `validateUIMessages`, `seq` from array order, invalid or already
-  used message ids replaced with new ones (`parentIds` and `activeLeafId` follow), pending approvals resolved as
-  denied. Without `parentIds` the import is linear; with `parentIds` every parent must be the id of an earlier
-  message and the ids must be unique. The active leaf is the most recent leaf under `activeLeafId` (default: the
-  last message). Body limit 20 MB (imports), <= 2000 messages.
+  `chat` of a JSON export): deep-validated with `validateUIMessages`, `seq` from array order, invalid, repeated or
+  already used message ids replaced with new ones (`parentIds` and `activeLeafId` follow), pending approvals resolved
+  as denied. Without `parentIds` the import is linear; with `parentIds` there is one per message, every parent must
+  be `null` or the id of an earlier message, and the ids must be unique. The tree is validated before anything is
+  written; the chat, its messages and its active leaf are inserted in one batch. The active leaf is the most recent
+  leaf under `activeLeafId` (default: the last message). Body limit 20 MB (imports), <= 2000 messages.
 - Response `201 ChatDetail`. Emits `chat.created`.
-- Errors: `409 conflict` (`reason: 'exists'`, id already used); `400 validation_error` (a parent that is not an
-  earlier message, duplicate ids, an unknown `activeLeafId`; `details.issues` carry the field path).
+- Errors: `409 conflict` (`reason: 'exists'`, `chatId`: the chat id is already used); `400 validation_error`
+  (`details.issues[].path` names the field: `parentIds` for a count that differs from `messages`,
+  `['parentIds', i]` for a parent that is not an earlier message, `['messages', i, 'id']` for a repeated id when
+  `parentIds` is sent, `activeLeafId` for an id that is not in `messages`, `['messages', i, ...]` for a message that
+  fails `validateUIMessages`). The single-chat import of `POST /data/import` reports the same issues under `chat`
+  (`['chat', 'parentIds', 1]`).
 - Note: the normal "new chat" flow does not call this: the web generates a uuidv7 and the first `POST /chat`
   creates the chat.
 
@@ -1362,9 +1383,11 @@ body exceeds its limit; `500 internal_error`.
 - Makes the most recent leaf under `messageId` (the highest `seq` in its subtree) the active leaf. `pendingApproval`
   is recomputed from the new path (approvals on other versions stay pending and are live again when their version is
   shown); `updatedAt` is not changed.
-- Response `200 ChatDetail` (the new path and its `branches`). Emits `chat.updated`.
+- Response `200 ChatDetail` (the new path and its `branches`). Emits `chat.updated` (a `ChatSummary`: other tabs
+  learn that the chat changed, not which version is shown).
 - Errors: `404 not_found` (unknown chat, or `messageId` not in the chat); `409 conflict` (`reason: 'run-active'`,
-  `chatId`) while a run holds the chat, in any phase.
+  `chatId`) while a run holds the chat, in any phase, and when the active leaf moved between reading and switching it
+  (a compare-and-set: a run committed or another switch won meanwhile).
 
 ### 5.10 `chat.ts`
 
@@ -1373,10 +1396,15 @@ body exceeds its limit; `500 internal_error`.
 - Response `200` AI SDK v7 UI message stream (section 6). Errors that happen before the stream starts are normal
   JSON error responses: `400 provider_not_configured` (action `configure-provider`); `404 not_found` (`parentId` or
   `messageId` not in the chat, or a continuation that is not the active leaf); `409 conflict` (`reason: 'run-active'`,
-  `chatId`; `reason: 'exists'` when the new user message id is already stored); `400 validation_error` (including
+  `chatId`; `reason: 'exists'` when the new user message id is already stored; `reason: 'stale'`, `chatId`, when the
+  run was stopped (Stop, delete-all, shutdown) before its history was stored); `400 validation_error` (including
   `validateUIMessages` failures, file parts whose `url` is not `/api/files/<id>`, a user message sent with
-  `messageId`, `parentId` on a regenerate or a continuation, and a regenerate whose target is not answered by a user
-  message). Section 6.2 lists what each action sends.
+  `messageId` (issue path `messageId`), `parentId` on a regenerate or a continuation (`parentId`), a regenerate with
+  no user message to answer (`messageId`: an empty chat, or a target whose previous message is not a user message),
+  and a continuation that carries no approval decision (`['message', 'parts']`)). Section 6.2 lists what each action
+  sends.
+- Such an error stores no message: at most the chat row is created (a new chat id, with `chat.created`) or its model,
+  mode and effort are updated, so the web can send the same text again under a new message id.
 
 **`GET /chat/:id/stream`** — `chat.resume` · response `'ui-message-stream'`
 - Params `{ id: ChatId }`. This is the default reconnect URL of `DefaultChatTransport` (`{api}/{chatId}/stream`).
@@ -1664,34 +1692,53 @@ Bulk data (ADR-024, formats in section 4.16). Only one import or delete-all runs
 - Query `DataExportQuery` (both default `true`).
 - Response `200 application/zip`, streamed while it is downloaded, with
   `Content-Disposition: attachment; filename="harness-forge-backup-<yyyy-mm-dd>.zip"` and `Cache-Control: no-store`;
-  the layout of section 4.16 (`manifest.json` last). A `HEAD` request gets the headers only (no zip is built).
-- Errors: `413 payload_too_large` when the zip would exceed 3.5 GB or 65,000 entries (no zip64; the message suggests
-  exporting with `files=false`).
+  the layout of section 4.16 (`manifest.json` last). A `HEAD` request runs the pre-check and gets the headers only (no
+  zip is built).
+- Errors: `413 payload_too_large` from the pre-check (before any byte is sent) when the backup would hold more than
+  `LIMITS.backupEntriesMax` (50,000) entries or `files/index.json` items (what an import accepts) or is estimated
+  above 3.5 GB (fflate writes no zip64). The message suggests `files=false` only when the backup would fit without
+  attachments. If the chats grow past the zip limits while the zip is streamed, the stream fails instead of producing
+  a broken archive.
 
 **`POST /data/import`** — `data.import` · multipart
-- Body `multipart/form-data`: the upload in part `file` + `DataImportForm` fields; limit 256 MB
-  (`LIMITS.backupImportBytes`). The content decides the kind: `PK` = a backup zip, `{` = one chat JSON
-  (`ChatExportAny`, version 1 or 2).
+- Body `multipart/form-data`: exactly one upload in part `file` + the `DataImportForm` fields (an unknown or repeated
+  field -> `400`); limit 256 MB (`LIMITS.backupImportBytes`). The route reads the multipart body itself, so the upload
+  is held once. The first bytes decide the kind: `PK` = a backup zip, `{` (after an optional UTF-8 BOM and
+  whitespace) = one chat JSON (`ChatExportAny`, version 1 or 2, at most 64 MB).
 - Backups are read lazily with the plugin installer's zip guards (path traversal, symbolic links, duplicate names,
-  at most 50,000 entries, declared and actual sizes, CRC); each chat entry is at most 64 MB and each file blob at most
-  20 MB before it is inflated; a manifest of a newer `version` is refused; unknown entries become `warnings`.
-- Each chat is imported atomically, one failure never stops the others (`status: 'failed'` + `error`): `skip` keeps
-  an existing chat with the same id, so running the same import again changes nothing; `copy` imports it under new
-  chat and message ids with " (imported)" appended to the title. Title, pinned, archived, dates and every message
-  version (the tree and the active leaf) are restored. Attachments are re-hashed against `files/index.json` and
-  re-checked (type), reused when the same content is stored, and the `/api/files/<id>` URLs of the parts are
-  rewritten to the stored ids; a referenced file absent from the backup counts in `filesMissing`.
-- `restoreSettings=true` applies the known keys of `settings.json`, each validated on its own (invalid keys become
-  warnings); secrets and the password are never part of a backup.
+  overlapping entries, at most 50,000 entries, declared and actual sizes, CRC); the declared sizes add up to at most
+  8 GB; each chat entry is at most 64 MB and each file blob at most 20 MB before it is inflated. The layout may sit
+  inside a single top-level folder; unknown entries become `warnings`.
+- What a problem fails:
+  - **the whole upload** (an HTTP error, nothing imported): not a zip or a chat JSON; a damaged zip or a zip guard
+    violation; a missing, invalid or newer `manifest.json` (`version` or `chatExportVersion`); an invalid
+    `files/index.json`; a chat JSON that is invalid (issue paths under `chat`, e.g. `['chat', 'parentIds', 1]`) or
+    of a newer version.
+  - **one chat of a backup** (`status: 'failed'` + `error`; the other chats go on): a chat entry that is damaged (CRC,
+    inflated size), over 64 MB, not a valid chat export, or whose messages or message tree are invalid.
+  - **one attachment** (`filesMissing` + a warning; the chat is still imported with the part URL unchanged): a blob
+    absent from the upload, over 20 MB, damaged, not matching its sha256 or of a type that is not allowed, unless a
+    file with the same id (and content) is already stored here (then it is reused).
+- Chats are imported one at a time in entry name order, each atomically: `skip` keeps an existing chat with the same
+  id, so running the same import again changes nothing; `copy` imports it under new chat and message ids with
+  " (imported)" appended to the title. Title, pinned, archived, dates, model, settings and every message version (the
+  tree and the active leaf) are restored; message ids are kept unless another chat uses them; pending approvals are
+  resolved as denied. The attachments of a chat are imported before it: re-hashed against `files/index.json`,
+  re-checked (type), reused when the same content is stored, and the `/api/files/<id>` URLs of its `file` and
+  `reasoning-file` parts rewritten to the stored ids.
+- `restoreSettings=true` applies the known keys of `settings.json`, each validated on its own (unknown and invalid keys
+  become warnings; with a chat JSON it only adds a warning); secrets and the password are never part of a backup.
 - Response `200 DataImportResult`. Emits `chat.created` for every imported or copied chat.
-- Errors: `400 validation_error` (neither a zip nor a chat JSON, a zip guard violation, a missing or newer manifest,
-  an invalid chat JSON); `409 conflict` (`reason: 'busy'`); `413 payload_too_large`.
+- Errors: `400 validation_error` (the whole-upload failures above); `409 conflict` (`reason: 'busy'`);
+  `413 payload_too_large` (an upload over 256 MB, a chat JSON over 64 MB, a backup whose entries declare more than
+  8 GB in total).
 
 **`POST /data/delete`** — `data.deleteAll` · **fresh**
 - Body `DataDeleteBody` (`confirm` must be the literal `DELETE`).
-- Stops every run (runs still preparing included), then deletes every chat with its messages and share links;
-  `usage: true` also deletes the usage rows (else they are kept with `chat_id = NULL`); `files: true` also deletes
-  every uploaded file (rows and blobs). Settings, providers, credentials, plugins and MCP servers are kept.
+- Stops every run (runs still preparing included), then deletes every chat with its messages and share links in one
+  batch; `usage: true` also deletes every usage row, the rows kept from chats deleted earlier included (else they are
+  kept with `chat_id = NULL`); `files: true` also deletes every uploaded file (rows and blobs); finally it stops any
+  run that started meanwhile on a deleted chat. Settings, providers, credentials, plugins and MCP servers are kept.
 - Response `200 DataDeleteResult`. Emits `chat.deleted` for every deleted chat.
 - Errors: `403 forbidden` (fresh auth missing, `action: 'login'`); `409 conflict` (`reason: 'busy'`).
 
@@ -1712,9 +1759,9 @@ actions emit no server event (the owner UI refetches).
 **`POST /shares`** — `shares.create` · **fresh**
 - Body `ShareCreate`. Snapshots the chat's active path through the allowlist sanitizer (section 4.17).
 - Response `201 ShareSummary`.
-- Errors: `404 not_found` (unknown chat); `400 validation_error` (`expiresAt` not in the future or more than 365 days
-  ahead, or the chat already has `LIMITS.sharesPerChatMax` (20) links); `413 payload_too_large` (the snapshot exceeds
-  10 MB, `details.limitBytes`); `403 forbidden` (fresh auth missing, `action: 'login'`).
+- Errors: `404 not_found` (unknown chat); `400 validation_error` (issue path `expiresAt`: not in the future or more
+  than 365 days ahead; `chatId`: the chat already has `LIMITS.sharesPerChatMax` (20) links); `413 payload_too_large`
+  (the snapshot exceeds 10 MB, `details.limitBytes`); `403 forbidden` (fresh auth missing, `action: 'login'`).
 
 **`PATCH /shares/:id`** — `shares.update` · **fresh**
 - Params `{ id: ShareId }`. Body `ShareUpdate`. `refresh: true` re-snapshots the chat's current active path; changed
@@ -1730,17 +1777,25 @@ actions emit no server event (the owner UI refetches).
 
 **`GET /share/:token`** — `shares.view` · public
 - Params `SharePublicParams`.
-- Response `200 ShareView` (file URLs rewritten to `/api/share/<token>/files/<fileId>`), `Cache-Control: no-store`.
-- Errors: `404 not_found`, the same response for every failure: a malformed, unknown, bad-MAC, revoked or expired
-  token, or a deleted chat (never `400`); `429 rate_limited` (`retryAfterMs`, `Retry-After`): 60 views per minute and
-  20 invalid tokens per 10 minutes per client address (ADR-026 for proxies), 6000 requests per minute in total.
+- Response `200 ShareView` (the share's options applied at every request: reasoning, tool details and file parts left
+  out when disabled; file URLs rewritten to `/api/share/<token>/files/<fileId>`), `Cache-Control: no-store`.
+- Errors: `404 not_found`, the same response (message "This share link is unavailable.") for every failure: a
+  malformed, unknown, bad-MAC, revoked or expired token, or a deleted chat (never `400`); `429 rate_limited`
+  (`retryAfterMs`, `Retry-After`).
+- Rate limits (in memory, sliding windows, keyed by the client address of section 1, ADR-026 for proxies): 60 views
+  per minute per address; 20 refused tokens per 10 minutes per address, after which the address is refused on both
+  public routes until the oldest refusal leaves the window; 6000 requests per minute over both routes and every
+  address. A refused request is not counted.
 
 **`GET /share/:token/files/:fileId`** — `shares.file` · public · response `'binary'`
-- Params `ShareFileParams`. Serves only the files of the share's snapshot.
-- Response `200` bytes with the headers of `GET /files/:id` (type, `nosniff`, sandboxing CSP, `inline` only for raster
-  images and PDF) except `Cache-Control: no-store` and no `ETag`.
-- Errors: the same `404 not_found` (also for a file that is not part of the share); `429 rate_limited` (600 requests
-  per minute per client address).
+- Params `ShareFileParams`. Serves only the files whose `/api/files/<id>` URLs are in the share's snapshot, and only
+  while `options.attachments` is on.
+- Response `200` bytes with the headers of `GET /files/:id` (type, `Content-Length`, `nosniff`, sandboxing CSP,
+  `inline` only for raster images and PDF) except `Cache-Control: no-store` and no `ETag` (a revoked link stops
+  serving at once, caches included). `HEAD` gets the headers only.
+- Errors: the same `404 not_found` (also for a file that is not part of the share, attachments turned off, a malformed
+  file id or a deleted file); `429 rate_limited`: 600 requests per minute per client address, plus the refused-token
+  and global limits of `GET /share/:token`. A failure that is only about the file does not count as a refused token.
 
 ## 6. Chat stream protocol
 
@@ -1821,7 +1876,8 @@ only for models with `vision` (images) or `pdf` capability, otherwise the part i
 - Status `200`, headers `Content-Type: text/event-stream`, `x-vercel-ai-ui-message-stream: v1`,
   `Cache-Control: no-cache`, `X-Accel-Buffering: no`, `X-Request-Id`.
 - Body: SSE events `data: <UIMessageChunk JSON>\n\n`, terminated by `data: [DONE]\n\n`.
-- Chunk types used (v7): `start` (with `messageId`, `messageMetadata`), `start-step`, `finish-step`,
+- Chunk types used (v7): `start` (with `messageId`, the id the reply is stored under: server-generated, or the
+  continued message's id for an approval continuation; and `messageMetadata`), `start-step`, `finish-step`,
   `text-start` / `text-delta` / `text-end`, `reasoning-start` / `reasoning-delta` / `reasoning-end`,
   `tool-input-start` / `tool-input-delta` / `tool-input-available` / `tool-input-error`, `tool-approval-request`,
   `tool-output-available` / `tool-output-error` / `tool-output-denied`, `source-url`, `source-document`, `file`,
@@ -1870,7 +1926,8 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   persisted in `metadata.error`. Tool execution errors do not end the stream: they become `output-error` parts.
 - The web always calls `HarnessError.from(chat.error)` (and reads `metadata.error` of stored messages) and maps
   `code` / `action` to UX: `configure-provider` -> "Open settings", `refresh-models` -> refresh, `retry` -> Retry
-  (`regenerate()`), `login` -> login.
+  (a regenerate of the failed reply; a user message whose request failed before streaming is sent again as a new
+  message), `login` -> login.
 
 ### 6.6 Resume and stop
 
@@ -1925,14 +1982,16 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 | `chat.updated` | title generated or renamed, pin/archive/model/settings change, a message persisted, a branch switch (`POST /chats/:id/branch`) | `ChatSummary` | chats store: patch and re-sort |
 | `chat.deleted` | `DELETE /chats/:id`, or `POST /data/delete` (one per deleted chat) | `{ id }` | chats store: remove; leave `/chat/:id` if open |
 | `run.started` | a run acquired the chat | `RunStartedData` | running dot |
-| `run.finished` | run completed, aborted or failed | `RunFinishedData` | clear running; amber dot when `awaitingApproval` |
+| `run.finished` | run completed, aborted or failed; sent after the reply and the active leaf are stored | `RunFinishedData` | clear running; amber dot when `awaitingApproval` |
 | `provider.changed` | credentials set/cleared, enable/disable, validation result, provider (un)registered | `{ id, provider }` | providers store: patch or remove |
 | `catalog.changed` | listing refresh, prefs or custom model change, plugin (un)load, models.dev refresh | `{ providerId }` | models store: refetch `GET /models` |
 | `plugin.changed` | install, uninstall, enable, disable, reload, trust, build, state change, MCP connection change | `{ id, plugin }` | plugins store: patch or remove; MCP panel refetches |
 | `plugin.log` | new plugin log entry (logger, guard failure, build output) | `{ pluginId, entry }` | Logs tab / build panel append |
 
 Phase 5 adds no event types: bulk import and delete-all report every chat through `chat.created` / `chat.deleted`,
-a branch switch through `chat.updated`; share link actions emit nothing (the owner UI refetches).
+a branch switch through `chat.updated`; share link actions emit nothing (the owner UI refetches). `chat.updated`
+carries a `ChatSummary` without the active leaf, so another tab that shows the chat keeps its version until it
+refetches the chat (for example on the next `run.finished`); pushing version switches is in the ROADMAP backlog.
 
 ## 8. Route key index
 

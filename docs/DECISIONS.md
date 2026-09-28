@@ -33,7 +33,7 @@ resolves the conflict.
 | ADR-023 | Conversation branching: the messages of a chat form a tree (`messages.parent_id`, `chats.active_leaf_id`); editing a user message or regenerating a reply adds a sibling version instead of deleting later messages; `ChatDetail.messages` is the active path and `ChatDetail.branches` lists the versions; `POST /chats/:id/branch` switches | Nothing is lost after an edit; answers can be compared | Migration `0001` backfills a linear parent chain (nullable columns, no foreign keys); the chat request sends `parentId` for new user messages and `messageId` only for regenerate (in-place edit removed); `seq` is creation order; chat JSON export v2 carries every version; search and usage totals cover every version; switching is refused while a run holds the chat |
 | ADR-024 | Bulk data (`/api/data`): streamed zip backup (chats as export v2, attachments by sha256, optional public settings), import of a backup or a single-chat JSON (conflict policy `skip` or `copy`), delete-all with a typed confirmation and fresh auth | Personal data portability and a clean reset (supersedes ADR-020) | Backups never contain secrets, credentials, the password, plugins, MCP servers, model/tool prefs, shares or usage rows; import reuses the plugin-install zip guards; one import or delete-all at a time; no new server event types |
 | ADR-025 | Read-only share links: a sanitized snapshot of a chat's active path in `chat_shares`, served at `/share/<token>` (public `GET /api/share/:token` + share-scoped files); token = share id suffix + HMAC (keyring subkey `share`) | Share a conversation without exposing the app or live data | No token is stored (the owner can copy the link again; revoke deletes the row; a new master key invalidates every link); allowlist sanitizer; fresh auth to create or update; exposing links requires `HF_PASSWORD` (the passwordless host guard is unchanged); every response carries `X-Robots-Tag: noindex, nofollow`; tokens are masked in logs |
-| ADR-026 | Trusted reverse proxies: `HF_TRUST_PROXY` = comma list of `loopback`, `private`, IP addresses or CIDRs; `X-Forwarded-For` / `X-Forwarded-Proto` are honored only from a trusted peer; `X-Forwarded-Host` is never honored | The login rate limiter and Secure cookies need the real client behind Caddy / nginx | Unset keeps the v1 behavior; proxies must forward `Host`; `1`, `true` and hop counts are rejected at boot |
+| ADR-026 | Trusted reverse proxies: `HF_TRUST_PROXY` = comma list of `loopback`, `private`, IP addresses or CIDRs; `X-Forwarded-For` / `X-Forwarded-Proto` are honored only from a trusted peer; `X-Forwarded-Host` is never honored | The login rate limiter and Secure cookies need the real client behind Caddy / nginx | Unset keeps the v1 behavior; proxies must forward `Host`; `1`, `true`, other boolean words, hop counts, `/0` ranges, `localhost` and unknown tokens are rejected at boot |
 | ADR-027 | Opt-in live provider suite (`pnpm test:live`, `HF_LIVE=1` + provider keys) and dependency automation (`pnpm audit` workflow, Dependabot) | v1 was only exercised with the mock provider; supply-chain hygiene | `pnpm test` never calls a paid API; the live suite runs in CI only on manual dispatch; Dependabot ignores TypeScript updates (ADR-013) |
 
 ## Contract seed
@@ -57,7 +57,7 @@ resolves the conflict.
 | Name | Default | Meaning |
 |---|---|---|
 | `HF_PORT` | `8787` | server port |
-| `HF_HOST` | `127.0.0.1` | bind address; a non-loopback host requires `HF_PASSWORD` or `HF_INSECURE=1` |
+| `HF_HOST` | `127.0.0.1` | bind address; a non-loopback host requires `HF_PASSWORD`, a password stored in Settings, or `HF_INSECURE=1` |
 | `HF_DATA_DIR` | `./data` | data directory (resolved against the repo root in dev) |
 | `HF_PASSWORD` | unset | enables login; overrides a password stored in settings |
 | `HF_MASTER_KEY` | unset | base64 32-byte master key; otherwise `data/secret.key` is generated (mode 0600) |
@@ -66,7 +66,7 @@ resolves the conflict.
 | `HF_PLUGIN_WATCH` | unset | `1` hot-reloads code plugins on file change |
 | `HF_OFFLINE` | unset | `1` disables network refresh of the models.dev snapshot |
 | `HF_INSECURE` | unset | `1` allows a non-loopback bind without a password |
-| `HF_TRUST_PROXY` | unset | comma list of trusted reverse proxies: `loopback`, `private`, IP addresses, CIDRs (ADR-026); `1`, `true` and hop counts are rejected |
+| `HF_TRUST_PROXY` | unset | comma list of trusted reverse proxies: `loopback`, `private`, IP addresses, CIDRs (ADR-026); rejected at boot: `1`, `true` and other boolean words (`*`, `all`, `yes`, `on`, …), hop counts, `/0` ranges (incl. `::ffff:0.0.0.0/96`), `localhost` (use `loopback`), unknown tokens, a list naming no proxy |
 | `HF_API_TARGET` | `http://localhost:8787` | web dev proxy target |
 | `HF_WEB_DIR` | `apps/web/.output/public` | directory of the built SPA served in production |
 | `<VENDOR>_API_KEY` | unset | provider key fallbacks (see PROVIDERS.md) |
