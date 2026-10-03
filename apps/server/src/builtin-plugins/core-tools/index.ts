@@ -2,7 +2,8 @@
 // guard of security/ssrf.ts) and `generate_image` (policy `ask`, plugin API 1.1.0 `ctx.images`, ADR-028), registered
 // through the public plugin SDK. The `allowLocalhost` setting lets `web_fetch` reach loopback addresses (a local dev
 // server); private, link-local and metadata addresses always stay blocked. `generate_image` is always registered and
-// uses the image model of Settings → Media (`imageModelRef`).
+// uses the image model of Settings → Media (`imageModelRef`). Version 1.2.0 (`engines` `^1.2.0`, Phase 7): the
+// `generate_image` output carries `modelName` (plugin API 1.2.0 `ImageGenerateResult.modelName`).
 import type { PluginManifest } from '@harness-forge/plugin-sdk'
 import { definePlugin } from '@harness-forge/plugin-sdk'
 import { appVersion } from '../../paths.ts'
@@ -18,9 +19,9 @@ export const manifest = {
   manifestVersion: 1,
   id: 'core-tools',
   name: 'Core tools',
-  version: '1.1.0',
+  version: '1.2.0',
   description: 'Builtin tools: current_time, web_fetch and generate_image.',
-  engines: { harness: '^1.1.0' },
+  engines: { harness: '^1.2.0' },
   main: 'index.ts',
   permissions: ['network'],
   settings: {

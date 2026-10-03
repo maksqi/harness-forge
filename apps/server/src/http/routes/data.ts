@@ -8,8 +8,8 @@
 //   here rather than by the form validator, which would keep a second copy of the (up to 256 MB) body for the whole
 //   request; the body-limit middleware already capped its size and checked its content type.
 // - `POST /data/delete` needs fresh auth (route table flag, checked by the middleware and again by the service).
-// - `GET /data/cleanup` (a dry run) and `POST /data/cleanup` (no body) remove orphaned files (ADR-035): Phase 7 stubs
-//   (501) until W7.8. No fresh auth; another maintenance operation is `409` (`busy`).
+// - `GET /data/cleanup` (a dry run, never cached) and `POST /data/cleanup` (no body) remove orphaned files (ADR-035,
+//   W7.8). No fresh auth; another maintenance operation is `409` (`busy`). `GET /data` never scans.
 import type { DataImportForm } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
 import type { AppContext, AppEnv } from '../types.ts'
@@ -17,7 +17,7 @@ import { apiRoutes, dataDeleteBodySchema, dataExportQuerySchema, dataImportFormS
 import { Hono } from 'hono'
 import { contentDisposition } from '../../services/files/names.ts'
 import { freshAuthOptions } from '../middleware/fresh-auth.ts'
-import { notImplemented, validate } from '../validate.ts'
+import { validate } from '../validate.ts'
 
 const MULTIPART = /^multipart\/form-data\s*;/i
 /** Multipart fields of `POST /data/import` besides the part `file`. */
@@ -99,8 +99,14 @@ export function createDataRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json(await deps.data.deleteAll(c.req.valid('json'), freshAuthOptions(c)))
   })
 
-  app.get(apiRoutes['data.cleanupPreview'].path, notImplemented('data.cleanupPreview'))
-  app.post(apiRoutes['data.cleanup'].path, notImplemented('data.cleanup'))
+  app.get(apiRoutes['data.cleanupPreview'].path, async (c) => {
+    c.header('Cache-Control', 'no-store')
+    return c.json(await deps.data.cleanupPreview())
+  })
+
+  app.post(apiRoutes['data.cleanup'].path, async (c) => {
+    return c.json(await deps.data.cleanup())
+  })
 
   return app
 }

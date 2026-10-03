@@ -1,11 +1,16 @@
 import type { TestApp } from '../../testing/create-test-app.ts'
 // Bulk data routes (API.md 5.19): summary, the streamed export (headers, HEAD, 413), multipart import (fields, errors,
-// body limit, busy), delete-all (confirmation, fresh auth).
+// body limit, busy), delete-all (confirmation, fresh auth), the orphaned file cleanup (preview, run, 409 busy).
 import type { FakeDataService } from '../../testing/fakes.ts'
-import { dataImportResultSchema, dataSummarySchema, harnessErrorEnvelopeSchema, LIMITS } from '@harness-forge/shared'
+import { existsSync } from 'node:fs'
+import { dataCleanupPreviewSchema, dataCleanupResultSchema, dataImportResultSchema, dataSummarySchema, harnessErrorEnvelopeSchema, LIMITS } from '@harness-forge/shared'
 import { strFromU8, unzipSync } from 'fflate'
 import { afterEach, describe, expect, it } from 'vitest'
-import { assistant, chatId, closeDataApps, dataApp, importForm, user } from '../../services/data/fixtures.test-util.ts'
+import { files } from '../../db/schema.ts'
+import { assistant, chatId, closeDataApps, dataApp, filePart, importForm, user } from '../../services/data/fixtures.test-util.ts'
+import { fileUrl } from '../../services/files/index.ts'
+import { blobPathOf, DAY_MS, seedStoredFile } from '../../services/files/store.test-util.ts'
+import { MAINTENANCE_BUSY_MESSAGE } from '../../services/maintenance/index.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createFakeDataService } from '../../testing/fakes.ts'
 import { FRESH_AUTH_REQUIRED_MESSAGE } from '../middleware/fresh-auth.ts'
@@ -235,5 +240,78 @@ describe('pOST /api/data/delete', () => {
     // Without a session at all: 401.
     const anonymous = await app.t.request('/api/data/delete', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: 'DELETE' }) })
     expect(anonymous.status).toBe(401)
+  })
+})
+
+describe('gET / POST /api/data/cleanup', () => {
+  it('previews without deleting, then removes the orphaned files', async () => {
+    const app = await dataApp()
+    const old = Date.now() - 2 * DAY_MS
+    const orphanBytes = new TextEncoder().encode('nobody needs me')
+    const orphan = await seedStoredFile(app.deps, orphanBytes, { createdAt: old, mime: 'text/plain' })
+    const used = await seedStoredFile(app.deps, new TextEncoder().encode('still used'), { createdAt: old, name: 'used.txt', mime: 'text/plain' })
+    await app.deps.chats.create({ id: chatId(1), messages: [user(1, 'see', [filePart({ id: used.id, name: used.name, mime: used.mime, size: used.size, url: fileUrl(used.id) })])] })
+
+    const preview = await app.t.request('/api/data/cleanup')
+    expect(preview.status).toBe(200)
+    expect(preview.headers.get('cache-control')).toBe('no-store')
+    expect(dataCleanupPreviewSchema.parse(await preview.json())).toEqual({
+      files: 1,
+      fileBytes: orphanBytes.byteLength,
+      blobs: 0,
+      diskBytes: orphanBytes.byteLength,
+      tempFiles: 0,
+      recentFiles: 0,
+      graceMs: 86_400_000,
+      lastRunAt: null,
+    })
+    expect(existsSync(blobPathOf(app.deps, orphanBytes))).toBe(true)
+    expect(await app.deps.data.summary()).toMatchObject({ files: 2 })
+
+    const before = Date.now()
+    const run = await app.t.request('/api/data/cleanup', { method: 'POST' })
+    expect(run.status).toBe(200)
+    const result = dataCleanupResultSchema.parse(await run.json())
+    expect(result).toMatchObject({ files: 1, fileBytes: orphanBytes.byteLength, blobs: 0, diskBytes: orphanBytes.byteLength, tempFiles: 0 })
+    expect(result.ranAt).toBeGreaterThanOrEqual(before)
+    expect((await app.t.db.select({ id: files.id }).from(files)).map(row => row.id)).toEqual([used.id])
+    expect(existsSync(blobPathOf(app.deps, orphanBytes))).toBe(false)
+    expect(orphan.id).not.toBe(used.id)
+
+    const again = await app.t.request('/api/data/cleanup')
+    expect(dataCleanupPreviewSchema.parse(await again.json())).toMatchObject({ files: 0, lastRunAt: result.ranAt })
+  })
+
+  it('answers 409 busy while an import runs, and works again afterwards', async () => {
+    const app = await dataApp()
+    let finish!: () => void
+    const importing = app.deps.maintenance.exclusive('import', () => new Promise<void>((resolve) => {
+      finish = resolve
+    }))
+    for (const method of ['GET', 'POST']) {
+      const response = await app.t.request('/api/data/cleanup', { method })
+      expect(response.status, method).toBe(409)
+      expect(await errorOf(response)).toEqual({ code: 'conflict', message: MAINTENANCE_BUSY_MESSAGE, details: { reason: 'busy' } })
+    }
+    finish()
+    await importing
+    expect((await app.t.request('/api/data/cleanup', { method: 'POST' })).status).toBe(200)
+  })
+
+  it('hands both requests to the service without a body', async () => {
+    const { t, data } = await fakeApp()
+    expect((await t.request('/api/data/cleanup')).status).toBe(200)
+    expect((await t.request('/api/data/cleanup', { method: 'POST' })).status).toBe(200)
+    expect(data.calls).toEqual([{ member: 'cleanupPreview', args: [] }, { member: 'cleanup', args: [] }])
+    data.busy = true
+    expect((await t.request('/api/data/cleanup', { method: 'POST' })).status).toBe(409)
+  })
+
+  it('needs a session but no fresh login', async () => {
+    const app = await dataApp({ env: { HF_PASSWORD: PASSWORD } })
+    const cookie = `${SESSION_COOKIE_NAME}=${await app.deps.sessions.issue({ authAt: Date.now() - FRESH_AUTH_WINDOW_MS - 60_000 })}`
+    expect((await app.t.request('/api/data/cleanup', { headers: { cookie } })).status).toBe(200)
+    expect((await app.t.request('/api/data/cleanup', { method: 'POST', headers: { cookie } })).status).toBe(200)
+    expect((await app.t.request('/api/data/cleanup', { method: 'POST' })).status).toBe(401)
   })
 })

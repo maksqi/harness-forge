@@ -8,7 +8,7 @@ import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MOCK_TRANSCRIPT } from '../builtin-plugins/mock/index.ts'
 import { providerConfigs } from '../db/schema.ts'
-import { isLocalProvider, MODEL_FACTORY_TIMEOUT_MS, providerStatus } from './index.ts'
+import { isLocalProvider, MODEL_FACTORY_TIMEOUT_MS, providerStatus, unknownProviderMessage } from './index.ts'
 import { createProvidersTestApp } from './testing.ts'
 
 const KEY = 'sk-ant-test-key-0123456789abcdef'
@@ -191,7 +191,13 @@ describe('resolveModel', () => {
   it('maps unknown providers, invalid refs, disabled providers and unknown models', async () => {
     const t = await setup({ env: { HF_MOCK_PROVIDER: '1', ANTHROPIC_API_KEY: KEY } })
     await expect(t.deps.providers.resolveModel('nocolon')).rejects.toMatchObject({ code: 'validation_error' })
-    await expect(t.deps.providers.resolveModel('nope:model')).rejects.toMatchObject({ code: 'not_found' })
+    // Phase 7: an unknown provider is provider_not_configured (400, action configure-provider), as on the media paths.
+    await expect(t.deps.providers.resolveModel('nope:model')).rejects.toMatchObject({
+      code: 'provider_not_configured',
+      action: 'configure-provider',
+      providerId: 'nope',
+      message: 'The provider "nope" is not available. Pick another model or install the provider.',
+    })
     await expect(t.deps.providers.resolveModel('mock:nope')).rejects.toMatchObject({ code: 'model_not_found', action: 'refresh-models' })
     await t.deps.providers.setEnabled('mock', false)
     await expect(t.deps.providers.resolveModel('mock:echo')).rejects.toMatchObject({ code: 'provider_not_configured' })
@@ -287,7 +293,10 @@ describe('media resolvers (Phase 6)', () => {
     const providers = t.deps.providers
     const table: Array<[string, () => Promise<unknown>, Record<string, unknown>]> = [
       ['an invalid ref', () => providers.resolveImageModel('nocolon'), { code: 'validation_error' }],
-      ['an unknown provider', () => providers.resolveTranscriptionModel('nope:model'), { code: 'not_found', providerId: 'nope' }],
+      ['an unknown provider (transcription)', () => providers.resolveTranscriptionModel('nope:model'), { code: 'provider_not_configured', action: 'configure-provider', providerId: 'nope', message: unknownProviderMessage('nope') }],
+      ['an unknown provider (speech)', () => providers.resolveSpeechModel('nope:model'), { code: 'provider_not_configured', action: 'configure-provider', providerId: 'nope', message: unknownProviderMessage('nope') }],
+      ['an unknown provider (image)', () => providers.resolveImageModel('nope:model'), { code: 'provider_not_configured', action: 'configure-provider', providerId: 'nope', message: unknownProviderMessage('nope') }],
+      ['an unknown provider (chat)', () => providers.resolveModel('nope:model'), { code: 'provider_not_configured', action: 'configure-provider', providerId: 'nope', message: unknownProviderMessage('nope') }],
       ['a disabled provider', () => providers.resolveImageModel('off:off-paint'), { code: 'provider_not_configured', action: 'configure-provider' }],
       ['missing credentials', () => providers.resolveSpeechModel('nokey:nokey-say'), { code: 'provider_not_configured', action: 'configure-provider', providerId: 'nokey' }],
       ['an unknown model', () => providers.resolveImageModel('studio:nope'), { code: 'model_not_found', action: 'refresh-models' }],

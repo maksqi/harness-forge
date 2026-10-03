@@ -1,14 +1,17 @@
 <script setup lang="ts">
 // Chat page header (docs/UI.md 5.6): h-12 bar whose bottom border shows only once the transcript scrolled (the 1px
 // is always reserved); the sidebar trigger when the sidebar is collapsed or on mobile; the title renames inline on
-// click; `⋯` menu: Rename · Show thinking · Share… · Export as Markdown · Export as JSON · Delete. Rename, export and
-// the undoable delete (toast with Undo, back to `/`) are the sidebar's chat actions (W2.4 `useChatActions`); Share…
-// opens the Share dialog (ui.openShare, docs/UI.md 7.14) once the menu has closed and its trigger has focus again, so
-// the dialog returns focus there when it closes.
+// click; the project chip (docs/UI.md 7.20) between the title and `⋯` while the chat has a project; `⋯` menu: Rename ·
+// Move to project ▸ (while any project exists) · Show thinking · Share… · Export as Markdown · Export as JSON · Delete.
+// Rename, export and the undoable delete (toast with Undo, back to `/`) are the sidebar's chat actions (W2.4
+// `useChatActions`); moving is `useMoveChat` (optimistic, toast with Undo); Share… opens the Share dialog
+// (ui.openShare, docs/UI.md 7.14) once the menu has closed and its trigger has focus again, so the dialog returns focus
+// there when it closes.
 import {
   BrainIcon,
   FileJsonIcon,
   FileTextIcon,
+  FolderInputIcon,
   MoreHorizontalIcon,
   PencilIcon,
   Share2Icon,
@@ -21,7 +24,11 @@ import {
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuPortal,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { SidebarTrigger, useSidebar } from '@/components/ui/sidebar'
@@ -30,6 +37,10 @@ import { cn } from '@/lib/utils'
 import { useChatActions } from '~/components/app-shell/chat-nav/chat-actions'
 import InlineRename from '~/components/common/InlineRename.vue'
 import KbdCombo from '~/components/common/KbdCombo.vue'
+import ChatProjectChip from '~/components/projects/ChatProjectChip.vue'
+import { useMoveChat } from '~/components/projects/move-chat'
+import ProjectMenuItems from '~/components/projects/ProjectMenuItems.vue'
+import { useProjectsStore } from '~/stores/projects'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
 
@@ -53,11 +64,15 @@ const props = withDefaults(defineProps<{
 })
 
 const actions = useChatActions()
+const moveChat = useMoveChat()
+const projects = useProjectsStore()
 const ui = useUiStore()
 const sidebar = useSidebar(null)
 const root = useTemplateRef<HTMLElement>('root')
 
 const showTrigger = computed(() => !!sidebar && (sidebar.isMobile.value || sidebar.state.value === 'collapsed'))
+/** "Move to project" needs a project to move to (or one to leave). */
+const canMove = computed(() => projects.items.length > 0 || props.projectId !== null)
 const editing = ref(false)
 /** The menu item that runs once the menu has closed. */
 let afterMenu: 'rename' | 'share' | null = null
@@ -92,6 +107,11 @@ function onMenuCloseAutoFocus(event: Event) {
 
 function rename(title: string) {
   void actions.rename(props.chatId, title)
+}
+
+function move(projectId: string | null) {
+  // Never rejects: it shows its own toasts (Undo, a running reply, a deleted project).
+  void moveChat(props.chatId, projectId)
 }
 </script>
 
@@ -149,6 +169,8 @@ function rename(title: string) {
       </h1>
     </div>
 
+    <ChatProjectChip v-if="projectId" :chat-id="chatId" :project-id="projectId" />
+
     <DropdownMenu>
       <DropdownMenuTrigger as-child>
         <Button
@@ -167,6 +189,17 @@ function rename(title: string) {
           <PencilIcon />
           Rename
         </DropdownMenuItem>
+        <DropdownMenuSub v-if="canMove">
+          <DropdownMenuSubTrigger :data-testid="testIds.chatMenuMove">
+            <FolderInputIcon />
+            Move to project
+          </DropdownMenuSubTrigger>
+          <DropdownMenuPortal>
+            <DropdownMenuSubContent class="max-h-80 w-64 overflow-y-auto">
+              <ProjectMenuItems :model-value="projectId" @select="move" />
+            </DropdownMenuSubContent>
+          </DropdownMenuPortal>
+        </DropdownMenuSub>
         <DropdownMenuCheckboxItem
           :model-value="ui.showThinking"
           :data-testid="testIds.chatMenuThinking"

@@ -5,12 +5,15 @@ import type { TestApp, TestAppOptions } from '../../testing/create-test-app.ts'
 import type { FakeChatRunner, RecordingEventBus } from '../../testing/fakes.ts'
 import type { AppDeps } from '../../types.ts'
 import type { ChatsService } from '../chats/types.ts'
+import type { FilesServiceOptions } from '../files/index.ts'
+import type { FilesService } from '../files/types.ts'
 import type { DataServiceOptions } from './index.ts'
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
 import { strFromU8, unzipSync } from 'fflate'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createFakeChatRunner, createFakeChatsService, createRecordingEventBus, readAllBytes } from '../../testing/fakes.ts'
+import { createFilesService } from '../files/index.ts'
 import { createDataService } from './index.ts'
 
 export interface DataTestApp {
@@ -24,6 +27,9 @@ export interface DataTestAppOptions {
   data?: DataServiceOptions
   /** Wraps the (fake) chats service, e.g. to count or delay calls. */
   chats?: (chats: ChatsService) => ChatsService
+  /** Options of the real files service (e.g. its clock), and a wrapper of it (Phase 7 cleanup tests). */
+  filesOptions?: FilesServiceOptions
+  files?: (files: FilesService) => FilesService
   env?: TestAppOptions['env']
 }
 
@@ -43,6 +49,10 @@ export async function dataApp(options: DataTestAppOptions = {}): Promise<DataTes
         return options.chats?.(chats) ?? chats
       },
       data: deps => createDataService(deps, options.data),
+      files: (deps) => {
+        const files = createFilesService(deps, options.filesOptions)
+        return options.files?.(files) ?? files
+      },
     },
   })
   apps.push(t)

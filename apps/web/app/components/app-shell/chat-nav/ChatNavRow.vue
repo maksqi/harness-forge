@@ -4,34 +4,53 @@
 // while the menu is open it shows the actions button instead (touch devices show both). Rename turns the row
 // into InlineRename. Rename and Delete wait until the menu has closed, so its focus return cannot steal focus from
 // the rename input or land on a row that is gone. Share… opens the Share dialog (ui.openShare, docs/UI.md 7.14) once
-// the menu has closed and its trigger has focus again, so the dialog returns focus there when it closes.
+// the menu has closed and its trigger has focus again, so the dialog returns focus there when it closes. Phase 7: "Move to
+// project ▸" (chat-row-move, right after Rename; only with `canMove`) lists ProjectMenuItems with the chat's project
+// checked; the move runs once the menu has closed and returned focus to its trigger.
 import type { ChatExportFormat, ChatSummary } from '@harness-forge/shared'
 import type { ChatListStatus } from '~/stores/chats'
-import { FileBracesIcon, FileTextIcon, MoreHorizontalIcon, PencilIcon, Share2Icon, Trash2Icon } from '@lucide/vue'
+import {
+  FileBracesIcon,
+  FileTextIcon,
+  FolderInputIcon,
+  MoreHorizontalIcon,
+  PencilIcon,
+  Share2Icon,
+  Trash2Icon,
+} from '@lucide/vue'
 import { computed, nextTick, ref, useTemplateRef } from 'vue'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { SidebarMenuButton, SidebarMenuItem, useSidebar } from '@/components/ui/sidebar'
 import { cn } from '@/lib/utils'
 import InlineRename from '~/components/common/InlineRename.vue'
 import StatusDot from '~/components/common/StatusDot.vue'
+import ProjectMenuItems from '~/components/projects/ProjectMenuItems.vue'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
 import { SIDEBAR_ROW_CLASS } from '../sidebar-classes'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   chat: ChatSummary
   active: boolean
   status: ChatListStatus | null
-}>()
+  /** Offer "Move to project" (a project exists). */
+  canMove?: boolean
+}>(), {
+  canMove: false,
+})
 
 const emit = defineEmits<{
   rename: [title: string]
+  move: [projectId: string | null]
   export: [format: ChatExportFormat]
   delete: []
 }>()
@@ -44,6 +63,8 @@ const menuOpen = ref(false)
 const editing = ref(false)
 /** The menu item chosen that runs once the menu has closed. */
 let pending: 'rename' | 'share' | 'delete' | null = null
+/** The project picked in "Move to project" (null: nothing picked); the move runs once the menu has closed. */
+let pendingMove: { projectId: string | null } | null = null
 
 const title = computed(() => props.chat.title?.trim() ?? '')
 
@@ -78,7 +99,18 @@ function choose(action: 'rename' | 'share' | 'delete') {
   pending = action
 }
 
+function chooseMove(projectId: string | null) {
+  pendingMove = { projectId }
+}
+
 function onCloseAutoFocus(event: Event) {
+  const move = pendingMove
+  pendingMove = null
+  if (move) {
+    // Focus returns to the trigger first; ChatNav moves it on when the row leaves the filtered list.
+    void nextTick(() => emit('move', move.projectId))
+    return
+  }
   const action = pending
   pending = null
   if (!action)
@@ -165,6 +197,15 @@ defineExpose({ focus })
                 <PencilIcon aria-hidden="true" />
                 Rename
               </DropdownMenuItem>
+              <DropdownMenuSub v-if="canMove">
+                <DropdownMenuSubTrigger :data-testid="testIds.chatRowMove" class="pointer-coarse:min-h-10">
+                  <FolderInputIcon aria-hidden="true" class="text-muted-foreground" />
+                  Move to project
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent class="max-h-80 w-64 max-w-[calc(100vw-2rem)] overflow-y-auto">
+                  <ProjectMenuItems :model-value="chat.projectId" @select="chooseMove" />
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
               <DropdownMenuItem :data-testid="testIds.chatRowShare" @select="choose('share')">
                 <Share2Icon aria-hidden="true" />
                 Share…

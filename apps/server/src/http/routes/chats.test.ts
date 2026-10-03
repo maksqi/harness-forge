@@ -11,6 +11,7 @@ import {
 } from '@harness-forge/shared'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chatBody, nextEvent, testChatId } from '../../chat/testing.ts'
+import { projects } from '../../db/schema.ts'
 import { createChatsService } from '../../services/chats/index.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 
@@ -404,6 +405,167 @@ describe('pOST /api/chats/:id/branch with a real run held in preparing', () => {
       const switched = await app.request(`/api/chats/${id}/branch`, json('POST', { messageId: mid(300) }))
       expect(switched.status).toBe(200)
       expect(ids(chatDetailSchema.parse(await switched.json()).messages)).toEqual([mid(300), mid(301), mid(302), mid(303)])
+    }
+    finally {
+      release()
+      await app.close()
+    }
+  })
+})
+
+describe('projects (ADR-031)', () => {
+  const PROJECT_A = 'prj_routeprojecta001'
+  const PROJECT_B = 'prj_routeprojectb001'
+  const UNKNOWN_PROJECT = 'prj_routeunknown0001'
+
+  beforeAll(async () => {
+    await t.db.insert(projects).values([PROJECT_A, PROJECT_B].map((id, index) => ({ id, name: `Project ${index}`, path: `/workspaces/${id}`, createdAt: 1, updatedAt: 1 })))
+  })
+
+  async function page(path: string) {
+    const response = await t.request(path)
+    expect(response.status).toBe(200)
+    return chatPageSchema.parse(await response.json())
+  }
+
+  it('pOST /api/chats with projectId: 201 with the project and chat.created carries it; an unknown project is 404', async () => {
+    const response = await t.request('/api/chats', json('POST', { id: chatId(60), title: 'Project chat', projectId: PROJECT_A }))
+    expect(response.status).toBe(201)
+    expect(chatDetailSchema.parse(await response.json()).projectId).toBe(PROJECT_A)
+    expect(received.map(event => [event.type, (event.data as { projectId?: unknown }).projectId])).toEqual([['chat.created', PROJECT_A]])
+
+    const unknown = await t.request('/api/chats', json('POST', { id: chatId(61), projectId: UNKNOWN_PROJECT, messages: [userMessage(610, 'hi')] }))
+    expect(unknown.status).toBe(404)
+    expect((await errorOf(unknown)).code).toBe('not_found')
+    expect((await t.request(`/api/chats/${chatId(61)}`)).status).toBe(404)
+    const malformed = await t.request('/api/chats', json('POST', { id: chatId(61), projectId: 'prj_bad' }))
+    expect(malformed.status).toBe(400)
+  })
+
+  it('gET /api/chats?projectId=<id> and ?projectId=none filter (with search and the cursor); an unknown project lists nothing', async () => {
+    await t.request('/api/chats', json('POST', { id: chatId(62), title: 'Second project chat', projectId: PROJECT_A }))
+    await t.request('/api/chats', json('POST', { id: chatId(63), title: 'Other project chat', projectId: PROJECT_B }))
+    await t.request('/api/chats', json('POST', { id: chatId(64), title: 'Loose project chat' }))
+
+    const inA = await page(`/api/chats?projectId=${PROJECT_A}`)
+    expect(inA.items.map(chat => [chat.id, chat.projectId])).toEqual([[chatId(62), PROJECT_A], [chatId(60), PROJECT_A]])
+    const firstOfA = await page(`/api/chats?projectId=${PROJECT_A}&limit=1`)
+    expect(firstOfA.items.map(chat => chat.id)).toEqual([chatId(62)])
+    const secondOfA = await page(`/api/chats?projectId=${PROJECT_A}&limit=1&cursor=${firstOfA.nextCursor}`)
+    expect(secondOfA).toMatchObject({ items: [{ id: chatId(60) }], nextCursor: null })
+
+    const none = await page('/api/chats?projectId=none&limit=100')
+    expect(none.items.map(chat => chat.id)).toContain(chatId(64))
+    expect(none.items.every(chat => chat.projectId === null)).toBe(true)
+    expect((await page('/api/chats?limit=100')).items.map(chat => chat.id)).toEqual(expect.arrayContaining([60, 62, 63, 64].map(chatId)))
+
+    const search = await page(`/api/chats?q=PROJECT%20CHAT&projectId=${PROJECT_B}`)
+    expect(search.items.map(chat => [chat.id, chat.projectId])).toEqual([[chatId(63), PROJECT_B]])
+    expect((await page(`/api/chats?projectId=${UNKNOWN_PROJECT}`))).toEqual({ items: [], nextCursor: null })
+  })
+
+  it.each([
+    '/api/chats?projectId=',
+    '/api/chats?projectId=prj_short',
+    '/api/chats?projectId=NONE',
+    '/api/chats?projectId=null',
+  ])('gET %s answers 400 validation_error', async (path) => {
+    const response = await t.request(path)
+    expect(response.status).toBe(400)
+    expect((await errorOf(response)).code).toBe('validation_error')
+  })
+
+  it('pATCH /api/chats/:id { projectId } moves the chat (200 ChatSummary, chat.updated), null moves it out', async () => {
+    const id = chatId(64)
+    const moved = await t.request(`/api/chats/${id}`, json('PATCH', { projectId: PROJECT_B }))
+    expect(moved.status).toBe(200)
+    const summary = chatSummarySchema.parse(await moved.json())
+    expect(summary).toMatchObject({ id, projectId: PROJECT_B })
+    expect(received).toEqual([expect.objectContaining({ type: 'chat.updated', data: { ...summary, activeLeafId: null } })])
+    expect((await page(`/api/chats?projectId=${PROJECT_B}`)).items.map(chat => chat.id)).toContain(id)
+
+    const out = await t.request(`/api/chats/${id}`, json('PATCH', { projectId: null }))
+    expect(out.status).toBe(200)
+    expect(chatSummarySchema.parse(await out.json()).projectId).toBeNull()
+    expect(received.map(event => [event.type, (event.data as { projectId?: unknown }).projectId])).toEqual([['chat.updated', PROJECT_B], ['chat.updated', null]])
+  })
+
+  it('pATCH /api/chats/:id { projectId } answers 404 for an unknown project (nothing changes) or chat, 400 for a malformed id', async () => {
+    const id = chatId(60)
+    const unknown = await t.request(`/api/chats/${id}`, json('PATCH', { title: 'Lost', projectId: UNKNOWN_PROJECT }))
+    expect(unknown.status).toBe(404)
+    expect(await errorOf(unknown)).toMatchObject({ code: 'not_found' })
+    expect(chatDetailSchema.parse(await (await t.request(`/api/chats/${id}`)).json())).toMatchObject({ title: 'Project chat', projectId: PROJECT_A })
+    expect(received).toEqual([])
+    expect((await t.request(`/api/chats/${chatId(99)}`, json('PATCH', { projectId: PROJECT_A }))).status).toBe(404)
+    expect((await t.request(`/api/chats/${id}`, json('PATCH', { projectId: 'prj_bad' }))).status).toBe(400)
+    expect((await t.request(`/api/chats/${id}`, json('PATCH', { projectId: 'none' }))).status).toBe(400)
+  })
+
+  it('pATCH /api/chats/:id { projectId } answers 409 conflict (run-active) while a run holds the chat; a rename still works', async () => {
+    const id = chatId(62)
+    holding.add(id)
+    for (const projectId of [PROJECT_B, null]) {
+      const refused = await t.request(`/api/chats/${id}`, json('PATCH', { projectId }))
+      expect(refused.status).toBe(409)
+      expect(await errorOf(refused)).toMatchObject({ code: 'conflict', details: { reason: 'run-active', chatId: id } })
+    }
+    expect(received).toEqual([])
+    const renamed = await t.request(`/api/chats/${id}`, json('PATCH', { title: 'Renamed during a run' }))
+    expect(chatSummarySchema.parse(await renamed.json())).toMatchObject({ title: 'Renamed during a run', projectId: PROJECT_A })
+    holding.delete(id)
+    const moved = await t.request(`/api/chats/${id}`, json('PATCH', { projectId: PROJECT_B }))
+    expect(chatSummarySchema.parse(await moved.json()).projectId).toBe(PROJECT_B)
+  })
+
+  it('gET /api/chats/:id/export never carries the project (JSON and Markdown)', async () => {
+    const json = await t.request(`/api/chats/${chatId(60)}/export?format=json`)
+    const text = await json.text()
+    expect(text).not.toContain(PROJECT_A)
+    expect((JSON.parse(text) as { chat: object }).chat).not.toHaveProperty('projectId')
+    expect(chatExportSchema.parse(JSON.parse(text)).chat.id).toBe(chatId(60))
+    expect(await (await t.request(`/api/chats/${chatId(60)}/export?format=md`)).text()).not.toContain(PROJECT_A)
+  })
+})
+
+describe('pATCH /api/chats/:id { projectId } with a real run held in preparing', () => {
+  it('is refused (409 run-active) while the run holds the chat and accepted once it is released', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const app = await createTestApp({
+      env: { HF_MOCK_PROVIDER: '1' },
+      factories: {
+        chats: (deps): ChatsService => {
+          const chats = createChatsService(deps)
+          return {
+            ...chats,
+            ensure: async (id, init) => {
+              await gate
+              return chats.ensure(id, init)
+            },
+          }
+        },
+      },
+    })
+    try {
+      const project = 'prj_realrunproject01'
+      await app.db.insert(projects).values({ id: project, name: 'Run project', path: '/workspaces/run', createdAt: 1, updatedAt: 1 })
+      const id = testChatId(310)
+      expect((await app.request('/api/chats', json('POST', { id }))).status).toBe(201)
+      const finished = nextEvent(app, 'run.finished', event => event.data.chatId === id)
+      const run = app.deps.runs.start(chatBody(id, 'while moving'), { logger: app.logs.logger, requestId: 'req-move' })
+      expect(app.deps.runs.hasRun(id)).toBe(true)
+      const refused = await app.request(`/api/chats/${id}`, json('PATCH', { projectId: project }))
+      expect(refused.status).toBe(409)
+      expect(await errorOf(refused)).toMatchObject({ code: 'conflict', details: { reason: 'run-active', chatId: id } })
+      release()
+      await (await run).text()
+      await finished
+      const moved = await app.request(`/api/chats/${id}`, json('PATCH', { projectId: project }))
+      expect(moved.status).toBe(200)
+      expect(chatSummarySchema.parse(await moved.json()).projectId).toBe(project)
     }
     finally {
       release()

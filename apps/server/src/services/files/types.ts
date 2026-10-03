@@ -89,9 +89,9 @@ export interface FileSweepResult {
   files: number
   /** Sum of their `size`. */
   fileBytes: number
-  /** Blobs unlinked: the blobs of removed rows that no row keeps any more, plus rowless 64-hex blobs past the cutoff. */
+  /** Leftover blobs unlinked: rowless 64-hex blobs past the cutoff (the blobs of removed rows are not counted here). */
   blobs: number
-  /** Disk bytes of those blobs. */
+  /** Every byte freed on disk: blobs of removed rows that no row keeps any more, leftover blobs and stale temp files. */
   diskBytes: number
   /** Stale `.<sha256>.<uuid>.tmp` files (older than 1 hour) removed. */
   tempFiles: number

@@ -4,6 +4,8 @@ import { DEFAULT_SETTINGS, HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
+import { TOOL_MODE_OPTIONS as PERMISSION_MENU_OPTIONS } from '~/components/chat/composer/permission'
 import { useAuthStore } from '~/stores/auth'
 import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
@@ -22,7 +24,7 @@ vi.mock('vue-sonner', () => ({ toast: Object.assign(vi.fn(), toasts) }))
 let pinia: ReturnType<typeof createPinia>
 let api: MockApi
 
-const saved: Settings = { ...DEFAULT_SETTINGS, displayName: 'Maks', maxSteps: 20 }
+const saved: Settings = { ...DEFAULT_SETTINGS, displayName: 'Maks', maxSteps: 20, projectMaxSteps: 100 }
 
 beforeEach(() => {
   api = createMockApi()
@@ -45,6 +47,13 @@ afterEach(() => {
   document.body.replaceChildren()
 })
 
+async function settle(rounds = 3) {
+  for (let round = 0; round < rounds; round++) {
+    await flushPromises()
+    await nextTick()
+  }
+}
+
 async function mountGeneral() {
   const wrapper = mount(GeneralSettings, { attachTo: document.body, global: { plugins: [pinia] } })
   await flushPromises()
@@ -57,6 +66,9 @@ describe('generalSettings', () => {
     expect(api.settings.get).toHaveBeenCalled()
     expect((wrapper.get(`[data-testid="${testIds.settingsDisplayName}"]`).element as HTMLInputElement).value).toBe('Maks')
     expect((wrapper.get(`[data-testid="${testIds.settingsMaxSteps}"]`).element as HTMLInputElement).value).toBe('20')
+    expect((wrapper.get(`[data-testid="${testIds.settingsProjectMaxSteps}"]`).element as HTMLInputElement).value).toBe('100')
+    expect(wrapper.text()).toContain('Max steps in project chats')
+    expect(wrapper.text()).toContain('Agent runs in project chats can take more steps (1–200).')
     expect(wrapper.get(`[data-testid="${testIds.settingsDefaultMode}"]`).text()).toBe('Ask')
     expect(wrapper.get(`[data-testid="${testIds.settingsDefaultEffort}"]`).text()).toBe('Auto')
     expect(wrapper.get(`[data-testid="${testIds.settingsAltShortcuts}"]`).attributes('aria-checked')).toBe('true')
@@ -94,27 +106,101 @@ describe('generalSettings', () => {
     expect(useSettingsStore().resolved.displayName).toBe('Ada')
   })
 
-  it('rejects an invalid max steps value and saves a valid one', async () => {
+  it('rejects an invalid max steps value and saves a valid one (1 to 200)', async () => {
     const wrapper = await mountGeneral()
     const input = wrapper.get(`[data-testid="${testIds.settingsMaxSteps}"]`)
 
-    for (const value of ['0', '101', 'ten', '2.5']) {
+    for (const value of ['0', '201', 'ten', '2.5']) {
       await input.trigger('focus')
       await input.setValue(value)
       await input.trigger('blur')
       await flushPromises()
-      expect(wrapper.text()).toContain('Enter a whole number from 1 to 100.')
+      expect(wrapper.text()).toContain('Enter a whole number from 1 to 200.')
       expect(input.attributes('aria-invalid')).toBe('true')
     }
     expect(api.settings.update).not.toHaveBeenCalled()
 
     await input.trigger('focus')
-    await input.setValue(' 40 ')
+    await input.setValue(' 150 ')
     await input.trigger('keydown', { key: 'Enter' })
     await input.trigger('blur')
     await flushPromises()
-    expect(api.settings.update).toHaveBeenCalledWith({ body: { maxSteps: 40 } })
-    expect(wrapper.text()).not.toContain('Enter a whole number from 1 to 100.')
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { maxSteps: 150 } })
+    expect(wrapper.text()).not.toContain('Enter a whole number from 1 to 200.')
+  })
+
+  it('saves the max steps of project chats (1 to 200) and keeps the saved value on an error', async () => {
+    const wrapper = await mountGeneral()
+    const input = wrapper.get(`[data-testid="${testIds.settingsProjectMaxSteps}"]`)
+    const other = wrapper.get(`[data-testid="${testIds.settingsMaxSteps}"]`)
+
+    for (const value of ['0', '201', '', 'many']) {
+      await input.trigger('focus')
+      await input.setValue(value)
+      await input.trigger('blur')
+      await flushPromises()
+      expect(wrapper.text()).toContain('Enter a whole number from 1 to 200.')
+      expect(input.attributes('aria-invalid')).toBe('true')
+      // The error belongs to this field only.
+      expect(other.attributes('aria-invalid')).toBeUndefined()
+    }
+    expect(api.settings.update).not.toHaveBeenCalled()
+    expect(useSettingsStore().resolved.projectMaxSteps).toBe(100)
+
+    // Esc restores the saved value and clears the error.
+    await input.trigger('focus')
+    await input.trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect((input.element as HTMLInputElement).value).toBe('100')
+    expect(input.attributes('aria-invalid')).toBeUndefined()
+
+    // An unchanged value saves nothing.
+    await input.trigger('focus')
+    await input.setValue('100')
+    await input.trigger('blur')
+    await flushPromises()
+    expect(api.settings.update).not.toHaveBeenCalled()
+
+    await input.trigger('focus')
+    await input.setValue('200')
+    await input.trigger('keydown', { key: 'Enter' })
+    await input.trigger('blur')
+    await flushPromises()
+    expect(api.settings.update).toHaveBeenCalledTimes(1)
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { projectMaxSteps: 200 } })
+    expect(useSettingsStore().resolved.projectMaxSteps).toBe(200)
+    expect(useSettingsStore().resolved.maxSteps).toBe(20)
+    expect(wrapper.text()).not.toContain('Enter a whole number from 1 to 200.')
+  })
+
+  it('restores the project max steps when the save fails', async () => {
+    api.settings.update.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Disk full.' }))
+    const wrapper = await mountGeneral()
+    const input = wrapper.get(`[data-testid="${testIds.settingsProjectMaxSteps}"]`)
+    await input.trigger('focus')
+    await input.setValue('50')
+    await input.trigger('blur')
+    await flushPromises()
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { projectMaxSteps: 50 } })
+    expect(toasts.error).toHaveBeenCalledWith('Something went wrong', { description: 'Disk full.' })
+    expect((input.element as HTMLInputElement).value).toBe('100')
+  })
+
+  it('offers Accept edits as the default permission mode', async () => {
+    const wrapper = await mountGeneral()
+    const trigger = wrapper.get(`[data-testid="${testIds.settingsDefaultMode}"]`)
+    // reka-ui's Select opens with the keyboard in happy-dom.
+    await trigger.trigger('keydown', { key: 'Enter' })
+    await settle()
+    const items = [...document.body.querySelectorAll<HTMLElement>('[data-slot="select-item"]')]
+    expect(items.map(item => item.dataset.value)).toEqual(['ask', 'edits', 'auto', 'off'])
+    expect(items[1]!.textContent).toContain('Accept edits')
+    expect(items[1]!.textContent).toContain('Edit project files without asking; ask before shell commands')
+
+    items[1]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settle()
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { defaultToolMode: 'edits' } })
+    expect(trigger.text()).toBe('Accept edits')
   })
 
   it('restores the saved value on Escape', async () => {
@@ -186,6 +272,11 @@ describe('general rules', () => {
     expect(instructionsError('x'.repeat(20_001))).toBe('Use at most 20,000 characters.')
     expect(parseMaxSteps('1')).toEqual({ value: 1 })
     expect(parseMaxSteps(' 100 ')).toEqual({ value: 100 })
+    expect(parseMaxSteps('101')).toEqual({ value: 101 })
+    expect(parseMaxSteps('200')).toEqual({ value: 200 })
+    expect(parseMaxSteps('201')).toEqual({ error: 'Enter a whole number from 1 to 200.' })
+    expect(parseMaxSteps('0')).toHaveProperty('error')
+    expect(parseMaxSteps('1e2')).toHaveProperty('error')
     expect(parseMaxSteps('')).toHaveProperty('error')
     expect(parseMaxSteps('-3')).toHaveProperty('error')
   })
@@ -193,7 +284,14 @@ describe('general rules', () => {
   it('labels the choices', () => {
     expect(sendKeyOptions(true).map(option => option.label)).toEqual(['Enter', '⌘ Enter'])
     expect(sendKeyOptions(false).map(option => option.label)).toEqual(['Enter', 'Ctrl Enter'])
-    expect(TOOL_MODE_OPTIONS.map(option => option.value)).toEqual(['ask', 'auto', 'off'])
+    // The options of the composer's permission menu, Accept edits included (docs/UI.md 7.11, 9.4).
+    expect(TOOL_MODE_OPTIONS.map(option => [option.value, option.label])).toEqual([
+      ['ask', 'Ask'],
+      ['edits', 'Accept edits'],
+      ['auto', 'Auto'],
+      ['off', 'Off'],
+    ])
+    expect(TOOL_MODE_OPTIONS.map(option => option.description)).toEqual(PERMISSION_MENU_OPTIONS.map(option => option.description))
     expect(EFFORT_OPTIONS.map(option => option.value)).toEqual(['auto', 'off', 'low', 'medium', 'high', 'max'])
   })
 })

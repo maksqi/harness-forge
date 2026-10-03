@@ -844,4 +844,28 @@ describe('ctx.images (plugin API 1.1.0)', () => {
     expect(images.calls[0]?.signal.aborted).toBe(true)
     await expect(ctx!.images.generate({ prompt: 'a red fox' })).rejects.toMatchObject({ code: 'plugin_error' })
   })
+
+  it('answers provider_not_configured for an unknown provider in ctx.images and ctx.models.resolve (plugin API 1.2.0)', async () => {
+    let ctx: PluginContext | undefined
+    const capture: BuiltinPlugin = {
+      id: 'mock',
+      manifest: { manifestVersion: 1, id: 'mock', name: 'Model user', version: '1.0.0', engines: { harness: '^1.2.0' }, main: 'index.ts' },
+      module: {
+        setup: (context) => {
+          ctx = context
+        },
+      },
+    }
+    // The real image service and the real provider resolvers.
+    const t = await createTestApp({ builtins: [capture] })
+    closers.push(() => t.close())
+    const expected = {
+      code: 'provider_not_configured',
+      action: 'configure-provider',
+      providerId: 'nope',
+      message: 'The provider "nope" is not available. Pick another model or install the provider.',
+    }
+    await expect(ctx!.images.generate({ prompt: 'a red fox', modelRef: 'nope:paint' })).rejects.toMatchObject(expected)
+    await expect(ctx!.models.resolve('nope:chat')).rejects.toMatchObject(expected)
+  })
 })

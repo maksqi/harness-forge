@@ -1,6 +1,7 @@
 // Notices of a run (API.md 4.7 `NoticeData`, 6.4): `data-notice` parts with a muted line of text. Most are added right
 // after the `start` chunk (`withNotices` in `pipeline.ts`) and stored where the run's content starts; the
-// `generated-file-dropped` notice (ADR-028) replaces a generated file in place (`generated-files.ts`, `images.ts`).
+// `generated-file-dropped` notice (ADR-028) replaces a generated file in place (`generated-files.ts`, `images.ts`). The
+// `workspace-unavailable` notice (Phase 7, ADR-031) is decided in `prepare.ts` and shown on every run it applies to.
 import type { NoticeData } from '@harness-forge/shared'
 import { LIMITS } from '@harness-forge/shared'
 
@@ -28,6 +29,12 @@ export const NOTICES = {
     level: 'info',
     code: 'context-trimmed',
     message: 'Older messages were left out to fit the context window of this model.',
+  }),
+  /** The project folder of the chat could not be opened (`OpenWorkspaceResult.message`, safe to show). */
+  workspaceUnavailable: (message: string): NoticeData => ({
+    level: 'warning',
+    code: 'workspace-unavailable',
+    message: message.trim() === '' ? 'The project folder of this chat is not available, so no workspace tools were sent.' : message,
   }),
   /** Generated files that were not kept (not a raster image of `GENERATED_IMAGE_MIME_TYPES`, too large, unreadable). */
   generatedFileDropped: (count = 1): NoticeData => {

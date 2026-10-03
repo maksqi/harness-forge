@@ -158,6 +158,17 @@ describe('json export', () => {
     expect(file.body.endsWith('}\n')).toBe(true)
   })
 
+  it('never carries the project of the chat (ADR-031), in JSON or Markdown', () => {
+    const project = 'prj_exportproject001'
+    const chat = { ...sampleChat(), projectId: project }
+    const json = buildChatExport(chat, 'json', NOW)
+    expect(JSON.parse(json.body).chat).not.toHaveProperty('projectId')
+    expect(json.body).not.toContain(project)
+    expect(json.body).toBe(buildChatExport(sampleChat(), 'json', NOW).body)
+    const markdown = buildChatExport(chat, 'md', NOW)
+    expect(markdown.body).toBe(EXPECTED_MARKDOWN)
+  })
+
   it('writes every version of the given tree, not only the active path of the detail', () => {
     const chat = sampleChat()
     const [question, answer] = chat.messages

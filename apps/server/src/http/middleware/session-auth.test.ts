@@ -1,18 +1,23 @@
 // Session authentication (W1.1-T5): the route-table-driven 401 matrix (SEC-A1), cookie verification (tampered,
-// expired, revoked), rolling re-issue and cookie attributes (SEC-A2).
+// expired, revoked), rolling re-issue and cookie attributes (SEC-A2); a key rotation (W7.7-T3) ends old cookies and
+// drops a rolling re-issue signed under the replaced key.
 import type { ApiRouteDef, ApiRouteKey } from '@harness-forge/shared'
 import type { TestApp } from '../../testing/create-test-app.ts'
+import type { AppEnv } from '../types.ts'
 import { API_ROUTE_KEYS, apiRoutes, harnessErrorEnvelopeSchema } from '@harness-forge/shared'
+import { Hono } from 'hono'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { swapMasterKey } from '../../security/keyring.ts'
 import { API_SAMPLES, sampleRequest } from '../../testing/api-samples.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
-import { createMemorySecretStore, createMemorySettingsService } from '../../testing/fakes.ts'
+import { createMemorySecretStore, createMemorySettingsService, fakeMasterKey } from '../../testing/fakes.ts'
 import {
   isLocalHostname,
   LOCAL_HOST_ONLY_MESSAGE,
   SESSION_COOKIE_MAX_AGE_SECONDS,
   SESSION_COOKIE_NAME,
   SESSION_ROLL_AFTER_MS,
+  sessionAuthMiddleware,
   UNAUTHORIZED_MESSAGE,
 } from './session-auth.ts'
 
@@ -292,5 +297,39 @@ describe('session cookie', () => {
     const cookies = response.headers.getSetCookie().filter(cookie => cookie.startsWith(`${SESSION_COOKIE_NAME}=`))
     expect(cookies).toHaveLength(1)
     expect(cookies[0]).toMatch(/^hf_session=; Max-Age=0;/)
+  })
+})
+
+describe('session cookie across a key rotation (ADR-034)', () => {
+  it('an old cookie is 401 after a swap; a cookie issued after it works', async () => {
+    const t = await testApp()
+    const old = await t.deps.sessions.issue({ authAt: Date.now() })
+    expect((await t.request('/api/settings', { headers: cookieHeader(old) })).status).toBe(200)
+    swapMasterKey(t.deps.keyring, fakeMasterKey('rotated'), 2)
+    expect((await t.request('/api/settings', { headers: cookieHeader(old) })).status).toBe(401)
+    const fresh = await t.deps.sessions.issue({ authAt: Date.now() })
+    expect((await t.request('/api/settings', { headers: cookieHeader(fresh) })).status).toBe(200)
+  })
+
+  it('drops a rolling re-issue signed before a swap that happened during the request', async () => {
+    const t = await testApp()
+    const app = new Hono<AppEnv>()
+    app.use('/api/*', sessionAuthMiddleware(t.deps))
+    app.get('/api/plain', c => c.json({ ok: true }))
+    app.get('/api/swap', (c) => {
+      swapMasterKey(t.deps.keyring, fakeMasterKey(`mid-${t.deps.keyring.keyVersion}`), t.deps.keyring.keyVersion + 1)
+      return c.json({ ok: true })
+    })
+    const request = async (path: string, token: string) => app.request(`http://127.0.0.1${path}`, { headers: cookieHeader(token) })
+    const old = () => t.deps.sessions.issue({ authAt: Date.now() - 2 * DAY, now: Date.now() - 2 * DAY })
+
+    // Control: an old session is re-issued.
+    const plain = await request('/api/plain', await old())
+    expect(plain.status).toBe(200)
+    expect(sessionCookieOf(plain)).not.toBeNull()
+
+    const swapped = await request('/api/swap', await old())
+    expect(swapped.status).toBe(200)
+    expect(sessionCookieOf(swapped)).toBeNull()
   })
 })

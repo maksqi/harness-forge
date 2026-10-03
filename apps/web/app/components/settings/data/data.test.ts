@@ -1,14 +1,23 @@
 import type { DataImportResult, DataSummary } from '@harness-forge/shared'
 import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { dataCleanupPreview, keyStatus } from '~/utils/testing/fixtures'
 import {
+  BUSY_MESSAGE,
+  canRotateKey,
+  cleanupConfirmText,
+  cleanupHeadline,
+  cleanupResultMessage,
   clearStoredChatState,
+  conflictReason,
   countLabel,
   deleteDescription,
   deletedMessage,
   exceedsImportLimit,
   EXPORT_LIMIT_WARNING,
   filesLabel,
+  graceLabel,
+  hasRemovableFiles,
   importAnnouncement,
   importFileProblem,
   importFilesLine,
@@ -17,6 +26,12 @@ import {
   importItemTitle,
   importKindOf,
   isBusyConflict,
+  KEY_SOURCE_LABELS,
+  keyRotatedDescription,
+  recentFilesLine,
+  ROTATE_KEY_COMMANDS,
+  rotateEffects,
+  secretsLabel,
   summaryLine,
 } from './data'
 
@@ -126,6 +141,94 @@ describe('errors', () => {
     expect(isBusyConflict(new HarnessError({ code: 'conflict', message: 'Busy', details: { reason: 'busy' } }))).toBe(true)
     expect(isBusyConflict(new HarnessError({ code: 'conflict', message: 'Running', details: { reason: 'run-active' } }))).toBe(false)
     expect(isBusyConflict({ error: { code: 'conflict', message: 'Busy', details: { reason: 'busy' } } })).toBe(true)
+  })
+
+  it('reads the reason of a conflict only', () => {
+    expect(conflictReason(new HarnessError({ code: 'conflict', message: 'Env', details: { reason: 'env-key' } }))).toBe('env-key')
+    expect(conflictReason(new HarnessError({ code: 'conflict', message: 'No reason' }))).toBeNull()
+    expect(conflictReason(new HarnessError({ code: 'forbidden', message: 'Busy', details: { reason: 'busy' } }))).toBeNull()
+    expect(conflictReason(new Error('boom'))).toBeNull()
+  })
+
+  it('names every maintenance task in the busy text (Phase 7)', () => {
+    expect(BUSY_MESSAGE).toBe('Another data task is running. Try again when it finishes.')
+  })
+})
+
+describe('storage cleanup texts', () => {
+  it('says what a cleanup removes', () => {
+    expect(cleanupHeadline(dataCleanupPreview({ files: 12, fileBytes: 50_331_648 }))).toBe('12 files · 48 MB can be removed')
+    expect(cleanupHeadline(dataCleanupPreview({ files: 1, fileBytes: 2048, blobs: 1, tempFiles: 1 })))
+      .toBe('1 file · 2 KB can be removed, and 2 leftover files on disk')
+    expect(cleanupHeadline(dataCleanupPreview({ blobs: 1 }))).toBe('1 leftover file on disk can be removed')
+    expect(cleanupHeadline(dataCleanupPreview({ recentFiles: 3 }))).toBe('No unused files.')
+  })
+
+  it('enables Remove only when something can be removed', () => {
+    expect(hasRemovableFiles(dataCleanupPreview())).toBe(false)
+    expect(hasRemovableFiles(dataCleanupPreview({ recentFiles: 4 }))).toBe(false)
+    expect(hasRemovableFiles(dataCleanupPreview({ files: 1 }))).toBe(true)
+    expect(hasRemovableFiles(dataCleanupPreview({ tempFiles: 1 }))).toBe(true)
+  })
+
+  it('mentions the recent files kept for the grace period', () => {
+    expect(recentFilesLine(dataCleanupPreview())).toBeNull()
+    expect(recentFilesLine(dataCleanupPreview({ recentFiles: 3 }))).toBe('3 recent files are kept for 24 hours.')
+    expect(recentFilesLine(dataCleanupPreview({ recentFiles: 1 }))).toBe('1 recent file is kept for 24 hours.')
+    expect(graceLabel(3_600_000)).toBe('1 hour')
+    expect(graceLabel(0)).toBe('1 hour')
+  })
+
+  it('words the confirmation and the result', () => {
+    expect(cleanupConfirmText(dataCleanupPreview({ files: 12, fileBytes: 50_331_648, blobs: 12 })))
+      .toBe('This deletes 12 files (48 MB). It can\'t be undone.')
+    expect(cleanupConfirmText(dataCleanupPreview({ blobs: 2, tempFiles: 1 }))).toBe('This deletes 3 leftover files on disk. It can\'t be undone.')
+    const result = { files: 12, fileBytes: 50_331_648, blobs: 12, diskBytes: 50_331_648, tempFiles: 0, ranAt: 1 }
+    expect(cleanupResultMessage(result)).toBe('Removed 12 files (48 MB)')
+    expect(cleanupResultMessage({ ...result, files: 1, fileBytes: 812 })).toBe('Removed 1 file (812 B)')
+    expect(cleanupResultMessage({ ...result, files: 0, fileBytes: 0, blobs: 1, tempFiles: 0 })).toBe('Removed 1 leftover file from disk')
+    expect(cleanupResultMessage({ ...result, files: 0, fileBytes: 0, blobs: 0 })).toBe('No unused files.')
+  })
+})
+
+describe('encryption key texts', () => {
+  it('labels the source and the secrets', () => {
+    expect(KEY_SOURCE_LABELS.file).toBe('Key file in the data directory')
+    expect(KEY_SOURCE_LABELS.env).toBe('HF_MASTER_KEY environment variable')
+    expect(secretsLabel({ secrets: 4, unreadableSecrets: 0 })).toBe('4 encrypted')
+    expect(secretsLabel({ secrets: 4, unreadableSecrets: 1 })).toBe('4 encrypted · 1 can\'t be read')
+  })
+
+  it('allows a rotation only for a key file that passes the key check', () => {
+    expect(canRotateKey(null)).toBe(false)
+    expect(canRotateKey(keyStatus())).toBe(true)
+    expect(canRotateKey(keyStatus({ canRotate: false }))).toBe(false)
+    expect(canRotateKey(keyStatus({ source: 'env' }))).toBe(false)
+    expect(canRotateKey(keyStatus({ keyCheck: 'mismatch' }))).toBe(false)
+    expect(canRotateKey(keyStatus({ keyCheck: 'unknown' }))).toBe(true)
+  })
+
+  it('lists the effects of a rotation, with the counts when known', () => {
+    expect(rotateEffects(keyStatus({ shares: 3, pendingApprovals: 2 }))).toEqual([
+      'Other browsers and devices are signed out; you stay signed in.',
+      'Every share link changes (3 links): copy the new links from Shared links.',
+      'Running replies stop and pending approvals expire (2 waiting).',
+      'Older versions of harness-forge can\'t read the secrets afterwards: back up the data directory first.',
+    ])
+    expect(rotateEffects(keyStatus({ shares: 1 }))[1]).toBe('Every share link changes (1 link): copy the new links from Shared links.')
+    expect(rotateEffects(null).slice(1, 3)).toEqual([
+      'Every share link changes: copy the new links from Shared links.',
+      'Running replies stop and pending approvals expire.',
+    ])
+  })
+
+  it('words the rotation toast and the offline commands', () => {
+    expect(keyRotatedDescription({ secrets: 4, approvalsExpired: 1 })).toBe('4 secrets encrypted again · 1 approval expired')
+    expect(keyRotatedDescription({ secrets: 0, approvalsExpired: 0 })).toBe('0 secrets encrypted again · 0 approvals expired')
+    expect(ROTATE_KEY_COMMANDS.map(item => item.command)).toEqual([
+      'docker run --rm -v <volume>:/data -e HF_MASTER_KEY=<old> -e HF_NEW_MASTER_KEY=<new> harness-forge node apps/server/dist/main.mjs rotate-key',
+      'HF_MASTER_KEY=<old> HF_NEW_MASTER_KEY=<new> pnpm key:rotate',
+    ])
   })
 })
 

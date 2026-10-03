@@ -28,6 +28,7 @@ import {
   TOOL_NAME_PATTERN,
   toolPolicySchema,
   validationError,
+  workspaceAccessSchema,
 } from '@harness-forge/shared'
 import { asSchema } from 'ai'
 import { z } from 'zod'
@@ -187,7 +188,8 @@ export function inputSchemaProblem(schema: unknown): string | null {
 
 /**
  * Checks a tool definition: name (`^[a-zA-Z0-9_-]{1,64}$`; the `mcp__` prefix is reserved for MCP tools and throws
- * `conflict` otherwise), description, input schema, policy, timeout and functions.
+ * `conflict` otherwise), description, input schema, policy, timeout, workspace access (plugin API 1.2.0, ADR-032:
+ * `read`, `write` or `execute` when present) and functions.
  */
 export function validateToolDefinition(definition: ToolDefinition, options: ToolRegisterOptions = {}): void {
   if (!isObject(definition))
@@ -227,6 +229,10 @@ export function validateToolDefinition(definition: ToolDefinition, options: Tool
   const timeoutMs: unknown = definition.timeoutMs
   if (timeoutMs !== undefined && (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > TOOL_TIMEOUT_MAX_MS))
     throw invalid(`${label}: "timeoutMs" must be an integer from 1 to ${TOOL_TIMEOUT_MAX_MS}.`, ['timeoutMs'])
+
+  const workspace: unknown = definition.workspace
+  if (workspace !== undefined && !workspaceAccessSchema.safeParse(workspace).success)
+    throw invalid(`${label}: "workspace" must be "read", "write" or "execute" (got ${describeValue(workspace)}).`, ['workspace'])
 
   const record = definition as unknown as Record<string, unknown>
   checkFunction(label, record, 'execute', true)

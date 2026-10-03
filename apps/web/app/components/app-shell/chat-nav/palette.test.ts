@@ -1,7 +1,7 @@
 import type { PaletteInput, PaletteModel } from './palette'
 import { describe, expect, it } from 'vitest'
-import { chatId, chatSummary } from '~/utils/testing/fixtures'
-import { buildPaletteSections, CHAT_RESULTS_LIMIT, matchesQuery, MODEL_RESULTS_LIMIT, RECENT_CHATS_LIMIT } from './palette'
+import { chatId, chatSummary, projectId } from '~/utils/testing/fixtures'
+import { ADD_PROJECT_ROUTE, buildPaletteSections, CHAT_RESULTS_LIMIT, matchesQuery, MODEL_RESULTS_LIMIT, RECENT_CHATS_LIMIT } from './palette'
 
 const NOW = 1_790_600_000_000
 
@@ -150,6 +150,59 @@ describe('buildPaletteSections', () => {
       models: [model({ ref: 'mock:echo', name: 'Mock echo', providerId: 'mock', providerName: 'Mock' })],
     }))
     expect(sections.map(section => section.id)).toEqual(['chats', 'navigation', 'models', 'theme'])
+  })
+})
+
+describe('buildPaletteSections: projects (Phase 7)', () => {
+  const projects = [{ id: projectId(1), name: 'API' }, { id: projectId(2), name: 'Website' }]
+
+  function projectSection(overrides: Partial<PaletteInput>) {
+    return buildPaletteSections(input({ chats: [], ...overrides })).find(section => section.id === 'projects')
+  }
+
+  it('shows the Projects section only while searching, after Actions', () => {
+    expect(projectSection({ projects })).toBeUndefined()
+    const sections = buildPaletteSections(input({ query: 'filter', chats: [], projects }))
+    expect(sections.map(section => section.id)).toEqual(['projects'])
+    // "Settings: Projects" stays in Go to.
+    expect(buildPaletteSections(input({ query: 'project', chats: [], projects })).map(section => section.id)).toEqual(['projects', 'navigation'])
+    expect(sections[0]!.heading).toBe('Projects')
+    expect(buildPaletteSections(input({ query: 'new', chats: [], projects })).map(section => section.id)).toEqual(['actions', 'projects'])
+  })
+
+  it('offers every filter (the current one checked) and Add project…', () => {
+    const section = projectSection({ query: 'project', projects, projectFilter: projectId(2) })!
+    expect(section.items.map(item => [item.value, item.label, item.checked ?? false])).toEqual([
+      ['project-filter-all', 'Show all chats', false],
+      ['project-filter-none', 'Show chats without a project', false],
+      [`project-filter-${projectId(1)}`, 'Show API', false],
+      [`project-filter-${projectId(2)}`, 'Show Website', true],
+      ['project-add', 'Add project…', false],
+    ])
+    expect(section.items[2]!.command).toEqual({ type: 'project-filter', filter: projectId(1) })
+    expect(section.items[4]!.command).toEqual({ type: 'navigate', to: ADD_PROJECT_ROUTE })
+    expect(ADD_PROJECT_ROUTE).toBe('/settings/projects?add=1')
+    // Without any project: all chats and Add project… only.
+    expect(projectSection({ query: 'project', projects: [] })!.items.map(item => item.value)).toEqual(['project-filter-all', 'project-add'])
+  })
+
+  it('moves the open chat to another project or out of its project', () => {
+    const section = projectSection({ query: 'move', projects, openChat: { id: chatId(1), projectId: projectId(1) } })!
+    expect(section.items.map(item => [item.value, item.label])).toEqual([
+      [`project-move-${projectId(2)}`, 'Move chat to Website'],
+      ['project-move-none', 'Move chat out of project'],
+    ])
+    expect(section.items[0]!.command).toEqual({ type: 'move-chat', chatId: chatId(1), projectId: projectId(2) })
+    expect(section.items[1]!.command).toEqual({ type: 'move-chat', chatId: chatId(1), projectId: null })
+    // A chat without a project can only move into one; no open chat, no move items.
+    expect(projectSection({ query: 'move', projects, openChat: { id: chatId(1), projectId: null } })!.items.map(item => item.value))
+      .toEqual([`project-move-${projectId(1)}`, `project-move-${projectId(2)}`])
+    expect(projectSection({ query: 'move chat', projects })).toBeUndefined()
+  })
+
+  it('matches projects by name', () => {
+    expect(projectSection({ query: 'website', projects, openChat: { id: chatId(1), projectId: null } })!.items.map(item => item.value))
+      .toEqual([`project-filter-${projectId(2)}`, `project-move-${projectId(2)}`])
   })
 })
 

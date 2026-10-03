@@ -207,6 +207,44 @@ describe('image service: generation', () => {
   })
 })
 
+describe('image service: model name (Phase 7, plugin API 1.2.0)', () => {
+  it('sets modelName on every result: the catalog name, else the model id', async () => {
+    const named = await t.deps.images.generate(input())
+    expect(named).toMatchObject({ modelRef: 'mock:image', modelName: 'Mock Image' })
+
+    // The user's alias is the catalog name the UI shows.
+    const base = await resolved()
+    const aliased = await t.deps.images.generate(input({ resolved: { ...base, entry: { ...base.entry, name: 'My painter' } } }))
+    expect(aliased.modelName).toBe('My painter')
+
+    // A blank catalog name falls back to the model id; a long one is cut to the output limit.
+    for (const name of ['', '   ']) {
+      const fallback = await t.deps.images.generate(input({ resolved: { ...base, entry: { ...base.entry, name } } }))
+      expect(fallback.modelName, JSON.stringify(name)).toBe('image')
+    }
+    const long = await t.deps.images.generate(input({ resolved: { ...base, entry: { ...base.entry, name: 'n'.repeat(300) } } }))
+    expect(long.modelName).toBe('n'.repeat(200))
+  })
+})
+
+describe('image service: unknown provider (Phase 7)', () => {
+  it('answers provider_not_configured with action configure-provider before calling a model', async () => {
+    const error = await rejection(t.deps.images.generate(input({ modelRef: 'nope:paint' })))
+    expect(error.httpStatus).toBe(400)
+    expect(error.toJSON().error).toMatchObject({
+      code: 'provider_not_configured',
+      action: 'configure-provider',
+      providerId: 'nope',
+      message: 'The provider "nope" is not available. Pick another model or install the provider.',
+    })
+    // The imageModelRef setting of a removed provider fails the same way.
+    await t.deps.settings.update({ imageModelRef: 'nope:paint' })
+    expect((await rejection(t.deps.images.generate(input({ modelRef: undefined })))).code).toBe('provider_not_configured')
+    expect(calls).toEqual([])
+    expect(await usageRows()).toEqual([])
+  })
+})
+
 describe('image service: request mapping', () => {
   it('maps the request with imageParams to size, aspect ratio and provider options', async () => {
     const requests: unknown[] = []

@@ -8,7 +8,8 @@
 // serve the public routes: they read only the stored snapshot, answer the same `not_found` for every failure (the chat
 // is re-checked on every call) and write nothing. `outdated` = the chat's `updated_at` is later than `snapshot_at`, or
 // its active path now holds another number of user / assistant messages than `message_count`; `expired` =
-// `expires_at <= now`. Share actions emit no server event.
+// `expires_at <= now`. Share actions emit no server event. A master-key rotation (ADR-034) changes every token: the
+// codec is rebuilt when `keyring.keyVersion` changes.
 import type { HarnessError, ShareCreate, ShareOptions, SharesQuery, ShareSummary, ShareUpdate, ShareView } from '@harness-forge/shared'
 import type { ChatShareRow } from '../../db/schema.ts'
 import type { AppDeps } from '../../types.ts'
@@ -97,9 +98,22 @@ export function createShareService(deps: AppDeps, options: ShareServiceOptions =
   const { db } = deps
   const now = options.now ?? Date.now
 
-  // Resolved on first use, like the session key.
-  let codec: ShareTokens | null = null
-  const tokens = (): ShareTokens => (codec ??= createShareTokens(deps.keyring.subkey('share')))
+  // Resolved on first use, like the session key, and again after a key rotation (ADR-034): the codec is valid only for
+  // the key version its subkey was read at, so every token of the old key stops working at once.
+  let codec: { version: number, tokens: ShareTokens } | null = null
+  function tokens(): ShareTokens {
+    const version = deps.keyring.keyVersion
+    if (codec === null || codec.version !== version) {
+      const key = deps.keyring.subkey('share')
+      try {
+        codec = { version, tokens: createShareTokens(key) }
+      }
+      finally {
+        key.fill(0)
+      }
+    }
+    return codec.tokens
+  }
 
   // `create` checks the per-chat limit and inserts under this lock, so concurrent creates cannot pass the limit.
   let createQueue: Promise<unknown> = Promise.resolve()

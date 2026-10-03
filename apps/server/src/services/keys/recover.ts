@@ -1,30 +1,36 @@
-// Boot recovery of the key state (Phase 7, ADR-034, ARCHITECTURE.md 5 and 6.14). Owner: C16 (C16-T3); W7.7 adds the
-// `secret.key.next` table (W7.7-T1). Called by `main.ts` after the migrations and before `createDeps`; the keyring
-// factory then takes the returned `keyVersion`.
+// Boot recovery of the key state (Phase 7, ADR-034, ARCHITECTURE.md 5 and 6.14). Owner: C16 (C16-T3) and W7.7
+// (W7.7-T1: the `secret.key.next` table). Called by `main.ts` after the migrations and before `createDeps`; the keyring
+// factory then takes the returned `keyVersion`. The offline `rotate-key` CLI runs it too before it rotates.
 //
-// What runs now:
-// - the master key is loaded like the keyring loads it (`HF_MASTER_KEY`, else `secret.key`, created 0600 when missing)
-//   and registered with the redactor; it is zeroed before this function returns;
-// - `_keys` present and valid: its `version` is the keyring version; a key check that does not match logs a warning
-//   (stored secrets cannot be decrypted; `GET /keys` reports `keyCheck: 'mismatch'`);
-// - `_keys` absent (the first v1.3 boot, or a new data directory): version 1, and `{ version: 1, check, rotatedAt:
-//   null }` is written when the secrets table is empty or at least one version-1 row decrypts with the key; otherwise
-//   nothing is written (a wrong key must not become the recorded one) and a warning is logged;
-// - `_keys` present but invalid: a warning, nothing is overwritten, and the version is the highest `key_version` of the
-//   secret rows (1 without rows).
-// What W7.7 adds (file mode): the recovery table for a `secret.key.next` left by an interrupted rotation (rename it
-// over `secret.key` when its check matches, delete it when the current key's check matches, else fail the boot).
+// 1. File mode (`HF_MASTER_KEY` unset) with a `secret.key.next` left by an interrupted rotation, decided BEFORE the key
+//    file is loaded (so a missing `secret.key` is never generated while `.next` may hold the key in use):
+//    | the check of `.next` equals the stored check  | the rotation committed: rename `.next` over `secret.key`, fsync |
+//    | the check of `secret.key` equals the stored one | the rotation did not commit: delete `.next`, warn              |
+//    | `_keys` absent                                  | nothing committed (a commit writes `_keys`): delete, warn       |
+//    | `_keys` invalid                                 | cannot decide: `.next` is left in place, warn                   |
+//    | neither matches                                 | `KeyRecoveryError` naming both files (the boot fails, exit 1)   |
+//    In env mode a `.next` is ignored (warning): only the file mode writes it.
+// 2. The master key is loaded like the keyring loads it (`HF_MASTER_KEY`, else `secret.key`, created 0600 when missing)
+//    and registered with the redactor; it is zeroed before this function returns.
+// 3. `_keys` present and valid: its `version` is the keyring version; a key check that does not match logs a warning
+//    (stored secrets cannot be decrypted; `GET /keys` reports `keyCheck: 'mismatch'`).
+// 4. `_keys` absent (the first v1.3 boot, or a new data directory): version 1, and `{ version: 1, check, rotatedAt:
+//    null }` is written when the secrets table is empty or at least one version-1 row decrypts with the key; otherwise
+//    nothing is written (a wrong key must not become the recorded one) and a warning is logged.
+// 5. `_keys` present but invalid: a warning, nothing is overwritten, and the version is the highest `key_version` of the
+//    secret rows (1 without rows).
 import type { Db } from '../../db/client.ts'
 import type { Env } from '../../env.ts'
 import type { Logger } from '../../logger.ts'
 import type { Redactor } from '../../security/types.ts'
 import type { KeyState } from './types.ts'
-import { existsSync } from 'node:fs'
+import { existsSync, renameSync, unlinkSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { eq, sql } from 'drizzle-orm'
 import { secrets, settings } from '../../db/schema.ts'
-import { deriveSubkey, encodeMasterKey, KEY_VERSION, loadMasterKey } from '../../security/keyring.ts'
+import { deriveSubkey, encodeMasterKey, KEY_VERSION, loadMasterKey, readMasterKeyFile, syncDirectory } from '../../security/keyring.ts'
 import { decryptSecret, secretAad } from '../secrets/crypto.ts'
-import { keyCheckOfSubkey, parseKeyState, sameKeyCheck } from './check.ts'
+import { keyCheckOfMasterKey, keyCheckOfSubkey, parseKeyState, sameKeyCheck } from './check.ts'
 import { KEY_STATE_SETTING } from './types.ts'
 
 /** What `recoverKeyState` needs: the values `main.ts` has before `createDeps`. */
@@ -92,14 +98,87 @@ async function probeSecrets(db: Db, encryptionKey: Uint8Array, version: number):
   return 'unreadable'
 }
 
+/** The boot cannot tell which key belongs to the database: it fails with this message (exit code 1). */
+export class KeyRecoveryError extends Error {
+  override readonly name = 'KeyRecoveryError'
+}
+
+/** What `resolveNextKeyFile` did with `secret.key.next`. */
+export type NextKeyOutcome = 'none' | 'promoted' | 'removed' | 'kept' | 'ignored'
+
+/** Reads a key file for a comparison: null when it is missing, unreadable or invalid (never throws). */
+function tryReadKey(path: string): Uint8Array | null {
+  try {
+    return readMasterKeyFile(path)
+  }
+  catch {
+    return null
+  }
+}
+
+function matchesCheck(key: Uint8Array | null, check: string): boolean {
+  return key !== null && sameKeyCheck(keyCheckOfMasterKey(key), check)
+}
+
+/**
+ * Step 1 of the file comment: decides what happens to a `secret.key.next` (file mode). Throws `KeyRecoveryError` when
+ * neither file matches the stored check. Never logs key material.
+ */
+export async function resolveNextKeyFile(input: Pick<KeyRecoveryInput, 'env' | 'db'> & { logger: Logger }): Promise<NextKeyOutcome> {
+  const { env, db, logger } = input
+  const next = nextKeyPath(env)
+  if (!existsSync(next))
+    return 'none'
+  if (env.masterKey !== null) {
+    logger.warn('secret.key.next is ignored while HF_MASTER_KEY is set', { path: next })
+    return 'ignored'
+  }
+  const stored = await readKeyState(db)
+  if (stored === null) {
+    logger.warn('found secret.key.next but the stored key state is invalid; it is left in place', { path: next })
+    return 'kept'
+  }
+  const remove = (message: string): NextKeyOutcome => {
+    unlinkSync(next)
+    syncDirectory(dirname(next))
+    logger.warn(message, { path: next })
+    return 'removed'
+  }
+  if (stored === undefined)
+    return remove('removed secret.key.next: no key rotation committed (no key state is stored)')
+
+  const nextKey = tryReadKey(next)
+  const currentKey = tryReadKey(env.paths.secretKey)
+  try {
+    if (matchesCheck(nextKey, stored.check)) {
+      renameSync(next, env.paths.secretKey)
+      syncDirectory(dirname(env.paths.secretKey))
+      logger.info('finished an interrupted key rotation: secret.key.next replaced secret.key', { keyVersion: stored.version })
+      return 'promoted'
+    }
+    if (matchesCheck(currentKey, stored.check))
+      return remove('removed secret.key.next: the interrupted key rotation did not commit')
+  }
+  finally {
+    nextKey?.fill(0)
+    currentKey?.fill(0)
+  }
+  throw new KeyRecoveryError(
+    `Neither ${env.paths.secretKey} nor ${next} matches the key check stored in the database, so the key of the stored `
+    + `secrets is unknown. Keep both files, restore the key file that belongs to this database as ${env.paths.secretKey} `
+    + `(and remove ${next}), then start again.`,
+  )
+}
+
 /**
  * Resolves the key state at boot (see the file comment) and returns the keyring version. Throws `KeyringError` for an
- * invalid or unreadable master key (the boot fails with exit code 1, as it would in `createKeyring`). Never logs key
- * material.
+ * invalid or unreadable master key (the boot fails with exit code 1, as it would in `createKeyring`) and
+ * `KeyRecoveryError` for a `secret.key.next` that matches no stored check. Never logs key material.
  */
 export async function recoverKeyState(input: KeyRecoveryInput): Promise<KeyRecovery> {
   const { env, db, redactor } = input
   const logger = input.logger.child({ component: 'keys' })
+  await resolveNextKeyFile({ env, db, logger })
   const { key, source } = loadMasterKey(env)
   const encryptionKey = deriveSubkey(key, 'encryption')
   try {
@@ -107,10 +186,6 @@ export async function recoverKeyState(input: KeyRecoveryInput): Promise<KeyRecov
     if (source === 'generated')
       logger.info('created the master key file', { path: env.paths.secretKey })
     const mode = source === 'env' ? 'env' : 'file'
-    if (mode === 'file' && existsSync(nextKeyPath(env))) {
-      // W7.7-T1 resolves an interrupted rotation here; until then the file is left untouched.
-      logger.warn('found secret.key.next from an interrupted key rotation; it is left in place', { path: nextKeyPath(env) })
-    }
 
     const stored = await readKeyState(db)
     const check = keyCheckOfSubkey(encryptionKey)

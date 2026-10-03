@@ -1,4 +1,4 @@
-import type { HookMap, HookName, ToolDefinition } from '@harness-forge/plugin-sdk'
+import type { HookMap, HookName, ToolCallContext, ToolDefinition, ToolWorkspace, ToolWorkspaceAccess } from '@harness-forge/plugin-sdk'
 import type { McpServer } from '@harness-forge/shared'
 import type { ToolExecutionOptions } from 'ai'
 import type { ToolPref } from '../mcp/types.ts'
@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { createSilentLogger } from '../logger.ts'
 import { ToolFailure } from './errors.ts'
-import { assembleTools, capToolOutput, clampToolTimeout, isTruncatedToolOutput, utf8Prefix, wrapToModelOutput, wrapToolExecute } from './tools.ts'
+import { assembleTools, capToolOutput, clampToolTimeout, isTruncatedToolOutput, offersWorkspaceTool, toolWorkspace, utf8Prefix, wrapToModelOutput, wrapToolExecute } from './tools.ts'
 
 function definition(overrides: Partial<ToolDefinition> = {}): ToolDefinition {
   return {
@@ -37,7 +37,7 @@ const guard: ToolWrapContext['plugins']['guard'] = async (_pluginId, fn, options
 
 type HookRun = <K extends HookName>(name: K, ...args: HookMap[K]) => Promise<void>
 
-function wrapContext(overrides: { active?: boolean, run?: HookRun } = {}): ToolWrapContext {
+function wrapContext(overrides: { active?: boolean, run?: HookRun, workspace?: ToolWorkspace | null } = {}): ToolWrapContext {
   const run: HookRun = overrides.run ?? (async () => {})
   return {
     chatId: 'chat',
@@ -45,8 +45,12 @@ function wrapContext(overrides: { active?: boolean, run?: HookRun } = {}): ToolW
     registry: { hooks: { run, on: () => ({ dispose() {} }), list: () => [] } },
     plugins: { guard, isActive: () => overrides.active ?? true },
     signal: new AbortController().signal,
+    ...(overrides.workspace === undefined ? {} : { workspace: overrides.workspace }),
   }
 }
+
+/** An `OpenWorkspace`-like value with fields that must not reach the tools. */
+const OPEN_WORKSPACE = { projectId: 'prj_0123456789abcdef', name: 'Demo', root: '/srv/projects/demo', instructions: 'Secret project rules.', projectFile: null }
 
 const options: ToolExecutionOptions<unknown> = { toolCallId: 'call_1', messages: [], context: undefined }
 
@@ -99,6 +103,23 @@ describe('wrapToolExecute', () => {
     const output = await wrapped({ text: 'hi' }, options)
     expect(isTruncatedToolOutput(output)).toBe(true)
     expect(execute).toHaveBeenCalledWith({ text: 'hi' }, expect.anything())
+  })
+
+  it('adds the frozen workspace of the run to the call context; none without a workspace', async () => {
+    const seen: ToolCallContext[] = []
+    const execute = async (_input: unknown, context: ToolCallContext) => {
+      seen.push(context)
+      return 'ok'
+    }
+    const workspace = toolWorkspace(OPEN_WORKSPACE)
+    expect(workspace).toEqual({ projectId: 'prj_0123456789abcdef', name: 'Demo', root: '/srv/projects/demo' })
+    expect(Object.isFrozen(workspace)).toBe(true)
+    await wrapToolExecute({ pluginId: 'demo', definition: definition({ execute }) }, wrapContext({ workspace }))({ text: 'a' }, options)
+    await wrapToolExecute({ pluginId: 'demo', definition: definition({ execute }) }, wrapContext({ workspace: null }))({ text: 'b' }, options)
+    await wrapToolExecute({ pluginId: 'demo', definition: definition({ execute }) }, wrapContext())({ text: 'c' }, options)
+    expect(seen[0]?.workspace).toBe(workspace)
+    expect('workspace' in seen[1]!).toBe(false)
+    expect('workspace' in seen[2]!).toBe(false)
   })
 
   it('fails with "Tool unavailable" when the owner plugin is not active', async () => {
@@ -189,8 +210,25 @@ function assemblyInput(overrides: Partial<ToolAssemblyInput> & { tools?: Registe
     } },
     signal: new AbortController().signal,
     logger: createSilentLogger(),
+    allowExecute: true,
     ...overrides,
   }
+}
+
+function workspaceTool(name: string, workspace: ToolWorkspaceAccess, execute?: ToolDefinition['execute']): RegisteredTool {
+  return registered(name, { pluginId: 'core-workspace', definition: definition({ name, workspace, ...(execute === undefined ? {} : { execute }) }) })
+}
+
+/** The core-workspace tools (by access) plus a plain tool and an MCP tool. */
+function workspaceTools(execute?: ToolDefinition['execute']): RegisteredTool[] {
+  return [
+    registered('current_time'),
+    workspaceTool('read_file', 'read', execute),
+    workspaceTool('write_file', 'write', execute),
+    workspaceTool('edit_file', 'write', execute),
+    workspaceTool('shell', 'execute', execute),
+    registered('mcp__up__a', { mcpServerId: 'up' }),
+  ]
 }
 
 describe('assembleTools', () => {
@@ -248,5 +286,59 @@ describe('assembleTools', () => {
       },
     }))
     expect(broken.tools).toEqual({})
+  })
+})
+
+describe('assembleTools with a workspace (Phase 7)', () => {
+  const servers = [{ id: 'up', status: 'connected' }] as McpServer[]
+
+  it('sends no workspace tool without a workspace (a chat without a project, or the folder unavailable)', async () => {
+    for (const workspace of [undefined, null]) {
+      const result = await assembleTools(assemblyInput({ tools: workspaceTools(), servers, ...(workspace === undefined ? {} : { workspace }) }))
+      expect(Object.keys(result.tools).sort()).toEqual(['current_time', 'mcp__up__a'])
+      expect([...result.byName.keys()].sort()).toEqual(['current_time', 'mcp__up__a'])
+      expect(result.workspace).toBeNull()
+    }
+  })
+
+  it('sends every tool with a workspace, and gives every tool the frozen { projectId, name, root }', async () => {
+    const seen = new Map<string, ToolCallContext>()
+    const execute = async (_input: unknown, context: ToolCallContext) => {
+      seen.set(context.toolCallId, context)
+      return 'ok'
+    }
+    const tools = [...workspaceTools(execute), registered('plain_tool', { definition: definition({ name: 'plain_tool', execute }) })]
+    const result = await assembleTools(assemblyInput({ tools, servers, workspace: OPEN_WORKSPACE }))
+    expect(Object.keys(result.tools).sort()).toEqual(['current_time', 'edit_file', 'mcp__up__a', 'plain_tool', 'read_file', 'shell', 'write_file'])
+    expect(result.workspace).toEqual({ projectId: 'prj_0123456789abcdef', name: 'Demo', root: '/srv/projects/demo' })
+    expect(Object.isFrozen(result.workspace)).toBe(true)
+    await result.tools.write_file!.execute!({ text: 'x' }, { ...options, toolCallId: 'call_write' })
+    await result.tools.plain_tool!.execute!({ text: 'x' }, { ...options, toolCallId: 'call_plain' })
+    expect(seen.get('call_write')?.workspace).toBe(result.workspace)
+    expect(seen.get('call_plain')?.workspace).toBe(result.workspace)
+  })
+
+  it('leaves out execute tools while the shell is switched off (HF_WORKSPACE_SHELL=0)', async () => {
+    const result = await assembleTools(assemblyInput({ tools: workspaceTools(), servers, workspace: OPEN_WORKSPACE, allowExecute: false }))
+    expect(Object.keys(result.tools).sort()).toEqual(['current_time', 'edit_file', 'mcp__up__a', 'read_file', 'write_file'])
+  })
+
+  it('applies the workspace filter before the tools-unsupported check and in mode off', async () => {
+    const onlyWorkspace = [workspaceTool('read_file', 'read')]
+    expect((await assembleTools(assemblyInput({ tools: onlyWorkspace, modelSupportsTools: false }))).unsupported).toBe(false)
+    expect((await assembleTools(assemblyInput({ tools: onlyWorkspace, modelSupportsTools: false, workspace: OPEN_WORKSPACE }))).unsupported).toBe(true)
+    const off = await assembleTools(assemblyInput({ tools: onlyWorkspace, toolMode: 'off', workspace: OPEN_WORKSPACE }))
+    expect(off.tools).toEqual({})
+    expect(off.workspace).toEqual({ projectId: 'prj_0123456789abcdef', name: 'Demo', root: '/srv/projects/demo' })
+  })
+
+  it('treats an unknown workspace access as execute', () => {
+    const odd = { workspace: 'admin' as ToolWorkspaceAccess }
+    expect(offersWorkspaceTool(odd, true, true)).toBe(true)
+    expect(offersWorkspaceTool(odd, true, false)).toBe(false)
+    expect(offersWorkspaceTool(odd, false, true)).toBe(false)
+    expect(offersWorkspaceTool({}, false, false)).toBe(true)
+    expect(offersWorkspaceTool({ workspace: 'read' }, true, false)).toBe(true)
+    expect(offersWorkspaceTool({ workspace: 'write' }, false, true)).toBe(false)
   })
 })

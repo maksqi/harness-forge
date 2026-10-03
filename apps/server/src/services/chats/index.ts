@@ -27,6 +27,12 @@
 //   `chat.deleted` (remove, removeAll: one per chat). Message operations emit nothing.
 // - Usage totals (`ChatDetail.totals`) sum the usage rows of purpose `chat` and `image` (Phase 6) of the chat, deleted
 //   versions included.
+// - Projects (Phase 7, ADR-031, W7.5): `chats.project_id` (no foreign key) is in every record, summary, search result
+//   and event. The list filters by a project or `none` (./list.ts, index `chats_project_idx`). A chat gets a project
+//   only from `create`, from `ensure` when it creates the chat, and from the move of `update`; every write of a project
+//   id checks the `projects` row inside the statement (a subquery or `WHERE EXISTS`), so a project deleted meanwhile is
+//   never referenced (the project service detaches the chats of a deleted project). A move is refused while a run holds
+//   the chat and keeps `updated_at`. Exports and imports never carry a project (./export.ts, `importChat`).
 import type { ChatDetail, ChatSettings, ChatSummary, CursorPage, HarnessUIMessage, UsageTotals } from '@harness-forge/shared'
 import type { SQL } from 'drizzle-orm'
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core'
@@ -35,6 +41,7 @@ import type { AppDeps } from '../../types.ts'
 import type { ChatCursor } from './cursor.ts'
 import type { ChatExportTree } from './export.ts'
 import type { ImportTree } from './import.ts'
+import type { ChatListFilter } from './list.ts'
 import type { ChatListQuery, ChatRecord, ChatsService, UsageInput } from './types.ts'
 import {
   CHAT_ID_PATTERN,
@@ -44,14 +51,17 @@ import {
   HarnessError,
   LIMITS,
   modelRefSchema,
+  PROJECT_ID_PATTERN,
   validationError,
 } from '@harness-forge/shared'
-import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm'
-import { chats, messages, usage } from '../../db/schema.ts'
+import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm'
+import { runConflict } from '../../chat/runs.ts'
+import { chats, messages, projects, usage } from '../../db/schema.ts'
 import { decodeChatCursor, encodeChatCursor } from './cursor.ts'
 import { databaseError, guardDb, isConstraintError } from './db-errors.ts'
 import { buildChatExport } from './export.ts'
 import { assignMessageIds, freshMessageIds, planImportTree, validateImportedMessages } from './import.ts'
+import { chatListWhere, chatPageQuery } from './list.ts'
 import {
   chatNotFound,
   chunk,
@@ -78,19 +88,13 @@ const ID_LOOKUP_CHUNK = 500
 const TOTALS_PURPOSES: readonly UsagePurpose[] = ['chat', 'image']
 
 type ChatUpdateSet = SQLiteUpdateSetSource<typeof chats>
-type ChatInsert = typeof chats.$inferInsert
+/** A chat row to insert; `projectId` may be the guarded subquery of `projectIdValue`. */
+type ChatInsert = Omit<typeof chats.$inferInsert, 'projectId'> & { projectId?: string | SQL | null }
 
 function clampLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit))
     return LIMITS.pageLimitDefault
   return Math.min(LIMITS.pageLimitMax, Math.max(1, Math.trunc(limit)))
-}
-
-/** Keyset condition "after `cursor`" for the order `updated_at` desc, `id` desc. */
-function afterCursor(cursor: ChatCursor | null) {
-  if (cursor === null)
-    return undefined
-  return or(lt(chats.updatedAt, cursor.updatedAt), and(eq(chats.updatedAt, cursor.updatedAt), lt(chats.id, cursor.id)))
 }
 
 function toRecord(row: ChatRow): ChatRecord {
@@ -169,6 +173,31 @@ function checkModelRef(value: string): string {
   return parsed.data
 }
 
+/** A project id to store (`validation_error` on `projectId` for a malformed one; the routes validate it before). */
+function checkProjectId(value: string): string {
+  if (!PROJECT_ID_PATTERN.test(value))
+    throw invalidField('projectId', 'Expected a project id "prj_<16 characters>".')
+  return value
+}
+
+/** An unknown project in `create`, `ensure` (creating) or the move of `update` (API.md 5.9: 404). */
+function projectNotFound(projectId: string): HarnessError {
+  return new HarnessError({ code: 'not_found', message: `Project ${projectId} not found.` })
+}
+
+/** SQL condition: the project exists (checked inside the write, so a project deleted meanwhile is never referenced). */
+function projectExistsSql(projectId: string): SQL {
+  return sql`EXISTS (SELECT 1 FROM ${projects} WHERE ${projects.id} = ${projectId})`
+}
+
+/**
+ * The value of `chats.project_id` in an INSERT: the project id while its row exists, else NULL (a project deleted
+ * between the check and the insert leaves the chat without a project instead of a dangling id).
+ */
+function projectIdValue(projectId: string | null): SQL | null {
+  return projectId === null ? null : sql`(SELECT ${projects.id} FROM ${projects} WHERE ${projects.id} = ${projectId})`
+}
+
 function checkSettings(value: ChatSettings): ChatSettings {
   const parsed = chatSettingsSchema.safeParse(value)
   if (!parsed.success)
@@ -238,11 +267,27 @@ export function createChatsService(deps: AppDeps): ChatsService {
     return row
   }
 
-  async function updateRow(id: string, set: ChatUpdateSet): Promise<ChatRow | undefined> {
+  /** Updates the chat row; `guard` is an extra condition checked by the same statement (nothing written when false). */
+  async function updateRow(id: string, set: ChatUpdateSet, guard?: SQL): Promise<ChatRow | undefined> {
     if (!CHAT_ID_PATTERN.test(id))
       return undefined
-    const [row] = await db.update(chats).set(set).where(eq(chats.id, id)).returning()
+    const [row] = await db.update(chats).set(set).where(and(eq(chats.id, id), guard)).returning()
     return row
+  }
+
+  /** A run holds the chat in any phase (`deps.runs`, read at call time like `isRunning`). */
+  function holdsRun(id: string): boolean {
+    try {
+      return deps.runs.hasRun(id)
+    }
+    catch {
+      return false
+    }
+  }
+
+  async function projectExists(projectId: string): Promise<boolean> {
+    const [row] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, projectId)).limit(1)
+    return row !== undefined
   }
 
   async function usageTotals(chatId: string): Promise<UsageTotals> {
@@ -337,17 +382,12 @@ export function createChatsService(deps: AppDeps): ChatsService {
     }
   }
 
-  async function listPlain(archived: boolean, after: ChatCursor | null, limit: number): Promise<CursorPage<ChatSummary>> {
-    const rows = await db
-      .select()
-      .from(chats)
-      .where(and(eq(chats.archived, archived), afterCursor(after)))
-      .orderBy(desc(chats.updatedAt), desc(chats.id))
-      .limit(limit + 1)
+  async function listPlain(filter: ChatListFilter, after: ChatCursor | null, limit: number): Promise<CursorPage<ChatSummary>> {
+    const rows = await chatPageQuery(db, filter, after, limit + 1)
     return page(rows.map(row => ({ row })), limit)
   }
 
-  async function search(q: string, archived: boolean, after: ChatCursor | null, limit: number): Promise<CursorPage<ChatSummary>> {
+  async function search(q: string, filter: ChatListFilter, after: ChatCursor | null, limit: number): Promise<CursorPage<ChatSummary>> {
     const needle = normalizeForSearch(q)
     const pattern = likeContainsPattern(needle)
     // Plain SQL with explicit aliases: inside a select list Drizzle renders columns unqualified, which would bind
@@ -363,7 +403,7 @@ export function createChatsService(deps: AppDeps): ChatsService {
       const rows = await db
         .select({ chat: chats, matchId })
         .from(chats)
-        .where(and(eq(chats.archived, archived), afterCursor(cursor)))
+        .where(chatListWhere(filter, cursor))
         .orderBy(desc(chats.updatedAt), desc(chats.id))
         .limit(SEARCH_BATCH_ROWS)
       for (const { chat, matchId: messageId } of rows) {
@@ -422,10 +462,10 @@ export function createChatsService(deps: AppDeps): ChatsService {
 
     list: (query: ChatListQuery) => guardDb(async () => {
       const limit = clampLimit(query.limit)
-      const archived = query.archived ?? false
+      const filter: ChatListFilter = { archived: query.archived ?? false, projectId: query.projectId }
       const after = query.cursor === undefined ? null : decodeChatCursor(query.cursor)
       const q = query.q?.trim() ?? ''
-      return q === '' ? listPlain(archived, after, limit) : search(q, archived, after, limit)
+      return q === '' ? listPlain(filter, after, limit) : search(q, filter, after, limit)
     }),
 
     get: id => guardDb(async () => detailOf(await requireRow(id))),
@@ -437,15 +477,27 @@ export function createChatsService(deps: AppDeps): ChatsService {
       const title = input.title === undefined ? null : requireTitle(input.title)
       const modelRef = input.modelRef === undefined ? null : checkModelRef(input.modelRef)
       const settings = input.settings === undefined ? {} : checkSettings(input.settings)
+      const projectId = input.projectId === undefined ? null : checkProjectId(input.projectId)
       const imported = await validateImportedMessages(input.messages ?? [])
       const ids = imported.map(message => message.id)
       const tree = planImportTree(ids, input.parentIds, input.activeLeafId)
       if (await findRow(id) !== undefined)
         throw conflictExists(id)
+      if (projectId !== null && !await projectExists(projectId))
+        throw projectNotFound(projectId)
       const list = assignMessageIds(imported, await existingMessageIds(ids))
 
       const now = Date.now()
-      await insertChat({ id, title, titleSource: title === null ? null : 'user', modelRef, settings, createdAt: now, updatedAt: now }, list, tree, now)
+      await insertChat({
+        id,
+        title,
+        titleSource: title === null ? null : 'user',
+        modelRef,
+        settings,
+        projectId: projectIdValue(projectId),
+        createdAt: now,
+        updatedAt: now,
+      }, list, tree, now)
       const row = await requireRow(id)
       const detail = await detailOf(row)
       deps.events.emit('chat.created', toSummary(row))
@@ -466,9 +518,22 @@ export function createChatsService(deps: AppDeps): ChatsService {
         set.modelRef = patch.modelRef === null ? null : checkModelRef(patch.modelRef)
       if (patch.settings !== undefined)
         set.settings = mergeSettings(patch.settings)
-      const row = Object.keys(set).length === 0 ? await findRow(id) : await updateRow(id, set)
-      if (row === undefined)
+      // The move (ADR-031): never while a run holds the chat (the run keeps the folder it opened); the project is checked
+      // by the UPDATE itself, so a missing one changes nothing (the other fields of the patch included).
+      const projectId = patch.projectId === undefined || patch.projectId === null ? patch.projectId : checkProjectId(patch.projectId)
+      let guard: SQL | undefined
+      if (projectId !== undefined) {
+        if (holdsRun(id))
+          throw runConflict(id)
+        set.projectId = projectId
+        guard = projectId === null ? undefined : projectExistsSql(projectId)
+      }
+      const row = Object.keys(set).length === 0 ? await findRow(id) : await updateRow(id, set, guard)
+      if (row === undefined) {
+        if (projectId !== undefined && projectId !== null && await findRow(id) !== undefined)
+          throw projectNotFound(projectId)
         throw chatNotFound(id)
+      }
       return emitUpdated(row)
     }),
 
@@ -632,10 +697,15 @@ export function createChatsService(deps: AppDeps): ChatsService {
         throw invalidField('id', 'Expected a lowercase uuidv7 chat id.')
       const modelRef = init.modelRef === undefined ? undefined : checkModelRef(init.modelRef)
       const settings = init.settings === undefined ? undefined : checkSettings(init.settings)
+      const projectId = init.projectId === undefined ? null : checkProjectId(init.projectId)
+      // The project applies only when this call creates the chat: an unknown one is `not_found` before the chat row
+      // exists; an existing chat keeps its project whatever `init.projectId` says.
+      if (projectId !== null && await findRow(id) === undefined && !await projectExists(projectId))
+        throw projectNotFound(projectId)
       const now = Date.now()
       const [created] = await db
         .insert(chats)
-        .values({ id, modelRef: modelRef ?? null, settings: settings ?? {}, projectId: init.projectId ?? null, createdAt: now, updatedAt: now })
+        .values({ id, modelRef: modelRef ?? null, settings: settings ?? {}, projectId: projectIdValue(projectId), createdAt: now, updatedAt: now })
         .onConflictDoNothing({ target: chats.id })
         .returning()
       if (created !== undefined) {

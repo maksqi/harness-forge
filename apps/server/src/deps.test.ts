@@ -186,22 +186,12 @@ describe('phase 6 services (P6-0b skeleton, implemented in P6-A)', () => {
   })
 })
 
-describe('phase 7 skeleton (P7-0b: projects stub, maintenance, keys)', () => {
-  it('wires projects, maintenance and keys; the project stubs answer not_implemented', async () => {
+describe('phase 7 services (projects, maintenance, keys)', () => {
+  it('wires projects, maintenance and keys (the project service is real since W7.1)', async () => {
     const t = await createTestApp({ start: false })
     cleanups.push(() => t.close())
     expect(SERVICE_NAMES).toEqual(expect.arrayContaining(['projects', 'maintenance', 'keys']))
-    const calls: Array<[string, () => Promise<unknown>]> = [
-      ['projects.list', () => t.deps.projects.list()],
-      ['projects.get', () => t.deps.projects.get('prj_AAAAAAAAAAAAAAAA')],
-      ['projects.create', () => t.deps.projects.create({ name: 'Demo', path: t.env.paths.workspaces })],
-      ['projects.update', () => t.deps.projects.update('prj_AAAAAAAAAAAAAAAA', { name: 'Renamed' })],
-      ['projects.remove', () => t.deps.projects.remove('prj_AAAAAAAAAAAAAAAA')],
-      ['projects.browse', () => t.deps.projects.browse()],
-      ['projects.openWorkspace', () => t.deps.projects.openWorkspace('prj_AAAAAAAAAAAAAAAA')],
-    ]
-    for (const [name, call] of calls)
-      await expect(call(), name).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(t.deps.projects.list()).resolves.toEqual([])
     expect(t.deps.maintenance.current()).toBeNull()
     await expect(t.deps.maintenance.exclusive('import', async () => 'done')).resolves.toBe('done')
     expect(typeof t.deps.keys.status).toBe('function')

@@ -9,7 +9,9 @@
 // `ctx.images.generate(o)` (plugin API 1.1.0) checks `o`, then calls the image service with `o.modelRef` (the service
 // falls back to the `imageModelRef` setting), `n` (default 1), the aspect ratio, `o.chatId` (usage row) and a signal
 // that `ctx.signal` and `o.signal` both abort; it maps the stored images to `GeneratedImageFile`s (`costUsd` omitted
-// when unknown) and fails with `provider_error` when the provider returned no image that could be stored.
+// when unknown), passes `modelName` (plugin API 1.2.0: the catalog name, else the model id) and fails with
+// `provider_error` when the provider returned no image that could be stored. An unknown provider is
+// `provider_not_configured` (plugin API 1.2.0; the resolver's error).
 import type {
   CommandDefinition,
   Disposable,
@@ -51,6 +53,7 @@ import {
 import { generateText, jsonSchema, tool } from 'ai'
 import { z } from 'zod'
 import { DisposableStore, toDisposable } from '../registry/disposable.ts'
+import { resultModelName } from '../services/images/generation.ts'
 
 /** The host's copies of the libraries a code plugin needs (`ctx.ai`, PLUGINS.md 8). */
 export const HOST_AI: HostAi = Object.freeze({
@@ -85,8 +88,8 @@ export const NO_STORED_IMAGE_MESSAGE = 'The image model returned no image that c
 export function toImageGenerateResult(result: ImageGenerationResult): ImageGenerateResult {
   return {
     modelRef: result.modelRef,
-    // Plugin API 1.2.0 placeholder (the model id) until the image service reports the catalog name (W7.6).
-    modelName: safeParseModelRef(result.modelRef)?.modelId ?? result.modelRef,
+    // Plugin API 1.2.0: the catalog name the image service reports, else the model id of `modelRef`.
+    modelName: resultModelName(result),
     images: result.images.map(({ file, url }) => ({ fileId: file.id, url, mediaType: file.mime, name: file.name, size: file.size })),
     ...(result.costUsd === null ? {} : { costUsd: result.costUsd }),
     ...(result.revisedPrompt === undefined ? {} : { revisedPrompt: result.revisedPrompt }),

@@ -10,7 +10,7 @@ import { createMemoryLogger } from '../logger.ts'
 import { createRegistryCore } from '../registry/index.ts'
 import { createRedactor } from '../security/redact.ts'
 import { createMemorySecretStore } from '../testing/fakes.ts'
-import { createPluginRuntime, HOST_AI, NO_STORED_IMAGE_MESSAGE } from './context.ts'
+import { createPluginRuntime, HOST_AI, NO_STORED_IMAGE_MESSAGE, toImageGenerateResult } from './context.ts'
 import { guardCall } from './guard.ts'
 import { createPluginStorage } from './state.ts'
 
@@ -249,6 +249,23 @@ describe('plugin context', () => {
       })
       expect(imageCalls[0]).toEqual({ prompt: 'a lighthouse', n: 1, signal: expect.any(AbortSignal), chatId: null, messageId: null })
       expect('modelRef' in imageCalls[0]!).toBe(false)
+    })
+
+    it('passes the model name of the image service (plugin API 1.2.0), else the model id', async () => {
+      const named = await setup(BASE_MANIFEST, {}, async () => imageResult([storedImage(1)], { modelRef: 'openai:gpt-image-1', modelName: 'GPT Image 1' }))
+      expect(await named.runtime.ctx.images.generate({ prompt: 'a fox' })).toMatchObject({ modelRef: 'openai:gpt-image-1', modelName: 'GPT Image 1' })
+      const blank = await setup(BASE_MANIFEST, {}, async () => imageResult([storedImage(1)], { modelRef: 'openai:gpt-image-1', modelName: '  ' }))
+      expect((await blank.runtime.ctx.images.generate({ prompt: 'a fox' })).modelName).toBe('gpt-image-1')
+      expect(toImageGenerateResult(imageResult([storedImage(1)], { modelName: 'Mock Image' })).modelName).toBe('Mock Image')
+      expect(toImageGenerateResult(imageResult([storedImage(1)])).modelName).toBe('image')
+    })
+
+    it('passes provider_not_configured of the resolver through (plugin API 1.2.0: an unknown provider)', async () => {
+      const unknown = new HarnessError({ code: 'provider_not_configured', message: 'The provider "nope" is not available. Pick another model or install the provider.', providerId: 'nope', action: 'configure-provider' })
+      const failing = await setup(BASE_MANIFEST, {}, async () => {
+        throw unknown
+      })
+      await expect(failing.runtime.ctx.images.generate({ prompt: 'x', modelRef: 'nope:paint' })).rejects.toBe(unknown)
     })
 
     it('aborts the generation with ctx.signal and with the given signal', async () => {

@@ -10,6 +10,7 @@ import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
 import { createMockApi } from '~/utils/testing/mock-api'
 import ChatMessage from './ChatMessage.vue'
+import ToolPart from './parts/ToolPart.vue'
 
 const mock = vi.hoisted(() => ({ api: null as unknown }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api, useApiFetch: () => vi.fn() }))
@@ -226,6 +227,16 @@ describe('chatMessage: assistant', () => {
     const { wrapper, events } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
     await wrapper.get(`[data-testid="${testIds.toolApprovalAllow}"]`).trigger('click')
     expect(events.approval).toEqual([[{ id: 'appr_1', approved: true, toolName: 'mock_approval_tool', alwaysAllow: false }]])
+  })
+
+  it('passes "Accept all edits in this chat" up unchanged (the session switches the mode)', () => {
+    const message = assistant({
+      parts: [{ type: 'tool-edit_file', toolCallId: 'c1', state: 'approval-requested', input: { path: 'a.ts', old_string: 'a', new_string: 'b' }, approval: { id: 'appr_1' } }],
+    })
+    const { wrapper, events } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
+    const decision = { id: 'appr_1', approved: true, toolName: 'edit_file', alwaysAllow: false, acceptEdits: true }
+    wrapper.getComponent(ToolPart).vm.$emit('approval', decision)
+    expect(events.approval).toEqual([[decision]])
   })
 })
 

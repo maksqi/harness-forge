@@ -7,6 +7,9 @@
 // (`validation_error`), the factory (`model_not_found` for images, `validation_error` for voice) and the guarded
 // factory call (5 s; a throw, a timeout or a value that is not a model instance is a `plugin_error`). `resolveModel`
 // refuses image models. The credential ping picks chat models only.
+//
+// Phase 7 (ADR-028 consequence): a model ref whose provider is not registered is `provider_not_configured` (action
+// `configure-provider`, `unknownProviderMessage`) in every resolver, as a disabled or unconfigured provider.
 import type { ProviderDefinition, ProviderRuntime } from '@harness-forge/plugin-sdk'
 import type { CatalogModel, CredentialState, HarnessErrorInit, IconRef, ProviderStatus, ProviderSummary, ProviderTestResult } from '@harness-forge/shared'
 import type { MediaModelKind } from '../catalog/classify.ts'
@@ -120,6 +123,14 @@ function isMediaModel(value: unknown): boolean {
 
 function isFactoryTimeout(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'TimeoutError'
+}
+
+/**
+ * The message of a model ref whose provider is not registered (Phase 7): the plugin was removed or disabled, or the ref
+ * is wrong. Answered as `provider_not_configured` (action `configure-provider`) by every resolver.
+ */
+export function unknownProviderMessage(providerId: string): string {
+  return `The provider "${providerId}" is not available. Pick another model or install the provider.`
 }
 
 /** The `validation_error` of a model used for the wrong purpose (the issue sits on `modelRef`). */
@@ -467,15 +478,17 @@ export function createProviderServiceWith(deps: AppDeps, options: ProviderServic
   // ---------- resolution ----------
 
   /**
-   * The checks every resolver shares, in order: the ref (`validation_error`), a registered provider (`not_found`), an
-   * enabled provider and its required credentials (`provider_not_configured`, before any network call), the catalog
-   * entry (`model_not_found`, action `refresh-models`).
+   * The checks every resolver shares, in order: the ref (`validation_error`), a registered provider, an enabled
+   * provider and its required credentials (`provider_not_configured`, action `configure-provider`, before any network
+   * call), the catalog entry (`model_not_found`, action `refresh-models`). Phase 7 (ADR-028 consequence, plugin API
+   * 1.2.0): an unknown provider is `provider_not_configured` too (before: `not_found`), so the media routes, `ctx.images`,
+   * `generate_image`, `ctx.models.resolve` and chats all answer 400 with the same action.
    */
   async function resolveBase(modelRef: string): Promise<{ base: ResolvedModelBase, credentials: ResolvedCredentials }> {
     const { providerId, modelId } = parseModelRef(modelRef)
     const provider = registered(providerId)
     if (provider === undefined)
-      throw new HarnessError({ code: 'not_found', message: `Unknown provider "${providerId}".`, providerId })
+      throw notConfigured(providerId, unknownProviderMessage(providerId))
     if (!isEnabledRow(await configs.get(providerId)))
       throw notConfigured(providerId, `The provider "${provider.definition.name}" is disabled.`)
     const credentials = await deps.credentials.resolve(providerId)

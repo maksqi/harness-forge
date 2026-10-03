@@ -14,11 +14,13 @@
 // same sha256 and type is returned as is (its blob written again when missing), else a new row is inserted. Saves of the
 // same bytes are serialized, so they give one row even when they run concurrently.
 //
-// Orphaned file cleanup (ADR-035, W7.8): `sweep`, `pinnedIds` and the store gate (`withSharedGate`,
-// `withExclusiveGate`) are stubs that throw `not_implemented` until W7.8 implements them (C16 compile fix).
+// Orphaned file cleanup (ADR-035, W7.8): `upload`, `importFile` and `saveGenerated` hold the store gate (./gate.ts)
+// shared around their blob write + row insert and pin the id they return (./pins.ts, in memory for the 24 h grace
+// period); `sweep` (./sweep.ts) and `purge` hold it exclusively. `sweep` snapshots the pins inside the gate, so a row a
+// run reused before the sweep started is never removed.
 import type { FileRef } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
-import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, GeneratedFileInput, StoredFile } from './types.ts'
+import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, FileSweepInput, FileSweepResult, GeneratedFileInput, StoredFile } from './types.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -26,17 +28,21 @@ import { Readable } from 'node:stream'
 import { createFileId, FILE_ID_PATTERN, HarnessError, LIMITS, SHA256_HEX_PATTERN, validationError } from '@harness-forge/shared'
 import { asc, eq } from 'drizzle-orm'
 import { files } from '../../db/schema.ts'
-import { rejectsNotImplemented, throwsNotImplemented } from '../../not-implemented.ts'
 import { guardDb, isConstraintError } from '../chats/db-errors.ts'
+import { createStoreGate } from './gate.ts'
 import { checkGeneratedFile, generatedFileName } from './generated.ts'
 import { sanitizeFileName } from './names.ts'
+import { createFilePins } from './pins.ts'
 import { resolveUploadType } from './sniff.ts'
+import { sweepStore } from './sweep.ts'
+import { FILE_URL_PREFIX, fileUrl } from './urls.ts'
 
-/** URL path of a stored file (the `url` of UI `file` parts). */
-export const FILE_URL_PREFIX = '/api/files/'
+export { FILE_CLEANUP_GRACE_MS } from './pins.ts'
+export { FILE_URL_PREFIX, fileUrl } from './urls.ts'
 
-export function fileUrl(id: string): string {
-  return `${FILE_URL_PREFIX}${id}`
+export interface FilesServiceOptions {
+  /** Clock of new rows, pins and the sweep's temp file cutoff (default `Date.now`; tests). */
+  now?: () => number
 }
 
 export function payloadTooLarge(): HarnessError {
@@ -66,9 +72,13 @@ function validTimestamp(value: number): number {
   return Number.isSafeInteger(value) && value >= 0 ? value : Date.now()
 }
 
-export function createFilesService(deps: AppDeps): FilesService {
+export function createFilesService(deps: AppDeps, options: FilesServiceOptions = {}): FilesService {
   const { db } = deps
   const root = deps.env.paths.files
+  const now = options.now ?? Date.now
+  const gate = createStoreGate()
+  const pins = createFilePins(now)
+  const logger = deps.logger.child({ component: 'files' })
 
   /** `<root>/<aa>/<sha256>`; null for a malformed hash (a row that was not written by this service). */
   function blobPath(sha256: string): string | null {
@@ -143,6 +153,18 @@ export function createFilesService(deps: AppDeps): FilesService {
       await rm(join(root, name), { recursive: true, force: true })
   }
 
+  /**
+   * Runs a blob write + row insert holding the store gate shared and pins the id it produced before the gate is
+   * released, so a sweep that starts afterwards sees the pin.
+   */
+  async function withPinnedGate<T>(operation: () => Promise<T>, idOf: (result: T) => string): Promise<T> {
+    return gate.shared(async () => {
+      const result = await operation()
+      pins.pin(idOf(result))
+      return result
+    })
+  }
+
   async function importFile(input: FileImportInput): Promise<FileImportResult> {
     const data = input.data
     if (data.byteLength > LIMITS.uploadBytes)
@@ -153,16 +175,18 @@ export function createFilesService(deps: AppDeps): FilesService {
     const type = resolveUploadType(input.mime, input.name, data)
     if (!type.ok)
       throw invalidImport(type.reason, 'mime')
-    const same = await guardDb(() => db.select().from(files).where(eq(files.sha256, sha256)).orderBy(asc(files.createdAt), asc(files.id)))
-    // Written again when a row survived without its blob (a no-op when the blob is there).
-    await storeBlob(sha256, data)
-    const reuse = same.find(row => row.id === input.preferredId) ?? same[0]
-    if (reuse !== undefined)
-      return { file: reuse, reused: true }
-    const row = { sha256, name: sanitizeFileName(input.name, type.mime), mime: type.mime, size: data.byteLength, createdAt: validTimestamp(input.createdAt) }
-    const keepId = FILE_ID_PATTERN.test(input.preferredId) && await insertRowWithId(input.preferredId, row)
-    const id = keepId ? input.preferredId : await insertRow(row)
-    return { file: { id, ...row }, reused: false }
+    return withPinnedGate(async () => {
+      const same = await guardDb(() => db.select().from(files).where(eq(files.sha256, sha256)).orderBy(asc(files.createdAt), asc(files.id)))
+      // Written again when a row survived without its blob (a no-op when the blob is there).
+      await storeBlob(sha256, data)
+      const reuse = same.find(row => row.id === input.preferredId) ?? same[0]
+      if (reuse !== undefined)
+        return { file: reuse, reused: true }
+      const row = { sha256, name: sanitizeFileName(input.name, type.mime), mime: type.mime, size: data.byteLength, createdAt: validTimestamp(input.createdAt) }
+      const keepId = FILE_ID_PATTERN.test(input.preferredId) && await insertRowWithId(input.preferredId, row)
+      const id = keepId ? input.preferredId : await insertRow(row)
+      return { file: { id, ...row }, reused: false }
+    }, result => result.file.id)
   }
 
   /** The tail of the pending `saveGenerated` calls per sha256 (removed once the last one settles). */
@@ -185,23 +209,32 @@ export function createFilesService(deps: AppDeps): FilesService {
     const mime = checkGeneratedFile(input.data, input.mediaType)
     const data = input.data
     const sha256 = createHash('sha256').update(data).digest('hex')
-    return withContentLock(sha256, async () => {
+    // The content lock is taken before the gate (never the other way round): the gate is held only for the write
+    // itself, never while this save waits for an earlier save of the same bytes.
+    return withContentLock(sha256, () => withPinnedGate(async () => {
       const same = await guardDb(() => db.select().from(files).where(eq(files.sha256, sha256)).orderBy(asc(files.createdAt), asc(files.id)))
       const reuse = same.find(row => row.mime === mime)
       // Written again when a reused row lost its blob (a no-op when the blob is there).
       await storeBlob(sha256, data)
       if (reuse !== undefined)
         return reuse
-      const row = { sha256, name: generatedFileName(input.name, mime), mime, size: data.byteLength, createdAt: Date.now() }
+      const row = { sha256, name: generatedFileName(input.name, mime), mime, size: data.byteLength, createdAt: now() }
       return { id: await insertRow(row), ...row }
-    })
+    }, file => file.id))
   }
 
   async function purge(): Promise<FilePurgeResult> {
-    // Rows first: an interrupted purge leaves orphan blobs (removed by the next purge), never rows without blobs.
-    const rows = await guardDb(() => db.delete(files).returning({ size: files.size }))
-    await removeBlobs()
-    return { files: rows.length, bytes: rows.reduce((total, row) => total + row.size, 0) }
+    return gate.exclusive(async () => {
+      // Rows first: an interrupted purge leaves orphan blobs (removed by the next purge), never rows without blobs.
+      const rows = await guardDb(() => db.delete(files).returning({ size: files.size }))
+      await removeBlobs()
+      return { files: rows.length, bytes: rows.reduce((total, row) => total + row.size, 0) }
+    })
+  }
+
+  async function sweep(input: FileSweepInput): Promise<FileSweepResult> {
+    // The gate is requested before anything else, so uploads that arrive later wait for the sweep.
+    return gate.exclusive(() => sweepStore({ db, root, pinned: pins.snapshot(), now: now(), logger }, input))
   }
 
   async function get(id: string): Promise<StoredFile | null> {
@@ -231,8 +264,10 @@ export function createFilesService(deps: AppDeps): FilesService {
         throw validationError([{ path: ['file'], message: type.reason, code: 'custom' }], type.reason)
       const name = sanitizeFileName(file.name, type.mime)
       const sha256 = createHash('sha256').update(bytes).digest('hex')
-      await storeBlob(sha256, bytes)
-      const id = await insertRow({ sha256, name, mime: type.mime, size: bytes.byteLength, createdAt: Date.now() })
+      const id = await withPinnedGate(async () => {
+        await storeBlob(sha256, bytes)
+        return insertRow({ sha256, name, mime: type.mime, size: bytes.byteLength, createdAt: now() })
+      }, rowId => rowId)
       return { id, name, mime: type.mime, size: bytes.byteLength, url: fileUrl(id) }
     },
 
@@ -289,12 +324,12 @@ export function createFilesService(deps: AppDeps): FilesService {
 
     saveGenerated,
 
-    sweep: rejectsNotImplemented('The file sweep'),
+    sweep,
 
-    pinnedIds: throwsNotImplemented('The file pins'),
+    pinnedIds: () => pins.snapshot(),
 
-    withSharedGate: rejectsNotImplemented('The file store gate'),
+    withSharedGate: operation => gate.shared(operation),
 
-    withExclusiveGate: rejectsNotImplemented('The file store gate'),
+    withExclusiveGate: operation => gate.exclusive(operation),
   }
 }

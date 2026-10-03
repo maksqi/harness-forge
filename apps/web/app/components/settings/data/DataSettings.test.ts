@@ -1,4 +1,4 @@
-import type { DataDeleteResult, DataImportResult, DataSummary } from '@harness-forge/shared'
+import type { DataDeleteResult, DataImportResult, DataSummary, KeyRotationResult } from '@harness-forge/shared'
 import type { VueWrapper } from '@vue/test-utils'
 import type { ComputedRef } from 'vue'
 import type { MockApi } from '~/utils/testing/mock-api'
@@ -14,12 +14,12 @@ import { useChatsStore } from '~/stores/chats'
 import { useSettingsStore } from '~/stores/settings'
 import { downloadResponse } from '~/utils/download'
 import { testIds } from '~/utils/testids'
-import { authStatus, chatId } from '~/utils/testing/fixtures'
+import { authStatus, chatId, dataCleanupPreview, keyStatus } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { BUSY_MESSAGE } from './data'
 import DataSettings from './DataSettings.vue'
 
-const mocks = vi.hoisted(() => ({ api: null as unknown, useHead: vi.fn(), navigateTo: vi.fn() }))
+const mocks = vi.hoisted(() => ({ api: null as unknown, useHead: vi.fn(), navigateTo: vi.fn(), sharesMounts: 0 }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mocks.api }))
 // SettingsPage sets the tab title and the danger zone navigates through the settings nuxt-imports module ('#imports'
 // does not resolve in Vitest).
@@ -30,14 +30,17 @@ const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }))
 vi.mock('vue-sonner', () => ({ toast: Object.assign(vi.fn(), toasts) }))
 
 // The Shared links section is W5.6's (tested in SharesSettingsSection.test.ts); a stand-in with its root test id keeps
-// these tests independent of the share requests.
+// these tests independent of the share requests. It counts its mounts (a key rotation remounts it).
 vi.mock('~/components/share/SharesSettingsSection.vue', async () => {
   const vue = await import('vue')
   const ids = await import('~/utils/testids')
   return {
     default: vue.defineComponent({
       name: 'SharesSettingsSection',
-      setup: () => () => vue.h('div', { 'data-testid': ids.testIds.sharesSection }),
+      setup: () => {
+        mocks.sharesMounts += 1
+        return () => vue.h('div', { 'data-testid': ids.testIds.sharesSection })
+      },
     }),
   }
 })
@@ -49,7 +52,7 @@ const NuxtLink = defineComponent({
 
 const passwordSet = authStatus({ enabled: true, authenticated: true, source: 'settings', freshUntil: null })
 const freshNeeded = () => new HarnessError({ code: 'forbidden', message: 'Log in again to continue.', action: 'login' })
-const busy = () => new HarnessError({ code: 'conflict', message: 'Another import or delete-all is running.', details: { reason: 'busy' } })
+const busy = () => new HarnessError({ code: 'conflict', message: 'Another data task is running. Try again when it finishes.', details: { reason: 'busy' } })
 
 function summary(overrides: Partial<DataSummary> = {}): DataSummary {
   return { chats: 12, archivedChats: 2, messages: 348, files: 18, fileBytes: 25_480_000, ...overrides }
@@ -81,6 +84,7 @@ beforeEach(() => {
   mocks.api = api
   mocks.useHead.mockReset()
   mocks.navigateTo.mockReset()
+  mocks.sharesMounts = 0
   toasts.success.mockReset()
   toasts.error.mockReset()
   vi.mocked(downloadResponse).mockClear()
@@ -89,6 +93,7 @@ beforeEach(() => {
   pinia = createPinia()
   setActivePinia(pinia)
   api.data.summary.mockResolvedValue(summary())
+  api.keys.get.mockResolvedValue(keyStatus({ secrets: 2, shares: 1 }))
   api.chats.list.mockResolvedValue({ items: [], nextCursor: null })
   api.settings.get.mockResolvedValue({ ...DEFAULT_SETTINGS })
   // The components use these stores through the same pinia; the spies call through to the mocked API.
@@ -181,7 +186,26 @@ describe('dataSettings', () => {
     expect(root.find(`[data-testid="${testIds.sharesSection}"]`).exists()).toBe(true)
     expect(wrapper.findComponent(SharesSettingsSection).exists()).toBe(true)
     const headings = wrapper.findAll('h2').map(heading => heading.text())
-    expect(headings).toEqual(['Export', 'Import', 'Danger zone'])
+    expect(headings).toEqual(['Export', 'Import', 'Storage cleanup', 'Encryption key', 'Danger zone'])
+  })
+
+  it('orders the sections: summary, Export, Import, Storage cleanup, Shared links, Encryption key, Danger zone', async () => {
+    const wrapper = await mountData()
+    const sections = [...wrapper.element.children].map(child => (
+      child.getAttribute('data-testid') ?? child.querySelector('h2')?.textContent?.trim() ?? child.tagName
+    ))
+    expect(sections).toEqual([
+      'DIV',
+      'Export',
+      'Import',
+      testIds.dataCleanupSection,
+      testIds.sharesSection,
+      testIds.dataKeySection,
+      'Danger zone',
+    ])
+    expect(wrapper.element.children[0]?.querySelector(`[data-testid="${testIds.dataSummary}"]`)).not.toBeNull()
+    expect(api.keys.get).toHaveBeenCalledTimes(1)
+    expect(api.data.cleanupPreview).not.toHaveBeenCalled()
   })
 
   it('shows the summary line', async () => {
@@ -541,6 +565,95 @@ describe('delete all', () => {
     await mountData()
     await click(byTestId(testIds.dataDelete))
     expect(byTestId(testIds.dataDeleteDialog)?.textContent).toContain('This deletes every chat and message.')
+  })
+
+  it('says that projects are kept (Phase 7)', async () => {
+    await mountData()
+    expect(byTestId(testIds.dataDelete)?.closest('section')?.textContent)
+      .toContain('API keys, plugins, projects and settings are kept.')
+  })
+})
+
+describe('storage cleanup and encryption key on the page', () => {
+  it('reloads the summary line after a cleanup', async () => {
+    await mountData()
+    expect(api.data.summary).toHaveBeenCalledTimes(1)
+    api.data.cleanupPreview
+      .mockResolvedValueOnce(dataCleanupPreview({ files: 6, fileBytes: 6_291_456 }))
+      .mockResolvedValueOnce(dataCleanupPreview())
+    api.data.cleanup.mockResolvedValue({ files: 6, fileBytes: 6_291_456, blobs: 6, diskBytes: 6_291_456, tempFiles: 0, ranAt: Date.now() })
+    api.data.summary.mockResolvedValue(summary({ files: 12, fileBytes: 19_188_544 }))
+
+    await click(byTestId(testIds.dataCleanupCheck))
+    expect(byTestId(testIds.dataCleanupSummary)?.textContent).toContain('6 files · 6 MB can be removed')
+    await click(byTestId(testIds.dataCleanupRun))
+    await click(byTestId(testIds.dataCleanupConfirm))
+
+    expect(toasts.success).toHaveBeenCalledWith('Removed 6 files (6 MB)')
+    expect(api.data.summary).toHaveBeenCalledTimes(2)
+    expect(byTestId(testIds.dataSummary)?.textContent).toContain('12 files, 18 MB')
+    expect(byTestId(testIds.dataCleanupSummary)?.textContent).toContain('No unused files.')
+  })
+
+  it('reloads the summary line and Shared links after a key rotation', async () => {
+    const result: KeyRotationResult = {
+      keyVersion: 2,
+      rotatedAt: Date.now(),
+      secrets: 2,
+      skippedSecrets: 0,
+      shares: 1,
+      approvalsExpired: 0,
+      chats: 0,
+      runsStopped: 0,
+    }
+    api.keys.rotate.mockResolvedValue(result)
+    await mountData()
+    expect(mocks.sharesMounts).toBe(1)
+
+    await click(byTestId(testIds.dataKeyRotate))
+    expect(byTestId(testIds.keyRotateDialog)?.textContent).toContain('Every share link changes (1 link)')
+    await type(testIds.keyRotateConfirm, 'ROTATE')
+    await click(byTestId(testIds.keyRotateSubmit))
+
+    expect(api.keys.rotate).toHaveBeenCalledWith({ body: { confirm: 'ROTATE' } })
+    expect(toasts.success).toHaveBeenCalledWith('Master key rotated', { description: '2 secrets encrypted again · 0 approvals expired' })
+    expect(api.keys.get).toHaveBeenCalledTimes(2)
+    expect(api.data.summary).toHaveBeenCalledTimes(2)
+    expect(mocks.sharesMounts).toBe(2)
+    expect(allByTestId(testIds.sharesSection)).toHaveLength(1)
+  })
+
+  it('asks for the password before a rotation when the session is not fresh', async () => {
+    useAuthStore().status = passwordSet
+    api.keys.rotate.mockResolvedValue({
+      keyVersion: 2,
+      rotatedAt: Date.now(),
+      secrets: 2,
+      skippedSecrets: 0,
+      shares: 1,
+      approvalsExpired: 0,
+      chats: 0,
+      runsStopped: 0,
+    })
+    await mountData()
+    await click(byTestId(testIds.dataKeyRotate))
+    await type(testIds.keyRotateConfirm, 'ROTATE')
+    await click(byTestId(testIds.keyRotateSubmit))
+
+    // One prompt, the rotate dialog's (the danger zone's prompt stays closed).
+    expect(allByTestId(testIds.confirmPasswordDialog)).toHaveLength(1)
+    expect(byTestId(testIds.confirmPasswordDialog)?.textContent).toContain('Rotating the master key needs your password.')
+    expect(api.keys.rotate).not.toHaveBeenCalled()
+    await submitPassword('correct-horse')
+    expect(api.keys.rotate).toHaveBeenCalledTimes(1)
+    expect(byTestId(testIds.keyRotateDialog)).toBeNull()
+  })
+
+  it('shows the busy toast when a cleanup meets another data task', async () => {
+    api.data.cleanupPreview.mockRejectedValue(busy())
+    await mountData()
+    await click(byTestId(testIds.dataCleanupCheck))
+    expect(toasts.error).toHaveBeenCalledWith('Another data task is running. Try again when it finishes.')
   })
 })
 

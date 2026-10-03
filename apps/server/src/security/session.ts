@@ -5,6 +5,10 @@
 // the password login of the session chain (fresh auth, ADR-017); `epoch` must equal the internal setting
 // `_auth.sessionEpoch`, which `revokeAll()` increments (password change or removal ends every session).
 // Cookie attributes and the rolling re-issue live in the HTTP layer (`http/middleware/session-auth.ts`).
+//
+// Key rotation (Phase 7, ADR-034, W7.7-T3): the `session` subkey is cached together with `keyring.keyVersion` and
+// derived again when the version changes, so every token signed before a rotation stops verifying at once (the
+// rotating caller gets a new cookie from `POST /keys/rotate`).
 import type { AppDeps } from '../types.ts'
 import type { SessionPayload, SessionService } from './types.ts'
 import { Buffer } from 'node:buffer'
@@ -40,9 +44,17 @@ function parsePayload(encoded: string): SessionPayload | null {
 }
 
 export function createSessionService(deps: AppDeps): SessionService {
-  // Resolved on first use: the keyring may not be usable while the server boots without a password.
-  let key: Uint8Array | null = null
-  const sessionKey = (): Uint8Array => (key ??= deps.keyring.subkey('session'))
+  // Resolved on first use (the keyring may not be usable while the server boots without a password) and again after a
+  // key rotation: the cached subkey is valid only for the key version it was read at.
+  let key: { version: number, value: Uint8Array } | null = null
+  function sessionKey(): Uint8Array {
+    const version = deps.keyring.keyVersion
+    if (key === null || key.version !== version) {
+      key?.value.fill(0)
+      key = { version, value: deps.keyring.subkey('session') }
+    }
+    return key.value
+  }
 
   const sign = (data: string): string => createHmac('sha256', sessionKey()).update(data).digest('base64url')
 

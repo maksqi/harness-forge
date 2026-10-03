@@ -7,9 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { useChatsStore } from '~/stores/chats'
+import { useProjectsStore } from '~/stores/projects'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
-import { catalogModel, chatId, chatSummary, providerSummary } from '~/utils/testing/fixtures'
+import { catalogModel, chatId, chatSummary, projectId, projectSummary, providerSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { GLOBAL_SHORTCUT_IDS } from './chat-nav/global-shortcuts'
@@ -251,6 +252,44 @@ describe('commandPalette', () => {
     await settle()
     expect(api.settings.update).toHaveBeenCalledWith({ body: { defaultModelRef: 'anthropic:claude-sonnet-5' } })
     expect(mocks.toast.success).toHaveBeenCalledWith('Default model set to Claude Sonnet 5')
+  })
+
+  it('filters the chat list from the Projects section and links Add project… to the settings dialog', async () => {
+    api.projects.list.mockResolvedValue({ items: [projectSummary({ id: projectId(1), name: 'Website' })] })
+    await openPalette()
+    expect(api.projects.list).toHaveBeenCalledTimes(1)
+    expect(headings()).not.toContain('Projects')
+    await type('project')
+    expect(headings()).toContain('Projects')
+    expect(item('project-filter-all').dataset.checked).toBe('true')
+
+    api.chats.list.mockResolvedValueOnce({ items: [], nextCursor: null })
+    item(`project-filter-${projectId(1)}`).click()
+    await settle()
+    expect(useUiStore().paletteOpen).toBe(false)
+    expect(useChatsStore().projectFilter).toBe(projectId(1))
+    expect(api.chats.list).toHaveBeenLastCalledWith({ query: { limit: 50, projectId: projectId(1) } })
+
+    useUiStore().openPalette()
+    await settle()
+    await type('add project')
+    item('project-add').click()
+    await settle()
+    expect(mocks.navigateTo).toHaveBeenLastCalledWith('/settings/projects?add=1')
+  })
+
+  it('moves the open chat to a project', async () => {
+    api.projects.list.mockResolvedValue({ items: [projectSummary({ id: projectId(1), name: 'Website' })] })
+    await openPalette()
+    useUiStore().setActiveChat(chatId(2))
+    await type('move')
+    expect(itemValues()).toEqual([`project-move-${projectId(1)}`])
+    api.chats.update.mockResolvedValueOnce({ ...recent[1]!, projectId: projectId(1) })
+    item(`project-move-${projectId(1)}`).click()
+    await settle()
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(2) }, body: { projectId: projectId(1) } })
+    expect(useUiStore().paletteOpen).toBe(false)
+    expect(useProjectsStore().byId(projectId(1))?.name).toBe('Website')
   })
 
   it('registers the global shortcuts while mounted', async () => {

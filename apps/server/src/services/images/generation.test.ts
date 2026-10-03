@@ -2,7 +2,7 @@ import type { GeneratedFile } from 'ai'
 import { LIMITS } from '@harness-forge/shared'
 import { DefaultGeneratedFile } from 'ai'
 import { describe, expect, it } from 'vitest'
-import { cutUtf16, imageCost, imageUsage, revisedPromptOf, roundUsd, sanitizeImageParams } from './generation.ts'
+import { cutUtf16, IMAGE_MODEL_NAME_MAX_CHARS, imageCost, imageModelDisplayName, imageUsage, resultModelName, revisedPromptOf, roundUsd, sanitizeImageParams } from './generation.ts'
 
 function generated(providerMetadata?: GeneratedFile['providerMetadata']): GeneratedFile {
   return new DefaultGeneratedFile({ data: new Uint8Array([1, 2, 3]), mediaType: 'image/png', ...(providerMetadata ? { providerMetadata } : {}) })
@@ -80,5 +80,25 @@ describe('image generation helpers: revised prompt', () => {
     expect(cutUtf16('ab\u{1F98A}', 3)).toBe('ab')
     expect(cutUtf16('abc', 5)).toBe('abc')
     expect(cutUtf16('abc', 0)).toBe('')
+  })
+})
+
+describe('image generation helpers: model display name (Phase 7, plugin API 1.2.0)', () => {
+  it('takes the catalog name, else the model id; trimmed and cut to 200 UTF-16 code units', () => {
+    expect(imageModelDisplayName('GPT Image 1', 'gpt-image-1')).toBe('GPT Image 1')
+    expect(imageModelDisplayName('  Imagen 4  ', 'imagen-4')).toBe('Imagen 4')
+    for (const blank of ['', '   ', null, undefined])
+      expect(imageModelDisplayName(blank, 'gpt-image-1'), String(blank)).toBe('gpt-image-1')
+    expect(IMAGE_MODEL_NAME_MAX_CHARS).toBe(200)
+    expect(imageModelDisplayName('n'.repeat(201), 'x')).toBe('n'.repeat(200))
+    expect(imageModelDisplayName(`${'n'.repeat(199)}\u{1F98A}`, 'x')).toBe('n'.repeat(199))
+  })
+
+  it('names a result by its modelName, else the model id of its modelRef', () => {
+    expect(resultModelName({ modelRef: 'openai:gpt-image-1', modelName: 'GPT Image 1' })).toBe('GPT Image 1')
+    expect(resultModelName({ modelRef: 'openai:gpt-image-1' })).toBe('gpt-image-1')
+    expect(resultModelName({ modelRef: 'openai:gpt-image-1', modelName: ' ' })).toBe('gpt-image-1')
+    // Split on the first colon (`ollama:llama3:8b`).
+    expect(resultModelName({ modelRef: 'local:flux:dev' })).toBe('flux:dev')
   })
 })

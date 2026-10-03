@@ -1,6 +1,9 @@
-// Shared pieces of the `core-workspace` tools (Phase 7, ADR-032 / ADR-033): the guard timeouts of PLUGINS.md 1 and the
-// workspace of a call. Owner after P7-0b: W7.2 (the file tools; W7.3 imports from here for `shell`).
-import type { ToolCallContext, ToolWorkspace } from '@harness-forge/plugin-sdk'
+// Shared pieces of the `core-workspace` tools (Phase 7, ADR-032 / ADR-033): the guard timeouts of PLUGINS.md 1, the
+// workspace of a call and the model text helper. Owner after P7-0b: W7.2 (the file tools; W7.3 imports from here for
+// `shell`).
+import type { ToolCallContext, ToolResultOutput, ToolWorkspace } from '@harness-forge/plugin-sdk'
+import type { JSONValue } from 'ai'
+import type { z } from 'zod'
 import { HarnessError } from '@harness-forge/shared'
 
 /** Guard timeout of `read_file` and `list_directory`. */
@@ -28,4 +31,13 @@ export function requireWorkspace(c: ToolCallContext): ToolWorkspace {
 /** The `not_implemented` error of a P7-0b tool stub. */
 export function toolNotImplemented(name: string): HarnessError {
   return new HarnessError({ code: 'not_implemented', message: `The ${name} tool is not implemented yet.` })
+}
+
+/**
+ * A `toModelOutput` result built only from the stored output: the text of `build` when the output parses with the
+ * tool's output schema, else the output as JSON (an output of an older format, or one the host replaced).
+ */
+export function textModelOutput<T>(schema: z.ZodType<T>, output: unknown, build: (value: T) => string): ToolResultOutput {
+  const parsed = schema.safeParse(output)
+  return parsed.success ? { type: 'text', value: build(parsed.data) } : { type: 'json', value: (output ?? null) as JSONValue }
 }

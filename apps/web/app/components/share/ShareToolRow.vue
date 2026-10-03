@@ -4,6 +4,9 @@
 // includes tool details (the prompt for generate_image), and the outcome (done, error, denied, stopped). With tool
 // details the row is a button that expands Input / Output (ToolValueBlock) and the error text; without them it is
 // static. Store-free.
+// Phase 7 (docs/UI.md 7.19): `core-workspace` tools use the same registry as ToolPart (icon, argument, summary) and,
+// with tool details, WorkspaceToolBody with the generic blocks behind "Raw input and output"; a value the server cut
+// at the share limit (a `[truncated]` string) fails the schemas and keeps the generic blocks.
 // Contract (docs/UI.md 10.4): `part` is the snapshot's tool part (toolName, status, input?, output?, errorText?).
 import type { ShareToolPart } from './share-view'
 import { BanIcon, CheckIcon, ChevronRightIcon, CircleSlashIcon, ServerIcon, WrenchIcon, XIcon } from '@lucide/vue'
@@ -13,6 +16,9 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { cn } from '@/lib/utils'
 import { formatToolValue, isServerTruncated, splitMcpToolName } from '~/components/chat/chat-format'
 import { toolRowArgument } from '~/components/chat/parts/tool-row'
+import ToolRowSummary from '~/components/chat/parts/tools/ToolRowSummary.vue'
+import { workspaceRowSummary, workspaceToolIcon, workspaceToolView } from '~/components/chat/parts/tools/workspace-tools'
+import WorkspaceToolBody from '~/components/chat/parts/tools/WorkspaceToolBody.vue'
 import ToolValueBlock from '~/components/chat/parts/ToolValueBlock.vue'
 import { testIds } from '~/utils/testids'
 
@@ -32,6 +38,14 @@ const outputText = computed(() => formatToolValue(props.part.output))
 // A value over the share limit arrives as its JSON text, cut and marked "[truncated]" (ADR-025).
 const inputTruncated = computed(() => hasInput.value && isServerTruncated(props.part.input))
 const outputTruncated = computed(() => hasOutput.value && isServerTruncated(props.part.output))
+const rowIcon = computed(() => (mcp.value ? ServerIcon : workspaceToolIcon(props.part.toolName) ?? WrenchIcon))
+/** The workspace summary and body of a finished call whose output parses (7.19); null keeps the generic blocks. */
+const summary = computed(() => (props.part.status === 'done' && hasOutput.value ? workspaceRowSummary(props.part.toolName, props.part.output) : null))
+const view = computed(() => {
+  if (props.part.status !== 'done' || props.part.output === undefined || props.part.output === null)
+    return null
+  return workspaceToolView(props.part.toolName, props.part.input, props.part.output)
+})
 const statusLabel = computed(() => ({ done: 'Done', error: 'Failed', denied: 'Denied', stopped: 'Stopped' })[props.part.status])
 
 const ROW_CLASS = '-mx-1.5 flex h-(--row-height) w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-md px-1.5 text-left text-sm pointer-coarse:h-10'
@@ -57,14 +71,14 @@ const ROW_CLASS = '-mx-1.5 flex h-(--row-height) w-[calc(100%+0.75rem)] min-w-0 
         aria-hidden="true"
         class="size-3.5 shrink-0 text-muted-foreground transition-transform duration-(--duration-base) group-data-[state=open]/tool-row:rotate-90"
       />
-      <ServerIcon v-if="mcp" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
-      <WrenchIcon v-else aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
+      <component :is="rowIcon" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
       <span class="shrink-0 font-mono text-[13px] font-medium">{{ displayName }}</span>
       <span v-if="firstArg" class="min-w-0 truncate font-mono text-xs text-muted-foreground">"{{ firstArg }}"</span>
       <Badge v-if="mcp" variant="outline" class="h-4 shrink-0 px-1.5 text-[10px] font-normal text-muted-foreground">
         {{ mcp.serverId }}
       </Badge>
       <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs text-muted-foreground">
+        <ToolRowSummary v-if="summary" :summary="summary" class="mr-0.5" />
         <CheckIcon v-if="part.status === 'done'" aria-hidden="true" class="size-3.5 text-success" />
         <XIcon v-else-if="part.status === 'error'" aria-hidden="true" class="size-3.5 text-destructive" />
         <template v-else-if="part.status === 'denied'">
@@ -81,9 +95,17 @@ const ROW_CLASS = '-mx-1.5 flex h-(--row-height) w-[calc(100%+0.75rem)] min-w-0 
     <CollapsibleContent
       v-if="expandable"
       :data-testid="testIds.shareToolRowOutput"
-      class="overflow-hidden pt-1 pl-6 data-closed:animate-out data-closed:fade-out-0 data-open:animate-in data-open:fade-in-0"
+      class="min-w-0 overflow-hidden pt-1 pl-6 data-closed:animate-out data-closed:fade-out-0 data-open:animate-in data-open:fade-in-0"
     >
-      <div class="flex flex-col gap-3 rounded-md bg-muted/50 p-3">
+      <WorkspaceToolBody v-if="view" :view="view">
+        <template #raw>
+          <div class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
+            <ToolValueBlock v-if="hasInput" label="Input" :value="inputText || '{}'" :server-truncated="inputTruncated" />
+            <ToolValueBlock label="Output" :value="outputText" :server-truncated="outputTruncated" />
+          </div>
+        </template>
+      </WorkspaceToolBody>
+      <div v-else class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
         <ToolValueBlock v-if="hasInput" label="Input" :value="inputText || '{}'" :server-truncated="inputTruncated" />
         <ToolValueBlock v-if="hasOutput" label="Output" :value="outputText" :server-truncated="outputTruncated" />
         <ToolValueBlock v-if="part.errorText" label="Error" :value="part.errorText" tone="error" />

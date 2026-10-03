@@ -6,12 +6,18 @@
 // the owning plugin's `ctx.secrets`), and every value read or written is registered with the redactor so it can never
 // reach a log line. A row that cannot be decrypted (other master key, row copied or tampered with) is reported as absent
 // and logged once as a warning, without the value.
+//
+// Key rotation (Phase 7, ADR-034, W7.7-T3): `get`, `set`, `delete` and `deleteScope` first wait for
+// `whenKeyStable(keyring)`, so nothing is read or written with the old key while a rotation re-encrypts the table. A
+// read or a write that a rotation overtook anyway (it began while the statement was in flight) is done again under the
+// new key: a value is never stored at a key version that the rotation already left behind.
 import type { AppDeps } from '../../types.ts'
 import type { SecretEntry, SecretScope, SecretStore } from './types.ts'
 import { Buffer } from 'node:buffer'
 import { HarnessError } from '@harness-forge/shared'
 import { and, asc, eq } from 'drizzle-orm'
 import { secrets } from '../../db/schema.ts'
+import { isKeyChanging, whenKeyStable } from '../../security/keyring.ts'
 import { decryptSecret, encryptSecret, secretAad } from './crypto.ts'
 import { secretHint } from './hint.ts'
 import { assertSecretName, assertSecretScope, SECRET_VALUE_MAX_BYTES } from './scope.ts'
@@ -53,33 +59,48 @@ export function createSecretStore(deps: AppDeps): SecretStore {
     logger.warn('stored secret cannot be decrypted and is ignored', { scope, name, reason })
   }
 
+  /** True when a key change began or finished since `version` was read (the operation must run again). */
+  function keyMoved(version: number): boolean {
+    return deps.keyring.keyVersion !== version || isKeyChanging(deps.keyring)
+  }
+
   async function get(scope: SecretScope, name: string): Promise<string | null> {
     assertSecretScope(scope)
     assertSecretName(name)
-    const [row] = await db
-      .select({ ciphertext: secrets.ciphertext, keyVersion: secrets.keyVersion, updatedAt: secrets.updatedAt })
-      .from(secrets)
-      .where(whereRow(scope, name))
-      .limit(1)
-    if (row === undefined)
-      return null
-    const { keyring } = deps
-    if (row.keyVersion !== keyring.keyVersion) {
-      reportUnreadable(scope, name, row.updatedAt, `key version ${row.keyVersion} is not available`)
-      return null
+    for (;;) {
+      await whenKeyStable(deps.keyring)
+      const version = deps.keyring.keyVersion
+      const [row] = await db
+        .select({ ciphertext: secrets.ciphertext, keyVersion: secrets.keyVersion, updatedAt: secrets.updatedAt })
+        .from(secrets)
+        .where(whereRow(scope, name))
+        .limit(1)
+      if (row === undefined)
+        return null
+      // A rotation overtook the read: the row may hold the old version. Read it again once the key is stable.
+      if (keyMoved(version))
+        continue
+      const { keyring } = deps
+      if (row.keyVersion !== keyring.keyVersion) {
+        reportUnreadable(scope, name, row.updatedAt, `key version ${row.keyVersion} is not available`)
+        return null
+      }
+      // Outside the `try`: a keyring failure is a server error, not an unreadable row.
+      const key = keyring.subkey('encryption')
+      let value: string
+      try {
+        value = decryptSecret(key, secretAad(scope, name), row.ciphertext)
+      }
+      catch {
+        reportUnreadable(scope, name, row.updatedAt, 'authentication failed (other master key, or the row was altered)')
+        return null
+      }
+      finally {
+        key.fill(0)
+      }
+      redactor.addSecret(value)
+      return value
     }
-    // Outside the `try`: a keyring failure is a server error, not an unreadable row.
-    const key = keyring.subkey('encryption')
-    let value: string
-    try {
-      value = decryptSecret(key, secretAad(scope, name), row.ciphertext)
-    }
-    catch {
-      reportUnreadable(scope, name, row.updatedAt, 'authentication failed (other master key, or the row was altered)')
-      return null
-    }
-    redactor.addSecret(value)
-    return value
   }
 
   async function set(scope: SecretScope, name: string, value: string): Promise<void> {
@@ -87,28 +108,44 @@ export function createSecretStore(deps: AppDeps): SecretStore {
     assertSecretName(name)
     assertSecretValue(value)
     redactor.addSecret(value)
-    const { keyring } = deps
-    const ciphertext = encryptSecret(keyring.subkey('encryption'), secretAad(scope, name), value)
     const hint = storedHint(scope, value)
-    const updatedAt = Date.now()
-    await db
-      .insert(secrets)
-      .values({ scope, name, ciphertext, hint, keyVersion: keyring.keyVersion, updatedAt })
-      .onConflictDoUpdate({
-        target: [secrets.scope, secrets.name],
-        set: { ciphertext, hint, keyVersion: keyring.keyVersion, updatedAt },
-      })
+    for (;;) {
+      await whenKeyStable(deps.keyring)
+      const { keyring } = deps
+      const version = keyring.keyVersion
+      const key = keyring.subkey('encryption')
+      let ciphertext: Buffer
+      try {
+        ciphertext = encryptSecret(key, secretAad(scope, name), value)
+      }
+      finally {
+        key.fill(0)
+      }
+      const updatedAt = Date.now()
+      await db
+        .insert(secrets)
+        .values({ scope, name, ciphertext, hint, keyVersion: version, updatedAt })
+        .onConflictDoUpdate({
+          target: [secrets.scope, secrets.name],
+          set: { ciphertext, hint, keyVersion: version, updatedAt },
+        })
+      // A rotation that began while the write was in flight may have missed it: write it again with the new key.
+      if (!keyMoved(version))
+        return
+    }
   }
 
   async function remove(scope: SecretScope, name: string): Promise<boolean> {
     assertSecretScope(scope)
     assertSecretName(name)
+    await whenKeyStable(deps.keyring)
     const deleted = await db.delete(secrets).where(whereRow(scope, name)).returning({ name: secrets.name })
     return deleted.length > 0
   }
 
   async function deleteScope(scope: SecretScope): Promise<number> {
     assertSecretScope(scope)
+    await whenKeyStable(deps.keyring)
     const deleted = await db.delete(secrets).where(eq(secrets.scope, scope)).returning({ name: secrets.name })
     return deleted.length
   }

@@ -2,6 +2,8 @@
 // tools of declared but disconnected MCP servers (`available: false`), sorted by name; `PATCH /tools/:name` upserts a
 // `tool_prefs` row (`enabled`, `override`); `prefs()` feeds the chat pipeline (disabled tools are not sent, `override`
 // is step 1 of the approval resolution). A pref equal to the defaults (`enabled: true`, no override) deletes its row.
+// `workspace` (Phase 7, ADR-032) is the definition's workspace access (`read` / `write` / `execute`), null for MCP tools
+// and tools without one.
 import type { ToolDefinition } from '@harness-forge/plugin-sdk'
 import type { ToolSummary, ToolUpdate } from '@harness-forge/shared'
 import type { RegisteredTool } from '../registry/types.ts'
@@ -62,8 +64,8 @@ export function createToolService(deps: AppDeps): ToolService {
       enabled: pref.enabled,
       override: pref.override,
       available: ownerActive(tool.pluginId) && (status === null || status === 'connected'),
-      // Phase 7 placeholder until `ToolDefinition.workspace` is validated and reported (W7.6).
-      workspace: null,
+      // Plugin API 1.2.0 (ADR-032): the declared workspace access (validated at registration); MCP tools have none.
+      workspace: tool.mcpServerId === null ? definition.workspace ?? null : null,
       inputSchema: await inputSchemaOf(definition),
     }
   }

@@ -5,10 +5,10 @@ import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
-import { useChatsStore } from '~/stores/chats'
+import { PROJECT_FILTER_KEY, useChatsStore } from '~/stores/chats'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
-import { chatId, chatSummary } from '~/utils/testing/fixtures'
+import { chatId, chatSummary, projectId, projectSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { CHAT_UNDO_MS } from './chat-nav/chat-actions'
@@ -545,5 +545,99 @@ describe('chatNav: top rows', () => {
     await settle()
     expect(mocks.navigateTo).toHaveBeenCalledTimes(1)
     expect(ui.composerFocusRequest).toBe(1)
+  })
+})
+
+describe('chatNav: projects (Phase 7)', () => {
+  const website = projectSummary({ id: projectId(1), name: 'Website' })
+  const notes = projectSummary({ id: projectId(2), name: 'Notes', path: '/srv/workspaces/notes' })
+
+  async function mountWithProjects(items: ChatSummary[], filter?: string) {
+    if (filter)
+      localStorage.setItem(PROJECT_FILTER_KEY, filter)
+    api.projects.list.mockResolvedValue({ items: [website, notes] })
+    return mountNav(items)
+  }
+
+  it('puts the project switcher first, above New chat and Search', async () => {
+    setup()
+    await mountWithProjects([])
+    const rows = Array.from(byTestId('chat-list')!.closest('nav')!.querySelectorAll<HTMLElement>('[data-sidebar="menu-button"]'))
+    expect(rows.slice(0, 3).map(element => element.dataset.testid)).toEqual([testIds.projectSwitcher, testIds.newChat, testIds.searchChats])
+    expect(api.projects.list).toHaveBeenCalled()
+  })
+
+  it('says which filtered list is empty', async () => {
+    setup()
+    await mountWithProjects([], 'none')
+    expect(api.chats.list).toHaveBeenLastCalledWith({ query: { limit: 50, projectId: 'none' } })
+    expect(byTestId(testIds.chatList)!.textContent).toContain('No chats without a project')
+
+    api.chats.list.mockResolvedValueOnce({ items: [], nextCursor: null })
+    await useChatsStore().setProjectFilter(projectId(1))
+    await settle()
+    expect(byTestId(testIds.chatList)!.textContent).toContain('No chats in Website yet')
+  })
+
+  it('offers Retry when the first page of a new filter fails', async () => {
+    setup()
+    await mountWithProjects([chatSummary({ id: chatId(1), title: 'Plain', updatedAt: NOW - 1 })])
+    api.chats.list.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Boom.' }))
+    await useChatsStore().setProjectFilter('none').catch(() => {})
+    await settle()
+    const list = byTestId(testIds.chatList)!
+    expect(list.textContent).toContain('Couldn\'t load chats')
+    expect(list.querySelectorAll('[data-sidebar="menu-skeleton"]').length).toBe(0)
+
+    api.chats.list.mockResolvedValueOnce({ items: [chatSummary({ id: chatId(1), title: 'Plain', updatedAt: NOW - 1 })], nextCursor: null })
+    Array.from(list.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Retry')!.click()
+    await settle()
+    expect(api.chats.list).toHaveBeenLastCalledWith({ query: { limit: 50, projectId: 'none' } })
+    expect(allByTestId(testIds.chatRow).map(element => element.textContent?.trim())).toEqual(['Plain'])
+  })
+
+  it('lists "Move to project" after Rename once a project exists, with the chat\'s project checked', async () => {
+    setup()
+    await mountWithProjects([chatSummary({ id: chatId(1), title: 'In website', updatedAt: NOW - 1, projectId: projectId(1) })])
+    await openRowMenu(chatId(1))
+    const items = Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'))
+    expect(items.map(item => item.textContent?.trim())).toEqual(['Rename', 'Move to project', 'Share…', 'Export as Markdown', 'Export as JSON', 'Delete'])
+    const move = byTestId(testIds.chatRowMove)!
+    move.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+    await settle()
+    expect(allByTestId(testIds.projectOption).map(option => [option.dataset.value, option.dataset.state])).toEqual([
+      ['none', 'unchecked'],
+      [projectId(2), 'unchecked'],
+      [projectId(1), 'checked'],
+    ])
+  })
+
+  it('hides "Move to project" while no project exists', async () => {
+    setup()
+    api.projects.list.mockResolvedValue({ items: [] })
+    await mountNav([chatSummary({ id: chatId(1), title: 'Plain', updatedAt: NOW - 1 })])
+    await openRowMenu(chatId(1))
+    expect(byTestId(testIds.chatRowMove)).toBeNull()
+  })
+
+  it('moves a chat from its row: it stays in All chats, and leaves a filtered list with focus on the next row', async () => {
+    setup()
+    await mountWithProjects([
+      chatSummary({ id: chatId(1), title: 'First', updatedAt: NOW - 1, projectId: projectId(1) }),
+      chatSummary({ id: chatId(2), title: 'Second', updatedAt: NOW - 2, projectId: projectId(1) }),
+    ], projectId(1))
+    expect(allByTestId(testIds.chatRow).map(element => element.dataset.chatId)).toEqual([chatId(1), chatId(2)])
+
+    api.chats.update.mockImplementation(async ({ params, body }: { params: { id: string }, body: { projectId: string | null } }) =>
+      chatSummary({ id: params.id, title: 'First', updatedAt: NOW - 1, projectId: body.projectId }))
+    await openRowMenu(chatId(1))
+    byTestId(testIds.chatRowMove)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+    await settle()
+    allByTestId(testIds.projectOption).find(option => option.dataset.value === projectId(2))!.click()
+    await settle(6)
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(1) }, body: { projectId: projectId(2) } })
+    expect(allByTestId(testIds.chatRow).map(element => element.dataset.chatId)).toEqual([chatId(2)])
+    expect(document.activeElement).toBe(row(chatId(2)))
+    expect((mocks.toast.custom.mock.lastCall?.[1] as { componentProps: { title: string } }).componentProps.title).toBe('Moved to Notes')
   })
 })

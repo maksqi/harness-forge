@@ -21,6 +21,9 @@
 // successful compare-and-set), `switchBranch` and `deleteMessage` record the shown path in `messages.selected_child_id`,
 // and `switchBranch` / `deleteMessage` show the remembered leaf. Every `chat.updated` carries the stored active leaf
 // (`update`, `touch` and `setTitle` are the real ones).
+// Phase 7 (ADR-031, W7.5): projects come from the real service (`create`, `ensure`, the move of `update`, the list
+// filter and `projectId` in every summary and event); the JSON export leaves `projectId` out like the real one, and
+// `importChat` never sets a project.
 // Simplifications: writes are not atomic (a failed tree write after `create` leaves a linear chat), `export(id, 'md')`
 // is the real Markdown export, and the `chat.created` event of `importChat` carries the summary from before the title,
 // flags and dates are restored.
@@ -460,7 +463,8 @@ export function createFakeChatsService(deps: AppDeps): ChatsService {
       const current = await base.get(id)
       const all = await base.listMessages(id)
       const tree = await requireTree(id)
-      const { branches: _branches, settings, totals, messages: _path, snippet: _snippet, ...summary } = current
+      // Exports never carry the project (ADR-031).
+      const { branches: _branches, settings, totals, messages: _path, snippet: _snippet, projectId: _projectId, ...summary } = current
       const body: ChatExport = {
         format: 'harness-forge.chat',
         version: 2,

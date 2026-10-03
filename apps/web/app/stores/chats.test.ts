@@ -1,15 +1,20 @@
 import type { MockApi } from '~/utils/testing/mock-api'
-import { HarnessError } from '@harness-forge/shared'
+import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { chatDetail, chatId, chatSummary, projectId } from '~/utils/testing/fixtures'
+import { chatDetail, chatId, chatSummary, projectId, projectSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
-import { UNREAD_CHATS_KEY, useChatsStore } from './chats'
+import { PROJECT_DELETED_MESSAGE, PROJECT_FILTER_KEY, UNREAD_CHATS_KEY, useChatsStore } from './chats'
+import { useProjectsStore } from './projects'
 import { useUiStore } from './ui'
 
-const mock = vi.hoisted(() => ({ api: null as unknown }))
+const mock = vi.hoisted(() => ({
+  api: null as unknown,
+  toast: Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn() }),
+}))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
+vi.mock('vue-sonner', () => ({ toast: mock.toast }))
 
 let pinia: ReturnType<typeof createPinia>
 let api: MockApi
@@ -21,6 +26,7 @@ const DAY = 24 * HOUR
 
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW })
+  mock.toast.mockClear()
   api = createMockApi()
   mock.api = api
   storage = stubLocalStorage()
@@ -180,7 +186,9 @@ describe('chats store: events', () => {
     expect(chats.items.map(chat => chat.title)).toEqual(['Renamed', null, 'Today'])
 
     chats.applyEvent({ type: 'chat.updated', data: { ...today, archived: true, activeLeafId: null }, at: 3 })
-    expect(chats.byId(today.id)).toBeUndefined()
+    expect(chats.items.some(chat => chat.id === today.id)).toBe(false)
+    // Kept aside for byId (an open archived chat still has its summary).
+    expect(chats.byId(today.id)?.archived).toBe(true)
 
     chats.applyEvent({ type: 'chat.deleted', data: { id: chatId(9) }, at: 4 })
     expect(chats.items.map(chat => chat.id)).toEqual([yesterday.id])
@@ -207,7 +215,9 @@ describe('chats store: events', () => {
     api.chats.list.mockResolvedValue({ items: [today], nextCursor: 'more' })
     await chats.fetchPage()
     chats.applyEvent({ type: 'chat.updated', data: { ...lastMonth, activeLeafId: null }, at: 2 })
-    expect(chats.byId(lastMonth.id)).toBeUndefined()
+    expect(chats.items.map(chat => chat.id)).toEqual([today.id])
+    // Not listed, but known: byId answers for it (e.g. an old chat opened from search).
+    expect(chats.byId(lastMonth.id)).toEqual(lastMonth)
     chats.applyEvent({ type: 'chat.updated', data: { ...lastMonth, running: true, activeLeafId: null }, at: 3 })
     expect(chats.statusOf(lastMonth.id)).toBe('running')
   })
@@ -316,15 +326,197 @@ describe('chats store: actions', () => {
   })
 })
 
-describe('chats store: project filter (Phase 7 skeleton)', () => {
-  it('starts with every chat and sets the filter', async () => {
+describe('chats store: project filter (Phase 7)', () => {
+  const inProject = chatSummary({ id: chatId(11), title: 'In project', updatedAt: NOW - HOUR, projectId: projectId(1) })
+  const inOther = chatSummary({ id: chatId(12), title: 'Other project', updatedAt: NOW - 2 * HOUR, projectId: projectId(2) })
+  const plain = chatSummary({ id: chatId(13), title: 'Plain', updatedAt: NOW - 3 * HOUR })
+
+  function query() {
+    return api.chats.list.mock.lastCall?.[0]?.query as Record<string, unknown> | undefined
+  }
+
+  it('starts from the stored filter and ignores a stored value that is not a filter', () => {
+    storage.setItem(PROJECT_FILTER_KEY, projectId(1))
+    expect(useChatsStore().projectFilter).toBe(projectId(1))
+    disposePinia(pinia)
+
+    for (const [stored, expected] of [['none', 'none'], ['all', 'all'], ['prj_bad', 'all'], ['"none"', 'all']] as const) {
+      storage.setItem(PROJECT_FILTER_KEY, stored)
+      pinia = createPinia()
+      setActivePinia(pinia)
+      expect(useChatsStore().projectFilter).toBe(expected)
+      disposePinia(pinia)
+    }
+    pinia = createPinia()
+    setActivePinia(pinia)
+  })
+
+  it('sends projectId with every page of a filtered list (none for chats without a project), nothing for all', async () => {
+    api.chats.list.mockResolvedValue({ items: [], nextCursor: null })
     const chats = useChatsStore()
-    expect(chats.projectFilter).toBe('all')
-    await expect(chats.setProjectFilter('none')).resolves.toBeUndefined()
-    expect(chats.projectFilter).toBe('none')
+    await chats.fetchPage()
+    expect(query()).toEqual({ limit: 50 })
+
+    api.chats.list.mockResolvedValueOnce({ items: [inProject], nextCursor: 'c1' })
     await chats.setProjectFilter(projectId(1))
+    expect(query()).toEqual({ limit: 50, projectId: projectId(1) })
+    api.chats.list.mockResolvedValueOnce({ items: [], nextCursor: null })
+    await chats.fetchPage()
+    expect(query()).toEqual({ limit: 50, cursor: 'c1', projectId: projectId(1) })
+
+    api.chats.list.mockResolvedValueOnce({ items: [plain], nextCursor: null })
+    await chats.setProjectFilter('none')
+    expect(query()).toEqual({ limit: 50, projectId: 'none' })
+    expect(chats.items.map(chat => chat.id)).toEqual([plain.id])
+  })
+
+  it('stores a new filter, empties the list and loads its first page; the same filter again does nothing', async () => {
+    api.chats.list.mockResolvedValueOnce({ items: [inProject, inOther, plain], nextCursor: null })
+    const chats = useChatsStore()
+    await chats.fetchPage()
+
+    let resolvePage: (value: unknown) => void = () => {}
+    api.chats.list.mockReturnValueOnce(new Promise((resolve) => {
+      resolvePage = resolve
+    }))
+    const switching = chats.setProjectFilter(projectId(1))
+    expect(storage.getItem(PROJECT_FILTER_KEY)).toBe(projectId(1))
     expect(chats.projectFilter).toBe(projectId(1))
-    await chats.setProjectFilter('all')
+    expect(chats.items).toEqual([])
+    expect(chats.loaded).toBe(false)
+    expect(chats.loading).toBe(true)
+    // The rows of the old list stay known to byId (the open chat keeps its summary).
+    expect(chats.byId(inOther.id)).toEqual(inOther)
+    resolvePage({ items: [inProject], nextCursor: null })
+    await switching
+    expect(chats.loaded).toBe(true)
+    expect(chats.items.map(chat => chat.id)).toEqual([inProject.id])
+
+    await chats.setProjectFilter(projectId(1))
+    expect(api.chats.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects when the first page of the new filter fails, leaving the list unloaded', async () => {
+    const chats = useChatsStore()
+    api.chats.list.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Boom.' }))
+    await expect(chats.setProjectFilter('none')).rejects.toMatchObject({ code: 'internal_error' })
+    expect(chats.loaded).toBe(false)
+    expect(chats.loading).toBe(false)
+    expect(chats.projectFilter).toBe('none')
+  })
+
+  it('inserts rows that start matching the filter and removes rows that stop matching', async () => {
+    storage.setItem(PROJECT_FILTER_KEY, projectId(1))
+    api.chats.list.mockResolvedValueOnce({ items: [inProject], nextCursor: null })
+    const chats = useChatsStore()
+    await chats.fetchPage()
+
+    // A chat of another project: not listed, but known.
+    chats.applyEvent(createServerEvent('chat.created', { ...inOther, updatedAt: NOW }))
+    expect(chats.items.map(chat => chat.id)).toEqual([inProject.id])
+    expect(chats.byId(inOther.id)?.projectId).toBe(projectId(2))
+
+    // It moves into the filtered project elsewhere: it joins the list.
+    chats.applyEvent(createServerEvent('chat.updated', { ...inOther, projectId: projectId(1), updatedAt: NOW, activeLeafId: null }))
+    expect(chats.items.map(chat => chat.id)).toEqual([inOther.id, inProject.id])
+
+    // The first one moves out: it leaves the list.
+    chats.applyEvent(createServerEvent('chat.updated', { ...inProject, projectId: null, activeLeafId: null }))
+    expect(chats.items.map(chat => chat.id)).toEqual([inOther.id])
+    expect(chats.byId(inProject.id)?.projectId).toBeNull()
+  })
+
+  it('moves a chat optimistically: it leaves the filtered list at once and comes back when the server refuses', async () => {
+    storage.setItem(PROJECT_FILTER_KEY, projectId(1))
+    api.chats.list.mockResolvedValueOnce({ items: [inProject], nextCursor: null })
+    const chats = useChatsStore()
+    await chats.fetchPage()
+
+    let reject: (error: unknown) => void = () => {}
+    api.chats.update.mockReturnValueOnce(new Promise((_resolve, fail) => {
+      reject = fail
+    }))
+    const moving = chats.update(inProject.id, { projectId: projectId(2) })
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: inProject.id }, body: { projectId: projectId(2) } })
+    expect(chats.items).toEqual([])
+    expect(chats.byId(inProject.id)?.projectId).toBe(projectId(2))
+    reject(new HarnessError({ code: 'conflict', message: 'A response is running.', details: { reason: 'run-active' } }))
+    await expect(moving).rejects.toMatchObject({ code: 'conflict' })
+    expect(chats.items).toEqual([inProject])
+
+    // A chat known only aside joins the list when it moves into the filtered project.
+    chats.applyEvent(createServerEvent('chat.updated', { ...inOther, activeLeafId: null }))
+    api.chats.update.mockResolvedValueOnce({ ...inOther, projectId: projectId(1) })
+    const joined = chats.update(inOther.id, { projectId: projectId(1) })
+    expect(chats.items.map(chat => chat.id)).toEqual([inProject.id, inOther.id])
+    await joined
+    expect(chats.byId(inOther.id)?.projectId).toBe(projectId(1))
+  })
+
+  it('detaches the chats of a deleted project; a list filtered by it falls back to every chat with a toast', async () => {
+    storage.setItem(PROJECT_FILTER_KEY, projectId(1))
+    api.chats.list.mockResolvedValueOnce({ items: [inProject], nextCursor: null })
+    const chats = useChatsStore()
+    await chats.fetchPage()
+
+    api.chats.list.mockResolvedValueOnce({ items: [{ ...inProject, projectId: null }, inOther, plain], nextCursor: null })
+    chats.applyEvent(createServerEvent('project.changed', { id: projectId(1), project: null }))
+    expect(mock.toast).toHaveBeenCalledWith(PROJECT_DELETED_MESSAGE)
     expect(chats.projectFilter).toBe('all')
+    expect(storage.getItem(PROJECT_FILTER_KEY)).toBe('all')
+    expect(chats.byId(inProject.id)?.projectId).toBeNull()
+    await vi.waitFor(() => expect(chats.loaded).toBe(true))
+    expect(query()).toEqual({ limit: 50 })
+    expect(chats.items.map(chat => chat.id)).toEqual([inProject.id, inOther.id, plain.id])
+
+    // Another project deleted while every chat shows: its rows lose their project, no toast.
+    mock.toast.mockClear()
+    chats.applyEvent(createServerEvent('project.changed', { id: projectId(2), project: null }))
+    expect(chats.byId(inOther.id)?.projectId).toBeNull()
+    expect(chats.projectFilter).toBe('all')
+    expect(mock.toast).not.toHaveBeenCalled()
+    // A changed (not deleted) project touches nothing.
+    chats.applyEvent(createServerEvent('project.changed', { id: projectId(3), project: projectSummary({ id: projectId(3) }) }))
+    expect(chats.items).toHaveLength(3)
+  })
+
+  it('lists the detached chats in a "No project" list', async () => {
+    storage.setItem(PROJECT_FILTER_KEY, 'none')
+    api.chats.list.mockResolvedValueOnce({ items: [plain], nextCursor: null })
+    const chats = useChatsStore()
+    await chats.fetchPage()
+    chats.applyEvent(createServerEvent('chat.updated', { ...inProject, activeLeafId: null }))
+    expect(chats.items.map(chat => chat.id)).toEqual([plain.id])
+    chats.applyEvent(createServerEvent('project.changed', { id: projectId(1), project: null }))
+    expect(chats.items.map(chat => chat.id)).toEqual([inProject.id, plain.id])
+    expect(mock.toast).not.toHaveBeenCalled()
+  })
+
+  it('falls back to every chat when the stored project is unknown once the projects loaded', async () => {
+    storage.setItem(PROJECT_FILTER_KEY, projectId(5))
+    api.chats.list.mockResolvedValue({ items: [], nextCursor: null })
+    const chats = useChatsStore()
+    expect(chats.projectFilter).toBe(projectId(5))
+    api.projects.list.mockResolvedValueOnce({ items: [projectSummary({ id: projectId(1) })] })
+    await useProjectsStore().fetchAll()
+    await vi.waitFor(() => expect(chats.projectFilter).toBe('all'))
+    expect(storage.getItem(PROJECT_FILTER_KEY)).toBe('all')
+    expect(mock.toast).not.toHaveBeenCalled()
+
+    // A known project stays.
+    api.projects.list.mockResolvedValueOnce({ items: [projectSummary({ id: projectId(1) })] })
+    await chats.setProjectFilter(projectId(1))
+    await useProjectsStore().fetchAll()
+    await Promise.resolve()
+    expect(chats.projectFilter).toBe(projectId(1))
+  })
+
+  it('searches every chat, whatever the filter', async () => {
+    storage.setItem(PROJECT_FILTER_KEY, projectId(1))
+    api.chats.list.mockResolvedValueOnce({ items: [inOther, plain], nextCursor: null })
+    const chats = useChatsStore()
+    const results = await chats.search('plans')
+    expect(api.chats.list).toHaveBeenCalledWith({ query: { q: 'plans', limit: 20 }, signal: undefined })
+    expect(results).toEqual([inOther, plain])
   })
 })

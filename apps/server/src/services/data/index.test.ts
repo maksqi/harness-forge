@@ -1,14 +1,20 @@
 // Data service (W5.3-T1, T5, T6): the summary, delete-all (confirmation, fresh auth, runs, usage, share links, files,
 // events) and the mutex shared by imports and delete-all (Phase 7, C16-T1: the maintenance lock, also taken by the key
-// rotation and the file cleanup); the Phase 7 cleanup stubs (C16-T5).
+// rotation and the file cleanup); the orphaned file cleanup (W7.8-T4: preview, run, references, `_files`, logs, lock).
+import type { MaintenanceOperation } from '../maintenance/types.ts'
 import type { DataTestApp } from './fixtures.test-util.ts'
 import { existsSync, readdirSync } from 'node:fs'
-import { dataDeleteResultSchema, DEFAULT_SETTINGS, HarnessError } from '@harness-forge/shared'
-import { afterEach, describe, expect, it } from 'vitest'
-import { chatShares, files, usage } from '../../db/schema.ts'
+import { dataCleanupPreviewSchema, dataCleanupResultSchema, dataDeleteResultSchema, DEFAULT_SETTINGS, HarnessError } from '@harness-forge/shared'
+import { eq } from 'drizzle-orm'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { chatShares, files, messages, pluginKv, usage } from '../../db/schema.ts'
 import { freshAuthRequiredError } from '../../http/middleware/fresh-auth.ts'
-import { PNG, TEXT } from '../files/fixtures.test-util.ts'
-import { assistant, chatId, closeDataApps, dataApp, filePart, treeChat, user } from './fixtures.test-util.ts'
+import { GIF, JPEG, PNG, TEXT } from '../files/fixtures.test-util.ts'
+import { fileUrl } from '../files/index.ts'
+import { DAY_MS, HOUR_MS, seedStoredFile, sha256Of } from '../files/store.test-util.ts'
+import { MAINTENANCE_BUSY_MESSAGE } from '../maintenance/index.ts'
+import { FILE_STATE_SETTING } from './cleanup.ts'
+import { assistant, chatId, closeDataApps, dataApp, filePart, mid, treeChat, user } from './fixtures.test-util.ts'
 
 afterEach(async () => {
   await closeDataApps()
@@ -195,14 +201,136 @@ describe('maintenance lock (Phase 7)', () => {
   })
 })
 
-describe('orphaned file cleanup stubs (Phase 7)', () => {
-  it('answer not_implemented until W7.8, in the data service and the files service', async () => {
+const GRACE_MS = 86_400_000
+
+function fileRef(file: { id: string, name: string, mime: string, size: number }) {
+  return { id: file.id, name: file.name, mime: file.mime, size: file.size, url: fileUrl(file.id) }
+}
+
+async function fileIds(app: DataTestApp): Promise<string[]> {
+  return (await app.t.db.select({ id: files.id }).from(files)).map(row => row.id).sort()
+}
+
+describe('orphaned file cleanup (Phase 7)', () => {
+  it('previews, then removes only what nothing references; stores the last run and logs counts only', async () => {
+    let now = Date.now()
+    const app = await dataApp({ data: { now: () => now }, filesOptions: { now: () => now } })
+    const old = now - 3 * DAY_MS
+    const orphanBytes = new TextEncoder().encode('orphaned bytes')
+    const orphan = await seedStoredFile(app.deps, orphanBytes, { createdAt: old, name: 'private-plan.txt', mime: 'text/plain' })
+    const kvOnly = await seedStoredFile(app.deps, PNG, { createdAt: old, name: 'kv.png', mime: 'image/png' })
+    const inShare = await seedStoredFile(app.deps, JPEG, { createdAt: old, name: 'shared.jpg', mime: 'image/jpeg' })
+    const inMessage = await seedStoredFile(app.deps, GIF, { createdAt: old, name: 'kept.gif', mime: 'image/gif' })
+    const recent = await seedStoredFile(app.deps, TEXT, { createdAt: now - HOUR_MS, name: 'recent.txt', mime: 'text/plain' })
+    // A plugin keeps an id in `ctx.storage` only.
+    await app.t.db.insert(pluginKv).values({ pluginId: 'gallery', key: 'last', value: { image: kvOnly.id } })
+    // A share keeps its snapshot after the message version it showed was deleted.
+    await app.deps.chats.create({ id: chatId(1), messages: [user(1, 'look', [filePart(fileRef(inShare))])] })
+    await app.t.db.insert(chatShares).values({
+      id: 'shr_0000000000000001',
+      chatId: chatId(1),
+      options: { reasoning: false, toolDetails: false, attachments: true },
+      snapshot: { title: null, messages: [{ id: mid(1), role: 'user', parts: [{ type: 'file', mediaType: 'image/jpeg', url: fileUrl(inShare.id) }] }] } as never,
+      fileIds: [inShare.id],
+      snapshotAt: 1,
+    })
+    await app.t.db.delete(messages).where(eq(messages.id, mid(1)))
+    await app.deps.chats.create({ id: chatId(2), messages: [user(2, 'gif', [filePart(fileRef(inMessage))])] })
+    const all = await fileIds(app)
+
+    const preview = await app.deps.data.cleanupPreview()
+    expect(dataCleanupPreviewSchema.parse(preview)).toEqual({
+      files: 1,
+      fileBytes: orphanBytes.byteLength,
+      blobs: 0,
+      diskBytes: orphanBytes.byteLength,
+      tempFiles: 0,
+      recentFiles: 1,
+      graceMs: GRACE_MS,
+      lastRunAt: null,
+    })
+    expect(await fileIds(app)).toEqual(all)
+    expect(await app.deps.settings.getInternal(FILE_STATE_SETTING)).toBeUndefined()
+
+    now += 1000
+    const result = await app.deps.data.cleanup()
+    expect(dataCleanupResultSchema.parse(result)).toEqual({ files: 1, fileBytes: orphanBytes.byteLength, blobs: 0, diskBytes: orphanBytes.byteLength, tempFiles: 0, ranAt: now })
+    expect(await fileIds(app)).toEqual(all.filter(id => id !== orphan.id))
+    expect(await app.deps.settings.getInternal(FILE_STATE_SETTING)).toEqual({ lastCleanup: now })
+    const record = app.t.logs.records.find(entry => entry.msg === 'orphaned files cleaned up')
+    expect(record).toMatchObject({ level: 'info', files: 1, fileBytes: orphanBytes.byteLength, blobs: 0, diskBytes: orphanBytes.byteLength, tempFiles: 0, recentFiles: 1 })
+    const logs = app.t.logs.text()
+    for (const secret of [orphan.id, 'private-plan', sha256Of(orphanBytes), kvOnly.id])
+      expect(logs).not.toContain(secret)
+
+    const ranAt = now
+    now += 1000
+    expect(await app.deps.data.cleanupPreview()).toMatchObject({ files: 0, recentFiles: 1, lastRunAt: ranAt })
+
+    // Once the share and the plugin value are gone, their files go too; a referenced message keeps its file.
+    await app.t.db.delete(chatShares)
+    await app.t.db.delete(pluginKv)
+    expect(await app.deps.data.cleanup()).toMatchObject({ files: 2, fileBytes: PNG.byteLength + JPEG.byteLength, ranAt: now })
+    expect(await fileIds(app)).toEqual([inMessage.id, recent.id].sort())
+  })
+
+  it('runs under the maintenance lock as file-cleanup without blocking runs; other data tasks are busy meanwhile', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let seen: MaintenanceOperation | null = null
+    const app = await dataApp({
+      files: inner => ({
+        ...inner,
+        sweep: async (input) => {
+          seen = app.deps.maintenance.current()
+          await gate
+          return inner.sweep(input)
+        },
+      }),
+    })
+    const running = app.deps.data.cleanup()
+    await vi.waitFor(() => expect(seen).not.toBeNull())
+    expect(seen).toMatchObject({ kind: 'file-cleanup', blockRuns: false })
+    for (const attempt of [app.deps.data.importData(new Blob(['{}'])), app.deps.data.deleteAll({ confirm: 'DELETE' }), app.deps.data.cleanupPreview(), app.deps.data.cleanup()])
+      expect((await rejection(attempt)).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'busy' } })
+    release()
+    expect((await running).files).toBe(0)
+    expect(app.deps.maintenance.current()).toBeNull()
+  })
+
+  it('answers 409 busy while an import, delete-all or key rotation holds the lock', async () => {
     const app = await dataApp()
-    expect((await rejection(app.deps.data.cleanupPreview())).code).toBe('not_implemented')
-    expect((await rejection(app.deps.data.cleanup())).code).toBe('not_implemented')
-    expect((await rejection(app.deps.files.sweep({ referencedIds: new Set(), createdBefore: Date.now(), dryRun: true }))).code).toBe('not_implemented')
-    expect((await rejection(app.deps.files.withSharedGate(async () => 1))).code).toBe('not_implemented')
-    expect((await rejection(app.deps.files.withExclusiveGate(async () => 1))).code).toBe('not_implemented')
-    expect(() => app.deps.files.pinnedIds()).toThrow(HarnessError)
+    for (const kind of ['import', 'delete-all', 'key-rotation'] as const) {
+      let finish!: () => void
+      const holder = app.deps.maintenance.exclusive(kind, () => new Promise<void>((resolve) => {
+        finish = resolve
+      }))
+      for (const attempt of [app.deps.data.cleanupPreview(), app.deps.data.cleanup()])
+        expect((await rejection(attempt)).toJSON().error, kind).toEqual({ code: 'conflict', message: MAINTENANCE_BUSY_MESSAGE, details: { reason: 'busy' } })
+      finish()
+      await holder
+    }
+    expect(await app.deps.settings.getInternal(FILE_STATE_SETTING)).toBeUndefined()
+    expect((await app.deps.data.cleanupPreview()).lastRunAt).toBeNull()
+  })
+
+  it('releases the lock and stores nothing when the sweep fails', async () => {
+    const failure = new HarnessError({ code: 'internal_error', message: 'disk gone' })
+    const app = await dataApp({ files: inner => ({ ...inner, sweep: async () => Promise.reject(failure) }) })
+    expect(await rejection(app.deps.data.cleanup())).toBe(failure)
+    expect(app.deps.maintenance.current()).toBeNull()
+    expect(await app.deps.settings.getInternal(FILE_STATE_SETTING)).toBeUndefined()
+  })
+
+  it('ignores a malformed stored state', async () => {
+    const app = await dataApp()
+    await app.deps.settings.setInternal(FILE_STATE_SETTING, { lastCleanup: 'yesterday' })
+    expect((await app.deps.data.cleanupPreview()).lastRunAt).toBeNull()
+    await app.deps.settings.setInternal(FILE_STATE_SETTING, ['not', 'an', 'object'])
+    expect((await app.deps.data.cleanupPreview()).lastRunAt).toBeNull()
+    const result = await app.deps.data.cleanup()
+    expect(await app.deps.settings.getInternal(FILE_STATE_SETTING)).toEqual({ lastCleanup: result.ranAt })
   })
 })

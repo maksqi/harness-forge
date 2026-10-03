@@ -12,6 +12,12 @@
 // was never stored, so it is never named as a parent; a `404` means the shown path is stale and reloads it. Another tab
 // that moves the active leaf is followed: `chat.updated` carries it, and an idle session whose path ends elsewhere
 // reloads the path (`followActiveLeaf()`, S5). Image-capable models get the composer's image options (ADR-028).
+//
+// Projects (ADR-031): a new chat's project is the picker's choice, else the project the chat list is filtered by; it is
+// sent with the first request only (the server honors it when the request creates the chat). A saved chat's project
+// comes from the chats store row or the summary and changes through `PATCH /api/chats/:id`. "Accept all edits in this
+// chat" switches the chat to the `edits` permission mode before the approval goes out (ADR-032). After a master-key
+// rotation (ADR-034) the sessions of the chats it touched reload their path (expired approvals, stopped runs).
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   ChatDetail,
@@ -46,6 +52,7 @@ import { useServerEvents } from '~/composables/useServerEvents'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectsStore } from '~/stores/projects'
 import { useSettingsStore } from '~/stores/settings'
 import { hasErrorCode, toHarnessError } from '~/utils/errors'
 
@@ -167,14 +174,13 @@ export interface ChatSession {
   takeBackUnstored: () => HarnessUIMessage | null
   /**
    * + Phase 7 (ADR-031): the chat's project. A new chat: the picker's choice, else the filter's project (when it names a
-   * known project); a saved chat: `chats.byId(id)?.projectId ?? summary.projectId`. Skeleton (C15, P7-0b): always null
-   * until W7.10 implements it.
+   * known project); a saved chat: its chats store row, else `summary.projectId` (else the project its first request
+   * sent, until the server describes the chat).
    */
   projectId: ComputedRef<string | null>
   /**
    * + Phase 7: a new chat: local only (sent with the first request); a persisted chat: `PATCH /api/chats/:id
-   * { projectId }` (throws `HarnessError` on 409 run-active / 404). Skeleton (C15, P7-0b): rejects with
-   * `not_implemented` until W7.10 implements it.
+   * { projectId }` (throws `HarnessError` on 409 run-active / 404; `useMoveChat` is the menu action with the toasts).
    */
   setProject: (projectId: string | null) => Promise<void>
 }
@@ -224,6 +230,11 @@ export function buildChatRequestBody(input: {
   toolMode: ToolMode
   /** `useImageOptions().forModel(model)`: set only for image models and chat models with image output (ADR-028). */
   imageOptions?: ImageOptions
+  /**
+   * The project of a chat the server does not know yet (ADR-031): sent with a new user message only (the server honors
+   * it when the request creates the chat). The caller passes it only while the chat is not persisted.
+   */
+  projectId?: string | null
 }): ChatRequestBody {
   const message = input.messages.at(-1)
   if (!message)
@@ -245,6 +256,8 @@ export function buildChatRequestBody(input: {
     body.messageId = input.messageId
   if (input.imageOptions)
     body.imageOptions = input.imageOptions
+  if (kind === 'new' && input.projectId)
+    body.projectId = input.projectId
   return body
 }
 
@@ -265,6 +278,14 @@ function conflictReason(error: unknown): unknown {
 export function isRunActiveConflict(error: unknown): boolean {
   const reason = conflictReason(error)
   return reason === null || reason === 'run-active'
+}
+
+/**
+ * `409 conflict` (reason `busy`): a maintenance task holds off new runs; for a chat request that is a master-key rotation
+ * (ADR-034, docs/UI.md 7.4).
+ */
+export function isBusyConflict(error: unknown): boolean {
+  return conflictReason(error) === 'busy'
 }
 
 /** The server stored nothing for a new user message whose request failed this way. */
@@ -341,6 +362,7 @@ interface SessionDeps {
   chats: ReturnType<typeof useChatsStore>
   models: ReturnType<typeof useModelsStore>
   plugins: ReturnType<typeof usePluginsStore>
+  projects: ReturnType<typeof useProjectsStore>
   settings: ReturnType<typeof useSettingsStore>
   imageOptions: ReturnType<typeof useImageOptions>
 }
@@ -352,7 +374,7 @@ interface ChatChoices {
 }
 
 function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSession {
-  const { api, apiFetch, chats, models, plugins, settings, imageOptions } = deps
+  const { api, apiFetch, chats, models, plugins, projects, settings, imageOptions } = deps
   // Watchers created later (resume, stop) belong to the session, not to whichever component is active then.
   const sessionScope = getCurrentScope()
   function inSession<T>(create: () => T): T {
@@ -441,11 +463,55 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
    * path. Events that repeat it (a rename, a pin) are not followed again until another leaf is announced.
    */
   let unreachableLeaf: string | null | undefined
+  /** A master-key rotation touched this chat while a request was in flight: reload once it settles. */
+  let reloadWhenIdle = false
+
+  // ---------- project (ADR-031) ----------
+
+  /**
+   * The project picked for a chat the server does not know yet: undefined = no pick (the filter's project counts), null =
+   * "No project".
+   */
+  const pickedProject = shallowRef<string | null | undefined>(undefined)
+  /** The project the first request of a new chat sent: the chat's project until the server describes the chat. */
+  const createdProject = shallowRef<string | null>(null)
+  /**
+   * A saved chat's project as the chats store row or the summary last reported it, whichever changed last (undefined =
+   * neither did yet). The row follows a move at once (optimistic, rolled back on an error) and a deleted project, but
+   * leaves the list when the chat no longer matches its filter; the summary follows the server's events.
+   */
+  const reportedProject = shallowRef<string | null | undefined>(undefined)
+  function reportProject(value: string | null | undefined) {
+    if (value !== undefined)
+      reportedProject.value = value
+  }
+  watch(() => chats.byId(id)?.projectId, reportProject, { flush: 'sync', immediate: true })
+  watch(() => summary.value?.projectId, reportProject, { flush: 'sync' })
+
+  /** The project the chat list is filtered by, when the projects store knows it (`all` and `none` name none). */
+  function filterProject(): string | null {
+    const filter = chats.projectFilter
+    return filter !== 'all' && filter !== 'none' && projects.byId(filter) ? filter : null
+  }
+
+  const projectId = computed<string | null>(() => {
+    if (!persisted.value)
+      return pickedProject.value !== undefined ? pickedProject.value : filterProject()
+    return reportedProject.value !== undefined ? reportedProject.value : createdProject.value
+  })
+
+  // A new chat follows the switcher: another filter drops an earlier pick (a pick that also set the filter, as the
+  // picker does while the list is filtered, names the same project).
+  watch(() => chats.projectFilter, () => {
+    if (!persisted.value)
+      pickedProject.value = undefined
+  })
 
   const transport = new DefaultChatTransport<HarnessUIMessage>({
     api: CHAT_API,
     fetch: apiFetch,
     prepareSendMessagesRequest: ({ id: chatId, messages, trigger, messageId }) => {
+      const firstRequest = !persisted.value
       const body = buildChatRequestBody({
         chatId,
         messages,
@@ -455,9 +521,13 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
         reasoningEffort: reasoningEffort.value,
         toolMode: toolMode.value,
         imageOptions: imageOptions.forModel(modelRef.value ? models.byRef(modelRef.value) : null),
+        // Only a request that creates the chat sets its project; later ones move nothing.
+        projectId: firstRequest ? projectId.value : null,
       })
       const kind = chatRequestKind(trigger, body.message)
       request = { kind, userMessageId: kind === 'new' ? body.message.id : null }
+      if (firstRequest && kind === 'new')
+        createdProject.value = body.projectId ?? null
       return { body }
     },
   })
@@ -631,13 +701,15 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
         summary.value = { ...summary.value, running: false }
       const finished = finishedWhileBusy
       finishedWhileBusy = null
+      const rotated = reloadWhenIdle
+      reloadWhenIdle = false
       if (!streamed) {
         // 204: nothing runs any more; drop a stale running dot.
         chats.setRunState(id, toListRunState(runState.value))
       }
       // A replay rebuilds only what the run streamed (an approval continuation lacks the earlier parts), and a run
       // that finished meanwhile is only in the database: reload either way.
-      if (streamed || finished)
+      if (streamed || finished || rotated)
         await refresh()
     })()
     return resuming
@@ -692,12 +764,41 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     if (event.data.id === id)
       queueMicrotask(() => forgetChatSession(id))
   })
+  // A deleted project detaches its chats on the server without a `chat.updated` per chat (ADR-031).
+  events.on('project.changed', (event) => {
+    if (event.data.project !== null)
+      return
+    const deleted = event.data.id
+    if (pickedProject.value === deleted)
+      pickedProject.value = undefined
+    if (createdProject.value === deleted)
+      createdProject.value = null
+    if (summary.value?.projectId === deleted)
+      summary.value = { ...summary.value, projectId: null }
+    if (reportedProject.value === deleted)
+      reportedProject.value = null
+  })
+  // A master-key rotation denied this chat's pending approvals and stopped its run (ADR-034): show the stored path.
+  events.on('key.rotated', (event) => {
+    if (!event.data.chatIds.includes(id))
+      return
+    if (busy.value || resuming)
+      reloadWhenIdle = true
+    else
+      void refresh()
+  })
   watch(busy, (isBusy) => {
-    if (isBusy || resuming || !finishedWhileBusy)
+    if (isBusy || resuming)
       return
     const finished = finishedWhileBusy
     finishedWhileBusy = null
-    onRunFinished(finished)
+    const rotated = reloadWhenIdle
+    reloadWhenIdle = false
+    // A reload covers whatever the finished run needed (its versions too).
+    if (rotated)
+      void refresh()
+    else if (finished)
+      onRunFinished(finished)
   })
 
   // ---------- actions ----------
@@ -899,14 +1000,32 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     return task
   }
 
-  // Phase 7 skeleton (C15, P7-0b): W7.10 implements the project of the session.
-  const projectId = computed<string | null>(() => null)
-
-  async function setProject(_projectId: string | null): Promise<void> {
-    throw new HarnessError({ code: 'not_implemented', message: 'Moving a chat to a project is not implemented yet.' })
+  async function setProject(next: string | null): Promise<void> {
+    if (!persisted.value) {
+      // Sent with the first request.
+      pickedProject.value = next
+      return
+    }
+    const before = summary.value
+    const optimistic = before ? { ...before, projectId: next } : null
+    if (optimistic)
+      summary.value = optimistic
+    try {
+      // The chats store patches its row optimistically and rolls it back on an error.
+      summary.value = await chats.update(id, { projectId: next })
+    }
+    catch (error) {
+      if (optimistic && summary.value === optimistic)
+        summary.value = before
+      throw toHarnessError(error)
+    }
   }
 
   async function approve(decision: ToolApprovalDecision): Promise<void> {
+    // "Accept all edits in this chat" (ADR-032): the mode is picked (and saved on the chat) first, so the continuation
+    // this response sends already runs in edits mode.
+    if (decision.approved && decision.acceptEdits && toolMode.value !== 'edits')
+      toolMode.value = 'edits'
     const preference = decision.approved && decision.alwaysAllow
       ? plugins.setToolPref(decision.toolName, { override: 'allow' })
       : null
@@ -1049,6 +1168,7 @@ export function useChatSession(id: string, options: { isNew?: boolean } = {}): C
       chats: useChatsStore(),
       models: useModelsStore(),
       plugins: usePluginsStore(),
+      projects: useProjectsStore(),
       settings: useSettingsStore(),
       imageOptions: useImageOptions(),
     }

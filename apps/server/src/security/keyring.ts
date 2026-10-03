@@ -258,6 +258,34 @@ function writeNewFile(path: string, data: Buffer): void {
   }
 }
 
+/** A new random 32-byte master key (`crypto.randomBytes`); the caller zeroes it when done. */
+export function generateMasterKey(): Buffer {
+  return randomBytes(MASTER_KEY_BYTES)
+}
+
+/**
+ * Writes `key` as a new key file (the base64 text of `secret.key` plus a newline): exclusive create (an existing file
+ * is never replaced: `EEXIST`), mode 0600, fsync of the file and of its folder. Used for the write-ahead
+ * `secret.key.next` of a key rotation (ADR-034). The encoded copy of the key is zeroed afterwards.
+ */
+export function writeMasterKeyFile(path: string, key: Uint8Array): void {
+  if (key.length !== MASTER_KEY_BYTES)
+    throw new KeyringError(`The master key must be exactly ${MASTER_KEY_BYTES} bytes.`)
+  const data = Buffer.from(`${encodeMasterKey(key)}\n`, 'utf8')
+  try {
+    writeNewFile(path, data)
+  }
+  finally {
+    data.fill(0)
+  }
+  fsyncDirectory(dirname(path))
+}
+
+/** Best effort: makes a new directory entry (a created, renamed or removed file) durable. */
+export function syncDirectory(dir: string): void {
+  fsyncDirectory(dir)
+}
+
 /** Best effort: makes a new directory entry durable (not supported on every platform). */
 function fsyncDirectory(dir: string): void {
   try {

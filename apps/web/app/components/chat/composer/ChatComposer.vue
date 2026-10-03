@@ -13,6 +13,8 @@
 // started (insertDictation), Esc cancels a recording or a transcription before it stops a response, starting a
 // recording stops read-aloud, Send stays disabled while voice input runs, and a polite live region announces the
 // dictation steps.
+// Phase 7: `projectId` marks a project chat, where PermissionMenu offers Accept edits (also shown while it is the
+// current value) and `/mode edits` selects it; elsewhere `/mode edits` explains "Accept edits works in project chats."
 import type { ClientCommand, ImageOptions, MessageUsage, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { DictationRange } from './dictation'
@@ -56,6 +58,7 @@ import MicButton from './MicButton.vue'
 import { isPickerModel, resolveModelQuery } from './model-picker'
 import ModelPicker from './ModelPicker.vue'
 import { navigateTo } from './nuxt-imports'
+import { offeredToolModes } from './permission'
 import PermissionMenu from './PermissionMenu.vue'
 import RecordingIndicator from './RecordingIndicator.vue'
 import { enterKeyAction, isComposingEvent } from './send-key'
@@ -296,11 +299,17 @@ function openMenu(menu: 'model' | 'effort' | 'mode') {
     permissionOpen.value = true
 }
 
+// ---------- permission mode (Accept edits: project chats, ADR-032) ----------
+
+const projectChat = computed(() => props.projectId !== null)
+const permissionModes = computed(() => offeredToolModes({ projectChat: projectChat.value, current: props.toolMode }))
+
 function runClientCommand(name: ClientCommand, args: string) {
   const action = resolveClientCommand(name, args, {
     resolveModel: query => resolveModelQuery(query, models.visible.filter(isPickerModel), modelRef => models.byRef(modelRef)),
     efforts: current.efforts.value,
     toolsAvailable: current.toolsAvailable.value,
+    projectChat: projectChat.value,
   })
   if (action.type === 'error') {
     toast.error(action.message)
@@ -718,6 +727,7 @@ const TEXTAREA_CLASS = [
             v-if="current.toolsAvailable.value && !voiceIndicator"
             v-model:open="permissionOpen"
             :model-value="toolMode"
+            :modes="permissionModes"
             :return-focus-to="focusTarget"
             @update:model-value="value => emit('update:toolMode', value)"
           />

@@ -13,7 +13,8 @@
 //      outcome) and `IMAGE_MAX_RETRIES`; failures go through `providers.mapError` (an empty result is a
 //      `provider_error`) and provider failures are recorded as the provider outcome;
 //   6. writes one usage row (`purpose: 'image'`, estimated cost from the catalog prices), records the outcome and stores
-//      every image through `files.saveGenerated`: a refused image (type, size, bytes) counts in `dropped`.
+//      every image through `files.saveGenerated`: a refused image (type, size, bytes) counts in `dropped`;
+//   7. answers the model ref and (Phase 7, plugin API 1.2.0) `modelName`: the catalog name, else the model id.
 // The log line carries provider, model, `n`, aspect ratio, input count, stored / dropped counts, bytes, usage, cost and
 // milliseconds; never the prompt.
 import type { ImageParamsRequest, ImageParamsResult } from '@harness-forge/plugin-sdk'
@@ -28,7 +29,7 @@ import { HarnessError, IMAGE_ASPECT_RATIOS, isHarnessError, LIMITS, validationEr
 import { generateImage, NoImageGeneratedError } from 'ai'
 import { fileUrl } from '../files/index.ts'
 import { canonicalMime, extensionForMime } from '../files/sniff.ts'
-import { imageCost, imageUsage, revisedPromptOf, sanitizeImageParams } from './generation.ts'
+import { imageCost, imageModelDisplayName, imageUsage, revisedPromptOf, sanitizeImageParams } from './generation.ts'
 
 /** The error of a generation without a model (the `generate_image` error text of ADR-028). */
 export const NO_IMAGE_MODEL_MESSAGE = 'Choose an image model in Settings → Media.'
@@ -270,8 +271,8 @@ export function createImageService(deps: AppDeps): ImageService {
     })
     return {
       modelRef: resolved.modelRef,
-      // Phase 7 (plugin API 1.2.0): the display name of the catalog entry, else the model id (W7.6 owns the rule).
-      modelName: resolved.entry.name || resolved.modelId,
+      // Phase 7 (plugin API 1.2.0): the display name of the catalog entry, else the model id.
+      modelName: imageModelDisplayName(resolved.entry.name, resolved.modelId),
       images: stored.images,
       usage,
       costUsd,

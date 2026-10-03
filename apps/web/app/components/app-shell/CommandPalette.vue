@@ -1,10 +1,11 @@
 <script setup lang="ts">
-// Command palette (docs/UI.md 5.3, 10.4, 12): Mod+K or the sidebar Search row. Chats first (recent chats, or a
-// debounced `GET /api/chats?q=` search with local title matches until the results arrive), then actions, pages,
-// the default model (while searching) and the theme. Bound to ui.paletteOpen. Its setup registers the global
-// shortcuts (useGlobalShortcuts): layouts/default.vue mounts it once. Contract: no props, no emits.
+// Command palette (docs/UI.md 5.3, 7.20, 10.4, 12): Mod+K or the sidebar Search row. Chats first (recent chats, or a
+// debounced `GET /api/chats?q=` search with local title matches until the results arrive; the project filter does not
+// apply), then actions, projects (Phase 7, while searching: the chat list's filter, Add project…, moving the open
+// chat), pages, the default model (while searching) and the theme. Bound to ui.paletteOpen. Its setup registers the
+// global shortcuts (useGlobalShortcuts): layouts/default.vue mounts it once. Contract: no props, no emits.
 import type { ChatSummary } from '@harness-forge/shared'
-import type { PaletteCommand, PaletteItem, PaletteModel } from './chat-nav/palette'
+import type { PaletteCommand, PaletteItem, PaletteModel, PaletteProject } from './chat-nav/palette'
 import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import {
@@ -21,10 +22,13 @@ import { useSidebar } from '@/components/ui/sidebar'
 import { cn } from '@/lib/utils'
 import KbdCombo from '~/components/common/KbdCombo.vue'
 import RelativeTime from '~/components/common/RelativeTime.vue'
+import { useMoveChat } from '~/components/projects/move-chat'
+import { loadProjectsOnce } from '~/components/projects/projects-load'
 import ProviderIcon from '~/components/providers/ProviderIcon.vue'
 import { useGlobalShortcuts } from '~/composables/useGlobalShortcuts'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
+import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
@@ -45,9 +49,11 @@ const chats = useChatsStore()
 const models = useModelsStore()
 const providers = useProvidersStore()
 const settings = useSettingsStore()
+const projects = useProjectsStore()
 const colorMode = useColorMode()
 const sidebar = useSidebar(null)
 const newChat = useNewChat()
+const moveChat = useMoveChat()
 
 const open = computed({
   get: () => ui.paletteOpen,
@@ -130,6 +136,7 @@ watch(() => ui.paletteOpen, (isOpen) => {
   modelsRequested = false
   if (!chats.loaded && !chats.loading)
     chats.fetchPage().catch(() => {})
+  loadProjectsOnce()
 }, { immediate: true })
 
 onScopeDispose(stopSearch)
@@ -147,6 +154,15 @@ const paletteModels = computed<PaletteModel[]>(() => models.visible
     }
   }))
 
+const paletteProjects = computed<PaletteProject[]>(() => projects.sorted.map(project => ({ id: project.id, name: project.name })))
+
+/** The open chat and its project, when its summary is known. */
+const openChat = computed(() => {
+  const id = ui.activeChatId
+  const summary = id ? chats.byId(id) : undefined
+  return summary ? { id: summary.id, projectId: summary.projectId } : null
+})
+
 const sections = computed(() => buildPaletteSections({
   query: query.value,
   chats: chats.items,
@@ -155,6 +171,9 @@ const sections = computed(() => buildPaletteSections({
   defaultModelRef: settings.resolved.defaultModelRef,
   theme: normalizeThemePreference(colorMode.preference),
   canToggleSidebar: sidebar !== null,
+  projects: paletteProjects.value,
+  projectFilter: chats.projectFilter,
+  openChat: openChat.value,
 }))
 
 /** Changes when results arrive for the same query, so the first item is highlighted again. */
@@ -202,6 +221,14 @@ function run(command: PaletteCommand) {
     case 'theme':
       ui.closePalette()
       colorMode.preference = command.value
+      return
+    case 'project-filter':
+      ui.closePalette()
+      chats.setProjectFilter(command.filter).catch(() => {})
+      return
+    case 'move-chat':
+      ui.closePalette()
+      void moveChat(command.chatId, command.projectId)
   }
 }
 

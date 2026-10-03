@@ -1,5 +1,6 @@
 <script setup lang="ts">
-// Empty-state greeting (docs/UI.md 2.2, 7.13): ember mark and "What's next, {displayName}?" in Source Serif.
+// Empty-state greeting (docs/UI.md 2.2, 7.13): ember mark and "What's next, {displayName}?" in Source Serif. The default
+// slot sits right under the heading (the new-chat project picker, docs/UI.md 2.12, 7.20).
 import { computed } from 'vue'
 import BrandMark from '~/components/common/BrandMark.vue'
 import { useSettingsStore } from '~/stores/settings'
@@ -21,5 +22,6 @@ const greeting = computed(() => {
     >
       {{ greeting }}
     </h1>
+    <slot />
   </div>
 </template>

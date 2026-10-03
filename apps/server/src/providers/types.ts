@@ -95,8 +95,8 @@ export interface ProviderService {
    */
   readonly test: (id: string, values?: Record<string, string>) => Promise<ProviderTestResult>
   /**
-   * `providerId:modelId` (split on the first `:`) -> registered and enabled provider (`not_found` /
-   * `provider_not_configured`) -> credentials (missing required -> `provider_not_configured`, action
+   * `providerId:modelId` (split on the first `:`) -> registered and enabled provider (unknown or disabled ->
+   * `provider_not_configured`, action `configure-provider`; Phase 7: an unknown provider was `not_found` before) -> credentials (missing required -> `provider_not_configured`, action
    * `configure-provider`, before any network call) -> catalog entry (unknown -> `model_not_found`, action
    * `refresh-models`) -> guarded `createLanguageModel`.
    *
@@ -107,7 +107,7 @@ export interface ProviderService {
   readonly resolveModel: (modelRef: string, options?: ResolveModelOptions) => Promise<ResolvedModel>
   /**
    * An image model for `generateImage` (ADR-028, ARCHITECTURE.md 6.11; implemented by W6.2). The checks of
-   * `resolveModel` in the same order (unknown provider -> `not_found`; disabled provider or missing required
+   * `resolveModel` in the same order (unknown provider (Phase 7), disabled provider or missing required
    * credentials -> `provider_not_configured`, action `configure-provider`, before any network call; unknown catalog
    * entry -> `model_not_found`, action `refresh-models`), then:
    * - a model whose `entry.kind` is not `image` -> `validation_error` (the model named);
@@ -118,7 +118,7 @@ export interface ProviderService {
   readonly resolveImageModel: (modelRef: string, options?: ResolveModelOptions) => Promise<ResolvedImageModel>
   /**
    * A transcription model for `transcribe` (dictation, ADR-029, ARCHITECTURE.md 6.12; implemented by W6.2). The checks
-   * of `resolveModel` in the same order (`not_found`, `provider_not_configured`, `model_not_found` as above), then:
+   * of `resolveModel` in the same order (`provider_not_configured`, `model_not_found` as above), then:
    * - a model whose `entry.kind` is not `transcription` -> `validation_error` (the model named);
    * - a provider without `createTranscriptionModel` -> `validation_error` (the model named; the catalog leaves such
    *   listing / seed / models.dev entries out, e.g. `alibaba:qwen3-asr-flash`, so this is reached by a custom model);

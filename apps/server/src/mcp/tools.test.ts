@@ -1,6 +1,7 @@
 import type { ToolDefinition } from '@harness-forge/plugin-sdk'
 import type { McpManager } from './types.ts'
-import { toolSummarySchema } from '@harness-forge/shared'
+import process from 'node:process'
+import { toolSummarySchema, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import { jsonSchema } from 'ai'
 import { afterEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -50,6 +51,46 @@ describe('tool service', () => {
     expect(items[0]?.inputSchema).toMatchObject({ type: 'object', properties: { text: { type: 'string', description: 'Text' } } })
     expect(items[1]).toMatchObject({ policy: null, inputSchema: { type: 'object', properties: { n: { type: 'number' } } } })
     expect(items[2]?.policy).toBe('safe')
+  })
+
+  it('reports the workspace access of a definition (plugin API 1.2.0), null without one and for MCP tools', async () => {
+    const { t } = await app()
+    t.deps.registry.tools.register('alpha', tool('read_tool', { workspace: 'read' }))
+    t.deps.registry.tools.register('alpha', tool('write_tool', { workspace: 'write' }))
+    t.deps.registry.tools.register('alpha', tool('exec_tool', { workspace: 'execute' }))
+    t.deps.registry.tools.register('alpha', tool('plain_tool'))
+    // An MCP definition never carries workspace access into the list, even if one were set.
+    t.deps.registry.tools.register('core-mcp', tool('mcp__docs__read', { workspace: 'read' }), { mcpServerId: 'docs' })
+    const items = await t.deps.tools.list()
+    for (const item of items)
+      toolSummarySchema.parse(item)
+    expect(Object.fromEntries(items.map(item => [item.name, item.workspace]))).toEqual({
+      exec_tool: 'execute',
+      mcp__docs__read: null,
+      plain_tool: null,
+      read_tool: 'read',
+      write_tool: 'write',
+    })
+    // `PATCH /tools/:name` answers the same summary, workspace included.
+    expect(await t.deps.tools.update('write_tool', { override: 'allow' })).toMatchObject({ workspace: 'write', override: 'allow' })
+  })
+
+  it('lists the 7 core-workspace tools with their access through GET /tools', async () => {
+    const t = await createTestApp()
+    closers.push(() => t.close())
+    const res = await t.request('/api/tools')
+    expect(res.status).toBe(200)
+    const body = await res.json() as { items: unknown[] }
+    const items = body.items.map(item => toolSummarySchema.parse(item))
+    const workspace = items.filter(item => item.pluginId === 'core-workspace')
+    const expected = process.platform === 'win32'
+      ? Object.entries(WORKSPACE_TOOL_ACCESS).filter(([name]) => name !== 'shell')
+      : Object.entries(WORKSPACE_TOOL_ACCESS)
+    expect(Object.fromEntries(workspace.map(item => [item.name, item.workspace]))).toEqual(Object.fromEntries(expected))
+    if (process.platform !== 'win32')
+      expect(workspace).toHaveLength(7)
+    // Tools of other builtins use no workspace.
+    expect(items.filter(item => item.pluginId === 'core-tools').map(item => item.workspace)).toEqual([null, null, null])
   })
 
   it('stores enabled / override prefs, deletes default rows and exposes them to the chat pipeline', async () => {

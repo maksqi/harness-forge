@@ -12,14 +12,14 @@ import type { AudioServiceOptions } from './index.ts'
 // options, `NoTranscriptGeneratedError`, speech types, timeouts, client aborts, error mapping + provider outcome, usage
 // rows, and log lines that never carry a transcript or speech text.
 import { APICallError } from '@ai-sdk/provider'
-import { HarnessError, LIMITS } from '@harness-forge/shared'
+import { HarnessError, harnessErrorEnvelopeSchema, LIMITS } from '@harness-forge/shared'
 import { generateSpeech, transcribe } from 'ai'
 import { MockSpeechModelV4, MockTranscriptionModelV4 } from 'ai/test'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readWav } from '../../builtin-plugins/mock/media.test-util.ts'
 import { createMockWav, MOCK_TRANSCRIPT } from '../../builtin-plugins/mock/media.ts'
 import { usage } from '../../db/schema.ts'
-import { createProviderServiceWith } from '../../providers/index.ts'
+import { createProviderServiceWith, unknownProviderMessage } from '../../providers/index.ts'
 import { withFakeMediaResolvers } from '../../providers/testing.ts'
 import { SAMPLE_WEBM_BYTES } from '../../testing/api-samples.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
@@ -257,7 +257,9 @@ describe('audioService.transcribe', () => {
     expect((await rejection(t.deps.audio.transcribe({ file: recording(), form: { modelRef: 'mock:speech' }, signal: signal() }))).code).toBe('validation_error')
     expect((await rejection(t.deps.audio.transcribe({ file: recording(), form: { modelRef: 'mock:nope' }, signal: signal() }))).toJSON().error)
       .toMatchObject({ code: 'model_not_found', action: 'refresh-models' })
-    expect((await rejection(t.deps.audio.transcribe({ file: recording(), form: { modelRef: 'acme:whisper' }, signal: signal() }))).code).toBe('not_found')
+    // Phase 7: an unknown provider is provider_not_configured (400, action configure-provider).
+    expect((await rejection(t.deps.audio.transcribe({ file: recording(), form: { modelRef: 'acme:whisper' }, signal: signal() }))).toJSON().error)
+      .toMatchObject({ code: 'provider_not_configured', action: 'configure-provider', providerId: 'acme', message: unknownProviderMessage('acme') })
     expect(model.calls).toEqual([])
     expect(audioLines(t, 'transcription')).toEqual([])
     expect(await t.db.select().from(usage)).toEqual([])
@@ -531,6 +533,55 @@ describe('usage rows and logs', () => {
     const logs = t.logs.text()
     expect(logs).not.toContain(MOCK_TRANSCRIPT)
     expect(logs).not.toContain(SPEECH_TEXT)
+  })
+})
+
+describe('unknown provider on the audio routes (Phase 7, ADR-028 consequence)', () => {
+  const expected = {
+    code: 'provider_not_configured',
+    action: 'configure-provider',
+    providerId: 'nope',
+    message: 'The provider "nope" is not available. Pick another model or install the provider.',
+  }
+
+  function transcribeInit(modelRef: string): RequestInit {
+    const form = new FormData()
+    form.append('file', recording())
+    form.append('modelRef', modelRef)
+    return { method: 'POST', body: form }
+  }
+
+  function speechInit(modelRef: string): RequestInit {
+    return { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: SPEECH_TEXT, modelRef }) }
+  }
+
+  it.each([
+    ['the real resolvers', async () => createTestApp({ env: { HF_MOCK_PROVIDER: '1' } })],
+    ['the fake media resolvers', async () => audioApp()],
+  ])('answers 400 provider_not_configured for POST /audio/transcriptions and /audio/speech with %s', async (_label, create) => {
+    const t = await create()
+    if (!apps.includes(t))
+      apps.push(t)
+    for (const [path, init] of [['/api/audio/transcriptions', transcribeInit('nope:x')], ['/api/audio/speech', speechInit('nope:x')]] as const) {
+      const response = await t.request(path, init)
+      expect(response.status, path).toBe(400)
+      expect(harnessErrorEnvelopeSchema.parse(await response.json()).error, path).toMatchObject(expected)
+    }
+    // The settings models fail the same way (a provider removed after it was chosen).
+    await t.deps.settings.update({ transcriptionModelRef: 'nope:listen', speechModelRef: 'nope:say' })
+    const form = new FormData()
+    form.append('file', recording())
+    for (const [path, init] of [
+      ['/api/audio/transcriptions', { method: 'POST', body: form }],
+      ['/api/audio/speech', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: SPEECH_TEXT }) }],
+    ] as const) {
+      const response = await t.request(path, init)
+      expect(response.status, path).toBe(400)
+      expect(harnessErrorEnvelopeSchema.parse(await response.json()).error, path).toMatchObject(expected)
+    }
+    expect(vi.mocked(transcribe)).not.toHaveBeenCalled()
+    expect(vi.mocked(generateSpeech)).not.toHaveBeenCalled()
+    expect(await t.db.select().from(usage)).toEqual([])
   })
 })
 

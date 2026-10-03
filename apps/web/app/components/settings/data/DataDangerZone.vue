@@ -109,8 +109,8 @@ function onPasswordCloseAutoFocus(event: Event): void {
   <SettingsSection title="Danger zone">
     <div class="flex flex-col gap-4 rounded-xl border border-destructive/40 p-4 sm:flex-row sm:items-center">
       <p class="min-w-0 flex-1 text-sm text-muted-foreground">
-        Delete every chat, including archived chats, every message version and every share link. API keys, plugins and
-        settings are kept.
+        Delete every chat, including archived chats, every message version and every share link. API keys, plugins,
+        projects and settings are kept.
       </p>
       <DataDeleteDialog
         ref="deleteDialog"

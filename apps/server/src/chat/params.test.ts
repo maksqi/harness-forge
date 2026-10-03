@@ -4,7 +4,18 @@ import type { ResolvedModel } from '../providers/types.ts'
 import type { RunParamsInput } from './params.ts'
 import { describe, expect, it } from 'vitest'
 import { createSilentLogger } from '../logger.ts'
-import { buildRunParams, joinInstructions, mergeProviderOptions, providerImageOptions, providerReasoning } from './params.ts'
+import {
+  buildRunParams,
+  joinInstructions,
+  mergeProviderOptions,
+  osName,
+  projectFileInstructions,
+  providerImageOptions,
+  providerReasoning,
+  runInstructions,
+  runMaxSteps,
+  workspaceBlock,
+} from './params.ts'
 
 function resolved(options: { reasoning?: boolean, efforts?: ReasoningEffort[], fn?: (effort: ReasoningEffort) => ReasoningParams | undefined } = {}): ResolvedModel {
   return {
@@ -98,7 +109,7 @@ describe('buildRunParams', () => {
       instructions: 'Global.\n\nChat. Hooked.',
       temperature: 0.2,
       maxOutputTokens: 512,
-      maxSteps: 100,
+      maxSteps: 200,
       reasoning: 'low',
       providerOptions: { prov: { budget: 1024 }, extra: { on: true } },
       headers: { 'x-ok': 'yes' },
@@ -123,6 +134,113 @@ describe('buildRunParams', () => {
       providerOptions: { prov: { budget: 1024 } },
       headers: {},
     })
+  })
+})
+
+describe('steps (Phase 7)', () => {
+  it('uses projectMaxSteps in a chat with a project, maxSteps otherwise', () => {
+    expect(runMaxSteps({ maxSteps: 20, projectMaxSteps: 100 }, null)).toBe(20)
+    expect(runMaxSteps({ maxSteps: 20, projectMaxSteps: 100 }, 'prj_0123456789abcdef')).toBe(100)
+  })
+
+  it('clamps the chat.params maxSteps to 1..200', async () => {
+    const withHook = (value: number) => input({
+      maxSteps: 100,
+      run: async (name, ...args) => {
+        if (name === 'chat.params')
+          (args[1] as { maxSteps: number }).maxSteps = value
+      },
+    })
+    expect((await buildRunParams(withHook(1000))).maxSteps).toBe(200)
+    expect((await buildRunParams(withHook(200))).maxSteps).toBe(200)
+    expect((await buildRunParams(withHook(150))).maxSteps).toBe(150)
+    expect((await buildRunParams(withHook(0))).maxSteps).toBe(1)
+    expect((await buildRunParams(withHook(-4))).maxSteps).toBe(1)
+    expect((await buildRunParams(input({ maxSteps: 100 }))).maxSteps).toBe(100)
+  })
+})
+
+describe('workspace instructions (Phase 7)', () => {
+  const ALL_TOOLS = ['read_file', 'list_directory', 'find_files', 'search_files', 'write_file', 'edit_file', 'shell']
+  const workspace = {
+    name: 'Demo app',
+    root: '/srv/projects/demo',
+    instructions: ' Project rules. ',
+    projectFile: { name: 'AGENTS.md' as const, content: 'Run the tests.\n', truncated: false },
+  }
+
+  it('names the OS of the server host', () => {
+    expect(osName('darwin')).toBe('macOS')
+    expect(osName('linux')).toBe('Linux')
+    expect(osName('win32')).toBe('Windows')
+    expect(osName('haiku' as NodeJS.Platform)).toBe('haiku')
+    expect(osName()).toBeTypeOf('string')
+  })
+
+  it('without workspace tools has only the project name, folder and OS', () => {
+    expect(workspaceBlock(workspace, [], 'linux')).toBe('Project "Demo app", folder /srv/projects/demo (Linux).')
+    // The name is quoted as JSON: a quote or a line break cannot end the line.
+    expect(workspaceBlock({ name: 'My "x"\napp', root: '/r' }, [], 'darwin')).toBe('Project "My \\"x\\"\\napp", folder /r (macOS).')
+  })
+
+  it('builds the rules only from the offered tools', () => {
+    expect(workspaceBlock(workspace, ALL_TOOLS, 'linux')).toBe([
+      'Project "Demo app", folder /srv/projects/demo (Linux).',
+      '- Use paths relative to the project folder.',
+      '- Read a file with read_file before you change it.',
+      '- edit_file: old_string must match the file exactly, including whitespace and indentation, and must be unique in it; add surrounding lines to make it unique, or set replace_all.',
+      '- Prefer edit_file for changes to an existing file; use write_file to create a file or to replace all of its content.',
+      '- Each shell call runs in a new process: cd does not persist between calls (use cwd, or cd dir && command), there is no stdin (interactive commands cannot work), and background processes are stopped when the command ends.',
+    ].join('\n'))
+    const readOnly = workspaceBlock(workspace, ['read_file', 'list_directory'], 'linux')
+    expect(readOnly.split('\n')).toEqual(['Project "Demo app", folder /srv/projects/demo (Linux).', '- Use paths relative to the project folder.'])
+    const noShell = workspaceBlock(workspace, ALL_TOOLS.filter(name => name !== 'shell'), 'linux')
+    expect(noShell).not.toContain('shell')
+    expect(noShell).toContain('Prefer edit_file')
+    const editOnly = workspaceBlock(workspace, ['edit_file'], 'linux')
+    expect(editOnly).toContain('old_string must match')
+    expect(editOnly).not.toContain('read_file')
+    expect(editOnly).not.toContain('Prefer edit_file')
+    expect(workspaceBlock(workspace, ['shell'], 'linux').split('\n')).toHaveLength(3)
+    // A tool of another plugin with workspace access gets the generic rule only.
+    expect(workspaceBlock(workspace, ['lint_project'], 'linux').split('\n')).toEqual(['Project "Demo app", folder /srv/projects/demo (Linux).', '- Use paths relative to the project folder.'])
+  })
+
+  it('introduces the project file and skips an empty one', () => {
+    expect(projectFileInstructions(workspace.projectFile)).toBe('Instructions from AGENTS.md in the project folder:\n\nRun the tests.')
+    expect(projectFileInstructions({ name: 'CLAUDE.md', content: ' \n ', truncated: false })).toBe('')
+    expect(projectFileInstructions(null)).toBe('')
+  })
+
+  it('orders global, workspace block, project file, project instructions, chat instructions', () => {
+    const text = runInstructions({ globalInstructions: 'Global.', chatInstructions: 'Chat.', workspace, workspaceTools: ['read_file'], platform: 'linux' })
+    expect(text).toBe([
+      'Global.',
+      'Project "Demo app", folder /srv/projects/demo (Linux).\n- Use paths relative to the project folder.',
+      'Instructions from AGENTS.md in the project folder:\n\nRun the tests.',
+      'Project rules.',
+      'Chat.',
+    ].join('\n\n'))
+    // Without a workspace: global and chat instructions only.
+    expect(runInstructions({ globalInstructions: 'Global.', chatInstructions: 'Chat.', workspace: null })).toBe('Global.\n\nChat.')
+    // The block is there without tools, empty parts are skipped.
+    expect(runInstructions({ globalInstructions: '', chatInstructions: undefined, workspace: { ...workspace, instructions: null, projectFile: null }, platform: 'darwin' }))
+      .toBe('Project "Demo app", folder /srv/projects/demo (macOS).')
+  })
+
+  it('gives chat.params hooks the full instructions', async () => {
+    const seen: unknown[] = []
+    const params = await buildRunParams(input({
+      workspace,
+      workspaceTools: ['read_file'],
+      platform: 'linux',
+      run: async (name, ...args) => {
+        if (name === 'chat.params')
+          seen.push((args[1] as { instructions: string }).instructions)
+      },
+    }))
+    expect(params.instructions).toBe(seen[0])
+    expect(params.instructions).toBe('Global.\n\nProject "Demo app", folder /srv/projects/demo (Linux).\n- Use paths relative to the project folder.\n\nInstructions from AGENTS.md in the project folder:\n\nRun the tests.\n\nProject rules.\n\nChat.')
   })
 })
 

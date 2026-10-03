@@ -1,13 +1,19 @@
-// Settings -> Data rules (docs/UI.md 2.7, 9.8, 7.4; docs/API.md 4.16, 5.19; ADR-024): the summary and hint texts, the
-// checks of an import file, the wording of an import result, the error that gets special handling (busy; fresh auth is
+// Settings -> Data rules (docs/UI.md 2.7, 9.8, 7.4; docs/API.md 4.16, 5.19, 5.23; ADR-024, ADR-034, ADR-035): the
+// summary and hint texts, the checks of an import file, the wording of an import result, the texts of the Storage
+// cleanup and Encryption key sections, the errors that get special handling (busy, env-key, key-mismatch; fresh auth is
 // useFreshAuth's) and the browser storage that delete-all clears (composer drafts, unread marks).
 import type {
+  DataCleanupPreview,
+  DataCleanupResult,
   DataDeleteResult,
   DataImportItem,
   DataImportKind,
   DataImportResult,
   DataImportStatus,
   DataSummary,
+  KeyRotationResult,
+  KeySource,
+  KeyStatus,
 } from '@harness-forge/shared'
 import { LIMITS } from '@harness-forge/shared'
 import { formatBytes } from '~/components/common/format'
@@ -21,8 +27,11 @@ export const DELETE_CONFIRMATION = 'DELETE'
 /** Download name when the export response has no `Content-Disposition` file name. */
 export const BACKUP_FILE_NAME = 'harness-forge-backup.zip'
 
-/** Toast of a `409 conflict` with `details.reason: 'busy'` (docs/UI.md 7.4, 15). */
-export const BUSY_MESSAGE = 'Another import or delete is running. Try again when it finishes.'
+/**
+ * Toast of a `409 conflict` with `details.reason: 'busy'` (docs/UI.md 7.4, 15): an import, delete-all, key rotation or
+ * file cleanup is running (they share one lock on the server, ADR-034, ADR-035).
+ */
+export const BUSY_MESSAGE = 'Another data task is running. Try again when it finishes.'
 
 /** "256 MB": the upload limit of `POST /data/import` (`LIMITS.backupImportBytes`). */
 export const IMPORT_LIMIT_LABEL = formatBytes(LIMITS.backupImportBytes)
@@ -143,11 +152,18 @@ export function deletedMessage(result: Pick<DataDeleteResult, 'chats'>): string 
   return `Deleted ${countLabel(result.chats, 'chat')}`
 }
 
-/** `409 conflict` because another import or delete-all is running. */
-export function isBusyConflict(error: unknown): boolean {
+/** The `details.reason` of a `409 conflict`, or null for any other error. */
+export function conflictReason(error: unknown): string | null {
   const failure = toHarnessError(error)
-  const details = failure.details as { reason?: unknown } | undefined
-  return failure.code === 'conflict' && details?.reason === 'busy'
+  if (failure.code !== 'conflict')
+    return null
+  const reason = (failure.details as { reason?: unknown } | undefined)?.reason
+  return typeof reason === 'string' ? reason : null
+}
+
+/** `409 conflict` because another maintenance task (import, delete-all, key rotation, file cleanup) is running. */
+export function isBusyConflict(error: unknown): boolean {
+  return conflictReason(error) === 'busy'
 }
 
 /**
@@ -177,4 +193,120 @@ export function clearStoredChatState(): void {
   catch {
     // Same as above.
   }
+}
+
+// ---------- Storage cleanup (docs/UI.md 9.8, ADR-035) ----------
+
+/** Files on disk without a row (rowless blobs and stale temp files) that a cleanup removes too. */
+export function leftoverFiles(counts: Pick<DataCleanupPreview, 'blobs' | 'tempFiles'>): number {
+  return counts.blobs + counts.tempFiles
+}
+
+/** The check found something to remove: "Remove…" is enabled. */
+export function hasRemovableFiles(preview: DataCleanupPreview): boolean {
+  return preview.files > 0 || leftoverFiles(preview) > 0
+}
+
+/**
+ * First line of the cleanup summary: "12 files · 48 MB can be removed" plus ", and 2 leftover files on disk";
+ * "No unused files." when nothing can be removed.
+ */
+export function cleanupHeadline(preview: DataCleanupPreview): string {
+  const leftovers = leftoverFiles(preview)
+  if (preview.files === 0) {
+    return leftovers > 0
+      ? `${countLabel(leftovers, 'leftover file')} on disk can be removed`
+      : 'No unused files.'
+  }
+  const removable = `${countLabel(preview.files, 'file')} · ${formatBytes(preview.fileBytes)} can be removed`
+  return leftovers > 0 ? `${removable}, and ${countLabel(leftovers, 'leftover file')} on disk` : removable
+}
+
+/** "24 hours" for the grace period (whole hours; "1 hour" at least). */
+export function graceLabel(graceMs: number): string {
+  return countLabel(Math.max(1, Math.round(graceMs / 3_600_000)), 'hour')
+}
+
+/** "3 recent files are kept for 24 hours."; null when none are. */
+export function recentFilesLine(preview: DataCleanupPreview): string | null {
+  if (preview.recentFiles === 0)
+    return null
+  const verb = preview.recentFiles === 1 ? 'is' : 'are'
+  return `${countLabel(preview.recentFiles, 'recent file')} ${verb} kept for ${graceLabel(preview.graceMs)}.`
+}
+
+/** Text of the cleanup confirmation, with the counts of the last check. */
+export function cleanupConfirmText(preview: DataCleanupPreview): string {
+  const what = preview.files > 0
+    ? `${countLabel(preview.files, 'file')} (${formatBytes(preview.fileBytes)})`
+    : `${countLabel(leftoverFiles(preview), 'leftover file')} on disk`
+  return `This deletes ${what}. It can't be undone.`
+}
+
+/** Toast after a cleanup: "Removed 12 files (48 MB)". */
+export function cleanupResultMessage(result: DataCleanupResult): string {
+  if (result.files > 0)
+    return `Removed ${countLabel(result.files, 'file')} (${formatBytes(result.fileBytes)})`
+  const leftovers = leftoverFiles(result)
+  return leftovers > 0 ? `Removed ${countLabel(leftovers, 'leftover file')} from disk` : 'No unused files.'
+}
+
+// ---------- Encryption key (docs/UI.md 9.8, ADR-034) ----------
+
+/** The typed confirmation of a key rotation (`KeyRotateBody.confirm`); case-sensitive. */
+export const ROTATE_CONFIRMATION = 'ROTATE' as const
+
+/** "Source" row of the Encryption key section. */
+export const KEY_SOURCE_LABELS: Record<KeySource, string> = {
+  file: 'Key file in the data directory',
+  env: 'HF_MASTER_KEY environment variable',
+}
+
+/** "Secrets" row: "4 encrypted", plus " · 1 can't be read" when some secrets fail the current key. */
+export function secretsLabel(status: Pick<KeyStatus, 'secrets' | 'unreadableSecrets'>): string {
+  const encrypted = `${status.secrets.toLocaleString('en-US')} encrypted`
+  return status.unreadableSecrets > 0
+    ? `${encrypted} · ${status.unreadableSecrets.toLocaleString('en-US')} can't be read`
+    : encrypted
+}
+
+/** "Rotate key…" can run: the server says so, the key comes from `secret.key` and it passes the key check. */
+export function canRotateKey(status: KeyStatus | null): boolean {
+  return status !== null && status.canRotate && status.source === 'file' && status.keyCheck !== 'mismatch'
+}
+
+/** The destructive alert of a key-check mismatch. */
+export const KEY_MISMATCH_MESSAGE = 'The master key doesn\'t match the stored secrets. Saved API keys can\'t be read. Restore the previous key (HF_MASTER_KEY or data/secret.key), or enter the keys again.'
+
+/** The offline rotation of a key from `HF_MASTER_KEY` (docs/guides/using-projects.md 8): Docker, then a source checkout. */
+export const ROTATE_KEY_COMMANDS = [
+  {
+    label: 'Docker',
+    copyLabel: 'Copy the Docker command',
+    command: 'docker run --rm -v <volume>:/data -e HF_MASTER_KEY=<old> -e HF_NEW_MASTER_KEY=<new> harness-forge node apps/server/dist/main.mjs rotate-key',
+  },
+  {
+    label: 'Source checkout',
+    copyLabel: 'Copy the source checkout command',
+    command: 'HF_MASTER_KEY=<old> HF_NEW_MASTER_KEY=<new> pnpm key:rotate',
+  },
+] as const
+
+/** The effects list of the rotate dialog; the counts are left out while the status is unknown. */
+export function rotateEffects(status: KeyStatus | null): string[] {
+  const links = status ? ` (${countLabel(status.shares, 'link')})` : ''
+  const waiting = status ? ` (${status.pendingApprovals.toLocaleString('en-US')} waiting)` : ''
+  return [
+    'Other browsers and devices are signed out; you stay signed in.',
+    `Every share link changes${links}: copy the new links from Shared links.`,
+    `Running replies stop and pending approvals expire${waiting}.`,
+    'Older versions of harness-forge can\'t read the secrets afterwards: back up the data directory first.',
+  ]
+}
+
+/** Toast after a rotation: "Master key rotated" with "4 secrets encrypted again · 1 approval expired". */
+export const KEY_ROTATED_TITLE = 'Master key rotated'
+
+export function keyRotatedDescription(result: Pick<KeyRotationResult, 'secrets' | 'approvalsExpired'>): string {
+  return `${countLabel(result.secrets, 'secret')} encrypted again · ${countLabel(result.approvalsExpired, 'approval')} expired`
 }

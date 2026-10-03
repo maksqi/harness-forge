@@ -1,8 +1,8 @@
 <script setup lang="ts">
-// An existing chat (docs/UI.md 2.1, 5.6-5.9, 6): ChatHeader + ChatView; "Chat not found" for malformed ids (the
-// API would answer 400) and for unknown ones (ChatView shows it on 404). Marks the chat as the open one, which
-// clears its unread dot. The document title is the chat title (the route announcer reads it). Never renders its own
-// <main> (the layout's SidebarInset is).
+// An existing chat (docs/UI.md 2.1, 5.6-5.9, 6): ChatHeader (with the chat's project, 7.20) + ChatView; "Chat not
+// found" for malformed ids (the API would answer 400) and for unknown ones (ChatView shows it on 404). Marks the chat
+// as the open one, which clears its unread dot. The document title is the chat title (the route announcer reads it).
+// Never renders its own <main> (the layout's SidebarInset is).
 import { chatIdSchema } from '@harness-forge/shared'
 import { computed, onBeforeUnmount, watch } from 'vue'
 import { useHead } from '#imports'
@@ -44,8 +44,8 @@ onBeforeUnmount(() => {
 
 <template>
   <ChatView v-if="validId" :key="chatId" :chat-id="chatId">
-    <template #header="{ scrolled, title, loading }">
-      <ChatHeader :chat-id="chatId" :title="title" :scrolled="scrolled" :loading="loading" />
+    <template #header="{ scrolled, title, loading, projectId }">
+      <ChatHeader :chat-id="chatId" :title="title" :scrolled="scrolled" :loading="loading" :project-id="projectId" />
     </template>
   </ChatView>
   <div v-else class="flex min-h-dvh flex-1 flex-col">

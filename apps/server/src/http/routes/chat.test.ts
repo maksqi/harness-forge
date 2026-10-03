@@ -4,6 +4,7 @@ import type { ChatDetail, HarnessErrorInit, HarnessUIMessage, McpServer, ServerE
 import type { MediaTestApp } from '../../chat/testing.ts'
 import type { McpManager, ToolPref, ToolService } from '../../mcp/types.ts'
 import type { TestApp } from '../../testing/create-test-app.ts'
+import type { FakeProjectService } from '../../testing/fake-projects.ts'
 import { Buffer } from 'node:buffer'
 import { chatDetailSchema, chatStopResultSchema, harnessErrorEnvelopeSchema, harnessErrorInitSchema, LIMITS } from '@harness-forge/shared'
 import { convertArrayToReadableStream, MockLanguageModelV4 } from 'ai/test'
@@ -29,6 +30,7 @@ import {
 } from '../../chat/testing.ts'
 import { PNG } from '../../services/files/fixtures.test-util.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
+import { createFakeProjectService } from '../../testing/fake-projects.ts'
 
 let t: TestApp
 let events: ServerEvent[]
@@ -1342,5 +1344,71 @@ describe('pOST /api/chat: image options and image turns (ADR-028)', () => {
     const unknownModel = await postChat(media, chatBody(mediaChatId(), 'a fox', { modelRef: 'mock:image-none' }))
     expect(unknownModel.status).toBe(404)
     expect((await errorOf(unknownModel)).code).toBe('model_not_found')
+  })
+})
+
+describe('pOST /api/chat: the project of a new chat (Phase 7, ADR-031)', () => {
+  let app: TestApp
+  let projects: FakeProjectService
+  const seen: ServerEvent[] = []
+
+  beforeAll(async () => {
+    app = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, factories: { projects: createFakeProjectService } })
+    projects = app.deps.projects as FakeProjectService
+    app.deps.events.subscribe(event => seen.push(event))
+  })
+
+  afterAll(async () => {
+    await app.close()
+  })
+
+  async function projectOf(chatId: string): Promise<string | null> {
+    const response = await app.request(`/api/chats/${chatId}`)
+    expect(response.status).toBe(200)
+    return chatDetailSchema.parse(await response.json()).projectId
+  }
+
+  it('puts the new chat in the project and opens its folder for the run', async () => {
+    const project = await projects.add({ name: 'Route demo' })
+    const chatId = testChatId(5001)
+    const response = await postChat(app, chatBody(chatId, 'hello', { projectId: project.id }))
+    expect(response.status).toBe(200)
+    expect(streamedText((await readSse(response)).chunks)).toBe('hello')
+    expect(await projectOf(chatId)).toBe(project.id)
+    expect(seen.find(event => event.type === 'chat.created' && event.data.id === chatId)?.data).toMatchObject({ projectId: project.id })
+    expect(projects.opened).toContain(project.id)
+    await runnerOf(app).idle()
+  })
+
+  it('answers 404 for an unknown project before the chat row exists', async () => {
+    const chatId = testChatId(5002)
+    seen.length = 0
+    const response = await postChat(app, chatBody(chatId, 'hello', { projectId: 'prj_0000000000000000' }))
+    expect(response.status).toBe(404)
+    expect(response.headers.get('content-type')).toContain('application/json')
+    expect((harnessErrorEnvelopeSchema.parse(await response.json())).error.code).toBe('not_found')
+    expect((await app.request(`/api/chats/${chatId}`)).status).toBe(404)
+    expect(seen.some(event => event.type === 'chat.created' || event.type === 'run.started')).toBe(false)
+    expect(runnerOf(app).hasRun(chatId)).toBe(false)
+  })
+
+  it('ignores projectId for an existing chat (a known or an unknown project)', async () => {
+    const project = await projects.add({ name: 'Ignored' })
+    const chatId = testChatId(5003)
+    await readSse(await postChat(app, chatBody(chatId, 'first')))
+    for (const projectId of [project.id, 'prj_0000000000000000']) {
+      const response = await postChat(app, chatBody(chatId, 'again', { projectId }))
+      expect(response.status).toBe(200)
+      await readSse(response)
+      expect(await projectOf(chatId)).toBeNull()
+    }
+    expect(projects.opened).not.toContain(project.id)
+    await runnerOf(app).idle()
+  })
+
+  it('rejects a malformed projectId with 400', async () => {
+    const response = await postChat(app, chatBody(testChatId(5004), 'hello', { projectId: 'nope' }))
+    expect(response.status).toBe(400)
+    expect((await errorOf(response)).code).toBe('validation_error')
   })
 })

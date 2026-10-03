@@ -5,6 +5,7 @@ import {
   filterSlashItems,
   parseClientCommand,
   parseSlashCommand,
+  parseToolMode,
   resolveClientCommand,
   serverSlashItems,
   slashQueryAt,
@@ -64,6 +65,43 @@ describe('slashQueryAt', () => {
   })
 })
 
+describe('/mode edits (Accept edits, Phase 7)', () => {
+  const base: ClientCommandContext = { resolveModel: () => null, efforts: [], toolsAvailable: true, projectChat: false }
+
+  it('reads values and labels, case-insensitively, with the accept-edits aliases', () => {
+    expect(parseToolMode('edits')).toBe('edits')
+    expect(parseToolMode('accept-edits')).toBe('edits')
+    expect(parseToolMode('accept edits')).toBe('edits')
+    expect(parseToolMode('  Accept   Edits ')).toBe('edits')
+    expect(parseToolMode('ACCEPT-EDITS')).toBe('edits')
+    expect(parseToolMode('Ask')).toBe('ask')
+    expect(parseToolMode('auto')).toBe('auto')
+    expect(parseToolMode('off')).toBe('off')
+    expect(parseToolMode('accept')).toBeNull()
+    expect(parseToolMode('edit')).toBeNull()
+    expect(parseToolMode('')).toBeNull()
+  })
+
+  it('selects Accept edits in a project chat', () => {
+    const project = { ...base, projectChat: true }
+    for (const args of ['edits', 'accept-edits', 'accept edits', 'Accept Edits'])
+      expect(resolveClientCommand('mode', args, project)).toEqual({ type: 'set-mode', mode: 'edits' })
+    expect(parseClientCommand('/mode accept edits')).toEqual({ name: 'mode', args: 'accept edits' })
+  })
+
+  it('explains that Accept edits needs a project chat, and changes nothing', () => {
+    for (const args of ['edits', 'accept-edits', 'accept edits'])
+      expect(resolveClientCommand('mode', args, base)).toEqual({ type: 'error', message: 'Accept edits works in project chats.' })
+    // The other modes work everywhere.
+    expect(resolveClientCommand('mode', 'ask', base)).toEqual({ type: 'set-mode', mode: 'ask' })
+    // Without tools the menu does not apply at all.
+    expect(resolveClientCommand('mode', 'edits', { ...base, projectChat: true, toolsAvailable: false })).toEqual({
+      type: 'error',
+      message: 'No tools are available for this model.',
+    })
+  })
+})
+
 describe('parsing', () => {
   it('parses /name and its arguments', () => {
     expect(parseSlashCommand('/effort high')).toEqual({ name: 'effort', args: 'high' })
@@ -89,6 +127,7 @@ describe('resolveClientCommand', () => {
     resolveModel: query => (query === 'sonnet' || query === 'anthropic:claude-sonnet-5' ? 'anthropic:claude-sonnet-5' : null),
     efforts: ['auto', 'low', 'medium', 'high'],
     toolsAvailable: true,
+    projectChat: false,
   }
 
   it('runs /new and /help at once, ignoring arguments', () => {
@@ -112,7 +151,8 @@ describe('resolveClientCommand', () => {
   it('explains invalid values and unavailable menus', () => {
     expect(resolveClientCommand('model', 'gpt-9', context)).toEqual({ type: 'error', message: 'Unknown model "gpt-9".' })
     expect(resolveClientCommand('effort', 'max', context)).toEqual({ type: 'error', message: 'Unknown effort "max". Use auto, low, medium or high.' })
-    expect(resolveClientCommand('mode', 'yolo', context)).toEqual({ type: 'error', message: 'Unknown mode "yolo". Use off, ask, edits or auto.' })
+    expect(resolveClientCommand('mode', 'yolo', context)).toEqual({ type: 'error', message: 'Unknown mode "yolo". Use ask, auto or off.' })
+    expect(resolveClientCommand('mode', 'yolo', { ...context, projectChat: true })).toEqual({ type: 'error', message: 'Unknown mode "yolo". Use ask, edits, auto or off.' })
     expect(resolveClientCommand('effort', 'high', { ...context, efforts: [] }).type).toBe('error')
     expect(resolveClientCommand('mode', '', { ...context, toolsAvailable: false }).type).toBe('error')
   })

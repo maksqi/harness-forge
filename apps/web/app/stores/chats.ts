@@ -3,6 +3,11 @@
 // `pendingApproval`, `run.*` events and the chat session (`setRunState`), plus client-side unread marks
 // (localStorage['hf-unread']). Rows hold summary fields only: the active leaf of `chat.updated` (ADR-030) is the open
 // chat session's business. Signatures are frozen after Phase 0.
+// Phase 7 (W7.9, docs/UI.md 7.20, 11; ADR-031): the project filter of the list (`projectFilter`, stored in
+// localStorage['hf-project-filter'] as the raw value: `all`, `none` or a project id). Pages are loaded with `projectId`,
+// rows that stop matching the filter leave the list (a move, `chat.updated`), rows that start matching join it, and a
+// stored project id that is unknown once the projects loaded falls back to `all`. Summaries seen outside the list (an
+// open chat of another project, or one older than the loaded pages) are kept aside, so `byId` still answers for them.
 import type {
   ChatCreate,
   ChatDetail,
@@ -14,16 +19,18 @@ import type {
   ServerEvent,
 } from '@harness-forge/shared'
 import type { ChatDateGroup } from '~/utils/chat-groups'
-import { apiUrl } from '@harness-forge/shared'
+import { apiUrl, PROJECT_ID_PATTERN } from '@harness-forge/shared'
 import { useEventListener } from '@vueuse/core'
 import { defineStore } from 'pinia'
-import { computed, onScopeDispose, ref, watch } from 'vue'
+import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue'
+import { toast } from 'vue-sonner'
 import { useApi } from '~/composables/useApi'
 import { groupChatsByDate, msUntilNextLocalDay, startOfLocalDay } from '~/utils/chat-groups'
 import { downloadResponse } from '~/utils/download'
 import { toHarnessError, withHarnessErrors } from '~/utils/errors'
 import { omitKey } from '~/utils/records'
 import { readStoredJson, writeStoredJson } from '~/utils/storage'
+import { useProjectsStore } from './projects'
 import { useUiStore } from './ui'
 
 /**
@@ -51,7 +58,13 @@ export interface ChatRemoveHandle {
 
 export const UNREAD_CHATS_KEY = 'hf-unread'
 export const CHAT_PAGE_SIZE = 50
+/** localStorage key of the project filter (the raw value: `all`, `none` or a project id). */
+export const PROJECT_FILTER_KEY = 'hf-project-filter'
+/** Toast when the project the list is filtered by was deleted (docs/UI.md 7.20). */
+export const PROJECT_DELETED_MESSAGE = 'The project was deleted. Showing all chats.'
 const UNREAD_MAX = 500
+/** Summaries kept aside for `byId` (chats outside the filter or the loaded pages). */
+const OUTSIDE_MAX = 200
 
 interface PendingDelete {
   summary: ChatSummary | undefined
@@ -65,6 +78,39 @@ function readUnread(): Record<string, true> {
   const stored = readStoredJson(UNREAD_CHATS_KEY)
   const ids = Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []
   return Object.fromEntries(ids.slice(-UNREAD_MAX).map(id => [id, true as const]))
+}
+
+/** `all`, `none` or a well-formed project id; anything else is not a filter. */
+function isProjectFilter(value: unknown): value is ChatProjectFilter {
+  return typeof value === 'string' && (value === 'all' || value === 'none' || PROJECT_ID_PATTERN.test(value))
+}
+
+function readProjectFilter(): ChatProjectFilter {
+  try {
+    const stored = globalThis.localStorage?.getItem(PROJECT_FILTER_KEY)
+    return isProjectFilter(stored) ? stored : 'all'
+  }
+  catch {
+    return 'all'
+  }
+}
+
+function writeProjectFilter(filter: ChatProjectFilter): void {
+  try {
+    globalThis.localStorage?.setItem(PROJECT_FILTER_KEY, filter)
+  }
+  catch {
+    // Storage blocked or full: the filter lasts for this page only.
+  }
+}
+
+/** The chat belongs in a list filtered by `filter`. */
+function matchesFilter(chat: ChatSummary, filter: ChatProjectFilter): boolean {
+  if (filter === 'all')
+    return true
+  if (filter === 'none')
+    return chat.projectId === null
+  return chat.projectId === filter
 }
 
 /** The summary fields of a chat detail or of `chat.updated` data (without its `activeLeafId`). */
@@ -113,19 +159,18 @@ export const useChatsStore = defineStore('chats', () => {
   const loaded = ref(false)
   const runState = ref<Record<string, ChatRunState>>({})
   const unread = ref<Record<string, true>>(readUnread())
-  /**
-   * + Phase 7: the project filter of the list (W7.9 stores it in `localStorage['hf-project-filter']` and sends it with
-   * `fetchPage`). Skeleton (C15, P7-0b): kept in memory only.
-   */
-  const projectFilter = ref<ChatProjectFilter>('all')
+  /** + Phase 7: the project filter of the list (`localStorage['hf-project-filter']`), sent with `fetchPage`. */
+  const projectFilter = ref<ChatProjectFilter>(readProjectFilter())
+  /** Summaries known but not listed: outside the filter, archived, or older than the loaded pages (newest last). */
+  const outside = shallowRef<ReadonlyMap<string, ChatSummary>>(new Map())
 
   watch(unread, value => writeStoredJson(UNREAD_CHATS_KEY, Object.keys(value)))
 
   // ---------- getters ----------
 
   const index = computed(() => new Map(items.value.map(chat => [chat.id, chat])))
-  /** `byId(id)`: the loaded summary, or undefined. */
-  const byId = computed(() => (id: string): ChatSummary | undefined => index.value.get(id))
+  /** `byId(id)`: the loaded summary (a listed row, else one seen outside the list), or undefined. */
+  const byId = computed(() => (id: string): ChatSummary | undefined => index.value.get(id) ?? outside.value.get(id))
 
   // Date groups change at midnight even when no chat changes.
   const today = ref(startOfLocalDay(Date.now()))
@@ -180,17 +225,48 @@ export const useChatsStore = defineStore('chats', () => {
     return !hasMore.value || !oldest || compareChats(chat, oldest) <= 0
   }
 
-  /** Replaces a loaded chat; inserts a new one when the list is loaded and it falls inside the loaded window. */
+  function keepOutside(...chats: ChatSummary[]) {
+    if (chats.length === 0)
+      return
+    const next = new Map(outside.value)
+    for (const chat of chats) {
+      next.delete(chat.id)
+      next.set(chat.id, chat)
+    }
+    for (const key of next.keys()) {
+      if (next.size <= OUTSIDE_MAX)
+        break
+      next.delete(key)
+    }
+    outside.value = next
+  }
+
+  function dropOutside(id: string) {
+    if (!outside.value.has(id))
+      return
+    const next = new Map(outside.value)
+    next.delete(id)
+    outside.value = next
+  }
+
+  /**
+   * Replaces a loaded chat; inserts a new one when the list is loaded and it falls inside the loaded window. A chat
+   * that is archived or does not match the project filter leaves the list (and is kept aside for `byId`).
+   */
   function upsertSummary(chat: ChatSummary) {
     if (pendingDeletes.has(chat.id))
       return
-    if (chat.archived) {
+    if (chat.archived || !matchesFilter(chat, projectFilter.value)) {
       removeItem(chat.id)
+      keepOutside(chat)
       return
     }
     const known = index.value.has(chat.id)
-    if (!known && !(loaded.value && inLoadedWindow(chat)))
+    if (!known && !(loaded.value && inLoadedWindow(chat))) {
+      keepOutside(chat)
       return
+    }
+    dropOutside(chat.id)
     const rest = known ? items.value.filter(item => item.id !== chat.id) : items.value
     items.value = [...rest, chat].sort(compareChats)
   }
@@ -201,13 +277,20 @@ export const useChatsStore = defineStore('chats', () => {
   }
 
   function forget(id: string) {
+    dropOutside(id)
     if (id in runState.value)
       runState.value = omitKey(runState.value, id)
     markRead(id)
   }
 
   function mergePage(page: readonly ChatSummary[], reset: boolean): ChatSummary[] {
-    const fresh = page.filter(chat => !pendingDeletes.has(chat.id) && !chat.archived)
+    const fresh = page.filter(chat => !pendingDeletes.has(chat.id) && !chat.archived && matchesFilter(chat, projectFilter.value))
+    if (fresh.some(chat => outside.value.has(chat.id))) {
+      const next = new Map(outside.value)
+      for (const chat of fresh)
+        next.delete(chat.id)
+      outside.value = next
+    }
     if (reset)
       return [...fresh].sort(compareChats)
     const seen = new Set(fresh.map(chat => chat.id))
@@ -270,12 +353,35 @@ export const useChatsStore = defineStore('chats', () => {
   // ---------- actions ----------
 
   /**
-   * + Phase 7: sets the project filter (W7.9: stores it, resets the list and reloads its first page with `projectId`).
-   * Skeleton (C15, P7-0b): only sets the state.
+   * + Phase 7: sets the project filter, stores it, empties the list (its rows are kept aside for `byId`) and loads the
+   * first page with `projectId`. The same filter again does nothing. Throws `HarnessError` when the page fails (the list
+   * then stays empty and unloaded, so the sidebar offers Retry).
    */
   async function setProjectFilter(filter: ChatProjectFilter): Promise<void> {
+    if (filter === projectFilter.value)
+      return
     projectFilter.value = filter
+    writeProjectFilter(filter)
+    keepOutside(...items.value)
+    items.value = []
+    cursor.value = null
+    hasMore.value = true
+    loaded.value = false
+    await fetchPage({ reset: true })
   }
+
+  // A stored project id that the loaded projects do not know (deleted while this browser was away) falls back to
+  // every chat.
+  const projects = useProjectsStore()
+  watch(
+    () => projects.loaded && projectFilter.value !== 'all' && projectFilter.value !== 'none'
+      && !projects.byId(projectFilter.value),
+    (unknown) => {
+      if (unknown)
+        setProjectFilter('all').catch(() => {})
+    },
+    { immediate: true },
+  )
 
   /**
    * `GET /chats` (cursor pages of 50). Appends the next page, or reloads the first page with `{ reset: true }`.
@@ -288,8 +394,13 @@ export const useChatsStore = defineStore('chats', () => {
       return Promise.resolve()
     const seq = ++pageSeq
     loading.value = true
+    const filter = projectFilter.value
     const request = withHarnessErrors(api.chats.list({
-      query: { limit: CHAT_PAGE_SIZE, ...(!reset && cursor.value ? { cursor: cursor.value } : {}) },
+      query: {
+        limit: CHAT_PAGE_SIZE,
+        ...(!reset && cursor.value ? { cursor: cursor.value } : {}),
+        ...(filter !== 'all' ? { projectId: filter } : {}),
+      },
     }))
       .then((page) => {
         if (seq !== pageSeq)
@@ -310,7 +421,10 @@ export const useChatsStore = defineStore('chats', () => {
     return request
   }
 
-  /** `GET /chats?q=`: matching chats with `snippet` (first page); the loaded list is left untouched. */
+  /**
+   * `GET /chats?q=`: matching chats with `snippet` (first page); the loaded list is left untouched and the project
+   * filter does not apply.
+   */
   async function search(q: string, options: { limit?: number, signal?: AbortSignal } = {}): Promise<ChatSummary[]> {
     const query = q.trim()
     if (query === '')
@@ -341,9 +455,13 @@ export const useChatsStore = defineStore('chats', () => {
     return chat
   }
 
-  /** `PATCH /chats/:id`. Title, pin, archive and model apply at once and roll back when the request fails. */
+  /**
+   * `PATCH /chats/:id`. Title, pin, archive, model and project apply at once and roll back when the request fails; a
+   * chat moved out of the filtered project leaves the list, one moved into it joins the list.
+   */
   async function update(id: string, patch: ChatUpdate): Promise<ChatSummary> {
-    const previous = index.value.get(id)
+    const listed = index.value.get(id)
+    const previous = listed ?? outside.value.get(id)
     if (previous) {
       const optimistic: ChatSummary = { ...previous }
       if (patch.title !== undefined)
@@ -354,10 +472,9 @@ export const useChatsStore = defineStore('chats', () => {
         optimistic.archived = patch.archived
       if (patch.modelRef !== undefined)
         optimistic.modelRef = patch.modelRef
-      if (optimistic.archived)
-        removeItem(id)
-      else
-        items.value = items.value.map(item => (item.id === id ? optimistic : item))
+      if (patch.projectId !== undefined)
+        optimistic.projectId = patch.projectId
+      upsertSummary(optimistic)
     }
     try {
       const chat = await withHarnessErrors(api.chats.update({ params: { id }, body: patch }))
@@ -366,8 +483,15 @@ export const useChatsStore = defineStore('chats', () => {
     }
     catch (error) {
       if (previous && !pendingDeletes.has(id)) {
-        const rest = items.value.filter(item => item.id !== id)
-        items.value = [...rest, previous].sort(compareChats)
+        if (listed) {
+          dropOutside(id)
+          const rest = items.value.filter(item => item.id !== id)
+          items.value = [...rest, previous].sort(compareChats)
+        }
+        else {
+          removeItem(id)
+          keepOutside(previous)
+        }
       }
       throw error
     }
@@ -390,8 +514,9 @@ export const useChatsStore = defineStore('chats', () => {
       clearTimeout(existing.timer)
       existing.settle({ status: 'undone' })
     }
-    const summary = index.value.get(id) ?? existing?.summary
+    const summary = index.value.get(id) ?? outside.value.get(id) ?? existing?.summary
     removeItem(id)
+    dropOutside(id)
     let settle: (outcome: ChatRemoveOutcome) => void = () => {}
     const done = new Promise<ChatRemoveOutcome>((resolve) => {
       settle = resolve
@@ -445,9 +570,33 @@ export const useChatsStore = defineStore('chats', () => {
   }
 
   /**
+   * A deleted project (`project.changed` with `project: null`): its chats lose their `projectId` (the server detaches
+   * them without a `chat.updated` each), and a list filtered by it falls back to every chat with a toast.
+   */
+  function detachProject(projectId: string) {
+    const detach = (chat: ChatSummary): ChatSummary => (chat.projectId === projectId ? { ...chat, projectId: null } : chat)
+    for (const entry of pendingDeletes.values()) {
+      if (entry.summary)
+        entry.summary = detach(entry.summary)
+    }
+    const listed = items.value.filter(chat => chat.projectId === projectId)
+    const aside = [...outside.value.values()].filter(chat => chat.projectId === projectId)
+    if (projectFilter.value === projectId) {
+      toast(PROJECT_DELETED_MESSAGE)
+      keepOutside(...aside.map(detach))
+      items.value = items.value.map(detach)
+      setProjectFilter('all').catch(() => {})
+      return
+    }
+    for (const chat of [...listed, ...aside])
+      upsertSummary(detach(chat))
+  }
+
+  /**
    * `chat.created` / `chat.updated` refresh the row (and its run state; the `activeLeafId` of `chat.updated` is not
    * kept), `chat.deleted` drops it, `run.started` sets `running`, `run.finished` clears it (or sets `approval` when
-   * `awaitingApproval`) and marks the chat unread unless it is the open one (`ui.activeChatId`).
+   * `awaitingApproval`) and marks the chat unread unless it is the open one (`ui.activeChatId`). Phase 7:
+   * `project.changed` for a deleted project detaches its chats (`detachProject`).
    */
   function applyEvent(event: ServerEvent): void {
     switch (event.type) {
@@ -484,6 +633,11 @@ export const useChatsStore = defineStore('chats', () => {
         setRunState(chatId, awaitingApproval ? 'approval' : null)
         if (useUiStore().activeChatId !== chatId)
           markUnread(chatId)
+        return
+      }
+      case 'project.changed': {
+        if (event.data.project === null)
+          detachProject(event.data.id)
       }
     }
   }

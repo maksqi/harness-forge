@@ -2,8 +2,9 @@
 // commands (`/new`, `/model`, `/effort`, `/mode`, `/help`), which run in the browser and never reach the server.
 // Server commands (`GET /api/commands`) are sent as typed; the server expands them.
 import type { ClientCommand, CommandSummary, ReasoningEffort, ToolMode } from '@harness-forge/shared'
-import { CLIENT_COMMANDS, isClientCommand, toolModeSchema } from '@harness-forge/shared'
+import { CLIENT_COMMANDS, isClientCommand } from '@harness-forge/shared'
 import { EFFORT_LABELS } from './effort'
+import { EDITS_NEEDS_PROJECT, TOOL_MODE_OPTIONS } from './permission'
 
 /** One row of the slash menu (docs/UI.md 10.4). */
 export interface SlashItem {
@@ -111,12 +112,23 @@ export interface ClientCommandContext {
   efforts: readonly ReasoningEffort[]
   /** The permission menu applies: tools exist and the model can call them. */
   toolsAvailable: boolean
+  /** The chat belongs to a project (Phase 7): only then can `/mode edits` select Accept edits. */
+  projectChat: boolean
 }
 
 function listOf(values: readonly string[]): string {
   if (values.length <= 1)
     return values.join('')
   return `${values.slice(0, -1).join(', ')} or ${values.at(-1)}`
+}
+
+/**
+ * The mode typed after `/mode`: a value (`edits`) or a label (`accept edits`), case-insensitive; hyphens and runs of
+ * spaces count as one space, so `accept-edits` works too. null when nothing matches.
+ */
+export function parseToolMode(value: string): ToolMode | null {
+  const wanted = value.trim().toLowerCase().replace(/[\s-]+/g, ' ')
+  return TOOL_MODE_OPTIONS.find(option => option.value === wanted || option.label.toLowerCase() === wanted)?.value ?? null
 }
 
 /**
@@ -152,10 +164,15 @@ export function resolveClientCommand(name: ClientCommand, args: string, context:
         return { type: 'error', message: 'No tools are available for this model.' }
       if (!value)
         return { type: 'open', menu: 'mode' }
-      const mode = toolModeSchema.safeParse(value.toLowerCase())
-      if (mode.success)
-        return { type: 'set-mode', mode: mode.data }
-      return { type: 'error', message: `Unknown mode "${value}". Use ${listOf(toolModeSchema.options)}.` }
+      const mode = parseToolMode(value)
+      if (mode === 'edits' && !context.projectChat)
+        return { type: 'error', message: EDITS_NEEDS_PROJECT }
+      if (mode)
+        return { type: 'set-mode', mode }
+      const modes = TOOL_MODE_OPTIONS
+        .map(option => option.value)
+        .filter(item => item !== 'edits' || context.projectChat)
+      return { type: 'error', message: `Unknown mode "${value}". Use ${listOf(modes)}.` }
     }
   }
 }

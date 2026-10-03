@@ -4,6 +4,9 @@
 // `POST /chats/:id/branch` and `DELETE /chats/:id/messages/:messageId` (deleting a version, ADR-030, W6.6) are refused
 // with `409 conflict` (`reason: 'run-active'`) while the runs registry holds the chat in any phase (`deps.runs.hasRun`),
 // so a version switch or delete never races a run's commit or persist.
+// Phase 7 (ADR-031, W7.5): `GET /chats?projectId=<id>|none` filters by project; `POST /chats` and `PATCH /chats/:id`
+// with `projectId` answer `404` for an unknown project; the move of `PATCH` is refused with `409 run-active` while a run
+// holds the chat. The chats service checks both (`update` asks `deps.runs.hasRun` itself), so the routes stay thin.
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import {

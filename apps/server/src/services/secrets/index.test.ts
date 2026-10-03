@@ -6,9 +6,10 @@ import { HarnessError } from '@harness-forge/shared'
 import { and, eq } from 'drizzle-orm'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { secrets } from '../../db/schema.ts'
+import { beginKeyChange, deriveSubkey, swapMasterKey } from '../../security/keyring.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
-import { createFakeKeyring } from '../../testing/fakes.ts'
-import { decryptSecret, secretAad } from './crypto.ts'
+import { createFakeKeyring, fakeMasterKey } from '../../testing/fakes.ts'
+import { decryptSecret, encryptSecret, secretAad } from './crypto.ts'
 import { createSecretStore } from './index.ts'
 
 const API_KEY = 'sk-store-test-0123456789abcdefghijklmnop9fQ2'
@@ -155,5 +156,76 @@ describe('secret store', () => {
     await t.deps.secrets.set('plugin:demo', 'unicode', 'päss wörd ✓ 🔑')
     expect(await t.deps.secrets.get('plugin:demo', 'empty')).toBe('')
     expect(await t.deps.secrets.get('plugin:demo', 'unicode')).toBe('päss wörd ✓ 🔑')
+  })
+})
+
+describe('secret store during a key rotation (ADR-034, W7.7-T3)', () => {
+  const NEXT = fakeMasterKey('rotated')
+
+  /** Re-encrypts every row to version 2 under `NEXT` (what the rotation transaction does). */
+  async function reencryptRows(): Promise<void> {
+    const oldKey = t.deps.keyring.subkey('encryption')
+    const newKey = deriveSubkey(NEXT, 'encryption')
+    for (const row of await t.db.select().from(secrets)) {
+      const aad = secretAad(row.scope, row.name)
+      await t.db.update(secrets).set({ ciphertext: encryptSecret(newKey, aad, decryptSecret(oldKey, aad, row.ciphertext)), keyVersion: 2 }).where(and(eq(secrets.scope, row.scope), eq(secrets.name, row.name)))
+    }
+  }
+
+  it('a write during a key change waits, then is encrypted with the new key', async () => {
+    const end = beginKeyChange(t.deps.keyring)
+    let done = false
+    const write = t.deps.secrets.set(scope, 'apiKey', API_KEY).then(() => {
+      done = true
+    })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(done).toBe(false)
+    expect(await rowOf(scope, 'apiKey')).toBeUndefined()
+    swapMasterKey(t.deps.keyring, NEXT, 2)
+    end()
+    await write
+    const row = await rowOf(scope, 'apiKey')
+    expect(row?.keyVersion).toBe(2)
+    expect(decryptSecret(deriveSubkey(NEXT, 'encryption'), secretAad(scope, 'apiKey'), row!.ciphertext)).toBe(API_KEY)
+  })
+
+  it('a write that a rotation overtook is written again under the new key', async () => {
+    const write = t.deps.secrets.set(scope, 'apiKey', API_KEY)
+    // The rotation begins while the write is in flight (after its stability check).
+    const end = beginKeyChange(t.deps.keyring)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    // The rotation's transaction did not see the row (it landed at version 1 after the re-encryption).
+    expect((await rowOf(scope, 'apiKey'))?.keyVersion).toBe(1)
+    swapMasterKey(t.deps.keyring, NEXT, 2)
+    end()
+    await write
+    const row = await rowOf(scope, 'apiKey')
+    expect(row?.keyVersion).toBe(2)
+    expect(await t.deps.secrets.get(scope, 'apiKey')).toBe(API_KEY)
+  })
+
+  it('a read during a key change waits and reads the re-encrypted row without a warning', async () => {
+    await t.deps.secrets.set(scope, 'apiKey', API_KEY)
+    const end = beginKeyChange(t.deps.keyring)
+    const read = t.deps.secrets.get(scope, 'apiKey')
+    await reencryptRows()
+    swapMasterKey(t.deps.keyring, NEXT, 2)
+    end()
+    expect(await read).toBe(API_KEY)
+    expect(warnings()).toEqual([])
+  })
+
+  it('a delete during a key change waits for it', async () => {
+    await t.deps.secrets.set(scope, 'apiKey', API_KEY)
+    const end = beginKeyChange(t.deps.keyring)
+    let done = false
+    const removal = t.deps.secrets.delete(scope, 'apiKey').then(() => {
+      done = true
+    })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(done).toBe(false)
+    end()
+    await removal
+    expect(await rowOf(scope, 'apiKey')).toBeUndefined()
   })
 })

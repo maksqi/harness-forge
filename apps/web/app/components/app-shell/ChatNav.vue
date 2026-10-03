@@ -1,10 +1,11 @@
 <script setup lang="ts">
-// Chat mode sidebar content (docs/UI.md 5.3): "New chat" and "Search" rows, then the chats store's list grouped by
-// date (Today, Yesterday, Previous 7 days, Previous 30 days, months) under sticky labels. Rows show the status dot
-// (chats.statusOf) and an actions menu (Rename inline, Export, Delete with Undo). The list scrolls on its own
-// below the fixed rows and loads the next cursor page when its end scrolls into view. Live `chat.*` / `run.*`
-// events reach the rows through the store. Contract: no props, no emits; renders inside <SidebarContent> and never
-// renders its own <Sidebar>.
+// Chat mode sidebar content (docs/UI.md 5.3): the project switcher (Phase 7, ProjectSwitcher: the filter of the list
+// and the default project of new chats), "New chat" and "Search" rows, then the chats store's list grouped by date
+// (Today, Yesterday, Previous 7 days, Previous 30 days, months) under sticky labels. Rows show the status dot
+// (chats.statusOf) and an actions menu (Rename inline, Move to project, Share, Export, Delete with Undo). The list
+// scrolls on its own below the fixed rows and loads the next cursor page when its end scrolls into view; a first page
+// that fails (also after a filter change) offers Retry. Live `chat.*` / `run.*` events reach the rows through the
+// store. Contract: no props, no emits; renders inside <SidebarContent> and never renders its own <Sidebar>.
 import type { ChatExportFormat, ChatSummary } from '@harness-forge/shared'
 import { SearchIcon, SquarePenIcon } from '@lucide/vue'
 import { useIntersectionObserver } from '@vueuse/core'
@@ -19,7 +20,10 @@ import {
   SidebarMenuSkeleton,
 } from '@/components/ui/sidebar'
 import KbdCombo from '~/components/common/KbdCombo.vue'
+import { useMoveChat } from '~/components/projects/move-chat'
+import ProjectSwitcher from '~/components/projects/ProjectSwitcher.vue'
 import { useChatsStore } from '~/stores/chats'
+import { useProjectsStore } from '~/stores/projects'
 import { useUiStore } from '~/stores/ui'
 import { isAbortError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
@@ -32,10 +36,12 @@ import { SIDEBAR_KBD_CLASS, SIDEBAR_ROW_CLASS } from './sidebar-classes'
 const CHAT_PATH = /^\/chat\/([^/]+)\/?$/
 
 const chats = useChatsStore()
+const projects = useProjectsStore()
 const ui = useUiStore()
 const route = useRoute()
 const newChat = useNewChat()
 const actions = useChatActions()
+const move = useMoveChat()
 const uid = useId()
 
 const root = useTemplateRef<HTMLElement>('root')
@@ -62,6 +68,17 @@ const activeChatId = computed(() => {
 const initialLoading = computed(() => !chats.loaded && !loadFailed.value)
 const loadingMore = computed(() => chats.loaded && chats.loading)
 const empty = computed(() => chats.loaded && !chats.hasMore && chats.items.length === 0)
+const emptyText = computed(() => {
+  const filter = chats.projectFilter
+  if (filter === 'all')
+    return 'No chats yet'
+  if (filter === 'none')
+    return 'No chats without a project'
+  const name = projects.byId(filter)?.name
+  return name ? `No chats in ${name} yet` : 'No chats yet'
+})
+/** The row menus offer "Move to project" once a project exists. */
+const canMove = computed(() => projects.items.length > 0)
 
 function tooltip(label: string, keys: string) {
   return () => h('span', { class: 'inline-flex items-center gap-2' }, [label, h(KbdCombo, { keys })])
@@ -98,6 +115,17 @@ onMounted(() => {
 useIntersectionObserver(sentinel, (entries) => {
   sentinelVisible.value = entries.some(entry => entry.isIntersecting)
 }, { root: list, rootMargin: '0px 0px 160px 0px' })
+
+// A first page that finished without loading the list failed (e.g. the reload after a filter change): offer Retry.
+watch(() => chats.loading, (loading, wasLoading) => {
+  if (wasLoading && !loading && !chats.loaded)
+    loadFailed.value = true
+})
+
+// A new filter starts a new list: forget the failure of the previous one.
+watch(() => chats.projectFilter, () => {
+  loadFailed.value = false
+})
 
 // Also fires again after each page while the end of the list stays visible, so a short list fills the view.
 watch(
@@ -139,6 +167,18 @@ function onExport(chat: ChatSummary, format: ChatExportFormat) {
   void actions.exportChat(chat.id, format)
 }
 
+/** A move that takes the row out of the filtered list moves focus like a delete (docs/UI.md 14.1). */
+function onMove(chat: ChatSummary, projectId: string | null) {
+  const rows = chats.groups.flatMap(group => group.chats)
+  const index = rows.findIndex(row => row.id === chat.id)
+  const neighbour = rows[index + 1] ?? rows[index - 1]
+  void move(chat.id, projectId)
+  void nextTick(() => {
+    if (!chats.items.some(item => item.id === chat.id))
+      focusAfterDelete(neighbour?.id)
+  })
+}
+
 function retry() {
   loadFailed.value = false
   void loadMore()
@@ -149,6 +189,9 @@ function retry() {
   <nav ref="root" aria-label="Chats" class="flex min-h-0 flex-1 flex-col">
     <SidebarGroup class="shrink-0 pb-1">
       <SidebarMenu>
+        <SidebarMenuItem>
+          <ProjectSwitcher />
+        </SidebarMenuItem>
         <SidebarMenuItem>
           <SidebarMenuButton as-child :tooltip="newChatTooltip" :data-testid="testIds.newChat" :class="SIDEBAR_ROW_CLASS">
             <NuxtLink to="/" @click="onNewChatClick">
@@ -198,7 +241,9 @@ function retry() {
               :chat="chat"
               :active="chat.id === activeChatId"
               :status="chats.statusOf(chat.id)"
+              :can-move="canMove"
               @rename="onRename(chat, $event)"
+              @move="onMove(chat, $event)"
               @export="onExport(chat, $event)"
               @delete="onDelete(chat)"
             />
@@ -210,7 +255,7 @@ function retry() {
         </div>
 
         <p v-if="empty" class="px-2 py-1.5 text-xs text-muted-foreground">
-          No chats yet
+          {{ emptyText }}
         </p>
 
         <div v-if="loadFailed" class="flex items-center gap-1 py-1 pl-2 text-xs text-muted-foreground">

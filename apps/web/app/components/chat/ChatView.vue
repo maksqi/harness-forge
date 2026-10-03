@@ -8,6 +8,11 @@
 // version shown after a switch (ADR-023) and a deleted version. "Delete this version" (ADR-030) is confirmed here, in
 // one ConfirmDialog; afterwards focus moves to the version now shown (or back to the button when nothing changed).
 // The composer learns how many images the last reply holds ("Edit the previous image", ADR-028).
+// Phase 7 (ADR-031): the session's project goes to the header slot (chip, "Move to project"), the empty slot (the
+// new-chat picker) and the composer (Accept edits is offered in project chats); a chat request held off by a master-key
+// rotation (`409 busy`, ADR-034) puts the message back into the composer with a toast. Approval cards learn the chat's
+// permission mode and project name (TOOL_APPROVAL_CONTEXT: no "Accept all edits" in a chat that already accepts edits,
+// "In {project}" on a shell approval).
 import type { MessageBranch, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
@@ -21,10 +26,11 @@ import { Button } from '@/components/ui/button'
 import ChatComposer from '~/components/chat/composer/ChatComposer.vue'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import { toHarnessErrorView } from '~/components/common/harness-error'
-import { isRunActiveConflict, useChatSession } from '~/composables/useChatSession'
+import { isBusyConflict, isRunActiveConflict, useChatSession } from '~/composables/useChatSession'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useUiStore } from '~/stores/ui'
 import { toHarnessError } from '~/utils/errors'
@@ -33,6 +39,8 @@ import { CHAT_VIEW_ACTIONS } from './chat-context'
 import { imageFileParts, messageText, toolNameOf } from './chat-format'
 import ChatNotFound from './ChatNotFound.vue'
 import ChatTranscript from './ChatTranscript.vue'
+import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
+import { toolApprovalLabel } from './parts/tool-row'
 
 const props = withDefaults(defineProps<{
   chatId: string
@@ -48,16 +56,23 @@ const emit = defineEmits<{
 }>()
 
 defineSlots<{
-  /** Above the transcript (the chat header); `scrolled` = the transcript left its top. */
-  header?: (props: { scrolled: boolean, title: string | null, loading: boolean }) => any
-  /** Above the inline composer of an empty new chat (greeting, callouts). */
-  empty?: () => any
+  /**
+   * Above the transcript (the chat header); `scrolled` = the transcript left its top; `projectId` = the chat's project
+   * (null = none).
+   */
+  header?: (props: { scrolled: boolean, title: string | null, loading: boolean, projectId: string | null }) => any
+  /**
+   * Above the inline composer of an empty new chat (greeting, the project picker, callouts): the project the first send
+   * carries and its setter.
+   */
+  empty?: (props: { projectId: string | null, setProject: (projectId: string | null) => void }) => any
 }>()
 
 const session = useChatSession(props.chatId, { isNew: props.isNew })
 const chats = useChatsStore()
 const models = useModelsStore()
 const plugins = usePluginsStore()
+const projects = useProjectsStore()
 const providers = useProvidersStore()
 const ui = useUiStore()
 
@@ -77,11 +92,14 @@ const notFound = session.notFound
 const loadError = session.loadError
 const branches = session.branches
 const switching = session.switching
+const projectId = session.projectId
 
 /** docs/UI.md 7.4: a run holds the chat (`409 conflict`, reason `run-active`). */
 const RUN_ACTIVE_MESSAGE = 'A response is already running in this chat.'
 /** A `404` to a chat request or a switch: the shown path was stale and the session reloaded it. */
 const STALE_CHAT_MESSAGE = 'This chat changed elsewhere and was reloaded.'
+/** docs/UI.md 7.4: a chat request answered `409 conflict` (`busy`): a master-key rotation holds off new runs. */
+const KEY_ROTATION_BUSY_MESSAGE = 'The server is rotating its encryption key. Try again in a moment.'
 
 const scrolled = ref(false)
 const showEmpty = computed(() => props.isNew && messages.value.length === 0 && !session.busy.value)
@@ -123,6 +141,13 @@ provide(CHAT_VIEW_ACTIONS, {
   openModelPicker: () => composer.value?.openModelPicker(),
 })
 
+/** The name of the chat's project, once the projects store knows it. */
+const projectName = computed(() => (projectId.value ? projects.byId(projectId.value)?.name ?? null : null))
+provide(TOOL_APPROVAL_CONTEXT, {
+  toolMode: () => toolMode.value,
+  projectName: () => projectName.value,
+})
+
 // ---------- announcements (polite live region) ----------
 
 const announcement = ref('')
@@ -144,16 +169,19 @@ watch(status, (next, previous) => {
   }
 })
 
-const pendingApprovalTools = computed(() => {
+/** Tool calls of the last reply waiting for a decision, with the card's label ("Approval needed: run {cmd}" for shell). */
+const pendingApprovals = computed(() => {
   const last = messages.value.at(-1)
   if (last?.role !== 'assistant')
     return []
-  return last.parts.flatMap(part => (isToolUIPart(part) && part.state === 'approval-requested' ? [toolNameOf(part)] : []))
+  return last.parts.flatMap(part => (isToolUIPart(part) && part.state === 'approval-requested'
+    ? [{ id: part.toolCallId, label: toolApprovalLabel(toolNameOf(part), part.input) }]
+    : []))
 })
-watch(pendingApprovalTools, (names, previous) => {
-  const added = names.find(name => !previous?.includes(name))
+watch(pendingApprovals, (pending, previous) => {
+  const added = pending.find(item => !previous?.some(known => known.id === item.id))
   if (added)
-    void announce(`Approval needed: ${added}`)
+    void announce(added.label)
 })
 
 // ---------- data the transcript needs ----------
@@ -165,6 +193,9 @@ onMounted(() => {
     models.fetchAll().catch(() => {})
   if (!plugins.toolsLoaded)
     plugins.fetchTools().catch(() => {})
+  // The project chip, the new-chat picker and "Move to project" (the sidebar may not be mounted, e.g. on mobile).
+  if (!projects.loaded && !projects.loading)
+    projects.fetchAll().catch(() => {})
 })
 
 // A run that starts while the chat is shown (another tab, a continuation elsewhere) is followed live.
@@ -174,13 +205,14 @@ watch(() => chats.runState[props.chatId] === 'running', (running) => {
 })
 
 // `409 conflict` (`run-active`): a reply is already running here; show the live run. `404 not_found`: the shown path
-// is stale (the chat changed elsewhere) and the session reloads it. Either way a message the server never stored goes
-// back into the composer.
+// is stale (the chat changed elsewhere) and the session reloads it. `409 conflict` (`busy`): a master-key rotation
+// holds off new runs. In every case a message the server never stored goes back into the composer.
 watch(error, (value) => {
   if (!value)
     return
   const stale = toHarnessError(value).code === 'not_found'
-  if (!stale && !isRunActiveConflict(value))
+  const busy = isBusyConflict(value)
+  if (!stale && !busy && !isRunActiveConflict(value))
     return
   const unsent = session.takeBackUnstored()
   if (unsent)
@@ -188,6 +220,10 @@ watch(error, (value) => {
   session.chat.clearError()
   if (stale) {
     toast(STALE_CHAT_MESSAGE)
+    return
+  }
+  if (busy) {
+    toast(KEY_ROTATION_BUSY_MESSAGE)
     return
   }
   toast(RUN_ACTIVE_MESSAGE)
@@ -330,11 +366,16 @@ function onEffortChange(value: ReasoningEffort) {
 function onToolModeChange(value: ToolMode) {
   toolMode.value = value
 }
+
+/** The new-chat picker: local until the first send (a saved chat moves through `PATCH`, which can fail). */
+function setProject(value: string | null) {
+  session.setProject(value).catch(failure => reportFailure('Could not move the chat', failure))
+}
 </script>
 
 <template>
   <div data-slot="chat-view" :data-chat-id="chatId" class="relative flex h-dvh min-h-0 flex-col" :style="composerStyle">
-    <slot v-if="!notFound" name="header" :scrolled="scrolled" :title="title" :loading="!loaded" />
+    <slot v-if="!notFound" name="header" :scrolled="scrolled" :title="title" :loading="!loaded" :project-id="projectId" />
 
     <ChatNotFound v-if="notFound" />
 
@@ -343,7 +384,7 @@ function onToolModeChange(value: ToolMode) {
       class="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-4 pt-[max(2rem,calc(38dvh-5rem))] pb-8 md:px-6"
     >
       <div class="flex w-full max-w-3xl flex-col items-center gap-8">
-        <slot name="empty" />
+        <slot name="empty" :project-id="projectId" :set-project="setProject" />
         <div class="w-full">
           <ChatComposer
             ref="composer"
@@ -355,6 +396,7 @@ function onToolModeChange(value: ToolMode) {
             :usage="lastUsage"
             :chat-cost-usd="chatCostUsd"
             :previous-images="previousImages"
+            :project-id="projectId"
             :disabled="noProvider"
             placeholder="Ask anything…"
             @update:model-ref="onModelChange"
@@ -416,6 +458,7 @@ function onToolModeChange(value: ToolMode) {
               :usage="lastUsage"
               :chat-cost-usd="chatCostUsd"
               :previous-images="previousImages"
+              :project-id="projectId"
               :disabled="noProvider"
               placeholder="Reply…"
               @update:model-ref="onModelChange"

@@ -1,12 +1,16 @@
-// Keys skeleton (C16-T3): the key check (ARCHITECTURE.md 6.14), the `_keys` shape, and the service stubs that answer
-// `not_implemented` until W7.7.
+// Key service (C16-T3, W7.7-T4): the key check (ARCHITECTURE.md 6.14), the `_keys` shape, and the service rules the
+// route tests (`http/routes/keys.test.ts`) do not reach: the order of the checks, stopped runs, an unrotatable keyring,
+// the redactor.
 import { Buffer } from 'node:buffer'
 import { createHmac, randomBytes } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
 import { HarnessError } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createMasterKeyring, deriveSubkey, swapMasterKey } from '../../security/keyring.ts'
+import { createKeyring, createMasterKeyring, deriveSubkey, encodeMasterKey, swapMasterKey } from '../../security/keyring.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
+import { createFakeChatRunner, createRecordingEventBus } from '../../testing/fakes.ts'
 import { keyCheckOf, keyCheckOfMasterKey, keyCheckOfSubkey, parseKeyState, sameKeyCheck } from './check.ts'
+import { nextKeyPath } from './recover.ts'
 import { KEY_CHECK_INFO } from './types.ts'
 
 const closers: (() => Promise<void>)[] = []
@@ -50,12 +54,50 @@ describe('key check', () => {
   })
 })
 
-describe('key service stub', () => {
-  it('is wired as deps.keys and answers not_implemented until W7.7', async () => {
+describe('key service', () => {
+  it('checks fresh auth first, then the confirmation, then the key source', async () => {
     const t = await createTestApp({ start: false })
     closers.push(() => t.close())
-    await expect(t.deps.keys.status()).rejects.toBeInstanceOf(HarnessError)
-    await expect(t.deps.keys.status()).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(t.deps.keys.rotate({ confirm: 'ROTATE' }, { requireFreshAuth: () => {} })).rejects.toMatchObject({ code: 'not_implemented' })
+    const order: string[] = []
+    const denied = new HarnessError({ code: 'forbidden', message: 'no' })
+    await expect(t.deps.keys.rotate({ confirm: 'ROTATE' }, { requireFreshAuth: () => {
+      order.push('fresh')
+      throw denied
+    } })).rejects.toBe(denied)
+    await expect(t.deps.keys.rotate({ confirm: 'rotate' } as never, { requireFreshAuth: () => {} })).rejects.toMatchObject({ code: 'validation_error' })
+    expect(order).toEqual(['fresh'])
+    expect(t.deps.keyring.keyVersion).toBe(1)
+
+    const env = await createTestApp({ start: false, env: { HF_MASTER_KEY: encodeMasterKey(randomBytes(32)) } })
+    closers.push(() => env.close())
+    await expect(env.deps.keys.rotate({ confirm: 'ROTATE' }, { requireFreshAuth: () => {} })).rejects.toMatchObject({ code: 'conflict', details: { reason: 'env-key' } })
+  })
+
+  it('stops every run first (runsStopped, chat ids in key.rotated) and refuses a keyring it cannot rotate', async () => {
+    const runs = createFakeChatRunner()
+    const events = createRecordingEventBus()
+    const t = await createTestApp({ start: false, overrides: { runs, events } })
+    closers.push(() => t.close())
+    const chatId = '0199a8f0-0000-7000-8000-00000000d001'
+    await t.deps.chats.create({ id: chatId, title: 'Running' })
+    runs.phases.set(chatId, 'streaming')
+    const result = await t.deps.keys.rotate({ confirm: 'ROTATE' }, { requireFreshAuth: () => {} })
+    expect(result).toMatchObject({ keyVersion: 2, runsStopped: 1, secrets: 0 })
+    expect(runs.stopped).toEqual([chatId])
+    expect(events.ofType('key.rotated')).toEqual([expect.objectContaining({ data: { keyVersion: 2, rotatedAt: result.rotatedAt, chatIds: [chatId] } })])
+    expect(events.disconnects()).toBe(1)
+
+    const fixed = await createTestApp({ start: false, overrides: { keyring: { keyVersion: 1, subkey: () => new Uint8Array(32) } } })
+    closers.push(() => fixed.close())
+    await expect(fixed.deps.keys.rotate({ confirm: 'ROTATE' }, { requireFreshAuth: () => {} })).rejects.toMatchObject({ code: 'internal_error' })
+    expect(existsSync(nextKeyPath(fixed.env))).toBe(false)
+  })
+
+  it('registers the new key with the redactor before anything can log it', async () => {
+    const t = await createTestApp({ start: false, factories: { keyring: createKeyring } })
+    closers.push(() => t.close())
+    await t.deps.keys.rotate({ confirm: 'ROTATE' }, { requireFreshAuth: () => {} })
+    const text = readFileSync(t.env.paths.secretKey, 'utf8').trim()
+    expect(t.deps.redactor.redactText(`key ${text}`)).not.toContain(text)
   })
 })

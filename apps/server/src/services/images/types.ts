@@ -71,7 +71,7 @@ export interface ImageGenerationResult {
    * Phase 7 (plugin API 1.2.0, W7.6): the display name of the model, the catalog name, else the model id; passed on as
    * `ImageGenerateResult.modelName` and the `generate_image` output `modelName`. The image service always sets it;
    * optional only so that results built by hand (test doubles written before Phase 7) stay valid: readers fall back to
-   * the model id of `modelRef`.
+   * the model id of `modelRef` (`resultModelName`).
    */
   modelName?: string
   /** The stored images, in the order the provider returned them (may be empty when every image was dropped). */

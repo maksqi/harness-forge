@@ -1,20 +1,28 @@
 // Server events (docs/API.md 7, docs/UI.md 11): parsing, dispatch into the stores, the reconnect refetch, and a
 // small subscription API for components that react to single events (e.g. W2.2 refetches a chat on
 // `run.finished` unless its own session streamed it). The connection itself lives in plugins/events.client.ts.
+// Phase 7: `project.changed` updates the projects and chats stores (ADR-031); `key.rotated` (ADR-034) reloads the chat
+// list and shows a toast, and every chat session it lists reloads its own path (useChatSession). The server closes
+// every event stream right after `key.rotated`, so the client reconnects (or lands on /login when signed out).
 import type { ServerEvent, ServerEventOf, ServerEventType } from '@harness-forge/shared'
 import type { Ref } from 'vue'
 import type { EventStreamStatus } from '~/utils/event-stream'
 import { serverEventSchema } from '@harness-forge/shared'
 import { getCurrentScope, onScopeDispose, readonly, ref } from 'vue'
+import { toast } from 'vue-sonner'
 import { useAuthStore } from '~/stores/auth'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
 
 type AnyHandler = (event: ServerEvent) => void
+
+/** The toast after a master-key rotation (docs/UI.md 11, 15). */
+export const KEY_ROTATED_MESSAGE = 'The encryption key was rotated.'
 
 const status = ref<EventStreamStatus>('idle')
 const handlers = new Map<ServerEventType | '*', Set<AnyHandler>>()
@@ -78,11 +86,20 @@ function safely(run: () => void) {
   }
 }
 
+/** `key.rotated`: the chat list reloads (rows of stopped runs and expired approvals change) and a toast says why. */
+function applyKeyRotated(): void {
+  const chats = useChatsStore()
+  if (chats.loaded)
+    chats.fetchPage({ reset: true }).catch(() => {})
+  toast(KEY_ROTATED_MESSAGE)
+}
+
 /**
  * Applies one event (docs/UI.md 11): `chat.*` / `run.*` -> chats; `provider.changed` -> providers (+ models
  * refetch); `catalog.changed` -> models; `plugin.changed` -> plugins (+ providers and models refetch); `plugin.log`
- * -> plugins. Then leaves `/chat/<id>` when the open chat was deleted, and notifies `useServerEvents().on()`
- * subscribers.
+ * -> plugins; `project.changed` -> projects + chats; `key.rotated` -> the chat list reloads, toast. Then leaves
+ * `/chat/<id>` when the open chat was deleted, and notifies `useServerEvents().on()` subscribers (the chat sessions
+ * listed by `key.rotated` reload their path there).
  */
 export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions = {}): void {
   switch (event.type) {
@@ -108,6 +125,13 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
     case 'plugin.log':
       safely(() => usePluginsStore().applyEvent(event))
       break
+    case 'project.changed':
+      safely(() => useProjectsStore().applyEvent(event))
+      safely(() => useChatsStore().applyEvent(event))
+      break
+    case 'key.rotated':
+      safely(applyKeyRotated)
+      break
   }
   if (event.type === 'chat.deleted' && options.navigate && useUiStore().activeChatId === event.data.id)
     safely(() => void options.navigate?.('/'))
@@ -119,7 +143,7 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
 
 /**
  * Refetches every loaded store after the event stream reconnects (missed events are not replayed): auth status,
- * settings, and the providers / models / plugins / chats data that was loaded before.
+ * settings, and the providers / models / plugins / chats / projects data that was loaded before.
  */
 export async function refetchLoadedStores(): Promise<void> {
   const auth = useAuthStore()
@@ -128,6 +152,7 @@ export async function refetchLoadedStores(): Promise<void> {
   const models = useModelsStore()
   const plugins = usePluginsStore()
   const chats = useChatsStore()
+  const projects = useProjectsStore()
   const tasks: Array<Promise<unknown>> = [auth.fetchStatus(), settings.fetch(), plugins.refreshLoaded()]
   if (providers.loaded)
     tasks.push(providers.fetchAll())
@@ -135,5 +160,7 @@ export async function refetchLoadedStores(): Promise<void> {
     tasks.push(models.fetchAll())
   if (chats.loaded)
     tasks.push(chats.fetchPage({ reset: true }))
+  if (projects.loaded)
+    tasks.push(projects.fetchAll())
   await Promise.allSettled(tasks)
 }

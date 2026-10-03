@@ -31,7 +31,7 @@ import { Zip, ZipDeflate, ZipPassThrough } from 'fflate'
 import { chats, files, messages } from '../../db/schema.ts'
 import { appVersion } from '../../paths.ts'
 import { guardDb } from '../chats/db-errors.ts'
-import { FILE_URL_PREFIX } from '../files/index.ts'
+import { referencedFileIdsQuery } from '../files/sweep.ts'
 import { formatBytes, payloadTooLarge, tooManyEntries } from './limits.ts'
 import { referencedFileIds } from './parts.ts'
 
@@ -71,23 +71,6 @@ export interface BackupPlan {
 /** `harness-forge-backup-<yyyy-mm-dd>.zip` (UTC date of `exportedAt`). */
 export function backupFilename(exportedAt: number): string {
   return `harness-forge-backup-${new Date(exportedAt).toISOString().slice(0, 10)}.zip`
-}
-
-/**
- * Ids of the stored files that `file` / `reasoning-file` parts of any message point at (`/api/files/<id>`), as a
- * subquery. Parts that are not objects and rows whose parts are not valid JSON are skipped.
- */
-function referencedFileIdsQuery() {
-  return sql`(
-    SELECT substr(ref.url, ${FILE_URL_PREFIX.length + 1}) FROM (
-      SELECT
-        CASE WHEN p.type = 'object' THEN json_extract(p.value, '$.type') END AS part_type,
-        CASE WHEN p.type = 'object' THEN json_extract(p.value, '$.url') END AS url
-      FROM messages AS m, json_each(CASE WHEN json_valid(m.parts) THEN m.parts ELSE '[]' END) AS p
-    ) AS ref
-    WHERE ref.part_type IN ('file', 'reasoning-file')
-      AND substr(ref.url, 1, ${FILE_URL_PREFIX.length}) = ${FILE_URL_PREFIX}
-  )`
 }
 
 /** Distinct blobs (by sha256) of the referenced files, their bytes and the number of file rows. */

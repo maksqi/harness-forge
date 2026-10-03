@@ -5,27 +5,68 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h, nextTick } from 'vue'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { useProjectsStore } from '~/stores/projects'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
+import { projectId, projectSummary } from '~/utils/testing/fixtures'
 import ChatHeader from './ChatHeader.vue'
 
 const mock = vi.hoisted(() => ({
   rename: null as unknown as Mock,
   exportChat: null as unknown as Mock,
   remove: null as unknown as Mock,
+  move: null as unknown as Mock,
 }))
 
 vi.mock('~/components/app-shell/chat-nav/chat-actions', () => ({
   useChatActions: () => ({ rename: mock.rename, exportChat: mock.exportChat, remove: mock.remove }),
 }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => ({}), useApiFetch: () => vi.fn() }))
+// The move action and the project components belong to W7.9; these stand-ins keep their frozen contracts (docs/UI.md
+// 10.4, 11.4).
+vi.mock('~/components/projects/move-chat', () => ({ useMoveChat: () => mock.move }))
+vi.mock('~/components/projects/ChatProjectChip.vue', async () => {
+  const { defineComponent: define, h: render } = await import('vue')
+  return {
+    default: define({
+      name: 'ChatProjectChip',
+      props: { chatId: { type: String, required: true }, projectId: { type: String, default: null } },
+      setup: props => () => render('button', { 'type': 'button', 'data-testid': 'chat-project-chip', 'data-chat-id': props.chatId, 'data-value': props.projectId }),
+    }),
+  }
+})
+vi.mock('~/components/projects/ProjectMenuItems.vue', async () => {
+  const { defineComponent: define, h: render } = await import('vue')
+  const { DropdownMenuCheckboxItem } = await import('@/components/ui/dropdown-menu')
+  const { useProjectsStore: projectsStore } = await import('~/stores/projects')
+  return {
+    default: define({
+      name: 'ProjectMenuItems',
+      props: { modelValue: { type: String, default: null }, includeNone: { type: Boolean, default: true } },
+      emits: ['select'],
+      setup(props, { emit }) {
+        const projects = projectsStore()
+        const item = (value: string | null, label: string) => render(DropdownMenuCheckboxItem, {
+          'modelValue': props.modelValue === value,
+          'data-testid': 'project-option',
+          'data-value': value ?? 'none',
+          'onSelect': () => emit('select', value),
+        }, () => label)
+        return () => [
+          ...(props.includeNone ? [item(null, 'No project')] : []),
+          ...projects.items.map(project => item(project.id, project.name)),
+        ]
+      },
+    }),
+  }
+})
 
 const CHAT_ID = '0199a8f0-0000-7000-8000-000000000001'
 
 /** Unmounted after each test, so an open menu never outlives its test. */
 const mounted: Array<{ unmount: () => void }> = []
 
-function mountHeader(props: { title: string | null, scrolled?: boolean, loading?: boolean }) {
+function mountHeader(props: { title: string | null, scrolled?: boolean, loading?: boolean, projectId?: string | null }) {
   const wrapper = mount({
     render: () => h(SidebarProvider, null, {
       default: () => h(TooltipProvider, null, { default: () => h(ChatHeader, { chatId: CHAT_ID, ...props }) }),
@@ -55,6 +96,7 @@ beforeEach(() => {
   mock.rename = vi.fn(async () => true)
   mock.exportChat = vi.fn(async () => {})
   mock.remove = vi.fn()
+  mock.move = vi.fn(async () => {})
   setActivePinia(createPinia())
 })
 
@@ -144,5 +186,80 @@ describe('chatHeader', () => {
     expect(document.activeElement).toBe(wrapper.get(`[data-testid="${testIds.chatMenuTrigger}"]`).element)
     expect(mock.rename).not.toHaveBeenCalled()
     expect(wrapper.find(`[data-testid="${testIds.chatTitleInput}"]`).exists()).toBe(false)
+  })
+
+  it('shows the project chip between the title and the menu only while the chat has a project', () => {
+    expect(mountHeader({ title: 'Chat' }).find(`[data-testid="${testIds.chatProjectChip}"]`).exists()).toBe(false)
+    expect(mountHeader({ title: 'Chat', projectId: null }).find(`[data-testid="${testIds.chatProjectChip}"]`).exists()).toBe(false)
+
+    const wrapper = mountHeader({ title: 'Chat', projectId: projectId(1) })
+    const chip = wrapper.get(`[data-testid="${testIds.chatProjectChip}"]`)
+    expect(chip.attributes()).toMatchObject({ 'data-chat-id': CHAT_ID, 'data-value': projectId(1) })
+    const order = [...wrapper.get(`[data-testid="${testIds.chatHeader}"]`).element.querySelectorAll('[data-testid]')].map(node => node.getAttribute('data-testid'))
+    expect(order.indexOf(testIds.chatTitle)).toBeLessThan(order.indexOf(testIds.chatProjectChip))
+    expect(order.indexOf(testIds.chatProjectChip)).toBeLessThan(order.indexOf(testIds.chatMenuTrigger))
+  })
+})
+
+describe('chatHeader: move to project', () => {
+  const P1 = projectId(1)
+  const P2 = projectId(2)
+
+  function withProjects() {
+    useProjectsStore().items = [projectSummary({ id: P1, name: 'Website' }), projectSummary({ id: P2, name: 'Notes', path: '/srv/workspaces/notes' })]
+  }
+
+  async function openMove(wrapper: ReturnType<typeof mountHeader>) {
+    await openMenu(wrapper)
+    menuItem(testIds.chatMenuMove).click()
+    for (let round = 0; round < 3 && !document.body.querySelector(`[data-testid="${testIds.projectOption}"]`); round++) {
+      await flushPromises()
+      await nextTick()
+    }
+  }
+
+  function options(): HTMLElement[] {
+    return [...document.body.querySelectorAll<HTMLElement>(`[data-testid="${testIds.projectOption}"]`)]
+  }
+
+  it('lists Move to project right after Rename while a project exists', async () => {
+    withProjects()
+    const wrapper = mountHeader({ title: 'Chat' })
+    await openMenu(wrapper)
+    const items = Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemcheckbox"]'))
+    expect(items.map(item => item.textContent?.trim())).toEqual([
+      'Rename',
+      'Move to project',
+      'Show thinking',
+      'Share…',
+      'Export as Markdown',
+      'Export as JSON',
+      'Delete',
+    ])
+    expect(menuItem(testIds.chatMenuMove).getAttribute('aria-haspopup')).toBe('menu')
+  })
+
+  it('offers no move without any project', async () => {
+    const wrapper = mountHeader({ title: 'Chat' })
+    await openMenu(wrapper)
+    expect(document.body.querySelector(`[data-testid="${testIds.chatMenuMove}"]`)).toBeNull()
+  })
+
+  it('moves the chat through useMoveChat: into a project, and out of it', async () => {
+    withProjects()
+    const wrapper = mountHeader({ title: 'Chat', projectId: P1 })
+    await openMove(wrapper)
+    expect(options().map(option => option.getAttribute('data-value'))).toEqual(['none', P1, P2])
+    // The current project is checked.
+    expect(options().find(option => option.getAttribute('data-value') === P1)!.getAttribute('data-state')).toBe('checked')
+    options().find(option => option.getAttribute('data-value') === P2)!.click()
+    await flushPromises()
+    expect(mock.move).toHaveBeenCalledWith(CHAT_ID, P2)
+
+    await openMove(wrapper)
+    options().find(option => option.getAttribute('data-value') === 'none')!.click()
+    await flushPromises()
+    expect(mock.move).toHaveBeenLastCalledWith(CHAT_ID, null)
+    expect(mock.move).toHaveBeenCalledTimes(2)
   })
 })

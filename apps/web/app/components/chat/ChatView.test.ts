@@ -13,10 +13,12 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { resetChatSessions } from '~/composables/useChatSession'
 import { dispatchServerEvent } from '~/composables/useServerEvents'
 import { useChatsStore } from '~/stores/chats'
+import { useProjectsStore } from '~/stores/projects'
 import { testIds } from '~/utils/testids'
-import { assistantMessage, chatDetail, chatId, messageBranch, userMessage } from '~/utils/testing/fixtures'
+import { assistantMessage, chatDetail, chatId, messageBranch, projectId, projectSummary, userMessage } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
+import ChatTranscript from './ChatTranscript.vue'
 import ChatView from './ChatView.vue'
 
 const mock = vi.hoisted(() => ({
@@ -43,7 +45,7 @@ vi.mock('~/components/chat/composer/ChatComposer.vue', async () => {
   return {
     default: define({
       name: 'ChatComposer',
-      props: ['chatId', 'status', 'modelRef', 'reasoningEffort', 'toolMode', 'usage', 'chatCostUsd', 'disabled', 'placeholder', 'previousImages'],
+      props: ['chatId', 'status', 'modelRef', 'reasoningEffort', 'toolMode', 'usage', 'chatCostUsd', 'disabled', 'placeholder', 'previousImages', 'projectId'],
       emits: ['update:modelRef', 'update:reasoningEffort', 'update:toolMode', 'submit', 'stop', 'edit-last'],
       setup(props, { emit, expose }) {
         expose({
@@ -58,6 +60,8 @@ vi.mock('~/components/chat/composer/ChatComposer.vue', async () => {
           'data-model-ref': props.modelRef,
           'data-disabled': String(props.disabled),
           'data-previous-images': String(props.previousImages),
+          'data-project-id': props.projectId ?? 'none',
+          'data-tool-mode': props.toolMode,
           'onSubmit': (event: Event) => {
             event.preventDefault()
             emit('submit', { text: 'Hello', files: [] })
@@ -121,6 +125,7 @@ beforeEach(() => {
   api.providers.list.mockResolvedValue({ items: [] })
   api.models.list.mockResolvedValue({ items: [] })
   api.tools.list.mockResolvedValue({ items: [] })
+  api.projects.list.mockResolvedValue({ items: [] })
   pinia = createPinia()
   setActivePinia(pinia)
 })
@@ -141,7 +146,13 @@ function mountView(props: { chatId: string, isNew?: boolean }) {
   const wrapper = mount(defineComponent({
     setup: () => () => h(TooltipProvider, null, {
       default: () => h(ChatView, { ...props, onCreated: created }, {
-        empty: () => h('p', { 'data-testid': testIds.emptyGreeting }, 'What\'s next?'),
+        // Like pages/chat/[id].vue: the header gets the chat's project.
+        header: ({ projectId: project }: { projectId: string | null }) => h('header', { 'data-testid': 'header', 'data-project-id': project ?? 'none' }),
+        // Like pages/index.vue: the greeting and the project picker (v-model on the session's project).
+        empty: ({ projectId: project, setProject }: { projectId: string | null, setProject: (id: string | null) => void }) => [
+          h('p', { 'data-testid': testIds.emptyGreeting }, 'What\'s next?'),
+          h('button', { 'type': 'button', 'data-testid': 'pick-project', 'data-project-id': project ?? 'none', 'onClick': () => setProject(projectId(2)) }),
+        ],
       }),
     }),
   }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
@@ -245,6 +256,176 @@ describe('chatView: existing chat', () => {
     // The running reply is followed: the store knows it runs, and the view asked to resume it.
     await until(() => calls.some(call => call.url === `/api/chat/${chatId(2)}/stream`))
     expect(useChatsStore().runState[chatId(2)]).toBeUndefined()
+  })
+
+  it('takes a message back while a key rotation holds off new runs (409 busy)', async () => {
+    const { wrapper } = mountView({ chatId: chatId(2) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    replies.push(() => new Response(JSON.stringify({ error: { code: 'conflict', message: 'The server is rotating its encryption key. Try again in a moment.', details: { reason: 'busy' } } }), { status: 409 }))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => mock.toast.mock.calls.length > 0)
+    expect(mock.toast.mock.calls).toEqual([['The server is rotating its encryption key. Try again in a moment.']])
+    expect(mock.composer.setText).toHaveBeenCalledWith('Hello')
+    expect(wrapper.findAll(`[data-testid="${testIds.messageUser}"]`)).toHaveLength(1)
+    expect(wrapper.find(`[data-testid="${testIds.chatError}"]`).exists()).toBe(false)
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-status')).toBe('ready')
+    // Nothing runs: no resume, no running dot.
+    await flushPromises()
+    expect(calls.filter(call => call.url.endsWith('/stream'))).toHaveLength(0)
+    expect(useChatsStore().runState[chatId(2)]).toBeUndefined()
+  })
+})
+
+describe('chatView: approvals', () => {
+  it('"Accept all edits in this chat": the composer shows edits and the continuation runs in edits mode', async () => {
+    api.chats.update.mockResolvedValue(chatDetail({ id: chatId(10) }))
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(10),
+      modelRef: MODEL,
+      projectId: projectId(1),
+      settings: { toolMode: 'ask' },
+      messages: [
+        userMessage('msg_user000000000001', 'Fix the parser'),
+        {
+          id: 'msg_asst000000000009',
+          role: 'assistant',
+          metadata: { modelRef: MODEL, startedAt: 1 },
+          parts: [{ type: 'tool-edit_file', toolCallId: 'call_1', state: 'approval-requested', input: { path: 'a.ts', old_string: 'a', new_string: 'b' }, approval: { id: 'appr_1' } }],
+        },
+      ],
+    }))
+    const { wrapper } = mountView({ chatId: chatId(10) })
+    await until(() => wrapper.find(`[data-testid="${testIds.toolApproval}"]`).exists())
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-tool-mode')).toBe('ask')
+    // An edit in a chat that asks: the card offers "Accept all edits in this chat" instead of "Always allow".
+    expect(wrapper.find(`[data-testid="${testIds.toolApprovalAcceptEdits}"]`).exists()).toBe(true)
+    expect(wrapper.find(`[data-testid="${testIds.toolApprovalAlways}"]`).exists()).toBe(false)
+
+    replies.push(textReply('Edited'))
+    wrapper.getComponent(ChatTranscript).vm.$emit('approval', { id: 'appr_1', approved: true, toolName: 'edit_file', alwaysAllow: false, acceptEdits: true })
+    await until(() => calls.some(call => call.url === '/api/chat'))
+    expect(calls.find(call => call.url === '/api/chat')!.body).toMatchObject({ toolMode: 'edits', message: { role: 'assistant' } })
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(10) }, body: { settings: { toolMode: 'edits' } } })
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-tool-mode')).toBe('edits')
+    await until(() => wrapper.text().includes('Edited'))
+  })
+})
+
+describe('chatView: approval cards', () => {
+  function pendingCall(toolName: string, input: unknown) {
+    return {
+      id: 'msg_asst000000000009',
+      role: 'assistant' as const,
+      metadata: { modelRef: MODEL, startedAt: 1 },
+      parts: [{ type: `tool-${toolName}` as const, toolCallId: 'call_1', state: 'approval-requested' as const, input, approval: { id: 'appr_1' } }],
+    }
+  }
+
+  it('a chat that already accepts edits gets no "Accept all edits" checkbox', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(11),
+      modelRef: MODEL,
+      projectId: projectId(1),
+      settings: { toolMode: 'edits' },
+      messages: [userMessage('msg_user000000000001', 'Write it'), pendingCall('write_file', { path: 'a.ts', content: 'x' })],
+    }))
+    const { wrapper } = mountView({ chatId: chatId(11) })
+    await until(() => wrapper.find(`[data-testid="${testIds.toolApproval}"]`).exists())
+    expect(wrapper.find(`[data-testid="${testIds.toolApprovalAcceptEdits}"]`).exists()).toBe(false)
+    expect(wrapper.find(`[data-testid="${testIds.toolApprovalAlways}"]`).exists()).toBe(false)
+    expect(wrapper.find(`[data-testid="${testIds.toolApprovalAllow}"]`).exists()).toBe(true)
+  })
+
+  it('a shell approval names the project and announces the command', async () => {
+    api.projects.list.mockResolvedValue({ items: [projectSummary({ id: projectId(1), name: 'Website' })] })
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(12),
+      modelRef: MODEL,
+      projectId: projectId(1),
+      messages: [userMessage('msg_user000000000001', 'Run the tests'), pendingCall('shell', { command: 'pnpm test\necho done', timeout_ms: 120_000 })],
+    }))
+    const { wrapper } = mountView({ chatId: chatId(12) })
+    await until(() => wrapper.find(`[data-testid="${testIds.toolApprovalPreview}"]`).exists())
+    await until(() => wrapper.get(`[data-testid="${testIds.toolApprovalPreview}"]`).text().includes('In Website'))
+    expect(wrapper.get(`[data-testid="${testIds.toolApprovalPreview}"]`).attributes('data-kind')).toBe('command')
+    // Shell commands are never "always allowed".
+    expect(wrapper.find(`[data-testid="${testIds.toolApprovalAlways}"]`).exists()).toBe(false)
+    await until(() => wrapper.get('[role="status"]').text() === 'Approval needed: run pnpm test')
+  })
+
+  it('announces other tools by name', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(13),
+      modelRef: MODEL,
+      messages: [userMessage('msg_user000000000001', 'Use it'), pendingCall('mock_approval_tool', { value: 'x' })],
+    }))
+    const { wrapper } = mountView({ chatId: chatId(13) })
+    await until(() => wrapper.get('[role="status"]').text() === 'Approval needed: mock_approval_tool')
+  })
+})
+
+describe('chatView: projects', () => {
+  const P1 = projectId(1)
+  const P2 = projectId(2)
+
+  beforeEach(() => {
+    api.projects.list.mockResolvedValue({ items: [projectSummary({ id: P1, name: 'Website' }), projectSummary({ id: P2, name: 'Notes', path: '/srv/workspaces/notes' })] })
+  })
+
+  it('loads the projects once (the chip, the picker and the move menu need them)', async () => {
+    mountView({ chatId: chatId(1), isNew: true })
+    await until(() => useProjectsStore().loaded)
+    expect(api.projects.list).toHaveBeenCalledTimes(1)
+    mountView({ chatId: chatId(2), isNew: true })
+    await flushPromises()
+    expect(api.projects.list).toHaveBeenCalledTimes(1)
+  })
+
+  it('a new chat: the filter\'s project, then the pick, reach the picker, the composer and the first request', async () => {
+    const chats = useChatsStore()
+    chats.projectFilter = P1
+    const { wrapper } = mountView({ chatId: chatId(1), isNew: true })
+    await until(() => wrapper.get('[data-testid="pick-project"]').attributes('data-project-id') === P1)
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-project-id')).toBe(P1)
+
+    // The picker's v-model: a local choice until the first send.
+    await wrapper.get('[data-testid="pick-project"]').trigger('click')
+    expect(wrapper.get('[data-testid="pick-project"]').attributes('data-project-id')).toBe(P2)
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-project-id')).toBe(P2)
+    expect(api.chats.update).not.toHaveBeenCalled()
+
+    wrapper.getComponent({ name: 'ChatComposer' }).vm.$emit('update:modelRef', MODEL)
+    replies.push(textReply('Hi there'))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => calls.some(call => call.url === '/api/chat'))
+    expect(calls.find(call => call.url === '/api/chat')!.body).toMatchObject({ chatId: chatId(1), projectId: P2 })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageAssistant}"]`).length === 1)
+    // The chat keeps its project once it exists.
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-project-id')).toBe(P2)
+    expect(wrapper.get('[data-testid="header"]').attributes('data-project-id')).toBe(P2)
+  })
+
+  it('a new chat without a project sends none', async () => {
+    const { wrapper } = mountView({ chatId: chatId(1), isNew: true })
+    expect(wrapper.get('[data-testid="pick-project"]').attributes('data-project-id')).toBe('none')
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-project-id')).toBe('none')
+    wrapper.getComponent({ name: 'ChatComposer' }).vm.$emit('update:modelRef', MODEL)
+    replies.push(textReply('Hi there'))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => calls.some(call => call.url === '/api/chat'))
+    expect(calls.find(call => call.url === '/api/chat')!.body).not.toHaveProperty('projectId')
+  })
+
+  it('a saved chat: the header and the composer get its project', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(5), modelRef: MODEL, projectId: P1, messages: [userMessage('msg_user000000000001', 'Hi')] }))
+    const { wrapper } = mountView({ chatId: chatId(5) })
+    await until(() => wrapper.get('[data-testid="header"]').attributes('data-project-id') === P1)
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-project-id')).toBe(P1)
+    // Moved elsewhere (another tab, the sidebar): both follow.
+    dispatchServerEvent({ type: 'chat.updated', data: { ...chatDetail({ id: chatId(5), projectId: null }), activeLeafId: 'msg_user000000000001' }, at: 1 })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="header"]').attributes('data-project-id')).toBe('none')
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-project-id')).toBe('none')
   })
 })
 

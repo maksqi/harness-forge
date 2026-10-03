@@ -9,7 +9,7 @@ import { authStatusSchema, harnessErrorEnvelopeSchema } from '@harness-forge/sha
 import { afterEach, describe, expect, it } from 'vitest'
 import { HSTS_HEADER_VALUE } from '../../security/headers.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
-import { createMemorySecretStore, createMemorySettingsService } from '../../testing/fakes.ts'
+import { createMemorySecretStore, createMemorySettingsService, createRecordingEventBus } from '../../testing/fakes.ts'
 import { FRESH_AUTH_REQUIRED_MESSAGE } from '../middleware/fresh-auth.ts'
 import { LOGIN_RATE_LIMIT_DEFAULTS } from '../middleware/login-rate-limit.ts'
 import { CROSS_ORIGIN_MESSAGE } from '../middleware/origin-check.ts'
@@ -330,6 +330,34 @@ describe('pUT /auth/password', () => {
     expect(await authStatus(t, other)).toMatchObject({ authenticated: false })
     expect((await login(t, 'first password')).status).toBe(401)
     expect((await login(t, 'second password')).status).toBe(200)
+  })
+
+  it('closes every event stream after a set, a change or a removal (Phase 7, events.disconnectAll)', async () => {
+    const events = createRecordingEventBus()
+    const t = await createTestApp({
+      start: false,
+      overrides: { secrets: createMemorySecretStore(), settings: createMemorySettingsService(), events },
+    })
+    apps.push(t)
+    let closed = 0
+    events.subscribe(() => {}, { onDisconnect: () => {
+      closed += 1
+    } })
+    const first = tokenOf(await setPassword(t, { newPassword: 'first password' }))
+    expect(events.disconnects()).toBe(1)
+    expect(closed).toBe(1)
+    expect(events.subscriberCount()).toBe(0)
+
+    const second = tokenOf(await setPassword(t, { currentPassword: 'first password', newPassword: 'second password' }, first))
+    expect(events.disconnects()).toBe(2)
+    await setPassword(t, { currentPassword: 'second password', newPassword: null }, second)
+    expect(events.disconnects()).toBe(3)
+
+    // A refused change closes nothing.
+    await setPassword(t, { newPassword: 'third password' })
+    const refused = await setPassword(t, { currentPassword: 'wrong one', newPassword: 'fourth password' }, tokenOf(await login(t, 'third password')))
+    expect(refused.status).toBe(403)
+    expect(events.disconnects()).toBe(4)
   })
 
   it('removes the password (newPassword null): every request is authenticated again', async () => {

@@ -2,6 +2,7 @@
 // fields that save on blur. Limits come from the shared settings schema.
 import type { ReasoningEffort, SendKey, ToolMode } from '@harness-forge/shared'
 import { LIMITS, settingsSchema } from '@harness-forge/shared'
+import { TOOL_MODE_OPTIONS as PERMISSION_MENU_OPTIONS } from '~/components/chat/composer/permission'
 
 export interface SettingChoice<T extends string> {
   value: T
@@ -9,12 +10,12 @@ export interface SettingChoice<T extends string> {
   description?: string
 }
 
-/** Same labels and descriptions as the composer's permission menu (docs/UI.md 7.11). */
-export const TOOL_MODE_OPTIONS: ReadonlyArray<SettingChoice<ToolMode>> = [
-  { value: 'ask', label: 'Ask', description: 'Ask before tools that can change things' },
-  { value: 'auto', label: 'Auto', description: 'Run tools without asking, except ones marked always-ask' },
-  { value: 'off', label: 'Off', description: 'Don\'t use tools' },
-]
+/**
+ * The options of the composer's permission menu (docs/UI.md 7.11), same order, labels and descriptions: Ask · Accept
+ * edits · Auto · Off. Accept edits is a valid default too; a new chat without a project treats it like Ask.
+ */
+export const TOOL_MODE_OPTIONS: ReadonlyArray<SettingChoice<ToolMode>> = PERMISSION_MENU_OPTIONS
+  .map(({ value, label, description }) => ({ value, label, description }))
 
 /** Same order as the composer's effort menu (docs/UI.md 7.10); models without reasoning ignore it. */
 export const EFFORT_OPTIONS: ReadonlyArray<SettingChoice<ReasoningEffort>> = [
@@ -51,14 +52,18 @@ export function instructionsError(value: string): string | null {
     : `Use at most ${INSTRUCTIONS_MAX.toLocaleString('en-US')} characters.`
 }
 
+export const STEPS_MAX = LIMITS.stepsMax
+export const STEPS_ERROR = `Enter a whole number from 1 to ${STEPS_MAX}.`
+
 /**
- * The typed "Max steps per response": a whole number from 1 to 100. The setting accepts up to 200 since Phase 7; the
- * field keeps its v1.2 bound of 100 until W7.12 raises it with the `projectMaxSteps` field.
+ * A typed step limit: "Max steps per response" (`maxSteps`, chats without a project) and "Max steps in project chats"
+ * (`projectMaxSteps`) are both whole numbers from 1 to 200 (Phase 7, ADR-032; `maxSteps` was 1 to 100 before).
  */
 export function parseMaxSteps(text: string): { value: number } | { error: string } {
   const trimmed = text.trim()
   const value = /^\d{1,3}$/.test(trimmed) ? Number(trimmed) : Number.NaN
-  return value <= 100 && settingsSchema.shape.maxSteps.safeParse(value).success
+  // Both settings share the bound `LIMITS.stepsMax`.
+  return settingsSchema.shape.projectMaxSteps.safeParse(value).success
     ? { value }
-    : { error: 'Enter a whole number from 1 to 100.' }
+    : { error: STEPS_ERROR }
 }

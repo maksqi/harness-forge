@@ -5,7 +5,7 @@ import { listResponseSchema, pluginManifestBaseSchema, toolSummarySchema, WORKSP
 import semver from 'semver'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createTestApp } from '../../testing/create-test-app.ts'
-import coreWorkspace, { createWorkspaceTools, manifest, NO_WORKSPACE_MESSAGE, requireWorkspace } from './index.ts'
+import coreWorkspace, { createWorkspaceTools, manifest, NO_WORKSPACE_MESSAGE, readFilePolicy, requireWorkspace, writeFilePolicy } from './index.ts'
 
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} }
 
@@ -20,15 +20,28 @@ const TIMEOUTS: Record<string, number> = {
   shell: 600_000,
 }
 
-/** P7-0b placeholder policies (W7.2 turns read_file, write_file and edit_file into policy functions). */
-const POLICIES: Record<string, string> = {
-  read_file: 'safe',
+/** Static policies; `read_file`, `write_file` and `edit_file` have policy functions (`policies.ts`). */
+const POLICIES: Record<string, string | typeof readFilePolicy> = {
+  read_file: readFilePolicy,
   list_directory: 'safe',
   find_files: 'safe',
   search_files: 'safe',
-  write_file: 'ask',
-  edit_file: 'ask',
+  write_file: writeFilePolicy,
+  edit_file: writeFilePolicy,
   shell: 'ask',
+}
+
+/** The file tools of W7.2 (the shell is W7.3's, tested in `shell-tool.test.ts`). */
+const FILE_TOOL_NAMES = WORKSPACE_TOOL_NAMES.filter(name => name !== 'shell')
+
+/** A valid input of each file tool. */
+const FILE_TOOL_INPUTS: Record<string, unknown> = {
+  read_file: { path: 'a.txt' },
+  list_directory: {},
+  find_files: { pattern: '*.ts' },
+  search_files: { pattern: 'x' },
+  write_file: { path: 'a.txt', content: 'x' },
+  edit_file: { path: 'a.txt', old_string: 'x', new_string: 'y' },
 }
 
 const context: ToolCallContext = {
@@ -63,7 +76,7 @@ describe('the seven workspace tools', () => {
     expect(createWorkspaceTools({ logger, platform: 'darwin' })).toHaveLength(7)
   })
 
-  it.each(WORKSPACE_TOOL_NAMES.map(name => [name] as const))('%s: shared input schema, workspace access, timeout, placeholder policy, description', (name) => {
+  it.each(WORKSPACE_TOOL_NAMES.map(name => [name] as const))('%s: shared input schema, workspace access, timeout, policy, description', (name) => {
     const tool = tools.find(entry => entry.name === name)!
     expect(tool.inputSchema).toBe(WORKSPACE_TOOL_SCHEMAS[name].input)
     expect(tool.workspace).toBe(WORKSPACE_TOOL_ACCESS[name])
@@ -73,9 +86,16 @@ describe('the seven workspace tools', () => {
     expect(tool.description.length).toBeLessThanOrEqual(1024)
   })
 
-  it.each(WORKSPACE_TOOL_NAMES.map(name => [name] as const))('%s: execute is a stub that answers not_implemented', async (name) => {
+  it.each(FILE_TOOL_NAMES.map(name => [name] as const))('%s: refuses a call without a project folder, and a missing folder', async (name) => {
     const tool = tools.find(entry => entry.name === name)!
-    await expect(tool.execute({}, context)).rejects.toMatchObject({ code: 'not_implemented' })
+    const { workspace: _workspace, ...withoutWorkspace } = context
+    await expect(tool.execute(FILE_TOOL_INPUTS[name], withoutWorkspace)).rejects.toMatchObject({ code: 'validation_error', message: NO_WORKSPACE_MESSAGE })
+    // The fake root does not exist: the path guard refuses every path.
+    await expect(tool.execute(FILE_TOOL_INPUTS[name], context)).rejects.toMatchObject({ code: 'validation_error' })
+  })
+
+  it.each(FILE_TOOL_NAMES.map(name => [name] as const))('%s: has a toModelOutput', (name) => {
+    expect(typeof tools.find(entry => entry.name === name)!.toModelOutput).toBe('function')
   })
 
   it('the shell description tells the model each call is a new process', () => {

@@ -3,7 +3,9 @@ import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import { createServer } from 'node:http'
+import { PLUGIN_API_VERSION } from '@harness-forge/plugin-sdk'
 import { pluginManifestBaseSchema, settingsSchemaSchema } from '@harness-forge/shared'
+import semver from 'semver'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import coreTools, { manifest, webFetchUserAgent } from './index.ts'
@@ -21,6 +23,13 @@ describe('core-tools manifest', () => {
     const parsed = pluginManifestBaseSchema.parse(manifest)
     expect(parsed).toMatchObject({ id: 'core-tools', main: 'index.ts', permissions: ['network'] })
     expect(settingsSchemaSchema.parse(manifest.settings).properties.allowLocalhost).toMatchObject({ type: 'boolean', default: false })
+  })
+
+  it('is version 1.2.0 for plugin API ^1.2.0 (Phase 7: ImageGenerateResult.modelName in the generate_image output)', () => {
+    expect(manifest).toMatchObject({ version: '1.2.0', engines: { harness: '^1.2.0' } })
+    expect(semver.satisfies(PLUGIN_API_VERSION, manifest.engines.harness)).toBe(true)
+    // A 1.1 host answers no modelName: the range excludes it.
+    expect(semver.satisfies('1.1.0', manifest.engines.harness)).toBe(false)
   })
 
   it('builds a versioned User-Agent', () => {

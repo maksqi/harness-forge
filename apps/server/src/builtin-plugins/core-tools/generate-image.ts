@@ -1,8 +1,10 @@
 // The `generate_image` tool of `core-tools` (ADR-028; policy `ask`, timeout 300 s): generates images with the image
 // model of Settings → Media (`imageModelRef`) through `ctx.images.generate`, which stores them as files, and returns file
-// references only (`generateImageToolOutputSchema`, never image bytes). The model gets a short text instead of the JSON;
-// the chat pipeline appends the images as `file` parts after the call (only for this tool of `core-tools`). The tool is
-// always registered: without an image model a call fails with "Choose an image model in Settings → Media.".
+// references only (`generateImageToolOutputSchema`, never image bytes) plus the model's display name (`modelName`, plugin
+// API 1.2.0). The model gets a short text instead of the JSON, built from the stored output ("Generated 2 images with GPT
+// Image 1; ..."; outputs stored before Phase 7 name the model ref); the chat pipeline appends the images as `file` parts
+// after the call (only for this tool of `core-tools`). The tool is always registered: without an image model a call
+// fails with "Choose an image model in Settings → Media.".
 import type { PluginImagesApi, ToolDefinition, ToolResultOutput } from '@harness-forge/plugin-sdk'
 import type { GenerateImageToolInput, GenerateImageToolOutput } from '@harness-forge/shared'
 import type { JSONValue } from 'ai'
@@ -32,15 +34,38 @@ export const generateImageInputSchema = z.object({
   ),
 })
 
+/** Maximum characters of the output's `modelName` (`generateImageToolOutputSchema`). */
+export const GENERATE_IMAGE_MODEL_NAME_MAX_CHARS = 200
+
 /**
- * The text the model gets instead of the output: `Generated 2 images with <model ref>; they are shown to the user below
- * this call.` (`1 image ...; it is shown ...`). The output carries only the model ref (no display name), and the text
- * must depend on the stored output alone: it is built again whenever the history is converted.
+ * The text the model gets instead of the output: `Generated 2 images with <model>; they are shown to the user below this
+ * call.` (`1 image ...; it is shown ...`). `model` is the output's `modelName`, else its `modelRef` (outputs stored before
+ * Phase 7): the text depends on the stored output alone, since it is built again whenever the history is converted.
  */
-export function generatedImagesText(count: number, modelRef: string): string {
+export function generatedImagesText(count: number, model: string): string {
   return count === 1
-    ? `Generated 1 image with ${modelRef}; it is shown to the user below this call.`
-    : `Generated ${count} images with ${modelRef}; they are shown to the user below this call.`
+    ? `Generated 1 image with ${model}; it is shown to the user below this call.`
+    : `Generated ${count} images with ${model}; they are shown to the user below this call.`
+}
+
+/**
+ * The `modelName` of the output: the result's display name, trimmed and cut between code points to
+ * `GENERATE_IMAGE_MODEL_NAME_MAX_CHARS`; undefined when the result has none (the text then names the model ref).
+ */
+export function outputModelName(modelName: unknown): string | undefined {
+  if (typeof modelName !== 'string')
+    return undefined
+  let name = modelName.trim()
+  if (name.length > GENERATE_IMAGE_MODEL_NAME_MAX_CHARS) {
+    let cut = ''
+    for (const char of name) {
+      if (cut.length + char.length > GENERATE_IMAGE_MODEL_NAME_MAX_CHARS)
+        break
+      cut += char
+    }
+    name = cut
+  }
+  return name === '' ? undefined : name
 }
 
 function jsonBytes(value: string): number {
@@ -77,8 +102,10 @@ export function createGenerateImageTool(images: PluginImagesApi): ToolDefinition
       if (result.images.length === 0)
         throw new HarnessError({ code: 'provider_error', message: 'The image model returned no image.' })
       const revisedPrompt = result.revisedPrompt === undefined ? '' : fitJsonBytes(result.revisedPrompt, GENERATE_IMAGE_REVISED_PROMPT_JSON_BYTES)
+      const modelName = outputModelName(result.modelName)
       const output = generateImageToolOutputSchema.safeParse({
         modelRef: result.modelRef,
+        ...(modelName === undefined ? {} : { modelName }),
         images: result.images.map(({ fileId, url, mediaType, name }) => ({ fileId, url, mediaType, name })),
         ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
         ...(revisedPrompt === '' ? {} : { revisedPrompt }),
@@ -91,7 +118,7 @@ export function createGenerateImageTool(images: PluginImagesApi): ToolDefinition
       const parsed = generateImageToolOutputSchema.safeParse(output)
       if (!parsed.success)
         return { type: 'json', value: (output ?? null) as JSONValue }
-      return { type: 'text', value: generatedImagesText(parsed.data.images.length, parsed.data.modelRef) }
+      return { type: 'text', value: generatedImagesText(parsed.data.images.length, parsed.data.modelName ?? parsed.data.modelRef) }
     },
   }
 }

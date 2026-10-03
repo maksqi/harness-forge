@@ -8,7 +8,8 @@
 //   `HF_TRUST_PROXY` (ADR-026, `clientAddress`); failures log both the resolved `address` and the TCP `peer`.
 // - `POST /auth/logout`: clears the cookie (sessions are stateless; changing the password ends all of them).
 // - `PUT /auth/password`: set, change or remove the stored password (current password required when one is set);
-//   every other session ends and the caller gets a new cookie.
+//   every other session ends and the caller gets a new cookie; every event stream closes (`events.disconnectAll()`,
+//   Phase 7: a revoked session must not keep listening; the browser reconnects with its new cookie).
 import type { AuthStatus } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
 import type { LoginAttempt } from '../middleware/login-rate-limit.ts'
@@ -109,6 +110,8 @@ export function createAuthRoutes(deps: AppDeps): Hono<AppEnv> {
 
     await deps.passwords.set(newPassword)
     c.get('logger').info(newPassword === null ? 'password removed' : 'password changed')
+    // Sessions were revoked (new epoch): end every event stream so no revoked session keeps receiving events.
+    await deps.events.disconnectAll()
     if (newPassword === null) {
       clearSessionCookie(c, deps.env)
       return c.json(DISABLED_STATUS)

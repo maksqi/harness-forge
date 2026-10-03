@@ -9,7 +9,9 @@
 // With a password the `hf_session` cookie is verified (`deps.sessions.verify`: signature, expiry, epoch); every route
 // that is not `public` in the route table (unknown routes count as non-public) answers `401 unauthorized` (action
 // `login`) without a valid session. A session older than 24 h is re-issued with the same `authAt` (rolling), unless
-// the route set or cleared the cookie itself.
+// the route set or cleared the cookie itself. The rolled token is signed before the handler runs: when a master-key
+// rotation swapped the key during the request (`keyring.keyVersion` changed, ADR-034), it would be invalid already and
+// is dropped (the rotation route issues the caller's new cookie itself).
 import type { Env } from '../../env.ts'
 import type { AppDeps } from '../../types.ts'
 import type { AppContext, AppMiddleware, RequestAuth } from '../types.ts'
@@ -118,11 +120,13 @@ export function sessionAuthMiddleware(deps: AppDeps): AppMiddleware {
     if (session === null && getApiRoute(c)?.route.public !== true)
       throw new HarnessError({ code: 'unauthorized', message: UNAUTHORIZED_MESSAGE, action: 'login' })
 
+    const keyVersion = deps.keyring.keyVersion
     const rolled = session !== null && now - session.iat > SESSION_ROLL_AFTER_MS
       ? await deps.sessions.issue({ authAt: session.authAt, now })
       : null
     await next()
-    if (rolled !== null) {
+    // Signed under a key that a rotation replaced during the request: no longer valid, never sent.
+    if (rolled !== null && deps.keyring.keyVersion === keyVersion) {
       // Login, logout and password changes set the cookie themselves: never override their answer.
       updateResponseHeaders(c, (headers) => {
         if (!setsSessionCookie(headers))

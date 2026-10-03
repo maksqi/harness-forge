@@ -82,8 +82,8 @@ export interface ChatEnsureInput {
   settings?: ChatSettings
   /**
    * Phase 7 (ADR-031): the project of a new chat (`ChatRequestBody.projectId`), applied only when `ensure` creates the
-   * chat (ignored for an existing chat). The pipeline checks that the project exists before (`not_found` before the
-   * chat row exists).
+   * chat (ignored for an existing chat). `ensure` checks that the project exists (`not_found` before the chat row
+   * exists) and stores the id through a subquery on `projects`, so a project deleted in between leaves no dangling id.
    */
   projectId?: string
 }

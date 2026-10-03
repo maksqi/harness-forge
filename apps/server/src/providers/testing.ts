@@ -54,9 +54,10 @@ import { createMockWav, MOCK_TRANSCRIPT, mockImagePng, mockImageSize, mockImageU
 import { createModelCatalogWith } from '../catalog/index.ts'
 import { catalogModelInfo } from '../catalog/merge.ts'
 import { rejectsNotImplemented, throwsNotImplemented } from '../not-implemented.ts'
+import { resultModelName } from '../services/images/generation.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { createRecordingEventBus } from '../testing/fakes.ts'
-import { createProviderServiceWith } from './index.ts'
+import { createProviderServiceWith, unknownProviderMessage } from './index.ts'
 
 /** The small models.dev snapshot used by the catalog tests. */
 export const MODELS_DEV_FIXTURE = fileURLToPath(new URL('../catalog/__fixtures__/models-dev.json', import.meta.url))
@@ -325,8 +326,8 @@ async function fakeContextImages(deps: AppDeps, pluginSignal: AbortSignal, optio
   })
   return {
     modelRef: result.modelRef,
-    // Plugin API 1.2.0 placeholder (the model id) until the image service reports the catalog name (W7.6).
-    modelName: safeParseModelRef(result.modelRef)?.modelId ?? result.modelRef,
+    // Plugin API 1.2.0: the catalog name the image service reports, else the model id (as `toImageGenerateResult`).
+    modelName: resultModelName(result),
     images: result.images.map(({ file, url }) => ({ fileId: file.id, url, mediaType: file.mime, name: file.name, size: file.size })),
     ...(result.costUsd === null ? {} : { costUsd: result.costUsd }),
     ...(result.revisedPrompt === undefined ? {} : { revisedPrompt: result.revisedPrompt }),
@@ -515,7 +516,8 @@ const KIND_LABELS: Readonly<Record<'image' | 'transcription' | 'speech', string>
 /**
  * `base` with fakes of the Phase 6 resolvers on the real catalog and registry (instant models for tests of the image,
  * audio and chat services; the real resolvers are in `providers/index.ts`):
- * - `resolveImageModel` / `resolveTranscriptionModel` / `resolveSpeechModel`: `not_found` for an unknown provider,
+ * - `resolveImageModel` / `resolveTranscriptionModel` / `resolveSpeechModel`: `provider_not_configured` (action
+ *   `configure-provider`, Phase 7) for an unknown provider,
  *   `model_not_found` (action `refresh-models`) for a model missing from the catalog, `validation_error` for a model of
  *   another kind; else the resolved model with `info` / `entry` / `provider` from the catalog and registry and the model
  *   instance of `options` (by ref) or an instant fake model (`createFakeImageModel`, ...). The enabled / credential
@@ -528,7 +530,7 @@ export function withFakeMediaResolvers(base: ProviderService, deps: AppDeps, opt
     const { providerId, modelId } = parseModelRef(modelRef)
     const provider = deps.registry.providers.get(providerId)
     if (provider === undefined)
-      throw new HarnessError({ code: 'not_found', message: `Unknown provider "${providerId}".`, providerId })
+      throw new HarnessError({ code: 'provider_not_configured', message: unknownProviderMessage(providerId), providerId, action: 'configure-provider' })
     const entry = await deps.catalog.get(providerId, modelId)
     if (entry === null) {
       throw new HarnessError({

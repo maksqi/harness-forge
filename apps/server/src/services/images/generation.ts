@@ -1,10 +1,31 @@
 // Pure helpers of one image generation (ADR-028): the checked call options of `ProviderDefinition.imageParams`, the token
-// usage and the estimated cost of a `generateImage` result, and the prompt as revised by the provider.
+// usage and the estimated cost of a `generateImage` result, the prompt as revised by the provider, and the display name
+// of the image model (Phase 7, plugin API 1.2.0).
 import type { ImageParamsResult, ProviderOptions } from '@harness-forge/plugin-sdk'
 import type { ModelCost } from '@harness-forge/shared'
 import type { GeneratedFile, ImageModelUsage } from 'ai'
-import type { ImageGenerationUsage } from './types.ts'
-import { LIMITS } from '@harness-forge/shared'
+import type { ImageGenerationResult, ImageGenerationUsage } from './types.ts'
+import { LIMITS, safeParseModelRef } from '@harness-forge/shared'
+
+/** Maximum characters of an image model display name (`generateImageToolOutputSchema.modelName`: `max(200)`). */
+export const IMAGE_MODEL_NAME_MAX_CHARS = 200
+
+/**
+ * The display name of an image model (Phase 7, plugin API 1.2.0): the catalog name (`CatalogModel.name`: the user's
+ * alias, else the catalog name, else the id), else the model id; trimmed and cut to `IMAGE_MODEL_NAME_MAX_CHARS`.
+ */
+export function imageModelDisplayName(catalogName: string | null | undefined, modelId: string): string {
+  const name = typeof catalogName === 'string' ? catalogName.trim() : ''
+  return cutUtf16(name === '' ? modelId : name, IMAGE_MODEL_NAME_MAX_CHARS)
+}
+
+/**
+ * The display name of an image generation result: its `modelName` (the image service always sets it), else the model id
+ * of `modelRef` (results built without it, e.g. test doubles written before Phase 7).
+ */
+export function resultModelName(result: Pick<ImageGenerationResult, 'modelRef' | 'modelName'>): string {
+  return imageModelDisplayName(result.modelName, safeParseModelRef(result.modelRef)?.modelId ?? result.modelRef)
+}
 
 /** `WxH` with positive integers (`generateImage({ size })`). */
 const SIZE_PATTERN = /^[1-9]\d{0,4}x[1-9]\d{0,4}$/

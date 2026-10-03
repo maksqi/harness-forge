@@ -1,13 +1,24 @@
 // Command palette content (docs/UI.md 5.3, 4.2, 12): which sections and items show for a query, in which order.
 // Pure: CommandPalette.vue feeds it the store data and runs the chosen item's command.
 //
-// Order: chats first (recent chats for an empty query, search results otherwise), then Actions, Go to, Default
-// model (only while searching: the catalog is long) and Theme. Items keep their definition order; sections
-// without matches are left out.
+// Order: chats first (recent chats for an empty query, search results otherwise), then Actions, Projects (Phase 7,
+// docs/UI.md 7.20; only while searching), Go to, Default model (only while searching: the catalog is long) and Theme.
+// Items keep their definition order; sections without matches are left out.
 import type { ChatSummary } from '@harness-forge/shared'
 import type { Component } from 'vue'
 import type { ThemePreference } from '../theme'
-import { BlocksIcon, KeyboardIcon, MessageSquareIcon, PanelLeftIcon, SquarePenIcon } from '@lucide/vue'
+import {
+  BlocksIcon,
+  FolderIcon,
+  FolderInputIcon,
+  FolderOutputIcon,
+  FolderPlusIcon,
+  FoldersIcon,
+  KeyboardIcon,
+  MessageSquareIcon,
+  PanelLeftIcon,
+  SquarePenIcon,
+} from '@lucide/vue'
 import { SETTINGS_LINKS } from '../navigation'
 import { THEME_OPTIONS } from '../theme'
 
@@ -23,8 +34,19 @@ export type PaletteCommand
     | { type: 'navigate', to: string }
     | { type: 'default-model', modelRef: string }
     | { type: 'theme', value: ThemePreference }
+    | { type: 'project-filter', filter: string }
+    | { type: 'move-chat', chatId: string, projectId: string | null }
 
-export type PaletteSectionId = 'chats' | 'actions' | 'navigation' | 'models' | 'theme'
+export type PaletteSectionId = 'chats' | 'actions' | 'projects' | 'navigation' | 'models' | 'theme'
+
+/** The Add project dialog of Settings -> Projects (docs/UI.md 6, 9.10). */
+export const ADD_PROJECT_ROUTE = '/settings/projects?add=1'
+
+/** A project the palette can filter by or move the open chat to. */
+export interface PaletteProject {
+  id: string
+  name: string
+}
 
 /** A model the palette can offer as the default model. */
 export interface PaletteModel {
@@ -72,6 +94,12 @@ export interface PaletteInput {
   theme: ThemePreference
   /** A sidebar is mounted (the "Toggle sidebar" action needs one). */
   canToggleSidebar: boolean
+  /** Phase 7: the projects by name (default none). */
+  projects?: readonly PaletteProject[]
+  /** Phase 7: the chat list's project filter (`all`, `none` or a project id; default `all`). */
+  projectFilter?: string
+  /** Phase 7: the open chat and its project (its "Move chat…" items); null or omitted without one. */
+  openChat?: { id: string, projectId: string | null } | null
 }
 
 interface StaticItem extends PaletteItem {
@@ -145,6 +173,34 @@ function themeItems(current: ThemePreference): StaticItem[] {
   }))
 }
 
+const PROJECT_KEYWORDS = ['project', 'projects', 'filter', 'folder']
+
+function projectItems(input: PaletteInput, query: string): StaticItem[] {
+  if (!query)
+    return []
+  const projects = input.projects ?? []
+  const filter = input.projectFilter ?? 'all'
+  const items: StaticItem[] = [
+    { value: 'project-filter-all', label: 'Show all chats', icon: FoldersIcon, command: { type: 'project-filter', filter: 'all' }, checked: filter === 'all', keywords: PROJECT_KEYWORDS },
+  ]
+  if (projects.length > 0) {
+    items.push({ value: 'project-filter-none', label: 'Show chats without a project', icon: FolderIcon, command: { type: 'project-filter', filter: 'none' }, checked: filter === 'none', keywords: PROJECT_KEYWORDS })
+    for (const project of projects)
+      items.push({ value: `project-filter-${project.id}`, label: `Show ${project.name}`, icon: FolderIcon, command: { type: 'project-filter', filter: project.id }, checked: filter === project.id, keywords: PROJECT_KEYWORDS })
+  }
+  items.push({ value: 'project-add', label: 'Add project…', icon: FolderPlusIcon, command: { type: 'navigate', to: ADD_PROJECT_ROUTE }, keywords: [...PROJECT_KEYWORDS, 'new', 'create', 'workspace'] })
+  const chat = input.openChat
+  if (chat) {
+    for (const project of projects) {
+      if (project.id !== chat.projectId)
+        items.push({ value: `project-move-${project.id}`, label: `Move chat to ${project.name}`, icon: FolderInputIcon, command: { type: 'move-chat', chatId: chat.id, projectId: project.id }, keywords: ['move', 'project'] })
+    }
+    if (chat.projectId !== null)
+      items.push({ value: 'project-move-none', label: 'Move chat out of project', icon: FolderOutputIcon, command: { type: 'move-chat', chatId: chat.id, projectId: null }, keywords: ['move', 'project', 'remove'] })
+  }
+  return items
+}
+
 function filterStatic(query: string, items: StaticItem[]): PaletteItem[] {
   return items
     .filter(item => matchesQuery(query, item.label, ...(item.keywords ?? [])))
@@ -181,6 +237,7 @@ export function buildPaletteSections(input: PaletteInput): PaletteSection[] {
   const sections: PaletteSection[] = [
     { id: 'chats', heading: query ? 'Chats' : 'Recent chats', items: chatItems(input, query) },
     { id: 'actions', heading: 'Actions', items: filterStatic(query, actionItems(input.canToggleSidebar)) },
+    { id: 'projects', heading: 'Projects', items: filterStatic(query, projectItems(input, query)) },
     { id: 'navigation', heading: 'Go to', items: filterStatic(query, navigationItems()) },
     { id: 'models', heading: 'Default model', items: modelItems(input, query) },
     { id: 'theme', heading: 'Theme', items: filterStatic(query, themeItems(input.theme)) },

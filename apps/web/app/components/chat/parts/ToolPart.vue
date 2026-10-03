@@ -5,7 +5,12 @@
 // ToolApprovalCard renders below the row. The builtin generate_image tool (Phase 6) is a normal row whose first
 // argument is the prompt; its output stays JSON (file references) and its images are the file parts the server appends
 // after the call, rendered as a gallery below the row.
+// Phase 7 (7.19): `core-workspace` tools get their icon, argument and summary (`+12 −3`, `exit 1`, ...) from the
+// workspace registry, and their body is WorkspaceToolBody (diff, terminal, file content, file list) with the generic
+// blocks behind "Raw input and output"; a running shell shows its terminal with "Running…". A value that does not
+// parse with the shared schemas keeps the generic blocks.
 import type { ToolPartLike } from '../chat-format'
+import { WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import {
   BanIcon,
   CheckIcon,
@@ -33,6 +38,14 @@ import {
 } from '../chat-format'
 import { toolRowArgument } from './tool-row'
 import ToolApprovalCard from './ToolApprovalCard.vue'
+import ToolRowSummary from './tools/ToolRowSummary.vue'
+import {
+  isWorkspaceToolName,
+  workspaceRowSummary,
+  workspaceToolIcon,
+  workspaceToolView,
+} from './tools/workspace-tools'
+import WorkspaceToolBody from './tools/WorkspaceToolBody.vue'
 import ToolValueBlock from './ToolValueBlock.vue'
 
 const props = withDefaults(defineProps<{
@@ -77,6 +90,16 @@ watch(serverId, (id) => {
     plugins.fetchMcp().catch(() => {})
 }, { immediate: true })
 const firstArg = computed(() => toolRowArgument(name.value, props.part.input))
+const rowIcon = computed(() => (serverId.value ? ServerIcon : workspaceToolIcon(name.value) ?? WrenchIcon))
+/**
+ * `ToolSummary.workspace` of the tool; before the tool list has loaded, the access of the `core-workspace` tool with
+ * this name (so a shell card never offers "Always allow").
+ */
+const workspaceAccess = computed(() => {
+  if (tool.value)
+    return tool.value.workspace
+  return isWorkspaceToolName(name.value) ? WORKSPACE_TOOL_ACCESS[name.value] : null
+})
 
 type RowStatus = 'running' | 'approval' | 'done' | 'error' | 'denied' | 'stopped'
 
@@ -125,11 +148,33 @@ const outputText = computed(() => (hasOutput.value ? formatToolValue(props.part.
 const outputTruncated = computed(() => hasOutput.value && isServerTruncated(props.part.output))
 const errorText = computed(() => (props.part.state === 'output-error' ? props.part.errorText : ''))
 
-function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
+/** The row summary of a finished workspace tool (7.19). */
+const summary = computed(() => (hasOutput.value ? workspaceRowSummary(name.value, props.part.output) : null))
+/**
+ * The workspace body: the finished output, or the terminal of a shell command that is running (its input is complete);
+ * null keeps the generic blocks.
+ */
+const view = computed(() => {
+  if (hasOutput.value) {
+    const output = props.part.output
+    return output === undefined || output === null ? null : workspaceToolView(name.value, props.part.input, output)
+  }
+  const runningShell = name.value === 'shell' && status.value === 'running'
+    && (props.part.state === 'input-available' || props.part.state === 'approval-responded')
+  return runningShell ? workspaceToolView(name.value, props.part.input, null) : null
+})
+
+function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdits?: boolean }) {
   const approval = props.part.approval
   if (!approval)
     return
-  emit('approval', { id: approval.id, approved: decision.approved, toolName: name.value, alwaysAllow: decision.alwaysAllow })
+  emit('approval', {
+    id: approval.id,
+    approved: decision.approved,
+    toolName: name.value,
+    alwaysAllow: decision.alwaysAllow,
+    ...(decision.acceptEdits === undefined ? {} : { acceptEdits: decision.acceptEdits }),
+  })
 }
 </script>
 
@@ -149,14 +194,14 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
             aria-hidden="true"
             class="size-3.5 shrink-0 text-muted-foreground transition-transform duration-(--duration-base) group-data-[state=open]/tool-row:rotate-90"
           />
-          <ServerIcon v-if="serverId" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
-          <WrenchIcon v-else aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
+          <component :is="rowIcon" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
           <span class="shrink-0 font-mono text-[13px] font-medium">{{ displayName }}</span>
           <span v-if="firstArg" class="min-w-0 truncate font-mono text-xs text-muted-foreground">"{{ firstArg }}"</span>
           <Badge v-if="serverName" variant="outline" class="h-4 shrink-0 px-1.5 text-[10px] font-normal text-muted-foreground">
             {{ serverName }}
           </Badge>
           <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs text-muted-foreground">
+            <ToolRowSummary v-if="summary" :summary="summary" class="mr-0.5" />
             <Spinner v-if="status === 'running'" class="size-3" />
             <template v-else-if="status === 'approval'">
               <span aria-hidden="true" class="size-2 rounded-full bg-warning" />
@@ -187,8 +232,16 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
           </span>
         </CollapsibleTrigger>
       </div>
-      <AiToolContent :data-testid="testIds.toolRowOutput" class="pt-1 pl-6">
-        <div class="flex flex-col gap-3 rounded-md bg-muted/50 p-3">
+      <AiToolContent :data-testid="testIds.toolRowOutput" class="min-w-0 pt-1 pl-6">
+        <WorkspaceToolBody v-if="view" :view="view" :running="status === 'running'">
+          <template #raw>
+            <div class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
+              <ToolValueBlock label="Input" :value="inputText || '{}'" />
+              <ToolValueBlock v-if="hasOutput" label="Output" :value="outputText" :server-truncated="outputTruncated" />
+            </div>
+          </template>
+        </WorkspaceToolBody>
+        <div v-else class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
           <ToolValueBlock label="Input" :value="inputText || '{}'" />
           <ToolValueBlock v-if="hasOutput" label="Output" :value="outputText" :server-truncated="outputTruncated" />
           <ToolValueBlock v-if="errorText" label="Error" :value="errorText" tone="error" />
@@ -200,6 +253,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
       :part="part"
       :tool-name="name"
       :source="tool?.pluginId ?? null"
+      :workspace="workspaceAccess"
       @decide="onDecide"
     />
   </div>

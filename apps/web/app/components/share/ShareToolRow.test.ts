@@ -116,3 +116,110 @@ describe('shareToolRow', () => {
     expect(blocks).toEqual(['{}', '12:00'])
   })
 })
+
+describe('shareToolRow: workspace tools (Phase 7)', () => {
+  const diff = {
+    hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, lines: ['-mock agent', '+workspace agent', '+second line'] }],
+    added: 2,
+    removed: 1,
+    truncated: false,
+  }
+
+  it('renders the diff through the same registry, with the raw blocks behind the toggle', async () => {
+    mountRow({
+      type: 'tool',
+      toolName: 'edit_file',
+      status: 'done',
+      input: { path: 'mock-workspace.txt', old_string: 'mock agent', new_string: 'workspace agent\nsecond line' },
+      output: { path: 'mock-workspace.txt', replacements: 1, diff },
+    })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.querySelector('svg.lucide-file-pen-line')).not.toBeNull()
+    expect(row.textContent).toContain('"mock-workspace.txt"')
+    const summary = byTestId(testIds.toolRowSummary, row)!
+    expect([summary.textContent, summary.dataset.tone]).toEqual(['+2 −1', 'success'])
+
+    row.querySelector('button')!.click()
+    await settle()
+    const body = byTestId(testIds.shareToolRowOutput)!
+    const view = byTestId(testIds.diffView, body)!
+    expect(view.dataset.path).toBe('mock-workspace.txt')
+    expect(Array.from(view.querySelectorAll<HTMLElement>(`[data-testid="${testIds.diffLine}"]`)).map(line => line.dataset.kind)).toEqual(['del', 'add', 'add'])
+    expect(body.querySelector('[data-slot="tool-value"]')).toBeNull()
+
+    byTestId(testIds.toolRawToggle, body)!.click()
+    await settle()
+    expect(Array.from(body.querySelectorAll<HTMLElement>('[data-slot="tool-value"]')).map(block => block.dataset.label)).toEqual(['input', 'output'])
+  })
+
+  it('shows a shared shell run as its terminal output', async () => {
+    mountRow({
+      type: 'tool',
+      toolName: 'shell',
+      status: 'done',
+      input: { command: 'cat mock-workspace.txt' },
+      output: {
+        command: 'cat mock-workspace.txt',
+        cwd: '.',
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        durationMs: 12,
+        stdout: 'Hello from the workspace agent.\n',
+        stderr: '',
+        stdoutBytes: 32,
+        stderrBytes: 0,
+      },
+    })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(byTestId(testIds.toolRowSummary, row)!.textContent).toBe('exit 0')
+    row.querySelector('button')!.click()
+    await settle()
+    const terminal = byTestId(testIds.terminalOutput)!
+    expect(terminal.dataset.status).toBe('ok')
+    expect(byTestId(testIds.terminalStdout, terminal)!.textContent).toBe('Hello from the workspace agent.')
+  })
+
+  it('falls back to the generic blocks for a value cut at the share limit', async () => {
+    mountRow({
+      type: 'tool',
+      toolName: 'write_file',
+      status: 'done',
+      input: '{"path": "big.txt", "content": "aaaa\n[truncated]',
+      output: '{"path": "big.txt", "created": true, "diff": {"hunks": [\n[truncated]',
+    })
+    const row = byTestId(testIds.shareToolRow)!
+    // The input is cut too: the generic first string, no summary.
+    expect(byTestId(testIds.toolRowSummary, row)).toBeNull()
+    row.querySelector('button')!.click()
+    await settle()
+    const body = byTestId(testIds.shareToolRowOutput)!
+    expect(byTestId(testIds.diffView, body)).toBeNull()
+    expect(byTestId(testIds.toolRawToggle, body)).toBeNull()
+    const blocks = Array.from(body.querySelectorAll<HTMLElement>('[data-slot="tool-value"]'))
+    expect(blocks.map(block => [block.dataset.label, block.querySelector('[data-slot="server-truncated"]') !== null])).toEqual([
+      ['input', true],
+      ['output', true],
+    ])
+  })
+
+  it('stays a static row without tool details, with the workspace icon', () => {
+    mountRow({ type: 'tool', toolName: 'shell', status: 'denied' })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.querySelector('button')).toBeNull()
+    expect(row.querySelector('svg.lucide-square-terminal')).not.toBeNull()
+    expect(byTestId(testIds.toolRowSummary, row)).toBeNull()
+    expect(byTestId(testIds.shareToolRowOutput)).toBeNull()
+  })
+
+  it('keeps the error block of a failed workspace call', async () => {
+    mountRow({ type: 'tool', toolName: 'edit_file', status: 'error', input: { path: 'a.txt', old_string: 'x', new_string: 'y' }, errorText: 'old_string was not found in a.txt.' })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain('"a.txt"')
+    row.querySelector('button')!.click()
+    await settle()
+    const body = byTestId(testIds.shareToolRowOutput)!
+    expect(byTestId(testIds.diffView, body)).toBeNull()
+    expect(Array.from(body.querySelectorAll<HTMLElement>('[data-slot="tool-value"]')).map(block => block.dataset.label)).toEqual(['input', 'error'])
+  })
+})

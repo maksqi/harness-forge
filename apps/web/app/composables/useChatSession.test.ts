@@ -1,5 +1,6 @@
 import type { ChatDetail, ChatRequestBody, HarnessUIMessage } from '@harness-forge/shared'
 import type { UIMessageChunk } from 'ai'
+import type { Mock } from 'vitest'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { HarnessError } from '@harness-forge/shared'
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
@@ -8,12 +9,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, nextTick } from 'vue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
-import { catalogModel, chatDetail, chatId, chatSummary, messageBranch } from '~/utils/testing/fixtures'
+import { useProjectsStore } from '~/stores/projects'
+import { catalogModel, chatDetail, chatId, chatSummary, messageBranch, projectId, projectSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import {
   buildChatRequestBody,
   chatDataPartSchemas,
+  isBusyConflict,
   isRunActiveConflict,
   leafMovedElsewhere,
   MAX_CHAT_SESSIONS,
@@ -123,11 +126,11 @@ function textReply(text: string, messageId = ASSISTANT_ID, gate?: Promise<void>)
 }
 
 /** A reply that ends with a tool call waiting for approval. */
-function approvalReply(messageId = ASSISTANT_ID): StreamWriter {
+function approvalReply(messageId = ASSISTANT_ID, toolName = 'mock_approval_tool'): StreamWriter {
   return (write) => {
     write({ type: 'start', messageId, messageMetadata: { modelRef: MODEL, startedAt: 1 } })
     write({ type: 'start-step' })
-    write({ type: 'tool-input-available', toolCallId: 'call_1', toolName: 'mock_approval_tool', input: { value: 'x' } })
+    write({ type: 'tool-input-available', toolCallId: 'call_1', toolName, input: { value: 'x' } })
     write({ type: 'tool-approval-request', approvalId: 'appr_1', toolCallId: 'call_1' })
     write({ type: 'finish-step' })
     write({ type: 'finish', finishReason: 'tool-calls' })
@@ -251,6 +254,17 @@ describe('buildChatRequestBody', () => {
     const image = buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: undefined, imageOptions: { n: 2 } })
     expect(image.imageOptions).toEqual({ n: 2 })
   })
+
+  it('sends the project with a new user message only', () => {
+    const project = projectId(1)
+    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: undefined, projectId: project }).projectId).toBe(project)
+    // No project: no key at all (the contract has no null).
+    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: undefined, projectId: null })).not.toHaveProperty('projectId')
+    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: undefined })).not.toHaveProperty('projectId')
+    // A regenerate and an approval continuation never create a chat.
+    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'regenerate-message', messageId: undefined, projectId: project })).not.toHaveProperty('projectId')
+    expect(buildChatRequestBody({ ...base, messages: [user, assistant], trigger: 'submit-message', messageId: ASSISTANT_ID, projectId: project })).not.toHaveProperty('projectId')
+  })
 })
 
 describe('leafMovedElsewhere', () => {
@@ -294,7 +308,16 @@ describe('path helpers', () => {
     expect(isRunActiveConflict(new HarnessError({ code: 'conflict', message: 'x', details: { reason: 'run-active' } }))).toBe(true)
     expect(isRunActiveConflict({ error: { code: 'conflict', message: 'x' } })).toBe(true)
     expect(isRunActiveConflict(new HarnessError({ code: 'conflict', message: 'x', details: { reason: 'exists' } }))).toBe(false)
+    expect(isRunActiveConflict(new HarnessError({ code: 'conflict', message: 'x', details: { reason: 'busy' } }))).toBe(false)
     expect(isRunActiveConflict(new HarnessError({ code: 'not_found', message: 'x' }))).toBe(false)
+  })
+
+  it('tells a maintenance conflict (busy) from other conflicts', () => {
+    expect(isBusyConflict(new HarnessError({ code: 'conflict', message: 'x', details: { reason: 'busy' } }))).toBe(true)
+    expect(isBusyConflict({ error: { code: 'conflict', message: 'x', details: { reason: 'busy' } } })).toBe(true)
+    expect(isBusyConflict(new HarnessError({ code: 'conflict', message: 'x', details: { reason: 'run-active' } }))).toBe(false)
+    expect(isBusyConflict({ error: { code: 'conflict', message: 'x' } })).toBe(false)
+    expect(isBusyConflict(new HarnessError({ code: 'not_found', message: 'x' }))).toBe(false)
   })
 
   it('compares paths by message ids', () => {
@@ -1074,6 +1097,254 @@ describe('useChatSession: approvals', () => {
     expect(api.tools.update).not.toHaveBeenCalled()
     expect(server.calls[1]!.body!.message.parts.find(part => part.type === 'tool-mock_approval_tool'))
       .toMatchObject({ approval: { approved: false } })
+  })
+
+  it('"Accept all edits in this chat" switches the mode to edits (saved on the chat) before the approval goes out', async () => {
+    const session = newSession()
+    session.toolMode.value = 'ask'
+    server.reply(approvalReply(ASSISTANT_ID, 'edit_file'))
+    await session.send({ text: 'fix the parser', files: [] })
+    expect(session.runState.value).toBe('approval')
+
+    server.reply(textReply('edited', ASSISTANT_ID))
+    await session.approve({ id: 'appr_1', approved: true, toolName: 'edit_file', alwaysAllow: false, acceptEdits: true })
+    await until(() => server.calls.length === 2 && session.runState.value === 'idle', 'continuation')
+
+    expect(session.toolMode.value).toBe('edits')
+    // The continuation already runs in edits mode, and the choice was saved first.
+    expect(chatBodies()[1]).toMatchObject({ toolMode: 'edits', message: { role: 'assistant' } })
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(1) }, body: { settings: { toolMode: 'edits' } } })
+    const saved = api.chats.update.mock.invocationCallOrder[0]!
+    const continued = (mock.fetch as Mock).mock.invocationCallOrder[1]!
+    expect(saved).toBeLessThan(continued)
+    // No tool override: accepting edits is a chat setting, not "Always allow".
+    expect(api.tools.update).not.toHaveBeenCalled()
+  })
+
+  it('a denial with "Accept all edits" checked keeps the mode', async () => {
+    const session = newSession()
+    session.toolMode.value = 'ask'
+    server.reply(approvalReply(ASSISTANT_ID, 'edit_file'))
+    await session.send({ text: 'fix the parser', files: [] })
+    server.reply(textReply('ok, not edited', ASSISTANT_ID))
+    await session.approve({ id: 'appr_1', approved: false, toolName: 'edit_file', alwaysAllow: false, acceptEdits: true })
+    await until(() => server.calls.length === 2, 'continuation')
+    expect(session.toolMode.value).toBe('ask')
+    expect(chatBodies()[1]!.toolMode).toBe('ask')
+    expect(api.chats.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('useChatSession: project', () => {
+  const P1 = projectId(1)
+  const P2 = projectId(2)
+
+  beforeEach(() => {
+    useProjectsStore().items = [projectSummary({ id: P1, name: 'Website' }), projectSummary({ id: P2, name: 'Notes', path: '/srv/workspaces/notes' })]
+  })
+
+  function projectChanged(id: string, project: ReturnType<typeof projectSummary> | null) {
+    dispatchServerEvent({ type: 'project.changed', data: { id, project }, at: 1 })
+  }
+
+  it('a new chat has no project by default, or the project the list is filtered by when it is known', async () => {
+    const chats = useChatsStore()
+    const session = newSession()
+    expect(session.projectId.value).toBeNull()
+    for (const filter of ['all', 'none', 'prj_unknown000000001']) {
+      chats.projectFilter = filter
+      expect(session.projectId.value, filter).toBeNull()
+    }
+    chats.projectFilter = P2
+    expect(session.projectId.value).toBe(P2)
+    // Once the project is gone from the store, the filter no longer names a known project.
+    useProjectsStore().items = []
+    expect(session.projectId.value).toBeNull()
+  })
+
+  it('the pick wins over the filter (No project too), and another filter drops the pick', async () => {
+    const chats = useChatsStore()
+    chats.projectFilter = P1
+    const session = newSession()
+    await session.setProject(P2)
+    expect(session.projectId.value).toBe(P2)
+    await session.setProject(null)
+    expect(session.projectId.value).toBeNull()
+    // A local choice: nothing is sent until the first message.
+    expect(api.chats.update).not.toHaveBeenCalled()
+    expect(server.calls).toHaveLength(0)
+
+    chats.projectFilter = P2
+    await nextTick()
+    expect(session.projectId.value).toBe(P2)
+  })
+
+  it('sends the project with the first request only, then shows it until the server describes the chat', async () => {
+    const session = newSession()
+    await session.setProject(P1)
+    server.reply(textReply('first'))
+    await session.send({ text: 'hello', files: [] })
+    expect(chatBodies()[0]!.projectId).toBe(P1)
+    expect(session.persisted.value).toBe(true)
+    expect(session.summary.value).toBeNull()
+    expect(session.projectId.value).toBe(P1)
+
+    // A later pick changes nothing: the chat exists now.
+    server.reply(textReply('second', 'msg_assistant0000002'))
+    await session.send({ text: 'again', files: [] })
+    expect(chatBodies()[1]).not.toHaveProperty('projectId')
+    server.reply(textReply('regenerated', 'msg_assistant0000003'))
+    await session.regenerate()
+    expect(chatBodies()[2]).not.toHaveProperty('projectId')
+  })
+
+  it('sends the project again when the first request was refused before the chat existed', async () => {
+    const session = newSession()
+    useChatsStore().projectFilter = P2
+    server.fail(400, { code: 'provider_not_configured', message: 'No key.', providerId: 'anthropic' })
+    await session.send({ text: 'hello', files: [] })
+    expect(chatBodies()[0]!.projectId).toBe(P2)
+    expect(session.persisted.value).toBe(false)
+    server.reply(textReply('hi'))
+    await session.regenerate()
+    expect(chatBodies()[1]).toMatchObject({ trigger: 'submit-message', projectId: P2 })
+  })
+
+  it('a new chat without a project sends no project', async () => {
+    const session = newSession()
+    useChatsStore().projectFilter = 'none'
+    server.reply(textReply('hi'))
+    await session.send({ text: 'hello', files: [] })
+    expect(chatBodies()[0]).not.toHaveProperty('projectId')
+    expect(session.projectId.value).toBeNull()
+  })
+
+  it('a saved chat: what the chats store row or the summary reported last; it never sends the project', async () => {
+    const chats = useChatsStore()
+    const session = await loadedSession(20, { projectId: P1, messages: [userMessage('msg_user000000000001', 'q'), assistantMessage(ASSISTANT_ID, 'a')] })
+    expect(session.projectId.value).toBe(P1)
+    // The list is filtered elsewhere: the filter does not move a saved chat.
+    chats.projectFilter = P2
+    expect(session.projectId.value).toBe(P1)
+
+    // A move through the chats store (useMoveChat: the header and sidebar menus) shows at once and rolls back with it.
+    let refuse!: (error: unknown) => void
+    api.chats.update.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      refuse = reject
+    }))
+    const moving = chats.update(chatId(20), { projectId: P2 }).catch(() => {})
+    expect(session.projectId.value).toBe(P2)
+    expect(session.summary.value?.projectId).toBe(P1)
+    refuse(new HarnessError({ code: 'conflict', message: 'A run is active.', details: { reason: 'run-active' } }))
+    await moving
+    expect(session.projectId.value).toBe(P1)
+
+    api.chats.update.mockResolvedValueOnce(chatSummary({ id: chatId(20), projectId: null }))
+    await chats.update(chatId(20), { projectId: null })
+    expect(session.projectId.value).toBeNull()
+
+    server.reply(textReply('next', 'msg_assistant0000002'))
+    await session.send({ text: 'next', files: [] })
+    expect(chatBodies()[0]).not.toHaveProperty('projectId')
+  })
+
+  it('a saved chat follows chat.updated (a move in another tab)', async () => {
+    const session = await loadedSession(21, { projectId: null })
+    expect(session.projectId.value).toBeNull()
+    dispatchServerEvent({ type: 'chat.updated', data: { ...chatSummary({ id: chatId(21), projectId: P2 }), activeLeafId: null }, at: 1 })
+    expect(session.projectId.value).toBe(P2)
+  })
+
+  it('setProject moves a saved chat with PATCH and shows the answer', async () => {
+    const session = await loadedSession(22, { projectId: null })
+    let answer!: (summary: ReturnType<typeof chatSummary>) => void
+    api.chats.update.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = resolve
+    }))
+    const moving = session.setProject(P1)
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(22) }, body: { projectId: P1 } })
+    // Optimistic: the chip moves at once.
+    expect(session.projectId.value).toBe(P1)
+    answer(chatSummary({ id: chatId(22), projectId: P1, title: 'Moved' }))
+    await moving
+    expect(session.summary.value).toMatchObject({ projectId: P1, title: 'Moved' })
+
+    api.chats.update.mockResolvedValueOnce(chatSummary({ id: chatId(22), projectId: null }))
+    await session.setProject(null)
+    expect(api.chats.update).toHaveBeenLastCalledWith({ params: { id: chatId(22) }, body: { projectId: null } })
+    expect(session.projectId.value).toBeNull()
+  })
+
+  it('setProject throws the HarnessError of a refused move (409 run-active, 404) and rolls back', async () => {
+    const session = await loadedSession(23, { projectId: P1 })
+    api.chats.update.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'A run is active.', details: { reason: 'run-active', chatId: chatId(23) } }))
+    const refused = await session.setProject(P2).catch((error: unknown) => error)
+    expect(refused).toBeInstanceOf(HarnessError)
+    expect(refused).toMatchObject({ code: 'conflict', details: { reason: 'run-active' } })
+    expect(session.projectId.value).toBe(P1)
+
+    api.chats.update.mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: 'Project not found.' }))
+    await expect(session.setProject(P2)).rejects.toMatchObject({ code: 'not_found' })
+    expect(session.projectId.value).toBe(P1)
+  })
+
+  it('a deleted project leaves the pick, the first request\'s project and the summary', async () => {
+    const picked = newSession(24)
+    await picked.setProject(P1)
+    projectChanged(P1, null)
+    expect(picked.projectId.value).toBeNull()
+
+    const saved = await loadedSession(25, { projectId: P2 })
+    projectChanged(P1, projectSummary({ id: P1, name: 'Renamed' }))
+    expect(saved.projectId.value).toBe(P2)
+    projectChanged(P2, null)
+    expect(saved.projectId.value).toBeNull()
+    expect(saved.summary.value?.projectId).toBeNull()
+  })
+})
+
+describe('useChatSession: master-key rotation', () => {
+  function keyRotated(...ids: string[]) {
+    dispatchServerEvent({ type: 'key.rotated', data: { keyVersion: 2, rotatedAt: 1, chatIds: ids }, at: 1 })
+  }
+
+  it('a listed chat reloads its path (the pending approval expired); other chats do not', async () => {
+    const pending: HarnessUIMessage = {
+      id: ASSISTANT_ID,
+      role: 'assistant',
+      metadata: { modelRef: MODEL, startedAt: 1 },
+      parts: [{ type: 'tool-mock_approval_tool', toolCallId: 'call_1', state: 'approval-requested', input: { value: 'x' }, approval: { id: 'appr_1' } }],
+    }
+    const session = await loadedSession(30, { messages: [userMessage('msg_user000000000001', 'q'), pending] })
+    const other = await loadedSession(31, { messages: [userMessage('msg_user000000000002', 'q')] })
+    expect(session.runState.value).toBe('approval')
+    expect(api.chats.get).toHaveBeenCalledTimes(2)
+
+    const denied: HarnessUIMessage = {
+      ...pending,
+      parts: [{ type: 'tool-mock_approval_tool', toolCallId: 'call_1', state: 'output-denied', input: { value: 'x' }, approval: { id: 'appr_1', approved: false, reason: 'Expired after a key rotation.' } }],
+    }
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(30), modelRef: MODEL, messages: [userMessage('msg_user000000000001', 'q'), denied] }))
+    keyRotated(chatId(30), chatId(99))
+    await until(() => session.runState.value === 'idle', 'reload')
+    expect(api.chats.get).toHaveBeenCalledTimes(3)
+    expect(api.chats.get).toHaveBeenLastCalledWith({ params: { id: chatId(30) } })
+    expect(other.chat.messages.value).toHaveLength(1)
+  })
+
+  it('a chat streaming when the rotation stopped its run reloads once the request ended', async () => {
+    const session = newSession(32)
+    const gate = deferred()
+    server.reply(textReply('cut short', ASSISTANT_ID, gate.promise))
+    const sending = session.send({ text: 'long answer', files: [] })
+    await until(() => session.chat.status.value === 'streaming', 'streaming')
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(32), modelRef: MODEL, messages: [userMessage('msg_user000000000001', 'long answer')] }))
+    keyRotated(chatId(32))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(api.chats.get).not.toHaveBeenCalled()
+    gate.resolve()
+    await sending
+    await until(() => api.chats.get.mock.calls.length === 1, 'reload after the request')
   })
 })
 

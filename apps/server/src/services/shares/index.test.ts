@@ -6,8 +6,9 @@ import { LIMITS, SHARE_TOKEN_PATTERN, shareSummarySchema, shareViewSchema } from
 import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { chats, chatShares } from '../../db/schema.ts'
+import { swapMasterKey } from '../../security/keyring.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
-import { createFakeChatsService, createFakeKeyring, readAllBytes } from '../../testing/fakes.ts'
+import { createFakeChatsService, createFakeKeyring, fakeMasterKey, readAllBytes } from '../../testing/fakes.ts'
 import { isInvalidShareTokenError, SHARE_UNAVAILABLE_MESSAGE } from './errors.ts'
 import { createShareService, SHARE_MAX_EXPIRY_MS } from './index.ts'
 import { createShareTokens } from './token.ts'
@@ -275,6 +276,20 @@ describe('update and remove', () => {
     expect(error).toMatchObject({ code: 'not_found', message: SHARE_UNAVAILABLE_MESSAGE })
     expect(isInvalidShareTokenError(error)).toBe(true)
     expect((await rejection(t.deps.shares.remove(created.id))).code).toBe('not_found')
+  })
+
+  it('a master-key rotation changes every token: the old one is not_found, the new one works (ADR-034)', async () => {
+    const { t } = await seededApp()
+    const created = await t.deps.shares.create({ chatId: CHAT })
+    expect((await t.deps.shares.view(tokenOf(created))).title).toBe('Branches')
+    swapMasterKey(t.deps.keyring, fakeMasterKey('rotated'), 2)
+    const error = await rejection(t.deps.shares.view(tokenOf(created)))
+    expect(isInvalidShareTokenError(error)).toBe(true)
+    const [renewed] = await t.deps.shares.list({ chatId: CHAT })
+    expect(renewed!.id).toBe(created.id)
+    expect(renewed!.path).not.toBe(created.path)
+    expect(renewed!.path).toBe(`/share/${createShareTokens(t.deps.keyring.subkey('share')).tokenOf(created.id)}`)
+    expect((await t.deps.shares.view(tokenOf(renewed!))).title).toBe('Branches')
   })
 
   it('goes with its chat: deleting the chat removes its links', async () => {

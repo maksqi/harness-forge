@@ -8,7 +8,7 @@
 // that the same routes stay usable with a stale session when nothing runs code.
 import type { ApiRouteDef, ApiRouteKey } from '@harness-forge/shared'
 import type { FileSet, InstallTestApp } from '../plugins/install/testing.ts'
-import { readdirSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { API_ROUTE_KEYS, apiRoutes, harnessErrorEnvelopeSchema } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
 import { FRESH_AUTH_REQUIRED_MESSAGE } from '../http/middleware/fresh-auth.ts'
@@ -295,12 +295,15 @@ const CASES: FreshCase[] = [
     unchanged: async () => {},
   },
   {
-    // ADR-034: 200 with a key file; 409 (`env-key` / `key-mismatch`) when the test keyring cannot be rotated online.
+    // ADR-034: the test app's key comes from no HF_MASTER_KEY (file mode), so the online rotation runs (200).
     name: 'rotating the master key',
     key: 'keys.rotate',
     attempt: { method: 'POST', path: '/api/keys/rotate', json: { confirm: 'ROTATE' } },
-    ok: [200, 409],
-    unchanged: async () => {},
+    ok: 200,
+    unchanged: async (a) => {
+      expect(a.t.deps.keyring.keyVersion).toBe(1)
+      expect(existsSync(`${a.t.env.paths.secretKey}.next`)).toBe(false)
+    },
   },
 ]
 

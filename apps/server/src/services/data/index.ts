@@ -11,7 +11,8 @@
 //   'delete-all', ...)`, shared with the key rotation and the file cleanup; it replaced the private mutex): while
 //   another maintenance operation runs they fail at once with `409 conflict` (`reason: 'busy'`). Summaries and exports
 //   never take it. No new event types: `ChatsService` emits `chat.created` / `chat.deleted` per chat.
-// - `cleanupPreview` / `cleanup` (ADR-035): stubs that reject with `not_implemented` until W7.8.
+// - `cleanupPreview` / `cleanup` (ADR-035, W7.8): ./cleanup.ts under `maintenance.exclusive('file-cleanup', ...)`
+//   (runs are not blocked: the pins and the grace period cover them).
 import type { DataDeleteBody, DataDeleteResult, DataSummary } from '@harness-forge/shared'
 import type { AppDeps, SensitiveOperationOptions } from '../../types.ts'
 import type { DataLimits } from './limits.ts'
@@ -19,16 +20,16 @@ import type { DataService } from './types.ts'
 import { validationError } from '@harness-forge/shared'
 import { sql } from 'drizzle-orm'
 import { chats, files, messages } from '../../db/schema.ts'
-import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { guardDb } from '../chats/db-errors.ts'
 import { backupFilename, createBackupStream, planBackup } from './backup.ts'
+import { previewCleanup, runCleanup } from './cleanup.ts'
 import { DATA_LIMITS } from './limits.ts'
 import { importUpload } from './restore.ts'
 
 export interface DataServiceOptions {
   /** Overrides of `DATA_LIMITS` (tests). */
   limits?: Partial<DataLimits>
-  /** Clock of `exportedAt` (default `Date.now`). */
+  /** Clock of `exportedAt` and of the cleanup (its cutoff and `ranAt`; default `Date.now`). */
   now?: () => number
 }
 
@@ -90,8 +91,8 @@ export function createDataService(deps: AppDeps, options: DataServiceOptions = {
       return deps.maintenance.exclusive('delete-all', () => deleteEverything(deps, body))
     },
 
-    cleanupPreview: rejectsNotImplemented('The storage cleanup preview'),
+    cleanupPreview: () => deps.maintenance.exclusive('file-cleanup', () => previewCleanup(deps, now)),
 
-    cleanup: rejectsNotImplemented('The storage cleanup'),
+    cleanup: () => deps.maintenance.exclusive('file-cleanup', () => runCleanup(deps, now)),
   }
 }

@@ -38,12 +38,3 @@ export function payloadTooLarge(message: string, limitBytes: number): HarnessErr
 export function tooManyEntries(message: string, limitEntries: number): HarnessError {
   return new HarnessError({ code: 'payload_too_large', message, details: { limitEntries } })
 }
-
-/** `409 conflict` (`reason: 'busy'`): another import or delete-all is running. */
-export function busyError(): HarnessError {
-  return new HarnessError({
-    code: 'conflict',
-    message: 'Another import or delete-all is running. Try again when it has finished.',
-    details: { reason: 'busy' },
-  })
-}

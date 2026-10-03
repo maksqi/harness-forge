@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// Permission mode menu (docs/UI.md 7.11): a radio menu bound to `ToolMode` — Ask (default), Auto (shown in ember:
-// tools run without asking), Off. The composer renders it only when a usable tool exists and the model can call
-// tools. Alt+P opens it.
+// Permission mode menu (docs/UI.md 7.11): a radio menu bound to `ToolMode` — Ask (default), Accept edits (Phase 7,
+// project chats), Auto (shown in ember: tools run without asking), Off. `modes` limits the options (menu order is
+// always that of TOOL_MODE_OPTIONS); the composer passes Accept edits only for a project chat or while it is selected.
+// The composer renders the menu only when a usable tool exists and the model can call tools. Alt+P opens it.
 import type { ToolMode } from '@harness-forge/shared'
 import { toolModeSchema } from '@harness-forge/shared'
 import { ChevronDownIcon } from '@lucide/vue'
@@ -45,9 +46,12 @@ const emit = defineEmits<{
 
 const isOpen = useVModel(props, 'open', emit, { passive: true })
 const current = computed(() => toolModeOption(props.modelValue))
+/** The offered options in menu order; the current mode always shows, so the radio group never loses its value. */
+const options = computed(() => TOOL_MODE_OPTIONS.filter(option =>
+  props.modes.includes(option.value) || option.value === current.value.value))
 
 function select(value: unknown) {
-  const option = TOOL_MODE_OPTIONS.find(item => item.value === value)
+  const option = options.value.find(item => item.value === value)
   if (option && option.value !== props.modelValue)
     emit('update:modelValue', option.value)
 }
@@ -100,7 +104,7 @@ function onCloseAutoFocus(event: Event) {
             <DropdownMenuLabel>Permission mode</DropdownMenuLabel>
             <DropdownMenuRadioGroup :model-value="current.value" @update:model-value="select">
               <DropdownMenuRadioItem
-                v-for="option in TOOL_MODE_OPTIONS"
+                v-for="option in options"
                 :key="option.value"
                 :value="option.value"
                 :data-testid="testIds.permissionOption"

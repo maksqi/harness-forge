@@ -3,11 +3,14 @@
 //   1. user override in `tool_prefs` (deny / allow / ask)            -> denied / approved / user-approval
 //   2. `tool.approve` hook decision (deny / allow / ask)             -> denied / approved / user-approval
 //   3. tool policy (static or function) is `deny`                    -> denied
-//   4. mode `ask`:  policy `safe` -> not-applicable; `ask` / `always` -> user-approval
-//   5. mode `auto`: policy `always` -> user-approval; `safe` / `ask` -> not-applicable
-// Mode `off` sends no tools; a call that still arrives is denied. A policy function is guarded (3 s); a throw or
-// timeout counts as `always`. The approval function never throws: an unexpected failure asks the user.
-import type { ToolCallContext, ToolDefinition } from '@harness-forge/plugin-sdk'
+//   4. mode `ask`:   policy `safe` -> not-applicable; `ask` / `always` -> user-approval
+//   5. mode `edits` (Accept edits, Phase 7, ADR-032): policy `safe`, or policy `ask` of a tool with workspace access
+//      `write` -> not-applicable; everything else (`ask` without workspace `write`, `always`) -> user-approval
+//   6. mode `auto`:  policy `always` -> user-approval; `safe` / `ask` -> not-applicable
+// Mode `off` sends no tools; a call that still arrives is denied. A policy function is guarded (3 s) and receives the
+// call context with `workspace` (the run's project folder); a throw or timeout counts as `always`. The approval
+// function never throws: an unexpected failure asks the user.
+import type { ToolCallContext, ToolDefinition, ToolWorkspace, ToolWorkspaceAccess } from '@harness-forge/plugin-sdk'
 import type { ToolMode, ToolOverride, ToolPolicy } from '@harness-forge/shared'
 import type { ModelMessage, ToolApprovalStatus, ToolSet } from 'ai'
 import type { Logger } from '../logger.ts'
@@ -26,6 +29,8 @@ export interface ApprovalInput {
   hookDecision: HookDecision | undefined
   toolMode: ToolMode
   policy: EffectivePolicy
+  /** The tool's workspace access (`ToolDefinition.workspace`, see `toolWorkspaceAccess`), or null (Phase 7). */
+  workspace: ToolWorkspaceAccess | null
 }
 
 export interface ApprovalResult {
@@ -46,7 +51,7 @@ const DECISIONS: Readonly<Record<HookDecision, ApprovalOutcome>> = {
   deny: 'denied',
 }
 
-/** The pure resolution table (steps 1-5). */
+/** The pure resolution table (steps 1-6). */
 export function resolveApproval(input: ApprovalInput): ApprovalResult {
   if (input.override !== null) {
     const outcome = DECISIONS[input.override]
@@ -59,10 +64,10 @@ export function resolveApproval(input: ApprovalInput): ApprovalResult {
   if (input.policy === 'deny')
     return { outcome: 'denied', reason: DENIED_BY_POLICY }
   switch (input.toolMode) {
-    // Phase 7: `edits` behaves like `ask` until the workspace write rule of ADR-032 lands (W7.4).
     case 'ask':
-    case 'edits':
       return { outcome: input.policy === 'safe' ? 'not-applicable' : 'user-approval' }
+    case 'edits':
+      return { outcome: input.policy === 'safe' || (input.policy === 'ask' && input.workspace === 'write') ? 'not-applicable' : 'user-approval' }
     case 'auto':
       return { outcome: input.policy === 'always' ? 'user-approval' : 'not-applicable' }
     default:
@@ -84,6 +89,18 @@ export function isHookDecision(value: unknown): value is HookDecision {
   return typeof value === 'string' && HOOK_DECISIONS.has(value)
 }
 
+/**
+ * The workspace access of a tool definition (plugin API 1.2.0): null when the tool does not declare one; an unknown
+ * value (the registry validates the enum, this is plugin data) counts as `execute`, the most restricted access: offered
+ * only with a workspace and the shell switch on, never run without asking in `edits` mode.
+ */
+export function toolWorkspaceAccess(definition: Pick<ToolDefinition, 'workspace'>): ToolWorkspaceAccess | null {
+  const access: unknown = definition.workspace
+  if (access === undefined || access === null)
+    return null
+  return access === 'read' || access === 'write' ? access : 'execute'
+}
+
 /** A tool of the run as the approval function sees it. */
 export interface ApprovalTool {
   readonly pluginId: string
@@ -101,6 +118,8 @@ export interface ToolApprovalContext {
   plugins: Pick<PluginHost, 'guard'>
   signal: AbortSignal
   logger: Logger
+  /** The project folder of the run (`ToolCallContext.workspace` of the policy functions); null or absent = none. */
+  workspace?: ToolWorkspace | null
 }
 
 /** Evaluates the tool policy: default `ask`; a function is guarded (3 s) and a throw or timeout counts as `always`. */
@@ -134,14 +153,16 @@ export function createToolApproval(context: ToolApprovalContext) {
   return async (options: { toolCall: { toolName: string, toolCallId: string, input: unknown }, messages: ModelMessage[], tools?: ToolSet }): Promise<ToolApprovalStatus> => {
     const { toolCall } = options
     try {
-      // A call to a tool this run does not offer (tool mode off, disabled, owner inactive) can only be denied: an
-      // approved call without an executable tool would leave the model without a result.
+      // A call to a tool this run does not offer (tool mode off, disabled, owner inactive, a workspace tool without a
+      // workspace) can only be denied: an approved call without an executable tool would leave the model without a
+      // result.
       const tool = context.tools.get(toolCall.toolName)
       if (tool === undefined)
         return { type: 'denied', reason: DENIED_UNAVAILABLE }
+      const workspace = toolWorkspaceAccess(tool.definition)
       const override = context.prefs.get(toolCall.toolName)?.override ?? null
       if (override !== null)
-        return toApprovalStatus(resolveApproval({ override, hookDecision: undefined, toolMode: context.toolMode, policy: 'ask' }))
+        return toApprovalStatus(resolveApproval({ override, hookDecision: undefined, toolMode: context.toolMode, policy: 'ask', workspace }))
 
       const hookOutput: { decision?: HookDecision } = {}
       await context.registry.hooks.run(
@@ -151,16 +172,22 @@ export function createToolApproval(context: ToolApprovalContext) {
       )
       const hookDecision = isHookDecision(hookOutput.decision) ? hookOutput.decision : undefined
       if (hookDecision !== undefined)
-        return toApprovalStatus(resolveApproval({ override: null, hookDecision, toolMode: context.toolMode, policy: 'ask' }))
+        return toApprovalStatus(resolveApproval({ override: null, hookDecision, toolMode: context.toolMode, policy: 'ask', workspace }))
 
       const policy = await evaluatePolicy(
         tool,
         toolCall.input,
-        { chatId: context.chatId, modelRef: context.modelRef, toolCallId: toolCall.toolCallId, messages: options.messages },
+        {
+          chatId: context.chatId,
+          modelRef: context.modelRef,
+          toolCallId: toolCall.toolCallId,
+          messages: options.messages,
+          ...(context.workspace == null ? {} : { workspace: context.workspace }),
+        },
         context.plugins,
         context.signal,
       )
-      return toApprovalStatus(resolveApproval({ override: null, hookDecision: undefined, toolMode: context.toolMode, policy }))
+      return toApprovalStatus(resolveApproval({ override: null, hookDecision: undefined, toolMode: context.toolMode, policy, workspace }))
     }
     catch (error) {
       context.logger.warn('tool approval failed, asking the user', { tool: toolCall.toolName, err: error })

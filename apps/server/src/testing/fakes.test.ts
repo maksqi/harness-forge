@@ -780,7 +780,7 @@ describe('fake media resolvers (providers/testing.ts)', () => {
     expect((await rejection(t.deps.providers.resolveTranscriptionModel('mock:speech'))).code).toBe('validation_error')
     expect((await rejection(t.deps.providers.resolveSpeechModel('mock:transcribe'))).code).toBe('validation_error')
     expect((await rejection(t.deps.providers.resolveImageModel('mock:nope'))).toJSON().error).toMatchObject({ code: 'model_not_found', action: 'refresh-models' })
-    expect((await rejection(t.deps.providers.resolveSpeechModel('acme:speech'))).code).toBe('not_found')
+    expect((await rejection(t.deps.providers.resolveSpeechModel('acme:speech'))).code).toBe('provider_not_configured')
     expect((await rejection(t.deps.providers.resolveModel('mock:image'))).code).toBe('validation_error')
     expect((await t.deps.providers.resolveModel('mock:echo')).modelRef).toBe('mock:echo')
   })
@@ -826,8 +826,9 @@ describe('createFakePluginHost: ctx.images', () => {
       ctx = context
     } } }] })
     apps.push(t)
-    // This mock plugin registers no provider, so the real resolver cannot find `mock:image`.
+    // This mock plugin registers no provider, so the real resolver cannot find `mock:image`: an unknown provider is
+    // `provider_not_configured` (Phase 7, as on chat).
     const error: unknown = await ctx!.images.generate({ prompt: 'x', modelRef: 'mock:image' }).then(() => null, (reason: unknown) => reason)
-    expect(error).toMatchObject({ code: 'not_found' })
+    expect(error).toMatchObject({ code: 'provider_not_configured' })
   })
 })

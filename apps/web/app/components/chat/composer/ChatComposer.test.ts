@@ -17,7 +17,7 @@ import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
 import { installFakeMedia } from '~/utils/testing/fake-media'
-import { catalogModel, chatId } from '~/utils/testing/fixtures'
+import { catalogModel, chatId, projectId } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import ChatComposer from './ChatComposer.vue'
@@ -47,6 +47,7 @@ interface HarnessState {
   chatCostUsd: number | null
   disabled: boolean
   previousImages: number
+  projectId: string | null
 }
 
 let pinia: ReturnType<typeof createPinia>
@@ -63,6 +64,7 @@ function mountComposer(overrides: Partial<HarnessState> = {}) {
     chatCostUsd: null,
     disabled: false,
     previousImages: 0,
+    projectId: null,
     ...overrides,
   })
   const wrapper = mount({
@@ -415,6 +417,68 @@ describe('chatComposer', () => {
       await flushPromises()
       expect(textarea().element.value).toBe('/')
       expect(wrapper.find(byTestId(testIds.slashMenu)).exists()).toBe(true)
+      wrapper.unmount()
+    })
+  })
+
+  describe('permission mode: Accept edits (Phase 7)', () => {
+    async function permissionOptions(wrapper: ReturnType<typeof mountComposer>['wrapper']) {
+      await wrapper.get(byTestId(testIds.permissionMenuTrigger)).trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+      return bodyAll(byTestId(testIds.permissionOption))
+    }
+
+    it('offers Accept edits in a project chat and applies the pick', async () => {
+      const { wrapper, state } = mountComposer({ projectId: projectId(1) })
+      const options = await permissionOptions(wrapper)
+      expect(options.map(option => option.dataset.value)).toEqual(['ask', 'edits', 'auto', 'off'])
+      options[1]!.click()
+      await flushPromises()
+      expect(state.toolMode).toBe('edits')
+      expect(wrapper.get(byTestId(testIds.permissionMenuTrigger)).attributes('aria-label')).toBe('Permission mode: Accept edits')
+      wrapper.unmount()
+    })
+
+    it('outside a project offers it only while it is the current mode', async () => {
+      const { wrapper, state } = mountComposer({ toolMode: 'edits' })
+      expect(wrapper.get(byTestId(testIds.permissionMenuTrigger)).attributes('data-value')).toBe('edits')
+      const options = await permissionOptions(wrapper)
+      expect(options.map(option => option.dataset.value)).toEqual(['ask', 'edits', 'auto', 'off'])
+      options[0]!.click()
+      await flushPromises()
+      expect(state.toolMode).toBe('ask')
+      press(document.activeElement ?? document.body, { key: 'Escape' })
+      await flushPromises()
+
+      const again = await permissionOptions(wrapper)
+      expect(again.map(option => option.dataset.value)).toEqual(['ask', 'auto', 'off'])
+      wrapper.unmount()
+    })
+
+    it('/mode edits and its aliases select Accept edits in a project chat', async () => {
+      const { wrapper, state, composer, textarea } = mountComposer({ projectId: projectId(1) })
+      for (const command of ['/mode edits', '/mode accept-edits', '/mode accept edits']) {
+        state.toolMode = 'ask'
+        await type(textarea(), command)
+        press(textarea().element, { key: 'Enter' })
+        await flushPromises()
+        expect(state.toolMode).toBe('edits')
+        expect(textarea().element.value).toBe('')
+      }
+      expect(mock.toastError).not.toHaveBeenCalled()
+      expect(composer().emitted('submit')).toBeUndefined()
+      wrapper.unmount()
+    })
+
+    it('/mode edits outside a project explains why and changes nothing', async () => {
+      const { wrapper, state, composer, textarea } = mountComposer()
+      await type(textarea(), '/mode accept edits')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(mock.toastError).toHaveBeenCalledWith('Accept edits works in project chats.')
+      expect(state.toolMode).toBe('ask')
+      expect(textarea().element.value).toBe('/mode accept edits')
+      expect(composer().emitted('submit')).toBeUndefined()
       wrapper.unmount()
     })
   })

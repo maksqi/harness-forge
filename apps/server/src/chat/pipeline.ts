@@ -7,7 +7,9 @@
 //   sendSources, messageMetadata, onError })` (no end callback of its own) and `writer.merge(ui.pipeThrough(
 //   storeGeneratedFiles(...)))`: generated files are stored before they are streamed or saved (`generated-files.ts`);
 //   a request without tools gets earlier tool calls as text (`tool-history.ts`); a chat model with image output gets
-//   the provider options of `imageParams` (ADR-028);
+//   the provider options of `imageParams` (ADR-028); a run with an open project folder (Phase 7, `prepared.workspace`)
+//   gets the workspace tools (`execute` tools only with `env.workspaceShell`), `ToolCallContext.workspace`, the
+//   workspace instructions and `projectMaxSteps`;
 // - image turns (an image model): `imageStream` (`images.ts`), one `ImageService.generate` call;
 // - reply commands and failures before the model call: `createUIMessageStream` without a model call.
 // `createUIMessageStreamResponse({ stream, consumeSseStream })` tees the SSE text into the run buffer (resume). The end
@@ -33,7 +35,7 @@ import {
   streamText,
   toUIMessageStream,
 } from 'ai'
-import { createToolApproval } from './approval.ts'
+import { createToolApproval, toolWorkspaceAccess } from './approval.ts'
 import { applyCommandExpansions, trimToContext, validModelMessages } from './context.ts'
 import {
   errorEnvelopeText,
@@ -49,7 +51,7 @@ import { GeneratedFiles, storeGeneratedFiles } from './generated-files.ts'
 import { finalizeParts, hasPendingApproval, plainText } from './history.ts'
 import { imageStream } from './images.ts'
 import { NOTICES } from './notices.ts'
-import { buildRunParams, providerImageOptions } from './params.ts'
+import { buildRunParams, providerImageOptions, runMaxSteps } from './params.ts'
 import { SseReplayBuffer } from './runs.ts'
 import { generateChatTitle } from './title.ts'
 import { toolPartsAsText } from './tool-history.ts'
@@ -578,6 +580,8 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     mcp: deps.mcp,
     signal: run.signal,
     logger,
+    workspace: prepared.workspace,
+    allowExecute: deps.env.workspaceShell,
   })
   if (assembled.unsupported) {
     const notice = NOTICES.toolsUnsupported()
@@ -598,7 +602,9 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     toolMode: session.ctx.toolMode,
     globalInstructions: prepared.settings.instructions,
     chatInstructions: prepared.chat.settings.instructions,
-    maxSteps: prepared.settings.maxSteps,
+    workspace: prepared.workspace,
+    workspaceTools: [...assembled.byName.values()].filter(entry => toolWorkspaceAccess(entry.definition) !== null).map(entry => entry.definition.name),
+    maxSteps: runMaxSteps(prepared.settings, prepared.chat.projectId),
     registry: deps.registry,
     logger,
   })
@@ -640,6 +646,7 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
       plugins: deps.plugins,
       signal: run.signal,
       logger,
+      workspace: assembled.workspace,
     }),
     experimental_toolApprovalSecret: deps.keyring.subkey('approval'),
     stopWhen: isStepCount(params.maxSteps),
@@ -724,6 +731,7 @@ export async function launchRun(ctx: RunContext): Promise<Response> {
   }
   if (prepared.superseded > 0)
     session.notices.push(NOTICES.superseded(prepared.superseded))
+  session.notices.push(...prepared.notices)
   startTitle(session)
 
   let stream: ReadableStream<UIMessageChunk>

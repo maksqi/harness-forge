@@ -3,7 +3,8 @@ import { Buffer } from 'node:buffer'
 import { afterEach, describe, expect, it } from 'vitest'
 import { SESSION_EPOCH_KEY } from '../services/settings/types.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
-import { createFakeKeyring, createMemorySecretStore, createMemorySettingsService } from '../testing/fakes.ts'
+import { createFakeKeyring, createMemorySecretStore, createMemorySettingsService, fakeMasterKey } from '../testing/fakes.ts'
+import { swapMasterKey } from './keyring.ts'
 import { SESSION_TTL_MS } from './session.ts'
 
 const apps: TestApp[] = []
@@ -139,5 +140,50 @@ describe('session tokens', () => {
     expect(calls).toBe(0)
     await t.deps.sessions.issue({ authAt: NOW, now: NOW })
     expect(calls).toBeGreaterThan(0)
+  })
+
+  it('derives the session subkey once per key version (cache { version, value })', async () => {
+    let calls = 0
+    const keyring = createFakeKeyring()
+    const t = await createTestApp({
+      start: false,
+      overrides: {
+        keyring: {
+          get keyVersion() {
+            return keyring.keyVersion
+          },
+          subkey: (name) => {
+            if (name === 'session')
+              calls += 1
+            return keyring.subkey(name)
+          },
+        },
+        secrets: createMemorySecretStore(),
+        settings: createMemorySettingsService(),
+      },
+    })
+    apps.push(t)
+    const token = await t.deps.sessions.issue({ authAt: NOW, now: NOW })
+    await t.deps.sessions.verify(token, NOW)
+    await t.deps.sessions.issue({ authAt: NOW, now: NOW })
+    expect(calls).toBe(1)
+    swapMasterKey(keyring, fakeMasterKey('rotated'), 2)
+    await t.deps.sessions.verify(token, NOW)
+    await t.deps.sessions.issue({ authAt: NOW, now: NOW })
+    expect(calls).toBe(2)
+  })
+})
+
+describe('session tokens across a key rotation (ADR-034)', () => {
+  it('a token signed before a swap stops verifying; a token signed after verifies', async () => {
+    const { deps } = await testApp()
+    const before = await deps.sessions.issue({ authAt: NOW, now: NOW })
+    expect(await deps.sessions.verify(before, NOW)).not.toBeNull()
+    swapMasterKey(deps.keyring, fakeMasterKey('rotated'), 2)
+    expect(await deps.sessions.verify(before, NOW)).toBeNull()
+    const after = await deps.sessions.issue({ authAt: NOW, now: NOW })
+    expect(await deps.sessions.verify(after, NOW)).toMatchObject({ authAt: NOW })
+    // The epoch is unchanged: only the key differs.
+    expect(decodePayload(after).epoch).toBe(decodePayload(before).epoch)
   })
 })

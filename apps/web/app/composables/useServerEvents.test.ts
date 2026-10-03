@@ -7,21 +7,24 @@ import { effectScope } from 'vue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useUiStore } from '~/stores/ui'
-import { chatId, chatSummary, logEntry, pluginSummary, providerSummary } from '~/utils/testing/fixtures'
+import { chatId, chatSummary, logEntry, pluginSummary, projectId, projectSummary, providerSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
-import { dispatchServerEvent, parseServerEvent, refetchLoadedStores, useServerEvents } from './useServerEvents'
+import { dispatchServerEvent, KEY_ROTATED_MESSAGE, parseServerEvent, refetchLoadedStores, useServerEvents } from './useServerEvents'
 
-const mock = vi.hoisted(() => ({ api: null as unknown }))
+const mock = vi.hoisted(() => ({ api: null as unknown, toast: vi.fn() }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
+vi.mock('vue-sonner', () => ({ toast: Object.assign((...args: unknown[]) => mock.toast(...args), { error: vi.fn(), success: vi.fn() }) }))
 
 let pinia: ReturnType<typeof createPinia>
 let api: MockApi
 
 beforeEach(() => {
   vi.useFakeTimers()
+  mock.toast.mockReset()
   api = createMockApi()
   mock.api = api
   stubLocalStorage()
@@ -99,6 +102,53 @@ describe('dispatchServerEvent', () => {
     expect(plugins.logs['dice-roller']).toHaveLength(1)
   })
 
+  it('routes project.changed to the projects and chats stores', () => {
+    const projects = useProjectsStore()
+    const chats = useChatsStore()
+    const projectEvents = vi.spyOn(projects, 'applyEvent')
+    const chatEvents = vi.spyOn(chats, 'applyEvent')
+    const changed = createServerEvent('project.changed', { id: projectId(1), project: projectSummary({ id: projectId(1) }) }, 1)
+    dispatchServerEvent(changed)
+    const deleted = createServerEvent('project.changed', { id: projectId(1), project: null }, 2)
+    dispatchServerEvent(deleted)
+    expect(projectEvents.mock.calls).toEqual([[changed], [deleted]])
+    expect(chatEvents.mock.calls).toEqual([[changed], [deleted]])
+  })
+
+  it('reloads the loaded chat list and shows a toast on key.rotated', async () => {
+    api.chats.list.mockResolvedValue({ items: [chatSummary({ id: chatId(1) })], nextCursor: null })
+    const chats = useChatsStore()
+    const seen: string[] = []
+    const scope = effectScope()
+    scope.run(() => useServerEvents().on('key.rotated', event => seen.push(...event.data.chatIds)))
+
+    // Nothing loaded yet: no list request, the toast still shows.
+    dispatchServerEvent(createServerEvent('key.rotated', { keyVersion: 2, rotatedAt: 1, chatIds: [] }, 1))
+    expect(api.chats.list).not.toHaveBeenCalled()
+    expect(mock.toast).toHaveBeenCalledWith(KEY_ROTATED_MESSAGE)
+    expect(KEY_ROTATED_MESSAGE).toBe('The encryption key was rotated.')
+
+    await chats.fetchPage()
+    dispatchServerEvent(createServerEvent('key.rotated', { keyVersion: 3, rotatedAt: 2, chatIds: [chatId(1)] }, 2))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(api.chats.list).toHaveBeenCalledTimes(2)
+    expect(api.chats.list).toHaveBeenLastCalledWith(expect.objectContaining({ query: expect.not.objectContaining({ cursor: expect.anything() }) }))
+    expect(mock.toast).toHaveBeenCalledTimes(2)
+    // The chat sessions it lists subscribe themselves (useChatSession reloads their path).
+    expect(seen).toEqual([chatId(1)])
+    scope.stop()
+  })
+
+  it('a failed list reload after key.rotated is not an unhandled error', async () => {
+    api.chats.list.mockResolvedValueOnce({ items: [], nextCursor: null })
+    const chats = useChatsStore()
+    await chats.fetchPage()
+    api.chats.list.mockRejectedValueOnce(new Error('offline'))
+    dispatchServerEvent(createServerEvent('key.rotated', { keyVersion: 2, rotatedAt: 1, chatIds: [] }, 1))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(api.chats.list).toHaveBeenCalledTimes(2)
+  })
+
   it('leaves the open chat when it is deleted elsewhere', () => {
     const navigate = vi.fn()
     useUiStore().setActiveChat(chatId(1))
@@ -147,5 +197,13 @@ describe('refetchLoadedStores', () => {
     expect(api.chats.list).toHaveBeenCalledTimes(2)
     expect(api.models.list).not.toHaveBeenCalled()
     expect(api.plugins.list).not.toHaveBeenCalled()
+    expect(api.projects.list).not.toHaveBeenCalled()
+  })
+
+  it('reloads the projects once they were loaded', async () => {
+    api.projects.list.mockResolvedValue({ items: [projectSummary()] })
+    await useProjectsStore().fetchAll()
+    await refetchLoadedStores()
+    expect(api.projects.list).toHaveBeenCalledTimes(2)
   })
 })

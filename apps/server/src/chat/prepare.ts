@@ -6,6 +6,9 @@
 // history change and the active leaf in one transaction. A failure here is a normal JSON error response and leaves the
 // history untouched. Nothing is ever deleted (ADR-023): an edit adds a sibling user message, a regenerate a sibling
 // reply.
+// Phase 7 (ADR-031, ARCHITECTURE.md 6.13): the request's `projectId` is honored only when the request creates the chat
+// (an unknown project is `not_found` before the chat row exists); every chat-model run of a chat with a project opens
+// its folder (`openWorkspace`): an unavailable folder gives the run no workspace and the `workspace-unavailable` notice.
 import type {
   CatalogModel,
   ChatRequestBody,
@@ -14,12 +17,14 @@ import type {
   ImageAspectRatio,
   ImageOptions,
   MessageMetadata,
+  NoticeData,
   Settings,
 } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 import type { ResolvedImageModel, ResolvedModel, ResolvedModelBase } from '../providers/types.ts'
 import type { ChatRecord } from '../services/chats/types.ts'
 import type { FilesService } from '../services/files/types.ts'
+import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { CommandResolution } from './commands.ts'
 import type { RequestKind } from './history.ts'
@@ -40,6 +45,7 @@ import { applyCommandExpansions } from './context.ts'
 import { normalizeUserParts } from './files.ts'
 import { isGeneratedImageType } from './generated-files.ts'
 import { badRequest, classifyRequest, mergeApprovalDecisions, notFound, supersedeApprovals } from './history.ts'
+import { NOTICES } from './notices.ts'
 
 /** A message write of the history transaction. */
 export interface MessageWrite {
@@ -107,6 +113,13 @@ export interface PreparedRun {
   /** Approvals resolved as denied (`superseded`). */
   superseded: number
   writes: HistoryWrites
+  /**
+   * The project folder of a chat-model run of a chat with a project (Phase 7, `openWorkspace`, read again on every run);
+   * null without a project, for image turns and command replies, and when the folder is not available.
+   */
+  workspace: OpenWorkspace | null
+  /** Notices decided while preparing (the `workspace-unavailable` notice of a folder that could not be opened). */
+  notices: NoticeData[]
 }
 
 /** The request was stopped before its history was stored. */
@@ -283,15 +296,55 @@ function pathWrites(changed: readonly HarnessUIMessage[], path: readonly Harness
 }
 
 /**
+ * The chat of a request (`chats.ensure`, which saves the model, mode and effort). `projectId` is applied only when this
+ * request creates the chat: `ensure` answers `not_found` for an unknown project before the chat row exists (and stores
+ * the id through a subquery on `projects`, so a project deleted in between leaves no dangling id); an existing chat
+ * keeps its project whatever the request says (moves go through `PATCH /chats/:id`).
+ */
+export async function ensureChat(deps: Pick<AppDeps, 'chats'>, body: ChatRequestBody): Promise<ChatRecord> {
+  const { chat } = await deps.chats.ensure(body.chatId, {
+    modelRef: body.modelRef,
+    settings: { toolMode: body.toolMode, reasoningEffort: body.reasoningEffort },
+    ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
+  })
+  return chat
+}
+
+/**
+ * The project folder of a run (Phase 7): opened for a chat-model run of a chat with a project that calls the model (not
+ * for image turns or command replies). An unavailable folder or a deleted project gives no workspace and the
+ * `workspace-unavailable` notice (the service's message); a database failure rejects.
+ */
+export async function openRunWorkspace(
+  deps: Pick<AppDeps, 'projects'>,
+  chat: Pick<ChatRecord, 'projectId'>,
+  target: RunTarget,
+  command: CommandResolution | null,
+  logger: Logger,
+): Promise<{ workspace: OpenWorkspace | null, notices: NoticeData[] }> {
+  if (chat.projectId === null || target.kind !== 'chat' || command !== null)
+    return { workspace: null, notices: [] }
+  const result = await deps.projects.openWorkspace(chat.projectId)
+  if (result.ok)
+    return { workspace: result.workspace, notices: [] }
+  logger.info('the project folder of the chat is not available', { projectId: chat.projectId })
+  return { workspace: null, notices: [NOTICES.workspaceUnavailable(result.message)] }
+}
+
+/**
  * Validates and plans the request. Throws `validation_error`, `not_found`, `conflict`, `provider_not_configured` (and
  * the other resolution errors) before anything but the chat row is written.
  */
 export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger): Promise<PreparedRun> {
+  const planned = await planRun(deps, run, body, logger)
+  const opened = await openRunWorkspace(deps, planned.chat, planned.target, planned.command, logger)
+  return { ...planned, ...opened }
+}
+
+/** `prepareRun` without the workspace. */
+async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger): Promise<Omit<PreparedRun, 'workspace' | 'notices'>> {
   const kind = classifyRequest(body)
-  const { chat } = await deps.chats.ensure(body.chatId, {
-    modelRef: body.modelRef,
-    settings: { toolMode: body.toolMode, reasoningEffort: body.reasoningEffort },
-  })
+  const chat = await ensureChat(deps, body)
   const resolvedTarget = await resolveTarget(deps, body.modelRef, run.signal)
   const resolved: ResolvedModelBase = resolvedTarget.model
   checkImageOptions(body.imageOptions, resolvedTarget.kind, resolved.entry)

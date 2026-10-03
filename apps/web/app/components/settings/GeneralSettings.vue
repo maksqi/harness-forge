@@ -1,6 +1,7 @@
 <script setup lang="ts">
-// Settings -> General body (docs/UI.md 9.4): display name, send key, default permission mode and effort, max steps,
-// Alt shortcuts, custom instructions and the password block. Choices save at once (optimistic, toast on failure);
+// Settings -> General body (docs/UI.md 9.4): display name, send key, default permission mode (Ask, Accept edits, Auto,
+// Off) and effort, max steps (per response in chats without a project, and in project chats: 1-200 each), Alt
+// shortcuts, custom instructions and the password block. Choices save at once (optimistic, toast on failure);
 // text fields save on blur or Enter (Mod+Enter in the instructions), Esc restores the saved value. Bulk export,
 // import and delete-all live in Settings -> Data (docs/UI.md 9.8, ADR-024); a single chat is still exported from its
 // chat menus.
@@ -23,6 +24,7 @@ import {
   instructionsError,
   parseMaxSteps,
   sendKeyOptions,
+  STEPS_MAX,
   TOOL_MODE_OPTIONS,
 } from './general'
 import { toastError } from './notify'
@@ -40,6 +42,7 @@ const ids = {
   toolMode: useId(),
   effort: useId(),
   maxSteps: useId(),
+  projectMaxSteps: useId(),
   altShortcuts: useId(),
   instructions: useId(),
 }
@@ -98,6 +101,7 @@ function useTextField(read: () => string) {
 
 const displayName = useTextField(() => resolved.value.displayName)
 const maxSteps = useTextField(() => String(resolved.value.maxSteps))
+const projectMaxSteps = useTextField(() => String(resolved.value.projectMaxSteps))
 const instructions = useTextField(() => resolved.value.instructions)
 
 async function commitDisplayName() {
@@ -111,17 +115,18 @@ async function commitDisplayName() {
     displayName.restore()
 }
 
-async function commitMaxSteps() {
-  maxSteps.focused.value = false
-  const parsed = parseMaxSteps(String(maxSteps.draft.value ?? ''))
+/** Both step limits: an invalid value shows the error and keeps the saved value. */
+async function commitSteps(field: ReturnType<typeof useTextField>, key: 'maxSteps' | 'projectMaxSteps') {
+  field.focused.value = false
+  const parsed = parseMaxSteps(String(field.draft.value ?? ''))
   if ('error' in parsed) {
-    maxSteps.error.value = parsed.error
+    field.error.value = parsed.error
     return
   }
-  maxSteps.error.value = null
-  maxSteps.draft.value = String(parsed.value)
-  if (parsed.value !== resolved.value.maxSteps && !(await save({ maxSteps: parsed.value })))
-    maxSteps.restore()
+  field.error.value = null
+  field.draft.value = String(parsed.value)
+  if (parsed.value !== resolved.value[key] && !(await save({ [key]: parsed.value })))
+    field.restore()
 }
 
 async function commitInstructions() {
@@ -263,7 +268,7 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
           <FieldLabel :for="ids.maxSteps">
             Max steps per response
           </FieldLabel>
-          <FieldDescription>How many tool calls and follow-ups one response may chain (1–100).</FieldDescription>
+          <FieldDescription>How many tool calls and follow-ups one response may chain in chats without a project (1–{{ STEPS_MAX }}).</FieldDescription>
         </FieldContent>
         <div class="grid gap-1.5 @md/field-group:w-48!">
           <Input
@@ -276,12 +281,40 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
             :aria-invalid="maxSteps.error.value ? true : undefined"
             :data-testid="testIds.settingsMaxSteps"
             @focus="maxSteps.focused.value = true"
-            @blur="commitMaxSteps"
+            @blur="commitSteps(maxSteps, 'maxSteps')"
             @keydown.enter.prevent="blurTarget"
             @keydown.esc.prevent="cancelEdit(maxSteps, $event)"
           />
           <FieldError v-if="maxSteps.error.value" class="text-xs">
             {{ maxSteps.error.value }}
+          </FieldError>
+        </div>
+      </Field>
+
+      <Field orientation="responsive" :data-invalid="projectMaxSteps.error.value ? true : undefined">
+        <FieldContent>
+          <FieldLabel :for="ids.projectMaxSteps">
+            Max steps in project chats
+          </FieldLabel>
+          <FieldDescription>Agent runs in project chats can take more steps (1–{{ STEPS_MAX }}).</FieldDescription>
+        </FieldContent>
+        <div class="grid gap-1.5 @md/field-group:w-48!">
+          <Input
+            :id="ids.projectMaxSteps"
+            v-model="projectMaxSteps.draft.value"
+            inputmode="numeric"
+            maxlength="3"
+            autocomplete="off"
+            class="tabular-nums"
+            :aria-invalid="projectMaxSteps.error.value ? true : undefined"
+            :data-testid="testIds.settingsProjectMaxSteps"
+            @focus="projectMaxSteps.focused.value = true"
+            @blur="commitSteps(projectMaxSteps, 'projectMaxSteps')"
+            @keydown.enter.prevent="blurTarget"
+            @keydown.esc.prevent="cancelEdit(projectMaxSteps, $event)"
+          />
+          <FieldError v-if="projectMaxSteps.error.value" class="text-xs">
+            {{ projectMaxSteps.error.value }}
           </FieldError>
         </div>
       </Field>

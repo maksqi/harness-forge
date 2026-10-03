@@ -1,15 +1,17 @@
-// Tool assembly (ARCHITECTURE.md 6.1, PLUGINS.md 9 "Tools"): registry tools (MCP tools included, registered by the MCP
-// manager as `mcp__<serverId>__<tool>` and sent as AI SDK dynamic tools), filtered by the chat tool mode, the tool
-// preferences (`enabled: false` and override `deny` are not sent), the owner plugin state, the MCP server state and the
-// model capability `tools`. Every tool is wrapped:
+// Tool assembly (ARCHITECTURE.md 6.1 / 6.13, PLUGINS.md 9 "Tools"): registry tools (MCP tools included, registered by
+// the MCP manager as `mcp__<serverId>__<tool>` and sent as AI SDK dynamic tools), filtered by the chat tool mode, the
+// tool preferences (`enabled: false` and override `deny` are not sent), the owner plugin state, the workspace (Phase 7:
+// a tool that declares `ToolDefinition.workspace` only when the run has an open project folder, an `execute` tool only
+// while `HF_WORKSPACE_SHELL` is on), the MCP server state and the model capability `tools`. Every tool is wrapped:
 //   1. owner plugin active, else "Tool unavailable";
 //   2. (approval: `approval.ts`, decided by the SDK before `execute`);
 //   3. `tool.before` hooks (a throw blocks the call), the input re-validated against `inputSchema`;
-//   4. `execute` under the plugin guard (`timeoutMs`, default 60 s, max 600 s; aborts with the run);
+//   4. `execute` under the plugin guard (`timeoutMs`, default 60 s, max 600 s; aborts with the run), with the frozen
+//      `ToolCallContext.workspace` (`{ projectId, name, root }`) for every tool of a run with a workspace;
 //   5. `tool.after` hooks;
 //   6. JSON-serializable output, capped at 64 KB of serialized JSON (`{ truncated, originalBytes, preview }`).
 // `toModelOutput` is guarded (3 s); on failure, or for a truncated output, the output is sent as JSON.
-import type { ToolCallContext, ToolDefinition, ToolResultOutput } from '@harness-forge/plugin-sdk'
+import type { ToolCallContext, ToolDefinition, ToolResultOutput, ToolWorkspace } from '@harness-forge/plugin-sdk'
 import type { McpServer, ToolMode } from '@harness-forge/shared'
 import type { JSONValue, Tool, ToolExecutionOptions, ToolSet } from 'ai'
 import type { Logger } from '../logger.ts'
@@ -21,6 +23,7 @@ import { Buffer } from 'node:buffer'
 import { LIMITS } from '@harness-forge/shared'
 import { asSchema, dynamicTool, tool } from 'ai'
 import { GUARD_TIMEOUT_MAX_MS, GUARD_TIMEOUTS } from '../plugins/guard.ts'
+import { toolWorkspaceAccess } from './approval.ts'
 import { isAbortError, ToolFailure } from './errors.ts'
 
 /** The marker that replaces a tool output larger than `LIMITS.toolOutputBytes` (DECISIONS.md "Tool output cap"). */
@@ -91,6 +94,16 @@ export interface ToolWrapContext {
   plugins: Pick<PluginHost, 'guard' | 'isActive'>
   /** The run signal (the SDK passes it, merged with its own timeout, as `abortSignal`). */
   signal: AbortSignal
+  /**
+   * The project folder of the run (Phase 7): passed as `ToolCallContext.workspace` to every tool; null or absent = the
+   * run has no workspace (`workspace` is then absent from the call context). Use `toolWorkspace()` (frozen).
+   */
+  workspace?: ToolWorkspace | null
+}
+
+/** The frozen `ToolCallContext.workspace` of a run: exactly `{ projectId, name, root }` (no other workspace fields). */
+export function toolWorkspace(workspace: ToolWorkspace): ToolWorkspace {
+  return Object.freeze({ projectId: workspace.projectId, name: workspace.name, root: workspace.root })
 }
 
 /** The `execute` of a registered tool with steps 1 and 3-6 of the host wrapper. */
@@ -130,6 +143,7 @@ export function wrapToolExecute(registered: Pick<RegisteredTool, 'pluginId' | 'd
             toolCallId: options.toolCallId,
             messages: options.messages,
             signal: guardSignal,
+            ...(context.workspace == null ? {} : { workspace: context.workspace }),
           }
           return definition.execute(finalInput, callContext)
         },
@@ -181,6 +195,14 @@ export interface ToolAssemblyInput {
   mcp: Pick<McpManager, 'list'>
   signal: AbortSignal
   logger: Logger
+  /**
+   * The project folder of the run (Phase 7; `OpenWorkspace` fits): tools that declare `ToolDefinition.workspace` are
+   * sent only with one, and every tool gets it as `ToolCallContext.workspace` (frozen `{ projectId, name, root }`).
+   * Null or absent = no workspace.
+   */
+  workspace?: ToolWorkspace | null
+  /** `env.workspaceShell` (`HF_WORKSPACE_SHELL`): tools with workspace access `execute` are sent only when true. */
+  allowExecute: boolean
 }
 
 export interface AssembledTools {
@@ -191,6 +213,16 @@ export interface AssembledTools {
   prefs: ReadonlyMap<string, ToolPref>
   /** Tools would have been sent, but the model does not support tools (`tools-unsupported` notice). */
   unsupported: boolean
+  /** The frozen `ToolCallContext.workspace` given to the tools (and to the policy functions), or null. */
+  workspace: ToolWorkspace | null
+}
+
+/** The workspace filter of a tool (see `ToolAssemblyInput.workspace` / `allowExecute`). */
+export function offersWorkspaceTool(definition: Pick<ToolDefinition, 'workspace'>, hasWorkspace: boolean, allowExecute: boolean): boolean {
+  const access = toolWorkspaceAccess(definition)
+  if (access === null)
+    return true
+  return hasWorkspace && (access !== 'execute' || allowExecute)
 }
 
 async function readPrefs(input: ToolAssemblyInput): Promise<ReadonlyMap<string, ToolPref>> {
@@ -230,7 +262,8 @@ export function toAiTool(registered: RegisteredTool, context: ToolWrapContext): 
 /** The tools of a run (see the header comment for the filters). */
 export async function assembleTools(input: ToolAssemblyInput): Promise<AssembledTools> {
   const prefs = await readPrefs(input)
-  const empty: AssembledTools = { tools: {}, byName: new Map(), prefs, unsupported: false }
+  const workspace = input.workspace == null ? null : toolWorkspace(input.workspace)
+  const empty: AssembledTools = { tools: {}, byName: new Map(), prefs, unsupported: false, workspace }
   if (input.toolMode === 'off')
     return empty
 
@@ -245,6 +278,8 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
   const candidates = registered.filter((entry) => {
     const pref = prefs.get(entry.definition.name)
     if (pref?.enabled === false || pref?.override === 'deny')
+      return false
+    if (!offersWorkspaceTool(entry.definition, workspace !== null, input.allowExecute))
       return false
     return input.plugins.isActive(entry.pluginId)
   })
@@ -265,6 +300,7 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
     registry: input.registry,
     plugins: input.plugins,
     signal: input.signal,
+    workspace,
   }
   const tools: ToolSet = {}
   const byName = new Map<string, ApprovalTool>()
@@ -272,5 +308,5 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
     tools[entry.definition.name] = toAiTool(entry, context)
     byName.set(entry.definition.name, { pluginId: entry.pluginId, definition: entry.definition as ToolDefinition })
   }
-  return { tools, byName, prefs, unsupported: false }
+  return { tools, byName, prefs, unsupported: false, workspace }
 }

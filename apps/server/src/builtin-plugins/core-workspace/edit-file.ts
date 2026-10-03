@@ -1,23 +1,126 @@
-// The `edit_file` tool of `core-workspace` (ADR-032; access `write`, timeout 30 s). P7-0b skeleton (C14): the definition
-// is final except the policy (W7.2: the same function as `write_file`) and `execute` / `toModelOutput` (W7.2: a unique
-// exact match unless `replace_all`, CRLF and BOM kept, the diff, "Edited x: N replacement(s) (+a -r lines).").
-import type { ToolDefinition } from '@harness-forge/plugin-sdk'
+// The `edit_file` tool of `core-workspace` (ADR-032; access `write`, timeout 30 s; policy: the `write_file` function,
+// `always` for a hidden or secret-looking path, else `ask`). Replaces `old_string` in a UTF-8 text file of at most 1 MiB
+// (`WORKSPACE_LIMITS.editFileMaxBytes`, read through the frozen `readWorkspaceFile`):
+//
+// - `old_string === new_string` is an error; `old_string` must occur exactly once unless `replace_all` ("not found"
+//   tells the model to read the file again and match whitespace exactly, "occurs N times" to add context or set
+//   `replace_all`); the replacement is literal (no `$&` patterns);
+// - a file that is CRLF throughout is matched on its LF text (CRLF in the strings is read as LF) and written back as
+//   CRLF; mixed line endings are matched raw; a leading BOM is kept;
+// - the result goes through the frozen `writeWorkspaceFile` (temp file + rename keeping the mode) and may not exceed
+//   1 MiB.
+//
+// The output carries the diff of the LF text (`computeWorkspaceDiff`, null on timeout). The model sees "Edited x: N
+// replacement(s) (+a -r lines).".
+import type { ToolDefinition, ToolResultOutput } from '@harness-forge/plugin-sdk'
 import type { EditFileToolInput, EditFileToolOutput } from '@harness-forge/shared'
-import { editFileToolInputSchema, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
-import { toolNotImplemented, WRITE_TOOL_TIMEOUT_MS } from './common.ts'
+import { editFileToolInputSchema, editFileToolOutputSchema, HarnessError, WORKSPACE_LIMITS, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
+import { decodeText } from '../../plugins/scaffold/paths.ts'
+import { computeWorkspaceDiff } from '../../workspace/diff.ts'
+import { readWorkspaceFile, writeWorkspaceFile } from '../../workspace/paths.ts'
+import { BOM, byteLength, plural } from '../../workspace/text.ts'
+import { requireWorkspace, textModelOutput, WRITE_TOOL_TIMEOUT_MS } from './common.ts'
+import { writeFilePolicy } from './policies.ts'
 
 export const EDIT_FILE_TOOL_NAME = 'edit_file'
+
+function editError(message: string, field = 'old_string'): HarnessError {
+  return new HarnessError({ code: 'validation_error', message, details: { issues: [{ path: [field], message, code: 'custom' }] } })
+}
+
+/** True when every `\n` of the text follows a `\r` (and there is at least one). */
+export function isCrlfThroughout(text: string): boolean {
+  let newlines = 0
+  for (let index = text.indexOf('\n'); index !== -1; index = text.indexOf('\n', index + 1)) {
+    if (index === 0 || text.charCodeAt(index - 1) !== 13)
+      return false
+    newlines++
+  }
+  return newlines > 0
+}
+
+/** Non-overlapping occurrences of `needle` in `text` (`needle` is not empty). */
+export function countOccurrences(text: string, needle: string): number {
+  let count = 0
+  for (let index = text.indexOf(needle); index !== -1; index = text.indexOf(needle, index + needle.length))
+    count++
+  return count
+}
+
+export interface AppliedEdit {
+  /** The new file text (BOM and line endings as in the original). */
+  text: string
+  /** Old and new text for the diff (LF for a CRLF file, without the BOM). */
+  before: string
+  after: string
+  replacements: number
+}
+
+/** Applies an edit to the decoded file text (see the module comment); throws the model-facing errors. */
+export function applyEdit(original: string, input: Pick<EditFileToolInput, 'old_string' | 'new_string' | 'replace_all'>, rel: string): AppliedEdit {
+  if (input.old_string === input.new_string)
+    throw editError('old_string and new_string are the same: there is nothing to change.')
+  const bom = original.startsWith(BOM)
+  const body = bom ? original.slice(1) : original
+  const crlf = isCrlfThroughout(body)
+  const text = crlf ? body.replaceAll('\r\n', '\n') : body
+  const oldString = crlf ? input.old_string.replaceAll('\r\n', '\n') : input.old_string
+  const newString = crlf ? input.new_string.replaceAll('\r\n', '\n') : input.new_string
+  if (oldString === newString)
+    throw editError('old_string and new_string are the same: there is nothing to change.')
+
+  const occurrences = countOccurrences(text, oldString)
+  if (occurrences === 0)
+    throw editError(`old_string was not found in ${rel}. Read the file again and copy the text exactly, including whitespace and indentation.`)
+  if (occurrences > 1 && input.replace_all !== true)
+    throw editError(`old_string occurs ${occurrences} times in ${rel}. Add more surrounding lines to old_string to make it unique, or set replace_all to true to replace every occurrence.`)
+
+  let after: string
+  if (input.replace_all === true) {
+    after = text.split(oldString).join(newString)
+  }
+  else {
+    const index = text.indexOf(oldString)
+    after = text.slice(0, index) + newString + text.slice(index + oldString.length)
+  }
+  const restored = crlf ? after.replaceAll('\n', '\r\n') : after
+  return { text: bom ? BOM + restored : restored, before: text, after, replacements: input.replace_all === true ? occurrences : 1 }
+}
+
+/** The text the model sees for an `edit_file` output. */
+export function editFileModelText(output: EditFileToolOutput): string {
+  const replacements = plural(output.replacements, 'replacement')
+  if (output.diff === null)
+    return `Edited ${output.path}: ${replacements}.`
+  return `Edited ${output.path}: ${replacements} (+${output.diff.added} -${output.diff.removed} lines).`
+}
 
 export function createEditFileTool(): ToolDefinition<EditFileToolInput, EditFileToolOutput> {
   return {
     name: EDIT_FILE_TOOL_NAME,
     description: 'Replace text in a file of the project folder. old_string must match the file exactly (whitespace and indentation included) and occur once, unless replace_all is true; read the file before editing it, and add surrounding lines to old_string to make it unique. Returns the number of replacements and a diff.',
     inputSchema: editFileToolInputSchema,
-    policy: 'ask',
+    policy: writeFilePolicy,
     timeoutMs: WRITE_TOOL_TIMEOUT_MS,
     workspace: WORKSPACE_TOOL_ACCESS.edit_file,
-    async execute() {
-      throw toolNotImplemented(EDIT_FILE_TOOL_NAME)
+    async execute(input, c) {
+      const { root } = requireWorkspace(c)
+      if (input.old_string === input.new_string)
+        throw editError('old_string and new_string are the same: there is nothing to change.')
+      const { resolved, bytes } = await readWorkspaceFile(root, input.path, { maxBytes: WORKSPACE_LIMITS.editFileMaxBytes })
+      const original = decodeText(bytes)
+      if (original === null)
+        throw editError(`"${resolved.rel}" is not a UTF-8 text file: edit_file changes text files only.`, 'path')
+      const edit = applyEdit(original, input, resolved.rel)
+      if (byteLength(edit.text) > WORKSPACE_LIMITS.editFileMaxBytes)
+        throw editError(`The edit would make ${resolved.rel} larger than 1 MiB.`, 'new_string')
+      c.signal.throwIfAborted()
+      const written = await writeWorkspaceFile(root, input.path, edit.text)
+      const diff = await computeWorkspaceDiff(edit.before, edit.after)
+      return { path: written.rel, replacements: edit.replacements, diff }
+    },
+    toModelOutput(output): ToolResultOutput {
+      return textModelOutput(editFileToolOutputSchema, output, editFileModelText)
     },
   }
 }
