@@ -1,5 +1,5 @@
 // WorkspaceToolBody (docs/UI.md 7.19, 10.4; W7.11): one renderer per view kind, the server's diff totals in the diff
-// header, the noun of an empty list, and the "Raw input and output" toggle around the caller's raw slot.
+// header (DiffView's `stats` prop since Phase 8), the noun of an empty list, and the "Raw input and output" toggle around the caller's raw slot.
 import type { WorkspaceToolView } from './workspace-tools'
 import { mount } from '@vue/test-utils'
 import { setActivePinia } from 'pinia'
@@ -7,12 +7,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
+import DiffView from './DiffView.vue'
 import TerminalOutput from './TerminalOutput.vue'
 import WorkspaceToolBody from './WorkspaceToolBody.vue'
 
 const views: Array<[WorkspaceToolView, string]> = [
   [{ kind: 'diff', path: 'a.txt', created: true, additions: 1, deletions: 0, hunks: [], truncated: false }, testIds.diffView],
-  [{ kind: 'terminal', command: 'ls', output: null }, testIds.terminalOutput],
+  [{ kind: 'terminal', command: 'ls', output: null, cwd: null }, testIds.terminalOutput],
   [{ kind: 'file', path: 'a.txt', content: 'a\n', startLine: 1, endLine: 1, totalLines: 1, truncated: false }, testIds.fileContent],
   [{ kind: 'list', items: [{ path: 'a.txt', type: 'file' }], noun: 'entries', truncated: false }, testIds.fileList],
 ]
@@ -46,7 +47,7 @@ describe('workspaceToolBody', () => {
   })
 
   it('passes running to the terminal', () => {
-    const { wrapper, body } = mountBody({ view: { kind: 'terminal', command: 'sleep 1', output: null }, running: true })
+    const { wrapper, body } = mountBody({ view: { kind: 'terminal', command: 'sleep 1', output: null, cwd: null }, running: true })
     expect(body.getComponent(TerminalOutput).props('running')).toBe(true)
     wrapper.unmount()
   })
@@ -54,6 +55,7 @@ describe('workspaceToolBody', () => {
   it('shows the server totals in the diff header (they count cut hunks too)', () => {
     const hunks = [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-a', '+b'] }]
     const { wrapper, body } = mountBody({ view: { kind: 'diff', path: 'a.txt', created: false, additions: 120, deletions: 40, hunks, truncated: true } })
+    expect(body.getComponent(DiffView).props('stats')).toEqual({ additions: 120, deletions: 40 })
     const diff = body.get(`[data-testid="${testIds.diffView}"]`)
     expect(diff.text()).toContain('+120')
     expect(diff.text()).toContain('−40')
@@ -73,7 +75,7 @@ describe('workspaceToolBody', () => {
 
   it('toggles the raw input and output of the caller', async () => {
     const { wrapper, body } = mountBody(
-      { view: { kind: 'terminal', command: 'ls', output: null } },
+      { view: { kind: 'terminal', command: 'ls', output: null, cwd: null } },
       { raw: () => h('pre', { 'data-slot': 'raw-blocks' }, '{"command": "ls"}') },
     )
     const toggle = body.get(`[data-testid="${testIds.toolRawToggle}"]`)

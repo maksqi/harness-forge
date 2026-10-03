@@ -307,8 +307,8 @@ describe('mock:image-tool (Phase 6)', () => {
 })
 
 describe('language model ids', () => {
-  it('covers the four v1 models, the two Phase 6 chat models and the Phase 7 workspace model', () => {
-    expect(MOCK_MODEL_IDS).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace'])
+  it('covers the four v1 models, the two Phase 6 chat models, the Phase 7 workspace model and the Phase 8 checkpoint and shell models', () => {
+    expect(MOCK_MODEL_IDS).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace', 'checkpoint', 'shell'])
     for (const modelId of ['image', 'transcribe', 'speech'])
       expect(MOCK_MODEL_IDS as readonly string[]).not.toContain(modelId)
   })

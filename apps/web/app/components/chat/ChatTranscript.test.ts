@@ -8,6 +8,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
 import { assistantMessage, messageBranch, userMessage } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
+import ChatMessage from './ChatMessage.vue'
 import ChatTranscript from './ChatTranscript.vue'
 
 const mock = vi.hoisted(() => ({ api: null as unknown }))
@@ -133,6 +134,7 @@ describe('chatTranscript: versions', () => {
           onRetry: record('retry'),
           onEdit: record('edit'),
           onDeleteVersion: record('delete-version'),
+          onRewind: record('rewind'),
         }),
       }),
     }, { attachTo: document.body })
@@ -265,5 +267,31 @@ describe('chatTranscript: versions', () => {
     expect(transcript.value!.focusDeleteVersion(U2)).toBe(true)
     expect(document.activeElement).toBe(wrapper.get(`[data-message-id="${U2}"] [data-testid="${testIds.messageDeleteVersion}"]`).element)
     expect(transcript.value!.focusDeleteVersion(A2)).toBe(false)
+  })
+
+  it('re-emits "Rewind files to here" with the message id and opens the editor through startEdit (Phase 8)', async () => {
+    const { wrapper, state, events, transcript } = mountWithVersions({
+      messages: [userMessage(U1, 'q1'), assistantMessage(A1, 'a1')],
+      branches: {},
+    })
+    await nextTick()
+    wrapper.findAllComponents(ChatMessage)[0]!.vm.$emit('rewind')
+    expect(events.rewind).toEqual([[U1]])
+
+    // No rewind button yet (W8.9 computes canRewind): focusRewind leaves focus alone.
+    transcript.value!.focusRewind(U1)
+    expect(document.activeElement).toBe(document.body)
+
+    state.value = { ...state.value, status: 'streaming' }
+    await nextTick()
+    transcript.value!.startEdit(U1)
+    await nextTick()
+    expect(wrapper.find(`[data-testid="${testIds.messageEditSave}"]`).exists()).toBe(false)
+
+    state.value = { ...state.value, status: 'ready' }
+    await nextTick()
+    transcript.value!.startEdit(U1)
+    await nextTick()
+    expect(wrapper.find(`[data-testid="${testIds.messageEditSave}"]`).exists()).toBe(true)
   })
 })

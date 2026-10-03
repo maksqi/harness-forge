@@ -50,6 +50,7 @@ function mountMessage(props: Props) {
         onRetry: record('retry'),
         onSelectVersion: record('select-version'),
         onDeleteVersion: record('delete-version'),
+        onRewind: record('rewind'),
       }),
     }),
   }), { attachTo: document.body })
@@ -421,6 +422,34 @@ describe('chatMessage: copy and read aloud', () => {
     player.state.value = 'idle'
     await nextTick()
     expect(actions().classes()).toContain('opacity-0')
+  })
+})
+
+describe('chatMessage: rewind files (Phase 8)', () => {
+  it('offers "Rewind files to here" on a user message with canRewind and re-emits it', async () => {
+    const { wrapper, events } = mountMessage({ message: user, isLast: false, streaming: false, showThinking: false, canRewind: true })
+    await wrapper.get(`[data-testid="${testIds.messageRewind}"]`).trigger('click')
+    expect(events.rewind).toEqual([[]])
+  })
+
+  it('not by default, not while a request runs and never on a reply', () => {
+    const cases: Array<Partial<Props>> = [{}, { canRewind: true, busy: true }]
+    for (const extra of cases) {
+      const { wrapper } = mountMessage({ message: user, isLast: false, streaming: false, showThinking: false, ...extra })
+      expect(wrapper.find(`[data-testid="${testIds.messageRewind}"]`).exists()).toBe(false)
+    }
+    const reply = mountMessage({ message: assistant(), isLast: true, streaming: false, showThinking: false, canRewind: true })
+    expect(reply.wrapper.find(`[data-testid="${testIds.messageRewind}"]`).exists()).toBe(false)
+  })
+
+  it('passes the shell rules of an approval up unchanged', () => {
+    const message = assistant({
+      parts: [{ type: 'tool-shell', toolCallId: 'c1', state: 'approval-requested', input: { command: 'pnpm test' }, approval: { id: 'appr_1' } }],
+    })
+    const { wrapper, events } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
+    const decision = { id: 'appr_1', approved: true, toolName: 'shell', alwaysAllow: false, allowRules: { prefixes: ['pnpm test'], scope: 'global' as const } }
+    wrapper.getComponent(ToolPart).vm.$emit('approval', decision)
+    expect(events.approval).toEqual([[decision]])
   })
 })
 

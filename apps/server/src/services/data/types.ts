@@ -2,7 +2,8 @@
 // `createDataService(deps)` in `services/data/index.ts` (W5.3). Consumer: the data routes (`http/routes/data.ts`, W5.3).
 // Built on `ChatsService` (`allIds`, `export`, `find`, `importChat`, `removeAll`), `FilesService` (`get`, `open`,
 // `importFile`, `purge`; Phase 7: `sweep`), the settings service, `ChatRunner.stop` and (Phase 7) the maintenance lock
-// (`MaintenanceService.exclusive`). Test double: `createFakeDataService` (`testing/fakes.ts`).
+// (`MaintenanceService.exclusive`). Test double: `createFakeDataService` (`testing/fakes.ts`). Phase 8 (C19): `start` /
+// `stop` for the automatic file sweep (ADR-039, W8.7), the last step of `startDeps` and the first of `stopDeps`.
 import type {
   DataCleanupPreview,
   DataCleanupResult,
@@ -88,4 +89,18 @@ export interface DataService {
    * `conflict` (`reason: 'busy'`).
    */
   readonly cleanup: () => Promise<DataCleanupResult>
+
+  // ----- Phase 8: the automatic file sweep (ADR-039, ARCHITECTURE.md 6.15), types C19, implementation W8.7
+
+  /**
+   * The last step of `startDeps`: schedules the automatic sweep's checks (a chained `setTimeout(...).unref()`: the first
+   * at boot + 24 h, or `Env.testFileSweepDelayMs`, then hourly; each check re-reads the `fileSweep` setting and
+   * `_files`) when `DataServiceOptions.background` is on (default, off under Vitest). Never runs a sweep at boot.
+   */
+  readonly start: () => Promise<void>
+  /**
+   * The first step of `stopDeps`: clears the timer and aborts a sweep in flight (`FileSweepInput.signal`, checked
+   * between batches), then resolves; no check runs after it. Idempotent.
+   */
+  readonly stop: () => Promise<void>
 }

@@ -227,12 +227,22 @@ Open points decided by D8 while writing this file (the coordinator confirms or c
   chat created (restored by deleting it); `too-large` / `evicted` bases are not revertible.
 - **`allowedBy`** is set whenever the whole command matched the run's rules (whatever the permission mode), else it is
   absent.
-- The workspace store also carries `rewindPreview` / `rewind` (same module `changes` on the server).
+- The workspace store carries no rewind members (P8-0b, C20 followed UI.md 11.5): `RewindDialog` calls
+  `api.changes.rewindPreview` / `api.changes.rewind` itself; the store keeps `fileDiff`, `revert`, `undo`.
 
 ### Deviations found while building (P8-0a – P8-B)
 
-None yet. The coordinator records them here at each gate from the agent reports; the code and the reconciled docs
+The coordinator records them here at each gate from the agent reports; the code and the reconciled docs
 follow these, not the task text further down.
+
+- **P8-0a**: C18 added `ShellAskReason` `syntax` / `escape` and `ShellRuleRejectReason` `shell-builtin`; `&>/dev/null`
+  asks (dash backgrounds `cmd &>/dev/null`); `>&M` only for M 0–2. Timestamps in the new DTOs are epoch-ms.
+- **P8-0b (C20)**: UI.md 10.5 / 11.5 won over this file's C20 section: `ChangesFileRow` takes `row: ChangesRow` +
+  `chatId`; `ChangesEmpty` reasons use `GitUnavailableReason`; `RevertFileDialog` takes `row` + `expectedSha?` and
+  emits `reverted: [result, path]`; `AllowlistEditor` takes `{ projectId }` only; the workspace store entry type is
+  `ChangesEntry`, without `entries()` / `ChangesFileEntry`, with `fileDiff(chatId, source, path, opts)`,
+  `revert(chatId, input)`, `undo(chatId, batchId)` and no rewind members; the shell rules store uses `applyEvent`
+  (not `dropProject`).
 
 ## Rules for every Phase 8 agent
 
@@ -1358,23 +1368,29 @@ server.
 These globs are the plan's table plus the addition listed in "Deviations" (`chat-nav/palette*` for W8.8). The audit
 cannot express "except": every `types.ts` of `S`, `S/workspace/{paths,run-scope,file-lock,git}.ts` and the P8-0b stub
 props stay frozen despite the globs; `S/workspace/shell*` covers `shell-env` and `shell-cwd` (one owner, W8.4);
-`W/components/workspace/allowlist/AllowRuleOption*` matches W8.11's glob too (a warning; W8.10 owns it).
+`W/components/workspace/allowlist/AllowRuleOption*` matches W8.11's glob too (a warning; W8.10 owns it). Added at Gate P8-0b: W8.1
+owns `S/services/checkpoints/disk*` and `S/testing/fake-checkpoints*`, W8.6 `S/testing/fake-shell-rules*`, W8.8
+`W/components/workspace/nuxt-imports*`; `W/components/workspace/allowlist/stubs.test.ts` is W8.11's (W8.10 keeps the
+`AllowRuleOption` stub assertions passing and writes its own `AllowRuleOption.test.ts`).
 
-```json
-{
+```json{
   "wave": "P8-A",
   "agents": {
     "W8.1": [
       "apps/server/src/services/checkpoints/{index,store,journal-service,prune}*",
       "apps/server/src/workspace/journal*",
-      "apps/server/src/builtin-plugins/core-workspace/{write-file,edit-file,common}*"
+      "apps/server/src/builtin-plugins/core-workspace/{write-file,edit-file,common}*",
+      "apps/server/src/services/checkpoints/disk*",
+      "apps/server/src/testing/fake-checkpoints*"
     ],
     "W8.2": [
       "apps/server/src/services/checkpoints/{plan,restore,rewind,revert,undo}*",
       "apps/server/src/workspace/remove*",
       "apps/server/src/http/routes/changes{,.test}.ts"
     ],
-    "W8.3": ["apps/server/src/services/checkpoints/{changes,git-changes}*"],
+    "W8.3": [
+      "apps/server/src/services/checkpoints/{changes,git-changes}*"
+    ],
     "W8.4": [
       "apps/server/src/workspace/{shell,shell-env,shell-cwd}*",
       "apps/server/src/builtin-plugins/core-workspace/shell-tool*"
@@ -1387,7 +1403,8 @@ props stay frozen despite the globs; `S/workspace/shell*` covers `shell-env` and
       "apps/server/src/services/shell-rules/**",
       "apps/server/src/http/routes/shell-rules{,.test}.ts",
       "apps/server/src/mcp/tools*",
-      "apps/server/src/http/routes/tools{,.test}.ts"
+      "apps/server/src/http/routes/tools{,.test}.ts",
+      "apps/server/src/testing/fake-shell-rules*"
     ],
     "W8.7": [
       "apps/server/src/services/files/**",
@@ -1400,7 +1417,8 @@ props stay frozen despite the globs; `S/workspace/shell*` covers `shell-env` and
       "apps/web/app/stores/workspace*",
       "apps/web/app/composables/{useChangesPanel,useServerEvents}*",
       "apps/web/app/components/app-shell/CommandPalette*",
-      "apps/web/app/components/app-shell/chat-nav/palette*"
+      "apps/web/app/components/app-shell/chat-nav/palette*",
+      "apps/web/app/components/workspace/nuxt-imports*"
     ],
     "W8.9": [
       "apps/web/app/components/workspace/rewind/**",
@@ -1448,7 +1466,7 @@ The props below are frozen in the P8-0b stubs or documented in UI.md 10.5; the s
 | W8.4 → W8.10 | the shell output `endCwd`, `cwdNote`, `allowedBy` |
 | W8.6 → W8.10, W8.11 | `POST /shell-rules` (201, 400, 404, 409 `exists`), `DELETE /shell-rules/:id` (204) |
 | W8.7 → W8.11 | `GET /data` `fileSweep`, the `fileSweep` setting |
-| W8.8 → W8.9 | `useWorkspaceStore.rewindPreview` / `rewind` / `undo` (frozen signature, implemented by W8.8) |
+| W8.8 → W8.9 | `useWorkspaceStore.undo(chatId, batchId)` (the toast Undo; frozen signature, implemented by W8.8); `RewindDialog` calls `api.changes.rewindPreview` / `api.changes.rewind` itself (P8-0b, UI.md 11.5: the store carries no rewind members) |
 | W8.11 → W8.10 | `useShellRulesStore.create` (frozen signature, implemented by W8.11) |
 | W8.10 → W8.9 | `session.cwd`, the rethrown rule failure of `session.approve()` |
 | C18 → W8.4, W8.6, W8.10, W8.11 | the parser; the server and the web agree because both call it |

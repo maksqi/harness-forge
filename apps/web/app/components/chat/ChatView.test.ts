@@ -10,7 +10,7 @@ import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { resetChatSessions } from '~/composables/useChatSession'
+import { resetChatSessions, useChatSession } from '~/composables/useChatSession'
 import { dispatchServerEvent } from '~/composables/useServerEvents'
 import { useChatsStore } from '~/stores/chats'
 import { useProjectsStore } from '~/stores/projects'
@@ -678,5 +678,67 @@ describe('chatView: delete a version', () => {
     confirmButton()!.click()
     await until(() => mock.toast.mock.calls.length === 3)
     expect(mock.toast).toHaveBeenLastCalledWith('This chat changed elsewhere and was reloaded.')
+  })
+})
+
+describe('chatView: workspace 2.0 wiring (Phase 8)', () => {
+  const U1 = 'msg_user0000000000r1'
+  const A1 = 'msg_asst0000000000r1'
+
+  function rewindDialog(): HTMLElement | null {
+    return document.body.querySelector<HTMLElement>(`[data-testid="${testIds.rewindDialog}"]`)
+  }
+
+  async function mountProjectChat() {
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(21),
+      modelRef: MODEL,
+      projectId: projectId(1),
+      messages: [userMessage(U1, 'Fix the parser'), assistantMessage(A1, 'Done')],
+    }))
+    const view = mountView({ chatId: chatId(21) })
+    await until(() => view.wrapper.find(`[data-testid="${testIds.messageAssistant}"]`).exists())
+    return view
+  }
+
+  it('keeps the RewindDialog closed until the transcript asks for a rewind; closing it changes nothing', async () => {
+    const { wrapper } = await mountProjectChat()
+    expect(rewindDialog()).toBeNull()
+
+    wrapper.getComponent(ChatTranscript).vm.$emit('rewind', U1)
+    await until(() => rewindDialog() !== null)
+    expect(rewindDialog()!.dataset.state).toBe('loading')
+    expect(document.body.textContent).toContain('Rewind files to here?')
+
+    const cancel = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.trim() === 'Cancel')!
+    cancel.click()
+    await until(() => rewindDialog() === null)
+    expect(api.changes.rewindPreview).not.toHaveBeenCalled()
+    expect(api.changes.rewind).not.toHaveBeenCalled()
+  })
+
+  it('"Restore files and edit" opens the editor on the message once the dialog closed', async () => {
+    const { wrapper } = await mountProjectChat()
+    wrapper.getComponent(ChatTranscript).vm.$emit('rewind', U1)
+    await until(() => rewindDialog() !== null)
+    const dialog = wrapper.getComponent({ name: 'RewindDialog' })
+    dialog.vm.$emit('restored', { batchId: null, restored: [], deleted: [], unchanged: [], skipped: [] }, 'edit')
+    dialog.vm.$emit('update:open', false)
+    await until(() => wrapper.find(`[data-testid="${testIds.messageEditSave}"]`).exists())
+  })
+
+  it('names a failed rule save "Could not save the rule"', async () => {
+    const { wrapper } = await mountProjectChat()
+    const session = useChatSession(chatId(21))
+    vi.spyOn(session, 'approve').mockRejectedValue(new HarnessError({ code: 'validation_error', message: 'The prefix is not allowed.' }))
+    wrapper.getComponent(ChatTranscript).vm.$emit('approval', {
+      id: 'appr_1',
+      approved: true,
+      toolName: 'shell',
+      alwaysAllow: false,
+      allowRules: { prefixes: ['pnpm test'], scope: 'project' },
+    })
+    await until(() => mock.toast.mock.calls.length === 1)
+    expect(mock.toast).toHaveBeenCalledWith('Could not save the rule', { description: 'The prefix is not allowed.' })
   })
 })

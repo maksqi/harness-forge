@@ -13,6 +13,8 @@
 //   never take it. No new event types: `ChatsService` emits `chat.created` / `chat.deleted` per chat.
 // - `cleanupPreview` / `cleanup` (ADR-035, W7.8): ./cleanup.ts under `maintenance.exclusive('file-cleanup', ...)`
 //   (runs are not blocked: the pins and the grace period cover them).
+// - `start` / `stop` (Phase 8, ADR-039; C19 skeleton: no-ops): W8.7 schedules the automatic file sweep here
+//   (`DataServiceOptions.background`, default on, off under Vitest).
 import type { DataDeleteBody, DataDeleteResult, DataSummary } from '@harness-forge/shared'
 import type { AppDeps, SensitiveOperationOptions } from '../../types.ts'
 import type { DataLimits } from './limits.ts'
@@ -31,6 +33,11 @@ export interface DataServiceOptions {
   limits?: Partial<DataLimits>
   /** Clock of `exportedAt` and of the cleanup (its cutoff and `ranAt`; default `Date.now`). */
   now?: () => number
+  /**
+   * Phase 8 (ADR-039): run the automatic file sweep's timer after `start()`; default on, off under Vitest (tests drive
+   * the sweep with fake timers and an injected clock).
+   */
+  background?: boolean
 }
 
 async function dataSummary(deps: AppDeps): Promise<DataSummary> {
@@ -97,5 +104,9 @@ export function createDataService(deps: AppDeps, options: DataServiceOptions = {
     cleanupPreview: () => deps.maintenance.exclusive('file-cleanup', () => previewCleanup(deps, now)),
 
     cleanup: () => deps.maintenance.exclusive('file-cleanup', () => runCleanup(deps, now)),
+
+    // P8-A (W8.7): schedule and stop the automatic file sweep.
+    start: async () => {},
+    stop: async () => {},
   }
 }

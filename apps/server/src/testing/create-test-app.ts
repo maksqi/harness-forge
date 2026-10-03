@@ -14,6 +14,9 @@
 // `factories: { projects: createFakeProjectService }` (./fake-projects.ts) gives projects with real temp folders. The temp
 // data directory is a canonical path (`realpath(mkdtemp())`: macOS `/var` is a link to `/private/var`), so
 // `<dataDir>/workspaces` passes the workspace containment checks.
+// Phase 8 (C19-T9): `checkpoints` / `shellRules` install a service (`'fake'`: `createFakeCheckpointService()` /
+// `createFakeShellRuleService(deps)` of ./fake-checkpoints.ts and ./fake-shell-rules.ts); `overrides` and `factories` of
+// the same name win.
 import type { ApiClient } from '@harness-forge/shared'
 import type { Hono } from 'hono'
 import type { Database, Db } from '../db/client.ts'
@@ -22,6 +25,8 @@ import type { Env } from '../env.ts'
 import type { AppEnv } from '../http/types.ts'
 import type { MemoryLogger } from '../logger.ts'
 import type { BuiltinPlugin } from '../plugins/types.ts'
+import type { CheckpointService } from '../services/checkpoints/types.ts'
+import type { ShellRuleService } from '../services/shell-rules/types.ts'
 import type { AppDeps, AppServices } from '../types.ts'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -35,6 +40,8 @@ import { createDeps, startDeps, stopDeps } from '../deps.ts'
 import { ensureDataDir, loadEnv } from '../env.ts'
 import { createMemoryLogger } from '../logger.ts'
 import { createRedactor } from '../security/redact.ts'
+import { createFakeCheckpointService } from './fake-checkpoints.ts'
+import { createFakeShellRuleService } from './fake-shell-rules.ts'
 import { createFakeKeyring } from './fakes.ts'
 
 /** Base URL of the typed client and of relative `request()` paths. */
@@ -72,6 +79,16 @@ export interface TestAppOptions {
   workspaceRoots?: readonly string[]
   /** Phase 7: `HF_WORKSPACE_SHELL` (`false` = `0`: no `execute` tools); default: unset (on). `env` wins. */
   workspaceShell?: boolean
+  /**
+   * Phase 8: the checkpoint service: `'fake'` = `createFakeCheckpointService()` (a recording journal, canned answers),
+   * or a ready service; default: the real one. `overrides.checkpoints` / `factories.checkpoints` win.
+   */
+  checkpoints?: 'fake' | CheckpointService
+  /**
+   * Phase 8: the shell rule service: `'fake'` = `createFakeShellRuleService(deps)` (rules in memory, project ids checked
+   * against the test database), or a ready service; default: the real one. `overrides` / `factories` win.
+   */
+  shellRules?: 'fake' | ShellRuleService
 }
 
 export interface TestRequestOptions {
@@ -110,6 +127,15 @@ function usesFakeKeyring(options: TestAppOptions): boolean {
   return options.overrides?.keyring === undefined && options.factories?.keyring === undefined
 }
 
+/** The Phase 8 service options as factories (`overrides` and `factories` of the same name win). */
+function phase8Factories(options: TestAppOptions): Partial<ServiceFactories> {
+  const { checkpoints, shellRules } = options
+  return {
+    ...(checkpoints === undefined ? {} : { checkpoints: () => (checkpoints === 'fake' ? createFakeCheckpointService() : checkpoints) }),
+    ...(shellRules === undefined ? {} : { shellRules: (deps: AppDeps) => (shellRules === 'fake' ? createFakeShellRuleService(deps) : shellRules) }),
+  }
+}
+
 export async function createTestApp(options: TestAppOptions = {}): Promise<TestApp> {
   const ownsDataDir = options.dataDir === undefined
   const dataDir = options.dataDir ?? realpathSync(mkdtempSync(join(tmpdir(), 'harness-forge-test-')))
@@ -132,7 +158,7 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
       db: database.db,
       builtins: options.builtins ?? getBuiltinPlugins(env),
       overrides: { ...(usesFakeKeyring(options) ? { keyring: createFakeKeyring() } : {}), ...options.overrides },
-      factories: options.factories,
+      factories: { ...phase8Factories(options), ...options.factories },
     })
     if (options.start ?? true)
       await startDeps(deps)

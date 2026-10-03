@@ -7,8 +7,11 @@
 // with access `write` offer "Accept all edits in this chat" instead (tool-approval-accept-edits; the decision carries
 // `acceptEdits`, and the session switches the chat to `edits` before answering), unless the chat already accepts edits
 // (TOOL_APPROVAL_CONTEXT, when a chat view provides it).
+// Phase 8 (C20 declares the payload, W8.10 mounts AllowRuleOption for the builtin shell): `decide` may carry
+// `allowRules` (the shell rules to create before the approval is sent; Deny ignores it).
 import type { WorkspaceAccess } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
+import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
 import { computed, inject, ref, useId } from 'vue'
 import {
   Confirmation as AiConfirmation,
@@ -39,8 +42,11 @@ const props = withDefaults(defineProps<{
 })
 
 const emit = defineEmits<{
-  /** + Phase 7: `acceptEdits` = "Accept all edits in this chat". */
-  decide: [decision: { approved: boolean, alwaysAllow: boolean, acceptEdits?: boolean }]
+  /**
+   * + Phase 7: `acceptEdits` = "Accept all edits in this chat". + Phase 8: `allowRules` = "Always allow commands
+   * starting with" (the builtin shell; W8.10).
+   */
+  decide: [decision: { approved: boolean, alwaysAllow: boolean, acceptEdits?: boolean, allowRules?: AllowRules }]
 }>()
 
 const context = inject(TOOL_APPROVAL_CONTEXT, null)

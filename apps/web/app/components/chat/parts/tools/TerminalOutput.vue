@@ -5,7 +5,7 @@
 // {n} lines" (up to the 60 KB body cap), and footer badges "Exit code {n}" (terminal-exit, data-value), "Timed out",
 // the signal and the duration; while running a Spinner + "Running…"; byte counts larger than the kept text -> "Output
 // truncated by server". ANSI codes are stripped (utils/ansi.ts). Store-free (the share page renders it too).
-// Contract (docs/UI.md 10.4): props below, no emits; root terminal-output (data-status = running | ok | error |
+// Contract (docs/UI.md 10.4; + `cwd` in Phase 8): props below, no emits; root terminal-output (data-status = running | ok | error |
 // timeout | killed; aria-label "Output of {command}").
 import type { ShellOutput } from '@harness-forge/shared'
 import { WORKSPACE_LIMITS } from '@harness-forge/shared'
@@ -22,8 +22,14 @@ const props = withDefaults(defineProps<{
   /** The stored shell output; null while running. */
   output: ShellOutput | null
   running?: boolean
+  /**
+   * + Phase 8 (C20 declares it, W8.10 renders it): the folder the command starts in while running (the call's `cwd`
+   * input, else the chat's current shell folder); default null. A finished output names its own `cwd`.
+   */
+  cwd?: string | null
 }>(), {
   running: false,
+  cwd: null,
 })
 
 /** Lines of each stream shown before "Show all {n} lines". */

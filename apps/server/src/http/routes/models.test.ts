@@ -43,10 +43,10 @@ describe('gET /api/models', () => {
     await t.deps.catalog.updatePrefs({ providerId: 'mock', modelId: 'error', hidden: true })
     const visible = listSchema.parse(await (await send('GET', '/api/models?providerId=mock')).json())
     // Phase 6: the media models of the mock provider are hidden by default (non-chat kinds); image-chat and image-tool
-    // (and workspace, Phase 7) are chat models.
-    expect(visible.items.map(item => item.id)).toEqual(['echo', 'image', 'image-chat', 'image-tool', 'reasoning', 'tool-approval', 'workspace'])
+    // (and workspace, Phase 7; checkpoint and shell, Phase 8) are chat models.
+    expect(visible.items.map(item => item.id)).toEqual(['checkpoint', 'echo', 'image', 'image-chat', 'image-tool', 'reasoning', 'shell', 'tool-approval', 'workspace'])
     const all = listSchema.parse(await (await send('GET', '/api/models?providerId=mock&includeHidden=true')).json())
-    expect(all.items.map(item => item.id).sort()).toEqual(['echo', 'error', 'image', 'image-chat', 'image-tool', 'reasoning', 'speech', 'tool-approval', 'transcribe', 'workspace'])
+    expect(all.items.map(item => item.id).sort()).toEqual(['checkpoint', 'echo', 'error', 'image', 'image-chat', 'image-tool', 'reasoning', 'shell', 'speech', 'tool-approval', 'transcribe', 'workspace'])
     const unknown = await send('GET', '/api/models?providerId=nope')
     expect(unknown.status).toBe(404)
     expect(await errorCode(unknown)).toBe('not_found')
@@ -60,9 +60,9 @@ describe('pOST /api/providers/:id/models/refresh', () => {
     const response = await send('POST', '/api/providers/mock/models/refresh')
     expect(response.status).toBe(200)
     const { items } = listSchema.parse(await response.json())
-    // Sorted by name: Mock Echo, Mock Error, Mock Image, Mock Image Chat, Mock Image Tool, Mock Reasoning, Mock Speech,
-    // Mock Tool Approval, Mock Transcribe, Mock Workspace (hidden models included).
-    const names = ['echo', 'error', 'image', 'image-chat', 'image-tool', 'reasoning', 'speech', 'tool-approval', 'transcribe', 'workspace']
+    // Sorted by name: Mock Checkpoint, Mock Echo, Mock Error, Mock Image, Mock Image Chat, Mock Image Tool, Mock Reasoning,
+    // Mock Shell, Mock Speech, Mock Tool Approval, Mock Transcribe, Mock Workspace (hidden models included).
+    const names = ['checkpoint', 'echo', 'error', 'image', 'image-chat', 'image-tool', 'reasoning', 'shell', 'speech', 'tool-approval', 'transcribe', 'workspace']
     expect(items.map(item => [item.id, item.source])).toEqual(names.map(id => [id, 'live']))
     expect(t.events.ofType('catalog.changed').map(event => event.data)).toContainEqual({ providerId: 'mock' })
     expect(t.events.ofType('provider.changed').map(event => event.data.id)).toContain('mock')

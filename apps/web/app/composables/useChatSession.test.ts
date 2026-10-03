@@ -1135,6 +1135,24 @@ describe('useChatSession: approvals', () => {
   })
 })
 
+describe('useChatSession: workspace 2.0 additions (Phase 8)', () => {
+  it('starts in the project folder (cwd null) until W8.10 derives the sticky shell folder', () => {
+    const session = newSession()
+    expect(session.cwd.value).toBeNull()
+  })
+
+  it('declares allowRules on a decision; the approval still goes out unchanged', async () => {
+    const session = newSession()
+    server.reply(approvalReply(ASSISTANT_ID, 'shell'))
+    await session.send({ text: 'run the tests', files: [] })
+    server.reply(textReply('ran', ASSISTANT_ID))
+    await session.approve({ id: 'appr_1', approved: true, toolName: 'shell', alwaysAllow: false, allowRules: { prefixes: ['pnpm test'], scope: 'project' } })
+    await until(() => server.calls.length === 2, 'continuation')
+    expect(server.calls[1]!.body!.message.parts.find(part => part.type === 'tool-shell'))
+      .toMatchObject({ approval: { approved: true } })
+  })
+})
+
 describe('useChatSession: project', () => {
   const P1 = projectId(1)
   const P2 = projectId(2)

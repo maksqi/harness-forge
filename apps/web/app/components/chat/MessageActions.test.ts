@@ -17,6 +17,7 @@ function mountActions(props: Partial<Props> = {}) {
         onRegenerate: () => events.push('regenerate'),
         onEdit: () => events.push('edit'),
         onDeleteVersion: () => events.push('delete-version'),
+        onRewind: () => events.push('rewind'),
       }, {
         'after-copy': () => h('button', { 'data-testid': 'after-copy' }, 'Read aloud'),
         'default': () => h('span', { 'data-testid': 'meta' }, 'meta'),
@@ -68,6 +69,24 @@ describe('messageActions', () => {
     expect(button.classes()).toEqual(expect.arrayContaining(['pointer-coarse:size-10', 'group-data-[busy=true]/transcript:hidden']))
     await button.trigger('click')
     expect(events).toEqual(['delete-version'])
+  })
+
+  it('offers "Rewind files to here" after Edit and before Delete this version, only with canRewind (Phase 8)', async () => {
+    expect(mountActions({ canEdit: true }).wrapper.find(`[data-testid="${testIds.messageRewind}"]`).exists()).toBe(false)
+    const { wrapper, events } = mountActions({ canEdit: true, canRewind: true, canDeleteVersion: true })
+    expect(order(wrapper)).toEqual([
+      testIds.messageCopy,
+      'after-copy',
+      testIds.messageEdit,
+      testIds.messageRewind,
+      testIds.messageDeleteVersion,
+      'meta',
+    ])
+    const button = wrapper.get(`[data-testid="${testIds.messageRewind}"]`)
+    expect(button.attributes('aria-label')).toBe('Rewind files to here')
+    expect(button.classes()).toEqual(expect.arrayContaining(['pointer-coarse:size-10', 'group-data-[busy=true]/transcript:hidden']))
+    await button.trigger('click')
+    expect(events).toEqual(['rewind'])
   })
 
   it('emits regenerate and edit', async () => {

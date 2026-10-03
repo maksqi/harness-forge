@@ -6,6 +6,8 @@ import { FilePenLineIcon, FilePlusIcon, FileSearchIcon, FileTextIcon, ListTreeIc
 import { describe, expect, it } from 'vitest'
 import {
   countDiffLines,
+  currentShellCwd,
+  diffStatsLabel,
   isWorkspaceToolName,
   workspaceApprovalKind,
   workspaceApprovalView,
@@ -101,9 +103,16 @@ describe('workspaceToolView', () => {
 
   it('turns a shell output into a terminal, and the input of a running call into a terminal without output', () => {
     const output = shell()
-    expect(workspaceToolView('shell', { command: 'pnpm test' }, output)).toEqual({ kind: 'terminal', command: 'pnpm test', output })
-    expect(workspaceToolView('shell', { command: 'pnpm test' }, undefined)).toEqual({ kind: 'terminal', command: 'pnpm test', output: null })
+    expect(workspaceToolView('shell', { command: 'pnpm test' }, output)).toEqual({ kind: 'terminal', command: 'pnpm test', output, cwd: '.' })
+    expect(workspaceToolView('shell', { command: 'pnpm test' }, undefined)).toEqual({ kind: 'terminal', command: 'pnpm test', output: null, cwd: null })
     expect(workspaceToolView('shell', { command: '' }, null)).toBeNull()
+  })
+
+  it('gives a terminal the folder it started in: the output\'s cwd, else the input\'s (Phase 8)', () => {
+    expect(workspaceToolView('shell', { command: 'ls', cwd: 'packages' }, shell({ cwd: 'packages/web' })))
+      .toMatchObject({ kind: 'terminal', cwd: 'packages/web' })
+    expect(workspaceToolView('shell', { command: 'ls', cwd: 'packages' }, undefined)).toMatchObject({ kind: 'terminal', cwd: 'packages' })
+    expect(workspaceApprovalView('shell', { command: 'ls', cwd: 'src' })).toMatchObject({ kind: 'terminal', cwd: 'src' })
   })
 
   it('turns read_file into file content', () => {
@@ -147,7 +156,7 @@ describe('workspaceApprovalView', () => {
       totalLines: 2,
       truncated: false,
     })
-    expect(workspaceApprovalView('shell', { command: 'ls -la', timeout_ms: 5000 })).toEqual({ kind: 'terminal', command: 'ls -la', output: null })
+    expect(workspaceApprovalView('shell', { command: 'ls -la', timeout_ms: 5000 })).toEqual({ kind: 'terminal', command: 'ls -la', output: null, cwd: null })
   })
 
   it('names the kind of a preview without building it', () => {
@@ -187,36 +196,62 @@ describe('workspaceRowArgument', () => {
 
 describe('workspaceRowSummary', () => {
   it('summarizes edits and writes as +a −d, a new file by its lines', () => {
-    expect(workspaceRowSummary('edit_file', { path: 'a', replacements: 1, diff })).toEqual({ text: '+12 −3', tone: 'success' })
-    expect(workspaceRowSummary('write_file', { path: 'a', created: false, bytes: 1, lines: 1, diff })).toEqual({ text: '+12 −3', tone: 'success' })
-    expect(workspaceRowSummary('write_file', { path: 'a', created: true, bytes: 1, lines: 40, diff })).toEqual({ text: 'New · 40 lines', tone: 'success' })
-    expect(workspaceRowSummary('write_file', { path: 'a', created: true, bytes: 1, lines: 1, diff: null })).toEqual({ text: 'New · 1 line', tone: 'success' })
+    expect(workspaceRowSummary('edit_file', { path: 'a', replacements: 1, diff })).toMatchObject({ text: '+12 −3', tone: 'success' })
+    expect(workspaceRowSummary('write_file', { path: 'a', created: false, bytes: 1, lines: 1, diff })).toMatchObject({ text: '+12 −3', tone: 'success' })
+    expect(workspaceRowSummary('write_file', { path: 'a', created: true, bytes: 1, lines: 40, diff })).toMatchObject({ text: 'New · 40 lines', tone: 'success' })
+    expect(workspaceRowSummary('write_file', { path: 'a', created: true, bytes: 1, lines: 1, diff: null })).toMatchObject({ text: 'New · 1 line', tone: 'success' })
     expect(workspaceRowSummary('write_file', { path: 'a', created: false, bytes: 1, lines: 2, diff: { hunks: [], added: 0, removed: 0, truncated: false } }))
-      .toEqual({ text: 'No changes', tone: 'muted' })
-    expect(workspaceRowSummary('write_file', { path: 'a', created: false, bytes: 1, lines: 7, diff: null })).toEqual({ text: 'Updated · 7 lines', tone: 'muted' })
-    expect(workspaceRowSummary('edit_file', { path: 'a', replacements: 3, diff: null })).toEqual({ text: '3 replacements', tone: 'muted' })
+      .toMatchObject({ text: 'No changes', tone: 'muted' })
+    expect(workspaceRowSummary('write_file', { path: 'a', created: false, bytes: 1, lines: 7, diff: null })).toMatchObject({ text: 'Updated · 7 lines', tone: 'muted' })
+    expect(workspaceRowSummary('edit_file', { path: 'a', replacements: 3, diff: null })).toMatchObject({ text: '3 replacements', tone: 'muted' })
   })
 
   it('summarizes shell runs by exit code, timeout and signal', () => {
-    expect(workspaceRowSummary('shell', shell())).toEqual({ text: 'exit 0', tone: 'muted' })
-    expect(workspaceRowSummary('shell', shell({ exitCode: 1 }))).toEqual({ text: 'exit 1', tone: 'destructive' })
-    expect(workspaceRowSummary('shell', shell({ exitCode: null, signal: 'SIGTERM', timedOut: true }))).toEqual({ text: 'timed out', tone: 'warning' })
-    expect(workspaceRowSummary('shell', shell({ exitCode: null, signal: 'SIGTERM' }))).toEqual({ text: 'killed SIGTERM', tone: 'warning' })
+    expect(workspaceRowSummary('shell', shell())).toMatchObject({ text: 'exit 0', tone: 'muted' })
+    expect(workspaceRowSummary('shell', shell({ exitCode: 1 }))).toMatchObject({ text: 'exit 1', tone: 'destructive' })
+    expect(workspaceRowSummary('shell', shell({ exitCode: null, signal: 'SIGTERM', timedOut: true }))).toMatchObject({ text: 'timed out', tone: 'warning' })
+    expect(workspaceRowSummary('shell', shell({ exitCode: null, signal: 'SIGTERM' }))).toMatchObject({ text: 'killed SIGTERM', tone: 'warning' })
   })
 
   it('summarizes reads and listings', () => {
     const read = { path: 'a', content: '', startLine: 1, endLine: 120, totalLines: 340, truncated: true }
-    expect(workspaceRowSummary('read_file', read)).toEqual({ text: 'lines 1–120 of 340', tone: 'muted' })
-    expect(workspaceRowSummary('read_file', { ...read, totalLines: null })).toEqual({ text: 'lines 1–120', tone: 'muted' })
-    expect(workspaceRowSummary('read_file', { ...read, endLine: 0, totalLines: 0 })).toEqual({ text: 'empty file', tone: 'muted' })
-    expect(workspaceRowSummary('read_file', { ...read, startLine: 500, endLine: 499 })).toEqual({ text: 'no lines of 340', tone: 'muted' })
+    expect(workspaceRowSummary('read_file', read)).toMatchObject({ text: 'lines 1–120 of 340', tone: 'muted' })
+    expect(workspaceRowSummary('read_file', { ...read, totalLines: null })).toMatchObject({ text: 'lines 1–120', tone: 'muted' })
+    expect(workspaceRowSummary('read_file', { ...read, endLine: 0, totalLines: 0 })).toMatchObject({ text: 'empty file', tone: 'muted' })
+    expect(workspaceRowSummary('read_file', { ...read, startLine: 500, endLine: 499 })).toMatchObject({ text: 'no lines of 340', tone: 'muted' })
     expect(workspaceRowSummary('list_directory', { path: '.', entries: Array.from({ length: 24 }, (_, i) => ({ name: `f${i}`, type: 'file' })), truncated: false }))
-      .toEqual({ text: '24 entries', tone: 'muted' })
-    expect(workspaceRowSummary('list_directory', { path: '.', entries: [{ name: 'a', type: 'file' }], truncated: false })).toEqual({ text: '1 entry', tone: 'muted' })
+      .toMatchObject({ text: '24 entries', tone: 'muted' })
+    expect(workspaceRowSummary('list_directory', { path: '.', entries: [{ name: 'a', type: 'file' }], truncated: false })).toMatchObject({ text: '1 entry', tone: 'muted' })
     expect(workspaceRowSummary('find_files', { pattern: '*', paths: Array.from({ length: 17 }, (_, i) => `f${i}`), truncated: false }))
-      .toEqual({ text: '17 files', tone: 'muted' })
+      .toMatchObject({ text: '17 files', tone: 'muted' })
     expect(workspaceRowSummary('search_files', { pattern: 'x', matches: [{ path: 'a', line: 1, text: 'x' }], filesSearched: 1, truncated: false }))
-      .toEqual({ text: '1 match', tone: 'muted' })
+      .toMatchObject({ text: '1 match', tone: 'muted' })
+  })
+
+  it('carries a spoken label for every summary (Phase 8)', () => {
+    for (const summary of [
+      workspaceRowSummary('edit_file', { path: 'a', replacements: 1, diff }),
+      workspaceRowSummary('shell', shell({ exitCode: 1 })),
+      workspaceRowSummary('find_files', { pattern: '*', paths: ['a'], truncated: false }),
+    ])
+      expect(summary?.label).toEqual(expect.any(String))
+  })
+})
+
+describe('diffStatsLabel', () => {
+  it('reads +a −d as words (docs/UI.md 7.19)', () => {
+    expect(diffStatsLabel(12, 3)).toBe('12 lines added, 3 removed')
+    expect(diffStatsLabel(1, 1)).toBe('1 line added, 1 removed')
+    expect(diffStatsLabel(12, 0)).toBe('12 lines added')
+    expect(diffStatsLabel(0, 3)).toBe('3 lines removed')
+    expect(diffStatsLabel(0, 1)).toBe('1 line removed')
+    expect(diffStatsLabel(0, 0)).toBe('No changes')
+  })
+})
+
+describe('currentShellCwd', () => {
+  it('is a stub until W8.10: no remembered folder', () => {
+    expect(currentShellCwd([])).toBeNull()
   })
 })
 

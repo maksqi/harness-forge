@@ -321,6 +321,63 @@ export const projects = sqliteTable('projects', {
   uniqueIndex('projects_path_idx').on(table.path),
 ])
 
+/**
+ * Workspace change journal (Phase 8, ADR-036): one row per recorded change of a project file (an agent edit, a revert,
+ * a rewind or an undo) and per unrestorable call (a shell command, a third-party write / execute tool). Before-states
+ * live in `<dataDir>/checkpoints/<aa>/<sha256>`; after-states are kept as hashes only. Rows go with their chat or
+ * project (cascade); never exported or backed up.
+ */
+export const workspaceChanges = sqliteTable('workspace_changes', {
+  /** Global order (inserted under the per-file lock, so it follows the write order of each path). */
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  chatId: text('chat_id').notNull().references(() => chats.id, { onDelete: 'cascade' }),
+  projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  /** `max(messages.seq)` of the chat at insert time: the rewind watermark. */
+  messageSeq: integer('message_seq').notNull(),
+  /** The assistant message of the run (null for user operations). */
+  messageId: text('message_id'),
+  toolCallId: text('tool_call_id'),
+  /** `wcb_` + 16 chars: one revert, rewind or undo (null for agent edits). */
+  batchId: text('batch_id'),
+  /** `edit | revert | rewind | undo | shell | untracked`. */
+  kind: text('kind').notNull(),
+  /** The tool name (`write_file`, `edit_file`, `shell`, a plugin tool); null for user operations. */
+  tool: text('tool'),
+  /** Project-relative POSIX path of the target (null for `shell` / `untracked` rows). */
+  path: text('path'),
+  /** The shell command of a `shell` row (at most 1000 characters). */
+  command: text('command'),
+  /** `missing | stored | too-large | evicted` (null for `shell` / `untracked` rows). */
+  beforeState: text('before_state'),
+  beforeSha: text('before_sha'),
+  beforeSize: integer('before_size'),
+  beforeMode: integer('before_mode'),
+  /** sha256 of the content written; null = the change removed the file. */
+  afterSha: text('after_sha'),
+  afterSize: integer('after_size'),
+  createdAt: createdAt(),
+}, table => [
+  index('workspace_changes_chat_path_idx').on(table.chatId, table.path, table.id),
+  index('workspace_changes_chat_seq_idx').on(table.chatId, table.messageSeq),
+  index('workspace_changes_project_idx').on(table.projectId, table.id),
+  index('workspace_changes_before_sha_idx').on(table.beforeSha),
+])
+
+/**
+ * Shell rules (Phase 8, ADR-038): command prefixes that let a matching `shell` command run without asking. Global when
+ * `project_id` is null. Not settings and not in backups (a backup never grants shell rights).
+ */
+export const shellRules = sqliteTable('shell_rules', {
+  /** `srl_` + 16 chars. */
+  id: text('id').primaryKey(),
+  projectId: text('project_id').references(() => projects.id, { onDelete: 'cascade' }),
+  /** The canonical prefix (`parseShellRule(prefix).canonical`). */
+  prefix: text('prefix').notNull(),
+  createdAt: createdAt(),
+}, table => [
+  index('shell_rules_project_idx').on(table.projectId),
+])
+
 // ---------- relations (relational query API: `db.query.chats.findFirst({ with: { messages: true } })`) ----------
 
 export const chatsRelations = relations(chats, ({ many }) => ({
@@ -341,7 +398,7 @@ export const usageRelations = relations(usage, ({ one }) => ({
   chat: one(chats, { fields: [usage.chatId], references: [chats.id] }),
 }))
 
-/** Every table name (the 16 tables of DECISIONS.md "Database tables"). */
+/** Every table name (the 18 tables of DECISIONS.md "Database tables"). */
 export const TABLE_NAMES = [
   'settings',
   'secrets',
@@ -359,6 +416,8 @@ export const TABLE_NAMES = [
   'files',
   'chat_shares',
   'projects',
+  'workspace_changes',
+  'shell_rules',
 ] as const
 
 // ---------- row types ----------
@@ -379,3 +438,5 @@ export type McpServerRow = typeof mcpServers.$inferSelect
 export type FileRow = typeof files.$inferSelect
 export type ChatShareRow = typeof chatShares.$inferSelect
 export type ProjectRow = typeof projects.$inferSelect
+export type WorkspaceChangeRow = typeof workspaceChanges.$inferSelect
+export type ShellRuleRow = typeof shellRules.$inferSelect

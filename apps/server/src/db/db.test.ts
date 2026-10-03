@@ -6,7 +6,7 @@ import { eq, sql } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase } from './client.ts'
 import { migrateDatabase, resolveMigrationsFolder } from './migrate.ts'
-import { chats, chatShares, messages, projects, TABLE_NAMES, usage } from './schema.ts'
+import { chats, chatShares, messages, projects, shellRules, TABLE_NAMES, usage, workspaceChanges } from './schema.ts'
 
 const opened: Database[] = []
 const tempDirs: string[] = []
@@ -67,12 +67,14 @@ describe('migrations', () => {
     expect(resolveMigrationsFolder()).toMatch(/[/\\]apps[/\\]server[/\\]drizzle$/)
   })
 
-  it('creates the 16 tables of the data model', async () => {
+  it('creates the 18 tables of the data model', async () => {
     const database = await freshDatabase()
     const tables = (await names(database, 'table')).filter(name => name !== '__drizzle_migrations')
-    expect(TABLE_NAMES).toHaveLength(16)
+    expect(TABLE_NAMES).toHaveLength(18)
     expect(TABLE_NAMES).toContain('chat_shares')
     expect(TABLE_NAMES).toContain('projects')
+    expect(TABLE_NAMES).toContain('workspace_changes')
+    expect(TABLE_NAMES).toContain('shell_rules')
     expect(tables).toEqual([...TABLE_NAMES].sort())
   })
 
@@ -88,15 +90,20 @@ describe('migrations', () => {
       'usage_created_idx',
       'projects_path_idx',
       'chats_project_idx',
+      'workspace_changes_chat_path_idx',
+      'workspace_changes_chat_seq_idx',
+      'workspace_changes_project_idx',
+      'workspace_changes_before_sha_idx',
+      'shell_rules_project_idx',
     ]))
     expect(await indexColumns(database, 'messages_chat_parent_idx')).toEqual(['chat_id', 'parent_id'])
     expect(await indexColumns(database, 'chat_shares_chat_idx')).toEqual(['chat_id'])
   })
 
-  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, 0003, 0004 projects', async () => {
+  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, 0003, 0004 projects, 0005 workspace checkpoints', async () => {
     const database = await freshDatabase()
     const journal = JSON.parse(readFileSync(join(resolveMigrationsFolder(), 'meta', '_journal.json'), 'utf8')) as { entries: Array<{ tag: string }> }
-    expect(journal.entries.map(entry => entry.tag)).toEqual(['0000_initial_schema', '0001_message_tree_and_shares', '0002_remembered_versions', '0003_refresh_model_listings', '0004_projects'])
+    expect(journal.entries.map(entry => entry.tag)).toEqual(['0000_initial_schema', '0001_message_tree_and_shares', '0002_remembered_versions', '0003_refresh_model_listings', '0004_projects', '0005_workspace_checkpoints'])
     const applied = await database.client.execute('SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows).toHaveLength(journal.entries.length)
   })
@@ -248,6 +255,92 @@ describe('phase 7 schema (ADR-031 projects)', () => {
     await db.insert(chats).values({ id: '0199a8f0-0000-7000-8000-000000000006' })
     const [plain] = await db.select({ projectId: chats.projectId }).from(chats).where(eq(chats.id, '0199a8f0-0000-7000-8000-000000000006'))
     expect(plain?.projectId).toBeNull()
+  })
+})
+
+describe('phase 8 schema (ADR-036 checkpoint journal, ADR-038 shell rules)', () => {
+  it('creates workspace_changes as documented: the journal columns, two cascading foreign keys, four indexes', async () => {
+    const database = await freshDatabase()
+    const table = await columns(database, 'workspace_changes')
+    expect(Object.values(table).map(column => [column.name, column.type, column.notnull, column.pk])).toEqual([
+      ['id', 'INTEGER', 1, 1],
+      ['chat_id', 'TEXT', 1, 0],
+      ['project_id', 'TEXT', 1, 0],
+      ['message_seq', 'INTEGER', 1, 0],
+      ['message_id', 'TEXT', 0, 0],
+      ['tool_call_id', 'TEXT', 0, 0],
+      ['batch_id', 'TEXT', 0, 0],
+      ['kind', 'TEXT', 1, 0],
+      ['tool', 'TEXT', 0, 0],
+      ['path', 'TEXT', 0, 0],
+      ['command', 'TEXT', 0, 0],
+      ['before_state', 'TEXT', 0, 0],
+      ['before_sha', 'TEXT', 0, 0],
+      ['before_size', 'INTEGER', 0, 0],
+      ['before_mode', 'INTEGER', 0, 0],
+      ['after_sha', 'TEXT', 0, 0],
+      ['after_size', 'INTEGER', 0, 0],
+      ['created_at', 'INTEGER', 1, 0],
+    ])
+    expect(Object.values(table).every(column => column.dflt_value === null)).toBe(true)
+    expect((await foreignKeys(database, 'workspace_changes')).sort()).toEqual(['chat_id -> chats.id (CASCADE)', 'project_id -> projects.id (CASCADE)'])
+    expect(await indexColumns(database, 'workspace_changes_chat_path_idx')).toEqual(['chat_id', 'path', 'id'])
+    expect(await indexColumns(database, 'workspace_changes_chat_seq_idx')).toEqual(['chat_id', 'message_seq'])
+    expect(await indexColumns(database, 'workspace_changes_project_idx')).toEqual(['project_id', 'id'])
+    expect(await indexColumns(database, 'workspace_changes_before_sha_idx')).toEqual(['before_sha'])
+    const autoincrement = await database.client.execute(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workspace_changes'`)
+    expect(String(autoincrement.rows[0]?.sql)).toMatch(/`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL/i)
+  })
+
+  it('creates shell_rules as documented: a nullable project_id (null = global) cascading from projects', async () => {
+    const database = await freshDatabase()
+    const table = await columns(database, 'shell_rules')
+    expect(Object.values(table).map(column => [column.name, column.type, column.notnull, column.pk])).toEqual([
+      ['id', 'TEXT', 1, 1],
+      ['project_id', 'TEXT', 0, 0],
+      ['prefix', 'TEXT', 1, 0],
+      ['created_at', 'INTEGER', 1, 0],
+    ])
+    expect(await foreignKeys(database, 'shell_rules')).toEqual(['project_id -> projects.id (CASCADE)'])
+    expect(await indexColumns(database, 'shell_rules_project_idx')).toEqual(['project_id'])
+    // Uniqueness and caps are the service's (no unique index).
+    const unique = await database.client.execute(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'shell_rules' AND sql LIKE '%UNIQUE%'`)
+    expect(unique.rows).toEqual([])
+  })
+
+  it('stores journal rows and rules; deleting a chat or a project cascades, global rules stay', async () => {
+    const { db } = await freshDatabase()
+    const projectId = 'prj_AAAAAAAAAAAAAAAA'
+    const chatA = '0199a8f0-0000-7000-8000-0000000000a1'
+    const chatB = '0199a8f0-0000-7000-8000-0000000000a2'
+    await db.insert(projects).values({ id: projectId, name: 'Demo', path: '/srv/projects/demo', createdAt: 1, updatedAt: 1 })
+    await db.insert(chats).values([{ id: chatA, projectId }, { id: chatB, projectId }])
+    await db.insert(workspaceChanges).values([
+      { chatId: chatA, projectId, messageSeq: 1, messageId: 'msg_AAAAAAAAAAAAAAAA', toolCallId: 'call_1', kind: 'edit', tool: 'write_file', path: 'a.txt', beforeState: 'missing', afterSha: 'a'.repeat(64), afterSize: 3, createdAt: 10 },
+      { chatId: chatA, projectId, messageSeq: 1, messageId: 'msg_AAAAAAAAAAAAAAAA', toolCallId: 'call_2', kind: 'shell', tool: 'shell', command: 'ls', createdAt: 11 },
+      { chatId: chatB, projectId, messageSeq: 3, batchId: 'wcb_AAAAAAAAAAAAAAAA', kind: 'rewind', path: 'a.txt', beforeState: 'stored', beforeSha: 'a'.repeat(64), beforeSize: 3, beforeMode: 0o644, afterSha: null, createdAt: 12 },
+    ])
+    await db.insert(shellRules).values([
+      { id: 'srl_AAAAAAAAAAAAAAAA', projectId, prefix: 'pnpm test', createdAt: 1 },
+      { id: 'srl_BBBBBBBBBBBBBBBB', projectId: null, prefix: 'ls', createdAt: 2 },
+    ])
+    const rows = await db.select().from(workspaceChanges).orderBy(workspaceChanges.id)
+    expect(rows.map(row => [row.id, row.chatId, row.kind])).toEqual([[1, chatA, 'edit'], [2, chatA, 'shell'], [3, chatB, 'rewind']])
+    expect(rows[2]).toMatchObject({ messageId: null, toolCallId: null, tool: null, beforeMode: 0o644, afterSha: null, afterSize: null })
+    // Real foreign keys: an unknown chat or project is refused.
+    await expect(db.insert(workspaceChanges).values({ chatId: 'missing', projectId, messageSeq: 0, kind: 'edit', createdAt: 1 })).rejects.toThrow()
+    await expect(db.insert(workspaceChanges).values({ chatId: chatA, projectId: 'prj_missing0000000', messageSeq: 0, kind: 'edit', createdAt: 1 })).rejects.toThrow()
+    await expect(db.insert(shellRules).values({ id: 'srl_CCCCCCCCCCCCCCCC', projectId: 'prj_missing0000000', prefix: 'ls', createdAt: 1 })).rejects.toThrow()
+
+    // Deleting a chat removes its rows (its messages first, as `ChatsService.remove` does).
+    await db.delete(messages).where(eq(messages.chatId, chatA))
+    await db.delete(chats).where(eq(chats.id, chatA))
+    expect((await db.select().from(workspaceChanges)).map(row => row.chatId)).toEqual([chatB])
+    // Deleting the project removes the rest of its rows and its rules; the global rule and the chats stay.
+    await db.delete(projects).where(eq(projects.id, projectId))
+    expect(await db.select().from(workspaceChanges)).toEqual([])
+    expect((await db.select().from(shellRules)).map(rule => [rule.id, rule.projectId])).toEqual([['srl_BBBBBBBBBBBBBBBB', null]])
+    expect((await db.select({ id: chats.id }).from(chats)).map(chat => chat.id)).toEqual([chatB])
   })
 })
 

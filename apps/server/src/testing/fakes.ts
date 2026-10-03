@@ -14,6 +14,11 @@
 // Phase 7 (C14-T6): ./fake-projects.ts adds `createFakeProjectService` (projects in memory, `openWorkspace` on a temp
 // folder); `createRecordingEventBus` has `disconnectAll`; `createFakeDataService` has `cleanupPreview` / `cleanup` and
 // answers `busy` with the maintenance lock's error; `createFakeKeyring` is C16's rotatable fake (./fake-keyring.ts).
+//
+// Phase 8 (C19-T9): ./fake-checkpoints.ts adds `createFakeCheckpointService` (a recording service), the in-memory
+// `createFakeCheckpointBlobStore`, `createTestChangeRowWriter` and `insertChangeRows` (journal rows in the test
+// database); ./fake-shell-rules.ts adds `createFakeShellRuleService`; `createFakeDataService` has no-op `start` / `stop`
+// (it counts the calls). `createTestApp({ checkpoints: 'fake', shellRules: 'fake' })` installs the two fake services.
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type {
   DataCleanupPreview,
@@ -65,10 +70,21 @@ import { busyError } from '../services/maintenance/index.ts'
 import { secretHint } from '../services/secrets/hint'
 
 export { createFakeChatsService } from './fake-chats.ts'
+export {
+  createFakeCheckpointBlobStore,
+  createFakeCheckpointService,
+  createTestChangeRowWriter,
+  editRowFields,
+  FAKE_RESTORE_RESULT,
+  insertChangeRows,
+} from './fake-checkpoints.ts'
+export type { FakeCheckpointBlobStore, FakeCheckpointService, FakeJournalRecord, TestChangeRowInput } from './fake-checkpoints.ts'
 /** Deterministic, rotatable keyring (C16, ./fake-keyring.ts): the same subkey bytes as the Phase 1 – 6 fake. */
 export { createFakeKeyring, FAKE_KEYRING_SEED, fakeMasterKey } from './fake-keyring.ts'
 export { createFakeAudioService, createFakeImageService, NO_IMAGE_MODEL_MESSAGE } from './fake-media.ts'
 export type { FakeAudioCall, FakeAudioService, FakeAudioServiceOptions, FakeImageService, FakeImageServiceOptions } from './fake-media.ts'
+export { createFakeShellRuleService } from './fake-shell-rules.ts'
+export type { FakeShellRuleService, FakeShellRuleServiceOptions } from './fake-shell-rules.ts'
 
 export interface RecordingEventBus extends EventBus {
   /** Every event emitted so far. */
@@ -306,6 +322,8 @@ export interface FakeDataService extends DataService {
   busy: boolean
   /** Backup streams read to the end, and cancelled (a `HEAD` request or a client that went away). */
   readonly exports: { completed: number, cancelled: number }
+  /** Calls of the no-op `start()` / `stop()` (Phase 8). */
+  readonly lifecycle: { started: number, stopped: number }
 }
 
 /**
@@ -322,6 +340,7 @@ export function createFakeDataService(options: FakeDataServiceOptions = {}): Fak
     calls: [],
     busy: false,
     exports: { completed: 0, cancelled: 0 },
+    lifecycle: { started: 0, stopped: 0 },
     summary: async () => {
       fake.calls.push({ member: 'summary', args: [] })
       return options.summary ?? { ...counts }
@@ -385,6 +404,13 @@ export function createFakeDataService(options: FakeDataServiceOptions = {}): Fak
       if (fake.busy)
         throw busyError()
       return options.cleanupResult ?? { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, ranAt: now(), pluginData: 'complete' }
+    },
+    // Phase 8: the automatic file sweep never runs in the fake; the lifecycle calls are counted, not recorded in `calls`.
+    start: async () => {
+      fake.lifecycle.started += 1
+    },
+    stop: async () => {
+      fake.lifecycle.stopped += 1
     },
   }
   return fake

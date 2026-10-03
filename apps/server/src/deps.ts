@@ -9,6 +9,7 @@
 import type { AppBase, AppDeps, AppServices, ServiceName } from './types.ts'
 import { createModelCatalog } from './catalog/index.ts'
 import { createChatRunner } from './chat/index.ts'
+import { envBootWarnings } from './env.ts'
 import { createMcpManager } from './mcp/index.ts'
 import { createToolService } from './mcp/tools.ts'
 import { createPluginDrafts } from './plugins/drafts/index.ts'
@@ -23,6 +24,7 @@ import { createPasswordService } from './security/password.ts'
 import { createSessionService } from './security/session.ts'
 import { createAudioService } from './services/audio/index.ts'
 import { createChatsService } from './services/chats/index.ts'
+import { createCheckpointService } from './services/checkpoints/index.ts'
 import { createDataService } from './services/data/index.ts'
 import { createEventBus } from './services/events/index.ts'
 import { createFilesService } from './services/files/index.ts'
@@ -34,6 +36,7 @@ import { createCredentialService } from './services/secrets/credentials.ts'
 import { createSecretStore } from './services/secrets/index.ts'
 import { createSettingsService } from './services/settings/index.ts'
 import { createShareService } from './services/shares/index.ts'
+import { createShellRuleService } from './services/shell-rules/index.ts'
 
 export type ServiceFactories = { readonly [K in ServiceName]: (deps: AppDeps) => AppServices[K] }
 
@@ -67,6 +70,9 @@ export const SERVICE_FACTORIES: ServiceFactories = {
   projects: createProjectService,
   maintenance: createMaintenanceService,
   keys: createKeyService,
+  // Phase 8 (P8-0b): checkpoints (C19 stub, W8.1 - W8.3), shell rules (C19 stub, W8.6).
+  checkpoints: createCheckpointService,
+  shellRules: createShellRuleService,
 }
 
 /** Instantiation order (dependencies first; construction-time access to later services still works lazily). */
@@ -119,25 +125,35 @@ export function createDeps(options: CreateDepsOptions): AppDeps {
 
 /**
  * Boot sequence after migrations (ARCHITECTURE.md 5): workspace roots (Phase 7: the default root is created and every
- * root is checked; a refused root throws `EnvError`) -> staging recovery -> plugin host (builtins, then user plugins)
- * -> model catalog warm-up -> MCP manager. A broken plugin never fails the boot.
+ * root is checked; a refused root throws `EnvError`) -> the checkpoint store (Phase 8: `checkpoints/` created 0700, one
+ * prune, the prune timer) -> staging recovery -> plugin host (builtins, then user plugins) -> model catalog warm-up ->
+ * MCP manager -> the data service last (Phase 8: the automatic file sweep timer, ADR-039). A broken plugin never fails
+ * the boot. The environment warnings (`envBootWarnings`) are logged first.
  */
 export async function startDeps(deps: AppDeps): Promise<void> {
+  for (const warning of envBootWarnings(deps.env))
+    deps.logger.warn(warning)
   await deps.projects.start()
+  await deps.checkpoints.start()
   await deps.installer.recover()
   await deps.plugins.start()
   await deps.catalog.start()
   await deps.mcp.start()
+  await deps.data.start()
 }
 
 /**
- * Shutdown (ARCHITECTURE.md 5): abort active runs (persisted as `aborted`) -> dispose plugins -> close MCP clients ->
- * stop catalog timers -> close SSE streams. Every step runs even when an earlier one fails (failures are logged).
- * The caller closes the HTTP server before and the database after.
+ * Shutdown (ARCHITECTURE.md 5): stop the automatic file sweep first (Phase 8: its timer, and a sweep in flight is
+ * aborted) -> abort active runs (persisted as `aborted`) -> stop the checkpoint store (Phase 8: the prune timer, after
+ * the runs so no journal write is cut off) -> dispose plugins -> close MCP clients -> stop catalog timers -> close SSE
+ * streams. Every step runs even when an earlier one fails (failures are logged). The caller closes the HTTP server
+ * before and the database after.
  */
 export async function stopDeps(deps: AppDeps): Promise<void> {
   const steps: Array<[string, () => Promise<void>]> = [
+    ['data', () => deps.data.stop()],
     ['runs', () => deps.runs.stopAll()],
+    ['checkpoints', () => deps.checkpoints.stop()],
     ['plugins', () => deps.plugins.stop()],
     ['mcp', () => deps.mcp.stop()],
     ['catalog', () => deps.catalog.stop()],

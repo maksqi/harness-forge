@@ -8,8 +8,11 @@
 // hover / focus, always shown on the last finished reply and while the reply is read aloud), so nothing moves when it
 // appears. A message with versions (ADR-023) starts that row with the BranchSwitcher, which stays visible outside the
 // hover fade; "Delete this version" asks ChatView for confirmation (ADR-030).
+// Phase 8 (C20 declares, W8.9 / W8.10 use; frozen from Gate P8-0b): `canRewind` shows "Rewind files to here" on a user
+// message (re-emitted as `rewind`), and the approval payload passes the card's `allowRules` on.
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { FileUIPart, TextUIPart } from 'ai'
+import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
 import { isFileUIPart } from 'ai'
 import { computed, ref } from 'vue'
 import { cn } from '@/lib/utils'
@@ -49,24 +52,35 @@ const props = withDefaults(defineProps<{
   branch?: MessageBranch | null
   /** A version switch (or a deletion) is in flight (the switcher is disabled). */
   switching?: boolean
+  /**
+   * + Phase 8: a user message followed by finished agent edits in a project chat: "Rewind files to here" (the
+   * transcript decides, docs/UI.md 7.22); default false.
+   */
+  canRewind?: boolean
 }>(), {
   busy: false,
   commandReply: false,
   branch: null,
   switching: false,
+  canRewind: false,
 })
 
 const emit = defineEmits<{
   'regenerate': []
   /** The edited text and the files left in the editor (the full new set). */
   'edit': [text: string, files: FileUIPart[]]
-  /** + Phase 7: `acceptEdits` = "Accept all edits in this chat" (the session switches the mode to `edits`). */
-  'approval': [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean, acceptEdits?: boolean }]
+  /**
+   * + Phase 7: `acceptEdits` = "Accept all edits in this chat" (the session switches the mode to `edits`). + Phase 8:
+   * `allowRules` = the shell rules to create before the approval is sent.
+   */
+  'approval': [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean, acceptEdits?: boolean, allowRules?: AllowRules }]
   'retry': []
   /** The version chosen in the BranchSwitcher (a sibling of this message). */
   'select-version': [messageId: string]
   /** "Delete this version" was clicked; ChatView asks for confirmation. */
   'delete-version': []
+  /** + Phase 8: "Rewind files to here" was clicked on this user message; ChatView opens the RewindDialog. */
+  'rewind': []
 }>()
 
 const editing = ref(false)
@@ -179,8 +193,10 @@ const actionsClass = computed(() => {
           :class="actionsClass"
           :copy-text="copyText"
           :can-edit="!busy"
+          :can-rewind="canRewind && !busy"
           :can-delete-version="canDeleteVersion"
           @edit="startEdit"
+          @rewind="emit('rewind')"
           @delete-version="deleteVersion"
         />
       </div>

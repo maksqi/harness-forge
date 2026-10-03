@@ -1,7 +1,8 @@
 // Environment variables (DECISIONS.md "Environment variables"): parsed once at boot into a frozen `Env`, after the
 // optional `<workspace root>/.env` file was loaded (`loadDotEnvFile`; variables already set win). Owned by W1.1 after
 // Phase 0 (bind safety with a stored password is enforced in `main.ts`); `HF_TRUST_PROXY` by W5.7 (ADR-026);
-// `HF_WORKSPACE_ROOTS` / `HF_WORKSPACE_SHELL` by C14 (Phase 7, ADR-031 / ADR-033).
+// `HF_WORKSPACE_ROOTS` / `HF_WORKSPACE_SHELL` by C14 (Phase 7, ADR-031 / ADR-033); `DataPaths.checkpoints` and the
+// test-only `HF_TEST_FILE_SWEEP_DELAY_MS` by C19 (Phase 8, ADR-036 / ADR-039).
 import type { LogLevel } from './logger.ts'
 import { Buffer } from 'node:buffer'
 import { existsSync, mkdirSync } from 'node:fs'
@@ -36,6 +37,12 @@ export interface DataPaths {
    * unset. Created with mode 0700 by `projects.start()` (not by `ensureDataDir`) when it is one of the roots.
    */
   readonly workspaces: string
+  /**
+   * The checkpoint blob store `checkpoints/<aa>/<sha256>` (Phase 8, ADR-036): the before-states of project files changed
+   * by the agent or by a restore. Created with mode 0700 by `checkpoints.start()` (not by `ensureDataDir`); never
+   * served, never in a backup, never touched by the file sweep.
+   */
+  readonly checkpoints: string
 }
 
 export interface Env {
@@ -84,6 +91,13 @@ export interface Env {
    * `execute` (the `shell` tool of `core-workspace`). A kill switch no session can change.
    */
   readonly workspaceShell: boolean
+  /**
+   * Test-only `HF_TEST_FILE_SWEEP_DELAY_MS` (Phase 8, ADR-039): replaces the boot delay (24 h) and the hourly check of
+   * the automatic file sweep, in ms (1000 - 86,400,000; another value fails the boot like any invalid variable).
+   * Honored only with `HF_MOCK_PROVIDER=1`; otherwise null, and `envBootWarnings` reports the ignored value (logged by
+   * `startDeps`). Null when unset.
+   */
+  readonly testFileSweepDelayMs: number | null
   /** `HF_API_TARGET`: proxy target of `nuxt dev` (unused by the server, kept for completeness). */
   readonly apiTarget: string
   /**
@@ -189,6 +203,18 @@ export function parseWorkspaceRoots(value: string): WorkspaceRootsParse {
   return { ok: true, roots }
 }
 
+/** Bounds of `HF_TEST_FILE_SWEEP_DELAY_MS` (ms). */
+export const TEST_FILE_SWEEP_DELAY_RANGE = { min: 1000, max: 86_400_000 } as const
+
+const testFileSweepDelaySchema = z
+  .string()
+  .regex(/^\s*\d{1,9}\s*$/, 'Expected a number of milliseconds.')
+  .transform(Number)
+  .pipe(z.int()
+    .min(TEST_FILE_SWEEP_DELAY_RANGE.min, `Expected ${TEST_FILE_SWEEP_DELAY_RANGE.min} - ${TEST_FILE_SWEEP_DELAY_RANGE.max} ms.`)
+    .max(TEST_FILE_SWEEP_DELAY_RANGE.max, `Expected ${TEST_FILE_SWEEP_DELAY_RANGE.min} - ${TEST_FILE_SWEEP_DELAY_RANGE.max} ms.`))
+  .optional()
+
 const workspaceRootsSchema = z
   .string()
   .transform((value, ctx) => {
@@ -216,6 +242,7 @@ const envSchema = z.object({
   HF_WEB_DIR: z.string().trim().min(1).optional(),
   HF_WORKSPACE_ROOTS: workspaceRootsSchema,
   HF_WORKSPACE_SHELL: flag(true),
+  HF_TEST_FILE_SWEEP_DELAY_MS: testFileSweepDelaySchema,
   NODE_ENV: z.string().optional(),
 })
 
@@ -251,6 +278,7 @@ export function dataPaths(root: string): DataPaths {
     cache,
     pluginCache: join(cache, 'plugins'),
     workspaces: join(root, 'workspaces'),
+    checkpoints: join(root, 'checkpoints'),
   })
 }
 
@@ -291,12 +319,27 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     workspaceRoots: Object.freeze(values.HF_WORKSPACE_ROOTS ?? [paths.workspaces]),
     workspaceRootsDefault: values.HF_WORKSPACE_ROOTS === undefined,
     workspaceShell: values.HF_WORKSPACE_SHELL,
+    testFileSweepDelayMs: values.HF_MOCK_PROVIDER ? values.HF_TEST_FILE_SWEEP_DELAY_MS ?? null : null,
     apiTarget: values.HF_API_TARGET,
     webDir: values.HF_WEB_DIR === undefined ? null : resolveDataDir(values.HF_WEB_DIR, cwd),
     dev,
     logLevel: dev ? 'debug' : 'info',
     vars: Object.freeze({ ...source }),
   })
+}
+
+/**
+ * Warnings about the environment that do not stop the boot, logged once by `startDeps` (Phase 8): a valid
+ * `HF_TEST_FILE_SWEEP_DELAY_MS` without `HF_MOCK_PROVIDER=1` is ignored.
+ */
+export function envBootWarnings(env: Pick<Env, 'mockProvider' | 'vars'>): string[] {
+  const warnings: string[] = []
+  const delay = env.vars.HF_TEST_FILE_SWEEP_DELAY_MS
+  if (!env.mockProvider && typeof delay === 'string' && delay.trim() !== '')
+    // The log redactor masks `HF_` + 16 or more word characters (its `hf_` key pattern), so the message names the setting
+    // in words.
+    warnings.push('the test-only automatic file sweep delay is ignored: it is honored only with HF_MOCK_PROVIDER=1')
+  return warnings
 }
 
 /** Creates the data directory (mode 0700) and its fixed subdirectories. Idempotent. */

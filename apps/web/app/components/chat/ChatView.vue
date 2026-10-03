@@ -13,7 +13,11 @@
 // rotation (`409 busy`, ADR-034) puts the message back into the composer with a toast. Approval cards learn the chat's
 // permission mode and project name (TOOL_APPROVAL_CONTEXT: no "Accept all edits" in a chat that already accepts edits,
 // "In {project}" on a shell approval).
-import type { MessageBranch, ReasoningEffort, ToolMode } from '@harness-forge/shared'
+// Phase 8 (C20 wires it, W8.9 / W8.10 finish it): the context also gives the cards the chat's project (the scope of a
+// shell rule) and its sticky shell folder (session.cwd); "Rewind files to here" opens the RewindDialog owned here
+// (closed: focus back on the button; "Restore files and edit": the editor opens on the message); a shell approval
+// whose rules could not be saved shows "Could not save the rule".
+import type { MessageBranch, ReasoningEffort, RestoreResult, ToolMode } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
@@ -26,6 +30,7 @@ import { Button } from '@/components/ui/button'
 import ChatComposer from '~/components/chat/composer/ChatComposer.vue'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import { toHarnessErrorView } from '~/components/common/harness-error'
+import RewindDialog from '~/components/workspace/rewind/RewindDialog.vue'
 import { isBusyConflict, isRunActiveConflict, useChatSession } from '~/composables/useChatSession'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
@@ -146,6 +151,8 @@ const projectName = computed(() => (projectId.value ? projects.byId(projectId.va
 provide(TOOL_APPROVAL_CONTEXT, {
   toolMode: () => toolMode.value,
   projectName: () => projectName.value,
+  projectId: () => projectId.value,
+  shellCwd: () => session.cwd.value,
 })
 
 // ---------- announcements (polite live region) ----------
@@ -278,7 +285,10 @@ function onRetry() {
 }
 
 function onApproval(decision: ToolApprovalDecision) {
-  session.approve(decision).catch(failure => reportFailure('Could not save the tool preference', failure))
+  // A shell approval with "Always allow commands starting with" rethrows a rule that could not be saved (the approval
+  // itself was still sent).
+  const title = decision.approved && decision.allowRules ? 'Could not save the rule' : 'Could not save the tool preference'
+  session.approve(decision).catch(failure => reportFailure(title, failure))
 }
 
 function onSelectVersion(messageId: string) {
@@ -355,6 +365,40 @@ async function confirmDeleteVersion() {
     transcript.value?.focusDeleteVersion(target.messageId)
 }
 
+// ---------- rewind files (Phase 8, ADR-036) ----------
+
+/** The user message whose "Rewind files to here" opened the dialog; null while it is closed. */
+const rewindTarget = ref<string | null>(null)
+/** The dialog finished with "Restore files and edit": the editor opens on the message once it closed. */
+let editAfterRewind = false
+
+function onRewind(messageId: string) {
+  if (session.busy.value)
+    return
+  editAfterRewind = false
+  rewindTarget.value = messageId
+}
+
+function onRewindOpenChange(open: boolean) {
+  if (open)
+    return
+  const target = rewindTarget.value
+  rewindTarget.value = null
+  if (!target)
+    return
+  void nextTick(() => {
+    if (editAfterRewind)
+      transcript.value?.startEdit(target)
+    else
+      transcript.value?.focusRewind(target)
+    editAfterRewind = false
+  })
+}
+
+function onRewindRestored(_result: RestoreResult, then: 'none' | 'edit') {
+  editAfterRewind = then === 'edit'
+}
+
 function onModelChange(value: string) {
   modelRef.value = value
 }
@@ -427,6 +471,7 @@ function setProject(value: string | null) {
         @retry="onRetry"
         @select-version="onSelectVersion"
         @delete-version="onDeleteVersion"
+        @rewind="onRewind"
       />
       <div
         v-if="loadError && !loaded"
@@ -482,6 +527,14 @@ function setProject(value: string | null) {
       :data-testid="testIds.messageDeleteVersionConfirm"
       @update:open="onDeleteOpenChange"
       @confirm="confirmDeleteVersion"
+    />
+
+    <RewindDialog
+      :open="rewindTarget !== null"
+      :chat-id="chatId"
+      :message-id="rewindTarget"
+      @update:open="onRewindOpenChange"
+      @restored="onRewindRestored"
     />
 
     <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">

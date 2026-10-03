@@ -81,6 +81,11 @@ export interface FileSweepInput {
   createdBefore: number
   /** true: count what would be removed and delete nothing (the preview, `GET /data/cleanup`). */
   dryRun: boolean
+  /**
+   * Phase 8 (ADR-039): stops the sweep between batches (the automatic sweep is aborted by `data.stop()`): the batch in
+   * progress finishes, then the sweep rejects with the signal's reason; what was removed so far stays removed.
+   */
+  signal?: AbortSignal
 }
 
 /** Result of `sweep`: what was removed (or would be, with `dryRun`). */

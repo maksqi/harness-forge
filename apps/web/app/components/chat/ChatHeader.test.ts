@@ -199,6 +199,17 @@ describe('chatHeader', () => {
     expect(order.indexOf(testIds.chatTitle)).toBeLessThan(order.indexOf(testIds.chatProjectChip))
     expect(order.indexOf(testIds.chatProjectChip)).toBeLessThan(order.indexOf(testIds.chatMenuTrigger))
   })
+
+  it('mounts the changes toggle between the project chip and the menu, only in a project chat (Phase 8)', () => {
+    expect(mountHeader({ title: 'Chat', projectId: null }).find(`[data-testid="${testIds.changesToggle}"]`).exists()).toBe(false)
+
+    const wrapper = mountHeader({ title: 'Chat', projectId: projectId(1) })
+    const toggle = wrapper.get(`[data-testid="${testIds.changesToggle}"]`)
+    expect(toggle.attributes()).toMatchObject({ 'data-state': 'closed', 'data-count': '0', 'aria-label': 'Show changes' })
+    const order = [...wrapper.get(`[data-testid="${testIds.chatHeader}"]`).element.querySelectorAll('[data-testid]')].map(node => node.getAttribute('data-testid'))
+    expect(order.indexOf(testIds.chatProjectChip)).toBeLessThan(order.indexOf(testIds.changesToggle))
+    expect(order.indexOf(testIds.changesToggle)).toBeLessThan(order.indexOf(testIds.chatMenuTrigger))
+  })
 })
 
 describe('chatHeader: move to project', () => {

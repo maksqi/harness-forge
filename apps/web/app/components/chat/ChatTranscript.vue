@@ -11,6 +11,10 @@
 // switcher and re-render when a request or a switch starts or ends (it disables them); after a switch, focus moves
 // to the same control of the new version's switcher (docs/UI.md 14.1). "Delete this version" (ADR-030) is re-emitted
 // with the message id; ChatView confirms it and uses the exposed focus helpers afterwards.
+// Phase 8 (C20 declares, W8.9 implements; frozen from Gate P8-0b): "Rewind files to here" is re-emitted as `rewind`
+// with the message id (ChatView opens the RewindDialog); `startEdit(id)` opens the editor on a user message ("Restore
+// files and edit") and `focusRewind(id)` puts focus back on its rewind button. W8.9 adds the `rewindable` set
+// (`canRewind` of each row).
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { ChatStatus, FileUIPart } from 'ai'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
@@ -54,6 +58,8 @@ const emit = defineEmits<{
   'select-version': [messageId: string]
   /** "Delete this version" was clicked on a shown message (ChatView asks for confirmation). */
   'delete-version': [messageId: string]
+  /** + Phase 8: "Rewind files to here" was clicked on a user message (ChatView opens the RewindDialog). */
+  'rewind': [messageId: string]
   /** The transcript is scrolled away from the top (the header shows its border). */
   'update:scrolled': [value: boolean]
 }>()
@@ -154,6 +160,13 @@ function focusDeleteVersion(messageId: string): boolean {
   const button = messageElement(messageId)?.querySelector<HTMLElement>(`[data-testid="${testIds.messageDeleteVersion}"]`)
   button?.focus()
   return !!button
+}
+
+// ---------- rewind (Phase 8) ----------
+
+/** + Phase 8: a closed rewind dialog puts focus back on "Rewind files to here" of that message (docs/UI.md 7.22). */
+function focusRewind(messageId: string): void {
+  messageElement(messageId)?.querySelector<HTMLElement>(`[data-testid="${testIds.messageRewind}"]`)?.focus()
 }
 
 // ---------- loading ----------
@@ -279,6 +292,12 @@ function setMessageRef(id: string, instance: unknown) {
     messageRefs.delete(id)
 }
 
+/** + Phase 8: opens the editor on a shown user message ("Restore files and edit"), unless a request is in flight. */
+function startEdit(messageId: string): void {
+  if (!busy.value)
+    messageRefs.get(messageId)?.startEdit()
+}
+
 /** Opens the editor on the last user message; false when there is none. */
 function editLastUserMessage(): boolean {
   const last = [...props.messages].reverse().find(message => message.role === 'user')
@@ -292,6 +311,8 @@ defineExpose({
   scrollToBottom: (behavior?: 'instant' | 'smooth') => controls.value?.scrollToBottom(behavior),
   focusShownVersion,
   focusDeleteVersion,
+  focusRewind,
+  startEdit,
 })
 </script>
 
@@ -337,6 +358,7 @@ defineExpose({
             @retry="onRetry(message.id)"
             @select-version="onSelectVersion"
             @delete-version="onDeleteVersion(message.id)"
+            @rewind="emit('rewind', message.id)"
           />
         </div>
         <SubmittedPlaceholder v-if="showPlaceholder" />

@@ -4,6 +4,9 @@
 // Phase 7: `project.changed` updates the projects and chats stores (ADR-031); `key.rotated` (ADR-034) reloads the chat
 // list and shows a toast, and every chat session it lists reloads its own path (useChatSession). The server closes
 // every event stream right after `key.rotated`, so the client reconnects (or lands on /login when signed out).
+// Phase 8 (ADR-036 - ADR-038): `workspace.changed`, `run.finished`, `chat.deleted` and `project.changed` also go to the
+// workspace store (the changes panel); `project.changed` to the shell rules store (a deleted project drops its rules);
+// a reconnect refreshes the loaded workspace entries and the loaded shell rules.
 import type { ServerEvent, ServerEventOf, ServerEventType } from '@harness-forge/shared'
 import type { Ref } from 'vue'
 import type { EventStreamStatus } from '~/utils/event-stream'
@@ -17,7 +20,9 @@ import { usePluginsStore } from '~/stores/plugins'
 import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
+import { useShellRulesStore } from '~/stores/shell-rules'
 import { useUiStore } from '~/stores/ui'
+import { useWorkspaceStore } from '~/stores/workspace'
 
 type AnyHandler = (event: ServerEvent) => void
 
@@ -97,7 +102,8 @@ function applyKeyRotated(): void {
 /**
  * Applies one event (docs/UI.md 11): `chat.*` / `run.*` -> chats; `provider.changed` -> providers (+ models
  * refetch); `catalog.changed` -> models; `plugin.changed` -> plugins (+ providers and models refetch); `plugin.log`
- * -> plugins; `project.changed` -> projects + chats; `key.rotated` -> the chat list reloads, toast. Then leaves
+ * -> plugins; `project.changed` -> projects + chats + workspace + shell rules; `workspace.changed` -> workspace (and
+ * `run.finished` / `chat.deleted` -> workspace too); `key.rotated` -> the chat list reloads, toast. Then leaves
  * `/chat/<id>` when the open chat was deleted, and notifies `useServerEvents().on()` subscribers (the chat sessions
  * listed by `key.rotated` reload their path there).
  */
@@ -105,10 +111,13 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
   switch (event.type) {
     case 'chat.created':
     case 'chat.updated':
-    case 'chat.deleted':
     case 'run.started':
+      safely(() => useChatsStore().applyEvent(event))
+      break
+    case 'chat.deleted':
     case 'run.finished':
       safely(() => useChatsStore().applyEvent(event))
+      safely(() => useWorkspaceStore().applyEvent(event))
       break
     case 'provider.changed':
       safely(() => useProvidersStore().applyEvent(event))
@@ -128,6 +137,11 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
     case 'project.changed':
       safely(() => useProjectsStore().applyEvent(event))
       safely(() => useChatsStore().applyEvent(event))
+      safely(() => useWorkspaceStore().applyEvent(event))
+      safely(() => useShellRulesStore().applyEvent(event))
+      break
+    case 'workspace.changed':
+      safely(() => useWorkspaceStore().applyEvent(event))
       break
     case 'key.rotated':
       safely(applyKeyRotated)
@@ -143,7 +157,8 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
 
 /**
  * Refetches every loaded store after the event stream reconnects (missed events are not replayed): auth status,
- * settings, and the providers / models / plugins / chats / projects data that was loaded before.
+ * settings, and the providers / models / plugins / chats / projects / shell rules data that was loaded before, plus the
+ * loaded entries of the changes panel (`workspace.refreshLoaded()`).
  */
 export async function refetchLoadedStores(): Promise<void> {
   const auth = useAuthStore()
@@ -153,7 +168,9 @@ export async function refetchLoadedStores(): Promise<void> {
   const plugins = usePluginsStore()
   const chats = useChatsStore()
   const projects = useProjectsStore()
-  const tasks: Array<Promise<unknown>> = [auth.fetchStatus(), settings.fetch(), plugins.refreshLoaded()]
+  const shellRules = useShellRulesStore()
+  const workspace = useWorkspaceStore()
+  const tasks: Array<Promise<unknown>> = [auth.fetchStatus(), settings.fetch(), plugins.refreshLoaded(), workspace.refreshLoaded()]
   if (providers.loaded)
     tasks.push(providers.fetchAll())
   if (models.loaded)
@@ -162,5 +179,7 @@ export async function refetchLoadedStores(): Promise<void> {
     tasks.push(chats.fetchPage({ reset: true }))
   if (projects.loaded)
     tasks.push(projects.fetchAll())
+  if (shellRules.loaded)
+    tasks.push(shellRules.fetchAll())
   await Promise.allSettled(tasks)
 }

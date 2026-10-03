@@ -6,10 +6,11 @@ import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { toolSummary } from '~/utils/testing/fixtures'
+import { shellOutput, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { TOOL_BODY_PREVIEW_CHARS } from '../chat-format'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
+import ToolApprovalCard from './ToolApprovalCard.vue'
 import ToolPart from './ToolPart.vue'
 
 const mock = vi.hoisted(() => ({ api: null as unknown }))
@@ -360,7 +361,7 @@ describe('toolPart: workspace approvals (Phase 7)', () => {
   function mountRequest(toolName: string, input: unknown, options: { toolMode?: 'ask' | 'edits', projectName?: string } = {}) {
     const toolPart = part({ type: `tool-${toolName}`, toolCallId: `call_${toolName}`, state: 'approval-requested', approval: { id: `appr_${toolName}` }, input } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
     const context = options.toolMode
-      ? { [TOOL_APPROVAL_CONTEXT as symbol]: { toolMode: () => options.toolMode!, projectName: () => options.projectName ?? null } }
+      ? { [TOOL_APPROVAL_CONTEXT as symbol]: { toolMode: () => options.toolMode!, projectName: () => options.projectName ?? null, projectId: () => null, shellCwd: () => null } }
       : {}
     return mount(ToolPart, {
       props: { part: toolPart, streaming: false },
@@ -440,5 +441,37 @@ describe('toolPart: workspace approvals (Phase 7)', () => {
     expect(card(wrapper).find(`[data-testid="${testIds.toolApprovalPreview}"]`).exists()).toBe(false)
     expect(card(wrapper).text()).toContain('"path": ".env"')
     expect(wrapper.find(`[data-testid="${testIds.toolApprovalAlways}"]`).exists()).toBe(true)
+  })
+})
+
+describe('toolPart: shell rules (Phase 8)', () => {
+  function shellPart(output: Record<string, unknown>): ToolPartLike {
+    return part({ type: 'tool-shell', toolCallId: 'call_shell', state: 'output-available', input: { command: 'pnpm test' }, output } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+  }
+
+  it('shows the rule badge before the summary of a shell call allowed by rules', () => {
+    const wrapper = mountPart(shellPart(shellOutput({ command: 'pnpm test', allowedBy: ['pnpm test', 'git status'] })), false)
+    const badge = row(wrapper).get(`[data-testid="${testIds.toolRowRule}"]`)
+    expect(badge.attributes('data-value')).toBe('pnpm test, git status')
+    expect(badge.text()).toBe(', allowed by rule pnpm test, git status')
+    expect(badge.element.nextElementSibling?.getAttribute('data-testid')).toBe(testIds.toolRowSummary)
+  })
+
+  it('shows no badge without allowedBy (an approved call, an output saved before v1.4)', () => {
+    const wrapper = mountPart(shellPart(shellOutput({ command: 'pnpm test' })), false)
+    expect(row(wrapper).find(`[data-testid="${testIds.toolRowRule}"]`).exists()).toBe(false)
+    expect(row(wrapper).find(`[data-testid="${testIds.toolRowSummary}"]`).exists()).toBe(true)
+  })
+
+  it('passes the card\'s allowRules on with the approval', () => {
+    const toolPart = part({ type: 'tool-shell', toolCallId: 'call_shell', state: 'approval-requested', approval: { id: 'appr_shell' }, input: { command: 'pnpm test' } } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+    const wrapper = mount(ToolPart, {
+      props: { part: toolPart, streaming: false },
+      global: { stubs: { Tooltip: { template: '<div><slot /></div>' }, CopyButton: true } },
+      attachTo: document.body,
+    })
+    const allowRules = { prefixes: ['pnpm test'], scope: 'project' as const }
+    wrapper.getComponent(ToolApprovalCard).vm.$emit('decide', { approved: true, alwaysAllow: false, allowRules })
+    expect(wrapper.emitted('approval')).toEqual([[{ id: 'appr_shell', approved: true, toolName: 'shell', alwaysAllow: false, allowRules }]])
   })
 })

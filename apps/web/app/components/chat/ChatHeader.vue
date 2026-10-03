@@ -7,6 +7,8 @@
 // `useChatActions`); moving is `useMoveChat` (optimistic, toast with Undo); Share… opens the Share dialog
 // (ui.openShare, docs/UI.md 7.14) once the menu has closed and its trigger has focus again, so the dialog returns focus
 // there when it closes.
+// Phase 8 (C20 mounts it, W8.8 implements it): ChangesToggle between the project chip and `⋯` (docs/UI.md 2.15, 7.21);
+// it renders nothing without a project.
 import {
   BrainIcon,
   FileJsonIcon,
@@ -40,6 +42,7 @@ import KbdCombo from '~/components/common/KbdCombo.vue'
 import ChatProjectChip from '~/components/projects/ChatProjectChip.vue'
 import { useMoveChat } from '~/components/projects/move-chat'
 import ProjectMenuItems from '~/components/projects/ProjectMenuItems.vue'
+import ChangesToggle from '~/components/workspace/changes/ChangesToggle.vue'
 import { useProjectsStore } from '~/stores/projects'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
@@ -170,6 +173,7 @@ function move(projectId: string | null) {
     </div>
 
     <ChatProjectChip v-if="projectId" :chat-id="chatId" :project-id="projectId" />
+    <ChangesToggle :chat-id="chatId" :project-id="projectId" />
 
     <DropdownMenu>
       <DropdownMenuTrigger as-child>

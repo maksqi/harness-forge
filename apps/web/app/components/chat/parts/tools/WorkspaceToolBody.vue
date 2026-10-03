@@ -4,7 +4,8 @@
 // shows the generic ToolValueBlocks. Replaces the Input / Output blocks of ToolPart and ShareToolRow (their error block
 // stays). Store-free (the share page renders it too).
 // Contract (docs/UI.md 10.4): props below, no emits; no root test id of its own. Additive (not frozen): the slot `raw`
-// holds the generic blocks; the toggle renders only when the caller fills it.
+// holds the generic blocks; the toggle renders only when the caller fills it. Phase 8 (C20): the diff's server totals go
+// to DiffView's `stats` prop (they count cut hunks too).
 import type { WorkspaceToolView } from './workspace-tools'
 import { ChevronRightIcon } from '@lucide/vue'
 import { computed, ref, useId } from 'vue'
@@ -14,7 +15,6 @@ import DiffView from './DiffView.vue'
 import FileContent from './FileContent.vue'
 import FileList from './FileList.vue'
 import TerminalOutput from './TerminalOutput.vue'
-import { MINUS_SIGN } from './workspace-tools'
 
 const props = withDefaults(defineProps<{
   view: WorkspaceToolView
@@ -44,14 +44,8 @@ const emptyText = computed(() => (props.view.kind === 'list' ? EMPTY_LIST[props.
       :path="view.path"
       :created="view.created"
       :truncated="view.truncated"
-    >
-      <template #stats>
-        <template v-if="view.additions + view.deletions > 0">
-          <span class="text-success">+{{ view.additions }}</span>
-          <span class="text-destructive">{{ MINUS_SIGN }}{{ view.deletions }}</span>
-        </template>
-      </template>
-    </DiffView>
+      :stats="{ additions: view.additions, deletions: view.deletions }"
+    />
     <TerminalOutput
       v-else-if="view.kind === 'terminal'"
       :command="view.command"

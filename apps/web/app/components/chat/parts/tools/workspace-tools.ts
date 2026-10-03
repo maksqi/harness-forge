@@ -3,8 +3,9 @@
 // the approval previews (`ToolApprovalPreview`). Pure and store-free: the share page uses it too. Every function
 // returns null for a name outside `WORKSPACE_TOOL_NAMES` or a value that fails the shared schema (a plugin tool with
 // the same name, a share value cut to a `[truncated]` string), so the row keeps its generic Input / Output blocks.
-// Signatures frozen from Gate P7-0b (C15).
-import type { DiffHunk, ShellOutput, WorkspaceDiff, WorkspaceEntryType, WorkspaceToolName } from '@harness-forge/shared'
+// Signatures frozen from Gate P7-0b (C15). Phase 8 additions (C20 in P8-0b, W8.10 in P8-A; docs/UI.md 7.19, 11.5): the
+// spoken `label` of a row summary, `diffStatsLabel`, the terminal view's `cwd` and `currentShellCwd(messages)`.
+import type { DiffHunk, HarnessUIMessage, ShellOutput, WorkspaceDiff, WorkspaceEntryType, WorkspaceToolName } from '@harness-forge/shared'
 import type { Component } from 'vue'
 import {
   editFileToolInputSchema,
@@ -45,7 +46,13 @@ export interface FileListItem {
 /** What a workspace tool part renders: a diff, a terminal, file content or a list. */
 export type WorkspaceToolView
   = | { kind: 'diff', path: string, created: boolean, additions: number, deletions: number, hunks: DiffHunk[], truncated: boolean }
-    | { kind: 'terminal', command: string, output: ShellOutput | null }
+    | {
+      kind: 'terminal'
+      command: string
+      output: ShellOutput | null
+      /** + Phase 8: the folder the command started in: the output's `cwd`, else the input's (null when neither). */
+      cwd: string | null
+    }
     | { kind: 'file', path: string, content: string, startLine: number, endLine: number, totalLines: number | null, truncated: boolean }
     | { kind: 'list', items: FileListItem[], noun: 'entries' | 'files' | 'matches', truncated: boolean }
 
@@ -56,6 +63,11 @@ export type WorkspaceRowSummaryTone = 'muted' | 'success' | 'destructive' | 'war
 export interface WorkspaceRowSummary {
   text: string
   tone: WorkspaceRowSummaryTone
+  /**
+   * + Phase 8 (docs/UI.md 7.19): what a screen reader says instead of `text` ("12 lines added, 3 removed", "Exit code
+   * 1", ...). Until W8.10 it is the visible text.
+   */
+  label: string
 }
 
 const ICONS: Record<WorkspaceToolName, Component> = {
@@ -160,10 +172,10 @@ export function workspaceToolView(toolName: string, input: unknown, output: unkn
       // Before the output exists (running), the terminal shows the command from the input with "Running…".
       if (output === undefined || output === null) {
         const command = shellToolInputSchema.safeParse(input)
-        return command.success ? { kind: 'terminal', command: command.data.command, output: null } : null
+        return command.success ? { kind: 'terminal', command: command.data.command, output: null, cwd: command.data.cwd ?? null } : null
       }
       const parsed = shellToolOutputSchema.safeParse(output)
-      return parsed.success ? { kind: 'terminal', command: parsed.data.command, output: parsed.data } : null
+      return parsed.success ? { kind: 'terminal', command: parsed.data.command, output: parsed.data, cwd: parsed.data.cwd } : null
     }
   }
 }
@@ -204,7 +216,7 @@ export function workspaceApprovalView(toolName: string, input: unknown): Workspa
     }
     case 'shell': {
       const parsed = shellToolInputSchema.safeParse(input)
-      return parsed.success ? { kind: 'terminal', command: parsed.data.command, output: null } : null
+      return parsed.success ? { kind: 'terminal', command: parsed.data.command, output: null, cwd: parsed.data.cwd ?? null } : null
     }
     default:
       return null
@@ -257,12 +269,41 @@ export function diffSummaryText(additions: number, deletions: number): string {
   return `+${additions} ${MINUS_SIGN}${deletions}`
 }
 
+/**
+ * The spoken form of `+a −d` (docs/UI.md 7.19): "12 lines added, 3 removed", "1 line added, 1 removed"; one side alone:
+ * "12 lines added" / "3 lines removed"; nothing changed: "No changes". Used by the row summary, `DiffView` and the
+ * changes panel.
+ */
+export function diffStatsLabel(additions: number, deletions: number): string {
+  if (additions > 0 && deletions > 0)
+    return `${plural(additions, 'line', 'lines')} added, ${deletions} removed`
+  if (additions > 0)
+    return `${plural(additions, 'line', 'lines')} added`
+  if (deletions > 0)
+    return `${plural(deletions, 'line', 'lines')} removed`
+  return 'No changes'
+}
+
+/**
+ * The folder the chat's next `shell` call starts in (ADR-038; docs/UI.md 11.5): the `endCwd` of the last finished
+ * shell part on the shown path (`.` for an output saved before v1.4), null without one (the project folder).
+ * Stub (C20, P8-0b): always null until W8.10 implements it.
+ */
+export function currentShellCwd(_messages: readonly HarnessUIMessage[]): string | null {
+  return null
+}
+
+/** A summary whose spoken label is its visible text (W8.10 adds the spoken labels of docs/UI.md 7.19). */
+function rowSummary(text: string, tone: WorkspaceRowSummaryTone): WorkspaceRowSummary {
+  return { text, tone, label: text }
+}
+
 function diffSummary(diff: WorkspaceDiff | null, fallback: string): WorkspaceRowSummary {
   if (!diff)
-    return { text: fallback, tone: 'muted' }
+    return rowSummary(fallback, 'muted')
   if (diff.added === 0 && diff.removed === 0)
-    return { text: 'No changes', tone: 'muted' }
-  return { text: diffSummaryText(diff.added, diff.removed), tone: 'success' }
+    return rowSummary('No changes', 'muted')
+  return rowSummary(diffSummaryText(diff.added, diff.removed), 'success')
 }
 
 /** The row summary once the output exists, or null. */
@@ -276,30 +317,30 @@ export function workspaceRowSummary(toolName: string, output: unknown): Workspac
         return null
       const { startLine, endLine, totalLines } = parsed.data
       if (totalLines === 0)
-        return { text: 'empty file', tone: 'muted' }
+        return rowSummary('empty file', 'muted')
       const of = totalLines === null ? '' : ` of ${totalLines}`
       if (endLine < startLine)
-        return { text: `no lines${of}`, tone: 'muted' }
-      return { text: `lines ${startLine}–${endLine}${of}`, tone: 'muted' }
+        return rowSummary(`no lines${of}`, 'muted')
+      return rowSummary(`lines ${startLine}–${endLine}${of}`, 'muted')
     }
     case 'list_directory': {
       const parsed = listDirectoryToolOutputSchema.safeParse(output)
-      return parsed.success ? { text: plural(parsed.data.entries.length, 'entry', 'entries'), tone: 'muted' } : null
+      return parsed.success ? rowSummary(plural(parsed.data.entries.length, 'entry', 'entries'), 'muted') : null
     }
     case 'find_files': {
       const parsed = findFilesToolOutputSchema.safeParse(output)
-      return parsed.success ? { text: plural(parsed.data.paths.length, 'file', 'files'), tone: 'muted' } : null
+      return parsed.success ? rowSummary(plural(parsed.data.paths.length, 'file', 'files'), 'muted') : null
     }
     case 'search_files': {
       const parsed = searchFilesToolOutputSchema.safeParse(output)
-      return parsed.success ? { text: plural(parsed.data.matches.length, 'match', 'matches'), tone: 'muted' } : null
+      return parsed.success ? rowSummary(plural(parsed.data.matches.length, 'match', 'matches'), 'muted') : null
     }
     case 'write_file': {
       const parsed = writeFileToolOutputSchema.safeParse(output)
       if (!parsed.success)
         return null
       if (parsed.data.created)
-        return { text: `New · ${plural(parsed.data.lines, 'line', 'lines')}`, tone: 'success' }
+        return rowSummary(`New · ${plural(parsed.data.lines, 'line', 'lines')}`, 'success')
       return diffSummary(parsed.data.diff, `Updated · ${plural(parsed.data.lines, 'line', 'lines')}`)
     }
     case 'edit_file': {
@@ -314,12 +355,12 @@ export function workspaceRowSummary(toolName: string, output: unknown): Workspac
         return null
       const { exitCode, signal, timedOut } = parsed.data
       if (timedOut)
-        return { text: 'timed out', tone: 'warning' }
+        return rowSummary('timed out', 'warning')
       if (signal !== null)
-        return { text: `killed ${signal}`, tone: 'warning' }
+        return rowSummary(`killed ${signal}`, 'warning')
       if (exitCode === 0)
-        return { text: 'exit 0', tone: 'muted' }
-      return { text: exitCode === null ? 'exited' : `exit ${exitCode}`, tone: 'destructive' }
+        return rowSummary('exit 0', 'muted')
+      return rowSummary(exitCode === null ? 'exited' : `exit ${exitCode}`, 'destructive')
     }
   }
 }

@@ -4,6 +4,9 @@ import { APICallError } from '@ai-sdk/provider'
 
 export const MOCK_PROVIDER_ID = 'mock'
 
+/** The answer to an empty user text (`mock:echo`, `mock:shell`). */
+export const MOCK_EMPTY_MESSAGE = '(empty message)'
+
 /** Whitespace-separated words. */
 export function countWords(text: string): number {
   return text.split(/\s+/).filter(word => word !== '').length

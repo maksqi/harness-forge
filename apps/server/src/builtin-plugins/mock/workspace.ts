@@ -52,13 +52,16 @@ export function mockWorkspaceSteps(shell: boolean): MockWorkspaceStep[] {
 const WORKSPACE_TOOLS: ReadonlySet<string> = new Set(WORKSPACE_TOOL_NAMES)
 
 /** A workspace tool result after the last user message. */
-interface WorkspaceResult {
+export interface WorkspaceResult {
   toolName: string
   output: LanguageModelV4ToolResultOutput
 }
 
-/** What followed the last user message: the workspace tool results in order, and whether a call was denied. */
-function afterLastUser(prompt: LanguageModelV4Prompt): { results: WorkspaceResult[], denied: boolean } {
+/**
+ * What followed the last user message: the workspace tool results in order, and whether a call was denied (shared by
+ * `mock:workspace`, `mock:checkpoint` and `mock:shell`).
+ */
+export function afterLastUser(prompt: LanguageModelV4Prompt): { results: WorkspaceResult[], denied: boolean } {
   let start = 0
   for (let index = prompt.length - 1; index >= 0; index--) {
     if (prompt[index]?.role === 'user') {
@@ -85,7 +88,8 @@ function afterLastUser(prompt: LanguageModelV4Prompt): { results: WorkspaceResul
   return { results, denied }
 }
 
-function textOf(output: LanguageModelV4ToolResultOutput): string {
+/** The text of a tool result output (JSON outputs serialized). */
+export function textOf(output: LanguageModelV4ToolResultOutput): string {
   switch (output.type) {
     case 'text':
     case 'error-text':
@@ -119,27 +123,25 @@ export function mockShellStdout(output: LanguageModelV4ToolResultOutput): string
   return (end >= 0 ? body.slice(0, end) : body).join('\n').trim()
 }
 
-function textPlan(text: string): MockPlan {
+/** A plan that answers `text` and stops. */
+export function textPlan(text: string): MockPlan {
   return { reasoning: null, text, toolCall: null, finishReason: 'stop' }
 }
 
-/** The answer of `mock:workspace` to a call (see the module comment). */
-export function mockWorkspacePlan(options: LanguageModelV4CallOptions): MockPlan {
-  const offered = new Set((options.tools ?? []).flatMap(tool => (tool.type === 'function' ? [tool.name] : [])))
-  if (!offered.has('write_file') || !offered.has('edit_file'))
-    return textPlan(MOCK_WORKSPACE_UNAVAILABLE)
-  const { results, denied } = afterLastUser(options.prompt)
-  if (denied)
-    return textPlan(MOCK_WORKSPACE_DENIED)
-  const last = results.at(-1)
-  if (last !== undefined && (last.output.type === 'error-text' || last.output.type === 'error-json'))
-    return textPlan(`${MOCK_WORKSPACE_FAILED_PREFIX} ${textOf(last.output)}`.trimEnd())
-  const steps = mockWorkspaceSteps(offered.has('shell'))
-  const step = steps[results.length]
-  if (step === undefined) {
-    const shell = results.findLast(result => result.toolName === 'shell')
-    return textPlan(shell === undefined ? MOCK_WORKSPACE_DONE : `${MOCK_WORKSPACE_DONE_PREFIX} ${mockShellStdout(shell.output)}`.trimEnd())
-  }
+/** The names of the function tools offered in the call. */
+export function offeredTools(options: LanguageModelV4CallOptions): Set<string> {
+  return new Set((options.tools ?? []).flatMap(tool => (tool.type === 'function' ? [tool.name] : [])))
+}
+
+/** The failure text of an error result (`The tool call failed: <error text>`), or null for any other output. */
+export function failedText(result: WorkspaceResult | undefined): string | null {
+  if (result === undefined || (result.output.type !== 'error-text' && result.output.type !== 'error-json'))
+    return null
+  return `${MOCK_WORKSPACE_FAILED_PREFIX} ${textOf(result.output)}`.trimEnd()
+}
+
+/** One tool call of a plan with id `mock_call_<n>` (n = assistant messages of the prompt + 1). */
+export function toolCallPlan(options: LanguageModelV4CallOptions, step: MockWorkspaceStep): MockPlan {
   const assistantMessages = options.prompt.filter(message => message.role === 'assistant').length
   return {
     reasoning: null,
@@ -147,4 +149,24 @@ export function mockWorkspacePlan(options: LanguageModelV4CallOptions): MockPlan
     toolCall: { toolCallId: `mock_call_${assistantMessages + 1}`, toolName: step.toolName, input: JSON.stringify(step.input) },
     finishReason: 'tool-calls',
   }
+}
+
+/** The answer of `mock:workspace` to a call (see the module comment). */
+export function mockWorkspacePlan(options: LanguageModelV4CallOptions): MockPlan {
+  const offered = offeredTools(options)
+  if (!offered.has('write_file') || !offered.has('edit_file'))
+    return textPlan(MOCK_WORKSPACE_UNAVAILABLE)
+  const { results, denied } = afterLastUser(options.prompt)
+  if (denied)
+    return textPlan(MOCK_WORKSPACE_DENIED)
+  const failed = failedText(results.at(-1))
+  if (failed !== null)
+    return textPlan(failed)
+  const steps = mockWorkspaceSteps(offered.has('shell'))
+  const step = steps[results.length]
+  if (step === undefined) {
+    const shell = results.findLast(result => result.toolName === 'shell')
+    return textPlan(shell === undefined ? MOCK_WORKSPACE_DONE : `${MOCK_WORKSPACE_DONE_PREFIX} ${mockShellStdout(shell.output)}`.trimEnd())
+  }
+  return toolCallPlan(options, step)
 }

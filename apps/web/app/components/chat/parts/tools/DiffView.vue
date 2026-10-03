@@ -6,18 +6,19 @@
 // "Show {n} more lines" (diff-expand, data-action = unfold | show-all); truncated -> "Diff truncated by server"; no
 // hunks + truncated (a `null` server diff) -> "The diff is too large to show." Below `sm` one line-number column. Each
 // changed line has an sr-only "Added" / "Removed" label. Store-free (the share page renders it too).
-// Contract (docs/UI.md 10.4): props below, no emits; root diff-view (data-path, data-state = created | modified;
-// role="region" aria-label "Changes to {path}"). Additive (not frozen): the slot `stats` ({ additions, deletions })
-// replaces the header's `+a −d` (WorkspaceToolBody passes the server's totals, which count cut hunks too), and the
-// fallthrough attribute `data-numbers="off"` hides the line numbers and hunk headers (approval previews diff a
-// snippet, whose line numbers are not the file's).
+// Contract (docs/UI.md 10.4, 10.5): props below, no emits, no slots; root diff-view (data-path, data-state = created |
+// modified, data-numbers = on | off; role="region" aria-label "Changes to {path}"). Phase 8 (C20): the header totals
+// come from the `stats` prop (WorkspaceToolBody and the changes panel pass the server's totals, which count cut hunks
+// too; null / absent = counted from the hunks), shown when additions + deletions > 0, aria-hidden with the sr-only
+// diffStatsLabel text; `lineNumbers: false` hides the line numbers and hunk headers (approval previews diff a snippet,
+// whose line numbers are not the file's). The `stats` slot and the `data-numbers` fallthrough attribute of v1.3 are gone.
 import type { DiffHunk } from '@harness-forge/shared'
-import { computed, ref, useAttrs, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import CopyButton from '~/components/common/CopyButton.vue'
 import { testIds } from '~/utils/testids'
-import { countDiffLines, MINUS_SIGN } from './workspace-tools'
+import { countDiffLines, diffStatsLabel, MINUS_SIGN } from './workspace-tools'
 
 const props = withDefaults(defineProps<{
   /** The server's hunks (workspaceDiffSchema) or utils/line-diff.ts output. */
@@ -30,16 +31,21 @@ const props = withDefaults(defineProps<{
   truncated?: boolean
   /** Lines shown before "Show {n} more lines"; default 200. */
   maxLines?: number
+  /**
+   * + Phase 8: the header's `+a −d` (the server's totals, which count cut hunks too); null / absent = counted from the
+   * hunks.
+   */
+  stats?: { additions: number, deletions: number } | null
+  /** + Phase 8: false = no line numbers and no hunk headers (approval previews); default true. */
+  lineNumbers?: boolean
 }>(), {
   path: null,
   created: false,
   truncated: false,
   maxLines: 200,
+  stats: null,
+  lineNumbers: true,
 })
-
-defineSlots<{
-  stats?: (props: { additions: number, deletions: number }) => unknown
-}>()
 
 /** Runs of more unchanged lines than this fold; FOLD_KEEP lines stay next to each change. */
 const FOLD_MIN = 8
@@ -53,8 +59,7 @@ type DiffRow
     | { type: 'note', key: string, text: string }
     | { type: 'fold', key: string, count: number }
 
-const attrs = useAttrs()
-const numbers = computed(() => attrs['data-numbers'] !== 'off')
+const numbers = computed(() => props.lineNumbers)
 
 const unfolded = ref<string[]>([])
 const showAll = ref(false)
@@ -63,7 +68,9 @@ watch(() => props.hunks, () => {
   showAll.value = false
 })
 
-const counts = computed(() => countDiffLines(props.hunks))
+/** The header totals: the `stats` prop, else counted from the hunks. */
+const totals = computed(() => props.stats ?? countDiffLines(props.hunks))
+const showTotals = computed(() => totals.value.additions + totals.value.deletions > 0)
 
 /** Every row of every hunk, numbered, before folding. */
 const hunkRows = computed(() => props.hunks.map((hunk, h) => {
@@ -184,6 +191,7 @@ function unfold(key: string) {
     :data-testid="testIds.diffView"
     :data-path="path ?? ''"
     :data-state="created ? 'created' : 'modified'"
+    :data-numbers="numbers ? 'on' : 'off'"
     role="region"
     :aria-label="path ? `Changes to ${path}` : 'Changes'"
     class="flex min-w-0 flex-col overflow-hidden rounded-md border bg-background text-xs"
@@ -195,12 +203,13 @@ function unfold(key: string) {
         New file
       </Badge>
       <span class="ml-auto flex shrink-0 items-center gap-1.5 font-mono tabular-nums">
-        <slot name="stats" :additions="counts.additions" :deletions="counts.deletions">
-          <template v-if="hunks.length > 0">
-            <span class="text-success">+{{ counts.additions }}</span>
-            <span class="text-destructive">{{ MINUS_SIGN }}{{ counts.deletions }}</span>
-          </template>
-        </slot>
+        <template v-if="showTotals">
+          <span aria-hidden="true" data-slot="diff-stats" class="flex items-center gap-1.5">
+            <span class="text-success">+{{ totals.additions }}</span>
+            <span class="text-destructive">{{ MINUS_SIGN }}{{ totals.deletions }}</span>
+          </span>
+          <span class="sr-only">{{ diffStatsLabel(totals.additions, totals.deletions) }}</span>
+        </template>
       </span>
       <CopyButton v-if="path" :text="path" label="Copy path" class="pointer-coarse:size-10" />
     </div>

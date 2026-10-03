@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { afterEach, describe, expect, it } from 'vitest'
-import { bindSafetyError, defaultEnvFile, ensureDataDir, EnvError, isLoopbackHost, loadDotEnvFile, loadEnv, parseWorkspaceRoots } from './env.ts'
+import { bindSafetyError, defaultEnvFile, ensureDataDir, envBootWarnings, EnvError, isLoopbackHost, loadDotEnvFile, loadEnv, parseWorkspaceRoots, TEST_FILE_SWEEP_DELAY_RANGE } from './env.ts'
 import { findWorkspaceRoot, serverPackageRoot } from './paths.ts'
 
 const tempDirs: string[] = []
@@ -259,6 +259,51 @@ describe('hF_WORKSPACE_ROOTS and HF_WORKSPACE_SHELL (Phase 7, ADR-031 / ADR-033)
     const env = loadEnv({ HF_DATA_DIR: join(tempDir(), 'data') })
     ensureDataDir(env)
     expect(existsSync(env.paths.workspaces)).toBe(false)
+  })
+})
+
+describe('phase 8: checkpoints and HF_TEST_FILE_SWEEP_DELAY_MS (ADR-036, ADR-039)', () => {
+  it('the checkpoint store is <dataDir>/checkpoints; ensureDataDir does not create it (checkpoints.start() does)', () => {
+    const dataDir = join(tempDir(), 'data')
+    const env = loadEnv({ HF_DATA_DIR: dataDir })
+    expect(env.paths.checkpoints).toBe(join(dataDir, 'checkpoints'))
+    expect(Object.isFrozen(env.paths)).toBe(true)
+    ensureDataDir(env)
+    expect(existsSync(env.paths.checkpoints)).toBe(false)
+  })
+
+  it('unset (or empty): null and no warning', () => {
+    const cwd = tempDir()
+    for (const value of [undefined, '', '  ']) {
+      const env = loadEnv({ HF_MOCK_PROVIDER: '1', HF_TEST_FILE_SWEEP_DELAY_MS: value }, { cwd })
+      expect(env.testFileSweepDelayMs).toBeNull()
+      expect(envBootWarnings(env)).toEqual([])
+    }
+  })
+
+  it('honored with HF_MOCK_PROVIDER=1 inside 1000 - 86,400,000 ms (both bounds included)', () => {
+    const cwd = tempDir()
+    expect(TEST_FILE_SWEEP_DELAY_RANGE).toEqual({ min: 1000, max: 86_400_000 })
+    for (const [value, expected] of [['2000', 2000], [' 1000 ', 1000], ['86400000', 86_400_000]] as const) {
+      const env = loadEnv({ HF_MOCK_PROVIDER: '1', HF_TEST_FILE_SWEEP_DELAY_MS: value }, { cwd })
+      expect(env.testFileSweepDelayMs, value).toBe(expected)
+      expect(envBootWarnings(env)).toEqual([])
+    }
+  })
+
+  it('ignored without HF_MOCK_PROVIDER=1: null and a boot warning', () => {
+    const cwd = tempDir()
+    for (const mock of [undefined, '0']) {
+      const env = loadEnv({ HF_MOCK_PROVIDER: mock, HF_TEST_FILE_SWEEP_DELAY_MS: '2000' }, { cwd })
+      expect(env.testFileSweepDelayMs).toBeNull()
+      expect(envBootWarnings(env)).toEqual(['the test-only automatic file sweep delay is ignored: it is honored only with HF_MOCK_PROVIDER=1'])
+    }
+  })
+
+  it.each(['999', '0', '86400001', '-5', '1.5', 'soon', '1e4'])('refuses %j (out of range or not a whole number of ms)', (value) => {
+    const cwd = tempDir()
+    expect(() => loadEnv({ HF_MOCK_PROVIDER: '1', HF_TEST_FILE_SWEEP_DELAY_MS: value }, { cwd })).toThrow(EnvError)
+    expect(() => loadEnv({ HF_TEST_FILE_SWEEP_DELAY_MS: value }, { cwd })).toThrow(/HF_TEST_FILE_SWEEP_DELAY_MS/)
   })
 })
 

@@ -18,6 +18,10 @@
 // comes from the chats store row or the summary and changes through `PATCH /api/chats/:id`. "Accept all edits in this
 // chat" switches the chat to the `edits` permission mode before the approval goes out (ADR-032). After a master-key
 // rotation (ADR-034) the sessions of the chats it touched reload their path (expired approvals, stopped runs).
+//
+// Workspace 2.0 (Phase 8, ADR-038; C20 declares, W8.10 implements; frozen from Gate P8-0b): `cwd` is the folder the
+// chat's next shell call starts in, derived from the shown path like the server does (`currentShellCwd`), and a shell
+// approval may carry `allowRules` (the rules to create first; `approve()` ignores them until W8.10).
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   ChatDetail,
@@ -34,6 +38,7 @@ import type {
 } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ComputedRef, EffectScope, Ref, WritableComputedRef } from 'vue'
+import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
 import type { ChatRunState as ChatListRunState } from '~/stores/chats'
 import { useChat } from '@ai-sdk/vue'
 import { createChatId, createMessageId, harnessDataSchemas, HarnessError, messageMetadataSchema } from '@harness-forge/shared'
@@ -46,6 +51,7 @@ import {
   lastAssistantMessageIsCompleteWithApprovalResponses,
 } from 'ai'
 import { computed, effectScope, getCurrentScope, nextTick, onScopeDispose, ref, shallowRef, watch } from 'vue'
+import { currentShellCwd } from '~/components/chat/parts/tools/workspace-tools'
 import { useApi, useApiFetch } from '~/composables/useApi'
 import { useImageOptions } from '~/composables/useImageOptions'
 import { useServerEvents } from '~/composables/useServerEvents'
@@ -100,6 +106,13 @@ export interface ToolApprovalDecision {
    * is sent (W7.10).
    */
   acceptEdits?: boolean
+  /**
+   * + Phase 8 (ADR-038; W8.10): "Always allow commands starting with" on a shell approval: `approve()` first awaits
+   * `POST /shell-rules` for each prefix (projectId: the session's project for 'project', null for 'global'; 409 exists
+   * counts as saved), then sends the approval; a failed save still sends it, then rethrows. Declared in P8-0b and
+   * ignored until W8.10.
+   */
+  allowRules?: AllowRules
 }
 
 export interface ChatSession {
@@ -183,6 +196,11 @@ export interface ChatSession {
    * { projectId }` (throws `HarnessError` on 409 run-active / 404; `useMoveChat` is the menu action with the toasts).
    */
   setProject: (projectId: string | null) => Promise<void>
+  /**
+   * + Phase 8 (ADR-038): the folder the chat's next shell call starts in, project-relative (`currentShellCwd` over the
+   * shown path, so it follows versions); null = the project folder.
+   */
+  cwd: ComputedRef<string | null>
 }
 
 export interface ChatSessionRegistry {
@@ -1000,6 +1018,9 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     return task
   }
 
+  /** + Phase 8: the sticky shell folder of the shown path (null = the project folder). */
+  const cwd = computed<string | null>(() => currentShellCwd(chat.messages.value))
+
   async function setProject(next: string | null): Promise<void> {
     if (!persisted.value) {
       // Sent with the first request.
@@ -1108,6 +1129,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     takeBackUnstored,
     projectId,
     setProject,
+    cwd,
   }
 }
 

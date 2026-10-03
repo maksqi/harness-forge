@@ -5,7 +5,9 @@
 // runs), then the meta slot. Fixed 28px height (40px touch targets on coarse pointers) and always laid out, so
 // revealing it never moves the transcript. The version switcher sits before this row (ChatMessage), outside its hover
 // fade.
-import { PencilIcon, RotateCcwIcon, Trash2Icon } from '@lucide/vue'
+// Phase 8 (C20 declares, W8.9 uses; frozen from Gate P8-0b): "Rewind files to here" (message-rewind, History) after Edit
+// and before Delete this version, shown with `canRewind` and hidden like Edit while the transcript is busy.
+import { HistoryIcon, PencilIcon, RotateCcwIcon, Trash2Icon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -21,16 +23,19 @@ withDefaults(defineProps<{
   canEdit?: boolean
   /** "Delete this version": the message has versions and nothing runs. */
   canDeleteVersion?: boolean
+  /** + Phase 8: "Rewind files to here" (a user message followed by agent edits in a project chat); default false. */
+  canRewind?: boolean
   align?: 'start' | 'end'
 }>(), {
   canCopy: true,
   canRegenerate: false,
   canEdit: false,
   canDeleteVersion: false,
+  canRewind: false,
   align: 'start',
 })
 
-const emit = defineEmits<{ 'regenerate': [], 'edit': [], 'delete-version': [] }>()
+const emit = defineEmits<{ 'regenerate': [], 'edit': [], 'delete-version': [], 'rewind': [] }>()
 
 defineSlots<{
   /** Right after Copy (ReadAloudButton). */
@@ -85,6 +90,22 @@ function deleteVersion() {
         </Button>
       </TooltipTrigger>
       <TooltipContent>Edit</TooltipContent>
+    </Tooltip>
+    <Tooltip v-if="canRewind">
+      <TooltipTrigger as-child>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label="Rewind files to here"
+          :data-testid="testIds.messageRewind"
+          :class="iconButtonClass"
+          @click="emit('rewind')"
+        >
+          <HistoryIcon class="size-3.5" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>Rewind files to here</TooltipContent>
     </Tooltip>
     <Tooltip v-if="canDeleteVersion">
       <TooltipTrigger as-child>

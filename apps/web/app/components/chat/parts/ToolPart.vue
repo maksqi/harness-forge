@@ -9,8 +9,11 @@
 // workspace registry, and their body is WorkspaceToolBody (diff, terminal, file content, file list) with the generic
 // blocks behind "Raw input and output"; a running shell shows its terminal with "Running…". A value that does not
 // parse with the shared schemas keeps the generic blocks.
+// Phase 8 (C20 wires it, W8.10 finishes it): a shell output with `allowedBy` (the command ran because shell rules
+// matched, ADR-038) shows ToolRuleBadge before the summary; the approval payload passes the card's `allowRules` on.
 import type { ToolPartLike } from '../chat-format'
-import { WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
+import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
+import { shellToolOutputSchema, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import {
   BanIcon,
   CheckIcon,
@@ -39,6 +42,7 @@ import {
 import { toolRowArgument } from './tool-row'
 import ToolApprovalCard from './ToolApprovalCard.vue'
 import ToolRowSummary from './tools/ToolRowSummary.vue'
+import ToolRuleBadge from './tools/ToolRuleBadge.vue'
 import {
   isWorkspaceToolName,
   workspaceRowSummary,
@@ -62,8 +66,11 @@ const props = withDefaults(defineProps<{
 })
 
 const emit = defineEmits<{
-  /** + Phase 7: `acceptEdits` = "Accept all edits in this chat" (the session switches the mode to `edits`). */
-  approval: [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean, acceptEdits?: boolean }]
+  /**
+   * + Phase 7: `acceptEdits` = "Accept all edits in this chat" (the session switches the mode to `edits`). + Phase 8:
+   * `allowRules` = the shell rules to create before the approval is sent (passed through from the card).
+   */
+  approval: [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean, acceptEdits?: boolean, allowRules?: AllowRules }]
 }>()
 
 const plugins = usePluginsStore()
@@ -150,6 +157,13 @@ const errorText = computed(() => (props.part.state === 'output-error' ? props.pa
 
 /** The row summary of a finished workspace tool (7.19). */
 const summary = computed(() => (hasOutput.value ? workspaceRowSummary(name.value, props.part.output) : null))
+/** + Phase 8: the prefixes of the shell rules that let a finished `shell` call run without a card (ToolRuleBadge). */
+const allowedBy = computed<readonly string[]>(() => {
+  if (!hasOutput.value || name.value !== 'shell')
+    return []
+  const parsed = shellToolOutputSchema.safeParse(props.part.output)
+  return parsed.success ? parsed.data.allowedBy ?? [] : []
+})
 /**
  * The workspace body: the finished output, or the terminal of a shell command that is running (its input is complete);
  * null keeps the generic blocks.
@@ -164,7 +178,7 @@ const view = computed(() => {
   return runningShell ? workspaceToolView(name.value, props.part.input, null) : null
 })
 
-function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdits?: boolean }) {
+function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdits?: boolean, allowRules?: AllowRules }) {
   const approval = props.part.approval
   if (!approval)
     return
@@ -174,6 +188,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
     toolName: name.value,
     alwaysAllow: decision.alwaysAllow,
     ...(decision.acceptEdits === undefined ? {} : { acceptEdits: decision.acceptEdits }),
+    ...(decision.allowRules === undefined ? {} : { allowRules: decision.allowRules }),
   })
 }
 </script>
@@ -201,6 +216,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
             {{ serverName }}
           </Badge>
           <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs text-muted-foreground">
+            <ToolRuleBadge v-if="allowedBy.length > 0" :prefixes="allowedBy" />
             <ToolRowSummary v-if="summary" :summary="summary" class="mr-0.5" />
             <Spinner v-if="status === 'running'" class="size-3" />
             <template v-else-if="status === 'approval'">

@@ -29,6 +29,7 @@ import type {
   ToolSummary,
   WorkspaceChangedData,
 } from '@harness-forge/shared'
+import type { ChangesRow } from '~/components/workspace/changes/changes-rows'
 import { DEFAULT_SETTINGS } from '@harness-forge/shared'
 
 /** A fixed uuidv7 chat id with a varying last group: chatId(1) -> '...000000000001'. */
@@ -358,6 +359,23 @@ export function rewindPreview(overrides: Partial<RewindPreview> = {}): RewindPre
 /** The answer of a revert, an undo or a rewind that restored one file. */
 export function restoreResult(overrides: Partial<RestoreResult> = {}): RestoreResult {
   return { batchId: changeBatchId(1), restored: ['src/index.ts'], deleted: [], unchanged: [], skipped: [], ...overrides }
+}
+
+/** One row of the changes panel (This chat view): `src/index.ts` modified by one edit (+1 -1), revertible. */
+export function changesRow(overrides: Partial<ChangesRow> = {}): ChangesRow {
+  return {
+    path: 'src/index.ts',
+    origPath: null,
+    status: 'modified',
+    additions: 1,
+    deletions: 1,
+    changedOutside: false,
+    revertible: true,
+    edits: 1,
+    staged: null,
+    unstaged: null,
+    ...overrides,
+  }
 }
 
 /** A shell rule of project 1. */

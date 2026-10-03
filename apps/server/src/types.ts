@@ -13,6 +13,7 @@ import type { Registry } from './registry/types.ts'
 import type { Keyring, PasswordService, Redactor, SessionService } from './security/types.ts'
 import type { AudioService } from './services/audio/types.ts'
 import type { ChatsService } from './services/chats/types.ts'
+import type { CheckpointService } from './services/checkpoints/types.ts'
 import type { DataService } from './services/data/types.ts'
 import type { EventBus } from './services/events/types.ts'
 import type { FilesService } from './services/files/types.ts'
@@ -23,6 +24,7 @@ import type { ProjectService } from './services/projects/types.ts'
 import type { CredentialService, SecretStore } from './services/secrets/types.ts'
 import type { SettingsService } from './services/settings/types.ts'
 import type { ShareService } from './services/shares/types.ts'
+import type { ShellRuleService } from './services/shell-rules/types.ts'
 
 /** Values created before the services (by `main.ts` or `createTestApp()`). */
 export interface AppBase {
@@ -100,6 +102,14 @@ export interface AppServices {
    * runs (Phase 7, ADR-034 / ADR-035; C16).
    */
   readonly maintenance: MaintenanceService
+  /**
+   * Checkpoints, rewind, revert, undo and the changes panel data: the journal of agent writes in `workspace_changes`
+   * and the blob store `<dataDir>/checkpoints/` (Phase 8, ADR-036 / ADR-037; C19 stub, W8.1 - W8.3). `start()` runs
+   * right after `projects.start()`; `stop()` after the runs stopped.
+   */
+  readonly checkpoints: CheckpointService
+  /** Shell rules: the per-project and global allowlist of command prefixes (Phase 8, ADR-038; C19 stub, W8.6). */
+  readonly shellRules: ShellRuleService
 }
 
 export interface AppDeps extends AppBase, AppServices {}

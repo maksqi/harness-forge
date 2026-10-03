@@ -12,6 +12,10 @@ import { getBuiltinPlugins } from '../index.ts'
 import mockPlugin, {
   createMockWav,
   manifest,
+  MOCK_CHECKPOINT_DONE,
+  MOCK_CHECKPOINT_LS_COMMAND,
+  MOCK_CHECKPOINT_MKDIR_COMMAND,
+  MOCK_SHELL_DONE_PREFIX,
   MOCK_SPEECH_VOICES,
   MOCK_TRANSCRIPT,
   MOCK_WORKSPACE_COMMAND,
@@ -21,6 +25,8 @@ import mockPlugin, {
   MOCK_WORKSPACE_FILE,
   MOCK_WORKSPACE_UNAVAILABLE,
   mockApprovalTool,
+  mockCheckpointContent,
+  mockCheckpointSteps,
   mockModels,
   mockProvider,
   mockWorkspaceSteps,
@@ -63,15 +69,15 @@ describe('mock plugin', () => {
 })
 
 describe('mock provider definition', () => {
-  it('has no credentials, no icon, echo as small model and the ten models as listing and seeds', async () => {
+  it('has no credentials, no icon, echo as small model and the twelve models as listing and seeds', async () => {
     expect(mockProvider).toMatchObject({ id: 'mock', name: 'Mock (dev only)', credentials: [], smallModelId: 'echo' })
     expect(mockProvider.icon).toBeUndefined()
     const listed = await mockProvider.listModels?.({ credentials: {}, fetch: globalThis.fetch })
-    expect(listed?.map(model => model.id)).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image', 'image-chat', 'image-tool', 'transcribe', 'speech', 'workspace'])
+    expect(listed?.map(model => model.id)).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image', 'image-chat', 'image-tool', 'transcribe', 'speech', 'workspace', 'checkpoint', 'shell'])
     expect(mockProvider.seedModels).toEqual(listed)
     expect(modelInfoListSchema.parse(mockModels())).toEqual(mockModels())
     const byId = new Map(mockModels().map(model => [model.id, model]))
-    for (const id of ['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace'])
+    for (const id of ['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace', 'checkpoint', 'shell'])
       expect(modelInfoSchema.parse(byId.get(id)), id).toMatchObject({ contextWindow: 32_000, maxOutputTokens: 4096, cost: { input: 1, output: 2 } })
     for (const id of ['echo', 'reasoning', 'tool-approval', 'error'])
       expect(byId.get(id)?.kind, id).toBeUndefined()
@@ -96,6 +102,14 @@ describe('mock provider definition', () => {
     const workspace = mockModels().find(model => model.id === 'workspace')
     expect(workspace).toMatchObject({ name: 'Mock Workspace', kind: 'chat', capabilities: { tools: true, vision: false, imageOutput: false } })
     expect(mockProvider.createLanguageModel('workspace', { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: 'workspace' })
+  })
+
+  it('lists mock:checkpoint and mock:shell (Phase 8) as explicit chat models with tools', () => {
+    const byId = new Map(mockModels().map(model => [model.id, model]))
+    expect(byId.get('checkpoint')).toMatchObject({ name: 'Mock Checkpoint', kind: 'chat', capabilities: { tools: true, vision: false, imageOutput: false } })
+    expect(byId.get('shell')).toMatchObject({ name: 'Mock Shell', kind: 'chat', capabilities: { tools: true, vision: false, imageOutput: false } })
+    for (const id of ['checkpoint', 'shell'])
+      expect(mockProvider.createLanguageModel(id, { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: id })
   })
 
   it('passes the registry validation of provider definitions', () => {
@@ -307,5 +321,168 @@ describe('mock:workspace end to end through streamText (tools over a temp projec
 
   it('without the shell: writes, edits and answers "Workspace done."', async () => {
     expect(await run(false)).toEqual({ text: 'Workspace done.', file: 'Hello from the workspace agent.\n', steps: ['write_file', 'edit_file'] })
+  })
+})
+
+// ---------- mock:checkpoint and mock:shell (Phase 8, PROVIDERS.md 8) ----------
+
+/** A prompt with `turns` earlier user turns (each answered), then the last user message and the given results. */
+function turnPrompt(turns: number, results: Array<{ toolName: string, output: LanguageModelV4ToolResultOutput }>, text = 'Next turn'): LanguageModelV4Prompt {
+  const history: LanguageModelV4Prompt = []
+  for (let index = 0; index < turns; index++) {
+    history.push({ role: 'user', content: [{ type: 'text', text: `turn ${index + 1}` }] })
+    history.push({ role: 'assistant', content: [{ type: 'text', text: MOCK_CHECKPOINT_DONE }] })
+  }
+  const prompt: LanguageModelV4Prompt = [...history, { role: 'user', content: [{ type: 'text', text }] }]
+  results.forEach(({ toolName, output }, index) => {
+    const toolCallId = `mock_call_${turns + index + 1}`
+    prompt.push({ role: 'assistant', content: [{ type: 'tool-call', toolCallId, toolName, input: {} }] })
+    prompt.push({ role: 'tool', content: [{ type: 'tool-result', toolCallId, toolName, output }] })
+  })
+  return prompt
+}
+
+function checkpointPlan(tools: readonly string[] | undefined, prompt: LanguageModelV4Prompt): ReturnType<typeof mockPlan> {
+  return mockPlan('checkpoint', { prompt, ...(tools === undefined ? {} : { tools: functionTools(tools) }) })
+}
+
+function shellPlan(tools: readonly string[] | undefined, prompt: LanguageModelV4Prompt): ReturnType<typeof mockPlan> {
+  return mockPlan('shell', { prompt, ...(tools === undefined ? {} : { tools: functionTools(tools) }) })
+}
+
+const WRITTEN: LanguageModelV4ToolResultOutput = { type: 'text', value: 'Created checkpoint.txt (1 line).' }
+const MKDIR: LanguageModelV4ToolResultOutput = { type: 'text', value: 'Exit code: 0\nThe working folder is now mock-dir (the next call starts there).\nstdout:\n(no output)' }
+const LS: LanguageModelV4ToolResultOutput = { type: 'text', value: 'Exit code: 0\nstdout:\n(no output)' }
+
+describe('mock:checkpoint plans', () => {
+  it('with the shell: write_file "Turn <n>", mkdir + cd, ls, then "Checkpoint done."', () => {
+    expect(checkpointPlan(ALL_WORKSPACE_TOOLS, turnPrompt(0, []))).toEqual({
+      reasoning: null,
+      text: null,
+      toolCall: { toolCallId: 'mock_call_1', toolName: 'write_file', input: JSON.stringify({ path: 'checkpoint.txt', content: 'Turn 1\n' }) },
+      finishReason: 'tool-calls',
+    })
+    expect(checkpointPlan(ALL_WORKSPACE_TOOLS, turnPrompt(0, [{ toolName: 'write_file', output: WRITTEN }])).toolCall).toEqual({
+      toolCallId: 'mock_call_2',
+      toolName: 'shell',
+      input: JSON.stringify({ command: 'mkdir -p mock-dir && cd mock-dir' }),
+    })
+    expect(checkpointPlan(ALL_WORKSPACE_TOOLS, turnPrompt(0, [{ toolName: 'write_file', output: WRITTEN }, { toolName: 'shell', output: MKDIR }])).toolCall).toEqual({
+      toolCallId: 'mock_call_3',
+      toolName: 'shell',
+      input: JSON.stringify({ command: 'ls' }),
+    })
+    const done = checkpointPlan(ALL_WORKSPACE_TOOLS, turnPrompt(0, [{ toolName: 'write_file', output: WRITTEN }, { toolName: 'shell', output: MKDIR }, { toolName: 'shell', output: LS }]))
+    expect(done).toEqual({ reasoning: null, text: 'Checkpoint done.', toolCall: null, finishReason: 'stop' })
+    expect([MOCK_CHECKPOINT_MKDIR_COMMAND, MOCK_CHECKPOINT_LS_COMMAND, MOCK_CHECKPOINT_DONE]).toEqual(['mkdir -p mock-dir && cd mock-dir', 'ls', 'Checkpoint done.'])
+  })
+
+  it('every turn writes "Turn <n>" with n = the user messages of the prompt (each user message is a rewind point)', () => {
+    expect(checkpointPlan(ALL_WORKSPACE_TOOLS, turnPrompt(1, [])).toolCall).toMatchObject({ toolName: 'write_file', toolCallId: 'mock_call_2', input: JSON.stringify({ path: 'checkpoint.txt', content: 'Turn 2\n' }) })
+    expect(checkpointPlan(ALL_WORKSPACE_TOOLS, turnPrompt(4, [])).toolCall?.input).toBe(JSON.stringify({ path: 'checkpoint.txt', content: 'Turn 5\n' }))
+    expect(mockCheckpointContent(3)).toBe('Turn 3\n')
+    expect(mockCheckpointSteps(2, true).map(step => [step.toolName, step.input])).toEqual([
+      ['write_file', { path: 'checkpoint.txt', content: 'Turn 2\n' }],
+      ['shell', { command: 'mkdir -p mock-dir && cd mock-dir' }],
+      ['shell', { command: 'ls' }],
+    ])
+  })
+
+  it('without the shell (HF_WORKSPACE_SHELL=0, Windows): write_file, then "Checkpoint done."', () => {
+    expect(checkpointPlan(WITHOUT_SHELL, turnPrompt(0, [])).toolCall?.toolName).toBe('write_file')
+    expect(checkpointPlan(WITHOUT_SHELL, turnPrompt(0, [{ toolName: 'write_file', output: WRITTEN }]))).toMatchObject({ text: 'Checkpoint done.', toolCall: null, finishReason: 'stop' })
+    expect(checkpointPlan(['write_file'], turnPrompt(0, [{ toolName: 'write_file', output: WRITTEN }])).text).toBe('Checkpoint done.')
+    expect(mockCheckpointSteps(1, false).map(step => step.toolName)).toEqual(['write_file'])
+  })
+
+  it('a denied call ends the plan (a denied result or a denied approval response)', () => {
+    const denied: LanguageModelV4ToolResultOutput = { type: 'execution-denied', reason: 'no' }
+    expect(checkpointPlan(ALL_WORKSPACE_TOOLS, turnPrompt(0, [{ toolName: 'write_file', output: denied }]))).toMatchObject({ text: 'The tool call was denied.', toolCall: null, finishReason: 'stop' })
+    expect(checkpointPlan(ALL_WORKSPACE_TOOLS, turnPrompt(0, [{ toolName: 'write_file', output: WRITTEN }, { toolName: 'shell', output: denied }])).text).toBe('The tool call was denied.')
+    const prompt = turnPrompt(0, [{ toolName: 'write_file', output: WRITTEN }])
+    prompt.push({ role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'mock_call_2', toolName: 'shell', input: {} }] })
+    prompt.push({ role: 'tool', content: [{ type: 'tool-approval-response', approvalId: 'approval_1', approved: false }] })
+    expect(checkpointPlan(ALL_WORKSPACE_TOOLS, prompt).text).toBe('The tool call was denied.')
+  })
+
+  it('a failed call ends the plan with its error text', () => {
+    const failed: LanguageModelV4ToolResultOutput = { type: 'error-text', value: 'Path is outside the project folder.' }
+    expect(checkpointPlan(ALL_WORKSPACE_TOOLS, turnPrompt(0, [{ toolName: 'write_file', output: failed }]))).toMatchObject({ text: 'The tool call failed: Path is outside the project folder.', finishReason: 'stop' })
+  })
+
+  it.each([
+    ['no tools in the call (tool mode off)', undefined],
+    ['no workspace tools (a chat without a project)', ['mock_approval_tool', 'current_time']],
+    ['only read tools and the shell', ['read_file', 'list_directory', 'shell']],
+  ] as const)('%s: "Workspace tools are not available."', (_label, tools) => {
+    expect(checkpointPlan(tools, turnPrompt(0, []))).toMatchObject({ text: MOCK_WORKSPACE_UNAVAILABLE, toolCall: null, finishReason: 'stop' })
+  })
+})
+
+describe('mock:shell plans', () => {
+  it('runs the trimmed user text as one shell call, then "Shell done: <stdout>"', () => {
+    expect(shellPlan(ALL_WORKSPACE_TOOLS, turnPrompt(0, [], '  cd sub  '))).toEqual({
+      reasoning: null,
+      text: null,
+      toolCall: { toolCallId: 'mock_call_1', toolName: 'shell', input: JSON.stringify({ command: 'cd sub' }) },
+      finishReason: 'tool-calls',
+    })
+    const stdout: LanguageModelV4ToolResultOutput = { type: 'text', value: 'Exit code: 0\nThe working folder is now sub (the next call starts there).\nstdout:\n/srv/demo/sub\n' }
+    expect(shellPlan(ALL_WORKSPACE_TOOLS, turnPrompt(0, [{ toolName: 'shell', output: stdout }], 'pwd'))).toEqual({ reasoning: null, text: 'Shell done: /srv/demo/sub', toolCall: null, finishReason: 'stop' })
+    expect(shellPlan(['shell'], turnPrompt(0, [{ toolName: 'shell', output: { type: 'json', value: { stdout: 'a\n' } } }], 'ls'))).toMatchObject({ text: 'Shell done: a' })
+    expect(shellPlan(['shell'], turnPrompt(0, [{ toolName: 'shell', output: { type: 'json', value: { stdout: '' } } }], 'true')).text).toBe(MOCK_SHELL_DONE_PREFIX)
+  })
+
+  it('a new user message starts over (ids continue after the assistant messages)', () => {
+    expect(shellPlan(['shell'], turnPrompt(2, [], 'ls')).toolCall).toMatchObject({ toolName: 'shell', toolCallId: 'mock_call_3' })
+  })
+
+  it('an empty user text answers "(empty message)" without a call', () => {
+    expect(shellPlan(['shell'], turnPrompt(0, [], '   '))).toMatchObject({ text: '(empty message)', toolCall: null, finishReason: 'stop' })
+  })
+
+  it('denied and failed calls', () => {
+    expect(shellPlan(['shell'], turnPrompt(0, [{ toolName: 'shell', output: { type: 'execution-denied' } }], 'rm x')).text).toBe('The tool call was denied.')
+    expect(shellPlan(['shell'], turnPrompt(0, [{ toolName: 'shell', output: { type: 'error-text', value: 'The command could not start.' } }], 'ls')).text).toBe('The tool call failed: The command could not start.')
+  })
+
+  it.each([
+    ['no tools in the call', undefined],
+    ['no shell (HF_WORKSPACE_SHELL=0, a chat without a project)', ['write_file', 'edit_file', 'read_file']],
+  ] as const)('%s: "Workspace tools are not available."', (_label, tools) => {
+    expect(shellPlan(tools, turnPrompt(0, [], 'ls'))).toMatchObject({ text: MOCK_WORKSPACE_UNAVAILABLE, toolCall: null, finishReason: 'stop' })
+  })
+})
+
+describe('mock:checkpoint end to end through streamText (stand-in tools over a temp project folder)', () => {
+  it('writes "Turn 1", creates and enters mock-dir, lists it and answers "Checkpoint done."', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'hf-')))
+    try {
+      const commands: string[] = []
+      const writeFile = tool({
+        description: 'Writes a file.',
+        inputSchema: writeFileToolInputSchema,
+        execute: async input => writeWorkspaceFile(root, input.path, input.content),
+        toModelOutput: ({ output }) => ({ type: 'text', value: `Created ${output.rel}.` }),
+      })
+      // A stand-in for the shell runner: records the command, runs nothing.
+      const shell = tool({
+        description: 'Runs a command.',
+        inputSchema: shellToolInputSchema,
+        execute: async (input) => {
+          commands.push(input.command)
+          return { exitCode: 0, stdout: '' }
+        },
+        toModelOutput: ({ output }) => ({ type: 'text', value: `Exit code: ${output.exitCode}\nstdout:\n${output.stdout}` }),
+      })
+      const result = streamText({ model: createMockLanguageModel('checkpoint'), prompt: 'Change the checkpoint', tools: { write_file: writeFile, shell }, stopWhen: isStepCount(6) })
+      expect(await result.text).toBe('Checkpoint done.')
+      expect((await result.steps).flatMap(step => step.toolCalls.map(call => call.toolName))).toEqual(['write_file', 'shell', 'shell'])
+      expect(commands).toEqual(['mkdir -p mock-dir && cd mock-dir', 'ls'])
+      expect(await readFile(join(root, 'checkpoint.txt'), 'utf8')).toBe('Turn 1\n')
+    }
+    finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })

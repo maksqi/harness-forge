@@ -206,10 +206,10 @@ automatic file sweep, backlog stabilization.
   - [x] D8 phase doc `phase-8-v1-4.md` · [x] D9 docs: UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md, guides, README,
     `.env.example`
   - [x] Gate + checkpoint commit
-- [ ] P8-0b Schema, migration `0005`, skeletons, FREEZE
-  - [ ] K3 v1.3 upgrade copy + schema + `pnpm db:generate` (coordinator)
-  - [ ] C19 server skeleton · [ ] C20 web skeleton · [ ] C21 git runner + spawn guard
-  - [ ] Gate (incl. v1.3 data upgrade probe) + FREEZE + checkpoint commit
+- [x] P8-0b Schema, migration `0005`, skeletons, FREEZE
+  - [x] K3 v1.3 upgrade copy + schema + `pnpm db:generate` (coordinator)
+  - [x] C19 server skeleton · [x] C20 web skeleton · [x] C21 git runner + spawn guard
+  - [x] Gate (incl. v1.3 data upgrade probe) + FREEZE + checkpoint commit
 - [ ] P8-A Features (11 agents)
   - [ ] W8.1 checkpoint-store · [ ] W8.2 restore-rewind · [ ] W8.3 changes-list · [ ] W8.4 shell-runtime
   - [ ] W8.5 chat-pipeline · [ ] W8.6 shell-rules · [ ] W8.7 files-maintenance
@@ -263,3 +263,4 @@ thread.
 | Final gate v1.3 | coordinator | frozen install ok; 6995 tests; build ok; CSP 38/38; probes 47/47; e2e 77 passed ×3 (chromium + mobile + tablet); `@screenshots` dark + light reviewed (86 per theme), README images refreshed + a workspace image; `pnpm audit --prod` clean (2 ignored build-tooling advisories); real v1.2 → v1.3 upgrade (v1.2 built from `b5bb2ec` in a worktree, seeded with password, provider key, MCP header secret, branched chat, attachment, orphan upload, generated image, pending approval, share): 15/15 + 11 extra (rotation on upgraded data re-encrypts every secret, the v1.2 pending approval expires, cleanup removes only the orphan); Docker image (Node 24, bash 5.3, git 2.54): boot with `server.lock` + `workspaces/`, offline `rotate-key` in a second container exit 0, restart with the new key `keyVersion` 2 `keyCheck` ok. Live provider suite not run (needs the user's keys) | (this commit) |
 | P8-00 | coordinator | CI on `8879e6e` green; Phase 7 ROADMAP boxes ticked; advisories still unpatched (ignores kept); `pnpm check` 6995 tests | `1a95805` |
 | P8-0a | coordinator (K1; K3 seeding done early), C17, C18, D8, D9 (+ coordinator: AGENT.md `allowRules`, phase-doc seed paths, C20-T8 helpers, `shell-rules.ts` comment; C18 follow-up: `&>` asks) | audit ok (55 paths; 10 C17 compile-fix files accepted); frozen install ok; 7514 tests; build ok; CSP 38/38; 10 new routes answer 501 / 400; e2e 77 passed on a fresh `.tmp/e2e`; TypeScript 6.0.3 only | (this commit) |
+| P8-0b | coordinator (K3: schema + `0005_workspace_checkpoints`, v1.3 seed from a `1a95805` worktree), C19, C20, C21 (+ coordinator: phase-doc deviations from C20 (UI.md 10.5 / 11.5 won), the rewind contract (RewindDialog calls the API itself), P8-A ownership additions; C21's `trackGroup` CCR declined: git keeps its own live-group set) | audit ok (117 paths; 3 C19 test fixes + the page test accepted); `0005` = 2 CREATE TABLE + 5 CREATE INDEX; 7722 tests; build ok; CSP 38/38; e2e 77 passed on a fresh `.tmp/e2e`; upgrade probe on a v1.3 copy 19/19 (6 migrations, empty new tables, no FK violations, `_files.lastCleanup` kept, secrets / MCP header / share / pending approval / project + old tool parts intact, `fileSweep` off, orphan kept); FREEZE | (this commit) |

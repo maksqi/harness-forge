@@ -3,7 +3,9 @@
 // 25 ms; reasoning: every 100 ms). Every delay aborts with the call's `abortSignal`, so a stopped run ends at once.
 // Phase 6: `mock:image-chat` (a chat model with image output: text, then one PNG `file` part) and `mock:image-tool`
 // (calls the builtin `generate_image` tool); the media models live in ./media.ts. Phase 7: `mock:workspace` (walks
-// through the `core-workspace` tools; the plan lives in ./workspace.ts).
+// through the `core-workspace` tools; the plan lives in ./workspace.ts). Phase 8: `mock:checkpoint` (one edit per turn,
+// then shell steps that create and enter a folder; ./checkpoint.ts) and `mock:shell` (runs the user text as one shell
+// command; ./shell.ts).
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
@@ -19,18 +21,20 @@ import { APICallError } from '@ai-sdk/provider'
 import { GENERATE_IMAGE_TOOL_NAME } from '@harness-forge/shared'
 import { simulateReadableStream } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
-import { abortableDelay, abortError, countWords, MOCK_PROVIDER_ID, unknownModelError, wordChunks } from './common.ts'
+import { mockCheckpointPlan } from './checkpoint.ts'
+import { abortableDelay, abortError, countWords, MOCK_EMPTY_MESSAGE, MOCK_PROVIDER_ID, unknownModelError, wordChunks } from './common.ts'
 import { mockAspectRatioOption, mockImagePng, mockImageSize } from './media.ts'
+import { mockShellPlan } from './shell.ts'
 import { mockWorkspacePlan } from './workspace.ts'
 
-export { abortableDelay, countWords, MOCK_PROVIDER_ID, wordChunks } from './common.ts'
+export { abortableDelay, countWords, MOCK_EMPTY_MESSAGE, MOCK_PROVIDER_ID, wordChunks } from './common.ts'
 
 export const MOCK_TOOL_NAME = 'mock_approval_tool'
 /**
- * The language model ids of the mock provider (`createLanguageModel`): the four v1 models, the two Phase 6 ones and
- * `workspace` (Phase 7).
+ * The language model ids of the mock provider (`createLanguageModel`): the four v1 models, the two Phase 6 ones,
+ * `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8).
  */
-export const MOCK_MODEL_IDS = ['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace'] as const
+export const MOCK_MODEL_IDS = ['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace', 'checkpoint', 'shell'] as const
 export type MockModelId = (typeof MOCK_MODEL_IDS)[number]
 
 /** Stream timing (PROVIDERS.md 8). */
@@ -43,7 +47,6 @@ export const MOCK_TIMING = {
   reasoningChunkMs: 100,
 } as const
 
-export const MOCK_EMPTY_MESSAGE = '(empty message)'
 export const MOCK_TOOLS_DISABLED = 'Tools are disabled.'
 export const MOCK_TOOL_DENIED = 'The tool call was denied.'
 export const MOCK_AUTH_FAILURE = 'Mock authentication failure'
@@ -237,6 +240,10 @@ export function mockPlan(modelId: MockModelId, options: LanguageModelV4CallOptio
       return toolPlan(options, IMAGE_TOOL_SPEC)
     case 'workspace':
       return mockWorkspacePlan(options)
+    case 'checkpoint':
+      return mockCheckpointPlan(options)
+    case 'shell':
+      return mockShellPlan(options, mockUserText(options.prompt))
     default:
       return echoPlan(options.prompt)
   }

@@ -42,6 +42,9 @@ export const REFERENCE_SOURCES: readonly ReferenceSource[] = [
   { table: projects, columns: [projects.name, projects.path, projects.instructions] },
 ]
 
+/** Why the columns of `workspace_changes` and `shell_rules` (Phase 8) are not scanned. */
+const CHECKPOINT_JOURNAL_REASON = 'checkpoint journal / shell rules: ids, paths, commands, hashes; never a data/files id'
+
 /**
  * `table.column` -> why it is not scanned: every text, JSON or blob column outside `REFERENCE_SOURCES`. A new column
  * must be added to one of the two lists (the schema-coverage test).
@@ -103,6 +106,23 @@ export const UNSCANNED_COLUMNS: Readonly<Record<string, string>> = {
   'chat_shares.title': 'share titles',
   'chat_shares.options': 'share options (booleans)',
   'projects.id': 'project ids',
+  // Phase 8 (ADR-036 / ADR-038): the checkpoint journal and the shell rules hold ids, project paths, shell commands and
+  // hashes, never a file id of `files/` (checkpoint blobs live in their own tree, `<dataDir>/checkpoints`).
+  'workspace_changes.chat_id': CHECKPOINT_JOURNAL_REASON,
+  'workspace_changes.project_id': CHECKPOINT_JOURNAL_REASON,
+  'workspace_changes.message_id': CHECKPOINT_JOURNAL_REASON,
+  'workspace_changes.tool_call_id': CHECKPOINT_JOURNAL_REASON,
+  'workspace_changes.batch_id': CHECKPOINT_JOURNAL_REASON,
+  'workspace_changes.kind': CHECKPOINT_JOURNAL_REASON,
+  'workspace_changes.tool': CHECKPOINT_JOURNAL_REASON,
+  'workspace_changes.path': CHECKPOINT_JOURNAL_REASON,
+  'workspace_changes.command': CHECKPOINT_JOURNAL_REASON,
+  'workspace_changes.before_state': CHECKPOINT_JOURNAL_REASON,
+  'workspace_changes.before_sha': CHECKPOINT_JOURNAL_REASON,
+  'workspace_changes.after_sha': CHECKPOINT_JOURNAL_REASON,
+  'shell_rules.id': CHECKPOINT_JOURNAL_REASON,
+  'shell_rules.project_id': CHECKPOINT_JOURNAL_REASON,
+  'shell_rules.prefix': CHECKPOINT_JOURNAL_REASON,
 }
 
 /** `table.column` names of the scanned columns. */

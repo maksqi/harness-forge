@@ -9,8 +9,10 @@ import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
+import { useShellRulesStore } from '~/stores/shell-rules'
 import { useUiStore } from '~/stores/ui'
-import { chatId, chatSummary, logEntry, pluginSummary, projectId, projectSummary, providerSummary } from '~/utils/testing/fixtures'
+import { useWorkspaceStore } from '~/stores/workspace'
+import { chatId, chatSummary, logEntry, pluginSummary, projectId, projectSummary, providerSummary, workspaceChangedData } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { dispatchServerEvent, KEY_ROTATED_MESSAGE, parseServerEvent, refetchLoadedStores, useServerEvents } from './useServerEvents'
@@ -115,6 +117,25 @@ describe('dispatchServerEvent', () => {
     expect(chatEvents.mock.calls).toEqual([[changed], [deleted]])
   })
 
+  it('routes the Phase 8 events to the workspace and shell rules stores', () => {
+    const workspace = useWorkspaceStore()
+    const shellRules = useShellRulesStore()
+    const chats = useChatsStore()
+    const workspaceEvents = vi.spyOn(workspace, 'applyEvent')
+    const ruleEvents = vi.spyOn(shellRules, 'applyEvent')
+    const chatEvents = vi.spyOn(chats, 'applyEvent').mockImplementation(() => {})
+    const changed = createServerEvent('workspace.changed', workspaceChangedData(), 1)
+    const finished = createServerEvent('run.finished', { chatId: chatId(1), messageId: 'msg_asst000000000001', outcome: 'completed', awaitingApproval: false }, 2)
+    const deletedChat = createServerEvent('chat.deleted', { id: chatId(1) }, 3)
+    const deletedProject = createServerEvent('project.changed', { id: projectId(1), project: null }, 4)
+    const started = createServerEvent('run.started', { chatId: chatId(1), messageId: 'msg_asst000000000001', modelRef: 'mock:echo' }, 5)
+    for (const event of [changed, finished, deletedChat, deletedProject, started])
+      dispatchServerEvent(event)
+    expect(workspaceEvents.mock.calls).toEqual([[changed], [finished], [deletedChat], [deletedProject]])
+    expect(ruleEvents.mock.calls).toEqual([[deletedProject]])
+    expect(chatEvents.mock.calls).toEqual([[finished], [deletedChat], [deletedProject], [started]])
+  })
+
   it('reloads the loaded chat list and shows a toast on key.rotated', async () => {
     api.chats.list.mockResolvedValue({ items: [chatSummary({ id: chatId(1) })], nextCursor: null })
     const chats = useChatsStore()
@@ -205,5 +226,18 @@ describe('refetchLoadedStores', () => {
     await useProjectsStore().fetchAll()
     await refetchLoadedStores()
     expect(api.projects.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('refreshes the loaded workspace entries and the shell rules once they were loaded (Phase 8)', async () => {
+    const workspace = useWorkspaceStore()
+    const shellRules = useShellRulesStore()
+    const refresh = vi.spyOn(workspace, 'refreshLoaded')
+    const fetchRules = vi.spyOn(shellRules, 'fetchAll')
+    await refetchLoadedStores()
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(fetchRules).not.toHaveBeenCalled()
+    shellRules.loaded = true
+    await refetchLoadedStores()
+    expect(fetchRules).toHaveBeenCalledTimes(1)
   })
 })

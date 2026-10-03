@@ -355,6 +355,15 @@ describe('createFakeChatRunner', () => {
 })
 
 describe('createFakeDataService', () => {
+  it('phase 8: start / stop are no-ops that are counted, never recorded in calls', async () => {
+    const data = createFakeDataService()
+    await expect(data.start()).resolves.toBeUndefined()
+    await expect(data.stop()).resolves.toBeUndefined()
+    await data.stop()
+    expect(data.lifecycle).toEqual({ started: 1, stopped: 2 })
+    expect(data.calls).toEqual([])
+  })
+
   it('answers from its options, streams the backup lazily and counts cancelled exports', async () => {
     const data = createFakeDataService({ now: () => Date.UTC(2026, 8, 28) })
     expect(await data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })

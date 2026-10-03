@@ -72,7 +72,7 @@ function lineCount(lines: number): string {
       <Badge v-if="replaceAll" variant="secondary" data-slot="replace-all" class="self-start">
         All occurrences
       </Badge>
-      <DiffView :hunks="view.hunks" :path="view.path" data-numbers="off" />
+      <DiffView :hunks="view.hunks" :path="view.path" :line-numbers="false" />
     </template>
 
     <template v-else-if="view.kind === 'file'">

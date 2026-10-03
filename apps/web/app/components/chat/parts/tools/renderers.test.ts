@@ -69,7 +69,8 @@ describe('diffView', () => {
     expect(root.attributes('data-state')).toBe('modified')
     expect(root.attributes('role')).toBe('region')
     expect(root.attributes('aria-label')).toBe('Changes to src/app.ts')
-    expect(wrapper.props()).toEqual({ hunks: [hunk], path: 'src/app.ts', created: false, truncated: false, maxLines: 200 })
+    expect(root.attributes('data-numbers')).toBe('on')
+    expect(wrapper.props()).toEqual({ hunks: [hunk], path: 'src/app.ts', created: false, truncated: false, maxLines: 200, stats: null, lineNumbers: true })
 
     await wrapper.setProps({ created: true, truncated: true, maxLines: 20 })
     expect(root.attributes('data-state')).toBe('created')
@@ -182,13 +183,37 @@ describe('diffView', () => {
     wrapper.unmount()
   })
 
-  it('takes the header totals from the stats slot and hides numbers with data-numbers="off"', () => {
-    const second: DiffHunk = { oldStart: 40, oldLines: 1, newStart: 40, newLines: 1, lines: ['-c', '+d'] }
-    const { wrapper } = mountIn(DiffView, { 'hunks': [hunk, second], 'path': 'a.txt', 'data-numbers': 'off' }, {
-      stats: () => h('span', { 'data-slot': 'totals' }, '+120 −40'),
-    })
+  it('takes the header totals from the stats prop, aria-hidden with a spoken label (Phase 8)', () => {
+    const { wrapper } = mountIn(DiffView, { hunks: [hunk], path: 'a.txt', stats: { additions: 120, deletions: 40 } })
     const root = by(testIds.diffView)[0]!
-    expect(root.querySelector('[data-slot="totals"]')?.textContent).toBe('+120 −40')
+    const totals = root.querySelector<HTMLElement>('[data-slot="diff-stats"]')!
+    expect(Array.from(totals.children, child => child.textContent)).toEqual(['+120', '−40'])
+    expect(totals.getAttribute('aria-hidden')).toBe('true')
+    expect(totals.nextElementSibling?.className).toContain('sr-only')
+    expect(totals.nextElementSibling?.textContent).toBe('120 lines added, 40 removed')
+    wrapper.unmount()
+  })
+
+  it('counts the totals from the hunks without stats and hides them when nothing changed', () => {
+    const counted = mountIn(DiffView, { hunks: [hunk], path: 'a.txt', stats: null })
+    expect(by(testIds.diffView)[0]!.querySelector('[data-slot="diff-stats"]')?.textContent).toBe('+1−1')
+    counted.wrapper.unmount()
+
+    const context: DiffHunk = { oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: [' same'] }
+    const unchanged = mountIn(DiffView, { hunks: [context], path: 'a.txt' })
+    expect(by(testIds.diffView)[0]!.querySelector('[data-slot="diff-stats"]')).toBeNull()
+    unchanged.wrapper.unmount()
+
+    const zero = mountIn(DiffView, { hunks: [hunk], path: 'a.txt', stats: { additions: 0, deletions: 0 } })
+    expect(by(testIds.diffView)[0]!.querySelector('[data-slot="diff-stats"]')).toBeNull()
+    zero.wrapper.unmount()
+  })
+
+  it('hides the line numbers and hunk headers with lineNumbers false and says so in data-numbers (Phase 8)', () => {
+    const second: DiffHunk = { oldStart: 40, oldLines: 1, newStart: 40, newLines: 1, lines: ['-c', '+d'] }
+    const { wrapper } = mountIn(DiffView, { hunks: [hunk, second], path: 'a.txt', lineNumbers: false })
+    const root = by(testIds.diffView)[0]!
+    expect(root.dataset.numbers).toBe('off')
     expect(by(testIds.diffLine)[0]!.querySelectorAll('[aria-hidden="true"]')).toHaveLength(1)
     // No "@@" headers: the first hunk has none, later ones a plain separator.
     expect(Array.from(root.querySelectorAll('[data-slot="diff-hunk"]')).map(row => row.textContent)).toEqual(['⋯'])

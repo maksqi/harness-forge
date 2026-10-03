@@ -8,6 +8,7 @@ import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
 import { TOOL_APPROVAL_CONTEXT } from '../tool-approval-context'
+import DiffView from './DiffView.vue'
 import ToolApprovalPreview from './ToolApprovalPreview.vue'
 
 const root = `[data-testid="${testIds.toolApprovalPreview}"]`
@@ -17,7 +18,7 @@ function mountPreview(toolName: string, input: unknown, projectName: string | nu
     render: () => h(TooltipProvider, null, { default: () => h(ToolApprovalPreview, { toolName, input }) }),
   }, {
     attachTo: document.body,
-    global: projectName === null ? {} : { provide: { [TOOL_APPROVAL_CONTEXT as symbol]: { toolMode: () => 'ask', projectName: () => projectName } } },
+    global: projectName === null ? {} : { provide: { [TOOL_APPROVAL_CONTEXT as symbol]: { toolMode: () => 'ask', projectName: () => projectName, projectId: () => null, shellCwd: () => null } } },
   })
 }
 
@@ -51,6 +52,7 @@ describe('toolApprovalPreview', () => {
     const diff = preview.get(`[data-testid="${testIds.diffView}"]`)
     expect(diff.attributes('data-path')).toBe('src/parser.ts')
     expect(diff.attributes('data-numbers')).toBe('off')
+    expect(wrapper.getComponent(DiffView).props('lineNumbers')).toBe(false)
     expect(diff.findAll(`[data-testid="${testIds.diffLine}"]`).map(line => line.attributes('data-kind'))).toEqual(['del', 'add', 'add'])
     expect(diff.text()).toContain('+2')
     expect(diff.text()).toContain('−1')

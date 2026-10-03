@@ -1,17 +1,25 @@
 import type { CreateDepsOptions } from './deps.ts'
+import type { CheckpointService } from './services/checkpoints/types.ts'
+import type { ShellRuleService } from './services/shell-rules/types.ts'
+import type { FakeCheckpointService } from './testing/fake-checkpoints.ts'
 import type { FakeProjectService } from './testing/fake-projects.ts'
-import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs'
+import type { FakeShellRuleService } from './testing/fake-shell-rules.ts'
+import type { AppDeps } from './types.ts'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { afterEach, describe, expect, it } from 'vitest'
+import { chatBody, postChat, readSse, runnerOf, streamedText, testChatId } from './chat/testing.ts'
 import { openDatabase } from './db/client.ts'
 import { createDeps, SERVICE_FACTORIES, SERVICE_NAMES, startDeps, stopDeps } from './deps.ts'
 import { EnvError, loadEnv } from './env.ts'
 import { createMemoryLogger } from './logger.ts'
 import { createPluginInstaller } from './plugins/install/index.ts'
 import { createRedactor } from './security/redact.ts'
+import { createCheckpointService } from './services/checkpoints/index.ts'
+import { createDataService } from './services/data/index.ts'
 import { createProjectService } from './services/projects/index.ts'
 import { SAMPLE_SHARE_TOKEN } from './testing/api-samples.ts'
 import { createTestApp } from './testing/create-test-app.ts'
@@ -25,6 +33,7 @@ import {
   createMemorySettingsService,
   createRecordingEventBus,
 } from './testing/fakes.ts'
+import { resolveWorkspacePath } from './workspace/paths.ts'
 
 const cleanups: (() => Promise<void> | void)[] = []
 
@@ -335,5 +344,245 @@ describe('testing helpers', () => {
     cleanups.push(() => t.close())
     expect(await t.client.health.get()).toMatchObject({ ok: true, safeMode: true })
     expect(await t.client.settings.get()).toMatchObject({ maxSteps: expect.any(Number) })
+  })
+})
+
+describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle)', () => {
+  const CHAT = '0199a8f0-0000-7000-8000-000000000081'
+
+  /** Each call fails as a stub: `not_implemented`, never another error. */
+  async function expectNotImplemented(calls: Array<[string, () => Promise<unknown>]>): Promise<void> {
+    for (const [name, call] of calls)
+      await expect(call(), name).rejects.toMatchObject({ code: 'not_implemented' })
+  }
+
+  it('wires checkpoints and shellRules; the route-facing members answer not_implemented', async () => {
+    const t = await createTestApp()
+    cleanups.push(() => t.close())
+    expect(SERVICE_NAMES).toEqual(expect.arrayContaining(['checkpoints', 'shellRules']))
+    const { checkpoints, shellRules } = t.deps
+    await expectNotImplemented([
+      ['checkpoints.listChanges', () => checkpoints.listChanges(CHAT)],
+      ['checkpoints.fileDiff', () => checkpoints.fileDiff(CHAT, { source: 'chat', path: 'a.txt' })],
+      ['checkpoints.gitStatus', () => checkpoints.gitStatus(CHAT)],
+      ['checkpoints.revert', () => checkpoints.revert(CHAT, { source: 'chat', path: 'a.txt' })],
+      ['checkpoints.undo', () => checkpoints.undo(CHAT, { batchId: 'wcb_AAAAAAAAAAAAAAAA', conflicts: 'skip' })],
+      ['checkpoints.rewindPreview', () => checkpoints.rewindPreview(CHAT, 'msg_AAAAAAAAAAAAAAAA')],
+      ['checkpoints.rewind', () => checkpoints.rewind(CHAT, { messageId: 'msg_AAAAAAAAAAAAAAAA', conflicts: 'skip' })],
+      ['shellRules.list', () => shellRules.list()],
+      ['shellRules.create', () => shellRules.create({ projectId: null, prefix: 'ls' })],
+      ['shellRules.remove', () => shellRules.remove('srl_AAAAAAAAAAAAAAAA')],
+    ])
+    // The members the boot, the pipeline and the data service use already work: an empty store, an empty rule set.
+    await expect(checkpoints.summary()).resolves.toEqual({ bytes: 0, blobs: 0 })
+    await expect(checkpoints.purge()).resolves.toEqual({ bytes: 0, blobs: 0 })
+    await expect(checkpoints.prune()).resolves.toEqual({ evictedByAge: 0, evictedByBudget: 0, rowsEvicted: 0, orphanBlobs: 0, tempFiles: 0, bytesFreed: 0 })
+    expect(await shellRules.forRun('prj_AAAAAAAAAAAAAAAA')).toEqual({ projectId: 'prj_AAAAAAAAAAAAAAAA', prefixes: [] })
+    expect(await shellRules.forRun(null)).toEqual({ projectId: null, prefixes: [] })
+    await expect(t.deps.data.start()).resolves.toBeUndefined()
+    await expect(t.deps.data.stop()).resolves.toBeUndefined()
+  })
+
+  it('startDeps creates <dataDir>/checkpoints with mode 0700 (not ensureDataDir)', async () => {
+    const t = await createTestApp({ start: false })
+    cleanups.push(() => t.close())
+    expect(t.env.paths.checkpoints).toBe(join(t.env.dataDir, 'checkpoints'))
+    expect(existsSync(t.env.paths.checkpoints)).toBe(false)
+    await startDeps(t.deps)
+    expect(statSync(t.env.paths.checkpoints).isDirectory()).toBe(true)
+    if (process.platform !== 'win32')
+      expect(statSync(t.env.paths.checkpoints).mode & 0o777).toBe(0o700)
+    // Idempotent: a second boot keeps the folder.
+    await t.deps.checkpoints.start()
+    expect(statSync(t.env.paths.checkpoints).isDirectory()).toBe(true)
+  })
+
+  it('the skeleton journal writes without recording: produce sees the before-state, the abort check runs before the write', async () => {
+    const t = await createTestApp({ factories: { projects: createFakeProjectService } })
+    cleanups.push(() => t.close())
+    const project = await (t.deps.projects as FakeProjectService).add({ name: 'Journal', files: { 'notes.txt': 'old\n' } })
+    const journal = t.deps.checkpoints.journal({ chatId: CHAT, messageId: 'msg_AAAAAAAAAAAAAAAA', projectId: project.id })
+    expect(journal.scope).toEqual({ chatId: CHAT, messageId: 'msg_AAAAAAAAAAAAAAAA', projectId: project.id })
+    const signal = new AbortController().signal
+
+    const seen: string[] = []
+    const updated = await journal.write({
+      toolCallId: 'call_1',
+      tool: 'edit_file',
+      root: project.path,
+      resolved: await resolveWorkspacePath(project.path, 'notes.txt', { allowMissing: true }),
+      produce: (before) => {
+        seen.push(before.state)
+        return before.state === 'present' ? `${before.bytes.toString('utf8')}new\n` : 'unexpected'
+      },
+      signal,
+    })
+    expect(updated).toMatchObject({ recorded: false, before: { state: 'present', size: 4 }, written: { rel: 'notes.txt', created: false } })
+    expect(readFileSync(join(project.path, 'notes.txt'), 'utf8')).toBe('old\nnew\n')
+
+    const created = await journal.write({
+      toolCallId: 'call_2',
+      tool: 'write_file',
+      root: project.path,
+      resolved: await resolveWorkspacePath(project.path, 'src/new.txt', { allowMissing: true }),
+      produce: (before) => {
+        seen.push(before.state)
+        return 'created\n'
+      },
+      signal,
+    })
+    expect(created).toMatchObject({ recorded: false, before: { state: 'missing' }, written: { rel: 'src/new.txt', created: true } })
+    expect(seen).toEqual(['present', 'missing'])
+
+    const controller = new AbortController()
+    await expect(journal.write({
+      toolCallId: 'call_3',
+      tool: 'write_file',
+      root: project.path,
+      resolved: await resolveWorkspacePath(project.path, 'notes.txt', { allowMissing: true }),
+      produce: () => {
+        controller.abort(new Error('stopped'))
+        return 'never written'
+      },
+      signal: controller.signal,
+    })).rejects.toThrow('stopped')
+    expect(readFileSync(join(project.path, 'notes.txt'), 'utf8')).toBe('old\nnew\n')
+    await expect(journal.recordShell({ toolCallId: 'call_4', command: 'ls' })).resolves.toBeUndefined()
+    await expect(journal.recordUntracked({ toolCallId: 'call_5', tool: 'plugin_tool' })).resolves.toBeUndefined()
+    // Nothing is stored before W8.1.
+    expect(existsSync(join(t.env.paths.checkpoints, 'aa'))).toBe(false)
+    expect(await t.deps.checkpoints.summary()).toEqual({ bytes: 0, blobs: 0 })
+  })
+
+  it('a chat run still works: mock:workspace and mock:checkpoint in a project chat (auto, no shell)', async () => {
+    const t = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, workspaceShell: false, factories: { projects: createFakeProjectService } })
+    cleanups.push(() => t.close())
+    const project = await (t.deps.projects as FakeProjectService).add({ name: 'Runs' })
+
+    const workspace = await readSse(await postChat(t, chatBody(testChatId(0x801), 'go', { modelRef: 'mock:workspace', toolMode: 'auto', projectId: project.id })))
+    expect(streamedText(workspace.chunks)).toBe('Workspace done.')
+    expect(readFileSync(join(project.path, 'mock-workspace.txt'), 'utf8')).toBe('Hello from the workspace agent.\n')
+
+    const checkpoint = await readSse(await postChat(t, chatBody(testChatId(0x802), 'first turn', { modelRef: 'mock:checkpoint', toolMode: 'auto', projectId: project.id })))
+    expect(streamedText(checkpoint.chunks)).toBe('Checkpoint done.')
+    expect(readFileSync(join(project.path, 'checkpoint.txt'), 'utf8')).toBe('Turn 1\n')
+    await runnerOf(t).idle()
+  })
+
+  it('startDeps order: projects -> checkpoints -> installer -> plugins -> catalog -> mcp -> data (last)', async () => {
+    const order: string[] = []
+    const wrap = <K extends 'projects' | 'checkpoints' | 'plugins' | 'catalog' | 'mcp' | 'data'>(name: K, make: (d: AppDeps) => AppDeps[K]) => (d: AppDeps): AppDeps[K] => {
+      const real = make(d) as AppDeps[K] & { start: () => Promise<void> }
+      return { ...real, start: async () => {
+        order.push(name)
+        await real.start()
+      } }
+    }
+    const t = await createTestApp({
+      start: false,
+      factories: {
+        projects: wrap('projects', createProjectService),
+        checkpoints: wrap('checkpoints', createCheckpointService),
+        installer: (d) => {
+          const real = createPluginInstaller(d)
+          return { ...real, recover: async () => {
+            order.push('installer')
+            await real.recover()
+          } }
+        },
+        data: wrap('data', createDataService),
+      },
+    })
+    cleanups.push(() => t.close())
+    const plugins = t.deps.plugins.start
+    const catalog = t.deps.catalog.start
+    const mcp = t.deps.mcp.start
+    // The plugin host, catalog and MCP manager are frozen objects of their own: watch them through a proxy of deps.
+    const watched = (name: string, start: () => Promise<void>) => async (): Promise<void> => {
+      order.push(name)
+      await start()
+    }
+    const deps = new Proxy(t.deps, {
+      get(target, key, receiver) {
+        if (key === 'plugins')
+          return { ...target.plugins, start: watched('plugins', plugins) }
+        if (key === 'catalog')
+          return { ...target.catalog, start: watched('catalog', catalog) }
+        if (key === 'mcp')
+          return { ...target.mcp, start: watched('mcp', mcp) }
+        return Reflect.get(target, key, receiver)
+      },
+    })
+    await startDeps(deps)
+    expect(order).toEqual(['projects', 'checkpoints', 'installer', 'plugins', 'catalog', 'mcp', 'data'])
+  })
+
+  it('stopDeps order: data (first) -> runs -> checkpoints -> plugins -> mcp -> catalog -> events; a failing step still lets the next run', async () => {
+    const t = await createTestApp()
+    cleanups.push(() => t.close())
+    const order: string[] = []
+    const step = (name: string, fail = false) => async (): Promise<void> => {
+      order.push(name)
+      if (fail)
+        throw new Error(`${name} failed`)
+    }
+    const deps = new Proxy(t.deps, {
+      get(target, key, receiver) {
+        switch (key) {
+          case 'data': return { ...target.data, stop: step('data', true) }
+          case 'runs': return { ...target.runs, stopAll: step('runs') }
+          case 'checkpoints': return { ...target.checkpoints, stop: step('checkpoints', true) }
+          case 'plugins': return { ...target.plugins, stop: step('plugins') }
+          case 'mcp': return { ...target.mcp, stop: step('mcp') }
+          case 'catalog': return { ...target.catalog, stop: step('catalog') }
+          case 'events': return { ...target.events, stop: step('events') }
+          default: return Reflect.get(target, key, receiver)
+        }
+      },
+    })
+    await expect(stopDeps(deps)).resolves.toBeUndefined()
+    expect(order).toEqual(['data', 'runs', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    const failures = t.logs.records.filter(record => record.msg === 'shutdown step failed').map(record => record.step)
+    expect(failures).toEqual(['data', 'checkpoints'])
+  })
+
+  it('startDeps logs HF_TEST_FILE_SWEEP_DELAY_MS without HF_MOCK_PROVIDER=1 as a warning (ignored)', async () => {
+    const ignored = await createTestApp({ env: { HF_TEST_FILE_SWEEP_DELAY_MS: '2000' } })
+    cleanups.push(() => ignored.close())
+    expect(ignored.env.testFileSweepDelayMs).toBeNull()
+    const warning = 'the test-only automatic file sweep delay is ignored: it is honored only with HF_MOCK_PROVIDER=1'
+    expect(ignored.logs.records.filter(record => record.level === 'warn').map(record => record.msg)).toContain(warning)
+    const honored = await createTestApp({ env: { HF_TEST_FILE_SWEEP_DELAY_MS: '2000', HF_MOCK_PROVIDER: '1' } })
+    cleanups.push(() => honored.close())
+    expect(honored.env.testFileSweepDelayMs).toBe(2000)
+    expect(honored.logs.text()).not.toContain('file sweep delay')
+  })
+
+  it('createTestApp accepts the Phase 8 fakes (checkpoints, shellRules) and ready services; factories win', async () => {
+    const t = await createTestApp({ checkpoints: 'fake', shellRules: 'fake' })
+    cleanups.push(() => t.close())
+    const checkpoints = t.deps.checkpoints as FakeCheckpointService
+    expect(checkpoints.started()).toBe(true)
+    expect(await checkpoints.listChanges(CHAT)).toMatchObject({ available: false, reason: 'no-project' })
+    const rules = t.deps.shellRules as FakeShellRuleService
+    expect(await rules.create({ projectId: null, prefix: 'ls' })).toMatchObject({ projectId: null, prefix: 'ls' })
+    expect(await rules.forRun(null)).toEqual({ projectId: null, prefixes: [] })
+
+    const ready: ShellRuleService = { ...rules, forRun: async projectId => ({ projectId, prefixes: ['make'] }) }
+    const override: CheckpointService = createCheckpointService(t.deps)
+    const u = await createTestApp({ start: false, shellRules: ready, checkpoints: 'fake', overrides: { checkpoints: override } })
+    cleanups.push(() => u.close())
+    expect(u.deps.shellRules).toBe(ready)
+    expect(u.deps.checkpoints).toBe(override)
+  })
+
+  it('a second boot keeps what checkpoints/ holds (the skeleton start only creates the folder)', async () => {
+    const t = await createTestApp({ start: false })
+    cleanups.push(() => t.close())
+    await t.deps.checkpoints.start()
+    const marker = join(t.env.paths.checkpoints, 'marker')
+    writeFileSync(marker, 'keep')
+    await startDeps(t.deps)
+    expect(readFileSync(marker, 'utf8')).toBe('keep')
   })
 })
