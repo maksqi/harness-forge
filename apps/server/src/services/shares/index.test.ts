@@ -384,7 +384,9 @@ describe('view and openFile (public)', () => {
     const before = await storedRow(t, created.id)
     await t.deps.shares.view(tokenOf(created))
     await readAllBytes((await t.deps.shares.openFile(tokenOf(created), pngId)).stream)
-    await rejection(t.deps.shares.view(`${tokenOf(created).slice(0, 37)}_`))
+    // A wrong last character (never the real one, so the token really differs).
+    const token = tokenOf(created)
+    await rejection(t.deps.shares.view(`${token.slice(0, 37)}${token.endsWith('_') ? '-' : '_'}`))
     expect(await storedRow(t, created.id)).toEqual(before)
   })
 })

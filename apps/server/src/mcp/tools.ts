@@ -52,11 +52,12 @@ export function allowRefusedMessage(tool: ToolAllowSubject): string | null {
 }
 
 /**
- * The override that applies, as the approval sees it: the stored one, except an `allow` on `exit_plan_mode` (it always
- * asks) or on a tool with workspace access `execute` (`effectiveOverride`).
+ * The override that applies, as the approval sees it: the stored one, except any override on `exit_plan_mode` (it always
+ * asks, before overrides are read) and an `allow` on a tool with workspace access `execute` (`effectiveOverride`).
  */
 export function effectiveToolOverride(tool: ToolAllowSubject, stored: ToolOverride | null): ToolOverride | null {
-  if (stored === 'allow' && isPlanExit(tool))
+  // The approval asks for `exit_plan_mode` before it reads any override, so none applies to it.
+  if (isPlanExit(tool))
     return null
   return effectiveOverride(stored, tool.workspace)
 }

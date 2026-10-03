@@ -59,7 +59,7 @@ part of the server they may import server dependencies (for example the official
 | `core-commands` (Core commands) | 10 template slash commands (below) | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server |
 | `core-mcp` (MCP servers) | MCP servers configured in the MCP panel (`mcp_servers` table); the panel is its Overview | settings `autoReconnect`, `connectTimeoutSeconds` (below) |
 | `core-workspace` (Workspace tools, Phase 7) | 7 workspace tools: `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file`, `shell` (below) | offered only in chats whose project folder opened; `shell` is not registered on Windows, and `HF_WORKSPACE_SHELL=0` keeps it from every chat (it stays registered and listed in the tools table); no settings. Phase 8: writes are journaled and restorable (rewind, revert), and `shell` keeps its working folder between calls and runs commands that match the user's shell rules without a card (below) |
-| `core-agent` (Agent tools, Phase 9) | 3 agent tools: `todo_write`, `exit_plan_mode`, `task` (below) | offered in every chat with tools (`exit_plan_mode` only in plan mode, `task` never inside a sub-agent); no settings (the agent settings live in Settings → General: `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps`) |
+| `core-agent` (Agent tools, Phase 9) | 3 agent tools: `todo_write`, `exit_plan_mode`, `task` (below) | offered in every chat with tools (`exit_plan_mode` only in plan mode; none of them inside a sub-agent); no settings (the agent settings live in Settings → General: `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps`) |
 | `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models; Phase 7 adds `mock:workspace`, Phase 8 `mock:checkpoint` and `mock:shell`, Phase 9 `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer`) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
 
 Builtin manifests in v1.3: `core-tools` is version 1.2.0 and declares `engines.harness` `"^1.2.0"` (its
@@ -155,8 +155,9 @@ output schema, such as one the host replaced, is sent as JSON; `N lines` is `1 l
 - **No "always allow" for `execute` tools**: `PATCH /api/tools/:name` refuses `override: 'allow'` for a tool with
   workspace access `execute` (400 `validation_error` on `['override']`, message "Shell commands can't be always
   allowed. Add a shell rule instead."; an unknown tool is still 404 first), and an `allow` stored before v1.4 is
-  ignored by the approval (`GET /api/tools` still reports it as the tool's `override`). `deny` and `ask` overrides
-  still work.
+  ignored by the approval. Since v1.5 `GET /api/tools` and the `PATCH` answer report the effective override (such a
+  stored `allow` reads `null`; a `PATCH` without `override` stores that effective value, so the stale row is cleared),
+  and migration `0006` clears a stored `allow` on the builtin `shell`. `deny` and `ask` overrides still work.
 
 Builtin agent tools (`core-agent`, Phase 9, ADR-041 / ADR-043; behavior in
 [ARCHITECTURE.md 6.19, 6.22](./ARCHITECTURE.md#619-plan-mode-and-todos-adr-041), schemas in `@harness-forge/shared`
@@ -167,11 +168,12 @@ of this.
 
 | Tool | Access / policy / timeout | Input | Output and model text |
 |---|---|---|---|
-| `todo_write` | none / `safe` / 60 s | `{ todos: { id (1-64 characters, unique in the list), content (1-500), status: 'pending' \| 'in_progress' \| 'completed', activeForm? (<= 200) }[] }` (<= 50 items; the whole list each time) | `{ todos, counts }` (counts per status); the model reads one line with the counts. The latest call on the chat's path is the todo state (the todo strip, 7.25 of UI.md) |
-| `exit_plan_mode` | none / `always` / 60 s | `{ plan }` (markdown, 1-50,000 characters) | offered only in plan mode; always shows the plan card (overrides and `tool.approve` hooks cannot approve it; `PATCH /api/tools/exit_plan_mode` with `override: 'allow'` is refused with 400). Approved: `{ approved: true, mode }` (the mode the user switched to) and the text "The user approved the plan. Mode is now <label>. Implement it now; track progress with todo_write."; rejected: the user's feedback reaches the model as the denial reason |
-| `task` | none / `safe` / 600 s | `{ description (3-80 characters), prompt (<= 20,000), type: 'explore' \| 'general' }` | runs a sub-agent (a separate agent loop with its own context) and streams `TaskOutput` snapshots as preliminary outputs: `{ status: 'queued' \| 'running' \| 'completed' \| 'failed' \| 'aborted' \| 'limit', type, description, modelRef, steps (the last 50: tool, summary, state, preview), stepsOmitted, report (<= 32,000), usage?, costUsd?, startedAt, finishedAt?, error? }`; the model reads only the report ("Sub-agent failed: …; partial report: …" on failure). A child gets only the tools that run without approval in the chat's mode (no agent tools, no `generate_image`), and any call that would ask is denied inside it; at most 3 run at once, 20 per reply |
+| `todo_write` | none / `safe` / 60 s | `{ todos: { id (1-64 characters, unique in the list), content (1-500), status: 'pending' \| 'in_progress' \| 'completed', activeForm? (<= 200) }[] }` (<= 50 items; the whole list each time) | `{ todos, counts }` (counts per status: `pending`, `inProgress`, `completed`, `total`); the model reads one line ("Todo list updated: 1 in progress, 2 pending, 0 completed.", "Todo list cleared." for an empty list). An invalid list (duplicate ids, more than 50 items, …) becomes the call's error result (the input validation error) and the run goes on. The latest call on the chat's path is the todo state (the todo strip, 7.25 of UI.md); nothing is stored elsewhere |
+| `exit_plan_mode` | none / `always` / 60 s | `{ plan }` (markdown, 1-50,000 characters) | offered only in plan mode (and kept, but not callable, on the continuation that executes an approved plan); always shows the plan card (overrides and `tool.approve` hooks cannot approve it; `PATCH /api/tools/exit_plan_mode` with `override: 'allow'` is refused with 400 on `['override']`, "Plans always ask for your approval, so exit_plan_mode can't be always allowed."). Approved: the approval continuation must carry `toolMode` `edits` or `ask` (any other mode, `auto` included, is refused with 400 on `['toolMode']`); output `{ approved: true, mode }` (the mode the user switched to) and the text "The user approved the plan. Mode is now <label>. Implement it now; track progress with todo_write." (label "Accept edits" or "Ask"); rejected ("Keep planning"): the user's feedback reaches the model as the denial reason |
+| `task` | none / `safe` / 600 s | `{ description (3-80 characters), prompt (<= 20,000), type: 'explore' \| 'general' }` | runs a sub-agent (a separate agent loop with its own context) and streams `TaskOutput` snapshots as preliminary outputs: `{ status: 'queued' \| 'running' \| 'completed' \| 'failed' \| 'aborted' \| 'limit', type, description, modelRef, steps (the last 50: toolCallId, toolName, summary (<= 200), state `running` / `done` / `error` / `denied`, resultPreview? (<= 300)), stepsOmitted, report (<= 32,000), usage?, costUsd?, startedAt, finishedAt?, error? (<= 2,000) }`; the model reads only the report (`completed`, or `limit` with a report; "Sub-agent failed: <error>; partial report: <report or (none)>" otherwise). A child gets only the tools that run without approval in the chat's mode (no agent tools, no `generate_image`; an `explore` child and every child of a plan-mode chat follow `ask` without write / execute tools; a tool with a policy function stays and is decided per call, so in `edits` a `general` child can run the shell commands that match a shell rule), and any call that would ask is denied inside it ("Sub-agents cannot ask the user: this call needs approval."); at most 3 run at once (the others wait as `queued`), 20 per reply, `subagentMaxSteps` steps and 570 s each. A call without a chat run behind it yields one `failed` output |
 
-The tools can be disabled per tool in the Tools tab like any tool (disabling `task` turns sub-agents off).
+The tools can be disabled per tool in the Tools tab like any tool (disabling `task` turns sub-agents off; the tools
+table offers no Allow override for `exit_plan_mode`, as for `execute` tools).
 `todo_write` and `task` are offered in every chat with tools, with or without a project; an `explore` sub-agent only
 reads.
 
@@ -208,7 +210,7 @@ manifest declares the API range it supports in `engines.harness`; the host check
 | `1.0.0` | v1 (Phase 0 – 5) |
 | `1.1.0` | Phase 6 (additive): the optional `ProviderDefinition` members `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel`, `transcriptionOptions`; `PluginContext.images.generate`; model kinds `transcription` and `speech`, `ModelInfo.voices`, `capabilities.imageOutput` |
 | `1.2.0` | Unchanged in Phase 8 (checkpoints, the sticky folder and shell rules need no plugin API). Phase 7 (additive, ADR-032): `ToolCallContext.workspace?: ToolWorkspace` (`{ projectId, name, root }`, frozen, set for every tool in a chat whose project folder opened, policy functions included); `ToolDefinition.workspace?: 'read' \| 'write' \| 'execute'` (registration rejects any other value with `validation_error` at `['workspace']`; such a tool is offered only in those chats; `execute` tools only while `HF_WORKSPACE_SHELL` is on; `write` + policy `ask` runs without a card in the new permission mode `edits`); `ToolMode` gains `edits` ("Accept edits"; visible to hooks in `chat.params`); `ImageGenerateResult.modelName` (the catalog name, the user's alias first, else the model id). Behavior change: an unknown provider in `ctx.ai` (`ctx.models.resolve`) and `ctx.images` is now `provider_not_configured` (400, action `configure-provider`, message `The provider "<id>" is not available. Pick another model or install the provider.`), as on chat; it was `not_found` |
-| `1.3.0` | Phase 9 (additive, ADR-041 / ADR-043): `ToolMode` gains `plan` ("Plan": read-only; tools with workspace access `write` / `execute` are not offered, and policies resolve as in `ask`; visible to hooks in `chat.params`); `ToolDefinition.execute` may be an **async generator** (`async function*`): every yielded value is a preliminary output (shown as progress, throttled to one per 250 ms, each capped at 64 KB, at most 2,000 per call) and the last yielded value is the final output (an `execute` that returns an `AsyncIterable` from a normal function is drained instead: only its last value counts). `tool.after` hooks and `toModelOutput` see only the final value; the guard timeout and the abort signal cover the whole iteration. No new `ToolCallContext` member (the agent tools of `core-agent` use a server-internal channel) |
+| `1.3.0` | Phase 9 (additive, ADR-041 / ADR-043): `ToolMode` gains `plan` ("Plan": read-only; tools with workspace access `write` / `execute` are not offered, and policies resolve as in `ask`; visible to hooks in `chat.params`); `ToolDefinition.execute` may return the output directly (`Promise<O> \| O \| AsyncIterable<O>`) or be an **async generator** (`async function*`): every yielded value is a preliminary output (shown as progress, throttled to one per 250 ms with the latest value winning and the first sent at once, each capped at 64 KB, at most 2,000 per call) and the last yielded value is the final output (an `execute` that returns an `AsyncIterable` from a normal function is drained instead: only its last value counts). `tool.after` hooks and `toModelOutput` see only the final value; the guard timeout and the abort signal cover the whole iteration. No new `ToolCallContext` member (the agent tools of `core-agent` use a server-internal channel) |
 
 A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0`, `1.2.0` and `1.3.0`; a plugin that
 catches the old `not_found` of an unknown provider should also accept `provider_not_configured`; a hook or policy that
@@ -529,7 +531,7 @@ Connection lifecycle: servers connect in the background after the plugin is `act
 
 | Field | Validation / meaning |
 |---|---|
-| `name` | `^[a-z][a-z0-9-]{0,31}$`; not `new`, `model`, `effort`, `mode`, `help` (client-only); typed as `/name` |
+| `name` | `^[a-z][a-z0-9-]{0,31}$`; not `new`, `model`, `effort`, `mode`, `help` (client-only) and not `compact` (the harness command, Phase 9); typed as `/name` |
 | `description` | 1-120 characters, shown in the slash menu |
 | `template` | 1 character to 16 KB; every `{{input}}` is replaced with the text after `/name ` (trimmed) |
 
@@ -889,9 +891,10 @@ export interface ToolDefinition<I = unknown, O = unknown> {
   timeoutMs?: number                              // default 60_000, max 600_000
   workspace?: ToolWorkspaceAccess                 // 1.2: offered only with an open workspace; 'write' + policy 'ask'
                                                   // runs without a card in mode 'edits'; 'execute' needs HF_WORKSPACE_SHELL
-  execute(input: I, c: ToolCallContext): Promise<O> | AsyncIterable<O>
-                                                  // 1.3: an async generator yields preliminary outputs; the
-                                                  // last yielded value is the final output
+  execute(input: I, c: ToolCallContext): Promise<O> | O | AsyncIterable<O>
+                                                  // 1.3: may return the output directly, or be an async generator
+                                                  // that yields preliminary outputs; the last yielded value is the
+                                                  // final output
   toModelOutput?(output: O, c: { toolCallId: string; input: I }): ToolResultOutput | Promise<ToolResultOutput>
 }
 
@@ -1014,9 +1017,9 @@ zod validator of a settings form. Plugin API 1.1.0 adds the type exports `ImageP
 `TranscriptionHints`, `PluginImagesApi`, `ImageGenerateOptions`, `ImageGenerateResult` and `GeneratedImageFile`, and
 re-exports the types `ImageAspectRatio` and `ModelKind` from shared. Plugin API 1.2.0 adds `ToolWorkspace` and
 `ToolWorkspaceAccess` (the shared `WorkspaceAccess` / `workspaceAccessSchema`). Plugin API 1.3.0 adds no export: the
-`ToolMode` literal gains `plan` and `ToolDefinition.execute` may return an `AsyncIterable`. The template mirror
-`apps/server/src/plugins/templates/sdk-types.ts` (the `harness-forge.d.ts` of the templates and examples) follows the
-SDK, including the `ToolMode` literal. `ModelInfo` must be imported from these packages,
+`ToolMode` literal gains `plan` and `ToolDefinition.execute` may return the output directly or an `AsyncIterable`. The
+template mirror `apps/server/src/plugins/templates/sdk-types.ts` (the `harness-forge.d.ts` of the templates and
+examples) follows the SDK, including the `ToolMode` literal. `ModelInfo` must be imported from these packages,
 not from `ai` (which exports an unrelated type of the same name).
 
 ### `PluginContext`
@@ -1143,8 +1146,10 @@ Streaming tools (1.3.0): an `execute` written as an `async function*` reports pr
 **preliminary output**: the chat shows it in the tool row while the reply streams (UI.md 7.2), and it is not sent to
 the model. The **last** yielded value is the final output (step 6 and 7 apply to it only; `tool.after` hooks run once,
 on it). The host keeps at most one preliminary value per 250 ms (the latest wins), caps each at 64 KB and stops sending
-them after 2,000 (the final value always goes out). `timeoutMs` and `c.signal` cover the whole iteration: stop the loop
-when the signal aborts. A run that ends while the tool still yields stores the call as an error ("stopped"). Declare
+them after 2,000 (the final value always goes out; a preliminary value still waiting when the iteration ends is
+dropped). `timeoutMs` and `c.signal` cover the whole iteration: stop the loop when the signal aborts. A run that ends
+while the tool still yields stores the call as an error without its progress ("The run was stopped before the tool
+finished." after Stop, "The run ended before the tool finished." after a failure). Declare
 `"engines": { "harness": "^1.3.0" }`.
 
 ```js
@@ -1190,10 +1195,10 @@ project only shows in the `instructions` of `chat.params` and in the workspace t
 
 | Hook | Input (read-only) | Output (mutable) | When it runs | Timeout | Failure behavior |
 |---|---|---|---|---|---|
-| `chat.params` | `chatId`, `modelRef`, `model`, `reasoningEffort`, `toolMode` | `instructions`, `temperature?`, `maxOutputTokens?`, `maxSteps`, `reasoning?`, `providerOptions` | once per chat run (not for image turns, which call no chat model), after model resolution and `provider.reasoning()`, before `streamText`; for a chat model with image output `providerOptions` already holds the `imageParams()` options; `instructions` arrives joined (global, then in a project chat the workspace block, the project file and the project's instructions, then the chat's), `maxSteps` as the `maxSteps` or `projectMaxSteps` setting, and the result is clamped to 1-200 | 3 s | changes discarded, run continues |
+| `chat.params` | `chatId`, `modelRef`, `model`, `reasoningEffort`, `toolMode` | `instructions`, `temperature?`, `maxOutputTokens?`, `maxSteps`, `reasoning?`, `providerOptions` | once per chat run (not for image turns, which call no chat model, nor for a compaction's summary call, `/compact` included), after model resolution and `provider.reasoning()`, before `streamText`; for a chat model with image output `providerOptions` already holds the `imageParams()` options; `instructions` arrives joined (global, then in a project chat the workspace block, then (Phase 9) the agent blocks: the plan-mode block in `plan`, the todo hint and the `task` hint when those tools are offered, then the project file and the project's instructions, then the chat's), `maxSteps` as the `maxSteps` or `projectMaxSteps` setting, and the result is clamped to 1-200. Phase 9: every sub-agent runs `chat.params` and `chat.headers` once more for itself (its own `modelRef`, its lowered `toolMode`, instructions that start with the sub-agent preamble, no agent blocks) | 3 s | changes discarded, run continues |
 | `chat.headers` | `chatId`, `modelRef` | `headers` (sent with every model request of the run) | once per chat run, after `chat.params` (not for image turns) | 3 s | changes discarded |
-| `chat.messages` | `chatId`, `modelRef` | `messages` (`ModelMessage[]` after `convertToModelMessages`, before context trimming): the path being answered, from the first message to the new or answered user message; other versions of edited or regenerated messages are never included (ADR-023); Phase 9: as the model sees it, so the messages before the latest compaction marker are replaced by the summary, replies are split at the messages the user sent during a run, and `task` outputs are reduced to their report | once per chat run (image turns send no history and run no `chat.*` hook) | 3 s | changes discarded |
-| `tool.approve` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `decision?` (`allow` / `ask` / `deny`) | per tool call in `ask` / `edits` / `plan` / `auto` mode (unless a user override decided), step 2 of the approval order; never for `core-agent`'s `exit_plan_mode` (always asks) or for calls inside a sub-agent whose answer would need the user (denied there) | 3 s | ignored; resolution falls through to the policy |
+| `chat.messages` | `chatId`, `modelRef` | `messages` (`ModelMessage[]` after `convertToModelMessages`, before context trimming): the path being answered, from the first message to the new or answered user message; other versions of edited or regenerated messages are never included (ADR-023); Phase 9: as the model sees it, so the messages before the latest compaction marker are replaced by the summary, replies are split at the messages the user sent during a run, and `task` outputs are reduced to their report; a compaction or a steer inside the run happens later, at a step boundary, and is not seen by the hook | once per chat run (image turns send no history and run no `chat.*` hook; never for a sub-agent or a `/compact` turn) | 3 s | changes discarded |
+| `tool.approve` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `decision?` (`allow` / `ask` / `deny`) | per tool call in `ask` / `edits` / `plan` / `auto` mode (unless a user override decided), step 2 of the approval order; never for `core-agent`'s `exit_plan_mode` (always asks). Inside a sub-agent it runs too (`toolCallId` `<parent call id>/<child call id>`, the sub-agent's mode), and an `ask` decision is denied there | 3 s | ignored; resolution falls through to the policy |
 | `tool.before` | `chatId`, `modelRef`, `tool`, `toolCallId` | `input` | per execution, after approval, before `execute` | 3 s | **a throw blocks the call** (error result `Blocked by <pluginId>: <message>`, not counted as a failure); a timeout also blocks and counts |
 | `tool.after` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `output` | per successful execution, before the 64 KB cap (1.3.0: for a streaming tool, once, on the final value; preliminary outputs skip it) | 3 s | changes discarded (original output kept) |
 | `message.completed` | `chatId`, `modelRef`, `message`, `usage`, `costUsd?`, `aborted` | none | once per run after the assistant message is persisted (finished, aborted or failed runs; errors are in `message.metadata.error`); image turns included (their `usage` holds the image token counts); `costUsd` includes an image turn's estimated cost and the `costUsd` of `generate_image` outputs | 3 s | logged only |
@@ -1205,7 +1210,7 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
 
 | Step | Rule | Result |
 |---|---|---|
-| 1 | user override in `tool_prefs.override` = `deny` / `allow` / `ask` (Phase 8: `allow` is refused for `execute` tools and a stored one is ignored) | `denied` / `approved` / `user-approval` |
+| 1 | user override in `tool_prefs.override` = `deny` / `allow` / `ask` (Phase 8: `allow` is refused for `execute` tools and a stored one is ignored; Phase 9: the same for `exit_plan_mode`) | `denied` / `approved` / `user-approval` |
 | 2 | `tool.approve` hook sets `decision` = `deny` / `allow` / `ask` | `denied` / `approved` / `user-approval` |
 | 3 | tool policy (static or function) is `deny` | `denied` |
 | 4 | chat `toolMode` = `ask`, policy `safe` | `not-applicable` (runs, no card) |
@@ -1217,10 +1222,12 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
 | 4–5 | chat `toolMode` = `plan` (1.3.0): as `ask`; tools with workspace access `write` / `execute` are not offered at all | `not-applicable` / `user-approval` |
 
 - Phase 9: before step 1, `core-agent`'s `exit_plan_mode` always resolves to `user-approval` (the plan card), and a
-  user override `allow` on it is refused. Inside a sub-agent (the `task` tool) the same resolution runs for the chat's
-  mode, but a `user-approval` result becomes `denied` ("Sub-agents cannot ask the user: this call needs approval."), and
-  tools that could only ask are not offered to the child at all; a plugin tool therefore runs inside a sub-agent only
-  when it would run without a card in the chat itself.
+  user override `allow` on it is refused (the approval of a continuation in any mode other than `edits` / `ask` is
+  refused with 400). Inside a sub-agent (the `task` tool) the same resolution runs for the chat's mode (`ask` for an
+  `explore` sub-agent and for every sub-agent of a plan-mode chat), but a `user-approval` result becomes `denied`
+  ("Sub-agents cannot ask the user: this call needs approval."), and tools whose override or static policy could only
+  ask are not offered to the child at all (a policy function stays and decides per call); a plugin tool therefore runs
+  inside a sub-agent only when it would run without a card in the chat itself.
 - `toolMode = off`: no tools are sent to the model. Tools disabled in prefs (`enabled = false`) or with override
   `deny` are not sent either; step 1 only catches calls to them that still arrive.
 - `approved` / `denied` are recorded as automatic decisions (no card; denials render as `output-denied`);
@@ -1862,14 +1869,16 @@ linked folder (pinned to the path).
 1.2 member such as `ToolDefinition.workspace`, `"^1.3.0"` for an async-generator `execute`).
 
 **Can my tool show progress, like a sub-agent?** Yes, since plugin API 1.3.0: write `execute` as an `async function*`
-and `yield` snapshots; the last yielded value is the result ([Tools](#tools)). Only the final value reaches the model,
-the `tool.after` hooks and the 64 KB cap; the snapshots are throttled to one per 250 ms.
+and `yield` snapshots; the last yielded value is the result ([Tools](#tools)). Only the final value reaches the model
+and the `tool.after` hooks; every value is capped at 64 KB, and the snapshots are throttled to one per 250 ms.
 
 **Will my tool run in plan mode or inside a sub-agent?** In plan mode (1.3.0) every tool without workspace access
 `write` / `execute` is offered and resolves as in Ask. A sub-agent gets your tool only when it would run without a card
-in the chat's mode (policy `safe`, or `ask` in Auto, or a `write` tool in Accept edits) and no user override `ask` /
-`deny` is set; a call that would still need approval is denied inside the sub-agent. `ToolCallContext` has no flag for
-it: treat a call from a sub-agent like any other call.
+in the chat's mode (policy `safe`, or `ask` in Auto, or a `write` tool in Accept edits; an `explore` sub-agent and every
+sub-agent of a plan-mode chat follow Ask without write / execute tools) and no user override `ask` / `deny` is set; a
+tool with a policy function is offered and decided per call, and a call that would still need approval is denied inside
+the sub-agent. `ToolCallContext` has no flag for it (only `c.toolCallId` reads `<parent call id>/<child call id>`):
+treat a call from a sub-agent like any other call.
 
 **How do I write a tool that works on the chat's project folder?** Set `workspace: 'read'` (or `'write'`) and use
 `c.workspace.root` (plugin API 1.2.0, `"^1.2.0"`); the tool is offered only in project chats. Resolve paths yourself

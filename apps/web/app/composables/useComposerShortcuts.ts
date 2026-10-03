@@ -1,11 +1,13 @@
 // Composer shortcuts in the shared registry (docs/UI.md 11.2, 12): Alt+M model picker, Alt+R effort menu (reasoning
 // models), Alt+P permission menu (when tools exist) matched by `event.code` (Option+M types a symbol on macOS),
 // and Esc to stop a running response when focus is outside inputs and overlays (inside the composer the textarea
-// handles Esc itself). Display-only entries list the send key, Shift+Enter and the edit-last key. Registrations
+// handles Esc itself). Display-only entries list the send key, Shift+Enter, the edit-last key and Shift+Tab (the
+// permission mode cycle, handled by the textarea through `useModeCycle`). Registrations
 // end with the calling scope (the mounted composer).
 import type { SendKey } from '@harness-forge/shared'
 import type { ShortcutDef } from '~/composables/useShortcuts'
 import { getCurrentScope, onScopeDispose, watch } from 'vue'
+import { MODE_CYCLE_SHORTCUT } from '~/components/chat/composer/mode-cycle'
 import { sendKeyCombo } from '~/components/chat/composer/send-key'
 import { useShortcuts } from '~/composables/useShortcuts'
 
@@ -92,6 +94,7 @@ export function useComposerShortcuts(handlers: ComposerShortcutHandlers): void {
       { id: 'composer-send', keys: sendKeyCombo(sendKey), description: 'Send message', group: 'Composer' },
       { id: 'composer-newline', keys: 'shift+enter', description: 'New line', group: 'Composer' },
       { id: 'composer-edit-last', keys: 'arrowup', description: 'Edit the last message (empty composer)', group: 'Composer' },
+      { ...MODE_CYCLE_SHORTCUT },
     ])
   }
   watch(handlers.sendKey, registerHints, { immediate: true })

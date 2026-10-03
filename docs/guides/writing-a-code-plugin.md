@@ -233,10 +233,11 @@ ctx.tools.register({
 
 - **Policy and approval.** In **Ask** mode, `safe` tools run at once while `ask` and `always` tools show an approval
   card. In **Accept edits** (plugin API 1.2.0, project chats) `safe` tools and `ask` tools with `workspace: 'write'`
-  run; everything else asks. In **Auto** mode only `always` asks. A policy function (`input => input.path.startsWith('/tmp/') ? 'safe' :
-  'always'`) decides per call and can return `'deny'`. Users can override any tool in the plugin's tools table (Allow /
-  Ask / Deny, or switch it off), and the override wins over your policy. With the permission mode **Off**, no tools
-  are sent at all.
+  run; everything else asks. In **Plan** (plugin API 1.3.0) tools with `workspace: 'write'` / `'execute'` are not
+  offered and the rest follow Ask. In **Auto** mode only `always` asks. A policy function
+  (`input => input.path.startsWith('/tmp/') ? 'safe' : 'always'`) decides per call and can return `'deny'`. Users
+  can override any tool in the plugin's tools table (Allow / Ask / Deny, or switch it off), and the override wins over
+  your policy. With the permission mode **Off**, no tools are sent at all.
 - **Stop and disable.** `call.signal` aborts when the user presses Stop, when the timeout passes, or when the plugin
   is disabled. Pass it to `fetch` and long loops.
 - **Output.** Return plain data. When the model should see something shorter than what the UI shows, add
@@ -294,6 +295,17 @@ ctx.tools.register({
   under "Other tools changed files too", but its changes stay. An `execute` tool can never be "always allowed" (the
   server refuses that override), and the user's shell rules apply only to the builtin `shell`, never to your tool.
   Nothing changes in the plugin API (still 1.2.0).
+- **Sub-agents** (v1.5): the builtin `task` tool runs a sub-agent that gets your tool only when it would run without a
+  card in the chat's mode (a call that would ask is denied there); `call.toolCallId` then reads
+  `<parent call id>/<child call id>`.
+
+### Streaming tools (plugin API 1.3.0)
+
+Write `execute` as an `async function*` to show progress: every `yield` is a preliminary output that the chat shows in
+the tool row while the tool runs (at most one per 250 ms, the latest wins), and the last yielded value is the result
+the model and the `tool.after` hooks see. The timeout and `call.signal` cover the whole loop, so stop when the signal
+aborts. Declare `"engines": { "harness": "^1.3.0" }`, so an older server reports the plugin `incompatible`. Example in
+[PLUGINS.md "Tools"](../PLUGINS.md#tools).
 
 ## Providers
 
@@ -402,8 +414,8 @@ Calls are billed to the user's key, so say in your description that the plugin m
 ## Lifecycle, debugging and trust
 
 - **States**: `active`, `disabled`, `untrusted` (the files changed since they were trusted), `incompatible`
-  (`engines.harness` does not match the plugin API `1.2.0`, so use `"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` for the
-  members of those versions),
+  (`engines.harness` does not match the plugin API `1.3.0`, so use `"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` /
+  `"^1.3.0"` for the members of those versions),
   `error` (invalid manifest, `setup` threw or timed out, build failed). The plugin card and the detail header show the
   state and the last error.
 - **Logs**: `ctx.logger.debug/info/warn/error(message, data)` shows up in the Logs tab (last 500 entries) and the

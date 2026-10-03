@@ -2,25 +2,24 @@
 
 Part of the harness-forge build plan. Progress is tracked in `docs/ROADMAP.md` (coordinator only). Shared names come
 from `docs/DECISIONS.md` (ADR-040 … ADR-043, the amendment notes on ADR-023, ADR-032, ADR-036 and ADR-038, and the
-contract seed; it wins on conflict); endpoints and DTOs from `docs/API.md` (the queue routes 4.24 and the project file
-routes 4.25, the agent tool schemas, the data parts `data-compaction` / `data-steer` / `data-activity`, preliminary tool
-outputs, the `queue.changed` event and `run.started.origin`, the five settings, `ChatStopResult.dropped`, the route key
-index); components, props, store and composable signatures, shortcuts and test ids from `docs/UI.md` (the 2.16
-wireframes, 7.24 compaction, 7.25 plan mode and todos, 7.26 mentions, queue and steering, 7.27 sub-agents, 9.11 agent
-settings, 10.6, 11.6, 12, 13.10, 14, 15 and the amended 7.1 – 7.3, 7.6 – 7.8, 7.11, 7.12, 7.15); flows, tables and
-security rules from `docs/ARCHITECTURE.md` (5, the new 6.18 compaction, 6.19 plan mode and todos, 6.20 steer queue, 6.21
-file mentions, 6.22 sub-agents, 8, 10, 12); plugin API 1.3.0, `core-agent` and async-generator tools from
-`docs/PLUGINS.md`; the five mock models from `docs/PROVIDERS.md` (9, the probe contract); the user guide
-`docs/guides/agent-features.md`. The new UI.md, ARCHITECTURE.md, PLUGINS.md and PROVIDERS.md sections and the guide are
-written by D11 in P9-0a, API.md by C22.
+contract seed; it wins on conflict); endpoints and DTOs from `docs/API.md` (the agent tool schemas 4.25, the steer queue
+4.26 and file mentions 4.27 with their routes 5.26 and 5.27, the data parts `data-compaction` / `data-steer` /
+`data-activity`, preliminary tool outputs, the `queue.changed` event and `run.started.origin`, the five settings,
+`ChatStopResult.dropped`, the route key index); components, props, store and composable signatures, shortcuts and test
+ids from `docs/UI.md` (the 2.16 wireframes, 7.24 compaction, 7.25 plan mode and todos, 7.26 mentions, queue and
+steering, 7.27 sub-agents, 9.11 agent settings, 10.6, 11.6, 12, 13.10, 14, 15 and the amended 7.1 – 7.3, 7.6 – 7.8,
+7.11, 7.12, 7.15); flows, tables and security rules from `docs/ARCHITECTURE.md` (5, the new 6.18 compaction, 6.19 plan
+mode and todos, 6.20 steer queue, 6.21 file mentions, 6.22 sub-agents, 8, 10, 12); plugin API 1.3.0, `core-agent` and
+async-generator tools from `docs/PLUGINS.md`; the five mock models from `docs/PROVIDERS.md` (8 "Agent mocks (Phase 9)",
+the probe contract); the user guide `docs/guides/agent-features.md`. The new UI.md, ARCHITECTURE.md, PLUGINS.md and
+PROVIDERS.md sections and the guide are written by D11 in P9-0a, API.md by C22. API.md, UI.md, ARCHITECTURE.md,
+PLUGINS.md, PROVIDERS.md and the guide were reconciled with the code by W9.14 in P9-B.
 
-**Status (2026-10-03):** P9-00 is done (design inputs in `.tmp/p9-designs`, CI on `316319a` green, advisories
-re-checked, memory updated, baseline 8327 tests). P9-0a is in progress: K1 is done (ADR-040 … ADR-043, the contract
-seed, the ROADMAP section and the AGENT.md facts, committed at Gate P9-0a); C22, C23, D10 (this file) and D11 run in one
-launch; the K3 v1.4 upgrade seed is built in the background. "Deviations from the plan" holds the binding changes to the
-plan sections below, the design-report items the plan replaced and the open points decided while writing this file;
-"Deviations found while building" is filled in per wave from the agent reports and the gates; "Outcome" at the end of
-this file is completed by the coordinator at the final gate.
+**Status (2026-10-04): done.** v1.5 is complete: P9-00, P9-0a (`53646ba`), P9-0b (`bcd7064`), P9-A (`805a230`), P9-B
+and the final gate (`chore: final gate for harness-forge v1.5`). The fix-up agents W9.15 / W9.16 were not needed; the
+coordinator fixed the two issues found in P9-B (the Shift+Tab entry of the shortcuts dialog, the announcement of a
+`/compact` reply) and one flaky Phase 5 test at the final gate. "Deviations from the plan" holds the binding changes to
+the plan sections below; "Deviations found while building" what each wave changed; "Outcome" the gate results.
 
 Paths: `S` = `apps/server/src`, `W` = `apps/web/app`, `SH` = `packages/shared/src`.
 
@@ -150,8 +149,9 @@ sub-agent exploration.
 
 ## Deviations from the plan (binding)
 
-None yet. The coordinator records here every binding change to the plan sections below, with the gate that decided
-it; the agents build against the plan sections of this file plus this list.
+The binding changes found while building are listed per wave in "Deviations found while building" below. The
+coordinator records here every binding change to the plan sections below, with the gate that decided it; the agents
+build against the plan sections of this file plus this list.
 
 The three design reports (`.tmp/p9-designs/{server,web,process}.md`) are superseded where `plan.md` (its
 "Reconciliation" table) and `.tmp/p9-designs/README.md` disagree with them. The replaced report items, for agents who
@@ -328,7 +328,22 @@ reconciled docs (W9.14) follow these, not the task text further down.
   - In `edits`, `general` sub-agents get `shell` (rule-matched commands run, the rest are denied); the probes' "never
     shell" holds in `ask`. A v1.4 data dir keeps a cached `mock` model listing (24 h) without the Phase 9 mocks: refresh
     the mock provider's models after an upgrade (dev only; real providers gain no models in Phase 9).
-- **P9-B (W9.13, W9.14) and the final gate**: recorded by the coordinator.
+- **P9-B (W9.13, W9.14) and the final gate**: recorded by the coordinator. Found by W9.14 while reconciling the docs
+  with the code (API.md, UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md 8 and the guides now describe the code as
+  built, including every "For W9.14" item of `.tmp/waves/P9-*-notes.md`):
+  - `MODE_CYCLE_SHORTCUT` (`W/components/chat/composer/mode-cycle.ts`) is exported but never registered, so the
+    shortcuts dialog does not list Shift+Tab; UI.md 12 and 15 keep the entry as the contract (the fix: add it to the
+    display-only entries of `W/composables/useComposerShortcuts.ts`).
+  - `GET /tools` lists a stored `ask` / `deny` override on `exit_plan_mode` although the approval ignores it (step 0
+    always asks); API.md 5.12 says such an override is accepted but changes nothing.
+  - `ToolDefinition.execute` returns `Promise<O> | O | AsyncIterable<O>` (the SDK and the template mirror); PLUGINS.md
+    now lists the direct `O` too.
+  - The P9-A probe ran `loop 30` for the in-run compaction (the Gate P9-A text says `loop 6`); a server-started turn
+    whose extra queued messages were steered at step 0 opens, for `mock:steer`, at the LAST of those user messages.
+  - Notes for DECISIONS.md: ADR-041 still says an approval with `toolMode` `off` or `plan` is a 400 (the code refuses
+    every mode other than `edits` / `ask`, `auto` included); ADR-042 lists Stop and chat deletion as what empties the
+    queue (also key rotation, shutdown and an aborted or failed run); the contract-seed line of plugin API 1.3.0 does
+    not mention that `execute` may return the output directly.
 
 ## Rules for every Phase 9 agent
 
@@ -598,7 +613,7 @@ Four agents in one launch (C22, C23, D10, D11) after K1; K2 and the K3 seed run 
   10. **C22-T10 `docs/API.md`** — the `ToolMode` and `LIMITS` rows; settings (26); notice codes (7); conflict reasons;
       the agent tool schemas (4.21); the data parts and preliminary tool outputs in the chat stream protocol (6.4: the
       `data-compaction` / `data-steer` parts, the transient `data-activity`, `output-available` with `preliminary:
-      true`); `/compact` in `GET /commands`; the two modules (4.24 queue, 4.25 project files) with every answer (queue:
+      true`); `/compact` in `GET /commands`; the two modules (5.26 queue, 5.27 project files) with every answer (queue:
       201, 204, 400, 404 unknown chat or item, 409 `run-idle` / `queue-full` / `exists`, `DELETE` 404 once delivered or
       started; files: 400 for a refused path, `.git`, a secret-looking path or an unavailable folder (the
       `openWorkspace` message), 404 unknown project, 413 over 5 MiB, the upload's own type errors); `chat.stop`
@@ -821,7 +836,7 @@ migration exists (C24's upgrade test needs it).
 - **Owned.** `S/types.ts`, `S/deps*.ts`, `S/env*.ts`, `S/db/**` (not `schema.ts`), `S/chat/types.ts`,
   `S/services/project-files/**`, `S/testing/**` (not `api-samples.ts`).
 - **Read-only highlights.** `.tmp/p9-designs/plan.md` 3, 5, 7, `server.md` 1C, `process.md` 3; ARCHITECTURE.md 5, 6.20,
-  6.21, 8; API.md 4.24, 4.25; `SH/schemas/{queue,project-files}.ts`; `apps/server/drizzle/0006_*.sql`;
+  6.21, 8; API.md 4.26, 4.27; `SH/schemas/{queue,project-files}.ts`; `apps/server/drizzle/0006_*.sql`;
   `S/workspace/{walk,paths,sensitive}.ts`; `S/services/files/types.ts` (`upload`).
 - **Tasks.**
   1. **C24-T1 Types (additive)** — `S/types.ts`: `AppServices.projectFiles: ProjectFileService`; `S/chat/types.ts`: the
@@ -1279,7 +1294,7 @@ server.
 - **Mission.** The queue, its routes and event, steer delivery at step boundaries, the server-started next turn, and
   clearing on Stop, chat delete, key rotation and shutdown.
 - **Owned.** `S/chat/{queue,steer,runs,index}*`, `S/http/routes/{chat,chat-queue}{,.test}.ts`.
-- **Read-only highlights.** ADR-042; `.tmp/p9-designs/plan.md` 3, `server.md` 1C; API.md 4.24, 5.10, 6.6, 7;
+- **Read-only highlights.** ADR-042; `.tmp/p9-designs/plan.md` 3, `server.md` 1C; API.md 4.26, 5.26, 5.10, 6.6, 7;
   ARCHITECTURE.md 6.20; `S/chat/{steps,pipeline}.ts` (`RunContext.onReleased`, `RunSession.inject`),
   `S/chat/files.ts` (`normalizeUserParts`, `prepareModelFiles`), `SH/schemas/queue.ts`, `SH/util/agent-state.ts`
   (`splitSteers`).
@@ -1293,7 +1308,7 @@ server.
      with a reason. *Accept:* `queue.test.ts` (caps, every 409, take vs. remove, the `removed` reasons).
   2. **W9.2-T2 Routes** — `GET /chat/:id/queue` (`{ items }`), `POST /chat/:id/queue` (201 item),
      `DELETE /chat/:id/queue/:itemId` (204 / 404); `POST /chat/:id/stop` clears the queue (reason `stopped`) and then
-     stops: `{ stopped, dropped }`. *Accept:* `chat-queue.test.ts` covers every answer of API.md 4.24; `chat.test.ts`
+     stops: `{ stopped, dropped }`. *Accept:* `chat-queue.test.ts` covers every answer of API.md 5.26; `chat.test.ts`
      (stop with queued items).
   3. **W9.2-T3 Steer step (`steer.ts` `createSteerStep`)** — the second piece of `prepareStep`: takes every steerable
      item synchronously, converts each into a user model message (a one-message UI history through `prepareModelFiles` +
@@ -1425,9 +1440,9 @@ server.
 - **Mission.** The per-project file index, ranking, invalidation, search and attach.
 - **Owned.** `S/services/project-files/**` (not `types.ts`), `S/http/routes/project-files{,.test}.ts`,
   `S/testing/fake-project-files*`.
-- **Read-only highlights.** ADR-042; `.tmp/p9-designs/plan.md` 3, `server.md` 1C; API.md 4.25; ARCHITECTURE.md 6.21;
-  `S/workspace/{walk,paths,sensitive}.ts` (`walkWorkspace`, `resolveWorkspacePath`, `readWorkspaceFile`,
-  `isSecretLookingPath`); `S/services/files/types.ts` (`upload`); `SH/util/mentions.ts`.
+- **Read-only highlights.** ADR-042; `.tmp/p9-designs/plan.md` 3, `server.md` 1C; API.md 4.27, 5.27;
+  ARCHITECTURE.md 6.21; `S/workspace/{walk,paths,sensitive}.ts` (`walkWorkspace`, `resolveWorkspacePath`,
+  `readWorkspaceFile`, `isSecretLookingPath`); `S/services/files/types.ts` (`upload`); `SH/util/mentions.ts`.
 - **Tasks.**
   1. **W9.6-T1 Index** — per project through `walkWorkspace` (`.gitignore`, `node_modules`, the entry / depth / 10 s
      limits; no new pattern code): relative POSIX file paths ≤ 50 000 (`truncated`), folders derived from the file
@@ -1526,8 +1541,8 @@ server.
   announcements.
 - **Owned.** `W/composables/{useChatSession,useServerEvents}*`, `W/stores/chat-queue*`,
   `W/components/chat/{ChatView,chat-context}*`.
-- **Read-only highlights.** UI.md 7.6, 7.25, 7.26, 10.6, 11.6, 14; `.tmp/p9-designs/web.md` 1.2, 1.6; API.md 4.24, 5.10,
-  7; `SH/util/agent-state.ts`; `W/components/chat/agent/todos.ts` (W9.10's, frozen signature).
+- **Read-only highlights.** UI.md 7.6, 7.25, 7.26, 10.6, 11.6, 14; `.tmp/p9-designs/web.md` 1.2, 1.6; API.md 4.26,
+  5.26, 5.10, 7; `SH/util/agent-state.ts`; `W/components/chat/agent/todos.ts` (W9.10's, frozen signature).
 - **Tasks.**
   1. **W9.9-T1 Store** — `useChatQueueStore`: `items(chatId)`, `fetch`, `enqueue` (`POST`), `cancel` (`DELETE`; 404 →
      "Already sent to the agent."), `markDelivered`, `applyEvent` (`queue.changed`, `chat.deleted`), `refreshLoaded`.
@@ -1980,13 +1995,18 @@ Completed by the coordinator at the final gate ("audit" is the ownership audit o
 
 | Wave | Agents | Gate result | Commit |
 |---|---|---|---|
-| P9-00 | coordinator | CI on `316319a` green; advisories still unpatched (ignores kept, re-checked 2026-10-03); memory updated; `pnpm check` 8327 tests | (no commit) |
-| P9-0a | coordinator (K1, K3 seed), C22, C23, D10, D11 | pending | `feat: add phase 9 contracts and docs` |
-| P9-0b | coordinator (K3), C24, C25, C26, C27 | pending | `feat: add phase 9 schema, migration and skeletons` |
-| P9-A | W9.1 – W9.12 | pending | `feat: add compaction, plan mode, steer queue and sub-agents` |
-| P9-B + final gate | W9.13, W9.14 (W9.15 / W9.16 if needed), coordinator | pending | `chore: final gate for harness-forge v1.5` |
+| P9-00 | coordinator | CI + Audit on `316319a` green; advisories still unpatched (ignores kept, re-checked 2026-10-03); design reports in `.tmp/p9-designs`; memory updated; `pnpm check` 8327 tests | (no commit) |
+| P9-0a | coordinator (K1; K3 seed done early), C22, C23, D10, D11 (+ coordinator: the example plugins' `harness-forge.d.ts` regenerated for API 1.3.0, the phase-doc reconciliation with D11 (`activity`, `chatQueue.add`, PROVIDERS.md 8, `mock:todo` 400 ms + `invalid`), C27 also owns `SH/ids*` for `core-agent`) | audit ok (69 paths; 16 C22 compile-fix files accepted); frozen install ok; 8528 tests; build ok; CSP 38/38; `pluginApiVersion` 1.3.0, the 5 new routes answer 501 / 400; e2e 96 passed on a fresh `.tmp/e2e`; TypeScript 6.0.3 only | `53646ba` `feat: add phase 9 contracts and docs` |
+| P9-0b | coordinator (K3: schema + `0006_shell_rule_unique`, v1.4 seed from a `316319a` worktree), C24, C25, C26, C27 (+ coordinator: `declarativeCommandSchema` refuses `/compact` (C27 CCR), ownership additions for P9-A) | audit ok (162 paths; 11 test-fix files accepted); `0006` = 1 DELETE + 1 UPDATE + 2 partial `CREATE UNIQUE INDEX`; 8974 tests; build ok; CSP 38/38; e2e 96 passed on a fresh `.tmp/e2e`; upgrade probe on a v1.4 copy 31/31 (7 migrations, duplicates removed keeping the oldest, shell `allow` cleared, `current_time` kept, data intact, `core-agent` active, new settings defaulted); seam probe 7/7; FREEZE | `bcd7064` `feat: add phase 9 schema, migration and skeletons` |
+| P9-A | W9.1 – W9.12 (+ coordinator: `truncated` covers matches beyond the limit, share snapshots leave out `/compact` exchanges, the `core-agent` stub test and the `deps` project-files pins updated; relays: `agentTools` + the pre-mode tool set for history (W9.1), the lowered child mode (W9.5), `isPlanExitTool` (W9.7)) | audit ok (175 paths, no frozen file touched); 9467 tests; build ok; CSP 38/38; probes 71/71 (`.tmp/gates/P9-A/probe.mjs`: compaction 14, plan 9, todos 5, steer 9, sub-agents 11 + hygiene, mentions 14, stabilization 3, upgrade 5); P8-A regression 47/47; e2e 96 passed on a fresh `.tmp/e2e`; 22 screenshots of the new screens reviewed (desktop + phone); `pnpm audit --prod` clean (2 ignored); W9.15 / W9.16 not needed | `805a230` `feat: add compaction, plan mode, steer queue and sub-agents` |
+| P9-B | W9.13, W9.14 (+ coordinator: the display-only Shift+Tab entry registered in `useComposerShortcuts` (found by W9.14), same-tick announcements joined so a `/compact` reply is announced (found by W9.13), the effective override of `exit_plan_mode` is always null (found by W9.14), DECISIONS wording for ADR-041 / ADR-042 / plugin API 1.3.0; both W9.13 `test.fixme`s enabled) | audit ok (35 paths); W9.13: 30 new tests (chromium +23, mobile +5, tablet +2), 126 passed ×3 on 8891; W9.14: every doc reconciled with the code | (final gate commit) |
+| Final gate v1.5 | coordinator | frozen install ok; 9469 tests (a Phase 5 flaky test fixed: a share token mutated to its own last character); repository `git status` unchanged by `pnpm check`; build ok; CSP 38/38; probes 71/71 + the full P8-A probes 57/57; e2e 128 passed ×3 (chromium + mobile + tablet) on a fresh `.tmp/e2e`; `@screenshots` dark + light reviewed (11 new Phase 9 screens per theme), README images replaced by the full-frame `@readme` shots; `pnpm audit --prod` clean (2 ignored, still unpatched); real v1.4 → v1.5 upgrade (a fresh seed made by the `316319a` build, duplicate rules + stored overrides planted) 31/31; Docker image (Node 24, uid 1000) on a copy of that seed 10/10 (`0006` applied, `/compact` on the long v1.4 chat, sub-agents in `/data/workspaces`, a steer round trip) | `chore: final gate for harness-forge v1.5` |
 
-Fixes made by the coordinator at the gates, CCRs, follow-ups and deferred items: recorded here at the final gate.
+Fixes made by the coordinator at the gates and CCRs are listed in the rows above and in "Deviations found while
+building". Follow-ups (kept in the ROADMAP backlog): a steer queue that survives a restart; nested / user-defined /
+background agents; plan files saved to the project; micro-compaction of single large tool outputs; retrying a provider
+context overflow after compaction; `@` mentions of symbols and URLs; the live provider suite for compaction, plan mode
+and sub-agents; after an upgrade the dev-only `mock` listing cache (24 h) hides the new agent mocks until refreshed.
 
 ---
 

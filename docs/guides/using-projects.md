@@ -4,7 +4,7 @@ A **project** is a named folder on the server. A chat can belong to one project;
 search and edit the files of that folder and run shell commands in it, after your approval or under the rules you set.
 This is the agent workspace of harness-forge (v1.3, ADR-031 … ADR-033); v1.4 adds rewinding the agent's file changes,
 a changes panel with per-file revert, shell rules and a working folder that carries over between shell commands
-(ADR-036 … ADR-038).
+(ADR-036 … ADR-038); v1.5 adds plan mode, `@` file mentions and sub-agents ([agent features](agent-features.md)).
 
 > **Read this first.** The workspace tools work on real files with the rights of the server process, and the shell runs
 > any command you approve as the server's operating-system user. There is no sandbox inside harness-forge: run it in
@@ -109,14 +109,16 @@ while one of its chats is replying, and a running chat cannot be moved to anothe
 - The folder is checked at the start of every reply: if it was moved or deleted, the reply says so ("The project
   folder … is not available") and runs without workspace tools.
 
-## 5. Permission modes: Ask, Accept edits, Auto
+## 5. Permission modes: Ask, Accept edits, Plan, Auto
 
-The permission menu in the composer (Alt+P, or `/mode`) decides which tool calls wait for your approval:
+The permission menu in the composer (Alt+P, `/mode`, or v1.5's Shift+Tab, which cycles Ask → Accept edits → Plan)
+decides which tool calls wait for your approval:
 
 | Mode | Runs without asking | Asks |
 |---|---|---|
 | **Ask** (default) | reading, listing and searching files; shell commands your shell rules allow (7) | every write, every edit, every other shell command, other tools that change things |
 | **Accept edits** (project chats, `/mode edits` or `/mode accept-edits`) | reading and searching, writes and edits of ordinary project files; shell commands your shell rules allow | other shell commands; writes to hidden or secret-looking paths (`.git/…`, `.github/…`, `.env`, `*.pem`, `.npmrc`, …); other tools that would ask in Ask |
+| **Plan** (v1.5, project chats, `/mode plan`) | reading, listing and searching; the agent's todo list; read-only sub-agents | writes, edits and the shell are not offered at all; the plan card (approve with Accept edits or Ask, or keep planning; [agent features](agent-features.md#2-plan-mode-look-first-then-change)); other tools that would ask in Ask |
 | **Auto** | everything except tools marked always-ask | writes to hidden or secret-looking paths, other always-ask tools |
 
 - Reading a secret-looking file (`.env`, private keys, `.npmrc`, …) asks in Ask and Accept edits.

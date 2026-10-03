@@ -37,37 +37,43 @@ oldest part of the conversation is replaced by a **summary** written by a model,
   large context window works well. The summary costs one extra model call, listed in the chat's usage (purpose
   `compact`).
 - **When it fails** (the model errors, or the setting is off): the old behavior applies and the oldest messages are left
-  out; a notice says so. At most 10 automatic compactions happen in one reply.
-- **Not shared**: share links never include summaries, and chat search does not index them. The Markdown export does.
+  out; a notice says so, and the reply does not try to compact again. At most 10 automatic compactions happen in one
+  reply. A failed `/compact` shows the error in its reply and changes nothing. `/compact` needs a chat model: with an
+  image model picked in the composer it is refused.
+- **Not shared**: share links never include summaries (a `/compact` exchange is left out of them entirely), and chat
+  search does not index them. The Markdown export does.
 
 ## 2. Plan mode: look first, then change
 
 Plan mode is a **permission mode** (next to Ask, Accept edits, Auto and Off), offered in project chats.
 
-- **Turn it on**: the permission menu in the composer (**Plan**), Alt+P, `/mode plan`, or **Shift+Tab** in the
-  composer, which cycles Ask → Accept edits → Plan → Ask (Settings → General → **Shift+Tab switches the permission
-  mode**; turn it off if you use Shift+Tab to move focus backwards).
+- **Turn it on**: the permission menu in the composer (**Plan**; Alt+P opens the menu), `/mode plan`, or **Shift+Tab**
+  in the composer, which cycles Ask → Accept edits → Plan → Ask (from Auto or Off it goes to Ask; Settings → General →
+  **Shift+Tab switches the permission mode**; turn it off if you use Shift+Tab to move focus backwards). A screen
+  reader hears "Permission mode: Plan".
 - **What the agent can do**: read, list and search files and use tools that change nothing. Tools that write files or
   run shell commands are not even offered to the model. Tools that ask in Ask still ask.
 - **The plan card**: when the agent is done exploring it calls `exit_plan_mode` with a markdown plan. The card shows it
   with three buttons:
   - **Approve, accept edits**: the chat switches to Accept edits and the agent starts implementing at once (file edits
-    run without asking; shell commands still ask).
+    run without asking; shell commands still ask unless a shell rule allows them).
   - **Approve, ask before edits**: the chat switches to Ask; every change asks first.
   - **Keep planning**: the agent stays in plan mode and revises the plan. Write what to change in **Feedback for the
     agent** (up to 2,000 characters); the feedback is sent with whichever button you press.
 - **Enforced on the server**: plan mode is not a hint. The server builds the tool set and decides approvals; the plan
-  card can never be approved by an "Always allow" setting or a plugin hook, and approving it requires leaving plan mode
-  (the card switches to Ask or Accept edits).
+  card can never be approved by an "Always allow" setting (Plugins → Agent tools offers no Allow for `exit_plan_mode`)
+  or a plugin hook, and a plan is only approved together with a switch to Accept edits or Ask (the server refuses any
+  other mode, Auto included).
 
 ## 3. Todos: watch the agent's task list
 
 The agent keeps a short task list with the `todo_write` tool (up to 50 items, each pending, in progress or done). It
 runs without asking, in every chat with tools.
 
-- **The strip** above the composer shows "3/7 · Running the parser tests" with a progress bar while the agent works, and
-  until a finished reply's list is complete. Open it to see every task.
-- **The row** of each `todo_write` call in the reply shows the count and the list.
+- **The strip** above the composer shows "3/7 · Running the parser tests" with a progress bar while the agent works,
+  and after the reply as long as its list still has open items ("All tasks done" when everything is done). Open it to
+  see every task; it remembers whether it was open.
+- **The row** of each `todo_write` call in the reply shows the count ("3/3") and the list.
 - The list belongs to the message path: switching to another version shows that version's list. It survives reloads and
   compaction (the summary carries it).
 
@@ -75,11 +81,13 @@ runs without asking, in every chat with tools.
 
 In a project chat, type `@` (or use **+** → **Mention a file**) and start typing a file name.
 
-- The menu searches the project's files: names first, then paths, then fuzzy matches; `.gitignore`d files,
-  `node_modules`, `.git` and secret-looking files (`.env`, keys, …) are left out. Pick a folder to look inside it.
-- Picking a file inserts `@src/parser.ts` into your text (so the model sees the path) and attaches a **snapshot** of the
-  file, like a dropped file. Later edits of the file do not change the attachment; ask the agent to `read_file` it for
-  the current version.
+- The menu searches the project's files: names that start with what you typed first, then names that contain it, then
+  full paths, then fuzzy matches (the letters in order); `.gitignore`d files, `node_modules`, `.git` and secret-looking
+  files (`.env`, keys, …) are left out. Pick a folder to look inside it. The list shows the first 50 matches; type more
+  to narrow it.
+- Picking a file inserts `@src/parser.ts` into your text (so the model sees the path; a path with spaces is written
+  `@"my notes.md"`) and attaches a **snapshot** of the file, like a dropped file. Later edits of the file do not change
+  the attachment; ask the agent to `read_file` it for the current version.
 - Limits: text files, images and PDFs up to **5 MB**; `.git` content and secret-looking files cannot be attached.
 - The chip and the `@path` text are independent: remove either one on its own.
 
@@ -93,7 +101,8 @@ You no longer have to wait for a reply to finish.
   queued message and reads it before it continues. The message then shows inside the reply where it was delivered
   ("You · while it worked"). Use it to correct course: "Use the vitest filter instead".
 - **Or as the next message**: a message still queued when the reply finishes is sent as the next message
-  automatically.
+  automatically, and the tab follows it (several queued messages: the first starts the next reply, the others reach it
+  at its first step).
 - **Edit or cancel** a queued message from its row until it is delivered.
 - **Stop** cancels the reply and empties the queue; the queued texts and files come back into your composer.
 - **Commands wait**: `/compact` and plugin commands are never sent into a running reply; they run as the next message.
@@ -111,16 +120,18 @@ longer flood the main conversation.
 - **Types**: **Explore** (read-only: reading, listing and searching) and **Agent** (general: whatever the chat's mode
   allows without asking).
 - **Never asks you**: a sub-agent only gets the tools that would run without an approval card in the chat's current
-  mode. In Ask that means read-only tools; in Accept edits also file edits (and shell commands your shell rules allow);
-  in Auto everything except always-ask tools. A call that would still need approval is skipped ("Sub-agents can't ask
-  for approval, so this was skipped."). In plan mode sub-agents are read-only too.
+  mode. In Ask that means read-only tools (no file edits, no shell); in Accept edits an **Agent** sub-agent also gets
+  file edits and the shell, where only the commands your shell rules allow run; in Auto everything except always-ask
+  tools. A call that would still need approval is skipped ("Sub-agents can't ask for approval, so this was skipped.").
+  An **Explore** sub-agent, and every sub-agent in plan mode, is read-only.
 - **Live blocks**: each sub-agent shows as a block with its latest step; open it for the prompt, the steps (the last 50),
   the report and its model, tokens, cost and time. Several run side by side.
 - **Limits**: 3 at once (more wait), 20 per reply, **Sub-agent max steps** (Settings → General → Agent; default 30, up
   to 200; at the limit the sub-agent writes its report), and about 9.5 minutes each. A sub-agent cannot start
   sub-agents.
-- **Model**: **Sub-agent model** (default: the chat's model). It must be able to call tools; a cheaper, faster model is
-  often enough for exploring. Each sub-agent's usage is listed in the chat's cost (purpose `subagent`).
+- **Model**: **Sub-agent model** (default: the chat's model). It must be able to call tools (the setting warns when it
+  can't); a cheaper, faster model is often enough for exploring. A model that is no longer available falls back to the
+  chat's model. Each sub-agent's usage is listed in the chat's cost (purpose `subagent`).
 - **Files**: edits made by sub-agents are journaled like the main agent's, so **Rewind files to here** and the changes
   panel cover them. A sub-agent's `cd` does not move the chat's shell folder.
 - **Stop** stops every sub-agent of the reply. After a reload, a stopped sub-agent shows as stopped without its steps.
@@ -144,7 +155,7 @@ No environment variable is needed for any of this.
 | Feature | Enforced by the server | Limits |
 |---|---|---|
 | Compaction | the latest summary on the message path replaces older messages for the model; stored messages are never rewritten | summary 60,000 characters, focus 1,000, 10 automatic compactions per reply, triggered at 80 % of the window |
-| Plan mode | the tool set (no write / execute tools) and the approvals (`exit_plan_mode` always asks; approving it requires leaving plan mode) | plan 50,000 characters, feedback 2,000 |
+| Plan mode | the tool set (no write / execute tools) and the approvals (`exit_plan_mode` always asks; approving it requires switching to Accept edits or Ask) | plan 50,000 characters, feedback 2,000 |
 | Todos | derived from the stored `todo_write` calls | 50 items |
 | Mentions | the path guard (no `..`, no links out of the project, no `.git`, no secret-looking files), the upload checks | 5 MB per file, 50 results, 50,000 indexed files per project |
 | Queue | bounded, per chat, emptied by Stop, chat deletion, key rotation and shutdown; server commands never steer | 10 messages of 256 KB per chat |
@@ -159,12 +170,13 @@ searches or file contents at the `info` level.
   window, or a **Compaction model** with a large window (the summary then has room for more detail).
 - **The summary misses something important**: run `/compact <what to keep>` yourself before the automatic one does, or
   edit a message above the divider to continue from the full history in a new branch.
-- **Plan is not in the permission menu**: plan mode is offered in project chats only. Move the chat into a project
-  first (the server would accept `plan` elsewhere, but without workspace tools it adds nothing).
+- **Plan is not in the permission menu**: plan mode is offered in project chats only (`/mode plan` elsewhere answers
+  "Plan mode works in project chats."). Move the chat into a project first (the server would accept `plan` elsewhere,
+  but without workspace tools it adds nothing).
 - **Shift+Tab moves focus instead of switching modes**: the setting is off, a menu is open, the composer is not focused,
   the model cannot call tools, or there is nothing to switch to (outside a project chat Ask is the only mode in the
   cycle).
 - **`@` opens no menu**: the chat has no project, or `@` is inside a word (`a@b`).
-- **A sub-agent "skipped" a step**: that call needed your approval in the current mode. Switch to Accept edits (for
-  file edits) or add a shell rule, then ask again.
+- **A sub-agent "skipped" a step**: that call needed your approval in the current mode. Switch to Accept edits (file
+  edits, and shell commands that match a shell rule; add the rule first), then ask again.
 - **A queued message disappeared after a restart**: the queue lives in memory; send it again.

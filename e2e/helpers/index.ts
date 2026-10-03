@@ -1,5 +1,6 @@
 // Everything the e2e specs share (documented in e2e/README.md). Import from this file:
 //   import { expect, openNewChat, test, testIds } from '../../helpers/index.ts'
+export * from './agent.ts'
 export * from './api.ts'
 export * from './auth-server.ts'
 export * from './changes.ts'

@@ -14,16 +14,24 @@
 // the rewind dialog, a shell approval card with the rule option checked, terminal output in a sticky working folder
 // with rule badges, the allowed commands of a project and the automatic cleanup in Settings -> Data. Their data: the
 // `harness-forge` project folder becomes a git repository after the Phase 7 chats (when git is installed), gets the
-// rules `ls`, `mkdir` and `pnpm test` (plus the global `git status`), and three more chats run in it. A screen that
-// starts something (a run, a recording, a dialog, settings only it needs, the open changes panel) undoes it in `close`,
-// so the other screens look the same in every run.
+// rules `ls`, `mkdir` and `pnpm test` (plus the global `git status`), and three more chats run in it. Phase 9 screens
+// (W9.13): a plan waiting for its approval (with the todo strip), a todo strip expanded on an unfinished list (a
+// `mock:todo` run stopped after its second list), two finished sub-agents with one expanded, a compacted chat with the
+// summary open, a live `mock:steer` run with a steer note and a queued server command, the `@` mention menu, and Settings
+// -> General -> Agent; the sub-agent and compaction models are set for the whole run (`mock:subagent`, `mock:compact`).
+// A screen that starts something (a run, a recording, a dialog, settings only it needs, the open changes panel) undoes
+// it in `close`, so the other screens look the same in every run.
+// `@readme` (also `@screenshots`): the README images as full 1440x900 frames, written to `.tmp/screenshots/readme/`
+// with the file names of `docs/assets/screenshots/` (chat-dark, chat-light, plugins-dark, provider-wizard-dark,
+// settings-dark, workspace-dark, changes-panel-dark).
 import type { Locator, Page } from '@playwright/test'
-import type { StartedServer } from '../../helpers/index.ts'
+import type { StartedServer, UiStreamChunk } from '../../helpers/index.ts'
 import { createHash } from 'node:crypto'
 import { mkdir, utimes, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import process from 'node:process'
 import { devices } from '@playwright/test'
+import { createMessageId } from '../../../packages/shared/src/index.ts'
 import {
   byTestId,
   changesFile,
@@ -46,6 +54,7 @@ import {
   MOCK_WORKSPACE_DONE,
   naturalSize,
   openRewind,
+  parseUiMessageStream,
   pressShortcut,
   REPO_ROOT,
   sendMessage,
@@ -53,11 +62,14 @@ import {
   test,
   testIds,
   userMessages,
+  waitForTestId,
   workspaceRoot,
 } from '../../helpers/index.ts'
 
 const ENABLED = process.env.E2E_SCREENSHOTS === '1'
 const OUTPUT_DIR = join(REPO_ROOT, '.tmp/screenshots')
+/** The README images (`@readme`), named like the files in `docs/assets/screenshots/`. */
+const README_DIR = join(OUTPUT_DIR, 'readme')
 const PASSWORD = 'screenshots-password'
 const THEMES = ['dark', 'light'] as const
 type Theme = (typeof THEMES)[number]
@@ -97,6 +109,14 @@ interface Seed {
   terminalCwd: string
   /** Phase 8: a `mock:shell` reply waiting for the approval of a command no rule covers. */
   ruleApproval: string
+  /** Phase 9: a `mock:plan` reply in the `harness-forge` project waiting for its plan approval (todos 0/2). */
+  plan: string
+  /** Phase 9: two finished `mock:subagent` sub-agents in the `harness-forge` project. */
+  subagents: string
+  /** Phase 9: a `mock:todo` run stopped after its second list (1/3, "Changing the code"). */
+  todos: string
+  /** Phase 9: three questions, then `/compact keep the parser details` (summarized by `mock:compact`). */
+  compacted: string
   /** The screenshot server (API calls of the screens that start something). */
   baseURL: string
   /** The start of the browser clock: a little after the seed, so relative times read "2m ago". */
@@ -164,6 +184,8 @@ const NO_SPEECH_SETTINGS = { speechModelRef: null, speechVoice: null, speechSpee
 
 /** The chat an image-turn screen creates for itself (deleted again in `close`). */
 let generatingChatId: string | null = null
+/** The chat of the live steer screen (deleted again in `close`). */
+let steerChatId: string | null = null
 /** How far the page clock ran ahead of the real one before the image-turn screen set it to the real time. */
 let clockOffsetMs = 0
 
@@ -558,6 +580,94 @@ const SCREENS: Screen[] = [
     },
   },
   {
+    name: 'chat-plan-approval',
+    open: async (page, seed) => {
+      await openChat(page, seed.plan)
+      const card = page.getByTestId(testIds.planApproval)
+      await expect(card).toHaveAttribute('data-state', 'pending')
+      await expect(page.getByTestId(testIds.todoStrip)).toHaveAttribute('data-value', '0')
+      await card.scrollIntoViewIfNeeded()
+    },
+  },
+  {
+    name: 'chat-todo-strip',
+    open: async (page, seed) => {
+      await page.evaluate(`localStorage.setItem('hf-todo-expanded', '1')`)
+      await openChat(page, seed.todos)
+      const strip = page.getByTestId(testIds.todoStrip)
+      await expect(strip).toHaveAttribute('data-state', 'open')
+      await expect(strip).toHaveAttribute('data-value', '1')
+      await expect(strip.getByTestId(testIds.todoItem)).toHaveCount(3)
+    },
+    close: async (page) => {
+      await page.evaluate(`localStorage.setItem('hf-todo-expanded', '0')`)
+    },
+  },
+  {
+    name: 'chat-subagents',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await openChat(page, seed.subagents)
+      const block = byTestId(page, testIds.taskBlock, { 'data-kind': 'explore' })
+      await expect(block).toHaveAttribute('data-state', 'completed')
+      await block.getByTestId(testIds.taskBlockTrigger).click()
+      await expect(block.getByTestId(testIds.taskReport)).toBeVisible()
+      await lastAssistantMessage(page).scrollIntoViewIfNeeded()
+    },
+  },
+  {
+    name: 'chat-compacted',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await openChat(page, seed.compacted)
+      const divider = lastAssistantMessage(page).getByTestId(testIds.compactionDivider)
+      await divider.getByTestId(testIds.compactionToggle).click()
+      await expect(divider.getByTestId(testIds.compactionSummary)).toBeVisible()
+      await expectTranscriptAtBottom(page)
+    },
+  },
+  {
+    name: 'chat-steer',
+    open: async (page, seed) => {
+      // A live run of its own: `steps 20` (8 s), a steer once the first step ran, then a server command that waits.
+      steerChatId = (await pageApi(page, seed).createChat({ title: 'Run the parser tests', modelRef: 'mock:steer' })).id
+      await page.goto(`/chat/${steerChatId}`)
+      await expect(composer(page).getByTestId(testIds.modelPickerTrigger)).toHaveAttribute('data-model-ref', 'mock:steer')
+      await sendMessage(page, 'steps 20')
+      await waitForTestId(page, testIds.toolRow, { 'data-tool-name': 'current_time' })
+      const input = page.getByTestId(testIds.composerInput)
+      await input.fill('Use the vitest filter instead')
+      await page.getByTestId(testIds.composerQueue).click()
+      await expect(lastAssistantMessage(page).getByTestId(testIds.steerNote)).toBeVisible()
+      // The streamed line catches up a little later under the page clock.
+      await expect(lastAssistantMessage(page)).toContainText('Steered: Use the vitest filter instead.')
+      await input.fill('/compact keep the test names')
+      await page.getByTestId(testIds.composerQueue).click()
+      await expect(page.getByTestId(testIds.queuedMessages)).toHaveAttribute('data-count', '1')
+      await input.fill('Also update the README')
+    },
+    close: async (page, seed) => {
+      if (steerChatId)
+        await pageApi(page, seed).removeChat(steerChatId)
+      steerChatId = null
+    },
+  },
+  {
+    name: 'composer-mention',
+    open: async (page, seed) => {
+      await openChat(page, seed.subagents)
+      await page.getByTestId(testIds.composerInput).click()
+      await page.keyboard.type('Update @re')
+      const menu = page.getByTestId(testIds.mentionMenu)
+      await expect(menu).toHaveAttribute('data-state', 'ready')
+      await expect(menu.getByTestId(testIds.mentionMenuItem).first()).toBeVisible()
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await page.getByTestId(testIds.composerInput).fill('')
+    },
+  },
+  {
     name: 'share-dialog',
     open: async (page, seed) => {
       await openChat(page, seed.shared)
@@ -695,6 +805,15 @@ const SCREENS: Screen[] = [
     }),
   },
   {
+    name: 'settings-general-agent',
+    only: 'desktop',
+    open: page => openSettings(page, '/settings/general', async (page) => {
+      await expect(page.getByTestId(testIds.settingsSubagentModel)).toHaveAttribute('data-value', 'mock:subagent')
+      await expect(page.getByTestId(testIds.settingsCompactionModel)).toHaveAttribute('data-value', 'mock:compact')
+      await page.getByText('Long chats and sub-agents.').evaluate(element => element.scrollIntoView({ block: 'center' }))
+    }),
+  },
+  {
     name: 'settings-appearance',
     open: page => openSettings(page, '/settings/appearance', async (page) => {
       await expect(page.getByTestId(testIds.appearanceThemeCard).first()).toBeVisible()
@@ -765,13 +884,61 @@ const SCREENS: Screen[] = [
   },
 ]
 
+/** A session cookie of the screenshot server for `streamTurn` (fetch sends no cookies of the Playwright contexts). */
+async function sessionCookie(baseURL: string): Promise<string> {
+  const response = await fetch(`${baseURL}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) })
+  const cookie = response.headers.getSetCookie()[0]?.split(';')[0]
+  if (!response.ok || !cookie)
+    throw new Error(`The screenshot login failed (${response.status}).`)
+  return cookie
+}
+
+/**
+ * Sends one user message with fetch and reads its UI message stream while it arrives (HarnessApi buffers whole
+ * answers): `onChunk` sees every chunk, e.g. to stop the run or to queue a steer at the right step. Resolves at the end
+ * of the stream.
+ */
+async function streamTurn(
+  baseURL: string,
+  cookie: string,
+  input: { chatId: string, text: string, modelRef: string },
+  onChunk: (chunk: UiStreamChunk) => Promise<void> | void,
+): Promise<void> {
+  const response = await fetch(`${baseURL}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({
+      chatId: input.chatId,
+      message: { id: createMessageId(), role: 'user', parts: [{ type: 'text', text: input.text }] },
+      trigger: 'submit-message',
+      modelRef: input.modelRef,
+      reasoningEffort: 'auto',
+      toolMode: 'ask',
+    }),
+  })
+  if (!response.ok || !response.body)
+    throw new Error(`The streamed turn failed (${response.status}).`)
+  const decoder = new TextDecoder()
+  let pending = ''
+  for await (const bytes of response.body) {
+    pending += decoder.decode(bytes, { stream: true })
+    const end = pending.lastIndexOf('\n')
+    if (end === -1)
+      continue
+    for (const chunk of parseUiMessageStream(pending.slice(0, end)))
+      await onChunk(chunk)
+    pending = pending.slice(end + 1)
+  }
+}
+
 /** Creates the chats of the screenshots through the API of the screenshot server. */
 async function seed(server: StartedServer): Promise<Seed> {
   const api = await HarnessApi.create(server.baseURL)
   try {
     await api.client.auth.login({ body: { password: PASSWORD } })
     // The image and speech-to-text models change nothing on the other screens (the mic looks the same either way).
-    await api.updateSettings({ displayName: 'Alex', defaultModelRef: 'mock:echo', imageModelRef: 'mock:image', transcriptionModelRef: 'mock:transcribe', ...NO_SPEECH_SETTINGS })
+    // Phase 9: the sub-agent and compaction models only show on Settings -> General -> Agent.
+    await api.updateSettings({ displayName: 'Alex', defaultModelRef: 'mock:echo', imageModelRef: 'mock:image', transcriptionModelRef: 'mock:transcribe', subagentModelRef: 'mock:subagent', compactModelRef: 'mock:compact', ...NO_SPEECH_SETTINGS })
     const titled = async (title: string) => (await api.createChat({ title })).id
     // Projects (Phase 7): two project folders and a plain folder (with subfolders) for the Add project dialog, below the
     // server's workspace root.
@@ -780,6 +947,23 @@ async function seed(server: StartedServer): Promise<Seed> {
       await mkdir(join(root, folder), { recursive: true })
     const project = (await api.client.projects.create({ body: { name: 'harness-forge', path: join(root, 'harness-forge') } })).id
     await api.client.projects.create({ body: { name: 'notes', path: join(root, 'notes') } })
+    // Phase 9 first (the oldest chats: the sidebar lists them last). Nothing here writes into the project folder.
+    const plan = (await api.createChat({ title: 'Plan the cookie settings', projectId: project, modelRef: 'mock:plan' })).id
+    await api.sendChat({ chatId: plan, modelRef: 'mock:plan', toolMode: 'plan', text: 'Plan moving the session cookie settings into one module.' })
+    const subagents = (await api.createChat({ title: 'Map the auth code', projectId: project, modelRef: 'mock:subagent' })).id
+    await api.sendChat({ chatId: subagents, modelRef: 'mock:subagent', toolMode: 'ask', text: 'Find the session code and the cookie settings.' })
+    const compacted = (await api.createChat({ title: 'Parser crash on empty input', modelRef: 'mock:echo' })).id
+    for (const text of ['Why does the parser crash on empty input?', 'Which test covers the lexer\'s end of file?', 'Should the parser return an empty program instead?'])
+      await api.sendChat({ chatId: compacted, modelRef: 'mock:echo', toolMode: 'off', text })
+    await api.sendChat({ chatId: compacted, modelRef: 'mock:echo', toolMode: 'off', text: '/compact keep the parser details' })
+    // A `mock:todo` run stopped right after its second list: the list stays unfinished (1/3).
+    const todos = (await api.createChat({ title: 'Fix the parser crash', modelRef: 'mock:todo' })).id
+    const cookie = await sessionCookie(server.baseURL)
+    let lists = 0
+    await streamTurn(server.baseURL, cookie, { chatId: todos, modelRef: 'mock:todo', text: 'Fix the crash, then run the tests.' }, async (chunk) => {
+      if (chunk.type === 'tool-output-available' && ++lists === 2)
+        await fetch(`${server.baseURL}/api/chat/${todos}/stop`, { method: 'POST', headers: { cookie } })
+    })
     const projectChat = async (title: string) => (await api.createChat({ title, projectId: project, modelRef: 'mock:workspace' })).id
     const workspaceText = 'Change the greeting in mock-workspace.txt and print the file.'
     // Older chats first: the sidebar lists the newest on top.
@@ -872,6 +1056,10 @@ async function seed(server: StartedServer): Promise<Seed> {
       changes,
       terminalCwd,
       ruleApproval,
+      plan,
+      subagents,
+      todos,
+      compacted,
       baseURL: server.baseURL,
       now: Date.now() + 2 * 60_000,
     }
@@ -909,6 +1097,65 @@ async function captureAll(page: Page, seedData: Seed, theme: Theme, viewport: Vi
       await screen.open(page, seedData)
       await expect(page.locator('html')).toContainClass(theme)
       await shoot(screen.name)
+      await screen.close?.(page, seedData)
+    })
+  }
+}
+
+/** The provider wizard on its API step with the LM Studio template (README only). */
+const WIZARD_API_SCREEN: Screen = {
+  name: 'provider-wizard-api',
+  open: async (page) => {
+    await page.goto('/plugins/new?type=provider')
+    const wizard = page.getByTestId(testIds.wizard)
+    await expect(wizard).toHaveAttribute('data-step', 'basics')
+    await page.getByTestId(testIds.wizardName).fill('LM Studio')
+    await page.getByTestId(testIds.wizardNext).click()
+    await expect(wizard).toHaveAttribute('data-step', 'api')
+    await byTestId(page, testIds.wizardTemplate, { 'data-value': 'lmstudio' }).click()
+    await expect(page.getByTestId(testIds.wizardBaseUrl)).toHaveValue('http://localhost:1234/v1')
+    // No focus ring in the picture.
+    await page.getByTestId(testIds.wizardBaseUrl).blur()
+  },
+  close: async (page) => {
+    // The draft lives in this browser's storage: discard it.
+    await page.getByTestId(testIds.wizardDiscard).click()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Discard' }).click()
+    await expect(page.getByTestId(testIds.wizard)).toHaveAttribute('data-step', 'basics')
+  },
+}
+
+/** The README images (`docs/assets/screenshots/<file>.png`): the screen each one shows, in its theme. */
+const README_SHOTS: readonly { file: string, screen: string, theme: Theme }[] = [
+  { file: 'chat-dark', screen: 'chat', theme: 'dark' },
+  { file: 'workspace-dark', screen: 'chat-shell-approval', theme: 'dark' },
+  { file: 'changes-panel-dark', screen: 'chat-changes-panel', theme: 'dark' },
+  { file: 'plugins-dark', screen: 'plugins', theme: 'dark' },
+  { file: 'provider-wizard-dark', screen: WIZARD_API_SCREEN.name, theme: 'dark' },
+  { file: 'settings-dark', screen: 'settings-providers', theme: 'dark' },
+  { file: 'chat-light', screen: 'chat-approval', theme: 'light' },
+]
+
+/** Captures the README images of one theme as full 1440x900 frames (no crops) into `.tmp/screenshots/readme/`. */
+async function captureReadme(page: Page, seedData: Seed, theme: Theme): Promise<void> {
+  await mkdir(README_DIR, { recursive: true })
+  await page.clock.install({ time: seedData.now })
+  await page.clock.resume()
+  await page.goto('/')
+  await expect(page.getByTestId(testIds.loginForm)).toBeVisible()
+  await page.getByTestId(testIds.loginPassword).fill(PASSWORD)
+  await page.getByTestId(testIds.loginSubmit).click()
+  await expect(page.getByTestId(testIds.emptyGreeting)).toBeVisible()
+
+  for (const shot of README_SHOTS.filter(item => item.theme === theme)) {
+    const screen = [...SCREENS, WIZARD_API_SCREEN].find(item => item.name === shot.screen)
+    if (!screen)
+      throw new Error(`No screen ${shot.screen} for ${shot.file}.`)
+    await test.step(shot.file, async () => {
+      await screen.open(page, seedData)
+      await expect(page.locator('html')).toContainClass(theme)
+      await page.evaluate('document.fonts.ready.then(() => true)')
+      await page.screenshot({ path: join(README_DIR, `${shot.file}.png`), animations: 'disabled', caret: 'hide' })
       await screen.close?.(page, seedData)
     })
   }
@@ -955,6 +1202,10 @@ shots.describe('screenshots', () => {
 
         shots(`every screen in ${theme} at 1440x900 @screenshots`, async ({ page, screenshotServer }) => {
           await captureAll(page, screenshotServer.seed, theme, 'desktop')
+        })
+
+        shots(`the README images in ${theme} at 1440x900 @screenshots @readme`, async ({ page, screenshotServer }) => {
+          await captureReadme(page, screenshotServer.seed, theme)
         })
       })
 

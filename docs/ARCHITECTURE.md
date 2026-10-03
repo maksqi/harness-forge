@@ -135,7 +135,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `services/keys/` | `KeyService` (Phase 7, ADR-034, section 6.14): `index.ts` (`status()` for `GET /keys`, read-only; `rotate()`, the online rotation), `rotate.ts` (the shared core `rotateSecretsTx` and the write-ahead `rotateWithKeyFile`), `check.ts` (the key check and `_keys`), `recover.ts` (the boot recovery `recoverKeyState`), `server-lock.ts` (`server.lock`) and `cli.ts` (the `rotate-key` CLI). |
 | `services/checkpoints/` | `CheckpointService` (Phase 8, ADR-036 / ADR-037, sections 6.16, 6.17; `index.ts` composes the modules, each of which receives a `CheckpointContext { deps, blobs, rows, now }`): `store.ts` (the content-addressed blob store `<dataDir>/checkpoints/`), `disk.ts` (`sha256Hex`, `readCheckpointBefore`, `diskSha` / `diskShas`, `writeWithoutRecording`), `journal-service.ts` (`journal({ chatId, messageId, projectId })` for a run: the `edit` rows of journaled writes, the `shell` / `untracked` rows, the coalesced `workspace.changed` events; the row writer `createChangeRowWriter`), `prune.ts` (age and budget eviction, orphan blobs and temp files; the 6-hour timer and the `chat.deleted` trigger live in `index.ts`), `plan.ts` (the pure rewind / revert / undo planner), `restore.ts` (the restore primitive: per file under the file lock), `restore-scope.ts` (the chat's project, the 409 `run-active` check, the batch event and log line), `rewind.ts`, `revert.ts`, `undo.ts`, `changes.ts` (`ChatChanges`, the chat diff), `git-changes.ts` (`GitStatus` and the HEAD diff over `workspace/git.ts`), `changes-common.ts` (the shared disk reads and diff sides), `purge()` for delete-all and `summary()` for `GET /data`. |
 | `services/shell-rules/` | `ShellRuleService` (Phase 8, ADR-038, 6.13): rule CRUD over `shell_rules` (validation through the shared `parseShellRule`, 200 rules per scope, duplicates 409 `exists`; creates serialized in-process because the table has no unique index) and `forRun(projectId)`, the global plus project rules a run matches against (one query; `forRun(null)` runs none). |
-| `services/project-files/` | The project files service (Phase 9, ADR-042, section 6.21; `types.ts` frozen, `AppDeps.projectFiles`): the per-project in-memory file index for `@` mentions (built with `workspace/walk.ts`, secret-looking paths left out, single-flight, 30 s TTL, dropped on `workspace.changed`), `search(projectId, q, limit)` ranked by the shared `rankPaths`, and `attach(projectId, path)` (path guard, `.git` / secret refusal, 5 MiB cap, then `files.upload`). |
+| `services/project-files/` | The project files service (Phase 9, ADR-042, section 6.21; `types.ts` frozen, `AppDeps.projectFiles`): the per-project in-memory file index for `@` mentions (built with `workspace/walk.ts`, secret-looking paths left out, single-flight, 30 s TTL, at most 8 projects, dropped on `workspace.changed`, `project.changed` and `run.finished` of a chat of the project), `search(projectId, q, limit)` ranked by the shared `rankPaths`, and `attach(projectId, path)` (path guard, `.git` / secret refusal, 5 MiB cap, then `files.upload`). |
 | `services/projects/` | `ProjectService` (Phase 7, ADR-031, section 6.13): `roots.ts` (the allowed roots, checked first in `startDeps` by `start()`, and the folder checks), `index.ts` (project CRUD, the folder browser, `openWorkspace()`, `chatCount`, `project.changed`), `project-file.ts` (`AGENTS.md` / `CLAUDE.md` with its `@file.md` lines). |
 | `workspace/` | The agent workspace (Phase 7, section 6.13): `paths.ts` (`resolveWorkspacePath` and the safe read / write helpers; frozen), `sensitive.ts` (secret-looking and hidden paths), `walk.ts` (the folder walker; `.gitignore` through `ignore`), `pattern-worker.ts` (globs through `picomatch` and regular expressions, matched in a killable Worker), `diff.ts` (diffs through `diff`), `trim.ts` (output caps), `text.ts`, `shell.ts` (the only shell runner: process groups, capped output; Phase 8: the working folder reported on fd 3 with `reportCwd`, `parseCwdReport`, `killProcessGroup` exported) and `shell-env.ts` (the environment allowlist; Phase 8: empty and relative `PATH` entries dropped, `CDPATH`, `ENV` and `BASH_ENV` never passed). Phase 8 (6.13, 6.16, 6.17): `run-scope.ts` (`bindRunScope` / `runScopeOf`: the server-only run scope bound to a tool call context), `file-lock.ts` (`withFileLock`: one promise chain per resolved path), `journal.ts` (`journaledWrite`: snapshot, write, journal row), `remove.ts` (the guarded unlink of a restore), `shell-cwd.ts` (`initialShellCwd(history)`, `checkShellFolder`, `clampEndCwd`, `cdTargetsInside`, the folder notes) and `git.ts` (the hardened git runner; the only git spawn). |
 | `services/shares/` | Share links (ADR-025, section 6.10): HMAC tokens, the allowlist sanitizer, snapshots, owner CRUD, the public view and file access, expiry, rate limits. |
@@ -286,16 +286,17 @@ Notes:
 - A failed boot prune of the checkpoint store is logged (`checkpoint prune failed`) and never fails the boot; the store
   folder itself must be creatable (a failing `mkdir` fails the boot like any other step).
 - Graceful shutdown (`SIGINT`/`SIGTERM`, `stopDeps()`): stop accepting connections, stop the automatic file sweep
-  first (Phase 8, `data.stop()`: clears its timer and aborts a sweep in flight between batches), then (Phase 9, in this
-  order) clear every chat's steer queue (items removed with reason `stopped`, so no run ends by starting a queued next
-  turn), abort every running sub-agent (their parent `task` calls end as aborted) and drop the mention file index, then
-  abort active runs
-  (persisted as `aborted`; aborting a run kills its shell process groups and its git commands), then (Phase 8,
-  `checkpoints.stop()`, after the runs so no journal write is cut off) clear the prune timers, drop the pending
-  `workspace.changed` tool events and abort a running prune between its steps, waiting for it; dispose plugins (5 s
-  guard each), close MCP clients (terminates stdio children), stop catalog timers, close SSE streams, close the DB,
-  then remove `server.lock`
-  while it still names this process (Phase 7; a lock a newer server took over stays). A process-exit handler SIGKILLs
+  first (Phase 8, `data.stop()`: clears its timer and aborts a sweep in flight between batches), then `runs.stopAll()`:
+  (Phase 9) clear every chat's steer queue (items removed with reason `stopped`, so no run ends by starting a queued
+  next turn), then abort active runs (persisted as `aborted`, waiting at most 5 s each; aborting a run kills its shell
+  process groups and its git commands and, through the run signal, its running sub-agents, whose `task` calls end as
+  stopped), then (Phase 9, `projectFiles.stop()`) abort the file index walks in flight and drop the mention file
+  index, then (Phase 8, `checkpoints.stop()`, after the runs so no journal write is cut off) clear the prune timers,
+  drop the pending `workspace.changed` tool events and abort a running prune between its steps, waiting for it;
+  dispose plugins (5 s guard each), close MCP clients (terminates stdio children), stop catalog timers, close SSE
+  streams (the order of `SHUTDOWN_STEPS` in `deps.ts`: data, runs, projectFiles, checkpoints, plugins, mcp, catalog,
+  events), close the DB, then remove `server.lock` while it still names this process (Phase 7; a lock a newer server
+  took over stays). A process-exit handler SIGKILLs
   any shell process group still alive, also when the server crashes (6.13). Every step runs even when an earlier one
   fails; a shutdown longer than 10 s exits with code 1, and a second signal exits immediately.
 - The signal handlers are installed right after the logger, before the data directory, the database or any plugin
@@ -347,14 +348,14 @@ sequenceDiagram
   P->>DB: plan (kind new / regenerate / continuation): history = listPath(parent or target), supersede approvals on it, resolve the command, validate the message
   P->>P: openWorkspace for a chat-model run of a project chat that calls the model (6.13)
   P->>DB: commit in one transaction: superseded approvals, merged decisions or the new user message, the active leaf
-  P-)Ev: run.started (chatId, messageId, modelRef)
+  P-)Ev: run.started (chatId, messageId, modelRef, origin request; Phase 9: origin queue + userMessageId for a turn the server starts from the queue, 6.20)
   opt the chat has no title yet (title_source is null)
     P-)M: in parallel with the reply: generateText title (titleModelRef, else smallModelId, else chat model), 10 s timeout
     P->>DB: save title (fallback: first 60 chars), never overwrite a user title
     P-)Ev: chat.updated (id, title)
   end
   P->>P: file parts -> bytes, tools (registry + MCP, filtered; workspace tools only with an open folder), params + hooks
-  P->>P: buildModelHistory(history) (Phase 9: compaction, steer split, task outputs, expansions), await convertToModelMessages, hook chat.messages
+  P->>P: buildModelHistory(history) (Phase 9: compaction, steer split, task outputs, expansions), await convertToModelMessages (Phase 9: with historyToolSet, every registered tool's toModelOutput), hook chat.messages
   Note over P: Phase 9: trimming moved into the context guard of prepareStep (automatic compaction first, 6.18)
   P->>M: streamText(model, instructions, messages, tools, activeTools?, toolApproval, prepareStep (Phase 9), stopWhen isStepCount(maxSteps or projectMaxSteps), abortSignal run.signal)
   P->>P: result.consumeStream() so the run survives a client disconnect
@@ -422,9 +423,13 @@ Notes:
   `HF_WORKSPACE_SHELL` is on, and every tool of such a run gets `ToolCallContext.workspace` (6.13). Every tool is wrapped:
   owner-plugin-active check, `tool.before` / `tool.after` hooks, `guard()` timeout (default 60 s), output capped at
   64 KB (truncated with a marker). Phase 9: `chat/modes.ts` reduces the set for the permission mode (`plan` drops the
-  workspace `write` / `execute` tools and adds `exit_plan_mode`; 6.19) and may return `activeTools`; an async-generator
-  `execute` is wrapped as a streaming tool (preliminary outputs; 6.22); every run with tools binds the agent scope
-  (`agent-scope.ts`: the tool mode, the sub-agent runner, the todos) next to the run scope.
+  workspace `write` / `execute` tools; `exit_plan_mode` is offered only in `plan`; 6.19) and may return `activeTools`;
+  an async-generator `execute` is wrapped as a streaming tool (preliminary outputs; 6.22); every run with tools binds
+  the agent scope (`agent-scope.ts`: the tool mode, the sub-agent runner, the todos) next to the run scope. The history
+  is converted with `historyToolSet` (`pipeline.ts`: the run's tools plus a conversion-only entry for every other
+  registered tool with a `toModelOutput`), so earlier outputs of a tool the mode drops (a write in `plan`, an executed
+  `exit_plan_mode`, a tool switched off since) still reach the model as their model text, not as raw JSON;
+  `streamText` gets only the mode-filtered set and `activeTools`.
 - When a request sends no tools (tool mode `off`, a model without tool support, or no usable tool), earlier tool
   calls and results in the history are sent to the model as compact text (`[tool name(input) → ok: output]`,
   input ≤ 500 chars, output ≤ 2000) so providers that reject tool parts without tool definitions still work; the
@@ -496,9 +501,14 @@ exactly as in `ask` mode.
 and 5); what makes it read-only is the tool set (`chat/modes.ts` offers no workspace `write` / `execute` tool). Before
 step 1, `createToolApproval` answers `user-approval` for the `core-agent` tool `exit_plan_mode` whatever the override,
 the hooks or the mode say, so the plan card always shows (on the continuation that result is not `denied`, so the
-SDK keeps the user's decision); `PATCH /tools/exit_plan_mode { override: 'allow' }` is refused with 400. A sub-agent
-uses the same function built for the parent's mode, with every `user-approval` result mapped to `denied` ("Sub-agents
-cannot ask the user: this call needs approval."), so a child never creates an approval request.
+SDK keeps the user's decision); `PATCH /tools/exit_plan_mode { override: 'allow' }` is refused with 400 on
+`['override']` ("Plans always ask for your approval, so exit_plan_mode can't be always allowed.", `mcp/tools.ts`), and
+`GET /tools` and the PATCH answer report the **effective** override (`effectiveToolOverride`: a stored `allow` on
+`exit_plan_mode` or on an `execute` tool shows as null; a PATCH without `override` stores that effective value, so a
+stale `allow` row is cleared by the next change of the tool). A sub-agent uses the same function built for the child's
+effective mode (`ask` for an `explore` child or under a `plan` parent, else the parent's), with every `user-approval`
+result mapped to `denied` ("Sub-agents cannot ask the user: this call needs approval."), so a child never creates an
+approval request.
 
 **Shell rules** (Phase 8, ADR-038). The builtin `shell` tool has the policy function `shellPolicy`
 (`core-workspace/shell-tool.ts`). `createToolApproval` passes the run scope (`AssembledTools.scope`, 6.13) to
@@ -622,7 +632,7 @@ sequenceDiagram
   P->>P: onEnd (isAborted): persist partial message with metadata.aborted = true, usage so far
   P->>Runs: release(chatId)
   P-)W: event run.finished (outcome aborted)
-  C-->>W: 200 { stopped: true }  (false when no run was active)
+  C-->>W: 200 { stopped: true, dropped? }  (false when no run was active; Phase 9: dropped = the queued messages removed first)
   W->>W: useChat stop() closes the local reader
 ```
 
@@ -633,12 +643,16 @@ the run to persist; a run that does not settle is released by force: its late en
 it was streaming, `run.finished` reports `aborted`. A run stopped while still `preparing` ends its request with
 `409 conflict` (`details.reason: 'stale'`) before its history is committed (delete-all relies on this, 6.9).
 
-**Stop order** (Phase 9, ADR-042 / ADR-043): `POST /chat/:id/stop` first empties the chat's steer queue (every item
-removed with reason `stopped`, one `queue.changed`), so the ending run cannot start a queued next turn; then the run is
-aborted, which aborts its sub-agents through the run signal (each running `task` call ends as an `output-error` with
-the stopped text, 6.22). The answer is `{ stopped, dropped: QueueItem[] }`: the web of the tab that stopped puts the
-dropped messages back into its composer. Server shutdown and a key rotation follow the same order for every chat
-(queues cleared → sub-agents aborted → runs aborted, section 5); deleting a chat drops its queue too.
+**Stop order** (Phase 9, ADR-042 / ADR-043): the `chat.stop` route first calls `clearQueue(id, 'stopped')` (every item
+removed with reason `stopped`, one `queue.changed`; also for a chat without a run, e.g. one waiting for an approval),
+so the ending run cannot start a queued next turn, then `ChatRunner.stop(id)` (which empties the queue again, a no-op
+by then, and aborts the run); the abort reaches its sub-agents through the run signal (each running `task` call ends as
+an `output-error` with the stopped text, 6.22). The answer is `{ stopped, dropped? }` (`dropped`: the removed
+`QueueItem`s, oldest first; absent when nothing was queued): the web of the tab that stopped puts the dropped messages
+back into its composer. Server shutdown follows the same order for every chat (`stopAll`: every queue cleared, then
+every run aborted with its sub-agents, section 5). A key rotation stops each chat that holds a run through `stop` (queue
+first) and its `key.rotated` event then empties every remaining queue (the chats waiting for an approval, which the
+rotation does not stop); deleting a chat drops its queue too (`chat.deleted`, reason `stopped`).
 
 ### 6.4 Plugin lifecycle
 
@@ -887,8 +901,9 @@ leaf under A), which brings back A -> reply -> B -> reply.
   the web reloads the chat, puts the unsent text back into the composer and says so in a toast (UI.md 11.1, 15). A
   user message whose request failed with an HTTP error was never stored, so the web never names it as a parent.
 - **Search** covers every version, so a snippet may come from a hidden version. **Totals** (`ChatDetail.totals`) sum
-  the chat's usage rows of purpose `chat` and (Phase 6) `image`, every version included, deleted ones too: the cost
-  actually paid for replies and images (title rows are not counted; transcription and speech rows belong to no chat).
+  the chat's usage rows of purpose `chat`, (Phase 6) `image` and (Phase 9) `compact` and `subagent` (`TOTALS_PURPOSES`
+  in `services/chats/index.ts`), every version included, deleted ones too: the cost actually paid for replies, images,
+  summaries and sub-agents (title rows are not counted; transcription and speech rows belong to no chat).
   The composer's chat cost sums the visible path only (UI.md 7.12).
 - **Export and import**: JSON export v2 carries every version in `seq` order, `parentIds` aligned by index and
   `activeLeafId`; Markdown exports the active path. `POST /api/chats` and the data import (6.9) accept v1 (linear) and
@@ -1027,10 +1042,11 @@ sequenceDiagram
   remains), usage and cost, `command.expansion`, provider metadata, approvals, `data-*`, `step-start`,
   `reasoning-file` and `custom` parts, other URLs and anything unknown. A snapshot above 10 MiB (serialized) ->
   `413 payload_too_large`. `file_ids` stores the only files the share may serve. Phase 9 (no `sharePartSchema`
-  change): an assistant message is split at each `data-steer` part, and the steer becomes a user share message (its
-  text and file parts, sanitized like any user message); `data-compaction` and `data-activity` stay dropped (a summary
-  is never shared); a `task` tool part keeps its input and output like any tool when tool details are shared (the
-  share page renders them with the chat's components).
+  change): an assistant message is split at each `data-steer` part (the shared `splitSteers`), and the steer becomes a
+  user share message (its text and file parts, sanitized like any user message; the reply's status stays on its last
+  piece); `data-compaction` and `data-activity` stay dropped (a summary is never shared), and a `/compact` exchange
+  (the command and its marker-only reply) is left out entirely; a `task` tool part keeps its input and output like any
+  tool when tool details are shared (the share page renders them with the chat's components).
 - **Options** (`{ reasoning: false, toolDetails: false, attachments: true }` by default) are applied when the view is
   served: without `reasoning` the reasoning parts are left out, without `toolDetails` tool parts keep only their name
   and status, without `attachments` the file parts are left out and `shares.file` serves nothing. A changed option
@@ -1175,8 +1191,8 @@ sequenceDiagram
   another plugin never injects files. Without `imageModelRef` the tool fails with "Choose an image model in Settings →
   Media.".
 - **Usage and totals**: every generation writes one usage row (with the chat id for image turns and the tool); image
-  rows count in `ChatDetail.totals` (the `chat` and `image` purposes); message metadata carries the turn's `usage` and
-  `costUsd`, and a tool's cost is added to the cost of its reply.
+  rows count in `ChatDetail.totals` (the `chat` and `image` purposes; Phase 9 adds `compact` and `subagent`); message
+  metadata carries the turn's `usage` and `costUsd`, and a tool's cost is added to the cost of its reply.
 - **Visibility**: an image model is listed only when its provider defines `createImageModel` (OpenAI, xAI and the mock
   provider; section 9), and it is then visible in the composer's "Image models" group; Gemini images come from chat
   models with image output (Google defines no image factory); declarative providers cannot generate images (backlog).
@@ -2085,7 +2101,8 @@ two steps of a long run. All three store the same `data-compaction` part and nev
 modelRef (the summarizer), messagesCompacted, tokensBefore, tokensAfter, createdAt }`. There is no state field and no
 message id in it: the marker is **positional**, so it survives the id remapping of a chat import. Progress is the
 transient `data-activity { kind: 'compacting' | 'idle' }` (sent through `RunSession.writeTransient`, reaching only the
-client's `onData`); a failure is the notice `compaction-failed` (warning) plus the old trimming.
+client's `onData`); an automatic failure is the notice `compaction-failed` (warning) plus the old trimming, a manual
+one an error reply.
 
 **The history rule** (`compaction/history.ts` `applyCompaction`, over `findCompaction(path)` of
 `shared/util/agent-state.ts`): the latest `data-compaction` part C on the path, in message M_k at part index p,
@@ -2103,8 +2120,8 @@ turns a stored path into the model's view, in this order:
 1. `applyCompaction` (above);
 2. `splitSteers` (shared): each assistant message is split at its `data-steer` parts into assistant / user / assistant
    (empty halves dropped; a split always falls on a step boundary, 6.20);
-3. `reduceAgentOutputs`: a stored `tool-task` output becomes `{ status, report }` (the progress trace never reaches a
-   model, 6.22);
+3. `reduceAgentOutputs` (`subagent/history.ts`): a stored `tool-task` output becomes `{ status, report, error? }` (the
+   progress trace never reaches a model, also when `task` is not offered in a later run, 6.22);
 4. `applyCommandExpansions` (`context.ts`): `prompt` commands send their stored expansion;
 5. the summary text is merged into the following user message as its **first** part (after step 4, because an
    expansion replaces the first text part), so the history never holds two user messages in a row.
@@ -2112,47 +2129,74 @@ turns a stored path into the model's view, in this order:
 `prepareModelFiles` (`pipeline.ts`) then runs on the result, so messages before the marker never load their files.
 
 **Manual** `/compact [focus]`: `resolveCommand` (`commands.ts`) checks `compact` before the registry and answers `{
-kind: 'compact', focus }` (`commandInvocationSchema.type` gains `compact`; the user message keeps
-`metadata.command`). `launchRun` dispatches it to `compactStream` (`compaction/stream.ts`): `start` → transient
-`compacting` → summarize `buildModelHistory` of the history without the `/compact` message → one `data-compaction`
-(`trigger: 'manual'`, `keep: 'none'`) → `finish` with `metadata.usage.contextTokens = tokensAfter` (the context ring
-drops at once). Nothing to summarize → the reply text "There is nothing to compact yet." (`replyStream`). A regenerate of
-the reply compacts again; while a run is active a queued `/compact` waits for the next turn (`turnOnly`, 6.20); a
-compaction model that resolves to an image model is a 400 on `['modelRef']`.
+kind: 'compact', focus }` (the input trimmed, null when empty; a focus longer than 1,000 characters,
+`compactFocusMaxChars`, is a 400 on `['message']`; `commandInvocationSchema.type` gains `compact`; the user message
+keeps `metadata.command`). An image model as the chat model is a 400 on `['modelRef']` ("An image model cannot compact
+the conversation. Pick a chat model to run /compact.") before the history changes, for a new turn and for a regenerate
+(`prepare.ts`); no project folder is opened. `launchRun` dispatches it to `compactStream` (`compaction/stream.ts`):
+`start` → transient `compacting` → summarize `buildModelHistory` of the history without the `/compact` message
+(converted with `conversionTools`, so tool outputs read as their model text, 6.1) → one `data-compaction` (`trigger:
+'manual'`, `keep: 'none'`, `focus`, the `latestTodos` snapshot, `messagesCompacted` = the messages the model still saw,
+`tokensBefore` = max(the estimate, the `contextTokens` the chat showed last); the chunk carries no `id`) → `idle` →
+`finish` with `metadata.usage` = the summarizer's tokens and `contextTokens = tokensAfter` (the context ring drops at
+once). The reply has no `start-step` and no text. Nothing to summarize (no content after the latest marker other than
+earlier `/compact` exchanges) → the reply text "There is nothing to compact yet." (`replyStream`). A summarizer failure
+ends the reply as failed (an `error` chunk, the error in `metadata.error`; no marker and no trimming); a Stop ends it
+with an `abort` chunk. A regenerate of the reply compacts again; while a run is active a queued `/compact` waits for the
+next turn (`turnOnly`, 6.20). Log: `conversation compacted` `{ trigger, messagesCompacted, tokensBefore, tokensAfter }`.
 
 **Automatic, before and inside runs** (one code path): `createContextGuard()` (`compaction/guard.ts`) is the first
 piece of the step composer (`steps.ts`, below), which runs before **every** model call, step 0 included.
 
-- Estimate = max(`estimateTokens(messages, instructions)`, the last step's input + output tokens). Compact when the
-  estimate is above 0.8 × the model's `contextWindow`, `autoCompact` is on, the window is known and the run has used
-  fewer than 10 compactions (`compactionsPerRunMax`).
+- Estimate = max(`estimateTokens(messages, instructions)` (4 characters per token, about 1,600 per image), the last
+  finished step's input + output tokens). Compact when the estimate is above 0.8 × the model's `contextWindow`
+  (`COMPACT_TRIGGER_RATIO`), `autoCompact` is on, the step holds more than a single user message and the run has made
+  fewer than 10 attempts (`compactionsPerRunMax`). A model with an unknown window is neither compacted nor trimmed.
 - New messages = `[merge(summary, keptUser)]` with `keep: 'last-user'`, where `keptUser` is the run's turn user message
   after expansions and files (converted lazily from the UI messages captured at run start); when that would still
   exceed 0.85 × the window the user message is dropped (`keep: 'none'`). The returned `messages` are carried into the
-  later steps by the SDK, so step N+1 starts from the summary too.
+  later steps by the SDK, so step N+1 starts from the summary too. The todo snapshot is the latest valid `todo_write`
+  output of this run's finished steps, else `latestTodos(history)`; `messagesCompacted` counts the messages the model
+  saw verbatim before the marker (the reply itself once it has content).
 - The guard queues the `data-compaction` part for its step through `RunSession.inject(chunk, stepNumber)`; the step
   injector places it right before that step's `start-step` (6.20), so the stored reply holds the marker exactly where
   the model's context changed. An equivalence test asserts that the in-run model messages equal `buildModelHistory` of
   the saved message.
-- Failure (any error but an abort) or `autoCompact` off: on step 0 only, the old `trimToContext` (`context.ts`) runs,
-  with the notice `compaction-failed` (after a failure) or `context-trimmed` (setting off); later steps go on
-  untouched. The pre-stream trim of v1.4 moved into the guard. An abort during summarizing is re-thrown (the run ends
-  `aborted`). Sub-agents run the guard in silent mode (no marker, no notice; a usage row only).
+- Failure (any error but an abort): on step 0 the old `trimToContext` (`context.ts`) trims the oldest turns down to
+  0.8 × the window and the notice `compaction-failed` is always injected (also when nothing had to go); on a later step
+  nothing is trimmed and no notice is shown. Either way the guard stops compacting for the rest of the run (a failing
+  summarizer is not called on every step). It also stops for the run when the provider reports the call right after a
+  compaction above the trigger again (tool definitions or instructions fill the window, which no summary can shrink).
+- `autoCompact` off: on step 0 only, `trimToContext` at 0.85 × the window, with `context-trimmed` when it left messages
+  out; later steps go on untouched. The pre-stream trim of v1.4 moved into the guard. An abort during summarizing is
+  re-thrown (the run ends `aborted`). Sub-agents run the guard in silent mode (no marker, no notice, no activity, no
+  todo snapshot; a usage row only).
+- Logs: `context compacted` `{ stepNumber, silent, keep, tokensBefore, tokensAfter }` (info); `automatic compaction
+  failed; the conversation is trimmed instead` and `the compacted context is still above the compaction trigger; no
+  more compactions in this run` (warn, `{ stepNumber, silent }`).
 
-**Summarizer** (`compaction/summarize.ts`, `prompt.ts`): the model messages are rendered as one text transcript (tool
-calls as `[tool name(args ≤ 500 characters)]`, results cut at 2,000 characters, files and images as `[file …]`,
-reasoning dropped), so no provider sees tool content without tool definitions; a transcript longer than 0.85 × the
-summarizer's window loses its middle (the head, which holds an earlier summary, and the newest part stay).
-`generateText` with instructions that contain `COMPACT_INSTRUCTIONS_MARKER` (`chat/markers.ts`) and Claude Code-style
-sections (request and intent, files and code, errors and fixes, every user message, pending tasks, current work, next
-step, the focus), reasoning off, `maxOutputTokens = clamp(0.2 × window, 256, 8192)`, the run signal, a 120 s timeout,
-`maxRetries: 2`. Model: `compactModelRef ?? the run model` (an unresolvable setting falls back to the run model with a
-warning). One usage row with purpose `compact` (`messageId` = the reply), its cost added to the reply through
-`RunSession.addExtraCost`.
+**Summarizer** (`compaction/summarize.ts`, `prompt.ts`): the model messages are rendered as one text transcript (a
+`User:` / `Assistant:` / `Tool results:` block per message, tool calls as `[tool name(args ≤ 500 characters)]`, results
+as `[result of name: …]` cut at 2,000 characters, files and images as `[file …]`, reasoning and approval bookkeeping
+dropped), so no provider sees tool content without tool definitions. The transcript budget is min(0.85 × the
+summarizer's window, window − the output tokens − the instruction tokens) at 4 characters per token (an unknown window
+counts as 32,000 tokens); above it the long blocks between the first and the last one are shortened first (each keeps
+its start and end, down to 300 characters), then the oldest middle blocks are left out with a "[… N earlier messages
+left out …]" note: the head (the first block, which holds an earlier summary) and the newest block stay. `generateText`
+with instructions that contain `COMPACT_INSTRUCTIONS_MARKER` (`chat/markers.ts`) and Claude Code-style sections
+(request and intent, key concepts, files and code, errors and fixes, every user message, pending tasks, current work,
+next step) plus a `Focus: …` line when a focus is set, the transcript as the prompt, reasoning off, `maxOutputTokens =
+clamp(0.2 × window, 256, 8192)`, the run signal, a 120 s timeout, `maxRetries: 2`. The summary is trimmed and capped at
+60,000 characters; an empty one is a failure (`provider_error`). Model: `compactModelRef ?? the run model` (an
+unresolvable setting falls back to the run model with a warning). One usage row with purpose `compact` (`messageId` =
+the reply), its cost added to the reply through `RunSession.addExtraCost`. The summary is never logged (debug:
+`compaction summary written` `{ modelRef, transcriptChars, summaryChars }`).
 
-**Surfaces**: the Markdown export renders "_Conversation compacted (N messages summarized)_" and the summary
-(`services/chats/export.ts`); search text is unchanged (summaries are not indexed); chat import validates the part
-through `harnessDataSchemas`; share snapshots drop it (6.10); rewind and checkpoints are unaffected (time-based, 6.16).
+**Surfaces**: the Markdown export renders "_Conversation compacted (N messages summarized)_" ("1 message" for one) and
+the summary as a quote (`services/chats/export.ts`); search text is unchanged (summaries are not indexed,
+`services/chats/text.ts`); chat import validates the part through `harnessDataSchemas` and keeps it (positional, so
+the new message ids do not matter) while it drops any `data-activity` part; share snapshots drop it and leave out a
+whole `/compact` exchange (6.10); rewind and checkpoints are unaffected (time-based, 6.16).
 
 ```mermaid
 sequenceDiagram
@@ -2171,9 +2215,9 @@ sequenceDiagram
     Z-->>G: summary (usage row purpose compact, cost via addExtraCost)
     G->>I: inject data-compaction for step N
     G-->>S: messages = [summary merged into the kept user message]
-  else failure or autoCompact off (step 0 only)
-    G->>I: inject notice compaction-failed or context-trimmed
-    G-->>S: messages = trimToContext(messages)
+  else failure or autoCompact off (step 0 only; after a failure no more compactions in this run)
+    G->>I: inject notice compaction-failed (always) or context-trimmed (when messages were left out)
+    G-->>S: messages = trimToContext(messages) (to 0.8 after a failure, 0.85 with autoCompact off)
   end
   S-->>P: { messages } (carried into later steps)
   I-->>W: data-compaction right before start-step N
@@ -2184,19 +2228,29 @@ sequenceDiagram
 **Mode**: `toolModeSchema` = `off | ask | edits | plan | auto` (plugin API 1.3.0). The web offers `plan` in project
 chats only; the server accepts it anywhere.
 
-- **Tool set** (`chat/modes.ts`, called by `assembleTools`): in `plan` the tools with workspace access `write` or
-  `execute` are not offered (MCP and other tools stay and resolve like `ask`), and `exit_plan_mode` is added; outside
-  `plan` it is not offered, with one exception: a continuation whose message holds an **approved** `exit_plan_mode` part
-  (`approval-responded`) keeps the tool in `tools` (so the SDK can execute the approved call) but leaves it out of
-  `activeTools` (so the model never calls it again). `AssembledTools.activeTools?` is passed to `streamText`.
-- **Approval** (`chat/approval.ts`): `case 'plan'` resolves like `ask`; `exit_plan_mode` always returns
-  `user-approval` first (6.2). The continuation check of `prepare.ts` refuses to **approve** an `exit_plan_mode` call
-  while the continuation's `toolMode` is `off` or `plan` (400 on `['toolMode']`): the web sets the new mode first.
-  Approval reasons (the plan feedback) may be 2,000 characters long (`LIMITS.approvalReasonMaxChars`).
+- **Tool set** (`chat/modes.ts` `applyToolMode`, called by `assembleTools`): `off` offers no tool; in `plan` the
+  tools with workspace access `write` or `execute` are not offered (an unknown access value counts as `execute`; MCP
+  and other tools without an access level stay and resolve like `ask`) and `exit_plan_mode` stays; in `ask`, `edits`
+  and `auto` `exit_plan_mode` is not offered, with one exception: a continuation whose message holds an **approved**
+  `exit_plan_mode` part (`approval-responded`, `approved: true`) keeps the tool in `tools` (so the SDK can execute the
+  approved call) but leaves it out of `activeTools` (so the model never calls it again). `todo_write` and `task` stay
+  in every mode with tools. `AssembledTools.activeTools` is set only in that continuation case and passed to
+  `streamText`. The history is still converted with every registered tool (`historyToolSet`, 6.1), so outputs of the
+  tools a mode drops keep their model text.
+- **Approval** (`chat/approval.ts`): `case 'plan'` resolves like `ask`; `exit_plan_mode` (recognized by
+  `isPlanExitTool`: owner `core-agent` and the name) always returns `user-approval` first (6.2). The continuation
+  check of `prepare.ts` (`checkPlanApprovalMode`, `modes.ts`) refuses to **approve** an `exit_plan_mode` call unless the
+  continuation's `toolMode` is `edits` or `ask` (every other mode, `auto` included, since the approved output names
+  the mode the user picked on the plan card: 400 `validation_error` on `['toolMode']`, "A plan can only be approved
+  with toolMode "edits" or "ask": switch the chat's permission mode first."): the web sets the new mode first. The
+  check runs after `ensureChat`, so a refused approval has already stored the requested mode on the chat. Approval
+  reasons (the plan feedback) may be 2,000 characters long (`LIMITS.approvalReasonMaxChars`; longer reasons are cut).
 - **`exit_plan_mode`** (`core-agent/exit-plan-mode.ts`): input `{ plan }` (markdown, ≤ 50,000 characters), policy
-  `always`. `execute` reads the mode from the agent scope and returns `{ approved: true, mode }`; the model reads "The
-  user approved the plan. Mode is now <label>. Implement it now; track progress with todo_write." A rejection is the
-  SDK's `execution-denied` with the user's `reason`, and the model keeps planning (`toolMode` stays `plan`).
+  `always`, timeout 60 s. `execute` reads the mode from the agent scope and returns `{ approved: true, mode }` (a call
+  without an agent scope or in a mode other than `edits` / `ask` fails with a tool error); the model reads "The user
+  approved the plan. Mode is now <label>. Implement it now; track progress with todo_write." (label "Accept edits" or
+  "Ask"). A rejection is the SDK's `execution-denied` with the user's `reason`, and the model keeps planning
+  (`toolMode` stays `plan`).
 
 ```mermaid
 sequenceDiagram
@@ -2210,7 +2264,7 @@ sequenceDiagram
   alt Approve, accept edits (or ask before edits)
     W->>W: session.toolMode = edits (or ask), saved on the chat
     W->>P: continuation (toolMode edits), approval { approved: true, reason? }
-    P->>P: checkPlanApprovalMode: toolMode not off / plan; tools for edits + exit_plan_mode kept out of activeTools
+    P->>P: checkPlanApprovalMode: toolMode edits or ask (else 400); tools for edits + exit_plan_mode kept out of activeTools
     P->>P: execute exit_plan_mode -> { approved: true, mode: edits }
     M->>P: write_file ... (runs without a card in edits)
   else Keep planning (feedback)
@@ -2221,14 +2275,24 @@ sequenceDiagram
 
 **Todos** (`core-agent/todo-write.ts`): input `{ todos: { id (1–64 characters, unique), content (1–500), status:
 pending | in_progress | completed, activeForm? (≤ 200) }[] (≤ 50) }`, policy `safe`, no workspace access, so it is
-offered in every chat with tools (plan mode included). Output `{ todos, counts }`; the model gets a one-line text. There
-is no table: the state is `latestTodos(path)` (shared), the last `output-available` `tool-todo_write` part on the path,
-so it follows versions and survives reloads; a sub-agent's todo calls are not parts of the reply and are ignored. A
+offered in every chat with tools (plan mode included), timeout 60 s. `execute` validates the input again with the
+shared schema (unknown keys dropped) and returns `{ todos, counts }` (`countTodos`); an invalid list (duplicate ids,
+more than 50 items, a bad status) is a `validation_error` "Invalid todo list: <path>: <issue>", which becomes the
+tool's error result while the run goes on. The model gets one line: "Todo list updated: 1 in progress, 2 pending, 0
+completed." ("Todo list cleared." for an empty list). Nothing is stored elsewhere and nothing is logged. There is no
+table: the state is `latestTodos(path)` (shared), the last `output-available` `tool-todo_write` part of an assistant
+message on the path, so it follows versions and survives reloads; sub-agents get no `core-agent` tool (6.22). A
 compaction stores the snapshot in its marker and sends it with the summary.
 
-**Instructions** (`chat/params.ts`, after the workspace block): a plan block when the run is in `plan` (investigate
-read-only, call `exit_plan_mode` with a complete markdown plan, answer plain questions directly), a todo hint when
-`todo_write` is offered and a `task` hint when `task` is offered.
+**Instructions** (`chat/params.ts` `runInstructions`): global → workspace block → the agent blocks (`agentBlocks`, in
+this order: the plan block when the run is in `plan`, the todo hint when `todo_write` is offered, the `task` hint when
+`task` is offered) → the project file → project instructions → chat instructions. "Offered" is
+`offeredAgentTools(assembled)`: the tools owned by `core-agent` that the model may call (`activeTools` respected, so the
+kept approved `exit_plan_mode` of a continuation does not count). The plan block says to investigate read-only, to
+answer plain questions directly and, when `exit_plan_mode` is offered, to call it with the whole plan as Markdown;
+when it is not offered (switched off in the Tools tab) the block asks instead: "When the plan is complete, present the
+whole plan as Markdown (the steps, the files to create or change, how to verify the result) and wait for the user to
+approve it before anything changes." Sub-agents pass their lowered mode and no agent tools (no agent block, 6.22).
 
 **Agent scope** (`chat/agent-scope.ts`, complete and frozen since P9-0b): a WeakMap side channel bound to the tool call
 context of every run with tools, like the run scope (`workspace/run-scope.ts`): `toolMode`, `runSubagent`, `todos`.
@@ -2237,38 +2301,44 @@ Only server code reaches it (`agentScopeOf(c)`); third-party plugins cannot, and
 
 ### 6.20 Steer queue (ADR-042)
 
-**Queue** (`chat/queue.ts`, one instance in the chat runner): in memory, per chat, at most 10 items of at most 256 KB
+**Queue** (`chat/queue.ts`, one instance in the chat runner): in memory, per chat, at most 10 items of at most 256 KiB
 each (`queueItemsMax`, `queueItemBytes`); lost on a server restart (documented; a restart kills the runs anyway). An
 item is `{ id (the client's msg_ id), message (a user UI message: text and uploaded file parts, normalized by
-normalizeUserParts), modelRef, reasoningEffort, toolMode, createdAt, turnOnly }`; `turnOnly` is set when the first text
-is a server command (a registered plugin command or `/compact`): such an item is never steered. Every change emits
-`queue.changed { chatId, items, removed?: { id, reason: delivered | started | cancelled | stopped | failed, error? }[]
-}`.
+normalizeUserParts), modelRef, reasoningEffort, toolMode, createdAt (epoch ms), turnOnly }`; `turnOnly` is set when
+the first text is a server command (a registered plugin command or `/compact`): such an item is never steered, only
+started as a next turn. The checks that depend on the queue run synchronously right before the item is appended
+(after every await), so a run that ends meanwhile either sees the item at its release or the add answers `run-idle`.
+Every change emits `queue.changed { chatId, items, removed?: { id, reason: delivered | started | cancelled | stopped |
+failed, error? }[] }` (`items` = the whole queue after the change).
 
 | Route (module `chatQueue`) | Answer |
 |---|---|
-| `GET /chat/:id/queue` | the chat's items (404 for an unknown chat) |
-| `POST /chat/:id/queue` `{ message, modelRef, reasoningEffort, toolMode }` (strict) | 201 the item; 409 `run-idle` when the chat has neither a run nor a pending approval, 409 `queue-full`, 409 `exists` (the message id is used or queued), 404, 400 (validation, the size cap) |
-| `DELETE /chat/:id/queue/:itemId` | 204; 404 once the item was delivered or started (or never existed) |
+| `GET /chat/:id/queue` | `{ items }`, oldest first (404 for an unknown chat) |
+| `POST /chat/:id/queue` `{ message, modelRef, reasoningEffort, toolMode }` (strict) | 201 the item; 409 `run-idle` when the chat has neither a run (in any phase, `preparing` included) nor a pending approval, 409 `queue-full`, 409 `exists` (the message id is used or queued), 404, 400 (validation, a `message` above 256 KiB of serialized JSON) |
+| `DELETE /chat/:id/queue/:itemId` | 204 (the removal is synchronous, before any await); 404 once the item was delivered or started (or never existed): "Message <id> is not queued: it was already sent to the agent." |
 
-**The step composer** (`chat/steps.ts` `createPrepareStep({ contextGuard, steer, finalize? })`, complete and frozen
-since P9-0b) is the `prepareStep` of every chat run. In fixed order: (1) the context guard (6.18), which may replace
-`messages`; (2) the steer step, which appends user messages; (3) the finalize nudge (sub-agents only, 6.22). It
-returns `{ messages }` (and, for the nudge, `activeTools` / `instructions`) only when something changed, and never
-throws except to propagate an abort. The SDK calls it before every model call, step 0 included, and never after a step
-without tool calls or with an open approval.
+**The step composer** (`chat/steps.ts` `createPrepareStep({ contextGuard, steer, finalize?, logger })`, complete and
+frozen since P9-0b) is the `prepareStep` of every chat run. In fixed order: (1) the context guard (6.18), which may
+replace `messages`; (2) the steer step, which appends user messages; (3) the finalize nudge (sub-agents only, 6.22).
+It returns `{ messages }` (and, for the nudge, `activeTools` / `instructions`) only when something changed, and never
+throws except to propagate an abort (any other error of a piece is logged as a warning and the piece counts as
+unchanged). The SDK calls it before every model call, step 0 included, and never after a step without tool calls or
+with an open approval.
 
 **Steer** (`createSteerStep`, `chat/steer.ts`): synchronously takes every steerable item of the chat (in order; the
 take is synchronous, so it cannot race a `DELETE`), turns each into a user model message (a one-message UI history
-through `prepareModelFiles` and `convertToModelMessages`), appends them to `messages` (carried into later steps) and
-queues a `data-steer { id, parts, queuedAt, deliveredAt }` per item through `RunSession.inject(chunk, stepNumber)`;
-`queue.changed` reports them `delivered`. Step 0 counts: the first call of a new turn or of an approval continuation
-delivers what waited.
+through `prepareModelFiles` and `convertToModelMessages`; a conversion that fails falls back to the item's text),
+appends them to `messages` (carried into later steps) and queues a `data-steer { id, parts, queuedAt, deliveredAt }`
+per item through `RunSession.inject(chunk, stepNumber)` before converting (so the transcript holds every taken item);
+`queue.changed` reports them `delivered`. `turnOnly` items stay queued. An aborted run takes nothing. Step 0 counts:
+the first call of a new turn or of an approval continuation delivers what waited. The SDK calls no `prepareStep`
+after the last step (one without tool calls), so a message queued during it waits for the run end.
 
 **Placement** (`stepInjector(session)`, piped as `ui.pipeThrough(injector).pipeThrough(storeGeneratedFiles)`): counts
 `finish-step` chunks, emits the injected chunks of step N right before the next `start-step` once N steps finished, and
-flushes the rest when the stream ends, so a slow consumer never misplaces them. `RunSession.finalMessage` appends any
-injected steer missing from the response message (a safety net). Because a steer always lands between two steps,
+emits the rest before the `finish` chunk (or when the stream closes without one: a step whose model call failed, an
+abort), so a slow consumer never misplaces them. `RunSession.finalMessage` appends any injected steer missing from the
+response message (a safety net). Because a steer always lands between two steps,
 `splitSteers` rebuilds the same history from the stored reply (assistant / user / assistant) after a reload.
 
 **Run end** (`RunContext.onReleased(ending, awaitingApproval)`, called right after `registry.release`):
@@ -2276,18 +2346,27 @@ injected steer missing from the response message (a safety net). Because a steer
 - **completed**, no approval pending: the first item is removed (`started`) and becomes the next turn, started by the
   server: `runner.start({ chatId, message, trigger: 'submit-message', modelRef, reasoningEffort, toolMode }, { requestId:
   'queue_…' })`, whose response body is cancelled at once (the tee keeps the replay buffer, so tabs resume it);
-  `run.started` carries `origin: 'queue'` and `userMessageId`. When that start loses the race to a user's `POST /chat`
-  (409), the item goes back to the head of the queue and is steered into the user's run; any other error removes it
-  as `failed` (with the error). The remaining items are steered into that next turn at its step 0 and later
-  boundaries.
+  `run.started` carries `origin: 'queue'` and `userMessageId`. The take reports the item `started` before the start is
+  tried: when that start loses the race to a user's `POST /chat` (409 `run-active`), the item goes back to the head of
+  the queue and is steered into the user's run (a `failed` removal, "The queue is full.", when items queued meanwhile
+  filled the queue); any other error reports it `failed` (with the error message). The remaining steerable items are
+  steered into that next turn at its step 0 and later boundaries (a `turnOnly` item waits for the next run end). The
+  turn logs with `reqId: queue_…`, `queuedBy` (the request id that queued the item) and the chat id (`next turn
+  started from the queue`, `{ itemId }`).
 - **awaiting approval**: the items wait for the next run (the continuation or a new message) and are delivered at its
   step 0.
 - **aborted** (Stop, shutdown, key rotation) or **failed**: every item is removed (`stopped` / `failed`); Stop returns
   them as `dropped` (6.3).
+- **released before the stream started** (the request failed while it was prepared): items queued for it meanwhile
+  become the next turn once the chat is idle and waits for no approval.
 
-Deleting the chat drops its queue. Surfaces: share snapshots split replies at steers into user messages (6.10); the
-Markdown export renders a steer as "## User (during the run)"; `messagePlainText` indexes steer text for search; steer
-file URLs are covered by the cleanup's reference scan, and queued file ids by the upload pins (6.15).
+The queue subscribes to the event bus with its first item: `chat.deleted` empties that chat's queue (reason `stopped`;
+an add still waiting for the database fails with 404) and `key.rotated` empties every queue (also the chats waiting for
+an approval, which the rotation does not stop). Message contents are never logged (ids and counts at debug).
+
+Surfaces: share snapshots split replies at steers into user messages (6.10); the Markdown export renders a steer as
+"## User (during the run)"; `messagePlainText` indexes steer text for search; chat import keeps `data-steer` parts;
+steer file URLs are covered by the cleanup's reference scan, and queued file ids by the upload pins (6.15).
 
 ```mermaid
 sequenceDiagram
@@ -2318,74 +2397,122 @@ sequenceDiagram
 Mentions are attachments: the web inserts `@path` into the text (so the model sees the path) and uploads a snapshot of
 the file; `POST /chat` is unchanged.
 
-- **Index** (`services/project-files/`): per project, in memory, built with `walkWorkspace` (`workspace/walk.ts`: it
-  honors `.gitignore`, skips `.git`, `node_modules` and the temp files of atomic writes, never enters folder links, and
-  stops at its entry, depth and 10 s limits); at most 50,000 files (`mentionIndexFilesMax`; the rest makes the answer
-  `truncated`); secret-looking paths (`workspace/sensitive.ts`) are left out; folders are derived from the file paths.
-  Builds are single-flight per project; an entry lives 30 s (`mentionIndexTtlMs`) and is dropped at once on a
-  `workspace.changed` event of its project (so a file the agent just wrote is found by the next search), on project
-  deletion and at shutdown. No new `.gitignore` parser and no new regex path: the ReDoS heuristic of the walker stays
-  (a backlog item).
-- **Search** (`GET /projects/:id/files?q&limit`): ranked by the shared `rankPaths(q, entries, limit)` (basename prefix
-  > basename substring > path substring > subsequence, then shorter paths, then by path); `limit` ≤ 50
-  (`mentionResultsMax`); answer `{ items: { path, kind: 'file' | 'dir' }[], truncated, indexedAt }`. 404 for an unknown
-  project, 400 with the `openWorkspace` message when the folder cannot be opened.
-- **Attach** (`POST /projects/:id/files/attach { path }`): `resolveWorkspacePath` (realpath containment, a link out of
-  the project refused) → refuse a `.git` segment or a secret-looking path (400) → `readWorkspaceFile` (a regular file,
-  > 5 MiB is 413, `mentionFileMaxBytes`) → `files.upload(new File([bytes], basename))`, which sniffs the type (text,
-  image or PDF; anything else is the upload route's 400) and pins the new file id → 201 `FileRef`. The bytes are a
-  snapshot: a later edit of the file does not change the attachment.
+- **Index** (`services/project-files/`: `file-index.ts`, `cache.ts`): per project, in memory, built with `walkWorkspace`
+  (`workspace/walk.ts`: it honors `.gitignore`, skips `.git`, `node_modules` and the temp files of atomic writes, never
+  enters folder links, and stops at its entry, depth and 10 s limits); at most 50,000 files (`mentionIndexFilesMax`);
+  secret-looking paths (`workspace/sensitive.ts`), paths with a `.git` segment and file links whose target is
+  secret-looking or inside `.git` are left out; folders are derived from the kept file paths (a folder without a listed
+  file is never a candidate). `indexedAt` is when the build started. Builds are single-flight per project (concurrent
+  searches share one build; a project never has more than one walk); an index lives 30 s from its build start
+  (`mentionIndexTtlMs`) and at most 8 indexes are kept (`MENTION_INDEX_PROJECTS_MAX`; the least recently searched one
+  goes first). The first search subscribes to the event bus; an index is dropped at once on `workspace.changed` of its
+  project (agent writes, rewind, revert, undo), on `project.changed` (edit or deletion), when a run of a chat of the
+  project finishes (`run.finished`: shell commands write without a `workspace.changed`, and the tool event is coalesced
+  for up to a second, so the search after a run sees what it wrote), when the folder cannot be opened, and at shutdown
+  (`stop()` aborts the walks in flight). A build already walking when its index is dropped is discarded: the searches
+  waiting for it still get its answer, but it is not kept, and the next search queues a fresh build. No new
+  `.gitignore` parser and no new regex path: the ReDoS heuristic of the walker stays (a backlog item).
+- **Search** (`GET /projects/:id/files?q&limit`): every call opens the project through `projects.openWorkspace` (404
+  "Project <id> not found." for an unknown project, 400 with the `openWorkspace` message when the folder cannot be
+  opened); `q` ≤ 256 characters (`mentionQueryMaxChars`), `limit` 1–50 (default 50, `mentionResultsMax`); ranked by the
+  shared `rankPaths(q, entries, limit)` (`shared/util/mentions.ts`): the tier first (basename prefix > basename
+  substring > full-path substring > subsequence, case-insensitive), then the quality inside the tier (matches at
+  segment and word starts, consecutive characters, characters in the basename; so `chk` ranks `src/check.ts` above
+  `checkpoint.txt`), then the shorter path, then the path; the empty query lists shallower paths first. Answer
+  `{ items: { path, kind: 'file' | 'dir' }[], truncated, indexedAt }`; `truncated` is set when more entries matched
+  than `limit` OR the index was cut (at 50,000 files or by the walk limits).
+- **Attach** (`POST /projects/:id/files/attach { path }`, `attach.ts`): the path is checked three times with the same
+  rule (a `.git` segment or a secret-looking path is a 400 on `['path']`): lexically on the typed path, then on the path
+  `resolveWorkspacePath` resolved (realpath containment: `../x`, an absolute path outside the project and a link out of
+  it are refused; 404 for a missing file; a link inside the project to `.env` is refused), then on the path
+  `readWorkspaceFile` read (`O_NOFOLLOW`, a regular file only; more than 5 MiB, `mentionFileMaxBytes`, is 413
+  `payload_too_large` with the message `"x" is larger than 5120 KiB.` and `details.limitBytes`) →
+  `files.upload(new File([bytes], basename))`, which sniffs the type (text, image or PDF; anything else is the upload
+  route's 400) and pins the new file id → 201 `FileRef`. The upload name is the base name of the path as typed (a link
+  keeps its own name). The bytes are a snapshot: a later edit of the file does not change the attachment.
+- **Logs**: counts and durations at debug only (`project files searched` `{ projectId, queryChars, items, files,
+  entries, truncated, cached, buildMs }`, `project file attached` `{ projectId, fileId, size, mime }`); never a query, a
+  path or file content.
 
 ### 6.22 Sub-agents (ADR-043)
 
-**`task`** (`core-agent/task.ts`): input `{ description (3–80 characters), prompt (≤ 20,000), type: 'explore' |
+**`task`** (`core-agent/task.ts`): input `{ description (3–80 characters), prompt (1–20,000), type: 'explore' |
 'general' }`, policy `safe`, `timeoutMs` 600,000; `execute` is an `async function*` that delegates to
-`agentScopeOf(c).runSubagent(input, { toolCallId, signal })` and yields `TaskOutput` snapshots; `toModelOutput` gives
-the model only the report ("Sub-agent failed: …; partial report: …" on failure). Output: `{ status: queued | running |
-completed | failed | aborted | limit, type, description, modelRef, steps: { toolCallId, toolName, summary (≤ 200),
-state: running | done | error | denied, resultPreview? (≤ 300) }[] (the last 50), stepsOmitted, report (≤ 32,000),
-usage?, costUsd?, startedAt, finishedAt?, error? }`, well under the 64 KB output cap.
+`agentScopeOf(c).runSubagent(input, { toolCallId, signal })` and yields `TaskOutput` snapshots (without an agent scope,
+inside a child or outside a chat run, it yields one `failed` output: "Sub-agents can only be started from a chat (a
+sub-agent cannot start another one)."). `toModelOutput` reads only `{ status, report, error? }` and gives the model the
+report for `completed` ("The sub-agent finished without a report." when empty) and for a `limit` with a report, else
+"Sub-agent failed: <error>; partial report: <report or (none)>". Output: `{ status: queued | running | completed |
+failed | aborted | limit, type, description, modelRef, steps: { toolCallId, toolName, summary (≤ 200, the first string
+of `path`, `pattern`, `query`, `command`, `url`, … else the input as JSON), state: running | done | error | denied,
+resultPreview? (≤ 300) }[] (the last 50), stepsOmitted, report (≤ 32,000: the text of the latest step that wrote
+text), usage?, costUsd?, startedAt, finishedAt?, error? (≤ 2,000) }` (epoch ms timestamps). Every snapshot is fitted to
+60,000 bytes of serialized JSON (`TASK_OUTPUT_BYTES_MAX`, `subagent/progress.ts`: the oldest steps go first, then the
+end of the report), so it stays under the 64 KB output cap and is never replaced by the truncation marker.
 
 **Streaming tools** (`chat/tools.ts` `wrapToolExecute`, plugin API 1.3.0): when `definition.execute` is an async
 generator function, the wrapper returns an async generator: the plugin's iteration runs inside `plugins.guard` (the
 timeout and the abort cover the whole iteration) and pushes values into a channel; preliminary values are merged to at
 most one per 250 ms (the latest wins), each passes `capToolOutput`, at most 2,000 are sent, and the final value always
-passes; `tool.after` hooks run on the final value only, and the journal records the call once it settled. A
-non-generator `execute` that resolves to an `AsyncIterable` is drained (the last value counts). The SDK re-emits the last
-yielded value as the final output; `convertToModelMessages` drops a part that is still preliminary.
+passes (the first value goes out at once; a value still waiting when the iteration ends is dropped, the final value
+supersedes it); `tool.after` hooks run on the final value only, and the journal records the call once it settled. A
+non-generator `execute` that resolves to an `AsyncIterable` is drained (the last value counts, no preliminary output).
+The SDK re-emits the last yielded value as the final output; `convertToModelMessages` drops a part that is still
+preliminary.
 
 **Child run** (`chat/subagent/index.ts` `createSubagentRunner`, created per run in `modelStream` and bound into the
 agent scope):
 
-- model `subagentModelRef ?? the run model`; `buildRunParams` with the child's tool list and a sub-agent preamble that
-  contains `SUBAGENT_INSTRUCTIONS_MARKER`; messages `[user: prompt]`; `stopWhen: isStepCount(subagentMaxSteps)` (setting,
-  1–200, default 30); the step composer with the context guard in silent mode and the **finalize nudge**: at the last
-  allowed step `activeTools: []` and an instruction to write the final report now (the output status is then
-  `limit`);
-- `AbortSignal.any([run.signal, AbortSignal.timeout(570 s)])` (`subagentTimeoutMs`, below the tool's 600 s guard, so a
-  partial report can still return);
-- a per-run semaphore: at most 3 children run at once (`subagentParallelMax`; a waiting call shows `queued`) and 20 per
-  run (`subagentsPerRunMax`; more calls fail);
-- the runner iterates the child's `result.stream` and yields a snapshot on every tool start / finish and step end.
+- model `subagentModelRef ?? the run model` (a setting that cannot be resolved falls back to the run model with the
+  warning `the sub-agent model cannot be resolved; the chat model runs the sub-agent` `{ modelRef, code? }`);
+  `buildRunParams` with the child's effective mode (`ask` for `explore` and below a `plan` parent), the child's tool
+  list, no agent tools (no plan block, todo or `task` hint) and global instructions = a sub-agent preamble that contains
+  `SUBAGENT_INSTRUCTIONS_MARKER` (plus a read-only line for `explore`) before the user's global instructions; messages
+  `[user: prompt]`; `stopWhen: isStepCount(subagentMaxSteps)` (setting, 1–200, default 30); `maxRetries: 2`; the step
+  composer with the context guard in silent mode, no steer step and the **finalize nudge**: from the last allowed step
+  (`maxSteps − 1`) on, `activeTools: []` and "You have reached your step limit and cannot call tools any more. Write
+  the final report now, from what you found so far." (whenever the nudge ran, the output status is `limit`);
+- the child's signal is `AbortSignal.any([the call's signal, the run signal, a deadline])`; the deadline is 570 s
+  (`subagentTimeoutMs`, below the tool's 600 s guard, so a partial report can still return) counted from the call, the
+  time queued for a slot included; a child the deadline ends reports `limit` ("The sub-agent reached its time limit
+  (570 s).");
+- a per-run semaphore: at most 3 children run at once (`subagentParallelMax`; a call without a free slot yields
+  `queued` and waits, first come first served) and 20 per run (`subagentsPerRunMax`; later calls yield one `failed`
+  output, "A reply can start at most 20 sub-agents.");
+- the runner iterates the child's `result.stream` and yields a snapshot at the start (`running`), on every tool call
+  start and end and on every step end; the final one is `completed`, `limit`, `aborted` (Stop: "The sub-agent was
+  stopped.") or `failed` (the model call failed; the error mapped and redacted like a run error); a tool call still
+  open when the child ends is marked "The sub-agent ended before the tool finished.".
 
-**Child tools** (`chat/subagent/tools.ts`): `assembleTools` with the parent's mode, workspace and scope, then minus every
-tool that can only ask in that mode, minus the `core-agent` tools (no `task`: depth 1; a test proves it is absent) and
-`generate_image`, minus tools with a user override `deny` or `ask`; type `explore`, or a parent in `plan`, also drops the
-workspace `write` / `execute` tools and lowers the effective mode to `ask`. The real gate is the child's approval
-function: `createToolApproval(parent mode, child tools)` with `user-approval` mapped to `denied` ("Sub-agents cannot ask
-the user: this call needs approval."). Result: in `ask` the safe tools run; in `edits` also workspace writes and shell
-commands that match the shell rules; in `auto` everything except `always` tools. A child never creates an approval
-request, so `pending_approval` is never set by one.
+**Child tools** (`chat/subagent/tools.ts`): `assembleTools` with the parent's mode (so `applyToolMode` applies), the
+parent's workspace and a child copy of its run scope, no agent scope and the call id prefix `<parent call id>/`; then
+minus the `core-agent` tools (no `task`: depth 1; a test proves it is absent) and `generate_image`. The effective mode
+is `ask` for type `explore` and below a `plan` parent, else the parent's; in `ask` the workspace `write` / `execute`
+tools are dropped. Then every tool whose static outcome in the effective mode can only ask or is always denied is
+dropped (`staticApprovalOutcome`, `approval.ts`: the stored override, so `ask` / `deny` overrides drop the tool, then a
+static policy); a tool with a policy **function** stays, because that function decides per call. The real gate is the
+child's approval function: `createToolApproval(effective mode, child tools)` with `user-approval` mapped to `denied`
+("Sub-agents cannot ask the user: this call needs approval."); the hooks see the prefixed call id. Result: in `ask` the
+safe tools and the read tools run; in `edits` a `general` child also gets the workspace writes and `shell` (its policy
+is the function `shellPolicy`): commands that match a shell rule run, every other command is denied; in `auto`
+everything except `always` tools. A child never creates an approval request, so `pending_approval` is never set by one.
 
 **Journal, folder, usage**: child calls bind the parent's run scope with `toolCallId = <parent call id>/<child call
-id>`, so their writes are journaled under the parent assistant message (rewind and the changes panel cover them,
-6.16); a child gets a **copy** of the sticky shell folder (its `cd` never moves the parent's); no agent scope is bound
-in a child (depth 1). Each child writes one usage row (purpose `subagent`, the child's provider and model), its cost
-added to the reply through `RunSession.addExtraCost`; `ChatDetail.totals` include `compact` and `subagent` rows.
+id>` (`callIdPrefix` of `wrapToolExecute`: the hooks, the call context, the run scope and the journal see the prefixed
+id, while the steps of the `TaskOutput` keep the child's own ids), so their writes are journaled under the parent
+assistant message (rewind and the changes panel cover them, 6.16); a child gets a **copy** of the sticky shell folder
+(its `cd` never moves the parent's); no agent scope is bound in a child (depth 1). Each child that used tokens writes
+one usage row (purpose `subagent`, the child's provider and model, the reply's `message_id`), its cost added to the
+reply through `RunSession.addExtraCost` and shown in the output (`usage`, `costUsd`); `ChatDetail.totals` include
+`compact` and `subagent` rows. After a Stop a child's usage row may be written after the reply was saved, so its cost
+can be missing from that reply's `costUsd` (the totals still count it). The prompt, the steps and the report are never
+logged (warnings carry model refs and error codes only: `a sub-agent failed` `{ modelRef, code? }`).
 
 **Finalize** (`chat/history.ts`): a part still `output-available` with `preliminary: true` when the run ends becomes an
-`output-error` with the stopped or failed text. The nested trace of a stopped child is therefore lost after a reload
-(accepted). Stop aborts every child through the run signal (6.3).
+`output-error` with the stopped text ("The run was stopped before the tool finished.") or the failed text. The nested
+trace of a stopped child is therefore lost after a reload (accepted). Stop aborts every child through the run signal
+(6.3). In the model history a stored `task` output is reduced to `{ status, report, error? }` (`reduceAgentOutputs`,
+6.18 step 3).
 
 ```mermaid
 sequenceDiagram
@@ -3152,12 +3279,12 @@ There is no OS sandbox: run harness-forge in its Docker container (or as a dedic
 
 | Threat | Mitigation | Accepted risk |
 |---|---|---|
-| A plan-mode bypass (the model or a modified client writes while the user expects a read-only plan) | plan mode is enforced on the server: the tool set has no workspace `write` / `execute` tool, `exit_plan_mode` always asks (before overrides and hooks), an `allow` override on it is refused (400), approving it while the continuation's mode is `plan` or `off` is a 400; the web only chooses the mode | MCP tools and third-party tools without workspace access stay offered in plan mode and resolve as in Ask (a destructive MCP tool still asks) |
-| Sub-agents bypass approvals | a child gets only the tools that run without approval in the parent's mode (no `core-agent` tools, no `generate_image`, no tool with a `deny` / `ask` override; `explore` and a parent in plan mode drop `write` / `execute`), and its approval function maps every `user-approval` to `denied`; depth 1 (no `task` in a child, tested); a probe asserts no `approval-requested` part and no `pending_approval` from a child | in Auto a `general` child can do whatever the parent could do without asking, now in parallel |
+| A plan-mode bypass (the model or a modified client writes while the user expects a read-only plan) | plan mode is enforced on the server: the tool set has no workspace `write` / `execute` tool, `exit_plan_mode` always asks (before overrides and hooks), an `allow` override on it is refused (400) and a stored one is ignored, approving it while the continuation's mode is anything but `edits` or `ask` (`plan`, `off`, `auto`) is a 400; the web only chooses the mode | MCP tools and third-party tools without workspace access stay offered in plan mode and resolve as in Ask (a destructive MCP tool still asks) |
+| Sub-agents bypass approvals | a child gets only the tools that can run without approval in its effective mode (no `core-agent` tools, no `generate_image`, no tool with a `deny` / `ask` override; `explore` and a parent in plan mode lower the mode to `ask` and drop `write` / `execute`; a tool with a policy function, like `shell` in `edits`, stays and is decided per call), and its approval function maps every `user-approval` to `denied`; depth 1 (no `task` in a child, tested); a probe asserts no `approval-requested` part and no `pending_approval` from a child | in Accept edits a `general` child runs the shell commands the user's shell rules allow; in Auto a `general` child can do whatever the parent could do without asking, now in parallel |
 | Runaway sub-agents (cost, time) | 3 at once, 20 per run, `subagentMaxSteps` (30) with a finalize step, a 570 s deadline, Stop and shutdown abort them, one usage row each; the `task` tool can be disabled in the Tools tab | a model that starts many children spends tokens up to those caps |
 | Child writes escape rewind | child calls run with the parent's run scope (journaled under the reply, `<parent>/<child>` call ids) and a copy of the sticky folder | shell side effects of children are not restorable, like the parent's (6.16) |
 | Mention traversal or secret leak | every attach path goes through `resolveWorkspacePath` (realpath containment; links out of the project refused), `.git` segments and secret-looking paths are refused (400) and never indexed, 5 MiB cap, type sniffing of the upload store; the index honors `.gitignore` and skips `node_modules` | an attached snapshot is a normal upload (served to the session, kept until the cleanup); a crafted `.gitignore` line below the walker's heuristic limits (the ReDoS item of 10.9, backlog) |
-| Memory growth from queues and indexes | queues: per chat, ≤ 10 items of ≤ 256 KB, cleared on Stop, chat deletion, key rotation and shutdown; the index: ≤ 50,000 files per project, 30 s TTL, single-flight builds, dropped on `workspace.changed`; preliminary outputs throttled to one per 250 ms, ≤ 2,000 per call, each capped, ≤ 50 steps kept | many projects searched within 30 s each hold an index |
+| Memory growth from queues and indexes | queues: per chat, ≤ 10 items of ≤ 256 KiB, cleared on Stop, chat deletion, key rotation and shutdown; the index: ≤ 50,000 files per project, ≤ 8 projects (least recently searched dropped first), 30 s TTL, single-flight builds, dropped on `workspace.changed`, `project.changed` and the end of a run in the project; preliminary outputs throttled to one per 250 ms, ≤ 2,000 per call, each capped, ≤ 50 steps kept | up to 8 indexes of up to 50,000 paths each stay in memory for 30 s |
 | A queued message changes a run the user stopped | Stop clears the queue before the run aborts and returns the dropped messages; only a completed run starts a queued next turn; a lost race with a user request re-queues the item | a steer can still land in a step the user did not expect (it is shown where it was delivered) |
 | Third-party plugins reach agent internals | the agent scope is a private WeakMap side channel (no `ToolCallContext.agent`); server code recognizes the tools by `pluginId === 'core-agent'`; `/compact` is reserved (a plugin command of that name is refused) | a plugin tool that shadows the description of `task` or `todo_write` under another name |
 | Summaries and plans leak | summaries, steers, todos and plans are message content: never in share pages (summaries; steers become user messages there), never in search (summaries), never logged at `info`; the compaction and sub-agent models (`compactModelRef`, `subagentModelRef`) receive chat content like the chat model | the user may point those settings at a different provider than the chat's |
@@ -3303,21 +3430,35 @@ flowchart LR
 - **Agent 2.0** (Phase 9, 6.18 – 6.22): counts, ids, model refs, durations and outcomes only at `info`; never a
   summary, a steer, todo or plan text, a sub-agent prompt, report or tool value, a mention query or file content (at
   `debug` only where the existing rules already allow message contents, redacted).
-  - Compaction: one info line per compaction (chat id, `trigger`, `keep`, messages compacted, tokens before and after,
-    the summarizer's model ref, duration, outcome) and a warning for a failure (error code, then the trimming fallback)
-    or for an unresolvable `compactModelRef` (the run model is used); a usage row with purpose `compact`.
-  - Queue: debug lines for add / take / cancel (chat id, item id, reason); an info line when the server starts a queued
-    next turn (chat id, request id `queue_…`) or drops an item as `failed` (error code).
-  - Sub-agents: one info line per child (chat id, parent call id, type, model ref, steps, status, duration, tokens,
-    cost); a warning when a child fails (error code); a usage row with purpose `subagent` each.
-  - Mentions: an index build logs a debug line (project id, files, truncated, duration); an attach logs nothing beyond
-    the upload's own line.
+  Every line of a run carries the run logger's `reqId`, `chatId` and `runId`.
+  - Compaction: `conversation compacted` (info, manual: `trigger`, `messagesCompacted`, `tokensBefore`,
+    `tokensAfter`) and `context compacted` (info, automatic: `stepNumber`, `silent` (a sub-agent's guard), `keep`,
+    `tokensBefore`, `tokensAfter`); warnings `automatic compaction failed; the conversation is trimmed instead` and
+    `the compacted context is still above the compaction trigger; no more compactions in this run` (`stepNumber`,
+    `silent`), `the compaction model cannot be used; the chat model writes the summary` (`modelRef`) and `cannot store
+    the compaction usage`; debug `compaction summary written` (`modelRef`, `transcriptChars`, `summaryChars`); a usage
+    row with purpose `compact`.
+  - Queue: debug lines `message queued` (`itemId`, `turnOnly`, `queued`), `queued message cancelled`, `queued messages
+    steered` / `steered queued messages into the run` (`count`, `stepNumber`, `itemIds`) and `queue cleared` (`count`,
+    `reason`); a server-started turn logs with `reqId: queue_…` and `queuedBy` (the request id that queued the item):
+    `next turn started from the queue` (info, `itemId`), `the next turn lost the chat to another request; the item goes
+    back to the queue` (debug) or `a queued message could not start the next turn` (warn, `itemId`, `code`); `a steered
+    message could not be converted; its text is sent` (warn, `itemId`).
+  - Step composer: `a step piece failed; the step goes on without it` (warn: `piece`, `stepNumber`).
+  - Sub-agents: no line per child on success (the `task` part and the usage row record it); warnings `a sub-agent
+    failed` (`modelRef`, `code`) for an unexpected failure, `the sub-agent model cannot be resolved; the chat model runs
+    the sub-agent` (`modelRef`, `code`) and `the sub-agent usage row was not written`; debug `sub-agent model stream
+    error`; a usage row with purpose `subagent` per child that used tokens.
+  - Mentions (component `project-files`): debug `project files searched` (`projectId`, `queryChars`, `items`, `files`,
+    `entries`, `truncated`, `cached`, `buildMs`) and `project file attached` (`projectId`, `fileId`, `size`, `mime`);
+    warnings only when the index cannot be dropped or stopped. The upload logs its own line.
   - **Limits at a glance** (`LIMITS`, `shared/limits.ts`, no settings key unless named): compaction summary 60,000
     characters, focus 1,000, 10 compactions per run, trigger at 80 % of the window (85 % for keeping the user
     message); todos 50 items; plan 50,000 characters; approval reason 2,000; `task` prompt 20,000, report 32,000, 50
-    steps kept, 3 children at once, 20 per run, 570 s per child, `subagentMaxSteps` 30 (setting, 1–200); queue 10 items
-    of 256 KB per chat; mentions 50 results, 5 MiB per attached file, 50,000 indexed files, 30 s index TTL;
-    preliminary outputs one per 250 ms, at most 2,000 per call.
+    steps kept, 3 children at once, 20 per run, 570 s per child, `subagentMaxSteps` 30 (setting, 1–200), a `task`
+    snapshot ≤ 60,000 bytes; queue 10 items of 256 KiB per chat; mentions 256-character query, 50 results, 5 MiB per
+    attached file, 50,000 indexed files, 30 s index TTL, 8 cached projects; preliminary outputs one per 250 ms, at most
+    2,000 per call.
 - **Proxy trust** (texts in section 10.6): the boot log line `trusting reverse proxies (HF_TRUST_PROXY)` lists the
   canonical entries and the trusted ranges; one warning per untrusted peer address that sends a forwarded header the
   server would honor from a trusted proxy (header names only, at most 256 addresses); failed-login warnings carry the

@@ -194,7 +194,8 @@ describe('tools routes: the effective override (Phase 9, W9.7)', () => {
     expect(allowRefusedMessage({ name: 'exit_plan_mode', pluginId: 'acme', workspace: null })).toBeNull()
     expect(allowRefusedMessage({ name: 'todo_write', pluginId: CORE_AGENT_PLUGIN_ID, workspace: null })).toBeNull()
     expect(effectiveToolOverride({ name: 'exit_plan_mode', pluginId: CORE_AGENT_PLUGIN_ID, workspace: null }, 'allow')).toBeNull()
-    expect(effectiveToolOverride({ name: 'exit_plan_mode', pluginId: CORE_AGENT_PLUGIN_ID, workspace: null }, 'deny')).toBe('deny')
+    // The approval asks for the plan before it reads any override, so even a stored deny does not apply.
+    expect(effectiveToolOverride({ name: 'exit_plan_mode', pluginId: CORE_AGENT_PLUGIN_ID, workspace: null }, 'deny')).toBeNull()
     expect(effectiveToolOverride({ name: 'exit_plan_mode', pluginId: 'acme', workspace: null }, 'allow')).toBe('allow')
     expect(allowRefusedMessage({ name: 'shell', pluginId: 'core-workspace', workspace: 'execute' })).toBe(EXECUTE_ALLOW_REFUSED_MESSAGE)
     expect(allowRefusedMessage({ name: 'write_file', pluginId: 'core-workspace', workspace: 'write' })).toBeNull()

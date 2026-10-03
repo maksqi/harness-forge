@@ -7,20 +7,21 @@ of a project folder on your server. By default, every tool call that can change 
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **In progress:** v1.5 ("Agent 2.0"): context compaction (`/compact` and automatic, also inside long runs), a plan
-> mode with a plan you approve, a todo list, `@` file mentions, messages that reach the agent while it works, and
-> sub-agents (see [Features](#features) and the [agent features guide](docs/guides/agent-features.md)).
->
-> **Status:** v1.4 ("Workspace 2.0"): checkpoints that rewind the agent's file changes to any of your messages, a
-> changes panel with per-file diffs, Git status and an undoable revert, shell rules for commands that may run without
-> asking, a working folder that carries over between shell commands, and an opt-in automatic cleanup of unused files.
-> v1.3 added projects and an agent workspace (file tools and a shell with approval, an "Accept edits" permission mode,
-> inline diffs and terminal output in the chat), master-key rotation (in the app or with a CLI) and a storage cleanup
-> with a preview. v1.2 added image generation and voice (dictation and read-aloud) through your own providers, message
-> versions that remember the path shown under them, can be deleted and follow a switch in other open tabs, editing the
-> attachments of a sent message, one password prompt for every sensitive action, and 40 px touch targets on tablets.
-> v1.1 added conversation branching, backup / restore / delete-all, read-only share links, trusted reverse proxies and
-> an opt-in live provider suite. Progress lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status:** v1.5 ("Agent 2.0"): context compaction that replaces the older part of a long chat with a summary
+> (`/compact [focus]` or automatically, also between the steps of a long agent run), a plan mode in which the agent
+> explores read-only and proposes a plan you approve, a todo list the agent keeps up to date, `@` file mentions in
+> project chats, messages that reach the agent while it works (or start the next turn by themselves), and sub-agents
+> that explore or work in parallel (see [Features](#features) and the
+> [agent features guide](docs/guides/agent-features.md)). v1.4 added checkpoints that rewind the agent's file changes to
+> any of your messages, a changes panel with per-file diffs, Git status and an undoable revert, shell rules for commands
+> that may run without asking, a working folder that carries over between shell commands, and an opt-in automatic
+> cleanup of unused files. v1.3 added projects and an agent workspace (file tools and a shell with approval, an "Accept
+> edits" permission mode, inline diffs and terminal output in the chat), master-key rotation (in the app or with a CLI)
+> and a storage cleanup with a preview. v1.2 added image generation and voice (dictation and read-aloud) through your
+> own providers, message versions that remember the path shown under them, can be deleted and follow a switch in other
+> open tabs, editing the attachments of a sent message, one password prompt for every sensitive action, and 40 px touch
+> targets on tablets. v1.1 added conversation branching, backup / restore / delete-all, read-only share links, trusted
+> reverse proxies and an opt-in live provider suite. Progress lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ![A chat reply with markdown, a table and a highlighted code block; the composer shows the model picker and the microphone button (dark theme)](docs/assets/screenshots/chat-dark.png)
 
@@ -73,13 +74,14 @@ desktop app, and it starts in dark mode.
   - The shell's working folder carries over between commands (`cd packages/web` sticks), clamped to the project.
   - Automatic cleanup of unused files (Settings -> Data, off by default, daily or weekly) and screen-reader labels for
     tool-row summaries.
-- **Agent 2.0** (v1.5, in progress; guide: [agent features](docs/guides/agent-features.md)):
+- **Agent 2.0** (v1.5; guide: [agent features](docs/guides/agent-features.md)):
   - Context compaction: when a chat nears the model's context window, its older part is replaced by a model-written
     summary (also between the steps of a long agent run), instead of being dropped; `/compact [focus]` does it on
-    demand. The older messages stay visible, dimmed, under a "Conversation compacted" divider with the summary.
+    demand. The older messages stay visible, dimmed, above a "Conversation compacted" divider that shows the summary on
+    request.
   - Plan mode (project chats): a read-only permission mode in which the agent explores and then proposes a plan; approve
-    it with "Accept edits" or "Ask", or send feedback and let it keep planning. Shift+Tab in the composer cycles Ask,
-    Accept edits and Plan. Enforced on the server.
+    it ("Approve, accept edits" or "Approve, ask before edits"), or send feedback and let it keep planning. Shift+Tab
+    in the composer cycles Ask, Accept edits and Plan. Enforced on the server.
   - A todo list the agent keeps up to date, shown as a progress strip above the composer.
   - `@` mentions: type `@` in a project chat to search the project's files and attach one.
   - Send while the agent works: queued messages reach it at its next step (or become the next message), can be edited
@@ -87,6 +89,8 @@ desktop app, and it starts in dark mode.
   - Sub-agents: the agent can start read-only explorers or general helpers that run in parallel with their own context,
     never ask for approval (they only get tools that run without a card in the current mode) and return a report;
     their file edits can be rewound like any other.
+  - Settings -> General -> Agent: automatic compaction (on by default), a separate model for summaries and for
+    sub-agents, and the sub-agent step limit (30); a switch in General turns the Shift+Tab mode cycle off.
 - **Images** (with your own keys):
   - Pick an image model (OpenAI GPT Image, xAI Grok Imagine) in the composer and describe a picture: 1 to 4 images
     per turn, an aspect ratio (Auto, 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16), and follow-ups such as "make it blue" that
@@ -116,8 +120,8 @@ desktop app, and it starts in dark mode.
 - **Composer**:
   - A model picker with provider icons and capability badges, and an "Image models" group.
   - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode for tools (Ask, Accept edits and
-    Plan in project chats, Auto, Off; v1.5: Shift+Tab cycles them); image options (count, aspect ratio, edit the
-    previous image) for image models.
+    Plan in project chats, Auto, Off; v1.5: Shift+Tab cycles Ask, Accept edits and Plan); image options (count, aspect
+    ratio, edit the previous image) for image models.
   - v1.5: `@` file mentions in project chats, and a queue for messages sent while a reply runs.
   - Slash commands: `/explain`, `/review`, `/fix`, `/translate`, `/proofread` and more, plus commands from plugins;
     v1.5: `/compact [focus]`.
@@ -184,8 +188,9 @@ pnpm dev            # server on :8787 (tsx watch) + web on :3000 (nuxt dev, prox
 
 Open http://localhost:3000. Go to **Settings** -> **Providers**, add a key, press **Test**, then start a chat.
 `HF_MOCK_PROVIDER=1 pnpm dev` adds a keyless `mock` provider for trying the UI, with mock image, speech-to-text and
-text-to-speech models (pick them in Settings -> Media) and `mock:workspace`, which writes, edits and runs a file in a
-project chat.
+text-to-speech models (pick them in Settings -> Media), `mock:workspace`, which writes, edits and runs a file in a
+project chat, and the agent mocks `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer`
+([PROVIDERS.md](docs/PROVIDERS.md#8-mock-provider)).
 
 ### Production
 
@@ -233,7 +238,8 @@ writable by uid 1000). Then add a project in Settings -> Projects and start a ch
 with the server's permissions after you approve them (or when your shell rules allow them); set `HF_WORKSPACE_SHELL=0`
 to turn it off. The Git view of the changes panel needs repositories owned by the container user: git refuses a
 bind-mounted folder owned by another uid ("dubious ownership"), see the guide. Details, permission modes, shell rules,
-rewind and security notes: [using projects](docs/guides/using-projects.md).
+rewind and security notes: [using projects](docs/guides/using-projects.md); plan mode, `@` mentions, the message queue
+and sub-agents: [agent features](docs/guides/agent-features.md).
 
 ## Configuration
 
@@ -348,7 +354,7 @@ harness-forge is built for **one user** on their own machine or server.
   runs any code the agent writes. Anyone who can log in can approve shell commands and add rules: keep `HF_PASSWORD`
   set, or turn the shell off with `HF_WORKSPACE_SHELL=0`. Git (the changes panel) runs read-only, with the
   repository's hooks, filters and configured programs switched off.
-- **Agent 2.0 (v1.5, in progress).** Plan mode is enforced by the server (no file-writing or shell tool is offered,
+- **Agent 2.0 (v1.5).** Plan mode is enforced by the server (no file-writing or shell tool is offered,
   and the plan card cannot be auto-approved). Sub-agents never ask for approval: they get only the tools that already
   run without a card in the chat's mode, and anything else is denied inside them; they cannot start sub-agents and
   are capped in number, steps and time. `@` mentions go through the same path guard as the file tools and refuse
@@ -467,7 +473,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | [`docs/UI.md`](docs/UI.md) | layout, design tokens, components, routes, shortcuts, test ids |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | phases, tasks and progress |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture decision records and the contract seed |
-| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md), [9 v1.5](docs/phases/phase-9-v1-5.md) (in progress) |
+| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md), [9 v1.5](docs/phases/phase-9-v1-5.md) |
 | [`AGENT.md`](AGENT.md) | rules for AI agents working on this repository |
 
 ## Development

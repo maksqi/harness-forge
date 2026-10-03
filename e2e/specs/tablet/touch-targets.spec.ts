@@ -6,6 +6,8 @@
 // this chat") are 40 px targets too. Phase 8 (W8.12): the changes toggle, the pane's Close and Refresh, a changes row and
 // its Revert (shown without hover), "Rewind files to here", and on a shell card the "Always allow commands starting
 // with" checkbox, the prefix input and both scope options are 40 px targets (at 1024 px the panel is the desktop pane).
+// Phase 9 (W9.13): the todo strip toggle, the queue's Edit and Cancel and "Queue message" while a reply runs, and the
+// sub-agent trigger, the plan card's buttons and the `@` mention rows are 40 px targets.
 import type { Locator, Page } from '@playwright/test'
 import type { CleanupTask, HarnessApi } from '../../helpers/index.ts'
 import {
@@ -17,13 +19,17 @@ import {
   changesPanel,
   changesToggle,
   expect,
+  expectMessageStatus,
+  lastAssistantMessage,
   MOCK_CHECKPOINT_DONE,
   MOCK_CHECKPOINT_FILE,
   seedProject,
+  seedProjectChat,
   test,
   testIds,
   touchTargetSize,
   uniqueId,
+  useAgentSettings,
   userMessages,
 } from '../../helpers/index.ts'
 
@@ -215,5 +221,60 @@ test.describe('tablet touch targets of the changes panel, rewind and shell rules
     for (const value of ['project', 'global'])
       await expectTouchTarget(scope.locator(`[data-value="${value}"]`), `the scope option ${value}`)
     await expectTouchTarget(card.getByTestId(testIds.toolApprovalAllow), 'Run')
+  })
+})
+
+test.describe('tablet touch targets of the agent controls', () => {
+  test('the todo strip toggle, the queue\'s Edit and Cancel and "Queue message" are at least 40x40 px', async ({ page, api, cleanup }) => {
+    const chat = await api.createChat({ title: `Tablet dock ${uniqueId('dock')}`, modelRef: 'mock:todo' })
+    cleanup(api => api.removeChat(chat.id))
+    await api.sendChat({ chatId: chat.id, modelRef: 'mock:todo', toolMode: 'ask', text: 'Do the three tasks.' })
+    await api.sendChat({ chatId: chat.id, modelRef: 'mock:steer', toolMode: 'ask', text: 'Ready.' })
+
+    await page.goto(`/chat/${chat.id}`)
+    await expectMessageStatus(lastAssistantMessage(page), 'done')
+    await page.getByTestId(testIds.composerInput).fill('steps 12')
+    await page.getByTestId(testIds.composerSend).tap()
+    const reply = lastAssistantMessage(page)
+    await expectMessageStatus(reply, 'streaming')
+    await expectTouchTarget(page.getByTestId(testIds.todoStripToggle), 'the todo strip toggle')
+    await page.getByTestId(testIds.composerInput).fill('/compact')
+    await expectTouchTarget(page.getByTestId(testIds.composerQueue), 'Queue message')
+    await page.getByTestId(testIds.composerQueue).tap()
+    const list = page.getByTestId(testIds.queuedMessages)
+    await expect(list).toHaveAttribute('data-count', '1')
+    await expectTouchTarget(list.getByTestId(testIds.queuedMessageEdit), 'Edit queued message')
+    await expectTouchTarget(list.getByTestId(testIds.queuedMessageCancel), 'Cancel queued message')
+    await page.getByTestId(testIds.composerStop).tap()
+    await expectMessageStatus(reply, 'aborted')
+    await page.getByTestId(testIds.composerInput).fill('')
+  })
+
+  test('the sub-agent trigger, the plan buttons and the mention rows are at least 40 px', async ({ page, api, cleanup }) => {
+    await useAgentSettings(api, cleanup, { subagentModelRef: 'mock:subagent' })
+    const { chatId } = await seedProjectChat(api, cleanup, { modelRef: 'mock:plan', prefix: 'tablet', files: { 'README.md': '# Tablet\n' } })
+    await api.sendChat({ chatId, modelRef: 'mock:subagent', toolMode: 'ask', text: 'Explore the project.' })
+    await api.sendChat({ chatId, modelRef: 'mock:plan', toolMode: 'plan', text: 'Plan the notes file.' })
+
+    await page.goto(`/chat/${chatId}`)
+    const card = page.getByTestId(testIds.planApproval)
+    await expect(card).toBeVisible()
+    for (const [id, name] of [[testIds.planApproveEdits, 'Approve, accept edits'], [testIds.planApproveAsk, 'Approve, ask before edits'], [testIds.planKeepPlanning, 'Keep planning']] as const)
+      await expectTouchTarget(card.getByTestId(id), name)
+    const triggers = page.getByTestId(testIds.taskBlockTrigger)
+    await expect(triggers).toHaveCount(2)
+    for (const trigger of await triggers.all())
+      await expectTouchTarget(trigger, 'a sub-agent trigger')
+
+    await page.getByTestId(testIds.composerInput).tap()
+    await page.keyboard.type('@')
+    const menu = page.getByTestId(testIds.mentionMenu)
+    await expect(menu).toHaveAttribute('data-state', 'ready')
+    const rows = menu.getByTestId(testIds.mentionMenuItem)
+    await expect(rows.first()).toBeVisible()
+    for (const row of await rows.all())
+      expect((await touchTargetSize(row)).height, 'a mention row height').toBeGreaterThanOrEqual(MIN_TARGET)
+    await page.keyboard.press('Escape')
+    await page.getByTestId(testIds.composerInput).fill('')
   })
 })

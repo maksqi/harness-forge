@@ -109,6 +109,8 @@ export interface RecordedRequest {
   method: string
   /** The URL path, e.g. `/api/audio/speech`. */
   path: string
+  /** The query string of the URL without `?` (`''` without one), e.g. `q=pars&limit=50` of a mention search. */
+  query: string
   /** Request headers (lowercase names). */
   headers: Record<string, string>
   /**
@@ -138,7 +140,7 @@ export async function recordRequests(page: Page, method: string, path: string): 
   const handler = async (route: Route) => {
     const request = route.request()
     if (request.method() === method)
-      requests.push({ method, path, headers: await request.allHeaders(), body: request.postDataBuffer() })
+      requests.push({ method, path, query: new URL(request.url()).search.slice(1), headers: await request.allHeaders(), body: request.postDataBuffer() })
     await route.fallback()
   }
   await page.route(matches, handler)

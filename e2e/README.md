@@ -3,8 +3,10 @@
 Playwright specs that drive the production build (`apps/web/.output/public` served by `apps/server/dist/main.mjs`)
 in Chromium with the dev-only `mock` provider (`HF_MOCK_PROVIDER=1`, docs/PROVIDERS.md 8), including its media models
 (images, speech to text, read-aloud), `mock:workspace` (the workspace tools of a project chat, Phase 7) and
-`mock:checkpoint` / `mock:shell` (checkpoints, rewind, the sticky working folder and shell rules, Phase 8). Tests tagged
-`@smoke` in their title run at every gate (`--grep @smoke`); every core test is.
+`mock:checkpoint` / `mock:shell` (checkpoints, rewind, the sticky working folder and shell rules, Phase 8) and the agent
+mocks `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer` (compaction, plan mode, todos,
+sub-agents and the steer queue, Phase 9). Tests tagged `@smoke` in their title run at every gate (`--grep @smoke`); every
+core test is.
 
 ```
 e2e/
@@ -12,11 +14,13 @@ e2e/
   specs/core/         core app: theme, navigation, chat, resume, keyboard, composer, settings, login (W2.6, W5.8),
                       branching, data (backup, delete-all, import), share links (W5.10), images, voice, versions,
                       edit attachments (W6.12), projects, workspace tools, key rotation and storage cleanup (W7.14),
-                      changes panel, rewind, shell rules, sticky folder, automatic cleanup (W8.12)
+                      changes panel, rewind, shell rules, sticky folder, automatic cleanup (W8.12), compaction, plan mode,
+                      todos, sub-agents, file mentions, steer queue (W9.13)
   specs/plugins/      plugins tab, install, wizard, code plugins, MCP (W3.6)
-  specs/mobile/       phone layout, project `mobile` only (W5.8, W6.12, W7.14, W8.12)
-  specs/tablet/       touch tablet (icon rail, Phase 7 and 8 controls), project `tablet` only (W6.12, W7.14, W8.12)
-  specs/screenshots/  screenshots for the visual review, opt-in with `E2E_SCREENSHOTS=1` (W5.8, W6.12, W7.14, W8.12)
+  specs/mobile/       phone layout, project `mobile` only (W5.8, W6.12, W7.14, W8.12, W9.13)
+  specs/tablet/       touch tablet (icon rail, Phase 7 – 9 controls), project `tablet` only (W6.12, W7.14, W8.12, W9.13)
+  specs/screenshots/  screenshots for the visual review and the README images, opt-in with `E2E_SCREENSHOTS=1` (W5.8,
+                      W6.12, W7.14, W8.12, W9.13)
   fixtures/           plugin fixtures used by the plugin specs (W3.6)
 ```
 
@@ -48,8 +52,11 @@ rm -rf .tmp/<agent>/data
 HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_PORT=889k HF_DATA_DIR=.tmp/<agent>/data node apps/server/dist/main.mjs &
 E2E_BASE_URL=http://127.0.0.1:889k pnpm exec playwright test e2e/specs/core --output .tmp/<agent>/test-results
 
-# screenshots (skipped without E2E_SCREENSHOTS=1)
+# screenshots (skipped without E2E_SCREENSHOTS=1); @screenshots includes the README images
 E2E_SCREENSHOTS=1 pnpm test:e2e --grep @screenshots
+
+# only the README images (.tmp/screenshots/readme/<name>.png, the file names of docs/assets/screenshots/)
+E2E_SCREENSHOTS=1 pnpm test:e2e --grep @readme
 ```
 
 | Variable | Meaning |
@@ -57,7 +64,7 @@ E2E_SCREENSHOTS=1 pnpm test:e2e --grep @screenshots
 | `E2E_BASE_URL` | server under test (disables the config's webServer) |
 | `E2E_AUTH_BASE_URL` | optional server started with `HF_PASSWORD`, used by the login and share specs; without it they start their own password server from `apps/server/dist/main.mjs` on a free port with a temporary data directory. The data spec never uses it: delete-all wipes every chat, so it always starts a server of its own |
 | `E2E_AUTH_PASSWORD` | password of `E2E_AUTH_BASE_URL` (default `secret`) |
-| `E2E_SCREENSHOTS` | `1` runs the `@screenshots` spec (otherwise its tests are skipped) |
+| `E2E_SCREENSHOTS` | `1` runs the `@screenshots` spec, `@readme` included (otherwise its tests are skipped) |
 | `E2E_WORKSPACE_ROOT` | optional: the workspace root the Phase 7 specs create their project folders in; it must be one of the server's roots. Default: the first available root the server reports (`GET /api/projects/browse`), e.g. `<dataDir>/workspaces` |
 
 Specs assume a server with `HF_MOCK_PROVIDER=1`, no provider keys in its environment and no password. They may
@@ -73,7 +80,9 @@ with Node's `fs`), never into a hard-coded `.tmp/e2e`. Phase 8: a git repository
 through `execFile` with argument arrays, inside the spec's own folder only; the test is skipped when `gitAvailable()`
 is false); a global shell rule applies to every project of the server, so specs give it a unique prefix and remove it
 through `cleanup`; the changes panel state (open, width, view) lives in the browser's `localStorage`, which every test
-starts empty (a new browser context).
+starts empty (a new browser context). Phase 9: specs that change Agent settings (`subagentModelRef`, `compactModelRef`,
+`autoCompact`, `shiftTabModes`) restore them through `useAgentSettings` (`agent.ts`); the todo strip's open state
+(`hf-todo-expanded`) lives in `localStorage` too.
 
 ## Core specs (`specs/core`)
 
@@ -88,11 +97,11 @@ starts empty (a new browser context).
 | `providers.spec.ts` | OpenAI key dialog: Save tests first, "Save anyway" on a fake key, only the masked hint afterwards, no DOM node holds the key |
 | `login.spec.ts` | `HF_PASSWORD` server: redirect to `/login?redirect=`, wrong password error, login opens the target, session survives a reload and authenticates API calls |
 | `resume.spec.ts` | a running 600-word `mock:echo` reply (about 15 s) resumes after a reload, after leaving the chat and coming back (sidebar dot `running`), and in a second tab: `streaming` again from its first words, `done` with its last word, stored exactly once (one reply, no second version) |
-| `keyboard.spec.ts` | the chat without clicks: Mod+Shift+O, Alt+M (type + Enter picks), Enter, Esc (stop), Shift+Esc, ↑ (edit; checks only that the edited text is the last user message and a reply streams), Alt+R, Alt+P, Shift+Tab / Tab / Enter on the approval card, Mod+/, Mod+B, Mod+K; `toBeFocused()` after every step. Phase 8: Alt+C from the composer opens the changes panel on its active view tab (the arrow keys switch This chat / Git), Alt+C inside the panel closes it with focus on the toggle, Enter on the toggle opens it, Alt+C from the composer closes it with focus kept; Mod+/ lists "Show or hide changes"; a chat without a project has no toggle and ignores Alt+C |
-| `settings.spec.ts` | General (send key Mod+Enter in the composer, custom instructions), Appearance (theme, `data-reading-font` / `data-text-size` / `data-density` on `<html>`, "Expand thinking by default"), Models (default model, a custom model as favorite and hidden in the picker, removed), About (Copy diagnostics with clipboard permission: an allow-list report without secrets) |
+| `keyboard.spec.ts` | the chat without clicks: Mod+Shift+O, Alt+M (type + Enter picks), Enter, Esc (stop), Shift+Esc, ↑ (edit; checks only that the edited text is the last user message and a reply streams), Alt+R, Alt+P, Shift+Tab / Tab / Enter on the approval card, Mod+/, Mod+B, Mod+K; `toBeFocused()` after every step. Phase 8: Alt+C from the composer opens the changes panel on its active view tab (the arrow keys switch This chat / Git), Alt+C inside the panel closes it with focus on the toggle, Enter on the toggle opens it, Alt+C from the composer closes it with focus kept; Mod+/ lists "Show or hide changes"; a chat without a project has no toggle and ignores Alt+C. Phase 9: in a project chat Shift+Tab cycles Ask -> Accept edits -> Plan -> Ask ("Permission mode: …" in the composer's live region, focus kept), Enter while a `mock:steer` reply runs queues the message, Esc closes the `@` menu first (the reply keeps running), then stops the reply and the queued `/compact` returns to the composer. The shortcuts dialog's "Switch the permission mode" entry is a `test.fixme` (missing from the P9-A build; the working tree registers it) |
+| `settings.spec.ts` | General (send key Mod+Enter in the composer, custom instructions), Appearance (theme, `data-reading-font` / `data-text-size` / `data-density` on `<html>`, "Expand thinking by default"), Models (default model, a custom model as favorite and hidden in the picker, removed), About (Copy diagnostics with clipboard permission: an allow-list report without secrets). Phase 9: General -> Agent (Automatic compaction, the compaction model, the sub-agent model with the warning "Mock Echo can't call tools, …" for a model without tools, Sub-agent max steps refusing 500 inline and saving 12 on Enter) and the Shift+Tab switch save at once and survive a reload |
 | `branching.spec.ts` | message versions with `mock:echo` (docs/UI.md 7.5): A, then B; editing A shows "2/2" on the user message; "Previous version" brings back A, B and their replies (focus stays on the control); Regenerate on the last reply shows "2/2" on it; a reload keeps the versions; ArrowLeft in a switcher picks the previous version, which survives a reload; the server's `branches` match. Asserted through `message-branch*` (`data-index`, `data-count`, `data-message-id`, `aria-disabled`) |
 | `data.spec.ts` | Settings -> Data on a password server of its own (`dedicated: true`): Export backup downloads a zip (`PK` magic, `manifest.json` counts, `chats/<id>.json` per chat, no share link or token); Delete all data needs exactly `DELETE` and, with the browser clock 11 minutes past the login (`page.clock.fastForward`), the password prompt, and also deletes the share links; importing the zip brings the chats back into the sidebar with their messages (no share link); a second import skips every chat |
-| `share.spec.ts` | share links on a password server: "Share…" in the chat header menu, "Create link" (defaults, focused absolute URL); a browser context without cookies opens the link as the read-only transcript (title, messages; no sidebar, composer, actions or switchers; no session); Revoke… in the dialog, then a reload of the link shows "This link is unavailable". Phase 8 parity: a `mock:checkpoint` run in Accept edits whose shell calls the project rules `mkdir` and `ls` allowed shows the same on the chat page and the share page (tool details): `tool-row-rule` with `data-value` and its sr-only ", allowed by rule …", the spoken summaries ("Exit code 0", "New file, 1 line"), the terminal output (`$ mkdir …` with "Now in mock-dir", then `mock-dir $ ls`) and "Allowed by rule: …" |
+| `share.spec.ts` | share links on a password server: "Share…" in the chat header menu, "Create link" (defaults, focused absolute URL); a browser context without cookies opens the link as the read-only transcript (title, messages; no sidebar, composer, actions or switchers; no session); Revoke… in the dialog, then a reload of the link shows "This link is unavailable". Phase 8 parity: a `mock:checkpoint` run in Accept edits whose shell calls the project rules `mkdir` and `ls` allowed shows the same on the chat page and the share page (tool details): `tool-row-rule` with `data-value` and its sr-only ", allowed by rule …", the spoken summaries ("Exit code 0", "New file, 1 line"), the terminal output (`$ mkdir …` with "Now in mock-dir", then `mock-dir $ ls`) and "Allowed by rule: …". Phase 9: a project chat with a steered `steps 3` turn (sent from the chat page after the first step), `mock:todo`, two `mock:subagent` sub-agents, an approved `mock:plan` plan (Accept edits), `/compact` and a `seen?` turn: with tool details the share page shows the steer as a user message between the two parts of its reply (the second starts with `Steered: …`), the todo rows ("3/3", the finished list), the sub-agents ("Explore" + description, the `list_directory` step, the report) and the plan ("Approved · Accept edits", `plan-body`); no `/compact` message, no divider, no `MOCK-SUMMARY` |
 | `images.spec.ts` | image generation (docs/UI.md 7.7, 7.16): `mock:image` from the picker's "Image models" group (`model-picker-group` `data-value="images"`), "Describe an image…", no effort / permission / context ring; `image-options-trigger` 16:9 and 2 images; a "slow" prompt shows `image-generating` (`data-count` 2, "Generating 2 images… Ns") until the gallery (`image-gallery` `data-count` 2, two `image-tile`s, `/api/files/` images of 320x180, no Copy or Read aloud); the stored reply has two file parts and `metadata.image`, never a `data:` URL; the lightbox (Previous disabled, Next focused, ArrowLeft, "1 / 2") and its same-origin Download (`image-download`, the stored file name, a PNG); Esc returns focus to the tile; Regenerate shows the placeholders again, then "2/2"; `mock:image-chat` (aspect ratio only, 3:2 → 318x212): text + a one-image gallery; `generate_image` with `mock:image-tool` (`imageModelRef` set through the API): the approval card, Allow → the tool row, the image below it, "Image tool result: 1 image(s)" |
 | `voice.spec.ts` | voice (docs/UI.md 7.17, 7.18, 9.9) with `transcriptionModelRef` / `speechModelRef` set through the API: type "Hello ", record until the timer shows 0:01 (the indicator replaces the left tools, Send disabled), Stop → one multipart request with the part `file` (`dictation.webm`, `audio/webm…`, the WebM magic) and "Hello This is a mock transcription." with the focus back in the textarea; Alt+V starts and stops; Esc in the textarea, Esc on the mic and the indicator's Cancel drop a recording without a request; without a model the mic's setup popover leads to `/settings/media`; read aloud: the request body `{ text }`, `playing` (`aria-pressed`, "Stop reading"), the natural end of a 2 s clip, a second reply stops the first, Stop and Esc → `idle`; Settings → Media: the image, speech-to-text and read-aloud selects list only their kind, the language, the voice suggestions (`mock-voice-a`, `mock-voice-b`) and the speed save, Test voice sends `{ text, modelRef, voice }`, plays and stops; everything survives a reload |
 | `versions.spec.ts` | version management (docs/UI.md 7.5, 14.1; ADR-030): "Delete this version" asks first (Cancel keeps every version and refocuses the button), "Delete version" shows the previous version (3 → 2 versions), announces "Version deleted" and focuses the switcher; down to one version: no switcher, focus on Copy; a remembered deep path (B'1 chosen under B, then an edit of A and back: B'1, not the newest B'2, also after a reload; deleting the edit returns to that path); two tabs: a switch in either tab and a deletion move the other one |
@@ -102,6 +111,12 @@ starts empty (a new browser context).
 | `changes-panel.spec.ts` | the changes panel with `mock:checkpoint` (docs/UI.md 7.21): the toggle counts the files (`data-count` 1, "Show changes, 1 file changed", focus stays after a click); This chat: "1 file changed · +1 −1", the untracked note "2 shell commands in this chat may have changed files too. …", the row (`modified`, spoken "Modified … checkpoint.txt, 1 line added, 1 removed") expands to the diff; Revert asks ("Revert checkpoint.txt?", "… goes back to how it was before this chat changed it.") and writes the old text to disk, the row leaves ("No file changes in this chat yet.", count 0), the toast's Undo brings the agent's text back ("Restored checkpoint.txt"); Git on a `seedGitProject`: "On main · 1 file changed", the diff, Revert to the last commit, then "No changes since the last commit." / "On main"; another project's folder outside git keeps the Git view: "This project isn't a Git repository." (`not-a-repo`, panel `unavailable`), This chat still lists the file (`added`); Alt+C and the palette's "Show changes" open the pane on the focused view tab, Alt+C closes it with focus on the toggle; a mouse drag on `changes-resize` widens the pane and stores `hf-changes-width`, a reload keeps the pane open at that width, Close returns focus to the toggle and a reload keeps it closed. The arrow-key resize is a `test.fixme` (app bug: the handle ignores the arrow keys) |
 | `rewind.spec.ts` | "Rewind files to here" with `mock:checkpoint` (docs/UI.md 7.22): only the user message an edit follows has `message-rewind` (not a later `mock:echo` turn, never a reply); the preview lists `checkpoint.txt` (`restore`) and the shell commands newest first (`ls`, then `mkdir -p mock-dir && cd mock-dir`), focus on Restore files; Restore writes the old text back, the toast "Restored 1 file" has Undo, focus returns to the button, Undo brings the agent's text back (its toast without Undo); Restore files and edit deletes a file the chat created (`delete`) and opens the editor on the message; a file changed by hand is a conflict (`data-conflict`, `rewind-force` unchecked): skipped ("Nothing was restored.", "Skipped 1 file changed outside this chat") unless forced; while another chat of the project runs a 400-word `mock:echo` reply the restore is refused ("Wait for the responses in this project to finish before rewinding files.", the dialog closes, focus on the button, the file unchanged) |
 | `shell-rules.spec.ts` | shell rules with `mock:shell` (docs/UI.md 7.23, 9.10): the card's "Always allow commands starting with" suggests `echo` (This project), an edited prefix is checked (`ls` -> `no-match` "This doesn't match the command.", `sudo` -> `command-runner`; Run disabled meanwhile), Run saves the project rule, the next `echo` runs without a card with `tool-row-rule` `echo` and "Allowed by rule: echo"; a combined command shows one chip per part (`echo`, `pwd`) and the several-parts note, Deny saves nothing; a redirection shows the always-ask note instead of the option; a narrowed prefix with All projects saves a global rule another project's chat then runs without asking; Settings -> Projects: "Allowed commands…" (focus in the input, empty state), Enter adds and keeps focus, the same rule again is `409` "This rule already exists.", a one-word rule warns and is saved (sorted), `syntax` and `empty` are refused inline, Remove moves focus to the next rule, the row reads "1 allowed command"; "Allowed in every project" refuses `interpreter`, `cd`, `command-runner`, adds a unique global rule (`409` again for a repeat), keeps it after a reload and removes it |
+| `compaction.spec.ts` | Phase 9 (docs/UI.md 7.24): `/compact` from the slash menu (`slash-menu-item` `compact`, server) with a focus in a `mock:echo` chat whose `compactModelRef` is `mock:compact`: the reply holds only `compaction-divider` (`manual`, `history`, `data-count` 6, "Conversation compacted", "6 messages summarized"), every row above it has `data-compacted`, the summary toggles (focus, `MOCK-SUMMARY:`, the footnote; focus stays on the toggle), a reload keeps it; two long `mock:compact` turns (`compactFiller`) fill the 2000-token window, the third reply opens with the automatic divider ("Conversation compacted automatically", 4 messages), the kept user message is not dimmed, the context ring drops and "Conversation compacted" is announced; with `autoCompact` off the third turn shows the `context-trimmed` notice and no divider. The announcement of a manual `/compact` is a `test.fixme` (app bug: the reply arrives within one tick, so ChatView's watcher sees `ready`) |
+| `plan-mode.spec.ts` | Phase 9 (docs/UI.md 7.11, 7.25): the permission menu offers Plan (5 options) only in project chats; Shift+Tab cycles Ask -> Accept edits -> Plan -> Ask with "Permission mode: …"; `/mode plan` saves `settings.toolMode` (a reload keeps it); outside a project 3 options, "Plan mode works in project chats." and Shift+Tab moves the focus; `mock:plan` in Plan: the card (region "Plan", "from core-agent", no write yet), Keep planning with feedback ("Feedback sent. …", "Kept planning", `Revising: …`, a revised card, "Your feedback: …" in the row), "Approve, accept edits" ("Plan approved. Permission mode: Accept edits.", `write_file` without a card, `Plan done in mode edits.`, `notes.txt` on disk and in the changes panel); "Approve, ask before edits" -> the write card, then `Plan done in mode ask.`; with `shiftTabModes` off Shift+Tab moves the focus |
+| `todos.spec.ts` | Phase 9 (docs/UI.md 7.25): a `mock:todo` run from the composer: the strip (recorded with `recordStates`) goes `0/3` -> `1/3 · Changing the code` -> `All tasks done` and hides after the run; three `todo_write` rows, the last "3/3" with the finished list, also after a reload; a pending `mock:plan` keeps an unfinished list (0/2): the strip stays after the run, its toggle ("Show tasks, 0 of 2 done" / "Hide tasks", "Tasks 0/2") shows the items, `hf-todo-expanded` remembers the state across a reload |
+| `subagents.spec.ts` | Phase 9 (docs/UI.md 7.27) with `subagentModelRef` `mock:subagent`: two `task-block`s run at the same time (one recorded snapshot with both `running`), the live line shows `└ list_directory …` and then the report's first sentence, the triggers are named "Explore sub-agent: …, completed, 1 tool call" / "Sub-agent: …", expanding shows the prompt, the step, the report and the meta line, no approval anywhere, a reload keeps them; `loop` + Stop: both blocks `aborted` ("Stopped"), also after a reload; `write` in Accept edits: the general sub-agent's `subagent.txt` is in the changes panel and "Rewind files to here" deletes it ("Restored 1 file") |
+| `mentions.spec.ts` | Phase 9 (docs/UI.md 7.26): `@pars` in a project chat: `mention-menu` ready with "Files in {project}", the first row `src/parser.ts` highlighted (`mention-highlight` "pars"), Enter inserts `@src/parser.ts ` and a project chip (`data-state` done), the sent message's echo holds the file's content; "Mention a file" (`composer-mention`) inserts `@` and the focus returns to the textarea; `@sr` + Enter opens the folder (`@src/`, two rows, no chip); Esc closes the menu and keeps the text; `a@b` searches nothing (`recordRequests` sees only the queries of the token after the blank); a chat without a project opens no menu and has no "Mention a file"; a removed project folder: `data-state` error, "The project folder is unavailable." |
+| `steer-queue.spec.ts` | Phase 9 (docs/UI.md 7.26) with `mock:steer`: after the first step of `steps 10`, Enter and "Queue message" queue two messages ("Message queued"), each becomes a `steer-note` ("You · while it worked", `data-message-id` `msg_…`) and the final text lists both, also after a reload; `/compact` waits in the list ("Runs after this response", "Queued · 2 · sent at the next step"), Cancel moves the focus to the next row's Cancel, Edit moves the message back into the composer (toast), nothing starts afterwards; a message queued after the last step of `steps 2` becomes the next turn, started by the server (one `POST …/queue`, no `POST /api/chat` from the page); Stop empties the queue and restores the text and the file chip (toast); a second page sees the queue and its Cancel empties the first page's list |
 | `edit-attachments.spec.ts` | attachments on edit (docs/UI.md 7.5, S8): the editor's chips (`message-edit-attachment`), "Remove {name}", the paperclip (`message-edit-attach`, Playwright's `filechooser` event: the hidden input has no test id) with an upload held by `page.route` (chip `uploading`, Send disabled and `aria-busy`), then Send: a new version with exactly the kept and the added file (UI, echo and server), the old version keeps its files; Cancel discards removals and uploads |
 
 ## Mobile specs (`specs/mobile`, project `mobile`)
@@ -115,7 +130,8 @@ full suite runs them, or `pnpm test:e2e --project=mobile`.
 | `layout.spec.ts` | no sideways scroll at 390 px (`scrollWidth <= 390`) on `/`, a chat with wide markdown, `/plugins`, a plugin and every settings page; the composer inside the viewport on `/` and under a long transcript |
 | `chat.spec.ts` | the model picker is a bottom drawer (full width, on the bottom edge); a `mock:echo` reply streams and finishes; composer toolbar buttons and message actions are touch targets of at least 40x40 px |
 | `projects.spec.ts` | Phase 7 at 390 px: the new-chat project pill and its options are 40 px targets and a pick shows the project; the switcher is a 40 px row of the sheet, its menu fits the screen, a filter keeps the sheet open and filters the list; the header chip is icon-only (at most 44 px wide, named "Project: {name}") and a 40 px target; an expanded write diff whose removed line is long scrolls inside its own block (its scroller is wider than its box) and the page never scrolls sideways |
-| `changes.spec.ts` | Phase 8 at 390 px: the changes toggle is a 40 px target; the panel is a right sheet (a dialog named "Changes", `data-variant="sheet"`, x = 0 and 390 px wide) with 40 px Close and Refresh; a row is 40 px tall and its Revert shows without hover (opacity 1) at 40 px; a diff whose removed line is long scrolls inside its block and the page never scrolls sideways; the revert confirmation fits the screen (Cancel keeps the sheet); Esc closes the sheet and focus returns to the toggle; "Rewind files to here" is a 40 px target without hover and the rewind dialog fits the screen with 40 px buttons |
+| `changes.spec.ts` | Phase 8 at 390 px: the changes toggle is a 40 px target; the panel is a right sheet (a dialog named "Changes", `data-variant="sheet"`, x = 0 and 390 px wide) with 40 px Close and Refresh; a row is 40 px tall and its Revert shows without hover (opacity 1) at 40 px; a diff whose removed line is long scrolls inside its block and the page never scrolls sideways; the revert confirmation fits the screen (Cancel keeps the sheet); Esc closes the sheet and focus returns to the toggle; "Rewind files to here" is a 40 px target without hover and the rewind dialog fits the screen with 40 px buttons. Phase 9: a pane opened at 1280 px closes when the viewport narrows to 390 px (no sheet opens by itself, also after a reload) while `hf-changes-open` stays `1`, and the pane is back at 1280 px |
+| `agent.spec.ts` | Phase 9 at 390 px: while a `mock:steer` reply runs after a finished `mock:todo` list, the strip ("All tasks done"), the queue (a `/compact`) and the composer lie inside the screen in that order, with 40 px targets (strip toggle, Queue message, Edit, Cancel) and no sideways scroll; Stop restores the text; an expanded compaction summary (meta line hidden, 40 px toggle) and an expanded sub-agent block (40 px trigger) never scroll the page sideways; the plan card's buttons stack full width at 40 px, "Approve, accept edits" on top; the `@` menu spans the composer inside the screen with 40 px rows |
 | `media.spec.ts` | Phase 6 at 390 px: the mic is a 40x40 target; recording and transcribing keep the layout (no sideways scroll, the indicator and the composer inside the viewport) and the textarea gets no focus afterwards (touch); a four-image gallery keeps two columns inside the column; the lightbox fits the screen; the image options trigger, Read aloud, Delete this version and the version switcher are 40x40 targets (sizes are polled: a dialog zooms in from 95%) |
 
 ## Tablet specs (`specs/tablet`, project `tablet`)
@@ -124,7 +140,7 @@ docs/UI.md 14.5, 14.7 (S9), with the existing test ids; not tagged `@smoke` (`pn
 
 | Spec | Covers |
 |---|---|
-| `touch-targets.spec.ts` | `pointer: coarse` and the sidebar in the page (not a sheet); collapsed with its own trigger, the icon rail is 56 px wide (the page, `getByRole('main')`, starts at x = 56; the sidebar fills the rail inside its 1 px border) in the chat, plugins and settings modes, every visible button and link of the rail is at least 40x40 px and inside the rail (the project switcher and the Projects settings link among them); the rail's "Expand sidebar" expands it again; Phase 7: in a project chat with a pending `mock:workspace` approval the expanded sidebar's project switcher, the header chip and the card's Deny and Allow are 40x40 px targets, and so is the "Accept all edits in this chat" checkbox (its `::after` hit area); Phase 8: the changes toggle, "Rewind files to here", the pane's Close and Refresh (1024 px: the desktop pane), a changes row (height), its Revert (shown without hover) and a 24 px hit area of `changes-resize`; on a pending `mock:shell` card the "Always allow commands starting with" checkbox, the prefix input (height), both scope options and Run |
+| `touch-targets.spec.ts` | `pointer: coarse` and the sidebar in the page (not a sheet); collapsed with its own trigger, the icon rail is 56 px wide (the page, `getByRole('main')`, starts at x = 56; the sidebar fills the rail inside its 1 px border) in the chat, plugins and settings modes, every visible button and link of the rail is at least 40x40 px and inside the rail (the project switcher and the Projects settings link among them); the rail's "Expand sidebar" expands it again; Phase 7: in a project chat with a pending `mock:workspace` approval the expanded sidebar's project switcher, the header chip and the card's Deny and Allow are 40x40 px targets, and so is the "Accept all edits in this chat" checkbox (its `::after` hit area); Phase 8: the changes toggle, "Rewind files to here", the pane's Close and Refresh (1024 px: the desktop pane), a changes row (height), its Revert (shown without hover) and a 24 px hit area of `changes-resize`; on a pending `mock:shell` card the "Always allow commands starting with" checkbox, the prefix input (height), both scope options and Run; Phase 9: while a `mock:steer` reply runs, the todo strip toggle, "Queue message" and the queue's Edit and Cancel; in a project chat with sub-agents and a pending plan, both task triggers, the three plan buttons and the `@` mention rows (height) |
 
 ## Screenshots (`specs/screenshots`)
 
@@ -140,7 +156,12 @@ when git is installed, `initGitRepository` commits all of it; the project rules 
 global rule `git status`; "Prepare the release checklist": a `mock:checkpoint` turn in Accept edits, then a `mock:shell`
 turn that deletes `docs/old-notes.md` and creates `docs/release-notes.md`; "Check the build folder": a `mock:checkpoint`
 run whose shell rows show the rule badges and the sticky folder; "Build the web app": a `mock:shell` reply waiting for
-the approval of `pnpm build --filter web`), sets the image and speech-to-text models (no visible change elsewhere), and
+the approval of `pnpm build --filter web`), Phase 9 data (created first, so the sidebar lists it last; nothing writes into
+the project folder: "Plan the cookie settings", a `mock:plan` reply in the `harness-forge` project waiting for its plan
+approval; "Map the auth code", two finished `mock:subagent` sub-agents there; "Parser crash on empty input", three
+`mock:echo` questions and `/compact keep the parser details`; "Fix the parser crash", a `mock:todo` run streamed with
+`fetch` and stopped right after its second list, so the list stays at 1/3), sets the image, speech-to-text, sub-agent
+(`mock:subagent`) and compaction (`mock:compact`) models (no visible change elsewhere), and
 captures every screen in dark and light (stored color mode set by an init script), at 1440x900 and on a 390x844 phone
 (Pixel 7, touch), with reduced motion and a browser clock that starts at a fixed time two minutes after the seed
 (relative times read "2m ago"; the clock then runs, because a frozen clock stalls the transcript's scroll-to-bottom).
@@ -156,7 +177,11 @@ chat-changes-git (desktop: the Git view, three files, a diff open), chat-changes
 chat-revert-confirm, chat-rewind-dialog (the file and three shell commands), chat-shell-approval-rule (the rule option
 checked: `pnpm build`, the scope), chat-terminal-cwd (both shell rows expanded: "Now in mock-dir", `mock-dir $ ls`,
 "Allowed by rule: …"), settings-projects-allowlist (the Allowed commands dialog of `harness-forge`),
-settings-data-auto-cleanup (Automatic cleanup on, "Next automatic cleanup in 24h."), then share-dialog, share-page, share-unavailable, model-picker,
+settings-data-auto-cleanup (Automatic cleanup on, "Next automatic cleanup in 24h."), Phase 9: chat-plan-approval (the plan
+card and the strip at 0/2), chat-todo-strip (the strip expanded at 1/3), chat-subagents (desktop: the explore block
+expanded), chat-compacted (desktop: the dimmed rows and the open summary), chat-steer (a live `steps 20` run of its own:
+a steer note, a queued `/compact`, text in the composer; the chat is deleted in `close`), composer-mention (`Update @re`
+in a project chat), settings-general-agent (desktop: the Agent section), then share-dialog, share-page, share-unavailable, model-picker,
 command-palette, shortcuts (desktop), sidebar (mobile), plugins, plugin-detail, plugin-mcp, plugin-new-provider,
 plugin-new-code, settings-providers, settings-provider-key, settings-models, settings-media (every model chosen, voice
 and speed), settings-general, settings-appearance, settings-data (with the share link), settings-data-key (the Encryption key
@@ -166,6 +191,12 @@ the recording, deletes its chat, turns read-aloud off again, puts the clock offs
 This chat, turns the automatic cleanup off again), so the other screens look the
 same in every run; the image-turn screen runs the page clock at the real time while it is shown, because its
 "Generating… Ns" counter counts from the server's start time.
+
+`@readme` (tagged `@screenshots @readme`, desktop 1440x900, the same server and data): the README images as full frames
+(no crops) in `.tmp/screenshots/readme/`, named like `docs/assets/screenshots/`: chat-dark (the markdown chat),
+workspace-dark (the Accept edits shell approval), changes-panel-dark (This chat with the diff), plugins-dark,
+provider-wizard-dark (the API step with the LM Studio template; the draft is discarded afterwards), settings-dark
+(Settings -> Providers) and chat-light (the tool approval card).
 
 ## Writing specs
 
@@ -193,6 +224,15 @@ same in every run; the image-turn screen runs the page clock at the real time wh
   meanwhile).
 - The helpers import `@harness-forge/shared` by path (`packages/shared/src/index.ts`): the root package does not
   depend on it, and Playwright compiles the TypeScript sources directly.
+- Short-lived states (Phase 9: a `mock:todo` or `mock:steer` step lasts 400 ms): Playwright's assertions retry after 100,
+  250, 500 and then every 1000 ms and can miss them. Record them with `recordStates` (a MutationObserver from an init
+  script) and check the order afterwards with `expectStatesInOrder`, or wait with `waitForTestId` (checks on every
+  animation frame). A polite live region keeps only its latest text: record it with `recordAnnouncements` and check it
+  with `expectAnnounced`.
+- `page.waitForFunction` with a string predicate fails: the app's CSP forbids `eval`. Pass a function (see
+  `waitForTestId`); `page.evaluate` with a string expression is fine.
+- A steer queued before the first step of a `mock:steer` turn opens the turn instead of steering it: queue once the
+  first `current_time` row exists (`waitForTestId`).
 - The root `tsconfig.json` type-checks `e2e/**` without the DOM library: inside `evaluate` callbacks reach browser
   globals through the element (`element.ownerDocument`, `ownerDocument.defaultView`), or pass a string expression
   (`page.evaluate<string>('navigator.clipboard.readText()')`).
@@ -316,7 +356,7 @@ in text fields (Home / End scroll on macOS instead of moving the caret).
 | `NO_MEDIA_SETTINGS` | nothing chosen: every model `null`, language `auto`, voice `null`, speed 1 |
 | `naturalSize(image)` | the pixel size of an `<img>` once it has loaded (e.g. 320x180 for a 16:9 `mock:image`) |
 | `multipartParts(body, contentType)` · `MultipartPart` | the parts of a `multipart/form-data` body: `name`, `filename?`, `contentType?`, `size`, `head` (the first 16 bytes) |
-| `recordRequests(page, method, path)` · `RequestLog` · `RecordedRequest` | records every matching request of the page from now on (`requests`: method, path, headers, `body` with file bytes; `jsonBodies()`), lets it through, `stop()` removes the route |
+| `recordRequests(page, method, path)` · `RequestLog` · `RecordedRequest` | records every matching request of the page from now on (`requests`: method, path, `query` (Phase 9), headers, `body` with file bytes; `jsonBodies()`), lets it through, `stop()` removes the route |
 
 ### Workspace and projects (`workspace.ts`, Phase 7)
 
@@ -344,6 +384,26 @@ in text fields (Home / End scroll on macOS instead of moving the caret).
 | `CHANGES_STORAGE_KEYS` · `storageItem(page, key)` | `hf-changes-width` / `hf-changes-open` / `hf-changes-view` and a `localStorage` read |
 | `toastWith(page, text)` | a vue-sonner toast with that text (custom toasts such as "Reverted {path}" with `toast-undo` too) |
 | `openRewind(page, message)` | hovers a user message, clicks its `message-rewind` and returns the visible `rewind-dialog` |
+
+### Agent 2.0 (`agent.ts`, Phase 9)
+
+| Export | Description |
+|---|---|
+| `MOCK_TODO_ITEMS` · `MOCK_TODO_DONE` | the three items of `mock:todo` (`id`, `content`, `activeForm`) and its answer |
+| `MOCK_PLAN_TODOS` · `MOCK_PLAN_FILE` · `MOCK_PLAN_FILE_CONTENT` · `MOCK_PLAN_HEADING` · `MOCK_PLAN_REVISED_HEADING` · `mockPlanDone(mode)` · `mockPlanRevising(reason)` | what `mock:plan` writes and answers |
+| `MOCK_SUBAGENT_TASKS` · `MOCK_SUBAGENT_FILE` · `MOCK_SUBAGENT_FILE_CONTENT` | the two default `task` calls of `mock:subagent` (`description`, `prompt`, `kind`) and the file a general sub-agent writes for `write` |
+| `mockSteerFinished(steps, steers)` | the final text of a `mock:steer` turn `steps <n>` |
+| `compactFiller(label)` | a long user text for `mock:compact`: two such turns stay below 80 % of its 2000-token window, the third passes it |
+| `AGENT_SETTINGS_KEYS` · `AgentSettings` · `agentSettingsOf(settings)` | `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps`, `shiftTabModes` |
+| `useAgentSettings(api, cleanup, patch)` | changes Agent settings and restores them through `cleanup` (on that `api`'s server, so it also works for a password server) |
+| `seedProjectChat(api, cleanup, { modelRef, files?, prefix?, name?, title? })` · `ProjectChat` | `seedProject` plus an empty chat in it: `{ project, folder, chatId }` |
+| `queueMessage(api, chatId, text, { modelRef?, toolMode?, timeout? })` | `POST /api/chat/:id/queue` while a run is active, retrying the 409 `run-idle` of a run that has not started |
+| `composerAnnouncement(page, text)` | the composer's polite live region with that text ("Permission mode: Plan") |
+| `noticeLine(scope, code)` | a `data-notice` line (`data-slot="notice-part"`) by `data-code`, e.g. `context-trimmed` |
+| `waitForTestId(page, id, attributes?, { count?, timeout? })` | waits, on every animation frame, until `count` matching elements exist |
+| `recordStates(page, name, id, snapshot)` · `recordSelectorStates(page, name, selector, snapshot)` · `StateRecorder` | records every distinct snapshot of the matching elements (`snapshot` = a function body of `el` returning a string; elements joined with `" \|\| "`), also across reloads; `states()` reads the history |
+| `expectStatesInOrder(states, patterns, message)` | the snapshots contain matches of the patterns in this order |
+| `recordAnnouncements(page)` · `expectAnnounced(recorder, text)` | the history of every polite live region, and a poll until `text` was announced |
 
 ### Other helpers
 
@@ -387,3 +447,12 @@ contains "slow", "fail" fails; solid-color PNGs with a 320 px long edge at the r
 `mock:transcribe` (`This is a mock transcription.` for any accepted recording) and `mock:speech` (a silent WAV, 400 ms
 per word, 1 s to 6 s; voices `mock-voice-a`, `mock-voice-b`). Read-aloud ends every block with sentence punctuation:
 end a reply you compare with the `{ text }` of `POST /api/audio/speech` with a period.
+
+Agent mocks (Phase 9, docs/PROVIDERS.md 8 "Agent mocks (Phase 9)"): `mock:compact` (a 2000-token window; as the
+summarizer `MOCK-SUMMARY: …`; `seen?` answers `summary:<yes|no> seen:<sentinels>`; otherwise the text plus 150 filler
+words), `mock:plan` (in plan mode `todo_write`, `list_directory`, then `exit_plan_mode`; Keep planning -> `Revising:
+<feedback>` and a revised plan; approved -> `notes.txt` and `Plan done in mode <mode>.`), `mock:todo` (three `todo_write`
+calls 400 ms apart, then `All 3 tasks done.`), `mock:subagent` (two parallel `task` calls, explore and general, 300 ms
+per child step; `write`, `loop`, `parallel <n>`; set `subagentModelRef: 'mock:subagent'`) and `mock:steer` (`steps <n>`:
+n `current_time` steps 400 ms apart, `Steered: <text>.` per steer, `Finished <n> steps. Steers: <list>`; other turns
+echo the text).

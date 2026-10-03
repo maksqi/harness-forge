@@ -3,8 +3,11 @@
 // (Copy diagnostics). Every change is checked where it matters (the composer, the transcript, the stored settings,
 // a reload). Each test registers the restore of what it changes before changing it (`cleanup`), so the settings come
 // back even when the test fails or times out.
+// Phase 9 (W9.13, docs/UI.md 9.11): General -> Agent (automatic compaction, the compaction and sub-agent models with the
+// "can't call tools" warning, sub-agent max steps with its validation) and the Shift+Tab switch persist.
 import type { Settings } from '../../../packages/shared/src/index.ts'
 import {
+  agentSettingsOf,
   byTestId,
   CHAT_URL_PATTERN,
   chatIdFromUrl,
@@ -82,6 +85,76 @@ test.describe('settings', () => {
     await page.goto('/settings/general')
     await page.getByTestId(testIds.settingsSendKey).locator('[data-value="enter"]').click()
     await expect.poll(async () => (await api.getSettings()).sendKey).toBe('enter')
+  })
+
+  test('agent: the Agent fields and the Shift+Tab switch save at once and persist @smoke', async ({ page, api, cleanup }) => {
+    const before = agentSettingsOf(await api.getSettings())
+    cleanup(api => api.updateSettings(before))
+    await api.updateSettings({ autoCompact: true, compactModelRef: null, subagentModelRef: null, subagentMaxSteps: 30, shiftTabModes: true })
+
+    await page.goto('/settings/general')
+    await expect(page.getByTestId(testIds.settingsNavGeneral)).toHaveAttribute('data-state', 'active')
+    await expect(page.getByRole('main')).toContainText('Long chats and sub-agents.')
+
+    // Automatic compaction.
+    const autoCompact = page.getByTestId(testIds.settingsAutoCompact)
+    await expect(autoCompact).toHaveAttribute('data-state', 'checked')
+    await autoCompact.click()
+    await expect(autoCompact).toHaveAttribute('data-state', 'unchecked')
+    await expect.poll(async () => (await api.getSettings()).autoCompact).toBe(false)
+
+    // The compaction model: "Same model as the chat" until one is picked.
+    const compactModel = page.getByTestId(testIds.settingsCompactionModel)
+    await expect(compactModel).toHaveAttribute('data-value', '')
+    await expect(compactModel).toContainText('Same model as the chat')
+    await compactModel.click()
+    await byTestId(page, testIds.modelSelectOption, { 'data-model-ref': 'mock:compact' }).click()
+    await expect(compactModel).toHaveAttribute('data-value', 'mock:compact')
+    await expect.poll(async () => (await api.getSettings()).compactModelRef).toBe('mock:compact')
+    const options = page.getByTestId(testIds.modelSelectOption)
+    await expect(options, 'the list closed').toHaveCount(0)
+
+    // The sub-agent model: a model without tools is saved with a warning; a tool model clears it.
+    const subagentModel = page.getByTestId(testIds.settingsSubagentModel)
+    const warning = page.locator('[data-slot="subagent-model-warning"]')
+    await subagentModel.click()
+    await byTestId(page, testIds.modelSelectOption, { 'data-model-ref': 'mock:echo' }).click()
+    await expect(subagentModel).toHaveAttribute('data-value', 'mock:echo')
+    await expect(options).toHaveCount(0)
+    await expect(warning).toHaveText('Mock Echo can\'t call tools, so sub-agents can\'t use it.')
+    await subagentModel.click()
+    await byTestId(page, testIds.modelSelectOption, { 'data-model-ref': 'mock:subagent' }).click()
+    await expect(subagentModel).toHaveAttribute('data-value', 'mock:subagent')
+    await expect(warning).toHaveCount(0)
+    await expect.poll(async () => (await api.getSettings()).subagentModelRef).toBe('mock:subagent')
+
+    // Sub-agent max steps: out of range is refused inline, Enter saves a valid number.
+    const maxSteps = page.getByTestId(testIds.settingsSubagentMaxSteps)
+    await expect(maxSteps).toHaveValue('30')
+    await maxSteps.fill('500')
+    await maxSteps.press('Enter')
+    await expect(page.getByRole('main')).toContainText('Enter a whole number from 1 to 200.')
+    await expect(maxSteps).toHaveAttribute('aria-invalid', 'true')
+    expect((await api.getSettings()).subagentMaxSteps).toBe(30)
+    await maxSteps.fill('12')
+    await maxSteps.press('Enter')
+    await expect.poll(async () => (await api.getSettings()).subagentMaxSteps).toBe(12)
+    await expect(page.getByRole('main')).not.toContainText('Enter a whole number from 1 to 200.')
+
+    // Shift+Tab switches the permission mode: off.
+    const shiftTab = page.getByTestId(testIds.settingsShiftTabModes)
+    await expect(shiftTab).toHaveAttribute('data-state', 'checked')
+    await shiftTab.click()
+    await expect(shiftTab).toHaveAttribute('data-state', 'unchecked')
+    await expect.poll(async () => (await api.getSettings()).shiftTabModes).toBe(false)
+
+    // Everything is there after a reload.
+    await page.reload()
+    await expect(page.getByTestId(testIds.settingsAutoCompact)).toHaveAttribute('data-state', 'unchecked')
+    await expect(page.getByTestId(testIds.settingsCompactionModel)).toHaveAttribute('data-value', 'mock:compact')
+    await expect(page.getByTestId(testIds.settingsSubagentModel)).toHaveAttribute('data-value', 'mock:subagent')
+    await expect(page.getByTestId(testIds.settingsSubagentMaxSteps)).toHaveValue('12')
+    await expect(page.getByTestId(testIds.settingsShiftTabModes)).toHaveAttribute('data-state', 'unchecked')
   })
 
   test('appearance: theme, reading font, text size, density and thinking apply at once and persist @smoke', async ({ page, api, cleanup }) => {

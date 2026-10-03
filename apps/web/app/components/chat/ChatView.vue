@@ -190,10 +190,17 @@ provide(TOOL_APPROVAL_CONTEXT, {
 // ---------- announcements (polite live region) ----------
 
 const announcement = ref('')
+// Announcements made within the same tick are joined ("Conversation compacted. Response finished." for a `/compact`
+// reply that streams and finishes at once), so the later one never silently replaces the earlier one.
+let pendingAnnouncements: string[] = []
 async function announce(text: string) {
+  pendingAnnouncements.push(text)
+  if (pendingAnnouncements.length > 1)
+    return
   announcement.value = ''
   await nextTick()
-  announcement.value = text
+  announcement.value = pendingAnnouncements.join('. ')
+  pendingAnnouncements = []
 }
 
 let stopRequested = false
@@ -228,10 +235,19 @@ watch(pendingApprovals, (pending, previous) => {
  * when it arrives in a stream of this tab ("Conversation compacted"); the markers of a loaded path are only remembered.
  */
 const knownMarkers = new Set<string>()
+// A `/compact` reply can arrive and finish within one tick, so the status is already `ready` when the marker shows:
+// remember that this tab streamed (sync, on every status change) until the next marker check consumed it.
+let streamedSinceCheck = false
+watch(status, (value) => {
+  if (value === 'submitted' || value === 'streaming')
+    streamedSinceCheck = true
+}, { flush: 'sync', immediate: true })
 watch(() => messages.value.at(-1), (last) => {
+  const streaming = status.value === 'submitted' || status.value === 'streaming' || streamedSinceCheck
+  if (status.value !== 'submitted' && status.value !== 'streaming')
+    streamedSinceCheck = false
   if (last?.role !== 'assistant')
     return
-  const streaming = status.value === 'submitted' || status.value === 'streaming'
   let arrived = false
   for (const marker of compactionMarkers([last])) {
     const key = `${last.id}:${marker.partIndex}:${marker.data.createdAt}`

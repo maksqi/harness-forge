@@ -3,14 +3,19 @@
 // toggle, the rows and Revert are 40 px targets (Revert always shows on a coarse pointer); an open diff with a long
 // line scrolls inside its own block, so the page never scrolls sideways; Esc closes the sheet and returns focus to the
 // toggle; the revert confirmation and the rewind dialog fit the screen with 40 px buttons.
+// Phase 9 (W9.13, docs/UI.md 7.21): a panel opened as the desktop pane closes when the viewport narrows below 1024 px
+// (no sheet opens by itself, also after a reload) but keeps the saved choice (`hf-changes-open`), so a wide viewport
+// shows the pane again.
 import type { Locator, Page } from '@playwright/test'
 import type { CleanupTask, HarnessApi } from '../../helpers/index.ts'
 import {
   boxOf,
   byTestId,
+  CHANGES_STORAGE_KEYS,
   changesFile,
   changesFileButton,
   changesFileDiff,
+  changesPane,
   changesPanel,
   changesToggle,
   documentWidths,
@@ -19,6 +24,7 @@ import {
   MOCK_CHECKPOINT_FILE,
   openRewind,
   seedProject,
+  storageItem,
   test,
   testIds,
   touchTargetSize,
@@ -151,5 +157,35 @@ test.describe('mobile changes', () => {
     await expectNoSidewaysScroll(page, 'the rewind dialog')
     await dialog.getByRole('button', { name: 'Cancel' }).tap()
     await expect(dialog).toBeHidden()
+  })
+
+  test('the open state of the panel survives a narrow viewport', async ({ page, api, cleanup }) => {
+    const chatId = await seedChangesChat(api, cleanup)
+    const wide = { width: 1280, height: 800 }
+    await page.setViewportSize(wide)
+    await openChat(page, chatId)
+    const toggle = changesToggle(page)
+    await toggle.click()
+    await expect(changesPane(page)).toBeVisible()
+    await expect(changesPanel(page)).toHaveAttribute('data-variant', 'pane')
+    expect(await storageItem(page, CHANGES_STORAGE_KEYS.open)).toBe('1')
+
+    // Narrow: the pane goes away and no sheet opens by itself, but the saved choice stays.
+    await page.setViewportSize(VIEWPORT)
+    await expect(changesPanel(page)).toHaveCount(0)
+    await expect(toggle).toHaveAttribute('data-state', 'closed')
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    expect(await storageItem(page, CHANGES_STORAGE_KEYS.open)).toBe('1')
+    await page.reload()
+    await expect(page.getByTestId(testIds.messageAssistant).last()).toContainText(MOCK_CHECKPOINT_DONE)
+    await expect(changesPanel(page)).toHaveCount(0)
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    expect(await storageItem(page, CHANGES_STORAGE_KEYS.open)).toBe('1')
+    await expectNoSidewaysScroll(page, 'the chat with the panel saved open')
+
+    // Wide again: the pane is back.
+    await page.setViewportSize(wide)
+    await expect(changesPane(page)).toBeVisible()
+    await expect(toggle).toHaveAttribute('data-state', 'open')
   })
 })

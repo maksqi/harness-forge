@@ -7,6 +7,9 @@
 // Phase 8 (W8.12): Alt+C shows and hides the changes panel of a project chat (also from the composer; opening focuses
 // the active view tab, closing from inside the panel returns focus to the toggle), the shortcuts dialog lists it, and a
 // chat without a project ignores it.
+// Phase 9 (W9.13): in a project chat Shift+Tab in the composer switches Ask -> Accept edits -> Plan -> Ask (announced,
+// focus kept) and the shortcuts dialog lists it; Enter while a reply runs queues the message; Esc closes the `@` mention
+// menu first (the reply keeps running), then stops the reply, and the queued message comes back into the composer.
 import type { Locator, Page } from '@playwright/test'
 import type { TestId } from '../../helpers/index.ts'
 import {
@@ -17,15 +20,18 @@ import {
   CHAT_URL_PATTERN,
   chatIdFromUrl,
   composer,
+  composerAnnouncement,
   expect,
   expectMessageStatus,
   expectStreamingWith,
   lastAssistantMessage,
   looseQuotes,
   MOCK_CHECKPOINT_DONE,
+  openNewChat,
   pressShortcut,
   pressUntilFocused,
   seedProject,
+  seedProjectChat,
   selectAllText,
   test,
   testIds,
@@ -302,5 +308,60 @@ test.describe('keyboard', () => {
     await expect(panel).toHaveCount(0)
     await expect(composerInput(page)).toBeFocused()
     await expect(composerInput(page)).toHaveValue('')
+  })
+
+  test('Shift+Tab switches the mode, Enter queues while a reply runs, Esc closes the mention menu before it stops @smoke', async ({ page, api, cleanup }) => {
+    const { chatId } = await seedProjectChat(api, cleanup, { modelRef: 'mock:steer', prefix: 'keys', files: { 'notes.md': '# Notes\n' } })
+    await page.goto(`/chat/${chatId}`)
+    await page.keyboard.press('Shift+Escape')
+    await expect(composerInput(page)).toBeFocused()
+
+    // Shift+Tab cycles the permission mode of a project chat and keeps the focus in the composer.
+    const trigger = composer(page).getByTestId(testIds.permissionMenuTrigger)
+    for (const [mode, label] of [['edits', 'Accept edits'], ['plan', 'Plan'], ['ask', 'Ask']] as const) {
+      await page.keyboard.press('Shift+Tab')
+      await expect(trigger).toHaveAttribute('data-value', mode)
+      await expect(composerAnnouncement(page, `Permission mode: ${label}`)).toHaveCount(1)
+      await expect(composerInput(page)).toBeFocused()
+    }
+
+    // Enter sends; while the reply runs `@` opens the mention menu and Esc closes only the menu.
+    await page.keyboard.insertText('steps 12')
+    await page.keyboard.press('Enter')
+    const reply = lastAssistantMessage(page)
+    await expectMessageStatus(reply, 'streaming')
+    await page.keyboard.type('@not')
+    const menu = page.getByTestId(testIds.mentionMenu)
+    await expect(byTestId(menu, testIds.mentionMenuItem, { 'data-path': 'notes.md' })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(menu).toHaveCount(0)
+    await expect(composerInput(page)).toHaveValue('@not')
+    await expect(reply).toHaveAttribute('data-status', 'streaming')
+
+    // Enter while the reply runs queues the message (a server command waits for the next turn).
+    await selectAllText(page, composerInput(page))
+    await page.keyboard.insertText('/compact')
+    await page.keyboard.press('Escape')
+    await expect(page.getByTestId(testIds.slashMenu)).toHaveCount(0)
+    await page.keyboard.press('Enter')
+    await expect(page.getByTestId(testIds.queuedMessages)).toHaveAttribute('data-count', '1')
+    await expect(composerInput(page)).toHaveValue('')
+    await expect(composerInput(page)).toBeFocused()
+
+    // Esc stops the reply; the queued message comes back into the composer.
+    await page.keyboard.press('Escape')
+    await expectMessageStatus(reply, 'aborted')
+    await expect(page.getByTestId(testIds.queuedMessages)).toHaveCount(0)
+    await expect(composerInput(page)).toHaveValue('/compact')
+    await expect(composerInput(page)).toBeFocused()
+  })
+
+  // The display-only Shift+Tab entry of the shortcuts dialog (docs/UI.md 12: "Switch the permission mode", group
+  // Composer), registered by `useComposerShortcuts.ts`.
+  test('the shortcuts dialog lists Shift+Tab @smoke', async ({ page }) => {
+    await openNewChat(page)
+    const shortcuts = page.getByTestId(testIds.shortcutsDialog)
+    await pressShortcut(page, 'Mod+/')
+    await expect(shortcuts).toContainText('Switch the permission mode')
   })
 })

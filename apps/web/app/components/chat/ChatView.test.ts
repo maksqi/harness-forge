@@ -1206,6 +1206,29 @@ describe('chatView: compaction and todos (Phase 9)', () => {
     api.chatQueue.list.mockResolvedValue({ items: [] })
   })
 
+  it('announces "Conversation compacted" for a /compact reply that streams and finishes within one tick', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(31),
+      modelRef: MODEL,
+      messages: [userMessage('msg_user000000000001', 'Hi'), assistantMessage('msg_asst000000000009', 'Hello')],
+    }))
+    const { wrapper } = mountView({ chatId: chatId(31) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    const seen: string[] = []
+    const region = wrapper.findAll('[role="status"]').at(-1)!.element
+    const observer = new MutationObserver(() => seen.push(region.textContent ?? ''))
+    observer.observe(region, { childList: true, characterData: true, subtree: true })
+    replies.push(streamReply(async (write) => {
+      write({ type: 'start', messageId: 'msg_asst000000000011', messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'data-compaction', id: 'cmp_2', data: compaction } as UIMessageChunk)
+      write({ type: 'finish', messageMetadata: { modelRef: MODEL, startedAt: 1, durationMs: 1 } })
+    }))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => seen.some(text => text.includes('Response finished')))
+    observer.disconnect()
+    expect(seen.some(text => text.includes('Conversation compacted'))).toBe(true)
+  })
+
   it('announces "Conversation compacted" once, when a marker arrives in this tab\'s stream', async () => {
     api.chats.get.mockResolvedValue(chatDetail({
       id: chatId(30),
