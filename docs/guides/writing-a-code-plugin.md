@@ -222,7 +222,7 @@ ctx.tools.register({
   inputSchema: ctx.ai.z.object({ id: ctx.ai.z.string() }), // must describe a JSON object
   policy: 'ask',                           // 'safe' | 'ask' | 'always', or a function of the input
   timeoutMs: 30_000,                       // default 60 s, max 600 s
-  async execute(input, call) {             // call: { chatId, modelRef, toolCallId, messages, signal }
+  async execute(input, call) {             // call: { chatId, modelRef, toolCallId, messages, signal, workspace? }
     const response = await ctx.fetch(`https://api.example.com/items/${encodeURIComponent(input.id)}`, { signal: call.signal })
     if (!response.ok)
       throw new Error(`Lookup failed with HTTP ${response.status}`) // becomes an error result for the model
@@ -232,7 +232,8 @@ ctx.tools.register({
 ```
 
 - **Policy and approval.** In **Ask** mode, `safe` tools run at once while `ask` and `always` tools show an approval
-  card. In **Auto** mode only `always` asks. A policy function (`input => input.path.startsWith('/tmp/') ? 'safe' :
+  card. In **Accept edits** (plugin API 1.2.0, project chats) `safe` tools and `ask` tools with `workspace: 'write'`
+  run; everything else asks. In **Auto** mode only `always` asks. A policy function (`input => input.path.startsWith('/tmp/') ? 'safe' :
   'always'`) decides per call and can return `'deny'`. Users can override any tool in the plugin's tools table (Allow /
   Ask / Deny, or switch it off), and the override wins over your policy. With the permission mode **Off**, no tools
   are sent at all.
@@ -241,6 +242,53 @@ ctx.tools.register({
 - **Output.** Return plain data. When the model should see something shorter than what the UI shows, add
   `toModelOutput(output) { return { type: 'text', value: '...' } }`. It must be fast and deterministic, because it also
   runs when history is replayed.
+
+### Workspace-aware tools (plugin API 1.2.0)
+
+In a chat that belongs to a project ([using projects](./using-projects.md)), every tool call gets
+`call.workspace = { projectId, name, root }`, where `root` is the verified real path of the project folder. A tool that
+only makes sense there declares `workspace`: `'read'`, `'write'` or `'execute'`. Such a tool is offered to the model
+only in project chats (and an `execute` tool only while the server allows the shell), and a `write` tool with policy
+`ask` runs without an approval card in **Accept edits**. Declare `"engines": { "harness": "^1.2.0" }`, so an older
+server reports the plugin `incompatible` instead of offering the tool everywhere.
+
+```js
+import { readFile, realpath } from 'node:fs/promises'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
+
+ctx.tools.register({
+  name: 'todo_count',
+  description: 'Count the TODO comments in a file of the current project.',
+  inputSchema: ctx.ai.z.object({ path: ctx.ai.z.string().describe('File path relative to the project folder') }),
+  policy: 'safe',                 // read-only: no approval card
+  workspace: 'read',              // offered only in project chats
+  async execute({ path }, call) {
+    if (!call.workspace)
+      throw new Error('This tool works only in a project chat.')
+    const { root } = call.workspace
+    const file = await realpath(resolve(root, path)) // follow links first, then check where the file really is
+    const rel = relative(root, file)
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel))
+      throw new Error('Path is outside the project folder.')
+    const text = await readFile(file, { encoding: 'utf8', signal: call.signal })
+    return { path: rel.split(sep).join('/'), todos: (text.match(/\bTODO\b/g) ?? []).length }
+  },
+  toModelOutput: output => ({ type: 'text', value: `${output.path}: ${output.todos} TODO comments.` }),
+})
+```
+
+- **Stay inside `root` yourself.** The host does not confine plugin code: resolve every path against `root`, follow
+  symbolic links with `realpath`, and refuse anything outside (the builtin tools also refuse writes inside `.git`).
+  Return project-relative paths, never absolute ones.
+- **Writes**: declare `workspace: 'write'` with policy `ask`, or a policy function that returns `'always'` for paths
+  that deserve a look even in Accept edits (hidden folders, secrets), as the builtin `write_file` does.
+- **No shells**: never start a shell or a program on the model's behalf from a plugin; the builtin `shell` tool
+  already runs approved commands in a contained process group. `workspace: 'execute'` exists for tools that run
+  something in the project; such tools disappear when the server sets `HF_WORKSPACE_SHELL=0`.
+- `call.workspace` is set for every tool of a project chat, also tools without `workspace`, so an ordinary tool can
+  adapt (for example, default a file name to the project).
+- The builtin workspace tools (`read_file`, `edit_file`, `shell`, …) already cover files and commands; build a
+  workspace tool for something they do not do (a linter, a project-specific index).
 
 ## Providers
 
@@ -288,8 +336,10 @@ ctx.providers.register({
   models never show up. Image models appear in the composer's "Image models" group; transcription and speech models
   are picked in Settings → Media. A local Whisper server for dictation is
   [PLUGINS.md 15 (e)](../PLUGINS.md#e-code-provider-plugin-dictation-through-a-local-whisper-server-plugin-api-110);
-  `ctx.images.generate()` creates images from plugin code (stored as files, usage recorded; errors in
-  [PLUGINS.md 9](../PLUGINS.md#plugincontext)).
+  `ctx.images.generate()` creates images from plugin code (stored as files, usage recorded; since plugin API 1.2.0 the
+  result also carries `modelName`; errors in [PLUGINS.md 9](../PLUGINS.md#plugincontext)). Keep the ids of files your
+  plugin needs in `ctx.storage` or its settings: the storage cleanup (Settings → Data) keeps only files something
+  references, and it does not look into `ctx.plugin.dataDir`.
 
 ## Commands
 
@@ -335,7 +385,7 @@ changes discarded; after 5 failures in a row it is switched off until the plugin
 ## Calling a model
 
 ```js
-const model = await ctx.models.resolve('anthropic:claude-haiku-4-5') // uses the user's key; throws when not configured
+const model = await ctx.models.resolve('anthropic:claude-haiku-4-5') // the user's key; provider_not_configured when unusable
 const { text } = await ctx.ai.generateText({ model, prompt: 'Summarize: ...', abortSignal: ctx.signal })
 ```
 
@@ -344,7 +394,8 @@ Calls are billed to the user's key, so say in your description that the plugin m
 ## Lifecycle, debugging and trust
 
 - **States**: `active`, `disabled`, `untrusted` (the files changed since they were trusted), `incompatible`
-  (`engines.harness` does not match the plugin API `1.1.0`, so use `"^1.0.0"`, or `"^1.1.0"` for the 1.1 members),
+  (`engines.harness` does not match the plugin API `1.2.0`, so use `"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` for the
+  members of those versions),
   `error` (invalid manifest, `setup` threw or timed out, build failed). The plugin card and the detail header show the
   state and the last error.
 - **Logs**: `ctx.logger.debug/info/warn/error(message, data)` shows up in the Logs tab (last 500 entries) and the

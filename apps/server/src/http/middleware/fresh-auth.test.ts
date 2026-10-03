@@ -38,13 +38,17 @@ async function cookieFor(authAt: number): Promise<Record<string, string>> {
 
 describe('fresh routes of the route table', () => {
   it('are the sensitive operations of ADR-017', () => {
-    // The Phase 6 routes (audio, deleting a version) run no code and create nothing lasting: no fresh auth.
+    // The Phase 6 routes (audio, deleting a version) run no code and create nothing lasting: no fresh auth. Phase 7:
+    // adding a project (file and shell access to a folder, ADR-031) and rotating the master key (ADR-034) need it;
+    // browsing folders, editing or deleting a project and the file cleanup do not.
     expect(FRESH_KEYS.sort()).toEqual([
       'auth.setPassword',
       'data.deleteAll',
+      'keys.rotate',
       'pluginFiles.build',
       'pluginFiles.scaffold',
       'pluginInstall.trust',
+      'projects.create',
       'shares.create',
       'shares.update',
     ])

@@ -99,10 +99,12 @@ export const validationErrorDetailsSchema = z.object({ issues: z.array(validatio
 export type ValidationErrorDetails = z.infer<typeof validationErrorDetailsSchema>
 
 /**
- * `busy`: another bulk import or delete-all is running (ADR-024); `only-version`: a message without another version
- * cannot be deleted (ADR-030).
+ * `busy`: another maintenance operation (bulk import, delete-all, key rotation, file cleanup) is running (ADR-024,
+ * ADR-034, ADR-035); `only-version`: a message without another version cannot be deleted (ADR-030); `env-key`: the
+ * master key comes from `HF_MASTER_KEY` and can only be rotated offline with the `rotate-key` CLI (ADR-034);
+ * `key-mismatch`: the master key does not match the stored key check, so a rotation would lose the secrets (ADR-034).
  */
-export const conflictReasonSchema = z.enum(['run-active', 'exists', 'stale', 'disabled', 'env-password', 'insecure-bind', 'busy', 'only-version'])
+export const conflictReasonSchema = z.enum(['run-active', 'exists', 'stale', 'disabled', 'env-password', 'insecure-bind', 'busy', 'only-version', 'env-key', 'key-mismatch'])
 export type ConflictReason = z.infer<typeof conflictReasonSchema>
 
 export const conflictDetailsSchema = z.object({ reason: conflictReasonSchema, chatId: z.string().optional() })

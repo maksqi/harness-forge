@@ -3,7 +3,7 @@ import type { UIMessage } from 'ai'
 import { z } from 'zod'
 import { reasoningEffortSchema, toolModeSchema } from './enums.ts'
 import { harnessErrorInitSchema } from './errors.ts'
-import { chatIdSchema, commandNameSchema, messageIdSchema, modelRefSchema, timestampSchema } from './ids.ts'
+import { chatIdSchema, commandNameSchema, messageIdSchema, modelRefSchema, projectIdSchema, timestampSchema } from './ids.ts'
 import { LIMITS } from './limits.ts'
 import { imageOptionsSchema, imageTurnMetadataSchema } from './schemas/images.ts'
 import { utf8ByteLength } from './util/text.ts'
@@ -68,8 +68,12 @@ export const messageMetadataSchema = z.object({
 export type MessageMetadata = z.infer<typeof messageMetadataSchema>
 
 export const noticeLevelSchema = z.enum(['info', 'warning'])
-/** `generated-file-dropped` (ADR-028): a file the model generated was not stored (not a raster image, or too large). */
-export const noticeCodeSchema = z.enum(['context-trimmed', 'approvals-superseded', 'tools-unsupported', 'attachments-unsupported', 'generated-file-dropped'])
+/**
+ * `generated-file-dropped` (ADR-028): a file the model generated was not stored (not a raster image, or too large);
+ * `workspace-unavailable` (ADR-031): the project folder of the chat could not be opened, so the run has no workspace
+ * tools (the message names the folder and the reason).
+ */
+export const noticeCodeSchema = z.enum(['context-trimmed', 'approvals-superseded', 'tools-unsupported', 'attachments-unsupported', 'generated-file-dropped', 'workspace-unavailable'])
 export type NoticeCode = z.infer<typeof noticeCodeSchema>
 
 /** Data of `data-notice` parts. */
@@ -151,6 +155,11 @@ export const chatRequestBodySchema = z.strictObject({
    * `editPrevious` only for image models (else `400` on `['imageOptions']`, checked by the server).
    */
   imageOptions: imageOptionsSchema.optional(),
+  /**
+   * The project of a new chat (ADR-031): honored only when this request creates the chat (an unknown project is a
+   * `404` before the chat row exists); ignored for an existing chat (move a chat with `PATCH /chats/:id`).
+   */
+  projectId: projectIdSchema.optional(),
 })
 export type ChatRequestBody = z.infer<typeof chatRequestBodySchema>
 

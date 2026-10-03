@@ -29,7 +29,7 @@ export const LIMITS = {
   chatImportMessagesMax: 2000,
   /** Parts of one UI message. */
   messagePartsMax: 1000,
-  /** Characters of global and chat instructions. */
+  /** Characters of global, project and chat instructions. */
   instructionsMaxChars: 20_000,
   /** Characters of one credential value. */
   credentialValueMaxChars: 4096,
@@ -76,6 +76,20 @@ export const LIMITS = {
   speechFirstChunkChars: 300,
   /** Read aloud: maximum characters of every later chunk. */
   speechChunkChars: 1500,
+
+  // Agent workspace (ADR-031, ADR-032). The limits of the workspace tools are `WORKSPACE_LIMITS`.
+  /** Characters of a project name. */
+  projectNameMaxChars: 80,
+  /** Projects of one server. */
+  projectsMax: 200,
+  /** Characters of a folder path on the server host (project paths, browse paths, workspace tool paths). */
+  workspacePathMaxChars: 4096,
+  /** Subfolders listed by one `GET /projects/browse` (the rest is cut, `truncated: true`). */
+  browseEntriesMax: 500,
+  /** Bytes of the project file (`AGENTS.md`, else `CLAUDE.md`, with its `@file` expansions) added to the instructions. */
+  projectFileBytes: 32_768,
+  /** Upper bound of the `maxSteps` and `projectMaxSteps` settings (steps of one agent run). */
+  stepsMax: 200,
 } as const
 
 /** MIME families accepted by `POST /files` (the server also checks the content). */

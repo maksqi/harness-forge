@@ -7,6 +7,7 @@ import {
   mcpServerIdSchema,
   messageIdSchema,
   pluginIdSchema,
+  projectIdSchema,
   providerIdSchema,
   shareIdSchema,
   shareTokenSchema,
@@ -42,6 +43,10 @@ export type IconParams = z.infer<typeof iconParamsSchema>
 /** Owner routes `/shares/:id`. */
 export const shareParamsSchema = z.object({ id: shareIdSchema })
 export type ShareParams = z.infer<typeof shareParamsSchema>
+
+/** `/projects/:id` (ADR-031). */
+export const projectParamsSchema = z.object({ id: projectIdSchema })
+export type ProjectParams = z.infer<typeof projectParamsSchema>
 
 /**
  * Public route `/share/:token`. The server answers every failure of the public share routes (a malformed token

@@ -118,13 +118,14 @@ describe('settings', () => {
       speechModelRef: null,
       speechVoice: null,
       speechSpeed: 1,
+      projectMaxSteps: 100,
     })
     expect(Object.isFrozen(DEFAULT_SETTINGS)).toBe(true)
-    expect(SETTINGS_KEYS).toHaveLength(19)
+    expect(SETTINGS_KEYS).toHaveLength(20)
     expect(settingsSchema.parse({ maxSteps: 5, _auth: 'internal' })).toEqual({ ...DEFAULT_SETTINGS, maxSteps: 5 })
   })
 
-  it('reads settings stored by v1.1 (without the Phase 6 keys) with the new defaults', () => {
+  it('reads settings stored by v1.1 (without the Phase 6 and 7 keys) with the new defaults', () => {
     const v11 = {
       displayName: 'Ada',
       defaultModelRef: 'openai:gpt-6-sol',
@@ -148,7 +149,17 @@ describe('settings', () => {
       speechModelRef: null,
       speechVoice: null,
       speechSpeed: 1,
+      projectMaxSteps: 100,
     })
+  })
+
+  it('accepts up to 200 steps and the edits mode (Phase 7, ADR-032)', () => {
+    expect(LIMITS.stepsMax).toBe(200)
+    expect(settingsUpdateSchema.parse({ maxSteps: 200, projectMaxSteps: 1, defaultToolMode: 'edits' })).toEqual({ maxSteps: 200, projectMaxSteps: 1, defaultToolMode: 'edits' })
+    for (const body of [{ maxSteps: 201 }, { projectMaxSteps: 0 }, { projectMaxSteps: 201 }, { projectMaxSteps: 1.5 }, { projectMaxSteps: null }])
+      expect(settingsUpdateSchema.safeParse(body).success, JSON.stringify(body)).toBe(false)
+    // Settings stored by v1.2 keep their maxSteps and get the projectMaxSteps default.
+    expect(settingsSchema.parse({ maxSteps: 40 })).toMatchObject({ maxSteps: 40, projectMaxSteps: 100 })
   })
 
   it('validates the image and voice settings (Phase 6)', () => {
@@ -180,7 +191,7 @@ describe('settings', () => {
   it('validates partial updates strictly and without defaults', () => {
     expect(settingsUpdateSchema.parse({ maxSteps: 7 })).toEqual({ maxSteps: 7 })
     expect(settingsUpdateSchema.parse({ displayName: '  Ada  ' })).toEqual({ displayName: 'Ada' })
-    for (const body of [{}, { maxSteps: 0 }, { maxSteps: 101 }, { unknown: 1 }, { sendKey: 'shift-enter' }, { defaultModelRef: 'no-colon' }])
+    for (const body of [{}, { maxSteps: 0 }, { maxSteps: 201 }, { unknown: 1 }, { sendKey: 'shift-enter' }, { defaultModelRef: 'no-colon' }])
       expect(settingsUpdateSchema.safeParse(body).success, JSON.stringify(body)).toBe(false)
     expect(settingsUpdateSchema.parse({ defaultModelRef: null, titleModelRef: 'ollama:llama3:8b' })).toEqual({ defaultModelRef: null, titleModelRef: 'ollama:llama3:8b' })
   })
@@ -232,6 +243,14 @@ describe('chat contract', () => {
     expect(chatRequestBodySchema.parse({ ...body, parentId: null })).toMatchObject({ parentId: null })
     expect(chatRequestBodySchema.parse({ ...body, parentId: MESSAGE_A })).toMatchObject({ parentId: MESSAGE_A })
     expect(chatRequestBodySchema.parse({ ...body, trigger: 'regenerate-message', messageId: MESSAGE_B })).toMatchObject({ messageId: MESSAGE_B })
+  })
+
+  it('accepts the edits mode and the project of a new chat (Phase 7, ADR-031, ADR-032)', () => {
+    const body = { chatId: CHAT_ID, message: userMessage, trigger: 'submit-message', modelRef: 'mock:workspace', reasoningEffort: 'auto', toolMode: 'edits' }
+    expect(chatRequestBodySchema.parse(body)).toEqual(body)
+    expect(chatRequestBodySchema.parse({ ...body, projectId: 'prj_ABCdef0123456789' })).toMatchObject({ projectId: 'prj_ABCdef0123456789' })
+    for (const projectId of [null, '', 'none', 'prj_short', 'proj_ABCdef0123456789'])
+      expect(chatRequestBodySchema.safeParse({ ...body, projectId }).success, String(projectId)).toBe(false)
   })
 
   it('accepts imageOptions on the chat request (shape only; model rules are checked by the server)', () => {
@@ -325,6 +344,7 @@ describe('chats', () => {
     archived: false,
     running: false,
     pendingApproval: false,
+    projectId: null,
     createdAt: 1,
     updatedAt: 2,
   }
@@ -333,6 +353,12 @@ describe('chats', () => {
     expect(chatSummarySchema.parse(summary)).toEqual(summary)
     const detail = { ...summary, settings: { toolMode: 'auto' }, messages: [], branches: {}, totals: EMPTY_TOTALS }
     expect(chatDetailSchema.parse(detail)).toEqual(detail)
+    // The project (ADR-031) is required on summaries: a project id or null.
+    expect(chatSummarySchema.parse({ ...summary, projectId: 'prj_ABCdef0123456789' }).projectId).toBe('prj_ABCdef0123456789')
+    const { projectId: _projectId, ...withoutProject } = summary
+    expect(chatSummarySchema.safeParse(withoutProject).success).toBe(false)
+    expect(chatSummarySchema.safeParse({ ...summary, projectId: 'prj_short' }).success).toBe(false)
+    expect(chatDetailSchema.parse({ ...detail, settings: { toolMode: 'edits' } }).settings.toolMode).toBe('edits')
   })
 
   it('requires branches on details: path messages with at least two versions', () => {
@@ -362,7 +388,9 @@ describe('chats', () => {
 
   it('reads chat exports of version 1 and 2 and writes version 2', () => {
     const message = { id: MESSAGE_A, role: 'user', metadata: { modelRef: 'mock:echo', startedAt: 1 }, parts: [{ type: 'text', text: 'hi' }] }
-    const base = { ...summary, settings: {}, totals: EMPTY_TOTALS }
+    // Exports never carry the project (ADR-031).
+    const { projectId: _projectId, ...exported } = summary
+    const base = { ...exported, settings: {}, totals: EMPTY_TOTALS }
     const v1 = { format: 'harness-forge.chat', version: 1, exportedAt: 5, chat: { ...base, messages: [message] } }
     const v2 = { format: 'harness-forge.chat', version: 2, exportedAt: 5, chat: { ...base, messages: [message], parentIds: [null], activeLeafId: MESSAGE_A } }
     expect(chatExportV1Schema.parse(v1)).toEqual(v1)
@@ -384,6 +412,19 @@ describe('chats', () => {
     expect(chatUpdateSchema.safeParse({}).success).toBe(false)
     expect(chatUpdateSchema.parse({ modelRef: null, settings: { instructions: null } })).toEqual({ modelRef: null, settings: { instructions: null } })
     expect(chatUpdateSchema.safeParse({ title: '   ' }).success).toBe(false)
+  })
+
+  it('moves chats between projects and filters the list by project (ADR-031)', () => {
+    const projectId = 'prj_ABCdef0123456789'
+    expect(chatCreateSchema.parse({ projectId })).toEqual({ projectId })
+    expect(chatCreateSchema.safeParse({ projectId: null }).success).toBe(false)
+    expect(chatUpdateSchema.parse({ projectId })).toEqual({ projectId })
+    expect(chatUpdateSchema.parse({ projectId: null })).toEqual({ projectId: null })
+    expect(chatUpdateSchema.safeParse({ projectId: 'none' }).success).toBe(false)
+    expect(chatsQuerySchema.parse({ projectId })).toEqual({ projectId })
+    expect(chatsQuerySchema.parse({ projectId: 'none', q: 'x' })).toEqual({ projectId: 'none', q: 'x' })
+    for (const value of ['', 'all', 'null', 'prj_short'])
+      expect(chatsQuerySchema.safeParse({ projectId: value }).success, value).toBe(false)
   })
 })
 
@@ -606,6 +647,7 @@ describe('server events', () => {
     archived: false,
     running: false,
     pendingApproval: false,
+    projectId: null,
     createdAt: 1,
     updatedAt: 2,
   }
@@ -622,8 +664,8 @@ describe('server events', () => {
     expect(serverEventSchema.parse(event)).toEqual({ type: 'chat.updated', data: { ...summary, activeLeafId: MESSAGE_B }, at: 4 })
   })
 
-  it('covers the 9 event types', () => {
-    expect(SERVER_EVENT_TYPES).toHaveLength(9)
+  it('covers the 11 event types', () => {
+    expect(SERVER_EVENT_TYPES).toHaveLength(11)
     expectTypeOf<ServerEventType>().toEqualTypeOf<z.infer<typeof serverEventTypeSchema>>()
   })
 
@@ -634,6 +676,20 @@ describe('server events', () => {
     expect(serverEventSchema.safeParse({ type: 'chat.renamed', data: {}, at: 1 }).success).toBe(false)
     const deleted: ServerEvent = { type: 'chat.deleted', data: { id: CHAT_ID }, at: 1 }
     expect(serverEventSchema.parse(deleted)).toEqual(deleted)
+  })
+
+  it('carries the project in chat events (ADR-031)', () => {
+    const moved = { ...summary, projectId: 'prj_ABCdef0123456789', activeLeafId: null }
+    expect(serverEventSchema.parse({ type: 'chat.updated', data: moved, at: 3 }).data).toEqual(moved)
+    const { projectId: _projectId, ...withoutProject } = summary
+    expect(serverEventSchema.safeParse({ type: 'chat.created', data: withoutProject, at: 3 }).success).toBe(false)
+  })
+
+  it('key.rotated carries the new key version and the touched chats (ADR-034)', () => {
+    const data = { keyVersion: 2, rotatedAt: 9, chatIds: [CHAT_ID] }
+    expect(serverEventSchema.parse(createServerEvent('key.rotated', data, 10))).toEqual({ type: 'key.rotated', data, at: 10 })
+    for (const change of [{ keyVersion: 0 }, { chatIds: ['x'] }, { chatIds: Array.from({ length: 1001 }).fill(CHAT_ID) }, { rotatedAt: undefined }])
+      expect(serverEventSchema.safeParse({ type: 'key.rotated', data: { ...data, ...change }, at: 10 }).success, JSON.stringify(change).slice(0, 60)).toBe(false)
   })
 })
 
@@ -672,6 +728,8 @@ describe('images (ADR-028)', () => {
     const output = { modelRef: 'openai:gpt-image-2', images: [image, { ...image, mediaType: 'image/webp', name: 'image-2.webp' }], costUsd: 0.04, revisedPrompt: 'A red fox' }
     expect(generateImageToolOutputSchema.parse(output)).toEqual(output)
     expect(generateImageToolOutputSchema.parse({ modelRef: 'mock:image', images: [image] })).toEqual({ modelRef: 'mock:image', images: [image] })
+    // Plugin API 1.2.0: the display name of the model; outputs stored before Phase 7 lack it.
+    expect(generateImageToolOutputSchema.parse({ ...output, modelName: 'GPT Image 2' }).modelName).toBe('GPT Image 2')
     for (const change of [
       { images: [] },
       { images: Array.from({ length: 5 }).fill(image) },
@@ -682,6 +740,8 @@ describe('images (ADR-028)', () => {
       { images: [{ ...image, name: '' }] },
       { modelRef: 'no-colon' },
       { costUsd: -1 },
+      { modelName: 'x'.repeat(201) },
+      { modelName: null },
     ])
       expect(generateImageToolOutputSchema.safeParse({ ...output, ...change }).success, JSON.stringify(change).slice(0, 80)).toBe(false)
   })

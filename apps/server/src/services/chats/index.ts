@@ -216,6 +216,8 @@ export function createChatsService(deps: AppDeps): ChatsService {
       archived: row.archived,
       running: isRunning(row.id),
       pendingApproval: row.pendingApproval,
+      // Phase 7 placeholder until `chats.project_id` exists (migration 0004, W7.5).
+      projectId: null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       ...(snippet === undefined ? {} : { snippet }),

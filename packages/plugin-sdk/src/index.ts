@@ -32,6 +32,8 @@ export type {
   ToolDefinition,
   ToolPolicyFunction,
   ToolResultOutput,
+  ToolWorkspace,
+  ToolWorkspaceAccess,
   TranscriptionHints,
 } from './types.ts'
 export { PLUGIN_API_VERSION } from './version.ts'

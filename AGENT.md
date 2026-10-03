@@ -58,6 +58,15 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
 - **Plugin API 1.1.0** (Phase 6, additive): `ProviderDefinition.createImageModel?`, `imageParams?`,
   `createTranscriptionModel?`, `createSpeechModel?`, `transcriptionOptions?`; `PluginContext.images.generate`. The
   template mirror `apps/server/src/plugins/templates/sdk-types.ts` must match the SDK.
+- **Plugin API 1.2.0** (Phase 7, additive): `ToolCallContext.workspace?: { projectId, name, root }` (set when the
+  chat's project folder opened), `ToolDefinition.workspace?: 'read' | 'write' | 'execute'` (such tools are offered only
+  in chats with an open project), `ImageGenerateResult.modelName`. `ToolMode` is `off | ask | edits | auto` (`edits` =
+  "Accept edits": `safe` tools and `ask` tools with workspace `write` run without asking). The mirror follows.
+- **Agent workspace** (Phase 7, ADR-031 … ADR-033): projects are folders inside `HF_WORKSPACE_ROOTS`; every path a
+  workspace tool touches resolves through `apps/server/src/workspace/paths.ts` (`resolveWorkspacePath`, realpath
+  containment); the `shell` tool runs in its own process group with a minimal environment; never call `spawn` with a
+  shell string elsewhere. Tests use `realpath(mkdtemp())` (macOS `/var` is a link to `/private/var`) and POSIX `sh`
+  syntax only (CI runs Linux).
 - **@ai-sdk/vue 4**: use the `useChat()` composable (the `Chat` class is deprecated); `DefaultChatTransport` is
   imported from `ai`.
 - **MCP**: `createMCPClient` from `@ai-sdk/mcp`; stdio transport from `@ai-sdk/mcp/mcp-stdio`.
@@ -83,7 +92,8 @@ scripts/                                      check-english.mjs, audit-ownership
 packages/shared/        @harness-forge/shared       zod DTOs, HarnessError, route table, createApiClient
 packages/plugin-sdk/    @harness-forge/plugin-sdk   plugin types, definePlugin, manifest/settings schemas
 apps/server/            @harness-forge/server       Hono core: http/, security/, db/, services/, registry/,
-                                                    plugins/, catalog/, providers/, chat/, mcp/, builtin-plugins/
+                                                    plugins/, catalog/, providers/, chat/, mcp/, workspace/,
+                                                    builtin-plugins/
 apps/web/               @harness-forge/web          Nuxt 4 SPA: app/{pages,layouts,components,composables,stores,...}
 examples/plugins/                              sample plugins (also used as test fixtures)
 e2e/                                           Playwright specs + fixtures
@@ -108,6 +118,7 @@ data/                                          runtime data (gitignored)
 | `pnpm check` | check:english + lint + typecheck + test |
 | `pnpm db:generate` | drizzle-kit generate — coordinator only |
 | `pnpm catalog:update` | refresh the bundled models.dev snapshot — coordinator only |
+| `pnpm key:rotate` | offline master-key rotation (`rotate-key` CLI, ADR-034; the server must be stopped) — coordinator / user only |
 
 ## Conventions
 
@@ -135,8 +146,10 @@ data/                                          runtime data (gitignored)
 
 `HF_PORT` (8787), `HF_HOST` (127.0.0.1), `HF_DATA_DIR` (`./data`, resolved against the repo root in dev),
 `HF_PASSWORD`, `HF_MASTER_KEY`, `HF_MOCK_PROVIDER`, `HF_SAFE_MODE`, `HF_PLUGIN_WATCH`, `HF_OFFLINE`, `HF_INSECURE`,
-`HF_TRUST_PROXY` (trusted reverse proxies, ADR-026), `HF_API_TARGET` (web dev proxy target), plus provider key
-fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). Test-only: `HF_LIVE`, `HF_LIVE_PROVIDERS`,
+`HF_TRUST_PROXY` (trusted reverse proxies, ADR-026), `HF_API_TARGET` (web dev proxy target), `HF_WORKSPACE_ROOTS`
+(folders that may hold projects, default `<dataDir>/workspaces`, ADR-031), `HF_WORKSPACE_SHELL` (`0` removes the
+`shell` tool, ADR-033), plus provider key fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). CLI-only:
+`HF_NEW_MASTER_KEY` (read by `rotate-key`, ADR-034). Test-only: `HF_LIVE`, `HF_LIVE_PROVIDERS`,
 `HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`. See `.env.example` and
 `docs/DECISIONS.md` (Contract seed).
 
@@ -163,6 +176,10 @@ server, use your slot `k` from the task prompt: `HF_PORT=879k HF_DATA_DIR=.tmp/<
   (`ImageGallery`, `GeneratingImages`, `ImageOptionsMenu`, `MicButton`, `RecordingIndicator`, `ReadAloudButton`,
   `MediaSettings`, `ImageSettings`, `VoiceSettings`) and the signatures of `useImageOptions`, `useVoiceInput`,
   `useSpeechPlayer` (see `docs/phases/phase-6-v1-2.md` "FREEZE in Phase 6").
+  Added in Phase 7 (after Gate P7-0b): `services/{projects,keys,maintenance}/types.ts` and the P7-0b versions of
+  `services/{chats,files,data,images,events}/types.ts`, `workspace/paths.ts`, `services/chats/approvals.ts`, the
+  `main.ts` boot hooks, `security/types.ts`, the props of the P7-0b stub components, the `projects` store and the new
+  `chats` store members, and the `useChatSession` additions (see `docs/phases/phase-7-v1-3.md` "FREEZE in Phase 7").
 - **CCR (contract change request)**: if a frozen contract blocks you, write a local adapter inside your owned
   paths, keep working, and add a CCR to your report: file, current shape, proposed shape, reason.
 - **DEPENDENCY REQUEST**: never install packages. Use existing dependencies or Node built-ins; if something is truly

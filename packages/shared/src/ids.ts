@@ -16,6 +16,8 @@ export const MESSAGE_ID_PATTERN = /^msg_[\dA-Za-z]{16}$/
 export const FILE_ID_PATTERN = /^file_[\dA-Za-z]{16}$/
 /** `shr_` + 16 characters of `[0-9A-Za-z]` (ADR-025). */
 export const SHARE_ID_PATTERN = /^shr_[\dA-Za-z]{16}$/
+/** `prj_` + 16 characters of `[0-9A-Za-z]` (ADR-031). */
+export const PROJECT_ID_PATTERN = /^prj_[\dA-Za-z]{16}$/
 /**
  * Share token (ADR-025): the 16-character suffix of the share id + the first 22 base64url characters of
  * `HMAC-SHA256(subkey 'share', 'harness-forge/share/v1:' + shareId)`. Never stored; the share page is `/share/<token>`.
@@ -68,6 +70,9 @@ export type ShareId = z.infer<typeof shareIdSchema>
 export const shareTokenSchema = z.string().regex(SHARE_TOKEN_PATTERN, 'Expected a share token of 38 characters.')
 export type ShareToken = z.infer<typeof shareTokenSchema>
 
+export const projectIdSchema = z.string().regex(PROJECT_ID_PATTERN, 'Expected a project id "prj_" + 16 characters.')
+export type ProjectId = z.infer<typeof projectIdSchema>
+
 export const pluginIdSchema = z.string().regex(PLUGIN_ID_PATTERN, 'Plugin ids use 1-40 characters of a-z, 0-9 and "-", without a leading or trailing "-".')
 export type PluginId = z.infer<typeof pluginIdSchema>
 
@@ -113,8 +118,11 @@ export const BUILTIN_PROVIDER_IDS = [
 ] as const
 export type BuiltinProviderId = (typeof BUILTIN_PROVIDER_IDS)[number]
 
-/** Builtin plugins in load order (`mock` only with `HF_MOCK_PROVIDER=1`). */
-export const BUILTIN_PLUGIN_IDS = ['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'mock'] as const
+/**
+ * Builtin plugins in load order (`core-workspace`: the workspace tools of Phase 7, ADR-032; `mock` only with
+ * `HF_MOCK_PROVIDER=1`).
+ */
+export const BUILTIN_PLUGIN_IDS = ['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'mock'] as const
 export type BuiltinPluginId = (typeof BUILTIN_PLUGIN_IDS)[number]
 
 /** Id of the dev-only mock provider and plugin. */
@@ -285,4 +293,9 @@ export function createFileId(): FileId {
 /** A new share id: `shr_` + 16 random characters of `[0-9A-Za-z]` (its suffix starts the share token, ADR-025). */
 export function createShareId(): ShareId {
   return `shr_${randomString(16)}`
+}
+
+/** A new project id: `prj_` + 16 random characters of `[0-9A-Za-z]` (ADR-031). */
+export function createProjectId(): ProjectId {
+  return `prj_${randomString(16)}`
 }

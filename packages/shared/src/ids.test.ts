@@ -9,6 +9,7 @@ import {
   createChatId,
   createFileId,
   createMessageId,
+  createProjectId,
   createShareId,
   fileIdSchema,
   formatModelRef,
@@ -21,6 +22,8 @@ import {
   modelRefSchema,
   parseModelRef,
   pluginIdSchema,
+  PROJECT_ID_PATTERN,
+  projectIdSchema,
   providerIdSchema,
   safeParseModelRef,
   shareIdSchema,
@@ -107,7 +110,7 @@ describe('id schemas', () => {
 describe('builtin and reserved ids', () => {
   it('lists the builtin ids of DECISIONS.md', () => {
     expect(BUILTIN_PROVIDER_IDS).toEqual(['anthropic', 'openai', 'google', 'xai', 'deepseek', 'moonshotai', 'alibaba', 'zai', 'minimax', 'mistral', 'groq', 'openrouter', 'ollama'])
-    expect(BUILTIN_PLUGIN_IDS).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'mock'])
+    expect(BUILTIN_PLUGIN_IDS).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'mock'])
     expect(CLIENT_COMMANDS).toEqual(['new', 'model', 'effort', 'mode', 'help'])
   })
 
@@ -169,6 +172,15 @@ describe('id generators', () => {
 
   it('creates file ids', () => {
     expect(createFileId()).toMatch(/^file_[\dA-Za-z]{16}$/)
+  })
+
+  it('creates project ids (ADR-031)', () => {
+    const id = createProjectId()
+    expect(id).toMatch(PROJECT_ID_PATTERN)
+    expect(projectIdSchema.safeParse(id).success).toBe(true)
+    expect(createProjectId()).not.toBe(id)
+    for (const bad of ['prj_short', `prj_${'a'.repeat(17)}`, `PRJ_${'a'.repeat(16)}`, `prj_${'a'.repeat(15)}-`, `shr_${'a'.repeat(16)}`])
+      expect(projectIdSchema.safeParse(bad).success, bad).toBe(false)
   })
 
   it('creates share ids whose suffix can start a share token', () => {

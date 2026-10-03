@@ -8,7 +8,7 @@ the plugin host (`apps/server/src/plugins/`) implements the behavior. Plugin aut
 
 Related: [PROVIDERS.md](./PROVIDERS.md) (builtin providers, reasoning mappings, wizard templates),
 [API.md](./API.md) (endpoints and DTOs), [ARCHITECTURE.md](./ARCHITECTURE.md) (sections 6.2 approvals, 6.4 lifecycle,
-6.5 install), [DECISIONS.md](./DECISIONS.md) (contract seed; wins on conflict).
+6.5 install, 6.13 agent workspace), [DECISIONS.md](./DECISIONS.md) (contract seed; wins on conflict).
 
 Contents: [1 Concepts](#1-concepts) · [2 Directory layout](#2-plugin-directory-layout) ·
 [3 Manifest](#3-manifest-reference-pluginjson) · [4 Declarative providers](#4-declarative-providers) ·
@@ -29,6 +29,7 @@ A **plugin** is a directory with a `plugin.json` manifest. It can contribute:
 | Image, speech-to-text and text-to-speech models (API 1.1.0) | — (backlog) | `ProviderDefinition.createImageModel` / `createTranscriptionModel` / `createSpeechModel` |
 | Generated images from plugin code (API 1.1.0) | — | `ctx.images.generate()` |
 | Tools | — | `ctx.tools.register()` |
+| Tools that work on the chat's project folder (API 1.2.0) | — | `ToolDefinition.workspace` + `ToolCallContext.workspace` |
 | MCP servers (their tools become tools) | `contributes.mcpServers` | `ctx.mcp.register()` |
 | Slash commands | `contributes.commands` (template) | `ctx.commands.register()` (template or `run`) |
 | Hooks into the chat pipeline | — | `ctx.hooks.on()` |
@@ -56,11 +57,14 @@ part of the server they may import server dependencies (for example the official
 | `core-tools` (Core tools) | 3 tools: `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard) and `generate_image` (Phase 6, policy `ask`) | setting `allowLocalhost` (below); `generate_image` uses the image model of Settings → Media (`imageModelRef`) |
 | `core-commands` (Core commands) | 10 template slash commands (below) | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server |
 | `core-mcp` (MCP servers) | MCP servers configured in the MCP panel (`mcp_servers` table); the panel is its Overview | settings `autoReconnect`, `connectTimeoutSeconds` (below) |
-| `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
+| `core-workspace` (Workspace tools, Phase 7) | 7 workspace tools: `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file`, `shell` (below) | offered only in chats whose project folder opened; `shell` is not registered on Windows and is removed by `HF_WORKSPACE_SHELL=0`; no settings |
+| `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models; Phase 7 adds `mock:workspace`) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
 
-Builtin manifests in v1.2: `core-providers` and `core-tools` are version 1.1.0 and declare `engines.harness`
-`"^1.1.0"` (they use 1.1 members); `mock` stays version 1.0.0 but declares `"^1.1.0"`; `core-commands` and `core-mcp`
-stay 1.0.0 with `"^1.0.0"`.
+Builtin manifests in v1.3: `core-tools` is version 1.2.0 and declares `engines.harness` `"^1.2.0"` (its
+`generate_image` output carries the 1.2 `modelName`); `core-workspace` is version 1.0.0 with `"^1.2.0"` and the
+permission `process` (it uses `ToolDefinition.workspace` and `ToolCallContext.workspace`); `core-providers` stays 1.1.0
+with `"^1.1.0"`; `mock` stays version 1.0.0 with `"^1.1.0"`; `core-commands` and `core-mcp` stay 1.0.0 with
+`"^1.0.0"`. Load order: `core-providers`, `core-tools`, `core-commands`, `core-mcp`, `core-workspace`, then `mock`.
 
 Builtin tools (`core-tools`):
 
@@ -68,10 +72,34 @@ Builtin tools (`core-tools`):
 |---|---|---|
 | `current_time` | `{ timezone? }`: IANA name (`Europe/Berlin`, `UTC`); default the server time zone; an unknown zone is a `validation_error` | `{ iso, unixMs, timezone, local, utcOffset, weekday }` (`local` = `YYYY-MM-DD HH:mm:ss`, `utcOffset` = `+02:00`) |
 | `web_fetch` | `{ url, maxChars? }`: `http:` / `https:` URL (<= 2048 characters); `maxChars` 1000-40000, default 20000 | `{ url, status, contentType, title, text, truncated }`: `url` after redirects, the readable text of an HTML page (`title` from `<title>` or `og:title`) or the text of a text document (plain, markdown, JSON, XML, ...); other content types are refused |
-| `generate_image` (Phase 6, ADR-028) | `{ prompt, n?, aspectRatio? }`: prompt 1-32000 characters (trimmed), `n` 1-4 (default 1), `aspectRatio` one of `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `16:9`, `9:16` (default: the model's) | `{ modelRef, images: [{ fileId, url, mediaType, name }], costUsd?, revisedPrompt? }` (1-4 images; `costUsd` when the catalog prices the model; `revisedPrompt` cut to fit 16 KB of JSON): file references only, well under the 64 KB output cap. The model sees a short text instead ("Generated 2 images with <model ref>; they are shown to the user below this call.", or "Generated 1 image with <model ref>; it is shown to the user below this call."), and the chat pipeline appends one image `file` part per image after the call and adds the tool's `costUsd` to the cost of the message, only for this tool of `core-tools` (checked by owner: a tool of the same name from another plugin never gets images appended). The tool is always registered; while `imageModelRef` is null a call fails with "Choose an image model in Settings → Media."; other failures are the `ctx.images` errors (section 9). Timeout 300 s |
+| `generate_image` (Phase 6, ADR-028) | `{ prompt, n?, aspectRatio? }`: prompt 1-32000 characters (trimmed), `n` 1-4 (default 1), `aspectRatio` one of `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `16:9`, `9:16` (default: the model's) | `{ modelRef, modelName?, images: [{ fileId, url, mediaType, name }], costUsd?, revisedPrompt? }` (1-4 images; `modelName` since 1.2.0: the catalog name of the model, else its id, absent in outputs saved before v1.3; `costUsd` when the catalog prices the model; `revisedPrompt` cut to fit 16 KB of JSON): file references only, well under the 64 KB output cap. The model sees a short text instead ("Generated 2 images with <model name>; they are shown to the user below this call.", or "Generated 1 image with <model name>; it is shown to the user below this call."; an old output without `modelName` names the model ref), and the chat pipeline appends one image `file` part per image after the call and adds the tool's `costUsd` to the cost of the message, only for this tool of `core-tools` (checked by owner: a tool of the same name from another plugin never gets images appended). The tool is always registered; while `imageModelRef` is null a call fails with "Choose an image model in Settings → Media."; other failures are the `ctx.images` errors (section 9). Timeout 300 s |
 
 `web_fetch` goes through the SSRF guard: public addresses only, every redirect re-checked (at most 5), 10 s timeout,
-2 MB body. The `core-tools` setting **Allow localhost in web_fetch** (`allowLocalhost`, default off) also admits
+2 MB body.
+
+Builtin workspace tools (`core-workspace`, Phase 7, ADR-032 / ADR-033; behavior in
+[ARCHITECTURE.md 6.13](./ARCHITECTURE.md#613-agent-workspace-projects-workspace-tools-and-the-shell-adr-031-adr-032-adr-033),
+schemas in `@harness-forge/shared`). Paths in inputs and outputs are relative to the project folder (POSIX); every path
+resolves through the server's path guard (realpath containment, no `.git` writes). Each output is trimmed to about
+60 KiB, and the model gets a short text built from the stored output (`toModelOutput`):
+
+| Tool | Access / policy / timeout | Input | Output |
+|---|---|---|---|
+| `read_file` | `read` / `safe`, `ask` for a secret-looking path (`.env`, `*.pem`, `id_rsa*`, …) / 30 s | `{ path, offset?, limit? }` (1-based offset, 1-2000 lines) | `{ path, content, startLine, endLine, totalLines, truncated }` (text files, ≤ 48 KiB per call) |
+| `list_directory` | `read` / `safe` / 30 s | `{ path? }` (default `.`) | `{ path, entries: [{ name, type }], truncated }` (≤ 1000) |
+| `find_files` | `read` / `safe` / 60 s | `{ pattern, path?, include_ignored?, max_results? }` (a glob; ≤ 1000, default 200) | `{ pattern, paths, truncated }` |
+| `search_files` | `read` / `safe` / 60 s | `{ pattern, literal?, case_sensitive?, glob?, path?, include_ignored?, max_results? }` (a JS regex; ≤ 500, default 100) | `{ pattern, matches: [{ path, line, text }], filesSearched, truncated }` |
+| `write_file` | `write` / `ask`, `always` for a hidden or secret path / 30 s | `{ path, content }` (≤ 256 KiB) | `{ path, created, bytes, lines, diff }` |
+| `edit_file` | `write` / as `write_file` / 30 s | `{ path, old_string, new_string, replace_all? }` (a unique exact match unless `replace_all`; files ≤ 1 MiB) | `{ path, replacements, diff }` |
+| `shell` | `execute` / `ask` / 600 s | `{ command, cwd?, timeout_ms?, description? }` (≤ 16 KiB; `timeout_ms` 1000-590000, default 120000) | `{ command, cwd, exitCode, signal, timedOut, durationMs, stdout, stderr, stdoutBytes, stderrBytes }` |
+
+`diff` is `{ hunks: [{ oldStart, oldLines, newStart, newLines, lines }], added, removed, truncated }` (or `null` when
+it could not be computed in 2 s); the web draws it inside the tool row. `find_files` and `search_files` skip `.git`
+always and `node_modules` and gitignored files unless `include_ignored`; `search_files` runs the regex in a Worker that
+is stopped after 20 s and skips secret-looking files. `shell` runs `bash -c` (else `sh -c`) in the project folder (or
+`cwd` inside it) with a minimal environment (no `HF_*`, no provider keys), in its own process group that is killed on
+Stop, on the timeout and when the server exits; each call is a new process (no `cd` that sticks, no stdin, background
+processes are stopped); each stream keeps its first 4 KiB and last 16 KiB. The `core-tools` setting **Allow localhost in web_fetch** (`allowLocalhost`, default off) also admits
 loopback addresses (a local dev server); private, link-local and cloud metadata addresses stay blocked.
 
 Builtin commands (`core-commands`, all `template` commands): `/explain` (code or a concept, step by step),
@@ -87,23 +115,27 @@ timeout (seconds)** (`connectTimeoutSeconds`, 5-120, default 20).
 ### API version
 
 ```ts
-export const PLUGIN_API_VERSION = '1.1.0'
+export const PLUGIN_API_VERSION = '1.2.0'
 ```
 
 `PLUGIN_API_VERSION` versions the plugin API (not the app). Minor versions only add; a major version breaks. A
 manifest declares the API range it supports in `engines.harness`; the host checks
 `semver.satisfies(PLUGIN_API_VERSION, engines.harness)` and marks the plugin `incompatible` when it fails. Use
-`"^1.0.0"`, or `"^1.1.0"` when the plugin uses a 1.1 member.
+`"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` when the plugin uses a member of that version.
 
 | Version | Changes |
 |---|---|
 | `1.0.0` | v1 (Phase 0 – 5) |
 | `1.1.0` | Phase 6 (additive): the optional `ProviderDefinition` members `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel`, `transcriptionOptions`; `PluginContext.images.generate`; model kinds `transcription` and `speech`, `ModelInfo.voices`, `capabilities.imageOutput` |
+| `1.2.0` | Phase 7 (additive, ADR-032): `ToolCallContext.workspace?: ToolWorkspace` (`{ projectId, name, root }`, set for every tool in a chat whose project folder opened); `ToolDefinition.workspace?: 'read' \| 'write' \| 'execute'` (such a tool is offered only in those chats; `execute` tools only while `HF_WORKSPACE_SHELL` is on; `write` + policy `ask` runs without a card in the new permission mode `edits`); `ToolMode` gains `edits` ("Accept edits"; visible to hooks in `chat.params`); `ImageGenerateResult.modelName`. Behavior change: an unknown provider in `ctx.ai` (`ctx.models.resolve`) and `ctx.images` is now `provider_not_configured` (400, action `configure-provider`), as on chat; it was `not_found` |
 
-A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0`). A plugin that uses a 1.1 member should
-declare `"^1.1.0"`, so a 1.0 host reports it `incompatible` instead of silently ignoring the member. The builtins
-follow the same rule: `core-providers` and `core-tools` (both 1.1.0) and `mock` declare `"^1.1.0"`. The in-browser
-templates and the example plugins still declare `"^1.0.0"` (they use no 1.1 member).
+A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0` and `1.2.0`; a plugin that catches the
+old `not_found` of an unknown provider should also accept `provider_not_configured`). A plugin that uses a newer member
+should declare that version (`"^1.1.0"`, `"^1.2.0"`), so an older host reports it `incompatible` instead of silently
+ignoring the member: a 1.1 host would offer a tool with `workspace` in every chat and never fill `c.workspace`. The
+builtins follow the same rule: `core-tools` (1.2.0) and `core-workspace` declare `"^1.2.0"`, `core-providers` and
+`mock` `"^1.1.0"`. The in-browser templates and the example plugins still declare `"^1.0.0"` (they use no newer
+member).
 
 ## 2. Plugin directory layout
 
@@ -592,7 +624,7 @@ import type {
   ModelMessage, Tool, UIMessage,
 } from 'ai'
 
-export const PLUGIN_API_VERSION = '1.1.0'
+export const PLUGIN_API_VERSION = '1.2.0'
 
 /** Same type as the AI SDK `ProviderOptions` (`ai` does not re-export it). */
 export type ProviderOptions = SharedV4ProviderOptions
@@ -602,7 +634,8 @@ export type PluginKind = 'declarative' | 'code'
 export type PluginSource = 'builtin' | 'created' | 'zip' | 'npm' | 'url' | 'link' | 'copy'
 export type PluginState = 'disabled' | 'untrusted' | 'incompatible' | 'loading' | 'active' | 'error'
 export type PluginPermission = 'network' | 'secrets' | 'storage' | 'hooks' | 'process'
-export type ToolMode = 'off' | 'ask' | 'auto'
+export type ToolMode = 'off' | 'ask' | 'edits' | 'auto'                      // 1.2: + edits ("Accept edits")
+export type ToolWorkspaceAccess = 'read' | 'write' | 'execute'               // 1.2 (shared WorkspaceAccess)
 export type ToolPolicy = 'safe' | 'ask' | 'always'
 export type ReasoningEffort = 'auto' | 'off' | 'low' | 'medium' | 'high' | 'max'
 /** AI SDK v7 top-level `reasoning` values without 'provider-default':
@@ -751,12 +784,19 @@ export interface ProviderDefinition {
 /** The AI SDK tool result output union ('text' | 'json' | 'execution-denied' | 'error-text' | 'error-json' |
  *  'content'); `ai` does not export the name, so the SDK derives it. */
 export type ToolResultOutput = Awaited<ReturnType<NonNullable<Tool['toModelOutput']>>>
+// ---------- 1.2.0: workspace (Phase 7) ----------
+export interface ToolWorkspace {                  // the open project folder of the chat
+  readonly projectId: string                      // 'prj_' + 16 characters
+  readonly name: string                           // the project name
+  readonly root: string                           // absolute, verified realpath of the project folder
+}
 export interface ToolCallContext {
   chatId: string
   modelRef: string
   toolCallId: string
   messages: ModelMessage[]                        // messages sent to the model for this step (read-only)
   signal: AbortSignal                             // aborted on stop, timeout, or plugin disable
+  workspace?: ToolWorkspace                       // 1.2: set for every tool in a chat whose project folder opened
 }
 export interface ToolDefinition<I = unknown, O = unknown> {
   name: string                                    // ^[a-zA-Z0-9_-]{1,64}$, globally unique
@@ -764,6 +804,8 @@ export interface ToolDefinition<I = unknown, O = unknown> {
   inputSchema: FlexibleSchema<I>                  // ctx.ai.z object schema or ctx.ai.jsonSchema()
   policy?: ToolPolicy | ((input: I, c: ToolCallContext) => ToolPolicy | 'deny' | Promise<ToolPolicy | 'deny'>)
   timeoutMs?: number                              // default 60_000, max 600_000
+  workspace?: ToolWorkspaceAccess                 // 1.2: offered only with an open workspace; 'write' + policy 'ask'
+                                                  // runs without a card in mode 'edits'; 'execute' needs HF_WORKSPACE_SHELL
   execute(input: I, c: ToolCallContext): Promise<O>
   toModelOutput?(output: O, c: { toolCallId: string; input: I }): ToolResultOutput | Promise<ToolResultOutput>
 }
@@ -834,6 +876,7 @@ export interface GeneratedImageFile {             // one generated image, stored
 }
 export interface ImageGenerateResult {
   modelRef: string                                // the image model used
+  modelName: string                               // 1.2: its display name (the catalog name, else the model id)
   images: GeneratedImageFile[]
   costUsd?: number                                // estimated from catalog prices; absent when unknown
   revisedPrompt?: string                          // the prompt as rewritten by the provider, when it reports one
@@ -884,7 +927,10 @@ values) and adds the runtime contract (`PluginContext`, `ProviderDefinition`, `T
 `HookMap`, `PluginModule`, `definePlugin`, `PLUGIN_API_VERSION`) plus `settingsValuesSchema(schema)`, which builds the
 zod validator of a settings form. Plugin API 1.1.0 adds the type exports `ImageParamsRequest`, `ImageParamsResult`,
 `TranscriptionHints`, `PluginImagesApi`, `ImageGenerateOptions`, `ImageGenerateResult` and `GeneratedImageFile`, and
-re-exports the types `ImageAspectRatio` and `ModelKind` from shared. `ModelInfo` must be imported from these packages,
+re-exports the types `ImageAspectRatio` and `ModelKind` from shared. Plugin API 1.2.0 adds `ToolWorkspace` and
+`ToolWorkspaceAccess` (the shared `WorkspaceAccess` / `workspaceAccessSchema`). The template mirror
+`apps/server/src/plugins/templates/sdk-types.ts` (the `harness-forge.d.ts` of the templates and examples) follows the
+SDK, including the `ToolMode` literal. `ModelInfo` must be imported from these packages,
 not from `ai` (which exports an unrelated type of the same name).
 
 ### `PluginContext`
@@ -899,15 +945,15 @@ not from `ai` (which exports an unrelated type of the same name).
 | `settings.get()` | current settings: stored values over defaults, secrets decrypted; synchronous (cached in memory) |
 | `settings.onChange(cb)` | called with the full new values after a successful save (guarded, 3 s) |
 | `secrets` | encrypted plugin-scoped strings (scope `plugin:<id>`, name `kv.<key>`); keys `^[A-Za-z0-9._:-]{1,128}$`, values <= 16 KB; never returned by any API; `list()` returns keys only |
-| `storage` | plugin-scoped JSON values in `plugin_kv`; keys 1-256 characters without control characters; values JSON-serializable, <= 256 KB each, <= 10 MB per plugin; `set(key, undefined)` is an error (use `delete`) |
+| `storage` | plugin-scoped JSON values in `plugin_kv`; keys 1-256 characters without control characters; values JSON-serializable, <= 256 KB each, <= 10 MB per plugin; `set(key, undefined)` is an error (use `delete`). Phase 7: the storage cleanup (Settings → Data, ADR-035) keeps every file whose id (`file_` + 16 characters) appears in a `ctx.storage` value or a plugin setting, so keep the ids of files your plugin needs there, never only in files under `plugin.dataDir` (those are not scanned, and such files may be removed once no chat references them) |
 | `providers.register(d)` | validates `d` (id namespace, credential fields, functions), then adds the provider; a duplicate id throws `conflict` |
 | `models.register(providerId, models)` | adds models / metadata to any provider (plugin models tier); held until the provider exists |
-| `models.resolve(ref)` | returns a model instance for `providerId:modelId` with the user's credentials; throws `provider_not_configured` / `not_found`; use with `ctx.ai.generateText` |
+| `models.resolve(ref)` | returns a model instance for `providerId:modelId` with the user's credentials; throws `provider_not_configured` (a disabled provider, missing credentials and, since 1.2.0, an unknown provider) / `not_found` (an unknown model); use with `ctx.ai.generateText` |
 | `tools.register(d)` | validates name, schema and policy; a duplicate or `mcp__`-prefixed name throws `conflict` |
 | `mcp.register(d)` | same rules as `contributes.mcpServers` |
 | `commands.register(d)` | exactly one of `template` / `run`; a duplicate name throws `conflict` |
 | `hooks.on(name, fn, { priority })` | registers a hook handler; see [Hooks](#hooks) |
-| `images.generate(o)` | 1.1.0 (ADR-028): generates `o.n` images (default 1) with `o.modelRef` or the `imageModelRef` setting, stores every image as a file (PNG, JPEG, WebP or GIF, at most 20 MB, the same bytes reuse one file) and returns an `ImageGenerateResult` with file references (`url` = `/api/files/<fileId>`; `costUsd` only when the catalog prices the model). Writes exactly one usage row (`purpose: 'image'`, attributed to `o.chatId` when given, else no chat) with the estimated cost. Aborted by `o.signal` and by `ctx.signal`: the promise rejects with the abort reason (a provider answer that arrives after the abort still writes its usage row but stores no image). Errors (`HarnessError`): options that fail the checks (the `generate_image` input rules, a `modelRef`, `chatId` <= 128 characters) → `validation_error`; no model → `validation_error` "Choose an image model in Settings → Media."; a model that is not an image model → `validation_error` (`modelRef: The model "<ref>" is not an image model.`); an image model whose provider has no `createImageModel` → `model_not_found`; an unknown provider → `not_found`; a disabled provider or missing key → `provider_not_configured`; provider failures mapped as for chats (`auth_invalid`, `rate_limited`, `provider_error`, ...); every returned image refused by the file store → `provider_error` "The image model returned no image that could be stored: only PNG, JPEG, WebP and GIF images of at most 20 MB are kept."; a call after the plugin was disposed → `plugin_error`. The builtin `generate_image` tool uses it. `ctx.ai` has no `generateImage`: images made through `ctx.images` are stored and accounted for |
+| `images.generate(o)` | 1.1.0 (ADR-028): generates `o.n` images (default 1) with `o.modelRef` or the `imageModelRef` setting, stores every image as a file (PNG, JPEG, WebP or GIF, at most 20 MB, the same bytes reuse one file) and returns an `ImageGenerateResult` with file references (`url` = `/api/files/<fileId>`; `costUsd` only when the catalog prices the model; `modelName` since 1.2.0). Writes exactly one usage row (`purpose: 'image'`, attributed to `o.chatId` when given, else no chat) with the estimated cost. Aborted by `o.signal` and by `ctx.signal`: the promise rejects with the abort reason (a provider answer that arrives after the abort still writes its usage row but stores no image). Errors (`HarnessError`): options that fail the checks (the `generate_image` input rules, a `modelRef`, `chatId` <= 128 characters) → `validation_error`; no model → `validation_error` "Choose an image model in Settings → Media."; a model that is not an image model → `validation_error` (`modelRef: The model "<ref>" is not an image model.`); an image model whose provider has no `createImageModel` → `model_not_found`; an unknown provider (since 1.2.0; 1.1 answered `not_found`), a disabled provider or a missing key → `provider_not_configured` (action `configure-provider`); provider failures mapped as for chats (`auth_invalid`, `rate_limited`, `provider_error`, ...); every returned image refused by the file store → `provider_error` "The image model returned no image that could be stored: only PNG, JPEG, WebP and GIF images of at most 20 MB are kept."; a call after the plugin was disposed → `plugin_error`. The builtin `generate_image` tool uses it. `ctx.ai` has no `generateImage`: images made through `ctx.images` are stored and accounted for |
 | `ai` | host library copies ([section 8](#8-code-plugins)) |
 | `fetch` | global `fetch` combined with `ctx.signal` (`AbortSignal.any`) and a default `User-Agent: harness-forge/<appVersion> plugin/<id>`; no SSRF guard (code plugins are trusted); no default timeout |
 
@@ -978,6 +1024,9 @@ non-empty wins); a provider whose required fields resolve only from the environm
 
 Execution of a registered tool (wrapped by the host):
 
+0. Offering (1.2.0): a tool with `workspace` set is sent to the model only in a chat whose project folder opened, and a
+   tool with `workspace: 'execute'` only while `HF_WORKSPACE_SHELL` is not `0`. Every tool of such a run (with or
+   without `workspace`) gets `c.workspace = { projectId, name, root }` (frozen; `root` is the verified realpath).
 1. The owner plugin must be `active`, else the result is the error "tool unavailable".
 2. Approval ([section 10](#10-tool-approval)).
 3. `tool.before` hooks; the (possibly changed) input is re-validated against `inputSchema`.
@@ -992,6 +1041,14 @@ Execution of a registered tool (wrapped by the host):
 A throw in `execute` becomes an error result for the model (`error-text` with the message), a failed tool row in the
 UI, and a `plugin_error` log entry. `inputSchema` must describe a JSON object. `description` is sent to the model
 (<= 1024 characters).
+
+Workspace tools (1.2.0): `workspace` declares what the tool does with the project folder (`read`, `write`,
+`execute`); registration rejects any other value (`validation_error` naming the tool), and `GET /api/tools` reports it
+as `ToolSummary.workspace` (the web hides "Always allow" for `execute` tools and offers "Accept all edits in this chat"
+for `write` tools). The host does **not** confine a plugin tool to `c.workspace.root`: a code plugin runs with the
+server's rights (section 13), so resolve every path against `root` and refuse anything outside it yourself (resolve
+symbolic links with `realpath` and compare the result with `root`), as the builtin `core-workspace` tools do. Never
+start a shell from a plugin tool; offer the builtin `shell` instead.
 
 ### Commands
 
@@ -1029,15 +1086,22 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
 | 3 | tool policy (static or function) is `deny` | `denied` |
 | 4 | chat `toolMode` = `ask`, policy `safe` | `not-applicable` (runs, no card) |
 | 5 | chat `toolMode` = `ask`, policy `ask` or `always` | `user-approval` (approval card) |
-| 6 | chat `toolMode` = `auto`, policy `always` | `user-approval` |
-| 7 | chat `toolMode` = `auto`, policy `safe` or `ask` | `not-applicable` |
+| 6 | chat `toolMode` = `edits` (1.2.0, "Accept edits"), policy `safe`, or policy `ask` with `workspace: 'write'` | `not-applicable` |
+| 7 | chat `toolMode` = `edits`, any other tool (policy `ask` without workspace `write`, policy `always`) | `user-approval` |
+| 8 | chat `toolMode` = `auto`, policy `always` | `user-approval` |
+| 9 | chat `toolMode` = `auto`, policy `safe` or `ask` | `not-applicable` |
 
 - `toolMode = off`: no tools are sent to the model. Tools disabled in prefs (`enabled = false`) or with override
   `deny` are not sent either; step 1 only catches calls to them that still arrive.
 - `approved` / `denied` are recorded as automatic decisions (no card; denials render as `output-denied`);
   `user-approval` shows the approval card ("Allow **tool**?" with Deny / Allow and an "Always allow **tool**"
   checkbox). Allow with the checkbox checked also writes override `allow` (`PATCH /api/tools/:name`).
-- Policy defaults to `ask`. A policy **function** is guarded (3 s); a throw or timeout is treated as `always`.
+- Policy defaults to `ask`. A policy **function** is guarded (3 s); a throw or timeout is treated as `always`. It
+  receives the call context, so a workspace tool can decide by path (the builtin `write_file` returns `always` for
+  hidden and secret-looking paths, so they ask even in Accept edits).
+- `edits` is meant for project chats: a `write` tool with policy `ask` runs there without a card, while `execute` tools
+  (the shell) and every non-workspace tool that would ask in `ask` mode still ask. The `tool.approve` hook and user
+  overrides keep their precedence (steps 1 and 2); hooks see `toolMode: 'edits'` in `chat.params`.
 - MCP tool policy: `readOnlyHint: true` -> `safe`; else `destructiveHint: true` -> `always`; else the server's
   `policy` (default `ask`). Annotations come from the MCP server and are advisory: if you do not fully trust a
   server, set an override (`ask`) on its tools.
@@ -1046,8 +1110,8 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
 
 ### Load order
 
-1. Builtins (static imports, trusted): `core-providers`, `core-tools`, `core-commands`, `core-mcp`, then `mock` when
-   `HF_MOCK_PROVIDER=1`.
+1. Builtins (static imports, trusted): `core-providers`, `core-tools`, `core-commands`, `core-mcp`, `core-workspace`
+   (Phase 7), then `mock` when `HF_MOCK_PROVIDER=1`.
 2. Unless `HF_SAFE_MODE=1`: every directory in `data/plugins/*` (not starting with `.`) plus linked folders, sorted
    by id (ASCII), each loaded independently and guarded.
 
@@ -1656,8 +1720,18 @@ Configuration tab; read it with `ctx.settings.get()`). Use `ctx.secrets` for tok
 `created` plugins in the in-browser editor (saves re-pin automatically), use the Trust action, or develop from a
 linked folder (pinned to the path).
 
-**My plugin is `incompatible`.** `engines.harness` does not include `PLUGIN_API_VERSION` (`1.1.0`). Use `"^1.0.0"`
-(or `"^1.1.0"` when the plugin uses a 1.1 member such as `createTranscriptionModel` or `ctx.images`).
+**My plugin is `incompatible`.** `engines.harness` does not include `PLUGIN_API_VERSION` (`1.2.0`). Use `"^1.0.0"`
+(or `"^1.1.0"` when the plugin uses a 1.1 member such as `createTranscriptionModel` or `ctx.images`, `"^1.2.0"` for a
+1.2 member such as `ToolDefinition.workspace`).
+
+**How do I write a tool that works on the chat's project folder?** Set `workspace: 'read'` (or `'write'`) and use
+`c.workspace.root` (plugin API 1.2.0, `"^1.2.0"`); the tool is offered only in project chats. Resolve paths yourself
+and stay inside `root`; a `write` tool with policy `ask` runs without a card in Accept edits. Example in
+[the code plugin guide](./guides/writing-a-code-plugin.md#workspace-aware-tools-plugin-api-120).
+
+**Can my plugin rely on file ids surviving the storage cleanup?** Yes, when the ids are in `ctx.storage` or a plugin
+setting: the cleanup scans both (and every chat, share and setting) and removes only files older than 24 hours that
+nothing references.
 
 **How do I generate an image from a plugin?** `const { images } = await ctx.images.generate({ prompt, chatId })` uses
 the image model the user chose in Settings → Media (or pass `modelRef`) and returns stored files (`images[0].url` is
@@ -1695,8 +1769,9 @@ unavailable".
 path being answered), which is why `hooks` is a permission shown in the trust dialog.
 
 **Is my plugin part of a Settings → Data backup?** No. A backup (ADR-024) holds chats, their attachments and, when
-chosen, the public app settings; plugins, plugin settings and storage, secrets, MCP servers and model or tool
-preferences stay out, and "Delete all data" leaves them alone too. To move everything, copy the whole data directory
+chosen, the public app settings; plugins, plugin settings and storage, secrets, MCP servers, projects and model or tool
+preferences stay out, and "Delete all data" leaves them alone too. A master-key rotation re-encrypts `ctx.secrets`
+values in place; nothing changes for the plugin. To move everything, copy the whole data directory
 (`HF_DATA_DIR`, including `secret.key`, or keep the same `HF_MASTER_KEY`) while the server is stopped.
 
 **How do I debug?** `ctx.logger` entries appear in the plugin's Logs tab and in the server log; link the folder for

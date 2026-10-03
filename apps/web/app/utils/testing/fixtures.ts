@@ -4,11 +4,14 @@ import type {
   CatalogModel,
   ChatDetail,
   ChatSummary,
+  DataCleanupPreview,
   HarnessUIMessage,
+  KeyStatus,
   MessageBranch,
   PluginDetail,
   PluginLogEntry,
   PluginSummary,
+  ProjectSummary,
   ProviderSummary,
   ToolSummary,
 } from '@harness-forge/shared'
@@ -58,6 +61,28 @@ export function chatSummary(overrides: Partial<ChatSummary> = {}): ChatSummary {
     archived: false,
     running: false,
     pendingApproval: false,
+    projectId: null,
+    createdAt: 1_759_000_000_000,
+    updatedAt: 1_759_000_000_000,
+    ...overrides,
+  }
+}
+
+/** A fixed project id with a varying end: projectId(1) -> 'prj_sample0000000001'. */
+export function projectId(n: number): string {
+  return `prj_sample${String(n).padStart(10, '0')}`
+}
+
+export function projectSummary(overrides: Partial<ProjectSummary> = {}): ProjectSummary {
+  return {
+    id: projectId(1),
+    name: 'Website',
+    path: '/srv/workspaces/website',
+    instructions: null,
+    available: true,
+    issue: null,
+    instructionsFile: null,
+    chatCount: 0,
     createdAt: 1_759_000_000_000,
     updatedAt: 1_759_000_000_000,
     ...overrides,
@@ -165,9 +190,29 @@ export function toolSummary(overrides: Partial<ToolSummary> = {}): ToolSummary {
     enabled: true,
     override: null,
     available: true,
+    workspace: null,
     inputSchema: {},
     ...overrides,
   }
+}
+
+export function keyStatus(overrides: Partial<KeyStatus> = {}): KeyStatus {
+  return {
+    source: 'file',
+    keyVersion: 1,
+    rotatedAt: null,
+    keyCheck: 'ok',
+    secrets: 0,
+    unreadableSecrets: 0,
+    shares: 0,
+    pendingApprovals: 0,
+    canRotate: true,
+    ...overrides,
+  }
+}
+
+export function dataCleanupPreview(overrides: Partial<DataCleanupPreview> = {}): DataCleanupPreview {
+  return { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, recentFiles: 0, graceMs: 86_400_000, lastRunAt: null, ...overrides }
 }
 
 export function logEntry(seq: number, overrides: Partial<PluginLogEntry> = {}): PluginLogEntry {

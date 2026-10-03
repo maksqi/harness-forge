@@ -228,6 +228,7 @@ describe('plugin context', () => {
       const result = await ctx.images.generate({ prompt: '  a red fox  ', modelRef: 'mock:image', n: 2, aspectRatio: '16:9', chatId: '0199a8f0-0000-7000-8000-000000000001' })
       expect(result).toEqual({
         modelRef: 'mock:image',
+        modelName: 'image',
         images: [
           { fileId: 'file_0000000000000001', url: '/api/files/file_0000000000000001', mediaType: 'image/png', name: 'image-1.png', size: 101 },
           { fileId: 'file_0000000000000002', url: '/api/files/file_0000000000000002', mediaType: 'image/png', name: 'image-2.png', size: 102 },
@@ -243,6 +244,7 @@ describe('plugin context', () => {
       const { runtime, imageCalls } = await setup(BASE_MANIFEST, {}, async () => imageResult([storedImage(1)], { costUsd: null, revisedPrompt: undefined }))
       expect(await runtime.ctx.images.generate({ prompt: 'a lighthouse' })).toEqual({
         modelRef: 'mock:image',
+        modelName: 'image',
         images: [{ fileId: 'file_0000000000000001', url: '/api/files/file_0000000000000001', mediaType: 'image/png', name: 'image-1.png', size: 101 }],
       })
       expect(imageCalls[0]).toEqual({ prompt: 'a lighthouse', n: 1, signal: expect.any(AbortSignal), chatId: null, messageId: null })

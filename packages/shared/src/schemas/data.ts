@@ -1,5 +1,5 @@
-// Bulk data DTOs (API.md section 4.16, ADR-024): the backup zip format and the bodies of `GET /data`,
-// `GET /data/export`, `POST /data/import` and `POST /data/delete`.
+// Bulk data DTOs (API.md section 4.16, ADR-024, ADR-035): the backup zip format and the bodies of `GET /data`,
+// `GET /data/export`, `POST /data/import`, `POST /data/delete` and the orphaned file cleanup (`/data/cleanup`).
 import { z } from 'zod'
 import { chatIdSchema, fileIdSchema, sha256HexSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
@@ -146,3 +146,38 @@ export const dataDeleteResultSchema = z.object({
   usageRows: countSchema,
 })
 export type DataDeleteResult = z.infer<typeof dataDeleteResultSchema>
+
+// ---------- orphaned file cleanup (ADR-035) ----------
+
+/**
+ * `GET /data/cleanup`: a dry run of the cleanup. Removable = file rows that no message, share, plugin value or setting
+ * references and that are older than the grace period, blobs no row keeps, and stale temp files.
+ */
+export const dataCleanupPreviewSchema = z.object({
+  /** Removable file rows and their bytes. */
+  files: countSchema,
+  fileBytes: countSchema,
+  /** Blobs (`files/<aa>/<sha256>`) that would be deleted and the disk bytes they free. */
+  blobs: countSchema,
+  diskBytes: countSchema,
+  /** Stale temp files (from interrupted uploads). */
+  tempFiles: countSchema,
+  /** Unreferenced files kept because they are younger than the grace period. */
+  recentFiles: countSchema,
+  /** The grace period (24 h). */
+  graceMs: countSchema,
+  /** Last cleanup; null = never. */
+  lastRunAt: timestampSchema.nullable(),
+})
+export type DataCleanupPreview = z.infer<typeof dataCleanupPreviewSchema>
+
+/** `POST /data/cleanup` (no body): what was removed. */
+export const dataCleanupResultSchema = z.object({
+  files: countSchema,
+  fileBytes: countSchema,
+  blobs: countSchema,
+  diskBytes: countSchema,
+  tempFiles: countSchema,
+  ranAt: timestampSchema,
+})
+export type DataCleanupResult = z.infer<typeof dataCleanupResultSchema>

@@ -1,11 +1,11 @@
 <script setup lang="ts">
 // `data-notice` part (docs/API.md 6.4): one muted line, e.g. "Older messages were left out to fit the context window".
 // The icon names what happened (trimmed context, superseded approvals, a model without tools or without support for
-// the attached files, a generated file that was not kept); the level colors it. Unknown codes fall back to the level
-// icon.
+// the attached files, a generated file that was not kept, a project folder that could not be opened); the level colors
+// it. Unknown codes fall back to the level icon.
 import type { NoticeCode, NoticeData } from '@harness-forge/shared'
 import type { Component } from 'vue'
-import { BanIcon, FoldVerticalIcon, ImageOffIcon, InfoIcon, PaperclipIcon, TriangleAlertIcon, WrenchIcon } from '@lucide/vue'
+import { BanIcon, FolderXIcon, FoldVerticalIcon, ImageOffIcon, InfoIcon, PaperclipIcon, TriangleAlertIcon, WrenchIcon } from '@lucide/vue'
 import { computed } from 'vue'
 import { cn } from '@/lib/utils'
 
@@ -17,6 +17,7 @@ const CODE_ICONS: Record<NoticeCode, Component> = {
   'tools-unsupported': WrenchIcon,
   'attachments-unsupported': PaperclipIcon,
   'generated-file-dropped': ImageOffIcon,
+  'workspace-unavailable': FolderXIcon,
 }
 
 const icon = computed<Component>(() => (CODE_ICONS as Partial<Record<string, Component>>)[props.notice.code]

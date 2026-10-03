@@ -170,7 +170,8 @@ export function linearTree(messages: readonly HarnessUIMessage[]): ChatExportTre
  * chat).
  */
 export function renderChatJson(chat: ChatDetail, at: number, tree: ChatExportTree = linearTree(chat.messages)): string {
-  const { branches: _branches, messages: _path, settings, totals, ...summary } = chat
+  // Exports never carry the project (ADR-031): projects are host-specific.
+  const { branches: _branches, messages: _path, settings, totals, projectId: _projectId, ...summary } = chat
   const body: ChatExport = {
     format: 'harness-forge.chat',
     version: 2,

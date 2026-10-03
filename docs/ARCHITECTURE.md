@@ -23,7 +23,8 @@ flowchart LR
     Reg["registry/<br/>providers, models, tools, MCP, commands, hooks"]
     Cat["catalog/<br/>model catalog"]
     MCPM["mcp/ manager"]
-    Svc["services/<br/>settings, secrets, chats, files, events, data, shares, images, audio"]
+    Svc["services/<br/>settings, secrets, chats, files, events, data, shares, images, audio,<br/>projects, keys, maintenance"]
+    WS["workspace/<br/>path guard, file walker, shell runner"]
     DB[("SQLite WAL<br/>data/harness.db")]
   end
   subgraph DataDir["HF_DATA_DIR (data/)"]
@@ -31,7 +32,9 @@ flowchart LR
     PDir["plugins/{id}/, plugins/.staging/"]
     Files["files/{aa}/{sha256}"]
     Cache["cache/ (models.dev refresh)"]
+    WRoot["workspaces/ (default root)"]
   end
+  Proj["Project folders<br/>(inside HF_WORKSPACE_ROOTS)"]
   LLM["LLM provider APIs<br/>(Anthropic, OpenAI, ..., Ollama)"]
   MCPS["MCP servers<br/>(stdio child processes, http, sse)"]
   MD["models.dev api.json"]
@@ -52,6 +55,8 @@ flowchart LR
   Cat -- "live /models listing" --> LLM
   Cat -- "weekly refresh unless HF_OFFLINE=1" --> MD
   MCPM --> MCPS
+  Chat -- "core-workspace tools" --> WS
+  WS -- "files, bash -c (own process group)" --> Proj
   Svc --> DB
   Cat --> DB
   Host --> DB
@@ -78,6 +83,9 @@ Key properties:
 - **Media through the user's own providers** (Phase 6): generated images are stored as files before they are streamed
   or saved, so no `data:` URL ever reaches the `messages` table (section 6.11); dictation and read-aloud pass audio and
   text through the server to the chosen provider and store nothing (sections 6.12, 10.8).
+- **Agent workspace** (Phase 7): a chat can belong to a project folder inside the allowed roots; there the builtin
+  `core-workspace` tools read, search and edit files through one path guard, and a shell runs approved commands in its
+  own process group (sections 6.13, 10.9). The master key can be rotated (6.14) and orphaned files cleaned up (6.15).
 
 ## 2. Packages
 
@@ -96,25 +104,29 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 
 | Path | Responsibility |
 |---|---|
-| `main.ts` | Process entry: installs the signal handlers for graceful shutdown (before the boot starts, Phase 6 hotfix), then runs the boot sequence (section 5). |
-| `env.ts` | Loads `<repo root>/.env`, parses and validates `HF_*` environment variables (zod) into a frozen `Env` object; resolves `HF_DATA_DIR` and `HF_WEB_DIR`; bind-safety check. |
+| `main.ts` | Process entry: dispatches the `rotate-key` CLI (Phase 7, 6.14) before anything boots; otherwise installs the signal handlers for graceful shutdown (before the boot starts, Phase 6 hotfix), then runs the boot sequence (section 5) with the key recovery and the `server.lock` hooks (Phase 7). |
+| `env.ts` | Loads `<repo root>/.env`, parses and validates `HF_*` environment variables (zod) into a frozen `Env` object; resolves `HF_DATA_DIR` and `HF_WEB_DIR`; bind-safety check; Phase 7: the syntax of `HF_WORKSPACE_ROOTS` (`Env.workspaceRoots`, `workspaceRootsDefault`) and `HF_WORKSPACE_SHELL` (`Env.workspaceShell`), `DataPaths.workspaces`. |
 | `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5). |
 | `app.ts` | `createApp(deps)` app factory: mounts middleware and every route module under `/api`; used by `main.ts` and `createTestApp()`. |
 | `paths.ts`, `logger.ts` | Package-relative locations (server package root, migrations, bundled assets, the SPA build, installed package versions); JSON-lines logger with redaction. |
 | `http/middleware/` | Request id, structured access log (share tokens masked; it also runs the untrusted-proxy hint of `proxy-warning.ts`), secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`; `request-info.ts` resolves the client address and scheme, trusting forwarded headers only from `HF_TRUST_PROXY` peers (section 10.6). |
-| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `audio`, `shares`); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes; `audio.ts` (Phase 6) parses the multipart recording of `POST /audio/transcriptions` itself and answers `POST /audio/speech` with audio bytes (section 6.12). |
+| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `audio`, `shares`; Phase 7: `projects`, `keys`); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes; `audio.ts` (Phase 6) parses the multipart recording of `POST /audio/transcriptions` itself and answers `POST /audio/speech` with audio bytes (section 6.12). |
 | `http/static.ts` | Production SPA serving from `HF_WEB_DIR` (default `apps/web/.output/public`) with `200.html` fallback for client routes. |
-| `security/` | `keyring.ts` (master key + HKDF subkeys), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers; Phase 6: `microphone=(self)` and the SPA's `media-src`, section 10.2), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). |
+| `security/` | `keyring.ts` (master key + HKDF subkeys; Phase 7: one frozen keyring whose key and `keyVersion` swap in place during a rotation, with the module-private controls `swapMasterKey`, `beginKeyChange`, `whenKeyStable`, 6.14), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers; Phase 6: `microphone=(self)` and the SPA's `media-src`, section 10.2), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). |
 | `db/` | Drizzle schema (`schema.ts`), libsql client, `migrate()` at boot, pragmas (WAL, foreign keys, busy timeout), transaction helper. |
 | `services/settings/` | Typed global settings (defaults, validation, cache) over the `settings` table. |
 | `services/secrets/` | Encrypted secret store (AES-256-GCM) over the `secrets` table: `get/set/delete/list(scope)`, masked hints, env fallback lookup. |
 | `services/chats/` | Chat + message persistence, the message tree (`tree.ts`: active path, versions, latest leaf, the remembered leaf under a message; section 6.8), version switching, deleting a version (Phase 6), search, cursor pagination, export (md / json v2) and import (v1 / v2), usage rows and totals, title updates, `allIds` / `importChat` / `removeAll` for bulk data. |
-| `services/data/` | Bulk data (ADR-024, section 6.9): summary, streamed zip export, import of a backup or a single chat, delete-all, the import / delete mutex. |
+| `services/data/` | Bulk data (ADR-024, section 6.9): summary, streamed zip export, import of a backup or a single chat, delete-all; Phase 7: the orphaned file cleanup (`cleanupPreview`, `cleanup`, the reference scan in `references.ts`, 6.15). Imports, delete-all, cleanup and key rotation are serialized by `services/maintenance/`. |
+| `services/maintenance/` | `MaintenanceService` (Phase 7): `exclusive(kind, op, { blockRuns? })` runs one maintenance operation at a time (`import`, `delete-all`, `key-rotation`, `file-cleanup`; another one gets 409 `busy`), `current()`; while an operation with `blockRuns` (the key rotation) holds it, `POST /chat` answers 409 `busy`. |
+| `services/keys/` | `KeyService` (Phase 7, ADR-034, section 6.14): `status()` (`GET /keys`), `rotate()` (online rotation), the shared core `rotateSecretsTx`, the boot recovery `recoverKeyState`, `server.lock`, and the `rotate-key` CLI. |
+| `services/projects/` | `ProjectService` (Phase 7, ADR-031, section 6.13): the allowed roots (`start()` checks them first in `startDeps`), project CRUD, the folder browser, `openWorkspace()` with the project file (`AGENTS.md` / `CLAUDE.md`), `chatCount`, `project.changed`. |
+| `workspace/` | The agent workspace (Phase 7, section 6.13): `paths.ts` (`resolveWorkspacePath` and the safe read / write helpers; frozen), `sensitive.ts` (secret-looking and hidden paths), the walker (`.gitignore` through `ignore`, globs through `picomatch`), the search Worker, diffs (`diff`), and `shell.ts` (the only shell runner: process groups, environment allowlist, capped output). |
 | `services/shares/` | Share links (ADR-025, section 6.10): HMAC tokens, the allowlist sanitizer, snapshots, owner CRUD, the public view and file access, expiry, rate limits. |
-| `services/files/` | Content-addressed upload store (`data/files/<aa>/<sha256>`), MIME/size validation, `files` rows, read streams; for bulk data `importFile` (deduplicated by sha256, keeps the preferred id when it is free) and `purge` (every row and blob); `saveGenerated` (Phase 6, rules in `generated.ts`) stores a generated raster image (PNG, JPEG, WebP or GIF whose magic bytes match its type, at most 20 MiB; a row with the same content and type is reused, and concurrent saves of the same bytes are serialized, section 6.11). |
+| `services/files/` | Content-addressed upload store (`data/files/<aa>/<sha256>`), MIME/size validation, `files` rows, read streams; for bulk data `importFile` (deduplicated by sha256, keeps the preferred id when it is free) and `purge` (every row and blob); Phase 7: `sweep()` for the cleanup, in-memory pins of fresh ids and a shared / exclusive gate (6.15); `saveGenerated` (Phase 6, rules in `generated.ts`) stores a generated raster image (PNG, JPEG, WebP or GIF whose magic bytes match its type, at most 20 MiB; a row with the same content and type is reused, and concurrent saves of the same bytes are serialized, section 6.11). |
 | `services/images/` | `ImageService` (Phase 6, ADR-028, section 6.11): `generate()` runs `generateImage` with the provider's `imageParams`, writes the one usage row of a generation (`purpose: 'image'`), records the provider outcome and stores every image through `files.saveGenerated`; `generation.ts` holds the pure helpers (the checked `imageParams` result, token usage, estimated cost, revised prompt). Used by image turns and by `ctx.images` (the `generate_image` tool). |
 | `services/audio/` | `AudioService` (Phase 6, ADR-029, section 6.12): `transcribe()` (type allowlist + magic-byte sniffing in `sniff.ts`, `transcribe()` of the AI SDK) and `speak()` (`generateSpeech()`); a usage row (`transcription` / `speech`) and the provider outcome only for a call that answers; one info log line per call; stores nothing. |
-| `services/events/` | In-process event bus + SSE fan-out for `/api/events` (section 6.7). |
+| `services/events/` | In-process event bus + SSE fan-out for `/api/events` (section 6.7); Phase 7: `disconnectAll()` (flushes queued events, then closes every stream; after a key rotation and a password change). |
 | `registry/` | Typed registries for providers, models, tools, MCP server declarations, commands and hooks; every registration returns a `Disposable` and is tagged with its owner plugin id. |
 | `plugins/host.ts` | Plugin host: discovery, load order, lifecycle state machine, enable/disable/reload, boot sentinel, safe mode. |
 | `plugins/loader.ts` | Reads + validates `plugin.json`, checks id/dir/engines/trust, imports the entry module (cache-busted URL). |
@@ -130,14 +142,15 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `plugins/templates/` | Template sources (tool, provider, MCP bridge, command pack): a JSDoc-typed `index.mjs` or a TypeScript `index.ts`, the vendored API types `harness-forge.d.ts` and a README. |
 | `catalog/` | Model catalog: live listings with 24 h cache (`model_cache`), models.dev snapshot + weekly refresh, seeds, plugin models, custom ids, prefs, `classify()` (model kinds incl. `image`, `transcription`, `speech`; `imageOutput`), cost lookup (section 9). |
 | `providers/` | Model resolution: `modelRef` -> provider -> credentials (stored or env) -> `LanguageModel` (`resolveModel`), and since Phase 6 image, transcription and speech models (`resolveImageModel`, `resolveTranscriptionModel`, `resolveSpeechModel`); provider test; provider status; error mapping to `HarnessError`; the LobeHub icon service (`/api/icons/lobe`). |
-| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`). |
+| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). |
 | `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect with backoff, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable; `{{settings.*}}` templating of plugin-declared servers; its own stdio transport (minimal environment, stderr lines in the owning plugin's log); the user-configured servers of the MCP panel (`mcp_servers`). |
 | `builtin-plugins/index.ts` | Static list of builtin plugin modules, loaded first and trusted. |
 | `builtin-plugins/core-providers/` | The 13 builtin providers (see PROVIDERS.md): definitions, seeds, reasoning mapping, error mapping; Phase 6 (version 1.1.0, `engines ^1.1.0`): the image, transcription and speech factories of OpenAI, xAI, Google, Mistral and Groq, `imageParams`, `transcriptionOptions` and the media seeds (`lib/media.ts`; PROVIDERS.md 13). |
-| `builtin-plugins/core-tools/` | Builtin tools (version 1.1.0, `engines ^1.1.0`): `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard; setting "Allow localhost in web_fetch") and `generate_image` (Phase 6, `generate-image.ts`, policy `ask`, the `imageModelRef` setting; section 6.11). |
+| `builtin-plugins/core-tools/` | Builtin tools (version 1.2.0 since Phase 7, `engines ^1.2.0`): `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard; setting "Allow localhost in web_fetch") and `generate_image` (Phase 6, `generate-image.ts`, policy `ask`, the `imageModelRef` setting; Phase 7: its output names the model with `modelName`; section 6.11). |
+| `builtin-plugins/core-workspace/` | Phase 7 (ADR-032, version 1.0.0, `engines ^1.2.0`, permission `process`): the workspace tools `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file` and `shell` (`shell-tool.ts`; not on Windows, removed by `HF_WORKSPACE_SHELL=0`); every tool declares its workspace access (section 6.13). |
 | `builtin-plugins/core-commands/` | Builtin server-side slash commands (prompt templates such as `/explain`, `/review`, `/commit`; list in PLUGINS.md). |
 | `builtin-plugins/core-mcp/` | Owns the user-configured MCP servers (`mcp_servers` table): they are declared as its contributions, so disabling `core-mcp` closes them. Its settings (reconnect automatically, connect timeout) apply to every MCP server. |
-| `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, the Phase 6 media models `mock:image`, `mock:image-chat`, `mock:image-tool`, `mock:transcribe`, `mock:speech` (a PNG encoder and a silent WAV), plus the tool `mock_approval_tool` (behavior in PROVIDERS.md section 8). |
+| `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, the Phase 6 media models `mock:image`, `mock:image-chat`, `mock:image-tool`, `mock:transcribe`, `mock:speech` (a PNG encoder and a silent WAV), plus the tool `mock_approval_tool`; Phase 7: `mock:workspace`, which walks through the workspace tools (behavior in PROVIDERS.md section 8). |
 | `testing/` | In-process test harness: `createTestApp()` (real composition over an in-memory database) and fakes (Phase 6: `fake-media.ts` with fake image and audio services; the fake media resolvers live in `providers/testing.ts`, and `chat/testing.ts` has `createMediaTestApp()`). |
 | `live/` | Opt-in live provider suite (`*.live.test.ts`, `pnpm test:live`, ADR-027): real provider calls with the keys in the environment; the image and voice checks only with `HF_LIVE_MEDIA=1`; excluded from `pnpm test` (PROVIDERS.md section 12). |
 | `assets/catalog/models-dev.json` (package root) | Bundled models.dev snapshot (updated by `pnpm catalog:update`); read at runtime, so it ships next to `dist/` (section 11). |
@@ -158,19 +171,21 @@ Dependency direction (no cycles): `http/routes` -> `services`, `chat`, `catalog`
 | `pages/index.vue` | Empty state: greeting + composer; first send navigates to `/chat/:id`. |
 | `pages/chat/[id].vue` | Chat transcript + composer for one chat. |
 | `pages/plugins.vue`, `pages/plugins/{index,new,[id]}.vue` | Parent route (hosts the single `InstallDialog`); plugin list (`?filter=`), new plugin (provider wizard / code template), plugin detail tabs. |
-| `pages/settings/{providers,models,media,general,appearance,data,about}.vue` | Settings pages (`/settings` redirects to providers); `media` = image model and voice (Phase 6); `data` = backup, import, shared links, delete-all. |
+| `pages/settings/{providers,models,media,projects,general,appearance,data,about}.vue` | Settings pages (`/settings` redirects to providers); `media` = image model and voice (Phase 6); `projects` = the project list and the Add project dialog (Phase 7); `data` = backup, import, storage cleanup (Phase 7), shared links, the encryption key (Phase 7), delete-all. |
 | `pages/share/[token].vue` | Public read-only share page (`share` layout): a store-free transcript of a share snapshot. |
 | `pages/login.vue` | Password login. |
 | `components/ui/` | shadcn-vue primitives (generated, frozen, no prefix). |
 | `components/ai-elements/` | AI Elements Vue subset (copied, frozen, used with `Ai` prefix). |
-| `components/app-shell/` | `AppSidebar`, `ChatNav`, `PluginsNav`, `SettingsNav`, `ThemeToggle`, `CommandPalette`, `ShortcutsDialog` (Phase 6: a 56 px icon rail with 40 px targets on touch screens, UI.md 14.5). |
+| `components/app-shell/` | `AppSidebar`, `ChatNav` (Phase 7: the project switcher first), `PluginsNav`, `SettingsNav`, `ThemeToggle`, `CommandPalette` (Phase 7: a Projects section), `ShortcutsDialog` (Phase 6: a 56 px icon rail with 40 px targets on touch screens, UI.md 14.5). |
+| `components/projects/`, `components/settings/projects/` | Phase 7 (UI.md 7.20, 9.10): `ProjectSwitcher`, `ProjectMenuItems`, `NewChatProjectPicker`, `ChatProjectChip`, `AddProjectDialog`, `FolderBrowser`, `ProjectInstructionsDialog`, `ProjectsSettings`, `move-chat.ts` (`useMoveChat`). |
+| `components/chat/parts/tools/` | Phase 7 (UI.md 7.19): the store-free registry `workspace-tools.ts` and the renderers `WorkspaceToolBody`, `DiffView`, `TerminalOutput`, `FileContent`, `FileList`, `ToolApprovalPreview` (also used by the share page). |
 | `components/chat/`, `components/chat/parts/`, `components/chat/composer/` | Transcript, message and part renderers (with the `BranchSwitcher` of message versions and the Delete-version action; Phase 6: `ImageGallery`, `GeneratingImages`, `ReadAloudButton`, the attachment chips of `MessageEditor`), composer (ModelPicker, EffortMenu, PermissionMenu, SlashMenu; Phase 6: `ImageOptionsMenu`, `MicButton`, `RecordingIndicator`). Pure Phase 6 helpers next to them: `chat-format.ts` (gallery blocks, the image-turn meta line), `attachment-toasts.ts` (the rejection toasts shared by the composer and the message editor), `parts/image-gallery.ts` (tiles, download links, placeholders), `parts/tool-row.ts` (the first argument of a tool row: the `generate_image` prompt), `composer/dictation.ts` (caret insertion, recorder type, clip name), `composer/image-options.ts` (the image options menu). |
 | `components/plugins/*` | `list`, `detail`, `forms`, `install`, `wizard`, `code`, `mcp` component groups. |
 | `components/share/` | `ShareDialog`, `SharesSettingsSection`, `SharedChatView`, `ShareToolRow`; the share page renders generated images as a gallery (Phase 6). |
 | `components/settings/`, `components/settings/{data,media,images,voice}/`, `components/providers/`, `components/common/` | Settings forms (incl. the Data and Media pages; `voice/voice-settings.ts`: the dictation languages, speeds, voice field rules and the Test voice text), `ProviderIcon`, shared pieces (`Markdown.vue`, empty states). |
 | `composables/` | `useChatSession` (detached `useChat` registry), `useComposer*`, `useShortcuts`, `useGlobalShortcuts`, helpers; Phase 6: `useImageOptions`, `useVoiceInput` (dictation), `useSpeechPlayer` (the one read-aloud player), `useFreshAuth` (every password prompt; it replaced the three `fresh-auth.ts` helpers of `plugins/code`, `plugins/detail` and `share`, and the duplicate helpers of the data, install and MCP forms). |
-| `stores/` | Pinia stores `auth`, `chats`, `providers`, `models`, `plugins`, `settings`, `ui` (each `use<Name>Store`), implemented over the typed client and refreshed by `/api/events`. |
-| `utils/` | Pure helpers (date grouping, formatting, `data-testid` constants, `speech-text.ts`: what read-aloud speaks), test helpers (`utils/testing/`, incl. `fake-media.ts`). |
+| `stores/` | Pinia stores `auth`, `chats` (Phase 7: the project filter), `providers`, `models`, `plugins`, `projects` (Phase 7), `settings`, `ui` (each `use<Name>Store`), implemented over the typed client and refreshed by `/api/events`. |
+| `utils/` | Pure helpers (date grouping, formatting, `data-testid` constants, `speech-text.ts`: what read-aloud speaks; Phase 7: `line-diff.ts` for approval previews, `ansi.ts`), test helpers (`utils/testing/`, incl. `fake-media.ts`). |
 
 ## 5. Boot sequence
 
@@ -185,14 +200,18 @@ sequenceDiagram
   participant Cat as catalog/
   participant MCP as mcp/
   participant HTTP as Hono + node-server
+  Main->>Main: argv[2] = rotate-key -> run the offline rotation CLI instead of the server (6.14), then exit
   Main->>Env: load <repo root>/.env (variables already set win), parse HF_* (zod), fail fast on invalid values
   Env-->>Main: Env
   Main->>Main: bind check: non-loopback HF_HOST without HF_PASSWORD or HF_INSECURE=1 and no database yet -> exit 1
   Main->>Main: create the data dir (0700) and plugins/, plugins/.staging/, plugins/.data/, files/, cache/plugins/
+  Main->>Main: write server.lock { pid, hostname, port, startedAt } (Phase 7)
   Main->>DB: open data/harness.db (WAL, foreign_keys=ON, busy_timeout=5000), migrate()
-  Main->>Deps: createDeps(): keyring (HF_MASTER_KEY or data/secret.key, generated 0600 on first boot) and every service
+  Main->>Main: recoverKeyState(): finish or drop an interrupted rotation (secret.key.next), write _keys on the first v1.3 boot, keyVersion (Phase 7)
+  Main->>Deps: createDeps(): keyring (HF_MASTER_KEY or data/secret.key, generated 0600 on first boot; at keyVersion) and every service
   Main->>Main: bind check again: a password stored in the database also allows a non-loopback bind (else exit 1)
   Main->>Deps: startDeps()
+  Deps->>Deps: projects.start(): realpath and check HF_WORKSPACE_ROOTS, create the default root (0700) (Phase 7)
   Deps->>Deps: installer.recover(): restore an interrupted swap, clean plugins/.staging
   Deps->>Host: start(): builtins (static imports, trusted), then unless HF_SAFE_MODE=1 data/plugins/* + linked folders, sorted by id, each guarded
   Host-->>Deps: registry populated (providers, models, tools, MCP decls, commands, hooks)
@@ -205,8 +224,10 @@ sequenceDiagram
 
 Notes:
 
-- Boot fails (exit code 1, clear log line) on: invalid env, non-loopback bind without a password (env or stored) or
-  `HF_INSECURE=1`, unreadable/invalid master key (or a group/world readable `secret.key`), failed migration, a
+- Boot fails (exit code 1, clear log line) on: invalid env (Phase 7: also an invalid `HF_WORKSPACE_ROOTS` syntax),
+  non-loopback bind without a password (env or stored) or `HF_INSECURE=1`, unreadable/invalid master key (or a
+  group/world readable `secret.key`), failed migration, a `secret.key.next` that matches neither key check (6.14), a
+  workspace root that is missing, not a folder, the data dir or inside it (outside `<dataDir>/workspaces`; 6.13), a
   failing service factory. A broken **plugin** never fails boot: it ends in `error` or `incompatible` state and is
   reported in the Plugins tab. `unhandledRejection` and `uncaughtException` (typically from plugin code) are logged,
   never fatal.
@@ -226,10 +247,14 @@ Notes:
   ages every successful cached model listing by one listing TTL (`fetched_at - 24 h`) so the v1.2 listing rules
   (media models, image output) apply at once: the first background cycle of the catalog (about 2 s after the start)
   lists every enabled provider with complete credentials again. Meanwhile, and after a failed refresh, the catalog keeps
-  serving the cached listing as the last good one (section 9).
+  serving the cached listing as the last good one (section 9). The first boot of v1.3 on a v1.2 data directory applies
+  `0004_projects` (table `projects`, `chats.project_id`, no backfill: every chat starts without a project) and writes
+  `_keys = { version: 1, check, rotatedAt: null }` when the secrets table is empty or a row decrypts (6.14).
 - Graceful shutdown (`SIGINT`/`SIGTERM`, `stopDeps()`): stop accepting connections, abort active runs (persisted as
-  `aborted`), dispose plugins (5 s guard each), close MCP clients (terminates stdio children), stop catalog timers,
-  close SSE streams, then close the DB. Every step runs even when an earlier one fails; a shutdown longer than 10 s
+  `aborted`; aborting a run kills its shell process groups), dispose plugins (5 s guard each), close MCP clients
+  (terminates stdio children), stop catalog timers, close SSE streams, close the DB, then remove `server.lock`
+  (Phase 7). A process-exit handler SIGKILLs any shell process group still alive, also when the server crashes
+  (6.13). Every step runs even when an earlier one fails; a shutdown longer than 10 s
   exits with code 1, and a second signal exits immediately.
 - The signal handlers are installed right after the logger, before the data directory, the database or any plugin
   (Phase 6 hotfix, `a5fd107`): `main.ts` keeps a boot state (database, deps, started, server, the current step,
@@ -262,13 +287,13 @@ sequenceDiagram
   participant DB as services/chats
   participant M as LLM provider
   participant Ev as events bus
-  W->>R: ChatRequestBody (chatId, message, trigger, parentId?, messageId?, modelRef, reasoningEffort, toolMode, imageOptions?)
+  W->>R: ChatRequestBody (chatId, message, trigger, parentId?, messageId?, modelRef, reasoningEffort, toolMode, imageOptions?, projectId?)
   R->>R: zod validate (400 validation_error)
   R->>Runs: acquire(chatId)
   alt a run is active for chatId
     Runs-->>W: 409 conflict (reason run-active)
   end
-  R->>DB: upsert chat (client uuidv7), save toolMode / reasoningEffort / modelRef
+  R->>DB: upsert chat (client uuidv7; projectId only when the request creates it), save toolMode / reasoningEffort / modelRef
   R->>Prov: resolve(modelRef): provider, credentials (stored, then env), ModelInfo
   alt provider missing or required credentials absent
     Prov-->>W: 400 provider_not_configured (action configure-provider), run released
@@ -282,9 +307,9 @@ sequenceDiagram
     P->>DB: save title (fallback: first 60 chars), never overwrite a user title
     P-)Ev: chat.updated (id, title)
   end
-  P->>P: file parts -> bytes, tools (registry + MCP, filtered), params + hooks
+  P->>P: file parts -> bytes, openWorkspace for a project chat (6.13), tools (registry + MCP, filtered), params + hooks
   P->>P: await convertToModelMessages(history, tools), hook chat.messages, trim to 85 percent of context
-  P->>M: streamText(model, instructions, messages, tools, toolApproval, stopWhen isStepCount(maxSteps), abortSignal run.signal)
+  P->>M: streamText(model, instructions, messages, tools, toolApproval, stopWhen isStepCount(maxSteps or projectMaxSteps), abortSignal run.signal)
   P->>P: result.consumeStream() so the run survives a client disconnect
   P->>P: createUIMessageStream: writer.merge(toUIMessageStream(result.stream) piped through storeGeneratedFiles)
   R-->>W: 200 createUIMessageStreamResponse(that stream) as SSE
@@ -343,7 +368,9 @@ Notes:
   call. Client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server.
 - Tool assembly: registry tools + connected MCP tools, filtered by `toolMode` (`off` = no tools), tool prefs
   (`enabled: false` removes the tool; an `override` only changes approval, see 6.2), and model capability
-  `capabilities.tools` (no tools for models without it, with a `tools-unsupported` notice). Every tool is wrapped:
+  `capabilities.tools` (no tools for models without it, with a `tools-unsupported` notice). Phase 7: tools that declare
+  workspace access are offered only in chats whose project folder opened, `execute` tools only while
+  `HF_WORKSPACE_SHELL` is on, and every tool of such a run gets `ToolCallContext.workspace` (6.13). Every tool is wrapped:
   owner-plugin-active check, `tool.before` / `tool.after` hooks, `guard()` timeout (default 60 s), output capped at
   64 KB (truncated with a marker).
 - When a request sends no tools (tool mode `off`, a model without tool support, or no usable tool), earlier tool
@@ -395,11 +422,20 @@ Resolution order (first match wins), returning an AI SDK approval status:
 | 3 | tool policy (static or function) returns `deny` | `denied` |
 | 4 | chat `toolMode` = `ask`: policy `safe` | `not-applicable` (runs without a card) |
 | 5 | chat `toolMode` = `ask`: policy `ask` or `always` | `user-approval` |
-| 6 | chat `toolMode` = `auto`: policy `always` | `user-approval` |
-| 7 | chat `toolMode` = `auto`: policy `safe` or `ask` | `not-applicable` |
+| 6 | chat `toolMode` = `edits` (Phase 7): policy `safe`, or policy `ask` with workspace access `write` | `not-applicable` |
+| 7 | chat `toolMode` = `edits`: everything else (policy `ask` without workspace `write`, policy `always`) | `user-approval` |
+| 8 | chat `toolMode` = `auto`: policy `always` | `user-approval` |
+| 9 | chat `toolMode` = `auto`: policy `safe` or `ask` | `not-applicable` |
+
+The approval function receives `ApprovalInput.workspace` (the tool's `ToolDefinition.workspace`, or null). Without the
+`edits` rows the function's default branch would deny every call as "tools off". Accept edits is meant for project
+chats: `write_file` and `edit_file` on ordinary paths run, while their policy function returns `always` for hidden or
+secret paths, and `shell` (`ask`, access `execute`) always asks; in a chat without a project no workspace tool is
+offered, so `edits` behaves like `ask`.
 
 MCP tools derive their policy from annotations: `readOnlyHint` -> `safe`, `destructiveHint` -> `always`, otherwise
-the server's configured `policy` (default `ask`).
+the server's configured `policy` (default `ask`). MCP tools never have workspace access, so they ask in `edits` mode
+exactly as in `ask` mode.
 
 ```mermaid
 sequenceDiagram
@@ -436,7 +472,10 @@ pending resolves the ones on its path as denied (`superseded`). Approvals pendin
 switching back to that version sets `chats.pending_approval` again, and the card works because the continuation
 targets the active leaf (6.8). Only `user-approval` results show a card; `approved` and
 `not-applicable` calls run directly, and automatic denials render as `output-denied` with
-`approval.isAutomatic = true`.
+`approval.isAutomatic = true`. Phase 7: the web hides "Always allow" for tools with workspace access `execute`, and
+for `write` tools it offers "Accept all edits in this chat", which switches the chat to `edits` before the
+continuation (UI.md 7.3). A master-key rotation denies every open approval with "Expired after a key rotation." (the
+approval signatures depend on the old `approval` subkey, 6.14).
 
 ### 6.3 Stop and resume
 
@@ -650,7 +689,11 @@ sequenceDiagram
   `EventSource` reconnects, then the web refetches its stores (it cannot know what it missed).
 - Events are notifications, not the source of truth: every handler in the web refetches or patches the relevant
   store from the payload. No replay of missed events (`Last-Event-ID` is ignored).
-- Event names and payloads: API.md, "Server events".
+- Event names and payloads: API.md, "Server events". Phase 7 adds `project.changed` (`{ id, project }`, `project` null
+  = deleted; 6.13) and `key.rotated` (`{ keyVersion, rotatedAt, chatIds }`; 6.14). `disconnectAll()` flushes the queued
+  events and then closes every connection: after a key rotation (`key.rotated` is the last event a stream sees) and
+  after a password change, so a revoked session stops listening at once; the browsers reconnect with backoff, and a
+  revoked one gets 401 and the login page.
 
 ### 6.8 Message tree and version switching (ADR-023)
 
@@ -750,7 +793,7 @@ leaf under A), which brings back A -> reply -> B -> reply.
 
 Settings -> Data uses the four routes of `http/routes/data.ts` (API.md): `GET /api/data` (summary),
 `GET /api/data/export?files&settings` (the backup), `POST /api/data/import` (multipart) and `POST /api/data/delete`
-(fresh auth). `services/data/` implements them on top of `ChatsService` (`allIds`, `importChat`, `removeAll`),
+(fresh auth); Phase 7 adds the cleanup routes `GET` / `POST /api/data/cleanup` (6.15). `services/data/` implements them on top of `ChatsService` (`allIds`, `importChat`, `removeAll`),
 `FilesService` (`importFile`, `purge`) and the settings service. There are no new event types: imports emit
 `chat.created` and deletions `chat.deleted`, one per chat.
 
@@ -813,9 +856,13 @@ links or usage rows (the per-message `metadata.usage` survives, so `ChatDetail.t
 - **Delete-all** (`{ confirm: 'DELETE', files?, usage? }`): take the mutex -> `chats.allIds()` -> `runs.stop` for
   every id (this also covers runs that are still `preparing`) -> `chats.removeAll({ usage })` in one batch (share links
   cascade; usage rows are deleted or kept detached) -> optionally `files.purge()` (rows and blobs) -> stop any run whose
-  chat appeared meanwhile. Settings, keys and plugins stay.
+  chat appeared meanwhile. Settings, keys, plugins and (Phase 7) projects stay; the chats' project folders are never
+  touched.
 - **Mutex**: one import or delete-all at a time per process; another one gets `409 conflict` with
-  `details.reason: 'busy'`. Exports do not take it.
+  `details.reason: 'busy'`. Exports do not take it. Phase 7: the mutex moved into `services/maintenance/`
+  (`exclusive('import' | 'delete-all', …)`), which also serializes the key rotation (6.14) and the file cleanup (6.15).
+- **Projects**: backups and chat exports never carry `projectId` (projects are host-specific); imported chats have no
+  project.
 - The zip is a portable backup of conversations. Moving a whole server (keys, plugins, settings) still means copying
   the data directory (section 7).
 
@@ -850,7 +897,9 @@ sequenceDiagram
   `HMAC-SHA256(keyring subkey 'share', 'harness-forge/share/v1:' + shareId)`, i.e. `^[0-9A-Za-z]{16}[\w-]{22}$`.
   Nothing token-like is stored: the owner's list recomputes it (the link can be copied again), revoking deletes the
   row, and a new master key invalidates every link. Verification recomputes the token from its id suffix and compares
-  the whole string in constant time.
+  the whole string in constant time. Phase 7: the token signer caches the `share` subkey together with the keyring's
+  `keyVersion`, so a master-key rotation changes every link at once (owners copy the new links; the old URLs answer
+  404, 6.14).
 - **Sanitizer (allowlist)**, applied when the snapshot is taken (`services/shares/snapshot.ts`): only the fields of the
   share DTOs are copied, so anything unknown (a new AI SDK part type, a new metadata field) is dropped rather than
   published. Kept are `user` and `assistant` messages with their text parts, `file` parts (app files `/api/files/<id>`,
@@ -943,8 +992,8 @@ sequenceDiagram
   `finishedAt`, an error or `aborted`). A resume replays the buffer, which holds URLs only, and the `start` metadata
   tells the web how many placeholders to draw. Regenerate adds a version like any reply (6.8). The pipeline writes no
   usage row and records no provider outcome for an image turn: the service does both.
-- **`ImageService.generate(input)`** (`services/images/`) → `{ modelRef, images: { file, url }[], usage, costUsd | null,
-  revisedPrompt?, dropped }`:
+- **`ImageService.generate(input)`** (`services/images/`) → `{ modelRef, modelName, images: { file, url }[], usage,
+  costUsd | null, revisedPrompt?, dropped }` (`modelName` since Phase 7: the catalog name, else the model id):
   1. checks the input (a prompt of 1–32,000 characters after trimming, `n` 1–4, a known aspect ratio, at most 4 input
      files; `validation_error`);
   2. takes the model from `input.resolved` (image turns), else `resolveImageModel(input.modelRef ??
@@ -987,7 +1036,8 @@ sequenceDiagram
 - **`ctx.images.generate({ prompt, modelRef?, n?, aspectRatio?, chatId?, signal? })`** (plugin API 1.1.0,
   `plugins/context.ts`): the options are checked (`validation_error`), `n` defaults to 1, and the call goes to
   `ImageService.generate` with `messageId: null` and a signal that both `ctx.signal` and `signal` abort; the result
-  lists `{ fileId, url, mediaType, name, size }` per image (`costUsd` omitted when unknown). When every image was
+  lists `{ fileId, url, mediaType, name, size }` per image (`costUsd` omitted when unknown) and, since plugin API 1.2.0,
+  `modelName`. When every image was
   dropped it fails with `provider_error` "The image model returned no image that could be stored: only PNG, JPEG, WebP
   and GIF images of at most 20 MB are kept." `ctx.ai` has no `generateImage` (plugins could not store images or record
   usage with it).
@@ -997,7 +1047,9 @@ sequenceDiagram
   16 KB of JSON, so the output stays far below the 64 KB tool output cap, whose truncation would make it unparsable);
   `toModelOutput` is text only: "Generated 2 images with <model ref>; they are shown to the user below this call." (one
   image: "Generated 1 image with <model ref>; it is shown to the user below this call."; the output carries the model
-  ref, not a display name). When the final `tool-output-available` of `generate_image` comes from `core-tools` and
+  ref; Phase 7: the output also carries `modelName`, the catalog display name, else the model id, and the text names
+  `modelName ?? modelRef`, so outputs saved before v1.3 keep their text). When the final `tool-output-available` of
+  `generate_image` comes from `core-tools` and
   parses with `generateImageToolOutputSchema`, `storeGeneratedFiles` appends one `file` chunk per image whose URL is
   `/api/files/<fileId>` of a stored raster image, and adds the tool's `costUsd` to the message cost (a `toolCallId →
   toolName` map, seeded from the continued message, covers approval continuations). A tool of the same name from
@@ -1009,8 +1061,11 @@ sequenceDiagram
 - **Visibility**: an image model is listed only when its provider defines `createImageModel` (OpenAI, xAI and the mock
   provider; section 9), and it is then visible in the composer's "Image models" group; Gemini images come from chat
   models with image output (Google defines no image factory); declarative providers cannot generate images (backlog).
-- **Disk**: generated images live in `data/files/` like uploads; they are removed by delete-all with files, not when a
-  chat or a version is deleted (orphan cleanup is in the backlog).
+- **Disk**: generated images live in `data/files/` like uploads; they are removed by delete-all with files, or by the
+  manual storage cleanup once nothing references them (Phase 7, 6.15), not when a chat or a version is deleted.
+- **Unknown provider** (Phase 7, ADR-028 consequence): a model ref whose provider does not exist (an uninstalled
+  plugin) is `400 provider_not_configured` with action `configure-provider` on the media routes, in `ctx.images` and
+  `generate_image`, and in `ctx.ai` / `ctx.models.resolve`, as on chat (v1.2 answered `404 not_found` there).
 
 ### 6.12 Voice: dictation and read-aloud (ADR-029)
 
@@ -1112,6 +1167,277 @@ sequenceDiagram
   The microphone needs a secure context (HTTPS or localhost) and the page's `Permissions-Policy` allows it for the
   app's own origin only (10.2).
 
+### 6.13 Agent workspace: projects, workspace tools and the shell (ADR-031, ADR-032, ADR-033)
+
+A **project** is a named folder on the server host; a chat optionally belongs to one (`chats.project_id`). In a chat
+whose project folder opens, the builtin plugin `core-workspace` offers file tools and a shell that work inside that
+folder. Everything below runs in the server process (the shell in child processes); there is no OS sandbox, and Docker
+is the recommended boundary (section 10.9).
+
+**Allowed roots.** `HF_WORKSPACE_ROOTS` (default `<dataDir>/workspaces`) is a comma list of absolute folders that may
+hold project folders. `env.ts` checks only the syntax (split on `,`, trimmed, empty items dropped, deduplicated; each
+item absolute and normalized; refused: relative paths, NUL, a filesystem root, a list that names no folder).
+`projects.start()`, the first step of `startDeps()`, does the filesystem checks: the default root is created with mode
+0700; each root is `realpath`ed and must exist and be a directory (a missing explicit root fails the boot); a root
+equal to the data dir, or inside it but outside `<dataDir>/workspaces`, is refused; a root that **contains** the data
+dir is allowed (normal in development, where the repository holds `data/`).
+
+**Project lifecycle** (`services/projects/`, routes `projects.ts`; API.md, projects):
+
+| Operation | Rules |
+|---|---|
+| `POST /projects` (fresh auth, 201) `{ name, path, newFolder? }` | `realpath(path)` (404 when missing) must be a directory inside a root (400 on `['path']`); with `newFolder`, `path` is the parent: `mkdir` without `recursive` (EEXIST → 409 `exists`), then `realpath` again; a folder that equals, contains or sits inside the data dir is refused (400 "This folder contains the harness-forge data directory."; the default root's subtree excepted; to run harness-forge on its own repository, set `HF_DATA_DIR` outside it); at most 200 projects (`LIMITS.projectsMax`); insert (a duplicate path → 409 `exists`, and a folder this call created is removed again); `project.changed` |
+| `PATCH /projects/:id` `{ name?, instructions? }` | the path never changes; `project.changed` |
+| `DELETE /projects/:id` (204) | 409 `run-active` while a chat of the project runs; one transaction sets `chats.project_id = NULL` for its chats and deletes the row; the folder is **never touched**; one `project.changed` with `project: null` (no `chat.updated` per chat: the web clears `projectId` locally) |
+| `GET /projects/browse?path` | without `path`: the roots (`{ path, available }`); with a path inside a root (else 400): its subfolders (`Dirent.isDirectory()`, so links are not listed), dot folders, `node_modules` and the data dir hidden, sorted, at most 500 (`truncated`), each with the `projectId` that uses it |
+| `GET /projects` | `ProjectSummary` per project: `available` / `issue` (the `openWorkspace` checks below), `instructionsFile` (`AGENTS.md` / `CLAUDE.md` / null), `chatCount` |
+
+A chat joins a project when it is created (`ChatRequestBody.projectId`, honored only when that request creates the
+chat; an unknown project is a 404 before the chat row exists) or later through `PATCH /chats/:id { projectId }` (`null`
+= out of the project; 404 for an unknown project, checked in the same `UPDATE … WHERE EXISTS`; 409 `run-active` during a
+run). `chats.project_id` has no foreign key (like `active_leaf_id`): the project service owns the two cross-table
+queries (the detach and `chatCount`). Projects are configuration: they are not in backups or chat exports (export v1 /
+v2 omit `projectId`, imports never set it), and delete-all keeps them (6.9).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant W as Web (useChat)
+  participant P as chat/prepare + pipeline
+  participant Pr as services/projects
+  participant M as LLM provider
+  participant T as core-workspace tool
+  participant FS as project folder
+  W->>P: POST /api/chat (projectId only when the request creates the chat)
+  P->>Pr: openWorkspace(chat.projectId)
+  alt the folder is not available
+    Pr-->>P: { ok: false, name, message }
+    P-->>W: data-notice workspace-unavailable; the run continues without workspace tools
+  end
+  Pr-->>P: { root (verified realpath), name, instructions, projectFile }
+  P->>P: assembleTools (workspace tools only with a workspace; execute tools only with HF_WORKSPACE_SHELL on)
+  P->>P: buildRunParams: instructions with the workspace block + project file; maxSteps = projectMaxSteps
+  P->>M: streamText(tools, toolApproval (mode edits), stopWhen isStepCount(projectMaxSteps))
+  M-->>P: tool call edit_file { path, old_string, new_string }
+  P->>P: approval (6.2); wrapToolExecute adds ToolCallContext.workspace = { projectId, name, root }
+  P->>T: execute(input, c)
+  T->>FS: resolveWorkspacePath(root, path), read, replace, write a temp file + rename
+  T-->>W: tool-output-available { path, replacements, diff } (the model gets "Edited src/a.ts: 1 replacement (+3 -1 lines).")
+```
+
+**`openWorkspace(id)`** runs on every chat-model run of a chat with a project (image turns have no tools): the stored
+path must still equal its realpath, be a directory, sit inside a current root and not overlap the data dir; otherwise
+the run continues without workspace tools and with the notice `workspace-unavailable` ("The project folder … is not
+available: …"). The result carries the project file: `AGENTS.md`, else `CLAUDE.md`, from the project root only, read
+through the resolver on every run; a line made only of `@relative.md` is expanded one level (inside the root; this
+repository's `CLAUDE.md` is just `@AGENT.md`); 32 KiB in total (`LIMITS.projectFileBytes`), then a truncation marker.
+
+**Tool assembly** (`chat/tools.ts`): a tool that declares `ToolDefinition.workspace` (plugin API 1.2.0) is offered only
+when the run has a workspace; a tool with access `execute` only while `HF_WORKSPACE_SHELL` is on. `wrapToolExecute`
+puts the frozen `{ projectId, name, root }` into the call context of **every** tool of such a run
+(`ToolCallContext.workspace`), and the policy function receives it too. Deleting or moving the chat's project during a
+run is refused (409), and a folder renamed on disk fails the next tool call through the root re-check.
+
+**Instructions** (`buildRunParams`, before the `chat.params` hook), in this order: the global instructions → the
+workspace block (`Project "<name>", folder <root> (<OS>).`, then rules built only from the tools actually offered: use
+paths relative to the folder; read a file before editing it; `old_string` must match exactly and be unique; prefer
+`edit_file`; each shell call is a new process, with no `cd` persistence, no stdin, and background processes stopped;
+without tools only the name and folder) → the project file → the project's own instructions → the chat instructions.
+**Steps**: chats with a project use the setting `projectMaxSteps` (default 100) instead of `maxSteps` (default 20);
+both accept 1–200, and the clamp after the `chat.params` hooks moved from 100 to 200.
+
+**Path resolution** (`workspace/paths.ts`, frozen after P7-0b): `resolveWorkspacePath(root, input, { allowMissing })`
+→ `{ absolute, rel, exists }`:
+
+1. The input has 1–4096 characters and no control characters; `realpath(root)` must equal `root`, else "The project
+   folder moved or was replaced by a link."
+2. `lexical = resolve(root, input)` (absolute inputs are accepted) must be inside `root` (`isWithin`), else "Path is
+   outside the project folder."
+3. Walk up from `lexical` until `realpath` succeeds: on ENOENT / ENOTDIR the path is `lstat`ed; if it exists it is a
+   dangling link and is refused, otherwise its name joins the missing tail and the walk continues with the parent.
+4. The realpath of the deepest existing entry must be inside `root`, else "… resolves outside the project folder
+   (symbolic link)."
+5. A missing tail is allowed only with `allowMissing` (writes), and its existing base must be a directory. `rel` is
+   POSIX, `.` for the root.
+
+Writes refuse any `.git` segment and directories, `mkdir -p` the missing tail and re-check the realpath of the parent,
+then write a temp file in the same folder (`open('wx')`, `.hf-write-<random>`), give it the old file's mode and
+`rename` it over the target. Reads open with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and refuse anything that is not a
+regular file after `fstat` (without `O_NONBLOCK` a FIFO would hang the read). TOCTOU: only the last path component is
+protected (`O_NOFOLLOW` / `O_EXCL`); Node has no `openat2` / `RESOLVE_BENEATH`, so a parent folder swapped for a link
+between the check and the open is not caught, and hard links are not detected. These guards protect against model
+mistakes and injected paths, not against code already running in the workspace; the shell has the server's rights
+anyway (10.9).
+
+**The tools** (`builtin-plugins/core-workspace/`, version 1.0.0, `engines ^1.2.0`, permission `process`, no settings;
+schemas in `@harness-forge/shared`, `WORKSPACE_LIMITS`):
+
+| Tool | Input | Policy / access / timeout | Output (stored) and the model's text |
+|---|---|---|---|
+| `read_file` | `path`, `offset?` (1-based), `limit?` (1–2000) | secret-looking path → `ask`, else `safe` / `read` / 30 s | `{ path, content, startLine, endLine, totalLines, truncated }`; text files only (binary detected in the first 8 KiB), lines cut at 2000 characters, at most 48 KiB per call; the model sees `cat -n` lines and "[truncated; continue with offset=N]" |
+| `list_directory` | `path?` (`.`) | `safe` / `read` / 30 s | `{ path, entries: { name, type }[], truncated }`, at most 1000; names with a `dir/` suffix |
+| `find_files` | `pattern` (glob; dot files included; without `/` it matches the name at any depth), `path?`, `include_ignored?`, `max_results?` (≤ 1000, 200) | `safe` / `read` / 60 s | `{ pattern, paths, truncated }`; a sorted list or "No files match" |
+| `search_files` | `pattern` (JS regex), `literal?`, `case_sensitive?` (true), `glob?`, `path?`, `include_ignored?`, `max_results?` (≤ 500, 100) | `safe` / `read` / 60 s | `{ pattern, matches: { path, line, text }[], filesSearched, truncated }`; `path:line: text` lines |
+| `write_file` | `path`, `content` (≤ 256 KiB) | hidden or secret path → `always`, else `ask` / `write` / 30 s | `{ path, created, bytes, lines, diff }`; "Created x (N lines)." / "Updated x (+a -r lines)." |
+| `edit_file` | `path`, `old_string` (1 – 64 KiB), `new_string` (≤ 64 KiB), `replace_all?` | as `write_file` | `{ path, replacements, diff }`; "Edited x: N replacement(s) (+a -r lines)." |
+| `shell` | `command` (≤ 16 KiB), `cwd?`, `timeout_ms?` (1000–590,000, 120,000), `description?` (≤ 200, shown on the approval card) | `ask` / `execute` / 600 s | `{ command, cwd, exitCode, signal, timedOut, durationMs, stdout, stderr, stdoutBytes, stderrBytes }`; "Exit code: N" or "Stopped after 120 s (timeout)", then stdout and stderr |
+
+- Paths in every input and output are project-relative POSIX paths. Every output is trimmed to about 60 KiB of JSON
+  before the 64 KB host cap (a diff to about 24 KiB with lines cut at 500 characters and `truncated: true`), and
+  `toModelOutput` builds the model's text only from the stored output, so a replayed history gives the same text.
+- `edit_file`: the match must be unique unless `replace_all` ("not found" tells the model to read the file again and
+  match whitespace exactly; "occurs N times" to add context or set `replace_all`; `old_string === new_string` is an
+  error); files up to 1 MiB; a file that is CRLF throughout is matched on its LF text and written back as CRLF (mixed
+  endings are matched raw); a BOM is kept. Diffs come from `diff.structuredPatch(…, { context: 3, timeout: 2000 })`
+  (`diff: null` when it times out).
+- Secret-looking paths (`workspace/sensitive.ts`): `.env`, `.env.*` (not `.env.example` / `.sample` / `.template`),
+  `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`, `*.p12`, `*.pfx`, `credentials*.json`,
+  `secrets.*`. Hidden paths: any segment that starts with `.` (git hooks, `.husky`, `.vscode`, `.github` workflows).
+  Reading a secret-looking file asks (in Ask and Accept edits); writing a hidden or secret path always asks. A user
+  override `allow` on the tool still wins (6.2).
+- Walking (`find_files`, `search_files`): an async walker; `.git` is always skipped; `node_modules` and gitignored paths
+  (nested `.gitignore` files, one `ignore` instance per folder) are skipped unless `include_ignored`; folder links are
+  not entered, file links are kept only when their realpath is inside the root; caps 100,000 entries, depth 64, 10 s and
+  the abort signal; globs through `picomatch`.
+- `search_files` checks the regex syntax on the main thread, then runs the matching in an eval `Worker`
+  (`resourceLimits` 256 MB) that the server terminates after 20 s ("The search timed out — use a simpler pattern or a
+  narrower path"), so a pattern like `(a+)+$` cannot freeze the single-process server; files over 1 MiB and
+  secret-looking files are skipped, even with `include_ignored`.
+
+**The shell runner** (`workspace/shell.ts`; the only place that starts a shell):
+
+- `spawn(sh, ['-c', command], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true, shell: false })` with
+  `sh` = `/bin/bash` when it is executable, else `/bin/sh`; `cwd` = the project-relative `cwd` through the resolver
+  (default the root). Not registered on Windows.
+- Environment allowlist: `HOME LOGNAME USER PATH LANG LC_ALL LC_CTYPE TZ TMPDIR`, plus `SHELL=<sh>`, `TERM=dumb`,
+  `NO_COLOR=1`, `PAGER=cat`, `GIT_PAGER=cat`, `GIT_TERMINAL_PROMPT=0`. Never passed: `HF_*`, provider keys, `NODE_ENV`.
+- The process gets its own process group (`detached`). The kill = `process.kill(-pid, 'SIGTERM')`, then `SIGKILL`
+  after 2 s, repeated until ESRCH (which also catches fork loops). It fires on the timeout (the result says `timedOut:
+  true`; a normal result, not an error), on the run's abort signal (Stop, the guard timeout, a disabled plugin:
+  AbortError), when the shell exits while its pipes stay open for 500 ms (background processes are killed, and the
+  tool description says so), and from a process-exit handler that SIGKILLs every live group, because detached groups
+  outlive a crashed server.
+- Output: each stream keeps its first 4 KiB and last 16 KiB with "[… N bytes omitted …]" between them; ANSI codes are
+  stripped, `\r\n` becomes `\n`, and a `\r` progress line keeps only its last segment.
+- `HF_WORKSPACE_SHELL=0` removes every `execute` tool from every run: a kill switch that no session can change.
+
+The dev-only model `mock:workspace` walks through `write_file`, `edit_file` and `shell` deterministically for tests and
+e2e (PROVIDERS.md 8).
+
+### 6.14 Master-key rotation (ADR-034)
+
+Rotation re-encrypts every secret with a new master key. It runs online (Settings → Data → Rotate key…, `POST
+/api/keys/rotate`) when the key comes from `data/secret.key`, and offline through the `rotate-key` CLI when the key
+comes from `HF_MASTER_KEY` (the server cannot change its own environment).
+
+**Key state.** The internal setting `_keys = { version, check, rotatedAt }`, where `check` = base64url of
+`HMAC-SHA256(encryption subkey, 'harness-forge/key-check/v1')`. The keyring's version is `_keys.version` (1 when
+absent), and a rotation writes every secret row with `key_version` = V+1. At the first v1.3 boot `_keys = { version:
+1, check, rotatedAt: null }` is written when the secrets table is empty or at least one row decrypts. `GET /keys` →
+`KeyStatus { source, keyVersion, rotatedAt, keyCheck: 'ok' | 'mismatch' | 'unknown', secrets, unreadableSecrets,
+shares, pendingApprovals, canRotate }`.
+
+**A live swap without breaking the frozen deps.** `createMasterKeyring` returns one frozen object whose `keyVersion`
+is a getter and whose `subkey()` reads closure state; module-private controls (`swapMasterKey`, `beginKeyChange`,
+`whenKeyStable`) change it in place, so `deps.keyring` keeps returning the same object. Every cache of a subkey keeps
+`{ version, value }` and derives again when `keyring.keyVersion` changes (the session signer, the share token signer);
+`SecretStore.get` / `set` / `delete` first `await whenKeyStable()`, so a write cannot be encrypted with the old key
+while a rotation runs; the session middleware drops a rolling cookie it signed before a swap that happened during the
+request.
+
+**Online rotation** (`KeyService.rotate`, `services/keys/`):
+
+1. The route runs the fresh-auth middleware (10.1); the service calls `requireFreshAuth()` again and checks `{ confirm:
+   'ROTATE' }`.
+2. Refused with 409 `env-key` when the key comes from `HF_MASTER_KEY`, and 409 `key-mismatch` when the key check fails
+   (a rotation would lose the secrets).
+3. `maintenance.exclusive('key-rotation', …, { blockRuns: true })`: another maintenance operation (an import,
+   delete-all, a cleanup) gets 409 `busy`, and so does every `POST /chat` while it runs.
+4. Every running chat is stopped (`runs.stop(id)`; preparing runs are refused).
+5. `beginKeyChange()`.
+6. The new key (`randomBytes(32)`) is written to `secret.key.next` (mode 0600, exclusive create, fsync of the file and
+   the folder) **before** anything commits, so a crash can never lose it.
+7. One `db.transaction` (`rotateSecretsTx`, shared with the CLI): every row readable at version V is decrypted with the
+   old encryption subkey and encrypted with the new one (`key_version` V+1; the `hint` is kept; unreadable rows stay as
+   they are and count as `skippedSecrets`); messages with open approvals go through `denyOpenApprovals(parts, 'Expired
+   after a key rotation.')`; `UPDATE chats SET pending_approval = 0 … RETURNING id`; `_keys = { version: V+1, check,
+   rotatedAt }`. A failed transaction deletes `.next`, ends the key change and rethrows.
+8. `rename(secret.key.next, secret.key)`; a failed rename is logged and finished by the next boot's recovery.
+9. `swapMasterKey()`, the key buffer zeroed, `redactor.addSecret(new key text)`, `end()`.
+10. `key.rotated { keyVersion, rotatedAt, chatIds }` (at most 1000 ids), then `events.disconnectAll()`: queued events
+    are flushed, then every event stream closes (revoked sessions must not keep listening; `PUT /auth/password` calls
+    it too).
+11. The route sets a new session cookie for the caller (`authAt` kept, so the session stays fresh); with auth disabled
+    there is no cookie. The answer is `KeyRotationResult { keyVersion, rotatedAt, secrets, skippedSecrets, shares,
+    approvalsExpired, chats, runsStopped }`.
+12. One info log line `master key rotated` with the counts, never the key.
+
+Effects: every other session is invalid (signed with the old `session` subkey), every share URL changes (tokens are
+HMACs of the `share` subkey; owners copy the new links), every pending approval is denied, running replies stop, event
+streams reconnect. **There is no downgrade to v1.2 after a rotation**: v1.2 always reads secrets as version 1.
+
+**Boot recovery** (`recoverKeyState`, after the migrations and before `createDeps`; file mode):
+
+| State at boot | Action |
+|---|---|
+| no `secret.key.next` | nothing |
+| the check of `.next` equals the stored check | the rotation committed: rename `.next` over `secret.key`, fsync the folder |
+| the check of `secret.key` equals the stored check | the rotation did not commit: delete `.next`, log a warning |
+| neither matches | the boot fails with exit code 1 and a message naming both files |
+
+In env mode a key that does not match the check logs a warning (like the existing stale-`secret.key` warning) and `GET
+/keys` reports `keyCheck: 'mismatch'`.
+
+**`server.lock`**: after the data directory exists the server writes `<dataDir>/server.lock` (`{ pid, hostname, port,
+startedAt }`) and removes it at shutdown and when the boot fails. It keeps the CLI away from a running server.
+
+**Offline CLI** (`node apps/server/dist/main.mjs rotate-key [--force]`, root script `pnpm key:rotate`; `main.ts`
+dispatches on `argv[2]` before it boots anything):
+
+- It loads `.env` and the environment like the server, then migrates.
+- The old key: `HF_MASTER_KEY`, else `secret.key`; it never creates a key file.
+- The new key in env mode: `HF_NEW_MASTER_KEY` is **required** (base64 of 32 bytes, different from the old key); the CLI
+  never generates or prints a key. Afterwards the operator replaces `HF_MASTER_KEY` with the new value. In file mode the
+  CLI generates the key and runs the same `.next` + transaction + rename flow as the online rotation.
+- It refuses with exit code 2 while a server runs: `/api/health` on the configured host and port answers within 1 s
+  (`0.0.0.0` probed as `127.0.0.1`), or `server.lock` names a live pid on this host; a lock written on another host is
+  refused unless `--force` is given.
+- It prints a summary to stderr only and warns about a stale `secret.key` in env mode. Exit codes: 0 done, 1 failed, 2
+  refused.
+- Docker: stop the server container, then run the CLI in a one-off container on the same volume (the command is in
+  `docs/guides/using-projects.md`).
+
+### 6.15 Orphaned file cleanup (ADR-035)
+
+Generated images and the attachments of deleted chats and versions stay in `data/files/` (deleting a chat or a version
+keeps its files, 6.8, 6.11). Settings → Data → Storage cleanup removes them by hand, after a preview; there is no
+automatic sweep (deletion cannot be undone, and a plugin may keep file ids outside the database).
+
+- **Routes** (`data.ts`): `GET /data/cleanup` → `DataCleanupPreview { files, fileBytes, blobs, diskBytes, tempFiles,
+  recentFiles, graceMs, lastRunAt }` (a dry run); `POST /data/cleanup` → `DataCleanupResult { files, fileBytes, blobs,
+  diskBytes, tempFiles, ranAt }`. Neither needs fresh auth; both answer 409 `busy` while another maintenance operation
+  runs. `GET /data` stays cheap (the scan reads every message, so it has its own route). No event.
+- **Referenced ids** (`services/data/references.ts`): keyset-paginated batches of 500 rows, pre-filtered with
+  `instr(col, 'file_') > 0`, then the loose regex `/file_[\dA-Za-z]{16}/g` (it may keep an extra file, never miss one)
+  over `messages.parts` and `metadata`, `chat_shares.snapshot` and `file_ids`, `plugin_kv.value`,
+  `plugin_settings.values`, `settings.value`, `chats.settings` and the text columns of `projects`. A schema-coverage
+  test fails when a JSON or text column is neither scanned nor explicitly excluded (`secrets`, `usage`, `model_cache`,
+  …), so a new column cannot silently lose files.
+- **Candidates**: file rows older than 24 hours (`graceMs`), not referenced and not **pinned**: the files service pins
+  in memory every id that `upload`, `importFile` or `saveGenerated` returned within the grace period (a run may reuse
+  an old row before its message is saved).
+- **Sweep** (`FilesService.sweep`, under the files service's exclusive gate; `upload`, `importFile` and `saveGenerated`
+  hold the gate shared around their blob write + insert): `DELETE … WHERE id IN (…) AND id NOT IN
+  (referencedFileIdsQuery())` (the statement re-checks message references, so a message committed after the scan keeps
+  its file); a blob is unlinked only when no row is left with its sha256; then `files/<aa>/` is walked: a 64-hex blob
+  without a row and older than the cutoff is deleted, `.<sha>.<uuid>.tmp` files older than 1 hour are deleted, anything
+  else is skipped (`lstat`, regular files only). `dryRun` deletes nothing.
+- **Exclusivity**: `maintenance.exclusive('file-cleanup', …)` without blocking runs (the pins and the grace period cover
+  them); imports, delete-all and key rotation are serialized against it. The time of the last run is stored in the
+  internal setting `_files` (`lastCleanup`); the counts are logged.
+- **Plugins** that keep file ids must keep them in `ctx.storage` or their settings (scanned), never only in files under
+  `ctx.plugin.dataDir` (PLUGINS.md 9).
+
 ## 7. Data directory
 
 ```
@@ -1126,6 +1452,9 @@ data/                      HF_DATA_DIR (default ./data, resolved against the rep
                            of the sha256)
   cache/                   models.dev snapshot refreshes (models-dev.json + fetched-at), misc caches
   cache/plugins/<id>/      compiled output of .ts code plugins (<sha256>.mjs), rebuilt on demand
+  workspaces/              default workspace root (0700; Phase 7): project folders when HF_WORKSPACE_ROOTS is unset
+  secret.key.next          transient: the new master key during a rotation (0600; renamed over secret.key, 6.14)
+  server.lock              { pid, hostname, port, startedAt } of the running server; removed at shutdown (6.14)
 ```
 
 The directory is created with mode 0700 when missing. Backups: copy the whole directory while the server is
@@ -1133,7 +1462,10 @@ stopped (or use `sqlite3 .backup` for the DB); that is the full backup. Settings
 portable zip of every chat and attachment (section 6.9), without keys, plugins or MCP servers. Losing `secret.key` (or
 changing `HF_MASTER_KEY`) makes every stored secret unreadable and invalidates every share link (their tokens are
 HMACs of the master key's `share` subkey); the server then reports affected providers as `not_configured` and logs a
-warning, it does not crash.
+warning, it does not crash. To replace the key on purpose, rotate it (Phase 7, 6.14): the secrets are re-encrypted and
+nothing is lost. `workspaces/` holds project folders only when the default root is used; project folders elsewhere
+(inside `HF_WORKSPACE_ROOTS`) are not part of the data directory, its backups or the Settings -> Data zip. A copied data
+directory keeps its `projects` rows, whose paths may not exist on the new host (they show "Folder not found").
 
 ## 8. Data model
 
@@ -1158,7 +1490,8 @@ Column conventions:
 ### Tables
 
 **`settings`** — global settings (keys listed in API.md `Settings`) and internal keys (prefix `_`, never returned
-by the API, e.g. `_auth.sessionEpoch`).
+by the API, e.g. `_auth.sessionEpoch`; Phase 7: `_keys` = `{ version, check, rotatedAt }`, the master-key state of
+6.14, and `_files` = `{ lastCleanup }`, 6.15).
 
 | Column | Type | Constraints |
 |---|---|---|
@@ -1174,7 +1507,7 @@ by the API, e.g. `_auth.sessionEpoch`).
 | `name` | text | NOT NULL; e.g. `apiKey`, `settings.<key>`, `header.<Name>`, `env.<NAME>`, `password` |
 | `ciphertext` | bytes | NOT NULL; `iv (12 B) \|\| AES-256-GCM ciphertext \|\| tag (16 B)` |
 | `hint` | text | NULL; masked hint computed at write time (`sk-…9fQ2`), never the value |
-| `key_version` | integer | NOT NULL DEFAULT 1 |
+| `key_version` | integer | NOT NULL DEFAULT 1; equals `_keys.version` after a rotation (6.14); a row of another version cannot be read |
 | `updated_at` | timestamp | NOT NULL |
 | | | PK (`scope`, `name`); index on `scope` via the PK prefix |
 
@@ -1228,9 +1561,10 @@ by the API, e.g. `_auth.sessionEpoch`).
 | `archived` | boolean | NOT NULL DEFAULT 0 |
 | `pending_approval` | boolean | NOT NULL DEFAULT 0; the last message of the active path waits for an approval |
 | `active_leaf_id` | text | NULL; last message of the shown path (ADR-023, 6.8); `null` = empty chat; no FK (see Migrations) |
+| `project_id` | text | NULL; the chat's project (`prj_` + 16, Phase 7, ADR-031); `null` = no project; no FK (the project service detaches chats in a transaction, 6.13) |
 | `created_at` | timestamp | NOT NULL |
 | `updated_at` | timestamp | NOT NULL; last activity (a version switch does not change it) |
-| | | index `chats_list_idx` (`archived`, `updated_at` DESC, `id` DESC) |
+| | | index `chats_list_idx` (`archived`, `updated_at` DESC, `id` DESC); index `chats_project_idx` (`project_id`, `archived`, `updated_at` DESC, `id` DESC) for the project filter |
 
 **`messages`**
 
@@ -1337,6 +1671,17 @@ when a chat is deleted.
 | `created_at` | timestamp | NOT NULL |
 | | | index `files_sha256_idx` (`sha256`) |
 
+**`projects`** — project folders (Phase 7, ADR-031, 6.13). Not in backups or exports; delete-all keeps them.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | text | PK; `prj_` + 16 chars |
+| `name` | text | NOT NULL; <= 80 chars |
+| `path` | text | NOT NULL; the canonical realpath of the folder on the server host; unique index `projects_path_idx` |
+| `instructions` | text | NULL; the project's own instructions (<= 20,000 chars), added after `AGENTS.md` / `CLAUDE.md` |
+| `created_at` | timestamp | NOT NULL |
+| `updated_at` | timestamp | NOT NULL |
+
 **`chat_shares`** — read-only share links (ADR-025, 6.10). There is no token column: tokens are recomputed from the id.
 
 | Column | Type | Constraints |
@@ -1361,6 +1706,7 @@ when a chat is deleted.
 | `0001_message_tree_and_shares` (Phase 5) | table `chat_shares` + index `chat_shares_chat_idx`, `ALTER TABLE chats ADD active_leaf_id`, `ALTER TABLE messages ADD parent_id`, index `messages_chat_parent_idx`, then a hand-written backfill |
 | `0002_remembered_versions` (Phase 6) | `ALTER TABLE messages ADD selected_child_id` (nullable, no FK, no index), then a hand-written backfill of every active path |
 | `0003_refresh_model_listings` (Phase 6) | hand-written, no schema change: one ``UPDATE `model_cache` SET `fetched_at` = `fetched_at` - 86400000 WHERE `fetched_at` IS NOT NULL;`` that makes every successful cached provider listing stale |
+| `0004_projects` (Phase 7) | generated: `CREATE TABLE projects`, unique index `projects_path_idx`, ``ALTER TABLE `chats` ADD `project_id` text`` (nullable, no FK), index `chats_project_idx`; no backfill |
 
 The backfill turns every existing chat into a linear chain: each message's parent is the previous message by `seq`,
 and the active leaf is the last message (`null` for an empty chat):
@@ -1410,10 +1756,21 @@ shows such a listing as one day older than it is until the refresh. `db/upgrade.
 that one `UPDATE`, that it keeps the cached models and ages `fetched_at` by the TTL, and that never-fetched rows stay
 null.
 
+`0004` (Phase 7, ADR-031) adds the table `projects` and the column `chats.project_id` the same way: nullable, without a
+default and without a foreign key (a key to `projects.id` would need an `ON DELETE SET NULL` that drizzle-kit does not
+write for an added column, and a rebuild of `chats` is refused), so SQLite adds it in place and every existing chat
+starts without a project. The generated SQL must be exactly the `CREATE TABLE`, the two `CREATE … INDEX` and the `ALTER
+TABLE … ADD` statements (a `DROP TABLE`, `__new_` or `PRAGMA foreign_keys` statement is rejected);
+`db/upgrade.test.ts` migrates a database holding only `0000` … `0003` with chats and checks that they survive with
+`project_id` null. Key rotation and the file cleanup need no columns: their state lives in the internal settings `_keys`
+and `_files`.
+
 Not stored in the DB: sessions (stateless HMAC cookie), active runs and resume buffers (memory), plugin logs
 (memory ring buffer), SSE subscribers (memory), share tokens (recomputed from the share id), rate-limit counters and
-the data import / delete-all mutex (memory), and (Phase 6) recordings, transcripts and speech audio or text, which only
-pass through (10.8). Generated images are stored as files like uploads.
+the maintenance lock (memory; Phase 7, it replaced the import / delete-all mutex), the file cleanup's pins (memory),
+the running server's identity (`server.lock` in the data directory), and (Phase 6) recordings, transcripts and speech
+audio or text, which only pass through (10.8). Generated images are stored as files like uploads. Project folders are
+files on the host, never copied into the database.
 
 ## 9. Model catalog
 
@@ -1493,8 +1850,8 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
 | DNS-rebinding guard | Without a password, `/api` answers `403 forbidden` to any request whose `Host` is not `localhost`, `*.localhost` or a loopback IP (unless `HF_INSECURE=1`): a web page whose DNS name is rebound to 127.0.0.1 would otherwise be same-origin with itself and drive the whole API. With a password every host name is allowed (sessions protect it). The guard reads only `Host`, never `X-Forwarded-Host` (10.6), and also covers the public share routes: exposing share links requires a password. |
 | Bind safety | At boot, `HF_HOST` outside `127.0.0.0/8`, `::1`, `localhost` requires a configured password (`HF_PASSWORD` or one stored in the data directory) or `HF_INSECURE=1` (else exit 1). At runtime, removing the password while bound to a non-loopback host is rejected (`409 conflict`). |
 | Session cookie | Name `hf_session`; value `v1.<payload b64url>.<HMAC-SHA256 b64url>` signed with the HKDF `session` subkey; payload `{ iat, exp, authAt, epoch }` (ms). Attributes: `HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` (30 days) plus `Secure` when the request is HTTPS (`X-Forwarded-Proto: https` counts: only from a trusted proxy when `HF_TRUST_PROXY` is set, from any peer when it is unset; 10.6). Re-issued when older than 24 h (rolling). |
-| Revocation | `epoch` must equal the internal setting `_auth.sessionEpoch`; changing or removing the password increments it, which invalidates every session (the caller gets a fresh cookie). Logout clears the cookie. |
-| Fresh auth | ADR-017. When a password is set, sensitive operations require `now - authAt <= 10 min`, else `403 forbidden` with `action: 'login'` (the web asks for the password — inline in the install and trust dialogs, else in `ConfirmPasswordDialog` — calls `POST /api/auth/login` and retries): installing a plugin that requires trust (code or stdio MCP, with or without `trust`), `POST /api/plugins/:id/trust`, scaffolding a code plugin, `POST /api/plugins/:id/build`, `POST /api/plugins/:id/reload` of a code plugin, writing or deleting files of a plugin that runs code (`PUT` / `DELETE /api/plugins/:id/files/*`), creating or changing a stdio MCP server (also inside a created declarative plugin), `PUT /api/auth/password`, creating or updating a share link (`POST /api/shares`, `PATCH /api/shares/:id`) and deleting all data (`POST /api/data/delete`). The window is 10 minutes, so the editor asks at most once per window; such an editor save also re-pins a trusted `created` plugin (10.4). |
+| Revocation | `epoch` must equal the internal setting `_auth.sessionEpoch`; changing or removing the password increments it, which invalidates every session (the caller gets a fresh cookie). Logout clears the cookie. Phase 7: a master-key rotation also invalidates every session (cookies are signed with the `session` subkey; the rotating caller gets a new cookie that keeps its `authAt`), and both the rotation and a password change close every event stream (`events.disconnectAll()`, 6.14). |
+| Fresh auth | ADR-017. When a password is set, sensitive operations require `now - authAt <= 10 min`, else `403 forbidden` with `action: 'login'` (the web asks for the password — inline in the install and trust dialogs, else in `ConfirmPasswordDialog` — calls `POST /api/auth/login` and retries): installing a plugin that requires trust (code or stdio MCP, with or without `trust`), `POST /api/plugins/:id/trust`, scaffolding a code plugin, `POST /api/plugins/:id/build`, `POST /api/plugins/:id/reload` of a code plugin, writing or deleting files of a plugin that runs code (`PUT` / `DELETE /api/plugins/:id/files/*`), creating or changing a stdio MCP server (also inside a created declarative plugin), `PUT /api/auth/password`, creating or updating a share link (`POST /api/shares`, `PATCH /api/shares/:id`), deleting all data (`POST /api/data/delete`) and, since Phase 7, creating a project (`POST /api/projects`) and rotating the master key (`POST /api/keys/rotate`). The window is 10 minutes, so the editor asks at most once per window; such an editor save also re-pins a trusted `created` plugin (10.4). |
 | Login rate limit | Failed password checks (`POST /api/auth/login` and the current-password check of `PUT /api/auth/password`): 5 per 15 min per client address and 50 per 15 min globally, then `429 rate_limited` with `retryAfterMs` and a `Retry-After` header. A successful login resets the per-address counter. The client address is the TCP peer, or, when the peer is a proxy listed in `HF_TRUST_PROXY`, the client named by `X-Forwarded-For` (10.6); a forwarded header from any other peer is ignored because any client can forge it. **Without `HF_TRUST_PROXY`** every client behind a proxy shares the proxy's address, so 5 failed attempts from anyone lock out every client (including you) for up to 15 minutes: set `HF_TRUST_PROXY` for your proxy, and limit access at the proxy (IP allow list, VPN, basic auth) when the server is reachable from the internet. The global cap stays the backstop against forged addresses. |
 | Public endpoints | `GET /api/health`, `GET /api/auth/status`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/icons/lobe`, `GET /api/icons/lobe/:slug`, the share routes `GET /api/share/:token` and `GET /api/share/:token/files/:fileId` (a valid share token is the credential; rate-limited; 10.7), and the SPA static files (the `/share/<token>` page is a client route of the SPA). Everything else returns `401 unauthorized` without a valid session. |
 
@@ -1533,7 +1890,15 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
   32 bytes). `approval` feeds `experimental_toolApprovalSecret`; `share` signs share tokens (10.7), so a new master
   key invalidates every share link.
 - Encryption: AES-256-GCM, random 12-byte IV per write, AAD = UTF-8 of `<scope>/<name>` (a ciphertext copied to
-  another row fails to decrypt), stored with `key_version` for future rotation.
+  another row fails to decrypt), stored with `key_version`.
+- Key check and rotation (Phase 7, ADR-034, 6.14): the internal setting `_keys = { version, check, rotatedAt }` holds
+  the HMAC of the `encryption` subkey over `harness-forge/key-check/v1`, so the server can tell a wrong key from a
+  damaged row (`GET /keys` → `keyCheck`). Online rotation (file mode, fresh auth, typed `ROTATE`) writes the new key to
+  `secret.key.next` first, re-encrypts every readable row to `key_version` V+1 in one transaction, then renames the
+  file over `secret.key` and swaps the live keyring; a crash at any step is resolved at the next boot by comparing both
+  files with the check. With `HF_MASTER_KEY` the rotation is offline only (`rotate-key` CLI, the new key from
+  `HF_NEW_MASTER_KEY`, never generated or printed). A rotation invalidates every session, share URL and pending
+  approval (all keyed by subkeys), and v1.2 cannot read the secrets afterwards (no downgrade).
 - The secrets API is **write-only**: credentials, plugin secret settings, MCP headers/env are never returned; DTOs
   carry `{ set, hint, source }` only. Values are decrypted only in memory at the point of use (provider call, MCP
   connect, `ctx.secrets.get` of the owning plugin).
@@ -1556,7 +1921,8 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
   `unhandledRejection` is logged, never fatal. `HF_SAFE_MODE=1` loads builtins only.
 - **Filesystem**: every path from user input (plugin files API, install extraction, linked folders) is resolved
   with `realpath` and must stay inside its root; relative POSIX paths only, no `..`, no absolute paths, no
-  backslashes, no NUL.
+  backslashes, no NUL. Phase 7: paths of the workspace tools (which may be absolute inside the project) go through
+  `resolveWorkspacePath` (6.13); project folders must sit inside `HF_WORKSPACE_ROOTS` and away from the data dir (10.9).
 - **SSRF guard** (`security/ssrf.ts`, used by `web_fetch` and URL installs): `http:`/`https:` only; DNS-resolve and
   reject loopback, private (RFC 1918), link-local (incl. `169.254.169.254`), CGNAT, multicast, unspecified,
   IPv6 ULA / link-local and IPv4-mapped forms of these; connect to the checked IP (no re-resolve); at most 5
@@ -1572,7 +1938,10 @@ third-party plugins. Multi-user isolation is out of scope (ADR-012).
   cut at 16,384 characters and each error text at 4096 (6.10); Phase 6: a dictation recording 64 bytes to 25 MiB (the
   body limit of `POST /audio/transcriptions` is 25 MiB + 64 KiB), a speech request 4,096 characters, an image prompt
   32,000 characters, 1–4 images per turn and at most 4 input images, a generated image 20 MiB, the `revisedPrompt` of a
-  `generate_image` output 16 KB of JSON (6.11, 6.12). A
+  `generate_image` output 16 KB of JSON (6.11, 6.12); Phase 7: 200 projects, project names 80 characters, paths 4096
+  characters, 500 browse entries, a project file of 32 KiB, the workspace tool limits of 6.13 (reads 48 KiB per call,
+  writes 256 KiB, edits on files up to 1 MiB, a shell command 16 KiB, a shell timeout of at most 590 s, each stored
+  output about 60 KiB), and at most 200 steps per run (`maxSteps`, `projectMaxSteps`). A
   non-empty body of a JSON route must be `application/json` (multipart routes also accept `multipart/form-data`), so
   HTML forms cannot post to the API.
 
@@ -1691,6 +2060,34 @@ before every check.
 - **Generated files**: only PNG, JPEG, WebP and GIF images whose bytes match their type are stored (at most 20 MiB);
   anything else a model returns is dropped with the `generated-file-dropped` notice, never stored or rendered (6.11).
 
+### 10.9 Workspace security (Phase 7, ADR-031 … ADR-033)
+
+The workspace tools act on real files with the server's privileges, and the shell runs any command the user approves.
+There is no OS sandbox: run harness-forge in its Docker container (or as a dedicated user) when the workspace matters.
+
+| Threat | Mitigation | Accepted risk |
+|---|---|---|
+| Prompt injection drives the shell in Auto mode | Auto is an explicit choice; Accept edits exists so Auto is not needed for edits; the shell asks in Ask and Accept edits and has no "Always allow" in the UI; hidden-path writes always ask | Auto = full trust in the model |
+| Reading `.env`, then sending it out with `web_fetch` | secret-looking reads ask; `search_files` skips them; `web_fetch` asks outside Auto and the card shows the URL | a shell `cat` in Auto mode |
+| Planting git hooks, CI files, editor tasks, `.npmrc` | hidden or secret paths: writes always ask (policy `always`), even in Accept edits; `.git` is never written by the file tools | a user override `allow` on the tool, or the shell |
+| Symlink escape, `..`, absolute paths | one resolver with realpath containment on every call; dangling links refused; folder links not walked; the root re-checked against its realpath | TOCTOU between check and open, hard links (6.13) |
+| Huge files, FIFOs, binary files | windowed reads with caps, `O_NONBLOCK` + `fstat` regular-file checks, binary detection, size limits on edits and searches | — |
+| ReDoS in `search_files` | the regex runs in a Worker that is terminated after 20 s | — |
+| Fork bombs, long-running or background processes | its own process group killed on Stop, timeout, a background leftover and server exit; timeouts of at most 590 s; capped output; compose `pids_limit: 512` | a process that calls `setsid` escapes the group kill |
+| A stolen session uses the workspace | fresh auth on `POST /projects` (a new folder needs the password); the roots and `HF_WORKSPACE_SHELL` come only from the environment | a valid session can approve its own shell calls: code execution as the server user |
+| Secrets readable by the shell | the environment allowlist (no `HF_*`, no provider keys) | anything the server user can read (`/proc/<ppid>/environ`, `data/secret.key`, the database) |
+| A project that exposes the data directory | a project folder may not equal, contain or sit inside the data dir; roots may not be the data dir or inside it (except `<dataDir>/workspaces`) | a root that contains the data dir is allowed (development), but no project can reach it |
+
+- **Kill switch**: `HF_WORKSPACE_SHELL=0` removes every tool with workspace access `execute` (the `shell` tool) from
+  every run. No session can change it; file tools keep working.
+- **Fresh auth** is required only to create a project. Adding it elsewhere would add friction without protection: a
+  session can already create chats in existing projects and approve its own calls.
+- **Logs**: the shell logs one `info` line per call (exit code, signal, timed out, duration, byte counts); the command
+  text only at `debug`, redacted; file contents and tool inputs and outputs never at `info` (12).
+- **Windows**: the `shell` tool is not registered (the file tools work); the process-group kill needs POSIX.
+- **Docker** (11): the image ships `bash` and `git` for the shell; mount project folders at `/workspaces` and set
+  `HF_WORKSPACE_ROOTS=/workspaces`; the container runs as uid 1000, so the mounted folders must be writable by it.
+
 ## 11. Topology
 
 ### Development (`pnpm dev`, coordinator only)
@@ -1733,7 +2130,15 @@ flowchart LR
   generated SPA (or point `HF_WEB_DIR` at it). The app version comes from the root `package.json`.
 - Docker: `docker compose up -d` starts the image on port 8787 with the data directory on the `/data`
   volume (`HF_DATA_DIR=/data`). The container listens on all interfaces, so the bind rule requires `HF_PASSWORD`
-  (or `HF_INSECURE=1`, not recommended): set it in the compose environment before the first start.
+  (or `HF_INSECURE=1`, not recommended): set it in the compose environment before the first start. Phase 7: the
+  runtime image installs `tini`, `bash` and `git` (the shell tool and git commands in projects); the compose file sets
+  `pids_limit: 512` (a fork bomb in a shell call cannot exhaust the host) and has a commented example that mounts
+  `./workspaces:/workspaces` with `HF_WORKSPACE_ROOTS=/workspaces` (the folder must be writable by uid 1000). Without
+  it, projects live in the default root `/data/workspaces` inside the volume. The container is the shell's sandbox:
+  commands run as the unprivileged `node` user and see only the container's files and the mounted folders.
+- Master-key rotation with `HF_MASTER_KEY` in Docker: stop the server container, run the `rotate-key` CLI in a one-off
+  container on the same volume with `HF_MASTER_KEY` (old) and `HF_NEW_MASTER_KEY` (new), then start the server with the
+  new `HF_MASTER_KEY` (`docs/guides/using-projects.md`).
 - Reverse proxy (TLS): forward the original `Host` header (the Origin check compares it with `Origin`;
   `X-Forwarded-Host` is never used), set `X-Forwarded-For` and `X-Forwarded-Proto`, and list the proxy in
   `HF_TRUST_PROXY`: `loopback` when it runs on the same machine, its exact address, or `private` for a proxy container
@@ -1746,7 +2151,8 @@ flowchart LR
 - Dictation needs a secure context: from another machine, reach the app through HTTPS (the TLS proxy above); plain
   `http://<lan-address>:8787` disables the microphone (section 10.8). A proxy must allow request bodies of at least
   25 MB for recordings (the 256 MB of data imports covers it).
-- Stdio MCP servers and code plugins run inside the same container/user as the server.
+- Stdio MCP servers, code plugins and (Phase 7) shell commands of the workspace tools run inside the same
+  container/user as the server.
 
 ## 12. Observability
 
@@ -1770,6 +2176,14 @@ flowchart LR
   (`providerId`, `modelId`, `chars`, the audio `type` and `bytes` on success, `ms`, `outcome`, `code`). Both services
   record the provider outcome (Settings → Providers status) for answers and provider failures, never for a canceled
   call. None of these lines carries the prompt, the transcript or the speech text.
+- **Workspace** (Phase 7): a shell call logs one `info` line with the chat id, the exit code, the signal, whether it
+  timed out, the duration and the byte counts of both streams; the command text only at `debug`, redacted; file
+  contents, tool inputs and outputs never at `info`. A run whose project folder cannot be opened logs a warning with the
+  project id and the reason.
+- **Maintenance** (Phase 7): `master key rotated` (info, with the counts of `KeyRotationResult`; never key material:
+  the new key text is added to the redactor before anything is logged), the boot recovery's warning about a discarded
+  `secret.key.next`, the CLI's summary on stderr, and one info line per cleanup with its counts (files, bytes, blobs,
+  temp files).
 - **Proxy trust** (texts in section 10.6): the boot log line `trusting reverse proxies (HF_TRUST_PROXY)` lists the
   canonical entries and the trusted ranges; one warning per untrusted peer address that sends a forwarded header the
   server would honor from a trusted proxy (header names only, at most 256 addresses); failed-login warnings carry the

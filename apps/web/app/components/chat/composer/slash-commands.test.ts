@@ -112,7 +112,7 @@ describe('resolveClientCommand', () => {
   it('explains invalid values and unavailable menus', () => {
     expect(resolveClientCommand('model', 'gpt-9', context)).toEqual({ type: 'error', message: 'Unknown model "gpt-9".' })
     expect(resolveClientCommand('effort', 'max', context)).toEqual({ type: 'error', message: 'Unknown effort "max". Use auto, low, medium or high.' })
-    expect(resolveClientCommand('mode', 'yolo', context)).toEqual({ type: 'error', message: 'Unknown mode "yolo". Use off, ask or auto.' })
+    expect(resolveClientCommand('mode', 'yolo', context)).toEqual({ type: 'error', message: 'Unknown mode "yolo". Use off, ask, edits or auto.' })
     expect(resolveClientCommand('effort', 'high', { ...context, efforts: [] }).type).toBe('error')
     expect(resolveClientCommand('mode', '', { ...context, toolsAvailable: false }).type).toBe('error')
   })

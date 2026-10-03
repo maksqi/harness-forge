@@ -146,6 +146,26 @@ describe('unknown routes and invalid input', () => {
     expect(harnessErrorEnvelopeSchema.parse(await response.json()).error.code).toBe('validation_error')
   })
 
+  it.each([
+    ['PATCH', '/api/projects/browse', { name: 'x' }, ['id']],
+    ['DELETE', '/api/projects/prj_short', undefined, ['id']],
+    ['POST', '/api/projects', { name: 'x', path: '/srv', newFolder: '../escape' }, ['newFolder']],
+    ['POST', '/api/projects', { name: 'x', path: '/srv\u0000x' }, ['path']],
+    ['GET', '/api/projects/browse?path=%00', undefined, ['path']],
+    ['POST', '/api/keys/rotate', { confirm: 'rotate' }, ['confirm']],
+  ] as const)('the Phase 7 routes validate their input first: %s %s -> 400', async (method, path, body, issuePath) => {
+    const init: RequestInit = { method }
+    if (body !== undefined) {
+      init.headers = { 'content-type': 'application/json' }
+      init.body = JSON.stringify(body)
+    }
+    const response = await t.request(path, init)
+    expect(response.status).toBe(400)
+    const envelope = harnessErrorEnvelopeSchema.parse(await response.json())
+    expect(envelope.error.code).toBe('validation_error')
+    expect(envelope.error.details).toMatchObject({ issues: [expect.objectContaining({ path: [...issuePath] })] })
+  })
+
   it('malformed JSON -> 400 validation_error', async () => {
     const response = await t.request('/api/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{"displayName":' })
     expect(response.status).toBe(400)

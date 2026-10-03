@@ -79,6 +79,11 @@ export type GeneratedImageRef = z.infer<typeof generatedImageRefSchema>
 export const generateImageToolOutputSchema = z.object({
   /** The image model used. */
   modelRef: modelRefSchema,
+  /**
+   * Display name of the image model (the catalog name, else the model id; plugin API 1.2.0). Absent in outputs stored
+   * before Phase 7: the model-facing text then names `modelRef`.
+   */
+  modelName: z.string().max(200).optional(),
   images: z.array(generatedImageRefSchema).min(1).max(LIMITS.imagesPerTurnMax),
   /** Estimated cost, added to the cost of the message. */
   costUsd: z.number().min(0).optional(),

@@ -157,16 +157,49 @@ ADR-027 consequence).
   - [x] Final gate (e2e ×3, screenshots, audit, v1.1 → v1.2 upgrade) + checkpoint commit; the live provider suite
     (incl. `HF_LIVE_MEDIA=1`) is left to the user (paid, needs keys)
 
-## Backlog (not in v1.2)
+## Phase 7 — v1.3: agent workspace + stabilization
+
+Details, owned paths and acceptance criteria: `docs/phases/phase-7-v1-3.md`. Decisions: ADR-031 … ADR-035 (and an
+ADR-028 consequence). Plan: projects (folders inside `HF_WORKSPACE_ROOTS`), the builtin `core-workspace` tools (file
+tools + a shell with approval), the Accept edits permission mode, master-key rotation, orphaned file cleanup.
+
+- [x] P7-00 Stabilization start (coordinator): math rendering tests (`0cc670e`); Dependabot rebases replaced #2 by #5
+  (ai-sdk group, 16 updates, `ai` 7.0.127) and #3 by #6 (minor-and-patch group, 8 updates), and moved #4 to katex
+  0.19.0 (checked locally with the math tests before the merge); all three squash-merged on GitHub (`aac10a5`,
+  `121db32`, `9341590`); two new build-tooling advisories (node-forge, braces; no patched release yet) ignored in
+  `pnpm-workspace.yaml` `auditConfig`
+- [x] P7-0a Decisions, docs, contracts
+  - [x] K1 DECISIONS (ADR-031 … ADR-035, contract seed), ROADMAP, AGENT.md (coordinator)
+  - [x] K2 dependencies (`diff`, `ignore`, `picomatch`), `key:rotate` script, Dockerfile `bash git`, compose (coordinator)
+  - [x] C13 contracts: shared DTOs + plugin SDK 1.2.0, 9 new routes (85), `docs/API.md`, 501 stubs
+  - [x] D7 docs: `phase-7-v1-3.md`, UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md, guides, README, `.env.example`
+  - [x] Gate + checkpoint commit
+- [ ] P7-0b Schema, migration `0004`, skeletons, FREEZE
+  - [ ] K3 schema + `pnpm db:generate` (coordinator; v1.2 upgrade copy first)
+  - [ ] C14 server skeleton (types, env, deps, workspace path resolver, `core-workspace` skeleton, `mock:workspace`)
+  - [ ] C16 maintenance + keys skeleton (rotatable keyring, maintenance service, boot hooks, approvals helper)
+  - [ ] C15 web skeleton (test ids, Projects nav, stub components, projects store, chats store members)
+  - [ ] Gate (incl. v1.2 data upgrade probe) + FREEZE + checkpoint commit
+- [ ] P7-A Features (13 agents)
+  - [ ] W7.1 projects-server · [ ] W7.2 workspace-files · [ ] W7.3 workspace-shell · [ ] W7.4 chat-pipeline
+  - [ ] W7.5 chats-server · [ ] W7.6 tools-media-api · [ ] W7.7 key-rotation · [ ] W7.8 file-cleanup
+  - [ ] W7.9 projects-web · [ ] W7.10 chat-surface-web · [ ] W7.11 tool-ui-web · [ ] W7.12 composer-web
+  - [ ] W7.13 data-settings-web
+  - [ ] Gate + checkpoint commit
+- [ ] P7-B Feature e2e, docs, fix-ups, final gate
+  - [ ] W7.14 e2e-features · [ ] W7.15 docs-final (W7.16 / W7.17 fix-ups only if the P7-A gate is red)
+  - [ ] Final gate (e2e ×3, screenshots, audit, v1.2 → v1.3 upgrade) + checkpoint commit
+
+## Backlog (not in v1.3)
 
 Multi-user accounts · child-process isolation for code plugins · plugin marketplace/registry index ·
-knowledge/RAG · agent workspace (file and shell tools; revisits ADR-015) · desktop/CLI clients · master-key rotation ·
-audio attachments to chat models · declarative image and voice providers · provider-native image tools (e.g. the
-OpenAI Responses image tool) · on-device speech synthesis · cleanup of orphaned files (generated images are only
-removed by delete-all) · video generation · a `modelName` in the plugin API image result (the `generate_image`
-text names the model ref) · the same error for an unknown provider on the media routes as on chat (404 `not_found` vs
-400 `provider_not_configured`) · verify Alt+V dictation on Firefox / Windows (Alt+J is the documented fallback) · run
-the live provider suite with `HF_LIVE_MEDIA=1` and record the results (PROVIDERS.md 11).
+knowledge/RAG · desktop/CLI clients · audio attachments to chat models · declarative image and voice providers ·
+provider-native image tools (e.g. the OpenAI Responses image tool) · on-device speech synthesis · video generation ·
+verify Alt+V dictation on Firefox / Windows (Alt+J is the documented fallback) · run the live provider suite with
+`HF_LIVE_MEDIA=1` and record the results (PROVIDERS.md 11) · Phase 7 follow-ups: checkpoints / undo of workspace
+edits · a changes side panel (git status and diffs) · a command allowlist for the shell · OS-level sandboxing of the
+shell · an automatic file sweep · a persistent shell session (`cd` that sticks) · remove the two ignored audit
+advisories (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) once patched releases ship.
 
 ## Wave log
 
@@ -191,3 +224,5 @@ the live provider suite with `HF_LIVE_MEDIA=1` and record the results (PROVIDERS
 | P6-A | W6.1 – W6.11 (+ coordinator K5: 3 stale skeleton tests, 2 frozen doc comments, plugins-list e2e 3 tools, builtin `engines ^1.1.0`, migration `0003`) | audit ok (199 paths, no frozen file touched); 5060 tests; build ok; CSP 38/38; probes 21/21 (image turn 2 stored files + metadata, image-output chat, `generate_image` tool, no `data:` URL saved, transcription + 400 / 413, speech WAV no-store + 400, headers, remembered path, delete version 200 / `only-version` / `run-active`, `chat.updated.activeLeafId`, no transcript in logs); e2e 44 passed; screenshots reviewed (versions trash icon, mic, Image models group, Media nav); `pnpm audit --prod` clean | (this commit) |
 | P6-B | W6.12, W6.13, W6.14 (+ coordinator: migration `0003` now ages listings by one TTL instead of clearing them (W6.13 found that null hid cached listings), stale classification comments + the plugin-sdk `seedModels` doc, PROVIDERS.md 12 media subsection, `live.yml` `media` input, the expanded sidebar trigger's 40 px touch target (W6.12 found it)) | audit ok (39 paths); e2e 61 run tests + 4 screenshot tests; new specs 17/17 ×3; docs reconciled; live media unit tests 52 | (final gate commit) |
 | Final gate v1.2 | coordinator | frozen install ok; 5091 tests; build ok; CSP 38/38; probes 21/21; e2e 61 passed ×3 (chromium + mobile + tablet); 5 new screens reviewed; `pnpm audit --prod` clean; real v1.1 → v1.2 upgrade 9/9 (v1.1 from `30da884` in a worktree). Live provider suite not run (needs the user's keys) | (this commit) |
+| P7-00 | coordinator | math tests (unit + e2e) green on katex 0.16 and on the PR #4 build (katex 0.19); Dependabot #5 (replaces #2), #6 (replaces #3), #4 squash-merged on GitHub after green check / e2e / docker (audit red only from two new build-tooling advisories, ignored locally) | `aac10a5`, `121db32`, `9341590`, `0cc670e` |
+| P7-0a | coordinator (K1, K2), C13, D7 | audit ok (78 paths; 15 C13 compile-fix files accepted); frozen install ok; 5195 tests; build ok; CSP 38/38; 9 new routes mounted (501, 400 on invalid input; `pluginApiVersion` 1.2.0); e2e 62 passed (61 + math); Docker image builds with bash 5.3 + git 2.54 (uid 1000); `pnpm audit --prod` clean with the two ignored advisories | (this commit) |

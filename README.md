@@ -2,16 +2,19 @@
 
 harness-forge is a self-hosted, bring-your-own-key (BYOK) AI chat and agent harness. It runs as one Node process
 with a web UI. Connect your own API keys for Claude, ChatGPT, Gemini, Grok, DeepSeek, Kimi, Qwen, GLM and more, or
-point it at a local Ollama. Then chat, watch the models reason, and let them call tools. By default, every tool call
-waits for your approval. A **Plugins** tab adds LLM providers, models, tools, MCP servers and slash commands, either
+point it at a local Ollama. Then chat, watch the models reason, and let them call tools, or let them work on the files
+of a project folder on your server. By default, every tool call that can change something waits for your approval. A **Plugins** tab adds LLM providers, models, tools, MCP servers and slash commands, either
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **Status:** v1.2. On top of v1.1 it adds image generation and voice (dictation and read-aloud) through your own
-> providers, message versions that remember the path shown under them, can be deleted and follow a switch in other open
-> tabs, editing the attachments of a sent message, one password prompt for every sensitive action, and 40 px touch
-> targets on tablets. v1.1 added conversation branching, backup / restore / delete-all, read-only share links, trusted
-> reverse proxies and an opt-in live provider suite. Progress lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status:** v1.3 in progress (Phase 7): projects and an agent workspace (file tools and a shell with approval, an
+> "Accept edits" permission mode, diffs and terminal output in the chat), master-key rotation and a storage cleanup.
+> The features marked "v1.3" below are being built and are not in a release yet. v1.2 added image generation and voice
+> (dictation and read-aloud) through your own providers, message versions that remember the path shown under them, can
+> be deleted and follow a switch in other open tabs, editing the attachments of a sent message, one password prompt for
+> every sensitive action, and 40 px touch targets on tablets. v1.1 added conversation branching, backup / restore /
+> delete-all, read-only share links, trusted reverse proxies and an opt-in live provider suite. Progress lives in
+> [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ![A chat reply with markdown, a table and a highlighted code block; the composer shows the model picker and the microphone button (dark theme)](docs/assets/screenshots/chat-dark.png)
 
@@ -32,6 +35,18 @@ desktop app, and it starts in dark mode.
     restores that whole path; an unwanted version can be deleted (with everything after it); other open tabs follow a
     switch.
   - Automatic chat titles, per-message token usage and cost, and a context-usage ring.
+- **Projects and the agent workspace** (v1.3):
+  - A project is a folder on your server, inside the folders you allow (`HF_WORKSPACE_ROOTS`). Add one in
+    Settings -> Projects with a folder browser (or create a new folder there); a chat can belong to a project, and the
+    sidebar filters chats by project.
+  - In a project chat the model reads, searches and edits files (`read_file`, `list_directory`, `find_files`,
+    `search_files`, `write_file`, `edit_file`) and runs shell commands (`shell`) in the project folder. Edits show as
+    diffs and commands as terminal output inside the tool rows; an `AGENTS.md` (or `CLAUDE.md`) in the folder joins the
+    instructions.
+  - Approval cards preview the change (a diff, the file, the exact command). The "Accept edits" mode lets edits run
+    without asking while shell commands still ask, and every shell command is approved on its own (no "Always allow").
+  - Shell commands run in their own process group with a minimal environment, a timeout and capped output;
+    `HF_WORKSPACE_SHELL=0` turns the shell off for everyone. Guide: [using projects](docs/guides/using-projects.md).
 - **Images** (with your own keys):
   - Pick an image model (OpenAI GPT Image, xAI Grok Imagine) in the composer and describe a picture: 1 to 4 images
     per turn, an aspect ratio (Auto, 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16), and follow-ups such as "make it blue" that
@@ -52,17 +67,19 @@ desktop app, and it starts in dark mode.
   - Recordings and the text read aloud pass through the server to the provider you picked and are never stored or
     logged.
 - **Your data** (Settings -> Data): back up every chat, with every version and attachment, to one zip file; restore it
-  here or on another server (existing chats are skipped or copied); or delete all chats at once.
+  here or on another server (existing chats are skipped or copied); or delete all chats at once. v1.3: remove the files
+  no chat uses anymore (a storage cleanup with a preview), and rotate the master key that encrypts your API keys (in the
+  app, or with `pnpm key:rotate` when the key comes from `HF_MASTER_KEY`).
 - **Share links**: publish a read-only snapshot of a chat at an unguessable link, choose whether reasoning, tool
   details and files and images are included, set an expiry date, update the snapshot or revoke the link at any time.
 - **Composer**:
   - A model picker with provider icons and capability badges, and an "Image models" group.
-  - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode (Ask, Auto, Off) for tools; image
-    options (count, aspect ratio, edit the previous image) for image models.
+  - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode (Ask, Auto, Off; v1.3: Accept
+    edits in project chats) for tools; image options (count, aspect ratio, edit the previous image) for image models.
   - Slash commands: `/explain`, `/review`, `/fix`, `/translate`, `/proofread` and more, plus commands from plugins.
   - A microphone button for dictation.
-- **Sidebar and navigation**: a Chat | Plugins switch, chats grouped by date with live status dots (running, needs
-  approval, unread), a Mod+K command palette, keyboard shortcuts, a Light / Dark / System theme toggle, and 40 px
+- **Sidebar and navigation**: a Chat | Plugins switch, a project switcher (v1.3), chats grouped by date with live status
+  dots (running, needs approval, unread), a Mod+K command palette, keyboard shortcuts, a Light / Dark / System theme toggle, and 40 px
   touch targets in the collapsed icon rail on tablets.
 - **Providers and models**:
   - 13 builtin BYOK providers. Keys are encrypted at rest, shown only as masked hints, and can fall back to
@@ -77,10 +94,11 @@ desktop app, and it starts in dark mode.
   - Declarative provider plugins, built with a five-step wizard or written as `plugin.json`.
   - Code plugins (tools, providers, commands, hooks, MCP servers) from templates, edited and rebuilt in the browser.
     Plugin API 1.1.0 lets a code provider add image, speech-to-text and text-to-speech models, and a code tool
-    generate images.
+    generate images; plugin API 1.2.0 (v1.3) lets a tool work on the chat's project folder.
   - Install from a zip, npm, a URL with an integrity hash, or a local folder, with an explicit trust step for code.
 - **Tools and MCP**: MCP servers over stdio, Streamable HTTP and SSE. The builtin tools are `current_time`,
-  `web_fetch` (SSRF-guarded) and `generate_image`. Every tool has an approval policy and a per-tool override.
+  `web_fetch` (SSRF-guarded) and `generate_image`, plus the workspace tools of project chats (v1.3). Every tool has an
+  approval policy and a per-tool override.
 - **Self-hosting**: SQLite storage, one port, an optional password, a loopback-only bind unless you secure it,
   trusted reverse proxies (`HF_TRUST_PROXY`) so rate limits and Secure cookies see the real clients, and a Docker image
   with a `/data` volume.
@@ -160,6 +178,15 @@ The container runs as the unprivileged `node` user (uid 1000); a bind-mounted da
 it. Put a TLS reverse proxy in front before exposing it beyond your machine or LAN (see
 [Behind a reverse proxy](#behind-a-reverse-proxy)).
 
+### Projects (agent workspace, v1.3)
+
+Projects live in `data/workspaces` (`/data/workspaces` in Docker) unless you allow other folders with
+`HF_WORKSPACE_ROOTS` (absolute paths, comma separated), for example `HF_WORKSPACE_ROOTS=/home/me/code`. In Docker,
+mount the folders and name the mount point (the commented `./workspaces:/workspaces` lines in `docker-compose.yml`;
+writable by uid 1000). Then add a project in Settings -> Projects and start a chat in it. The shell tool runs commands
+with the server's permissions after you approve them; set `HF_WORKSPACE_SHELL=0` to turn it off. Details, permission
+modes and security notes: [using projects](docs/guides/using-projects.md).
+
 ## Configuration
 
 Every variable is optional. [`.env.example`](.env.example) lists them with comments.
@@ -176,11 +203,16 @@ Every variable is optional. [`.env.example`](.env.example) lists them with comme
 | `HF_PLUGIN_WATCH` | unset | `1` hot-reloads code plugins in the data directory when their files change (linked folders always reload) |
 | `HF_OFFLINE` | unset | `1` never downloads the models.dev catalog (the bundled snapshot is used) |
 | `HF_INSECURE` | unset | `1` allows a non-loopback bind without a password (only behind another authentication layer); it also disables the DNS-rebinding guard that restricts a password-less server to `localhost` host names |
+| `HF_WORKSPACE_ROOTS` | `<data dir>/workspaces` | folders that may hold project folders (v1.3): a comma list of absolute paths; a relative path, `/`, a missing folder, the data directory or a folder inside it (other than `<data dir>/workspaces`) stops the start. See [using projects](docs/guides/using-projects.md) |
+| `HF_WORKSPACE_SHELL` | `1` | `0` removes the `shell` tool from every chat (v1.3; the file tools keep working); no setting in the app can turn it back on |
 | `HF_TRUST_PROXY` | unset | reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` headers are trusted: a comma list of `loopback` (127.0.0.0/8, ::1), `private` (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7), IP addresses and CIDR ranges. `1`, `true`, `*` and other booleans, hop counts, `/0` ranges, `localhost` (write `loopback`) and unknown words stop the start with the format explained; `X-Forwarded-Host` is never used. Unset: `X-Forwarded-For` is ignored and `X-Forwarded-Proto` is honored from any peer (v1). See [Behind a reverse proxy](#behind-a-reverse-proxy) |
 | `HF_WEB_DIR` | `apps/web/.output/public` | directory of the built web app served in production |
 | `HF_API_TARGET` | `http://localhost:8787` | where `nuxt dev` proxies `/api` (development only) |
 | `NODE_ENV` | unset | `development` forces dev mode (debug logs, `:3000` origins allowed), `production` forces production; by default dev mode means running from TypeScript sources |
 | `<VENDOR>_API_KEY` | unset | provider key fallbacks, see [Supported providers](#supported-providers) |
+
+`HF_NEW_MASTER_KEY` is read only by the offline key rotation (`pnpm key:rotate` with the server stopped, when the key
+comes from `HF_MASTER_KEY`; v1.3): it holds the new key, which the CLI never generates or prints.
 
 A key saved in Settings wins over its environment variable; the key dialog shows which source is active ("From env").
 Flags accept `1` / `true` / `yes` / `on` and `0` / `false` / `no` / `off`; an empty value counts as unset, and any
@@ -222,7 +254,8 @@ Start one from a template (**New plugin** -> **Code plugin**), then edit it and 
 Or develop in your own editor with a linked folder that reloads on save.
 
 - Guides: [writing a declarative provider](docs/guides/writing-a-declarative-provider.md),
-  [writing a code plugin](docs/guides/writing-a-code-plugin.md), [adding an MCP server](docs/guides/adding-an-mcp-server.md).
+  [writing a code plugin](docs/guides/writing-a-code-plugin.md) (also tools that work on a project folder),
+  [adding an MCP server](docs/guides/adding-an-mcp-server.md).
 - Examples that load as they are: [`examples/plugins/`](examples/plugins/) (LM Studio, Together AI, a dice-roller
   tool, a TypeScript echo provider, the MCP "everything" server).
 - The full contract (manifest, `PluginContext`, hooks, lifecycle, install, trust): [`docs/PLUGINS.md`](docs/PLUGINS.md).
@@ -251,7 +284,15 @@ harness-forge is built for **one user** on their own machine or server.
   or approvals; reasoning, tool details and files and images only when you include them. Its token is an HMAC that is
   never stored and never logged; revoking the link or changing the master key ends it, and every response carries
   `X-Robots-Tag: noindex, nofollow`.
-- **Backups.** The Settings -> Data zip never contains API keys, the password, plugins or MCP servers.
+- **Backups.** The Settings -> Data zip never contains API keys, the password, plugins, MCP servers or projects.
+- **Projects, files and the shell** (v1.3). The workspace tools act on real files with the server's rights, and an
+  approved shell command runs as the server's user; there is no sandbox inside harness-forge, so run it in Docker (or as
+  a dedicated user) when the folders matter. Projects can only be created inside `HF_WORKSPACE_ROOTS`, never around the
+  data directory, and adding one asks for the password. The file tools refuse paths outside the project (also through
+  symbolic links) and never write into `.git`; reading secret-looking files and writing hidden ones always ask; shell
+  commands get a minimal environment (no `HF_*` variables, no provider keys), their own process group, a timeout and no
+  "Always allow". Anyone who can log in can approve shell commands: keep `HF_PASSWORD` set, or turn the shell off with
+  `HF_WORKSPACE_SHELL=0`.
 - **Microphone and media.** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
   `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled ("Voice
   input needs HTTPS or localhost"); use the TLS reverse proxy below. The page may use only its own microphone
@@ -259,7 +300,9 @@ harness-forge is built for **one user** on their own machine or server.
   only to the provider you pick in Settings -> Media and are never stored or logged; generated images are stored as
   files like attachments, and a `data:` URL is never saved in a chat.
 - **Secrets.** Provider keys and plugin secrets are encrypted with AES-256-GCM under a master key from
-  `HF_MASTER_KEY` or `data/secret.key`. The API never returns a secret, and logs are redacted.
+  `HF_MASTER_KEY` or `data/secret.key`. The API never returns a secret, and logs are redacted. v1.3: the master key can
+  be rotated (Settings -> Data -> Encryption key, or `pnpm key:rotate` for `HF_MASTER_KEY`); a rotation signs other
+  browsers out and changes every share link, and v1.2 cannot read the data afterwards.
 - **Plugins.** Code plugins and stdio MCP servers run **with the full rights of the server process**. They load only
   after you trust their exact files (SHA-256 pin) and become untrusted again when those files change. Declarative
   plugins run no code. `HF_SAFE_MODE=1` starts with builtin plugins only.
@@ -352,7 +395,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 
 | Document | Contents |
 |---|---|
-| [`docs/guides/`](docs/guides/) | step-by-step guides: [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) |
+| [`docs/guides/`](docs/guides/) | step-by-step guides: [using projects](docs/guides/using-projects.md), [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) |
 | [`examples/plugins/`](examples/plugins/) | five example plugins with READMEs and a test that loads them |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | components, flows, data directory, database, security model, topology |
 | [`docs/API.md`](docs/API.md) | every HTTP endpoint, the error envelope, the chat stream protocol, server events |
@@ -361,7 +404,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | [`docs/UI.md`](docs/UI.md) | layout, design tokens, components, routes, shortcuts, test ids |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | phases, tasks and progress |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture decision records and the contract seed |
-| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md) |
+| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md) |
 | [`AGENT.md`](AGENT.md) | rules for AI agents working on this repository |
 
 ## Development
@@ -385,6 +428,7 @@ on SQLite), and the TypeScript-only packages `packages/shared` (schemas, DTOs, r
 | `pnpm check` | check:english + lint + typecheck + test |
 | `pnpm db:generate` | drizzle-kit generate (after schema changes) |
 | `pnpm catalog:update` | refresh the bundled models.dev snapshot |
+| `pnpm key:rotate` | offline master-key rotation (v1.3; the server must be stopped; `HF_NEW_MASTER_KEY` = the new key when the key comes from `HF_MASTER_KEY`) |
 
 All development happens on the `main` branch. CI (`.github/workflows/ci.yml`) runs `pnpm check`, the build with the
 built-page CSP test and the Playwright e2e suite, and the Docker image build on every push to `main` and on pull

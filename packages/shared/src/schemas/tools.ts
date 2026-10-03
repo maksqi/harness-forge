@@ -1,6 +1,6 @@
 // Tool, MCP server and command DTOs (API.md section 4.9).
 import { z } from 'zod'
-import { mcpStatusSchema, toolOverrideSchema, toolPolicySchema } from '../enums.ts'
+import { mcpStatusSchema, toolOverrideSchema, toolPolicySchema, workspaceAccessSchema } from '../enums.ts'
 import { harnessErrorInitSchema } from '../errors.ts'
 import { commandNameSchema, mcpServerIdSchema, pluginIdSchema, timestampSchema, toolNameSchema } from '../ids.ts'
 import { hasControlChars } from '../util/text.ts'
@@ -25,6 +25,11 @@ export const toolSummarySchema = z.object({
   override: toolOverrideSchema.nullable(),
   /** Owner active and, for MCP tools, server connected. */
   available: z.boolean(),
+  /**
+   * `ToolDefinition.workspace` (ADR-032): what the tool does with the project folder; such a tool is offered only in
+   * chats whose project folder opened. null = not a workspace tool (MCP tools always).
+   */
+  workspace: workspaceAccessSchema.nullable(),
   /** JSON Schema of the input (display only). */
   inputSchema: z.record(z.string(), z.unknown()),
 })

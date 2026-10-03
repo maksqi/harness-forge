@@ -23,6 +23,7 @@
     "check": "pnpm run check:english && pnpm run lint && pnpm run typecheck && pnpm run test",
     "db:generate": "pnpm --filter @harness-forge/server run db:generate",
     "catalog:update": "tsx scripts/update-catalog.ts",
+    "key:rotate": "node apps/server/dist/main.mjs rotate-key",
     "audit:ownership": "node scripts/audit-ownership.mjs"
   },
   "devDependencies": {

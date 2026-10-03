@@ -1,9 +1,10 @@
 // Server-sent events of `GET /api/events` (API.md sections 4.14 and 7).
 import { z } from 'zod'
 import { harnessErrorInitSchema } from './errors.ts'
-import { chatIdSchema, messageIdSchema, modelRefSchema, pluginIdSchema, providerIdSchema, timestampSchema } from './ids.ts'
+import { chatIdSchema, messageIdSchema, modelRefSchema, pluginIdSchema, projectIdSchema, providerIdSchema, timestampSchema } from './ids.ts'
 import { chatSummarySchema } from './schemas/chats.ts'
 import { pluginLogEntrySchema, pluginSummarySchema } from './schemas/plugins.ts'
+import { projectSummarySchema } from './schemas/projects.ts'
 import { providerSummarySchema } from './schemas/providers.ts'
 
 /** Every server event type; the SSE `event:` field equals `type`. */
@@ -17,6 +18,8 @@ export const SERVER_EVENT_TYPES = [
   'catalog.changed',
   'plugin.changed',
   'plugin.log',
+  'project.changed',
+  'key.rotated',
 ] as const
 
 export const serverEventTypeSchema = z.enum(SERVER_EVENT_TYPES)
@@ -52,6 +55,27 @@ export const runFinishedDataSchema = z.object({
 })
 export type RunFinishedData = z.infer<typeof runFinishedDataSchema>
 
+/**
+ * Data of `project.changed` (ADR-031): `project: null` = the project was deleted (its chats were detached in the same
+ * transaction; no `chat.updated` is sent per chat, clients set their `projectId` to null).
+ */
+export const projectChangedDataSchema = z.object({
+  id: projectIdSchema,
+  project: projectSummarySchema.nullable(),
+})
+export type ProjectChangedData = z.infer<typeof projectChangedDataSchema>
+
+/**
+ * Data of `key.rotated` (ADR-034): sent once after a master-key rotation, then every event stream closes (the sessions
+ * were revoked). `chatIds`: the chats whose pending approvals expired or whose runs were stopped (at most 1000).
+ */
+export const keyRotatedDataSchema = z.object({
+  keyVersion: z.int().min(1),
+  rotatedAt: timestampSchema,
+  chatIds: z.array(chatIdSchema).max(1000),
+})
+export type KeyRotatedData = z.infer<typeof keyRotatedDataSchema>
+
 function eventSchema<const T extends (typeof SERVER_EVENT_TYPES)[number], D extends z.ZodType>(type: T, data: D) {
   return z.object({ type: z.literal(type), data, at: timestampSchema })
 }
@@ -71,6 +95,10 @@ export const serverEventSchema = z.discriminatedUnion('type', [
   /** `plugin: null`: the plugin was uninstalled. */
   eventSchema('plugin.changed', z.object({ id: pluginIdSchema, plugin: pluginSummarySchema.nullable() })),
   eventSchema('plugin.log', z.object({ pluginId: pluginIdSchema, entry: pluginLogEntrySchema })),
+  /** `project: null`: the project was deleted. */
+  eventSchema('project.changed', projectChangedDataSchema),
+  /** The last event of every stream: the server closes the streams right after it. */
+  eventSchema('key.rotated', keyRotatedDataSchema),
 ])
 export type ServerEvent = z.infer<typeof serverEventSchema>
 export type ServerEventType = ServerEvent['type']

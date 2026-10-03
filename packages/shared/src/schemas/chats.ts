@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { harnessUIMessageSchema } from '../chat.ts'
 import { reasoningEffortSchema, titleSourceSchema, toolModeSchema } from '../enums.ts'
-import { chatIdSchema, messageIdSchema, modelRefSchema, timestampSchema } from '../ids.ts'
+import { chatIdSchema, messageIdSchema, modelRefSchema, projectIdSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { cursorSchema, queryBooleanSchema, queryIntSchema } from './common.ts'
 
@@ -47,6 +47,11 @@ export const chatSummarySchema = z.object({
   running: z.boolean(),
   /** The active leaf (an assistant message) waits for a tool approval. */
   pendingApproval: z.boolean(),
+  /**
+   * The project the chat belongs to (ADR-031); null = no project. Never part of a chat export or a backup (projects are
+   * host-specific): the export schemas omit it.
+   */
+  projectId: projectIdSchema.nullable(),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
   /** Only for `GET /chats?q=`: matching excerpt, plain text. */
@@ -111,6 +116,8 @@ export const chatsQuerySchema = z.object({
   q: z.string().trim().min(1).max(200).optional(),
   /** true: only archived chats; false (default): only non-archived chats. */
   archived: queryBooleanSchema.optional(),
+  /** Only the chats of this project, or `none`: only chats without a project (ADR-031); omitted = every chat. */
+  projectId: z.union([projectIdSchema, z.literal('none')]).optional(),
 })
 export type ChatsQuery = z.infer<typeof chatsQuerySchema>
 
@@ -122,6 +129,8 @@ export const chatCreateSchema = z.strictObject({
   title: titleInputSchema.optional(),
   modelRef: modelRefSchema.optional(),
   settings: chatSettingsSchema.optional(),
+  /** The project of the chat (ADR-031); an unknown project is a `404`. Default: no project. */
+  projectId: projectIdSchema.optional(),
   /** Import (e.g. the `chat.messages` of a JSON export), in `seq` order. */
   messages: z.array(harnessUIMessageSchema).max(LIMITS.chatImportMessagesMax).optional(),
   /**
@@ -143,6 +152,11 @@ export const chatUpdateSchema = z
     archived: z.boolean().optional(),
     modelRef: modelRefSchema.nullable().optional(),
     settings: chatSettingsUpdateSchema.optional(),
+    /**
+     * Moves the chat to a project, or out of it with null (ADR-031): `404` for an unknown project, `409` (`run-active`)
+     * while a run holds the chat.
+     */
+    projectId: projectIdSchema.nullable().optional(),
   })
   .refine(value => Object.keys(value).length > 0, 'Send at least one field.')
 export type ChatUpdate = z.infer<typeof chatUpdateSchema>
@@ -160,26 +174,29 @@ const exportedMessagesSchema = z.array(harnessUIMessageSchema).max(LIMITS.backup
 
 /**
  * Chat JSON export version 1 (linear chats, written before ADR-023; still accepted by imports): `chat` is the detail
- * without `branches`. `running` / `pendingApproval` are false.
+ * without `branches` and `projectId`. `running` / `pendingApproval` are false.
+ *
+ * Neither export version carries `projectId` (ADR-031): projects are host-specific, so imported chats never get one,
+ * and the exports written before Phase 7 (without the field) keep importing. A `projectId` key in an upload is dropped.
  */
 export const chatExportV1Schema = z.object({
   format: z.literal('harness-forge.chat'),
   version: z.literal(1),
   exportedAt: timestampSchema,
-  chat: chatDetailSchema.omit({ branches: true }).extend({ messages: exportedMessagesSchema }),
+  chat: chatDetailSchema.omit({ branches: true, projectId: true }).extend({ messages: exportedMessagesSchema }),
 })
 export type ChatExportV1 = z.infer<typeof chatExportV1Schema>
 
 /**
- * Chat JSON export version 2 (ADR-023): `chat` = summary + settings + totals + every message version in `seq` order +
- * the parent of each message (aligned by index) + the active leaf. Messages carry no parent field of their own.
- * `running` / `pendingApproval` are false.
+ * Chat JSON export version 2 (ADR-023): `chat` = summary (without `projectId`, ADR-031) + settings + totals + every
+ * message version in `seq` order + the parent of each message (aligned by index) + the active leaf. Messages carry no
+ * parent field of their own. `running` / `pendingApproval` are false.
  */
 export const chatExportV2Schema = z.object({
   format: z.literal('harness-forge.chat'),
   version: z.literal(2),
   exportedAt: timestampSchema,
-  chat: chatSummarySchema.extend({
+  chat: chatSummarySchema.omit({ projectId: true }).extend({
     settings: chatSettingsSchema,
     totals: usageTotalsSchema,
     /** Every version, in `seq` order. */

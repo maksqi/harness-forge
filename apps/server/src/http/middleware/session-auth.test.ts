@@ -144,8 +144,20 @@ describe('with a password and no session', () => {
 
   it('the public routes are exactly the ones of ARCHITECTURE.md 10.1', () => {
     expect(PUBLIC_KEYS.sort()).toEqual(['auth.login', 'auth.logout', 'auth.status', 'health.get', 'icons.get', 'icons.list', 'shares.file', 'shares.view'])
-    // Phase 6: dictation, read-aloud (ADR-029) and deleting a version (ADR-030) need a session.
+    // Phase 6: dictation, read-aloud (ADR-029) and deleting a version (ADR-030) need a session; Phase 7: projects
+    // (ADR-031), the master key (ADR-034) and the file cleanup (ADR-035) too.
     expect(PRIVATE_KEYS).toEqual(expect.arrayContaining(['audio.transcribe', 'audio.speech', 'chats.deleteMessage']))
+    expect(PRIVATE_KEYS).toEqual(expect.arrayContaining([
+      'projects.list',
+      'projects.create',
+      'projects.update',
+      'projects.remove',
+      'projects.browse',
+      'keys.get',
+      'keys.rotate',
+      'data.cleanupPreview',
+      'data.cleanup',
+    ]))
   })
 
   it.each(PRIVATE_KEYS)('%s answers 401 unauthorized (action login)', async (key: ApiRouteKey) => {

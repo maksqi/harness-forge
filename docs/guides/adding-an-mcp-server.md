@@ -174,7 +174,8 @@ Each MCP tool gets a policy from its annotations first, then from the server's p
 | `destructiveHint: true` | `always` | asks | asks |
 | neither | the server's `policy` (default `ask`) | asks (`safe`: runs) | runs (`always`: asks) |
 
-Annotations come from the server and are only hints. For a server you do not fully trust, set **Ask** on its tools:
+MCP tools never have workspace access, so in the **Accept edits** mode of project chats (v1.3) they ask exactly as in
+**Ask** mode. Annotations come from the server and are only hints. For a server you do not fully trust, set **Ask** on its tools:
 in the tools table of the plugin detail page, each tool has an enable switch and an approval override (Default /
 Allow / Ask / Deny) that wins over the policy. Checking **Always allow** on an approval card before **Allow** sets the
 override to Allow.

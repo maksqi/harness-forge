@@ -1,5 +1,5 @@
 /* eslint-disable -- copy of the harness-forge.d.ts that the code plugin templates write */
-// harness-forge plugin API 1.1.0: types for your editor.
+// harness-forge plugin API 1.2.0: types for your editor.
 //
 // This file lets "// @ts-check" with JSDoc types (index.mjs) and "import type" (index.ts) resolve
 // "@harness-forge/plugin-sdk" without installing anything. The host never loads it and it is not part of the trust
@@ -18,7 +18,10 @@ declare module '@harness-forge/plugin-sdk' {
   export type PluginSource = 'builtin' | 'created' | 'zip' | 'npm' | 'url' | 'link' | 'copy'
   export type PluginState = 'disabled' | 'untrusted' | 'incompatible' | 'loading' | 'active' | 'error'
   export type PluginPermission = 'network' | 'secrets' | 'storage' | 'hooks' | 'process'
-  export type ToolMode = 'off' | 'ask' | 'auto'
+  /** Permission mode of a chat; 'edits' runs write tools without asking (plugin API 1.2.0). */
+  export type ToolMode = 'off' | 'ask' | 'edits' | 'auto'
+  /** What a tool does with the project folder of a chat (plugin API 1.2.0). */
+  export type ToolWorkspaceAccess = 'read' | 'write' | 'execute'
   export type ToolPolicy = 'safe' | 'ask' | 'always'
   export type ReasoningEffort = 'auto' | 'off' | 'low' | 'medium' | 'high' | 'max'
   /** AI SDK top-level "reasoning" values (without "provider-default"). */
@@ -247,7 +250,7 @@ declare module '@harness-forge/plugin-sdk' {
     credentials: CredentialField[]
     modelsDevId?: string
     smallModelId?: string
-    /** Models shown when there is no live or cached listing. */
+    /** Models shown when there is no live or cached listing (media seeds always); they also fill gaps of listed models. */
     seedModels?: ModelInfo[]
     /** "Get a key" link of the key dialog. */
     keyUrl?: string
@@ -275,6 +278,14 @@ declare module '@harness-forge/plugin-sdk' {
 
   // ---------- tools ----------
 
+  /** The project folder of a chat (plugin API 1.2.0). */
+  export interface ToolWorkspace {
+    readonly projectId: string
+    readonly name: string
+    /** Canonical realpath of the folder; keep every path you resolve inside it. */
+    readonly root: string
+  }
+
   export interface ToolCallContext {
     chatId: string
     modelRef: string
@@ -283,6 +294,8 @@ declare module '@harness-forge/plugin-sdk' {
     messages: ModelMessage[]
     /** Aborted on stop, timeout, or plugin disable. */
     signal: AbortSignal
+    /** The project folder of the chat, when it has one that opened (plugin API 1.2.0). */
+    workspace?: ToolWorkspace
   }
 
   /** Guarded (3 s); a throw or timeout counts as 'always'. */
@@ -299,6 +312,8 @@ declare module '@harness-forge/plugin-sdk' {
     policy?: ToolPolicy | ToolPolicyFunction<I>
     /** Default 60000, max 600000. */
     timeoutMs?: number
+    /** Uses the project folder: offered only in chats whose folder opened; 'write' tools run without asking in 'edits'. */
+    workspace?: ToolWorkspaceAccess
     /** The output must be JSON-serializable (capped at 64 KB). */
     execute(input: I, c: ToolCallContext): Promise<O>
     /** Converts the stored output for the model (fast and deterministic, 3 s). */
@@ -410,6 +425,8 @@ declare module '@harness-forge/plugin-sdk' {
   export interface ImageGenerateResult {
     /** The image model used. */
     modelRef: string
+    /** Display name of the image model (plugin API 1.2.0). */
+    modelName: string
     images: GeneratedImageFile[]
     costUsd?: number
     revisedPrompt?: string

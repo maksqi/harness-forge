@@ -2,7 +2,8 @@
 // last 10 minutes, else `403 forbidden` with `action: 'login'` and nothing changes. Route-table driven: the cases below
 // must cover every route flagged `fresh` in the shared route table plus the conditional cases the server enforces
 // (installing / trusting code or stdio-MCP plugins, scaffold, code-file writes and deletes, build, reload of code
-// plugins, stdio MCP create / update, drafts that declare a stdio server, password change). Each case runs twice on a
+// plugins, stdio MCP create / update, drafts that declare a stdio server, password change, adding a project, rotating
+// the master key). Each case runs twice on a
 // fresh app: with a stale session (refused, no side effect), then with a fresh one (succeeds). Negative controls show
 // that the same routes stay usable with a stale session when nothing runs code.
 import type { ApiRouteDef, ApiRouteKey } from '@harness-forge/shared'
@@ -67,8 +68,11 @@ interface FreshCase {
   /** Prepares the state (services called directly, so no fresh auth is involved). */
   prepare?: (a: InstallTestApp) => Promise<void>
   attempt: Attempt
-  /** Status of the fresh attempt (a route that is still a stub answers 501 from its own handler instead). */
-  ok: number
+  /**
+   * Status of the fresh attempt, or the statuses it may have (a route that is still a stub answers 501 from its own
+   * handler instead).
+   */
+  ok: number | readonly number[]
   /** Proves the refused attempt changed nothing. */
   unchanged: (a: InstallTestApp) => Promise<void>
 }
@@ -281,6 +285,23 @@ const CASES: FreshCase[] = [
     ok: 404,
     unchanged: async () => {},
   },
+  {
+    // ADR-031: a project gives the session file and shell access to a folder. The missing folder proves the request
+    // reached the route (404) without creating anything.
+    name: 'adding a project (a missing folder proves the request reached the route)',
+    key: 'projects.create',
+    attempt: { method: 'POST', path: '/api/projects', json: { name: 'Fresh project', path: '/harness-forge-fresh/missing', newFolder: 'fresh-project' } },
+    ok: 404,
+    unchanged: async () => {},
+  },
+  {
+    // ADR-034: 200 with a key file; 409 (`env-key` / `key-mismatch`) when the test keyring cannot be rotated online.
+    name: 'rotating the master key',
+    key: 'keys.rotate',
+    attempt: { method: 'POST', path: '/api/keys/rotate', json: { confirm: 'ROTATE' } },
+    ok: [200, 409],
+    unchanged: async () => {},
+  },
 ]
 
 async function cookie(a: InstallTestApp, authAgeMs: number): Promise<string> {
@@ -324,9 +345,11 @@ describe('sEC-A5 fresh auth table', () => {
     expect([...ALWAYS_FRESH_KEYS].sort()).toEqual([
       'auth.setPassword',
       'data.deleteAll',
+      'keys.rotate',
       'pluginFiles.build',
       'pluginFiles.scaffold',
       'pluginInstall.trust',
+      'projects.create',
       'shares.create',
       'shares.update',
     ])
@@ -345,7 +368,8 @@ describe('sEC-A5 fresh auth table', () => {
 
     const fresh = await send(a, attempt, await cookie(a, 60_000))
     const text = await fresh.text()
-    expect(fresh.status, text).toBe(stubRouteKeys().has(entry.key) ? 501 : entry.ok)
+    const expected = stubRouteKeys().has(entry.key) ? [501] : typeof entry.ok === 'number' ? [entry.ok] : entry.ok
+    expect(expected, text).toContain(fresh.status)
   })
 
   it('the window is 10 minutes from the password login (inclusive)', async () => {

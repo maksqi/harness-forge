@@ -26,8 +26,11 @@ import type {
   ProviderDefinition,
   ReasoningLevel,
   SettingsSchema,
+  ToolCallContext,
   ToolDefinition,
   ToolResultOutput,
+  ToolWorkspace,
+  ToolWorkspaceAccess,
   TranscriptionHints,
 } from './index.ts'
 import * as shared from '@harness-forge/shared'
@@ -70,8 +73,8 @@ describe('exports', () => {
     expect(Object.keys(sdk).sort()).toEqual([...REEXPORTED_VALUES, 'PLUGIN_API_VERSION', 'definePlugin', 'settingsValuesSchema'].sort())
   })
 
-  it('has plugin API version 1.1.0 (Phase 6: image, transcription and speech models, ctx.images)', () => {
-    expect(sdk.PLUGIN_API_VERSION).toBe('1.1.0')
+  it('has plugin API version 1.2.0 (Phase 7: workspace tools, ImageGenerateResult.modelName)', () => {
+    expect(sdk.PLUGIN_API_VERSION).toBe('1.2.0')
   })
 
   it('definePlugin is the identity', () => {
@@ -111,6 +114,25 @@ describe('exports', () => {
     expectTypeOf<keyof GeneratedImageFile>().toEqualTypeOf<'fileId' | 'url' | 'mediaType' | 'name' | 'size'>()
     // `ctx.ai` gains no image function: plugins generate images through `ctx.images` (stored files, usage rows).
     expectTypeOf<keyof PluginContext['ai']>().toEqualTypeOf<'z' | 'tool' | 'jsonSchema' | 'generateText' | 'createOpenAICompatible' | 'createAnthropic' | 'createOpenAI' | 'createGoogleGenerativeAI'>()
+  })
+
+  it('types the workspace additions of plugin API 1.2.0 (ADR-031, ADR-032)', () => {
+    expectTypeOf<ToolWorkspaceAccess>().toEqualTypeOf<shared.WorkspaceAccess>()
+    expectTypeOf<ToolWorkspaceAccess>().toEqualTypeOf<'read' | 'write' | 'execute'>()
+    expectTypeOf<ToolWorkspace>().toEqualTypeOf<{ readonly projectId: string, readonly name: string, readonly root: string }>()
+    expectTypeOf<ToolCallContext['workspace']>().toEqualTypeOf<ToolWorkspace | undefined>()
+    expectTypeOf<ToolDefinition['workspace']>().toEqualTypeOf<ToolWorkspaceAccess | undefined>()
+    expectTypeOf<ImageGenerateResult['modelName']>().toEqualTypeOf<string>()
+    // The edits mode reaches hooks through the shared enum.
+    expectTypeOf<shared.ToolMode>().toEqualTypeOf<'off' | 'ask' | 'edits' | 'auto'>()
+    const tool: ToolDefinition<{ path: string }, string> = {
+      name: 'read_note',
+      description: 'Reads a note of the project.',
+      inputSchema: z.object({ path: z.string() }),
+      workspace: 'read',
+      execute: async (input, c) => `${c.workspace?.root ?? ''}/${input.path}`,
+    }
+    expect(tool.workspace).toBe('read')
   })
 
   it('derives the AI SDK types of PLUGINS.md section 9', () => {

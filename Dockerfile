@@ -12,6 +12,10 @@
 #
 # Data (SQLite database, secret.key, plugins, uploads, caches) lives in the /data volume, owned by the unprivileged
 # "node" user (uid 1000). A bind-mounted host directory must be writable by uid 1000.
+#
+# Master-key rotation with HF_MASTER_KEY (ADR-034): stop the container, then run the offline CLI on the same volume:
+#   docker run --rm -v harness-forge-data:/data -e HF_MASTER_KEY=<old> -e HF_NEW_MASTER_KEY=<new> harness-forge \
+#     node apps/server/dist/main.mjs rotate-key
 
 ARG NODE_VERSION=24
 
@@ -55,8 +59,10 @@ LABEL org.opencontainers.image.title="harness-forge" \
   org.opencontainers.image.description="Self-hosted, single-user, BYOK AI chat and agent harness with plugins." \
   org.opencontainers.image.licenses="MIT"
 
-# tini as PID 1 forwards signals and reaps the processes of stdio MCP servers and plugins.
-RUN apk add --no-cache tini \
+# tini as PID 1 forwards signals and reaps the processes of stdio MCP servers, plugins and shell commands.
+# bash and git serve the workspace `shell` tool (ADR-033; it falls back to busybox sh without bash). Projects live in
+# /data/workspaces (the default workspace root) or in a mounted folder named by HF_WORKSPACE_ROOTS.
+RUN apk add --no-cache tini bash git \
   && install -d -o node -g node -m 0700 /data
 
 ENV NODE_ENV=production \

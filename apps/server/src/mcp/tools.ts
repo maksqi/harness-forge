@@ -62,6 +62,8 @@ export function createToolService(deps: AppDeps): ToolService {
       enabled: pref.enabled,
       override: pref.override,
       available: ownerActive(tool.pluginId) && (status === null || status === 'connected'),
+      // Phase 7 placeholder until `ToolDefinition.workspace` is validated and reported (W7.6).
+      workspace: null,
       inputSchema: await inputSchemaOf(definition),
     }
   }
@@ -88,6 +90,7 @@ export function createToolService(deps: AppDeps): ToolService {
         enabled: pref.enabled,
         override: pref.override,
         available: false,
+        workspace: null,
         inputSchema: tool.inputSchema,
       })
     }

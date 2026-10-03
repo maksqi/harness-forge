@@ -45,7 +45,7 @@ function fakeImages(result: Partial<ImageGenerateResult> | Error = {}): PluginIm
       calls.push(options)
       if (result instanceof Error)
         throw result
-      return { modelRef: 'mock:image', images: [file(1)], ...result }
+      return { modelRef: 'mock:image', modelName: 'image', images: [file(1)], ...result }
     },
   }
 }

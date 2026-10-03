@@ -28,3 +28,11 @@ allowBuilds:
 
 # Fail the install when a dependency has a build script that is not listed in allowBuilds.
 strictDepBuilds: true
+
+# Ignored advisories (2026-10-03): both reach only the web build tooling (nuxt CLI / nitropack: listhen -> node-forge,
+# globby -> micromatch -> braces), never the server runtime or the generated SPA, and no patched release (braces 3.0.4,
+# node-forge 1.4.1) was published yet. Remove each entry once the fix is released.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-86w9-cpqp-85rv
+    - GHSA-vfj7-8cjw-p6xm

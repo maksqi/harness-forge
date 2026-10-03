@@ -59,7 +59,9 @@ export function resolveApproval(input: ApprovalInput): ApprovalResult {
   if (input.policy === 'deny')
     return { outcome: 'denied', reason: DENIED_BY_POLICY }
   switch (input.toolMode) {
+    // Phase 7: `edits` behaves like `ask` until the workspace write rule of ADR-032 lands (W7.4).
     case 'ask':
+    case 'edits':
       return { outcome: input.policy === 'safe' ? 'not-applicable' : 'user-approval' }
     case 'auto':
       return { outcome: input.policy === 'always' ? 'user-approval' : 'not-applicable' }

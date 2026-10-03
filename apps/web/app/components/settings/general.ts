@@ -51,11 +51,14 @@ export function instructionsError(value: string): string | null {
     : `Use at most ${INSTRUCTIONS_MAX.toLocaleString('en-US')} characters.`
 }
 
-/** The typed "Max steps per response": a whole number from 1 to 100. */
+/**
+ * The typed "Max steps per response": a whole number from 1 to 100. The setting accepts up to 200 since Phase 7; the
+ * field keeps its v1.2 bound of 100 until W7.12 raises it with the `projectMaxSteps` field.
+ */
 export function parseMaxSteps(text: string): { value: number } | { error: string } {
   const trimmed = text.trim()
   const value = /^\d{1,3}$/.test(trimmed) ? Number(trimmed) : Number.NaN
-  return settingsSchema.shape.maxSteps.safeParse(value).success
+  return value <= 100 && settingsSchema.shape.maxSteps.safeParse(value).success
     ? { value }
     : { error: 'Enter a whole number from 1 to 100.' }
 }

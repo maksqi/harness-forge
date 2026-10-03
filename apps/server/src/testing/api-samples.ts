@@ -10,6 +10,9 @@ export const SAMPLE_PLUGIN_ID = 'sample-plugin'
 export const SAMPLE_PROVIDER_ID = 'openai'
 export const SAMPLE_MCP_SERVER_ID = 'everything'
 export const SAMPLE_SHARE_ID = 'shr_sample0000000001'
+export const SAMPLE_PROJECT_ID = 'prj_sample0000000001'
+/** A folder that does not exist on any test host: the project samples never touch a real folder. */
+export const SAMPLE_WORKSPACE_PATH = '/harness-forge-sample/workspaces'
 /** The share id suffix + 22 base64url characters (the shape of a share token; its MAC is not valid). */
 export const SAMPLE_SHARE_TOKEN = 'sample0000000001AbCdEfGhIjKlMnOpQrSt_-'
 
@@ -189,6 +192,8 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
     },
   },
   'data.deleteAll': { body: { confirm: 'DELETE', files: false, usage: false } },
+  'data.cleanupPreview': {},
+  'data.cleanup': {},
 
   'audio.transcribe': {
     form: () => {
@@ -200,6 +205,15 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
     },
   },
   'audio.speech': { body: { text: 'Hello world', modelRef: 'mock:speech' } },
+
+  'projects.list': {},
+  'projects.create': { body: { name: 'Sample project', path: SAMPLE_WORKSPACE_PATH, newFolder: 'sample-project' } },
+  'projects.update': { params: { id: SAMPLE_PROJECT_ID }, body: { name: 'Renamed project', instructions: null } },
+  'projects.remove': { params: { id: SAMPLE_PROJECT_ID } },
+  'projects.browse': { query: { path: SAMPLE_WORKSPACE_PATH } },
+
+  'keys.get': {},
+  'keys.rotate': { body: { confirm: 'ROTATE' } },
 
   'shares.list': { query: { chatId: SAMPLE_CHAT_ID } },
   'shares.create': { body: { chatId: SAMPLE_CHAT_ID, title: 'Sample share', options: { reasoning: true }, expiresAt: null } },

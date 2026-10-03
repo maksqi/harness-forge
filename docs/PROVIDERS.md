@@ -322,8 +322,8 @@ errors -> `context_overflow`; `ECONNREFUSED` / `ENOTFOUND` -> `provider_unreacha
 Dev and e2e only: the builtin plugin `mock` registers provider `mock` and tool `mock_approval_tool` when
 `HF_MOCK_PROVIDER=1` (`pnpm start:e2e` sets it). Models are `MockLanguageModelV4` instances from `ai/test` streaming
 through `simulateReadableStream`. The provider has no credentials (status `connected`), no icon (monogram),
-`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its nine models (the four chat models of v1 and the five
-models of Phase 6), and `validate` always succeeds. Its `reasoning()` maps `off` -> `none`, `low` / `medium` / `high`
+`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its ten models (the four chat models of v1, the five
+models of Phase 6 and `workspace` of Phase 7), and `validate` always succeeds. Its `reasoning()` maps `off` -> `none`, `low` / `medium` / `high`
 -> same, `max` -> `xhigh`. Since Phase 6 (manifest `engines.harness` `^1.1.0`) it also defines `createImageModel`,
 `imageParams`, `createTranscriptionModel`, `createSpeechModel` and a `transcriptionOptions` that returns nothing (the
 mock models ignore the language), with models built on `MockImageModelV4`, `MockTranscriptionModelV4` and
@@ -334,9 +334,11 @@ model gets only the provider options). A media model id other than the three bel
 `APICallError`.
 
 Names: Mock Echo, Mock Reasoning, Mock Tool Approval, Mock Error, Mock Image, Mock Image Chat, Mock Image Tool, Mock
-Transcribe, Mock Speech. `GET /api/models` shows seven of them (the four chat models, `image`, `image-chat`,
-`image-tool`); `transcribe` and `speech` are hidden and chosen in Settings → Media. The provider's `modelCount` is 6
-(visible chat models; the image model is not counted).
+Transcribe, Mock Speech, Mock Workspace. `GET /api/models` shows eight of them (the four chat models, `image`,
+`image-chat`, `image-tool`, `workspace`); `transcribe` and `speech` are hidden and chosen in Settings → Media. The
+provider's `modelCount` is 7 (visible chat models; the image model is not counted). A data directory whose cached mock
+listing predates `workspace` (the e2e server's `.tmp/e2e`) shows the new model only after a refresh: wipe it before a
+gate.
 
 Common behavior (deterministic):
 
@@ -347,9 +349,10 @@ Common behavior (deterministic):
   `abortSignal` aborts.
 - **Usage**: `inputTokens` = number of whitespace-separated words in all prompt text parts; `outputTokens` = number of
   streamed text and reasoning words; `reasoningTokens` = reasoning words.
-- **Model info** (the four chat models and `image-chat`, `image-tool`): `contextWindow: 32000`, `maxOutputTokens: 4096`,
-  `cost: { input: 1, output: 2 }` (USD per 1M tokens, so cost displays are non-zero); `image-chat` and `image-tool`
-  declare `kind: 'chat'` explicitly (an explicit kind wins over `classify()`). The media models have explicit kinds:
+- **Model info** (the four chat models and `image-chat`, `image-tool`, `workspace`): `contextWindow: 32000`,
+  `maxOutputTokens: 4096`, `cost: { input: 1, output: 2 }` (USD per 1M tokens, so cost displays are non-zero);
+  `image-chat`, `image-tool` and `workspace` declare `kind: 'chat'` explicitly (an explicit kind wins over
+  `classify()`). The media models have explicit kinds:
   `image` (`kind: 'image'`, `capabilities.vision: true`, the same cost, so image turns show an estimated cost),
   `transcribe` (`kind: 'transcription'`) and `speech` (`kind: 'speech'`, `voices: ['mock-voice-a', 'mock-voice-b']`
   so the Voice suggestions can be tested); the last two have no limits and no price.
@@ -363,6 +366,7 @@ Common behavior (deterministic):
 | `mock:image` (Phase 6) | image model, vision | Waits 300 ms (5 s when the prompt contains "slow", for Stop and placeholder tests) and honors the abort signal; a prompt containing "fail" then rejects with a 400 `APICallError` "Mock image generation failure" (not retryable, mapped to `provider_error`). Otherwise returns `n` solid-color PNGs (up to 4 per call) whose color comes from a sha256 of the prompt, the image index and the input images, so every image and every edit differs. Size: the long edge is 320 px and the aspect ratio sets the short edge exactly (16:9 -> 320×180, 3:2 -> 318×212, 9:16 -> 180×320); Auto (no aspect ratio) -> 320×320; an explicit `size` is scaled down to at most 1024 px. Usage: input tokens = the prompt's words, output tokens = 100 × `n`; `revisedPrompt` `Mock: <prompt>` in `providerMetadata.mock.images[i].revisedPrompt` (the key OpenAI uses). |
 | `mock:image-chat` (Phase 6) | chat, `imageOutput` | Streams `Image for: <user text>` word by word, then one PNG `file` part with raw bytes (color from the user text; size from `providerOptions.mock.aspectRatio`, square without one): a model-side file, so the pipeline must store it and re-send it with an `/api/files/` URL. |
 | `mock:image-tool` (Phase 6) | tools | Like `mock:tool-approval` for the builtin `generate_image` tool: without the tool in the call (tool mode `off`, tool disabled) text `Tools are disabled.`; else, when the prompt does not end with its result, one tool call `generate_image` with input `{ "prompt": "<user text>" }` (`(empty message)` for an empty text) and id `mock_call_<n>`; after the result, text `Image tool result: <n> image(s)` (n = the images of a JSON output, else the count in the tool's text for the model, "Generated 1 image with …"), or `The tool call was denied.`. Needs an image model in Settings → Media (`imageModelRef`, e.g. `mock:image`). |
+| `mock:workspace` (Phase 7) | tools | Walks through the builtin workspace tools of `core-workspace` (ADR-032) in a project chat. The step is chosen by the number of workspace tool results that follow the last user message: (1) `write_file` with `{ "path": "mock-workspace.txt", "content": "Hello from the mock agent.\n" }`; (2) `edit_file` with `{ "path": "mock-workspace.txt", "old_string": "mock agent", "new_string": "workspace agent" }`; (3) `shell` with `{ "command": "cat mock-workspace.txt" }`, skipped when `shell` is not offered (`HF_WORKSPACE_SHELL=0`, Windows); then the text `Workspace done: <stdout of the shell call>` (so `Workspace done: Hello from the workspace agent.` after a full run), or `Workspace done.` without the shell. Ids `mock_call_<n>` as above, `finishReason: 'tool-calls'` for each call. A denied call ends the plan with `The tool call was denied.`; without any workspace tool in the call (a chat without a project, tool mode `off`, the folder unavailable) the text is `Workspace tools are not available.`. In tool mode `edits` the write and the edit run without a card and the shell asks; in `ask` all three ask; in `auto` none does. |
 | `mock:transcribe` (Phase 6) | transcription | Returns the text `This is a mock transcription.` for any accepted recording (no segments, language or duration reported; the language setting is ignored); rejects when the call is aborted. |
 | `mock:speech` (Phase 6) | speech | Returns a silent WAV (RIFF / WAVE, 8 kHz, mono, 16-bit PCM, the 44-byte canonical header) lasting 400 ms per word of the text, at least 1 s and at most 6 s, for any voice; `generateSpeech` reports `audio/wav` from the magic bytes. Rejects when the call is aborted. |
 
@@ -649,6 +653,10 @@ confirm it, and their results go to [section 11](#11-verification-log).
   `providerOptions` into image-output chat calls (called with `n: 1`, `inputs: 0`; the reasoning provider options win on
   a conflict). The result is plugin data: `size` must look like `1536x1024`, `aspectRatio` like `16:9`,
   `providerOptions` must be an object of objects; anything else is dropped, and a throw is logged and ignored.
+- **Model name** (Phase 7, plugin API 1.2.0): the image service reports `modelName` with every generation (the catalog
+  display name, else the model id); `ctx.images.generate()` returns it, the `generate_image` output stores it and the
+  tool's text for the model names it ("Generated 2 images with GPT Image 1; …"; outputs saved before v1.3 name the
+  model ref).
 - **Cost** (image turns and `generate_image`): `(input tokens × input price + output tokens × output price) /
   1,000,000` with the catalog prices (USD per 1M tokens), rounded to 1e-10, shown as "estimated". `costUsd` is null
   when the model has no price, when the provider reports no token counts (xAI) or when a used token kind has no price.
@@ -669,7 +677,9 @@ confirm it, and their results go to [section 11](#11-verification-log).
   documents its `language` option as the language of inverse text normalization (spoken numbers written as digits,
   for example); whether it also steers recognition is **(unverified)**.
 - **Errors**: media calls use the provider's `mapError` and the default mapping of [section 6](#6-provider-notes); a
-  removed model id answers `model_not_found`. The resolvers answer `validation_error` on `modelRef` for a model of
+  removed model id answers `model_not_found`; since Phase 7 a model ref whose provider does not exist (an uninstalled
+  plugin's provider) answers `400 provider_not_configured` with action `configure-provider` on the transcription and
+  speech routes, in `ctx.images` and the `generate_image` tool, as on chat (v1.2 answered `404 not_found`). The resolvers answer `validation_error` on `modelRef` for a model of
   another kind (`modelRef: The model "openai:gpt-6-luna" is not a speech-to-text model.`), `model_not_found` for an
   image model whose provider has no `createImageModel`, `validation_error` for a transcription or speech model whose
   provider lacks the factory (`modelRef: The provider "<name>" cannot transcribe speech, so the model "<ref>" cannot be

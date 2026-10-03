@@ -30,8 +30,15 @@ services:
       HF_PORT: '8787'
       HF_DATA_DIR: /data
       HF_WEB_DIR: ''
+      # Agent workspace (ADR-031): projects live in /data/workspaces by default. To work on host folders, mount them
+      # and name the mount point (writable by uid 1000), e.g. with the volume line below:
+      # HF_WORKSPACE_ROOTS: /workspaces
+      # HF_WORKSPACE_SHELL: '0'      # removes the shell tool (ADR-033)
     volumes:
       - data:/data
+      # - ./workspaces:/workspaces
+    # Shell commands of the agent run in this container: cap the number of processes (fork bombs).
+    pids_limit: 512
     # The server needs up to 10 s to stop runs, plugins and MCP servers after SIGTERM.
     stop_grace_period: 15s
     cap_drop:

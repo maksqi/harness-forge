@@ -72,6 +72,7 @@ function summaryOf(chat: ChatSummary | ChatDetail | ChatUpdatedData): ChatSummar
     archived: chat.archived,
     running: chat.running,
     pendingApproval: chat.pendingApproval,
+    projectId: chat.projectId,
     createdAt: chat.createdAt,
     updatedAt: chat.updatedAt,
   }

@@ -5,8 +5,8 @@ Agents build the UI from this document. Names, props, emits, routes, store actio
 values defined here are **contracts**: several agents build components in parallel against them.
 
 - Source of truth for shared names: `docs/DECISIONS.md` (wins on conflict). DTO names come from `docs/API.md`.
-- Owners (C3, C5, W2.x, W3.x, W4.x; Phase 5: C9, W5.x; Phase 6: C12, W6.x) follow the phase tables in
-  `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
+- Owners (C3, C5, W2.x, W3.x, W4.x; Phase 5: C9, W5.x; Phase 6: C12, W6.x; Phase 7: C15, W7.x) follow the phase
+  tables in `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
 - Everything is English. Every UI string is sentence case (see [Copy guidelines](#15-copy-guidelines)).
 
 Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 Design tokens](#3-design-tokens) ·
@@ -24,16 +24,22 @@ Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 D
    darker sidebar with a session list, one centered transcript column, a rounded composer docked at the bottom,
    collapsed one-line tool rows, quiet chrome. Warm neutral grays and one ember accent.
 2. **Removed on purpose** (never add them back without a user request):
-   - environment and folder/working-directory selectors;
+   - environment selectors and free folder / working-directory pickers (amended in Phase 7: the user asked for
+     **projects**, so a chat can belong to a project folder chosen from the server's allowed roots through the project
+     switcher, the new-chat picker and Settings → Projects, 7.20 and 9.10; there is still no working-directory selector
+     in the composer);
    - the Views menu;
    - Dispatch;
    - Routines;
    - Customize;
-   - session filters (status/branch/environment filters above the session list);
-   - diff, terminal and browser panes (no split panes next to the transcript);
+   - session filters (status/branch/environment filters above the session list; Phase 7: the project switcher is the
+     only filter);
+   - diff, terminal and browser panes (no split panes next to the transcript; Phase 7 keeps this: diffs and shell
+     output render **inside tool rows**, 7.19);
    - usage-limit UI (plan limits, quota meters, upgrade prompts).
    What stays: sidebar with `Chat | Plugins`, New chat, Search, date-grouped chats, Settings, theme toggle,
-   transcript, composer (`+`, model, effort, permission, context ring, send/stop; Phase 6: image options and the mic).
+   transcript, composer (`+`, model, effort, permission, context ring, send/stop; Phase 6: image options and the mic);
+   Phase 7: the project switcher above New chat.
 3. **Dark by default.** `html.dark` on first load even when the OS prefers light. Light and System are opt-in.
    No light flash, ever (see [4](#4-theme-behavior)).
 4. **Keyboard-first.** Every action is reachable from the keyboard: palette (Mod+K), new chat (Mod+Shift+O),
@@ -352,6 +358,135 @@ A reply of an image turn (7.16): the gallery spans the transcript column, the ac
    ‹ 2/2 ›  ↻   Mock Image · 3s                                          no Copy and no Read aloud
                                                                           without text; Delete this
                                                                           version follows Regenerate
+```
+
+### 2.12 Projects in the sidebar, a new chat and the header (Phase 7)
+
+Legend additions: `▢` folder icon · `⇕` `ChevronsUpDown` · `✎` / `❯` the `FilePenLine` / `SquareTerminal` tool icons.
+
+```
+┌──────────────────────┬─────────────────────────────────────────────────────────────────┐
+│ ◆ harness-forge    ◧ │ Fix the parser                       [▢ harness-forge]      ⋯   │ ChatProjectChip
+│ [ Chat  | Plugins  ] │─────────────────────────────────────────────────────────────────│
+│ ▢ harness-forge    ⇕ │                                                                 │ ProjectSwitcher
+│ ＋ New chat      ⌘⇧O │    ▸ ✎ edit_file  "src/parser.ts"             +12 −3   ✓        │ workspace tool rows
+│ ⌕  Search         ⌘K │    ▸ ❯ shell  "pnpm test"                     exit 0   ✓        │ (7.19)
+│ Today                │    Fixed: the parser now rejects empty input.                   │
+│  Fix the parser     ●│                                                                 │
+│  Add a CLI flag      │    ┌────────────────────────────────────────────────────────┐   │
+│ Yesterday            │    │ Reply…                                                  │   │
+│  Release notes       │    │ ＋  ✱ Claude Sonnet 5 ▾  High ▾   Accept edits ▾  ◔ (↑) │   │
+│ ⚙ Settings    ☾ ☀ ▭ │    └────────────────────────────────────────────────────────┘   │
+└──────────────────────┴─────────────────────────────────────────────────────────────────┘
+  the list shows only the chats of the switcher's filter (All chats · No project · a project)
+```
+
+Switcher menu (`DropdownMenu` radio group, `max-h-80`, scrolls):
+
+```
+┌──────────────────────────────────────────┐
+│ ◉ All chats                              │
+│ ○ No project                             │
+│ ──────────────────────────────────────── │
+│ ○ harness-forge                       12 │ chat count
+│   /home/me/workspaces/harness-forge      │ path in mono, muted
+│ ○ notes                     ⚠          3 │ folder missing (FolderX, warning)
+│   /home/me/workspaces/notes              │
+│ ──────────────────────────────────────── │
+│ ⊞ Add project…                           │
+│ ⚙ Manage projects                        │
+└──────────────────────────────────────────┘
+```
+
+A new chat (`/`): `NewChatProjectPicker` under the greeting, defaulting to the switcher's project.
+
+```
+                                ◆
+                      What's next, Maks?
+                      [ ▢ harness-forge ▾ ]                    ghost pill, rounded-full
+    ┌────────────────────────────────────────────────────────┐
+    │ Ask anything…                                           │
+    │ ＋  ✱ Claude Sonnet 5 ▾              Accept edits ▾ (↑) │
+    └────────────────────────────────────────────────────────┘
+```
+
+### 2.13 Settings → Projects and the Add project dialog (Phase 7)
+
+```
+┌──────────────────────┬─────────────────────────────────────────────────────────────────┐
+│ ◆ harness-forge    ◧ │ Projects                                        [Add project]   │
+│ ← Back to app        │ Folders on the server that chats can read and edit.             │
+│                      │                                                                 │
+│ ⚿  Providers         │ harness-forge                                  12 chats     ⋯   │ project-row
+│ ▦  Models            │ /home/me/workspaces/harness-forge                               │ mono, muted
+│ ▷  Media             │ notes                    [Folder not found]     3 chats     ⋯   │ warning badge
+│ ▢  Projects          │ /home/me/workspaces/notes                                       │
+│ ⚙  General           │                                                                 │
+│ ◐  Appearance        │                                                                 │
+│ ▤  Data              │                                                                 │
+│ ⓘ  About             │                                                                 │
+│ ⚙ Settings    ☾ ☀ ▭ │                                                                 │
+└──────────────────────┴─────────────────────────────────────────────────────────────────┘
+```
+
+```
+┌ Add project ───────────────────────────────────────────────── × ┐
+│ workspaces › harness-forge › packages                     [↑]   │ breadcrumb, Parent folder
+│ ┌─────────────────────────────────────────────────────────────┐ │
+│ │ ▢ plugin-sdk                                                │ │ FolderBrowser entries
+│ │ ▢ shared                                        [Project]   │ │ already a project: disabled
+│ └─────────────────────────────────────────────────────────────┘ │
+│ [⊞ New folder]                                                  │ reveals "Folder name"
+│ Selected: /home/me/workspaces/harness-forge/packages            │ mono
+│ Name [ packages                                             ]   │ defaults to the basename
+│                                         [Cancel] [Add project]  │ fresh auth first
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 2.14 Workspace tool rows and approvals (Phase 7)
+
+Diffs and shell output render inside the expanded tool row (7.19), never in a side pane.
+
+```
+   ▾ ✎ edit_file  "src/parser.ts"                               +2 −1   ✓
+     ┌ src/parser.ts                                      +2 −1   ⧉ ┐   DiffView
+     │ @@ −12,3 +12,4 @@                                            │   bg-muted/60
+     │ 12  12    const tokens = lex(input)                          │   context, muted
+     │ 13      − if (!tokens) return null                           │   bg-destructive/10
+     │     13  + if (tokens.length === 0)                           │   bg-success/10
+     │     14  +   return null                                      │
+     │ 14  15    return parse(tokens)                               │
+     └──────────────────────────────────────────────────────────────┘
+     Raw input and output ▸
+   ▾ ❯ shell  "pnpm test"                                       exit 0   ✓
+     ┌──────────────────────────────────────────────────────────────┐   TerminalOutput
+     │ $ pnpm test                                                  │
+     │ 42 tests passed                                              │
+     │ [Exit code 0] [3.2s]                                         │
+     └──────────────────────────────────────────────────────────────┘
+```
+
+```
+┌───────────────────────────────────────────────────────────────┐   shell approval
+│ Run this command?                         from core-workspace │
+│ Run the parser tests                                          │   description
+│ ┌───────────────────────────────────────────────────────────┐ │
+│ │ pnpm test --filter parser                                 │ │   command, mono
+│ └───────────────────────────────────────────────────────────┘ │
+│ In harness-forge · timeout 120s                               │
+│ ⚠ Runs on the server with the server user's permissions.      │
+│                                                [Deny]  [Run]  │   no "Always allow"
+└───────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐   edit approval
+│ Allow edit_file?                          from core-workspace │
+│ ┌ src/parser.ts                                       +2 −1 ┐ │   DiffView of the
+│ │ −  if (!tokens) return null                               │ │   old → new strings
+│ │ +  if (tokens.length === 0)                               │ │
+│ │ +    return null                                          │ │
+│ └───────────────────────────────────────────────────────────┘ │
+│ ☐ Accept all edits in this chat                               │
+│                                              [Deny]  [Allow]  │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -739,23 +874,32 @@ Clicking the Chat tab goes to `lastRoutes.chat`; Plugins goes to `lastRoutes.plu
 
 ### 5.3 Chat mode contents (`ChatNav`, W2.4)
 
-1. "New chat" row — `SquarePen` icon, label, `KbdCombo keys="mod+shift+o"` right-aligned (hidden below `lg`).
+1. "Project" row (Phase 7, `ProjectSwitcher`, W7.9; 7.20, wireframe 2.12) — the first row, above New chat:
+   `Folders` + "All chats", `Folder` + a project name, or `FolderX` in `text-warning` when that project's folder is
+   missing, then `ChevronsUpDown`. Its menu filters the list below (All chats · No project · a project;
+   `chats.setProjectFilter`) and its project is the default project of new chats.
+2. "New chat" row — `SquarePen` icon, label, `KbdCombo keys="mod+shift+o"` right-aligned (hidden below `lg`).
    Navigates to `/` and focuses the composer.
-2. "Search" row — `Search` icon, `KbdCombo keys="mod+k"`. Opens `CommandPalette` (chats first).
-3. Date groups from `chats.groups`: **Today**, **Yesterday**, **Previous 7 days**, **Previous 30 days**, then one
+3. "Search" row — `Search` icon, `KbdCombo keys="mod+k"`. Opens `CommandPalette` (chats first; search ignores the
+   project filter).
+4. Date groups from `chats.groups`: **Today**, **Yesterday**, **Previous 7 days**, **Previous 30 days**, then one
    group per month ("September", "August 2025" when not the current year). Group label: caption, muted, sticky
    while scrolling the list.
-4. Row (`--row-height`, `rounded-md`, px-2): title (truncate, `text-sm`), trailing 20px slot. Active row:
-   `bg-sidebar-accent font-medium`. Untitled chats show "New chat" in muted italic until the title arrives.
-5. Trailing slot: `StatusDot` when the chat has a status; on hover/focus-within/menu-open it shows the `⋯` button
-   (`MoreHorizontal`, `aria-label="Chat actions"`) instead. Menu: Rename, Share… (`Share2` icon), Export as
-   Markdown, Export as JSON, separator, Delete (destructive). Share… opens the Share dialog through
-   `ui.openShare(chatId)` (7.14; W5.6 owns the item and `chat-actions.ts`).
-6. Rename: the row turns into `InlineRename` (Enter saves, Esc cancels, blur saves; empty = cancel).
-7. Delete: the row disappears at once; toast "Chat deleted" with **Undo** (5s). The API call runs when the toast
+5. Row (`--row-height`, `rounded-md`, px-2): title (truncate, `text-sm`), trailing 20px slot. Active row:
+   `bg-sidebar-accent font-medium`. Untitled chats show "New chat" in muted italic until the title arrives. Rows show
+   no project badge (the filter tells the project).
+6. Trailing slot: `StatusDot` when the chat has a status; on hover/focus-within/menu-open it shows the `⋯` button
+   (`MoreHorizontal`, `aria-label="Chat actions"`) instead. Menu: Rename, Move to project ▸ (Phase 7, `FolderInput`,
+   `chat-row-move`, 7.20), Share… (`Share2` icon), Export as Markdown, Export as JSON, separator, Delete
+   (destructive). Share… opens the Share dialog through `ui.openShare(chatId)` (7.14; W5.6 owns the item and
+   `chat-actions.ts`).
+7. Rename: the row turns into `InlineRename` (Enter saves, Esc cancels, blur saves; empty = cancel).
+8. Delete: the row disappears at once; toast "Chat deleted" with **Undo** (5s). The API call runs when the toast
    expires (see `chats.remove` in 11). Deleting the open chat navigates to `/`.
-8. Infinite scroll: `useIntersectionObserver` on a sentinel → `chats.fetchPage()`; skeleton rows while loading.
-9. Empty list: caption "No chats yet".
+9. Infinite scroll: `useIntersectionObserver` on a sentinel → `chats.fetchPage()` (with `projectId` while a project
+   filter is set, Phase 7); skeleton rows while loading.
+10. Empty list: caption "No chats yet"; with a filter (Phase 7) "No chats in {name} yet" or "No chats without a
+    project".
 
 ### 5.4 Plugins mode contents (`PluginsNav`, W3.1)
 
@@ -772,10 +916,13 @@ Clicking the Chat tab goes to `lastRoutes.chat`; Plugins goes to `lastRoutes.plu
 ### 5.5 Settings mode contents (`SettingsNav`, C3)
 
 "← Back to app" row, then Providers (`KeyRound`), Models (`Boxes`), Media (`ImagePlay`, Phase 6: right after
-Models, `/settings/media`, 9.9), General (`SlidersHorizontal`), Appearance (`Palette`), Data (`Database`, Phase 5:
-between Appearance and About, `/settings/data`, 9.8), About (`Info`). Active item from the route. Footer shows only
-`ThemeToggle`. The links live in `SETTINGS_LINKS` (`components/app-shell/navigation.ts`; the Media entry has the key
-`media` and the test id `settings-nav-media`); the command palette lists them too.
+Models, `/settings/media`, 9.9), Projects (`Folders`, Phase 7: right after Media, `/settings/projects`, 9.10), General
+(`SlidersHorizontal`), Appearance (`Palette`), Data (`Database`, Phase 5: between Appearance and About,
+`/settings/data`, 9.8), About (`Info`). The order is therefore Providers, Models, Media, Projects, General, Appearance,
+Data, About. Active item from the route. Footer shows only `ThemeToggle`. The links live in `SETTINGS_LINKS`
+(`components/app-shell/navigation.ts`; the Media entry has the key `media` and the test id `settings-nav-media`, the
+Projects entry the key `projects` and the test id `settings-nav-projects`); the command palette lists them too
+(`go-settings-projects`). The wireframes 2.5, 2.7 and 2.10 predate the Projects entry (2.13 shows it).
 
 ### 5.6 Main header
 
@@ -783,9 +930,11 @@ between Appearance and About, `/settings/data`, 9.8), About (`Info`). Active ite
   transcript in the chat view's `h-dvh` column (only the transcript scrolls); bottom border appears only after the
   transcript scrolls (`border-b border-border` when `scrollTop > 0`, fixed 1px reserved so nothing moves). Left:
   `SidebarTrigger` (only when the sidebar is collapsed or on mobile), then the title (`text-base font-medium`,
-  truncate). Clicking the title starts `InlineRename`. Right: `⋯` menu
-  (`aria-label="Chat options"`): Rename · Show thinking (checkbox) · Share… · Export as Markdown · Export as JSON ·
-  separator · Delete. Share… calls `ui.openShare(chatId)` (7.14). The empty state `/` shows no title and no menu.
+  truncate). Clicking the title starts `InlineRename`. Phase 7: `ChatProjectChip` follows the title when the chat
+  belongs to a project (7.20, wireframe 2.12). Right: `⋯` menu
+  (`aria-label="Chat options"`): Rename · Move to project ▸ (Phase 7, `chat-menu-move`, 7.20) · Show thinking
+  (checkbox) · Share… · Export as Markdown · Export as JSON · separator · Delete. Share… calls `ui.openShare(chatId)`
+  (7.14). The empty state `/` shows no title and no menu (its project is picked under the greeting, 7.20).
 - **Other pages** (`PageHeader`, C3): same height and trigger rule; title (`text-xl font-semibold`) +
   optional description (muted) below the bar, actions slot on the right.
 
@@ -841,7 +990,7 @@ All pages are `ssr: false` SPA routes. C5 creates every page as a stub in Phase 
 
 | Route | File | Contents | Owner |
 |---|---|---|---|
-| `/` | `pages/index.vue` | empty state: `ChatView` with `isNew` for the draft chat id (`useDraftChatId()`: a uuidv7 kept until the first send, so an unsent draft survives leaving `/`); `ChatGreeting` + `NoProviderCallout` fill its `empty` slot; the first send replaces the route with `/chat/<id>` | W2.2 |
+| `/` | `pages/index.vue` | empty state: `ChatView` with `isNew` for the draft chat id (`useDraftChatId()`: a uuidv7 kept until the first send, so an unsent draft survives leaving `/`); `ChatGreeting` + `NoProviderCallout` fill its `empty` slot (Phase 7: `NewChatProjectPicker` right under the greeting, 7.20); the first send replaces the route with `/chat/<id>` | W2.2; W7.10 (Phase 7) |
 | `/chat/[id]` | `pages/chat/[id].vue` | `ChatView` for an existing chat with `ChatHeader` in its `header` slot; `ChatNotFound` ("Chat not found" + "New chat") for malformed ids and on 404 | W2.2 |
 | (parent) | `pages/plugins.vue` | plugins shell: `<NuxtPage />` + the single `InstallDialog` instance bound to `ui.installDialogOpen` (`@installed` → `/plugins/<id>`) | W3.1 |
 | `/plugins` | `pages/plugins/index.vue` | `PageHeader` "Plugins" (search, Install…, New plugin ▾), filter from `?filter=` and `?q=`, `PluginCard` grid | W3.1 |
@@ -852,10 +1001,11 @@ All pages are `ssr: false` SPA routes. C5 creates every page as a stub in Phase 
 | `/settings/providers` | `pages/settings/providers.vue` | provider list, key dialog (`?configure=<providerId>` opens it) | W2.5 |
 | `/settings/models` | `pages/settings/models.vue` | default + title model (chat models only), per-provider model tables | W2.5; W6.10 (Phase 6) |
 | `/settings/media` | `pages/settings/media.vue` → `MediaSettings` | "Images and voice": the Images section (image model of the `generate_image` tool) and the Voice section (speech to text, language, read aloud, voice, speed, test voice), 9.9 | C12 (stub), W6.10 |
-| `/settings/general` | `pages/settings/general.vue` | display name, send key, defaults, Alt shortcuts, instructions, password | W2.5 |
+| `/settings/projects` | `pages/settings/projects.vue` → `ProjectsSettings` | Projects (Phase 7): the project list with rename, instructions and delete, and the Add project dialog with the folder browser (`?add=1` opens it), 9.10 | C15 (stub), W7.9 |
+| `/settings/general` | `pages/settings/general.vue` | display name, send key, defaults, max steps (Phase 7: also in project chats), Alt shortcuts, instructions, password | W2.5; W7.12 (Phase 7) |
 | `/settings/appearance` | `pages/settings/appearance.vue` | theme cards, reading font, text size, density, expand thinking | W2.5 |
 | `/settings/about` | `pages/settings/about.vue` | versions, license, copy diagnostics | W2.5 |
-| `/settings/data` | `pages/settings/data.vue` → `DataSettings` | summary, export, import, shared links (`SharesSettingsSection`), danger zone (9.8) | C9 (stub), W5.5; W5.6 (`SharesSettingsSection`) |
+| `/settings/data` | `pages/settings/data.vue` → `DataSettings` | summary, export, import, storage cleanup (Phase 7), shared links (`SharesSettingsSection`), encryption key (Phase 7), danger zone (9.8) | C9 (stub), W5.5; W5.6 (`SharesSettingsSection`); W7.13 (Phase 7 sections) |
 | `/share/[token]` | `pages/share/[token].vue` (`layout: 'share'`) → `SharedChatView :token` | public, read-only, store-free transcript of the share snapshot; "This link is unavailable" on 404; `noindex` (7.15) | C9 (stub), W5.6 |
 | `/login` | `pages/login.vue` (`layout: 'auth'`) | password form; `?redirect=` | W2.5 |
 | unknown | `app/error.vue` (`auth` layout) | "Page not found" (404) or "Something went wrong" (other errors, no raw details) + "Back to chats" (`clearError({ redirect: '/' })`) | C5 |
@@ -873,7 +1023,8 @@ page being loaded) is under `/share/`. The share page calls only `GET /api/share
 
 Query parameters used by the UI: `/plugins?filter=&q=` (`filter` = `all | providers | tools | mcp | commands |
 disabled`; not `kind`, which is the plugin kind enum), `/plugins/[id]?tab=`, `/plugins/new?type=&edit=`,
-`/settings/providers?configure=`, `/login?redirect=`. Model refs never appear in paths.
+`/settings/providers?configure=`, `/settings/projects?add=1` (Phase 7: opens the Add project dialog), `/login?redirect=`.
+Model refs and project ids never appear in paths (the project filter lives in `localStorage`, 7.20).
 
 ---
 
@@ -888,13 +1039,13 @@ v7 UI message stream; verify the exact names in `node_modules/ai/dist/index.d.ts
 |---|---|---|
 | `text` | `TextPart` → `Markdown` | `content` = part text; `final` = the part is done (message not streaming, or a later part exists). Assistant only; user text is plain (5.7) |
 | `reasoning` | `ReasoningPart` (`AiReasoning` + `AiReasoningTrigger`) | one row, height `--row-height`: while streaming `▸ Thinking… 4s` (shimmer label, live seconds); done: `▸ Thought for 12s` (from `metadata.reasoningMs` when present, so it survives reloads; else "Thought"). Collapsed unless Show thinking is on; expanded body = `Markdown` inside a shadcn `CollapsibleContent` (the copied AI Elements `ReasoningContent` was removed together with vue-stream-markdown, ADR-007), muted, `text-sm`, left border `border-l-2 border-border pl-3` |
-| `tool-*` / `dynamic-tool` | `ToolPart` (`AiTool`) | one row, see 7.2 |
+| `tool-*` / `dynamic-tool` | `ToolPart` (`AiTool`) | one row, see 7.2 (Phase 7: the `core-workspace` tools render diffs, terminal output, file content and file lists in their row, 7.19) |
 | approval request (tool part in approval state) | `ToolApprovalCard` (`AiConfirmation`) | below its tool row, see 7.3 |
 | `file` (not an image), `reasoning-file` | `FilePart` → `FileChip` | images (a `reasoning-file` holds a model's draft image): 64px thumbnail (`object-cover rounded-md`), click opens a lightbox `Dialog`; other files: chip with `FileText`, name, size |
 | consecutive `file` parts with an `image/*` type (assistant messages) | `ImageGallery` (Phase 6, W6.8, 7.16) | one gallery block per run of images (`chat-format.ts` block kind `gallery`; parts that render nothing, such as `step-start`, never split a run, any rendered block does): generated images of an image turn, of a chat model with image output or of the `generate_image` tool; one image full width, two or more in two columns; a lightbox with previous / next and Download |
 | `source-url` / `source-document` | `SourcesPart` (`AiSources`) | consecutive sources merge into one row "3 sources" (`Link2` icon); expanded: title + hostname links (`target="_blank" rel="noopener noreferrer"`) |
 | `step-start` | — | renders nothing (no divider) |
-| `data-notice` | `NoticePart` | one muted line with the server's message and an icon per code (codes in API.md 6.4; Phase 6 adds `generated-file-dropped`, icon `ImageOff`, level warning: a generated file that is not a PNG, JPEG, WebP or GIF image, or larger than 20 MB, was not kept; it stands where the file was) |
+| `data-notice` | `NoticePart` | one muted line with the server's message and an icon per code (codes in API.md 6.4; Phase 6 adds `generated-file-dropped`, icon `ImageOff`, level warning: a generated file that is not a PNG, JPEG, WebP or GIF image, or larger than 20 MB, was not kept; it stands where the file was; Phase 7 adds `workspace-unavailable`, icon `FolderX`, level warning: the chat's project folder could not be opened, so this run has no workspace tools; the message names the folder and the reason, 7.20) |
 | `data-*` | — | ignored unless listed in `docs/API.md`; unknown data parts never render |
 | error (message `metadata.error` or stream error) | `ErrorPart` | alert at the end of the message, see 7.4 |
 
@@ -916,8 +1067,9 @@ Layout (`--row-height`, `rounded-md`, `hover:bg-accent`, whole row is the collap
 ▸  [icon]  display_name  "first argument…"   [server badge]                 status
 ```
 
-- Icon: `Wrench` for plugin/core tools; `Server` for MCP tools. Display name: the tool name; for
-  `mcp__<server>__<tool>` show `<tool>` plus a small outline badge with the server name.
+- Icon: `Wrench` for plugin/core tools; `Server` for MCP tools; Phase 7: each `core-workspace` tool has its own icon
+  (7.19). Display name: the tool name; for `mcp__<server>__<tool>` show `<tool>` plus a small outline badge with the
+  server name.
 - First argument: the first string value of the input, one line, mono, max 60 chars, quoted, muted.
 - Status by part state:
 
@@ -940,7 +1092,14 @@ Expanded body (`pl-8`, `text-xs` mono, `bg-muted/50 rounded-md p-3`): **Input** 
 references only (`{ modelRef, images: [{ fileId, url, mediaType, name }], costUsd?, revisedPrompt? }`).
 The images themselves are `file` parts the server appends after the tool call, so they render as a gallery (7.16) right
 below the row, in shares and backups too. Without an image model in Settings → Media the row ends in `output-error`
-with "Choose an image model in Settings → Media."
+with "Choose an image model in Settings → Media." Phase 7: the output also carries `modelName` (the model's display
+name; outputs saved before v1.3 lack it).
+
+Workspace tools (Phase 7, ADR-032; `core-workspace`: `read_file`, `list_directory`, `find_files`, `search_files`,
+`write_file`, `edit_file`, `shell`) use the same row with their own icon and first argument, plus a summary before the
+status (`+12 −3`, `exit 1`, `lines 1–120 of 340`, `17 files`, `23 matches`; `tool-row-summary`), and their expanded body
+shows a diff, terminal output, file content or a file list instead of the Input / Output blocks, with a "Raw input and
+output" toggle (7.19). A row whose output does not parse with the shared schemas falls back to the generic blocks.
 
 ### 7.3 Approval card
 
@@ -965,6 +1124,23 @@ with "Choose an image model in Settings → Media."
 - Sending a new message while approvals are pending is allowed; the server marks the ones on the path of the new
   message denied (superseded). An approval pending on another version stays pending and its card works again after
   switching back to that version (ADR-023).
+- **Workspace tools** (Phase 7, ADR-032; wireframe 2.14, renderers 7.19): `ToolApprovalPreview`
+  (`tool-approval-preview`, `data-kind`) replaces the JSON block whenever the registry has a view for the call.
+  `edit_file` → a `DiffView` of `old_string` → `new_string` (an "All occurrences" badge with `replace_all`);
+  `write_file` → "Create or overwrite {path} · {n} lines" and a 20-line `FileContent` preview (the client does not
+  have the old file, so no diff); `shell` → the card title "Run this command?", the `description` as text when
+  present, the command in a large mono block, "In {project}" and the timeout when set, and the warning
+  (`TriangleAlert`, `text-warning`) "Runs on the server with the server user's permissions."; its buttons are Deny /
+  **Run**.
+- **"Always allow" is hidden** for tools with workspace access `execute` (`ToolApprovalCard.workspace`, from
+  `ToolSummary.workspace`): a shell command is approved one call at a time.
+- **"Accept all edits in this chat"** (`tool-approval-accept-edits`) replaces "Always allow {tool}" for tools with
+  workspace access `write` while the chat is not already in Accept edits: Allow with it checked sets the chat's
+  permission mode to `edits` before the approval is sent (`ToolApprovalDecision.acceptEdits`, 11.1), so the
+  continuation already runs in Accept edits; it writes no tool override. A hidden or secret path still asks in Accept
+  edits (policy `always`); its card then shows neither checkbox.
+- The polite live region announces a shell approval as "Approval needed: run {command}" (the first line, at most 60
+  characters).
 
 ### 7.4 Errors
 
@@ -1003,9 +1179,13 @@ back into the composer (`takeBackUnstored()`, 11.1):
   → toast "This chat changed elsewhere and was reloaded."; the session reloads the path. A version switch answered
   404 does the same.
 
-409 `conflict` with `details.reason: 'busy'` (a data import or delete-all is running, 9.8) → toast "Another import or
-delete is running. Try again when it finishes." Every other failed request outside the transcript →
-`toast.error(title, { description })` with the same titles.
+409 `conflict` with `details.reason: 'busy'` (a data import, delete-all, key rotation or file cleanup is running, 9.8)
+→ toast "Another data task is running. Try again when it finishes." (Phase 7; v1.2 said "Another import or delete is
+running. Try again when it finishes."). A **chat request** answered 409 `busy` (Phase 7: a master-key rotation stops
+the runs and holds new ones off, ADR-034) → toast "The server is rotating its encryption key. Try again in a moment.",
+and the unstored user message goes back into the composer as for `run-active`. Moving a chat to another project
+during a run → 409 `run-active` → toast "Wait for the response to finish before moving this chat." (7.20). Every
+other failed request outside the transcript → `toast.error(title, { description })` with the same titles.
 
 ### 7.5 Message actions, versions and meta
 
@@ -1170,7 +1350,9 @@ Opens when the textarea starts with `/` (caret in the first token); a popover an
 ↑/↓ move, Enter or Tab completes, Esc closes. Client commands without arguments run at once; `/model`,
 `/effort`, `/mode` without an argument open their menu; with one (`/effort high`, `/mode auto`,
 `/model anthropic:claude-sonnet-5`) they apply it on Enter and clear the input. `/help` opens `ShortcutsDialog`.
-Server commands insert `/name ` and keep the menu closed.
+Server commands insert `/name ` and keep the menu closed. Phase 7: `/mode edits` (aliases `/mode accept-edits` and
+`/mode accept edits`) selects Accept edits in a project chat; in a chat without a project it changes nothing and shows
+the error "Accept edits works in project chats." (7.11).
 
 ### 7.9 Model picker (`ModelPicker`, W2.3)
 
@@ -1211,10 +1393,17 @@ High, Max. Hidden when the model has no reasoning capability; the value still tr
 | Value | Label | Icon | Description |
 |---|---|---|---|
 | `ask` | Ask | `Hand` | Ask before tools that can change things (default) |
+| `edits` | Accept edits | `FilePenLine` | Edit project files without asking; ask before shell commands (Phase 7) |
 | `auto` | Auto | `Zap` | Run tools without asking, except ones marked always-ask |
 | `off` | Off | `CircleSlash` | Don't use tools |
 
-Alt+P opens it. Default for new chats: `settings.defaultToolMode`.
+The options come from `TOOL_MODE_OPTIONS` (`composer/permission.ts`) in this order. **Accept edits** (Phase 7,
+ADR-032) is shown only in project chats or while it is the current value: `ChatComposer` passes `modes` to
+`PermissionMenu` from its `projectId` prop (10.4). In Accept edits, safe tools and `ask` tools with workspace access
+`write` (`write_file`, `edit_file` on ordinary paths) run without a card; the shell, hidden or secret-looking paths
+(policy `always`) and every other tool that asks in Ask still ask. In a chat without a project the stored value
+`edits` behaves like Ask (no workspace tool is offered there). Alt+P opens it. Default for new chats:
+`settings.defaultToolMode` (Settings → General offers Accept edits too, 9.4).
 
 ### 7.12 Context ring (`ContextRing`, W2.3)
 
@@ -1229,7 +1418,8 @@ including hidden versions and image generations (the cost actually paid).
 ### 7.13 Empty state and no-provider callout (W2.2)
 
 - `ChatGreeting`: `BrandMark` 28px, then "What's next, {displayName}?" (Source Serif 4, 32px; "What's next?" when
-  `displayName` is empty). The composer follows.
+  `displayName` is empty). Phase 7: `NewChatProjectPicker` sits right under the heading when at least one project
+  exists (7.20). The composer follows.
 - `NoProviderCallout` shows when `providers.hasUsableProvider` is false: `Alert` with `PlugZap` icon, title
   "Connect a provider to start", text "Add an API key for Anthropic, OpenAI, DeepSeek and more, or run models
   locally with Ollama.", button "Connect a provider" → `/settings/providers`. Send stays disabled with tooltip
@@ -1461,6 +1651,121 @@ ADR-029).
 - **Errors**: toast "Could not read this reply aloud" with the server message ("The browser blocked audio playback."
   or "The browser could not play the audio." when playback itself fails); the player returns to `idle`.
 
+### 7.19 Workspace tool rendering (`workspace-tools.ts`, `WorkspaceToolBody`, `DiffView`, `TerminalOutput`, `FileContent`, `FileList`, W7.11)
+
+The builtin `core-workspace` tools (ADR-032, PLUGINS.md 1) return structured outputs with project-relative paths, diff
+hunks and shell results (ARCHITECTURE.md 6.13; schemas in API.md, workspace tools). The web renders them inside the
+tool row, never in a side pane (principle 1.2). Wireframe: 2.14.
+
+- **Registry** (`components/chat/parts/tools/workspace-tools.ts`, pure and store-free, signatures in 11.4):
+  `workspaceToolView(toolName, input, output)` parses the output with the shared schemas and returns a view of kind
+  `diff` (`write_file`, `edit_file`), `terminal` (`shell`), `file` (`read_file`) or `list` (`list_directory`,
+  `find_files`, `search_files`), else `null`. `null` (a plugin tool with the same name, an output cut to a
+  `[truncated]` string on a share page or by the 64 KB cap, an unexpected shape) keeps the generic Input / Output blocks
+  of 7.2. `workspaceRowArgument` gives the first argument (the path for read / write / edit / list, `.` by default; the
+  pattern for find / search; the first line of the command for shell); `toolRowArgument` (`parts/tool-row.ts`) asks it
+  first, so `ToolPart` and `ShareToolRow` agree.
+- **Icons** (verified in `@lucide/vue`): `FileText` `read_file`, `ListTree` `list_directory`, `FileSearch`
+  `find_files`, `TextSearch` `search_files`, `FilePlus` `write_file`, `FilePenLine` `edit_file`, `SquareTerminal`
+  `shell` (`workspaceToolIcon`).
+- **Row summary** (`tool-row-summary`, `data-tone` `muted` | `success` | `destructive` | `warning`), before the status
+  and only once the output exists (`workspaceRowSummary`):
+
+  | Tool | Summary |
+  |---|---|
+  | `edit_file` / `write_file` | `+a −d` (`text-success` / `text-destructive`, `tabular-nums`); a new file "New · 40 lines" |
+  | `shell` | `exit 0` (muted), `exit 1` (destructive), `timed out` (warning), `killed SIGTERM` (warning) |
+  | `read_file` | `lines 1–120 of 340` ("of …" only when the total is known) |
+  | `list_directory` | `24 entries` |
+  | `find_files` | `17 files` |
+  | `search_files` | `23 matches` |
+
+  Rows still never expand by themselves (principle 5).
+- **Expanded body**: `WorkspaceToolBody` replaces the Input / Output blocks (the error block of `output-error` stays)
+  and ends with the toggle **Raw input and output** (`tool-raw-toggle`), which shows the generic `ToolValueBlock`s.
+- **DiffView** (`diff-view`, `data-path`, `data-state` `created` | `modified`): a header with the path in mono, a "New
+  file" badge, `+a −d` and a `CopyButton` for the path; the lines are a grid (old line number | new line number | sign
+  | text) in `font-mono text-xs whitespace-pre` inside an `overflow-x-auto rounded-md border` block, so a long line
+  scrolls inside the block and never widens the page. Added lines `bg-success/10` with the sign in `text-success`,
+  removed lines `bg-destructive/10` with the sign in `text-destructive`, context `text-muted-foreground`, hunk headers
+  `@@ −12,5 +12,7 @@` on `bg-muted/60` (`diff-line`, `data-kind` `add` | `del` | `context`). Runs of more than 8
+  unchanged lines fold into "⋯ {n} unchanged lines"; past `maxLines` (200) "Show {n} more lines" (`diff-expand`,
+  `data-action` `unfold` | `show-all`); `truncated` → "Diff truncated by server"; a `null` diff (the server's 2 s diff
+  timeout) → "The diff is too large to show." Below `sm` one line-number column. Each changed line has the sr-only
+  label "Added" or "Removed". No syntax highlighting in v1.3.
+- **TerminalOutput** (`terminal-output`, `data-status` `running` | `ok` | `error` | `timeout` | `killed`): a
+  `bg-muted/60` block: the `$ command` line (`terminal-command`), then stdout (`terminal-stdout`, `whitespace-pre-wrap
+  break-words`), then stderr under a small "stderr" label (`terminal-stderr`; `text-destructive` only when the exit code
+  is not 0); ANSI codes are stripped on the client too (`utils/ansi.ts`); the last 40 lines show, with "Show all {n}
+  lines" up to the 60 KB body cap of 7.2; footer badges: "Exit code {n}" (`terminal-exit`, `data-value`), "Timed out",
+  the signal, and the duration (`formatDuration`); while running a Spinner + "Running…"; byte counts larger than the
+  kept text → "Output truncated by server" (the server keeps the first 4 KiB and the last 16 KiB of each stream).
+- **FileContent** (`file-content`, `data-path`): numbered lines starting at `startLine`, 20 lines, then **Show all**;
+  "Showing lines {a}–{b} of {total}" and "Truncated by server" when the output says so.
+- **FileList** (`file-list`; items `file-list-item` with `data-path`): up to 50 items, then "Show {n} more"; folders
+  end with `/`; search matches are grouped by path with `line:` prefixes and the matched line in mono; "More results
+  were cut by the server" when `truncated`.
+- **While running**: a `shell` row shows `TerminalOutput` with "Running…" as soon as its input is available (expanded
+  only when the user opens it); other tools keep the spinner status of 7.2.
+- **Approval previews** (`ToolApprovalPreview`, `tool-approval-preview`, `data-kind` `diff` | `content` | `command`;
+  7.3): `workspaceApprovalView(toolName, input)` builds `edit_file` → a `DiffView` of `diffLines(old_string,
+  new_string)` (`utils/line-diff.ts`: a small LCS without a dependency; past its size cap one hunk with every old line
+  removed, then every new line added), `write_file` → "Create or overwrite {path} · {n} lines" + a 20-line
+  `FileContent`, `shell` → the command card. The server's hunks are what the user sees for finished edits; the client
+  only diffs the small snippets of a preview.
+- **Share page** (7.15): `ShareToolRow` uses the same `workspaceToolView`, `WorkspaceToolBody` and row summary when the
+  share includes tool details; without tool details the row stays static, as before. Values longer than 16,384
+  characters arrive as `[truncated]` strings and fall back to the generic text.
+
+### 7.20 Projects in the chat (`ProjectSwitcher`, `NewChatProjectPicker`, `ChatProjectChip`, W7.9 / W7.10)
+
+A project (ADR-031) is a named folder on the server host inside the allowed roots (`HF_WORKSPACE_ROOTS`); a chat
+optionally belongs to one, and the workspace tools work only in chats whose project folder opened (ARCHITECTURE.md
+6.13). Projects are managed in Settings → Projects (9.10); the chat UI picks, shows and changes them. Wireframe: 2.12.
+
+- **Project switcher** (`ProjectSwitcher`, `project-switcher`, `data-value` `all` | `none` | the id): the first row
+  of `ChatNav`, above New chat (5.3). Row: `Folders` + "All chats", `Folder` + the project name, or `FolderX` in
+  `text-warning` when its folder is missing (`available: false`), then a trailing `ChevronsUpDown`. Menu: a
+  `DropdownMenu` radio group (`max-h-80`, scrolls): All chats · No project · separator · the projects sorted by name
+  (name, the path in mono muted text on a second line, the chat count on the right; `project-switcher-option`,
+  `data-value`) · separator · **Add project…** (`FolderPlus`, `project-add`; the switcher mounts its own
+  `AddProjectDialog`, and after a project is created the filter switches to it) · **Manage projects** (`project-manage`
+  → `/settings/projects`). Without any project the menu holds All chats, Add project… and Manage projects.
+- **Filtering**: a pick calls `chats.setProjectFilter()`, which resets the paged list and loads it again with
+  `GET /api/chats?projectId=<id>` (`none` for No project; nothing for All chats). The filter is stored in
+  `localStorage['hf-project-filter']`; an id that is unknown once the projects loaded falls back to All chats. Icon
+  mode: an icon button with the tooltip "Project: {name}" ("All chats", "No project"). Mobile: the same row inside the
+  sheet; picking a filter does not close the sheet. Empty list: "No chats in {name} yet" / "No chats without a
+  project". Search (Mod+K) ignores the filter.
+- **New chat** (`NewChatProjectPicker`, `new-chat-project`, `data-value` `none` | the id): a ghost pill (h-8,
+  `rounded-full`, 40px on coarse pointers) right under the `ChatGreeting` heading on `/`: "No project ▾" or "{name} ▾"
+  with a `Folder` icon; its menu lists `ProjectMenuItems` (`project-option`). Not a composer chip: the 390px toolbar is
+  full. Default: the switcher's project when the filter names one, else No project. When the filter is not All chats,
+  a pick also sets the filter (No project → `none`), so the new chat appears in the visible list. The first send
+  carries `projectId` (11.1). Hidden while no project exists.
+- **Chat header** (`ChatProjectChip`, `chat-project-chip`, `data-value` the id, `data-state` `ok` | `missing`): between
+  the title and `⋯`, only when the chat has a project: ghost h-7, `Folder` (`FolderX` in `text-warning` when missing) +
+  the name truncated at 14rem; below `sm` icon-only with `aria-label="Project: {name}"`. It opens a menu with the move
+  items (`ProjectMenuItems` with No project) and **Project settings** (→ `/settings/projects`).
+- **Move to project ▸** (`FolderInput`): a submenu in the header `⋯` menu (`chat-menu-move`, right after Rename) and in
+  the sidebar row `⋯` menu (`chat-row-move`, right after Rename) listing No project and every project (`project-option`,
+  the current one checked). Moving = `useMoveChat()(chatId, projectId)` (11.4): an optimistic `PATCH /api/chats/:id {
+  projectId }`, then the toast "Moved to {name}" (or "Moved out of {name}") with **Undo**; the row leaves the list when
+  it no longer matches the filter. 409 `run-active` → the change rolls back with the toast "Wait for the response to
+  finish before moving this chat."; 404 (the project was deleted meanwhile) → "This project no longer exists." A move
+  changes the instructions and tools of the chat's next run only; history is not rewritten.
+- **Command palette** (W7.9): a "Projects" section, shown only while searching: Show all chats · Show chats without a
+  project · Show {name} (checked when it is the current filter) · Add project… (→ `/settings/projects?add=1`) · with a
+  chat open: Move chat to {name} · Move chat out of project (keywords: move, project). "Settings: Projects" comes from
+  `SETTINGS_LINKS` (5.5).
+- **States**: no workspace roots → the Add dialog's alert (9.10); a folder deleted or moved on disk → the `FolderX`
+  warning in the switcher, the chip and the settings row, and the next run shows the `workspace-unavailable` notice
+  (7.1) instead of offering workspace tools; a chat's project deleted (`project.changed` with `project: null`) → the
+  chip disappears, the chats lose their `projectId` locally, and a filter on that project resets to All chats with the
+  toast "The project was deleted. Showing all chats."; the permission mode Accept edits is offered only in project
+  chats (7.11).
+- **No new shortcuts** (12): the palette covers keyboard reach, and Alt+P still opens the permission menu.
+
 ---
 
 ## 8. Plugins UX spec
@@ -1534,8 +1839,9 @@ emits `trusted(id)`. A stale hash (the files changed meanwhile) reloads the plug
 **Fresh auth everywhere** (Phase 6, S4: one composable, `useFreshAuth`, W6.11; signature in 11). Fresh-auth
 actions (API.md **fresh**): installing or trusting a plugin that runs code (8.3, above), creating a plugin from a
 template (8.6), saving or deleting files of a **code** plugin and Build & reload (8.10), reloading a code plugin (8.7),
-saving a stdio MCP server (8.12), changing the password (9.4), creating or updating a share link (7.14) and deleting
-all data (9.8). Every component follows the same rules:
+saving a stdio MCP server (8.12), changing the password (9.4), creating or updating a share link (7.14), deleting
+all data (9.8) and, since Phase 7, adding a project (9.10) and rotating the master key (9.8). Every component follows
+the same rules:
 
 - `run(task, { required })`: with `required` (the action is known to need fresh auth) and a session that is not fresh
   (`auth.fresh` false), `ConfirmPasswordDialog` opens **first**; otherwise the request runs, and a `403 forbidden` +
@@ -1549,7 +1855,7 @@ all data (9.8). Every component follows the same rules:
   else, a 403 from the login itself included, shows the server message (v1.1's plugin detail and data prompts said
   "Wrong password").
 - Where `required` is set: the code plugin form (scaffold), the Share dialog and the delete-all dialog (always), the
-  trust dialog (always), the install dialog (when the inspection says `requiresTrust`: code, or a stdio MCP server),
+  Add project dialog and the Rotate key dialog (always, Phase 7), the trust dialog (always), the install dialog (when the inspection says `requiresTrust`: code, or a stdio MCP server),
   the Source tab (code plugins: saving, deleting or renaming files and Build & reload ask for the password first when
   the session is not fresh; for a declarative plugin's `plugin.json` the prompt comes only after a refusal), the plugin
   header's Reload (code plugins), the MCP server dialog (when the request needs it: a stdio server); the provider wizard
@@ -1564,7 +1870,8 @@ all data (9.8). Every component follows the same rules:
   (MCP server dialog), "This provider starts a program on the server. Confirm your password to continue." (provider
   wizard), "Confirm your password to install a plugin that runs code on this server." (install), "Confirm your password
   to trust a plugin that runs code on this server." (trust), "Confirm your password to create or change a share link."
-  (7.14), "Deleting all data needs your password." (9.8).
+  (7.14), "Deleting all data needs your password." (9.8), "Adding a project needs your password." (9.10, Phase 7),
+  "Rotating the master key needs your password." (9.8, Phase 7).
 
 After a fresh-auth save of a `created` code plugin the server re-pins its trust automatically (ADR-017). The v1.1 copies
 of this flow (`plugins/code/fresh-auth.ts`, `plugins/detail/fresh-auth.ts`, `share/fresh-auth.ts` and the helpers in
@@ -1781,11 +2088,15 @@ except dialogs and text fields, which save on blur or Enter.
 |---|---|---|
 | Display name | `Input` ("Used in the greeting") | `displayName` |
 | Send messages with | `ToggleGroup` Enter / ⌘ Enter (Ctrl Enter off macOS) | `sendKey` |
-| Default permission mode | `Select` Ask / Auto / Off | `defaultToolMode` |
+| Default permission mode | `Select` Ask / Accept edits / Auto / Off (the options of `TOOL_MODE_OPTIONS`, 7.11; Accept edits since Phase 7) | `defaultToolMode` |
 | Default reasoning effort | `Select` Auto / Off / Low / Medium / High / Max | `defaultReasoningEffort` |
-| Max steps per response | `Input type="number"` 1–100 | `maxSteps` |
+| Max steps per response | `Input type="number"` 1–200 (Phase 7; was 1–100), help "Chats without a project" | `maxSteps` |
+| Max steps in project chats | `Input type="number"` 1–200 (Phase 7, `settings-project-max-steps`), help "Agent runs in project chats can take more steps." | `projectMaxSteps` |
 | Alt shortcuts | `Switch` "Use Alt+M, Alt+R and Alt+P for composer menus, and Alt+V to dictate." (Phase 6 added Alt+V) | `altShortcuts` |
 | Custom instructions | `Textarea` ("Sent with every chat") | `instructions` |
+
+Both step fields save on blur or Enter; an invalid value shows "Enter a whole number from 1 to 200." and keeps the saved
+value (defaults: 20 and 100).
 
 Password section: status text "No password" / "Password set" / "Set by HF_PASSWORD" (read-only);
 **Set password** / **Change password** (`PasswordDialog`: current, new, confirm → `PUT /api/auth/password`, a
@@ -1821,10 +2132,14 @@ under the field: "Wrong password", "Too many attempts. Try again in {n}s." Succe
 ### 9.8 Data (`/settings/data`, W5.5)
 
 Bulk data (ADR-024). `DataSettings` (`data-settings`) in the usual `SettingsPage` frame: `PageHeader` "Data" with the
-description "Back up and restore your chats, or delete them all." Wireframe: 2.7. On load it calls `GET /api/data`
+description "Back up and restore your chats, or delete them all." Wireframe: 2.7 (it predates the Phase 7 sections
+Storage cleanup and Encryption key). On load it calls `GET /api/data`
 (`DataSummary`); the summary line (`data-summary`) reads "12 chats (2 archived) · 348 messages · 18 files, 24 MB"
 (messages count every version). A skeleton shows while it loads, "Could not load the data summary" with **Retry**
-when it fails; it reloads after every import.
+when it fails; it reloads after every import (and, since Phase 7, after a cleanup). Section order: the summary,
+Export, Import, Storage cleanup (Phase 7), Shared links, Encryption key (Phase 7), Danger zone. Import, delete-all,
+key rotation and cleanup share one lock on the server (ADR-034, ADR-035): a `409 busy` answer to any of them shows the
+toast "Another data task is running. Try again when it finishes." (7.4).
 
 **Export** (`SettingsSection` "Export"): "Download a zip with every chat, including archived chats and every message
 version. API keys, passwords, plugins, MCP servers and share links are never included."
@@ -1862,6 +2177,22 @@ one; a failed chat does not stop the others."
 - afterwards `chats.fetchPage({ reset: true })`, plus `settings.fetch()` when `settingsRestored`; the summary line
   reloads and the polite region announces the result (14.2).
 
+**Storage cleanup** (Phase 7, ADR-035; `StorageCleanupSection`, `data-cleanup-section`, W7.13): `SettingsSection`
+"Storage cleanup" with the description "Remove uploaded and generated files that no chat, share link, plugin or
+setting uses anymore. Files from the last 24 hours are kept, and deleting a chat or a version keeps its files until the
+next cleanup."
+
+- **Check for unused files** (`data-cleanup-check`, outline) → `data.cleanupPreview()` (`GET /api/data/cleanup`, a
+  dry run that reads every message, so it shows a spinner); the summary (`data-cleanup-summary`): "{files} files ·
+  {size} can be removed" (plus ", and {n} leftover files on disk" when `blobs + tempFiles` > 0), then "{n} recent files
+  are kept for 24 hours." when `recentFiles` > 0, then "Last cleanup {relative time}" from `lastRunAt`; nothing to
+  remove → "No unused files."
+- **Remove…** (`data-cleanup-run`, destructive outline; enabled only after a check found something) opens a
+  `ConfirmDialog` "Remove unused files?" with "This deletes {files} files ({size}). It can't be undone." and **Remove
+  files** (`data-cleanup-confirm`, destructive) → `data.cleanup()` (`POST /api/data/cleanup`; not a fresh-auth route) →
+  toast "Removed {files} files ({size})"; the section and the summary line reload. The confirm counts come from the
+  last check; the server re-checks every file when it deletes.
+
 **Shared links**: `SharesSettingsSection` (W5.6, contract 10.4) renders its own `SettingsSection` "Shared links"
 ("Read-only links to chat snapshots. Revoking a link stops it at once.") and lists every share link of every chat,
 newest first. Row (`shares-row`, `data-share-id`, `data-chat-id`): the chat title (a link to `/chat/<id>`; "Untitled
@@ -1872,8 +2203,37 @@ Outdated / Expired badges (`share-outdated`, `share-expired`) · **Copy link** (
 links" with **Try again** (earlier rows stay). The section refetches after a revoke and when the Share dialog closes
 (`ui.shareChatId` back to `null`).
 
+**Encryption key** (Phase 7, ADR-034; `EncryptionKeySection`, `data-key-section`, W7.13): `SettingsSection`
+"Encryption key" with the description "API keys and other secrets are encrypted on this server with a master key." On
+load it calls `keys.get()` (`GET /api/keys`, `KeyStatus`):
+
+- Rows: "Source" ("Key file in the data directory" for `file`, "HF_MASTER_KEY environment variable" for `env`),
+  "Version" (`keyVersion`), "Rotated" (`rotatedAt` as `RelativeTime`, else "Never"), "Secrets" ("{secrets} encrypted",
+  plus "· {n} can't be read" when `unreadableSecrets` > 0).
+- **Rotate key…** (`data-key-rotate`, outline) opens `RotateKeyDialog`. It is disabled when `canRotate` is false; with
+  `source: 'env'` a note follows: "The key comes from HF_MASTER_KEY. Stop the server and run `pnpm key:rotate` with
+  HF_NEW_MASTER_KEY set to the new key." (the Docker command is in `docs/guides/using-projects.md`).
+- `keyCheck: 'mismatch'` → a destructive `Alert` "The master key doesn't match the stored secrets. Saved API keys can't
+  be read. Restore the previous key (HF_MASTER_KEY or data/secret.key), or enter the keys again." and rotation stays
+  disabled; `unknown` (no secrets yet) shows nothing extra.
+- **Rotate key dialog** (`RotateKeyDialog`, `key-rotate-dialog`): title "Rotate the master key?", text "A new key
+  encrypts every saved secret again.", then the effects as a list: "Other browsers and devices are signed out; you stay
+  signed in." · "Every share link changes ({shares} links): copy the new links from Shared links." · "Running replies
+  stop and pending approvals expire ({pendingApprovals} waiting)." · "Older versions of harness-forge can't read the
+  secrets afterwards: back up the data directory first."; `Input` "Type ROTATE to confirm" (`key-rotate-confirm`,
+  case-sensitive, autofocus) and **Rotate key** (`key-rotate-submit`, destructive, enabled only when the input is exactly
+  `ROTATE`).
+- Submit → `keys.rotate({ body: { confirm: 'ROTATE' } })` through `useFreshAuth().run(…, { required: true })` with the
+  prompt "Rotating the master key needs your password." (8.4); while the request or the prompt is pending the dialog
+  stays open. Success → toast "Master key rotated" with the description "{secrets} secrets encrypted again ·
+  {approvalsExpired} approvals expired", `rotated(result)`, the dialog closes, the section and Shared links reload. The
+  response carries a new session cookie for this browser; the server then sends `key.rotated` and closes every event
+  stream, and this tab reconnects (11). 409 `env-key` / `key-mismatch` → the server message inside the dialog; 409
+  `busy` → the busy toast.
+
 **Danger zone** (`SettingsSection` "Danger zone", its content in a `border-destructive/40` box): "Delete every chat,
-including archived chats, every message version and every share link. API keys, plugins and settings are kept."
+including archived chats, every message version and every share link. API keys, plugins, projects and settings are
+kept." (projects since Phase 7: delete-all keeps them, ADR-031)
 
 - **Delete all data…** (`data-delete`, destructive outline) opens a `Dialog` (`data-delete-dialog`): title "Delete all
   data?", text "This deletes {chats} chats and {messages} messages. It can't be undone; export a backup first if you
@@ -1946,6 +2306,64 @@ text go to the provider you choose; harness-forge doesn't store them."):
   errors → the player's toast "Could not play the test voice" with the server message (the page adds no toast of its
   own).
 
+### 9.10 Projects (`/settings/projects`, W7.9, Phase 7)
+
+Projects (ADR-031). `ProjectsSettings` (`projects-settings`) in the usual `SettingsPage` frame: the page
+(`pages/settings/projects.vue`) renders the `PageHeader` "Projects" with the description "Folders on the server that
+chats can read and edit." and the header action **Add project** (`project-add`, `FolderPlus`); `ProjectsSettings` is
+the body. Wireframe: 2.13. Nav label "Projects" (5.5). `?add=1` opens the Add project dialog (the command palette's
+"Add project…", 7.20). A skeleton shows while the projects load; a failure shows `SettingsLoadError` "Could not load
+the projects" with **Retry**.
+
+- **Rows** (`project-row`, `data-project-id`), sorted by name: the name, the path in mono muted text (truncated, the
+  full path in its `title`), "{n} chats" (`chatCount`), the warning badge "Folder not found" (`project-missing`; its
+  tooltip is `issue`) when `available` is false, and a muted "Uses AGENTS.md" / "Uses CLAUDE.md" when
+  `instructionsFile` is set.
+- **Row `⋯` menu** (`project-row-menu`, `aria-label="Actions for {name}"`): **Rename** (`project-rename` → the name turns
+  into `InlineRename`, `project-rename-input`, at most 80 characters; `projects.update(id, { name })`, optimistic) ·
+  **Edit instructions…** (`project-instructions` → `ProjectInstructionsDialog`) · **Delete…** (`project-delete` → a
+  `ConfirmDialog` "Delete {name}?" with "Its {n} chats stay and move to No project. The folder and its files are not
+  touched." and **Delete project**, `project-delete-confirm`, destructive). Delete → `projects.remove(id)` → toast
+  "Project deleted"; 409 `run-active` → toast "Wait for the responses in this project to finish before deleting it."
+- **Instructions dialog** (`ProjectInstructionsDialog`, `project-instructions-dialog`): title "Instructions for
+  {name}", a `Textarea` (`project-instructions-input`, at most 20,000 characters, `LIMITS.instructionsMaxChars`, with
+  the counter "{n} / 20,000"), the note "Sent with every chat in this project, after AGENTS.md / CLAUDE.md from the
+  folder." (when the folder has one: "This folder has {file}; it is added first."), Cancel and **Save**
+  (`project-instructions-save`) → `projects.update(id, { instructions })` (an empty text saves `null`), `saved(project)`.
+- **Empty state** (`projects-empty`): "No projects yet. A project is a folder on the server that chats can read and
+  edit." and **Add project** (`project-add`).
+- **Add project dialog** (`AddProjectDialog`, `add-project-dialog`; a form dialog, full width minus 1rem at 390px,
+  `max-h-[90dvh]`, its folder list scrolls; also opened from the switcher, 7.20):
+  - **Folder browser** (`FolderBrowser`, `folder-browser`, `data-path`, `data-state` `loading` | `ready` | `empty` |
+    `error`): with no folder open it lists the roots from `projects.browse()` (`GET /api/projects/browse`; a root
+    whose folder is missing is disabled with "Not found"); then a breadcrumb inside `nav aria-label="Folder path"` (the
+    root, then the path segments; `folder-browser-crumb`, `data-path`; the current one `aria-current="page"`),
+    **Parent folder** (`folder-browser-up`, `FolderUp`; at a root's top it returns to the list of roots), and the
+    subfolders as buttons (`folder-browser-entry`, `data-path`; a click or Enter opens one; the server hides dot
+    folders, `node_modules` and the data directory). Folders that already are projects show a "Project" badge and are
+    disabled; past 500 folders the list ends with "Showing the first 500 folders." The open folder is the selected
+    folder: "Selected: {path}" in mono. Each browse request aborts the previous one; a polite live region announces
+    "Opened {folder}, {n} folders" and focus moves to the first entry. Errors inline (`folder-browser-error`,
+    `data-code`): 404 → "This folder no longer exists." with Parent folder and back to the roots; 400 → "Choose a folder
+    inside the workspace folders."
+  - **New folder** (`folder-browser-new`, `FolderPlus`; rendered by the dialog right below the browser, because the
+    folder is created only on submit): reveals a "Folder name" input (`folder-browser-new-input`) checked like
+    `folderNameSchema`: no `/` or `\`, not `.` or `..`, no leading dot, at most 255 characters (inline errors "Use a
+    name without slashes.", "Folder names can't start with a dot.", "Use at most 255 characters."). With a name the
+    request becomes `{ name, path: <the open folder>, newFolder }`.
+  - **Name** (`add-project-name`, at most 80 characters): the selected folder's basename (or the new folder's name)
+    until the user edits it.
+  - **Add project** (`add-project-submit`; disabled without a selected folder below a root or without a name) →
+    `useFreshAuth().run(() => projects.create(body), { required: true })` with `ConfirmPasswordDialog` ("Adding a
+    project needs your password.", 8.4); cancelling the prompt shows nothing. Success → toast "Project added",
+    `created(project)`, the dialog closes (the switcher then filters by the new project).
+  - **Inline errors** (`add-project-error`, `data-code`): 409 `exists` → "A project for this folder already exists."
+    (with a new folder: "A folder with this name already exists."); 400 / 403 → "Choose a folder inside the workspace
+    folders." (a 400 with another server message, such as the data-directory refusal or the 200-project cap, shows that
+    message); 404 → "This folder no longer exists."
+  - **No workspace folders** (every root missing): an `Alert` "No workspace folders. Set HF_WORKSPACE_ROOTS on the
+    server." and the submit stays disabled.
+
 ---
 
 ## 10. Component inventory and contracts
@@ -2004,9 +2422,9 @@ here are server-driven and only the active path is loaded, hence the custom `Bra
 | `ModeTabs` × | `Chat \| Plugins` segmented tabs driven by the route | C3 |
 | `SettingsNav` × | "← Back to app" + settings links | C3 |
 | `ThemeToggle` × | Moon / Sun / Monitor toggle (dropdown when collapsed) | C3 |
-| `ChatNav` × | new chat, search, grouped chat list, status dots, row menu, infinite scroll | W2.4 (stub C3) |
+| `ChatNav` × | project switcher (Phase 7), new chat, search, grouped chat list, status dots, row menu (+ Move to project), infinite scroll | W2.4 (stub C3); W7.9 (Phase 7) |
 | `PluginsNav` × | new plugin, install, browse filters with counts, installed list | W3.1 (stub C3) |
-| `CommandPalette` × | Mod+K palette; also registers global shortcuts (`useGlobalShortcuts`) | W2.4 (stub C3) |
+| `CommandPalette` × | Mod+K palette (Phase 7: a Projects section while searching); also registers global shortcuts (`useGlobalShortcuts`) | W2.4 (stub C3); W7.9 (Phase 7) |
 | `ShortcutsDialog` × | Mod+/ list of shortcuts from the registry | W2.4 (stub C3) |
 
 Internal to `ChatNav` / `CommandPalette` (`app-shell/chat-nav/`, W2.4): `ChatNavRow`, `ChatNavDeletedToast` (the
@@ -2106,7 +2524,26 @@ cross-owner components. Phase 6: the dialog's own `fresh-auth.ts` was replaced b
 `SharedMessage` renders generated images with `ImageGallery` (W6.8); `share-view.ts` groups consecutive image files
 into a `gallery` block, and the "Files and images" label lives in `share-links.ts`.
 
-W4.2 (UX polish) may edit every file above in Phase 4. Phase 6 owners: W6.7 (`useChatSession` and the top-level chat
+**`projects/`** (W7.9, Phase 7; C15 ships the stubs) — `ProjectSwitcher` × (first row of `ChatNav`),
+`ProjectMenuItems` × (the radio items of every project menu), `NewChatProjectPicker` × (on `/`), `ChatProjectChip` ×
+(in `ChatHeader`), `AddProjectDialog` ×, `FolderBrowser` ×, `ProjectInstructionsDialog` ×, and the helper
+`move-chat.ts` (`useMoveChat`, 11.4).
+
+**`settings/projects/`** (W7.9, Phase 7; C15 ships the stub) — `ProjectsSettings` × (the body of
+`/settings/projects`, 9.10).
+
+**`chat/parts/tools/`** (W7.11, Phase 7; C15 ships the stubs) — `WorkspaceToolBody` ×, `DiffView` ×,
+`TerminalOutput` ×, `FileContent` ×, `FileList` ×, `ToolApprovalPreview` × and the pure registry `workspace-tools.ts`
+(7.19, 11.4). `ToolPart`, `ToolApprovalCard` and `ShareToolRow` use them. The pure helpers `utils/line-diff.ts`
+(`diffLines`) and `utils/ansi.ts` (`stripAnsi`) belong to W7.11 too.
+
+**`settings/data/`, Phase 7** (W7.13; C15 ships the stubs) — `EncryptionKeySection` ×, `RotateKeyDialog` × and
+`StorageCleanupSection` × (9.8), rendered by `DataSettings`.
+
+W4.2 (UX polish) may edit every file above in Phase 4. Phase 7 owners: W7.9 (the projects and chats stores,
+`projects/**`, `settings/projects/**`, `ChatNav`, `CommandPalette`), W7.10 (`useChatSession`, `useServerEvents`, the
+top-level chat components and pages), W7.11 (`chat/parts/**`, the share rendering files, `line-diff`, `ansi`), W7.12
+(`chat/composer/**`, `GeneralSettings`), W7.13 (`settings/data/**`); see `docs/phases/phase-7-v1-3.md`. Phase 6 owners: W6.7 (`useChatSession` and the top-level chat
 components), W6.8 (`chat/parts/**`, `ReadAloudButton`, the share rendering files), W6.9 (`chat/composer/**`,
 `ModelCaps`), W6.10 (the settings files), W6.11 (`useFreshAuth` and its call sites in `plugins/**`, `settings/data/**`,
 `ShareDialog`; `AppBrand`, `ThemeToggle`, `AppSidebar` and the `ui/sidebar` patch); see
@@ -2556,6 +2993,130 @@ defineEmits<{
 // files and no text); Cancel message-edit-cancel. The send key follows settings.sendKey; Esc cancels.
 ```
 
+#### Projects, workspace tools and data maintenance (Phase 7: W7.9 – W7.13; C15 ships the stubs)
+
+The seventeen components marked "stub" are created by C15 in P7-0b with exactly these props, emits and root test ids
+and are frozen from Gate P7-0b (a change is a CCR); P7-A implements them behind those contracts. Types:
+`ProjectSummary`, `ProjectCreate`, `ProjectUpdate`, `ProjectBrowse`, `KeyStatus`, `KeyRotationResult`, `ToolMode`,
+`WorkspaceAccess`, `DiffHunk`, `ShellOutput` and the workspace tool output types from `@harness-forge/shared`;
+`WorkspaceToolView` and `FileListItem` from `workspace-tools.ts` (11.4). The components are imported by path
+(`import DiffView from './tools/DiffView.vue'`).
+
+```ts
+// ProjectSwitcher (W7.9; stub) — the first row of ChatNav (5.3, 7.20)
+// No props, no emits: reads the projects and chats stores; its menu calls chats.setProjectFilter(); "Add project…"
+// mounts its own AddProjectDialog (the filter then switches to the new project); "Manage projects" → /settings/projects.
+// Root project-switcher (data-value = all | none | <project id>); items project-switcher-option (data-value),
+// project-add, project-manage.
+
+// ProjectMenuItems (W7.9; stub) — radio items inside the caller's DropdownMenu content: the new-chat picker, the
+// header chip and both "Move to project" submenus
+defineProps<{
+  modelValue: string | null       // the selected project id; null = No project
+  includeNone?: boolean           // default true: a first "No project" item
+}>()
+defineEmits<{ select: [projectId: string | null] }>()
+// Items project-option (data-value = none | <project id>): projects sorted by name with the path (mono, muted) on a
+// second line; a project whose folder is missing shows FolderX in text-warning.
+
+// NewChatProjectPicker (W7.9; stub; mounted by pages/index.vue, W7.10) — the pill under ChatGreeting (7.20)
+defineProps<{ modelValue: string | null; disabled?: boolean }>()   // v-model: the new chat's project (null = none)
+defineEmits<{ 'update:modelValue': [projectId: string | null] }>()
+// Root new-chat-project (data-value = none | <project id>); renders nothing while no project exists. A pick also sets
+// the chats store filter when the filter is not 'all'.
+
+// ChatProjectChip (W7.9; stub; mounted by ChatHeader, W7.10) — the project of a saved chat (7.20)
+defineProps<{ chatId: string; projectId: string | null }>()
+// Renders nothing for a null or unknown project. Root chat-project-chip (data-value = the id, data-state = ok |
+// missing); its menu: ProjectMenuItems (moves through useMoveChat) and "Project settings".
+
+// AddProjectDialog (W7.9; stub) — 9.10
+defineProps<{ open: boolean; initialPath?: string | null }>()   // initialPath: the folder to open first (default: the roots)
+defineEmits<{ 'update:open': [value: boolean]; created: [project: ProjectSummary] }>()
+// Root add-project-dialog; renders FolderBrowser, the New folder button folder-browser-new + input
+// folder-browser-new-input, the name input add-project-name, submit add-project-submit and the inline error
+// add-project-error (data-code). Submits through useFreshAuth().run(() => projects.create(body), { required: true }).
+
+// FolderBrowser (W7.9; stub) — 9.10
+defineProps<{ modelValue: string | null; disabled?: boolean }>()   // v-model: the open (= selected) folder; null = the roots
+defineEmits<{ 'update:modelValue': [path: string | null] }>()
+// Root folder-browser (data-path = the open folder, '' for the roots; data-state = loading | ready | empty | error);
+// entries folder-browser-entry (data-path), folder-browser-up, breadcrumb folder-browser-crumb (data-path),
+// folder-browser-error (data-code). Calls projects.browse(path, { signal }) and aborts the previous request.
+
+// ProjectInstructionsDialog (W7.9; stub) — 9.10
+defineProps<{ open: boolean; project: ProjectSummary | null }>()
+defineEmits<{ 'update:open': [value: boolean]; saved: [project: ProjectSummary] }>()
+// Root project-instructions-dialog; textarea project-instructions-input; Save project-instructions-save.
+
+// ProjectsSettings (W7.9; stub) — the body of pages/settings/projects.vue (9.10): the page's SettingsPage renders the
+// PageHeader "Projects" with the Add project action. No props, no emits. Root projects-settings.
+
+// WorkspaceToolBody (W7.11; stub) — the expanded body of a workspace tool row (7.19)
+defineProps<{ view: WorkspaceToolView; running?: boolean }>()   // running default false
+// Renders DiffView / TerminalOutput / FileContent / FileList by view.kind, then the toggle tool-raw-toggle
+// ("Raw input and output", which shows the generic ToolValueBlocks).
+
+// DiffView (W7.11; stub)
+defineProps<{
+  hunks: readonly DiffHunk[]      // the server's hunks (workspaceDiffSchema) or utils/line-diff.ts output
+  path?: string | null            // project-relative path shown in the header
+  created?: boolean               // default false: a new file ("New file" badge)
+  truncated?: boolean             // default false: "Diff truncated by server"
+  maxLines?: number               // default 200: then "Show {n} more lines"
+}>()
+// Root diff-view (data-path, data-state = created | modified; role="region" aria-label "Changes to {path}"); lines
+// diff-line (data-kind = add | del | context); diff-expand (data-action = unfold | show-all).
+
+// TerminalOutput (W7.11; stub)
+defineProps<{ command: string; output: ShellOutput | null; running?: boolean }>()   // output null while running
+// Root terminal-output (data-status = running | ok | error | timeout | killed; aria-label "Output of {command}");
+// terminal-command, terminal-stdout, terminal-stderr, terminal-exit (data-value = the exit code).
+
+// FileContent (W7.11; stub)
+defineProps<{ path: string; content: string; startLine?: number; totalLines?: number | null; truncated?: boolean }>()
+// startLine default 1; 20 lines, then "Show all". Root file-content (data-path).
+
+// FileList (W7.11; stub)
+defineProps<{ items: readonly FileListItem[]; truncated?: boolean; maxItems?: number }>()   // maxItems default 50
+// Root file-list; items file-list-item (data-path); search matches grouped by path with "line:" prefixes.
+
+// ToolApprovalPreview (W7.11; stub) — replaces the JSON block of ToolApprovalCard for workspace tools (7.3)
+defineProps<{ toolName: string; input: unknown }>()
+// Root tool-approval-preview (data-kind = diff | content | command); renders nothing when
+// workspaceApprovalView(toolName, input) is null (the card then keeps its JSON block).
+
+// ToolApprovalCard (W7.11; internal to chat/parts, listed for its Phase 7 members)
+defineProps<{
+  part: ToolPartLike
+  toolName: string
+  source?: string | null
+  workspace?: WorkspaceAccess | null   // + C15: ToolSummary.workspace; 'execute' hides "Always allow", 'write' offers
+                                       // "Accept all edits in this chat" (tool-approval-accept-edits)
+}>()
+defineEmits<{ decide: [decision: { approved: boolean; alwaysAllow: boolean; acceptEdits?: boolean /* + */ }] }>()
+// ToolPart and ChatMessage add acceptEdits? to their approval emit payload (C15, type only); the session switches the
+// mode (11.1).
+
+// EncryptionKeySection (W7.13; stub) — Settings → Data (9.8). No props, no emits: loads keys.get() itself and owns the
+// RotateKeyDialog. Root data-key-section; the button data-key-rotate.
+
+// RotateKeyDialog (W7.13; stub) — 9.8
+defineProps<{ open: boolean; status: KeyStatus | null }>()   // the counts of the effects list come from status
+defineEmits<{ 'update:open': [value: boolean]; rotated: [result: KeyRotationResult] }>()
+// Root key-rotate-dialog; the "Type ROTATE to confirm" input key-rotate-confirm; submit key-rotate-submit. Submits
+// through useFreshAuth().run(…, { required: true }).
+
+// StorageCleanupSection (W7.13; stub) — Settings → Data (9.8). No props, no emits. Root data-cleanup-section;
+// data-cleanup-check, data-cleanup-summary, data-cleanup-run, and data-cleanup-confirm on the ConfirmDialog's button.
+
+// Prop-only additions (C15 declares them in P7-0b; the owners use them in P7-A)
+// ChatHeader (W7.10):     projectId?: string | null         // the chat's project: ChatProjectChip + "Move to project"
+// ChatComposer (W7.12):   projectId?: string | null         // a project chat: PermissionMenu offers Accept edits
+// PermissionMenu (W7.12): modes?: readonly ToolMode[]       // default every mode; ChatComposer passes ask, auto, off,
+//                                                           // plus edits in a project chat or while edits is selected
+```
+
 ---
 
 ## 11. Pinia stores and composables
@@ -2611,6 +3172,24 @@ actions: fetchPage({ reset? }) /* pages of 50 */, search(q, { limit?, signal? })
 // remove(): hides the row now, calls DELETE when the undo window ends; `done` (+) settles with
 // { status: 'deleted' | 'undone' | 'failed', error? } and never rejects (a failed delete restores the row).
 // Pending deletes are flushed on pagehide (fetch keepalive). unread persists in localStorage['hf-unread'].
+// + Phase 7 (C15 signature, W7.9 implementation, 7.20):
+type ChatProjectFilter = 'all' | 'none' | (string & {})   // 'all' = every chat, 'none' = chats without a project, else a project id
+state:   + projectFilter: ChatProjectFilter               // localStorage['hf-project-filter']; default 'all'
+actions: + setProjectFilter(filter: ChatProjectFilter): Promise<void>  // stores it, resets the list, fetchPage({ reset: true })
+// fetchPage sends projectId (an id or 'none'); upsertSummary inserts rows that match the filter and removes rows that
+// no longer do; summaryOf copies projectId; update(id, { projectId }) patches the row optimistically (a move);
+// applyEvent(project.changed with project null) sets projectId to null on loaded rows and resets a filter on that
+// project to 'all' (toast); search ignores the filter; an id unknown once the projects loaded falls back to 'all'.
+
+// stores/projects.ts — useProjectsStore (+ Phase 7, ADR-031; C15 signature, W7.9 implementation)
+state:   { items: ProjectSummary[]; loaded: boolean; loading: boolean }
+getters: byId(id: string): ProjectSummary | undefined, sorted (ProjectSummary[] by name)
+actions: fetchAll(): Promise<void>
+         create(input: ProjectCreate): Promise<ProjectSummary>     // POST /projects; the caller wraps it in useFreshAuth().run
+         update(id: string, patch: ProjectUpdate): Promise<ProjectSummary>  // optimistic, rolls back on error
+         remove(id: string): Promise<void>                         // 409 run-active is thrown (the caller shows the toast)
+         browse(path?: string | null, opts?: { signal?: AbortSignal }): Promise<ProjectBrowse>
+         applyEvent(event: ServerEvent): void                      // project.changed: upsert, or remove for project null
 
 // stores/plugins.ts — usePluginsStore
 state:   { items: PluginSummary[]; details: Record<string, PluginDetail>; logs: Record<string, PluginLogEntry[]>
@@ -2639,7 +3218,9 @@ actions: openPalette(), closePalette(), togglePalette(), openShortcuts(), openIn
          openShare(chatId) /* + sets shareChatId */, closeShare() /* + sets it back to null */
 ```
 
-The chats store keeps its signature in Phase 5 (W5.2 changes only the implementation); the Data page uses
+Phase 7 adds the projects store and the two chats store members above (frozen from Gate P7-0b); the settings store
+carries `projectMaxSteps` through `Settings`. The chats store keeps its signature in Phase 5 (W5.2 changes only the
+implementation); the Data page uses
 `chats.fetchPage({ reset: true })` and `settings.fetch()` after an import or a delete-all (9.8). Phase 6 changes no
 store signature: the settings store carries the six new keys through `Settings` (`imageModelRef`,
 `transcriptionModelRef`, `transcriptionLanguage`, `speechModelRef`, `speechVoice`, `speechSpeed`), and the chats store
@@ -2657,7 +3238,12 @@ plugin's opened detail on `plugin.changed`. `chat.deleted` of the open chat navi
 `plugins.refreshLoaded()` and the loaded providers / models / first chat page. `run.finished` for a chat that is
 not `ui.activeChatId` marks it unread; `awaitingApproval: true` sets its run state to `approval`. Components
 subscribe to single events with `useServerEvents().on(type | '*', handler)` (runs after the stores applied the
-event; unsubscribes with the scope).
+event; unsubscribes with the scope). Phase 7 (W7.10): `project.changed` → `projects.applyEvent` + `chats.applyEvent`;
+`key.rotated` → the chats store reloads its first page, an open session whose chat is in `chatIds` refreshes (its
+pending approvals were denied), and the toast "The encryption key was rotated." shows; the server closes every event
+stream right after `key.rotated`, so the client reconnects with backoff (the rotating tab holds a new cookie; other
+browsers are signed out and land on `/login`); `refetchLoadedStores()` also calls `projects.fetchAll()` when the
+projects store is loaded.
 
 ### 11.1 `useChatSession(id)` (W2.2)
 
@@ -2689,7 +3275,7 @@ interface ChatSession {
                                           // another tab moved the leaf (coalesced)
   regenerate(messageId?: string): Promise<void>   // a new version of that reply (default: the last message), or a
                                           // first reply to a user message; re-sends an unstored failed message
-  approve(r: { id: string; approved: boolean; toolName: string; alwaysAllow: boolean }): Promise<void>
+  approve(r: ToolApprovalDecision): Promise<void>   // below; Phase 7 adds acceptEdits
   stop(): Promise<void>                   // POST /api/chat/:id/stop, then the client abort (an abort alone only disconnects)
   load(): Promise<void>                   // + GET /api/chats/:id, then resumeIfRunning()
   refresh(): Promise<void>                // + reloads the history unless a request is in flight
@@ -2698,6 +3284,17 @@ interface ChatSession {
   refreshBranches(): Promise<void>        // + Phase 5: GET /api/chats/:id after the session's own edit / regenerate
   takeBackUnstored(): HarnessUIMessage | null  // + Phase 5: removes the unstored failed user message (and anything
                                           // after it) from the transcript and returns it; null when there is none
+  projectId: ComputedRef<string | null>   // + Phase 7: a new chat: the picker's choice, else the filter's project
+                                          // (when it names a known project); a saved chat: chats.byId(id)?.projectId
+                                          // ?? summary.projectId
+  setProject(projectId: string | null): Promise<void>  // + Phase 7: a new chat: local only (sent with the first
+                                          // request); a persisted chat: PATCH /api/chats/:id { projectId } (throws
+                                          // HarnessError on 409 run-active / 404; useMoveChat shows the toasts)
+}
+interface ToolApprovalDecision {          // the argument of approve()
+  id: string; approved: boolean; toolName: string; alwaysAllow: boolean
+  acceptEdits?: boolean                   // + Phase 7: "Accept all edits in this chat": toolMode = 'edits' is set
+                                          // (and saved on the chat) before the approval is sent
 }
 function useChatSession(id: string, opts?: { isNew?: boolean }): ChatSession
 function useChatSessionRegistry(): { get(id: string): ChatSession | undefined; ids: Readonly<Ref<readonly string[]>> }
@@ -2716,8 +3313,10 @@ function leafMovedElsewhere(messages: readonly HarnessUIMessage[], leaf: string 
 - `useChat({ id, messages, generateId: createMessageId, transport: new DefaultChatTransport({ api: '/api/chat',
   prepareSendMessagesRequest }), sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses })`
   (API.md 6.1); the body sends only the last message plus `{ chatId, trigger, parentId?, messageId?, modelRef,
-  reasoningEffort, toolMode, imageOptions? }` (Phase 6: `imageOptions = useImageOptions().forModel(model)`, sent only
-  for image models and chat models with image output). User message ids are generated here (`createMessageId`,
+  reasoningEffort, toolMode, imageOptions?, projectId? }` (Phase 6: `imageOptions = useImageOptions().forModel(model)`,
+  sent only for image models and chat models with image output; Phase 7: `projectId` = the session's `projectId`, sent
+  only while the chat is not persisted and the request is a new user message: the server honors it only when the
+  request creates the chat). User message ids are generated here (`createMessageId`,
   ADR-019); assistant ids always come from the server.
 - `@ai-sdk/vue` 4 has no `resume` option: on mount, when the chat has an active run (`ChatSummary.running`, or the
   chats store saw `run.started`), the session calls `chat.resumeStream()` (`GET /api/chat/:id/stream`, 204 when
@@ -2803,7 +3402,8 @@ auto-repeat, where the handler does not run again). Ignored while an IME composi
 Other composables: `useApi()` / `useApiFetch()` (C5), `useServerEvents()` (C5, 11), `useChatSession()` (W2.2,
 11.1), `useGlobalShortcuts()` (W2.4), `useComposerAttachments()`, `useComposerDraft(chatId)`,
 `useComposerModel(modelRef)`, `useComposerShortcuts()` and `useComposerDropZone()` (W2.3); Phase 6: `useImageOptions()`,
-`useVoiceInput()`, `useSpeechPlayer()` and `useFreshAuth()` (11.3).
+`useVoiceInput()`, `useSpeechPlayer()` and `useFreshAuth()` (11.3); Phase 7: `useMoveChat()` and the pure workspace
+modules (11.4).
 
 ### 11.3 Phase 6 composables
 
@@ -2907,6 +3507,46 @@ export interface FreshAuth {
 export function useFreshAuth(): FreshAuth
 ```
 
+### 11.4 Phase 7 modules
+
+C15 creates these modules in P7-0b with exactly these exports and inert bodies (`workspaceToolView` returns `null`, so
+`ToolPart` keeps its generic blocks until W7.11 lands); W7.9 owns `move-chat.ts`, W7.11 the other three.
+
+```ts
+// components/projects/move-chat.ts (W7.9) — the one move action behind every "Move to project" menu (7.20)
+function useMoveChat(): (chatId: string, projectId: string | null) => Promise<void>
+// chats.update(chatId, { projectId }) (optimistic; the row leaves a list it no longer matches), then the toast
+// "Moved to {name}" / "Moved out of {name}" with Undo (moves back); 409 run-active → rolled back + "Wait for the
+// response to finish before moving this chat."; 404 → rolled back + "This project no longer exists."; never rejects.
+
+// components/chat/parts/tools/workspace-tools.ts (W7.11) — pure and store-free (the share page uses it too), 7.19
+// DiffHunk ({ oldStart, oldLines, newStart, newLines, lines }, lines prefixed ' ' / '+' / '-') and ShellOutput (the
+// stored shell output) come from @harness-forge/shared (the workspace tool schemas).
+type FileListItem = { path: string; type?: WorkspaceEntryType; line?: number; text?: string }
+                                        // type: list_directory entries (file | dir | symlink | other);
+                                        // line + text: a search_files match
+type WorkspaceToolView =
+  | { kind: 'diff', path: string, created: boolean, additions: number, deletions: number, hunks: DiffHunk[], truncated: boolean }
+  | { kind: 'terminal', command: string, output: ShellOutput | null }
+  | { kind: 'file', path: string, content: string, startLine: number, endLine: number, totalLines: number | null, truncated: boolean }
+  | { kind: 'list', items: FileListItem[], noun: 'entries' | 'files' | 'matches', truncated: boolean }
+function workspaceToolView(toolName: string, input: unknown, output: unknown): WorkspaceToolView | null
+function workspaceApprovalView(toolName: string, input: unknown): WorkspaceToolView | null   // previews (7.3)
+function workspaceRowArgument(toolName: string, input: unknown): string | null
+function workspaceRowSummary(toolName: string, output: unknown):
+  { text: string; tone: 'muted' | 'success' | 'destructive' | 'warning' } | null
+function workspaceToolIcon(toolName: string): Component | null
+// Every function returns null for a name outside WORKSPACE_TOOL_NAMES or a value that fails the shared schema.
+
+// utils/line-diff.ts (W7.11) — client diffs for approval previews only (no dependency)
+function diffLines(a: string, b: string, opts?: { context?: number; maxCells?: number }): DiffHunk[]
+// context default 3, maxCells default 4e6 (the LCS table); past the cap one hunk: every old line removed, then every
+// new line added; CRLF is compared as LF; a missing trailing newline is not a change of its own.
+
+// utils/ansi.ts (W7.11)
+function stripAnsi(text: string): string   // removes CSI / OSC escape sequences (the server strips them too)
+```
+
 ---
 
 ## 12. Keyboard shortcuts
@@ -2922,7 +3562,7 @@ export function useFreshAuth(): FreshAuth
 | Shift+Esc | focus the composer | chat pages, no overlay open | W2.4 (→ `ui.requestComposerFocus()`) |
 | Alt+M | open model picker | chat pages, also in inputs | W2.3 (`alt+code:KeyM`, `alt: true`) |
 | Alt+R | open effort menu (reasoning models) | chat pages, also in inputs | W2.3 (`alt+code:KeyR`, `alt: true`) |
-| Alt+P | open permission menu (when tools exist) | chat pages, also in inputs | W2.3 (`alt+code:KeyP`, `alt: true`) |
+| Alt+P | open permission menu (when tools exist; Phase 7: with Accept edits in project chats) | chat pages, also in inputs | W2.3 (`alt+code:KeyP`, `alt: true`) |
 | Alt+V | what a click on the mic does (7.17): start dictation; while recording: stop and transcribe; while transcribing: cancel; without a speech-to-text model: the setup popover | chat pages with the composer, also in inputs; not while focus is in a dialog, menu or listbox; only where the browser can record in a secure context; with a disabled composer only while dictation runs | W6.9 (id `composer-dictate`, `alt+code:KeyV`, `alt: true`; calls `MicButton.activate()`; Phase 6) |
 | Enter | send (`sendKey = enter`) | composer | W2.3 |
 | Mod+Enter | send (`sendKey = mod-enter`) | composer | W2.3 |
@@ -2947,6 +3587,8 @@ Rules:
   whose `when` is false: `composer-dictation-cancel` only takes Esc while dictation runs, and `read-aloud-stop` exists
   only while something is read.
 - Shortcuts never fire while an IME composition is active or inside CodeMirror (except Mod+S and Mod+K).
+- Phase 7 adds no shortcut (every free combo clashes with a browser shortcut): projects are reached through the
+  switcher (Tab and Enter), the command palette's Projects section (7.20) and Alt+P for the permission mode.
 - `KbdCombo` renders hints: `⌘⇧O` / `⌘K` on macOS, `Ctrl Shift O` / `Ctrl K` elsewhere. Hints are hidden below `lg`
   and on touch devices.
 
@@ -2971,9 +3613,10 @@ elements goes into data attributes (`data-chat-id`, `data-message-id`, `data-mod
 `data-plugin-id`, `data-tool-name`, `data-server-id`, `data-state`, `data-status`, `data-value`, `data-step`,
 `data-step-item`, `data-path`, `data-kind`, `data-action`, `data-code`, `data-level`, `data-dirty`, `data-hidden`;
 Phase 5 adds `data-index`, `data-count`, `data-share-id`, `data-role`, `data-outdated`, `data-expired`; Phase 6 reuses
-them for galleries and adds no new attribute name). Playwright uses `getByTestId()` plus attribute filters. Ids are
-never reused for a different element; removing one is a CCR. The Phase 5 ids are collected in 13.6, except the two
-Settings → Models ids added in P5-B (`model-select-option`, `model-row-menu`, 13.4); the Phase 6 ids in 13.7.
+them for galleries and adds no new attribute name; Phase 7 adds `data-project-id` and `data-tone`). Playwright uses
+`getByTestId()` plus attribute filters. Ids are never reused for a different element; removing one is a CCR. The Phase
+5 ids are collected in 13.6, except the two Settings → Models ids added in P5-B (`model-select-option`,
+`model-row-menu`, 13.4); the Phase 6 ids in 13.7; the Phase 7 ids in 13.8.
 
 ### 13.1 Shell and navigation
 
@@ -3238,6 +3881,82 @@ event on `message-edit-attach`) and the custom model dialog's Kind select (tests
 | `settings-speech-speed` | `settingsSpeechSpeed` | "Speed" select trigger | `data-value` (`0.75` … `2`) |
 | `settings-speech-test` | `settingsSpeechTest` | "Test voice" button | `data-state` (`idle` / `loading` / `playing`) |
 
+### 13.8 Projects, workspace tools and data maintenance (Phase 7)
+
+The 60 new ids of Phase 7. C15 copies this table verbatim into `utils/testids.ts` in P7-0b (the key column is the
+`testIds` key, the camelCase of the id) under a `// Projects, workspace tools and data maintenance (Phase 7)` comment;
+the file stays frozen through P7-A. The new components also reuse existing ids: the permission option "Accept edits" is
+a `permission-option` with `data-value="edits"`; workspace tool rows are `tool-row`s (`data-tool-name` = the tool),
+their approval cards `tool-approval` with `tool-approval-allow` / `tool-approval-deny` (the shell card has no
+`tool-approval-always`); the Add project and Rotate key prompts use `confirm-password-dialog`; the delete and cleanup
+confirmations are `ConfirmDialog`s whose confirm buttons carry `project-delete-confirm` / `data-cleanup-confirm`; the
+share page keeps `share-tool-row`; Settings → Projects renders `page-header`; the palette's Projects entries are
+`command-palette-item`s. `project-add` marks every "Add project" control (the switcher item, the Settings → Projects
+header button and its empty state), as `share-copy` marks every "Copy link".
+
+| Id | Key (`testIds.*`) | Element | Data attributes |
+|---|---|---|---|
+| `project-switcher` | `projectSwitcher` | `ProjectSwitcher` trigger (first row of `ChatNav`) | `data-value` (`all` / `none` / project id) |
+| `project-switcher-option` | `projectSwitcherOption` | a filter item of the switcher menu | `data-value` (`all` / `none` / project id) |
+| `project-add` | `projectAdd` | "Add project…" / "Add project" (switcher menu, Settings → Projects header and empty state) | |
+| `project-manage` | `projectManage` | "Manage projects" in the switcher menu | |
+| `new-chat-project` | `newChatProject` | `NewChatProjectPicker` pill on `/` | `data-value` (`none` / project id) |
+| `project-option` | `projectOption` | a project item of `ProjectMenuItems` (picker, chip and move menus) | `data-value` (`none` / project id), `data-state` (reka: `checked` / `unchecked`) |
+| `chat-project-chip` | `chatProjectChip` | `ChatProjectChip` in the chat header | `data-value` (project id), `data-state` (`ok` / `missing`) |
+| `chat-menu-move` | `chatMenuMove` | "Move to project" submenu trigger in the header `⋯` menu | |
+| `chat-row-move` | `chatRowMove` | "Move to project" submenu trigger in the sidebar row menu | |
+| `add-project-dialog` | `addProjectDialog` | `AddProjectDialog` content | |
+| `add-project-name` | `addProjectName` | "Name" input | |
+| `add-project-submit` | `addProjectSubmit` | "Add project" submit | |
+| `add-project-error` | `addProjectError` | inline error of the dialog | `data-code` |
+| `folder-browser` | `folderBrowser` | `FolderBrowser` root | `data-path` (the open folder; empty for the roots), `data-state` (`loading` / `ready` / `empty` / `error`) |
+| `folder-browser-entry` | `folderBrowserEntry` | a root or subfolder button | `data-path` |
+| `folder-browser-up` | `folderBrowserUp` | "Parent folder" | |
+| `folder-browser-crumb` | `folderBrowserCrumb` | a breadcrumb segment | `data-path` |
+| `folder-browser-new` | `folderBrowserNew` | "New folder" | |
+| `folder-browser-new-input` | `folderBrowserNewInput` | "Folder name" input | |
+| `folder-browser-error` | `folderBrowserError` | inline browse error | `data-code` |
+| `settings-nav-projects` | `settingsNavProjects` | "Projects" settings nav item | `data-state` (active) |
+| `projects-settings` | `projectsSettings` | `ProjectsSettings` root | |
+| `projects-empty` | `projectsEmpty` | "No projects yet." state | |
+| `project-row` | `projectRow` | one project in Settings → Projects | `data-project-id` |
+| `project-row-menu` | `projectRowMenu` | `⋯` actions trigger of a project row | |
+| `project-rename` | `projectRename` | "Rename" item | |
+| `project-rename-input` | `projectRenameInput` | inline rename input of a project | |
+| `project-instructions` | `projectInstructions` | "Edit instructions…" item | |
+| `project-instructions-dialog` | `projectInstructionsDialog` | `ProjectInstructionsDialog` content | |
+| `project-instructions-input` | `projectInstructionsInput` | instructions textarea | |
+| `project-instructions-save` | `projectInstructionsSave` | "Save" of the instructions dialog | |
+| `project-delete` | `projectDelete` | "Delete…" item | |
+| `project-delete-confirm` | `projectDeleteConfirm` | confirm button of the delete `ConfirmDialog` | |
+| `project-missing` | `projectMissing` | "Folder not found" badge of a project row | |
+| `settings-project-max-steps` | `settingsProjectMaxSteps` | "Max steps in project chats" input (Settings → General) | |
+| `tool-row-summary` | `toolRowSummary` | summary of a workspace tool row (`+12 −3`, `exit 1`, …) | `data-tone` (`muted` / `success` / `destructive` / `warning`) |
+| `tool-raw-toggle` | `toolRawToggle` | "Raw input and output" toggle of a workspace tool body | `data-state` (`open` / `closed`) |
+| `diff-view` | `diffView` | `DiffView` root | `data-path`, `data-state` (`created` / `modified`) |
+| `diff-line` | `diffLine` | one diff line | `data-kind` (`add` / `del` / `context`) |
+| `diff-expand` | `diffExpand` | "⋯ N unchanged lines" / "Show N more lines" | `data-action` (`unfold` / `show-all`) |
+| `terminal-output` | `terminalOutput` | `TerminalOutput` root | `data-status` (`running` / `ok` / `error` / `timeout` / `killed`) |
+| `terminal-command` | `terminalCommand` | the `$ command` line | |
+| `terminal-exit` | `terminalExit` | "Exit code N" badge | `data-value` (the exit code) |
+| `terminal-stdout` | `terminalStdout` | stdout block | |
+| `terminal-stderr` | `terminalStderr` | stderr block | |
+| `file-content` | `fileContent` | `FileContent` root | `data-path` |
+| `file-list` | `fileList` | `FileList` root | |
+| `file-list-item` | `fileListItem` | one item of a file list | `data-path` |
+| `tool-approval-preview` | `toolApprovalPreview` | `ToolApprovalPreview` root inside an approval card | `data-kind` (`diff` / `content` / `command`) |
+| `tool-approval-accept-edits` | `toolApprovalAcceptEdits` | "Accept all edits in this chat" checkbox | `data-state` (reka: `checked` / `unchecked`) |
+| `data-key-section` | `dataKeySection` | `EncryptionKeySection` root | |
+| `data-key-rotate` | `dataKeyRotate` | "Rotate key…" | |
+| `key-rotate-dialog` | `keyRotateDialog` | `RotateKeyDialog` content | |
+| `key-rotate-confirm` | `keyRotateConfirm` | "Type ROTATE to confirm" input | |
+| `key-rotate-submit` | `keyRotateSubmit` | "Rotate key" submit | |
+| `data-cleanup-section` | `dataCleanupSection` | `StorageCleanupSection` root | |
+| `data-cleanup-check` | `dataCleanupCheck` | "Check for unused files" | |
+| `data-cleanup-summary` | `dataCleanupSummary` | the preview summary line | |
+| `data-cleanup-run` | `dataCleanupRun` | "Remove…" | |
+| `data-cleanup-confirm` | `dataCleanupConfirm` | confirm button of the cleanup `ConfirmDialog` | |
+
 ---
 
 ## 14. Accessibility and responsiveness
@@ -3269,6 +3988,13 @@ event on `message-edit-attach`) and the custom model dialog's Kind select (tests
   the mic unless the user clicked elsewhere. The image options menu opens on the current aspect ratio and returns focus
   to the textarea (desktop). The voice field keeps focus while its suggestions open and close. The Media page's Test
   voice keeps focus on its button while it plays.
+- Phase 7: the switcher, the new-chat picker and the chip are menus that return focus to their trigger; a "Move to
+  project" submenu returns focus to its `⋯` trigger (the row or the header). Opening a folder in the `FolderBrowser`
+  moves focus to its first entry (else Parent folder) and the polite region announces "Opened {folder}, {n} folders";
+  the Add project dialog opens on the browser's first entry. The Rotate key dialog focuses "Type ROTATE to confirm";
+  closing it (or its password prompt) returns focus to "Rotate key…". "Show {n} more lines" and "Show all" keep focus on
+  the same place of the expanded block. Checking "Accept all edits in this chat" does not move focus; Allow then
+  collapses the card like any decision.
 
 ### 14.2 Semantics and labels
 
@@ -3301,6 +4027,15 @@ event on `message-edit-attach`) and the custom model dialog's Kind select (tests
   "Generated image {n} of {m}"; the lightbox counter is read as "Image {n} of {m}" (polite), its dialog title is the
   image's alt text and its description "Use the arrow keys to see the other images." ("A generated image." for one);
   `GeneratingImages` is `aria-busy` with the sr-only text "Generating images".
+- Phase 7: the switcher trigger is named "Project filter: {name}" ("All chats", "No project") with
+  `aria-haspopup="menu"`; its items and the move items are menu radio items; the chip is named "Project: {name}" (plus
+  ", folder not found" when missing). The folder browser's breadcrumb is a `nav` "Folder path" with `aria-current` on
+  the open folder; disabled entries say "{name}, already a project". A diff is a `role="region"` named "Changes to
+  {path}" whose changed lines carry the sr-only words "Added" / "Removed"; a terminal block is named "Output of
+  {command}" and its exit badge reads "Exit code {n}"; row summaries carry sr-only text ("12 lines added, 3 removed",
+  "exit code 1"). The shell approval is announced as "Approval needed: run {command}"; its warning is part of the card's
+  description. The Encryption key and Storage cleanup sections have headings; "Rotate key…" and "Remove…" name their
+  action.
 
 ### 14.3 Contrast targets
 
@@ -3343,6 +4078,12 @@ instant scroll instead of smooth, no sheet slide (fade only).
   pointer-coarse:[--sidebar-width-icon:3.5rem]` on `SidebarProvider`, since an inline custom property outranks every
   class; `pointer-coarse:size-10` on `AppBrand` and `ThemeToggle`); both `ui/sidebar` patches are recorded in
   `apps/web/AI_ELEMENTS_PATCHES.md`.
+- Phase 7 screens: at 390px the switcher is a full-width row in the sheet, the chip is icon-only, diffs scroll sideways
+  inside their own block (the page never scrolls horizontally; e2e asserts it), terminal output wraps, and the Add
+  project dialog follows the form-dialog rule (full width minus 1rem, `max-h-[90dvh]`, the folder list scrolls inside).
+  On touch screens every new control is at least 40px (`pointer-coarse:h-10`): the switcher, the new-chat pill, the
+  chip, the move items, the folder entries and Parent folder, Raw input and output, Show more, and the approval
+  checkbox.
 - Phase 6 screens: galleries keep their two columns at 390px (tiles never overflow the column); the recording composer
   keeps the 390px layout without horizontal scroll (the indicator shows the dot, the timer and Cancel); the Media page
   stacks labels above controls below `sm`.
@@ -3366,14 +4107,17 @@ extra browser. The mobile specs (W5.8) assert:
 - a `mock:echo` reply streams and finishes.
 
 They reuse the existing test ids; Phase 5 adds none for mobile. Phase 6 adds to the mobile specs (W6.12): the mic is
-at least 40×40px, a gallery fits 390px, and there is no horizontal scroll while recording.
+at least 40×40px, a gallery fits 390px, and there is no horizontal scroll while recording. Phase 7 adds
+`mobile/projects.spec.ts` (W7.14): the switcher works inside the sheet, the chip is icon-only, and an expanded diff
+causes no horizontal page scroll.
 
 ### 14.7 Tablet e2e and media permissions (Phase 6)
 
 `playwright.config.ts` (K4) adds a `tablet` project: `devices['Galaxy Tab S9 landscape']` (1024×640, Chromium, touch,
 so `pointer: coarse` matches and the sidebar is not a sheet). It runs only `e2e/specs/tablet/*.spec.ts`; the `chromium`
 project ignores `specs/(mobile|tablet)/`. `tablet/touch-targets.spec.ts` (W6.12) collapses the sidebar and asserts that
-the icon rail is 56px wide and every icon button is at least 40×40px.
+the icon rail is 56px wide and every icon button is at least 40×40px. Phase 7 (W7.14) extends it to the project
+switcher, the chip and the approval controls.
 
 Every project runs with `use.permissions: ['microphone']` and the Chromium flags `--use-fake-ui-for-media-stream`,
 `--use-fake-device-for-media-stream` and `--autoplay-policy=no-user-gesture-required`, so the voice spec records from a
@@ -3424,7 +4168,7 @@ Key strings:
 | Share dialog | "Share chat" · "Anyone with a link can read a snapshot of this chat. Messages you add later are not shared until you update the snapshot." · "This chat has no links yet." · "New link" · "Create link" · "Copy link" · "Update snapshot" · "Revoke…" · "Revoke this link?" · "People with the link can no longer open it. This can't be undone." · "Outdated" · "Expired" · "No password set" · "Changes apply to the link at once." · "A chat can have up to 20 links." · "Confirm your password to create or change a share link." |
 | Share page | "Read-only snapshot · {date}" · "This link is unavailable" · "It may have expired or been revoked, or the chat was deleted." · "Couldn't load this chat" · "Too many requests. Try again in {n}s." · "This reply failed." |
 | Data page | "Export backup" · "Choose file…" · "Import" · "Importing…" · "This file is larger than 256 MB." · "Skip it" · "Import a copy" · "Restore settings from the backup" · "Shared links" · "No shared links." · "Delete all data…" · "Delete all data?" · "Type DELETE to confirm" · "Delete everything" · "Deleting all data needs your password." · "Deleted {n} chats" |
-| Busy (409 `busy`) | "Another import or delete is running. Try again when it finishes." |
+| Busy (409 `busy`, v1.1 – v1.2) | "Another import or delete is running. Try again when it finishes." (replaced in Phase 7, below) |
 | Composer (image model) | "Describe an image…" · "Image options" (tooltip) · "Image options: {ratio}, {n} images" / "Image options: {ratio}" (accessible name) · "Aspect ratio" · "Auto" · "Images" · "Edit the previous image" · "The prompt can be up to 32,000 characters" (Send tooltip) · "Finish dictation first" (Send tooltip while voice input runs) |
 | Attachment warnings | "{model} can't see images. Remove them or choose another model." · "{model} can't read PDFs. Remove them or choose another model." · "{name} is too large" · "Files can be up to 20 MB." · "{name} can't be attached" · "Attach images, PDFs or text files." |
 | Model picker | "Image models" · "Image output" |
@@ -3441,3 +4185,13 @@ Key strings:
 | General (Phase 6) | "Use Alt+M, Alt+R and Alt+P for composer menus, and Alt+V to dictate." |
 | Fresh-auth prompts | "Creating a plugin that runs code needs your password." · "Changing the code of a plugin needs your password." · "Reloading runs the plugin's code again. Confirm your password to continue." · "Saving a server that runs a local command needs your password." · "This provider starts a program on the server. Confirm your password to continue." · "Confirm your password to install a plugin that runs code on this server." · "Confirm your password to trust a plugin that runs code on this server." (8.4) |
 | Share option (Phase 6) | "Files and images" (was "Attachments") |
+| Project switcher (Phase 7) | "All chats" · "No project" · "Add project…" · "Manage projects" · "Project: {name}" · "Project filter: {name}" · "No chats in {name} yet" · "No chats without a project" · "The project was deleted. Showing all chats." |
+| Project of a chat (Phase 7) | "No project" · "Move to project" · "Project settings" · "Moved to {name}" · "Moved out of {name}" · "Undo" · "Wait for the response to finish before moving this chat." · "This project no longer exists." · palette: "Show all chats" · "Show chats without a project" · "Show {name}" · "Move chat to {name}" · "Move chat out of project" |
+| Settings → Projects (Phase 7) | "Projects" · "Folders on the server that chats can read and edit." · "Add project" · "{n} chats" · "Folder not found" · "Uses AGENTS.md" · "Uses CLAUDE.md" · "Rename" · "Edit instructions…" · "Delete…" · "Delete {name}?" · "Its {n} chats stay and move to No project. The folder and its files are not touched." · "Delete project" · "Project deleted" · "Wait for the responses in this project to finish before deleting it." · "Instructions for {name}" · "Sent with every chat in this project, after AGENTS.md / CLAUDE.md from the folder." · "This folder has {file}; it is added first." · "No projects yet. A project is a folder on the server that chats can read and edit." · "Could not load the projects" |
+| Add project (Phase 7) | "Add project" · "Folder path" · "Parent folder" · "Not found" · "Project" (badge) · "Showing the first 500 folders." · "Selected: {path}" · "New folder" · "Folder name" · "Use a name without slashes." · "Folder names can't start with a dot." · "Use at most 255 characters." · "Name" · "Opened {folder}, {n} folders" · "Project added" · "A project for this folder already exists." · "A folder with this name already exists." · "Choose a folder inside the workspace folders." · "This folder no longer exists." · "No workspace folders. Set HF_WORKSPACE_ROOTS on the server." · "Adding a project needs your password." |
+| Workspace tools (Phase 7) | "New · {n} lines" · "exit {n}" · "timed out" · "killed {signal}" · "lines {a}–{b} of {n}" · "{n} entries" · "{n} files" · "{n} matches" · "Raw input and output" · "New file" · "⋯ {n} unchanged lines" · "Show {n} more lines" · "Diff truncated by server" · "The diff is too large to show." · "Added" · "Removed" · "Changes to {path}" · "stderr" · "Show all {n} lines" · "Exit code {n}" · "Timed out" · "Running…" · "Output truncated by server" · "Output of {command}" · "Show all" · "Show {n} more" · "More results were cut by the server" |
+| Workspace approvals (Phase 7) | "Run this command?" · "In {project}" · "Runs on the server with the server user's permissions." · "Run" · "Create or overwrite {path} · {n} lines" · "All occurrences" · "Accept all edits in this chat" · "Approval needed: run {command}" |
+| Permission mode (Phase 7) | "Accept edits" · "Edit project files without asking; ask before shell commands" · "Accept edits works in project chats." · notice icon `FolderX` for `workspace-unavailable` (the text comes from the server) |
+| General (Phase 7) | "Max steps in project chats" · "Agent runs in project chats can take more steps." · "Chats without a project" · "Enter a whole number from 1 to 200." |
+| Settings → Data (Phase 7) | "Storage cleanup" · "Remove uploaded and generated files that no chat, share link, plugin or setting uses anymore. Files from the last 24 hours are kept, and deleting a chat or a version keeps its files until the next cleanup." · "Check for unused files" · "{files} files · {size} can be removed" · "and {n} leftover files on disk" · "{n} recent files are kept for 24 hours." · "Last cleanup {time}" · "No unused files." · "Remove…" · "Remove unused files?" · "This deletes {files} files ({size}). It can't be undone." · "Remove files" · "Removed {files} files ({size})" · "Encryption key" · "API keys and other secrets are encrypted on this server with a master key." · "Source" · "Key file in the data directory" · "HF_MASTER_KEY environment variable" · "Version" · "Rotated" · "Never" · "Secrets" · "{n} encrypted" · "{n} can't be read" · "Rotate key…" · "The key comes from HF_MASTER_KEY. Stop the server and run `pnpm key:rotate` with HF_NEW_MASTER_KEY set to the new key." · "The master key doesn't match the stored secrets. Saved API keys can't be read. Restore the previous key (HF_MASTER_KEY or data/secret.key), or enter the keys again." · "Rotate the master key?" · "A new key encrypts every saved secret again." · "Other browsers and devices are signed out; you stay signed in." · "Every share link changes ({n} links): copy the new links from Shared links." · "Running replies stop and pending approvals expire ({n} waiting)." · "Older versions of harness-forge can't read the secrets afterwards: back up the data directory first." · "Type ROTATE to confirm" · "Rotate key" · "Rotating the master key needs your password." · "Master key rotated" · "{n} secrets encrypted again · {m} approvals expired" · "The encryption key was rotated." |
+| Busy (Phase 7) | "Another data task is running. Try again when it finishes." (Data page; was "Another import or delete is running. Try again when it finishes.") · "The server is rotating its encryption key. Try again in a moment." (chat requests) |

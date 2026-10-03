@@ -90,8 +90,8 @@ function tableSignatures(): string[] {
 }
 
 describe('route table', () => {
-  it('has 76 routes keyed <module>.<action>', () => {
-    expect(API_ROUTE_KEYS).toHaveLength(76)
+  it('has 85 routes keyed <module>.<action>', () => {
+    expect(API_ROUTE_KEYS).toHaveLength(85)
     for (const key of API_ROUTE_KEYS) {
       const route: ApiRouteDef = apiRoutes[key]
       expect(key.startsWith(`${route.module}.`), key).toBe(true)
@@ -107,7 +107,7 @@ describe('route table', () => {
 
   it('equals the route key index of API.md (key, method, path, module)', () => {
     const index = routeIndex()
-    expect(index).toHaveLength(76)
+    expect(index).toHaveLength(85)
     expect(index.map(row => `${row.key} ${signature(row)}`).sort()).toEqual(
       API_ROUTE_KEYS.map(key => `${key} ${signature(apiRoutes[key])}`).sort(),
     )
@@ -184,6 +184,27 @@ describe('route table', () => {
       expect(routeSuccessStatus(route)).toBe(200)
     }
   })
+
+  it('declares the project, key and cleanup routes as the contract says (ADR-031, ADR-034, ADR-035)', () => {
+    expect(API_MODULES).toHaveLength(23)
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'projects')).toEqual(['projects.list', 'projects.create', 'projects.update', 'projects.remove', 'projects.browse'])
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'keys')).toEqual(['keys.get', 'keys.rotate'])
+    // Creating a project and rotating the key need fresh auth; nothing else of Phase 7 does.
+    const fresh = (key: ApiRouteKey): boolean => (apiRoutes[key] as ApiRouteDef).fresh === true
+    expect(fresh('projects.create')).toBe(true)
+    expect(fresh('keys.rotate')).toBe(true)
+    for (const key of ['projects.list', 'projects.update', 'projects.remove', 'projects.browse', 'keys.get', 'data.cleanupPreview', 'data.cleanup'] as const) {
+      expect(fresh(key), key).toBe(false)
+      expect((apiRoutes[key] as ApiRouteDef).public, key).toBeUndefined()
+    }
+    expect(routeSuccessStatus(apiRoutes['projects.create'])).toBe(201)
+    expect(routeSuccessStatus(apiRoutes['projects.remove'])).toBe(204)
+    expect(routeSuccessStatus(apiRoutes['keys.rotate'])).toBe(200)
+    // The cleanup takes no body; the dry run is a GET.
+    const cleanup: ApiRouteDef = apiRoutes['data.cleanup']
+    expect(cleanup.body ?? cleanup.form).toBeUndefined()
+    expect(apiRoutes['data.cleanupPreview'].method).toBe('GET')
+  })
 })
 
 describe('matchApiRoute', () => {
@@ -237,6 +258,21 @@ describe('matchApiRoute', () => {
     expect(matchApiRoute('POST', '/audio/transcriptions')?.key).toBe('audio.transcribe')
     expect(matchApiRoute('POST', '/audio/speech')?.key).toBe('audio.speech')
     for (const [method, path] of [['GET', `/chats/${chat}/messages/msg_sample0000000001`], ['DELETE', `/chats/${chat}/messages`], ['GET', '/audio/speech'], ['POST', '/audio'], ['PUT', '/audio/transcriptions']] as const)
+      expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
+  })
+
+  it('matches the project, key and cleanup routes (Phase 7) without shadowing', () => {
+    const project = 'prj_ABCdef0123456789'
+    expect(matchApiRoute('GET', '/projects')?.key).toBe('projects.list')
+    expect(matchApiRoute('POST', '/projects')?.key).toBe('projects.create')
+    expect(matchApiRoute('GET', '/projects/browse')?.key).toBe('projects.browse')
+    expect(matchApiRoute('PATCH', `/projects/${project}`)).toMatchObject({ key: 'projects.update', params: { id: project } })
+    expect(matchApiRoute('DELETE', `/projects/${project}`)).toMatchObject({ key: 'projects.remove', params: { id: project } })
+    expect(matchApiRoute('GET', '/keys')?.key).toBe('keys.get')
+    expect(matchApiRoute('POST', '/keys/rotate')?.key).toBe('keys.rotate')
+    expect(matchApiRoute('GET', '/data/cleanup')?.key).toBe('data.cleanupPreview')
+    expect(matchApiRoute('POST', '/data/cleanup')?.key).toBe('data.cleanup')
+    for (const [method, path] of [['GET', `/projects/${project}`], ['POST', '/projects/browse'], ['GET', '/keys/rotate'], ['POST', '/keys'], ['DELETE', '/data/cleanup'], ['GET', `/projects/${project}/browse`]] as const)
       expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
   })
 

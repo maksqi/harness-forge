@@ -46,6 +46,7 @@ const settings: Settings = {
   speechModelRef: null,
   speechVoice: null,
   speechSpeed: 1,
+  projectMaxSteps: 100,
 }
 
 describe('createApiClient', () => {

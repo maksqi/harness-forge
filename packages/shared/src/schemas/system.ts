@@ -76,7 +76,8 @@ const settingsFields = {
   sendKey: sendKeySchema,
   defaultToolMode: toolModeSchema,
   defaultReasoningEffort: reasoningEffortSchema,
-  maxSteps: z.int().min(1).max(100),
+  /** Steps of one agent run in a chat without a project (1..200). */
+  maxSteps: z.int().min(1).max(LIMITS.stepsMax),
   altShortcuts: z.boolean(),
   showThinking: z.boolean(),
   density: densitySchema,
@@ -95,6 +96,9 @@ const settingsFields = {
   speechVoice: speechVoiceSchema.nullable(),
   /** Playback speed of read-aloud, 0.5..2 (applied by the browser, never sent to the provider). */
   speechSpeed: z.number().min(0.5).max(2),
+  // Agent workspace (Phase 7, ADR-032).
+  /** Steps of one agent run in a chat with a project (1..200); `maxSteps` applies to the other chats. */
+  projectMaxSteps: z.int().min(1).max(LIMITS.stepsMax),
 }
 
 /** `GET /settings`: every key always present (defaults applied by `settingsSchema.parse`). */
@@ -118,6 +122,7 @@ export const settingsSchema = z.object({
   speechModelRef: settingsFields.speechModelRef.default(null),
   speechVoice: settingsFields.speechVoice.default(null),
   speechSpeed: settingsFields.speechSpeed.default(1),
+  projectMaxSteps: settingsFields.projectMaxSteps.default(100),
 })
 export type Settings = z.infer<typeof settingsSchema>
 

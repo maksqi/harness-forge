@@ -13,6 +13,8 @@ import {
 } from '../schemas/chats.ts'
 import { cursorPageSchema, listResponseSchema } from '../schemas/common.ts'
 import {
+  dataCleanupPreviewSchema,
+  dataCleanupResultSchema,
   dataDeleteBodySchema,
   dataDeleteResultSchema,
   dataExportQuerySchema,
@@ -22,6 +24,7 @@ import {
 } from '../schemas/data.ts'
 import { fileRefSchema } from '../schemas/files.ts'
 import { lobeIconListSchema } from '../schemas/icons.ts'
+import { keyRotateBodySchema, keyRotationResultSchema, keyStatusSchema } from '../schemas/keys.ts'
 import {
   catalogModelSchema,
   customModelInputSchema,
@@ -38,6 +41,7 @@ import {
   mcpServerParamsSchema,
   pluginFileParamsSchema,
   pluginParamsSchema,
+  projectParamsSchema,
   providerParamsSchema,
   shareFileParamsSchema,
   shareParamsSchema,
@@ -68,6 +72,13 @@ import {
   pluginTrustBodySchema,
   scaffoldRequestSchema,
 } from '../schemas/plugins.ts'
+import {
+  projectBrowseQuerySchema,
+  projectBrowseSchema,
+  projectCreateSchema,
+  projectSummarySchema,
+  projectUpdateSchema,
+} from '../schemas/projects.ts'
 import {
   credentialsUpdateSchema,
   providerSummarySchema,
@@ -129,6 +140,8 @@ export const API_MODULES = [
   'pluginFiles',
   'data',
   'audio',
+  'projects',
+  'keys',
   'shares',
 ] as const
 export type ApiModule = (typeof API_MODULES)[number]
@@ -163,7 +176,7 @@ export interface ApiRouteDef {
   status?: 200 | 201 | 204
 }
 
-/** Every endpoint of API.md (76 routes), keyed `<module>.<action>`. */
+/** Every endpoint of API.md (85 routes), keyed `<module>.<action>`. */
 export const apiRoutes = {
   // health.ts
   'health.get': { module: 'health', method: 'GET', path: '/health', public: true, response: healthSchema },
@@ -270,10 +283,25 @@ export const apiRoutes = {
   'data.export': { module: 'data', method: 'GET', path: '/data/export', query: dataExportQuerySchema, response: 'binary' },
   'data.import': { module: 'data', method: 'POST', path: '/data/import', form: dataImportFormSchema, response: dataImportResultSchema },
   'data.deleteAll': { module: 'data', method: 'POST', path: '/data/delete', fresh: true, body: dataDeleteBodySchema, response: dataDeleteResultSchema },
+  // orphaned file cleanup (ADR-035): a dry run, then the cleanup (no body)
+  'data.cleanupPreview': { module: 'data', method: 'GET', path: '/data/cleanup', response: dataCleanupPreviewSchema },
+  'data.cleanup': { module: 'data', method: 'POST', path: '/data/cleanup', response: dataCleanupResultSchema },
 
   // audio.ts (ADR-029): dictation (multipart: the recording in the part `file`) and read-aloud (answers audio bytes)
   'audio.transcribe': { module: 'audio', method: 'POST', path: '/audio/transcriptions', form: audioTranscribeFormSchema, response: audioTranscriptionSchema },
   'audio.speech': { module: 'audio', method: 'POST', path: '/audio/speech', body: audioSpeechBodySchema, response: 'binary' },
+
+  // projects.ts (ADR-031): folders on the server host that chats can belong to; no `GET /projects/:id`, so `/browse`
+  // never meets a param route of the same method
+  'projects.list': { module: 'projects', method: 'GET', path: '/projects', response: listResponseSchema(projectSummarySchema) },
+  'projects.create': { module: 'projects', method: 'POST', path: '/projects', fresh: true, body: projectCreateSchema, response: projectSummarySchema, status: 201 },
+  'projects.update': { module: 'projects', method: 'PATCH', path: '/projects/:id', params: projectParamsSchema, body: projectUpdateSchema, response: projectSummarySchema },
+  'projects.remove': { module: 'projects', method: 'DELETE', path: '/projects/:id', params: projectParamsSchema, response: 'empty' },
+  'projects.browse': { module: 'projects', method: 'GET', path: '/projects/browse', query: projectBrowseQuerySchema, response: projectBrowseSchema },
+
+  // keys.ts (ADR-034): master-key state and the online rotation
+  'keys.get': { module: 'keys', method: 'GET', path: '/keys', response: keyStatusSchema },
+  'keys.rotate': { module: 'keys', method: 'POST', path: '/keys/rotate', fresh: true, body: keyRotateBodySchema, response: keyRotationResultSchema },
 
   // shares.ts (ADR-025): owner routes under `/shares`, public routes under `/share/:token`
   'shares.list': { module: 'shares', method: 'GET', path: '/shares', query: sharesQuerySchema, response: listResponseSchema(shareSummarySchema) },

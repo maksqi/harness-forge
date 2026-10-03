@@ -26,6 +26,7 @@ import type {
   ReasoningEffort,
   ToolMode,
   ToolPolicy,
+  WorkspaceAccess,
 } from '@harness-forge/shared'
 import type {
   FlexibleSchema,
@@ -124,9 +125,10 @@ export interface ProviderDefinition {
   /** Cheap model for chat titles and the default credential ping. */
   smallModelId?: string
   /**
-   * Used when there is no live listing and no cached listing. Seeds with an explicit media kind (`image`,
-   * `transcription`, `speech`) are listed next to a live listing too, when the provider defines the matching factory
-   * (Phase 6, ADR-028 / ADR-029).
+   * Listed when the provider has no live listing (none was ever fetched or cached). Seeds with an explicit media kind
+   * (`image`, `transcription`, `speech`) are listed next to a live listing too, when the provider defines the matching
+   * factory (Phase 6, ADR-028 / ADR-029). Seed fields also fill the gaps of listed models with the same id (the lowest
+   * metadata layer, after models.dev and plugin models).
    */
   seedModels?: ModelInfo[]
   /** "Get a key" link of the key dialog. */
@@ -180,6 +182,22 @@ export interface ProviderDefinition {
  */
 export type ToolResultOutput = Awaited<ReturnType<NonNullable<Tool['toModelOutput']>>>
 
+/** What a tool does with the project folder of a chat (plugin API 1.2.0, ADR-032): `read`, `write` or `execute`. */
+export type ToolWorkspaceAccess = WorkspaceAccess
+
+/** The project folder of a chat, as the tools of a run see it (plugin API 1.2.0, ADR-031 / ADR-032). Frozen. */
+export interface ToolWorkspace {
+  /** `prj_` + 16 characters. */
+  readonly projectId: string
+  /** Project name. */
+  readonly name: string
+  /**
+   * Canonical realpath of the project folder, verified when the run started. Resolve every path against it and keep
+   * the result inside it (realpath containment): the folder can change on disk during a run.
+   */
+  readonly root: string
+}
+
 export interface ToolCallContext {
   chatId: string
   modelRef: string
@@ -188,6 +206,11 @@ export interface ToolCallContext {
   messages: ModelMessage[]
   /** Aborted on stop, timeout, or plugin disable. */
   signal: AbortSignal
+  /**
+   * Plugin API 1.2.0 (ADR-032): the project folder of the chat; set for every tool of a run in a chat whose project
+   * folder opened, absent otherwise (no project, or the folder is not available).
+   */
+  workspace?: ToolWorkspace
 }
 
 /**
@@ -210,6 +233,14 @@ export interface ToolDefinition<I = unknown, O = unknown> {
   policy?: ToolPolicy | ToolPolicyFunction<I>
   /** Default 60_000, max 600_000. */
   timeoutMs?: number
+  /**
+   * Plugin API 1.2.0 (ADR-032): what the tool does with the project folder of the chat. A tool that declares it is
+   * offered only in chats whose project folder opened (`c.workspace` is then set), and an `execute` tool only while
+   * `HF_WORKSPACE_SHELL` is not `0` (ADR-033). In the Accept edits mode (`ToolMode` `edits`) a `write` tool whose
+   * policy resolves to `ask` runs without asking; every other tool follows its policy as in `ask` mode. Omitted = the
+   * tool does not use the workspace and is offered in every chat.
+   */
+  workspace?: ToolWorkspaceAccess
   /** The output must be JSON-serializable; capped at 64 KB of serialized JSON. */
   execute(input: I, c: ToolCallContext): Promise<O>
   /** Converts the stored output for the model; fast and deterministic (guarded, 3 s). */
@@ -327,6 +358,8 @@ export interface GeneratedImageFile {
 export interface ImageGenerateResult {
   /** The image model used. */
   modelRef: string
+  /** Display name of the image model: the catalog name, else the model id (plugin API 1.2.0). */
+  modelName: string
   images: GeneratedImageFile[]
   /** Estimated cost (catalog prices), when known. */
   costUsd?: number
@@ -338,7 +371,8 @@ export interface ImageGenerateResult {
 export interface PluginImagesApi {
   /**
    * Generates images with an image model, stores them as files and records a usage row (purpose `image`). Errors are
-   * `HarnessError`s (provider errors mapped as for chats).
+   * `HarnessError`s (provider errors mapped as for chats); an unknown, disabled or unconfigured provider is
+   * `provider_not_configured` (plugin API 1.2.0; 1.1.0 answered `not_found` for an unknown provider).
    */
   generate(options: ImageGenerateOptions): Promise<ImageGenerateResult>
 }
@@ -386,7 +420,10 @@ export interface PluginContext {
   models: {
     /** Adds models / metadata to any provider (held until the provider exists). */
     register(providerId: string, models: ModelInfo[]): Disposable
-    /** A model instance for `providerId:modelId` with the user's credentials (use with `ai.generateText`). */
+    /**
+     * A model instance for `providerId:modelId` with the user's credentials (use with `ai.generateText`); an unknown,
+     * disabled or unconfigured provider is a `provider_not_configured` `HarnessError` (plugin API 1.2.0).
+     */
     resolve(ref: string): Promise<Exclude<LanguageModel, string>>
   }
   tools: {

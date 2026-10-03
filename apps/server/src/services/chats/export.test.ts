@@ -16,6 +16,7 @@ function sampleChat(): ChatDetail {
     archived: false,
     running: true,
     pendingApproval: true,
+    projectId: null,
     createdAt: 1,
     updatedAt: 2,
     settings: { toolMode: 'ask' },
@@ -139,7 +140,7 @@ describe('json export', () => {
     expect(file.filename).toBe('plan-the-trip-2026-09-28.json')
     expect(file.contentType).toBe('application/json; charset=utf-8')
     const parsed = chatExportSchema.parse(JSON.parse(file.body))
-    const { branches: _branches, ...chat } = sampleChat()
+    const { branches: _branches, projectId: _projectId, ...chat } = sampleChat()
     expect(parsed).toEqual({
       format: 'harness-forge.chat',
       version: 2,

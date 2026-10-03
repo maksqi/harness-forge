@@ -2,9 +2,20 @@
 // Error codes and actions live in `errors.ts`.
 import { z } from 'zod'
 
-/** Chat permission mode (UI label: permission mode). Default `ask`. */
-export const toolModeSchema = z.enum(['off', 'ask', 'auto'])
+/**
+ * Chat permission mode (UI label: permission mode). Default `ask`. `edits` ("Accept edits", Phase 7, ADR-032): safe
+ * tools and `ask` tools with workspace access `write` run without asking; everything else asks.
+ */
+export const toolModeSchema = z.enum(['off', 'ask', 'edits', 'auto'])
 export type ToolMode = z.infer<typeof toolModeSchema>
+
+/**
+ * What a tool does with the project folder of a chat (`ToolDefinition.workspace`, `ToolSummary.workspace`; Phase 7,
+ * ADR-032): such a tool is offered only in chats whose project folder opened; `execute` tools only while
+ * `HF_WORKSPACE_SHELL` is not `0` (ADR-033).
+ */
+export const workspaceAccessSchema = z.enum(['read', 'write', 'execute'])
+export type WorkspaceAccess = z.infer<typeof workspaceAccessSchema>
 
 /** Reasoning effort; `auto` sends nothing to the provider. */
 export const reasoningEffortSchema = z.enum(['auto', 'off', 'low', 'medium', 'high', 'max'])

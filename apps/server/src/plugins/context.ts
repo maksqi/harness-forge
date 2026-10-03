@@ -85,6 +85,8 @@ export const NO_STORED_IMAGE_MESSAGE = 'The image model returned no image that c
 export function toImageGenerateResult(result: ImageGenerationResult): ImageGenerateResult {
   return {
     modelRef: result.modelRef,
+    // Plugin API 1.2.0 placeholder (the model id) until the image service reports the catalog name (W7.6).
+    modelName: safeParseModelRef(result.modelRef)?.modelId ?? result.modelRef,
     images: result.images.map(({ file, url }) => ({ fileId: file.id, url, mediaType: file.mime, name: file.name, size: file.size })),
     ...(result.costUsd === null ? {} : { costUsd: result.costUsd }),
     ...(result.revisedPrompt === undefined ? {} : { revisedPrompt: result.revisedPrompt }),
