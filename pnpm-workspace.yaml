@@ -6,10 +6,10 @@ packages:
 # Shared versions. Reference them from package.json files as "catalog:".
 catalog:
   '@ai-sdk/provider': ^4.0.21
-  '@types/node': ^22.20.4
+  '@types/node': ^22.20.5
   '@vitest/coverage-v8': ^4.1.11
   ai: ^7.0.127
-  hono: ^4.13.0
+  hono: ^4.13.12
   tsx: ^4.23.15
   typescript: ~6.0.3
   vitest: ^4.0.0
