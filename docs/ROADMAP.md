@@ -181,13 +181,13 @@ tools + a shell with approval), the Accept edits permission mode, master-key rot
   - [x] C15 web skeleton (test ids, Projects nav, stub components, projects store, chats store members)
   - [x] Gate (incl. v1.2 data upgrade probe) + FREEZE + checkpoint commit
 - [x] P7-A Features (13 agents)
-  - [x] W7.1 projects-server · [ ] W7.2 workspace-files · [ ] W7.3 workspace-shell · [ ] W7.4 chat-pipeline
-  - [x] W7.5 chats-server · [ ] W7.6 tools-media-api · [ ] W7.7 key-rotation · [ ] W7.8 file-cleanup
-  - [x] W7.9 projects-web · [ ] W7.10 chat-surface-web · [ ] W7.11 tool-ui-web · [ ] W7.12 composer-web
+  - [x] W7.1 projects-server · [x] W7.2 workspace-files · [x] W7.3 workspace-shell · [x] W7.4 chat-pipeline
+  - [x] W7.5 chats-server · [x] W7.6 tools-media-api · [x] W7.7 key-rotation · [x] W7.8 file-cleanup
+  - [x] W7.9 projects-web · [x] W7.10 chat-surface-web · [x] W7.11 tool-ui-web · [x] W7.12 composer-web
   - [x] W7.13 data-settings-web
   - [x] Gate + checkpoint commit
 - [x] P7-B Feature e2e, docs, fix-ups, final gate
-  - [x] W7.14 e2e-features · [ ] W7.15 docs-final (W7.16 / W7.17 fix-ups only if the P7-A gate is red)
+  - [x] W7.14 e2e-features · [x] W7.15 docs-final (W7.16 / W7.17 fix-ups only if the P7-A gate is red)
   - [x] Final gate (e2e ×3, screenshots, audit, v1.2 → v1.3 upgrade) + checkpoint commit
 
 ## Backlog (not in v1.3)
