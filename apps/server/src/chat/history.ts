@@ -9,14 +9,14 @@
 // - approval continuation (`submit-message` with the active leaf assistant message): only the approval decisions are
 //   merged, by approval id, into the stored copy; every other client change is ignored.
 import type { ChatRequestBody, HarnessUIMessage, HarnessUIMessagePart } from '@harness-forge/shared'
-import { HarnessError } from '@harness-forge/shared'
+import { HarnessError, LIMITS } from '@harness-forge/shared'
 
 export type RequestKind = 'new' | 'regenerate' | 'continuation'
 
 /** `approval.reason` of approvals resolved by a newer user message. */
 export const SUPERSEDED_REASON = 'superseded'
-/** Maximum length of an approval reason taken from the client. */
-const REASON_MAX_CHARS = 500
+/** Maximum length of an approval reason taken from the client (Phase 9: plan feedback travels as the reason). */
+const REASON_MAX_CHARS = LIMITS.approvalReasonMaxChars
 
 type LoosePart = Record<string, unknown> & { type: string }
 
@@ -146,20 +146,28 @@ export function mergeApprovalDecisions(stored: HarnessUIMessage, incoming: Harne
 /** How a run ended, for part finalization. */
 export type RunEnding = 'completed' | 'aborted' | 'failed'
 
-const STOPPED_TOOL_TEXT = 'The run was stopped before the tool finished.'
-const FAILED_TOOL_TEXT = 'The run ended before the tool finished.'
+export const STOPPED_TOOL_TEXT = 'The run was stopped before the tool finished.'
+export const FAILED_TOOL_TEXT = 'The run ended before the tool finished.'
+
+/** A tool part that never got its final output: no result yet, or only a preliminary one (Phase 9, a streaming tool). */
+function isUnfinishedToolPart(part: LoosePart): boolean {
+  return isToolPart(part) && (part.state === 'input-streaming' || part.state === 'input-available'
+    || (part.state === 'output-available' && part.preliminary === true))
+}
 
 /**
  * Parts as persisted: streaming text / reasoning are marked done; tool calls that never got a result (the run was
- * stopped or failed mid-call) become `output-error` so no row spins forever after a reload.
+ * stopped or failed mid-call) become `output-error` so no row spins forever after a reload. Phase 9 (ADR-043): a part
+ * still holding a preliminary output (a `task` sub-agent, a streaming plugin tool) counts as unfinished too, so the
+ * progress trace of a stopped call is not kept.
  */
 export function finalizeParts(parts: readonly HarnessUIMessagePart[], ending: RunEnding): HarnessUIMessagePart[] {
   return parts.map((part) => {
     const value = part as unknown as LoosePart
     if ((value.type === 'text' || value.type === 'reasoning') && value.state === 'streaming')
       return { ...value, state: 'done' } as unknown as HarnessUIMessagePart
-    if (isToolPart(value) && (value.state === 'input-streaming' || value.state === 'input-available')) {
-      const { approval: _approval, output: _output, ...rest } = value
+    if (isUnfinishedToolPart(value)) {
+      const { approval: _approval, output: _output, preliminary: _preliminary, ...rest } = value
       return {
         ...rest,
         state: 'output-error',

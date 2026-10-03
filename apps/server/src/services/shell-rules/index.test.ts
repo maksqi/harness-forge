@@ -1,13 +1,16 @@
 // Shell rule service (W8.6, ADR-038, API.md 4.24 / 5.25): storage over `shell_rules`, the parser, duplicates, the cap
-// per scope, `forRun`, the foreign key cascade of a project delete, the log levels and the backup isolation.
+// per scope, `forRun`, the foreign key cascade of a project delete, the log levels and the backup isolation. Phase 9
+// (W9.7): the unique indexes of migration `0006` are the authority on duplicates (a violation is `409 exists`).
 import type { ShellRule } from '@harness-forge/shared'
+import type { Db } from '../../db/client.ts'
 import type { TestApp } from '../../testing/create-test-app.ts'
-import { HarnessError, LIMITS, parseShellRule, SHELL_RULE_ID_PATTERN, shellRuleSchema } from '@harness-forge/shared'
+import type { AppDeps } from '../../types.ts'
+import { HarnessError, harnessErrorEnvelopeSchema, LIMITS, parseShellRule, SHELL_RULE_ID_PATTERN, shellRuleSchema } from '@harness-forge/shared'
 import { strToU8, unzipSync, zipSync } from 'fflate'
 import { afterEach, describe, expect, it } from 'vitest'
 import { projects, shellRules } from '../../db/schema.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
-import { compareShellRules, createShellRuleService, emptyShellRuleSet, SHELL_RULE_EXISTS_MESSAGE, shellRuleSetOf, shellRulesFullMessage } from './index.ts'
+import { compareShellRules, createShellRuleService, emptyShellRuleSet, isUniqueViolation, SHELL_RULE_EXISTS_MESSAGE, shellRuleSetOf, shellRulesFullMessage } from './index.ts'
 
 const A = 'prj_AAAAAAAAAAAAAAAA'
 const B = 'prj_BBBBBBBBBBBBBBBB'
@@ -295,5 +298,120 @@ describe('shell rule service: projects, logs and backups', () => {
     const service = createShellRuleService(t.deps)
     await service.create({ projectId: null, prefix: 'ls' })
     expect(scopes(await t.deps.shellRules.list())).toEqual([[null, 'ls']])
+  })
+})
+
+// ---------- Phase 9: the unique indexes (migration 0006) are the authority ----------
+
+/**
+ * The deps of `t` with a database whose first `insert(shell_rules)` stores `planted` right before the real insert: a
+ * create that raced past the duplicate check (another process or service instance stored the same rule meanwhile).
+ */
+let racers = 0
+
+function racingDeps(t: TestApp, planted: { projectId: string | null, prefix: string }): AppDeps {
+  let raced = false
+  racers += 1
+  const id = `srl_RACER${String(racers).padStart(11, '0')}`
+  const db = new Proxy(t.db, {
+    get(target, property) {
+      if (property === 'insert') {
+        return (table: unknown) => {
+          if (table !== shellRules || raced)
+            return target.insert(table as typeof shellRules)
+          raced = true
+          return {
+            values: (values: typeof shellRules.$inferInsert) => ({
+              returning: async () => {
+                await target.insert(shellRules).values({ id, createdAt: 1, ...planted })
+                return target.insert(shellRules).values(values).returning()
+              },
+            }),
+          }
+        }
+      }
+      const value: unknown = Reflect.get(target, property)
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value
+    },
+  }) as Db
+  return Object.create(t.deps, { db: { value: db } }) as AppDeps
+}
+
+async function post(t: TestApp, body: unknown): Promise<{ status: number, body: unknown }> {
+  const response = await t.request('/api/shell-rules', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  return { status: response.status, body: await response.json() as unknown }
+}
+
+describe('shell rule service: the unique indexes (Phase 9, migration 0006)', () => {
+  it('the database refuses a second row of the same scope and prefix (global and per project)', async () => {
+    const t = await app()
+    await addProjects(t, A, B)
+    await t.db.insert(shellRules).values({ id: 'srl_UNIQUEGLOBAL0001', projectId: null, prefix: 'ls', createdAt: 1 })
+    await t.db.insert(shellRules).values({ id: 'srl_UNIQUEPROJECT01', projectId: A, prefix: 'ls', createdAt: 1 })
+    await t.db.insert(shellRules).values({ id: 'srl_UNIQUEPROJECT02', projectId: B, prefix: 'ls', createdAt: 1 })
+    for (const [id, projectId] of [['srl_UNIQUEGLOBAL0002', null], ['srl_UNIQUEPROJECT03', A]] as const) {
+      const error = await t.db.insert(shellRules).values({ id, projectId, prefix: 'ls', createdAt: 2 }).then(() => null, (caught: unknown) => caught)
+      expect(error, String(projectId)).not.toBeNull()
+      expect(isUniqueViolation(error), String(projectId)).toBe(true)
+    }
+    expect(scopes(await t.deps.shellRules.list())).toEqual([[null, 'ls'], [A, 'ls'], [B, 'ls']])
+  })
+
+  it('maps a unique violation of the insert to 409 exists (a create that raced past the duplicate check)', async () => {
+    const t = await app()
+    await addProjects(t, A)
+    for (const projectId of [null, A]) {
+      const service = createShellRuleService(racingDeps(t, { projectId, prefix: 'pnpm test' }))
+      const error = await rejection(service.create({ projectId, prefix: 'pnpm   test' }))
+      expect(error).toMatchObject({ code: 'conflict', message: SHELL_RULE_EXISTS_MESSAGE, details: { reason: 'exists' } })
+    }
+    // The planted rows are the only ones; the failed creates logged nothing.
+    expect(scopes(await t.deps.shellRules.list())).toEqual([[null, 'pnpm test'], [A, 'pnpm test']])
+    expect(t.logs.records.filter(record => record.msg === 'shell rule added')).toEqual([])
+  })
+
+  it('a rule of another scope stored meanwhile is no conflict', async () => {
+    const t = await app()
+    await addProjects(t, A)
+    const service = createShellRuleService(racingDeps(t, { projectId: null, prefix: 'make' }))
+    const rule = await service.create({ projectId: A, prefix: 'make' })
+    expect(rule).toMatchObject({ projectId: A, prefix: 'make' })
+    expect(scopes(await t.deps.shellRules.list())).toEqual([[null, 'make'], [A, 'make']])
+  })
+
+  it('a foreign key or primary key violation is not a duplicate', () => {
+    const constraint = (code: string) => Object.assign(new Error('failed'), { cause: Object.assign(new Error('SQLITE_CONSTRAINT'), { code: 'SQLITE_CONSTRAINT', cause: { code } }) })
+    expect(isUniqueViolation(constraint('SQLITE_CONSTRAINT_UNIQUE'))).toBe(true)
+    expect(isUniqueViolation(constraint('SQLITE_CONSTRAINT_FOREIGNKEY'))).toBe(false)
+    expect(isUniqueViolation(constraint('SQLITE_CONSTRAINT_PRIMARYKEY'))).toBe(false)
+    expect(isUniqueViolation(new Error('SQLITE_CONSTRAINT_UNIQUE'))).toBe(false)
+    expect(isUniqueViolation(null)).toBe(false)
+  })
+
+  it('two service instances racing on one prefix store it once; the others answer 409 exists', async () => {
+    const t = await app()
+    await addProjects(t, A)
+    const services = [createShellRuleService(t.deps), createShellRuleService(t.deps), createShellRuleService(t.deps)]
+    const results = await Promise.allSettled(services.flatMap(service => [0, 1].map(async () => service.create({ projectId: A, prefix: 'cargo test' }))))
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+    for (const result of results.filter(result => result.status === 'rejected'))
+      expect((result as PromiseRejectedResult).reason).toMatchObject({ code: 'conflict', details: { reason: 'exists' } })
+    expect(scopes(await t.deps.shellRules.list())).toEqual([[A, 'cargo test']])
+  })
+
+  it('pOST /shell-rules: two concurrent identical creates answer one 201 and one 409 exists; global and project both 201', async () => {
+    const t = await app()
+    await addProjects(t, A)
+    const answers = await Promise.all([post(t, { projectId: null, prefix: 'pnpm lint' }), post(t, { projectId: null, prefix: 'pnpm lint' })])
+    expect(answers.map(answer => answer.status).sort()).toEqual([201, 409])
+    const conflict = answers.find(answer => answer.status === 409)!
+    expect(harnessErrorEnvelopeSchema.parse(conflict.body).error).toMatchObject({ code: 'conflict', message: SHELL_RULE_EXISTS_MESSAGE, details: { reason: 'exists' } })
+    const created = answers.find(answer => answer.status === 201)!
+    expect(shellRuleSchema.parse(created.body)).toMatchObject({ projectId: null, prefix: 'pnpm lint' })
+
+    // The same prefix in a project is another scope.
+    const both = await Promise.all([post(t, { projectId: A, prefix: 'make' }), post(t, { projectId: null, prefix: 'make' })])
+    expect(both.map(answer => answer.status)).toEqual([201, 201])
+    expect(scopes(await t.deps.shellRules.list())).toEqual([[null, 'make'], [null, 'pnpm lint'], [A, 'make']])
   })
 })

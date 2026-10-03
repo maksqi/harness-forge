@@ -30,7 +30,10 @@ export type ProjectFileEntry = z.infer<typeof projectFileEntrySchema>
 /** Response of `GET /projects/:id/files`: the best matches first (`rankPaths`), at most `limit`. */
 export const projectFileSearchSchema = z.object({
   items: z.array(projectFileEntrySchema).max(LIMITS.mentionResultsMax),
-  /** The index was cut at `LIMITS.mentionIndexFilesMax` files (or by the walk limits), so a match may be missing. */
+  /**
+   * More entries matched than `limit`, or the index was cut at `LIMITS.mentionIndexFilesMax` files (or by the walk
+   * limits), so a match may be missing.
+   */
   truncated: z.boolean(),
   /** When the index of the project was built. */
   indexedAt: timestampSchema,

@@ -1,6 +1,7 @@
 // Context ring math (docs/UI.md 7.12): context used by the last assistant turn (input + output tokens of its last
 // step, `MessageUsage.contextTokens`) against the model's context window. Muted below 80%, warning from 80%,
-// destructive from 95%.
+// destructive from 95%. Phase 9 (ADR-040): after `/compact` the reply's `contextTokens` is the size after the
+// compaction, so the ring drops at once; the hover card ends with a note that follows the `autoCompact` setting.
 import type { MessageUsage } from '@harness-forge/shared'
 import type { LanguageModelUsage } from 'ai'
 
@@ -33,6 +34,13 @@ export function contextUsage(usage: MessageUsage | null | undefined, contextWind
   const ratio = Math.min(Math.max(used / contextWindow, 0), 1)
   const level: ContextLevel = ratio >= 0.95 ? 'danger' : ratio >= 0.8 ? 'warning' : 'normal'
   return { used, max: contextWindow, percent: Math.round(ratio * 100), level }
+}
+
+/** + Phase 9: the hover card's last line, per the `autoCompact` setting (docs/UI.md 7.12). */
+export function compactionNote(autoCompact: boolean): string {
+  return autoCompact
+    ? 'Older messages are summarized automatically near the limit. Type /compact to do it now.'
+    : 'Automatic compaction is off. Older messages are left out near the limit.'
 }
 
 /** `MessageUsage` in the AI SDK shape the AI Elements context rows read. */

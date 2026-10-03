@@ -19,6 +19,16 @@
 // Phase 9 (C26 seams): the candidate tools pass `applyToolMode` (`modes.ts`: the tool set of a permission mode, and the
 // `activeTools` the model may call, `AssembledTools.activeTools`); the agent scope of the run (`agent-scope.ts`: the
 // mode, the sub-agent runner, the todos) is bound to every call context next to the run scope (never in sub-agents).
+// Phase 9 (W9.5, ADR-043, plugin API 1.3.0) streaming tools: an `execute` written as an async generator function makes
+// the wrapped `execute` an async generator too. The plugin's whole iteration runs inside one `plugins.guard` call (the
+// timeout and the abort cover it) and hands its values over to the wrapper; preliminary values go out at most once per
+// `PRELIMINARY_INTERVAL_MS` (the latest wins; the first at once), each through the 64 KB cap, at most
+// `PRELIMINARY_OUTPUTS_MAX` per call; once the iteration settled the journal records the call, `tool.after` runs on the
+// final value (the last one yielded) only, and the capped final value is yielded last (the SDK re-emits the last yield
+// as the final output). A value still waiting when the iteration ends is dropped: the final value supersedes it. A
+// non-generator `execute` whose result is an `AsyncIterable` is drained (the last value counts, no preliminary output).
+// Sub-agent calls (`subagent/tools.ts`) set `callIdPrefix` (`<parent call id>/`): the hooks, the call context, the run
+// scope and the journal see the prefixed call id.
 import type { ToolCallContext, ToolDefinition, ToolResultOutput, ToolWorkspace } from '@harness-forge/plugin-sdk'
 import type { HarnessUIMessage, McpServer, ToolMode } from '@harness-forge/shared'
 import type { JSONValue, Tool, ToolExecutionOptions, ToolSet } from 'ai'
@@ -36,8 +46,13 @@ import { GUARD_TIMEOUT_MAX_MS, GUARD_TIMEOUTS } from '../plugins/guard.ts'
 import { bindRunScope } from '../workspace/run-scope.ts'
 import { bindAgentScope } from './agent-scope.ts'
 import { toolWorkspaceAccess } from './approval.ts'
-import { isAbortError, ToolFailure } from './errors.ts'
+import { abortReason, isAbortError, ToolFailure } from './errors.ts'
 import { applyToolMode } from './modes.ts'
+
+/** Preliminary outputs of a streaming tool go out at most once per this interval (the latest value wins). */
+export const PRELIMINARY_INTERVAL_MS = 250
+/** Preliminary outputs one streaming call sends at most; later ones are dropped (the final value always goes out). */
+export const PRELIMINARY_OUTPUTS_MAX = 2000
 
 /** The marker that replaces a tool output larger than `LIMITS.toolOutputBytes` (DECISIONS.md "Tool output cap"). */
 export interface TruncatedToolOutput {
@@ -125,6 +140,11 @@ export interface ToolWrapContext {
    * of the `core-agent` tools). Null or absent (sub-agents) = nothing is bound.
    */
   agent?: AgentRunScope | null
+  /**
+   * The prefix of the call ids of a sub-agent's calls (Phase 9: `<parent call id>/`): the hooks, the call context, the
+   * bound run scope and the journal see `<prefix><call id>`. Absent = the SDK's call id as it is.
+   */
+  callIdPrefix?: string
   /** Warnings of the journal step (default: none). */
   logger?: Logger
 }
@@ -183,71 +203,278 @@ export function toolWorkspace(workspace: ToolWorkspace): ToolWorkspace {
   return Object.freeze({ projectId: workspace.projectId, name: workspace.name, root: workspace.root })
 }
 
-/** The `execute` of a registered tool with steps 1 and 3-6 of the host wrapper. */
-export function wrapToolExecute(registered: Pick<RegisteredTool, 'pluginId' | 'definition'>, context: ToolWrapContext) {
+/** `fn` is an `async function*` (or an async generator method): its call returns an async generator at once. */
+export function isAsyncGeneratorFunction(fn: unknown): boolean {
+  return typeof fn === 'function' && Object.prototype.toString.call(fn) === '[object AsyncGeneratorFunction]'
+}
+
+/** `value` can be iterated with `for await` (`Symbol.asyncIterator`). */
+export function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return typeof value === 'object' && value !== null && typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function'
+}
+
+/** The wrapped `execute`: a promise, or an async generator for a streaming tool (`isAsyncGeneratorFunction`). */
+export type WrappedToolExecute = (input: unknown, options: ToolExecutionOptions<unknown>) => Promise<unknown> | AsyncGenerator<unknown, void, undefined>
+
+type WrappedTool = Pick<RegisteredTool, 'pluginId' | 'definition'>
+
+/** The hook context of one call (`tool.before` / `tool.after`). */
+interface CallBase {
+  chatId: string
+  modelRef: string
+  tool: string
+  toolCallId: string
+}
+
+/** The call id the hooks, the call context, the run scope and the journal see (`ToolWrapContext.callIdPrefix`). */
+function callIdOf(context: ToolWrapContext, options: Pick<ToolExecutionOptions<unknown>, 'toolCallId'>): string {
+  return `${context.callIdPrefix ?? ''}${options.toolCallId}`
+}
+
+/** Steps 1 and 3 before the plugin's code runs: the owner is active, `tool.before`, the input re-validated. */
+async function prepareInput(registered: WrappedTool, context: ToolWrapContext, base: CallBase, input: unknown): Promise<unknown> {
   const { pluginId, definition } = registered
-  const name = definition.name
-  return async (input: unknown, options: ToolExecutionOptions<unknown>): Promise<unknown> => {
-    const signal = options.abortSignal ?? context.signal
-    const base = { chatId: context.chatId, modelRef: context.modelRef, tool: name, toolCallId: options.toolCallId }
-    if (!context.plugins.isActive(pluginId))
-      throw new ToolFailure(`Tool unavailable: the plugin "${pluginId}" is not active.`)
-
-    const before = { input }
-    try {
-      await context.registry.hooks.run('tool.before', base, before)
-    }
-    catch (error) {
-      throw new ToolFailure(failureMessage(error))
-    }
-    let finalInput = before.input
-    const schema = asSchema(definition.inputSchema)
-    if (schema.validate !== undefined) {
-      const result = await schema.validate(finalInput)
-      if (!result.success)
-        throw new ToolFailure(`The tool input is invalid: ${failureMessage(result.error)}`)
-      finalInput = result.value
-    }
-
-    let output: unknown
-    let started = false
-    try {
-      output = await context.plugins.guard(
-        pluginId,
-        (guardSignal) => {
-          const callContext: ToolCallContext = {
-            chatId: context.chatId,
-            modelRef: context.modelRef,
-            toolCallId: options.toolCallId,
-            messages: options.messages,
-            signal: guardSignal,
-            ...(context.workspace == null ? {} : { workspace: context.workspace }),
-          }
-          if (context.scope != null)
-            bindRunScope(callContext, { ...context.scope, toolCallId: options.toolCallId })
-          if (context.agent != null)
-            bindAgentScope(callContext, context.agent)
-          started = true
-          return definition.execute(finalInput, callContext)
-        },
-        { timeoutMs: clampToolTimeout(definition.timeoutMs), phase: 'tool', signal, label: name },
-      )
-    }
-    catch (error) {
-      if (signal.aborted && isAbortError(error))
-        throw error
-      throw new ToolFailure(failureMessage(error))
-    }
-    finally {
-      // Journaled once the call settled, success or failure (a call that never started records nothing).
-      if (started)
-        await recordSettledCall(context, registered, options.toolCallId, finalInput)
-    }
-
-    const after = { output }
-    await context.registry.hooks.run('tool.after', { ...base, input: finalInput }, after)
-    return capToolOutput(after.output)
+  if (!context.plugins.isActive(pluginId))
+    throw new ToolFailure(`Tool unavailable: the plugin "${pluginId}" is not active.`)
+  const before = { input }
+  try {
+    await context.registry.hooks.run('tool.before', base, before)
   }
+  catch (error) {
+    throw new ToolFailure(failureMessage(error))
+  }
+  const schema = asSchema(definition.inputSchema)
+  if (schema.validate === undefined)
+    return before.input
+  const result = await schema.validate(before.input)
+  if (!result.success)
+    throw new ToolFailure(`The tool input is invalid: ${failureMessage(result.error)}`)
+  return result.value
+}
+
+/** The `ToolCallContext` of one call, with the run scope and the agent scope bound to it (server-internal). */
+function callContextOf(context: ToolWrapContext, options: ToolExecutionOptions<unknown>, toolCallId: string, signal: AbortSignal): ToolCallContext {
+  const callContext: ToolCallContext = {
+    chatId: context.chatId,
+    modelRef: context.modelRef,
+    toolCallId,
+    messages: options.messages,
+    signal,
+    ...(context.workspace == null ? {} : { workspace: context.workspace }),
+  }
+  if (context.scope != null)
+    bindRunScope(callContext, { ...context.scope, toolCallId })
+  if (context.agent != null)
+    bindAgentScope(callContext, context.agent)
+  return callContext
+}
+
+/** The error a failed guarded call rethrows: the abort of a stopped run as it is, anything else as a `ToolFailure`. */
+function settledError(error: unknown, signal: AbortSignal): unknown {
+  return signal.aborted && isAbortError(error) ? error : new ToolFailure(failureMessage(error))
+}
+
+/** The last value of an async iterable (undefined when it yields nothing); stops early when `signal` aborts. */
+async function drain(iterable: AsyncIterable<unknown>, signal: AbortSignal): Promise<unknown> {
+  let last: unknown
+  for await (const value of iterable) {
+    last = value
+    if (signal.aborted)
+      break
+  }
+  return last
+}
+
+/** The promise path of `wrapToolExecute` (a plain `execute`; an `AsyncIterable` result is drained). */
+async function runToolCall(registered: WrappedTool, context: ToolWrapContext, input: unknown, options: ToolExecutionOptions<unknown>): Promise<unknown> {
+  const { pluginId, definition } = registered
+  const signal = options.abortSignal ?? context.signal
+  const toolCallId = callIdOf(context, options)
+  const base: CallBase = { chatId: context.chatId, modelRef: context.modelRef, tool: definition.name, toolCallId }
+  const finalInput = await prepareInput(registered, context, base, input)
+
+  let output: unknown
+  let started = false
+  try {
+    output = await context.plugins.guard(
+      pluginId,
+      async (guardSignal) => {
+        const callContext = callContextOf(context, options, toolCallId, guardSignal)
+        started = true
+        const result: unknown = await definition.execute(finalInput, callContext)
+        return isAsyncIterable(result) ? drain(result, guardSignal) : result
+      },
+      { timeoutMs: clampToolTimeout(definition.timeoutMs), phase: 'tool', signal, label: definition.name },
+    )
+  }
+  catch (error) {
+    throw settledError(error, signal)
+  }
+  finally {
+    // Journaled once the call settled, success or failure (a call that never started records nothing).
+    if (started)
+      await recordSettledCall(context, registered, toolCallId, finalInput)
+  }
+
+  const after = { output }
+  await context.registry.hooks.run('tool.after', { ...base, input: finalInput }, after)
+  return capToolOutput(after.output)
+}
+
+/**
+ * The hand-over between the plugin's iteration (inside the guard) and the wrapper's generator: only the latest value
+ * waits (`put` replaces it), and `wait` resolves on the next `put` / `wake` or after `ms`.
+ */
+class LatestValue {
+  #value: { readonly current: unknown } | null = null
+  #waiter: (() => void) | null = null
+  #woken = false
+
+  put(value: unknown): void {
+    this.#value = { current: value }
+    this.wake()
+  }
+
+  /** Removes and returns the waiting value (null when none waits). */
+  take(): { readonly current: unknown } | null {
+    const value = this.#value
+    this.#value = null
+    return value
+  }
+
+  get waiting(): boolean {
+    return this.#value !== null
+  }
+
+  wake(): void {
+    const waiter = this.#waiter
+    if (waiter === null) {
+      this.#woken = true
+      return
+    }
+    this.#waiter = null
+    waiter()
+  }
+
+  /** Resolves on the next `put` / `wake` (at once when one came since the last wait), or after `ms` when given. */
+  wait(ms?: number): Promise<void> {
+    if (this.#woken) {
+      this.#woken = false
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      this.#waiter = () => {
+        if (timer !== undefined)
+          clearTimeout(timer)
+        resolve()
+      }
+      if (ms !== undefined) {
+        timer = setTimeout(() => {
+          this.#waiter = null
+          resolve()
+        }, ms)
+        timer.unref?.()
+      }
+    })
+  }
+}
+
+type IterationOutcome = { ok: true, last: unknown } | { ok: false, error: unknown }
+
+/** The streaming path of `wrapToolExecute` (an async generator `execute`; see the module comment). */
+async function* streamToolCall(registered: WrappedTool, context: ToolWrapContext, input: unknown, options: ToolExecutionOptions<unknown>): AsyncGenerator<unknown, void, undefined> {
+  const { pluginId, definition } = registered
+  const signal = options.abortSignal ?? context.signal
+  const toolCallId = callIdOf(context, options)
+  const base: CallBase = { chatId: context.chatId, modelRef: context.modelRef, tool: definition.name, toolCallId }
+  const finalInput = await prepareInput(registered, context, base, input)
+
+  const latest = new LatestValue()
+  // Ends the plugin's iteration when this generator ends before it (a value that cannot be capped, a consumer that
+  // stops reading): the guard rejects and the plugin's `c.signal` aborts.
+  const stop = new AbortController()
+  let started = false
+  // Set once the guarded iteration settled (a holder: the callbacks below assign it).
+  const state: { outcome: IterationOutcome | null } = { outcome: null }
+  void context.plugins.guard(
+    pluginId,
+    async (guardSignal) => {
+      const callContext = callContextOf(context, options, toolCallId, guardSignal)
+      started = true
+      let last: unknown
+      for await (const value of definition.execute(finalInput, callContext) as AsyncIterable<unknown>) {
+        last = value
+        if (guardSignal.aborted)
+          break
+        latest.put(value)
+      }
+      return last
+    },
+    { timeoutMs: clampToolTimeout(definition.timeoutMs), phase: 'tool', signal: AbortSignal.any([signal, stop.signal]), label: definition.name },
+  ).then(
+    (last) => {
+      state.outcome = { ok: true, last }
+      latest.wake()
+    },
+    (error: unknown) => {
+      state.outcome = { ok: false, error }
+      latest.wake()
+    },
+  )
+
+  let recorded = false
+  const record = async (): Promise<void> => {
+    if (!started || recorded)
+      return
+    recorded = true
+    await recordSettledCall(context, registered, toolCallId, finalInput)
+  }
+  try {
+    let sent = 0
+    let lastSentAt = Number.NEGATIVE_INFINITY
+    while (state.outcome === null) {
+      if (!latest.waiting) {
+        await latest.wait()
+        continue
+      }
+      if (sent >= PRELIMINARY_OUTPUTS_MAX) {
+        latest.take()
+        continue
+      }
+      const due = lastSentAt + PRELIMINARY_INTERVAL_MS - Date.now()
+      if (due > 0) {
+        await latest.wait(due)
+        continue
+      }
+      const value = latest.take()
+      if (value === null)
+        continue
+      sent += 1
+      lastSentAt = Date.now()
+      yield capToolOutput(value.current)
+    }
+    // Journaled once the iteration settled, success or failure.
+    await record()
+    const settled = state.outcome
+    if (!settled.ok)
+      throw settledError(settled.error, signal)
+    const after = { output: settled.last }
+    await context.registry.hooks.run('tool.after', { ...base, input: finalInput }, after)
+    yield capToolOutput(after.output)
+  }
+  finally {
+    if (state.outcome === null)
+      stop.abort(abortReason('The tool call ended before its iteration.'))
+    await record()
+  }
+}
+
+/** The `execute` of a registered tool with steps 1 and 3-6 of the host wrapper (streaming: see the module comment). */
+export function wrapToolExecute(registered: WrappedTool, context: ToolWrapContext): WrappedToolExecute {
+  if (isAsyncGeneratorFunction(registered.definition.execute))
+    return (input, options) => streamToolCall(registered, context, input, options)
+  return (input, options) => runToolCall(registered, context, input, options)
 }
 
 /** The guarded `toModelOutput` of a tool; JSON of the output on failure or for a truncated output. */
@@ -305,6 +532,8 @@ export interface ToolAssemblyInput {
   continuation?: HarnessUIMessage | null
   /** The agent scope of the run (Phase 9), bound to every call context; null or absent (sub-agents) = none. */
   agent?: AgentRunScope | null
+  /** The call id prefix of a sub-agent's tools (`ToolWrapContext.callIdPrefix`, Phase 9); absent for chat runs. */
+  callIdPrefix?: string
 }
 
 export interface AssembledTools {
@@ -415,6 +644,7 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
     workspace,
     scope,
     agent: input.agent ?? null,
+    ...(input.callIdPrefix === undefined ? {} : { callIdPrefix: input.callIdPrefix }),
     logger: input.logger,
   }
   const tools: ToolSet = {}

@@ -1,9 +1,12 @@
 import type { ToolMode } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h, nextTick } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
+import { settings } from '~/utils/testing/fixtures'
 import { bodyAll, byTestId } from './composer-test-utils'
 import PermissionMenu from './PermissionMenu.vue'
 
@@ -24,6 +27,10 @@ async function openMenu(wrapper: ReturnType<typeof mountMenu>['wrapper']) {
 }
 
 describe('permissionMenu', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
   afterEach(() => {
     document.body.replaceChildren()
   })
@@ -87,6 +94,42 @@ describe('permissionMenu', () => {
     const options = await openMenu(wrapper)
     expect(options.map(option => option.dataset.value)).toEqual(['ask', 'edits', 'auto', 'off'])
     expect(options[1]!.getAttribute('aria-checked')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('shows Plan in the info tone, on the trigger and in the menu', async () => {
+    const { wrapper } = mountMenu('plan', ['ask', 'edits', 'plan', 'auto', 'off'])
+    const trigger = wrapper.get(byTestId(testIds.permissionMenuTrigger))
+    expect(trigger.attributes()).toMatchObject({ 'data-value': 'plan', 'aria-label': 'Permission mode: Plan' })
+    expect(trigger.text()).toContain('Plan')
+    expect(trigger.classes()).toContain('text-info')
+    expect(trigger.classes()).not.toContain('text-primary')
+    const options = await openMenu(wrapper)
+    const plan = options.find(option => option.dataset.value === 'plan')!
+    expect(plan.getAttribute('aria-checked')).toBe('true')
+    const icons = (option: HTMLElement) => [...option.querySelectorAll('svg')].map(icon => icon.getAttribute('class') ?? '')
+    expect(icons(plan).some(name => name.includes('lucide-clipboard-list') && name.includes('text-info'))).toBe(true)
+    expect(plan.querySelector('span.text-info')?.textContent).toBe('Plan')
+    expect(plan.textContent).toContain('Explore and plan; change nothing until you approve the plan')
+    const ask = options.find(option => option.dataset.value === 'ask')!
+    expect(icons(ask).some(name => name.includes('lucide-hand') && name.includes('text-muted-foreground'))).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('lists Alt+P and Shift+Tab in aria-keyshortcuts while each is on', async () => {
+    const store = useSettingsStore()
+    const { wrapper } = mountMenu('ask')
+    const trigger = () => wrapper.get(byTestId(testIds.permissionMenuTrigger))
+    expect(trigger().attributes('aria-keyshortcuts')).toBe('Alt+P Shift+Tab')
+    store.settings = settings({ shiftTabModes: false })
+    await nextTick()
+    expect(trigger().attributes('aria-keyshortcuts')).toBe('Alt+P')
+    store.settings = settings({ shiftTabModes: true, altShortcuts: false })
+    await nextTick()
+    expect(trigger().attributes('aria-keyshortcuts')).toBe('Shift+Tab')
+    store.settings = settings({ shiftTabModes: false, altShortcuts: false })
+    await nextTick()
+    expect(trigger().attributes('aria-keyshortcuts')).toBeUndefined()
     wrapper.unmount()
   })
 })

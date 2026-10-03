@@ -107,11 +107,6 @@ describe('the three agent tools', () => {
     expect(schema.safeParse({ todos: Array.from({ length: 51 }, (_, index) => ({ id: `${index}`, content: 'x', status: 'pending' })) }).success).toBe(false)
   })
 
-  it('the P9-0b stubs of todo_write and exit_plan_mode throw not_implemented', async () => {
-    await expect(Promise.resolve(byName.get('todo_write')!.execute(VALID_INPUTS.todo_write, context()))).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(Promise.resolve(byName.get('exit_plan_mode')!.execute(VALID_INPUTS.exit_plan_mode, context()))).rejects.toMatchObject({ code: 'not_implemented' })
-  })
-
   it('setup registers every tool through ctx.tools.register', async () => {
     const registered: ToolDefinition[] = []
     const ctx = {

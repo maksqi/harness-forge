@@ -109,6 +109,29 @@ describe('/mode plan (Plan, Phase 9)', () => {
     expect(parseToolMode('Plan')).toBe('plan')
     expect(resolveClientCommand('mode', 'plan', { ...base, projectChat: true })).toEqual({ type: 'set-mode', mode: 'plan' })
     expect(resolveClientCommand('mode', 'PLAN', base)).toEqual({ type: 'error', message: 'Plan mode works in project chats.' })
+    expect(parseClientCommand('/mode plan')).toEqual({ name: 'mode', args: 'plan' })
+  })
+
+  it('lists plan in the /mode help only in project chats', () => {
+    expect(resolveClientCommand('mode', 'later', base)).toEqual({ type: 'error', message: 'Unknown mode "later". Use ask, auto or off.' })
+    expect(resolveClientCommand('mode', 'later', { ...base, projectChat: true })).toEqual({
+      type: 'error',
+      message: 'Unknown mode "later". Use ask, edits, plan, auto or off.',
+    })
+  })
+})
+
+describe('/compact (Phase 9)', () => {
+  const listed = [{ name: 'compact', description: 'Summarize the conversation so far', pluginId: 'core-agent' }]
+
+  it('comes from GET /commands as a server command and is sent as typed', () => {
+    expect(serverSlashItems(listed, id => (id === 'core-agent' ? 'Agent tools' : undefined))).toEqual([
+      { name: 'compact', description: 'Summarize the conversation so far', kind: 'server', source: 'Agent tools' },
+    ])
+    const all = [...clientSlashItems(), ...serverSlashItems(listed)]
+    expect(filterSlashItems(all, 'comp').map(item => `${item.kind}:${item.name}`)).toEqual(['server:compact'])
+    expect(parseClientCommand('/compact keep numbers')).toBeNull()
+    expect(parseSlashCommand('/compact keep numbers')).toEqual({ name: 'compact', args: 'keep numbers' })
   })
 })
 

@@ -1,4 +1,4 @@
-import type { AudioTranscription, FileRef, MessageUsage, ReasoningEffort, ToolMode } from '@harness-forge/shared'
+import type { AudioTranscription, FileRef, MessageUsage, ProjectFileEntry, ProjectFileSearch, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { Mock } from 'vitest'
 import type { ChatComposerExposed } from './types'
@@ -10,6 +10,7 @@ import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h, nextTick, reactive } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { MENTION_SEARCH_DEBOUNCE_MS } from '~/composables/useFileMentions'
 import { IMAGE_OPTIONS_KEY, useImageOptions } from '~/composables/useImageOptions'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { useProjectsStore } from '~/stores/projects'
@@ -18,13 +19,12 @@ import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
 import { installFakeMedia } from '~/utils/testing/fake-media'
-import { catalogModel, chatId, projectId, projectSummary } from '~/utils/testing/fixtures'
+import { catalogModel, chatId, messageId, projectFileEntry, projectId, projectSummary, queueItem } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import ChatComposer from './ChatComposer.vue'
 import { anthropic, bodyAll, byTestId, haiku, llama, NuxtLinkStub, ollama, openai, seedStores, sonnet } from './composer-test-utils'
 import ComposerAddMenu from './ComposerAddMenu.vue'
-import MentionMenu from './MentionMenu.vue'
 import SendStopButton from './SendStopButton.vue'
 
 const mock = vi.hoisted(() => ({
@@ -262,10 +262,11 @@ describe('chatComposer', () => {
     wrapper.unmount()
   })
 
-  it('shows Stop while a response runs: click or Esc stops, Enter does not send', async () => {
+  it('shows Stop while a response runs: click or Esc stops, Enter queues the message (Phase 9)', async () => {
     const { wrapper, state, composer, textarea } = mountComposer({ status: 'streaming' })
     expect(wrapper.get(byTestId(testIds.composer)).attributes('data-status')).toBe('streaming')
     expect(wrapper.find(byTestId(testIds.composerSend)).exists()).toBe(false)
+    expect(textarea().attributes('placeholder')).toBe('Queue a message…')
     await wrapper.get(byTestId(testIds.composerStop)).trigger('click')
     expect(composer().emitted('stop')).toHaveLength(1)
 
@@ -273,9 +274,12 @@ describe('chatComposer', () => {
     expect(composer().emitted('stop')).toHaveLength(2)
 
     await type(textarea(), 'queued?')
-    press(textarea().element, { key: 'Enter' })
+    const enter = press(textarea().element, { key: 'Enter' })
     await flushPromises()
-    expect(composer().emitted('submit')).toBeUndefined()
+    expect(enter.defaultPrevented).toBe(true)
+    expect(composer().emitted('submit')).toEqual([[{ text: 'queued?', files: [] }]])
+    expect(textarea().element.value).toBe('')
+    expect(document.activeElement).toBe(textarea().element)
 
     // Esc outside inputs stops too (global shortcut).
     textarea().element.blur()
@@ -1048,53 +1052,337 @@ describe('chatComposer', () => {
     wrapper.unmount()
   })
 
-  describe('agent 2.0 seams (Phase 9)', () => {
-    it('mounts the mention menu closed and keeps the textarea pointed at the slash menu', async () => {
+  describe('file mentions (Phase 9)', () => {
+    const dir = (path: string) => projectFileEntry(path, 'dir')
+    const file = (path: string) => projectFileEntry(path)
+
+    function answer(items: ProjectFileEntry[], truncated = false): ProjectFileSearch {
+      return { items, truncated, indexedAt: 1_759_000_000_000 }
+    }
+
+    function mountProjectChat(overrides: Partial<HarnessState> = {}) {
+      useProjectsStore().items = [projectSummary({ id: projectId(1), name: 'harness-forge' })]
+      return mountComposer({ projectId: projectId(1), ...overrides })
+    }
+
+    /** The 80 ms debounce runs out and the (mocked) search answers. */
+    async function searchSettles() {
+      vi.advanceTimersByTime(MENTION_SEARCH_DEBOUNCE_MS)
+      await flushPromises()
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    })
+
+    it('@pars + Enter inserts the best match and attaches it as a project chip; Send waits for it', async () => {
+      api.projectFiles.search.mockResolvedValue(answer([file('src/parser.ts'), file('src/parser.test.ts')]))
+      let finish!: (ref: FileRef) => void
+      api.projectFiles.attach.mockReturnValueOnce(new Promise<FileRef>((resolve) => {
+        finish = resolve
+      }))
+      const { wrapper, composer, textarea } = mountProjectChat()
+      const menu = () => wrapper.find(byTestId(testIds.mentionMenu))
+
+      await type(textarea(), 'Fix @pars')
+      expect(menu().attributes('data-state')).toBe('loading')
+      expect(textarea().attributes('aria-controls')).toBe(menu().attributes('id'))
+      await searchSettles()
+      expect(api.projectFiles.search).toHaveBeenCalledTimes(1)
+      expect(api.projectFiles.search.mock.calls[0]![0]).toMatchObject({ params: { id: projectId(1) }, query: { q: 'pars', limit: 50 } })
+      expect(menu().attributes()).toMatchObject({ 'data-state': 'ready', 'data-count': '2', 'aria-label': 'Files in harness-forge' })
+      const rows = wrapper.findAll(byTestId(testIds.mentionMenuItem))
+      expect(textarea().attributes('aria-activedescendant')).toBe(rows[0]!.attributes('id'))
+
+      const enter = press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(enter.defaultPrevented).toBe(true)
+      expect(composer().emitted('submit')).toBeUndefined()
+      expect(textarea().element.value).toBe('Fix @src/parser.ts ')
+      expect(textarea().element.selectionStart).toBe(19)
+      expect(menu().exists()).toBe(false)
+      expect(textarea().attributes('aria-controls')).toBeUndefined()
+      const chip = wrapper.get(byTestId(testIds.composerAttachment))
+      expect(chip.attributes()).toMatchObject({ 'data-kind': 'project', 'data-path': 'src/parser.ts', 'data-state': 'uploading' })
+      expect(chip.text()).toContain('parser.ts')
+      expect(api.projectFiles.attach).toHaveBeenCalledWith(expect.objectContaining({ params: { id: projectId(1) }, body: { path: 'src/parser.ts' } }))
+
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(composer().emitted('submit')).toBeUndefined()
+      finish(fileRef('parser.ts', 'text/plain'))
+      await flushPromises()
+      expect(composer().emitted('submit')).toEqual([[{ text: 'Fix @src/parser.ts', files: [fileRef('parser.ts', 'text/plain')] }]])
+      wrapper.unmount()
+    })
+
+    it('a folder inserts @folder/ and keeps the menu open on it', async () => {
+      api.projectFiles.search.mockImplementation(async (input: { query: { q: string } }) => (input.query.q === 'pars'
+        ? answer([dir('src/parsers'), file('src/parser.ts')])
+        : answer([file('src/parsers/json.ts'), file('src/parsers/yaml.ts')])))
+      api.projectFiles.attach.mockResolvedValue(fileRef('yaml.ts', 'text/plain'))
+      const { wrapper, textarea } = mountProjectChat()
+      await type(textarea(), '@pars')
+      await searchSettles()
+      expect(wrapper.findAll(byTestId(testIds.mentionMenuItem)).map(row => row.attributes('data-kind'))).toEqual(['dir', 'file'])
+
+      press(textarea().element, { key: 'Tab' })
+      await flushPromises()
+      expect(textarea().element.value).toBe('@src/parsers/')
+      expect(api.projectFiles.attach).not.toHaveBeenCalled()
+      expect(wrapper.find(byTestId(testIds.mentionMenu)).exists()).toBe(true)
+      await searchSettles()
+      expect(api.projectFiles.search).toHaveBeenLastCalledWith(expect.objectContaining({ query: { q: 'src/parsers/', limit: 50 } }))
+      expect(wrapper.findAll(byTestId(testIds.mentionMenuItem)).map(row => row.attributes('data-path'))).toEqual(['src/parsers/json.ts', 'src/parsers/yaml.ts'])
+
+      press(textarea().element, { key: 'ArrowDown' })
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(textarea().element.value).toBe('@src/parsers/yaml.ts ')
+      expect(wrapper.get(byTestId(testIds.composerAttachment)).attributes('data-path')).toBe('src/parsers/yaml.ts')
+      wrapper.unmount()
+    })
+
+    it('never opens for a@b or in a chat without a project', async () => {
+      const project = mountProjectChat()
+      await type(project.textarea(), 'mail a@b')
+      await searchSettles()
+      expect(project.wrapper.find(byTestId(testIds.mentionMenu)).exists()).toBe(false)
+      expect(api.projectFiles.search).not.toHaveBeenCalled()
+      project.wrapper.unmount()
+
+      const plain = mountComposer()
+      await type(plain.textarea(), 'Fix @pars')
+      await searchSettles()
+      expect(plain.wrapper.find(byTestId(testIds.mentionMenu)).exists()).toBe(false)
+      expect(api.projectFiles.search).not.toHaveBeenCalled()
+      press(plain.textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(plain.composer().emitted('submit')).toEqual([[{ text: 'Fix @pars', files: [] }]])
+      plain.wrapper.unmount()
+    })
+
+    it('esc closes the mention menu before it stops a response; the menu returns when the token changes', async () => {
+      api.projectFiles.search.mockResolvedValue(answer([file('src/parser.ts')]))
+      const { wrapper, composer, textarea } = mountProjectChat({ status: 'streaming' })
+      await type(textarea(), '@pa')
+      await searchSettles()
+      const escape = press(textarea().element, { key: 'Escape' })
+      await flushPromises()
+      expect(escape.defaultPrevented).toBe(true)
+      expect(wrapper.find(byTestId(testIds.mentionMenu)).exists()).toBe(false)
+      expect(composer().emitted('stop')).toBeUndefined()
+
+      await type(textarea(), '@par')
+      expect(wrapper.find(byTestId(testIds.mentionMenu)).exists()).toBe(true)
+      press(textarea().element, { key: 'Escape' })
+      await flushPromises()
+      press(textarea().element, { key: 'Escape' })
+      expect(composer().emitted('stop')).toHaveLength(1)
+      wrapper.unmount()
+    })
+
+    it('shows search errors in the menu', async () => {
+      api.projectFiles.search.mockRejectedValueOnce(new HarnessError({ code: 'validation_error', message: 'The folder /srv/x is missing.' }))
+        .mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Could not reach the server.' }))
+      const { wrapper, textarea } = mountProjectChat()
+      await type(textarea(), '@pa')
+      await searchSettles()
+      const menu = wrapper.get(byTestId(testIds.mentionMenu))
+      expect(menu.attributes('data-state')).toBe('error')
+      expect(menu.text()).toContain('The project folder is unavailable.')
+      await type(textarea(), '@par')
+      await searchSettles()
+      expect(wrapper.get(byTestId(testIds.mentionMenu)).text()).toContain('Couldn\'t search files.')
+      wrapper.unmount()
+    })
+
+    it('reports a file that cannot be attached with a toast and keeps the text', async () => {
+      api.projectFiles.search.mockImplementation(async (input: { query: { q: string } }) => answer([file(`${input.query.q}.log`)]))
+      api.projectFiles.attach
+        .mockRejectedValueOnce(new HarnessError({ code: 'payload_too_large', message: 'Files are limited to 5 MB.', details: { limitBytes: 5_242_880 } }))
+        .mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: 'File gone.log not found.' }))
+        .mockRejectedValueOnce(new HarnessError({ code: 'validation_error', message: 'The file type is not supported.', details: { issues: [{ path: ['file'], message: 'The file type is not supported.', code: 'custom' }] } }))
+        .mockRejectedValueOnce(new HarnessError({ code: 'validation_error', message: 'path: Secret-looking paths cannot be attached.', details: { issues: [{ path: ['path'], message: 'Secret-looking paths cannot be attached.', code: 'custom' }] } }))
+      const { wrapper, textarea } = mountProjectChat()
+      for (const name of ['big', 'gone', 'blob', 'secret']) {
+        await type(textarea(), `@${name}`)
+        await searchSettles()
+        press(textarea().element, { key: 'Enter' })
+        await flushPromises()
+        expect(textarea().element.value).toBe(`@${name}.log `)
+      }
+      expect(mock.toastError.mock.calls).toEqual([
+        ['big.log can\'t be attached', { description: 'Files can be up to 5 MB.' }],
+        ['gone.log can\'t be attached', { description: 'The file no longer exists.' }],
+        ['blob.log can\'t be attached', { description: 'Attach images, PDFs or text files.' }],
+        ['secret.log can\'t be attached', { description: 'path: Secret-looking paths cannot be attached.' }],
+      ])
+      expect(wrapper.find(byTestId(testIds.composerAttachment)).exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('the chip and the text are independent', async () => {
+      api.projectFiles.search.mockResolvedValue(answer([file('src/parser.ts')]))
+      api.projectFiles.attach.mockResolvedValue(fileRef('parser.ts', 'text/plain'))
+      const { wrapper, textarea } = mountProjectChat()
+      await type(textarea(), '@pars')
+      await searchSettles()
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      const chip = wrapper.get(byTestId(testIds.composerAttachment))
+      expect(chip.attributes('data-state')).toBe('done')
+      await chip.get('button[aria-label="Remove parser.ts"]').trigger('click')
+      expect(wrapper.find(byTestId(testIds.composerAttachment)).exists()).toBe(false)
+      expect(textarea().element.value).toBe('@src/parser.ts ')
+
+      // Picking the same file again attaches it again; clearing the text keeps the chip.
+      await type(textarea(), '@src/parser.ts @pars')
+      await searchSettles()
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(wrapper.findAll(byTestId(testIds.composerAttachment))).toHaveLength(1)
+      await type(textarea(), '')
+      expect(wrapper.findAll(byTestId(testIds.composerAttachment))).toHaveLength(1)
+      wrapper.unmount()
+    })
+  })
+
+  describe('agent 2.0: queue, + menu and Shift+Tab (Phase 9)', () => {
+    async function openAddMenu(wrapper: ReturnType<typeof mountComposer>['wrapper']) {
+      await wrapper.get(byTestId(testIds.composerAdd)).trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+    }
+
+    it('"Mention a file" in the + menu inserts @ at the caret and opens the menu (project chats only)', async () => {
       useProjectsStore().items = [projectSummary({ id: projectId(1), name: 'harness-forge' })]
       const { wrapper, textarea } = mountComposer({ projectId: projectId(1) })
-      const mentions = wrapper.getComponent(MentionMenu)
-      expect(mentions.props()).toMatchObject({ open: false, projectName: 'harness-forge', state: 'ready', truncated: false })
-      await type(textarea(), 'Fix @src/pa')
-      expect(wrapper.find(byTestId(testIds.mentionMenu)).exists()).toBe(false)
-      expect(textarea().attributes('aria-controls')).toBeUndefined()
-      await type(textarea(), '/mo')
-      expect(textarea().attributes('aria-controls')).toBe(wrapper.get(byTestId(testIds.slashMenu)).attributes('id'))
-      wrapper.unmount()
-    })
-
-    it('leaves Shift+Tab to the browser', async () => {
-      const { wrapper, state, textarea } = mountComposer({ projectId: projectId(1) })
-      const event = press(textarea().element, { key: 'Tab', shiftKey: true })
+      expect(wrapper.getComponent(ComposerAddMenu).props('projectChat')).toBe(true)
+      await type(textarea(), 'Look at')
+      await openAddMenu(wrapper)
+      const item = bodyAll(byTestId(testIds.composerMention))
+      expect(item).toHaveLength(1)
+      expect(item[0]!.textContent).toContain('Mention a file')
+      item[0]!.click()
       await flushPromises()
-      expect(event.defaultPrevented).toBe(false)
-      expect(state.toolMode).toBe('ask')
+      expect(textarea().element.value).toBe('Look at @')
+      expect(textarea().element.selectionStart).toBe(9)
+      expect(wrapper.find(byTestId(testIds.mentionMenu)).exists()).toBe(true)
       wrapper.unmount()
+
+      const other = mountComposer()
+      expect(other.wrapper.getComponent(ComposerAddMenu).props('projectChat')).toBe(false)
+      await openAddMenu(other.wrapper)
+      expect(bodyAll(byTestId(testIds.composerMention))).toHaveLength(0)
+      expect(bodyAll('[role="menuitem"]').map(entry => entry.textContent?.trim())).toEqual(['Attach files', 'Commands'])
+      other.wrapper.unmount()
     })
 
-    it('passes canQueue to Send / Stop while a run is active and the composer has content', async () => {
-      const { wrapper, state, textarea } = mountComposer({ status: 'streaming' })
+    it('shows "Queue message" left of Stop while a run is active and the composer has content', async () => {
+      const { wrapper, state, composer, textarea } = mountComposer({ status: 'streaming' })
       const button = () => wrapper.getComponent(SendStopButton)
+      const queue = () => wrapper.find(byTestId(testIds.composerQueue))
       expect(button().props('canQueue')).toBe(false)
+      expect(queue().exists()).toBe(false)
       await type(textarea(), 'Also update the README')
       expect(button().props('canQueue')).toBe(true)
+      expect(queue().text()).toBe('Queue message')
+      const stop = wrapper.get(byTestId(testIds.composerStop))
+      expect(queue().element.compareDocumentPosition(stop.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+      await queue().trigger('click')
+      await flushPromises()
+      expect(composer().emitted('submit')).toEqual([[{ text: 'Also update the README', files: [] }]])
+      expect(textarea().element.value).toBe('')
+      expect(queue().exists()).toBe(false)
+      expect(wrapper.find(byTestId(testIds.composerStop)).exists()).toBe(true)
+
+      await type(textarea(), 'More')
       state.status = 'ready'
       await nextTick()
       expect(button().props('canQueue')).toBe(false)
+      expect(queue().exists()).toBe(false)
+      expect(textarea().attributes('placeholder')).toBe('Reply…')
       wrapper.unmount()
     })
 
-    it('tells the + menu about a project chat and exposes restoreQueued', async () => {
-      const { wrapper, composer, textarea } = mountComposer({ projectId: projectId(1) })
-      expect(wrapper.getComponent(ComposerAddMenu).props('projectChat')).toBe(true)
-      const exposed = composer().vm as unknown as ChatComposerExposed
-      expect(typeof exposed.restoreQueued).toBe('function')
-      exposed.restoreQueued([])
-      await nextTick()
-      expect(textarea().element.value).toBe('')
+    it('queueing still waits for uploads in flight', async () => {
+      let finish!: (ref: FileRef) => void
+      api.files.upload.mockReturnValueOnce(new Promise<FileRef>((resolve) => {
+        finish = resolve
+      }))
+      const { wrapper, composer, textarea } = mountComposer({ status: 'streaming' })
+      const paste = new Event('paste', { bubbles: true, cancelable: true })
+      const notes = new File(['# notes'], 'notes.md', { type: 'text/markdown' })
+      Object.defineProperty(paste, 'clipboardData', { value: { items: [{ kind: 'file', getAsFile: () => notes }] } })
+      textarea().element.dispatchEvent(paste)
+      await type(textarea(), 'with notes')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(composer().emitted('submit')).toBeUndefined()
+      expect(wrapper.get(byTestId(testIds.composerQueue)).attributes('aria-busy')).toBe('true')
+      finish(fileRef('notes.md', 'text/markdown'))
+      await flushPromises()
+      expect(composer().emitted('submit')).toEqual([[{ text: 'with notes', files: [fileRef('notes.md', 'text/markdown')] }]])
       wrapper.unmount()
-      const other = mountComposer()
-      expect(other.wrapper.getComponent(ComposerAddMenu).props('projectChat')).toBe(false)
-      other.wrapper.unmount()
+    })
+
+    it('restoreQueued appends the texts with blank lines and restores the files as chips', async () => {
+      const shot = fileRef('shot.png', 'image/png')
+      const withFile = queueItem({
+        id: messageId('queued2'),
+        message: {
+          id: messageId('queued2'),
+          role: 'user',
+          parts: [{ type: 'text', text: 'See the screenshot' }, { type: 'file', mediaType: 'image/png', filename: 'shot.png', url: shot.url }],
+        },
+      })
+      const { wrapper, state, composer, textarea } = mountComposer({ status: 'streaming' })
+      await type(textarea(), 'My draft')
+      textarea().element.blur()
+      const exposed = composer().vm as unknown as ChatComposerExposed
+      exposed.restoreQueued([queueItem(), withFile])
+      await flushPromises()
+      const value = 'My draft\n\nAlso update the README\n\nSee the screenshot'
+      expect(textarea().element.value).toBe(value)
+      expect(textarea().element.selectionStart).toBe(value.length)
+      expect(document.activeElement).toBe(textarea().element)
+      const chip = wrapper.get(byTestId(testIds.composerAttachment))
+      expect(chip.attributes()).toMatchObject({ 'data-kind': 'upload', 'data-state': 'done', 'data-mime': 'image/png' })
+      expect(mock.toast).toHaveBeenCalledWith('Queued messages moved back to the composer.')
+
+      exposed.restoreQueued([])
+      await flushPromises()
+      expect(mock.toast).toHaveBeenCalledTimes(1)
+      expect(textarea().element.value).toBe(value)
+
+      state.status = 'ready'
+      await nextTick()
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(composer().emitted('submit')).toEqual([[{ text: value, files: [{ ...shot, size: 0 }] }]])
+      wrapper.unmount()
+    })
+
+    it('leaves Shift+Tab to the browser while a menu is open or the setting is off', async () => {
+      useProjectsStore().items = [projectSummary({ id: projectId(1), name: 'harness-forge' })]
+      const { wrapper, state, textarea } = mountComposer({ projectId: projectId(1) })
+      await type(textarea(), '@pa')
+      expect(wrapper.find(byTestId(testIds.mentionMenu)).exists()).toBe(true)
+      const inMention = press(textarea().element, { key: 'Tab', shiftKey: true })
+      expect(inMention.defaultPrevented).toBe(false)
+      await type(textarea(), '/mo')
+      const inSlash = press(textarea().element, { key: 'Tab', shiftKey: true })
+      expect(inSlash.defaultPrevented).toBe(false)
+
+      await type(textarea(), '')
+      const settings = useSettingsStore()
+      settings.settings = { ...settings.settings!, shiftTabModes: false }
+      const off = press(textarea().element, { key: 'Tab', shiftKey: true })
+      expect(off.defaultPrevented).toBe(false)
+      await flushPromises()
+      expect(state.toolMode).toBe('ask')
+      wrapper.unmount()
     })
   })
 })

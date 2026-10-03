@@ -3,6 +3,9 @@
 // the model's context window, inside the AI Elements `Context` hover card. Muted, warning from 80%, destructive from
 // 95%. The card lists "42% of context used", "84K / 200K tokens", the input / output / reasoning / cache rows and
 // the chat cost when known. Renders nothing without usage or a context window.
+// Phase 9 (ADR-040): the card ends with a note that follows `settings.resolved.autoCompact` ("Older messages are
+// summarized automatically near the limit. Type /compact to do it now." / "Automatic compaction is off. Older messages
+// are left out near the limit."); after `/compact` the reply's `contextTokens` makes the ring drop at once.
 import type { MessageUsage } from '@harness-forge/shared'
 import { computed } from 'vue'
 import {
@@ -20,8 +23,9 @@ import {
 import { Progress } from '@/components/ui/progress'
 import { cn } from '@/lib/utils'
 import { formatTokenCount } from '~/components/common/format'
+import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
-import { contextUsage, formatUsd, toLanguageModelUsage } from './context-usage'
+import { compactionNote, contextUsage, formatUsd, toLanguageModelUsage } from './context-usage'
 
 const props = withDefaults(defineProps<{
   usage?: MessageUsage | null
@@ -36,6 +40,8 @@ const props = withDefaults(defineProps<{
 const view = computed(() => contextUsage(props.usage, props.contextWindow))
 const usageForRows = computed(() => (props.usage ? toLanguageModelUsage(props.usage) : undefined))
 const cost = computed(() => (props.chatCostUsd == null ? '' : formatUsd(props.chatCostUsd)))
+const settings = useSettingsStore()
+const note = computed(() => compactionNote(settings.resolved.autoCompact))
 
 const RADIUS = 7
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS
@@ -100,6 +106,9 @@ const LEVEL_CLASS = {
         <span class="text-muted-foreground">Chat cost</span>
         <span class="tabular-nums">{{ cost }}</span>
       </AiContextContentFooter>
+      <p data-slot="context-compaction-note" class="p-3 text-xs text-muted-foreground">
+        {{ note }}
+      </p>
     </AiContextContent>
   </AiContext>
 </template>

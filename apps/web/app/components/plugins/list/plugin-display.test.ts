@@ -1,6 +1,9 @@
+import { BUILTIN_PLUGIN_IDS, MOCK_PROVIDER_ID } from '@harness-forge/shared'
+import { BotIcon, FolderCodeIcon } from '@lucide/vue'
 import { describe, expect, it } from 'vitest'
 import { pluginSummary } from '~/utils/testing/fixtures'
 import {
+  BUILTIN_PLUGIN_GLYPHS,
   contributionsSummary,
   countLabel,
   pluginDetailRoute,
@@ -61,5 +64,13 @@ describe('plugin display rules', () => {
     expect(pluginDetailRoute('dice-roller')).toBe('/plugins/dice-roller')
     expect(pluginDetailRoute('dice-roller', 'logs')).toBe('/plugins/dice-roller?tab=logs')
     expect(pluginDetailRoute('dice-roller', 'overview')).toBe('/plugins/dice-roller')
+  })
+
+  it('draws a glyph for every core plugin, the agent tools included (Phase 9)', () => {
+    for (const id of BUILTIN_PLUGIN_IDS.filter(id => id !== MOCK_PROVIDER_ID))
+      expect(BUILTIN_PLUGIN_GLYPHS[id], id).toBeDefined()
+    expect(BUILTIN_PLUGIN_GLYPHS['core-workspace']).toBe(FolderCodeIcon)
+    expect(BUILTIN_PLUGIN_GLYPHS['core-agent']).toBe(BotIcon)
+    expect(new Set(Object.values(BUILTIN_PLUGIN_GLYPHS)).size).toBe(Object.keys(BUILTIN_PLUGIN_GLYPHS).length)
   })
 })

@@ -26,11 +26,16 @@
 // is rethrown after the approval went out. "Always allow" never writes an `allow` override for an `execute` tool.
 //
 // Agent 2.0 (Phase 9, ADR-040 - ADR-042; C25 declares, W9.9 implements; frozen from Gate P9-0b): `submit()` sends, or
-// queues the message while a run is active (`'queued'`); `queue` and `cancelQueued()` are the chat's steer queue (the
-// `chat-queue` store); `stop()` resolves with the queued messages the stop dropped; `todos` is the todo state of the
-// shown path; `activity` follows the transient `data-activity` of the current stream ("Compacting conversation…"); a
-// plan approval carries `planMode` (set before the response goes out) and `reason` (the plan feedback). P9-0b: `submit`
-// always sends, `stop` resolves with [], `todos` and `activity` stay null, and `approve` ignores `planMode` / `reason`.
+// queues the message while a run is active (`POST /api/chat/:id/queue` with a client `msg_` id; `'queued'`; a `409
+// run-idle` answer means the run ended in between: the message is sent once this tab is idle); `queue` and
+// `cancelQueued()` are the chat's steer queue (the `chat-queue` store, fetched when the chat loads); `stop()` resolves
+// with the queued messages the stop dropped (only this tab restores them); `todos` is the todo state of the shown path;
+// `useChat`'s `onData` marks a queued message delivered when its `data-steer` chunk arrives and drives `activity` from
+// the transient `data-activity` ("Compacting conversation…"; null once the stream ended); a plan approval carries
+// `planMode` (the mode is set, and saved on the chat, before the response goes out, so the automatic continuation runs
+// in it) and `reason` (the plan feedback). A turn the server started from the queue (`run.started` with `origin:
+// 'queue'` and a `userMessageId` the shown path lacks) reloads the path first, then resumes the stream, so the queued
+// message shows as a user bubble before its reply streams; a busy session does that once it is idle.
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   ChatDetail,
@@ -43,6 +48,7 @@ import type {
   ImageOptions,
   MessageBranch,
   QueueItem,
+  QueueMessage,
   ReasoningEffort,
   ToolMode,
   WorkspaceAccess,
@@ -198,8 +204,8 @@ export interface ChatSession {
   approve: (decision: ToolApprovalDecision) => Promise<void>
   /**
    * `POST /api/chat/:id/stop`, then the client abort (a client abort alone only disconnects). + Phase 9: resolves with
-   * the queued messages the stop dropped (`ChatStopResult.dropped`; only this tab restores them into its composer).
-   * P9-0b: resolves with [].
+   * the queued messages the stop dropped (`ChatStopResult.dropped`, oldest first; only this tab restores them into its
+   * composer).
    */
   stop: () => Promise<QueueItem[]>
   /** Loads the history (`GET /api/chats/:id`). */
@@ -240,7 +246,8 @@ export interface ChatSession {
   /**
    * + Phase 9 (ADR-042; W9.9): a new message from the composer. Sends it (`'sent'`), or queues it while a request is in
    * flight, the session is resuming or the chats store reports a run (`POST /api/chat/:id/queue` with a new client
-   * message id; `'queued'`); a `409 run-idle` answer waits until the session is idle, then sends. P9-0b: always sends.
+   * message id; `'queued'`); a `409 run-idle` answer waits until the session is idle, then sends. Other failures of the
+   * queue are thrown (`HarnessError`: 409 `queue-full`, 400, 404).
    */
   submit: (input: ChatSendInput) => Promise<'sent' | 'queued'>
   /** + Phase 9: the chat's queued messages, oldest first (`chatQueue.items(id)`). */
@@ -413,6 +420,17 @@ export function fileRefToPart(file: FileRef): FileUIPart {
   return { type: 'file', mediaType: file.mime, filename: file.name, url: file.url }
 }
 
+/**
+ * The parts of a queued message (docs/API.md 4.26): the text (when it has any) and the uploaded files, like the user
+ * message `send()` creates. Empty when there is nothing to send.
+ */
+export function queueMessageParts(input: ChatSendInput): QueueMessage['parts'] {
+  const parts: QueueMessage['parts'] = input.text.trim() ? [{ type: 'text', text: input.text }] : []
+  for (const file of input.files)
+    parts.push({ type: 'file', mediaType: file.mime, filename: file.name, url: file.url })
+  return parts
+}
+
 function summaryOf(chat: ChatDetail): ChatSummary {
   const { settings: _settings, messages: _messages, branches: _branches, totals: _totals, ...summary } = chat
   return summary
@@ -542,6 +560,16 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   /** A master-key rotation touched this chat while a request was in flight: reload once it settles. */
   let reloadWhenIdle = false
 
+  // ---------- steer queue and activity (Phase 9, ADR-040, ADR-042) ----------
+
+  /**
+   * The user message of a turn the server started from the queue (`run.started`, origin `queue`) that the shown path
+   * did not have: the next resume reloads the path first, so the message shows before its reply streams.
+   */
+  let queuedTurn: string | null = null
+  /** The transient `data-activity` of the current stream (`onData`); null when idle or once the stream ended. */
+  const activity = ref<'compacting' | null>(null)
+
   // ---------- project (ADR-031) ----------
 
   /**
@@ -617,6 +645,14 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     dataPartSchemas: chatDataPartSchemas,
     transport,
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
+    // + Phase 9: a steer chunk means its queued message reached the model (the row leaves the queue before the
+    // event); the transient activity chunks (never stored) drive the "Compacting conversation…" shimmer.
+    onData: (part) => {
+      if (part.type === 'data-steer')
+        chatQueue.markDelivered(id, part.data.id)
+      else if (part.type === 'data-activity')
+        activity.value = part.data.kind === 'compacting' ? 'compacting' : null
+    },
     // Called before `chat.error` is set, only for the requests of this session (a failed resume has no `request`).
     onError: (error) => {
       if (!request)
@@ -687,6 +723,8 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
         loaded.value = true
         notFound.value = false
         persisted.value = true
+        // + Phase 9: the chat's queue (kept current by `queue.changed` from now on, refetched after a reconnect).
+        chatQueue.fetch(id).catch(() => {})
       }
       catch (error) {
         const failure = toHarnessError(error)
@@ -752,22 +790,40 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       chat.clearError()
   }
 
+  /** The server or the chats store reports a run of this chat. */
+  function reportsRun(): boolean {
+    return chats.runState[id] === 'running' || summary.value?.running === true
+  }
+
+  function onPath(messageId: string): boolean {
+    return chat.messages.value.some(message => message.id === messageId)
+  }
+
   function resumeIfRunning(): Promise<void> {
     if (resuming)
       return resuming
     if (busy.value || !loaded.value || notFound.value)
       return Promise.resolve()
-    const running = chats.runState[id] === 'running' || summary.value?.running === true
-    if (!running)
+    // + Phase 9: a turn the server started from the queue: its user message is only on the server's path, so reload
+    // the path first (the server shows it up to that message while the reply runs), then follow the reply.
+    const refreshFirst = queuedTurn !== null && !onPath(queuedTurn)
+    queuedTurn = null
+    if (!refreshFirst && !reportsRun())
       return Promise.resolve()
     let streamed = false
-    const stopWatching = inSession(() => watch(() => chat.status.value, (status) => {
-      if (status === 'submitted' || status === 'streaming')
-        streamed = true
-    }, { flush: 'sync' }))
+    let stopWatching = () => {}
     resuming = (async () => {
       try {
-        await chat.resumeStream()
+        if (refreshFirst)
+          await refresh()
+        // A request may have started meanwhile, or the run ended already (the reload shows its reply).
+        if (!busy.value && reportsRun()) {
+          stopWatching = inSession(() => watch(() => chat.status.value, (status) => {
+            if (status === 'submitted' || status === 'streaming')
+              streamed = true
+          }, { flush: 'sync' }))
+          await chat.resumeStream()
+        }
       }
       finally {
         stopWatching()
@@ -787,8 +843,20 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       // that finished meanwhile is only in the database: reload either way.
       if (streamed || finished || rotated)
         await refresh()
+      // + Phase 9: the server started a turn from the queue while this resume ran.
+      if (queuedTurn !== null && !busy.value && !resuming)
+        followQueuedTurn()
     })()
     return resuming
+  }
+
+  /**
+   * + Phase 9 (ADR-042): follows a turn the server started from the queue: the running dot (a reply this session
+   * streamed may have cleared it when it ended), then the resume, which reloads the path first.
+   */
+  function followQueuedTurn() {
+    chats.setRunState(id, 'running')
+    void resumeIfRunning()
   }
 
   // ---------- server events ----------
@@ -863,9 +931,29 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     else
       void refresh()
   })
+  // + Phase 9 (ADR-042): a turn the server started from the queue. Its user message carries the queued id; a path that
+  // does not show it yet is reloaded before the reply is followed (once idle when a request or a resume is in flight).
+  events.on('run.started', (event) => {
+    const { chatId, origin, userMessageId } = event.data
+    if (chatId !== id || origin !== 'queue' || !userMessageId || onPath(userMessageId))
+      return
+    queuedTurn = userMessageId
+    if (!busy.value && !resuming)
+      followQueuedTurn()
+  })
   watch(busy, (isBusy) => {
+    // The activity belongs to the stream that just ended.
+    if (!isBusy)
+      activity.value = null
     if (isBusy || resuming)
       return
+    if (queuedTurn !== null) {
+      // Its reload covers a run that finished meanwhile and a key rotation too.
+      finishedWhileBusy = null
+      reloadWhenIdle = false
+      followQueuedTurn()
+      return
+    }
     const finished = finishedWhileBusy
     finishedWhileBusy = null
     const rotated = reloadWhenIdle
@@ -1134,6 +1222,10 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     // this response sends already runs in edits mode.
     if (decision.approved && decision.acceptEdits && toolMode.value !== 'edits')
       toolMode.value = 'edits'
+    // + Phase 9 (ADR-041): an approved plan picks the mode the work continues in, set (and saved) the same way first:
+    // the server refuses to approve the plan while the continuation's mode is still `plan` (or `off`).
+    if (decision.approved && decision.planMode && toolMode.value !== decision.planMode)
+      toolMode.value = decision.planMode
     // Shell rules (ADR-038) are saved before the approval goes out, so the continuation already runs with them. A rule
     // that could not be saved never holds the approval back: its failure is rethrown afterwards.
     const ruleFailure = decision.approved && decision.allowRules && decision.allowRules.prefixes.length > 0
@@ -1143,7 +1235,9 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     const preference = decision.approved && decision.alwaysAllow && toolAccess(decision.toolName) !== 'execute'
       ? plugins.setToolPref(decision.toolName, { override: 'allow' })
       : null
-    await chat.addToolApprovalResponse({ id: decision.id, approved: decision.approved })
+    // + Phase 9: the plan feedback goes out as the approval's reason (Keep planning keeps `plan`).
+    const reason = decision.reason?.trim()
+    await chat.addToolApprovalResponse({ id: decision.id, approved: decision.approved, ...(reason ? { reason } : {}) })
     if (preference)
       await preference
     if (ruleFailure)
@@ -1178,27 +1272,65 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
 
   async function stop(): Promise<QueueItem[]> {
     const wasBusy = busy.value || resuming !== null
+    // + Phase 9: the server empties the chat's queue first and returns what it dropped (oldest first).
+    let dropped: QueueItem[] = []
     try {
-      await api.chat.stop({ params: { id } })
+      dropped = (await api.chat.stop({ params: { id } })).dropped ?? []
     }
     catch {
       // No run on the server (or it is gone): the client abort below still ends the local request.
     }
+    // Their rows leave the list now (the `queue.changed` of the stop follows); this tab restores them.
+    for (const item of dropped)
+      chatQueue.markDelivered(id, item.id)
     await chat.stop()
     if (!wasBusy)
-      return []
+      return dropped
     await whenIdle()
     // The partial reply stays; mark it like the server persists it (`metadata.aborted`).
     const last = chat.messages.value.at(-1)
     if (last?.role === 'assistant')
       markAborted(last.id)
-    return []
+    return dropped
   }
 
-  // ---------- Agent 2.0 (Phase 9; W9.9 implements) ----------
+  // ---------- Agent 2.0 (Phase 9, ADR-040 - ADR-042) ----------
 
-  /** P9-0b: always sends (W9.9 queues while a run is active). */
+  /** A run of this chat is active: a request in flight, a resume, or a run the chats store reports. */
+  function runActive(): boolean {
+    return busy.value || resuming !== null || chats.runState[id] === 'running'
+  }
+
+  /** Resolves once no request and no resume is in flight (`whenIdle()` waits at most 2 s for the request). */
+  async function settled(): Promise<void> {
+    await whenIdle()
+    if (resuming)
+      await resuming.catch(() => {})
+  }
+
   async function submit(input: ChatSendInput): Promise<'sent' | 'queued'> {
+    if (!runActive()) {
+      await send(input)
+      return 'sent'
+    }
+    const parts = queueMessageParts(input)
+    if (parts.length === 0)
+      return 'sent'
+    if (!modelRef.value)
+      throw missingModel()
+    pinChoices()
+    // A client id, like `send()` (ADR-019): the message keeps it when the server stores it (steer or next turn).
+    const message: QueueMessage = { id: createMessageId(), role: 'user', parts }
+    try {
+      await chatQueue.enqueue(id, { message, modelRef: modelRef.value, reasoningEffort: reasoningEffort.value, toolMode: toolMode.value })
+      return 'queued'
+    }
+    catch (error) {
+      if (conflictReason(error) !== 'run-idle')
+        throw toHarnessError(error)
+    }
+    // `409 run-idle`: the run ended in between, so it is an ordinary message once this tab is idle too.
+    await settled()
     await send(input)
     return 'sent'
   }
@@ -1210,9 +1342,6 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   }
 
   const todos = computed<TodoState | null>(() => todoState(chat.messages.value))
-
-  /** Driven by `onData` (`data-activity`) in W9.9. */
-  const activity = ref<'compacting' | null>(null)
 
   return {
     id,

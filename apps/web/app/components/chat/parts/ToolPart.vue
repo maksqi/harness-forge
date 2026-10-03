@@ -13,11 +13,17 @@
 // matched, ADR-038) shows ToolRuleBadge before the summary; the approval payload passes the card's `allowRules` on; a
 // running shell's terminal shows the folder it starts in (the call's `cwd` input, else the chat's current shell folder
 // from TOOL_APPROVAL_CONTEXT.shellCwd()).
-// Phase 9 (C25 wires it, W9.10 owns it; ADR-041, ADR-043): an `exit_plan_mode` call of `core-agent` awaiting its decision
-// shows PlanApprovalCard instead of ToolApprovalCard, and its decision goes up as the approval's `planMode` / `reason`;
-// a preliminary output (`output-available` with `preliminary: true`, an async-generator tool such as `task`) is running
-// while the message streams and stopped otherwise.
+// Phase 9 (C25 wires it, W9.10 owns it; ADR-041, ADR-043; docs/UI.md 7.2, 7.25): an `exit_plan_mode` call of
+// `core-agent` awaiting its decision shows PlanApprovalCard instead of ToolApprovalCard, and its decision goes up as the
+// approval's `planMode` / `reason`; a preliminary output (`output-available` with `preliminary: true`, an async-generator
+// tool such as `task`) is running while the message streams and stopped otherwise. The agent rows of `core-agent`:
+// `todo_write` (`ListTodo`, the current item as the argument, the summary "3/7", the body TodoList) and
+// `exit_plan_mode` (`ClipboardList`, the plan's first heading as the argument, the status "Plan ready for review",
+// "Kept planning" or "Approved · Accept edits" / "Approved · Ask", the body PlanBody with "Your feedback: …"); both
+// keep the generic blocks behind "Raw input and output", and a value that fails its schema keeps the generic row.
+import type { TodoItem } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
+import type { WorkspaceRowSummary } from './tools/workspace-tools'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
 import { shellToolOutputSchema, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import {
@@ -25,6 +31,9 @@ import {
   CheckIcon,
   ChevronRightIcon,
   CircleSlashIcon,
+  ClipboardListIcon,
+  ListTodoIcon,
+  PencilLineIcon,
   ServerIcon,
   WrenchIcon,
   XIcon,
@@ -37,7 +46,11 @@ import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
+import { doneTodos, planApprovedText, planModeOf, planOf, TODO_TOOL_NAME, todoListOf } from '../agent/agent-tools'
+import AgentToolBody from '../agent/AgentToolBody.vue'
 import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
+import PlanBody from '../agent/PlanBody.vue'
+import TodoList from '../agent/TodoList.vue'
 import { TRANSCRIPT_SCROLL } from '../chat-context'
 import {
   CORE_AGENT_PLUGIN_ID,
@@ -109,7 +122,21 @@ watch(serverId, (id) => {
     plugins.fetchMcp().catch(() => {})
 }, { immediate: true })
 const firstArg = computed(() => toolRowArgument(name.value, props.part.input))
-const rowIcon = computed(() => (serverId.value ? ServerIcon : workspaceToolIcon(name.value) ?? WrenchIcon))
+/** + Phase 9: a tool of `core-agent` (before the tool list has loaded, any tool with an agent tool's name). */
+const coreAgent = computed(() => tool.value === undefined || tool.value.pluginId === CORE_AGENT_PLUGIN_ID)
+/** + Phase 9: the plan tool of `core-agent`. */
+const isPlanTool = computed(() => name.value === PLAN_TOOL_NAME && coreAgent.value)
+/** + Phase 9: the todo tool of `core-agent`. */
+const isTodoTool = computed(() => name.value === TODO_TOOL_NAME && coreAgent.value)
+const rowIcon = computed(() => {
+  if (serverId.value)
+    return ServerIcon
+  if (isPlanTool.value)
+    return ClipboardListIcon
+  if (isTodoTool.value)
+    return ListTodoIcon
+  return workspaceToolIcon(name.value) ?? WrenchIcon
+})
 /**
  * `ToolSummary.workspace` of the tool; before the tool list has loaded, the access of the `core-workspace` tool with
  * this name (so a shell card never offers "Always allow").
@@ -153,8 +180,6 @@ const status = computed<RowStatus>(() => {
 })
 
 const awaitingDecision = computed(() => props.part.state === 'approval-requested' && !props.superseded)
-/** + Phase 9: the plan tool of `core-agent` (before the tool list has loaded, any `exit_plan_mode`). */
-const isPlanTool = computed(() => name.value === PLAN_TOOL_NAME && (tool.value === undefined || tool.value.pluginId === CORE_AGENT_PLUGIN_ID))
 const supersededDenial = computed(() => status.value === 'denied'
   && (isSupersededDenial(props.part) || props.part.state === 'approval-requested'))
 const statusLabel = computed(() => ({
@@ -172,8 +197,49 @@ const outputText = computed(() => (hasOutput.value ? formatToolValue(props.part.
 const outputTruncated = computed(() => hasOutput.value && isServerTruncated(props.part.output))
 const errorText = computed(() => (props.part.state === 'output-error' ? props.part.errorText : ''))
 
-/** The row summary of a finished workspace tool (7.19). */
-const summary = computed(() => (hasOutput.value ? workspaceRowSummary(name.value, props.part.output) : null))
+/**
+ * + Phase 9: the agent view of a `todo_write` / `exit_plan_mode` row (7.25): the list (the output's, else the input's
+ * while the call runs) or the plan with the mode an approval chose; null keeps the generic blocks (an error, or a value
+ * that fails its schema).
+ */
+const agentView = computed<{ kind: 'todo', todos: readonly TodoItem[] } | { kind: 'plan', plan: string, mode: 'edits' | 'ask' | null } | null>(() => {
+  if (props.part.state === 'output-error')
+    return null
+  const output = hasOutput.value ? props.part.output : undefined
+  if (isTodoTool.value) {
+    const todos = todoListOf(props.part.input, output)
+    return todos === null ? null : { kind: 'todo', todos }
+  }
+  if (isPlanTool.value) {
+    const plan = planOf(props.part.input)
+    const mode = planModeOf(output)
+    if (plan === null || (hasOutput.value && mode === null))
+      return null
+    return { kind: 'plan', plan, mode }
+  }
+  return null
+})
+/** + Phase 9: the status text of an approved plan ("Approved · Accept edits" / "Approved · Ask"). */
+const planApproved = computed(() => {
+  const view = agentView.value
+  return status.value === 'done' && view?.kind === 'plan' && view.mode ? planApprovedText(view.mode) : null
+})
+/** + Phase 9: the feedback sent with the plan decision (the approval's reason; a superseded denial has none). */
+const planFeedback = computed(() => {
+  const approval = props.part.approval
+  const reason = approval && 'reason' in approval ? approval.reason : undefined
+  return typeof reason === 'string' && reason.trim() !== '' && !isSupersededDenial(props.part) ? reason : null
+})
+
+/** The row summary of a finished workspace tool (7.19); + Phase 9: "3/7" of a todo list. */
+const summary = computed<WorkspaceRowSummary | null>(() => {
+  const view = agentView.value
+  if (view?.kind === 'todo') {
+    const done = doneTodos(view.todos)
+    return { text: `${done}/${view.todos.length}`, tone: 'muted', label: `${done} of ${view.todos.length} tasks done` }
+  }
+  return hasOutput.value ? workspaceRowSummary(name.value, props.part.output) : null
+})
 /** + Phase 8: the prefixes of the shell rules that let a finished `shell` call run without a card (ToolRuleBadge). */
 const allowedBy = computed<readonly string[]>(() => {
   if (!hasOutput.value || name.value !== 'shell')
@@ -255,9 +321,17 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
             <ToolRuleBadge v-if="allowedBy.length > 0" :prefixes="allowedBy" />
             <ToolRowSummary v-if="summary" :summary="summary" class="mr-0.5" />
             <Spinner v-if="status === 'running'" class="size-3" />
+            <template v-else-if="status === 'approval' && isPlanTool">
+              <span aria-hidden="true" class="size-2 rounded-full bg-info" />
+              <span>Plan ready for review</span>
+            </template>
             <template v-else-if="status === 'approval'">
               <span aria-hidden="true" class="size-2 rounded-full bg-warning" />
               <span>Needs approval</span>
+            </template>
+            <template v-else-if="planApproved">
+              <CheckIcon aria-hidden="true" class="size-3.5 text-success" />
+              <span>{{ planApproved }}</span>
             </template>
             <CheckIcon v-else-if="status === 'done'" aria-hidden="true" class="size-3.5 text-success" />
             <XIcon v-else-if="status === 'error'" aria-hidden="true" class="size-3.5 text-destructive" />
@@ -271,6 +345,10 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
                 </TooltipTrigger>
                 <TooltipContent>Skipped because you sent a new message</TooltipContent>
               </Tooltip>
+              <template v-else-if="isPlanTool">
+                <PencilLineIcon aria-hidden="true" class="size-3.5" />
+                <span>Kept planning</span>
+              </template>
               <template v-else>
                 <BanIcon aria-hidden="true" class="size-3.5" />
                 <span>Denied</span>
@@ -280,12 +358,22 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
               <CircleSlashIcon aria-hidden="true" class="size-3.5" />
               <span>Stopped</span>
             </template>
-            <span v-if="status === 'running' || status === 'done' || status === 'error'" class="sr-only">{{ statusLabel }}</span>
+            <span v-if="status === 'running' || (status === 'done' && !planApproved) || status === 'error'" class="sr-only">{{ statusLabel }}</span>
           </span>
         </CollapsibleTrigger>
       </div>
       <AiToolContent :data-testid="testIds.toolRowOutput" class="min-w-0 pt-1 pl-6">
-        <WorkspaceToolBody v-if="view" :view="view" :running="status === 'running'">
+        <AgentToolBody v-if="agentView">
+          <TodoList v-if="agentView.kind === 'todo'" :todos="agentView.todos" />
+          <PlanBody v-else :plan="agentView.plan" :feedback="planFeedback" />
+          <template #raw>
+            <div class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
+              <ToolValueBlock label="Input" :value="inputText || '{}'" />
+              <ToolValueBlock v-if="hasOutput" label="Output" :value="outputText" :server-truncated="outputTruncated" />
+            </div>
+          </template>
+        </AgentToolBody>
+        <WorkspaceToolBody v-else-if="view" :view="view" :running="status === 'running'">
           <template #raw>
             <div class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
               <ToolValueBlock label="Input" :value="inputText || '{}'" />
@@ -303,7 +391,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
     <PlanApprovalCard
       v-if="awaitingDecision && isPlanTool"
       :part="part"
-      :source="tool?.pluginId ?? null"
+      :source="tool?.pluginId ?? CORE_AGENT_PLUGIN_ID"
       @decide="onPlanDecide"
     />
     <ToolApprovalCard

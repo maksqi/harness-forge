@@ -4,6 +4,7 @@ import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { flushPromises } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope } from 'vue'
+import { projectId } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { useComposerAttachments } from './useComposerAttachments'
 
@@ -171,5 +172,109 @@ describe('useComposerAttachments', () => {
     expect(revoke).toHaveBeenCalledWith('blob:preview-1')
     expect(attachments.items.value).toEqual([])
     scope.stop()
+  })
+
+  describe('project files (Phase 9)', () => {
+    it('attaches a picked project file as a project chip: uploading, then done with the stored type and size', async () => {
+      const attach = deferred<FileRef>()
+      api.projectFiles.attach.mockReturnValueOnce(attach.promise)
+      const { scope, attachments } = setup()
+      const chip = attachments.addProject(projectId(1), 'src/parser.ts')
+      expect(chip).toMatchObject({ source: 'project', path: 'src/parser.ts', projectId: projectId(1), name: 'parser.ts', state: 'uploading' })
+      expect(chip.file).toBeUndefined()
+      expect(attachments.uploading.value).toBe(true)
+      const [input] = api.projectFiles.attach.mock.calls[0]!
+      expect(input).toMatchObject({ params: { id: projectId(1) }, body: { path: 'src/parser.ts' } })
+      expect(input.signal).toBeInstanceOf(AbortSignal)
+      expect(api.files.upload).not.toHaveBeenCalled()
+
+      attach.resolve({ ...fileRef('p', 'parser.ts', 'text/plain'), size: 512 })
+      await flushPromises()
+      expect(attachments.items.value[0]).toMatchObject({ state: 'done', mime: 'text/plain', size: 512, source: 'project' })
+      expect(attachments.fileRefs.value.map(ref => ref.name)).toEqual(['parser.ts'])
+      scope.stop()
+    })
+
+    it('attaches the same path once (a failed chip is retried instead)', async () => {
+      api.projectFiles.attach
+        .mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Could not reach the server.' }))
+        .mockResolvedValueOnce(fileRef('q', 'parser.ts'))
+      const { scope, attachments } = setup()
+      const first = attachments.addProject(projectId(1), 'src/parser.ts')
+      await flushPromises()
+      expect(attachments.items.value[0]!.state).toBe('error')
+
+      const again = attachments.addProject(projectId(1), 'src/parser.ts')
+      expect(again.id).toBe(first.id)
+      expect(attachments.items.value).toHaveLength(1)
+      await flushPromises()
+      expect(attachments.items.value[0]!.state).toBe('done')
+      expect(api.projectFiles.attach).toHaveBeenCalledTimes(2)
+
+      attachments.addProject(projectId(1), 'src/parser.ts')
+      expect(api.projectFiles.attach).toHaveBeenCalledTimes(2)
+      attachments.addProject(projectId(1), 'src/lexer.ts')
+      expect(attachments.items.value.map(item => item.path)).toEqual(['src/parser.ts', 'src/lexer.ts'])
+      await flushPromises()
+      scope.stop()
+    })
+
+    it('drops a project file the server refuses and reports it with its path and error', async () => {
+      const tooLarge = new HarnessError({ code: 'payload_too_large', message: 'Files are limited to 5 MB.' })
+      const missing = new HarnessError({ code: 'not_found', message: 'File not found.' })
+      const refused = new HarnessError({ code: 'validation_error', message: 'path: The path is a .git path.' })
+      api.projectFiles.attach.mockRejectedValueOnce(tooLarge).mockRejectedValueOnce(missing).mockRejectedValueOnce(refused)
+      const { scope, attachments, onReject } = setup()
+      attachments.addProject(projectId(1), 'big.log')
+      attachments.addProject(projectId(1), 'gone.ts')
+      attachments.addProject(projectId(1), '.git/config')
+      await flushPromises()
+      expect(attachments.items.value).toEqual([])
+      expect(onReject.mock.calls.map(([rejection]) => rejection)).toEqual([
+        { name: 'big.log', reason: 'size', message: tooLarge.message, source: 'project', path: 'big.log', error: tooLarge },
+        { name: 'gone.ts', reason: 'server', message: missing.message, source: 'project', path: 'gone.ts', error: missing },
+        { name: '.git/config', reason: 'server', message: refused.message, source: 'project', path: '.git/config', error: refused },
+      ])
+      scope.stop()
+    })
+
+    it('aborts a project attach when its chip is removed', async () => {
+      const attach = deferred<FileRef>()
+      api.projectFiles.attach.mockReturnValueOnce(attach.promise)
+      const { scope, attachments } = setup()
+      const chip = attachments.addProject(projectId(1), 'src/parser.ts')
+      const [input] = api.projectFiles.attach.mock.calls[0]!
+      attachments.remove(chip.id)
+      expect((input.signal as AbortSignal).aborted).toBe(true)
+      attach.resolve(fileRef('r', 'parser.ts'))
+      await flushPromises()
+      expect(attachments.items.value).toEqual([])
+      scope.stop()
+    })
+
+    it('addRefs restores uploaded files as done chips, once each', async () => {
+      const create = vi.spyOn(URL, 'createObjectURL')
+      const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      const { scope, attachments } = setup()
+      const notes = fileRef('s', 'notes.md', 'text/markdown')
+      const shot = fileRef('t', 'shot.png', 'image/png')
+      const added = attachments.addRefs([notes, shot, notes])
+      expect(added).toHaveLength(2)
+      expect(attachments.items.value).toMatchObject([
+        { source: 'upload', name: 'notes.md', state: 'done', ref: notes },
+        { source: 'upload', name: 'shot.png', state: 'done', ref: shot, previewUrl: shot.url },
+      ])
+      expect(attachments.items.value[0]!.file).toBeUndefined()
+      expect(attachments.uploading.value).toBe(false)
+      expect(attachments.fileRefs.value).toEqual([notes, shot])
+      expect(attachments.addRefs([shot])).toEqual([])
+      expect(api.files.upload).not.toHaveBeenCalled()
+      expect(create).not.toHaveBeenCalled()
+      attachments.clear()
+      // The server URL is not a blob URL.
+      expect(revoke).not.toHaveBeenCalled()
+      await flushPromises()
+      scope.stop()
+    })
   })
 })

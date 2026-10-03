@@ -1,7 +1,10 @@
-// Settings -> General rules (docs/UI.md 9.4, docs/API.md 4.3 `Settings`): choices, labels and validation of the
-// fields that save on blur. Limits come from the shared settings schema.
+// Settings -> General rules (docs/UI.md 9.4, 9.11, docs/API.md 4.3 `Settings`): choices, labels and validation of the
+// fields that save on blur, and the draft of such a field (shared with the Agent section). Limits come from the shared
+// settings schema.
 import type { ReasoningEffort, SendKey, ToolMode } from '@harness-forge/shared'
+import type { Ref } from 'vue'
 import { LIMITS, settingsSchema } from '@harness-forge/shared'
+import { ref, watch } from 'vue'
 import { TOOL_MODE_OPTIONS as PERMISSION_MENU_OPTIONS } from '~/components/chat/composer/permission'
 
 export interface SettingChoice<T extends string> {
@@ -12,7 +15,8 @@ export interface SettingChoice<T extends string> {
 
 /**
  * The options of the composer's permission menu (docs/UI.md 7.11), same order, labels and descriptions: Ask · Accept
- * edits · Auto · Off. Accept edits is a valid default too; a new chat without a project treats it like Ask.
+ * edits · Plan · Auto · Off. Accept edits and Plan (Phase 9) are valid defaults too: a new chat without a project treats
+ * Accept edits like Ask and starts in Plan, which the server enforces (no workspace tools exist there).
  */
 export const TOOL_MODE_OPTIONS: ReadonlyArray<SettingChoice<ToolMode>> = PERMISSION_MENU_OPTIONS
   .map(({ value, label, description }) => ({ value, label, description }))
@@ -56,14 +60,76 @@ export const STEPS_MAX = LIMITS.stepsMax
 export const STEPS_ERROR = `Enter a whole number from 1 to ${STEPS_MAX}.`
 
 /**
- * A typed step limit: "Max steps per response" (`maxSteps`, chats without a project) and "Max steps in project chats"
- * (`projectMaxSteps`) are both whole numbers from 1 to 200 (Phase 7, ADR-032; `maxSteps` was 1 to 100 before).
+ * A typed step limit: "Max steps per response" (`maxSteps`, chats without a project), "Max steps in project chats"
+ * (`projectMaxSteps`) and, since Phase 9, "Sub-agent max steps" (`subagentMaxSteps`) are whole numbers from 1 to 200
+ * (Phase 7, ADR-032; `maxSteps` was 1 to 100 before).
  */
 export function parseMaxSteps(text: string): { value: number } | { error: string } {
   const trimmed = text.trim()
   const value = /^\d{1,3}$/.test(trimmed) ? Number(trimmed) : Number.NaN
-  // Both settings share the bound `LIMITS.stepsMax`.
+  // The three settings share the bound `LIMITS.stepsMax`.
   return settingsSchema.shape.projectMaxSteps.safeParse(value).success
     ? { value }
     : { error: STEPS_ERROR }
+}
+
+// ---------- fields that save on blur ----------
+
+/** The draft of a text field that saves on blur or Enter; Esc restores the saved value (docs/UI.md 9.4). */
+export interface DraftField {
+  draft: Ref<string>
+  /** The user is editing: server updates do not replace the draft meanwhile. */
+  focused: Ref<boolean>
+  error: Ref<string | null>
+  /** Back to the saved value, without an error. */
+  restore: () => void
+}
+
+/** A draft that follows the saved value (`read`) unless the user is editing. */
+export function useDraftField(read: () => string): DraftField {
+  const draft = ref(read())
+  const focused = ref(false)
+  const error = ref<string | null>(null)
+  watch(read, (value) => {
+    if (!focused.value)
+      draft.value = value
+  })
+  return {
+    draft,
+    focused,
+    error,
+    restore: () => {
+      draft.value = read()
+      error.value = null
+    },
+  }
+}
+
+/**
+ * Commits a step limit (`maxSteps`, `projectMaxSteps`, `subagentMaxSteps`): an invalid value shows the error and keeps
+ * the saved value; an unchanged value saves nothing; a failed save (`save` resolves false) restores the saved value.
+ */
+export async function commitStepsField(field: DraftField, saved: number, save: (value: number) => Promise<boolean>): Promise<void> {
+  field.focused.value = false
+  const parsed = parseMaxSteps(String(field.draft.value ?? ''))
+  if ('error' in parsed) {
+    field.error.value = parsed.error
+    return
+  }
+  field.error.value = null
+  field.draft.value = String(parsed.value)
+  if (parsed.value !== saved && !(await save(parsed.value)))
+    field.restore()
+}
+
+/** Enter in a field that saves on blur: leave the field (its blur handler saves). */
+export function blurTarget(event: Event): void {
+  (event.target as HTMLElement | null)?.blur()
+}
+
+/** Esc in a field that saves on blur: restore the saved value and leave the field without saving. */
+export function cancelDraftEdit(field: DraftField, event: Event): void {
+  field.restore()
+  field.focused.value = false
+  blurTarget(event)
 }

@@ -10,10 +10,13 @@
 // hover fade; "Delete this version" asks ChatView for confirmation (ADR-030).
 // Phase 8 (C20 declares, W8.9 / W8.10 use; frozen from Gate P8-0b): `canRewind` shows "Rewind files to here" on a user
 // message (re-emitted as `rewind`), and the approval payload passes the card's `allowRules` on.
-// Phase 9 (C25 declares, W9.11 uses; frozen from Gate P9-0b): block kinds `compaction` (CompactionDivider), `steer`
-// (SteerNote) and `task` (TaskBlock); `compacted` marks a row the latest compaction replaced for the model
-// (`data-compacted`, dimmed); `activity` = 'compacting' makes the streaming reply show "Compacting conversation…"
-// instead of "Thinking…" (W9.11); the approval payload passes the plan card's `planMode` / `reason` on.
+// Phase 9 (C25 declares, W9.11 implements; frozen from Gate P9-0b): block kinds `compaction` (CompactionDivider at the
+// part's position, `history` or `run` from the marker's position, docs/UI.md 7.24), `steer` (SteerNote) and `task`
+// (TaskBlock); `compacted` marks a row the latest compaction replaced for the model (`data-compacted`, dimmed until it
+// is hovered or holds the focus); in a row that is not compacted, the blocks before its last compaction marker (an
+// in-run compaction) are dimmed the same way. While the reply streams, `activity` = 'compacting' shows "Compacting
+// conversation…" at its end (instead of "Thinking…"); "Thinking…" also shows while nothing follows its last divider.
+// The approval payload passes the plan card's `planMode` / `reason` on.
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { FileUIPart, TextUIPart } from 'ai'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
@@ -25,7 +28,7 @@ import { testIds } from '~/utils/testids'
 import TaskBlock from './agent/TaskBlock.vue'
 import BranchSwitcher from './BranchSwitcher.vue'
 import { messageBlocks, messageText } from './chat-format'
-import { compactionVariant } from './compaction/compaction'
+import { messageCompaction } from './compaction/compaction'
 import CompactionDivider from './compaction/CompactionDivider.vue'
 import MessageActions from './MessageActions.vue'
 import MessageEditor from './MessageEditor.vue'
@@ -176,10 +179,35 @@ const player = useSpeechPlayer()
 /** This reply is being read aloud: its action row stays visible (docs/UI.md 7.18). */
 const reading = computed(() => player.activeId.value === props.message.id && player.state.value !== 'idle')
 
+/** + Phase 9: dimmed content (compacted for the model), back to full opacity on hover and focus-within. */
+const DIMMED_CLASS = 'opacity-70 transition-opacity duration-(--duration-fast) hover:opacity-100 focus-within:opacity-100'
+
 /** + Phase 9: a row the latest compaction replaced is dimmed until it is hovered or holds the focus. */
-const compactedClass = computed(() => (props.compacted
-  ? 'opacity-70 transition-opacity duration-(--duration-fast) hover:opacity-100 focus-within:opacity-100'
-  : ''))
+const compactedClass = computed(() => (props.compacted ? DIMMED_CLASS : ''))
+
+/** + Phase 9: the compaction markers of a reply (divider variants, the last marker's part index). */
+const compaction = computed(() => (props.message.role === 'assistant' ? messageCompaction(props.message) : null))
+
+/**
+ * + Phase 9: the class of a block. In a row that is not compacted itself, the blocks before its last compaction marker
+ * were compacted during the reply (docs/UI.md 7.24): dimmed like a compacted row.
+ */
+function blockClass(index: number): string | undefined {
+  const last = compaction.value?.lastIndex ?? null
+  return !props.compacted && last !== null && index < last ? DIMMED_CLASS : undefined
+}
+
+/**
+ * The streaming reply's activity line: "Compacting conversation…" while the session compacts, else "Thinking…" while
+ * nothing renders yet or nothing follows the last compaction divider (the next step has not started).
+ */
+const showPlaceholder = computed(() => {
+  if (!props.streaming)
+    return false
+  if (props.activity === 'compacting' || blocks.value.length === 0)
+    return true
+  return blocks.value.at(-1)!.kind === 'compaction'
+})
 
 const actionsClass = computed(() => {
   if (props.streaming)
@@ -243,10 +271,11 @@ const actionsClass = computed(() => {
         v-if="block.kind === 'text'"
         :part="block.part"
         :final="isTextFinal(blockIndex, block.part)"
-        class="font-reading"
+        :class="cn('font-reading', blockClass(block.index))"
       />
       <ReasoningPart
         v-else-if="block.kind === 'reasoning'"
+        :class="blockClass(block.index)"
         :part="block.part"
         :streaming="streaming"
         :show-thinking="showThinking"
@@ -254,25 +283,33 @@ const actionsClass = computed(() => {
       />
       <ToolPart
         v-else-if="block.kind === 'tool'"
+        :class="blockClass(block.index)"
         :part="block.part"
         :streaming="streaming"
         :superseded="!isLast"
         @approval="emit('approval', $event)"
       />
-      <ImageGallery v-else-if="block.kind === 'gallery'" :images="block.parts" :message-id="message.id" />
-      <div v-else-if="block.kind === 'file'" class="flex">
+      <ImageGallery
+        v-else-if="block.kind === 'gallery'"
+        :class="blockClass(block.index)"
+        :images="block.parts"
+        :message-id="message.id"
+      />
+      <div v-else-if="block.kind === 'file'" :class="cn('flex', blockClass(block.index))">
         <FilePart :part="block.part" />
       </div>
-      <SourcesPart v-else-if="block.kind === 'sources'" :parts="block.parts" />
-      <NoticePart v-else-if="block.kind === 'notice'" :notice="block.notice" />
+      <SourcesPart v-else-if="block.kind === 'sources'" :class="blockClass(block.index)" :parts="block.parts" />
+      <NoticePart v-else-if="block.kind === 'notice'" :class="blockClass(block.index)" :notice="block.notice" />
       <CompactionDivider
         v-else-if="block.kind === 'compaction'"
+        :class="blockClass(block.index)"
         :data="block.data"
-        :variant="compactionVariant(message, block.index)"
+        :variant="compaction?.variants.get(block.index) ?? 'history'"
       />
-      <SteerNote v-else-if="block.kind === 'steer'" :steer="block.steer" />
+      <SteerNote v-else-if="block.kind === 'steer'" :class="blockClass(block.index)" :steer="block.steer" />
       <TaskBlock
         v-else-if="block.kind === 'task'"
+        :class="blockClass(block.index)"
         :part="block.part"
         :streaming="streaming"
         :superseded="!isLast"
@@ -285,7 +322,7 @@ const actionsClass = computed(() => {
       :aspect-ratio="generatingImages.aspectRatio"
       :started-at="generatingImages.startedAt"
     />
-    <SubmittedPlaceholder v-else-if="streaming && blocks.length === 0" />
+    <SubmittedPlaceholder v-else-if="showPlaceholder" :activity="activity" />
     <ErrorPart v-if="displayError && !streaming" :error="displayError" @retry="emit('retry')" />
     <div data-slot="message-action-row" class="flex h-7 min-w-0 items-center gap-0.5 pointer-coarse:h-10">
       <BranchSwitcher

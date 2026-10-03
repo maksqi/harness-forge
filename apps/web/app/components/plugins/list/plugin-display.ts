@@ -6,6 +6,7 @@ import type { Component } from 'vue'
 import type { StatusDotStatus } from '~/components/common/status'
 import type { PluginFilter } from '~/stores/plugins'
 import {
+  BotIcon,
   BoxesIcon,
   CircleOffIcon,
   FolderCodeIcon,
@@ -170,4 +171,6 @@ export const BUILTIN_PLUGIN_GLYPHS: Readonly<Record<string, Component>> = {
   'core-commands': SquareSlashIcon,
   'core-mcp': ServerIcon,
   'core-workspace': FolderCodeIcon,
+  // Phase 9: the agent tools (todo_write, exit_plan_mode, task).
+  'core-agent': BotIcon,
 }

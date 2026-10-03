@@ -18,7 +18,9 @@
 // pass computes the set (`rewindable`, part of each row's v-memo); while a reply runs the button hides like Edit.
 // Phase 9 (C25 declares, W9.11 implements; frozen from Gate P9-0b): `compactionLayout(messages).dimmed` gives each row
 // its `compacted` flag (part of the row's v-memo); `activity` (the session's transient activity, from ChatView) goes to
-// the streaming last row ("Compacting conversation…"). The dividers render inside ChatMessage at their part's position.
+// the submitted placeholder and the streaming last row ("Compacting conversation…"). The dividers render inside
+// ChatMessage at their part's position. A `task` call (a sub-agent) whose steps hold a done `write_file` / `edit_file`
+// counts as an agent edit for "Rewind files to here" (its writes are journaled under the reply, ADR-043).
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { ChatStatus, FileUIPart } from 'ai'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
@@ -30,7 +32,7 @@ import AiConversation from '@/components/ai-elements/conversation/Conversation.v
 import { Skeleton } from '@/components/ui/skeleton'
 import { testIds } from '~/utils/testids'
 import { TRANSCRIPT_SCROLL } from './chat-context'
-import { toolNameOf } from './chat-format'
+import { TASK_TOOL_NAME, toolNameOf } from './chat-format'
 import ChatMessage from './ChatMessage.vue'
 import { compactionLayout } from './compaction/compaction'
 import ErrorPart from './parts/ErrorPart.vue'
@@ -186,10 +188,31 @@ function focusDeleteVersion(messageId: string): boolean {
 // ---------- rewind (Phase 8) ----------
 
 /** Agent edits that can be rewound: a finished `write_file` / `edit_file` call (docs/UI.md 7.22). */
-const REWINDABLE_TOOLS = new Set(['write_file', 'edit_file'])
+const REWINDABLE_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_file'])
+
+/**
+ * + Phase 9: a sub-agent's output (final or a preliminary snapshot) whose kept steps hold a done `write_file` /
+ * `edit_file` call (`TaskOutput.steps`; a light structural check, run on every chunk of the streaming reply).
+ */
+function taskWroteFiles(output: unknown): boolean {
+  const steps = typeof output === 'object' && output !== null ? (output as { steps?: unknown }).steps : undefined
+  if (!Array.isArray(steps))
+    return false
+  return steps.some((step) => {
+    if (typeof step !== 'object' || step === null)
+      return false
+    const { toolName, state } = step as { toolName?: unknown, state?: unknown }
+    return state === 'done' && typeof toolName === 'string' && REWINDABLE_TOOLS.has(toolName)
+  })
+}
 
 function hasFinishedEdit(message: HarnessUIMessage): boolean {
-  return message.parts.some(part => isToolUIPart(part) && part.state === 'output-available' && REWINDABLE_TOOLS.has(toolNameOf(part)))
+  return message.parts.some((part) => {
+    if (!isToolUIPart(part) || part.state !== 'output-available')
+      return false
+    const name = toolNameOf(part)
+    return REWINDABLE_TOOLS.has(name) || (name === TASK_TOOL_NAME && taskWroteFiles(part.output))
+  })
 }
 
 /** Older messages are finished, so their answer is kept (the last one may still change in place). */
@@ -433,7 +456,7 @@ defineExpose({
             @rewind="emit('rewind', message.id)"
           />
         </div>
-        <SubmittedPlaceholder v-if="showPlaceholder" />
+        <SubmittedPlaceholder v-if="showPlaceholder" :activity="activity" />
         <div v-if="standaloneError && !busy" data-slot="request-error">
           <ErrorPart :error="standaloneError" @retry="emit('retry')" />
         </div>

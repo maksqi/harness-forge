@@ -3,6 +3,11 @@
 // parts are finalized, pending tool approvals are resolved as denied, the message tree (`parentIds`, `activeLeafId`,
 // ADR-023) is validated before anything is written, and message ids are kept or replaced. Pending approvals are denied
 // through `denyOpenApprovals` (./approvals.ts, shared with the key rotation).
+//
+// Phase 9 (ADR-040 / ADR-042, W9.7): `harnessDataSchemas` validates the agent parts, so a chat export with compaction
+// markers (`data-compaction`) and steers (`data-steer`) round-trips unchanged (a marker is positional, so it survives
+// replaced message ids). A `data-activity` part is transient and never stored: an import drops it from replies (the
+// only messages the server writes data parts into).
 import type { HarnessUIMessage, HarnessUIMessagePart } from '@harness-forge/shared'
 import { createMessageId, harnessDataSchemas, MESSAGE_ID_PATTERN, messageMetadataSchema, validationError } from '@harness-forge/shared'
 import { safeValidateUIMessages } from 'ai'
@@ -64,9 +69,16 @@ function finalizePart(part: HarnessUIMessagePart): HarnessUIMessagePart {
   return part
 }
 
-/** Finalizes streaming text / reasoning and denies approvals that can no longer be answered. */
-function resolveParts(parts: HarnessUIMessagePart[]): HarnessUIMessagePart[] {
-  return denyOpenApprovals(parts.map(finalizePart), IMPORT_DENIAL_REASON).parts
+/** Part type of the transient activity chunks (ADR-040): never stored, so never imported. */
+const ACTIVITY_PART_TYPE = 'data-activity'
+
+/**
+ * Finalizes streaming text / reasoning, denies approvals that can no longer be answered and drops transient activity
+ * parts of a reply.
+ */
+function resolveParts(message: HarnessUIMessage): HarnessUIMessagePart[] {
+  const stored = message.role === 'assistant' ? message.parts.filter(part => part.type !== ACTIVITY_PART_TYPE) : message.parts
+  return denyOpenApprovals(stored.map(finalizePart), IMPORT_DENIAL_REASON).parts
 }
 
 /**
@@ -84,7 +96,7 @@ export async function validateImportedMessages(input: readonly HarnessUIMessage[
   })
   if (!result.success)
     throw importValidationError(result.error, prefix)
-  return result.data.map(message => ({ ...message, parts: resolveParts(message.parts) }))
+  return result.data.map(message => ({ ...message, parts: resolveParts(message) }))
 }
 
 /** The message tree of an import, by position (see `planImportTree`). */

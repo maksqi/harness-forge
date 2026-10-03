@@ -5,9 +5,13 @@
 // percentages, so the pane would drift whenever the window is resized). Storage that is missing, full or blocked keeps
 // the state in memory. `focusRequest` increases when Alt+C or the palette opens the panel: the panel then moves focus to
 // its active view tab. Signature frozen from Gate P8-0b (C20).
+// Phase 9 (W9.12): `hf-changes-open` is the user's choice and is written only by `setOpen` / `toggle` (an explicit
+// toggle or close). Below 1024px the panel is a modal sheet that never opens by itself, so ChatWorkspace marks the
+// viewport narrow (`setChangesPanelNarrow`): `open` then reads false until an explicit open, while the saved choice
+// stays; a wide viewport again shows the saved choice (narrowing the window and widening it back keeps the pane open).
 import type { Ref } from 'vue'
 import type { ChangesView } from '~/components/workspace/changes/changes-rows'
-import { effectScope, readonly, ref, watch } from 'vue'
+import { computed, effectScope, readonly, ref, watch } from 'vue'
 
 export const CHANGES_OPEN_KEY = 'hf-changes-open'
 export const CHANGES_VIEW_KEY = 'hf-changes-view'
@@ -59,13 +63,20 @@ export function clampChangesWidth(value: unknown): number {
   return Math.round(Math.min(CHANGES_WIDTH.max, Math.max(CHANGES_WIDTH.min, width)))
 }
 
-function createChangesPanel(): ChangesPanelState {
-  const open = ref(readItem(CHANGES_OPEN_KEY) === '1')
+interface ChangesPanelInternals extends ChangesPanelState {
+  setNarrow: (narrow: boolean) => void
+}
+
+function createChangesPanel(): ChangesPanelInternals {
+  /** The user's choice (`hf-changes-open`): changed only by an explicit open, toggle or close. */
+  const saved = ref(readItem(CHANGES_OPEN_KEY) === '1')
+  /** Below 1024px and not explicitly opened there: the panel reads closed without touching the saved choice. */
+  const suppressed = ref(false)
+  const open = computed(() => saved.value && !suppressed.value)
   const view = ref<ChangesView>(readItem(CHANGES_VIEW_KEY) === 'git' ? 'git' : 'chat')
   const width = ref(clampChangesWidth(readItem(CHANGES_WIDTH_KEY)))
   const focusRequest = ref(0)
 
-  watch(open, value => writeItem(CHANGES_OPEN_KEY, value ? '1' : '0'), { flush: 'sync' })
   watch(view, (value) => {
     if (value !== 'chat' && value !== 'git') {
       view.value = 'chat'
@@ -82,29 +93,48 @@ function createChangesPanel(): ChangesPanelState {
     writeItem(CHANGES_WIDTH_KEY, String(clamped))
   }, { flush: 'sync' })
 
+  /** An explicit open or close: it shows (also as the sheet below 1024px) and becomes the saved choice. */
   function setOpen(value: boolean, opts: { focus?: boolean } = {}): void {
     if (value && opts.focus)
       focusRequest.value++
-    open.value = value
+    suppressed.value = false
+    saved.value = value
+    writeItem(CHANGES_OPEN_KEY, value ? '1' : '0')
   }
 
   return {
-    open: readonly(open),
+    open,
     view,
     width,
     focusRequest: readonly(focusRequest),
     setOpen,
     toggle: opts => setOpen(!open.value, opts),
+    setNarrow: (narrow) => {
+      suppressed.value = narrow
+    },
   }
 }
 
-let shared: ChangesPanelState | undefined
+let shared: ChangesPanelInternals | undefined
+
+function internals(): ChangesPanelInternals {
+  shared ??= effectScope(true).run(createChangesPanel)!
+  return shared
+}
 
 /**
  * The app-wide changes panel state (created on first use from localStorage, in a detached effect scope so its watchers
  * outlive the component that asked first).
  */
 export function useChangesPanel(): ChangesPanelState {
-  shared ??= effectScope(true).run(createChangesPanel)!
-  return shared
+  return internals()
+}
+
+/**
+ * ChatWorkspace's viewport class (docs/UI.md 7.21): `true` (below 1024px, where the panel is a modal sheet that never
+ * opens by itself) closes the panel without changing the saved choice; `false` shows the saved choice again. An
+ * explicit open, toggle or close (`setOpen` / `toggle`) applies in either class.
+ */
+export function setChangesPanelNarrow(narrow: boolean): void {
+  internals().setNarrow(narrow)
 }

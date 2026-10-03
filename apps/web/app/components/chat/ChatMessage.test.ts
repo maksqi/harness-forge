@@ -515,6 +515,87 @@ describe('chatMessage: agent parts (Phase 9 seams)', () => {
     expect(streaming.wrapper.get(`[data-testid="${testIds.messageAssistant}"]`).attributes('data-compacted')).toBeUndefined()
   })
 
+  it('dims the blocks before the last marker of a reply that compacted during the run', () => {
+    const message = assistant({
+      parts: [
+        { type: 'step-start' },
+        { type: 'text', text: 'Step 1 done.', state: 'done' },
+        { type: 'tool-web_fetch', toolCallId: 'c1', state: 'output-available', input: { url: 'https://a.example' }, output: 'ok' },
+        steerPart(),
+        { type: 'step-start' },
+        compactionPart({ trigger: 'auto', keep: 'last-user' }),
+        { type: 'text', text: 'Step 2 done.', state: 'done' },
+      ],
+    })
+    const { wrapper } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
+    const root = wrapper.get(`[data-testid="${testIds.messageAssistant}"]`)
+    expect(root.attributes('data-compacted')).toBeUndefined()
+    const dimmed = (element: Element | undefined) => element?.classList.contains('opacity-70') ?? false
+    const markdown = root.findAll('[data-slot="markdown"]')
+    expect(markdown.map(block => dimmed(block.element))).toEqual([true, false])
+    expect(dimmed(root.get('[data-slot="tool-part"]').element)).toBe(true)
+    expect(dimmed(root.get(`[data-testid="${testIds.steerNote}"]`).element)).toBe(true)
+    const divider = root.get(`[data-testid="${testIds.compactionDivider}"]`)
+    expect(divider.attributes('data-variant')).toBe('run')
+    expect(divider.attributes('aria-label')).toBe('Context compacted during this response')
+    expect(dimmed(divider.element)).toBe(false)
+    // Dimmed blocks come back on hover and focus.
+    expect(root.get('[data-slot="tool-part"]').classes()).toEqual(expect.arrayContaining(['hover:opacity-100', 'focus-within:opacity-100']))
+  })
+
+  it('dims nothing inside a reply that opens with its marker, nor inside a compacted row (the row is dimmed)', () => {
+    const opening = assistant({ parts: [{ type: 'step-start' }, compactionPart({ trigger: 'auto' }), { type: 'text', text: 'Answer', state: 'done' }] })
+    const first = mountMessage({ message: opening, isLast: true, streaming: false, showThinking: false })
+    expect(first.wrapper.findAll('.opacity-70')).toHaveLength(0)
+    expect(first.wrapper.get(`[data-testid="${testIds.compactionDivider}"]`).attributes('aria-label')).toBe('Conversation compacted automatically')
+
+    const inRun = assistant({ parts: [{ type: 'text', text: 'Step 1.', state: 'done' }, compactionPart({ trigger: 'auto' })] })
+    const compacted = mountMessage({ message: inRun, isLast: false, streaming: false, showThinking: false, compacted: true })
+    const root = compacted.wrapper.get(`[data-testid="${testIds.messageAssistant}"]`)
+    expect(root.classes()).toContain('opacity-70')
+    expect(root.findAll('.opacity-70')).toHaveLength(0)
+  })
+
+  it('labels a /compact reply "Conversation compacted"', () => {
+    const message = assistant({ parts: [compactionPart({ focus: 'tests' })] })
+    const { wrapper } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
+    const divider = wrapper.get(`[data-testid="${testIds.compactionDivider}"]`)
+    expect(divider.attributes()).toMatchObject({ 'data-kind': 'manual', 'data-variant': 'history', 'data-count': '12', 'aria-label': 'Conversation compacted' })
+    // Nothing to copy or read aloud: the reply has no text.
+    expect(wrapper.find(`[data-testid="${testIds.messageCopy}"]`).exists()).toBe(false)
+  })
+
+  it('shows "Compacting conversation…" instead of "Thinking…" while the session compacts', async () => {
+    const placeholder = (wrapper: ReturnType<typeof mountLive>['wrapper']) => wrapper.find(`[data-testid="${testIds.submittedPlaceholder}"]`)
+    const { wrapper, state } = mountLive({ message: assistant({ parts: [] }), isLast: true, streaming: true, showThinking: false, activity: 'compacting' })
+    expect(placeholder(wrapper).text()).toBe('Compacting conversation…')
+
+    // Done compacting: "Thinking…" until the next step renders something after the divider.
+    state.value = { ...state.value, activity: null, message: assistant({ parts: [compactionPart({ trigger: 'auto' })] }) }
+    await nextTick()
+    expect(placeholder(wrapper).text()).toBe('Thinking…')
+    state.value = { ...state.value, message: assistant({ parts: [compactionPart({ trigger: 'auto' }), { type: 'text', text: 'Hi', state: 'streaming' }] }) }
+    await nextTick()
+    expect(placeholder(wrapper).exists()).toBe(false)
+
+    // A compaction during the run: the line shows at the end of the reply.
+    state.value = { ...state.value, activity: 'compacting' }
+    await nextTick()
+    expect(placeholder(wrapper).text()).toBe('Compacting conversation…')
+    const blocks = [...wrapper.get(`[data-testid="${testIds.messageAssistant}"]`).element.children]
+    expect(blocks.indexOf(placeholder(wrapper).element)).toBeGreaterThan(blocks.indexOf(wrapper.get('[data-slot="markdown"]').element))
+
+    // Never once the reply stopped streaming.
+    state.value = { ...state.value, streaming: false }
+    await nextTick()
+    expect(placeholder(wrapper).exists()).toBe(false)
+  })
+
+  it('keeps "Thinking…" for a streaming reply without blocks and no activity', () => {
+    const { wrapper } = mountMessage({ message: assistant({ parts: [{ type: 'step-start' }] }), isLast: true, streaming: true, showThinking: false })
+    expect(wrapper.get(`[data-testid="${testIds.submittedPlaceholder}"]`).text()).toBe('Thinking…')
+  })
+
   it('passes the approvals of task blocks and plan cards up', () => {
     const message = assistant({ parts: [taskPart(), planApprovalPart()] })
     const { wrapper, events } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })

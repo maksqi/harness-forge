@@ -6,7 +6,7 @@ import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { planApprovalPart, shellOutput, taskPart, toolSummary } from '~/utils/testing/fixtures'
+import { planApprovalPart, shellOutput, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
 import { TOOL_BODY_PREVIEW_CHARS } from '../chat-format'
@@ -588,7 +588,16 @@ describe('toolPart: shell rules (Phase 8)', () => {
   })
 })
 
-describe('toolPart: agent tools (Phase 9 seams)', () => {
+describe('toolPart: agent tools (Phase 9)', () => {
+  const plan = '## Move auth to server sessions\n1. Add createSession() in src/auth/session.ts'
+  const todos = [
+    todoItem({ id: 'a', content: 'Read the parser', status: 'completed' }),
+    todoItem({ id: 'b', content: 'Run the parser tests', status: 'in_progress', activeForm: 'Running the parser tests' }),
+    todoItem({ id: 'c', content: 'Fix the empty-input branch' }),
+  ]
+  const planPart = (overrides: Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>) =>
+    ({ type: 'tool-exit_plan_mode', toolCallId: 'call_plan_1', input: { plan }, ...overrides }) as ToolPartLike
+
   it('shows a preliminary output as running while the message streams, else as stopped', () => {
     const running = taskPart({ preliminary: true }) as ToolPartLike
     expect(row(mountPart(running, true)).attributes('data-status')).toBe('running')
@@ -598,14 +607,27 @@ describe('toolPart: agent tools (Phase 9 seams)', () => {
     expect(row(mountPart(taskPart() as ToolPartLike, false)).attributes('data-status')).toBe('done')
   })
 
-  it('renders the plan card for an exit_plan_mode call of core-agent awaiting its decision', async () => {
+  it('renders the plan card for an exit_plan_mode call of core-agent awaiting its decision; the row reads "Plan ready for review"', async () => {
     usePluginsStore().tools = [toolSummary({ name: 'exit_plan_mode', pluginId: 'core-agent' })]
-    const wrapper = mount(ToolPart, { props: { part: planApprovalPart() as ToolPartLike, streaming: false }, attachTo: document.body })
+    const wrapper = mountPart(planApprovalPart(plan) as ToolPartLike, false)
     const card = wrapper.get(`[data-testid="${testIds.planApproval}"]`)
     expect(card.attributes('data-state')).toBe('pending')
-    // P9-0b: the plain approval card stands in until W9.10 builds the plan card.
-    await card.get(`[data-testid="${testIds.toolApprovalAllow}"]`).trigger('click')
-    expect(wrapper.emitted('approval')).toEqual([[{ id: 'approval_call_plan_1', approved: true, toolName: 'exit_plan_mode', alwaysAllow: false }]])
+    expect(card.text()).toContain('from core-agent')
+    expect(wrapper.find(`[data-testid="${testIds.toolApproval}"]`).exists()).toBe(false)
+    expect(row(wrapper).text()).toContain('exit_plan_mode')
+    expect(row(wrapper).text()).toContain('"Move auth to server sessions"')
+    expect(row(wrapper).text()).toContain('Plan ready for review')
+    expect(row(wrapper).find('.bg-info').exists()).toBe(true)
+    await card.get(`[data-testid="${testIds.planFeedback}"]`).setValue('Keep the tests')
+    await card.get(`[data-testid="${testIds.planApproveEdits}"]`).trigger('click')
+    expect(wrapper.getComponent(ToolPart).emitted('approval')).toEqual([[
+      { id: 'approval_call_plan_1', approved: true, toolName: 'exit_plan_mode', alwaysAllow: false, planMode: 'edits', reason: 'Keep the tests' },
+    ]])
+  })
+
+  it('renders the plan card before the tool list has loaded, from core-agent', () => {
+    const wrapper = mountPart(planApprovalPart() as ToolPartLike, false)
+    expect(wrapper.get(`[data-testid="${testIds.planApproval}"]`).text()).toContain('from core-agent')
   })
 
   it('passes the plan decision on as planMode and reason', () => {
@@ -621,10 +643,80 @@ describe('toolPart: agent tools (Phase 9 seams)', () => {
     ])
   })
 
-  it('keeps the plain card for an exit_plan_mode tool of another plugin', () => {
+  it('keeps the plain card and row for an exit_plan_mode tool of another plugin', () => {
     usePluginsStore().tools = [toolSummary({ name: 'exit_plan_mode', pluginId: 'my-plugin' })]
-    const wrapper = mount(ToolPart, { props: { part: planApprovalPart() as ToolPartLike, streaming: false }, attachTo: document.body })
+    const wrapper = mountPart(planApprovalPart() as ToolPartLike, false)
     expect(wrapper.find(`[data-testid="${testIds.planApproval}"]`).exists()).toBe(false)
     expect(wrapper.find(`[data-testid="${testIds.toolApproval}"]`).exists()).toBe(true)
+    expect(row(wrapper).text()).toContain('Needs approval')
+  })
+
+  it('collapses the decision into the row: "Approved · Accept edits", "Approved · Ask" and "Kept planning"', async () => {
+    const edits = mountPart(planPart({ state: 'output-available', output: { approved: true, mode: 'edits' }, approval: { id: 'a1', approved: true } }), false)
+    expect(row(edits).attributes('data-status')).toBe('done')
+    expect(row(edits).text()).toContain('Approved · Accept edits')
+    expect(row(edits).find('.text-success').exists()).toBe(true)
+    expect(edits.find(`[data-testid="${testIds.planApproval}"]`).exists()).toBe(false)
+
+    const ask = mountPart(planPart({ state: 'output-available', output: { approved: true, mode: 'ask' }, approval: { id: 'a1', approved: true } }), false)
+    expect(row(ask).text()).toContain('Approved · Ask')
+
+    const kept = mountPart(planPart({ state: 'output-denied', approval: { id: 'a1', approved: false, reason: 'Split step 2' } }), false)
+    expect(row(kept).attributes('data-status')).toBe('denied')
+    expect(row(kept).text()).toContain('Kept planning')
+    expect(row(kept).text()).not.toContain('Denied')
+    await row(kept).get('button').trigger('click')
+    const body = kept.get(`[data-testid="${testIds.toolRowOutput}"]`)
+    expect(body.get('[data-slot="plan-body"]').text()).toContain('Add createSession() in src/auth/session.ts')
+    expect(body.get('[data-slot="plan-feedback-text"]').text()).toBe('Your feedback: Split step 2')
+    expect(body.find(`[data-testid="${testIds.toolRawToggle}"]`).exists()).toBe(true)
+
+    const superseded = mountPart(planPart({ state: 'output-denied', approval: { id: 'a1', approved: false, reason: 'superseded' } }), false)
+    expect(row(superseded).text()).toContain('Denied')
+    expect(row(superseded).text()).not.toContain('Kept planning')
+  })
+
+  it('keeps the generic row for a plan value that fails its schema', () => {
+    const badInput = mountPart(planPart({ state: 'output-available', input: { plan: '' }, output: { approved: true, mode: 'edits' } }), false)
+    expect(row(badInput).text()).not.toContain('Approved')
+    const badOutput = mountPart(planPart({ state: 'output-available', output: { ok: true } }), false)
+    expect(row(badOutput).text()).not.toContain('Approved')
+    expect(row(badOutput).attributes('data-status')).toBe('done')
+  })
+
+  it('shows a todo_write row with the current item, the "3/7" summary and the list as its body', async () => {
+    const wrapper = mountPart(todoWritePart(todos) as ToolPartLike, false)
+    expect(row(wrapper).attributes()).toMatchObject({ 'data-tool-name': 'todo_write', 'data-status': 'done' })
+    expect(row(wrapper).text()).toContain('"Running the parser tests"')
+    const summary = row(wrapper).get(`[data-testid="${testIds.toolRowSummary}"]`)
+    expect(summary.text()).toBe('1/3')
+    expect(row(wrapper).get('[data-slot="tool-row-summary-label"]').text()).toBe('1 of 3 tasks done')
+    // Rows never open by themselves.
+    expect(row(wrapper).get('button').attributes('aria-expanded')).toBe('false')
+    await row(wrapper).get('button').trigger('click')
+    const body = wrapper.get(`[data-testid="${testIds.toolRowOutput}"]`)
+    expect(body.findAll(`[data-testid="${testIds.todoItem}"]`)).toHaveLength(3)
+    await body.get(`[data-testid="${testIds.toolRawToggle}"]`).trigger('click')
+    expect(body.find('[data-label="input"]').exists()).toBe(true)
+    expect(body.find('[data-label="output"]').exists()).toBe(true)
+  })
+
+  it('shows the list of a todo_write call that is still running, and the generic row for an invalid list', async () => {
+    const running = mountPart({ type: 'tool-todo_write', toolCallId: 'call_t', state: 'input-available', input: { todos } } as ToolPartLike, true)
+    expect(row(running).attributes('data-status')).toBe('running')
+    expect(row(running).text()).toContain('1/3')
+
+    const invalid = mountPart({
+      type: 'tool-todo_write',
+      toolCallId: 'call_t',
+      state: 'output-error',
+      input: { todos: [todos[0], todos[0]] },
+      errorText: 'Todo ids must be unique.',
+    } as ToolPartLike, false)
+    expect(row(invalid).attributes('data-status')).toBe('error')
+    expect(row(invalid).find(`[data-testid="${testIds.toolRowSummary}"]`).exists()).toBe(false)
+    await row(invalid).get('button').trigger('click')
+    expect(invalid.get(`[data-testid="${testIds.toolRowOutput}"]`).find(`[data-testid="${testIds.todoList}"]`).exists()).toBe(false)
+    expect(invalid.get('[data-label="error"]').text()).toContain('Todo ids must be unique.')
   })
 })

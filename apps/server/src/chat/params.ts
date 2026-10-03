@@ -3,17 +3,20 @@
 // options of a chat model with image output, ADR-028), then the `chat.params` and `chat.headers` hooks. Provider and
 // hook output is plugin data: every value is checked before it reaches `streamText`.
 // Instructions, in this order (Phase 7, ADR-031): global → the workspace block (project name, folder, OS, and rules
-// built only from the workspace tools offered in this run) → the project file (`AGENTS.md`, else `CLAUDE.md`) → the
-// project's own instructions → the chat instructions. Steps: `projectMaxSteps` for a chat with a project, else
-// `maxSteps`; the `chat.params` output is clamped to 1..`LIMITS.stepsMax` (200).
+// built only from the workspace tools offered in this run) → the agent blocks (Phase 9, ADR-041 / ADR-043: the plan
+// block in plan mode, the todo hint when `todo_write` is offered, the `task` hint when `task` is offered) → the
+// project file (`AGENTS.md`, else `CLAUDE.md`) → the project's own instructions → the chat instructions. Steps:
+// `projectMaxSteps` for a chat with a project, else `maxSteps`; the `chat.params` output is clamped to
+// 1..`LIMITS.stepsMax` (200).
 import type { ProviderOptions, ReasoningLevel, ReasoningParams } from '@harness-forge/plugin-sdk'
-import type { ImageAspectRatio, ReasoningEffort, Settings, ToolMode } from '@harness-forge/shared'
+import type { AgentToolName, ImageAspectRatio, ReasoningEffort, Settings, ToolMode } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 import type { ResolvedModelBase } from '../providers/types.ts'
 import type { Registry } from '../registry/types.ts'
 import type { OpenWorkspace } from '../services/projects/types.ts'
 import process from 'node:process'
-import { HTTP_HEADER_NAME_PATTERN, LIMITS } from '@harness-forge/shared'
+import { AGENT_TOOL_NAMES, HTTP_HEADER_NAME_PATTERN, LIMITS } from '@harness-forge/shared'
+import { CORE_AGENT_PLUGIN_ID } from '../builtin-plugins/core-agent/index.ts'
 
 export interface RunParams {
   /** Undefined when empty. */
@@ -87,15 +90,80 @@ export function projectFileInstructions(file: OpenWorkspace['projectFile']): str
   return file === null || content === '' ? '' : `Instructions from ${file.name} in the project folder:\n\n${content}`
 }
 
+/** A tool of a run as `offeredAgentTools` sees it (`ApprovalTool` and `RegisteredTool` fit). */
+export interface OfferedTool {
+  readonly pluginId: string
+  readonly definition: { readonly name: string }
+}
+
 /**
- * The instructions before the `chat.params` hooks: global → workspace block → project file → project instructions →
- * chat instructions (each trimmed, empty parts skipped, separated by a blank line).
+ * The `core-agent` tools the model may call in a run (`AssembledTools` fits): the tools of `byName` owned by
+ * `core-agent` (recognized by owner, never by name alone), restricted to `activeTools` when it is set (an approved
+ * `exit_plan_mode` kept only so the SDK can execute it is not offered), in `AGENT_TOOL_NAMES` order.
  */
-export function runInstructions(input: Pick<RunParamsInput, 'globalInstructions' | 'chatInstructions' | 'workspace' | 'workspaceTools' | 'platform'>): string {
+export function offeredAgentTools(assembled: { readonly byName: ReadonlyMap<string, OfferedTool>, readonly activeTools?: readonly string[] | undefined }): AgentToolName[] {
+  const owned = new Set<string>()
+  for (const entry of assembled.byName.values()) {
+    if (entry.pluginId === CORE_AGENT_PLUGIN_ID)
+      owned.add(entry.definition.name)
+  }
+  const active = assembled.activeTools === undefined ? null : new Set(assembled.activeTools)
+  return AGENT_TOOL_NAMES.filter(name => owned.has(name) && (active === null || active.has(name)))
+}
+
+/**
+ * The plan block of a run in plan mode (ADR-041): investigate read-only, then hand in a complete Markdown plan
+ * (through `exit_plan_mode` when `planTool` is true: the tool is offered; else in the reply), and answer plain
+ * questions directly.
+ */
+export function planModeBlock(planTool: boolean): string {
+  const handIn = planTool
+    ? 'When the plan is complete, call exit_plan_mode with the whole plan as Markdown: the steps, the files to create or change, and how to verify the result. The user either approves it (implement it then) or asks you to keep planning (revise the plan with their feedback and call exit_plan_mode again).'
+    : 'When the plan is complete, present the whole plan as Markdown (the steps, the files to create or change, how to verify the result) and wait for the user to approve it before anything changes.'
+  return [
+    'Plan mode is on: the user wants a plan before anything changes.',
+    '- Investigate first, read-only: do not create, change or delete files, and do not run commands that change anything (the tools that write files or run commands are not available in this mode).',
+    `- ${handIn}`,
+    '- Answer plain questions (an explanation, a lookup, research) directly in your reply, without a plan.',
+  ].join('\n')
+}
+
+/** The hint of a run that offers `todo_write` (ADR-041). */
+export const TODO_HINT = 'Track multi-step work with todo_write: for a task with three or more steps, or several tasks from the user, write the list before you start, keep exactly one item in_progress, mark each item completed as soon as it is done, and send the complete list every time. Skip it for a single, simple step.'
+
+/** The hint of a run that offers `task` (ADR-043). */
+export const TASK_HINT = 'Delegate with task: a sub-agent works in its own context and returns only its report. Use type "explore" to search and read (read-only) and "general" when it also has to change things. Sub-agents cannot ask the user for approval (a call that needs approval is denied), and they do not see this conversation, so give each one a complete prompt: the goal, the relevant paths and facts, and what to report back. Several task calls in one step run in parallel; do small lookups yourself.'
+
+/**
+ * The agent blocks of a run, in order (each one or none): the plan block (`toolMode` `plan`), the todo hint
+ * (`todo_write` offered) and the `task` hint (`task` offered). `agentTools`: the offered `core-agent` tools
+ * (`offeredAgentTools`); default none.
+ */
+export function agentBlocks(toolMode: ToolMode | undefined, agentTools: readonly string[] = []): string[] {
+  const offered = new Set(agentTools)
+  const blocks: string[] = []
+  if (toolMode === 'plan')
+    blocks.push(planModeBlock(offered.has('exit_plan_mode')))
+  if (offered.has('todo_write'))
+    blocks.push(TODO_HINT)
+  if (offered.has('task'))
+    blocks.push(TASK_HINT)
+  return blocks
+}
+
+/**
+ * The instructions before the `chat.params` hooks: global → workspace block → agent blocks (plan block, todo hint,
+ * `task` hint) → project file → project instructions → chat instructions (each trimmed, empty parts skipped,
+ * separated by a blank line). Without `toolMode` and `agentTools` there are no agent blocks.
+ */
+export function runInstructions(
+  input: Pick<RunParamsInput, 'globalInstructions' | 'chatInstructions' | 'workspace' | 'workspaceTools' | 'platform' | 'agentTools'> & { toolMode?: ToolMode },
+): string {
   const workspace = input.workspace ?? null
   return joinInstructions(
     input.globalInstructions,
     workspace === null ? undefined : workspaceBlock(workspace, input.workspaceTools ?? [], input.platform),
+    ...agentBlocks(input.toolMode, input.agentTools),
     workspace === null ? undefined : projectFileInstructions(workspace.projectFile),
     workspace?.instructions,
     input.chatInstructions,
@@ -209,6 +277,11 @@ export interface RunParamsInput {
   workspace?: Pick<OpenWorkspace, 'name' | 'root' | 'instructions' | 'projectFile'> | null
   /** Names of the offered tools with workspace access (the rules of the workspace block); default none. */
   workspaceTools?: readonly string[]
+  /**
+   * Names of the `core-agent` tools the model may call in this run (`offeredAgentTools(assembled)`; Phase 9): the
+   * todo and `task` hints, and whether the plan block names `exit_plan_mode`. Default none.
+   */
+  agentTools?: readonly string[]
   /** The OS named in the workspace block; default `process.platform`. */
   platform?: NodeJS.Platform
   /** The step limit before the hooks (`runMaxSteps`). */

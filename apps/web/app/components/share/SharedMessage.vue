@@ -5,6 +5,9 @@
 // ImageGallery with its lightbox and Download link, merged sources), then the model id (muted mono, not the
 // store-backed ModelLabel) and "Stopped" or "This reply failed." (error details are never shared). No actions, version
 // switchers or status dots.
+// Phase 9: a steer arrives as its own user message (the server splits the reply there) and reads as an ordinary user
+// bubble; compaction markers never reach a snapshot; the agent tools render through ShareToolRow (task, todo and plan
+// bodies when tool details are shared).
 import type { ShareMessage } from '@harness-forge/shared'
 import { CircleAlertIcon } from '@lucide/vue'
 import { computed } from 'vue'

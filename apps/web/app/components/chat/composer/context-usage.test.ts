@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { contextUsage, formatUsd, toLanguageModelUsage, usedContextTokens } from './context-usage'
+import { compactionNote, contextUsage, formatUsd, toLanguageModelUsage, usedContextTokens } from './context-usage'
 
 describe('context usage', () => {
   it('uses the context tokens of the last step', () => {
@@ -43,5 +43,15 @@ describe('context usage', () => {
     expect(formatUsd(12.5)).toBe('$12.50')
     expect(formatUsd(0)).toBe('$0')
     expect(formatUsd(-1)).toBe('')
+  })
+
+  it('drops right after /compact: the reply reports the context after the compaction (Phase 9)', () => {
+    expect(contextUsage({ inputTokens: 190_000, outputTokens: 2_000, contextTokens: 9_000 }, 200_000))
+      .toEqual({ used: 9_000, max: 200_000, percent: 5, level: 'normal' })
+  })
+
+  it('ends the hover card with a note per the autoCompact setting (Phase 9)', () => {
+    expect(compactionNote(true)).toBe('Older messages are summarized automatically near the limit. Type /compact to do it now.')
+    expect(compactionNote(false)).toBe('Automatic compaction is off. Older messages are left out near the limit.')
   })
 })

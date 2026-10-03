@@ -6,7 +6,7 @@ import type { McpManager, ToolPref, ToolService } from '../../mcp/types.ts'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import type { FakeProjectService } from '../../testing/fake-projects.ts'
 import { Buffer } from 'node:buffer'
-import { chatDetailSchema, chatStopResultSchema, harnessErrorEnvelopeSchema, harnessErrorInitSchema, LIMITS } from '@harness-forge/shared'
+import { chatDetailSchema, chatStopResultSchema, createMessageId, harnessErrorEnvelopeSchema, harnessErrorInitSchema, LIMITS, queueItemSchema } from '@harness-forge/shared'
 import { convertArrayToReadableStream, MockLanguageModelV4 } from 'ai/test'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -372,6 +372,47 @@ describe('pOST /api/chat: stop, disconnect and resume', () => {
   it('stop without a run answers stopped: false', async () => {
     const response = await t.request(`/api/chat/${newChatId()}/stop`, { method: 'POST' })
     expect(await response.json()).toEqual({ stopped: false })
+  })
+
+  it('stop empties the steer queue first and answers the queued messages as dropped, oldest first (Phase 9)', async () => {
+    const chatId = newChatId()
+    const response = await postChat(t, chatBody(chatId, words(400)))
+    await readUntil(response, chunks => chunks.some(chunk => chunk.type === 'text-delta'))
+    const queued = []
+    for (const text of ['first queued', '/compact']) {
+      const added = await t.request(`/api/chat/${chatId}/queue`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: { id: createMessageId(), role: 'user', parts: [{ type: 'text', text }] }, modelRef: 'mock:echo', reasoningEffort: 'auto', toolMode: 'ask' }),
+      })
+      expect(added.status).toBe(201)
+      queued.push(queueItemSchema.parse(await added.json()))
+    }
+    const stop = await t.request(`/api/chat/${chatId}/stop`, { method: 'POST' })
+    expect(stop.status).toBe(200)
+    const result = chatStopResultSchema.parse(await stop.json())
+    expect(result).toEqual({ stopped: true, dropped: queued })
+    expect(events.filter(event => event.type === 'queue.changed' && event.data.removed !== undefined).map(event => event.data))
+      .toEqual([{ chatId, items: [], removed: queued.map(item => ({ id: item.id, reason: 'stopped' })) }])
+    expect((await t.request(`/api/chat/${chatId}/queue`)).json()).resolves.toEqual({ items: [] })
+    // Nothing queued starts a turn: the path ends with the aborted reply.
+    expect((await detailOf(chatId)).messages.map(message => message.role)).toEqual(['user', 'assistant'])
+    expect(events.filter(event => event.type === 'run.started' && event.data.chatId === chatId)).toHaveLength(1)
+    await runnerOf(t).idle()
+  })
+
+  it('stop of a chat waiting for an approval drops its queue without a run (stopped: false)', async () => {
+    const chatId = newChatId()
+    await readSse(await postChat(t, chatBody(chatId, 'echo me', { modelRef: 'mock:tool-approval' })))
+    const added = await t.request(`/api/chat/${chatId}/queue`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: { id: createMessageId(), role: 'user', parts: [{ type: 'text', text: 'waiting' }] }, modelRef: 'mock:tool-approval', reasoningEffort: 'auto', toolMode: 'ask' }),
+    })
+    const item = queueItemSchema.parse(await added.json())
+    const stop = await t.request(`/api/chat/${chatId}/stop`, { method: 'POST' })
+    expect(await stop.json()).toEqual({ stopped: false, dropped: [item] })
+    expect(t.deps.runs.queueList(chatId)).toEqual([])
   })
 
   it('a client disconnect keeps the run alive; resume replays it from the first chunk', async () => {
@@ -909,12 +950,19 @@ describe('pOST /api/chat: params, files and context', () => {
     await runnerOf(t).idle()
   })
 
-  it('leaves out the oldest turns above 85 percent of the context window', async () => {
+  it('leaves out the oldest turns above 85 percent of the context window (automatic compaction off)', async () => {
     const { model, calls } = scriptedModel(() => textParts('ok'))
     scripted.set('tiny', model)
     const chatId = newChatId()
-    for (const text of [words(200, 'a'), words(200, 'b'), 'last question'])
-      await readSse(await postChat(t, chatBody(chatId, text, { modelRef: 'testkit:tiny' })))
+    // Phase 9 (ADR-040): with `autoCompact` on, the context guard compacts instead of trimming.
+    await t.deps.settings.update({ autoCompact: false })
+    try {
+      for (const text of [words(200, 'a'), words(200, 'b'), 'last question'])
+        await readSse(await postChat(t, chatBody(chatId, text, { modelRef: 'testkit:tiny' })))
+    }
+    finally {
+      await t.deps.settings.update({ autoCompact: true })
+    }
     const lastCall = calls.at(-1)!
     expect(lastCall.prompt.filter(message => message.role === 'user')).toHaveLength(1)
     expect(JSON.stringify(lastCall.prompt)).toContain('last question')

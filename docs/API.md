@@ -2236,8 +2236,8 @@ type ProjectFileEntry = {               // projectFileEntrySchema
 }                                       // narrows the query)
 type ProjectFileSearch = {              // projectFileSearchSchema
   items: ProjectFileEntry[]             // the best matches first, at most `limit`
-  truncated: boolean                    // the index was cut (50000 files, or the limits of the walk): a match may be
-                                        // missing
+  truncated: boolean                    // more entries matched than `limit`, or the index was cut (50000 files, or
+                                        // the limits of the walk): a match may be missing
   indexedAt: Timestamp                  // when the project's index was built
 }
 type ProjectFileAttachBody = { path: string }   // projectFileAttachBodySchema; strict; workspaceToolPathSchema

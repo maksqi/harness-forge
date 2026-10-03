@@ -89,6 +89,28 @@ describe('messageBlocks', () => {
     expect(new Set(blocks.map(block => block.key)).size).toBe(blocks.length)
   })
 
+  it('makes a dynamic task call a task block, and splits galleries at rendered agent blocks (Phase 9)', () => {
+    const image = (n: number): HarnessUIMessagePart => ({ type: 'file', mediaType: 'image/png', url: `/api/files/file_${n}` })
+    const parts: HarnessUIMessagePart[] = [
+      image(1),
+      { type: 'data-activity', data: { kind: 'idle' } },
+      image(2),
+      steerPart(),
+      image(3),
+      compactionPart({ trigger: 'auto' }),
+      image(4),
+      { type: 'dynamic-tool', toolName: 'task', toolCallId: 'call_task_9', state: 'input-available', input: {} } as HarnessUIMessagePart,
+      { type: 'tool-mcp__docs__task', toolCallId: 'c3', state: 'input-available', input: {} } as HarnessUIMessagePart,
+    ]
+    const blocks = messageBlocks(parts)
+    expect(blocks.map(block => block.kind)).toEqual(['gallery', 'steer', 'gallery', 'compaction', 'gallery', 'task', 'tool'])
+    expect(blocks[0]).toMatchObject({ parts: [{ url: '/api/files/file_1' }, { url: '/api/files/file_2' }] })
+    expect(blocks[5]).toMatchObject({ kind: 'task', key: 'task-call_task_9', index: 7 })
+    // Copy and Read aloud take the reply's own text: never a steer or a summary.
+    expect(messageText({ parts: [{ type: 'text', text: 'Before', state: 'done' }, steerPart(), compactionPart(), { type: 'text', text: 'After', state: 'done' }] }))
+      .toBe('Before\n\nAfter')
+  })
+
   it('finds the image file parts of a message', () => {
     const png = { type: 'file' as const, mediaType: 'IMAGE/PNG', url: '/api/files/file_1' }
     const pdf = { type: 'file' as const, mediaType: 'application/pdf', url: '/api/files/file_2' }

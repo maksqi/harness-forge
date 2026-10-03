@@ -1,7 +1,8 @@
-import type { ChatRequestBody } from '@harness-forge/shared'
+import type { ChatRequestBody, HarnessUIMessage, QueueAddBody, QueueItem } from '@harness-forge/shared'
 import type { VueWrapper } from '@vue/test-utils'
 import type { UIMessageChunk } from 'ai'
 import type { Mock } from 'vitest'
+import type { TodoState } from './agent/todos'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
@@ -18,19 +19,32 @@ import { testIds } from '~/utils/testids'
 import { assistantMessage, changeBatchId, chatDetail, chatId, messageBranch, projectId, projectSummary, queueItem, restoreResult, rewindPreview, userMessage } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
+import TodoStrip from './agent/TodoStrip.vue'
 import ChatTranscript from './ChatTranscript.vue'
 import ChatView from './ChatView.vue'
 import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
+import QueuedMessages from './queue/QueuedMessages.vue'
+
+type TodoStateFn = (messages: readonly HarnessUIMessage[]) => TodoState | null
 
 const mock = vi.hoisted(() => ({
   api: null as unknown,
   fetch: null as unknown,
-  composer: { setText: null as unknown as Mock, openModelPicker: null as unknown as Mock },
+  composer: { setText: null as unknown as Mock, openModelPicker: null as unknown as Mock, focus: null as unknown as Mock, restoreQueued: null as unknown as Mock },
+  /** `todoState` of the todo helpers (W9.10's): the real one unless a test replaces it. */
+  todoState: null as unknown as Mock<TodoStateFn>,
+  realTodoState: null as TodoStateFn | null,
   toast: null as unknown as Mock,
   customToast: null as unknown as Mock,
 }))
 
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api, useApiFetch: () => mock.fetch }))
+vi.mock('~/components/chat/agent/todos', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('~/components/chat/agent/todos')>()
+  mock.realTodoState ??= actual.todoState
+  mock.todoState ??= vi.fn(actual.todoState)
+  return { ...actual, todoState: mock.todoState }
+})
 vi.mock('~/components/chat/nuxt-imports', () => ({
   useColorMode: () => ({ value: 'dark' }),
   useRoute: () => ({ path: '/', fullPath: '/', params: {}, query: {} }),
@@ -56,9 +70,10 @@ vi.mock('~/components/chat/composer/ChatComposer.vue', async () => {
       emits: ['update:modelRef', 'update:reasoningEffort', 'update:toolMode', 'submit', 'stop', 'edit-last'],
       setup(props, { emit, expose }) {
         expose({
-          focus: () => {},
+          focus: () => mock.composer.focus(),
           setText: (text: string) => mock.composer.setText(text),
           openModelPicker: () => mock.composer.openModelPicker(),
+          restoreQueued: (items: readonly QueueItem[]) => mock.composer.restoreQueued(items),
         })
         return () => render('form', {
           'data-testid': 'composer',
@@ -116,6 +131,8 @@ beforeEach(() => {
   mock.customToast = vi.fn()
   mock.composer.setText = vi.fn()
   mock.composer.openModelPicker = vi.fn()
+  mock.composer.focus = vi.fn()
+  mock.composer.restoreQueued = vi.fn()
   mock.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const body = typeof init?.body === 'string' ? JSON.parse(init.body) as ChatRequestBody : null
@@ -865,8 +882,64 @@ describe('chatView: workspace 2.0 wiring (Phase 8)', () => {
   })
 })
 
-describe('chatView: agent 2.0 dock (Phase 9 seams)', () => {
+// ---------- Agent 2.0 (Phase 9, W9.9) ----------
+
+/** A reply stream written by `writer` (chunks typed loosely: data parts included). */
+function streamReply(writer: (write: (chunk: UIMessageChunk) => void) => Promise<void> | void): () => Response {
+  return () => createUIMessageStreamResponse({
+    stream: createUIMessageStream({
+      execute: async ({ writer: out }) => {
+        await writer(chunk => out.write(chunk as never))
+      },
+    }),
+  })
+}
+
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+/** A text reply that waits for `gate` before it finishes. */
+function gatedReply(text: string, gate: Promise<void>): () => Response {
+  return streamReply(async (write) => {
+    write({ type: 'start', messageId: 'msg_asst000000000001', messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+    // A new step: an approval continuation is complete once it streams (no second automatic request).
+    write({ type: 'start-step' })
+    write({ type: 'text-start', id: 't' })
+    write({ type: 'text-delta', id: 't', delta: text })
+    await gate
+    write({ type: 'text-end', id: 't' })
+    write({ type: 'finish', messageMetadata: { modelRef: MODEL, startedAt: 1, durationMs: 2000 } })
+  })
+}
+
+/** The text of ChatView's polite live region (the last `role="status"` element of the view). */
+function announced(wrapper: VueWrapper): string {
+  return wrapper.findAll('[role="status"]').at(-1)!.text()
+}
+
+/** `POST /chat/:id/queue` answers with the stored item, like the server (W9.2). */
+function acceptQueue() {
+  api.chatQueue.add.mockImplementation(async ({ body }: { body: QueueAddBody }): Promise<QueueItem> => ({
+    id: body.message.id,
+    message: body.message,
+    modelRef: body.modelRef,
+    reasoningEffort: body.reasoningEffort,
+    toolMode: body.toolMode,
+    createdAt: 1,
+    turnOnly: false,
+  }))
+}
+
+const chatPosts = () => calls.filter(call => call.url === '/api/chat')
+
+describe('chatView: queue and stop (Phase 9)', () => {
   beforeEach(() => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
     api.chats.get.mockResolvedValue(chatDetail({
       id: chatId(2),
       modelRef: MODEL,
@@ -877,9 +950,20 @@ describe('chatView: agent 2.0 dock (Phase 9 seams)', () => {
     }))
   })
 
+  async function streamingView() {
+    const view = mountView({ chatId: chatId(2) })
+    await until(() => view.wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    const gate = deferred()
+    replies.push(gatedReply('Working on it', gate.promise))
+    await view.wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => view.wrapper.get('[data-testid="composer"]').attributes('data-status') === 'streaming')
+    return { ...view, gate }
+  }
+
   it('stacks the queued messages above the composer and hides the empty dock parts', async () => {
     const { wrapper } = mountView({ chatId: chatId(2) })
     await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    expect(api.chatQueue.list).toHaveBeenCalledWith({ params: { id: chatId(2) } })
     expect(wrapper.find(`[data-testid="${testIds.queuedMessages}"]`).exists()).toBe(false)
     expect(wrapper.find(`[data-testid="${testIds.todoStrip}"]`).exists()).toBe(false)
     expect(wrapper.getComponent(ChatTranscript).props('activity')).toBeNull()
@@ -888,14 +972,59 @@ describe('chatView: agent 2.0 dock (Phase 9 seams)', () => {
     await flushPromises()
     const queued = wrapper.get(`[data-testid="${testIds.queuedMessages}"]`)
     expect(queued.attributes('data-count')).toBe('1')
+    expect(queued.attributes('data-state')).toBe('queued')
     const composer = wrapper.get('[data-testid="composer"]')
-
     expect(queued.element.compareDocumentPosition(composer.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 
     dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(1), items: [queueItem()] }))
     dispatchServerEvent(createServerEvent('chat.deleted', { id: chatId(1) }))
     await flushPromises()
     expect(wrapper.get(`[data-testid="${testIds.queuedMessages}"]`).attributes('data-count')).toBe('1')
+  })
+
+  it('queues a message sent while the reply streams and announces it', async () => {
+    const { wrapper, gate } = await streamingView()
+    acceptQueue()
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => announced(wrapper) === 'Message queued')
+    expect(api.chatQueue.add).toHaveBeenCalledOnce()
+    expect(chatPosts()).toHaveLength(1)
+    await until(() => wrapper.find(`[data-testid="${testIds.queuedMessages}"]`).exists())
+    expect(wrapper.findAll(`[data-testid="${testIds.messageUser}"]`)).toHaveLength(2)
+    expect(mock.toast).not.toHaveBeenCalled()
+    gate.resolve()
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'ready')
+  })
+
+  it('a full queue puts the text back with its toast; another failure with an error toast', async () => {
+    const { wrapper, gate } = await streamingView()
+    api.chatQueue.add.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'The queue is full.', details: { reason: 'queue-full' } }))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => mock.toast.mock.calls.length === 1)
+    expect(mock.toast).toHaveBeenCalledWith('The queue is full. Wait for the agent to take a message.')
+    expect(mock.composer.setText).toHaveBeenCalledWith('Hello')
+
+    api.chatQueue.add.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Something went wrong.' }))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => mock.toast.mock.calls.length === 2)
+    expect(mock.toast).toHaveBeenLastCalledWith('Could not send the message', { description: 'Something went wrong.' })
+    expect(mock.composer.setText).toHaveBeenCalledTimes(2)
+    expect(chatPosts()).toHaveLength(1)
+    gate.resolve()
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'ready')
+  })
+
+  it('stop hands the messages it dropped back to the composer of this tab', async () => {
+    const { wrapper, gate } = await streamingView()
+    const item = queueItem()
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(2), items: [item] }))
+    api.chat.stop.mockResolvedValue({ stopped: true, dropped: [item] })
+    await wrapper.get('[data-action="stop"]').trigger('click')
+    await until(() => mock.composer.restoreQueued.mock.calls.length === 1)
+    expect(mock.composer.restoreQueued).toHaveBeenCalledWith([item])
+    expect(wrapper.find(`[data-testid="${testIds.queuedMessages}"]`).exists()).toBe(false)
+    gate.resolve()
+    await until(() => announced(wrapper) === 'Response stopped')
   })
 
   it('stops without restoring anything while nothing was queued', async () => {
@@ -905,6 +1034,271 @@ describe('chatView: agent 2.0 dock (Phase 9 seams)', () => {
     await wrapper.get('[data-action="stop"]').trigger('click')
     await flushPromises()
     expect(api.chat.stop).toHaveBeenCalledWith({ params: { id: chatId(2) } })
+    expect(mock.composer.restoreQueued).not.toHaveBeenCalled()
     expect(mock.toast).not.toHaveBeenCalled()
+  })
+
+  it('cancel: the row shows cancelling meanwhile; "Already sent to the agent." when it was delivered first', async () => {
+    const { wrapper } = mountView({ chatId: chatId(2) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    const first = queueItem()
+    const second = queueItem({ id: 'msg_queued2000000000', text: 'Second' })
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(2), items: [first, second] }))
+    await flushPromises()
+    const list = () => wrapper.getComponent(QueuedMessages)
+
+    let answer!: () => void
+    api.chatQueue.remove.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      answer = resolve
+    }))
+    list().vm.$emit('cancel', first.id)
+    await flushPromises()
+    expect(list().props('cancelling')).toEqual([first.id])
+    answer()
+    await until(() => list().props('items').length === 1)
+    expect(list().props('cancelling')).toEqual([])
+    expect(mock.toast).not.toHaveBeenCalled()
+
+    api.chatQueue.remove.mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: 'Not queued.' }))
+    list().vm.$emit('cancel', second.id)
+    await until(() => mock.toast.mock.calls.length === 1)
+    expect(mock.toast).toHaveBeenCalledWith('Already sent to the agent.')
+    expect(wrapper.find(`[data-testid="${testIds.queuedMessages}"]`).exists()).toBe(false)
+    expect(mock.composer.restoreQueued).not.toHaveBeenCalled()
+  })
+
+  it('edit cancels the message, then puts it back into the composer (not when it was already sent)', async () => {
+    const { wrapper } = mountView({ chatId: chatId(2) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    const first = queueItem()
+    const second = queueItem({ id: 'msg_queued2000000000', text: 'Second' })
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(2), items: [first, second] }))
+    await flushPromises()
+    api.chatQueue.remove.mockResolvedValueOnce(undefined)
+    wrapper.getComponent(QueuedMessages).vm.$emit('edit', first.id)
+    await until(() => mock.composer.restoreQueued.mock.calls.length === 1)
+    expect(api.chatQueue.remove).toHaveBeenCalledWith({ params: { id: chatId(2), itemId: first.id } })
+    expect(mock.composer.restoreQueued).toHaveBeenCalledWith([first])
+
+    api.chatQueue.remove.mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: 'Not queued.' }))
+    wrapper.getComponent(QueuedMessages).vm.$emit('edit', second.id)
+    await until(() => mock.toast.mock.calls.length === 1)
+    expect(mock.toast).toHaveBeenCalledWith('Already sent to the agent.')
+    expect(mock.composer.restoreQueued).toHaveBeenCalledOnce()
+  })
+
+  it('queued messages wait while the chat awaits an approval', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(2),
+      modelRef: MODEL,
+      messages: [
+        userMessage('msg_user000000000001', 'Use it'),
+        { id: 'msg_asst000000000009', role: 'assistant', metadata: { modelRef: MODEL, startedAt: 1 }, parts: [{ type: 'tool-mock_approval_tool', toolCallId: 'call_1', state: 'approval-requested', input: { value: 'x' }, approval: { id: 'appr_1' } }] },
+      ],
+    }))
+    const { wrapper } = mountView({ chatId: chatId(2) })
+    await until(() => wrapper.find(`[data-testid="${testIds.toolApproval}"]`).exists())
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(2), items: [queueItem()] }))
+    await flushPromises()
+    expect(wrapper.getComponent(QueuedMessages).props('waitingForApproval')).toBe(true)
+    expect(wrapper.get(`[data-testid="${testIds.queuedMessages}"]`).attributes('data-state')).toBe('approval')
+  })
+})
+
+describe('chatView: plan approval (Phase 9)', () => {
+  function planChat(n: number) {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    api.chats.update.mockResolvedValue(chatDetail({ id: chatId(n) }))
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(n),
+      modelRef: MODEL,
+      projectId: projectId(1),
+      settings: { toolMode: 'plan' },
+      messages: [
+        userMessage('msg_user000000000001', 'Plan the notes file'),
+        {
+          id: 'msg_asst000000000009',
+          role: 'assistant',
+          metadata: { modelRef: MODEL, startedAt: 1 },
+          parts: [{ type: 'tool-exit_plan_mode', toolCallId: 'call_plan', state: 'approval-requested', input: { plan: '# Plan\n1. Write notes.txt' }, approval: { id: 'appr_plan' } }],
+        },
+      ],
+    }))
+  }
+
+  it('"Approve, accept edits": the continuation runs in edits, the decision is announced, focus goes back to the composer', async () => {
+    planChat(20)
+    const { wrapper } = mountView({ chatId: chatId(20) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageAssistant}"]`).length === 1)
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-tool-mode')).toBe('plan')
+    const gate = deferred()
+    replies.push(gatedReply('Writing notes.txt', gate.promise))
+    wrapper.getComponent(ChatTranscript).vm.$emit('approval', { id: 'appr_plan', approved: true, toolName: 'exit_plan_mode', alwaysAllow: false, planMode: 'edits' })
+    await until(() => announced(wrapper) === 'Plan approved. Permission mode: Accept edits.')
+    expect(mock.composer.focus).toHaveBeenCalled()
+    await until(() => chatPosts().length === 1)
+    expect(chatPosts()[0]!.body).toMatchObject({ toolMode: 'edits', message: { role: 'assistant' } })
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(20) }, body: { settings: { toolMode: 'edits' } } })
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-tool-mode')).toBe('edits')
+    gate.resolve()
+    await until(() => wrapper.text().includes('Writing notes.txt'))
+  })
+
+  it('"Approve, ask before edits" announces Ask', async () => {
+    planChat(21)
+    const { wrapper } = mountView({ chatId: chatId(21) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageAssistant}"]`).length === 1)
+    const gate = deferred()
+    replies.push(gatedReply('Asking first', gate.promise))
+    wrapper.getComponent(ChatTranscript).vm.$emit('approval', { id: 'appr_plan', approved: true, toolName: 'exit_plan_mode', alwaysAllow: false, planMode: 'ask' })
+    await until(() => announced(wrapper) === 'Plan approved. Permission mode: Ask.')
+    await until(() => chatPosts().length === 1)
+    expect(chatPosts()[0]!.body!.toolMode).toBe('ask')
+    gate.resolve()
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'ready')
+  })
+
+  it('"Keep planning" sends the feedback, keeps plan and says so', async () => {
+    planChat(22)
+    const { wrapper } = mountView({ chatId: chatId(22) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageAssistant}"]`).length === 1)
+    const gate = deferred()
+    replies.push(gatedReply('Revising: keep the old API', gate.promise))
+    wrapper.getComponent(ChatTranscript).vm.$emit('approval', { id: 'appr_plan', approved: false, toolName: 'exit_plan_mode', alwaysAllow: false, reason: 'Keep the old API' })
+    await until(() => announced(wrapper) === 'Feedback sent. The agent keeps planning.')
+    await until(() => chatPosts().length === 1)
+    const body = chatPosts()[0]!.body!
+    expect(body.toolMode).toBe('plan')
+    expect(body.message.parts.find(part => part.type === 'tool-exit_plan_mode')).toMatchObject({ approval: { approved: false, reason: 'Keep the old API' } })
+    expect(api.chats.update).not.toHaveBeenCalled()
+    gate.resolve()
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'ready')
+  })
+
+  it('other approvals announce nothing extra', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(23),
+      modelRef: MODEL,
+      messages: [
+        userMessage('msg_user000000000001', 'Use it'),
+        { id: 'msg_asst000000000009', role: 'assistant', metadata: { modelRef: MODEL, startedAt: 1 }, parts: [{ type: 'tool-mock_approval_tool', toolCallId: 'call_1', state: 'approval-requested', input: { value: 'x' }, approval: { id: 'appr_1' } }] },
+      ],
+    }))
+    const { wrapper } = mountView({ chatId: chatId(23) })
+    await until(() => announced(wrapper) === 'Approval needed: mock_approval_tool')
+    const gate = deferred()
+    replies.push(gatedReply('Done', gate.promise))
+    wrapper.getComponent(ChatTranscript).vm.$emit('approval', { id: 'appr_1', approved: true, toolName: 'mock_approval_tool', alwaysAllow: false })
+    await until(() => chatPosts().length === 1)
+    await flushPromises()
+    expect(announced(wrapper)).toBe('Approval needed: mock_approval_tool')
+    expect(mock.composer.focus).not.toHaveBeenCalled()
+    gate.resolve()
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'ready')
+  })
+})
+
+describe('chatView: compaction and todos (Phase 9)', () => {
+  const compaction = { trigger: 'manual', keep: 'none', summary: 'The user wants notes.', modelRef: 'mock:compact', messagesCompacted: 2, tokensBefore: 1200, tokensAfter: 90, createdAt: 1_759_000_000_000 }
+
+  beforeEach(() => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+  })
+
+  it('announces "Conversation compacted" once, when a marker arrives in this tab\'s stream', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(30),
+      modelRef: MODEL,
+      messages: [userMessage('msg_user000000000001', 'Hi'), assistantMessage('msg_asst000000000009', 'Hello')],
+    }))
+    const { wrapper } = mountView({ chatId: chatId(30) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    const gate = deferred()
+    replies.push(streamReply(async (write) => {
+      write({ type: 'start', messageId: 'msg_asst000000000010', messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'data-activity', data: { kind: 'compacting' }, transient: true } as UIMessageChunk)
+      write({ type: 'data-compaction', id: 'cmp_1', data: compaction } as UIMessageChunk)
+      write({ type: 'data-activity', data: { kind: 'idle' }, transient: true } as UIMessageChunk)
+      await gate.promise
+      write({ type: 'finish', messageMetadata: { modelRef: MODEL, startedAt: 1, durationMs: 10 } })
+    }))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => announced(wrapper) === 'Conversation compacted')
+    gate.resolve()
+    await until(() => announced(wrapper) === 'Response finished')
+    // The stored path comes back with the marker (another tab's run finished): nothing is announced again.
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(30),
+      modelRef: MODEL,
+      messages: [
+        userMessage('msg_user000000000001', 'Hi'),
+        assistantMessage('msg_asst000000000009', 'Hello'),
+        userMessage('msg_user000000000002', 'Hello'),
+        { id: 'msg_asst000000000010', role: 'assistant', metadata: { modelRef: MODEL, startedAt: 1 }, parts: [{ type: 'data-compaction', id: 'cmp_1', data: compaction } as never] },
+      ],
+    }))
+    dispatchServerEvent(createServerEvent('run.finished', { chatId: chatId(30), messageId: 'msg_asst000000000077', outcome: 'completed', awaitingApproval: false }))
+    await until(() => api.chats.get.mock.calls.length === 2)
+    await flushPromises()
+    expect(announced(wrapper)).toBe('Response finished')
+  })
+
+  it('a loaded path with a marker announces nothing', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(31),
+      modelRef: MODEL,
+      messages: [
+        userMessage('msg_user000000000001', '/compact'),
+        { id: 'msg_asst000000000010', role: 'assistant', metadata: { modelRef: MODEL, startedAt: 1 }, parts: [{ type: 'data-compaction', id: 'cmp_1', data: compaction } as never] },
+      ],
+    }))
+    const { wrapper } = mountView({ chatId: chatId(31) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    await flushPromises()
+    expect(announced(wrapper)).toBe('')
+  })
+
+  it('shows the todo strip from the session\'s todos, running while a run is active', async () => {
+    const state: TodoState = {
+      todos: [
+        { id: 't1', content: 'Read the parser', status: 'completed' },
+        { id: 't2', content: 'Run the tests', status: 'in_progress', activeForm: 'Running the tests' },
+        { id: 't3', content: 'Fix the bug', status: 'pending' },
+      ],
+      done: 1,
+      total: 3,
+      current: { id: 't2', content: 'Run the tests', status: 'in_progress', activeForm: 'Running the tests' },
+      messageId: 'msg_asst000000000009',
+      live: true,
+    }
+    mock.todoState.mockImplementation(messages => (messages.length > 0 ? state : null))
+    try {
+      api.chats.get.mockResolvedValue(chatDetail({
+        id: chatId(32),
+        modelRef: MODEL,
+        messages: [userMessage('msg_user000000000001', 'Do it'), assistantMessage('msg_asst000000000009', 'Working')],
+      }))
+      const { wrapper } = mountView({ chatId: chatId(32) })
+      await until(() => wrapper.find(`[data-testid="${testIds.todoStrip}"]`).exists())
+      const strip = wrapper.get(`[data-testid="${testIds.todoStrip}"]`)
+      expect(strip.attributes('data-count')).toBe('3')
+      expect(strip.attributes('data-value')).toBe('1')
+      const component = wrapper.getComponent(TodoStrip)
+      expect(component.props('state')).toEqual(state)
+      expect(component.props('running')).toBe(false)
+      // The strip sits above the queue and the composer.
+      const composer = wrapper.get('[data-testid="composer"]')
+      expect(strip.element.compareDocumentPosition(composer.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      const gate = deferred()
+      replies.push(gatedReply('Still working', gate.promise))
+      await composer.trigger('submit')
+      await until(() => component.props('running') === true)
+      gate.resolve()
+      await until(() => component.props('running') === false)
+    }
+    finally {
+      mock.todoState.mockImplementation(mock.realTodoState!)
+    }
   })
 })

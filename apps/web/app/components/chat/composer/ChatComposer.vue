@@ -15,11 +15,15 @@
 // dictation steps.
 // Phase 7: `projectId` marks a project chat, where PermissionMenu offers Accept edits (also shown while it is the
 // current value) and `/mode edits` selects it; elsewhere `/mode edits` explains "Accept edits works in project chats."
-// Phase 9 (ADR-041, ADR-042; C25 wires it, W9.8 / W9.10 implement; frozen from Gate P9-0b): MentionMenu after SlashMenu
-// (`useFileMentions`, project chats), the keydown chain mention menu -> slash menu -> Shift+Tab mode cycle
-// (`useModeCycle`), the textarea's `aria-controls` / `aria-activedescendant` follow whichever menu is open, `canQueue`
-// goes to SendStopButton ("Queue message" while a run is active), "Mention a file" in the `+` menu, and the exposed
-// `restoreQueued(items)`.
+// Phase 9 (ADR-041, ADR-042; C25 wired it, W9.8 / W9.10 implement; frozen from Gate P9-0b): MentionMenu after SlashMenu
+// (`useFileMentions`, project chats only; never for `a@b`): picking a file inserts its mention and a blank and attaches
+// it as a project chip (`attachments.addProject`; the chip and the text are independent), picking a folder inserts
+// `@folder/` and keeps the menu open, "Mention a file" in the `+` menu inserts `@` at the caret. The keydown chain is
+// mention menu -> slash menu -> Shift+Tab mode cycle (`useModeCycle`, W9.10); the textarea's `aria-controls` /
+// `aria-activedescendant` follow whichever menu is open. While a run is active the composer stays usable: the
+// placeholder reads "Queue a message…", Send (the send key or "Queue message" left of Stop, `canQueue`) emits `submit`
+// as usual and the session queues it (ChatView, W9.9); Esc still stops. `restoreQueued(items)` (exposed) puts queued
+// messages back: their texts appended to the draft with blank lines between them, their files as done chips.
 import type { ClientCommand, ImageOptions, MessageUsage, ProjectFileEntry, QueueItem, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { DictationRange } from './dictation'
@@ -53,6 +57,7 @@ import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
+import { queueItemFiles, restoredDraft } from '../queue/queued-messages'
 import { capabilityWarnings, COMPOSER_ACCEPT } from './attachments'
 import ComposerAddMenu from './ComposerAddMenu.vue'
 import ComposerAttachments from './ComposerAttachments.vue'
@@ -61,6 +66,7 @@ import { DICTATION_SHORTCUT, dictationErrorToast, insertDictation } from './dict
 import DropOverlay from './DropOverlay.vue'
 import EffortMenu from './EffortMenu.vue'
 import ImageOptionsMenu from './ImageOptionsMenu.vue'
+import { mentionErrorMessage, projectAttachErrorText } from './mention-menu'
 import MentionMenu from './MentionMenu.vue'
 import MicButton from './MicButton.vue'
 import { useModeCycle } from './mode-cycle'
@@ -134,7 +140,17 @@ const draft = useComposerDraft(() => props.chatId)
 const text = draft.text
 const current = useComposerModel(() => props.modelRef)
 const attachments = useComposerAttachments({
-  onReject: ({ name, reason, message }) => {
+  onReject: ({ name, reason, message, source, path, error }) => {
+    // A project file of an `@` mention (docs/UI.md 7.26).
+    if (source === 'project') {
+      const title = `${path ?? name} can't be attached`
+      const description = error ? projectAttachErrorText(error) : message
+      if (description)
+        toast.error(title, { description })
+      else
+        toast.error(title)
+      return
+    }
     if (reason === 'size')
       toast.error(`${name} is too large`, { description: 'Files can be up to 20 MB.' })
     else if (reason === 'type')
@@ -162,7 +178,12 @@ const focusTarget = computed(() => (isTouch.value ? null : textarea.value))
 
 const imageOptions = useImageOptions()
 const isImageModel = computed(() => current.model.value?.kind === 'image')
-const effectivePlaceholder = computed(() => (isImageModel.value ? 'Describe an image…' : props.placeholder))
+/** Phase 9: while a run is active, what is sent joins the chat's queue. */
+const effectivePlaceholder = computed(() => {
+  if (running.value)
+    return 'Queue a message…'
+  return isImageModel.value ? 'Describe an image…' : props.placeholder
+})
 
 function onImageOptionsChange(value: ImageOptions) {
   imageOptions.set({ n: value.n, aspectRatio: value.aspectRatio, editPrevious: value.editPrevious })
@@ -214,15 +235,30 @@ const slashOpen = computed(() => slashQuery.value !== null
 const mentions = useFileMentions({ projectId: computed(() => props.projectId), text, caret })
 const mentionOpen = mentions.open
 const mentionProjectName = computed(() => (props.projectId ? projects.byId(props.projectId)?.name ?? null : null))
+const mentionError = computed(() => (mentions.state.value === 'error' ? mentionErrorMessage(mentions.error.value) : null))
 
-/** A picked file or folder replaces the `@` token (W9.8 also attaches a picked file as a project chip). */
+/** A picked file replaces the `@` token with its mention and is attached as a project chip; a folder opens it. */
 function onMentionSelect(entry: ProjectFileEntry) {
+  const projectId = props.projectId
   const next = mentions.apply(entry)
   setTextAndCaret(next.text, next.caret, { force: true })
+  if (entry.kind === 'file' && projectId)
+    attachments.addProject(projectId, entry.path)
 }
 
-/** `+` -> "Mention a file" (W9.8: inserts `@` at the caret and opens the menu). */
-function startMention() {}
+/** `+` -> "Mention a file": `@` at the caret (a blank before it when needed) opens the menu. */
+function startMention() {
+  const value = text.value
+  const element = textarea.value
+  const start = Math.min(element?.selectionStart ?? caret.value, value.length)
+  const end = Math.max(Math.min(element?.selectionEnd ?? start, value.length), start)
+  const before = value.slice(0, start)
+  const after = value.slice(end)
+  const head = before === '' || /\s$/.test(before) ? '@' : ' @'
+  // A word right after the caret would become the query: keep it apart.
+  const tail = after === '' || /^\s/.test(after) ? after : ` ${after}`
+  setTextAndCaret(`${before}${head}${tail}`, before.length + head.length, { force: true })
+}
 
 /** The open menu the textarea's `aria-controls` / `aria-activedescendant` point at. */
 const openMenuRef = computed(() => {
@@ -456,8 +492,9 @@ const drop = useComposerDropZone({
 
 let submitting = false
 
+// Phase 9: a running response no longer blocks sending (ChatView queues the message); dictation and uploads still do.
 async function submit() {
-  if (submitting || running.value || voiceBusy.value)
+  if (submitting || voiceBusy.value)
     return
   const command = parseClientCommand(text.value)
   if (command) {
@@ -472,8 +509,8 @@ async function submit() {
       pendingSubmit.value = true
       await attachments.settled()
       pendingSubmit.value = false
-      // Uploads may have failed or been removed meanwhile, or a response may have started.
-      if (running.value || sendState.value.disabled)
+      // Uploads may have failed or been removed meanwhile.
+      if (sendState.value.disabled)
         return
     }
     const input: ComposerSubmitInput = { text: text.value.trim(), files: attachments.fileRefs.value }
@@ -656,12 +693,21 @@ onMounted(() => {
   focusTextarea()
 })
 
+/** Queued messages back into the composer (after a Stop, or Edit of a queued message): texts and files. */
+function restoreQueued(items: readonly QueueItem[]) {
+  if (items.length === 0)
+    return
+  const value = restoredDraft(text.value, items)
+  setTextAndCaret(value, value.length)
+  attachments.addRefs(items.flatMap(queueItemFiles))
+  toast('Queued messages moved back to the composer.')
+}
+
 const exposed: ChatComposerExposed = {
   focus: () => focusTextarea(),
   setText: (value: string) => setTextAndCaret(value, value.length),
   openModelPicker: () => openMenu('model'),
-  // + Phase 9: W9.8 appends the texts to the draft and restores the files as chips.
-  restoreQueued: (_items: readonly QueueItem[]) => {},
+  restoreQueued,
 }
 defineExpose(exposed)
 
@@ -703,7 +749,7 @@ const TEXTAREA_CLASS = [
       :query="mentions.token.value?.query ?? ''"
       :items="mentions.items.value"
       :state="mentions.state.value"
-      :error-message="mentions.error.value?.message ?? null"
+      :error-message="mentionError"
       :truncated="mentions.truncated.value"
       :project-name="mentionProjectName"
       @select="onMentionSelect"

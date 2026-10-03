@@ -11,17 +11,23 @@
 //   failed before its `start-step`, an abort) is emitted before the `finish` chunk, or when the stream closes. Chunks
 //   keep their injection order. A steer therefore always lands between two steps, so `splitSteers` rebuilds the same
 //   model history from the saved reply.
-// - `createSteerStep(input)` (stub until W9.2: a piece that changes nothing): the second piece of the step composer
-//   (`steps.ts`). W9.2: synchronously takes every steerable queued item of the chat (`ChatQueue.takeSteerable`), turns
-//   each into a user model message (a one-message UI history through `prepareModelFiles` and `convertToModelMessages`),
-//   appends them to `messages` (carried into later steps) and injects `data-steer { id, parts, queuedAt, deliveredAt }`
-//   for that step; step 0 counts (the first call of a new turn or of an approval continuation).
-import type { ToolSet } from 'ai'
+// - `createSteerStep(input)` (W9.2): the second piece of the step composer (`steps.ts`). Before every model call (step 0
+//   included: the first call of a new turn or of an approval continuation delivers what waited) it synchronously takes
+//   every steerable queued item of the chat (`ChatQueue.takeSteerable`, reported `delivered`; the take cannot race a
+//   `DELETE`) and injects one `data-steer { id, parts, queuedAt, deliveredAt }` per item for that step at once (so the
+//   transcript holds every taken item, even when a conversion fails); then it turns each item into a user model
+//   message (a one-message UI history through `prepareModelFiles` and `convertToModelMessages`, exactly what
+//   `buildModelHistory` + `prepareModelFiles` make of the saved steer later) and appends them to `messages` (the SDK
+//   carries them into later steps). An aborted run takes nothing (its end empties the queue). Steer texts are never
+//   logged.
+import type { HarnessUIMessage, QueueItem } from '@harness-forge/shared'
+import type { ModelMessage, ToolSet } from 'ai'
 import type { ResolvedModel } from '../providers/types.ts'
 import type { HarnessUIMessageChunk } from './generated-files.ts'
-import type { RunSession } from './pipeline.ts'
+import type { HarnessDataChunk, RunSession } from './pipeline.ts'
 import type { StepPiece } from './steps.ts'
-import { noopStepPiece } from './steps.ts'
+import { convertToModelMessages } from 'ai'
+import { prepareModelFiles } from './files.ts'
 
 /** Where `stepInjector` takes the injected chunks from (`RunSession` implements it). */
 export interface StepInjectionSource {
@@ -68,7 +74,52 @@ export interface SteerStepInput {
   readonly tools: ToolSet
 }
 
-/** The steer piece of the step composer (stub until W9.2: changes nothing; see the module comment). */
-export function createSteerStep(_input: SteerStepInput): StepPiece {
-  return noopStepPiece
+/** The `data-steer` chunk of a delivered item (its id is the queued message id). */
+export function steerChunk(item: QueueItem, deliveredAt: number): HarnessDataChunk {
+  return { type: 'data-steer', data: { id: item.id, parts: item.message.parts, queuedAt: item.createdAt, deliveredAt } }
+}
+
+/** A delivered item as the one-message UI history of its user message (what `splitSteers` makes of the saved part). */
+export function steerUIMessage(item: QueueItem): HarnessUIMessage {
+  return { id: item.id, role: 'user', parts: item.message.parts }
+}
+
+/**
+ * The user model message(s) of a delivered item: its files loaded for the run's model (`prepareModelFiles`), then
+ * `convertToModelMessages`. A conversion that fails falls back to the item's text (the model still reads the steer).
+ */
+export async function steerModelMessages(item: QueueItem, input: SteerStepInput): Promise<ModelMessage[]> {
+  const { session, model, tools } = input
+  const { deps, logger } = session.ctx
+  try {
+    const files = await prepareModelFiles([steerUIMessage(item)], { capabilities: model.entry.capabilities, files: deps.files, logger })
+    return await convertToModelMessages<HarnessUIMessage>(files.messages, { tools, ignoreIncompleteToolCalls: true })
+  }
+  catch (error) {
+    logger.warn('a steered message could not be converted; its text is sent', { itemId: item.id, err: error })
+    const text = item.message.parts.flatMap(part => (part.type === 'text' ? [part.text] : [])).join('\n')
+    return [{ role: 'user', content: text === '' ? '(The user sent files that could not be read.)' : text }]
+  }
+}
+
+/** The steer piece of the step composer (see the module comment). */
+export function createSteerStep(input: SteerStepInput): StepPiece {
+  const { session } = input
+  return async ({ stepNumber, messages }) => {
+    const { ctx } = session
+    if (ctx.run.signal.aborted)
+      return undefined
+    // Synchronous take and injection: a `DELETE` either removed the item before or answers 404 now.
+    const items = ctx.queue.takeSteerable(session.chatId)
+    if (items.length === 0)
+      return undefined
+    const deliveredAt = ctx.now()
+    for (const item of items)
+      session.inject(steerChunk(item, deliveredAt), stepNumber)
+    ctx.logger.debug('steered queued messages into the run', { stepNumber, count: items.length, itemIds: items.map(item => item.id) })
+    const steered: ModelMessage[] = []
+    for (const item of items)
+      steered.push(...await steerModelMessages(item, input))
+    return { messages: [...messages, ...steered] }
+  }
 }

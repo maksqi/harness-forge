@@ -32,6 +32,42 @@ describe('message text', () => {
     expect(messagePlainText(parts)).toBe('First\nSecond')
   })
 
+  it('includes the text of steers at their place, never compaction summaries or notices (Phase 9)', () => {
+    const parts = [
+      { type: 'step-start' },
+      { type: 'text', text: 'Working on it' },
+      {
+        type: 'data-steer',
+        id: 'steer_1',
+        data: {
+          id: 'msg_steer00000000001',
+          parts: [{ type: 'text', text: 'Also cover the PINEAPPLE case' }, { type: 'file', mediaType: 'text/plain', filename: 'notes.txt', url: '/api/files/file_0000000000000001' }],
+          queuedAt: 1,
+          deliveredAt: 2,
+        },
+      },
+      { type: 'step-start' },
+      { type: 'text', text: 'Done' },
+      {
+        type: 'data-compaction',
+        data: { trigger: 'auto', keep: 'last-user', summary: 'SECRET-SUMMARY of the work', modelRef: 'mock:compact', messagesCompacted: 4, tokensBefore: 900, tokensAfter: 100, createdAt: 3 },
+      },
+      { type: 'data-notice', data: { level: 'warning', code: 'compaction-failed', message: 'NOTICE-TEXT' } },
+      // An invalid steer is not text.
+      { type: 'data-steer', data: { id: 'not-an-id', parts: [{ type: 'text', text: 'INVALID-STEER' }], queuedAt: 1, deliveredAt: 2 } },
+    ]
+    expect(messagePlainText(parts)).toBe('Working on it\nAlso cover the PINEAPPLE case\nDone')
+    const search = toSearchText(parts)
+    expect(search).toContain('pineapple')
+    expect(search).not.toContain('secret-summary')
+    expect(search).not.toContain('notice-text')
+    expect(search).not.toContain('invalid-steer')
+    // A /compact reply (only the marker) has no search text.
+    expect(toSearchText([{ type: 'step-start' }, parts[5]])).toBe('')
+    // A user message that is only a steer still reads as text.
+    expect(messagePlainText([parts[2]])).toBe('Also cover the PINEAPPLE case')
+  })
+
   it('stores search text NFC-normalized and lowercased with Unicode rules', () => {
     expect(toSearchText([{ type: 'text', text: `Hello \u00DCBER ${GREEK_WORLD_UPPER}` }])).toBe(`hello \u00FCber ${GREEK_WORLD_LOWER}`)
     // A decomposed "e" + combining acute becomes the composed character.

@@ -1,19 +1,29 @@
-import type { HarnessUIMessage, MessageMetadata, SteerData } from '@harness-forge/shared'
+import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider'
+import type { ChatDetail, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, SteerData } from '@harness-forge/shared'
 import type { LanguageModelUsage, TextStreamPart, ToolSet, UIMessageChunk, UIMessageStreamWriter } from 'ai'
 import type { ResolvedModel } from '../providers/types.ts'
+import type { TestApp } from '../testing/create-test-app.ts'
 import type { AppDeps } from '../types.ts'
 import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { RunEnding } from './history.ts'
 import type { RunContext } from './pipeline.ts'
 import type { PreparedRun } from './prepare.ts'
-import { HarnessError } from '@harness-forge/shared'
-import { describe, expect, it } from 'vitest'
+import { chatDetailSchema, createMessageId, HarnessError } from '@harness-forge/shared'
+import { convertToModelMessages } from 'ai'
+import { convertArrayToReadableStream, MockLanguageModelV4 } from 'ai/test'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import { createSilentLogger } from '../logger.ts'
 import { createRedactor } from '../security/redact.ts'
-import { alreadyNoticed, catchStreamErrors, NOTICES, RunSession, TaskTracker, withNotices } from './pipeline.ts'
+import { createTestApp } from '../testing/create-test-app.ts'
+import { assistant, seedChat, user } from './compaction/testing.ts'
+import { COMPACT_INSTRUCTIONS_MARKER } from './markers.ts'
+import { TODO_HINT } from './params.ts'
+import { alreadyNoticed, catchStreamErrors, historyToolSet, NOTICES, RunSession, TaskTracker, withNotices } from './pipeline.ts'
 import { createChatQueue } from './queue.ts'
 import { createRunRegistry } from './runs.ts'
 import { stepInjector } from './steer.ts'
+import { chatBody, postChat, readSse, runnerOf, streamedText, testChatId } from './testing.ts'
 
 async function collect<T>(stream: ReadableStream<T>): Promise<T[]> {
   const values: T[] = []
@@ -407,5 +417,351 @@ describe('runSession: release callback (Phase 9)', () => {
     s.ctx.registry.release(s.ctx.run)
     await s.finalize(undefined, true)
     expect(endings).toEqual([])
+  })
+})
+
+// ---------- W9.1: compaction inside runs, the history tool set, the agent blocks, run.started ----------
+
+/** Models of the `compactkit` provider (window 10 000, tools), set per test. */
+const compactkit = new Map<string, LanguageModelV4>()
+let app: TestApp
+
+function streamFinish(input: number, output: number, reason: 'stop' | 'tool-calls'): LanguageModelV4StreamPart {
+  return {
+    type: 'finish',
+    usage: { inputTokens: { total: input, noCache: input, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: output, text: output, reasoning: 0 } },
+    finishReason: { unified: reason, raw: reason },
+  }
+}
+
+/** A text (and optionally one `current_time` call) as stream parts, reporting `input` prompt tokens. */
+function stepParts(text: string, call: string | null, input = 10): LanguageModelV4StreamPart[] {
+  return [
+    { type: 'text-start', id: 't' },
+    { type: 'text-delta', id: 't', delta: text },
+    { type: 'text-end', id: 't' },
+    ...(call === null ? [] : [{ type: 'tool-call' as const, toolCallId: call, toolName: 'current_time', input: '{}' }]),
+    streamFinish(input, 5, call === null ? 'stop' : 'tool-calls'),
+  ]
+}
+
+/** The texts of a provider prompt (system included), for "contains" checks. */
+function promptText(call: LanguageModelV4CallOptions | undefined): string {
+  return JSON.stringify(call?.prompt ?? [])
+}
+
+/** The first text part of the first user message of a provider prompt. */
+function firstUserText(call: LanguageModelV4CallOptions | undefined): string {
+  const message = call?.prompt.find(entry => entry.role === 'user')
+  const part = message?.role === 'user' ? message.content[0] : undefined
+  return part?.type === 'text' ? part.text : ''
+}
+
+async function compactDetail(chatId: string): Promise<ChatDetail> {
+  const response = await app.request(`/api/chats/${chatId}`)
+  expect(response.status).toBe(200)
+  return chatDetailSchema.parse(await response.json())
+}
+
+describe('compaction inside runs (W9.1-T5)', () => {
+  let disposable: { dispose: () => void } | undefined
+
+  beforeAll(async () => {
+    app = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' } })
+    disposable = app.deps.registry.providers.register('mock', {
+      id: 'compactkit',
+      name: 'Compact kit',
+      credentials: [],
+      seedModels: [{ id: 'agent', name: 'Agent', contextWindow: 10_000, capabilities: { tools: true }, cost: { input: 1, output: 2 } }],
+      createLanguageModel: (modelId) => {
+        const model = compactkit.get(modelId)
+        if (model === undefined)
+          throw new Error(`No scripted model "${modelId}".`)
+        return model
+      },
+    })
+  })
+
+  afterAll(async () => {
+    disposable?.dispose()
+    await app.close()
+  })
+
+  it('carries the summary into the later steps and equals buildModelHistory of the saved reply', async () => {
+    const streamCalls: LanguageModelV4CallOptions[] = []
+    const summarizerCalls: LanguageModelV4CallOptions[] = []
+    // Calls 1-4 do a step with a `current_time` call; call 2 reports a context above 80 % of the window, so the guard
+    // compacts before call 3 (step 2). Calls from 5 on answer with text.
+    compactkit.set('agent', new MockLanguageModelV4({
+      doStream: async (options) => {
+        streamCalls.push(options)
+        const n = streamCalls.length
+        const parts = n <= 4 ? stepParts(`Step ${n} done.`, `call_${n}`, n === 2 ? 9500 : 10) : stepParts(n === 5 ? 'All done.' : 'Next answer.', null)
+        return { stream: convertArrayToReadableStream(parts) }
+      },
+      doGenerate: async (options) => {
+        // The chat title is asked for with `generateText` too: only the summarizer calls carry the marker.
+        const summarizer = promptText(options).includes(COMPACT_INSTRUCTIONS_MARKER)
+        if (summarizer)
+          summarizerCalls.push(options)
+        return {
+          content: [{ type: 'text', text: summarizer ? 'SUMMARY-ONE of steps 1 and 2' : 'A title' }],
+          finishReason: { unified: 'stop', raw: 'stop' },
+          usage: { inputTokens: { total: 50, noCache: 50, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 7, text: 7, reasoning: 0 } },
+          warnings: [],
+        }
+      },
+    }))
+    const chatId = testChatId(9150)
+    const body = { ...chatBody(chatId, 'do the work OLD-9'), modelRef: 'compactkit:agent' }
+    const { chunks } = await readSse(await postChat(app, body))
+    await runnerOf(app).idle()
+    expect(streamCalls).toHaveLength(5)
+    expect(summarizerCalls).toHaveLength(1)
+    expect(promptText(summarizerCalls[0])).toContain(COMPACT_INSTRUCTIONS_MARKER)
+
+    // Steps 0 and 1 saw the original request; steps 2, 3 and 4 start with the summary, then the request.
+    expect(firstUserText(streamCalls[0])).toBe('do the work OLD-9')
+    expect(firstUserText(streamCalls[1])).toBe('do the work OLD-9')
+    for (const call of streamCalls.slice(2)) {
+      expect(firstUserText(call)).toContain('SUMMARY-ONE of steps 1 and 2')
+      expect(promptText(call)).toContain('do the work OLD-9')
+      expect(promptText(call)).not.toContain('Step 1 done.')
+      expect(promptText(call)).not.toContain('Step 2 done.')
+    }
+    expect(promptText(streamCalls[3])).toContain('Step 3 done.')
+    expect(promptText(streamCalls[4])).toContain('Step 4 done.')
+
+    // The marker was streamed right before the start-step of step 2, with the activity around the summary.
+    const types = chunks.map(chunk => chunk.type)
+    const markerAt = types.indexOf('data-compaction')
+    expect(markerAt).toBeGreaterThan(0)
+    expect(types[markerAt + 1]).toBe('start-step')
+    expect(chunks.filter(chunk => chunk.type === 'start-step').length).toBe(5)
+    expect(types.slice(0, markerAt).filter(type => type === 'start-step')).toHaveLength(2)
+    expect(chunks.filter(chunk => chunk.type === 'data-activity').map(chunk => (chunk as { data: unknown }).data)).toEqual([{ kind: 'compacting' }, { kind: 'idle' }])
+
+    // The saved reply holds the marker exactly there; the usage row and the cost are recorded.
+    const detail = await compactDetail(chatId)
+    const reply = detail.messages.at(-1)!
+    const markerIndex = reply.parts.findIndex(part => part.type === 'data-compaction')
+    const marker = reply.parts[markerIndex]
+    expect(marker?.type === 'data-compaction' ? marker.data : null).toMatchObject({ trigger: 'auto', keep: 'last-user', summary: 'SUMMARY-ONE of steps 1 and 2', modelRef: 'compactkit:agent', messagesCompacted: 1 })
+    expect(reply.parts[markerIndex + 1]?.type).toBe('step-start')
+    expect(JSON.stringify(reply.parts.slice(0, markerIndex))).toContain('Step 2 done.')
+    const rows = await app.database.client.execute({ sql: 'SELECT purpose, message_id FROM usage WHERE chat_id = ? AND purpose IN (\'chat\', \'compact\') ORDER BY purpose', args: [chatId] })
+    expect(rows.rows.map(row => [row.purpose, row.message_id])).toEqual([['chat', reply.id], ['compact', reply.id]])
+
+    // Equivalence: the next turn's history (`buildModelHistory` of the saved path) starts with exactly the messages
+    // the last in-run step saw, followed by that step's answer.
+    await readSse(await postChat(app, { ...chatBody(chatId, 'and now?'), modelRef: 'compactkit:agent' }))
+    await runnerOf(app).idle()
+    const lastInRun = streamCalls[4]!.prompt
+    const nextTurn = streamCalls[5]!.prompt
+    expect(nextTurn.slice(0, lastInRun.length)).toEqual(lastInRun)
+    expect(nextTurn.slice(lastInRun.length)).toEqual([
+      { role: 'assistant', content: [{ type: 'text', text: 'All done.' }] },
+      { role: 'user', content: [{ type: 'text', text: 'and now?' }] },
+    ])
+    // The summary is never logged at info.
+    expect(app.logs.records.filter(record => record.level !== 'debug').map(record => JSON.stringify(record)).join('\n')).not.toContain('SUMMARY-ONE')
+  })
+
+  it('a stop while the summary is written ends the run aborted, without a marker', async () => {
+    let started!: () => void
+    const summarizing = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    let streamCalls = 0
+    compactkit.set('agent', new MockLanguageModelV4({
+      doStream: async () => {
+        streamCalls += 1
+        return { stream: convertArrayToReadableStream(stepParts(`Step ${streamCalls} done.`, `call_${streamCalls}`, 9500)) }
+      },
+      doGenerate: options => new Promise((_resolve, reject) => {
+        if (!promptText(options).includes(COMPACT_INSTRUCTIONS_MARKER)) {
+          reject(new Error('no title'))
+          return
+        }
+        started()
+        options.abortSignal?.addEventListener('abort', () => reject(options.abortSignal?.reason), { once: true })
+      }),
+    }))
+    const chatId = testChatId(9154)
+    const response = await postChat(app, { ...chatBody(chatId, 'work'), modelRef: 'compactkit:agent' })
+    const reading = readSse(response)
+    await summarizing
+    expect(await runnerOf(app).stop(chatId)).toBe(true)
+    const { chunks } = await reading
+    await runnerOf(app).idle()
+    expect(streamCalls).toBe(1)
+    expect(chunks.some(chunk => chunk.type === 'data-compaction')).toBe(false)
+    const reply = (await compactDetail(chatId)).messages.at(-1)!
+    expect(reply.metadata?.aborted).toBe(true)
+    expect(reply.metadata?.error).toBeUndefined()
+    expect(reply.parts.some(part => part.type === 'data-compaction' || part.type === 'data-notice')).toBe(false)
+  })
+
+  it('without compaction the history goes to the model unchanged', async () => {
+    const streamCalls: LanguageModelV4CallOptions[] = []
+    compactkit.set('agent', new MockLanguageModelV4({
+      doStream: async (options) => {
+        streamCalls.push(options)
+        return { stream: convertArrayToReadableStream(stepParts('plain', null)) }
+      },
+    }))
+    const chatId = testChatId(9151)
+    await readSse(await postChat(app, { ...chatBody(chatId, 'hello'), modelRef: 'compactkit:agent' }))
+    await runnerOf(app).idle()
+    expect(firstUserText(streamCalls[0])).toBe('hello')
+    expect((await compactDetail(chatId)).messages.at(-1)?.parts.some(part => part.type === 'data-compaction')).toBe(false)
+  })
+
+  it('sends the agent blocks of the offered core-agent tools in the instructions', async () => {
+    const streamCalls: LanguageModelV4CallOptions[] = []
+    compactkit.set('agent', new MockLanguageModelV4({
+      doStream: async (options) => {
+        streamCalls.push(options)
+        return { stream: convertArrayToReadableStream(stepParts('ok', null)) }
+      },
+    }))
+    const chatId = testChatId(9152)
+    await readSse(await postChat(app, { ...chatBody(chatId, 'hi'), modelRef: 'compactkit:agent' }))
+    await runnerOf(app).idle()
+    const offered = (streamCalls[0]?.tools ?? []).map(entry => entry.name)
+    expect(offered).toContain('todo_write')
+    const system = streamCalls[0]?.prompt.filter(message => message.role === 'system').map(message => message.content).join('\n') ?? ''
+    expect(system).toContain(TODO_HINT)
+  })
+
+  it('emits run.started with origin request', async () => {
+    compactkit.set('agent', new MockLanguageModelV4({ doStream: async () => ({ stream: convertArrayToReadableStream(stepParts('ok', null)) }) }))
+    const chatId = testChatId(9153)
+    const started = new Promise<unknown>((resolve) => {
+      const subscription = app.deps.events.subscribe((event) => {
+        if (event.type === 'run.started' && event.data.chatId === chatId) {
+          subscription.dispose()
+          resolve(event.data)
+        }
+      })
+    })
+    await readSse(await postChat(app, { ...chatBody(chatId, 'hi'), modelRef: 'compactkit:agent' }))
+    await runnerOf(app).idle()
+    const data = await started as Record<string, unknown>
+    expect(data).toMatchObject({ chatId, modelRef: 'compactkit:agent', origin: 'request' })
+    expect(data.userMessageId).toBeUndefined()
+  })
+})
+
+describe('mock:compact runs (W9.1-T3 / T5)', () => {
+  let loopApp: TestApp
+
+  beforeAll(async () => {
+    loopApp = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' } })
+  })
+
+  afterAll(async () => {
+    await loopApp.close()
+  })
+
+  /** A chat whose history (eight turns with sentinels, about 2300 tokens) is above the 2000-token window. */
+  async function oversized(chatId: string): Promise<void> {
+    const turns = [1, 2, 3, 4, 5, 6, 7, 8].flatMap(n => [user(createMessageId(), `old turn OLD-${n}`), assistant(createMessageId(), `answer ${n} ${'filler '.repeat(150)}`)])
+    await seedChat(loopApp.deps, chatId, turns)
+  }
+
+  async function seen(chatId: string): Promise<{ text: string, reply: HarnessUIMessage }> {
+    const { chunks } = await readSse(await postChat(loopApp, { ...chatBody(chatId, 'seen?'), modelRef: 'mock:compact' }))
+    await runnerOf(loopApp).idle()
+    const detail = chatDetailSchema.parse(await (await loopApp.request(`/api/chats/${chatId}`)).json())
+    return { text: streamedText(chunks), reply: detail.messages.at(-1)! }
+  }
+
+  it('compacts an oversized history before the first step (the marker opens the reply)', async () => {
+    const chatId = testChatId(9156)
+    await oversized(chatId)
+    const { text, reply } = await seen(chatId)
+    expect(text).toBe('summary:yes seen:none')
+    expect(reply.parts[0]?.type).toBe('data-compaction')
+    expect(reply.parts[0]?.type === 'data-compaction' ? reply.parts[0].data : null).toMatchObject({ trigger: 'auto', keep: 'last-user', messagesCompacted: 16 })
+    expect(reply.parts.some(part => part.type === 'data-notice')).toBe(false)
+  })
+
+  it('autoCompact off: no marker, the oldest turns trimmed with context-trimmed', async () => {
+    const chatId = testChatId(9157)
+    await oversized(chatId)
+    await loopApp.deps.settings.update({ autoCompact: false })
+    try {
+      const { text, reply } = await seen(chatId)
+      expect(text).toMatch(/^summary:no seen:OLD-\d/)
+      expect(text).not.toContain('OLD-1,')
+      expect(reply.parts.some(part => part.type === 'data-compaction')).toBe(false)
+      expect(reply.parts.filter(part => part.type === 'data-notice').map(part => part.type === 'data-notice' ? part.data.code : null)).toEqual(['context-trimmed'])
+    }
+    finally {
+      await loopApp.deps.settings.update({ autoCompact: true })
+    }
+  })
+
+  it('a failing summarizer: the run still answers, trimmed, with compaction-failed; the stored history is unchanged', async () => {
+    const chatId = testChatId(9158)
+    await oversized(chatId)
+    const before = chatDetailSchema.parse(await (await loopApp.request(`/api/chats/${chatId}`)).json()).messages
+    await loopApp.deps.settings.update({ compactModelRef: 'mock:error' })
+    try {
+      const { text, reply } = await seen(chatId)
+      expect(text).toMatch(/^summary:no seen:OLD-\d/)
+      expect(reply.parts.some(part => part.type === 'data-compaction')).toBe(false)
+      expect(reply.parts.filter(part => part.type === 'data-notice').map(part => part.type === 'data-notice' ? part.data.code : null)).toEqual(['compaction-failed'])
+      const after = chatDetailSchema.parse(await (await loopApp.request(`/api/chats/${chatId}`)).json()).messages
+      expect(after.slice(0, before.length)).toEqual(before)
+    }
+    finally {
+      await loopApp.deps.settings.update({ compactModelRef: null })
+    }
+  })
+
+  it('a loop run compacts between two steps and finishes', async () => {
+    const chatId = testChatId(9155)
+    // A long earlier conversation (about 1200 tokens), so the second step of the loop passes 80 % of the window.
+    const seeded = [1, 2, 3, 4].flatMap(n => [user(createMessageId(), `seed turn ${n}`), assistant(createMessageId(), `seed answer ${n} ${'filler '.repeat(170)}`)])
+    await seedChat(loopApp.deps, chatId, seeded)
+    const { chunks } = await readSse(await postChat(loopApp, { ...chatBody(chatId, 'loop 2'), modelRef: 'mock:compact' }))
+    await runnerOf(loopApp).idle()
+    expect(streamedText(chunks)).toContain('Loop finished after 2 steps.')
+    const reply = (await chatDetailSchema.parse(await (await loopApp.request(`/api/chats/${chatId}`)).json())).messages.at(-1)!
+    const markerIndex = reply.parts.findIndex(part => part.type === 'data-compaction')
+    expect(markerIndex).toBeGreaterThan(0)
+    // Between the steps: step 1 before the marker, step 2 after it.
+    expect(JSON.stringify(reply.parts.slice(0, markerIndex))).toContain('Step 1 done.')
+    expect(JSON.stringify(reply.parts.slice(markerIndex))).toContain('Step 2 done.')
+    const marker = reply.parts[markerIndex]
+    expect(marker?.type === 'data-compaction' ? marker.data : null).toMatchObject({ trigger: 'auto', keep: 'last-user', todos: [{ id: 'loop', status: 'in_progress' }] })
+    expect(marker?.type === 'data-compaction' ? marker.data.summary : '').toContain('steps-done=1')
+  }, 30_000)
+})
+
+describe('historyToolSet (W9.1, from W9.3)', () => {
+  it('converts earlier outputs of tools the run does not offer with their toModelOutput', async () => {
+    const plugins = { guard: async <T>(_pluginId: string, fn: (signal: AbortSignal) => Promise<T> | T) => fn(new AbortController().signal) } as never
+    const writeTool = {
+      pluginId: 'core-workspace',
+      mcpServerId: null,
+      title: null,
+      definition: { name: 'write_file', description: 'w', inputSchema: z.object({ path: z.string() }), toModelOutput: () => ({ type: 'text' as const, value: 'Wrote notes.txt.' }), execute: async () => ({ diff: 'RAW-DIFF' }) },
+    }
+    const plain = { pluginId: 'x', mcpServerId: null, title: null, definition: { name: 'plain', description: 'p', inputSchema: z.object({}), execute: async () => 1 } }
+    const set = historyToolSet({}, [writeTool, plain] as never, plugins)
+    expect(Object.keys(set)).toEqual(['write_file'])
+    const history: HarnessUIMessage[] = [
+      { id: 'msg_u000000000000001', role: 'user', parts: [{ type: 'text', text: 'plan it' }] },
+      { id: 'msg_a000000000000001', role: 'assistant', parts: [{ type: 'tool-write_file', toolCallId: 'w1', state: 'output-available', input: { path: 'notes.txt' }, output: { diff: 'RAW-DIFF' } } as unknown as HarnessUIMessagePart] },
+    ]
+    const converted = JSON.stringify(await convertToModelMessages(history, { tools: set }))
+    expect(converted).toContain('Wrote notes.txt.')
+    expect(converted).not.toContain('RAW-DIFF')
+    // The run's own tools win over the registry entries.
+    const own = { write_file: { inputSchema: z.object({}), toModelOutput: () => ({ type: 'text' as const, value: 'own' }) } } as never
+    expect(historyToolSet(own, [writeTool] as never, plugins).write_file).toBe((own as Record<string, unknown>).write_file)
   })
 })

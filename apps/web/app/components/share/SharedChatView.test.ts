@@ -229,6 +229,59 @@ describe('sharedChatView', () => {
     expect(mocks.calls).toEqual(['shares.view'])
   })
 
+  it('renders a reply split at a steer as reply, user bubble, reply, and never a compaction (Phase 9)', async () => {
+    respond(shareView({
+      options: { reasoning: false, toolDetails: false, attachments: true },
+      messages: [
+        { role: 'user', parts: [{ type: 'text', text: 'Fix the parser.' }] },
+        {
+          role: 'assistant',
+          modelRef: 'mock:steer',
+          parts: [
+            { type: 'tool', toolName: 'todo_write', status: 'done' },
+            { type: 'text', text: 'Step 1 done.' },
+          ],
+        },
+        // The steer, split out by the server: an ordinary user message with its file.
+        {
+          role: 'user',
+          parts: [
+            { type: 'text', text: 'Use the vitest filter instead' },
+            { type: 'file', mediaType: 'application/pdf', filename: 'filter.pdf', url: FILE_URL },
+          ],
+        },
+        {
+          role: 'assistant',
+          modelRef: 'mock:steer',
+          parts: [
+            { type: 'tool', toolName: 'task', status: 'done' },
+            { type: 'tool', toolName: 'exit_plan_mode', status: 'done' },
+            { type: 'text', text: 'Switched to the vitest filter.' },
+          ],
+        },
+        // A /compact reply: the server dropped its marker.
+        { role: 'user', command: { name: 'compact' }, parts: [{ type: 'text', text: '/compact' }] },
+        { role: 'assistant', modelRef: 'mock:steer', parts: [] },
+      ],
+    }))
+    mountView()
+    await settle()
+    const messages = allByTestId(testIds.shareMessage)
+    expect(messages.map(message => message.dataset.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'assistant'])
+    const steer = messages[2]!
+    expect(steer.querySelector('[data-slot="user-message"]')?.textContent).toContain('Use the vitest filter instead')
+    expect(byTestId(testIds.fileChip, steer)?.textContent).toContain('filter.pdf')
+    expect(steer.querySelector('[data-slot="share-message-meta"]')).toBeNull()
+    // The agent tools are share tool rows (bodies only with tool details, ShareToolRow's part).
+    expect(allByTestId(testIds.shareToolRow).map(row => row.dataset.toolName)).toEqual(['todo_write', 'task', 'exit_plan_mode'])
+    // None of the chat's own agent pieces: no steer note, divider, summary or dimming.
+    for (const id of [testIds.steerNote, testIds.compactionDivider, testIds.compactionSummary, testIds.taskBlock, testIds.planApproval])
+      expect(byTestId(id), id).toBeNull()
+    expect(document.body.querySelector('[data-compacted]')).toBeNull()
+    expect(messages[4]!.querySelector('[data-slot="command-badge"]')?.textContent).toContain('/compact')
+    expect(mocks.calls).toEqual(['shares.view'])
+  })
+
   it('calls nothing but shares.view with the token, without any store', async () => {
     mountView()
     await settle()

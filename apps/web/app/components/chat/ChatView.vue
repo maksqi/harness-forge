@@ -23,12 +23,18 @@
 // Closing the dialog any other way puts focus back on the button.
 // Phase 9 (ADR-040 - ADR-042; C25 mounts, W9.9 implements; frozen from Gate P9-0b): the dock stacks TodoStrip (the
 // session's `todos`) and QueuedMessages (the session's `queue`) above the composer; the transcript gets the session's
-// transient `activity`; Stop hands the queued messages it dropped back to the composer (`restoreQueued`); a plan
-// approval's `planMode` / `reason` reach the session through the approval payload.
+// transient `activity`. A submit while a run is active is queued by the session (announced "Message queued"; a full
+// queue or another failure puts the text back into the composer with a toast); Stop hands the queued messages it
+// dropped back to this tab's composer (`restoreQueued`); Cancel and Edit on a queued message cancel it ("Already sent to
+// the agent." when it was delivered meanwhile), Edit then restores it. A plan approval's `planMode` / `reason` reach the
+// session through the approval payload; the decision is announced ("Plan approved. Permission mode: Accept edits." /
+// "Feedback sent. The agent keeps planning.") and focus goes back to the composer. A compaction marker that arrives in
+// this tab's stream is announced once ("Conversation compacted").
 import type { HarnessError, MessageBranch, ReasoningEffort, RestoreResult, ToolMode } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
+import { compactionMarkers } from '@harness-forge/shared'
 import { useElementSize } from '@vueuse/core'
 import { isToolUIPart } from 'ai'
 import { computed, nextTick, onMounted, provide, ref, useTemplateRef, watch } from 'vue'
@@ -36,12 +42,14 @@ import { toast } from 'vue-sonner'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import ChatComposer from '~/components/chat/composer/ChatComposer.vue'
+import { toolModeOption } from '~/components/chat/composer/permission'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import { toHarnessErrorView } from '~/components/common/harness-error'
 import { REWIND_DIALOG_HOST, REWIND_RUN_ACTIVE_MESSAGE, runningChatOf } from '~/components/workspace/rewind/rewind'
 import { useRewindResultToast } from '~/components/workspace/rewind/rewind-toast'
 import RewindDialog from '~/components/workspace/rewind/RewindDialog.vue'
 import { isBusyConflict, isRunActiveConflict, useChatSession } from '~/composables/useChatSession'
+import { QUEUE_ITEM_GONE_MESSAGE } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
@@ -52,7 +60,7 @@ import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
 import TodoStrip from './agent/TodoStrip.vue'
 import { CHAT_VIEW_ACTIONS } from './chat-context'
-import { imageFileParts, messageText, toolNameOf } from './chat-format'
+import { imageFileParts, messageText, PLAN_TOOL_NAME, toolNameOf } from './chat-format'
 import ChatNotFound from './ChatNotFound.vue'
 import ChatTranscript from './ChatTranscript.vue'
 import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
@@ -127,6 +135,8 @@ const RUN_ACTIVE_MESSAGE = 'A response is already running in this chat.'
 const STALE_CHAT_MESSAGE = 'This chat changed elsewhere and was reloaded.'
 /** docs/UI.md 7.4: a chat request answered `409 conflict` (`busy`): a master-key rotation holds off new runs. */
 const KEY_ROTATION_BUSY_MESSAGE = 'The server is rotating its encryption key. Try again in a moment.'
+/** docs/UI.md 7.26: the chat's queue already holds 10 messages (`409 conflict`, reason `queue-full`). */
+const QUEUE_FULL_MESSAGE = 'The queue is full. Wait for the agent to take a message.'
 
 const scrolled = ref(false)
 const showEmpty = computed(() => props.isNew && messages.value.length === 0 && !session.busy.value)
@@ -213,6 +223,27 @@ watch(pendingApprovals, (pending, previous) => {
     void announce(added.label)
 })
 
+/**
+ * + Phase 9 (ADR-040): compaction markers this view has seen (`<message>:<part>:<createdAt>`). A marker is announced once,
+ * when it arrives in a stream of this tab ("Conversation compacted"); the markers of a loaded path are only remembered.
+ */
+const knownMarkers = new Set<string>()
+watch(() => messages.value.at(-1), (last) => {
+  if (last?.role !== 'assistant')
+    return
+  const streaming = status.value === 'submitted' || status.value === 'streaming'
+  let arrived = false
+  for (const marker of compactionMarkers([last])) {
+    const key = `${last.id}:${marker.partIndex}:${marker.data.createdAt}`
+    if (!knownMarkers.has(key)) {
+      knownMarkers.add(key)
+      arrived = true
+    }
+  }
+  if (arrived && streaming)
+    void announce('Conversation compacted')
+}, { immediate: true })
+
 // ---------- data the transcript needs ----------
 
 onMounted(() => {
@@ -267,19 +298,36 @@ function reportFailure(title: string, failure: unknown) {
 }
 
 function onSubmit(input: ComposerSubmitInput) {
-  if (session.busy.value)
-    return
   if (!session.modelRef.value) {
     toast.error('Choose a model first')
     composer.value?.openModelPicker()
     return
   }
   const first = props.isNew && messages.value.length === 0
-  const sending = session.send(input)
-  transcript.value?.scrollToBottom('smooth')
+  // + Phase 9 (ADR-042): while a run is active the session queues the message (it never enters the transcript).
+  const queueing = runActive.value
+  const submitting = session.submit(input)
+  if (!queueing)
+    transcript.value?.scrollToBottom('smooth')
   if (first)
     emit('created', props.chatId)
-  sending.catch(failure => reportFailure('Could not send the message', failure))
+  submitting
+    .then((result) => {
+      if (result === 'queued')
+        void announce('Message queued')
+    })
+    .catch(failure => onSubmitFailed(input, failure))
+}
+
+/** A message that was neither sent nor queued: its text goes back into the composer (which cleared itself). */
+function onSubmitFailed(input: ComposerSubmitInput, failure: unknown) {
+  if (input.text)
+    composer.value?.setText(input.text)
+  const error = toHarnessError(failure)
+  if (error.code === 'conflict' && (error.details as { reason?: unknown } | undefined)?.reason === 'queue-full')
+    toast(QUEUE_FULL_MESSAGE)
+  else
+    reportFailure('Could not send the message', error)
 }
 
 function onStop() {
@@ -302,7 +350,7 @@ async function cancelQueued(itemId: string) {
   try {
     const result = await session.cancelQueued(itemId)
     if (result === 'gone')
-      toast('Already sent to the agent.')
+      toast(QUEUE_ITEM_GONE_MESSAGE)
     return result === 'cancelled' ? item : null
   }
   finally {
@@ -348,6 +396,13 @@ function onApproval(decision: ToolApprovalDecision) {
   // itself was still sent).
   const title = decision.approved && decision.allowRules ? 'Could not save the rule' : 'Could not save the tool preference'
   session.approve(decision).catch(failure => reportFailure(title, failure))
+  // + Phase 9 (ADR-041): the plan card's decision is announced, and focus goes back to the composer (desktop).
+  if (decision.toolName === PLAN_TOOL_NAME) {
+    void announce(decision.approved
+      ? `Plan approved. Permission mode: ${toolModeOption(decision.planMode ?? toolMode.value).label}.`
+      : 'Feedback sent. The agent keeps planning.')
+    void nextTick(() => composer.value?.focus())
+  }
 }
 
 function onSelectVersion(messageId: string) {

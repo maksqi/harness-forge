@@ -143,12 +143,16 @@ describe('tool service', () => {
     ]))
   })
 
-  it('keeps an allow override stored before v1.4 on an execute tool when a patch leaves the override alone', async () => {
+  it('lists an allow override stored before v1.4 on an execute tool as null, and a patch clears it (Phase 9)', async () => {
     const { t } = await app()
     t.deps.registry.tools.register('alpha', tool('exec_tool', { workspace: 'execute' }))
     await t.db.insert(toolPrefs).values({ toolName: 'exec_tool', enabled: true, override: 'allow', updatedAt: 1 })
-    // The approval ignores it (W8.5); this route only refuses new ones, and clearing it works.
-    expect(await t.deps.tools.update('exec_tool', { enabled: false })).toMatchObject({ enabled: false, override: 'allow' })
+    // The approval ignores it (W8.5), so the list shows the effective override; the raw prefs keep the row.
+    expect((await t.deps.tools.list()).find(item => item.name === 'exec_tool')).toMatchObject({ enabled: true, override: null })
+    expect(await t.deps.tools.prefs()).toEqual(new Map([['exec_tool', { enabled: true, override: 'allow' }]]))
+    // A patch that leaves the override alone stores the effective one.
+    expect(await t.deps.tools.update('exec_tool', { enabled: false })).toMatchObject({ enabled: false, override: null })
+    expect(await t.deps.tools.prefs()).toEqual(new Map([['exec_tool', { enabled: false, override: null }]]))
     expect(await t.deps.tools.update('exec_tool', { override: null, enabled: true })).toMatchObject({ enabled: true, override: null })
     expect(await t.deps.tools.prefs()).toEqual(new Map())
   })

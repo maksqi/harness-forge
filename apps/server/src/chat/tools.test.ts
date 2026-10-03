@@ -10,9 +10,10 @@ import type { WorkspaceRunScope, WorkspaceRunScopeInit } from '../workspace/run-
 import type { ToolAssemblyInput, ToolWrapContext } from './tools.ts'
 import { Buffer } from 'node:buffer'
 import { LIMITS } from '@harness-forge/shared'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { createMemoryLogger, createSilentLogger } from '../logger.ts'
+import { guardCall } from '../plugins/guard.ts'
 import { createFakeCheckpointService } from '../testing/fake-checkpoints.ts'
 import { runScopeOf } from '../workspace/run-scope.ts'
 import { ToolFailure } from './errors.ts'
@@ -21,8 +22,12 @@ import {
   capToolOutput,
   clampToolTimeout,
   CORE_WORKSPACE_PLUGIN_ID,
+  isAsyncGeneratorFunction,
+  isAsyncIterable,
   isTruncatedToolOutput,
   offersWorkspaceTool,
+  PRELIMINARY_INTERVAL_MS,
+  PRELIMINARY_OUTPUTS_MAX,
   settledCallRecord,
   toolWorkspace,
   utf8Prefix,
@@ -527,7 +532,7 @@ describe('wrapToolExecute: journal rows of settled calls (Phase 8)', () => {
       [scopedTool('core-mcp', 'mcp__srv__write'), 'call_mcp'],
     ]
     for (const [tool, toolCallId] of calls)
-      await wrapToolExecute(tool, context)({}, { ...options, toolCallId }).catch(() => {})
+      await Promise.resolve(wrapToolExecute(tool, context)({}, { ...options, toolCallId })).catch(() => {})
     expect(recorded(fake.records)).toEqual([
       { kind: 'untracked', toolCallId: 'call_lint', tool: 'lint_fix' },
       { kind: 'untracked', toolCallId: 'call_task', tool: 'run_task' },
@@ -608,5 +613,285 @@ describe('assembleTools: the run scope (Phase 8)', () => {
     expect(bound.get('call_plain')).toBeNull()
     expect(fake.records).toHaveLength(1)
     expect((await assembleTools(assemblyInput({ toolMode: 'off', workspace: OPEN_WORKSPACE, scope }))).scope).toBe(scope)
+  })
+})
+
+// ---------- Phase 9: streaming tools (async-generator execute, W9.5-T1) ----------
+
+/** The real guard (timeout, abort) with silent services. */
+const realGuard: ToolWrapContext['plugins']['guard'] = (pluginId, fn, guardOptions) => guardCall(
+  { log: () => {}, redactText: text => text, lifecycleSignal: () => undefined, isInactive: () => false },
+  pluginId,
+  fn,
+  guardOptions,
+)
+
+function streamingContext(overrides: Parameters<typeof wrapContext>[0] & { callIdPrefix?: string, signal?: AbortSignal } = {}): ToolWrapContext {
+  const { callIdPrefix, signal, ...rest } = overrides
+  const context = wrapContext(rest)
+  return {
+    ...context,
+    plugins: { ...context.plugins, guard: realGuard },
+    ...(signal === undefined ? {} : { signal }),
+    ...(callIdPrefix === undefined ? {} : { callIdPrefix }),
+  }
+}
+
+/** Every value the wrapped `execute` yields (it must be a generator for a streaming tool). */
+async function collect(result: unknown): Promise<unknown[]> {
+  expect(isAsyncIterable(result)).toBe(true)
+  const values: unknown[] = []
+  for await (const value of result as AsyncIterable<unknown>)
+    values.push(value)
+  return values
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+describe('wrapToolExecute: streaming tools (Phase 9)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('recognizes async generator functions only', () => {
+    expect(isAsyncGeneratorFunction(async function* () {})).toBe(true)
+    expect(isAsyncGeneratorFunction({ async* execute() {} }.execute)).toBe(true)
+    expect(isAsyncGeneratorFunction(async () => 1)).toBe(false)
+    expect(isAsyncGeneratorFunction(function* () {})).toBe(false)
+    expect(isAsyncGeneratorFunction(undefined)).toBe(false)
+    expect(isAsyncIterable((async function* () {})())).toBe(true)
+    expect(isAsyncIterable('text')).toBe(false)
+    expect(isAsyncIterable(null)).toBe(false)
+  })
+
+  it('throttles preliminary values: 10 yields in 100 ms -> one preliminary plus the final value; tool.after once', async () => {
+    vi.useFakeTimers()
+    const hooks: Array<{ name: string, output: unknown }> = []
+    const run: HookRun = async (name, ...args) => {
+      const output = args[1] as { output?: unknown }
+      hooks.push({ name, output: output.output })
+      if (name === 'tool.after')
+        output.output = { final: output.output }
+    }
+    const tool = definition({
+      async* execute() {
+        for (let i = 1; i <= 10; i++) {
+          await sleep(10)
+          yield { step: i }
+        }
+      },
+    })
+    const result = wrapToolExecute({ pluginId: 'demo', definition: tool }, streamingContext({ run }))({ text: 'x' }, options)
+    const collected = collect(result)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(await collected).toEqual([{ step: 1 }, { final: { step: 10 } }])
+    expect(hooks.filter(hook => hook.name === 'tool.after')).toEqual([{ name: 'tool.after', output: { step: 10 } }])
+    expect(hooks.map(hook => hook.name)).toEqual(['tool.before', 'tool.after'])
+  })
+
+  it('sends the latest value once per interval while the tool keeps yielding', async () => {
+    vi.useFakeTimers()
+    const tool = definition({
+      async* execute() {
+        for (let i = 1; i <= 12; i++) {
+          await sleep(100)
+          yield i
+        }
+      },
+    })
+    const result = wrapToolExecute({ pluginId: 'demo', definition: tool }, streamingContext())({ text: 'x' }, options)
+    const times: number[] = []
+    const values: unknown[] = []
+    const done = (async () => {
+      for await (const value of result as AsyncIterable<unknown>) {
+        values.push(value)
+        times.push(Date.now())
+      }
+    })()
+    await vi.advanceTimersByTimeAsync(2000)
+    await done
+    // Values every 100 ms, at most one per 250 ms: 1 (t=100), then the latest at t=350 (3), t=600 (6), t=850 (8),
+    // t=1100 (11); the final value 12 at t=1200.
+    expect(values).toEqual([1, 3, 6, 8, 11, 12])
+    const gaps = times.slice(1, -1).map((time, index) => time - times[index]!)
+    for (const gap of gaps)
+      expect(gap).toBeGreaterThanOrEqual(PRELIMINARY_INTERVAL_MS)
+  })
+
+  it('caps every value at 64 KB and stops sending preliminaries after 2000 (the final value always goes out)', async () => {
+    let clock = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => {
+      clock += 1000
+      return clock
+    })
+    const count = PRELIMINARY_OUTPUTS_MAX + 50
+    const tool = definition({
+      async* execute() {
+        yield 'x'.repeat(LIMITS.toolOutputBytes + 10)
+        for (let i = 2; i <= count; i++) {
+          await new Promise(resolve => setImmediate(resolve))
+          yield i
+        }
+      },
+    })
+    const values = await collect(wrapToolExecute({ pluginId: 'demo', definition: tool }, streamingContext())({ text: 'x' }, options))
+    expect(isTruncatedToolOutput(values[0])).toBe(true)
+    expect(values).toHaveLength(PRELIMINARY_OUTPUTS_MAX + 1)
+    expect(values.at(-1)).toBe(count)
+    expect(values.at(-2)).toBe(PRELIMINARY_OUTPUTS_MAX)
+
+    const big = definition({
+      async* execute() {
+        yield 'y'.repeat(LIMITS.toolOutputBytes + 10)
+      },
+    })
+    const [only, final] = await collect(wrapToolExecute({ pluginId: 'demo', definition: big }, streamingContext())({ text: 'x' }, options))
+    expect(isTruncatedToolOutput(only)).toBe(true)
+    expect(isTruncatedToolOutput(final)).toBe(true)
+  })
+
+  it('applies the guard timeout to the whole iteration and aborts the plugin\'s signal', async () => {
+    vi.useFakeTimers()
+    let pluginSignal: AbortSignal | undefined
+    const tool = definition({
+      timeoutMs: 1000,
+      async* execute(_input: unknown, c: ToolCallContext) {
+        pluginSignal = c.signal
+        yield 'started'
+        await new Promise(resolve => c.signal.addEventListener('abort', resolve, { once: true }))
+        yield 'never sent'
+      },
+    })
+    const result = wrapToolExecute({ pluginId: 'demo', definition: tool }, streamingContext())({ text: 'x' }, options)
+    const values: unknown[] = []
+    const done = (async () => {
+      for await (const value of result as AsyncIterable<unknown>)
+        values.push(value)
+    })()
+    const failure = expect(done).rejects.toThrow(new ToolFailure('Timed out after 1 s (tool demo_tool).'))
+    await vi.advanceTimersByTimeAsync(1500)
+    await failure
+    expect(values).toEqual(['started'])
+    expect(pluginSignal?.aborted).toBe(true)
+  })
+
+  it('passes the run abort through (an AbortError) and stops the plugin', async () => {
+    const controller = new AbortController()
+    let pluginSignal: AbortSignal | undefined
+    const tool = definition({
+      async* execute(_input: unknown, c: ToolCallContext) {
+        pluginSignal = c.signal
+        yield 1
+        controller.abort(new DOMException('stopped', 'AbortError'))
+        await new Promise(resolve => c.signal.addEventListener('abort', resolve, { once: true }))
+        yield 2
+      },
+    })
+    const result = wrapToolExecute({ pluginId: 'demo', definition: tool }, streamingContext())({ text: 'x' }, { ...options, abortSignal: controller.signal })
+    await expect(collect(result)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(pluginSignal?.aborted).toBe(true)
+  })
+
+  it('turns a throwing iteration into a ToolFailure after the values it sent', async () => {
+    const tool = definition({
+      async* execute() {
+        yield 'first'
+        throw new Error('disk full')
+      },
+    })
+    const result = wrapToolExecute({ pluginId: 'demo', definition: tool }, streamingContext())({ text: 'x' }, options)
+    const values: unknown[] = []
+    await expect((async () => {
+      for await (const value of result as AsyncIterable<unknown>)
+        values.push(value)
+    })()).rejects.toThrow(new ToolFailure('disk full'))
+    expect(values.length).toBeLessThanOrEqual(1)
+  })
+
+  it('runs the before checks first: an inactive owner, a blocking hook and an invalid input fail without iterating', async () => {
+    const execute = vi.fn(async function* () {
+      yield 1
+    })
+    const tool = definition({ execute })
+    await expect(collect(wrapToolExecute({ pluginId: 'demo', definition: tool }, streamingContext({ active: false }))({ text: 'x' }, options))).rejects.toThrow('Tool unavailable')
+    await expect(collect(wrapToolExecute({ pluginId: 'demo', definition: tool }, streamingContext())({ text: 42 }, options))).rejects.toThrow('The tool input is invalid')
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('stops the plugin when the consumer stops reading', async () => {
+    let pluginSignal: AbortSignal | undefined
+    const tool = definition({
+      async* execute(_input: unknown, c: ToolCallContext) {
+        pluginSignal = c.signal
+        for (let i = 0; !c.signal.aborted; i++) {
+          yield i
+          await new Promise(resolve => setImmediate(resolve))
+        }
+      },
+    })
+    const result = wrapToolExecute({ pluginId: 'demo', definition: tool }, streamingContext())({ text: 'x' }, options) as AsyncGenerator<unknown>
+    expect((await result.next()).value).toBe(0)
+    await result.return(undefined)
+    expect(pluginSignal?.aborted).toBe(true)
+  })
+
+  it('journals the call once, after the iteration settled, under the prefixed call id', async () => {
+    const { fake, scope } = runScope()
+    const events: string[] = []
+    const bound: Array<WorkspaceRunScope | null> = []
+    const hookIds: string[] = []
+    const run: HookRun = async (name, ...args) => {
+      hookIds.push(`${name}:${(args[0] as { toolCallId: string }).toolCallId}`)
+    }
+    const tool = scopedTool('runner', 'run_task', 'execute')
+    const streaming = {
+      ...tool,
+      definition: {
+        ...tool.definition,
+        async* execute(_input: unknown, c: ToolCallContext) {
+          bound.push(runScopeOf(c))
+          events.push(`call:${c.toolCallId}`)
+          yield 'a'
+          events.push(`records:${fake.records.length}`)
+          yield 'b'
+        },
+      },
+    }
+    const context = streamingContext({ workspace: toolWorkspace(OPEN_WORKSPACE), scope, run, callIdPrefix: 'call_parent/' })
+    const values = await collect(wrapToolExecute(streaming, context)({}, options))
+    expect(values.at(-1)).toBe('b')
+    expect(events).toEqual(['call:call_parent/call_1', 'records:0'])
+    expect(bound[0]?.toolCallId).toBe('call_parent/call_1')
+    expect(recorded(fake.records)).toEqual([{ kind: 'untracked', toolCallId: 'call_parent/call_1', tool: 'run_task' }])
+    expect(hookIds).toEqual(['tool.before:call_parent/call_1', 'tool.after:call_parent/call_1'])
+  })
+
+  it('prefixes the call id of plain tools too', async () => {
+    const { fake, scope } = runScope()
+    const context = { ...wrapContext({ workspace: toolWorkspace(OPEN_WORKSPACE), scope }), callIdPrefix: 'call_parent/' }
+    await wrapToolExecute(scopedTool(CORE_WORKSPACE_PLUGIN_ID, 'shell', 'execute'), context)({ command: 'ls' }, options)
+    expect(recorded(fake.records)).toEqual([{ kind: 'shell', toolCallId: 'call_parent/call_1', command: 'ls' }])
+  })
+})
+
+describe('wrapToolExecute: an AsyncIterable from a plain execute is drained (Phase 9)', () => {
+  it('uses the last value, with no preliminary output', async () => {
+    async function* values() {
+      yield 1
+      yield 2
+      yield { last: true }
+    }
+    const direct = definition({ execute: () => values() })
+    const promised = definition({ execute: async () => values() })
+    for (const tool of [direct, promised]) {
+      const result = wrapToolExecute({ pluginId: 'demo', definition: tool }, wrapContext())({ text: 'x' }, options)
+      expect(isAsyncIterable(result)).toBe(false)
+      expect(await result).toEqual({ last: true })
+    }
+    const empty = definition({ execute: async () => (async function* () {})() })
+    expect(await wrapToolExecute({ pluginId: 'demo', definition: empty }, wrapContext())({ text: 'x' }, options)).toBeNull()
   })
 })

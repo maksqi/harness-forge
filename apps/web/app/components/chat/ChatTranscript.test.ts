@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h, nextTick, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
-import { assistantMessage, messageBranch, userMessage } from '~/utils/testing/fixtures'
+import { assistantMessage, compactionPart, messageBranch, taskOutput, taskPart, taskStep, userMessage } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import ChatMessage from './ChatMessage.vue'
 import ChatTranscript from './ChatTranscript.vue'
@@ -396,8 +396,183 @@ describe('chatTranscript: rewind files (Phase 8)', () => {
   })
 })
 
+describe('chatTranscript: rewind files after sub-agent edits (Phase 9)', () => {
+  const U1 = 'msg_user0000000000t1'
+  const A1 = 'msg_asst0000000000t1'
+  const U2 = 'msg_user0000000000t2'
+  const A2 = 'msg_asst0000000000t2'
+
+  function mountTasks(messages: HarnessUIMessage[], status: ChatStatus = 'ready') {
+    return mount({
+      render: () => h(TooltipProvider, null, {
+        default: () => h(ChatTranscript, { messages, status, showThinking: false, projectId: 'prj_sample0000000001' }),
+      }),
+    }, { attachTo: document.body })
+  }
+
+  function rewindable(wrapper: ReturnType<typeof mountTasks>): string[] {
+    return wrapper.findAll(`[data-testid="${testIds.messageUser}"]`)
+      .filter(row => row.find(`[data-testid="${testIds.messageRewind}"]`).exists())
+      .map(row => row.attributes('data-message-id')!)
+  }
+
+  it('counts a task call whose sub-agent wrote or edited a file', async () => {
+    const wrote = taskPart({ output: taskOutput({ type: 'general', steps: [taskStep(), taskStep({ toolCallId: 'child_2', toolName: 'edit_file', state: 'done' })] }) })
+    const wrapper = mountTasks([
+      userMessage(U1, 'q1'),
+      assistantMessage(A1, '', { parts: [wrote, { type: 'text', text: 'Done', state: 'done' }] }),
+      userMessage(U2, 'q2'),
+      assistantMessage(A2, 'Plain'),
+    ])
+    await nextTick()
+    expect(rewindable(wrapper)).toEqual([U1])
+  })
+
+  it('also counts a stopped sub-agent (a preliminary output) as the last reply', async () => {
+    const running = taskPart({ preliminary: true, output: taskOutput({ status: 'running', steps: [taskStep({ toolName: 'write_file', state: 'done' })], report: '' }) })
+    const wrapper = mountTasks([userMessage(U1, 'q1'), assistantMessage(A1, '', { parts: [running] })])
+    await nextTick()
+    expect(rewindable(wrapper)).toEqual([U1])
+  })
+
+  it('ignores sub-agents that only read, or whose edits failed, were denied or still run', async () => {
+    const steps = [
+      taskStep(),
+      taskStep({ toolCallId: 'child_2', toolName: 'write_file', state: 'error' }),
+      taskStep({ toolCallId: 'child_3', toolName: 'edit_file', state: 'denied' }),
+      taskStep({ toolCallId: 'child_4', toolName: 'write_file', state: 'running' }),
+    ]
+    const unparsable = { ...taskPart(), output: 'Sub-agent finished.' } as HarnessUIMessage['parts'][number]
+    const pending = { type: 'tool-task', toolCallId: 'call_task_2', state: 'input-available', input: {} } as HarnessUIMessage['parts'][number]
+    const wrapper = mountTasks([
+      userMessage(U1, 'q1'),
+      assistantMessage(A1, '', { parts: [taskPart({ output: taskOutput({ steps }) }), unparsable, pending] }),
+    ])
+    await nextTick()
+    expect(rewindable(wrapper)).toEqual([])
+  })
+})
+
+describe('chatTranscript: compaction (Phase 9)', () => {
+  const U1 = 'msg_u000000000000001'
+  const A1 = 'msg_a000000000000001'
+  const U2 = 'msg_u000000000000002'
+  const A2 = 'msg_a000000000000002'
+  const U3 = 'msg_u000000000000003'
+  const A3 = 'msg_a000000000000003'
+
+  interface State { messages: HarnessUIMessage[], status: ChatStatus, activity: 'compacting' | null }
+
+  function mountCompaction(initial: Pick<State, 'messages'> & Partial<State>) {
+    const state = ref<State>({ status: 'ready', activity: null, ...initial })
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, {
+        default: () => h(ChatTranscript, {
+          messages: state.value.messages,
+          status: state.value.status,
+          showThinking: false,
+          activity: state.value.activity,
+        }),
+      }),
+    }, { attachTo: document.body })
+    return { wrapper, state }
+  }
+
+  function compacted(wrapper: ReturnType<typeof mountCompaction>['wrapper']): string[] {
+    return wrapper.findAll('[data-compacted]').map(row => row.attributes('data-message-id')!)
+  }
+
+  const history = () => [
+    userMessage(U1, 'Old question'),
+    assistantMessage(A1, 'Old answer'),
+    userMessage(U2, '/compact keep numbers'),
+    assistantMessage(A2, '', { parts: [compactionPart({ focus: 'keep numbers' })] }),
+    userMessage(U3, 'Next question'),
+    assistantMessage(A3, 'Next answer'),
+  ]
+
+  it('dims the rows a /compact replaced and renders the divider in its reply', async () => {
+    const { wrapper } = mountCompaction({ messages: history() })
+    await nextTick()
+    expect(compacted(wrapper)).toEqual([U1, A1, U2])
+    for (const id of [U1, A1, U2]) {
+      const row = wrapper.get(`[data-message-id="${id}"]`)
+      expect(row.attributes('data-compacted')).toBe('true')
+      expect(row.classes()).toEqual(expect.arrayContaining(['opacity-70', 'hover:opacity-100', 'focus-within:opacity-100']))
+    }
+    expect(wrapper.get(`[data-message-id="${A3}"]`).classes()).not.toContain('opacity-70')
+    const divider = wrapper.get(`[data-message-id="${A2}"] [data-testid="${testIds.compactionDivider}"]`)
+    expect(divider.attributes()).toMatchObject({ 'data-kind': 'manual', 'data-variant': 'history', 'aria-label': 'Conversation compacted' })
+  })
+
+  it('keeps the user message of an automatic compaction before the reply at full opacity', async () => {
+    const { wrapper } = mountCompaction({
+      messages: [
+        userMessage(U1, 'Old question'),
+        assistantMessage(A1, 'Old answer'),
+        userMessage(U2, 'New question'),
+        assistantMessage(A2, '', { parts: [{ type: 'step-start' }, compactionPart({ trigger: 'auto', keep: 'last-user' }), { type: 'text', text: 'Answer', state: 'done' }] }),
+      ],
+    })
+    await nextTick()
+    expect(compacted(wrapper)).toEqual([U1, A1])
+    expect(wrapper.get(`[data-testid="${testIds.compactionDivider}"]`).attributes('aria-label')).toBe('Conversation compacted automatically')
+  })
+
+  it('dims the earlier rows and the earlier blocks of a reply that compacted during the run, as it streams', async () => {
+    const reply = (parts: HarnessUIMessage['parts']) => assistantMessage(A2, '', { parts })
+    const before = [userMessage(U1, 'Old question'), assistantMessage(A1, 'Old answer'), userMessage(U2, 'loop 6')]
+    const step1: HarnessUIMessage['parts'] = [{ type: 'step-start' }, { type: 'text', text: 'Step 1 done.', state: 'done' }]
+    const { wrapper, state } = mountCompaction({ messages: [...before, reply(step1)], status: 'streaming' })
+    await nextTick()
+    expect(compacted(wrapper)).toEqual([])
+
+    state.value = { ...state.value, activity: 'compacting' }
+    await nextTick()
+    expect(wrapper.get(`[data-message-id="${A2}"] [data-testid="${testIds.submittedPlaceholder}"]`).text()).toBe('Compacting conversation…')
+
+    const marker = compactionPart({ trigger: 'auto', keep: 'last-user' })
+    state.value = { ...state.value, activity: null, messages: [...before, reply([...step1, { type: 'step-start' }, marker])] }
+    await nextTick()
+    expect(compacted(wrapper)).toEqual([U1, A1])
+    const row = wrapper.get(`[data-message-id="${A2}"]`)
+    expect(row.attributes('data-compacted')).toBeUndefined()
+    expect(row.get('[data-slot="markdown"]').classes()).toContain('opacity-70')
+    expect(row.get(`[data-testid="${testIds.compactionDivider}"]`).attributes('data-variant')).toBe('run')
+    expect(row.get(`[data-testid="${testIds.submittedPlaceholder}"]`).text()).toBe('Thinking…')
+  })
+
+  it('follows the latest of several markers, and a branch without the marker shows no dimming', async () => {
+    const messages = history()
+    const later = [
+      ...messages,
+      userMessage('msg_u000000000000004', 'More'),
+      assistantMessage('msg_a000000000000004', '', { parts: [compactionPart({ trigger: 'auto', keep: 'last-user' }), { type: 'text', text: 'Four', state: 'done' }] }),
+    ]
+    const { wrapper, state } = mountCompaction({ messages: later })
+    await nextTick()
+    expect(compacted(wrapper)).toEqual([U1, A1, U2, A2, U3, A3])
+    expect(wrapper.findAll(`[data-testid="${testIds.compactionDivider}"]`)).toHaveLength(2)
+
+    // Another version of the second question: the marker is not on this path.
+    state.value = { ...state.value, messages: [userMessage(U1, 'Old question'), assistantMessage(A1, 'Old answer'), userMessage('msg_u00000000000000b', 'Other'), assistantMessage('msg_a00000000000000b', 'Other answer')] }
+    await nextTick()
+    expect(compacted(wrapper)).toEqual([])
+    expect(wrapper.findAll(`[data-testid="${testIds.compactionDivider}"]`)).toHaveLength(0)
+  })
+
+  it('says "Compacting conversation…" in the submitted placeholder while the session compacts', async () => {
+    const { wrapper, state } = mountCompaction({ messages: [userMessage(U1, 'Question')], status: 'submitted' })
+    await nextTick()
+    expect(wrapper.get(`[data-testid="${testIds.submittedPlaceholder}"]`).text()).toBe('Thinking…')
+    state.value = { ...state.value, activity: 'compacting' }
+    await nextTick()
+    expect(wrapper.get(`[data-testid="${testIds.submittedPlaceholder}"]`).text()).toBe('Compacting conversation…')
+  })
+})
+
 describe('chatTranscript: Phase 9 seams', () => {
-  it('passes the activity to the streaming last reply only, and no row is compacted yet', async () => {
+  it('passes the activity to the streaming last reply only, and no row is compacted without a marker', async () => {
     const messages = [
       userMessage('msg_u000000000000001', 'Old question'),
       assistantMessage('msg_a000000000000001', 'Old answer'),

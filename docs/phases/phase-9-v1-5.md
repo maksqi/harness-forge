@@ -309,7 +309,25 @@ reconciled docs (W9.14) follow these, not the task text further down.
   - Ownership additions for P9-A: W9.11 owns `W/components/chat/SubmittedPlaceholder*` ("Compacting conversation…");
     W9.12 owns `W/components/plugins/list/plugin-display*` (a glyph for `core-agent`).
   - Coordinator CCR: `declarativeCommandSchema` refuses `isHarnessCommand(name)` (`/compact`), like client commands.
-- **P9-A (W9.1 – W9.12)**: recorded at Gate P9-A.
+- **P9-A (W9.1 – W9.12)** (details in `.tmp/waves/P9-A-notes.md`, for W9.14):
+  - `GET /projects/:id/files` `truncated` = more entries matched than `limit` OR the index was cut (coordinator, so the
+    composer's "Showing the first N matches" is right); the index is also dropped when a run of a project chat
+    finishes (shell writes emit no `workspace.changed`).
+  - `checkPlanApprovalMode` refuses every mode other than `edits` / `ask` (incl. `auto`): `exitPlanModeOutputSchema.mode`
+    is `edits | ask`. A refused approval still stores the requested mode (`ensureChat` runs first).
+  - The model history is converted with every registered tool's `toModelOutput` (`historyToolSet`), so tools a mode
+    drops still send their model text; `streamText` gets the mode-filtered set + `activeTools`.
+  - `runInstructions` order: workspace → plan block (plan only; asks for the plan in the reply when `exit_plan_mode` is
+    not offered) → todo hint → task hint → project file; children pass their lowered mode and no agent tools.
+  - The context guard stops for the run after one failed compaction, and when the call right after a compaction still
+    reports usage above the trigger; a step-0 failure trims to 0.8 of the window with `compaction-failed`.
+  - `RunContext.origin?` (default `request`); a queue turn's `run.started` carries `userMessageId`. The queue subscribes
+    to `chat.deleted` and `key.rotated` (reaches chats waiting for an approval).
+  - Share snapshots leave out a `/compact` exchange (the command and its marker-only reply) (coordinator); a PATCH
+    `/tools/:name` without `override` stores the effective value (a stale `allow` on an execute tool is cleared).
+  - In `edits`, `general` sub-agents get `shell` (rule-matched commands run, the rest are denied); the probes' "never
+    shell" holds in `ask`. A v1.4 data dir keeps a cached `mock` model listing (24 h) without the Phase 9 mocks: refresh
+    the mock provider's models after an upgrade (dev only; real providers gain no models in Phase 9).
 - **P9-B (W9.13, W9.14) and the final gate**: recorded by the coordinator.
 
 ## Rules for every Phase 9 agent

@@ -9,9 +9,9 @@
 // Phase 7 (ADR-031, ARCHITECTURE.md 6.13): the request's `projectId` is honored only when the request creates the chat
 // (an unknown project is `not_found` before the chat row exists); every chat-model run of a chat with a project opens
 // its folder (`openWorkspace`): an unavailable folder gives the run no workspace and the `workspace-unavailable` notice.
-// Phase 9 (C26 seams): `/compact [focus]` resolves like a reply command (it decides the reply: no model call, no
-// workspace) and a regenerate of its reply compacts again; the continuation branch checks the mode of a plan approval
-// (`checkPlanApprovalMode`, `modes.ts`).
+// Phase 9 (C26 seams, W9.1): `/compact [focus]` resolves like a reply command (it decides the reply: no model call, no
+// workspace), needs a chat model (an image model is a 400 on `['modelRef']`) and a regenerate of its reply compacts
+// again; the continuation branch checks the mode of a plan approval (`checkPlanApprovalMode`, `modes.ts`).
 import type {
   CatalogModel,
   ChatRequestBody,
@@ -43,7 +43,7 @@ import {
   validationError,
 } from '@harness-forge/shared'
 import { safeValidateUIMessages } from 'ai'
-import { resolveCommand } from './commands.ts'
+import { compactNeedsChatModel, resolveCommand } from './commands.ts'
 import { applyCommandExpansions } from './context.ts'
 import { normalizeUserParts } from './files.ts'
 import { isGeneratedImageType } from './generated-files.ts'
@@ -297,6 +297,12 @@ async function regeneratedCommand(context: PrepareContext, userMessage: HarnessU
   return resolution?.kind === 'prompt' ? null : resolution
 }
 
+/** `/compact` needs a chat model (Phase 9): an image model is a `validation_error` on `['modelRef']`. */
+export function checkCompactTarget(command: CommandResolution | null, kind: ResolvedTarget['kind']): void {
+  if (command?.kind === 'compact' && kind === 'image')
+    throw compactNeedsChatModel()
+}
+
 /** The writes of changed path messages, each with its parent on the path (unused: they are stored already). */
 function pathWrites(changed: readonly HarnessUIMessage[], path: readonly HarnessUIMessage[]): MessageWrite[] {
   const parentOf = new Map(path.map((message, index) => [message.id, path[index - 1]?.id ?? null]))
@@ -375,6 +381,7 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
       // Only the approvals of this path: those of other versions stay pending.
       const superseded = supersedeApprovals(path)
       const decides = command?.kind === 'prompt' ? null : command
+      checkCompactTarget(decides, resolvedTarget.kind)
       return {
         ...base,
         target: await planTarget(context, resolvedTarget, { message, parent: path.at(-1), decides, countDropped: true }),
@@ -399,6 +406,7 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
       const kept = path.slice(0, answeredIndex + 1)
       const superseded = supersedeApprovals(kept)
       const command = await regeneratedCommand(context, answered)
+      checkCompactTarget(command, resolvedTarget.kind)
       return {
         ...base,
         target: await planTarget(context, resolvedTarget, { message: answered, parent: kept.at(-2), decides: command, countDropped: false }),

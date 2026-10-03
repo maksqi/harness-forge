@@ -2,12 +2,16 @@
 import type { ShareToolPart } from './share-view'
 import { mount } from '@vue/test-utils'
 import { setActivePinia } from 'pinia'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
+import { taskInput, taskOutput, taskStep, todoItem } from '~/utils/testing/fixtures'
 import ShareToolRow from './ShareToolRow.vue'
-import { byTestId, settle } from './testing'
+import { allByTestId, byTestId, settle } from './testing'
+
+// Markdown (the plan and the sub-agent report) reads the color mode.
+vi.mock('~/components/chat/nuxt-imports', () => ({ useColorMode: () => ({ value: 'dark' }) }))
 
 function mountRow(part: ShareToolPart) {
   return mount({ render: () => h(TooltipProvider, null, { default: () => h(ShareToolRow, { part }) }) }, { attachTo: document.body })
@@ -295,5 +299,103 @@ describe('shareToolRow: sticky folder, shell rules and spoken summaries (Phase 8
     const summary = byTestId(testIds.toolRowSummary)!
     expect(summary.textContent).toBe('+1 −1')
     expect(summary.nextElementSibling!.textContent).toBe('1 line added, 1 removed')
+  })
+})
+
+describe('shareToolRow: agent tools (Phase 9)', () => {
+  const todos = [
+    todoItem({ id: 'a', content: 'Read the parser', status: 'completed' }),
+    todoItem({ id: 'b', content: 'Run the parser tests', status: 'in_progress', activeForm: 'Running the parser tests' }),
+    todoItem({ id: 'c', content: 'Fix the empty-input branch' }),
+  ]
+  const counts = { pending: 1, inProgress: 1, completed: 1, total: 3 }
+  const plan = '## Move auth to server sessions\n1. Add createSession() in src/auth/session.ts'
+
+  it('reads "Sub-agent", "Updated tasks" and "Plan" without tool details, as static rows', () => {
+    const labels = (['task', 'todo_write', 'exit_plan_mode'] as const).map((toolName) => {
+      const wrapper = mountRow({ type: 'tool', toolName, status: 'done' })
+      const row = byTestId(testIds.shareToolRow)!
+      const result = [
+        row.dataset.toolName,
+        row.querySelector('[data-slot="agent-tool-label"]')?.textContent,
+        row.textContent?.includes(toolName),
+        row.querySelector('button') === null,
+      ]
+      wrapper.unmount()
+      return result
+    })
+    expect(labels).toEqual([
+      ['task', 'Sub-agent', false, true],
+      ['todo_write', 'Updated tasks', false, true],
+      ['exit_plan_mode', 'Plan', false, true],
+    ])
+  })
+
+  it('renders TaskBody for a shared sub-agent with tool details', async () => {
+    const output = taskOutput({ steps: [taskStep(), taskStep({ toolCallId: 'child_2', toolName: 'shell', summary: 'pnpm test', state: 'denied' })] })
+    mountRow({ type: 'tool', toolName: 'task', status: 'done', input: taskInput(), output })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain('Explore')
+    expect(row.textContent).toContain('Find the session code')
+    expect(row.querySelector('.lucide-telescope')).not.toBeNull()
+    row.querySelector('button')!.click()
+    await settle()
+    const body = byTestId(testIds.shareToolRowOutput)!
+    expect(body.querySelector('[data-slot="task-body"]')).not.toBeNull()
+    expect(allByTestId(testIds.taskStep, body).map(step => step.dataset.state)).toEqual(['done', 'denied'])
+    expect(byTestId(testIds.taskReport, body)?.textContent).toContain('src/auth/session.ts')
+    expect(body.textContent).toContain('Skipped')
+  })
+
+  it('renders TodoList for shared tasks, with the summary and the raw blocks behind the toggle', async () => {
+    mountRow({ type: 'tool', toolName: 'todo_write', status: 'done', input: { todos }, output: { todos, counts } })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain('todo_write')
+    expect(row.textContent).toContain('"Running the parser tests"')
+    expect(byTestId(testIds.toolRowSummary, row)?.textContent).toBe('1/3')
+    expect(row.querySelector('.lucide-list-todo')).not.toBeNull()
+    row.querySelector('button')!.click()
+    await settle()
+    const body = byTestId(testIds.shareToolRowOutput)!
+    expect(allByTestId(testIds.todoItem, body).map(item => item.dataset.status)).toEqual(['completed', 'in_progress', 'pending'])
+    expect(body.querySelector('[data-slot="tool-value"]')).toBeNull()
+    byTestId(testIds.toolRawToggle, body)!.click()
+    await settle()
+    expect(Array.from(body.querySelectorAll<HTMLElement>('[data-slot="tool-value"]')).map(block => block.dataset.label)).toEqual(['input', 'output'])
+  })
+
+  it('renders PlanBody for a shared plan; the outcome reads "Approved · …" or "Kept planning"', async () => {
+    const approved = mountRow({ type: 'tool', toolName: 'exit_plan_mode', status: 'done', input: { plan }, output: { approved: true, mode: 'edits' } })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain('"Move auth to server sessions"')
+    expect(row.textContent).toContain('Approved · Accept edits')
+    row.querySelector('button')!.click()
+    await settle()
+    const body = byTestId(testIds.shareToolRowOutput)!
+    expect(body.querySelector('[data-slot="plan-body"]')?.textContent).toContain('Add createSession() in src/auth/session.ts')
+    approved.unmount()
+
+    mountRow({ type: 'tool', toolName: 'exit_plan_mode', status: 'denied', input: { plan } })
+    const kept = byTestId(testIds.shareToolRow)!
+    expect(kept.textContent).toContain('Kept planning')
+    expect(kept.textContent).not.toContain('Denied')
+  })
+
+  it('keeps the generic row for a value the share cut or that fails its schema', async () => {
+    const cut = mountRow({ type: 'tool', toolName: 'task', status: 'done', input: taskInput(), output: '{"status": "completed", "steps": [\n[truncated]' })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain('task')
+    row.querySelector('button')!.click()
+    await settle()
+    expect(byTestId(testIds.shareToolRowOutput)!.querySelector('[data-slot="task-body"]')).toBeNull()
+    expect(Array.from(byTestId(testIds.shareToolRowOutput)!.querySelectorAll<HTMLElement>('[data-slot="tool-value"]')).map(block => block.dataset.label)).toEqual(['input', 'output'])
+    cut.unmount()
+
+    mountRow({ type: 'tool', toolName: 'todo_write', status: 'error', input: { todos: [todos[0], todos[0]] }, errorText: 'Todo ids must be unique.' })
+    const failed = byTestId(testIds.shareToolRow)!
+    expect(byTestId(testIds.toolRowSummary, failed)).toBeNull()
+    failed.querySelector('button')!.click()
+    await settle()
+    expect(byTestId(testIds.todoList, byTestId(testIds.shareToolRowOutput)!)).toBeNull()
   })
 })

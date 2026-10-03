@@ -1,14 +1,16 @@
 <script setup lang="ts">
-// Settings -> General body (docs/UI.md 9.4): display name, send key, default permission mode (Ask, Accept edits, Auto,
-// Off) and effort, max steps (per response in chats without a project, and in project chats: 1-200 each), Alt
-// shortcuts (Alt+M / R / P, Alt+V and, since Phase 8, Alt+C for the changes panel), custom instructions and the
+// Settings -> General body (docs/UI.md 9.4): display name, send key, default permission mode (Ask, Accept edits, Plan,
+// Auto, Off) and effort, max steps (per response in chats without a project, and in project chats: 1-200 each), Alt
+// shortcuts (Alt+M / R / P, Alt+V and, since Phase 8, Alt+C for the changes panel), the Shift+Tab switch (Phase 9:
+// Shift+Tab in the composer cycles Ask, Accept edits and Plan; off, it moves focus), custom instructions and the
 // password block. Choices save at once (optimistic, toast on failure); text fields save on blur or Enter (Mod+Enter in
 // the instructions), Esc restores the saved value. Bulk export, import and delete-all live in Settings -> Data
 // (docs/UI.md 9.8, ADR-024); a single chat is still exported from its chat menus.
-// Phase 9 (C25 mounts it, W9.12 fills it): the Agent section (AgentSettingsSection, docs/UI.md 9.11) sits between the
-// Chat section and Custom instructions; W9.12 adds the Shift+Tab switch (`settings-shift-tab-modes`) after Alt shortcuts.
+// Phase 9: the Agent section (AgentSettingsSection, docs/UI.md 9.11: compaction and sub-agents) sits between the Chat
+// section and Custom instructions.
 import type { ReasoningEffort, SendKey, Settings, ToolMode } from '@harness-forge/shared'
-import { computed, ref, useId, watch } from 'vue'
+import type { DraftField } from './general'
+import { computed, useId } from 'vue'
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
@@ -20,15 +22,18 @@ import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
 import AgentSettingsSection from './agent/AgentSettingsSection.vue'
 import {
+  blurTarget,
+  cancelDraftEdit,
+  commitStepsField,
   DISPLAY_NAME_MAX,
   displayNameError,
   EFFORT_OPTIONS,
   INSTRUCTIONS_MAX,
   instructionsError,
-  parseMaxSteps,
   sendKeyOptions,
   STEPS_MAX,
   TOOL_MODE_OPTIONS,
+  useDraftField,
 } from './general'
 import { toastError } from './notify'
 import PasswordSection from './PasswordSection.vue'
@@ -47,6 +52,7 @@ const ids = {
   maxSteps: useId(),
   projectMaxSteps: useId(),
   altShortcuts: useId(),
+  shiftTabModes: useId(),
   instructions: useId(),
 }
 
@@ -87,25 +93,10 @@ function onEffort(value: unknown) {
 
 // ---------- text fields (save on blur / Enter) ----------
 
-function useTextField(read: () => string) {
-  const draft = ref(read())
-  const focused = ref(false)
-  const error = ref<string | null>(null)
-  // Server updates show up unless the user is editing.
-  watch(read, (value) => {
-    if (!focused.value)
-      draft.value = value
-  })
-  return { draft, focused, error, restore: () => {
-    draft.value = read()
-    error.value = null
-  } }
-}
-
-const displayName = useTextField(() => resolved.value.displayName)
-const maxSteps = useTextField(() => String(resolved.value.maxSteps))
-const projectMaxSteps = useTextField(() => String(resolved.value.projectMaxSteps))
-const instructions = useTextField(() => resolved.value.instructions)
+const displayName = useDraftField(() => resolved.value.displayName)
+const maxSteps = useDraftField(() => String(resolved.value.maxSteps))
+const projectMaxSteps = useDraftField(() => String(resolved.value.projectMaxSteps))
+const instructions = useDraftField(() => resolved.value.instructions)
 
 async function commitDisplayName() {
   displayName.focused.value = false
@@ -119,17 +110,8 @@ async function commitDisplayName() {
 }
 
 /** Both step limits: an invalid value shows the error and keeps the saved value. */
-async function commitSteps(field: ReturnType<typeof useTextField>, key: 'maxSteps' | 'projectMaxSteps') {
-  field.focused.value = false
-  const parsed = parseMaxSteps(String(field.draft.value ?? ''))
-  if ('error' in parsed) {
-    field.error.value = parsed.error
-    return
-  }
-  field.error.value = null
-  field.draft.value = String(parsed.value)
-  if (parsed.value !== resolved.value[key] && !(await save({ [key]: parsed.value })))
-    field.restore()
+function commitSteps(field: DraftField, key: 'maxSteps' | 'projectMaxSteps') {
+  return commitStepsField(field, resolved.value[key], value => save({ [key]: value }))
 }
 
 async function commitInstructions() {
@@ -140,16 +122,6 @@ async function commitInstructions() {
     return
   if (value !== resolved.value.instructions && !(await save({ instructions: value })))
     instructions.restore()
-}
-
-function blurTarget(event: Event) {
-  (event.target as HTMLElement | null)?.blur()
-}
-
-function cancelEdit(field: ReturnType<typeof useTextField>, event: Event) {
-  field.restore()
-  field.focused.value = false
-  blurTarget(event)
 }
 
 const instructionsCount = computed(() => `${instructions.draft.value.length.toLocaleString('en-US')} / ${INSTRUCTIONS_MAX.toLocaleString('en-US')}`)
@@ -185,7 +157,7 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
             @focus="displayName.focused.value = true"
             @blur="commitDisplayName"
             @keydown.enter.prevent="blurTarget"
-            @keydown.esc.prevent="cancelEdit(displayName, $event)"
+            @keydown.esc.prevent="cancelDraftEdit(displayName, $event)"
           />
           <FieldError v-if="displayName.error.value" class="text-xs">
             {{ displayName.error.value }}
@@ -286,7 +258,7 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
             @focus="maxSteps.focused.value = true"
             @blur="commitSteps(maxSteps, 'maxSteps')"
             @keydown.enter.prevent="blurTarget"
-            @keydown.esc.prevent="cancelEdit(maxSteps, $event)"
+            @keydown.esc.prevent="cancelDraftEdit(maxSteps, $event)"
           />
           <FieldError v-if="maxSteps.error.value" class="text-xs">
             {{ maxSteps.error.value }}
@@ -314,7 +286,7 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
             @focus="projectMaxSteps.focused.value = true"
             @blur="commitSteps(projectMaxSteps, 'projectMaxSteps')"
             @keydown.enter.prevent="blurTarget"
-            @keydown.esc.prevent="cancelEdit(projectMaxSteps, $event)"
+            @keydown.esc.prevent="cancelDraftEdit(projectMaxSteps, $event)"
           />
           <FieldError v-if="projectMaxSteps.error.value" class="text-xs">
             {{ projectMaxSteps.error.value }}
@@ -334,6 +306,21 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
           :model-value="resolved.altShortcuts"
           :data-testid="testIds.settingsAltShortcuts"
           @update:model-value="value => save({ altShortcuts: value })"
+        />
+      </Field>
+
+      <Field orientation="horizontal">
+        <FieldContent>
+          <FieldLabel :for="ids.shiftTabModes">
+            Shift+Tab switches the permission mode
+          </FieldLabel>
+          <FieldDescription>In the composer, Shift+Tab cycles Ask, Accept edits and Plan. Off: Shift+Tab moves focus.</FieldDescription>
+        </FieldContent>
+        <Switch
+          :id="ids.shiftTabModes"
+          :model-value="resolved.shiftTabModes"
+          :data-testid="testIds.settingsShiftTabModes"
+          @update:model-value="value => save({ shiftTabModes: value })"
         />
       </Field>
     </FieldGroup>
@@ -358,7 +345,7 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
         @blur="commitInstructions"
         @keydown.meta.enter.prevent="blurTarget"
         @keydown.ctrl.enter.prevent="blurTarget"
-        @keydown.esc.prevent="cancelEdit(instructions, $event)"
+        @keydown.esc.prevent="cancelDraftEdit(instructions, $event)"
       />
       <div class="flex items-start justify-between gap-4 text-xs text-muted-foreground">
         <FieldError v-if="instructions.error.value" class="text-xs">

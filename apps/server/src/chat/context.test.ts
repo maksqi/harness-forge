@@ -80,6 +80,15 @@ describe('trimToContext', () => {
     expect(trimToContext([user('x'.repeat(10_000))], 10).removed).toBe(0)
   })
 
+  it('trims down to a lower ratio when asked (the compaction fallback trims to the 0.8 trigger)', () => {
+    const total = estimateTokens(history)
+    const window = Math.ceil(total / 0.84)
+    expect(trimToContext(history, window).removed).toBe(0)
+    const trimmed = trimToContext(history, window, undefined, 0.8)
+    expect(trimmed.removed).toBe(3)
+    expect(estimateTokens(trimmed.messages)).toBeLessThanOrEqual(window * 0.8)
+  })
+
   it('counts the instructions', () => {
     const small: ModelMessage[] = [user('a'.repeat(40)), assistant('b'), user('c')]
     expect(trimToContext(small, 100).removed).toBe(0)

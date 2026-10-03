@@ -1,19 +1,26 @@
 import type { HookMap, HookName, ProviderOptions, ReasoningParams } from '@harness-forge/plugin-sdk'
-import type { ReasoningEffort } from '@harness-forge/shared'
+import type { ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ResolvedModel } from '../providers/types.ts'
-import type { RunParamsInput } from './params.ts'
-import { describe, expect, it } from 'vitest'
+import type { OfferedTool, RunParamsInput } from './params.ts'
+import type { AssembledTools } from './tools.ts'
+import { AGENT_TOOL_NAMES, toolModeSchema } from '@harness-forge/shared'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 import { createSilentLogger } from '../logger.ts'
 import {
+  agentBlocks,
   buildRunParams,
   joinInstructions,
   mergeProviderOptions,
+  offeredAgentTools,
   osName,
+  planModeBlock,
   projectFileInstructions,
   providerImageOptions,
   providerReasoning,
   runInstructions,
   runMaxSteps,
+  TASK_HINT,
+  TODO_HINT,
   workspaceBlock,
 } from './params.ts'
 
@@ -287,5 +294,107 @@ describe('image output provider options (ADR-028)', () => {
     const expected = { prov: { responseModalities: ['TEXT', 'IMAGE'], budget: 1024 }, img: { aspectRatio: '16:9' } }
     expect(seen).toEqual([expected])
     expect(params.providerOptions).toEqual(expected)
+  })
+})
+
+describe('agent instructions (Phase 9, ADR-041 / ADR-043)', () => {
+  const workspace = {
+    name: 'Demo app',
+    root: '/srv/projects/demo',
+    instructions: 'Project rules.',
+    projectFile: { name: 'AGENTS.md' as const, content: 'Run the tests.', truncated: false },
+  }
+  const BLOCK = 'Project "Demo app", folder /srv/projects/demo (Linux).\n- Use paths relative to the project folder.'
+  const ALL = [...AGENT_TOOL_NAMES]
+
+  function tool(pluginId: string, name: string): OfferedTool {
+    return { pluginId, definition: { name } }
+  }
+
+  it('the plan block: read-only investigation, exit_plan_mode with a complete Markdown plan, plain questions answered directly', () => {
+    const block = planModeBlock(true)
+    expect(block.split('\n')[0]).toBe('Plan mode is on: the user wants a plan before anything changes.')
+    expect(block).toContain('read-only')
+    expect(block).toContain('call exit_plan_mode with the whole plan as Markdown')
+    expect(block).toContain('Answer plain questions')
+    expect(block).toContain('directly in your reply')
+    // Without the tool (disabled in the Tools tab, or a model without tools) the plan goes into the reply.
+    const noTool = planModeBlock(false)
+    expect(noTool).not.toContain('exit_plan_mode')
+    expect(noTool).toContain('present the whole plan as Markdown')
+    expect(noTool).toContain('Answer plain questions')
+  })
+
+  it('the hints name their tool and its rules', () => {
+    expect(TODO_HINT).toContain('todo_write')
+    expect(TODO_HINT).toContain('in_progress')
+    expect(TASK_HINT).toContain('"explore"')
+    expect(TASK_HINT).toContain('"general"')
+    expect(TASK_HINT).toContain('cannot ask the user for approval')
+    expect(TASK_HINT).toContain('complete prompt')
+    for (const text of [planModeBlock(true), planModeBlock(false), TODO_HINT, TASK_HINT])
+      expect(text).toMatch(/^[\x20-\x7E\n]+$/)
+  })
+
+  it.each(toolModeSchema.options.map(mode => [mode] as const))('mode %s: the plan block only in plan, the hints only for offered tools', (mode: ToolMode) => {
+    const plan = mode === 'plan' ? [planModeBlock(true)] : []
+    expect(agentBlocks(mode, ALL)).toEqual([...plan, TODO_HINT, TASK_HINT])
+    expect(agentBlocks(mode, ['todo_write'])).toEqual([...(mode === 'plan' ? [planModeBlock(false)] : []), TODO_HINT])
+    expect(agentBlocks(mode, ['task'])).toEqual([...(mode === 'plan' ? [planModeBlock(false)] : []), TASK_HINT])
+    expect(agentBlocks(mode, [])).toEqual(mode === 'plan' ? [planModeBlock(false)] : [])
+    expect(agentBlocks(mode)).toEqual(agentBlocks(mode, []))
+  })
+
+  it('order: global, workspace block, plan block, todo hint, task hint, project file, project and chat instructions', () => {
+    const text = runInstructions({ globalInstructions: 'Global.', chatInstructions: 'Chat.', workspace, workspaceTools: ['read_file'], platform: 'linux', toolMode: 'plan', agentTools: ['task', 'exit_plan_mode', 'todo_write'] })
+    expect(text).toBe([
+      'Global.',
+      BLOCK,
+      planModeBlock(true),
+      TODO_HINT,
+      TASK_HINT,
+      'Instructions from AGENTS.md in the project folder:\n\nRun the tests.',
+      'Project rules.',
+      'Chat.',
+    ].join('\n\n'))
+    // Without a workspace the agent blocks follow the global instructions.
+    expect(runInstructions({ globalInstructions: 'Global.', chatInstructions: 'Chat.', workspace: null, toolMode: 'edits', agentTools: ['todo_write', 'task'] }))
+      .toBe(['Global.', TODO_HINT, TASK_HINT, 'Chat.'].join('\n\n'))
+    // No mode and no agent tools (a caller of Phase 8): unchanged.
+    expect(runInstructions({ globalInstructions: 'Global.', chatInstructions: 'Chat.', workspace, workspaceTools: ['read_file'], platform: 'linux' }))
+      .toBe(['Global.', BLOCK, 'Instructions from AGENTS.md in the project folder:\n\nRun the tests.', 'Project rules.', 'Chat.'].join('\n\n'))
+    // Only the agent blocks.
+    expect(runInstructions({ globalInstructions: '', chatInstructions: undefined, toolMode: 'plan', agentTools: ['exit_plan_mode'] })).toBe(planModeBlock(true))
+  })
+
+  it('buildRunParams passes the agent blocks to the chat.params hooks; ask without agent tools adds nothing', async () => {
+    const seen: string[] = []
+    const run: RunParamsInput['registry']['hooks']['run'] = async (name, ...args) => {
+      if (name === 'chat.params')
+        seen.push((args[1] as { instructions: string }).instructions)
+    }
+    const params = await buildRunParams(input({ toolMode: 'plan', agentTools: ['todo_write', 'exit_plan_mode'], run }))
+    expect(params.instructions).toBe(['Global.', planModeBlock(true), TODO_HINT, 'Chat.'].join('\n\n'))
+    expect(seen).toEqual([params.instructions])
+    expect((await buildRunParams(input({ toolMode: 'ask' }))).instructions).toBe('Global.\n\nChat.')
+    expect((await buildRunParams(input({ toolMode: 'auto', agentTools: ['task'], globalInstructions: '', chatInstructions: undefined }))).instructions).toBe(TASK_HINT)
+  })
+
+  it('offeredAgentTools: core-agent tools only (by owner), in AGENT_TOOL_NAMES order, narrowed by activeTools', () => {
+    const byName = new Map<string, OfferedTool>([
+      ['task', tool('core-agent', 'task')],
+      ['read_file', tool('core-workspace', 'read_file')],
+      ['exit_plan_mode', tool('core-agent', 'exit_plan_mode')],
+      ['todo_write', tool('core-agent', 'todo_write')],
+    ])
+    expect(offeredAgentTools({ byName })).toEqual(['todo_write', 'exit_plan_mode', 'task'])
+    // The approved plan continuation: exit_plan_mode stays executable but is not offered to the model.
+    expect(offeredAgentTools({ byName, activeTools: ['read_file', 'todo_write', 'task'] })).toEqual(['todo_write', 'task'])
+    expect(offeredAgentTools({ byName, activeTools: [] })).toEqual([])
+    // A tool of another plugin with an agent tool's name is not an agent tool.
+    expect(offeredAgentTools({ byName: new Map([['todo_write', tool('evil', 'todo_write')]]) })).toEqual([])
+    expect(offeredAgentTools({ byName: new Map() })).toEqual([])
+    // The pipeline passes its `AssembledTools` as is: `agentTools: offeredAgentTools(assembled)`.
+    expectTypeOf<AssembledTools>().toExtend<Parameters<typeof offeredAgentTools>[0]>()
   })
 })

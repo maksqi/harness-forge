@@ -1,11 +1,19 @@
-// Steering seams (Phase 9, C26-T5): `stepInjector` is complete (chunks injected at a step boundary land right before
+// Steering (Phase 9, C26-T5 / W9.2-T3): `stepInjector` is complete (chunks injected at a step boundary land right before
 // that step's `start-step`, in order, also when the consumer falls whole steps behind, and the rest is flushed when the
-// stream ends); `createSteerStep` is a no-op piece until W9.2.
+// stream ends); `createSteerStep` takes the steerable queued items synchronously, injects their `data-steer` chunks for
+// the step and appends them as user model messages (files loaded for the model like the saved history's). The run-level
+// round trips (placement in the stored reply, the model history after a reload) are in `index.test.ts`.
+import type { QueueItem } from '@harness-forge/shared'
+import type { ResolvedModel } from '../providers/types.ts'
 import type { HarnessUIMessageChunk } from './generated-files.ts'
-import type { RunSession } from './pipeline.ts'
+import type { HarnessDataChunk, RunSession } from './pipeline.ts'
+import type { ChatQueue } from './queue.ts'
 import type { StepInjectionSource } from './steer.ts'
+import { Buffer } from 'node:buffer'
 import { describe, expect, it } from 'vitest'
-import { createSteerStep, stepInjector } from './steer.ts'
+import { createMemoryLogger } from '../logger.ts'
+import { UNREADABLE_ATTACHMENTS_TEXT } from './files.ts'
+import { createSteerStep, steerChunk as itemSteerChunk, steerUIMessage, stepInjector } from './steer.ts'
 
 /** The injection queue of `RunSession`, standing alone. */
 function injections(): StepInjectionSource & { inject: (chunk: HarnessUIMessageChunk, step: number) => void } {
@@ -125,9 +133,140 @@ describe('stepInjector', () => {
   })
 })
 
-describe('createSteerStep (stub until W9.2)', () => {
-  it('is a piece that changes nothing', async () => {
-    const piece = createSteerStep({ session: {} as RunSession, model: {} as never, tools: {} })
-    expect(await piece({ stepNumber: 0, messages: [{ role: 'user', content: 'hi' }], instructions: undefined, steps: [] })).toBeUndefined()
+// ---------- createSteerStep ----------
+
+const CHAT = '0199a8f0-0000-7000-8000-000000000001'
+const TEXT_FILE = 'file_TTTTTTTTTTTTTTTT'
+const IMAGE_FILE = 'file_IIIIIIIIIIIIIIII'
+const STEER_SECRET = 'steer-sentinel-91c2'
+
+function item(n: number, parts: QueueItem['message']['parts'], turnOnly = false): QueueItem {
+  const id = `msg_s${n.toString().padStart(15, '0')}`
+  return { id, message: { id, role: 'user', parts }, modelRef: 'mock:steer', reasoningEffort: 'auto', toolMode: 'ask', createdAt: 100 + n, turnOnly }
+}
+
+/** A queue that only knows the takes the steer step uses. */
+function fakeQueue(items: QueueItem[]): ChatQueue & { items: QueueItem[], takes: number } {
+  const state = {
+    items: [...items],
+    takes: 0,
+    takeSteerable: (chatId: string) => {
+      expect(chatId).toBe(CHAT)
+      state.takes += 1
+      const taken = state.items.filter(entry => !entry.turnOnly)
+      state.items = state.items.filter(entry => entry.turnOnly)
+      return taken
+    },
+  }
+  return state as unknown as ChatQueue & { items: QueueItem[], takes: number }
+}
+
+interface SteerHarness {
+  session: RunSession
+  queue: ReturnType<typeof fakeQueue>
+  injected: Array<{ chunk: HarnessDataChunk, step: number }>
+  controller: AbortController
+  logs: ReturnType<typeof createMemoryLogger>
+  model: ResolvedModel
+}
+
+function steerHarness(items: QueueItem[], capabilities: { vision: boolean, pdf: boolean } = { vision: false, pdf: false }): SteerHarness {
+  const queue = fakeQueue(items)
+  const injected: SteerHarness['injected'] = []
+  const controller = new AbortController()
+  const logs = createMemoryLogger()
+  const files = {
+    idFromUrl: (url: string) => (url.startsWith('/api/files/') ? url.slice('/api/files/'.length) : null),
+    read: async (id: string) => {
+      if (id === TEXT_FILE)
+        return { file: { id, mime: 'text/plain', name: 'notes.txt' }, data: new Uint8Array(Buffer.from('file body')) }
+      if (id === IMAGE_FILE)
+        return { file: { id, mime: 'image/png', name: 'shot.png' }, data: new Uint8Array([1, 2, 3]) }
+      throw new Error('missing')
+    },
+  }
+  const session = {
+    chatId: CHAT,
+    ctx: { run: { signal: controller.signal }, queue, now: () => 5000, deps: { files }, logger: logs.logger },
+    inject: (chunk: HarnessDataChunk, step: number) => injected.push({ chunk, step }),
+  } as unknown as RunSession
+  const model = { entry: { capabilities: { tools: true, ...capabilities } } } as unknown as ResolvedModel
+  return { session, queue, injected, controller, logs, model }
+}
+
+const BEFORE = [{ role: 'user' as const, content: 'steps 3' }]
+
+describe('createSteerStep', () => {
+  it('takes the steerable items synchronously, injects one data-steer per item for the step and appends user messages', async () => {
+    const first = item(1, [{ type: 'text', text: 'also check the tests' }])
+    const compact = item(2, [{ type: 'text', text: '/compact' }], true)
+    const second = item(3, [{ type: 'text', text: 'and the docs' }])
+    const h = steerHarness([first, compact, second])
+    const piece = createSteerStep({ session: h.session, model: h.model, tools: {} })
+    const pending = piece({ stepNumber: 2, messages: BEFORE, instructions: undefined, steps: [] })
+    // Before any await: the take and the injection happened (a DELETE now loses).
+    expect(h.queue.takes).toBe(1)
+    expect(h.queue.items).toEqual([compact])
+    expect(h.injected).toEqual([
+      { chunk: itemSteerChunk(first, 5000), step: 2 },
+      { chunk: itemSteerChunk(second, 5000), step: 2 },
+    ])
+    expect(h.injected[0]?.chunk).toEqual({ type: 'data-steer', data: { id: first.id, parts: first.message.parts, queuedAt: 101, deliveredAt: 5000 } })
+    const result = await pending
+    expect(result?.messages).toEqual([
+      ...BEFORE,
+      { role: 'user', content: [{ type: 'text', text: 'also check the tests' }] },
+      { role: 'user', content: [{ type: 'text', text: 'and the docs' }] },
+    ])
+  })
+
+  it('step 0 counts (the first call of a turn or a continuation)', async () => {
+    const h = steerHarness([item(1, [{ type: 'text', text: 'waited' }])])
+    const result = await createSteerStep({ session: h.session, model: h.model, tools: {} })({ stepNumber: 0, messages: [], instructions: undefined, steps: [] })
+    expect(h.injected.map(entry => entry.step)).toEqual([0])
+    expect(result?.messages).toHaveLength(1)
+  })
+
+  it('changes nothing without steerable items, and takes nothing once the run is aborted', async () => {
+    const h = steerHarness([item(1, [{ type: 'text', text: '/compact' }], true)])
+    const piece = createSteerStep({ session: h.session, model: h.model, tools: {} })
+    expect(await piece({ stepNumber: 1, messages: BEFORE, instructions: undefined, steps: [] })).toBeUndefined()
+    const aborted = steerHarness([item(1, [{ type: 'text', text: 'late' }])])
+    aborted.controller.abort()
+    expect(await createSteerStep({ session: aborted.session, model: aborted.model, tools: {} })({ stepNumber: 1, messages: BEFORE, instructions: undefined, steps: [] })).toBeUndefined()
+    expect(aborted.queue.takes).toBe(0)
+    expect(aborted.injected).toEqual([])
+  })
+
+  it('loads files for the run model like the saved history (text inlined; images only for vision models)', async () => {
+    const parts: QueueItem['message']['parts'] = [
+      { type: 'text', text: 'see these' },
+      { type: 'file', mediaType: 'text/plain', filename: 'notes.txt', url: `/api/files/${TEXT_FILE}` },
+      { type: 'file', mediaType: 'image/png', filename: 'shot.png', url: `/api/files/${IMAGE_FILE}` },
+    ]
+    const plain = steerHarness([item(1, parts)])
+    const result = await createSteerStep({ session: plain.session, model: plain.model, tools: {} })({ stepNumber: 1, messages: [], instructions: undefined, steps: [] })
+    expect(result?.messages).toEqual([{ role: 'user', content: [{ type: 'text', text: 'see these' }, { type: 'text', text: 'Attached file "notes.txt":\n\nfile body' }] }])
+    // The injected part keeps the stored file references (never data URLs).
+    expect(plain.injected[0]?.chunk.data).toMatchObject({ parts })
+
+    const vision = steerHarness([item(1, parts)], { vision: true, pdf: false })
+    const seen = await createSteerStep({ session: vision.session, model: vision.model, tools: {} })({ stepNumber: 1, messages: [], instructions: undefined, steps: [] })
+    const content = (seen?.messages?.[0] as { content: Array<{ type: string, mediaType?: string }> }).content
+    expect(content.map(part => part.type)).toEqual(['text', 'text', 'file'])
+    expect(content[2]).toMatchObject({ type: 'file', mediaType: 'image/png' })
+
+    const unreadable = steerHarness([item(1, [{ type: 'file', mediaType: 'image/png', url: `/api/files/${IMAGE_FILE}` }])])
+    const only = await createSteerStep({ session: unreadable.session, model: unreadable.model, tools: {} })({ stepNumber: 1, messages: [], instructions: undefined, steps: [] })
+    expect(only?.messages).toEqual([{ role: 'user', content: [{ type: 'text', text: UNREADABLE_ATTACHMENTS_TEXT }] }])
+  })
+
+  it('steerUIMessage is the user message splitSteers rebuilds; texts are never logged', async () => {
+    const steer = item(1, [{ type: 'text', text: STEER_SECRET }])
+    expect(steerUIMessage(steer)).toEqual({ id: steer.id, role: 'user', parts: steer.message.parts })
+    const h = steerHarness([steer])
+    await createSteerStep({ session: h.session, model: h.model, tools: {} })({ stepNumber: 1, messages: [], instructions: undefined, steps: [] })
+    expect(h.logs.records.length).toBeGreaterThan(0)
+    expect(h.logs.text()).not.toContain(STEER_SECRET)
   })
 })

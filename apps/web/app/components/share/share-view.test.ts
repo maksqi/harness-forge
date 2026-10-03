@@ -63,6 +63,42 @@ describe('share view helpers', () => {
     expect(new Set(blocks.map(block => block.key)).size).toBe(blocks.length)
   })
 
+  it('routes the agent tools to tool rows like any tool (Phase 9)', () => {
+    const blocks = shareMessageBlocks([
+      { type: 'tool', toolName: 'todo_write', status: 'done' },
+      { type: 'text', text: 'Exploring first.' },
+      { type: 'tool', toolName: 'task', status: 'done', input: { description: 'Find the session code', prompt: 'List files.', type: 'explore' } },
+      { type: 'tool', toolName: 'task', status: 'stopped' },
+      { type: 'tool', toolName: 'exit_plan_mode', status: 'denied' },
+    ])
+    expect(blocks.map(block => [block.kind, block.kind === 'tool' ? block.part.toolName : null])).toEqual([
+      ['tool', 'todo_write'],
+      ['text', null],
+      ['tool', 'task'],
+      ['tool', 'task'],
+      ['tool', 'exit_plan_mode'],
+    ])
+    expect(new Set(blocks.map(block => block.key)).size).toBe(blocks.length)
+  })
+
+  it('builds a plain user bubble from a steer the server split out of a reply (Phase 9)', () => {
+    const message = toUserMessage({
+      role: 'user',
+      parts: [
+        { type: 'text', text: 'Use the vitest filter instead' },
+        { type: 'file', mediaType: 'text/plain', filename: 'notes.txt', url: '/api/share/t/files/n' },
+      ],
+    }, 'share-message-2')
+    expect(message).toEqual({
+      id: 'share-message-2',
+      role: 'user',
+      parts: [
+        { type: 'text', text: 'Use the vitest filter instead', state: 'done' },
+        { type: 'file', mediaType: 'text/plain', filename: 'notes.txt', url: '/api/share/t/files/n' },
+      ],
+    })
+  })
+
   it('builds the user message the bubble reads: text, files and the command name', () => {
     const message = toUserMessage({
       role: 'user',

@@ -204,12 +204,61 @@ describe('generalSettings', () => {
     expect(trigger.text()).toBe('Accept edits')
   })
 
+  it('offers Plan as the default permission mode (Phase 9)', async () => {
+    const wrapper = await mountGeneral()
+    const trigger = wrapper.get(`[data-testid="${testIds.settingsDefaultMode}"]`)
+    await trigger.trigger('keydown', { key: 'Enter' })
+    await settle()
+    const plan = document.body.querySelector<HTMLElement>('[data-slot="select-item"][data-value="plan"]')!
+    expect(plan.textContent).toContain('Plan')
+    expect(plan.textContent).toContain('Explore and plan; change nothing until you approve the plan')
+    plan.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settle()
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { defaultToolMode: 'plan' } })
+    expect(trigger.text()).toBe('Plan')
+  })
+
+  it('shows the Shift+Tab switch after Alt shortcuts and saves it at once (Phase 9)', async () => {
+    const wrapper = await mountGeneral()
+    const toggle = wrapper.get(`[data-testid="${testIds.settingsShiftTabModes}"]`)
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    const field = toggle.element.closest('[data-slot="field"]')!
+    expect(field.textContent).toContain('Shift+Tab switches the permission mode')
+    expect(field.textContent).toContain('In the composer, Shift+Tab cycles Ask, Accept edits and Plan. Off: Shift+Tab moves focus.')
+    expect(field.querySelector('label')!.getAttribute('for')).toBe(toggle.attributes('id'))
+    // Right after the Alt shortcuts field, in the Chat section.
+    const altField = wrapper.get(`[data-testid="${testIds.settingsAltShortcuts}"]`).element.closest('[data-slot="field"]')!
+    expect(altField.nextElementSibling).toBe(field)
+
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { shiftTabModes: false } })
+    expect(useSettingsStore().resolved.shiftTabModes).toBe(false)
+    expect(toggle.attributes('aria-checked')).toBe('false')
+  })
+
+  it('rolls the Shift+Tab switch back with a toast when saving fails', async () => {
+    api.settings.update.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Disk full.' }))
+    const wrapper = await mountGeneral()
+    const toggle = wrapper.get(`[data-testid="${testIds.settingsShiftTabModes}"]`)
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { shiftTabModes: false } })
+    expect(toasts.error).toHaveBeenCalledWith('Something went wrong', { description: 'Disk full.' })
+    expect(useSettingsStore().resolved.shiftTabModes).toBe(true)
+    expect(toggle.attributes('aria-checked')).toBe('true')
+  })
+
   it('shows the Agent section between Chat and Custom instructions (Phase 9)', async () => {
     const wrapper = await mountGeneral()
     const titles = wrapper.findAll('[data-slot="settings-section"] > header h2').map(title => title.text())
     const chat = titles.indexOf('Chat')
     expect(chat).toBeGreaterThanOrEqual(0)
     expect(titles.slice(chat, chat + 3)).toEqual(['Chat', 'Agent', 'Custom instructions'])
+    // Its fields (docs/UI.md 9.11; AgentSettingsSection.test.ts covers them).
+    for (const id of [testIds.settingsAutoCompact, testIds.settingsCompactionModel, testIds.settingsSubagentModel, testIds.settingsSubagentMaxSteps])
+      expect(wrapper.find(`[data-testid="${id}"]`).exists(), id).toBe(true)
+    expect((wrapper.get(`[data-testid="${testIds.settingsSubagentMaxSteps}"]`).element as HTMLInputElement).value).toBe('30')
   })
 
   it('restores the saved value on Escape', async () => {

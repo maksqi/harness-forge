@@ -2,9 +2,16 @@
 // message version, ADR-023) of a chat, with a sanitized `<title-slug>-<yyyy-mm-dd>.<md|json>` file name. Exports carry
 // the chat as the API shows it (no secrets, no internal ids beyond the chat's own and its messages'); `running` and
 // `pendingApproval` are always false.
-import type { ChatDetail, ChatExport, ChatExportFormat, HarnessUIMessage } from '@harness-forge/shared'
+//
+// Phase 9 (ADR-040 / ADR-042, W9.7): in Markdown a compaction marker (`data-compaction`) reads
+// "_Conversation compacted (N messages summarized)_" followed by its summary as a quote, and a reply is split at its
+// steers (`data-steer`, the shared `splitSteers`): each steer becomes a "## User (during the run)" section between
+// the parts of the reply before and after it. Invalid marker or steer data is left out. JSON exports carry the parts as
+// stored (the import validates them with `harnessDataSchemas`).
+import type { ChatDetail, ChatExport, ChatExportFormat, CompactionData, HarnessUIMessage } from '@harness-forge/shared'
 import type { ChatExportFile } from './types.ts'
 import { Buffer } from 'node:buffer'
+import { COMPACTION_PART_TYPE, compactionDataSchema, splitSteers } from '@harness-forge/shared'
 
 /** Tool outputs longer than this (UTF-8 bytes) are truncated in Markdown exports. */
 export const EXPORT_TOOL_OUTPUT_BYTES = 4096
@@ -87,6 +94,21 @@ function quote(text: string): string {
   return text.split(/\r?\n/).map(line => (line === '' ? '>' : `> ${line}`)).join('\n')
 }
 
+/** The heading line of a compaction marker. */
+export function compactionLine(data: Pick<CompactionData, 'messagesCompacted'>): string {
+  const count = data.messagesCompacted
+  return `_Conversation compacted (${count} ${count === 1 ? 'message' : 'messages'} summarized)_`
+}
+
+/** A compaction marker: the line and its summary as a quote; nothing for invalid data. */
+function compactionBlocks(part: Record<string, unknown>): string[] {
+  const parsed = compactionDataSchema.safeParse(part.data)
+  if (!parsed.success)
+    return []
+  const summary = parsed.data.summary.trim()
+  return summary === '' ? [compactionLine(parsed.data)] : [compactionLine(parsed.data), quote(summary)]
+}
+
 function toolBlocks(part: Record<string, unknown>): string[] {
   const type = String(part.type)
   const name = type === 'dynamic-tool' ? String(part.toolName ?? 'tool') : type.slice('tool-'.length)
@@ -119,28 +141,37 @@ function partBlocks(part: HarnessUIMessage['parts'][number]): string[] {
     case 'source-document':
       return [`Source: ${linkText(part.title)}`]
     default:
+      if (part.type === COMPACTION_PART_TYPE)
+        return compactionBlocks(loose)
       return part.type.startsWith('tool-') || part.type === 'dynamic-tool' ? toolBlocks(loose) : []
   }
 }
 
-function messageHeading(message: HarnessUIMessage, chatModelRef: string | null): string {
+/** The heading of a steer: a message the user queued while the agent worked (ADR-042). */
+export const STEER_HEADING = '## User (during the run)'
+
+function messageHeading(message: HarnessUIMessage, chatModelRef: string | null, steer: boolean): string {
   if (message.role === 'user')
-    return '## User'
+    return steer ? STEER_HEADING : '## User'
   if (message.role === 'system')
     return '## System'
   const modelRef = message.metadata?.modelRef ?? chatModelRef
   return modelRef ? `## Assistant (${modelRef})` : '## Assistant'
 }
 
-/** Markdown export: title, an export line (date, model), then one section per message. */
+/** Markdown export: title, an export line (date, model), then one section per message (replies split at steers). */
 export function renderChatMarkdown(chat: ChatDetail, at: number): string {
   const title = chat.title ?? UNTITLED
   const exportLine = `Exported from harness-forge on ${isoDate(at)}${chat.modelRef ? ` · Model: ${chat.modelRef}` : ''}`
   const sections = [`# ${title}`, exportLine]
   for (const message of chat.messages) {
-    sections.push(messageHeading(message, chat.modelRef))
-    for (const part of message.parts)
-      sections.push(...partBlocks(part))
+    // Only an assistant message is split; every user message that comes out of it is a steer.
+    const pieces = splitSteers([message])
+    for (const piece of pieces) {
+      sections.push(messageHeading(piece, chat.modelRef, piece.role === 'user' && message.role === 'assistant'))
+      for (const part of piece.parts)
+        sections.push(...partBlocks(part))
+    }
   }
   return `${sections.join('\n\n')}\n`
 }

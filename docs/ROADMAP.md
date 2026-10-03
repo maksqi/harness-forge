@@ -238,12 +238,12 @@ sub-agents (`task`), stabilization (unique shell rules, migration `0006`).
   - [x] K3 v1.4 upgrade seed (from a `316319a` worktree) + schema + `pnpm db:generate` (coordinator)
   - [x] C24 server skeleton · [x] C25 web skeleton · [x] C26 chat seams · [x] C27 `core-agent` skeleton + mock models
   - [x] Gate (incl. v1.4 data upgrade probe) + FREEZE + checkpoint commit
-- [ ] P9-A Features (12 agents)
-  - [ ] W9.1 compaction-server · [ ] W9.2 steer-queue-server · [ ] W9.3 plan-mode-server · [ ] W9.4 todo-instructions-server
-  - [ ] W9.5 subagents-server · [ ] W9.6 mentions-server · [ ] W9.7 stabilization-server
-  - [ ] W9.8 composer-web · [ ] W9.9 session-web · [ ] W9.10 agent-tools-web · [ ] W9.11 transcript-web
-  - [ ] W9.12 settings-stabilization-web
-  - [ ] Gate + checkpoint commit
+- [x] P9-A Features (12 agents)
+  - [x] W9.1 compaction-server · [x] W9.2 steer-queue-server · [x] W9.3 plan-mode-server · [x] W9.4 todo-instructions-server
+  - [x] W9.5 subagents-server · [x] W9.6 mentions-server · [x] W9.7 stabilization-server
+  - [x] W9.8 composer-web · [x] W9.9 session-web · [x] W9.10 agent-tools-web · [x] W9.11 transcript-web
+  - [x] W9.12 settings-stabilization-web
+  - [x] Gate + checkpoint commit
 - [ ] P9-B Feature e2e, docs, fix-ups, final gate
   - [ ] W9.13 e2e-features · [ ] W9.14 docs-final (W9.15 / W9.16 fix-ups only if the P9-A gate is red)
   - [ ] Final gate (e2e ×3, screenshots, audit, v1.4 → v1.5 upgrade, Docker) + checkpoint commit
@@ -302,3 +302,4 @@ run the live provider suite for compaction, plan mode and sub-agents with real m
 | P9-00 | coordinator | CI + Audit on `316319a` green; advisories still unpatched (ignores kept); `pnpm check` 8327 tests; design reports in `.tmp/p9-designs` | — |
 | P9-0a | coordinator (K1; K3 seed done early), C22, C23, D10, D11 (+ coordinator: the example plugins' `harness-forge.d.ts` regenerated for API 1.3.0, phase-doc reconciliation with D11 (`activity`, `chatQueue.add`, PROVIDERS.md 8, `mock:todo` 400 ms + `invalid`), C27 also owns `SH/ids*` for `core-agent`) | audit ok (69 paths; 16 C22 compile-fix files accepted); frozen install ok; 8528 tests; build ok; CSP 38/38; `pluginApiVersion` 1.3.0, 5 new routes answer 501 / 400; e2e 96 passed on a fresh `.tmp/e2e`; TypeScript 6.0.3 only | (this commit) |
 | P9-0b | coordinator (K3: schema + `0006_shell_rule_unique`, v1.4 seed from a `316319a` worktree), C24, C25, C26, C27 (+ coordinator: `declarativeCommandSchema` refuses `/compact` (C27 CCR), ownership additions for P9-A) | audit ok (162 paths; 11 test-fix files accepted); `0006` = 1 DELETE + 1 UPDATE + 2 partial `CREATE UNIQUE INDEX`; 8974 tests; build ok; CSP 38/38; e2e 96 passed on a fresh `.tmp/e2e`; upgrade probe on a v1.4 copy 31/31 (7 migrations, duplicates removed keeping the oldest, shell `allow` cleared, `current_time` kept, data intact, `core-agent` active, new settings defaulted); seam probe 7/7 (`mock:workspace` in auto writes + journals, `plan` accepted and asks, `/compact` listed, 5 agent mocks listed); FREEZE | (this commit) |
+| P9-A | W9.1 – W9.12 (+ coordinator: `truncated` covers matches beyond the limit, share snapshots leave out `/compact` exchanges, the `core-agent` stub test and the `deps` project-files pins updated; relays: `agentTools` + the pre-mode tool set for history (W9.1), the lowered child mode (W9.5), `isPlanExitTool` (W9.7)) | audit ok (175 paths, no frozen file touched); 9467 tests; build ok; CSP 38/38; probes 71/71 (`.tmp/gates/P9-A/probe.mjs`: manual + automatic + in-run compaction, branch above the marker, failure fallback, export / share; plan tool set, card, approve with Accept edits writes + journals, keep planning with feedback, 400s; todos incl. invalid list and the compaction snapshot; steer between steps, server-started next turn, cancel, Stop `dropped`, `run-idle`; parallel sub-agents without approvals, preliminary outputs, journal `<parent>/<child>`, cap, Stop, step limit; mentions ranking, ignores, attach guards, 413; unique rules race; v1.4 upgrade compaction); P8-A regression 47/47; e2e 96 passed on a fresh `.tmp/e2e`; 22 screenshots of the new screens reviewed (desktop + phone); `pnpm audit --prod` clean (2 ignored) | (this commit) |

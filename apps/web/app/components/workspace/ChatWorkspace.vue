@@ -7,7 +7,8 @@
 // pane's px size when the window resizes, and the width the user drags or keys in goes to `hf-changes-width`
 // (useChangesPanel) from the pane's `resize` event (not reka's `autoSaveId`, which stores percentages). Below 1024px
 // the same panel is a right Sheet (full width below `sm`, `sm:max-w-lg`, the panel's own 40px Close; it never opens by
-// itself: a narrow viewport closes the panel). Without a project only the chat panel renders.
+// itself: a narrow viewport closes the panel without clearing the saved open state, so widening the window again shows
+// the pane; Phase 9). Without a project only the chat panel renders.
 // Focus (14.1): a click on the toggle keeps focus there; Alt+C and the palette move it to the active view tab when they
 // open the panel; Close (and Alt+C from inside the pane) returns it to the toggle; the sheet traps focus, closes with Esc
 // and returns focus to the toggle.
@@ -19,7 +20,14 @@ import { useMediaQuery } from '@vueuse/core'
 import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
-import { CHANGES_SHORTCUT, CHANGES_SHORTCUT_KEYS, CHANGES_WIDTH, clampChangesWidth, useChangesPanel } from '~/composables/useChangesPanel'
+import {
+  CHANGES_SHORTCUT,
+  CHANGES_SHORTCUT_KEYS,
+  CHANGES_WIDTH,
+  clampChangesWidth,
+  setChangesPanelNarrow,
+  useChangesPanel,
+} from '~/composables/useChangesPanel'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { testIds } from '~/utils/testids'
 import { setChangesTarget } from './changes/changes-context'
@@ -63,11 +71,9 @@ watch(showPane, async (visible) => {
 const sheetOpen = computed(() => !isDesktop.value && panel.open.value && hasProject.value)
 
 // The sheet is modal: it never appears by itself (a stored "open" from a wide window, or a window narrowed while the
-// pane shows); below 1024px only the toggle, Alt+C or the palette open it.
-watch(isDesktop, (desktop) => {
-  if (!desktop && panel.open.value)
-    panel.setOpen(false)
-}, { immediate: true })
+// pane shows); below 1024px only the toggle, Alt+C or the palette open it. Narrowing closes the panel without writing
+// `hf-changes-open` (only an explicit toggle or close does), so a wide viewport shows the saved choice again.
+watch(isDesktop, desktop => setChangesPanelNarrow(!desktop), { immediate: true })
 
 // ---------- pane width ----------
 

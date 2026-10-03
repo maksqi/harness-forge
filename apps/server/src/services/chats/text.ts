@@ -1,10 +1,16 @@
 // Text helpers of the chats service: plain text of UI messages, `messages.search_text`, the `GET /chats?q=` matching
 // rules, snippets and title sanitizing.
 //
+// Phase 9 (ADR-040 / ADR-042, W9.7): the plain text of a reply includes the text of its steers (`data-steer`, messages
+// the user queued during the run; read through the shared `splitSteers`, in place), so a search finds them and the
+// snippet can show them; compaction summaries (`data-compaction`) are never indexed.
+//
 // Case-insensitive search: SQLite's LIKE folds ASCII letters only, so `search_text` stores the message text
 // NFC-normalized and lowercased with JavaScript's Unicode-aware `toLowerCase()`, and the query is normalized the same
 // way before it becomes a LIKE pattern (`%` and `_` escaped). Titles are matched in JavaScript with the same rule.
 // Snippets are cut from the original (not lowercased) text of the matching message.
+import type { AgentStateMessage } from '@harness-forge/shared'
+import { splitSteers, STEER_PART_TYPE } from '@harness-forge/shared'
 
 /** Maximum length of `ChatSummary.snippet`. */
 export const SNIPPET_MAX_LENGTH = 160
@@ -52,9 +58,7 @@ export function truncateCodePoints(value: string, max: number): string {
   return chars.length <= max ? value : chars.slice(0, max).join('')
 }
 
-/** Plain text of a message: its `text` parts joined with newlines. */
-export function messagePlainText(parts: readonly unknown[]): string {
-  const texts: string[] = []
+function collectTexts(parts: readonly unknown[], texts: string[]): void {
   for (const part of parts) {
     if (typeof part !== 'object' || part === null)
       continue
@@ -62,6 +66,24 @@ export function messagePlainText(parts: readonly unknown[]): string {
     if (type === 'text' && typeof text === 'string' && text !== '')
       texts.push(text)
   }
+}
+
+/**
+ * Plain text of a message: its `text` parts joined with newlines, with the text of each valid steer (`data-steer`,
+ * `splitSteers`) at its place in the reply. Other data parts (compaction summaries, notices) are not text.
+ */
+export function messagePlainText(parts: readonly unknown[]): string {
+  const texts: string[] = []
+  if (!Array.isArray(parts))
+    return ''
+  const steered = parts.some(part => typeof part === 'object' && part !== null && (part as { type?: unknown }).type === STEER_PART_TYPE)
+  if (!steered) {
+    collectTexts(parts, texts)
+    return texts.join('\n')
+  }
+  // Steers are only recognized in assistant messages; the role does not matter for the text.
+  for (const piece of splitSteers([{ id: 'text', role: 'assistant', parts: parts as AgentStateMessage['parts'] }]))
+    collectTexts(piece.parts, texts)
   return texts.join('\n')
 }
 

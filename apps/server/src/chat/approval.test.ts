@@ -17,7 +17,9 @@ import {
   DENIED_UNAVAILABLE,
   effectiveOverride,
   evaluatePolicy,
+  isPlanExitTool,
   resolveApproval,
+  staticApprovalOutcome,
   toApprovalStatus,
   toolWorkspaceAccess,
 } from './approval.ts'
@@ -389,6 +391,95 @@ describe('createToolApproval: a stored allow override on an execute tool (Phase 
     for (const access of [null, 'read', 'write', 'execute'] as const) {
       for (const stored of OVERRIDES)
         expect(effectiveOverride(stored, access)).toBe(stored === 'allow' && access === 'execute' ? null : stored)
+    }
+  })
+})
+
+// ---------- Phase 9: exit_plan_mode always asks; the call-independent outcome ----------
+
+describe('createToolApproval: core-agent exit_plan_mode (Phase 9, ADR-041)', () => {
+  const plan: ApprovalTool = { pluginId: 'core-agent', definition: { ...definition('always'), name: 'exit_plan_mode' } }
+  const planCall = { toolCall: { toolName: 'exit_plan_mode', toolCallId: 'call_plan', input: { plan: '# Plan' } }, messages: [] }
+
+  function recordingHooks(decision: HookDecision, calls: string[]): ToolApprovalContext['registry']['hooks'] {
+    return {
+      run: async (_name: string, input: unknown, output: unknown) => {
+        calls.push((input as { tool: string }).tool);
+        (output as { decision?: unknown }).decision = decision
+      },
+      on: () => ({ dispose() {} }),
+      list: () => [],
+    } as unknown as ToolApprovalContext['registry']['hooks']
+  }
+
+  it('asks in every mode, before the overrides (allow / deny / ask) and the tool.approve hook', async () => {
+    for (const toolMode of MODES) {
+      for (const override of ['allow', 'deny', 'ask'] as const) {
+        const calls: string[] = []
+        const approve = createToolApproval(context({ toolMode, tool: plan, prefs: new Map([['exit_plan_mode', { enabled: true, override }]]), registry: { hooks: recordingHooks('allow', calls) } }))
+        expect(await approve(planCall)).toBe('user-approval')
+        expect(calls).toEqual([])
+      }
+      const calls: string[] = []
+      for (const decision of ['allow', 'deny'] as const)
+        expect(await createToolApproval(context({ toolMode, tool: plan, registry: { hooks: recordingHooks(decision, calls) } }))(planCall)).toBe('user-approval')
+      expect(calls).toEqual([])
+    }
+  })
+
+  it('never evaluates a policy for it (the card always shows, also on the approved continuation)', async () => {
+    let evaluated = 0
+    const tool: ApprovalTool = { pluginId: 'core-agent', definition: { ...definition(() => {
+      evaluated += 1
+      return 'safe' as const
+    }), name: 'exit_plan_mode' } }
+    expect(await createToolApproval(context({ toolMode: 'edits', tool }))(planCall)).toBe('user-approval')
+    expect(evaluated).toBe(0)
+  })
+
+  it('a tool of another owner with that name resolves like any other tool; an unoffered exit_plan_mode is denied', async () => {
+    const impostor: ApprovalTool = { pluginId: 'impostor', definition: { ...definition('ask'), name: 'exit_plan_mode' } }
+    expect(isPlanExitTool(impostor)).toBe(false)
+    expect(isPlanExitTool(plan)).toBe(true)
+    expect(await createToolApproval(context({ tool: impostor, prefs: new Map([['exit_plan_mode', { enabled: true, override: 'allow' }]]) }))(planCall)).toBe('approved')
+    // Not offered in this run (another mode, switched off): denied like any unknown tool.
+    expect(await createToolApproval(context({ toolMode: 'edits' }))(planCall)).toEqual({ type: 'denied', reason: DENIED_UNAVAILABLE })
+  })
+})
+
+describe('staticApprovalOutcome (Phase 9, the sub-agent tool set)', () => {
+  const tool = (policy: ToolDefinition['policy'], workspace?: ToolWorkspaceAccess, pluginId = 'demo'): ApprovalTool => ({ pluginId, definition: definition(policy, workspace) })
+
+  it('equals resolveApproval without a hook for static policies, in every mode, with every override', () => {
+    for (const toolMode of MODES) {
+      for (const stored of OVERRIDES) {
+        for (const policy of ['safe', 'ask', 'always', 'deny'] as const) {
+          for (const workspace of ACCESS) {
+            const expectedOutcome = expected(effectiveOverride(stored, workspace), undefined, toolMode, policy, workspace)
+            // A static `deny` string is plugin data the type does not allow (a policy function may answer it).
+            expect(staticApprovalOutcome(tool(policy as ToolDefinition['policy'], workspace ?? undefined), toolMode, stored)).toBe(expectedOutcome)
+          }
+        }
+      }
+    }
+  })
+
+  it('no policy or an unknown string counts as ask; a policy function decides per call (null) unless an override decides', () => {
+    expect(staticApprovalOutcome(tool(undefined), 'ask', null)).toBe('user-approval')
+    expect(staticApprovalOutcome(tool(undefined), 'auto', null)).toBe('not-applicable')
+    expect(staticApprovalOutcome(tool('sometimes' as ToolDefinition['policy']), 'ask', null)).toBe('user-approval')
+    expect(staticApprovalOutcome(tool(() => 'safe', 'execute'), 'ask', null)).toBeNull()
+    expect(staticApprovalOutcome(tool(() => 'safe', 'execute'), 'ask', 'deny')).toBe('denied')
+    // A stored allow on an execute tool is ignored (ADR-038): the policy function decides.
+    expect(staticApprovalOutcome(tool(() => 'safe', 'execute'), 'ask', 'allow')).toBeNull()
+    expect(staticApprovalOutcome(tool(() => 'safe', 'write'), 'ask', 'allow')).toBe('approved')
+  })
+
+  it('exit_plan_mode of core-agent can only ask', () => {
+    const plan: ApprovalTool = { pluginId: 'core-agent', definition: { ...definition('always'), name: 'exit_plan_mode' } }
+    for (const toolMode of MODES) {
+      for (const stored of OVERRIDES)
+        expect(staticApprovalOutcome(plan, toolMode, stored)).toBe('user-approval')
     }
   })
 })

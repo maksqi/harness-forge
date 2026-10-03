@@ -1,6 +1,9 @@
-import type { HarnessUIMessage } from '@harness-forge/shared'
-import { HarnessError, MESSAGE_ID_PATTERN } from '@harness-forge/shared'
-import { describe, expect, it } from 'vitest'
+import type { ChatDetail, HarnessUIMessage } from '@harness-forge/shared'
+import type { TestApp } from '../../testing/create-test-app.ts'
+import { chatExportAnySchema, findCompaction, HarnessError, MESSAGE_ID_PATTERN, splitSteers } from '@harness-forge/shared'
+import { afterEach, describe, expect, it } from 'vitest'
+import { createTestApp } from '../../testing/create-test-app.ts'
+import { buildChatExport } from './export.ts'
 import { assignMessageIds, freshMessageIds, IMPORT_DENIAL_REASON, planImportTree, validateImportedMessages } from './import.ts'
 
 const META = { modelRef: 'mock:echo', startedAt: 1 }
@@ -148,5 +151,160 @@ describe('freshMessageIds', () => {
     expect(new Set([...result.map(message => message.id), 'msg_aaaaaaaaaaaaaaaa']).size).toBe(4)
     expect(result.map(message => (message.parts[0] as { text: string }).text)).toEqual(['one', 'two', 'three'])
     expect(list[0]!.id).toBe('msg_aaaaaaaaaaaaaaaa')
+  })
+})
+
+// ---------- Phase 9: agent parts (W9.7) ----------
+
+const COMPACTION = { modelRef: 'mock:compact', messagesCompacted: 2, tokensBefore: 800, tokensAfter: 80, createdAt: 7 }
+
+/** A path with a steer inside a reply, a `/compact` reply and an automatic marker during a reply. */
+function agentMessages(): HarnessUIMessage[] {
+  return [
+    { id: 'msg_agentimport00001', role: 'user', metadata: META, parts: [{ type: 'text', text: 'Remember OLD-1' }] },
+    {
+      id: 'msg_agentimport00002',
+      role: 'assistant',
+      metadata: { modelRef: 'mock:steer', startedAt: 2, finishedAt: 3 },
+      parts: [
+        { type: 'step-start' },
+        { type: 'text', text: 'Working', state: 'done' },
+        {
+          type: 'data-steer',
+          id: 'steer_part_1',
+          data: {
+            id: 'msg_queuedimport0001',
+            parts: [{ type: 'text', text: 'Also the TANGERINE case' }, { type: 'file', mediaType: 'text/plain', filename: 'notes.txt', url: '/api/files/file_0000000000000003' }],
+            queuedAt: 3,
+            deliveredAt: 4,
+          },
+        },
+        { type: 'step-start' },
+        { type: 'text', text: 'Done with both', state: 'done' },
+      ],
+    },
+    { id: 'msg_agentimport00003', role: 'user', metadata: { ...META, command: { name: 'compact', input: 'keep numbers', type: 'compact' } }, parts: [{ type: 'text', text: '/compact keep numbers' }] },
+    {
+      id: 'msg_agentimport00004',
+      role: 'assistant',
+      metadata: { modelRef: 'mock:compact', startedAt: 5, finishedAt: 6 },
+      parts: [{ type: 'step-start' }, { type: 'data-compaction', data: { ...COMPACTION, trigger: 'manual', keep: 'none', focus: 'keep numbers', summary: 'MOCK-SUMMARY sentinels=OLD-1' } }],
+    },
+    { id: 'msg_agentimport00005', role: 'user', metadata: META, parts: [{ type: 'text', text: 'loop 2' }] },
+    {
+      id: 'msg_agentimport00006',
+      role: 'assistant',
+      metadata: { modelRef: 'mock:compact', startedAt: 8, finishedAt: 9 },
+      parts: [
+        { type: 'step-start' },
+        { type: 'text', text: 'Step 1 done.', state: 'done' },
+        { type: 'data-compaction', data: { ...COMPACTION, trigger: 'auto', keep: 'last-user', summary: 'In-run summary', todos: [{ id: 't1', content: 'Write tests', status: 'in_progress' }] } },
+        { type: 'step-start' },
+        { type: 'text', text: 'Loop finished after 2 steps.', state: 'done' },
+      ],
+    },
+  ] as HarnessUIMessage[]
+}
+
+function agentChat(messages: HarnessUIMessage[] = agentMessages()): ChatDetail {
+  return {
+    id: '0199a8f0-0000-7000-8000-00000000a9e1',
+    title: 'Agent import',
+    titleSource: 'user',
+    modelRef: 'mock:compact',
+    pinned: false,
+    archived: false,
+    running: false,
+    pendingApproval: false,
+    projectId: null,
+    createdAt: 1,
+    updatedAt: 2,
+    settings: { toolMode: 'ask' },
+    totals: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 },
+    branches: {},
+    messages,
+  }
+}
+
+const apps: TestApp[] = []
+
+afterEach(async () => {
+  for (const t of apps.splice(0))
+    await t.close()
+})
+
+async function testApp(): Promise<TestApp> {
+  const t = await createTestApp({ start: false, builtins: [] })
+  apps.push(t)
+  return t
+}
+
+function exportOf(chat: ChatDetail) {
+  return chatExportAnySchema.parse(JSON.parse(buildChatExport(chat, 'json', 10).body))
+}
+
+describe('validateImportedMessages: agent parts (Phase 9)', () => {
+  it('keeps compaction markers and steers unchanged', async () => {
+    const messages = agentMessages()
+    await expect(validateImportedMessages(messages)).resolves.toEqual(messages)
+  })
+
+  it('drops transient activity parts from replies', async () => {
+    const reply = {
+      id: 'msg_agentimport00009',
+      role: 'assistant',
+      parts: [{ type: 'data-activity', data: { kind: 'compacting' } }, { type: 'text', text: 'ok', state: 'done' }, { type: 'data-activity', data: { kind: 'idle' } }],
+    } as HarnessUIMessage
+    const [result] = await validateImportedMessages([reply])
+    expect(result!.parts).toEqual([{ type: 'text', text: 'ok', state: 'done' }])
+  })
+
+  it('rejects invalid compaction and steer data with the issue path', async () => {
+    const [, reply, , compactReply] = agentMessages()
+    const badSteer = { ...reply!, parts: [{ type: 'data-steer', data: { id: 'msg_queuedimport0001', parts: [], queuedAt: 1, deliveredAt: 2 } }] } as unknown as HarnessUIMessage
+    const longSummary = { ...compactReply!, parts: [{ type: 'data-compaction', data: { ...COMPACTION, trigger: 'manual', keep: 'none', summary: 'x'.repeat(60_001) } }] } as unknown as HarnessUIMessage
+    const badTrigger = { ...compactReply!, parts: [{ type: 'data-compaction', data: { ...COMPACTION, trigger: 'sometimes', keep: 'none', summary: 's' } }] } as unknown as HarnessUIMessage
+    for (const bad of [badSteer, longSummary, badTrigger]) {
+      const error = await rejection(validateImportedMessages([bad], ['chat']))
+      expect(error.code).toBe('validation_error')
+      expect((error.details as { issues: { path: unknown[] }[] }).issues[0]!.path.slice(0, 3)).toEqual(['chat', 'messages', 0])
+    }
+  })
+})
+
+describe('chat export -> import round trip: agent parts (Phase 9)', () => {
+  it('keep: the parts come back unchanged, and a second export equals the first', async () => {
+    const t = await testApp()
+    const exported = exportOf(agentChat())
+    const { id } = await t.deps.chats.importChat({ exported, id: 'keep', restore: true })
+    const imported = await t.deps.chats.get(id)
+    expect(imported.messages).toEqual(agentMessages())
+    const again = (await t.deps.chats.export(id, 'json')).body
+    expect(chatExportAnySchema.parse(JSON.parse(again)).chat.messages).toEqual(exported.chat.messages)
+  })
+
+  it('new: replaced message ids keep the marker in force (positional) and the steer splits the reply', async () => {
+    const t = await testApp()
+    const { id } = await t.deps.chats.importChat({ exported: exportOf(agentChat()), id: 'new', restore: false })
+    const path = (await t.deps.chats.get(id)).messages
+    expect(path.map(message => message.id)).not.toContain('msg_agentimport00001')
+    expect(path.map(message => message.parts)).toEqual(agentMessages().map(message => message.parts))
+    expect(findCompaction(path)).toMatchObject({ messageIndex: 5, partIndex: 2, keptUserIndex: 4, data: { trigger: 'auto', summary: 'In-run summary' } })
+    const split = splitSteers(path)
+    expect(split.map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant'])
+    expect(split[2]).toMatchObject({ id: 'msg_queuedimport0001', role: 'user', parts: [{ type: 'text', text: 'Also the TANGERINE case' }, { type: 'file' }] })
+    // The search text of the imported reply holds the steer text, never the summaries.
+    expect((await t.deps.chats.list({ q: 'tangerine' })).items.map(chat => chat.id)).toEqual([id])
+    expect((await t.deps.chats.list({ q: 'in-run summary' })).items).toEqual([])
+    expect((await t.deps.chats.list({ q: 'sentinels' })).items).toEqual([])
+  })
+
+  it('an imported activity part is not stored', async () => {
+    const t = await testApp()
+    const messages = agentMessages()
+    const reply = messages[1]!
+    messages[1] = { ...reply, parts: [...reply.parts, { type: 'data-activity', data: { kind: 'idle' } } as HarnessUIMessage['parts'][number]] }
+    const { id } = await t.deps.chats.importChat({ exported: exportOf(agentChat(messages)), id: 'keep', restore: true })
+    expect((await t.deps.chats.get(id)).messages).toEqual(agentMessages())
   })
 })

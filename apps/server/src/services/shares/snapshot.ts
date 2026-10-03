@@ -10,12 +10,19 @@
 // provider metadata, approvals, `data-*`, `step-start`, `reasoning-file`, `custom` and unknown parts, other URLs.
 // Reasoning and tool details are always stored, so the share's options can change what the page shows at once.
 //
+// Phase 9 (ADR-040 / ADR-042, UI.md 7.15 "Agent 2.0 parity", W9.7; no `sharePartSchema` change): an assistant message
+// is split at its steers (`data-steer`, the shared `splitSteers`) into assistant / user / assistant share messages, so
+// a message the user queued during the run reads as an ordinary user message (its text and file parts, the files
+// following the attachments option); the reply's `failed` / `stopped` status stays on its last assistant part.
+// Compaction markers (`data-compaction`, summaries are never shared) and activity parts (`data-activity`) are dropped
+// like every other `data-*` part. `shareableMessageCount` counts the messages after the split, like the snapshot.
+//
 // `renderShareMessages` applies the options when the view is served: reasoning parts, tool inputs / outputs / error
 // texts and file parts are left out when disabled, and app file URLs become `/api/share/<token>/files/<id>` (only for
 // ids of the share's `file_ids`).
 import type { HarnessUIMessage, ShareMessage, ShareOptions, SharePart, ShareSnapshot, ShareToolStatus } from '@harness-forge/shared'
 import { Buffer } from 'node:buffer'
-import { COMMAND_NAME_PATTERN, LIMITS, safeParseModelRef, TOOL_NAME_PATTERN } from '@harness-forge/shared'
+import { COMMAND_NAME_PATTERN, isContentPart, LIMITS, safeParseModelRef, splitSteers, TOOL_NAME_PATTERN } from '@harness-forge/shared'
 
 /** The file id of an app file URL (`/api/files/<id>`), else null: `FilesService.idFromUrl`. */
 export type FileIdOf = (url: string) => string | null
@@ -216,7 +223,11 @@ function sanitizePart(value: unknown, context: SanitizeContext): SharePart | nul
   }
 }
 
-function sanitizeMessage(message: HarnessUIMessage, context: SanitizeContext): ShareMessage {
+/**
+ * One share message. `withStatus`: the reply's `failed` / `stopped` status applies (false for the assistant parts of a
+ * split reply before its last one).
+ */
+function sanitizeMessage(message: HarnessUIMessage, context: SanitizeContext, withStatus = true): ShareMessage {
   const role = message.role === 'assistant' ? 'assistant' : 'user'
   const metadata = asRecord(message.metadata)
   const shared: ShareMessage = { role, parts: [] }
@@ -224,9 +235,10 @@ function sanitizeMessage(message: HarnessUIMessage, context: SanitizeContext): S
     const modelRef = metadata?.modelRef
     if (typeof modelRef === 'string' && safeParseModelRef(modelRef) !== null)
       shared.modelRef = modelRef
-    if (metadata?.error !== undefined && metadata.error !== null)
+    // An earlier part of a reply split at a steer has no status: the reply went on after it.
+    if (withStatus && metadata?.error !== undefined && metadata.error !== null)
       shared.status = 'failed'
-    else if (metadata?.aborted === true)
+    else if (withStatus && metadata?.aborted === true)
       shared.status = 'stopped'
   }
   else {
@@ -251,21 +263,44 @@ export interface SanitizedSnapshot {
   fileIds: string[]
 }
 
+function isShareable(message: HarnessUIMessage): boolean {
+  if (message.role === 'user')
+    return message.metadata?.command?.type !== 'compact'
+  if (message.role !== 'assistant')
+    return false
+  // A `/compact` reply holds only its marker (dropped from shares), so the whole exchange is left out.
+  const parts = (Array.isArray(message.parts) ? message.parts as unknown[] : [])
+    .filter((part): part is { type: string } => typeof part === 'object' && part !== null && typeof (part as { type?: unknown }).type === 'string')
+  return !(parts.some(part => part.type === 'data-compaction') && parts.every(part => !isContentPart(part) || part.type === 'data-compaction'))
+}
+
 /**
  * The snapshot of an active path (`ChatDetail.messages`). `title` is the chat title at snapshot time (the page shows
- * the share's custom title instead when it has one). Only `user` and `assistant` messages are kept, so
- * `snapshot.messages.length` is the share's `message_count`.
+ * the share's custom title instead when it has one). Only `user` and `assistant` messages are kept (a `/compact`
+ * exchange is left out), each assistant message split at its steers (`splitSteers`), so `snapshot.messages.length` is the share's `message_count`. A tool
+ * waiting for an approval counts as denied when a later share message exists (the steer after it included).
  */
 export function sanitizeSnapshot(title: string | null, path: readonly HarnessUIMessage[], fileIdOf: FileIdOf): SanitizedSnapshot {
   const fileIds = new Set<string>()
-  const kept = path.filter(message => message.role === 'user' || message.role === 'assistant')
-  const messages = kept.map((message, index) => sanitizeMessage(message, { fileIdOf, fileIds, superseded: index < kept.length - 1 }))
+  const pieces = path.filter(isShareable).map(message => splitSteers([message]))
+  const total = pieces.reduce((sum, list) => sum + list.length, 0)
+  const messages: ShareMessage[] = []
+  for (const list of pieces) {
+    const lastAssistant = list.findLastIndex(piece => piece.role === 'assistant')
+    list.forEach((piece, index) => {
+      const context = { fileIdOf, fileIds, superseded: messages.length < total - 1 }
+      messages.push(sanitizeMessage(piece, context, index === lastAssistant))
+    })
+  }
   return { snapshot: { title, messages }, fileIds: [...fileIds] }
 }
 
-/** Messages of a path that a snapshot keeps (`user` and `assistant`): compared with `message_count` for `outdated`. */
+/**
+ * Messages of a path that a snapshot keeps (`user` and `assistant`, assistant messages split at their steers): compared
+ * with `message_count` for `outdated`.
+ */
 export function shareableMessageCount(path: readonly HarnessUIMessage[]): number {
-  return path.filter(message => message.role === 'user' || message.role === 'assistant').length
+  return splitSteers(path.filter(isShareable)).length
 }
 
 /** Serialized UTF-8 size of a snapshot (checked against `LIMITS.shareSnapshotBytes`). */

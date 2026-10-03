@@ -5,13 +5,25 @@
 // and waits for it; shutdown stops every run the same way.
 // Phase 7 (C16-T1): while a maintenance operation with `blockRuns` holds the lock (the key rotation), `POST /chat`
 // answers `409 conflict` (`reason: 'busy'`) before the chat is acquired.
-// Phase 9 (C26 seams, ADR-042): one steer queue per runner (`queue.ts`); the `ChatRunner` queue members delegate to it;
-// `stop` empties the chat's queue before it stops the run and `stopAll` empties every queue before it aborts the runs;
-// every run gets the queue and the release callback `onRunReleased` (the queue's run end, W9.2).
+// Phase 9 (ADR-042, ARCHITECTURE.md 6.20, W9.2): one steer queue per runner (`queue.ts`); the `ChatRunner` queue members
+// delegate to it; `stop` empties the chat's queue before it stops the run and `stopAll` empties every queue before it
+// aborts the runs; every run gets the queue and the release callback `onRunReleased`, the queue's run end:
+// - completed without a pending approval: the oldest item becomes the next turn, started by the server
+//   (`startQueuedTurn`: `start` with the item's message and composer state, request id `queue_…`, the response body
+//   cancelled at once: the tee keeps filling the replay buffer, so tabs resume it); its `run.started` carries
+//   `origin: 'queue'` and `userMessageId` (`RunContext.origin`; `launchRun` emits them). A start that loses the chat to
+//   a user's `POST /chat` (409 `run-active`) puts the item back at the head (that run steers it in); any other failure
+//   reports it `failed` (with the error message);
+// - awaiting an approval: the items wait for the next run (its step 0 takes them);
+// - aborted / failed: every item is removed (`stopped` / `failed`).
+// `run.started` of user requests carries `origin: 'request'`.
+import type { QueueChangedData, RunOrigin } from '@harness-forge/shared'
+import type { EventBus } from '../services/events/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { RunEnding } from './history.ts'
+import type { ChatQueue, QueueEntry } from './queue.ts'
 import type { Run } from './runs.ts'
-import type { ChatRunner } from './types.ts'
+import type { ChatRunner, ChatRunOptions } from './types.ts'
 import { isHarnessError } from '@harness-forge/shared'
 import { assertRunsAllowed } from '../services/maintenance/index.ts'
 import { abortReason, preStreamError } from './errors.ts'
@@ -45,6 +57,60 @@ export function createChatRunner(deps: AppDeps): ChatRunner {
   return createChatRunnerWith(deps)
 }
 
+let queueRequestCounter = 0
+
+/** The request id of a turn the server starts from the queue (`queue_…`). */
+export function queueRequestId(): string {
+  queueRequestCounter += 1
+  return `queue_${Date.now().toString(36)}_${queueRequestCounter.toString(36)}`
+}
+
+/** What `startQueuedTurn` needs (the runner's internals; replaceable in tests). */
+export interface QueuedTurnInput {
+  chatId: string
+  entry: QueueEntry
+  queue: ChatQueue
+  events: Pick<EventBus, 'emit'>
+  /** The runner's start with the origin of the run. */
+  start: (body: Parameters<ChatRunner['start']>[0], options: ChatRunOptions, origin: RunOrigin) => Promise<Response>
+}
+
+/**
+ * Starts the next turn from a queued item taken with `takeNext` (reported `started`). The synchronous part of `start`
+ * acquires the chat at once, so no request can come between the run end and this turn. The response body is cancelled
+ * (nobody reads it; the replay buffer keeps the run). A 409 `run-active` puts the item back at the head of the queue (the
+ * run that holds the chat steers it in); any other failure is reported as a `failed` removal with the error message.
+ */
+export async function startQueuedTurn(input: QueuedTurnInput): Promise<void> {
+  const { chatId, entry, queue, events, start } = input
+  const { item } = entry
+  const requestId = queueRequestId()
+  // The logger of the request that queued the item, with the id of this turn (and the queuing request's id).
+  const logger = entry.options.logger.child({ reqId: requestId, queuedBy: entry.options.requestId, chatId })
+  try {
+    const response = await start(
+      { chatId, message: { id: item.message.id, role: 'user', parts: item.message.parts }, trigger: 'submit-message', modelRef: item.modelRef, reasoningEffort: item.reasoningEffort, toolMode: item.toolMode },
+      { logger, requestId },
+      'queue',
+    )
+    logger.info('next turn started from the queue', { itemId: item.id })
+    await response.body?.cancel().catch(() => {})
+  }
+  catch (error) {
+    const details = isHarnessError(error) ? error.details as { reason?: unknown } | undefined : undefined
+    if (isHarnessError(error) && error.code === 'conflict' && details?.reason === 'run-active') {
+      logger.debug('the next turn lost the chat to another request; the item goes back to the queue', { itemId: item.id })
+      queue.requeue(chatId, entry)
+      return
+    }
+    const code = isHarnessError(error) ? error.code : 'internal_error'
+    logger.warn('a queued message could not start the next turn', { itemId: item.id, code, err: error })
+    const message = isHarnessError(error) ? error.message : 'The next turn could not start.'
+    const data: QueueChangedData = { chatId, items: queue.list(chatId), removed: [{ id: item.id, reason: 'failed', error: message.slice(0, 2000) }] }
+    events.emit('queue.changed', data)
+  }
+}
+
 export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions = {}): ChatRunnerInternal {
   const now = options.now ?? Date.now
   const registry = createRunRegistry(now)
@@ -56,11 +122,26 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
   const queue = createChatQueue(deps, { hasRun: chatId => registry.get(chatId) !== undefined, now })
 
   /**
-   * A run of `chatId` left the registry (Phase 9, `RunContext.onReleased`). Stub until W9.2: completed without a pending
-   * approval → the first queued item becomes the next turn; awaiting an approval → the items wait; aborted / failed →
-   * every item is removed.
+   * A run of `chatId` left the registry (Phase 9, `RunContext.onReleased`): completed without a pending approval → the
+   * oldest queued item becomes the next turn; awaiting an approval → the items wait; aborted / failed → every item is
+   * removed (`stopped` / `failed`). At shutdown nothing starts (the queues were emptied first anyway).
    */
-  function onRunReleased(_chatId: string, _ending: RunEnding, _awaitingApproval: boolean): void {}
+  function onRunReleased(chatId: string, ending: RunEnding, awaitingApproval: boolean): void {
+    if (ending === 'aborted' || lifecycle.signal.aborted) {
+      queue.clear(chatId, 'stopped')
+      return
+    }
+    if (ending === 'failed') {
+      queue.clear(chatId, 'failed')
+      return
+    }
+    if (awaitingApproval)
+      return
+    const entry = queue.takeNext(chatId)
+    if (entry === null)
+      return
+    void startQueuedTurn({ chatId, entry, queue, events: deps.events, start: startRun })
+  }
 
   /** Releases a run that did not settle after a stop; its late end callback stores nothing. */
   function forceRelease(run: Run): void {
@@ -93,48 +174,71 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
     return wasRunning
   }
 
+  /**
+   * A run released before its stream started (the request failed while it was prepared) while messages were queued
+   * for it: they become the next turn once the chat is idle and waits for no approval (a pending approval keeps them
+   * for the next run).
+   */
+  function releasedBeforeLaunch(chatId: string): void {
+    if (queue.list(chatId).length === 0)
+      return
+    deps.chats.find(chatId).then((chat) => {
+      if (chat !== null && !chat.pendingApproval && registry.get(chatId) === undefined)
+        onRunReleased(chatId, 'completed', false)
+    }).catch((error: unknown) => deps.logger.warn('cannot check the queue of a chat whose request failed', { chatId, err: error }))
+  }
+
+  /** `start` with the origin of the run (`run.started`). The chat is acquired synchronously (before the first await). */
+  async function startRun(body: Parameters<ChatRunner['start']>[0], runOptions: ChatRunOptions, origin: RunOrigin): Promise<Response> {
+    const logger = runOptions.logger.child({ chatId: body.chatId })
+    // Checked right before the chat is acquired (no await in between), so an operation that blocks runs and then
+    // stops every registered run cannot miss one.
+    assertRunsAllowed(deps.maintenance)
+    const run = registry.acquire(body.chatId, body.modelRef)
+    let launched = false
+    try {
+      const prepared = await prepareRun(deps, run, body, logger)
+      if (run.signal.aborted)
+        throw stoppedBeforeStart(body.chatId)
+      await commitHistory(deps, body.chatId, prepared.writes)
+      launched = true
+      return await launchRun({
+        deps,
+        registry,
+        run,
+        prepared,
+        toolMode: body.toolMode,
+        reasoningEffort: body.reasoningEffort,
+        logger: logger.child({ runId: run.runId }),
+        now,
+        tasks,
+        titleTimeoutMs: options.titleTimeoutMs ?? TITLE_TIMEOUT_MS,
+        lifecycle: lifecycle.signal,
+        ...(options.imageKeepAliveMs === undefined ? {} : { imageKeepAliveMs: options.imageKeepAliveMs }),
+        queue,
+        onReleased: (ending, awaitingApproval) => onRunReleased(body.chatId, ending, awaitingApproval),
+        origin,
+      })
+    }
+    catch (error) {
+      // `launchRun` answers every failure with an in-stream error; this only guards against a bug there.
+      const released = registry.release(run)
+      if (released && launched && run.messageId !== null) {
+        logger.error('run launch failed', { err: error })
+        deps.events.emit('run.finished', { chatId: run.chatId, messageId: run.messageId, outcome: 'failed', awaitingApproval: false })
+        onRunReleased(body.chatId, 'failed', false)
+      }
+      else if (released && !launched) {
+        releasedBeforeLaunch(body.chatId)
+      }
+      if (!launched && run.signal.aborted && !isHarnessError(error))
+        throw stoppedBeforeStart(body.chatId)
+      throw preStreamError(error, runOptions.requestId)
+    }
+  }
+
   return {
-    start: async (body, runOptions) => {
-      const logger = runOptions.logger.child({ chatId: body.chatId })
-      // Checked right before the chat is acquired (no await in between), so an operation that blocks runs and then
-      // stops every registered run cannot miss one.
-      assertRunsAllowed(deps.maintenance)
-      const run = registry.acquire(body.chatId, body.modelRef)
-      let launched = false
-      try {
-        const prepared = await prepareRun(deps, run, body, logger)
-        if (run.signal.aborted)
-          throw stoppedBeforeStart(body.chatId)
-        await commitHistory(deps, body.chatId, prepared.writes)
-        launched = true
-        return await launchRun({
-          deps,
-          registry,
-          run,
-          prepared,
-          toolMode: body.toolMode,
-          reasoningEffort: body.reasoningEffort,
-          logger: logger.child({ runId: run.runId }),
-          now,
-          tasks,
-          titleTimeoutMs: options.titleTimeoutMs ?? TITLE_TIMEOUT_MS,
-          lifecycle: lifecycle.signal,
-          ...(options.imageKeepAliveMs === undefined ? {} : { imageKeepAliveMs: options.imageKeepAliveMs }),
-          queue,
-          onReleased: (ending, awaitingApproval) => onRunReleased(body.chatId, ending, awaitingApproval),
-        })
-      }
-      catch (error) {
-        // `launchRun` answers every failure with an in-stream error; this only guards against a bug there.
-        if (registry.release(run) && launched && run.messageId !== null) {
-          logger.error('run launch failed', { err: error })
-          deps.events.emit('run.finished', { chatId: run.chatId, messageId: run.messageId, outcome: 'failed', awaitingApproval: false })
-        }
-        if (!launched && run.signal.aborted && !isHarnessError(error))
-          throw stoppedBeforeStart(body.chatId)
-        throw preStreamError(error, runOptions.requestId)
-      }
-    },
+    start: (body, runOptions) => startRun(body, runOptions, 'request'),
 
     resume: (chatId) => {
       const run = registry.get(chatId)

@@ -1,5 +1,6 @@
 // The changes panel state (docs/UI.md 7.21, 11.5): one app-wide state, closed / This chat / 440px by default, kept in
-// localStorage (open '1' / '0', the view, the width in px clamped to 320-720), in memory when storage is blocked.
+// localStorage (open '1' / '0', the view, the width in px clamped to 320-720), in memory when storage is blocked. The
+// open state is written only on an explicit open, toggle or close: a narrow viewport hides the panel without changing it.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { isReadonly } from 'vue'
 import { stubLocalStorage } from '~/utils/testing/storage'
@@ -88,6 +89,58 @@ describe('useChangesPanel', () => {
     expect(panel.focusRequest.value).toBe(2)
   })
 
+  it('keeps the saved open state while the viewport is narrow, and shows it again when wide (Phase 9)', async () => {
+    storage.setItem('hf-changes-open', '1')
+    const { CHANGES_OPEN_KEY, setChangesPanelNarrow, useChangesPanel } = await freshModule()
+    const panel = useChangesPanel()
+    expect(panel.open.value).toBe(true)
+    const setItem = vi.spyOn(storage, 'setItem')
+
+    // Below 1024px the panel reads closed (the sheet never opens by itself), and nothing is written.
+    setChangesPanelNarrow(true)
+    expect(panel.open.value).toBe(false)
+    expect(isReadonly(panel.open)).toBe(true)
+    setChangesPanelNarrow(false)
+    expect(panel.open.value).toBe(true)
+    setChangesPanelNarrow(true)
+    setChangesPanelNarrow(true)
+    expect(panel.open.value).toBe(false)
+    expect(setItem).not.toHaveBeenCalled()
+    expect(storage.getItem(CHANGES_OPEN_KEY)).toBe('1')
+
+    // An explicit open while narrow shows the sheet (focus request included) ...
+    panel.toggle({ focus: true })
+    expect(panel.open.value).toBe(true)
+    expect(panel.focusRequest.value).toBe(1)
+    expect(storage.getItem(CHANGES_OPEN_KEY)).toBe('1')
+    // ... it stays open while the viewport keeps its class, and is the saved choice when wide.
+    setChangesPanelNarrow(false)
+    expect(panel.open.value).toBe(true)
+
+    // An explicit close is saved in either class.
+    setChangesPanelNarrow(true)
+    panel.setOpen(true)
+    panel.setOpen(false)
+    expect(storage.getItem(CHANGES_OPEN_KEY)).toBe('0')
+    setChangesPanelNarrow(false)
+    expect(panel.open.value).toBe(false)
+  })
+
+  it('writes the open state only on an explicit open, toggle or close', async () => {
+    const { CHANGES_OPEN_KEY, setChangesPanelNarrow, useChangesPanel } = await freshModule()
+    const panel = useChangesPanel()
+    const setItem = vi.spyOn(storage, 'setItem')
+    panel.view.value = 'git'
+    panel.width.value = 500
+    setChangesPanelNarrow(true)
+    setChangesPanelNarrow(false)
+    expect(setItem.mock.calls.map(([key]) => key)).not.toContain(CHANGES_OPEN_KEY)
+    panel.toggle()
+    expect(setItem).toHaveBeenLastCalledWith(CHANGES_OPEN_KEY, '1')
+    panel.setOpen(false)
+    expect(setItem).toHaveBeenLastCalledWith(CHANGES_OPEN_KEY, '0')
+  })
+
   it('keeps the state in memory when storage is blocked', async () => {
     vi.stubGlobal('localStorage', {
       getItem: () => {
@@ -97,12 +150,17 @@ describe('useChangesPanel', () => {
         throw new Error('blocked')
       },
     })
-    const { useChangesPanel } = await freshModule()
+    const { setChangesPanelNarrow, useChangesPanel } = await freshModule()
     const panel = useChangesPanel()
     expect(panel.open.value).toBe(false)
     panel.setOpen(true)
     panel.view.value = 'git'
     expect(panel.open.value).toBe(true)
     expect(panel.view.value).toBe('git')
+    // The saved choice survives a narrow viewport in memory too.
+    setChangesPanelNarrow(true)
+    expect(panel.open.value).toBe(false)
+    setChangesPanelNarrow(false)
+    expect(panel.open.value).toBe(true)
   })
 })

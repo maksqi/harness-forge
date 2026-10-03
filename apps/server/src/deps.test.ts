@@ -598,13 +598,13 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
 describe('phase 9 skeleton (project files, the steer queue members, the stop order)', () => {
   const PROJECT = 'prj_AAAAAAAAAAAAAAAA'
 
-  it('wires projectFiles: search and attach answer not_implemented until W9.6; invalidate and stop are no-ops', async () => {
+  it('wires projectFiles: search and attach answer not_found for an unknown project; invalidate and stop are no-ops', async () => {
     const t = await createTestApp()
     cleanups.push(() => t.close())
     expect(SERVICE_NAMES).toContain('projectFiles')
     const { projectFiles } = t.deps
-    await expect(projectFiles.search(PROJECT, { q: '', limit: 50 })).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(projectFiles.attach(PROJECT, { path: 'a.txt' })).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(projectFiles.search(PROJECT, { q: '', limit: 50 })).rejects.toMatchObject({ code: 'not_found' })
+    await expect(projectFiles.attach(PROJECT, { path: 'a.txt' })).rejects.toMatchObject({ code: 'not_found' })
     expect(projectFiles.invalidate(PROJECT)).toBeUndefined()
     expect(projectFiles.stop()).toBeUndefined()
     expect(projectFiles.stop()).toBeUndefined()
@@ -677,7 +677,7 @@ describe('phase 9 skeleton (project files, the steer queue members, the stop ord
 
     const w = await createTestApp({ start: false, projectFiles: 'fake', factories: { projectFiles: createProjectFileService } })
     cleanups.push(() => w.close())
-    await expect(w.deps.projectFiles.search(PROJECT, { q: '', limit: 1 })).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(w.deps.projectFiles.search(PROJECT, { q: '', limit: 1 })).rejects.toMatchObject({ code: 'not_found' })
   })
 
   it('the ChatRunner has the steer queue members', async () => {

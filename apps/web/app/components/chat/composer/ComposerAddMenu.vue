@@ -3,7 +3,7 @@
 // slash menu. The composer does both (it owns the hidden file input and the text).
 // Phase 9 (ADR-042; C25 declares, W9.8 adds the item; frozen from Gate P9-0b): in a project chat (`projectChat`),
 // "Mention a file" (`composer-mention`, `AtSign`) emits `mention`; the composer inserts `@` and opens the mention menu.
-import { PaperclipIcon, PlusIcon, SquareTerminalIcon } from '@lucide/vue'
+import { AtSignIcon, PaperclipIcon, PlusIcon, SquareTerminalIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -65,6 +65,10 @@ function onCloseAutoFocus(event: Event) {
             <DropdownMenuItem class="rounded-md" @select="emit('commands')">
               <SquareTerminalIcon aria-hidden="true" />
               Commands
+            </DropdownMenuItem>
+            <DropdownMenuItem v-if="projectChat" :data-testid="testIds.composerMention" class="rounded-md" @select="emit('mention')">
+              <AtSignIcon aria-hidden="true" />
+              Mention a file
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

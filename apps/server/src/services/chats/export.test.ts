@@ -1,7 +1,7 @@
 import type { ChatDetail } from '@harness-forge/shared'
 import { chatExportAnySchema, chatExportSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { buildChatExport, EXPORT_TOOL_OUTPUT_BYTES, exportFilename, linearTree, renderChatMarkdown, titleSlug } from './export.ts'
+import { buildChatExport, compactionLine, EXPORT_TOOL_OUTPUT_BYTES, exportFilename, linearTree, renderChatMarkdown, STEER_HEADING, titleSlug } from './export.ts'
 
 const CHAT_ID = '0199a8f0-0000-7000-8000-000000000001'
 const NOW = Date.UTC(2026, 8, 28, 12, 30)
@@ -131,6 +131,158 @@ describe('markdown export', () => {
     expect(markdown).toContain('x'.repeat(EXPORT_TOOL_OUTPUT_BYTES - 1))
     expect(markdown).toContain('image/png (embedded file not exported)')
     expect(markdown).not.toContain('base64')
+  })
+})
+
+/** A chat with the Phase 9 parts: a steer inside a reply, a `/compact` reply and an automatic marker during a reply. */
+function agentChat(): ChatDetail {
+  const compaction = { modelRef: 'mock:compact', tokensBefore: 9000, tokensAfter: 700, createdAt: 5 }
+  return {
+    ...sampleChat(),
+    title: 'Agent work',
+    modelRef: 'mock:steer',
+    messages: [
+      { id: 'msg_user000000000011', role: 'user', parts: [{ type: 'text', text: 'Fix the tests.' }] },
+      {
+        id: 'msg_asst000000000011',
+        role: 'assistant',
+        metadata: { modelRef: 'mock:steer', startedAt: 2 },
+        parts: [
+          { type: 'step-start' },
+          { type: 'text', text: 'Running the tests.' },
+          {
+            type: 'data-steer',
+            id: 'steer_part_1',
+            data: {
+              id: 'msg_queued0000000001',
+              parts: [
+                { type: 'text', text: 'Skip the slow suite.' },
+                { type: 'file', mediaType: 'text/plain', filename: 'slow.txt', url: '/api/files/file_0000000000000002' },
+              ],
+              queuedAt: 3,
+              deliveredAt: 4,
+            },
+          },
+          { type: 'step-start' },
+          { type: 'text', text: 'Skipped it; all green.' },
+          // Invalid steer data is left out (no split, no section).
+          { type: 'data-steer', data: { id: 'bad', parts: [], queuedAt: 1, deliveredAt: 1 } },
+        ],
+      },
+      { id: 'msg_user000000000012', role: 'user', metadata: { modelRef: 'mock:steer', startedAt: 6, command: { name: 'compact', input: 'keep numbers', type: 'compact' } }, parts: [{ type: 'text', text: '/compact keep numbers' }] },
+      {
+        id: 'msg_asst000000000012',
+        role: 'assistant',
+        metadata: { modelRef: 'mock:compact', startedAt: 7 },
+        parts: [
+          { type: 'step-start' },
+          { type: 'data-compaction', data: { ...compaction, trigger: 'manual', keep: 'none', focus: 'keep numbers', summary: 'The user fixed the tests.\n\nNumbers: 42.', messagesCompacted: 4 } },
+        ],
+      },
+      { id: 'msg_user000000000013', role: 'user', parts: [{ type: 'text', text: 'Continue.' }] },
+      {
+        id: 'msg_asst000000000013',
+        role: 'assistant',
+        metadata: { modelRef: 'mock:steer', startedAt: 8 },
+        parts: [
+          { type: 'step-start' },
+          { type: 'text', text: 'Step one done.' },
+          { type: 'data-compaction', data: { ...compaction, trigger: 'auto', keep: 'last-user', summary: 'Continued after step one.', messagesCompacted: 1 } },
+          { type: 'step-start' },
+          { type: 'text', text: 'Step two done.' },
+          // Invalid marker data is left out.
+          { type: 'data-compaction', data: { trigger: 'auto', summary: 'BROKEN-MARKER' } },
+        ],
+      },
+    ],
+  } as ChatDetail
+}
+
+const AGENT_MARKDOWN = `# Agent work
+
+Exported from harness-forge on 2026-09-28 · Model: mock:steer
+
+## User
+
+Fix the tests.
+
+## Assistant (mock:steer)
+
+Running the tests.
+
+## User (during the run)
+
+Skip the slow suite.
+
+[slow.txt](/api/files/file_0000000000000002)
+
+## Assistant (mock:steer)
+
+Skipped it; all green.
+
+## User
+
+/compact keep numbers
+
+## Assistant (mock:compact)
+
+_Conversation compacted (4 messages summarized)_
+
+> The user fixed the tests.
+>
+> Numbers: 42.
+
+## User
+
+Continue.
+
+## Assistant (mock:steer)
+
+Step one done.
+
+_Conversation compacted (1 message summarized)_
+
+> Continued after step one.
+
+Step two done.
+`
+
+describe('markdown export: agent parts (Phase 9)', () => {
+  it('renders steers as user sections inside the reply and markers with their summary', () => {
+    expect(renderChatMarkdown(agentChat(), NOW)).toBe(AGENT_MARKDOWN)
+    expect(buildChatExport(agentChat(), 'md', NOW).body).toBe(AGENT_MARKDOWN)
+    expect(AGENT_MARKDOWN).not.toContain('BROKEN-MARKER')
+    expect(AGENT_MARKDOWN).not.toContain('data-')
+    expect(STEER_HEADING).toBe('## User (during the run)')
+  })
+
+  it('a reply that ends with a steer keeps the reply before it; a steer never splits a user message', () => {
+    const chat = agentChat()
+    const reply = chat.messages[1]!
+    const ended: ChatDetail = { ...chat, messages: [{ ...reply, parts: reply.parts.slice(0, 4) }] }
+    expect(renderChatMarkdown(ended, NOW)).toBe([
+      '# Agent work',
+      'Exported from harness-forge on 2026-09-28 · Model: mock:steer',
+      '## Assistant (mock:steer)',
+      'Running the tests.',
+      '## User (during the run)',
+      'Skip the slow suite.',
+      '[slow.txt](/api/files/file_0000000000000002)',
+    ].join('\n\n').concat('\n'))
+    // Steers are only recognized in replies.
+    const user: ChatDetail = { ...chat, messages: [{ id: 'msg_user000000000019', role: 'user', parts: [{ type: 'text', text: 'Hi' }, reply.parts[2]!] }] }
+    expect(renderChatMarkdown(user, NOW)).not.toContain(STEER_HEADING)
+  })
+
+  it('compactionLine counts the summarized messages', () => {
+    expect(compactionLine({ messagesCompacted: 0 })).toBe('_Conversation compacted (0 messages summarized)_')
+    expect(compactionLine({ messagesCompacted: 1 })).toBe('_Conversation compacted (1 message summarized)_')
+    expect(compactionLine({ messagesCompacted: 42 })).toBe('_Conversation compacted (42 messages summarized)_')
+  })
+
+  it('the json export keeps the parts as stored', () => {
+    const parsed = chatExportSchema.parse(JSON.parse(buildChatExport(agentChat(), 'json', NOW).body))
+    expect(parsed.chat.messages).toEqual(agentChat().messages)
   })
 })
 

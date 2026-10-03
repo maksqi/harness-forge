@@ -2,10 +2,14 @@
 // fakes: an in-memory blob store, the test row writer over the in-memory database, and a fake checkpoint service whose
 // read members (`listChanges`, `fileDiff`, `gitStatus`: W8.3) answer canned DTOs. Project folders are real temp folders
 // inside a temp workspace root; the projects service is the real one. The last suite runs one round trip through the
-// real checkpoint service (the journal, the blob store and the row writer of W8.1).
+// real checkpoint service (the journal, the blob store and the row writer of W8.1). Phase 9 (W9.7): the chats and
+// projects services are the real ones wrapped to count `chats.find` / `projects.openWorkspace` (one chat lookup per
+// request, in the service).
+import type { ChatsService } from '../../services/chats/types.ts'
 import type { RestoreIo } from '../../services/checkpoints/restore-scope.ts'
 import type { RevertOptions } from '../../services/checkpoints/revert.ts'
 import type { CheckpointService } from '../../services/checkpoints/types.ts'
+import type { ProjectService } from '../../services/projects/types.ts'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import type { FakeCheckpointBlobStore, FakeCheckpointService, TestChangeRowInput } from '../../testing/fake-checkpoints.ts'
 import type { FakeChatRunner, RecordingEventBus } from '../../testing/fakes.ts'
@@ -26,12 +30,16 @@ import {
 import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { chats, messages, projects, workspaceChanges } from '../../db/schema.ts'
+import { createChatsService } from '../../services/chats/index.ts'
+import { NO_PROJECT_MESSAGE as COMMON_NO_PROJECT_MESSAGE } from '../../services/checkpoints/changes-common.ts'
+import { changesFileDiff, listChatChanges } from '../../services/checkpoints/changes.ts'
 import { sha256Hex } from '../../services/checkpoints/disk.ts'
+import { chatGitStatus } from '../../services/checkpoints/git-changes.ts'
 import { NO_PROJECT_MESSAGE } from '../../services/checkpoints/restore-scope.ts'
 import { revertFile, STALE_MESSAGE } from '../../services/checkpoints/revert.ts'
 import { NOT_A_USER_MESSAGE, rewindFiles, rewindPreview } from '../../services/checkpoints/rewind.ts'
 import { undoBatch } from '../../services/checkpoints/undo.ts'
-import { PROJECT_GONE_MESSAGE, PROJECT_RUNNING_MESSAGE } from '../../services/projects/index.ts'
+import { createProjectService, PROJECT_GONE_MESSAGE, PROJECT_RUNNING_MESSAGE } from '../../services/projects/index.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createFakeCheckpointBlobStore, createFakeCheckpointService, createTestChangeRowWriter, editRowFields, insertChangeRows } from '../../testing/fake-checkpoints.ts'
 import { createFakeChatRunner, createRecordingEventBus } from '../../testing/fakes.ts'
@@ -66,6 +74,8 @@ interface HarnessOptions {
   git?: RevertOptions['git']
   io?: RestoreIo
   overrides?: Partial<CheckpointService>
+  /** Use the real read members (`listChanges`, `fileDiff`, `gitStatus` of W8.3) instead of the fake's canned DTOs. */
+  realReads?: boolean
 }
 
 interface Harness {
@@ -91,6 +101,24 @@ interface Harness {
   /** Writes a file on disk outside the journal (null removes it). */
   disk: (path: string, content: string | null) => Promise<void>
   send: (method: string, path: string, body?: unknown) => Promise<{ status: number, body: any }>
+  /** The ids passed to `chats.find` and `projects.openWorkspace` (tests clear them before a request). */
+  finds: string[]
+  opened: string[]
+}
+
+/** `service` with `member` calls recorded into `calls` (the first argument). */
+function counting<T extends object>(service: T, member: keyof T, calls: string[]): T {
+  return new Proxy(service, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property)
+      if (property !== member || typeof value !== 'function')
+        return value
+      return (...args: unknown[]) => {
+        calls.push(String(args[0]))
+        return (value as (...args: unknown[]) => unknown).apply(target, args)
+      }
+    },
+  })
 }
 
 let messageCounter = 0
@@ -102,14 +130,26 @@ async function open(options: HarnessOptions = {}): Promise<Harness> {
   const events = createRecordingEventBus()
   const runs = createFakeChatRunner()
   const blobs = createFakeCheckpointBlobStore()
+  const finds: string[] = []
+  const opened: string[] = []
   let service!: FakeCheckpointService
   const t = await createTestApp({
     workspaceRoots: [rootsDir],
     overrides: { events, runs },
     factories: {
+      chats: (deps): ChatsService => counting(createChatsService(deps), 'find', finds),
+      projects: (deps): ProjectService => counting(createProjectService(deps), 'openWorkspace', opened),
       checkpoints: (deps) => {
         const ctx = () => ({ deps, blobs, rows: createTestChangeRowWriter(deps.db), now: Date.now })
+        const reads: Partial<CheckpointService> = options.realReads !== true
+          ? {}
+          : {
+              listChanges: async (chatId, readOptions) => listChatChanges(ctx(), chatId, readOptions),
+              fileDiff: async (chatId, query, readOptions) => changesFileDiff(ctx(), chatId, query, readOptions),
+              gitStatus: async (chatId, readOptions) => chatGitStatus(ctx(), chatId, readOptions),
+            }
         service = createFakeCheckpointService({
+          ...reads,
           revert: (chatId, body) => revertFile(ctx(), chatId, body, { ...(options.git === undefined ? {} : { git: options.git }), ...(options.io === undefined ? {} : { io: options.io }) }),
           undo: (chatId, body) => undoBatch(ctx(), chatId, body, options.io === undefined ? {} : { io: options.io }),
           rewindPreview: (chatId, messageId, readOptions) => rewindPreview(ctx(), chatId, messageId, readOptions),
@@ -166,7 +206,7 @@ async function open(options: HarnessOptions = {}): Promise<Harness> {
     const text = await response.text()
     return { status: response.status, body: text === '' ? null : JSON.parse(text) }
   }
-  return { t, events, runs, blobs, service, root, message, edit, shell, untracked, read, disk, send }
+  return { t, events, runs, blobs, service, root, message, edit, shell, untracked, read, disk, send, finds, opened }
 }
 
 function errorOf(body: unknown) {
@@ -194,24 +234,49 @@ async function twoTurns(h: Harness): Promise<{ u1: string, a1: string, u2: strin
 
 // ---------- common answers ----------
 
+/** One request of every changes route for `chatId` (`user`: a user message id of the chat). */
+function everyRoute(chatId: string, user = 'msg_AAAAAAAAAAAAAAAA'): Array<[string, string, unknown?]> {
+  return [
+    ['GET', `/chats/${chatId}/changes`],
+    ['GET', `/chats/${chatId}/changes/diff?source=chat&path=a.txt`],
+    ['GET', `/chats/${chatId}/changes/diff?source=git&path=a.txt`],
+    ['GET', `/chats/${chatId}/git`],
+    ['POST', `/chats/${chatId}/changes/revert`, { source: 'chat', path: 'a.txt' }],
+    ['POST', `/chats/${chatId}/changes/undo`, { batchId: 'wcb_AAAAAAAAAAAAAAAA', conflicts: 'skip' }],
+    ['GET', `/chats/${chatId}/rewind?messageId=${user}`],
+    ['POST', `/chats/${chatId}/rewind`, { messageId: user, conflicts: 'skip' }],
+  ]
+}
+
 describe('changes routes: common answers', () => {
-  it('every route answers 404 for an unknown chat before the service runs', async () => {
-    const h = await open()
-    const cases: Array<[string, string, unknown?]> = [
-      ['GET', `/chats/${UNKNOWN_CHAT}/changes`],
-      ['GET', `/chats/${UNKNOWN_CHAT}/changes/diff?source=chat&path=a.txt`],
-      ['GET', `/chats/${UNKNOWN_CHAT}/git`],
-      ['POST', `/chats/${UNKNOWN_CHAT}/changes/revert`, { source: 'chat', path: 'a.txt' }],
-      ['POST', `/chats/${UNKNOWN_CHAT}/changes/undo`, { batchId: 'wcb_AAAAAAAAAAAAAAAA', conflicts: 'skip' }],
-      ['GET', `/chats/${UNKNOWN_CHAT}/rewind?messageId=msg_AAAAAAAAAAAAAAAA`],
-      ['POST', `/chats/${UNKNOWN_CHAT}/rewind`, { messageId: 'msg_AAAAAAAAAAAAAAAA', conflicts: 'skip' }],
-    ]
-    for (const [method, path, body] of cases) {
+  it('every route answers 404 for an unknown chat: one chat lookup, before any project, git or disk work', async () => {
+    const h = await open({ realReads: true })
+    for (const [method, path, body] of everyRoute(UNKNOWN_CHAT)) {
+      h.finds.length = 0
+      h.opened.length = 0
       const { status, body: answer } = await h.send(method, path, body)
       expect(status, path).toBe(404)
       expect(errorOf(answer), path).toEqual({ code: 'not_found', message: `Chat ${UNKNOWN_CHAT} not found.` })
+      expect(h.finds, path).toEqual([UNKNOWN_CHAT])
+      expect(h.opened, path).toEqual([])
     }
-    expect(h.service.calls.filter(call => call.member !== 'start')).toEqual([])
+  })
+
+  it('looks the chat up once per request on every route (Phase 9, W9.7)', async () => {
+    const h = await open({ realReads: true })
+    const user = await h.message('user')
+    for (const [method, path, body] of everyRoute(CHAT, user)) {
+      h.finds.length = 0
+      h.opened.length = 0
+      await h.send(method, path, body)
+      expect(h.finds, `${method} ${path}`).toEqual([CHAT])
+      expect(h.opened, `${method} ${path}`).toEqual([PROJECT])
+    }
+  })
+
+  it('defines the no-project message once (the reads and the writes share it)', () => {
+    expect(NO_PROJECT_MESSAGE).toBe('This chat has no project.')
+    expect(COMMON_NO_PROJECT_MESSAGE).toBe(NO_PROJECT_MESSAGE)
   })
 
   it('changes.list, changes.diff and changes.git delegate to the service with the request signal', async () => {

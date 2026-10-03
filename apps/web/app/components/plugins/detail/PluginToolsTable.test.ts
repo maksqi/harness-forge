@@ -1,3 +1,4 @@
+import type { ToolSummary } from '@harness-forge/shared'
 import type { VueWrapper } from '@vue/test-utils'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { HarnessError } from '@harness-forge/shared'
@@ -44,9 +45,9 @@ function switchOf(name: string) {
   return row(name).querySelector<HTMLButtonElement>(`[data-testid="${testIds.pluginToolEnabled}"]`)!
 }
 
-async function mountTable(missing: string[] = []) {
+async function mountTable(missing: string[] = [], tools: ToolSummary[] = TOOLS) {
   const plugins = usePluginsStore()
-  api.tools.list.mockResolvedValue({ items: TOOLS })
+  api.tools.list.mockResolvedValue({ items: tools })
   await plugins.fetchTools()
   wrapper = mountInShell({
     setup: () => () => h(PluginToolsTable, { tools: plugins.tools, missing }),
@@ -81,7 +82,8 @@ describe('pluginToolsTable', () => {
     expect(row('roll_dice').textContent).toContain('Roll dice')
     expect(row('roll_dice').textContent).toContain('Roll N dice')
     const policies = ['roll_dice', 'wipe', 'dynamic_tool'].map(name => row(name).querySelector<HTMLElement>('[data-slot="badge"], [data-variant]:not(button)')?.textContent?.trim())
-    expect(policies).toEqual(['Safe', 'Always ask', 'Dynamic'])
+    // A policy function (policy null) is decided per call (Phase 9; was "Dynamic").
+    expect(policies).toEqual(['Safe', 'Always ask', 'Decided per call'])
     expect(['roll_dice', 'wipe', 'dynamic_tool'].map(name => approvalOf(name).dataset.value)).toEqual(['default', 'allow', 'default'])
     expect(approvalOf('wipe').textContent?.trim()).toBe('Allow')
     expect(['roll_dice', 'wipe', 'dynamic_tool'].map(name => switchOf(name).getAttribute('aria-checked'))).toEqual(['true', 'true', 'false'])
@@ -113,6 +115,45 @@ describe('pluginToolsTable', () => {
     await settle()
     expect(mocks.toast.error).toHaveBeenCalledWith('Something went wrong', { description: 'Boom' })
     expect(switchOf('dynamic_tool').getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('offers no Allow where the server refuses it and shows a stale allow as Default (Phase 9)', async () => {
+    const tools = [
+      toolSummary({ name: 'exit_plan_mode', pluginId: 'core-agent', policy: 'always' }),
+      toolSummary({ name: 'shell', pluginId: 'core-workspace', policy: null, workspace: 'execute', override: 'allow' }),
+      toolSummary({ name: 'write_file', pluginId: 'core-workspace', policy: 'ask', workspace: 'write', override: 'allow' }),
+    ]
+    api.tools.update.mockImplementation(async ({ params, body }: { params: { name: string }, body: Record<string, unknown> }) => ({
+      ...tools.find(tool => tool.name === params.name)!,
+      ...body,
+    }))
+    await mountTable([], tools)
+    expect(row('shell').querySelector('[data-value="dynamic"]')?.textContent?.trim()).toBe('Decided per call')
+    // The effective override: the approval ignores an allow on an execute tool.
+    expect(['exit_plan_mode', 'shell', 'write_file'].map(name => approvalOf(name).dataset.value)).toEqual(['default', 'default', 'allow'])
+
+    async function options(name: string): Promise<Array<string | undefined>> {
+      approvalOf(name).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+      await settle()
+      const values = [...document.body.querySelectorAll<HTMLElement>('[data-slot="select-item"]')].map(item => item.dataset.value)
+      document.body.querySelector('[data-slot="select-content"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await settle()
+      return values
+    }
+    expect(await options('shell')).toEqual(['default', 'ask', 'deny'])
+    expect(await options('exit_plan_mode')).toEqual(['default', 'ask', 'deny'])
+    expect(await options('write_file')).toEqual(['default', 'allow', 'ask', 'deny'])
+
+    // A stray allow never reaches the server; Ask replaces the stale override.
+    const selects = wrapper!.findAllComponents(SelectRoot)
+    selects[0]!.vm.$emit('update:modelValue', 'allow')
+    selects[1]!.vm.$emit('update:modelValue', 'allow')
+    await settle()
+    expect(api.tools.update).not.toHaveBeenCalled()
+    selects[1]!.vm.$emit('update:modelValue', 'ask')
+    await settle()
+    expect(api.tools.update).toHaveBeenLastCalledWith({ params: { name: 'shell' }, body: { override: 'ask' } })
+    expect(approvalOf('shell').dataset.value).toBe('ask')
   })
 
   it('lists tools the tools API does not know without controls', async () => {

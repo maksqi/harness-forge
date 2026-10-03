@@ -1,22 +1,35 @@
 // The tool set of a sub-agent (Phase 9, ADR-043, ARCHITECTURE.md 6.22). Signatures FROZEN after P9-0b (C26); the
 // implementation is W9.5's.
 //
-// W9.5: `assembleTools` with the parent's mode, workspace and scope, then `applyToolMode` (`modes.ts`), minus every tool
-// that can only ask in that mode, minus the `core-agent` tools (never `task`: depth 1) and `generate_image`, minus the
-// tools with a user override `deny` or `ask`; type `explore`, or a parent in `plan`, also drops the workspace `write` /
-// `execute` tools and lowers the effective mode to `ask`. Child calls bind the parent run scope with `toolCallId =
-// <parentCallId>/<child call id>` and a copy of the shell folder; no agent scope. The approval function is
-// `createToolApproval(parent mode, child tools)` with `user-approval` mapped to a denial
-// (`SUBAGENT_APPROVAL_DENIED_TEXT`): a child never creates an approval request.
-//
-// P9-0b stub: no tools, and an approval function that denies.
+// A child only gets the tools that can run without approval in the parent's permission mode, and its approval function
+// turns every request for approval into a denial, so a child never creates an approval request (no card, no
+// `pending_approval`):
+// - `assembleTools` with the parent's mode (which applies `applyToolMode`, `modes.ts`), the parent's workspace and a
+//   child copy of the parent's run scope, no agent scope (depth 1: a `task` call inside a child finds none) and the call
+//   id prefix `<parentCallId>/` (the child's calls are journaled under the parent assistant message with the tool call id
+//   `<parent call id>/<child call id>`, so rewind and the changes panel cover them);
+// - minus the `core-agent` tools (`task` is never in a child's set) and `generate_image`;
+// - type `explore`, or a parent in `plan`, lowers the effective mode to `ask`; in `ask` the tools with workspace access
+//   `write` / `execute` are not offered (`ask`: the safe tools and the read tools);
+// - minus every tool that can only ask (or is always denied) in the effective mode: `staticApprovalOutcome`
+//   (`approval.ts`) of the tool's static policy and the user override (`ask` / `deny` overrides drop the tool); a policy
+//   function decides per call, so such a tool stays and the approval function is the gate (`edits`: writes and the shell
+//   commands that match a shell rule; `auto`: everything except `always`).
+// The approval function is `createToolApproval` of the effective mode over the child's tools and scope, with
+// `user-approval` mapped to a denial (`SUBAGENT_APPROVAL_DENIED_TEXT`); the hooks see the prefixed call id.
+// The child's scope is a shallow copy of the parent's with its own `shellCwd` object: a child's `cd` never moves the
+// parent's sticky folder (the journal, the rules and the message id stay the parent's).
 import type { TaskType, ToolMode } from '@harness-forge/shared'
-import type { ToolSet } from 'ai'
+import type { ToolApprovalStatus, ToolSet } from 'ai'
 import type { ResolvedModel } from '../../providers/types.ts'
 import type { OpenWorkspace } from '../../services/projects/types.ts'
 import type { WorkspaceRunScopeInit } from '../../workspace/run-scope.ts'
-import type { ApprovalTool, createToolApproval } from '../approval.ts'
+import type { ApprovalTool } from '../approval.ts'
 import type { RunSession } from '../pipeline.ts'
+import { GENERATE_IMAGE_TOOL_NAME } from '@harness-forge/shared'
+import { CORE_AGENT_PLUGIN_ID } from '../../builtin-plugins/core-agent/index.ts'
+import { createToolApproval, staticApprovalOutcome, toolWorkspaceAccess } from '../approval.ts'
+import { assembleTools } from '../tools.ts'
 
 /** The reason a sub-agent's call that would need an approval is denied with. */
 export const SUBAGENT_APPROVAL_DENIED_TEXT = 'Sub-agents cannot ask the user: this call needs approval.'
@@ -52,11 +65,101 @@ export interface ChildTools {
   readonly toolApproval: ChildToolApproval
 }
 
-/** The tools of one sub-agent (stub until W9.5: none; see the module comment). */
-export async function childTools(_input: ChildToolsInput): Promise<ChildTools> {
-  return {
-    tools: {},
-    byName: new Map(),
-    toolApproval: async () => ({ type: 'denied', reason: SUBAGENT_APPROVAL_DENIED_TEXT }),
+/** The mode a child's tools and approvals follow: `ask` for `explore` and for a parent in `plan`, else the parent's. */
+export function childToolMode(type: TaskType, parentMode: ToolMode): ToolMode {
+  return type === 'explore' || parentMode === 'plan' ? 'ask' : parentMode
+}
+
+/** The call id prefix of a child's calls: `<parentCallId>/`. */
+export function childCallIdPrefix(parentCallId: string): string {
+  return `${parentCallId}/`
+}
+
+/** A copy of the parent's run scope with its own sticky folder (the child's `cd` never moves the parent's). */
+export function childRunScope(scope: WorkspaceRunScopeInit | null): WorkspaceRunScopeInit | null {
+  return scope === null ? null : { ...scope, shellCwd: { current: scope.shellCwd.current } }
+}
+
+/** The stored override of a tool (`ToolPref.override`). */
+type StoredOverride = Parameters<typeof staticApprovalOutcome>[2]
+
+/**
+ * Whether a child is offered `tool` (see the module comment): never a `core-agent` tool or `generate_image`; in `ask`
+ * no workspace `write` / `execute` tool; never a tool whose static outcome in `mode` (policy and stored override) is
+ * `user-approval` or `denied`.
+ */
+export function offeredToChild(tool: ApprovalTool, mode: ToolMode, stored: StoredOverride): boolean {
+  if (tool.pluginId === CORE_AGENT_PLUGIN_ID || tool.definition.name === GENERATE_IMAGE_TOOL_NAME)
+    return false
+  const access = toolWorkspaceAccess(tool.definition)
+  if (mode === 'ask' && (access === 'write' || access === 'execute'))
+    return false
+  const outcome = staticApprovalOutcome(tool, mode, stored)
+  return outcome !== 'user-approval' && outcome !== 'denied'
+}
+
+/** `status` with `user-approval` turned into the sub-agent denial (nothing else changes). */
+export function denyUserApproval(status: ToolApprovalStatus): ToolApprovalStatus {
+  const type = typeof status === 'object' ? status.type : status
+  return type === 'user-approval' ? { type: 'denied', reason: SUBAGENT_APPROVAL_DENIED_TEXT } : status
+}
+
+/** The tools of one sub-agent (see the module comment). */
+export async function childTools(input: ChildToolsInput): Promise<ChildTools> {
+  const { session, model } = input
+  const { deps, logger } = session.ctx
+  const mode = childToolMode(input.type, input.toolMode)
+  const scope = childRunScope(input.scope)
+  const callIdPrefix = childCallIdPrefix(input.parentCallId)
+  const assembled = await assembleTools({
+    chatId: session.chatId,
+    messageId: session.assistantId,
+    modelRef: model.modelRef,
+    toolMode: input.toolMode,
+    modelSupportsTools: model.entry.capabilities.tools,
+    registry: deps.registry,
+    plugins: deps.plugins,
+    toolService: deps.tools,
+    mcp: deps.mcp,
+    signal: input.signal,
+    logger,
+    workspace: input.workspace,
+    scope,
+    allowExecute: deps.env.workspaceShell,
+    continuation: null,
+    agent: null,
+    callIdPrefix,
+  })
+
+  const active = assembled.activeTools === undefined ? null : new Set(assembled.activeTools)
+  const tools: ToolSet = {}
+  const byName = new Map<string, ApprovalTool>()
+  for (const [name, entry] of assembled.byName) {
+    const tool = assembled.tools[name]
+    if (tool === undefined || (active !== null && !active.has(name)))
+      continue
+    if (!offeredToChild(entry, mode, assembled.prefs.get(name)?.override ?? null))
+      continue
+    tools[name] = tool
+    byName.set(name, entry)
   }
+
+  const approval = createToolApproval({
+    chatId: session.chatId,
+    modelRef: model.modelRef,
+    toolMode: mode,
+    tools: byName,
+    prefs: assembled.prefs,
+    registry: deps.registry,
+    plugins: deps.plugins,
+    signal: input.signal,
+    logger,
+    workspace: assembled.workspace,
+    scope: assembled.scope,
+  })
+  const toolApproval: ChildToolApproval = async options => denyUserApproval(await approval({
+    ...options,
+    toolCall: { ...options.toolCall, toolCallId: `${callIdPrefix}${options.toolCall.toolCallId}` },
+  }))
+  return { tools, byName, toolApproval }
 }

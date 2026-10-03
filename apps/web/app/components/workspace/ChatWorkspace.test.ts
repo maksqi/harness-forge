@@ -1,14 +1,15 @@
 // ChatWorkspace (docs/UI.md 7.21, 10.5, 12, 14): the always-present ResizablePanelGroup (toggling never remounts the
 // chat view), the pane at >= 1024px (handle, <aside> labelled by the panel's h2, px sizes, the stored width restored and
-// written only for a user resize), the right sheet below 1024px (never opening by itself), Alt+C (registered with a
-// project only, focusing the active view tab), Close returning focus to the toggle, and the palette target.
+// written only for a user resize), the right sheet below 1024px (never opening by itself, and never clearing the saved
+// open state: narrowing and widening back keeps the pane open; Phase 9), Alt+C (registered with a project only,
+// focusing the active view tab), Close returning focus to the toggle, and the palette target.
 import type { MockApi } from '~/utils/testing/mock-api'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, onMounted, ref } from 'vue'
 import { ResizableHandle, ResizablePanel } from '@/components/ui/resizable'
-import { CHANGES_WIDTH_KEY, useChangesPanel } from '~/composables/useChangesPanel'
+import { CHANGES_OPEN_KEY, CHANGES_WIDTH_KEY, useChangesPanel } from '~/composables/useChangesPanel'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { testIds } from '~/utils/testids'
 import { chatChanges, chatId, projectId } from '~/utils/testing/fixtures'
@@ -184,9 +185,11 @@ describe('chatWorkspace: layout', () => {
     const viewport = stubViewport(false)
     const { wrapper } = mountWorkspace()
     await flushPromises()
-    // A stored "open" from a wide window does not cover the chat on a phone.
+    // A stored "open" from a wide window does not cover the chat on a phone, and stays stored.
     expect(useChangesPanel().open.value).toBe(false)
     expect(byTestId(testIds.changesPanel)).toBeNull()
+    expect(document.body.querySelector('[data-slot="sheet-content"]')).toBeNull()
+    expect(storage.getItem(CHANGES_OPEN_KEY)).toBe('1')
 
     useChangesPanel().setOpen(true)
     await flushPromises()
@@ -200,11 +203,12 @@ describe('chatWorkspace: layout', () => {
     expect(document.body.querySelector('aside')).toBeNull()
     expect(mounts).toBe(1)
 
-    // Close: the panel closes and focus returns to the toggle.
+    // Close: the panel closes (an explicit close is saved) and focus returns to the toggle.
     byTestId(testIds.changesClose)!.click()
     await flushPromises()
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(useChangesPanel().open.value).toBe(false)
+    expect(storage.getItem(CHANGES_OPEN_KEY)).toBe('0')
     expect(document.activeElement).toBe(byTestId(testIds.changesToggle))
 
     // Narrowing the window closes an open pane instead of turning it into a modal sheet.
@@ -215,6 +219,56 @@ describe('chatWorkspace: layout', () => {
     viewport.set(false)
     await flushPromises()
     expect(useChangesPanel().open.value).toBe(false)
+    expect(document.body.querySelector('aside')).toBeNull()
+    expect(document.body.querySelector('[data-slot="sheet-content"]')).toBeNull()
+    expect(storage.getItem(CHANGES_OPEN_KEY)).toBe('1')
+  })
+
+  it('keeps the pane open when the window narrows and widens back (Phase 9)', async () => {
+    const viewport = stubViewport(true)
+    const { wrapper } = mountWorkspace()
+    useChangesPanel().setOpen(true)
+    await flushPromises()
+    expect(document.body.querySelector('aside')).not.toBeNull()
+
+    for (let round = 0; round < 2; round++) {
+      viewport.set(false)
+      await flushPromises()
+      expect(useChangesPanel().open.value).toBe(false)
+      expect(document.body.querySelector('aside')).toBeNull()
+      expect(document.body.querySelector('[data-slot="sheet-content"]')).toBeNull()
+      expect(storage.getItem(CHANGES_OPEN_KEY)).toBe('1')
+
+      viewport.set(true)
+      await flushPromises()
+      expect(useChangesPanel().open.value).toBe(true)
+      expect(document.body.querySelector('aside')).not.toBeNull()
+      expect(wrapper.getComponent(ChangesPanel).props('variant')).toBe('pane')
+    }
+    expect(mounts).toBe(1)
+
+    // Opened as the sheet while narrow: the pane shows when wide, and narrowing again hides it without clearing it.
+    viewport.set(false)
+    await flushPromises()
+    useChangesPanel().toggle()
+    await flushPromises()
+    expect(wrapper.getComponent(ChangesPanel).props('variant')).toBe('sheet')
+    viewport.set(true)
+    await flushPromises()
+    expect(wrapper.getComponent(ChangesPanel).props('variant')).toBe('pane')
+    viewport.set(false)
+    await flushPromises()
+    expect(useChangesPanel().open.value).toBe(false)
+    expect(storage.getItem(CHANGES_OPEN_KEY)).toBe('1')
+  })
+
+  it('opens with a stored "open" on a wide window', async () => {
+    useChangesPanel().setOpen(true)
+    stubViewport(true)
+    mountWorkspace()
+    await flushPromises()
+    expect(useChangesPanel().open.value).toBe(true)
+    expect(document.body.querySelector('aside')).not.toBeNull()
   })
 })
 

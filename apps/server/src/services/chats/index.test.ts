@@ -209,6 +209,30 @@ describe('create and get', () => {
     expect((await service.get(chatId(2))).totals).toMatchObject({ inputTokens: 1000, outputTokens: 1000, costUsd: 9 })
   })
 
+  it('counts every purpose but title, transcription and speech: chat, image, compact and subagent (Phase 9)', async () => {
+    const id = chatId(1)
+    await service.create(treeInput())
+    await service.create({ id: chatId(2) })
+    const base = { chatId: id, messageId: messageId(6), providerId: 'mock', modelId: 'compact', reasoningTokens: 1, cacheReadTokens: 2, cacheWriteTokens: 3 }
+    await service.addUsage({ ...base, purpose: 'chat', inputTokens: 10, outputTokens: 20, costUsd: 0.5 })
+    await service.addUsage({ ...base, purpose: 'image', inputTokens: 1, outputTokens: 2, costUsd: 0.25 })
+    // A `/compact` (or an automatic compaction) and two sub-agents of the same reply: each one row, all counted.
+    await service.addUsage({ ...base, purpose: 'compact', inputTokens: 300, outputTokens: 40, costUsd: 0.125 })
+    await service.addUsage({ ...base, modelId: 'subagent', purpose: 'subagent', inputTokens: 50, outputTokens: 6, costUsd: 0.0625 })
+    await service.addUsage({ ...base, modelId: 'subagent', purpose: 'subagent', inputTokens: 70, outputTokens: 8, costUsd: null })
+    // Not counted: a title, a transcription, a speech row, and a compact row of another chat.
+    await service.addUsage({ ...base, messageId: null, purpose: 'title', inputTokens: 100, outputTokens: 100, costUsd: 1 })
+    await service.addUsage({ ...base, messageId: null, purpose: 'transcription', inputTokens: 0, outputTokens: 0, costUsd: null })
+    await service.addUsage({ ...base, messageId: null, purpose: 'speech', inputTokens: 50, outputTokens: 0, costUsd: 2 })
+    await service.addUsage({ ...base, chatId: chatId(2), purpose: 'compact', inputTokens: 900, outputTokens: 90, costUsd: 4 })
+    const { totals } = await service.get(id)
+    expect(totals).toEqual({ inputTokens: 431, outputTokens: 76, reasoningTokens: 5, cacheReadTokens: 10, cacheWriteTokens: 15, costUsd: 0.9375 })
+    expect((await service.get(chatId(2))).totals).toEqual({ inputTokens: 900, outputTokens: 90, reasoningTokens: 1, cacheReadTokens: 2, cacheWriteTokens: 3, costUsd: 4 })
+    // The rows are stored with their purpose (the totals filter is the only place that groups them).
+    const rows = await t.db.select({ purpose: usage.purpose }).from(usage).where(eq(usage.chatId, id))
+    expect(rows.map(row => row.purpose).sort()).toEqual(['chat', 'compact', 'image', 'speech', 'subagent', 'subagent', 'title', 'transcription'])
+  })
+
   it('reports running from the runs registry', async () => {
     const id = chatId(1)
     await service.create({ id })

@@ -1,10 +1,11 @@
 // The two project-file calls of `@` mentions (docs/UI.md 7.26, 11.6; docs/API.md 4.25; ADR-042), through `useApi()`
 // (no store): `search` -> `GET /projects/:id/files?q=&limit=` (ranked by the server with `rankPaths`), `attach` ->
 // `POST /projects/:id/files/attach { path }` (an upload snapshot of the file: 201 `FileRef`; 400 / 404 / 413 thrown as
-// `HarnessError`). Signature frozen from Gate P9-0b (C25); W9.8 implements it. Inert in P9-0b: both reject with
-// `not_implemented` (nothing calls them yet).
+// `HarnessError`). Signature frozen from Gate P9-0b (C25); implemented by W9.8. An aborted request rejects with the
+// abort error (`isAbortError`), like every `$api` call.
 import type { FileRef, ProjectFileSearch } from '@harness-forge/shared'
-import { HarnessError } from '@harness-forge/shared'
+import { LIMITS } from '@harness-forge/shared'
+import { useApi } from '~/composables/useApi'
 
 export interface ProjectFilesApi {
   /** The best matches of `q` among the project's files and folders (`limit` default 50). */
@@ -13,18 +14,19 @@ export interface ProjectFilesApi {
   attach: (projectId: string, path: string, opts?: { signal?: AbortSignal }) => Promise<FileRef>
 }
 
-function notImplemented(): HarnessError {
-  return new HarnessError({ code: 'not_implemented', message: 'File mentions are not available yet.' })
-}
-
 /** Search and attach of project files for the `@` menu. */
 export function useProjectFiles(): ProjectFilesApi {
+  const api = useApi()
   return {
-    search: async () => {
-      throw notImplemented()
-    },
-    attach: async () => {
-      throw notImplemented()
-    },
+    search: (projectId, q, opts = {}) => api.projectFiles.search({
+      params: { id: projectId },
+      query: { q, limit: opts.limit ?? LIMITS.mentionResultsMax },
+      signal: opts.signal,
+    }),
+    attach: (projectId, path, opts = {}) => api.projectFiles.attach({
+      params: { id: projectId },
+      body: { path },
+      signal: opts.signal,
+    }),
   }
 }

@@ -2,6 +2,10 @@
 // reused chat components read (TextPart, ReasoningPart, FilePart, ImageGallery, SourcesPart, UserMessageBubble),
 // consecutive sources merged into one row, consecutive images of an assistant message into one gallery (Phase 6,
 // 7.16), the model id and the page's error text. No Vue, no stores.
+// Phase 9 (ADR-040, ADR-042; no `sharePartSchema` change): the server's sanitizer splits a reply at each steer into
+// user share messages (they render as ordinary user bubbles, `toUserMessage`) and drops compaction markers and activity
+// parts (summaries are never shared: no divider and no dimming here); the agent tools (`task`, `todo_write`,
+// `exit_plan_mode`) are tool parts like any other and render through ShareToolRow.
 import type { HarnessError, HarnessUIMessage, MessageMetadata, ShareMessage, SharePart } from '@harness-forge/shared'
 import type { FileUIPart, ReasoningUIPart, TextUIPart } from 'ai'
 import type { SourcePart } from '~/components/chat/chat-format'

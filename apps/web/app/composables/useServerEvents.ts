@@ -10,8 +10,10 @@
 // them); `project.changed` to the shell rules store (a deleted project drops its rules); a reconnect refreshes the loaded
 // workspace entries and the loaded shell rules.
 // Phase 9 (ADR-042; C25 wires it, W9.9 owns it): `queue.changed` and `chat.deleted` go to the chat-queue store (the
-// event's list replaces the chat's queue; a deleted chat's queue is dropped), and a reconnect refetches the loaded
-// queues (`chatQueue.refreshLoaded()`).
+// event's list replaces the chat's queue; a deleted chat's queue is dropped; a `failed` removal of a message this tab
+// queued shows a toast), and a reconnect refetches the loaded queues (`chatQueue.refreshLoaded()`). `run.started` with
+// `origin: 'queue'` reaches the live session of its chat through `on()` (after the chats store marked it running): the
+// session reloads its path before it follows the reply when it does not show the queued message yet.
 import type { ServerEvent, ServerEventOf, ServerEventType } from '@harness-forge/shared'
 import type { Ref } from 'vue'
 import type { EventStreamStatus } from '~/utils/event-stream'

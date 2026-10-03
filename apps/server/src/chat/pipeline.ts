@@ -27,11 +27,15 @@
 // sub-agents) through `RunSession.addExtraCost`; the agent scope (`agent-scope.ts`: the mode, the sub-agent runner of
 // `subagent/index.ts`, the todos) is bound to every tool call; `RunContext.onReleased` runs once right after the run
 // left the registry (the queue's run end); a `/compact` command is answered by `compactStream`
-// (`compaction/stream.ts`).
-import type { HarnessError, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, NoticeData, ReasoningEffort, ToolMode } from '@harness-forge/shared'
-import type { LanguageModelUsage, ModelMessage, TextStreamPart, ToolSet, UIMessageChunk, UIMessageStreamOnEndCallback, UIMessageStreamWriter } from 'ai'
+// (`compaction/stream.ts`). W9.1: the v1.4 pre-stream trim moved into the context guard (`compaction/guard.ts`), which
+// compacts the context before any model call above 80 % of the window and injects its marker or notice for that step;
+// `run.started` carries `origin` (`RunContext.origin`, default `request`) and, for a queued turn, `userMessageId`.
+import type { HarnessError, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, NoticeData, ReasoningEffort, RunOrigin, ToolMode } from '@harness-forge/shared'
+import type { LanguageModelUsage, ModelMessage, TextStreamPart, Tool, ToolSet, UIMessageChunk, UIMessageStreamOnEndCallback, UIMessageStreamWriter } from 'ai'
 import type { Logger } from '../logger.ts'
+import type { PluginHost } from '../plugins/types.ts'
 import type { ResolvedModel } from '../providers/types.ts'
+import type { RegisteredTool } from '../registry/types.ts'
 import type { ImageGenerationResult } from '../services/images/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { AgentRunScope } from './agent-scope.ts'
@@ -52,7 +56,7 @@ import {
 import { createToolApproval, toolWorkspaceAccess } from './approval.ts'
 import { createContextGuard } from './compaction/guard.ts'
 import { compactStream } from './compaction/stream.ts'
-import { applyCommandExpansions, trimToContext, validModelMessages } from './context.ts'
+import { applyCommandExpansions, validModelMessages } from './context.ts'
 import {
   errorEnvelopeText,
   errorInit,
@@ -68,7 +72,7 @@ import { finalizeParts, hasPendingApproval, plainText } from './history.ts'
 import { imageStream } from './images.ts'
 import { buildModelHistory } from './model-history.ts'
 import { NOTICES } from './notices.ts'
-import { buildRunParams, providerImageOptions, runMaxSteps } from './params.ts'
+import { buildRunParams, offeredAgentTools, providerImageOptions, runMaxSteps } from './params.ts'
 import { SseReplayBuffer } from './runs.ts'
 import { createRunScope } from './scope.ts'
 import { createSteerStep, stepInjector } from './steer.ts'
@@ -76,7 +80,7 @@ import { createPrepareStep } from './steps.ts'
 import { createSubagentRunner } from './subagent/index.ts'
 import { generateChatTitle } from './title.ts'
 import { toolPartsAsText } from './tool-history.ts'
-import { assembleTools } from './tools.ts'
+import { assembleTools, wrapToModelOutput } from './tools.ts'
 import { addMessageUsage, roundUsd, RunTracker, toMessageUsage } from './usage.ts'
 
 /** Retries of a failed model call before streaming starts. */
@@ -176,12 +180,18 @@ export interface RunContext {
    * for a run released by a forced stop. A throw is logged.
    */
   onReleased: (ending: RunEnding, awaitingApproval: boolean) => void
+  /**
+   * What started the run (Phase 9, ADR-042; `run.started.origin`): a `POST /chat` request (the default) or the server
+   * with the first queued message (`queue`: `run.started` also carries the new user message id as `userMessageId`).
+   */
+  origin?: RunOrigin
 }
 
 /** A data chunk of this app (`data-notice`, `data-compaction`, `data-steer`, `data-activity`). */
 export type HarnessDataChunk = Extract<HarnessUIMessageChunk, { type: `data-${string}` }>
 
-type StreamMode = 'model' | 'reply' | 'error' | 'image'
+/** How the run answers: a model run, a reply command, a failure before the model call, an image turn, `/compact`. */
+type StreamMode = 'model' | 'reply' | 'error' | 'image' | 'compact'
 
 /** An image generation usage as the `LanguageModelUsage` of the `message.completed` hook. */
 function imageHookUsage(usage: ImageGenerationResult['usage']): LanguageModelUsage {
@@ -696,6 +706,34 @@ export function keptUserMessage(session: RunSession, model: ResolvedModel, tools
 }
 
 /**
+ * The tool set the history is converted with (`convertToModelMessages`, Phase 9): the run's tools plus, for every other
+ * registered tool with a `toModelOutput`, an entry that only converts outputs. Earlier outputs of a tool the run does
+ * not offer (a write tool in `plan`, an executed `exit_plan_mode`, a tool switched off since) then still reach the model
+ * as their model text, not as raw JSON. Never passed to `streamText`: the model may call only the run's tools.
+ */
+export function historyToolSet(runTools: ToolSet, registered: readonly RegisteredTool[], plugins: Pick<PluginHost, 'guard'>): ToolSet {
+  const set: ToolSet = { ...runTools }
+  for (const entry of registered) {
+    const name = entry.definition.name
+    if (Object.hasOwn(set, name) || entry.definition.toModelOutput === undefined)
+      continue
+    set[name] = { inputSchema: entry.definition.inputSchema, toModelOutput: wrapToModelOutput(entry, plugins) } as Tool
+  }
+  return set
+}
+
+/** `historyToolSet` over the registry (an unreadable registry converts with the run's tools only). */
+export function conversionTools(deps: Pick<AppDeps, 'registry' | 'plugins'>, runTools: ToolSet, logger: Logger): ToolSet {
+  try {
+    return historyToolSet(runTools, deps.registry.tools.list(), deps.plugins)
+  }
+  catch (error) {
+    logger.warn('cannot list the registered tools for the history', { err: error })
+    return runTools
+  }
+}
+
+/**
  * Tools, parameters, model messages and the `streamText` call of a model run, streamed through
  * `storeGeneratedFiles` inside `createUIMessageStream` (what is saved equals what is streamed, ADR-028).
  */
@@ -758,6 +796,8 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     chatInstructions: prepared.chat.settings.instructions,
     workspace: prepared.workspace,
     workspaceTools: [...assembled.byName.values()].filter(entry => toolWorkspaceAccess(entry.definition) !== null).map(entry => entry.definition.name),
+    // The offered `core-agent` tools (Phase 9): the plan block, the todo hint and the `task` hint of the instructions.
+    agentTools: offeredAgentTools(assembled),
     maxSteps: runMaxSteps(prepared.settings, prepared.chat.projectId),
     registry: deps.registry,
     logger,
@@ -775,17 +815,18 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
   const tools = Object.keys(assembled.tools).length > 0 ? assembled.tools : undefined
   // Without tool definitions, earlier tool calls go to the model as text: providers reject tool content without tools.
   const history = tools === undefined ? toolPartsAsText(files.messages) : files.messages
-  const converted = await convertToModelMessages<HarnessUIMessage>(history, { tools: assembled.tools, ignoreIncompleteToolCalls: true })
+  // Outputs of tools the mode does not offer keep their model text (`historyToolSet`).
+  const historyTools = tools === undefined ? assembled.tools : conversionTools(deps, assembled.tools, logger)
+  const converted = await convertToModelMessages<HarnessUIMessage>(history, { tools: historyTools, ignoreIncompleteToolCalls: true })
   const messagesDraft: { messages: ModelMessage[] } = { messages: converted }
   await deps.registry.hooks.run('chat.messages', { chatId, modelRef }, messagesDraft)
   const hooked = validModelMessages(messagesDraft.messages)
   if (hooked === null)
     logger.warn('chat.messages hooks returned invalid messages; the original messages are sent')
-  const trimmed = trimToContext(hooked ?? converted, resolved.entry.contextWindow, params.instructions)
-  if (trimmed.removed > 0)
-    session.notices.push(NOTICES.contextTrimmed())
 
   // The step composer (Phase 9): the context guard, then the steer step, before every model call (step 0 included).
+  // The guard compacts the context above 80 % of the window, or trims the oldest turns before the first step when
+  // automatic compaction is off or failed (the v1.4 pre-stream trim moved there).
   const prepareStep = createPrepareStep({
     contextGuard: createContextGuard({ session, model: resolved, keptUser: keptUserMessage(session, resolved, assembled.tools) }),
     steer: createSteerStep({ session, model: resolved, tools: assembled.tools }),
@@ -795,7 +836,7 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
   const result = streamText({
     model: resolved.model,
     instructions: params.instructions,
-    messages: trimmed.messages,
+    messages: hooked ?? converted,
     tools,
     ...(assembled.activeTools === undefined ? {} : { activeTools: assembled.activeTools }),
     prepareStep,
@@ -890,7 +931,14 @@ export async function launchRun(ctx: RunContext): Promise<Response> {
   run.modelRef = prepared.resolved.modelRef
   run.startedAt = session.startedAt
   run.phase = 'streaming'
-  deps.events.emit('run.started', { chatId: run.chatId, messageId: prepared.assistantId, modelRef: prepared.resolved.modelRef })
+  const origin = ctx.origin ?? 'request'
+  deps.events.emit('run.started', {
+    chatId: run.chatId,
+    messageId: prepared.assistantId,
+    modelRef: prepared.resolved.modelRef,
+    origin,
+    ...(origin === 'queue' && prepared.userMessage !== null ? { userMessageId: prepared.userMessage.id } : {}),
+  })
   try {
     await deps.chats.touch(run.chatId, { pendingApproval: false, modelRef: prepared.resolved.modelRef })
   }

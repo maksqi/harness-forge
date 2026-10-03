@@ -18,9 +18,9 @@ import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { dispatchServerEvent, KEY_ROTATED_MESSAGE, parseServerEvent, refetchLoadedStores, useServerEvents } from './useServerEvents'
 
-const mock = vi.hoisted(() => ({ api: null as unknown, toast: vi.fn() }))
+const mock = vi.hoisted(() => ({ api: null as unknown, toast: vi.fn(), toastError: vi.fn() }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
-vi.mock('vue-sonner', () => ({ toast: Object.assign((...args: unknown[]) => mock.toast(...args), { error: vi.fn(), success: vi.fn() }) }))
+vi.mock('vue-sonner', () => ({ toast: Object.assign((...args: unknown[]) => mock.toast(...args), { error: (...args: unknown[]) => mock.toastError(...args), success: vi.fn() }) }))
 
 let pinia: ReturnType<typeof createPinia>
 let api: MockApi
@@ -28,6 +28,7 @@ let api: MockApi
 beforeEach(() => {
   vi.useFakeTimers()
   mock.toast.mockReset()
+  mock.toastError.mockReset()
   api = createMockApi()
   mock.api = api
   stubLocalStorage()
@@ -215,6 +216,28 @@ describe('dispatchServerEvent', () => {
     expect(navigate).toHaveBeenCalledWith('/')
   })
 
+  it('hands run.started of a queued turn to subscribers after the chats store marked the chat running (Phase 9)', () => {
+    const seen: Array<{ origin: string | undefined, userMessageId: string | undefined, running: string | undefined }> = []
+    const scope = effectScope()
+    scope.run(() => useServerEvents().on('run.started', (event) => {
+      seen.push({ origin: event.data.origin, userMessageId: event.data.userMessageId, running: useChatsStore().runState[event.data.chatId] })
+    }))
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(1), messageId: 'msg_asst000000000002', modelRef: 'mock:steer', origin: 'queue', userMessageId: 'msg_queued1000000000' }, 1))
+    expect(seen).toEqual([{ origin: 'queue', userMessageId: 'msg_queued1000000000', running: 'running' }])
+    scope.stop()
+  })
+
+  it('a failed queued message is reported in the tab that queued it (Phase 9)', async () => {
+    const queue = useChatQueueStore()
+    const item = queueItem()
+    api.chatQueue.add.mockResolvedValue(item)
+    await queue.enqueue(chatId(1), { message: item.message, modelRef: item.modelRef, reasoningEffort: item.reasoningEffort, toolMode: item.toolMode })
+    expect(queue.items(chatId(1))).toEqual([item])
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(1), items: [], removed: [{ id: item.id, reason: 'failed', error: 'The model is not available.' }] }, 1))
+    expect(queue.items(chatId(1))).toEqual([])
+    expect(mock.toastError).toHaveBeenCalledWith('Couldn\'t send a queued message.', { description: 'The model is not available.' })
+  })
+
   it('notifies subscribers after the stores and keeps going when one handler throws', () => {
     const seen: string[] = []
     const scope = effectScope()
@@ -281,5 +304,18 @@ describe('refetchLoadedStores', () => {
     const refresh = vi.spyOn(useChatQueueStore(), 'refreshLoaded')
     await refetchLoadedStores()
     expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('a reconnect brings back the queue of every opened chat, not of the others (Phase 9)', async () => {
+    const queue = useChatQueueStore()
+    const item = queueItem()
+    api.chatQueue.list.mockResolvedValueOnce({ items: [] })
+    await queue.fetch(chatId(1))
+    // Missed while disconnected: the item was queued in another tab.
+    api.chatQueue.list.mockResolvedValueOnce({ items: [item] })
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(2), items: [item] }, 1))
+    await refetchLoadedStores()
+    expect(api.chatQueue.list.mock.calls).toEqual([[{ params: { id: chatId(1) } }], [{ params: { id: chatId(1) } }]])
+    expect(queue.items(chatId(1))).toEqual([item])
   })
 })

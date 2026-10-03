@@ -1,8 +1,13 @@
 <script setup lang="ts">
 // Tools of a plugin (docs/UI.md 2.4, 8.8): name (mono) and description, the tool's own approval policy (Safe / Ask /
-// Always ask), the user's Approval override (Default / Allow / Ask / Deny; Default clears it) and the enabled switch.
-// Both write tool preferences with `PATCH /api/tools/:name` through the plugins store (optimistic, rolled back with
-// a toast on failure). Tools the tools API does not know yet are listed by name with their controls disabled.
+// Always ask, or "Decided per call" for a policy function such as the `shell` tool's), the user's Approval override
+// (Default / Allow / Ask / Deny; Default clears it) and the enabled switch. Both write tool preferences with
+// `PATCH /api/tools/:name` through the plugins store (optimistic, rolled back with a toast on failure). Tools the tools
+// API does not know yet are listed by name with their controls disabled.
+// Phase 9 (W9.12): Allow is not offered where the server refuses it (a tool with workspace access `execute`, whose
+// commands shell rules allow instead, ADR-038; core-agent's `exit_plan_mode`, whose plan card always shows, ADR-041),
+// and the select shows the effective override: an `allow` stored before v1.4 on such a tool reads as Default (the
+// approval ignores it; `GET /tools` reports it as null since v1.5).
 import type { ToolSummary } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
 import type { ToolApproval } from './plugin-detail'
@@ -13,6 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { CORE_AGENT_PLUGIN_ID, PLAN_TOOL_NAME } from '~/components/chat/chat-format'
 import { errorTitle } from '~/components/common/harness-error'
 import { usePluginsStore } from '~/stores/plugins'
 import { toHarnessError } from '~/utils/errors'
@@ -47,8 +53,23 @@ const POLICY_CLASS: Record<string, string> = {
   dynamic: 'border-dashed border-border text-muted-foreground',
 }
 
+/** The label of a policy function (`policy: null`): the tool decides for each call. */
+const PER_CALL_LABEL = 'Decided per call'
+
+/** The server refuses (and the approval ignores) an `allow` override for this tool. */
+function refusesAllow(tool: ToolSummary): boolean {
+  return tool.workspace === 'execute' || (tool.pluginId === CORE_AGENT_PLUGIN_ID && tool.name === PLAN_TOOL_NAME)
+}
+
+/** The effective override: an `allow` the approval ignores reads as Default. */
 function approvalOf(tool: ToolSummary): ToolApproval {
+  if (tool.override === 'allow' && refusesAllow(tool))
+    return 'default'
   return tool.override ?? 'default'
+}
+
+function approvalOptions(tool: ToolSummary | null) {
+  return tool && refusesAllow(tool) ? TOOL_APPROVAL_OPTIONS.filter(option => option.value !== 'allow') : TOOL_APPROVAL_OPTIONS
 }
 
 async function update(tool: ToolSummary, patch: { enabled?: boolean, override?: ToolSummary['override'] }) {
@@ -62,7 +83,7 @@ async function update(tool: ToolSummary, patch: { enabled?: boolean, override?: 
 }
 
 function onApproval(tool: ToolSummary, value: AcceptableValue) {
-  if (!isToolApproval(value) || value === approvalOf(tool))
+  if (!isToolApproval(value) || value === approvalOf(tool) || (value === 'allow' && refusesAllow(tool)))
     return
   void update(tool, { override: value === 'default' ? null : value })
 }
@@ -71,7 +92,7 @@ function onApproval(tool: ToolSummary, value: AcceptableValue) {
 <template>
   <div role="table" aria-label="Tools" class="overflow-hidden rounded-xl border bg-card">
     <div role="rowgroup" class="hidden border-b bg-muted/30 sm:block">
-      <div role="row" class="grid grid-cols-[minmax(0,1fr)_6.5rem_8.5rem_3.5rem] items-center gap-x-4 px-4 py-2 text-xs font-medium text-muted-foreground">
+      <div role="row" class="grid grid-cols-[minmax(0,1fr)_8rem_8.5rem_3.5rem] items-center gap-x-4 px-4 py-2 text-xs font-medium text-muted-foreground">
         <span role="columnheader">Tool</span>
         <span role="columnheader">Policy</span>
         <span role="columnheader">Approval</span>
@@ -86,7 +107,7 @@ function onApproval(tool: ToolSummary, value: AcceptableValue) {
         :data-testid="testIds.pluginToolRow"
         :data-tool-name="row.name"
         :data-enabled="row.tool?.enabled"
-        class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_6.5rem_8.5rem_3.5rem]"
+        class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_8rem_8.5rem_3.5rem]"
       >
         <div role="cell" :class="cn('col-span-3 min-w-0 sm:col-span-1', row.tool && !row.tool.enabled && 'opacity-60')">
           <div class="flex min-w-0 items-center gap-2">
@@ -118,7 +139,7 @@ function onApproval(tool: ToolSummary, value: AcceptableValue) {
                 :data-value="row.tool.policy ?? 'dynamic'"
                 :class="cn('rounded-md px-1.5 font-medium', POLICY_CLASS[row.tool.policy ?? 'dynamic'])"
               >
-                {{ row.tool.policy ? TOOL_POLICY_LABELS[row.tool.policy] : 'Dynamic' }}
+                {{ row.tool.policy ? TOOL_POLICY_LABELS[row.tool.policy] : PER_CALL_LABEL }}
               </Badge>
             </TooltipTrigger>
             <TooltipContent class="max-w-xs">
@@ -145,7 +166,7 @@ function onApproval(tool: ToolSummary, value: AcceptableValue) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent position="popper" align="end">
-              <SelectItem v-for="option in TOOL_APPROVAL_OPTIONS" :key="option.value" :value="option.value">
+              <SelectItem v-for="option in approvalOptions(row.tool)" :key="option.value" :value="option.value" :data-value="option.value">
                 {{ option.label }}
               </SelectItem>
             </SelectContent>

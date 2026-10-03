@@ -1,8 +1,11 @@
 <script setup lang="ts">
 // Permission mode menu (docs/UI.md 7.11): a radio menu bound to `ToolMode` — Ask (default), Accept edits (Phase 7,
-// project chats), Auto (shown in ember: tools run without asking), Off. `modes` limits the options (menu order is
-// always that of TOOL_MODE_OPTIONS); the composer passes Accept edits only for a project chat or while it is selected.
-// The composer renders the menu only when a usable tool exists and the model can call tools. Alt+P opens it.
+// project chats), Plan (Phase 9, project chats; shown in `text-info`), Auto (shown in ember: tools run without
+// asking), Off. `modes` limits the options (menu order is always that of TOOL_MODE_OPTIONS); the composer passes Accept
+// edits and Plan only for a project chat or while selected. The composer renders the menu only when a usable tool
+// exists and the model can call tools. Alt+P opens it; + Phase 9: Shift+Tab in the composer cycles the mode
+// (`useModeCycle`), so the trigger's `aria-keyshortcuts` lists Shift+Tab while the `shiftTabModes` setting is on (and
+// Alt+P while `altShortcuts` is on).
 import type { ToolMode } from '@harness-forge/shared'
 import { toolModeSchema } from '@harness-forge/shared'
 import { ChevronDownIcon } from '@lucide/vue'
@@ -20,6 +23,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import KbdCombo from '~/components/common/KbdCombo.vue'
+import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
 import { TOOL_MODE_OPTIONS, toolModeOption } from './permission'
 
@@ -45,7 +49,37 @@ const emit = defineEmits<{
 }>()
 
 const isOpen = useVModel(props, 'open', emit, { passive: true })
+const settings = useSettingsStore()
 const current = computed(() => toolModeOption(props.modelValue))
+/** The trigger's shortcuts: Alt+P (with Alt shortcuts on) and Shift+Tab (the mode cycle, with `shiftTabModes` on). */
+const keyShortcuts = computed(() => {
+  const keys = [
+    settings.resolved.altShortcuts ? 'Alt+P' : null,
+    settings.resolved.shiftTabModes ? 'Shift+Tab' : null,
+  ].filter(key => key !== null)
+  return keys.length > 0 ? keys.join(' ') : undefined
+})
+
+/** The accent of a mode: Auto in ember (primary), Plan in info; null = the muted default. */
+function accentClass(value: ToolMode): string | null {
+  if (value === 'auto')
+    return 'text-primary'
+  if (value === 'plan')
+    return 'text-info'
+  return null
+}
+
+/** The trigger's colors: Auto in ember, Plan in info, the rest muted. */
+const triggerClass = computed(() => {
+  switch (current.value.value) {
+    case 'auto':
+      return 'text-primary hover:text-primary aria-expanded:text-primary'
+    case 'plan':
+      return 'text-info hover:text-info aria-expanded:text-info'
+    default:
+      return 'text-muted-foreground hover:text-foreground aria-expanded:text-foreground'
+  }
+})
 /** The offered options in menu order; the current mode always shows, so the radio group never loses its value. */
 const options = computed(() => TOOL_MODE_OPTIONS.filter(option =>
   props.modes.includes(option.value) || option.value === current.value.value))
@@ -88,12 +122,8 @@ function onCloseAutoFocus(event: Event) {
               :data-testid="testIds.permissionMenuTrigger"
               :data-value="current.value"
               :aria-label="`Permission mode: ${current.label}`"
-              :class="cn(
-                'h-8 gap-1.5 px-2 font-normal pointer-coarse:h-10',
-                current.value === 'auto'
-                  ? 'text-primary hover:text-primary aria-expanded:text-primary'
-                  : 'text-muted-foreground hover:text-foreground aria-expanded:text-foreground',
-              )"
+              :aria-keyshortcuts="keyShortcuts"
+              :class="cn('h-8 gap-1.5 px-2 font-normal pointer-coarse:h-10', triggerClass)"
             >
               <component :is="current.icon" aria-hidden="true" class="size-4" />
               <span class="hidden sm:inline">{{ current.label }}</span>
@@ -114,10 +144,10 @@ function onCloseAutoFocus(event: Event) {
                 <component
                   :is="option.icon"
                   aria-hidden="true"
-                  :class="cn('mt-0.5 size-4', option.value === 'auto' ? 'text-primary' : 'text-muted-foreground')"
+                  :class="cn('mt-0.5 size-4', accentClass(option.value) ?? 'text-muted-foreground')"
                 />
                 <span class="flex min-w-0 flex-col">
-                  <span :class="option.value === 'auto' && 'text-primary'">{{ option.label }}</span>
+                  <span :class="accentClass(option.value) ?? undefined">{{ option.label }}</span>
                   <span class="text-xs text-muted-foreground">{{ option.description }}</span>
                 </span>
               </DropdownMenuRadioItem>

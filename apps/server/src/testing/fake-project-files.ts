@@ -7,14 +7,18 @@
 //   await files.search(projectId, { q: 'app', limit: 50 })  // { items: [{ path: 'src/app.ts', kind: 'file' }], ... }
 //
 // Paths live in memory per project (a project is known when it has an entry in `files`). Follows the contract where
-// callers can see it: the folders are derived from the file paths, the ranking is the shared `rankPaths` (never a local
-// one), `truncated` is the index flag (`truncatedProjects`), `indexedAt` is set by the first search after creation or
-// `invalidate` (the lazy index), `not_found` for an unknown project or file, `validation_error` on `['path']` for a
-// folder. `attach` returns a fixed `FileRef` (`FAKE_PROJECT_FILE_REF` with the basename of the path) without reading or
-// storing anything. Every call is counted and recorded.
-import type { FileRef, ProjectFileAttachBody, ProjectFileEntry, ProjectFilesQuery } from '@harness-forge/shared'
+// callers can see it: the folders are derived from the file paths (`projectFileEntries`, the real service's helper), the
+// ranking is the shared `rankPaths` (never a local one), `truncated` is the index flag (`truncatedProjects`),
+// `indexedAt` is set by the first search after creation or `invalidate` (the lazy index), `not_found` for an unknown
+// project or file, `validation_error` on `['path']` for a folder. `attach` returns a fixed `FileRef`
+// (`FAKE_PROJECT_FILE_REF` with the basename of the path) without reading or storing anything. Every call is counted
+// and recorded.
+import type { FileRef, ProjectFileAttachBody, ProjectFilesQuery } from '@harness-forge/shared'
 import type { ProjectFileService } from '../services/project-files/types.ts'
 import { HarnessError, rankPaths, validationError } from '@harness-forge/shared'
+import { projectFileEntries } from '../services/project-files/file-index.ts'
+
+export { projectFileEntries } from '../services/project-files/file-index.ts'
 
 /** The `FileRef` of every fake attach (its `name` is replaced by the basename of the attached path). */
 export const FAKE_PROJECT_FILE_REF: FileRef = Object.freeze({
@@ -49,23 +53,6 @@ export interface FakeProjectFileService extends ProjectFileService {
   readonly attaches: Array<{ projectId: string, path: string }>
   /** Every `invalidate` call (the project id), in order. */
   readonly invalidated: string[]
-}
-
-/** The file entries of `paths` plus every folder above them (no trailing `/`), files first in input order. */
-export function projectFileEntries(paths: readonly string[]): ProjectFileEntry[] {
-  const entries: ProjectFileEntry[] = paths.map(path => ({ path, kind: 'file' }))
-  const files = new Set(paths)
-  const dirs = new Set<string>()
-  for (const path of paths) {
-    let end = path.lastIndexOf('/')
-    while (end > 0) {
-      const dir = path.slice(0, end)
-      if (!files.has(dir))
-        dirs.add(dir)
-      end = dir.lastIndexOf('/')
-    }
-  }
-  return [...entries, ...[...dirs].sort().map(path => ({ path, kind: 'dir' as const }))]
 }
 
 function basename(path: string): string {

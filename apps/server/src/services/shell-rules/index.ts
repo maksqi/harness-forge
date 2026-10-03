@@ -4,8 +4,12 @@
 // - A rule is stored in its canonical form (`parseShellRule(prefix).canonical` of the shared parser); a refused prefix
 //   is `400 validation_error` on `['prefix']` with the parser's message, so the web editors and the server agree.
 // - Scope = the project (`project_id`) or the global list (`project_id` null). Per scope: one row per canonical prefix
-//   (`409 conflict`, `reason: 'exists'`) and at most `LIMITS.shellRulesPerScopeMax` rules (`400`). The table has no
-//   unique index, so `create` runs its checks and the insert one at a time (an in-process queue; one server process).
+//   (`409 conflict`, `reason: 'exists'`) and at most `LIMITS.shellRulesPerScopeMax` rules (`400`). Phase 9 (ADR-038,
+//   migration `0006_shell_rule_unique`): the database is the authority on duplicates. Two partial unique indexes (one
+//   for the global scope, one per project) refuse a second row, and the insert maps that violation
+//   (`SQLITE_CONSTRAINT_UNIQUE`) to the same `409 exists`, so two creates that race past the duplicate check (another
+//   process, another service instance) still store one rule. `create` keeps running its checks and the insert one at a
+//   time (an in-process queue), so a duplicate in a full scope stays a `409` and the cap is never exceeded in-process.
 // - The rules of a project go with it (`ON DELETE CASCADE`); nothing here reacts to a project delete. Rules are not
 //   settings and are never exported, backed up or imported (the data service never reads this table).
 // - `forRun(projectId)` reads the global rules and the project's in one query, once per run; a null project gets the
@@ -19,7 +23,7 @@ import type { ShellRuleService, ShellRuleSet } from './types.ts'
 import { createShellRuleId, HarnessError, LIMITS, parseShellRule, validationError } from '@harness-forge/shared'
 import { and, count, eq, isNull, or } from 'drizzle-orm'
 import { projects, shellRules } from '../../db/schema.ts'
-import { databaseError, guardDb, isConstraintError } from '../chats/db-errors.ts'
+import { databaseError, guardDb, isConstraintError, sqliteErrorCodes } from '../chats/db-errors.ts'
 
 // ---------- messages (user-facing, API.md 5.25) ----------
 
@@ -43,6 +47,20 @@ function ruleNotFound(id: string): HarnessError {
 
 function prefixIssue(message: string): HarnessError {
   return validationError([{ path: ['prefix'], message, code: 'custom' }], message)
+}
+
+/** The `409` of a prefix that its scope already holds. */
+export function shellRuleExists(): HarnessError {
+  return new HarnessError({ code: 'conflict', message: SHELL_RULE_EXISTS_MESSAGE, details: { reason: 'exists' } })
+}
+
+/**
+ * A violation of a unique index (`shell_rules_global_prefix_uq` / `shell_rules_project_prefix_uq`, migration `0006`)
+ * anywhere in the error chain. A primary key collision (`SQLITE_CONSTRAINT_PRIMARYKEY`) and a foreign key violation
+ * (`SQLITE_CONSTRAINT_FOREIGNKEY`) have their own codes and are not duplicates.
+ */
+export function isUniqueViolation(error: unknown): boolean {
+  return sqliteErrorCodes(error).includes('SQLITE_CONSTRAINT_UNIQUE')
 }
 
 // ---------- ordering ----------
@@ -126,7 +144,7 @@ export function createShellRuleService(deps: AppDeps): ShellRuleService {
       .where(and(scopeCondition(projectId), eq(shellRules.prefix, canonical)))
       .limit(1))
     if (existing !== undefined)
-      throw new HarnessError({ code: 'conflict', message: SHELL_RULE_EXISTS_MESSAGE, details: { reason: 'exists' } })
+      throw shellRuleExists()
     const [{ n } = { n: 0 }] = await guardDb(async () => db.select({ n: count() }).from(shellRules).where(scopeCondition(projectId)))
     if (n >= LIMITS.shellRulesPerScopeMax)
       throw prefixIssue(shellRulesFullMessage(projectId))
@@ -138,6 +156,9 @@ export function createShellRuleService(deps: AppDeps): ShellRuleService {
         .returning()
     }
     catch (error) {
+      // The unique index is the authority: a create that raced past the duplicate check above.
+      if (isUniqueViolation(error))
+        throw shellRuleExists()
       // The project was deleted between the check and the insert (the foreign key refuses the row).
       if (projectId !== null && isConstraintError(error))
         throw projectNotFound(projectId)

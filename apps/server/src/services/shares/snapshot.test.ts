@@ -243,6 +243,119 @@ describe('sanitizeSnapshot (allowlist)', () => {
   })
 })
 
+/** A path with the Phase 9 parts: a steer inside a stopped reply, compaction markers, an activity part. */
+function agentPath(): HarnessUIMessage[] {
+  const compaction = { modelRef: 'mock:compact', messagesCompacted: 3, tokensBefore: 900, tokensAfter: 90, createdAt: 9 }
+  return [
+    message(1, 'user', [{ type: 'text', text: 'Fix the tests' }], { modelRef: 'mock:steer', startedAt: 1 }),
+    message(2, 'assistant', [
+      { type: 'step-start' },
+      { type: 'text', text: 'Running them' },
+      { type: 'tool-current_time', toolCallId: 'call_1', state: 'output-available', input: {}, output: { now: 'noon' } },
+      {
+        type: 'data-steer',
+        id: 'steer_part_1',
+        data: {
+          id: 'msg_QUEUEDQUEUED0001',
+          parts: [
+            { type: 'text', text: 'Also check the docs' },
+            { type: 'file', mediaType: 'text/plain', filename: 'docs.txt', url: `/api/files/${FILE_B}` },
+            { type: 'file', mediaType: 'image/png', url: PNG_DATA_URL },
+          ],
+          queuedAt: 3,
+          deliveredAt: 4,
+        },
+      },
+      { type: 'step-start' },
+      { type: 'data-activity', data: { kind: 'compacting' } },
+      { type: 'data-compaction', data: { ...compaction, trigger: 'auto', keep: 'last-user', summary: 'SUMMARY-IN-RUN', focus: 'FOCUS-TEXT' } },
+      { type: 'text', text: 'Docs checked too' },
+    ], { modelRef: 'mock:steer', startedAt: 2, aborted: true }),
+    message(3, 'user', [{ type: 'text', text: '/compact' }], { modelRef: 'mock:steer', startedAt: 5, command: { name: 'compact', input: '', type: 'compact' } }),
+    message(4, 'assistant', [
+      { type: 'step-start' },
+      { type: 'data-compaction', data: { ...compaction, trigger: 'manual', keep: 'none', summary: 'SUMMARY-MANUAL' } },
+    ], { modelRef: 'mock:compact', startedAt: 6 }),
+  ]
+}
+
+describe('sanitizeSnapshot: agent parts (Phase 9)', () => {
+  it('splits a reply at its steers into user share messages and drops compaction and activity parts', () => {
+    const path = agentPath()
+    const { snapshot, fileIds } = sanitizeSnapshot('Agent chat', path, fileIdOf)
+    expect(shareSnapshotSchema.parse(snapshot)).toEqual(snapshot)
+    expect(snapshot.messages).toEqual([
+      { role: 'user', parts: [{ type: 'text', text: 'Fix the tests' }] },
+      {
+        role: 'assistant',
+        modelRef: 'mock:steer',
+        parts: [
+          { type: 'text', text: 'Running them' },
+          { type: 'tool', toolName: 'current_time', status: 'done', input: {}, output: { now: 'noon' } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          { type: 'text', text: 'Also check the docs' },
+          { type: 'file', mediaType: 'text/plain', filename: 'docs.txt', url: `/api/files/${FILE_B}` },
+          { type: 'file', mediaType: 'image/png', url: PNG_DATA_URL },
+        ],
+      },
+      // The reply's status stays on its last part.
+      { role: 'assistant', modelRef: 'mock:steer', status: 'stopped', parts: [{ type: 'text', text: 'Docs checked too' }] },
+      // The /compact exchange (the command and its marker-only reply) is left out.
+    ])
+    expect(fileIds).toEqual([FILE_B])
+    expect(shareableMessageCount(path)).toBe(snapshot.messages.length)
+    const json = JSON.stringify(snapshot)
+    for (const leaked of ['SUMMARY-IN-RUN', 'SUMMARY-MANUAL', 'FOCUS-TEXT', 'compacting', 'data-', 'queuedAt', 'msg_', 'steer_part_1'])
+      expect(json, leaked).not.toContain(leaked)
+  })
+
+  it('the steer files follow the attachments option; the steer text always shows', () => {
+    const { snapshot, fileIds } = sanitizeSnapshot(null, agentPath(), fileIdOf)
+    const shown = renderShareMessages(snapshot, renderContext(ALL_OPTIONS, fileIds))
+    expect(shown[2]).toEqual({
+      role: 'user',
+      parts: [
+        { type: 'text', text: 'Also check the docs' },
+        { type: 'file', mediaType: 'text/plain', filename: 'docs.txt', url: `/api/share/TOKEN/files/${FILE_B}` },
+        { type: 'file', mediaType: 'image/png', url: PNG_DATA_URL },
+      ],
+    })
+    expect(renderShareMessages(snapshot, renderContext(NO_OPTIONS, fileIds))[2]).toEqual({ role: 'user', parts: [{ type: 'text', text: 'Also check the docs' }] })
+  })
+
+  it('a failed reply that ends with a steer keeps the status on its part before the steer', () => {
+    const [, reply] = agentPath()
+    const failed = { ...reply!, parts: reply!.parts.slice(0, 5), metadata: { modelRef: 'mock:steer', startedAt: 2, error: { code: 'provider_error', message: 'ERROR-DETAILS' } } } as HarnessUIMessage
+    const { snapshot } = sanitizeSnapshot(null, [failed], fileIdOf)
+    expect(snapshot.messages.map(shown => [shown.role, shown.status])).toEqual([['assistant', 'failed'], ['user', undefined]])
+    expect(shareableMessageCount([failed])).toBe(2)
+    expect(JSON.stringify(snapshot)).not.toContain('ERROR-DETAILS')
+  })
+
+  it('a pending approval before a later share message counts as denied; invalid steers and user steers are dropped', () => {
+    const path = [
+      message(1, 'assistant', [
+        { type: 'tool-shell', toolCallId: 'call_1', state: 'approval-requested', input: { command: 'ls' }, approval: { id: 'appr_1' } },
+        { type: 'data-steer', data: { id: 'msg_QUEUEDQUEUED0002', parts: [{ type: 'text', text: 'Go on' }], queuedAt: 1, deliveredAt: 2 } },
+        { type: 'data-steer', data: { id: 'bad', parts: [{ type: 'text', text: 'INVALID-STEER' }], queuedAt: 1, deliveredAt: 2 } },
+      ]),
+      message(2, 'user', [{ type: 'text', text: 'Hi' }, { type: 'data-steer', data: { id: 'msg_QUEUEDQUEUED0003', parts: [{ type: 'text', text: 'USER-STEER' }], queuedAt: 1, deliveredAt: 2 } }]),
+    ]
+    const { snapshot } = sanitizeSnapshot(null, path, fileIdOf)
+    expect(snapshot.messages).toEqual([
+      { role: 'assistant', parts: [{ type: 'tool', toolName: 'shell', status: 'denied', input: { command: 'ls' } }] },
+      { role: 'user', parts: [{ type: 'text', text: 'Go on' }] },
+      { role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+    ])
+    expect(shareableMessageCount(path)).toBe(3)
+    expect(JSON.stringify(snapshot)).not.toMatch(/INVALID-STEER|USER-STEER/)
+  })
+})
+
 describe('capToolValue', () => {
   it('copies values whose JSON fits, cuts the others with a marker', () => {
     const value = { a: [1, 'two', { three: true }], nothing: null }

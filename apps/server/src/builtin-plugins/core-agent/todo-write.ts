@@ -4,15 +4,19 @@
 // the todo state (`latestTodos` of `@harness-forge/shared`, no table). The input schema refuses duplicate ids, so an
 // invalid list never reaches `execute` (the model gets the validation error as the tool result).
 //
-// P9-0b (C27): the definition (name, description, schema, policy, timeout, model text) is final and frozen; `execute`
-// is a stub until W9.4 (`todo-write*`) implements it: `{ todos: input.todos, counts: countTodos(input.todos) }`.
+// P9-0b (C27): the definition (name, description, schema, policy, timeout, model text) is final and frozen. W9.4:
+// `execute` validates the input again with the shared schema (the host wrapper and the SDK validate first; a direct
+// call or a hook-changed input still never stores an invalid list) and returns `{ todos, counts }` (`countTodos`); an
+// invalid input throws `validation_error` ("Invalid todo list: <path>: <issue>"), which the run turns into the tool's
+// error result while the run goes on. Nothing is stored elsewhere and nothing is logged (todo texts are user content).
 //
 // The model reads one line: "Todo list updated: 1 in progress, 2 pending, 0 completed." ("Todo list cleared." for an
 // empty list).
 import type { ToolDefinition, ToolResultOutput } from '@harness-forge/plugin-sdk'
-import type { TodoWriteInput, TodoWriteOutput } from '@harness-forge/shared'
-import { todoWriteInputSchema, todoWriteOutputSchema } from '@harness-forge/shared'
-import { agentToolNotImplemented, textModelOutput, TODO_WRITE_TIMEOUT_MS } from './common.ts'
+import type { HarnessError, TodoWriteInput, TodoWriteOutput } from '@harness-forge/shared'
+import type { z } from 'zod'
+import { countTodos, todoWriteInputSchema, todoWriteOutputSchema, validationError } from '@harness-forge/shared'
+import { textModelOutput, TODO_WRITE_TIMEOUT_MS } from './common.ts'
 
 export const TODO_WRITE_TOOL_NAME = 'todo_write'
 
@@ -26,6 +30,23 @@ export function todoWriteModelText(output: TodoWriteOutput): string {
   return `Todo list updated: ${counts.inProgress} in progress, ${counts.pending} pending, ${counts.completed} completed.`
 }
 
+/** The `validation_error` of an invalid `todo_write` input: "Invalid todo list: <path>: <issue>" (the first issue). */
+export function invalidTodoListError(error: z.ZodError): HarnessError {
+  return validationError(error, `Invalid todo list: ${validationError(error).message}`)
+}
+
+/**
+ * The output of a `todo_write` call: the validated list (unknown keys dropped) and its counts. Throws
+ * `invalidTodoListError` for an input the shared schema refuses (duplicate ids, more than 50 items, a bad status, …).
+ */
+export function todoWriteOutput(input: unknown): TodoWriteOutput {
+  const parsed = todoWriteInputSchema.safeParse(input)
+  if (!parsed.success)
+    throw invalidTodoListError(parsed.error)
+  const { todos } = parsed.data
+  return { todos, counts: countTodos(todos) }
+}
+
 export function createTodoWriteTool(): ToolDefinition<TodoWriteInput, TodoWriteOutput> {
   return {
     name: TODO_WRITE_TOOL_NAME,
@@ -33,8 +54,8 @@ export function createTodoWriteTool(): ToolDefinition<TodoWriteInput, TodoWriteO
     inputSchema: todoWriteInputSchema,
     policy: 'safe',
     timeoutMs: TODO_WRITE_TIMEOUT_MS,
-    async execute() {
-      throw agentToolNotImplemented(TODO_WRITE_TOOL_NAME)
+    async execute(input) {
+      return todoWriteOutput(input)
     },
     toModelOutput(output): ToolResultOutput {
       return textModelOutput(todoWriteOutputSchema, output, todoWriteModelText)

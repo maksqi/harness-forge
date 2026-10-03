@@ -1,7 +1,8 @@
 // What rewind, revert and undo share (Phase 8, ADR-036 / ADR-037, API.md 5.24 "Common errors", ARCHITECTURE.md 6.16).
 // Owner: W8.2.
 //
-// - `requireChat`: `404 not_found` for an unknown chat ("Chat <id> not found.").
+// - `requireChat`: `404 not_found` for an unknown chat ("Chat <id> not found."); the one lookup of a request (Phase 9,
+//   W9.7: defined in `changes-common.ts` with `NO_PROJECT_MESSAGE` and re-exported here).
 // - `openChatWorkspace`: the chat's **current** project, opened through `deps.projects.openWorkspace` (the stored path
 //   must still be its own realpath, a directory inside a root); a chat without a project or a folder that cannot be
 //   opened is `400 validation_error` with the project service's message.
@@ -20,11 +21,10 @@ import type { CheckpointContext } from './types.ts'
 import { HarnessError, LIMITS, validationError } from '@harness-forge/shared'
 import { and, asc, eq } from 'drizzle-orm'
 import { chats, workspaceChanges } from '../../db/schema.ts'
-import { chatNotFound } from '../chats/store.ts'
 import { PROJECT_RUNNING_MESSAGE } from '../projects/index.ts'
+import { NO_PROJECT_MESSAGE } from './changes-common.ts'
 
-/** The 400 of a chat without a project (the project service has no message for it). */
-export const NO_PROJECT_MESSAGE = 'This chat has no project.'
+export { NO_PROJECT_MESSAGE, requireChat } from './changes-common.ts'
 
 /** The opened project folder of a chat. */
 export interface ChatWorkspace {
@@ -33,14 +33,6 @@ export interface ChatWorkspace {
   readonly projectId: string
   /** The project folder (canonical realpath, from `openWorkspace`). */
   readonly root: string
-}
-
-/** The chat row; `404 not_found` when it does not exist. */
-export async function requireChat(ctx: CheckpointContext, chatId: string): Promise<ChatRecord> {
-  const chat = await ctx.deps.chats.find(chatId)
-  if (chat === null)
-    throw chatNotFound(chatId)
-  return chat
 }
 
 function workspaceUnavailable(message: string): HarnessError {

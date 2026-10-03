@@ -1,18 +1,18 @@
-import type { ChatDetail, ChatRequestBody, HarnessUIMessage, ShellRule } from '@harness-forge/shared'
+import type { ChatDetail, ChatRequestBody, FileRef, HarnessUIMessage, QueueAddBody, QueueItem, ShellRule } from '@harness-forge/shared'
 import type { UIMessageChunk } from 'ai'
 import type { Mock } from 'vitest'
+import type { TodoState } from '~/components/chat/agent/todos'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, nextTick } from 'vue'
-import { useChatQueueStore } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { useProjectsStore } from '~/stores/projects'
 import { useShellRulesStore } from '~/stores/shell-rules'
-import { catalogModel, chatDetail, chatId, chatSummary, messageBranch, messageId, projectId, projectSummary, queueItem, shellRule } from '~/utils/testing/fixtures'
+import { catalogModel, chatDetail, chatId, chatSummary, messageBranch, messageId, projectId, projectSummary, queueItem, shellRule, steerData } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import {
@@ -31,8 +31,22 @@ import {
 import { useImageOptions } from './useImageOptions'
 import { dispatchServerEvent } from './useServerEvents'
 
-const mock = vi.hoisted(() => ({ api: null as unknown, fetch: null as unknown }))
+type TodoStateFn = (messages: readonly HarnessUIMessage[]) => TodoState | null
+
+const mock = vi.hoisted(() => ({
+  api: null as unknown,
+  fetch: null as unknown,
+  /** `todoState` of the todo helpers (W9.10's): the real one unless a test replaces it. */
+  todoState: null as unknown as Mock<TodoStateFn>,
+  realTodoState: null as TodoStateFn | null,
+}))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api, useApiFetch: () => mock.fetch }))
+vi.mock('~/components/chat/agent/todos', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('~/components/chat/agent/todos')>()
+  mock.realTodoState ??= actual.todoState
+  mock.todoState ??= vi.fn(actual.todoState)
+  return { ...actual, todoState: mock.todoState }
+})
 
 const MODEL = 'mock:echo'
 const ASSISTANT_ID = 'msg_assistant0000001'
@@ -1633,28 +1647,449 @@ describe('useChatSession: registry', () => {
   })
 })
 
-describe('useChatSession: agent 2.0 interface (P9-0b)', () => {
-  it('submit() sends for now; queue, todos and activity start empty; stop() resolves with no dropped items', async () => {
+// ---------- Agent 2.0 (Phase 9, W9.9) ----------
+
+const README_FILE: FileRef = { id: 'file_readme000000000', name: 'README.md', mime: 'text/markdown', size: 12, url: '/api/files/file_readme000000000' }
+
+/** `POST /chat/:id/queue` answers with the stored item, like the server (W9.2). */
+function acceptQueue() {
+  api.chatQueue.add.mockImplementation(async ({ body }: { body: QueueAddBody }): Promise<QueueItem> => ({
+    id: body.message.id,
+    message: body.message,
+    modelRef: body.modelRef,
+    reasoningEffort: body.reasoningEffort,
+    toolMode: body.toolMode,
+    createdAt: 1,
+    turnOnly: false,
+  }))
+}
+
+function conflict(reason: string): HarnessError {
+  return new HarnessError({ code: 'conflict', message: 'Conflict.', details: { reason } })
+}
+
+/** A session streaming a reply that waits for `gate` before it finishes. */
+async function streamingSession(n = 1) {
+  const session = newSession(n)
+  const gate = deferred()
+  server.reply(textReply('working on it', ASSISTANT_ID, gate.promise))
+  const sending = session.submit({ text: 'Fix the parser', files: [] })
+  await until(() => session.chat.status.value === 'streaming', 'streaming')
+  return { session, gate, sending }
+}
+
+/** A writer that waits for `gate` before anything is written (the request is in flight meanwhile). */
+function afterGate(gate: Promise<void>, writer: StreamWriter): StreamWriter {
+  return async (write) => {
+    await gate
+    await writer(write)
+  }
+}
+
+/** A reply whose `exit_plan_mode` call waits for the plan decision (ADR-041). */
+function planReply(messageId = ASSISTANT_ID): StreamWriter {
+  return (write) => {
+    write({ type: 'start', messageId, messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+    write({ type: 'start-step' })
+    write({ type: 'tool-input-available', toolCallId: 'call_plan', toolName: 'exit_plan_mode', input: { plan: '# Plan\n1. Write notes.txt' } })
+    write({ type: 'tool-approval-request', approvalId: 'appr_plan', toolCallId: 'call_plan' })
+    write({ type: 'finish-step' })
+    write({ type: 'finish', finishReason: 'tool-calls' })
+  }
+}
+
+const ids = (messages: readonly HarnessUIMessage[]) => messages.map(message => message.id)
+
+describe('useChatSession: submit and the queue (Phase 9)', () => {
+  it('sends while idle', async () => {
     const session = newSession()
     expect(session.queue.value).toEqual([])
-    expect(session.todos.value).toBeNull()
-    expect(session.activity.value).toBeNull()
-    expect(await session.stop()).toEqual([])
-
     server.reply(textReply('Hello back'))
     expect(await session.submit({ text: 'Hello', files: [] })).toBe('sent')
     expect(chatBodies()).toHaveLength(1)
+    expect(api.chatQueue.add).not.toHaveBeenCalled()
     expect(session.chat.messages.value.map(message => message.role)).toEqual(['user', 'assistant'])
   })
 
-  it('reads the chat\'s queue from the chat-queue store and cancels through it', async () => {
+  it('queues while its own request streams: a client message id, the text and files, the composer state', async () => {
+    const { session, gate, sending } = await streamingSession()
+    acceptQueue()
+    session.reasoningEffort.value = 'high'
+    expect(await session.submit({ text: 'Also update the README', files: [README_FILE] })).toBe('queued')
+
+    expect(api.chatQueue.add).toHaveBeenCalledOnce()
+    const [{ params, body }] = api.chatQueue.add.mock.calls[0]! as [{ params: { id: string }, body: QueueAddBody }]
+    expect(params).toEqual({ id: chatId(1) })
+    expect(body.message.id).toMatch(/^msg_/)
+    expect(body).toEqual({
+      message: {
+        id: body.message.id,
+        role: 'user',
+        parts: [
+          { type: 'text', text: 'Also update the README' },
+          { type: 'file', mediaType: 'text/markdown', filename: 'README.md', url: '/api/files/file_readme000000000' },
+        ],
+      },
+      modelRef: MODEL,
+      reasoningEffort: 'high',
+      toolMode: session.toolMode.value,
+    })
+    // Never a second chat request during the run, and the message stays out of the transcript.
+    expect(chatBodies()).toHaveLength(1)
+    expect(session.chat.messages.value.map(message => message.id)).not.toContain(body.message.id)
+    expect(session.queue.value.map(item => item.id)).toEqual([body.message.id])
+    gate.resolve()
+    expect(await sending).toBe('sent')
+  })
+
+  it('queues a files-only message, and sends nothing for an empty one', async () => {
+    const { session, gate } = await streamingSession()
+    acceptQueue()
+    expect(await session.submit({ text: '  ', files: [README_FILE] })).toBe('queued')
+    expect((api.chatQueue.add.mock.calls[0]![0] as { body: QueueAddBody }).body.message.parts.map(part => part.type)).toEqual(['file'])
+    await session.submit({ text: ' ', files: [] })
+    expect(api.chatQueue.add).toHaveBeenCalledOnce()
+    gate.resolve()
+  })
+
+  it('queues while the chats store reports a run of another tab', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const session = await loadedSession(2, { messages: [userMessage('msg_user000000000001', 'q'), assistantMessage(ASSISTANT_ID, 'a')] })
+    useChatsStore().setRunState(chatId(2), 'running')
+    acceptQueue()
+    expect(await session.submit({ text: 'And the docs', files: [] })).toBe('queued')
+    expect(api.chatQueue.add).toHaveBeenCalledWith(expect.objectContaining({ params: { id: chatId(2) } }))
+    expect(server.calls.filter(call => call.url === '/api/chat')).toHaveLength(0)
+  })
+
+  it('fetches the chat\'s queue when the chat loads', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [queueItem()] })
+    const session = await loadedSession(3, {})
+    await until(() => session.queue.value.length === 1, 'queue')
+    expect(api.chatQueue.list).toHaveBeenCalledWith({ params: { id: chatId(3) } })
+  })
+
+  it('409 run-idle: the run ended in between, so the message is sent once this tab is idle', async () => {
+    const { session, gate, sending } = await streamingSession()
+    api.chatQueue.add.mockRejectedValue(conflict('run-idle'))
+    server.reply(textReply('second answer', 'msg_assistant0000002'))
+    const submitting = session.submit({ text: 'Next step', files: [] })
+    await until(() => api.chatQueue.add.mock.calls.length === 1, 'queue attempt')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(chatBodies()).toHaveLength(1)
+    gate.resolve()
+    await sending
+    expect(await submitting).toBe('sent')
+    expect(chatBodies()).toHaveLength(2)
+    expect(chatBodies()[1]!.message.parts).toEqual([{ type: 'text', text: 'Next step' }])
+    expect(session.chat.messages.value.map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+  })
+
+  it('throws the other failures and sends nothing (409 queue-full)', async () => {
+    const { session, gate } = await streamingSession()
+    api.chatQueue.add.mockRejectedValue(conflict('queue-full'))
+    await expect(session.submit({ text: 'One more', files: [] }))
+      .rejects
+      .toSatisfy((error: HarnessError) => error instanceof HarnessError && (error.details as { reason: string }).reason === 'queue-full')
+    expect(chatBodies()).toHaveLength(1)
+    gate.resolve()
+  })
+
+  it('cancels through the queue route: 204 cancelled, 404 gone', async () => {
     const session = newSession()
+    const first = queueItem()
+    const second = queueItem({ id: messageId('queued2') })
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(1), items: [first, second] }))
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(2), items: [queueItem({ id: messageId('other1') })] }))
+    expect(session.queue.value).toEqual([first, second])
+    api.chatQueue.remove.mockResolvedValueOnce(undefined)
+    expect(await session.cancelQueued(first.id)).toBe('cancelled')
+    api.chatQueue.remove.mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: 'Not queued.' }))
+    expect(await session.cancelQueued(second.id)).toBe('gone')
+    expect(api.chatQueue.remove.mock.calls).toEqual([[{ params: { id: chatId(1), itemId: first.id } }], [{ params: { id: chatId(1), itemId: second.id } }]])
+    expect(session.queue.value).toEqual([])
+  })
+
+  it('stop resolves with the dropped messages and takes them out of the list', async () => {
+    const { session, gate, sending } = await streamingSession()
     const item = queueItem()
     dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(1), items: [item] }))
-    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(2), items: [queueItem({ id: messageId('other1') })] }))
-    expect(session.queue.value).toEqual([item])
-    const cancel = vi.spyOn(useChatQueueStore(), 'cancel').mockResolvedValue('gone')
-    expect(await session.cancelQueued(item.id)).toBe('gone')
-    expect(cancel).toHaveBeenCalledWith(chatId(1), item.id)
+    api.chat.stop.mockResolvedValue({ stopped: true, dropped: [item] })
+    const stopping = session.stop()
+    gate.resolve()
+    expect(await stopping).toEqual([item])
+    await sending
+    expect(session.queue.value).toEqual([])
+    expect(session.chat.messages.value.at(-1)!.metadata?.aborted).toBe(true)
+    // Nothing queued: nothing dropped.
+    api.chat.stop.mockResolvedValue({ stopped: false })
+    expect(await session.stop()).toEqual([])
+  })
+})
+
+describe('useChatSession: stream data (Phase 9)', () => {
+  it('a steer chunk marks its queued message delivered before the event arrives', async () => {
+    const session = newSession()
+    const item = queueItem()
+    const other = queueItem({ id: messageId('queued2') })
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(1), items: [item, other] }))
+    const delivered = deferred()
+    const gate = deferred()
+    server.reply(async (write) => {
+      write({ type: 'start', messageId: ASSISTANT_ID, messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'start-step' })
+      write({ type: 'text-start', id: 't1' })
+      write({ type: 'text-delta', id: 't1', delta: 'Running the tests.' })
+      write({ type: 'text-end', id: 't1' })
+      write({ type: 'finish-step' })
+      write({ type: 'data-steer', data: steerData({ id: item.id }) } as UIMessageChunk)
+      delivered.resolve()
+      await gate.promise
+      write({ type: 'start-step' })
+      write({ type: 'finish-step' })
+      write({ type: 'finish', finishReason: 'stop' })
+    })
+    const sending = session.submit({ text: 'Run the tests', files: [] })
+    await delivered.promise
+    await until(() => session.queue.value.length === 1, 'delivered')
+    expect(session.queue.value.map(entry => entry.id)).toEqual([other.id])
+    // The steer stays in the reply where it was delivered.
+    await until(() => session.chat.messages.value[1]?.parts.some(part => part.type === 'data-steer') === true, 'steer part')
+    expect(session.chat.messages.value[1]!.parts).toContainEqual({ type: 'data-steer', data: steerData({ id: item.id }) })
+    gate.resolve()
+    await sending
+  })
+
+  it('the transient activity drives `activity` and is never stored', async () => {
+    const session = newSession()
+    const gates = [deferred(), deferred(), deferred()]
+    const reached = [deferred(), deferred(), deferred()]
+    server.reply(async (write) => {
+      write({ type: 'start', messageId: ASSISTANT_ID, messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'data-activity', data: { kind: 'compacting' }, transient: true } as UIMessageChunk)
+      reached[0]!.resolve()
+      await gates[0]!.promise
+      write({ type: 'data-activity', data: { kind: 'idle' }, transient: true } as UIMessageChunk)
+      reached[1]!.resolve()
+      await gates[1]!.promise
+      write({ type: 'data-activity', data: { kind: 'compacting' }, transient: true } as UIMessageChunk)
+      reached[2]!.resolve()
+      await gates[2]!.promise
+      // The stream ends without `idle` (a stop, a failure).
+      write({ type: 'finish', finishReason: 'stop' })
+    })
+    expect(session.activity.value).toBeNull()
+    const sending = session.submit({ text: '/compact', files: [] })
+    await reached[0]!.promise
+    await until(() => session.activity.value === 'compacting', 'compacting')
+    gates[0]!.resolve()
+    await reached[1]!.promise
+    await until(() => session.activity.value === null, 'idle')
+    gates[1]!.resolve()
+    await reached[2]!.promise
+    await until(() => session.activity.value === 'compacting', 'compacting again')
+    gates[2]!.resolve()
+    await sending
+    await nextTick()
+    expect(session.activity.value).toBeNull()
+    expect(session.chat.messages.value.flatMap(message => message.parts).some(part => part.type === 'data-activity')).toBe(false)
+  })
+})
+
+describe('useChatSession: plan approval (Phase 9)', () => {
+  it('approving with a mode sets the mode (saved on the chat) before the response, so the continuation runs in it', async () => {
+    const session = newSession()
+    session.toolMode.value = 'plan'
+    server.reply(planReply())
+    await session.submit({ text: 'Plan the notes file', files: [] })
+    expect(session.runState.value).toBe('approval')
+
+    server.reply(textReply('notes.txt written', ASSISTANT_ID))
+    await session.approve({ id: 'appr_plan', approved: true, toolName: 'exit_plan_mode', alwaysAllow: false, planMode: 'edits' })
+    await until(() => chatBodies().length === 2 && session.runState.value === 'idle', 'continuation')
+
+    expect(session.toolMode.value).toBe('edits')
+    expect(chatBodies()[0]!.toolMode).toBe('plan')
+    expect(chatBodies()[1]).toMatchObject({ toolMode: 'edits', message: { role: 'assistant' } })
+    const tool = chatBodies()[1]!.message.parts.find(part => part.type === 'tool-exit_plan_mode')
+    expect(tool).toMatchObject({ state: 'approval-responded', approval: { id: 'appr_plan', approved: true } })
+    expect(tool).not.toHaveProperty('approval.reason')
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(1) }, body: { settings: { toolMode: 'edits' } } })
+    // The mode is saved before the continuation goes out.
+    const saved = api.chats.update.mock.invocationCallOrder[0]!
+    const continued = (mock.fetch as Mock).mock.invocationCallOrder[1]!
+    expect(saved).toBeLessThan(continued)
+    expect(api.tools.update).not.toHaveBeenCalled()
+  })
+
+  it('"Approve, ask before edits" switches to ask', async () => {
+    const session = newSession()
+    session.toolMode.value = 'plan'
+    server.reply(planReply())
+    await session.submit({ text: 'Plan it', files: [] })
+    server.reply(textReply('asking first', ASSISTANT_ID))
+    await session.approve({ id: 'appr_plan', approved: true, toolName: 'exit_plan_mode', alwaysAllow: false, planMode: 'ask' })
+    await until(() => chatBodies().length === 2, 'continuation')
+    expect(chatBodies()[1]!.toolMode).toBe('ask')
+  })
+
+  it('"Keep planning" sends the feedback as the reason and keeps plan', async () => {
+    const session = newSession()
+    session.toolMode.value = 'plan'
+    server.reply(planReply())
+    await session.submit({ text: 'Plan the notes file', files: [] })
+    server.reply(planReply())
+    await session.approve({ id: 'appr_plan', approved: false, toolName: 'exit_plan_mode', alwaysAllow: false, planMode: 'edits', reason: '  Keep the old API  ' })
+    await until(() => chatBodies().length === 2, 'continuation')
+    expect(session.toolMode.value).toBe('plan')
+    expect(chatBodies()[1]!.toolMode).toBe('plan')
+    const tool = chatBodies()[1]!.message.parts.find(part => part.type === 'tool-exit_plan_mode')
+    expect(tool).toMatchObject({ approval: { id: 'appr_plan', approved: false, reason: 'Keep the old API' } })
+    expect(api.chats.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('useChatSession: todos (Phase 9)', () => {
+  it('derives the todo state from the shown path (todoState)', async () => {
+    const state = { todos: [], done: 1, total: 3, current: null, messageId: ASSISTANT_ID, live: true }
+    mock.todoState.mockImplementation((messages: readonly HarnessUIMessage[]) => (messages.length > 1 ? state : null))
+    try {
+      const session = newSession()
+      expect(session.todos.value).toBeNull()
+      server.reply(textReply('Planning the work'))
+      await session.submit({ text: 'Plan it', files: [] })
+      expect(session.todos.value).toBe(state)
+      expect(mock.todoState).toHaveBeenLastCalledWith(session.chat.messages.value)
+    }
+    finally {
+      mock.todoState.mockImplementation(mock.realTodoState!)
+    }
+  })
+})
+
+describe('useChatSession: turns the server starts from the queue (Phase 9)', () => {
+  const U1 = 'msg_user000000000001'
+  const QUEUED = messageId('queued1')
+  const A2 = 'msg_assistant0000002'
+
+  it('an idle tab reloads the path before it resumes, so the queued message shows before its reply', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const session = await loadedSession(4, { messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a')] })
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(4), modelRef: MODEL, running: true, messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a'), userMessage(QUEUED, 'Also update the README')] }))
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(4), modelRef: MODEL, messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a'), userMessage(QUEUED, 'Also update the README'), assistantMessage(A2, 'README updated')] }))
+    let shownAtResume: string[] = []
+    server.resume((write) => {
+      shownAtResume = ids(session.chat.messages.value)
+      return textReply('README updated', A2)(write)
+    })
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(4), messageId: A2, modelRef: MODEL, origin: 'queue', userMessageId: QUEUED }))
+    await until(() => ids(session.chat.messages.value).at(-1) === A2 && session.chat.status.value === 'ready', 'resumed')
+    expect(shownAtResume).toEqual([U1, ASSISTANT_ID, QUEUED])
+    const reload = api.chats.get.mock.invocationCallOrder[1]!
+    const resume = (mock.fetch as Mock).mock.invocationCallOrder[0]!
+    expect(reload).toBeLessThan(resume)
+    await until(() => api.chats.get.mock.calls.length === 3, 'reconciled')
+    expect(ids(session.chat.messages.value)).toEqual([U1, ASSISTANT_ID, QUEUED, A2])
+  })
+
+  it('ignores runs started by a request, and queued turns whose message it already shows', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const session = await loadedSession(5, { messages: [userMessage(U1, 'q'), userMessage(QUEUED, 'shown')] })
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(5), messageId: A2, modelRef: MODEL }))
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(5), messageId: A2, modelRef: MODEL, origin: 'queue', userMessageId: QUEUED }))
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(6), messageId: A2, modelRef: MODEL, origin: 'queue', userMessageId: messageId('elsewhere') }))
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(api.chats.get).toHaveBeenCalledTimes(1)
+    expect(server.calls).toHaveLength(0)
+    expect(session.chat.status.value).toBe('ready')
+  })
+
+  it('two tabs: the tab that queued follows once its own reply ended, the other one at once', async () => {
+    // Tab A: this module. Tab B: its own copy of the app modules and stores (another browser tab), same server.
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const n = 7
+    let phase: 'initial' | 'queued-turn' | 'done' = 'initial'
+    let userId = ''
+    let queuedId = ''
+    const path = (): HarnessUIMessage[] => {
+      const base = [userMessage(U1, 'q'), assistantMessage('msg_assistant0000000', 'a')]
+      if (phase === 'initial')
+        return base
+      const turn = [...base, userMessage(userId, 'Fix the parser'), assistantMessage(ASSISTANT_ID, 'working on it'), userMessage(queuedId, 'Also update the README')]
+      return phase === 'done' ? [...turn, assistantMessage(A2, 'README updated')] : turn
+    }
+    api.chats.get.mockImplementation(async () => chatDetail({ id: chatId(n), modelRef: MODEL, running: phase === 'queued-turn', messages: path() }))
+
+    const tabA = useChatSession(chatId(n))
+    await until(() => tabA.loaded.value, 'tab A load')
+    vi.resetModules()
+    const piniaB = createPinia()
+    setActivePinia(piniaB)
+    const tabBSessions = await import('./useChatSession')
+    const tabBEvents = await import('./useServerEvents')
+    const tabB = tabBSessions.useChatSession(chatId(n))
+    await until(() => tabB.loaded.value, 'tab B load')
+    setActivePinia(pinia)
+    try {
+      // Tab A sends, then queues while its reply streams.
+      const gateR1 = deferred()
+      server.reply(textReply('working on it', ASSISTANT_ID, gateR1.promise))
+      const sending = tabA.submit({ text: 'Fix the parser', files: [] })
+      await until(() => tabA.chat.status.value === 'streaming', 'tab A streams')
+      userId = chatBodies()[0]!.message.id
+      acceptQueue()
+      expect(await tabA.submit({ text: 'Also update the README', files: [] })).toBe('queued')
+      queuedId = (api.chatQueue.add.mock.calls[0]![0] as { body: QueueAddBody }).body.message.id
+
+      // The run completes and the server starts the queued message as the next turn.
+      const gateB = deferred()
+      const gateA = deferred()
+      let tabBAtResume: string[] = []
+      let tabAAtResume: string[] = []
+      server.resume(afterGate(gateB.promise, (write) => {
+        tabBAtResume = ids(tabB.chat.messages.value)
+        return textReply('README updated', A2)(write)
+      }))
+      server.resume(afterGate(gateA.promise, (write) => {
+        tabAAtResume = ids(tabA.chat.messages.value)
+        return textReply('README updated', A2)(write)
+      }))
+      phase = 'queued-turn'
+      const started = createServerEvent('run.started', { chatId: chatId(n), messageId: A2, modelRef: MODEL, origin: 'queue', userMessageId: queuedId })
+      dispatchServerEvent(started)
+      setActivePinia(piniaB)
+      tabBEvents.dispatchServerEvent(started)
+      setActivePinia(pinia)
+
+      // Tab B (idle) reloads, shows the queued message, then follows the reply.
+      const streamCalls = () => server.calls.filter(call => call.url === `/api/chat/${chatId(n)}/stream`).length
+      await until(() => streamCalls() === 1, 'tab B resumes')
+      expect(ids(tabB.chat.messages.value)).toEqual([U1, 'msg_assistant0000000', userId, ASSISTANT_ID, queuedId])
+      // Tab A still streams its own reply: it waits.
+      expect(tabA.chat.status.value).toBe('streaming')
+      expect(ids(tabA.chat.messages.value)).not.toContain(queuedId)
+
+      gateR1.resolve()
+      await sending
+      await until(() => streamCalls() === 2, 'tab A resumes')
+      expect(ids(tabA.chat.messages.value)).toEqual([U1, 'msg_assistant0000000', userId, ASSISTANT_ID, queuedId])
+      expect(useChatsStore().runState[chatId(n)]).toBe('running')
+
+      phase = 'done'
+      gateB.resolve()
+      gateA.resolve()
+      const final = [U1, 'msg_assistant0000000', userId, ASSISTANT_ID, queuedId, A2]
+      await until(() => tabA.chat.status.value === 'ready' && ids(tabA.chat.messages.value).join() === final.join(), 'tab A done')
+      await until(() => tabB.chat.status.value === 'ready' && ids(tabB.chat.messages.value).join() === final.join(), 'tab B done')
+      expect(tabBAtResume).toEqual(final.slice(0, 5))
+      expect(tabAAtResume).toEqual(final.slice(0, 5))
+      // One POST /chat in all: the next turn was started by the server.
+      expect(chatBodies()).toHaveLength(1)
+    }
+    finally {
+      tabBSessions.resetChatSessions()
+      disposePinia(piniaB)
+      setActivePinia(pinia)
+    }
   })
 })

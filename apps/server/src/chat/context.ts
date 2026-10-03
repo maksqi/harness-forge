@@ -1,6 +1,9 @@
 // Model context of a run (ARCHITECTURE.md 6.1 "Params"): prompt-command expansions replace the text the model sees,
 // the history is converted with `convertToModelMessages` (async in v7), `chat.messages` hooks may change it, and the
 // oldest turns are left out while the estimated prompt is above 85 percent of the model's context window.
+// Phase 9 (ADR-040): the trimming runs inside the context guard (`compaction/guard.ts`) before the first model call of a
+// run, only when automatic compaction is off (85 percent) or failed (down to the compaction trigger, 80 percent); the
+// guard and the summarizer size the context with the same estimate.
 import type { HarnessUIMessage, HarnessUIMessagePart } from '@harness-forge/shared'
 import type { ModelMessage } from 'ai'
 import { modelMessageSchema } from 'ai'
@@ -13,8 +16,8 @@ const IMAGE_TOKENS = 1600
 const BINARY_BYTES_PER_TOKEN = 32
 /** Per-message overhead (role, separators). */
 const MESSAGE_OVERHEAD_TOKENS = 4
-/** Characters per token of text and JSON. */
-const CHARS_PER_TOKEN = 4
+/** Characters per token of text and JSON (the estimate of this module, also the summarizer's transcript budget). */
+export const CHARS_PER_TOKEN = 4
 
 /**
  * UI messages as sent to the model: a user message that invoked a prompt command has its first text part replaced by
@@ -126,13 +129,13 @@ export interface TrimResult {
 
 /**
  * Leaves out the oldest turns (a user message and the assistant / tool messages up to the next user message) while the
- * estimate is above `CONTEXT_BUDGET_RATIO` of `contextWindow`. The last turn is always kept, so tool calls keep their
- * results and an approval continuation keeps its final tool message.
+ * estimate is above `ratio` (default `CONTEXT_BUDGET_RATIO`) of `contextWindow`. The last turn is always kept, so tool
+ * calls keep their results and an approval continuation keeps its final tool message.
  */
-export function trimToContext(messages: readonly ModelMessage[], contextWindow: number | null, instructions?: string): TrimResult {
+export function trimToContext(messages: readonly ModelMessage[], contextWindow: number | null, instructions?: string, ratio: number = CONTEXT_BUDGET_RATIO): TrimResult {
   if (contextWindow === null || contextWindow <= 0 || messages.length === 0)
     return { messages: [...messages], removed: 0 }
-  const budget = Math.floor(contextWindow * CONTEXT_BUDGET_RATIO)
+  const budget = Math.floor(contextWindow * ratio)
   const perMessage = messages.map(message => estimateMessageTokens(message))
   let total = (instructions === undefined ? 0 : textTokens(instructions)) + perMessage.reduce((sum, value) => sum + value, 0)
   if (total <= budget)

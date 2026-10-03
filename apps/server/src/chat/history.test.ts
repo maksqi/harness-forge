@@ -1,13 +1,15 @@
 import type { HarnessUIMessage, HarnessUIMessagePart } from '@harness-forge/shared'
-import { HarnessError } from '@harness-forge/shared'
+import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import {
   classifyRequest,
+  FAILED_TOOL_TEXT,
   finalizeParts,
   firstText,
   hasPendingApproval,
   mergeApprovalDecisions,
   plainText,
+  STOPPED_TOOL_TEXT,
   supersedeApprovals,
   SUPERSEDED_REASON,
 } from './history.ts'
@@ -112,7 +114,7 @@ describe('approvals', () => {
     const incoming = assistant([
       { type: 'text', text: 'injected by the client' },
       tool('approval-responded', { toolCallId: 'call_1', input: { a: 'tampered' }, approval: { id: 'ap1', approved: true, signature: 'forged' } }),
-      tool('approval-responded', { toolCallId: 'call_2', approval: { id: 'ap2', approved: false, reason: `  ${'r'.repeat(600)}  ` } }),
+      tool('approval-responded', { toolCallId: 'call_2', approval: { id: 'ap2', approved: false, reason: `  ${'r'.repeat(2500)}  ` } }),
       tool('approval-responded', { approval: { id: 'unknown', approved: true } }),
     ])
     const { message, merged } = mergeApprovalDecisions(stored, incoming)
@@ -121,7 +123,9 @@ describe('approvals', () => {
     const parts = message.parts as unknown as Record<string, unknown>[]
     expect(parts[1]).toEqual({ type: 'tool-demo', toolCallId: 'call_1', state: 'approval-responded', input: { a: 1 }, approval: { id: 'ap1', signature: 'server-signature', approved: true } })
     expect(parts[2]).toMatchObject({ state: 'approval-responded', input: { b: 2 }, approval: { id: 'ap2', approved: false } })
-    expect((parts[2]!.approval as { reason: string }).reason).toHaveLength(500)
+    // Phase 9: plan feedback travels as the reason, capped at LIMITS.approvalReasonMaxChars (2000).
+    expect((parts[2]!.approval as { reason: string }).reason).toHaveLength(LIMITS.approvalReasonMaxChars)
+    expect(LIMITS.approvalReasonMaxChars).toBe(2000)
     expect(mergeApprovalDecisions(stored, stored).merged).toBe(0)
   })
 })
@@ -142,6 +146,18 @@ describe('finalizeParts', () => {
     expect(aborted[3]).toMatchObject({ state: 'output-error', input: { a: 1 } })
     expect(aborted[4]).toBe(parts[4])
     expect((finalizeParts(parts, 'failed') as unknown as Record<string, unknown>[])[3]).toMatchObject({ errorText: 'The run ended before the tool finished.' })
+  })
+
+  it('turns a part still holding a preliminary output (a running sub-agent) into an error (Phase 9)', () => {
+    const running = { type: 'tool-task', toolCallId: 'call_task', state: 'output-available', preliminary: true, input: { description: 'x' }, output: { status: 'running', steps: [{ toolName: 'read_file' }] } } as unknown as HarnessUIMessagePart
+    const done = { type: 'tool-task', toolCallId: 'call_done', state: 'output-available', input: {}, output: { status: 'completed', report: 'ok' } } as unknown as HarnessUIMessagePart
+    const settledFalse = { ...done, preliminary: false } as unknown as HarnessUIMessagePart
+    const aborted = finalizeParts([running, done, settledFalse], 'aborted') as unknown as Record<string, unknown>[]
+    expect(aborted[0]).toEqual({ type: 'tool-task', toolCallId: 'call_task', state: 'output-error', input: { description: 'x' }, errorText: STOPPED_TOOL_TEXT })
+    expect(aborted[1]).toBe(done)
+    expect(aborted[2]).toBe(settledFalse)
+    expect((finalizeParts([running], 'failed')[0] as unknown as Record<string, unknown>).errorText).toBe(FAILED_TOOL_TEXT)
+    expect((finalizeParts([running], 'completed')[0] as unknown as Record<string, unknown>).state).toBe('output-error')
   })
 })
 

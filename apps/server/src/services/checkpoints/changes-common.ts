@@ -1,6 +1,9 @@
 // Helpers shared by the changes list, the file diffs and the git view (Phase 8, ADR-037, ARCHITECTURE.md 6.17). Owner:
 // W8.3. `changes.ts` and `git-changes.ts` import them, so neither module imports the other's internals.
 //
+// - `requireChat` and `NO_PROJECT_MESSAGE`: the one chat lookup of a changes request (`404` for an unknown chat) and the
+//   message of a chat without a project; the writes (`restore-scope.ts`) re-export both (Phase 9, W9.7: one constant,
+//   one lookup per request; the changes routes no longer look the chat up themselves).
 // - `openChatWorkspace` / `requireChatWorkspace`: the chat's current project folder (`404` for an unknown chat; the read
 //   views answer `available: false` with `no-project` / `folder-unavailable`, the diff answers `400 validation_error`
 //   with the project service's message).
@@ -10,6 +13,7 @@
 //   (`tooLarge`) and the diff through `computeWorkspaceDiff`.
 import type { ChangesUnavailableReason, FileDiff, FileDiffStatus, WorkspaceDiff } from '@harness-forge/shared'
 import type { DiffOptions } from '../../workspace/diff.ts'
+import type { ChatRecord } from '../chats/types.ts'
 import type { OpenWorkspace } from '../projects/types.ts'
 import type { CheckpointContext, CheckpointReadOptions } from './types.ts'
 import { Buffer } from 'node:buffer'
@@ -26,8 +30,23 @@ export const SNIFF_BYTES = 8192
 /** Bytes read per chunk while hashing a file. */
 const READ_CHUNK_BYTES = 1_048_576
 
-/** The message of a chat without a project (diff routes: `400 validation_error`; the same text as W8.2's writes). */
+/**
+ * The message of a chat without a project: the `reason: 'no-project'` of the read views, the `400 validation_error` of
+ * the diffs and of the writes (`restore-scope.ts` re-exports it).
+ */
 export const NO_PROJECT_MESSAGE = 'This chat has no project.'
+
+/**
+ * The chat row; `404 not_found` ("Chat <id> not found.") when it does not exist. The only chat lookup of a changes
+ * request: every member of the checkpoint service that takes a chat id calls it first, before any project, git or disk
+ * work.
+ */
+export async function requireChat(ctx: CheckpointContext, chatId: string): Promise<ChatRecord> {
+  const chat = await ctx.deps.chats.find(chatId)
+  if (chat === null)
+    throw chatNotFound(chatId)
+  return chat
+}
 
 /**
  * Read options of the changes modules: the request's signal (`CheckpointReadOptions`), plus the environment the git
@@ -58,9 +77,7 @@ export type ChatWorkspace
  * opened `folder-unavailable`.
  */
 export async function openChatWorkspace(ctx: CheckpointContext, chatId: string): Promise<ChatWorkspace> {
-  const chat = await ctx.deps.chats.find(chatId)
-  if (chat === null)
-    throw chatNotFound(chatId)
+  const chat = await requireChat(ctx, chatId)
   if (chat.projectId === null)
     return { ok: false, reason: 'no-project', projectId: null, message: NO_PROJECT_MESSAGE }
   const opened = await ctx.deps.projects.openWorkspace(chat.projectId)

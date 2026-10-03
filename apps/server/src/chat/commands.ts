@@ -76,6 +76,12 @@ function compactResolution(input: string): CommandResolution {
   return { kind: 'compact', invocation: { name: 'compact', input, type: 'compact' }, focus: input === '' ? null : input }
 }
 
+/** `/compact` with an image model as the chat model (Phase 9): a `validation_error` on `['modelRef']`. */
+export function compactNeedsChatModel(): HarnessError {
+  const message = 'An image model cannot compact the conversation. Pick a chat model to run /compact.'
+  return new HarnessError({ code: 'validation_error', message, details: { issues: [{ path: ['modelRef'], message, code: 'custom' }] } })
+}
+
 function promptResolution(name: string, input: string, expansion: string): CommandResolution {
   if (Buffer.byteLength(expansion, 'utf8') > LIMITS.commandExpansionBytes)
     throw tooLong(name)

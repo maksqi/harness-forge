@@ -2,7 +2,7 @@ import type { CommandDefinition } from '@harness-forge/plugin-sdk'
 import type { CommandServices } from './commands.ts'
 import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { expandTemplate, HARNESS_COMMAND_SUMMARIES, parseSlashCommand, resolveCommand } from './commands.ts'
+import { compactNeedsChatModel, expandTemplate, HARNESS_COMMAND_SUMMARIES, parseSlashCommand, resolveCommand } from './commands.ts'
 
 describe('parseSlashCommand', () => {
   it('reads /name at the start followed by whitespace or the end', () => {
@@ -140,6 +140,30 @@ describe('resolveCommand: /compact (Phase 9)', () => {
       code: 'validation_error',
       details: { issues: [{ path: ['message'] }] },
     })
+  })
+
+  it('never reads the plugin command registry, so a command list that changes meanwhile cannot shadow it', async () => {
+    const changing: CommandServices = {
+      registry: {
+        commands: {
+          get: () => {
+            throw new Error('the registry is being reloaded')
+          },
+          list: () => [],
+          register: () => ({ dispose() {} }),
+        },
+      } as unknown as CommandServices['registry'],
+      plugins: { guard: async () => { throw new Error('not used') } } as unknown as CommandServices['plugins'],
+    }
+    expect(await resolveCommand(changing, '/compact\n  the API\n  and errors  ', context)).toEqual({
+      kind: 'compact',
+      invocation: { name: 'compact', input: 'the API\n  and errors', type: 'compact' },
+      focus: 'the API\n  and errors',
+    })
+  })
+
+  it('names the model in the error of an image model', () => {
+    expect(compactNeedsChatModel()).toMatchObject({ code: 'validation_error', details: { issues: [{ path: ['modelRef'] }] } })
   })
 
   it('lists compact for GET /commands under the agent tools plugin', () => {

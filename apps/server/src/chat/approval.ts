@@ -1,5 +1,8 @@
 // Tool approval (ARCHITECTURE.md 6.2, PLUGINS.md 10), passed as `streamText({ toolApproval })`. Resolution order, first
 // match wins:
+//   0. `core-agent`'s `exit_plan_mode` (Phase 9, ADR-041)           -> user-approval (the plan card; before overrides
+//      and hooks, so neither can approve or deny it; on an approved continuation the SDK re-runs this function, and
+//      a result other than `denied` keeps the user's approval)
 //   1. user override in `tool_prefs` (deny / allow / ask)            -> denied / approved / user-approval
 //      (Phase 8, ADR-038: a stored `allow` on a tool with workspace access `execute` is ignored, as if none were set)
 //   2. `tool.approve` hook decision (deny / allow / ask)             -> denied / approved / user-approval
@@ -9,6 +12,8 @@
 //      `write` -> not-applicable; everything else (`ask` without workspace `write`, `always`) -> user-approval
 //   6. mode `auto`:  policy `always` -> user-approval; `safe` / `ask` -> not-applicable
 //   (Phase 9, ADR-041: mode `plan` resolves like `ask`; its tool set is narrowed by `modes.ts`.)
+// `staticApprovalOutcome` is the part of this order that does not depend on the call (no hook, no policy function):
+// the sub-agent tool set (`subagent/tools.ts`) leaves out the tools that could only ask.
 // Mode `off` sends no tools; a call that still arrives is denied. A policy function is guarded (3 s) and receives the
 // call context with `workspace` (the run's project folder) and, in a run with a workspace (Phase 8), the run scope bound
 // to that context object (`runScopeOf(c)`: the shell rules and the working folder of `shellPolicy`); a throw or timeout
@@ -21,6 +26,7 @@ import type { ToolPref } from '../mcp/types.ts'
 import type { PluginHost } from '../plugins/types.ts'
 import type { Registry } from '../registry/types.ts'
 import type { WorkspaceRunScope, WorkspaceRunScopeInit } from '../workspace/run-scope.ts'
+import { CORE_AGENT_PLUGIN_ID, EXIT_PLAN_MODE_TOOL_NAME } from '../builtin-plugins/core-agent/index.ts'
 import { GUARD_TIMEOUTS } from '../plugins/guard.ts'
 import { bindRunScope } from '../workspace/run-scope.ts'
 
@@ -113,6 +119,14 @@ export interface ApprovalTool {
   readonly definition: ToolDefinition
 }
 
+/**
+ * `core-agent`'s `exit_plan_mode` (ADR-041), recognized by owner and name (tool names are global, so no other plugin
+ * can register the name, and a tool of another owner is never treated as the plan exit).
+ */
+export function isPlanExitTool(tool: { readonly pluginId: string, readonly definition: Pick<ToolDefinition, 'name'> }): boolean {
+  return tool.pluginId === CORE_AGENT_PLUGIN_ID && tool.definition.name === EXIT_PLAN_MODE_TOOL_NAME
+}
+
 export interface ToolApprovalContext {
   chatId: string
   modelRef: string
@@ -140,6 +154,26 @@ export interface ToolApprovalContext {
  */
 export function effectiveOverride(stored: ToolOverride | null, workspace: ToolWorkspaceAccess | null): ToolOverride | null {
   return stored === 'allow' && workspace === 'execute' ? null : stored
+}
+
+/**
+ * The approval outcome of `tool` that does not depend on the call (Phase 9): `exit_plan_mode` -> `user-approval`; else
+ * the effective override of `stored` (`effectiveOverride`); else a static policy resolved in `toolMode` (no policy =
+ * `ask`, an unknown string = `ask`, as in `evaluatePolicy`); null when a policy function decides per call. `tool.approve`
+ * hooks are not consulted (they run per call). A tool whose outcome is `user-approval` can only ask in that mode.
+ */
+export function staticApprovalOutcome(tool: ApprovalTool, toolMode: ToolMode, stored: ToolOverride | null): ApprovalOutcome | null {
+  if (isPlanExitTool(tool))
+    return 'user-approval'
+  const workspace = toolWorkspaceAccess(tool.definition)
+  const override = effectiveOverride(stored, workspace)
+  if (override !== null)
+    return resolveApproval({ override, hookDecision: undefined, toolMode, policy: 'ask', workspace }).outcome
+  const policy = tool.definition.policy
+  if (typeof policy === 'function')
+    return null
+  const effective: EffectivePolicy = typeof policy === 'string' && POLICIES.has(policy) ? policy : 'ask'
+  return resolveApproval({ override: null, hookDecision: undefined, toolMode, policy: effective, workspace }).outcome
 }
 
 /**
@@ -188,6 +222,10 @@ export function createToolApproval(context: ToolApprovalContext) {
       const tool = context.tools.get(toolCall.toolName)
       if (tool === undefined)
         return { type: 'denied', reason: DENIED_UNAVAILABLE }
+      // The plan card always shows (ADR-041): no override or hook decides it, and on an approved continuation this
+      // result keeps the user's approval.
+      if (isPlanExitTool(tool))
+        return 'user-approval'
       const workspace = toolWorkspaceAccess(tool.definition)
       const override = effectiveOverride(context.prefs.get(toolCall.toolName)?.override ?? null, workspace)
       if (override !== null)
