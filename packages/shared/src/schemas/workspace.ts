@@ -289,13 +289,19 @@ export type EditFileToolOutput = z.infer<typeof editFileToolOutputSchema>
 // ---------- shell ----------
 
 /**
- * Input of `shell` (policy `ask`, access `execute`; ADR-033): runs `bash -c` (else `sh -c`) in the project folder with
- * a minimal environment; every call is a new process (no `cd` persistence, no stdin; background processes are stopped).
+ * Input of `shell` (policy `ask`, access `execute`; ADR-033, ADR-038): runs `bash -c` (else `sh -c`) with a minimal
+ * environment; every call is a new process (no stdin; background processes are stopped). `cd` persists inside the
+ * project folder: the next call of the chat starts in the folder the previous one ended in (clamped to the project);
+ * environment variables do not persist. A command whose every segment matches a shell rule runs without asking in the
+ * `ask` and `edits` modes (ADR-038).
  */
 export const shellToolInputSchema = z.object({
   /** At most 16 KiB. */
   command: boundedText('command', WORKSPACE_LIMITS.commandMaxBytes, 1),
-  /** Working folder inside the project; default `.`. */
+  /**
+   * Working folder inside the project for this call; default: where the chat's previous shell call ended (`.` at
+   * first). Its end folder becomes the remembered one.
+   */
   cwd: workspaceToolPathSchema.optional(),
   /** 1000..590000 ms; default 120000. */
   timeout_ms: z.int().min(WORKSPACE_LIMITS.shellTimeoutMinMs).max(WORKSPACE_LIMITS.shellTimeoutMaxMs).optional(),
@@ -310,7 +316,7 @@ export type ShellToolInput = z.infer<typeof shellToolInputSchema>
  */
 export const shellToolOutputSchema = z.object({
   command: z.string(),
-  /** Project-relative working folder (`.` = the project folder). */
+  /** Project-relative working folder the command started in (`.` = the project folder). */
   cwd: z.string(),
   /** null when the process was ended by a signal. */
   exitCode: z.int().nullable(),
@@ -324,6 +330,24 @@ export const shellToolOutputSchema = z.object({
   /** Bytes each stream produced in total (before trimming). */
   stdoutBytes: countSchema,
   stderrBytes: countSchema,
+  /**
+   * Where the chat's next shell call starts (Phase 8, ADR-038): the folder the command ended in, project-relative
+   * (`.` = the project folder), clamped to the project (a folder outside it, or one that is gone, becomes `.` with a
+   * `cwdNote`). Absent when the end folder was not reported (`exec`, a kill, the command's own EXIT trap: the folder
+   * stays as it was) and in outputs stored before v1.4 (read as `.`).
+   */
+  endCwd: workspaceToolPathSchema.optional(),
+  /**
+   * Why the working folder was reset to the project folder ("The command ended outside the project folder; the next
+   * call starts in the project folder."), or why the call did not start in the remembered folder; at most 500
+   * characters.
+   */
+  cwdNote: z.string().max(500).optional(),
+  /**
+   * The canonical prefixes of the shell rules that let the command run without asking (ADR-038), in first-match
+   * order; absent when the command was approved (or ran in the `auto` mode).
+   */
+  allowedBy: z.array(z.string().min(1).max(LIMITS.shellRulePrefixMaxChars)).max(LIMITS.shellCommandSegmentsMax).optional(),
 })
 export type ShellToolOutput = z.infer<typeof shellToolOutputSchema>
 /** The stored `shell` output (the terminal view of the web). */

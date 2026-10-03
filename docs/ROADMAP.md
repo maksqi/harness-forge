@@ -190,18 +190,47 @@ tools + a shell with approval), the Accept edits permission mode, master-key rot
   - [x] W7.14 e2e-features · [x] W7.15 docs-final (W7.16 / W7.17 fix-ups only if the P7-A gate is red)
   - [x] Final gate (e2e ×3, screenshots, audit, v1.2 → v1.3 upgrade) + checkpoint commit
 
-## Backlog (not in v1.3)
+## Phase 8 — v1.4: Workspace 2.0
+
+Details, owned paths and acceptance criteria: `docs/phases/phase-8-v1-4.md`. Decisions: ADR-036 … ADR-039 (and
+amendments of ADR-031, ADR-033, ADR-035). Plan: per-edit checkpoints and "Rewind files to here", a changes side panel
+(This chat + Git views, reversible revert), a sticky shell working folder, shell rules (allowlist), an opt-in
+automatic file sweep, backlog stabilization.
+
+- [x] P8-00 Stabilization start (coordinator): design reports in `.tmp/p8-designs`, CI on `8879e6e` green, Phase 7
+  bookkeeping (`1a95805`), audit advisories re-checked (both still unpatched: ignores kept), baseline 6995 tests
+- [x] P8-0a Decisions, docs, contracts
+  - [x] K1 DECISIONS (ADR-036 … ADR-039, contract seed), ROADMAP, AGENT.md (coordinator); K2 no new dependency
+  - [x] C17 contracts: shared DTOs, 10 new routes (95), `docs/API.md`, 501 stubs
+  - [x] C18 shell command parser (`packages/shared/src/util/shell-command.ts`)
+  - [x] D8 phase doc `phase-8-v1-4.md` · [x] D9 docs: UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md, guides, README,
+    `.env.example`
+  - [x] Gate + checkpoint commit
+- [ ] P8-0b Schema, migration `0005`, skeletons, FREEZE
+  - [ ] K3 v1.3 upgrade copy + schema + `pnpm db:generate` (coordinator)
+  - [ ] C19 server skeleton · [ ] C20 web skeleton · [ ] C21 git runner + spawn guard
+  - [ ] Gate (incl. v1.3 data upgrade probe) + FREEZE + checkpoint commit
+- [ ] P8-A Features (11 agents)
+  - [ ] W8.1 checkpoint-store · [ ] W8.2 restore-rewind · [ ] W8.3 changes-list · [ ] W8.4 shell-runtime
+  - [ ] W8.5 chat-pipeline · [ ] W8.6 shell-rules · [ ] W8.7 files-maintenance
+  - [ ] W8.8 changes-panel-web · [ ] W8.9 rewind-web · [ ] W8.10 tool-ui-web · [ ] W8.11 settings-web
+  - [ ] Gate + checkpoint commit
+- [ ] P8-B Feature e2e, docs, fix-ups, final gate
+  - [ ] W8.12 e2e-features · [ ] W8.13 docs-final (W8.14 / W8.15 fix-ups only if the P8-A gate is red)
+  - [ ] Final gate (e2e ×3, screenshots, audit, v1.3 → v1.4 upgrade, Docker git) + checkpoint commit
+
+## Backlog (not in v1.4)
 
 Multi-user accounts · child-process isolation for code plugins · plugin marketplace/registry index ·
 knowledge/RAG · desktop/CLI clients · audio attachments to chat models · declarative image and voice providers ·
 provider-native image tools (e.g. the OpenAI Responses image tool) · on-device speech synthesis · video generation ·
 verify Alt+V dictation on Firefox / Windows (Alt+J is the documented fallback) · run the live provider suite with
-`HF_LIVE_MEDIA=1` and record the results (PROVIDERS.md 11) · Phase 7 follow-ups: checkpoints / undo of workspace
-edits · a changes side panel (git status and diffs) · a command allowlist for the shell · OS-level sandboxing of the
-shell · an automatic file sweep · a persistent shell session (`cd` that sticks) · remove the two ignored audit
-advisories (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) once patched releases ship · screen-reader text
-for the tool row summaries · make the legacy fake files service pin and gate reused rows · `ImageGenerationResult.modelName`
-required (tests still cover the fallback) · `DiffView` props instead of the `stats` slot / `data-numbers` attribute.
+`HF_LIVE_MEDIA=1` and record the results (PROVIDERS.md 11) · OS-level sandboxing of the shell · the shell on Windows ·
+syntax highlighting in diffs · stage / commit from the changes panel · a terminal pane · a persistent shell process
+(environment variables that stick) · restoring shell changes (whole-tree snapshots) · remove the two ignored audit
+advisories (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) once patched releases ship (re-checked
+2026-10-03: still unpatched) · move the `.gitignore` ReDoS heuristic of `find_files` / `search_files` off the main
+thread.
 
 ## Wave log
 
@@ -232,3 +261,5 @@ required (tests still cover the fallback) · `DiffView` props instead of the `st
 | P7-A | W7.1 – W7.13 (+ coordinator: CCR comments in `providers/types.ts`, `chats/types.ts`, `files/types.ts`; `fakes.test.ts` + `deps.test.ts` updates; W7.10 follow-up for the approval context; `modelName` stays optional — tests cover the fallback; the legacy fake files service reuse path deferred) | audit ok (218 paths, no frozen file touched); 6995 tests; build ok; CSP 38/38; e2e 62 passed on a fresh `.tmp/e2e`; probes 47/47 (projects CRUD + browse limits + data-dir refusal, `mock:workspace` in auto / edits / ask, no project → no tools, `HF_WORKSPACE_SHELL=0`, missing folder → `workspace-unavailable`, delete detaches chats and keeps the folder, `modelName`, unknown provider 400, keys: 401 / rotate 200 with one cookie / old cookie 401 / old share 404 + new 200 / approval expired / key_version 2 / `.next` recovery / `server.lock` / env-mode 409 + CLI exit 2 then 0 + keyCheck ok / mismatch, cleanup recent → removable → removed); screenshots of the new screens reviewed (desktop + phone); `pnpm audit --prod` clean (2 ignored) | (this commit) |
 | P7-B | W7.14, W7.15 (+ coordinator: DECISIONS corrections from W7.15; the approval checkbox hit area 40 px on coarse pointers (found by W7.14, `pointer-coarse:after:-inset-[13px]`: the hit area is inset from the 14 px padding box); a `FolderCodeIcon` glyph for the builtin Workspace tools plugin card; README screenshots) | audit ok (25 paths); new specs (projects 5, workspace tools 4, data maintenance 2, mobile 2, tablet +2) green 3× on 8891; docs reconciled (API, ARCHITECTURE, UI, PLUGINS, PROVIDERS, guides, README "v1.3") | (final gate commit) |
 | Final gate v1.3 | coordinator | frozen install ok; 6995 tests; build ok; CSP 38/38; probes 47/47; e2e 77 passed ×3 (chromium + mobile + tablet); `@screenshots` dark + light reviewed (86 per theme), README images refreshed + a workspace image; `pnpm audit --prod` clean (2 ignored build-tooling advisories); real v1.2 → v1.3 upgrade (v1.2 built from `b5bb2ec` in a worktree, seeded with password, provider key, MCP header secret, branched chat, attachment, orphan upload, generated image, pending approval, share): 15/15 + 11 extra (rotation on upgraded data re-encrypts every secret, the v1.2 pending approval expires, cleanup removes only the orphan); Docker image (Node 24, bash 5.3, git 2.54): boot with `server.lock` + `workspaces/`, offline `rotate-key` in a second container exit 0, restart with the new key `keyVersion` 2 `keyCheck` ok. Live provider suite not run (needs the user's keys) | (this commit) |
+| P8-00 | coordinator | CI on `8879e6e` green; Phase 7 ROADMAP boxes ticked; advisories still unpatched (ignores kept); `pnpm check` 6995 tests | `1a95805` |
+| P8-0a | coordinator (K1; K3 seeding done early), C17, C18, D8, D9 (+ coordinator: AGENT.md `allowRules`, phase-doc seed paths, C20-T8 helpers, `shell-rules.ts` comment; C18 follow-up: `&>` asks) | audit ok (55 paths; 10 C17 compile-fix files accepted); frozen install ok; 7514 tests; build ok; CSP 38/38; 10 new routes answer 501 / 400; e2e 77 passed on a fresh `.tmp/e2e`; TypeScript 6.0.3 only | (this commit) |

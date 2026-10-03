@@ -55,7 +55,7 @@ const freshNeeded = () => new HarnessError({ code: 'forbidden', message: 'Log in
 const busy = () => new HarnessError({ code: 'conflict', message: 'Another data task is running. Try again when it finishes.', details: { reason: 'busy' } })
 
 function summary(overrides: Partial<DataSummary> = {}): DataSummary {
-  return { chats: 12, archivedChats: 2, messages: 348, files: 18, fileBytes: 25_480_000, ...overrides }
+  return { chats: 12, archivedChats: 2, messages: 348, files: 18, fileBytes: 25_480_000, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null }, ...overrides }
 }
 
 function deleted(overrides: Partial<DataDeleteResult> = {}): DataDeleteResult {

@@ -86,6 +86,35 @@ export type LogLevel = z.infer<typeof logLevelSchema>
 export const pluginTemplateIdSchema = z.enum(['tool', 'provider', 'mcp-bridge', 'command-pack'])
 export type PluginTemplateId = z.infer<typeof pluginTemplateIdSchema>
 
+// ---------- workspace 2.0 (Phase 8) ----------
+
+/**
+ * Kind of a row of the workspace change journal (ADR-036): `edit` (an agent `write_file` / `edit_file`), `revert`,
+ * `rewind` and `undo` (user operations, one batch each), `shell` (a shell command, never restorable) and `untracked` (a
+ * call of another tool with workspace access `write` / `execute`, never restorable).
+ */
+export const workspaceChangeKindSchema = z.enum(['edit', 'revert', 'rewind', 'undo', 'shell', 'untracked'])
+export type WorkspaceChangeKind = z.infer<typeof workspaceChangeKindSchema>
+
+/** View of the changes panel (ADR-037): `chat` (from the change journal, no git needed) or `git` (against HEAD). */
+export const changeSourceSchema = z.enum(['chat', 'git'])
+export type ChangeSource = z.infer<typeof changeSourceSchema>
+
+/**
+ * What a rewind or an undo does with a file that changed since its last recorded change (ADR-036): `skip` it (listed
+ * as a conflict), or `force` the restore.
+ */
+export const conflictHandlingSchema = z.enum(['skip', 'force'])
+export type ConflictHandling = z.infer<typeof conflictHandlingSchema>
+
+/** What wrote the files of a `workspace.changed` event (ADR-036): an agent tool, or a user rewind, revert or undo. */
+export const workspaceChangedSourceSchema = z.enum(['tool', 'rewind', 'revert', 'undo'])
+export type WorkspaceChangedSource = z.infer<typeof workspaceChangedSourceSchema>
+
+/** The automatic orphaned-file sweep (setting `fileSweep`, ADR-039): `off` (default), `daily` or `weekly`. */
+export const fileSweepModeSchema = z.enum(['off', 'daily', 'weekly'])
+export type FileSweepMode = z.infer<typeof fileSweepModeSchema>
+
 // ---------- global settings enums ----------
 
 export const sendKeySchema = z.enum(['enter', 'mod-enter'])

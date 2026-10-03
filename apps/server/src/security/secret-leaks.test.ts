@@ -70,6 +70,8 @@ const events: ServerEvent[] = []
 /** Answers of the writes made while storing the secrets. */
 const writeAnswers: Array<{ what: string, text: string }> = []
 let chatId: string
+/** The user message of the chat (the target of the rewind preview). */
+let userMessageId: string
 let fileId: string
 
 /** Every form a secret could take in a body or a log line (the searched fragments). */
@@ -190,7 +192,8 @@ beforeAll(async () => {
 
   // A chat (message contents are not secrets, but must stay out of info-level logs) and an uploaded file.
   chatId = createChatId()
-  const chat = await call('POST', '/api/chat', chatBody(chatId, CHAT_CONTENT, { message: { id: createMessageId(), role: 'user', parts: [{ type: 'text', text: CHAT_CONTENT }] } }))
+  userMessageId = createMessageId()
+  const chat = await call('POST', '/api/chat', chatBody(chatId, CHAT_CONTENT, { message: { id: userMessageId, role: 'user', parts: [{ type: 'text', text: CHAT_CONTENT }] } }))
   expect(chat.status).toBe(200)
   await chat.text()
   const form = new FormData()
@@ -227,6 +230,11 @@ function getInputs(): Partial<Record<ApiRouteKey, Array<{ params?: Record<string
     'models.list': [{}, { query: { includeHidden: 'true' } }],
     'shares.view': [{ params: { token: SAMPLE_SHARE_TOKEN } }],
     'shares.file': [{ params: { token: SAMPLE_SHARE_TOKEN, fileId } }],
+    // Phase 8 (ADR-036, ADR-037): the chat has no project, so the views answer `available: false`.
+    'changes.list': [{ params: { id: chatId } }],
+    'changes.diff': [{ params: { id: chatId }, query: { source: 'chat', path: 'notes.txt' } }, { params: { id: chatId }, query: { source: 'git', path: 'notes.txt' } }],
+    'changes.git': [{ params: { id: chatId } }],
+    'changes.rewindPreview': [{ params: { id: chatId }, query: { messageId: userMessageId } }],
   }
 }
 

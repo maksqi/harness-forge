@@ -25,7 +25,7 @@ const MB = 1024 * 1024
 const busy = () => new HarnessError({ code: 'conflict', message: 'Another data task is running. Try again when it finishes.', details: { reason: 'busy' } })
 
 function cleanupResult(overrides: Partial<DataCleanupResult> = {}): DataCleanupResult {
-  return { files: 12, fileBytes: 48 * MB, blobs: 12, diskBytes: 48 * MB, tempFiles: 0, ranAt: Date.now(), ...overrides }
+  return { files: 12, fileBytes: 48 * MB, blobs: 12, diskBytes: 48 * MB, tempFiles: 0, ranAt: Date.now(), pluginData: 'complete', ...overrides }
 }
 
 let api: MockApi

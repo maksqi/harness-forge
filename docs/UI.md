@@ -5,8 +5,8 @@ Agents build the UI from this document. Names, props, emits, routes, store actio
 values defined here are **contracts**: several agents build components in parallel against them.
 
 - Source of truth for shared names: `docs/DECISIONS.md` (wins on conflict). DTO names come from `docs/API.md`.
-- Owners (C3, C5, W2.x, W3.x, W4.x; Phase 5: C9, W5.x; Phase 6: C12, W6.x; Phase 7: C15, W7.x) follow the phase
-  tables in `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
+- Owners (C3, C5, W2.x, W3.x, W4.x; Phase 5: C9, W5.x; Phase 6: C12, W6.x; Phase 7: C15, W7.x; Phase 8: C20, W8.x)
+  follow the phase tables in `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
 - Everything is English. Every UI string is sentence case (see [Copy guidelines](#15-copy-guidelines)).
 
 Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 Design tokens](#3-design-tokens) ·
@@ -35,11 +35,15 @@ Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 D
    - session filters (status/branch/environment filters above the session list; Phase 7: the project switcher is the
      only filter);
    - diff, terminal and browser panes (no split panes next to the transcript; Phase 7 keeps this: diffs and shell
-     output render **inside tool rows**, 7.19);
+     output render **inside tool rows**, 7.19; amended in Phase 8, ADR-037: the user asked for **one changes panel**.
+     It is a right-hand pane on desktop (≥ 1024px) and a sheet below that, exists only in **project chats**, opens only
+     when the user toggles it, and lists the files the agent changed in the chat and the project's Git status, each
+     with a diff and "Revert file" (2.15, 7.21). There is still no terminal pane, browser pane, editor, staging or
+     committing; tool rows keep their own inline diffs and shell output, 7.19);
    - usage-limit UI (plan limits, quota meters, upgrade prompts).
    What stays: sidebar with `Chat | Plugins`, New chat, Search, date-grouped chats, Settings, theme toggle,
    transcript, composer (`+`, model, effort, permission, context ring, send/stop; Phase 6: image options and the mic);
-   Phase 7: the project switcher above New chat.
+   Phase 7: the project switcher above New chat. Phase 8: the changes toggle in the header of project chats (5.6).
 3. **Dark by default.** `html.dark` on first load even when the OS prefers light. Light and System are opt-in.
    No light flash, ever (see [4](#4-theme-behavior)).
 4. **Keyboard-first.** Every action is reachable from the keyboard: palette (Mod+K), new chat (Mod+Shift+O),
@@ -445,7 +449,8 @@ A new chat (`/`): `NewChatProjectPicker` under the greeting, defaulting to the s
 
 ### 2.14 Workspace tool rows and approvals (Phase 7)
 
-Diffs and shell output render inside the expanded tool row (7.19), never in a side pane.
+Diffs and shell output render inside the expanded tool row (7.19). Rows render their own diff and output; the changes
+panel (Phase 8, 7.21) shows the chat's net changes.
 
 ```
    ▾ ✎ edit_file  "src/parser.ts"                               +2 −1   ✓
@@ -487,6 +492,161 @@ Diffs and shell output render inside the expanded tool row (7.19), never in a si
 │ ☐ Accept all edits in this chat                               │
 │                                              [Deny]  [Allow]  │
 └───────────────────────────────────────────────────────────────┘
+```
+
+### 2.15 Changes panel, rewind and shell rules (Phase 8)
+
+Legend additions: `◨` the changes toggle (`PanelRight`, count pill) · `↶` "Revert file" (`Undo2`) · `⚠` changed
+outside this chat (`TriangleAlert`) · `⟲` "Rewind files to here" (`History`) · `⛉` allowed by a shell rule
+(`ShieldCheck`) · `⊖` "Remove" (`Trash2`).
+
+Desktop (≥ 1024px): the changes pane sits right of the chat panel (7.21); the transcript keeps its `max-w-3xl` column
+centred in the remaining width.
+
+```
+┌─sidebar 16.5rem─┬────────── chat panel (flex, ≥ 40%) ──────────┬┬────── changes pane 440px ──────┐
+│ ◆ harness-forge │ Fix the parser  [▢ harness-forge]  [◨ 3]  ⋯  ││ Changes [This chat | Git]  ⟳  ✕ │ both h-12
+│ ▢ harness-forge │──────────────────────────────────────────────││ 3 files changed  +24 −7         │ changes-summary
+│ ＋ New chat     │   transcript: max-w-3xl, centred in the      ││ ▸ M src/parser.ts   +12 −3   ↶  │ changes-file
+│ ⌕  Search       │   remaining width (px-4 gutters)             ││ ▾ A src/lexer.ts    +10      ↶  │
+│ Today           │   ▸ ✎ edit_file "src/parser.ts"  +12 −3   ✓  ││   ┌ src/lexer.ts  New file +10 ┐│ DiffView, lazy
+│  Fix the parser │   ▸ ❯ shell "pnpm test"  ⛉       exit 0   ✓  ││   │ 1  + export function lex() ││
+│                 │                                              ││   └────────────────────────────┘│
+│                 │   ┌ composer (same max-w-3xl) ─────────────┐ ││ ▸ D old/util.ts        −4  ⚠ ↶  │ changed outside
+│ ⚙ Settings ☾☀▭ │   └────────────────────────────────────────┘ ││ Changes made by shell commands  │ untracked note
+└─────────────────┴──────────────────────────────────────────────┴┴─────────────────────────────────┘
+                                                                 ↑ changes-resize: drag or arrow keys, 320–720px
+```
+
+The Git view of the same pane (a project inside a git work tree):
+
+```
+│ Changes [This chat | Git]  ⟳  ✕ │
+│ On main · 4 files changed       │   "On {branch}"; "No changes since the last commit." when clean
+│ ▸ M src/parser.ts            ↶  │
+│ ▸ R src/lex.ts → src/lexer.ts ↶ │   rename: origPath → path
+│ ▸ U notes.txt                ↶  │   untracked
+│ ▸ ! src/merge.ts                │   conflicted: no Revert
+```
+
+Phone and tablet (< 1024px): the same panel in a right `Sheet` (full width below `sm`, `sm:max-w-lg` above).
+
+```
+┌ 390 ──────────────────────────┐      ┌ 390 ──────────────────────────┐
+│ ≡  Fix the parser   ▢  ◨3  ⋯ │  →   │ Changes [This chat|Git] ⟳  ✕ │ Sheet from the right,
+│───────────────────────────────│      │ 3 files changed  +24 −7       │ own 40px close button
+│ transcript…                   │      │ ▸ M src/parser.ts  +12 −3  ↶  │
+│                               │      │ ▸ A src/lexer.ts   +10     ↶  │
+└───────────────────────────────┘      └───────────────────────────────┘
+```
+
+Revert confirmation and its toast (7.21):
+
+```
+┌ Revert parser.ts? ───────────────────────────────────────────┐
+│ src/parser.ts goes back to how it was before this chat        │
+│ changed it.                                                   │
+│ It also changed outside this chat after the agent's last      │   only when changedOutside
+│ edit. Those changes are reverted too.                         │
+│ The current version is saved first, so you can undo this.     │
+│                                       [Cancel] [Revert file]  │   destructive
+└───────────────────────────────────────────────────────────────┘
+  toast: Reverted src/parser.ts                        [Undo]
+```
+
+Rewind (7.22): the action row of a user message in a project chat, then the dialog.
+
+```
+                                  ┌───────────────────────────────┐
+                                  │ Fix the empty-input crash      │
+                                  └───────────────────────────────┘
+                                                    ⧉  ✎  ⟲          ⟲ after Edit, only when edits follow
+
+┌ Rewind files to here? ──────────────────────────────────────────── × ┐
+│ Files the agent changed after this message go back to how they were  │
+│ before it. The conversation stays as it is.                          │
+│ ┌──────────────────────────────────────────────────────────────────┐ │
+│ │ src/parser.ts                                         [Restore]  │ │ rewind-file
+│ │ src/lexer.ts                                          [Delete]   │ │ created after it
+│ │ README.md                                       ⚠     [Restore]  │ │ changed outside this chat
+│ └──────────────────────────────────────────────────────────────────┘ │
+│ ☐ Also restore files changed outside this chat                       │ rewind-force (with conflicts)
+│ Shell changes aren't tracked.                                        │
+│ ┌ ⚠ These commands ran after this message; their effects on files ─┐ │
+│ │ stay:                                                            │ │
+│ │ mkdir -p mock-dir && cd mock-dir                                 │ │ rewind-shell-command
+│ │ pnpm test                                                        │ │
+│ └──────────────────────────────────────────────────────────────────┘ │
+│           [Cancel]  [Restore files and edit]  [Restore files]        │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+The shell approval card with the allow-rule option (7.3, 7.23) and a shell row in a sticky folder (7.19):
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│ Run this command?                         from core-workspace │
+│ ┌───────────────────────────────────────────────────────────┐ │
+│ │ pnpm test --filter parser                                 │ │
+│ └───────────────────────────────────────────────────────────┘ │
+│ In harness-forge/packages/web · timeout 120s                  │   the sticky folder
+│ ⚠ Runs on the server with the server user's permissions.      │
+│ ☑ Always allow commands starting with                         │   tool-approval-allow-rule
+│   [ pnpm test          ]  ( This project | All projects )     │   prefix + scope, once checked
+│   Combined commands run only when every part matches a rule.  │
+│                                                [Deny]  [Run]  │
+└───────────────────────────────────────────────────────────────┘
+  a command with always-ask syntax shows, instead of the checkbox:
+│ Commands with redirections, substitutions or other shell      │
+│ syntax always ask.                                            │
+
+   ▾ ❯ shell  "cd web && pnpm build"  ⛉                        exit 0   ✓
+     ┌──────────────────────────────────────────────────────────────┐   TerminalOutput
+     │ packages $ cd web && pnpm build                              │   terminal-cwd (muted)
+     │ built in 2.1s                                                │
+     │ [Exit code 0] [3.2s] [Now in packages/web]                   │   terminal-cwd-change
+     │ Allowed by rule: pnpm build                                  │
+     └──────────────────────────────────────────────────────────────┘
+```
+
+Settings → Projects with the rules (9.10, 7.23):
+
+```
+│ Projects                                        [Add project]   │
+│ harness-forge            12 chats · 3 allowed commands      ⋯   │ ⋯: Rename · Edit instructions… ·
+│ /home/me/workspaces/harness-forge                               │    Allowed commands… · Delete…
+│ notes                    3 chats                            ⋯   │
+│                                                                 │
+│ Allowed in every project                                        │ GlobalAllowlistSection
+│ Shell commands that start with one of these run without asking  │
+│ in every project. …                                             │
+│ ls                                                          ⊖   │ allowlist-rule
+│ git status                                                  ⊖   │
+│ [ pnpm test                                      ]  [Add]       │ allowlist-input, allowlist-add
+
+┌ Allowed commands in harness-forge ─────────────────────────── × ┐
+│ Shell commands that start with one of these run without asking │
+│ in this project. Combined commands run only when every part    │
+│ matches; redirections and substitutions always ask.            │
+│ pnpm test                                                  ⊖   │
+│ pnpm -F @harness-forge/web typecheck:fast                  ⊖   │
+│ [ make                                          ]  [Add]       │
+│ ⚠ This allows every make command.                              │ one-word warning (not blocking)
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Settings → Data, automatic cleanup inside Storage cleanup (9.8):
+
+```
+│ Storage cleanup                                                 │
+│ Remove uploaded and generated files that no chat, …             │
+│ [Check for unused files]  [Remove…]                             │
+│ ◉ Automatic cleanup                      [ Every day        ▾ ] │ data-cleanup-auto, data-cleanup-interval
+│   Remove unused files on a schedule. They're deleted without    │
+│   asking and can't be restored. Files from the last 24 hours    │
+│   are always kept.                                              │
+│   Last automatic cleanup 3 days ago: removed 4 files (2 MB).    │ data-cleanup-auto-status
+│   Next automatic cleanup in 21 hours.                           │
 ```
 
 ---
@@ -939,7 +1099,10 @@ Projects entry the key `projects` and the test id `settings-nav-projects`); the 
   (checkbox) · Share… · Export as Markdown · Export as JSON · separator · Delete. Share… calls `ui.openShare(chatId)`
   (7.14). The empty state `/` shows no title and no menu (its project is picked under the greeting, 7.20). Phase 7:
   `ChatView` passes the session's `projectId` to its `header` slot, and `pages/chat/[id].vue` hands it to
-  `ChatHeader` (10.4).
+  `ChatHeader` (10.4). Phase 8 (ADR-037): `ChangesToggle` (7.21) sits between `ChatProjectChip` and `⋯` in project
+  chats only (`PanelRight` + a count pill of the files this chat changed, capped at "9+"; it opens and closes the
+  changes panel; Alt+C, 12); `ChatHeader` mounts it with its `chatId` and `projectId` and it renders nothing without a
+  project.
 - **Other pages** (`PageHeader`, C3): same height and trigger rule; title (`text-xl font-semibold`) +
   optional description (muted) below the bar, actions slot on the right.
 
@@ -996,7 +1159,7 @@ All pages are `ssr: false` SPA routes. C5 creates every page as a stub in Phase 
 | Route | File | Contents | Owner |
 |---|---|---|---|
 | `/` | `pages/index.vue` | empty state: `ChatView` with `isNew` for the draft chat id (`useDraftChatId()`: a uuidv7 kept until the first send, so an unsent draft survives leaving `/`); `ChatGreeting` + `NoProviderCallout` fill its `empty` slot (Phase 7: the slot props `{ projectId, setProject }` feed `NewChatProjectPicker`, placed in `ChatGreeting`'s default slot right under the greeting, 7.20); the first send replaces the route with `/chat/<id>` | W2.2; W7.10 (Phase 7) |
-| `/chat/[id]` | `pages/chat/[id].vue` | `ChatView` for an existing chat with `ChatHeader` in its `header` slot (Phase 7: with the slot's `projectId`); `ChatNotFound` ("Chat not found" + "New chat") for malformed ids and on 404 | W2.2 |
+| `/chat/[id]` | `pages/chat/[id].vue` | `ChatView` for an existing chat with `ChatHeader` in its `header` slot (Phase 7: with the slot's `projectId`); `ChatNotFound` ("Chat not found" + "New chat") for malformed ids and on 404; Phase 8: `ChatView` is wrapped in `ChatWorkspace` (`chatId`, `projectId` = the session's project from the registry), which adds the changes pane or sheet (7.21) without remounting `ChatView` | W2.2; C20 (Phase 8 mount) |
 | (parent) | `pages/plugins.vue` | plugins shell: `<NuxtPage />` + the single `InstallDialog` instance bound to `ui.installDialogOpen` (`@installed` → `/plugins/<id>`) | W3.1 |
 | `/plugins` | `pages/plugins/index.vue` | `PageHeader` "Plugins" (search, Install…, New plugin ▾), filter from `?filter=` and `?q=`, `PluginCard` grid | W3.1 |
 | `/plugins/new?type=provider` | `pages/plugins/new.vue` | `ProviderWizard` (`?edit=<id>` edits an existing declarative plugin); without `type` the page shows a Provider / Code plugin chooser | W3.3 |
@@ -1006,11 +1169,11 @@ All pages are `ssr: false` SPA routes. C5 creates every page as a stub in Phase 
 | `/settings/providers` | `pages/settings/providers.vue` | provider list, key dialog (`?configure=<providerId>` opens it) | W2.5 |
 | `/settings/models` | `pages/settings/models.vue` | default + title model (chat models only), per-provider model tables | W2.5; W6.10 (Phase 6) |
 | `/settings/media` | `pages/settings/media.vue` → `MediaSettings` | "Images and voice": the Images section (image model of the `generate_image` tool) and the Voice section (speech to text, language, read aloud, voice, speed, test voice), 9.9 | C12 (stub), W6.10 |
-| `/settings/projects` | `pages/settings/projects.vue` → `ProjectsSettings` | Projects (Phase 7): the project list with rename, instructions and delete, and the Add project dialog with the folder browser (`?add=1` opens it), 9.10 | C15 (stub), W7.9 |
+| `/settings/projects` | `pages/settings/projects.vue` → `ProjectsSettings` | Projects (Phase 7): the project list with rename, instructions and delete, and the Add project dialog with the folder browser (`?add=1` opens it), 9.10; Phase 8: "Allowed commands…" per project and the global rules section `GlobalAllowlistSection` below the list | C15 (stub), W7.9; W8.11 (Phase 8) |
 | `/settings/general` | `pages/settings/general.vue` | display name, send key, defaults, max steps (Phase 7: also in project chats), Alt shortcuts, instructions, password | W2.5; W7.12 (Phase 7) |
 | `/settings/appearance` | `pages/settings/appearance.vue` | theme cards, reading font, text size, density, expand thinking | W2.5 |
 | `/settings/about` | `pages/settings/about.vue` | versions, license, copy diagnostics | W2.5 |
-| `/settings/data` | `pages/settings/data.vue` → `DataSettings` | summary, export, import, storage cleanup (Phase 7), shared links (`SharesSettingsSection`), encryption key (Phase 7), danger zone (9.8) | C9 (stub), W5.5; W5.6 (`SharesSettingsSection`); W7.13 (Phase 7 sections) |
+| `/settings/data` | `pages/settings/data.vue` → `DataSettings` | summary, export, import, storage cleanup (Phase 7; Phase 8: automatic cleanup), shared links (`SharesSettingsSection`), encryption key (Phase 7), danger zone (9.8) | C9 (stub), W5.5; W5.6 (`SharesSettingsSection`); W7.13 (Phase 7 sections) |
 | `/share/[token]` | `pages/share/[token].vue` (`layout: 'share'`) → `SharedChatView :token` | public, read-only, store-free transcript of the share snapshot; "This link is unavailable" on 404; `noindex` (7.15) | C9 (stub), W5.6 |
 | `/login` | `pages/login.vue` (`layout: 'auth'`) | password form; `?redirect=` | W2.5 |
 | unknown | `app/error.vue` (`auth` layout) | "Page not found" (404) or "Something went wrong" (other errors, no raw details) + "Back to chats" (`clearError({ redirect: '/' })`) | C5 |
@@ -1131,16 +1294,16 @@ output" toggle (7.19). A row whose output does not parse with the shared schemas
   switching back to that version (ADR-023).
 - **Workspace tools** (Phase 7, ADR-032; wireframe 2.14, renderers 7.19): `ToolApprovalPreview`
   (`tool-approval-preview`, `data-kind`) replaces the JSON block whenever the registry has a view for the call.
-  `edit_file` → a `DiffView` of `old_string` → `new_string` without line numbers or hunk headers (`data-numbers="off"`:
-  they would be the snippet's, not the file's) and an "All occurrences" badge with `replace_all`; `write_file` →
-  "Create or overwrite {path} · {n} lines" and a 20-line `FileContent` preview (the client does not have the old
-  file, so no diff); `shell` → the card title "Run this command?", the `description` as text when present, the command
-  in a large mono block, a meta line "In {project}" ("In {project}/{cwd}" with a `cwd`, "In {cwd}" when the project
-  name is unknown) and "timeout {n}s" when the call sets `timeout_ms`, and the warning (`TriangleAlert`,
-  `text-warning`) "Runs on the server with the server user's permissions."; its buttons are Deny / **Run**. The card
-  learns the chat's permission mode and project name from `TOOL_APPROVAL_CONTEXT` (`parts/tool-approval-context.ts`),
-  which `ChatView` provides; without it (a card rendered outside a chat view) every write tool offers "Accept all edits
-  in this chat" and the meta line has no project.
+  `edit_file` → a `DiffView` of `old_string` → `new_string` without line numbers or hunk headers (`lineNumbers: false`,
+  Phase 8; the root then carries `data-numbers="off"`: they would be the snippet's, not the file's) and an "All
+  occurrences" badge with `replace_all`; `write_file` → "Create or overwrite {path} · {n} lines" and a 20-line
+  `FileContent` preview (the client does not have the old file, so no diff); `shell` → the card title "Run this
+  command?", the `description` as text when present, the command in a large mono block, a meta line "In {project}" ("In
+  {project}/{cwd}" with a `cwd`, "In {cwd}" when the project name is unknown) and "timeout {n}s" when the call sets
+  `timeout_ms`, and the warning (`TriangleAlert`, `text-warning`) "Runs on the server with the server user's
+  permissions."; its buttons are Deny / **Run**. The card learns the chat's permission mode and project name from
+  `TOOL_APPROVAL_CONTEXT` (`parts/tool-approval-context.ts`), which `ChatView` provides; without it (a card rendered
+  outside a chat view) every write tool offers "Accept all edits in this chat" and the meta line has no project.
 - **"Always allow" is hidden** for tools with workspace access `execute` (`ToolApprovalCard.workspace`, from
   `ToolSummary.workspace`; before the tools list has loaded, `ToolPart` uses `WORKSPACE_TOOL_ACCESS` for the
   `core-workspace` names, so a shell card never offers it): a shell command is approved one call at a time.
@@ -1152,6 +1315,18 @@ output" toggle (7.19). A row whose output does not parse with the shared schemas
 - Every card is a `role="group"` named "Approval needed: {tool}" (`toolApprovalLabel`, `parts/tool-row.ts`); a shell
   card is named, and announced once by the polite live region, as "Approval needed: run {command}" (the first
   non-empty line, at most 60 characters).
+- **Shell rules** (Phase 8, ADR-038; wireframe 2.15, full spec 7.23): the card of an `execute` tool still offers no
+  "Always allow {tool}", but the card of the builtin `shell` renders `AllowRuleOption` below the warning: a checkbox
+  "Always allow commands starting with" (`tool-approval-allow-rule`) that, once checked, shows the suggested prefixes
+  (`suggestShellRules(command)` from `@harness-forge/shared`; one prefix is an editable input, several are read-only
+  chips; `tool-approval-rule-prefix`), the scope `ToggleGroup` **This project** | **All projects**
+  (`tool-approval-rule-scope`, default This project) and the hint "Combined commands run only when every part
+  matches a rule." Run with the box checked creates the rules first (`ToolApprovalDecision.allowRules`, 11.5), then
+  sends the normal approval. A command that can never be allowed by a rule shows only a muted note instead of the
+  checkbox: "Commands with redirections, substitutions or other shell syntax always ask." (the parser refused it) or
+  "No rule can allow this command, so it always asks." (no valid prefix, e.g. `sudo …`). The meta line uses the
+  sticky folder: "In {project}/{cwd}" where `cwd` is the call's `cwd` input, else the chat's current shell folder
+  (`TOOL_APPROVAL_CONTEXT.shellCwd()`), left out when it is the project folder.
 
 ### 7.4 Errors
 
@@ -1242,7 +1417,9 @@ sibling ids (`seq` order) and the index of the shown one (API.md, `MessageBranch
   `generate_image` tool keep the label "Cost"). Regenerating adds a new version of that reply
   under the same user message; the path continues from the new version, and the older version keeps the messages that
   followed it.
-- User: **Copy**, **Edit** (any user message while no run is active), **Delete this version** (below). Edit turns the
+- User: **Copy**, **Edit** (any user message while no run is active), **Rewind files to here** (Phase 8, `History`,
+  `message-rewind`: project chats only, after Edit, when file edits follow the message; 7.22), **Delete this version**
+  (below). Edit turns the
   bubble into `MessageEditor` (textarea at the bubble's width, the message's attachments, Cancel / Send). Send creates
   a **new version** of that message: the session drops the local messages from the edited one on and sends a new user
   message (a new id) whose `parentId` is the edited message's parent (11.1); the old version and everything after it
@@ -1670,7 +1847,8 @@ ADR-029).
 
 The builtin `core-workspace` tools (ADR-032, PLUGINS.md 1) return structured outputs with project-relative paths, diff
 hunks and shell results (ARCHITECTURE.md 6.13; schemas in API.md, workspace tools). The web renders them inside the
-tool row, never in a side pane (principle 1.2). Wireframe: 2.14.
+tool row (principle 1.2). Rows render their own diff and output; the changes panel (Phase 8, 7.21) shows the chat's net
+changes. Wireframe: 2.14 (Phase 8: 2.15).
 
 - **Registry** (`components/chat/parts/tools/workspace-tools.ts`, pure and store-free, signatures in 11.4):
   `workspaceToolView(toolName, input, output)` parses the output with the shared schemas and returns a view of kind
@@ -1698,25 +1876,46 @@ tool row, never in a side pane (principle 1.2). Wireframe: 2.14.
   | `search_files` | `23 matches` / `1 match` |
 
   Rows still never expand by themselves (principle 5).
+
+  **Spoken labels** (Phase 8, W8.10): `workspaceRowSummary` also returns `label`, what a screen reader says instead of
+  the visible text. `ToolRowSummary` renders the visible span `aria-hidden="true"` (it keeps `tool-row-summary` and
+  `data-tone`, so the visible text and the e2e checks are unchanged) and a sibling `<span class="sr-only">` with the
+  label; the share page inherits it (`ShareToolRow` uses the same component):
+
+  | Visible | Label |
+  |---|---|
+  | `+12 −3` | "12 lines added, 3 removed" ("1 line added, 1 removed"; one side alone: "3 lines removed", "12 lines added"; `diffStatsLabel(a, d)`, also used by `DiffView` and the changes panel) |
+  | "New · 40 lines" / "Updated · 40 lines" | "New file, 40 lines" / "Updated, 40 lines" |
+  | `exit 1` / `timed out` / `killed SIGTERM` / `exited` | "Exit code 1" / "Timed out" / "Killed by SIGTERM" / "Exited without an exit code" |
+  | `lines 1–120 of 340` | "Lines 1 to 120 of 340" ("Lines 1 to 120" without a total) |
+  | every other summary | its visible text |
+
+  **Rule badge** (Phase 8, ADR-038): a `shell` row whose output has `allowedBy` (the command ran without a card
+  because shell rules matched) shows `ToolRuleBadge` before the summary: a muted `ShieldCheck` icon (`tool-row-rule`,
+  `data-value` = the matched prefixes joined with ", ") with the sr-only text ", allowed by rule {prefixes}" and the
+  tooltip "Allowed by rule: {prefixes}". `ToolPart` and `ShareToolRow` render it.
 - **Expanded body**: `WorkspaceToolBody` replaces the Input / Output blocks (the error block of `output-error` stays)
   and ends with the toggle **Raw input and output** (`tool-raw-toggle`, `data-state` `open` | `closed`), which shows the
   generic `ToolValueBlock`s; the callers (`ToolPart`, `ShareToolRow`) pass those blocks through its `raw` slot, and the
-  toggle renders only when the slot is filled. It passes the server's totals to the `stats` slot of `DiffView` (they
-  count cut hunks too) and names the empty list through the `empty` slot of `FileList`.
-- **DiffView** (`diff-view`, `data-path`, `data-state` `created` | `modified`): a header with the path in mono, a "New
-  file" badge, `+a −d` (the `stats` slot, default: counted from the hunks) and a `CopyButton` for the path ("Copy
-  path"); the lines are a grid (old line number | new line number | sign | text) in `font-mono text-xs whitespace-pre`
-  inside an `overflow-x-auto rounded-md border` block, so a long line scrolls inside the block and never widens the
-  page. Added lines `bg-success/10` with the sign in `text-success`, removed lines `bg-destructive/10` with the sign
-  (U+2212) in `text-destructive`, context `text-muted-foreground`, hunk headers `@@ −12,5 +12,7 @@` on `bg-muted/60`
-  (`diff-line`, `data-kind` `add` | `del` | `context`); a `\ No newline at end of file` line shows as a muted italic
-  note. Runs of more than 8 unchanged lines fold into "⋯ {n} unchanged lines" (3 lines stay next to each change); past
-  `maxLines` (200) "Show {n} more lines" (`diff-expand`, `data-action` `unfold` | `show-all`); `truncated` → "Diff
-  truncated by server"; no hunks: "The diff is too large to show." when `truncated` (a `null` diff: the server's 2 s
-  diff timeout), else "Empty file." for a new file and "No changes." otherwise. Below `sm` one line-number column. The
-  fallthrough attribute `data-numbers="off"` (approval previews) hides both number columns and the hunk headers (hunks
-  are then separated by a `⋯` row). Each changed line has the sr-only label "Added" or "Removed". No syntax
-  highlighting in v1.3.
+  toggle renders only when the slot is filled. It passes the server's totals to the `stats` prop of `DiffView` (they
+  count cut hunks too; a slot until v1.3) and names the empty list through the `empty` slot of `FileList`.
+- **DiffView** (`diff-view`, `data-path`, `data-state` `created` | `modified`, `data-numbers` `on` | `off`): a header
+  with the path in mono, a "New file" badge, `+a −d` (the `stats` prop, Phase 8; `null` or absent: counted from the
+  hunks; shown when additions + deletions > 0, `aria-hidden` with the sr-only `diffStatsLabel` text) and a `CopyButton`
+  for the path ("Copy path"); the lines are a grid (old line number | new line number | sign | text) in
+  `font-mono text-xs whitespace-pre` inside an `overflow-x-auto rounded-md border` block, so a long line scrolls inside
+  the block and never widens the page. Added lines `bg-success/10` with the sign in `text-success`, removed lines
+  `bg-destructive/10` with the sign (U+2212) in `text-destructive`, context `text-muted-foreground`, hunk headers
+  `@@ −12,5 +12,7 @@` on `bg-muted/60` (`diff-line`, `data-kind` `add` | `del` | `context`); a
+  `\ No newline at end of file` line shows as a muted italic note. Runs of more than 8 unchanged lines fold into "⋯ {n}
+  unchanged lines" (3 lines stay next to each change); past `maxLines` (200) "Show {n} more lines" (`diff-expand`,
+  `data-action` `unfold` | `show-all`); `truncated` → "Diff truncated by server"; no hunks: "The diff is too large to
+  show." when `truncated` (a `null` diff: the server's 2 s diff timeout), else "Empty file." for a new file and "No
+  changes." otherwise. Below `sm` one line-number column. The prop `lineNumbers: false` (Phase 8; approval previews;
+  until v1.3 the fallthrough attribute `data-numbers="off"`) hides both number columns and the hunk headers (hunks are
+  then separated by a `⋯` row); the root renders `data-numbers="on"` or `"off"` itself. Each changed line has the
+  sr-only label "Added" or "Removed". No syntax highlighting (backlog). The changes panel uses the same component
+  (7.21).
 - **TerminalOutput** (`terminal-output`, `data-status` `running` | `ok` | `error` | `timeout` | `killed`): a
   `bg-muted/60` block: the `$ command` line (`terminal-command`), then stdout (`terminal-stdout`, `whitespace-pre-wrap
   break-words`), then stderr under a small "stderr" label (`terminal-stderr`; `text-destructive` only when the exit code
@@ -1726,6 +1925,15 @@ tool row, never in a side pane (principle 1.2). Wireframe: 2.14.
   an exit code), "Timed out", the signal, and the duration (`formatDuration`), plus "No output" when both streams are
   empty; while running a Spinner + "Running…"; "Output truncated by server" when a stream's byte count is above 20 KiB
   (the server keeps the first 4 KiB and the last 16 KiB of each stream) and above the bytes of the kept text.
+  Phase 8 (ADR-038, sticky folder): the command line reads `{cwd} $ command`, the folder muted (`terminal-cwd`,
+  `data-value` = the project-relative folder; left out when it is `.`, the project folder); the folder is the output's
+  `cwd`, while running the new prop `cwd` (the call's `cwd` input, else the chat's current shell folder from
+  `TOOL_APPROVAL_CONTEXT.shellCwd()`, nothing on the share page). When the output's `endCwd` differs from `cwd`, a
+  footer badge reads "Now in {endCwd}" ("Now in the project folder" for `.`; `terminal-cwd-change`, `data-value`), and
+  a `cwdNote` from the server shows as a muted line below the badges (`data-slot="terminal-cwd-note"`, e.g. "The command
+  ended outside the project folder; the next call starts in the project folder."). An output with `allowedBy` ends with
+  the muted line "Allowed by rule: {prefixes}" (`data-slot="terminal-rule"`). Outputs saved before v1.4 have none of
+  these fields and render as before.
 - **FileContent** (`file-content`, `data-path`): a header with the path and "Copy path", numbered lines starting at
   `startLine`, 20 lines, then **Show all**; "Showing lines {a}–{b} of {total}" (unless it is the whole file) and
   "Truncated by server" when the output says so; "Empty file." without lines.
@@ -1739,11 +1947,12 @@ tool row, never in a side pane (principle 1.2). Wireframe: 2.14.
   only when the user opens it); other tools keep the spinner status of 7.2.
 - **Approval previews** (`ToolApprovalPreview`, `tool-approval-preview`, `data-kind` `diff` | `content` | `command`;
   7.3): `workspaceApprovalView(toolName, input)` builds `edit_file` → a `DiffView` of `diffLines(old_string,
-  new_string)` with `data-numbers="off"` (`utils/line-diff.ts`: a small LCS without a dependency; past its size cap one
-  hunk with every old line removed, then every new line added), `write_file` → "Create or overwrite {path} · {n}
-  lines" and a 20-line `FileContent`, `shell` → the command card; `workspaceApprovalKind(toolName, input)` gives the
-  same kind without building the diff (the card picks its title and buttons from it). The server's hunks are what the
-  user sees for finished edits; the client only diffs the small snippets of a preview.
+  new_string)` with `lineNumbers: false` (`data-numbers="off"`; `utils/line-diff.ts`: a small LCS without a dependency;
+  past its size cap one hunk with every old line removed, then every new line added), `write_file` → "Create or
+  overwrite {path} · {n} lines" and a 20-line `FileContent`, `shell` → the command card;
+  `workspaceApprovalKind(toolName, input)` gives the same kind without building the diff (the card picks its title and
+  buttons from it). The server's hunks are what the user sees for finished edits; the client only diffs the small
+  snippets of a preview.
 - **Share page** (7.15): `ShareToolRow` uses the same `workspaceToolView`, `WorkspaceToolBody` and row summary when the
   share includes tool details (the summary and body only for finished calls whose output parses); without tool details
   the row stays static, as before. Values longer than 16,384 characters arrive as `[truncated]` strings and fall back
@@ -1814,6 +2023,228 @@ optionally belongs to one, and the workspace tools work only in chats whose proj
   toast "The project was deleted. Showing all chats."; the permission mode Accept edits is offered only in project
   chats (7.11).
 - **No new shortcuts** (12): the palette covers keyboard reach, and Alt+P still opens the permission menu.
+
+### 7.21 Changes panel (`ChatWorkspace`, `ChangesToggle`, `ChangesPanel`, W8.8; Phase 8)
+
+The one side panel of the app (principle 1.2 as amended by ADR-037): in a **project chat** it lists the files the agent
+changed and the project's Git status, each with a diff and **Revert file**. Two views: **This chat** (the net changes
+of this chat, from the server's checkpoint journal; works without git; ARCHITECTURE.md 6.16) and **Git** (`git status`
+and a diff against HEAD when the project folder is inside a git work tree; 6.17). Data: `GET /api/chats/:id/changes`,
+`GET /api/chats/:id/changes/diff?source=&path=`, `GET /api/chats/:id/git` (API.md, `changes` module). Wireframe: 2.15.
+
+- **Mount** (`ChatWorkspace`, `components/workspace/ChatWorkspace.vue`): `pages/chat/[id].vue` wraps `ChatView` in it
+  (`chatId`, `projectId` = the session's `projectId` from the registry, the lookup the page already uses for the
+  title); no layout or ui store change. It always renders a horizontal `ResizablePanelGroup` around the chat panel, so
+  opening or closing the panel never remounts `ChatView` (scroll position and the stream survive). The handle
+  (`changes-resize`) and the side panel (an `<aside>` labelled by the panel's `h2`, `ChangesPanel variant="pane"`) are
+  added only while the viewport is at least 1024px wide, the panel is open and the chat has a project. Below 1024px the
+  same component renders a right `Sheet` (full width below `sm`, `sm:max-w-lg` above, `showCloseButton` off: the
+  panel's own 40px close button) holding `ChangesPanel variant="sheet"`. Without a project only the chat panel renders.
+  It registers Alt+C (12).
+- **Sizes**: the pane defaults to 440px, at least 320, at most 720, and the chat panel keeps at least 40% of the inset
+  (at 1024px with the sidebar expanded the inset is 760px, so the pane is then at most about 456px). The px values are
+  converted to the group's percentages and recomputed when the group resizes; the transcript keeps its `max-w-3xl`
+  column centred in the chat panel (5.7). The panel never collapses the sidebar, and Mod+B is unchanged. The handle
+  has a 24px hit area on coarse pointers and moves with the arrow keys.
+- **Persistence** (`useChangesPanel`, 11.5; per browser, not per chat): `localStorage['hf-changes-width']` (the pane
+  width in px, written from the panel's `@resize`, clamped to 320–720 when read; not reka's `autoSaveId`, which stores
+  percentages, so the pane would drift whenever the window is resized), `['hf-changes-open']` (`1` / `0`, default
+  closed) and `['hf-changes-view']` (`chat` | `git`, default `chat`). Blocked storage keeps the state in memory.
+- **Toggle** (`ChangesToggle`, `changes-toggle`, `data-state` `open` | `closed`, `data-count`): a ghost icon button
+  (`PanelRight`) in `ChatHeader` between `ChatProjectChip` and `⋯` (5.6), with a count pill of the files this chat
+  changed (`workspace.changeCount(chatId)`; hidden at 0, "9+" above 9), `aria-pressed`, `aria-controls` (the pane or
+  sheet), the label "Show changes" ("Show changes, 3 files changed") or "Hide changes" and a tooltip with Alt+C; 40px
+  on coarse pointers. It renders nothing without a project and loads the chat's changes once on mount, so the count
+  is right before the panel opens.
+- **Header** (`ChangesPanel`, `changes-panel`, `data-view` `chat` | `git`, `data-state` `loading` | `ready` | `error` |
+  `unavailable`): h-12 like the chat header: the `h2` "Changes", `Tabs` **This chat** | **Git** (`changes-view-option`,
+  `data-value` `chat` | `git`; the choice persists), **Refresh** (`changes-refresh`, `RefreshCw`, "Refresh changes";
+  spins with `aria-busy` while loading) and **Close** (`changes-close`, `X`, "Close changes"). Below it the summary
+  line (`changes-summary`, `data-count`) and the list; the whole panel is one scroll area.
+- **Summary**: This chat: "3 files changed · +24 −7" ("1 file changed"; the totals of the known line counts, left out
+  when none is known). Git: "On {branch} · 4 files changed" ("On {branch}" alone when clean; "Detached at {head}" with
+  the first 7 characters of HEAD when there is no branch; "No commits yet" for an unborn HEAD).
+- **Rows** (`ChangesFileRow`, `changes-file`, `data-path`, `data-status`, `data-state` `open` | `closed`,
+  `data-conflict="true"` when the file changed outside this chat): an accordion; the row is a button with
+  `aria-expanded` / `aria-controls`: a 16px status tile (the letter in `text-foreground` on a tint, 14.3, with sr-only
+  text): **A** added (`bg-success/15`, "Added"), **M** modified (`bg-warning/15`, "Modified"), **D** deleted
+  (`bg-destructive/15`, "Deleted"), **U** untracked (`bg-muted`, "Untracked"), **R** renamed (`bg-info/15`, "Renamed"),
+  **!** conflicted (`bg-destructive/15`, "Conflicted"), **T** type changed (`bg-muted`, "Type changed"); the path in
+  mono (truncated from the start, the full path in `title`; a rename reads `{origPath} → {path}`); `+a −d` (This chat,
+  when known; read as `diffStatsLabel`); `TriangleAlert` in `text-warning` with the sr-only text "changed outside this
+  chat" (This chat, `changedOutside`: the file on disk is not what the agent last wrote); then **Revert file**
+  (`changes-file-revert`, `data-path`, `Undo2`, "Revert {path}"), shown on hover or focus-within and always on coarse
+  pointers (40px). Revert is not offered for a row that is not `revertible` (This chat: the earlier version is no longer
+  stored) or for a conflicted Git row. Rows keep the server's order (This chat: most recently changed first; Git: by
+  path); This chat leaves out files that are back to their original state (`unchanged`). The server caps the lists (500
+  / 2,000 files); there is no virtualization.
+- **Diff** (`ChangesFileDiff`): an opened row loads `GET /api/chats/:id/changes/diff?source={view}&path={path}` once (a
+  3-line skeleton meanwhile; the request aborts when the row closes; cached in the store until the next refresh) and
+  renders `DiffView` (7.19) with the hunks of `FileDiff.diff`, its `added` / `removed` as `stats` and line numbers.
+  `binary` → "Binary file. No preview."; `tooLarge` → "This file is too large to show a diff."; `baseAvailable: false`
+  (This chat) → "The earlier version of this file is no longer stored, so it can't be shown or reverted."; another
+  `null` diff → `DiffView`'s "The diff is too large to show."; a failed load → "Couldn't load the diff" with **Retry**
+  (`data-slot="changes-diff-error"`).
+
+| State | What shows |
+|---|---|
+| First load | 3 skeleton rows (`data-state="loading"`) |
+| Refresh | the Refresh icon spins (`aria-busy`); the rows stay |
+| Error | an `Alert` "Couldn't load the changes" with the server message and **Retry** (`changes-error`, `data-code`); earlier rows stay |
+| This chat, nothing changed | "No file changes in this chat yet." (`changes-empty`, `data-reason="none"`) |
+| Git, clean tree | "No changes since the last commit." (`clean`) |
+| Git, not a repository | "This project isn't a Git repository." (`not-a-repo`) |
+| Git, no git on the server | "Git isn't installed on the server." (`git-missing`) |
+| Git refused the repository | "Git refused to read this repository. It may belong to another user (see the projects guide)." (`refused`; typical for a Docker bind mount owned by another uid) |
+| Git too slow or failed | "Git took too long to answer." (`timeout`) / "Git couldn't read this repository." (`failed`) |
+| Folder missing | `FolderX` + "The project folder wasn't found." (`folder-unavailable`; `data-state="unavailable"`) |
+| Truncated | the footer "Showing the first 500 files." (This chat) / "Showing the first 2,000 files." (Git) |
+| Untracked changes (This chat) | a muted footer note when shell commands or other workspace tools ran in this chat (`untracked`): "3 shell commands and 1 other tool call in this chat may have changed files too. They aren't listed here." (a zero part is left out; `data-slot="changes-untracked"`) |
+
+- **Refresh triggers** (no polling): `workspace.changed` for this chat or its project (debounced 300ms per chat; agent
+  edits arrive at most once a second during a run, so the panel follows a run live), `run.finished` of this chat, an
+  event-stream reconnect (`workspace.refreshLoaded()`), window focus while the Git view is shown, and Refresh. A
+  refresh drops the view's cached diffs and reloads the diffs of open rows.
+- **Revert** (`RevertFileDialog`, a `ConfirmDialog`): title "Revert {name}?" (the file name), then by view and status:
+  This chat: "{path} goes back to how it was before this chat changed it." (added: "{path} is deleted. This chat created
+  it."); Git: "{path} goes back to the last commit." (untracked: "{path} is deleted. Git doesn't track it."; added:
+  "{path} is deleted. It isn't in the last commit."; renamed: "{origPath} comes back and {path} is deleted."). A row
+  with `changedOutside` adds "It also changed outside this chat after the agent's last edit. Those changes are reverted
+  too."; every revert adds "The current version is saved first, so you can undo this." Confirm **Revert file**
+  (`changes-revert-confirm`, destructive) → `POST /api/chats/:id/changes/revert { source, path, expectedSha }`
+  (`expectedSha` = the `currentSha` of the row's loaded diff, `null` when that diff showed the file missing, so a revert
+  never overwrites a version the user did not see; left out when the diff was never opened). Success → the toast
+  "Reverted {path}" with **Undo** (`toast-undo`) → `POST /api/chats/:id/changes/undo { batchId, conflicts: 'skip' }` →
+  "Restored {path}", or "{path} changed after the revert, so it was not restored." when the undo skipped it; the polite
+  region announces "Reverted {path}"; the list refreshes through `workspace.changed`. Errors: 409 `run-active` → toast
+  "Wait for the responses in this project to finish before reverting files."; 409 `stale` → toast "{path} changed since
+  its diff was loaded. Check it again." and the row's diff reloads; 400 (a conflicted file, a symbolic link, a
+  submodule, a filtered path such as Git LFS, a chat without a usable project folder) → toast "Couldn't revert {path}"
+  with the server message; 404 → the stale-chat toast of 7.4. The dialog cannot be dismissed while the request runs.
+- **Focus**: a click on the toggle keeps focus on the toggle; Alt+C and the palette item move focus to the active view
+  tab when they open the panel; Close returns focus to the toggle; the sheet traps focus, Esc closes it and its
+  `close-auto-focus` returns focus to the toggle. After a revert focus moves to the next row (else the previous one,
+  else the view tabs); a canceled dialog returns it to the row's Revert button.
+- **Palette** (W8.8): on project chat pages the Actions section lists "Show changes" / "Hide changes"
+  (`command-palette-item`, `data-value="toggle-changes"`; keywords changes, diff, git, files).
+- **Narrow screens**: at 390px the sheet is full width, paths truncate, a diff scrolls sideways inside its own block,
+  and the page never scrolls horizontally (14.5).
+
+### 7.22 Rewind files (`RewindDialog`, `MessageActions`, W8.9; Phase 8)
+
+"Rewind files to here" restores the project files this chat changed **after a user message was sent** (ADR-036,
+time-based: it covers every version and earlier reverts or rewinds of the chat; edits of other chats are never undone,
+they show as conflicts). The conversation itself stays; "Restore files and edit" adds the existing edit flow on top.
+Shell commands and other tools are not restorable: the dialog lists them. Wireframe: 2.15.
+
+- **Button** (`MessageActions` prop `canRewind` + emit `rewind`; `message-rewind`, `History`, "Rewind files to here",
+  after Edit and before Delete this version, 40px on coarse pointers): on a **user** message only, when the chat has a
+  project, no request is in flight (hidden through the transcript's `data-busy`, like Edit) and a `write_file` or
+  `edit_file` part in state `output-available` follows the message on the shown path. `ChatTranscript` computes the
+  set of such message ids in one backwards pass (and adds `rewindable.has(id)` to `v-memo`); `ChatMessage` passes
+  `canRewind` down and re-emits `rewind`; `ChatTranscript` emits `rewind: [messageId]`. The rule only decides
+  visibility; the preview is the truth (edits made before v1.4 have no checkpoints, so their preview is empty).
+- **Dialog** (`RewindDialog`, `components/workspace/rewind/`, `rewind-dialog`, `data-state` `loading` | `ready` |
+  `empty` | `error` | `restoring`; owned by `ChatView` like the delete-version dialog): opening it calls `GET
+  /api/chats/:id/rewind?messageId=` (aborted when it closes; a skeleton meanwhile). Title "Rewind files to here?",
+  text "Files the agent changed after this message go back to how they were before it. The conversation stays as it
+  is.", then the files (`rewind-file`, `data-path`, `data-action` `restore` | `delete` | `unavailable`,
+  `data-conflict`): the path in mono, a badge "Restore" / "Delete" (the file was created after the message) / "Can't
+  restore" (its earlier version is no longer stored; tooltip "The earlier version of this file is no longer stored."),
+  and `TriangleAlert` with the sr-only text "changed outside this chat" on a conflict; files that already match are
+  not listed; "and more files" when the server cut the list (500).
+  - With a conflict: the unchecked `Checkbox` "Also restore files changed outside this chat" (`rewind-force`): checked
+    sends `conflicts: 'force'`, unchecked skips those files.
+  - Always the muted line "Shell changes aren't tracked."; when commands ran after the message a warning `Alert`
+    "These commands ran after this message; their effects on files stay:" with up to 10 commands
+    (`rewind-shell-command`, the first line in mono, truncated with the full command in `title`) and "and {n} more";
+    when other workspace tools ran: "Other tools changed files too: {tools}. Their changes stay."
+  - Buttons: Cancel · **Restore files and edit** (outline, `rewind-restore-edit`) · **Restore files** (primary,
+    `rewind-restore`; not destructive, since it can be undone). A preview without anything to restore reads "Nothing to
+    restore. The files already match." and offers only Close.
+- **Restore** → `POST /api/chats/:id/rewind { messageId, conflicts: 'skip' | 'force' }`; the dialog stays open and
+  cannot be dismissed while it runs, then closes. Toast "Restored {n} files" ("Restored 1 file"; n = restored +
+  deleted) with the description "Skipped {k} files changed outside this chat" and / or "Skipped {k} files that can't be
+  restored", and **Undo** (`toast-undo`) when the answer has a `batchId` → `POST /api/chats/:id/changes/undo {
+  batchId, conflicts: 'skip' }`. Nothing written (`batchId: null`) → the toast "Nothing was restored." with the same
+  description, or "The files already match." when nothing was skipped either. The changes panel refreshes through
+  `workspace.changed`; the session does not reload (no message changed).
+- **Restore files and edit**: after the restore `ChatView` calls `transcript.startEdit(messageId)`: the existing
+  `MessageEditor` opens on that message and Send goes through the unchanged `session.edit()` (a new version, ADR-023).
+- **Errors**: 409 `run-active` → toast "Wait for the responses in this project to finish before rewinding files."; when
+  `details.chatId` is this chat the session marks it running and follows the run (`resumeIfRunning`). 404 → the
+  stale-chat toast of 7.4 and a refresh. 400 (not a user message, no project, the folder unavailable) and every other
+  failure → an inline destructive alert in the dialog (`rewind-error`, `data-code`) with the server message.
+- **Focus**: the dialog opens on **Restore files** (Close when empty); Cancel, Esc and a failure return focus to
+  `message-rewind` (`transcript.focusRewind(messageId)`); after Restore files focus returns there too; after Restore
+  files and edit it is in the editor.
+
+### 7.23 Shell rules (`AllowRuleOption`, `AllowlistEditor`, W8.10 / W8.11; Phase 8)
+
+A **shell rule** (ADR-038) is a command prefix: its words must equal the first words of a command part (`pnpm test`
+matches `pnpm test --run x`, not `pnpm testx` or `pnpm -C x test`). Project rules apply to the chats of that project,
+global rules ("Allowed in every project") to every project. In **Ask** and **Accept edits** a `shell` call runs without
+a card when every part of the command (split on `&&`, `||`, `;`, `|` and newlines) matches a rule or is a `cd` into a
+folder of the project; **Auto** is unchanged; a user override (`deny` / `ask`) or a `tool.approve` hook still wins. A
+command always asks when it uses `$`, backticks, redirections (other than to `/dev/null` and fd copies such as `2>&1`),
+`( )`, `{ }`, a trailing `&`, here-docs, unquoted `* ? [`, a word starting with `~` or `#`, shell keywords, a `VAR=x`
+prefix, `cd` without a literal folder, or more than 32 parts. The server matches (it reloads the rules for every run);
+the web uses the same pure parser (`packages/shared/src/util/shell-command.ts`) only to suggest and validate.
+
+- **On the approval card** (`AllowRuleOption`, `components/workspace/allowlist/`, mounted by `ToolApprovalCard` for the
+  builtin `shell` only; 7.3, wireframe 2.15): `suggestShellRules(command)` gives one prefix per part that needs a rule
+  (deduplicated, in order; `cd` parts need none); an empty result replaces the option with the note of 7.3. The
+  checkbox "Always allow commands starting with" (`tool-approval-allow-rule`) reveals, once checked:
+  - one prefix: an editable `Input` (`tool-approval-rule-prefix`, `data-value`), checked on every change with
+    `parseShellRule` and, once edited, with `matchShellRules(command, [canonical])` (the edited rule must still cover
+    the command); several prefixes: read-only mono chips (`tool-approval-rule-prefix` each, `data-value`) and the note
+    "This command has several parts: one rule is added for each.";
+  - the scope `ToggleGroup` (`tool-approval-rule-scope`, `data-value` `project` | `global`): **This project**
+    (default) or **All projects**;
+  - the hint "Combined commands run only when every part matches a rule.";
+  - inline errors (`tool-approval-rule-error`, `data-code` = the reason below); **Run** is disabled while the box is
+    checked and a prefix is invalid (the option emits `valid`).
+
+  Run → the card's `decide` carries `allowRules: { prefixes, scope }` (Deny ignores it) → `ToolPart` and `ChatMessage`
+  pass it on → `session.approve()` first awaits `POST /api/shell-rules { projectId, prefix }` for each prefix
+  (`projectId` null for All projects; 409 `exists` counts as saved), then sends the approval unchanged
+  (`addToolApprovalResponse`), so the continuation already sees the rules. A failed save still sends the approval and
+  then rethrows: `ChatView` shows the toast "Could not save the rule" with the server message.
+- **Badge**: a call allowed by rules shows `ToolRuleBadge` in its row and "Allowed by rule: …" in its terminal output
+  (7.19).
+- **Settings** (9.10, wireframe 2.15): each project row's `⋯` menu has **Allowed commands…** (`project-allowlist`,
+  `ShieldCheck`) → `AllowlistDialog` (`allowlist-dialog`, title "Allowed commands in {name}"), and its meta line counts
+  "{n} allowed commands" ("1 allowed command"; left out at 0). Below the project list `GlobalAllowlistSection`
+  (`allowlist-section`, `SettingsSection` "Allowed in every project"). Both render `AllowlistEditor`:
+  - the explanation "Shell commands that start with one of these run without asking in this project." ("in every
+    project" for the global list) "Combined commands run only when every part matches; redirections and substitutions
+    always ask." and the muted risk note "A rule for a script runner such as pnpm test or make also lets the agent run
+    any code it writes into the project.";
+  - the rules sorted by prefix (`allowlist-rule`, `data-rule-id`, `data-value` = the prefix, in mono) with **Remove**
+    (`allowlist-rule-remove`, `Trash2`, "Remove {prefix}"; immediate, no confirmation; focus then moves to the next
+    rule's Remove, else the previous one, else the input). There is no edit: remove the rule and add a new one;
+  - the add form: an `Input` (`allowlist-input`, placeholder "pnpm test") and **Add** (`allowlist-add`; Enter submits)
+    → `shellRules.create({ projectId, prefix })`; the input clears and keeps focus; errors inline (`allowlist-error`,
+    `data-code`); a one-word prefix shows the non-blocking warning "This allows every {word} command.";
+  - empty: "No allowed commands yet." (`allowlist-empty`); a failed load: "Couldn't load the allowed commands" with
+    **Retry**.
+- **Validation copy** (the card and the editor; reasons from `parseShellRule`):
+
+| Reason | Text |
+|---|---|
+| `empty` | "Enter the start of a command." |
+| `too-long` | "Use at most 200 characters." |
+| `syntax` | "Use a plain command without \|, ;, &&, redirections or substitutions." |
+| `command-runner` | "{word} runs other commands, so it can't be allowed by a rule." |
+| `interpreter` | "A rule for {word} alone would allow any code. Add what follows it, such as a script name." |
+| `cd` | "cd needs no rule: changing into a project folder is always allowed." |
+| no match (card only) | "This doesn't match the command." |
+| 409 `exists` (editor) | "This rule already exists." |
+| 400 (editor, e.g. the 200-rule cap) | the server message |
+
+- **Store**: `useShellRulesStore` (11.5) loads on first use (the Settings page or a card that saves a rule) and after an
+  event-stream reconnect when loaded; there is no rule event. Deleting a project (`project.changed` with `project:
+  null`) drops its rules locally (the server deletes them with the project).
 
 ---
 
@@ -2142,7 +2573,7 @@ except dialogs and text fields, which save on blur or Enter.
 | Default reasoning effort | `Select` Auto / Off / Low / Medium / High / Max | `defaultReasoningEffort` |
 | Max steps per response | `Input` (`inputmode="numeric"`, at most 3 characters) 1–200 (Phase 7; was 1–100), help "How many tool calls and follow-ups one response may chain in chats without a project (1–200)." | `maxSteps` |
 | Max steps in project chats | `Input` (`inputmode="numeric"`) 1–200 (Phase 7, `settings-project-max-steps`), help "Agent runs in project chats can take more steps (1–200)." | `projectMaxSteps` |
-| Alt shortcuts | `Switch` "Use Alt+M, Alt+R and Alt+P for composer menus, and Alt+V to dictate." (Phase 6 added Alt+V) | `altShortcuts` |
+| Alt shortcuts | `Switch` "Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate and Alt+C for changes." (Phase 6 added Alt+V, Phase 8 Alt+C) | `altShortcuts` |
 | Custom instructions | `Textarea` ("Sent with every chat") | `instructions` |
 
 Both step fields save on blur or Enter and Esc restores the saved value; an invalid value shows "Enter a whole number
@@ -2250,6 +2681,25 @@ next cleanup."
   left);
   then the summary line reloads and the check runs again. The confirm counts come from the last check; the server
   re-checks every file when it deletes. 409 `busy` → the busy toast; other failures → an error toast.
+- **Plugin data** (Phase 8, ADR-039): the check also scans the files plugins keep in `plugins/.data` for file ids.
+  When that scan hit its budget (`pluginData: 'partial'` in the preview) the summary adds the warning "Plugin data is
+  too large to scan completely, so a file only a plugin remembers may be removed." (`data-slot="cleanup-plugin-data"`);
+  a manual run still proceeds.
+- **Automatic cleanup** (Phase 8, ADR-039, W8.11; wireframe 2.15), below the buttons: a `Switch` "Automatic cleanup"
+  (`data-cleanup-auto`, `data-state` `checked` | `unchecked`) with the description "Remove unused files on a schedule.
+  They're deleted without asking and can't be restored. Files from the last 24 hours are always kept.", and a `Select`
+  (`data-cleanup-interval`, `data-value` `daily` | `weekly`) **Every day** / **Every week**, disabled while the switch
+  is off. Both write the one setting `fileSweep` (`off` | `daily` | `weekly`, default `off`) through
+  `settings.update()` (optimistic; a failure rolls back with an error toast); turning the switch on writes the interval
+  shown (default `daily`). A status line (`data-cleanup-auto-status`, `data-state` `off` | `never` | `done` | `skipped`
+  | `failed`) comes from `DataSummary.fileSweep` (`FileSweepStatus { mode, lastAttempt, nextRunAt }`; the section
+  loads `GET /api/data` itself on mount and after every change and cleanup): "Last automatic cleanup {relative time}:
+  removed {n} files ({size})." (`done`), "The last automatic cleanup was skipped: plugin data is too large to scan.
+  Run a cleanup by hand." (`skipped`), "The last automatic cleanup failed. It tries again after the next interval."
+  (`failed`), then "Next automatic cleanup {relative time}." while the mode is not `off` (the first run comes at
+  least 24 hours after the server started); nothing while off and never run. The automatic run uses the same lock as
+  the manual one, so a manual cleanup during it gets the busy toast; a manual cleanup also resets the schedule. The
+  setting is a public setting: a backup restores it (9.8 Import, "Restore settings from the backup").
 
 **Shared links**: `SharesSettingsSection` (W5.6, contract 10.4) renders its own `SettingsSection` "Shared links"
 ("Read-only links to chat snapshots. Revoking a link stops it at once.") and lists every share link of every chat,
@@ -2385,10 +2835,12 @@ not load the projects" with **Retry**.
 - **Rows** (`project-row`, `data-project-id`), sorted by name: the name, the path in mono muted text (truncated, the
   full path in its `title`), "{n} chats" / "1 chat" (`chatCount`), the warning badge "Folder not found"
   (`project-missing`; its tooltip is `issue`) when `available` is false, and a muted "Uses AGENTS.md" / "Uses CLAUDE.md"
-  when `instructionsFile` is set.
+  when `instructionsFile` is set; Phase 8: "{n} allowed commands" ("1 allowed command", left out at 0;
+  `shellRules.countForProject(id)`).
 - **Row `⋯` menu** (`project-row-menu`, `aria-label="Actions for {name}"`): **Rename** (`project-rename` → the name turns
   into `InlineRename`, `project-rename-input`, at most 80 characters; `projects.update(id, { name })`, optimistic) ·
-  **Edit instructions…** (`project-instructions` → `ProjectInstructionsDialog`) · **Delete…** (`project-delete` → a
+  **Edit instructions…** (`project-instructions` → `ProjectInstructionsDialog`) · **Allowed commands…** (Phase 8,
+  `project-allowlist`, `ShieldCheck` → `AllowlistDialog`, 7.23) · **Delete…** (`project-delete` → a
   `ConfirmDialog` "Delete {name}?" with "Its {n} chats stay and move to No project. The folder and its files are not
   touched." ("Its 1 chat stays and moves to No project. …"; without chats "It has no chats. The folder and its files
   are not touched.") and **Delete project**, `project-delete-confirm`, destructive). Delete → `projects.remove(id)` →
@@ -2402,6 +2854,9 @@ not load the projects" with **Retry**.
   and the dialog closes; a failure shows inline. The text resets to the project's instructions whenever it opens.
 - **Empty state** (`projects-empty`): "No projects yet. A project is a folder on the server that chats can read and
   edit." and **Add project** (`project-add`).
+- **Allowed in every project** (Phase 8, `GlobalAllowlistSection`, `allowlist-section`, mounted by the page below
+  `ProjectsSettings`, also when no project exists): the global shell rules (7.23). The page loads the rules
+  (`shellRules.fetchAll()`) on every visit, like the projects. Deleting a project deletes its rules.
 - **Add project dialog** (`AddProjectDialog`, `add-project-dialog`; title "Add project", description "Choose a folder
   on the server that chats can read and edit."; a form dialog, full width minus 1rem at 390px, `max-h-[90dvh]`, its
   folder list scrolls; it opens with focus on the browser's first entry; also opened from the switcher, 7.20):
@@ -2623,7 +3078,19 @@ provided by `ChatView`) tells the approval cards the chat's permission mode and 
 `StorageCleanupSection` × (9.8), rendered by `DataSettings`, which provides `data-context.ts`
 (`dataSettingsContextKey`: `reloadSummary()`, `reloadShares()`) to them; their texts and rules live in `data.ts`.
 
-W4.2 (UX polish) may edit every file above in Phase 4. Phase 7 owners: W7.9 (the projects and chats stores,
+**`workspace/`** (Phase 8, ADR-036 … ADR-038; C20 ships the stubs, contracts in 10.5) — `ChatWorkspace` × (wraps
+`ChatView` on `/chat/[id]`: the changes pane or sheet, Alt+C; 7.21); `changes/`: `ChangesToggle` × (in `ChatHeader`),
+`ChangesPanel` ×, `ChangesFileRow` ×, `ChangesFileDiff` ×, `ChangesEmpty` ×, `RevertFileDialog` × and the pure helpers
+`changes-rows.ts` (11.5); `rewind/`: `RewindDialog` × (owned by `ChatView`, 7.22); `allowlist/`: `AllowRuleOption` ×
+(in `ToolApprovalCard`), `AllowlistEditor` ×, `AllowlistDialog` ×, `GlobalAllowlistSection` × (7.23). Also Phase 8:
+`chat/parts/tools/ToolRuleBadge` × (the rule badge of a shell row, 7.19).
+
+W4.2 (UX polish) may edit every file above in Phase 4. Phase 8 owners: W8.8 (`ChatWorkspace`, `changes/**`, the
+workspace store, `useChangesPanel`, `useServerEvents`, `CommandPalette`), W8.9 (`rewind/**`, `ChatView`,
+`ChatTranscript`, `ChatMessage`, `MessageActions`, `ChatHeader`), W8.10 (`chat/parts/**`, the share rendering files,
+`AllowRuleOption`, `useChatSession`), W8.11 (`settings/projects/**`, `settings/data/**`, `pages/settings/projects.vue`,
+the shell rules store, `allowlist/**` but `AllowRuleOption`, `GeneralSettings`); see `docs/phases/phase-8-v1-4.md`.
+Phase 7 owners: W7.9 (the projects and chats stores,
 `projects/**`, `settings/projects/**`, `ChatNav`, `CommandPalette`), W7.10 (`useChatSession`, `useServerEvents`, the
 top-level chat components and pages), W7.11 (`chat/parts/**`, the share rendering files, `line-diff`, `ansi`), W7.12
 (`chat/composer/**`, `GeneralSettings`), W7.13 (`settings/data/**`); see `docs/phases/phase-7-v1-3.md`. Phase 6 owners:
@@ -3094,7 +3561,9 @@ and are frozen from Gate P7-0b (a change is a CCR); P7-A implements them behind 
 `WorkspaceToolView` and `FileListItem` from `workspace-tools.ts` (11.4). The components are imported by path
 (`import DiffView from './tools/DiffView.vue'`). Slots are not frozen: P7-A added the slots marked "+ slot" below
 (`DiffView` `stats`, `FileList` `empty`, `WorkspaceToolBody` `raw`), the `DiffView` attribute `data-numbers="off"`,
-the `ChatView` slot props (10.4 Chat) and a default slot in `ChatGreeting` (the new-chat picker, 7.13).
+the `ChatView` slot props (10.4 Chat) and a default slot in `ChatGreeting` (the new-chat picker, 7.13). Phase 8 (C20,
+P8-0b) replaced the `DiffView` slot and attribute with the props `stats` and `lineNumbers` (10.5); the signature below
+is the v1.4 one.
 
 ```ts
 // ProjectSwitcher (W7.9; stub) — the first row of ChatNav (5.3, 7.20)
@@ -3161,15 +3630,21 @@ defineProps<{
   created?: boolean               // default false: a new file ("New file" badge)
   truncated?: boolean             // default false: "Diff truncated by server"
   maxLines?: number               // default 200: then "Show {n} more lines"
+  stats?: { additions: number; deletions: number } | null   // + Phase 8 (C20; was the `stats` slot): the header's
+                                  // "+a −d"; null / absent = counted from the hunks; WorkspaceToolBody and
+                                  // ChangesFileDiff pass the server's totals
+  lineNumbers?: boolean           // + Phase 8 (C20; was the fallthrough attribute data-numbers="off"), default true;
+                                  // false = no line numbers and no hunk headers (approval previews)
 }>()
-defineSlots<{ stats?: (p: { additions: number; deletions: number }) => any }>()
-// + slot: replaces the header's "+a −d" (default: counted from the hunks; WorkspaceToolBody passes the server's totals)
-// + attribute data-numbers="off" (falls through): no line numbers and no hunk headers (approval previews)
-// Root diff-view (data-path, data-state = created | modified; role="region" aria-label "Changes to {path}"); lines
-// diff-line (data-kind = add | del | context); diff-expand (data-action = unfold | show-all).
+// Root diff-view (data-path, data-state = created | modified, data-numbers = on | off rendered by the component;
+// role="region" aria-label "Changes to {path}"); lines diff-line (data-kind = add | del | context); diff-expand
+// (data-action = unfold | show-all). No slots and no useAttrs since Phase 8.
 
 // TerminalOutput (W7.11; stub)
-defineProps<{ command: string; output: ShellOutput | null; running?: boolean }>()   // output null while running
+defineProps<{ command: string; output: ShellOutput | null; running?: boolean
+  cwd?: string | null }>()        // + Phase 8 (C20): the start folder while running (7.19); default null
+// output null while running; Phase 8: terminal-cwd (data-value), terminal-cwd-change (data-value) from output.cwd /
+// output.endCwd, the cwdNote line and "Allowed by rule: …" from output.allowedBy
 // Root terminal-output (data-status = running | ok | error | timeout | killed; aria-label "Output of {command}");
 // terminal-command, terminal-stdout, terminal-stderr, terminal-exit (data-value = the exit code).
 
@@ -3228,6 +3703,118 @@ defineEmits<{ 'update:open': [value: boolean]; rotated: [result: KeyRotationResu
 // Slot additions (P7-A, not frozen)
 // ChatView (W7.10):       header slot props + projectId; empty slot props { projectId, setProject } (10.4 Chat)
 // ChatGreeting (W7.10):   a default slot right under the heading (NewChatProjectPicker on '/')
+```
+
+### 10.5 Phase 8 contracts (Workspace 2.0: W8.8 – W8.11; C20 ships the stubs)
+
+The thirteen components marked "stub" are created by C20 in P8-0b with exactly these props, emits and root test ids and
+are frozen from Gate P8-0b (a change is a CCR); P8-A implements them behind those contracts. Types from
+`@harness-forge/shared`: `ChatChanges`, `FileDiff`, `GitStatus`, `RewindPreview`, `RestoreResult`, `ShellRule`,
+`ProjectSummary`, `ShellOutput` (with `endCwd?`, `cwdNote?`, `allowedBy?`); `ChangesView`, `ChangesRow` and
+`ChangesEmptyReason` from `components/workspace/changes/changes-rows.ts` (11.5); `ShellRuleScope = 'project' |
+'global'` from `components/workspace/allowlist/allow-rule.ts` (11.5). The components are imported by path.
+
+```ts
+// ChatWorkspace (W8.8; stub; mounted by pages/chat/[id].vue around ChatView) — 7.21
+defineProps<{ chatId: string; projectId: string | null }>()   // projectId null: only the chat panel renders
+defineSlots<{ default: () => any }>()                         // the ChatView
+// Always a horizontal ResizablePanelGroup (the chat panel never remounts); ≥ 1024px + open + project: the handle
+// changes-resize and an <aside> with ChangesPanel variant="pane"; < 1024px: a right Sheet with variant="sheet".
+// Registers Alt+C (id toggle-changes, 12). No root test id (data-slot="chat-workspace").
+
+// ChangesToggle (W8.8; stub; mounted by ChatHeader between ChatProjectChip and ⋯) — 7.21
+defineProps<{ chatId: string; projectId: string | null }>()
+// Renders nothing for a null project. Root changes-toggle (data-state = open | closed, data-count; aria-pressed,
+// aria-controls). Fetches the chat's changes once on mount (the count pill).
+
+// ChangesPanel (W8.8; stub) — the header, the two views, the summary and the list (7.21)
+defineProps<{ chatId: string; projectId: string; variant: 'pane' | 'sheet' }>()
+defineEmits<{ close: [] }>()
+// Root changes-panel (data-view = chat | git, data-state = loading | ready | error | unavailable); its h2 "Changes"
+// labels the pane; changes-view-option (data-value), changes-refresh, changes-close, changes-summary (data-count),
+// changes-error (data-code). Owns the RevertFileDialog.
+
+// ChangesFileRow (W8.8; stub) — one accordion row
+defineProps<{ chatId: string; view: ChangesView; row: ChangesRow; open: boolean }>()
+defineEmits<{ 'update:open': [value: boolean]; revert: [row: ChangesRow] }>()
+// Root changes-file (data-path, data-status, data-state = open | closed, data-conflict); the button
+// changes-file-revert (data-path) unless the row is not revertible; renders ChangesFileDiff while open.
+
+// ChangesFileDiff (W8.8; stub) — the lazy diff of an open row
+defineProps<{ chatId: string; view: ChangesView; path: string }>()
+// GET /api/chats/:id/changes/diff?source=view&path= through workspace.fileDiff (aborted on unmount), then DiffView
+// with the diff's hunks, :stats (its added / removed) and line numbers; the binary / too-large / base-missing notes
+// of 7.21. No root test id
+// (data-slot="changes-diff", data-state = loading | ready | error).
+
+// ChangesEmpty (W8.8; stub) — the empty and unavailable states
+defineProps<{ reason: ChangesEmptyReason }>()
+// Root changes-empty (data-reason); the texts of the 7.21 states table.
+
+// RevertFileDialog (W8.8; stub) — the revert confirmation (a ConfirmDialog)
+defineProps<{
+  open: boolean
+  chatId: string
+  view: ChangesView
+  row: ChangesRow | null
+  expectedSha?: string | null     // FileDiff.currentSha of the row's loaded diff (null = that diff showed the file
+                                  // missing); undefined = the diff was never loaded, nothing is sent
+}>()
+defineEmits<{ 'update:open': [value: boolean]; reverted: [result: RestoreResult, path: string] }>()
+// The confirm button carries changes-revert-confirm. Calls workspace.revert(); shows the "Reverted {path}" toast with
+// Undo itself (7.21); emits reverted after a success (the panel moves focus).
+
+// RewindDialog (W8.9; stub; owned by ChatView) — 7.22
+defineProps<{ open: boolean; chatId: string; messageId: string | null }>()
+defineEmits<{ 'update:open': [value: boolean]; restored: [result: RestoreResult, then: 'none' | 'edit'] }>()
+// Root rewind-dialog (data-state = loading | ready | empty | error | restoring); rewind-file (data-path, data-action =
+// restore | delete | unavailable, data-conflict), rewind-shell-command, rewind-force, rewind-restore,
+// rewind-restore-edit, rewind-error (data-code). Loads GET /api/chats/:id/rewind?messageId= on open and posts
+// POST /api/chats/:id/rewind; shows the result toast with Undo; ChatView calls transcript.startEdit(messageId) after
+// restored(…, 'edit').
+
+// AllowRuleOption (W8.10; stub; mounted by ToolApprovalCard for the builtin shell) — 7.3, 7.23
+defineProps<{ command: string; disabled?: boolean }>()
+defineModel<{ prefixes: string[]; scope: ShellRuleScope } | null>()   // null = the box is unchecked
+defineEmits<{ valid: [value: boolean] }>()                            // false while checked with an invalid prefix
+// Root tool-approval-allow-rule (the checkbox; data-state = checked | unchecked); tool-approval-rule-prefix (the
+// input, or each chip; data-value), tool-approval-rule-scope (data-value = project | global),
+// tool-approval-rule-error (data-code). Renders only the always-ask note (data-slot="allow-rule-note") when
+// suggestShellRules(command) is empty.
+
+// AllowlistEditor (W8.11; stub) — the rules of one scope (7.23)
+defineProps<{ projectId: string | null }>()   // null = the global rules
+// allowlist-rule (data-rule-id, data-value), allowlist-rule-remove, allowlist-input, allowlist-add, allowlist-error
+// (data-code), allowlist-empty. Reads and writes useShellRulesStore. No root test id (data-slot="allowlist-editor").
+
+// AllowlistDialog (W8.11; stub; opened by the project row menu) — 9.10
+defineProps<{ open: boolean; project: ProjectSummary | null }>()
+defineEmits<{ 'update:open': [value: boolean] }>()
+// Root allowlist-dialog; title "Allowed commands in {name}"; renders AllowlistEditor :project-id="project.id".
+
+// GlobalAllowlistSection (W8.11; stub; mounted by pages/settings/projects.vue below ProjectsSettings) — 9.10
+// No props, no emits. Root allowlist-section; a SettingsSection "Allowed in every project" with AllowlistEditor
+// :project-id="null".
+
+// ToolRuleBadge (W8.10; stub; mounted by ToolPart and ShareToolRow) — 7.19
+defineProps<{ prefixes: readonly string[] }>()   // ShellOutput.allowedBy; renders nothing when empty
+// Root tool-row-rule (data-value = the prefixes joined with ", "); ShieldCheck + the sr-only text
+// ", allowed by rule {prefixes}"; tooltip "Allowed by rule: {prefixes}".
+
+// Prop and emit additions (C20 declares them in P8-0b; the owners use them in P8-A)
+// MessageActions (W8.9):  canRewind?: boolean (default false) + emit rewind: []   // History, after Edit
+// ChatMessage (W8.9):     canRewind?: boolean (default false) + emit rewind: []   // passed to MessageActions
+//                         approval emit payload + allowRules?: { prefixes: string[]; scope: ShellRuleScope }
+// ChatTranscript (W8.9):  emit rewind: [messageId: string]; defineExpose + focusRewind(messageId: string): void,
+//                         startEdit(messageId: string): void (opens MessageEditor on that user message unless busy)
+// ToolApprovalCard (W8.10): decide payload + allowRules?: { prefixes: string[]; scope: ShellRuleScope }
+// ToolPart (W8.10):       approval payload + allowRules? (pass-through); renders ToolRuleBadge for outputs with
+//                         allowedBy and passes cwd to TerminalOutput while running
+// DiffView (C20, complete in P8-0b): stats?: { additions; deletions } | null, lineNumbers?: boolean (10.4)
+// TerminalOutput (W8.10): cwd?: string | null (10.4)
+// ChatHeader (W8.9):      mounts ChangesToggle with its chatId and projectId (no new prop)
+// ChatView (W8.9):        owns RewindDialog; provides TOOL_APPROVAL_CONTEXT.projectId / shellCwd (11.5); shows the
+//                         "Could not save the rule" toast when session.approve() rethrows a rule failure
 ```
 
 ---
@@ -3339,7 +3926,9 @@ actions: openPalette(), closePalette(), togglePalette(), openShortcuts(), openIn
          openShare(chatId) /* + sets shareChatId */, closeShare() /* + sets it back to null */
 ```
 
-Phase 7 adds the projects store and the two chats store members above (frozen from Gate P7-0b); the settings store
+Phase 8 adds the `workspace` and `shell-rules` stores (11.5, frozen from Gate P8-0b); no existing store signature
+changes, and the settings store carries `fileSweep` through `Settings`. Phase 7 adds the projects store and the two
+chats store members above (frozen from Gate P7-0b); the settings store
 carries `projectMaxSteps` through `Settings`. The chats store keeps its signature in Phase 5 (W5.2 changes only the
 implementation); the Data page uses
 `chats.fetchPage({ reset: true })` and `settings.fetch()` after an import or a delete-all (9.8). Phase 6 changes no
@@ -3366,7 +3955,10 @@ session in the registry whose chat is listed in `chatIds` reloads its path (its 
 run stopped; a session with a request in flight reloads once that request settles), not only the open one; the server
 closes every event stream right after `key.rotated`, so the client reconnects with backoff (the rotating tab holds a
 new cookie; other browsers are signed out and land on `/login`); `refetchLoadedStores()` also calls
-`projects.fetchAll()` when the projects store is loaded.
+`projects.fetchAll()` when the projects store is loaded. Phase 8 (C20 dispatch, W8.8): `workspace.changed` →
+`workspace.applyEvent` (the changes panel, 7.21); `run.finished`, `chat.deleted` and `project.changed` also go to
+`workspace.applyEvent`, and `project.changed` to `shellRules.applyEvent`; `refetchLoadedStores()` also calls
+`workspace.refreshLoaded()` and, when the shell rules store is loaded, `shellRules.fetchAll()`.
 
 ### 11.1 `useChatSession(id)` (W2.2)
 
@@ -3535,7 +4127,7 @@ Other composables: `useApi()` / `useApiFetch()` (C5), `useServerEvents()` (C5, 1
 11.1), `useGlobalShortcuts()` (W2.4), `useComposerAttachments()`, `useComposerDraft(chatId)`,
 `useComposerModel(modelRef)`, `useComposerShortcuts()` and `useComposerDropZone()` (W2.3); Phase 6: `useImageOptions()`,
 `useVoiceInput()`, `useSpeechPlayer()` and `useFreshAuth()` (11.3); Phase 7: `useMoveChat()` and the pure workspace
-modules (11.4).
+modules (11.4); Phase 8: `useChangesPanel()` and the helpers of 11.5.
 
 ### 11.3 Phase 6 composables
 
@@ -3709,6 +4301,122 @@ Exports added in P7-A (not frozen; the frozen signatures above are unchanged):
 // settings/general.ts: STEPS_MAX (LIMITS.stepsMax), STEPS_ERROR; TOOL_MODE_OPTIONS mirrors the composer's
 ```
 
+### 11.5 Phase 8 modules
+
+C20 creates these in P8-0b with exactly these signatures (frozen from Gate P8-0b) and stub bodies; P8-A implements
+them. Owners: W8.8 the workspace store, `useChangesPanel` and `changes-rows.ts`; W8.11 the shell rules store; W8.10 the
+`useChatSession`, `TOOL_APPROVAL_CONTEXT` and `workspace-tools.ts` additions; `allow-rule.ts` is complete in P8-0b.
+
+```ts
+// stores/workspace.ts — useWorkspaceStore (+ Phase 8, ADR-036 / ADR-037; 7.21, 7.22)
+interface ChangesEntry<T> { data: T | null; loading: boolean; error: HarnessError | null; loadedAt: number | null }
+state:   { chat: Record<string, ChangesEntry<ChatChanges>>   // by chat id: the This chat view
+           git: Record<string, ChangesEntry<GitStatus>> }    // by chat id: the Git view (the route is chat-scoped)
+getters: chatChanges(chatId): ChatChanges | null, gitStatus(chatId): GitStatus | null,
+         changeCount(chatId): number          // This chat files whose status is not 'unchanged' (the toggle's pill)
+actions: fetchChatChanges(chatId: string, opts?: { force?: boolean }): Promise<void>   // GET /chats/:id/changes
+         fetchGit(chatId: string, opts?: { force?: boolean }): Promise<void>           // GET /chats/:id/git
+         fileDiff(chatId: string, source: ChangesView, path: string, opts?: { signal?: AbortSignal }): Promise<FileDiff>
+                                              // GET /chats/:id/changes/diff; cached until the next refresh
+         revert(chatId: string, input: { source: ChangesView; path: string; expectedSha?: string | null })
+           : Promise<RestoreResult>           // POST /chats/:id/changes/revert
+         undo(chatId: string, batchId: string): Promise<RestoreResult>   // POST …/changes/undo, conflicts: 'skip'
+         applyEvent(event: ServerEvent): void
+         refreshLoaded(): Promise<void>       // after an event-stream reconnect: refetch every loaded entry
+// fetch* keep a failure in the entry (error) and never reject; a second call while one runs joins it unless force;
+// revert / undo throw HarnessError (409 run-active / stale, 400, 404). applyEvent: workspace.changed → refetch
+// (debounced 300 ms per chat) the This chat entry of data.chatId and the Git entries of the loaded chats of
+// data.projectId (a chat's project: its loaded ChatChanges.projectId, else the chats store); run.finished → refetch
+// that chat's loaded entries; chat.deleted → drop its entries; project.changed with project null → drop the entries
+// of that project's chats. The rewind preview and apply are one-shot calls of RewindDialog (useApi()); its Undo uses
+// undo().
+
+// stores/shell-rules.ts — useShellRulesStore (+ Phase 8, ADR-038; 7.23)
+state:   { items: ShellRule[]; loaded: boolean; loading: boolean }
+getters: global: ShellRule[]                          // projectId null, sorted by prefix
+         forProject(projectId: string): ShellRule[]   // sorted by prefix
+         countForProject(projectId: string): number
+actions: fetchAll(): Promise<void>                    // GET /shell-rules
+         create(input: { projectId: string | null; prefix: string }): Promise<ShellRule>
+                                                      // POST /shell-rules; 409 exists and 400 are thrown
+         remove(id: string): Promise<void>            // DELETE /shell-rules/:id; a 404 counts as removed
+         applyEvent(event: ServerEvent): void         // project.changed with project null: drop that project's rules
+// No update action: a rule is removed and added again (no rule edit).
+
+// composables/useChangesPanel.ts — the panel state, one shared state for the app (module singleton, like
+// useImageOptions)
+function useChangesPanel(): {
+  open: Readonly<Ref<boolean>>          // localStorage['hf-changes-open'] ('1' / '0'); default false
+  view: Ref<ChangesView>                // localStorage['hf-changes-view']; default 'chat'
+  width: Ref<number>                    // px, localStorage['hf-changes-width']; default 440, clamped to 320–720
+  focusRequest: Readonly<Ref<number>>   // increases when Alt+C or the palette opens the panel: focus the active tab
+  setOpen(value: boolean, opts?: { focus?: boolean }): void
+  toggle(opts?: { focus?: boolean }): void
+}
+// Also exported: CHANGES_OPEN_KEY, CHANGES_VIEW_KEY, CHANGES_WIDTH_KEY, CHANGES_WIDTH ({ default: 440, min: 320,
+// max: 720 }), CHANGES_SHORTCUT ('toggle-changes'). Blocked storage keeps the state in memory.
+
+// components/workspace/changes/changes-rows.ts — pure helpers of the panel
+type ChangesView = 'chat' | 'git'
+type ChangesStatus = 'added' | 'modified' | 'deleted' | 'untracked' | 'renamed' | 'conflicted' | 'typechange'
+interface ChangesRow {
+  path: string
+  origPath: string | null           // Git renames
+  status: ChangesStatus
+  additions: number | null          // This chat only; null = not counted
+  deletions: number | null
+  changedOutside: boolean           // This chat: the file on disk is not what the agent last wrote
+  revertible: boolean               // This chat: its base state is stored; Git: not conflicted
+  edits: number | null              // This chat: the recorded changes of the file
+  staged: boolean | null            // Git only
+  unstaged: boolean | null
+}
+type ChangesEmptyReason = 'none' | 'clean' | GitUnavailableReason   // GitUnavailableReason from @harness-forge/shared
+                                  // (no-project, folder-unavailable, git-missing, not-a-repo, refused, timeout, failed)
+function chatChangeRows(changes: ChatChanges): ChangesRow[]   // from ChatChangeFile; leaves out 'unchanged' files;
+                                                              // keeps the server's order (most recently changed first)
+function gitChangeRows(status: GitStatus): ChangesRow[]       // from GitStatusFile; the server's order (by path)
+function statusTile(status: ChangesStatus): { letter: string; label: string }   // { letter: 'A', label: 'Added' }
+function changesSummary(view: ChangesView, data: ChatChanges | GitStatus): string   // the summary line (7.21)
+function changesEmptyReason(view: ChangesView, data: ChatChanges | GitStatus): ChangesEmptyReason | null
+
+// components/workspace/allowlist/allow-rule.ts — complete in P8-0b (C20): the copy of 7.23 over the shared parser
+type ShellRuleScope = 'project' | 'global'
+function checkRulePrefix(prefix: string, command?: string):
+  | { ok: true; canonical: string; warning: string | null }   // warning: "This allows every {word} command."
+  | { ok: false; code: string; message: string }              // code = the parseShellRule reason, or 'no-match'
+function ruleProjectId(scope: ShellRuleScope, projectId: string | null): string | null   // global → null
+
+// composables/useChatSession.ts — additions (W8.10)
+interface ChatSession {
+  // … the members of 11.1
+  cwd: ComputedRef<string | null>   // + currentShellCwd(chat.messages): the folder the next shell call starts in
+                                    //   (null = the project folder; derived like the server, so it follows versions)
+}
+interface ToolApprovalDecision {
+  // … the members of 11.1
+  allowRules?: { prefixes: string[]; scope: ShellRuleScope }
+                                    // + approve() first awaits POST /shell-rules for each prefix (projectId: the
+                                    //   session's project for 'project', null for 'global'; 409 exists counts as
+                                    //   saved), then sends the approval; a failed save still sends it, then rethrows
+}
+
+// components/chat/parts/tool-approval-context.ts — additions (provided by ChatView)
+interface ToolApprovalContext {
+  toolMode: () => ToolMode | null
+  projectName: () => string | null
+  projectId: () => string | null    // + the chat's project (the scope This project)
+  shellCwd: () => string | null     // + session.cwd: "In {project}/{cwd}" and the running TerminalOutput
+}
+
+// components/chat/parts/tools/workspace-tools.ts — additions (W8.10)
+function currentShellCwd(messages: readonly HarnessUIMessage[]): string | null
+  // the endCwd of the last finished shell part on the path ('.' for an output saved before v1.4), null without one
+function diffStatsLabel(additions: number, deletions: number): string   // "12 lines added, 3 removed" (7.19)
+// WorkspaceRowSummary gains label: string (the spoken text, 7.19); the terminal view gains cwd: string | null (the
+// output's cwd, else the input's)
+```
+
 ---
 
 ## 12. Keyboard shortcuts
@@ -3726,6 +4434,7 @@ Exports added in P7-A (not frozen; the frozen signatures above are unchanged):
 | Alt+R | open effort menu (reasoning models) | chat pages, also in inputs | W2.3 (`alt+code:KeyR`, `alt: true`) |
 | Alt+P | open permission menu (when tools exist; Phase 7: with Accept edits in project chats) | chat pages, also in inputs | W2.3 (`alt+code:KeyP`, `alt: true`) |
 | Alt+V | what a click on the mic does (7.17): start dictation; while recording: stop and transcribe; while transcribing: cancel; without a speech-to-text model: the setup popover | chat pages with the composer, also in inputs; not while focus is in a dialog, menu or listbox; only where the browser can record in a secure context; with a disabled composer only while dictation runs | W6.9 (id `composer-dictate`, `alt+code:KeyV`, `alt: true`; calls `MicButton.activate()`; Phase 6) |
+| Alt+C | show or hide the changes panel (Phase 8, 7.21); opening it focuses the active view tab | project chat pages, also in inputs | W8.8 (id `toggle-changes`, `alt+code:KeyC`, `alt: true`, group Chat; registered by `ChatWorkspace` while the chat has a project) |
 | Enter | send (`sendKey = enter`) | composer | W2.3 |
 | Mod+Enter | send (`sendKey = mod-enter`) | composer | W2.3 |
 | Shift+Enter | new line | composer | W2.3 |
@@ -3751,6 +4460,12 @@ Rules:
 - Shortcuts never fire while an IME composition is active or inside CodeMirror (except Mod+S and Mod+K).
 - Phase 7 adds no shortcut (every free combo clashes with a browser shortcut): projects are reached through the
   switcher (Tab and Enter), the command palette's Projects section (7.20) and Alt+P for the permission mode.
+- Phase 8 adds **Alt+C** (the changes panel, only on project chat pages) and the palette item "Show changes" / "Hide
+  changes" (`toggle-changes`). It follows the Alt rule above: it matches `event.code` (AltGr layouts and Option+C on
+  macOS work), obeys `altShortcuts`, and calls `preventDefault()`. Rejected: Alt+D (focuses the address bar on
+  Windows), Mod+Shift+D (bookmarks all tabs), Mod+\ (fails on AltGr layouts). Known caveat, as for Alt+V: Alt+C opens
+  the History menu of Firefox in some locales (German); `preventDefault()` should keep it closed (unverified). Rewind
+  and shell rules have no shortcut (the message action row and the approval card are reached with Tab).
 - `KbdCombo` renders hints: `⌘⇧O` / `⌘K` on macOS, `Ctrl Shift O` / `Ctrl K` elsewhere. Hints are hidden below `lg`
   and on touch devices.
 
@@ -3775,10 +4490,11 @@ elements goes into data attributes (`data-chat-id`, `data-message-id`, `data-mod
 `data-plugin-id`, `data-tool-name`, `data-server-id`, `data-state`, `data-status`, `data-value`, `data-step`,
 `data-step-item`, `data-path`, `data-kind`, `data-action`, `data-code`, `data-level`, `data-dirty`, `data-hidden`;
 Phase 5 adds `data-index`, `data-count`, `data-share-id`, `data-role`, `data-outdated`, `data-expired`; Phase 6 reuses
-them for galleries and adds no new attribute name; Phase 7 adds `data-project-id` and `data-tone`). Playwright uses
-`getByTestId()` plus attribute filters. Ids are never reused for a different element; removing one is a CCR. The Phase
-5 ids are collected in 13.6, except the two Settings → Models ids added in P5-B (`model-select-option`,
-`model-row-menu`, 13.4); the Phase 6 ids in 13.7; the Phase 7 ids in 13.8.
+them for galleries and adds no new attribute name; Phase 7 adds `data-project-id` and `data-tone`; Phase 8 adds
+`data-conflict`, `data-view` and `data-rule-id`). Playwright uses `getByTestId()` plus attribute filters. Ids are never
+reused for a different element; removing one is a CCR. The Phase 5 ids are collected in 13.6, except the two Settings →
+Models ids added in P5-B (`model-select-option`, `model-row-menu`, 13.4); the Phase 6 ids in 13.7; the Phase 7 ids in
+13.8; the Phase 8 ids in 13.9.
 
 ### 13.1 Shell and navigation
 
@@ -4133,6 +4849,64 @@ badge), `command`, `command-description`, `command-meta`, `command-warning` (the
 show-all buttons carry `data-action="show-all"` (`data-stream` in `TerminalOutput`). The project filter is stored raw in
 `localStorage['hf-project-filter']` (`all`, `none` or a project id).
 
+### 13.9 Changes panel, rewind, shell rules and automatic cleanup (Phase 8)
+
+The 39 new ids of Phase 8. C20 copies this table verbatim into `utils/testids.ts` in P8-0b (the key column is the
+`testIds` key) under a `// Changes panel, rewind, shell rules and automatic cleanup (Phase 8)` comment; the file stays
+frozen through P8-A. New data attributes: `data-conflict` (`true` on a file changed outside this chat), `data-view`
+(`chat` / `git`) and `data-rule-id` (a shell rule id). Reused ids: the revert and rewind toasts' Undo is `toast-undo`;
+the palette item is a `command-palette-item` with `data-value="toggle-changes"`; the revert confirmation is a
+`ConfirmDialog` whose confirm button carries `changes-revert-confirm`; the shell approval card stays a
+`tool-approval` with `tool-approval-allow` / `tool-approval-deny`; rows stay `tool-row`s. There are no ids for a rule
+edit (rules are removed and added, never edited).
+
+| Id | Key (`testIds.*`) | Element | Data attributes |
+|---|---|---|---|
+| `changes-toggle` | `changesToggle` | `ChangesToggle` in the chat header | `data-state` (`open` / `closed`), `data-count` |
+| `changes-panel` | `changesPanel` | `ChangesPanel` root (pane or sheet) | `data-view` (`chat` / `git`), `data-state` (`loading` / `ready` / `error` / `unavailable`) |
+| `changes-view-option` | `changesViewOption` | a view tab (This chat / Git) | `data-value` (`chat` / `git`), `data-state` (reka: `active` / `inactive`) |
+| `changes-refresh` | `changesRefresh` | "Refresh changes" | |
+| `changes-close` | `changesClose` | "Close changes" | |
+| `changes-resize` | `changesResize` | the resize handle of the desktop pane | |
+| `changes-summary` | `changesSummary` | the summary line | `data-count` (listed files) |
+| `changes-file` | `changesFile` | one file row | `data-path`, `data-status` (`added` / `modified` / `deleted` / `untracked` / `renamed` / `conflicted` / `typechange`), `data-state` (`open` / `closed`), `data-conflict` |
+| `changes-file-revert` | `changesFileRevert` | "Revert {path}" of a row | `data-path` |
+| `changes-empty` | `changesEmpty` | `ChangesEmpty` | `data-reason` (`ChangesEmptyReason`) |
+| `changes-error` | `changesError` | "Couldn't load the changes" alert | `data-code` |
+| `changes-revert-confirm` | `changesRevertConfirm` | confirm button of the revert `ConfirmDialog` | |
+| `message-rewind` | `messageRewind` | "Rewind files to here" in the action row of a user message | |
+| `rewind-dialog` | `rewindDialog` | `RewindDialog` content | `data-state` (`loading` / `ready` / `empty` / `error` / `restoring`) |
+| `rewind-file` | `rewindFile` | one file of the preview | `data-path`, `data-action` (`restore` / `delete` / `unavailable`), `data-conflict` |
+| `rewind-shell-command` | `rewindShellCommand` | one shell command listed in the warning | |
+| `rewind-force` | `rewindForce` | "Also restore files changed outside this chat" checkbox | `data-state` (reka: `checked` / `unchecked`) |
+| `rewind-restore` | `rewindRestore` | "Restore files" | |
+| `rewind-restore-edit` | `rewindRestoreEdit` | "Restore files and edit" | |
+| `rewind-error` | `rewindError` | inline error of the dialog | `data-code` |
+| `tool-approval-allow-rule` | `toolApprovalAllowRule` | "Always allow commands starting with" checkbox of a shell card | `data-state` (reka: `checked` / `unchecked`) |
+| `tool-approval-rule-prefix` | `toolApprovalRulePrefix` | the prefix input (one prefix) or each prefix chip (several) | `data-value` (the prefix) |
+| `tool-approval-rule-scope` | `toolApprovalRuleScope` | This project / All projects toggle group | `data-value` (`project` / `global`) |
+| `tool-approval-rule-error` | `toolApprovalRuleError` | inline rule error of the card | `data-code` (the `parseShellRule` reason or `no-match`) |
+| `tool-row-rule` | `toolRowRule` | `ToolRuleBadge` of a shell row (chat and share page) | `data-value` (the matched prefixes, joined with ", ") |
+| `project-allowlist` | `projectAllowlist` | "Allowed commands…" item of a project row menu | |
+| `allowlist-dialog` | `allowlistDialog` | `AllowlistDialog` content | |
+| `allowlist-section` | `allowlistSection` | `GlobalAllowlistSection` root | |
+| `allowlist-input` | `allowlistInput` | the new-rule input of an `AllowlistEditor` | |
+| `allowlist-add` | `allowlistAdd` | "Add" of an `AllowlistEditor` | |
+| `allowlist-error` | `allowlistError` | inline error of an `AllowlistEditor` | `data-code` (a `parseShellRule` reason or the `HarnessError` code) |
+| `allowlist-rule` | `allowlistRule` | one rule row | `data-rule-id`, `data-value` (the prefix) |
+| `allowlist-rule-remove` | `allowlistRuleRemove` | "Remove {prefix}" | |
+| `allowlist-empty` | `allowlistEmpty` | "No allowed commands yet." | |
+| `terminal-cwd` | `terminalCwd` | the folder before `$` in `TerminalOutput` | `data-value` (the project-relative folder) |
+| `terminal-cwd-change` | `terminalCwdChange` | the "Now in {folder}" badge | `data-value` (the new folder; `.` = the project folder) |
+| `data-cleanup-auto` | `dataCleanupAuto` | "Automatic cleanup" switch (Settings → Data) | `data-state` (reka: `checked` / `unchecked`) |
+| `data-cleanup-interval` | `dataCleanupInterval` | "Every day / Every week" select trigger | `data-value` (`daily` / `weekly`) |
+| `data-cleanup-auto-status` | `dataCleanupAutoStatus` | the automatic cleanup status line | `data-state` (`off` / `never` / `done` / `skipped` / `failed`) |
+
+E2e hooks that are not test ids (Phase 8, no CCR needed): `data-slot` = `chat-workspace`, `changes-diff` (`data-state`),
+`changes-diff-error`, `changes-untracked`, `allow-rule-note`, `allowlist-editor`, `terminal-cwd-note`,
+`terminal-rule`, `cleanup-plugin-data`. The panel state is stored in `localStorage['hf-changes-width']` (px),
+`['hf-changes-open']` (`1` / `0`) and `['hf-changes-view']` (`chat` / `git`).
+
 ---
 
 ## 14. Accessibility and responsiveness
@@ -4175,6 +4949,14 @@ show-all buttons carry `data-action="show-all"` (`data-stream` in `TerminalOutpu
   keyboard focus hands focus back to "Check for unused files". "Show {n} more lines" and "Show all" keep focus on
   the same place of the expanded block. Checking "Accept all edits in this chat" does not move focus; Allow then
   collapses the card like any decision.
+- Phase 8: a click on the changes toggle keeps focus on it; Alt+C and the palette item move focus to the active view
+  tab when they open the panel; Close returns focus to the toggle; the sheet traps focus and returns it to the toggle
+  when it closes (Esc too). After a revert focus moves to the next row (else the previous one, else the view tabs); a
+  canceled revert returns it to the row's Revert button. The rewind dialog opens on Restore files (Close when there is
+  nothing to restore); Cancel, Esc, a failure and Restore files return focus to "Rewind files to here"; Restore files
+  and edit leaves it in the message editor. Checking "Always allow commands starting with" moves focus to the prefix
+  input (one prefix) or keeps it on the checkbox; an `AllowlistEditor` keeps focus in its input after Add and moves it
+  to the next rule's Remove (else the previous one, else the input) after a removal.
 
 ### 14.2 Semantics and labels
 
@@ -4212,12 +4994,23 @@ show-all buttons carry `data-action="show-all"` (`data-stream` in `TerminalOutpu
   ", folder not found" when missing). The folder browser's breadcrumb is a `nav` "Folder path" with `aria-current` on
   the open folder; disabled entries say "{name}, already a project". A diff is a `role="region"` named "Changes to
   {path}" whose changed lines carry the sr-only words "Added" / "Removed"; a terminal block is a group named "Output of
-  {command}" (the first line) and its exit badge reads "Exit code {n}"; row summaries are plain visible text ("+12 −3",
-  "exit 1") with no extra sr-only wording. The new-chat picker is named "Project: {name}" too; root entries of the
-  folder browser whose folder is missing say "{path}, not found". Every approval card is a group named "Approval needed:
-  {tool}"; the shell approval is named and announced as "Approval needed: run {command}", and its warning is text inside
-  the card. The Encryption key and Storage cleanup sections have headings; "Rotate key…" and "Remove…" name their
-  action; the cleanup check result is announced in a polite region.
+  {command}" (the first line) and its exit badge reads "Exit code {n}"; row summaries were plain visible text ("+12 −3",
+  "exit 1") with no extra sr-only wording in v1.3 (Phase 8 adds spoken labels, below). The new-chat picker is named
+  "Project: {name}" too; root entries of the folder browser whose folder is missing say "{path}, not found". Every
+  approval card is a group named "Approval needed: {tool}"; the shell approval is named and announced as "Approval
+  needed: run {command}", and its warning is text inside the card. The Encryption key and Storage cleanup sections have
+  headings; "Rotate key…" and "Remove…" name their action; the cleanup check result is announced in a polite region.
+- Phase 8: a row summary's visible text is `aria-hidden` and a sibling sr-only span says its label ("12 lines added, 3
+  removed", "Exit code 1", "Timed out", "Lines 1 to 120 of 340", "New file, 40 lines"; 7.19), on the share page too. The
+  changes toggle is a toggle button (`aria-pressed`, `aria-controls`) named "Show changes, {n} files changed" / "Hide
+  changes"; the desktop pane is an `<aside>` labelled by its `h2` "Changes"; the views are reka `Tabs`; each file row
+  is a button with `aria-expanded` / `aria-controls` whose status letter has sr-only text ("Added", "Modified", …), and
+  whose conflict icon says "changed outside this chat"; "+a −d" reads as `diffStatsLabel`; Revert is named "Revert
+  {path}"; a polite region announces "Reverted {path}". "Rewind files to here" names its action; the dialog's file
+  badges are text ("Restore", "Delete", "Can't restore"). The rule badge of a shell row adds ", allowed by rule
+  {prefixes}" to the row's name; the allow-rule checkbox, the prefix input and the scope group have visible labels;
+  inline rule errors are linked with `aria-describedby`. The automatic cleanup switch has a visible label and its
+  description; the status line is plain text.
 
 ### 14.3 Contrast targets
 
@@ -4242,7 +5035,7 @@ instant scroll instead of smooth, no sheet slide (fade only).
 | < 640 (`sm`) | greeting 24px; effort/permission triggers show icons only; dialogs stay centered, never full-screen: form dialogs span the width minus 1rem on each side (`max-w-[calc(100%-2rem)]`), are capped at the viewport height minus 2rem and scroll inside; confirmations (`AlertDialog`) are 20rem wide |
 | < 768 (`md`) | sidebar becomes a `Sheet` (18rem, from the left; its own query is `max-width: 768px`, so it is still a sheet at exactly 768px) opened by the header trigger; closes on navigation; composer full width with 12px gutters; textarea 16px; model picker as a bottom `Drawer`; plugin filters as a `Select`; settings content full width |
 | 768–1023 | sidebar collapsible to icons; transcript `max-w-3xl` with 16px gutters; kbd hints hidden |
-| ≥ 1024 (`lg`) | full layout, kbd hints visible |
+| ≥ 1024 (`lg`) | full layout, kbd hints visible; Phase 8: the changes panel is a pane next to the chat (below: a right sheet) |
 | ≥ 1280 (`xl`) | plugin grid 3 columns |
 
 - Use `min-h-dvh` / `h-dvh` (not `vh`) for full-height areas; the composer dock pads with
@@ -4266,6 +5059,12 @@ instant scroll instead of smooth, no sheet slide (fade only).
   On touch screens every new control is at least 40px (`pointer-coarse:h-10`): the switcher, the new-chat pill, the
   chip, the move items, the folder entries and Parent folder, Raw input and output, Show more, and the approval
   checkbox.
+- Phase 8 screens: at ≥ 1024px the changes panel is a resizable pane (320–720px, the chat panel keeps at least 40%);
+  below 1024px it is a right sheet, full width below `sm` (no horizontal page scroll with a diff open: the diff
+  scrolls inside its block); the rewind dialog and the allowed commands dialog follow the form-dialog rule. On touch
+  screens the toggle, the row buttons, Revert (always visible), "Rewind files to here", the allow-rule checkbox, the
+  scope toggles, the editor's Remove and Add, and the cleanup switch and select are at least 40px
+  (`pointer-coarse:h-10`); the pane's resize handle has a 24px hit area.
 - Phase 6 screens: galleries keep their two columns at 390px (tiles never overflow the column); the recording composer
   keeps the 390px layout without horizontal scroll (the indicator shows the dot, the timer and Cancel); the Media page
   stacks labels above controls below `sm`.
@@ -4291,7 +5090,8 @@ extra browser. The mobile specs (W5.8) assert:
 They reuse the existing test ids; Phase 5 adds none for mobile. Phase 6 adds to the mobile specs (W6.12): the mic is
 at least 40×40px, a gallery fits 390px, and there is no horizontal scroll while recording. Phase 7 adds
 `mobile/projects.spec.ts` (W7.14): the switcher works inside the sheet, the chip is icon-only, and an expanded diff
-causes no horizontal page scroll.
+causes no horizontal page scroll. Phase 8 adds `mobile/changes.spec.ts` (W8.12): the panel opens as a right sheet at
+390px, an open diff causes no horizontal page scroll, Esc returns focus to the toggle, and the rewind dialog fits.
 
 ### 14.7 Tablet e2e and media permissions (Phase 6)
 
@@ -4299,7 +5099,8 @@ causes no horizontal page scroll.
 so `pointer: coarse` matches and the sidebar is not a sheet). It runs only `e2e/specs/tablet/*.spec.ts`; the `chromium`
 project ignores `specs/(mobile|tablet)/`. `tablet/touch-targets.spec.ts` (W6.12) collapses the sidebar and asserts that
 the icon rail is 56px wide and every icon button is at least 40×40px. Phase 7 (W7.14) extends it to the project
-switcher, the chip and the approval controls.
+switcher, the chip and the approval controls; Phase 8 (W8.12) to the changes toggle, the file rows, Revert,
+"Rewind files to here", and the allow-rule checkbox and scope.
 
 Every project runs with `use.permissions: ['microphone']` and the Chromium flags `--use-fake-ui-for-media-stream`,
 `--use-fake-device-for-media-stream` and `--autoplay-policy=no-user-gesture-required`, so the voice spec records from a
@@ -4377,3 +5178,10 @@ Key strings:
 | General (Phase 7) | "Max steps per response" · "How many tool calls and follow-ups one response may chain in chats without a project (1–200)." · "Max steps in project chats" · "Agent runs in project chats can take more steps (1–200)." · "Enter a whole number from 1 to 200." |
 | Settings → Data (Phase 7) | "Storage cleanup" · "Remove uploaded and generated files that no chat, share link, plugin or setting uses anymore. Files from the last 24 hours are kept, and deleting a chat or a version keeps its files until the next cleanup." · "Check for unused files" · "{files} files · {size} can be removed" · "and {n} leftover files on disk" · "{n} leftover files on disk can be removed" · "{n} recent files are kept for 24 hours." · "Last cleanup {time}" · "No unused files." · "Remove…" · "Remove unused files?" · "This deletes {files} files ({size}). It can't be undone." · "This deletes {n} leftover files on disk. It can't be undone." · "Remove files" · "Removed {files} files ({size})" · "Removed {n} leftover files from disk" · "Encryption key" · "API keys and other secrets are encrypted on this server with a master key." · "Source" · "Key file in the data directory" · "HF_MASTER_KEY environment variable" · "Version" · "Rotated" · "Never" · "Secrets" · "{n} encrypted" · "{n} can't be read" · "Rotate key…" · "Could not load the encryption key status" · "The key comes from HF_MASTER_KEY. Stop the server and run `pnpm key:rotate` with HF_NEW_MASTER_KEY set to the new key." · "Docker" · "Source checkout" · "Copy the Docker command" · "Copy the source checkout command" · "The master key doesn't match the stored secrets. Saved API keys can't be read. Restore the previous key (HF_MASTER_KEY or data/secret.key), or enter the keys again." · "Rotate the master key?" · "A new key encrypts every saved secret again." · "Other browsers and devices are signed out; you stay signed in." · "Every share link changes ({n} links): copy the new links from Shared links." · "Running replies stop and pending approvals expire ({n} waiting)." · "Older versions of harness-forge can't read the secrets afterwards: back up the data directory first." · "Type ROTATE to confirm" · "Rotate key" · "Rotating the master key needs your password." · "Couldn't rotate the key" · "Master key rotated" · "{n} secrets encrypted again · {m} approvals expired" · "The encryption key was rotated." · danger zone: "Delete every chat, including archived chats, every message version and every share link. API keys, plugins, projects and settings are kept." |
 | Busy (Phase 7) | "Another data task is running. Try again when it finishes." (Data page; was "Another import or delete is running. Try again when it finishes.") · "The server is rotating its encryption key. Try again in a moment." (chat requests) |
+| Changes panel (Phase 8) | "Changes" · "This chat" · "Git" · "Show changes" · "Show changes, {n} files changed" · "Hide changes" · "Refresh changes" · "Close changes" · "{n} files changed" · "1 file changed" · "On {branch}" · "Detached at {head}" · "No commits yet" · "Added" · "Modified" · "Deleted" · "Untracked" · "Renamed" · "Conflicted" · "Type changed" · "changed outside this chat" · "Revert {path}" · "Couldn't load the changes" · "Retry" · "No file changes in this chat yet." · "No changes since the last commit." · "This project isn't a Git repository." · "Git isn't installed on the server." · "Git refused to read this repository. It may belong to another user (see the projects guide)." · "Git took too long to answer." · "Git couldn't read this repository." · "The project folder wasn't found." · "Showing the first 500 files." · "Showing the first 2,000 files." · "{n} shell commands and {m} other tool calls in this chat may have changed files too. They aren't listed here." · "Binary file. No preview." · "This file is too large to show a diff." · "The earlier version of this file is no longer stored, so it can't be shown or reverted." · "Couldn't load the diff" · palette: "Show changes" / "Hide changes" |
+| Revert (Phase 8) | "Revert {name}?" · "{path} goes back to how it was before this chat changed it." · "{path} is deleted. This chat created it." · "{path} goes back to the last commit." · "{path} is deleted. Git doesn't track it." · "{path} is deleted. It isn't in the last commit." · "{origPath} comes back and {path} is deleted." · "It also changed outside this chat after the agent's last edit. Those changes are reverted too." · "The current version is saved first, so you can undo this." · "Revert file" · "Reverted {path}" · "Undo" · "Restored {path}" · "{path} changed after the revert, so it was not restored." · "Wait for the responses in this project to finish before reverting files." · "{path} changed since its diff was loaded. Check it again." · "Couldn't revert {path}" |
+| Rewind (Phase 8) | "Rewind files to here" · "Rewind files to here?" · "Files the agent changed after this message go back to how they were before it. The conversation stays as it is." · "Restore" · "Delete" · "Can't restore" · "The earlier version of this file is no longer stored." · "and more files" · "Also restore files changed outside this chat" · "Shell changes aren't tracked." · "These commands ran after this message; their effects on files stay:" · "and {n} more" · "Other tools changed files too: {tools}. Their changes stay." · "Restore files and edit" · "Restore files" · "Nothing to restore. The files already match." · "Close" · "Restored {n} files" · "Restored 1 file" · "Skipped {k} files changed outside this chat" · "Skipped {k} files that can't be restored" · "Nothing was restored." · "The files already match." · "Wait for the responses in this project to finish before rewinding files." |
+| Shell rules (Phase 8) | "Always allow commands starting with" · "This project" · "All projects" · "Combined commands run only when every part matches a rule." · "This command has several parts: one rule is added for each." · "Commands with redirections, substitutions or other shell syntax always ask." · "No rule can allow this command, so it always asks." · "Could not save the rule" · "Allowed by rule: {prefixes}" · ", allowed by rule {prefixes}" · "Allowed commands…" · "Allowed commands in {name}" · "{n} allowed commands" · "1 allowed command" · "Allowed in every project" · "Shell commands that start with one of these run without asking in this project." / "… in every project." · "Combined commands run only when every part matches; redirections and substitutions always ask." · "A rule for a script runner such as pnpm test or make also lets the agent run any code it writes into the project." · "Add" · "Remove {prefix}" · "No allowed commands yet." · "Couldn't load the allowed commands" · "This allows every {word} command." · validation (7.23): "Enter the start of a command." · "Use at most 200 characters." · "Use a plain command without \|, ;, &&, redirections or substitutions." · "{word} runs other commands, so it can't be allowed by a rule." · "A rule for {word} alone would allow any code. Add what follows it, such as a script name." · "cd needs no rule: changing into a project folder is always allowed." · "This doesn't match the command." · "This rule already exists." |
+| Shell rows (Phase 8) | "Now in {folder}" · "Now in the project folder" · "In {project}/{cwd}" (the sticky folder) · spoken summaries: "{a} lines added, {d} removed" · "1 line added" · "{d} lines removed" · "New file, {n} lines" · "Updated, {n} lines" · "Exit code {n}" · "Timed out" · "Killed by {signal}" · "Exited without an exit code" · "Lines {a} to {b} of {n}" · "Lines {a} to {b}" |
+| Settings → Data (Phase 8) | "Automatic cleanup" · "Remove unused files on a schedule. They're deleted without asking and can't be restored. Files from the last 24 hours are always kept." · "Every day" · "Every week" · "Last automatic cleanup {time}: removed {n} files ({size})." · "The last automatic cleanup was skipped: plugin data is too large to scan. Run a cleanup by hand." · "The last automatic cleanup failed. It tries again after the next interval." · "Next automatic cleanup {time}." · "Plugin data is too large to scan completely, so a file only a plugin remembers may be removed." |
+| General (Phase 8) | "Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate and Alt+C for changes." |

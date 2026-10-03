@@ -69,7 +69,7 @@ describe('gET /api/data', () => {
     const response = await app.t.request('/api/data')
     expect(response.status).toBe(200)
     expect(response.headers.get('cache-control')).toBe('no-store')
-    expect(dataSummarySchema.parse(await response.json())).toEqual({ chats: 1, archivedChats: 0, messages: 2, files: 0, fileBytes: 0 })
+    expect(dataSummarySchema.parse(await response.json())).toEqual({ chats: 1, archivedChats: 0, messages: 2, files: 0, fileBytes: 0, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
   })
 })
 
@@ -264,6 +264,8 @@ describe('gET / POST /api/data/cleanup', () => {
       recentFiles: 0,
       graceMs: 86_400_000,
       lastRunAt: null,
+      fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null },
+      pluginData: 'complete',
     })
     expect(existsSync(blobPathOf(app.deps, orphanBytes))).toBe(true)
     expect(await app.deps.data.summary()).toMatchObject({ files: 2 })

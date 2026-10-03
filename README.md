@@ -7,7 +7,10 @@ of a project folder on your server. By default, every tool call that can change 
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **Status:** v1.3. On top of v1.2 it adds projects and an agent workspace (file tools and a shell with approval, an
+> **Status:** v1.4 in progress ("Workspace 2.0": rewind the agent's file changes to any of your messages, a changes
+> panel with per-file diffs, Git status and an undoable revert, shell rules for commands that may run without asking,
+> a working folder that carries over between shell commands, and an opt-in automatic cleanup of unused files); v1.3 is
+> the latest release. v1.3 added projects and an agent workspace (file tools and a shell with approval, an
 > "Accept edits" permission mode, inline diffs and terminal output in the chat), master-key rotation (in the app or
 > with a CLI) and a storage cleanup with a preview. v1.2 added image generation and voice (dictation and read-aloud)
 > through your own providers, message versions that remember the path shown under them, can be deleted and follow a
@@ -50,6 +53,20 @@ desktop app, and it starts in dark mode.
     without asking while shell commands still ask, and every shell command is approved on its own (no "Always allow").
   - Shell commands run in their own process group with a minimal environment, a timeout and capped output;
     `HF_WORKSPACE_SHELL=0` turns the shell off for everyone. Guide: [using projects](docs/guides/using-projects.md).
+- **Workspace 2.0** (v1.4, in progress):
+  - Rewind: "Rewind files to here" under one of your messages puts every file the agent changed since then back the
+    way it was (across message versions), lists the shell commands whose effects it cannot undo, and can be undone;
+    "Restore files and edit" continues from that message. The previous version of every agent edit is kept as a
+    checkpoint on your server (no git needed; 30 days, 512 MB per project).
+  - A changes panel (Alt+C; a side pane on desktop, a sheet on phones) with two views: the files this chat changed
+    and the project's Git status, each with a diff and a **Revert file** that saves the current version first and can
+    be undone. Git runs read-only with the repository's hooks, filters and other configured programs switched off.
+  - Shell rules: "Always allow commands starting with `pnpm test`" on the approval card (for this project or every
+    project) lets matching commands run without asking; combined commands need a rule for every part, and redirections
+    or substitutions always ask. Rules are managed in Settings -> Projects.
+  - The shell's working folder carries over between commands (`cd packages/web` sticks), clamped to the project.
+  - Automatic cleanup of unused files (Settings -> Data, off by default, daily or weekly) and screen-reader labels for
+    tool-row summaries.
 - **Images** (with your own keys):
   - Pick an image model (OpenAI GPT Image, xAI Grok Imagine) in the composer and describe a picture: 1 to 4 images
     per turn, an aspect ratio (Auto, 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16), and follow-ups such as "make it blue" that
@@ -72,8 +89,8 @@ desktop app, and it starts in dark mode.
 - **Your data** (Settings -> Data): back up every chat, with every version and attachment, to one zip file; restore it
   here or on another server (existing chats are skipped or copied); or delete all chats at once. Remove the files
   nothing uses anymore (a storage cleanup with a preview: attachments and generated images of deleted chats and
-  versions), and rotate the master key that encrypts your API keys (in the app, or with `pnpm key:rotate` when the key
-  comes from `HF_MASTER_KEY`).
+  versions; v1.4: optionally on a daily or weekly schedule), and rotate the master key that encrypts your API keys (in
+  the app, or with `pnpm key:rotate` when the key comes from `HF_MASTER_KEY`).
 - **Share links**: publish a read-only snapshot of a chat at an unguessable link, choose whether reasoning, tool
   details and files and images are included, set an expiry date, update the snapshot or revoke the link at any time.
 - **Composer**:
@@ -189,8 +206,10 @@ Projects live in `data/workspaces` (`/data/workspaces` in Docker) unless you all
 `HF_WORKSPACE_ROOTS` (absolute paths, comma separated), for example `HF_WORKSPACE_ROOTS=/home/me/code`. In Docker,
 mount the folders and name the mount point (the commented `./workspaces:/workspaces` lines in `docker-compose.yml`;
 writable by uid 1000). Then add a project in Settings -> Projects and start a chat in it. The shell tool runs commands
-with the server's permissions after you approve them; set `HF_WORKSPACE_SHELL=0` to turn it off. Details, permission
-modes and security notes: [using projects](docs/guides/using-projects.md).
+with the server's permissions after you approve them (or when your shell rules allow them); set `HF_WORKSPACE_SHELL=0`
+to turn it off. The Git view of the changes panel needs repositories owned by the container user: git refuses a
+bind-mounted folder owned by another uid ("dubious ownership"), see the guide. Details, permission modes, shell rules,
+rewind and security notes: [using projects](docs/guides/using-projects.md).
 
 ## Configuration
 
@@ -223,7 +242,8 @@ generates the new key itself and ignores the variable). Exit codes and options: 
 A key saved in Settings wins over its environment variable; the key dialog shows which source is active ("From env").
 Flags accept `1` / `true` / `yes` / `on` and `0` / `false` / `no` / `off`; an empty value counts as unset, and any
 other invalid value stops the start with a message naming the variable. Test-only variables (`HF_LIVE_PROVIDERS`,
-`HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`, `E2E_BASE_URL`) are described in
+`HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `HF_TEST_FILE_SWEEP_DELAY_MS` (only with
+`HF_MOCK_PROVIDER=1`), `E2E_SCREENSHOTS`, `E2E_BASE_URL`) are described in
 [`docs/PROVIDERS.md`](docs/PROVIDERS.md#12-live-provider-suite), [`e2e/README.md`](e2e/README.md) and
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
@@ -290,7 +310,8 @@ harness-forge is built for **one user** on their own machine or server.
   or approvals; reasoning, tool details and files and images only when you include them. Its token is an HMAC that is
   never stored and never logged; revoking the link or changing the master key ends it, and every response carries
   `X-Robots-Tag: noindex, nofollow`.
-- **Backups.** The Settings -> Data zip never contains API keys, the password, plugins, MCP servers or projects.
+- **Backups.** The Settings -> Data zip never contains API keys, the password, plugins, MCP servers, projects, shell
+  rules or checkpoints.
 - **Projects, files and the shell.** The workspace tools act on real files with the server's rights, and an
   approved shell command runs as the server's user; there is no sandbox inside harness-forge, so run it in Docker (or as
   a dedicated user) when the folders matter. Projects can only be created inside `HF_WORKSPACE_ROOTS`, never around the
@@ -298,8 +319,11 @@ harness-forge is built for **one user** on their own machine or server.
   symbolic links) and never write into `.git`; writing hidden or secret-looking files always asks, and reading
   secret-looking files asks in Ask and Accept edits; shell
   commands get a minimal environment (no `HF_*` variables, no provider keys), their own process group, a timeout and no
-  "Always allow". Anyone who can log in can approve shell commands: keep `HF_PASSWORD` set, or turn the shell off with
-  `HF_WORKSPACE_SHELL=0`.
+  "Always allow" for the whole tool; v1.4 shell rules let commands that start with an allowed prefix run without asking
+  (every part of a combined command must match, and `$`, backticks and redirections always ask), so a rule for a script
+  runner such as `pnpm test` runs any code the agent writes. Anyone who can log in can approve shell commands and add
+  rules: keep `HF_PASSWORD` set, or turn the shell off with `HF_WORKSPACE_SHELL=0`. Git (the changes panel) runs
+  read-only, with the repository's hooks, filters and configured programs switched off.
 - **Microphone and media.** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
   `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled ("Voice
   input needs HTTPS or localhost"); use the TLS reverse proxy below. The page may use only its own microphone
@@ -412,7 +436,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | [`docs/UI.md`](docs/UI.md) | layout, design tokens, components, routes, shortcuts, test ids |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | phases, tasks and progress |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture decision records and the contract seed |
-| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md) |
+| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md) |
 | [`AGENT.md`](AGENT.md) | rules for AI agents working on this repository |
 
 ## Development

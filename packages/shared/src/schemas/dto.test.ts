@@ -119,13 +119,14 @@ describe('settings', () => {
       speechVoice: null,
       speechSpeed: 1,
       projectMaxSteps: 100,
+      fileSweep: 'off',
     })
     expect(Object.isFrozen(DEFAULT_SETTINGS)).toBe(true)
-    expect(SETTINGS_KEYS).toHaveLength(20)
+    expect(SETTINGS_KEYS).toHaveLength(21)
     expect(settingsSchema.parse({ maxSteps: 5, _auth: 'internal' })).toEqual({ ...DEFAULT_SETTINGS, maxSteps: 5 })
   })
 
-  it('reads settings stored by v1.1 (without the Phase 6 and 7 keys) with the new defaults', () => {
+  it('reads settings stored by v1.1 (without the Phase 6, 7 and 8 keys) with the new defaults', () => {
     const v11 = {
       displayName: 'Ada',
       defaultModelRef: 'openai:gpt-6-sol',
@@ -150,7 +151,15 @@ describe('settings', () => {
       speechVoice: null,
       speechSpeed: 1,
       projectMaxSteps: 100,
+      fileSweep: 'off',
     })
+  })
+
+  it('validates the automatic file sweep setting (Phase 8, ADR-039)', () => {
+    expect(settingsUpdateSchema.parse({ fileSweep: 'weekly' })).toEqual({ fileSweep: 'weekly' })
+    expect(settingsSchema.parse({ fileSweep: 'daily' }).fileSweep).toBe('daily')
+    for (const value of ['monthly', 'on', null, true, ''])
+      expect(settingsUpdateSchema.safeParse({ fileSweep: value }).success, String(value)).toBe(false)
   })
 
   it('accepts up to 200 steps and the edits mode (Phase 7, ADR-032)', () => {
@@ -458,7 +467,11 @@ describe('bulk data (ADR-024)', () => {
   })
 
   it('validates the summary, the import result and delete-all', () => {
-    expect(dataSummarySchema.parse({ chats: 2, archivedChats: 1, messages: 9, files: 1, fileBytes: 5 })).toBeTruthy()
+    const fileSweep = { mode: 'off', lastAttempt: null, nextRunAt: null }
+    expect(dataSummarySchema.parse({ chats: 2, archivedChats: 1, messages: 9, files: 1, fileBytes: 5, fileSweep })).toBeTruthy()
+    // Phase 8 (ADR-039): the sweep status is required, the checkpoint storage optional.
+    expect(dataSummarySchema.safeParse({ chats: 2, archivedChats: 1, messages: 9, files: 1, fileBytes: 5 }).success).toBe(false)
+    expect(dataSummarySchema.parse({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep, checkpoints: { bytes: 10, blobs: 1 } }).checkpoints).toEqual({ bytes: 10, blobs: 1 })
     const result = {
       kind: 'backup',
       counts: { imported: 1, copied: 0, skipped: 1, failed: 1, filesImported: 1, filesReused: 0, filesMissing: 1 },
@@ -664,8 +677,8 @@ describe('server events', () => {
     expect(serverEventSchema.parse(event)).toEqual({ type: 'chat.updated', data: { ...summary, activeLeafId: MESSAGE_B }, at: 4 })
   })
 
-  it('covers the 11 event types', () => {
-    expect(SERVER_EVENT_TYPES).toHaveLength(11)
+  it('covers the 12 event types', () => {
+    expect(SERVER_EVENT_TYPES).toHaveLength(12)
     expectTypeOf<ServerEventType>().toEqualTypeOf<z.infer<typeof serverEventTypeSchema>>()
   })
 

@@ -40,7 +40,9 @@ describe('fresh routes of the route table', () => {
   it('are the sensitive operations of ADR-017', () => {
     // The Phase 6 routes (audio, deleting a version) run no code and create nothing lasting: no fresh auth. Phase 7:
     // adding a project (file and shell access to a folder, ADR-031) and rotating the master key (ADR-034) need it;
-    // browsing folders, editing or deleting a project and the file cleanup do not.
+    // browsing folders, editing or deleting a project and the file cleanup do not. Phase 8: none of the change routes
+    // (revert, undo and rewind are reversible) nor the shell rules (a session can already approve its own shell calls,
+    // ADR-038) needs it.
     expect(FRESH_KEYS.sort()).toEqual([
       'auth.setPassword',
       'data.deleteAll',

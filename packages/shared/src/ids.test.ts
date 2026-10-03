@@ -3,14 +3,18 @@ import { HarnessError } from './errors.ts'
 import {
   BUILTIN_PLUGIN_IDS,
   BUILTIN_PROVIDER_IDS,
+  CHANGE_BATCH_ID_PATTERN,
+  changeBatchIdSchema,
   chatIdSchema,
   CLIENT_COMMANDS,
   commandNameSchema,
+  createChangeBatchId,
   createChatId,
   createFileId,
   createMessageId,
   createProjectId,
   createShareId,
+  createShellRuleId,
   fileIdSchema,
   formatModelRef,
   isPluginNamespacedId,
@@ -28,6 +32,8 @@ import {
   safeParseModelRef,
   shareIdSchema,
   shareTokenSchema,
+  SHELL_RULE_ID_PATTERN,
+  shellRuleIdSchema,
   toolNameSchema,
 } from './ids.ts'
 import { fnv1a32Hex } from './util/hash.ts'
@@ -181,6 +187,21 @@ describe('id generators', () => {
     expect(createProjectId()).not.toBe(id)
     for (const bad of ['prj_short', `prj_${'a'.repeat(17)}`, `PRJ_${'a'.repeat(16)}`, `prj_${'a'.repeat(15)}-`, `shr_${'a'.repeat(16)}`])
       expect(projectIdSchema.safeParse(bad).success, bad).toBe(false)
+  })
+
+  it('creates shell rule ids (ADR-038) and change batch ids (ADR-036)', () => {
+    const rule = createShellRuleId()
+    expect(rule).toMatch(SHELL_RULE_ID_PATTERN)
+    expect(shellRuleIdSchema.safeParse(rule).success).toBe(true)
+    expect(createShellRuleId()).not.toBe(rule)
+    const batch = createChangeBatchId()
+    expect(batch).toMatch(CHANGE_BATCH_ID_PATTERN)
+    expect(changeBatchIdSchema.safeParse(batch).success).toBe(true)
+    expect(createChangeBatchId()).not.toBe(batch)
+    for (const bad of ['srl_short', `srl_${'a'.repeat(17)}`, `SRL_${'a'.repeat(16)}`, `srl_${'a'.repeat(15)}-`, `wcb_${'a'.repeat(16)}`, `prj_${'a'.repeat(16)}`])
+      expect(shellRuleIdSchema.safeParse(bad).success, bad).toBe(false)
+    for (const bad of ['wcb_short', `wcb_${'a'.repeat(17)}`, `WCB_${'a'.repeat(16)}`, `wcb_${'a'.repeat(15)}_`, `srl_${'a'.repeat(16)}`])
+      expect(changeBatchIdSchema.safeParse(bad).success, bad).toBe(false)
   })
 
   it('creates share ids whose suffix can start a share token', () => {

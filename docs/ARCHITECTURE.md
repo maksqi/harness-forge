@@ -23,14 +23,15 @@ flowchart LR
     Reg["registry/<br/>providers, models, tools, MCP, commands, hooks"]
     Cat["catalog/<br/>model catalog"]
     MCPM["mcp/ manager"]
-    Svc["services/<br/>settings, secrets, chats, files, events, data, shares, images, audio,<br/>projects, keys, maintenance"]
-    WS["workspace/<br/>path guard, file walker, shell runner"]
+    Svc["services/<br/>settings, secrets, chats, files, events, data, shares,<br/>images, audio, projects, keys, maintenance,<br/>checkpoints, shell-rules"]
+    WS["workspace/<br/>path guard, file walker, shell runner,<br/>journal, file lock, git runner"]
     DB[("SQLite WAL<br/>data/harness.db")]
   end
   subgraph DataDir["HF_DATA_DIR (data/)"]
     Key["secret.key"]
     PDir["plugins/{id}/, plugins/.staging/"]
     Files["files/{aa}/{sha256}"]
+    Ckpt["checkpoints/{aa}/{sha256}"]
     Cache["cache/ (models.dev refresh)"]
     WRoot["workspaces/ (default root)"]
   end
@@ -56,7 +57,8 @@ flowchart LR
   Cat -- "weekly refresh unless HF_OFFLINE=1" --> MD
   MCPM --> MCPS
   Chat -- "core-workspace tools" --> WS
-  WS -- "files, bash -c (own process group)" --> Proj
+  WS -- "files, bash -c (own process group),<br/>git (argument arrays)" --> Proj
+  WS -- "before-states (Phase 8)" --> Ckpt
   Svc --> DB
   Cat --> DB
   Host --> DB
@@ -86,6 +88,11 @@ Key properties:
 - **Agent workspace** (Phase 7): a chat can belong to a project folder inside the allowed roots; there the builtin
   `core-workspace` tools read, search and edit files through one path guard, and a shell runs approved commands in its
   own process group (sections 6.13, 10.9). The master key can be rotated (6.14) and orphaned files cleaned up (6.15).
+- **Workspace 2.0** (Phase 8): every agent write to a project file is journaled with its previous state, so a chat's
+  edits can be rewound or reverted file by file and every restore can be undone (6.16); a changes panel shows the
+  chat's net changes and the project's Git status through one hardened git runner (6.17); the shell remembers its
+  working folder between calls and runs commands that match the user's shell rules without asking (6.13, 6.2); an
+  opt-in timer runs the orphaned-file cleanup (6.15).
 
 ## 2. Packages
 
@@ -105,25 +112,27 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | Path | Responsibility |
 |---|---|
 | `main.ts` | Process entry: dispatches the `rotate-key` CLI (Phase 7, 6.14) before anything boots; otherwise installs the signal handlers for graceful shutdown (before the boot starts, Phase 6 hotfix), then runs the boot sequence (section 5) with the key recovery and the `server.lock` hooks (Phase 7). |
-| `env.ts` | Loads `<repo root>/.env`, parses and validates `HF_*` environment variables (zod) into a frozen `Env` object; resolves `HF_DATA_DIR` and `HF_WEB_DIR`; bind-safety check; Phase 7: the syntax of `HF_WORKSPACE_ROOTS` (`Env.workspaceRoots`, `workspaceRootsDefault`) and `HF_WORKSPACE_SHELL` (`Env.workspaceShell`), `DataPaths.workspaces`. |
-| `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5). |
+| `env.ts` | Loads `<repo root>/.env`, parses and validates `HF_*` environment variables (zod) into a frozen `Env` object; resolves `HF_DATA_DIR` and `HF_WEB_DIR`; bind-safety check; Phase 7: the syntax of `HF_WORKSPACE_ROOTS` (`Env.workspaceRoots`, `workspaceRootsDefault`) and `HF_WORKSPACE_SHELL` (`Env.workspaceShell`), `DataPaths.workspaces`; Phase 8: `DataPaths.checkpoints` and the test-only `Env.testFileSweepDelayMs` (`HF_TEST_FILE_SWEEP_DELAY_MS`, honored only with `HF_MOCK_PROVIDER=1`, else ignored with a boot warning). |
+| `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5; Phase 8: `checkpoints.start()` and `data.start()` last, `data.stop()` first). |
 | `app.ts` | `createApp(deps)` app factory: mounts middleware and every route module under `/api`; used by `main.ts` and `createTestApp()`. |
 | `paths.ts`, `logger.ts` | Package-relative locations (server package root, migrations, bundled assets, the SPA build, installed package versions); JSON-lines logger with redaction. |
 | `http/middleware/` | Request id, structured access log (share tokens masked; it also runs the untrusted-proxy hint of `proxy-warning.ts`), secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`; `request-info.ts` resolves the client address and scheme, trusting forwarded headers only from `HF_TRUST_PROXY` peers (section 10.6). |
-| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `audio`, `shares`; Phase 7: `projects`, `keys`); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes; `audio.ts` (Phase 6) parses the multipart recording of `POST /audio/transcriptions` itself and answers `POST /audio/speech` with audio bytes (section 6.12). |
+| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `audio`, `shares`; Phase 7: `projects`, `keys`; Phase 8: `changes` (7 chat-scoped routes: changes, diff, git, revert, undo, rewind preview and apply; 6.16, 6.17) and `shell-rules` (3; 6.13)); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes; `audio.ts` (Phase 6) parses the multipart recording of `POST /audio/transcriptions` itself and answers `POST /audio/speech` with audio bytes (section 6.12). |
 | `http/static.ts` | Production SPA serving from `HF_WEB_DIR` (default `apps/web/.output/public`) with `200.html` fallback for client routes. |
-| `security/` | `keyring.ts` (master key + HKDF subkeys; Phase 7: one frozen keyring whose key and `keyVersion` swap in place during a rotation, with the module-private controls `swapMasterKey`, `beginKeyChange`, `whenKeyStable`, 6.14), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers; Phase 6: `microphone=(self)` and the SPA's `media-src`, section 10.2), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). |
+| `security/` | `keyring.ts` (master key + HKDF subkeys; Phase 7: one frozen keyring whose key and `keyVersion` swap in place during a rotation, with the module-private controls `swapMasterKey`, `beginKeyChange`, `whenKeyStable`, 6.14), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers; Phase 6: `microphone=(self)` and the SPA's `media-src`, section 10.2), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). Phase 8: `process-spawn.test.ts` fails when a non-test file other than `workspace/shell.ts`, `workspace/git.ts` and `mcp/stdio-transport.ts` imports `node:child_process`. |
 | `db/` | Drizzle schema (`schema.ts`), libsql client, `migrate()` at boot, pragmas (WAL, foreign keys, busy timeout), transaction helper. |
 | `services/settings/` | Typed global settings (defaults, validation, cache) over the `settings` table. |
 | `services/secrets/` | Encrypted secret store (AES-256-GCM) over the `secrets` table: `get/set/delete/list(scope)`, masked hints, env fallback lookup. |
 | `services/chats/` | Chat + message persistence, the message tree (`tree.ts`: active path, versions, latest leaf, the remembered leaf under a message; section 6.8), version switching, deleting a version (Phase 6), search, cursor pagination (`list.ts`: a row-value keyset cursor), export (md / json v2) and import (v1 / v2), usage rows and totals, title updates, `allIds` / `importChat` / `removeAll` for bulk data; Phase 7: `projectId` in records, summaries, search results and events, the project filter, the move of `update` (6.13), `approvals.ts` (`denyOpenApprovals`, used by the key rotation). |
-| `services/data/` | Bulk data (ADR-024, section 6.9): summary, streamed zip export, import of a backup or a single chat, delete-all; Phase 7: the orphaned file cleanup (`cleanup.ts`: `cleanupPreview`, `cleanup`, `_files`; the reference scan in `references.ts`, 6.15). Imports, delete-all, cleanup and key rotation are serialized by `services/maintenance/`. |
+| `services/data/` | Bulk data (ADR-024, section 6.9): summary, streamed zip export, import of a backup or a single chat, delete-all; Phase 7: the orphaned file cleanup (`cleanup.ts`: `cleanupPreview`, `cleanup`, `_files`; the reference scan in `references.ts`, 6.15). Imports, delete-all, cleanup and key rotation are serialized by `services/maintenance/`. Phase 8 (ADR-039): `start()` / `stop()` of the automatic sweep (`auto-sweep.ts`: `createAutoSweep`, the pure `nextSweepAt`), the loose plugin-data scan (`plugin-data-scan.ts`), `FileSweepStatus` in the summary and the preview; `references.ts` classifies every column of the new tables; delete-all also purges the checkpoint store. |
 | `services/maintenance/` | `MaintenanceService` (Phase 7): `exclusive(kind, op, { blockRuns? })` runs one maintenance operation at a time (`import`, `delete-all`, `key-rotation`, `file-cleanup`; another one gets 409 `busy`), `current()`; while an operation with `blockRuns` (the key rotation) holds it, `POST /chat` answers 409 `busy`. |
 | `services/keys/` | `KeyService` (Phase 7, ADR-034, section 6.14): `index.ts` (`status()` for `GET /keys`, read-only; `rotate()`, the online rotation), `rotate.ts` (the shared core `rotateSecretsTx` and the write-ahead `rotateWithKeyFile`), `check.ts` (the key check and `_keys`), `recover.ts` (the boot recovery `recoverKeyState`), `server-lock.ts` (`server.lock`) and `cli.ts` (the `rotate-key` CLI). |
+| `services/checkpoints/` | `CheckpointService` (Phase 8, ADR-036 / ADR-037, sections 6.16, 6.17): `store.ts` (the content-addressed blob store `<dataDir>/checkpoints/`), `journal-service.ts` (`journal({ chatId, messageId, projectId })` for a run: the `workspace_changes` rows, `shell` / `untracked` rows, the coalesced `workspace.changed` events), `prune.ts` (age and budget eviction, orphan blobs, the 6-hour timer started by `start()`), `plan.ts` (the pure rewind / revert planner), `restore.ts` (per-file restore under the file lock), `rewind.ts`, `revert.ts`, `undo.ts`, `changes.ts` (`ChatChanges`, the chat diff), `git-changes.ts` (`GitStatus` and the HEAD diff over `workspace/git.ts`), `purge()` for delete-all. |
+| `services/shell-rules/` | `ShellRuleService` (Phase 8, ADR-038, 6.13): rule CRUD over `shell_rules` (validation through the shared `parseShellRule`, 200 rules per scope, duplicates 409 `exists`) and `forRun(projectId)`, the global plus project rules a run matches against. |
 | `services/projects/` | `ProjectService` (Phase 7, ADR-031, section 6.13): `roots.ts` (the allowed roots, checked first in `startDeps` by `start()`, and the folder checks), `index.ts` (project CRUD, the folder browser, `openWorkspace()`, `chatCount`, `project.changed`), `project-file.ts` (`AGENTS.md` / `CLAUDE.md` with its `@file.md` lines). |
-| `workspace/` | The agent workspace (Phase 7, section 6.13): `paths.ts` (`resolveWorkspacePath` and the safe read / write helpers; frozen), `sensitive.ts` (secret-looking and hidden paths), `walk.ts` (the folder walker; `.gitignore` through `ignore`), `pattern-worker.ts` (globs through `picomatch` and regular expressions, matched in a killable Worker), `diff.ts` (diffs through `diff`), `trim.ts` (output caps), `text.ts`, `shell.ts` (the only shell runner: process groups, capped output) and `shell-env.ts` (the environment allowlist). |
+| `workspace/` | The agent workspace (Phase 7, section 6.13): `paths.ts` (`resolveWorkspacePath` and the safe read / write helpers; frozen), `sensitive.ts` (secret-looking and hidden paths), `walk.ts` (the folder walker; `.gitignore` through `ignore`), `pattern-worker.ts` (globs through `picomatch` and regular expressions, matched in a killable Worker), `diff.ts` (diffs through `diff`), `trim.ts` (output caps), `text.ts`, `shell.ts` (the only shell runner: process groups, capped output; Phase 8: the working folder reported on fd 3, `killProcessGroup` exported) and `shell-env.ts` (the environment allowlist; Phase 8: empty and relative `PATH` entries dropped). Phase 8 (6.13, 6.16, 6.17): `run-scope.ts` (`bindRunScope` / `runScopeOf`: the server-only run scope bound to a tool call context), `file-lock.ts` (one promise chain per resolved path), `journal.ts` (`journaledWrite`: snapshot, write, journal row), `remove.ts` (the guarded unlink of a restore), `shell-cwd.ts` (`initialShellCwd(history)`, the clamp of the sticky folder) and `git.ts` (the hardened git runner; the only git spawn). |
 | `services/shares/` | Share links (ADR-025, section 6.10): HMAC tokens, the allowlist sanitizer, snapshots, owner CRUD, the public view and file access, expiry, rate limits. |
-| `services/files/` | Content-addressed upload store (`data/files/<aa>/<sha256>`), MIME/size validation, `files` rows, read streams; for bulk data `importFile` (deduplicated by sha256, keeps the preferred id when it is free) and `purge` (every row and blob); Phase 7: `sweep()` for the cleanup (`sweep.ts`), in-memory pins of fresh ids (`pins.ts`) and a shared / exclusive gate (`gate.ts`; 6.15); `saveGenerated` (Phase 6, rules in `generated.ts`) stores a generated raster image (PNG, JPEG, WebP or GIF whose magic bytes match its type, at most 20 MiB; a row with the same content and type is reused, and concurrent saves of the same bytes are serialized, section 6.11). |
+| `services/files/` | Content-addressed upload store (`data/files/<aa>/<sha256>`), MIME/size validation, `files` rows, read streams; for bulk data `importFile` (deduplicated by sha256, keeps the preferred id when it is free) and `purge` (every row and blob); Phase 7: `sweep()` for the cleanup (`sweep.ts`), in-memory pins of fresh ids (`pins.ts`) and a shared / exclusive gate (`gate.ts`; 6.15); `saveGenerated` (Phase 6, rules in `generated.ts`) stores a generated raster image (PNG, JPEG, WebP or GIF whose magic bytes match its type, at most 20 MiB; a row with the same content and type is reused, and concurrent saves of the same bytes are serialized, section 6.11). Phase 8: `FileSweepInput.signal` (the automatic sweep aborts between batches); the store gate (`gate.ts`) is reused by the checkpoint store (6.16). |
 | `services/images/` | `ImageService` (Phase 6, ADR-028, section 6.11): `generate()` runs `generateImage` with the provider's `imageParams`, writes the one usage row of a generation (`purpose: 'image'`), records the provider outcome and stores every image through `files.saveGenerated`; `generation.ts` holds the pure helpers (the checked `imageParams` result, token usage, estimated cost, revised prompt). Used by image turns and by `ctx.images` (the `generate_image` tool). |
 | `services/audio/` | `AudioService` (Phase 6, ADR-029, section 6.12): `transcribe()` (type allowlist + magic-byte sniffing in `sniff.ts`, `transcribe()` of the AI SDK) and `speak()` (`generateSpeech()`); a usage row (`transcription` / `speech`) and the provider outcome only for a call that answers; one info log line per call; stores nothing. |
 | `services/events/` | In-process event bus + SSE fan-out for `/api/events` (section 6.7); Phase 7: `disconnectAll()` (flushes queued events, then closes every stream; after a key rotation and a password change). |
@@ -142,15 +151,15 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `plugins/templates/` | Template sources (tool, provider, MCP bridge, command pack): a JSDoc-typed `index.mjs` or a TypeScript `index.ts`, the vendored API types `harness-forge.d.ts` and a README. |
 | `catalog/` | Model catalog: live listings with 24 h cache (`model_cache`), models.dev snapshot + weekly refresh, seeds, plugin models, custom ids, prefs, `classify()` (model kinds incl. `image`, `transcription`, `speech`; `imageOutput`), cost lookup (section 9). |
 | `providers/` | Model resolution: `modelRef` -> provider -> credentials (stored or env) -> `LanguageModel` (`resolveModel`), and since Phase 6 image, transcription and speech models (`resolveImageModel`, `resolveTranscriptionModel`, `resolveSpeechModel`); provider test; provider status; error mapping to `HarnessError`; the LobeHub icon service (`/api/icons/lobe`). |
-| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). |
-| `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect with backoff, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable; `{{settings.*}}` templating of plugin-declared servers; its own stdio transport (minimal environment, stderr lines in the owning plugin's log); the user-configured servers of the MCP panel (`mcp_servers`). |
+| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). Phase 8: binds the run scope (chat, assistant message id, journal, shell rules, sticky folder) to every tool call context and to policy contexts, records `shell` / `untracked` journal rows after each workspace call, ignores a stored `allow` override on `execute` tools, and says in the workspace block that `cd` persists (6.13, 6.16). |
+| `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect with backoff, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable; `{{settings.*}}` templating of plugin-declared servers; its own stdio transport (minimal environment, stderr lines in the owning plugin's log); the user-configured servers of the MCP panel (`mcp_servers`). Phase 8: `tools.ts` (`ToolService.update`) refuses `override: 'allow'` for tools with workspace access `execute` (400). |
 | `builtin-plugins/index.ts` | Static list of builtin plugin modules, loaded first and trusted. |
 | `builtin-plugins/core-providers/` | The 13 builtin providers (see PROVIDERS.md): definitions, seeds, reasoning mapping, error mapping; Phase 6 (version 1.1.0, `engines ^1.1.0`): the image, transcription and speech factories of OpenAI, xAI, Google, Mistral and Groq, `imageParams`, `transcriptionOptions` and the media seeds (`lib/media.ts`; PROVIDERS.md 13). |
 | `builtin-plugins/core-tools/` | Builtin tools (version 1.2.0 since Phase 7, `engines ^1.2.0`): `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard; setting "Allow localhost in web_fetch") and `generate_image` (Phase 6, `generate-image.ts`, policy `ask`, the `imageModelRef` setting; Phase 7: its output names the model with `modelName`; section 6.11). |
-| `builtin-plugins/core-workspace/` | Phase 7 (ADR-032, version 1.0.0, `engines ^1.2.0`, permission `process`): the workspace tools `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file` (one module each) and `shell` (`shell-tool.ts`; not on Windows, removed by `HF_WORKSPACE_SHELL=0`); `policies.ts` (the policy functions of the file tools), `common.ts` (guard timeouts, the model text helper); every tool declares its workspace access (section 6.13). |
+| `builtin-plugins/core-workspace/` | Phase 7 (ADR-032, version 1.0.0, `engines ^1.2.0`, permission `process`): the workspace tools `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file` (one module each) and `shell` (`shell-tool.ts`; not on Windows, removed by `HF_WORKSPACE_SHELL=0`); `policies.ts` (the policy functions of the file tools), `common.ts` (guard timeouts, the model text helper); every tool declares its workspace access (section 6.13). Phase 8: `write_file` and `edit_file` write through `journaledWrite` (snapshot first; parallel edits of one file serialize), and `shell` gets the sticky working folder, the `shellPolicy` of the shell rules and the output fields `endCwd`, `cwdNote`, `allowedBy`. |
 | `builtin-plugins/core-commands/` | Builtin server-side slash commands (prompt templates such as `/explain`, `/review`, `/commit`; list in PLUGINS.md). |
 | `builtin-plugins/core-mcp/` | Owns the user-configured MCP servers (`mcp_servers` table): they are declared as its contributions, so disabling `core-mcp` closes them. Its settings (reconnect automatically, connect timeout) apply to every MCP server. |
-| `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, the Phase 6 media models `mock:image`, `mock:image-chat`, `mock:image-tool`, `mock:transcribe`, `mock:speech` (a PNG encoder and a silent WAV), plus the tool `mock_approval_tool`; Phase 7: `mock:workspace`, which walks through the workspace tools (behavior in PROVIDERS.md section 8). |
+| `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, the Phase 6 media models `mock:image`, `mock:image-chat`, `mock:image-tool`, `mock:transcribe`, `mock:speech` (a PNG encoder and a silent WAV), plus the tool `mock_approval_tool`; Phase 7: `mock:workspace`, which walks through the workspace tools; Phase 8: `mock:checkpoint` (an edit per turn plus shell steps for rewind and the sticky folder) and `mock:shell` (runs the user text as one shell command) (behavior in PROVIDERS.md section 8). |
 | `testing/` | In-process test harness: `createTestApp()` (real composition over an in-memory database) and fakes (Phase 6: `fake-media.ts` with fake image and audio services; the fake media resolvers live in `providers/testing.ts`, and `chat/testing.ts` has `createMediaTestApp()`; Phase 7: `fake-keyring.ts`, a deterministic, rotatable keyring). |
 | `live/` | Opt-in live provider suite (`*.live.test.ts`, `pnpm test:live`, ADR-027): real provider calls with the keys in the environment; the image and voice checks only with `HF_LIVE_MEDIA=1`; excluded from `pnpm test` (PROVIDERS.md section 12). |
 | `assets/catalog/models-dev.json` (package root) | Bundled models.dev snapshot (updated by `pnpm catalog:update`); read at runtime, so it ships next to `dist/` (section 11). |
@@ -169,7 +178,7 @@ Dependency direction (no cycles): `http/routes` -> `services`, `chat`, `catalog`
 | `middleware/` | Route middleware: auth guard (redirect to `/login` when `AuthStatus.authenticated` is false); `/share/*` is exempt and never loads the auth status. |
 | `plugins/` | `$api` plugin (`createApiClient` with a `fetch` wrapper: `unauthorized` -> `/login`), `events.client.ts` (`EventSource('/api/events')` -> store updates), `shortcuts.client.ts` (the single `keydown` listener of the shortcuts registry). |
 | `pages/index.vue` | Empty state: greeting + composer; first send navigates to `/chat/:id`. |
-| `pages/chat/[id].vue` | Chat transcript + composer for one chat. |
+| `pages/chat/[id].vue` | Chat transcript + composer for one chat (Phase 8: wrapped in `ChatWorkspace`, which adds the changes pane or sheet). |
 | `pages/plugins.vue`, `pages/plugins/{index,new,[id]}.vue` | Parent route (hosts the single `InstallDialog`); plugin list (`?filter=`), new plugin (provider wizard / code template), plugin detail tabs. |
 | `pages/settings/{providers,models,media,projects,general,appearance,data,about}.vue` | Settings pages (`/settings` redirects to providers); `media` = image model and voice (Phase 6); `projects` = the project list and the Add project dialog (Phase 7); `data` = backup, import, storage cleanup (Phase 7), shared links, the encryption key (Phase 7), delete-all. |
 | `pages/share/[token].vue` | Public read-only share page (`share` layout): a store-free transcript of a share snapshot. |
@@ -178,13 +187,14 @@ Dependency direction (no cycles): `http/routes` -> `services`, `chat`, `catalog`
 | `components/ai-elements/` | AI Elements Vue subset (copied, frozen, used with `Ai` prefix). |
 | `components/app-shell/` | `AppSidebar`, `ChatNav` (Phase 7: the project switcher first), `PluginsNav`, `SettingsNav`, `ThemeToggle`, `CommandPalette` (Phase 7: a Projects section), `ShortcutsDialog` (Phase 6: a 56 px icon rail with 40 px targets on touch screens, UI.md 14.5). |
 | `components/projects/`, `components/settings/projects/` | Phase 7 (UI.md 7.20, 9.10): `ProjectSwitcher`, `ProjectMenuItems`, `NewChatProjectPicker`, `ChatProjectChip`, `AddProjectDialog`, `FolderBrowser`, `ProjectInstructionsDialog`, `ProjectsSettings`, `ProjectMovedToast` (the "Moved to {name}" toast with Undo), `move-chat.ts` (`useMoveChat`), `folder-path.ts` (breadcrumbs of the folder browser), `projects-load.ts` (one quiet load of the projects for the chat UI). |
-| `components/chat/parts/tools/` | Phase 7 (UI.md 7.19): the store-free registry `workspace-tools.ts` and the renderers `WorkspaceToolBody`, `DiffView`, `TerminalOutput`, `FileContent`, `FileList`, `ToolApprovalPreview`, `ToolRowSummary` (the `+12 −3` / `exit 1` summary of a row; all also used by the share page); `parts/tool-approval-context.ts` (the optional chat context of approval cards: tool mode, project name). |
+| `components/workspace/` | Phase 8 (UI.md 7.21 – 7.23): `ChatWorkspace` (the resizable pane next to the chat, the sheet below 1024 px, Alt+C), `changes/` (`ChangesToggle`, `ChangesPanel`, `ChangesFileRow`, `ChangesFileDiff`, `ChangesEmpty`, `RevertFileDialog`, `changes-rows.ts`), `rewind/RewindDialog`, `allowlist/` (`AllowRuleOption` on the shell approval card, `AllowlistEditor`, `AllowlistDialog`, `GlobalAllowlistSection`, `allow-rule.ts`). |
+| `components/chat/parts/tools/` | Phase 7 (UI.md 7.19): the store-free registry `workspace-tools.ts` and the renderers `WorkspaceToolBody`, `DiffView`, `TerminalOutput`, `FileContent`, `FileList`, `ToolApprovalPreview`, `ToolRowSummary` (the `+12 −3` / `exit 1` summary of a row; all also used by the share page); `parts/tool-approval-context.ts` (the optional chat context of approval cards: tool mode, project name; Phase 8: project id, sticky shell folder). Phase 8: `ToolRuleBadge`, the spoken labels of row summaries, the sticky folder in `TerminalOutput`, the `DiffView` props `stats` / `lineNumbers`. |
 | `components/chat/`, `components/chat/parts/`, `components/chat/composer/` | Transcript, message and part renderers (with the `BranchSwitcher` of message versions and the Delete-version action; Phase 6: `ImageGallery`, `GeneratingImages`, `ReadAloudButton`, the attachment chips of `MessageEditor`), composer (ModelPicker, EffortMenu, PermissionMenu, SlashMenu; Phase 6: `ImageOptionsMenu`, `MicButton`, `RecordingIndicator`). Pure Phase 6 helpers next to them: `chat-format.ts` (gallery blocks, the image-turn meta line), `attachment-toasts.ts` (the rejection toasts shared by the composer and the message editor), `parts/image-gallery.ts` (tiles, download links, placeholders), `parts/tool-row.ts` (the first argument of a tool row: the `generate_image` prompt), `composer/dictation.ts` (caret insertion, recorder type, clip name), `composer/image-options.ts` (the image options menu). |
 | `components/plugins/*` | `list`, `detail`, `forms`, `install`, `wizard`, `code`, `mcp` component groups. |
 | `components/share/` | `ShareDialog`, `SharesSettingsSection`, `SharedChatView`, `ShareToolRow`; the share page renders generated images as a gallery (Phase 6). |
 | `components/settings/`, `components/settings/{data,media,images,voice}/`, `components/providers/`, `components/common/` | Settings forms (incl. the Data and Media pages; Phase 7: `data/EncryptionKeySection`, `RotateKeyDialog`, `StorageCleanupSection` and `data/data-context.ts`, which lets the sections reload the summary and Shared links after a cleanup or a rotation; `voice/voice-settings.ts`: the dictation languages, speeds, voice field rules and the Test voice text), `ProviderIcon`, shared pieces (`Markdown.vue`, empty states). |
-| `composables/` | `useChatSession` (detached `useChat` registry), `useComposer*`, `useShortcuts`, `useGlobalShortcuts`, helpers; Phase 6: `useImageOptions`, `useVoiceInput` (dictation), `useSpeechPlayer` (the one read-aloud player), `useFreshAuth` (every password prompt; it replaced the three `fresh-auth.ts` helpers of `plugins/code`, `plugins/detail` and `share`, and the duplicate helpers of the data, install and MCP forms). |
-| `stores/` | Pinia stores `auth`, `chats` (Phase 7: the project filter), `providers`, `models`, `plugins`, `projects` (Phase 7), `settings`, `ui` (each `use<Name>Store`), implemented over the typed client and refreshed by `/api/events`. |
+| `composables/` | `useChatSession` (detached `useChat` registry), `useComposer*`, `useShortcuts`, `useGlobalShortcuts`, helpers; Phase 6: `useImageOptions`, `useVoiceInput` (dictation), `useSpeechPlayer` (the one read-aloud player), `useFreshAuth` (every password prompt; it replaced the three `fresh-auth.ts` helpers of `plugins/code`, `plugins/detail` and `share`, and the duplicate helpers of the data, install and MCP forms); Phase 8: `useChangesPanel` (the panel's open state, view and width in `localStorage`), `useChatSession` gains `cwd` and the shell rules of an approval. |
+| `stores/` | Pinia stores `auth`, `chats` (Phase 7: the project filter), `providers`, `models`, `plugins`, `projects` (Phase 7), `settings`, `ui`, `workspace` and `shell-rules` (Phase 8: the changes panel data and the shell rules) (each `use<Name>Store`), implemented over the typed client and refreshed by `/api/events`. |
 | `utils/` | Pure helpers (date grouping, formatting, `data-testid` constants, `speech-text.ts`: what read-aloud speaks; Phase 7: `line-diff.ts` for approval previews, `ansi.ts` for terminal output), test helpers (`utils/testing/`, incl. `fake-media.ts`). |
 
 ## 5. Boot sequence
@@ -218,6 +228,8 @@ sequenceDiagram
   Deps->>Cat: start(): models.dev snapshot (bundled or data/cache refresh), model_cache
   Cat-)Cat: background: refresh stale listings (>24 h) and weekly models.dev (unless HF_OFFLINE=1)
   Deps->>MCP: start(): connect declared MCP servers in the background (never blocks boot)
+  Deps->>Deps: checkpoints.start(): one prune (age, budget, orphan blobs, temp files), then every 6 h (Phase 8)
+  Deps->>Deps: data.start(): the automatic file sweep timer, first check 24 h after boot (Phase 8, ADR-039)
   Main->>HTTP: createApp(deps): /api/*, plus the SPA with 200.html fallback when the web build exists
   HTTP-->>Main: listening on HF_HOST:HF_PORT
 ```
@@ -252,13 +264,18 @@ Notes:
   lists every enabled provider with complete credentials again. Meanwhile, and after a failed refresh, the catalog keeps
   serving the cached listing as the last good one (section 9). The first boot of v1.3 on a v1.2 data directory applies
   `0004_projects` (table `projects`, `chats.project_id`, no backfill: every chat starts without a project) and writes
-  `_keys = { version: 1, check, rotatedAt: null }` when the secrets table is empty or a row decrypts (6.14).
-- Graceful shutdown (`SIGINT`/`SIGTERM`, `stopDeps()`): stop accepting connections, abort active runs (persisted as
-  `aborted`; aborting a run kills its shell process groups), dispose plugins (5 s guard each), close MCP clients
-  (terminates stdio children), stop catalog timers, close SSE streams, close the DB, then remove `server.lock` while it
-  still names this process (Phase 7; a lock a newer server took over stays). A process-exit handler SIGKILLs any shell process group still alive, also when the server crashes
-  (6.13). Every step runs even when an earlier one fails; a shutdown longer than 10 s
-  exits with code 1, and a second signal exits immediately.
+  `_keys = { version: 1, check, rotatedAt: null }` when the secrets table is empty or a row decrypts (6.14). The first
+  boot of v1.4 on a v1.3 data directory applies `0005_workspace_checkpoints` (the tables `workspace_changes` and
+  `shell_rules`, no change to an existing table): earlier agent edits have no checkpoints (a rewind to a message from
+  before the upgrade has nothing to restore), no shell rule exists and `fileSweep` is `off`.
+- Graceful shutdown (`SIGINT`/`SIGTERM`, `stopDeps()`): stop accepting connections, stop the automatic file sweep
+  first (Phase 8, `data.stop()`: clears its timer and aborts a sweep in flight between batches), abort active runs
+  (persisted as `aborted`; aborting a run kills its shell process groups and its git commands), dispose plugins (5 s
+  guard each), close MCP clients (terminates stdio children), stop catalog timers and (Phase 8, `checkpoints.stop()`)
+  the checkpoint prune timer, waiting for a running prune, close SSE streams, close the DB, then remove `server.lock`
+  while it still names this process (Phase 7; a lock a newer server took over stays). A process-exit handler SIGKILLs
+  any shell process group still alive, also when the server crashes (6.13). Every step runs even when an earlier one
+  fails; a shutdown longer than 10 s exits with code 1, and a second signal exits immediately.
 - The signal handlers are installed right after the logger, before the data directory, the database or any plugin
   (Phase 6 hotfix, `a5fd107`): `main.ts` keeps a boot state (database, deps, started, server, the current step,
   stopping). A signal during the boot waits for the running step (open, migrate, `startDeps`, listen), skips the rest,
@@ -424,9 +441,9 @@ Resolution order (first match wins), returning an AI SDK approval status:
 
 | Step | Rule | Result |
 |---|---|---|
-| 1 | `tool_prefs.override` = `deny` / `allow` / `ask` | `denied` / `approved` / `user-approval` |
+| 1 | `tool_prefs.override` = `deny` / `allow` / `ask` (Phase 8: a stored `allow` on a tool with workspace access `execute` is ignored) | `denied` / `approved` / `user-approval` |
 | 2 | `tool.approve` hook sets `decision` | `deny` -> `denied`, `allow` -> `approved`, `ask` -> `user-approval` |
-| 3 | tool policy (static or function) returns `deny` | `denied` |
+| 3 | tool policy (static or function) returns `deny` (Phase 8: the `shell` policy is `shellPolicy`, below) | `denied` |
 | 4 | chat `toolMode` = `ask`: policy `safe` | `not-applicable` (runs without a card) |
 | 5 | chat `toolMode` = `ask`: policy `ask` or `always` | `user-approval` |
 | 6 | chat `toolMode` = `edits` (Phase 7): policy `safe`, or policy `ask` with workspace access `write` | `not-applicable` |
@@ -446,6 +463,22 @@ offered, so `edits` behaves like `ask`.
 MCP tools derive their policy from annotations: `readOnlyHint` -> `safe`, `destructiveHint` -> `always`, otherwise
 the server's configured `policy` (default `ask`). MCP tools never have workspace access, so they ask in `edits` mode
 exactly as in `ask` mode.
+
+**Shell rules** (Phase 8, ADR-038). The builtin `shell` tool has the policy function `shellPolicy`
+(`core-workspace/shell-tool.ts`): it reads the run's rules through `runScopeOf(c)` (the global rules plus the
+project's, loaded once per run by `shellRules.forRun(projectId)`, 6.13) and calls the shared `matchShellRules(command,
+rules)` (`packages/shared/src/util/shell-command.ts`). It returns `safe` when every segment of the command (split on
+`&&`, `||`, `;`, `|` and unquoted newlines) matches a rule or is a `cd` whose literal target resolves to a folder
+inside the project (the policy resolves the `cdTargets` in order through the path guard, starting at the call's
+folder), and `ask` otherwise, including every command the parser refuses (`$`, backticks, redirections other than
+`N>&M` and to `/dev/null`, `( ) { }`, `&`, `|&`, here-docs and process substitution, unquoted globs, `~` / `#` words,
+keywords, env-assignment prefixes, more than 32 segments; the parser fails closed). So in `ask` and `edits` a fully
+matching command runs without a card (steps 4 and 6), `auto` is unchanged, `off` sends no tools, and an override
+`deny` / `ask` or a `tool.approve` hook still decides first (steps 1 and 2). The matched prefixes are stored in the
+output (`allowedBy`) so the UI can show why no card appeared. An `allow` override cannot be set on an `execute` tool
+(`PATCH /tools/:name` answers 400 on `['override']`; `ToolService.update`), and one stored before v1.4 is ignored by
+the approval function: the only way to skip the card for shell commands, short of Auto, is a rule. Rules apply only
+to the core `shell` tool; a third-party `execute` tool always asks outside Auto.
 
 ```mermaid
 sequenceDiagram
@@ -485,7 +518,9 @@ targets the active leaf (6.8). Only `user-approval` results show a card; `approv
 `approval.isAutomatic = true`. Phase 7: the web hides "Always allow" for tools with workspace access `execute`, and
 for `write` tools it offers "Accept all edits in this chat", which switches the chat to `edits` before the
 continuation (UI.md 7.3). A master-key rotation denies every open approval with "Expired after a key rotation." (the
-approval signatures depend on the old `approval` subkey, 6.14).
+approval signatures depend on the old `approval` subkey, 6.14). Phase 8: the shell card offers "Always allow commands
+starting with …" instead; Run with it checked first creates the rules (`POST /api/shell-rules`, one per suggested
+prefix), then sends the unchanged approval, so the continuation already matches them (UI.md 7.23).
 
 ### 6.3 Stop and resume
 
@@ -700,7 +735,9 @@ sequenceDiagram
 - Events are notifications, not the source of truth: every handler in the web refetches or patches the relevant
   store from the payload. No replay of missed events (`Last-Event-ID` is ignored).
 - Event names and payloads: API.md, "Server events". Phase 7 adds `project.changed` (`{ id, project }`, `project` null
-  = deleted; 6.13) and `key.rotated` (`{ keyVersion, rotatedAt, chatIds }`; 6.14). `disconnectAll()` flushes the queued
+  = deleted; 6.13) and `key.rotated` (`{ keyVersion, rotatedAt, chatIds }`; 6.14); Phase 8 adds `workspace.changed`
+  (`{ projectId, chatId, batchId, source, paths }`, 6.16: after every revert, rewind or undo batch that wrote
+  something, and for agent edits at most once a second per chat). `disconnectAll()` flushes the queued
   events and then closes every connection: after a key rotation (`key.rotated` is the last event a stream sees) and
   after a password change, so a revoked session stops listening at once; the browsers reconnect with backoff, and a
   revoked one gets 401 and the login page.
@@ -867,12 +904,15 @@ links or usage rows (the per-message `metadata.usage` survives, so `ChatDetail.t
   every id (this also covers runs that are still `preparing`) -> `chats.removeAll({ usage })` in one batch (share links
   cascade; usage rows are deleted or kept detached) -> optionally `files.purge()` (rows and blobs) -> stop any run whose
   chat appeared meanwhile. Settings, keys, plugins and (Phase 7) projects stay; the chats' project folders are never
-  touched.
+  touched. Phase 8: the journal rows of the deleted chats go with them (foreign-key cascade) and `checkpoints.purge()`
+  empties the checkpoint store inside the same maintenance operation; shell rules stay (they belong to projects).
 - **Mutex**: one import or delete-all at a time per process; another one gets `409 conflict` with
   `details.reason: 'busy'`. Exports do not take it. Phase 7: the mutex moved into `services/maintenance/`
   (`exclusive('import' | 'delete-all', …)`), which also serializes the key rotation (6.14) and the file cleanup (6.15).
 - **Projects**: backups and chat exports never carry `projectId` (projects are host-specific); imported chats have no
-  project.
+  project. Phase 8: checkpoints (`workspace_changes` and the blobs) and shell rules are never exported or imported
+  either (host-specific; a crafted backup must not grant shell rights); the setting `fileSweep` is a public setting and
+  is restored with `restoreSettings`.
 - The zip is a portable backup of conversations. Moving a whole server (keys, plugins, settings) still means copying
   the data directory (section 7).
 
@@ -1243,7 +1283,7 @@ sequenceDiagram
   M-->>P: tool call edit_file { path, old_string, new_string }
   P->>P: approval (6.2); wrapToolExecute adds ToolCallContext.workspace = { projectId, name, root }
   P->>T: execute(input, c)
-  T->>FS: resolveWorkspacePath(root, path), read, replace, write a temp file + rename
+  T->>FS: journaledWrite (Phase 8): lock, resolve, snapshot the before-state, replace, temp file + rename, journal row
   T-->>W: tool-output-available { path, replacements, diff } (the model gets "Edited src/a.ts: 1 replacement (+3 -1 lines).")
 ```
 
@@ -1285,11 +1325,13 @@ Project "<name as a JSON string>", folder <root> (<OS: macOS, Linux, ...>).
   add surrounding lines to make it unique, or set replace_all.                    (edit_file)
 - Prefer edit_file for changes to an existing file; use write_file to create a file or to replace all of its content.
                                                                                   (edit_file + write_file)
-- Each shell call runs in a new process: cd does not persist between calls (use cwd, or cd dir && command), there is
-  no stdin (interactive commands cannot work), and background processes are stopped when the command ends.   (shell)
+- Each shell call runs in a new process: the working folder carries over (cd persists inside the project folder),
+  environment variables do not; there is no stdin (interactive commands cannot work), and background processes are
+  stopped when the command ends.                                                  (shell)
 ```
 
-(Each rule is one line in the real text; the parentheses name its condition and are not sent.)
+(Each rule is one line in the real text; the parentheses name its condition and are not sent. v1.3 said "cd does not
+persist between calls (use cwd, or cd dir && command)"; Phase 8 changed the shell line with the sticky folder.)
 
 **Steps**: every run of a chat with a project uses the setting `projectMaxSteps` (default 100) instead of `maxSteps`
 (default 20), also when its folder could not be opened; both accept 1–200, and the clamp after the `chat.params` hooks
@@ -1329,7 +1371,7 @@ schemas in `@harness-forge/shared`, `WORKSPACE_LIMITS`):
 | `search_files` | `pattern` (JS regex), `literal?`, `case_sensitive?` (true), `glob?`, `path?` (a folder, or a single file that is not secret-looking), `include_ignored?`, `max_results?` (≤ 500, 100) | `safe` / `read` / 60 s | `{ pattern, matches: { path, line, text }[], filesSearched, truncated }`; `path:line: text` lines, "No matches (N files searched).", "[truncated: showing N matches; narrow the pattern, the glob or the path]" |
 | `write_file` | `path`, `content` (≤ 256 KiB) | hidden or secret path → `always`, else `ask` / `write` / 30 s | `{ path, created, bytes, lines, diff }`; "Created x (1 line)." / "Updated x (+a -r lines)." / "Updated x (N lines)." (no diff: an old file over 1 MiB or a diff that timed out) |
 | `edit_file` | `path`, `old_string` (1 – 64 KiB), `new_string` (≤ 64 KiB), `replace_all?` | as `write_file` | `{ path, replacements, diff }`; "Edited x: 1 replacement (+a -r lines)." / "Edited x: N replacements." (no diff) |
-| `shell` | `command` (≤ 16 KiB), `cwd?` (a project folder; a refused one is `validation_error` on `['cwd']`), `timeout_ms?` (1000–590,000, 120,000), `description?` (≤ 200, shown on the approval card) | `ask` / `execute` / 600 s | `{ command, cwd, exitCode, signal, timedOut, durationMs, stdout, stderr, stdoutBytes, stderrBytes }`; the text below |
+| `shell` | `command` (≤ 16 KiB), `cwd?` (a project folder; a refused one is `validation_error` on `['cwd']`), `timeout_ms?` (1000–590,000, 120,000), `description?` (≤ 200, shown on the approval card) | `ask` (Phase 8: `shellPolicy`, `safe` when shell rules match, 6.2) / `execute` / 600 s | `{ command, cwd, exitCode, signal, timedOut, durationMs, stdout, stderr, stdoutBytes, stderrBytes }`, Phase 8 `endCwd?`, `cwdNote?`, `allowedBy?`; the text below |
 
 - Paths in every input and output are project-relative POSIX paths. Every output is trimmed to about 60 KiB of JSON
   before the 64 KB host cap (a diff to about 24 KiB with lines cut at 500 characters and `truncated: true`), and
@@ -1346,7 +1388,8 @@ schemas in `@harness-forge/shared`, `WORKSPACE_LIMITS`):
   Reading a secret-looking file asks (in Ask and Accept edits); writing a hidden or secret path always asks. The
   policy functions (`core-workspace/policies.ts`) check the path as written and, with the call's workspace, the path it
   resolves to through the guard, so a link named `notes.txt` that points at `.env` asks too (a path the guard refuses
-  is judged by its spelling; the call fails anyway). A user override `allow` on the tool still wins (6.2).
+  is judged by its spelling; the call fails anyway). A user override `allow` on the tool still wins (6.2). Phase 8:
+  both file tools write through `journaledWrite` (below), so every write is restorable.
 - Walking (`find_files`, `search_files`; `workspace/walk.ts`): an async depth-first walker; `.git` (a folder or a
   worktree file) and the `.hf-write-*` temp files are always skipped; `node_modules` and gitignored paths are skipped
   unless `include_ignored` (every folder's `.gitignore` gets its own `ignore` instance, the deepest verdict wins, an
@@ -1376,7 +1419,8 @@ schemas in `@harness-forge/shared`, `WORKSPACE_LIMITS`):
 - Environment (`workspace/shell-env.ts`): the allowlist `HOME LOGNAME USER PATH LANG LC_ALL LC_CTYPE TZ TMPDIR` (when
   set and not empty; values starting with `()`, exported shell functions, are skipped; `PATH` falls back to
   `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), plus `SHELL=<sh>`, `TERM=dumb`, `NO_COLOR=1`,
-  `PAGER=cat`, `GIT_PAGER=cat`, `GIT_TERMINAL_PROMPT=0`. Never passed: `HF_*`, provider keys, `NODE_ENV`.
+  `PAGER=cat`, `GIT_PAGER=cat`, `GIT_TERMINAL_PROMPT=0`. Never passed: `HF_*`, provider keys, `NODE_ENV`. Phase 8:
+  empty and relative `PATH` entries are dropped, so `pnpm` can never resolve to a file inside the project.
 - The process gets its own process group (`detached`). The kill = `process.kill(-pid, 'SIGTERM')`, then `SIGKILL`
   after 2 s, repeated every 200 ms (at most 25 times) until ESRCH (which also catches fork loops). It fires on the
   timeout (the result says `timedOut: true`; a normal result, not an error), on the run's abort signal (Stop, the guard
@@ -1399,8 +1443,73 @@ schemas in `@harness-forge/shared`, `WORKSPACE_LIMITS`):
   redacted; never the output.
 - `HF_WORKSPACE_SHELL=0` removes every `execute` tool from every run: a kill switch that no session can change.
 
+**Run scope and journaled writes** (Phase 8, ADR-036; `workspace/run-scope.ts`, `file-lock.ts`, `journal.ts`). The
+pipeline (`chat/pipeline.ts`) passes `session.assistantId` and a run scope to `assembleTools` (`chat/tools.ts`):
+`{ chatId, messageId, projectId, toolCallId, journal, shellRules, shellCwd: { current } }` with `journal =
+checkpoints.journal({ chatId, messageId, projectId })`, `shellRules = await shellRules.forRun(projectId)` and
+`shellCwd.current = initialShellCwd(history)`. `wrapToolExecute` binds it (with the call's `toolCallId`) to the
+`ToolCallContext` object right before `definition.execute`, and `evaluatePolicy` binds it to the context object of a
+policy function; `runScopeOf(c)` reads it from a module-private `WeakMap`, so only server code (the builtin
+`core-workspace` tools) can reach it: the plugin API stays 1.2.0 and third-party plugins see nothing new. A
+continuation after an approval reuses the same assistant message id.
+
+`journaledWrite(c, root, input, produce)`: resolve the path (`allowMissing`; a `.git` segment is refused early) → take
+the per-file lock (`file-lock.ts`: one promise chain per resolved absolute path, process-wide) → read the before-state
+(`readWorkspaceFile`, at most 8 MiB, else `too-large`; the mode through `fstat`; `missing` when there is no file) →
+`data = await produce(before)` (`edit_file` applies its replacement here; when it throws nothing is snapshotted) →
+`signal.throwIfAborted()` → store the before blob (the store gate held shared) → the frozen `writeWorkspaceFile` →
+insert the `workspace_changes` row with the after sha → release the lock. A failure to record logs the warning
+`checkpoint not recorded` and keeps the tool's result; a blob left by a failed write is removed by the next prune.
+`write_file` and `edit_file` compute their diff from the same before bytes (`readPreviousText` is gone), so two parallel
+`edit_file` calls on one file in one step now serialize and the second sees the first's result (v1.3 could lose one).
+Rewind, revert and undo take the same lock, and so do the writes of other chats to that file.
+
+After every settled call (success or failure) `wrapToolExecute` records a `shell` row for the core `shell` (its
+command, cut at 1,000 characters) and an `untracked` row (the tool name only) for any other tool with workspace access
+`write` or `execute`: the rewind dialog lists them and they are never restored (6.16). MCP tools declare no workspace
+access and are invisible to the journal.
+
+**Sticky working folder** (Phase 8, ADR-038; `workspace/shell.ts`, `shell-cwd.ts`). Each call is still a new process
+(same isolation, environment, timeouts and group kill), but the folder it ends in is where the chat's next call starts:
+
+- `runShellCommand({ …, reportCwd: true })` runs `sh -c "trap 'pwd -P 2>/dev/null >&3' EXIT; <command>"` (one line, so
+  bash's line numbers stay) with stdio `['ignore', 'pipe', 'pipe', 'pipe']`; fd 3 is read up to 4 KiB and its last
+  absolute line becomes `ShellRunResult.endCwd`. `exit N`, a `set -e` failure and a normal end report it (EXIT traps
+  run under bash and dash; the exit status is kept); `exec`, a SIGKILL (timeout, Stop), a user `trap … EXIT` or a
+  syntax error on the first line report nothing, so the folder stays as it was; subshells (`(cd x)`, `cd x | cat`)
+  correctly leave it unchanged. fd 3 is inherited by the command; a program that writes to it can only pick a folder
+  inside the project (the clamp below).
+- The state is derived, not stored: `initialShellCwd(history)` takes the `endCwd` of the last `tool-shell` part with
+  an output on the run's active path (default `.`; outputs saved before v1.4 count as `.`), so it follows versions
+  and survives restarts. Inside a run `scope.shellCwd.current` follows the finished calls (for parallel calls in one
+  step the call that finishes last wins).
+- Clamp: the reported folder must resolve inside the root and be a folder (`resolveWorkspacePath`; `pwd -P` has
+  already resolved links), else the output has `endCwd: '.'` and the `cwdNote` "The command ended outside the project
+  folder; the next call starts in the project folder." At each call start the remembered folder is checked again: a
+  folder that no longer exists means the call runs in the project folder, with a note. An explicit `cwd` input
+  (relative to the project folder) overrides the remembered folder for that call, and its end folder is remembered.
+- Output: `{ command, cwd, …, endCwd?, cwdNote?, allowedBy? }` (`cwd` = the folder the call started in). The model's
+  text gains one line after the status line when the folder changed: "The working folder is now packages/web (the
+  next call starts there)." (or the `cwdNote`). Environment variables still never carry over (`export X=1` is gone at
+  the next call); the tool description says so.
+
+**Shell rules** (Phase 8, ADR-038; `services/shell-rules/`, route module `shell-rules.ts`; their effect on approvals
+is in 6.2). Table `shell_rules` (`srl_` ids; `project_id` null = a global rule, else the project, deleted with it); a
+rule is a canonical prefix (`parseShellRule` of the shared parser: the words after unquoting, joined by single spaces,
+at most 200 characters); at most 200 rules per scope; a duplicate is 409 `exists`. Refused prefixes: an empty one, one
+with shell syntax, a first word that runs its arguments as a command (`sh bash zsh dash ksh fish eval exec source .
+command builtin env sudo doas su xargs nohup nice timeout time watch stdbuf chroot setsid ssh parallel`), a single word
+naming an interpreter or a package runner (`node python python3 ruby perl php deno bun npx pnpx bunx`), and `cd` (it
+needs no rule). Routes: `GET /shell-rules` → `{ items: ShellRule[] }`, `POST /shell-rules { projectId | null, prefix }`
+→ 201 (an unknown project is 404), `DELETE /shell-rules/:id` → 204; none needs fresh auth (a session can already
+approve its own shell calls, 10.9). Rules are not settings (public settings travel in backups, and a crafted backup
+must not grant shell rights) and are never exported or imported. `forRun(projectId)` loads the global and the project's
+rules once per run; a rule added during a run applies from the next run (the web adds the rules of an approval card
+before it sends the approval, whose continuation is a new run).
+
 The dev-only model `mock:workspace` walks through `write_file`, `edit_file` and `shell` deterministically for tests and
-e2e (PROVIDERS.md 8).
+e2e; Phase 8 adds `mock:checkpoint` (one edit per turn, then shell steps that create and enter a folder) and
+`mock:shell` (runs the user's text as one command) (PROVIDERS.md 8).
 
 ### 6.14 Master-key rotation (ADR-034)
 
@@ -1525,8 +1634,9 @@ same volume (the command is in `docs/guides/using-projects.md`).
 ### 6.15 Orphaned file cleanup (ADR-035)
 
 Generated images and the attachments of deleted chats and versions stay in `data/files/` (deleting a chat or a version
-keeps its files, 6.8, 6.11). Settings → Data → Storage cleanup removes them by hand, after a preview; there is no
-automatic sweep (deletion cannot be undone, and a plugin may keep file ids outside the database).
+keeps its files, 6.8, 6.11). Settings → Data → Storage cleanup removes them by hand, after a preview. Phase 7 had no
+automatic sweep (deletion cannot be undone, and a plugin may keep file ids outside the database); Phase 8 (ADR-039)
+adds an opt-in timer that runs the same cleanup and scans plugin data too (below).
 
 - **Routes** (`data.ts`): `GET /data/cleanup` → `DataCleanupPreview { files, fileBytes, blobs, diskBytes, tempFiles,
   recentFiles, graceMs, lastRunAt }` (a dry run); `POST /data/cleanup` → `DataCleanupResult { files, fileBytes, blobs,
@@ -1540,7 +1650,16 @@ automatic sweep (deletion cannot be undone, and a plugin may keep file ids outsi
   `chat_shares.snapshot` and `file_ids`, `plugin_kv.key` and `value`, `plugin_settings.values`, `settings.value`,
   `chats.settings` and `projects.name`, `path` and `instructions`. A schema-coverage test fails when a JSON, text or
   blob column is neither scanned nor explicitly excluded with a reason (`secrets`, `usage`, `model_cache`, …), so a new
-  column cannot silently lose files.
+  column cannot silently lose files. Phase 8: every text column of `workspace_changes` and `shell_rules` is in
+  `UNSCANNED_COLUMNS` (ids, project paths, commands, hashes; never a `data/files` id).
+- **Plugin data** (Phase 8, ADR-039; `services/data/plugin-data-scan.ts`, the manual and the automatic run): the same
+  loose `file_` scan over the files under `paths.pluginData` (`plugins/.data/**`, disabled plugins and `keepData`
+  leftovers included): `readdir` with file types plus `lstat`, links never followed, regular files only, opened
+  `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and checked with `fstat`, read as a stream in 1 MiB chunks with a 20-byte carry
+  over (an id split across two chunks is found) and the same lookahead regex on latin1. Budget: 256 MiB, 50,000 files,
+  depth 32, plus the abort signal. Over budget, an automatic run is skipped (nothing is deleted, `skipped` /
+  `plugin-data-limit`) while a manual run proceeds and reports `pluginData: 'partial'` in the preview (v1.3 scanned
+  no plugin data at all). Installed plugin folders, `cache/`, `workspaces/` and `checkpoints/` are not scanned.
 - **Candidates**: file rows created before the cutoff (`now - 24 h`, `graceMs`, taken before the scan), not referenced
   and not **pinned**: the files service pins in memory, for the grace period, every id that `upload`, `importFile` or
   `saveGenerated` returned (a run may reuse an old row before its message is saved; pins are lost on restart, like the
@@ -1562,8 +1681,169 @@ automatic sweep (deletion cannot be undone, and a plugin may keep file ids outsi
   them); imports, delete-all and key rotation are serialized against it. A real run stores its time in the internal
   setting `_files` (`{ lastCleanup }`, the preview's `lastRunAt`) and logs `orphaned files cleaned up` (info: the
   counts and `recentFiles`); a file that cannot be removed logs a warning with the error code only.
-- **Plugins** that keep file ids must keep them in `ctx.storage` or their settings (scanned), never only in files under
-  `ctx.plugin.dataDir` (PLUGINS.md 9).
+- **Plugins** that keep file ids should keep them in `ctx.storage` or their settings (scanned exactly); since Phase 8
+  the files under `ctx.plugin.dataDir` are scanned loosely within the budget above (PLUGINS.md 9).
+- **Checkpoints** (6.16) are a separate store: the sweep walks only `paths.files` (64-hex names in their own shard), so
+  a `checkpoints/aa/<sha256>` blob is never touched (a test proves it), and checkpoint retention follows ADR-036.
+
+**Automatic sweep** (Phase 8, ADR-039; `services/data/auto-sweep.ts`: `createAutoSweep` and the pure `nextSweepAt(state,
+mode, bootAt)`):
+
+- The setting `fileSweep` = `off` (default) | `daily` | `weekly` (a public setting, no fresh auth, restored by a backup
+  like any setting). `DataService.start()` (the last step of `startDeps`) starts a timer like the catalog's
+  `scheduleCycle`: a chained `setTimeout(…).unref()` plus a `stopped` flag; the first check comes at `bootAt + 24 h`
+  (`FILE_CLEANUP_GRACE_MS`, so the in-memory pins lost at a restart never matter), then one check per hour. Each check
+  reads the setting and `_files` again, so a change applies within an hour without a subscription.
+  `DataServiceOptions.background` is off under Vitest; `stop()` (the first step of `stopDeps`) clears the timer and
+  aborts a sweep in flight (`FileSweepInput.signal`, checked between batches).
+- Due time: `nextRunAt = max(bootAt + 24 h, (lastCleanup ?? 0) + interval, lastAutoSweep failed or skipped ?
+  lastAutoSweep.at + interval : 0)` with interval 24 h (`daily`) or 7 days (`weekly`); `null` while `off`. A manual
+  cleanup sets `lastCleanup`, so it resets the clock.
+- Run: `maintenance.exclusive('file-cleanup', () => runCleanup(deps, now, { trigger: 'auto', signal }))`, the same
+  lock as the manual run (no `blockRuns`). A 409 `busy` (an import, delete-all, a rotation or a manual cleanup is
+  running) stores nothing and retries in 10 minutes (debug log). A failure is stored (`failed`, reason `error`) with a
+  warning (`err`, no paths) and is retried only after a full interval, so it cannot loop. A finished run sets both
+  `lastCleanup` and `lastAutoSweep`, so the existing "Last cleanup" line covers both kinds.
+- State: the internal setting `_files = { lastCleanup?, lastAutoSweep?: { at, status: 'done' | 'skipped' | 'failed',
+  reason: 'plugin-data-limit' | 'error' | null, files, diskBytes } }`. DTO `FileSweepStatus { mode, lastAttempt,
+  nextRunAt }` in `GET /data` (`DataSummary.fileSweep`: one internal setting read, so the section renders without a
+  scan) and in `GET /data/cleanup`. No new route and no new event: the Data page loads `GET /data` when it opens.
+- Logs: info `automatic file sweep finished` (`trigger`, the counts, `recentFiles`, `pluginDataFiles`,
+  `pluginDataBytes`, `durationMs`) or `automatic file sweep skipped` (`reason`); manual runs log `trigger: 'manual'`;
+  never ids, names or paths.
+- Test hook: `HF_TEST_FILE_SWEEP_DELAY_MS` (1000 – 86,400,000) replaces the boot delay and the hourly check, honored
+  only with `HF_MOCK_PROVIDER=1` (otherwise ignored with a boot warning); the 24 h `created_at` grace stays, so probes
+  age rows with SQL.
+
+### 6.16 Checkpoints and rewind (ADR-036)
+
+Before every agent `write_file` / `edit_file` and before every server-side revert, rewind or undo, the previous state of
+the file is stored content-addressed and journaled, so a chat's file changes can be rewound to any of its user
+messages, reverted file by file (6.17), and every restore can itself be undone. No git is needed. Shell commands and
+third-party tools are journaled but not restorable. Services: `services/checkpoints/` (`CheckpointService`), the
+capture path in 6.13 (run scope, `journaledWrite`).
+
+- **Journal** (`workspace_changes`, section 8): one row per change, in global order (`id`, inserted under the file
+  lock, so per path it follows the write order): `chat_id`, `project_id`, `message_seq` (`coalesce(max(seq), 0)` of
+  the chat's messages at insert time: the rewind watermark; the user message is committed before its run starts),
+  `message_id` / `tool_call_id` (null for user operations), `batch_id` (`wcb_` + 16: one revert, rewind or undo),
+  `kind` (`edit` | `revert` | `rewind` | `undo` | `shell` | `untracked`), `tool`, `path` (project-relative POSIX),
+  `command` (shell rows, cut at 1,000 characters), the before-state (`before_state` `missing` | `stored` | `too-large`
+  | `evicted`, `before_sha`, `before_size`, `before_mode`) and the after-state (`after_sha`, null = removed;
+  `after_size`; only hashes, never content).
+- **Blob store** (`checkpoints/<aa>/<sha256>` in the data directory, `DataPaths.checkpoints`): the raw before-bytes,
+  deduplicated by sha256, folders 0700, files 0600, written to a temp file, fsynced, then renamed. Binary files are
+  stored like text. It is a separate tree from `files/`: the file sweep deletes blobs that have no `files` row (6.15),
+  and project content must never be reachable through `/api/files/:id`. No route serves it, and it is never in a
+  backup, export or import.
+- **Limits** (`LIMITS`, no settings key): `checkpointFileMaxBytes` 8 MiB (a bigger before-state is recorded as
+  `too-large`: the edit still runs, the file just cannot be restored), `checkpointProjectMaxBytes` 512 MiB per project
+  and `checkpointMaxAgeMs` 30 days.
+- **Prune** (`prune.ts`): at boot (`checkpoints.start()`), every 6 hours (a chained `setTimeout(…).unref()` like the
+  catalog cycle; `stop()` clears it) and 60 s after a `chat.deleted` (debounced). In order: evict blobs older than the
+  age limit, then the oldest blobs of each project over its budget (the row stays with `before_state = 'evicted'`),
+  unlink blobs that no `stored` row references and that are older than 1 hour, remove stale temp files. Concurrency:
+  the store gate of `services/files/gate.ts` (`createStoreGate()`): writers hold it shared from the blob write to the
+  row insert, prune holds it exclusive.
+- **Lifecycle**: deleting a chat or a project deletes its rows (foreign keys with `ON DELETE CASCADE`; foreign keys are
+  on); delete-all also calls `checkpoints.purge()` inside its maintenance operation (6.9); deleting a message version
+  keeps the rows (the disk history is time-based, not branch-based); a chat moved to another project keeps its old
+  rows, but every query filters on the chat's current project, so they are ignored. `DataSummary.checkpoints { bytes,
+  blobs }` reports the store (optional).
+
+**Rewind** ("Rewind files to here", UI.md 7.22) is time-based: "the files as they were when user message M was sent".
+
+1. Scope: every file row of the chat in its current project with `message_seq >= M.seq`, on any branch (abandoned
+   versions, an older message continued after M, earlier reverts and rewinds). Only user messages are targets (400
+   otherwise). Edits of other chats are never undone; when they touched the same files they show as conflicts.
+2. Plan (`plan.ts`, pure), per path: **target** = the before-state of the earliest row in the range, **expected** = the
+   after-state of the latest row, **current** = the disk (a sha256 streamed through `openWorkspaceFile`, or missing).
+   Actions: `unchanged` (current = target), `restore`, `delete` (the target is missing), `unavailable` (the target is
+   `too-large` or `evicted`). **Conflict** = current ≠ expected (the file changed after the chat's last recorded
+   change). The plan is idempotent: a second rewind sees its own rows and every file comes out `unchanged`.
+3. Preview: `GET /chats/:id/rewind?messageId=` → `RewindPreview { messageId, files: { path, action, conflict, edits
+   }[] (≤ 500), untracked: { shellCount, shell: { command, at, messageId }[] (≤ 50), tools: { tool, at, messageId }[]
+   (≤ 50) }, truncated }`.
+4. Apply: `POST /chats/:id/rewind { messageId, conflicts: 'skip' | 'force' }`. Refused with 409 `run-active`
+   (`details.chatId`) while **any** chat of the project runs (`runs.hasRun`, the check of project deletion). Files are
+   processed newest-edited first; each one under its file lock: read the current state again and re-check the conflict
+   (skipped unless `force`), snapshot the current state, then write the target through `writeWorkspaceFile` (plus
+   `chmod(before_mode)` when the file is re-created) or remove it through `workspace/remove.ts` (resolve, refuse
+   `.git`, `lstat` a regular file, unlink), and insert a `rewind` row with the batch id. Folders the agent created stay.
+   There is no multi-file transaction: every write is atomic and journaled right after it, so running the rewind again
+   resumes it and undoing a partial batch works. Answer: `RestoreResult { batchId | null, restored[], deleted[],
+   unchanged[], skipped: { path, reason: 'conflict' | 'unavailable' | 'refused' | 'failed', message }[] }`
+   (`batchId` null = nothing was written).
+5. The server never moves the conversation: "Restore files and edit" is a rewind followed by the existing edit flow of
+   the web (a new version, ADR-023).
+
+**Undo** (`POST /chats/:id/changes/undo { batchId, conflicts }`) restores the before-states of a batch's rows
+(expected = their after-states) as a new batch of kind `undo`, with the same lock, conflict and 409 rules; so a revert,
+a rewind and an undo can all be reversed.
+
+**Events**: `workspace.changed { projectId, chatId | null, batchId | null, source: 'tool' | 'rewind' | 'revert' |
+'undo', paths (≤ 200) }` after every batch that wrote something, and for agent edits (`source: 'tool'`, coalesced to at
+most one event per second per chat), so the changes panel follows a run live.
+
+**Errors**: the write routes answer 400 `validation_error` with the `openWorkspace` message for a chat without a
+project or with an unavailable folder, 404 for an unknown chat, message or batch, 409 `run-active` as above; the read
+routes answer `available: false` with a reason instead. No new conflict reason or error code.
+
+### 6.17 Changes panel data and the git runner (ADR-037)
+
+The changes panel (UI.md 7.21) reads the module `changes` (`http/routes/changes.ts`; none of its routes needs fresh
+auth). Its "This chat" view comes from the journal (6.16) and needs no git; its "Git" view runs git through one
+hardened runner.
+
+| Route | Answer |
+|---|---|
+| `GET /chats/:id/changes` | `ChatChanges { available, reason: no-project \| folder-unavailable \| null, projectId, files: { path, status: added \| modified \| deleted \| unchanged, edits, changedOutside, revertible, added, removed, lastEditAt }[] (≤ 500, most recently changed first), truncated, untracked: { shellCommands, toolCalls } }`: per path, base = the earliest before-state, expected = the latest after-state, current = the disk; `changedOutside` = current ≠ expected; `revertible` = the base is stored or missing; the line counts only for the first 200 text files of at most 256 KiB (else null) |
+| `GET /chats/:id/changes/diff?source=chat\|git&path=` | `FileDiff { source, path, origPath, status, binary, tooLarge, diff, currentSha, baseAvailable }` (`diff` null when binary, too large or the base is not available): `computeWorkspaceDiff` with its caps on sides of at most 1 MiB; binary = a NUL byte in the first 8 KiB or a failed `decodeText`; `currentSha` = the sha256 on disk (null when missing), which the web sends back as `expectedSha` |
+| `GET /chats/:id/git` | `GitStatus { available, reason: no-project \| folder-unavailable \| git-missing \| not-a-repo \| refused \| timeout \| failed \| null, branch, head, prefix, files: { path, origPath, status: modified \| added \| deleted \| renamed \| untracked \| conflicted \| typechange, staged, unstaged }[] (≤ 2000), truncated }` |
+| `POST /chats/:id/changes/revert` `{ source, path, expectedSha? }` | `RestoreResult` (one batch, undoable, 6.16); 409 `stale` when the disk is not `expectedSha` (`null` = the file was missing; omitted = no check), 409 `run-active` while any chat of the project runs |
+| `POST /chats/:id/changes/undo` `{ batchId, conflicts }` | `RestoreResult` (6.16) |
+
+**Revert** (`revert.ts`): `chat` → the base state (the file before this chat first changed it; a base that is
+`too-large` or `evicted` cannot be restored, 400); `git` → the raw HEAD blob (mode 100755 stays executable); an
+untracked or added file is deleted after a snapshot; a rename restores `origPath` and deletes `path`. Refused with 400:
+conflicted files, symbolic links (mode 120000), submodules and paths whose `check-attr filter` is set (Git LFS and other
+filters). The git index is never touched. Every path resolves through `resolveWorkspacePath`; every write goes through
+the restore primitive of 6.16 (lock, snapshot, journal row, `workspace.changed`). There is no `force`: a revert whose
+`expectedSha` no longer matches is refused, and the web shows the newer diff first.
+
+**The git runner** (`workspace/git.ts`; complete and frozen since P8-0b; the only module that spawns git):
+
+- `runGit(args, { cwd, signal })`: `spawn('git', args, { shell: false, detached: true })` with an argument array (never
+  a shell string), killed with `killProcessGroup` (exported from `workspace/shell.ts`) on the abort signal and after
+  15 s (`timeout`); stdout is capped at 8 MiB (`failed` beyond it).
+- Environment: the shell's allowlist (`shell-env.ts`) plus `GIT_OPTIONAL_LOCKS=0` (`status` never writes the index),
+  `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`, `LC_ALL=C` and `GIT_CEILING_DIRECTORIES` = the
+  parent of the project's workspace root, so git never discovers a repository above the allowed root (in development
+  never the harness-forge repository that holds `data/workspaces`); inherited `GIT_DIR`, `GIT_WORK_TREE` and
+  `GIT_CONFIG_*` variables are dropped.
+- Every call starts with `--no-pager -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c
+  core.pager=cat -c color.ui=false -c core.quotepath=false -c protocol.allow=never`. Filter drivers that the
+  repository configures (`git config -z --name-only --get-regexp '^filter\.'`) are neutralized with `-c
+  filter.<name>.clean= -c filter.<name>.smudge= -c filter.<name>.process=`; a sentinel test suite proves that no
+  configured program runs (fsmonitor, `diff.external`, textconv, filter clean / smudge / process, `core.hooksPath`,
+  `core.pager`, an `include.path` chain, inherited `GIT_DIR` / `GIT_CONFIG_*`), and when that cannot be guaranteed the
+  answer is `refused`.
+- Commands: `rev-parse --is-inside-work-tree --show-prefix --abbrev-ref HEAD` (the prefix maps repository paths to
+  project paths: a project may be a subfolder of a repository); `status --porcelain=v2 -z --untracked-files=all
+  --ignore-submodules=all -- .` from the project root (entries `1`, `2` (a rename with `origPath`), `u` (conflicted)
+  and `?`; paths outside the prefix are dropped); `ls-tree -z HEAD -- <path>` (mode and blob id) and `cat-file -s` /
+  `cat-file blob <oid>` (size and content). Paths from the model or the user resolve through `resolveWorkspacePath`
+  first and always follow `--`. `git diff` is never run: a diff is the HEAD blob against the disk through
+  `computeWorkspaceDiff` (untracked or added: empty against the file; deleted: HEAD against empty; renamed: HEAD of
+  `origPath` against `path`; an unborn HEAD: everything added).
+- Reasons: `git-missing` (`ENOENT` when spawning, cached for 60 s), `not-a-repo`, `refused` (git's "dubious ownership"
+  check: `safe.directory` is **not** overridden, so a repository owned by another user, typically a Docker bind mount
+  with another uid, stays refused; `docs/guides/using-projects.md` explains the fix), `timeout`, `failed`, plus
+  `no-project` / `folder-unavailable` from the project checks.
+- Spawn guard: `security/process-spawn.test.ts` fails when a non-test file other than `workspace/shell.ts`,
+  `workspace/git.ts` and `mcp/stdio-transport.ts` imports `node:child_process`. Tests create repositories with `git
+  init` inside `realpath(mkdtemp())` (author through `-c user.name` / `-c user.email`, `HOME` and `GIT_CONFIG_GLOBAL`
+  pointed at the temp folder) and skip without git.
 
 ## 7. Data directory
 
@@ -1580,6 +1860,8 @@ data/                      HF_DATA_DIR (default ./data, resolved against the rep
   cache/                   models.dev snapshot refreshes (models-dev.json + fetched-at), misc caches
   cache/plugins/<id>/      compiled output of .ts code plugins (<sha256>.mjs), rebuilt on demand
   workspaces/              default workspace root (0700; Phase 7): project folders when HF_WORKSPACE_ROOTS is unset
+  checkpoints/<aa>/<sha256>  before-states of project files changed by the agent or by a restore (Phase 8, 6.16;
+                           folders 0700, files 0600; never served, never in a backup, not touched by the file sweep)
   secret.key.next          transient: the new master key during a rotation (0600; renamed over secret.key, 6.14)
   server.lock              { pid, hostname, port, startedAt } of the running server; removed at shutdown (6.14)
 ```
@@ -1593,6 +1875,8 @@ warning, it does not crash. To replace the key on purpose, rotate it (Phase 7, 6
 nothing is lost. `workspaces/` holds project folders only when the default root is used; project folders elsewhere
 (inside `HF_WORKSPACE_ROOTS`) are not part of the data directory, its backups or the Settings -> Data zip. A copied data
 directory keeps its `projects` rows, whose paths may not exist on the new host (they show "Folder not found").
+`checkpoints/` (Phase 8) belongs to the journal rows in the database: copy it together with the database; without it
+the files whose earlier versions it held cannot be restored (rewind and revert skip or refuse them).
 
 ## 8. Data model
 
@@ -1618,7 +1902,8 @@ Column conventions:
 
 **`settings`** — global settings (keys listed in API.md `Settings`) and internal keys (prefix `_`, never returned
 by the API, e.g. `_auth.sessionEpoch`; Phase 7: `_keys` = `{ version, check, rotatedAt }`, the master-key state of
-6.14, and `_files` = `{ lastCleanup }`, 6.15).
+6.14, and `_files` = `{ lastCleanup }`, 6.15; Phase 8: `_files.lastAutoSweep` = `{ at, status, reason, files,
+diskBytes }` of the automatic sweep, and the public key `fileSweep`).
 
 | Column | Type | Constraints |
 |---|---|---|
@@ -1809,6 +2094,41 @@ when a chat is deleted.
 | `created_at` | timestamp | NOT NULL |
 | `updated_at` | timestamp | NOT NULL |
 
+**`workspace_changes`** — the checkpoint journal (Phase 8, ADR-036, 6.16): one row per change of a project file. Not in
+backups or exports; deleted with its chat or project.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | integer | PK AUTOINCREMENT; the global order (inserted under the file lock) |
+| `chat_id` | text | NOT NULL; FK -> `chats.id` ON DELETE CASCADE |
+| `project_id` | text | NOT NULL; FK -> `projects.id` ON DELETE CASCADE |
+| `message_seq` | integer | NOT NULL; `coalesce(max(seq), 0)` of the chat's messages at insert time (the rewind watermark) |
+| `message_id` | text | NULL; the assistant message of the run (a continuation keeps its id); null for user operations; no FK |
+| `tool_call_id` | text | NULL; the tool call; null for user operations |
+| `batch_id` | text | NULL; `wcb_` + 16 chars: one revert, rewind or undo |
+| `kind` | text | NOT NULL; `edit` \| `revert` \| `rewind` \| `undo` \| `shell` \| `untracked` |
+| `tool` | text | NULL; `write_file`, `edit_file`, `shell` or the plugin tool's name |
+| `path` | text | NULL; project-relative POSIX path (null for `shell` and `untracked` rows) |
+| `command` | text | NULL; `shell` rows only, cut at 1,000 characters |
+| `before_state` | text | NULL; `missing` \| `stored` \| `too-large` \| `evicted` |
+| `before_sha` | text | NULL; sha256 hex of the before-state (the blob name when `stored`) |
+| `before_size` | integer | NULL; bytes |
+| `before_mode` | integer | NULL; the file mode, restored when a file is re-created |
+| `after_sha` | text | NULL; sha256 hex after the change; null = the file was removed |
+| `after_size` | integer | NULL; bytes |
+| `created_at` | timestamp | NOT NULL |
+| | | indexes (`chat_id`, `path`, `id`), (`chat_id`, `message_seq`), (`project_id`, `id`), (`before_sha`) |
+
+**`shell_rules`** — command prefixes that let `shell` calls run without a card (Phase 8, ADR-038, 6.13). Not settings,
+not in backups; deleted with their project.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | text | PK; `srl_` + 16 chars |
+| `project_id` | text | NULL = a global rule; FK -> `projects.id` ON DELETE CASCADE; indexed |
+| `prefix` | text | NOT NULL; the canonical prefix (<= 200 chars); unique per scope (checked by the service) |
+| `created_at` | timestamp | NOT NULL |
+
 **`chat_shares`** — read-only share links (ADR-025, 6.10). There is no token column: tokens are recomputed from the id.
 
 | Column | Type | Constraints |
@@ -1834,6 +2154,7 @@ when a chat is deleted.
 | `0002_remembered_versions` (Phase 6) | `ALTER TABLE messages ADD selected_child_id` (nullable, no FK, no index), then a hand-written backfill of every active path |
 | `0003_refresh_model_listings` (Phase 6) | hand-written, no schema change: one ``UPDATE `model_cache` SET `fetched_at` = `fetched_at` - 86400000 WHERE `fetched_at` IS NOT NULL;`` that makes every successful cached provider listing stale |
 | `0004_projects` (Phase 7) | generated: `CREATE TABLE projects`, unique index `projects_path_idx`, ``ALTER TABLE `chats` ADD `project_id` text`` (nullable, no FK), index `chats_project_idx`; no backfill |
+| `0005_workspace_checkpoints` (Phase 8) | generated: `CREATE TABLE workspace_changes` and `CREATE TABLE shell_rules` with their indexes; no change to an existing table, no backfill |
 
 The backfill turns every existing chat into a linear chain: each message's parent is the previous message by `seq`,
 and the active leaf is the last message (`null` for an empty chat):
@@ -1892,12 +2213,22 @@ TABLE … ADD` statements (a `DROP TABLE`, `__new_` or `PRAGMA foreign_keys` sta
 `project_id` null. Key rotation and the file cleanup need no columns: their state lives in the internal settings `_keys`
 and `_files`.
 
+`0005` (Phase 8, ADR-036 / ADR-038) only creates the two new tables. Because they are new, their foreign keys can carry
+`ON DELETE CASCADE` (to `chats` and `projects`; foreign keys are on), so deleting a chat or a project removes its
+journal rows and rules without service code; nothing references them. The generated SQL must be only `CREATE TABLE` and
+`CREATE … INDEX` statements (a `DROP TABLE`, `__new_` or `PRAGMA foreign_keys` statement is rejected);
+`db/upgrade.test.ts` migrates a database holding `0000` … `0004` and checks 18 tables, the old data intact and the
+cascades. Every text column of both tables is listed in `UNSCANNED_COLUMNS` of `services/data/references.ts` (ids,
+paths, commands and hashes, never a `data/files` id), so the schema-coverage test of the file cleanup stays green.
+
 Not stored in the DB: sessions (stateless HMAC cookie), active runs and resume buffers (memory), plugin logs
 (memory ring buffer), SSE subscribers (memory), share tokens (recomputed from the share id), rate-limit counters and
 the maintenance lock (memory; Phase 7, it replaced the import / delete-all mutex), the file cleanup's pins (memory),
 the running server's identity (`server.lock` in the data directory), and (Phase 6) recordings, transcripts and speech
 audio or text, which only pass through (10.8). Generated images are stored as files like uploads. Project folders are
-files on the host, never copied into the database.
+files on the host, never copied into the database. Phase 8: the per-file locks and the run scopes (memory), the sticky
+shell folder (derived from the stored shell outputs) and the checkpoint blobs (`checkpoints/`, the rows hold only
+hashes).
 
 ## 9. Model catalog
 
@@ -2194,7 +2525,7 @@ There is no OS sandbox: run harness-forge in its Docker container (or as a dedic
 
 | Threat | Mitigation | Accepted risk |
 |---|---|---|
-| Prompt injection drives the shell in Auto mode | Auto is an explicit choice; Accept edits exists so Auto is not needed for edits; the shell asks in Ask and Accept edits and has no "Always allow" in the UI; hidden-path writes always ask | Auto = full trust in the model |
+| Prompt injection drives the shell in Auto mode | Auto is an explicit choice; Accept edits exists so Auto is not needed for edits; the shell asks in Ask and Accept edits unless the user's shell rules match the whole command (Phase 8), and an `allow` override on it is refused; hidden-path writes always ask | Auto = full trust in the model |
 | Reading `.env`, then sending it out with `web_fetch` | secret-looking reads ask; `search_files` skips them; `web_fetch` asks outside Auto and the card shows the URL | a shell `cat` in Auto mode |
 | Planting git hooks, CI files, editor tasks, `.npmrc` | hidden or secret paths: writes always ask (policy `always`), even in Accept edits; `.git` is never written by the file tools | a user override `allow` on the tool, or the shell |
 | Symlink escape, `..`, absolute paths | one resolver with realpath containment on every call; dangling links refused; folder links not walked; the root re-checked against its realpath | TOCTOU between check and open, hard links (6.13) |
@@ -2204,6 +2535,16 @@ There is no OS sandbox: run harness-forge in its Docker container (or as a dedic
 | A stolen session uses the workspace | fresh auth on `POST /projects` (a new folder needs the password); the roots and `HF_WORKSPACE_SHELL` come only from the environment | a valid session can approve its own shell calls: code execution as the server user |
 | Secrets readable by the shell | the environment allowlist (no `HF_*`, no provider keys) | anything the server user can read (`/proc/<ppid>/environ`, `data/secret.key`, the database) |
 | A project that exposes the data directory | a project folder may not equal, contain or sit inside the data dir; roots may not be the data dir or inside it (except `<dataDir>/workspaces`) | a root that contains the data dir is allowed (development), but no project can reach it |
+| Repository config runs code through git (Phase 8: fsmonitor, hooks, filter drivers, textconv, external diff, pager, `include.path` chains) | one hardened runner (6.17): argument arrays, no shell, scrubbed environment (no inherited `GIT_DIR` / `GIT_CONFIG_*`, `GIT_CONFIG_NOSYSTEM`), `-c` overrides for fsmonitor, hooks, external diff and pager, every configured filter neutralized (else `refused`), never `git diff`, a sentinel test suite and gate probe; 15 s timeout, capped output | a vulnerability in the git binary itself |
+| git finds a repository above the project, e.g. the harness-forge repository in development (Phase 8) | `GIT_CEILING_DIRECTORIES` = the parent of the workspace root; the prefix of `rev-parse` maps paths and drops anything outside the project | a project that is itself a subfolder of a repository sees that repository's status for its own files (intended) |
+| A repository owned by another user (Phase 8) | git's "dubious ownership" check stays on (`safe.directory` is not overridden): the Git view answers `refused` | the user configures `safe.directory` (or fixes ownership) deliberately; the projects guide documents it for Docker bind mounts |
+| Shell syntax slips past a shell rule (Phase 8) | the shared parser fails closed: every segment must match, and `$`, backticks, redirections (other than to `/dev/null` or fd copies), subshells, here-docs, globs, `~`, keywords and env prefixes always ask; enforcement is on the server; rules for command runners (`sh`, `env`, `xargs`, `sudo`, …) and single-word interpreter rules are refused; table and fuzz tests, a gate probe | argument-level side effects of an allowed command (`git diff --output=…`, `find … -delete`); a rule for a script runner (`pnpm test`, `make`, `npm run x`) runs any code the agent wrote into the project, so with Accept edits it is about as strong as Auto for the shell |
+| A crafted backup grants shell rights (Phase 8) | shell rules are not settings and are never exported or imported; `fileSweep` is the only new public setting | — |
+| The sticky folder escapes the project (Phase 8) | the reported folder is clamped through the path guard at the end of each call and re-checked at the start of the next; an explicit `cwd` is resolved like any path | a command can still `cd` anywhere while it runs (as before: no sandbox) |
+| A revert or rewind destroys work (Phase 8) | the current state is snapshotted first and every batch can be undone; conflict detection (current ≠ expected) with an explicit force; `expectedSha` on a revert; 409 `run-active` while any chat of the project runs; the per-file lock | changes made by shell commands and third-party tools are not restorable (listed in the dialog); the lock works only inside the server process |
+| Checkpoints expose project content (Phase 8) | a separate tree (`checkpoints/`, 0700 / 0600), never served by a route (never under `/api/files`), never in backups or exports; deleted with the chat or project | anyone who can read the data directory |
+| Checkpoint storage grows (Phase 8) | 8 MiB per file, 512 MiB per project, 30 days, prune at boot and every 6 h, cascade deletes, `purge()` on delete-all | — |
+| The automatic sweep deletes a file in use (Phase 8) | opt-in (`fileSweep` off by default); the 24 h grace, the first run 24 h after boot, the pins, the DELETE re-check, the plugin-data scan (skipped when incomplete); checkpoint blobs are never touched | a plugin that keeps file ids only in files beyond the scan budget (the automatic run is skipped then, a manual one proceeds) |
 
 - **Kill switch**: `HF_WORKSPACE_SHELL=0` removes every tool with workspace access `execute` (the `shell` tool) from
   every run. No session can change it; file tools keep working.
@@ -2215,6 +2556,14 @@ There is no OS sandbox: run harness-forge in its Docker container (or as a dedic
 - **Windows**: the `shell` tool is not registered (the file tools work); the process-group kill needs POSIX.
 - **Docker** (11): the image ships `bash` and `git` for the shell; mount project folders at `/workspaces` and set
   `HF_WORKSPACE_ROOTS=/workspaces`; the container runs as uid 1000, so the mounted folders must be writable by it.
+  Phase 8: a bind-mounted repository owned by another uid makes git refuse it ("dubious ownership"), so the Git view
+  shows `refused`; fix the ownership or add `safe.directory` to the git configuration of the container user yourself
+  (`docs/guides/using-projects.md`); the server never overrides it.
+- **Shell rules** (Phase 8): adding or removing a rule needs no fresh auth (a session can already approve its own shell
+  calls, so a rule adds no power that session lacks); rules apply only to the core `shell` tool; `HF_WORKSPACE_SHELL=0`
+  still removes the shell whatever the rules say.
+- **Git and the shell** (Phase 8): git runs only through `workspace/git.ts` and shell strings only through
+  `workspace/shell.ts` (a spawn guard test enforces it, 6.17); git never writes the index or runs a write command.
 
 ## 11. Topology
 
@@ -2281,6 +2630,10 @@ flowchart LR
   25 MB for recordings (the 256 MB of data imports covers it).
 - Stdio MCP servers, code plugins and (Phase 7) shell commands of the workspace tools run inside the same
   container/user as the server.
+- Git in Docker (Phase 8): the Git view of the changes panel needs `git` (shipped) and repositories the container user
+  owns. A bind mount owned by another uid is refused by git ("dubious ownership"; the panel says "Git refused to read
+  this repository"): `chown` the folder to uid 1000, or set `safe.directory` for that path in the git configuration of
+  the `node` user yourself (10.9). The "This chat" view and rewind work without git.
 
 ## 12. Observability
 
@@ -2317,6 +2670,17 @@ flowchart LR
   stored check, an unrecorded key check), the `server.lock` warnings (a lock of another live process or host
   replaced), the CLI's lines on stderr (6.14), and `orphaned files cleaned up` (info: files, file bytes, blobs, disk
   bytes, temp files, recent files).
+- **Workspace 2.0** (Phase 8): counts and ids only at `info`, never file contents, diffs, commands, rule prefixes or
+  paths (those only at `debug`, redacted). `checkpoint not recorded` (warn: chat id, tool call id, the error code) when
+  a journal row or blob could not be written (the tool result is kept); the prune logs `checkpoints pruned` (info:
+  evicted blobs, unlinked blobs, temp files, bytes freed) when it removed something; a rewind, revert or undo logs one
+  info line (`files rewound` / `file reverted` / `restore undone`: chat id, batch id, the counts of restored, deleted,
+  unchanged and skipped files); the git runner logs failures at `debug` (the arguments, the exit code) and a spawn
+  failure (`git-missing`) once per minute at most; the shell rule service logs `shell rule added` / `shell rule
+  removed` (info: rule id, global or project id); the automatic sweep logs `automatic file sweep finished` (info:
+  trigger, counts, `recentFiles`, `pluginDataFiles`, `pluginDataBytes`, `durationMs`), `automatic file sweep skipped`
+  (info: reason) or a warning with the error on failure (6.15); a shell call allowed by rules adds `allowedByRule:
+  true` to its `shell command finished` line.
 - **Proxy trust** (texts in section 10.6): the boot log line `trusting reverse proxies (HF_TRUST_PROXY)` lists the
   canonical entries and the trusted ranges; one warning per untrusted peer address that sends a forwarded header the
   server would honor from a trusted proxy (header names only, at most 256 addresses); failed-login warnings carry the

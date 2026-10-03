@@ -8,7 +8,7 @@
 //    re-checks the message references, and walks the store for rowless blobs and stale temp files.
 // 4. A real run stores its time in the internal setting `_files` (`{ lastCleanup }`) and logs the counts (nothing
 //    else: no ids, names or paths). No event.
-import type { DataCleanupPreview, DataCleanupResult } from '@harness-forge/shared'
+import type { DataCleanupPreview, DataCleanupResult, FileSweepStatus } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
 import type { FileSweepResult } from '../files/types.ts'
 import type { InternalSettingKey } from '../settings/types.ts'
@@ -34,6 +34,15 @@ export function lastCleanupOf(state: Record<string, unknown>): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
 }
 
+/**
+ * The automatic sweep state of `GET /data` and `GET /data/cleanup` (ADR-039). P8-A (W8.7): a contract placeholder
+ * (the current `fileSweep` setting, no attempt, no next run) until the automatic sweep exists.
+ */
+export async function fileSweepStatus(deps: AppDeps): Promise<FileSweepStatus> {
+  const { fileSweep } = await deps.settings.get()
+  return { mode: fileSweep, lastAttempt: null, nextRunAt: null }
+}
+
 async function sweepOrphans(deps: AppDeps, now: () => number, dryRun: boolean): Promise<FileSweepResult> {
   const createdBefore = now() - FILE_CLEANUP_GRACE_MS
   const referencedIds = await collectReferencedFileIds(deps.db)
@@ -53,6 +62,9 @@ export async function previewCleanup(deps: AppDeps, now: () => number): Promise<
     recentFiles: result.recentFiles,
     graceMs: FILE_CLEANUP_GRACE_MS,
     lastRunAt: lastCleanupOf(state),
+    // P8-A (W8.7): the plugin data scan reports `partial` when it stops at its budget.
+    fileSweep: await fileSweepStatus(deps),
+    pluginData: 'complete',
   }
 }
 
@@ -70,5 +82,6 @@ export async function runCleanup(deps: AppDeps, now: () => number): Promise<Data
     tempFiles: result.tempFiles,
   }
   deps.logger.info('orphaned files cleaned up', { ...counts, recentFiles: result.recentFiles })
-  return { ...counts, ranAt }
+  // P8-A (W8.7): the plugin data scan reports `partial` when it stops at its budget.
+  return { ...counts, ranAt, pluginData: 'complete' }
 }

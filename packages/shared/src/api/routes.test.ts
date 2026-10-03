@@ -90,8 +90,8 @@ function tableSignatures(): string[] {
 }
 
 describe('route table', () => {
-  it('has 85 routes keyed <module>.<action>', () => {
-    expect(API_ROUTE_KEYS).toHaveLength(85)
+  it('has 95 routes keyed <module>.<action>', () => {
+    expect(API_ROUTE_KEYS).toHaveLength(95)
     for (const key of API_ROUTE_KEYS) {
       const route: ApiRouteDef = apiRoutes[key]
       expect(key.startsWith(`${route.module}.`), key).toBe(true)
@@ -107,7 +107,7 @@ describe('route table', () => {
 
   it('equals the route key index of API.md (key, method, path, module)', () => {
     const index = routeIndex()
-    expect(index).toHaveLength(85)
+    expect(index).toHaveLength(95)
     expect(index.map(row => `${row.key} ${signature(row)}`).sort()).toEqual(
       API_ROUTE_KEYS.map(key => `${key} ${signature(apiRoutes[key])}`).sort(),
     )
@@ -186,7 +186,6 @@ describe('route table', () => {
   })
 
   it('declares the project, key and cleanup routes as the contract says (ADR-031, ADR-034, ADR-035)', () => {
-    expect(API_MODULES).toHaveLength(23)
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'projects')).toEqual(['projects.list', 'projects.create', 'projects.update', 'projects.remove', 'projects.browse'])
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'keys')).toEqual(['keys.get', 'keys.rotate'])
     // Creating a project and rotating the key need fresh auth; nothing else of Phase 7 does.
@@ -204,6 +203,39 @@ describe('route table', () => {
     const cleanup: ApiRouteDef = apiRoutes['data.cleanup']
     expect(cleanup.body ?? cleanup.form).toBeUndefined()
     expect(apiRoutes['data.cleanupPreview'].method).toBe('GET')
+  })
+
+  it('declares the change and shell rule routes as the contract says (ADR-036, ADR-037, ADR-038)', () => {
+    expect(API_MODULES).toHaveLength(25)
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'changes')).toEqual([
+      'changes.list',
+      'changes.diff',
+      'changes.git',
+      'changes.revert',
+      'changes.undo',
+      'changes.rewindPreview',
+      'changes.rewind',
+    ])
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'shellRules')).toEqual(['shellRules.list', 'shellRules.create', 'shellRules.remove'])
+    const phase8 = API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'changes' || apiRoutes[key].module === 'shellRules')
+    // None needs fresh auth (a session can already approve its own shell calls) and none is public.
+    for (const key of phase8) {
+      const route: ApiRouteDef = apiRoutes[key]
+      expect(route.fresh, key).toBeUndefined()
+      expect(route.public, key).toBeUndefined()
+    }
+    // Every change route is chat-scoped; the queries and bodies are the ones of the contract.
+    for (const key of phase8.filter(key => apiRoutes[key].module === 'changes'))
+      expect(apiRoutes[key].path.startsWith('/chats/:id/'), key).toBe(true)
+    expect((apiRoutes['changes.diff'] as ApiRouteDef).query).toBeDefined()
+    expect((apiRoutes['changes.rewindPreview'] as ApiRouteDef).query).toBeDefined()
+    for (const key of ['changes.revert', 'changes.undo', 'changes.rewind'] as const) {
+      expect((apiRoutes[key] as ApiRouteDef).body, key).toBeDefined()
+      expect(apiRoutes[key].response, key).toBe(apiRoutes['changes.rewind'].response)
+    }
+    expect(routeSuccessStatus(apiRoutes['shellRules.create'])).toBe(201)
+    expect(routeSuccessStatus(apiRoutes['shellRules.remove'])).toBe(204)
+    expect(routeSuccessStatus(apiRoutes['changes.rewind'])).toBe(200)
   })
 })
 
@@ -273,6 +305,39 @@ describe('matchApiRoute', () => {
     expect(matchApiRoute('GET', '/data/cleanup')?.key).toBe('data.cleanupPreview')
     expect(matchApiRoute('POST', '/data/cleanup')?.key).toBe('data.cleanup')
     for (const [method, path] of [['GET', `/projects/${project}`], ['POST', '/projects/browse'], ['GET', '/keys/rotate'], ['POST', '/keys'], ['DELETE', '/data/cleanup'], ['GET', `/projects/${project}/browse`]] as const)
+      expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
+  })
+
+  it('matches the change and shell rule routes (Phase 8) without shadowing the chat routes', () => {
+    const chat = '0199a8f0-0000-7000-8000-000000000001'
+    const rule = 'srl_ABCdef0123456789'
+    expect(matchApiRoute('GET', `/chats/${chat}/changes`)).toMatchObject({ key: 'changes.list', params: { id: chat } })
+    expect(matchApiRoute('GET', `/chats/${chat}/changes/diff`)).toMatchObject({ key: 'changes.diff', params: { id: chat } })
+    expect(matchApiRoute('GET', `/chats/${chat}/git`)).toMatchObject({ key: 'changes.git', params: { id: chat } })
+    expect(matchApiRoute('POST', `/chats/${chat}/changes/revert`)?.key).toBe('changes.revert')
+    expect(matchApiRoute('POST', `/chats/${chat}/changes/undo`)?.key).toBe('changes.undo')
+    expect(matchApiRoute('GET', `/chats/${chat}/rewind`)?.key).toBe('changes.rewindPreview')
+    expect(matchApiRoute('POST', `/chats/${chat}/rewind`)?.key).toBe('changes.rewind')
+    expect(matchApiRoute('GET', '/shell-rules')?.key).toBe('shellRules.list')
+    expect(matchApiRoute('POST', '/shell-rules')?.key).toBe('shellRules.create')
+    expect(matchApiRoute('DELETE', `/shell-rules/${rule}`)).toMatchObject({ key: 'shellRules.remove', params: { id: rule } })
+    // The chat routes keep their keys.
+    expect(matchApiRoute('GET', `/chats/${chat}`)?.key).toBe('chats.get')
+    expect(matchApiRoute('GET', `/chats/${chat}/export`)?.key).toBe('chats.export')
+    expect(matchApiRoute('POST', `/chats/${chat}/branch`)?.key).toBe('chats.switchBranch')
+    expect(matchApiRoute('DELETE', `/chats/${chat}/messages/msg_sample0000000001`)?.key).toBe('chats.deleteMessage')
+    for (const [method, path] of [
+      ['POST', `/chats/${chat}/changes`],
+      ['DELETE', `/chats/${chat}/changes`],
+      ['GET', `/chats/${chat}/changes/revert`],
+      ['POST', `/chats/${chat}/changes/diff`],
+      ['POST', `/chats/${chat}/git`],
+      ['DELETE', `/chats/${chat}/rewind`],
+      ['GET', `/chats/${chat}/changes/undo`],
+      ['GET', `/shell-rules/${rule}`],
+      ['PATCH', `/shell-rules/${rule}`],
+      ['DELETE', '/shell-rules'],
+    ] as const)
       expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
   })
 

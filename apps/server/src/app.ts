@@ -21,6 +21,7 @@ import { sessionAuthMiddleware } from './http/middleware/session-auth.ts'
 import { API_BASE_PATH } from './http/route-match.ts'
 import { createAudioRoutes } from './http/routes/audio.ts'
 import { createAuthRoutes } from './http/routes/auth.ts'
+import { createChangesRoutes } from './http/routes/changes.ts'
 import { createChatRoutes } from './http/routes/chat.ts'
 import { createChatsRoutes } from './http/routes/chats.ts'
 import { createCommandsRoutes } from './http/routes/commands.ts'
@@ -41,14 +42,15 @@ import { createProjectsRoutes } from './http/routes/projects.ts'
 import { createProvidersRoutes } from './http/routes/providers.ts'
 import { createSettingsRoutes } from './http/routes/settings.ts'
 import { createSharesRoutes } from './http/routes/shares.ts'
+import { createShellRulesRoutes } from './http/routes/shell-rules.ts'
 import { createToolsRoutes } from './http/routes/tools.ts'
 import { createStaticRoutes } from './http/static.ts'
 
 /**
- * The 23 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
+ * The 25 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
  * with static `/plugins/<word>` paths are mounted before `plugins` (`/plugins/:id...`); no route shadows another
- * (they differ in method or segment count, API.md 8), the order is a second line of defense. `shares` also serves the
- * public `/share/:token` routes.
+ * (they differ in method, segment count or static segments, API.md 8), the order is a second line of defense. `shares`
+ * also serves the public `/share/:token` routes; `changes` (Phase 8) serves chat-scoped routes under `/chats/:id/...`.
  */
 export const ROUTE_MODULES = {
   health: createHealthRoutes,
@@ -69,6 +71,8 @@ export const ROUTE_MODULES = {
   audio: createAudioRoutes,
   projects: createProjectsRoutes,
   keys: createKeysRoutes,
+  changes: createChangesRoutes,
+  shellRules: createShellRulesRoutes,
   shares: createSharesRoutes,
   pluginInstall: createPluginInstallRoutes,
   pluginDrafts: createPluginDraftsRoutes,

@@ -57,8 +57,8 @@ part of the server they may import server dependencies (for example the official
 | `core-tools` (Core tools) | 3 tools: `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard) and `generate_image` (Phase 6, policy `ask`) | setting `allowLocalhost` (below); `generate_image` uses the image model of Settings → Media (`imageModelRef`) |
 | `core-commands` (Core commands) | 10 template slash commands (below) | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server |
 | `core-mcp` (MCP servers) | MCP servers configured in the MCP panel (`mcp_servers` table); the panel is its Overview | settings `autoReconnect`, `connectTimeoutSeconds` (below) |
-| `core-workspace` (Workspace tools, Phase 7) | 7 workspace tools: `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file`, `shell` (below) | offered only in chats whose project folder opened; `shell` is not registered on Windows, and `HF_WORKSPACE_SHELL=0` keeps it from every chat (it stays registered and listed in the tools table); no settings |
-| `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models; Phase 7 adds `mock:workspace`) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
+| `core-workspace` (Workspace tools, Phase 7) | 7 workspace tools: `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file`, `shell` (below) | offered only in chats whose project folder opened; `shell` is not registered on Windows, and `HF_WORKSPACE_SHELL=0` keeps it from every chat (it stays registered and listed in the tools table); no settings. Phase 8: writes are journaled and restorable (rewind, revert), and `shell` keeps its working folder between calls and runs commands that match the user's shell rules without a card (below) |
+| `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models; Phase 7 adds `mock:workspace`, Phase 8 `mock:checkpoint` and `mock:shell`) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
 
 Builtin manifests in v1.3: `core-tools` is version 1.2.0 and declares `engines.harness` `"^1.2.0"` (its
 `generate_image` output carries the 1.2 `modelName`); `core-workspace` is version 1.0.0 with `"^1.2.0"` and the
@@ -92,7 +92,7 @@ resolves through the server's path guard (realpath containment, no `.git` writes
 | `search_files` | `read` / `safe` / 60 s | `{ pattern, literal?, case_sensitive?, glob?, path?, include_ignored?, max_results? }` (a JS regex, plain text with `literal`; `path` a folder or one file; ≤ 500, default 100) | `{ pattern, matches: [{ path, line, text }], filesSearched, truncated }` |
 | `write_file` | `write` / `ask`, `always` for a hidden or secret path / 30 s | `{ path, content }` (≤ 256 KiB) | `{ path, created, bytes, lines, diff }` |
 | `edit_file` | `write` / as `write_file` / 30 s | `{ path, old_string, new_string, replace_all? }` (a unique exact match unless `replace_all`; files ≤ 1 MiB) | `{ path, replacements, diff }` |
-| `shell` | `execute` / `ask` / 600 s | `{ command, cwd?, timeout_ms?, description? }` (≤ 16 KiB; `timeout_ms` 1000-590000, default 120000) | `{ command, cwd, exitCode, signal, timedOut, durationMs, stdout, stderr, stdoutBytes, stderrBytes }` |
+| `shell` | `execute` / `ask` (Phase 8: a policy function that returns `safe` when the user's shell rules match the whole command) / 600 s | `{ command, cwd?, timeout_ms?, description? }` (≤ 16 KiB; `timeout_ms` 1000-590000, default 120000) | `{ command, cwd, exitCode, signal, timedOut, durationMs, stdout, stderr, stdoutBytes, stderrBytes }`; Phase 8 adds `endCwd?` (where the next call starts), `cwdNote?` and `allowedBy?` (the matched rule prefixes) |
 
 `diff` is `{ hunks: [{ oldStart, oldLines, newStart, newLines, lines }], added, removed, truncated }` (3 lines of
 context, cut to 24 KiB with lines cut at 500 characters), or `null` when it could not be computed in 2 s (and, for
@@ -106,7 +106,9 @@ of `find_files` and the `glob` filter and regex of `search_files` are matched in
 ("The search timed out — use a simpler pattern or a narrower path."); `search_files` never reads secret-looking files
 or files over 1 MiB. `shell` runs `bash -c` (else `sh -c`) in the project folder (or `cwd` inside it) with a minimal
 environment (no `HF_*`, no provider keys), in its own process group that is killed on Stop, on the timeout and when
-the server exits; each call is a new process (no `cd` that sticks, no stdin, background processes are stopped); each
+the server exits; each call is a new process (no stdin, background processes are stopped; environment variables never
+carry over), but since Phase 8 the folder a call ends in is where the chat's next call starts (`cd` persists inside the
+project folder; a folder outside it falls back to the project folder with a note); each
 stream keeps its first 4 KiB and last 16 KiB with `[… N bytes omitted …]` between them, ANSI codes and other control
 characters stripped. A failure (a refused path, a missing file, an ambiguous `old_string`) is an error result whose
 message tells the model what to do next.
@@ -122,7 +124,28 @@ output schema, such as one the host replaced, is sent as JSON; `N lines` is `1 l
 | `search_files` | `path:line: text` lines, or `No matches (N files searched).`; then `[truncated: showing N matches; narrow the pattern, the glob or the path]` |
 | `write_file` | `Created x (N lines).`, `Updated x (+a -r lines).`, or `Updated x (N lines).` when there is no diff |
 | `edit_file` | `Edited x: 1 replacement (+a -r lines).` (`N replacements` with `replace_all`), or `Edited x: N replacements.` when there is no diff |
-| `shell` | `Exit code: N`, `Stopped after <s> s (timeout)` or `Terminated by signal SIGKILL`; then a `stdout:` line and the text (or `(empty)`); then a `stderr:` line and the text, only when stderr is not empty (trailing newlines trimmed) |
+| `shell` | `Exit code: N`, `Stopped after <s> s (timeout)` or `Terminated by signal SIGKILL`; Phase 8: then, when the folder changed, `The working folder is now <folder> (the next call starts there).` (or the note of a clamped folder); then a `stdout:` line and the text (or `(empty)`); then a `stderr:` line and the text, only when stderr is not empty (trailing newlines trimmed) |
+
+**Workspace 2.0** (Phase 8, ADR-036 … ADR-038; the plugin API stays 1.2.0, nothing changes for plugin code; behavior in
+[ARCHITECTURE.md 6.13, 6.16, 6.17](./ARCHITECTURE.md#616-checkpoints-and-rewind-adr-036)):
+
+- **Journaled writes**: `write_file` and `edit_file` save the previous state of the file in the server's checkpoint
+  store before they write (`<dataDir>/checkpoints/`, at most 8 MiB per file), so the user can rewind a chat's edits to
+  any of its messages, revert a file in the changes panel and undo either. Parallel edits of one file now run one
+  after the other. The capture is internal to the server (a run scope bound to the tool call context); plugins cannot
+  record or read checkpoints.
+- **Third-party tools** with workspace access `write` or `execute` are journaled as `untracked` after every call (only
+  the tool name): the rewind dialog lists them ("Other tools changed files too"), but what they wrote is **not
+  restorable**. `shell` calls are journaled the same way (with the command) and are not restorable either. MCP tools
+  declare no workspace access and are not journaled at all.
+- **Sticky working folder**: the `shell` folder carries over between calls of a chat (above); a third-party `execute`
+  tool gets no such state.
+- **Shell rules** (an allowlist of command prefixes, per project and global, managed in Settings → Projects and from
+  the shell approval card) apply **only to the core `shell` tool**: a matching command runs without a card in Ask and
+  Accept edits. They never apply to a plugin's `execute` tool.
+- **No "always allow" for `execute` tools**: `PATCH /api/tools/:name` refuses `override: 'allow'` for a tool with
+  workspace access `execute` (400 `validation_error` on `['override']`), and an `allow` stored before v1.4 is ignored.
+  `deny` and `ask` overrides still work.
 
 Builtin commands (`core-commands`, all `template` commands): `/explain` (code or a concept, step by step),
 `/summarize` (text, or the conversation so far when no text is given), `/review` (bugs, security, readability),
@@ -149,7 +172,7 @@ manifest declares the API range it supports in `engines.harness`; the host check
 |---|---|
 | `1.0.0` | v1 (Phase 0 – 5) |
 | `1.1.0` | Phase 6 (additive): the optional `ProviderDefinition` members `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel`, `transcriptionOptions`; `PluginContext.images.generate`; model kinds `transcription` and `speech`, `ModelInfo.voices`, `capabilities.imageOutput` |
-| `1.2.0` | Phase 7 (additive, ADR-032): `ToolCallContext.workspace?: ToolWorkspace` (`{ projectId, name, root }`, frozen, set for every tool in a chat whose project folder opened, policy functions included); `ToolDefinition.workspace?: 'read' \| 'write' \| 'execute'` (registration rejects any other value with `validation_error` at `['workspace']`; such a tool is offered only in those chats; `execute` tools only while `HF_WORKSPACE_SHELL` is on; `write` + policy `ask` runs without a card in the new permission mode `edits`); `ToolMode` gains `edits` ("Accept edits"; visible to hooks in `chat.params`); `ImageGenerateResult.modelName` (the catalog name, the user's alias first, else the model id). Behavior change: an unknown provider in `ctx.ai` (`ctx.models.resolve`) and `ctx.images` is now `provider_not_configured` (400, action `configure-provider`, message `The provider "<id>" is not available. Pick another model or install the provider.`), as on chat; it was `not_found` |
+| `1.2.0` | Unchanged in Phase 8 (checkpoints, the sticky folder and shell rules need no plugin API). Phase 7 (additive, ADR-032): `ToolCallContext.workspace?: ToolWorkspace` (`{ projectId, name, root }`, frozen, set for every tool in a chat whose project folder opened, policy functions included); `ToolDefinition.workspace?: 'read' \| 'write' \| 'execute'` (registration rejects any other value with `validation_error` at `['workspace']`; such a tool is offered only in those chats; `execute` tools only while `HF_WORKSPACE_SHELL` is on; `write` + policy `ask` runs without a card in the new permission mode `edits`); `ToolMode` gains `edits` ("Accept edits"; visible to hooks in `chat.params`); `ImageGenerateResult.modelName` (the catalog name, the user's alias first, else the model id). Behavior change: an unknown provider in `ctx.ai` (`ctx.models.resolve`) and `ctx.images` is now `provider_not_configured` (400, action `configure-provider`, message `The provider "<id>" is not available. Pick another model or install the provider.`), as on chat; it was `not_found` |
 
 A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0` and `1.2.0`; a plugin that catches the
 old `not_found` of an unknown provider should also accept `provider_not_configured`). A plugin that uses a newer member
@@ -967,7 +990,7 @@ not from `ai` (which exports an unrelated type of the same name).
 | `settings.get()` | current settings: stored values over defaults, secrets decrypted; synchronous (cached in memory) |
 | `settings.onChange(cb)` | called with the full new values after a successful save (guarded, 3 s) |
 | `secrets` | encrypted plugin-scoped strings (scope `plugin:<id>`, name `kv.<key>`); keys `^[A-Za-z0-9._:-]{1,128}$`, values <= 16 KB; never returned by any API; `list()` returns keys only |
-| `storage` | plugin-scoped JSON values in `plugin_kv`; keys 1-256 characters without control characters; values JSON-serializable, <= 256 KB each, <= 10 MB per plugin; `set(key, undefined)` is an error (use `delete`). Phase 7: the storage cleanup (Settings → Data, ADR-035) keeps every file whose id (`file_` + 16 characters) appears in a `ctx.storage` key or value or a plugin setting, so keep the ids of files your plugin needs there, never only in `ctx.secrets` (encrypted, not scanned) or in files under `plugin.dataDir` (not scanned either): such files may be removed once nothing else references them and they are older than 24 hours |
+| `storage` | plugin-scoped JSON values in `plugin_kv`; keys 1-256 characters without control characters; values JSON-serializable, <= 256 KB each, <= 10 MB per plugin; `set(key, undefined)` is an error (use `delete`). Phase 7: the storage cleanup (Settings → Data, ADR-035) keeps every file whose id (`file_` + 16 characters) appears in a `ctx.storage` key or value or a plugin setting, so keep the ids of files your plugin needs there, never only in `ctx.secrets` (encrypted, not scanned) or only in files under `plugin.dataDir`: such files may be removed once nothing else references them and they are older than 24 hours. Phase 8 (ADR-039): both the manual cleanup and the opt-in automatic sweep also scan the files under `data/plugins/.data/` loosely (any `file_` + 16 characters counts; links are not followed; at most 256 MiB, 50,000 files and 32 levels per run, beyond which an automatic sweep is skipped and a manual one proceeds with a warning), so ids kept there are found too, but `ctx.storage` stays the reliable place |
 | `providers.register(d)` | validates `d` (id namespace, credential fields, functions), then adds the provider; a duplicate id throws `conflict` |
 | `models.register(providerId, models)` | adds models / metadata to any provider (plugin models tier); held until the provider exists |
 | `models.resolve(ref)` | returns a model instance for `providerId:modelId` with the user's credentials; throws `provider_not_configured` with action `configure-provider` (a disabled provider, missing credentials and, since 1.2.0, an unknown provider: `The provider "<id>" is not available. Pick another model or install the provider.`), `model_not_found` with action `refresh-models` (a model that is not in the provider's catalog) or `validation_error` (an invalid ref, an image model); use with `ctx.ai.generateText` |
@@ -1068,10 +1091,12 @@ Workspace tools (1.2.0): `workspace` declares what the tool does with the projec
 `execute`); registration rejects any other value (`validation_error` naming the tool, issue path `['workspace']`; a
 value that still reaches the chat pipeline counts as `execute`), and `GET /api/tools` reports it as
 `ToolSummary.workspace` (null for MCP tools and tools without one; the web hides "Always allow" for `execute` tools
-and offers "Accept all edits in this chat" for `write` tools). The host does **not** confine a plugin tool to `c.workspace.root`: a code plugin runs with the
-server's rights (section 13), so resolve every path against `root` and refuse anything outside it yourself (resolve
-symbolic links with `realpath` and compare the result with `root`), as the builtin `core-workspace` tools do. Never
-start a shell from a plugin tool; offer the builtin `shell` instead.
+and offers "Accept all edits in this chat" for `write` tools; Phase 8: the server refuses an `allow` override for
+`execute` tools, and every `write` / `execute` call is journaled as `untracked` for the rewind dialog, without its
+content, so it is not restorable). The host does **not** confine a plugin tool to `c.workspace.root`: a code plugin
+runs with the server's rights (section 13), so resolve every path against `root` and refuse anything outside it
+yourself (resolve symbolic links with `realpath` and compare the result with `root`), as the builtin `core-workspace`
+tools do. Never start a shell from a plugin tool; offer the builtin `shell` instead.
 
 ### Commands
 
@@ -1105,7 +1130,7 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
 
 | Step | Rule | Result |
 |---|---|---|
-| 1 | user override in `tool_prefs.override` = `deny` / `allow` / `ask` | `denied` / `approved` / `user-approval` |
+| 1 | user override in `tool_prefs.override` = `deny` / `allow` / `ask` (Phase 8: `allow` is refused for `execute` tools and a stored one is ignored) | `denied` / `approved` / `user-approval` |
 | 2 | `tool.approve` hook sets `decision` = `deny` / `allow` / `ask` | `denied` / `approved` / `user-approval` |
 | 3 | tool policy (static or function) is `deny` | `denied` |
 | 4 | chat `toolMode` = `ask`, policy `safe` | `not-applicable` (runs, no card) |
@@ -1127,7 +1152,11 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
   receives the call context, so a workspace tool can decide by path (the builtin `write_file` returns `always` for
   hidden and secret-looking paths, so they ask even in Accept edits).
 - `edits` is meant for project chats: a `write` tool with policy `ask` runs there without a card, while `execute` tools
-  (the shell) and every non-workspace tool that would ask in `ask` mode still ask. The `tool.approve` hook and user
+  (the shell) and every non-workspace tool that would ask in `ask` mode still ask. Phase 8: the builtin `shell` has a
+  policy function that returns `safe` when every part of the command matches one of the user's shell rules (a prefix
+  allowlist kept by the server, per project and global), so such commands run without a card in `ask` and `edits`;
+  commands with `$`, backticks, redirections, subshells, globs or here-docs always ask. A plugin cannot add rules or
+  read them, and the rules never apply to a plugin's tools. The `tool.approve` hook and user
   overrides keep their precedence (steps 1 and 2); hooks see `toolMode: 'edits'` in `chat.params`.
 - MCP tool policy: `readOnlyHint: true` -> `safe`; else `destructiveHint: true` -> `always`; else the server's
   `policy` (default `ask`). Annotations come from the MCP server and are advisory: if you do not fully trust a
@@ -1758,7 +1787,13 @@ and stay inside `root`; a `write` tool with policy `ask` runs without a card in 
 
 **Can my plugin rely on file ids surviving the storage cleanup?** Yes, when the ids are in `ctx.storage` or a plugin
 setting: the cleanup scans both (and every chat, share and setting) and removes only files older than 24 hours that
-nothing references.
+nothing references. Since Phase 8 the cleanup (manual, and the opt-in automatic sweep of Settings → Data) also scans
+the files in `ctx.plugin.dataDir` loosely within a budget; an automatic sweep is skipped when that scan is incomplete.
+
+**Can a user undo what my workspace tool wrote?** No. Rewind and the changes panel restore only the writes of the
+builtin `write_file` / `edit_file`; a plugin tool with workspace access `write` or `execute` is listed in the rewind
+dialog ("Other tools changed files too") but its changes stay. In a Git project the user can still revert such a file
+to HEAD from the Git view.
 
 **How do I generate an image from a plugin?** `const { images } = await ctx.images.generate({ prompt, chatId })` uses
 the image model the user chose in Settings → Media (or pass `modelRef`) and returns stored files (`images[0].url` is

@@ -26,6 +26,7 @@ import {
   stdioPlugin,
   zipOf,
 } from '../plugins/install/testing.ts'
+import { sampleRequest } from '../testing/api-samples.ts'
 
 const PASSWORD = 'correct horse battery staple'
 const NO_CHECK = { requireFreshAuth: () => {} }
@@ -393,5 +394,22 @@ describe('sEC-A5 negative controls: nothing runs code, a stale session is enough
     expect((await send(a, { method: 'POST', path: '/api/plugins/stale-created/reload' }, stale)).status).toBe(200)
     expect((await send(a, { method: 'POST', path: '/api/mcp', json: { id: 'stale-web', name: 'Web', enabled: false, transport: { type: 'http', url: 'https://mcp.example.com/mcp' } } }, stale)).status).toBe(201)
     expect((await send(a, { method: 'POST', path: '/api/plugins/inspect', form: form(codePlugin('stale-inspect')) }, stale)).status).toBe(200)
+  })
+
+  it('the change routes and the shell rules (Phase 8, ADR-036 … ADR-038) take a stale session', async () => {
+    const a = await passwordApp()
+    const stale = await cookie(a, FRESH_AUTH_WINDOW_MS + 60_000)
+    const keys = API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'changes' || apiRoutes[key].module === 'shellRules')
+    expect(keys).toHaveLength(10)
+    for (const key of keys) {
+      const { path, init } = sampleRequest(key, { headers: { cookie: stale } })
+      const response = await a.t.request(path, init)
+      const text = await response.text()
+      // The sample chat, project and rule do not exist: the request reaches the route (501 while stubbed, else 404 or
+      // 200), never the fresh-auth refusal.
+      expect([401, 403], `${key}: ${text}`).not.toContain(response.status)
+      if (stubRouteKeys().has(key))
+        expect(response.status, key).toBe(501)
+    }
   })
 })

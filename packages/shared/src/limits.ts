@@ -90,6 +90,41 @@ export const LIMITS = {
   projectFileBytes: 32_768,
   /** Upper bound of the `maxSteps` and `projectMaxSteps` settings (steps of one agent run). */
   stepsMax: 200,
+
+  // Workspace 2.0 (Phase 8): checkpoints and rewind (ADR-036), the changes panel and git (ADR-037), shell rules and the
+  // working folder (ADR-038).
+  /** Bytes of one stored before-state (8 MiB); a larger file is journaled as `too-large` and the edit still runs. */
+  checkpointFileMaxBytes: 8_388_608,
+  /** Bytes of the stored before-states of one project (512 MiB); the oldest are evicted above it (ADR-036). */
+  checkpointProjectMaxBytes: 536_870_912,
+  /** Age after which a stored before-state is evicted (30 days; the journal row stays, as `evicted`). */
+  checkpointMaxAgeMs: 2_592_000_000,
+  /** Files listed by `GET /chats/:id/changes` and `GET /chats/:id/rewind` (the rest is cut, `truncated`; ADR-037). */
+  changesFilesMax: 500,
+  /** `GET /chats/:id/changes`: only the first files get added / removed line counts (the rest `null`). */
+  changesLineCountFiles: 200,
+  /** `GET /chats/:id/changes`: text files up to this size (256 KiB) get line counts. */
+  changesLineCountMaxBytes: 262_144,
+  /** `GET /chats/:id/changes/diff`: bytes of each side of a diff (1 MiB); a larger side is `tooLarge`. */
+  changeDiffSideMaxBytes: 1_048_576,
+  /** Files listed by `GET /chats/:id/git` (the rest is cut, `truncated`; ADR-037). */
+  gitStatusFilesMax: 2000,
+  /** Timeout of one git command of the hardened runner (15 s; ADR-037). */
+  gitTimeoutMs: 15_000,
+  /** Bytes of the output of one git command (8 MiB); more fails the command. */
+  gitOutputMaxBytes: 8_388_608,
+  /** Shell commands and tool calls listed by a rewind preview (each list; ADR-036). */
+  rewindUntrackedListMax: 50,
+  /** Paths of one `workspace.changed` event (ADR-036). */
+  workspaceEventPathsMax: 200,
+  /** Shell rules per scope: one project, or the global list (ADR-038). */
+  shellRulesPerScopeMax: 200,
+  /** Characters of a shell rule prefix (ADR-038). */
+  shellRulePrefixMaxChars: 200,
+  /** Segments of one shell command the rule matcher accepts; a longer command always asks (ADR-038). */
+  shellCommandSegmentsMax: 32,
+  /** Characters of a shell command kept in the change journal (ADR-036). */
+  journalCommandMaxChars: 1000,
 } as const
 
 /** MIME families accepted by `POST /files` (the server also checks the content). */

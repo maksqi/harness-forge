@@ -15,7 +15,8 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
    you do not own, even to fix a typo — report it instead.
 4. **Frozen files change only through the coordinator** (see "Contracts, freeze and CCRs").
 5. **Sub-agents never run:** `pnpm`/`npm`/`npx`/`pnpm dlx` installs or CLIs (shadcn-vue, ai-elements-vue, nuxi,
-   drizzle-kit), `git` write commands (add/commit/checkout/reset/stash/clean), `nuxt dev`/`nuxt build`/`nuxt prepare`,
+   drizzle-kit), `git` write commands (add/commit/checkout/reset/stash/clean) on this repository (Phase 8 tests may `git init` and
+   commit inside their own `realpath(mkdtemp())` folders), `nuxt dev`/`nuxt build`/`nuxt prepare`,
    or any server on ports 3000/8787. Running scripts that already exist (`pnpm -F <pkg> test`, `pnpm typecheck`,
    `pnpm -F @harness-forge/web typecheck:fast`, `pnpm check:english`) is allowed.
 6. **Verify APIs against installed types.** Library versions here are newer than most model training data.
@@ -67,6 +68,15 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   containment); the `shell` tool runs in its own process group with a minimal environment; never call `spawn` with a
   shell string elsewhere. Tests use `realpath(mkdtemp())` (macOS `/var` is a link to `/private/var`) and POSIX `sh`
   syntax only (CI runs Linux).
+- **Workspace 2.0** (Phase 8, ADR-036 … ADR-039; plugin API stays 1.2.0): every agent write to a project file goes
+  through `journaledWrite` (`apps/server/src/workspace/journal.ts`), which snapshots the previous state into
+  `<dataDir>/checkpoints/` and journals it in `workspace_changes`; the run scope (`workspace/run-scope.ts`, bound to
+  the tool call context) carries the chat, message, journal, shell rules and the sticky working folder; one per-file
+  lock (`workspace/file-lock.ts`) serializes writes. Rewind, revert and undo are batches (`wcb_` ids) and are refused
+  (409 `run-active`) while any chat of the project runs. **git runs only through `apps/server/src/workspace/git.ts`**
+  (argument arrays, scrubbed environment, `GIT_CEILING_DIRECTORIES`, hooks / fsmonitor / filters neutralized); the
+  shell stays the only shell-string spawn. Shell rules (`shell_rules`, `srl_` ids) are matched by the shared parser
+  `packages/shared/src/util/shell-command.ts`, which fails closed. The automatic file sweep (`fileSweep`) is opt-in.
 - **@ai-sdk/vue 4**: use the `useChat()` composable (the `Chat` class is deprecated); `DefaultChatTransport` is
   imported from `ai`.
 - **MCP**: `createMCPClient` from `@ai-sdk/mcp`; stdio transport from `@ai-sdk/mcp/mcp-stdio`.
@@ -150,7 +160,8 @@ data/                                          runtime data (gitignored)
 (folders that may hold projects, default `<dataDir>/workspaces`, ADR-031), `HF_WORKSPACE_SHELL` (`0` removes the
 `shell` tool, ADR-033), plus provider key fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). CLI-only:
 `HF_NEW_MASTER_KEY` (read by `rotate-key`, ADR-034). Test-only: `HF_LIVE`, `HF_LIVE_PROVIDERS`,
-`HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`. See `.env.example` and
+`HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`, `HF_TEST_FILE_SWEEP_DELAY_MS`
+(only with `HF_MOCK_PROVIDER=1`, ADR-039). See `.env.example` and
 `docs/DECISIONS.md` (Contract seed).
 
 **Never run `pnpm test:live` unless your task prompt says so** — it makes paid provider calls with real keys.
@@ -180,6 +191,11 @@ server, use your slot `k` from the task prompt: `HF_PORT=879k HF_DATA_DIR=.tmp/<
   `services/{chats,files,data,images,events}/types.ts`, `workspace/paths.ts`, `services/chats/approvals.ts`, the
   `main.ts` boot hooks, `security/types.ts`, the props of the P7-0b stub components, the `projects` store and the new
   `chats` store members, and the `useChatSession` additions (see `docs/phases/phase-7-v1-3.md` "FREEZE in Phase 7").
+  Added in Phase 8 (after Gate P8-0b): `services/{checkpoints,shell-rules}/types.ts` and the P8-0b versions of
+  `services/{data,files}/types.ts`, `workspace/{run-scope,file-lock,git}.ts`, `packages/shared/src/util/shell-command.ts`,
+  the props / emits of the P8-0b stub components (`components/workspace/**`), `DiffView` props, the `workspace` and
+  `shell-rules` stores, the `useChatSession` additions (`cwd`, `ToolApprovalDecision.allowRules`) and the Phase 8 test
+  ids (see `docs/phases/phase-8-v1-4.md` "FREEZE in Phase 8").
 - **CCR (contract change request)**: if a frozen contract blocks you, write a local adapter inside your owned
   paths, keep working, and add a CCR to your report: file, current shape, proposed shape, reason.
 - **DEPENDENCY REQUEST**: never install packages. Use existing dependencies or Node built-ins; if something is truly

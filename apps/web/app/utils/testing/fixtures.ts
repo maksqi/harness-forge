@@ -2,9 +2,17 @@
 import type {
   AuthStatus,
   CatalogModel,
+  ChatChangeFile,
+  ChatChanges,
   ChatDetail,
   ChatSummary,
   DataCleanupPreview,
+  DataCleanupResult,
+  DataSummary,
+  FileDiff,
+  FileSweepStatus,
+  GitStatus,
+  GitStatusFile,
   HarnessUIMessage,
   KeyStatus,
   MessageBranch,
@@ -13,8 +21,15 @@ import type {
   PluginSummary,
   ProjectSummary,
   ProviderSummary,
+  RestoreResult,
+  RewindPreview,
+  Settings,
+  ShellOutput,
+  ShellRule,
   ToolSummary,
+  WorkspaceChangedData,
 } from '@harness-forge/shared'
+import { DEFAULT_SETTINGS } from '@harness-forge/shared'
 
 /** A fixed uuidv7 chat id with a varying last group: chatId(1) -> '...000000000001'. */
 export function chatId(n: number): string {
@@ -211,8 +226,166 @@ export function keyStatus(overrides: Partial<KeyStatus> = {}): KeyStatus {
   }
 }
 
+/** The global settings: the defaults (`fileSweep: 'off'` included) with overrides. */
+export function settings(overrides: Partial<Settings> = {}): Settings {
+  return { ...DEFAULT_SETTINGS, ...overrides }
+}
+
+/** The automatic file sweep state (ADR-039): off, never ran. */
+export function fileSweepStatus(overrides: Partial<FileSweepStatus> = {}): FileSweepStatus {
+  return { mode: 'off', lastAttempt: null, nextRunAt: null, ...overrides }
+}
+
+export function dataSummary(overrides: Partial<DataSummary> = {}): DataSummary {
+  return { chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep: fileSweepStatus(), ...overrides }
+}
+
 export function dataCleanupPreview(overrides: Partial<DataCleanupPreview> = {}): DataCleanupPreview {
-  return { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, recentFiles: 0, graceMs: 86_400_000, lastRunAt: null, ...overrides }
+  return {
+    files: 0,
+    fileBytes: 0,
+    blobs: 0,
+    diskBytes: 0,
+    tempFiles: 0,
+    recentFiles: 0,
+    graceMs: 86_400_000,
+    lastRunAt: null,
+    fileSweep: fileSweepStatus(),
+    pluginData: 'complete',
+    ...overrides,
+  }
+}
+
+export function dataCleanupResult(overrides: Partial<DataCleanupResult> = {}): DataCleanupResult {
+  return { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, ranAt: 1_759_000_000_000, pluginData: 'complete', ...overrides }
+}
+
+// ---------- workspace 2.0 (Phase 8) ----------
+
+/** A fixed change batch id with a varying end: changeBatchId(1) -> 'wcb_sample0000000001'. */
+export function changeBatchId(n: number): string {
+  return `wcb_sample${String(n).padStart(10, '0')}`
+}
+
+/** A fixed shell rule id with a varying end: shellRuleId(1) -> 'srl_sample0000000001'. */
+export function shellRuleId(n: number): string {
+  return `srl_sample${String(n).padStart(10, '0')}`
+}
+
+/** One file of the "This chat" view: `src/index.ts` modified by one edit (+1 -1). */
+export function chatChangeFile(overrides: Partial<ChatChangeFile> = {}): ChatChangeFile {
+  return {
+    path: 'src/index.ts',
+    status: 'modified',
+    edits: 1,
+    changedOutside: false,
+    revertible: true,
+    added: 1,
+    removed: 1,
+    lastEditAt: 1_759_000_000_000,
+    ...overrides,
+  }
+}
+
+/** `GET /chats/:id/changes` of a project chat with one changed file. */
+export function chatChanges(overrides: Partial<ChatChanges> = {}): ChatChanges {
+  return {
+    available: true,
+    reason: null,
+    projectId: projectId(1),
+    files: [chatChangeFile()],
+    truncated: false,
+    untracked: { shellCommands: 0, toolCalls: 0 },
+    ...overrides,
+  }
+}
+
+/** `GET /chats/:id/changes/diff` of `src/index.ts` (one changed line). */
+export function fileDiff(overrides: Partial<FileDiff> = {}): FileDiff {
+  return {
+    source: 'chat',
+    path: 'src/index.ts',
+    origPath: null,
+    status: 'modified',
+    binary: false,
+    tooLarge: false,
+    diff: {
+      hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-export const answer = 41', '+export const answer = 42'] }],
+      added: 1,
+      removed: 1,
+      truncated: false,
+    },
+    currentSha: 'c'.repeat(64),
+    baseAvailable: true,
+    ...overrides,
+  }
+}
+
+/** One file of the "Git" view: `src/index.ts` modified in the work tree. */
+export function gitStatusFile(overrides: Partial<GitStatusFile> = {}): GitStatusFile {
+  return { path: 'src/index.ts', origPath: null, status: 'modified', staged: false, unstaged: true, ...overrides }
+}
+
+/** `GET /chats/:id/git` of a repository on `main` with one modified file. */
+export function gitStatus(overrides: Partial<GitStatus> = {}): GitStatus {
+  return {
+    available: true,
+    reason: null,
+    branch: 'main',
+    head: 'd'.repeat(40),
+    prefix: '',
+    files: [gitStatusFile()],
+    truncated: false,
+    ...overrides,
+  }
+}
+
+/** `GET /chats/:id/rewind` of the user message `msg_u1...`: one file to restore and one shell command. */
+export function rewindPreview(overrides: Partial<RewindPreview> = {}): RewindPreview {
+  return {
+    messageId: messageId('u1'),
+    files: [{ path: 'checkpoint.txt', action: 'restore', conflict: false, edits: 1 }],
+    untracked: {
+      shellCount: 1,
+      shell: [{ command: 'mkdir -p mock-dir && cd mock-dir', at: 1_759_000_000_000, messageId: messageId('a1') }],
+      tools: [],
+    },
+    truncated: false,
+    ...overrides,
+  }
+}
+
+/** The answer of a revert, an undo or a rewind that restored one file. */
+export function restoreResult(overrides: Partial<RestoreResult> = {}): RestoreResult {
+  return { batchId: changeBatchId(1), restored: ['src/index.ts'], deleted: [], unchanged: [], skipped: [], ...overrides }
+}
+
+/** A shell rule of project 1. */
+export function shellRule(overrides: Partial<ShellRule> = {}): ShellRule {
+  return { id: shellRuleId(1), projectId: projectId(1), prefix: 'pnpm test', createdAt: 1_759_000_000_000, ...overrides }
+}
+
+/** The data of a `workspace.changed` event of an agent tool edit in chat 1. */
+export function workspaceChangedData(overrides: Partial<WorkspaceChangedData> = {}): WorkspaceChangedData {
+  return { projectId: projectId(1), chatId: chatId(1), batchId: null, source: 'tool', paths: ['src/index.ts'], ...overrides }
+}
+
+/** A finished `shell` output (exit code 0) that ended in the project folder. */
+export function shellOutput(overrides: Partial<ShellOutput> = {}): ShellOutput {
+  return {
+    command: 'ls',
+    cwd: '.',
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    durationMs: 12,
+    stdout: 'README.md\n',
+    stderr: '',
+    stdoutBytes: 10,
+    stderrBytes: 0,
+    endCwd: '.',
+    ...overrides,
+  }
 }
 
 export function logEntry(seq: number, overrides: Partial<PluginLogEntry> = {}): PluginLogEntry {

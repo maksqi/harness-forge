@@ -143,7 +143,7 @@ describe('import of a backup zip', () => {
     expect((await target.deps.chats.get(chatId(1))).branches).toEqual((await source.deps.chats.get(chatId(1))).branches)
     expect((await target.deps.files.read(png.id)).data).toEqual(PNG)
     expect((await target.deps.files.read(text.id)).data).toEqual(TEXT)
-    expect(await target.deps.data.summary()).toEqual({ chats: 3, archivedChats: 1, messages: 8, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength })
+    expect(await target.deps.data.summary()).toEqual({ chats: 3, archivedChats: 1, messages: 8, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
     // One chat.created per chat, no other event.
     expect(target.events.events.map(event => event.type)).toEqual(['chat.created', 'chat.created', 'chat.created'])
     expect(target.events.ofType('chat.created').map(event => event.data.id)).toEqual([chatId(1), chatId(2), chatId(3)])

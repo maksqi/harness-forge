@@ -22,7 +22,7 @@ import { sql } from 'drizzle-orm'
 import { chats, files, messages } from '../../db/schema.ts'
 import { guardDb } from '../chats/db-errors.ts'
 import { backupFilename, createBackupStream, planBackup } from './backup.ts'
-import { previewCleanup, runCleanup } from './cleanup.ts'
+import { fileSweepStatus, previewCleanup, runCleanup } from './cleanup.ts'
 import { DATA_LIMITS } from './limits.ts'
 import { importUpload } from './restore.ts'
 
@@ -35,6 +35,8 @@ export interface DataServiceOptions {
 
 async function dataSummary(deps: AppDeps): Promise<DataSummary> {
   const { db } = deps
+  // P8-A (W8.7): the real sweep status; W8.1 may add `checkpoints` (optional).
+  const fileSweep = await fileSweepStatus(deps)
   return guardDb(async () => {
     const [chatCounts] = await db
       .select({ chats: sql<number>`count(*)`, archived: sql<number>`coalesce(sum(${chats.archived}), 0)` })
@@ -47,6 +49,7 @@ async function dataSummary(deps: AppDeps): Promise<DataSummary> {
       messages: Number(messageCounts?.messages ?? 0),
       files: Number(fileCounts?.files ?? 0),
       fileBytes: Number(fileCounts?.bytes ?? 0),
+      fileSweep,
     }
   })
 }

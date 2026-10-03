@@ -357,7 +357,7 @@ describe('createFakeChatRunner', () => {
 describe('createFakeDataService', () => {
   it('answers from its options, streams the backup lazily and counts cancelled exports', async () => {
     const data = createFakeDataService({ now: () => Date.UTC(2026, 8, 28) })
-    expect(await data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0 })
+    expect(await data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
     const backup = await data.exportBackup({})
     expect(backup.filename).toBe('harness-forge-backup-2026-09-28.zip')
     expect(await readAllBytes(backup.stream)).toEqual(EMPTY_ZIP)
@@ -387,9 +387,9 @@ describe('createFakeDataService', () => {
 
   it('phase 7: answers the cleanup preview and run from its options, busy like the maintenance lock', async () => {
     const data = createFakeDataService({ now: () => 1234 })
-    expect(dataCleanupPreviewSchema.parse(await data.cleanupPreview())).toEqual({ files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, recentFiles: 0, graceMs: 86_400_000, lastRunAt: null })
-    expect(dataCleanupResultSchema.parse(await data.cleanup())).toEqual({ files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, ranAt: 1234 })
-    const custom = createFakeDataService({ cleanupResult: { files: 2, fileBytes: 10, blobs: 1, diskBytes: 8, tempFiles: 0, ranAt: 5 } })
+    expect(dataCleanupPreviewSchema.parse(await data.cleanupPreview())).toEqual({ files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, recentFiles: 0, graceMs: 86_400_000, lastRunAt: null, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null }, pluginData: 'complete' })
+    expect(dataCleanupResultSchema.parse(await data.cleanup())).toEqual({ files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, ranAt: 1234, pluginData: 'complete' })
+    const custom = createFakeDataService({ cleanupResult: { files: 2, fileBytes: 10, blobs: 1, diskBytes: 8, tempFiles: 0, ranAt: 5, pluginData: 'complete' } })
     expect(await custom.cleanup()).toMatchObject({ files: 2, ranAt: 5 })
     data.busy = true
     expect((await rejection(data.cleanupPreview())).toJSON().error).toMatchObject({ code: 'conflict', message: 'Another data task is running. Try again when it finishes.', details: { reason: 'busy' } })

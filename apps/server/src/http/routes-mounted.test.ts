@@ -166,6 +166,45 @@ describe('unknown routes and invalid input', () => {
     expect(envelope.error.details).toMatchObject({ issues: [expect.objectContaining({ path: [...issuePath] })] })
   })
 
+  const CHAT = '0199a8f0-0000-7000-8000-000000000001'
+  it.each([
+    ['GET', '/api/chats/not-a-uuid/changes', undefined, ['id']],
+    ['GET', `/api/chats/${CHAT}/changes/diff?source=svn&path=a.txt`, undefined, ['source']],
+    ['GET', `/api/chats/${CHAT}/changes/diff?source=chat`, undefined, ['path']],
+    ['GET', '/api/chats/not-a-uuid/git', undefined, ['id']],
+    ['POST', `/api/chats/${CHAT}/changes/revert`, { source: 'chat', path: 'a.txt', expectedSha: 'ABC' }, ['expectedSha']],
+    ['POST', `/api/chats/${CHAT}/changes/revert`, { source: 'git', path: '' }, ['path']],
+    ['POST', `/api/chats/${CHAT}/changes/undo`, { batchId: 'wcb_short', conflicts: 'skip' }, ['batchId']],
+    ['GET', `/api/chats/${CHAT}/rewind?messageId=msg_short`, undefined, ['messageId']],
+    ['POST', `/api/chats/${CHAT}/rewind`, { messageId: 'msg_sample0000000001', conflicts: 'overwrite' }, ['conflicts']],
+    ['POST', '/api/shell-rules', { projectId: null, prefix: '   ' }, ['prefix']],
+    ['POST', '/api/shell-rules', { projectId: 'prj_short', prefix: 'ls' }, ['projectId']],
+    ['DELETE', '/api/shell-rules/srl_short', undefined, ['id']],
+  ] as const)('the Phase 8 routes validate their input first: %s %s -> 400', async (method, path, body, issuePath) => {
+    const init: RequestInit = { method }
+    if (body !== undefined) {
+      init.headers = { 'content-type': 'application/json' }
+      init.body = JSON.stringify(body)
+    }
+    const response = await t.request(path, init)
+    expect(response.status).toBe(400)
+    const envelope = harnessErrorEnvelopeSchema.parse(await response.json())
+    expect(envelope.error.code).toBe('validation_error')
+    expect(envelope.error.details).toMatchObject({ issues: [expect.objectContaining({ path: [...issuePath] })] })
+  })
+
+  it('the Phase 8 bodies are strict: an unknown key -> 400 validation_error', async () => {
+    for (const [path, body] of [
+      [`/api/chats/${CHAT}/changes/revert`, { source: 'chat', path: 'a.txt', force: true }],
+      [`/api/chats/${CHAT}/rewind`, { messageId: 'msg_sample0000000001', conflicts: 'skip', edit: true }],
+      ['/api/shell-rules', { projectId: null, prefix: 'ls', scope: 'global' }],
+    ] as const) {
+      const response = await t.request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      expect(response.status, path).toBe(400)
+      expect(harnessErrorEnvelopeSchema.parse(await response.json()).error.code, path).toBe('validation_error')
+    }
+  })
+
   it('malformed JSON -> 400 validation_error', async () => {
     const response = await t.request('/api/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{"displayName":' })
     expect(response.status).toBe(400)

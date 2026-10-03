@@ -315,7 +315,9 @@ export interface FakeDataService extends DataService {
  */
 export function createFakeDataService(options: FakeDataServiceOptions = {}): FakeDataService {
   const now = options.now ?? Date.now
-  const counts = { chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0 }
+  // P8-A (W8.7): the automatic sweep (ADR-039) is off in the fake.
+  const fileSweep = { mode: 'off', lastAttempt: null, nextRunAt: null } as const
+  const counts = { chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep }
   const fake: FakeDataService = {
     calls: [],
     busy: false,
@@ -376,13 +378,13 @@ export function createFakeDataService(options: FakeDataServiceOptions = {}): Fak
       fake.calls.push({ member: 'cleanupPreview', args: [] })
       if (fake.busy)
         throw busyError()
-      return options.cleanupPreview ?? { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, recentFiles: 0, graceMs: FAKE_CLEANUP_GRACE_MS, lastRunAt: null }
+      return options.cleanupPreview ?? { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, recentFiles: 0, graceMs: FAKE_CLEANUP_GRACE_MS, lastRunAt: null, fileSweep, pluginData: 'complete' }
     },
     cleanup: async () => {
       fake.calls.push({ member: 'cleanup', args: [] })
       if (fake.busy)
         throw busyError()
-      return options.cleanupResult ?? { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, ranAt: now() }
+      return options.cleanupResult ?? { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, ranAt: now(), pluginData: 'complete' }
     },
   }
   return fake

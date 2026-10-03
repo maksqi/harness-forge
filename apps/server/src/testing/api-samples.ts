@@ -11,6 +11,10 @@ export const SAMPLE_PROVIDER_ID = 'openai'
 export const SAMPLE_MCP_SERVER_ID = 'everything'
 export const SAMPLE_SHARE_ID = 'shr_sample0000000001'
 export const SAMPLE_PROJECT_ID = 'prj_sample0000000001'
+export const SAMPLE_SHELL_RULE_ID = 'srl_sample0000000001'
+export const SAMPLE_CHANGE_BATCH_ID = 'wcb_sample0000000001'
+/** A project-relative path for the change samples (no project folder is ever touched). */
+export const SAMPLE_CHANGE_PATH = 'src/index.ts'
 /** A folder that does not exist on any test host: the project samples never touch a real folder. */
 export const SAMPLE_WORKSPACE_PATH = '/harness-forge-sample/workspaces'
 /** The share id suffix + 22 base64url characters (the shape of a share token; its MAC is not valid). */
@@ -214,6 +218,18 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
 
   'keys.get': {},
   'keys.rotate': { body: { confirm: 'ROTATE' } },
+
+  'changes.list': { params: { id: SAMPLE_CHAT_ID } },
+  'changes.diff': { params: { id: SAMPLE_CHAT_ID }, query: { source: 'chat', path: SAMPLE_CHANGE_PATH } },
+  'changes.git': { params: { id: SAMPLE_CHAT_ID } },
+  'changes.revert': { params: { id: SAMPLE_CHAT_ID }, body: { source: 'git', path: SAMPLE_CHANGE_PATH, expectedSha: 'b'.repeat(64) } },
+  'changes.undo': { params: { id: SAMPLE_CHAT_ID }, body: { batchId: SAMPLE_CHANGE_BATCH_ID, conflicts: 'skip' } },
+  'changes.rewindPreview': { params: { id: SAMPLE_CHAT_ID }, query: { messageId: SAMPLE_MESSAGE_ID } },
+  'changes.rewind': { params: { id: SAMPLE_CHAT_ID }, body: { messageId: SAMPLE_MESSAGE_ID, conflicts: 'skip' } },
+
+  'shellRules.list': {},
+  'shellRules.create': { body: { projectId: SAMPLE_PROJECT_ID, prefix: 'pnpm test' } },
+  'shellRules.remove': { params: { id: SAMPLE_SHELL_RULE_ID } },
 
   'shares.list': { query: { chatId: SAMPLE_CHAT_ID } },
   'shares.create': { body: { chatId: SAMPLE_CHAT_ID, title: 'Sample share', options: { reasoning: true }, expiresAt: null } },

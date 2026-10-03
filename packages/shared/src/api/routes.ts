@@ -3,6 +3,18 @@ import type { z } from 'zod'
 import { chatRequestBodySchema, chatStopResultSchema } from '../chat.ts'
 import { audioSpeechBodySchema, audioTranscribeFormSchema, audioTranscriptionSchema } from '../schemas/audio.ts'
 import {
+  changeDiffQuerySchema,
+  changeRevertBodySchema,
+  changeUndoBodySchema,
+  chatChangesSchema,
+  fileDiffSchema,
+  gitStatusSchema,
+  restoreResultSchema,
+  rewindBodySchema,
+  rewindPreviewSchema,
+  rewindQuerySchema,
+} from '../schemas/changes.ts'
+import {
   chatBranchBodySchema,
   chatCreateSchema,
   chatDetailSchema,
@@ -46,6 +58,7 @@ import {
   shareFileParamsSchema,
   shareParamsSchema,
   sharePublicParamsSchema,
+  shellRuleParamsSchema,
   toolParamsSchema,
 } from '../schemas/params.ts'
 import {
@@ -93,6 +106,7 @@ import {
   shareUpdateSchema,
   shareViewSchema,
 } from '../schemas/shares.ts'
+import { shellRuleCreateSchema, shellRuleListSchema, shellRuleSchema } from '../schemas/shell-rules.ts'
 import {
   authStatusSchema,
   healthSchema,
@@ -142,6 +156,8 @@ export const API_MODULES = [
   'audio',
   'projects',
   'keys',
+  'changes',
+  'shellRules',
   'shares',
 ] as const
 export type ApiModule = (typeof API_MODULES)[number]
@@ -176,7 +192,7 @@ export interface ApiRouteDef {
   status?: 200 | 201 | 204
 }
 
-/** Every endpoint of API.md (85 routes), keyed `<module>.<action>`. */
+/** Every endpoint of API.md (95 routes), keyed `<module>.<action>`. */
 export const apiRoutes = {
   // health.ts
   'health.get': { module: 'health', method: 'GET', path: '/health', public: true, response: healthSchema },
@@ -302,6 +318,23 @@ export const apiRoutes = {
   // keys.ts (ADR-034): master-key state and the online rotation
   'keys.get': { module: 'keys', method: 'GET', path: '/keys', response: keyStatusSchema },
   'keys.rotate': { module: 'keys', method: 'POST', path: '/keys/rotate', fresh: true, body: keyRotateBodySchema, response: keyRotationResultSchema },
+
+  // changes.ts (ADR-036, ADR-037): the changes panel of a project chat ("This chat" from the change journal, "Git"
+  // against HEAD), the per-file revert, the undo of a batch and the rewind; chat-scoped, none needs fresh auth. Each
+  // differs from the `chats.ts` routes under `/chats/:id` in its static segments or its segment count.
+  'changes.list': { module: 'changes', method: 'GET', path: '/chats/:id/changes', params: chatParamsSchema, response: chatChangesSchema },
+  'changes.diff': { module: 'changes', method: 'GET', path: '/chats/:id/changes/diff', params: chatParamsSchema, query: changeDiffQuerySchema, response: fileDiffSchema },
+  'changes.git': { module: 'changes', method: 'GET', path: '/chats/:id/git', params: chatParamsSchema, response: gitStatusSchema },
+  'changes.revert': { module: 'changes', method: 'POST', path: '/chats/:id/changes/revert', params: chatParamsSchema, body: changeRevertBodySchema, response: restoreResultSchema },
+  'changes.undo': { module: 'changes', method: 'POST', path: '/chats/:id/changes/undo', params: chatParamsSchema, body: changeUndoBodySchema, response: restoreResultSchema },
+  'changes.rewindPreview': { module: 'changes', method: 'GET', path: '/chats/:id/rewind', params: chatParamsSchema, query: rewindQuerySchema, response: rewindPreviewSchema },
+  'changes.rewind': { module: 'changes', method: 'POST', path: '/chats/:id/rewind', params: chatParamsSchema, body: rewindBodySchema, response: restoreResultSchema },
+
+  // shell-rules.ts (ADR-038): command prefixes that run without asking; no fresh auth (a session can already approve
+  // its own shell calls)
+  'shellRules.list': { module: 'shellRules', method: 'GET', path: '/shell-rules', response: shellRuleListSchema },
+  'shellRules.create': { module: 'shellRules', method: 'POST', path: '/shell-rules', body: shellRuleCreateSchema, response: shellRuleSchema, status: 201 },
+  'shellRules.remove': { module: 'shellRules', method: 'DELETE', path: '/shell-rules/:id', params: shellRuleParamsSchema, response: 'empty' },
 
   // shares.ts (ADR-025): owner routes under `/shares`, public routes under `/share/:token`
   'shares.list': { module: 'shares', method: 'GET', path: '/shares', query: sharesQuerySchema, response: listResponseSchema(shareSummarySchema) },

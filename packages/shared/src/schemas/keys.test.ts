@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { conflictDetailsSchema, conflictReasonSchema } from '../errors.ts'
-import { dataCleanupPreviewSchema, dataCleanupResultSchema } from './data.ts'
+import { dataCleanupPreviewSchema, dataCleanupResultSchema, fileSweepStatusSchema, pluginDataScanSchema } from './data.ts'
 import { keyCheckSchema, keyRotateBodySchema, keyRotationResultSchema, keySourceSchema, keyStatusSchema } from './keys.ts'
 
 describe('master key (ADR-034)', () => {
@@ -47,13 +47,45 @@ describe('master key (ADR-034)', () => {
 
 describe('orphaned file cleanup (ADR-035)', () => {
   it('parses the preview and the result', () => {
-    const preview = { files: 12, fileBytes: 48_000_000, blobs: 10, diskBytes: 40_000_000, tempFiles: 1, recentFiles: 3, graceMs: 86_400_000, lastRunAt: null }
+    const fileSweep = { mode: 'off', lastAttempt: null, nextRunAt: null }
+    const preview = { files: 12, fileBytes: 48_000_000, blobs: 10, diskBytes: 40_000_000, tempFiles: 1, recentFiles: 3, graceMs: 86_400_000, lastRunAt: null, fileSweep, pluginData: 'complete' }
     expect(dataCleanupPreviewSchema.parse(preview)).toEqual(preview)
     expect(dataCleanupPreviewSchema.parse({ ...preview, lastRunAt: 5 }).lastRunAt).toBe(5)
     for (const change of [{ files: -1 }, { graceMs: undefined }, { lastRunAt: undefined }])
       expect(dataCleanupPreviewSchema.safeParse({ ...preview, ...change }).success, JSON.stringify(change)).toBe(false)
-    const result = { files: 12, fileBytes: 48_000_000, blobs: 10, diskBytes: 40_000_000, tempFiles: 1, ranAt: 7 }
+    const result = { files: 12, fileBytes: 48_000_000, blobs: 10, diskBytes: 40_000_000, tempFiles: 1, ranAt: 7, pluginData: 'partial' }
     expect(dataCleanupResultSchema.parse(result)).toEqual(result)
     expect(dataCleanupResultSchema.safeParse({ ...result, ranAt: null }).success).toBe(false)
+  })
+})
+
+describe('automatic file sweep (ADR-039)', () => {
+  const status = { mode: 'daily', lastAttempt: { at: 5, status: 'done', reason: null, files: 2, diskBytes: 1024 }, nextRunAt: 86_400_005 }
+
+  it('parses the sweep status', () => {
+    expect(fileSweepStatusSchema.parse(status)).toEqual(status)
+    const skipped = { ...status, lastAttempt: { at: 5, status: 'skipped', reason: 'plugin-data-limit', files: 0, diskBytes: 0 } }
+    expect(fileSweepStatusSchema.parse(skipped)).toEqual(skipped)
+    const off = { mode: 'off', lastAttempt: null, nextRunAt: null }
+    expect(fileSweepStatusSchema.parse(off)).toEqual(off)
+    expect(pluginDataScanSchema.options).toEqual(['complete', 'partial'])
+    for (const change of [
+      { mode: 'monthly' },
+      { nextRunAt: undefined },
+      { lastAttempt: { ...status.lastAttempt, status: 'running' } },
+      { lastAttempt: { ...status.lastAttempt, reason: 'busy' } },
+      { lastAttempt: { ...status.lastAttempt, files: -1 } },
+    ])
+      expect(fileSweepStatusSchema.safeParse({ ...status, ...change }).success, JSON.stringify(change)).toBe(false)
+  })
+
+  it('requires the sweep status and the plugin data coverage on the cleanup DTOs', () => {
+    const preview = { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, recentFiles: 0, graceMs: 86_400_000, lastRunAt: null, fileSweep: status, pluginData: 'partial' }
+    expect(dataCleanupPreviewSchema.parse(preview)).toEqual(preview)
+    for (const change of [{ fileSweep: undefined }, { pluginData: undefined }, { pluginData: 'none' }])
+      expect(dataCleanupPreviewSchema.safeParse({ ...preview, ...change }).success, JSON.stringify(change)).toBe(false)
+    const result = { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, ranAt: 1 }
+    expect(dataCleanupResultSchema.safeParse(result).success).toBe(false)
+    expect(dataCleanupResultSchema.parse({ ...result, pluginData: 'complete' }).pluginData).toBe('complete')
   })
 })

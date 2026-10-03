@@ -39,7 +39,7 @@ import {
 vi.mock('~/composables/useApi', () => ({ useApi: () => ({}) }))
 
 function summary(overrides: Partial<DataSummary> = {}): DataSummary {
-  return { chats: 12, archivedChats: 2, messages: 348, files: 18, fileBytes: 25_480_000, ...overrides }
+  return { chats: 12, archivedChats: 2, messages: 348, files: 18, fileBytes: 25_480_000, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null }, ...overrides }
 }
 
 function importResult(counts: Partial<DataImportResult['counts']> = {}): DataImportResult {
@@ -183,7 +183,7 @@ describe('storage cleanup texts', () => {
     expect(cleanupConfirmText(dataCleanupPreview({ files: 12, fileBytes: 50_331_648, blobs: 12 })))
       .toBe('This deletes 12 files (48 MB). It can\'t be undone.')
     expect(cleanupConfirmText(dataCleanupPreview({ blobs: 2, tempFiles: 1 }))).toBe('This deletes 3 leftover files on disk. It can\'t be undone.')
-    const result = { files: 12, fileBytes: 50_331_648, blobs: 12, diskBytes: 50_331_648, tempFiles: 0, ranAt: 1 }
+    const result = { files: 12, fileBytes: 50_331_648, blobs: 12, diskBytes: 50_331_648, tempFiles: 0, ranAt: 1, pluginData: 'complete' as const }
     expect(cleanupResultMessage(result)).toBe('Removed 12 files (48 MB)')
     expect(cleanupResultMessage({ ...result, files: 1, fileBytes: 812 })).toBe('Removed 1 file (812 B)')
     expect(cleanupResultMessage({ ...result, files: 0, fileBytes: 0, blobs: 1, tempFiles: 0 })).toBe('Removed 1 leftover file from disk')

@@ -2,6 +2,7 @@
 import { z } from 'zod'
 import {
   densitySchema,
+  fileSweepModeSchema,
   readingFontSchema,
   reasoningEffortSchema,
   sendKeySchema,
@@ -99,6 +100,9 @@ const settingsFields = {
   // Agent workspace (Phase 7, ADR-032).
   /** Steps of one agent run in a chat with a project (1..200); `maxSteps` applies to the other chats. */
   projectMaxSteps: z.int().min(1).max(LIMITS.stepsMax),
+  // Automatic file sweep (Phase 8, ADR-039).
+  /** The automatic orphaned-file cleanup: `off` (manual only), `daily` or `weekly`. */
+  fileSweep: fileSweepModeSchema,
 }
 
 /** `GET /settings`: every key always present (defaults applied by `settingsSchema.parse`). */
@@ -123,6 +127,7 @@ export const settingsSchema = z.object({
   speechVoice: settingsFields.speechVoice.default(null),
   speechSpeed: settingsFields.speechSpeed.default(1),
   projectMaxSteps: settingsFields.projectMaxSteps.default(100),
+  fileSweep: settingsFields.fileSweep.default('off'),
 })
 export type Settings = z.infer<typeof settingsSchema>
 

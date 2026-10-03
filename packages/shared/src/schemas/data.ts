@@ -1,6 +1,8 @@
-// Bulk data DTOs (API.md section 4.16, ADR-024, ADR-035): the backup zip format and the bodies of `GET /data`,
-// `GET /data/export`, `POST /data/import`, `POST /data/delete` and the orphaned file cleanup (`/data/cleanup`).
+// Bulk data DTOs (API.md section 4.16, ADR-024, ADR-035, ADR-039): the backup zip format and the bodies of `GET /data`,
+// `GET /data/export`, `POST /data/import`, `POST /data/delete` and the orphaned file cleanup (`/data/cleanup`, manual or
+// automatic).
 import { z } from 'zod'
+import { fileSweepModeSchema } from '../enums.ts'
 import { chatIdSchema, fileIdSchema, sha256HexSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { queryBooleanSchema } from './common.ts'
@@ -43,6 +45,46 @@ export const backupFileIndexSchema = z.object({
 })
 export type BackupFileIndex = z.infer<typeof backupFileIndexSchema>
 
+// ---------- automatic file sweep (ADR-039) ----------
+
+/** Outcome of an automatic sweep: `done`, `skipped` (nothing deleted) or `failed`. */
+export const fileSweepAttemptStatusSchema = z.enum(['done', 'skipped', 'failed'])
+export type FileSweepAttemptStatus = z.infer<typeof fileSweepAttemptStatusSchema>
+
+/** Why an automatic sweep was skipped or failed: the plugin data scan went over its budget, or an error. */
+export const fileSweepAttemptReasonSchema = z.enum(['plugin-data-limit', 'error'])
+export type FileSweepAttemptReason = z.infer<typeof fileSweepAttemptReasonSchema>
+
+/** The last automatic sweep (internal setting `_files.lastAutoSweep`). */
+export const fileSweepAttemptSchema = z.object({
+  at: timestampSchema,
+  status: fileSweepAttemptStatusSchema,
+  /** null when `done`. */
+  reason: fileSweepAttemptReasonSchema.nullable(),
+  /** File rows removed and disk bytes freed (0 unless `done`). */
+  files: countSchema,
+  diskBytes: countSchema,
+})
+export type FileSweepAttempt = z.infer<typeof fileSweepAttemptSchema>
+
+/** State of the automatic sweep, in `GET /data` and `GET /data/cleanup`. */
+export const fileSweepStatusSchema = z.object({
+  /** The `fileSweep` setting. */
+  mode: fileSweepModeSchema,
+  /** The last automatic sweep; null = none yet. */
+  lastAttempt: fileSweepAttemptSchema.nullable(),
+  /** When the next automatic sweep is due (an estimate: the timer checks hourly); null when `mode` is `off`. */
+  nextRunAt: timestampSchema.nullable(),
+})
+export type FileSweepStatus = z.infer<typeof fileSweepStatusSchema>
+
+/**
+ * How much of the plugin data folder (`<dataDir>/plugins/.data`) the reference scan read: `complete`, or `partial`
+ * when it stopped at its budget (an automatic sweep is then skipped; a manual cleanup proceeds).
+ */
+export const pluginDataScanSchema = z.enum(['complete', 'partial'])
+export type PluginDataScan = z.infer<typeof pluginDataScanSchema>
+
 // ---------- routes ----------
 
 /** `GET /data`: what a backup contains and what delete-all removes. */
@@ -56,6 +98,13 @@ export const dataSummarySchema = z.object({
   files: countSchema,
   /** Bytes of the uploaded files. */
   fileBytes: countSchema,
+  /** The automatic file sweep (Phase 8, ADR-039). */
+  fileSweep: fileSweepStatusSchema,
+  /**
+   * Stored before-states of workspace files (`<dataDir>/checkpoints`, ADR-036; never in a backup): their disk bytes and
+   * blob count. Optional.
+   */
+  checkpoints: z.object({ bytes: countSchema, blobs: countSchema }).optional(),
 })
 export type DataSummary = z.infer<typeof dataSummarySchema>
 
@@ -168,6 +217,10 @@ export const dataCleanupPreviewSchema = z.object({
   graceMs: countSchema,
   /** Last cleanup; null = never. */
   lastRunAt: timestampSchema.nullable(),
+  /** The automatic file sweep (Phase 8, ADR-039). */
+  fileSweep: fileSweepStatusSchema,
+  /** How much of the plugin data the reference scan read (Phase 8, ADR-039). */
+  pluginData: pluginDataScanSchema,
 })
 export type DataCleanupPreview = z.infer<typeof dataCleanupPreviewSchema>
 
@@ -179,5 +232,7 @@ export const dataCleanupResultSchema = z.object({
   diskBytes: countSchema,
   tempFiles: countSchema,
   ranAt: timestampSchema,
+  /** How much of the plugin data the reference scan read (Phase 8, ADR-039). */
+  pluginData: pluginDataScanSchema,
 })
 export type DataCleanupResult = z.infer<typeof dataCleanupResultSchema>

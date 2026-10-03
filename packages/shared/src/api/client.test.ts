@@ -1,7 +1,9 @@
 import type { AudioTranscription } from '../schemas/audio.ts'
+import type { ChatChanges, FileDiff, GitStatus, RestoreResult, RewindPreview } from '../schemas/changes.ts'
 import type { ChatDetail } from '../schemas/chats.ts'
 import type { DataImportResult } from '../schemas/data.ts'
 import type { ShareSummary, ShareView } from '../schemas/shares.ts'
+import type { ShellRule, ShellRuleList } from '../schemas/shell-rules.ts'
 import type { Settings } from '../schemas/system.ts'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { HarnessError } from '../errors.ts'
@@ -47,6 +49,7 @@ const settings: Settings = {
   speechVoice: null,
   speechSpeed: 1,
   projectMaxSteps: 100,
+  fileSweep: 'off',
 }
 
 describe('createApiClient', () => {
@@ -174,6 +177,36 @@ describe('createApiClient', () => {
     expect(calls[2]).toMatchObject({ url: '/api/chats/0199a8f0-0000-7000-8000-000000000001/messages/msg_sample0000000001', init: { method: 'DELETE', body: undefined } })
   })
 
+  it('calls the change and shell rule routes (Phase 8)', async () => {
+    const chat = '0199a8f0-0000-7000-8000-000000000001'
+    const { calls, fetch } = fakeFetch(call => (call.init.method === 'DELETE' ? new Response(null, { status: 204 }) : json({}, call.init.method === 'POST' && call.url === '/api/shell-rules' ? 201 : 200)))
+    const client = createApiClient({ fetch })
+    await client.changes.list({ params: { id: chat } })
+    await client.changes.diff({ params: { id: chat }, query: { source: 'git', path: 'src/a b.ts' } })
+    await client.changes.git({ params: { id: chat } })
+    await client.changes.revert({ params: { id: chat }, body: { source: 'chat', path: 'src/a.ts', expectedSha: null } })
+    await client.changes.undo({ params: { id: chat }, body: { batchId: 'wcb_ABCdef0123456789', conflicts: 'skip' } })
+    await client.changes.rewindPreview({ params: { id: chat }, query: { messageId: 'msg_sample0000000001' } })
+    await client.changes.rewind({ params: { id: chat }, body: { messageId: 'msg_sample0000000001', conflicts: 'force' } })
+    await client.shellRules.list()
+    await client.shellRules.create({ body: { projectId: null, prefix: 'pnpm test' } })
+    await expect(client.shellRules.remove({ params: { id: 'srl_ABCdef0123456789' } })).resolves.toBeUndefined()
+    expect(calls.map(call => `${call.init.method} ${call.url}`)).toEqual([
+      `GET /api/chats/${chat}/changes`,
+      `GET /api/chats/${chat}/changes/diff?source=git&path=src%2Fa+b.ts`,
+      `GET /api/chats/${chat}/git`,
+      `POST /api/chats/${chat}/changes/revert`,
+      `POST /api/chats/${chat}/changes/undo`,
+      `GET /api/chats/${chat}/rewind?messageId=msg_sample0000000001`,
+      `POST /api/chats/${chat}/rewind`,
+      'GET /api/shell-rules',
+      'POST /api/shell-rules',
+      'DELETE /api/shell-rules/srl_ABCdef0123456789',
+    ])
+    expect(calls[3]?.init.body).toBe('{"source":"chat","path":"src/a.ts","expectedSha":null}')
+    expect(calls[8]?.init.body).toBe('{"projectId":null,"prefix":"pnpm test"}')
+  })
+
   it('resolves void for 204 responses', async () => {
     const { fetch } = fakeFetch(() => new Response(null, { status: 204 }))
     const client = createApiClient({ fetch })
@@ -282,6 +315,17 @@ describe('createApiClient', () => {
     expectTypeOf(client.audio.transcribe).returns.resolves.toEqualTypeOf<AudioTranscription>()
     expectTypeOf(client.audio.speech).parameter(0).toHaveProperty('body')
     expectTypeOf(client.audio.speech).returns.resolves.toEqualTypeOf<Response>()
+    expectTypeOf(client.changes.list).returns.resolves.toEqualTypeOf<ChatChanges>()
+    expectTypeOf(client.changes.diff).parameter(0).toHaveProperty('query')
+    expectTypeOf(client.changes.diff).returns.resolves.toEqualTypeOf<FileDiff>()
+    expectTypeOf(client.changes.git).returns.resolves.toEqualTypeOf<GitStatus>()
+    expectTypeOf(client.changes.revert).returns.resolves.toEqualTypeOf<RestoreResult>()
+    expectTypeOf(client.changes.undo).returns.resolves.toEqualTypeOf<RestoreResult>()
+    expectTypeOf(client.changes.rewindPreview).returns.resolves.toEqualTypeOf<RewindPreview>()
+    expectTypeOf(client.changes.rewind).returns.resolves.toEqualTypeOf<RestoreResult>()
+    expectTypeOf(client.shellRules.list).returns.resolves.toEqualTypeOf<ShellRuleList>()
+    expectTypeOf(client.shellRules.create).returns.resolves.toEqualTypeOf<ShellRule>()
+    expectTypeOf(client.shellRules.remove).returns.resolves.toEqualTypeOf<void>()
   })
 })
 

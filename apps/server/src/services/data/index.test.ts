@@ -53,9 +53,9 @@ async function seed(app: DataTestApp): Promise<void> {
 describe('data summary', () => {
   it('counts every chat (archived included), every message version, file rows and their bytes', async () => {
     const app = await dataApp()
-    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0 })
+    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
     await seed(app)
-    expect(await app.deps.data.summary()).toEqual({ chats: 3, archivedChats: 1, messages: 8, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength })
+    expect(await app.deps.data.summary()).toEqual({ chats: 3, archivedChats: 1, messages: 8, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
   })
 })
 
@@ -83,7 +83,7 @@ describe('delete-all', () => {
     // Settings and credentials stay.
     expect((await app.deps.settings.get()).displayName).toBe('Keep me')
     expect(await app.deps.secrets.get('provider:openai', 'apiKey')).toBe('sk-keep-0000000000')
-    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength })
+    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
   })
 
   it('also deletes the usage rows and every file (rows and blobs) on request', async () => {
@@ -95,7 +95,7 @@ describe('delete-all', () => {
     expect(await app.t.db.select().from(files)).toEqual([])
     expect(existsSync(app.t.env.paths.files)).toBe(true)
     expect(readdirSync(app.t.env.paths.files)).toEqual([])
-    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0 })
+    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
   })
 
   it('checks fresh auth and the typed confirmation before anything is stopped or deleted', async () => {
@@ -248,13 +248,15 @@ describe('orphaned file cleanup (Phase 7)', () => {
       recentFiles: 1,
       graceMs: GRACE_MS,
       lastRunAt: null,
+      fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null },
+      pluginData: 'complete',
     })
     expect(await fileIds(app)).toEqual(all)
     expect(await app.deps.settings.getInternal(FILE_STATE_SETTING)).toBeUndefined()
 
     now += 1000
     const result = await app.deps.data.cleanup()
-    expect(dataCleanupResultSchema.parse(result)).toEqual({ files: 1, fileBytes: orphanBytes.byteLength, blobs: 0, diskBytes: orphanBytes.byteLength, tempFiles: 0, ranAt: now })
+    expect(dataCleanupResultSchema.parse(result)).toEqual({ files: 1, fileBytes: orphanBytes.byteLength, blobs: 0, diskBytes: orphanBytes.byteLength, tempFiles: 0, ranAt: now, pluginData: 'complete' })
     expect(await fileIds(app)).toEqual(all.filter(id => id !== orphan.id))
     expect(await app.deps.settings.getInternal(FILE_STATE_SETTING)).toEqual({ lastCleanup: now })
     const record = app.t.logs.records.find(entry => entry.msg === 'orphaned files cleaned up')

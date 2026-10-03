@@ -147,6 +147,27 @@ describe('workspace tools (ADR-032)', () => {
       expect(shellToolOutputSchema.safeParse({ ...output, ...change }).success, JSON.stringify(change)).toBe(false)
   })
 
+  it('carries the end folder, a folder note and the matched shell rules (ADR-038)', () => {
+    const output = { command: 'cd packages/web && pnpm test', cwd: '.', exitCode: 0, signal: null, timedOut: false, durationMs: 12, stdout: '', stderr: '', stdoutBytes: 0, stderrBytes: 0 }
+    // Outputs stored before v1.4 have none of the new fields.
+    expect(shellToolOutputSchema.parse(output)).toEqual(output)
+    const sticky = { ...output, endCwd: 'packages/web', allowedBy: ['pnpm test'] }
+    expect(shellToolOutputSchema.parse(sticky)).toEqual(sticky)
+    const clamped = { ...output, command: 'cd /', endCwd: '.', cwdNote: 'The command ended outside the project folder; the next call starts in the project folder.' }
+    expect(shellToolOutputSchema.parse(clamped)).toEqual(clamped)
+    for (const change of [
+      { endCwd: '' },
+      { endCwd: 'a\u0000b' },
+      { endCwd: 'x'.repeat(LIMITS.workspacePathMaxChars + 1) },
+      { cwdNote: 'x'.repeat(501) },
+      { allowedBy: [''] },
+      { allowedBy: ['x'.repeat(LIMITS.shellRulePrefixMaxChars + 1)] },
+      { allowedBy: Array.from({ length: LIMITS.shellCommandSegmentsMax + 1 }).fill('ls') },
+      { allowedBy: 'ls' },
+    ])
+      expect(shellToolOutputSchema.safeParse({ ...output, ...change }).success, JSON.stringify(change).slice(0, 60)).toBe(false)
+  })
+
   it('adds the workspace access to tool summaries', () => {
     const tool = { name: 'edit_file', title: null, description: 'Edit a file', pluginId: 'core-workspace', mcpServerId: null, policy: null, enabled: true, override: null, available: true, inputSchema: {}, workspace: 'write' }
     expect(toolSummarySchema.parse(tool)).toEqual(tool)

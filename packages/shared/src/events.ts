@@ -2,6 +2,7 @@
 import { z } from 'zod'
 import { harnessErrorInitSchema } from './errors.ts'
 import { chatIdSchema, messageIdSchema, modelRefSchema, pluginIdSchema, projectIdSchema, providerIdSchema, timestampSchema } from './ids.ts'
+import { workspaceChangedDataSchema } from './schemas/changes.ts'
 import { chatSummarySchema } from './schemas/chats.ts'
 import { pluginLogEntrySchema, pluginSummarySchema } from './schemas/plugins.ts'
 import { projectSummarySchema } from './schemas/projects.ts'
@@ -20,6 +21,7 @@ export const SERVER_EVENT_TYPES = [
   'plugin.log',
   'project.changed',
   'key.rotated',
+  'workspace.changed',
 ] as const
 
 export const serverEventTypeSchema = z.enum(SERVER_EVENT_TYPES)
@@ -99,6 +101,8 @@ export const serverEventSchema = z.discriminatedUnion('type', [
   eventSchema('project.changed', projectChangedDataSchema),
   /** The last event of every stream: the server closes the streams right after it. */
   eventSchema('key.rotated', keyRotatedDataSchema),
+  /** Files of a project folder were written by an agent tool or by a rewind, revert or undo (ADR-036). */
+  eventSchema('workspace.changed', workspaceChangedDataSchema),
 ])
 export type ServerEvent = z.infer<typeof serverEventSchema>
 export type ServerEventType = ServerEvent['type']

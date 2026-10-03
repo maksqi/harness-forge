@@ -150,8 +150,21 @@ describe('with a password and no session', () => {
   it('the public routes are exactly the ones of ARCHITECTURE.md 10.1', () => {
     expect(PUBLIC_KEYS.sort()).toEqual(['auth.login', 'auth.logout', 'auth.status', 'health.get', 'icons.get', 'icons.list', 'shares.file', 'shares.view'])
     // Phase 6: dictation, read-aloud (ADR-029) and deleting a version (ADR-030) need a session; Phase 7: projects
-    // (ADR-031), the master key (ADR-034) and the file cleanup (ADR-035) too.
+    // (ADR-031), the master key (ADR-034) and the file cleanup (ADR-035) too; Phase 8: the changes panel, revert, undo
+    // and rewind (ADR-036, ADR-037) and the shell rules (ADR-038).
     expect(PRIVATE_KEYS).toEqual(expect.arrayContaining(['audio.transcribe', 'audio.speech', 'chats.deleteMessage']))
+    expect(PRIVATE_KEYS).toEqual(expect.arrayContaining([
+      'changes.list',
+      'changes.diff',
+      'changes.git',
+      'changes.revert',
+      'changes.undo',
+      'changes.rewindPreview',
+      'changes.rewind',
+      'shellRules.list',
+      'shellRules.create',
+      'shellRules.remove',
+    ]))
     expect(PRIVATE_KEYS).toEqual(expect.arrayContaining([
       'projects.list',
       'projects.create',

@@ -11,6 +11,7 @@ import {
   providerIdSchema,
   shareIdSchema,
   shareTokenSchema,
+  shellRuleIdSchema,
   toolNameSchema,
 } from '../ids.ts'
 import { isSafeRelativePath } from '../util/paths.ts'
@@ -47,6 +48,10 @@ export type ShareParams = z.infer<typeof shareParamsSchema>
 /** `/projects/:id` (ADR-031). */
 export const projectParamsSchema = z.object({ id: projectIdSchema })
 export type ProjectParams = z.infer<typeof projectParamsSchema>
+
+/** `/shell-rules/:id` (ADR-038). */
+export const shellRuleParamsSchema = z.object({ id: shellRuleIdSchema })
+export type ShellRuleParams = z.infer<typeof shellRuleParamsSchema>
 
 /**
  * Public route `/share/:token`. The server answers every failure of the public share routes (a malformed token

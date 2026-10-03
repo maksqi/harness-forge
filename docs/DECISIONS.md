@@ -38,11 +38,15 @@ resolves the conflict.
 | ADR-028 | Image generation (Phase 6): image turns with dedicated image models (`kind: 'image'`, `generateImage`), image output from chat models with `capabilities.imageOutput` (provider options from `ProviderDefinition.imageParams`), and a builtin `generate_image` tool (`core-tools`, policy `ask`, model from the `imageModelRef` setting); every generated file is stored in `files` before it is streamed or saved (the chat stream runs inside `createUIMessageStream` + `writer.merge`), so no `data:` URL reaches the `messages` table | Pictures from the user's own providers; the models.dev snapshot already lists image models of both kinds (dedicated and chat models with image output) | Plugin API 1.1.0 (`createImageModel`, `imageParams`, `ctx.images.generate`); history carries the latest generated images into the next user message for vision models (most provider converters drop images in assistant messages) and replaces older ones with `[Generated image: <name>]`; image turns send no history; usage rows with purpose `image` and an estimated cost; no new route or table; declarative image providers stay in the backlog. Phase 7: `ImageGenerateResult.modelName` (plugin API 1.2.0) and the `generate_image` text names the model; an unknown provider on the media routes and in `ctx.images` / `ctx.ai` is `400 provider_not_configured` (action `configure-provider`), as on chat |
 | ADR-029 | Voice (Phase 6): dictation (browser `MediaRecorder` -> `POST /api/audio/transcriptions` -> `transcribe()`) and read-aloud (`POST /api/audio/speech` -> `generateSpeech()`) through the user's own providers; the models are opt-in settings; audio and text pass through the server and are never stored or logged | Voice without browser speech APIs, which break bring-your-own-key (Chrome's recognition sends audio to Google) | Model kinds `transcription` and `speech`, `ModelInfo.voices`; plugin API 1.1.0 (`createTranscriptionModel`, `createSpeechModel`, `transcriptionOptions`); `Permissions-Policy: microphone=(self)` and SPA CSP `media-src 'self' blob:`; the microphone needs HTTPS or localhost; usage rows with purpose `transcription` / `speech` (no cost); audio is accepted only on the transcription route (chat uploads unchanged) |
 | ADR-030 | Versions (Phase 6, amends ADR-023): each message remembers the child last shown under it (`messages.selected_child_id`, a hint without a foreign key; migration `0002` backfills the active paths), so switching to a version restores the path last shown under it; `DELETE /chats/:id/messages/:messageId` deletes one version and everything after it, only when another version exists and never during a run; `chat.updated` carries `activeLeafId` so other tabs follow a switch | Switching back jumped to the newest leaf; unwanted versions piled up; other tabs kept showing an old version | 409 `only-version` / `run-active`; the active path moves to the previous sibling's remembered leaf (else the next); usage rows, share snapshots and files are kept; the pointer is not exported (chat export v2 and backups unchanged) |
-| ADR-031 | Projects (Phase 7, supersedes ADR-015 with ADR-032 / ADR-033): a project is a named folder on the server host (`projects` table: id `prj_` + 16, name, canonical realpath, optional instructions); a chat optionally belongs to one (`chats.project_id`, nullable, no foreign key); project folders only inside the allowed roots `HF_WORKSPACE_ROOTS` (default `<dataDir>/workspaces`); creating a project requires fresh auth; `AGENTS.md` (else `CLAUDE.md`) from the project root joins the instructions | Claude Code-style agent work on real files (user decision) | Module `projects` (5 routes), SSE `project.changed`, migration `0004`; a project folder may not equal, contain or sit inside the data dir (the `<dataDir>/workspaces` subtree excepted); deleting a project detaches its chats and never touches the folder; deleting or moving during a run is refused (409 `run-active`); projects are not in backups or chat exports (export v1 / v2 unchanged) and delete-all keeps them; the sidebar filters chats by project, no side panes (UI.md 1.2 amended) |
+| ADR-031 | Projects (Phase 7, supersedes ADR-015 with ADR-032 / ADR-033): a project is a named folder on the server host (`projects` table: id `prj_` + 16, name, canonical realpath, optional instructions); a chat optionally belongs to one (`chats.project_id`, nullable, no foreign key); project folders only inside the allowed roots `HF_WORKSPACE_ROOTS` (default `<dataDir>/workspaces`); creating a project requires fresh auth; `AGENTS.md` (else `CLAUDE.md`) from the project root joins the instructions | Claude Code-style agent work on real files (user decision) | Module `projects` (5 routes), SSE `project.changed`, migration `0004`; a project folder may not equal, contain or sit inside the data dir (the `<dataDir>/workspaces` subtree excepted); deleting a project detaches its chats and never touches the folder; deleting or moving during a run is refused (409 `run-active`); projects are not in backups or chat exports (export v1 / v2 unchanged) and delete-all keeps them; the sidebar filters chats by project, no side panes (UI.md 1.2 amended); Phase 8 (ADR-037): one changes side panel in project chats |
 | ADR-032 | Workspace tools and the Accept edits mode (Phase 7): the builtin plugin `core-workspace` registers `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file` and `shell`; plugin API 1.2.0 adds `ToolCallContext.workspace` and `ToolDefinition.workspace` (`read` / `write` / `execute`; such tools are offered only in chats whose project folder opened) and `ImageGenerateResult.modelName`; `ToolMode` gains `edits` (safe tools and `ask` tools with workspace `write` run without asking; everything else asks) | Agents edit files without an approval per edit while shell commands still ask | Every path resolves through one guard (realpath containment, no `.git` writes); secret-looking reads ask, hidden or secret-path writes always ask; tool outputs carry project-relative paths and diff hunks for the UI while `toModelOutput` gives the model a short text; the search regex runs in a killable Worker; setting `projectMaxSteps` (100) for chats with a project, `maxSteps` and `projectMaxSteps` up to 200 |
-| ADR-033 | Shell execution (Phase 7): the `shell` tool runs `bash -c` (else `sh -c`) in the project folder with the server's privileges, a minimal environment (no `HF_*`, no provider keys), its own process group (killed on Stop, timeout or server exit), a timeout of at most 590 s and capped output; `HF_WORKSPACE_SHELL=0` never offers an `execute` tool (they stay registered and listed) | The user chose a shell with approval over no shell or an OS sandbox; Docker is the sandbox | Accepted risks: a valid session can approve its own shell calls (code execution as the server user), auto mode trusts the model fully, a process that calls `setsid` escapes the group kill, the shell reads whatever the server user can read; no OS sandbox; not available on Windows; the Docker image ships `bash` and `git` |
+| ADR-033 | Shell execution (Phase 7): the `shell` tool runs `bash -c` (else `sh -c`) in the project folder with the server's privileges, a minimal environment (no `HF_*`, no provider keys), its own process group (killed on Stop, timeout or server exit), a timeout of at most 590 s and capped output; `HF_WORKSPACE_SHELL=0` never offers an `execute` tool (they stay registered and listed) | The user chose a shell with approval over no shell or an OS sandbox; Docker is the sandbox | Accepted risks: a valid session can approve its own shell calls (code execution as the server user), auto mode trusts the model fully, a process that calls `setsid` escapes the group kill, the shell reads whatever the server user can read; no OS sandbox; not available on Windows; the Docker image ships `bash` and `git`. Phase 8 (ADR-038): the working folder carries over between calls and shell rules let matching commands run without asking |
 | ADR-034 | Master-key rotation (Phase 7): `POST /api/keys/rotate` (fresh auth, typed `ROTATE`) re-encrypts every secret with a new key when the key comes from `secret.key` (write-ahead `secret.key.next`, one transaction, boot recovery through a key check kept in the internal setting `_keys`); deployments using `HF_MASTER_KEY` rotate offline with the `rotate-key` CLI (`pnpm key:rotate`, new key from `HF_NEW_MASTER_KEY`, never generated or printed; with a key file the CLI rotates offline too, generating the key and ignoring `HF_NEW_MASTER_KEY`; exit codes 0 done / 1 failed / 2 refused) | Retire a leaked or old key without losing credentials | The live keyring swaps in place (the frozen `deps` keep their getters); every session, share URL (owners copy the new link) and pending approval (denied as "Expired after a key rotation.") is invalidated; runs are stopped; SSE `key.rotated`, then every event stream closes; `server.lock` keeps the CLI away from a running server (the server itself replaces a stale lock with a warning); no downgrade to v1.2 after a rotation |
-| ADR-035 | Orphaned file cleanup (Phase 7): `GET /api/data/cleanup` previews and `POST /api/data/cleanup` removes file rows that no message, share, plugin value or setting references (a loose `file_…` id scan of an explicit list of JSON / text columns, `plugin_kv.key` included, guarded by a schema-coverage test) and that are older than 24 h, plus blobs no row keeps and stale temp files; manual only | Generated images and attachments of deleted chats and versions piled up (only delete-all removed them) | No automatic sweep (deletion cannot be undone and plugins may keep file ids outside the database); a schema-coverage test fails on an unscanned column; runs exclusively with imports, delete-all and key rotation; deleting a chat or a version still keeps its files until the next cleanup |
+| ADR-035 | Orphaned file cleanup (Phase 7): `GET /api/data/cleanup` previews and `POST /api/data/cleanup` removes file rows that no message, share, plugin value or setting references (a loose `file_…` id scan of an explicit list of JSON / text columns, `plugin_kv.key` included, guarded by a schema-coverage test) and that are older than 24 h, plus blobs no row keeps and stale temp files; manual only | Generated images and attachments of deleted chats and versions piled up (only delete-all removed them) | No automatic sweep in Phase 7 (deletion cannot be undone and plugins may keep file ids outside the database; amended by ADR-039: an opt-in automatic sweep that also scans plugin data); a schema-coverage test fails on an unscanned column; runs exclusively with imports, delete-all and key rotation; deleting a chat or a version still keeps its files until the next cleanup |
+| ADR-036 | Checkpoints and rewind (Phase 8): before every `write_file` / `edit_file` and before every server-side revert, rewind or undo, the file's previous state is stored content-addressed in `<dataDir>/checkpoints/` and journaled in `workspace_changes` (chat, project, message `seq` watermark, tool call, before / after sha); "Rewind files to here" on a user message restores every file the chat changed since that message was sent (time-based, across versions), with conflict detection (the file changed since the last recorded change: skip or force); every restore is one undoable batch | Undo agent work on real files without git (user decision; Claude Code parity) | Capture is server-internal (a run scope bound to the tool call context; plugin API stays 1.2.0); shell commands and third-party plugin writes are not restorable: they are journaled as `shell` / `untracked` rows and listed in the rewind dialog; before-states over 8 MiB are `too-large`; per-project budget 512 MiB and 30 days (oldest blobs evicted, rows kept as `evicted`); a per-file lock serializes writes; rewind / revert / undo are refused (409 `run-active`) while any chat of the project runs; the conversation is not moved (restore + edit reuses ADR-023); chat and project deletion cascade; never in backups, exports or imports; migration `0005` |
+| ADR-037 | Changes panel and git (Phase 8, amends ADR-031 and UI.md 1.2): one side panel in project chats (desktop right pane, sheet below 1024 px) with "This chat" (net changes from the journal, works without git) and "Git" (`git status` + diff against HEAD when the project is inside a git work tree) views; a per-file revert (to the state before the chat, or to HEAD) is reversible (snapshot first); no stage / commit; git runs only through one hardened runner (argument array, no shell, scrubbed environment, `GIT_CEILING_DIRECTORIES`, fsmonitor / hooks / external diff / pager / filter drivers neutralized, 15 s timeout, capped output) | Review and selectively undo agent edits (user decision) | Module `changes` (7 routes incl. rewind); SSE `workspace.changed`; diffs are computed by the server from the HEAD blob and the disk (never `git diff`); the git index is never touched; conflicted files, symbolic links, submodules and filtered (LFS) paths are not revertible; a repository owned by another user stays refused by git (`safe.directory` is not overridden; documented for Docker bind mounts); git missing → the Git view is unavailable |
+| ADR-038 | Sticky working folder and shell rules (Phase 8, amends ADR-033): each `shell` call is still a new process, but the folder it ends in (reported through an EXIT trap on fd 3, clamped to the project) is where the chat's next call starts (derived from the last shell output on the active path; environment variables do not persist); shell rules (an allowlist of command prefixes, per project and global; `shell_rules` table, module `shellRules`): a command runs without asking in the `ask` and `edits` modes when every segment (`&&`, `\|\|`, `;`, `\|`, newline) matches a rule, and always asks with `$`, backticks, redirections (other than to `/dev/null` or fd duplication), subshells, globs, here-docs or env prefixes; the parser is shared by web and server and fails closed | Fewer approval prompts for routine commands without the auto mode (user decision; Claude Code parity) | Rules are not settings (a backup never grants shell rights) and are not in backups; rules for command runners (`sh`, `env`, `xargs`, `sudo`, …) and single-word interpreter rules are refused; `cd <folder inside the project>` needs no rule; the server refuses an `allow` override on `execute` tools (and ignores a stored one); `PATH` drops empty and relative entries; accepted risk: a rule for a script runner (`pnpm test`, `make`) runs any code the agent wrote (with Accept edits about as strong as auto for the shell); shell output gains `endCwd`, `cwdNote`, `allowedBy` |
+| ADR-039 | Automatic file sweep (Phase 8, amends ADR-035): the opt-in setting `fileSweep` (`off` by default, `daily`, `weekly`) runs the same cleanup as `POST /data/cleanup` from a timer in the data service; the first run comes at least 24 h after boot, later runs once `lastCleanup + interval` has passed (a manual cleanup resets the clock); the reference scan (manual and automatic) also reads `<dataDir>/plugins/.data/**` loosely within a budget | Orphaned files piled up between manual cleanups (user decision) | A busy maintenance lock retries in 10 min; a failure waits a full interval; an over-budget plugin data scan skips the automatic run (a manual run proceeds and reports `partial`); `_files.lastAutoSweep`; status in `GET /data` and `GET /data/cleanup` (`FileSweepStatus`); no new route or event; checkpoint blobs are never touched; test-only `HF_TEST_FILE_SWEEP_DELAY_MS` (honored only with `HF_MOCK_PROVIDER=1`) |
 
 ## Contract seed
 
@@ -87,7 +91,9 @@ comes from `HF_MASTER_KEY`; ADR-034).
 Test-only variables: `HF_LIVE` (`1` enables the live provider suite, `pnpm test:live`), `HF_LIVE_PROVIDERS` (comma
 list of provider ids to run), `HF_LIVE_MAX_COST_USD` (budget of one live run), `HF_TEST_REQUIRE_WEB_BUILD` (`1`
 turns the skipped built-page CSP test into a failure when the web build is missing), `E2E_SCREENSHOTS` (`1` runs the
-`@screenshots` Playwright spec), `HF_LIVE_MEDIA` (`1` adds the image and voice checks to the live suite; Phase 6).
+`@screenshots` Playwright spec), `HF_LIVE_MEDIA` (`1` adds the image and voice checks to the live suite; Phase 6), `HF_TEST_FILE_SWEEP_DELAY_MS`
+(1000 – 86400000: replaces the automatic file sweep's boot delay and hourly check; honored only with
+`HF_MOCK_PROVIDER=1`, otherwise ignored with a boot warning; Phase 8, ADR-039).
 
 ### Data directory
 
@@ -102,6 +108,7 @@ data/
   workspaces/           default workspace root (0700; Phase 7, ADR-031)
   secret.key.next       transient: the new key during a master-key rotation (ADR-034)
   server.lock           { pid, hostname, port, startedAt } of the running server (ADR-034)
+  checkpoints/<aa>/<sha256>  before-states of workspace files (0700 / 0600; Phase 8, ADR-036; never served)
 ```
 
 ### Identifiers
@@ -119,7 +126,7 @@ data/
 - **Builtin tool names**: `current_time`, `web_fetch`, `generate_image` (Phase 6, ADR-028) from `core-tools`;
   `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file`, `shell` from `core-workspace`
   (Phase 7, ADR-032).
-- **Plugin API version** (`PLUGIN_API_VERSION`): `1.2.0` (Phase 7, additive: `ToolCallContext.workspace`,
+- **Plugin API version** (`PLUGIN_API_VERSION`): `1.2.0` (unchanged in Phase 8; Phase 7, additive: `ToolCallContext.workspace`,
   `ToolDefinition.workspace`, `ImageGenerateResult.modelName`); `1.1.0` (Phase 6) added the image, transcription and
   speech factories, `imageParams`, `transcriptionOptions`, `ctx.images`.
 - **Command name**: `^[a-z][a-z0-9-]{0,31}$` (typed as `/name`). Client-only commands: `/new`, `/model`, `/effort`,
@@ -128,6 +135,8 @@ data/
   client-generated ids (`createMessageId`), assistant messages get server-generated ids (ADR-019). **File id**:
   `file_` + 16 chars. **Session cookie**: `hf_session`.
 - **Project id** (Phase 7): `prj_` + 16 chars; the project path is the canonical realpath of its folder (unique).
+- **Shell rule id** (Phase 8): `srl_` + 16 chars. **Change batch id** (Phase 8): `wcb_` + 16 chars (one revert, rewind
+  or undo; ADR-036).
 - **Share id**: `shr_` + 16 chars. **Share token** (`^[0-9A-Za-z]{16}[\w-]{22}$`): the 16-char share id suffix + the
   first 22 base64url chars of `HMAC-SHA256(subkey 'share', 'harness-forge/share/v1:' + shareId)`; never stored
   (ADR-025). Share page URL: `/share/<token>`.
@@ -139,7 +148,8 @@ data/
 - **Keyring subkeys** (HKDF of the master key): `encryption`, `session`, `approval`, `share`. Key state (Phase 7,
   ADR-034): internal setting `_keys` = `{ version, check, rotatedAt }` (`check` = HMAC-SHA256 of the `encryption`
   subkey over `harness-forge/key-check/v1`); `secrets.key_version` equals `_keys.version` after a rotation. Internal
-  setting `_files` = `{ lastCleanup }` (ADR-035).
+  setting `_files` = `{ lastCleanup, lastAutoSweep? }` (ADR-035; `lastAutoSweep = { at, status: done | skipped |
+  failed, reason: plugin-data-limit | error | null, files, diskBytes }`, ADR-039).
 
 ### Enumerations
 
@@ -154,7 +164,11 @@ data/
 - Model `kind` = `chat | embedding | image | audio | transcription | speech | other` (`transcription` and `speech`
   added in Phase 6). Usage `purpose` = `chat | title | image | transcription | speech`.
 - Conflict `details.reason` (409) = `run-active | busy | exists | only-version | env-key | key-mismatch` (the last
-  two: Phase 7 key rotation).
+  two: Phase 7 key rotation). Phase 8 adds no reason (rewind / revert use `run-active`, a stale revert uses the
+  existing `stale` reason of `errors.ts`, a duplicate shell rule `exists`).
+- Workspace change `kind` (Phase 8) = `edit | revert | rewind | undo | shell | untracked`; before-state = `missing |
+  stored | too-large | evicted`; `workspace.changed` source = `tool | rewind | revert | undo`; change view source =
+  `chat | git`; conflict handling = `skip | force`; `fileSweep` = `off | daily | weekly`.
 
 ### HTTP API (all under `/api`) — endpoint → server route module
 
@@ -182,6 +196,8 @@ data/
 | `audio.ts` | `POST /audio/transcriptions`, `POST /audio/speech` |
 | `projects.ts` | `GET /projects`, `POST /projects` (fresh auth), `PATCH /projects/:id`, `DELETE /projects/:id`, `GET /projects/browse?path` (Phase 7) |
 | `keys.ts` | `GET /keys`, `POST /keys/rotate` (fresh auth) (Phase 7) |
+| `changes.ts` | `GET /chats/:id/changes`, `GET /chats/:id/changes/diff?source&path`, `GET /chats/:id/git`, `POST /chats/:id/changes/revert`, `POST /chats/:id/changes/undo`, `GET /chats/:id/rewind?messageId`, `POST /chats/:id/rewind` (Phase 8) |
+| `shell-rules.ts` | `GET /shell-rules`, `POST /shell-rules`, `DELETE /shell-rules/:id` (Phase 8) |
 | `shares.ts` | `GET /shares?chatId`, `POST /shares`, `PATCH /shares/:id`, `DELETE /shares/:id`, `GET /share/:token` (public), `GET /share/:token/files/:fileId` (public) |
 
 ### Error envelope
@@ -197,7 +213,9 @@ provider status when relevant; the HTTP status is derived from `code` (`errorSta
 
 `chat.created`, `chat.updated` (incl. title; data = the chat summary + `activeLeafId`, ADR-030), `chat.deleted`, `run.started`, `run.finished`, `provider.changed`,
 `catalog.changed`, `plugin.changed`, `plugin.log`; Phase 7: `project.changed` (`{ id, project }`, `project` null =
-deleted) and `key.rotated` (`{ keyVersion, rotatedAt, chatIds }`; every event stream closes after it). Payload: `{ type, data, at }`. `run.finished` data includes
+deleted) and `key.rotated` (`{ keyVersion, rotatedAt, chatIds }`; every event stream closes after it); Phase 8:
+`workspace.changed` (`{ projectId, chatId, batchId, source, paths }`, ADR-036; tool edits coalesced to at most one
+event per second per chat). Payload: `{ type, data, at }`. `run.finished` data includes
 `awaitingApproval: boolean` (drives the amber sidebar dot; also persisted as `chats.pending_approval`).
 
 ### Chat request (`POST /api/chat`)
@@ -219,17 +237,20 @@ reasoningMs?, usage?, costUsd?, finishReason?, aborted?, error?, command?, image
 `imageModelRef` (null), `transcriptionModelRef` (null = dictation off), `transcriptionLanguage` (`auto`),
 `speechModelRef` (null = read-aloud off), `speechVoice` (null = provider default), `speechSpeed` (1); Phase 7:
 `projectMaxSteps` (100, used for chats with a project), `maxSteps` and `projectMaxSteps` accept 1–200,
-`defaultToolMode` accepts `edits`.
+`defaultToolMode` accepts `edits`; Phase 8: `fileSweep` (`off`; ADR-039).
 The theme itself is stored client-side by `@nuxtjs/color-mode` (key `hf-color-mode`) so it applies before boot.
 
 ### Database tables
 
 `settings`, `secrets`, `provider_configs`, `model_cache`, `model_prefs`, `chats`, `messages`, `usage`, `plugins`,
-`plugin_settings`, `plugin_kv`, `tool_prefs`, `mcp_servers`, `files`, `chat_shares`, `projects` (Phase 7) — columns in
+`plugin_settings`, `plugin_kv`, `tool_prefs`, `mcp_servers`, `files`, `chat_shares`, `projects` (Phase 7),
+`workspace_changes`, `shell_rules` (Phase 8) — columns in
 `docs/ARCHITECTURE.md`. Migrations: `0000_initial_schema`, `0001` (message tree + `chat_shares`, Phase 5), `0002` (remembered versions:
 `messages.selected_child_id` + backfill, Phase 6), `0003` (ages every successful cached model listing by one TTL, so it is
 stale once and the v1.2 listing rules apply right after the upgrade while it stays served; Phase 6), `0004_projects`
-(table `projects` + `chats.project_id`, no backfill; Phase 7).
+(table `projects` + `chats.project_id`, no backfill; Phase 7), `0005_workspace_checkpoints` (tables
+`workspace_changes` + `shell_rules` with cascading foreign keys to `chats` / `projects`, no change to an existing table;
+Phase 8).
 
 ### Chat export and backup formats
 
@@ -258,6 +279,9 @@ Models `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error`; the ap
 output), `mock:image-tool` (calls `generate_image`), `mock:transcribe` (transcription) and `mock:speech` (speech).
 Phase 7 adds `mock:workspace` (writes `mock-workspace.txt`, edits "mock agent" to "workspace agent", runs
 `cat mock-workspace.txt` when the shell is offered, then answers "Workspace done: <stdout>").
+Phase 8 adds `mock:checkpoint` (writes `checkpoint.txt` = "Turn <n>", then runs `mkdir -p mock-dir && cd mock-dir`
+and `ls` when the shell is offered, then answers "Checkpoint done.") and `mock:shell` (runs the user message text as one
+shell command, then answers "Shell done: <stdout>").
 Behavior is specified in PROVIDERS.md.
 
 ### Example plugins
