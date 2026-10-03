@@ -119,7 +119,7 @@ describe('id schemas', () => {
 describe('builtin and reserved ids', () => {
   it('lists the builtin ids of DECISIONS.md', () => {
     expect(BUILTIN_PROVIDER_IDS).toEqual(['anthropic', 'openai', 'google', 'xai', 'deepseek', 'moonshotai', 'alibaba', 'zai', 'minimax', 'mistral', 'groq', 'openrouter', 'ollama'])
-    expect(BUILTIN_PLUGIN_IDS).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'mock'])
+    expect(BUILTIN_PLUGIN_IDS).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'core-agent', 'mock'])
     expect(CLIENT_COMMANDS).toEqual(['new', 'model', 'effort', 'mode', 'help'])
     expect(HARNESS_COMMANDS).toEqual(['compact'])
   })

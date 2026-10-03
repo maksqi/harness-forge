@@ -6,12 +6,15 @@
 // - `run` commands (guarded, 30 s, phase `tool`): `{ type: 'prompt', text }` behaves like a template expansion,
 //   `{ type: 'reply', markdown }` is written as the assistant message without a model call; a throw or timeout is
 //   shown as a `plugin_error` in the chat.
+// Phase 9 (ADR-040): the harness command `/compact [focus]` (`HARNESS_COMMANDS`) is checked before the registry (a
+// plugin cannot register the name) and resolves to `compact`: `launchRun` answers it with a compaction instead of a
+// model call (`compaction/stream.ts`). `GET /commands` lists it with `HARNESS_COMMAND_SUMMARIES`.
 import type { CommandDefinition, CommandRunResult } from '@harness-forge/plugin-sdk'
-import type { CommandInvocation } from '@harness-forge/shared'
+import type { CommandInvocation, CommandSummary } from '@harness-forge/shared'
 import type { PluginHost } from '../plugins/types.ts'
 import type { Registry } from '../registry/types.ts'
 import { Buffer } from 'node:buffer'
-import { COMMAND_NAME_PATTERN, HarnessError, isClientCommand, isHarnessError, LIMITS } from '@harness-forge/shared'
+import { COMMAND_NAME_PATTERN, HarnessError, isClientCommand, isHarnessCommand, isHarnessError, LIMITS } from '@harness-forge/shared'
 import { GUARD_TIMEOUTS } from '../plugins/guard.ts'
 
 export interface ParsedCommand {
@@ -43,6 +46,13 @@ export type CommandResolution
   = | { kind: 'prompt', invocation: CommandInvocation & { type: 'prompt', expansion: string } }
     | { kind: 'reply', invocation: CommandInvocation & { type: 'reply' }, markdown: string }
     | { kind: 'failed', invocation: CommandInvocation & { type: 'reply' }, error: HarnessError }
+    /** `/compact [focus]` (Phase 9): `focus` is the input, trimmed (null when empty). */
+    | { kind: 'compact', invocation: CommandInvocation & { name: 'compact', type: 'compact' }, focus: string | null }
+
+/** The harness commands as `GET /commands` lists them (Phase 9; `pluginId` names the plugin of the agent tools). */
+export const HARNESS_COMMAND_SUMMARIES: readonly CommandSummary[] = Object.freeze([
+  Object.freeze({ name: 'compact', description: 'Summarize the conversation to free up context', pluginId: 'core-agent' }),
+])
 
 export interface CommandServices {
   registry: Pick<Registry, 'commands'>
@@ -55,6 +65,15 @@ function tooLong(name: string): HarnessError {
     message: `The expanded /${name} command is larger than ${LIMITS.commandExpansionBytes / 1024} KB. Shorten the input.`,
     details: { issues: [{ path: ['message', 'parts'], message: 'Command expansions are limited to 64 KB.', code: 'too_big' }] },
   })
+}
+
+/** `/compact [focus]`; a focus longer than `LIMITS.compactFocusMaxChars` is a `validation_error` on `['message']`. */
+function compactResolution(input: string): CommandResolution {
+  if (input.length > LIMITS.compactFocusMaxChars) {
+    const message = `The focus of /compact is limited to ${LIMITS.compactFocusMaxChars} characters.`
+    throw new HarnessError({ code: 'validation_error', message, details: { issues: [{ path: ['message'], message, code: 'too_big' }] } })
+  }
+  return { kind: 'compact', invocation: { name: 'compact', input, type: 'compact' }, focus: input === '' ? null : input }
 }
 
 function promptResolution(name: string, input: string, expansion: string): CommandResolution {
@@ -75,9 +94,9 @@ function isRunResult(value: unknown): value is CommandRunResult {
 }
 
 /**
- * The command invoked by `text`, or null when the text is not a registered server-side command. Throws
- * `validation_error` when a prompt expansion is larger than 64 KB, and the abort reason when the run was stopped; a
- * failing `run` is returned as `failed`.
+ * The command invoked by `text`, or null when the text is not a harness command or a registered server-side command.
+ * Throws `validation_error` when a prompt expansion is larger than 64 KB or a `/compact` focus longer than 1000
+ * characters, and the abort reason when the run was stopped; a failing `run` is returned as `failed`.
  */
 export async function resolveCommand(
   services: CommandServices,
@@ -87,6 +106,8 @@ export async function resolveCommand(
   const parsed = parseSlashCommand(text)
   if (parsed === null || isClientCommand(parsed.name))
     return null
+  if (isHarnessCommand(parsed.name))
+    return compactResolution(parsed.input)
   const registered = services.registry.commands.get(parsed.name)
   if (registered === undefined)
     return null

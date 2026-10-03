@@ -3,7 +3,7 @@ import type { VueWrapper } from '@vue/test-utils'
 import type { UIMessageChunk } from 'ai'
 import type { Mock } from 'vitest'
 import type { MockApi } from '~/utils/testing/mock-api'
-import { HarnessError } from '@harness-forge/shared'
+import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
@@ -15,7 +15,7 @@ import { dispatchServerEvent } from '~/composables/useServerEvents'
 import { useChatsStore } from '~/stores/chats'
 import { useProjectsStore } from '~/stores/projects'
 import { testIds } from '~/utils/testids'
-import { assistantMessage, changeBatchId, chatDetail, chatId, messageBranch, projectId, projectSummary, restoreResult, rewindPreview, userMessage } from '~/utils/testing/fixtures'
+import { assistantMessage, changeBatchId, chatDetail, chatId, messageBranch, projectId, projectSummary, queueItem, restoreResult, rewindPreview, userMessage } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import ChatTranscript from './ChatTranscript.vue'
@@ -862,5 +862,49 @@ describe('chatView: workspace 2.0 wiring (Phase 8)', () => {
     })
     await until(() => mock.toast.mock.calls.length === 1)
     expect(mock.toast).toHaveBeenCalledWith('Could not save the rule', { description: 'The prefix is not allowed.' })
+  })
+})
+
+describe('chatView: agent 2.0 dock (Phase 9 seams)', () => {
+  beforeEach(() => {
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(2),
+      modelRef: MODEL,
+      messages: [
+        { id: 'msg_user000000000001', role: 'user', parts: [{ type: 'text', text: 'First question' }] },
+        { id: 'msg_asst000000000009', role: 'assistant', metadata: { modelRef: MODEL, startedAt: 1 }, parts: [{ type: 'text', text: 'Answer', state: 'done' }] },
+      ],
+    }))
+  })
+
+  it('stacks the queued messages above the composer and hides the empty dock parts', async () => {
+    const { wrapper } = mountView({ chatId: chatId(2) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    expect(wrapper.find(`[data-testid="${testIds.queuedMessages}"]`).exists()).toBe(false)
+    expect(wrapper.find(`[data-testid="${testIds.todoStrip}"]`).exists()).toBe(false)
+    expect(wrapper.getComponent(ChatTranscript).props('activity')).toBeNull()
+
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(2), items: [queueItem()] }))
+    await flushPromises()
+    const queued = wrapper.get(`[data-testid="${testIds.queuedMessages}"]`)
+    expect(queued.attributes('data-count')).toBe('1')
+    const composer = wrapper.get('[data-testid="composer"]')
+
+    expect(queued.element.compareDocumentPosition(composer.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(1), items: [queueItem()] }))
+    dispatchServerEvent(createServerEvent('chat.deleted', { id: chatId(1) }))
+    await flushPromises()
+    expect(wrapper.get(`[data-testid="${testIds.queuedMessages}"]`).attributes('data-count')).toBe('1')
+  })
+
+  it('stops without restoring anything while nothing was queued', async () => {
+    api.chat.stop.mockResolvedValue({ stopped: false })
+    const { wrapper } = mountView({ chatId: chatId(2) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    await wrapper.get('[data-action="stop"]').trigger('click')
+    await flushPromises()
+    expect(api.chat.stop).toHaveBeenCalledWith({ params: { id: chatId(2) } })
+    expect(mock.toast).not.toHaveBeenCalled()
   })
 })

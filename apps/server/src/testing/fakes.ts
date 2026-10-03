@@ -21,6 +21,11 @@
 // (it counts the calls). `createTestApp({ checkpoints: 'fake', shellRules: 'fake' })` installs the two fake services.
 // W8.7: `createFakeFilesService` is a deprecated alias of the real `createFilesService` (pins and the store gate
 // included), so the call sites keep working with the real behavior.
+//
+// Phase 9 (C24-T5): `createFakeChatRunner` has the steer queue members (`queueList`, `enqueue`, `dequeue`,
+// `clearQueue`; an in-memory queue per chat, `queue.changed` on the `events` option); ./fake-project-files.ts adds
+// `createFakeProjectFileService` (paths in memory ranked by the shared `rankPaths`, a fixed `FileRef` for `attach`,
+// call counters), installed with `createTestApp({ projectFiles: 'fake' })`.
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type {
   DataCleanupPreview,
@@ -30,6 +35,8 @@ import type {
   DataSummary,
   IconRef,
   LobeIconList,
+  QueueItem,
+  QueueRemoval,
   ServerEvent,
   Settings,
   SettingsUpdate,
@@ -39,7 +46,7 @@ import type {
   ShareSummary,
   ShareView,
 } from '@harness-forge/shared'
-import type { ActiveRun, ChatRunner } from '../chat/types.ts'
+import type { ActiveRun, ChatRunner, QueueClearReason } from '../chat/types.ts'
 import type { IconService } from '../providers/types.ts'
 import type { DataService } from '../services/data/types.ts'
 import type { EventBus, EventSubscribeOptions, ServerEventListener } from '../services/events/types.ts'
@@ -80,6 +87,8 @@ export type { FakeCheckpointBlobStore, FakeCheckpointService, FakeJournalRecord,
 export { createFakeKeyring, FAKE_KEYRING_SEED, fakeMasterKey } from './fake-keyring.ts'
 export { createFakeAudioService, createFakeImageService, NO_IMAGE_MODEL_MESSAGE } from './fake-media.ts'
 export type { FakeAudioCall, FakeAudioService, FakeAudioServiceOptions, FakeImageService, FakeImageServiceOptions } from './fake-media.ts'
+export { createFakeProjectFileService, FAKE_PROJECT_FILE_REF } from './fake-project-files.ts'
+export type { FakeProjectFileService, FakeProjectFileServiceOptions } from './fake-project-files.ts'
 export { createFakeShellRuleService } from './fake-shell-rules.ts'
 export type { FakeShellRuleService, FakeShellRuleServiceOptions } from './fake-shell-rules.ts'
 
@@ -251,25 +260,80 @@ export interface FakeChatRunner extends ChatRunner {
   readonly phases: Map<string, FakeRunPhase>
   /** Chat ids passed to `stop`, in call order. */
   readonly stopped: string[]
+  /** Phase 9: the steer queue of each chat, oldest first; tests may read or edit it directly (no event then). */
+  readonly queues: Map<string, QueueItem[]>
+  /** Phase 9: chats waiting for an approval, so `enqueue` accepts them without a run; tests add entries directly. */
+  readonly awaitingApproval: Set<string>
+  /** Phase 9: every item that left a queue (through `dequeue`, `clearQueue`, `stop` or `stopAll`), in order. */
+  readonly removals: Array<QueueRemoval & { chatId: string }>
+}
+
+export interface FakeChatRunnerOptions {
+  /** Receives `queue.changed` on every queue change (default: no events). */
+  events?: Pick<EventBus, 'emit'>
+  /** Clock of `QueueItem.createdAt` (default `Date.now`). */
+  now?: () => number
+}
+
+/** `turnOnly` of the fake queue: the first text part starts with `/` (a server command; no registry lookup). */
+function fakeTurnOnly(item: Pick<QueueItem, 'message'>): boolean {
+  const first = item.message.parts.find(part => part.type === 'text')
+  return first?.type === 'text' && first.text.trimStart().startsWith('/')
+}
+
+function queueConflict(reason: 'run-idle' | 'queue-full' | 'exists', chatId: string, message: string): HarnessError {
+  return new HarnessError({ code: 'conflict', message, details: { reason, chatId } })
 }
 
 /**
  * A `ChatRunner` without a pipeline: `hasRun` = the chat has an entry in `phases` (any phase), `isActive` / `active` =
  * `streaming` entries, `stop` records the id, removes the entry and answers like the real runner (true unless the run
  * was missing or `finishing`). `start` answers `not_implemented`; `overrides` replace any member.
+ *
+ * Phase 9: the steer queue follows the `ChatRunner` contract where the routes can see it, without a database: `enqueue`
+ * refuses with `conflict` (`run-idle` without a run or an `awaitingApproval` entry, `queue-full` at
+ * `LIMITS.queueItemsMax`, `exists` for an id queued in any chat) but checks neither the chat nor the file parts (stored
+ * as sent); `turnOnly` = the first text starts with `/`. `stop` empties the chat's queue (`stopped`) before it stops
+ * the run, `stopAll` empties every queue first. Every change emits `queue.changed` on `options.events`.
  */
-export function createFakeChatRunner(overrides: Partial<ChatRunner> = {}): FakeChatRunner {
+export function createFakeChatRunner(overrides: Partial<ChatRunner> = {}, options: FakeChatRunnerOptions = {}): FakeChatRunner {
+  const now = options.now ?? Date.now
   const phases = new Map<string, FakeRunPhase>()
   const stopped: string[] = []
+  const queues = new Map<string, QueueItem[]>()
+  const awaitingApproval = new Set<string>()
+  const removals: Array<QueueRemoval & { chatId: string }> = []
+
+  const queueOf = (chatId: string): QueueItem[] => [...(queues.get(chatId) ?? [])]
+
+  function changed(chatId: string, removed: QueueRemoval[] = []): void {
+    for (const removal of removed)
+      removals.push({ ...removal, chatId })
+    options.events?.emit('queue.changed', { chatId, items: queueOf(chatId), ...(removed.length === 0 ? {} : { removed }) })
+  }
+
+  const clearQueue = (chatId: string, reason: QueueClearReason): QueueItem[] => {
+    const items = queueOf(chatId)
+    queues.delete(chatId)
+    if (items.length > 0)
+      changed(chatId, items.map(item => ({ id: item.id, reason })))
+    return items
+  }
+
   const stop = async (chatId: string): Promise<boolean> => {
+    clearQueue(chatId, 'stopped')
     stopped.push(chatId)
     const phase = phases.get(chatId)
     phases.delete(chatId)
     return phase !== undefined && phase !== 'finishing'
   }
+
   return {
     phases,
     stopped,
+    queues,
+    awaitingApproval,
+    removals,
     start: rejectsNotImplemented('fake runs.start'),
     resume: () => null,
     stop,
@@ -279,9 +343,48 @@ export function createFakeChatRunner(overrides: Partial<ChatRunner> = {}): FakeC
       ? [{ runId: `run_fake_${chatId}`, chatId, messageId: 'msg_fakerun000000000', modelRef: 'mock:echo', startedAt: 0 }]
       : []),
     stopAll: async () => {
+      for (const chatId of [...queues.keys()])
+        clearQueue(chatId, 'stopped')
       for (const chatId of [...phases.keys()])
         await stop(chatId)
     },
+    queueList: chatId => queueOf(chatId),
+    enqueue: async (chatId, body) => {
+      if (!phases.has(chatId) && !awaitingApproval.has(chatId))
+        throw queueConflict('run-idle', chatId, 'The chat has no active run: send the message instead.')
+      const queue = queues.get(chatId) ?? []
+      if (queue.length >= LIMITS.queueItemsMax)
+        throw queueConflict('queue-full', chatId, `At most ${LIMITS.queueItemsMax} messages can be queued.`)
+      if ([...queues.values()].some(items => items.some(item => item.id === body.message.id)))
+        throw queueConflict('exists', chatId, `Message ${body.message.id} is already queued.`)
+      const item: QueueItem = {
+        id: body.message.id,
+        message: { id: body.message.id, role: 'user', parts: body.message.parts.map(part => ({ ...part })) },
+        modelRef: body.modelRef,
+        reasoningEffort: body.reasoningEffort,
+        toolMode: body.toolMode,
+        createdAt: now(),
+        turnOnly: false,
+      }
+      item.turnOnly = fakeTurnOnly(item)
+      queues.set(chatId, [...queue, item])
+      changed(chatId)
+      return item
+    },
+    dequeue: (chatId, itemId) => {
+      const queue = queues.get(chatId) ?? []
+      const index = queue.findIndex(item => item.id === itemId)
+      if (index < 0)
+        return false
+      const rest = queue.filter((_, at) => at !== index)
+      if (rest.length === 0)
+        queues.delete(chatId)
+      else
+        queues.set(chatId, rest)
+      changed(chatId, [{ id: itemId, reason: 'cancelled' }])
+      return true
+    },
+    clearQueue,
     ...overrides,
   }
 }

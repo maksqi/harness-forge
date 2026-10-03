@@ -2,7 +2,8 @@ import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4Prompt
 import { APICallError } from '@ai-sdk/provider'
 import { GENERATE_IMAGE_TOOL_NAME, generateImageToolInputSchema } from '@harness-forge/shared'
 import { isStepCount, streamText, tool } from 'ai'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { z } from 'zod'
 import { firstPixel, readPng } from './media.test-util.ts'
 import { mockImageColor } from './media.ts'
 import {
@@ -307,13 +308,113 @@ describe('mock:image-tool (Phase 6)', () => {
 })
 
 describe('language model ids', () => {
-  it('covers the four v1 models, the two Phase 6 chat models, the Phase 7 workspace model and the Phase 8 checkpoint and shell models', () => {
-    expect(MOCK_MODEL_IDS).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace', 'checkpoint', 'shell'])
+  it('covers the four v1 models, the two Phase 6 chat models, the Phase 7 workspace model, the Phase 8 checkpoint and shell models and the five Phase 9 agent mocks', () => {
+    expect(MOCK_MODEL_IDS).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace', 'checkpoint', 'shell', 'compact', 'plan', 'todo', 'subagent', 'steer'])
     for (const modelId of ['image', 'transcribe', 'speech'])
       expect(MOCK_MODEL_IDS as readonly string[]).not.toContain(modelId)
   })
 
   it('a media model id used as a language model rejects with a 404', async () => {
     await expect(createMockLanguageModel('image').doStream({ prompt: [user('x')] })).rejects.toMatchObject({ statusCode: 404 })
+  })
+})
+
+describe('mockPlan additions of Phase 9: parallel calls and the step delay', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const TWO_CALLS = {
+    reasoning: null,
+    text: 'Two at once.',
+    toolCall: null,
+    toolCalls: [
+      { toolCallId: 'mock_call_1_1', toolName: 'alpha', input: '{"n":1}' },
+      { toolCallId: 'mock_call_1_2', toolName: 'beta', input: '{"n":2}' },
+    ],
+    finishReason: 'tool-calls',
+  } as const
+
+  it('streams every call of a step in order after the text', () => {
+    const types = streamSchedule({ ...TWO_CALLS, toolCalls: [...TWO_CALLS.toolCalls] }, [user('go')], 'subagent')
+      .map(entry => entry.part)
+      .flatMap(part => (part.type.startsWith('tool-') ? [`${part.type}:${'id' in part ? part.id : (part as { toolCallId: string }).toolCallId}`] : []))
+    expect(types).toEqual([
+      'tool-input-start:mock_call_1_1',
+      'tool-input-delta:mock_call_1_1',
+      'tool-input-end:mock_call_1_1',
+      'tool-call:mock_call_1_1',
+      'tool-input-start:mock_call_1_2',
+      'tool-input-delta:mock_call_1_2',
+      'tool-input-end:mock_call_1_2',
+      'tool-call:mock_call_1_2',
+    ])
+  })
+
+  it('the SDK runs both calls of one step (doStream and doGenerate)', async () => {
+    const executed: string[] = []
+    const model = createMockLanguageModel('subagent')
+    // A parent turn of mock:subagent: two parallel task calls in one step.
+    const task = tool({
+      description: 'Task.',
+      inputSchema: z.object({ description: z.string(), prompt: z.string(), type: z.string() }),
+      execute: async (input) => {
+        executed.push(input.prompt)
+        return input.prompt
+      },
+    })
+    const result = streamText({ model, prompt: 'Look around', tools: { task }, stopWhen: isStepCount(1) })
+    const steps = await result.steps
+    expect(steps[0]?.toolCalls.map(call => [call.toolCallId, call.toolName])).toEqual([['mock_call_1_1', 'task'], ['mock_call_1_2', 'task']])
+    expect(executed.sort()).toEqual(['Check the time.', 'List the project files.'])
+    const generated = await model.doGenerate({ prompt: [user('Look around')], tools: [{ type: 'function', name: 'task', inputSchema: { type: 'object' } }] })
+    expect(generated.content.map(part => (part.type === 'tool-call' ? part.toolCallId : part.type))).toEqual(['mock_call_1_1', 'mock_call_1_2'])
+    expect(generated.finishReason.unified).toBe('tool-calls')
+  })
+
+  it('stepDelayMs waits before the first chunk (fake timers)', async () => {
+    vi.useFakeTimers()
+    const schedule = streamSchedule({ reasoning: null, text: 'a', toolCall: null, stepDelayMs: 400, finishReason: 'stop' }, [user('a')], 'todo')
+    expect(schedule[0]).toMatchObject({ delayMs: 400, part: { type: 'stream-start' } })
+    const { stream } = await createMockLanguageModel('todo').doStream({ prompt: [user('go')], tools: [{ type: 'function', name: 'todo_write', inputSchema: { type: 'object' } }] })
+    const reader = stream.getReader()
+    let first: LanguageModelV4StreamPart | undefined
+    const reading = reader.read().then(({ value }) => {
+      first = value
+    })
+    await vi.advanceTimersByTimeAsync(399)
+    expect(first).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(1)
+    await reading
+    expect(first?.type).toBe('stream-start')
+    reader.releaseLock()
+  })
+
+  it('an abort during the step delay ends the stream at once', async () => {
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    const { stream } = await createMockLanguageModel('steer').doStream({
+      prompt: [user('steps 2')],
+      tools: [{ type: 'function', name: 'current_time', inputSchema: { type: 'object' } }],
+      abortSignal: controller.signal,
+    })
+    const reading = stream.getReader().read()
+    await vi.advanceTimersByTimeAsync(100)
+    controller.abort()
+    await expect(reading).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(createMockLanguageModel('steer').doGenerate({ prompt: [user('steps 2')], tools: [{ type: 'function', name: 'current_time', inputSchema: { type: 'object' } }], abortSignal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('doGenerate waits the step delay too', async () => {
+    vi.useFakeTimers()
+    let settled = false
+    const generating = createMockLanguageModel('todo').doGenerate({ prompt: [user('go')], tools: [{ type: 'function', name: 'todo_write', inputSchema: { type: 'object' } }] }).then((value) => {
+      settled = true
+      return value
+    })
+    await vi.advanceTimersByTimeAsync(399)
+    expect(settled).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect((await generating).content.map(part => part.type)).toEqual(['tool-call'])
   })
 })

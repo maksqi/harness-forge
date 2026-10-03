@@ -80,6 +80,10 @@ beforeEach(async () => {
     hasRun: id => activeRuns.has(id),
     active: () => [],
     stopAll: async () => {},
+    queueList: () => [],
+    enqueue: async () => Promise.reject(new Error('not used')),
+    dequeue: () => false,
+    clearQueue: () => [],
   }
   t = await createTestApp({ start: false, overrides: { events, runs } })
   service = t.deps.chats

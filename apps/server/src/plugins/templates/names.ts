@@ -1,11 +1,13 @@
 // Contribution names of a scaffolded plugin (W3.4-T1). Tool names, command names and MCP server ids are global, so the
 // scaffold picks names nobody registered yet: tools and providers are namespaced by the plugin id, commands keep short
 // names (`/tldr`) with a numeric suffix when taken, MCP servers use the plugin id (so its length is limited to 32).
+// Reserved command names count as taken: the client-only commands and the harness commands (`/compact`, Phase 9).
 import type { PluginTemplateId } from '@harness-forge/shared'
 import {
   COMMAND_NAME_PATTERN,
   HarnessError,
   isClientCommand,
+  isHarnessCommand,
   MCP_SERVER_ID_PATTERN,
   PROVIDER_ID_PATTERN,
   TOOL_NAME_PATTERN,
@@ -58,6 +60,11 @@ function unavailable(what: string): HarnessError {
   })
 }
 
+/** A command name no plugin may register: a client-only command (`/new`, ...) or a harness command (`/compact`). */
+export function isReservedCommandName(name: string): boolean {
+  return isClientCommand(name) || isHarnessCommand(name)
+}
+
 /** `^[a-z0-9-]` plugin id -> `snake_case` tool prefix. */
 export function toolPrefix(pluginId: string): string {
   return pluginId.replaceAll('-', '_')
@@ -105,7 +112,7 @@ export function pickTemplateNames(pluginId: string, template: PluginTemplateId, 
       break
     }
     case 'command-pack': {
-      const taken = (name: string): boolean => registry.command(name) || isClientCommand(name)
+      const taken = (name: string): boolean => isReservedCommandName(name) || registry.command(name)
       const summary = pickName('tldr', '-', COMMAND_NAME_PATTERN, taken, 32)
       const count = pickName('wordcount', '-', COMMAND_NAME_PATTERN, name => taken(name) || name === summary, 32)
       if (summary === null || count === null)

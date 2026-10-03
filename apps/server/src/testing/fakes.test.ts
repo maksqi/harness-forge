@@ -3,14 +3,14 @@
 // fake project service has its own file (./fake-projects.test.ts). Phase 8 (W8.7): `createFakeFilesService` is the real
 // files service (pins and the store gate).
 import type { PluginContext } from '@harness-forge/plugin-sdk'
-import type { ChatCreate, HarnessUIMessage } from '@harness-forge/shared'
+import type { ChatCreate, HarnessUIMessage, QueueAddBody } from '@harness-forge/shared'
 import type { ResolvedImageModel } from '../providers/types.ts'
 import type { ChatsService } from '../services/chats/types.ts'
 import type { TestApp } from './create-test-app.ts'
 import type { FakeChatRunner, RecordingEventBus } from './fakes.ts'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
-import { chatDetailSchema, chatExportSchema, dataCleanupPreviewSchema, dataCleanupResultSchema, dataImportResultSchema, HarnessError, LIMITS, SHARE_TOKEN_PATTERN, shareSummarySchema, shareViewSchema } from '@harness-forge/shared'
+import { chatDetailSchema, chatExportSchema, dataCleanupPreviewSchema, dataCleanupResultSchema, dataImportResultSchema, HarnessError, LIMITS, queueChangedDataSchema, queueItemSchema, SHARE_TOKEN_PATTERN, shareSummarySchema, shareViewSchema } from '@harness-forge/shared'
 import { generateImage, generateSpeech, transcribe } from 'ai'
 import { MockTranscriptionModelV4 } from 'ai/test'
 import { and, eq } from 'drizzle-orm'
@@ -20,6 +20,7 @@ import { firstPixel, readPng, readWav } from '../builtin-plugins/mock/media.test
 import { MOCK_TRANSCRIPT, mockImageColor } from '../builtin-plugins/mock/media.ts'
 import { encodeSolidPng } from '../builtin-plugins/mock/png.ts'
 import { chats, chatShares, files, messages, usage } from '../db/schema.ts'
+import { createMemoryLogger } from '../logger.ts'
 import { createProvidersTestApp, fakeMediaProviders } from '../providers/testing.ts'
 import { messageInsertValues } from '../services/chats/store.ts'
 import { createFilesService } from '../services/files/index.ts'
@@ -354,6 +355,104 @@ describe('createFakeChatRunner', () => {
     expect(runs.resume('b')).toBeNull()
     expect((await rejection(runs.start({} as never, {} as never))).code).toBe('not_implemented')
     expect(createFakeChatRunner({ hasRun: () => true }).hasRun('x')).toBe(true)
+  })
+
+  // Phase 9 (C24-T5): the steer queue members.
+  const queueBody = (id: string, text = 'also check the tests'): QueueAddBody => ({
+    message: { id, role: 'user', parts: [{ type: 'text', text }] },
+    modelRef: 'mock:steer',
+    reasoningEffort: 'off',
+    toolMode: 'ask',
+  })
+  const options = { logger: createMemoryLogger().logger, requestId: 'req_test' }
+  const [QA, QB, QC, QD, QX, QY] = [901, 902, 903, 904, 905, 906].map(chatId) as [string, string, string, string, string, string]
+
+  it('phase 9: enqueue needs a run or a pending approval, caps the queue, refuses a used id; items follow the schema', async () => {
+    const events = createRecordingEventBus()
+    const runs = createFakeChatRunner({}, { events, now: () => 42 })
+    expect((await rejection(runs.enqueue(QA, queueBody('msg_q000000000000001'), options))).details).toEqual({ reason: 'run-idle', chatId: QA })
+    runs.phases.set(QA, 'streaming')
+    runs.awaitingApproval.add(QB)
+    const item = await runs.enqueue(QA, queueBody('msg_q000000000000001'), options)
+    expect(queueItemSchema.parse(item)).toEqual({ ...queueBody('msg_q000000000000001'), id: 'msg_q000000000000001', createdAt: 42, turnOnly: false })
+    expect((await runs.enqueue(QB, queueBody('msg_q000000000000002', '/compact keep numbers'), options)).turnOnly).toBe(true)
+    // A used id is refused in any chat.
+    const exists = await rejection(runs.enqueue(QA, queueBody('msg_q000000000000002'), options))
+    expect([exists.code, exists.details]).toEqual(['conflict', { reason: 'exists', chatId: QA }])
+    for (let n = 3; n <= LIMITS.queueItemsMax + 1; n++)
+      await runs.enqueue(QA, queueBody(`msg_q0000000000000${String(n).padStart(2, '0')}`), options)
+    expect(runs.queueList(QA)).toHaveLength(LIMITS.queueItemsMax)
+    expect((await rejection(runs.enqueue(QA, queueBody('msg_q000000000000099'), options))).details).toEqual({ reason: 'queue-full', chatId: QA })
+    // Every accepted item emitted the whole queue, validated by the shared schema.
+    const changed = events.ofType('queue.changed')
+    expect(changed).toHaveLength(LIMITS.queueItemsMax + 1)
+    expect(changed.every(event => queueChangedDataSchema.safeParse(event.data).success)).toBe(true)
+    expect(changed.at(-1)?.data.items.map(entry => entry.id)).toEqual(runs.queueList(QA).map(entry => entry.id))
+    // queueList returns a copy, oldest first.
+    runs.queueList(QA).length = 0
+    expect(runs.queueList(QA)[0]?.id).toBe('msg_q000000000000001')
+    expect(runs.queueList(chatId(999))).toEqual([])
+  })
+
+  it('phase 9: dequeue cancels a queued item once; clearQueue returns the removed items; stop and stopAll empty the queues first', async () => {
+    const events = createRecordingEventBus()
+    const runs = createFakeChatRunner({}, { events })
+    runs.phases.set(QA, 'streaming')
+    runs.phases.set(QB, 'streaming')
+    runs.awaitingApproval.add(QC)
+    for (const [chat, id] of [[QA, 'msg_q100000000000001'], [QA, 'msg_q100000000000002'], [QA, 'msg_q100000000000003'], [QB, 'msg_q200000000000001'], [QC, 'msg_q300000000000001']] as const)
+      await runs.enqueue(chat, queueBody(id), options)
+    events.clear()
+
+    expect(runs.dequeue(QA, 'msg_q100000000000002')).toBe(true)
+    expect(runs.dequeue(QA, 'msg_q100000000000002')).toBe(false)
+    expect(runs.dequeue(QB, 'msg_q100000000000001')).toBe(false)
+    expect(events.ofType('queue.changed').map(event => event.data)).toEqual([{
+      chatId: QA,
+      items: runs.queueList(QA),
+      removed: [{ id: 'msg_q100000000000002', reason: 'cancelled' }],
+    }])
+
+    expect(runs.clearQueue(QB, 'failed').map(item => item.id)).toEqual(['msg_q200000000000001'])
+    expect(runs.clearQueue(QB, 'failed')).toEqual([])
+    expect(events.ofType('queue.changed')).toHaveLength(2)
+
+    // The stop route: clearQueue first (the dropped items), then stop (its own clearing finds nothing).
+    const dropped = runs.clearQueue(QA, 'stopped')
+    expect(dropped.map(item => item.id)).toEqual(['msg_q100000000000001', 'msg_q100000000000003'])
+    expect(await runs.stop(QA)).toBe(true)
+    // stop alone empties the queue of a chat waiting for an approval (no run: false).
+    expect(await runs.stop(QC)).toBe(false)
+    expect(runs.queueList(QC)).toEqual([])
+    expect(runs.removals.map(removal => [removal.chatId, removal.id, removal.reason])).toEqual([
+      [QA, 'msg_q100000000000002', 'cancelled'],
+      [QB, 'msg_q200000000000001', 'failed'],
+      [QA, 'msg_q100000000000001', 'stopped'],
+      [QA, 'msg_q100000000000003', 'stopped'],
+      [QC, 'msg_q300000000000001', 'stopped'],
+    ])
+
+    // stopAll: every queue is emptied before the first run stops.
+    const bus = createRecordingEventBus()
+    const all = createFakeChatRunner({}, { events: bus })
+    all.phases.set(QX, 'streaming')
+    all.phases.set(QY, 'streaming')
+    await all.enqueue(QX, queueBody('msg_q500000000000001'), options)
+    await all.enqueue(QY, queueBody('msg_q500000000000002'), options)
+    const stoppedWhenCleared: number[] = []
+    bus.subscribe((event) => {
+      if (event.type === 'queue.changed')
+        stoppedWhenCleared.push(all.stopped.length)
+    })
+    await all.stopAll()
+    expect(stoppedWhenCleared).toEqual([0, 0])
+    expect(all.stopped).toEqual([QX, QY])
+    expect(all.removals.map(removal => [removal.chatId, removal.reason])).toEqual([[QX, 'stopped'], [QY, 'stopped']])
+    runs.phases.set(QD, 'streaming')
+    await runs.enqueue(QD, queueBody('msg_q400000000000001'), options)
+    await runs.stopAll()
+    expect(runs.queueList(QD)).toEqual([])
+    expect(runs.phases.size).toBe(0)
   })
 })
 

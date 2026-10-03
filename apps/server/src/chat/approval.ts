@@ -8,6 +8,7 @@
 //   5. mode `edits` (Accept edits, Phase 7, ADR-032): policy `safe`, or policy `ask` of a tool with workspace access
 //      `write` -> not-applicable; everything else (`ask` without workspace `write`, `always`) -> user-approval
 //   6. mode `auto`:  policy `always` -> user-approval; `safe` / `ask` -> not-applicable
+//   (Phase 9, ADR-041: mode `plan` resolves like `ask`; its tool set is narrowed by `modes.ts`.)
 // Mode `off` sends no tools; a call that still arrives is denied. A policy function is guarded (3 s) and receives the
 // call context with `workspace` (the run's project folder) and, in a run with a workspace (Phase 8), the run scope bound
 // to that context object (`runScopeOf(c)`: the shell rules and the working folder of `shellPolicy`); a throw or timeout
@@ -69,6 +70,7 @@ export function resolveApproval(input: ApprovalInput): ApprovalResult {
     return { outcome: 'denied', reason: DENIED_BY_POLICY }
   switch (input.toolMode) {
     case 'ask':
+    case 'plan':
       return { outcome: input.policy === 'safe' ? 'not-applicable' : 'user-approval' }
     case 'edits':
       return { outcome: input.policy === 'safe' || (input.policy === 'ask' && input.workspace === 'write') ? 'not-applicable' : 'user-approval' }

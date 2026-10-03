@@ -46,7 +46,7 @@ export type MessageRole = HarnessUIMessage['role']
  * Purpose of a usage row: a chat run, a title generation, an image generation (image turn or the `generate_image`
  * tool, ADR-028) or a voice request (ADR-029: dictation = `transcription`, read-aloud = `speech`).
  */
-export type UsagePurpose = 'chat' | 'title' | 'image' | 'transcription' | 'speech'
+export type UsagePurpose = 'chat' | 'title' | 'image' | 'transcription' | 'speech' | 'compact' | 'subagent'
 
 /**
  * `mcp_servers.transport`: only header / env NAMES are stored; their values are secrets (scope `mcp:<id>`, names
@@ -376,6 +376,9 @@ export const shellRules = sqliteTable('shell_rules', {
   createdAt: createdAt(),
 }, table => [
   index('shell_rules_project_idx').on(table.projectId),
+  // Phase 9 (migration 0006): one rule per scope and prefix (SQLite treats NULLs as distinct, hence two partial indexes).
+  uniqueIndex('shell_rules_global_prefix_uq').on(table.prefix).where(sql`project_id is null`),
+  uniqueIndex('shell_rules_project_prefix_uq').on(table.projectId, table.prefix).where(sql`project_id is not null`),
 ])
 
 // ---------- relations (relational query API: `db.query.chats.findFirst({ with: { messages: true } })`) ----------

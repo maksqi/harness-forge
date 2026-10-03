@@ -10,6 +10,10 @@
 // hover fade; "Delete this version" asks ChatView for confirmation (ADR-030).
 // Phase 8 (C20 declares, W8.9 / W8.10 use; frozen from Gate P8-0b): `canRewind` shows "Rewind files to here" on a user
 // message (re-emitted as `rewind`), and the approval payload passes the card's `allowRules` on.
+// Phase 9 (C25 declares, W9.11 uses; frozen from Gate P9-0b): block kinds `compaction` (CompactionDivider), `steer`
+// (SteerNote) and `task` (TaskBlock); `compacted` marks a row the latest compaction replaced for the model
+// (`data-compacted`, dimmed); `activity` = 'compacting' makes the streaming reply show "Compacting conversation…"
+// instead of "Thinking…" (W9.11); the approval payload passes the plan card's `planMode` / `reason` on.
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { FileUIPart, TextUIPart } from 'ai'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
@@ -18,8 +22,11 @@ import { computed, ref } from 'vue'
 import { cn } from '@/lib/utils'
 import { useSpeechPlayer } from '~/composables/useSpeechPlayer'
 import { testIds } from '~/utils/testids'
+import TaskBlock from './agent/TaskBlock.vue'
 import BranchSwitcher from './BranchSwitcher.vue'
 import { messageBlocks, messageText } from './chat-format'
+import { compactionVariant } from './compaction/compaction'
+import CompactionDivider from './compaction/CompactionDivider.vue'
 import MessageActions from './MessageActions.vue'
 import MessageEditor from './MessageEditor.vue'
 import MessageMeta from './MessageMeta.vue'
@@ -33,6 +40,7 @@ import SourcesPart from './parts/SourcesPart.vue'
 import TextPart from './parts/TextPart.vue'
 import ToolPart from './parts/ToolPart.vue'
 import ReadAloudButton from './ReadAloudButton.vue'
+import SteerNote from './steer/SteerNote.vue'
 import SubmittedPlaceholder from './SubmittedPlaceholder.vue'
 import UserMessageBubble from './UserMessageBubble.vue'
 
@@ -57,12 +65,24 @@ const props = withDefaults(defineProps<{
    * transcript decides, docs/UI.md 7.22); default false.
    */
   canRewind?: boolean
+  /**
+   * + Phase 9 (ADR-040): the latest compaction on the path replaced this message for the model: `data-compacted`, shown
+   * dimmed (full opacity on hover and focus-within); default false.
+   */
+  compacted?: boolean
+  /**
+   * + Phase 9: the session's transient activity while this reply streams ('compacting': "Compacting conversation…"
+   * instead of "Thinking…"); default null.
+   */
+  activity?: 'compacting' | null
 }>(), {
   busy: false,
   commandReply: false,
   branch: null,
   switching: false,
   canRewind: false,
+  compacted: false,
+  activity: null,
 })
 
 const emit = defineEmits<{
@@ -71,9 +91,10 @@ const emit = defineEmits<{
   'edit': [text: string, files: FileUIPart[]]
   /**
    * + Phase 7: `acceptEdits` = "Accept all edits in this chat" (the session switches the mode to `edits`). + Phase 8:
-   * `allowRules` = the shell rules to create before the approval is sent.
+   * `allowRules` = the shell rules to create before the approval is sent. + Phase 9: `planMode` / `reason` = the plan
+   * card's mode and feedback.
    */
-  'approval': [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean, acceptEdits?: boolean, allowRules?: AllowRules }]
+  'approval': [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean, acceptEdits?: boolean, allowRules?: AllowRules, planMode?: 'edits' | 'ask', reason?: string }]
   'retry': []
   /** The version chosen in the BranchSwitcher (a sibling of this message). */
   'select-version': [messageId: string]
@@ -155,6 +176,11 @@ const player = useSpeechPlayer()
 /** This reply is being read aloud: its action row stays visible (docs/UI.md 7.18). */
 const reading = computed(() => player.activeId.value === props.message.id && player.state.value !== 'idle')
 
+/** + Phase 9: a row the latest compaction replaced is dimmed until it is hovered or holds the focus. */
+const compactedClass = computed(() => (props.compacted
+  ? 'opacity-70 transition-opacity duration-(--duration-fast) hover:opacity-100 focus-within:opacity-100'
+  : ''))
+
 const actionsClass = computed(() => {
   if (props.streaming)
     return 'invisible'
@@ -175,7 +201,8 @@ const actionsClass = computed(() => {
     :data-testid="testIds.messageUser"
     :data-message-id="message.id"
     data-status="done"
-    class="group/message flex min-w-0 flex-col items-end gap-1"
+    :data-compacted="compacted || undefined"
+    :class="cn('group/message flex min-w-0 flex-col items-end gap-1', compactedClass)"
   >
     <MessageEditor v-if="editing" :text="copyText()" :files="fileParts" @save="onSave" @cancel="editing = false" />
     <template v-else>
@@ -208,7 +235,8 @@ const actionsClass = computed(() => {
     :data-testid="testIds.messageAssistant"
     :data-message-id="message.id"
     :data-status="status"
-    class="group/message flex min-w-0 flex-col gap-2"
+    :data-compacted="compacted || undefined"
+    :class="cn('group/message flex min-w-0 flex-col gap-2', compactedClass)"
   >
     <template v-for="(block, blockIndex) in blocks" :key="block.key">
       <TextPart
@@ -237,6 +265,19 @@ const actionsClass = computed(() => {
       </div>
       <SourcesPart v-else-if="block.kind === 'sources'" :parts="block.parts" />
       <NoticePart v-else-if="block.kind === 'notice'" :notice="block.notice" />
+      <CompactionDivider
+        v-else-if="block.kind === 'compaction'"
+        :data="block.data"
+        :variant="compactionVariant(message, block.index)"
+      />
+      <SteerNote v-else-if="block.kind === 'steer'" :steer="block.steer" />
+      <TaskBlock
+        v-else-if="block.kind === 'task'"
+        :part="block.part"
+        :streaming="streaming"
+        :superseded="!isLast"
+        @approval="emit('approval', $event)"
+      />
     </template>
     <GeneratingImages
       v-if="generatingImages"

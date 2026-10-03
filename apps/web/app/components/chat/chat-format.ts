@@ -1,7 +1,10 @@
 // Pure helpers of the chat transcript (docs/UI.md 7): part grouping (galleries of generated images, merged sources),
 // tool names and arguments, size caps, durations, costs and the image-turn meta line. No Vue, no stores: unit tested
 // on their own.
-import type { HarnessUIMessage, HarnessUIMessagePart, ImageTurnMetadata, NoticeData } from '@harness-forge/shared'
+// Phase 9 (C25 adds the kinds, W9.11 owns them in P9-A): `data-compaction` -> `compaction` (CompactionDivider),
+// `data-steer` -> `steer` (SteerNote), a tool part named `task` -> `task` (TaskBlock, which falls back to ToolPart when
+// its input or output does not parse); the transient `data-activity` never becomes a block.
+import type { CompactionData, HarnessUIMessage, HarnessUIMessagePart, ImageTurnMetadata, NoticeData, SteerData } from '@harness-forge/shared'
 import type {
   DynamicToolUIPart,
   FileUIPart,
@@ -12,6 +15,7 @@ import type {
   TextUIPart,
   ToolUIPart,
 } from 'ai'
+import { compactionDataSchema, steerDataSchema } from '@harness-forge/shared'
 import { getToolName, isToolUIPart } from 'ai'
 
 export type ToolPartLike = ToolUIPart | DynamicToolUIPart
@@ -28,6 +32,12 @@ export type MessageBlock
     | { kind: 'gallery', key: string, index: number, parts: FileUIPart[] }
     | { kind: 'sources', key: string, index: number, parts: SourcePart[] }
     | { kind: 'notice', key: string, index: number, notice: NoticeData }
+    /** + Phase 9: a compaction marker (`data-compaction`, ADR-040): CompactionDivider at the part's position. */
+    | { kind: 'compaction', key: string, index: number, data: CompactionData }
+    /** + Phase 9: a message the user queued while the agent worked (`data-steer`, ADR-042): SteerNote. */
+    | { kind: 'steer', key: string, index: number, steer: SteerData }
+    /** + Phase 9: a sub-agent call (a tool part named `task`, ADR-043): TaskBlock. */
+    | { kind: 'task', key: string, index: number, part: ToolPartLike }
 
 /** Characters of a tool input / output shown before "Show all" (docs/UI.md 7.2). */
 export const TOOL_BODY_PREVIEW_CHARS = 4096
@@ -44,6 +54,13 @@ function isSourcePart(part: HarnessUIMessagePart): part is SourcePart {
 export function isImageMediaType(mediaType: string): boolean {
   return mediaType.trim().toLowerCase().startsWith('image/')
 }
+
+/** The builtin plugin of the agent tools (Phase 9): `todo_write`, `exit_plan_mode` and `task`. */
+export const CORE_AGENT_PLUGIN_ID = 'core-agent'
+/** The sub-agent tool of `core-agent` (ADR-043): its calls render as task blocks. */
+export const TASK_TOOL_NAME = 'task'
+/** The plan tool of `core-agent` (ADR-041): its approval renders as the plan card. */
+export const PLAN_TOOL_NAME = 'exit_plan_mode'
 
 /** A `file` part holding an image: generated images in assistant messages, attachments in user ones. */
 export function isImageFilePart(part: HarnessUIMessagePart): part is FileUIPart {
@@ -65,7 +82,9 @@ function isNoticeData(value: unknown): value is NoticeData {
 /**
  * Renderable blocks of an assistant message: consecutive sources merge into one row, image file parts with no other
  * rendered block between them form one gallery (a `reasoning-file` draft image stays a thumbnail), `step-start`,
- * unknown `data-*` and custom parts render nothing, `data-notice` becomes a notice row.
+ * unknown `data-*` and custom parts render nothing, `data-notice` becomes a notice row. Phase 9: a valid
+ * `data-compaction` becomes a `compaction` block, a valid `data-steer` a `steer` block (invalid data renders nothing),
+ * a tool part named `task` a `task` block; `data-activity` is transient and never a block.
  */
 export function messageBlocks(parts: readonly HarnessUIMessagePart[]): MessageBlock[] {
   const blocks: MessageBlock[] = []
@@ -77,7 +96,10 @@ export function messageBlocks(parts: readonly HarnessUIMessagePart[]): MessageBl
       blocks.push({ kind: 'reasoning', key: `reasoning-${index}`, index, part })
     }
     else if (isToolUIPart(part)) {
-      blocks.push({ kind: 'tool', key: `tool-${part.toolCallId || index}`, index, part })
+      if (getToolName(part) === TASK_TOOL_NAME)
+        blocks.push({ kind: 'task', key: `task-${part.toolCallId || index}`, index, part })
+      else
+        blocks.push({ kind: 'tool', key: `tool-${part.toolCallId || index}`, index, part })
     }
     else if (part.type === 'file' && isImageMediaType(part.mediaType)) {
       // Invisible parts (e.g. `step-start`) render nothing, so they never split a gallery.
@@ -99,6 +121,16 @@ export function messageBlocks(parts: readonly HarnessUIMessagePart[]): MessageBl
     }
     else if (part.type === 'data-notice' && isNoticeData(part.data)) {
       blocks.push({ kind: 'notice', key: `notice-${index}`, index, notice: part.data })
+    }
+    else if (part.type === 'data-compaction') {
+      const parsed = compactionDataSchema.safeParse(part.data)
+      if (parsed.success)
+        blocks.push({ kind: 'compaction', key: `compaction-${index}`, index, data: parsed.data })
+    }
+    else if (part.type === 'data-steer') {
+      const parsed = steerDataSchema.safeParse(part.data)
+      if (parsed.success)
+        blocks.push({ kind: 'steer', key: `steer-${index}`, index, steer: parsed.data })
     }
   })
   return blocks

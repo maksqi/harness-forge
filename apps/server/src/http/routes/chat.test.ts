@@ -712,8 +712,9 @@ describe('pOST /api/chat: slash commands', () => {
     const response = await t.request('/api/commands')
     expect(response.status).toBe(200)
     const { items } = await response.json() as { items: { name: string, pluginId: string }[] }
-    expect(items.map(item => item.name)).toEqual(BUILTIN_COMMANDS.map(command => command.name).sort())
-    expect(items.every(item => item.pluginId === 'core-commands')).toBe(true)
+    // Phase 9: the harness command `compact` (plugin `core-agent`) is listed with the builtin commands.
+    expect(items.map(item => item.name)).toEqual([...BUILTIN_COMMANDS.map(command => command.name), 'compact'].sort())
+    expect(items.every(item => item.pluginId === (item.name === 'compact' ? 'core-agent' : 'core-commands'))).toBe(true)
   })
 })
 

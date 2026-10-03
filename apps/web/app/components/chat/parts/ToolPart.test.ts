@@ -6,8 +6,9 @@ import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { shellOutput, toolSummary } from '~/utils/testing/fixtures'
+import { planApprovalPart, shellOutput, taskPart, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
+import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
 import { TOOL_BODY_PREVIEW_CHARS } from '../chat-format'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
 import ToolApprovalCard from './ToolApprovalCard.vue'
@@ -584,5 +585,46 @@ describe('toolPart: shell rules (Phase 8)', () => {
     const allowRules = { prefixes: ['pnpm test'], scope: 'project' as const }
     wrapper.getComponent(ToolApprovalCard).vm.$emit('decide', { approved: true, alwaysAllow: false, allowRules })
     expect(wrapper.emitted('approval')).toEqual([[{ id: 'appr_shell', approved: true, toolName: 'shell', alwaysAllow: false, allowRules }]])
+  })
+})
+
+describe('toolPart: agent tools (Phase 9 seams)', () => {
+  it('shows a preliminary output as running while the message streams, else as stopped', () => {
+    const running = taskPart({ preliminary: true }) as ToolPartLike
+    expect(row(mountPart(running, true)).attributes('data-status')).toBe('running')
+    const stopped = row(mountPart(running, false))
+    expect(stopped.attributes('data-status')).toBe('stopped')
+    expect(stopped.text()).toContain('Stopped')
+    expect(row(mountPart(taskPart() as ToolPartLike, false)).attributes('data-status')).toBe('done')
+  })
+
+  it('renders the plan card for an exit_plan_mode call of core-agent awaiting its decision', async () => {
+    usePluginsStore().tools = [toolSummary({ name: 'exit_plan_mode', pluginId: 'core-agent' })]
+    const wrapper = mount(ToolPart, { props: { part: planApprovalPart() as ToolPartLike, streaming: false }, attachTo: document.body })
+    const card = wrapper.get(`[data-testid="${testIds.planApproval}"]`)
+    expect(card.attributes('data-state')).toBe('pending')
+    // P9-0b: the plain approval card stands in until W9.10 builds the plan card.
+    await card.get(`[data-testid="${testIds.toolApprovalAllow}"]`).trigger('click')
+    expect(wrapper.emitted('approval')).toEqual([[{ id: 'approval_call_plan_1', approved: true, toolName: 'exit_plan_mode', alwaysAllow: false }]])
+  })
+
+  it('passes the plan decision on as planMode and reason', () => {
+    const wrapper = mount(ToolPart, { props: { part: planApprovalPart() as ToolPartLike, streaming: false }, attachTo: document.body })
+    const card = wrapper.getComponent(PlanApprovalCard)
+    card.vm.$emit('decide', { approved: true, mode: 'edits', feedback: 'Keep the tests' })
+    card.vm.$emit('decide', { approved: false, mode: 'ask', feedback: 'Split step 2' })
+    card.vm.$emit('decide', { approved: true, mode: 'ask' })
+    expect(wrapper.emitted('approval')).toEqual([
+      [{ id: 'approval_call_plan_1', approved: true, toolName: 'exit_plan_mode', alwaysAllow: false, planMode: 'edits', reason: 'Keep the tests' }],
+      [{ id: 'approval_call_plan_1', approved: false, toolName: 'exit_plan_mode', alwaysAllow: false, reason: 'Split step 2' }],
+      [{ id: 'approval_call_plan_1', approved: true, toolName: 'exit_plan_mode', alwaysAllow: false, planMode: 'ask' }],
+    ])
+  })
+
+  it('keeps the plain card for an exit_plan_mode tool of another plugin', () => {
+    usePluginsStore().tools = [toolSummary({ name: 'exit_plan_mode', pluginId: 'my-plugin' })]
+    const wrapper = mount(ToolPart, { props: { part: planApprovalPart() as ToolPartLike, streaming: false }, attachTo: document.body })
+    expect(wrapper.find(`[data-testid="${testIds.planApproval}"]`).exists()).toBe(false)
+    expect(wrapper.find(`[data-testid="${testIds.toolApproval}"]`).exists()).toBe(true)
   })
 })

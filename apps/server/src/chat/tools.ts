@@ -16,22 +16,28 @@
 //   5. `tool.after` hooks;
 //   6. JSON-serializable output, capped at 64 KB of serialized JSON (`{ truncated, originalBytes, preview }`).
 // `toModelOutput` is guarded (3 s); on failure, or for a truncated output, the output is sent as JSON.
+// Phase 9 (C26 seams): the candidate tools pass `applyToolMode` (`modes.ts`: the tool set of a permission mode, and the
+// `activeTools` the model may call, `AssembledTools.activeTools`); the agent scope of the run (`agent-scope.ts`: the
+// mode, the sub-agent runner, the todos) is bound to every call context next to the run scope (never in sub-agents).
 import type { ToolCallContext, ToolDefinition, ToolResultOutput, ToolWorkspace } from '@harness-forge/plugin-sdk'
-import type { McpServer, ToolMode } from '@harness-forge/shared'
+import type { HarnessUIMessage, McpServer, ToolMode } from '@harness-forge/shared'
 import type { JSONValue, Tool, ToolExecutionOptions, ToolSet } from 'ai'
 import type { Logger } from '../logger.ts'
 import type { McpManager, ToolPref, ToolService } from '../mcp/types.ts'
 import type { PluginHost } from '../plugins/types.ts'
 import type { RegisteredTool, Registry } from '../registry/types.ts'
 import type { WorkspaceRunScopeInit } from '../workspace/run-scope.ts'
+import type { AgentRunScope } from './agent-scope.ts'
 import type { ApprovalTool } from './approval.ts'
 import { Buffer } from 'node:buffer'
 import { LIMITS } from '@harness-forge/shared'
 import { asSchema, dynamicTool, tool } from 'ai'
 import { GUARD_TIMEOUT_MAX_MS, GUARD_TIMEOUTS } from '../plugins/guard.ts'
 import { bindRunScope } from '../workspace/run-scope.ts'
+import { bindAgentScope } from './agent-scope.ts'
 import { toolWorkspaceAccess } from './approval.ts'
 import { isAbortError, ToolFailure } from './errors.ts'
+import { applyToolMode } from './modes.ts'
 
 /** The marker that replaces a tool output larger than `LIMITS.toolOutputBytes` (DECISIONS.md "Tool output cap"). */
 export interface TruncatedToolOutput {
@@ -114,6 +120,11 @@ export interface ToolWrapContext {
    * nothing is bound or recorded.
    */
   scope?: WorkspaceRunScopeInit | null
+  /**
+   * The agent scope of the run (Phase 9, `agent-scope.ts`): bound to the call context of every tool (`agentScopeOf(c)`
+   * of the `core-agent` tools). Null or absent (sub-agents) = nothing is bound.
+   */
+  agent?: AgentRunScope | null
   /** Warnings of the journal step (default: none). */
   logger?: Logger
 }
@@ -214,6 +225,8 @@ export function wrapToolExecute(registered: Pick<RegisteredTool, 'pluginId' | 'd
           }
           if (context.scope != null)
             bindRunScope(callContext, { ...context.scope, toolCallId: options.toolCallId })
+          if (context.agent != null)
+            bindAgentScope(callContext, context.agent)
           started = true
           return definition.execute(finalInput, callContext)
         },
@@ -285,6 +298,13 @@ export interface ToolAssemblyInput {
   scope?: WorkspaceRunScopeInit | null
   /** `env.workspaceShell` (`HF_WORKSPACE_SHELL`): tools with workspace access `execute` are sent only when true. */
   allowExecute: boolean
+  /**
+   * The continued assistant message of an approval continuation (`prepared.continued`), for `applyToolMode` (Phase 9:
+   * an approved `exit_plan_mode` call stays executable); null or absent otherwise.
+   */
+  continuation?: HarnessUIMessage | null
+  /** The agent scope of the run (Phase 9), bound to every call context; null or absent (sub-agents) = none. */
+  agent?: AgentRunScope | null
 }
 
 export interface AssembledTools {
@@ -299,6 +319,11 @@ export interface AssembledTools {
   workspace: ToolWorkspace | null
   /** The run scope bound to the tools' call contexts (and to the policy functions' contexts), or null (Phase 8). */
   scope: WorkspaceRunScopeInit | null
+  /**
+   * The tools the model may call (`streamText({ activeTools })`, Phase 9 `applyToolMode`); absent = every tool of
+   * `tools`.
+   */
+  activeTools?: string[]
 }
 
 /** The workspace filter of a tool (see `ToolAssemblyInput.workspace` / `allowExecute`). */
@@ -374,7 +399,8 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
     if (connected !== null)
       usable = candidates.filter(entry => entry.mcpServerId === null || connected.has(entry.mcpServerId))
   }
-  if (usable.length === 0)
+  const moded = applyToolMode(usable, { toolMode: input.toolMode, continuation: input.continuation ?? null })
+  if (moded.tools.length === 0)
     return empty
   if (!input.modelSupportsTools)
     return { ...empty, unsupported: true }
@@ -388,13 +414,14 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
     signal: input.signal,
     workspace,
     scope,
+    agent: input.agent ?? null,
     logger: input.logger,
   }
   const tools: ToolSet = {}
   const byName = new Map<string, ApprovalTool>()
-  for (const entry of usable) {
+  for (const entry of moded.tools) {
     tools[entry.definition.name] = toAiTool(entry, context)
     byName.set(entry.definition.name, { pluginId: entry.pluginId, definition: entry.definition as ToolDefinition })
   }
-  return { tools, byName, prefs, unsupported: false, workspace, scope }
+  return { tools, byName, prefs, unsupported: false, workspace, scope, ...(moded.activeTools === undefined ? {} : { activeTools: moded.activeTools }) }
 }

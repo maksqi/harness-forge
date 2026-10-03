@@ -24,6 +24,13 @@
 // approval may carry `allowRules`: `approve()` saves those shell rules first (`POST /shell-rules`, one per prefix), so
 // the continuation already runs with them; a rule that could not be saved never holds the approval back, its failure
 // is rethrown after the approval went out. "Always allow" never writes an `allow` override for an `execute` tool.
+//
+// Agent 2.0 (Phase 9, ADR-040 - ADR-042; C25 declares, W9.9 implements; frozen from Gate P9-0b): `submit()` sends, or
+// queues the message while a run is active (`'queued'`); `queue` and `cancelQueued()` are the chat's steer queue (the
+// `chat-queue` store); `stop()` resolves with the queued messages the stop dropped; `todos` is the todo state of the
+// shown path; `activity` follows the transient `data-activity` of the current stream ("Compacting conversation…"); a
+// plan approval carries `planMode` (set before the response goes out) and `reason` (the plan feedback). P9-0b: `submit`
+// always sends, `stop` resolves with [], `todos` and `activity` stay null, and `approve` ignores `planMode` / `reason`.
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   ChatDetail,
@@ -35,12 +42,14 @@ import type {
   HarnessUIMessage,
   ImageOptions,
   MessageBranch,
+  QueueItem,
   ReasoningEffort,
   ToolMode,
   WorkspaceAccess,
 } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ComputedRef, EffectScope, Ref, WritableComputedRef } from 'vue'
+import type { TodoState } from '~/components/chat/agent/todos'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
 import type { ChatRunState as ChatListRunState } from '~/stores/chats'
 import { useChat } from '@ai-sdk/vue'
@@ -60,12 +69,14 @@ import {
   isToolUIPart,
   lastAssistantMessageIsCompleteWithApprovalResponses,
 } from 'ai'
-import { computed, effectScope, getCurrentScope, nextTick, onScopeDispose, ref, shallowRef, watch } from 'vue'
+import { computed, effectScope, getCurrentScope, nextTick, onScopeDispose, readonly, ref, shallowRef, watch } from 'vue'
+import { todoState } from '~/components/chat/agent/todos'
 import { currentShellCwd, isWorkspaceToolName } from '~/components/chat/parts/tools/workspace-tools'
 import { ruleProjectId } from '~/components/workspace/allowlist/allow-rule'
 import { useApi, useApiFetch } from '~/composables/useApi'
 import { useImageOptions } from '~/composables/useImageOptions'
 import { useServerEvents } from '~/composables/useServerEvents'
+import { useChatQueueStore } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
@@ -124,6 +135,16 @@ export interface ToolApprovalDecision {
    * counts as saved), then sends the approval; a failed save still sends it, then rethrows. Ignored on a denial.
    */
   allowRules?: AllowRules
+  /**
+   * + Phase 9 (ADR-041; W9.9): the plan approval's mode ("Approve, accept edits" / "Approve, ask before edits"):
+   * `approve()` sets `toolMode` (saved on the chat) before the response goes out. Only with `approved: true`.
+   */
+  planMode?: 'edits' | 'ask'
+  /**
+   * + Phase 9 (W9.9): sent as `addToolApprovalResponse({ id, approved, reason })`; the plan feedback (at most
+   * `LIMITS.approvalReasonMaxChars`).
+   */
+  reason?: string
 }
 
 export interface ChatSession {
@@ -175,8 +196,12 @@ export interface ChatSession {
    */
   regenerate: (messageId?: string) => Promise<void>
   approve: (decision: ToolApprovalDecision) => Promise<void>
-  /** `POST /api/chat/:id/stop`, then the client abort (a client abort alone only disconnects). */
-  stop: () => Promise<void>
+  /**
+   * `POST /api/chat/:id/stop`, then the client abort (a client abort alone only disconnects). + Phase 9: resolves with
+   * the queued messages the stop dropped (`ChatStopResult.dropped`; only this tab restores them into its composer).
+   * P9-0b: resolves with [].
+   */
+  stop: () => Promise<QueueItem[]>
   /** Loads the history (`GET /api/chats/:id`). */
   load: () => Promise<void>
   /** Reloads the history unless a request is in flight. */
@@ -212,6 +237,26 @@ export interface ChatSession {
    * shown path, so it follows versions); null = the project folder.
    */
   cwd: ComputedRef<string | null>
+  /**
+   * + Phase 9 (ADR-042; W9.9): a new message from the composer. Sends it (`'sent'`), or queues it while a request is in
+   * flight, the session is resuming or the chats store reports a run (`POST /api/chat/:id/queue` with a new client
+   * message id; `'queued'`); a `409 run-idle` answer waits until the session is idle, then sends. P9-0b: always sends.
+   */
+  submit: (input: ChatSendInput) => Promise<'sent' | 'queued'>
+  /** + Phase 9: the chat's queued messages, oldest first (`chatQueue.items(id)`). */
+  queue: ComputedRef<readonly QueueItem[]>
+  /**
+   * + Phase 9: cancels a queued message (`chatQueue.cancel`): 'cancelled', or 'gone' when it was delivered or started
+   * meanwhile (the host shows "Already sent to the agent.").
+   */
+  cancelQueued: (itemId: string) => Promise<'cancelled' | 'gone'>
+  /** + Phase 9 (ADR-041): the todo state of the shown path (`todoState(chat.messages)`); null without a list. */
+  todos: ComputedRef<TodoState | null>
+  /**
+   * + Phase 9 (ADR-040): the transient `data-activity` of the current stream: 'compacting' while a summary is written,
+   * null when idle or after the stream ended.
+   */
+  activity: Readonly<Ref<'compacting' | null>>
 }
 
 export interface ChatSessionRegistry {
@@ -395,6 +440,7 @@ interface SessionDeps {
   settings: ReturnType<typeof useSettingsStore>
   imageOptions: ReturnType<typeof useImageOptions>
   shellRules: ReturnType<typeof useShellRulesStore>
+  chatQueue: ReturnType<typeof useChatQueueStore>
 }
 
 interface ChatChoices {
@@ -404,7 +450,7 @@ interface ChatChoices {
 }
 
 function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSession {
-  const { api, apiFetch, chats, models, plugins, projects, settings, imageOptions, shellRules } = deps
+  const { api, apiFetch, chats, models, plugins, projects, settings, imageOptions, shellRules, chatQueue } = deps
   // Watchers created later (resume, stop) belong to the session, not to whichever component is active then.
   const sessionScope = getCurrentScope()
   function inSession<T>(create: () => T): T {
@@ -1130,7 +1176,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     })
   }
 
-  async function stop(): Promise<void> {
+  async function stop(): Promise<QueueItem[]> {
     const wasBusy = busy.value || resuming !== null
     try {
       await api.chat.stop({ params: { id } })
@@ -1140,13 +1186,33 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     }
     await chat.stop()
     if (!wasBusy)
-      return
+      return []
     await whenIdle()
     // The partial reply stays; mark it like the server persists it (`metadata.aborted`).
     const last = chat.messages.value.at(-1)
     if (last?.role === 'assistant')
       markAborted(last.id)
+    return []
   }
+
+  // ---------- Agent 2.0 (Phase 9; W9.9 implements) ----------
+
+  /** P9-0b: always sends (W9.9 queues while a run is active). */
+  async function submit(input: ChatSendInput): Promise<'sent' | 'queued'> {
+    await send(input)
+    return 'sent'
+  }
+
+  const queue = computed<readonly QueueItem[]>(() => chatQueue.items(id))
+
+  function cancelQueued(itemId: string): Promise<'cancelled' | 'gone'> {
+    return chatQueue.cancel(id, itemId)
+  }
+
+  const todos = computed<TodoState | null>(() => todoState(chat.messages.value))
+
+  /** Driven by `onData` (`data-activity`) in W9.9. */
+  const activity = ref<'compacting' | null>(null)
 
   return {
     id,
@@ -1179,6 +1245,11 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     projectId,
     setProject,
     cwd,
+    submit,
+    queue,
+    cancelQueued,
+    todos,
+    activity: readonly(activity),
   }
 }
 
@@ -1243,6 +1314,7 @@ export function useChatSession(id: string, options: { isNew?: boolean } = {}): C
       settings: useSettingsStore(),
       imageOptions: useImageOptions(),
       shellRules: useShellRulesStore(),
+      chatQueue: useChatQueueStore(),
     }
     const scope = effectScope(true)
     const session = scope.run(() => createSession(id, options.isNew === true, deps))!

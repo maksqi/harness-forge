@@ -9,6 +9,9 @@
 // Phase 7 (ADR-031, ARCHITECTURE.md 6.13): the request's `projectId` is honored only when the request creates the chat
 // (an unknown project is `not_found` before the chat row exists); every chat-model run of a chat with a project opens
 // its folder (`openWorkspace`): an unavailable folder gives the run no workspace and the `workspace-unavailable` notice.
+// Phase 9 (C26 seams): `/compact [focus]` resolves like a reply command (it decides the reply: no model call, no
+// workspace) and a regenerate of its reply compacts again; the continuation branch checks the mode of a plan approval
+// (`checkPlanApprovalMode`, `modes.ts`).
 import type {
   CatalogModel,
   ChatRequestBody,
@@ -45,6 +48,7 @@ import { applyCommandExpansions } from './context.ts'
 import { normalizeUserParts } from './files.ts'
 import { isGeneratedImageType } from './generated-files.ts'
 import { badRequest, classifyRequest, mergeApprovalDecisions, notFound, supersedeApprovals } from './history.ts'
+import { checkPlanApprovalMode } from './modes.ts'
 import { NOTICES } from './notices.ts'
 
 /** A message write of the history transaction. */
@@ -281,9 +285,13 @@ async function buildUserMessage(context: PrepareContext): Promise<{ message: Har
   return { message: { id: body.message.id, role: 'user', parts, metadata }, command }
 }
 
-/** The command that decides a regenerated reply: a reply command is run again (a prompt command keeps its expansion). */
+/**
+ * The command that decides a regenerated reply: a reply command (and `/compact`) is run again (a prompt command keeps
+ * its expansion).
+ */
 async function regeneratedCommand(context: PrepareContext, userMessage: HarnessUIMessage): Promise<CommandResolution | null> {
-  if (userMessage.metadata?.command?.type !== 'reply')
+  const type = userMessage.metadata?.command?.type
+  if (type !== 'reply' && type !== 'compact')
     return null
   const resolution = await resolveCommand(context.deps, firstTextOf(userMessage.parts), { chatId: context.body.chatId, signal: context.run.signal })
   return resolution?.kind === 'prompt' ? null : resolution
@@ -414,6 +422,7 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
       const { message, merged } = mergeApprovalDecisions(last, body.message)
       if (merged === 0)
         throw badRequest('The continuation carries no approval decision for a pending tool call.', ['message', 'parts'])
+      checkPlanApprovalMode(last, message, body.toolMode)
       await validateMessage(message)
       const parentId = path.at(-2)?.id ?? null
       return {

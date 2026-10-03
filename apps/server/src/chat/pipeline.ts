@@ -19,15 +19,28 @@
 // (`pending_approval`), records the provider outcome, releases the run, emits `run.finished` and fires
 // `message.completed`. A stream that fails without reaching the end callback is finalized when the SSE copy ends, so a
 // run is always released.
-import type { HarnessError, HarnessUIMessage, MessageMetadata, NoticeData, ReasoningEffort, ToolMode } from '@harness-forge/shared'
-import type { LanguageModelUsage, ModelMessage, TextStreamPart, ToolSet, UIMessageChunk, UIMessageStreamOnEndCallback } from 'ai'
+// Phase 9 seams (C26; the features land behind them in P9-A): the model history is `buildModelHistory`
+// (`model-history.ts`: compaction, steers, sub-agent outputs, command expansions); `streamText` gets the step composer
+// `createPrepareStep({ contextGuard, steer })` (`steps.ts`) and `activeTools` (`modes.ts` through `assembleTools`);
+// chunks a step boundary adds (`RunSession.inject`) are placed by `stepInjector` (`steer.ts`) before the step's
+// `start-step`; transient chunks go out through `RunSession.writeTransient`; extra costs (`generate_image`, compaction,
+// sub-agents) through `RunSession.addExtraCost`; the agent scope (`agent-scope.ts`: the mode, the sub-agent runner of
+// `subagent/index.ts`, the todos) is bound to every tool call; `RunContext.onReleased` runs once right after the run
+// left the registry (the queue's run end); a `/compact` command is answered by `compactStream`
+// (`compaction/stream.ts`).
+import type { HarnessError, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, NoticeData, ReasoningEffort, ToolMode } from '@harness-forge/shared'
+import type { LanguageModelUsage, ModelMessage, TextStreamPart, ToolSet, UIMessageChunk, UIMessageStreamOnEndCallback, UIMessageStreamWriter } from 'ai'
 import type { Logger } from '../logger.ts'
+import type { ResolvedModel } from '../providers/types.ts'
 import type { ImageGenerationResult } from '../services/images/types.ts'
 import type { AppDeps } from '../types.ts'
+import type { AgentRunScope } from './agent-scope.ts'
+import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { RunEnding } from './history.ts'
 import type { PreparedRun } from './prepare.ts'
+import type { ChatQueue } from './queue.ts'
 import type { Run, RunRegistry } from './runs.ts'
-import { LIMITS } from '@harness-forge/shared'
+import { latestTodos, LIMITS } from '@harness-forge/shared'
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -37,6 +50,8 @@ import {
   toUIMessageStream,
 } from 'ai'
 import { createToolApproval, toolWorkspaceAccess } from './approval.ts'
+import { createContextGuard } from './compaction/guard.ts'
+import { compactStream } from './compaction/stream.ts'
 import { applyCommandExpansions, trimToContext, validModelMessages } from './context.ts'
 import {
   errorEnvelopeText,
@@ -51,10 +66,14 @@ import { prepareModelFiles } from './files.ts'
 import { GeneratedFiles, storeGeneratedFiles } from './generated-files.ts'
 import { finalizeParts, hasPendingApproval, plainText } from './history.ts'
 import { imageStream } from './images.ts'
+import { buildModelHistory } from './model-history.ts'
 import { NOTICES } from './notices.ts'
 import { buildRunParams, providerImageOptions, runMaxSteps } from './params.ts'
 import { SseReplayBuffer } from './runs.ts'
 import { createRunScope } from './scope.ts'
+import { createSteerStep, stepInjector } from './steer.ts'
+import { createPrepareStep } from './steps.ts'
+import { createSubagentRunner } from './subagent/index.ts'
 import { generateChatTitle } from './title.ts'
 import { toolPartsAsText } from './tool-history.ts'
 import { assembleTools } from './tools.ts'
@@ -149,7 +168,18 @@ export interface RunContext {
   lifecycle: AbortSignal
   /** Interval of the `message-metadata` keep-alive of image turns (default `IMAGE_KEEPALIVE_MS`). */
   imageKeepAliveMs?: number
+  /** The steer queue of the runner (Phase 9; the steer step takes the chat's queued messages from it). */
+  queue: ChatQueue
+  /**
+   * Called once, right after the run left the registry (`registry.release`) and `run.finished` was emitted, with how
+   * the run ended and whether its stored reply waits for an approval (Phase 9, W9.2: the queue's run end). Not called
+   * for a run released by a forced stop. A throw is logged.
+   */
+  onReleased: (ending: RunEnding, awaitingApproval: boolean) => void
 }
+
+/** A data chunk of this app (`data-notice`, `data-compaction`, `data-steer`, `data-activity`). */
+export type HarnessDataChunk = Extract<HarnessUIMessageChunk, { type: `data-${string}` }>
 
 type StreamMode = 'model' | 'reply' | 'error' | 'image'
 
@@ -186,8 +216,11 @@ export class RunSession {
   mode: StreamMode = 'model'
   fatal: HarnessError | null = null
   finishMetadata: MessageMetadata | null = null
-  /** Estimated costs of the `generate_image` outputs of this run (added to the message cost). */
-  toolCostUsd = 0
+  /**
+   * Estimated extra costs of this run, added to the message cost: `generate_image` outputs, compaction summaries and
+   * sub-agents (Phase 9, `addExtraCost`).
+   */
+  extraCostUsd = 0
   /** The result of an image turn. */
   image: ImageGenerationResult | null = null
   /** The pipeline wrote the `finish` chunk itself (a reply command, an image turn): the run completed. */
@@ -196,6 +229,12 @@ export class RunSession {
   #finalized = false
   #finalizing: Promise<void> | null = null
   readonly #mapped = new Map<unknown, HarnessError>()
+  /** Chunks injected at step boundaries and not yet placed by `stepInjector`, in injection order. */
+  #injections: { chunk: HarnessDataChunk, step: number }[] = []
+  /** Every injected `data-steer` chunk (`finalMessage` appends one the response lost). */
+  readonly #injectedSteers: HarnessDataChunk[] = []
+  /** The writer of the run's UI stream (`bindWriter`), for transient chunks. */
+  #writer: UIMessageStreamWriter<HarnessUIMessage> | null = null
   readonly ctx: RunContext
 
   constructor(ctx: RunContext) {
@@ -229,18 +268,21 @@ export class RunSession {
     return metadata
   }
 
-  /** Adds the estimated cost of a `generate_image` output to the message cost. */
-  addToolCost(usd: number): void {
+  /**
+   * Adds an estimated extra cost to the message cost (Phase 9, generalizes the `generate_image` tool cost): a
+   * `generate_image` output, a compaction summary, a sub-agent. Ignores values that are not finite and positive.
+   */
+  addExtraCost(usd: number): void {
     if (Number.isFinite(usd) && usd > 0)
-      this.toolCostUsd = roundUsd(this.toolCostUsd + usd)
+      this.extraCostUsd = roundUsd(this.extraCostUsd + usd)
   }
 
   /**
-   * The `finish` metadata once every chunk before `finish` was handled: rebuilt when `generate_image` costs were added
-   * (the model's `finish` part may have been observed before the last tool output was handled).
+   * The `finish` metadata once every chunk before `finish` was handled: rebuilt when extra costs were added (the
+   * model's `finish` part may have been observed before the last tool output was handled).
    */
-  finishWithToolCost(metadata: MessageMetadata | undefined): MessageMetadata | undefined {
-    if (this.toolCostUsd === 0 || metadata === undefined)
+  finishWithExtraCost(metadata: MessageMetadata | undefined): MessageMetadata | undefined {
+    if (this.extraCostUsd === 0 || metadata === undefined)
       return metadata
     this.finishMetadata = this.buildFinishMetadata(metadata.finishedAt ?? this.ctx.now(), 'completed')
     return this.finishMetadata
@@ -267,8 +309,8 @@ export class RunSession {
     }
     if (this.mode === 'image' && this.image !== null)
       this.#addImageResult(metadata, this.image)
-    if (this.toolCostUsd > 0)
-      metadata.costUsd = roundUsd((metadata.costUsd ?? 0) + this.toolCostUsd)
+    if (this.extraCostUsd > 0)
+      metadata.costUsd = roundUsd((metadata.costUsd ?? 0) + this.extraCostUsd)
     if (ending === 'failed')
       metadata.finishReason = 'error'
     else if (this.tracker.finishReason !== undefined)
@@ -296,6 +338,53 @@ export class RunSession {
     const revisedPrompt = result.revisedPrompt?.trim()
     if (metadata.image !== undefined && revisedPrompt !== undefined && revisedPrompt !== '')
       metadata.image = { ...metadata.image, revisedPrompt: cutText(revisedPrompt, LIMITS.imagePromptMaxChars) }
+  }
+
+  /**
+   * Queues a chunk for the transcript at a step boundary (Phase 9): `stepInjector` emits it right before the
+   * `start-step` of step `stepNumber` (the `prepareStep` step number; 0 = the first model call of this run), or when the
+   * stream ends. Used for `data-steer` (W9.2), `data-compaction` and notices of the context guard (W9.1); not for
+   * transient chunks (`writeTransient`).
+   */
+  inject(chunk: HarnessDataChunk, stepNumber: number): void {
+    this.#injections.push({ chunk, step: stepNumber })
+    if (chunk.type === 'data-steer')
+      this.#injectedSteers.push(chunk)
+  }
+
+  /**
+   * `StepInjectionSource` of `stepInjector`: removes and returns the pending chunks injected for steps
+   * `<= finishedSteps` (`Number.POSITIVE_INFINITY`: all), in injection order.
+   */
+  takeInjections(finishedSteps: number): HarnessUIMessageChunk[] {
+    const ready: HarnessUIMessageChunk[] = []
+    const rest: { chunk: HarnessDataChunk, step: number }[] = []
+    for (const entry of this.#injections) {
+      if (entry.step <= finishedSteps)
+        ready.push(entry.chunk)
+      else
+        rest.push(entry)
+    }
+    this.#injections = rest
+    return ready
+  }
+
+  /** Records the writer of the run's UI stream (the `execute` of `createUIMessageStream`) for `writeTransient`. */
+  bindWriter(writer: UIMessageStreamWriter<HarnessUIMessage>): void {
+    this.#writer = writer
+  }
+
+  /**
+   * Writes a transient data chunk (`transient: true`, e.g. `data-activity`) at once: it reaches only the client's
+   * `onData` and is never stored. Dropped before a writer is bound and after the stream closed.
+   */
+  writeTransient(chunk: HarnessDataChunk): void {
+    try {
+      this.#writer?.write({ ...chunk, transient: true })
+    }
+    catch (error) {
+      this.ctx.logger.debug('a transient chunk was not written', { err: error })
+    }
   }
 
   map(error: unknown): HarnessError {
@@ -397,8 +486,34 @@ export class RunSession {
     let parts = finalizeParts([...head, ...tail], ending)
     if (this.notices.length > 0)
       parts = [...parts.slice(0, head.length), ...this.notices.map(data => ({ type: 'data-notice' as const, data })), ...parts.slice(head.length)]
+    const missing = this.#missingSteers(parts)
+    if (missing.length > 0)
+      parts = [...parts, ...missing]
     const metadata = ending === 'completed' && this.finishMetadata !== null ? this.finishMetadata : this.buildFinishMetadata(this.ctx.now(), ending)
     return { id: this.assistantId, role: 'assistant', parts, metadata }
+  }
+
+  /** Injected steers the response does not hold (the stream ended before they were placed), as parts. */
+  #missingSteers(parts: readonly HarnessUIMessagePart[]): HarnessUIMessagePart[] {
+    const present = new Set(parts.flatMap(part => (part.type === 'data-steer' ? [part.data.id] : [])))
+    const missing: HarnessUIMessagePart[] = []
+    for (const chunk of this.#injectedSteers) {
+      if (chunk.type !== 'data-steer' || present.has(chunk.data.id))
+        continue
+      present.add(chunk.data.id)
+      missing.push({ type: 'data-steer', ...(chunk.id === undefined ? {} : { id: chunk.id }), data: chunk.data })
+    }
+    return missing
+  }
+
+  /** `RunContext.onReleased`, guarded. */
+  #released(ending: RunEnding, awaitingApproval: boolean): void {
+    try {
+      this.ctx.onReleased(ending, awaitingApproval)
+    }
+    catch (error) {
+      this.ctx.logger.error('run end: the release callback failed', { err: error })
+    }
   }
 
   async #step(label: string, fn: () => Promise<unknown>): Promise<boolean> {
@@ -485,20 +600,21 @@ export class RunSession {
           awaitingApproval,
           ...(ending === 'failed' && this.fatal !== null ? { error: errorInit(this.fatal) } : {}),
         })
+        this.#released(ending, awaitingApproval)
       }
       if (message !== null)
         this.#fireMessageCompleted(message, ending)
     }
   }
 
-  /** The cost of this run (model or image turn, plus `generate_image` outputs), for `message.completed`. */
+  /** The cost of this run (model or image turn, plus the extra costs), for `message.completed`. */
   #runCost(): number | undefined {
     const own = this.mode === 'model'
       ? this.tracker.cost(this.ctx.prepared.resolved.entry.cost)
       : this.mode === 'image' ? (this.image?.costUsd ?? undefined) : undefined
-    if (own === undefined && this.toolCostUsd === 0)
+    if (own === undefined && this.extraCostUsd === 0)
       return undefined
-    return roundUsd((own ?? 0) + this.toolCostUsd)
+    return roundUsd((own ?? 0) + this.extraCostUsd)
   }
 
   #fireMessageCompleted(message: HarnessUIMessage, ending: RunEnding): void {
@@ -559,6 +675,27 @@ export function errorStream(session: RunSession, error: HarnessError): ReadableS
 }
 
 /**
+ * The context guard's kept user message (Phase 9): the run's turn user message (the last user message of the path) as
+ * the model sees it, after its command expansion and files and without any merged summary; converted on the first call
+ * only. Null when the path has no user message.
+ */
+export function keptUserMessage(session: RunSession, model: ResolvedModel, tools: ToolSet): () => Promise<ModelMessage | null> {
+  let converted: Promise<ModelMessage | null> | null = null
+  return () => {
+    converted ??= (async () => {
+      const { deps, prepared, logger } = session.ctx
+      const user = prepared.history.findLast(message => message.role === 'user')
+      if (user === undefined)
+        return null
+      const files = await prepareModelFiles(applyCommandExpansions([user]), { capabilities: model.entry.capabilities, files: deps.files, logger })
+      const [message] = await convertToModelMessages<HarnessUIMessage>(files.messages, { tools, ignoreIncompleteToolCalls: true })
+      return message ?? null
+    })()
+    return converted
+  }
+}
+
+/**
  * Tools, parameters, model messages and the `streamText` call of a model run, streamed through
  * `storeGeneratedFiles` inside `createUIMessageStream` (what is saved equals what is streamed, ADR-028).
  */
@@ -573,6 +710,15 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
 
   // One scope per run (Phase 8): a continuation after an approval keeps the assistant message id.
   const scope = await createRunScope(deps, { chatId, messageId: session.assistantId, workspace: prepared.workspace, history: prepared.history, logger })
+  // The agent scope (Phase 9): the run's mode, its sub-agent runner and todos, bound to every tool call of this run.
+  const subagents = createSubagentRunner({ session, model: resolved, toolMode: session.ctx.toolMode, workspace: prepared.workspace, scope })
+  const agent: AgentRunScope = {
+    chatId,
+    messageId: session.assistantId,
+    toolMode: session.ctx.toolMode,
+    runSubagent: (input, options) => subagents.run(input, options),
+    todos: () => latestTodos(prepared.history),
+  }
   const assembled = await assembleTools({
     chatId,
     messageId: session.assistantId,
@@ -588,6 +734,8 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     workspace: prepared.workspace,
     scope,
     allowExecute: deps.env.workspaceShell,
+    continuation: prepared.continued,
+    agent,
   })
   if (assembled.unsupported) {
     const notice = NOTICES.toolsUnsupported()
@@ -615,7 +763,7 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     logger,
   })
 
-  const files = await prepareModelFiles(applyCommandExpansions(prepared.history), {
+  const files = await prepareModelFiles(buildModelHistory(prepared.history), {
     capabilities: resolved.entry.capabilities,
     files: deps.files,
     logger,
@@ -637,11 +785,20 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
   if (trimmed.removed > 0)
     session.notices.push(NOTICES.contextTrimmed())
 
+  // The step composer (Phase 9): the context guard, then the steer step, before every model call (step 0 included).
+  const prepareStep = createPrepareStep({
+    contextGuard: createContextGuard({ session, model: resolved, keptUser: keptUserMessage(session, resolved, assembled.tools) }),
+    steer: createSteerStep({ session, model: resolved, tools: assembled.tools }),
+    logger,
+  })
+
   const result = streamText({
     model: resolved.model,
     instructions: params.instructions,
     messages: trimmed.messages,
     tools,
+    ...(assembled.activeTools === undefined ? {} : { activeTools: assembled.activeTools }),
+    prepareStep,
     toolApproval: createToolApproval({
       chatId,
       modelRef,
@@ -689,13 +846,17 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     logger,
     toolOwner: name => assembled.byName.get(name)?.pluginId,
     continued: prepared.continued,
-    onToolCost: usd => session.addToolCost(usd),
-    finishMetadata: metadata => session.finishWithToolCost(metadata),
+    onToolCost: usd => session.addExtraCost(usd),
+    finishMetadata: metadata => session.finishWithExtraCost(metadata),
   })
   return createUIMessageStream<HarnessUIMessage>({
     originalMessages: prepared.history,
     generateId: () => session.assistantId,
-    execute: ({ writer }) => writer.merge(ui.pipeThrough(generatedFiles)),
+    execute: ({ writer }) => {
+      session.bindWriter(writer)
+      // Chunks injected at step boundaries are placed before the step's `start-step` (Phase 9, `steer.ts`).
+      writer.merge(ui.pipeThrough(stepInjector(session)).pipeThrough(generatedFiles))
+    },
     onError: error => session.errorText(error),
     onEnd: session.onEnd,
   }) as ReadableStream<UIMessageChunk>
@@ -744,7 +905,9 @@ export async function launchRun(ctx: RunContext): Promise<Response> {
   let stream: ReadableStream<UIMessageChunk>
   try {
     const command = prepared.command
-    if (command?.kind === 'reply')
+    if (command?.kind === 'compact')
+      stream = await compactStream(session, command.focus)
+    else if (command?.kind === 'reply')
       stream = replyStream(session, command.markdown)
     else if (command?.kind === 'failed')
       stream = errorStream(session, command.error)

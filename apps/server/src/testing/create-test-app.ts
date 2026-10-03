@@ -17,6 +17,9 @@
 // Phase 8 (C19-T9): `checkpoints` / `shellRules` install a service (`'fake'`: `createFakeCheckpointService()` /
 // `createFakeShellRuleService(deps)` of ./fake-checkpoints.ts and ./fake-shell-rules.ts); `overrides` and `factories` of
 // the same name win.
+// Phase 9 (C24-T5): `projectFiles` installs the mention file service (`'fake'`: `createFakeProjectFileService()` of
+// ./fake-project-files.ts, or a ready service); `overrides` and `factories` of the same name win. `createFakeChatRunner`
+// (./fakes.ts) has the steer queue members.
 import type { ApiClient } from '@harness-forge/shared'
 import type { Hono } from 'hono'
 import type { Database, Db } from '../db/client.ts'
@@ -26,6 +29,7 @@ import type { AppEnv } from '../http/types.ts'
 import type { MemoryLogger } from '../logger.ts'
 import type { BuiltinPlugin } from '../plugins/types.ts'
 import type { CheckpointService } from '../services/checkpoints/types.ts'
+import type { ProjectFileService } from '../services/project-files/types.ts'
 import type { ShellRuleService } from '../services/shell-rules/types.ts'
 import type { AppDeps, AppServices } from '../types.ts'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
@@ -41,6 +45,7 @@ import { ensureDataDir, loadEnv } from '../env.ts'
 import { createMemoryLogger } from '../logger.ts'
 import { createRedactor } from '../security/redact.ts'
 import { createFakeCheckpointService } from './fake-checkpoints.ts'
+import { createFakeProjectFileService } from './fake-project-files.ts'
 import { createFakeShellRuleService } from './fake-shell-rules.ts'
 import { createFakeKeyring } from './fakes.ts'
 
@@ -89,6 +94,12 @@ export interface TestAppOptions {
    * against the test database), or a ready service; default: the real one. `overrides` / `factories` win.
    */
   shellRules?: 'fake' | ShellRuleService
+  /**
+   * Phase 9: the project file service of `@` mentions: `'fake'` = `createFakeProjectFileService()` (paths in memory,
+   * ranked by the shared `rankPaths`; a fixed `FileRef` for `attach`), or a ready service; default: the real one.
+   * `overrides.projectFiles` / `factories.projectFiles` win.
+   */
+  projectFiles?: 'fake' | ProjectFileService
 }
 
 export interface TestRequestOptions {
@@ -127,12 +138,13 @@ function usesFakeKeyring(options: TestAppOptions): boolean {
   return options.overrides?.keyring === undefined && options.factories?.keyring === undefined
 }
 
-/** The Phase 8 service options as factories (`overrides` and `factories` of the same name win). */
-function phase8Factories(options: TestAppOptions): Partial<ServiceFactories> {
-  const { checkpoints, shellRules } = options
+/** The Phase 8 and Phase 9 service options as factories (`overrides` and `factories` of the same name win). */
+function serviceOptionFactories(options: TestAppOptions): Partial<ServiceFactories> {
+  const { checkpoints, shellRules, projectFiles } = options
   return {
     ...(checkpoints === undefined ? {} : { checkpoints: () => (checkpoints === 'fake' ? createFakeCheckpointService() : checkpoints) }),
     ...(shellRules === undefined ? {} : { shellRules: (deps: AppDeps) => (shellRules === 'fake' ? createFakeShellRuleService(deps) : shellRules) }),
+    ...(projectFiles === undefined ? {} : { projectFiles: () => (projectFiles === 'fake' ? createFakeProjectFileService() : projectFiles) }),
   }
 }
 
@@ -158,7 +170,7 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
       db: database.db,
       builtins: options.builtins ?? getBuiltinPlugins(env),
       overrides: { ...(usesFakeKeyring(options) ? { keyring: createFakeKeyring() } : {}), ...options.overrides },
-      factories: { ...phase8Factories(options), ...options.factories },
+      factories: { ...serviceOptionFactories(options), ...options.factories },
     })
     if (options.start ?? true)
       await startDeps(deps)

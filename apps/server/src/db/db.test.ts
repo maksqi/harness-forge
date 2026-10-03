@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { eq, sql } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase } from './client.ts'
+import { uniqueViolation } from './constraint.test-util.ts'
 import { migrateDatabase, resolveMigrationsFolder } from './migrate.ts'
 import { chats, chatShares, messages, projects, shellRules, TABLE_NAMES, usage, workspaceChanges } from './schema.ts'
 
@@ -95,15 +96,25 @@ describe('migrations', () => {
       'workspace_changes_project_idx',
       'workspace_changes_before_sha_idx',
       'shell_rules_project_idx',
+      'shell_rules_global_prefix_uq',
+      'shell_rules_project_prefix_uq',
     ]))
     expect(await indexColumns(database, 'messages_chat_parent_idx')).toEqual(['chat_id', 'parent_id'])
     expect(await indexColumns(database, 'chat_shares_chat_idx')).toEqual(['chat_id'])
   })
 
-  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, 0003, 0004 projects, 0005 workspace checkpoints', async () => {
+  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, 0003, 0004 projects, 0005 workspace checkpoints, 0006 shell rule unique', async () => {
     const database = await freshDatabase()
     const journal = JSON.parse(readFileSync(join(resolveMigrationsFolder(), 'meta', '_journal.json'), 'utf8')) as { entries: Array<{ tag: string }> }
-    expect(journal.entries.map(entry => entry.tag)).toEqual(['0000_initial_schema', '0001_message_tree_and_shares', '0002_remembered_versions', '0003_refresh_model_listings', '0004_projects', '0005_workspace_checkpoints'])
+    expect(journal.entries.map(entry => entry.tag)).toEqual([
+      '0000_initial_schema',
+      '0001_message_tree_and_shares',
+      '0002_remembered_versions',
+      '0003_refresh_model_listings',
+      '0004_projects',
+      '0005_workspace_checkpoints',
+      '0006_shell_rule_unique',
+    ])
     const applied = await database.client.execute('SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows).toHaveLength(journal.entries.length)
   })
@@ -303,9 +314,10 @@ describe('phase 8 schema (ADR-036 checkpoint journal, ADR-038 shell rules)', () 
     ])
     expect(await foreignKeys(database, 'shell_rules')).toEqual(['project_id -> projects.id (CASCADE)'])
     expect(await indexColumns(database, 'shell_rules_project_idx')).toEqual(['project_id'])
-    // Uniqueness and caps are the service's (no unique index).
-    const unique = await database.client.execute(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'shell_rules' AND sql LIKE '%UNIQUE%'`)
-    expect(unique.rows).toEqual([])
+    // Phase 9 (0006): uniqueness per scope is the database's (two partial unique indexes, see below); caps stay the
+    // service's.
+    const unique = await database.client.execute(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'shell_rules' AND sql LIKE '%UNIQUE%' ORDER BY name`)
+    expect(unique.rows.map(row => String(row.name))).toEqual(['shell_rules_global_prefix_uq', 'shell_rules_project_prefix_uq'])
   })
 
   it('stores journal rows and rules; deleting a chat or a project cascades, global rules stay', async () => {
@@ -341,6 +353,63 @@ describe('phase 8 schema (ADR-036 checkpoint journal, ADR-038 shell rules)', () 
     expect(await db.select().from(workspaceChanges)).toEqual([])
     expect((await db.select().from(shellRules)).map(rule => [rule.id, rule.projectId])).toEqual([['srl_BBBBBBBBBBBBBBBB', null]])
     expect((await db.select({ id: chats.id }).from(chats)).map(chat => chat.id)).toEqual([chatB])
+  })
+})
+
+describe('phase 9 schema (0006: ADR-038 amendment, unique shell rules per scope)', () => {
+  const PROJECT_A = 'prj_AAAAAAAAAAAAAAAA'
+  const PROJECT_B = 'prj_BBBBBBBBBBBBBBBB'
+
+  /** The `sql` of an index in `sqlite_master`, whitespace collapsed. */
+  async function indexSql(database: Database, index: string): Promise<string> {
+    const result = await database.client.execute({ sql: `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`, args: [index] })
+    return String(result.rows[0]?.sql ?? '').replace(/\s+/g, ' ')
+  }
+
+  it('creates the two partial unique indexes with their WHERE (the shell_rules_project_idx stays)', async () => {
+    const database = await freshDatabase()
+    const indexes = await database.client.execute(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'shell_rules' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+    expect(indexes.rows.map(row => String(row.name))).toEqual(['shell_rules_global_prefix_uq', 'shell_rules_project_idx', 'shell_rules_project_prefix_uq'])
+    expect(await indexColumns(database, 'shell_rules_global_prefix_uq')).toEqual(['prefix'])
+    expect(await indexColumns(database, 'shell_rules_project_prefix_uq')).toEqual(['project_id', 'prefix'])
+    expect(await indexSql(database, 'shell_rules_global_prefix_uq')).toMatch(/^CREATE UNIQUE INDEX `shell_rules_global_prefix_uq` ON `shell_rules` \(`prefix`\) WHERE project_id is null$/)
+    expect(await indexSql(database, 'shell_rules_project_prefix_uq')).toMatch(/^CREATE UNIQUE INDEX `shell_rules_project_prefix_uq` ON `shell_rules` \(`project_id`,\s?`prefix`\) WHERE project_id is not null$/)
+    // `PRAGMA index_list` reports both as unique and partial.
+    const list = await database.client.execute(`PRAGMA index_list(shell_rules)`)
+    const flags = Object.fromEntries(list.rows.map(row => [String(row.name), [Number(row.unique), Number(row.partial)]]))
+    expect(flags).toMatchObject({ shell_rules_global_prefix_uq: [1, 1], shell_rules_project_prefix_uq: [1, 1], shell_rules_project_idx: [0, 0] })
+  })
+
+  it('refuses the same prefix twice in one scope; the same prefix in other scopes is fine', async () => {
+    const { db } = await freshDatabase()
+    await db.insert(projects).values([
+      { id: PROJECT_A, name: 'A', path: '/srv/projects/a', createdAt: 1, updatedAt: 1 },
+      { id: PROJECT_B, name: 'B', path: '/srv/projects/b', createdAt: 1, updatedAt: 1 },
+    ])
+    await db.insert(shellRules).values([
+      { id: 'srl_AAAAAAAAAAAAAAAA', projectId: null, prefix: 'ls', createdAt: 1 },
+      { id: 'srl_BBBBBBBBBBBBBBBB', projectId: PROJECT_A, prefix: 'ls', createdAt: 2 },
+      { id: 'srl_CCCCCCCCCCCCCCCC', projectId: PROJECT_B, prefix: 'ls', createdAt: 3 },
+      { id: 'srl_DDDDDDDDDDDDDDDD', projectId: PROJECT_A, prefix: 'pnpm test', createdAt: 4 },
+    ])
+    expect(await uniqueViolation(db.insert(shellRules).values({ id: 'srl_EEEEEEEEEEEEEEEE', projectId: null, prefix: 'ls', createdAt: 5 })))
+      .toBe('UNIQUE constraint failed: shell_rules.prefix')
+    expect(await uniqueViolation(db.insert(shellRules).values({ id: 'srl_FFFFFFFFFFFFFFFF', projectId: PROJECT_A, prefix: 'ls', createdAt: 5 })))
+      .toBe('UNIQUE constraint failed: shell_rules.project_id, shell_rules.prefix')
+    expect(await db.select({ id: shellRules.id }).from(shellRules).orderBy(shellRules.id)).toHaveLength(4)
+    // A deleted project frees its prefixes (the cascade), so the scope can hold them again.
+    await db.delete(projects).where(eq(projects.id, PROJECT_A))
+    await db.insert(projects).values({ id: PROJECT_A, name: 'A', path: '/srv/projects/a', createdAt: 2, updatedAt: 2 })
+    await expect(db.insert(shellRules).values({ id: 'srl_FFFFFFFFFFFFFFFF', projectId: PROJECT_A, prefix: 'ls', createdAt: 6 })).resolves.toBeDefined()
+  })
+
+  it('records the compact and subagent usage purposes (text column without a CHECK)', async () => {
+    const { db } = await freshDatabase()
+    await db.insert(usage).values([
+      { providerId: 'mock', modelId: 'compact', input: 1, purpose: 'compact' },
+      { providerId: 'mock', modelId: 'subagent', input: 2, purpose: 'subagent' },
+    ])
+    expect((await db.select({ purpose: usage.purpose }).from(usage).orderBy(usage.input)).map(row => row.purpose)).toEqual(['compact', 'subagent'])
   })
 })
 

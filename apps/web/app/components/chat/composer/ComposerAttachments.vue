@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // Attachment chips of the composer (docs/UI.md 7.7): image thumbnails and file chips with upload states (spinner,
 // destructive + Retry, X to remove), then the capability warnings ("… can't see images") under the chips.
+// Phase 9 (C25; W9.8 adds project chips): every chip carries `data-kind` (`upload`; `project` for a file attached
+// through an `@` mention, which also carries `data-path`).
 import type { ComposerAttachment } from '~/composables/useComposerAttachments'
 import { TriangleAlertIcon } from '@lucide/vue'
 import FileChip from '~/components/common/FileChip.vue'
@@ -25,6 +27,7 @@ const emit = defineEmits<{
         :key="item.id"
         :data-testid="testIds.composerAttachment"
         :data-mime="item.mime"
+        data-kind="upload"
         :name="item.name"
         :size="item.size"
         :mime="item.mime"

@@ -17,6 +17,7 @@ import {
   HarnessError,
   httpUrlSchema,
   isClientCommand,
+  isHarnessCommand,
   isPluginNamespacedId,
   LIMITS,
   MCP_TOOL_PREFIX,
@@ -241,14 +242,17 @@ export function validateToolDefinition(definition: ToolDefinition, options: Tool
 
 // ---------- commands ----------
 
-/** Checks a command: name (not client-only), description and exactly one of `template` / `run`. */
+/**
+ * Checks a command: name (not client-only, not a harness command: `/compact` is run by the server itself, Phase 9,
+ * ADR-040), description and exactly one of `template` / `run`.
+ */
 export function validateCommandDefinition(definition: CommandDefinition): void {
   if (!isObject(definition))
     throw invalid('A command definition must be an object.')
   const name: unknown = definition.name
   if (typeof name !== 'string' || !COMMAND_NAME_PATTERN.test(name))
     throw invalid(`Invalid command name ${describeValue(name)}: start with a-z and use up to 32 characters of a-z, 0-9 and "-".`, ['name'])
-  if (isClientCommand(name))
+  if (isClientCommand(name) || isHarnessCommand(name))
     throw invalid(`The command "/${name}" is reserved by the app.`, ['name'])
   const label = `Command "/${name}"`
   const description: unknown = definition.description

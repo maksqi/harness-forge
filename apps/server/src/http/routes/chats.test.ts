@@ -69,6 +69,10 @@ beforeAll(async () => {
     hasRun: chatId => holding.has(chatId),
     active: () => [],
     stopAll: async () => {},
+    queueList: () => [],
+    enqueue: async () => Promise.reject(new Error('not used')),
+    dequeue: () => false,
+    clearQueue: () => [],
   }
   t = await createTestApp({ start: false, overrides: { runs } })
   t.deps.events.subscribe(event => received.push(event))

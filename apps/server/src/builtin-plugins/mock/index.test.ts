@@ -69,11 +69,11 @@ describe('mock plugin', () => {
 })
 
 describe('mock provider definition', () => {
-  it('has no credentials, no icon, echo as small model and the twelve models as listing and seeds', async () => {
+  it('has no credentials, no icon, echo as small model and the seventeen models as listing and seeds', async () => {
     expect(mockProvider).toMatchObject({ id: 'mock', name: 'Mock (dev only)', credentials: [], smallModelId: 'echo' })
     expect(mockProvider.icon).toBeUndefined()
     const listed = await mockProvider.listModels?.({ credentials: {}, fetch: globalThis.fetch })
-    expect(listed?.map(model => model.id)).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image', 'image-chat', 'image-tool', 'transcribe', 'speech', 'workspace', 'checkpoint', 'shell'])
+    expect(listed?.map(model => model.id)).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image', 'image-chat', 'image-tool', 'transcribe', 'speech', 'workspace', 'checkpoint', 'shell', 'compact', 'plan', 'todo', 'subagent', 'steer'])
     expect(mockProvider.seedModels).toEqual(listed)
     expect(modelInfoListSchema.parse(mockModels())).toEqual(mockModels())
     const byId = new Map(mockModels().map(model => [model.id, model]))
@@ -110,6 +110,25 @@ describe('mock provider definition', () => {
     expect(byId.get('shell')).toMatchObject({ name: 'Mock Shell', kind: 'chat', capabilities: { tools: true, vision: false, imageOutput: false } })
     for (const id of ['checkpoint', 'shell'])
       expect(mockProvider.createLanguageModel(id, { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: id })
+  })
+
+  it('lists the five agent mocks (Phase 9) as explicit chat models with tools only; mock:compact has a 2000-token window', () => {
+    const byId = new Map(mockModels().map(model => [model.id, model]))
+    const names: Record<string, string> = { compact: 'Mock Compact', plan: 'Mock Plan', todo: 'Mock Todo', subagent: 'Mock Sub-agent', steer: 'Mock Steer' }
+    for (const [id, name] of Object.entries(names)) {
+      expect(modelInfoSchema.parse(byId.get(id)), id).toEqual({
+        id,
+        name,
+        kind: 'chat',
+        contextWindow: id === 'compact' ? 2000 : 32_000,
+        maxOutputTokens: 4096,
+        capabilities: { tools: true, vision: false, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false },
+        cost: { input: 1, output: 2 },
+      })
+      expect(mockProvider.createLanguageModel(id, { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: id })
+    }
+    // Visible chat models (the picker): everything except the three media models.
+    expect(mockModels().filter(model => model.kind === undefined || model.kind === 'chat')).toHaveLength(14)
   })
 
   it('passes the registry validation of provider definitions', () => {

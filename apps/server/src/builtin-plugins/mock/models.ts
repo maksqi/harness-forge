@@ -5,7 +5,10 @@
 // (calls the builtin `generate_image` tool); the media models live in ./media.ts. Phase 7: `mock:workspace` (walks
 // through the `core-workspace` tools; the plan lives in ./workspace.ts). Phase 8: `mock:checkpoint` (one edit per turn,
 // then shell steps that create and enter a folder; ./checkpoint.ts) and `mock:shell` (runs the user text as one shell
-// command; ./shell.ts).
+// command; ./shell.ts). Phase 9 (the agent mocks, PROVIDERS.md 8 "Agent mocks (Phase 9)", shared rules in ./turn.ts):
+// `mock:compact` (./compact.ts), `mock:plan` (./plan-mode.ts), `mock:todo` (./todo.ts), `mock:subagent`
+// (./subagent.ts) and `mock:steer` (./steer.ts); `MockPlan` gains `toolCalls` (several calls in one step, run in
+// parallel by the SDK) and `stepDelayMs` (an abortable wait before the step streams anything).
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
@@ -22,19 +25,39 @@ import { GENERATE_IMAGE_TOOL_NAME } from '@harness-forge/shared'
 import { simulateReadableStream } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 import { mockCheckpointPlan } from './checkpoint.ts'
-import { abortableDelay, abortError, countWords, MOCK_EMPTY_MESSAGE, MOCK_PROVIDER_ID, unknownModelError, wordChunks } from './common.ts'
+import { abortableDelay, abortError, countWords, MOCK_EMPTY_MESSAGE, MOCK_PROVIDER_ID, MOCK_TOOL_DENIED, MOCK_TOOLS_DISABLED, unknownModelError, wordChunks } from './common.ts'
+import { mockCompactPlan } from './compact.ts'
 import { mockAspectRatioOption, mockImagePng, mockImageSize } from './media.ts'
+import { mockPlanModePlan } from './plan-mode.ts'
 import { mockShellPlan } from './shell.ts'
+import { mockSteerPlan } from './steer.ts'
+import { mockSubagentPlan } from './subagent.ts'
+import { mockTodoPlan } from './todo.ts'
 import { mockWorkspacePlan } from './workspace.ts'
 
-export { abortableDelay, countWords, MOCK_EMPTY_MESSAGE, MOCK_PROVIDER_ID, wordChunks } from './common.ts'
+export { abortableDelay, countWords, MOCK_EMPTY_MESSAGE, MOCK_PROVIDER_ID, MOCK_TOOL_DENIED, MOCK_TOOLS_DISABLED, wordChunks } from './common.ts'
 
 export const MOCK_TOOL_NAME = 'mock_approval_tool'
 /**
  * The language model ids of the mock provider (`createLanguageModel`): the four v1 models, the two Phase 6 ones,
- * `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8).
+ * `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8), and the five agent mocks of Phase 9.
  */
-export const MOCK_MODEL_IDS = ['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace', 'checkpoint', 'shell'] as const
+export const MOCK_MODEL_IDS = [
+  'echo',
+  'reasoning',
+  'tool-approval',
+  'error',
+  'image-chat',
+  'image-tool',
+  'workspace',
+  'checkpoint',
+  'shell',
+  'compact',
+  'plan',
+  'todo',
+  'subagent',
+  'steer',
+] as const
 export type MockModelId = (typeof MOCK_MODEL_IDS)[number]
 
 /** Stream timing (PROVIDERS.md 8). */
@@ -47,8 +70,6 @@ export const MOCK_TIMING = {
   reasoningChunkMs: 100,
 } as const
 
-export const MOCK_TOOLS_DISABLED = 'Tools are disabled.'
-export const MOCK_TOOL_DENIED = 'The tool call was denied.'
 export const MOCK_AUTH_FAILURE = 'Mock authentication failure'
 export const MOCK_ERROR_URL = 'mock://error'
 /** The text of `mock:image-chat` starts with this prefix, followed by the user text. */
@@ -108,13 +129,31 @@ export interface MockGeneratedFile {
   data: Uint8Array
 }
 
-/** What a call answers: optional reasoning, then text (optionally followed by a generated file) or one tool call. */
+/** One tool call of a step (`input`: the JSON text the model streams). */
+export interface MockToolCall {
+  toolCallId: string
+  toolName: string
+  input: string
+}
+
+/**
+ * What a call (one step) answers: optional reasoning, then text (optionally followed by a generated file), then the tool
+ * calls: `toolCall`, then every entry of `toolCalls` (Phase 9: several calls in one step, which the SDK runs in
+ * parallel). `stepDelayMs` (Phase 9): an abortable wait before the step streams anything (`doGenerate` waits too).
+ */
 export interface MockPlan {
   reasoning: string | null
   text: string | null
-  toolCall: { toolCallId: string, toolName: string, input: string } | null
+  toolCall: MockToolCall | null
+  toolCalls?: MockToolCall[]
   file?: MockGeneratedFile
+  stepDelayMs?: number
   finishReason: 'stop' | 'tool-calls'
+}
+
+/** Every tool call of a plan, in stream order. */
+export function planToolCalls(plan: MockPlan): MockToolCall[] {
+  return [...(plan.toolCall === null ? [] : [plan.toolCall]), ...(plan.toolCalls ?? [])]
 }
 
 function textPlan(text: string, reasoning: string | null = null): MockPlan {
@@ -244,6 +283,16 @@ export function mockPlan(modelId: MockModelId, options: LanguageModelV4CallOptio
       return mockCheckpointPlan(options)
     case 'shell':
       return mockShellPlan(options, mockUserText(options.prompt))
+    case 'compact':
+      return mockCompactPlan(options)
+    case 'plan':
+      return mockPlanModePlan(options)
+    case 'todo':
+      return mockTodoPlan(options)
+    case 'subagent':
+      return mockSubagentPlan(options)
+    case 'steer':
+      return mockSteerPlan(options)
     default:
       return echoPlan(options.prompt)
   }
@@ -269,8 +318,8 @@ function generateResult(plan: MockPlan, prompt: LanguageModelV4Prompt, modelId: 
     content.push({ type: 'text', text: plan.text })
   if (plan.file !== undefined)
     content.push({ type: 'file', mediaType: plan.file.mediaType, data: { type: 'data', data: plan.file.data } })
-  if (plan.toolCall !== null)
-    content.push({ type: 'tool-call', toolCallId: plan.toolCall.toolCallId, toolName: plan.toolCall.toolName, input: plan.toolCall.input })
+  for (const call of planToolCalls(plan))
+    content.push({ type: 'tool-call', toolCallId: call.toolCallId, toolName: call.toolName, input: call.input })
   return {
     content,
     finishReason: { unified: plan.finishReason, raw: plan.finishReason },
@@ -286,10 +335,10 @@ export interface ScheduledPart {
   part: LanguageModelV4StreamPart
 }
 
-/** The timed stream of a plan. */
+/** The timed stream of a plan (the step delay, if any, comes before the first chunk). */
 export function streamSchedule(plan: MockPlan, prompt: LanguageModelV4Prompt, modelId: string): ScheduledPart[] {
   const parts: ScheduledPart[] = [
-    { delayMs: 0, part: { type: 'stream-start', warnings: [] } },
+    { delayMs: plan.stepDelayMs ?? 0, part: { type: 'stream-start', warnings: [] } },
     { delayMs: 0, part: { type: 'response-metadata', id: 'mock-response', modelId, timestamp: new Date(0) } },
   ]
   if (plan.reasoning !== null) {
@@ -311,8 +360,7 @@ export function streamSchedule(plan: MockPlan, prompt: LanguageModelV4Prompt, mo
       part: { type: 'file', mediaType: plan.file.mediaType, data: { type: 'data', data: plan.file.data } },
     })
   }
-  if (plan.toolCall !== null) {
-    const { toolCallId, toolName, input } = plan.toolCall
+  for (const { toolCallId, toolName, input } of planToolCalls(plan)) {
     parts.push(
       { delayMs: MOCK_TIMING.firstTextChunkMs, part: { type: 'tool-input-start', id: toolCallId, toolName } },
       { delayMs: 0, part: { type: 'tool-input-delta', id: toolCallId, delta: input } },
@@ -369,7 +417,9 @@ export function createMockLanguageModel(modelId: string): LanguageModelV4 {
         throw failure()
       if (options.abortSignal?.aborted)
         throw abortError(options.abortSignal)
-      return generateResult(mockPlan(modelId as MockModelId, options), options.prompt, modelId)
+      const plan = mockPlan(modelId as MockModelId, options)
+      await abortableDelay(plan.stepDelayMs ?? 0, options.abortSignal)
+      return generateResult(plan, options.prompt, modelId)
     },
     doStream: async (options) => {
       if (failure !== null)

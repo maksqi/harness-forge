@@ -395,3 +395,27 @@ describe('chatTranscript: rewind files (Phase 8)', () => {
     expect(rewindable(wrapper)).toEqual([U1])
   })
 })
+
+describe('chatTranscript: Phase 9 seams', () => {
+  it('passes the activity to the streaming last reply only, and no row is compacted yet', async () => {
+    const messages = [
+      userMessage('msg_u000000000000001', 'Old question'),
+      assistantMessage('msg_a000000000000001', 'Old answer'),
+      userMessage('msg_u000000000000002', 'New question'),
+      assistantMessage('msg_a000000000000002', '', { parts: [] }),
+    ]
+    const state = ref<{ status: ChatStatus, activity: 'compacting' | null }>({ status: 'streaming', activity: 'compacting' })
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, {
+        default: () => h(ChatTranscript, { messages, status: state.value.status, showThinking: false, activity: state.value.activity }),
+      }),
+    }, { attachTo: document.body })
+    await nextTick()
+    const rows = () => wrapper.findAllComponents(ChatMessage)
+    expect(rows().map(row => row.props('activity'))).toEqual([null, null, null, 'compacting'])
+    expect(rows().map(row => row.props('compacted'))).toEqual([false, false, false, false])
+    state.value = { status: 'ready', activity: 'compacting' }
+    await nextTick()
+    expect(rows().map(row => row.props('activity'))).toEqual([null, null, null, null])
+  })
+})

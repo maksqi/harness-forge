@@ -193,7 +193,8 @@ describe('generalSettings', () => {
     await trigger.trigger('keydown', { key: 'Enter' })
     await settle()
     const items = [...document.body.querySelectorAll<HTMLElement>('[data-slot="select-item"]')]
-    expect(items.map(item => item.dataset.value)).toEqual(['ask', 'edits', 'auto', 'off'])
+    // Plan (Phase 9) is listed like Accept edits.
+    expect(items.map(item => item.dataset.value)).toEqual(['ask', 'edits', 'plan', 'auto', 'off'])
     expect(items[1]!.textContent).toContain('Accept edits')
     expect(items[1]!.textContent).toContain('Edit project files without asking; ask before shell commands')
 
@@ -201,6 +202,14 @@ describe('generalSettings', () => {
     await settle()
     expect(api.settings.update).toHaveBeenCalledWith({ body: { defaultToolMode: 'edits' } })
     expect(trigger.text()).toBe('Accept edits')
+  })
+
+  it('shows the Agent section between Chat and Custom instructions (Phase 9)', async () => {
+    const wrapper = await mountGeneral()
+    const titles = wrapper.findAll('[data-slot="settings-section"] > header h2').map(title => title.text())
+    const chat = titles.indexOf('Chat')
+    expect(chat).toBeGreaterThanOrEqual(0)
+    expect(titles.slice(chat, chat + 3)).toEqual(['Chat', 'Agent', 'Custom instructions'])
   })
 
   it('restores the saved value on Escape', async () => {
@@ -284,10 +293,11 @@ describe('general rules', () => {
   it('labels the choices', () => {
     expect(sendKeyOptions(true).map(option => option.label)).toEqual(['Enter', '⌘ Enter'])
     expect(sendKeyOptions(false).map(option => option.label)).toEqual(['Enter', 'Ctrl Enter'])
-    // The options of the composer's permission menu, Accept edits included (docs/UI.md 7.11, 9.4).
+    // The options of the composer's permission menu, Accept edits and Plan included (docs/UI.md 7.11, 9.4).
     expect(TOOL_MODE_OPTIONS.map(option => [option.value, option.label])).toEqual([
       ['ask', 'Ask'],
       ['edits', 'Accept edits'],
+      ['plan', 'Plan'],
       ['auto', 'Auto'],
       ['off', 'Off'],
     ])

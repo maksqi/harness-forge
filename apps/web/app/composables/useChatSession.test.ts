@@ -2,16 +2,17 @@ import type { ChatDetail, ChatRequestBody, HarnessUIMessage, ShellRule } from '@
 import type { UIMessageChunk } from 'ai'
 import type { Mock } from 'vitest'
 import type { MockApi } from '~/utils/testing/mock-api'
-import { HarnessError } from '@harness-forge/shared'
+import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, nextTick } from 'vue'
+import { useChatQueueStore } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { useProjectsStore } from '~/stores/projects'
 import { useShellRulesStore } from '~/stores/shell-rules'
-import { catalogModel, chatDetail, chatId, chatSummary, messageBranch, projectId, projectSummary, shellRule } from '~/utils/testing/fixtures'
+import { catalogModel, chatDetail, chatId, chatSummary, messageBranch, messageId, projectId, projectSummary, queueItem, shellRule } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import {
@@ -1629,5 +1630,31 @@ describe('useChatSession: registry', () => {
     gate.resolve()
     await sending
     component.stop()
+  })
+})
+
+describe('useChatSession: agent 2.0 interface (P9-0b)', () => {
+  it('submit() sends for now; queue, todos and activity start empty; stop() resolves with no dropped items', async () => {
+    const session = newSession()
+    expect(session.queue.value).toEqual([])
+    expect(session.todos.value).toBeNull()
+    expect(session.activity.value).toBeNull()
+    expect(await session.stop()).toEqual([])
+
+    server.reply(textReply('Hello back'))
+    expect(await session.submit({ text: 'Hello', files: [] })).toBe('sent')
+    expect(chatBodies()).toHaveLength(1)
+    expect(session.chat.messages.value.map(message => message.role)).toEqual(['user', 'assistant'])
+  })
+
+  it('reads the chat\'s queue from the chat-queue store and cancels through it', async () => {
+    const session = newSession()
+    const item = queueItem()
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(1), items: [item] }))
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(2), items: [queueItem({ id: messageId('other1') })] }))
+    expect(session.queue.value).toEqual([item])
+    const cancel = vi.spyOn(useChatQueueStore(), 'cancel').mockResolvedValue('gone')
+    expect(await session.cancelQueued(item.id)).toBe('gone')
+    expect(cancel).toHaveBeenCalledWith(chatId(1), item.id)
   })
 })

@@ -24,11 +24,14 @@ import {
 
 const OVERRIDES: (ToolOverride | null)[] = [null, 'allow', 'ask', 'deny']
 const HOOKS: (HookDecision | undefined)[] = [undefined, 'allow', 'ask', 'deny']
-const MODES: ToolMode[] = ['off', 'ask', 'edits', 'auto']
+const MODES: ToolMode[] = ['off', 'ask', 'edits', 'plan', 'auto']
 const POLICIES: EffectivePolicy[] = ['safe', 'ask', 'always', 'deny']
 const ACCESS: (ToolWorkspaceAccess | null)[] = [null, 'read', 'write', 'execute']
 
-/** The expected outcome, written as the resolution table of ARCHITECTURE.md 6.2 / PLUGINS.md 10 (Phase 7: `edits`). */
+/**
+ * The expected outcome, written as the resolution table of ARCHITECTURE.md 6.2 / PLUGINS.md 10 (Phase 7: `edits`;
+ * Phase 9: `plan` resolves like `ask`).
+ */
 function expected(override: ToolOverride | null, hook: HookDecision | undefined, mode: ToolMode, policy: EffectivePolicy, workspace: ToolWorkspaceAccess | null): ApprovalOutcome {
   const decision = { allow: 'approved', ask: 'user-approval', deny: 'denied' } as const
   if (override !== null)
@@ -37,7 +40,7 @@ function expected(override: ToolOverride | null, hook: HookDecision | undefined,
     return decision[hook]
   if (policy === 'deny')
     return 'denied'
-  if (mode === 'ask')
+  if (mode === 'ask' || mode === 'plan')
     return policy === 'safe' ? 'not-applicable' : 'user-approval'
   if (mode === 'edits')
     return policy === 'safe' || (policy === 'ask' && workspace === 'write') ? 'not-applicable' : 'user-approval'
@@ -50,7 +53,7 @@ const MATRIX = OVERRIDES.flatMap(override => HOOKS.flatMap(hook => MODES.flatMap
 
 describe('resolveApproval (resolution table)', () => {
   it('covers every (override, hook, mode, policy, workspace access) combination', () => {
-    expect(MATRIX).toHaveLength(4 * 4 * 4 * 4 * 4)
+    expect(MATRIX).toHaveLength(4 * 4 * 5 * 4 * 4)
   })
 
   it.each(MATRIX)('override $override, hook $hook, mode $mode, policy $policy, workspace $workspace', ({ override, hook, mode, policy, workspace }) => {
@@ -78,6 +81,17 @@ describe('resolveApproval (resolution table)', () => {
     expect(resolveApproval({ override: 'ask', hookDecision: undefined, toolMode: 'edits', policy: 'ask', workspace: 'write' }).outcome).toBe('user-approval')
     expect(resolveApproval({ override: 'allow', hookDecision: undefined, toolMode: 'edits', policy: 'always', workspace: 'execute' }).outcome).toBe('approved')
     expect(resolveApproval({ override: null, hookDecision: 'ask', toolMode: 'edits', policy: 'ask', workspace: 'write' }).outcome).toBe('user-approval')
+  })
+
+  it('plan (Phase 9): safe tools run, everything else asks, like ask', () => {
+    const plan = (policy: EffectivePolicy, workspace: ToolWorkspaceAccess | null): ApprovalOutcome =>
+      resolveApproval({ override: null, hookDecision: undefined, toolMode: 'plan', policy, workspace }).outcome
+    expect(plan('safe', null)).toBe('not-applicable')
+    expect(plan('safe', 'read')).toBe('not-applicable')
+    expect(plan('ask', 'write')).toBe('user-approval')
+    expect(plan('ask', null)).toBe('user-approval')
+    expect(plan('always', null)).toBe('user-approval')
+    expect(resolveApproval({ override: null, hookDecision: undefined, toolMode: 'plan', policy: 'deny', workspace: null })).toEqual({ outcome: 'denied', reason: DENIED_BY_POLICY })
   })
 
   it('names the reason of an automatic denial', () => {

@@ -15,7 +15,12 @@
 // dictation steps.
 // Phase 7: `projectId` marks a project chat, where PermissionMenu offers Accept edits (also shown while it is the
 // current value) and `/mode edits` selects it; elsewhere `/mode edits` explains "Accept edits works in project chats."
-import type { ClientCommand, ImageOptions, MessageUsage, ReasoningEffort, ToolMode } from '@harness-forge/shared'
+// Phase 9 (ADR-041, ADR-042; C25 wires it, W9.8 / W9.10 implement; frozen from Gate P9-0b): MentionMenu after SlashMenu
+// (`useFileMentions`, project chats), the keydown chain mention menu -> slash menu -> Shift+Tab mode cycle
+// (`useModeCycle`), the textarea's `aria-controls` / `aria-activedescendant` follow whichever menu is open, `canQueue`
+// goes to SendStopButton ("Queue message" while a run is active), "Mention a file" in the `+` menu, and the exposed
+// `restoreQueued(items)`.
+import type { ClientCommand, ImageOptions, MessageUsage, ProjectFileEntry, QueueItem, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { DictationRange } from './dictation'
 import type { SlashItem } from './slash-commands'
@@ -36,12 +41,14 @@ import { useComposerDraft } from '~/composables/useComposerDraft'
 import { useComposerDropZone } from '~/composables/useComposerDropZone'
 import { loadComposerCatalog, useComposerModel } from '~/composables/useComposerModel'
 import { focusInOverlay, useComposerShortcuts } from '~/composables/useComposerShortcuts'
+import { useFileMentions } from '~/composables/useFileMentions'
 import { useImageOptions } from '~/composables/useImageOptions'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { useSpeechPlayer } from '~/composables/useSpeechPlayer'
 import { useVoiceInput } from '~/composables/useVoiceInput'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
@@ -54,7 +61,9 @@ import { DICTATION_SHORTCUT, dictationErrorToast, insertDictation } from './dict
 import DropOverlay from './DropOverlay.vue'
 import EffortMenu from './EffortMenu.vue'
 import ImageOptionsMenu from './ImageOptionsMenu.vue'
+import MentionMenu from './MentionMenu.vue'
 import MicButton from './MicButton.vue'
+import { useModeCycle } from './mode-cycle'
 import { isPickerModel, resolveModelQuery } from './model-picker'
 import ModelPicker from './ModelPicker.vue'
 import { navigateTo } from './nuxt-imports'
@@ -107,6 +116,7 @@ const emit = defineEmits<{
 
 const models = useModelsStore()
 const plugins = usePluginsStore()
+const projects = useProjectsStore()
 const providers = useProvidersStore()
 const settings = useSettingsStore()
 const ui = useUiStore()
@@ -115,6 +125,7 @@ const root = useTemplateRef<HTMLElement>('root')
 const textareaComponent = useTemplateRef<InstanceType<typeof InputGroupTextarea>>('textarea')
 const fileInput = useTemplateRef<HTMLInputElement>('fileInput')
 const slashMenu = useTemplateRef<InstanceType<typeof SlashMenu>>('slashMenu')
+const mentionMenu = useTemplateRef<InstanceType<typeof MentionMenu>>('mentionMenu')
 const micButton = useTemplateRef<InstanceType<typeof MicButton>>('micButton')
 const textarea = computed(() => (textareaComponent.value?.$el as HTMLTextAreaElement | undefined) ?? null)
 
@@ -198,11 +209,35 @@ const slashOpen = computed(() => slashQuery.value !== null
   && firstToken(text.value) !== slashDismissed.value
   && filterSlashItems(slashItems.value, slashQuery.value).length > 0)
 
+// ---------- file mentions (Phase 9, ADR-042; W9.8) ----------
+
+const mentions = useFileMentions({ projectId: computed(() => props.projectId), text, caret })
+const mentionOpen = mentions.open
+const mentionProjectName = computed(() => (props.projectId ? projects.byId(props.projectId)?.name ?? null : null))
+
+/** A picked file or folder replaces the `@` token (W9.8 also attaches a picked file as a project chip). */
+function onMentionSelect(entry: ProjectFileEntry) {
+  const next = mentions.apply(entry)
+  setTextAndCaret(next.text, next.caret, { force: true })
+}
+
+/** `+` -> "Mention a file" (W9.8: inserts `@` at the caret and opens the menu). */
+function startMention() {}
+
+/** The open menu the textarea's `aria-controls` / `aria-activedescendant` point at. */
+const openMenuRef = computed(() => {
+  if (mentionOpen.value)
+    return mentionMenu.value
+  return slashOpen.value ? slashMenu.value : null
+})
+
 // ---------- send state ----------
 
 const warnings = computed(() => capabilityWarnings(attachmentItems.value, current.model.value))
 const typedClientCommand = computed(() => parseClientCommand(text.value) !== null)
 const hasContent = computed(() => text.value.trim() !== '' || attachmentItems.value.length > 0)
+/** + Phase 9: "Queue message" next to Stop while a run is active and there is something to send (W9.8). */
+const canQueue = computed(() => running.value && hasContent.value)
 
 /** Why Send is disabled (tooltip), or enabled. Client commands always run. */
 const sendState = computed<{ disabled: boolean, reason: string | null }>(() => {
@@ -303,6 +338,17 @@ function openMenu(menu: 'model' | 'effort' | 'mode') {
 
 const projectChat = computed(() => props.projectId !== null)
 const permissionModes = computed(() => offeredToolModes({ projectChat: projectChat.value, current: props.toolMode }))
+
+// Shift+Tab cycles the permission mode (Phase 9, ADR-041; W9.10): only while the permission menu shows and no menu is
+// open; otherwise the native reverse focus move happens.
+const modeCycle = useModeCycle({
+  enabled: () => settings.resolved.shiftTabModes && current.toolsAvailable.value && !voiceIndicator.value
+    && !slashOpen.value && !mentionOpen.value,
+  current: () => props.toolMode,
+  projectChat: () => projectChat.value,
+  set: mode => emit('update:toolMode', mode),
+  announce: message => announce(message),
+})
 
 function runClientCommand(name: ClientCommand, args: string) {
   const action = resolveClientCommand(name, args, {
@@ -449,7 +495,12 @@ async function submit() {
 function onKeydown(event: KeyboardEvent) {
   if (isComposingEvent(event))
     return
+  // The mention menu first, then the slash menu, then Shift+Tab (Phase 9).
+  if (mentionMenu.value?.handleKeydown(event))
+    return
   if (slashMenu.value?.handleKeydown(event))
+    return
+  if (modeCycle.handleKeydown(event))
     return
   const plain = !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey
   if (event.key === 'Escape') {
@@ -609,6 +660,8 @@ const exposed: ChatComposerExposed = {
   focus: () => focusTextarea(),
   setText: (value: string) => setTextAndCaret(value, value.length),
   openModelPicker: () => openMenu('model'),
+  // + Phase 9: W9.8 appends the texts to the draft and restores the files as chips.
+  restoreQueued: (_items: readonly QueueItem[]) => {},
 }
 defineExpose(exposed)
 
@@ -644,6 +697,19 @@ const TEXTAREA_CLASS = [
       @close="dismissSlash"
     />
 
+    <MentionMenu
+      ref="mentionMenu"
+      :open="mentionOpen"
+      :query="mentions.token.value?.query ?? ''"
+      :items="mentions.items.value"
+      :state="mentions.state.value"
+      :error-message="mentions.error.value?.message ?? null"
+      :truncated="mentions.truncated.value"
+      :project-name="mentionProjectName"
+      @select="onMentionSelect"
+      @close="mentions.dismiss()"
+    />
+
     <input
       ref="fileInput"
       type="file"
@@ -674,8 +740,8 @@ const TEXTAREA_CLASS = [
         :placeholder="effectivePlaceholder"
         aria-label="Message"
         aria-autocomplete="list"
-        :aria-controls="slashOpen ? slashMenu?.listId : undefined"
-        :aria-activedescendant="slashOpen ? slashMenu?.activeId : undefined"
+        :aria-controls="openMenuRef?.listId"
+        :aria-activedescendant="openMenuRef?.activeId"
         :enterkeyhint="sendKey === 'enter' ? 'send' : 'enter'"
         :data-testid="testIds.composerInput"
         :class="TEXTAREA_CLASS"
@@ -697,7 +763,13 @@ const TEXTAREA_CLASS = [
             @cancel="onRecordingCancel"
           />
           <template v-else>
-            <ComposerAddMenu :return-focus-to="focusTarget" @attach="openFilePicker" @commands="startCommand" />
+            <ComposerAddMenu
+              :return-focus-to="focusTarget"
+              :project-chat="projectChat"
+              @attach="openFilePicker"
+              @commands="startCommand"
+              @mention="startMention"
+            />
             <ModelPicker
               v-model:open="pickerOpen"
               :model-value="modelRef"
@@ -753,8 +825,10 @@ const TEXTAREA_CLASS = [
             :pending="pendingSubmit"
             :reason="sendState.reason"
             :send-key="sendKey"
+            :can-queue="canQueue"
             @send="submit"
             @stop="emit('stop')"
+            @queue="submit"
           />
         </AiPromptInputTools>
       </AiPromptInputFooter>

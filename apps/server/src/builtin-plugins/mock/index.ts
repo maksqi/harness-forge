@@ -4,11 +4,14 @@
 // Phase 6 (plugin API 1.1.0), `mock:image` (an image model), `mock:image-chat` (image output), `mock:image-tool`
 // (calls `generate_image`), `mock:transcribe` and `mock:speech` (./media.ts); Phase 7: `mock:workspace` (walks through
 // the `core-workspace` tools, ./workspace.ts); Phase 8: `mock:checkpoint` (./checkpoint.ts) and `mock:shell`
-// (./shell.ts).
+// (./shell.ts); Phase 9 (the agent mocks, PROVIDERS.md 8 "Agent mocks (Phase 9)", FROZEN after Gate P9-0b):
+// `mock:compact` (./compact.ts), `mock:plan` (./plan-mode.ts), `mock:todo` (./todo.ts), `mock:subagent`
+// (./subagent.ts) and `mock:steer` (./steer.ts), with the shared rules in ./turn.ts.
 import type { HarnessErrorInit, ModelInfo, PluginManifest, ProviderDefinition, ReasoningLevel, ToolDefinition } from '@harness-forge/plugin-sdk'
 import { APICallError } from '@ai-sdk/provider'
 import { definePlugin } from '@harness-forge/plugin-sdk'
 import { z } from 'zod'
+import { MOCK_COMPACT_CONTEXT_WINDOW } from './compact.ts'
 import {
   createMockImageModel,
   createMockSpeechModel,
@@ -37,6 +40,17 @@ export {
   mockCheckpointSteps,
 } from './checkpoint.ts'
 export {
+  MOCK_COMPACT_CONTEXT_WINDOW,
+  MOCK_COMPACT_ECHO_FILLER,
+  MOCK_COMPACT_STEP_FILLER,
+  MOCK_FILLER_WORD,
+  MOCK_LOOP_MAX,
+  MOCK_LOOP_TODO_ID,
+  MOCK_SEEN_QUESTION,
+  MOCK_SUMMARY_PREFIX,
+  mockFiller,
+} from './compact.ts'
+export {
   createMockWav,
   MOCK_IMAGE_MODEL_ID,
   MOCK_IMAGE_TIMING,
@@ -45,8 +59,26 @@ export {
   MOCK_TRANSCRIPT,
   MOCK_TRANSCRIPTION_MODEL_ID,
 } from './media.ts'
-export { MOCK_EMPTY_MESSAGE, MOCK_MODEL_IDS, MOCK_PROVIDER_ID, MOCK_TIMING, MOCK_TOOL_NAME } from './models.ts'
+export { MOCK_EMPTY_MESSAGE, MOCK_MODEL_IDS, MOCK_PROVIDER_ID, MOCK_TIMING, MOCK_TOOL_DENIED, MOCK_TOOL_NAME, MOCK_TOOLS_DISABLED } from './models.ts'
+export {
+  MOCK_PLAN_NOTES_CONTENT,
+  MOCK_PLAN_NOTES_FILE,
+  MOCK_PLAN_OFF,
+  MOCK_PLAN_TEXT,
+  MOCK_PLAN_TODOS,
+  mockRevisedPlan,
+} from './plan-mode.ts'
 export { MOCK_SHELL_DONE_PREFIX } from './shell.ts'
+export { MOCK_STEER_STEP_DELAY_MS, MOCK_STEER_STEPS_MAX } from './steer.ts'
+export {
+  MOCK_PARALLEL_MAX,
+  MOCK_SUBAGENT_CHILD_DELAY_MS,
+  MOCK_SUBAGENT_CONTENT,
+  MOCK_SUBAGENT_FILE,
+  MOCK_SUBAGENTS_UNAVAILABLE,
+  mockTaskInputs,
+} from './subagent.ts'
+export { MOCK_TODO_DONE, MOCK_TODO_STEP_DELAY_MS, mockInvalidTodoList, mockTodoList } from './todo.ts'
 export {
   MOCK_WORKSPACE_COMMAND,
   MOCK_WORKSPACE_CONTENT,
@@ -94,11 +126,12 @@ function mockModel(id: string, name: string, capabilities: Partial<Record<MockCa
 }
 
 /**
- * The twelve mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
- * PROVIDERS.md 8, then `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8). The media models carry explicit kinds:
- * `image` (vision, the same cost), `transcription` and `speech` (with `voices`). `image-chat`, `image-tool`,
- * `workspace`, `checkpoint` and `shell` say `kind: 'chat'` explicitly: an explicit kind always wins over `classify()`,
- * so their ids can never be read as dedicated image models.
+ * The seventeen mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
+ * PROVIDERS.md 8, then `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8), then the agent mocks of Phase 9
+ * (`compact` with a 2000-token context window, `plan`, `todo`, `subagent`, `steer`; the `tools` capability only). The
+ * media models carry explicit kinds: `image` (vision, the same cost), `transcription` and `speech` (with `voices`).
+ * `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell` and the agent mocks say `kind: 'chat'` explicitly: an
+ * explicit kind always wins over `classify()`, so their ids can never be read as dedicated image models.
  */
 export function mockModels(): ModelInfo[] {
   return [
@@ -114,6 +147,11 @@ export function mockModels(): ModelInfo[] {
     mockModel('workspace', 'Mock Workspace', { tools: true }, { kind: 'chat' }),
     mockModel('checkpoint', 'Mock Checkpoint', { tools: true }, { kind: 'chat' }),
     mockModel('shell', 'Mock Shell', { tools: true }, { kind: 'chat' }),
+    mockModel('compact', 'Mock Compact', { tools: true }, { kind: 'chat', contextWindow: MOCK_COMPACT_CONTEXT_WINDOW }),
+    mockModel('plan', 'Mock Plan', { tools: true }, { kind: 'chat' }),
+    mockModel('todo', 'Mock Todo', { tools: true }, { kind: 'chat' }),
+    mockModel('subagent', 'Mock Sub-agent', { tools: true }, { kind: 'chat' }),
+    mockModel('steer', 'Mock Steer', { tools: true }, { kind: 'chat' }),
   ]
 }
 

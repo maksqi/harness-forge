@@ -2,6 +2,8 @@
 // Send / Stop (docs/UI.md 7.7): one 32px ember circle in one slot. `ArrowUp` sends, a filled `Square` stops a
 // running response; a spinner while sending waits for uploads. Disabled = muted colors, kept focusable with
 // `aria-disabled` so its tooltip can explain why. Same size in every state (no layout shift).
+// Phase 9 (ADR-042; C25 declares, W9.8 builds it; frozen from Gate P9-0b): `canQueue` (a run is active and the composer
+// has content) adds the outline "Queue message" button (`composer-queue`) left of Stop, which emits `queue`.
 import type { SendKey } from '@harness-forge/shared'
 import { ArrowUpIcon, Loader2Icon, SquareIcon } from '@lucide/vue'
 import { computed } from 'vue'
@@ -20,16 +22,21 @@ const props = withDefaults(defineProps<{
   /** Why sending is disabled (tooltip). */
   reason?: string | null
   sendKey?: SendKey
+  /** + Phase 9: while running, offer "Queue message" left of Stop (default false). */
+  canQueue?: boolean
 }>(), {
   disabled: false,
   pending: false,
   reason: null,
   sendKey: 'enter',
+  canQueue: false,
 })
 
 const emit = defineEmits<{
   send: []
   stop: []
+  /** + Phase 9: "Queue message" was clicked (what the send key does while a response runs). */
+  queue: []
 }>()
 
 const inactive = computed(() => props.disabled || props.pending)

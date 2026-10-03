@@ -102,6 +102,16 @@ describe('/mode edits (Accept edits, Phase 7)', () => {
   })
 })
 
+describe('/mode plan (Plan, Phase 9)', () => {
+  const base: ClientCommandContext = { resolveModel: () => null, efforts: [], toolsAvailable: true, projectChat: false }
+
+  it('selects Plan in a project chat and explains it elsewhere', () => {
+    expect(parseToolMode('Plan')).toBe('plan')
+    expect(resolveClientCommand('mode', 'plan', { ...base, projectChat: true })).toEqual({ type: 'set-mode', mode: 'plan' })
+    expect(resolveClientCommand('mode', 'PLAN', base)).toEqual({ type: 'error', message: 'Plan mode works in project chats.' })
+  })
+})
+
 describe('parsing', () => {
   it('parses /name and its arguments', () => {
     expect(parseSlashCommand('/effort high')).toEqual({ name: 'effort', args: 'high' })
@@ -152,7 +162,7 @@ describe('resolveClientCommand', () => {
     expect(resolveClientCommand('model', 'gpt-9', context)).toEqual({ type: 'error', message: 'Unknown model "gpt-9".' })
     expect(resolveClientCommand('effort', 'max', context)).toEqual({ type: 'error', message: 'Unknown effort "max". Use auto, low, medium or high.' })
     expect(resolveClientCommand('mode', 'yolo', context)).toEqual({ type: 'error', message: 'Unknown mode "yolo". Use ask, auto or off.' })
-    expect(resolveClientCommand('mode', 'yolo', { ...context, projectChat: true })).toEqual({ type: 'error', message: 'Unknown mode "yolo". Use ask, edits, auto or off.' })
+    expect(resolveClientCommand('mode', 'yolo', { ...context, projectChat: true })).toEqual({ type: 'error', message: 'Unknown mode "yolo". Use ask, edits, plan, auto or off.' })
     expect(resolveClientCommand('effort', 'high', { ...context, efforts: [] }).type).toBe('error')
     expect(resolveClientCommand('mode', '', { ...context, toolsAvailable: false }).type).toBe('error')
   })

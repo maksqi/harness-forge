@@ -1,7 +1,9 @@
 import type { CreateDepsOptions } from './deps.ts'
 import type { CheckpointService } from './services/checkpoints/types.ts'
+import type { ProjectFileService } from './services/project-files/types.ts'
 import type { ShellRuleService } from './services/shell-rules/types.ts'
 import type { FakeCheckpointService } from './testing/fake-checkpoints.ts'
+import type { FakeProjectFileService } from './testing/fake-project-files.ts'
 import type { FakeProjectService } from './testing/fake-projects.ts'
 import type { FakeShellRuleService } from './testing/fake-shell-rules.ts'
 import type { AppDeps } from './types.ts'
@@ -13,16 +15,18 @@ import { getConnInfo } from '@hono/node-server/conninfo'
 import { afterEach, describe, expect, it } from 'vitest'
 import { chatBody, postChat, readSse, runnerOf, streamedText, testChatId } from './chat/testing.ts'
 import { openDatabase } from './db/client.ts'
-import { createDeps, SERVICE_FACTORIES, SERVICE_NAMES, startDeps, stopDeps } from './deps.ts'
+import { createDeps, SERVICE_FACTORIES, SERVICE_NAMES, SHUTDOWN_STEPS, startDeps, stopDeps } from './deps.ts'
 import { EnvError, loadEnv } from './env.ts'
 import { createMemoryLogger } from './logger.ts'
 import { createPluginInstaller } from './plugins/install/index.ts'
 import { createRedactor } from './security/redact.ts'
 import { createCheckpointService } from './services/checkpoints/index.ts'
 import { createDataService } from './services/data/index.ts'
+import { createProjectFileService } from './services/project-files/index.ts'
 import { createProjectService } from './services/projects/index.ts'
 import { SAMPLE_SHARE_TOKEN } from './testing/api-samples.ts'
 import { createTestApp } from './testing/create-test-app.ts'
+import { createFakeProjectFileService } from './testing/fake-project-files.ts'
 import { createFakeProjectService } from './testing/fake-projects.ts'
 import {
   createFakeAudioService,
@@ -515,7 +519,7 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
     expect(order).toEqual(['projects', 'checkpoints', 'installer', 'plugins', 'catalog', 'mcp', 'data'])
   })
 
-  it('stopDeps order: data (first) -> runs -> checkpoints -> plugins -> mcp -> catalog -> events; a failing step still lets the next run', async () => {
+  it('stopDeps order: data (first) -> runs -> projectFiles -> checkpoints -> plugins -> mcp -> catalog -> events; a failing step still lets the next run', async () => {
     const t = await createTestApp()
     cleanups.push(() => t.close())
     const order: string[] = []
@@ -529,6 +533,11 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
         switch (key) {
           case 'data': return { ...target.data, stop: step('data', true) }
           case 'runs': return { ...target.runs, stopAll: step('runs') }
+          // Phase 9: a synchronous `stop()` that throws is a failed step like an async one.
+          case 'projectFiles': return { ...target.projectFiles, stop: () => {
+            order.push('projectFiles')
+            throw new Error('projectFiles failed')
+          } }
           case 'checkpoints': return { ...target.checkpoints, stop: step('checkpoints', true) }
           case 'plugins': return { ...target.plugins, stop: step('plugins') }
           case 'mcp': return { ...target.mcp, stop: step('mcp') }
@@ -539,9 +548,10 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
       },
     })
     await expect(stopDeps(deps)).resolves.toBeUndefined()
-    expect(order).toEqual(['data', 'runs', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(order).toEqual(['data', 'runs', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(order).toEqual([...SHUTDOWN_STEPS])
     const failures = t.logs.records.filter(record => record.msg === 'shutdown step failed').map(record => record.step)
-    expect(failures).toEqual(['data', 'checkpoints'])
+    expect(failures).toEqual(['data', 'projectFiles', 'checkpoints'])
   })
 
   it('startDeps logs HF_TEST_FILE_SWEEP_DELAY_MS without HF_MOCK_PROVIDER=1 as a warning (ignored)', async () => {
@@ -582,5 +592,98 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
     writeFileSync(marker, 'keep')
     await startDeps(t.deps)
     expect(readFileSync(marker, 'utf8')).toBe('keep')
+  })
+})
+
+describe('phase 9 skeleton (project files, the steer queue members, the stop order)', () => {
+  const PROJECT = 'prj_AAAAAAAAAAAAAAAA'
+
+  it('wires projectFiles: search and attach answer not_implemented until W9.6; invalidate and stop are no-ops', async () => {
+    const t = await createTestApp()
+    cleanups.push(() => t.close())
+    expect(SERVICE_NAMES).toContain('projectFiles')
+    const { projectFiles } = t.deps
+    await expect(projectFiles.search(PROJECT, { q: '', limit: 50 })).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(projectFiles.attach(PROJECT, { path: 'a.txt' })).rejects.toMatchObject({ code: 'not_implemented' })
+    expect(projectFiles.invalidate(PROJECT)).toBeUndefined()
+    expect(projectFiles.stop()).toBeUndefined()
+    expect(projectFiles.stop()).toBeUndefined()
+    // The stub factory has the final signature and the production factory is it.
+    expect(SERVICE_FACTORIES.projectFiles).toBe(createProjectFileService)
+  })
+
+  it('the project file index has no boot step: startDeps never touches projectFiles', async () => {
+    const touched: string[] = []
+    const watched = (d: AppDeps): ProjectFileService => {
+      const real = createProjectFileService(d)
+      return new Proxy(real, {
+        get(target, key, receiver) {
+          touched.push(String(key))
+          return Reflect.get(target, key, receiver)
+        },
+      })
+    }
+    const t = await createTestApp({ factories: { projectFiles: watched } })
+    cleanups.push(() => t.close())
+    expect(touched).toEqual([])
+    await t.close()
+    expect(touched).toEqual(['stop'])
+  })
+
+  it('the stop order: the runs (queues first, inside stopAll) -> the file index -> checkpoints', async () => {
+    expect(SHUTDOWN_STEPS).toEqual(['data', 'runs', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(SHUTDOWN_STEPS.indexOf('projectFiles')).toBe(SHUTDOWN_STEPS.indexOf('runs') + 1)
+    // A runner's stopAll runs to its end (queues cleared, runs stopped) before the index is dropped.
+    const t = await createTestApp()
+    cleanups.push(() => t.close())
+    const order: string[] = []
+    const deps = new Proxy(t.deps, {
+      get(target, key, receiver) {
+        if (key === 'runs') {
+          return { ...target.runs, stopAll: async () => {
+            order.push('queues')
+            await Promise.resolve()
+            order.push('runs')
+          } }
+        }
+        if (key === 'projectFiles')
+          return { ...target.projectFiles, stop: () => void order.push('projectFiles') }
+        if (key === 'checkpoints')
+          return { ...target.checkpoints, stop: async () => void order.push('checkpoints') }
+        return Reflect.get(target, key, receiver)
+      },
+    })
+    await stopDeps(deps)
+    expect(order).toEqual(['queues', 'runs', 'projectFiles', 'checkpoints'])
+  })
+
+  it('createTestApp accepts projectFiles: the fake and ready services; overrides and factories win', async () => {
+    const t = await createTestApp({ projectFiles: 'fake' })
+    cleanups.push(() => t.close())
+    const files = t.deps.projectFiles as FakeProjectFileService
+    files.files.set(PROJECT, ['src/app.ts'])
+    expect(await files.search(PROJECT, { q: 'app', limit: 50 })).toMatchObject({ items: [{ path: 'src/app.ts', kind: 'file' }], truncated: false })
+    expect(files.calls.search).toBe(1)
+
+    const ready = createFakeProjectFileService()
+    const u = await createTestApp({ start: false, projectFiles: ready })
+    cleanups.push(() => u.close())
+    expect(u.deps.projectFiles).toBe(ready)
+
+    const override = createFakeProjectFileService()
+    const v = await createTestApp({ start: false, projectFiles: 'fake', overrides: { projectFiles: override } })
+    cleanups.push(() => v.close())
+    expect(v.deps.projectFiles).toBe(override)
+
+    const w = await createTestApp({ start: false, projectFiles: 'fake', factories: { projectFiles: createProjectFileService } })
+    cleanups.push(() => w.close())
+    await expect(w.deps.projectFiles.search(PROJECT, { q: '', limit: 1 })).rejects.toMatchObject({ code: 'not_implemented' })
+  })
+
+  it('the ChatRunner has the steer queue members', async () => {
+    const t = await createTestApp({ start: false })
+    cleanups.push(() => t.close())
+    for (const member of ['queueList', 'enqueue', 'dequeue', 'clearQueue', 'stop', 'stopAll'] as const)
+      expect(typeof t.deps.runs[member], member).toBe('function')
   })
 })

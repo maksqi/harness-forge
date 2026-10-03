@@ -1,12 +1,12 @@
 import type { ProviderDefinition, ToolDefinition } from '@harness-forge/plugin-sdk'
 import type { ToolRegisterOptions } from './types.ts'
-import { HarnessError, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
+import { CLIENT_COMMANDS, HARNESS_COMMANDS, HarnessError, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { PROVIDER_DEFINITIONS } from '../builtin-plugins/core-providers/index.ts'
 import { createWorkspaceTools } from '../builtin-plugins/core-workspace/index.ts'
 import { createMemoryLogger } from '../logger.ts'
-import { validateProviderDefinition, validateToolDefinition } from './validate.ts'
+import { validateCommandDefinition, validateProviderDefinition, validateToolDefinition } from './validate.ts'
 
 function unused(): never {
   throw new Error('unused')
@@ -122,5 +122,21 @@ describe('validateToolDefinition: workspace access (plugin API 1.2.0, ADR-032)',
       expect(() => validateToolDefinition(definition), definition.name).not.toThrow()
       expect(definition.workspace).toBe(WORKSPACE_TOOL_ACCESS[definition.name as keyof typeof WORKSPACE_TOOL_ACCESS])
     }
+  })
+})
+
+describe('validateCommandDefinition: reserved names', () => {
+  it.each([...CLIENT_COMMANDS, ...HARNESS_COMMANDS])('refuses a plugin command named "/%s" (client-only or harness command)', (name) => {
+    for (const definition of [{ name, description: 'Mine.', template: '{{input}}' }, { name, description: 'Mine.', run: async () => ({ type: 'reply' as const, markdown: 'x' }) }]) {
+      const error = thrown(() => validateCommandDefinition(definition))
+      expect(error.code).toBe('validation_error')
+      expect(error.message).toBe(`The command "/${name}" is reserved by the app.`)
+      expect(error.details).toEqual({ issues: [{ path: ['name'], message: error.message, code: 'custom' }] })
+    }
+  })
+
+  it('accepts names that only start like a reserved one', () => {
+    for (const name of ['compact-x', 'compactor', 'news', 'helper'])
+      expect(() => validateCommandDefinition({ name, description: 'Mine.', template: '{{input}}' }), name).not.toThrow()
   })
 })

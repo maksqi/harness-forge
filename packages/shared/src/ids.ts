@@ -129,11 +129,11 @@ export const BUILTIN_PROVIDER_IDS = [
 export type BuiltinProviderId = (typeof BUILTIN_PROVIDER_IDS)[number]
 
 /**
- * Builtin plugins in load order (`core-workspace`: the workspace tools of Phase 7, ADR-032; `mock` only with
- * `HF_MOCK_PROVIDER=1`). Phase 9 adds `core-agent` (`todo_write`, `exit_plan_mode`, `task`; ADR-041 / ADR-043) before
- * `mock` together with the plugin itself (P9-0b).
+ * Builtin plugins in load order (`core-workspace`: the workspace tools of Phase 7, ADR-032; `core-agent`: the agent
+ * tools `todo_write`, `exit_plan_mode` and `task` of Phase 9, ADR-041 / ADR-043; `mock` only with
+ * `HF_MOCK_PROVIDER=1`).
  */
-export const BUILTIN_PLUGIN_IDS = ['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'mock'] as const
+export const BUILTIN_PLUGIN_IDS = ['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'core-agent', 'mock'] as const
 export type BuiltinPluginId = (typeof BUILTIN_PLUGIN_IDS)[number]
 
 /** Id of the dev-only mock provider and plugin. */

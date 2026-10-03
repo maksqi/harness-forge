@@ -283,7 +283,32 @@ reconciled docs (W9.14) follow these, not the task text further down.
     Promise<'cancelled' | 'gone'>`, the session `activity`); **PROVIDERS.md 8 ("Agent mocks (Phase 9)") wins** for
     mock behavior (step delays: `mock:todo` / `mock:steer` 400 ms, sub-agent child steps 300 ms; parallel call ids
     `mock_call_<n>_<i>`; the summarizer prompt's `Focus:` line; `mock:todo`'s `invalid` keyword).
-- **P9-0b (K3, C24, C25, C26, C27)**: recorded at Gate P9-0b.
+- **P9-0b (K3, C24, C25, C26, C27)**:
+  - `ChatRunner.stop(chatId)` keeps returning a boolean (it empties the queue first, also with no run); the `chat.stop`
+    route (W9.2) calls `clearQueue(id, 'stopped')` first to get `dropped`, then `stop`. Queue members:
+    `queueList`, `enqueue(chatId, body, options)`, `dequeue(chatId, itemId): boolean`, `clearQueue(chatId, reason)`.
+    `SHUTDOWN_STEPS` = data, runs, projectFiles, checkpoints, plugins, mcp, catalog, events (the mention index is
+    dropped after the runs stop). Key rotation only stops chats that hold a run: W9.2 also clears the queue of a chat
+    waiting for an approval.
+  - `createPrepareStep({ contextGuard, steer, finalize?, logger })`; `compactStream(session, focus)` is async;
+    `stepInjector` emits leftover chunks before `finish` (and at flush without a `finish`); the queue stub answers reads
+    and removals with an empty queue (only `add` / `requeue` throw until W9.2); until W9.3 the identity `applyToolMode`
+    offers `exit_plan_mode` in every mode (its `always` policy asks). Markers: `[[hf:compact-summarizer:v1]]`,
+    `[[hf:subagent:v1]]`. `AgentRunScope = { chatId, messageId, toolMode, runSubagent, todos }`.
+  - Mock details beyond PROVIDERS.md 8 (W9.14 records them): a step with one call keeps `mock_call_<n>` (`_<i>` only
+    with two or more calls); a user message after a steer is also a steer; `mock:compact` ignores `Step k done.` inside
+    a `MOCK-SUMMARY:` line and `loop N` outside 1–50 echoes; `mock:plan` checks failed / denied results first and skips
+    `todo_write` when it is not offered; every `steps N` step waits 400 ms (echo turns don't); `todo_write` with an empty
+    list answers "Todo list cleared."; the `task` model text reads `{ status, report, error? }` (W9.5's
+    `reduceAgentOutputs` keeps `error`).
+  - Web: `compactionLayout(messages)` returns `{ dimmed }` only — the divider renders inside `ChatMessage` at the part
+    (no `ChatTranscript` divider slot); `todoState(messages)` takes no `{ running }`; extra exports `compactionLabel`,
+    `compactionVariant`, `todoSummary`, `MODE_CYCLE_SHORTCUT`, `CORE_AGENT_PLUGIN_ID`, `TASK_TOOL_NAME`, `PLAN_TOOL_NAME`,
+    `PLAN_NEEDS_PROJECT`, `isProjectOnlyMode`; the stubs keep today's UI (PlanApprovalCard wraps ToolApprovalCard,
+    TaskBlock wraps ToolPart); upload chips carry `data-kind="upload"`.
+  - Ownership additions for P9-A: W9.11 owns `W/components/chat/SubmittedPlaceholder*` ("Compacting conversation…");
+    W9.12 owns `W/components/plugins/list/plugin-display*` (a glyph for `core-agent`).
+  - Coordinator CCR: `declarativeCommandSchema` refuses `isHarnessCommand(name)` (`/compact`), like client commands.
 - **P9-A (W9.1 – W9.12)**: recorded at Gate P9-A.
 - **P9-B (W9.13, W9.14) and the final gate**: recorded by the coordinator.
 

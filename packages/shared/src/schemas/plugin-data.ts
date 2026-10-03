@@ -8,8 +8,10 @@ import {
   commandNameSchema,
   ENV_VAR_NAME_PATTERN,
   FIELD_KEY_PATTERN,
+  HARNESS_COMMANDS,
   HTTP_HEADER_NAME_PATTERN,
   isClientCommand,
+  isHarnessCommand,
   mcpServerIdSchema,
   modelIdSchema,
   providerIdSchema,
@@ -155,10 +157,15 @@ const settingsTemplatedHeaderValueSchema = settingsTemplatedSchema.refine(
 
 /** A slash command whose `{{input}}` placeholders are replaced with the text after `/name `. */
 export const declarativeCommandSchema = z.strictObject({
-  name: commandNameSchema.refine(
-    name => !isClientCommand(name),
-    `Reserved client-only command (${CLIENT_COMMANDS.map(name => `/${name}`).join(', ')}).`,
-  ),
+  name: commandNameSchema
+    .refine(
+      name => !isClientCommand(name),
+      `Reserved client-only command (${CLIENT_COMMANDS.map(name => `/${name}`).join(', ')}).`,
+    )
+    .refine(
+      name => !isHarnessCommand(name),
+      `Reserved harness command (${HARNESS_COMMANDS.map(name => `/${name}`).join(', ')}).`,
+    ),
   description: z.string().trim().min(1).max(120),
   template: z
     .string()

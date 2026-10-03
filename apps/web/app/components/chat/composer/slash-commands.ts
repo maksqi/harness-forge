@@ -4,7 +4,7 @@
 import type { ClientCommand, CommandSummary, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import { CLIENT_COMMANDS, isClientCommand } from '@harness-forge/shared'
 import { EFFORT_LABELS } from './effort'
-import { EDITS_NEEDS_PROJECT, TOOL_MODE_OPTIONS } from './permission'
+import { EDITS_NEEDS_PROJECT, isProjectOnlyMode, PLAN_NEEDS_PROJECT, TOOL_MODE_OPTIONS } from './permission'
 
 /** One row of the slash menu (docs/UI.md 10.4). */
 export interface SlashItem {
@@ -167,11 +167,13 @@ export function resolveClientCommand(name: ClientCommand, args: string, context:
       const mode = parseToolMode(value)
       if (mode === 'edits' && !context.projectChat)
         return { type: 'error', message: EDITS_NEEDS_PROJECT }
+      if (mode === 'plan' && !context.projectChat)
+        return { type: 'error', message: PLAN_NEEDS_PROJECT }
       if (mode)
         return { type: 'set-mode', mode }
       const modes = TOOL_MODE_OPTIONS
         .map(option => option.value)
-        .filter(item => item !== 'edits' || context.projectChat)
+        .filter(item => !isProjectOnlyMode(item) || context.projectChat)
       return { type: 'error', message: `Unknown mode "${value}". Use ${listOf(modes)}.` }
     }
   }

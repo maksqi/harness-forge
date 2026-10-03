@@ -94,8 +94,9 @@ describe('provider list', () => {
     const providers = await t.deps.providers.list()
     expect(providers.map(provider => provider.id)).toEqual([...BUILTIN_PROVIDER_IDS, 'mock'])
     // Visible chat models: the four of v1 plus image-chat, image-tool, workspace (Phase 7), checkpoint and shell (Phase 8)
-    // (mock:image is visible but not a chat model; the transcription and speech models are hidden).
-    expect(providers.at(-1)).toMatchObject({ id: 'mock', pluginId: 'mock', status: 'connected', local: true, icon: null, modelCount: 9, credentials: {} })
+    // and the five agent mocks (Phase 9) (mock:image is visible but not a chat model; the transcription and speech models
+    // are hidden).
+    expect(providers.at(-1)).toMatchObject({ id: 'mock', pluginId: 'mock', status: 'connected', local: true, icon: null, modelCount: 14, credentials: {} })
   })
 
   it('reports statuses: not_configured, env, stored (connected), local and error', async () => {

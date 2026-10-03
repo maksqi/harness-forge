@@ -31,6 +31,7 @@ import { createFilesService } from './services/files/index.ts'
 import { createImageService } from './services/images/index.ts'
 import { createKeyService } from './services/keys/index.ts'
 import { createMaintenanceService } from './services/maintenance/index.ts'
+import { createProjectFileService } from './services/project-files/index.ts'
 import { createProjectService } from './services/projects/index.ts'
 import { createCredentialService } from './services/secrets/credentials.ts'
 import { createSecretStore } from './services/secrets/index.ts'
@@ -73,6 +74,8 @@ export const SERVICE_FACTORIES: ServiceFactories = {
   // Phase 8 (P8-0b): checkpoints (C19 stub, W8.1 - W8.3), shell rules (C19 stub, W8.6).
   checkpoints: createCheckpointService,
   shellRules: createShellRuleService,
+  // Phase 9 (P9-0b): the file index of `@` mentions (C24 stub, W9.6).
+  projectFiles: createProjectFileService,
 }
 
 /** Instantiation order (dependencies first; construction-time access to later services still works lazily). */
@@ -142,17 +145,24 @@ export async function startDeps(deps: AppDeps): Promise<void> {
   await deps.data.start()
 }
 
+/** The steps of `stopDeps`, in order (each named by its service). */
+export const SHUTDOWN_STEPS = ['data', 'runs', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'] as const
+export type ShutdownStep = typeof SHUTDOWN_STEPS[number]
+
 /**
  * Shutdown (ARCHITECTURE.md 5): stop the automatic file sweep first (Phase 8: its timer, and a sweep in flight is
- * aborted) -> abort active runs (persisted as `aborted`) -> stop the checkpoint store (Phase 8: the prune timer, after
+ * aborted) -> the runs (`runs.stopAll()`; Phase 9: every chat's steer queue cleared first, so no queued message starts
+ * a new turn, then every run aborted and persisted as `aborted`, its sub-agents through the run's signal) -> drop the
+ * mention file index (Phase 9, `projectFiles.stop()`) -> stop the checkpoint store (Phase 8: the prune timer, after
  * the runs so no journal write is cut off) -> dispose plugins -> close MCP clients -> stop catalog timers -> close SSE
  * streams. Every step runs even when an earlier one fails (failures are logged). The caller closes the HTTP server
- * before and the database after.
+ * before and the database after. Frozen order (Phase 9): `SHUTDOWN_STEPS`.
  */
 export async function stopDeps(deps: AppDeps): Promise<void> {
-  const steps: Array<[string, () => Promise<void>]> = [
+  const steps: Array<[ShutdownStep, () => Promise<void>]> = [
     ['data', () => deps.data.stop()],
     ['runs', () => deps.runs.stopAll()],
+    ['projectFiles', async () => deps.projectFiles.stop()],
     ['checkpoints', () => deps.checkpoints.stop()],
     ['plugins', () => deps.plugins.stop()],
     ['mcp', () => deps.mcp.stop()],

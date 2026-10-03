@@ -2,7 +2,7 @@ import type { CommandDefinition } from '@harness-forge/plugin-sdk'
 import type { CommandServices } from './commands.ts'
 import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { expandTemplate, parseSlashCommand, resolveCommand } from './commands.ts'
+import { expandTemplate, HARNESS_COMMAND_SUMMARIES, parseSlashCommand, resolveCommand } from './commands.ts'
 
 describe('parseSlashCommand', () => {
   it('reads /name at the start followed by whitespace or the end', () => {
@@ -110,5 +110,39 @@ describe('resolveCommand', () => {
       },
     }
     await expect(resolveCommand(slow, '/slow', { chatId: 'chat', signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+  })
+})
+
+describe('resolveCommand: /compact (Phase 9)', () => {
+  it('resolves the harness command before the registry, with the trimmed input as the focus', async () => {
+    const shadowed = services({ compact: { name: 'compact', description: 'x', template: 'never {{input}}' } })
+    expect(await resolveCommand(shadowed, '/compact keep numbers', context)).toEqual({
+      kind: 'compact',
+      invocation: { name: 'compact', input: 'keep numbers', type: 'compact' },
+      focus: 'keep numbers',
+    })
+    expect(await resolveCommand(services({}), '  /compact  ', context)).toEqual({
+      kind: 'compact',
+      invocation: { name: 'compact', input: '', type: 'compact' },
+      focus: null,
+    })
+  })
+
+  it('does not match other names or text after the start', async () => {
+    expect(await resolveCommand(services({}), '/compactx now', context)).toBeNull()
+    expect(await resolveCommand(services({}), 'please /compact', context)).toBeNull()
+    expect(await resolveCommand(services({}), '/Compact', context)).toBeNull()
+  })
+
+  it('refuses a focus longer than 1000 characters on the message', async () => {
+    expect(await resolveCommand(services({}), `/compact ${'f'.repeat(LIMITS.compactFocusMaxChars)}`, context)).toMatchObject({ kind: 'compact' })
+    await expect(resolveCommand(services({}), `/compact ${'f'.repeat(LIMITS.compactFocusMaxChars + 1)}`, context)).rejects.toMatchObject({
+      code: 'validation_error',
+      details: { issues: [{ path: ['message'] }] },
+    })
+  })
+
+  it('lists compact for GET /commands under the agent tools plugin', () => {
+    expect(HARNESS_COMMAND_SUMMARIES).toEqual([{ name: 'compact', description: 'Summarize the conversation to free up context', pluginId: 'core-agent' }])
   })
 })

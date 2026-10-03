@@ -64,3 +64,17 @@ describe('pOST /api/chat during maintenance', () => {
     }
   })
 })
+
+describe('steer queue members (P9-0b stubs until W9.2)', () => {
+  it('delegate to the runner queue: an empty queue that cannot take items yet', async () => {
+    const chatId = testChatId(903)
+    const runs = t.deps.runs
+    expect(runs.queueList(chatId)).toEqual([])
+    expect(runs.dequeue(chatId, 'msg_q000000000000001')).toBe(false)
+    expect(runs.clearQueue(chatId, 'stopped')).toEqual([])
+    const body = { message: { id: 'msg_q000000000000001', role: 'user' as const, parts: [{ type: 'text' as const, text: 'later' }] }, modelRef: 'mock:echo', reasoningEffort: 'auto' as const, toolMode: 'ask' as const }
+    await expect(runs.enqueue(chatId, body, { logger: t.deps.logger, requestId: 'req_test' })).rejects.toMatchObject({ code: 'not_implemented' })
+    // Stop empties the queue first and still answers for a chat without a run.
+    expect(await runs.stop(chatId)).toBe(false)
+  })
+})

@@ -6,6 +6,7 @@ import type {
   ChatChanges,
   ChatDetail,
   ChatSummary,
+  CompactionData,
   DataCleanupPreview,
   DataCleanupResult,
   DataSummary,
@@ -14,23 +15,31 @@ import type {
   GitStatus,
   GitStatusFile,
   HarnessUIMessage,
+  HarnessUIMessagePart,
   KeyStatus,
   MessageBranch,
   PluginDetail,
   PluginLogEntry,
   PluginSummary,
+  ProjectFileEntry,
   ProjectSummary,
   ProviderSummary,
+  QueueItem,
   RestoreResult,
   RewindPreview,
   Settings,
   ShellOutput,
   ShellRule,
+  SteerData,
+  TaskInput,
+  TaskOutput,
+  TaskStep,
+  TodoItem,
   ToolSummary,
   WorkspaceChangedData,
 } from '@harness-forge/shared'
 import type { ChangesRow } from '~/components/workspace/changes/changes-rows'
-import { DEFAULT_SETTINGS } from '@harness-forge/shared'
+import { countTodos, DEFAULT_SETTINGS } from '@harness-forge/shared'
 
 /** A fixed uuidv7 chat id with a varying last group: chatId(1) -> '...000000000001'. */
 export function chatId(n: number): string {
@@ -411,4 +420,128 @@ export function shellOutput(overrides: Partial<ShellOutput> = {}): ShellOutput {
 
 export function logEntry(seq: number, overrides: Partial<PluginLogEntry> = {}): PluginLogEntry {
   return { seq, at: 1_759_000_000_000 + seq, level: 'info', message: `entry ${seq}`, ...overrides }
+}
+
+// ---------- Agent 2.0 (Phase 9): compaction, steers, the queue, todos, plans, sub-agents, mentions ----------
+
+/** The data of a compaction marker (`data-compaction`, ADR-040): `/compact` without a focus, 12 messages summarized. */
+export function compactionData(overrides: Partial<CompactionData> = {}): CompactionData {
+  return {
+    trigger: 'manual',
+    keep: 'none',
+    summary: 'The user is moving auth to server sessions.',
+    modelRef: 'mock:compact',
+    messagesCompacted: 12,
+    tokensBefore: 182_000,
+    tokensAfter: 9_000,
+    createdAt: 1_759_000_000_000,
+    ...overrides,
+  }
+}
+
+/** A `data-compaction` part of an assistant message. */
+export function compactionPart(overrides: Partial<CompactionData> = {}, id = 'compaction_1'): HarnessUIMessagePart {
+  return { type: 'data-compaction', id, data: compactionData(overrides) }
+}
+
+/** The data of a steer (`data-steer`, ADR-042): a queued text message delivered at a step boundary. */
+export function steerData(overrides: Partial<SteerData> = {}): SteerData {
+  return {
+    id: messageId('steer1'),
+    parts: [{ type: 'text', text: 'Use the vitest filter instead' }],
+    queuedAt: 1_759_000_000_000,
+    deliveredAt: 1_759_000_001_000,
+    ...overrides,
+  }
+}
+
+/** A `data-steer` part of an assistant message. */
+export function steerPart(overrides: Partial<SteerData> = {}): HarnessUIMessagePart {
+  return { type: 'data-steer', data: steerData(overrides) }
+}
+
+/** A queued message (`QueueItem`, ADR-042): one text part (`text`), sent in Ask with mock:echo. */
+export function queueItem(overrides: Partial<QueueItem> & { text?: string } = {}): QueueItem {
+  const { text = 'Also update the README', ...rest } = overrides
+  const id = rest.id ?? messageId('queued1')
+  return {
+    id,
+    message: { id, role: 'user', parts: [{ type: 'text', text }] },
+    modelRef: 'mock:echo',
+    reasoningEffort: 'auto',
+    toolMode: 'ask',
+    createdAt: 1_759_000_000_000,
+    turnOnly: false,
+    ...rest,
+  }
+}
+
+/** One item of the agent's todo list (ADR-041). */
+export function todoItem(overrides: Partial<TodoItem> = {}): TodoItem {
+  return { id: 't1', content: 'Run the parser tests', status: 'pending', ...overrides }
+}
+
+/** A finished `todo_write` call (`tool-todo_write`, output-available) that stored `todos`. */
+export function todoWritePart(todos: TodoItem[], toolCallId = 'call_todo_1'): HarnessUIMessagePart {
+  return {
+    type: 'tool-todo_write',
+    toolCallId,
+    state: 'output-available',
+    input: { todos },
+    output: { todos, counts: countTodos(todos) },
+  }
+}
+
+/** An `exit_plan_mode` call waiting for the plan approval (ADR-041). */
+export function planApprovalPart(plan = '# Plan\n1. Create notes.txt', toolCallId = 'call_plan_1'): HarnessUIMessagePart {
+  return {
+    type: 'tool-exit_plan_mode',
+    toolCallId,
+    state: 'approval-requested',
+    input: { plan },
+    approval: { id: `approval_${toolCallId}` },
+  }
+}
+
+/** The input of a `task` call (ADR-043): an explore sub-agent. */
+export function taskInput(overrides: Partial<TaskInput> = {}): TaskInput {
+  return { description: 'Find the session code', prompt: 'List the files that create sessions.', type: 'explore', ...overrides }
+}
+
+/** One finished tool call of a sub-agent. */
+export function taskStep(overrides: Partial<TaskStep> = {}): TaskStep {
+  return { toolCallId: 'child_call_1', toolName: 'read_file', summary: 'src/auth/session.ts', state: 'done', ...overrides }
+}
+
+/** The output of a finished explore sub-agent with one step. */
+export function taskOutput(overrides: Partial<TaskOutput> = {}): TaskOutput {
+  return {
+    status: 'completed',
+    type: 'explore',
+    description: 'Find the session code',
+    modelRef: 'mock:subagent',
+    steps: [taskStep()],
+    stepsOmitted: 0,
+    report: 'Sessions are created in `src/auth/session.ts`.',
+    startedAt: 1_759_000_000_000,
+    finishedAt: 1_759_000_041_000,
+    ...overrides,
+  }
+}
+
+/** A `task` call with an output: finished, or a snapshot of a running sub-agent (`preliminary`). */
+export function taskPart(options: { toolCallId?: string, input?: TaskInput, output?: TaskOutput, preliminary?: boolean } = {}): HarnessUIMessagePart {
+  return {
+    type: 'tool-task',
+    toolCallId: options.toolCallId ?? 'call_task_1',
+    state: 'output-available',
+    input: options.input ?? taskInput(),
+    output: options.output ?? taskOutput(),
+    ...(options.preliminary ? { preliminary: true } : {}),
+  }
+}
+
+/** A candidate of the `@` menu (`GET /projects/:id/files`). */
+export function projectFileEntry(path = 'src/parser.ts', kind: ProjectFileEntry['kind'] = 'file'): ProjectFileEntry {
+  return { path, kind }
 }

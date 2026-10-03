@@ -16,6 +16,9 @@
 // files and edit") and `focusRewind(id)` puts focus back on its rewind button. In a project chat (`projectId`) a user
 // message gets the button when a finished `write_file` / `edit_file` call follows it on the shown path: one backwards
 // pass computes the set (`rewindable`, part of each row's v-memo); while a reply runs the button hides like Edit.
+// Phase 9 (C25 declares, W9.11 implements; frozen from Gate P9-0b): `compactionLayout(messages).dimmed` gives each row
+// its `compacted` flag (part of the row's v-memo); `activity` (the session's transient activity, from ChatView) goes to
+// the streaming last row ("Compacting conversation…"). The dividers render inside ChatMessage at their part's position.
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { ChatStatus, FileUIPart } from 'ai'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
@@ -29,6 +32,7 @@ import { testIds } from '~/utils/testids'
 import { TRANSCRIPT_SCROLL } from './chat-context'
 import { toolNameOf } from './chat-format'
 import ChatMessage from './ChatMessage.vue'
+import { compactionLayout } from './compaction/compaction'
 import ErrorPart from './parts/ErrorPart.vue'
 import SubmittedPlaceholder from './SubmittedPlaceholder.vue'
 import TranscriptScrollButton from './TranscriptScrollButton.vue'
@@ -46,11 +50,17 @@ const props = withDefaults(defineProps<{
   switching?: boolean
   /** + Phase 8: the chat's project; null = none (no "Rewind files to here"). */
   projectId?: string | null
+  /**
+   * + Phase 9 (ADR-040): the session's transient activity (`session.activity`): 'compacting' while a summary is written
+   * (the submitted placeholder and the streaming last row say "Compacting conversation…"); default null.
+   */
+  activity?: 'compacting' | null
 }>(), {
   loading: false,
   branches: () => ({}),
   switching: false,
   projectId: null,
+  activity: null,
 })
 
 const emit = defineEmits<{
@@ -79,6 +89,11 @@ const showPlaceholder = computed(() => props.status === 'submitted' && !lastIsAs
 
 function isStreaming(index: number): boolean {
   return busy.value && index === props.messages.length - 1 && props.messages[index]?.role === 'assistant'
+}
+
+/** + Phase 9: the activity of a row: only the streaming last reply shows it. */
+function activityFor(index: number): 'compacting' | null {
+  return isStreaming(index) ? props.activity : null
 }
 
 function errorFor(index: number): unknown {
@@ -212,6 +227,11 @@ const rewindable = computed<ReadonlySet<string>>(() => {
   }
   return ids
 })
+
+// ---------- compaction (Phase 9) ----------
+
+/** + Phase 9: the rows the latest compaction replaced for the model (dimmed, `data-compacted`; docs/UI.md 7.24). */
+const layout = computed(() => compactionLayout(props.messages))
 
 /** + Phase 8: a closed rewind dialog puts focus back on "Rewind files to here" of that message (docs/UI.md 7.22). */
 function focusRewind(messageId: string): void {
@@ -385,7 +405,7 @@ defineExpose({
         <div
           v-for="(message, index) in messages"
           :key="message.id"
-          v-memo="[message, index >= renderStart, index === messages.length - 1, isStreaming(index), showThinking, index === messages.length - 1 && busy, errorFor(index), branches[message.id], branches[message.id] !== undefined && (busy || switching), rewindable.has(message.id)]"
+          v-memo="[message, index >= renderStart, index === messages.length - 1, isStreaming(index), showThinking, index === messages.length - 1 && busy, errorFor(index), branches[message.id], branches[message.id] !== undefined && (busy || switching), rewindable.has(message.id), layout.dimmed.has(message.id), activityFor(index)]"
           data-slot="transcript-message"
           class="contents"
         >
@@ -402,6 +422,8 @@ defineExpose({
             :branch="branches[message.id] ?? null"
             :switching="switching"
             :can-rewind="rewindable.has(message.id)"
+            :compacted="layout.dimmed.has(message.id)"
+            :activity="activityFor(index)"
             @regenerate="emit('regenerate', message.id)"
             @edit="(text, files) => emit('edit', message.id, text, files)"
             @approval="decision => emit('approval', decision)"

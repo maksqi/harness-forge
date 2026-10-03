@@ -5,6 +5,8 @@
 // password block. Choices save at once (optimistic, toast on failure); text fields save on blur or Enter (Mod+Enter in
 // the instructions), Esc restores the saved value. Bulk export, import and delete-all live in Settings -> Data
 // (docs/UI.md 9.8, ADR-024); a single chat is still exported from its chat menus.
+// Phase 9 (C25 mounts it, W9.12 fills it): the Agent section (AgentSettingsSection, docs/UI.md 9.11) sits between the
+// Chat section and Custom instructions; W9.12 adds the Shift+Tab switch (`settings-shift-tab-modes`) after Alt shortcuts.
 import type { ReasoningEffort, SendKey, Settings, ToolMode } from '@harness-forge/shared'
 import { computed, ref, useId, watch } from 'vue'
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -16,6 +18,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { isApplePlatform } from '~/components/common/keys'
 import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
+import AgentSettingsSection from './agent/AgentSettingsSection.vue'
 import {
   DISPLAY_NAME_MAX,
   displayNameError,
@@ -335,6 +338,8 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
       </Field>
     </FieldGroup>
   </SettingsSection>
+
+  <AgentSettingsSection />
 
   <SettingsSection title="Custom instructions" description="Sent with every chat, before the chat's own instructions.">
     <Field :data-invalid="instructions.error.value ? true : undefined">

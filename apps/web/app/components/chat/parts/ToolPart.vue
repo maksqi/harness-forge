@@ -13,6 +13,10 @@
 // matched, ADR-038) shows ToolRuleBadge before the summary; the approval payload passes the card's `allowRules` on; a
 // running shell's terminal shows the folder it starts in (the call's `cwd` input, else the chat's current shell folder
 // from TOOL_APPROVAL_CONTEXT.shellCwd()).
+// Phase 9 (C25 wires it, W9.10 owns it; ADR-041, ADR-043): an `exit_plan_mode` call of `core-agent` awaiting its decision
+// shows PlanApprovalCard instead of ToolApprovalCard, and its decision goes up as the approval's `planMode` / `reason`;
+// a preliminary output (`output-available` with `preliminary: true`, an async-generator tool such as `task`) is running
+// while the message streams and stopped otherwise.
 import type { ToolPartLike } from '../chat-format'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
 import { shellToolOutputSchema, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
@@ -33,11 +37,14 @@ import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
+import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
 import { TRANSCRIPT_SCROLL } from '../chat-context'
 import {
+  CORE_AGENT_PLUGIN_ID,
   formatToolValue,
   isServerTruncated,
   isSupersededDenial,
+  PLAN_TOOL_NAME,
   splitMcpToolName,
   toolNameOf,
 } from '../chat-format'
@@ -71,9 +78,10 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   /**
    * + Phase 7: `acceptEdits` = "Accept all edits in this chat" (the session switches the mode to `edits`). + Phase 8:
-   * `allowRules` = the shell rules to create before the approval is sent (passed through from the card).
+   * `allowRules` = the shell rules to create before the approval is sent (passed through from the card). + Phase 9:
+   * `planMode` / `reason` = the plan card's mode and feedback (the session sets the mode before answering).
    */
-  approval: [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean, acceptEdits?: boolean, allowRules?: AllowRules }]
+  approval: [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean, acceptEdits?: boolean, allowRules?: AllowRules, planMode?: 'edits' | 'ask', reason?: string }]
 }>()
 
 const plugins = usePluginsStore()
@@ -131,6 +139,9 @@ const status = computed<RowStatus>(() => {
         return 'denied'
       return props.streaming ? 'running' : 'stopped'
     case 'output-available':
+      // + Phase 9: a preliminary output is a snapshot of a tool that still runs (or stopped without a final value).
+      if (props.part.preliminary === true)
+        return props.streaming ? 'running' : 'stopped'
       return 'done'
     case 'output-error':
       return 'error'
@@ -142,6 +153,8 @@ const status = computed<RowStatus>(() => {
 })
 
 const awaitingDecision = computed(() => props.part.state === 'approval-requested' && !props.superseded)
+/** + Phase 9: the plan tool of `core-agent` (before the tool list has loaded, any `exit_plan_mode`). */
+const isPlanTool = computed(() => name.value === PLAN_TOOL_NAME && (tool.value === undefined || tool.value.pluginId === CORE_AGENT_PLUGIN_ID))
 const supersededDenial = computed(() => status.value === 'denied'
   && (isSupersededDenial(props.part) || props.part.state === 'approval-requested'))
 const statusLabel = computed(() => ({
@@ -185,6 +198,21 @@ const view = computed(() => {
     return { ...running, cwd: approvalContext?.shellCwd() ?? null }
   return running
 })
+
+/** + Phase 9: the plan card's decision as the approval of the call (`planMode` only with an approval). */
+function onPlanDecide(decision: { approved: boolean, mode?: 'edits' | 'ask', feedback?: string }) {
+  const approval = props.part.approval
+  if (!approval)
+    return
+  emit('approval', {
+    id: approval.id,
+    approved: decision.approved,
+    toolName: name.value,
+    alwaysAllow: false,
+    ...(decision.approved && decision.mode ? { planMode: decision.mode } : {}),
+    ...(decision.feedback ? { reason: decision.feedback } : {}),
+  })
+}
 
 function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdits?: boolean, allowRules?: AllowRules }) {
   const approval = props.part.approval
@@ -272,8 +300,14 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
         </div>
       </AiToolContent>
     </AiTool>
+    <PlanApprovalCard
+      v-if="awaitingDecision && isPlanTool"
+      :part="part"
+      :source="tool?.pluginId ?? null"
+      @decide="onPlanDecide"
+    />
     <ToolApprovalCard
-      v-if="awaitingDecision"
+      v-else-if="awaitingDecision"
       :part="part"
       :tool-name="name"
       :source="tool?.pluginId ?? null"

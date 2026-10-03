@@ -1,5 +1,6 @@
 import type { HarnessUIMessagePart } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
+import { compactionData, compactionPart, steerData, steerPart, taskPart } from '~/utils/testing/fixtures'
 import {
   capText,
   firstStringArg,
@@ -64,6 +65,28 @@ describe('messageBlocks', () => {
     // Keys stay stable while more images stream into a gallery.
     expect(galleries[0]!.key).toBe('gallery-1')
     expect(messageBlocks(parts.slice(0, 2))[0]!.key).toBe('gallery-1')
+  })
+
+  it('turns compaction markers, steers and task calls into their blocks; activity never renders (Phase 9)', () => {
+    const parts: HarnessUIMessagePart[] = [
+      { type: 'step-start' },
+      { type: 'data-activity', data: { kind: 'compacting' } },
+      compactionPart({ trigger: 'auto', keep: 'last-user' }),
+      { type: 'text', text: 'Working', state: 'done' },
+      steerPart(),
+      taskPart(),
+      { type: 'tool-web_fetch', toolCallId: 'c2', state: 'output-available', input: { url: 'https://a.example' }, output: 'ok' },
+      // Invalid data renders nothing.
+      { type: 'data-compaction', data: { trigger: 'manual' } } as unknown as HarnessUIMessagePart,
+      { type: 'data-steer', data: { id: 'nope' } } as unknown as HarnessUIMessagePart,
+    ]
+    const blocks = messageBlocks(parts)
+    expect(blocks.map(block => block.kind)).toEqual(['compaction', 'text', 'steer', 'task', 'tool'])
+    const [compaction, , steer, task] = blocks
+    expect(compaction).toMatchObject({ kind: 'compaction', index: 2, data: compactionData({ trigger: 'auto', keep: 'last-user' }) })
+    expect(steer).toMatchObject({ kind: 'steer', index: 4, steer: steerData() })
+    expect(task).toMatchObject({ kind: 'task', key: 'task-call_task_1', index: 5 })
+    expect(new Set(blocks.map(block => block.key)).size).toBe(blocks.length)
   })
 
   it('finds the image file parts of a message', () => {

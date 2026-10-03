@@ -5,7 +5,11 @@
 // and waits for it; shutdown stops every run the same way.
 // Phase 7 (C16-T1): while a maintenance operation with `blockRuns` holds the lock (the key rotation), `POST /chat`
 // answers `409 conflict` (`reason: 'busy'`) before the chat is acquired.
+// Phase 9 (C26 seams, ADR-042): one steer queue per runner (`queue.ts`); the `ChatRunner` queue members delegate to it;
+// `stop` empties the chat's queue before it stops the run and `stopAll` empties every queue before it aborts the runs;
+// every run gets the queue and the release callback `onRunReleased` (the queue's run end, W9.2).
 import type { AppDeps } from '../types.ts'
+import type { RunEnding } from './history.ts'
 import type { Run } from './runs.ts'
 import type { ChatRunner } from './types.ts'
 import { isHarnessError } from '@harness-forge/shared'
@@ -13,6 +17,7 @@ import { assertRunsAllowed } from '../services/maintenance/index.ts'
 import { abortReason, preStreamError } from './errors.ts'
 import { launchRun, TaskTracker } from './pipeline.ts'
 import { commitHistory, prepareRun, stoppedBeforeStart } from './prepare.ts'
+import { createChatQueue } from './queue.ts'
 import { createRunRegistry, toActiveRun } from './runs.ts'
 import { TITLE_TIMEOUT_MS } from './title.ts'
 
@@ -47,6 +52,15 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
   const lifecycle = new AbortController()
   const stopWaitMs = options.stopWaitMs ?? STOP_WAIT_MS
   const shutdownStopWaitMs = Math.min(stopWaitMs, options.shutdownStopWaitMs ?? SHUTDOWN_STOP_WAIT_MS)
+  // The services are read lazily inside the queue's methods (the runner is built inside the deps factory).
+  const queue = createChatQueue(deps, { hasRun: chatId => registry.get(chatId) !== undefined, now })
+
+  /**
+   * A run of `chatId` left the registry (Phase 9, `RunContext.onReleased`). Stub until W9.2: completed without a pending
+   * approval → the first queued item becomes the next turn; awaiting an approval → the items wait; aborted / failed →
+   * every item is removed.
+   */
+  function onRunReleased(_chatId: string, _ending: RunEnding, _awaitingApproval: boolean): void {}
 
   /** Releases a run that did not settle after a stop; its late end callback stores nothing. */
   function forceRelease(run: Run): void {
@@ -106,6 +120,8 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
           titleTimeoutMs: options.titleTimeoutMs ?? TITLE_TIMEOUT_MS,
           lifecycle: lifecycle.signal,
           ...(options.imageKeepAliveMs === undefined ? {} : { imageKeepAliveMs: options.imageKeepAliveMs }),
+          queue,
+          onReleased: (ending, awaitingApproval) => onRunReleased(body.chatId, ending, awaitingApproval),
         })
       }
       catch (error) {
@@ -128,6 +144,8 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
     },
 
     stop: async (chatId) => {
+      // The queue first (also without a run: a chat waiting for an approval), so no queued message starts a turn.
+      queue.clear(chatId, 'stopped')
       const run = registry.get(chatId)
       if (run === undefined)
         return false
@@ -144,10 +162,19 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
     }),
 
     stopAll: async () => {
+      queue.clearAll('stopped')
       lifecycle.abort(abortReason('The server is shutting down.'))
       await Promise.all(registry.list().map(run => stopRun(run, 'The server is shutting down.', shutdownStopWaitMs)))
       await tasks.idle()
     },
+
+    queueList: chatId => queue.list(chatId),
+
+    enqueue: (chatId, body, runOptions) => queue.add(chatId, body, runOptions),
+
+    dequeue: (chatId, itemId) => queue.remove(chatId, itemId),
+
+    clearQueue: (chatId, reason) => queue.clear(chatId, reason),
 
     idle: () => tasks.idle(),
   }

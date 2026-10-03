@@ -55,7 +55,7 @@ describe('list and detail', () => {
     const { status, body } = await json('/api/plugins')
     expect(status).toBe(200)
     const list = listResponseSchema(pluginSummarySchema).parse(body)
-    expect(list.items.map(plugin => plugin.id)).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'acme-docs', 'dice-roller', 'lobe-icon'])
+    expect(list.items.map(plugin => plugin.id)).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'core-agent', 'acme-docs', 'dice-roller', 'lobe-icon'])
   })
 
   it('returns the detail DTO, 404 for unknown ids and 400 for invalid ids', async () => {

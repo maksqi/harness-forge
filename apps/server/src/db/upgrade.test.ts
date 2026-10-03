@@ -14,6 +14,12 @@
 //   projects is migrated with the real folder; 0005 must be exactly two `CREATE TABLE` and five `CREATE INDEX`
 //   statements (new tables with real cascading foreign keys, nothing else touched), every chat and project survives, and
 //   deleting a chat or a project cascades into the new tables while global shell rules stay.
+// - v1.4 -> v1.5 through migration 0006 (C24-T6, ADR-038 amendment): a database with `0000` ... `0005`, duplicate shell
+//   rules in both scopes and `allow` overrides on `shell` and `current_time` is migrated with the real folder; 0006 must be
+//   exactly one `DELETE`, one `UPDATE` and two partial `CREATE UNIQUE INDEX` statements (no rebuild: foreign keys are on),
+//   keep the oldest rule of each scope and prefix (ties by id), clear only the `shell` override, lose no chat, message or
+//   project, and make a second identical rule a unique violation. The checks also run against copies of 0006 without its
+//   `DELETE` or `UPDATE`, which must fail.
 import type { Database } from './client.ts'
 import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -24,6 +30,7 @@ import { LISTING_TTL_MS } from '../catalog/index.ts'
 import { buildTree, latestLeafUnder } from '../services/chats/tree.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { openDatabase } from './client.ts'
+import { uniqueViolation } from './constraint.test-util.ts'
 import { migrateDatabase, resolveMigrationsFolder } from './migrate.ts'
 import { TABLE_NAMES } from './schema.ts'
 
@@ -48,6 +55,7 @@ const TREE = JOURNAL.entries.find(entry => entry.tag.startsWith('0001_'))
 const REMEMBERED = JOURNAL.entries.find(entry => entry.tag.startsWith('0002_'))
 const PROJECTS = JOURNAL.entries.find(entry => entry.tag.startsWith('0004_'))
 const CHECKPOINTS = JOURNAL.entries.find(entry => entry.tag.startsWith('0005_'))
+const SHELL_UNIQUE = JOURNAL.entries.find(entry => entry.tag.startsWith('0006_'))
 
 const opened: Database[] = []
 const tempDirs: string[] = []
@@ -947,7 +955,8 @@ describe('upgrade of a v1.3 database through migration 0005 (workspace checkpoin
 
     const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
-    expect(applied.rows).toHaveLength(6)
+    // 0005 and every later migration (Phase 9: 0006).
+    expect(applied.rows).toHaveLength(7)
     const shape = await schemaShape(database)
     expect(shape.tables).toEqual([...TABLE_NAMES].sort())
     expect(shape.tables).toHaveLength(18)
@@ -1014,6 +1023,280 @@ describe('upgrade of a v1.3 database through migration 0005 (workspace checkpoin
       expect(detail.messages.map(message => message.id)).toEqual(['msg_d100000000000000', 'msg_d100000000000001'])
       expect(detail.messages[1]?.parts[0]).toMatchObject({ type: 'tool-write_file', state: 'output-available' })
       expect((await t.deps.projects.list()).map(project => project.id).sort()).toEqual([V13_PROJECT, V13_OTHER_PROJECT])
+    }
+    finally {
+      await t.close()
+    }
+  })
+})
+
+// ---------- v1.4 -> v1.5: migration 0006 (unique shell rules per scope) ----------
+
+/** A migrations folder holding 0000 - 0005 (their SQL + a six-entry journal): the schema of a v1.4 data directory. */
+function v14Folder(): string {
+  const entries = [INITIAL, TREE, REMEMBERED, REFRESH, PROJECTS, CHECKPOINTS]
+  if (entries.includes(undefined))
+    throw new Error('a migration of 0000 - 0005 is missing from the journal')
+  const dir = tempDir()
+  mkdirSync(join(dir, 'meta'))
+  for (const entry of entries as JournalEntry[])
+    copyFileSync(join(REAL_FOLDER, `${entry.tag}.sql`), join(dir, `${entry.tag}.sql`))
+  writeFileSync(join(dir, 'meta', '_journal.json'), JSON.stringify({ ...JOURNAL, entries }))
+  return dir
+}
+
+/** The statements of migration 0006 without comments and blank lines (split like `migrate()` does). */
+function shellUniqueStatements(): string[] {
+  if (SHELL_UNIQUE === undefined)
+    throw new Error('migration 0006 is missing from the journal')
+  return readFileSync(join(REAL_FOLDER, `${SHELL_UNIQUE.tag}.sql`), 'utf8')
+    .split('--> statement-breakpoint')
+    .map(statement => statement.replace(/^--.*$/gm, '').trim())
+    .filter(Boolean)
+}
+
+/** A copy of the real folder whose 0006 lacks the statement starting with `keyword` (`DELETE` or `UPDATE`). */
+function folderWithout0006(keyword: 'DELETE' | 'UPDATE'): string {
+  if (SHELL_UNIQUE === undefined)
+    throw new Error('migration 0006 is missing from the journal')
+  const dir = tempDir()
+  cpSync(REAL_FOLDER, dir, { recursive: true })
+  const path = join(dir, `${SHELL_UNIQUE.tag}.sql`)
+  const statements = readFileSync(path, 'utf8').split('--> statement-breakpoint')
+  const kept = statements.filter(statement => !new RegExp(`^\\s*(?:--[^\\n]*\\n\\s*)*${keyword}\\b`, 'i').test(statement))
+  expect(statements.length - kept.length, `0006 has one ${keyword} statement`).toBe(1)
+  writeFileSync(path, kept.join('--> statement-breakpoint'))
+  return dir
+}
+
+const V14_PROJECT = 'prj_v14project000001'
+const V14_OTHER_PROJECT = 'prj_v14project000002'
+const CHAT_R1 = '0199a8f0-0000-7000-8000-0000000000e1'
+const CHAT_R2 = '0199a8f0-0000-7000-8000-0000000000e2'
+
+/**
+ * Shell rules of the v1.4 seed: `[id, projectId, prefix, createdAt]`. v1.4 serialized rule creation only inside one
+ * process, so a scope could hold a prefix twice. Groups: two global `ls` (the newer has the lower id), three global
+ * `git status`, an equal-`created_at` pair of global `make` (decided by id), two `ls` in the first project, one `ls` in
+ * the other project, single rules in both scopes.
+ */
+const V14_RULES: Array<[string, string | null, string, number]> = [
+  ['srl_glob000000000002', null, 'ls', 10],
+  ['srl_glob000000000001', null, 'ls', 20],
+  ['srl_gits000000000003', null, 'git status', 1],
+  ['srl_gits000000000001', null, 'git status', 2],
+  ['srl_gits000000000002', null, 'git status', 3],
+  ['srl_make000000000002', null, 'make', 30],
+  ['srl_make000000000001', null, 'make', 30],
+  ['srl_pwd0000000000001', null, 'pwd', 40],
+  ['srl_prja000000000001', V14_PROJECT, 'ls', 15],
+  ['srl_prja000000000002', V14_PROJECT, 'ls', 5],
+  ['srl_prja000000000003', V14_PROJECT, 'pnpm test', 50],
+  ['srl_prjb000000000001', V14_OTHER_PROJECT, 'ls', 60],
+]
+
+/** The rule kept for each scope and prefix: the oldest, ties by id. */
+const V14_KEPT_RULES = [
+  'srl_gits000000000003',
+  'srl_glob000000000002',
+  'srl_make000000000001',
+  'srl_prja000000000002',
+  'srl_prja000000000003',
+  'srl_prjb000000000001',
+  'srl_pwd0000000000001',
+]
+
+/** Tool preferences of the v1.4 seed: `[toolName, enabled, override]`. */
+const V14_TOOL_PREFS: Array<[string, 0 | 1, string | null]> = [
+  ['shell', 1, 'allow'],
+  ['current_time', 1, 'allow'],
+  ['write_file', 0, 'deny'],
+  ['read_file', 1, 'ask'],
+]
+
+/**
+ * Creates a v1.4 database file (0000 - 0005) with two projects, a chat in the first project (with a journal row) and
+ * one without, their messages, the duplicate shell rules of `V14_RULES` and the tool preferences of `V14_TOOL_PREFS`;
+ * returns every row of the tables 0006 must not touch.
+ */
+async function seedV14Database(path: string): Promise<Record<'projects' | 'chats' | 'messages' | 'workspace_changes' | 'usage', Record<string, unknown>[]>> {
+  const database = await open(path)
+  await migrateDatabase(database.db, { migrationsFolder: v14Folder() })
+  const unique = await database.client.execute(`SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'shell_rules_%_uq'`)
+  expect(unique.rows).toHaveLength(0)
+  for (const [id, name] of [[V14_PROJECT, 'git-demo'], [V14_OTHER_PROJECT, 'other']] as const) {
+    await database.client.execute({
+      sql: 'INSERT INTO projects (id, name, path, instructions, created_at, updated_at) VALUES (?, ?, ?, NULL, 100, 200)',
+      args: [id, name, `/srv/projects/${name}`],
+    })
+  }
+  for (const [index, [id, projectId]] of ([[CHAT_R1, V14_PROJECT], [CHAT_R2, null]] as const).entries()) {
+    await database.client.execute({
+      sql: 'INSERT INTO chats (id, title, title_source, model_ref, settings, pinned, archived, pending_approval, active_leaf_id, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)',
+      args: [id, `Chat ${index}`, 'user', 'mock:shell', '{"toolMode":"ask"}', index === 0 ? 1 : 0, `msg_e${index + 1}00000000000001`, projectId, 1000 + index, 2000 + index],
+    })
+    for (const [seq, role] of [[0, 'user'], [1, 'assistant']] as const) {
+      const messageId = `msg_e${index + 1}0000000000000${seq}`
+      const parts = role === 'assistant'
+        ? [{ type: 'tool-shell', toolCallId: 'mock_call_1', state: 'approval-requested', input: { command: 'ls' }, approval: { id: 'apr_1' } }]
+        : [{ type: 'text', text: `user ${messageId}` }]
+      await database.client.execute({
+        sql: 'INSERT INTO messages (id, chat_id, parent_id, selected_child_id, seq, role, parts, metadata, search_text, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)',
+        args: [messageId, id, seq === 0 ? null : `msg_e${index + 1}00000000000000`, seq, role, JSON.stringify(parts), JSON.stringify({ modelRef: 'mock:shell', startedAt: 1 }), `${role} ${messageId}`, 3000 + seq, 4000 + seq],
+      })
+    }
+  }
+  await database.client.execute({
+    sql: `INSERT INTO workspace_changes (chat_id, project_id, message_seq, message_id, tool_call_id, kind, tool, path, before_state, after_sha, after_size, created_at)
+          VALUES (?, ?, 1, 'msg_e100000000000001', 'call_1', 'edit', 'write_file', 'a.txt', 'missing', ?, 1, 7)`,
+    args: [CHAT_R1, V14_PROJECT, 'f'.repeat(64)],
+  })
+  await database.client.execute({
+    sql: 'INSERT INTO usage (chat_id, message_id, purpose, provider_id, model_id, input, output, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    args: [CHAT_R1, 'msg_e100000000000001', 'chat', 'mock', 'shell', 3, 4, 5000],
+  })
+  for (const [id, projectId, prefix, createdAt] of V14_RULES)
+    await database.client.execute({ sql: 'INSERT INTO shell_rules (id, project_id, prefix, created_at) VALUES (?, ?, ?, ?)', args: [id, projectId, prefix, createdAt] })
+  for (const [toolName, enabled, override] of V14_TOOL_PREFS)
+    await database.client.execute({ sql: 'INSERT INTO tool_prefs (tool_name, enabled, override, updated_at) VALUES (?, ?, ?, 9)', args: [toolName, enabled, override] })
+  expect(await scalar(database, 'SELECT count(*) AS n FROM shell_rules')).toBe(V14_RULES.length)
+  const seeded = {
+    projects: await rows(database, 'projects', 'id'),
+    chats: await rows(database, 'chats', 'id'),
+    messages: await rows(database, 'messages', 'chat_id, seq'),
+    workspace_changes: await rows(database, 'workspace_changes', 'id'),
+    usage: await rows(database, 'usage', 'id'),
+  }
+  database.close()
+  return seeded
+}
+
+/** The `tool_prefs` rows as `[tool_name, enabled, override]`, by name. */
+async function toolPrefRows(database: Database): Promise<Array<[string, number, string | null]>> {
+  const result = await database.client.execute('SELECT tool_name, enabled, override FROM tool_prefs ORDER BY tool_name')
+  return result.rows.map(row => [String(row.tool_name), Number(row.enabled), row.override === null ? null : String(row.override)])
+}
+
+describe('upgrade of a v1.4 database through migration 0006 (unique shell rules)', () => {
+  it('0006 is one DELETE, one UPDATE and two partial CREATE UNIQUE INDEX statements, never a table rebuild', () => {
+    const statements = shellUniqueStatements()
+    expect(statements).toHaveLength(4)
+    expect(statements.filter(statement => /^DELETE\s+FROM\s+`?shell_rules`?\s/i.test(statement))).toHaveLength(1)
+    expect(statements.filter(statement => /^UPDATE\s+`?tool_prefs`?\s+SET\s+`?override`?\s*=\s*NULL\s/i.test(statement))).toHaveLength(1)
+    const indexes = statements.filter(statement => statement.startsWith('CREATE UNIQUE INDEX '))
+    expect(indexes.map(statement => statement.match(/^CREATE UNIQUE INDEX `(\w+)`/)?.[1])).toEqual(['shell_rules_global_prefix_uq', 'shell_rules_project_prefix_uq'])
+    expect(indexes[0]).toMatch(/ON `shell_rules` \(`prefix`\) WHERE project_id is null;?$/)
+    expect(indexes[1]).toMatch(/ON `shell_rules` \(`project_id`,\s?`prefix`\) WHERE project_id is not null;?$/)
+    const sql = statements.join('\n')
+    for (const forbidden of [/DROP\s+/i, /__new_/i, /PRAGMA/i, /ALTER\s+TABLE/i, /CREATE\s+TABLE/i, /\bINSERT\b/i])
+      expect(sql, String(forbidden)).not.toMatch(forbidden)
+    // The UPDATE clears only an `allow` override of the `shell` tool.
+    expect(statements.find(statement => statement.startsWith('UPDATE'))).toMatch(/WHERE `?tool_name`? = 'shell' AND `?override`? = 'allow'/)
+    expect(JOURNAL.entries.slice(0, 7)).toEqual([INITIAL, TREE, REMEMBERED, REFRESH, PROJECTS, CHECKPOINTS, SHELL_UNIQUE])
+    expect(SHELL_UNIQUE?.tag).toBe('0006_shell_rule_unique')
+  })
+
+  it('keeps the oldest rule of each scope and prefix (ties by id), clears only the shell allow, loses nothing else', async () => {
+    const path = join(tempDir(), 'harness.db')
+    const before = await seedV14Database(path)
+    const database = await open(path)
+    await migrateDatabase(database.db)
+
+    // The oldest rule of each scope + prefix; the global and the project `ls` both stay, as does the other project's.
+    const kept = await rows(database, 'shell_rules', 'id')
+    expect(kept.map(row => row.id)).toEqual(V14_KEPT_RULES)
+    expect(kept.filter(row => row.prefix === 'ls').map(row => [row.project_id, row.id])).toEqual([
+      [null, 'srl_glob000000000002'],
+      [V14_PROJECT, 'srl_prja000000000002'],
+      [V14_OTHER_PROJECT, 'srl_prjb000000000001'],
+    ])
+    for (const row of kept) {
+      const seeded = V14_RULES.find(([id]) => id === row.id)
+      expect([row.project_id, row.prefix, Number(row.created_at)], String(row.id)).toEqual(seeded?.slice(1))
+    }
+    const duplicates = await database.client.execute(`SELECT coalesce(project_id, '') AS scope, prefix FROM shell_rules GROUP BY 1, 2 HAVING count(*) > 1`)
+    expect(duplicates.rows).toEqual([])
+
+    // Only the `allow` override of `shell` is cleared; `current_time` keeps its `allow`, the others are untouched.
+    expect(await toolPrefRows(database)).toEqual([
+      ['current_time', 1, 'allow'],
+      ['read_file', 1, 'ask'],
+      ['shell', 1, null],
+      ['write_file', 0, 'deny'],
+    ])
+
+    // Every project, chat, message, journal row and usage row survives as stored.
+    expect(await rows(database, 'projects', 'id')).toEqual(before.projects)
+    expect(await rows(database, 'chats', 'id')).toEqual(before.chats)
+    expect(await rows(database, 'messages', 'chat_id, seq')).toEqual(before.messages)
+    expect(await rows(database, 'workspace_changes', 'id')).toEqual(before.workspace_changes)
+    expect(await rows(database, 'usage', 'id')).toEqual(before.usage)
+
+    const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
+    expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
+    expect(applied.rows).toHaveLength(7)
+    const shape = await schemaShape(database)
+    expect(shape.tables).toHaveLength(18)
+    const fresh = await open(':memory:')
+    await migrateDatabase(fresh.db)
+    expect(shape).toEqual(await schemaShape(fresh))
+    expect(shape.indexes.shell_rules_global_prefix_uq).toEqual(['prefix'])
+    expect(shape.indexes.shell_rules_project_prefix_uq).toEqual(['project_id', 'prefix'])
+    const indexSql = await database.client.execute(`SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name LIKE 'shell_rules_%_uq' ORDER BY name`)
+    expect(indexSql.rows.map(row => [String(row.name), /WHERE project_id is (?:not )?null$/.exec(String(row.sql))?.[0]])).toEqual([
+      ['shell_rules_global_prefix_uq', 'WHERE project_id is null'],
+      ['shell_rules_project_prefix_uq', 'WHERE project_id is not null'],
+    ])
+    expect((await database.client.execute('PRAGMA foreign_key_check')).rows).toEqual([])
+    expect((await database.client.execute('PRAGMA integrity_check')).rows.map(row => String(row.integrity_check))).toEqual(['ok'])
+
+    // The database is now the authority: a second identical rule in either scope is a unique violation.
+    const insertRule = (id: string, projectId: string | null, prefix: string): Promise<unknown> =>
+      database.client.execute({ sql: 'INSERT INTO shell_rules (id, project_id, prefix, created_at) VALUES (?, ?, ?, 99)', args: [id, projectId, prefix] })
+    expect(await uniqueViolation(insertRule('srl_dupe000000000001', null, 'ls'))).toBe('UNIQUE constraint failed: shell_rules.prefix')
+    expect(await uniqueViolation(insertRule('srl_dupe000000000002', V14_PROJECT, 'ls'))).toBe('UNIQUE constraint failed: shell_rules.project_id, shell_rules.prefix')
+    // The same prefix in another scope is still fine.
+    await insertRule('srl_dupe000000000003', V14_OTHER_PROJECT, 'pnpm test')
+    expect(await scalar(database, 'SELECT count(*) AS n FROM shell_rules')).toBe(V14_KEPT_RULES.length + 1)
+
+    // Idempotent: migrating again applies nothing.
+    await migrateDatabase(database.db)
+    expect(await scalar(database, 'SELECT count(*) AS n FROM __drizzle_migrations')).toBe(JOURNAL.entries.length)
+  })
+
+  it('the same checks fail without the hand-written statements (the test notices a missing dedupe or reset)', async () => {
+    // Without the DELETE, the unique index cannot be created over the duplicates: the migration fails.
+    const noDedupe = join(tempDir(), 'harness.db')
+    await seedV14Database(noDedupe)
+    const first = await open(noDedupe)
+    await expect(migrateDatabase(first.db, { migrationsFolder: folderWithout0006('DELETE') })).rejects.toThrow()
+    first.close()
+    const after = await open(noDedupe)
+    expect(await scalar(after, 'SELECT count(*) AS n FROM shell_rules')).toBe(V14_RULES.length)
+    expect(await scalar(after, 'SELECT count(*) AS n FROM __drizzle_migrations')).toBe(6)
+
+    // Without the UPDATE, the stored `allow` of `shell` survives.
+    const noReset = join(tempDir(), 'harness.db')
+    await seedV14Database(noReset)
+    const second = await open(noReset)
+    await migrateDatabase(second.db, { migrationsFolder: folderWithout0006('UPDATE') })
+    expect((await toolPrefRows(second)).find(([name]) => name === 'shell')).toEqual(['shell', 1, 'allow'])
+  })
+
+  it('boots on the upgraded database: chats, the pending approval and the kept rules are served', async () => {
+    const dataDir = tempDir()
+    const databasePath = join(dataDir, 'harness.db')
+    await seedV14Database(databasePath)
+    const t = await createTestApp({ dataDir, databasePath, start: false })
+    try {
+      const list = cursorPageSchema(chatSummarySchema).parse(await (await t.request('/api/chats')).json())
+      expect(list.items.map(chat => [chat.id, chat.projectId]).sort()).toEqual([[CHAT_R1, V14_PROJECT], [CHAT_R2, null]])
+      const detail = chatDetailSchema.parse(await (await t.request(`/api/chats/${CHAT_R1}`)).json())
+      expect(detail.messages.map(message => message.id)).toEqual(['msg_e100000000000000', 'msg_e100000000000001'])
+      expect(detail.messages[1]?.parts[0]).toMatchObject({ type: 'tool-shell', state: 'approval-requested' })
+      expect(detail.pendingApproval).toBe(true)
+      expect((await t.deps.shellRules.list()).map(rule => rule.id).sort()).toEqual(V14_KEPT_RULES)
+      expect((await t.deps.projects.list()).map(project => project.id).sort()).toEqual([V14_PROJECT, V14_OTHER_PROJECT])
     }
     finally {
       await t.close()

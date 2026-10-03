@@ -8,7 +8,9 @@ import { defineComponent, h, nextTick, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
+import { compactionPart, planApprovalPart, steerPart, taskPart } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
+import TaskBlock from './agent/TaskBlock.vue'
 import ChatMessage from './ChatMessage.vue'
 import ToolPart from './parts/ToolPart.vue'
 
@@ -478,5 +480,48 @@ describe('chatMessage: delete a version', () => {
       const { wrapper } = mountMessage({ message: user, isLast: false, streaming: false, showThinking: false, ...extra })
       expect(wrapper.find(`[data-testid="${testIds.messageDeleteVersion}"]`).exists()).toBe(false)
     }
+  })
+})
+
+describe('chatMessage: agent parts (Phase 9 seams)', () => {
+  it('renders compaction markers, steers and task calls as their blocks, in part order', () => {
+    const message = assistant({
+      parts: [
+        { type: 'step-start' },
+        compactionPart({ trigger: 'auto' }),
+        { type: 'text', text: 'Step 1 done.', state: 'done' },
+        steerPart(),
+        taskPart(),
+        compactionPart({ trigger: 'auto' }, 'compaction_2'),
+      ],
+    })
+    const { wrapper } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
+    const dividers = wrapper.findAll(`[data-testid="${testIds.compactionDivider}"]`)
+    expect(dividers.map(divider => divider.attributes('data-variant'))).toEqual(['history', 'run'])
+    expect(wrapper.find(`[data-testid="${testIds.steerNote}"]`).exists()).toBe(true)
+    expect(wrapper.get(`[data-testid="${testIds.taskBlock}"]`).attributes('data-state')).toBe('completed')
+    const order = [...wrapper.element.querySelectorAll('[data-testid]')]
+      .map(element => element.getAttribute('data-testid'))
+      .filter(id => id === testIds.compactionDivider || id === testIds.steerNote || id === testIds.taskBlock)
+    expect(order).toEqual([testIds.compactionDivider, testIds.steerNote, testIds.taskBlock, testIds.compactionDivider])
+  })
+
+  it('marks a compacted row and accepts the activity', () => {
+    const reply = mountMessage({ message: assistant(), isLast: false, streaming: false, showThinking: false, compacted: true })
+    expect(reply.wrapper.get(`[data-testid="${testIds.messageAssistant}"]`).attributes('data-compacted')).toBe('true')
+    const question = mountMessage({ message: user, isLast: false, streaming: false, showThinking: false, compacted: true })
+    expect(question.wrapper.get(`[data-testid="${testIds.messageUser}"]`).attributes('data-compacted')).toBe('true')
+    const streaming = mountMessage({ message: assistant({ parts: [] }), isLast: true, streaming: true, showThinking: false, activity: 'compacting' })
+    expect(streaming.wrapper.get(`[data-testid="${testIds.messageAssistant}"]`).attributes('data-compacted')).toBeUndefined()
+  })
+
+  it('passes the approvals of task blocks and plan cards up', () => {
+    const message = assistant({ parts: [taskPart(), planApprovalPart()] })
+    const { wrapper, events } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
+    const task = { id: 'appr_task', approved: true, toolName: 'task', alwaysAllow: false }
+    wrapper.getComponent(TaskBlock).vm.$emit('approval', task)
+    const plan = { id: 'approval_call_plan_1', approved: true, toolName: 'exit_plan_mode', alwaysAllow: false, planMode: 'edits', reason: 'Go' }
+    wrapper.findAllComponents(ToolPart).at(-1)!.vm.$emit('approval', plan)
+    expect(events.approval).toEqual([[task], [plan]])
   })
 })

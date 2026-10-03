@@ -234,10 +234,10 @@ sub-agents (`task`), stabilization (unique shell rules, migration `0006`).
   - [x] C23 agent-state + mention helpers (`packages/shared/src/util/{agent-state,mentions}.ts`)
   - [x] D10 phase doc `phase-9-v1-5.md` · [x] D11 docs: UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md, guides, README
   - [x] Gate + checkpoint commit
-- [ ] P9-0b Schema, migration `0006`, skeletons, FREEZE
-  - [ ] K3 v1.4 upgrade seed (from a `316319a` worktree) + schema + `pnpm db:generate` (coordinator)
-  - [ ] C24 server skeleton · [ ] C25 web skeleton · [ ] C26 chat seams · [ ] C27 `core-agent` skeleton + mock models
-  - [ ] Gate (incl. v1.4 data upgrade probe) + FREEZE + checkpoint commit
+- [x] P9-0b Schema, migration `0006`, skeletons, FREEZE
+  - [x] K3 v1.4 upgrade seed (from a `316319a` worktree) + schema + `pnpm db:generate` (coordinator)
+  - [x] C24 server skeleton · [x] C25 web skeleton · [x] C26 chat seams · [x] C27 `core-agent` skeleton + mock models
+  - [x] Gate (incl. v1.4 data upgrade probe) + FREEZE + checkpoint commit
 - [ ] P9-A Features (12 agents)
   - [ ] W9.1 compaction-server · [ ] W9.2 steer-queue-server · [ ] W9.3 plan-mode-server · [ ] W9.4 todo-instructions-server
   - [ ] W9.5 subagents-server · [ ] W9.6 mentions-server · [ ] W9.7 stabilization-server
@@ -301,3 +301,4 @@ run the live provider suite for compaction, plan mode and sub-agents with real m
 | Final gate v1.4 | coordinator | frozen install ok; 8327 tests; repository `git status` unchanged by `pnpm check`; build ok; CSP 38/38; probes 57/57 (incl. the real v1.3 → v1.4 upgrade of a seed made by the v1.3 build); e2e 96 passed ×3 (chromium + mobile + tablet); `@screenshots` dark + light reviewed (15 new Phase 8 screens per theme); `pnpm audit --prod` clean (2 ignored, still unpatched); Docker image (Node 24, git 2.54, bash 5.3): Git view, This chat, rewind and checkpoints/ 0700 in the container, a repository owned by another uid answers refused (8/8) | (this commit) |
 | P9-00 | coordinator | CI + Audit on `316319a` green; advisories still unpatched (ignores kept); `pnpm check` 8327 tests; design reports in `.tmp/p9-designs` | — |
 | P9-0a | coordinator (K1; K3 seed done early), C22, C23, D10, D11 (+ coordinator: the example plugins' `harness-forge.d.ts` regenerated for API 1.3.0, phase-doc reconciliation with D11 (`activity`, `chatQueue.add`, PROVIDERS.md 8, `mock:todo` 400 ms + `invalid`), C27 also owns `SH/ids*` for `core-agent`) | audit ok (69 paths; 16 C22 compile-fix files accepted); frozen install ok; 8528 tests; build ok; CSP 38/38; `pluginApiVersion` 1.3.0, 5 new routes answer 501 / 400; e2e 96 passed on a fresh `.tmp/e2e`; TypeScript 6.0.3 only | (this commit) |
+| P9-0b | coordinator (K3: schema + `0006_shell_rule_unique`, v1.4 seed from a `316319a` worktree), C24, C25, C26, C27 (+ coordinator: `declarativeCommandSchema` refuses `/compact` (C27 CCR), ownership additions for P9-A) | audit ok (162 paths; 11 test-fix files accepted); `0006` = 1 DELETE + 1 UPDATE + 2 partial `CREATE UNIQUE INDEX`; 8974 tests; build ok; CSP 38/38; e2e 96 passed on a fresh `.tmp/e2e`; upgrade probe on a v1.4 copy 31/31 (7 migrations, duplicates removed keeping the oldest, shell `allow` cleared, `current_time` kept, data intact, `core-agent` active, new settings defaulted); seam probe 7/7 (`mock:workspace` in auto writes + journals, `plan` accepted and asks, `/compact` listed, 5 agent mocks listed); FREEZE | (this commit) |

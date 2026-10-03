@@ -248,7 +248,7 @@ describe('credential fields, models, commands and MCP servers', () => {
 
   it('validates declarative commands', () => {
     expect(declarativeCommandSchema.safeParse({ name: 'tldr', description: 'Summarize', template: 'Summarize:\n\n{{input}}' }).success).toBe(true)
-    for (const name of ['new', 'model', 'effort', 'mode', 'help'])
+    for (const name of ['new', 'model', 'effort', 'mode', 'help', 'compact'])
       expect(issuePaths(declarativeCommandSchema.safeParse({ name, description: 'x', template: 'x' }))).toEqual(['name'])
     expect(issuePaths(declarativeCommandSchema.safeParse({ name: 'big', description: 'x', template: 'x'.repeat(16_385) }))).toEqual(['template'])
   })

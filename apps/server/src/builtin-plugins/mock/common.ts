@@ -7,6 +7,12 @@ export const MOCK_PROVIDER_ID = 'mock'
 /** The answer to an empty user text (`mock:echo`, `mock:shell`). */
 export const MOCK_EMPTY_MESSAGE = '(empty message)'
 
+/** The answer of a tool-calling mock model without the tool its script needs (tool mode `off`, the tool disabled). */
+export const MOCK_TOOLS_DISABLED = 'Tools are disabled.'
+
+/** The answer of a tool-calling mock model after a denied call. */
+export const MOCK_TOOL_DENIED = 'The tool call was denied.'
+
 /** Whitespace-separated words. */
 export function countWords(text: string): number {
   return text.split(/\s+/).filter(word => word !== '').length

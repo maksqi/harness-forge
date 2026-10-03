@@ -12,16 +12,20 @@ import { h, nextTick, reactive } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { IMAGE_OPTIONS_KEY, useImageOptions } from '~/composables/useImageOptions'
 import { useShortcuts } from '~/composables/useShortcuts'
+import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
 import { installFakeMedia } from '~/utils/testing/fake-media'
-import { catalogModel, chatId, projectId } from '~/utils/testing/fixtures'
+import { catalogModel, chatId, projectId, projectSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import ChatComposer from './ChatComposer.vue'
 import { anthropic, bodyAll, byTestId, haiku, llama, NuxtLinkStub, ollama, openai, seedStores, sonnet } from './composer-test-utils'
+import ComposerAddMenu from './ComposerAddMenu.vue'
+import MentionMenu from './MentionMenu.vue'
+import SendStopButton from './SendStopButton.vue'
 
 const mock = vi.hoisted(() => ({
   api: null as unknown,
@@ -431,7 +435,8 @@ describe('chatComposer', () => {
     it('offers Accept edits in a project chat and applies the pick', async () => {
       const { wrapper, state } = mountComposer({ projectId: projectId(1) })
       const options = await permissionOptions(wrapper)
-      expect(options.map(option => option.dataset.value)).toEqual(['ask', 'edits', 'auto', 'off'])
+      // Plan (Phase 9) is offered like Accept edits.
+      expect(options.map(option => option.dataset.value)).toEqual(['ask', 'edits', 'plan', 'auto', 'off'])
       options[1]!.click()
       await flushPromises()
       expect(state.toolMode).toBe('edits')
@@ -561,6 +566,7 @@ describe('chatComposer', () => {
       expect(paste.defaultPrevented).toBe(true)
       const chip = wrapper.get(byTestId(testIds.composerAttachment))
       expect(chip.attributes('data-state')).toBe('uploading')
+      expect(chip.attributes('data-kind')).toBe('upload')
 
       await type(textarea(), 'see attached')
       await send().trigger('click')
@@ -1040,5 +1046,55 @@ describe('chatComposer', () => {
     await nextTick()
     expect(document.activeElement).toBe(textarea().element)
     wrapper.unmount()
+  })
+
+  describe('agent 2.0 seams (Phase 9)', () => {
+    it('mounts the mention menu closed and keeps the textarea pointed at the slash menu', async () => {
+      useProjectsStore().items = [projectSummary({ id: projectId(1), name: 'harness-forge' })]
+      const { wrapper, textarea } = mountComposer({ projectId: projectId(1) })
+      const mentions = wrapper.getComponent(MentionMenu)
+      expect(mentions.props()).toMatchObject({ open: false, projectName: 'harness-forge', state: 'ready', truncated: false })
+      await type(textarea(), 'Fix @src/pa')
+      expect(wrapper.find(byTestId(testIds.mentionMenu)).exists()).toBe(false)
+      expect(textarea().attributes('aria-controls')).toBeUndefined()
+      await type(textarea(), '/mo')
+      expect(textarea().attributes('aria-controls')).toBe(wrapper.get(byTestId(testIds.slashMenu)).attributes('id'))
+      wrapper.unmount()
+    })
+
+    it('leaves Shift+Tab to the browser', async () => {
+      const { wrapper, state, textarea } = mountComposer({ projectId: projectId(1) })
+      const event = press(textarea().element, { key: 'Tab', shiftKey: true })
+      await flushPromises()
+      expect(event.defaultPrevented).toBe(false)
+      expect(state.toolMode).toBe('ask')
+      wrapper.unmount()
+    })
+
+    it('passes canQueue to Send / Stop while a run is active and the composer has content', async () => {
+      const { wrapper, state, textarea } = mountComposer({ status: 'streaming' })
+      const button = () => wrapper.getComponent(SendStopButton)
+      expect(button().props('canQueue')).toBe(false)
+      await type(textarea(), 'Also update the README')
+      expect(button().props('canQueue')).toBe(true)
+      state.status = 'ready'
+      await nextTick()
+      expect(button().props('canQueue')).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('tells the + menu about a project chat and exposes restoreQueued', async () => {
+      const { wrapper, composer, textarea } = mountComposer({ projectId: projectId(1) })
+      expect(wrapper.getComponent(ComposerAddMenu).props('projectChat')).toBe(true)
+      const exposed = composer().vm as unknown as ChatComposerExposed
+      expect(typeof exposed.restoreQueued).toBe('function')
+      exposed.restoreQueued([])
+      await nextTick()
+      expect(textarea().element.value).toBe('')
+      wrapper.unmount()
+      const other = mountComposer()
+      expect(other.wrapper.getComponent(ComposerAddMenu).props('projectChat')).toBe(false)
+      other.wrapper.unmount()
+    })
   })
 })

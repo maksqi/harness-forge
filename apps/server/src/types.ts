@@ -20,6 +20,7 @@ import type { FilesService } from './services/files/types.ts'
 import type { ImageService } from './services/images/types.ts'
 import type { KeyService } from './services/keys/types.ts'
 import type { MaintenanceService } from './services/maintenance/types.ts'
+import type { ProjectFileService } from './services/project-files/types.ts'
 import type { ProjectService } from './services/projects/types.ts'
 import type { CredentialService, SecretStore } from './services/secrets/types.ts'
 import type { SettingsService } from './services/settings/types.ts'
@@ -110,6 +111,12 @@ export interface AppServices {
   readonly checkpoints: CheckpointService
   /** Shell rules: the per-project and global allowlist of command prefixes (Phase 8, ADR-038; C19 stub, W8.6). */
   readonly shellRules: ShellRuleService
+  /**
+   * File mentions of project chats: the per-project in-memory file index (built lazily by the first search) and the
+   * attach of a project file as an upload snapshot (Phase 9, ADR-042; C24 stub, W9.6). `stop()` runs right after the
+   * runs stopped.
+   */
+  readonly projectFiles: ProjectFileService
 }
 
 export interface AppDeps extends AppBase, AppServices {}

@@ -21,6 +21,10 @@
 // REWIND_DIALOG_HOST: `409 run-active` -> "Wait for the responses in this project to finish before rewinding files."
 // and, when this chat is the one running, the run is followed; `404` -> the stale-chat toast and a reload of the path.
 // Closing the dialog any other way puts focus back on the button.
+// Phase 9 (ADR-040 - ADR-042; C25 mounts, W9.9 implements; frozen from Gate P9-0b): the dock stacks TodoStrip (the
+// session's `todos`) and QueuedMessages (the session's `queue`) above the composer; the transcript gets the session's
+// transient `activity`; Stop hands the queued messages it dropped back to the composer (`restoreQueued`); a plan
+// approval's `planMode` / `reason` reach the session through the approval payload.
 import type { HarnessError, MessageBranch, ReasoningEffort, RestoreResult, ToolMode } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
@@ -46,12 +50,14 @@ import { useProvidersStore } from '~/stores/providers'
 import { useUiStore } from '~/stores/ui'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
+import TodoStrip from './agent/TodoStrip.vue'
 import { CHAT_VIEW_ACTIONS } from './chat-context'
 import { imageFileParts, messageText, toolNameOf } from './chat-format'
 import ChatNotFound from './ChatNotFound.vue'
 import ChatTranscript from './ChatTranscript.vue'
 import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
 import { toolApprovalLabel } from './parts/tool-row'
+import QueuedMessages from './queue/QueuedMessages.vue'
 
 const props = withDefaults(defineProps<{
   chatId: string
@@ -104,6 +110,16 @@ const loadError = session.loadError
 const branches = session.branches
 const switching = session.switching
 const projectId = session.projectId
+/** + Phase 9: the dock and the streaming row. */
+const queue = session.queue
+const todos = session.todos
+const activity = session.activity
+/** A run of this chat is active (this tab's request, or one the chats store reports). */
+const runActive = computed(() => session.busy.value || chats.runState[props.chatId] === 'running')
+/** Queued messages wait for the next run while the chat awaits an approval. */
+const waitingForApproval = computed(() => session.runState.value === 'approval')
+/** Queued messages whose cancel is in flight. */
+const cancellingQueued = ref<string[]>([])
 
 /** docs/UI.md 7.4: a run holds the chat (`409 conflict`, reason `run-active`). */
 const RUN_ACTIVE_MESSAGE = 'A response is already running in this chat.'
@@ -268,7 +284,44 @@ function onSubmit(input: ComposerSubmitInput) {
 
 function onStop() {
   stopRequested = true
-  session.stop().catch(failure => reportFailure('Could not stop the response', failure))
+  session.stop()
+    .then((dropped) => {
+      // + Phase 9: the queued messages the stop dropped go back into this tab's composer.
+      if (dropped.length > 0)
+        composer.value?.restoreQueued(dropped)
+    })
+    .catch(failure => reportFailure('Could not stop the response', failure))
+}
+
+// ---------- queued messages (Phase 9, ADR-042; W9.9 implements) ----------
+
+/** Cancels a queued message; resolves with the item when it was still queued, else null. */
+async function cancelQueued(itemId: string) {
+  const item = queue.value.find(entry => entry.id === itemId) ?? null
+  cancellingQueued.value = [...cancellingQueued.value, itemId]
+  try {
+    const result = await session.cancelQueued(itemId)
+    if (result === 'gone')
+      toast('Already sent to the agent.')
+    return result === 'cancelled' ? item : null
+  }
+  finally {
+    cancellingQueued.value = cancellingQueued.value.filter(id => id !== itemId)
+  }
+}
+
+function onCancelQueued(itemId: string) {
+  cancelQueued(itemId).catch(failure => reportFailure('Could not cancel the message', failure))
+}
+
+/** Edit = cancel, then the message goes back into the composer. */
+function onEditQueued(itemId: string) {
+  cancelQueued(itemId)
+    .then((item) => {
+      if (item)
+        composer.value?.restoreQueued([item])
+    })
+    .catch(failure => reportFailure('Could not cancel the message', failure))
 }
 
 function onEditLast() {
@@ -492,6 +545,7 @@ function setProject(value: string | null) {
         :branches="branches"
         :switching="switching"
         :project-id="projectId"
+        :activity="activity"
         @regenerate="onRegenerate"
         @edit="onEdit"
         @approval="onApproval"
@@ -519,7 +573,15 @@ function setProject(value: string | null) {
       <div class="pointer-events-none absolute inset-x-0 bottom-0 z-20">
         <div aria-hidden="true" class="h-6 bg-linear-to-t from-background to-transparent" />
         <div ref="dock" class="pointer-events-auto bg-background px-3 pb-[max(12px,env(safe-area-inset-bottom))] md:px-6">
-          <div class="mx-auto w-full max-w-3xl">
+          <div class="mx-auto flex w-full max-w-3xl flex-col gap-2">
+            <TodoStrip :state="todos" :running="runActive" />
+            <QueuedMessages
+              :items="queue"
+              :waiting-for-approval="waitingForApproval"
+              :cancelling="cancellingQueued"
+              @cancel="onCancelQueued"
+              @edit="onEditQueued"
+            />
             <ChatComposer
               ref="composer"
               :chat-id="chatId"

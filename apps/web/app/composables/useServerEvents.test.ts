@@ -4,6 +4,7 @@ import { createServerEvent } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope } from 'vue'
+import { useChatQueueStore } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
@@ -12,7 +13,7 @@ import { useProvidersStore } from '~/stores/providers'
 import { useShellRulesStore } from '~/stores/shell-rules'
 import { useUiStore } from '~/stores/ui'
 import { useWorkspaceStore } from '~/stores/workspace'
-import { chatChanges, chatId, chatSummary, gitStatus, logEntry, pluginSummary, projectId, projectSummary, providerSummary, workspaceChangedData } from '~/utils/testing/fixtures'
+import { chatChanges, chatId, chatSummary, gitStatus, logEntry, pluginSummary, projectId, projectSummary, providerSummary, queueItem, workspaceChangedData } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { dispatchServerEvent, KEY_ROTATED_MESSAGE, parseServerEvent, refetchLoadedStores, useServerEvents } from './useServerEvents'
@@ -134,6 +135,22 @@ describe('dispatchServerEvent', () => {
     expect(workspaceEvents.mock.calls).toEqual([[changed], [finished], [deletedChat], [deletedProject]])
     expect(ruleEvents.mock.calls).toEqual([[deletedProject]])
     expect(chatEvents.mock.calls).toEqual([[finished], [deletedChat], [deletedProject], [started]])
+  })
+
+  it('routes queue.changed and chat.deleted to the chat queue store (Phase 9)', () => {
+    const queue = useChatQueueStore()
+    const chats = useChatsStore()
+    const queueEvents = vi.spyOn(queue, 'applyEvent')
+    vi.spyOn(chats, 'applyEvent').mockImplementation(() => {})
+    const changed = createServerEvent('queue.changed', { chatId: chatId(1), items: [queueItem()] }, 1)
+    const finished = createServerEvent('run.finished', { chatId: chatId(1), messageId: 'msg_asst000000000001', outcome: 'completed', awaitingApproval: false }, 2)
+    const deletedChat = createServerEvent('chat.deleted', { id: chatId(1) }, 3)
+    dispatchServerEvent(changed)
+    expect(queue.items(chatId(1))).toHaveLength(1)
+    dispatchServerEvent(finished)
+    dispatchServerEvent(deletedChat)
+    expect(queueEvents.mock.calls).toEqual([[changed], [deletedChat]])
+    expect(queue.items(chatId(1))).toEqual([])
   })
 
   it('refetches the open changes 300 ms after workspace.changed, and drops a deleted project\'s chats before the chats store detaches them (Phase 8)', async () => {
@@ -258,5 +275,11 @@ describe('refetchLoadedStores', () => {
     shellRules.loaded = true
     await refetchLoadedStores()
     expect(fetchRules).toHaveBeenCalledTimes(1)
+  })
+
+  it('refetches the loaded chat queues (Phase 9)', async () => {
+    const refresh = vi.spyOn(useChatQueueStore(), 'refreshLoaded')
+    await refetchLoadedStores()
+    expect(refresh).toHaveBeenCalledTimes(1)
   })
 })

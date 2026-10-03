@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // The composer `+` menu (docs/UI.md 7.7): "Attach files" opens the file picker, "Commands" inserts `/` and opens the
 // slash menu. The composer does both (it owns the hidden file input and the text).
+// Phase 9 (ADR-042; C25 declares, W9.8 adds the item; frozen from Gate P9-0b): in a project chat (`projectChat`),
+// "Mention a file" (`composer-mention`, `AtSign`) emits `mention`; the composer inserts `@` and opens the mention menu.
 import { PaperclipIcon, PlusIcon, SquareTerminalIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
@@ -15,13 +17,18 @@ import { testIds } from '~/utils/testids'
 const props = withDefaults(defineProps<{
   /** Receives focus when the menu closes (the composer textarea); default: the trigger. */
   returnFocusTo?: HTMLElement | null
+  /** + Phase 9: the chat has a project ("Mention a file" is offered); default false. */
+  projectChat?: boolean
 }>(), {
   returnFocusTo: null,
+  projectChat: false,
 })
 
 const emit = defineEmits<{
   attach: []
   commands: []
+  /** + Phase 9: "Mention a file" was picked. */
+  mention: []
 }>()
 
 function onCloseAutoFocus(event: Event) {
