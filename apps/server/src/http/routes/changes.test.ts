@@ -763,7 +763,7 @@ describe.skipIf(!hasGit())('changes.revert (source git)', () => {
     await h.disk('a.txt', 'x\n')
     const answer = await revert(h, 'a.txt')
     expect(answer.status).toBe(400)
-    expect(errorOf(answer.body)).toMatchObject({ code: 'validation_error', message: 'The git view is not available: the project folder is not inside a git repository.', details: { issues: [{ path: ['source'] }] } })
+    expect(errorOf(answer.body)).toMatchObject({ code: 'validation_error', message: 'The Git view is not available: the project folder is not inside a git repository.', details: { issues: [{ path: ['source'] }] } })
   })
 })
 

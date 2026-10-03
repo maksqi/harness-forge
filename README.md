@@ -7,21 +7,22 @@ of a project folder on your server. By default, every tool call that can change 
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **Status:** v1.4 in progress ("Workspace 2.0": rewind the agent's file changes to any of your messages, a changes
-> panel with per-file diffs, Git status and an undoable revert, shell rules for commands that may run without asking,
-> a working folder that carries over between shell commands, and an opt-in automatic cleanup of unused files); v1.3 is
-> the latest release. v1.3 added projects and an agent workspace (file tools and a shell with approval, an
-> "Accept edits" permission mode, inline diffs and terminal output in the chat), master-key rotation (in the app or
-> with a CLI) and a storage cleanup with a preview. v1.2 added image generation and voice (dictation and read-aloud)
-> through your own providers, message versions that remember the path shown under them, can be deleted and follow a
-> switch in other open tabs, editing the attachments of a sent message, one password prompt for every sensitive action,
-> and 40 px touch targets on tablets. v1.1 added conversation branching, backup / restore / delete-all, read-only share
-> links, trusted reverse proxies and an opt-in live provider suite. Progress lives in
-> [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status:** v1.4 ("Workspace 2.0"): checkpoints that rewind the agent's file changes to any of your messages, a
+> changes panel with per-file diffs, Git status and an undoable revert, shell rules for commands that may run without
+> asking, a working folder that carries over between shell commands, and an opt-in automatic cleanup of unused files.
+> v1.3 added projects and an agent workspace (file tools and a shell with approval, an "Accept edits" permission mode,
+> inline diffs and terminal output in the chat), master-key rotation (in the app or with a CLI) and a storage cleanup
+> with a preview. v1.2 added image generation and voice (dictation and read-aloud) through your own providers, message
+> versions that remember the path shown under them, can be deleted and follow a switch in other open tabs, editing the
+> attachments of a sent message, one password prompt for every sensitive action, and 40 px touch targets on tablets.
+> v1.1 added conversation branching, backup / restore / delete-all, read-only share links, trusted reverse proxies and
+> an opt-in live provider suite. Progress lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ![A chat reply with markdown, a table and a highlighted code block; the composer shows the model picker and the microphone button (dark theme)](docs/assets/screenshots/chat-dark.png)
 
 ![A project chat: write_file and edit_file ran in Accept edits mode (+1 −1), the shell command waits for approval with Deny and Run (dark theme)](docs/assets/screenshots/workspace-dark.png)
+
+![The changes panel next to a project chat: This chat lists checkpoint.txt with its diff and notes that shell commands may have changed files too (dark theme)](docs/assets/screenshots/changes-panel-dark.png)
 
 | Plugins | Provider wizard |
 |---|---|
@@ -53,17 +54,18 @@ desktop app, and it starts in dark mode.
     without asking while shell commands still ask, and every shell command is approved on its own (no "Always allow").
   - Shell commands run in their own process group with a minimal environment, a timeout and capped output;
     `HF_WORKSPACE_SHELL=0` turns the shell off for everyone. Guide: [using projects](docs/guides/using-projects.md).
-- **Workspace 2.0** (v1.4, in progress):
+- **Workspace 2.0** (v1.4):
   - Rewind: "Rewind files to here" under one of your messages puts every file the agent changed since then back the
     way it was (across message versions), lists the shell commands whose effects it cannot undo, and can be undone;
     "Restore files and edit" continues from that message. The previous version of every agent edit is kept as a
     checkpoint on your server (no git needed; 30 days, 512 MB per project).
-  - A changes panel (Alt+C; a side pane on desktop, a sheet on phones) with two views: the files this chat changed
-    and the project's Git status, each with a diff and a **Revert file** that saves the current version first and can
-    be undone. Git runs read-only with the repository's hooks, filters and other configured programs switched off.
+  - A changes panel (Alt+C; a side pane on desktop, a sheet on phones and tablets) with two views: the files this chat
+    changed and the project's Git status, each with a diff and a **Revert file** that saves the current version first
+    and can be undone. Git runs read-only with the repository's hooks, filters and other configured programs switched
+    off.
   - Shell rules: "Always allow commands starting with `pnpm test`" on the approval card (for this project or every
-    project) lets matching commands run without asking; combined commands need a rule for every part, and redirections
-    or substitutions always ask. Rules are managed in Settings -> Projects.
+    project) lets matching commands run without asking; combined commands need a rule for every part, and substitutions
+    or redirections (other than to `/dev/null`) always ask. Rules are managed in Settings -> Projects.
   - The shell's working folder carries over between commands (`cd packages/web` sticks), clamped to the project.
   - Automatic cleanup of unused files (Settings -> Data, off by default, daily or weekly) and screen-reader labels for
     tool-row summaries.
@@ -312,18 +314,18 @@ harness-forge is built for **one user** on their own machine or server.
   `X-Robots-Tag: noindex, nofollow`.
 - **Backups.** The Settings -> Data zip never contains API keys, the password, plugins, MCP servers, projects, shell
   rules or checkpoints.
-- **Projects, files and the shell.** The workspace tools act on real files with the server's rights, and an
-  approved shell command runs as the server's user; there is no sandbox inside harness-forge, so run it in Docker (or as
-  a dedicated user) when the folders matter. Projects can only be created inside `HF_WORKSPACE_ROOTS`, never around the
+- **Projects, files and the shell.** The workspace tools act on real files with the server's rights, and an approved
+  shell command runs as the server's user; there is no sandbox inside harness-forge, so run it in Docker (or as a
+  dedicated user) when the folders matter. Projects can only be created inside `HF_WORKSPACE_ROOTS`, never around the
   data directory, and adding one asks for the password. The file tools refuse paths outside the project (also through
   symbolic links) and never write into `.git`; writing hidden or secret-looking files always asks, and reading
-  secret-looking files asks in Ask and Accept edits; shell
-  commands get a minimal environment (no `HF_*` variables, no provider keys), their own process group, a timeout and no
-  "Always allow" for the whole tool; v1.4 shell rules let commands that start with an allowed prefix run without asking
-  (every part of a combined command must match, and `$`, backticks and redirections always ask), so a rule for a script
-  runner such as `pnpm test` runs any code the agent writes. Anyone who can log in can approve shell commands and add
-  rules: keep `HF_PASSWORD` set, or turn the shell off with `HF_WORKSPACE_SHELL=0`. Git (the changes panel) runs
-  read-only, with the repository's hooks, filters and configured programs switched off.
+  secret-looking files asks in Ask and Accept edits; shell commands get a minimal environment (no `HF_*` variables, no
+  provider keys), their own process group, a timeout and no "Always allow" for the whole tool; v1.4 shell rules let
+  commands that start with an allowed prefix run without asking (every part of a combined command must match, and `$`,
+  backticks and redirections other than to `/dev/null` always ask), so a rule for a script runner such as `pnpm test`
+  runs any code the agent writes. Anyone who can log in can approve shell commands and add rules: keep `HF_PASSWORD`
+  set, or turn the shell off with `HF_WORKSPACE_SHELL=0`. Git (the changes panel) runs read-only, with the
+  repository's hooks, filters and configured programs switched off.
 - **Microphone and media.** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
   `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled ("Voice
   input needs HTTPS or localhost"); use the TLS reverse proxy below. The page may use only its own microphone

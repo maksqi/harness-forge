@@ -46,6 +46,20 @@ const panel = useChangesPanel()
 const isDesktop = useMediaQuery('(min-width: 1024px)')
 const hasProject = computed(() => props.projectId !== null)
 const showPane = computed(() => isDesktop.value && panel.open.value && hasProject.value)
+
+/**
+ * reka attaches the handle's arrow keys in a watchEffect that looks the handle up in the DOM during setup; a handle
+ * mounted after the group (the `v-if` below) is not in the DOM yet then, and that effect never re-runs. So the handle
+ * mounts disabled and is enabled on the next tick: enabling it re-registers it and re-runs the lookup.
+ */
+const handleReady = ref(false)
+watch(showPane, async (visible) => {
+  handleReady.value = false
+  if (!visible)
+    return
+  await nextTick()
+  handleReady.value = showPane.value
+}, { immediate: true })
 const sheetOpen = computed(() => !isDesktop.value && panel.open.value && hasProject.value)
 
 // The sheet is modal: it never appears by itself (a stored "open" from a wide window, or a window narrowed while the
@@ -168,6 +182,7 @@ onScopeDispose(() => {
       <template v-if="showPane && projectId">
         <ResizableHandle
           id="hf-changes-resize"
+          :disabled="!handleReady"
           :data-testid="testIds.changesResize"
           aria-label="Resize changes"
           :hit-area-margins="{ coarse: 12, fine: 4 }"

@@ -403,6 +403,8 @@ describe('toolPart: workspace approvals (Phase 7)', () => {
     const wrapper = mountRequest('edit_file', { path: 'src/parser.ts', old_string: 'a', new_string: 'b' })
     expect(card(wrapper).text()).toContain('Allow edit_file?')
     expect(card(wrapper).get(`[data-testid="${testIds.toolApprovalPreview}"]`).attributes('data-kind')).toBe('diff')
+    // The preview replaces the raw arguments (no JSON block under the diff).
+    expect(card(wrapper).find('pre').exists() && card(wrapper).find('pre').text().includes('old_string')).toBe(false)
     expect(wrapper.find(`[data-testid="${testIds.toolApprovalAlways}"]`).exists()).toBe(false)
     const accept = wrapper.get(`[data-testid="${testIds.toolApprovalAcceptEdits}"]`)
     expect(card(wrapper).text()).toContain('Accept all edits in this chat')

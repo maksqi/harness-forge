@@ -276,7 +276,7 @@ async function onConfirmRemove(): Promise<void> {
         <div class="flex min-w-0 flex-1 items-start gap-3">
           <Switch
             :id="ids.auto"
-            class="mt-0.5"
+            class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
             :model-value="autoOn"
             :aria-describedby="ids.autoDescription"
             :data-testid="testIds.dataCleanupAuto"
@@ -291,7 +291,7 @@ async function onConfirmRemove(): Promise<void> {
         </div>
         <Select :model-value="interval" :disabled="!autoOn" @update:model-value="onIntervalChange">
           <SelectTrigger
-            class="w-full sm:w-40"
+            class="w-full sm:w-40 pointer-coarse:min-h-10"
             aria-label="Automatic cleanup interval"
             :data-testid="testIds.dataCleanupInterval"
             :data-value="interval"

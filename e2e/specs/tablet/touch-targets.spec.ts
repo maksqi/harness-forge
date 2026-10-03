@@ -3,18 +3,28 @@
 // 3rem, and every button of it is a touch target of at least 40x40 px, in the chat, plugins and settings modes (the
 // project switcher of the chat mode among them). Phase 7 (W7.14): in a project chat the expanded sidebar's project
 // switcher, the header's project chip and the controls of a workspace approval card (Deny, Allow, "Accept all edits in
-// this chat") are 40 px targets too.
+// this chat") are 40 px targets too. Phase 8 (W8.12): the changes toggle, the pane's Close and Refresh, a changes row and
+// its Revert (shown without hover), "Rewind files to here", and on a shell card the "Always allow commands starting
+// with" checkbox, the prefix input and both scope options are 40 px targets (at 1024 px the panel is the desktop pane).
 import type { Locator, Page } from '@playwright/test'
 import type { CleanupTask, HarnessApi } from '../../helpers/index.ts'
 import {
   boxOf,
   byTestId,
+  changesFile,
+  changesFileButton,
+  changesPane,
+  changesPanel,
+  changesToggle,
   expect,
+  MOCK_CHECKPOINT_DONE,
+  MOCK_CHECKPOINT_FILE,
   seedProject,
   test,
   testIds,
   touchTargetSize,
   uniqueId,
+  userMessages,
 } from '../../helpers/index.ts'
 
 /** The collapsed rail on touch devices (`pointer-coarse:[--sidebar-width-icon:3.5rem]`). */
@@ -153,5 +163,57 @@ test.describe('tablet touch targets in a project chat', () => {
   test('the "Accept all edits in this chat" checkbox is at least 40x40 px', async ({ page, api, cleanup }) => {
     const card = await openApprovalChat(page, api, cleanup)
     await expectTouchTarget(card.getByTestId(testIds.toolApprovalAcceptEdits), 'the "Accept all edits in this chat" checkbox')
+  })
+})
+
+test.describe('tablet touch targets of the changes panel, rewind and shell rules', () => {
+  test('the changes toggle, a row, Revert and "Rewind files to here" are at least 40x40 px', async ({ page, api, cleanup }) => {
+    const { project } = await seedProject(api, cleanup, { name: `Tablet changes ${uniqueId('tablet')}`, files: { [MOCK_CHECKPOINT_FILE]: 'Original line.\n' } })
+    const chat = await api.createChat({ title: `Tablet changes ${uniqueId('chat')}`, projectId: project.id, modelRef: 'mock:checkpoint' })
+    cleanup(api => api.removeChat(chat.id))
+    expect((await api.sendChat({ chatId: chat.id, modelRef: 'mock:checkpoint', toolMode: 'auto', text: 'Write the checkpoint.' })).text).toBe(MOCK_CHECKPOINT_DONE)
+
+    await page.goto(`/chat/${chat.id}`)
+    await expect(page.getByTestId(testIds.messageAssistant).last()).toContainText(MOCK_CHECKPOINT_DONE)
+    const toggle = changesToggle(page)
+    await expectTouchTarget(toggle, 'the changes toggle')
+    await expectTouchTarget(userMessages(page).first().getByTestId(testIds.messageRewind), 'Rewind files to here')
+
+    // 1024 px: the desktop pane, with touch-sized controls.
+    await toggle.tap()
+    await expect(changesPane(page)).toBeVisible()
+    const panel = changesPanel(page)
+    await expect(panel).toHaveAttribute('data-variant', 'pane')
+    await expectTouchTarget(panel.getByTestId(testIds.changesClose), 'Close changes')
+    await expectTouchTarget(panel.getByTestId(testIds.changesRefresh), 'Refresh changes')
+    const row = changesFile(page, MOCK_CHECKPOINT_FILE)
+    await expect.poll(async () => (await touchTargetSize(changesFileButton(row))).height, { message: 'the row height' }).toBeGreaterThanOrEqual(MIN_TARGET)
+    const revert = byTestId(row, testIds.changesFileRevert, { 'data-path': MOCK_CHECKPOINT_FILE })
+    await expectTouchTarget(revert, 'Revert file')
+    expect(await revert.evaluate(element => element.ownerDocument.defaultView!.getComputedStyle(element).opacity), 'Revert shows without hover').toBe('1')
+    const handle = page.getByTestId(testIds.changesResize)
+    await expect.poll(async () => (await touchTargetSize(handle)).width, { message: 'the resize handle hit area' }).toBeGreaterThanOrEqual(24)
+  })
+
+  test('the shell card\'s rule checkbox, prefix and scope options are at least 40x40 px', async ({ page, api, cleanup }) => {
+    const { project } = await seedProject(api, cleanup, { name: `Tablet rules ${uniqueId('tablet')}` })
+    const chat = await api.createChat({ title: `Tablet rules ${uniqueId('chat')}`, projectId: project.id, modelRef: 'mock:shell' })
+    cleanup(api => api.removeChat(chat.id))
+    await api.sendChat({ chatId: chat.id, modelRef: 'mock:shell', toolMode: 'ask', text: 'echo tablet' })
+
+    await page.goto(`/chat/${chat.id}`)
+    const card = byTestId(page, testIds.toolApproval, { 'data-tool-name': 'shell' })
+    await expect(card).toBeVisible()
+    const allowRule = card.getByTestId(testIds.toolApprovalAllowRule)
+    await expectTouchTarget(allowRule, 'the "Always allow commands starting with" checkbox')
+    await allowRule.tap()
+    await expect(allowRule).toHaveAttribute('data-state', 'checked')
+    const prefix = card.getByTestId(testIds.toolApprovalRulePrefix)
+    await expect(prefix).toHaveValue('echo')
+    await expect.poll(async () => (await touchTargetSize(prefix)).height, { message: 'the prefix input height' }).toBeGreaterThanOrEqual(MIN_TARGET)
+    const scope = card.getByTestId(testIds.toolApprovalRuleScope)
+    for (const value of ['project', 'global'])
+      await expectTouchTarget(scope.locator(`[data-value="${value}"]`), `the scope option ${value}`)
+    await expectTouchTarget(card.getByTestId(testIds.toolApprovalAllow), 'Run')
   })
 })

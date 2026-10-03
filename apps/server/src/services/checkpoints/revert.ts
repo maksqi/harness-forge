@@ -57,7 +57,7 @@ function pathRefused(message: string): HarnessError {
 function gitUnavailable(ctx: CheckpointContext, failure: GitFailure): HarnessError {
   if (failure.detail !== undefined)
     ctx.deps.logger.debug('git revert unavailable', { reason: failure.reason, detail: failure.detail })
-  const message = `The git view is not available: ${GIT_REASON_MESSAGES[failure.reason]}`
+  const message = `The Git view is not available: ${GIT_REASON_MESSAGES[failure.reason]}`
   return validationError([{ path: ['source'], message, code: 'custom' }], message)
 }
 
@@ -163,7 +163,7 @@ async function gitRevert(ctx: CheckpointContext, workspace: ChatWorkspace, body:
       const current = await diskSha(root, rel)
       if (current !== null) {
         throw pathRefused(status.truncated
-          ? `"${rel}" is not in the git view (too many changed files): revert it with git.`
+          ? `"${rel}" is not in the Git view (too many changed files): revert it with git.`
           : `"${rel}" is ignored by git: it cannot be reverted to HEAD.`)
       }
     }

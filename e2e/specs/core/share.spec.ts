@@ -3,17 +3,66 @@
 // and a browser context without cookies (no session) opens its URL as the read-only transcript of the snapshot: the
 // title and the messages, no sidebar, composer, message actions or version switchers. Revoking the link in the dialog
 // makes a reload of that page show "This link is unavailable".
+// Phase 8 (W8.12), parity of the share page with the chat: a `mock:checkpoint` run in Accept edits whose shell calls the
+// project's rules allowed shows, with tool details, the same rule badges (`tool-row-rule`), spoken row labels and
+// terminal output (the working folder before `$`, "Now in mock-dir", "Allowed by rule: …") as the chat itself.
+import type { Locator, Page } from '@playwright/test'
 import type { PasswordServer } from '../../helpers/index.ts'
 import {
   assistantMessages,
   byTestId,
+  createProject,
   expect,
   HarnessApi,
+  MOCK_CHECKPOINT_DIR,
+  MOCK_CHECKPOINT_DONE,
+  MOCK_CHECKPOINT_LS,
+  MOCK_CHECKPOINT_MKDIR,
+  removeProject,
+  seedWorkspaceFolder,
   startPasswordServer,
   test,
   testIds,
   uniqueId,
 } from '../../helpers/index.ts'
+
+/** What a shell row shows, in the chat (`tool-row`) and on the share page (`share-tool-row`). */
+interface ShellRowView {
+  rule: string
+  command: string
+  cwd: string | null
+  nowIn: string | null
+}
+
+/** Expands a shell row and checks its rule badge, spoken summary and terminal output. */
+async function expectShellRow(row: Locator, body: Locator, view: ShellRowView): Promise<void> {
+  await expect(row.getByTestId(testIds.toolRowRule).first()).toHaveAttribute('data-value', view.rule)
+  await expect(row.getByText(`, allowed by rule ${view.rule}`).first()).toBeAttached()
+  await expect(row.getByText('Exit code 0', { exact: true }).first()).toBeAttached()
+  await row.getByRole('button').first().click()
+  const terminal = body.getByTestId(testIds.terminalOutput)
+  await expect(terminal).toBeVisible()
+  await expect(terminal.getByTestId(testIds.terminalCommand)).toHaveText(`${view.cwd ? `${view.cwd} ` : ''}$ ${view.command}`)
+  if (view.nowIn)
+    await expect(terminal.getByTestId(testIds.terminalCwdChange)).toHaveText(`Now in ${view.nowIn}`)
+  else
+    await expect(terminal.getByTestId(testIds.terminalCwdChange)).toHaveCount(0)
+  await expect(terminal.locator('[data-slot="terminal-rule"]')).toHaveText(`Allowed by rule: ${view.rule}`)
+}
+
+const SHELL_ROWS: readonly ShellRowView[] = [
+  { rule: 'mkdir', command: MOCK_CHECKPOINT_MKDIR, cwd: null, nowIn: MOCK_CHECKPOINT_DIR },
+  { rule: 'ls', command: MOCK_CHECKPOINT_LS, cwd: MOCK_CHECKPOINT_DIR, nowIn: null },
+]
+
+/** The shell rows of the chat page and their expanded bodies. */
+function chatShellRows(page: Page): { row: (index: number) => Locator, body: (index: number) => Locator } {
+  const rows = byTestId(assistantMessages(page).last(), testIds.toolRow, { 'data-tool-name': 'shell' })
+  return {
+    row: index => rows.nth(index),
+    body: index => rows.nth(index).locator('xpath=ancestor::*[@data-slot="tool-part"][1]').getByTestId(testIds.toolRowOutput),
+  }
+}
 
 /** `<origin>/share/<token>` with the token format of DECISIONS.md (`^[0-9A-Za-z]{16}[\w-]{22}$`). */
 function shareUrlPattern(baseURL: string): RegExp {
@@ -120,6 +169,53 @@ test.describe('share', () => {
       await expect(sharePage).toHaveAttribute('data-state', 'unavailable')
       await expect(guest.getByTestId(testIds.shareUnavailable)).toContainText('This link is unavailable')
       await expect(guest.getByTestId(testIds.shareTranscript)).toHaveCount(0)
+    }
+    finally {
+      await visitor.close()
+    }
+  })
+
+  test('the share page shows the rule badges and the working folder like the chat @smoke', async ({ page, browser, cleanup }) => {
+    const { baseURL, password } = server!
+    const api = owner!
+    // A project with the rules `mkdir` and `ls`: in Accept edits the whole `mock:checkpoint` plan runs without a card.
+    // `mock-dir` exists beforehand: a `cd` needs no rule only into a folder that exists when the command is checked.
+    const folder = await seedWorkspaceFolder(api, { prefix: 'share', files: { [`${MOCK_CHECKPOINT_DIR}/.keep`]: '' } })
+    cleanup(() => folder.remove())
+    const project = await createProject(api, { name: `Share parity ${uniqueId('share')}`, path: folder.path })
+    cleanup(() => removeProject(api, project.id))
+    for (const prefix of ['mkdir', 'ls'])
+      await api.client.shellRules.create({ body: { projectId: project.id, prefix } })
+    const parity = await api.createChat({ title: `Share parity ${uniqueId('chat')}`, projectId: project.id, modelRef: 'mock:checkpoint' })
+    cleanup(() => api.removeChat(parity.id))
+    const { text } = await api.sendChat({ chatId: parity.id, modelRef: 'mock:checkpoint', toolMode: 'edits', text: 'Write the checkpoint.' })
+    expect(text).toBe(MOCK_CHECKPOINT_DONE)
+    const share = await api.client.shares.create({ body: { chatId: parity.id, options: { toolDetails: true } } })
+
+    // The chat.
+    await new HarnessApi(page.request, baseURL).client.auth.login({ body: { password } })
+    await page.goto(`${baseURL}/chat/${parity.id}`)
+    await expect(assistantMessages(page).last()).toContainText(MOCK_CHECKPOINT_DONE)
+    const chatRows = chatShellRows(page)
+    for (const [index, view] of SHELL_ROWS.entries())
+      await expectShellRow(chatRows.row(index), chatRows.body(index), view)
+    const writeRow = byTestId(assistantMessages(page).last(), testIds.toolRow, { 'data-tool-name': 'write_file' })
+    await expect(writeRow.getByTestId(testIds.toolRowSummary)).toHaveText('New · 1 line')
+    await expect(writeRow.getByText('New file, 1 line', { exact: true })).toBeAttached()
+
+    // The share page, in a browser without a session.
+    const visitor = await browser.newContext()
+    try {
+      const guest = await visitor.newPage()
+      await guest.goto(`${baseURL}${share.path}`)
+      await expect(guest.getByTestId(testIds.sharePage)).toHaveAttribute('data-state', 'ready')
+      const shellRows = byTestId(guest, testIds.shareToolRow, { 'data-tool-name': 'shell' })
+      await expect(shellRows).toHaveCount(2)
+      for (const [index, view] of SHELL_ROWS.entries())
+        await expectShellRow(shellRows.nth(index), shellRows.nth(index).getByTestId(testIds.shareToolRowOutput), view)
+      const shareWrite = byTestId(guest, testIds.shareToolRow, { 'data-tool-name': 'write_file' })
+      await expect(shareWrite.getByTestId(testIds.toolRowSummary)).toHaveText('New · 1 line')
+      await expect(shareWrite.getByText('New file, 1 line', { exact: true })).toBeAttached()
     }
     finally {
       await visitor.close()

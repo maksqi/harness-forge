@@ -11,9 +11,12 @@ from `docs/ARCHITECTURE.md` (5, 6.2, 6.13, 6.15, the new 6.16 checkpoints and 6.
 the `mock:checkpoint` and `mock:shell` models from `docs/PROVIDERS.md` (8); the user guide
 `docs/guides/using-projects.md`. The new UI.md and ARCHITECTURE.md sections are written by D9 in P8-0a, API.md by C17.
 
-**Status (2026-10-03):** P8-00 is done (`1a95805`); P8-0a is in progress. "Deviations from the plan" lists where the
-build differs from the design reports (the plan sections below already follow the reconciliation); "Outcome" at the
-end of this file is written by the coordinator at the final gate.
+**Status (2026-10-03, final):** Phase 8 shipped as v1.4. Earlier status: P8-00 (`1a95805`), P8-0a (`8e79252`), P8-0b (`07b9cd2`, plus the coordinator's
+`shell-cwd.ts` stub `fbaa3bb` before the P8-A launch) and P8-A (`6699a73`) passed their gates. P8-B (W8.12 feature e2e
+specs, W8.13 docs reconciliation) is in progress; the final gate follows. "Deviations from the plan" lists where the
+plan differs from the design reports (the plan sections below already follow the reconciliation), "Deviations found
+while building" where the build differs from the plan sections; "Outcome" at the end of this file is completed by the
+coordinator at the final gate.
 
 Paths: `S` = `apps/server/src`, `W` = `apps/web/app`, `SH` = `packages/shared/src`.
 
@@ -232,32 +235,114 @@ Open points decided by D8 while writing this file (the coordinator confirms or c
 
 ### Deviations found while building (P8-0a – P8-B)
 
-The coordinator records them here at each gate from the agent reports; the code and the reconciled docs
-follow these, not the task text further down.
+Recorded from the agent reports (`.tmp/waves/P8-0a-notes.md`, `P8-0b-notes.md`, `P8-A-notes.md`) and the gates; the
+code and the reconciled docs (API.md, ARCHITECTURE.md, UI.md, PLUGINS.md, PROVIDERS.md, the guides; W8.13) follow
+these, not the task text further down.
 
-- **P8-0a**: C18 added `ShellAskReason` `syntax` / `escape` and `ShellRuleRejectReason` `shell-builtin`; `&>/dev/null`
-  asks (dash backgrounds `cmd &>/dev/null`); `>&M` only for M 0–2. Timestamps in the new DTOs are epoch-ms.
+- **P8-0a (C17)**: timestamps in the new DTOs are epoch-ms (`timestampSchema`, not ISO strings); every `reason` field
+  is required and nullable; the ten 501 stubs validate first (400 before 501); fixture names `chatChanges()`,
+  `gitStatus()`, `fileDiff()`, `rewindPreview()`, `restoreResult()`, `shellRule()`; 10 compile-fix files outside the
+  owned paths were accepted at the gate.
+- **P8-0a (C18)**: `ShellAskReason` adds `syntax` (an empty segment: a leading, trailing or doubled operator, `ls ;`)
+  and `escape` (a backslash inside double quotes, a continuation, a trailing backslash); `ShellRuleRejectReason` adds
+  `shell-builtin` (`export`, `declare`, `printf`, `read`, `test`, `[`, `set`, `trap`, …: bash evaluates array
+  subscripts in names); braces ask as `glob`; `N>&M` only for M 0–2; `&>` asks (dash runs `cmd &>/dev/null` as a
+  background command plus a bare redirection); command names compare as lower-case basenames without a version suffix
+  (`/bin/sh`, `BASH`, `python3.12`); interpreter rules with only options after the interpreter are refused
+  (`python3 -m`, `node -e`); the longest matching rule is reported; `pnpm run` alone gets no suggestion. The shell
+  environment must never set `CDPATH` (kept by W8.4: `shell-env.ts` also drops `ENV` / `BASH_ENV`).
+- **P8-0a (D8 / D9)**: the open points above were confirmed at Gate P8-0a (AGENT.md says `allowRules`); the mock
+  models' denied / failed / empty-text answers come from PROVIDERS.md 8, which goes beyond DECISIONS.
+- **P8-0b (K3)**: `0005_workspace_checkpoints.sql` = 2 CREATE TABLE + 5 CREATE INDEX, nothing else
+  (`workspace_changes`: 18 columns, 4 indexes, 2 cascading foreign keys; `shell_rules`: 4 columns, 1 index, 1
+  cascading foreign key); the v1.3 seed comes from a `1a95805` worktree (`.tmp/upgrade-v13`).
+- **P8-0b (C19)**: the mock provider lists 12 models (10 visible, `modelCount` 9; three count pins outside the owned
+  paths were accepted); `CheckpointJournal.write({ toolCallId, tool, root, resolved, produce(before), signal })` with
+  the before-state `missing | present | too-large`; `prune()` returns `{ evictedByAge, evictedByBudget, rowsEvicted,
+  orphanBlobs, tempFiles, bytesFreed }`; `CheckpointContext { deps, blobs, rows, now }` and `disk.ts` (`sha256Hex`,
+  `readCheckpointBefore`, `diskSha(s)`, `writeWithoutRecording`) complete; the boot warning about the test-only sweep
+  delay names it in words (the log redactor masks `HF_` + 16 characters).
 - **P8-0b (C20)**: UI.md 10.5 / 11.5 won over this file's C20 section: `ChangesFileRow` takes `row: ChangesRow` +
   `chatId`; `ChangesEmpty` reasons use `GitUnavailableReason`; `RevertFileDialog` takes `row` + `expectedSha?` and
   emits `reverted: [result, path]`; `AllowlistEditor` takes `{ projectId }` only; the workspace store entry type is
   `ChangesEntry`, without `entries()` / `ChangesFileEntry`, with `fileDiff(chatId, source, path, opts)`,
   `revert(chatId, input)`, `undo(chatId, batchId)` and no rewind members; the shell rules store uses `applyEvent`
-  (not `dropProject`).
-- **P8-A** (details in `.tmp/waves/P8-A-notes.md`, for W8.13): `journaledWrite(c, root, { tool, path },
-  produce(before, resolved))` records only when the run scope, the journal scope and `c.workspace` share the project;
-  a failed before-blob store keeps the write and records `before_state = evicted`; the chat pipeline builds the run
-  scope in `chat/scope.ts` (`createRunScope`, fallbacks: no journal / empty rules / `.` on errors) and records `shell` /
-  `untracked` rows before the `tool.after` hooks; `initialShellCwd` and the web's `currentShellCwd` skip finished
-  outputs without `endCwd` (the web returns `null` for the project folder); `allowedBy` is absent when no rule matched
-  (e.g. a command that is only `cd`); the shell's policy is a function, so `GET /tools` shows `policy: null` for it; a
-  chat revert of a `too-large` / `evicted` base answers 200 with the file skipped as `unavailable` (API.md), not 400;
-  a chat without a project answers 400 "This chat has no project."; git-view failures on revert / diff are 400 on
-  `['source']`; the rewind preview lists shell commands newest first (the last 50); the workspace store also refreshes
-  the open chat's This chat view on `workspace.changed`; the rewind result toast lives in `ChatView`
-  (`REWIND_DIALOG_HOST` hands 404 / 409 from the dialog to the view); `ChatTranscript` gained the optional prop
-  `projectId`; the Storage cleanup status uses `data-state` `off | never | done | skipped | failed`; the automatic
-  sweep's busy retry is `min(10 min, check interval)` and its skip logs at info; the plugin data budget counts entries;
-  `mock:checkpoint` nests `mock-dir/mock-dir` on a second turn (the sticky folder).
+  (not `dropProject`); the `rewind-dialog` test id sits on a wrapper inside `DialogContent` (reka owns `data-state`).
+- **P8-0b (C21)**: hardening beyond the plan: `-c safe.bareRepository=explicit`, `GIT_LITERAL_PATHSPECS=1`,
+  `GIT_NO_LAZY_FETCH=1`, diff-driver neutralization and a command allowlist (`rev-parse`, `symbolic-ref`, `status`,
+  `ls-tree`, `ls-files`, `cat-file`, `check-attr`); `ls-tree -l` instead of `cat-file -s`; `prefix` without a trailing
+  slash; `~/.gitconfig` is kept on purpose (the documented Docker `safe.directory` fix); the ceiling is the outermost
+  workspace root holding the project. The CCR to export `trackGroup` from `shell.ts` was declined (git keeps its own
+  live-group set). Accepted risk: a repository config rewritten between the driver discovery and the guarded command.
+- **Before P8-A (coordinator)**: the `S/workspace/shell-cwd.ts` stub with the `initialShellCwd` signature for W8.5
+  (`fbaa3bb`).
+- **P8-A checkpoints (W8.1)**: `journaledWrite(c, root, { tool, path }, produce(before, resolved))` records only when
+  the run scope, the journal scope and `c.workspace` share the project; a failed before-blob store keeps the write and
+  records `before_state = evicted` (`recorded: false`); parallel edits of one file run in lock order and both land;
+  prune `evictedByAge` / `evictedByBudget` count unlinked blobs, the budget goes by `before_size` per project (LRU
+  first; a blob shared with another project stays), orphan blobs and temp files go after 1 h, the boot prune runs even
+  without `background`, `checkpoints pruned` is logged only when something changed; `stop()` drops pending tool events.
+- **P8-A restore (W8.2)**: a chat revert of a `too-large` / `evicted` base answers 200 with the file skipped as
+  `unavailable` and `batchId: null` (API.md), not 400; a chat without a project answers 400 "This chat has no
+  project."; git-view failures on revert are 400 on `['source']`, other refusals on `['path']` (an ignored file, a
+  conflicted file, a link, a submodule, a filtered path); a copy only deletes `path`; a mode-only difference restores
+  the exec bits; the git index is never touched; `conflict` is never set on `unchanged`; undo of a batch from an
+  earlier project is 404; the error order of rewind is chat 404, message 404, non-user 400, workspace 400, run 409, of
+  revert path 400 / 404, run 409, `stale` 409; new `restore-scope.ts` (overlaps W8.3's `changes-common.ts`).
+- **P8-A changes list (W8.3)**: line counts for the first 200 entries by position under a shared 5 s diff budget;
+  `unchanged` entries are listed (the web filters them); a gone project is `no-project` with `projectId: null`,
+  `folder-unavailable` keeps it; a guard-refused path is `modified` + `changedOutside` with null counts (its diff is
+  400); git status: `staged` = X ≠ `.`, `unstaged` = Y ≠ `.` (conflicted both), `D.` plus an untracked file of the
+  same path merge, a copy / rename from outside and `.A` are `added`, an untracked nested repository keeps its
+  trailing `/`; `FileDiff.status` maps conflicted / typechange to `modified`; HEAD symlinks diff as link-target text;
+  a git diff of an unlisted path is 404.
+- **P8-A sticky folder (W8.4)**: the folder is reported on fd 3 by an EXIT trap; only the last absolute line counts (no
+  trailing newline, any signal, `exec` or the command's own EXIT trap → no report, the folder stays); `initialShellCwd`
+  skips finished outputs without `endCwd`; the notes read "The working folder X no longer exists / can no longer be
+  used, so the command ran in the project folder." and "The working folder is now … (the next call starts there)."
+  ("the project folder" for `.`); `cd` targets are walked like `cd` (`link/..` is the folder holding the link) and
+  each must already exist and be enterable; `allowedBy` is absent when no rule matched (e.g. a command that is only
+  `cd`); rules apply only when the run scope's project is the call's workspace project; the shell's policy is a
+  function, so `GET /tools` shows `policy: null` for it; `PATH` keeps absolute entries only.
+- **P8-A chat pipeline (W8.5)**: the run scope is built in `chat/scope.ts` (`createRunScope`; fallbacks: no journal,
+  an empty rule set, `.` on errors, each with a warning; built in tool mode `off` too); `shell` / `untracked` rows are
+  recorded after every started call (success, failure, abort or timeout; not for blocked, invalid or inactive-plugin
+  calls) before the `tool.after` hooks; a non-core tool named `write_file` / `shell` is recorded by its access level;
+  a stored `allow` on an `execute` tool is ignored (`effectiveOverride`).
+- **P8-A shell rules (W8.6)**: the create check order is parser → project → duplicate → cap; a full scope is 400 on
+  `['prefix']` ("This project already has 200 shell rules. Remove one first." / "The global list already has …");
+  creates are serialized in-process (no unique index on scope + prefix); `forRun(null)` runs no query; a pre-v1.4
+  stored `allow` on `shell` still shows in `GET /tools`.
+- **P8-A sweep (W8.7)**: the plugin data budget counts entries (files, folders, links); the busy retry is `min(10 min,
+  check interval)`; `nextRunAt` is the first scheduled check at or after the due time; a skip logs at info, a failure
+  warns with `code` / `errorName` only; a failed `summary()` omits `DataSummary.checkpoints`, a failed `purge()` is
+  logged and delete-all still succeeds; `createDataService` returns `DataServiceWithSweep`. Accepted race: a folder
+  swapped for a link between `lstat` and `opendir` is followed once.
+- **P8-A web (W8.8 – W8.11)**: the workspace store also refreshes the open chat's This chat view on
+  `workspace.changed`, and `useServerEvents` hands `project.changed` to it before the chats store; `RevertFileDialog`
+  is built on AlertDialog parts (keeps `data-slot="confirm-dialog"`); Alt+C is ignored while focus is in another
+  dialog, menu or listbox; below 1024 px the sheet never opens by itself and the width is saved only on drag / arrow
+  keys; the rewind result toast lives in `ChatView` (`useRewindResultToast`; `REWIND_DIALOG_HOST` hands 404 / 409 from
+  the dialog to the view); `ChatTranscript` gained the optional prop `projectId`; `approve()` creates the rule prefixes
+  one by one before it answers (409 `exists` counts as saved; never `override: allow` for execute tools);
+  `currentShellCwd` skips finished outputs without a valid `endCwd` and returns `null` for the project folder; the
+  Storage cleanup status uses `data-state` `off | never | done | skipped | failed` and loads `GET /data` itself.
+- **Gate P8-A (coordinator)**: `S/deps.test.ts` phase 8 tests rewritten for the implemented members,
+  `core-workspace/index.test.ts` expects `shell: shellPolicy`; W8.10 follow-up (the `currentShellCwd` skip rule).
+  `mock:checkpoint` nests `mock-dir/mock-dir` on a second turn (the sticky folder), so its `mkdir` step always asks
+  under a `mkdir` rule (the `cd` target does not exist yet when the call is checked).
+- **P8-B (W8.13)**: API.md, UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md 8, the guides, README and
+  `.env.example` reconciled with the code (the boot / shutdown order, the git commands actually run, the 200 skipped
+  chat revert, `allowedBy` in any mode, the `&>` and `cd`-target rules, the entry-counting plugin data budget, the
+  `mock:checkpoint` nesting). Code issues found while reconciling (left for the coordinator / a fix-up):
+  `W/components/chat/parts/ToolApprovalCard.vue` shows the raw JSON under the `write_file` / `edit_file` preview again
+  (its `<pre v-else>` now pairs with `<AllowRuleOption v-if="offersRule">` instead of the preview; since `6699a73`);
+  the git-view 400 message has two wordings (`S/services/checkpoints/revert.ts` "The Git view is not available: git
+  …" vs `git-changes.ts` "The Git view is not available: Git …"); `NO_PROJECT_MESSAGE` is defined twice
+  (`restore-scope.ts`, `changes-common.ts`); the frozen `SH/schemas/workspace.ts` comments on `allowedBy` ("absent
+  when approved / auto") and `endCwd` (no skip rule) are stale; the automatic cleanup switch and interval select in
+  `StorageCleanupSection.vue` have no 40 px coarse-pointer sizing (UI.md 14.5).
+- **P8-B (W8.12) and the final gate**: recorded by the coordinator.
 
 ## Rules for every Phase 8 agent
 
@@ -1653,7 +1738,27 @@ Launched only for red P8-A gate items (W8.14 server, W8.15 web), with the globs 
 
 ## Outcome
 
-Written by the coordinator at the final gate.
+Completed by the coordinator at the final gate. Gate results so far (copied from the ROADMAP wave log; "audit" is the
+ownership audit of `scripts/audit-ownership.mjs`):
+
+| Wave | Agents | Gate result | Commit |
+|---|---|---|---|
+| P8-00 | coordinator | CI on `8879e6e` green; Phase 7 ROADMAP boxes ticked; advisories still unpatched (ignores kept); `pnpm check` 6995 tests | `1a95805` |
+| P8-0a | coordinator (K1, K3 seed early), C17, C18, D8, D9 | audit ok (55 paths; 10 C17 compile-fix files accepted); frozen install ok; 7514 tests; build ok; CSP 38/38; 10 new routes answer 501 / 400; e2e 77; TypeScript 6.0.3 only | `8e79252` |
+| P8-0b | coordinator (K3), C19, C20, C21 | audit ok (117 paths); `0005` = 2 CREATE TABLE + 5 CREATE INDEX; 7722 tests; build ok; CSP 38/38; e2e 77; upgrade probe on a v1.3 copy 19/19; FREEZE | `07b9cd2`, `fbaa3bb` |
+| P8-A | W8.1 – W8.11 | audit ok (152 paths, no frozen file touched); 8327 tests; build ok; CSP 38/38; probes 57/57; e2e 77; screenshots reviewed; `pnpm audit --prod` clean (2 ignored) | `6699a73` |
+| P8-B + final gate | W8.12, W8.13, coordinator | new e2e specs 3× green; docs reconciled; 8327 tests; build ok; CSP 38/38; probes 57/57 (incl. the real v1.3 → v1.4 upgrade); e2e 96 passed ×3; screenshots reviewed (dark + light); `pnpm audit --prod` clean (2 ignored); Docker image (Node 24, git 2.54, bash 5.3): Git view, This chat, rewind and checkpoints/ 0700 in the container, a repository owned by another uid answers refused (8/8) | `chore: final gate for harness-forge v1.4` |
+
+Fixes made by the coordinator at the gates: the parser follow-up (`&>` asks: dash backgrounds it); the phase-doc seed
+paths and the C20 deviations (UI.md 10.5 / 11.5 won); the stub `S/workspace/shell-cwd.ts` that fixed
+`initialShellCwd(history)` before P8-A; the rewritten phase 8 tests of `deps.test.ts` and `shell: shellPolicy` in
+`core-workspace/index.test.ts`; at the final gate the raw arguments shown again under the write / edit approval preview
+(a P8-A regression, found by W8.13), the resize handle's arrow keys (found by W8.12; the handle now mounts disabled and
+is enabled on the next tick, so reka's setup-time DOM lookup finds it), the "Git view" wording, 40 px coarse-pointer
+cleanup controls, the shared schema comments and the ADR / AGENT.md wording. Follow-ups sent to agents: C18 (`&>`),
+W8.10 (`currentShellCwd` skips outputs without `endCwd`, like the server). CCRs: C21's `trackGroup` export declined (git
+keeps its own live-group set); no other CCR. W8.14 / W8.15 were not needed. Deferred: the duplicated
+`NO_PROJECT_MESSAGE` (`restore-scope.ts`, `changes-common.ts`). Not run: the live provider suite (paid; the user's).
 
 ---
 

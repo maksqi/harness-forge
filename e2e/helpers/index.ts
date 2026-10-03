@@ -2,6 +2,7 @@
 //   import { expect, openNewChat, test, testIds } from '../../helpers/index.ts'
 export * from './api.ts'
 export * from './auth-server.ts'
+export * from './changes.ts'
 export * from './chat.ts'
 export * from './data.ts'
 export * from './env.ts'

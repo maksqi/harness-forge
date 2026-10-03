@@ -1107,7 +1107,8 @@ type DataSummary = {                    // dataSummarySchema (GET /data)
   fileBytes: number                     // bytes of the uploaded files
   fileSweep: FileSweepStatus            // the automatic file sweep (Phase 8, ADR-039)
   checkpoints?: { bytes: number; blobs: number }   // stored before-states of workspace files (<dataDir>/checkpoints,
-}                                       // ADR-036; never in a backup): disk bytes and blob count; optional
+}                                       // ADR-036; never in a backup): disk bytes and blob count; omitted when the
+                                        // store cannot be read
 
 type DataExportQuery = {                // dataExportQuerySchema (GET /data/export)
   files?: boolean                       // default true: attachments referenced by message parts
@@ -1190,8 +1191,9 @@ type FileSweepStatus = {                // fileSweepStatusSchema (GET /data, GET
   mode: FileSweepMode                   // the `fileSweep` setting: 'off' | 'daily' | 'weekly'
   lastAttempt: FileSweepAttempt | null  // the last automatic sweep (internal setting `_files.lastAutoSweep`); null =
                                         // none yet
-  nextRunAt: Timestamp | null           // when the next automatic sweep is due (an estimate: the timer checks hourly);
-}                                       // null when mode is 'off'
+  nextRunAt: Timestamp | null           // when the next automatic sweep runs: the first scheduled hourly check at or
+}                                       // after the due time (the due time itself while no check is scheduled); null
+                                        // when mode is 'off'
 
 type FileSweepAttempt = {               // fileSweepAttemptSchema
   at: Timestamp
@@ -1201,8 +1203,10 @@ type FileSweepAttempt = {               // fileSweepAttemptSchema
 }
 
 type PluginDataScan = 'complete' | 'partial'   // pluginDataScanSchema: the reference scan read every file of
-                                               // <dataDir>/plugins/.data, or stopped at its budget (an automatic sweep
-                                               // is then skipped; a manual cleanup proceeds)
+                                               // <dataDir>/plugins/.data, or stopped at its budget (256 MiB read,
+                                               // 50,000 entries visited: files, folders and links; 32 folder levels)
+                                               // or met an entry it could not read (an automatic sweep is then
+                                               // skipped; a manual cleanup proceeds)
 
 type BackupManifest = {                 // backupManifestSchema; manifest.json, written last (exact counts)
   format: 'harness-forge.backup'
@@ -1657,15 +1661,19 @@ type ShellToolOutput = {                // = ShellOutput
   // Phase 8 (ADR-038); absent in outputs stored before v1.4
   endCwd?: string                       // where the chat's next shell call starts: the folder the command ended in,
                                         // project-relative ('.' = the project folder), clamped to the project (a
-                                        // folder outside it, or one that is gone, becomes '.' with a cwdNote); absent
-                                        // when the end folder was not reported (exec, a kill, the command's own EXIT
-                                        // trap: the folder stays as it was); read as '.' when missing
-  cwdNote?: string                      // <= 500 chars: why the working folder went back to the project folder, e.g.
-                                        // "The command ended outside the project folder; the next call starts in the
-                                        // project folder."
-  allowedBy?: string[]                  // the canonical prefixes of the shell rules that let the command run without
-                                        // asking (<= 32, each <= 200 chars, first-match order); absent when the
-                                        // command was approved or ran in the auto mode
+                                        // folder outside it, or one that is no longer a folder, becomes '.' with a
+                                        // cwdNote); absent when the end folder was not reported (exec, a signal or a
+                                        // kill, the command's own EXIT trap: the folder stays as it was, so the next
+                                        // run looks further back for the last output that has one; none = '.')
+  cwdNote?: string                      // <= 500 chars: why the call did not start in the remembered folder ("The
+                                        // working folder <x> no longer exists, so the command ran in the project
+                                        // folder." / "... can no longer be used, ...") and / or why the next call
+                                        // starts in the project folder ("The command ended outside the project
+                                        // folder; the next call starts in the project folder."), joined by a space
+  allowedBy?: string[]                  // the canonical prefixes of the shell rules that matched the whole command
+                                        // (<= 32, each <= 200 chars, first-match order), whatever the permission
+                                        // mode (also in auto, and when an override or hook decided); absent when no
+                                        // rule matched every segment, and for a command of only `cd <folder>` segments
 }
 
 type WorkspaceDiff = {                  // workspaceDiffSchema: the change of a write or an edit, for the UI
@@ -1705,10 +1713,12 @@ diffMaxBytes: 24576, diffLineMaxChars: 500, descriptionMaxChars: 200 }`.
     path).").
   - `write_file`: "Created x (N lines).", "Updated x (+a -r lines).", or "Updated x (N lines)." without a diff.
   - `edit_file`: "Edited x: 1 replacement (+a -r lines).", or "Edited x: N replacements." without a diff.
-  - `shell`: "Exit code: N", "Stopped after <s> s (timeout)" or "Terminated by signal SIGKILL"; then, when the working
-    folder changed, "The working folder is now <endCwd> (the next call starts there)." or the `cwdNote` (Phase 8); then
-    a line `stdout:` and the output (trailing newlines trimmed) or "(empty)"; then `stderr:` and its text, only when
-    stderr is not empty.
+  - `shell`: "Exit code: N", "Stopped after <s> s (timeout)" or "Terminated by signal SIGKILL"; then (Phase 8) the
+    `cwdNote` when there is one, and "The working folder is now <endCwd> (the next call starts there)." (`.` reads "the
+    project folder") when the next call starts somewhere else than this one did (the end folder differs from the
+    start folder, the call had an explicit `cwd`, or the remembered folder was gone), never when the end folder was not
+    reported or the note already says the next call starts in the project folder; then a line `stdout:` and the output
+    (trailing newlines trimmed) or "(empty)"; then `stderr:` and its text, only when stderr is not empty.
 - **Errors the model sees** (the call fails, the run goes on): a refused `cwd` of `shell` is `validation_error` on
   `['cwd']`; `edit_file` explains a missing `old_string` ("… Read the file again and copy the text exactly, including
   whitespace and indentation.") and an ambiguous one ("old_string occurs N times in x. Add more surrounding lines … or
@@ -1729,12 +1739,15 @@ diffMaxBytes: 24576, diffLineMaxChars: 500, descriptionMaxChars: 200 }`.
   environment (an allowlist: no `HF_*`, no provider keys, no `NODE_ENV`), its own process group (killed on Stop,
   timeout or server exit; background processes are stopped once the shell exits, also when they closed their pipes).
   Each call is a new process; since Phase 8 (ADR-038) `cd` persists inside the project folder: the folder a command
-  ends in (reported through an EXIT trap on file descriptor 3) is where the chat's next call starts (`endCwd` of the
-  last `shell` output on the shown path, so it follows versions and survives restarts; checked again when the next call
-  starts: a folder that is gone means the project folder and a `cwdNote`); environment variables do not persist. A
-  command whose every segment matches a shell rule runs without asking in the `ask` and `edits` modes (section 4.24;
-  `allowedBy`). A valid session can approve its own shell calls (accepted risk, ADR-033); `HF_WORKSPACE_SHELL=0`
-  removes the tool.
+  ends in (reported through an EXIT trap on file descriptor 3; only the last absolute line counts, and a command ended
+  by a signal reports nothing) is where the chat's next call starts. A run starts from the `endCwd` of the last
+  finished `shell` output on the shown path that has one (so it follows versions and survives restarts; outputs
+  without it are skipped, none = the project folder); inside a run the call that finishes last wins. The folder is
+  checked again when each call starts: one that is gone or unusable means the project folder and a `cwdNote`.
+  Environment variables do not persist (the environment never sets `CDPATH`, `ENV` or `BASH_ENV`). A command whose
+  every segment matches a shell rule of the call's project (or the global list) runs without asking in the `ask` and
+  `edits` modes (section 4.24; `allowedBy`). A valid session can approve its own shell calls (accepted risk, ADR-033);
+  `HF_WORKSPACE_SHELL=0` removes the tool.
 
 ### 4.22 Master key
 
@@ -1800,18 +1813,25 @@ type ChatChangeFile = {                 // chatChangeFileSchema
   edits: number                         // journaled changes of the file in the chat (edits, reverts, rewinds, undos)
   changedOutside: boolean               // the disk differs from the state after the chat's last recorded change
                                         // (another chat, a shell command, an editor)
-  revertible: boolean                   // the base state is stored (not too-large or evicted)
-  added: number | null                  // lines added / removed, base against disk; null beyond the first 200 files
-  removed: number | null                // (LIMITS.changesLineCountFiles), for binary files and over 256 KiB
+  revertible: boolean                   // the base can be written back: it is stored, or it is missing (a file the
+                                        // chat created; reverting deletes it); false for a too-large or evicted base
+  added: number | null                  // lines added / removed, base against disk (0 / 0 when equal); null beyond the
+  removed: number | null                // first 200 entries of the list (LIMITS.changesLineCountFiles, by position),
+                                        // for binary sides, sides over 256 KiB, a base that is not stored, a path
+                                        // the guard refuses, and once the list's shared 5 s diff budget is spent
   lastEditAt: Timestamp                 // the chat's last recorded change of the file
 }
 type ChatChanges = {                    // chatChangesSchema (GET /chats/:id/changes)
   available: boolean                    // false: no project, or its folder cannot be opened (files empty)
-  reason: 'no-project' | 'folder-unavailable' | null   // changesUnavailableReasonSchema; null when available
-  projectId: ProjectId | null           // the chat's current project
-  files: ChatChangeFile[]               // most recently changed first, <= 500 (LIMITS.changesFilesMax)
+  reason: 'no-project' | 'folder-unavailable' | null   // changesUnavailableReasonSchema; null when available;
+                                        // 'no-project' also when the chat's project no longer exists
+  projectId: ProjectId | null           // the chat's current project (kept with 'folder-unavailable'); null without
+                                        // a project
+  files: ChatChangeFile[]               // most recently changed first, <= 500 (LIMITS.changesFilesMax); files back at
+                                        // their base are listed too (status 'unchanged'; the web hides them)
   truncated: boolean
-  untracked: { shellCommands: number; toolCalls: number }   // journaled changes a rewind cannot restore
+  untracked: { shellCommands: number; toolCalls: number }   // journaled changes a rewind cannot restore (the
+                                        // chat's `shell` and `untracked` rows in this project)
 }
 
 // Diff of one file (both views)
@@ -1822,14 +1842,14 @@ type FileDiff = {                       // fileDiffSchema (GET /chats/:id/change
   source: ChangeSource
   path: string
   origPath: string | null               // the path at HEAD of a renamed file (git view)
-  status: FileDiffStatus
+  status: FileDiffStatus                // git view: conflicted and typechange files read as 'modified'
   binary: boolean                       // a side has a NUL byte in its first 8 KiB or is not valid text: no diff
   tooLarge: boolean                     // a side is over 1 MiB (LIMITS.changeDiffSideMaxBytes): no diff
   diff: WorkspaceDiff | null            // base against disk (section 4.21: cut to 24 KiB, `truncated`; no hunks when
                                         // unchanged); null when binary, too large or the base is not available
   currentSha: Sha256Hex | null          // the file on disk now (send it back as a revert's expectedSha); null = missing
-  baseAvailable: boolean                // chat: the base is stored; git: the file exists at HEAD or is new
-}
+  baseAvailable: boolean                // chat: the base is stored (or missing: a new file); git: the file exists at
+}                                       // HEAD or is new (false for a submodule)
 
 // "Git": the project folder against HEAD
 type GitFileStatus = 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted' | 'typechange'
@@ -1873,6 +1893,7 @@ type RewindFile = {                     // rewindFileSchema
   path: string
   action: RewindAction
   conflict: boolean                     // the disk differs from the state after the chat's last recorded change
+                                        // (never set for 'unchanged': nothing is written there)
   edits: number                         // journaled changes of the file in the range
 }
 type RewindShellCommand = { command: string; at: Timestamp; messageId: MessageId | null }   // rewindShellCommandSchema;
@@ -1884,9 +1905,9 @@ type RewindPreview = {                  // rewindPreviewSchema (GET /chats/:id/r
   untracked: {                          // changes in the range a rewind cannot undo
     shellCount: number                  // every shell command in the range
     shell: RewindShellCommand[]         // the latest first, <= 50 (LIMITS.rewindUntrackedListMax)
-    tools: RewindToolCall[]             // calls of other tools with workspace access write / execute, <= 50
-  }
-  truncated: boolean
+    tools: RewindToolCall[]             // calls of other tools with workspace access write / execute (plugin tools
+  }                                     // named like a core tool included), the latest first, <= 50
+  truncated: boolean                    // more than 500 files are in the range (the apply still restores them all)
 }
 type RestoreSkip = {                    // restoreSkipSchema: a file left as it was
   path: string
@@ -1914,14 +1935,21 @@ type WorkspaceChangedData = {           // workspaceChangedDataSchema (event wor
 
 - **Base and conflict**: per path, the base is the earliest before-state the chat recorded and the expected state the
   latest after-state; the file conflicts (`changedOutside`, `conflict`) when the disk (SHA-256) differs from the
-  expected state.
+  expected state. A listed path that the guard now refuses (e.g. it leads through a link out of the folder) shows as
+  `modified` with `changedOutside: true` and no line counts; its diff answers `400`.
+- **Journal**: a `write_file` / `edit_file` is recorded only when it runs in a chat run whose project is the tool
+  call's project; a before-state that could not be stored is journaled as `evicted` (the edit still runs). `shell`
+  and `untracked` rows are added after every call that started (finished, failed, aborted or timed out), not for calls
+  that were blocked, invalid or of an inactive plugin.
 - **Rewind** is time-based: "the files as they were when message M was sent". It covers every file row of the chat
   recorded after M was sent, on every version of the conversation; edits of other chats are never undone (they show up
   as conflicts). Folders the agent created stay. Running it again resumes a partial rewind (restored files are
   `unchanged`). The conversation is not moved: "Restore files and edit" is a rewind followed by the edit flow
   (ADR-023).
 - **Limits**: a before-state over 8 MiB is not stored (`too-large`; the edit still runs); per project 512 MiB and 30
-  days (the oldest before-states are evicted; their rows stay as `evicted`).
+  days (over the budget the least recently used before-states, by the newest row that references them, are evicted
+  first; their rows stay as `evicted`; a blob another project still uses stays). The prune runs at boot, every 6
+  hours and 60 s after the last chat deletion; deleting a chat or project deletes its rows.
 
 ### 4.24 Shell rules
 
@@ -1934,9 +1962,9 @@ settings: they are not in backups (a backup never grants shell rights); deleting
 type ShellRule = {                      // shellRuleSchema
   id: ShellRuleId                       // srl_ + 16 chars, generated by the server
   projectId: ProjectId | null           // null = a global rule (every project)
-  prefix: string                        // the canonical prefix: words unquoted, one space between them; <= 200 chars
-  createdAt: Timestamp
-}
+  prefix: string                        // the canonical prefix (parseShellRule(...).canonical): the words after
+  createdAt: Timestamp                  // unquoting, one space between them, a word with other characters than
+}                                       // letters, digits and @ % + = : , . / - _ single-quoted; <= 200 chars
 type ShellRuleList = ListResponse<ShellRule>   // shellRuleListSchema (GET /shell-rules)
 
 type ShellRuleCreate = {                // shellRuleCreateSchema (POST /shell-rules); strict, shape only
@@ -1947,23 +1975,39 @@ type ShellRuleCreate = {                // shellRuleCreateSchema (POST /shell-ru
 
 - **Matching** (`matchShellRules(command, rules)` of `@harness-forge/shared`, the same code on the web and the server):
   a rule's words must equal the first words of a segment (`pnpm test` matches `pnpm test --run x`, not `pnpm testx` or
-  `pnpm -C x test`); words are compared after unquoting; the command word is literal (`pnpm` is not `./pnpm`). It
-  fails closed: a command that cannot be split with certainty always asks.
-- **Always asks** (no rule can allow it): `$` (variables, `$(…)`, `$((…))`), backticks, `( ) { }`, `&`, `|&`,
-  redirections other than `N>&M`, `>/dev/null`, `N>/dev/null`, `&>/dev/null`; `<`, `<<`, `<<<`, `<(`, `>(`; unquoted
-  `*`, `?`, `[`; a word starting with `~` or `#`; shell keywords, `!`, `[[`, `((`; an environment assignment before the
-  command (`FOO=1 cmd`); more than 32 segments (`LIMITS.shellCommandSegmentsMax`). `cd <folder>` needs no rule when the
-  folder lies inside the project folder; `cd`, `cd -`, `pushd` and `popd` ask.
-- **Refused rules** (`400` on `POST /shell-rules`, `parseShellRule` gives the reason and the message): a prefix the
-  parser cannot read or that always asks; a first word that runs its arguments as a command (at least `sh`, `bash`,
-  `zsh`, `dash`, `ksh`, `fish`, `eval`, `exec`, `source`, `.`, `command`, `builtin`, `env`, `sudo`, `doas`, `su`,
-  `xargs`, `nohup`, `nice`, `timeout`, `time`, `watch`, `stdbuf`, `chroot`, `setsid`, `ssh`, `parallel`); a shell
-  builtin that changes the shell or evaluates its arguments; a rule for an interpreter or package runner that names no
-  script or package (at least `node`, `python`, `python3`, `ruby`, `perl`, `php`, `deno`, `bun`, `npx`, `pnpx`,
-  `bunx`); and `cd`, `pushd`, `popd`. The complete word lists live in `util/shell-command.ts`.
-- **Suggestions**: `suggestShellRules(command)` gives one prefix per segment that needs a rule (the command word, plus
-  the subcommand of tools such as `git`, `npm`, `pnpm`, `yarn`, `cargo`, `go`, `docker`, plus the script name after
-  `run` / `exec`), or none when the command always asks.
+  `pnpm -C x test`); words are compared after unquoting; the command word is literal (`pnpm` is not `./pnpm`); the
+  longest matching rule of a segment is the one reported. It fails closed: a command that cannot be split with
+  certainty always asks. The server applies the rules of the run's project and the global list, read once when the
+  run starts, and only to calls in that project.
+- **Always asks** (no rule can allow it; `ShellAskReason`): `$` (variables, `$(…)`, `$((…))`), backticks, `( ) { }`,
+  `&`, `|&`, `&>` (dash runs `cmd &>/dev/null` as `cmd &` plus a redirection), redirections other than `>&M` / `N>&M`
+  (M = 0, 1 or 2), `>/dev/null`, `>>/dev/null` and `N>/dev/null`; `<`, `<<`, `<<<`, `<(`, `>(`, `>|`; unquoted `*`,
+  `?`, `[`; a word starting with `#`; `~` at the start of a word or after `=` / `:`; a backslash inside double quotes,
+  a line continuation or a trailing backslash; an empty segment (a leading, trailing or doubled operator, a trailing
+  `;`; blank lines and trailing newlines are ignored); a control character (bidirectional formatting characters
+  included); shell keywords, `!`, `[[`, `((` as the command word (checked after unquoting); an environment assignment
+  before the command (`FOO=1 cmd`); more than 32 segments (`LIMITS.shellCommandSegmentsMax`); more than 16 KiB.
+  `cd <folder>` (one literal word) needs no rule when the folder lies inside the project folder (each target is walked
+  like `cd`, from the call's start folder, and must be enterable); `cd`, `cd -`, `cd -P x`, `pushd` and `popd` ask.
+- **Refused rules** (`400` on `['prefix']` of `POST /shell-rules`; `parseShellRule` gives the reason
+  `ShellRuleRejectReason` and the message): empty or over 200 characters; a prefix the parser cannot read, with more
+  than one segment, a redirection or anything that always asks (`syntax`); a first word that runs its arguments as a
+  command (`command-runner`, at least `sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `eval`, `exec`, `source`, `.`,
+  `command`, `builtin`, `env`, `sudo`, `doas`, `su`, `xargs`, `nohup`, `nice`, `timeout`, `time`, `watch`, `stdbuf`,
+  `chroot`, `setsid`, `ssh`, `parallel`, `busybox`, `flock`, `script`, `strace`); a shell builtin that changes the
+  shell or evaluates its arguments (`shell-builtin`, at least `export`, `declare`, `local`, `readonly`, `unset`, `set`,
+  `alias`, `printf`, `read`, `test`, `[`, `trap`: bash evaluates array subscripts in names); a rule for an interpreter
+  or package runner whose words after the first are only options (`interpreter`, at least `node`, `python`,
+  `python3`, `ruby`, `perl`, `php`, `deno`, `bun`, `npx`, `pnpx`, `bunx`, `tsx`, `awk`: `node`, `node -e` and
+  `python3 -m` are refused, `python3 -m pytest` is not); and `cd`, `pushd`, `popd` (`cd`). The first word is compared
+  as a lower-case base name without a version suffix (`/bin/sh`, `BASH`, `python3.12`). The complete word lists live
+  in `util/shell-command.ts`.
+- **Suggestions**: `suggestShellRules(command)` gives one prefix per segment that needs a rule, deduplicated, in order
+  (the command word, plus the subcommand of tools such as `git`, `gh`, `npm`, `pnpm`, `yarn`, `cargo`, `go`, `docker`,
+  `make`, plus the nested subcommand of `docker compose`, `gh pr`, `git stash`, `go mod`, plus the script or package
+  name after `run` / `exec`; for an interpreter the shortest prefix naming the program, e.g. `python3 -m pytest`;
+  `cd <folder>` segments need none), or none when the command always asks or a segment has no valid rule (e.g. a bare
+  `pnpm run`).
 - **Accepted risk**: a rule for a script runner (`pnpm test`, `make`) runs whatever code the agent wrote into the
   project; with Accept edits this is about as strong as the auto mode for the shell. Arguments can still have side
   effects (`git diff --output=…`).
@@ -2307,17 +2351,20 @@ body exceeds its limit; `500 internal_error`.
 **`GET /tools`** — `tools.list`
 - Response `200 ListResponse<ToolSummary>` sorted by name: every registered tool, plus MCP tools from the last
   successful listing of a currently disconnected server (`available: false`). `workspace` names the access of the
-  workspace tools (`core-workspace` and plugin tools that declare it, ADR-032).
+  workspace tools (`core-workspace` and plugin tools that declare it, ADR-032). Since Phase 8 the `shell` tool has a
+  policy function (`ask`, or `safe` when shell rules match the whole command), so it is listed with `policy: null`.
 
 **`PATCH /tools/:name`** — `tools.update`
 - Params `{ name: ToolName }`. Body `ToolUpdate`. Used by the Overview tab and by the "Always allow {tool}" checkbox
   of an approval card (`override: 'allow'`).
 - Phase 8 (ADR-038): `override: 'allow'` is refused for a tool with workspace access `execute` (the `shell` tool and
   plugin tools that declare it): shell rules (section 5.25) allow single commands instead. An `allow` override stored
-  before v1.4 on such a tool is ignored by the approval (the tool asks); `ask`, `deny` and `null` stay accepted.
+  before v1.4 on such a tool is ignored by the approval (the tool asks) but still listed by `GET /tools` (`override:
+  'allow'`) until it is changed; `ask`, `deny` and `null` stay accepted.
 - Response `200 ToolSummary`.
-- Errors: `404 not_found` (unknown tool name); `400 validation_error` on `['override']` for `override: 'allow'` on a tool
-  with workspace access `execute`.
+- Errors, in this order: `404 not_found` (unknown tool name, `Unknown tool "<name>".`); `400 validation_error` on
+  `['override']` for `override: 'allow'` on a tool with workspace access `execute` ("Shell commands can't be always
+  allowed. Add a shell rule instead.").
 
 ### 5.13 `mcp.ts`
 
@@ -2559,8 +2606,9 @@ event types: the chat events of section 7 report the changes.
 
 **`GET /data`** — `data.summary`
 - Response `200 DataSummary` (what a backup contains and what delete-all removes), with the state of the automatic file
-  sweep (`fileSweep`, Phase 8) and, optionally, the disk use of the stored workspace before-states (`checkpoints`; never
-  part of a backup).
+  sweep (`fileSweep`, Phase 8; the setting and the stored state, no scan) and the disk use of the stored workspace
+  before-states (`checkpoints`; never part of a backup; omitted, with a warning in the log, when the checkpoint store
+  cannot be read).
 
 **`GET /data/export?files=true|false&settings=true|false`** — `data.export` · response `'binary'`
 - Query `DataExportQuery` (both default `true`).
@@ -2612,9 +2660,12 @@ event types: the chat events of section 7 report the changes.
 - Stops every run (runs still preparing included), then deletes every chat with its messages and share links in one
   batch; `usage: true` also deletes every usage row, the rows kept from chats deleted earlier included (else they are
   kept with `chat_id = NULL`); `files: true` also deletes every uploaded file (rows and blobs); finally it stops any
-  run that started meanwhile on a deleted chat. Settings, providers, credentials, plugins, MCP servers and projects are
-  kept (projects keep no chats).
-- Response `200 DataDeleteResult`. Emits `chat.deleted` for every deleted chat.
+  run that started meanwhile on a deleted chat. Since Phase 8 it also empties the checkpoint store
+  (`<dataDir>/checkpoints`; the change journal rows go with their chats; a failure there is logged and does not fail
+  the request). Settings, providers, credentials, plugins, MCP servers, projects and shell rules are kept (projects keep
+  no chats).
+- Response `200 DataDeleteResult` (the checkpoint store is not counted in it; the `data deleted` log line carries
+  `checkpointBlobs` / `checkpointBytes`). Emits `chat.deleted` for every deleted chat.
 - Errors: `403 forbidden` (fresh auth missing, `action: 'login'`); `409 conflict` (`reason: 'busy'`).
 
 **`GET /data/cleanup`** — `data.cleanupPreview`
@@ -2632,8 +2683,9 @@ event types: the chat events of section 7 report the changes.
   row is unlinked only when no other row shares it (identical uploads share one blob). References are file ids
   (`file_` + 16 letters or digits) found anywhere in message parts and metadata, share snapshots and their file lists,
   plugin storage (keys and values) and plugin settings, settings, chat settings and projects, and since Phase 8 the
-  files of `<dataDir>/plugins/.data` (a loose scan: it may keep an extra file, never removes a referenced one; the
-  plugin data scan has a budget, `pluginData: 'partial'` when it stopped early). Workspace before-states
+  files of `<dataDir>/plugins/.data` (a loose scan: it may keep an extra file, never removes a referenced one; links
+  are never followed; the plugin data scan has a budget, section 4.16, `pluginData: 'partial'` when it stopped early or
+  could not read an entry). Workspace before-states
   (`<dataDir>/checkpoints`) are never touched. The DELETE re-checks the message references, so a message committed
   after the scan keeps its file; files returned by an upload, import or image generation within the last 24 hours are
   pinned in memory and kept (`recentFiles`). Deleting a chat or a message version leaves its files in place until the
@@ -2642,12 +2694,17 @@ event types: the chat events of section 7 report the changes.
   counts (no ids, names or paths). Emits no event.
 - Errors: `409 conflict` (`reason: 'busy'`).
 - **Automatic sweep** (Phase 8, ADR-039): with `fileSweep` `daily` or `weekly`, a timer of the data service runs the
-  same cleanup at least 24 hours after the server started and once `lastRunAt` + the interval has
-  passed (a manual cleanup resets the clock); it checks hourly. Another maintenance operation makes it retry in 10
-  minutes (nothing stored); a plugin data scan over its budget skips it (`status: 'skipped'`, `reason:
-  'plugin-data-limit'`, nothing deleted); a failure is stored and retried after a full interval. The outcome is stored
-  as `_files.lastAutoSweep` and reported as `fileSweep.lastAttempt` of `GET /data` and `GET /data/cleanup`; no route,
-  no event.
+  same cleanup once it is due: at least 24 hours after the server started, `lastRunAt` + the interval (24 hours or 7
+  days; a manual cleanup resets the clock) and, after a skipped or failed attempt, that attempt + the interval (so it
+  never loops). The first check runs 24 hours after boot, then one every hour; each check reads the setting again (a
+  change applies at the next check). Another maintenance operation makes it retry after `min(10 minutes, the check
+  interval)` (nothing stored); a plugin data scan that is partial skips it (`status: 'skipped'`, `reason:
+  'plugin-data-limit'`, nothing deleted, logged at info); a failure is stored as `failed` / `error` (a warning with the
+  error code only). The outcome is stored as `_files.lastAutoSweep` and reported as `fileSweep.lastAttempt` of `GET
+  /data` and `GET /data/cleanup`; a finished automatic run also sets `lastRunAt`, a manual cleanup does not change
+  `lastAttempt`. No route, no event.
+  `HF_TEST_FILE_SWEEP_DELAY_MS` (test-only, honored only with `HF_MOCK_PROVIDER=1`, else ignored with a boot warning)
+  replaces both the boot delay and the check interval.
 
 ### 5.20 `shares.ts`
 
@@ -2870,25 +2927,36 @@ belonged to another project are ignored); every path resolves through the worksp
 no `.git`).
 
 Common errors:
-- `404 not_found` for an unknown chat ("Chat <id> not found.").
+- `400 validation_error` for invalid params, query or body (checked first).
+- `404 not_found` for an unknown chat ("Chat <id> not found."), before any project, git or disk work.
 - A chat without a project, a project that no longer exists, or a folder that cannot be opened: `changes.list` and
-  `changes.git` answer `200` with `available: false` and the `reason`; every other route answers `400 validation_error`
-  with the message of the project service ("The project of this chat no longer exists.", "The project folder <path> is
-  not available: <issue>").
+  `changes.git` answer `200` with `available: false` and the `reason` (`no-project` for the first two,
+  `folder-unavailable`); every other route answers `400 validation_error` with the message "This chat has no
+  project." or the project service's ("The project of this chat no longer exists.", "The project folder <path> is not
+  available: <issue>").
 - Revert, undo and rewind: `409 conflict` (`reason: 'run-active'`, `chatId`: the running chat) while **any** chat of the
   project runs ("A chat of this project is running. Stop it first, then try again."); nothing is written. The `GET`
-  routes also answer during a run.
+  routes also answer during a run. This check comes after every `400` / `404` of the route.
+- A path the workspace guard refuses (invalid, outside the folder, the folder itself, a link out of the folder; for
+  revert also a path inside `.git`): `400 validation_error` on `['path']`.
 
-Writes: each file is written under a per-file lock shared with the agent tools; its current state is stored first, then
-the earlier state is written atomically (a re-created file gets its old mode back) or the file is removed; every write is
-journaled under one batch id right away, so an interrupted batch can be undone or run again. A batch that wrote
-something emits `workspace.changed` (`source` = `revert`, `undo` or `rewind`, with `batchId`).
+Writes: files go newest-edited first (the order of the journal, a restore's own rows included); each file is written
+under a per-file lock shared with the agent tools, where its path is resolved and its disk state read and decided again
+(already at the target: `unchanged`; changed since the expected state: `conflict` unless `force`); its current state is
+stored first, then the earlier state is written atomically (a re-created file gets its old mode back) or the file is
+removed; every write is journaled under one batch id right away, so an interrupted batch can be undone or run again.
+A file that fails is skipped (`refused` for a guard refusal, `failed` with the error code for a write error) and the
+batch goes on; folders the agent created stay. A batch that wrote something emits `workspace.changed` (`source` =
+`revert`, `undo` or `rewind`, with `batchId`, at most 200 paths) and logs `file reverted` / `restore undone` / `files
+rewound` with the counts at info (paths only at debug).
 
 **`GET /chats/:id/changes`** — `changes.list`
 - Params `ChatParams`.
-- Response `200 ChatChanges`: one entry per path the chat changed (net change of the base against the disk), most
-  recently changed first, at most 500 (`truncated`); line counts for the first 200 text files of at most 256 KiB;
-  `untracked` counts the shell commands and other workspace tool calls the journal cannot restore.
+- Response `200 ChatChanges`: one entry per path the chat changed (net change of the base against the disk; files back
+  at their base included as `unchanged`), most recently changed first, at most 500 (`truncated`); line counts for the
+  first 200 entries whose sides are text of at most 256 KiB, within one 5 s diff budget per request; `untracked` counts
+  the shell commands and other workspace tool calls the journal cannot restore. Logs nothing (paths never reach the
+  log).
 
 **`GET /chats/:id/changes/diff?source=chat|git&path=`** — `changes.diff`
 - Params `ChatParams`. Query `ChangeDiffQuery`.
@@ -2897,73 +2965,101 @@ something emits `workspace.changed` (`source` = `revert`, `undo` or `rewind`, wi
   HEAD of `origPath`; with an unborn HEAD every file is added). Git's own diff is never run (diffs are computed by the
   server); each side at most 1 MiB (`tooLarge`), binary sides give no diff.
 - Response `200 FileDiff`.
-- Errors: `404 not_found` (`source=chat`: a path the chat never changed); `400 validation_error` (`source=git`: the git
-  view is not available, with its reason).
+- Errors: `404 not_found` (`source=chat`: a path the chat never changed, `"<path>" was not changed by this chat.`;
+  `source=git`: a path the Git view does not list, `"<path>" has no changes since the last commit.`); `400
+  validation_error` on `['source']` (`source=git`: the Git view is not available, "The Git view is not available:
+  <reason>", e.g. "Git is not installed on the server."); `400` on `['path']` for a path the guard refuses (also a
+  listed file that is now a folder or a link out of the project); the common errors.
 
 **`GET /chats/:id/git`** — `changes.git`
 - Params `ChatParams`.
-- Runs `git status` of the project folder (porcelain v2, untracked files included, submodules ignored) through the
-  hardened git runner: an argument array without a shell, a scrubbed environment, `GIT_CEILING_DIRECTORIES` above the
-  allowed root, file system monitors, hooks, external diff and pager, filter drivers and optional locks disabled, 15 s
-  timeout, output capped at 8 MiB. The index is never touched. A project in a subfolder of a repository lists only its
-  own files (`prefix`).
+- Runs `git status --porcelain=v2 -z --untracked-files=all --ignore-submodules=all --find-renames -- .` in the project
+  folder through the hardened git runner (ARCHITECTURE.md 6.17): an argument array without a shell, only read-only
+  commands, a scrubbed environment (no inherited `GIT_*`; `GIT_OPTIONAL_LOCKS=0`, `GIT_LITERAL_PATHSPECS=1`,
+  `GIT_NO_LAZY_FETCH=1`), `GIT_CEILING_DIRECTORIES` above the allowed root (a repository above the workspace root is
+  never discovered), file system monitors, hooks, external diff and pager disabled, `safe.bareRepository=explicit`,
+  every filter and diff driver of the repository and of `~/.gitconfig` neutralized, 15 s timeout, output capped at
+  8 MiB. The index is never touched. A project in a subfolder of a repository lists only its own files (`prefix`, no
+  trailing slash).
+- Status per file: untracked -> `untracked` (an untracked nested repository keeps its trailing `/`); unmerged ->
+  `conflicted`; a rename inside the project -> `renamed` (`origPath`), a copy or a rename from outside the project
+  folder -> `added`; otherwise `added` (an `A` in either column, `git add -N` included), `deleted`, `typechange` or
+  `modified`. `staged` = the index column is not `.`, `unstaged` = the work-tree column is not `.`; a file deleted from
+  the index and present as untracked (`git rm --cached`) is one entry marked `unstaged`.
 - Response `200 GitStatus`; `available: false` with `reason`: `no-project`, `folder-unavailable`, `git-missing` (git is
   not installed), `not-a-repo`, `refused` (git refused the repository, e.g. "dubious ownership" of a folder owned by
-  another user, common with Docker bind mounts; `safe.directory` is not overridden), `timeout`, `failed`.
+  another user, common with Docker bind mounts, `safe.directory` is not overridden; a folder inside a bare repository;
+  a configuration whose drivers cannot be neutralized: unreadable, more drivers than the runner handles, or a driver
+  name with `=`), `timeout`, `failed`. The runner's detail is logged at debug only.
 
 **`POST /chats/:id/changes/revert`** — `changes.revert`
 - Params `ChatParams`. Body `ChangeRevertBody`.
 - `source: 'chat'` writes the file back to its base (removes it when the chat created it). `source: 'git'` writes back
-  the HEAD content (mode `100755` stays executable): an untracked or added file is removed, a renamed file is restored
-  at `origPath` and removed at `path`. The current state is stored first, so the revert is one undoable batch.
-- Response `200 RestoreResult` (a base that is not stored: `skipped` with `reason: 'unavailable'`, `batchId: null`).
-- Errors: `409 conflict` (`reason: 'stale'`) when the disk state is not `expectedSha` ("The file changed since it was
-  shown. Refresh and try again."); `404 not_found` (`source: 'chat'`: a path the chat never changed); `400
-  validation_error` on `['path']` for a path the guard refuses, and (`source: 'git'`) for a conflicted file, a symbolic
-  link, a submodule or a path with a `filter` attribute (Git LFS), or when the git view is not available; the common
-  errors.
+  the raw HEAD blob and sets the executable bits like a checkout (`100755` executable, `100644` not; a difference in
+  the mode only is restored too): an untracked or added file is removed, a renamed file is restored at `origPath` and
+  removed at `path`, a copy only removes `path`; the git index is never touched. The current state is stored first, so
+  the revert is one undoable batch.
+- Response `200 RestoreResult`. A chat base that is not stored (`too-large` or `evicted`) answers `200` with the file
+  in `skipped` (`reason: 'unavailable'`) and `batchId: null`, not an error.
+- Errors, in this order: the chat (`404`); the project folder (`400`); the path (`400` on `['path']`, the common
+  errors); `source: 'chat'`: `404 not_found` for a path the chat never changed (`"<path>" has no changes in this
+  chat.`); `source: 'git'`: `400 validation_error` on `['source']` when the Git view is not available ("The git view is
+  not available: <reason>"), and on `['path']` for a file with a merge conflict, a symbolic link (at HEAD, in the index
+  or on disk), a submodule, an untracked nested repository, a rename from outside the project folder, a path git
+  ignores (neither at HEAD nor listed), a path missing from a cut listing, or a path with a `filter` attribute (Git
+  LFS); then `409 run-active`; then `409 conflict` (`reason: 'stale'`) when `expectedSha` is given and the disk state is
+  another one ("The file changed since it was shown. Refresh and try again."); nothing is written on any error. A
+  change between this check and the write is skipped as `conflict`.
 
 **`POST /chats/:id/changes/undo`** — `changes.undo`
 - Params `ChatParams`. Body `ChangeUndoBody`.
 - Writes back the states every file of the batch had before it (the batch of a revert, a rewind or an undo); a file
   that changed since the batch wrote it is a conflict (`skip` or `force`). The undo is a new batch (undo it to redo).
 - Response `200 RestoreResult`.
-- Errors: `404 not_found` (a batch that is not one of this chat, "Change batch <batchId> not found."); the common
-  errors.
+- Errors, in this order: the chat (`404`); the project folder (`400`); `404 not_found` for a batch with no file row of
+  this chat in its current project (another chat's, an unknown one, or one recorded while the chat belonged to another
+  project: "Change batch <batchId> not found."); `409 run-active`.
 
 **`GET /chats/:id/rewind?messageId=`** — `changes.rewindPreview`
 - Params `ChatParams`. Query `RewindQuery`.
 - What `POST /chats/:id/rewind` would do now: every file the chat changed since the user message was sent (section
-  4.23), with its action and conflict, and the shell commands and other tool calls in that range that a rewind cannot
-  undo. Writes nothing.
-- Response `200 RewindPreview` (no files: nothing to restore).
-- Errors: `404 not_found` (`messageId` not in the chat, "Message <messageId> not found in chat <id>."); `400
-  validation_error` on `['messageId']` for a message that is not a user message; the common errors.
+  4.23; the journal rows of the chat in its current project from that message on, on every version of the
+  conversation), with its action and conflict, and the shell commands and other tool calls in that range that a rewind
+  cannot undo (the latest 50 of each, newest first). Only the first 500 files are read from disk. Writes nothing.
+- Response `200 RewindPreview` (no files: nothing to restore; a message sent before v1.4 has no journal rows).
+- Errors, in this order: the chat (`404`); `404 not_found` (`messageId` not in the chat, "Message <messageId> not found
+  in chat <id>."); `400 validation_error` on `['messageId']` for a message that is not a user message ("Files can be
+  rewound only to a user message."); the project folder (`400`).
 
 **`POST /chats/:id/rewind`** — `changes.rewind`
 - Params `ChatParams`. Body `RewindBody`.
-- Restores every file of the preview, the most recently edited first: `restore` writes the earlier content, `delete`
-  removes a file the chat created, `unchanged` files are listed as such, `unavailable` ones are skipped; a file whose
-  disk state differs from the chat's last recorded change is skipped (`conflict`) unless `conflicts: 'force'`. The
-  conversation is not changed.
+- Restores every file of the range (all of them, also beyond the 500 a preview lists), the most recently edited
+  first: `restore` writes the earlier content, `delete` removes a file the chat created, `unchanged` files are listed
+  as such, `unavailable` ones are skipped; a file whose disk state differs from the chat's last recorded change is
+  skipped (`conflict`) unless `conflicts: 'force'`. Shell changes are not undone. The conversation is not changed.
 - Response `200 RestoreResult` (`batchId: null` when nothing was written).
-- Errors: as `changes.rewindPreview`, plus `409 run-active`.
+- Errors: as `changes.rewindPreview`, then `409 run-active`.
 
 ### 5.25 `shell-rules.ts`
 
 Shell rules (ADR-038, DTOs in section 4.24). Every route needs a session; none needs fresh auth (a session can already
-approve its own shell calls). Rules are read when a run starts. Emits no event.
+approve its own shell calls). Rules are read when a run starts (a change applies from the next run). Emits no event.
+Logs `shell rule added` / `shell rule removed` at info with `ruleId`, `scope` (`project` | `global`) and `projectId`;
+the prefix only at debug. Rules are never in a backup, an export or an import; deleting a project deletes its rules.
 
 **`GET /shell-rules`** — `shellRules.list`
-- Response `200 ShellRuleList`: every rule, the global ones first, then by project and prefix.
+- Response `200 ShellRuleList`: every rule, the global ones first, then by project id; each scope by prefix.
 
 **`POST /shell-rules`** — `shellRules.create`
-- Body `ShellRuleCreate`. The prefix is checked with `parseShellRule` and stored in its canonical form.
+- Body `ShellRuleCreate`. The prefix is checked with `parseShellRule` and stored in its canonical form. Creates run one
+  at a time in the server process (the duplicate and cap checks and the insert do not interleave).
 - Response `201 ShellRule`.
-- Errors: `400 validation_error` on `['prefix']` with the parser's message for a refused prefix (section 4.24); `400
-  validation_error` when the scope (the project, or the global list) already has 200 rules
-  (`LIMITS.shellRulesPerScopeMax`); `404 not_found` (unknown `projectId`, "Project <id> not found."); `409 conflict`
-  (`reason: 'exists'`) when the scope already has the same canonical prefix ("This rule already exists.").
+- Errors, in this order: `400 validation_error` on `['prefix']` with the parser's message for a refused prefix
+  (section 4.24); `404 not_found` (unknown `projectId`, "Project <id> not found."); `409 conflict` (`reason:
+  'exists'`) when the scope already has the same canonical prefix ("This rule already exists."); `400
+  validation_error` on `['prefix']` when the scope already has 200 rules (`LIMITS.shellRulesPerScopeMax`; "This project
+  already has 200 shell rules. Remove one first." / "The global list already has 200 shell rules. Remove one
+  first.").
 
 **`DELETE /shell-rules/:id`** — `shellRules.remove`
 - Params `ShellRuleParams`. There is no edit: remove a rule and add another.
@@ -3162,10 +3258,12 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   | `auto` | everything except `always` | `always` |
 
   A policy function resolves first (e.g. `write_file` on a hidden path is `always`, so it asks in every mode);
-  `shell` (policy `ask`, access `execute`) asks in `ask` and `edits` mode, except (Phase 8, ADR-038) a command whose
-  every segment matches a shell rule of the project or the global list: its policy is then `safe`, so it runs without
-  asking in `ask` and `edits` (`allowedBy` in the output). The rules are read when a run starts; an override `ask` or
-  `deny` and the `tool.approve` hook still win, and a stored `allow` override of an `execute` tool is ignored.
+  `shell` (access `execute`; since Phase 8 a policy function, `policy: null` in `GET /tools`) is `ask`, so it asks in
+  `ask` and `edits` mode, except (ADR-038) a command whose every segment matches a shell rule of the project or the
+  global list (and whose `cd` targets stay inside the project): its policy is then `safe`, so it runs without asking
+  in `ask` and `edits` (`allowedBy` in the output). The policy is `ask` without a run scope or workspace, for an input
+  that does not validate and on any error. The rules are read when a run starts; an override `ask` or `deny` and the
+  `tool.approve` hook still win, and a stored `allow` override of an `execute` tool is ignored.
 - Approvals on other versions of a chat stay pending: switching back to such a version sets `pendingApproval` again,
   and the approval card is live because the continuation targets the active leaf.
 

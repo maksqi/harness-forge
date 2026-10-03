@@ -4,10 +4,16 @@
 // composer (edit the last user message), Alt+R (effort menu), Alt+P (permission menu), Tab / Enter on the approval
 // card, Mod+/ (shortcuts dialog), Mod+B (sidebar) and Mod+K (command palette). The edit step only checks that the
 // edited text is the last user message and that a reply streams, so it holds for in-place edits and for branches.
+// Phase 8 (W8.12): Alt+C shows and hides the changes panel of a project chat (also from the composer; opening focuses
+// the active view tab, closing from inside the panel returns focus to the toggle), the shortcuts dialog lists it, and a
+// chat without a project ignores it.
 import type { Locator, Page } from '@playwright/test'
 import type { TestId } from '../../helpers/index.ts'
 import {
   byTestId,
+  changesPanel,
+  changesToggle,
+  changesViewTab,
   CHAT_URL_PATTERN,
   chatIdFromUrl,
   composer,
@@ -16,8 +22,10 @@ import {
   expectStreamingWith,
   lastAssistantMessage,
   looseQuotes,
+  MOCK_CHECKPOINT_DONE,
   pressShortcut,
   pressUntilFocused,
+  seedProject,
   selectAllText,
   test,
   testIds,
@@ -232,5 +240,67 @@ test.describe('keyboard', () => {
     await expect(page).toHaveURL(new RegExp(`/chat/${chatId}$`))
     await expect(page.getByTestId(testIds.chatTitle)).toHaveText(title)
     await expect(composerInput(page)).toBeFocused()
+  })
+
+  test('Alt+C shows and hides the changes panel of a project chat, also from the composer @smoke', async ({ page, api, cleanup }) => {
+    const { project } = await seedProject(api, cleanup, { name: `Keys ${uniqueId('changes')}` })
+    const chat = await api.createChat({ title: `Keyboard changes ${uniqueId('chat')}`, projectId: project.id, modelRef: 'mock:checkpoint' })
+    cleanup(api => api.removeChat(chat.id))
+    expect((await api.sendChat({ chatId: chat.id, modelRef: 'mock:checkpoint', toolMode: 'auto', text: 'Write the checkpoint.' })).text).toBe(MOCK_CHECKPOINT_DONE)
+    const plain = await api.sendChat({ modelRef: 'mock:echo', text: `No project ${uniqueId('keys')}` })
+    cleanup(api => api.removeChat(plain.chatId))
+
+    await page.goto(`/chat/${chat.id}`)
+    await expect(lastAssistantMessage(page)).toContainText(MOCK_CHECKPOINT_DONE)
+    await page.keyboard.press('Shift+Escape')
+    await expect(composerInput(page)).toBeFocused()
+
+    // From the composer: Alt+C opens the panel on its active view tab; the arrow keys switch the views.
+    const panel = changesPanel(page)
+    const toggle = changesToggle(page)
+    await page.keyboard.press('Alt+KeyC')
+    await expect(panel).toBeVisible()
+    await expect(toggle).toHaveAttribute('data-state', 'open')
+    await expect(changesViewTab(page, 'chat')).toBeFocused()
+    await page.keyboard.press('ArrowRight')
+    await expect(changesViewTab(page, 'git')).toBeFocused()
+    await expect(panel).toHaveAttribute('data-view', 'git')
+    await page.keyboard.press('ArrowLeft')
+    await expect(changesViewTab(page, 'chat')).toBeFocused()
+    await expect(panel).toHaveAttribute('data-view', 'chat')
+
+    // From inside the panel Alt+C closes it and focus goes to the toggle; Enter on the toggle opens it again.
+    await page.keyboard.press('Alt+KeyC')
+    await expect(panel).toHaveCount(0)
+    await expect(toggle).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(panel).toBeVisible()
+    await expect(toggle).toBeFocused()
+
+    // Back in the composer, Alt+C closes the panel and focus stays there.
+    await page.keyboard.press('Shift+Escape')
+    await expect(composerInput(page)).toBeFocused()
+    await page.keyboard.press('Alt+KeyC')
+    await expect(panel).toHaveCount(0)
+    await expect(composerInput(page)).toBeFocused()
+
+    // The shortcuts dialog lists it.
+    const shortcuts = page.getByTestId(testIds.shortcutsDialog)
+    await pressShortcut(page, 'Mod+/')
+    await expect(shortcuts).toContainText('Show or hide changes')
+    await pressShortcut(page, 'Mod+/')
+    await expect(shortcuts).toBeHidden()
+    await expect(composerInput(page)).toBeFocused()
+
+    // A chat without a project has no toggle and ignores Alt+C.
+    await page.goto(`/chat/${plain.chatId}`)
+    await expect(lastAssistantMessage(page)).toHaveAttribute('data-status', 'done')
+    await page.keyboard.press('Shift+Escape')
+    await expect(composerInput(page)).toBeFocused()
+    await expect(toggle).toHaveCount(0)
+    await page.keyboard.press('Alt+KeyC')
+    await expect(panel).toHaveCount(0)
+    await expect(composerInput(page)).toBeFocused()
+    await expect(composerInput(page)).toHaveValue('')
   })
 })

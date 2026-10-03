@@ -68,13 +68,15 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   containment); the `shell` tool runs in its own process group with a minimal environment; never call `spawn` with a
   shell string elsewhere. Tests use `realpath(mkdtemp())` (macOS `/var` is a link to `/private/var`) and POSIX `sh`
   syntax only (CI runs Linux).
-- **Workspace 2.0** (Phase 8, ADR-036 … ADR-039; plugin API stays 1.2.0): every agent write to a project file goes
+- **Workspace 2.0** (Phase 8, ADR-036 … ADR-039; plugin API stays 1.2.0): every core `write_file` / `edit_file` write goes
   through `journaledWrite` (`apps/server/src/workspace/journal.ts`), which snapshots the previous state into
-  `<dataDir>/checkpoints/` and journals it in `workspace_changes`; the run scope (`workspace/run-scope.ts`, bound to
+  `<dataDir>/checkpoints/` and journals it in `workspace_changes`; revert / rewind / undo write through
+  `apps/server/src/services/checkpoints/restore.ts`; the run scope (`workspace/run-scope.ts`, bound to
   the tool call context) carries the chat, message, journal, shell rules and the sticky working folder; one per-file
   lock (`workspace/file-lock.ts`) serializes writes. Rewind, revert and undo are batches (`wcb_` ids) and are refused
   (409 `run-active`) while any chat of the project runs. **git runs only through `apps/server/src/workspace/git.ts`**
-  (argument arrays, scrubbed environment, `GIT_CEILING_DIRECTORIES`, hooks / fsmonitor / filters neutralized); the
+  (argument arrays, scrubbed environment, `GIT_CEILING_DIRECTORIES`, hooks / fsmonitor / filter and diff drivers
+  neutralized, a read-only command allowlist); the
   shell stays the only shell-string spawn. Shell rules (`shell_rules`, `srl_` ids) are matched by the shared parser
   `packages/shared/src/util/shell-command.ts`, which fails closed. The automatic file sweep (`fileSweep`) is opt-in.
 - **@ai-sdk/vue 4**: use the `useChat()` composable (the `Chat` class is deprecated); `DefaultChatTransport` is

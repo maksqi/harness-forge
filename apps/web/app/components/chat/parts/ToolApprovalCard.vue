@@ -127,7 +127,7 @@ function decide(approved: boolean) {
         :disabled="pending"
         @valid="ruleValid = $event"
       />
-      <pre v-else class="max-h-48 overflow-auto rounded-md bg-muted/60 p-2.5 font-mono text-xs whitespace-pre-wrap break-words">{{ args }}</pre>
+      <pre v-if="!previewKind" class="max-h-48 overflow-auto rounded-md bg-muted/60 p-2.5 font-mono text-xs whitespace-pre-wrap break-words">{{ args }}</pre>
       <div v-if="option" class="flex min-h-6 items-center gap-2 pointer-coarse:min-h-10">
         <Checkbox
           :id="checkboxId"

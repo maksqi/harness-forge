@@ -8,6 +8,10 @@
 // - Storage cleanup: a rowless blob older than the 24-hour grace period placed in the server's file store (the data
 //   directory is known because this spec started the server) is a leftover file; "Check for unused files" counts it,
 //   "Remove…" asks, removes it from disk and the next check reads "No unused files.".
+// - Automatic cleanup (Phase 8, W8.12; docs/UI.md 9.8, ADR-039): the switch and the interval write the setting
+//   `fileSweep`, survive a reload and show the next run ("Next automatic cleanup in …"); off hides it again. A fresh
+//   server has never run the sweep (`data-state` `off`, then `never`), and the first run comes at least 24 hours after
+//   the start, so nothing is removed meanwhile.
 import type { Locator, Page } from '@playwright/test'
 import type { PasswordServer } from '../../helpers/index.ts'
 import { createHash } from 'node:crypto'
@@ -228,5 +232,63 @@ test.describe('data maintenance', () => {
     await expect(summary).toContainText('Last cleanup')
     await expect(run).toBeDisabled()
     expect(await exists(blob), 'the blob is gone from disk').toBe(false)
+  })
+
+  test('the automatic cleanup setting persists and shows the next run @smoke', async ({ page }) => {
+    const { baseURL, password } = server!
+    const session = new HarnessApi(page.request, baseURL)
+    await session.client.auth.login({ body: { password } })
+    await page.goto(`${baseURL}/settings/data`)
+    const section = page.getByTestId(testIds.dataCleanupSection)
+    await expect(section).toBeVisible()
+    const auto = section.getByTestId(testIds.dataCleanupAuto)
+    const interval = section.getByTestId(testIds.dataCleanupInterval)
+    const status = section.getByTestId(testIds.dataCleanupAutoStatus)
+    const nextRun = /Next automatic cleanup (?:in \d+[mhd]|soon)\./
+
+    // Off by default: the interval is disabled and no next run is shown.
+    await expect(auto).toHaveAttribute('data-state', 'unchecked')
+    await expect(auto).toHaveAccessibleName('Automatic cleanup')
+    await expect(interval).toBeDisabled()
+    await expect(interval).toHaveAttribute('data-value', 'daily')
+    await expect(interval).toHaveAccessibleName('Automatic cleanup interval')
+    await expect(status).toHaveAttribute('data-state', 'off')
+    await expect(status).not.toContainText('Next automatic cleanup')
+
+    // On: every day, never run yet, the next run is shown.
+    await auto.click()
+    await expect(auto).toHaveAttribute('data-state', 'checked')
+    await expect(interval).toBeEnabled()
+    await expect.poll(async () => (await session.getSettings()).fileSweep).toBe('daily')
+    await expect(status).toHaveAttribute('data-state', 'never')
+    await expect(status).toHaveText(nextRun)
+
+    // Every week.
+    await interval.click()
+    await page.getByRole('option', { name: 'Every week' }).click()
+    await expect(interval).toHaveAttribute('data-value', 'weekly')
+    await expect(interval).toContainText('Every week')
+    await expect.poll(async () => (await session.getSettings()).fileSweep).toBe('weekly')
+    await expect(status).toHaveText(nextRun)
+    const summary = await session.client.data.summary()
+    expect(summary.fileSweep.mode).toBe('weekly')
+    expect(summary.fileSweep.lastAttempt).toBeNull()
+    expect(summary.fileSweep.nextRunAt, 'the first run is in the future').toBeGreaterThan(Date.now())
+
+    // A reload keeps both.
+    await page.reload()
+    await expect(auto).toHaveAttribute('data-state', 'checked')
+    await expect(interval).toHaveAttribute('data-value', 'weekly')
+    await expect(status).toHaveAttribute('data-state', 'never')
+    await expect(status).toHaveText(nextRun)
+
+    // Off again: the interval stays as chosen but disabled, the next run is gone.
+    await auto.click()
+    await expect(auto).toHaveAttribute('data-state', 'unchecked')
+    await expect.poll(async () => (await session.getSettings()).fileSweep).toBe('off')
+    await expect(status).toHaveAttribute('data-state', 'off')
+    await expect(status).not.toContainText('Next automatic cleanup')
+    await expect(interval).toBeDisabled()
+    await expect(interval).toHaveAttribute('data-value', 'weekly')
   })
 })

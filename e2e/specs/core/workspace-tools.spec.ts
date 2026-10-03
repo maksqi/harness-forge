@@ -9,6 +9,10 @@
 //   card.
 // - A share link with tool details shows the diff of the edit on the share page (the server has no password, which
 //   only adds a warning to the Share dialog).
+// - Phase 8 (W8.12): every row summary has its spoken label (`+1 −1` reads "1 line added, 1 removed"); with
+//   `mock:checkpoint` the shell keeps its working folder between calls: the terminal output shows the folder before `$`
+//   and "Now in mock-dir", and the next turn's approval cards say where the command runs ("In {project}/mock-dir",
+//   then "mock-dir/mock-dir": the folder nests).
 import type { Locator, Page } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -18,6 +22,10 @@ import {
   expect,
   expectMessageStatus,
   lastAssistantMessage,
+  MOCK_CHECKPOINT_DIR,
+  MOCK_CHECKPOINT_DONE,
+  MOCK_CHECKPOINT_LS,
+  MOCK_CHECKPOINT_MKDIR,
   MOCK_WORKSPACE_COMMAND,
   MOCK_WORKSPACE_DONE,
   MOCK_WORKSPACE_EDITED,
@@ -79,6 +87,9 @@ test.describe('workspace tools', () => {
     await writeCard.getByTestId(testIds.toolApprovalAllow).click()
     await expect(toolRow(page, 'write_file')).toHaveAttribute('data-state', 'output-available')
     await expect(toolRow(page, 'write_file').getByTestId(testIds.toolRowSummary)).toHaveText('New · 1 line')
+    // The visible summary is hidden from screen readers; its spoken label sits next to it.
+    await expect(toolRow(page, 'write_file').getByTestId(testIds.toolRowSummary)).toHaveAttribute('aria-hidden', 'true')
+    await expect(toolRow(page, 'write_file').getByText('New file, 1 line', { exact: true })).toBeAttached()
 
     // 2. edit_file: the preview is the diff of the old and the new string.
     const editCard = approvalCard(page, 'edit_file')
@@ -97,6 +108,7 @@ test.describe('workspace tools', () => {
     const summary = editRow.getByTestId(testIds.toolRowSummary)
     await expect(summary).toHaveText(`+1 ${MINUS}1`)
     await expect(summary).toHaveAttribute('data-tone', 'success')
+    await expect(editRow.getByText('1 line added, 1 removed', { exact: true })).toBeAttached()
 
     // 3. shell: "Run this command?" with the command, no "Always allow", Run instead of Allow.
     const shellCard = approvalCard(page, 'shell')
@@ -119,6 +131,7 @@ test.describe('workspace tools', () => {
     const shellRow = toolRow(page, 'shell')
     await expect(shellRow).toHaveAttribute('data-state', 'output-available')
     await expect(shellRow.getByTestId(testIds.toolRowSummary)).toHaveText('exit 0')
+    await expect(shellRow.getByText('Exit code 0', { exact: true })).toBeAttached()
 
     // Expanded rows: the diff of the edit, the terminal output of the shell.
     await editRow.getByRole('button').click()
@@ -221,5 +234,57 @@ test.describe('workspace tools', () => {
     await expect(diff).toBeVisible()
     await expect(diff).toHaveAttribute('data-path', MOCK_WORKSPACE_FILE)
     await expect(byTestId(diff, testIds.diffLine, { 'data-kind': 'add' })).toHaveText(/Hello from the workspace agent\./)
+  })
+
+  test('the shell keeps its working folder: the prompt, "Now in" and the next cards show it @smoke', async ({ page, api, cleanup }) => {
+    const { project } = await seedProject(api, cleanup, { name: `Sticky ${uniqueId('cwd')}` })
+    const chat = await api.createChat({ title: `Sticky folder ${uniqueId('chat')}`, projectId: project.id, modelRef: 'mock:checkpoint' })
+    cleanup(api => api.removeChat(chat.id))
+    expect((await api.sendChat({ chatId: chat.id, modelRef: 'mock:checkpoint', toolMode: 'auto', text: 'First turn.' })).text).toBe(MOCK_CHECKPOINT_DONE)
+
+    await page.goto(`/chat/${chat.id}`)
+    await expect(lastAssistantMessage(page)).toContainText(MOCK_CHECKPOINT_DONE)
+    const shellRows = byTestId(lastAssistantMessage(page), testIds.toolRow, { 'data-tool-name': 'shell' })
+    await expect(shellRows).toHaveCount(2)
+
+    // The first command starts in the project folder (no folder before `$`) and ends in mock-dir.
+    await shellRows.nth(0).getByRole('button').first().click()
+    const mkdir = rowBody(shellRows.nth(0)).getByTestId(testIds.terminalOutput)
+    await expect(mkdir.getByTestId(testIds.terminalCommand)).toHaveText(`$ ${MOCK_CHECKPOINT_MKDIR}`)
+    await expect(mkdir.getByTestId(testIds.terminalCwd)).toHaveCount(0)
+    const nowIn = mkdir.getByTestId(testIds.terminalCwdChange)
+    await expect(nowIn).toHaveAttribute('data-value', MOCK_CHECKPOINT_DIR)
+    await expect(nowIn).toHaveText(`Now in ${MOCK_CHECKPOINT_DIR}`)
+    // The next one starts there: the prompt shows the folder.
+    await shellRows.nth(1).getByRole('button').first().click()
+    const ls = rowBody(shellRows.nth(1)).getByTestId(testIds.terminalOutput)
+    const cwd = ls.getByTestId(testIds.terminalCwd)
+    await expect(cwd).toHaveAttribute('data-value', MOCK_CHECKPOINT_DIR)
+    await expect(cwd).toHaveText(MOCK_CHECKPOINT_DIR)
+    await expect(ls.getByTestId(testIds.terminalCommand)).toHaveText(`${MOCK_CHECKPOINT_DIR} $ ${MOCK_CHECKPOINT_LS}`)
+    await expect(ls.getByTestId(testIds.terminalCwdChange)).toHaveCount(0)
+
+    // A second turn in Ask: the cards say where each command runs; the folder nests (mock-dir/mock-dir).
+    await expect(composer(page).getByTestId(testIds.modelPickerTrigger)).toHaveAttribute('data-model-ref', 'mock:checkpoint')
+    await selectPermissionMode(page, 'ask')
+    await sendMessage(page, 'Second turn.')
+    await approvalCard(page, 'write_file').getByTestId(testIds.toolApprovalAllow).click()
+    const nested = `${MOCK_CHECKPOINT_DIR}/${MOCK_CHECKPOINT_DIR}`
+    for (const [command, folder] of [[MOCK_CHECKPOINT_MKDIR, MOCK_CHECKPOINT_DIR], [MOCK_CHECKPOINT_LS, nested]] as const) {
+      const card = approvalCard(page, 'shell')
+      await expect(card).toHaveAccessibleName(`Approval needed: run ${command}`)
+      await expect(card.locator('[data-slot="command-meta"]')).toHaveText(`In ${project.name}/${folder}`)
+      await card.getByTestId(testIds.toolApprovalAllow).click()
+      await expect(card).toBeHidden()
+    }
+    const reply = lastAssistantMessage(page)
+    await expect(reply).toContainText(MOCK_CHECKPOINT_DONE)
+    await expectMessageStatus(reply)
+    const second = byTestId(reply, testIds.toolRow, { 'data-tool-name': 'shell' }).nth(0)
+    await second.getByRole('button').first().click()
+    const terminal = rowBody(second).getByTestId(testIds.terminalOutput)
+    await expect(terminal.getByTestId(testIds.terminalCwd)).toHaveAttribute('data-value', MOCK_CHECKPOINT_DIR)
+    await expect(terminal.getByTestId(testIds.terminalCwdChange)).toHaveAttribute('data-value', nested)
+    await expect(terminal.getByTestId(testIds.terminalCwdChange)).toHaveText(`Now in ${nested}`)
   })
 })

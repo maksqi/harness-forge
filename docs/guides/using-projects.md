@@ -137,7 +137,9 @@ The permission menu in the composer (Alt+P, or `/mode`) decides which tool calls
   The terminal output shows the folder before `$` and "Now in …" when it changed. A command that ends outside the
   project folder (or in a folder that was deleted since) sends the next call back to the project folder, with a note.
   The folder follows the conversation: after you switch to another version of a message, it is the folder of the last
-  shell call on that version. A `cwd` given in a call wins for that call.
+  shell call on that version. A `cwd` given in a call wins for that call. A command that is stopped or killed (Stop,
+  the timeout, a signal) or that replaces the shell (`exec …`) cannot report where it ended, so it leaves the working
+  folder as it was.
 - The environment is minimal (`HOME`, `PATH`, `LANG`, …): no `HF_*` variables and no provider keys. A command can
   still read any file the server user can read, including the data directory.
 - Stop (or Esc) kills the whole process group; the default timeout is 120 s, at most 590 s per call; output keeps the
@@ -160,15 +162,18 @@ runs every command anyway). A rule is the start of a command, compared word by w
   **Allowed in every project** below the project list for global rules. Rules cannot be edited: remove one and add a
   new one. A project can have up to 200 rules, and so can the global list. Deleting a project deletes its rules.
 - **Combined commands** (`&&`, `||`, `;`, `|`, several lines) run without asking only when **every** part matches a
-  rule. `cd` into a folder of the project needs no rule.
+  rule. `cd` into a folder of the project needs no rule, but the folder must already exist when the command is
+  checked: `mkdir -p out && cd out` asks while `out` does not exist yet (the `cd` is checked before anything runs).
 - **Always asks**, whatever the rules: anything with `$` (variables, `$(…)`), backticks, redirections (`>`, `<`, `>>`,
-  here-docs; only `>/dev/null`, `2>/dev/null`, `&>/dev/null` and copies such as `2>&1` are allowed), `( )` or `{ }`,
-  a trailing `&`, unquoted `*`, `?` or `[`, words starting with `~` or `#`, shell keywords (`if`, `for`, …), a
-  `NAME=value` prefix, `cd` without a folder, and commands with more than 32 parts. The approval card says so instead
-  of offering a rule.
+  here-docs; only `>/dev/null`, `>>/dev/null`, `2>/dev/null` and copies to 0, 1 or 2 such as `2>&1` are allowed;
+  `&>/dev/null` asks, because `sh` runs it as a background command), `( )` or `{ }`, a trailing `&`, an empty part
+  (`ls ;`, `&& ls`), unquoted `*`, `?` or `[`, words starting with `~` or `#`, a backslash inside double quotes or at
+  the end of a line, shell keywords (`if`, `for`, …), a `NAME=value` prefix, `cd` without a folder, `pushd` / `popd`,
+  and commands with more than 32 parts. The approval card says so instead of offering a rule.
 - **Refused rules**: commands that run other commands (`sh`, `bash`, `env`, `xargs`, `sudo`, `nohup`, `timeout`,
-  `ssh`, …) can never be rules, and interpreters or package runners alone (`node`, `python`, `npx`, …) need more words
-  (`node scripts/build.js`).
+  `ssh`, …) and shell builtins that change the shell or evaluate their arguments (`export`, `set`, `printf`, `test`,
+  …) can never be rules, and interpreters or package runners alone (`node`, `python`, `npx`, also `node -e` or
+  `python3 -m` without the module) need more words (`node scripts/build.js`, `python3 -m pytest`).
 - A shell call that a rule allowed shows a shield icon in its row and "Allowed by rule: …" in its output.
 
 > **Think before you add a rule.** A rule for a script runner such as `pnpm test`, `npm run build` or `make` runs
@@ -180,7 +185,9 @@ runs every command anyway). A rule is the start of a command, compared word by w
 ## 8. The changes panel
 
 In a project chat the **changes** button in the header (or **Alt+C**, or "Show changes" in the command palette) opens
-the changes panel: a pane on the right on wide screens (drag its edge to resize it), a sheet on phones and tablets.
+the changes panel: a pane on the right on screens at least 1024 px wide (drag its edge, or use the arrow keys on it, to
+resize it; the width and whether it is open are remembered), a sheet from the right on narrower screens (it opens only
+when you ask for it).
 
 - **This chat** lists the files the agent changed in this chat with `write_file` and `edit_file`, as they differ now
   from how they were before the chat touched them (status A / M / D, `+a −d`). Open a row for its diff. A warning icon
@@ -190,16 +197,19 @@ the changes panel: a pane on the right on wide screens (drag its edge to resize 
   project folder is inside a git repository. It reads the repository only: no staging, no commits, and git hooks,
   filters and other programs from the repository configuration never run.
 - **Revert file** (the arrow on a row) puts one file back: in This chat to how it was before the chat changed it, in
-  Git to the last commit (an untracked or new file is deleted). The current version is saved first, so the toast
-  offers **Undo**. Conflicted files, symbolic links, submodules and files handled by a Git filter (such as Git LFS)
-  cannot be reverted here.
+  Git to the last commit (an untracked or new file is deleted, a renamed one gets its old name back). The current
+  version is saved first, so the toast offers **Undo**. Conflicted files, symbolic links, submodules, files handled by
+  a Git filter (such as Git LFS) and files git ignores cannot be reverted here. If the file changed after the panel
+  showed it, the revert is refused ("… changed since its diff was loaded. Check it again.") and the list is refreshed.
+  A file whose earlier version is no longer stored has no revert button in This chat.
 - Revert, rewind and undo wait until no chat of the project is replying ("Wait for the responses in this project to
   finish …").
 
 ## 9. Rewind files
 
-**Rewind files to here** (the clock-arrow icon under one of your messages in a project chat) puts the files the agent
-changed **after that message** back the way they were when you sent it. It covers every version of the conversation
+**Rewind files to here** (the clock-arrow icon under one of your messages in a project chat; it shows once the agent
+changed a file with `write_file` or `edit_file` after that message) puts the files the agent changed **after that
+message** back the way they were when you sent it. It covers every version of the conversation
 since then (also replies you regenerated or edited away); edits made by other chats are never undone. The conversation
 itself stays as it is.
 
@@ -306,5 +316,8 @@ match the stored secrets." after a restart means the server was started with the
 Files that no chat uses anymore (attachments and generated images of deleted chats or versions) stay in the data
 directory until a cleanup: Settings → Data → **Storage cleanup** shows what can be removed and removes it after you
 confirm. v1.4 adds **Automatic cleanup** there (off by default, every day or every week; the first run comes at least
-24 hours after the server starts, and files from the last 24 hours are always kept). Automatic deletions cannot be
+24 hours after the server starts, and files from the last 24 hours are always kept). The section shows when the next
+run is due and how the last one went. A manual cleanup pushes the next automatic run back by one interval; a run is
+skipped (and retried an interval later) when the plugin data is too large to scan completely; a server that restarts
+more often than once a day never reaches its first run, so use the manual cleanup there. Automatic deletions cannot be
 undone. Checkpoints (9) are separate: the cleanup never touches them.

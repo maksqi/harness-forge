@@ -9,32 +9,50 @@
 // Settings -> Media with every model chosen. Phase 7 screens: the project switcher open, the new-chat project picker,
 // the Add project dialog, Settings -> Projects, the edit and the shell approvals of `mock:workspace`, an expanded diff
 // (also on the phone), the terminal output of its shell step, and the Encryption key and Storage cleanup sections of
-// Settings -> Data (a leftover blob in the server's file store gives the cleanup something to count). A screen that
-// starts something (a run, a recording, a dialog, settings only it needs) undoes it in `close`, so the other screens
-// look the same in every run.
+// Settings -> Data (a leftover blob in the server's file store gives the cleanup something to count). Phase 8 screens
+// (W8.12): the changes panel (This chat with a diff, the Git view; on the phone the sheet), the revert confirmation,
+// the rewind dialog, a shell approval card with the rule option checked, terminal output in a sticky working folder
+// with rule badges, the allowed commands of a project and the automatic cleanup in Settings -> Data. Their data: the
+// `harness-forge` project folder becomes a git repository after the Phase 7 chats (when git is installed), gets the
+// rules `ls`, `mkdir` and `pnpm test` (plus the global `git status`), and three more chats run in it. A screen that
+// starts something (a run, a recording, a dialog, settings only it needs, the open changes panel) undoes it in `close`,
+// so the other screens look the same in every run.
 import type { Locator, Page } from '@playwright/test'
 import type { StartedServer } from '../../helpers/index.ts'
 import { createHash } from 'node:crypto'
 import { mkdir, utimes, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import process from 'node:process'
 import { devices } from '@playwright/test'
 import {
   byTestId,
+  changesFile,
+  changesFileButton,
+  changesFileDiff,
+  changesPanel,
+  changesToggle,
+  changesViewTab,
   COLOR_MODE_STORAGE_KEY,
   composer,
   expect,
   expectMessageStatus,
+  gitAvailable,
   HarnessApi,
+  initGitRepository,
   lastAssistantMessage,
+  MOCK_CHECKPOINT_DIR,
+  MOCK_CHECKPOINT_DONE,
+  MOCK_CHECKPOINT_FILE,
   MOCK_WORKSPACE_DONE,
   naturalSize,
+  openRewind,
   pressShortcut,
   REPO_ROOT,
   sendMessage,
   startServer,
   test,
   testIds,
+  userMessages,
   workspaceRoot,
 } from '../../helpers/index.ts'
 
@@ -68,6 +86,17 @@ interface Seed {
   editApproval: string
   /** A `mock:workspace` reply in Accept edits mode that waits for the approval of its shell command. */
   shellApproval: string
+  /** The `harness-forge` project (its Allowed commands dialog). */
+  project: string
+  /**
+   * Phase 8: a `mock:checkpoint` turn in Accept edits (the rules ran its shell calls) and a `mock:shell` turn that
+   * deleted and created a file: This chat lists `checkpoint.txt`, Git three files (when git is installed).
+   */
+  changes: string
+  /** Phase 8: a `mock:checkpoint` run whose shell rows show the sticky folder and the rule badges. */
+  terminalCwd: string
+  /** Phase 8: a `mock:shell` reply waiting for the approval of a command no rule covers. */
+  ruleApproval: string
   /** The screenshot server (API calls of the screens that start something). */
   baseURL: string
   /** The start of the browser clock: a little after the seed, so relative times read "2m ago". */
@@ -105,6 +134,15 @@ const SHARED_SUMMARY = [
   '2. Issue an **HttpOnly** cookie on login.',
   '3. Drop the token from local storage.',
 ].join('\n')
+
+/** Files of the `harness-forge` project folder for the Phase 8 screens (committed when git is installed). */
+const PROJECT_FILES: Readonly<Record<string, string>> = {
+  'README.md': '# harness-forge\n\nA self-hosted chat and agent harness.\n',
+  [MOCK_CHECKPOINT_FILE]: 'Release checklist: draft\n',
+  'docs/old-notes.md': '# Old notes\n\nMoved to the release notes.\n',
+  [`${MOCK_CHECKPOINT_DIR}/app.js`]: 'export const ready = true\n',
+  [`${MOCK_CHECKPOINT_DIR}/index.html`]: '<!doctype html>\n',
+}
 
 interface Screen {
   name: string
@@ -165,6 +203,44 @@ function isPhone(page: Page): boolean {
 /** The tool row of a workspace tool in the last reply. */
 function workspaceRow(page: Page, toolName: string): Locator {
   return byTestId(lastAssistantMessage(page), testIds.toolRow, { 'data-tool-name': toolName })
+}
+
+/**
+ * Opens the changes panel of the open chat on `view` (the pane on the desktop, the sheet on the phone) and waits until
+ * the view loaded.
+ */
+async function openChangesPanel(page: Page, view: 'chat' | 'git'): Promise<Locator> {
+  const toggle = changesToggle(page)
+  await expect(toggle).toHaveAttribute('data-state', 'closed')
+  await toggle.click()
+  const panel = changesPanel(page)
+  await expect(panel).toBeVisible()
+  if (await panel.getAttribute('data-view') !== view)
+    await changesViewTab(page, view).click()
+  await expect(panel).toHaveAttribute('data-view', view)
+  await expect(panel).toHaveAttribute('data-state', /^(?:ready|unavailable)$/)
+  return panel
+}
+
+/** Expands a row of the changes panel and waits for its diff. */
+async function expandChangesRow(page: Page, path: string): Promise<void> {
+  const row = changesFile(page, path)
+  await changesFileButton(row).click()
+  await expect(changesFileDiff(row)).toHaveAttribute('data-state', 'ready')
+}
+
+/**
+ * Closes the changes panel on This chat: its state is per browser, so the other screens would show it open (and on
+ * the Git view) otherwise.
+ */
+async function closeChangesPanel(page: Page): Promise<void> {
+  const panel = changesPanel(page)
+  if (await panel.count() === 0)
+    return
+  if (await panel.getAttribute('data-view') !== 'chat')
+    await changesViewTab(page, 'chat').click()
+  await panel.getByTestId(testIds.changesClose).click()
+  await expect(panel).toHaveCount(0)
 }
 
 /** Expands a finished workspace tool row and returns its expanded body. */
@@ -340,6 +416,22 @@ const SCREENS: Screen[] = [
     }),
   },
   {
+    name: 'settings-projects-allowlist',
+    open: async (page, seed) => {
+      await openSettings(page, '/settings/projects', async (page) => {
+        const row = byTestId(page, testIds.projectRow, { 'data-project-id': seed.project })
+        await expect(row).toContainText('3 allowed commands')
+        await row.getByTestId(testIds.projectRowMenu).click()
+        await page.getByTestId(testIds.projectAllowlist).click()
+        await expect(page.getByTestId(testIds.allowlistDialog).getByTestId(testIds.allowlistRule)).toHaveCount(3)
+      })
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.allowlistDialog)).toBeHidden()
+    },
+  },
+  {
     name: 'chat-edit-approval',
     open: async (page, seed) => {
       await openChat(page, seed.editApproval)
@@ -371,6 +463,97 @@ const SCREENS: Screen[] = [
       await openChat(page, seed.workspace)
       const terminal = (await expandWorkspaceRow(page, 'shell')).getByTestId(testIds.terminalOutput)
       await expect(terminal).toHaveAttribute('data-status', 'ok')
+      await terminal.scrollIntoViewIfNeeded()
+    },
+  },
+  {
+    name: 'chat-changes-panel',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await openChat(page, seed.changes)
+      const panel = await openChangesPanel(page, 'chat')
+      await expandChangesRow(page, MOCK_CHECKPOINT_FILE)
+      await expect(panel.locator('[data-slot="changes-untracked"]')).toBeVisible()
+    },
+    close: closeChangesPanel,
+  },
+  {
+    name: 'chat-changes-git',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await openChat(page, seed.changes)
+      const panel = await openChangesPanel(page, 'git')
+      // Without git on the host the view explains that the folder is not a repository.
+      if (await gitAvailable()) {
+        await expect(panel.getByTestId(testIds.changesFile)).toHaveCount(3)
+        await expandChangesRow(page, MOCK_CHECKPOINT_FILE)
+      }
+    },
+    close: closeChangesPanel,
+  },
+  {
+    name: 'chat-changes-sheet',
+    only: 'mobile',
+    open: async (page, seed) => {
+      await openChat(page, seed.changes)
+      await openChangesPanel(page, 'chat')
+      await expandChangesRow(page, MOCK_CHECKPOINT_FILE)
+    },
+    close: closeChangesPanel,
+  },
+  {
+    name: 'chat-revert-confirm',
+    open: async (page, seed) => {
+      await openChat(page, seed.changes)
+      await openChangesPanel(page, 'chat')
+      const row = changesFile(page, MOCK_CHECKPOINT_FILE)
+      await row.hover()
+      await byTestId(row, testIds.changesFileRevert, { 'data-path': MOCK_CHECKPOINT_FILE }).click()
+      await expect(page.getByRole('alertdialog')).toContainText(`Revert ${MOCK_CHECKPOINT_FILE}?`)
+    },
+    close: async (page) => {
+      // Cancel: the file stays.
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.changesRevertConfirm)).toBeHidden()
+      await closeChangesPanel(page)
+    },
+  },
+  {
+    name: 'chat-rewind-dialog',
+    open: async (page, seed) => {
+      await openChat(page, seed.changes)
+      const dialog = await openRewind(page, userMessages(page).first())
+      await expect(dialog).toHaveAttribute('data-state', 'ready')
+      await expect(dialog.getByTestId(testIds.rewindShellCommand)).toHaveCount(3)
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.rewindDialog)).toBeHidden()
+    },
+  },
+  {
+    name: 'chat-shell-approval-rule',
+    open: async (page, seed) => {
+      await openChat(page, seed.ruleApproval)
+      const card = byTestId(page, testIds.toolApproval, { 'data-tool-name': 'shell' })
+      await card.getByTestId(testIds.toolApprovalAllowRule).click()
+      await expect(card.getByTestId(testIds.toolApprovalRulePrefix)).toHaveValue('pnpm build')
+      await expectTranscriptAtBottom(page)
+    },
+  },
+  {
+    name: 'chat-terminal-cwd',
+    open: async (page, seed) => {
+      await openChat(page, seed.terminalCwd)
+      await expect(lastAssistantMessage(page)).toContainText(MOCK_CHECKPOINT_DONE)
+      const rows = byTestId(lastAssistantMessage(page), testIds.toolRow, { 'data-tool-name': 'shell' })
+      await expect(rows).toHaveCount(2)
+      for (const index of [0, 1]) {
+        await expect(rows.nth(index).getByTestId(testIds.toolRowRule)).toBeVisible()
+        await rows.nth(index).getByRole('button').first().click()
+      }
+      const terminal = rows.nth(1).locator('xpath=ancestor::*[@data-slot="tool-part"][1]').getByTestId(testIds.terminalOutput)
+      await expect(terminal.getByTestId(testIds.terminalCwd)).toHaveAttribute('data-value', MOCK_CHECKPOINT_DIR)
       await terminal.scrollIntoViewIfNeeded()
     },
   },
@@ -543,6 +726,23 @@ const SCREENS: Screen[] = [
     }),
   },
   {
+    name: 'settings-data-auto-cleanup',
+    open: async (page, seed) => {
+      await pageApi(page, seed).updateSettings({ fileSweep: 'daily' })
+      await openSettings(page, '/settings/data', async (page) => {
+        const section = page.getByTestId(testIds.dataCleanupSection)
+        await expect(section.getByTestId(testIds.dataCleanupAuto)).toHaveAttribute('data-state', 'checked')
+        const status = section.getByTestId(testIds.dataCleanupAutoStatus)
+        await expect(status).toHaveAttribute('data-state', 'never')
+        await expect(status).toContainText('Next automatic cleanup')
+        await status.scrollIntoViewIfNeeded()
+      })
+    },
+    close: async (page, seed) => {
+      await pageApi(page, seed).updateSettings({ fileSweep: 'off' })
+    },
+  },
+  {
     name: 'settings-about',
     open: page => openSettings(page, '/settings/about', async (page) => {
       await expect(page.getByTestId(testIds.aboutCopyDiagnostics)).toBeVisible()
@@ -593,6 +793,31 @@ async function seed(server: StartedServer): Promise<Seed> {
     await api.answerApprovals({ chatId: editApproval, approved: true, modelRef: 'mock:workspace', toolMode: 'ask' })
     const shellApproval = await projectChat('Print the greeting (approval)')
     await api.sendChat({ chatId: shellApproval, modelRef: 'mock:workspace', toolMode: 'edits', text: workspaceText })
+    // Phase 8: a few more files, then (git installed) the project folder becomes a repository with all of it committed.
+    const projectPath = join(root, 'harness-forge')
+    for (const [file, content] of Object.entries(PROJECT_FILES)) {
+      await mkdir(join(projectPath, dirname(file)), { recursive: true })
+      await writeFile(join(projectPath, file), content)
+    }
+    if (await gitAvailable())
+      await (await initGitRepository(projectPath, { ceiling: root })).dispose()
+    // Rules: the `mock:checkpoint` shell calls run without a card in Accept edits (`mock-dir` exists, so its `cd` needs
+    // none); `git status` for every project.
+    for (const prefix of ['ls', 'mkdir', 'pnpm test'])
+      await api.client.shellRules.create({ body: { projectId: project, prefix } })
+    await api.client.shellRules.create({ body: { projectId: null, prefix: 'git status' } })
+    const phase8Chat = async (title: string, modelRef: string) => (await api.createChat({ title, projectId: project, modelRef })).id
+    // The changes chat first: the later chat writes the same text, so this chat's change stays its own.
+    const changes = await phase8Chat('Prepare the release checklist', 'mock:checkpoint')
+    const checklist = await api.sendChat({ chatId: changes, modelRef: 'mock:checkpoint', toolMode: 'edits', text: 'Update the release checklist and check the build folder.' })
+    if (checklist.text !== MOCK_CHECKPOINT_DONE)
+      throw new Error(`mock:checkpoint answered ${JSON.stringify(checklist.text)}.`)
+    // It runs in mock-dir (the sticky folder of the turn before).
+    await api.sendChat({ chatId: changes, modelRef: 'mock:shell', toolMode: 'auto', text: 'cd .. && rm docs/old-notes.md && touch docs/release-notes.md' })
+    const terminalCwd = await phase8Chat('Check the build folder', 'mock:checkpoint')
+    await api.sendChat({ chatId: terminalCwd, modelRef: 'mock:checkpoint', toolMode: 'edits', text: 'List the build folder.' })
+    const ruleApproval = await phase8Chat('Build the web app', 'mock:shell')
+    await api.sendChat({ chatId: ruleApproval, modelRef: 'mock:shell', toolMode: 'ask', text: 'pnpm build --filter web' })
     // A rowless blob from two days ago: the storage cleanup counts it as a leftover file (its check is a dry run).
     const blob = 'a leftover blob for the storage cleanup screen\n'
     const sha256 = createHash('sha256').update(blob).digest('hex')
@@ -643,6 +868,10 @@ async function seed(server: StartedServer): Promise<Seed> {
       workspace,
       editApproval,
       shellApproval,
+      project,
+      changes,
+      terminalCwd,
+      ruleApproval,
       baseURL: server.baseURL,
       now: Date.now() + 2 * 60_000,
     }

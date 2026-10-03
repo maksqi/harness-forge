@@ -334,7 +334,7 @@ export const shellToolOutputSchema = z.object({
    * Where the chat's next shell call starts (Phase 8, ADR-038): the folder the command ended in, project-relative
    * (`.` = the project folder), clamped to the project (a folder outside it, or one that is gone, becomes `.` with a
    * `cwdNote`). Absent when the end folder was not reported (`exec`, a kill, the command's own EXIT trap: the folder
-   * stays as it was) and in outputs stored before v1.4 (read as `.`).
+   * stays as it was; the next run looks further back) and in outputs stored before v1.4 (read as `.`).
    */
   endCwd: workspaceToolPathSchema.optional(),
   /**
@@ -344,8 +344,8 @@ export const shellToolOutputSchema = z.object({
    */
   cwdNote: z.string().max(500).optional(),
   /**
-   * The canonical prefixes of the shell rules that let the command run without asking (ADR-038), in first-match
-   * order; absent when the command was approved (or ran in the `auto` mode).
+   * The canonical prefixes of the shell rules that matched every segment of the command (ADR-038), in first-match
+   * order, whatever the permission mode; absent when no rule matched (for example a command that is only `cd`).
    */
   allowedBy: z.array(z.string().min(1).max(LIMITS.shellRulePrefixMaxChars)).max(LIMITS.shellCommandSegmentsMax).optional(),
 })

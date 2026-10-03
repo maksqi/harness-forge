@@ -92,7 +92,7 @@ resolves through the server's path guard (realpath containment, no `.git` writes
 | `search_files` | `read` / `safe` / 60 s | `{ pattern, literal?, case_sensitive?, glob?, path?, include_ignored?, max_results? }` (a JS regex, plain text with `literal`; `path` a folder or one file; ≤ 500, default 100) | `{ pattern, matches: [{ path, line, text }], filesSearched, truncated }` |
 | `write_file` | `write` / `ask`, `always` for a hidden or secret path / 30 s | `{ path, content }` (≤ 256 KiB) | `{ path, created, bytes, lines, diff }` |
 | `edit_file` | `write` / as `write_file` / 30 s | `{ path, old_string, new_string, replace_all? }` (a unique exact match unless `replace_all`; files ≤ 1 MiB) | `{ path, replacements, diff }` |
-| `shell` | `execute` / `ask` (Phase 8: a policy function that returns `safe` when the user's shell rules match the whole command) / 600 s | `{ command, cwd?, timeout_ms?, description? }` (≤ 16 KiB; `timeout_ms` 1000-590000, default 120000) | `{ command, cwd, exitCode, signal, timedOut, durationMs, stdout, stderr, stdoutBytes, stderrBytes }`; Phase 8 adds `endCwd?` (where the next call starts), `cwdNote?` and `allowedBy?` (the matched rule prefixes) |
+| `shell` | `execute` / `ask` (Phase 8: a policy function that returns `safe` when the user's shell rules match the whole command, else `ask`; `GET /api/tools` reports `policy: null` for it, as for every policy function) / 600 s | `{ command, cwd?, timeout_ms?, description? }` (≤ 16 KiB; `timeout_ms` 1000-590000, default 120000) | `{ command, cwd, exitCode, signal, timedOut, durationMs, stdout, stderr, stdoutBytes, stderrBytes }`; Phase 8 adds `endCwd?` (where the next call starts), `cwdNote?` and `allowedBy?` (the matched rule prefixes) |
 
 `diff` is `{ hunks: [{ oldStart, oldLines, newStart, newLines, lines }], added, removed, truncated }` (3 lines of
 context, cut to 24 KiB with lines cut at 500 characters), or `null` when it could not be computed in 2 s (and, for
@@ -124,7 +124,7 @@ output schema, such as one the host replaced, is sent as JSON; `N lines` is `1 l
 | `search_files` | `path:line: text` lines, or `No matches (N files searched).`; then `[truncated: showing N matches; narrow the pattern, the glob or the path]` |
 | `write_file` | `Created x (N lines).`, `Updated x (+a -r lines).`, or `Updated x (N lines).` when there is no diff |
 | `edit_file` | `Edited x: 1 replacement (+a -r lines).` (`N replacements` with `replace_all`), or `Edited x: N replacements.` when there is no diff |
-| `shell` | `Exit code: N`, `Stopped after <s> s (timeout)` or `Terminated by signal SIGKILL`; Phase 8: then, when the folder changed, `The working folder is now <folder> (the next call starts there).` (or the note of a clamped folder); then a `stdout:` line and the text (or `(empty)`); then a `stderr:` line and the text, only when stderr is not empty (trailing newlines trimmed) |
+| `shell` | `Exit code: N`, `Stopped after <s> s (timeout)` or `Terminated by signal SIGKILL`; Phase 8: then the output's `cwdNote` when there is one (the remembered folder was gone, or the command ended outside the project), then, when the next call starts somewhere else than this one did (the end folder differs, the call had an explicit `cwd`, or the remembered folder was gone), `The working folder is now <folder> (the next call starts there).` (`<folder>` is "the project folder" for `.`; no such line when the end folder was not reported or the note already says the next call starts in the project folder); then a `stdout:` line and the text (or `(empty)`); then a `stderr:` line and the text, only when stderr is not empty (trailing newlines trimmed) |
 
 **Workspace 2.0** (Phase 8, ADR-036 … ADR-038; the plugin API stays 1.2.0, nothing changes for plugin code; behavior in
 [ARCHITECTURE.md 6.13, 6.16, 6.17](./ARCHITECTURE.md#616-checkpoints-and-rewind-adr-036)):
@@ -134,18 +134,25 @@ output schema, such as one the host replaced, is sent as JSON; `N lines` is `1 l
   any of its messages, revert a file in the changes panel and undo either. Parallel edits of one file now run one
   after the other. The capture is internal to the server (a run scope bound to the tool call context); plugins cannot
   record or read checkpoints.
-- **Third-party tools** with workspace access `write` or `execute` are journaled as `untracked` after every call (only
-  the tool name): the rewind dialog lists them ("Other tools changed files too"), but what they wrote is **not
-  restorable**. `shell` calls are journaled the same way (with the command) and are not restorable either. MCP tools
-  declare no workspace access and are not journaled at all.
+- **Third-party tools** with workspace access `write` or `execute` (an unknown access counts as `execute`) are
+  journaled as `untracked` rows after every call that started in a project chat, successful or not (aborted and
+  timed-out calls included; blocked, invalid or denied calls and calls to an inactive plugin record nothing). The row
+  holds only the tool name and the call id: the rewind dialog lists the tools ("Other tools changed files too: … Their
+  changes stay."), but what they wrote is **not restorable**. The core `shell` calls are journaled the same way as
+  `shell` rows (with the command, at most 1000 characters) and are not restorable either. The row is written before
+  the `tool.after` hooks run; a plugin tool that happens to be named `write_file` or `shell` is still an `untracked`
+  row (only the builtin `core-workspace` tools are special). MCP tools and tools with workspace access `read` or none
+  are not journaled at all.
 - **Sticky working folder**: the `shell` folder carries over between calls of a chat (above); a third-party `execute`
   tool gets no such state.
 - **Shell rules** (an allowlist of command prefixes, per project and global, managed in Settings → Projects and from
   the shell approval card) apply **only to the core `shell` tool**: a matching command runs without a card in Ask and
   Accept edits. They never apply to a plugin's `execute` tool.
 - **No "always allow" for `execute` tools**: `PATCH /api/tools/:name` refuses `override: 'allow'` for a tool with
-  workspace access `execute` (400 `validation_error` on `['override']`), and an `allow` stored before v1.4 is ignored.
-  `deny` and `ask` overrides still work.
+  workspace access `execute` (400 `validation_error` on `['override']`, message "Shell commands can't be always
+  allowed. Add a shell rule instead."; an unknown tool is still 404 first), and an `allow` stored before v1.4 is
+  ignored by the approval (`GET /api/tools` still reports it as the tool's `override`). `deny` and `ask` overrides
+  still work.
 
 Builtin commands (`core-commands`, all `template` commands): `/explain` (code or a concept, step by step),
 `/summarize` (text, or the conversation so far when no text is given), `/review` (bugs, security, readability),
@@ -990,7 +997,7 @@ not from `ai` (which exports an unrelated type of the same name).
 | `settings.get()` | current settings: stored values over defaults, secrets decrypted; synchronous (cached in memory) |
 | `settings.onChange(cb)` | called with the full new values after a successful save (guarded, 3 s) |
 | `secrets` | encrypted plugin-scoped strings (scope `plugin:<id>`, name `kv.<key>`); keys `^[A-Za-z0-9._:-]{1,128}$`, values <= 16 KB; never returned by any API; `list()` returns keys only |
-| `storage` | plugin-scoped JSON values in `plugin_kv`; keys 1-256 characters without control characters; values JSON-serializable, <= 256 KB each, <= 10 MB per plugin; `set(key, undefined)` is an error (use `delete`). Phase 7: the storage cleanup (Settings → Data, ADR-035) keeps every file whose id (`file_` + 16 characters) appears in a `ctx.storage` key or value or a plugin setting, so keep the ids of files your plugin needs there, never only in `ctx.secrets` (encrypted, not scanned) or only in files under `plugin.dataDir`: such files may be removed once nothing else references them and they are older than 24 hours. Phase 8 (ADR-039): both the manual cleanup and the opt-in automatic sweep also scan the files under `data/plugins/.data/` loosely (any `file_` + 16 characters counts; links are not followed; at most 256 MiB, 50,000 files and 32 levels per run, beyond which an automatic sweep is skipped and a manual one proceeds with a warning), so ids kept there are found too, but `ctx.storage` stays the reliable place |
+| `storage` | plugin-scoped JSON values in `plugin_kv`; keys 1-256 characters without control characters; values JSON-serializable, <= 256 KB each, <= 10 MB per plugin; `set(key, undefined)` is an error (use `delete`). Phase 7: the storage cleanup (Settings → Data, ADR-035) keeps every file whose id (`file_` + 16 characters) appears in a `ctx.storage` key or value or a plugin setting, so keep the ids of files your plugin needs there, never only in `ctx.secrets` (encrypted, not scanned) or only in files under `plugin.dataDir`: such files may be removed once nothing else references them and they are older than 24 hours. Phase 8 (ADR-039): both the manual cleanup and the opt-in automatic sweep also scan the files under `data/plugins/.data/` loosely (any `file_` + 16 characters counts; links are not followed; at most 256 MiB read, 50,000 entries visited (files, folders and links alike; the folder's own entries are level 1) and 32 levels per run; beyond that, or when an entry cannot be read, the scan is `partial`: an automatic sweep is skipped and a manual one proceeds with what was found, with a warning), so ids kept there are found too, but `ctx.storage` stays the reliable place |
 | `providers.register(d)` | validates `d` (id namespace, credential fields, functions), then adds the provider; a duplicate id throws `conflict` |
 | `models.register(providerId, models)` | adds models / metadata to any provider (plugin models tier); held until the provider exists |
 | `models.resolve(ref)` | returns a model instance for `providerId:modelId` with the user's credentials; throws `provider_not_configured` with action `configure-provider` (a disabled provider, missing credentials and, since 1.2.0, an unknown provider: `The provider "<id>" is not available. Pick another model or install the provider.`), `model_not_found` with action `refresh-models` (a model that is not in the provider's catalog) or `validation_error` (an invalid ref, an image model); use with `ctx.ai.generateText` |
@@ -1087,16 +1094,16 @@ A throw in `execute` becomes an error result for the model (`error-text` with th
 UI, and a `plugin_error` log entry. `inputSchema` must describe a JSON object. `description` is sent to the model
 (<= 1024 characters).
 
-Workspace tools (1.2.0): `workspace` declares what the tool does with the project folder (`read`, `write`,
-`execute`); registration rejects any other value (`validation_error` naming the tool, issue path `['workspace']`; a
-value that still reaches the chat pipeline counts as `execute`), and `GET /api/tools` reports it as
-`ToolSummary.workspace` (null for MCP tools and tools without one; the web hides "Always allow" for `execute` tools
-and offers "Accept all edits in this chat" for `write` tools; Phase 8: the server refuses an `allow` override for
-`execute` tools, and every `write` / `execute` call is journaled as `untracked` for the rewind dialog, without its
-content, so it is not restorable). The host does **not** confine a plugin tool to `c.workspace.root`: a code plugin
-runs with the server's rights (section 13), so resolve every path against `root` and refuse anything outside it
-yourself (resolve symbolic links with `realpath` and compare the result with `root`), as the builtin `core-workspace`
-tools do. Never start a shell from a plugin tool; offer the builtin `shell` instead.
+Workspace tools (1.2.0): `workspace` declares what the tool does with the project folder (`read`, `write`, `execute`);
+registration rejects any other value (`validation_error` naming the tool, issue path `['workspace']`; a value that still
+reaches the chat pipeline counts as `execute`), and `GET /api/tools` reports it as `ToolSummary.workspace` (null for MCP
+tools and tools without one; the web hides "Always allow" for `execute` tools and offers "Accept all edits in this chat"
+for `write` tools; Phase 8: the server refuses an `allow` override for `execute` tools, and every started `write` /
+`execute` call in a project chat is journaled as `untracked` for the rewind dialog, by tool name only, so what it wrote
+is not restorable). The host does **not** confine a plugin tool to `c.workspace.root`: a code plugin runs with the
+server's rights (section 13), so resolve every path against `root` and refuse anything outside it yourself (resolve
+symbolic links with `realpath` and compare the result with `root`), as the builtin `core-workspace` tools do. Never
+start a shell from a plugin tool; offer the builtin `shell` instead.
 
 ### Commands
 

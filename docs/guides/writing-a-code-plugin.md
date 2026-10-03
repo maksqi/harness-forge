@@ -289,6 +289,11 @@ ctx.tools.register({
   adapt (for example, default a file name to the project).
 - The builtin workspace tools (`read_file`, `edit_file`, `shell`, …) already cover files and commands; build a
   workspace tool for something they do not do (a linter, a project-specific index).
+- **Not restorable** (v1.4): rewind and the changes panel restore only what the builtin `write_file` / `edit_file`
+  wrote. Every call of a `write` or `execute` tool is journaled by name only, so the rewind dialog lists your tool
+  under "Other tools changed files too", but its changes stay. An `execute` tool can never be "always allowed" (the
+  server refuses that override), and the user's shell rules apply only to the builtin `shell`, never to your tool.
+  Nothing changes in the plugin API (still 1.2.0).
 
 ## Providers
 
