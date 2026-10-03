@@ -1,6 +1,6 @@
 // The shell rule stubs (docs/UI.md 7.23, 9.10, 10.5, 13.9; C20, P8-0b): AllowRuleOption, AllowlistEditor,
 // AllowlistDialog and GlobalAllowlistSection accept their frozen props and render their root test ids (or data-slot).
-// W8.10 / W8.11 implement them behind these contracts.
+// W8.10 / W8.11 implement them behind these contracts (the editor's behavior: AllowlistEditor.test.ts).
 import type { AllowRules } from './allow-rule'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { flushPromises, mount } from '@vue/test-utils'
@@ -66,16 +66,19 @@ describe('allowRuleOption (stub)', () => {
   })
 })
 
-describe('allowlistEditor (stub)', () => {
-  it('shows "No allowed commands yet." without rules, without loading them', async () => {
+describe('allowlistEditor (contract)', () => {
+  it('loads the rules it never had, then shows "No allowed commands yet." without rules', async () => {
+    api.shellRules.list.mockResolvedValue({ items: [] })
     const wrapper = mount(AllowlistEditor, { props: { projectId: projectId(1) } })
-    expect(wrapper.get('[data-slot="allowlist-editor"]').get(`[data-testid="${testIds.allowlistEmpty}"]`).text()).toBe('No allowed commands yet.')
     await flushPromises()
-    expect(api.shellRules.list).not.toHaveBeenCalled()
+    expect(api.shellRules.list).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-slot="allowlist-editor"]').get(`[data-testid="${testIds.allowlistEmpty}"]`).text()).toBe('No allowed commands yet.')
   })
 
   it('lists the rules of its scope with their id and prefix', () => {
-    useShellRulesStore().items = [
+    const store = useShellRulesStore()
+    store.loaded = true
+    store.items = [
       shellRule({ id: shellRuleId(1), prefix: 'pnpm test' }),
       shellRule({ id: shellRuleId(2), projectId: null, prefix: 'ls' }),
     ]
@@ -87,8 +90,9 @@ describe('allowlistEditor (stub)', () => {
   })
 })
 
-describe('allowlistDialog (stub)', () => {
+describe('allowlistDialog (contract)', () => {
   it('opens for a project with its title and the editor of that project', async () => {
+    api.shellRules.list.mockResolvedValue({ items: [] })
     const wrapper = mount(AllowlistDialog, { props: { open: true, project: projectSummary({ id: projectId(1), name: 'website' }) }, attachTo: document.body })
     await flushPromises()
     const dialog = document.body.querySelector<HTMLElement>(`[data-testid="${testIds.allowlistDialog}"]`)!
@@ -103,8 +107,9 @@ describe('allowlistDialog (stub)', () => {
   })
 })
 
-describe('globalAllowlistSection (stub)', () => {
+describe('globalAllowlistSection (contract)', () => {
   it('renders the section "Allowed in every project" with the global editor', () => {
+    api.shellRules.list.mockResolvedValue({ items: [] })
     const wrapper = mount(GlobalAllowlistSection)
     const section = wrapper.get(`[data-testid="${testIds.allowlistSection}"]`)
     expect(section.text()).toContain('Allowed in every project')

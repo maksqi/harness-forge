@@ -1,9 +1,13 @@
 import type { ToolCallContext, ToolDefinition, ToolWorkspace, ToolWorkspaceAccess } from '@harness-forge/plugin-sdk'
 import type { ToolMode, ToolOverride } from '@harness-forge/shared'
+import type { WorkspaceRunScope, WorkspaceRunScopeInit } from '../workspace/run-scope.ts'
 import type { ApprovalOutcome, ApprovalTool, EffectivePolicy, HookDecision, ToolApprovalContext } from './approval.ts'
+import { matchShellRules } from '@harness-forge/shared'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { createSilentLogger } from '../logger.ts'
+import { createFakeCheckpointService } from '../testing/fake-checkpoints.ts'
+import { runScopeOf } from '../workspace/run-scope.ts'
 import {
   createToolApproval,
   DENIED_BY_HOOK,
@@ -11,6 +15,7 @@ import {
   DENIED_BY_POLICY,
   DENIED_TOOLS_OFF,
   DENIED_UNAVAILABLE,
+  effectiveOverride,
   evaluatePolicy,
   resolveApproval,
   toApprovalStatus,
@@ -242,5 +247,134 @@ describe('createToolApproval in accept edits mode (Phase 7)', () => {
     await createToolApproval(context({ tool }))(call)
     expect(seen).toEqual([workspace, undefined, undefined])
     expect(seen[0]).toBe(workspace)
+  })
+})
+
+// ---------- Phase 8: the run scope of policy functions, the ignored allow override on execute tools ----------
+
+const PROJECT_ID = 'prj_0123456789abcdef'
+const MESSAGE_ID = 'msg_a000000000000001'
+const WORKSPACE: ToolWorkspace = Object.freeze({ projectId: PROJECT_ID, name: 'Demo', root: '/srv/demo' })
+
+function runScope(prefixes: readonly string[] = ['ls', 'pnpm test']): WorkspaceRunScopeInit {
+  return {
+    chatId: 'chat',
+    messageId: MESSAGE_ID,
+    projectId: PROJECT_ID,
+    journal: createFakeCheckpointService().journal({ chatId: 'chat', messageId: MESSAGE_ID, projectId: PROJECT_ID }),
+    shellRules: Object.freeze({ projectId: PROJECT_ID, prefixes: Object.freeze([...prefixes]) }),
+    shellCwd: { current: '.' },
+  }
+}
+
+/** A stand-in of the core `shellPolicy`: `safe` when the run's rules match the whole command, else `ask`. */
+function shellPolicy(input: unknown, c: ToolCallContext): 'safe' | 'ask' {
+  const rules = runScopeOf(c)?.shellRules.prefixes ?? []
+  return matchShellRules((input as { command: string }).command, rules).allowed ? 'safe' : 'ask'
+}
+
+/** The core `shell` as the approval function sees it (policy function, access `execute`). */
+const SHELL: ApprovalTool = { pluginId: 'core-workspace', definition: { ...definition(shellPolicy, 'execute'), name: 'shell' } }
+
+function shellCall(command: string) {
+  return { toolCall: { toolName: 'shell', toolCallId: 'call_shell', input: { command } }, messages: [] }
+}
+
+function shellContext(overrides: Partial<ToolApprovalContext> = {}): ToolApprovalContext {
+  return context({ tool: SHELL, workspace: WORKSPACE, scope: runScope(), ...overrides })
+}
+
+describe('createToolApproval: the run scope of policy functions (Phase 8)', () => {
+  it('binds the scope with the call id to the policy context; nothing without a scope', async () => {
+    const seen: Array<WorkspaceRunScope | null> = []
+    const contexts: ToolCallContext[] = []
+    const policy = (_input: unknown, c: ToolCallContext) => {
+      seen.push(runScopeOf(c))
+      contexts.push(c)
+      return 'safe' as const
+    }
+    const tool = { pluginId: 'core-workspace', definition: definition(policy, 'execute') }
+    const scope = runScope()
+    await createToolApproval(context({ tool, workspace: WORKSPACE, scope }))(call)
+    await createToolApproval(context({ tool, workspace: WORKSPACE, scope: null }))(call)
+    await createToolApproval(context({ tool }))(call)
+    expect(seen[0]).toEqual({ ...scope, toolCallId: 'call_1' })
+    expect(seen[0]?.shellRules.prefixes).toEqual(['ls', 'pnpm test'])
+    expect(seen[0]?.shellCwd).toBe(scope.shellCwd)
+    expect(seen.slice(1)).toEqual([null, null])
+    expect(Reflect.ownKeys(contexts[0]!).sort()).toEqual(['chatId', 'messages', 'modelRef', 'signal', 'toolCallId', 'workspace'])
+  })
+
+  it('evaluatePolicy binds a given scope to the context it creates', async () => {
+    const scope = { ...runScope(), toolCallId: 'call_9' }
+    let bound: WorkspaceRunScope | null = null
+    const tool = { pluginId: 'demo', definition: definition((_input: unknown, c: ToolCallContext) => {
+      bound = runScopeOf(c)
+      return 'ask' as const
+    }) }
+    const base = { chatId: 'chat', modelRef: 'mock:echo', toolCallId: 'call_9', messages: [] }
+    expect(await evaluatePolicy(tool, {}, base, { guard }, new AbortController().signal, scope)).toBe('ask')
+    expect(bound).toEqual(scope)
+    expect(await evaluatePolicy(tool, {}, base, { guard }, new AbortController().signal)).toBe('ask')
+    expect(bound).toBeNull()
+  })
+
+  it('runs allowlisted shell commands without a card in ask and edits; others ask; auto unchanged', async () => {
+    for (const toolMode of ['ask', 'edits'] as const) {
+      const approve = createToolApproval(shellContext({ toolMode }))
+      expect(await approve(shellCall('ls -la'))).toBe('not-applicable')
+      expect(await approve(shellCall('pnpm test --run'))).toBe('not-applicable')
+      expect(await approve(shellCall('ls && rm x'))).toBe('user-approval')
+      expect(await approve(shellCall('ls $(whoami)'))).toBe('user-approval')
+    }
+    const auto = createToolApproval(shellContext({ toolMode: 'auto' }))
+    expect(await auto(shellCall('rm x'))).toBe('not-applicable')
+    // Without the scope's rules (another project, or no rules) the same command asks.
+    expect(await createToolApproval(shellContext({ scope: runScope([]) }))(shellCall('ls'))).toBe('user-approval')
+  })
+})
+
+describe('createToolApproval: a stored allow override on an execute tool (Phase 8)', () => {
+  const allow = new Map([['shell', { enabled: true, override: 'allow' as const }]])
+
+  it('ignores it: the call falls through to the policy and the mode', async () => {
+    expect(await createToolApproval(shellContext({ prefs: allow }))(shellCall('rm -rf build'))).toBe('user-approval')
+    expect(await createToolApproval(shellContext({ prefs: allow, toolMode: 'edits' }))(shellCall('rm -rf build'))).toBe('user-approval')
+    expect(await createToolApproval(shellContext({ prefs: allow }))(shellCall('ls'))).toBe('not-applicable')
+    expect(await createToolApproval(shellContext({ prefs: allow, toolMode: 'auto' }))(shellCall('rm -rf build'))).toBe('not-applicable')
+    // A third-party execute tool (static policy) asks too.
+    const runner = { pluginId: 'runner', definition: { ...definition('ask', 'execute'), name: 'run_task' } }
+    const prefs = new Map([['run_task', { enabled: true, override: 'allow' as const }]])
+    expect(await createToolApproval(context({ tool: runner, workspace: WORKSPACE, prefs }))({ ...call, toolCall: { ...call.toolCall, toolName: 'run_task' } })).toBe('user-approval')
+  })
+
+  it('keeps allow on other tools, deny / ask on execute tools, and a tool.approve hook ahead of the policy', async () => {
+    const write = { pluginId: 'core-workspace', definition: definition('ask', 'write') }
+    expect(await createToolApproval(context({ tool: write, workspace: WORKSPACE, prefs: new Map([['demo_tool', { enabled: true, override: 'allow' }]]) }))(call)).toBe('approved')
+    expect(await createToolApproval(context({ prefs: new Map([['demo_tool', { enabled: true, override: 'allow' }]]) }))(call)).toBe('approved')
+    expect(await createToolApproval(shellContext({ prefs: new Map([['shell', { enabled: true, override: 'deny' }]]) }))(shellCall('ls'))).toEqual({ type: 'denied', reason: DENIED_BY_OVERRIDE })
+    expect(await createToolApproval(shellContext({ prefs: new Map([['shell', { enabled: true, override: 'ask' }]]) }))(shellCall('ls'))).toBe('user-approval')
+
+    let decision: HookDecision = 'deny'
+    const hooks = {
+      run: async (_name: string, _input: unknown, output: unknown) => {
+        (output as { decision?: unknown }).decision = decision
+      },
+      on: () => ({ dispose() {} }),
+      list: () => [],
+    } as unknown as ToolApprovalContext['registry']['hooks']
+    const hooked = createToolApproval(shellContext({ prefs: allow, registry: { hooks } }))
+    expect(await hooked(shellCall('ls'))).toEqual({ type: 'denied', reason: DENIED_BY_HOOK })
+    decision = 'allow'
+    expect(await hooked(shellCall('rm x'))).toBe('approved')
+    decision = 'ask'
+    expect(await hooked(shellCall('ls'))).toBe('user-approval')
+  })
+
+  it('effectiveOverride drops only allow on execute', () => {
+    for (const access of [null, 'read', 'write', 'execute'] as const) {
+      for (const stored of OVERRIDES)
+        expect(effectiveOverride(stored, access)).toBe(stored === 'allow' && access === 'execute' ? null : stored)
+    }
   })
 })

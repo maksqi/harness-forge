@@ -3,19 +3,25 @@
 // `tool_prefs` row (`enabled`, `override`); `prefs()` feeds the chat pipeline (disabled tools are not sent, `override`
 // is step 1 of the approval resolution). A pref equal to the defaults (`enabled: true`, no override) deletes its row.
 // `workspace` (Phase 7, ADR-032) is the definition's workspace access (`read` / `write` / `execute`), null for MCP tools
-// and tools without one.
+// and tools without one. Phase 8 (ADR-038): `override: 'allow'` is refused for a tool with workspace access `execute`
+// (`400 validation_error` on `['override']`; shell rules allow single commands instead); `ask`, `deny` and `null` stay
+// accepted, and a patch without `override` keeps whatever is stored (an `allow` stored before v1.4 is ignored by the
+// approval, not here).
 import type { ToolDefinition } from '@harness-forge/plugin-sdk'
 import type { ToolSummary, ToolUpdate } from '@harness-forge/shared'
 import type { RegisteredTool } from '../registry/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { ToolPref, ToolService } from './types.ts'
-import { HarnessError } from '@harness-forge/shared'
+import { HarnessError, validationError } from '@harness-forge/shared'
 import { asSchema } from 'ai'
 import { eq } from 'drizzle-orm'
 import { toolPrefs } from '../db/schema.ts'
 import { mcpInternals } from './internal.ts'
 
 const DEFAULT_PREF: ToolPref = Object.freeze({ enabled: true, override: null })
+
+/** The `400` of `override: 'allow'` on a tool with workspace access `execute` (API.md 5.12, ADR-038). */
+export const EXECUTE_ALLOW_REFUSED_MESSAGE = 'Shell commands can\'t be always allowed. Add a shell rule instead.'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -116,6 +122,8 @@ export function createToolService(deps: AppDeps): ToolService {
       const current = (await summaries(prefs)).find(tool => tool.name === name)
       if (!current)
         throw new HarnessError({ code: 'not_found', message: `Unknown tool "${name}".` })
+      if (patch.override === 'allow' && current.workspace === 'execute')
+        throw validationError([{ path: ['override'], message: EXECUTE_ALLOW_REFUSED_MESSAGE, code: 'custom' }], EXECUTE_ALLOW_REFUSED_MESSAGE)
       const next: ToolPref = {
         enabled: patch.enabled ?? current.enabled,
         override: patch.override === undefined ? current.override : patch.override,

@@ -7,7 +7,12 @@
 //   2. (approval: `approval.ts`, decided by the SDK before `execute`);
 //   3. `tool.before` hooks (a throw blocks the call), the input re-validated against `inputSchema`;
 //   4. `execute` under the plugin guard (`timeoutMs`, default 60 s, max 600 s; aborts with the run), with the frozen
-//      `ToolCallContext.workspace` (`{ projectId, name, root }`) for every tool of a run with a workspace;
+//      `ToolCallContext.workspace` (`{ projectId, name, root }`) for every tool of a run with a workspace; Phase 8
+//      (ADR-036 / ADR-038): the run scope (`workspace/run-scope.ts`) is bound with the call's `toolCallId` to the call
+//      context right before `definition.execute` (a server-internal side channel: no property of the context exposes
+//      it), and once the call settles (success or failure) the run's journal records it: a `shell` row for the core
+//      `shell`, an `untracked` row for any other tool with workspace access `write` or `execute` (the core
+//      `write_file` / `edit_file` journal themselves; MCP tools declare no access and record nothing);
 //   5. `tool.after` hooks;
 //   6. JSON-serializable output, capped at 64 KB of serialized JSON (`{ truncated, originalBytes, preview }`).
 // `toModelOutput` is guarded (3 s); on failure, or for a truncated output, the output is sent as JSON.
@@ -18,11 +23,13 @@ import type { Logger } from '../logger.ts'
 import type { McpManager, ToolPref, ToolService } from '../mcp/types.ts'
 import type { PluginHost } from '../plugins/types.ts'
 import type { RegisteredTool, Registry } from '../registry/types.ts'
+import type { WorkspaceRunScopeInit } from '../workspace/run-scope.ts'
 import type { ApprovalTool } from './approval.ts'
 import { Buffer } from 'node:buffer'
 import { LIMITS } from '@harness-forge/shared'
 import { asSchema, dynamicTool, tool } from 'ai'
 import { GUARD_TIMEOUT_MAX_MS, GUARD_TIMEOUTS } from '../plugins/guard.ts'
+import { bindRunScope } from '../workspace/run-scope.ts'
 import { toolWorkspaceAccess } from './approval.ts'
 import { isAbortError, ToolFailure } from './errors.ts'
 
@@ -89,6 +96,8 @@ function failureMessage(error: unknown): string {
 
 export interface ToolWrapContext {
   chatId: string
+  /** The assistant message of the run (Phase 8; a continuation after an approval keeps the id). */
+  messageId: string
   modelRef: string
   registry: Pick<Registry, 'hooks'>
   plugins: Pick<PluginHost, 'guard' | 'isActive'>
@@ -99,6 +108,63 @@ export interface ToolWrapContext {
    * run has no workspace (`workspace` is then absent from the call context). Use `toolWorkspace()` (frozen).
    */
   workspace?: ToolWorkspace | null
+  /**
+   * The run scope of a run with a workspace (Phase 8, `workspace/run-scope.ts`): bound with the call's `toolCallId` to
+   * the call context of every tool, and its journal records the settled calls (`settledCallRecord`). Null or absent =
+   * nothing is bound or recorded.
+   */
+  scope?: WorkspaceRunScopeInit | null
+  /** Warnings of the journal step (default: none). */
+  logger?: Logger
+}
+
+/** The builtin plugin of the workspace tools (`builtin-plugins/core-workspace`). */
+export const CORE_WORKSPACE_PLUGIN_ID = 'core-workspace'
+/** The core-workspace tools that journal their own writes (`journaledWrite`, `workspace/journal.ts`). */
+const SELF_JOURNALED_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_file'])
+/** The core-workspace shell (its calls are journaled as `shell` rows with the command). */
+const CORE_SHELL_TOOL = 'shell'
+
+/** What the journal records for a settled call (Phase 8, ADR-036): nothing, a `shell` row or an `untracked` row. */
+export type SettledCallRecord = { kind: 'shell', command: string } | { kind: 'untracked' } | null
+
+/**
+ * The journal row of a settled call of `registered` with its final `input`: the core `shell` -> `shell` with the
+ * command; the core `write_file` / `edit_file` -> nothing (they journal themselves); any other tool with workspace
+ * access `write` or `execute` (an unknown access counts as `execute`) -> `untracked`; everything else (no access, `read`,
+ * MCP tools) -> nothing.
+ */
+export function settledCallRecord(registered: Pick<RegisteredTool, 'pluginId' | 'definition'>, input: unknown): SettledCallRecord {
+  const { pluginId, definition } = registered
+  if (pluginId === CORE_WORKSPACE_PLUGIN_ID) {
+    if (definition.name === CORE_SHELL_TOOL) {
+      const command = typeof input === 'object' && input !== null ? (input as { command?: unknown }).command : undefined
+      return { kind: 'shell', command: typeof command === 'string' ? command : '' }
+    }
+    if (SELF_JOURNALED_TOOLS.has(definition.name))
+      return null
+  }
+  const access = toolWorkspaceAccess(definition)
+  return access === 'write' || access === 'execute' ? { kind: 'untracked' } : null
+}
+
+/** Records a settled call in the run's journal (`recordShell` / `recordUntracked` never reject; guarded anyway). */
+async function recordSettledCall(context: ToolWrapContext, registered: Pick<RegisteredTool, 'pluginId' | 'definition'>, toolCallId: string, input: unknown): Promise<void> {
+  const journal = context.scope?.journal ?? null
+  if (journal === null)
+    return
+  const record = settledCallRecord(registered, input)
+  if (record === null)
+    return
+  try {
+    if (record.kind === 'shell')
+      await journal.recordShell({ toolCallId, command: record.command })
+    else
+      await journal.recordUntracked({ toolCallId, tool: registered.definition.name })
+  }
+  catch (error) {
+    context.logger?.warn('the tool call was not journaled', { tool: registered.definition.name, messageId: context.messageId, err: error })
+  }
 }
 
 /** The frozen `ToolCallContext.workspace` of a run: exactly `{ projectId, name, root }` (no other workspace fields). */
@@ -133,6 +199,7 @@ export function wrapToolExecute(registered: Pick<RegisteredTool, 'pluginId' | 'd
     }
 
     let output: unknown
+    let started = false
     try {
       output = await context.plugins.guard(
         pluginId,
@@ -145,6 +212,9 @@ export function wrapToolExecute(registered: Pick<RegisteredTool, 'pluginId' | 'd
             signal: guardSignal,
             ...(context.workspace == null ? {} : { workspace: context.workspace }),
           }
+          if (context.scope != null)
+            bindRunScope(callContext, { ...context.scope, toolCallId: options.toolCallId })
+          started = true
           return definition.execute(finalInput, callContext)
         },
         { timeoutMs: clampToolTimeout(definition.timeoutMs), phase: 'tool', signal, label: name },
@@ -154,6 +224,11 @@ export function wrapToolExecute(registered: Pick<RegisteredTool, 'pluginId' | 'd
       if (signal.aborted && isAbortError(error))
         throw error
       throw new ToolFailure(failureMessage(error))
+    }
+    finally {
+      // Journaled once the call settled, success or failure (a call that never started records nothing).
+      if (started)
+        await recordSettledCall(context, registered, options.toolCallId, finalInput)
     }
 
     const after = { output }
@@ -185,6 +260,8 @@ export function wrapToModelOutput(registered: Pick<RegisteredTool, 'pluginId' | 
 
 export interface ToolAssemblyInput {
   chatId: string
+  /** The assistant message of the run (`session.assistantId`; a continuation keeps the id). */
+  messageId: string
   modelRef: string
   toolMode: ToolMode
   /** `capabilities.tools` of the model. */
@@ -201,6 +278,11 @@ export interface ToolAssemblyInput {
    * Null or absent = no workspace.
    */
   workspace?: ToolWorkspace | null
+  /**
+   * The run scope (Phase 8, `createRunScope` of ./scope.ts): bound to the call context of every tool and to the context
+   * of every policy function (`AssembledTools.scope`). Used only together with `workspace`; null or absent = none.
+   */
+  scope?: WorkspaceRunScopeInit | null
   /** `env.workspaceShell` (`HF_WORKSPACE_SHELL`): tools with workspace access `execute` are sent only when true. */
   allowExecute: boolean
 }
@@ -215,6 +297,8 @@ export interface AssembledTools {
   unsupported: boolean
   /** The frozen `ToolCallContext.workspace` given to the tools (and to the policy functions), or null. */
   workspace: ToolWorkspace | null
+  /** The run scope bound to the tools' call contexts (and to the policy functions' contexts), or null (Phase 8). */
+  scope: WorkspaceRunScopeInit | null
 }
 
 /** The workspace filter of a tool (see `ToolAssemblyInput.workspace` / `allowExecute`). */
@@ -263,7 +347,8 @@ export function toAiTool(registered: RegisteredTool, context: ToolWrapContext): 
 export async function assembleTools(input: ToolAssemblyInput): Promise<AssembledTools> {
   const prefs = await readPrefs(input)
   const workspace = input.workspace == null ? null : toolWorkspace(input.workspace)
-  const empty: AssembledTools = { tools: {}, byName: new Map(), prefs, unsupported: false, workspace }
+  const scope = workspace === null ? null : (input.scope ?? null)
+  const empty: AssembledTools = { tools: {}, byName: new Map(), prefs, unsupported: false, workspace, scope }
   if (input.toolMode === 'off')
     return empty
 
@@ -296,11 +381,14 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
 
   const context: ToolWrapContext = {
     chatId: input.chatId,
+    messageId: input.messageId,
     modelRef: input.modelRef,
     registry: input.registry,
     plugins: input.plugins,
     signal: input.signal,
     workspace,
+    scope,
+    logger: input.logger,
   }
   const tools: ToolSet = {}
   const byName = new Map<string, ApprovalTool>()
@@ -308,5 +396,5 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
     tools[entry.definition.name] = toAiTool(entry, context)
     byName.set(entry.definition.name, { pluginId: entry.pluginId, definition: entry.definition as ToolDefinition })
   }
-  return { tools, byName, prefs, unsupported: false, workspace }
+  return { tools, byName, prefs, unsupported: false, workspace, scope }
 }

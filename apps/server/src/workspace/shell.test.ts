@@ -1,9 +1,11 @@
 // Shell runner tests (POSIX `sh` syntax only: CI runs Linux, where `/bin/sh` may be dash). Every kill is proven with
-// `process.kill(pid, 0)` throwing ESRCH; temp folders are canonical (`realpath(mkdtemp())`).
+// `process.kill(pid, 0)` throwing ESRCH; temp folders are canonical (`realpath(mkdtemp())`). The end folder report
+// (`reportCwd`, ADR-038) runs under `/bin/sh`, `/bin/bash` and `/bin/dash`, whichever exist.
 import type { ShellRunResult } from './shell.ts'
 import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { accessSync, constants } from 'node:fs'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
@@ -18,12 +20,15 @@ import {
   liveShellGroups,
   normalizeTerminalText,
   omissionMarker,
+  parseCwdReport,
   pickShell,
   redactShellCommand,
   runShellCommand,
+  SHELL_CWD_TRAP,
   shellBinary,
   shrinkCaptured,
   StreamCapture,
+  withCwdReport,
 } from './shell.ts'
 
 const posix = process.platform !== 'win32'
@@ -324,6 +329,151 @@ describe.skipIf(!posix)('runShellCommand', () => {
     await expectGone(group)
     await expectGone(child!)
   }, 40_000)
+})
+
+/** The shells of this host the end folder report is checked under: `/bin/sh` (dash on Debian), bash, dash. */
+const REPORT_SHELLS = posix ? ['/bin/sh', '/bin/bash', '/bin/dash'].filter(isExecutable) : []
+
+function isExecutable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK)
+    return true
+  }
+  catch {
+    return false
+  }
+}
+
+describe.skipIf(!posix)('the end folder report (reportCwd)', () => {
+  it('runs under every shell of this host', () => {
+    expect(REPORT_SHELLS).toContain('/bin/sh')
+  })
+
+  describe.each(REPORT_SHELLS.map(shell => [shell] as const))('%s', (shell) => {
+    function report(command: string, options: Partial<Parameters<typeof runShellCommand>[0]> = {}): Promise<ShellRunResult> {
+      return run(command, { shell, reportCwd: true, ...options })
+    }
+
+    beforeEach(async () => {
+      await mkdir(join(cwd, 'sub', 'deep'), { recursive: true })
+    })
+
+    it('reports the folder after a normal end, `exit N` and a `set -e` failure, keeping the exit status', async () => {
+      await expect(report('cd sub')).resolves.toMatchObject({ exitCode: 0, endCwd: join(cwd, 'sub') })
+      await expect(report('ls > /dev/null')).resolves.toMatchObject({ exitCode: 0, endCwd: cwd })
+      await expect(report('cd sub; exit 3')).resolves.toMatchObject({ exitCode: 3, endCwd: join(cwd, 'sub') })
+      const failed = await report('set -e; cd sub/deep; false; echo never')
+      expect(failed).toMatchObject({ exitCode: 1, endCwd: join(cwd, 'sub', 'deep') })
+      expect(out(failed)).toBe('')
+      const output = await report('cd sub && pwd && echo err 1>&2')
+      expect(out(output)).toBe(`${join(cwd, 'sub')}\n`)
+      expect(err(output)).toBe('err\n')
+    })
+
+    it('reports the physical folder (links resolved)', async () => {
+      await symlink(join(cwd, 'sub', 'deep'), join(cwd, 'link'))
+      await expect(report('cd link')).resolves.toMatchObject({ endCwd: join(cwd, 'sub', 'deep') })
+    })
+
+    it('leaves the folder unchanged after a subshell or a cd in a pipeline', async () => {
+      await expect(report('(cd sub)')).resolves.toMatchObject({ exitCode: 0, endCwd: cwd })
+      await expect(report('cd sub | cat')).resolves.toMatchObject({ exitCode: 0, endCwd: cwd })
+    })
+
+    it('reports nothing after exec, the command\'s own EXIT trap or a syntax error', async () => {
+      await expect(report('cd sub && exec true')).resolves.toMatchObject({ exitCode: 0, endCwd: null })
+      const trapped = await report('trap \'echo mine\' EXIT; cd sub')
+      expect(trapped).toMatchObject({ exitCode: 0, endCwd: null })
+      expect(out(trapped)).toBe('mine\n')
+      await expect(report('cd sub; if then')).resolves.toMatchObject({ endCwd: null })
+    })
+
+    it('reports nothing after a timeout kill (whether or not the trap ran)', async () => {
+      const result = await report('cd sub; sleep 5', { timeoutMs: 300 })
+      expect(result).toMatchObject({ timedOut: true, exitCode: null, endCwd: null })
+    })
+
+    it('rejects an aborted command as before', async () => {
+      const controller = new AbortController()
+      const pending = report('cd sub; sleep 30', { signal: controller.signal })
+      await delay(100)
+      controller.abort()
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+      expect(liveShellGroups()).toEqual([])
+    })
+
+    it('keeps the exit status and stays silent when the command closes fd 3', async () => {
+      const result = await report('exec 3>&-; cd sub; exit 4')
+      expect(result).toMatchObject({ exitCode: 4, endCwd: null })
+      expect(err(result)).toBe('')
+    })
+
+    it('uses the last line on fd 3 (the trap writes last), from the last 4 KiB', async () => {
+      await expect(report('echo /tmp >&3; cd sub')).resolves.toMatchObject({ endCwd: join(cwd, 'sub') })
+      const flood = 'awk \'BEGIN { for (i = 0; i < 2000; i++) printf "xxxxx"; printf "\\n" }\' >&3'
+      await expect(report(`${flood}; cd sub`)).resolves.toMatchObject({ endCwd: join(cwd, 'sub') })
+      // Text without a final newline joins the trap's line: nothing usable, the folder stays.
+      await expect(report('printf x >&3; cd sub')).resolves.toMatchObject({ exitCode: 0, endCwd: null })
+    })
+
+    it('keeps the error messages and line numbers of the command (the trap shares its first line)', async () => {
+      const command = 'true\nhf_no_such_command_x\ncd sub'
+      const plain = await run(command, { shell })
+      const reported = await report(command)
+      expect(err(plain)).toMatch(/hf_no_such_command_x/)
+      expect(err(reported)).toBe(err(plain))
+      expect(reported.exitCode).toBe(plain.exitCode)
+      expect(reported.endCwd).toBe(join(cwd, 'sub'))
+    })
+
+    it('never resolves cd through CDPATH from the server environment', async () => {
+      const elsewhere = await tempFolder()
+      await mkdir(join(elsewhere, 'only-there'))
+      const result = await report('cd only-there', { parentEnv: { PATH: process.env.PATH, CDPATH: elsewhere } })
+      expect(result.exitCode).not.toBe(0)
+      expect(result.endCwd).toBe(cwd)
+      expect(out(result)).toBe('')
+    })
+  })
+
+  it('without reportCwd: the command runs as given, fd 3 is not open and nothing is reported', async () => {
+    await mkdir(join(cwd, 'sub'))
+    const result = await run('cd sub; echo x >&3', { shell: '/bin/sh' })
+    expect(result.endCwd).toBeNull()
+    expect(result.exitCode).not.toBe(0)
+    expect(withCwdReport('ls')).toBe(`${SHELL_CWD_TRAP}ls`)
+    expect(SHELL_CWD_TRAP).toBe('trap \'pwd -P 2>/dev/null >&3\' EXIT; ')
+  })
+
+  it('never finds a program through an empty or relative PATH entry', async () => {
+    await mkdir(join(cwd, 'bin'))
+    for (const name of ['hf-probe-a', 'bin/hf-probe-b']) {
+      await writeFile(join(cwd, name), '#!/bin/sh\necho planted\n')
+      await chmod(join(cwd, name), 0o755)
+    }
+    const parentEnv = { PATH: `:.:bin:${process.env.PATH ?? ''}` }
+    for (const command of ['hf-probe-a', 'hf-probe-b']) {
+      const result = await run(command, { parentEnv, shell: '/bin/sh' })
+      expect(result.exitCode, command).toBe(127)
+      expect(out(result)).toBe('')
+    }
+  })
+})
+
+describe('parseCwdReport', () => {
+  it.each([
+    ['/a/b\n', '/a/b'],
+    ['/a/b', '/a/b'],
+    ['junk\n/a/b\n\n', '/a/b'],
+    ['/x\n/a b/c\n', '/a b/c'],
+    ['', null],
+    ['\n', null],
+    ['relative/path\n', null],
+    ['/a\nb\n', null],
+    ['/a\0b\n', null],
+  ])('%j -> %j', (text, expected) => {
+    expect(parseCwdReport(Buffer.from(text))).toBe(expected)
+  })
 })
 
 describe.skipIf(!posix)('killProcessGroup', () => {

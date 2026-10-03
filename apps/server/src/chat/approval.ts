@@ -1,6 +1,7 @@
 // Tool approval (ARCHITECTURE.md 6.2, PLUGINS.md 10), passed as `streamText({ toolApproval })`. Resolution order, first
 // match wins:
 //   1. user override in `tool_prefs` (deny / allow / ask)            -> denied / approved / user-approval
+//      (Phase 8, ADR-038: a stored `allow` on a tool with workspace access `execute` is ignored, as if none were set)
 //   2. `tool.approve` hook decision (deny / allow / ask)             -> denied / approved / user-approval
 //   3. tool policy (static or function) is `deny`                    -> denied
 //   4. mode `ask`:   policy `safe` -> not-applicable; `ask` / `always` -> user-approval
@@ -8,8 +9,9 @@
 //      `write` -> not-applicable; everything else (`ask` without workspace `write`, `always`) -> user-approval
 //   6. mode `auto`:  policy `always` -> user-approval; `safe` / `ask` -> not-applicable
 // Mode `off` sends no tools; a call that still arrives is denied. A policy function is guarded (3 s) and receives the
-// call context with `workspace` (the run's project folder); a throw or timeout counts as `always`. The approval
-// function never throws: an unexpected failure asks the user.
+// call context with `workspace` (the run's project folder) and, in a run with a workspace (Phase 8), the run scope bound
+// to that context object (`runScopeOf(c)`: the shell rules and the working folder of `shellPolicy`); a throw or timeout
+// counts as `always`. The approval function never throws: an unexpected failure asks the user.
 import type { ToolCallContext, ToolDefinition, ToolWorkspace, ToolWorkspaceAccess } from '@harness-forge/plugin-sdk'
 import type { ToolMode, ToolOverride, ToolPolicy } from '@harness-forge/shared'
 import type { ModelMessage, ToolApprovalStatus, ToolSet } from 'ai'
@@ -17,7 +19,9 @@ import type { Logger } from '../logger.ts'
 import type { ToolPref } from '../mcp/types.ts'
 import type { PluginHost } from '../plugins/types.ts'
 import type { Registry } from '../registry/types.ts'
+import type { WorkspaceRunScope, WorkspaceRunScopeInit } from '../workspace/run-scope.ts'
 import { GUARD_TIMEOUTS } from '../plugins/guard.ts'
+import { bindRunScope } from '../workspace/run-scope.ts'
 
 export type ApprovalOutcome = 'not-applicable' | 'approved' | 'denied' | 'user-approval'
 export type HookDecision = 'allow' | 'ask' | 'deny'
@@ -120,15 +124,33 @@ export interface ToolApprovalContext {
   logger: Logger
   /** The project folder of the run (`ToolCallContext.workspace` of the policy functions); null or absent = none. */
   workspace?: ToolWorkspace | null
+  /**
+   * The run scope (Phase 8, `AssembledTools.scope`): bound with the call's `toolCallId` to the context object of each
+   * policy function. Null or absent = nothing is bound.
+   */
+  scope?: WorkspaceRunScopeInit | null
 }
 
-/** Evaluates the tool policy: default `ask`; a function is guarded (3 s) and a throw or timeout counts as `always`. */
+/**
+ * The override that applies to a tool: the stored one, except a stored `allow` on a tool with workspace access
+ * `execute` (Phase 8, ADR-038: such an override can no longer be set, and one stored before v1.4 is ignored, so the
+ * call falls through to the hook, the policy and the mode; the shell skips the card only through a rule or Auto).
+ */
+export function effectiveOverride(stored: ToolOverride | null, workspace: ToolWorkspaceAccess | null): ToolOverride | null {
+  return stored === 'allow' && workspace === 'execute' ? null : stored
+}
+
+/**
+ * Evaluates the tool policy: default `ask`; a function is guarded (3 s) and a throw or timeout counts as `always`. With
+ * a `scope` (Phase 8), the scope is bound to the context object the function receives (`runScopeOf(c)`).
+ */
 export async function evaluatePolicy(
   tool: ApprovalTool,
   input: unknown,
   context: Omit<ToolCallContext, 'signal'>,
   plugins: Pick<PluginHost, 'guard'>,
   signal: AbortSignal,
+  scope: WorkspaceRunScope | null = null,
 ): Promise<EffectivePolicy> {
   const policy = tool.definition.policy
   if (policy === undefined)
@@ -138,7 +160,12 @@ export async function evaluatePolicy(
   try {
     const value = await plugins.guard(
       tool.pluginId,
-      guardSignal => policy.call(tool.definition, input, { ...context, signal: guardSignal }),
+      (guardSignal) => {
+        const callContext: ToolCallContext = { ...context, signal: guardSignal }
+        if (scope !== null)
+          bindRunScope(callContext, scope)
+        return policy.call(tool.definition, input, callContext)
+      },
       { timeoutMs: GUARD_TIMEOUTS.hook, phase: 'tool', signal, label: `${tool.definition.name} policy` },
     )
     return typeof value === 'string' && POLICIES.has(value) ? value as EffectivePolicy : 'always'
@@ -160,7 +187,7 @@ export function createToolApproval(context: ToolApprovalContext) {
       if (tool === undefined)
         return { type: 'denied', reason: DENIED_UNAVAILABLE }
       const workspace = toolWorkspaceAccess(tool.definition)
-      const override = context.prefs.get(toolCall.toolName)?.override ?? null
+      const override = effectiveOverride(context.prefs.get(toolCall.toolName)?.override ?? null, workspace)
       if (override !== null)
         return toApprovalStatus(resolveApproval({ override, hookDecision: undefined, toolMode: context.toolMode, policy: 'ask', workspace }))
 
@@ -186,6 +213,7 @@ export function createToolApproval(context: ToolApprovalContext) {
         },
         context.plugins,
         context.signal,
+        context.scope == null ? null : { ...context.scope, toolCallId: toolCall.toolCallId },
       )
       return toApprovalStatus(resolveApproval({ override: null, hookDecision: undefined, toolMode: context.toolMode, policy, workspace }))
     }

@@ -60,8 +60,9 @@ export function osName(platform: NodeJS.Platform = process.platform): string {
  * The workspace block of the instructions: `Project "<name>", folder <root> (<OS>).`, then one rule per line, built only
  * from the offered workspace tools (`tools`: names of the tools of this run that declare workspace access): relative
  * paths (any workspace tool), read before edit (`read_file` with `edit_file` or `write_file`), the exact unique
- * `old_string` (`edit_file`), `edit_file` over `write_file` (both), the shell process rules (`shell`). Without
- * workspace tools only the first line.
+ * `old_string` (`edit_file`), `edit_file` over `write_file` (both), the shell process rules (`shell`; Phase 8: the
+ * working folder carries over between calls, environment variables do not). Without workspace tools only the first
+ * line.
  */
 export function workspaceBlock(workspace: Pick<OpenWorkspace, 'name' | 'root'>, tools: readonly string[], platform?: NodeJS.Platform): string {
   const offered = new Set(tools)
@@ -75,7 +76,7 @@ export function workspaceBlock(workspace: Pick<OpenWorkspace, 'name' | 'root'>, 
   if (offered.has('edit_file') && offered.has('write_file'))
     rules.push('Prefer edit_file for changes to an existing file; use write_file to create a file or to replace all of its content.')
   if (offered.has('shell'))
-    rules.push('Each shell call runs in a new process: cd does not persist between calls (use cwd, or cd dir && command), there is no stdin (interactive commands cannot work), and background processes are stopped when the command ends.')
+    rules.push('Each shell call runs in a new process: the working folder carries over (cd persists inside the project folder), environment variables do not; there is no stdin (interactive commands cannot work), and background processes are stopped when the command ends.')
   const head = `Project ${JSON.stringify(workspace.name)}, folder ${workspace.root} (${osName(platform)}).`
   return [head, ...rules.map(rule => `- ${rule}`)].join('\n')
 }

@@ -463,6 +463,115 @@ describe('toolPart: shell rules (Phase 8)', () => {
     expect(row(wrapper).find(`[data-testid="${testIds.toolRowSummary}"]`).exists()).toBe(true)
   })
 
+  function mountShellRequest(input: Record<string, unknown>, context: { projectName?: string | null, shellCwd?: string | null } | null = {}) {
+    usePluginsStore().tools = [toolSummary({ name: 'shell', pluginId: 'core-workspace', policy: 'ask', workspace: 'execute' })]
+    const toolPart = part({ type: 'tool-shell', toolCallId: 'call_shell', state: 'approval-requested', approval: { id: 'appr_shell' }, input } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+    const provide = context === null
+      ? {}
+      : { [TOOL_APPROVAL_CONTEXT as symbol]: { toolMode: () => 'ask', projectName: () => (context.projectName === undefined ? 'website' : context.projectName), projectId: () => 'prj_1', shellCwd: () => context.shellCwd ?? null } }
+    return mount(ToolPart, {
+      props: { part: toolPart, streaming: false },
+      global: { stubs: { Tooltip: { template: '<div><slot /></div>' }, CopyButton: true }, provide },
+      attachTo: document.body,
+    })
+  }
+  const sel = (id: string) => `[data-testid="${id}"]`
+
+  it('offers "Always allow commands starting with" below the warning of a shell card; Run sends allowRules', async () => {
+    const wrapper = mountShellRequest({ command: 'pnpm test --filter parser' })
+    const card = wrapper.get(sel(testIds.toolApproval))
+    const box = card.get(sel(testIds.toolApprovalAllowRule))
+    // Below the warning of the command preview, and no "Always allow shell".
+    const warning = card.get('[data-slot="command-warning"]').element
+    expect(warning.compareDocumentPosition(box.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(card.find(sel(testIds.toolApprovalAlways)).exists()).toBe(false)
+    await box.trigger('click')
+    await card.get(`${sel(testIds.toolApprovalRuleScope)} button[data-value="global"]`).trigger('click')
+    await wrapper.get(sel(testIds.toolApprovalAllow)).trigger('click')
+    expect(wrapper.emitted('approval')).toEqual([[{
+      id: 'appr_shell',
+      approved: true,
+      toolName: 'shell',
+      alwaysAllow: false,
+      allowRules: { prefixes: ['pnpm test'], scope: 'global' },
+    }]])
+  })
+
+  it('disables Run while the checked prefix is invalid', async () => {
+    const wrapper = mountShellRequest({ command: 'pnpm test --filter parser' })
+    await wrapper.get(sel(testIds.toolApprovalAllowRule)).trigger('click')
+    const run = () => wrapper.get(sel(testIds.toolApprovalAllow))
+    await wrapper.get(sel(testIds.toolApprovalRulePrefix)).setValue('npm test')
+    expect(wrapper.get(sel(testIds.toolApprovalRuleError)).attributes('data-code')).toBe('no-match')
+    expect(run().attributes('disabled')).toBeDefined()
+    await run().trigger('click')
+    expect(wrapper.emitted('approval')).toBeUndefined()
+    // Deny still works and ignores the rule.
+    await wrapper.get(sel(testIds.toolApprovalRulePrefix)).setValue('pnpm test')
+    expect(run().attributes('disabled')).toBeUndefined()
+    await wrapper.get(sel(testIds.toolApprovalDeny)).trigger('click')
+    expect(wrapper.emitted('approval')).toEqual([[{ id: 'appr_shell', approved: false, toolName: 'shell', alwaysAllow: false }]])
+  })
+
+  it('sends no allowRules while the box is unchecked, and shows only the note for a command that always asks', async () => {
+    const plain = mountShellRequest({ command: 'pnpm test' })
+    await plain.get(sel(testIds.toolApprovalAllowRule)).trigger('click')
+    await plain.get(sel(testIds.toolApprovalAllowRule)).trigger('click')
+    await plain.get(sel(testIds.toolApprovalAllow)).trigger('click')
+    expect(plain.emitted('approval')).toEqual([[{ id: 'appr_shell', approved: true, toolName: 'shell', alwaysAllow: false }]])
+    plain.unmount()
+
+    const redirect = mountShellRequest({ command: 'pnpm test > out.txt' })
+    expect(redirect.find(sel(testIds.toolApprovalAllowRule)).exists()).toBe(false)
+    expect(redirect.get('[data-slot="allow-rule-note"]').text()).toBe('Commands with redirections, substitutions or other shell syntax always ask.')
+    expect(redirect.get(sel(testIds.toolApprovalAllow)).attributes('disabled')).toBeUndefined()
+  })
+
+  it('offers no rule for a plugin tool that only shares the name shell', () => {
+    usePluginsStore().tools = [toolSummary({ name: 'shell', pluginId: 'my-shell', policy: 'ask', workspace: null })]
+    const toolPart = part({ type: 'tool-shell', toolCallId: 'call_shell', state: 'approval-requested', approval: { id: 'appr_shell' }, input: { command: 'ls' } } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+    const wrapper = mount(ToolPart, { props: { part: toolPart, streaming: false }, global: { stubs: { Tooltip: { template: '<div><slot /></div>' }, CopyButton: true } } })
+    expect(wrapper.find(sel(testIds.toolApprovalAllowRule)).exists()).toBe(false)
+    expect(wrapper.find('[data-slot="allow-rule-note"]').exists()).toBe(false)
+  })
+
+  it('names the sticky folder in the meta line: the call\'s cwd, else the chat\'s current shell folder', () => {
+    const meta = (wrapper: ReturnType<typeof mountShellRequest>) => wrapper.get('[data-slot="command-meta"]').text()
+    expect(meta(mountShellRequest({ command: 'ls' }, { shellCwd: 'packages/web' }))).toBe('In website/packages/web')
+    expect(meta(mountShellRequest({ command: 'ls', cwd: 'src' }, { shellCwd: 'packages/web' }))).toBe('In website/src')
+    expect(meta(mountShellRequest({ command: 'ls', cwd: '.', timeout_ms: 30_000 }, { shellCwd: 'packages/web' }))).toBe('In website · timeout 30s')
+    expect(meta(mountShellRequest({ command: 'ls' }, { shellCwd: '.' }))).toBe('In website')
+    expect(meta(mountShellRequest({ command: 'ls' }, { projectName: null, shellCwd: 'lib' }))).toBe('In lib')
+  })
+
+  it('shows the folder a running shell call starts in: its cwd input, else the chat\'s current shell folder', async () => {
+    const running = (input: Record<string, unknown>) => mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: part({ type: 'tool-shell', toolCallId: 'call_run', state: 'input-available', input } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>), streaming: true }) }),
+    }, {
+      attachTo: document.body,
+      global: { provide: { [TOOL_APPROVAL_CONTEXT as symbol]: { toolMode: () => 'ask', projectName: () => 'website', projectId: () => 'prj_1', shellCwd: () => 'packages/web' } } },
+    })
+    for (const [input, folder] of [[{ command: 'sleep 5' }, 'packages/web'], [{ command: 'sleep 5', cwd: 'src' }, 'src']] as const) {
+      const wrapper = running(input)
+      await row(wrapper).get('button').trigger('click')
+      await flushPromises()
+      const terminal = wrapper.get(sel(testIds.terminalOutput))
+      expect(terminal.attributes('data-status')).toBe('running')
+      expect(terminal.get(sel(testIds.terminalCwd)).attributes('data-value')).toBe(folder)
+      wrapper.unmount()
+    }
+  })
+
+  it('reads the row summary aloud by its label; the visible text stays', () => {
+    const wrapper = mountPart(shellPart(shellOutput({ command: 'pnpm test', exitCode: 1, allowedBy: ['pnpm test'] })), false)
+    const summary = row(wrapper).get(sel(testIds.toolRowSummary))
+    expect([summary.text(), summary.attributes('aria-hidden')]).toEqual(['exit 1', 'true'])
+    expect(summary.element.nextElementSibling?.classList.contains('sr-only')).toBe(true)
+    expect(summary.element.nextElementSibling?.textContent).toBe('Exit code 1')
+    // The row's name: the rule badge, then the spoken summary.
+    expect(row(wrapper).get('button').text()).toContain(', allowed by rule pnpm testexit 1Exit code 1')
+  })
+
   it('passes the card\'s allowRules on with the approval', () => {
     const toolPart = part({ type: 'tool-shell', toolCallId: 'call_shell', state: 'approval-requested', approval: { id: 'appr_shell' }, input: { command: 'pnpm test' } } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
     const wrapper = mount(ToolPart, {

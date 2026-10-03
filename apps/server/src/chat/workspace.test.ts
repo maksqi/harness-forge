@@ -24,7 +24,7 @@ import { createTestApp } from '../testing/create-test-app.ts'
 import { createFakeProjectService } from '../testing/fake-projects.ts'
 import { readWorkspaceFile, writeWorkspaceFile } from '../workspace/paths.ts'
 import { osName } from './params.ts'
-import { chatBody, postChat, readSse, runnerOf, streamedText, testChatId } from './testing.ts'
+import { answerApprovals, chatBody, postChat, readSse, runnerOf, streamedText, testChatId } from './testing.ts'
 
 const WORKSPACE_TOOLS = ['read_file', 'list_directory', 'find_files', 'search_files', 'write_file', 'edit_file', 'shell']
 const SHELL_OFFERED = process.platform !== 'win32'
@@ -316,19 +316,6 @@ function standInTools(): ToolDefinition[] {
   return [writeFile, editFile, shell] as ToolDefinition[]
 }
 
-/** Marks every pending approval of `message` as answered (the client side of `addToolApprovalResponse`). */
-function answered(message: HarnessUIMessage, approved: boolean): HarnessUIMessage {
-  return {
-    ...message,
-    parts: message.parts.map((part) => {
-      const value = part as unknown as Record<string, unknown>
-      if (value.state !== 'approval-requested')
-        return part
-      return { ...value, state: 'approval-responded', approval: { ...(value.approval as object), approved } } as unknown as typeof part
-    }),
-  }
-}
-
 describe('accept edits with mock:workspace on a temp project', () => {
   let t: TestApp
   let project: ProjectSummary
@@ -376,7 +363,7 @@ describe('accept edits with mock:workspace on a temp project', () => {
 
     expect(pending.pendingApproval).toBe(true)
     expect(received.has('shell')).toBe(false)
-    const { chunks } = await readSse(await postChat(t, { ...chatBody(chatId, '', { modelRef: 'mock:workspace', toolMode: 'edits' }), message: answered(assistant, true) }))
+    const { chunks } = await readSse(await postChat(t, { ...chatBody(chatId, '', { modelRef: 'mock:workspace', toolMode: 'edits' }), message: answerApprovals(assistant, true) }))
     expect(streamedText(chunks)).toBe('Workspace done: Hello from the workspace agent.')
     expect(received.get('shell')?.[0]?.workspace).toEqual({ projectId: project.id, name: 'Edits', root: project.path })
     const done = await detailOf(t, chatId)

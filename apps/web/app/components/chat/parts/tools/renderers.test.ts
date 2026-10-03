@@ -327,6 +327,70 @@ describe('terminalOutput', () => {
     expect(wrapper.get(`[data-testid="${testIds.terminalCommand}"]`).text()).toBe('$ \nnpm ci\nnpm test'.trim())
     wrapper.unmount()
   })
+  it('prompts with the folder the command started in, left out for the project folder (Phase 8)', async () => {
+    const wrapper = mount(TerminalOutput, { props: { command: 'pnpm test', output: shell({ cwd: 'packages/web', endCwd: 'packages/web' }) } })
+    const cwd = wrapper.get(`[data-testid="${testIds.terminalCwd}"]`)
+    expect([cwd.text(), cwd.attributes('data-value')]).toEqual(['packages/web', 'packages/web'])
+    expect(cwd.classes()).toContain('text-muted-foreground')
+    expect(wrapper.get(`[data-testid="${testIds.terminalCommand}"]`).text()).toBe('packages/web $ pnpm test')
+    // Same folder at the end: no "Now in" badge.
+    expect(wrapper.find(`[data-testid="${testIds.terminalCwdChange}"]`).exists()).toBe(false)
+
+    await wrapper.setProps({ output: shell({ cwd: '.', endCwd: '.' }) })
+    expect(wrapper.find(`[data-testid="${testIds.terminalCwd}"]`).exists()).toBe(false)
+    expect(wrapper.get(`[data-testid="${testIds.terminalCommand}"]`).text()).toBe('$ pnpm test')
+    wrapper.unmount()
+  })
+
+  it('prompts with the cwd prop while running; a finished output names its own folder', async () => {
+    const wrapper = mount(TerminalOutput, { props: { command: 'ls', output: null, running: true, cwd: 'src' } })
+    expect(wrapper.get(`[data-testid="${testIds.terminalCwd}"]`).attributes('data-value')).toBe('src')
+    await wrapper.setProps({ cwd: '.' })
+    expect(wrapper.find(`[data-testid="${testIds.terminalCwd}"]`).exists()).toBe(false)
+    await wrapper.setProps({ running: false, cwd: 'src', output: shell({ cwd: 'lib', endCwd: 'lib' }) })
+    expect(wrapper.get(`[data-testid="${testIds.terminalCwd}"]`).attributes('data-value')).toBe('lib')
+    wrapper.unmount()
+  })
+
+  it('says where the next call starts when the folder changed, with the server\'s note', async () => {
+    const wrapper = mount(TerminalOutput, { props: { command: 'cd packages/web', output: shell({ cwd: '.', endCwd: 'packages/web' }) } })
+    const change = () => wrapper.get(`[data-testid="${testIds.terminalCwdChange}"]`)
+    expect([change().text(), change().attributes('data-value')]).toEqual(['Now in packages/web', 'packages/web'])
+    expect(wrapper.find('[data-slot="terminal-cwd-note"]').exists()).toBe(false)
+
+    const note = 'The command ended outside the project folder; the next call starts in the project folder.'
+    await wrapper.setProps({ output: shell({ cwd: 'packages/web', endCwd: '.', cwdNote: note }) })
+    expect([change().text(), change().attributes('data-value')]).toEqual(['Now in the project folder', '.'])
+    expect(wrapper.get('[data-slot="terminal-cwd-note"]').text()).toBe(note)
+    wrapper.unmount()
+  })
+
+  it('ends with "Allowed by rule: …" for a command shell rules let run', () => {
+    const wrapper = mount(TerminalOutput, { props: { command: 'pnpm test && git status', output: shell({ allowedBy: ['pnpm test', 'git status'] }) } })
+    const rule = wrapper.get('[data-slot="terminal-rule"]')
+    expect(rule.text()).toBe('Allowed by rule: pnpm test, git status')
+    expect(rule.element).toBe(wrapper.element.lastElementChild)
+    wrapper.unmount()
+  })
+
+  it('renders an output saved before v1.4 (no endCwd, cwdNote or allowedBy) as before', () => {
+    const old = shell()
+    delete old.endCwd
+    const wrapper = mount(TerminalOutput, { props: { command: 'ls', output: old } })
+    for (const selector of [
+      `[data-testid="${testIds.terminalCwd}"]`,
+      `[data-testid="${testIds.terminalCwdChange}"]`,
+      '[data-slot="terminal-cwd-note"]',
+      '[data-slot="terminal-rule"]',
+    ])
+      expect(wrapper.find(selector).exists(), selector).toBe(false)
+    // A timeout kill reports no end folder either: no badge, the status as before.
+    const killed = mount(TerminalOutput, { props: { command: 'sleep 999', output: shell({ cwd: 'sub', exitCode: null, signal: 'SIGKILL', timedOut: true }) } })
+    expect(killed.find(`[data-testid="${testIds.terminalCwdChange}"]`).exists()).toBe(false)
+    expect(killed.get(`[data-testid="${testIds.terminalCwd}"]`).attributes('data-value')).toBe('sub')
+    wrapper.unmount()
+    killed.unmount()
+  })
 })
 
 describe('fileContent', () => {

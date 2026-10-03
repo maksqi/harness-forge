@@ -17,6 +17,7 @@ import {
   shellToolInputSchema,
   shellToolOutputSchema,
   WORKSPACE_TOOL_NAMES,
+  workspaceToolPathSchema,
   writeFileToolInputSchema,
   writeFileToolOutputSchema,
 } from '@harness-forge/shared'
@@ -29,6 +30,7 @@ import {
   SquareTerminalIcon,
   TextSearchIcon,
 } from '@lucide/vue'
+import { getToolName, isToolUIPart } from 'ai'
 import { markRaw } from 'vue'
 import { diffLines, splitLines } from '~/utils/line-diff'
 import { firstStringArg } from '../../chat-format'
@@ -65,7 +67,7 @@ export interface WorkspaceRowSummary {
   tone: WorkspaceRowSummaryTone
   /**
    * + Phase 8 (docs/UI.md 7.19): what a screen reader says instead of `text` ("12 lines added, 3 removed", "Exit code
-   * 1", ...). Until W8.10 it is the visible text.
+   * 1", "Lines 1 to 120 of 340", "New file, 40 lines", ...); the visible text for every other summary.
    */
   label: string
 }
@@ -285,25 +287,60 @@ export function diffStatsLabel(additions: number, deletions: number): string {
 }
 
 /**
- * The folder the chat's next `shell` call starts in (ADR-038; docs/UI.md 11.5): the `endCwd` of the last finished
- * shell part on the shown path (`.` for an output saved before v1.4), null without one (the project folder).
- * Stub (C20, P8-0b): always null until W8.10 implements it.
+ * The folder the chat's next `shell` call starts in (ADR-038; docs/UI.md 11.5), derived like the server's
+ * `initialShellCwd(history)` (`apps/server/src/workspace/shell-cwd.ts`): the path is scanned backwards and the valid
+ * `endCwd` of the last finished (`output-available`) core `shell` part of an assistant message wins. A finished output
+ * without `endCwd` (the end folder was not reported: `exec`, a kill, the command's own EXIT trap; or an output saved
+ * before v1.4) left the folder as it was, so the search goes on before it. Null when no part reports one (the project
+ * folder). For parallel calls of one step the last part in message order wins, as on the server.
  */
-export function currentShellCwd(_messages: readonly HarnessUIMessage[]): string | null {
+export function currentShellCwd(messages: readonly HarnessUIMessage[]): string | null {
+  for (let m = messages.length - 1; m >= 0; m--) {
+    const message = messages[m]!
+    if (message.role !== 'assistant')
+      continue
+    for (let p = message.parts.length - 1; p >= 0; p--) {
+      const part = message.parts[p]!
+      if (!isToolUIPart(part) || part.state !== 'output-available' || getToolName(part) !== 'shell')
+        continue
+      const output: unknown = part.output
+      if (typeof output !== 'object' || output === null)
+        continue
+      const endCwd = workspaceToolPathSchema.safeParse((output as Record<string, unknown>).endCwd)
+      if (endCwd.success)
+        return endCwd.data
+    }
+  }
   return null
 }
 
-/** A summary whose spoken label is its visible text (W8.10 adds the spoken labels of docs/UI.md 7.19). */
-function rowSummary(text: string, tone: WorkspaceRowSummaryTone): WorkspaceRowSummary {
-  return { text, tone, label: text }
+/**
+ * The folder to show for a project-relative working folder (the terminal prompt, "In {project}/{cwd}", "Now in
+ * {folder}"): the path without a leading `./` or trailing `/`; null for the project folder (`.`, `./`, empty) and for
+ * no folder at all.
+ */
+export function shellFolder(cwd: string | null | undefined): string | null {
+  if (cwd === null || cwd === undefined)
+    return null
+  let folder = cwd.trim()
+  while (folder.startsWith('./'))
+    folder = folder.slice(2)
+  folder = folder.replace(/\/+$/, '')
+  return folder === '' || folder === '.' ? null : folder
 }
 
-function diffSummary(diff: WorkspaceDiff | null, fallback: string): WorkspaceRowSummary {
+/** A row summary; its spoken label defaults to the visible text (docs/UI.md 7.19, "every other summary"). */
+function rowSummary(text: string, tone: WorkspaceRowSummaryTone, label: string = text): WorkspaceRowSummary {
+  return { text, tone, label }
+}
+
+/** `+a −d` ("12 lines added, 3 removed"), "No changes", or the fallback of an output without a diff. */
+function diffSummary(diff: WorkspaceDiff | null, fallback: { text: string, label: string }): WorkspaceRowSummary {
   if (!diff)
-    return rowSummary(fallback, 'muted')
+    return rowSummary(fallback.text, 'muted', fallback.label)
   if (diff.added === 0 && diff.removed === 0)
     return rowSummary('No changes', 'muted')
-  return rowSummary(diffSummaryText(diff.added, diff.removed), 'success')
+  return rowSummary(diffSummaryText(diff.added, diff.removed), 'success', diffStatsLabel(diff.added, diff.removed))
 }
 
 /** The row summary once the output exists, or null. */
@@ -321,7 +358,7 @@ export function workspaceRowSummary(toolName: string, output: unknown): Workspac
       const of = totalLines === null ? '' : ` of ${totalLines}`
       if (endLine < startLine)
         return rowSummary(`no lines${of}`, 'muted')
-      return rowSummary(`lines ${startLine}–${endLine}${of}`, 'muted')
+      return rowSummary(`lines ${startLine}–${endLine}${of}`, 'muted', `Lines ${startLine} to ${endLine}${of}`)
     }
     case 'list_directory': {
       const parsed = listDirectoryToolOutputSchema.safeParse(output)
@@ -339,15 +376,17 @@ export function workspaceRowSummary(toolName: string, output: unknown): Workspac
       const parsed = writeFileToolOutputSchema.safeParse(output)
       if (!parsed.success)
         return null
+      const lines = plural(parsed.data.lines, 'line', 'lines')
       if (parsed.data.created)
-        return rowSummary(`New · ${plural(parsed.data.lines, 'line', 'lines')}`, 'success')
-      return diffSummary(parsed.data.diff, `Updated · ${plural(parsed.data.lines, 'line', 'lines')}`)
+        return rowSummary(`New · ${lines}`, 'success', `New file, ${lines}`)
+      return diffSummary(parsed.data.diff, { text: `Updated · ${lines}`, label: `Updated, ${lines}` })
     }
     case 'edit_file': {
       const parsed = editFileToolOutputSchema.safeParse(output)
       if (!parsed.success)
         return null
-      return diffSummary(parsed.data.diff, plural(parsed.data.replacements, 'replacement', 'replacements'))
+      const replacements = plural(parsed.data.replacements, 'replacement', 'replacements')
+      return diffSummary(parsed.data.diff, { text: replacements, label: replacements })
     }
     case 'shell': {
       const parsed = shellToolOutputSchema.safeParse(output)
@@ -355,12 +394,12 @@ export function workspaceRowSummary(toolName: string, output: unknown): Workspac
         return null
       const { exitCode, signal, timedOut } = parsed.data
       if (timedOut)
-        return rowSummary('timed out', 'warning')
+        return rowSummary('timed out', 'warning', 'Timed out')
       if (signal !== null)
-        return rowSummary(`killed ${signal}`, 'warning')
-      if (exitCode === 0)
-        return rowSummary('exit 0', 'muted')
-      return rowSummary(exitCode === null ? 'exited' : `exit ${exitCode}`, 'destructive')
+        return rowSummary(`killed ${signal}`, 'warning', `Killed by ${signal}`)
+      if (exitCode === null)
+        return rowSummary('exited', 'destructive', 'Exited without an exit code')
+      return rowSummary(`exit ${exitCode}`, exitCode === 0 ? 'muted' : 'destructive', `Exit code ${exitCode}`)
     }
   }
 }

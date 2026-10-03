@@ -1,10 +1,13 @@
 // Test helpers of the bulk data tests (W5.3): an app with the fake chats service (message tree and bulk members, C8),
-// the real files service, a recording event bus and a fake runner; message builders; zip readers.
+// the real files service, a recording event bus and a fake runner; message builders; zip readers. Phase 8 (W8.7): the
+// fake checkpoint service by default (`summary` / `purge` of an empty store, recorded), or the one given.
 import type { ChatCreate, FileRef, HarnessUIMessage } from '@harness-forge/shared'
 import type { TestApp, TestAppOptions } from '../../testing/create-test-app.ts'
+import type { FakeCheckpointService } from '../../testing/fake-checkpoints.ts'
 import type { FakeChatRunner, RecordingEventBus } from '../../testing/fakes.ts'
 import type { AppDeps } from '../../types.ts'
 import type { ChatsService } from '../chats/types.ts'
+import type { CheckpointService } from '../checkpoints/types.ts'
 import type { FilesServiceOptions } from '../files/index.ts'
 import type { FilesService } from '../files/types.ts'
 import type { DataServiceOptions } from './index.ts'
@@ -12,6 +15,7 @@ import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
 import { strFromU8, unzipSync } from 'fflate'
 import { createTestApp } from '../../testing/create-test-app.ts'
+import { createFakeCheckpointService } from '../../testing/fake-checkpoints.ts'
 import { createFakeChatRunner, createFakeChatsService, createRecordingEventBus, readAllBytes } from '../../testing/fakes.ts'
 import { createFilesService } from '../files/index.ts'
 import { createDataService } from './index.ts'
@@ -31,6 +35,8 @@ export interface DataTestAppOptions {
   filesOptions?: FilesServiceOptions
   files?: (files: FilesService) => FilesService
   env?: TestAppOptions['env']
+  /** Phase 8: the checkpoint service (default: `createFakeCheckpointService()`, see `checkpointsOf`). */
+  checkpoints?: CheckpointService
 }
 
 /** Every app created by `dataApp`, closed by `closeDataApps()` (call it in `afterEach`). */
@@ -42,7 +48,7 @@ export async function dataApp(options: DataTestAppOptions = {}): Promise<DataTes
   const t = await createTestApp({
     start: false,
     ...(options.env === undefined ? {} : { env: options.env }),
-    overrides: { events, runs },
+    overrides: { events, runs, checkpoints: options.checkpoints ?? createFakeCheckpointService() },
     factories: {
       chats: (deps) => {
         const chats = createFakeChatsService(deps)
@@ -57,6 +63,11 @@ export async function dataApp(options: DataTestAppOptions = {}): Promise<DataTes
   })
   apps.push(t)
   return { t, deps: t.deps, events, runs }
+}
+
+/** The checkpoint service of a `dataApp` without `checkpoints` (the recording fake). */
+export function checkpointsOf(app: DataTestApp): FakeCheckpointService {
+  return app.deps.checkpoints as FakeCheckpointService
 }
 
 export async function closeDataApps(): Promise<void> {

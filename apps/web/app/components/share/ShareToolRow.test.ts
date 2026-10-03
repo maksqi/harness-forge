@@ -223,3 +223,77 @@ describe('shareToolRow: workspace tools (Phase 7)', () => {
     expect(Array.from(body.querySelectorAll<HTMLElement>('[data-slot="tool-value"]')).map(block => block.dataset.label)).toEqual(['input', 'error'])
   })
 })
+
+describe('shareToolRow: sticky folder, shell rules and spoken summaries (Phase 8)', () => {
+  const shell = (overrides: Record<string, unknown> = {}) => ({
+    command: 'pnpm test',
+    cwd: 'packages/web',
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+    durationMs: 12,
+    stdout: 'ok\n',
+    stderr: '',
+    stdoutBytes: 3,
+    stderrBytes: 0,
+    endCwd: '.',
+    cwdNote: 'The command ended outside the project folder; the next call starts in the project folder.',
+    allowedBy: ['pnpm test'],
+    ...overrides,
+  })
+
+  it('renders the rule badge before the spoken summary of a shell call allowed by rules', () => {
+    mountRow({ type: 'tool', toolName: 'shell', status: 'done', input: { command: 'pnpm test' }, output: shell() })
+    const row = byTestId(testIds.shareToolRow)!
+    const badge = byTestId(testIds.toolRowRule, row)!
+    expect(badge.dataset.value).toBe('pnpm test')
+    expect(badge.querySelector('.sr-only')!.textContent).toBe(', allowed by rule pnpm test')
+    const summary = byTestId(testIds.toolRowSummary, row)!
+    expect(badge.nextElementSibling).toBe(summary)
+    expect([summary.textContent, summary.getAttribute('aria-hidden')]).toEqual(['exit 1', 'true'])
+    expect(summary.nextElementSibling!.classList.contains('sr-only')).toBe(true)
+    expect(summary.nextElementSibling!.textContent).toBe('Exit code 1')
+  })
+
+  it('shows the folder prompt, "Now in …", the note and the rule line in the shared terminal', async () => {
+    mountRow({ type: 'tool', toolName: 'shell', status: 'done', input: { command: 'pnpm test' }, output: shell() })
+    const row = byTestId(testIds.shareToolRow)!
+    row.querySelector('button')!.click()
+    await settle()
+    const terminal = byTestId(testIds.terminalOutput)!
+    expect(byTestId(testIds.terminalCwd, terminal)!.dataset.value).toBe('packages/web')
+    expect(byTestId(testIds.terminalCommand, terminal)!.textContent).toBe('packages/web $ pnpm test')
+    const change = byTestId(testIds.terminalCwdChange, terminal)!
+    expect([change.textContent, change.dataset.value]).toEqual(['Now in the project folder', '.'])
+    expect(terminal.querySelector('[data-slot="terminal-cwd-note"]')!.textContent!.trim()).toContain('next call starts in the project folder')
+    expect(terminal.querySelector('[data-slot="terminal-rule"]')!.textContent!.trim()).toBe('Allowed by rule: pnpm test')
+  })
+
+  it('shows no badge for an approved call, an old output or a share without tool details', () => {
+    const approved = shell()
+    delete (approved as Record<string, unknown>).allowedBy
+    const first = mountRow({ type: 'tool', toolName: 'shell', status: 'done', input: { command: 'pnpm test' }, output: approved })
+    expect(byTestId(testIds.toolRowRule)).toBeNull()
+    expect(byTestId(testIds.toolRowSummary)).not.toBeNull()
+    first.unmount()
+    const bare = mountRow({ type: 'tool', toolName: 'shell', status: 'done' })
+    expect(byTestId(testIds.toolRowRule)).toBeNull()
+    bare.unmount()
+    // A value cut at the share limit fails the schema: no badge, no summary.
+    mountRow({ type: 'tool', toolName: 'shell', status: 'done', input: { command: 'pnpm test' }, output: '{"command": "pnpm test", "allowedBy": [\n[truncated]' })
+    expect(byTestId(testIds.toolRowRule)).toBeNull()
+  })
+
+  it('reads a diff summary as words', () => {
+    mountRow({
+      type: 'tool',
+      toolName: 'edit_file',
+      status: 'done',
+      input: { path: 'a.txt', old_string: 'x', new_string: 'y' },
+      output: { path: 'a.txt', replacements: 1, diff: { hunks: [], added: 1, removed: 1, truncated: false } },
+    })
+    const summary = byTestId(testIds.toolRowSummary)!
+    expect(summary.textContent).toBe('+1 −1')
+    expect(summary.nextElementSibling!.textContent).toBe('1 line added, 1 removed')
+  })
+})

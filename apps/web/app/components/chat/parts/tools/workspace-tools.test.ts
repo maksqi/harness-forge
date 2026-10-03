@@ -1,7 +1,7 @@
 // Workspace tool registry (docs/UI.md 7.19, 11.4; W7.11): views, approval previews, row arguments, row summaries and
 // icons of the core-workspace tools; null (the generic blocks) for other tools and for values that fail the shared
 // schemas, such as a share value cut to a `[truncated]` string.
-import type { ShellOutput } from '@harness-forge/shared'
+import type { HarnessUIMessage, ShellOutput } from '@harness-forge/shared'
 import { FilePenLineIcon, FilePlusIcon, FileSearchIcon, FileTextIcon, ListTreeIcon, SquareTerminalIcon, TextSearchIcon } from '@lucide/vue'
 import { describe, expect, it } from 'vitest'
 import {
@@ -9,6 +9,7 @@ import {
   currentShellCwd,
   diffStatsLabel,
   isWorkspaceToolName,
+  shellFolder,
   workspaceApprovalKind,
   workspaceApprovalView,
   workspaceRowArgument,
@@ -228,13 +229,37 @@ describe('workspaceRowSummary', () => {
       .toMatchObject({ text: '1 match', tone: 'muted' })
   })
 
-  it('carries a spoken label for every summary (Phase 8)', () => {
-    for (const summary of [
-      workspaceRowSummary('edit_file', { path: 'a', replacements: 1, diff }),
-      workspaceRowSummary('shell', shell({ exitCode: 1 })),
-      workspaceRowSummary('find_files', { pattern: '*', paths: ['a'], truncated: false }),
-    ])
-      expect(summary?.label).toEqual(expect.any(String))
+  it('carries the spoken label of every summary (Phase 8, docs/UI.md 7.19)', () => {
+    const one = { hunks: [], added: 1, removed: 1, truncated: false }
+    const read = { path: 'a', content: '', startLine: 1, endLine: 120, totalLines: 340, truncated: true }
+    const table: Array<[string, unknown, string, string]> = [
+      ['edit_file', { path: 'a', replacements: 1, diff }, '+12 −3', '12 lines added, 3 removed'],
+      ['edit_file', { path: 'a', replacements: 1, diff: one }, '+1 −1', '1 line added, 1 removed'],
+      ['edit_file', { path: 'a', replacements: 1, diff: { ...one, removed: 0 } }, '+1 −0', '1 line added'],
+      ['edit_file', { path: 'a', replacements: 1, diff: { ...one, added: 0, removed: 3 } }, '+0 −3', '3 lines removed'],
+      ['edit_file', { path: 'a', replacements: 3, diff: null }, '3 replacements', '3 replacements'],
+      ['edit_file', { path: 'a', replacements: 1, diff: { ...one, added: 0, removed: 0 } }, 'No changes', 'No changes'],
+      ['write_file', { path: 'a', created: true, bytes: 1, lines: 40, diff }, 'New · 40 lines', 'New file, 40 lines'],
+      ['write_file', { path: 'a', created: true, bytes: 1, lines: 1, diff: null }, 'New · 1 line', 'New file, 1 line'],
+      ['write_file', { path: 'a', created: false, bytes: 1, lines: 40, diff: null }, 'Updated · 40 lines', 'Updated, 40 lines'],
+      ['write_file', { path: 'a', created: false, bytes: 1, lines: 2, diff }, '+12 −3', '12 lines added, 3 removed'],
+      ['shell', shell(), 'exit 0', 'Exit code 0'],
+      ['shell', shell({ exitCode: 1 }), 'exit 1', 'Exit code 1'],
+      ['shell', shell({ exitCode: null, signal: 'SIGTERM', timedOut: true }), 'timed out', 'Timed out'],
+      ['shell', shell({ exitCode: null, signal: 'SIGTERM' }), 'killed SIGTERM', 'Killed by SIGTERM'],
+      ['shell', shell({ exitCode: null }), 'exited', 'Exited without an exit code'],
+      ['read_file', read, 'lines 1–120 of 340', 'Lines 1 to 120 of 340'],
+      ['read_file', { ...read, totalLines: null }, 'lines 1–120', 'Lines 1 to 120'],
+      ['read_file', { ...read, endLine: 0, totalLines: 0 }, 'empty file', 'empty file'],
+      ['read_file', { ...read, startLine: 500, endLine: 499 }, 'no lines of 340', 'no lines of 340'],
+      ['list_directory', { path: '.', entries: [{ name: 'a', type: 'file' }], truncated: false }, '1 entry', '1 entry'],
+      ['find_files', { pattern: '*', paths: ['a', 'b'], truncated: false }, '2 files', '2 files'],
+      ['search_files', { pattern: 'x', matches: [{ path: 'a', line: 1, text: 'x' }], filesSearched: 1, truncated: false }, '1 match', '1 match'],
+    ]
+    expect(table.map(([tool, output]) => {
+      const summary = workspaceRowSummary(tool, output)
+      return [tool, summary?.text, summary?.label]
+    })).toEqual(table.map(([tool, , text, label]) => [tool, text, label]))
   })
 })
 
@@ -250,8 +275,72 @@ describe('diffStatsLabel', () => {
 })
 
 describe('currentShellCwd', () => {
-  it('is a stub until W8.10: no remembered folder', () => {
+  function shellPart(output: unknown, state = 'output-available', toolCallId = 'call_1') {
+    return { type: 'tool-shell', toolCallId, state, input: { command: 'cd sub' }, ...(state === 'output-available' ? { output } : { errorText: 'x' }) }
+  }
+  function assistant(...parts: unknown[]): HarnessUIMessage {
+    return { id: `msg_${parts.length}`, role: 'assistant', parts } as HarnessUIMessage
+  }
+  const user: HarnessUIMessage = { id: 'msg_user', role: 'user', parts: [{ type: 'text', text: 'go' }] }
+
+  it('is null (the project folder) without a finished shell call', () => {
     expect(currentShellCwd([])).toBeNull()
+    expect(currentShellCwd([user, assistant({ type: 'text', text: 'hi', state: 'done' })])).toBeNull()
+    expect(currentShellCwd([assistant(shellPart(null, 'input-available'), shellPart(null, 'output-error'))])).toBeNull()
+  })
+
+  it('takes the endCwd of the last finished shell part on the path', () => {
+    const messages = [
+      user,
+      assistant(shellPart(shell({ endCwd: 'packages' })), shellPart(shell({ cwd: 'packages', endCwd: 'packages/web' }), 'output-available', 'call_2')),
+      user,
+      assistant({ type: 'text', text: 'done', state: 'done' }),
+    ]
+    expect(currentShellCwd(messages)).toBe('packages/web')
+    // A running or failed call after it changes nothing; other tools neither.
+    const later = assistant(
+      shellPart(null, 'input-available', 'call_3'),
+      shellPart(null, 'output-error', 'call_4'),
+      { type: 'tool-read_file', toolCallId: 'call_5', state: 'output-available', input: {}, output: { endCwd: 'elsewhere' } },
+    )
+    expect(currentShellCwd([...messages, later])).toBe('packages/web')
+    // The project folder again after a call that ended there.
+    expect(currentShellCwd([...messages, assistant(shellPart(shell({ cwd: 'packages/web', endCwd: '.' })))])).toBe('.')
+    // A dynamic tool part named shell counts too.
+    const dynamic = { type: 'dynamic-tool', toolName: 'shell', toolCallId: 'call_6', state: 'output-available', input: {}, output: shell({ endCwd: 'lib' }) }
+    expect(currentShellCwd([...messages, assistant(dynamic)])).toBe('lib')
+  })
+
+  it('skips a finished output without endCwd (exec, a kill, an output saved before v1.4): the folder stays', () => {
+    const unreported = shell({ cwd: 'sub', exitCode: null, signal: 'SIGKILL', timedOut: true })
+    delete unreported.endCwd
+    expect(currentShellCwd([assistant(shellPart(shell({ endCwd: 'sub' })), shellPart(unreported, 'output-available', 'call_2'))])).toBe('sub')
+    expect(currentShellCwd([assistant(shellPart(shell({ endCwd: 'sub' }))), user, assistant(shellPart(unreported, 'output-available', 'call_2'))])).toBe('sub')
+    // Only outputs without the field (pre-v1.4): the project folder (null).
+    const old = shell()
+    delete old.endCwd
+    expect(currentShellCwd([assistant(shellPart(old), shellPart(old, 'output-available', 'call_2'))])).toBeNull()
+  })
+
+  it('ignores an endCwd the shared path schema refuses, and shell parts outside assistant messages', () => {
+    // Like the server: empty, not a string, a control character (the folder itself is re-checked at the call start).
+    for (const endCwd of ['', 42, null, 'a\u0007b'])
+      expect(currentShellCwd([assistant(shellPart(shell({ endCwd: 'ok' })), shellPart({ ...shell(), endCwd }, 'output-available', 'call_2'))]), String(endCwd)).toBe('ok')
+    expect(currentShellCwd([{ id: 'msg_u', role: 'user', parts: [shellPart(shell({ endCwd: 'sub' }))] } as HarnessUIMessage])).toBeNull()
+  })
+
+  it('follows the shown path: another version of a message has its own folder', () => {
+    const first = [user, assistant(shellPart(shell({ endCwd: 'a' })))]
+    const second = [user, assistant(shellPart(shell({ endCwd: 'b' })))]
+    expect([currentShellCwd(first), currentShellCwd(second)]).toEqual(['a', 'b'])
+  })
+})
+
+describe('shellFolder', () => {
+  it('shows a project-relative folder; nothing for the project folder', () => {
+    expect([null, undefined, '', '.', './', ' . '].map(shellFolder)).toEqual([null, null, null, null, null, null])
+    expect(['packages/web', './packages/web', 'packages/web/', '././sub//'].map(shellFolder))
+      .toEqual(['packages/web', 'packages/web', 'packages/web', 'sub'])
   })
 })
 

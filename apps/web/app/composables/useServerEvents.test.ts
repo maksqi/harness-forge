@@ -12,7 +12,7 @@ import { useProvidersStore } from '~/stores/providers'
 import { useShellRulesStore } from '~/stores/shell-rules'
 import { useUiStore } from '~/stores/ui'
 import { useWorkspaceStore } from '~/stores/workspace'
-import { chatId, chatSummary, logEntry, pluginSummary, projectId, projectSummary, providerSummary, workspaceChangedData } from '~/utils/testing/fixtures'
+import { chatChanges, chatId, chatSummary, gitStatus, logEntry, pluginSummary, projectId, projectSummary, providerSummary, workspaceChangedData } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { dispatchServerEvent, KEY_ROTATED_MESSAGE, parseServerEvent, refetchLoadedStores, useServerEvents } from './useServerEvents'
@@ -134,6 +134,25 @@ describe('dispatchServerEvent', () => {
     expect(workspaceEvents.mock.calls).toEqual([[changed], [finished], [deletedChat], [deletedProject]])
     expect(ruleEvents.mock.calls).toEqual([[deletedProject]])
     expect(chatEvents.mock.calls).toEqual([[finished], [deletedChat], [deletedProject], [started]])
+  })
+
+  it('refetches the open changes 300 ms after workspace.changed, and drops a deleted project\'s chats before the chats store detaches them (Phase 8)', async () => {
+    const workspace = useWorkspaceStore()
+    const chats = useChatsStore()
+    api.changes.list.mockResolvedValue(chatChanges({ projectId: projectId(1) }))
+    api.changes.git.mockResolvedValue(gitStatus())
+    await workspace.fetchChatChanges(chatId(1))
+    dispatchServerEvent(createServerEvent('workspace.changed', workspaceChangedData({ chatId: chatId(1), projectId: projectId(1) })))
+    expect(api.changes.list).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(300)
+    expect(api.changes.list).toHaveBeenCalledTimes(2)
+
+    // Only the Git view of chat 2 is loaded: its project is known from the chats store alone.
+    chats.applyEvent(createServerEvent('chat.created', chatSummary({ id: chatId(2), projectId: projectId(1) })))
+    await workspace.fetchGit(chatId(2))
+    dispatchServerEvent(createServerEvent('project.changed', { id: projectId(1), project: null }))
+    expect(workspace.chat[chatId(1)]).toBeUndefined()
+    expect(workspace.git[chatId(2)]).toBeUndefined()
   })
 
   it('reloads the loaded chat list and shows a toast on key.rotated', async () => {

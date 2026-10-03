@@ -5,6 +5,12 @@
 // {n} lines" (up to the 60 KB body cap), and footer badges "Exit code {n}" (terminal-exit, data-value), "Timed out",
 // the signal and the duration; while running a Spinner + "Running…"; byte counts larger than the kept text -> "Output
 // truncated by server". ANSI codes are stripped (utils/ansi.ts). Store-free (the share page renders it too).
+// Phase 8 (ADR-038, W8.10; the sticky folder): the command line reads `{cwd} $ command` with the folder muted
+// (terminal-cwd, data-value; left out for the project folder); the folder is the output's `cwd`, while running the
+// `cwd` prop. When the output's `endCwd` differs from its `cwd`, a footer badge reads "Now in {endCwd}" ("Now in the
+// project folder"; terminal-cwd-change, data-value, `.` = the project folder); a `cwdNote` shows as a muted line below
+// the badges (data-slot="terminal-cwd-note"), and an output with `allowedBy` ends with "Allowed by rule: {prefixes}"
+// (data-slot="terminal-rule"). Outputs saved before v1.4 have none of these fields and render as before.
 // Contract (docs/UI.md 10.4; + `cwd` in Phase 8): props below, no emits; root terminal-output (data-status = running | ok | error |
 // timeout | killed; aria-label "Output of {command}").
 import type { ShellOutput } from '@harness-forge/shared'
@@ -15,7 +21,7 @@ import { cn } from '@/lib/utils'
 import { terminalText } from '~/utils/ansi'
 import { testIds } from '~/utils/testids'
 import { formatDuration, TOOL_BODY_MAX_CHARS } from '../../chat-format'
-import { commandFirstLine } from './workspace-tools'
+import { commandFirstLine, shellFolder } from './workspace-tools'
 
 const props = withDefaults(defineProps<{
   command: string
@@ -95,6 +101,21 @@ const serverTruncated = computed(() => {
 })
 
 const stderrError = computed(() => props.output !== null && props.output.exitCode !== 0)
+
+/** The folder the command started in, as shown before `$` (null = the project folder: nothing is shown). */
+const startFolder = computed(() => shellFolder(props.output ? props.output.cwd : props.cwd))
+/** "Now in {folder}" when the command ended in another folder than it started in (`.` = the project folder). */
+const cwdChange = computed(() => {
+  const output = props.output
+  if (!output || output.endCwd === undefined)
+    return null
+  const end = shellFolder(output.endCwd)
+  if (end === shellFolder(output.cwd))
+    return null
+  return { value: end ?? '.', text: end === null ? 'Now in the project folder' : `Now in ${end}` }
+})
+const cwdNote = computed(() => props.output?.cwdNote?.trim() || null)
+const allowedBy = computed(() => (props.output?.allowedBy ?? []).join(', '))
 const duration = computed(() => (props.output ? formatDuration(props.output.durationMs) : ''))
 
 const BADGE_CLASS = 'inline-flex h-5 items-center rounded-sm border px-1.5 font-sans text-[11px] font-medium'
@@ -112,7 +133,7 @@ const SHOW_ALL_CLASS = 'self-start rounded-sm font-sans text-[11px] font-medium 
     <pre
       :data-testid="testIds.terminalCommand"
       class="font-mono whitespace-pre-wrap break-words text-foreground"
-    ><span aria-hidden="true" class="text-muted-foreground select-none">$ </span>{{ command }}</pre>
+    ><template v-if="startFolder"><span :data-testid="testIds.terminalCwd" :data-value="startFolder" class="text-muted-foreground">{{ startFolder }}</span>{{ ' ' }}</template><span aria-hidden="true" class="text-muted-foreground select-none">$ </span>{{ command }}</pre>
 
     <template v-for="(stream, index) in [stdout, stderr]" :key="index">
       <div v-if="stream" class="flex min-w-0 flex-col gap-1">
@@ -157,8 +178,20 @@ const SHOW_ALL_CLASS = 'self-start rounded-sm font-sans text-[11px] font-medium 
       <span v-if="output.timedOut" data-slot="terminal-timeout" :class="cn(BADGE_CLASS, 'border-warning/50 text-warning')">Timed out</span>
       <span v-if="output.signal" data-slot="terminal-signal" :class="cn(BADGE_CLASS, 'border-warning/50 text-warning')">{{ output.signal }}</span>
       <span v-if="duration" data-slot="terminal-duration" :class="BADGE_CLASS">{{ duration }}</span>
+      <span
+        v-if="cwdChange"
+        :data-testid="testIds.terminalCwdChange"
+        :data-value="cwdChange.value"
+        :class="BADGE_CLASS"
+      >{{ cwdChange.text }}</span>
       <span v-if="!stdout && !stderr" class="font-sans text-[11px]">No output</span>
       <span v-if="serverTruncated" data-slot="server-truncated" class="font-sans text-[11px]">Output truncated by server</span>
     </div>
+    <p v-if="status !== 'running' && cwdNote" data-slot="terminal-cwd-note" class="font-sans text-[11px] text-muted-foreground">
+      {{ cwdNote }}
+    </p>
+    <p v-if="status !== 'running' && allowedBy" data-slot="terminal-rule" class="font-sans text-[11px] text-muted-foreground">
+      Allowed by rule: {{ allowedBy }}
+    </p>
   </div>
 </template>

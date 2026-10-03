@@ -6,6 +6,7 @@ import semver from 'semver'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import coreWorkspace, { createWorkspaceTools, manifest, NO_WORKSPACE_MESSAGE, readFilePolicy, requireWorkspace, writeFilePolicy } from './index.ts'
+import { shellPolicy } from './shell-tool.ts'
 
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} }
 
@@ -20,15 +21,15 @@ const TIMEOUTS: Record<string, number> = {
   shell: 600_000,
 }
 
-/** Static policies; `read_file`, `write_file` and `edit_file` have policy functions (`policies.ts`). */
-const POLICIES: Record<string, string | typeof readFilePolicy> = {
+/** Static policies; `read_file`, `write_file`, `edit_file` (`policies.ts`) and `shell` (`shell-tool.ts`, rules) have policy functions. */
+const POLICIES: Record<string, string | typeof readFilePolicy | typeof shellPolicy> = {
   read_file: readFilePolicy,
   list_directory: 'safe',
   find_files: 'safe',
   search_files: 'safe',
   write_file: writeFilePolicy,
   edit_file: writeFilePolicy,
-  shell: 'ask',
+  shell: shellPolicy,
 }
 
 /** The file tools of W7.2 (the shell is W7.3's, tested in `shell-tool.test.ts`). */

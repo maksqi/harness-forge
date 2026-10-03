@@ -4,6 +4,8 @@
 // apply), then actions, projects (Phase 7, while searching: the chat list's filter, Add project…, moving the open
 // chat), pages, the default model (while searching) and the theme. Bound to ui.paletteOpen. Its setup registers the
 // global shortcuts (useGlobalShortcuts): layouts/default.vue mounts it once. Contract: no props, no emits.
+// Phase 8 (docs/UI.md 7.21, 12): on a project chat page (the target ChatWorkspace publishes) the Actions offer "Show
+// changes" / "Hide changes"; opening moves focus to the panel's active view tab (the palette does not restore it).
 import type { ChatSummary } from '@harness-forge/shared'
 import type { PaletteCommand, PaletteItem, PaletteModel, PaletteProject } from './chat-nav/palette'
 import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue'
@@ -25,6 +27,8 @@ import RelativeTime from '~/components/common/RelativeTime.vue'
 import { useMoveChat } from '~/components/projects/move-chat'
 import { loadProjectsOnce } from '~/components/projects/projects-load'
 import ProviderIcon from '~/components/providers/ProviderIcon.vue'
+import { useChangesTarget } from '~/components/workspace/changes/changes-context'
+import { useChangesPanel } from '~/composables/useChangesPanel'
 import { useGlobalShortcuts } from '~/composables/useGlobalShortcuts'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
@@ -54,6 +58,8 @@ const colorMode = useColorMode()
 const sidebar = useSidebar(null)
 const newChat = useNewChat()
 const moveChat = useMoveChat()
+const changesPanel = useChangesPanel()
+const changesTarget = useChangesTarget()
 
 const open = computed({
   get: () => ui.paletteOpen,
@@ -163,6 +169,14 @@ const openChat = computed(() => {
   return summary ? { id: summary.id, projectId: summary.projectId } : null
 })
 
+/** The changes panel item: only on a project chat page (the open chat's ChatWorkspace has a project). */
+const changesItem = computed(() => {
+  const target = changesTarget.value
+  if (!target || target.chatId !== ui.activeChatId)
+    return null
+  return { open: changesPanel.open.value, shortcut: settings.resolved.altShortcuts }
+})
+
 const sections = computed(() => buildPaletteSections({
   query: query.value,
   chats: chats.items,
@@ -174,6 +188,7 @@ const sections = computed(() => buildPaletteSections({
   projects: paletteProjects.value,
   projectFilter: chats.projectFilter,
   openChat: openChat.value,
+  changesPanel: changesItem.value,
 }))
 
 /** Changes when results arrive for the same query, so the first item is highlighted again. */
@@ -229,6 +244,13 @@ function run(command: PaletteCommand) {
     case 'move-chat':
       ui.closePalette()
       void moveChat(command.chatId, command.projectId)
+      return
+    case 'toggle-changes':
+      // Opening moves focus to the panel's active view tab; hiding returns it to where it was.
+      if (!changesPanel.open.value)
+        restoreFocus = false
+      ui.closePalette()
+      changesPanel.toggle({ focus: true })
   }
 }
 

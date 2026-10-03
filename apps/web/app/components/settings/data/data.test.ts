@@ -15,7 +15,11 @@ import {
   deletedMessage,
   exceedsImportLimit,
   EXPORT_LIMIT_WARNING,
+  FILE_SWEEP_INTERVALS,
   filesLabel,
+  fileSweepIntervalLabel,
+  fileSweepRemovedText,
+  fileSweepState,
   graceLabel,
   hasRemovableFiles,
   importAnnouncement,
@@ -26,6 +30,7 @@ import {
   importItemTitle,
   importKindOf,
   isBusyConflict,
+  isFileSweepInterval,
   KEY_SOURCE_LABELS,
   keyRotatedDescription,
   recentFilesLine,
@@ -188,6 +193,31 @@ describe('storage cleanup texts', () => {
     expect(cleanupResultMessage({ ...result, files: 1, fileBytes: 812 })).toBe('Removed 1 file (812 B)')
     expect(cleanupResultMessage({ ...result, files: 0, fileBytes: 0, blobs: 1, tempFiles: 0 })).toBe('Removed 1 leftover file from disk')
     expect(cleanupResultMessage({ ...result, files: 0, fileBytes: 0, blobs: 0 })).toBe('No unused files.')
+  })
+})
+
+describe('automatic cleanup texts', () => {
+  const attempt = { at: 1, files: 4, diskBytes: 2 * 1024 * 1024, reason: null }
+
+  it('offers Every day and Every week', () => {
+    expect(FILE_SWEEP_INTERVALS.map(option => [option.value, option.label])).toEqual([['daily', 'Every day'], ['weekly', 'Every week']])
+    expect(fileSweepIntervalLabel('weekly')).toBe('Every week')
+    expect(isFileSweepInterval('daily')).toBe(true)
+    expect(isFileSweepInterval('off')).toBe(false)
+    expect(isFileSweepInterval(undefined)).toBe(false)
+  })
+
+  it('names the state of the status line: the last outcome, else never while on, else off', () => {
+    expect(fileSweepState('off', { lastAttempt: null })).toBe('off')
+    expect(fileSweepState('daily', { lastAttempt: null })).toBe('never')
+    expect(fileSweepState('weekly', { lastAttempt: { ...attempt, status: 'done' } })).toBe('done')
+    expect(fileSweepState('off', { lastAttempt: { ...attempt, status: 'failed', reason: 'error' } })).toBe('failed')
+    expect(fileSweepState('daily', { lastAttempt: { ...attempt, status: 'skipped', reason: 'plugin-data-limit' } })).toBe('skipped')
+  })
+
+  it('words what a run removed', () => {
+    expect(fileSweepRemovedText(attempt)).toBe('removed 4 files (2 MB).')
+    expect(fileSweepRemovedText({ files: 1, diskBytes: 2048 })).toBe('removed 1 file (2 KB).')
   })
 })
 

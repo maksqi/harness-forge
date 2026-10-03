@@ -3,9 +3,12 @@
 // data-project-id) with the path (mono, muted, truncated; the full path in its title), "{n} chats", "Folder not found"
 // (project-missing; its tooltip is the server's `issue`) and "Uses AGENTS.md" / "Uses CLAUDE.md"; the row `⋯` menu
 // (project-row-menu, "Actions for {name}"): Rename (project-rename -> InlineRename project-rename-input, at most 80
-// characters, optimistic) · Edit instructions… (project-instructions -> ProjectInstructionsDialog) · Delete…
+// characters, optimistic) · Edit instructions… (project-instructions -> ProjectInstructionsDialog) · Allowed
+// commands… (Phase 8, project-allowlist, ShieldCheck -> AllowlistDialog, the project's shell rules) · Delete…
 // (project-delete -> ConfirmDialog with project-delete-confirm; 409 run-active -> toast "Wait for the responses in this
-// project to finish before deleting it."). The empty state (projects-empty) has its own Add project (project-add).
+// project to finish before deleting it."). Phase 8: the row meta adds "{n} allowed commands" ("1 allowed command", left
+// out at 0; useShellRulesStore, which pages/settings/projects.vue loads). The empty state (projects-empty) has its own
+// Add project (project-add).
 // A skeleton shows while the projects load; a failure shows SettingsLoadError "Could not load the projects" with Retry.
 // `?add=1` (the page's header action, the palette's "Add project…") opens the AddProjectDialog, and the query parameter
 // is dropped at once, so the same link works again. The list reloads on every visit (chat counts and folder states).
@@ -13,7 +16,7 @@
 // pages/settings/projects.vue inside SettingsPage, which renders the PageHeader "Projects" with the Add project action.
 import type { ProjectSummary } from '@harness-forge/shared'
 import { createServerEvent, LIMITS } from '@harness-forge/shared'
-import { FileTextIcon, FolderPlusIcon, FolderXIcon, MoreHorizontalIcon, PencilIcon, Trash2Icon } from '@lucide/vue'
+import { FileTextIcon, FolderPlusIcon, FolderXIcon, MoreHorizontalIcon, PencilIcon, ShieldCheckIcon, Trash2Icon } from '@lucide/vue'
 import { computed, nextTick, onMounted, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Badge } from '@/components/ui/badge'
@@ -31,18 +34,22 @@ import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import InlineRename from '~/components/common/InlineRename.vue'
 import AddProjectDialog from '~/components/projects/AddProjectDialog.vue'
 import ProjectInstructionsDialog from '~/components/projects/ProjectInstructionsDialog.vue'
+import { allowedCommandsLabel } from '~/components/workspace/allowlist/allowlist'
+import AllowlistDialog from '~/components/workspace/allowlist/AllowlistDialog.vue'
 import { useChatsStore } from '~/stores/chats'
 import { useProjectsStore } from '~/stores/projects'
+import { useShellRulesStore } from '~/stores/shell-rules'
 import { hasErrorCode } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
 import { toastError } from '../notify'
 import { useRoute, useRouter } from '../nuxt-imports'
 import SettingsLoadError from '../SettingsLoadError.vue'
 
-type RowAction = 'rename' | 'instructions' | 'delete'
+type RowAction = 'rename' | 'instructions' | 'allowlist' | 'delete'
 
 const projects = useProjectsStore()
 const chats = useChatsStore()
+const shellRules = useShellRulesStore()
 const route = useRoute()
 const router = useRouter()
 const list = useTemplateRef<HTMLElement>('list')
@@ -52,6 +59,8 @@ const addOpen = ref(false)
 const renamingId = ref<string | null>(null)
 const instructionsProject = shallowRef<ProjectSummary | null>(null)
 const instructionsOpen = ref(false)
+const allowlistProject = shallowRef<ProjectSummary | null>(null)
+const allowlistOpen = ref(false)
 const deleteTarget = shallowRef<ProjectSummary | null>(null)
 const deleteOpen = ref(false)
 const deleting = ref(false)
@@ -63,6 +72,11 @@ const showError = computed(() => loadError.value !== null && !projects.loaded)
 
 function chatsLabel(count: number): string {
   return `${count} ${count === 1 ? 'chat' : 'chats'}`
+}
+
+/** "{n} allowed commands" of a row; null without rules. */
+function rulesLabel(id: string): string | null {
+  return allowedCommandsLabel(shellRules.countForProject(id))
 }
 
 const deleteDescription = computed(() => {
@@ -127,6 +141,10 @@ function onMenuCloseAutoFocus(event: Event): void {
       instructionsProject.value = chosen.project
       instructionsOpen.value = true
     }
+    else if (chosen.action === 'allowlist') {
+      allowlistProject.value = chosen.project
+      allowlistOpen.value = true
+    }
     else {
       deleteTarget.value = chosen.project
       deleteOpen.value = true
@@ -164,9 +182,11 @@ async function confirmDelete(): Promise<void> {
   deleting.value = true
   try {
     await projects.remove(project.id)
-    // The server detaches the chats and announces it with `project.changed`; do it locally too, in case the event
-    // stream is reconnecting.
-    chats.applyEvent(createServerEvent('project.changed', { id: project.id, project: null }))
+    // The server detaches the chats, deletes the project's shell rules and announces it with `project.changed`; do it
+    // locally too, in case the event stream is reconnecting.
+    const deletedEvent = createServerEvent('project.changed', { id: project.id, project: null })
+    chats.applyEvent(deletedEvent)
+    shellRules.applyEvent(deletedEvent)
     toast.success('Project deleted')
   }
   catch (error) {
@@ -262,7 +282,15 @@ function openAdd(): void {
             Uses {{ project.instructionsFile }}
           </p>
         </div>
-        <span class="shrink-0 text-sm text-muted-foreground tabular-nums">{{ chatsLabel(project.chatCount) }}</span>
+        <span
+          class="flex shrink-0 flex-col items-end text-right text-sm text-muted-foreground tabular-nums sm:flex-row sm:items-center sm:gap-1"
+        >
+          <span>{{ chatsLabel(project.chatCount) }}</span>
+          <template v-if="rulesLabel(project.id)">
+            <span aria-hidden="true" class="hidden sm:inline">·</span>
+            <span>{{ rulesLabel(project.id) }}</span>
+          </template>
+        </span>
         <DropdownMenu>
           <DropdownMenuTrigger as-child>
             <Button
@@ -285,6 +313,10 @@ function openAdd(): void {
               <FileTextIcon aria-hidden="true" />
               Edit instructions…
             </DropdownMenuItem>
+            <DropdownMenuItem :data-testid="testIds.projectAllowlist" @select="choose(project, 'allowlist')">
+              <ShieldCheckIcon aria-hidden="true" />
+              Allowed commands…
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" :data-testid="testIds.projectDelete" @select="choose(project, 'delete')">
               <Trash2Icon aria-hidden="true" />
@@ -297,6 +329,7 @@ function openAdd(): void {
 
     <AddProjectDialog v-model:open="addOpen" />
     <ProjectInstructionsDialog v-model:open="instructionsOpen" :project="instructionsProject" />
+    <AllowlistDialog v-model:open="allowlistOpen" :project="allowlistProject" />
     <ConfirmDialog
       :open="deleteOpen"
       :title="`Delete ${deleteTarget?.name ?? 'project'}?`"

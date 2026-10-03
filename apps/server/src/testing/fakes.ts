@@ -19,6 +19,8 @@
 // `createFakeCheckpointBlobStore`, `createTestChangeRowWriter` and `insertChangeRows` (journal rows in the test
 // database); ./fake-shell-rules.ts adds `createFakeShellRuleService`; `createFakeDataService` has no-op `start` / `stop`
 // (it counts the calls). `createTestApp({ checkpoints: 'fake', shellRules: 'fake' })` installs the two fake services.
+// W8.7: `createFakeFilesService` is a deprecated alias of the real `createFilesService` (pins and the store gate
+// included), so the call sites keep working with the real behavior.
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type {
   DataCleanupPreview,
@@ -41,19 +43,17 @@ import type { ActiveRun, ChatRunner } from '../chat/types.ts'
 import type { IconService } from '../providers/types.ts'
 import type { DataService } from '../services/data/types.ts'
 import type { EventBus, EventSubscribeOptions, ServerEventListener } from '../services/events/types.ts'
-import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, GeneratedFileInput, StoredFile } from '../services/files/types.ts'
+import type { FilesServiceOptions } from '../services/files/index.ts'
+import type { FilesService, StoredFile } from '../services/files/types.ts'
 import type { SecretEntry, SecretScope, SecretStore } from '../services/secrets/types.ts'
 import type { InternalSettingKey, SettingsService } from '../services/settings/types.ts'
 import type { ShareFile, ShareService } from '../services/shares/types.ts'
 import type { AppDeps } from '../types.ts'
 import { createHash } from 'node:crypto'
-import { mkdir, rm } from 'node:fs/promises'
 import {
   createServerEvent,
   createShareId,
   DEFAULT_SETTINGS,
-  FILE_ID_PATTERN,
-  GENERATED_IMAGE_MIME_TYPES,
   HarnessError,
   LIMITS,
   settingsSchema,
@@ -61,11 +61,8 @@ import {
   shareOptionsSchema,
   validationError,
 } from '@harness-forge/shared'
-import { asc, eq } from 'drizzle-orm'
-import { files } from '../db/schema.ts'
 import { rejectsNotImplemented } from '../not-implemented.ts'
 import { createFilesService } from '../services/files/index.ts'
-import { sniffBinaryType } from '../services/files/sniff.ts'
 import { busyError } from '../services/maintenance/index.ts'
 import { secretHint } from '../services/secrets/hint'
 
@@ -333,7 +330,7 @@ export interface FakeDataService extends DataService {
  */
 export function createFakeDataService(options: FakeDataServiceOptions = {}): FakeDataService {
   const now = options.now ?? Date.now
-  // P8-A (W8.7): the automatic sweep (ADR-039) is off in the fake.
+  // The automatic sweep (ADR-039) is off in the fake: no attempt, no next run.
   const fileSweep = { mode: 'off', lastAttempt: null, nextRunAt: null } as const
   const counts = { chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep }
   const fake: FakeDataService = {
@@ -580,70 +577,14 @@ export function createFakeShareService(options: FakeShareServiceOptions = {}): F
 }
 
 /**
- * The real `FilesService` with simple versions of the Phase 5 members, for the data service tests while W5.3
- * implements them: `importFile` checks the sha256, reuses a row with the same content (the one with `preferredId`
- * first), else stores the bytes through `upload` (same type checks) and moves the row to `preferredId` when that id is
- * free; `purge` deletes every row and the blob directory. Phase 6: `saveGenerated` (while W6.4 implements it) accepts
- * only `GENERATED_IMAGE_MIME_TYPES` (`validation_error`), at most `LIMITS.generatedImageBytes` (`payload_too_large`),
- * with matching magic bytes (`validation_error`), returns an existing row with the same sha256, else stores the bytes
- * through `upload`. Use as a factory: `factories: { files: createFakeFilesService }`.
+ * Legacy name of the real files service (Phase 8, W8.7): the Phase 5 / 6 stand-ins (`importFile`, `purge`,
+ * `saveGenerated` while W5.3 and W6.4 built them) are gone, because the real service has had those members, the pins
+ * and the store gate since Phase 7. Use as a factory: `factories: { files: createFakeFilesService }` (or use
+ * `createFilesService` directly).
+ *
+ * @deprecated Use `createFilesService` from `services/files/index.ts`.
  */
-export function createFakeFilesService(deps: AppDeps): FilesService {
-  const base = createFilesService(deps)
-  const { db } = deps
-
-  async function importFile(input: FileImportInput): Promise<FileImportResult> {
-    const sha256 = createHash('sha256').update(input.data).digest('hex')
-    if (sha256 !== input.sha256)
-      throw validationError([{ path: ['sha256'], message: 'The bytes do not match the declared sha256.', code: 'custom' }])
-    const same = await db.select().from(files).where(eq(files.sha256, sha256))
-    const reuse = same.find(row => row.id === input.preferredId) ?? same[0]
-    if (reuse !== undefined)
-      return { file: reuse, reused: true }
-    const uploaded = await base.upload(new File([new Uint8Array(input.data)], input.name, { type: input.mime }))
-    const free = FILE_ID_PATTERN.test(input.preferredId) && await base.get(input.preferredId) === null
-    const id = free ? input.preferredId : uploaded.id
-    await db.update(files).set({ id, createdAt: input.createdAt }).where(eq(files.id, uploaded.id))
-    const file = await base.get(id)
-    if (file === null)
-      throw new Error(`fake files: the imported file ${id} is missing.`)
-    return { file, reused: false }
-  }
-
-  async function purge(): Promise<FilePurgeResult> {
-    const rows = await db.delete(files).returning({ size: files.size })
-    await rm(deps.env.paths.files, { recursive: true, force: true })
-    await mkdir(deps.env.paths.files, { recursive: true, mode: 0o700 })
-    return { files: rows.length, bytes: rows.reduce((total, row) => total + row.size, 0) }
-  }
-
-  async function saveGenerated(input: GeneratedFileInput): Promise<StoredFile> {
-    const mediaType = (input.mediaType.split(';')[0] ?? '').trim().toLowerCase()
-    if (!(GENERATED_IMAGE_MIME_TYPES as readonly string[]).includes(mediaType))
-      throw validationError([{ path: ['mediaType'], message: `Generated files are stored only as PNG, JPEG, WebP or GIF images, not "${mediaType}".`, code: 'custom' }])
-    if (input.data.byteLength > LIMITS.generatedImageBytes) {
-      throw new HarnessError({
-        code: 'payload_too_large',
-        message: `Generated images are limited to ${LIMITS.generatedImageBytes / 1024 / 1024} MB.`,
-        details: { limitBytes: LIMITS.generatedImageBytes },
-      })
-    }
-    if (sniffBinaryType(input.data) !== mediaType)
-      throw validationError([{ path: ['data'], message: `The generated image does not match its type (${mediaType}).`, code: 'custom' }])
-    const sha256 = createHash('sha256').update(input.data).digest('hex')
-    const [existing] = await db.select().from(files).where(eq(files.sha256, sha256)).orderBy(asc(files.createdAt), asc(files.id)).limit(1)
-    if (existing !== undefined)
-      return existing
-    const uploaded = await base.upload(new File([new Uint8Array(input.data)], input.name, { type: mediaType }))
-    const file = await base.get(uploaded.id)
-    if (file === null)
-      throw new Error(`fake files: the generated file ${uploaded.id} is missing.`)
-    return file
-  }
-
-  const fake = { ...base, importFile, purge, saveGenerated }
-  return fake
-}
+export const createFakeFilesService: (deps: AppDeps, options?: FilesServiceOptions) => FilesService = createFilesService
 
 /** Bytes of a `ReadableStream` (fake streams, `DataBackup.stream`, `ShareFile.stream`). */
 export async function readAllBytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {

@@ -8,24 +8,26 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, inject } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { resetChatSessions, useChatSession } from '~/composables/useChatSession'
 import { dispatchServerEvent } from '~/composables/useServerEvents'
 import { useChatsStore } from '~/stores/chats'
 import { useProjectsStore } from '~/stores/projects'
 import { testIds } from '~/utils/testids'
-import { assistantMessage, chatDetail, chatId, messageBranch, projectId, projectSummary, userMessage } from '~/utils/testing/fixtures'
+import { assistantMessage, changeBatchId, chatDetail, chatId, messageBranch, projectId, projectSummary, restoreResult, rewindPreview, userMessage } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import ChatTranscript from './ChatTranscript.vue'
 import ChatView from './ChatView.vue'
+import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
 
 const mock = vi.hoisted(() => ({
   api: null as unknown,
   fetch: null as unknown,
   composer: { setText: null as unknown as Mock, openModelPicker: null as unknown as Mock },
   toast: null as unknown as Mock,
+  customToast: null as unknown as Mock,
 }))
 
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api, useApiFetch: () => mock.fetch }))
@@ -36,7 +38,12 @@ vi.mock('~/components/chat/nuxt-imports', () => ({
   navigateTo: vi.fn(),
 }))
 vi.mock('vue-sonner', () => {
-  const toast = Object.assign((...args: unknown[]) => mock.toast(...args), { error: (...args: unknown[]) => mock.toast(...args), success: vi.fn() })
+  const toast = Object.assign((...args: unknown[]) => mock.toast(...args), {
+    error: (...args: unknown[]) => mock.toast(...args),
+    success: vi.fn(),
+    custom: (...args: unknown[]) => mock.customToast(...args),
+    dismiss: vi.fn(),
+  })
   return { toast }
 })
 // The real composer belongs to W2.3; this stand-in keeps its contract (docs/UI.md 10.4).
@@ -106,6 +113,7 @@ beforeEach(() => {
   calls = []
   replies = []
   mock.toast = vi.fn()
+  mock.customToast = vi.fn()
   mock.composer.setText = vi.fn()
   mock.composer.openModelPicker = vi.fn()
   mock.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -684,47 +692,161 @@ describe('chatView: delete a version', () => {
 describe('chatView: workspace 2.0 wiring (Phase 8)', () => {
   const U1 = 'msg_user0000000000r1'
   const A1 = 'msg_asst0000000000r1'
+  const RUN_ACTIVE = 'Wait for the responses in this project to finish before rewinding files.'
 
   function rewindDialog(): HTMLElement | null {
     return document.body.querySelector<HTMLElement>(`[data-testid="${testIds.rewindDialog}"]`)
   }
 
-  async function mountProjectChat() {
+  function inDialog(testId: string): HTMLButtonElement | null {
+    return document.body.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)
+  }
+
+  /** The reply wrote a file with `write_file` (finished), so "Rewind files to here" shows on U1. */
+  function editingReply() {
+    return assistantMessage(A1, 'Done', {
+      parts: [
+        { type: 'tool-write_file', toolCallId: 'call_w1', state: 'output-available', input: { path: 'checkpoint.txt', content: 'Turn 1' }, output: { path: 'checkpoint.txt' } },
+        { type: 'text', text: 'Done', state: 'done' },
+      ] as never,
+    })
+  }
+
+  async function mountProjectChat(options: { project?: string | null } = {}) {
     api.chats.get.mockResolvedValue(chatDetail({
       id: chatId(21),
       modelRef: MODEL,
-      projectId: projectId(1),
-      messages: [userMessage(U1, 'Fix the parser'), assistantMessage(A1, 'Done')],
+      projectId: options.project === undefined ? projectId(1) : options.project,
+      messages: [userMessage(U1, 'Fix the parser'), editingReply()],
     }))
     const view = mountView({ chatId: chatId(21) })
     await until(() => view.wrapper.find(`[data-testid="${testIds.messageAssistant}"]`).exists())
     return view
   }
 
-  it('keeps the RewindDialog closed until the transcript asks for a rewind; closing it changes nothing', async () => {
+  function rewindButton(wrapper: VueWrapper) {
+    return wrapper.find(`[data-message-id="${U1}"] [data-testid="${testIds.messageRewind}"]`)
+  }
+
+  async function openRewind(wrapper: VueWrapper) {
+    await rewindButton(wrapper).trigger('click')
+    await until(() => rewindDialog()?.dataset.state !== undefined && rewindDialog()!.dataset.state !== 'loading')
+  }
+
+  it('offers "Rewind files to here" after agent edits in a project chat only', async () => {
     const { wrapper } = await mountProjectChat()
+    expect(rewindButton(wrapper).exists()).toBe(true)
     expect(rewindDialog()).toBeNull()
+    wrapper.unmount()
 
-    wrapper.getComponent(ChatTranscript).vm.$emit('rewind', U1)
-    await until(() => rewindDialog() !== null)
-    expect(rewindDialog()!.dataset.state).toBe('loading')
-    expect(document.body.textContent).toContain('Rewind files to here?')
+    resetChatSessions()
+    const other = await mountProjectChat({ project: null })
+    expect(other.wrapper.find(`[data-testid="${testIds.messageEdit}"]`).exists()).toBe(true)
+    expect(rewindButton(other.wrapper).exists()).toBe(false)
+  })
 
+  it('restores the files: the result toast with Undo, focus back on the button, no reload', async () => {
+    api.changes.rewindPreview.mockResolvedValue(rewindPreview({ messageId: U1 }))
+    api.changes.rewind.mockResolvedValue(restoreResult({
+      restored: ['checkpoint.txt'],
+      deleted: ['new.txt'],
+      skipped: [{ path: 'README.md', reason: 'conflict', message: 'Changed outside this chat.' }],
+    }))
+    const { wrapper } = await mountProjectChat()
+    await openRewind(wrapper)
+    expect(api.changes.rewindPreview).toHaveBeenCalledWith(expect.objectContaining({ params: { id: chatId(21) }, query: { messageId: U1 } }))
+    expect(rewindDialog()!.dataset.state).toBe('ready')
+
+    inDialog(testIds.rewindRestore)!.click()
+    await until(() => rewindDialog() === null)
+    expect(api.changes.rewind).toHaveBeenCalledWith({ params: { id: chatId(21) }, body: { messageId: U1, conflicts: 'skip' } })
+    expect(mock.customToast).toHaveBeenCalledOnce()
+    const props = (mock.customToast.mock.lastCall![1] as { componentProps: { title: string, lines: string[], undoable: boolean, onUndo: () => void } }).componentProps
+    expect(props).toMatchObject({ title: 'Restored 2 files', lines: ['Skipped 1 file changed outside this chat'], undoable: true })
+    await flushPromises()
+    expect(document.activeElement).toBe(rewindButton(wrapper).element)
+    // The conversation did not change: no reload.
+    expect(api.chats.get).toHaveBeenCalledOnce()
+
+    api.changes.undo.mockResolvedValue(restoreResult({ batchId: changeBatchId(2) }))
+    props.onUndo()
+    await flushPromises()
+    expect(api.changes.undo).toHaveBeenCalledWith({ params: { id: chatId(21) }, body: { batchId: changeBatchId(1), conflicts: 'skip' } })
+  })
+
+  it('"Restore files and edit" opens the editor on the message', async () => {
+    api.changes.rewindPreview.mockResolvedValue(rewindPreview({ messageId: U1 }))
+    api.changes.rewind.mockResolvedValue(restoreResult())
+    const { wrapper } = await mountProjectChat()
+    await openRewind(wrapper)
+    inDialog(testIds.rewindRestoreEdit)!.click()
+    await until(() => wrapper.find(`[data-testid="${testIds.messageEditSave}"]`).exists())
+    expect(rewindDialog()).toBeNull()
+    expect(mock.customToast).toHaveBeenCalledOnce()
+    const input = wrapper.get<HTMLTextAreaElement>(`[data-testid="${testIds.messageEditInput}"]`)
+    expect(input.element.value).toBe('Fix the parser')
+  })
+
+  it('cancel restores nothing and returns focus to the button', async () => {
+    api.changes.rewindPreview.mockResolvedValue(rewindPreview({ messageId: U1 }))
+    const { wrapper } = await mountProjectChat()
+    await openRewind(wrapper)
     const cancel = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.trim() === 'Cancel')!
     cancel.click()
     await until(() => rewindDialog() === null)
-    expect(api.changes.rewindPreview).not.toHaveBeenCalled()
+    await flushPromises()
     expect(api.changes.rewind).not.toHaveBeenCalled()
+    expect(mock.customToast).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(rewindButton(wrapper).element)
   })
 
-  it('"Restore files and edit" opens the editor on the message once the dialog closed', async () => {
+  it('a running chat of the project: the toast, and this chat\'s run is followed', async () => {
+    api.changes.rewindPreview.mockResolvedValue(rewindPreview({ messageId: U1 }))
     const { wrapper } = await mountProjectChat()
-    wrapper.getComponent(ChatTranscript).vm.$emit('rewind', U1)
-    await until(() => rewindDialog() !== null)
-    const dialog = wrapper.getComponent({ name: 'RewindDialog' })
-    dialog.vm.$emit('restored', { batchId: null, restored: [], deleted: [], unchanged: [], skipped: [] }, 'edit')
-    dialog.vm.$emit('update:open', false)
-    await until(() => wrapper.find(`[data-testid="${testIds.messageEditSave}"]`).exists())
+
+    api.changes.rewind.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'A chat of this project is running.', details: { reason: 'run-active', chatId: chatId(5) } }))
+    await openRewind(wrapper)
+    inDialog(testIds.rewindRestore)!.click()
+    await until(() => rewindDialog() === null)
+    expect(mock.toast).toHaveBeenCalledWith(RUN_ACTIVE)
+    // Another chat runs: nothing to follow here.
+    await flushPromises()
+    expect(calls.filter(call => call.url.endsWith('/stream'))).toHaveLength(0)
+    expect(mock.customToast).not.toHaveBeenCalled()
+
+    api.changes.rewind.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'A chat of this project is running.', details: { reason: 'run-active', chatId: chatId(21) } }))
+    await openRewind(wrapper)
+    inDialog(testIds.rewindRestore)!.click()
+    await until(() => rewindDialog() === null)
+    expect(mock.toast).toHaveBeenCalledTimes(2)
+    expect(mock.toast).toHaveBeenLastCalledWith(RUN_ACTIVE)
+    await until(() => calls.some(call => call.url === `/api/chat/${chatId(21)}/stream`))
+  })
+
+  it('a stale path (404): the stale-chat toast and a reload', async () => {
+    api.changes.rewindPreview.mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: `Message ${U1} not found in chat ${chatId(21)}.` }))
+    const { wrapper } = await mountProjectChat()
+    await rewindButton(wrapper).trigger('click')
+    await until(() => mock.toast.mock.calls.length === 1)
+    expect(mock.toast).toHaveBeenCalledWith('This chat changed elsewhere and was reloaded.')
+    await until(() => rewindDialog() === null)
+    await until(() => api.chats.get.mock.calls.length === 2)
+  })
+
+  it('gives the approval cards the chat\'s project and its shell folder', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(22), modelRef: MODEL, projectId: projectId(1), messages: [userMessage(U1, 'Hi')] }))
+    const Probe = defineComponent({
+      setup() {
+        const context = inject(TOOL_APPROVAL_CONTEXT, null)
+        return () => h('output', { 'data-testid': 'approval-context', 'data-project-id': context?.projectId() ?? 'none', 'data-cwd': context?.shellCwd() ?? 'root' })
+      },
+    })
+    const wrapper = mount(defineComponent({
+      setup: () => () => h(TooltipProvider, null, { default: () => h(ChatView, { chatId: chatId(22) }, { header: () => h(Probe) }) }),
+    }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
+    mounted.push(wrapper)
+    await until(() => wrapper.get('[data-testid="approval-context"]').attributes('data-project-id') === projectId(1))
+    expect(wrapper.get('[data-testid="approval-context"]').attributes('data-cwd')).toBe(useChatSession(chatId(22)).cwd.value ?? 'root')
   })
 
   it('names a failed rule save "Could not save the rule"', async () => {

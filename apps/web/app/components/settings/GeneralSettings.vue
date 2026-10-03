@@ -1,10 +1,10 @@
 <script setup lang="ts">
 // Settings -> General body (docs/UI.md 9.4): display name, send key, default permission mode (Ask, Accept edits, Auto,
 // Off) and effort, max steps (per response in chats without a project, and in project chats: 1-200 each), Alt
-// shortcuts, custom instructions and the password block. Choices save at once (optimistic, toast on failure);
-// text fields save on blur or Enter (Mod+Enter in the instructions), Esc restores the saved value. Bulk export,
-// import and delete-all live in Settings -> Data (docs/UI.md 9.8, ADR-024); a single chat is still exported from its
-// chat menus.
+// shortcuts (Alt+M / R / P, Alt+V and, since Phase 8, Alt+C for the changes panel), custom instructions and the
+// password block. Choices save at once (optimistic, toast on failure); text fields save on blur or Enter (Mod+Enter in
+// the instructions), Esc restores the saved value. Bulk export, import and delete-all live in Settings -> Data
+// (docs/UI.md 9.8, ADR-024); a single chat is still exported from its chat menus.
 import type { ReasoningEffort, SendKey, Settings, ToolMode } from '@harness-forge/shared'
 import { computed, ref, useId, watch } from 'vue'
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -324,7 +324,7 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
           <FieldLabel :for="ids.altShortcuts">
             Alt shortcuts
           </FieldLabel>
-          <FieldDescription>Use Alt+M, Alt+R and Alt+P for composer menus, and Alt+V to dictate.</FieldDescription>
+          <FieldDescription>Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate and Alt+C for changes.</FieldDescription>
         </FieldContent>
         <Switch
           :id="ids.altShortcuts"

@@ -13,18 +13,21 @@
 // with the message id; ChatView confirms it and uses the exposed focus helpers afterwards.
 // Phase 8 (C20 declares, W8.9 implements; frozen from Gate P8-0b): "Rewind files to here" is re-emitted as `rewind`
 // with the message id (ChatView opens the RewindDialog); `startEdit(id)` opens the editor on a user message ("Restore
-// files and edit") and `focusRewind(id)` puts focus back on its rewind button. W8.9 adds the `rewindable` set
-// (`canRewind` of each row).
+// files and edit") and `focusRewind(id)` puts focus back on its rewind button. In a project chat (`projectId`) a user
+// message gets the button when a finished `write_file` / `edit_file` call follows it on the shown path: one backwards
+// pass computes the set (`rewindable`, part of each row's v-memo); while a reply runs the button hides like Edit.
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { ChatStatus, FileUIPart } from 'ai'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
 import { usePreferredReducedMotion, useScroll } from '@vueuse/core'
+import { isToolUIPart } from 'ai'
 import { computed, defineComponent, onBeforeUnmount, provide, ref, useTemplateRef, watch } from 'vue'
 import { useStickToBottomContext } from 'vue-stick-to-bottom'
 import AiConversation from '@/components/ai-elements/conversation/Conversation.vue'
 import { Skeleton } from '@/components/ui/skeleton'
 import { testIds } from '~/utils/testids'
 import { TRANSCRIPT_SCROLL } from './chat-context'
+import { toolNameOf } from './chat-format'
 import ChatMessage from './ChatMessage.vue'
 import ErrorPart from './parts/ErrorPart.vue'
 import SubmittedPlaceholder from './SubmittedPlaceholder.vue'
@@ -41,10 +44,13 @@ const props = withDefaults(defineProps<{
   branches?: Record<string, MessageBranch>
   /** A version switch is in flight. */
   switching?: boolean
+  /** + Phase 8: the chat's project; null = none (no "Rewind files to here"). */
+  projectId?: string | null
 }>(), {
   loading: false,
   branches: () => ({}),
   switching: false,
+  projectId: null,
 })
 
 const emit = defineEmits<{
@@ -163,6 +169,49 @@ function focusDeleteVersion(messageId: string): boolean {
 }
 
 // ---------- rewind (Phase 8) ----------
+
+/** Agent edits that can be rewound: a finished `write_file` / `edit_file` call (docs/UI.md 7.22). */
+const REWINDABLE_TOOLS = new Set(['write_file', 'edit_file'])
+
+function hasFinishedEdit(message: HarnessUIMessage): boolean {
+  return message.parts.some(part => isToolUIPart(part) && part.state === 'output-available' && REWINDABLE_TOOLS.has(toolNameOf(part)))
+}
+
+/** Older messages are finished, so their answer is kept (the last one may still change in place). */
+const finishedEdits = new WeakMap<HarnessUIMessage, boolean>()
+
+/**
+ * + Phase 8: the user messages of the shown path that a finished agent edit follows, in a project chat: they offer
+ * "Rewind files to here". One backwards pass; the preview stays the truth (edits older than v1.4 have no checkpoints).
+ */
+const rewindable = computed<ReadonlySet<string>>(() => {
+  const ids = new Set<string>()
+  if (!props.projectId)
+    return ids
+  const messages = props.messages
+  let edited = false
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!
+    if (message.role === 'user') {
+      if (edited)
+        ids.add(message.id)
+      continue
+    }
+    if (edited || message.role !== 'assistant')
+      continue
+    if (index === messages.length - 1) {
+      edited = hasFinishedEdit(message)
+      continue
+    }
+    let known = finishedEdits.get(message)
+    if (known === undefined) {
+      known = hasFinishedEdit(message)
+      finishedEdits.set(message, known)
+    }
+    edited = known
+  }
+  return ids
+})
 
 /** + Phase 8: a closed rewind dialog puts focus back on "Rewind files to here" of that message (docs/UI.md 7.22). */
 function focusRewind(messageId: string): void {
@@ -336,7 +385,7 @@ defineExpose({
         <div
           v-for="(message, index) in messages"
           :key="message.id"
-          v-memo="[message, index >= renderStart, index === messages.length - 1, isStreaming(index), showThinking, index === messages.length - 1 && busy, errorFor(index), branches[message.id], branches[message.id] !== undefined && (busy || switching)]"
+          v-memo="[message, index >= renderStart, index === messages.length - 1, isStreaming(index), showThinking, index === messages.length - 1 && busy, errorFor(index), branches[message.id], branches[message.id] !== undefined && (busy || switching), rewindable.has(message.id)]"
           data-slot="transcript-message"
           class="contents"
         >
@@ -352,6 +401,7 @@ defineExpose({
             :command-reply="isCommandReply(index)"
             :branch="branches[message.id] ?? null"
             :switching="switching"
+            :can-rewind="rewindable.has(message.id)"
             @regenerate="emit('regenerate', message.id)"
             @edit="(text, files) => emit('edit', message.id, text, files)"
             @approval="decision => emit('approval', decision)"

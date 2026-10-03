@@ -243,6 +243,21 @@ follow these, not the task text further down.
   `ChangesEntry`, without `entries()` / `ChangesFileEntry`, with `fileDiff(chatId, source, path, opts)`,
   `revert(chatId, input)`, `undo(chatId, batchId)` and no rewind members; the shell rules store uses `applyEvent`
   (not `dropProject`).
+- **P8-A** (details in `.tmp/waves/P8-A-notes.md`, for W8.13): `journaledWrite(c, root, { tool, path },
+  produce(before, resolved))` records only when the run scope, the journal scope and `c.workspace` share the project;
+  a failed before-blob store keeps the write and records `before_state = evicted`; the chat pipeline builds the run
+  scope in `chat/scope.ts` (`createRunScope`, fallbacks: no journal / empty rules / `.` on errors) and records `shell` /
+  `untracked` rows before the `tool.after` hooks; `initialShellCwd` and the web's `currentShellCwd` skip finished
+  outputs without `endCwd` (the web returns `null` for the project folder); `allowedBy` is absent when no rule matched
+  (e.g. a command that is only `cd`); the shell's policy is a function, so `GET /tools` shows `policy: null` for it; a
+  chat revert of a `too-large` / `evicted` base answers 200 with the file skipped as `unavailable` (API.md), not 400;
+  a chat without a project answers 400 "This chat has no project."; git-view failures on revert / diff are 400 on
+  `['source']`; the rewind preview lists shell commands newest first (the last 50); the workspace store also refreshes
+  the open chat's This chat view on `workspace.changed`; the rewind result toast lives in `ChatView`
+  (`REWIND_DIALOG_HOST` hands 404 / 409 from the dialog to the view); `ChatTranscript` gained the optional prop
+  `projectId`; the Storage cleanup status uses `data-state` `off | never | done | skipped | failed`; the automatic
+  sweep's busy retry is `min(10 min, check interval)` and its skip logs at info; the plugin data budget counts entries;
+  `mock:checkpoint` nests `mock-dir/mock-dir` on a second turn (the sticky folder).
 
 ## Rules for every Phase 8 agent
 

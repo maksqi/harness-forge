@@ -1,20 +1,24 @@
 // Data service (W5.3-T1, T5, T6): the summary, delete-all (confirmation, fresh auth, runs, usage, share links, files,
 // events) and the mutex shared by imports and delete-all (Phase 7, C16-T1: the maintenance lock, also taken by the key
 // rotation and the file cleanup); the orphaned file cleanup (W7.8-T4: preview, run, references, `_files`, logs, lock).
+// Phase 8 (W8.7): `DataSummary.checkpoints`, the checkpoint purge of delete-all, the plugin data in the manual cleanup
+// (the automatic sweep has its own file, ./auto-sweep.test.ts).
 import type { MaintenanceOperation } from '../maintenance/types.ts'
 import type { DataTestApp } from './fixtures.test-util.ts'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { dataCleanupPreviewSchema, dataCleanupResultSchema, dataDeleteResultSchema, DEFAULT_SETTINGS, HarnessError } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { chatShares, files, messages, pluginKv, usage } from '../../db/schema.ts'
 import { freshAuthRequiredError } from '../../http/middleware/fresh-auth.ts'
+import { createFakeCheckpointService } from '../../testing/fake-checkpoints.ts'
 import { GIF, JPEG, PNG, TEXT } from '../files/fixtures.test-util.ts'
 import { fileUrl } from '../files/index.ts'
 import { DAY_MS, HOUR_MS, seedStoredFile, sha256Of } from '../files/store.test-util.ts'
 import { MAINTENANCE_BUSY_MESSAGE } from '../maintenance/index.ts'
 import { FILE_STATE_SETTING } from './cleanup.ts'
-import { assistant, chatId, closeDataApps, dataApp, filePart, mid, treeChat, user } from './fixtures.test-util.ts'
+import { assistant, chatId, checkpointsOf, closeDataApps, dataApp, filePart, mid, treeChat, user } from './fixtures.test-util.ts'
 
 afterEach(async () => {
   await closeDataApps()
@@ -53,9 +57,9 @@ async function seed(app: DataTestApp): Promise<void> {
 describe('data summary', () => {
   it('counts every chat (archived included), every message version, file rows and their bytes', async () => {
     const app = await dataApp()
-    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
+    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null }, checkpoints: { bytes: 0, blobs: 0 } })
     await seed(app)
-    expect(await app.deps.data.summary()).toEqual({ chats: 3, archivedChats: 1, messages: 8, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
+    expect(await app.deps.data.summary()).toEqual({ chats: 3, archivedChats: 1, messages: 8, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null }, checkpoints: { bytes: 0, blobs: 0 } })
   })
 })
 
@@ -83,7 +87,7 @@ describe('delete-all', () => {
     // Settings and credentials stay.
     expect((await app.deps.settings.get()).displayName).toBe('Keep me')
     expect(await app.deps.secrets.get('provider:openai', 'apiKey')).toBe('sk-keep-0000000000')
-    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
+    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null }, checkpoints: { bytes: 0, blobs: 0 } })
   })
 
   it('also deletes the usage rows and every file (rows and blobs) on request', async () => {
@@ -95,7 +99,7 @@ describe('delete-all', () => {
     expect(await app.t.db.select().from(files)).toEqual([])
     expect(existsSync(app.t.env.paths.files)).toBe(true)
     expect(readdirSync(app.t.env.paths.files)).toEqual([])
-    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
+    expect(await app.deps.data.summary()).toEqual({ chats: 0, archivedChats: 0, messages: 0, files: 0, fileBytes: 0, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null }, checkpoints: { bytes: 0, blobs: 0 } })
   })
 
   it('checks fresh auth and the typed confirmation before anything is stopped or deleted', async () => {
@@ -334,5 +338,93 @@ describe('orphaned file cleanup (Phase 7)', () => {
     expect((await app.deps.data.cleanupPreview()).lastRunAt).toBeNull()
     const result = await app.deps.data.cleanup()
     expect(await app.deps.settings.getInternal(FILE_STATE_SETTING)).toEqual({ lastCleanup: result.ranAt })
+  })
+})
+
+// ---------- Phase 8 (W8.7) ----------
+
+describe('checkpoints in the summary and delete-all (Phase 8)', () => {
+  it('reports the checkpoint store from CheckpointService.summary(), and omits it when the summary fails', async () => {
+    const app = await dataApp({ checkpoints: createFakeCheckpointService({ summary: async () => ({ bytes: 4096, blobs: 3 }) }) })
+    expect((await app.deps.data.summary()).checkpoints).toEqual({ bytes: 4096, blobs: 3 })
+    const broken = await dataApp({ checkpoints: createFakeCheckpointService({ summary: async () => Promise.reject(Object.assign(new Error('EACCES: /data/checkpoints'), { code: 'EACCES' })) }) })
+    const summary = await broken.deps.data.summary()
+    expect(summary).not.toHaveProperty('checkpoints')
+    expect(summary.fileSweep).toEqual({ mode: 'off', lastAttempt: null, nextRunAt: null })
+    expect(broken.t.logs.records.find(record => record.msg === 'checkpoint store summary failed')).toMatchObject({ level: 'warn', code: 'EACCES' })
+    expect(broken.t.logs.text()).not.toContain('/data/checkpoints')
+  })
+
+  it('delete-all purges the checkpoint store inside its maintenance operation, after the runs stopped', async () => {
+    let held: MaintenanceOperation | null = null
+    let stoppedBefore = -1
+    let chatsBefore = -1
+    const app: DataTestApp = await dataApp({
+      checkpoints: createFakeCheckpointService({
+        purge: async () => {
+          held = app.deps.maintenance.current()
+          stoppedBefore = app.runs.stopped.length
+          chatsBefore = (await app.deps.chats.allIds()).length
+          return { bytes: 2048, blobs: 2 }
+        },
+      }),
+    })
+    await seed(app)
+    app.runs.phases.set(chatId(1), 'streaming')
+    expect(await app.deps.data.deleteAll({ confirm: 'DELETE' })).toMatchObject({ chats: 3 })
+    expect(held).toMatchObject({ kind: 'delete-all', blockRuns: false })
+    expect(stoppedBefore).toBe(3)
+    expect(chatsBefore).toBe(0)
+    expect(app.deps.maintenance.current()).toBeNull()
+    expect(app.t.logs.records.find(record => record.msg === 'data deleted')).toMatchObject({ checkpointBlobs: 2, checkpointBytes: 2048 })
+  })
+
+  it('a failed checkpoint purge is logged and does not fail the delete-all', async () => {
+    const app = await dataApp({ checkpoints: createFakeCheckpointService({ purge: async () => Promise.reject(Object.assign(new Error('EBUSY'), { code: 'EBUSY' })) }) })
+    await seed(app)
+    expect(await app.deps.data.deleteAll({ confirm: 'DELETE', files: true })).toMatchObject({ chats: 3, files: 2 })
+    expect(app.t.logs.records.find(record => record.msg === 'checkpoint store purge failed')).toMatchObject({ level: 'warn', code: 'EBUSY' })
+    expect(app.t.logs.records.find(record => record.msg === 'data deleted')).toMatchObject({ checkpointBlobs: 0 })
+  })
+
+  it('the default fake records one purge per delete-all and one summary per GET', async () => {
+    const app = await dataApp()
+    await app.deps.data.summary()
+    await app.deps.data.deleteAll({ confirm: 'DELETE' })
+    expect(checkpointsOf(app).calls.map(call => call.member)).toEqual(['summary', 'purge'])
+  })
+})
+
+describe('plugin data in the manual cleanup (Phase 8)', () => {
+  it('keeps a file only a plugin data file references, never touches the checkpoint folder, logs counts only', async () => {
+    let now = Date.now()
+    const app = await dataApp({ data: { now: () => now }, filesOptions: { now: () => now } })
+    const old = now - 3 * DAY_MS
+    const referenced = await seedStoredFile(app.deps, new TextEncoder().encode('kept by a plugin'), { createdAt: old, name: 'kept.txt' })
+    const orphan = await seedStoredFile(app.deps, new TextEncoder().encode('nobody'), { createdAt: old, name: 'nobody.txt' })
+    const pluginFile = join(app.t.env.paths.pluginData, 'gallery', 'nested', 'index.json')
+    mkdirSync(join(pluginFile, '..'), { recursive: true })
+    writeFileSync(pluginFile, JSON.stringify({ images: [referenced.id] }))
+    // A checkpoint blob named like a files blob, old enough for the files walk: a separate tree, never swept.
+    const sha = sha256Of(new TextEncoder().encode('checkpoint'))
+    const checkpoint = join(app.t.env.paths.checkpoints, sha.slice(0, 2), sha)
+    mkdirSync(join(checkpoint, '..'), { recursive: true })
+    writeFileSync(checkpoint, 'Turn 1\n')
+
+    expect(await app.deps.data.cleanupPreview()).toMatchObject({ files: 1, pluginData: 'complete' })
+    now += 1000
+    expect(await app.deps.data.cleanup()).toMatchObject({ files: 1, pluginData: 'complete', ranAt: now })
+    expect(await fileIds(app)).toEqual([referenced.id])
+    expect(existsSync(checkpoint)).toBe(true)
+    expect(app.t.logs.records.find(record => record.msg === 'orphaned files cleaned up')).toMatchObject({
+      level: 'info',
+      trigger: 'manual',
+      files: 1,
+      pluginData: 'complete',
+      pluginDataFiles: 1,
+    })
+    const logs = app.t.logs.text()
+    expect(logs).not.toMatch(/file_[\dA-Za-z]{16}/)
+    expect(logs).not.toContain(orphan.name)
   })
 })

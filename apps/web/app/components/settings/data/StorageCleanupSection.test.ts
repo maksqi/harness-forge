@@ -1,15 +1,20 @@
-// StorageCleanupSection (docs/UI.md 9.8, 10.4; docs/API.md 5.19; W7.13): Check for unused files and its summary,
-// "No unused files.", Remove… with its confirmation, the result toast, the reloads afterwards and the busy answers.
-import type { DataCleanupPreview, DataCleanupResult } from '@harness-forge/shared'
+// StorageCleanupSection (docs/UI.md 9.8, 10.4; docs/API.md 5.19; W7.13, W8.11-T3): Check for unused files and its
+// summary (the plugin data warning included), "No unused files.", Remove… with its confirmation, the result toast, the
+// reloads afterwards and the busy answers; Automatic cleanup: the switch and the interval writing `fileSweep`
+// (optimistic, rolled back with a toast) and the status line from `GET /api/data`.
+import type { DataCleanupPreview, DataCleanupResult, FileSweepStatus, Settings } from '@harness-forge/shared'
 import type { VueWrapper } from '@vue/test-utils'
 import type { Mock } from 'vitest'
 import type { DataSettingsContext } from './data-context'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
+import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
-import { dataCleanupPreview } from '~/utils/testing/fixtures'
+import { dataCleanupPreview, dataSummary, fileSweepStatus, settings } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { BUSY_MESSAGE } from './data'
 import { dataSettingsContextKey } from './data-context'
@@ -22,6 +27,8 @@ const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }))
 vi.mock('vue-sonner', () => ({ toast: Object.assign(vi.fn(), toasts) }))
 
 const MB = 1024 * 1024
+const HOUR = 3_600_000
+const DAY = 24 * HOUR
 const busy = () => new HarnessError({ code: 'conflict', message: 'Another data task is running. Try again when it finishes.', details: { reason: 'busy' } })
 
 function cleanupResult(overrides: Partial<DataCleanupResult> = {}): DataCleanupResult {
@@ -29,6 +36,7 @@ function cleanupResult(overrides: Partial<DataCleanupResult> = {}): DataCleanupR
 }
 
 let api: MockApi
+let pinia: ReturnType<typeof createPinia>
 let page: { [K in keyof DataSettingsContext]: Mock<DataSettingsContext[K]> }
 let wrappers: VueWrapper[] = []
 
@@ -38,19 +46,23 @@ beforeEach(() => {
   toasts.success.mockReset()
   toasts.error.mockReset()
   page = { reloadSummary: vi.fn(), reloadShares: vi.fn() }
+  pinia = createPinia()
+  setActivePinia(pinia)
+  api.data.summary.mockResolvedValue(dataSummary())
 })
 
 afterEach(() => {
   for (const wrapper of wrappers)
     wrapper.unmount()
   wrappers = []
+  disposePinia(pinia)
   document.body.replaceChildren()
 })
 
 async function mountSection(): Promise<VueWrapper> {
   const wrapper = mount(StorageCleanupSection, {
     attachTo: document.body,
-    global: { provide: { [dataSettingsContextKey as symbol]: page } },
+    global: { plugins: [pinia], provide: { [dataSettingsContextKey as symbol]: page } },
   })
   wrappers.push(wrapper)
   await flushPromises()
@@ -230,5 +242,214 @@ describe('storageCleanupSection', () => {
     await mountSection()
     await click(checkButton())
     expect(toasts.error).toHaveBeenCalledWith('Something went wrong', { description: 'The database is locked.' })
+  })
+})
+
+describe('storageCleanupSection: plugin data', () => {
+  it('warns when the scan of the plugin data stopped at its budget', async () => {
+    await mountSection()
+    await checkWith(dataCleanupPreview({ files: 1, fileBytes: 2048, pluginData: 'partial' }))
+    const warning = document.body.querySelector<HTMLElement>('[data-slot="cleanup-plugin-data"]')
+    expect(warning?.textContent?.trim()).toBe('Plugin data is too large to scan completely, so a file only a plugin remembers may be removed.')
+    expect(removeButton().disabled).toBe(false)
+    await checkWith(dataCleanupPreview({ files: 1, fileBytes: 2048 }))
+    expect(document.body.querySelector('[data-slot="cleanup-plugin-data"]')).toBeNull()
+  })
+})
+
+describe('storageCleanupSection: automatic cleanup', () => {
+  function autoSwitch(): HTMLButtonElement {
+    return byTestId<HTMLButtonElement>(testIds.dataCleanupAuto)!
+  }
+
+  function intervalTrigger(): HTMLButtonElement {
+    return byTestId<HTMLButtonElement>(testIds.dataCleanupInterval)!
+  }
+
+  function statusLine(): HTMLElement | null {
+    return byTestId(testIds.dataCleanupAutoStatus)
+  }
+
+  function statusTexts(): string[] {
+    return [...(statusLine()?.querySelectorAll('p') ?? [])].map(line => line.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+  }
+
+  async function settle(rounds = 3): Promise<void> {
+    for (let round = 0; round < rounds; round++) {
+      await flushPromises()
+      await nextTick()
+    }
+  }
+
+  async function withSettings(overrides: Partial<Settings>): Promise<void> {
+    api.settings.get.mockResolvedValueOnce(settings(overrides))
+    await useSettingsStore().fetch()
+  }
+
+  /** `PUT /settings` answers with the saved values. */
+  function acceptUpdates(): void {
+    api.settings.update.mockImplementation(async ({ body }: { body: Partial<Settings> }) => settings(body))
+  }
+
+  async function chooseInterval(value: 'daily' | 'weekly'): Promise<void> {
+    // reka-ui's Select opens with the keyboard in happy-dom.
+    intervalTrigger().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settle()
+    const item = [...document.body.querySelectorAll<HTMLElement>('[data-slot="select-item"]')].find(option => option.dataset.value === value)!
+    item.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settle()
+  }
+
+  it('starts off: the switch, its description, the disabled "Every day" select and an empty status line', async () => {
+    await withSettings({})
+    const wrapper = await mountSection()
+    expect(api.data.summary).toHaveBeenCalledTimes(1)
+    expect(autoSwitch().getAttribute('role')).toBe('switch')
+    expect(autoSwitch().dataset.state).toBe('unchecked')
+    const label = document.body.querySelector<HTMLLabelElement>(`label[for="${autoSwitch().id}"]`)
+    expect(label?.textContent?.trim()).toBe('Automatic cleanup')
+    expect(document.getElementById(autoSwitch().getAttribute('aria-describedby')!)?.textContent?.trim())
+      .toBe('Remove unused files on a schedule. They\'re deleted without asking and can\'t be restored. Files from the last 24 hours are always kept.')
+    expect(intervalTrigger().disabled).toBe(true)
+    expect(intervalTrigger().dataset.value).toBe('daily')
+    expect(intervalTrigger().textContent?.trim()).toBe('Every day')
+    expect(statusLine()?.dataset.state).toBe('off')
+    expect(statusTexts()).toEqual([])
+    // Below the buttons.
+    expect(checkButton().compareDocumentPosition(autoSwitch()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(wrapper.text()).not.toContain('Next automatic cleanup')
+  })
+
+  it('turns on with the interval shown, then shows when the next cleanup runs', async () => {
+    await withSettings({})
+    acceptUpdates()
+    await mountSection()
+    api.data.summary.mockResolvedValue(dataSummary({ fileSweep: fileSweepStatus({ mode: 'daily', nextRunAt: Date.now() + 21 * HOUR }) }))
+    autoSwitch().click()
+    await settle()
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { fileSweep: 'daily' } })
+    expect(autoSwitch().dataset.state).toBe('checked')
+    expect(intervalTrigger().disabled).toBe(false)
+    expect(api.data.summary).toHaveBeenCalledTimes(2)
+    expect(statusLine()?.dataset.state).toBe('never')
+    expect(statusTexts()).toEqual(['Next automatic cleanup in 21h.'])
+  })
+
+  it('changes the interval while on, and keeps the one shown when turned off', async () => {
+    await withSettings({ fileSweep: 'daily' })
+    acceptUpdates()
+    await mountSection()
+    expect(autoSwitch().dataset.state).toBe('checked')
+    await chooseInterval('weekly')
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { fileSweep: 'weekly' } })
+    expect(intervalTrigger().dataset.value).toBe('weekly')
+    expect(intervalTrigger().textContent?.trim()).toBe('Every week')
+
+    autoSwitch().click()
+    await settle()
+    expect(api.settings.update).toHaveBeenLastCalledWith({ body: { fileSweep: 'off' } })
+    expect(autoSwitch().dataset.state).toBe('unchecked')
+    expect(intervalTrigger().disabled).toBe(true)
+    expect(intervalTrigger().dataset.value).toBe('weekly')
+
+    autoSwitch().click()
+    await settle()
+    expect(api.settings.update).toHaveBeenLastCalledWith({ body: { fileSweep: 'weekly' } })
+  })
+
+  it('applies at once and rolls back with an error toast when the save fails', async () => {
+    await withSettings({})
+    let fail!: (error: unknown) => void
+    api.settings.update.mockReturnValueOnce(new Promise((_resolve, reject) => {
+      fail = reject
+    }))
+    await mountSection()
+    autoSwitch().click()
+    await settle()
+    expect(autoSwitch().dataset.state).toBe('checked')
+    fail(new HarnessError({ code: 'internal_error', message: 'Disk full.' }))
+    await settle()
+    expect(autoSwitch().dataset.state).toBe('unchecked')
+    expect(intervalTrigger().disabled).toBe(true)
+    expect(toasts.error).toHaveBeenCalledWith('Something went wrong', { description: 'Disk full.' })
+    expect(api.data.summary).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports the last automatic cleanup and the next one', async () => {
+    await withSettings({ fileSweep: 'weekly' })
+    api.data.summary.mockResolvedValue(dataSummary({ fileSweep: fileSweepStatus({
+      mode: 'weekly',
+      lastAttempt: { at: Date.now() - 3 * DAY, status: 'done', reason: null, files: 4, diskBytes: 2 * MB },
+      nextRunAt: Date.now() + 4 * DAY,
+    }) }))
+    await mountSection()
+    expect(statusLine()?.dataset.state).toBe('done')
+    expect(statusTexts()).toEqual(['Last automatic cleanup 3d ago: removed 4 files (2 MB).', 'Next automatic cleanup in 4d.'])
+  })
+
+  it('reports a skipped and a failed run, and only the last run while off', async () => {
+    await withSettings({ fileSweep: 'daily' })
+    api.data.summary.mockResolvedValueOnce(dataSummary({ fileSweep: fileSweepStatus({
+      mode: 'daily',
+      lastAttempt: { at: Date.now() - HOUR, status: 'skipped', reason: 'plugin-data-limit', files: 0, diskBytes: 0 },
+      nextRunAt: Date.now() + 23 * HOUR,
+    }) }))
+    await mountSection()
+    expect(statusLine()?.dataset.state).toBe('skipped')
+    expect(statusTexts()).toEqual([
+      'The last automatic cleanup was skipped: plugin data is too large to scan. Run a cleanup by hand.',
+      'Next automatic cleanup in 23h.',
+    ])
+
+    wrappers.pop()!.unmount()
+    await withSettings({ fileSweep: 'off' })
+    api.data.summary.mockResolvedValueOnce(dataSummary({ fileSweep: fileSweepStatus({
+      mode: 'off',
+      lastAttempt: { at: Date.now() - DAY, status: 'failed', reason: 'error', files: 0, diskBytes: 0 },
+      nextRunAt: null,
+    }) }))
+    await mountSection()
+    expect(statusLine()?.dataset.state).toBe('failed')
+    expect(statusTexts()).toEqual(['The last automatic cleanup failed. It tries again after the next interval.'])
+  })
+
+  it('says "soon" when the next run is already due', async () => {
+    await withSettings({ fileSweep: 'daily' })
+    api.data.summary.mockResolvedValue(dataSummary({ fileSweep: fileSweepStatus({ mode: 'daily', nextRunAt: Date.now() - 5 * 60_000 }) }))
+    await mountSection()
+    expect(statusTexts()).toEqual(['Next automatic cleanup soon.'])
+  })
+
+  it('uses the mode of the status until the settings are loaded', async () => {
+    api.data.summary.mockResolvedValue(dataSummary({ fileSweep: fileSweepStatus({ mode: 'weekly', nextRunAt: Date.now() + 2 * DAY }) }))
+    await mountSection()
+    expect(useSettingsStore().settings).toBeNull()
+    expect(autoSwitch().dataset.state).toBe('checked')
+    expect(intervalTrigger().dataset.value).toBe('weekly')
+    expect(statusTexts()).toEqual(['Next automatic cleanup in 2d.'])
+  })
+
+  it('takes the state from a check and loads it again after a cleanup (which resets the schedule)', async () => {
+    await withSettings({ fileSweep: 'daily' })
+    await mountSection()
+    expect(statusTexts()).toEqual([])
+    const status: FileSweepStatus = fileSweepStatus({ mode: 'daily', nextRunAt: Date.now() + 10 * HOUR })
+    await checkWith(dataCleanupPreview({ files: 2, fileBytes: 4096, fileSweep: status }))
+    expect(statusTexts()).toEqual(['Next automatic cleanup in 10h.'])
+
+    api.data.cleanup.mockResolvedValue(cleanupResult({ files: 2, fileBytes: 4096 }))
+    api.data.cleanupPreview.mockResolvedValueOnce(dataCleanupPreview({ fileSweep: fileSweepStatus({ mode: 'daily', nextRunAt: Date.now() + 20 * HOUR }) }))
+    api.data.summary.mockResolvedValue(dataSummary({ fileSweep: fileSweepStatus({ mode: 'daily', nextRunAt: Date.now() + 20 * HOUR }) }))
+    await click(removeButton())
+    await click(byTestId(testIds.dataCleanupConfirm))
+    expect(api.data.summary).toHaveBeenCalledTimes(2)
+    expect(statusTexts()).toEqual(['Next automatic cleanup in 20h.'])
+  })
+
+  it('keeps the status line out while GET /data fails', async () => {
+    api.data.summary.mockRejectedValue(new HarnessError({ code: 'internal_error', message: 'Down.' }))
+    await mountSection()
+    expect(statusLine()).toBeNull()
+    expect(autoSwitch().dataset.state).toBe('unchecked')
   })
 })

@@ -210,11 +210,11 @@ automatic file sweep, backlog stabilization.
   - [x] K3 v1.3 upgrade copy + schema + `pnpm db:generate` (coordinator)
   - [x] C19 server skeleton · [x] C20 web skeleton · [x] C21 git runner + spawn guard
   - [x] Gate (incl. v1.3 data upgrade probe) + FREEZE + checkpoint commit
-- [ ] P8-A Features (11 agents)
-  - [ ] W8.1 checkpoint-store · [ ] W8.2 restore-rewind · [ ] W8.3 changes-list · [ ] W8.4 shell-runtime
-  - [ ] W8.5 chat-pipeline · [ ] W8.6 shell-rules · [ ] W8.7 files-maintenance
-  - [ ] W8.8 changes-panel-web · [ ] W8.9 rewind-web · [ ] W8.10 tool-ui-web · [ ] W8.11 settings-web
-  - [ ] Gate + checkpoint commit
+- [x] P8-A Features (11 agents)
+  - [x] W8.1 checkpoint-store · [x] W8.2 restore-rewind · [x] W8.3 changes-list · [x] W8.4 shell-runtime
+  - [x] W8.5 chat-pipeline · [x] W8.6 shell-rules · [x] W8.7 files-maintenance
+  - [x] W8.8 changes-panel-web · [x] W8.9 rewind-web · [x] W8.10 tool-ui-web · [x] W8.11 settings-web
+  - [x] Gate + checkpoint commit
 - [ ] P8-B Feature e2e, docs, fix-ups, final gate
   - [ ] W8.12 e2e-features · [ ] W8.13 docs-final (W8.14 / W8.15 fix-ups only if the P8-A gate is red)
   - [ ] Final gate (e2e ×3, screenshots, audit, v1.3 → v1.4 upgrade, Docker git) + checkpoint commit
@@ -264,3 +264,4 @@ thread.
 | P8-00 | coordinator | CI on `8879e6e` green; Phase 7 ROADMAP boxes ticked; advisories still unpatched (ignores kept); `pnpm check` 6995 tests | `1a95805` |
 | P8-0a | coordinator (K1; K3 seeding done early), C17, C18, D8, D9 (+ coordinator: AGENT.md `allowRules`, phase-doc seed paths, C20-T8 helpers, `shell-rules.ts` comment; C18 follow-up: `&>` asks) | audit ok (55 paths; 10 C17 compile-fix files accepted); frozen install ok; 7514 tests; build ok; CSP 38/38; 10 new routes answer 501 / 400; e2e 77 passed on a fresh `.tmp/e2e`; TypeScript 6.0.3 only | (this commit) |
 | P8-0b | coordinator (K3: schema + `0005_workspace_checkpoints`, v1.3 seed from a `1a95805` worktree), C19, C20, C21 (+ coordinator: phase-doc deviations from C20 (UI.md 10.5 / 11.5 won), the rewind contract (RewindDialog calls the API itself), P8-A ownership additions; C21's `trackGroup` CCR declined: git keeps its own live-group set) | audit ok (117 paths; 3 C19 test fixes + the page test accepted); `0005` = 2 CREATE TABLE + 5 CREATE INDEX; 7722 tests; build ok; CSP 38/38; e2e 77 passed on a fresh `.tmp/e2e`; upgrade probe on a v1.3 copy 19/19 (6 migrations, empty new tables, no FK violations, `_files.lastCleanup` kept, secrets / MCP header / share / pending approval / project + old tool parts intact, `fileSweep` off, orphan kept); FREEZE | (this commit) |
+| P8-A | W8.1 – W8.11 (+ coordinator: `deps.test.ts` phase 8 tests rewritten for the implemented members, `core-workspace/index.test.ts` `shell: shellPolicy`; follow-ups: W8.10 `currentShellCwd` aligned with the server's skip rule) | audit ok (152 paths, no frozen file touched); 8327 tests; build ok; CSP 38/38; probes 57/57 (`.tmp/gates/P8-A/probe.mjs`: checkpoints + journal rows + 0700 store, changes list, rewind preview / apply / idempotent / undo / conflict skip + force, 400 non-user message, chat revert + stale 409 + undo, run-active 409 from another chat of the project, sticky cwd + clamp + no env persistence, rules 201 / 409 / refused 400 / allowed in ask / compound, substitution and redirection ask / project scoping / `override: allow` 400, git modified + untracked + revert / undo both, not-a-repo without discovering the repository above, malicious repository config fires nothing, git missing, automatic sweep (orphan removed, plugin-data id kept, checkpoint blob untouched, status + next run, no ids outside the access log, test variable ignored without the mock flag), upgrade (old project chat: no changes, nothing to rewind, Git view works, sweep off)); e2e 77 passed on a fresh `.tmp/e2e`; screenshots of the panel (pane, diff, Git, revert confirm), rewind dialog, shell approval rule, Settings → Projects rules, Data automatic cleanup, mobile sheet reviewed; `pnpm audit --prod` clean (2 ignored) | (this commit) |

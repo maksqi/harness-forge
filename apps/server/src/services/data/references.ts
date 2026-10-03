@@ -147,14 +147,15 @@ export function collectFileIds(value: unknown, ids: Set<string>): void {
     ids.add(`file_${match[1]}`)
 }
 
-/** Scans one source in keyset batches by `rowid`. */
-async function scanSource(db: Db, source: ReferenceSource, ids: Set<string>, batch: number): Promise<void> {
+/** Scans one source in keyset batches by `rowid` (the signal is checked before each batch). */
+async function scanSource(db: Db, source: ReferenceSource, ids: Set<string>, batch: number, signal: AbortSignal | undefined): Promise<void> {
   const tableName = getTableConfig(source.table).name
   const columns = source.columns.map(column => sql.identifier(column.name))
   const selected = sql.join(columns.map((column, index) => sql`${column} AS ${sql.identifier(`c${index}`)}`), sql`, `)
   const filter = sql.join(columns.map(column => sql`instr(${column}, 'file_') > 0`), sql` OR `)
   let cursor = Number.MIN_SAFE_INTEGER
   for (;;) {
+    signal?.throwIfAborted()
     const after = cursor
     const rows = await guardDb(() => db.all<Record<string, unknown>>(sql`
       SELECT rowid AS k, ${selected} FROM ${sql.identifier(tableName)}
@@ -174,6 +175,8 @@ async function scanSource(db: Db, source: ReferenceSource, ids: Set<string>, bat
 export interface ReferenceScanOptions {
   /** Rows per batch (default `REFERENCE_BATCH`; tests). */
   batch?: number
+  /** Phase 8: stops the scan between batches (the automatic sweep is aborted by `data.stop()`). */
+  signal?: AbortSignal
 }
 
 /** Every file id referenced by a scanned column (a loose superset of the ids in use). */
@@ -181,6 +184,6 @@ export async function collectReferencedFileIds(db: Db, options: ReferenceScanOpt
   const batch = options.batch ?? REFERENCE_BATCH
   const ids = new Set<string>()
   for (const source of REFERENCE_SOURCES)
-    await scanSource(db, source, ids, batch)
+    await scanSource(db, source, ids, batch, options.signal)
   return ids
 }

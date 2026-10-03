@@ -22,7 +22,7 @@ afterEach(() => {
 
 describe('useChangesPanel', () => {
   it('starts closed on This chat at 440px, with read-only open and focusRequest, and is one shared state', async () => {
-    const { CHANGES_SHORTCUT, CHANGES_WIDTH, useChangesPanel } = await freshModule()
+    const { CHANGES_SHORTCUT, CHANGES_SHORTCUT_KEYS, CHANGES_WIDTH, useChangesPanel } = await freshModule()
     const panel = useChangesPanel()
     expect(panel.open.value).toBe(false)
     expect(panel.view.value).toBe('chat')
@@ -33,6 +33,7 @@ describe('useChangesPanel', () => {
     expect(useChangesPanel()).toBe(panel)
     expect(CHANGES_WIDTH).toEqual({ default: 440, min: 320, max: 720 })
     expect(CHANGES_SHORTCUT).toBe('toggle-changes')
+    expect(CHANGES_SHORTCUT_KEYS).toBe('alt+code:KeyC')
   })
 
   it('reads the stored state and clamps the stored width', async () => {

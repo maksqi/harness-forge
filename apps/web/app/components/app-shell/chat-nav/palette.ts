@@ -3,7 +3,8 @@
 //
 // Order: chats first (recent chats for an empty query, search results otherwise), then Actions, Projects (Phase 7,
 // docs/UI.md 7.20; only while searching), Go to, Default model (only while searching: the catalog is long) and Theme.
-// Items keep their definition order; sections without matches are left out.
+// Items keep their definition order; sections without matches are left out. Phase 8 (docs/UI.md 7.21, 12): on a project
+// chat page the Actions end with "Show changes" / "Hide changes" (`toggle-changes`, Alt+C).
 import type { ChatSummary } from '@harness-forge/shared'
 import type { Component } from 'vue'
 import type { ThemePreference } from '../theme'
@@ -17,8 +18,10 @@ import {
   KeyboardIcon,
   MessageSquareIcon,
   PanelLeftIcon,
+  PanelRightIcon,
   SquarePenIcon,
 } from '@lucide/vue'
+import { CHANGES_SHORTCUT, CHANGES_SHORTCUT_KEYS } from '~/composables/useChangesPanel'
 import { SETTINGS_LINKS } from '../navigation'
 import { THEME_OPTIONS } from '../theme'
 
@@ -36,6 +39,7 @@ export type PaletteCommand
     | { type: 'theme', value: ThemePreference }
     | { type: 'project-filter', filter: string }
     | { type: 'move-chat', chatId: string, projectId: string | null }
+    | { type: 'toggle-changes' }
 
 export type PaletteSectionId = 'chats' | 'actions' | 'projects' | 'navigation' | 'models' | 'theme'
 
@@ -100,6 +104,11 @@ export interface PaletteInput {
   projectFilter?: string
   /** Phase 7: the open chat and its project (its "Move chat…" items); null or omitted without one. */
   openChat?: { id: string, projectId: string | null } | null
+  /**
+   * Phase 8: on a project chat page, the changes panel's state ("Show changes" / "Hide changes"; `shortcut`: the Alt+C
+   * hint shows, i.e. Alt shortcuts are on); null or omitted elsewhere.
+   */
+  changesPanel?: { open: boolean, shortcut: boolean } | null
 }
 
 interface StaticItem extends PaletteItem {
@@ -139,13 +148,25 @@ function chatItem(chat: ChatSummary, withSnippet: boolean): PaletteItem {
   return item
 }
 
-function actionItems(canToggleSidebar: boolean): StaticItem[] {
+const CHANGES_KEYWORDS = ['changes', 'diff', 'git', 'files', 'panel', 'revert']
+
+function actionItems(canToggleSidebar: boolean, changesPanel: PaletteInput['changesPanel']): StaticItem[] {
   const items: StaticItem[] = [
     { value: 'new-chat', label: 'New chat', icon: SquarePenIcon, keys: 'mod+shift+o', command: { type: 'new-chat' }, keywords: ['start', 'create', 'conversation'] },
     { value: 'show-shortcuts', label: 'Keyboard shortcuts', icon: KeyboardIcon, keys: 'mod+/', command: { type: 'show-shortcuts' }, keywords: ['help', 'keys', 'hotkeys'] },
   ]
   if (canToggleSidebar)
     items.push({ value: 'toggle-sidebar', label: 'Toggle sidebar', icon: PanelLeftIcon, keys: 'mod+b', command: { type: 'toggle-sidebar' }, keywords: ['collapse', 'expand', 'hide', 'show'] })
+  if (changesPanel) {
+    items.push({
+      value: CHANGES_SHORTCUT,
+      label: changesPanel.open ? 'Hide changes' : 'Show changes',
+      icon: PanelRightIcon,
+      keys: changesPanel.shortcut ? CHANGES_SHORTCUT_KEYS : undefined,
+      command: { type: 'toggle-changes' },
+      keywords: CHANGES_KEYWORDS,
+    })
+  }
   return items
 }
 
@@ -236,7 +257,7 @@ export function buildPaletteSections(input: PaletteInput): PaletteSection[] {
   const query = input.query.trim()
   const sections: PaletteSection[] = [
     { id: 'chats', heading: query ? 'Chats' : 'Recent chats', items: chatItems(input, query) },
-    { id: 'actions', heading: 'Actions', items: filterStatic(query, actionItems(input.canToggleSidebar)) },
+    { id: 'actions', heading: 'Actions', items: filterStatic(query, actionItems(input.canToggleSidebar, input.changesPanel)) },
     { id: 'projects', heading: 'Projects', items: filterStatic(query, projectItems(input, query)) },
     { id: 'navigation', heading: 'Go to', items: filterStatic(query, navigationItems()) },
     { id: 'models', heading: 'Default model', items: modelItems(input, query) },

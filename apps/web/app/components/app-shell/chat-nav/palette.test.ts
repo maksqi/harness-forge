@@ -206,6 +206,28 @@ describe('buildPaletteSections: projects (Phase 7)', () => {
   })
 })
 
+describe('buildPaletteSections: changes panel (Phase 8)', () => {
+  function actions(overrides: Partial<PaletteInput>) {
+    return buildPaletteSections(input(overrides)).find(section => section.id === 'actions')?.items ?? []
+  }
+
+  it('ends the actions with "Show changes" / "Hide changes" on a project chat page only', () => {
+    expect(actions({}).map(item => item.value)).not.toContain('toggle-changes')
+    expect(actions({ changesPanel: null }).map(item => item.value)).not.toContain('toggle-changes')
+
+    const show = actions({ changesPanel: { open: false, shortcut: true } }).at(-1)!
+    expect(show).toMatchObject({ value: 'toggle-changes', label: 'Show changes', keys: 'alt+code:KeyC', command: { type: 'toggle-changes' } })
+    expect(actions({ changesPanel: { open: true, shortcut: true } }).at(-1)!.label).toBe('Hide changes')
+    expect(actions({ changesPanel: { open: false, shortcut: false } }).at(-1)!.keys).toBeUndefined()
+  })
+
+  it('matches its keywords: changes, diff, git, files', () => {
+    for (const query of ['changes', 'diff', 'git', 'files'])
+      expect(actions({ query, changesPanel: { open: false, shortcut: true } }).map(item => item.value)).toContain('toggle-changes')
+    expect(actions({ query: 'theme', changesPanel: { open: false, shortcut: true } }).map(item => item.value)).not.toContain('toggle-changes')
+  })
+})
+
 describe('matchesQuery', () => {
   it('matches every word, ignoring case and accents', () => {
     expect(matchesQuery('théme DARK', 'Theme: Dark')).toBe(true)

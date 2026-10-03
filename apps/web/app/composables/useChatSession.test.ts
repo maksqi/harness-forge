@@ -1,4 +1,4 @@
-import type { ChatDetail, ChatRequestBody, HarnessUIMessage } from '@harness-forge/shared'
+import type { ChatDetail, ChatRequestBody, HarnessUIMessage, ShellRule } from '@harness-forge/shared'
 import type { UIMessageChunk } from 'ai'
 import type { Mock } from 'vitest'
 import type { MockApi } from '~/utils/testing/mock-api'
@@ -10,7 +10,8 @@ import { effectScope, nextTick } from 'vue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { useProjectsStore } from '~/stores/projects'
-import { catalogModel, chatDetail, chatId, chatSummary, messageBranch, projectId, projectSummary } from '~/utils/testing/fixtures'
+import { useShellRulesStore } from '~/stores/shell-rules'
+import { catalogModel, chatDetail, chatId, chatSummary, messageBranch, projectId, projectSummary, shellRule } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import {
@@ -1136,20 +1137,142 @@ describe('useChatSession: approvals', () => {
 })
 
 describe('useChatSession: workspace 2.0 additions (Phase 8)', () => {
-  it('starts in the project folder (cwd null) until W8.10 derives the sticky shell folder', () => {
+  const P1 = projectId(1)
+
+  function shellPart(endCwd: string | undefined, toolCallId = 'call_sh') {
+    return {
+      type: 'tool-shell',
+      toolCallId,
+      state: 'output-available',
+      input: { command: 'cd sub' },
+      output: { command: 'cd sub', cwd: '.', exitCode: 0, signal: null, timedOut: false, durationMs: 1, stdout: '', stderr: '', stdoutBytes: 0, stderrBytes: 0, ...(endCwd === undefined ? {} : { endCwd }) },
+    }
+  }
+
+  function shellReply(endCwd: string): HarnessUIMessage {
+    return { id: 'msg_assistant0000009', role: 'assistant', metadata: { modelRef: MODEL, startedAt: 1 }, parts: [shellPart(endCwd)] } as HarnessUIMessage
+  }
+
+  /** A new chat in project 1 whose first reply waits for the approval of a shell call. */
+  async function shellApproval() {
+    useProjectsStore().items = [projectSummary({ id: P1, name: 'Website' })]
     const session = newSession()
+    await session.setProject(P1)
+    server.reply(approvalReply(ASSISTANT_ID, 'shell'))
+    await session.send({ text: 'run the tests', files: [] })
+    expect(session.runState.value).toBe('approval')
+    return session
+  }
+
+  function spyCreate(implementation?: (input: { projectId: string | null, prefix: string }) => Promise<ShellRule>) {
+    return vi.spyOn(useShellRulesStore(), 'create').mockImplementation(implementation
+      ?? (async input => shellRule({ projectId: input.projectId, prefix: input.prefix })))
+  }
+
+  it('cwd: the project folder (null) without a shell call, else where the last one on the shown path ended', async () => {
+    expect(newSession().cwd.value).toBeNull()
+    const session = await loadedSession(2, {
+      messages: [userMessage('msg_user000000000001', 'go'), shellReply('packages/web')],
+    })
+    expect(session.cwd.value).toBe('packages/web')
+    // Another version of the reply (a switch shows another path): its own folder.
+    session.chat.messages.value = [userMessage('msg_user000000000001', 'go'), shellReply('src')]
+    expect(session.cwd.value).toBe('src')
+    // A later output without endCwd (not reported, or saved before v1.4) leaves the folder as it was.
+    const unreported = { ...shellReply('x'), id: 'msg_assistant0000010', parts: [shellPart(undefined)] } as HarnessUIMessage
+    session.chat.messages.value = [userMessage('msg_user000000000001', 'go'), shellReply('src'), userMessage('msg_user000000000002', 'again'), unreported]
+    expect(session.cwd.value).toBe('src')
+    // Only such outputs: the project folder.
+    session.chat.messages.value = [userMessage('msg_user000000000001', 'go'), unreported]
     expect(session.cwd.value).toBeNull()
   })
 
-  it('declares allowRules on a decision; the approval still goes out unchanged', async () => {
+  it('approve(): saves each rule of allowRules before the approval goes out', async () => {
+    const session = await shellApproval()
+    const gate = deferred()
+    const create = spyCreate(async (input) => {
+      await gate.promise
+      return shellRule({ projectId: input.projectId, prefix: input.prefix })
+    })
+    server.reply(textReply('ran', ASSISTANT_ID))
+    const approving = session.approve({ id: 'appr_1', approved: true, toolName: 'shell', alwaysAllow: false, allowRules: { prefixes: ['pnpm test', 'git status'], scope: 'project' } })
+    await until(() => create.mock.calls.length === 1, 'first rule')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    // Nothing is answered while a rule is being saved.
+    expect(server.calls).toHaveLength(1)
+    gate.resolve()
+    await approving
+    await until(() => server.calls.length === 2 && session.runState.value === 'idle', 'continuation')
+    expect(create.mock.calls.map(([input]) => input)).toEqual([
+      { projectId: P1, prefix: 'pnpm test' },
+      { projectId: P1, prefix: 'git status' },
+    ])
+    const continued = (mock.fetch as Mock).mock.invocationCallOrder[1]!
+    expect(Math.max(...create.mock.invocationCallOrder)).toBeLessThan(continued)
+    // The approval itself is unchanged, and no tool override is written for the shell.
+    expect(chatBodies()[1]!.message.parts.find(part => part.type === 'tool-shell')).toMatchObject({ state: 'approval-responded', approval: { id: 'appr_1', approved: true } })
+    expect(api.tools.update).not.toHaveBeenCalled()
+  })
+
+  it('approve(): All projects saves global rules; an existing rule (409 exists) counts as saved', async () => {
+    const session = await shellApproval()
+    const create = spyCreate(async (input) => {
+      if (input.prefix === 'ls')
+        throw new HarnessError({ code: 'conflict', message: 'This rule already exists.', details: { reason: 'exists' } })
+      return shellRule({ projectId: input.projectId, prefix: input.prefix })
+    })
+    server.reply(textReply('ran', ASSISTANT_ID))
+    await session.approve({ id: 'appr_1', approved: true, toolName: 'shell', alwaysAllow: false, allowRules: { prefixes: ['ls', 'pnpm test'], scope: 'global' } })
+    await until(() => server.calls.length === 2, 'continuation')
+    expect(create.mock.calls.map(([input]) => input)).toEqual([{ projectId: null, prefix: 'ls' }, { projectId: null, prefix: 'pnpm test' }])
+  })
+
+  it('approve(): a rule that could not be saved still sends the approval, then rethrows (the other rules are tried)', async () => {
+    const session = await shellApproval()
+    const create = spyCreate(async (input) => {
+      if (input.prefix === 'pnpm test')
+        throw new HarnessError({ code: 'validation_error', message: 'This project already has 200 rules.' })
+      return shellRule({ projectId: input.projectId, prefix: input.prefix })
+    })
+    server.reply(textReply('ran', ASSISTANT_ID))
+    const failure = await session.approve({ id: 'appr_1', approved: true, toolName: 'shell', alwaysAllow: false, allowRules: { prefixes: ['pnpm test', 'git status'], scope: 'project' } })
+      .then(() => null, (error: unknown) => error)
+    expect(failure).toBeInstanceOf(HarnessError)
+    expect(failure).toMatchObject({ code: 'validation_error', message: 'This project already has 200 rules.' })
+    expect(create).toHaveBeenCalledTimes(2)
+    await until(() => server.calls.length === 2, 'continuation')
+    expect(chatBodies()[1]!.message.parts.find(part => part.type === 'tool-shell')).toMatchObject({ approval: { approved: true } })
+  })
+
+  it('approve(): "This project" in a chat without a project saves nothing, answers, then reports it', async () => {
     const session = newSession()
     server.reply(approvalReply(ASSISTANT_ID, 'shell'))
     await session.send({ text: 'run the tests', files: [] })
+    const create = spyCreate()
     server.reply(textReply('ran', ASSISTANT_ID))
-    await session.approve({ id: 'appr_1', approved: true, toolName: 'shell', alwaysAllow: false, allowRules: { prefixes: ['pnpm test'], scope: 'project' } })
+    await expect(session.approve({ id: 'appr_1', approved: true, toolName: 'shell', alwaysAllow: false, allowRules: { prefixes: ['pnpm test'], scope: 'project' } }))
+      .rejects
+      .toMatchObject({ code: 'validation_error' })
+    expect(create).not.toHaveBeenCalled()
     await until(() => server.calls.length === 2, 'continuation')
-    expect(server.calls[1]!.body!.message.parts.find(part => part.type === 'tool-shell'))
-      .toMatchObject({ approval: { approved: true } })
+  })
+
+  it('approve(): a denial saves no rule', async () => {
+    const session = await shellApproval()
+    const create = spyCreate()
+    server.reply(textReply('skipped', ASSISTANT_ID))
+    await session.approve({ id: 'appr_1', approved: false, toolName: 'shell', alwaysAllow: true, allowRules: { prefixes: ['pnpm test'], scope: 'project' } })
+    await until(() => server.calls.length === 2, 'continuation')
+    expect(create).not.toHaveBeenCalled()
+    expect(api.tools.update).not.toHaveBeenCalled()
+  })
+
+  it('approve(): "Always allow" never writes an allow override for the shell (shell rules replace it)', async () => {
+    const session = await shellApproval()
+    server.reply(textReply('ran', ASSISTANT_ID))
+    await session.approve({ id: 'appr_1', approved: true, toolName: 'shell', alwaysAllow: true })
+    await until(() => server.calls.length === 2, 'continuation')
+    expect(api.tools.update).not.toHaveBeenCalled()
   })
 })
 

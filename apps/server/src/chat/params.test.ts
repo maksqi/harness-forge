@@ -190,7 +190,7 @@ describe('workspace instructions (Phase 7)', () => {
       '- Read a file with read_file before you change it.',
       '- edit_file: old_string must match the file exactly, including whitespace and indentation, and must be unique in it; add surrounding lines to make it unique, or set replace_all.',
       '- Prefer edit_file for changes to an existing file; use write_file to create a file or to replace all of its content.',
-      '- Each shell call runs in a new process: cd does not persist between calls (use cwd, or cd dir && command), there is no stdin (interactive commands cannot work), and background processes are stopped when the command ends.',
+      '- Each shell call runs in a new process: the working folder carries over (cd persists inside the project folder), environment variables do not; there is no stdin (interactive commands cannot work), and background processes are stopped when the command ends.',
     ].join('\n'))
     const readOnly = workspaceBlock(workspace, ['read_file', 'list_directory'], 'linux')
     expect(readOnly.split('\n')).toEqual(['Project "Demo app", folder /srv/projects/demo (Linux).', '- Use paths relative to the project folder.'])

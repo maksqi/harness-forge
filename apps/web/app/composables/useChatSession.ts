@@ -21,7 +21,9 @@
 //
 // Workspace 2.0 (Phase 8, ADR-038; C20 declares, W8.10 implements; frozen from Gate P8-0b): `cwd` is the folder the
 // chat's next shell call starts in, derived from the shown path like the server does (`currentShellCwd`), and a shell
-// approval may carry `allowRules` (the rules to create first; `approve()` ignores them until W8.10).
+// approval may carry `allowRules`: `approve()` saves those shell rules first (`POST /shell-rules`, one per prefix), so
+// the continuation already runs with them; a rule that could not be saved never holds the approval back, its failure
+// is rethrown after the approval went out. "Always allow" never writes an `allow` override for an `execute` tool.
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   ChatDetail,
@@ -35,13 +37,21 @@ import type {
   MessageBranch,
   ReasoningEffort,
   ToolMode,
+  WorkspaceAccess,
 } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ComputedRef, EffectScope, Ref, WritableComputedRef } from 'vue'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
 import type { ChatRunState as ChatListRunState } from '~/stores/chats'
 import { useChat } from '@ai-sdk/vue'
-import { createChatId, createMessageId, harnessDataSchemas, HarnessError, messageMetadataSchema } from '@harness-forge/shared'
+import {
+  createChatId,
+  createMessageId,
+  harnessDataSchemas,
+  HarnessError,
+  messageMetadataSchema,
+  WORKSPACE_TOOL_ACCESS,
+} from '@harness-forge/shared'
 import {
   APICallError,
   DefaultChatTransport,
@@ -51,7 +61,8 @@ import {
   lastAssistantMessageIsCompleteWithApprovalResponses,
 } from 'ai'
 import { computed, effectScope, getCurrentScope, nextTick, onScopeDispose, ref, shallowRef, watch } from 'vue'
-import { currentShellCwd } from '~/components/chat/parts/tools/workspace-tools'
+import { currentShellCwd, isWorkspaceToolName } from '~/components/chat/parts/tools/workspace-tools'
+import { ruleProjectId } from '~/components/workspace/allowlist/allow-rule'
 import { useApi, useApiFetch } from '~/composables/useApi'
 import { useImageOptions } from '~/composables/useImageOptions'
 import { useServerEvents } from '~/composables/useServerEvents'
@@ -60,6 +71,7 @@ import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectsStore } from '~/stores/projects'
 import { useSettingsStore } from '~/stores/settings'
+import { useShellRulesStore } from '~/stores/shell-rules'
 import { hasErrorCode, toHarnessError } from '~/utils/errors'
 
 /** Sessions kept alive at once (the least recently used idle one is evicted first). */
@@ -109,8 +121,7 @@ export interface ToolApprovalDecision {
   /**
    * + Phase 8 (ADR-038; W8.10): "Always allow commands starting with" on a shell approval: `approve()` first awaits
    * `POST /shell-rules` for each prefix (projectId: the session's project for 'project', null for 'global'; 409 exists
-   * counts as saved), then sends the approval; a failed save still sends it, then rethrows. Declared in P8-0b and
-   * ignored until W8.10.
+   * counts as saved), then sends the approval; a failed save still sends it, then rethrows. Ignored on a denial.
    */
   allowRules?: AllowRules
 }
@@ -383,6 +394,7 @@ interface SessionDeps {
   projects: ReturnType<typeof useProjectsStore>
   settings: ReturnType<typeof useSettingsStore>
   imageOptions: ReturnType<typeof useImageOptions>
+  shellRules: ReturnType<typeof useShellRulesStore>
 }
 
 interface ChatChoices {
@@ -392,7 +404,7 @@ interface ChatChoices {
 }
 
 function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSession {
-  const { api, apiFetch, chats, models, plugins, projects, settings, imageOptions } = deps
+  const { api, apiFetch, chats, models, plugins, projects, settings, imageOptions, shellRules } = deps
   // Watchers created later (resume, stop) belong to the session, not to whichever component is active then.
   const sessionScope = getCurrentScope()
   function inSession<T>(create: () => T): T {
@@ -1042,17 +1054,54 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     }
   }
 
+  /** `ToolSummary.workspace` of a tool; before the tool list has loaded, the access of the `core-workspace` tool. */
+  function toolAccess(toolName: string): WorkspaceAccess | null {
+    const tool = plugins.tools.find(item => item.name === toolName)
+    if (tool)
+      return tool.workspace
+    return isWorkspaceToolName(toolName) ? WORKSPACE_TOOL_ACCESS[toolName] : null
+  }
+
+  /**
+   * The shell rules of "Always allow commands starting with" (ADR-038): one `POST /shell-rules` per prefix, in order
+   * (`409 conflict` reason `exists` counts as saved). Every prefix is tried; resolves with the first failure, or null.
+   */
+  async function saveShellRules(rules: NonNullable<ToolApprovalDecision['allowRules']>): Promise<HarnessError | null> {
+    const ruleProject = ruleProjectId(rules.scope, projectId.value)
+    if (rules.scope === 'project' && ruleProject === null)
+      return new HarnessError({ code: 'validation_error', message: 'This chat has no project. Choose All projects for the rule.' })
+    let failure: HarnessError | null = null
+    for (const prefix of rules.prefixes) {
+      try {
+        await shellRules.create({ projectId: ruleProject, prefix })
+      }
+      catch (error) {
+        if (conflictReason(error) !== 'exists')
+          failure ??= toHarnessError(error)
+      }
+    }
+    return failure
+  }
+
   async function approve(decision: ToolApprovalDecision): Promise<void> {
     // "Accept all edits in this chat" (ADR-032): the mode is picked (and saved on the chat) first, so the continuation
     // this response sends already runs in edits mode.
     if (decision.approved && decision.acceptEdits && toolMode.value !== 'edits')
       toolMode.value = 'edits'
-    const preference = decision.approved && decision.alwaysAllow
+    // Shell rules (ADR-038) are saved before the approval goes out, so the continuation already runs with them. A rule
+    // that could not be saved never holds the approval back: its failure is rethrown afterwards.
+    const ruleFailure = decision.approved && decision.allowRules && decision.allowRules.prefixes.length > 0
+      ? await saveShellRules(decision.allowRules)
+      : null
+    // The server refuses an `allow` override for tools with workspace access `execute`: they use shell rules instead.
+    const preference = decision.approved && decision.alwaysAllow && toolAccess(decision.toolName) !== 'execute'
       ? plugins.setToolPref(decision.toolName, { override: 'allow' })
       : null
     await chat.addToolApprovalResponse({ id: decision.id, approved: decision.approved })
     if (preference)
       await preference
+    if (ruleFailure)
+      throw ruleFailure
   }
 
   function markAborted(messageId: string) {
@@ -1193,6 +1242,7 @@ export function useChatSession(id: string, options: { isNew?: boolean } = {}): C
       projects: useProjectsStore(),
       settings: useSettingsStore(),
       imageOptions: useImageOptions(),
+      shellRules: useShellRulesStore(),
     }
     const scope = effectScope(true)
     const session = scope.run(() => createSession(id, options.isNew === true, deps))!

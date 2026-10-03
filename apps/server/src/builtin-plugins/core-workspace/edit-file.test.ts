@@ -126,6 +126,25 @@ describe('edit_file', () => {
   it('fails without a project folder', async () => {
     await expect(tool.execute({ path: 'a', old_string: 'a', new_string: 'b' }, contextWithoutWorkspace())).rejects.toThrow(NO_WORKSPACE_MESSAGE)
   })
+
+  it('parallel edits of one file serialize: every edit lands (no lost update), each diff from the text it edited (lock order, not call order)', async () => {
+    await ws.write({ 'race.txt': 'alpha\nbeta\ngamma\n' })
+    const outputs = await Promise.all([
+      tool.execute({ path: 'race.txt', old_string: 'alpha', new_string: 'ALPHA' }, ws.context()),
+      tool.execute({ path: 'race.txt', old_string: 'beta', new_string: 'BETA' }, ws.context()),
+      tool.execute({ path: 'race.txt', old_string: 'gamma', new_string: 'GAMMA' }, ws.context()),
+    ])
+    expect(await content('race.txt')).toBe('ALPHA\nBETA\nGAMMA\n')
+    expect(outputs.map(output => output.diff!.hunks[0]!.lines.filter(line => line.startsWith('-')))).toEqual([['-alpha'], ['-beta'], ['-gamma']])
+    // Whichever edit took the lock last saw the two others' results.
+    const contexts = outputs.map(output => output.diff!.hunks[0]!.lines.filter(line => line.startsWith(' ')))
+    expect(contexts.some(lines => lines.length === 2 && lines.every(line => line === line.toUpperCase()))).toBe(true)
+    // An edit whose text disappeared under a parallel edit fails like any stale edit.
+    await ws.write({ 'race.txt': 'once\n' })
+    const results = await Promise.allSettled(['first', 'second'].map(word => tool.execute({ path: 'race.txt', old_string: 'once', new_string: word }, ws.context())))
+    expect(results.map(result => result.status).sort()).toEqual(['fulfilled', 'rejected'])
+    expect(await content('race.txt')).toBe(results[0]!.status === 'fulfilled' ? 'first\n' : 'second\n')
+  })
 })
 
 describe('edit helpers', () => {

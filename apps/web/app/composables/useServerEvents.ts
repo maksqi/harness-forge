@@ -5,8 +5,10 @@
 // list and shows a toast, and every chat session it lists reloads its own path (useChatSession). The server closes
 // every event stream right after `key.rotated`, so the client reconnects (or lands on /login when signed out).
 // Phase 8 (ADR-036 - ADR-038): `workspace.changed`, `run.finished`, `chat.deleted` and `project.changed` also go to the
-// workspace store (the changes panel); `project.changed` to the shell rules store (a deleted project drops its rules);
-// a reconnect refreshes the loaded workspace entries and the loaded shell rules.
+// workspace store (the changes panel; it refetches the loaded entries, debounced 300 ms per chat, and drops the entries
+// of deleted chats and of a deleted project's chats, so it sees `project.changed` before the chats store detaches
+// them); `project.changed` to the shell rules store (a deleted project drops its rules); a reconnect refreshes the loaded
+// workspace entries and the loaded shell rules.
 import type { ServerEvent, ServerEventOf, ServerEventType } from '@harness-forge/shared'
 import type { Ref } from 'vue'
 import type { EventStreamStatus } from '~/utils/event-stream'
@@ -136,8 +138,9 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
       break
     case 'project.changed':
       safely(() => useProjectsStore().applyEvent(event))
-      safely(() => useChatsStore().applyEvent(event))
+      // Before the chats store detaches a deleted project's chats: the workspace store finds them by their project.
       safely(() => useWorkspaceStore().applyEvent(event))
+      safely(() => useChatsStore().applyEvent(event))
       safely(() => useShellRulesStore().applyEvent(event))
       break
     case 'workspace.changed':

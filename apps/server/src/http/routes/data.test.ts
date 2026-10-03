@@ -1,12 +1,15 @@
 import type { TestApp } from '../../testing/create-test-app.ts'
 // Bulk data routes (API.md 5.19): summary, the streamed export (headers, HEAD, 413), multipart import (fields, errors,
-// body limit, busy), delete-all (confirmation, fresh auth), the orphaned file cleanup (preview, run, 409 busy).
+// body limit, busy), delete-all (confirmation, fresh auth), the orphaned file cleanup (preview, run, 409 busy); Phase 8:
+// the automatic sweep status (`fileSweep`) and the plugin data scan (`pluginData`).
 import type { FakeDataService } from '../../testing/fakes.ts'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { dataCleanupPreviewSchema, dataCleanupResultSchema, dataImportResultSchema, dataSummarySchema, harnessErrorEnvelopeSchema, LIMITS } from '@harness-forge/shared'
 import { strFromU8, unzipSync } from 'fflate'
 import { afterEach, describe, expect, it } from 'vitest'
 import { files } from '../../db/schema.ts'
+import { FILE_STATE_SETTING } from '../../services/data/cleanup.ts'
 import { assistant, chatId, closeDataApps, dataApp, filePart, importForm, user } from '../../services/data/fixtures.test-util.ts'
 import { fileUrl } from '../../services/files/index.ts'
 import { blobPathOf, DAY_MS, seedStoredFile } from '../../services/files/store.test-util.ts'
@@ -69,7 +72,7 @@ describe('gET /api/data', () => {
     const response = await app.t.request('/api/data')
     expect(response.status).toBe(200)
     expect(response.headers.get('cache-control')).toBe('no-store')
-    expect(dataSummarySchema.parse(await response.json())).toEqual({ chats: 1, archivedChats: 0, messages: 2, files: 0, fileBytes: 0, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null } })
+    expect(dataSummarySchema.parse(await response.json())).toEqual({ chats: 1, archivedChats: 0, messages: 2, files: 0, fileBytes: 0, fileSweep: { mode: 'off', lastAttempt: null, nextRunAt: null }, checkpoints: { bytes: 0, blobs: 0 } })
   })
 })
 
@@ -315,5 +318,58 @@ describe('gET / POST /api/data/cleanup', () => {
     expect((await app.t.request('/api/data/cleanup', { headers: { cookie } })).status).toBe(200)
     expect((await app.t.request('/api/data/cleanup', { method: 'POST', headers: { cookie } })).status).toBe(200)
     expect((await app.t.request('/api/data/cleanup', { method: 'POST' })).status).toBe(401)
+  })
+})
+
+// ---------- Phase 8 (W8.7, ADR-039) ----------
+
+describe('the automatic file sweep status and the plugin data scan (Phase 8)', () => {
+  it('gET /api/data reports the fileSweep setting, the last automatic attempt and the next run (no scan)', async () => {
+    const app = await dataApp({ data: { now: () => Date.UTC(2026, 9, 3, 12) } })
+    const at = Date.UTC(2026, 9, 2, 3)
+    await app.deps.settings.update({ fileSweep: 'weekly' })
+    await app.deps.settings.setInternal(FILE_STATE_SETTING, {
+      lastCleanup: at,
+      lastAutoSweep: { at, status: 'done', reason: null, files: 4, diskBytes: 2_000_000 },
+    })
+    let scans = 0
+    const watched = await dataApp({
+      files: inner => ({
+        ...inner,
+        sweep: async (input) => {
+          scans += 1
+          return inner.sweep(input)
+        },
+      }),
+    })
+    const response = await app.t.request('/api/data')
+    expect(response.status).toBe(200)
+    expect(dataSummarySchema.parse(await response.json()).fileSweep).toEqual({
+      mode: 'weekly',
+      lastAttempt: { at, status: 'done', reason: null, files: 4, diskBytes: 2_000_000 },
+      nextRunAt: at + 7 * DAY_MS,
+    })
+    expect((await watched.t.request('/api/data')).status).toBe(200)
+    expect(scans).toBe(0)
+
+    // A malformed stored attempt counts as none.
+    await app.deps.settings.setInternal(FILE_STATE_SETTING, { lastAutoSweep: { at: 'yesterday', status: 'done' } })
+    expect(dataSummarySchema.parse(await (await app.t.request('/api/data')).json()).fileSweep.lastAttempt).toBeNull()
+  })
+
+  it('gET / POST /api/data/cleanup report pluginData: partial over the scan budget; a manual run still removes orphans', async () => {
+    const app = await dataApp({ data: { pluginDataBudget: { maxBytes: 16 } } })
+    await seedStoredFile(app.deps, new TextEncoder().encode('orphan'), { createdAt: Date.now() - 2 * DAY_MS })
+    const big = join(app.t.env.paths.pluginData, 'p', 'big.txt')
+    mkdirSync(join(big, '..'), { recursive: true })
+    writeFileSync(big, 'x'.repeat(64))
+    await app.deps.settings.update({ fileSweep: 'daily' })
+
+    const preview = dataCleanupPreviewSchema.parse(await (await app.t.request('/api/data/cleanup')).json())
+    expect(preview).toMatchObject({ files: 1, pluginData: 'partial', fileSweep: { mode: 'daily', lastAttempt: null } })
+    expect(preview.fileSweep.nextRunAt).toEqual(expect.any(Number))
+    const result = dataCleanupResultSchema.parse(await (await app.t.request('/api/data/cleanup', { method: 'POST' })).json())
+    expect(result).toMatchObject({ files: 1, pluginData: 'partial' })
+    expect(await app.t.db.select().from(files)).toEqual([])
   })
 })

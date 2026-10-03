@@ -15,6 +15,10 @@
 // leftover blobs and the temp files). With `dryRun` nothing is deleted: the counts say what a run would remove (the
 // DELETE re-check aside). Paths come only from validated sha256 names, never from request input; only counts are
 // logged.
+//
+// Phase 8 (ADR-039, W8.7): `FileSweepInput.signal` is checked before each keyset batch, each DELETE chunk and each shard
+// of the walk: the batch in progress finishes, then the sweep rejects with the signal's reason (what was removed so far
+// stays removed).
 import type { Stats } from 'node:fs'
 import type { Db } from '../../db/client.ts'
 import type { Logger } from '../../logger.ts'
@@ -121,6 +125,7 @@ async function classifyRows(context: SweepContext, input: FileSweepInput, result
   const keptShas = new Set<string>()
   let cursor = ''
   for (;;) {
+    input.signal?.throwIfAborted()
     const after = cursor
     const rows = await guardDb(() => context.db
       .select({ id: files.id, sha256: files.sha256, size: files.size, createdAt: files.createdAt })
@@ -148,9 +153,13 @@ async function classifyRows(context: SweepContext, input: FileSweepInput, result
 }
 
 /** Steps 2 and 3 for real: deletes the candidates (re-checked) and unlinks the blobs no row keeps (`diskBytes`). */
-async function removeRows(context: SweepContext, candidates: readonly FileRowRef[], result: FileSweepResult): Promise<void> {
+async function removeRows(context: SweepContext, input: FileSweepInput, candidates: readonly FileRowRef[], result: FileSweepResult): Promise<void> {
   const deleted: FileRowRef[] = []
   for (const chunk of chunks(candidates.map(row => row.id), BATCH)) {
+    if (input.signal?.aborted === true) {
+      // The rows deleted so far still lose their blobs below; the sweep rejects afterwards.
+      break
+    }
     const rows = await guardDb(() => context.db
       .delete(files)
       .where(and(inArray(files.id, chunk), notInArray(files.id, referencedFileIdsQuery())))
@@ -212,6 +221,7 @@ async function walkStore(context: SweepContext, input: FileSweepInput, result: F
   }
   const tempCutoff = context.now - TEMP_FILE_MAX_AGE_MS
   for (const shard of shards.sort()) {
+    input.signal?.throwIfAborted()
     if (!SHARD_NAME.test(shard))
       continue
     const directory = join(context.root, shard)
@@ -263,12 +273,14 @@ async function walkStore(context: SweepContext, input: FileSweepInput, result: F
 
 /** The sweep itself; the caller holds the exclusive store gate. */
 export async function sweepStore(context: SweepContext, input: FileSweepInput): Promise<FileSweepResult> {
+  input.signal?.throwIfAborted()
   const result: FileSweepResult = { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, recentFiles: 0 }
   const { candidates, keptShas } = await classifyRows(context, input, result)
   if (input.dryRun)
     await countRows(context, candidates, keptShas, result)
   else if (candidates.length > 0)
-    await removeRows(context, candidates, result)
+    await removeRows(context, input, candidates, result)
+  input.signal?.throwIfAborted()
   await walkStore(context, input, result)
   return result
 }

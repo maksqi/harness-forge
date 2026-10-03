@@ -5,6 +5,8 @@ import { DEFAULT_SETTINGS, HarnessError } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
+import { setChangesTarget } from '~/components/workspace/changes/changes-context'
+import { useChangesPanel } from '~/composables/useChangesPanel'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { useChatsStore } from '~/stores/chats'
 import { useProjectsStore } from '~/stores/projects'
@@ -300,5 +302,48 @@ describe('commandPalette', () => {
     wrapper!.unmount()
     wrapper = null
     expect(ids()).not.toContain(GLOBAL_SHORTCUT_IDS.commandPalette)
+  })
+
+  it('offers "Show changes" / "Hide changes" on a project chat page and toggles the panel (Phase 8)', async () => {
+    const panel = useChangesPanel()
+    panel.setOpen(false)
+    const token = Symbol('test-workspace')
+    try {
+      await openPalette()
+      expect(itemValues()).not.toContain('toggle-changes')
+
+      // The open chat's ChatWorkspace publishes its project.
+      useUiStore().setActiveChat(chatId(1))
+      setChangesTarget(token, { chatId: chatId(1), projectId: projectId(1) })
+      await settle()
+      const show = item('toggle-changes')
+      expect(show.textContent).toContain('Show changes')
+      expect(show.closest('[data-section]')?.getAttribute('data-section')).toBe('actions')
+      const focusRequests = panel.focusRequest.value
+      show.click()
+      await settle()
+      expect(useUiStore().paletteOpen).toBe(false)
+      expect(panel.open.value).toBe(true)
+      expect(panel.focusRequest.value).toBe(focusRequests + 1)
+
+      useUiStore().openPalette()
+      await settle()
+      await type('diff')
+      const hide = item('toggle-changes')
+      expect(hide.textContent).toContain('Hide changes')
+      hide.click()
+      await settle()
+      expect(panel.open.value).toBe(false)
+
+      // Another chat's page (its workspace has no project): no item.
+      useUiStore().setActiveChat(chatId(2))
+      useUiStore().openPalette()
+      await settle()
+      expect(itemValues()).not.toContain('toggle-changes')
+    }
+    finally {
+      setChangesTarget(token, null)
+      panel.setOpen(false)
+    }
   })
 })

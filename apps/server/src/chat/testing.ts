@@ -101,6 +101,19 @@ export function messageText(message: HarnessUIMessage | undefined): string {
   return message?.parts.flatMap(part => (part.type === 'text' ? [part.text] : [])).join('') ?? ''
 }
 
+/** Marks every pending approval of `message` as answered (the client side of `addToolApprovalResponse`). */
+export function answerApprovals(message: HarnessUIMessage, approved: boolean): HarnessUIMessage {
+  return {
+    ...message,
+    parts: message.parts.map((part) => {
+      const value = part as unknown as Record<string, unknown>
+      if (value.state !== 'approval-requested')
+        return part
+      return { ...value, state: 'approval-responded', approval: { ...(value.approval as object), approved } } as unknown as typeof part
+    }),
+  }
+}
+
 export function runnerOf(t: TestApp): ChatRunnerInternal {
   return t.deps.runs as ChatRunnerInternal
 }

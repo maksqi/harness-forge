@@ -72,8 +72,8 @@ describe('generalSettings', () => {
     expect(wrapper.get(`[data-testid="${testIds.settingsDefaultMode}"]`).text()).toBe('Ask')
     expect(wrapper.get(`[data-testid="${testIds.settingsDefaultEffort}"]`).text()).toBe('Auto')
     expect(wrapper.get(`[data-testid="${testIds.settingsAltShortcuts}"]`).attributes('aria-checked')).toBe('true')
-    // The switch also governs Alt+V (dictation, docs/UI.md 12).
-    expect(wrapper.text()).toContain('Use Alt+M, Alt+R and Alt+P for composer menus, and Alt+V to dictate.')
+    // The switch also governs Alt+V (dictation) and Alt+C (the changes panel, Phase 8; docs/UI.md 9.4, 12).
+    expect(wrapper.text()).toContain('Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate and Alt+C for changes.')
   })
 
   it('says so when the settings cannot be loaded, and retries', async () => {

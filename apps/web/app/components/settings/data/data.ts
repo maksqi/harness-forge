@@ -1,6 +1,6 @@
-// Settings -> Data rules (docs/UI.md 2.7, 9.8, 7.4; docs/API.md 4.16, 5.19, 5.23; ADR-024, ADR-034, ADR-035): the
-// summary and hint texts, the checks of an import file, the wording of an import result, the texts of the Storage
-// cleanup and Encryption key sections, the errors that get special handling (busy, env-key, key-mismatch; fresh auth is
+// Settings -> Data rules (docs/UI.md 2.7, 9.8, 7.4; docs/API.md 4.16, 5.19, 5.23; ADR-024, ADR-034, ADR-035,
+// ADR-039): the summary and hint texts, the checks of an import file, the wording of an import result, the texts of the
+// Storage cleanup (its automatic cleanup included) and Encryption key sections, the errors that get special handling (busy, env-key, key-mismatch; fresh auth is
 // useFreshAuth's) and the browser storage that delete-all clears (composer drafts, unread marks).
 import type {
   DataCleanupPreview,
@@ -11,6 +11,9 @@ import type {
   DataImportResult,
   DataImportStatus,
   DataSummary,
+  FileSweepAttempt,
+  FileSweepMode,
+  FileSweepStatus,
   KeyRotationResult,
   KeySource,
   KeyStatus,
@@ -250,6 +253,56 @@ export function cleanupResultMessage(result: DataCleanupResult): string {
   const leftovers = leftoverFiles(result)
   return leftovers > 0 ? `Removed ${countLabel(leftovers, 'leftover file')} from disk` : 'No unused files.'
 }
+
+/** The summary's warning when the reference scan stopped at its budget (`pluginData: 'partial'`, Phase 8). */
+export const CLEANUP_PLUGIN_DATA_WARNING = 'Plugin data is too large to scan completely, so a file only a plugin remembers may be removed.'
+
+// ---------- Automatic cleanup (docs/UI.md 9.8, ADR-039) ----------
+
+/** The intervals of the automatic cleanup: the non-off values of the `fileSweep` setting. */
+export type FileSweepInterval = Exclude<FileSweepMode, 'off'>
+
+/** The interval select, in order. */
+export const FILE_SWEEP_INTERVALS: ReadonlyArray<{ value: FileSweepInterval, label: string }> = [
+  { value: 'daily', label: 'Every day' },
+  { value: 'weekly', label: 'Every week' },
+]
+
+/** The interval shown while the automatic cleanup is off, and written when it is turned on. */
+export const DEFAULT_FILE_SWEEP_INTERVAL: FileSweepInterval = 'daily'
+
+/** The description under "Automatic cleanup". */
+export const AUTO_CLEANUP_DESCRIPTION = 'Remove unused files on a schedule. They\'re deleted without asking and can\'t be restored. Files from the last 24 hours are always kept.'
+
+/** True for `daily` and `weekly`. */
+export function isFileSweepInterval(value: unknown): value is FileSweepInterval {
+  return FILE_SWEEP_INTERVALS.some(option => option.value === value)
+}
+
+/** "Every day" / "Every week". */
+export function fileSweepIntervalLabel(interval: FileSweepInterval): string {
+  return FILE_SWEEP_INTERVALS.find(option => option.value === interval)?.label ?? interval
+}
+
+/** `data-state` of the status line: the last attempt's outcome, else `never` while on, else `off`. */
+export type FileSweepState = 'off' | 'never' | FileSweepAttempt['status']
+
+export function fileSweepState(mode: FileSweepMode, status: Pick<FileSweepStatus, 'lastAttempt'>): FileSweepState {
+  if (status.lastAttempt)
+    return status.lastAttempt.status
+  return mode === 'off' ? 'off' : 'never'
+}
+
+/** The end of "Last automatic cleanup {time}: removed 4 files (2 MB)." */
+export function fileSweepRemovedText(attempt: Pick<FileSweepAttempt, 'files' | 'diskBytes'>): string {
+  return `removed ${countLabel(attempt.files, 'file')} (${formatBytes(attempt.diskBytes)}).`
+}
+
+/** The status line of a skipped last run (the plugin data scan hit its budget). */
+export const FILE_SWEEP_SKIPPED = 'The last automatic cleanup was skipped: plugin data is too large to scan. Run a cleanup by hand.'
+
+/** The status line of a failed last run. */
+export const FILE_SWEEP_FAILED = 'The last automatic cleanup failed. It tries again after the next interval.'
 
 // ---------- Encryption key (docs/UI.md 9.8, ADR-034) ----------
 

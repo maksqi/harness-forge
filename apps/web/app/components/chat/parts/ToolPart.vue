@@ -10,7 +10,9 @@
 // blocks behind "Raw input and output"; a running shell shows its terminal with "Running…". A value that does not
 // parse with the shared schemas keeps the generic blocks.
 // Phase 8 (C20 wires it, W8.10 finishes it): a shell output with `allowedBy` (the command ran because shell rules
-// matched, ADR-038) shows ToolRuleBadge before the summary; the approval payload passes the card's `allowRules` on.
+// matched, ADR-038) shows ToolRuleBadge before the summary; the approval payload passes the card's `allowRules` on; a
+// running shell's terminal shows the folder it starts in (the call's `cwd` input, else the chat's current shell folder
+// from TOOL_APPROVAL_CONTEXT.shellCwd()).
 import type { ToolPartLike } from '../chat-format'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
 import { shellToolOutputSchema, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
@@ -39,6 +41,7 @@ import {
   splitMcpToolName,
   toolNameOf,
 } from '../chat-format'
+import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
 import { toolRowArgument } from './tool-row'
 import ToolApprovalCard from './ToolApprovalCard.vue'
 import ToolRowSummary from './tools/ToolRowSummary.vue'
@@ -76,6 +79,7 @@ const emit = defineEmits<{
 const plugins = usePluginsStore()
 const open = ref(false)
 const scroll = inject(TRANSCRIPT_SCROLL, null)
+const approvalContext = inject(TOOL_APPROVAL_CONTEXT, null)
 watch(open, (isOpen) => {
   if (isOpen)
     scroll?.holdPosition()
@@ -175,7 +179,11 @@ const view = computed(() => {
   }
   const runningShell = name.value === 'shell' && status.value === 'running'
     && (props.part.state === 'input-available' || props.part.state === 'approval-responded')
-  return runningShell ? workspaceToolView(name.value, props.part.input, null) : null
+  const running = runningShell ? workspaceToolView(name.value, props.part.input, null) : null
+  // Without a `cwd` input the command starts where the chat's previous shell call ended (the sticky folder).
+  if (running?.kind === 'terminal' && running.cwd === null)
+    return { ...running, cwd: approvalContext?.shellCwd() ?? null }
+  return running
 })
 
 function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdits?: boolean, allowRules?: AllowRules }) {

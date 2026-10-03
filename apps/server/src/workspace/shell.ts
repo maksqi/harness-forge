@@ -14,6 +14,13 @@
 //   - Output: each stream keeps its first 4 KiB and its last 16 KiB (`WORKSPACE_LIMITS`) with "[… N bytes omitted …]"
 //     between them; ANSI escape sequences and other control characters are stripped, `\r\n` becomes `\n`, and a line
 //     rewritten with `\r` (a progress bar) keeps only its last segment. The byte counts are those of the raw streams.
+//   - `reportCwd` (Phase 8, ADR-038, the sticky working folder): the command runs as
+//     `trap 'pwd -P 2>/dev/null >&3' EXIT; <command>` (one line, so bash's line numbers stay) with a fourth pipe on fd 3;
+//     its last line (of at most the last 4 KiB) becomes `endCwd` when it is an absolute path. EXIT traps run under bash
+//     and dash on `exit N`, a `set -e` failure and a normal end, and the exit status is kept; `exec`, a kill (timeout,
+//     Stop, any signal), the command's own EXIT trap and a syntax error report nothing (`endCwd: null`: the folder
+//     stays as it was). Subshells (`(cd x)`, `cd x | cat`) leave the folder unchanged, as in a terminal. The command
+//     inherits fd 3; whatever it writes there is only a folder candidate the caller clamps to the project.
 //
 // Accepted risk (ADR-033): a process that calls `setsid` leaves the group and escapes the kill; its pipes are then
 // closed by force so the call still ends.
@@ -43,6 +50,13 @@ const KILL_POLL_MS = 25
 const PIPE_DRAIN_MS = 200
 /** Characters of a command written to the debug log. */
 export const SHELL_LOG_COMMAND_MAX_CHARS = 1000
+/** Bytes of fd 3 kept for the end folder report (the last ones: the EXIT trap writes last). */
+export const SHELL_CWD_REPORT_MAX_BYTES = 4096
+/**
+ * The prefix of a command whose end folder is reported (`reportCwd`): an EXIT trap that prints the physical working
+ * folder to fd 3. On the command's own line, so bash's line numbers in error messages stay as the model wrote them.
+ */
+export const SHELL_CWD_TRAP = 'trap \'pwd -P 2>/dev/null >&3\' EXIT; '
 
 const BASH = '/bin/bash'
 const SH = '/bin/sh'
@@ -377,6 +391,11 @@ export interface RunShellOptions {
   tailBytes?: number
   /** Called with the shell's pid (= its process group id) once it started. */
   onSpawn?: (pid: number) => void
+  /**
+   * Report the folder the command ended in (`ShellRunResult.endCwd`) through an EXIT trap on fd 3 (Phase 8, ADR-038;
+   * see the module comment). Default false: the command runs as given, with three pipes.
+   */
+  reportCwd?: boolean
 }
 
 export interface ShellRunResult {
@@ -392,6 +411,12 @@ export interface ShellRunResult {
   durationMs: number
   stdout: CapturedOutput
   stderr: CapturedOutput
+  /**
+   * The absolute physical folder the shell ended in (`reportCwd`; `pwd -P`, links resolved), not yet checked against
+   * the project. null without `reportCwd` and when nothing usable was reported: `exec`, a kill (timeout, abort, any
+   * signal), the command's own EXIT trap, a syntax error, a last line on fd 3 that is not an absolute path.
+   */
+  endCwd: string | null
 }
 
 /** The error of an aborted command: the signal's reason when it is an `AbortError`, else a new one. */
@@ -449,6 +474,43 @@ function started(child: ChildProcess): Promise<number> {
   })
 }
 
+/** The command line run for `command` with `reportCwd` (the EXIT trap first, on the same line). */
+export function withCwdReport(command: string): string {
+  return `${SHELL_CWD_TRAP}${command}`
+}
+
+/**
+ * The end folder in the bytes the shell wrote to fd 3: their last non-empty line when it is an absolute path without a
+ * NUL, else null. (Only the last line counts: the trap writes last, and a folder name with a newline must not turn
+ * into its first part.)
+ */
+export function parseCwdReport(bytes: Uint8Array): string | null {
+  const lines = Buffer.from(bytes).toString('utf8').split('\n')
+  while (lines.length > 0 && lines.at(-1) === '')
+    lines.pop()
+  const last = lines.at(-1)
+  return last !== undefined && last.startsWith('/') && !last.includes('\0') ? last : null
+}
+
+/** Keeps the last `max` bytes written to a stream (the fd 3 report). */
+class TailBytes {
+  #bytes: Buffer = Buffer.alloc(0)
+  readonly #max: number
+
+  constructor(max: number) {
+    this.#max = max
+  }
+
+  push(chunk: Buffer): void {
+    const combined = this.#bytes.length === 0 ? chunk : Buffer.concat([this.#bytes, chunk])
+    this.#bytes = combined.length > this.#max ? Buffer.from(combined.subarray(combined.length - this.#max)) : combined
+  }
+
+  get bytes(): Buffer {
+    return this.#bytes
+  }
+}
+
 /**
  * Runs `command` with `<sh> -c` in `cwd` (see the module comment). Resolves with the exit status and the captured
  * output, also after a timeout (`timedOut: true`); rejects with an `AbortError` when `signal` aborts (after the
@@ -464,14 +526,16 @@ export async function runShellCommand(options: RunShellOptions): Promise<ShellRu
   const killOptions: KillProcessGroupOptions = { graceMs: options.killGraceMs }
   const stdout = new StreamCapture(options.headBytes, options.tailBytes)
   const stderr = new StreamCapture(options.headBytes, options.tailBytes)
+  const reportCwd = options.reportCwd === true
+  const cwdReport = new TailBytes(SHELL_CWD_REPORT_MAX_BYTES)
 
   const begin = performance.now()
   let child: ChildProcess
   try {
-    child = spawn(sh, ['-c', options.command], {
+    child = spawn(sh, ['-c', reportCwd ? withCwdReport(options.command) : options.command], {
       cwd: options.cwd,
       env: shellEnvironment(sh, options.parentEnv),
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: reportCwd ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
       detached: true,
       shell: false,
       windowsHide: true,
@@ -484,7 +548,15 @@ export async function runShellCommand(options: RunShellOptions): Promise<ShellRu
   child.on('error', () => {})
   child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk))
   child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk))
-  const pipesClosed = Promise.all([closed(child.stdout), closed(child.stderr)])
+  const cwdStream = reportCwd ? (child.stdio[3] as Readable | null | undefined) ?? null : null
+  cwdStream?.on('error', () => {})
+  cwdStream?.on('data', (chunk: Buffer) => cwdReport.push(chunk))
+  const pipes = [child.stdout, child.stderr, cwdStream]
+  const destroyPipes = (): void => {
+    for (const pipe of pipes)
+      pipe?.destroy()
+  }
+  const pipesClosed = Promise.all(pipes.map(closed))
   const exited = new Promise<{ code: number | null, signal: NodeJS.Signals | null }>((resolve) => {
     child.once('exit', (code, exitSignal) => resolve({ code, signal: exitSignal }))
   })
@@ -494,8 +566,7 @@ export async function runShellCommand(options: RunShellOptions): Promise<ShellRu
     pid = await started(child)
   }
   catch (error) {
-    child.stdout?.destroy()
-    child.stderr?.destroy()
+    destroyPipes()
     throw startError(error)
   }
   trackGroup(pid)
@@ -540,13 +611,14 @@ export async function runShellCommand(options: RunShellOptions): Promise<ShellRu
 
     // A process that left the group (setsid) may still hold the pipes: close them by force.
     if (!await within(pipesClosed, PIPE_DRAIN_MS)) {
-      child.stdout?.destroy()
-      child.stderr?.destroy()
+      destroyPipes()
       await pipesClosed
     }
 
     if (aborted)
       throw shellAbortError(signal)
+    // A shell ended by a signal reports nothing, whether or not its trap ran (bash runs it on SIGTERM, dash does not).
+    const reported = reportCwd && !timedOut && exit.signal === null
     return {
       exitCode: exit.code,
       signal: exit.signal,
@@ -555,6 +627,7 @@ export async function runShellCommand(options: RunShellOptions): Promise<ShellRu
       durationMs,
       stdout: stdout.finish(),
       stderr: stderr.finish(),
+      endCwd: reported ? parseCwdReport(cwdReport.bytes) : null,
     }
   }
   finally {

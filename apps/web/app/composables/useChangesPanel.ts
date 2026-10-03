@@ -16,6 +16,8 @@ export const CHANGES_WIDTH_KEY = 'hf-changes-width'
 export const CHANGES_WIDTH = { default: 440, min: 320, max: 720 } as const
 /** The shortcut id of Alt+C and the palette item value (docs/UI.md 12). */
 export const CHANGES_SHORTCUT = 'toggle-changes'
+/** Alt+C in the useShortcuts() syntax: the physical C key (`event.code`), so Option+C on macOS and AltGr layouts work. */
+export const CHANGES_SHORTCUT_KEYS = 'alt+code:KeyC'
 
 export interface ChangesPanelState {
   /** The panel is open (it renders only in project chats). */

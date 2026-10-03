@@ -210,12 +210,16 @@ describe('dataSettings', () => {
 
   it('shows the summary line', async () => {
     await mountData()
-    expect(api.data.summary).toHaveBeenCalledTimes(1)
+    // The page and Storage cleanup (the automatic cleanup status, docs/UI.md 9.8) each load GET /api/data once.
+    expect(api.data.summary).toHaveBeenCalledTimes(2)
     expect(byTestId(testIds.dataSummary)?.textContent?.trim()).toBe('12 chats (2 archived) · 348 messages · 18 files, 24 MB')
   })
 
   it('says so when the summary cannot be loaded, and retries', async () => {
-    api.data.summary.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'The database is locked.' }))
+    // Storage cleanup loads the same summary for its status line (it mounts first).
+    api.data.summary
+      .mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'The database is locked.' }))
+      .mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'The database is locked.' }))
     await mountData()
     const alert = document.body.querySelector<HTMLElement>('[data-slot="settings-load-error"]')
     expect(alert?.textContent).toContain('Could not load the data summary')
@@ -339,7 +343,8 @@ describe('import', () => {
     // Afterwards the chat list, the restored settings and the summary are loaded again.
     expect(fetchChats).toHaveBeenCalledWith({ reset: true })
     expect(fetchSettings).toHaveBeenCalledTimes(1)
-    expect(api.data.summary).toHaveBeenCalledTimes(2)
+    // Twice on mount (the page and Storage cleanup), then the page again.
+    expect(api.data.summary).toHaveBeenCalledTimes(3)
     expect(document.body.querySelector('[aria-live="polite"]')?.textContent?.trim())
       .toBe('Import finished: 1 imported, 1 copied, 1 skipped, 1 failed')
   })
@@ -577,7 +582,8 @@ describe('delete all', () => {
 describe('storage cleanup and encryption key on the page', () => {
   it('reloads the summary line after a cleanup', async () => {
     await mountData()
-    expect(api.data.summary).toHaveBeenCalledTimes(1)
+    // The page and Storage cleanup (its automatic cleanup status) load GET /api/data on mount.
+    expect(api.data.summary).toHaveBeenCalledTimes(2)
     api.data.cleanupPreview
       .mockResolvedValueOnce(dataCleanupPreview({ files: 6, fileBytes: 6_291_456 }))
       .mockResolvedValueOnce(dataCleanupPreview())
@@ -590,7 +596,8 @@ describe('storage cleanup and encryption key on the page', () => {
     await click(byTestId(testIds.dataCleanupConfirm))
 
     expect(toasts.success).toHaveBeenCalledWith('Removed 6 files (6 MB)')
-    expect(api.data.summary).toHaveBeenCalledTimes(2)
+    // Both again: a cleanup also resets the schedule of the automatic one.
+    expect(api.data.summary).toHaveBeenCalledTimes(4)
     expect(byTestId(testIds.dataSummary)?.textContent).toContain('12 files, 18 MB')
     expect(byTestId(testIds.dataCleanupSummary)?.textContent).toContain('No unused files.')
   })
@@ -618,7 +625,8 @@ describe('storage cleanup and encryption key on the page', () => {
     expect(api.keys.rotate).toHaveBeenCalledWith({ body: { confirm: 'ROTATE' } })
     expect(toasts.success).toHaveBeenCalledWith('Master key rotated', { description: '2 secrets encrypted again · 0 approvals expired' })
     expect(api.keys.get).toHaveBeenCalledTimes(2)
-    expect(api.data.summary).toHaveBeenCalledTimes(2)
+    // Twice on mount (the page and Storage cleanup), then the page again.
+    expect(api.data.summary).toHaveBeenCalledTimes(3)
     expect(mocks.sharesMounts).toBe(2)
     expect(allByTestId(testIds.sharesSection)).toHaveLength(1)
   })

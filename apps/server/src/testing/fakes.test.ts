@@ -1,6 +1,7 @@
 // The Phase 5 fakes (C8-T6) behave like the frozen contracts they stand in for, so W5.3 / W5.4 can rely on them; the
 // Phase 6 fakes (C11-T5) likewise for W6.1, W6.4, W6.5 and W6.6; the Phase 7 additions (C14-T6) for W7.7 and W7.8. The
-// fake project service has its own file (./fake-projects.test.ts).
+// fake project service has its own file (./fake-projects.test.ts). Phase 8 (W8.7): `createFakeFilesService` is the real
+// files service (pins and the store gate).
 import type { PluginContext } from '@harness-forge/plugin-sdk'
 import type { ChatCreate, HarnessUIMessage } from '@harness-forge/shared'
 import type { ResolvedImageModel } from '../providers/types.ts'
@@ -21,6 +22,8 @@ import { encodeSolidPng } from '../builtin-plugins/mock/png.ts'
 import { chats, chatShares, files, messages, usage } from '../db/schema.ts'
 import { createProvidersTestApp, fakeMediaProviders } from '../providers/testing.ts'
 import { messageInsertValues } from '../services/chats/store.ts'
+import { createFilesService } from '../services/files/index.ts'
+import { seedStoredFile } from '../services/files/store.test-util.ts'
 import { createTestApp } from './create-test-app.ts'
 import {
   createFakeAudioService,
@@ -527,6 +530,61 @@ describe('createFakeFilesService', () => {
     expect(existsSync(t.env.paths.files)).toBe(true)
     expect(readdirSync(t.env.paths.files)).toEqual([])
     expect(await t.deps.files.purge()).toEqual({ files: 0, bytes: 0 })
+  })
+
+  // Phase 8 (W8.7-T6): the deprecated alias is the real files service, so the reuse paths pin and use the store gate.
+  it('is the real files service: rows reused by importFile and saveGenerated are pinned', async () => {
+    expect(createFakeFilesService).toBe(createFilesService)
+    const { t } = await treeApp()
+    const text = new TextEncoder().encode('reused notes')
+    const png = encodeSolidPng(2, 2, [9, 9, 9])
+    const oldText = await seedStoredFile(t.deps, text, { createdAt: 1, name: 'old.txt', mime: 'text/plain' })
+    const oldPng = await seedStoredFile(t.deps, png, { createdAt: 1, name: 'old.png', mime: 'image/png' })
+    expect(t.deps.files.pinnedIds()).toEqual(new Set())
+    const imported = await t.deps.files.importFile({ preferredId: 'file_0000000000000009', sha256: sha(text), name: 'notes.txt', mime: 'text/plain', data: text, createdAt: 5 })
+    expect(imported).toMatchObject({ reused: true, file: { id: oldText.id } })
+    const saved = await t.deps.files.saveGenerated({ data: png, mediaType: 'image/png', name: 'image-1.png' })
+    expect(saved.id).toBe(oldPng.id)
+    expect(t.deps.files.pinnedIds()).toEqual(new Set([oldText.id, oldPng.id]))
+    // A sweep never removes them, although they are old and unreferenced.
+    expect(await t.deps.files.sweep({ referencedIds: new Set(), createdBefore: Date.now(), dryRun: false })).toMatchObject({ files: 0, recentFiles: 2 })
+  })
+
+  it('importFile and saveGenerated wait while the exclusive gate is held; purge waits for a shared holder', async () => {
+    const { t } = await treeApp()
+    const text = new TextEncoder().encode('gated notes')
+    const png = encodeSolidPng(3, 1, [1, 2, 3])
+    let release!: () => void
+    const held = t.deps.files.withExclusiveGate(() => new Promise<void>((resolve) => {
+      release = resolve
+    }))
+    const done: string[] = []
+    const importing = t.deps.files.importFile({ preferredId: 'file_0000000000000001', sha256: sha(text), name: 'n.txt', mime: 'text/plain', data: text, createdAt: 1 }).then(() => done.push('import'))
+    const saving = t.deps.files.saveGenerated({ data: png, mediaType: 'image/png', name: 'g.png' }).then(() => done.push('save'))
+    for (let tick = 0; tick < 20; tick++)
+      await new Promise(resolve => setImmediate(resolve))
+    expect(done).toEqual([])
+    expect(await t.db.select().from(files)).toEqual([])
+    release()
+    await held
+    await Promise.all([importing, saving])
+    expect(done.sort()).toEqual(['import', 'save'])
+
+    let finish!: () => void
+    const reading = t.deps.files.withSharedGate(() => new Promise<void>((resolve) => {
+      finish = resolve
+    }))
+    let purged = false
+    const purging = t.deps.files.purge().then(() => {
+      purged = true
+    })
+    for (let tick = 0; tick < 20; tick++)
+      await new Promise(resolve => setImmediate(resolve))
+    expect(purged).toBe(false)
+    finish()
+    await reading
+    await purging
+    expect(await t.db.select().from(files)).toEqual([])
   })
 })
 

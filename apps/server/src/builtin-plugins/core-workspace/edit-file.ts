@@ -7,17 +7,21 @@
 //   `replace_all`); the replacement is literal (no `$&` patterns);
 // - a file that is CRLF throughout is matched on its LF text (CRLF in the strings is read as LF) and written back as
 //   CRLF; mixed line endings are matched raw; a leading BOM is kept;
-// - the result goes through the frozen `writeWorkspaceFile` (temp file + rename keeping the mode) and may not exceed
-//   1 MiB.
+// - the edit runs inside `journaledWrite` (Phase 8, ADR-036): under the file's lock the current state is read, the
+//   replacement applied to it, the previous state snapshotted and journaled, and the result written through the frozen
+//   `writeWorkspaceFile` (temp file + rename keeping the mode); it may not exceed 1 MiB. Two parallel edits of one file
+//   serialize, and the second applies to the first one's result.
 //
 // The output carries the diff of the LF text (`computeWorkspaceDiff`, null on timeout). The model sees "Edited x: N
 // replacement(s) (+a -r lines).".
 import type { ToolDefinition, ToolResultOutput } from '@harness-forge/plugin-sdk'
 import type { EditFileToolInput, EditFileToolOutput } from '@harness-forge/shared'
+import type { CheckpointBefore } from '../../services/checkpoints/types.ts'
+import type { ResolvedWorkspacePath } from '../../workspace/paths.ts'
 import { editFileToolInputSchema, editFileToolOutputSchema, HarnessError, WORKSPACE_LIMITS, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import { decodeText } from '../../plugins/scaffold/paths.ts'
 import { computeWorkspaceDiff } from '../../workspace/diff.ts'
-import { readWorkspaceFile, writeWorkspaceFile } from '../../workspace/paths.ts'
+import { journaledWrite } from '../../workspace/journal.ts'
 import { BOM, byteLength, plural } from '../../workspace/text.ts'
 import { requireWorkspace, textModelOutput, WRITE_TOOL_TIMEOUT_MS } from './common.ts'
 import { writeFilePolicy } from './policies.ts'
@@ -87,6 +91,27 @@ export function applyEdit(original: string, input: Pick<EditFileToolInput, 'old_
   return { text: bom ? BOM + restored : restored, before: text, after, replacements: input.replace_all === true ? occurrences : 1 }
 }
 
+/**
+ * The UTF-8 text of the file to edit, from the before-state read under the lock; the errors of the v1.3 read (a missing
+ * file is `not_found`, a file over 1 MiB `payload_too_large`, a binary file a `validation_error` on `path`).
+ */
+function editableText(before: CheckpointBefore, resolved: ResolvedWorkspacePath): string {
+  if (before.state === 'missing')
+    throw new HarnessError({ code: 'not_found', message: `"${resolved.rel}" does not exist in the project folder.` })
+  const maxBytes = WORKSPACE_LIMITS.editFileMaxBytes
+  if (before.state === 'too-large' || before.size > maxBytes) {
+    throw new HarnessError({
+      code: 'payload_too_large',
+      message: `"${resolved.rel}" is larger than ${Math.floor(maxBytes / 1024)} KiB.`,
+      details: { limitBytes: maxBytes },
+    })
+  }
+  const text = decodeText(before.bytes)
+  if (text === null)
+    throw editError(`"${resolved.rel}" is not a UTF-8 text file: edit_file changes text files only.`, 'path')
+  return text
+}
+
 /** The text the model sees for an `edit_file` output. */
 export function editFileModelText(output: EditFileToolOutput): string {
   const replacements = plural(output.replacements, 'replacement')
@@ -107,17 +132,17 @@ export function createEditFileTool(): ToolDefinition<EditFileToolInput, EditFile
       const { root } = requireWorkspace(c)
       if (input.old_string === input.new_string)
         throw editError('old_string and new_string are the same: there is nothing to change.')
-      const { resolved, bytes } = await readWorkspaceFile(root, input.path, { maxBytes: WORKSPACE_LIMITS.editFileMaxBytes })
-      const original = decodeText(bytes)
-      if (original === null)
-        throw editError(`"${resolved.rel}" is not a UTF-8 text file: edit_file changes text files only.`, 'path')
-      const edit = applyEdit(original, input, resolved.rel)
-      if (byteLength(edit.text) > WORKSPACE_LIMITS.editFileMaxBytes)
-        throw editError(`The edit would make ${resolved.rel} larger than 1 MiB.`, 'new_string')
-      c.signal.throwIfAborted()
-      const written = await writeWorkspaceFile(root, input.path, edit.text)
-      const diff = await computeWorkspaceDiff(edit.before, edit.after)
-      return { path: written.rel, replacements: edit.replacements, diff }
+      let edit: AppliedEdit | undefined
+      const { written } = await journaledWrite(c, root, { tool: EDIT_FILE_TOOL_NAME, path: input.path }, (before, resolved) => {
+        const applied = applyEdit(editableText(before, resolved), input, resolved.rel)
+        if (byteLength(applied.text) > WORKSPACE_LIMITS.editFileMaxBytes)
+          throw editError(`The edit would make ${resolved.rel} larger than 1 MiB.`, 'new_string')
+        edit = applied
+        return applied.text
+      })
+      const applied = edit!
+      const diff = await computeWorkspaceDiff(applied.before, applied.after)
+      return { path: written.rel, replacements: applied.replacements, diff }
     },
     toModelOutput(output): ToolResultOutput {
       return textModelOutput(editFileToolOutputSchema, output, editFileModelText)

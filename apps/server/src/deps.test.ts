@@ -350,18 +350,12 @@ describe('testing helpers', () => {
 describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle)', () => {
   const CHAT = '0199a8f0-0000-7000-8000-000000000081'
 
-  /** Each call fails as a stub: `not_implemented`, never another error. */
-  async function expectNotImplemented(calls: Array<[string, () => Promise<unknown>]>): Promise<void> {
-    for (const [name, call] of calls)
-      await expect(call(), name).rejects.toMatchObject({ code: 'not_implemented' })
-  }
-
-  it('wires checkpoints and shellRules; the route-facing members answer not_implemented', async () => {
+  it('wires checkpoints and shellRules; no member answers not_implemented any more (implemented in P8-A)', async () => {
     const t = await createTestApp()
     cleanups.push(() => t.close())
     expect(SERVICE_NAMES).toEqual(expect.arrayContaining(['checkpoints', 'shellRules']))
     const { checkpoints, shellRules } = t.deps
-    await expectNotImplemented([
+    const calls: Array<[string, () => Promise<unknown>]> = [
       ['checkpoints.listChanges', () => checkpoints.listChanges(CHAT)],
       ['checkpoints.fileDiff', () => checkpoints.fileDiff(CHAT, { source: 'chat', path: 'a.txt' })],
       ['checkpoints.gitStatus', () => checkpoints.gitStatus(CHAT)],
@@ -372,12 +366,16 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
       ['shellRules.list', () => shellRules.list()],
       ['shellRules.create', () => shellRules.create({ projectId: null, prefix: 'ls' })],
       ['shellRules.remove', () => shellRules.remove('srl_AAAAAAAAAAAAAAAA')],
-    ])
-    // The members the boot, the pipeline and the data service use already work: an empty store, an empty rule set.
+    ]
+    for (const [name, call] of calls) {
+      // Each call may resolve or fail for its own reason (an unknown chat, rule or batch), never as a stub.
+      const outcome: unknown = await call().then(() => null, (reason: unknown) => reason)
+      expect((outcome as { code?: unknown } | null)?.code, name).not.toBe('not_implemented')
+    }
+    // An empty store and the rule set of a run.
     await expect(checkpoints.summary()).resolves.toEqual({ bytes: 0, blobs: 0 })
-    await expect(checkpoints.purge()).resolves.toEqual({ bytes: 0, blobs: 0 })
-    await expect(checkpoints.prune()).resolves.toEqual({ evictedByAge: 0, evictedByBudget: 0, rowsEvicted: 0, orphanBlobs: 0, tempFiles: 0, bytesFreed: 0 })
-    expect(await shellRules.forRun('prj_AAAAAAAAAAAAAAAA')).toEqual({ projectId: 'prj_AAAAAAAAAAAAAAAA', prefixes: [] })
+    await expect(checkpoints.prune()).resolves.toMatchObject({ evictedByAge: 0, evictedByBudget: 0 })
+    expect(await shellRules.forRun('prj_AAAAAAAAAAAAAAAA')).toEqual({ projectId: 'prj_AAAAAAAAAAAAAAAA', prefixes: ['ls'] })
     expect(await shellRules.forRun(null)).toEqual({ projectId: null, prefixes: [] })
     await expect(t.deps.data.start()).resolves.toBeUndefined()
     await expect(t.deps.data.stop()).resolves.toBeUndefined()
@@ -397,7 +395,7 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
     expect(statSync(t.env.paths.checkpoints).isDirectory()).toBe(true)
   })
 
-  it('the skeleton journal writes without recording: produce sees the before-state, the abort check runs before the write', async () => {
+  it('the journal writes for an unknown chat without a row: produce sees the before-state, the abort check runs before the write', async () => {
     const t = await createTestApp({ factories: { projects: createFakeProjectService } })
     cleanups.push(() => t.close())
     const project = await (t.deps.projects as FakeProjectService).add({ name: 'Journal', files: { 'notes.txt': 'old\n' } })
@@ -449,9 +447,9 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
     expect(readFileSync(join(project.path, 'notes.txt'), 'utf8')).toBe('old\nnew\n')
     await expect(journal.recordShell({ toolCallId: 'call_4', command: 'ls' })).resolves.toBeUndefined()
     await expect(journal.recordUntracked({ toolCallId: 'call_5', tool: 'plugin_tool' })).resolves.toBeUndefined()
-    // Nothing is stored before W8.1.
-    expect(existsSync(join(t.env.paths.checkpoints, 'aa'))).toBe(false)
-    expect(await t.deps.checkpoints.summary()).toEqual({ bytes: 0, blobs: 0 })
+    // P8-A: the before blob of the edit is stored; the row cannot be inserted for an unknown chat (foreign key), so
+    // nothing is recorded and prune removes the orphan blob later.
+    expect(await t.deps.checkpoints.summary()).toEqual({ bytes: 4, blobs: 1 })
   })
 
   it('a chat run still works: mock:workspace and mock:checkpoint in a project chat (auto, no shell)', async () => {

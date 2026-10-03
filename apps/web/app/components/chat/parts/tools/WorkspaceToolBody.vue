@@ -5,7 +5,8 @@
 // stays). Store-free (the share page renders it too).
 // Contract (docs/UI.md 10.4): props below, no emits; no root test id of its own. Additive (not frozen): the slot `raw`
 // holds the generic blocks; the toggle renders only when the caller fills it. Phase 8 (C20): the diff's server totals go
-// to DiffView's `stats` prop (they count cut hunks too).
+// to DiffView's `stats` prop (they count cut hunks too); W8.10: the terminal view's `cwd` goes to TerminalOutput (the
+// folder of a running command; a finished output names its own).
 import type { WorkspaceToolView } from './workspace-tools'
 import { ChevronRightIcon } from '@lucide/vue'
 import { computed, ref, useId } from 'vue'
@@ -51,6 +52,7 @@ const emptyText = computed(() => (props.view.kind === 'list' ? EMPTY_LIST[props.
       :command="view.command"
       :output="view.output"
       :running="running"
+      :cwd="view.cwd"
     />
     <FileContent
       v-else-if="view.kind === 'file'"

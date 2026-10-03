@@ -1,6 +1,7 @@
-// Settings -> Projects (docs/UI.md 9.10, 10.4; W7.9-T6): the page frame with Add project, the skeleton, the load error
-// with Retry, the rows (path, chat count, missing folder, project file), rename, the instructions dialog, delete with
-// its confirmation and the 409 toast, the empty state, and `?add=1`.
+// Settings -> Projects (docs/UI.md 9.10, 10.4; W7.9-T6, W8.11-T2): the page frame with Add project, the skeleton, the
+// load error with Retry, the rows (path, chat count, missing folder, project file, allowed commands), rename, the
+// instructions dialog, the allowed commands dialog, delete with its confirmation and the 409 toast, the empty state,
+// `?add=1`, and the global shell rules below the list (loaded on every visit).
 import type { VueWrapper } from '@vue/test-utils'
 import type { ComputedRef } from 'vue'
 import type { MockApi } from '~/utils/testing/mock-api'
@@ -12,8 +13,9 @@ import { defineComponent, h, nextTick, reactive } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import ProjectsPage from '~/pages/settings/projects.vue'
 import { useChatsStore } from '~/stores/chats'
+import { useShellRulesStore } from '~/stores/shell-rules'
 import { testIds } from '~/utils/testids'
-import { chatId, chatSummary, projectId, projectSummary } from '~/utils/testing/fixtures'
+import { chatId, chatSummary, projectId, projectSummary, shellRule, shellRuleId } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import ProjectsSettings from './ProjectsSettings.vue'
@@ -121,6 +123,30 @@ describe('settings projects page', () => {
     expect(byTestId(testIds.addProjectDialog)).not.toBeNull()
     expect(mocks.route!.query).toEqual({})
   })
+
+  it('shows "Allowed in every project" below the projects and loads the shell rules once per visit', async () => {
+    api.projects.list.mockResolvedValue({ items: [] })
+    api.shellRules.list.mockResolvedValue({ items: [
+      shellRule({ id: shellRuleId(1), projectId: null, prefix: 'ls' }),
+      shellRule({ id: shellRuleId(2), projectId: projectId(1), prefix: 'pnpm test' }),
+    ] })
+    mountIn(ProjectsPage)
+    await flushPromises()
+    // The editor's first load and the page's load are one request.
+    expect(api.shellRules.list).toHaveBeenCalledTimes(1)
+    const section = byTestId(testIds.allowlistSection)!
+    expect(section.textContent).toContain('Allowed in every project')
+    // Below the project list, also without projects.
+    expect(byTestId(testIds.projectsEmpty)!.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect([...section.querySelectorAll<HTMLElement>(`[data-testid="${testIds.allowlistRule}"]`)].map(rule => rule.dataset.value)).toEqual(['ls'])
+
+    // A later visit refreshes the loaded rules.
+    wrapper!.unmount()
+    wrapper = null
+    mountIn(ProjectsPage)
+    await flushPromises()
+    expect(api.shellRules.list).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('projectsSettings', () => {
@@ -151,6 +177,58 @@ describe('projectsSettings', () => {
     expect(badge.textContent?.trim()).toBe('Folder not found')
     expect(badge.getAttribute('aria-description')).toBe('The folder does not exist.')
     expect(byTestId(testIds.projectRowMenu, old)!.getAttribute('aria-label')).toBe('Actions for Notes')
+  })
+
+  it('counts the allowed commands of each project in its row ("1 allowed command", left out at 0)', async () => {
+    const rules = useShellRulesStore()
+    rules.loaded = true
+    rules.items = [
+      shellRule({ id: shellRuleId(1), projectId: projectId(1), prefix: 'pnpm test' }),
+      shellRule({ id: shellRuleId(2), projectId: projectId(1), prefix: 'pnpm lint' }),
+      shellRule({ id: shellRuleId(3), projectId: projectId(1), prefix: 'make' }),
+      shellRule({ id: shellRuleId(4), projectId: null, prefix: 'ls' }),
+    ]
+    await mountSettings()
+    expect(row(projectId(1)).textContent).toContain('3 allowed commands')
+    expect(row(projectId(2)).textContent).not.toContain('allowed command')
+    rules.items = [...rules.items, shellRule({ id: shellRuleId(5), projectId: projectId(2), prefix: 'ls' })]
+    await nextTick()
+    expect(row(projectId(2)).textContent).toContain('1 allowed command')
+    expect(row(projectId(2)).textContent).not.toContain('1 allowed commands')
+  })
+
+  it('opens "Allowed commands in {name}" from the row menu, with that project\'s rules', async () => {
+    const rules = useShellRulesStore()
+    rules.loaded = true
+    rules.items = [
+      shellRule({ id: shellRuleId(1), projectId: projectId(1), prefix: 'pnpm test' }),
+      shellRule({ id: shellRuleId(2), projectId: projectId(2), prefix: 'make' }),
+    ]
+    await mountSettings()
+    byTestId(testIds.projectRowMenu, row(projectId(1)))!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    const item = byTestId(testIds.projectAllowlist)!
+    expect(item.textContent?.trim()).toBe('Allowed commands…')
+    expect(item.querySelector('svg')).not.toBeNull()
+    item.click()
+    await flushPromises()
+    await nextTick()
+    await flushPromises()
+
+    const dialog = byTestId(testIds.allowlistDialog)!
+    expect(dialog.textContent).toContain('Allowed commands in website')
+    expect([...dialog.querySelectorAll<HTMLElement>(`[data-testid="${testIds.allowlistRule}"]`)].map(rule => rule.dataset.value)).toEqual(['pnpm test'])
+
+    // Adding a rule there updates the row meta.
+    api.shellRules.create.mockResolvedValueOnce(shellRule({ id: shellRuleId(3), projectId: projectId(1), prefix: 'pnpm lint' }))
+    const input = byTestId<HTMLInputElement>(testIds.allowlistInput, dialog)!
+    input.value = 'pnpm lint'
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+    input.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(api.shellRules.create).toHaveBeenCalledWith({ body: { projectId: projectId(1), prefix: 'pnpm lint' } })
+    expect(row(projectId(1)).textContent).toContain('2 allowed commands')
   })
 
   it('shows the load error with Retry', async () => {
@@ -242,6 +320,21 @@ describe('projectsSettings', () => {
     expect(rows().map(element => element.dataset.projectId)).toEqual([projectId(2)])
     expect(chats.byId(chatId(1))?.projectId).toBeNull()
     expect(byTestId(testIds.projectDeleteConfirm)).toBeNull()
+  })
+
+  it('drops the shell rules of a deleted project', async () => {
+    const rules = useShellRulesStore()
+    rules.loaded = true
+    rules.items = [
+      shellRule({ id: shellRuleId(1), projectId: projectId(1), prefix: 'pnpm test' }),
+      shellRule({ id: shellRuleId(2), projectId: null, prefix: 'ls' }),
+    ]
+    await mountSettings()
+    await chooseFromMenu(projectId(1), testIds.projectDelete)
+    api.projects.remove.mockResolvedValueOnce(undefined)
+    byTestId<HTMLButtonElement>(testIds.projectDeleteConfirm)!.click()
+    await flushPromises()
+    expect(rules.items.map(rule => rule.prefix)).toEqual(['ls'])
   })
 
   it('explains a 409 run-active and keeps the project', async () => {

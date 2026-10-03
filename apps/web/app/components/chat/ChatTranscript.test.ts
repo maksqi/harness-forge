@@ -1,6 +1,6 @@
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h, nextTick, ref } from 'vue'
@@ -58,6 +58,9 @@ beforeEach(() => {
 afterEach(() => {
   document.body.replaceChildren()
 })
+// Focused buttons open their tooltips (portaled into the body); a tooltip left open by one test would close when the next
+// one opens a tooltip, patching nodes the cleared body no longer holds.
+enableAutoUnmount(afterEach)
 
 describe('chatTranscript: long histories', () => {
   it('renders the newest messages first and the older ones right after, in order', async () => {
@@ -278,7 +281,7 @@ describe('chatTranscript: versions', () => {
     wrapper.findAllComponents(ChatMessage)[0]!.vm.$emit('rewind')
     expect(events.rewind).toEqual([[U1]])
 
-    // No rewind button yet (W8.9 computes canRewind): focusRewind leaves focus alone.
+    // Not a project chat: no rewind button, so focusRewind leaves focus alone.
     transcript.value!.focusRewind(U1)
     expect(document.activeElement).toBe(document.body)
 
@@ -293,5 +296,102 @@ describe('chatTranscript: versions', () => {
     transcript.value!.startEdit(U1)
     await nextTick()
     expect(wrapper.find(`[data-testid="${testIds.messageEditSave}"]`).exists()).toBe(true)
+  })
+})
+
+describe('chatTranscript: rewind files (Phase 8)', () => {
+  const U1 = 'msg_user0000000000w1'
+  const A1 = 'msg_asst0000000000w1'
+  const U2 = 'msg_user0000000000w2'
+  const A2 = 'msg_asst0000000000w2'
+  const U3 = 'msg_user0000000000w3'
+  const A3 = 'msg_asst0000000000w3'
+
+  type ToolState = 'input-available' | 'output-available' | 'output-error'
+
+  function toolCall(tool: string, state: ToolState, dynamic = false): HarnessUIMessage['parts'][number] {
+    const base = { toolCallId: `call_${tool}_${state}`, input: { path: 'src/a.ts' } }
+    const settled = state === 'output-available'
+      ? { state, output: { path: 'src/a.ts' } }
+      : state === 'output-error' ? { state, errorText: 'Failed.' } : { state }
+    const part = dynamic ? { type: 'dynamic-tool', toolName: tool, ...base, ...settled } : { type: `tool-${tool}`, ...base, ...settled }
+    return part as HarnessUIMessage['parts'][number]
+  }
+
+  function reply(id: string, ...parts: HarnessUIMessage['parts']): HarnessUIMessage {
+    return assistantMessage(id, 'Done', { parts: [...parts, { type: 'text', text: 'Done', state: 'done' }] })
+  }
+
+  interface State { messages: HarnessUIMessage[], status: ChatStatus, projectId: string | null }
+
+  function mountRewind(initial: Pick<State, 'messages'> & Partial<State>) {
+    const state = ref<State>({ status: 'ready', projectId: 'prj_sample0000000001', ...initial })
+    const events: unknown[][] = []
+    const transcript = ref<InstanceType<typeof ChatTranscript> | null>(null)
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, {
+        default: () => h(ChatTranscript, {
+          ref: transcript,
+          messages: state.value.messages,
+          status: state.value.status,
+          showThinking: false,
+          projectId: state.value.projectId,
+          onRewind: (...args: unknown[]) => events.push(args),
+        }),
+      }),
+    }, { attachTo: document.body })
+    return { wrapper, state, events, transcript }
+  }
+
+  function rewindable(wrapper: ReturnType<typeof mountRewind>['wrapper']): string[] {
+    return wrapper.findAll(`[data-testid="${testIds.messageUser}"]`)
+      .filter(row => row.find(`[data-testid="${testIds.messageRewind}"]`).exists())
+      .map(row => row.attributes('data-message-id')!)
+  }
+
+  it('offers it on the user messages that a finished write_file / edit_file call follows', async () => {
+    const { wrapper, state } = mountRewind({
+      messages: [
+        userMessage(U1, 'q1'),
+        reply(A1, toolCall('write_file', 'output-available')),
+        userMessage(U2, 'q2'),
+        reply(A2, toolCall('shell', 'output-available'), toolCall('read_file', 'output-available')),
+        userMessage(U3, 'q3'),
+        reply(A3, toolCall('edit_file', 'output-error'), toolCall('write_file', 'input-available')),
+      ],
+    })
+    await nextTick()
+    expect(rewindable(wrapper)).toEqual([U1])
+
+    // The last reply finishes an edit (a new message object): every user message before it qualifies.
+    state.value = { ...state.value, messages: [...state.value.messages.slice(0, 5), reply(A3, toolCall('edit_file', 'output-available', true))] }
+    await nextTick()
+    expect(rewindable(wrapper)).toEqual([U1, U2, U3])
+
+    // A chat without a project never offers it.
+    state.value = { ...state.value, projectId: null }
+    await nextTick()
+    expect(rewindable(wrapper)).toEqual([])
+  })
+
+  it('hides it like Edit while a reply runs, re-emits it with the message id and takes focus back', async () => {
+    const { wrapper, state, events, transcript } = mountRewind({
+      messages: [userMessage(U1, 'q1'), reply(A1, toolCall('write_file', 'output-available')), userMessage(U2, 'q2')],
+    })
+    await nextTick()
+    const button = wrapper.get(`[data-message-id="${U1}"] [data-testid="${testIds.messageRewind}"]`)
+    expect(button.attributes('aria-label')).toBe('Rewind files to here')
+    expect(button.classes()).toContain('group-data-[busy=true]/transcript:hidden')
+    await button.trigger('click')
+    expect(events).toEqual([[U1]])
+
+    transcript.value!.focusRewind(U1)
+    expect(document.activeElement).toBe(button.element)
+
+    state.value = { ...state.value, status: 'submitted' }
+    await nextTick()
+    expect(wrapper.get('.hf-transcript').attributes('data-busy')).toBe('true')
+    // The older row keeps its button (hidden by CSS, no re-render); the last user message is not rewindable.
+    expect(rewindable(wrapper)).toEqual([U1])
   })
 })

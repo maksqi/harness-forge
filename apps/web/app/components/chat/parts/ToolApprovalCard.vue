@@ -7,8 +7,10 @@
 // with access `write` offer "Accept all edits in this chat" instead (tool-approval-accept-edits; the decision carries
 // `acceptEdits`, and the session switches the chat to `edits` before answering), unless the chat already accepts edits
 // (TOOL_APPROVAL_CONTEXT, when a chat view provides it).
-// Phase 8 (C20 declares the payload, W8.10 mounts AllowRuleOption for the builtin shell): `decide` may carry
-// `allowRules` (the shell rules to create before the approval is sent; Deny ignores it).
+// Phase 8 (ADR-038; C20 declares the payload, W8.10 mounts AllowRuleOption): the command card of a tool with workspace
+// access `execute` (the builtin shell) shows "Always allow commands starting with" below the warning; Run with it
+// checked carries `allowRules` (the shell rules the session creates before the approval is sent; Deny ignores it), and
+// Run is disabled while the box is checked with an invalid prefix.
 import type { WorkspaceAccess } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
@@ -20,6 +22,7 @@ import {
 } from '@/components/ai-elements/confirmation'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import AllowRuleOption from '~/components/workspace/allowlist/AllowRuleOption.vue'
 import { testIds } from '~/utils/testids'
 import { formatToolValue } from '../chat-format'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
@@ -60,6 +63,18 @@ const previewKind = computed(() => workspaceApprovalKind(props.toolName, props.p
 const isCommand = computed(() => previewKind.value === 'terminal')
 const label = computed(() => toolApprovalLabel(props.toolName, props.part.input))
 
+/** "Always allow commands starting with" (Phase 8): the command card of an `execute` tool (the builtin shell). */
+const offersRule = computed(() => isCommand.value && props.workspace === 'execute')
+const command = computed(() => {
+  const input = props.part.input
+  const value = typeof input === 'object' && input !== null ? (input as Record<string, unknown>).command : undefined
+  return typeof value === 'string' ? value : ''
+})
+/** The rules to create with Run (null = the box is unchecked) and whether their prefix is valid. */
+const allowRules = ref<AllowRules | null>(null)
+const ruleValid = ref(true)
+const runBlocked = computed(() => offersRule.value && allowRules.value !== null && !ruleValid.value)
+
 /** Which checkbox the card offers: none for `execute` (and for `write` in a chat that already accepts edits). */
 const option = computed<'always' | 'accept-edits' | null>(() => {
   if (props.workspace === 'execute')
@@ -70,12 +85,14 @@ const option = computed<'always' | 'accept-edits' | null>(() => {
 })
 
 function decide(approved: boolean) {
-  if (pending.value)
+  if (pending.value || (approved && runBlocked.value))
     return
   pending.value = true
   const isChecked = approved && checked.value === true
   if (option.value === 'accept-edits')
     emit('decide', { approved, alwaysAllow: false, acceptEdits: isChecked })
+  else if (approved && offersRule.value && allowRules.value !== null)
+    emit('decide', { approved, alwaysAllow: false, allowRules: { prefixes: [...allowRules.value.prefixes], scope: allowRules.value.scope } })
   else
     emit('decide', { approved, alwaysAllow: option.value === 'always' && isChecked })
 }
@@ -103,6 +120,13 @@ function decide(approved: boolean) {
         <span v-if="source" class="shrink-0 text-xs text-muted-foreground">from {{ source }}</span>
       </div>
       <ToolApprovalPreview v-if="previewKind" :tool-name="toolName" :input="part.input" />
+      <AllowRuleOption
+        v-if="offersRule"
+        v-model="allowRules"
+        :command="command"
+        :disabled="pending"
+        @valid="ruleValid = $event"
+      />
       <pre v-else class="max-h-48 overflow-auto rounded-md bg-muted/60 p-2.5 font-mono text-xs whitespace-pre-wrap break-words">{{ args }}</pre>
       <div v-if="option" class="flex min-h-6 items-center gap-2 pointer-coarse:min-h-10">
         <Checkbox
@@ -135,7 +159,7 @@ function decide(approved: boolean) {
       <Button
         type="button"
         size="sm"
-        :disabled="pending"
+        :disabled="pending || runBlocked"
         :data-testid="testIds.toolApprovalAllow"
         class="pointer-coarse:h-10"
         @click="decide(true)"

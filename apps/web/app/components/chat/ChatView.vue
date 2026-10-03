@@ -13,11 +13,15 @@
 // rotation (`409 busy`, ADR-034) puts the message back into the composer with a toast. Approval cards learn the chat's
 // permission mode and project name (TOOL_APPROVAL_CONTEXT: no "Accept all edits" in a chat that already accepts edits,
 // "In {project}" on a shell approval).
-// Phase 8 (C20 wires it, W8.9 / W8.10 finish it): the context also gives the cards the chat's project (the scope of a
-// shell rule) and its sticky shell folder (session.cwd); "Rewind files to here" opens the RewindDialog owned here
-// (closed: focus back on the button; "Restore files and edit": the editor opens on the message); a shell approval
-// whose rules could not be saved shows "Could not save the rule".
-import type { MessageBranch, ReasoningEffort, RestoreResult, ToolMode } from '@harness-forge/shared'
+// Phase 8 (ADR-036, ADR-038): the context also gives the cards the chat's project (the scope of a shell rule) and its
+// sticky shell folder (session.cwd); a shell approval whose rules could not be saved shows "Could not save the rule".
+// The transcript learns the chat's project ("Rewind files to here" only in project chats); the button opens the
+// RewindDialog owned here: a restore shows the result toast with Undo (useRewindResultToast); "Restore files and edit"
+// then opens the editor on the message (the existing edit / branch flow); a refused rewind comes back through
+// REWIND_DIALOG_HOST: `409 run-active` -> "Wait for the responses in this project to finish before rewinding files."
+// and, when this chat is the one running, the run is followed; `404` -> the stale-chat toast and a reload of the path.
+// Closing the dialog any other way puts focus back on the button.
+import type { HarnessError, MessageBranch, ReasoningEffort, RestoreResult, ToolMode } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
@@ -30,6 +34,8 @@ import { Button } from '@/components/ui/button'
 import ChatComposer from '~/components/chat/composer/ChatComposer.vue'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import { toHarnessErrorView } from '~/components/common/harness-error'
+import { REWIND_DIALOG_HOST, REWIND_RUN_ACTIVE_MESSAGE, runningChatOf } from '~/components/workspace/rewind/rewind'
+import { useRewindResultToast } from '~/components/workspace/rewind/rewind-toast'
 import RewindDialog from '~/components/workspace/rewind/RewindDialog.vue'
 import { isBusyConflict, isRunActiveConflict, useChatSession } from '~/composables/useChatSession'
 import { useChatsStore } from '~/stores/chats'
@@ -371,13 +377,32 @@ async function confirmDeleteVersion() {
 const rewindTarget = ref<string | null>(null)
 /** The dialog finished with "Restore files and edit": the editor opens on the message once it closed. */
 let editAfterRewind = false
+const showRewindResult = useRewindResultToast()
 
 function onRewind(messageId: string) {
-  if (session.busy.value)
+  if (session.busy.value || !projectId.value)
     return
   editAfterRewind = false
   rewindTarget.value = messageId
 }
+
+/** The dialog closed on a `404` or a `409 run-active` answer (its focus returns to the button like a cancel). */
+function onRewindRefused(failure: HarnessError) {
+  if (failure.code === 'not_found') {
+    toast(STALE_CHAT_MESSAGE)
+    void session.refresh()
+    return
+  }
+  toast(REWIND_RUN_ACTIVE_MESSAGE)
+  // Another chat of the project runs: nothing to follow here.
+  const running = runningChatOf(failure)
+  if (running !== null && running !== props.chatId)
+    return
+  chats.setRunState(props.chatId, 'running')
+  void session.resumeIfRunning()
+}
+
+provide(REWIND_DIALOG_HOST, { refused: onRewindRefused })
 
 function onRewindOpenChange(open: boolean) {
   if (open)
@@ -395,8 +420,9 @@ function onRewindOpenChange(open: boolean) {
   })
 }
 
-function onRewindRestored(_result: RestoreResult, then: 'none' | 'edit') {
+function onRewindRestored(result: RestoreResult, then: 'none' | 'edit') {
   editAfterRewind = then === 'edit'
+  showRewindResult(props.chatId, result)
 }
 
 function onModelChange(value: string) {
@@ -465,6 +491,7 @@ function setProject(value: string | null) {
         :loading="!loaded && !loadError"
         :branches="branches"
         :switching="switching"
+        :project-id="projectId"
         @regenerate="onRegenerate"
         @edit="onEdit"
         @approval="onApproval"

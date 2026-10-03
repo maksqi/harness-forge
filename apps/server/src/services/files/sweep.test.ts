@@ -296,3 +296,80 @@ describe('file sweep: the store walk', () => {
     expect(await sweep(t)).toEqual({ files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, recentFiles: 0 })
   })
 })
+
+// ---------- Phase 8 (W8.7, ADR-039): `FileSweepInput.signal` ----------
+
+/**
+ * A signal whose state follows the sweep's checks: `throwIfAborted` throws `reason` from its call number `throwAt` on,
+ * `aborted` is true from its call number `abortedAt` on (the DELETE chunks read `aborted`).
+ */
+function scriptedSignal(reason: Error, script: { throwAt?: number, abortedAt?: number }): AbortSignal & { checks: () => number } {
+  let checks = 0
+  let reads = 0
+  return {
+    get aborted() {
+      reads += 1
+      return script.abortedAt !== undefined && reads >= script.abortedAt
+    },
+    reason,
+    throwIfAborted() {
+      checks += 1
+      if (script.throwAt !== undefined && checks >= script.throwAt)
+        throw reason
+    },
+    checks: () => checks,
+  } as unknown as AbortSignal & { checks: () => number }
+}
+
+async function manyOldRows(t: TestApp, count: number): Promise<Uint8Array> {
+  const content = bytes('one blob for many rows')
+  writeBlob(t.deps, content)
+  const rows = Array.from({ length: count }, () => ({ id: createFileId(), sha256: sha256Of(content), name: 'many.bin', mime: 'application/octet-stream', size: content.byteLength, createdAt: clock - 2 * DAY_MS }))
+  for (let index = 0; index < rows.length; index += 400)
+    await t.db.insert(files).values(rows.slice(index, index + 400))
+  return content
+}
+
+describe('file sweep: the abort signal (Phase 8)', () => {
+  it('an aborted signal rejects at once with its reason: no gate, nothing deleted', async () => {
+    const t = await storeApp()
+    await seedStoredFile(t.deps, bytes('old orphan'), { createdAt: clock - 2 * DAY_MS })
+    const controller = new AbortController()
+    const reason = new Error('stopped')
+    controller.abort(reason)
+    // A shared holder would make a sweep wait: an aborted one never asks for the gate.
+    let release!: () => void
+    const holder = t.deps.files.withSharedGate(() => new Promise<void>((resolve) => {
+      release = resolve
+    }))
+    await expect(sweep(t, { signal: controller.signal })).rejects.toBe(reason)
+    release()
+    await holder
+    expect(await rowIds(t)).toHaveLength(1)
+  })
+
+  it('stops between keyset batches before deleting anything', async () => {
+    const t = await storeApp()
+    await manyOldRows(t, 1203)
+    const reason = new Error('stopped')
+    // Checks: the service, the sweep, then one per batch of 500 rows: the third batch is never read.
+    const signal = scriptedSignal(reason, { throwAt: 5 })
+    await expect(sweep(t, { signal })).rejects.toBe(reason)
+    expect(signal.checks()).toBe(5)
+    expect(await rowIds(t)).toHaveLength(1203)
+  })
+
+  it('finishes the DELETE chunk in progress, then rejects: what was removed stays removed, the walk never runs', async () => {
+    const t = await storeApp()
+    const content = await manyOldRows(t, 1203)
+    const rowless = writeBlob(t.deps, bytes('rowless old'), clock - 2 * DAY_MS)
+    const reason = new Error('stopped')
+    // The first chunk (500 ids) runs; the second sees the abort; the check after the chunks throws.
+    const signal = scriptedSignal(reason, { abortedAt: 2, throwAt: 6 })
+    await expect(sweep(t, { signal })).rejects.toBe(reason)
+    expect(await rowIds(t)).toHaveLength(703)
+    // 703 rows still share the blob; the leftover blob is untouched (the walk did not run).
+    expect(existsSync(blobPathOf(t.deps, content))).toBe(true)
+    expect(existsSync(rowless)).toBe(true)
+  })
+})

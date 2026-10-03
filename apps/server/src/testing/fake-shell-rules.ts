@@ -6,7 +6,8 @@
 //   await rules.create({ projectId: project.id, prefix: 'pnpm test' })
 //   await rules.forRun(project.id)                                 // { projectId, prefixes: ['pnpm test'] }
 //
-// Rules live in memory. Follows the contract where callers can see it: `parseShellRule` (a refused prefix is
+// Rules live in memory. Follows the contract where callers can see it (W8.6: the messages, the order and the set come
+// from the real service's helpers): `parseShellRule` (a refused prefix is
 // `validation_error` on `['prefix']` with the parser's message; the canonical prefix is stored), `409 conflict`
 // (`exists`) for the same canonical prefix in the same scope, `400` above `LIMITS.shellRulesPerScopeMax` rules in a
 // scope, `404` for an unknown rule id, the list order (global first, then by project id and prefix) and the `forRun`
@@ -18,6 +19,13 @@ import type { AppDeps } from '../types.ts'
 import { createShellRuleId, HarnessError, LIMITS, parseShellRule, validationError } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { projects } from '../db/schema.ts'
+import {
+  compareShellRules,
+  emptyShellRuleSet,
+  SHELL_RULE_EXISTS_MESSAGE,
+  shellRuleSetOf,
+  shellRulesFullMessage,
+} from '../services/shell-rules/index.ts'
 
 export interface FakeShellRuleServiceOptions {
   /** Clock of `createdAt` (default `Date.now`). */
@@ -29,22 +37,6 @@ export interface FakeShellRuleService extends ShellRuleService {
   readonly rules: ShellRule[]
   /** Every `forRun` call (the project id), in order. */
   readonly forRunCalls: Array<string | null>
-}
-
-function byPrefix(a: ShellRule, b: ShellRule): number {
-  return a.prefix < b.prefix ? -1 : a.prefix > b.prefix ? 1 : 0
-}
-
-/** Global rules first (by prefix), then by project id and prefix. */
-function listOrder(a: ShellRule, b: ShellRule): number {
-  if (a.projectId !== b.projectId) {
-    if (a.projectId === null)
-      return -1
-    if (b.projectId === null)
-      return 1
-    return a.projectId < b.projectId ? -1 : 1
-  }
-  return byPrefix(a, b)
 }
 
 /** An in-memory `ShellRuleService` (see the module comment). `deps` is optional: pass it to check project ids. */
@@ -75,18 +67,20 @@ export function createFakeShellRuleService(deps?: Pick<AppDeps, 'db'>, options: 
   return {
     rules,
     forRunCalls,
-    list: async () => (await live()).sort(listOrder),
+    list: async () => (await live()).sort(compareShellRules),
     create: async (input: ShellRuleCreate) => {
       const parsed = parseShellRule(input.prefix)
       if (!parsed.ok)
-        throw validationError([{ path: ['prefix'], message: parsed.message, code: 'custom' }])
+        throw validationError([{ path: ['prefix'], message: parsed.message, code: 'custom' }], parsed.message)
       if (input.projectId !== null && !(await projectExists(input.projectId)))
         throw new HarnessError({ code: 'not_found', message: `Project ${input.projectId} not found.` })
       const scope = (await live()).filter(rule => rule.projectId === input.projectId)
       if (scope.some(rule => rule.prefix === parsed.canonical))
-        throw new HarnessError({ code: 'conflict', message: 'This rule already exists.', details: { reason: 'exists' } })
-      if (scope.length >= LIMITS.shellRulesPerScopeMax)
-        throw validationError([{ path: ['prefix'], message: `At most ${LIMITS.shellRulesPerScopeMax} rules per scope.`, code: 'custom' }])
+        throw new HarnessError({ code: 'conflict', message: SHELL_RULE_EXISTS_MESSAGE, details: { reason: 'exists' } })
+      if (scope.length >= LIMITS.shellRulesPerScopeMax) {
+        const message = shellRulesFullMessage(input.projectId)
+        throw validationError([{ path: ['prefix'], message, code: 'custom' }], message)
+      }
       const rule: ShellRule = { id: createShellRuleId(), projectId: input.projectId, prefix: parsed.canonical, createdAt: now() }
       rules.push(rule)
       return { ...rule }
@@ -100,16 +94,8 @@ export function createFakeShellRuleService(deps?: Pick<AppDeps, 'db'>, options: 
     forRun: async (projectId): Promise<ShellRuleSet> => {
       forRunCalls.push(projectId)
       if (projectId === null)
-        return Object.freeze({ projectId: null, prefixes: Object.freeze([]) })
-      const all = await live()
-      const prefixes: string[] = []
-      for (const scope of [null, projectId]) {
-        for (const rule of all.filter(item => item.projectId === scope).sort(byPrefix)) {
-          if (!prefixes.includes(rule.prefix))
-            prefixes.push(rule.prefix)
-        }
-      }
-      return Object.freeze({ projectId, prefixes: Object.freeze(prefixes) })
+        return emptyShellRuleSet(null)
+      return shellRuleSetOf(projectId, await live())
     },
   }
 }

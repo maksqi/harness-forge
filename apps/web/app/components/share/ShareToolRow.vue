@@ -7,8 +7,12 @@
 // Phase 7 (docs/UI.md 7.19): `core-workspace` tools use the same registry as ToolPart (icon, argument, summary) and,
 // with tool details, WorkspaceToolBody with the generic blocks behind "Raw input and output"; a value the server cut
 // at the share limit (a `[truncated]` string) fails the schemas and keeps the generic blocks.
+// Phase 8 (W8.10, docs/UI.md 7.19): the same spoken summary labels (ToolRowSummary), the terminal's folder prompt, "Now
+// in {folder}" and "Allowed by rule: …" (TerminalOutput), and the rule badge (ToolRuleBadge) of a shell call that ran
+// because shell rules matched (`allowedBy`; only with tool details: the output carries it).
 // Contract (docs/UI.md 10.4): `part` is the snapshot's tool part (toolName, status, input?, output?, errorText?).
 import type { ShareToolPart } from './share-view'
+import { shellToolOutputSchema } from '@harness-forge/shared'
 import { BanIcon, CheckIcon, ChevronRightIcon, CircleSlashIcon, ServerIcon, WrenchIcon, XIcon } from '@lucide/vue'
 import { computed, ref } from 'vue'
 import { Badge } from '@/components/ui/badge'
@@ -17,6 +21,7 @@ import { cn } from '@/lib/utils'
 import { formatToolValue, isServerTruncated, splitMcpToolName } from '~/components/chat/chat-format'
 import { toolRowArgument } from '~/components/chat/parts/tool-row'
 import ToolRowSummary from '~/components/chat/parts/tools/ToolRowSummary.vue'
+import ToolRuleBadge from '~/components/chat/parts/tools/ToolRuleBadge.vue'
 import { workspaceRowSummary, workspaceToolIcon, workspaceToolView } from '~/components/chat/parts/tools/workspace-tools'
 import WorkspaceToolBody from '~/components/chat/parts/tools/WorkspaceToolBody.vue'
 import ToolValueBlock from '~/components/chat/parts/ToolValueBlock.vue'
@@ -41,6 +46,13 @@ const outputTruncated = computed(() => hasOutput.value && isServerTruncated(prop
 const rowIcon = computed(() => (mcp.value ? ServerIcon : workspaceToolIcon(props.part.toolName) ?? WrenchIcon))
 /** The workspace summary and body of a finished call whose output parses (7.19); null keeps the generic blocks. */
 const summary = computed(() => (props.part.status === 'done' && hasOutput.value ? workspaceRowSummary(props.part.toolName, props.part.output) : null))
+/** The prefixes of the shell rules that let a finished `shell` call run without a card (ToolRuleBadge). */
+const allowedBy = computed<readonly string[]>(() => {
+  if (props.part.status !== 'done' || props.part.toolName !== 'shell' || !hasOutput.value)
+    return []
+  const parsed = shellToolOutputSchema.safeParse(props.part.output)
+  return parsed.success ? parsed.data.allowedBy ?? [] : []
+})
 const view = computed(() => {
   if (props.part.status !== 'done' || props.part.output === undefined || props.part.output === null)
     return null
@@ -78,6 +90,7 @@ const ROW_CLASS = '-mx-1.5 flex h-(--row-height) w-[calc(100%+0.75rem)] min-w-0 
         {{ mcp.serverId }}
       </Badge>
       <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs text-muted-foreground">
+        <ToolRuleBadge v-if="allowedBy.length > 0" :prefixes="allowedBy" />
         <ToolRowSummary v-if="summary" :summary="summary" class="mr-0.5" />
         <CheckIcon v-if="part.status === 'done'" aria-hidden="true" class="size-3.5 text-success" />
         <XIcon v-else-if="part.status === 'error'" aria-hidden="true" class="size-3.5 text-destructive" />

@@ -4,6 +4,8 @@
 // snippet's, not the file's) with an "All occurrences" badge for `replace_all`; `write_file` -> "Create or overwrite
 // {path} · {n} lines" + a 20-line FileContent; `shell` -> the description, the command in a large mono block, "In
 // {project}" and the timeout when known, and the warning "Runs on the server with the server user's permissions."
+// Phase 8 (ADR-038, W8.10): the meta line uses the sticky folder: "In {project}/{cwd}" where `cwd` is the call's `cwd`
+// input, else the chat's current shell folder (TOOL_APPROVAL_CONTEXT.shellCwd()), left out for the project folder.
 // Contract (docs/UI.md 10.4): props below, no emits; root tool-approval-preview (data-kind = diff | content |
 // command); renders nothing when workspaceApprovalView(toolName, input) is null (the card then keeps its JSON block).
 import type { WorkspaceToolView } from './workspace-tools'
@@ -15,7 +17,7 @@ import { testIds } from '~/utils/testids'
 import { TOOL_APPROVAL_CONTEXT } from '../tool-approval-context'
 import DiffView from './DiffView.vue'
 import FileContent from './FileContent.vue'
-import { workspaceApprovalView } from './workspace-tools'
+import { shellFolder, workspaceApprovalView } from './workspace-tools'
 
 const props = defineProps<{
   toolName: string
@@ -49,7 +51,8 @@ const shell = computed(() => {
     return null
   const { command, cwd, timeout_ms: timeoutMs, description } = parsed.data
   const project = context?.projectName() ?? null
-  const folder = cwd && cwd !== '.' ? cwd.replace(/^\.\//, '') : null
+  // The call's own folder wins (`.` too); else where the chat's previous shell call ended.
+  const folder = shellFolder(cwd ?? context?.shellCwd() ?? null)
   const where = project ? `In ${project}${folder ? `/${folder}` : ''}` : folder ? `In ${folder}` : null
   const timeout = timeoutMs === undefined ? null : `timeout ${Math.round(timeoutMs / 1000)}s`
   const meta = [where, timeout].filter((part): part is string => part !== null).join(' · ')

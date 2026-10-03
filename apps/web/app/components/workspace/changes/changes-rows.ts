@@ -1,7 +1,9 @@
 // Pure helpers of the changes panel (docs/UI.md 7.21, 11.5; ADR-036, ADR-037): one row model for both views ("This
 // chat" from the change journal, "Git" from `git status`), the status tiles, the summary line and the empty states.
-// Store-free. Types frozen from Gate P8-0b (C20); the function bodies are stubs until W8.8 implements them in P8-A.
+// Store-free. Types frozen from Gate P8-0b (C20); W8.8 implemented the bodies and added the DOM ids, the footer notes and
+// the display path.
 import type { ChangeSource, ChatChanges, GitStatus, GitUnavailableReason } from '@harness-forge/shared'
+import { LIMITS } from '@harness-forge/shared'
 
 /** The two views of the panel: "This chat" (`chat`) and "Git" (`git`); the `source` of the diff and revert routes. */
 export type ChangesView = ChangeSource
@@ -45,39 +47,149 @@ export interface StatusTile {
   label: string
 }
 
+/** DOM id of the panel (the toggle's `aria-controls`); one panel shows at a time (pane or sheet). */
+export const CHANGES_PANEL_ID = 'hf-changes-panel'
+/** DOM id of the panel's `h2` "Changes" (labels the desktop `<aside>` and the sheet). */
+export const CHANGES_HEADING_ID = 'hf-changes-heading'
+
+/** U+2212, as in the tool rows' `+a −d`. */
+const MINUS = '\u2212'
+
+function isChatChanges(data: ChatChanges | GitStatus): data is ChatChanges {
+  return 'untracked' in data
+}
+
+function plural(count: number, one: string, many: string): string {
+  return `${count.toLocaleString('en-US')} ${count === 1 ? one : many}`
+}
+
 /**
  * The rows of "This chat" from `ChatChangeFile`s: files back to their original state (`unchanged`) are left out; the
- * server's order is kept (most recently changed first). Stub (C20): no rows until W8.8.
+ * server's order is kept (most recently changed first).
  */
-export function chatChangeRows(_changes: ChatChanges): ChangesRow[] {
-  return []
+export function chatChangeRows(changes: ChatChanges): ChangesRow[] {
+  const rows: ChangesRow[] = []
+  for (const file of changes.files) {
+    if (file.status === 'unchanged')
+      continue
+    rows.push({
+      path: file.path,
+      origPath: null,
+      status: file.status,
+      additions: file.added,
+      deletions: file.removed,
+      changedOutside: file.changedOutside,
+      revertible: file.revertible,
+      edits: file.edits,
+      staged: null,
+      unstaged: null,
+    })
+  }
+  return rows
 }
 
-/** The rows of "Git" from `GitStatusFile`s, in the server's order (by path). Stub (C20): no rows until W8.8. */
-export function gitChangeRows(_status: GitStatus): ChangesRow[] {
-  return []
+/** The rows of "Git" from `GitStatusFile`s, in the server's order (by path); a conflicted file is not revertible. */
+export function gitChangeRows(status: GitStatus): ChangesRow[] {
+  return status.files.map(file => ({
+    path: file.path,
+    origPath: file.origPath,
+    status: file.status,
+    additions: null,
+    deletions: null,
+    changedOutside: false,
+    revertible: file.status !== 'conflicted',
+    edits: null,
+    staged: file.staged,
+    unstaged: file.unstaged,
+  }))
+}
+
+const STATUS_TILES: Record<ChangesStatus, StatusTile> = {
+  added: { letter: 'A', label: 'Added' },
+  modified: { letter: 'M', label: 'Modified' },
+  deleted: { letter: 'D', label: 'Deleted' },
+  untracked: { letter: 'U', label: 'Untracked' },
+  renamed: { letter: 'R', label: 'Renamed' },
+  conflicted: { letter: '!', label: 'Conflicted' },
+  typechange: { letter: 'T', label: 'Type changed' },
+}
+
+/** The tile of a status: A Added, M Modified, D Deleted, U Untracked, R Renamed, ! Conflicted, T Type changed. */
+export function statusTile(status: ChangesStatus): StatusTile {
+  return STATUS_TILES[status]
+}
+
+/** "3 files changed" / "1 file changed". */
+function filesChanged(count: number): string {
+  return plural(count, 'file changed', 'files changed')
 }
 
 /**
- * The tile of a status: A Added, M Modified, D Deleted, U Untracked, R Renamed, ! Conflicted, T Type changed.
- * Stub (C20): W8.8 fills the table.
+ * The summary line (docs/UI.md 7.21): This chat "3 files changed · +24 −7" (the totals of the known line counts, left
+ * out when none is known); Git "On {branch} · 4 files changed", "Detached at {head}" (7 characters), "No commits yet"
+ * (an unborn HEAD). Empty when the view is not available, and for This chat without rows (the empty state says it).
  */
-export function statusTile(_status: ChangesStatus): StatusTile {
-  return { letter: '', label: '' }
+export function changesSummary(view: ChangesView, data: ChatChanges | GitStatus): string {
+  if (!data.available)
+    return ''
+  if (view === 'chat' && isChatChanges(data)) {
+    const rows = chatChangeRows(data)
+    if (rows.length === 0)
+      return ''
+    const counted = rows.filter(row => row.additions !== null || row.deletions !== null)
+    if (counted.length === 0)
+      return filesChanged(rows.length)
+    const additions = counted.reduce((sum, row) => sum + (row.additions ?? 0), 0)
+    const deletions = counted.reduce((sum, row) => sum + (row.deletions ?? 0), 0)
+    return `${filesChanged(rows.length)} · +${additions.toLocaleString('en-US')} ${MINUS}${deletions.toLocaleString('en-US')}`
+  }
+  if (isChatChanges(data))
+    return ''
+  const where = data.head === null
+    ? 'No commits yet'
+    : data.branch !== null ? `On ${data.branch}` : `Detached at ${data.head.slice(0, 7)}`
+  return data.files.length > 0 ? `${where} · ${filesChanged(data.files.length)}` : where
 }
 
 /**
- * The summary line (docs/UI.md 7.21): This chat "3 files changed · +24 −7"; Git "On {branch} · 4 files changed",
- * "Detached at {head}", "No commits yet". Stub (C20): empty until W8.8.
+ * Why the view lists nothing (`none`, `clean` or the unavailable reason), or null when it has rows. A view that is
+ * not available without a reason reads as `no-project` (This chat) or `failed` (Git).
  */
-export function changesSummary(_view: ChangesView, _data: ChatChanges | GitStatus): string {
-  return ''
+export function changesEmptyReason(view: ChangesView, data: ChatChanges | GitStatus): ChangesEmptyReason | null {
+  if (!data.available)
+    return data.reason ?? (view === 'chat' ? 'no-project' : 'failed')
+  if (isChatChanges(data))
+    return chatChangeRows(data).length === 0 ? 'none' : null
+  return data.files.length === 0 ? 'clean' : null
+}
+
+/** The footer of a capped list: "Showing the first 500 files." (This chat) / "Showing the first 2,000 files." (Git). */
+export function changesTruncatedNote(view: ChangesView): string {
+  const max = view === 'chat' ? LIMITS.changesFilesMax : LIMITS.gitStatusFilesMax
+  return `Showing the first ${max.toLocaleString('en-US')} files.`
 }
 
 /**
- * Why the view lists nothing (`none`, `clean` or the unavailable reason), or null when it has rows.
- * Stub (C20): always null until W8.8.
+ * The untracked note of This chat (data-slot="changes-untracked"): "3 shell commands and 1 other tool call in this
+ * chat may have changed files too. They aren't listed here."; a zero part is left out; null when both are zero.
  */
-export function changesEmptyReason(_view: ChangesView, _data: ChatChanges | GitStatus): ChangesEmptyReason | null {
-  return null
+export function untrackedNote(untracked: ChatChanges['untracked']): string | null {
+  const parts: string[] = []
+  if (untracked.shellCommands > 0)
+    parts.push(plural(untracked.shellCommands, 'shell command', 'shell commands'))
+  if (untracked.toolCalls > 0)
+    parts.push(plural(untracked.toolCalls, 'other tool call', 'other tool calls'))
+  if (parts.length === 0)
+    return null
+  return `${parts.join(' and ')} in this chat may have changed files too. They aren't listed here.`
+}
+
+/** The path a row shows: `{origPath} → {path}` for a rename, else the path. */
+export function rowLabel(row: Pick<ChangesRow, 'path' | 'origPath'>): string {
+  return row.origPath ? `${row.origPath} → ${row.path}` : row.path
+}
+
+/** The file name of a path ("Revert parser.ts?"). */
+export function fileName(path: string): string {
+  return path.split('/').pop() || path
 }

@@ -18,6 +18,9 @@
 // shared around their blob write + row insert and pin the id they return (./pins.ts, in memory for the 24 h grace
 // period); `sweep` (./sweep.ts) and `purge` hold it exclusively. `sweep` snapshots the pins inside the gate, so a row a
 // run reused before the sweep started is never removed.
+//
+// Automatic sweep (ADR-039, W8.7): `sweep` honors `FileSweepInput.signal`: an aborted signal never takes the gate, and
+// ./sweep.ts checks it between batches.
 import type { FileRef } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
 import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, FileSweepInput, FileSweepResult, GeneratedFileInput, StoredFile } from './types.ts'
@@ -75,7 +78,8 @@ function validTimestamp(value: number): number {
 export function createFilesService(deps: AppDeps, options: FilesServiceOptions = {}): FilesService {
   const { db } = deps
   const root = deps.env.paths.files
-  const now = options.now ?? Date.now
+  // Read at call time, so fake timers that replace `Date` after the service was built still apply (tests).
+  const now = options.now ?? (() => Date.now())
   const gate = createStoreGate()
   const pins = createFilePins(now)
   const logger = deps.logger.child({ component: 'files' })
@@ -233,7 +237,9 @@ export function createFilesService(deps: AppDeps, options: FilesServiceOptions =
   }
 
   async function sweep(input: FileSweepInput): Promise<FileSweepResult> {
-    // The gate is requested before anything else, so uploads that arrive later wait for the sweep.
+    // An aborted sweep never takes the gate. Otherwise the gate is requested before anything else, so uploads that
+    // arrive later wait for the sweep.
+    input.signal?.throwIfAborted()
     return gate.exclusive(() => sweepStore({ db, root, pinned: pins.snapshot(), now: now(), logger }, input))
   }
 

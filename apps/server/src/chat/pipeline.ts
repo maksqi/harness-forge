@@ -9,7 +9,8 @@
 //   a request without tools gets earlier tool calls as text (`tool-history.ts`); a chat model with image output gets
 //   the provider options of `imageParams` (ADR-028); a run with an open project folder (Phase 7, `prepared.workspace`)
 //   gets the workspace tools (`execute` tools only with `env.workspaceShell`), `ToolCallContext.workspace`, the
-//   workspace instructions and `projectMaxSteps`;
+//   workspace instructions and `projectMaxSteps`; Phase 8: and the run scope (`scope.ts`: the assistant message id,
+//   the run's checkpoint journal, the shell rules and the shared working folder), bound to every tool and policy call;
 // - image turns (an image model): `imageStream` (`images.ts`), one `ImageService.generate` call;
 // - reply commands and failures before the model call: `createUIMessageStream` without a model call.
 // `createUIMessageStreamResponse({ stream, consumeSseStream })` tees the SSE text into the run buffer (resume). The end
@@ -53,6 +54,7 @@ import { imageStream } from './images.ts'
 import { NOTICES } from './notices.ts'
 import { buildRunParams, providerImageOptions, runMaxSteps } from './params.ts'
 import { SseReplayBuffer } from './runs.ts'
+import { createRunScope } from './scope.ts'
 import { generateChatTitle } from './title.ts'
 import { toolPartsAsText } from './tool-history.ts'
 import { assembleTools } from './tools.ts'
@@ -569,8 +571,11 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
   const chatId = run.chatId
   const modelRef = resolved.modelRef
 
+  // One scope per run (Phase 8): a continuation after an approval keeps the assistant message id.
+  const scope = await createRunScope(deps, { chatId, messageId: session.assistantId, workspace: prepared.workspace, history: prepared.history, logger })
   const assembled = await assembleTools({
     chatId,
+    messageId: session.assistantId,
     modelRef,
     toolMode: session.ctx.toolMode,
     modelSupportsTools: resolved.entry.capabilities.tools,
@@ -581,6 +586,7 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     signal: run.signal,
     logger,
     workspace: prepared.workspace,
+    scope,
     allowExecute: deps.env.workspaceShell,
   })
   if (assembled.unsupported) {
@@ -647,6 +653,7 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
       signal: run.signal,
       logger,
       workspace: assembled.workspace,
+      scope: assembled.scope,
     }),
     experimental_toolApprovalSecret: deps.keyring.subkey('approval'),
     stopWhen: isStepCount(params.maxSteps),
