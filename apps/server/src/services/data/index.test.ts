@@ -1,5 +1,6 @@
 // Data service (W5.3-T1, T5, T6): the summary, delete-all (confirmation, fresh auth, runs, usage, share links, files,
-// events) and the mutex shared by imports and delete-all.
+// events) and the mutex shared by imports and delete-all (Phase 7, C16-T1: the maintenance lock, also taken by the key
+// rotation and the file cleanup); the Phase 7 cleanup stubs (C16-T5).
 import type { DataTestApp } from './fixtures.test-util.ts'
 import { existsSync, readdirSync } from 'node:fs'
 import { dataDeleteResultSchema, DEFAULT_SETTINGS, HarnessError } from '@harness-forge/shared'
@@ -148,5 +149,60 @@ describe('delete-all', () => {
     expect((await running).chats).toBe(3)
     expect(await app.deps.data.deleteAll({ confirm: 'DELETE' })).toEqual({ chats: 0, messages: 0, files: 0, fileBytes: 0, usageRows: 0 })
     expect(await app.deps.settings.get()).toEqual(DEFAULT_SETTINGS)
+  })
+})
+
+describe('maintenance lock (Phase 7)', () => {
+  it('holds the maintenance lock as delete-all while it runs, and refuses both while another maintenance task runs', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let seen: string | undefined
+    const app = await dataApp({
+      chats: chats => ({
+        ...chats,
+        removeAll: async (options) => {
+          seen = app.deps.maintenance.current()?.kind
+          await gate
+          return chats.removeAll(options)
+        },
+      }),
+    })
+    const running = app.deps.data.deleteAll({ confirm: 'DELETE' })
+    await Promise.resolve()
+    release()
+    await running
+    expect(seen).toBe('delete-all')
+    expect(app.deps.maintenance.current()).toBeNull()
+
+    let finish!: () => void
+    const rotation = app.deps.maintenance.exclusive('key-rotation', () => new Promise<void>((resolve) => {
+      finish = resolve
+    }), { blockRuns: true })
+    expect((await rejection(app.deps.data.importData(new Blob(['{}'])))).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'busy' } })
+    expect((await rejection(app.deps.data.deleteAll({ confirm: 'DELETE' }))).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'busy' } })
+    finish()
+    await rotation
+    expect((await app.deps.data.deleteAll({ confirm: 'DELETE' })).chats).toBe(0)
+  })
+
+  it('releases the lock when an import fails', async () => {
+    const app = await dataApp()
+    const failed = await rejection(app.deps.data.importData(new Blob(['not a backup'])))
+    expect(failed.code).toBe('validation_error')
+    expect(app.deps.maintenance.current()).toBeNull()
+  })
+})
+
+describe('orphaned file cleanup stubs (Phase 7)', () => {
+  it('answer not_implemented until W7.8, in the data service and the files service', async () => {
+    const app = await dataApp()
+    expect((await rejection(app.deps.data.cleanupPreview())).code).toBe('not_implemented')
+    expect((await rejection(app.deps.data.cleanup())).code).toBe('not_implemented')
+    expect((await rejection(app.deps.files.sweep({ referencedIds: new Set(), createdBefore: Date.now(), dryRun: true }))).code).toBe('not_implemented')
+    expect((await rejection(app.deps.files.withSharedGate(async () => 1))).code).toBe('not_implemented')
+    expect((await rejection(app.deps.files.withExclusiveGate(async () => 1))).code).toBe('not_implemented')
+    expect(() => app.deps.files.pinnedIds()).toThrow(HarnessError)
   })
 })

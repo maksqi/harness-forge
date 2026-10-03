@@ -7,6 +7,9 @@
 //   path (null everywhere else), so switching away from a version and back restores what the user saw.
 // Each set of checks also runs against a copy of the folder without the backfill and must fail there, so these tests
 // notice a missing or broken backfill.
+// - v1.2 -> v1.3 through migration 0004 (C14-T7, ADR-031): a database with `0000` ... `0003` and chats is migrated with
+//   the real folder; 0004 must be plain `CREATE` / `ALTER` / `INDEX` statements (a rebuild of `chats` would cascade-delete
+//   messages inside the migration transaction) and every chat must survive without a project (`project_id` null).
 import type { Database } from './client.ts'
 import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -39,6 +42,7 @@ const JOURNAL = JSON.parse(readFileSync(join(REAL_FOLDER, 'meta', '_journal.json
 const INITIAL = JOURNAL.entries.find(entry => entry.tag === '0000_initial_schema')
 const TREE = JOURNAL.entries.find(entry => entry.tag.startsWith('0001_'))
 const REMEMBERED = JOURNAL.entries.find(entry => entry.tag.startsWith('0002_'))
+const PROJECTS = JOURNAL.entries.find(entry => entry.tag.startsWith('0004_'))
 
 const opened: Database[] = []
 const tempDirs: string[] = []
@@ -526,7 +530,8 @@ describe('upgrade of a v1.1 database through migration 0002 (remembered versions
 
     expect(await rememberedProblems(database)).toEqual([])
     expect(await v11MessageRows(database)).toEqual(before.messages)
-    expect(await chatRows(database)).toEqual(before.chats)
+    // 0004 (Phase 7) adds `project_id` to every chat row: null, nothing else changes.
+    expect(await chatRows(database)).toEqual(before.chats.map(row => ({ ...row, project_id: null })))
     const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
     const fresh = await open(':memory:')
@@ -647,5 +652,161 @@ describe('migration 0003 (cached model listings marked stale)', () => {
     // The catalog still serves the aged listing (it only skips listings without a successful fetch) and finds it stale.
     const aged = Number(rows[0]?.fetched_at)
     expect(Date.now() - aged).toBeGreaterThanOrEqual(LISTING_TTL_MS)
+  })
+})
+
+// ---------- v1.2 -> v1.3: migration 0004 (projects) ----------
+
+/** A migrations folder holding 0000 - 0003 (their SQL + a four-entry journal): the schema of a v1.2 data directory. */
+function v12Folder(): string {
+  if (INITIAL === undefined || TREE === undefined || REMEMBERED === undefined || REFRESH === undefined)
+    throw new Error('migration 0000, 0001, 0002 or 0003 is missing from the journal')
+  const dir = tempDir()
+  mkdirSync(join(dir, 'meta'))
+  for (const entry of [INITIAL, TREE, REMEMBERED, REFRESH])
+    copyFileSync(join(REAL_FOLDER, `${entry.tag}.sql`), join(dir, `${entry.tag}.sql`))
+  writeFileSync(join(dir, 'meta', '_journal.json'), JSON.stringify({ ...JOURNAL, entries: [INITIAL, TREE, REMEMBERED, REFRESH] }))
+  return dir
+}
+
+/** The statements of migration 0004 without comments and blank lines (split like `migrate()` does). */
+function projectsStatements(): string[] {
+  if (PROJECTS === undefined)
+    throw new Error('migration 0004 is missing from the journal')
+  return readFileSync(join(REAL_FOLDER, `${PROJECTS.tag}.sql`), 'utf8')
+    .split('--> statement-breakpoint')
+    .map(statement => statement.replace(/^--.*$/gm, '').trim())
+    .filter(Boolean)
+}
+
+const CHAT_P1 = '0199a8f0-0000-7000-8000-0000000000c1'
+const CHAT_P2 = '0199a8f0-0000-7000-8000-0000000000c2'
+const CHAT_P3 = '0199a8f0-0000-7000-8000-0000000000c3'
+
+/** Every row of a table, as stored, ordered by `order`. */
+async function rows(database: Database, table: string, order: string): Promise<Record<string, unknown>[]> {
+  const result = await database.client.execute(`SELECT * FROM ${table} ORDER BY ${order}`)
+  return result.rows.map(row => ({ ...row }))
+}
+
+/**
+ * Creates a v1.2 database file (0000 - 0003) with three chats (a linear one with a share link and a usage row, an
+ * archived empty one, a pinned one), their messages and a cached model listing; returns every row of those tables.
+ */
+async function seedV12Database(path: string): Promise<Record<'chats' | 'messages' | 'chat_shares' | 'usage', Record<string, unknown>[]>> {
+  const database = await open(path)
+  await migrateDatabase(database.db, { migrationsFolder: v12Folder() })
+  const columns = await database.client.execute('PRAGMA table_info(chats)')
+  expect(columns.rows.map(row => String(row.name))).not.toContain('project_id')
+  const tables = await database.client.execute(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'projects'`)
+  expect(tables.rows).toHaveLength(0)
+  const chatsSeed: Array<[string, string | null, number, number]> = [
+    [CHAT_P1, 'msg_c100000000000001', 0, 0],
+    [CHAT_P2, null, 0, 1],
+    [CHAT_P3, 'msg_c300000000000000', 1, 0],
+  ]
+  for (const [index, [id, leaf, pinned, archived]] of chatsSeed.entries()) {
+    await database.client.execute({
+      sql: 'INSERT INTO chats (id, title, title_source, model_ref, settings, pinned, archived, pending_approval, active_leaf_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)',
+      args: [id, `Chat ${index}`, 'user', 'mock:echo', '{"toolMode":"ask"}', pinned, archived, leaf, 1000 + index, 2000 + index],
+    })
+  }
+  const messagesSeed: Array<[string, string, string | null, number, 'user' | 'assistant']> = [
+    ['msg_c100000000000000', CHAT_P1, null, 0, 'user'],
+    ['msg_c100000000000001', CHAT_P1, 'msg_c100000000000000', 1, 'assistant'],
+    ['msg_c300000000000000', CHAT_P3, null, 0, 'user'],
+  ]
+  for (const [id, chatId, parentId, seq, role] of messagesSeed) {
+    await database.client.execute({
+      sql: 'INSERT INTO messages (id, chat_id, parent_id, selected_child_id, seq, role, parts, metadata, search_text, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)',
+      args: [id, chatId, parentId, seq, role, JSON.stringify([{ type: 'text', text: `${role} ${id}` }]), JSON.stringify({ modelRef: 'mock:echo', startedAt: 1 }), `${role} ${id}`, 3000 + seq, 4000 + seq],
+    })
+  }
+  await database.client.execute({
+    sql: `INSERT INTO chat_shares (id, chat_id, options, snapshot, snapshot_at, created_at, updated_at) VALUES ('shr_0000000000000001', ?, '{}', '{}', 1, 1, 1)`,
+    args: [CHAT_P1],
+  })
+  await database.client.execute({
+    sql: 'INSERT INTO usage (chat_id, message_id, purpose, provider_id, model_id, input, output, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    args: [CHAT_P1, 'msg_c100000000000001', 'chat', 'mock', 'echo', 3, 4, 5000],
+  })
+  const seeded = {
+    chats: await rows(database, 'chats', 'id'),
+    messages: await rows(database, 'messages', 'chat_id, seq'),
+    chat_shares: await rows(database, 'chat_shares', 'id'),
+    usage: await rows(database, 'usage', 'id'),
+  }
+  database.close()
+  return seeded
+}
+
+describe('upgrade of a v1.2 database through migration 0004 (projects)', () => {
+  it('0004 is plain CREATE TABLE / CREATE INDEX / ALTER TABLE ... ADD statements, never a table rebuild', () => {
+    expect(projectsStatements()).toEqual([
+      expect.stringMatching(/^CREATE TABLE `projects` \(/),
+      'CREATE UNIQUE INDEX `projects_path_idx` ON `projects` (`path`);',
+      'ALTER TABLE `chats` ADD `project_id` text;',
+      'CREATE INDEX `chats_project_idx` ON `chats` (`project_id`,`archived`,"updated_at" DESC,"id" DESC);',
+    ])
+    const sql = projectsStatements().join('\n')
+    for (const forbidden of [/DROP\s+TABLE/i, /__new_/i, /PRAGMA\s+foreign_keys/i, /REFERENCES/i, /\bUPDATE\b/i, /\bDELETE\b/i, /\bINSERT\b/i])
+      expect(sql, String(forbidden)).not.toMatch(forbidden)
+    // The new column has no default and no NOT NULL: SQLite adds it in place.
+    expect(projectsStatements()[2]).not.toMatch(/NOT NULL|DEFAULT/i)
+    expect(JOURNAL.entries.slice(0, 5)).toEqual([INITIAL, TREE, REMEMBERED, REFRESH, PROJECTS])
+    expect(PROJECTS?.tag).toBe('0004_projects')
+  })
+
+  it('every chat survives without a project; messages, shares and usage are untouched; the schema matches a fresh one', async () => {
+    const path = join(tempDir(), 'harness.db')
+    const before = await seedV12Database(path)
+    const database = await open(path)
+    await migrateDatabase(database.db)
+
+    expect(await rows(database, 'chats', 'id')).toEqual(before.chats.map(row => ({ ...row, project_id: null })))
+    expect(await scalar(database, 'SELECT count(*) AS n FROM chats WHERE project_id IS NOT NULL')).toBe(0)
+    expect(await rows(database, 'messages', 'chat_id, seq')).toEqual(before.messages)
+    expect(await rows(database, 'chat_shares', 'id')).toEqual(before.chat_shares)
+    expect(await rows(database, 'usage', 'id')).toEqual(before.usage)
+    expect(await scalar(database, 'SELECT count(*) AS n FROM projects')).toBe(0)
+
+    const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
+    expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
+    const shape = await schemaShape(database)
+    expect(shape.tables).toEqual([...TABLE_NAMES].sort())
+    expect(shape.tables).toHaveLength(16)
+    expect(shape.indexes.projects_path_idx).toEqual(['path'])
+    expect(shape.indexes.chats_project_idx).toEqual(['project_id', 'archived', 'updated_at', 'id'])
+    const fresh = await open(':memory:')
+    await migrateDatabase(fresh.db)
+    expect(shape).toEqual(await schemaShape(fresh))
+    const foreignKeys = await database.client.execute('PRAGMA foreign_keys')
+    expect(Number(foreignKeys.rows[0]?.foreign_keys)).toBe(1)
+    expect(shape.foreignKeys.chats).toEqual([])
+
+    // Idempotent: migrating again applies nothing.
+    await migrateDatabase(database.db)
+    expect(await scalar(database, 'SELECT count(*) AS n FROM __drizzle_migrations')).toBe(JOURNAL.entries.length)
+  })
+
+  it('boots on the upgraded database: every chat is served, without a project', async () => {
+    const dataDir = tempDir()
+    const databasePath = join(dataDir, 'harness.db')
+    await seedV12Database(databasePath)
+    const t = await createTestApp({ dataDir, databasePath, start: false })
+    try {
+      const list = cursorPageSchema(chatSummarySchema).parse(await (await t.request('/api/chats')).json())
+      expect(list.items.map(chat => chat.id).sort()).toEqual([CHAT_P1, CHAT_P3])
+      expect(list.items.every(chat => chat.projectId === null)).toBe(true)
+      const archived = cursorPageSchema(chatSummarySchema).parse(await (await t.request('/api/chats?archived=true')).json())
+      expect(archived.items).toMatchObject([{ id: CHAT_P2, projectId: null }])
+      const detail = chatDetailSchema.parse(await (await t.request(`/api/chats/${CHAT_P1}`)).json())
+      expect(detail).toMatchObject({ projectId: null, settings: { toolMode: 'ask' } })
+      expect(detail.messages.map(message => message.id)).toEqual(['msg_c100000000000000', 'msg_c100000000000001'])
+      expect((await t.deps.chats.find(CHAT_P3))?.projectId).toBeNull()
+    }
+    finally {
+      await t.close()
+    }
   })
 })

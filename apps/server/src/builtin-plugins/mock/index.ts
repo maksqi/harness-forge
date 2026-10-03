@@ -2,7 +2,8 @@
 // registered through `ctx` like any builtin. Loaded only with `HF_MOCK_PROVIDER=1` (`getBuiltinPlugins`). Every answer
 // is deterministic, for e2e. Models: `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` (v1) and, since
 // Phase 6 (plugin API 1.1.0), `mock:image` (an image model), `mock:image-chat` (image output), `mock:image-tool`
-// (calls `generate_image`), `mock:transcribe` and `mock:speech` (./media.ts).
+// (calls `generate_image`), `mock:transcribe` and `mock:speech` (./media.ts); Phase 7: `mock:workspace` (walks through
+// the `core-workspace` tools, ./workspace.ts).
 import type { HarnessErrorInit, ModelInfo, PluginManifest, ProviderDefinition, ReasoningLevel, ToolDefinition } from '@harness-forge/plugin-sdk'
 import { APICallError } from '@ai-sdk/provider'
 import { definePlugin } from '@harness-forge/plugin-sdk'
@@ -35,6 +36,19 @@ export {
   MOCK_TRANSCRIPTION_MODEL_ID,
 } from './media.ts'
 export { MOCK_MODEL_IDS, MOCK_PROVIDER_ID, MOCK_TIMING, MOCK_TOOL_NAME } from './models.ts'
+export {
+  MOCK_WORKSPACE_COMMAND,
+  MOCK_WORKSPACE_CONTENT,
+  MOCK_WORKSPACE_DENIED,
+  MOCK_WORKSPACE_DONE,
+  MOCK_WORKSPACE_DONE_PREFIX,
+  MOCK_WORKSPACE_FAILED_PREFIX,
+  MOCK_WORKSPACE_FILE,
+  MOCK_WORKSPACE_NEW_STRING,
+  MOCK_WORKSPACE_OLD_STRING,
+  MOCK_WORKSPACE_UNAVAILABLE,
+  mockWorkspaceSteps,
+} from './workspace.ts'
 
 export const manifest = {
   manifestVersion: 1,
@@ -69,10 +83,10 @@ function mockModel(id: string, name: string, capabilities: Partial<Record<MockCa
 }
 
 /**
- * The nine mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
- * PROVIDERS.md 8. The media models carry explicit kinds: `image` (vision, the same cost), `transcription` and `speech`
- * (with `voices`). `image-chat` and `image-tool` say `kind: 'chat'` explicitly: an explicit kind always wins over
- * `classify()`, so their ids can never be read as dedicated image models.
+ * The ten mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
+ * PROVIDERS.md 8, then `workspace` (Phase 7). The media models carry explicit kinds: `image` (vision, the same cost),
+ * `transcription` and `speech` (with `voices`). `image-chat`, `image-tool` and `workspace` say `kind: 'chat'`
+ * explicitly: an explicit kind always wins over `classify()`, so their ids can never be read as dedicated image models.
  */
 export function mockModels(): ModelInfo[] {
   return [
@@ -85,6 +99,7 @@ export function mockModels(): ModelInfo[] {
     mockModel('image-tool', 'Mock Image Tool', { tools: true }, { kind: 'chat' }),
     { id: MOCK_TRANSCRIPTION_MODEL_ID, name: 'Mock Transcribe', kind: 'transcription' },
     { id: MOCK_SPEECH_MODEL_ID, name: 'Mock Speech', kind: 'speech', voices: [...MOCK_SPEECH_VOICES] },
+    mockModel('workspace', 'Mock Workspace', { tools: true }, { kind: 'chat' }),
   ]
 }
 

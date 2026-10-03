@@ -104,6 +104,7 @@ function toRecord(row: ChatRow): ChatRecord {
     archived: row.archived,
     pendingApproval: row.pendingApproval,
     activeLeafId: row.activeLeafId,
+    projectId: row.projectId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -216,8 +217,7 @@ export function createChatsService(deps: AppDeps): ChatsService {
       archived: row.archived,
       running: isRunning(row.id),
       pendingApproval: row.pendingApproval,
-      // Phase 7 placeholder until `chats.project_id` exists (migration 0004, W7.5).
-      projectId: null,
+      projectId: row.projectId,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       ...(snippet === undefined ? {} : { snippet }),
@@ -635,7 +635,7 @@ export function createChatsService(deps: AppDeps): ChatsService {
       const now = Date.now()
       const [created] = await db
         .insert(chats)
-        .values({ id, modelRef: modelRef ?? null, settings: settings ?? {}, createdAt: now, updatedAt: now })
+        .values({ id, modelRef: modelRef ?? null, settings: settings ?? {}, projectId: init.projectId ?? null, createdAt: now, updatedAt: now })
         .onConflictDoNothing({ target: chats.id })
         .returning()
       if (created !== undefined) {

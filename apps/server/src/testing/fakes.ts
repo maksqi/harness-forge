@@ -10,8 +10,14 @@
 // Phase 6 (C11-T5): `createFakeFilesService` also has `saveGenerated`, `createFakeChatsService` has `deleteMessage`, and
 // ./fake-media.ts adds `createFakeImageService` (a factory) and `createFakeAudioService`. The fake media resolvers and
 // the fake plugin host's `ctx.images` live in `providers/testing.ts` (`withFakeMediaResolvers`, `fakeMediaProviders`).
+//
+// Phase 7 (C14-T6): ./fake-projects.ts adds `createFakeProjectService` (projects in memory, `openWorkspace` on a temp
+// folder); `createRecordingEventBus` has `disconnectAll`; `createFakeDataService` has `cleanupPreview` / `cleanup` and
+// answers `busy` with the maintenance lock's error; `createFakeKeyring` is C16's rotatable fake (./fake-keyring.ts).
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type {
+  DataCleanupPreview,
+  DataCleanupResult,
   DataDeleteResult,
   DataImportResult,
   DataSummary,
@@ -28,7 +34,6 @@ import type {
 } from '@harness-forge/shared'
 import type { ActiveRun, ChatRunner } from '../chat/types.ts'
 import type { IconService } from '../providers/types.ts'
-import type { Keyring, SubkeyName } from '../security/types.ts'
 import type { DataService } from '../services/data/types.ts'
 import type { EventBus, EventSubscribeOptions, ServerEventListener } from '../services/events/types.ts'
 import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, GeneratedFileInput, StoredFile } from '../services/files/types.ts'
@@ -36,7 +41,7 @@ import type { SecretEntry, SecretScope, SecretStore } from '../services/secrets/
 import type { InternalSettingKey, SettingsService } from '../services/settings/types.ts'
 import type { ShareFile, ShareService } from '../services/shares/types.ts'
 import type { AppDeps } from '../types.ts'
-import { createHash, hkdfSync } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { mkdir, rm } from 'node:fs/promises'
 import {
   createServerEvent,
@@ -56,28 +61,14 @@ import { files } from '../db/schema.ts'
 import { rejectsNotImplemented } from '../not-implemented.ts'
 import { createFilesService } from '../services/files/index.ts'
 import { sniffBinaryType } from '../services/files/sniff.ts'
+import { busyError } from '../services/maintenance/index.ts'
 import { secretHint } from '../services/secrets/hint'
 
 export { createFakeChatsService } from './fake-chats.ts'
+/** Deterministic, rotatable keyring (C16, ./fake-keyring.ts): the same subkey bytes as the Phase 1 – 6 fake. */
+export { createFakeKeyring, FAKE_KEYRING_SEED, fakeMasterKey } from './fake-keyring.ts'
 export { createFakeAudioService, createFakeImageService, NO_IMAGE_MODEL_MESSAGE } from './fake-media.ts'
 export type { FakeAudioCall, FakeAudioService, FakeAudioServiceOptions, FakeImageService, FakeImageServiceOptions } from './fake-media.ts'
-
-/** Deterministic keyring: HKDF-SHA256 subkeys of `sha256(seed)` (same derivation parameters as the real keyring). */
-export function createFakeKeyring(seed = 'harness-forge-test-master-key'): Keyring {
-  const master = createHash('sha256').update(seed).digest()
-  const cache = new Map<SubkeyName, Uint8Array>()
-  return {
-    keyVersion: 1,
-    subkey: (name) => {
-      let key = cache.get(name)
-      if (key === undefined) {
-        key = new Uint8Array(hkdfSync('sha256', master, 'harness-forge/v1', name, 32))
-        cache.set(name, key)
-      }
-      return key
-    },
-  }
-}
 
 export interface RecordingEventBus extends EventBus {
   /** Every event emitted so far. */
@@ -85,13 +76,20 @@ export interface RecordingEventBus extends EventBus {
   /** Events of one type. */
   readonly ofType: <T extends ServerEvent['type']>(type: T) => Extract<ServerEvent, { type: T }>[]
   readonly clear: () => void
+  /** Calls of `disconnectAll()` so far (Phase 7). */
+  readonly disconnects: () => number
 }
 
-/** A working in-memory event bus that also records every event. */
+/**
+ * A working in-memory event bus that also records every event. Delivery is synchronous, so `disconnectAll()` (Phase 7)
+ * has nothing queued: it removes every subscription with `onDisconnect` or `onClose` and notifies it (`onDisconnect`,
+ * else `onClose`), keeps the others, and resolves once every `onDisconnect` settled.
+ */
 export function createRecordingEventBus(): RecordingEventBus {
   const events: ServerEvent[] = []
   const subscribers = new Map<ServerEventListener, EventSubscribeOptions>()
   let stopped = false
+  let disconnects = 0
 
   function publish(event: ServerEvent): void {
     if (stopped)
@@ -125,6 +123,22 @@ export function createRecordingEventBus(): RecordingEventBus {
       for (const options of subscribers.values())
         options.onClose?.()
       subscribers.clear()
+    },
+    disconnects: () => disconnects,
+    disconnectAll: async () => {
+      disconnects += 1
+      const pending: Promise<void>[] = []
+      for (const [listener, options] of [...subscribers]) {
+        if (options.onDisconnect === undefined && options.onClose === undefined)
+          continue
+        subscribers.delete(listener)
+        if (options.onDisconnect === undefined) {
+          options.onClose?.()
+          continue
+        }
+        pending.push(Promise.resolve().then(() => options.onDisconnect?.()).catch(() => {}))
+      }
+      await Promise.all(pending)
     },
   }
 }
@@ -259,16 +273,11 @@ export function createFakeChatRunner(overrides: Partial<ChatRunner> = {}): FakeC
   }
 }
 
+/** The grace period of the orphaned file cleanup in the fake data service (ADR-035: 24 h). */
+export const FAKE_CLEANUP_GRACE_MS = 86_400_000
+
 /** An empty zip: only the end-of-central-directory record (22 bytes). */
 export const EMPTY_ZIP: Uint8Array = Uint8Array.from([0x50, 0x4B, 0x05, 0x06, ...Array.from({ length: 18 }).fill(0)])
-
-function busyError(): HarnessError {
-  return new HarnessError({
-    code: 'conflict',
-    message: 'Another import or delete-all is running. Try again when it has finished.',
-    details: { reason: 'busy' },
-  })
-}
 
 export interface FakeDataServiceOptions {
   /** Answer of `summary` (default: zeros). */
@@ -279,6 +288,10 @@ export interface FakeDataServiceOptions {
   importResult?: DataImportResult
   /** Answer of `deleteAll` (default: zeros). */
   deleteResult?: DataDeleteResult
+  /** Answer of `cleanupPreview` (Phase 7; default: nothing to remove, grace 24 h, never run). */
+  cleanupPreview?: DataCleanupPreview
+  /** Answer of `cleanup` (Phase 7; default: nothing removed, `ranAt` from `now`). */
+  cleanupResult?: DataCleanupResult
   /** Clock of `exportedAt` (default `Date.now`). */
   now?: () => number
 }
@@ -286,7 +299,10 @@ export interface FakeDataServiceOptions {
 export interface FakeDataService extends DataService {
   /** Every call in order: the member and its arguments. */
   readonly calls: Array<{ member: keyof DataService, args: unknown[] }>
-  /** While true, `importData` and `deleteAll` fail with `conflict` (`reason: 'busy'`), like the real mutex. */
+  /**
+   * While true, `importData`, `deleteAll`, `cleanupPreview` and `cleanup` fail with `conflict` (`reason: 'busy'`), like
+   * the maintenance lock.
+   */
   busy: boolean
   /** Backup streams read to the end, and cancelled (a `HEAD` request or a client that went away). */
   readonly exports: { completed: number, cancelled: number }
@@ -355,6 +371,18 @@ export function createFakeDataService(options: FakeDataServiceOptions = {}): Fak
       if (body.confirm !== 'DELETE')
         throw validationError([{ path: ['confirm'], message: 'Type DELETE to confirm.', code: 'custom' }])
       return options.deleteResult ?? { chats: 0, messages: 0, files: 0, fileBytes: 0, usageRows: 0 }
+    },
+    cleanupPreview: async () => {
+      fake.calls.push({ member: 'cleanupPreview', args: [] })
+      if (fake.busy)
+        throw busyError()
+      return options.cleanupPreview ?? { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, recentFiles: 0, graceMs: FAKE_CLEANUP_GRACE_MS, lastRunAt: null }
+    },
+    cleanup: async () => {
+      fake.calls.push({ member: 'cleanup', args: [] })
+      if (fake.busy)
+        throw busyError()
+      return options.cleanupResult ?? { files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, ranAt: now() }
     },
   }
   return fake

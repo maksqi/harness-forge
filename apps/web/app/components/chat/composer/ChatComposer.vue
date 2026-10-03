@@ -78,12 +78,18 @@ const props = withDefaults(defineProps<{
   placeholder?: string
   /** Images of the last assistant message on the path; > 0 shows "Edit the previous image" (ImageOptionsMenu). */
   previousImages?: number
+  /**
+   * + Phase 7 (C15 declares it, W7.12 uses it): the chat's project; a project chat offers Accept edits in the
+   * PermissionMenu. null = none.
+   */
+  projectId?: string | null
 }>(), {
   usage: null,
   chatCostUsd: null,
   disabled: false,
   placeholder: 'Reply…',
   previousImages: 0,
+  projectId: null,
 })
 
 const emit = defineEmits<{

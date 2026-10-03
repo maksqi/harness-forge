@@ -3,6 +3,7 @@
 // tools run without asking), Off. The composer renders it only when a usable tool exists and the model can call
 // tools. Alt+P opens it.
 import type { ToolMode } from '@harness-forge/shared'
+import { toolModeSchema } from '@harness-forge/shared'
 import { ChevronDownIcon } from '@lucide/vue'
 import { useVModel } from '@vueuse/core'
 import { computed } from 'vue'
@@ -26,9 +27,15 @@ const props = withDefaults(defineProps<{
   open?: boolean
   /** Receives focus when the menu closes (the composer textarea); default: the trigger. */
   returnFocusTo?: HTMLElement | null
+  /**
+   * + Phase 7 (C15 declares it, W7.12 uses it): the modes offered; default every mode. ChatComposer passes ask, auto,
+   * off, plus edits in a project chat or while edits is selected.
+   */
+  modes?: readonly ToolMode[]
 }>(), {
   open: false,
   returnFocusTo: null,
+  modes: () => [...toolModeSchema.options],
 })
 
 const emit = defineEmits<{

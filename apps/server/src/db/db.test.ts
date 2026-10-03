@@ -6,7 +6,7 @@ import { eq, sql } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase } from './client.ts'
 import { migrateDatabase, resolveMigrationsFolder } from './migrate.ts'
-import { chats, chatShares, messages, TABLE_NAMES, usage } from './schema.ts'
+import { chats, chatShares, messages, projects, TABLE_NAMES, usage } from './schema.ts'
 
 const opened: Database[] = []
 const tempDirs: string[] = []
@@ -67,11 +67,12 @@ describe('migrations', () => {
     expect(resolveMigrationsFolder()).toMatch(/[/\\]apps[/\\]server[/\\]drizzle$/)
   })
 
-  it('creates the 15 tables of the data model', async () => {
+  it('creates the 16 tables of the data model', async () => {
     const database = await freshDatabase()
     const tables = (await names(database, 'table')).filter(name => name !== '__drizzle_migrations')
-    expect(TABLE_NAMES).toHaveLength(15)
+    expect(TABLE_NAMES).toHaveLength(16)
     expect(TABLE_NAMES).toContain('chat_shares')
+    expect(TABLE_NAMES).toContain('projects')
     expect(tables).toEqual([...TABLE_NAMES].sort())
   })
 
@@ -85,15 +86,17 @@ describe('migrations', () => {
       'messages_chat_seq_idx',
       'usage_chat_idx',
       'usage_created_idx',
+      'projects_path_idx',
+      'chats_project_idx',
     ]))
     expect(await indexColumns(database, 'messages_chat_parent_idx')).toEqual(['chat_id', 'parent_id'])
     expect(await indexColumns(database, 'chat_shares_chat_idx')).toEqual(['chat_id'])
   })
 
-  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, ...', async () => {
+  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, 0003, 0004 projects', async () => {
     const database = await freshDatabase()
     const journal = JSON.parse(readFileSync(join(resolveMigrationsFolder(), 'meta', '_journal.json'), 'utf8')) as { entries: Array<{ tag: string }> }
-    expect(journal.entries.map(entry => entry.tag).slice(0, 3)).toEqual(['0000_initial_schema', '0001_message_tree_and_shares', '0002_remembered_versions'])
+    expect(journal.entries.map(entry => entry.tag)).toEqual(['0000_initial_schema', '0001_message_tree_and_shares', '0002_remembered_versions', '0003_refresh_model_listings', '0004_projects'])
     const applied = await database.client.execute('SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows).toHaveLength(journal.entries.length)
   })
@@ -173,14 +176,13 @@ describe('phase 5 schema (ADR-023 message tree, ADR-025 share links)', () => {
 })
 
 describe('phase 6 schema (ADR-030 remembered versions)', () => {
-  it('adds a nullable selected_child_id column without a default, a foreign key or an index (still 15 tables)', async () => {
+  it('adds a nullable selected_child_id column without a default, a foreign key or an index', async () => {
     const database = await freshDatabase()
     expect((await columns(database, 'messages')).selected_child_id).toEqual({ name: 'selected_child_id', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 })
     expect(await foreignKeys(database, 'messages')).toEqual(['chat_id -> chats.id (CASCADE)'])
     const indexes = await database.client.execute(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'messages' AND name NOT LIKE 'sqlite_%'`)
     for (const row of indexes.rows)
       expect(await indexColumns(database, String(row.name)), String(row.name)).not.toContain('selected_child_id')
-    expect((await names(database, 'table')).filter(name => name !== '__drizzle_migrations')).toHaveLength(15)
   })
 
   it('stores the remembered child as a hint: a pointer may outlive its child', async () => {
@@ -200,6 +202,52 @@ describe('phase 6 schema (ADR-030 remembered versions)', () => {
     await db.delete(messages).where(eq(messages.id, 'msg_bbbbbbbbbbbbbbbb'))
     const [parent] = await db.select({ selectedChildId: messages.selectedChildId }).from(messages)
     expect(parent?.selectedChildId).toBe('msg_bbbbbbbbbbbbbbbb')
+  })
+})
+
+describe('phase 7 schema (ADR-031 projects)', () => {
+  it('creates projects as documented: text id, unique canonical path, nullable instructions, timestamps', async () => {
+    const database = await freshDatabase()
+    const table = await columns(database, 'projects')
+    expect(Object.values(table).map(column => [column.name, column.type, column.notnull, column.pk])).toEqual([
+      ['id', 'TEXT', 1, 1],
+      ['name', 'TEXT', 1, 0],
+      ['path', 'TEXT', 1, 0],
+      ['instructions', 'TEXT', 0, 0],
+      ['created_at', 'INTEGER', 1, 0],
+      ['updated_at', 'INTEGER', 1, 0],
+    ])
+    expect(await indexColumns(database, 'projects_path_idx')).toEqual(['path'])
+    expect(await foreignKeys(database, 'projects')).toEqual([])
+  })
+
+  it('adds a nullable chats.project_id without a default or a foreign key, indexed with archived and the list order', async () => {
+    const database = await freshDatabase()
+    expect((await columns(database, 'chats')).project_id).toEqual({ name: 'project_id', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 })
+    expect(await foreignKeys(database, 'chats')).toEqual([])
+    expect(await indexColumns(database, 'chats_project_idx')).toEqual(['project_id', 'archived', 'updated_at', 'id'])
+    const sql = await database.client.execute(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'chats_project_idx'`)
+    expect(String(sql.rows[0]?.sql)).toMatch(/"updated_at" DESC,\s*"id" DESC/i)
+  })
+
+  it('stores projects; a project path is unique; deleting a project leaves the chats that name it (no foreign key)', async () => {
+    const { db } = await freshDatabase()
+    await db.insert(projects).values({ id: 'prj_AAAAAAAAAAAAAAAA', name: 'Demo', path: '/srv/projects/demo', createdAt: 1, updatedAt: 2 })
+    const [project] = await db.select().from(projects)
+    expect(project).toEqual({ id: 'prj_AAAAAAAAAAAAAAAA', name: 'Demo', path: '/srv/projects/demo', instructions: null, createdAt: 1, updatedAt: 2 })
+    await expect(db.insert(projects).values({ id: 'prj_BBBBBBBBBBBBBBBB', name: 'Copy', path: '/srv/projects/demo', createdAt: 1, updatedAt: 1 })).rejects.toThrow()
+
+    const chatId = '0199a8f0-0000-7000-8000-000000000005'
+    await db.insert(chats).values({ id: chatId, projectId: 'prj_AAAAAAAAAAAAAAAA' })
+    const [chat] = await db.select({ projectId: chats.projectId }).from(chats)
+    expect(chat?.projectId).toBe('prj_AAAAAAAAAAAAAAAA')
+    // The project service detaches chats itself (one transaction); the schema never cascades into chats.
+    await db.delete(projects).where(eq(projects.id, 'prj_AAAAAAAAAAAAAAAA'))
+    expect(await db.select({ id: chats.id, projectId: chats.projectId }).from(chats)).toEqual([{ id: chatId, projectId: 'prj_AAAAAAAAAAAAAAAA' }])
+    // A chat without a project.
+    await db.insert(chats).values({ id: '0199a8f0-0000-7000-8000-000000000006' })
+    const [plain] = await db.select({ projectId: chats.projectId }).from(chats).where(eq(chats.id, '0199a8f0-0000-7000-8000-000000000006'))
+    expect(plain?.projectId).toBeNull()
   })
 })
 

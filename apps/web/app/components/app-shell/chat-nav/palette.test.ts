@@ -48,7 +48,7 @@ describe('buildPaletteSections', () => {
     expect(values(sections)).toEqual([
       ['chats', chats(RECENT_CHATS_LIMIT).map(chat => `chat:${chat.id}`)],
       ['actions', ['new-chat', 'show-shortcuts', 'toggle-sidebar']],
-      ['navigation', ['go-plugins', 'go-settings-providers', 'go-settings-models', 'go-settings-media', 'go-settings-general', 'go-settings-appearance', 'go-settings-data', 'go-settings-about']],
+      ['navigation', ['go-plugins', 'go-settings-providers', 'go-settings-models', 'go-settings-media', 'go-settings-projects', 'go-settings-general', 'go-settings-appearance', 'go-settings-data', 'go-settings-about']],
       ['theme', ['theme-dark', 'theme-light', 'theme-system']],
     ])
     const labels = sections.flatMap(section => section.items.map(item => item.label))
@@ -102,6 +102,15 @@ describe('buildPaletteSections', () => {
     const untitled = buildPaletteSections(input({ chats: [chatSummary({ id: chatId(9), title: null, titleSource: null })] }))
     expect(untitled[0]!.items[0]).toMatchObject({ label: 'New chat', placeholder: true })
     expect(buildPaletteSections(input({ query: 'new chat', chats: [chatSummary({ id: chatId(9), title: null })] }))[0]!.items[0]?.value).toBe(`chat:${chatId(9)}`)
+  })
+
+  it('offers "Settings: Projects" from the settings links (Phase 7)', () => {
+    const items = buildPaletteSections(input({ chats: [] })).flatMap(section => section.items)
+    expect(items.find(item => item.value === 'go-settings-projects')).toMatchObject({
+      label: 'Settings: Projects',
+      command: { type: 'navigate', to: '/settings/projects' },
+    })
+    expect(values(buildPaletteSections(input({ query: 'settings proj', chats: [] })))).toEqual([['navigation', ['go-settings-projects']]])
   })
 
   it('filters actions, pages and themes by label and keywords', () => {

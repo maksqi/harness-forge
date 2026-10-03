@@ -60,7 +60,8 @@ const emit = defineEmits<{
   'regenerate': []
   /** The edited text and the files left in the editor (the full new set). */
   'edit': [text: string, files: FileUIPart[]]
-  'approval': [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean }]
+  /** + Phase 7: `acceptEdits` = "Accept all edits in this chat" (the session switches the mode to `edits`). */
+  'approval': [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean, acceptEdits?: boolean }]
   'retry': []
   /** The version chosen in the BranchSwitcher (a sibling of this message). */
   'select-version': [messageId: string]

@@ -17,6 +17,9 @@ import type { DataService } from './services/data/types.ts'
 import type { EventBus } from './services/events/types.ts'
 import type { FilesService } from './services/files/types.ts'
 import type { ImageService } from './services/images/types.ts'
+import type { KeyService } from './services/keys/types.ts'
+import type { MaintenanceService } from './services/maintenance/types.ts'
+import type { ProjectService } from './services/projects/types.ts'
 import type { CredentialService, SecretStore } from './services/secrets/types.ts'
 import type { SettingsService } from './services/settings/types.ts'
 import type { ShareService } from './services/shares/types.ts'
@@ -85,6 +88,18 @@ export interface AppServices {
   readonly images: ImageService
   /** Dictation (`transcribe`) and read-aloud (`speak`) behind `/api/audio/*` (W6.5, ADR-029). */
   readonly audio: AudioService
+  /**
+   * Projects (folders on the server host that chats belong to), the allowed workspace roots and `openWorkspace` for
+   * chat runs (Phase 7, ADR-031; C14 stub, W7.1). `start()` is the first step of `startDeps()`.
+   */
+  readonly projects: ProjectService
+  /** Master-key state and the online key rotation behind `/api/keys` (Phase 7, ADR-034; C16 stub, W7.7). */
+  readonly keys: KeyService
+  /**
+   * One maintenance operation at a time: import, delete-all, key rotation, file cleanup; `blockRuns` refuses new chat
+   * runs (Phase 7, ADR-034 / ADR-035; C16).
+   */
+  readonly maintenance: MaintenanceService
 }
 
 export interface AppDeps extends AppBase, AppServices {}

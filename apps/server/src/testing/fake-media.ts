@@ -7,11 +7,12 @@
 // Both follow the documented contract where callers can see it (the model fallback to the settings, input limits,
 // abort, the usage row of an image generation) and answer deterministically: images are the solid-color PNGs of the
 // mock provider (`builtin-plugins/mock/media.ts`), speech is its silent WAV. Never imported by production code.
+// Phase 7: image results carry `modelName` (the model id: the fake has no catalog).
 import type { AudioTranscribeForm, AudioTranscription } from '@harness-forge/shared'
 import type { AudioService, AudioSpeakInput, AudioTranscribeInput, SpeechAudio } from '../services/audio/types.ts'
 import type { ImageGenerationInput, ImageGenerationResult, ImageService, StoredImage } from '../services/images/types.ts'
 import type { AppDeps } from '../types.ts'
-import { HarnessError, LIMITS, parseModelRef, validationError } from '@harness-forge/shared'
+import { HarnessError, LIMITS, parseModelRef, safeParseModelRef, validationError } from '@harness-forge/shared'
 import { abortableDelay, abortError } from '../builtin-plugins/mock/common.ts'
 import { createMockWav, MOCK_TRANSCRIPT, mockImagePng, mockImageSize, mockImageUsage, mockRevisedPrompt } from '../builtin-plugins/mock/media.ts'
 
@@ -118,7 +119,8 @@ export function createFakeImageService(deps: AppDeps, options: FakeImageServiceO
         costUsd,
       })
     }
-    return { modelRef, images, usage, costUsd, revisedPrompt: mockRevisedPrompt(prompt), dropped }
+    // `modelName` (Phase 7): the fake has no catalog, so the model id stands in for the display name.
+    return { modelRef, modelName: safeParseModelRef(modelRef)?.modelId ?? modelRef, images, usage, costUsd, revisedPrompt: mockRevisedPrompt(prompt), dropped }
   }
 
   return { calls, generate }

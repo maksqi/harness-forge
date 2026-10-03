@@ -1,10 +1,12 @@
 // Imported messages (API.md 5.9: `POST /chats` with `messages`; `ChatsService.importChat`, ADR-024): the UI messages are
 // deep-validated with the AI SDK (`validateUIMessages` with the message metadata and data part schemas), streaming
 // parts are finalized, pending tool approvals are resolved as denied, the message tree (`parentIds`, `activeLeafId`,
-// ADR-023) is validated before anything is written, and message ids are kept or replaced.
+// ADR-023) is validated before anything is written, and message ids are kept or replaced. Pending approvals are denied
+// through `denyOpenApprovals` (./approvals.ts, shared with the key rotation).
 import type { HarnessUIMessage, HarnessUIMessagePart } from '@harness-forge/shared'
 import { createMessageId, harnessDataSchemas, MESSAGE_ID_PATTERN, messageMetadataSchema, validationError } from '@harness-forge/shared'
 import { safeValidateUIMessages } from 'ai'
+import { denyOpenApprovals } from './approvals.ts'
 
 /** `approval.reason` of approvals that were still pending when the chat was imported. */
 export const IMPORT_DENIAL_REASON = 'imported'
@@ -54,25 +56,17 @@ function importValidationError(error: unknown, prefix: IssuePath): Error {
   return validationError(issues)
 }
 
-function isToolPart(type: string): boolean {
-  return type.startsWith('tool-') || type === 'dynamic-tool'
-}
-
-/** Finalizes streaming text / reasoning and denies approvals that can no longer be answered. */
-function resolvePart(part: HarnessUIMessagePart): HarnessUIMessagePart {
+/** Finalizes streaming text / reasoning. */
+function finalizePart(part: HarnessUIMessagePart): HarnessUIMessagePart {
   const loose = part as unknown as Record<string, unknown>
   if ((part.type === 'text' || part.type === 'reasoning') && loose.state === 'streaming')
     return { ...part, state: 'done' }
-  if (isToolPart(part.type) && (loose.state === 'approval-requested' || loose.state === 'approval-responded')) {
-    const approval = (loose.approval ?? {}) as Record<string, unknown>
-    const keepReason = loose.state === 'approval-responded' && approval.approved === false && typeof approval.reason === 'string'
-    return {
-      ...loose,
-      state: 'output-denied',
-      approval: { ...approval, approved: false, reason: keepReason ? approval.reason : IMPORT_DENIAL_REASON },
-    } as unknown as HarnessUIMessagePart
-  }
   return part
+}
+
+/** Finalizes streaming text / reasoning and denies approvals that can no longer be answered. */
+function resolveParts(parts: HarnessUIMessagePart[]): HarnessUIMessagePart[] {
+  return denyOpenApprovals(parts.map(finalizePart), IMPORT_DENIAL_REASON).parts
 }
 
 /**
@@ -90,7 +84,7 @@ export async function validateImportedMessages(input: readonly HarnessUIMessage[
   })
   if (!result.success)
     throw importValidationError(result.error, prefix)
-  return result.data.map(message => ({ ...message, parts: message.parts.map(resolvePart) }))
+  return result.data.map(message => ({ ...message, parts: resolveParts(message.parts) }))
 }
 
 /** The message tree of an import, by position (see `planImportTree`). */

@@ -174,12 +174,12 @@ tools + a shell with approval), the Accept edits permission mode, master-key rot
   - [x] C13 contracts: shared DTOs + plugin SDK 1.2.0, 9 new routes (85), `docs/API.md`, 501 stubs
   - [x] D7 docs: `phase-7-v1-3.md`, UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md, guides, README, `.env.example`
   - [x] Gate + checkpoint commit
-- [ ] P7-0b Schema, migration `0004`, skeletons, FREEZE
-  - [ ] K3 schema + `pnpm db:generate` (coordinator; v1.2 upgrade copy first)
-  - [ ] C14 server skeleton (types, env, deps, workspace path resolver, `core-workspace` skeleton, `mock:workspace`)
-  - [ ] C16 maintenance + keys skeleton (rotatable keyring, maintenance service, boot hooks, approvals helper)
-  - [ ] C15 web skeleton (test ids, Projects nav, stub components, projects store, chats store members)
-  - [ ] Gate (incl. v1.2 data upgrade probe) + FREEZE + checkpoint commit
+- [x] P7-0b Schema, migration `0004`, skeletons, FREEZE
+  - [x] K3 schema + `pnpm db:generate` (coordinator; v1.2 upgrade copy first)
+  - [x] C14 server skeleton (types, env, deps, workspace path resolver, `core-workspace` skeleton, `mock:workspace`)
+  - [x] C16 maintenance + keys skeleton (rotatable keyring, maintenance service, boot hooks, approvals helper)
+  - [x] C15 web skeleton (test ids, Projects nav, stub components, projects store, chats store members)
+  - [x] Gate (incl. v1.2 data upgrade probe) + FREEZE + checkpoint commit
 - [ ] P7-A Features (13 agents)
   - [ ] W7.1 projects-server · [ ] W7.2 workspace-files · [ ] W7.3 workspace-shell · [ ] W7.4 chat-pipeline
   - [ ] W7.5 chats-server · [ ] W7.6 tools-media-api · [ ] W7.7 key-rotation · [ ] W7.8 file-cleanup
@@ -226,3 +226,4 @@ advisories (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) once pat
 | Final gate v1.2 | coordinator | frozen install ok; 5091 tests; build ok; CSP 38/38; probes 21/21; e2e 61 passed ×3 (chromium + mobile + tablet); 5 new screens reviewed; `pnpm audit --prod` clean; real v1.1 → v1.2 upgrade 9/9 (v1.1 from `30da884` in a worktree). Live provider suite not run (needs the user's keys) | (this commit) |
 | P7-00 | coordinator | math tests (unit + e2e) green on katex 0.16 and on the PR #4 build (katex 0.19); Dependabot #5 (replaces #2), #6 (replaces #3), #4 squash-merged on GitHub after green check / e2e / docker (audit red only from two new build-tooling advisories, ignored locally) | `aac10a5`, `121db32`, `9341590`, `0cc670e` |
 | P7-0a | coordinator (K1, K2), C13, D7 | audit ok (78 paths; 15 C13 compile-fix files accepted); frozen install ok; 5195 tests; build ok; CSP 38/38; 9 new routes mounted (501, 400 on invalid input; `pluginApiVersion` 1.2.0); e2e 62 passed (61 + math); Docker image builds with bash 5.3 + git 2.54 (uid 1000); `pnpm audit --prod` clean with the two ignored advisories | (this commit) |
+| P7-0b | coordinator (K3), C14, C15, C16 (+ coordinator: C14 test fixes for the new builtin plugin and mock model accepted) | audit ok (135 paths); `0004_projects` = CREATE TABLE + 2 indexes + ALTER ADD (no rebuild); 5424 tests; build ok; CSP 38/38; e2e 62 passed (fresh `.tmp/e2e`: `workspaces/` 0700 created); upgrade probe on a v1.2 copy (seeded on the real v1.2 dist) 15/15: 5 migrations, `_keys` written (version 1), secrets readable, branched path + attachment + pending approval + share intact, `projectId` null; FREEZE | (this commit) |

@@ -1,5 +1,6 @@
 // The Phase 5 fakes (C8-T6) behave like the frozen contracts they stand in for, so W5.3 / W5.4 can rely on them; the
-// Phase 6 fakes (C11-T5) likewise for W6.1, W6.4, W6.5 and W6.6.
+// Phase 6 fakes (C11-T5) likewise for W6.1, W6.4, W6.5 and W6.6; the Phase 7 additions (C14-T6) for W7.7 and W7.8. The
+// fake project service has its own file (./fake-projects.test.ts).
 import type { PluginContext } from '@harness-forge/plugin-sdk'
 import type { ChatCreate, HarnessUIMessage } from '@harness-forge/shared'
 import type { ResolvedImageModel } from '../providers/types.ts'
@@ -8,7 +9,7 @@ import type { TestApp } from './create-test-app.ts'
 import type { FakeChatRunner, RecordingEventBus } from './fakes.ts'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
-import { chatDetailSchema, chatExportSchema, dataImportResultSchema, HarnessError, LIMITS, SHARE_TOKEN_PATTERN, shareSummarySchema, shareViewSchema } from '@harness-forge/shared'
+import { chatDetailSchema, chatExportSchema, dataCleanupPreviewSchema, dataCleanupResultSchema, dataImportResultSchema, HarnessError, LIMITS, SHARE_TOKEN_PATTERN, shareSummarySchema, shareViewSchema } from '@harness-forge/shared'
 import { generateImage, generateSpeech, transcribe } from 'ai'
 import { MockTranscriptionModelV4 } from 'ai/test'
 import { and, eq } from 'drizzle-orm'
@@ -382,6 +383,38 @@ describe('createFakeDataService', () => {
     data.busy = true
     expect((await rejection(data.importData(new Blob([EMPTY_ZIP])))).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'busy' } })
     expect((await rejection(data.deleteAll({ confirm: 'DELETE' }))).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'busy' } })
+  })
+
+  it('phase 7: answers the cleanup preview and run from its options, busy like the maintenance lock', async () => {
+    const data = createFakeDataService({ now: () => 1234 })
+    expect(dataCleanupPreviewSchema.parse(await data.cleanupPreview())).toEqual({ files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, recentFiles: 0, graceMs: 86_400_000, lastRunAt: null })
+    expect(dataCleanupResultSchema.parse(await data.cleanup())).toEqual({ files: 0, fileBytes: 0, blobs: 0, diskBytes: 0, tempFiles: 0, ranAt: 1234 })
+    const custom = createFakeDataService({ cleanupResult: { files: 2, fileBytes: 10, blobs: 1, diskBytes: 8, tempFiles: 0, ranAt: 5 } })
+    expect(await custom.cleanup()).toMatchObject({ files: 2, ranAt: 5 })
+    data.busy = true
+    expect((await rejection(data.cleanupPreview())).toJSON().error).toMatchObject({ code: 'conflict', message: 'Another data task is running. Try again when it finishes.', details: { reason: 'busy' } })
+    expect((await rejection(data.cleanup())).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'busy' } })
+    expect(data.calls.map(call => call.member)).toEqual(['cleanupPreview', 'cleanup', 'cleanupPreview', 'cleanup'])
+  })
+})
+
+describe('createRecordingEventBus: disconnectAll (Phase 7)', () => {
+  it('ends the streams (onDisconnect, else onClose), keeps plain listeners, records the call and keeps working', async () => {
+    const bus = createRecordingEventBus()
+    const seen: string[] = []
+    const ended: string[] = []
+    bus.subscribe(() => seen.push('plain'))
+    bus.subscribe(() => seen.push('stream'), { onDisconnect: async () => void ended.push('disconnect') })
+    bus.subscribe(() => seen.push('closer'), { onClose: () => void ended.push('close') })
+    bus.emit('key.rotated', { keyVersion: 2, rotatedAt: 1, chatIds: [] })
+    expect(seen).toEqual(['plain', 'stream', 'closer'])
+    await bus.disconnectAll()
+    expect(ended.sort()).toEqual(['close', 'disconnect'])
+    expect(bus.subscriberCount()).toBe(1)
+    expect(bus.disconnects()).toBe(1)
+    bus.emit('catalog.changed', { providerId: null })
+    expect(seen.at(-1)).toBe('plain')
+    expect(bus.ofType('catalog.changed')).toHaveLength(1)
   })
 })
 

@@ -49,7 +49,8 @@ const props = withDefaults(defineProps<{
 })
 
 const emit = defineEmits<{
-  approval: [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean }]
+  /** + Phase 7: `acceptEdits` = "Accept all edits in this chat" (the session switches the mode to `edits`). */
+  approval: [response: { id: string, approved: boolean, toolName: string, alwaysAllow: boolean, acceptEdits?: boolean }]
 }>()
 
 const plugins = usePluginsStore()

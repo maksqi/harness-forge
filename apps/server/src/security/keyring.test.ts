@@ -11,17 +11,23 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { loadEnv } from '../env.ts'
 import { createMemoryLogger } from '../logger.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
+import { createFakeKeyring as createRotatableFakeKeyring, fakeMasterKey } from '../testing/fake-keyring.ts'
 import { createFakeKeyring } from '../testing/fakes.ts'
 import {
+  beginKeyChange,
   createKeyring,
   createMasterKeyring,
   decodeMasterKey,
   deriveSubkey,
   encodeMasterKey,
   HKDF_SALT,
+  isKeyChanging,
+  isRotatableKeyring,
   KeyringError,
   loadMasterKey,
   MASTER_KEY_BYTES,
+  swapMasterKey,
+  whenKeyStable,
 } from './keyring.ts'
 import { createRedactor } from './redact.ts'
 import { SUBKEY_NAMES } from './types.ts'
@@ -311,5 +317,134 @@ describe('createKeyring in the app', () => {
     const dataDir = tempDataDir()
     writeFileSync(join(dataDir, 'secret.key'), 'garbage', { mode: 0o600 })
     await expect(createTestApp({ dataDir, factories: { keyring: createKeyring }, start: false })).rejects.toThrow(KeyringError)
+  })
+})
+
+describe('rotation controls (Phase 7, ADR-034)', () => {
+  /** Resolves with true when `promise` settles within a few macrotask turns. */
+  async function settlesSoon(promise: Promise<unknown>): Promise<boolean> {
+    let settled = false
+    void promise.then(() => {
+      settled = true
+    })
+    for (let index = 0; index < 3; index++)
+      await new Promise(resolve => setTimeout(resolve, 0))
+    return settled
+  }
+
+  it('is one frozen object whose keyVersion is a getter', () => {
+    const keyring = createMasterKeyring(randomBytes(32), 4)
+    expect(Object.isFrozen(keyring)).toBe(true)
+    expect(Object.getOwnPropertyDescriptor(keyring, 'keyVersion')?.get).toBeTypeOf('function')
+    expect(keyring.keyVersion).toBe(4)
+    expect(() => {
+      (keyring as { keyVersion: number }).keyVersion = 9
+    }).toThrow(TypeError)
+    expect(Object.keys(keyring).sort()).toEqual(['keyVersion', 'subkey'])
+    expect(isRotatableKeyring(keyring)).toBe(true)
+  })
+
+  it('swapMasterKey changes every subkey and the version in place; copies taken before keep their bytes', () => {
+    const before = randomBytes(32)
+    const after = randomBytes(32)
+    const expected = new Map(SUBKEY_NAMES.map(name => [name, deriveSubkey(after, name)]))
+    const keyring = createMasterKeyring(before)
+    const old = new Map(SUBKEY_NAMES.map(name => [name, keyring.subkey(name)]))
+    swapMasterKey(keyring, after, 2)
+    // The keyring keeps no reference to the key it was given.
+    after.fill(0)
+    expect(keyring.keyVersion).toBe(2)
+    for (const name of SUBKEY_NAMES) {
+      expect(keyring.subkey(name)).not.toEqual(old.get(name))
+      expect(keyring.subkey(name)).toEqual(expected.get(name))
+      expect(old.get(name)).toEqual(deriveSubkey(before, name))
+    }
+  })
+
+  it('derives the new subkeys exactly like a new keyring over the new key', () => {
+    const next = randomBytes(32)
+    const keyring = createMasterKeyring(randomBytes(32))
+    swapMasterKey(keyring, new Uint8Array(next), 3)
+    const fresh = createMasterKeyring(next, 3)
+    for (const name of SUBKEY_NAMES)
+      expect(keyring.subkey(name)).toEqual(fresh.subkey(name))
+  })
+
+  it('refuses keyrings it did not create, keys of the wrong size and invalid versions', () => {
+    const literal = { keyVersion: 1, subkey: () => new Uint8Array(32) }
+    expect(isRotatableKeyring(literal)).toBe(false)
+    expect(() => swapMasterKey(literal, randomBytes(32), 2)).toThrow(KeyringError)
+    expect(() => beginKeyChange(literal)).toThrow(KeyringError)
+    const keyring = createMasterKeyring(randomBytes(32))
+    expect(() => swapMasterKey(keyring, randomBytes(16), 2)).toThrow(KeyringError)
+    for (const version of [0, -1, 1.5, Number.NaN])
+      expect(() => swapMasterKey(keyring, randomBytes(32), version)).toThrow(KeyringError)
+    expect(() => createMasterKeyring(randomBytes(32), 0)).toThrow(KeyringError)
+    expect(keyring.keyVersion).toBe(1)
+  })
+
+  it('whenKeyStable resolves at once when stable and waits for every end() of overlapping key changes', async () => {
+    const keyring = createMasterKeyring(randomBytes(32))
+    expect(isKeyChanging(keyring)).toBe(false)
+    expect(await settlesSoon(whenKeyStable(keyring))).toBe(true)
+
+    const endFirst = beginKeyChange(keyring)
+    const endSecond = beginKeyChange(keyring)
+    expect(isKeyChanging(keyring)).toBe(true)
+    const waiting = whenKeyStable(keyring)
+    expect(await settlesSoon(waiting)).toBe(false)
+    endFirst()
+    endFirst()
+    expect(await settlesSoon(waiting)).toBe(false)
+    endSecond()
+    expect(await settlesSoon(waiting)).toBe(true)
+    expect(isKeyChanging(keyring)).toBe(false)
+    expect(await settlesSoon(whenKeyStable(keyring))).toBe(true)
+
+    // A new change after a stable period needs its own end().
+    const endThird = beginKeyChange(keyring)
+    const later = whenKeyStable(keyring)
+    expect(await settlesSoon(later)).toBe(false)
+    endThird()
+    expect(await settlesSoon(later)).toBe(true)
+  })
+
+  it('treats a keyring it did not create as always stable', async () => {
+    expect(await settlesSoon(whenKeyStable({ keyVersion: 1, subkey: () => new Uint8Array(32) }))).toBe(true)
+  })
+
+  it('createKeyring takes the key version recovered at boot', () => {
+    const dataDir = tempDataDir()
+    const { deps } = keyringDeps(dataDir)
+    expect(createKeyring(deps).keyVersion).toBe(1)
+    const keyring = createKeyring(deps, { keyVersion: 3 })
+    expect(keyring.keyVersion).toBe(3)
+    expect(isRotatableKeyring(keyring)).toBe(true)
+    expect(() => createKeyring(deps, { keyVersion: 0 })).toThrow(KeyringError)
+  })
+
+  it('the frozen deps.keyring keeps returning the same object across a swap', async () => {
+    const t = await createTestApp({ start: false, overrides: { keyring: createRotatableFakeKeyring() } })
+    cleanups.push(() => t.close())
+    const keyring = t.deps.keyring
+    const before = keyring.subkey('share')
+    swapMasterKey(keyring, fakeMasterKey('rotated'), 2)
+    expect(t.deps.keyring).toBe(keyring)
+    expect(t.deps.keyring.keyVersion).toBe(2)
+    expect(t.deps.keyring.subkey('share')).not.toEqual(before)
+    expect(t.deps.keyring.subkey('share')).toEqual(createRotatableFakeKeyring('rotated').subkey('share'))
+  })
+
+  it('the fake keyring is rotatable and keeps the Phase 1 - 6 derivation', () => {
+    const seed = 'fake-seed'
+    const keyring = createRotatableFakeKeyring(seed)
+    const master = createHash('sha256').update(seed).digest()
+    expect(isRotatableKeyring(keyring)).toBe(true)
+    expect(keyring.keyVersion).toBe(1)
+    for (const name of SUBKEY_NAMES)
+      expect(keyring.subkey(name)).toEqual(new Uint8Array(hkdfSync('sha256', master, HKDF_SALT, name, 32)))
+    expect(fakeMasterKey(seed)).toEqual(new Uint8Array(master))
+    swapMasterKey(keyring, fakeMasterKey('other'), 2)
+    expect(keyring.subkey('encryption')).toEqual(createRotatableFakeKeyring('other').subkey('encryption'))
   })
 })

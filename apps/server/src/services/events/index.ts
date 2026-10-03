@@ -4,6 +4,10 @@
 // emits) are queued and delivered right after the current one, before the outer `emit` returns, so every listener sees
 // every event in the same global order. A throwing listener is logged and never breaks `emit`. Events reach in-process
 // listeners as published; the SSE layer (`./sse.ts`) validates them with `serverEventSchema` before sending.
+//
+// `disconnectAll()` (Phase 7, C16-T4) ends every event stream but keeps the bus running: called from inside a delivery
+// it waits until the queued events were delivered, then removes every subscription with `onDisconnect` / `onClose`
+// and notifies it (an SSE stream flushes its own queue, then closes).
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type { ServerEvent } from '@harness-forge/shared'
 import type { Logger } from '../../logger.ts'
@@ -22,6 +26,8 @@ const NOOP_DISPOSABLE: Disposable = Object.freeze({ dispose: () => {} })
 export function createEventBusWithLogger(logger: Logger): EventBus {
   const subscriptions = new Set<Subscription>()
   const pending: ServerEvent[] = []
+  /** `disconnectAll()` calls made during a delivery: they run once the queue is empty. */
+  const afterDelivery: (() => void)[] = []
   let delivering = false
   let stopped = false
 
@@ -58,6 +64,8 @@ export function createEventBusWithLogger(logger: Logger): EventBus {
       pending.length = 0
       delivering = false
     }
+    for (let next = afterDelivery.shift(); next !== undefined; next = afterDelivery.shift())
+      next()
   }
 
   function closeSubscription(subscription: Subscription): void {
@@ -66,6 +74,25 @@ export function createEventBusWithLogger(logger: Logger): EventBus {
     }
     catch (error) {
       logger.warn('event subscriber onClose failed', { err: error })
+    }
+  }
+
+  /** Removes and notifies every stream subscription (`onDisconnect`, else `onClose`). */
+  async function disconnectStreams(): Promise<void> {
+    if (stopped)
+      return
+    const streams = [...subscriptions].filter(({ options }) => options.onDisconnect !== undefined || options.onClose !== undefined)
+    for (const subscription of streams)
+      subscriptions.delete(subscription)
+    const settled = await Promise.allSettled(streams.map(async ({ options }) => {
+      if (options.onDisconnect !== undefined)
+        await options.onDisconnect()
+      else
+        options.onClose?.()
+    }))
+    for (const result of settled) {
+      if (result.status === 'rejected')
+        logger.warn('event subscriber disconnect failed', { err: result.reason })
     }
   }
 
@@ -93,6 +120,16 @@ export function createEventBusWithLogger(logger: Logger): EventBus {
       for (const subscription of closing)
         closeSubscription(subscription)
       subscriptions.clear()
+      // A `disconnectAll()` still waiting for a delivery has nothing left to do.
+      for (let next = afterDelivery.shift(); next !== undefined; next = afterDelivery.shift())
+        next()
+    },
+    disconnectAll: () => {
+      if (!delivering)
+        return disconnectStreams()
+      return new Promise<void>((resolve) => {
+        afterDelivery.push(() => resolve(disconnectStreams()))
+      })
     },
   }
 }

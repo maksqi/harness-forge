@@ -1,10 +1,10 @@
 import { Buffer } from 'node:buffer'
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { afterEach, describe, expect, it } from 'vitest'
-import { bindSafetyError, defaultEnvFile, ensureDataDir, EnvError, isLoopbackHost, loadDotEnvFile, loadEnv } from './env.ts'
+import { bindSafetyError, defaultEnvFile, ensureDataDir, EnvError, isLoopbackHost, loadDotEnvFile, loadEnv, parseWorkspaceRoots } from './env.ts'
 import { findWorkspaceRoot, serverPackageRoot } from './paths.ts'
 
 const tempDirs: string[] = []
@@ -171,6 +171,94 @@ describe('hF_TRUST_PROXY (ADR-026)', () => {
   it('names the reason for booleans and hop counts', () => {
     expect(() => loadEnv({ HF_TRUST_PROXY: 'true' }, { cwd: tempDir() })).toThrow(/trust every peer/)
     expect(() => loadEnv({ HF_TRUST_PROXY: '1' }, { cwd: tempDir() })).toThrow(/hop count/)
+  })
+})
+
+describe('hF_WORKSPACE_ROOTS and HF_WORKSPACE_SHELL (Phase 7, ADR-031 / ADR-033)', () => {
+  it('defaults: the only root is <dataDir>/workspaces (frozen), the shell is on', () => {
+    const cwd = tempDir()
+    const env = loadEnv({}, { cwd })
+    expect(env.paths.workspaces).toBe(join(cwd, 'data', 'workspaces'))
+    expect(env.workspaceRoots).toEqual([join(cwd, 'data', 'workspaces')])
+    expect(env.workspaceRootsDefault).toBe(true)
+    expect(env.workspaceShell).toBe(true)
+    expect(Object.isFrozen(env.workspaceRoots)).toBe(true)
+    expect(Object.isFrozen(env.paths)).toBe(true)
+  })
+
+  it('an empty value counts as unset', () => {
+    const env = loadEnv({ HF_WORKSPACE_ROOTS: '  ', HF_WORKSPACE_SHELL: '' }, { cwd: tempDir() })
+    expect(env.workspaceRootsDefault).toBe(true)
+    expect(env.workspaceShell).toBe(true)
+  })
+
+  it('splits on commas, trims, drops empty items, normalizes with resolve and deduplicates (first wins)', () => {
+    const env = loadEnv({ HF_WORKSPACE_ROOTS: ' /srv/projects , ,/home/me/code/, /srv/a/../projects,/srv/x/./y,' }, { cwd: tempDir() })
+    expect(env.workspaceRoots).toEqual(['/srv/projects', '/home/me/code', '/srv/x/y'])
+    expect(env.workspaceRootsDefault).toBe(false)
+    expect(Object.isFrozen(env.workspaceRoots)).toBe(true)
+  })
+
+  it('an explicit list may name the default root', () => {
+    const cwd = tempDir()
+    const dataDir = join(cwd, 'data')
+    const env = loadEnv({ HF_DATA_DIR: dataDir, HF_WORKSPACE_ROOTS: `${join(dataDir, 'workspaces')},/srv/projects` }, { cwd })
+    expect(env.workspaceRoots).toEqual([join(dataDir, 'workspaces'), '/srv/projects'])
+    expect(env.workspaceRootsDefault).toBe(false)
+  })
+
+  it.each([
+    ['relative/projects', 'is not an absolute path'],
+    ['./projects', 'is not an absolute path'],
+    ['~/projects', 'is not an absolute path'],
+    ['/srv/projects,projects', 'is not an absolute path'],
+    ['/', 'is a filesystem root'],
+    ['/srv/..', 'is a filesystem root'],
+    ['/srv/projects, //', 'is a filesystem root'],
+    ['/srv/pro\u0000jects', 'NUL character'],
+    [',', 'names no folder'],
+    [' , ,, ', 'names no folder'],
+  ])('refuses %j with an EnvError naming the variable and the format', (value, reason) => {
+    let error: unknown
+    try {
+      loadEnv({ HF_WORKSPACE_ROOTS: value }, { cwd: tempDir() })
+    }
+    catch (caught) {
+      error = caught
+    }
+    expect(error).toBeInstanceOf(EnvError)
+    const message = (error as EnvError).message
+    expect(message).toContain('HF_WORKSPACE_ROOTS')
+    expect(message).toContain(reason)
+    expect(message).toContain('comma-separated list of absolute folders')
+  })
+
+  it('parseWorkspaceRoots never touches the filesystem: missing folders pass the syntax check', () => {
+    expect(parseWorkspaceRoots('/does/not/exist/hf-c14')).toEqual({ ok: true, roots: ['/does/not/exist/hf-c14'] })
+    expect(parseWorkspaceRoots('relative')).toMatchObject({ ok: false })
+  })
+
+  it.each([
+    ['0', false],
+    ['off', false],
+    ['false', false],
+    ['no', false],
+    ['1', true],
+    ['on', true],
+    ['TRUE', true],
+  ])('hF_WORKSPACE_SHELL=%s -> %s', (value, expected) => {
+    expect(loadEnv({ HF_WORKSPACE_SHELL: value }, { cwd: tempDir() }).workspaceShell).toBe(expected)
+  })
+
+  it('refuses an HF_WORKSPACE_SHELL that is not a flag', () => {
+    expect(() => loadEnv({ HF_WORKSPACE_SHELL: 'maybe' }, { cwd: tempDir() })).toThrow(EnvError)
+    expect(() => loadEnv({ HF_WORKSPACE_SHELL: 'maybe' }, { cwd: tempDir() })).toThrow(/HF_WORKSPACE_SHELL/)
+  })
+
+  it('ensureDataDir does not create the workspace root (projects.start() does)', () => {
+    const env = loadEnv({ HF_DATA_DIR: join(tempDir(), 'data') })
+    ensureDataDir(env)
+    expect(existsSync(env.paths.workspaces)).toBe(false)
   })
 })
 

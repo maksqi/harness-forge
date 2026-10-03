@@ -2,7 +2,9 @@
 // Implementation: `createFilesService(deps)` in `services/files/index.ts` (W1.5). Consumers: the files routes (W1.5)
 // and the chat pipeline (W2.1: file parts -> bytes for vision / pdf models); in Phase 5 the data service (W5.3:
 // `importFile`, `purge`, ADR-024) and the share service (W5.4: `open` for share-scoped files, ADR-025); in Phase 6 the
-// image service and the chat pipeline (`saveGenerated`, ADR-028, implemented by W6.4).
+// image service and the chat pipeline (`saveGenerated`, ADR-028, implemented by W6.4); in Phase 7 the orphaned file
+// cleanup of the data service (`sweep`, the pins and the store gate, ADR-035, ARCHITECTURE.md 6.15; types by C16,
+// implemented by W7.8).
 import type { FileRef } from '@harness-forge/shared'
 
 /** A `files` row. */
@@ -64,6 +66,39 @@ export interface FilePurgeResult {
   bytes: number
 }
 
+/** Input of `sweep` (ADR-035). */
+export interface FileSweepInput {
+  /**
+   * Every file id referenced anywhere (the loose `file_...` scan of `services/data/references.ts`): never deleted. The
+   * `DELETE` re-checks the message references in the same statement, so a message committed after the scan keeps its
+   * file too.
+   */
+  referencedIds: ReadonlySet<string>
+  /**
+   * The cutoff (ms; `now - graceMs`): only rows created before it are candidates; rowless blobs are removed only when
+   * their mtime is before it too. Unreferenced rows created later count as `recentFiles`.
+   */
+  createdBefore: number
+  /** true: count what would be removed and delete nothing (the preview, `GET /data/cleanup`). */
+  dryRun: boolean
+}
+
+/** Result of `sweep`: what was removed (or would be, with `dryRun`). */
+export interface FileSweepResult {
+  /** `files` rows removed (unreferenced, unpinned, created before the cutoff). */
+  files: number
+  /** Sum of their `size`. */
+  fileBytes: number
+  /** Blobs unlinked: the blobs of removed rows that no row keeps any more, plus rowless 64-hex blobs past the cutoff. */
+  blobs: number
+  /** Disk bytes of those blobs. */
+  diskBytes: number
+  /** Stale `.<sha256>.<uuid>.tmp` files (older than 1 hour) removed. */
+  tempFiles: number
+  /** Unreferenced rows kept because they are younger than the cutoff or pinned. */
+  recentFiles: number
+}
+
 export interface FilesService {
   /**
    * Validates size (`LIMITS.uploadBytes` -> `payload_too_large` with `details.limitBytes`), MIME family
@@ -114,4 +149,31 @@ export interface FilesService {
    * `generated-file-dropped` notice, `ImageService` result `dropped`).
    */
   readonly saveGenerated: (input: GeneratedFileInput) => Promise<StoredFile>
+
+  // ----- Phase 7: orphaned file cleanup (ADR-035), types C16, implementation W7.8
+
+  /**
+   * Removes the orphaned files under the exclusive store gate (it takes the gate itself: never call it from inside
+   * `withExclusiveGate`): rows created before `createdBefore`, not in `referencedIds` and not pinned, with `DELETE ...
+   * WHERE id IN (...) AND id NOT IN (referencedFileIdsQuery())`; a blob is unlinked only when no row is left with its
+   * sha256; then `files/<aa>/` is walked with `lstat` (regular files only): a 64-hex blob without a row and older than
+   * the cutoff is deleted, `.<sha256>.<uuid>.tmp` files older than 1 hour are deleted, anything else stays. With
+   * `dryRun` nothing is deleted and the counts say what would be. The caller holds
+   * `maintenance.exclusive('file-cleanup', ...)`.
+   */
+  readonly sweep: (input: FileSweepInput) => Promise<FileSweepResult>
+  /**
+   * The pinned ids: every id `upload`, `importFile` and `saveGenerated` returned within the grace period (24 h), kept
+   * in memory, so a run that reuses an old row before its message is saved never loses it. `sweep` never deletes a
+   * pinned row. A snapshot (later pins do not change it).
+   */
+  readonly pinnedIds: () => ReadonlySet<string>
+  /**
+   * Runs `operation` holding the store gate shared: any number of shared holders run together; they wait while an
+   * exclusive holder runs, and an exclusive holder waits for them. `upload`, `importFile` and `saveGenerated` hold it
+   * shared around their blob write + row insert. Not re-entrant across modes.
+   */
+  readonly withSharedGate: <T>(operation: () => Promise<T>) => Promise<T>
+  /** Runs `operation` holding the store gate exclusively (no shared or other exclusive holder meanwhile; `sweep`). */
+  readonly withExclusiveGate: <T>(operation: () => Promise<T>) => Promise<T>
 }

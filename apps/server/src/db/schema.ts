@@ -141,10 +141,16 @@ export const chats = sqliteTable('chats', {
    * chat before the chat, and drizzle-kit cannot add `ON DELETE` to an `ALTER TABLE ... ADD` column.
    */
   activeLeafId: text('active_leaf_id'),
+  /**
+   * Project of the chat (ADR-031); null = no project. No foreign key: added by `ALTER TABLE` in migration 0004 (a
+   * rebuild of `chats` would cascade-delete its messages); deleting a project detaches its chats in a transaction.
+   */
+  projectId: text('project_id'),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 }, table => [
   index('chats_list_idx').on(table.archived, sql`${table.updatedAt} DESC`, sql`${table.id} DESC`),
+  index('chats_project_idx').on(table.projectId, table.archived, sql`${table.updatedAt} DESC`, sql`${table.id} DESC`),
 ])
 
 export const messages = sqliteTable('messages', {
@@ -300,6 +306,21 @@ export const chatShares = sqliteTable('chat_shares', {
   index('chat_shares_chat_idx').on(table.chatId),
 ])
 
+/** Projects (ADR-031): a named folder on the server host, inside one of the workspace roots. */
+export const projects = sqliteTable('projects', {
+  /** `prj_` + 16 chars. */
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  /** Canonical realpath of the project folder (unique). */
+  path: text('path').notNull(),
+  /** Project instructions, joined after AGENTS.md / CLAUDE.md of the folder; null = none. */
+  instructions: text('instructions'),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, table => [
+  uniqueIndex('projects_path_idx').on(table.path),
+])
+
 // ---------- relations (relational query API: `db.query.chats.findFirst({ with: { messages: true } })`) ----------
 
 export const chatsRelations = relations(chats, ({ many }) => ({
@@ -320,7 +341,7 @@ export const usageRelations = relations(usage, ({ one }) => ({
   chat: one(chats, { fields: [usage.chatId], references: [chats.id] }),
 }))
 
-/** Every table name (the 15 tables of DECISIONS.md "Database tables"). */
+/** Every table name (the 16 tables of DECISIONS.md "Database tables"). */
 export const TABLE_NAMES = [
   'settings',
   'secrets',
@@ -337,6 +358,7 @@ export const TABLE_NAMES = [
   'mcp_servers',
   'files',
   'chat_shares',
+  'projects',
 ] as const
 
 // ---------- row types ----------
@@ -356,3 +378,4 @@ export type ToolPrefRow = typeof toolPrefs.$inferSelect
 export type McpServerRow = typeof mcpServers.$inferSelect
 export type FileRow = typeof files.$inferSelect
 export type ChatShareRow = typeof chatShares.$inferSelect
+export type ProjectRow = typeof projects.$inferSelect

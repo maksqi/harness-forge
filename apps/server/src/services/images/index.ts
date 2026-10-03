@@ -270,6 +270,8 @@ export function createImageService(deps: AppDeps): ImageService {
     })
     return {
       modelRef: resolved.modelRef,
+      // Phase 7 (plugin API 1.2.0): the display name of the catalog entry, else the model id (W7.6 owns the rule).
+      modelName: resolved.entry.name || resolved.modelId,
       images: stored.images,
       usage,
       costUsd,

@@ -7,9 +7,11 @@
 // - `deleteAll`: stops every run, deletes every chat (and its messages and share links) through `ChatsService`,
 //   optionally the usage rows and every uploaded file, then stops any run whose chat appeared meanwhile. Settings,
 //   providers, credentials, plugins and MCP servers stay.
-// - One import or delete-all at a time per process (an in-process mutex): another one fails at once with `409
-//   conflict` (`reason: 'busy'`). Summaries and exports never take it. No new event types: `ChatsService` emits
-//   `chat.created` / `chat.deleted` per chat.
+// - Imports and delete-all run under the maintenance lock (Phase 7, C16-T1: `deps.maintenance.exclusive('import' |
+//   'delete-all', ...)`, shared with the key rotation and the file cleanup; it replaced the private mutex): while
+//   another maintenance operation runs they fail at once with `409 conflict` (`reason: 'busy'`). Summaries and exports
+//   never take it. No new event types: `ChatsService` emits `chat.created` / `chat.deleted` per chat.
+// - `cleanupPreview` / `cleanup` (ADR-035): stubs that reject with `not_implemented` until W7.8.
 import type { DataDeleteBody, DataDeleteResult, DataSummary } from '@harness-forge/shared'
 import type { AppDeps, SensitiveOperationOptions } from '../../types.ts'
 import type { DataLimits } from './limits.ts'
@@ -17,9 +19,10 @@ import type { DataService } from './types.ts'
 import { validationError } from '@harness-forge/shared'
 import { sql } from 'drizzle-orm'
 import { chats, files, messages } from '../../db/schema.ts'
+import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { guardDb } from '../chats/db-errors.ts'
 import { backupFilename, createBackupStream, planBackup } from './backup.ts'
-import { busyError, DATA_LIMITS } from './limits.ts'
+import { DATA_LIMITS } from './limits.ts'
 import { importUpload } from './restore.ts'
 
 export interface DataServiceOptions {
@@ -69,20 +72,6 @@ async function deleteEverything(deps: AppDeps, body: DataDeleteBody): Promise<Da
 export function createDataService(deps: AppDeps, options: DataServiceOptions = {}): DataService {
   const limits: DataLimits = { ...DATA_LIMITS, ...options.limits }
   const now = options.now ?? Date.now
-  let busy = false
-
-  /** Runs `operation` under the import / delete-all mutex; `conflict` (`busy`) when it is taken. */
-  async function exclusive<T>(operation: () => Promise<T>): Promise<T> {
-    if (busy)
-      throw busyError()
-    busy = true
-    try {
-      return await operation()
-    }
-    finally {
-      busy = false
-    }
-  }
 
   return {
     summary: () => dataSummary(deps),
@@ -92,13 +81,17 @@ export function createDataService(deps: AppDeps, options: DataServiceOptions = {
       return { filename: backupFilename(plan.exportedAt), exportedAt: plan.exportedAt, stream: createBackupStream(deps, plan) }
     },
 
-    importData: (upload, form = {}) => exclusive(() => importUpload(deps, upload, form, limits)),
+    importData: (upload, form = {}) => deps.maintenance.exclusive('import', () => importUpload(deps, upload, form, limits)),
 
     deleteAll: async (body: DataDeleteBody, sensitive?: SensitiveOperationOptions) => {
       sensitive?.requireFreshAuth()
       if (body.confirm !== 'DELETE')
         throw validationError([{ path: ['confirm'], message: 'Type DELETE to confirm.', code: 'custom' }])
-      return exclusive(() => deleteEverything(deps, body))
+      return deps.maintenance.exclusive('delete-all', () => deleteEverything(deps, body))
     },
+
+    cleanupPreview: rejectsNotImplemented('The storage cleanup preview'),
+
+    cleanup: rejectsNotImplemented('The storage cleanup'),
   }
 }

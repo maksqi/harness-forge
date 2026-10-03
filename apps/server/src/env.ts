@@ -1,10 +1,11 @@
 // Environment variables (DECISIONS.md "Environment variables"): parsed once at boot into a frozen `Env`, after the
 // optional `<workspace root>/.env` file was loaded (`loadDotEnvFile`; variables already set win). Owned by W1.1 after
-// Phase 0 (bind safety with a stored password is enforced in `main.ts`); `HF_TRUST_PROXY` by W5.7 (ADR-026).
+// Phase 0 (bind safety with a stored password is enforced in `main.ts`); `HF_TRUST_PROXY` by W5.7 (ADR-026);
+// `HF_WORKSPACE_ROOTS` / `HF_WORKSPACE_SHELL` by C14 (Phase 7, ADR-031 / ADR-033).
 import type { LogLevel } from './logger.ts'
 import { Buffer } from 'node:buffer'
 import { existsSync, mkdirSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, parse, resolve } from 'node:path'
 import process from 'node:process'
 import { z } from 'zod'
 import { findWorkspaceRoot, serverPackageRoot } from './paths.ts'
@@ -30,6 +31,11 @@ export interface DataPaths {
   readonly cache: string
   /** Compiled `.ts` code plugins: `cache/plugins/<id>/<sha256>.mjs`. */
   readonly pluginCache: string
+  /**
+   * The default workspace root `workspaces/` (Phase 7, ADR-031): the only allowed root while `HF_WORKSPACE_ROOTS` is
+   * unset. Created with mode 0700 by `projects.start()` (not by `ensureDataDir`) when it is one of the roots.
+   */
+  readonly workspaces: string
 }
 
 export interface Env {
@@ -64,6 +70,20 @@ export interface Env {
    * `X-Forwarded-Proto` is honored from any peer). Read through the helpers of `http/middleware/request-info.ts`.
    */
   readonly trustProxy: readonly string[] | null
+  /**
+   * `HF_WORKSPACE_ROOTS` (Phase 7, ADR-031): the folders that may hold project folders, absolute and normalized with
+   * `resolve` (deduplicated, in the given order), frozen. Default: `[paths.workspaces]`. `loadEnv` checks only the
+   * syntax; `projects.start()` resolves each root with `realpath` and checks it (exists, a directory, not the data dir
+   * or inside it except `<dataDir>/workspaces`), and `projects.roots()` returns the checked list.
+   */
+  readonly workspaceRoots: readonly string[]
+  /** `HF_WORKSPACE_ROOTS` is unset: `workspaceRoots` is the default `[paths.workspaces]`. */
+  readonly workspaceRootsDefault: boolean
+  /**
+   * `HF_WORKSPACE_SHELL` (Phase 7, ADR-033; default on): `false` (`0`) never offers a tool with workspace access
+   * `execute` (the `shell` tool of `core-workspace`). A kill switch no session can change.
+   */
+  readonly workspaceShell: boolean
   /** `HF_API_TARGET`: proxy target of `nuxt dev` (unused by the server, kept for completeness). */
   readonly apiTarget: string
   /**
@@ -93,17 +113,22 @@ export class EnvError extends Error {
 const TRUE_VALUES = new Set(['1', 'true', 'yes', 'on'])
 const FALSE_VALUES = new Set(['0', 'false', 'no', 'off'])
 
-const flagSchema = z
-  .string()
-  .transform((value, ctx) => {
-    const normalized = value.trim().toLowerCase()
-    if (TRUE_VALUES.has(normalized))
-      return true
-    if (!FALSE_VALUES.has(normalized))
-      ctx.addIssue({ code: 'custom', message: 'Use 1 (on) or 0 (off).' })
-    return false
-  })
-  .default(false)
+/** A boolean flag (`1` / `0`, `true` / `false`, `yes` / `no`, `on` / `off`) with its value when unset. */
+function flag(defaultValue: boolean) {
+  return z
+    .string()
+    .transform((value, ctx) => {
+      const normalized = value.trim().toLowerCase()
+      if (TRUE_VALUES.has(normalized))
+        return true
+      if (!FALSE_VALUES.has(normalized))
+        ctx.addIssue({ code: 'custom', message: 'Use 1 (on) or 0 (off).' })
+      return false
+    })
+    .default(defaultValue)
+}
+
+const flagSchema = flag(false)
 
 const portSchema = z
   .string()
@@ -132,6 +157,49 @@ const trustProxySchema = z
   })
   .optional()
 
+/** How `HF_WORKSPACE_ROOTS` is written (appended to every refusal). */
+const WORKSPACE_ROOTS_FORMAT = 'Use a comma-separated list of absolute folders, e.g. /srv/projects,/home/me/code.'
+
+/** Result of `parseWorkspaceRoots`. */
+export type WorkspaceRootsParse = { ok: true, roots: string[] } | { ok: false, message: string }
+
+/**
+ * Syntax of `HF_WORKSPACE_ROOTS` (ARCHITECTURE.md 6.13): split on `,`, items trimmed, empty items dropped; each item
+ * must be absolute, without a NUL character, and not a filesystem root (`/`, `C:\`); each is normalized with `resolve`
+ * and duplicates are dropped (first wins). A list that names no folder is refused. The filesystem is not touched.
+ */
+export function parseWorkspaceRoots(value: string): WorkspaceRootsParse {
+  const roots: string[] = []
+  for (const raw of value.split(',')) {
+    const item = raw.trim()
+    if (item === '')
+      continue
+    if (item.includes('\0'))
+      return { ok: false, message: `A folder contains a NUL character. ${WORKSPACE_ROOTS_FORMAT}` }
+    if (!isAbsolute(item))
+      return { ok: false, message: `"${item}" is not an absolute path. ${WORKSPACE_ROOTS_FORMAT}` }
+    const root = resolve(item)
+    if (parse(root).root === root)
+      return { ok: false, message: `"${item}" is a filesystem root: name the folders that hold your projects. ${WORKSPACE_ROOTS_FORMAT}` }
+    if (!roots.includes(root))
+      roots.push(root)
+  }
+  if (roots.length === 0)
+    return { ok: false, message: `The list names no folder. ${WORKSPACE_ROOTS_FORMAT}` }
+  return { ok: true, roots }
+}
+
+const workspaceRootsSchema = z
+  .string()
+  .transform((value, ctx) => {
+    const parsed = parseWorkspaceRoots(value)
+    if (parsed.ok)
+      return parsed.roots
+    ctx.addIssue({ code: 'custom', message: parsed.message })
+    return z.NEVER
+  })
+  .optional()
+
 const envSchema = z.object({
   HF_PORT: portSchema,
   HF_HOST: z.string().trim().min(1).default('127.0.0.1'),
@@ -146,6 +214,8 @@ const envSchema = z.object({
   HF_TRUST_PROXY: trustProxySchema,
   HF_API_TARGET: z.url({ protocol: /^https?$/ }).default('http://localhost:8787'),
   HF_WEB_DIR: z.string().trim().min(1).optional(),
+  HF_WORKSPACE_ROOTS: workspaceRootsSchema,
+  HF_WORKSPACE_SHELL: flag(true),
   NODE_ENV: z.string().optional(),
 })
 
@@ -180,6 +250,7 @@ export function dataPaths(root: string): DataPaths {
     files: join(root, 'files'),
     cache,
     pluginCache: join(cache, 'plugins'),
+    workspaces: join(root, 'workspaces'),
   })
 }
 
@@ -203,11 +274,12 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
   const dev = options.dev ?? (nodeEnv === 'production' ? false : nodeEnv === 'development' ? true : runningFromSource())
   const cwd = options.cwd ?? process.cwd()
   const dataDir = resolveDataDir(values.HF_DATA_DIR, cwd)
+  const paths = dataPaths(dataDir)
   return Object.freeze({
     port: values.HF_PORT,
     host: values.HF_HOST,
     dataDir,
-    paths: dataPaths(dataDir),
+    paths,
     password: values.HF_PASSWORD ?? null,
     masterKey: values.HF_MASTER_KEY?.trim() ?? null,
     mockProvider: values.HF_MOCK_PROVIDER,
@@ -216,6 +288,9 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     offline: values.HF_OFFLINE,
     insecure: values.HF_INSECURE,
     trustProxy: values.HF_TRUST_PROXY ?? null,
+    workspaceRoots: Object.freeze(values.HF_WORKSPACE_ROOTS ?? [paths.workspaces]),
+    workspaceRootsDefault: values.HF_WORKSPACE_ROOTS === undefined,
+    workspaceShell: values.HF_WORKSPACE_SHELL,
     apiTarget: values.HF_API_TARGET,
     webDir: values.HF_WEB_DIR === undefined ? null : resolveDataDir(values.HF_WEB_DIR, cwd),
     dev,

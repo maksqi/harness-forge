@@ -2,7 +2,7 @@ import type { MockApi } from '~/utils/testing/mock-api'
 import { HarnessError } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { chatDetail, chatId, chatSummary } from '~/utils/testing/fixtures'
+import { chatDetail, chatId, chatSummary, projectId } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { UNREAD_CHATS_KEY, useChatsStore } from './chats'
@@ -313,5 +313,18 @@ describe('chats store: actions', () => {
     expect(api.chats.export).toHaveBeenCalledWith({ params: { id: today.id }, query: { format: 'md' } })
     expect(clicked).toEqual(['today-2026-09-28.md'])
     click.mockRestore()
+  })
+})
+
+describe('chats store: project filter (Phase 7 skeleton)', () => {
+  it('starts with every chat and sets the filter', async () => {
+    const chats = useChatsStore()
+    expect(chats.projectFilter).toBe('all')
+    await expect(chats.setProjectFilter('none')).resolves.toBeUndefined()
+    expect(chats.projectFilter).toBe('none')
+    await chats.setProjectFilter(projectId(1))
+    expect(chats.projectFilter).toBe(projectId(1))
+    await chats.setProjectFilter('all')
+    expect(chats.projectFilter).toBe('all')
   })
 })

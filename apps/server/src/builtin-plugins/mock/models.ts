@@ -2,7 +2,8 @@
 // whose streams come from `simulateReadableStream` with a per-chunk schedule (text: first chunk after 50 ms, then every
 // 25 ms; reasoning: every 100 ms). Every delay aborts with the call's `abortSignal`, so a stopped run ends at once.
 // Phase 6: `mock:image-chat` (a chat model with image output: text, then one PNG `file` part) and `mock:image-tool`
-// (calls the builtin `generate_image` tool); the media models live in ./media.ts.
+// (calls the builtin `generate_image` tool); the media models live in ./media.ts. Phase 7: `mock:workspace` (walks
+// through the `core-workspace` tools; the plan lives in ./workspace.ts).
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
@@ -20,12 +21,16 @@ import { simulateReadableStream } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 import { abortableDelay, abortError, countWords, MOCK_PROVIDER_ID, unknownModelError, wordChunks } from './common.ts'
 import { mockAspectRatioOption, mockImagePng, mockImageSize } from './media.ts'
+import { mockWorkspacePlan } from './workspace.ts'
 
 export { abortableDelay, countWords, MOCK_PROVIDER_ID, wordChunks } from './common.ts'
 
 export const MOCK_TOOL_NAME = 'mock_approval_tool'
-/** The language model ids of the mock provider (`createLanguageModel`): the four v1 models and the two Phase 6 ones. */
-export const MOCK_MODEL_IDS = ['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool'] as const
+/**
+ * The language model ids of the mock provider (`createLanguageModel`): the four v1 models, the two Phase 6 ones and
+ * `workspace` (Phase 7).
+ */
+export const MOCK_MODEL_IDS = ['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace'] as const
 export type MockModelId = (typeof MOCK_MODEL_IDS)[number]
 
 /** Stream timing (PROVIDERS.md 8). */
@@ -230,6 +235,8 @@ export function mockPlan(modelId: MockModelId, options: LanguageModelV4CallOptio
       return imageChatPlan(options)
     case 'image-tool':
       return toolPlan(options, IMAGE_TOOL_SPEC)
+    case 'workspace':
+      return mockWorkspacePlan(options)
     default:
       return echoPlan(options.prompt)
   }

@@ -1,5 +1,5 @@
 // Frozen security interfaces (ARCHITECTURE.md section 10). Implementations:
-// - `Keyring`         -> `createKeyring(deps)` in `security/keyring.ts` (W1.2)
+// - `Keyring`         -> `createKeyring(deps, { keyVersion })` in `security/keyring.ts` (W1.2; rotatable since C16)
 // - `PasswordService` -> `createPasswordService(deps)` in `security/password.ts` (W1.1)
 // - `SessionService`  -> `createSessionService(deps)` in `security/session.ts` (W1.1)
 // - `Redactor`        -> `createRedactor()` in `security/redact.ts` (implemented; hardened in W4.1)
@@ -14,16 +14,25 @@ export const SUBKEY_NAMES = ['encryption', 'session', 'approval', 'share'] as co
  *
  * The master key comes from `HF_MASTER_KEY` (base64, exactly 32 bytes) or `<dataDir>/secret.key` (generated once
  * with `crypto.randomBytes(32)`, mode 0600; a group/world readable file is refused). The factory loads the key
- * synchronously and throws on an invalid key, which fails the boot (exit 1). `createTestApp()` injects a fake keyring.
+ * synchronously and throws on an invalid key, which fails the boot (exit 1). `createTestApp()` injects a fake keyring
+ * (`testing/fake-keyring.ts`, rotatable like the real one).
+ *
+ * Rotation (Phase 7, ADR-034): the keyring is one frozen object whose state changes in place when a key rotation swaps
+ * the master key (`swapMasterKey`, `beginKeyChange`, `whenKeyStable` in `security/keyring.ts`; never members of this
+ * object), so `deps.keyring` always returns the same object while `keyVersion` and every subkey change.
  */
 export interface Keyring {
-  /** Version of the master key, stored in `secrets.key_version` (1 in v1; rotation is future work). */
+  /**
+   * Version of the master key, stored in `secrets.key_version` and `_keys.version`: 1 until the first rotation, +1 per
+   * rotation. A getter: it changes when a rotation swaps the key, so read it at the point of use.
+   */
   readonly keyVersion: number
   /**
    * 32-byte subkey: `encryption` (AES-256-GCM secrets), `session` (HMAC of `hf_session`), `approval`
    * (`experimental_toolApprovalSecret` of the chat pipeline), `share` (share link tokens: the first 22 base64url
    * characters of `HMAC-SHA256(subkey, 'harness-forge/share/v1:' + shareId)`, ADR-025; a new master key invalidates
-   * every link). Always returns the same bytes for a name.
+   * every link). Returns the same bytes for a name until a key rotation; cache a subkey only together with
+   * `keyVersion` (`{ version, value }`) and derive it again when `keyVersion` changed. Each call returns a copy.
    */
   readonly subkey: (name: SubkeyName) => Uint8Array
 }

@@ -219,9 +219,9 @@ describe('loading and states', () => {
       plugins: [{ fixture: 'acme-docs' }],
     })
     const list = await h.t.deps.plugins.list()
-    expect(list.map(plugin => plugin.id)).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'acme-docs'])
-    expect(list.slice(0, 4).every(plugin => plugin.state === 'active' && plugin.builtin && !plugin.removable && plugin.source === 'builtin')).toBe(true)
-    expect(list[4]).toMatchObject({ id: 'acme-docs', state: 'disabled', enabled: true })
+    expect(list.map(plugin => plugin.id)).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'acme-docs'])
+    expect(list.slice(0, 5).every(plugin => plugin.state === 'active' && plugin.builtin && !plugin.removable && plugin.source === 'builtin')).toBe(true)
+    expect(list[5]).toMatchObject({ id: 'acme-docs', state: 'disabled', enabled: true })
     expect(h.t.deps.registry.providers.list().map(provider => provider.definition.id)).toHaveLength(13)
     expect(h.t.deps.registry.providers.get('acme-docs')).toBeUndefined()
     const core = await detail(h, 'core-providers')

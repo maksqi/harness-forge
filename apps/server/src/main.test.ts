@@ -2,16 +2,25 @@
 // before it creates the data directory or opens a port. (The stored-password and HF_INSECURE branches of the rule are
 // unit-tested in env.test.ts; starting a server on a public address is never done in tests.) `HF_TRUST_PROXY`
 // (W5.7-T1 / T4, ADR-026): an invalid value stops the boot with the format explained, a valid one is logged with every
-// trusted range (a real boot on 127.0.0.1, any free port, offline, provider keys blanked).
+// trusted range (a real boot on 127.0.0.1, any free port, offline, provider keys blanked). Phase 7 boot hooks (C16-T3):
+// a normal boot and shutdown still log `listening` / `stopped`, record the key check `_keys` and leave no
+// `server.lock`; `rotate-key` is dispatched to the CLI without starting the server.
 import type { ChildProcess } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
+import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { PROVIDER_DEFINITIONS } from './builtin-plugins/core-providers/providers/index.ts'
+import { openDatabase } from './db/client.ts'
+import { settings } from './db/schema.ts'
 import { serverPackageRoot } from './paths.ts'
+import { readMasterKeyFile } from './security/keyring.ts'
+import { keyCheckOfMasterKey } from './services/keys/check.ts'
+import { SERVER_LOCK_FILE } from './services/keys/server-lock.ts'
+import { KEY_STATE_SETTING } from './services/keys/types.ts'
 
 const tempDirs: string[] = []
 
@@ -31,10 +40,10 @@ interface RunResult {
 const PROVIDER_KEY_VARIABLES = PROVIDER_DEFINITIONS.flatMap(definition => definition.credentials.flatMap(field => field.envVar ?? []))
 
 /** Spawns `src/main.ts` with tsx and a clean `HF_*` environment (explicit values also shadow any `.env` file). */
-function spawnMain(env: Record<string, string>): ChildProcess {
+function spawnMain(env: Record<string, string>, args: readonly string[] = []): ChildProcess {
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('HF_')))
   const root = serverPackageRoot()
-  return spawn(process.execPath, ['--import', 'tsx', join(root, 'src', 'main.ts')], {
+  return spawn(process.execPath, ['--import', 'tsx', join(root, 'src', 'main.ts'), ...args], {
     cwd: root,
     env: { ...inherited, HF_PASSWORD: '', HF_INSECURE: '0', HF_MASTER_KEY: '', HF_TRUST_PROXY: '', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -45,9 +54,9 @@ function spawnMain(env: Record<string, string>): ChildProcess {
  * Runs `src/main.ts` until it exits. With `stopWhen`, sends SIGTERM once the output matches it (a server that booted)
  * and waits for the graceful shutdown.
  */
-function runMain(env: Record<string, string>, timeoutMs = 60_000, stopWhen?: RegExp): Promise<RunResult> {
+function runMain(env: Record<string, string>, timeoutMs = 60_000, stopWhen?: RegExp, args: readonly string[] = []): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const child = spawnMain(env)
+    const child = spawnMain(env, args)
     let output = ''
     let stopping = false
     const collect = (chunk: string): void => {
@@ -173,5 +182,63 @@ describe('main.ts graceful shutdown', () => {
     expect(messages).toContain('shutting down')
     expect(messages).toContain('stopped')
     expect(messages).not.toContain('boot failed')
+  }, 90_000)
+})
+
+describe('main.ts Phase 7 boot hooks (ADR-034)', () => {
+  it('a normal boot and shutdown log listening / stopped, record the key check and leave no server.lock', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'harness-forge-main-'))
+    tempDirs.push(dataDir)
+    const blankKeys = Object.fromEntries(PROVIDER_KEY_VARIABLES.map(name => [name, '']))
+    const result = await runMain({
+      ...blankKeys,
+      HF_HOST: '127.0.0.1',
+      HF_PORT: '0',
+      HF_DATA_DIR: dataDir,
+      HF_OFFLINE: '1',
+      NODE_ENV: 'production',
+    }, 60_000, /"msg":"listening"/)
+    expect(result.signal).toBeNull()
+    expect(result.code).toBe(0)
+    const messages = records(result.output).map(record => record.msg)
+    expect(messages).toContain('listening')
+    expect(messages).toContain('recorded the key check')
+    expect(messages.indexOf('recorded the key check')).toBeLessThan(messages.indexOf('listening'))
+    expect(messages.at(-1)).toBe('stopped')
+    expect(existsSync(join(dataDir, SERVER_LOCK_FILE))).toBe(false)
+
+    const key = readMasterKeyFile(join(dataDir, 'secret.key'))
+    expect(key).not.toBeNull()
+    const database = await openDatabase({ path: join(dataDir, 'harness.db') })
+    try {
+      const [row] = await database.db.select({ value: settings.value }).from(settings).where(eq(settings.key, KEY_STATE_SETTING))
+      expect(row?.value).toEqual({ version: 1, check: keyCheckOfMasterKey(key!), rotatedAt: null })
+    }
+    finally {
+      database.close()
+    }
+  }, 90_000)
+
+  it('rotate-key is dispatched to the CLI without starting the server', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'harness-forge-main-'))
+    tempDirs.push(dataDir)
+    const blankKeys = Object.fromEntries(PROVIDER_KEY_VARIABLES.map(name => [name, '']))
+    const result = await runMain({
+      ...blankKeys,
+      HF_HOST: '127.0.0.1',
+      HF_PORT: '0',
+      HF_DATA_DIR: dataDir,
+      HF_OFFLINE: '1',
+      NODE_ENV: 'production',
+    }, 60_000, undefined, ['rotate-key'])
+    // The CLI ends by itself (no signal) and refuses or fails here: no key file and no HF_MASTER_KEY (it never creates
+    // a key); the stub of P7-0b always answers 1.
+    expect(result.signal).toBeNull()
+    expect([1, 2]).toContain(result.code)
+    const messages = records(result.output).map(record => record.msg)
+    expect(messages).not.toContain('listening')
+    expect(messages).not.toContain('plugins loaded')
+    expect(existsSync(join(dataDir, SERVER_LOCK_FILE))).toBe(false)
+    expect(existsSync(join(dataDir, 'secret.key'))).toBe(false)
   }, 90_000)
 })

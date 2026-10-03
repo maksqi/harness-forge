@@ -13,6 +13,9 @@
 // `LIMITS.generatedImageBytes`, magic bytes matching the type: ./generated.ts), deduplicated by content: a row with the
 // same sha256 and type is returned as is (its blob written again when missing), else a new row is inserted. Saves of the
 // same bytes are serialized, so they give one row even when they run concurrently.
+//
+// Orphaned file cleanup (ADR-035, W7.8): `sweep`, `pinnedIds` and the store gate (`withSharedGate`,
+// `withExclusiveGate`) are stubs that throw `not_implemented` until W7.8 implements them (C16 compile fix).
 import type { FileRef } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
 import type { FileImportInput, FileImportResult, FilePurgeResult, FilesService, GeneratedFileInput, StoredFile } from './types.ts'
@@ -23,6 +26,7 @@ import { Readable } from 'node:stream'
 import { createFileId, FILE_ID_PATTERN, HarnessError, LIMITS, SHA256_HEX_PATTERN, validationError } from '@harness-forge/shared'
 import { asc, eq } from 'drizzle-orm'
 import { files } from '../../db/schema.ts'
+import { rejectsNotImplemented, throwsNotImplemented } from '../../not-implemented.ts'
 import { guardDb, isConstraintError } from '../chats/db-errors.ts'
 import { checkGeneratedFile, generatedFileName } from './generated.ts'
 import { sanitizeFileName } from './names.ts'
@@ -284,5 +288,13 @@ export function createFilesService(deps: AppDeps): FilesService {
     purge,
 
     saveGenerated,
+
+    sweep: rejectsNotImplemented('The file sweep'),
+
+    pinnedIds: throwsNotImplemented('The file pins'),
+
+    withSharedGate: rejectsNotImplemented('The file store gate'),
+
+    withExclusiveGate: rejectsNotImplemented('The file store gate'),
   }
 }

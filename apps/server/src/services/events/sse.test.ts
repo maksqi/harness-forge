@@ -270,3 +270,52 @@ describe('openEventStream', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 })
+
+describe('openEventStream and disconnectAll (Phase 7)', () => {
+  it('writes an event emitted right before disconnectAll, then closes with `disconnect`', async () => {
+    const { bus, logger } = setup()
+    const { sink, frames, closes } = createSink()
+    const stream = openEventStream(bus, sink, { logger })
+    bus.emit('chat.deleted', { id: CHAT_ID })
+    await bus.disconnectAll()
+    expect(await stream.closed).toBe('disconnect')
+    expect(closes).toEqual(['disconnect'])
+    expect(frames[0]).toBe(SSE_RETRY_FRAME)
+    expect(frames.map(dataOf)).toContainEqual(expect.objectContaining({ type: 'chat.deleted', data: { id: CHAT_ID } }))
+    expect(bus.subscriberCount()).toBe(0)
+  })
+
+  it('flushes every queued frame of a slow consumer before closing', async () => {
+    const { bus, logger } = setup()
+    const { sink, frames, closes, release } = createSink({ blocking: true })
+    const stream = openEventStream(bus, sink, { logger })
+    bus.emit('chat.deleted', { id: CHAT_ID })
+    bus.emit('catalog.changed', { providerId: null })
+    const disconnected = bus.disconnectAll()
+    await flush()
+    expect(stream.isClosed()).toBe(false)
+    for (let index = 0; index < 5 && !stream.isClosed(); index++) {
+      release()
+      await flush()
+    }
+    await disconnected
+    expect(closes).toEqual(['disconnect'])
+    expect(frames.slice(1).map(frame => (dataOf(frame) as ServerEvent).type)).toEqual(['chat.deleted', 'catalog.changed'])
+  })
+
+  it('closes a consumer that does not read within the flush limit, and takes no new frames meanwhile', async () => {
+    vi.useFakeTimers()
+    const { bus, logger } = setup()
+    const { sink, frames, closes } = createSink({ blocking: true })
+    const stream = openEventStream(bus, sink, { logger, disconnectFlushMs: 1000 })
+    bus.emit('chat.deleted', { id: CHAT_ID })
+    const disconnected = bus.disconnectAll()
+    bus.emit('catalog.changed', { providerId: null })
+    await vi.advanceTimersByTimeAsync(999)
+    expect(stream.isClosed()).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await disconnected
+    expect(closes).toEqual(['disconnect'])
+    expect(frames.some(frame => frame.includes('catalog.changed'))).toBe(false)
+  })
+})

@@ -26,6 +26,12 @@ import { omitKey } from '~/utils/records'
 import { readStoredJson, writeStoredJson } from '~/utils/storage'
 import { useUiStore } from './ui'
 
+/**
+ * The project filter of the chat list (docs/UI.md 7.20, 11; ADR-031): `'all'` = every chat, `'none'` = chats without a
+ * project, else a project id.
+ */
+export type ChatProjectFilter = 'all' | 'none' | (string & {})
+
 /** Live run state of a chat: streaming, or waiting for a tool approval. */
 export type ChatRunState = 'running' | 'approval'
 /** The sidebar dot of a chat (priority approval > running > unread). */
@@ -107,6 +113,11 @@ export const useChatsStore = defineStore('chats', () => {
   const loaded = ref(false)
   const runState = ref<Record<string, ChatRunState>>({})
   const unread = ref<Record<string, true>>(readUnread())
+  /**
+   * + Phase 7: the project filter of the list (W7.9 stores it in `localStorage['hf-project-filter']` and sends it with
+   * `fetchPage`). Skeleton (C15, P7-0b): kept in memory only.
+   */
+  const projectFilter = ref<ChatProjectFilter>('all')
 
   watch(unread, value => writeStoredJson(UNREAD_CHATS_KEY, Object.keys(value)))
 
@@ -257,6 +268,14 @@ export const useChatsStore = defineStore('chats', () => {
     useEventListener(window, 'pagehide', flushPendingDeletes)
 
   // ---------- actions ----------
+
+  /**
+   * + Phase 7: sets the project filter (W7.9: stores it, resets the list and reloads its first page with `projectId`).
+   * Skeleton (C15, P7-0b): only sets the state.
+   */
+  async function setProjectFilter(filter: ChatProjectFilter): Promise<void> {
+    projectFilter.value = filter
+  }
 
   /**
    * `GET /chats` (cursor pages of 50). Appends the next page, or reloads the first page with `{ reset: true }`.
@@ -477,6 +496,7 @@ export const useChatsStore = defineStore('chats', () => {
     loaded,
     runState,
     unread,
+    projectFilter,
     byId,
     groups,
     statusOf,
@@ -491,5 +511,6 @@ export const useChatsStore = defineStore('chats', () => {
     setRunState,
     markRead,
     applyEvent,
+    setProjectFilter,
   }
 })

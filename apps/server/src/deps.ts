@@ -27,6 +27,9 @@ import { createDataService } from './services/data/index.ts'
 import { createEventBus } from './services/events/index.ts'
 import { createFilesService } from './services/files/index.ts'
 import { createImageService } from './services/images/index.ts'
+import { createKeyService } from './services/keys/index.ts'
+import { createMaintenanceService } from './services/maintenance/index.ts'
+import { createProjectService } from './services/projects/index.ts'
 import { createCredentialService } from './services/secrets/credentials.ts'
 import { createSecretStore } from './services/secrets/index.ts'
 import { createSettingsService } from './services/settings/index.ts'
@@ -60,6 +63,10 @@ export const SERVICE_FACTORIES: ServiceFactories = {
   shares: createShareService,
   images: createImageService,
   audio: createAudioService,
+  // Phase 7 (P7-0b): projects (C14 stub, W7.1), maintenance lock (C16), master-key service (C16 stub, W7.7).
+  projects: createProjectService,
+  maintenance: createMaintenanceService,
+  keys: createKeyService,
 }
 
 /** Instantiation order (dependencies first; construction-time access to later services still works lazily). */
@@ -111,10 +118,12 @@ export function createDeps(options: CreateDepsOptions): AppDeps {
 }
 
 /**
- * Boot sequence after migrations (ARCHITECTURE.md 5): staging recovery -> plugin host (builtins, then user plugins)
+ * Boot sequence after migrations (ARCHITECTURE.md 5): workspace roots (Phase 7: the default root is created and every
+ * root is checked; a refused root throws `EnvError`) -> staging recovery -> plugin host (builtins, then user plugins)
  * -> model catalog warm-up -> MCP manager. A broken plugin never fails the boot.
  */
 export async function startDeps(deps: AppDeps): Promise<void> {
+  await deps.projects.start()
   await deps.installer.recover()
   await deps.plugins.start()
   await deps.catalog.start()

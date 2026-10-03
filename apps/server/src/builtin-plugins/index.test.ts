@@ -4,17 +4,15 @@ import semver from 'semver'
 import { describe, expect, it } from 'vitest'
 import { BUILTIN_PLUGINS, getBuiltinPlugins } from './index.ts'
 
-/** `core-workspace` (Phase 7) joins the frozen builtin list in P7-0b (C14); until then the list lacks it. */
-const REGISTERED_IDS = BUILTIN_PLUGIN_IDS.filter(id => id !== 'core-workspace')
-
 describe('builtin plugins', () => {
-  it('lists every builtin id in load order', () => {
-    expect(BUILTIN_PLUGINS.map(plugin => plugin.id)).toEqual(REGISTERED_IDS)
+  it('lists every builtin id in load order (core-workspace after core-mcp, before mock)', () => {
+    expect(BUILTIN_PLUGINS.map(plugin => plugin.id)).toEqual([...BUILTIN_PLUGIN_IDS])
+    expect(BUILTIN_PLUGIN_IDS).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'mock'])
   })
 
   it('includes mock only with HF_MOCK_PROVIDER=1', () => {
-    expect(getBuiltinPlugins({ mockProvider: false }).map(plugin => plugin.id)).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp'])
-    expect(getBuiltinPlugins({ mockProvider: true }).map(plugin => plugin.id)).toEqual(REGISTERED_IDS)
+    expect(getBuiltinPlugins({ mockProvider: false }).map(plugin => plugin.id)).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace'])
+    expect(getBuiltinPlugins({ mockProvider: true }).map(plugin => plugin.id)).toEqual([...BUILTIN_PLUGIN_IDS])
   })
 
   it.each(BUILTIN_PLUGINS.map(plugin => [plugin.id, plugin] as const))('%s has a valid manifest and module', (id, plugin) => {

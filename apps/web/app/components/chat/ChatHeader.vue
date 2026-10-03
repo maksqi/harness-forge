@@ -41,9 +41,15 @@ const props = withDefaults(defineProps<{
   scrolled?: boolean
   /** The chat is still loading: no "New chat" placeholder yet. */
   loading?: boolean
+  /**
+   * + Phase 7 (C15 declares it, W7.10 uses it): the chat's project, for ChatProjectChip and "Move to project"; null =
+   * none.
+   */
+  projectId?: string | null
 }>(), {
   scrolled: false,
   loading: false,
+  projectId: null,
 })
 
 const actions = useChatActions()

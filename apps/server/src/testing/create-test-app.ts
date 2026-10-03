@@ -10,6 +10,10 @@
 // Phase 6 fakes: `factories: { images: createFakeImageService, providers: fakeMediaProviders() }` (the latter from
 // `providers/testing.ts`, with `env: { HF_MOCK_PROVIDER: '1' }` for the `mock:*` media models) and `overrides: { audio:
 // createFakeAudioService() }`.
+// Phase 7 (C14-T6): `workspaceRoots` / `workspaceShell` set `HF_WORKSPACE_ROOTS` / `HF_WORKSPACE_SHELL`, and
+// `factories: { projects: createFakeProjectService }` (./fake-projects.ts) gives projects with real temp folders. The temp
+// data directory is a canonical path (`realpath(mkdtemp())`: macOS `/var` is a link to `/private/var`), so
+// `<dataDir>/workspaces` passes the workspace containment checks.
 import type { ApiClient } from '@harness-forge/shared'
 import type { Hono } from 'hono'
 import type { Database, Db } from '../db/client.ts'
@@ -19,7 +23,7 @@ import type { AppEnv } from '../http/types.ts'
 import type { MemoryLogger } from '../logger.ts'
 import type { BuiltinPlugin } from '../plugins/types.ts'
 import type { AppDeps, AppServices } from '../types.ts'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createApiClient } from '@harness-forge/shared'
@@ -58,8 +62,16 @@ export interface TestAppOptions {
   overrides?: Partial<AppServices>
   /** Factory replacements (fakes that need `deps`); `overrides` win. */
   factories?: Partial<ServiceFactories>
-  /** Run the boot sequence (`startDeps`: installer recovery, plugin host, catalog, MCP); default true. */
+  /** Run the boot sequence (`startDeps`: workspace roots, installer recovery, plugin host, catalog, MCP); default true. */
   start?: boolean
+  /**
+   * Phase 7: `HF_WORKSPACE_ROOTS` as a list of absolute folders (joined with `,`; use canonical paths, e.g.
+   * `realpath(await mkdtemp(...))`); default: unset, the only root is `<dataDir>/workspaces`. `env.HF_WORKSPACE_ROOTS`
+   * wins when both are given.
+   */
+  workspaceRoots?: readonly string[]
+  /** Phase 7: `HF_WORKSPACE_SHELL` (`false` = `0`: no `execute` tools); default: unset (on). `env` wins. */
+  workspaceShell?: boolean
 }
 
 export interface TestRequestOptions {
@@ -100,10 +112,14 @@ function usesFakeKeyring(options: TestAppOptions): boolean {
 
 export async function createTestApp(options: TestAppOptions = {}): Promise<TestApp> {
   const ownsDataDir = options.dataDir === undefined
-  const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), 'harness-forge-test-'))
+  const dataDir = options.dataDir ?? realpathSync(mkdtempSync(join(tmpdir(), 'harness-forge-test-')))
   let database: Database | undefined
   try {
-    const env = loadEnv({ HF_DATA_DIR: dataDir, ...options.env }, { cwd: dataDir })
+    const workspace: Record<string, string> = {
+      ...(options.workspaceRoots === undefined ? {} : { HF_WORKSPACE_ROOTS: options.workspaceRoots.join(',') }),
+      ...(options.workspaceShell === undefined ? {} : { HF_WORKSPACE_SHELL: options.workspaceShell ? '1' : '0' }),
+    }
+    const env = loadEnv({ HF_DATA_DIR: dataDir, ...workspace, ...options.env }, { cwd: dataDir })
     ensureDataDir(env)
     const redactor = createRedactor()
     const logs = createMemoryLogger({ redactor })

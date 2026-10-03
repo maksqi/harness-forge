@@ -3,10 +3,13 @@
 // ./images.ts).
 // `GET /chat/:id/stream` replays the run buffer; `POST /chat/:id/stop` aborts the run into the normal persistence path
 // and waits for it; shutdown stops every run the same way.
+// Phase 7 (C16-T1): while a maintenance operation with `blockRuns` holds the lock (the key rotation), `POST /chat`
+// answers `409 conflict` (`reason: 'busy'`) before the chat is acquired.
 import type { AppDeps } from '../types.ts'
 import type { Run } from './runs.ts'
 import type { ChatRunner } from './types.ts'
 import { isHarnessError } from '@harness-forge/shared'
+import { assertRunsAllowed } from '../services/maintenance/index.ts'
 import { abortReason, preStreamError } from './errors.ts'
 import { launchRun, TaskTracker } from './pipeline.ts'
 import { commitHistory, prepareRun, stoppedBeforeStart } from './prepare.ts'
@@ -79,6 +82,9 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
   return {
     start: async (body, runOptions) => {
       const logger = runOptions.logger.child({ chatId: body.chatId })
+      // Checked right before the chat is acquired (no await in between), so an operation that blocks runs and then
+      // stops every registered run cannot miss one.
+      assertRunsAllowed(deps.maintenance)
       const run = registry.acquire(body.chatId, body.modelRef)
       let launched = false
       try {

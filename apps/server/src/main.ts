@@ -1,7 +1,12 @@
 // Process entry (ARCHITECTURE.md section 5): `.env` -> env -> bind check -> data dir -> database + migrations ->
 // services -> bind check with a stored password -> boot sequence -> HTTP server; graceful shutdown on SIGINT / SIGTERM
 // (the handlers exist from the start of the boot, so a signal during plugin loading is a graceful shutdown too).
-// Owner after Phase 0: W1.1 (W1.1-T8); the trusted proxy boot log: W5.7.
+// Owner after Phase 0: W1.1 (W1.1-T8); the trusted proxy boot log: W5.7; the Phase 7 boot hooks: C16 (C16-T3).
+//
+// Phase 7 boot hooks (ADR-034, frozen after Gate P7-0b): `argv[2] === 'rotate-key'` runs the offline key rotation CLI
+// (`services/keys/cli.ts`) instead of the server, before any boot step runs; `acquireServerLock` runs right after
+// the data directory exists and its `release()` at the end of a shutdown and when the boot fails; `recoverKeyState`
+// runs after the migrations and before `createDeps`, whose keyring factory takes the `keyVersion` it returns.
 //
 // Bind safety: a non-loopback `HF_HOST` needs `HF_PASSWORD`, a password stored in the data directory, or
 // `HF_INSECURE=1`; otherwise the process exits with code 1 before any plugin starts or any port is opened. An invalid
@@ -12,6 +17,7 @@ import type { AddressInfo } from 'node:net'
 import type { Database } from './db/client.ts'
 import type { Env } from './env.ts'
 import type { Logger } from './logger.ts'
+import type { ServerLock } from './services/keys/server-lock.ts'
 import type { AppDeps } from './types.ts'
 import { existsSync } from 'node:fs'
 import process from 'node:process'
@@ -23,8 +29,12 @@ import { migrateDatabase } from './db/migrate.ts'
 import { createDeps, startDeps, stopDeps } from './deps.ts'
 import { bindSafetyError, defaultEnvFile, ensureDataDir, EnvError, isLoopbackHost, loadDotEnvFile, loadEnv } from './env.ts'
 import { createLogger } from './logger.ts'
+import { createKeyring } from './security/keyring.ts'
 import { trustedRanges } from './security/proxy-trust.ts'
 import { createRedactor } from './security/redact.ts'
+import { isRotateKeyCommand, runRotateKeyCommand } from './services/keys/cli.ts'
+import { recoverKeyState } from './services/keys/recover.ts'
+import { acquireServerLock } from './services/keys/server-lock.ts'
 
 /** A shutdown that takes longer exits with code 1. */
 const SHUTDOWN_TIMEOUT_MS = 10_000
@@ -77,6 +87,8 @@ function listen(deps: AppDeps): Promise<{ server: ServerType, info: AddressInfo 
  * the default signal action.
  */
 interface BootState {
+  /** `server.lock`, taken right after the data directory exists. */
+  lock: ServerLock | undefined
   database: Database | undefined
   deps: AppDeps | undefined
   /** `startDeps` was called: plugins, MCP servers and background tasks may be running. */
@@ -119,9 +131,11 @@ function installShutdown(state: BootState, logger: Logger): void {
         server.closeAllConnections()
       await closed
       state.database?.close()
+      state.lock?.release()
     }
     catch (error) {
       logger.error('shutdown failed', { err: error })
+      state.lock?.release()
       process.exit(1)
     }
     logger.info('stopped')
@@ -166,10 +180,11 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
-  const state: BootState = { database: undefined, deps: undefined, started: false, server: undefined, current: null, stopping: false }
+  const state: BootState = { lock: undefined, database: undefined, deps: undefined, started: false, server: undefined, current: null, stopping: false }
   installShutdown(state, logger)
   try {
     ensureDataDir(env)
+    state.lock = acquireServerLock({ env, logger })
     const database = await bootStep(state, openDatabase({ path: env.paths.db }))
     state.database = database
     if (state.stopping)
@@ -177,7 +192,18 @@ async function main(): Promise<void> {
     await bootStep(state, migrateDatabase(database.db))
     if (state.stopping)
       return
-    const deps = createDeps({ env, logger, redactor, db: database.db, builtins: getBuiltinPlugins(env) })
+    // Finishes or drops an interrupted rotation and records the key check on the first v1.3 boot (ADR-034).
+    const { keyVersion } = await bootStep(state, recoverKeyState({ env, db: database.db, logger, redactor }))
+    if (state.stopping)
+      return
+    const deps = createDeps({
+      env,
+      logger,
+      redactor,
+      db: database.db,
+      builtins: getBuiltinPlugins(env),
+      factories: { keyring: appDeps => createKeyring(appDeps, { keyVersion }) },
+    })
     state.deps = deps
 
     if (envBindError !== null) {
@@ -188,6 +214,7 @@ async function main(): Promise<void> {
       if (bindError !== null) {
         logger.error(bindError, { host: env.host })
         database.close()
+        state.lock?.release()
         process.exit(1)
       }
     }
@@ -221,8 +248,26 @@ async function main(): Promise<void> {
     if (state.started && state.deps !== undefined)
       await stopDeps(state.deps).catch(() => {})
     state.database?.close()
+    state.lock?.release()
     process.exit(1)
   }
 }
 
-void main()
+/** `rotate-key [--force]`: the offline key rotation instead of the server (it loads `.env` and the env itself). */
+async function rotateKey(args: readonly string[]): Promise<void> {
+  let code: number
+  try {
+    code = await runRotateKeyCommand(args)
+  }
+  catch (error) {
+    // The CLI resolves its exit code; a rejection is a bug there. Print the message only (no stack, no values).
+    process.stderr.write(`harness-forge rotate-key: ${error instanceof Error ? error.message : 'failed'}\n`)
+    code = 1
+  }
+  process.exit(code)
+}
+
+if (isRotateKeyCommand(process.argv))
+  void rotateKey(process.argv.slice(3))
+else
+  void main()

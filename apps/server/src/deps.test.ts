@@ -1,16 +1,21 @@
 import type { CreateDepsOptions } from './deps.ts'
-import { mkdtempSync, rmSync } from 'node:fs'
+import type { FakeProjectService } from './testing/fake-projects.ts'
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import process from 'node:process'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase } from './db/client.ts'
 import { createDeps, SERVICE_FACTORIES, SERVICE_NAMES, startDeps, stopDeps } from './deps.ts'
-import { loadEnv } from './env.ts'
+import { EnvError, loadEnv } from './env.ts'
 import { createMemoryLogger } from './logger.ts'
+import { createPluginInstaller } from './plugins/install/index.ts'
 import { createRedactor } from './security/redact.ts'
+import { createProjectService } from './services/projects/index.ts'
 import { SAMPLE_SHARE_TOKEN } from './testing/api-samples.ts'
 import { createTestApp } from './testing/create-test-app.ts'
+import { createFakeProjectService } from './testing/fake-projects.ts'
 import {
   createFakeAudioService,
   createFakeDataService,
@@ -178,6 +183,110 @@ describe('phase 6 services (P6-0b skeleton, implemented in P6-A)', () => {
     cleanups.push(() => t.close())
     expect(t.deps.audio).toBe(audio)
     expect('calls' in t.deps.images).toBe(true)
+  })
+})
+
+describe('phase 7 skeleton (P7-0b: projects stub, maintenance, keys)', () => {
+  it('wires projects, maintenance and keys; the project stubs answer not_implemented', async () => {
+    const t = await createTestApp({ start: false })
+    cleanups.push(() => t.close())
+    expect(SERVICE_NAMES).toEqual(expect.arrayContaining(['projects', 'maintenance', 'keys']))
+    const calls: Array<[string, () => Promise<unknown>]> = [
+      ['projects.list', () => t.deps.projects.list()],
+      ['projects.get', () => t.deps.projects.get('prj_AAAAAAAAAAAAAAAA')],
+      ['projects.create', () => t.deps.projects.create({ name: 'Demo', path: t.env.paths.workspaces })],
+      ['projects.update', () => t.deps.projects.update('prj_AAAAAAAAAAAAAAAA', { name: 'Renamed' })],
+      ['projects.remove', () => t.deps.projects.remove('prj_AAAAAAAAAAAAAAAA')],
+      ['projects.browse', () => t.deps.projects.browse()],
+      ['projects.openWorkspace', () => t.deps.projects.openWorkspace('prj_AAAAAAAAAAAAAAAA')],
+    ]
+    for (const [name, call] of calls)
+      await expect(call(), name).rejects.toMatchObject({ code: 'not_implemented' })
+    expect(t.deps.maintenance.current()).toBeNull()
+    await expect(t.deps.maintenance.exclusive('import', async () => 'done')).resolves.toBe('done')
+    expect(typeof t.deps.keys.status).toBe('function')
+  })
+
+  it('startDeps runs projects.start() first: the default root <dataDir>/workspaces exists with mode 0700', async () => {
+    const order: string[] = []
+    const t = await createTestApp({
+      start: false,
+      factories: {
+        projects: (d) => {
+          const real = createProjectService(d)
+          return { ...real, start: async () => {
+            order.push('projects')
+            await real.start()
+          } }
+        },
+        installer: (d) => {
+          const real = createPluginInstaller(d)
+          return { ...real, recover: async () => {
+            order.push('installer')
+            await real.recover()
+          } }
+        },
+      },
+    })
+    cleanups.push(() => t.close())
+    expect(existsSync(t.env.paths.workspaces)).toBe(false)
+    await startDeps(t.deps)
+    expect(order).toEqual(['projects', 'installer'])
+    expect(statSync(t.env.paths.workspaces).isDirectory()).toBe(true)
+    if (process.platform !== 'win32')
+      expect(statSync(t.env.paths.workspaces).mode & 0o777).toBe(0o700)
+    expect(t.env.workspaceRootsDefault).toBe(true)
+    expect(await t.deps.projects.roots()).toEqual([realpathSync(t.env.paths.workspaces)])
+  })
+
+  it('a refused root fails the boot before anything else starts', async () => {
+    const order: string[] = []
+    const t = await createTestApp({
+      start: false,
+      factories: {
+        projects: d => ({ ...createProjectService(d), start: async () => {
+          throw new EnvError('HF_WORKSPACE_ROOTS: /missing does not exist.')
+        } }),
+        installer: (d) => {
+          const real = createPluginInstaller(d)
+          return { ...real, recover: async () => {
+            order.push('installer')
+          } }
+        },
+      },
+    })
+    cleanups.push(() => t.close())
+    await expect(startDeps(t.deps)).rejects.toBeInstanceOf(EnvError)
+    expect(order).toEqual([])
+  })
+
+  it('createTestApp sets HF_WORKSPACE_ROOTS and HF_WORKSPACE_SHELL; explicit roots skip the default root', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'hf-')))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+    const t = await createTestApp({ workspaceRoots: [root], workspaceShell: false })
+    cleanups.push(() => t.close())
+    expect(t.env).toMatchObject({ workspaceRoots: [root], workspaceRootsDefault: false, workspaceShell: false })
+    expect(await t.deps.projects.roots()).toEqual([root])
+    expect(existsSync(t.env.paths.workspaces)).toBe(false)
+    // `env` wins over the options.
+    const u = await createTestApp({ start: false, workspaceShell: false, env: { HF_WORKSPACE_SHELL: '1' } })
+    cleanups.push(() => u.close())
+    expect(u.env.workspaceShell).toBe(true)
+  })
+
+  it('the temp data directory of createTestApp is canonical (realpath)', async () => {
+    const t = await createTestApp({ start: false })
+    cleanups.push(() => t.close())
+    expect(realpathSync(t.env.dataDir)).toBe(t.env.dataDir)
+  })
+
+  it('createTestApp accepts the Phase 7 fake project service', async () => {
+    const t = await createTestApp({ factories: { projects: createFakeProjectService } })
+    cleanups.push(() => t.close())
+    const projects = t.deps.projects as FakeProjectService
+    const project = await projects.add({ name: 'Demo' })
+    const opened = await t.deps.projects.openWorkspace(project.id)
+    expect(opened).toMatchObject({ ok: true, workspace: { projectId: project.id, name: 'Demo', root: project.path } })
   })
 })
 

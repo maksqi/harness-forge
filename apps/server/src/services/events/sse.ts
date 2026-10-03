@@ -5,7 +5,9 @@
 // line; a `: ping` comment every 25 s. Every event is validated with `serverEventSchema` once (the frame and its
 // per-process id are cached by event identity and shared by every connection); invalid events are dropped and logged
 // (rate limited). Producers never block: a connection whose queue exceeds 256 frames is closed and the browser
-// `EventSource` reconnects (the web then refetches its stores).
+// `EventSource` reconnects (the web then refetches its stores). `EventBus.disconnectAll()` (Phase 7) makes a connection
+// write the frames it has queued, then close (`disconnect`); a consumer that does not read within
+// `SSE_DISCONNECT_FLUSH_MS` is closed anyway.
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type { ServerEvent } from '@harness-forge/shared'
 import type { Logger } from '../../logger.ts'
@@ -16,6 +18,8 @@ import { LIMITS, serverEventSchema } from '@harness-forge/shared'
 export const SSE_RETRY_MS = 3000
 /** Frames a connection may have queued; one more closes it. */
 export const SSE_MAX_QUEUE = 256
+/** How long `disconnectAll()` lets a connection write its queued frames before it is closed anyway. */
+export const SSE_DISCONNECT_FLUSH_MS = 5000
 export const SSE_RETRY_FRAME = `retry: ${SSE_RETRY_MS}\n\n`
 /** Heartbeat comment (keeps proxies from closing an idle stream). */
 export const SSE_PING_FRAME = ': ping\n\n'
@@ -27,8 +31,11 @@ export const SSE_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   'X-Accel-Buffering': 'no',
 })
 
-/** Why a stream ended: the client left, shutdown, too slow, the session is no longer valid, a write failed. */
-export type EventStreamCloseReason = 'client' | 'shutdown' | 'overflow' | 'session' | 'error'
+/**
+ * Why a stream ended: the client left, shutdown, too slow, the session is no longer valid, a write failed, or
+ * `EventBus.disconnectAll()` (after its queued frames were written).
+ */
+export type EventStreamCloseReason = 'client' | 'shutdown' | 'overflow' | 'session' | 'error' | 'disconnect'
 
 const INVALID_EVENT_LOG_INTERVAL_MS = 60_000
 
@@ -97,6 +104,8 @@ export interface EventStreamOptions {
   maxQueue?: number
   /** Runs with every heartbeat; resolving false closes the stream (`session`). A rejection is logged and ignored. */
   revalidate?: () => Promise<boolean>
+  /** Default `SSE_DISCONNECT_FLUSH_MS` (5 s). */
+  disconnectFlushMs?: number
 }
 
 export interface EventStream {
@@ -117,8 +126,12 @@ export function openEventStream(bus: EventBus, sink: EventStreamSink, options: E
   const { logger, revalidate } = options
   const heartbeatMs = options.heartbeatMs ?? LIMITS.sseHeartbeatMs
   const maxQueue = options.maxQueue ?? SSE_MAX_QUEUE
+  const disconnectFlushMs = options.disconnectFlushMs ?? SSE_DISCONNECT_FLUSH_MS
   const queue: string[] = [SSE_RETRY_FRAME]
   let closed = false
+  /** `disconnectAll()` asked this stream to end: the pump writes what is queued, then closes (`disconnect`). */
+  let draining = false
+  let drainTimer: ReturnType<typeof setTimeout> | undefined
   let revalidating = false
   let wake: (() => void) | undefined
   let subscription: Disposable | undefined
@@ -141,6 +154,8 @@ export function openEventStream(bus: EventBus, sink: EventStreamSink, options: E
     subscription?.dispose()
     if (heartbeat !== undefined)
       clearInterval(heartbeat)
+    if (drainTimer !== undefined)
+      clearTimeout(drainTimer)
     queue.length = 0
     wakePump()
     try {
@@ -154,7 +169,7 @@ export function openEventStream(bus: EventBus, sink: EventStreamSink, options: E
   }
 
   function enqueue(frame: string): void {
-    if (closed)
+    if (closed || draining)
       return
     if (queue.length >= maxQueue) {
       logger.warn('events stream closed: the client does not keep up', { queued: queue.length })
@@ -196,6 +211,10 @@ export function openEventStream(bus: EventBus, sink: EventStreamSink, options: E
         if (closed)
           return
         const frame = queue.shift()
+        if (frame === undefined && draining) {
+          close('disconnect')
+          return
+        }
         if (frame === undefined) {
           await new Promise<void>((resolve) => {
             wake = resolve
@@ -211,13 +230,28 @@ export function openEventStream(bus: EventBus, sink: EventStreamSink, options: E
     }
   }
 
+  /** `onDisconnect` of the subscription: stop taking frames, let the pump write the queue, then close. */
+  function drain(): Promise<void> {
+    if (closed)
+      return Promise.resolve()
+    if (!draining) {
+      draining = true
+      if (heartbeat !== undefined)
+        clearInterval(heartbeat)
+      drainTimer = setTimeout(close, disconnectFlushMs, 'disconnect')
+      drainTimer.unref?.()
+      wakePump()
+    }
+    return closedPromise.then(() => {})
+  }
+
   subscription = bus.subscribe((event) => {
     if (closed)
       return
     const frame = serverEventFrame(event, logger)
     if (frame !== null)
       enqueue(frame)
-  }, { onClose: () => close('shutdown') })
+  }, { onClose: () => close('shutdown'), onDisconnect: drain })
   if (closed) {
     // The bus closed the subscription synchronously (stopped bus).
     subscription.dispose()

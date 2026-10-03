@@ -10,6 +10,11 @@
 // Phase 6 additions (ADR-030, implemented by W6.6): remembered versions (`messages.selected_child_id`, written with the
 // active leaf and read by `switchBranch` / `deleteMessage`), `deleteMessage` (deleting a version), totals that include
 // image usage, and the active leaf in every `chat.updated` event (`ChatUpdatedData`).
+//
+// Phase 7 additions (ADR-031, implemented by W7.5): the project of a chat (`chats.project_id`, nullable, no foreign key):
+// `ChatRecord.projectId`, the list filter `ChatListQuery.projectId`, `ChatEnsureInput.projectId` (applied only when
+// `ensure` creates the chat) and the move through `update` (`ChatUpdate.projectId`). Summaries and events carry it
+// (`ChatSummary.projectId`); chat exports and imports never do.
 import type {
   ChatCreate,
   ChatDetail,
@@ -40,6 +45,11 @@ export interface ChatRecord {
    * pipeline's commit and persist transactions (`setActiveLeaf`), by `switchBranch` and by `deleteMessage` (Phase 6).
    */
   activeLeafId: string | null
+  /**
+   * The project of the chat (Phase 7, ADR-031, `chats.project_id`); null = no project. Set by `ensure` on creation,
+   * `create` and the move of `update`; cleared by the project service when the project is deleted.
+   */
+  projectId: string | null
   createdAt: number
   updatedAt: number
 }
@@ -50,6 +60,11 @@ export interface ChatListQuery {
   limit?: number
   q?: string
   archived?: boolean
+  /**
+   * Phase 7 (ADR-031): only the chats of this project, or `'none'`: only chats without a project; omitted = every chat.
+   * Combines with `archived`, `q` and the cursor (index `chats_project_idx`).
+   */
+  projectId?: string | 'none'
 }
 
 /** Body of `GET /chats/:id/export` (sent as an attachment by the route). */
@@ -65,6 +80,12 @@ export interface ChatExportFile {
 export interface ChatEnsureInput {
   modelRef?: string
   settings?: ChatSettings
+  /**
+   * Phase 7 (ADR-031): the project of a new chat (`ChatRequestBody.projectId`), applied only when `ensure` creates the
+   * chat (ignored for an existing chat). The pipeline checks that the project exists before (`not_found` before the
+   * chat row exists).
+   */
+  projectId?: string
 }
 
 /** Fields updated by `touch` (always sets `updated_at`). */
@@ -222,7 +243,14 @@ export interface ChatsService extends ChatMessageStore {
    * most recent leaf under `activeLeafId` (default: the last message). `conflict` (`exists`).
    */
   readonly create: (input: ChatCreate) => Promise<ChatDetail>
-  /** Rename (`titleSource: 'user'`), pin, archive, model, settings merge (`null` removes a key); `not_found`. */
+  /**
+   * Rename (`titleSource: 'user'`), pin, archive, model, settings merge (`null` removes a key); `not_found`.
+   *
+   * Phase 7 (ADR-031, W7.5): `projectId` moves the chat into a project (`null` = out of it) with one `UPDATE … WHERE
+   * EXISTS (SELECT 1 FROM projects WHERE id = ?)`: a missing project is `not_found` and changes nothing; refused with
+   * `conflict` (`reason: 'run-active'`, `chatId`) while a run holds the chat (`deps.runs.hasRun(id)`; checked here or by
+   * the route). Emits `chat.updated`.
+   */
   readonly update: (id: string, patch: ChatUpdate) => Promise<ChatSummary>
   /**
    * Deletes the chat, its messages (every version) and its share links (cascade); usage rows keep `chat_id = NULL`;
@@ -293,7 +321,10 @@ export interface ChatsService extends ChatMessageStore {
   readonly find: (id: string) => Promise<ChatRecord | null>
   /** The current `ChatSummary` (events, stream metadata); `not_found`. */
   readonly summary: (id: string) => Promise<ChatSummary>
-  /** Creates the chat when missing (client uuidv7 validated) and applies `init`; emits `chat.created` on creation. */
+  /**
+   * Creates the chat when missing (client uuidv7 validated) and applies `init`; emits `chat.created` on creation.
+   * `init.projectId` is written only when this call creates the chat (Phase 7).
+   */
   readonly ensure: (id: string, init?: ChatEnsureInput) => Promise<{ chat: ChatRecord, created: boolean }>
   /** Sets `updated_at` (and the given fields); emits `chat.updated`. */
   readonly touch: (id: string, input?: ChatTouchInput) => Promise<ChatSummary>

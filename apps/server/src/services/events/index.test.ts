@@ -145,3 +145,79 @@ describe('event bus', () => {
     expect(() => subscription.dispose()).not.toThrow()
   })
 })
+
+describe('disconnectAll (Phase 7)', () => {
+  it('closes every stream subscription (onDisconnect, else onClose), keeps in-process listeners and the bus running', async () => {
+    const { bus } = setup()
+    const calls: string[] = []
+    const seen: string[] = []
+    bus.subscribe(() => {}, { onDisconnect: () => void calls.push('stream-a') })
+    bus.subscribe(() => {}, { onClose: () => calls.push('stream-b') })
+    bus.subscribe(event => seen.push(event.type))
+    expect(bus.subscriberCount()).toBe(3)
+    await bus.disconnectAll()
+    expect(calls).toEqual(['stream-a', 'stream-b'])
+    expect(bus.subscriberCount()).toBe(1)
+    // The bus keeps working: new streams (reconnecting browsers) and emits.
+    const after: string[] = []
+    bus.subscribe(event => after.push(event.type), { onClose: () => {} })
+    bus.emit('chat.deleted', { id: CHAT_ID })
+    expect(seen).toEqual(['chat.deleted'])
+    expect(after).toEqual(['chat.deleted'])
+  })
+
+  it('delivers an event emitted right before it to every stream first', async () => {
+    const { bus } = setup()
+    const order: string[] = []
+    bus.subscribe(event => order.push(`event:${event.type}`), { onDisconnect: () => void order.push('disconnect') })
+    bus.emit('catalog.changed', { providerId: null })
+    await bus.disconnectAll()
+    expect(order).toEqual(['event:catalog.changed', 'disconnect'])
+  })
+
+  it('called by a listener during a delivery, waits until the queued events were delivered', async () => {
+    const { bus } = setup()
+    const order: string[] = []
+    let disconnected: Promise<void> | undefined
+    bus.subscribe((event) => {
+      order.push(`a:${event.type}`)
+      if (event.type === 'chat.deleted') {
+        bus.emit('catalog.changed', { providerId: null })
+        disconnected = bus.disconnectAll()
+      }
+    })
+    bus.subscribe(event => order.push(`stream:${event.type}`), { onDisconnect: () => void order.push('stream:disconnect') })
+    bus.emit('chat.deleted', { id: CHAT_ID })
+    await disconnected
+    expect(order).toEqual(['a:chat.deleted', 'stream:chat.deleted', 'a:catalog.changed', 'stream:catalog.changed', 'stream:disconnect'])
+  })
+
+  it('waits for asynchronous onDisconnect handlers and logs a failing one', async () => {
+    const { bus, logs } = setup()
+    let finished = false
+    bus.subscribe(() => {}, {
+      onDisconnect: async () => {
+        await new Promise(resolve => setTimeout(resolve, 5))
+        finished = true
+      },
+    })
+    bus.subscribe(() => {}, {
+      onDisconnect: async () => {
+        throw new Error('socket gone')
+      },
+    })
+    await bus.disconnectAll()
+    expect(finished).toBe(true)
+    expect(logs.records.some(record => record.msg === 'event subscriber disconnect failed')).toBe(true)
+  })
+
+  it('does nothing once the bus is stopped', async () => {
+    const { bus } = setup()
+    const onClose = vi.fn()
+    bus.subscribe(() => {}, { onClose })
+    await bus.stop()
+    expect(onClose).toHaveBeenCalledTimes(1)
+    await bus.disconnectAll()
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})

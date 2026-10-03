@@ -88,6 +88,11 @@ export interface ToolApprovalDecision {
   toolName: string
   /** "Always allow {tool}": also sets the tool override to `allow` (`PATCH /api/tools/:name`). */
   alwaysAllow: boolean
+  /**
+   * + Phase 7: "Accept all edits in this chat": `toolMode = 'edits'` is set (and saved on the chat) before the approval
+   * is sent (W7.10).
+   */
+  acceptEdits?: boolean
 }
 
 export interface ChatSession {
@@ -160,6 +165,18 @@ export interface ChatSession {
    * and returns it, e.g. to put its text back into the composer; null when there is none.
    */
   takeBackUnstored: () => HarnessUIMessage | null
+  /**
+   * + Phase 7 (ADR-031): the chat's project. A new chat: the picker's choice, else the filter's project (when it names a
+   * known project); a saved chat: `chats.byId(id)?.projectId ?? summary.projectId`. Skeleton (C15, P7-0b): always null
+   * until W7.10 implements it.
+   */
+  projectId: ComputedRef<string | null>
+  /**
+   * + Phase 7: a new chat: local only (sent with the first request); a persisted chat: `PATCH /api/chats/:id
+   * { projectId }` (throws `HarnessError` on 409 run-active / 404). Skeleton (C15, P7-0b): rejects with
+   * `not_implemented` until W7.10 implements it.
+   */
+  setProject: (projectId: string | null) => Promise<void>
 }
 
 export interface ChatSessionRegistry {
@@ -882,6 +899,13 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     return task
   }
 
+  // Phase 7 skeleton (C15, P7-0b): W7.10 implements the project of the session.
+  const projectId = computed<string | null>(() => null)
+
+  async function setProject(_projectId: string | null): Promise<void> {
+    throw new HarnessError({ code: 'not_implemented', message: 'Moving a chat to a project is not implemented yet.' })
+  }
+
   async function approve(decision: ToolApprovalDecision): Promise<void> {
     const preference = decision.approved && decision.alwaysAllow
       ? plugins.setToolPref(decision.toolName, { override: 'allow' })
@@ -963,6 +987,8 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     switchBranch,
     refreshBranches,
     takeBackUnstored,
+    projectId,
+    setProject,
   }
 }
 

@@ -1,9 +1,11 @@
 // Frozen interface of bulk data (ADR-024, API.md 4.16 / 5.19, ARCHITECTURE.md 6.9). Implementation:
 // `createDataService(deps)` in `services/data/index.ts` (W5.3). Consumer: the data routes (`http/routes/data.ts`, W5.3).
 // Built on `ChatsService` (`allIds`, `export`, `find`, `importChat`, `removeAll`), `FilesService` (`get`, `open`,
-// `importFile`, `purge`), the settings service and `ChatRunner.stop`. Test double: `createFakeDataService`
-// (`testing/fakes.ts`).
+// `importFile`, `purge`; Phase 7: `sweep`), the settings service, `ChatRunner.stop` and (Phase 7) the maintenance lock
+// (`MaintenanceService.exclusive`). Test double: `createFakeDataService` (`testing/fakes.ts`).
 import type {
+  DataCleanupPreview,
+  DataCleanupResult,
   DataDeleteBody,
   DataDeleteResult,
   DataExportQuery,
@@ -28,10 +30,12 @@ export interface DataBackup {
 }
 
 /**
- * Summary, streamed backup export, import of a backup zip or one chat JSON, and delete-all. Only one import or
- * delete-all runs at a time per process: another one fails at once with `conflict` (`reason: 'busy'`); the summary and
- * exports never wait for it. No new server event types: imports emit `chat.created` and delete-all `chat.deleted`, one
- * per chat (through `ChatsService`).
+ * Summary, streamed backup export, import of a backup zip or one chat JSON, delete-all and (Phase 7) the orphaned file
+ * cleanup. Imports, delete-all and cleanups run under the maintenance lock (`maintenance.exclusive('import' |
+ * 'delete-all' | 'file-cleanup', ...)`, also taken by the key rotation): while another maintenance operation runs they
+ * fail at once with `conflict` (`reason: 'busy'`); the summary and exports never wait for it. No new server event types:
+ * imports emit `chat.created` and delete-all `chat.deleted`, one per chat (through `ChatsService`); a cleanup emits
+ * nothing.
  */
 export interface DataService {
   /** `GET /data`: every chat (archived included), the archived ones, every message version, file rows and their bytes. */
@@ -69,4 +73,19 @@ export interface DataService {
    * (`reason: 'busy'`).
    */
   readonly deleteAll: (body: DataDeleteBody, options?: SensitiveOperationOptions) => Promise<DataDeleteResult>
+
+  // ----- Phase 7: orphaned file cleanup (ADR-035, ARCHITECTURE.md 6.15), types C16, implementation W7.8
+
+  /**
+   * `GET /data/cleanup`: a dry run under `maintenance.exclusive('file-cleanup', ...)` (no run blocking): collects the
+   * referenced file ids (`services/data/references.ts`), then `files.sweep({ referencedIds, createdBefore: now -
+   * graceMs, dryRun: true })`; adds `graceMs` (24 h) and `lastRunAt` (`_files.lastCleanup`, null = never). `conflict`
+   * (`reason: 'busy'`).
+   */
+  readonly cleanupPreview: () => Promise<DataCleanupPreview>
+  /**
+   * `POST /data/cleanup`: the same with `dryRun: false`; stores `_files.lastCleanup` = `ranAt` and logs the counts.
+   * `conflict` (`reason: 'busy'`).
+   */
+  readonly cleanup: () => Promise<DataCleanupResult>
 }

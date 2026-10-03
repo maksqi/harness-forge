@@ -2,6 +2,7 @@
 // Approval card under a tool row (docs/UI.md 7.3): "Allow {tool}?" with the source plugin, the arguments, "Always
 // allow {tool}" and Deny / Allow. The decision goes up (ChatView answers through the session); the card disappears
 // into the row status once the part leaves `approval-requested`. Nothing approves implicitly (no Enter handling).
+import type { WorkspaceAccess } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import { computed, ref, useId } from 'vue'
 import {
@@ -14,15 +15,23 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { testIds } from '~/utils/testids'
 import { formatToolValue } from '../chat-format'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   part: ToolPartLike
   toolName: string
   /** Plugin that provides the tool ("from core-tools"), when known. */
   source?: string | null
-}>()
+  /**
+   * + Phase 7 (C15 declares it, W7.11 uses it): `ToolSummary.workspace` of the tool; 'execute' hides "Always allow",
+   * 'write' offers "Accept all edits in this chat" (tool-approval-accept-edits).
+   */
+  workspace?: WorkspaceAccess | null
+}>(), {
+  workspace: null,
+})
 
 const emit = defineEmits<{
-  decide: [decision: { approved: boolean, alwaysAllow: boolean }]
+  /** + Phase 7: `acceptEdits` = "Accept all edits in this chat". */
+  decide: [decision: { approved: boolean, alwaysAllow: boolean, acceptEdits?: boolean }]
 }>()
 
 const alwaysAllow = ref<boolean | 'indeterminate'>(false)
