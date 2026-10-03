@@ -41,7 +41,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "codemirror": "^6.0.2",
-    "katex": "^0.16.47",
+    "katex": "^0.19.0",
     "markstream-vue": "^2.0.14",
     "mermaid": "^11.17.2",
     "motion-v": "^2.5.1",
