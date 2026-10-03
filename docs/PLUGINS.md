@@ -57,7 +57,7 @@ part of the server they may import server dependencies (for example the official
 | `core-tools` (Core tools) | 3 tools: `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard) and `generate_image` (Phase 6, policy `ask`) | setting `allowLocalhost` (below); `generate_image` uses the image model of Settings → Media (`imageModelRef`) |
 | `core-commands` (Core commands) | 10 template slash commands (below) | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server |
 | `core-mcp` (MCP servers) | MCP servers configured in the MCP panel (`mcp_servers` table); the panel is its Overview | settings `autoReconnect`, `connectTimeoutSeconds` (below) |
-| `core-workspace` (Workspace tools, Phase 7) | 7 workspace tools: `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file`, `shell` (below) | offered only in chats whose project folder opened; `shell` is not registered on Windows and is removed by `HF_WORKSPACE_SHELL=0`; no settings |
+| `core-workspace` (Workspace tools, Phase 7) | 7 workspace tools: `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file`, `shell` (below) | offered only in chats whose project folder opened; `shell` is not registered on Windows, and `HF_WORKSPACE_SHELL=0` keeps it from every chat (it stays registered and listed in the tools table); no settings |
 | `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models; Phase 7 adds `mock:workspace`) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
 
 Builtin manifests in v1.3: `core-tools` is version 1.2.0 and declares `engines.harness` `"^1.2.0"` (its
@@ -72,35 +72,57 @@ Builtin tools (`core-tools`):
 |---|---|---|
 | `current_time` | `{ timezone? }`: IANA name (`Europe/Berlin`, `UTC`); default the server time zone; an unknown zone is a `validation_error` | `{ iso, unixMs, timezone, local, utcOffset, weekday }` (`local` = `YYYY-MM-DD HH:mm:ss`, `utcOffset` = `+02:00`) |
 | `web_fetch` | `{ url, maxChars? }`: `http:` / `https:` URL (<= 2048 characters); `maxChars` 1000-40000, default 20000 | `{ url, status, contentType, title, text, truncated }`: `url` after redirects, the readable text of an HTML page (`title` from `<title>` or `og:title`) or the text of a text document (plain, markdown, JSON, XML, ...); other content types are refused |
-| `generate_image` (Phase 6, ADR-028) | `{ prompt, n?, aspectRatio? }`: prompt 1-32000 characters (trimmed), `n` 1-4 (default 1), `aspectRatio` one of `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `16:9`, `9:16` (default: the model's) | `{ modelRef, modelName?, images: [{ fileId, url, mediaType, name }], costUsd?, revisedPrompt? }` (1-4 images; `modelName` since 1.2.0: the catalog name of the model, else its id, absent in outputs saved before v1.3; `costUsd` when the catalog prices the model; `revisedPrompt` cut to fit 16 KB of JSON): file references only, well under the 64 KB output cap. The model sees a short text instead ("Generated 2 images with <model name>; they are shown to the user below this call.", or "Generated 1 image with <model name>; it is shown to the user below this call."; an old output without `modelName` names the model ref), and the chat pipeline appends one image `file` part per image after the call and adds the tool's `costUsd` to the cost of the message, only for this tool of `core-tools` (checked by owner: a tool of the same name from another plugin never gets images appended). The tool is always registered; while `imageModelRef` is null a call fails with "Choose an image model in Settings → Media."; other failures are the `ctx.images` errors (section 9). Timeout 300 s |
+| `generate_image` (Phase 6, ADR-028) | `{ prompt, n?, aspectRatio? }`: prompt 1-32000 characters (trimmed), `n` 1-4 (default 1), `aspectRatio` one of `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `16:9`, `9:16` (default: the model's) | `{ modelRef, modelName?, images: [{ fileId, url, mediaType, name }], costUsd?, revisedPrompt? }` (1-4 images; `modelName` since 1.2.0: the catalog name of the model (the user's alias wins), else its id, trimmed and cut to 200 characters, absent in outputs saved before v1.3; `costUsd` when the catalog prices the model; `revisedPrompt` cut to fit 16 KB of JSON): file references only, well under the 64 KB output cap. The model sees a short text instead ("Generated 2 images with <model name>; they are shown to the user below this call.", or "Generated 1 image with <model name>; it is shown to the user below this call."; an old output without `modelName` names the model ref), and the chat pipeline appends one image `file` part per image after the call and adds the tool's `costUsd` to the cost of the message, only for this tool of `core-tools` (checked by owner: a tool of the same name from another plugin never gets images appended). The tool is always registered; while `imageModelRef` is null a call fails with "Choose an image model in Settings → Media."; other failures are the `ctx.images` errors (section 9). Timeout 300 s |
 
 `web_fetch` goes through the SSRF guard: public addresses only, every redirect re-checked (at most 5), 10 s timeout,
-2 MB body.
+2 MB body. The `core-tools` setting **Allow localhost in web_fetch** (`allowLocalhost`, default off) also admits
+loopback addresses (a local dev server); private, link-local and cloud metadata addresses stay blocked.
 
 Builtin workspace tools (`core-workspace`, Phase 7, ADR-032 / ADR-033; behavior in
 [ARCHITECTURE.md 6.13](./ARCHITECTURE.md#613-agent-workspace-projects-workspace-tools-and-the-shell-adr-031-adr-032-adr-033),
 schemas in `@harness-forge/shared`). Paths in inputs and outputs are relative to the project folder (POSIX); every path
 resolves through the server's path guard (realpath containment, no `.git` writes). Each output is trimmed to about
-60 KiB, and the model gets a short text built from the stored output (`toModelOutput`):
+60 KiB, and the model gets a short text built from the stored output (`toModelOutput`, listed below the table):
 
 | Tool | Access / policy / timeout | Input | Output |
 |---|---|---|---|
 | `read_file` | `read` / `safe`, `ask` for a secret-looking path (`.env`, `*.pem`, `id_rsa*`, …) / 30 s | `{ path, offset?, limit? }` (1-based offset, 1-2000 lines) | `{ path, content, startLine, endLine, totalLines, truncated }` (text files, ≤ 48 KiB per call) |
 | `list_directory` | `read` / `safe` / 30 s | `{ path? }` (default `.`) | `{ path, entries: [{ name, type }], truncated }` (≤ 1000) |
 | `find_files` | `read` / `safe` / 60 s | `{ pattern, path?, include_ignored?, max_results? }` (a glob; ≤ 1000, default 200) | `{ pattern, paths, truncated }` |
-| `search_files` | `read` / `safe` / 60 s | `{ pattern, literal?, case_sensitive?, glob?, path?, include_ignored?, max_results? }` (a JS regex; ≤ 500, default 100) | `{ pattern, matches: [{ path, line, text }], filesSearched, truncated }` |
+| `search_files` | `read` / `safe` / 60 s | `{ pattern, literal?, case_sensitive?, glob?, path?, include_ignored?, max_results? }` (a JS regex, plain text with `literal`; `path` a folder or one file; ≤ 500, default 100) | `{ pattern, matches: [{ path, line, text }], filesSearched, truncated }` |
 | `write_file` | `write` / `ask`, `always` for a hidden or secret path / 30 s | `{ path, content }` (≤ 256 KiB) | `{ path, created, bytes, lines, diff }` |
 | `edit_file` | `write` / as `write_file` / 30 s | `{ path, old_string, new_string, replace_all? }` (a unique exact match unless `replace_all`; files ≤ 1 MiB) | `{ path, replacements, diff }` |
 | `shell` | `execute` / `ask` / 600 s | `{ command, cwd?, timeout_ms?, description? }` (≤ 16 KiB; `timeout_ms` 1000-590000, default 120000) | `{ command, cwd, exitCode, signal, timedOut, durationMs, stdout, stderr, stdoutBytes, stderrBytes }` |
 
-`diff` is `{ hunks: [{ oldStart, oldLines, newStart, newLines, lines }], added, removed, truncated }` (or `null` when
-it could not be computed in 2 s); the web draws it inside the tool row. `find_files` and `search_files` skip `.git`
-always and `node_modules` and gitignored files unless `include_ignored`; `search_files` runs the regex in a Worker that
-is stopped after 20 s and skips secret-looking files. `shell` runs `bash -c` (else `sh -c`) in the project folder (or
-`cwd` inside it) with a minimal environment (no `HF_*`, no provider keys), in its own process group that is killed on
-Stop, on the timeout and when the server exits; each call is a new process (no `cd` that sticks, no stdin, background
-processes are stopped); each stream keeps its first 4 KiB and last 16 KiB. The `core-tools` setting **Allow localhost in web_fetch** (`allowLocalhost`, default off) also admits
-loopback addresses (a local dev server); private, link-local and cloud metadata addresses stay blocked.
+`diff` is `{ hunks: [{ oldStart, oldLines, newStart, newLines, lines }], added, removed, truncated }` (3 lines of
+context, cut to 24 KiB with lines cut at 500 characters), or `null` when it could not be computed in 2 s (and, for
+`write_file`, when the old file was binary or larger than 1 MiB); the web draws it inside the tool row. The policy
+functions check the path as written and, through the path guard, the path it resolves to, so a link named `notes.txt`
+that points at `.env` asks too; a hidden path is one with a segment starting with `.` (`.github/…`, `.husky/…`,
+`.vscode/…`). `find_files` and `search_files` walk the folder: `.git` and the temp files of atomic writes
+(`.hf-write-*`, also hidden from `list_directory`) always skipped, `node_modules` and gitignored paths unless
+`include_ignored`, folder links never entered, at most 100,000 entries, 64 levels and 10 s (then `truncated`). The glob
+of `find_files` and the `glob` filter and regex of `search_files` are matched in a Worker that is stopped after 20 s
+("The search timed out — use a simpler pattern or a narrower path."); `search_files` never reads secret-looking files
+or files over 1 MiB. `shell` runs `bash -c` (else `sh -c`) in the project folder (or `cwd` inside it) with a minimal
+environment (no `HF_*`, no provider keys), in its own process group that is killed on Stop, on the timeout and when
+the server exits; each call is a new process (no `cd` that sticks, no stdin, background processes are stopped); each
+stream keeps its first 4 KiB and last 16 KiB with `[… N bytes omitted …]` between them, ANSI codes and other control
+characters stripped. A failure (a refused path, a missing file, an ambiguous `old_string`) is an error result whose
+message tells the model what to do next.
+
+What the model sees (`toModelOutput`, built only from the stored output; an output that does not parse with the tool's
+output schema, such as one the host replaced, is sent as JSON; `N lines` is `1 line` for one):
+
+| Tool | Text |
+|---|---|
+| `read_file` | one line per file line: the line number right-aligned in 6 columns, a tab, the text; then `[truncated; continue with offset=N]` when the file goes on, or `[lines longer than 2000 characters were cut]`; `(x is empty)`, `(x has N lines; offset M is past the end)` |
+| `list_directory` | one name per line, `name/` for a folder and `name@` for a link; `(x is an empty folder)`; then `[truncated: only the first N entries are listed]` |
+| `find_files` | one path per line, or `No files match.`; then `[truncated: showing N paths; narrow the pattern or the path]` |
+| `search_files` | `path:line: text` lines, or `No matches (N files searched).`; then `[truncated: showing N matches; narrow the pattern, the glob or the path]` |
+| `write_file` | `Created x (N lines).`, `Updated x (+a -r lines).`, or `Updated x (N lines).` when there is no diff |
+| `edit_file` | `Edited x: 1 replacement (+a -r lines).` (`N replacements` with `replace_all`), or `Edited x: N replacements.` when there is no diff |
+| `shell` | `Exit code: N`, `Stopped after <s> s (timeout)` or `Terminated by signal SIGKILL`; then a `stdout:` line and the text (or `(empty)`); then a `stderr:` line and the text, only when stderr is not empty (trailing newlines trimmed) |
 
 Builtin commands (`core-commands`, all `template` commands): `/explain` (code or a concept, step by step),
 `/summarize` (text, or the conversation so far when no text is given), `/review` (bugs, security, readability),
@@ -127,7 +149,7 @@ manifest declares the API range it supports in `engines.harness`; the host check
 |---|---|
 | `1.0.0` | v1 (Phase 0 – 5) |
 | `1.1.0` | Phase 6 (additive): the optional `ProviderDefinition` members `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel`, `transcriptionOptions`; `PluginContext.images.generate`; model kinds `transcription` and `speech`, `ModelInfo.voices`, `capabilities.imageOutput` |
-| `1.2.0` | Phase 7 (additive, ADR-032): `ToolCallContext.workspace?: ToolWorkspace` (`{ projectId, name, root }`, set for every tool in a chat whose project folder opened); `ToolDefinition.workspace?: 'read' \| 'write' \| 'execute'` (such a tool is offered only in those chats; `execute` tools only while `HF_WORKSPACE_SHELL` is on; `write` + policy `ask` runs without a card in the new permission mode `edits`); `ToolMode` gains `edits` ("Accept edits"; visible to hooks in `chat.params`); `ImageGenerateResult.modelName`. Behavior change: an unknown provider in `ctx.ai` (`ctx.models.resolve`) and `ctx.images` is now `provider_not_configured` (400, action `configure-provider`), as on chat; it was `not_found` |
+| `1.2.0` | Phase 7 (additive, ADR-032): `ToolCallContext.workspace?: ToolWorkspace` (`{ projectId, name, root }`, frozen, set for every tool in a chat whose project folder opened, policy functions included); `ToolDefinition.workspace?: 'read' \| 'write' \| 'execute'` (registration rejects any other value with `validation_error` at `['workspace']`; such a tool is offered only in those chats; `execute` tools only while `HF_WORKSPACE_SHELL` is on; `write` + policy `ask` runs without a card in the new permission mode `edits`); `ToolMode` gains `edits` ("Accept edits"; visible to hooks in `chat.params`); `ImageGenerateResult.modelName` (the catalog name, the user's alias first, else the model id). Behavior change: an unknown provider in `ctx.ai` (`ctx.models.resolve`) and `ctx.images` is now `provider_not_configured` (400, action `configure-provider`, message `The provider "<id>" is not available. Pick another model or install the provider.`), as on chat; it was `not_found` |
 
 A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0` and `1.2.0`; a plugin that catches the
 old `not_found` of an unknown provider should also accept `provider_not_configured`). A plugin that uses a newer member
@@ -945,10 +967,10 @@ not from `ai` (which exports an unrelated type of the same name).
 | `settings.get()` | current settings: stored values over defaults, secrets decrypted; synchronous (cached in memory) |
 | `settings.onChange(cb)` | called with the full new values after a successful save (guarded, 3 s) |
 | `secrets` | encrypted plugin-scoped strings (scope `plugin:<id>`, name `kv.<key>`); keys `^[A-Za-z0-9._:-]{1,128}$`, values <= 16 KB; never returned by any API; `list()` returns keys only |
-| `storage` | plugin-scoped JSON values in `plugin_kv`; keys 1-256 characters without control characters; values JSON-serializable, <= 256 KB each, <= 10 MB per plugin; `set(key, undefined)` is an error (use `delete`). Phase 7: the storage cleanup (Settings → Data, ADR-035) keeps every file whose id (`file_` + 16 characters) appears in a `ctx.storage` value or a plugin setting, so keep the ids of files your plugin needs there, never only in files under `plugin.dataDir` (those are not scanned, and such files may be removed once no chat references them) |
+| `storage` | plugin-scoped JSON values in `plugin_kv`; keys 1-256 characters without control characters; values JSON-serializable, <= 256 KB each, <= 10 MB per plugin; `set(key, undefined)` is an error (use `delete`). Phase 7: the storage cleanup (Settings → Data, ADR-035) keeps every file whose id (`file_` + 16 characters) appears in a `ctx.storage` key or value or a plugin setting, so keep the ids of files your plugin needs there, never only in `ctx.secrets` (encrypted, not scanned) or in files under `plugin.dataDir` (not scanned either): such files may be removed once nothing else references them and they are older than 24 hours |
 | `providers.register(d)` | validates `d` (id namespace, credential fields, functions), then adds the provider; a duplicate id throws `conflict` |
 | `models.register(providerId, models)` | adds models / metadata to any provider (plugin models tier); held until the provider exists |
-| `models.resolve(ref)` | returns a model instance for `providerId:modelId` with the user's credentials; throws `provider_not_configured` (a disabled provider, missing credentials and, since 1.2.0, an unknown provider) / `not_found` (an unknown model); use with `ctx.ai.generateText` |
+| `models.resolve(ref)` | returns a model instance for `providerId:modelId` with the user's credentials; throws `provider_not_configured` with action `configure-provider` (a disabled provider, missing credentials and, since 1.2.0, an unknown provider: `The provider "<id>" is not available. Pick another model or install the provider.`), `model_not_found` with action `refresh-models` (a model that is not in the provider's catalog) or `validation_error` (an invalid ref, an image model); use with `ctx.ai.generateText` |
 | `tools.register(d)` | validates name, schema and policy; a duplicate or `mcp__`-prefixed name throws `conflict` |
 | `mcp.register(d)` | same rules as `contributes.mcpServers` |
 | `commands.register(d)` | exactly one of `template` / `run`; a duplicate name throws `conflict` |
@@ -1043,9 +1065,10 @@ UI, and a `plugin_error` log entry. `inputSchema` must describe a JSON object. `
 (<= 1024 characters).
 
 Workspace tools (1.2.0): `workspace` declares what the tool does with the project folder (`read`, `write`,
-`execute`); registration rejects any other value (`validation_error` naming the tool), and `GET /api/tools` reports it
-as `ToolSummary.workspace` (the web hides "Always allow" for `execute` tools and offers "Accept all edits in this chat"
-for `write` tools). The host does **not** confine a plugin tool to `c.workspace.root`: a code plugin runs with the
+`execute`); registration rejects any other value (`validation_error` naming the tool, issue path `['workspace']`; a
+value that still reaches the chat pipeline counts as `execute`), and `GET /api/tools` reports it as
+`ToolSummary.workspace` (null for MCP tools and tools without one; the web hides "Always allow" for `execute` tools
+and offers "Accept all edits in this chat" for `write` tools). The host does **not** confine a plugin tool to `c.workspace.root`: a code plugin runs with the
 server's rights (section 13), so resolve every path against `root` and refuse anything outside it yourself (resolve
 symbolic links with `realpath` and compare the result with `root`), as the builtin `core-workspace` tools do. Never
 start a shell from a plugin tool; offer the builtin `shell` instead.
@@ -1062,14 +1085,15 @@ Handlers run sequentially: higher `priority` first (default 0), then plugin load
 The `input` object is frozen; each handler receives the current `output` draft and mutates it in place. Return
 values are ignored. Changes of a handler that throws or times out are discarded (the host passes a copy and commits
 it on success). A handler that fails 5 times in a row is disabled until its plugin reloads (a `warn` entry is
-logged and the plugin detail shows it).
+logged and the plugin detail shows it). Hooks get no project data (no project id or folder); in a project chat the
+project only shows in the `instructions` of `chat.params` and in the workspace tools of the run.
 
 | Hook | Input (read-only) | Output (mutable) | When it runs | Timeout | Failure behavior |
 |---|---|---|---|---|---|
-| `chat.params` | `chatId`, `modelRef`, `model`, `reasoningEffort`, `toolMode` | `instructions`, `temperature?`, `maxOutputTokens?`, `maxSteps`, `reasoning?`, `providerOptions` | once per chat run (not for image turns, which call no chat model), after model resolution and `provider.reasoning()`, before `streamText`; for a chat model with image output `providerOptions` already holds the `imageParams()` options | 3 s | changes discarded, run continues |
+| `chat.params` | `chatId`, `modelRef`, `model`, `reasoningEffort`, `toolMode` | `instructions`, `temperature?`, `maxOutputTokens?`, `maxSteps`, `reasoning?`, `providerOptions` | once per chat run (not for image turns, which call no chat model), after model resolution and `provider.reasoning()`, before `streamText`; for a chat model with image output `providerOptions` already holds the `imageParams()` options; `instructions` arrives joined (global, then in a project chat the workspace block, the project file and the project's instructions, then the chat's), `maxSteps` as the `maxSteps` or `projectMaxSteps` setting, and the result is clamped to 1-200 | 3 s | changes discarded, run continues |
 | `chat.headers` | `chatId`, `modelRef` | `headers` (sent with every model request of the run) | once per chat run, after `chat.params` (not for image turns) | 3 s | changes discarded |
 | `chat.messages` | `chatId`, `modelRef` | `messages` (`ModelMessage[]` after `convertToModelMessages`, before context trimming): the path being answered, from the first message to the new or answered user message; other versions of edited or regenerated messages are never included (ADR-023) | once per chat run (image turns send no history and run no `chat.*` hook) | 3 s | changes discarded |
-| `tool.approve` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `decision?` (`allow` / `ask` / `deny`) | per tool call in `ask` / `auto` mode, step 2 of the approval order | 3 s | ignored; resolution falls through to the policy |
+| `tool.approve` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `decision?` (`allow` / `ask` / `deny`) | per tool call in `ask` / `edits` / `auto` mode (unless a user override decided), step 2 of the approval order | 3 s | ignored; resolution falls through to the policy |
 | `tool.before` | `chatId`, `modelRef`, `tool`, `toolCallId` | `input` | per execution, after approval, before `execute` | 3 s | **a throw blocks the call** (error result `Blocked by <pluginId>: <message>`, not counted as a failure); a timeout also blocks and counts |
 | `tool.after` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `output` | per successful execution, before the 64 KB cap | 3 s | changes discarded (original output kept) |
 | `message.completed` | `chatId`, `modelRef`, `message`, `usage`, `costUsd?`, `aborted` | none | once per run after the assistant message is persisted (finished, aborted or failed runs; errors are in `message.metadata.error`); image turns included (their `usage` holds the image token counts); `costUsd` includes an image turn's estimated cost and the `costUsd` of `generate_image` outputs | 3 s | logged only |
@@ -1095,7 +1119,10 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
   `deny` are not sent either; step 1 only catches calls to them that still arrive.
 - `approved` / `denied` are recorded as automatic decisions (no card; denials render as `output-denied`);
   `user-approval` shows the approval card ("Allow **tool**?" with Deny / Allow and an "Always allow **tool**"
-  checkbox). Allow with the checkbox checked also writes override `allow` (`PATCH /api/tools/:name`).
+  checkbox). Allow with the checkbox checked also writes override `allow` (`PATCH /api/tools/:name`). Workspace tools
+  (1.2.0) differ: a tool with `workspace: 'execute'` never offers "Always allow" (the builtin `shell` card reads "Run
+  this command?" with Deny / Run), and a tool with `workspace: 'write'` offers "Accept all edits in this chat" instead,
+  which switches the chat to `edits` before the call is approved (not shown once the chat already accepts edits).
 - Policy defaults to `ask`. A policy **function** is guarded (3 s); a throw or timeout is treated as `always`. It
   receives the call context, so a workspace tool can decide by path (the builtin `write_file` returns `always` for
   hidden and secret-looking paths, so they ask even in Accept edits).

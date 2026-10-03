@@ -389,6 +389,9 @@ const model = await ctx.models.resolve('anthropic:claude-haiku-4-5') // the user
 const { text } = await ctx.ai.generateText({ model, prompt: 'Summarize: ...', abortSignal: ctx.signal })
 ```
 
+`ctx.models.resolve` throws `provider_not_configured` when the provider is unknown (since plugin API 1.2.0; it was
+`not_found`), switched off or missing its key, and `model_not_found` when the model is not in the provider's list.
+
 Calls are billed to the user's key, so say in your description that the plugin makes them.
 
 ## Lifecycle, debugging and trust

@@ -1,13 +1,20 @@
 // Touch tablets (docs/UI.md 14.5, 14.7; S9, W6.11), project `tablet` (Galaxy Tab S9 landscape: 1024x640, touch, so
 // `pointer: coarse` matches and the sidebar is not a sheet): the collapsed icon rail is 3.5rem (56 px) wide instead of
-// 3rem, and every button of it is a touch target of at least 40x40 px, in the chat, plugins and settings modes.
+// 3rem, and every button of it is a touch target of at least 40x40 px, in the chat, plugins and settings modes (the
+// project switcher of the chat mode among them). Phase 7 (W7.14): in a project chat the expanded sidebar's project
+// switcher, the header's project chip and the controls of a workspace approval card (Deny, Allow, "Accept all edits in
+// this chat") are 40 px targets too.
 import type { Locator, Page } from '@playwright/test'
+import type { CleanupTask, HarnessApi } from '../../helpers/index.ts'
 import {
   boxOf,
+  byTestId,
   expect,
+  seedProject,
   test,
   testIds,
   touchTargetSize,
+  uniqueId,
 } from '../../helpers/index.ts'
 
 /** The collapsed rail on touch devices (`pointer-coarse:[--sidebar-width-icon:3.5rem]`). */
@@ -26,7 +33,7 @@ const MODES: readonly RailMode[] = [
   {
     path: '/',
     ready: page => page.getByTestId(testIds.emptyGreeting),
-    buttons: [testIds.sidebarTrigger, testIds.modeTabChat, testIds.modeTabPlugins, testIds.newChat, testIds.searchChats, testIds.settingsLink, testIds.themeToggle],
+    buttons: [testIds.sidebarTrigger, testIds.modeTabChat, testIds.modeTabPlugins, testIds.projectSwitcher, testIds.newChat, testIds.searchChats, testIds.settingsLink, testIds.themeToggle],
   },
   {
     path: '/plugins',
@@ -36,7 +43,7 @@ const MODES: readonly RailMode[] = [
   {
     path: '/settings/providers',
     ready: page => page.getByTestId(testIds.pageHeader),
-    buttons: [testIds.sidebarTrigger, testIds.backToApp, testIds.settingsNavProviders, testIds.settingsNavModels, testIds.settingsNavMedia, testIds.settingsNavGeneral, testIds.settingsNavAppearance, testIds.settingsNavData, testIds.settingsNavAbout, testIds.themeToggle],
+    buttons: [testIds.sidebarTrigger, testIds.backToApp, testIds.settingsNavProviders, testIds.settingsNavModels, testIds.settingsNavMedia, testIds.settingsNavProjects, testIds.settingsNavGeneral, testIds.settingsNavAppearance, testIds.settingsNavData, testIds.settingsNavAbout, testIds.themeToggle],
   },
 ]
 
@@ -107,5 +114,44 @@ test.describe('tablet touch targets', () => {
     await sidebar.getByTestId(testIds.sidebarTrigger).tap()
     await expect(sidebar).toHaveAttribute('data-state', 'expanded')
     await expect.poll(async () => Math.round((await boxOf(page.getByRole('main'))).x)).toBeGreaterThan(RAIL_WIDTH)
+  })
+})
+
+/** At least 40x40 px; polled, because menus and cards zoom or fade in. */
+async function expectTouchTarget(target: Locator, name: string): Promise<void> {
+  await expect(target, name).toBeVisible()
+  await expect.poll(async () => (await touchTargetSize(target)).height, { message: `${name} height` }).toBeGreaterThanOrEqual(MIN_TARGET)
+  expect((await touchTargetSize(target)).width, `${name} width`).toBeGreaterThanOrEqual(MIN_TARGET)
+}
+
+/** A project chat whose `mock:workspace` reply waits for the approval of its first step (write_file in `ask`). */
+async function openApprovalChat(page: Page, api: HarnessApi, cleanup: (task: CleanupTask) => void): Promise<Locator> {
+  const { project } = await seedProject(api, cleanup, { name: `Tablet ${uniqueId('tablet')}` })
+  const chat = await api.createChat({ title: `Tablet approval ${uniqueId('chat')}`, projectId: project.id, modelRef: 'mock:workspace' })
+  cleanup(api => api.removeChat(chat.id))
+  await api.sendChat({ chatId: chat.id, modelRef: 'mock:workspace', toolMode: 'ask', text: 'Go.' })
+  await page.goto(`/chat/${chat.id}`)
+  const card = byTestId(page, testIds.toolApproval, { 'data-tool-name': 'write_file' })
+  await expect(card).toBeVisible()
+  return card
+}
+
+test.describe('tablet touch targets in a project chat', () => {
+  test('the project switcher, the chip and the approval buttons are at least 40x40 px', async ({ page, api, cleanup }) => {
+    const card = await openApprovalChat(page, api, cleanup)
+    const sidebar = page.getByTestId(testIds.sidebar)
+    await expect(sidebar).toHaveAttribute('data-state', 'expanded')
+    await expectTouchTarget(sidebar.getByTestId(testIds.projectSwitcher), 'the expanded project switcher')
+    await expectTouchTarget(page.getByTestId(testIds.chatProjectChip), 'the project chip')
+    await expectTouchTarget(card.getByTestId(testIds.toolApprovalDeny), 'Deny')
+    await expectTouchTarget(card.getByTestId(testIds.toolApprovalAllow), 'Allow')
+    await expect(card.getByTestId(testIds.toolApprovalAcceptEdits)).toBeVisible()
+  })
+
+  // The checkbox's hit area (its ::after, inset from the 14 px padding box) grows to 40 px on a coarse pointer (fixed at
+  // the final gate of Phase 7).
+  test('the "Accept all edits in this chat" checkbox is at least 40x40 px', async ({ page, api, cleanup }) => {
+    const card = await openApprovalChat(page, api, cleanup)
+    await expectTouchTarget(card.getByTestId(testIds.toolApprovalAcceptEdits), 'the "Accept all edits in this chat" checkbox')
   })
 })

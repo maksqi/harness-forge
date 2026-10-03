@@ -102,6 +102,7 @@ function decide(approved: boolean) {
         <Checkbox
           :id="checkboxId"
           v-model="checked"
+          class="pointer-coarse:after:-inset-[13px]"
           :disabled="pending"
           :data-testid="option === 'accept-edits' ? testIds.toolApprovalAcceptEdits : testIds.toolApprovalAlways"
         />

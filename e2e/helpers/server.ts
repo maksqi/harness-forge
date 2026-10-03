@@ -7,7 +7,7 @@ import type { Buffer } from 'node:buffer'
 import type { ChildProcess } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -50,6 +50,11 @@ export interface StartServerOptions {
 export interface StartedServer {
   /** `http://127.0.0.1:<port>` */
   baseURL: string
+  /**
+   * Its temporary data directory (a realpath: macOS `/var` is a link to `/private/var`), e.g. to place a leftover blob
+   * for the storage cleanup (Phase 7). Its default workspace root is `<dataDir>/workspaces`.
+   */
+  dataDir: string
   /** Ends the server and removes its data directory. */
   stop: () => Promise<void>
 }
@@ -113,7 +118,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
 
   const port = await freePort()
   const baseURL = `http://127.0.0.1:${port}`
-  const dataDir = await mkdtemp(join(tmpdir(), `${options.label ?? 'hf-e2e'}-`))
+  const dataDir = await realpath(await mkdtemp(join(tmpdir(), `${options.label ?? 'hf-e2e'}-`)))
   const child = spawn(process.execPath, [SERVER_ENTRY], {
     cwd: REPO_ROOT,
     env: {
@@ -146,5 +151,5 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     await stop()
     throw error
   }
-  return { baseURL, stop }
+  return { baseURL, dataDir, stop }
 }

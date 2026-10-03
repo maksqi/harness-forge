@@ -27,14 +27,16 @@ Projects can only be created inside the **workspace roots**, the folders named b
   HF_WORKSPACE_ROOTS=/home/me/code,/srv/projects
   ```
 
-  Each root must exist and be a folder. The server refuses to start on a relative path, a filesystem root (`/`), a
-  root that does not exist, the data directory itself or a folder inside the data directory (other than
+  Each root must exist and be a folder. The server refuses to start (exit code 1, the log names the root and the
+  reason) on a relative path, a filesystem root (`/`), a root that does not exist, is not a folder or cannot be
+  accessed, the data directory itself or a folder inside the data directory (other than
   `<data directory>/workspaces`). A root may *contain* the data directory (normal in development).
 - A **project folder** may not be the data directory, contain it or sit inside it. To use harness-forge on its own
   repository, set `HF_DATA_DIR` to a folder outside the repository first.
 
-Restart the server after changing the variable. Projects whose folder is no longer inside a root (or no longer exists)
-show "Folder not found"; their chats keep working, without the workspace tools.
+Restart the server after changing the variable. Projects whose folder can no longer be used (it was deleted, moved,
+replaced by a symbolic link, or is no longer inside a root) show "Folder not found" in Settings → Projects (its tooltip
+gives the reason); their chats keep working, without the workspace tools.
 
 ## 2. Docker
 
@@ -59,17 +61,20 @@ Commands of the shell tool see only the container's files and the mounted folder
 ## 3. Add a project
 
 1. **Settings → Projects → Add project** (or **Add project…** in the project switcher at the top of the sidebar).
-2. Browse to the folder: open subfolders with a click, go up with **Parent folder**. Folders that already are projects
-   are marked "Project". To start empty, open the parent folder and use **New folder**.
+2. Browse to the folder: the browser starts at the workspace roots; open subfolders with a click, go up with **Parent
+   folder**. Hidden folders, `node_modules`, symbolic links and the data directory are not listed; folders that already
+   are projects are marked "Project" and cannot be picked. A workspace root itself cannot be a project: pick a folder
+   inside it, or open the parent folder and use **New folder** to start empty.
 3. Check the name (it defaults to the folder name) and press **Add project**. With a password set, harness-forge asks
    for it first (adding a project gives chats access to a folder).
 
 Each project can have its own instructions (**Edit instructions…** in its row menu). An `AGENTS.md` (or, without one,
 a `CLAUDE.md`) in the project folder is added to the instructions of every chat in the project, before the project's
-own instructions; a line made only of `@other-file.md` includes that file (one level, inside the folder; 32 KiB in
-total).
+own instructions; a line made only of `@other-file.md` includes that file (a relative `.md` path inside the folder,
+one level deep, at most 64 such lines per file). The whole text is read again for every reply and cut at 32 KiB.
 
-Deleting a project never touches its folder: its chats stay and move to "No project".
+Deleting a project never touches its folder: its chats stay and move to "No project". A project cannot be deleted
+while one of its chats is replying, and a running chat cannot be moved to another project.
 
 ## 4. Chat in a project
 
@@ -79,8 +84,8 @@ Deleting a project never touches its folder: its chats stay and move to "No proj
   and can be moved with **Move to project** (in the chat menu or the sidebar row menu).
 - In a project chat the model can use `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`,
   `edit_file` and `shell`. Edits show as a diff inside the tool row (`+12 −3`), shell commands as terminal output with
-  the exit code. Chats in a project may take up to `projectMaxSteps` steps per reply (Settings → General, default
-  100; other chats use "Max steps per response", default 20).
+  the exit code. Chats in a project may take up to `projectMaxSteps` steps per reply (Settings → General → "Max steps
+  in project chats", default 100; other chats use "Max steps per response", default 20; both accept 1 to 200).
 - The folder is checked at the start of every reply: if it was moved or deleted, the reply says so ("The project
   folder … is not available") and runs without workspace tools.
 
@@ -91,7 +96,7 @@ The permission menu in the composer (Alt+P, or `/mode`) decides which tool calls
 | Mode | Runs without asking | Asks |
 |---|---|---|
 | **Ask** (default) | reading, listing and searching files | every write, every edit, every shell command, other tools that change things |
-| **Accept edits** (project chats, `/mode edits`) | reading and searching, writes and edits of ordinary project files | shell commands; writes to hidden or secret-looking paths (`.git/…`, `.github/…`, `.env`, `*.pem`, `.npmrc`, …); other tools that would ask in Ask |
+| **Accept edits** (project chats, `/mode edits` or `/mode accept-edits`) | reading and searching, writes and edits of ordinary project files | shell commands; writes to hidden or secret-looking paths (`.git/…`, `.github/…`, `.env`, `*.pem`, `.npmrc`, …); other tools that would ask in Ask |
 | **Auto** | everything except tools marked always-ask | writes to hidden or secret-looking paths, other always-ask tools |
 
 - Reading a secret-looking file (`.env`, private keys, `.npmrc`, …) asks in Ask and Accept edits.
@@ -163,7 +168,32 @@ docker run --rm -v harness-forge-data:/data -e HF_MASTER_KEY="$OLD" -e HF_NEW_MA
 # start the container again with -e HF_MASTER_KEY="$NEW"
 ```
 
-The CLI never generates or prints a key in this mode, refuses to run while a server answers on the configured port or
-`server.lock` names a running server (exit code 2), and prints a summary to stderr. Settings → Data → Encryption key
-shows the key's source, version and last rotation; a "doesn't match" alert after a restart means the server was started
-with the wrong key: restore the previous one.
+### The `rotate-key` CLI
+
+Usage: `node apps/server/dist/main.mjs rotate-key [--force]` (`pnpm key:rotate [--force]` in a source checkout). It
+reads `.env` and the environment like the server, so it finds the same data directory.
+
+- **Env mode** (`HF_MASTER_KEY` set): `HF_NEW_MASTER_KEY` must hold the new key (base64 of 32 bytes, different from the
+  old one). The CLI never generates or prints a key here; afterwards replace `HF_MASTER_KEY` with the new key and unset
+  `HF_NEW_MASTER_KEY`.
+- **File mode** (no `HF_MASTER_KEY`): the CLI generates the new key and writes it to `secret.key` itself, like **Rotate
+  key…** in the app (useful when the server cannot start). `HF_NEW_MASTER_KEY` is ignored with a warning.
+- It refuses to run while a server may use the data directory: something answers `GET /api/health` on `HF_HOST:HF_PORT`
+  within 1 s (`0.0.0.0` is probed as `127.0.0.1`, `::` as `::1`; `HF_PORT=0` skips the probe), or `server.lock` names a
+  running process on this machine. A lock written on another host, or one that cannot be read, is refused unless you
+  pass `--force` after making sure that server is stopped; `--force` never overrides a running process on this
+  machine. In Docker every container has its own host name, so a lock left by a container that was killed (not
+  stopped) looks foreign: check that the server container is stopped, then add `--force`.
+- It checks the current key against the stored key check first and changes nothing when it does not match.
+- Every line goes to stderr, prefixed `harness-forge rotate-key:`; the last one is the summary ("rotated the master key
+  to version N: …") or the reason it stopped (`refused: …`, `failed: …`).
+
+| Exit code | Meaning |
+|---|---|
+| 0 | the key was rotated |
+| 1 | failed: nothing to rotate, a missing or invalid `HF_NEW_MASTER_KEY`, a key that does not match the stored secrets, an error during the rotation (the transaction leaves the old key in place) |
+| 2 | refused: a server answers on the configured port or `server.lock` names a running server (or a foreign / unreadable lock without `--force`) |
+
+Settings → Data → Encryption key shows the key's source, version and last rotation; the alert "The master key doesn't
+match the stored secrets." after a restart means the server was started with the wrong key: restore the previous one
+(`HF_MASTER_KEY` or `data/secret.key`), or enter the API keys again.

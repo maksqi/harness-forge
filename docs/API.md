@@ -77,9 +77,9 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | `unauthorized` | 401 | `login` | No valid session (or wrong password on `POST /auth/login`). |
 | `forbidden` | 403 | `login` when fresh auth is missing | Origin check failed, fresh auth missing, operation not allowed for this resource (builtin plugin, read-only source). |
 | `not_found` | 404 | - | Unknown route, chat, message, plugin, provider, file, tool, MCP server, icon, share link, project, or a missing project folder. Every failure of the public share routes is the same 404 (section 5.20). |
-| `conflict` | 409 | - | State conflict: a run is active for the chat (or for a chat of the project), id already exists (also a project for the folder, or the new folder), stale file `baseEtag`, password managed by `HF_PASSWORD`, another maintenance operation (import, delete-all, key rotation, file cleanup) is running, the message to delete is its only version, the master key comes from `HF_MASTER_KEY` or fails the key check. |
+| `conflict` | 409 | - | State conflict: a run is active for the chat (or for a chat of the project), id already exists (also a project for the folder, or the new folder), stale file `baseEtag`, password managed by `HF_PASSWORD`, another maintenance operation (import, delete-all, key rotation, file cleanup) is running, a chat request arrives during a key rotation, the message to delete is its only version, the master key comes from `HF_MASTER_KEY` or fails the key check. |
 | `payload_too_large` | 413 | - | Body, upload, zip, backup, recording, share snapshot or file over the limit (`details.limitBytes`; a backup with too many entries: `details.limitEntries`). |
-| `provider_not_configured` | 400 | `configure-provider` | Provider unknown/disabled or required credentials missing. Returned before any streaming. |
+| `provider_not_configured` | 400 | `configure-provider` | Provider unknown/disabled or required credentials missing, wherever a model ref is resolved (chat, media routes, `ctx.ai`, `ctx.models.resolve`, `ctx.images`, `generate_image`; an unknown provider since Phase 7). Returned before any streaming. Routes that address a provider by id (`/providers/:id/...`, `GET /models?providerId=`, model prefs, custom models) answer `404 not_found` for an unknown one. |
 | `auth_invalid` | 502 | `configure-provider` | Provider rejected the credentials (upstream 401/403). |
 | `rate_limited` | 429 | `retry` | Upstream rate limit, login rate limit or share link rate limit; `retryAfterMs` when known. |
 | `model_not_found` | 404 | `refresh-models` | Provider does not know the model (upstream 404). |
@@ -97,7 +97,7 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | Code | `details` shape |
 |---|---|
 | `validation_error` | `{ issues: Array<{ path: Array<string \| number>; message: string; code: string }> }` (zod issues, flattened) |
-| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy' \| 'only-version' \| 'env-key' \| 'key-mismatch', chatId?: string }` (`run-active`: a run holds the chat, or its active leaf moved during a version switch or delete, section 5.9, or a chat of the project runs while the project is deleted or the chat is moved, sections 5.9 and 5.22; `exists`: a chat or message id is already used, a project already uses the folder, or the new folder exists, section 5.22; `stale`: a plugin file or package changed since it was read or reviewed, or a chat request was stopped before its history was stored, section 5.10; `busy`: another maintenance operation (import, delete-all, key rotation, file cleanup) is running, sections 5.19 and 5.23; `only-version`: the message to delete has no other version, section 5.9; `env-key`: the master key comes from `HF_MASTER_KEY` and is rotated offline, section 5.23; `key-mismatch`: the master key fails the stored key check, section 5.23) |
+| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy' \| 'only-version' \| 'env-key' \| 'key-mismatch', chatId?: string }` (`run-active`: a run holds the chat, or its active leaf moved during a version switch or delete, section 5.9, or a chat of the project runs while the project is deleted, or the chat runs while it is moved, sections 5.9 and 5.22; `exists`: a chat or message id is already used, a project already uses the folder, or the new folder exists, section 5.22; `stale`: a plugin file or package changed since it was read or reviewed, or a chat request was stopped before its history was stored, section 5.10; `busy`: another maintenance operation (import, delete-all, key rotation, file cleanup) is running, sections 5.19 and 5.23, or a chat request arrives while a key rotation runs, section 5.10; `only-version`: the message to delete has no other version, section 5.9; `env-key`: the master key comes from `HF_MASTER_KEY` and is rotated offline, section 5.23; `key-mismatch`: the master key fails the stored key check, section 5.23) |
 | `payload_too_large` | `{ limitBytes: number }`, or `{ limitEntries: number }` when `GET /data/export` refuses a backup for its entry count (section 5.19) |
 | `plugin_error` | `{ pluginId: string; phase?: 'load' \| 'setup' \| 'dispose' \| 'hook' \| 'tool' \| 'build' \| 'install' }` |
 | `internal_error` | `{ requestId: string }` |
@@ -1040,7 +1040,8 @@ type ProjectChangedData = {                                                     
 type KeyRotatedData = {                                                             // keyRotatedDataSchema (ADR-034)
   keyVersion: number                    // the new key version
   rotatedAt: Timestamp
-  chatIds: ChatId[]                     // chats whose pending approvals expired or whose runs were stopped (<= 1000)
+  chatIds: ChatId[]                     // chats whose runs were stopped, whose pending approvals expired or whose
+                                        // pending-approval flag was cleared (sorted, unique, <= 1000)
 }
 type ServerEventType = ServerEvent['type']                                          // serverEventTypeSchema
 ```
@@ -1138,19 +1139,24 @@ type DataDeleteResult = {               // dataDeleteResultSchema; what was dele
 
 // Orphaned file cleanup (Phase 7, ADR-035)
 type DataCleanupPreview = {             // dataCleanupPreviewSchema (GET /data/cleanup): a dry run
-  files: number; fileBytes: number      // removable file rows (unreferenced, older than the grace period) and bytes
-  blobs: number; diskBytes: number      // blobs that would be deleted (no row keeps them) and the disk bytes freed
-  tempFiles: number                     // stale temp files of interrupted uploads
-  recentFiles: number                   // unreferenced files kept because they are younger than the grace period
+  files: number; fileBytes: number      // removable file rows (unreferenced, older than the grace period, not pinned)
+                                        // and the sum of their sizes
+  blobs: number                         // leftover blobs only: files/<aa>/<sha256> entries that no row has at all
+                                        // (older than the grace period); NOT the blobs of the removed rows
+  diskBytes: number                     // every byte freed on disk: the blobs of removed rows that no other row
+                                        // shares, the leftover blobs and the temp files
+  tempFiles: number                     // stale temp files of interrupted uploads (older than 1 h)
+  recentFiles: number                   // unreferenced rows kept: younger than the grace period, or pinned (returned by
+                                        // an upload, import or generation within it, e.g. a reused older row)
   graceMs: number                       // the grace period: 86400000 (24 h)
-  lastRunAt: Timestamp | null           // the last cleanup; null = never
+  lastRunAt: Timestamp | null           // the last real cleanup (internal setting `_files.lastCleanup`); null = never
 }
 
-type DataCleanupResult = {              // dataCleanupResultSchema (POST /data/cleanup): what was removed
-  files: number; fileBytes: number
+type DataCleanupResult = {              // dataCleanupResultSchema (POST /data/cleanup): what was removed; the counts
+  files: number; fileBytes: number      // mean the same as in the preview
   blobs: number; diskBytes: number
   tempFiles: number
-  ranAt: Timestamp
+  ranAt: Timestamp                      // stored as `_files.lastCleanup`
 }
 
 type BackupManifest = {                 // backupManifestSchema; manifest.json, written last (exact counts)
@@ -1327,8 +1333,9 @@ type GeneratedImageRef = {              // generatedImageRefSchema: a generated 
 
 type GenerateImageToolOutput = {        // generateImageToolOutputSchema: file references only, never image bytes
   modelRef: ModelRef                    // the image model used
-  modelName?: string                    // its display name (catalog name, else the model id; <= 200 chars; Phase 7,
-                                        // plugin API 1.2.0); absent in outputs stored before Phase 7
+  modelName?: string                    // its display name (Phase 7, plugin API 1.2.0): the catalog name (the user's
+                                        // alias wins), else the model id; trimmed, <= 200 chars; absent in outputs
+                                        // stored before Phase 7
   images: GeneratedImageRef[]           // 1..4
   costUsd?: number                      // estimated; added to the cost of the message
   revisedPrompt?: string
@@ -1349,14 +1356,16 @@ Rules (the stream is described in sections 5.10 and 6.8):
   `editPrevious` only for image models; otherwise `400 validation_error` on `['imageOptions']` (texts in section 5.10).
 - **`generate_image`**: the model never sees the output JSON, only the text "Generated 2 images with <model>; they
   are shown to the user below this call." ("Generated 1 image with <model>; it is shown to the user below this
-  call."), where `<model>` is `modelName`, else (outputs stored before Phase 7) `modelRef`; the output above (file references, well under the 64 KB tool output cap) is stored in the tool part. The chat
+  call."), where `<model>` is `modelName`, else (outputs stored before Phase 7) `modelRef`; the text is built from the
+  stored output alone, whenever the history is converted; the output above (file references, well under the 64 KB tool output cap) is stored in the tool part. The chat
   pipeline appends one `file` part per image right after the final `tool-output-available` chunk, only for `core-tools`'
   `generate_image` (also on an approval continuation), only when the output parses with
   `generateImageToolOutputSchema`, and only for images whose URL is `/api/files/<fileId>` of a stored raster image; the
   tool's `costUsd` is added to the cost of the message. The tool is always registered: without an `imageModelRef` it
   fails with "Choose an image model in Settings → Media.", with a `provider_not_configured` error (action
   `configure-provider`) when the provider of the image model is unknown, disabled or lacks credentials (Phase 7: also
-  for an unknown provider, which v1.2 reported as `not_found`; `ctx.images.generate` throws the same error), and when
+  for an unknown provider, which v1.2 reported as `not_found`: 'The provider "<id>" is not available. Pick another
+  model or install the provider.'; `ctx.images.generate` throws the same error), and when
   every image was refused (see below) with
   `provider_error` "The image model returned no image that could be stored: only PNG, JPEG, WebP and GIF images of at
   most 20 MB are kept."
@@ -1421,8 +1430,8 @@ sentence chunks: the first up to 300 characters (`LIMITS.speechFirstChunkChars`)
 
 ADR-031. A project is a named folder on the server host; a chat optionally belongs to one (`ChatSummary.projectId`).
 Project folders lie inside the **allowed roots** (`HF_WORKSPACE_ROOTS`, comma list of absolute folders, default
-`<dataDir>/workspaces`) and never equal, contain or sit inside the data directory. Projects are configuration: they are
-not part of backups or chat exports, and delete-all keeps them.
+`<dataDir>/workspaces`) and never equal, contain or sit inside the data directory (the subtree of the default root
+excepted). Projects are configuration: they are not part of backups or chat exports, and delete-all keeps them.
 
 ```ts
 type ProjectSummary = {                 // projectSummarySchema
@@ -1430,12 +1439,17 @@ type ProjectSummary = {                 // projectSummarySchema
   name: string                          // 1..80 chars
   path: string                          // canonical realpath of the folder on the server host (unique; never changes)
   instructions: string | null           // the project's own instructions (<= 20000 chars); null = none
-  available: boolean                    // the folder exists, is a directory and still lies inside an allowed root
-                                        // (checked whenever projects are listed)
-  issue: string | null                  // why it is not available, safe to show ("The folder does not exist.");
-                                        // null when available
+  available: boolean                    // the stored path is still its own realpath, a directory, inside a current
+                                        // allowed root and away from the data directory (checked on every listing
+                                        // and every run)
+  issue: string | null                  // why it is not available, safe to show: "The folder does not exist.", "The
+                                        // folder was moved or replaced by a symbolic link.", "The path is not a
+                                        // folder.", "The folder cannot be accessed (permission denied).", "The folder
+                                        // is outside the workspace folders (HF_WORKSPACE_ROOTS).", "The folder
+                                        // overlaps the harness-forge data directory."; null when available
   instructionsFile: 'AGENTS.md' | 'CLAUDE.md' | null   // projectInstructionsFileSchema (PROJECT_INSTRUCTIONS_FILES):
                                         // the project file found in the folder root (AGENTS.md wins), else null
+                                        // (also null while the folder is not available)
   chatCount: number                     // chats of the project, archived ones included
   createdAt: Timestamp
   updatedAt: Timestamp
@@ -1479,23 +1493,33 @@ type ProjectBrowse = {                  // projectBrowseSchema (response of GET 
 ```
 
 - **Project file**: on every run of a chat model in a project chat, `AGENTS.md`, else `CLAUDE.md`, is read from the
-  folder root (never from subfolders); a line made only of `@relative/path.md` is replaced by that file (one level,
-  inside the folder); at most 32 KiB in total (`LIMITS.projectFileBytes`), then a truncation marker.
+  folder root (never from subfolders) through the workspace path guard: a file that is missing, not a regular file, a
+  link out of the folder or binary (a NUL byte in its first 8 KiB) is skipped and the next name is tried. A line made
+  only of `@relative/path.md` (a relative path ending in `.md`, surrounding spaces allowed) is replaced by that file
+  (one level, inside the folder, at most 64 such lines per file; a refused, missing or binary target leaves the line as
+  written). At most 32 KiB in total (`LIMITS.projectFileBytes`, cut at a character boundary), then the marker
+  "[The project file was cut at 32 KiB.]" after a blank line. It joins the instructions as "Instructions from
+  AGENTS.md in the project folder:" (or `CLAUDE.md`), a blank line and the text.
 - **Instructions of a project chat**, in this order (before the `chat.params` hook): global instructions; the workspace
   block (project name, folder, OS and rules for the offered workspace tools); the project file; the project's
   `instructions`; the chat instructions.
-- **Steps**: a run in a chat with a project uses the `projectMaxSteps` setting (default 100), every other run
-  `maxSteps` (default 20); both accept 1..200.
-- **Opening the folder** (every chat-model run of a project chat): the stored path must still be its own realpath, a
+- **Steps**: a run in a chat with a project uses the `projectMaxSteps` setting (default 100), also when its folder
+  could not be opened; every other run uses `maxSteps` (default 20); both accept 1..200.
+- **Opening the folder** (every chat-model run of a project chat; not for image turns or the reply of a slash command
+  that answers without the model): the project must still exist and its stored path must still be its own realpath, a
   directory, inside a current root and away from the data directory. Otherwise the run continues without workspace
-  tools and its reply starts with the notice `workspace-unavailable` ("The project folder … is not available: …").
+  tools and its reply starts with the warning notice `workspace-unavailable` ("The project folder <path> is not
+  available: <issue>", or "The project of this chat no longer exists."), on every run until the folder is back.
 
 ### 4.21 Workspace tools
 
 ADR-032, ADR-033. The builtin plugin `core-workspace` registers seven tools (`WORKSPACE_TOOL_NAMES`, schema
 `workspaceToolNameSchema`); they are offered only in chats whose project folder opened (`ToolDefinition.workspace`,
 `ToolSummary.workspace`), and `shell` only while `HF_WORKSPACE_SHELL` is not `0` (never on Windows).
-`WORKSPACE_TOOL_ACCESS` maps each tool to its access, `WORKSPACE_TOOL_SCHEMAS` to its input and output schemas.
+`WORKSPACE_TOOL_ACCESS` maps each tool to its access, `WORKSPACE_TOOL_SCHEMAS` to its input and output schemas. A
+plugin tool may declare `workspace` too; any value other than `read`, `write` or `execute` fails its registration
+(`validation_error` on `['workspace']`). `GET /tools` reports the declared access (`ToolSummary.workspace`; null for MCP
+tools and tools without one).
 
 | Tool | Input schema | Output schema | Policy / access / timeout |
 |---|---|---|---|
@@ -1546,25 +1570,31 @@ type ShellToolInput = {
 
 // Outputs: stored in the tool parts and rendered by the web (paths project-relative, POSIX)
 type ReadFileToolOutput = {             // raw text; line numbers only in the text the model sees
-  path: string; content: string
-  startLine: number; endLine: number    // 1-based range of `content`
-  totalLines: number | null             // null when the file was not read to its end
+  path: string; content: string         // path: the file read (a link reports its target); content without a leading
+                                        // BOM or trailing \r of a line
+  startLine: number; endLine: number    // 1-based range of `content` (endLine < startLine: no lines in the window)
+  totalLines: number | null             // null when more than 8 MiB remain after the window (not counted)
   truncated: boolean                    // the file continues, or a line (2000 chars) or the window (48 KiB) was cut
 }
-type ListDirectoryToolOutput = {        // sorted by name, <= 1000 entries
-  path: string
-  entries: { name: string; type: 'file' | 'dir' | 'symlink' | 'other' }[]   // workspaceEntryTypeSchema
-  truncated: boolean
+type ListDirectoryToolOutput = {        // sorted by name (code point order), <= 1000 entries; the temp files of
+  path: string                          // atomic writes (.hf-write-*) are not listed
+  entries: { name: string; type: 'file' | 'dir' | 'symlink' | 'other' }[]   // workspaceEntryTypeSchema; links are
+  truncated: boolean                                                        // not followed
 }
-type FindFilesToolOutput = { pattern: string; paths: string[]; truncated: boolean }   // sorted paths
+type FindFilesToolOutput = { pattern: string; paths: string[]; truncated: boolean }   // files only (no folders),
+                                        // project-relative, code point order; truncated also when the walk stopped
+                                        // early (100,000 entries, depth 64, 10 s)
 type SearchFilesToolOutput = {
   pattern: string
-  matches: { path: string; line: number; text: string }[]   // searchFilesMatchSchema; text cut at 2000 chars
+  matches: { path: string; line: number; text: string }[]   // searchFilesMatchSchema; text cut at 2000 chars; walk
+                                                            // order
   filesSearched: number
   truncated: boolean
 }
 type WriteFileToolOutput = { path: string; created: boolean; bytes: number; lines: number; diff: WorkspaceDiff | null }
-type EditFileToolOutput = { path: string; replacements: number; diff: WorkspaceDiff | null }   // replacements >= 1
+                                        // diff null when the old file was binary or over 1 MiB, or the diff timed out
+type EditFileToolOutput = { path: string; replacements: number; diff: WorkspaceDiff | null }   // replacements >= 1;
+                                        // diff (of the LF text) null when it timed out (2 s)
 type ShellToolOutput = {                // = ShellOutput
   command: string
   cwd: string                           // project-relative working folder
@@ -1572,9 +1602,12 @@ type ShellToolOutput = {                // = ShellOutput
   signal: string | null                 // 'SIGTERM', 'SIGKILL', ...
   timedOut: boolean                     // stopped after timeout_ms (a normal result, not an error)
   durationMs: number
-  stdout: string; stderr: string        // each: the first 4 KiB + the last 16 KiB with an omission marker between,
-                                        // ANSI codes stripped, \r\n -> \n, only the last segment of \r progress lines
-  stdoutBytes: number; stderrBytes: number   // bytes each stream produced in total
+  stdout: string; stderr: string        // each: the first 4 KiB + the last 16 KiB with "[… N bytes omitted …]" on its
+                                        // own line between them; ANSI codes and other control characters (except
+                                        // tab and newline) stripped, \r\n -> \n, only the last segment of \r
+                                        // progress lines; both cut further from the middle (in proportion) when the
+                                        // output would exceed 60 KiB, the command last
+  stdoutBytes: number; stderrBytes: number   // raw bytes each stream produced in total
 }
 
 type WorkspaceDiff = {                  // workspaceDiffSchema: the change of a write or an edit, for the UI
@@ -1585,7 +1618,9 @@ type WorkspaceDiff = {                  // workspaceDiffSchema: the change of a 
 type DiffHunk = {                       // workspaceDiffHunkSchema: a unified diff hunk with 3 lines of context
   oldStart: number; oldLines: number; newStart: number; newLines: number
   lines: string[]                       // prefixed ' ' (context), '-' (removed), '+' (added); '\' = "No newline at end
-}                                       // of file"; lines cut at 500 chars (WORKSPACE_LIMITS.diffLineMaxChars)
+}                                       // of file"; lines cut at 500 chars (WORKSPACE_LIMITS.diffLineMaxChars), a
+                                        // trailing \r dropped; an empty side starts at the line before the hunk (0
+                                        // for an empty file), as in a printed unified diff
 ```
 
 `WORKSPACE_LIMITS` = `{ readMaxLines: 2000, readMaxBytes: 49152, lineMaxChars: 2000, editFileMaxBytes: 1048576,
@@ -1597,20 +1632,45 @@ diffMaxBytes: 24576, diffLineMaxChars: 500, descriptionMaxChars: 200 }`.
 
 - **Text only**: binary files are refused; edits work on files up to 1 MiB; a CRLF file is matched as LF text and
   written back as CRLF; a BOM is kept.
-- **What the model sees**: a short text built from the stored output (`toModelOutput`): numbered lines for `read_file`
-  (with "[truncated; continue with offset=N]"), `path:line: text` lines for `search_files`, "Created x (N lines)." /
-  "Updated x (+a -r lines)." / "Edited x: N replacement(s) (+a -r lines)." for writes and edits, "Exit code: N" (or the
-  timeout) followed by stdout and stderr for `shell`; never the diff hunks.
+- **What the model sees**: a short text built only from the stored output (`toModelOutput`; an output that does not
+  parse with the tool's output schema, e.g. one the host replaced, is sent as JSON); never the diff hunks:
+  - `read_file`: one line per file line, the line number right-aligned in 6 columns, a tab, the text (like `cat -n`);
+    then "[truncated; continue with offset=N]" when the file goes on, else "[lines longer than 2000 characters were
+    cut]" when a line was cut; "(x is empty)", "(x has N lines; offset M is past the end)" or "(no lines at offset M)"
+    when the window holds no line.
+  - `list_directory`: one name per line, `name/` for a folder, `name@` for a link; "[truncated: only the first N
+    entries are listed]"; "(x is an empty folder)".
+  - `find_files`: one path per line; "[truncated: showing N paths; narrow the pattern or the path]"; "No files match."
+    ("No files match (the search stopped early; narrow the path).").
+  - `search_files`: `path:line: text` lines; "[truncated: showing N matches; narrow the pattern, the glob or the
+    path]"; "No matches (N files searched)." ("No matches (N files searched; the search stopped early, narrow the
+    path).").
+  - `write_file`: "Created x (N lines).", "Updated x (+a -r lines).", or "Updated x (N lines)." without a diff.
+  - `edit_file`: "Edited x: 1 replacement (+a -r lines).", or "Edited x: N replacements." without a diff.
+  - `shell`: "Exit code: N", "Stopped after <s> s (timeout)" or "Terminated by signal SIGKILL"; then a line `stdout:`
+    and the output (trailing newlines trimmed) or "(empty)"; then `stderr:` and its text, only when stderr is not
+    empty.
+- **Errors the model sees** (the call fails, the run goes on): a refused `cwd` of `shell` is `validation_error` on
+  `['cwd']`; `edit_file` explains a missing `old_string` ("… Read the file again and copy the text exactly, including
+  whitespace and indentation.") and an ambiguous one ("old_string occurs N times in x. Add more surrounding lines … or
+  set replace_all to true …"); a search pattern that runs longer than 20 s stops with "The search timed out — use a
+  simpler pattern or a narrower path." (regex and glob matching run in a Worker).
 - **Size**: every output is trimmed to about 60 KiB of serialized JSON (`WORKSPACE_LIMITS.outputMaxBytes`), under the
   64 KB host cap of every tool output.
 - **Secret-looking paths** (`.env`, `.env.*` except `.env.example` / `.env.sample` / `.env.template`, `*.pem`, `*.key`,
-  `id_rsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`, `*.p12`, `*.pfx`, `credentials*.json`, `secrets.*`): reading
-  one asks (`ask` and `edits` modes), searches skip them. **Hidden paths** (any segment starting with `.`, e.g. `.git`
-  hooks, `.github` workflows, `.vscode`): writing one is policy `always`, so it asks in every mode; a user override
-  `allow` still applies.
-- **Shell**: the server's privileges in the project folder, a minimal environment (no `HF_*`, no provider keys), its
-  own process group (killed on Stop, timeout or server exit; background processes are stopped when the command ends).
-  A valid session can approve its own shell calls (accepted risk, ADR-033); `HF_WORKSPACE_SHELL=0` removes the tool.
+  `id_rsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`, `*.p12`, `*.pfx`, `credentials*.json`, `secrets.*`; the file
+  name, case-insensitive): reading one asks (`ask` and `edits` modes); searches never read one, even with
+  `include_ignored` (a single secret-looking file named in `path` is refused). **Hidden paths** (any segment starting
+  with `.`, e.g. `.git` hooks, `.github` workflows, `.vscode`): writing one is policy `always`, so it asks in every
+  mode; a user override `allow` still applies. The policies check the path as written and the path it resolves to, so
+  a link named `notes.txt` that points at `.env` asks as well.
+- **`search_files`** searches a folder (walked like `find_files`) or a single file named in `path`; files over 1 MiB
+  and files whose first 8 KiB do not look like text are skipped.
+- **Shell**: `bash -c` (else `sh -c`) with the server's privileges in the project folder (or `cwd`), no stdin, a minimal
+  environment (an allowlist: no `HF_*`, no provider keys, no `NODE_ENV`), its own process group (killed on Stop,
+  timeout or server exit; background processes are stopped once the shell exits, also when they closed their pipes).
+  Each call is a new process: a `cd` does not persist. A valid session can approve its own shell calls (accepted risk,
+  ADR-033); `HF_WORKSPACE_SHELL=0` removes the tool.
 
 ### 4.22 Master key
 
@@ -1622,8 +1682,8 @@ from `HF_MASTER_KEY` is rotated offline with the `rotate-key` CLI (`pnpm key:rot
 ```ts
 type KeySource = 'env' | 'file'         // keySourceSchema
 type KeyCheck = 'ok' | 'mismatch' | 'unknown'   // keyCheckSchema: the key in use against the stored key check
-                                        // ('unknown': no check stored yet, e.g. a v1.2 database whose secrets could not
-                                        // be read)
+                                        // ('unknown': no check stored yet and no stored secret readable with the key
+                                        // in use, e.g. a v1.2 database whose secrets could not be read)
 
 type KeyStatus = {                      // keyStatusSchema (GET /keys); never the key
   source: KeySource
@@ -1631,9 +1691,10 @@ type KeyStatus = {                      // keyStatusSchema (GET /keys); never th
   rotatedAt: Timestamp | null           // null = never rotated
   keyCheck: KeyCheck
   secrets: number                       // stored secrets (rows)
-  unreadableSecrets: number             // secrets the current key cannot decrypt (a rotation leaves them unchanged)
+  unreadableSecrets: number             // secrets the current key cannot decrypt (another key version, or failing
+                                        // decryption; a rotation leaves them unchanged)
   shares: number                        // share links (their URLs change with a rotation)
-  pendingApprovals: number              // messages waiting for a tool approval (a rotation denies them)
+  pendingApprovals: number              // MESSAGES with at least one open tool approval (a rotation denies them)
   canRotate: boolean                    // source 'file' and keyCheck 'ok'
 }
 
@@ -1645,11 +1706,16 @@ type KeyRotationResult = {              // keyRotationResultSchema
   secrets: number                       // secrets re-encrypted with the new key
   skippedSecrets: number                // secrets the old key could not read, left unchanged
   shares: number                        // share links whose URL changed (owners copy the new links)
-  approvalsExpired: number              // pending approvals denied ("Expired after a key rotation.")
+  approvalsExpired: number              // TOOL PARTS whose open approval was denied ("Expired after a key rotation.");
+                                        // one message may hold several, so it can exceed KeyStatus.pendingApprovals
   chats: number                         // chats whose pending-approval flag was cleared
   runsStopped: number                   // runs stopped before the rotation
 }
 ```
+
+`GET /keys` only reads: the key state `_keys` (an internal setting) is written by the first v1.3 boot and by a
+rotation. When it is missing, the state the boot would record is computed in memory (the key in use, when the secrets
+table is empty or a secret of the current key version decrypts; else `keyCheck: 'unknown'`).
 
 ## 5. Endpoints
 
@@ -1687,7 +1753,8 @@ body exceeds its limit; `500 internal_error`.
 **`PUT /auth/password`** — `auth.setPassword` · **fresh**
 - Body `PasswordUpdate`. `newPassword: null` removes the password.
 - Response `200 AuthStatus`; the session epoch is incremented (all other sessions end) and a new cookie is set
-  for the caller (none when the password was removed).
+  for the caller (none when the password was removed). Every event stream closes (Phase 7: a revoked session must not
+  keep listening; the caller's tab reconnects with its new cookie).
 - Errors: `403 forbidden` (`currentPassword` missing or wrong); `429 rate_limited` (the current-password check
   shares the login limiter); `409 conflict` (`reason: 'env-password'` when `HF_PASSWORD` is set;
   `reason: 'insecure-bind'` when removing the password on a non-loopback bind without `HF_INSECURE=1`).
@@ -1751,14 +1818,17 @@ body exceeds its limit; `500 internal_error`.
 - Response `200 ListResponse<CatalogModel>`: models of enabled providers (regardless of credential status; the web
   filters by `ProviderSummary.status`; media models only when the provider can serve their kind, section 4.5), hidden
   ones only with `includeHidden=true`. Order: favorites, recent, then provider registry order and name.
-- Errors: `404 not_found` (unknown `providerId`).
+- Errors: `404 not_found` (unknown `providerId`; this route resolves no model, so it keeps `404` where the model
+  resolvers answer `400 provider_not_configured` since Phase 7).
 
 **`POST /providers/:id/models/refresh`** — `models.refresh`
 - Params `{ id: ProviderId }`. No body.
 - Forces a live listing now (bypasses the 24 h TTL); on failure the last good listing is kept.
 - Response `200 ListResponse<CatalogModel>` — the provider's models after the refresh, hidden included. Emits
   `catalog.changed` and `provider.changed`.
-- Errors: `404 not_found`; `400 provider_not_configured`; upstream errors mapped as in 2.3 (`auth_invalid`,
+- Errors: `404 not_found` (unknown provider; not routed through the model resolvers, so not
+  `provider_not_configured`); `400 provider_not_configured` (disabled, or credentials missing); upstream errors mapped
+  as in 2.3 (`auth_invalid`,
   `rate_limited`, `provider_unreachable`, `provider_error`).
 
 **`PUT /model-prefs`** — `models.updatePrefs`
@@ -1796,7 +1866,8 @@ body exceeds its limit; `500 internal_error`.
 - Response `200 CursorPage<ChatSummary>`, ordered by `updatedAt` desc, `id` desc; `snippet` set when `q` is given.
   The search covers every message version, so a snippet may come from a version that is not on the active path.
 - `projectId` (ADR-031): a project id lists only its chats, `none` only chats without a project; omitted = every chat.
-  An unknown project id lists nothing (no error). The filter combines with `q` and `archived`.
+  An unknown project id lists nothing (no error). The filter combines with `q`, `archived` and the cursor (the same
+  `updatedAt` desc, `id` desc order); search results carry `projectId` too.
 
 **`POST /chats`** — `chats.create`
 - Body `ChatCreate`. Without `messages` it creates an empty chat; with `messages` it imports them (e.g. the
@@ -1806,10 +1877,10 @@ body exceeds its limit; `500 internal_error`.
   be `null` or the id of an earlier message, and the ids must be unique. The tree is validated before anything is
   written; the chat, its messages and its active leaf are inserted in one batch. The active leaf is the most recent
   leaf under `activeLeafId` (default: the last message). Body limit 20 MB (imports), <= 2000 messages.
-- `projectId` puts the new chat in a project (ADR-031).
+- `projectId` puts the new chat in a project (ADR-031); an import never takes a project from the uploaded export.
 - Response `201 ChatDetail`. Emits `chat.created`.
-- Errors: `404 not_found` (unknown `projectId`); `409 conflict` (`reason: 'exists'`, `chatId`: the chat id is already
-  used); `400 validation_error`
+- Errors: `404 not_found` (unknown `projectId`, "Project <id> not found."; nothing is written); `409 conflict`
+  (`reason: 'exists'`, `chatId`: the chat id is already used; checked first); `400 validation_error`
   (`details.issues[].path` names the field: `parentIds` for a count that differs from `messages`,
   `['parentIds', i]` for a parent that is not an earlier message, `['messages', i, 'id']` for a repeated id when
   `parentIds` is sent, `activeLeafId` for an id that is not in `messages`, `['messages', i, ...]` for a message that
@@ -1830,9 +1901,12 @@ body exceeds its limit; `500 internal_error`.
 - Response `200 ChatSummary`. Emits `chat.updated`. A `title` sets `titleSource: 'user'` (never overwritten by
   auto titles).
 - `projectId` moves the chat (ADR-031): a project id puts it in that project, `null` takes it out. The next run uses
-  the new project's folder and instructions; the messages are unchanged.
-- Errors: `404 not_found` (unknown chat, or unknown `projectId`); `409 conflict` (`reason: 'run-active'`, `chatId`)
-  when `projectId` is sent while a run holds the chat.
+  the new project's folder and instructions; the messages are unchanged. Like every `PATCH` of a chat, a move keeps
+  `updatedAt` (the chat keeps its place in the list). The project is checked by the update itself (`UPDATE … WHERE
+  EXISTS`), so a project deleted meanwhile leaves no dangling id.
+- Errors: `404 not_found` (unknown chat; or unknown `projectId`, "Project <id> not found.": the whole patch is dropped,
+  its other keys included); `409 conflict` (`reason: 'run-active'`, `chatId`) whenever `projectId` is in the patch
+  (also `null`) while a run holds the chat, in any phase: nothing of the patch is applied.
 
 **`DELETE /chats/:id`** — `chats.remove`
 - Params `{ id: ChatId }`.
@@ -1902,7 +1976,9 @@ body exceeds its limit; `500 internal_error`.
   JSON error responses: `400 provider_not_configured` (action `configure-provider`); `404 not_found` (`parentId` or
   `messageId` not in the chat, or a continuation that is not the active leaf); `409 conflict` (`reason: 'run-active'`,
   `chatId`; `reason: 'exists'` when the new user message id is already stored; `reason: 'stale'`, `chatId`, when the
-  run was stopped (Stop, delete-all, shutdown) before its history was stored); `400 validation_error` (including
+  run was stopped (Stop, delete-all, shutdown) before its history was stored; `reason: 'busy'` while a master-key
+  rotation runs, checked before anything is written: "The server is rotating its encryption key. Try again in a
+  moment.", section 5.23); `400 validation_error` (including
   `validateUIMessages` failures, file parts whose `url` is not `/api/files/<id>`, a user message sent with
   `messageId` (issue path `messageId`), `parentId` on a regenerate or a continuation (`parentId`), a regenerate with
   no user message to answer (`messageId`: an empty chat, or a target whose previous message is not a user message),
@@ -1912,11 +1988,13 @@ body exceeds its limit; `500 internal_error`.
   mode and effort are updated, so the web can send the same text again under a new message id.
 - Projects (ADR-031): `projectId` is honored only by the request that creates the chat: an unknown project is
   `404 not_found` before the chat row exists; for an existing chat it is ignored. In a chat with a project, every
-  chat-model run opens the project folder (section 4.20): the workspace tools are offered (`shell` only while
-  `HF_WORKSPACE_SHELL` is not `0`), `ToolCallContext.workspace` is set for every tool, the instructions gain the
-  workspace block, the project file and the project instructions, and the run uses `projectMaxSteps`. A folder that
-  cannot be opened gives the notice `workspace-unavailable` and a run without workspace tools; a chat without a
-  project is never offered a tool that declares `workspace`.
+  chat-model run opens the project folder (section 4.20; not image turns, not the reply of a slash command that
+  answers without the model): the workspace tools are offered (`shell` and every other `execute` tool only while
+  `HF_WORKSPACE_SHELL` is not `0`), `ToolCallContext.workspace` is set for every tool of the run (policy functions
+  receive it too; hooks get no project data), the instructions gain the workspace block, the project file and the
+  project instructions, and the run uses `projectMaxSteps`. A folder that cannot be opened gives the warning notice
+  `workspace-unavailable` (on every such run) and a run without workspace tools, still with `projectMaxSteps`; a chat
+  without a project is never offered a tool that declares `workspace`.
 - `toolMode: 'edits'` (Accept edits, ADR-032): approvals follow the table of section 6.7.
 - Images (ADR-028, section 4.18): the catalog kind of `modelRef` decides. A model of `kind: 'image'` makes the request
   an **image turn** (no history is sent; the prompt and the input images as in section 4.18); the reply streams one
@@ -2220,8 +2298,9 @@ Additional guards (all `400 validation_error`):
 ### 5.19 `data.ts`
 
 Bulk data (ADR-024, formats in section 4.16) and the orphaned file cleanup (ADR-035). Maintenance operations run one at
-a time: an import, delete-all, file cleanup or key rotation (section 5.23) started while another one runs gets
-`409 conflict` (`reason: 'busy'`). No new event types: the chat events of section 7 report the changes.
+a time: an import, delete-all, file cleanup (its preview included) or key rotation (section 5.23) started while another
+one runs gets `409 conflict` (`reason: 'busy'`, "Another data task is running. Try again when it finishes."). No new
+event types: the chat events of section 7 report the changes.
 
 **`GET /data`** — `data.summary`
 - Response `200 DataSummary` (what a backup contains and what delete-all removes).
@@ -2282,19 +2361,25 @@ a time: an import, delete-all, file cleanup or key rotation (section 5.23) start
 - Errors: `403 forbidden` (fresh auth missing, `action: 'login'`); `409 conflict` (`reason: 'busy'`).
 
 **`GET /data/cleanup`** — `data.cleanupPreview`
-- A dry run of `POST /data/cleanup` (ADR-035): reads every reference, deletes nothing. `GET /data` stays cheap and does
-  not scan.
-- Response `200 DataCleanupPreview`.
+- A dry run of `POST /data/cleanup` (ADR-035): reads every reference, deletes nothing, writes nothing (`lastRunAt`
+  stays). It skips the DELETE re-check of a real run (below), so it may count a file that a message committed after
+  the scan keeps. `GET /data` stays cheap and does not scan.
+- Response `200 DataCleanupPreview` (count meanings in section 4.16).
 - Errors: `409 conflict` (`reason: 'busy'`).
 
 **`POST /data/cleanup`** — `data.cleanup`
 - No body. Manual only (no automatic sweep: a deletion cannot be undone).
-- Removes the file rows that nothing references and that are older than 24 hours (`graceMs`), then every blob no row
-  keeps and stale temp files. References are file ids (`file_` + 16 chars) found anywhere in message parts and
-  metadata, share snapshots, plugin storage and settings, chat settings and projects (a loose scan: it may keep an
-  extra file, never removes a referenced one). Files used by a run that is still writing its reply are kept. Deleting a
-  chat or a message version leaves its files in place until the next cleanup.
-- Response `200 DataCleanupResult`. Emits no event.
+- Removes the file rows that nothing references and that are older than 24 hours (`graceMs`), then the leftover blobs
+  that no row has (older than 24 hours) and temp files of interrupted uploads older than 1 hour. A blob of a removed
+  row is unlinked only when no other row shares it (identical uploads share one blob). References are file ids
+  (`file_` + 16 letters or digits) found anywhere in message parts and metadata, share snapshots and their file lists,
+  plugin storage (keys and values) and plugin settings, settings, chat settings and projects (a loose scan: it may keep
+  an extra file, never removes a referenced one). The DELETE re-checks the message references, so a message committed
+  after the scan keeps its file; files returned by an upload, import or image generation within the last 24 hours are
+  pinned in memory and kept (`recentFiles`). Deleting a chat or a message version leaves its files in place until the
+  next cleanup.
+- Response `200 DataCleanupResult`; `ranAt` is stored as the next preview's `lastRunAt`. One info log line with the
+  counts (no ids, names or paths). Emits no event.
 - Errors: `409 conflict` (`reason: 'busy'`).
 
 ### 5.20 `shares.ts`
@@ -2430,11 +2515,20 @@ Common rules:
 Projects (ADR-031, DTOs in section 4.20). Every route needs a session; adding a project also needs fresh auth (it gives
 the session file and shell access to a folder), the other routes do not. Every change emits `project.changed`.
 
-Common path errors (create and browse): `400 validation_error` on `['path']` for a folder outside every allowed root
-("Choose a folder inside the workspace folders.") and for a folder that equals, contains or sits inside the data
-directory ("This folder contains the harness-forge data directory."; to use harness-forge on its own repository, set
-`HF_DATA_DIR` outside it); `404 not_found` for a folder that does not exist (also a dangling link) or is not a
-directory.
+Common path errors (create and browse): the path is resolved to its canonical realpath first.
+- `404 not_found` for a folder that does not exist, also a dangling link or a path through a file ("The folder <path>
+  does not exist.").
+- `400 validation_error` on `['path']` with the message as the issue: a relative path ("Use an absolute folder
+  path."); a path that is not a directory, e.g. a file ("This path is not a folder."); a folder outside every allowed
+  root ("Choose a folder inside the workspace folders."; `/etc` with the default root); a folder that cannot be read
+  ("This folder cannot be accessed (permission denied)."); a symbolic link loop ("This path goes through a symbolic
+  link loop."); a path the system refuses as too long ("This path is too long.").
+- `400 validation_error` on `['path']` for a folder that overlaps the data directory (the subtree of the default root
+  `<dataDir>/workspaces` excepted): "This folder is inside the harness-forge data directory." (a folder inside it) or
+  "This folder contains the harness-forge data directory." (the data directory itself or a folder that contains it;
+  to use harness-forge on its own repository, set `HF_DATA_DIR` outside it). Browsing a folder that contains the data
+  directory is allowed (the data directory is not listed); with `newFolder`, the parent may contain it too, while the
+  new folder itself must not overlap it.
 
 **`GET /projects`** — `projects.list`
 - Response `200 ListResponse<ProjectSummary>` sorted by name: every project with `available`, `issue`,
@@ -2446,25 +2540,30 @@ directory.
 - Response `201 ProjectSummary`. Emits `project.changed`.
 - Errors: the common path errors; `409 conflict` (`reason: 'exists'`) when a project already uses the folder ("A project
   for this folder already exists.") or the new folder already exists ("A folder with this name already exists."; a
-  folder created by a failed request is removed again); `400 validation_error` when the server already has
-  `LIMITS.projectsMax` (200) projects; `403 forbidden` (fresh auth missing, `action: 'login'`).
+  folder created by a failed request is removed again while it is still empty); `400 validation_error` on `['path']`
+  when the new folder cannot be created ("The folder cannot be created here (permission denied).", "The folder name
+  is too long.") or the server already has `LIMITS.projectsMax` (200) projects ("A server can have up to 200
+  projects."); `403 forbidden` (fresh auth missing, `action: 'login'`; checked before the folder is touched).
 
 **`PATCH /projects/:id`** — `projects.update`
 - Params `ProjectParams`. Body `ProjectUpdate` (`name`, `instructions`; the folder never changes).
 - Response `200 ProjectSummary`. Emits `project.changed`.
-- Errors: `404 not_found` (unknown project).
+- Errors: `404 not_found` (unknown project, "Project <id> not found.").
 
 **`DELETE /projects/:id`** — `projects.remove`
 - Params `ProjectParams`. Detaches every chat of the project (their `projectId` becomes null) and deletes the project in
   one transaction; the folder and its files are never touched.
 - Response `204`. Emits one `project.changed` with `project: null` (no `chat.updated` per detached chat: clients clear
   `projectId` themselves).
-- Errors: `404 not_found`; `409 conflict` (`reason: 'run-active'`, `chatId`) while a chat of the project runs.
+- Errors: `404 not_found`; `409 conflict` (`reason: 'run-active'`, `chatId`: the running chat) while a chat of the
+  project runs ("A chat of this project is running. Stop it first, then try again.").
 
 **`GET /projects/browse?path=`** — `projects.browse`
-- Query `ProjectBrowseQuery`. Without `path`: the roots only (`path: null`, no entries). With `path`: its subfolders
-  (directories only; symbolic links, dot folders, `node_modules` and the data directory are not listed), sorted by
-  name, at most 500 (`truncated`), each with the `projectId` of a project that already uses it.
+- Query `ProjectBrowseQuery`. Without `path`: the roots only (`path: null`, `parent: null`, no entries), each with
+  `available`. With `path`: its subfolders (directories only; symbolic links, dot folders, `node_modules`, the data
+  directory and names with control characters are not listed), in natural, case-insensitive name order (`app2` before
+  `app10`), at most 500 (`truncated`), each with the `projectId` of a project that already uses it; `parent` is null
+  at a root.
 - Response `200 ProjectBrowse`.
 - Errors: the common path errors.
 
@@ -2474,21 +2573,27 @@ Master key (ADR-034, DTOs in section 4.22). Both routes need a session; a rotati
 confirmation.
 
 **`GET /keys`** — `keys.get`
-- Response `200 KeyStatus` (never the key).
+- Response `200 KeyStatus` (never the key). Read-only: it never writes `_keys` (section 4.22); during a rotation it
+  answers once the new key is in place.
 
 **`POST /keys/rotate`** — `keys.rotate` · **fresh**
-- Body `KeyRotateBody` (`confirm` must be the literal `ROTATE`).
-- Only for a key from `secret.key`. Stops every run, then re-encrypts every readable secret with a new key in one
-  transaction (unreadable secrets are left unchanged and counted), denies every pending tool approval ("Expired after a
-  key rotation.") and clears the pending-approval flags. A write-ahead `secret.key.next` keeps the new key safe until
-  it replaces `secret.key`; a crash in between is finished at the next boot.
+- Body `KeyRotateBody` (`confirm` must be the literal `ROTATE`; else `400 validation_error` on `['confirm']`).
+- Only for a key from `secret.key`. Checks in order: fresh auth, `confirm`, the key source (`env-key`), the maintenance
+  lock (`busy`; while the rotation runs, `POST /chat` answers `409 busy` too), the key check (`key-mismatch`). Then it
+  stops every run, re-encrypts every readable secret with a new random key in one transaction (unreadable secrets are
+  left unchanged and counted), denies every open tool approval ("Expired after a key rotation.") and clears the
+  pending-approval flags. A write-ahead `secret.key.next` (mode 0600) keeps the new key safe until it replaces
+  `secret.key`; a crash in between is finished at the next boot. One info log line with the counts, never key text.
 - Effects: every other session ends (the caller gets a new cookie and stays signed in and fresh); every share URL
   changes (owners copy the new links; the old URLs answer `404`); pending approvals are denied; runs were stopped;
   `key.rotated` is emitted, then every event stream closes. There is no downgrade to v1.2 after a rotation.
-- Response `200 KeyRotationResult` + `Set-Cookie: hf_session=...` (no cookie when no password is set).
-- Errors: `409 conflict` with `reason: 'env-key'` (the key comes from `HF_MASTER_KEY`: stop the server and run the
-  `rotate-key` CLI), `reason: 'key-mismatch'` (the key fails the stored key check: rotating would lose the secrets) or
-  `reason: 'busy'` (another maintenance operation runs); `403 forbidden` (fresh auth missing, `action: 'login'`).
+- Response `200 KeyRotationResult` + exactly one `Set-Cookie: hf_session=...` signed with the new key and keeping the
+  caller's login time, so it stays fresh (no cookie when no password is set).
+- Errors: `409 conflict` with `reason: 'env-key'` ("The master key comes from HF_MASTER_KEY and cannot be rotated
+  online. Stop the server and run "rotate-key" with HF_NEW_MASTER_KEY set (pnpm key:rotate)."), `reason:
+  'key-mismatch'` ("The master key in use does not match the key the secrets were written with; a rotation would lose
+  them. Restore the original key first.") or `reason: 'busy'` ("Another data task is running. Try again when it
+  finishes."); `403 forbidden` (fresh auth missing, `action: 'login'`).
 
 ## 6. Chat stream protocol
 
@@ -2736,7 +2841,7 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 | Event | Emitted when | `data` | Web reaction |
 |---|---|---|---|
 | `chat.created` | `POST /chats`, the first `POST /chat` for a new chat id, or `POST /data/import` (one per imported or copied chat) | `ChatSummary` | chats store: insert |
-| `chat.updated` | title generated or renamed, pin/archive/model/settings change, a message persisted, a branch switch (`POST /chats/:id/branch`), a version deleted (`DELETE /chats/:id/messages/:messageId`, also off the active path) | `ChatUpdatedData` (`ChatSummary` + `activeLeafId`) | chats store: patch and re-sort (without `activeLeafId`); an idle open chat whose shown path does not end at `activeLeafId` refetches it (bursts coalesce into one refetch; a `null` or unknown leaf triggers one refetch, then waits for a different leaf) |
+| `chat.updated` | title generated or renamed, pin/archive/model/settings change, a move to or out of a project (Phase 7), a message persisted, a branch switch (`POST /chats/:id/branch`), a version deleted (`DELETE /chats/:id/messages/:messageId`, also off the active path) | `ChatUpdatedData` (`ChatSummary` + `activeLeafId`) | chats store: patch and re-sort (without `activeLeafId`); an idle open chat whose shown path does not end at `activeLeafId` refetches it (bursts coalesce into one refetch; a `null` or unknown leaf triggers one refetch, then waits for a different leaf) |
 | `chat.deleted` | `DELETE /chats/:id`, or `POST /data/delete` (one per deleted chat) | `{ id }` | chats store: remove; leave `/chat/:id` if open |
 | `run.started` | a run acquired the chat | `RunStartedData` | running dot |
 | `run.finished` | run completed, aborted or failed; sent after the reply and the active leaf are stored | `RunFinishedData` | clear running; amber dot when `awaitingApproval` |
@@ -2745,7 +2850,7 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 | `plugin.changed` | install, uninstall, enable, disable, reload, trust, build, state change, MCP connection change | `{ id, plugin }` | plugins store: patch or remove; MCP panel refetches |
 | `plugin.log` | new plugin log entry (logger, guard failure, build output) | `{ pluginId, entry }` | Logs tab / build panel append |
 | `project.changed` | project created, renamed, instructions changed, deleted (Phase 7, ADR-031) | `ProjectChangedData` (`{ id, project }`, `project: null` = deleted) | projects store: patch or remove; on delete, chats of the project get `projectId: null` and a list filtered by it falls back to all chats |
-| `key.rotated` | master-key rotation finished (Phase 7, ADR-034); every stream closes right after it | `KeyRotatedData` (`{ keyVersion, rotatedAt, chatIds }`) | reload the chats store and the open chat when listed; toast; the closed stream reconnects (or the login page shows) |
+| `key.rotated` | master-key rotation finished (Phase 7, ADR-034); every stream closes right after it | `KeyRotatedData` (`{ keyVersion, rotatedAt, chatIds }`) | reload the chats store; every open chat listed in `chatIds` refetches; toast; the closed stream reconnects (or the login page shows) |
 
 Phase 7 adds `project.changed` and `key.rotated`; moving a chat to another project is a `chat.updated` (its summary
 carries `projectId`), the file cleanup emits nothing. Phases 5 and 6 add no event types: bulk import and delete-all

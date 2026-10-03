@@ -8,6 +8,7 @@ import type { PluginFilter } from '~/stores/plugins'
 import {
   BoxesIcon,
   CircleOffIcon,
+  FolderCodeIcon,
   LayoutGridIcon,
   PlugZapIcon,
   ServerIcon,
@@ -168,4 +169,5 @@ export const BUILTIN_PLUGIN_GLYPHS: Readonly<Record<string, Component>> = {
   'core-tools': WrenchIcon,
   'core-commands': SquareSlashIcon,
   'core-mcp': ServerIcon,
+  'core-workspace': FolderCodeIcon,
 }

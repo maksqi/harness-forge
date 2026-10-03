@@ -9,6 +9,7 @@ import type {
   ChatDetail,
   ChatSummary,
   CredentialValues,
+  HarnessUIMessage,
   ImageOptions,
   ProviderSummary,
   ReasoningEffort,
@@ -117,6 +118,18 @@ export interface SendChatInput {
   reasoningEffort?: ReasoningEffort
   /** Image options (docs/API.md 4.18): only for image models and chat models with image output. */
   imageOptions?: ImageOptions
+  /** The project of a new chat (Phase 7, ADR-031): honored only when this request creates the chat. */
+  projectId?: string
+}
+
+export interface AnswerApprovalsInput {
+  chatId: string
+  /** Allow (true) or deny (false) every pending approval of the chat's active leaf. */
+  approved: boolean
+  /** Default `mock:echo`; the model of the continuation (e.g. `mock:workspace`). */
+  modelRef?: string
+  /** Default `ask`. */
+  toolMode?: ToolMode
 }
 
 export interface RegenerateChatInput {
@@ -221,8 +234,8 @@ export class HarnessApi {
 
   // ---------- chats ----------
 
-  /** Creates an empty chat (a title set here counts as a user title). */
-  createChat(input: { id?: string, title?: string, modelRef?: string } = {}): Promise<ChatDetail> {
+  /** Creates an empty chat (a title set here counts as a user title; `projectId` puts it into a project, Phase 7). */
+  createChat(input: { id?: string, title?: string, modelRef?: string, projectId?: string } = {}): Promise<ChatDetail> {
     const { id = createChatId(), ...rest } = input
     return this.client.chats.create({ body: { id, ...rest } })
   }
@@ -278,10 +291,46 @@ export class HarnessApi {
         reasoningEffort: input.reasoningEffort ?? 'auto',
         toolMode: input.toolMode ?? 'ask',
         ...(input.imageOptions === undefined ? {} : { imageOptions: input.imageOptions }),
+        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
       },
     })
     const chunks = parseUiMessageStream(await response.text())
     return { chatId, userMessageId, chunks, text: streamText(chunks) }
+  }
+
+  /**
+   * Answers every pending tool approval of the chat's active leaf (the client side of `addToolApprovalResponse`, docs/API.md
+   * 6.2): the leaf assistant message goes back with its `approval-requested` parts marked `approval-responded`, as an
+   * approval continuation, and this resolves when the continued run finished (`userMessageId` = the answered message).
+   */
+  async answerApprovals(input: AnswerApprovalsInput): Promise<SendChatResult> {
+    const { chatId, approved } = input
+    const leaf = (await this.getChat(chatId)).messages.at(-1)
+    if (!leaf || leaf.role !== 'assistant')
+      throw new Error(`Chat ${chatId} does not end with an assistant message.`)
+    let pending = 0
+    const parts = leaf.parts.map((part) => {
+      const value = part as unknown as Record<string, unknown>
+      if (value.state !== 'approval-requested')
+        return part
+      pending += 1
+      return { ...value, state: 'approval-responded', approval: { ...(value.approval as object), approved } } as unknown as typeof part
+    })
+    if (pending === 0)
+      throw new Error(`Chat ${chatId} has no pending approval.`)
+    const message: HarnessUIMessage = { ...leaf, parts }
+    const response = await this.client.chat.send({
+      body: {
+        chatId,
+        message,
+        trigger: 'submit-message',
+        modelRef: input.modelRef ?? 'mock:echo',
+        reasoningEffort: 'auto',
+        toolMode: input.toolMode ?? 'ask',
+      },
+    })
+    const chunks = parseUiMessageStream(await response.text())
+    return { chatId, userMessageId: leaf.id, chunks, text: streamText(chunks) }
   }
 
   /**

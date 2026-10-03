@@ -10,10 +10,11 @@ flows, tables and security rules from `docs/ARCHITECTURE.md` (3, 5, 6.2, 6.13 �
 plugin API 1.2.0 and the builtin `core-workspace` from `docs/PLUGINS.md` (1, 9, 10); the `mock:workspace` model from
 `docs/PROVIDERS.md` (8); the user guide `docs/guides/using-projects.md`.
 
-**Status (2026-10-03):** P7-00 in progress: the math rendering tests are committed (`3af05be`); the Dependabot merges
-(#2 → #3 → #4) are pending. P7-0a has started: K1 is done (DECISIONS.md, ROADMAP.md, AGENT.md); C13 (contracts,
-API.md) and D7 (this file and the other docs) run in one launch. "Outcome" at the end of this file records what
-actually happens in each wave; the plan sections below are corrected where the implementation differs from the plan.
+**Status (2026-10-03):** P7-00 is done (the math tests as `0cc670e`; Dependabot #5, #6 and #4 merged, see
+"Deviations"); P7-0a (`9468f4f`), P7-0b (`bf61035`) and P7-A (`b4ff064`) passed their gates. P7-B (W7.14 feature e2e
+specs, W7.15 docs) and the final gate are done: Phase 7 shipped as v1.3. "Deviations from the plan" lists where
+the build differs from the plan sections below (those are kept as planned); "Outcome" at the end of this file is
+written by the coordinator at the final gate.
 
 ## Goal
 
@@ -93,7 +94,7 @@ Manual acceptance (coordinator, `HF_MOCK_PROVIDER=1 pnpm dev`):
 - Move a chat out of the project; delete the project (the chats stay, the folder stays).
 - Settings → Data → Rotate key… (typed `ROTATE`) → another browser is signed out and the share link changes; Storage
   cleanup: preview, then remove.
-- Math renders in dark and light (the katex 0.18 merge).
+- Math renders in dark and light (the katex 0.19.0 merge, #4).
 - A v1.2 data directory boots on v1.3 with every chat, secret and share intact.
 
 With real keys (the user, optional): "Create hello.py that prints the date and run it" in a project chat.
@@ -184,6 +185,69 @@ Open points decided by D7 while writing the docs (the coordinator confirms or ch
 - `mock:workspace` behavior after a failed (not denied) workspace call is left to C14; PROVIDERS.md 8 records what is
   built.
 
+### Deviations found while building (P7-00 – P7-A)
+
+Recorded from the agent reports and the gates; the code and the reconciled docs (API.md, ARCHITECTURE.md, UI.md,
+PLUGINS.md, PROVIDERS.md, the guides) follow these, not the task text further down.
+
+- **P7-00**: Dependabot #2 and #3 were closed and replaced by #5 (ai-sdk group, 16 updates: `ai` 7.0.127,
+  `@ai-sdk/vue` 4.0.127, `@ai-sdk/provider` 4.0.21; `aac10a5`) and #6 (minor-and-patch group, 8 updates: hono 4.13.12,
+  `@hono/node-server` 2.1.3, the MCP SDK 1.31.0, lucide 1.49.0, markstream-vue 2.0.14, motion-v 2.5.1, shiki 4.5.0;
+  `121db32`); #4 is **katex 0.19.0** (not 0.18; worktree build, math unit and e2e green; `9341590`). Two new advisories
+  in the web build tooling without a patched release (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) are
+  listed in `auditConfig.ignoreGhsas` of `pnpm-workspace.yaml`.
+- **C13 extra shared names**: `LIMITS.stepsMax`, `WORKSPACE_TOOL_ACCESS`, `WORKSPACE_TOOL_SCHEMAS`,
+  `WORKSPACE_LIMITS.patternMaxChars`, `keySourceSchema`, `keyCheckSchema`, the aliases `ShellOutput` / `DiffHunk`, and
+  `projectParamsSchema` in `schemas/params.ts`.
+- **K3**: the v1.2 upgrade seed was made on the real v1.2 dist (`b5bb2ec`) before the P7-0a rebuild (equivalent
+  storage); its orphan is an upload that was never attached. `0004_projects.sql` = `CREATE TABLE projects`,
+  `CREATE UNIQUE INDEX projects_path_idx`, `ALTER TABLE chats ADD project_id`, `CREATE INDEX chats_project_idx` (no
+  table rebuild).
+- **Projects (W7.1)**: a path that exists but is not a folder is `400` on `['path']` ("This path is not a folder."; only
+  a missing folder or a dangling link is `404`); a folder inside the data dir answers "This folder is inside the
+  harness-forge data directory.", one around it "This folder contains the harness-forge data directory."; browse also
+  hides symbolic links and names with control characters, and sorts naturally; `ProjectSummary.available` is false
+  when the folder overlaps the data dir; `@file` lines of the project file expand only relative `.md` paths, at most 64
+  per file; a project file with a NUL byte in its first 8 KiB is skipped (the next name is tried); a cut project file
+  ends with "[The project file was cut at 32 KiB.]".
+- **Chats (W7.5)**: `PATCH /chats/:id` answers `409 run-active` whenever `projectId` is in the patch and the chat runs;
+  an unknown project is `404` and drops the whole patch; a move keeps `updatedAt` (and emits `chat.updated`); the list
+  filter pages with a row-value keyset `(updated_at, id) < (?, ?)` on `chats_project_idx`; an unknown project lists
+  nothing; `chats.ensure` does the unknown-project `404` of a chat request (the pipeline has no pre-check).
+- **Chat pipeline (W7.4)**: `openWorkspace` is skipped for image turns and for replies to slash commands that fail or
+  answer themselves; the `workspace-unavailable` warning notice comes on every run; `projectMaxSteps` applies whenever
+  the chat has a project, even when the folder failed to open; an unknown workspace access counts as `execute`; hooks
+  get no project data.
+- **Workspace files (W7.2)**: glob matching runs in the Worker too (a `*a*a…b` pattern hung the event loop); the
+  `.gitignore` rules stay on the main thread behind a heuristic ReDoS guard (lines with more than 3 `*` runs or over
+  512 characters are dropped; open risk); policies check the written path and, with a workspace, its resolved path (a
+  link to `.env` asks too); `totalLines` is null when more than 8 MiB remain.
+- **Shell (W7.3)**: background processes are stopped after the shell exits even when no pipe stayed open; every
+  control character is stripped (not only ANSI codes); the stored output is at most 60 KiB (the streams cut from the
+  middle in proportion, the command last); the model text adds "Terminated by signal SIG…" and "(empty)" for an empty
+  stdout; a refused `cwd` is `validation_error` on `['cwd']`.
+- **Media (W7.6)**: an unknown provider is `400 provider_not_configured` in every resolver, but
+  `GET /models?providerId=` and `POST /providers/:id/models/refresh` stay `404` (they do not go through a resolver);
+  `modelName` = the catalog name (an alias wins) else the model id, trimmed to 200 characters;
+  `ImageGenerationResult.modelName` stays optional (CCR rejected at Gate P7-A).
+- **Keys (W7.7)**: the server replaces an existing `server.lock` (with a warning when it names a live process or
+  another host) and never refuses to boot because of it; the recovery table also covers `_keys` absent (delete `.next`),
+  `_keys` invalid (keep `.next`) and env mode (ignore `.next` with a warning); `GET /keys` never writes `_keys`;
+  `pendingApprovals` counts messages, `approvalsExpired` counts tool parts; the CLI also rotates a key file (it
+  generates the key and ignores `HF_NEW_MASTER_KEY` with a warning), probes `::` as `::1`, skips the probe for
+  `HF_PORT=0`, and prefixes every stderr line with `harness-forge rotate-key:`.
+- **Cleanup (W7.8)**: `blobs` counts only rowless leftovers, `diskBytes` every byte freed; the dry run skips the DELETE
+  re-check (a preview may count a file the real run keeps); `plugin_kv.key` is scanned too; `purge` holds the exclusive
+  gate; the internal setting `_files` = `{ lastCleanup }`; the dead `busyError` of `data/limits.ts` is gone.
+- **Web (W7.9 – W7.13)**: `chats.byId` also returns summaries seen outside the visible list; non-frozen slots
+  `ChatGreeting` default (the new-chat picker), `ChatView` header (`projectId`) and empty (`{ projectId, setProject }`),
+  `DiffView` `stats` (+ `data-numbers="off"`), `FileList` `empty`, `WorkspaceToolBody` `raw`; `key.rotated` refreshes
+  every live session listed in `chatIds`; the Data page's e2e hooks are `data-slot` attributes (no new test ids).
+- **CCRs at Gate P7-A**: applied — the resolver comments of `S/providers/types.ts`, the `ChatEnsureInput.projectId`
+  comment of `S/services/chats/types.ts`, the `FileSweepResult` count comments of `S/services/files/types.ts`; rejected —
+  a required `ImageGenerationResult.modelName`; deferred to the backlog — the reuse path of `createFakeFilesService`
+  (neither pins nor gates; the real service does both).
+
 ## Rules for every Phase 7 agent
 
 - Read `AGENT.md` fully, your section of this file and the docs it names. Paths: `S` = `apps/server/src`,
@@ -267,15 +331,16 @@ No CCR is pre-approved for P7-A; the coordinator batches CCRs at Gate P7-A.
 
 ---
 
-## Wave P7-00 — stabilization start (in progress)
+## Wave P7-00 — stabilization start (done)
 
 The coordinator runs this before P7-0a closes; merges are authorized by the user's choice, local commits are pushed
 only when the user asks.
 
-1. **Math tests (done, `3af05be`)** — `W/components/chat/parts/markdown/math.test.ts` (the KaTeX `\frac{a}{b}`
+1. **Math tests (done, `0cc670e`; first committed as `3af05be` and rebased onto the merges)** — `W/components/chat/parts/markdown/math.test.ts` (the KaTeX `\frac{a}{b}`
    annotation, `mhchem` `\ce{H2O}`, the CSS import) and `e2e/specs/core/math.spec.ts` (`mock:echo`; MathML
    annotations present, no `katex-error`, the KaTeX font family), so the katex 0.18 bump has a guard.
-2. **Dependabot #2 (ai-sdk) → #3 (motion-v) → #4 (katex 0.18)**, one at a time: `gh pr comment N --body "@dependabot
+2. **Dependabot #2 (ai-sdk) → #3 (motion-v) → #4 (katex 0.18)** (as built: #2 and #3 were closed and replaced by #5
+   and #6, #4 became katex 0.19.0; see "Deviations"), one at a time: `gh pr comment N --body "@dependabot
    rebase"` → wait for a new head and `CLEAN` → check the diff for downgrades → `gh pr checks N --watch` → for #4 only:
    a worktree `.tmp/pr4`, `pnpm install --frozen-lockfile && pnpm build`, katex `exports` still allow
    `./dist/contrib/mhchem` and the CSS, a local math run on port 8897 → `gh pr merge N --squash --delete-branch` →
@@ -1415,12 +1480,23 @@ Launched only for red P7-A gate items (W7.16 server, W7.17 web), with the globs 
 
 ## Outcome
 
-Filled in as the waves finish (the gate results are copied from the ROADMAP wave log; "audit" is the ownership audit
-of `scripts/audit-ownership.mjs`).
+Phase 7 is done (v1.3). Gate results (copied from the ROADMAP wave log; "audit" is the ownership audit of
+`scripts/audit-ownership.mjs`):
 
 | Wave | Agents | Gate result | Commit |
 |---|---|---|---|
-| P7-00 | coordinator | math tests committed; Dependabot merges pending | `3af05be` |
+| P7-00 | coordinator | math tests (unit + e2e) green on katex 0.16 and on the PR #4 build (katex 0.19); Dependabot #5 (replaced #2), #6 (replaced #3) and #4 squash-merged on GitHub after green check / e2e / docker; two new build-tooling advisories ignored in `pnpm-workspace.yaml` | `aac10a5`, `121db32`, `9341590`, `0cc670e` |
+| P7-0a | coordinator (K1, K2), C13, D7 | audit ok (78 paths, 15 C13 compile-fix files accepted); 5195 tests; build ok; CSP 38/38; 9 new routes mounted (501 / 400); e2e 62; Docker image with bash + git | `9468f4f` |
+| P7-0b | coordinator (K3), C14, C15, C16 | audit ok (135 paths); `0004_projects` without a rebuild; 5424 tests; e2e 62; upgrade probe on a seeded v1.2 copy 15/15; FREEZE | `bf61035` |
+| P7-A | W7.1 – W7.13 | audit ok (218 paths, no frozen file touched); 6995 tests; e2e 62; probes 47/47; screenshots reviewed | `b4ff064` |
+| P7-B + final gate | W7.14, W7.15, coordinator | new e2e specs 3× green; docs reconciled; e2e 77 ×3 (chromium + mobile + tablet); real v1.2 → v1.3 upgrade from a `b5bb2ec` worktree 26/26 (incl. rotation and cleanup on upgraded data); Docker `rotate-key` round trip | `chore: final gate for harness-forge v1.3` |
+
+Fixes made by the coordinator at the gates: CCR comments in `providers/types.ts`, `chats/types.ts`, `files/types.ts`;
+`deps.test.ts` / `fakes.test.ts` updates; the approval card context (W7.10 follow-up); the approval checkbox hit area
+(40 px on coarse pointers; the `::after` hit area is inset from the 14 px padding box, so `-inset-[13px]`); a glyph for
+the Workspace tools plugin card; DECISIONS corrections from W7.15. Rejected / deferred: a required
+`ImageGenerationResult.modelName` (tests cover the fallback), pins in the legacy fake files service (ROADMAP backlog).
+No fix-up agent (W7.16 / W7.17) was needed. Not run: the live provider suite (paid; needs the user's keys).
 
 ---
 

@@ -2,7 +2,7 @@
 
 Playwright specs that drive the production build (`apps/web/.output/public` served by `apps/server/dist/main.mjs`)
 in Chromium with the dev-only `mock` provider (`HF_MOCK_PROVIDER=1`, docs/PROVIDERS.md 8), including its media models
-(images, speech to text, read-aloud). Tests tagged `@smoke` in their title run at every gate (`--grep @smoke`); every
+(images, speech to text, read-aloud) and `mock:workspace` (the workspace tools of a project chat, Phase 7). Tests tagged `@smoke` in their title run at every gate (`--grep @smoke`); every
 core test is.
 
 ```
@@ -10,11 +10,11 @@ e2e/
   helpers/            shared helpers (this file documents their API; keep it stable)
   specs/core/         core app: theme, navigation, chat, resume, keyboard, composer, settings, login (W2.6, W5.8),
                       branching, data (backup, delete-all, import), share links (W5.10), images, voice, versions,
-                      edit attachments (W6.12)
+                      edit attachments (W6.12), projects, workspace tools, key rotation and storage cleanup (W7.14)
   specs/plugins/      plugins tab, install, wizard, code plugins, MCP (W3.6)
-  specs/mobile/       phone layout, project `mobile` only (W5.8, W6.12)
-  specs/tablet/       touch tablet (icon rail), project `tablet` only (W6.12)
-  specs/screenshots/  screenshots for the visual review, opt-in with `E2E_SCREENSHOTS=1` (W5.8, W6.12)
+  specs/mobile/       phone layout, project `mobile` only (W5.8, W6.12, W7.14)
+  specs/tablet/       touch tablet (icon rail, Phase 7 controls), project `tablet` only (W6.12, W7.14)
+  specs/screenshots/  screenshots for the visual review, opt-in with `E2E_SCREENSHOTS=1` (W5.8, W6.12, W7.14)
   fixtures/           plugin fixtures used by the plugin specs (W3.6)
 ```
 
@@ -56,6 +56,7 @@ E2E_SCREENSHOTS=1 pnpm test:e2e --grep @screenshots
 | `E2E_AUTH_BASE_URL` | optional server started with `HF_PASSWORD`, used by the login and share specs; without it they start their own password server from `apps/server/dist/main.mjs` on a free port with a temporary data directory. The data spec never uses it: delete-all wipes every chat, so it always starts a server of its own |
 | `E2E_AUTH_PASSWORD` | password of `E2E_AUTH_BASE_URL` (default `secret`) |
 | `E2E_SCREENSHOTS` | `1` runs the `@screenshots` spec (otherwise its tests are skipped) |
+| `E2E_WORKSPACE_ROOT` | optional: the workspace root the Phase 7 specs create their project folders in; it must be one of the server's roots. Default: the first available root the server reports (`GET /api/projects/browse`), e.g. `<dataDir>/workspaces` |
 
 Specs assume a server with `HF_MOCK_PROVIDER=1`, no provider keys in its environment and no password. They may
 share one data directory across runs: every spec creates its own data (unique titles and texts from `uniqueId()`)
@@ -63,7 +64,10 @@ and restores any global state it changes (settings, provider switches, credentia
 the `cleanup` fixture, or in `finally` / `afterEach`. Prefer `cleanup`: it also runs after a timeout, when a
 `finally` block can no longer reach the API (the test's request context is closed by then). Anything that needs a
 password (login, share links, delete-all) runs on a second server from `startPasswordServer()`, never on the shared
-one; a spec that wipes data asks for a server of its own (`dedicated: true`).
+one; a spec that wipes data asks for a server of its own (`dedicated: true`). The Phase 7 specs create their project
+folders below the server's workspace root (`seedProject` / `seedWorkspaceFolder`, `workspace.ts`), with unique names, and
+remove the projects and the folders through `cleanup`; they run on the host of the server (the folders are written
+with Node's `fs`), never into a hard-coded `.tmp/e2e`.
 
 ## Core specs (`specs/core`)
 
@@ -86,6 +90,9 @@ one; a spec that wipes data asks for a server of its own (`dedicated: true`).
 | `images.spec.ts` | image generation (docs/UI.md 7.7, 7.16): `mock:image` from the picker's "Image models" group (`model-picker-group` `data-value="images"`), "Describe an image…", no effort / permission / context ring; `image-options-trigger` 16:9 and 2 images; a "slow" prompt shows `image-generating` (`data-count` 2, "Generating 2 images… Ns") until the gallery (`image-gallery` `data-count` 2, two `image-tile`s, `/api/files/` images of 320x180, no Copy or Read aloud); the stored reply has two file parts and `metadata.image`, never a `data:` URL; the lightbox (Previous disabled, Next focused, ArrowLeft, "1 / 2") and its same-origin Download (`image-download`, the stored file name, a PNG); Esc returns focus to the tile; Regenerate shows the placeholders again, then "2/2"; `mock:image-chat` (aspect ratio only, 3:2 → 318x212): text + a one-image gallery; `generate_image` with `mock:image-tool` (`imageModelRef` set through the API): the approval card, Allow → the tool row, the image below it, "Image tool result: 1 image(s)" |
 | `voice.spec.ts` | voice (docs/UI.md 7.17, 7.18, 9.9) with `transcriptionModelRef` / `speechModelRef` set through the API: type "Hello ", record until the timer shows 0:01 (the indicator replaces the left tools, Send disabled), Stop → one multipart request with the part `file` (`dictation.webm`, `audio/webm…`, the WebM magic) and "Hello This is a mock transcription." with the focus back in the textarea; Alt+V starts and stops; Esc in the textarea, Esc on the mic and the indicator's Cancel drop a recording without a request; without a model the mic's setup popover leads to `/settings/media`; read aloud: the request body `{ text }`, `playing` (`aria-pressed`, "Stop reading"), the natural end of a 2 s clip, a second reply stops the first, Stop and Esc → `idle`; Settings → Media: the image, speech-to-text and read-aloud selects list only their kind, the language, the voice suggestions (`mock-voice-a`, `mock-voice-b`) and the speed save, Test voice sends `{ text, modelRef, voice }`, plays and stops; everything survives a reload |
 | `versions.spec.ts` | version management (docs/UI.md 7.5, 14.1; ADR-030): "Delete this version" asks first (Cancel keeps every version and refocuses the button), "Delete version" shows the previous version (3 → 2 versions), announces "Version deleted" and focuses the switcher; down to one version: no switcher, focus on Copy; a remembered deep path (B'1 chosen under B, then an edit of A and back: B'1, not the newest B'2, also after a reload; deleting the edit returns to that path); two tabs: a switch in either tab and a deletion move the other one |
+| `projects.spec.ts` | projects (docs/UI.md 2.12, 2.13, 7.20, 9.10): the switcher's "Add project…" opens the Add dialog, the folder browser opens the workspace root (a root itself cannot be submitted) and a seeded folder (name = its basename), "Project added", the switcher filters by the new project ("No chats in {name} yet"), and the folder shows the disabled "Project" badge afterwards; Settings -> Projects: "New folder" (a leading dot is refused inline) creates the folder on disk, the row shows the path and "0 chats", the same new folder again is `409` "A folder with this name already exists."; the switcher filters All chats / No project / a project (path and chat count in the menu, `hf-project-filter` in `localStorage`, the new-chat pill defaults to the filter's project) and a reload keeps the filter; Accept edits (`permission-option` `edits`) in a project chat is saved with the chat and survives a reload; a chat moves into the project from the header menu (toast "Moved to {name}", the chip), Undo moves it back, the row menu moves it again, and the chip's "No project" moves it out ("Moved out of {name}") and off a filtered list; deleting a project (confirm "Delete {name}?", "Project deleted") keeps its chat (no project) and its folder with its files |
+| `workspace-tools.spec.ts` | `mock:workspace` in a project chat (docs/UI.md 2.14, 7.3, 7.19): in `ask` the write card previews the new file ("Create or overwrite mock-workspace.txt · 1 line", "Accept all edits in this chat", no "Always allow"), the edit card previews the diff, the edit row reads `+1 −1` (U+2212, `data-tone` success) and the write row "New · 1 line"; the shell card ("Run this command?", "Approval needed: run cat mock-workspace.txt", the server warning) has neither "Always allow" nor the accept-edits checkbox and its button reads Run; then "Workspace done: Hello from the workspace agent.", `exit 0`, the expanded diff (`diff-view` `modified`, `diff-line` del / add) and terminal (`terminal-output` `ok`, `$ cat mock-workspace.txt`, stdout, "Exit code 0"), and the file on disk holds the edit; Accept edits: no write / edit card, the shell asks, Deny -> Denied + "The tool call was denied."; the checkbox switches the chat to `edits` (composer and server) and the edit runs without a card; a share link with tool details shows the row summaries and the diff on the share page |
+| `data-maintenance.spec.ts` | Settings -> Data maintenance (docs/UI.md 9.8) on a password server of its own (`dedicated: true`, a rotation changes every session): the Encryption key rows (file, version 1, Never, "1 encrypted"), the Rotate dialog's effects with the counts ("(1 link)", "(1 waiting)"), exactly ROTATE, the password prompt 11 minutes after the login, the toast "Master key rotated" with "1 secret encrypted again · 1 approval expired", version 2; this browser stays signed in, another session is signed out; the old share URL is unavailable and the new one opens the transcript; the pending `mock_approval_tool` approval shows Denied without a card; Storage cleanup: a rowless blob two days old in `<dataDir>/files/<aa>/` -> "1 leftover file on disk can be removed", Remove… asks ("This deletes 1 leftover file on disk."), "Removed 1 leftover file from disk", the re-check reads "No unused files." with "Last cleanup", and the blob is gone |
 | `edit-attachments.spec.ts` | attachments on edit (docs/UI.md 7.5, S8): the editor's chips (`message-edit-attachment`), "Remove {name}", the paperclip (`message-edit-attach`, Playwright's `filechooser` event: the hidden input has no test id) with an upload held by `page.route` (chip `uploading`, Send disabled and `aria-busy`), then Send: a new version with exactly the kept and the added file (UI, echo and server), the old version keeps its files; Cancel discards removals and uploads |
 
 ## Mobile specs (`specs/mobile`, project `mobile`)
@@ -98,6 +105,7 @@ full suite runs them, or `pnpm test:e2e --project=mobile`.
 | `shell.spec.ts` | the sidebar is a sheet (dialog on the left edge, narrower than the screen) opened by the header's `sidebar-trigger`, closed by a navigation; its rows are touch targets of at least 40x40 px |
 | `layout.spec.ts` | no sideways scroll at 390 px (`scrollWidth <= 390`) on `/`, a chat with wide markdown, `/plugins`, a plugin and every settings page; the composer inside the viewport on `/` and under a long transcript |
 | `chat.spec.ts` | the model picker is a bottom drawer (full width, on the bottom edge); a `mock:echo` reply streams and finishes; composer toolbar buttons and message actions are touch targets of at least 40x40 px |
+| `projects.spec.ts` | Phase 7 at 390 px: the new-chat project pill and its options are 40 px targets and a pick shows the project; the switcher is a 40 px row of the sheet, its menu fits the screen, a filter keeps the sheet open and filters the list; the header chip is icon-only (at most 44 px wide, named "Project: {name}") and a 40 px target; an expanded write diff whose removed line is long scrolls inside its own block (its scroller is wider than its box) and the page never scrolls sideways |
 | `media.spec.ts` | Phase 6 at 390 px: the mic is a 40x40 target; recording and transcribing keep the layout (no sideways scroll, the indicator and the composer inside the viewport) and the textarea gets no focus afterwards (touch); a four-image gallery keeps two columns inside the column; the lightbox fits the screen; the image options trigger, Read aloud, Delete this version and the version switcher are 40x40 targets (sizes are polled: a dialog zooms in from 95%) |
 
 ## Tablet specs (`specs/tablet`, project `tablet`)
@@ -106,7 +114,7 @@ docs/UI.md 14.5, 14.7 (S9), with the existing test ids; not tagged `@smoke` (`pn
 
 | Spec | Covers |
 |---|---|
-| `touch-targets.spec.ts` | `pointer: coarse` and the sidebar in the page (not a sheet); collapsed with its own trigger, the icon rail is 56 px wide (the page, `getByRole('main')`, starts at x = 56; the sidebar fills the rail inside its 1 px border) in the chat, plugins and settings modes, every visible button and link of the rail is at least 40x40 px and inside the rail; the rail's "Expand sidebar" expands it again |
+| `touch-targets.spec.ts` | `pointer: coarse` and the sidebar in the page (not a sheet); collapsed with its own trigger, the icon rail is 56 px wide (the page, `getByRole('main')`, starts at x = 56; the sidebar fills the rail inside its 1 px border) in the chat, plugins and settings modes, every visible button and link of the rail is at least 40x40 px and inside the rail (the project switcher and the Projects settings link among them); the rail's "Expand sidebar" expands it again; Phase 7: in a project chat with a pending `mock:workspace` approval the expanded sidebar's project switcher, the header chip and the card's Deny and Allow are 40x40 px targets. The "Accept all edits in this chat" checkbox check is a `test.fixme` (app bug: its hit area is about 30 px tall on touch) |
 
 ## Screenshots (`specs/screenshots`)
 
@@ -114,7 +122,11 @@ docs/UI.md 14.5, 14.7 (S9), with the existing test ids; not tagged `@smoke` (`pn
 from the build (`startServer`, fresh data directory, whatever `E2E_BASE_URL` says), creates a few chats (markdown,
 reasoning, tool result, pending approval, provider error, a chat whose first message and reply have two versions, a
 chat with an outdated share link that includes reasoning and tool details, and a chat of two `mock:image` turns: one
-16:9 image, then two variations of it), sets the image and speech-to-text models (no visible change elsewhere), and
+16:9 image, then two variations of it), Phase 7 data (two projects and a plain folder with subfolders below the server's
+workspace root; three `mock:workspace` chats in the `harness-forge` project: a finished auto run, a reply waiting for
+its edit approval (the write allowed through `answerApprovals`) and an Accept edits reply waiting for its shell
+approval; a two-day-old leftover blob in the file store), sets the image and speech-to-text models (no visible change
+elsewhere), and
 captures every screen in dark and light (stored color mode set by an init script), at 1440x900 and on a 390x844 phone
 (Pixel 7, touch), with reduced motion and a browser clock that starts at a fixed time two minutes after the seed
 (relative times read "2m ago"; the clock then runs, because a frozen clock stalls the transcript's scroll-to-bottom).
@@ -122,10 +134,14 @@ Files: `.tmp/screenshots/{dark,light}/<screen>-{desktop,mobile}.png`, for exampl
 `sidebar-mobile.png`. Screens: login, new-chat, chat, chat-reasoning, chat-tools, chat-approval, chat-error,
 chat-versions (the "‹ 2/2 ›" switchers), chat-delete-version (the "Delete this version?" dialog), chat-images (the
 galleries), chat-images-generating (a "slow" two-image turn in a chat of its own: the placeholder tiles),
-composer-recording (the recording indicator at 0:02), share-dialog, share-page, share-unavailable, model-picker,
+composer-recording (the recording indicator at 0:02), project-switcher (the menu open; on the phone inside the
+sheet), new-chat-project (the pill's menu), add-project (the Add dialog inside the plain folder), settings-projects,
+chat-edit-approval, chat-shell-approval, chat-diff (the edit row expanded; also the phone's diff), chat-terminal (the
+shell row expanded), share-dialog, share-page, share-unavailable, model-picker,
 command-palette, shortcuts (desktop), sidebar (mobile), plugins, plugin-detail, plugin-mcp, plugin-new-provider,
 plugin-new-code, settings-providers, settings-provider-key, settings-models, settings-media (every model chosen, voice
-and speed), settings-general, settings-appearance, settings-data (with the share link), settings-about,
+and speed), settings-general, settings-appearance, settings-data (with the share link), settings-data-key (the Encryption key
+section), settings-data-cleanup (after "Check for unused files": one leftover file), settings-about,
 chat-not-found, page-not-found. A screen that starts something undoes it in its `close` step after the picture (cancels the dialog or
 the recording, deletes its chat, turns read-aloud off again, puts the clock offset back), so the other screens look the
 same in every run; the image-turn screen runs the page clock at the real time while it is shown, because its
@@ -197,10 +213,11 @@ test('echoes a message @smoke', async ({ page, cleanup }) => {
 | `setProviderEnabled(id, enabled)` | `PATCH /api/providers/:id` |
 | `setCredentials(id, values)` / `clearCredentials(id)` | `PUT` / `DELETE /api/providers/:id/credentials` |
 | `disableUsableProviders()` | disables every usable provider (enabled, configured, with models); resolves to a `restore()` function |
-| `createChat({ id?, title?, modelRef? })` | `POST /api/chats` (a title here is a user title) |
+| `createChat({ id?, title?, modelRef?, projectId? })` | `POST /api/chats` (a title here is a user title; `projectId` puts the chat into a project) |
 | `getChat(id)` / `searchChats(q)` / `deleteChat(id)` | chat detail, `GET /api/chats?q=`, delete (404 ignored) |
 | `stopChat(id)` / `removeChat(id)` | `POST /api/chat/:id/stop` (resolves to whether a run was stopped); stop, then delete (for `cleanup`) |
-| `sendChat({ chatId?, text, parentId?, modelRef?, toolMode?, reasoningEffort?, imageOptions? })` | `POST /api/chat` (default `mock:echo`, `ask`, `auto`); resolves when the run finished with `{ chatId, userMessageId, chunks, text }`. `parentId`: omitted = the active leaf, `null` = a first message; an edit sends the parent of the edited message. `imageOptions` (`{ n?, aspectRatio?, editPrevious? }`) only with image models and chat models with image output, e.g. `{ modelRef: 'mock:image', imageOptions: { n: 2, aspectRatio: '16:9' } }` |
+| `sendChat({ chatId?, text, parentId?, modelRef?, toolMode?, reasoningEffort?, imageOptions?, projectId? })` | `POST /api/chat` (default `mock:echo`, `ask`, `auto`; `projectId` only when the request creates the chat); resolves when the run finished with `{ chatId, userMessageId, chunks, text }`. `parentId`: omitted = the active leaf, `null` = a first message; an edit sends the parent of the edited message. `imageOptions` (`{ n?, aspectRatio?, editPrevious? }`) only with image models and chat models with image output, e.g. `{ modelRef: 'mock:image', imageOptions: { n: 2, aspectRatio: '16:9' } }` |
+| `answerApprovals({ chatId, approved, modelRef?, toolMode? })` | answers every pending approval of the chat's active leaf (an approval continuation: the leaf goes back with its `approval-requested` parts marked `approval-responded`) and resolves like `sendChat` when the continued run finished; e.g. allow the write of `mock:workspace` so its edit asks next |
 | `regenerateChat({ chatId, messageId?, modelRef?, toolMode?, reasoningEffort?, imageOptions? })` | `POST /api/chat` with `regenerate-message`: a new version of the reply `messageId` (default: the active leaf); resolves like `sendChat` (`userMessageId` = the answered user message) |
 | `waitForChatTitle(id, timeout?)` | polls until the chat has a title and returns it |
 
@@ -213,7 +230,7 @@ Also exported: `requestFetch(context)` (a `fetch` over an `APIRequestContext`), 
 |---|---|
 | `openNewChat(page)` | `/`, waits for the greeting and an editable composer |
 | `selectModel(page, modelRef)` | picks `provider:model` in the composer's model picker and verifies the trigger |
-| `selectPermissionMode(page, mode)` | sets the composer's permission mode (`ask` / `auto` / `off`; only for models with tools) |
+| `selectPermissionMode(page, mode)` | sets the composer's permission mode (`ask` / `edits` / `auto` / `off`; only for models with tools, `edits` only in project chats) |
 | `sendMessage(page, text)` | fills the composer and clicks Send once it is ready |
 | `startChat(page, { modelRef, text })` | `openNewChat` + `selectModel` + `sendMessage`, then waits for `/chat/<id>`; returns the chat id |
 | `composer(page)` · `userMessages(page)` · `assistantMessages(page)` · `lastAssistantMessage(page)` | locators |
@@ -281,12 +298,23 @@ in text fields (Home / End scroll on macOS instead of moving the caret).
 | `multipartParts(body, contentType)` · `MultipartPart` | the parts of a `multipart/form-data` body: `name`, `filename?`, `contentType?`, `size`, `head` (the first 16 bytes) |
 | `recordRequests(page, method, path)` · `RequestLog` · `RecordedRequest` | records every matching request of the page from now on (`requests`: method, path, headers, `body` with file bytes; `jsonBodies()`), lets it through, `stop()` removes the route |
 
+### Workspace and projects (`workspace.ts`, Phase 7)
+
+| Export | Description |
+|---|---|
+| `workspaceRoot(api)` | the root the specs create folders in: `E2E_WORKSPACE_ROOT` (checked against the server's roots), else the first available root of `GET /api/projects/browse` |
+| `seedWorkspaceFolder(api, { prefix?, files? })` · `WorkspaceFolder` | a uniquely named folder (`<prefix>-<id>`, default prefix `demo`) below that root with optional files (relative paths, subfolders created): `{ root, name, path, remove() }` |
+| `seedProject(api, cleanup, { name?, prefix?, files? })` · `SeededProject` | a seeded folder plus a project for it (name default: the folder name), both undone through `cleanup` (the project first, then the folder): `{ project, folder }` |
+| `createProject(api, { name, path })` · `listProjects(api)` · `projectByPath(api, path)` | `POST /api/projects` (no password on the server, or a fresh session), the list, the project of a folder |
+| `removeProject(api, id)` · `removeProjectAt(api, path)` | delete a project (404 ignored; the folder stays), or the project of a folder if any (for projects created through the UI) |
+| `MOCK_WORKSPACE_FILE` · `MOCK_WORKSPACE_CONTENT` · `MOCK_WORKSPACE_EDITED` · `MOCK_WORKSPACE_COMMAND` · `MOCK_WORKSPACE_DONE` | what `mock:workspace` writes, edits, runs and answers |
+
 ### Other helpers
 
 | Export | Description |
 |---|---|
-| `startPasswordServer({ password?, dedicated?, label? })` | `{ baseURL, password, stop() }`: `E2E_AUTH_BASE_URL`, or a password-protected server started with `startServer` (`auth-server.ts`); `dedicated: true` always starts one with an empty data directory (for specs that wipe data); `label` names its temporary directory |
-| `startServer({ env?, label? })` | `{ baseURL, stop() }`: the build on a free port of 127.0.0.1 with a temporary data directory, `HF_MOCK_PROVIDER=1`, `HF_OFFLINE=1` and every provider key variable set empty (which also beats a repository `.env`); `stop()` removes the directory (`server.ts`) |
+| `startPasswordServer({ password?, dedicated?, label? })` | `{ baseURL, password, dataDir?, stop() }` (`dataDir` only for a started server): `E2E_AUTH_BASE_URL`, or a password-protected server started with `startServer` (`auth-server.ts`); `dedicated: true` always starts one with an empty data directory (for specs that wipe data); `label` names its temporary directory |
+| `startServer({ env?, label? })` | `{ baseURL, dataDir, stop() }`: the build on a free port of 127.0.0.1 with a temporary data directory (`dataDir`, a realpath; its workspace root is `<dataDir>/workspaces`), `HF_MOCK_PROVIDER=1`, `HF_OFFLINE=1` and every provider key variable set empty (which also beats a repository `.env`); `stop()` removes the directory (`server.ts`) |
 | `REPO_ROOT` | the repository root (`server.ts`) |
 | `uniqueId(prefix?)` · `wordList(count, prefix?)` · `firstWords(text, count)` | unique test data (`data.ts`) |
 | `looseQuotes(text)` | a RegExp matching `text` with straight or typographic quotes: assistant markdown renders `"a"` as `“a”` (`data.ts`) |
@@ -302,6 +330,12 @@ about 15 s),
 `Tool result: {"echoed":"<text>"}`, Deny -> `The tool call was denied.`), `mock:error` fails with `auth_invalid`
 (action `configure-provider`). Chat titles come from `mock:echo`: the first 8 words of the first message. Text files
 attached to a `mock:echo` message reach it inlined (`Attached file "<name>": <contents>`), so its echo names them.
+
+`mock:workspace` (Phase 7) walks through the workspace tools of a project chat: `write_file` `mock-workspace.txt` ("Hello
+from the mock agent."), `edit_file` ("mock agent" -> "workspace agent"), `shell` `cat mock-workspace.txt`, then
+`Workspace done: Hello from the workspace agent.`; in `ask` all three ask, in `edits` only the shell does, in `auto`
+none. Without a project it answers `Workspace tools are not available.`. A file that exists before makes the write an
+update (`+a −r`, the old lines in its diff); server diff lines are cut at `WORKSPACE_LIMITS.diffLineMaxChars`.
 
 Media models (Phase 6): `mock:image` (an image model in the picker's "Image models" group: 300 ms, 5 s when the prompt
 contains "slow", "fail" fails; solid-color PNGs with a 320 px long edge at the requested aspect ratio, square for Auto),

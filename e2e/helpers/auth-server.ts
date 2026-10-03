@@ -14,6 +14,8 @@ export interface PasswordServer {
   /** `http://127.0.0.1:<port>` */
   baseURL: string
   password: string
+  /** The data directory of a server this helper started (undefined for `E2E_AUTH_BASE_URL`). */
+  dataDir?: string
   /** Stops a server this helper started (no-op for `E2E_AUTH_BASE_URL`). */
   stop: () => Promise<void>
 }

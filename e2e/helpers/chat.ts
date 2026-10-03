@@ -1,6 +1,7 @@
 // UI helpers for the chat flow (docs/UI.md 2.1, 2.2, 7): open a new chat, pick a model in the composer, send, and find
 // messages. Every helper waits with web-first assertions, never with fixed sleeps.
 import type { Locator, Page } from '@playwright/test'
+import type { ToolMode } from '../../packages/shared/src/index.ts'
 import type { DataAttributes } from './locators.ts'
 import { expect } from '@playwright/test'
 import { byTestId, testIdSelector } from './locators.ts'
@@ -48,10 +49,10 @@ export async function selectModel(page: Page, modelRef: string): Promise<void> {
 }
 
 /**
- * Sets the composer's permission mode (`ask` | `auto` | `off`, docs/UI.md 7.11) and checks the trigger shows it. The
- * menu only exists when the selected model can call tools.
+ * Sets the composer's permission mode (`ask` | `edits` | `auto` | `off`, docs/UI.md 7.11) and checks the trigger shows
+ * it. The menu only exists when the selected model can call tools; Accept edits (`edits`, Phase 7) only in project chats.
  */
-export async function selectPermissionMode(page: Page, mode: 'ask' | 'auto' | 'off'): Promise<void> {
+export async function selectPermissionMode(page: Page, mode: ToolMode): Promise<void> {
   const trigger = composer(page).getByTestId(testIds.permissionMenuTrigger)
   await expect(trigger).toBeVisible()
   if (await trigger.getAttribute('data-value') === mode)

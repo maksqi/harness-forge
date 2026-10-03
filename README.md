@@ -7,22 +7,24 @@ of a project folder on your server. By default, every tool call that can change 
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **Status:** v1.3 in progress (Phase 7): projects and an agent workspace (file tools and a shell with approval, an
-> "Accept edits" permission mode, diffs and terminal output in the chat), master-key rotation and a storage cleanup.
-> The features marked "v1.3" below are being built and are not in a release yet. v1.2 added image generation and voice
-> (dictation and read-aloud) through your own providers, message versions that remember the path shown under them, can
-> be deleted and follow a switch in other open tabs, editing the attachments of a sent message, one password prompt for
-> every sensitive action, and 40 px touch targets on tablets. v1.1 added conversation branching, backup / restore /
-> delete-all, read-only share links, trusted reverse proxies and an opt-in live provider suite. Progress lives in
+> **Status:** v1.3. On top of v1.2 it adds projects and an agent workspace (file tools and a shell with approval, an
+> "Accept edits" permission mode, inline diffs and terminal output in the chat), master-key rotation (in the app or
+> with a CLI) and a storage cleanup with a preview. v1.2 added image generation and voice (dictation and read-aloud)
+> through your own providers, message versions that remember the path shown under them, can be deleted and follow a
+> switch in other open tabs, editing the attachments of a sent message, one password prompt for every sensitive action,
+> and 40 px touch targets on tablets. v1.1 added conversation branching, backup / restore / delete-all, read-only share
+> links, trusted reverse proxies and an opt-in live provider suite. Progress lives in
 > [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ![A chat reply with markdown, a table and a highlighted code block; the composer shows the model picker and the microphone button (dark theme)](docs/assets/screenshots/chat-dark.png)
 
+![A project chat: write_file and edit_file ran in Accept edits mode (+1 −1), the shell command waits for approval with Deny and Run (dark theme)](docs/assets/screenshots/workspace-dark.png)
+
 | Plugins | Provider wizard |
 |---|---|
-| ![The Plugins tab with the builtin plugins; Core tools lists current_time, web_fetch and generate_image](docs/assets/screenshots/plugins-dark.png) | ![The provider wizard, API step, with the LM Studio template](docs/assets/screenshots/provider-wizard-dark.png) |
+| ![The Plugins tab with the builtin plugins, including Core workspace with its file tools and the shell](docs/assets/screenshots/plugins-dark.png) | ![The provider wizard, API step, with the LM Studio template](docs/assets/screenshots/provider-wizard-dark.png) |
 | **Settings -> Providers** | **Light theme** |
-| ![Settings, providers with brand icons and status; the settings menu lists Media after Models](docs/assets/screenshots/settings-dark.png) | ![A tool call waiting for approval, in the light theme](docs/assets/screenshots/chat-light.png) |
+| ![Settings, providers with brand icons and status; the settings menu lists Media and Projects after Models](docs/assets/screenshots/settings-dark.png) | ![A tool call waiting for approval, in the light theme](docs/assets/screenshots/chat-light.png) |
 
 ## Features
 
@@ -35,14 +37,15 @@ desktop app, and it starts in dark mode.
     restores that whole path; an unwanted version can be deleted (with everything after it); other open tabs follow a
     switch.
   - Automatic chat titles, per-message token usage and cost, and a context-usage ring.
-- **Projects and the agent workspace** (v1.3):
+- **Projects and the agent workspace**:
   - A project is a folder on your server, inside the folders you allow (`HF_WORKSPACE_ROOTS`). Add one in
-    Settings -> Projects with a folder browser (or create a new folder there); a chat can belong to a project, and the
-    sidebar filters chats by project.
+    Settings -> Projects with a folder browser (or create a new folder there); a chat can belong to a project (pick it
+    for a new chat, or use "Move to project" later), and the project switcher at the top of the sidebar filters chats
+    by project.
   - In a project chat the model reads, searches and edits files (`read_file`, `list_directory`, `find_files`,
     `search_files`, `write_file`, `edit_file`) and runs shell commands (`shell`) in the project folder. Edits show as
-    diffs and commands as terminal output inside the tool rows; an `AGENTS.md` (or `CLAUDE.md`) in the folder joins the
-    instructions.
+    diffs (`+12 −3`) and commands as terminal output with the exit code inside the tool rows; an `AGENTS.md` (or
+    `CLAUDE.md`) in the folder joins the instructions, and project chats get more steps per reply (100 by default).
   - Approval cards preview the change (a diff, the file, the exact command). The "Accept edits" mode lets edits run
     without asking while shell commands still ask, and every shell command is approved on its own (no "Always allow").
   - Shell commands run in their own process group with a minimal environment, a timeout and capped output;
@@ -67,18 +70,19 @@ desktop app, and it starts in dark mode.
   - Recordings and the text read aloud pass through the server to the provider you picked and are never stored or
     logged.
 - **Your data** (Settings -> Data): back up every chat, with every version and attachment, to one zip file; restore it
-  here or on another server (existing chats are skipped or copied); or delete all chats at once. v1.3: remove the files
-  no chat uses anymore (a storage cleanup with a preview), and rotate the master key that encrypts your API keys (in the
-  app, or with `pnpm key:rotate` when the key comes from `HF_MASTER_KEY`).
+  here or on another server (existing chats are skipped or copied); or delete all chats at once. Remove the files
+  nothing uses anymore (a storage cleanup with a preview: attachments and generated images of deleted chats and
+  versions), and rotate the master key that encrypts your API keys (in the app, or with `pnpm key:rotate` when the key
+  comes from `HF_MASTER_KEY`).
 - **Share links**: publish a read-only snapshot of a chat at an unguessable link, choose whether reasoning, tool
   details and files and images are included, set an expiry date, update the snapshot or revoke the link at any time.
 - **Composer**:
   - A model picker with provider icons and capability badges, and an "Image models" group.
-  - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode (Ask, Auto, Off; v1.3: Accept
-    edits in project chats) for tools; image options (count, aspect ratio, edit the previous image) for image models.
+  - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode for tools (Ask, Accept edits in
+    project chats, Auto, Off); image options (count, aspect ratio, edit the previous image) for image models.
   - Slash commands: `/explain`, `/review`, `/fix`, `/translate`, `/proofread` and more, plus commands from plugins.
   - A microphone button for dictation.
-- **Sidebar and navigation**: a Chat | Plugins switch, a project switcher (v1.3), chats grouped by date with live status
+- **Sidebar and navigation**: a Chat | Plugins switch, a project switcher, chats grouped by date with live status
   dots (running, needs approval, unread), a Mod+K command palette, keyboard shortcuts, a Light / Dark / System theme toggle, and 40 px
   touch targets in the collapsed icon rail on tablets.
 - **Providers and models**:
@@ -94,10 +98,10 @@ desktop app, and it starts in dark mode.
   - Declarative provider plugins, built with a five-step wizard or written as `plugin.json`.
   - Code plugins (tools, providers, commands, hooks, MCP servers) from templates, edited and rebuilt in the browser.
     Plugin API 1.1.0 lets a code provider add image, speech-to-text and text-to-speech models, and a code tool
-    generate images; plugin API 1.2.0 (v1.3) lets a tool work on the chat's project folder.
+    generate images; plugin API 1.2.0 lets a tool work on the chat's project folder.
   - Install from a zip, npm, a URL with an integrity hash, or a local folder, with an explicit trust step for code.
 - **Tools and MCP**: MCP servers over stdio, Streamable HTTP and SSE. The builtin tools are `current_time`,
-  `web_fetch` (SSRF-guarded) and `generate_image`, plus the workspace tools of project chats (v1.3). Every tool has an
+  `web_fetch` (SSRF-guarded) and `generate_image`, plus the seven workspace tools of project chats. Every tool has an
   approval policy and a per-tool override.
 - **Self-hosting**: SQLite storage, one port, an optional password, a loopback-only bind unless you secure it,
   trusted reverse proxies (`HF_TRUST_PROXY`) so rate limits and Secure cookies see the real clients, and a Docker image
@@ -139,7 +143,8 @@ pnpm dev            # server on :8787 (tsx watch) + web on :3000 (nuxt dev, prox
 
 Open http://localhost:3000. Go to **Settings** -> **Providers**, add a key, press **Test**, then start a chat.
 `HF_MOCK_PROVIDER=1 pnpm dev` adds a keyless `mock` provider for trying the UI, with mock image, speech-to-text and
-text-to-speech models (pick them in Settings -> Media).
+text-to-speech models (pick them in Settings -> Media) and `mock:workspace`, which writes, edits and runs a file in a
+project chat.
 
 ### Production
 
@@ -178,7 +183,7 @@ The container runs as the unprivileged `node` user (uid 1000); a bind-mounted da
 it. Put a TLS reverse proxy in front before exposing it beyond your machine or LAN (see
 [Behind a reverse proxy](#behind-a-reverse-proxy)).
 
-### Projects (agent workspace, v1.3)
+### Projects (agent workspace)
 
 Projects live in `data/workspaces` (`/data/workspaces` in Docker) unless you allow other folders with
 `HF_WORKSPACE_ROOTS` (absolute paths, comma separated), for example `HF_WORKSPACE_ROOTS=/home/me/code`. In Docker,
@@ -203,8 +208,8 @@ Every variable is optional. [`.env.example`](.env.example) lists them with comme
 | `HF_PLUGIN_WATCH` | unset | `1` hot-reloads code plugins in the data directory when their files change (linked folders always reload) |
 | `HF_OFFLINE` | unset | `1` never downloads the models.dev catalog (the bundled snapshot is used) |
 | `HF_INSECURE` | unset | `1` allows a non-loopback bind without a password (only behind another authentication layer); it also disables the DNS-rebinding guard that restricts a password-less server to `localhost` host names |
-| `HF_WORKSPACE_ROOTS` | `<data dir>/workspaces` | folders that may hold project folders (v1.3): a comma list of absolute paths; a relative path, `/`, a missing folder, the data directory or a folder inside it (other than `<data dir>/workspaces`) stops the start. See [using projects](docs/guides/using-projects.md) |
-| `HF_WORKSPACE_SHELL` | `1` | `0` removes the `shell` tool from every chat (v1.3; the file tools keep working); no setting in the app can turn it back on |
+| `HF_WORKSPACE_ROOTS` | `<data dir>/workspaces` | folders that may hold project folders: a comma list of absolute paths; a relative path, `/`, a missing folder (or a file), the data directory or a folder inside it (other than `<data dir>/workspaces`) stops the start. See [using projects](docs/guides/using-projects.md) |
+| `HF_WORKSPACE_SHELL` | `1` | `0` removes the `shell` tool from every chat (the file tools keep working); no setting in the app can turn it back on |
 | `HF_TRUST_PROXY` | unset | reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` headers are trusted: a comma list of `loopback` (127.0.0.0/8, ::1), `private` (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7), IP addresses and CIDR ranges. `1`, `true`, `*` and other booleans, hop counts, `/0` ranges, `localhost` (write `loopback`) and unknown words stop the start with the format explained; `X-Forwarded-Host` is never used. Unset: `X-Forwarded-For` is ignored and `X-Forwarded-Proto` is honored from any peer (v1). See [Behind a reverse proxy](#behind-a-reverse-proxy) |
 | `HF_WEB_DIR` | `apps/web/.output/public` | directory of the built web app served in production |
 | `HF_API_TARGET` | `http://localhost:8787` | where `nuxt dev` proxies `/api` (development only) |
@@ -212,7 +217,8 @@ Every variable is optional. [`.env.example`](.env.example) lists them with comme
 | `<VENDOR>_API_KEY` | unset | provider key fallbacks, see [Supported providers](#supported-providers) |
 
 `HF_NEW_MASTER_KEY` is read only by the offline key rotation (`pnpm key:rotate` with the server stopped, when the key
-comes from `HF_MASTER_KEY`; v1.3): it holds the new key, which the CLI never generates or prints.
+comes from `HF_MASTER_KEY`): it holds the new key, which the CLI never generates or prints (with a key file the CLI
+generates the new key itself and ignores the variable). Exit codes and options: [using projects](docs/guides/using-projects.md#the-rotate-key-cli).
 
 A key saved in Settings wins over its environment variable; the key dialog shows which source is active ("From env").
 Flags accept `1` / `true` / `yes` / `on` and `0` / `false` / `no` / `off`; an empty value counts as unset, and any
@@ -277,19 +283,20 @@ harness-forge is built for **one user** on their own machine or server.
   [Behind a reverse proxy](#behind-a-reverse-proxy).
 - **Sessions and CSRF.** An HttpOnly, SameSite=Strict HMAC session cookie; state-changing requests must come from
   the same origin. With a password set, creating, installing, trusting, editing, building or reloading code plugins,
-  adding stdio MCP servers, changing the password, creating or updating share links and deleting all data require a
-  login within the last 10 minutes; when the last login is older, the app asks for the password once and then carries
+  adding stdio MCP servers, changing the password, creating or updating share links, adding a project, rotating the
+  master key and deleting all data require a login within the last 10 minutes; when the last login is older, the app asks for the password once and then carries
   out the action.
 - **Share links.** A link shows a sanitized snapshot of one conversation path: no instructions, errors, usage, costs
   or approvals; reasoning, tool details and files and images only when you include them. Its token is an HMAC that is
   never stored and never logged; revoking the link or changing the master key ends it, and every response carries
   `X-Robots-Tag: noindex, nofollow`.
 - **Backups.** The Settings -> Data zip never contains API keys, the password, plugins, MCP servers or projects.
-- **Projects, files and the shell** (v1.3). The workspace tools act on real files with the server's rights, and an
+- **Projects, files and the shell.** The workspace tools act on real files with the server's rights, and an
   approved shell command runs as the server's user; there is no sandbox inside harness-forge, so run it in Docker (or as
   a dedicated user) when the folders matter. Projects can only be created inside `HF_WORKSPACE_ROOTS`, never around the
   data directory, and adding one asks for the password. The file tools refuse paths outside the project (also through
-  symbolic links) and never write into `.git`; reading secret-looking files and writing hidden ones always ask; shell
+  symbolic links) and never write into `.git`; writing hidden or secret-looking files always asks, and reading
+  secret-looking files asks in Ask and Accept edits; shell
   commands get a minimal environment (no `HF_*` variables, no provider keys), their own process group, a timeout and no
   "Always allow". Anyone who can log in can approve shell commands: keep `HF_PASSWORD` set, or turn the shell off with
   `HF_WORKSPACE_SHELL=0`.
@@ -300,13 +307,14 @@ harness-forge is built for **one user** on their own machine or server.
   only to the provider you pick in Settings -> Media and are never stored or logged; generated images are stored as
   files like attachments, and a `data:` URL is never saved in a chat.
 - **Secrets.** Provider keys and plugin secrets are encrypted with AES-256-GCM under a master key from
-  `HF_MASTER_KEY` or `data/secret.key`. The API never returns a secret, and logs are redacted. v1.3: the master key can
-  be rotated (Settings -> Data -> Encryption key, or `pnpm key:rotate` for `HF_MASTER_KEY`); a rotation signs other
-  browsers out and changes every share link, and v1.2 cannot read the data afterwards.
+  `HF_MASTER_KEY` or `data/secret.key`. The API never returns a secret, and logs are redacted. The master key can be
+  rotated (Settings -> Data -> Encryption key, or `pnpm key:rotate` for `HF_MASTER_KEY`); a rotation signs other
+  browsers out, changes every share link and expires pending approvals, and v1.2 cannot read the data afterwards.
 - **Plugins.** Code plugins and stdio MCP servers run **with the full rights of the server process**. They load only
   after you trust their exact files (SHA-256 pin) and become untrusted again when those files change. Declarative
   plugins run no code. `HF_SAFE_MODE=1` starts with builtin plugins only.
-- **Tools.** Tool calls wait for approval in **Ask** mode, except tools marked safe. `web_fetch` reaches only public
+- **Tools.** Tool calls wait for approval in **Ask** mode, except tools marked safe; **Accept edits** also runs edits of
+  ordinary project files without asking. `web_fetch` reaches only public
   addresses (loopback only when you allow it in the Core tools settings), and every redirect is re-checked. Model
   output is rendered as escaped markdown, never as raw HTML.
 
@@ -428,7 +436,7 @@ on SQLite), and the TypeScript-only packages `packages/shared` (schemas, DTOs, r
 | `pnpm check` | check:english + lint + typecheck + test |
 | `pnpm db:generate` | drizzle-kit generate (after schema changes) |
 | `pnpm catalog:update` | refresh the bundled models.dev snapshot |
-| `pnpm key:rotate` | offline master-key rotation (v1.3; the server must be stopped; `HF_NEW_MASTER_KEY` = the new key when the key comes from `HF_MASTER_KEY`) |
+| `pnpm key:rotate` | offline master-key rotation (`rotate-key [--force]`; the server must be stopped; `HF_NEW_MASTER_KEY` = the new key when the key comes from `HF_MASTER_KEY`; exit codes 0 done, 1 failed, 2 refused) |
 
 All development happens on the `main` branch. CI (`.github/workflows/ci.yml`) runs `pnpm check`, the build with the
 built-page CSP test and the Playwright e2e suite, and the Docker image build on every push to `main` and on pull

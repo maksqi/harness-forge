@@ -6,11 +6,16 @@
 // (the "‹ 2/2 ›" switchers), the Share dialog with an outdated link, the shared chat page and its unavailable state,
 // and Settings -> Data with that link in its list. Phase 6 screens: a chat with generated images (galleries), an image
 // turn in flight (the placeholder tiles), the composer while it records, the "Delete this version?" dialog and
-// Settings -> Media with every model chosen. A screen that starts something (a run, a recording, a dialog, settings
-// only it needs) undoes it in `close`, so the other screens look the same in every run.
-import type { Page } from '@playwright/test'
+// Settings -> Media with every model chosen. Phase 7 screens: the project switcher open, the new-chat project picker,
+// the Add project dialog, Settings -> Projects, the edit and the shell approvals of `mock:workspace`, an expanded diff
+// (also on the phone), the terminal output of its shell step, and the Encryption key and Storage cleanup sections of
+// Settings -> Data (a leftover blob in the server's file store gives the cleanup something to count). A screen that
+// starts something (a run, a recording, a dialog, settings only it needs) undoes it in `close`, so the other screens
+// look the same in every run.
+import type { Locator, Page } from '@playwright/test'
 import type { StartedServer } from '../../helpers/index.ts'
-import { mkdir } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdir, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import process from 'node:process'
 import { devices } from '@playwright/test'
@@ -22,6 +27,7 @@ import {
   expectMessageStatus,
   HarnessApi,
   lastAssistantMessage,
+  MOCK_WORKSPACE_DONE,
   naturalSize,
   pressShortcut,
   REPO_ROOT,
@@ -29,6 +35,7 @@ import {
   startServer,
   test,
   testIds,
+  workspaceRoot,
 } from '../../helpers/index.ts'
 
 const ENABLED = process.env.E2E_SCREENSHOTS === '1'
@@ -53,6 +60,14 @@ interface Seed {
   sharePath: string
   /** Two image turns: one 16:9 image, then two variations of it (an edit). */
   images: string
+  /** The workspace root of the screenshot server. */
+  workspaceRoot: string
+  /** A `mock:workspace` run in auto mode: write, edit and shell rows, done. */
+  workspace: string
+  /** A `mock:workspace` reply that waits for the approval of its edit (the write was allowed). */
+  editApproval: string
+  /** A `mock:workspace` reply in Accept edits mode that waits for the approval of its shell command. */
+  shellApproval: string
   /** The screenshot server (API calls of the screens that start something). */
   baseURL: string
   /** The start of the browser clock: a little after the seed, so relative times read "2m ago". */
@@ -140,6 +155,24 @@ async function openSettings(page: Page, path: string, ready: (page: Page) => Pro
   await page.goto(path)
   await expect(page.getByTestId(testIds.pageHeader)).toBeVisible()
   await ready(page)
+}
+
+/** Below the 768 px sheet breakpoint (the phone run). */
+function isPhone(page: Page): boolean {
+  return (page.viewportSize()?.width ?? 1440) < 768
+}
+
+/** The tool row of a workspace tool in the last reply. */
+function workspaceRow(page: Page, toolName: string): Locator {
+  return byTestId(lastAssistantMessage(page), testIds.toolRow, { 'data-tool-name': toolName })
+}
+
+/** Expands a finished workspace tool row and returns its expanded body. */
+async function expandWorkspaceRow(page: Page, toolName: string): Promise<Locator> {
+  const row = workspaceRow(page, toolName)
+  await expect(row).toHaveAttribute('data-state', 'output-available')
+  await row.getByRole('button').click()
+  return row.locator('xpath=ancestor::*[@data-slot="tool-part"][1]').getByTestId(testIds.toolRowOutput)
 }
 
 const SCREENS: Screen[] = [
@@ -265,6 +298,80 @@ const SCREENS: Screen[] = [
     close: async (page) => {
       await composer(page).getByTestId(testIds.composerMicCancel).click()
       await expect(composer(page).getByTestId(testIds.composerMic)).toHaveAttribute('data-state', 'idle')
+    },
+  },
+  {
+    name: 'project-switcher',
+    open: async (page) => {
+      await openNewChatScreen(page)
+      if (isPhone(page))
+        await page.getByTestId(testIds.sidebarTrigger).click()
+      await page.getByTestId(testIds.projectSwitcher).click()
+      await expect(page.getByTestId(testIds.projectSwitcherOption)).toHaveCount(4)
+      await expect(page.getByTestId(testIds.projectManage)).toBeVisible()
+    },
+  },
+  {
+    name: 'new-chat-project',
+    open: async (page) => {
+      await openNewChatScreen(page)
+      await page.getByTestId(testIds.newChatProject).click()
+      await expect(page.getByTestId(testIds.projectOption)).toHaveCount(3)
+    },
+  },
+  {
+    name: 'add-project',
+    open: async (page, seed) => {
+      await page.goto('/settings/projects?add=1')
+      const dialog = page.getByTestId(testIds.addProjectDialog)
+      await expect(dialog).toBeVisible()
+      const browser = dialog.getByTestId(testIds.folderBrowser)
+      await byTestId(browser, testIds.folderBrowserEntry, { 'data-path': seed.workspaceRoot }).click()
+      await expect(browser).toHaveAttribute('data-path', seed.workspaceRoot)
+      await byTestId(browser, testIds.folderBrowserEntry, { 'data-path': join(seed.workspaceRoot, 'playground') }).click()
+      await expect(browser).toHaveAttribute('data-state', 'ready')
+      await expect(dialog.getByTestId(testIds.addProjectName)).toHaveValue('playground')
+    },
+  },
+  {
+    name: 'settings-projects',
+    open: page => openSettings(page, '/settings/projects', async (page) => {
+      await expect(page.getByTestId(testIds.projectRow)).toHaveCount(2)
+    }),
+  },
+  {
+    name: 'chat-edit-approval',
+    open: async (page, seed) => {
+      await openChat(page, seed.editApproval)
+      const card = byTestId(page, testIds.toolApproval, { 'data-tool-name': 'edit_file' })
+      await expect(card.getByTestId(testIds.diffView)).toBeVisible()
+      await expectTranscriptAtBottom(page)
+    },
+  },
+  {
+    name: 'chat-shell-approval',
+    open: async (page, seed) => {
+      await openChat(page, seed.shellApproval)
+      await expect(byTestId(page, testIds.toolApproval, { 'data-tool-name': 'shell' })).toContainText('Run this command?')
+      await expectTranscriptAtBottom(page)
+    },
+  },
+  {
+    name: 'chat-diff',
+    open: async (page, seed) => {
+      await openChat(page, seed.workspace)
+      const diff = (await expandWorkspaceRow(page, 'edit_file')).getByTestId(testIds.diffView)
+      await expect(diff).toBeVisible()
+      await diff.scrollIntoViewIfNeeded()
+    },
+  },
+  {
+    name: 'chat-terminal',
+    open: async (page, seed) => {
+      await openChat(page, seed.workspace)
+      const terminal = (await expandWorkspaceRow(page, 'shell')).getByTestId(testIds.terminalOutput)
+      await expect(terminal).toHaveAttribute('data-status', 'ok')
+      await terminal.scrollIntoViewIfNeeded()
     },
   },
   {
@@ -418,6 +525,24 @@ const SCREENS: Screen[] = [
     }),
   },
   {
+    name: 'settings-data-key',
+    open: page => openSettings(page, '/settings/data', async (page) => {
+      const section = page.getByTestId(testIds.dataKeySection)
+      await expect(section.locator('[data-slot="key-version"]')).toHaveText('1')
+      await section.scrollIntoViewIfNeeded()
+    }),
+  },
+  {
+    name: 'settings-data-cleanup',
+    open: page => openSettings(page, '/settings/data', async (page) => {
+      const section = page.getByTestId(testIds.dataCleanupSection)
+      await section.getByTestId(testIds.dataCleanupCheck).click()
+      await expect(section.getByTestId(testIds.dataCleanupSummary)).toHaveAttribute('data-state', 'removable')
+      await expect(section.getByTestId(testIds.dataCleanupRun)).toBeEnabled()
+      await section.scrollIntoViewIfNeeded()
+    }),
+  },
+  {
     name: 'settings-about',
     open: page => openSettings(page, '/settings/about', async (page) => {
       await expect(page.getByTestId(testIds.aboutCopyDiagnostics)).toBeVisible()
@@ -448,7 +573,34 @@ async function seed(server: StartedServer): Promise<Seed> {
     // The image and speech-to-text models change nothing on the other screens (the mic looks the same either way).
     await api.updateSettings({ displayName: 'Alex', defaultModelRef: 'mock:echo', imageModelRef: 'mock:image', transcriptionModelRef: 'mock:transcribe', ...NO_SPEECH_SETTINGS })
     const titled = async (title: string) => (await api.createChat({ title })).id
+    // Projects (Phase 7): two project folders and a plain folder (with subfolders) for the Add project dialog, below the
+    // server's workspace root.
+    const root = await workspaceRoot(api)
+    for (const folder of ['harness-forge/apps', 'harness-forge/packages', 'notes', 'playground/api', 'playground/scripts', 'playground/web'])
+      await mkdir(join(root, folder), { recursive: true })
+    const project = (await api.client.projects.create({ body: { name: 'harness-forge', path: join(root, 'harness-forge') } })).id
+    await api.client.projects.create({ body: { name: 'notes', path: join(root, 'notes') } })
+    const projectChat = async (title: string) => (await api.createChat({ title, projectId: project, modelRef: 'mock:workspace' })).id
+    const workspaceText = 'Change the greeting in mock-workspace.txt and print the file.'
     // Older chats first: the sidebar lists the newest on top.
+    const workspace = await projectChat('Update the greeting')
+    const done = await api.sendChat({ chatId: workspace, modelRef: 'mock:workspace', toolMode: 'auto', text: workspaceText })
+    if (done.text !== MOCK_WORKSPACE_DONE)
+      throw new Error(`mock:workspace answered ${JSON.stringify(done.text)}.`)
+    const editApproval = await projectChat('Edit the greeting (approval)')
+    await api.sendChat({ chatId: editApproval, modelRef: 'mock:workspace', toolMode: 'ask', text: workspaceText })
+    // Allow the write: the edit asks next.
+    await api.answerApprovals({ chatId: editApproval, approved: true, modelRef: 'mock:workspace', toolMode: 'ask' })
+    const shellApproval = await projectChat('Print the greeting (approval)')
+    await api.sendChat({ chatId: shellApproval, modelRef: 'mock:workspace', toolMode: 'edits', text: workspaceText })
+    // A rowless blob from two days ago: the storage cleanup counts it as a leftover file (its check is a dry run).
+    const blob = 'a leftover blob for the storage cleanup screen\n'
+    const sha256 = createHash('sha256').update(blob).digest('hex')
+    const shard = join(server.dataDir, 'files', sha256.slice(0, 2))
+    await mkdir(shard, { recursive: true })
+    await writeFile(join(shard, sha256), blob)
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    await utimes(join(shard, sha256), twoDaysAgo, twoDaysAgo)
     const shared = await titled('Session migration plan')
     await api.sendChat({ chatId: shared, modelRef: 'mock:reasoning', reasoningEffort: 'high', text: 'Why is a server session safer than a token in local storage?' })
     await api.sendChat({ chatId: shared, modelRef: 'mock:tool-approval', toolMode: 'auto', text: 'Echo "rotate the session cookie" with the tool.' })
@@ -477,7 +629,23 @@ async function seed(server: StartedServer): Promise<Seed> {
     await api.sendChat({ chatId: reasoning, modelRef: 'mock:reasoning', reasoningEffort: 'high', text: 'Why is a server session safer than a token in local storage for this app?' })
     const markdown = await titled('Refactor auth flow')
     await api.sendChat({ chatId: markdown, modelRef: 'mock:echo', toolMode: 'off', text: MARKDOWN })
-    return { markdown, reasoning, tools, approval, error, versions, shared, sharePath: share.path, images, baseURL: server.baseURL, now: Date.now() + 2 * 60_000 }
+    return {
+      markdown,
+      reasoning,
+      tools,
+      approval,
+      error,
+      versions,
+      shared,
+      sharePath: share.path,
+      images,
+      workspaceRoot: root,
+      workspace,
+      editApproval,
+      shellApproval,
+      baseURL: server.baseURL,
+      now: Date.now() + 2 * 60_000,
+    }
   }
   finally {
     await api.dispose()

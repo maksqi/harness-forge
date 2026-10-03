@@ -186,9 +186,9 @@ tools + a shell with approval), the Accept edits permission mode, master-key rot
   - [x] W7.9 projects-web · [ ] W7.10 chat-surface-web · [ ] W7.11 tool-ui-web · [ ] W7.12 composer-web
   - [x] W7.13 data-settings-web
   - [x] Gate + checkpoint commit
-- [ ] P7-B Feature e2e, docs, fix-ups, final gate
-  - [ ] W7.14 e2e-features · [ ] W7.15 docs-final (W7.16 / W7.17 fix-ups only if the P7-A gate is red)
-  - [ ] Final gate (e2e ×3, screenshots, audit, v1.2 → v1.3 upgrade) + checkpoint commit
+- [x] P7-B Feature e2e, docs, fix-ups, final gate
+  - [x] W7.14 e2e-features · [ ] W7.15 docs-final (W7.16 / W7.17 fix-ups only if the P7-A gate is red)
+  - [x] Final gate (e2e ×3, screenshots, audit, v1.2 → v1.3 upgrade) + checkpoint commit
 
 ## Backlog (not in v1.3)
 
@@ -199,7 +199,9 @@ verify Alt+V dictation on Firefox / Windows (Alt+J is the documented fallback) �
 `HF_LIVE_MEDIA=1` and record the results (PROVIDERS.md 11) · Phase 7 follow-ups: checkpoints / undo of workspace
 edits · a changes side panel (git status and diffs) · a command allowlist for the shell · OS-level sandboxing of the
 shell · an automatic file sweep · a persistent shell session (`cd` that sticks) · remove the two ignored audit
-advisories (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) once patched releases ship.
+advisories (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) once patched releases ship · screen-reader text
+for the tool row summaries · make the legacy fake files service pin and gate reused rows · `ImageGenerationResult.modelName`
+required (tests still cover the fallback) · `DiffView` props instead of the `stats` slot / `data-numbers` attribute.
 
 ## Wave log
 
@@ -228,3 +230,5 @@ advisories (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) once pat
 | P7-0a | coordinator (K1, K2), C13, D7 | audit ok (78 paths; 15 C13 compile-fix files accepted); frozen install ok; 5195 tests; build ok; CSP 38/38; 9 new routes mounted (501, 400 on invalid input; `pluginApiVersion` 1.2.0); e2e 62 passed (61 + math); Docker image builds with bash 5.3 + git 2.54 (uid 1000); `pnpm audit --prod` clean with the two ignored advisories | (this commit) |
 | P7-0b | coordinator (K3), C14, C15, C16 (+ coordinator: C14 test fixes for the new builtin plugin and mock model accepted) | audit ok (135 paths); `0004_projects` = CREATE TABLE + 2 indexes + ALTER ADD (no rebuild); 5424 tests; build ok; CSP 38/38; e2e 62 passed (fresh `.tmp/e2e`: `workspaces/` 0700 created); upgrade probe on a v1.2 copy (seeded on the real v1.2 dist) 15/15: 5 migrations, `_keys` written (version 1), secrets readable, branched path + attachment + pending approval + share intact, `projectId` null; FREEZE | (this commit) |
 | P7-A | W7.1 – W7.13 (+ coordinator: CCR comments in `providers/types.ts`, `chats/types.ts`, `files/types.ts`; `fakes.test.ts` + `deps.test.ts` updates; W7.10 follow-up for the approval context; `modelName` stays optional — tests cover the fallback; the legacy fake files service reuse path deferred) | audit ok (218 paths, no frozen file touched); 6995 tests; build ok; CSP 38/38; e2e 62 passed on a fresh `.tmp/e2e`; probes 47/47 (projects CRUD + browse limits + data-dir refusal, `mock:workspace` in auto / edits / ask, no project → no tools, `HF_WORKSPACE_SHELL=0`, missing folder → `workspace-unavailable`, delete detaches chats and keeps the folder, `modelName`, unknown provider 400, keys: 401 / rotate 200 with one cookie / old cookie 401 / old share 404 + new 200 / approval expired / key_version 2 / `.next` recovery / `server.lock` / env-mode 409 + CLI exit 2 then 0 + keyCheck ok / mismatch, cleanup recent → removable → removed); screenshots of the new screens reviewed (desktop + phone); `pnpm audit --prod` clean (2 ignored) | (this commit) |
+| P7-B | W7.14, W7.15 (+ coordinator: DECISIONS corrections from W7.15; the approval checkbox hit area 40 px on coarse pointers (found by W7.14, `pointer-coarse:after:-inset-[13px]`: the hit area is inset from the 14 px padding box); a `FolderCodeIcon` glyph for the builtin Workspace tools plugin card; README screenshots) | audit ok (25 paths); new specs (projects 5, workspace tools 4, data maintenance 2, mobile 2, tablet +2) green 3× on 8891; docs reconciled (API, ARCHITECTURE, UI, PLUGINS, PROVIDERS, guides, README "v1.3") | (final gate commit) |
+| Final gate v1.3 | coordinator | frozen install ok; 6995 tests; build ok; CSP 38/38; probes 47/47; e2e 77 passed ×3 (chromium + mobile + tablet); `@screenshots` dark + light reviewed (86 per theme), README images refreshed + a workspace image; `pnpm audit --prod` clean (2 ignored build-tooling advisories); real v1.2 → v1.3 upgrade (v1.2 built from `b5bb2ec` in a worktree, seeded with password, provider key, MCP header secret, branched chat, attachment, orphan upload, generated image, pending approval, share): 15/15 + 11 extra (rotation on upgraded data re-encrypts every secret, the v1.2 pending approval expires, cleanup removes only the orphan); Docker image (Node 24, bash 5.3, git 2.54): boot with `server.lock` + `workspaces/`, offline `rotate-key` in a second container exit 0, restart with the new key `keyVersion` 2 `keyCheck` ok. Live provider suite not run (needs the user's keys) | (this commit) |
