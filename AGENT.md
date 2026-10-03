@@ -79,6 +79,20 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   neutralized, a read-only command allowlist); the
   shell stays the only shell-string spawn. Shell rules (`shell_rules`, `srl_` ids) are matched by the shared parser
   `packages/shared/src/util/shell-command.ts`, which fails closed. The automatic file sweep (`fileSweep`) is opt-in.
+- **Plugin API 1.3.0** (Phase 9, additive): `ToolMode` gains `plan`; `ToolDefinition.execute` may be an async generator
+  (each yield is a preliminary output, the last one the final output). The template mirror follows.
+- **Agent 2.0** (Phase 9, ADR-040 … ADR-043): `prepareStep` (verified in `ai/dist/index.d.ts`) may return `messages`
+  (carried forward to later steps), `activeTools` and `instructions`; it runs before every model call incl. step 0.
+  One composer `apps/server/src/chat/steps.ts` runs, in order, the context guard (automatic compaction), the steer
+  injection and the sub-agent finalize nudge. Model history is built only by `apps/server/src/chat/model-history.ts`
+  (compaction → steer split → task output reduction → command expansions); history-derived state (`findCompaction`,
+  `compactionMarkers`, `splitSteers`, `latestTodos`) comes only from `packages/shared/src/util/agent-state.ts`, mention
+  parsing / ranking only from `packages/shared/src/util/mentions.ts`. New UI data parts: `data-compaction`,
+  `data-steer`, transient `data-activity`. Builtin plugin `core-agent` (`todo_write`, `exit_plan_mode`, `task`) reaches
+  server internals through the private side channel `apps/server/src/chat/agent-scope.ts`. Plan mode is enforced on the
+  server (tool set + approval). Sub-agents never create approval requests (a call that would ask is denied), depth 1.
+  The steer queue is in memory (`/chat/:id/queue`, SSE `queue.changed`). Tests use only mock models
+  (`MockLanguageModelV4`, `simulateReadableStream` from `ai/test`).
 - **@ai-sdk/vue 4**: use the `useChat()` composable (the `Chat` class is deprecated); `DefaultChatTransport` is
   imported from `ai`.
 - **MCP**: `createMCPClient` from `@ai-sdk/mcp`; stdio transport from `@ai-sdk/mcp/mcp-stdio`.
@@ -198,6 +212,12 @@ server, use your slot `k` from the task prompt: `HF_PORT=879k HF_DATA_DIR=.tmp/<
   the props / emits of the P8-0b stub components (`components/workspace/**`), `DiffView` props, the `workspace` and
   `shell-rules` stores, the `useChatSession` additions (`cwd`, `ToolApprovalDecision.allowRules`) and the Phase 8 test
   ids (see `docs/phases/phase-8-v1-4.md` "FREEZE in Phase 8").
+  Added in Phase 9 (after Gate P9-0b): `services/project-files/types.ts`, the P9-0b versions of `types.ts`,
+  `chat/types.ts` and the deps start / stop order, `chat/{steps,markers,model-history,agent-scope}.ts`,
+  `builtin-plugins/{index.ts,core-agent/index.ts}`, the mock models, `packages/shared/src/util/{agent-state,mentions}.ts`,
+  plugin SDK 1.3.0, the props / emits / root test ids of the P9-0b stub components, the `chat-queue` store, the
+  `useProjectFiles` / `useFileMentions` / `useModeCycle` signatures, the `useChatSession` additions and the Phase 9 test
+  ids (see `docs/phases/phase-9-v1-5.md` "FREEZE in Phase 9").
 - **CCR (contract change request)**: if a frozen contract blocks you, write a local adapter inside your owned
   paths, keep working, and add a CCR to your report: file, current shape, proposed shape, reason.
 - **DEPENDENCY REQUEST**: never install packages. Use existing dependencies or Node built-ins; if something is truly

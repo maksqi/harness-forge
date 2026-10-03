@@ -76,8 +76,8 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | `validation_error` | 400 | - | Request failed zod validation or a semantic check (`details.issues`). |
 | `unauthorized` | 401 | `login` | No valid session (or wrong password on `POST /auth/login`). |
 | `forbidden` | 403 | `login` when fresh auth is missing | Origin check failed, fresh auth missing, operation not allowed for this resource (builtin plugin, read-only source). |
-| `not_found` | 404 | - | Unknown route, chat, message, plugin, provider, file, tool, MCP server, icon, share link, project, shell rule or change batch, a file the chat never changed, or a missing project folder. Every failure of the public share routes is the same 404 (section 5.20). |
-| `conflict` | 409 | - | State conflict: a run is active for the chat (or for a chat of the project, also during a rewind, revert or undo), id already exists (also a project for the folder, the new folder, or a shell rule), stale file `baseEtag` (or a revert's `expectedSha`), password managed by `HF_PASSWORD`, another maintenance operation (import, delete-all, key rotation, file cleanup) is running, a chat request arrives during a key rotation, the message to delete is its only version, the master key comes from `HF_MASTER_KEY` or fails the key check. |
+| `not_found` | 404 | - | Unknown route, chat, message, plugin, provider, file, tool, MCP server, icon, share link, project, shell rule or change batch, a file the chat never changed, a missing project folder, or a message that is not queued (already delivered or started; Phase 9). Every failure of the public share routes is the same 404 (section 5.20). |
+| `conflict` | 409 | - | State conflict: a run is active for the chat (or for a chat of the project, also during a rewind, revert or undo), id already exists (also a project for the folder, the new folder, or a shell rule), stale file `baseEtag` (or a revert's `expectedSha`), password managed by `HF_PASSWORD`, another maintenance operation (import, delete-all, key rotation, file cleanup) is running, a chat request arrives during a key rotation, the message to delete is its only version, the master key comes from `HF_MASTER_KEY` or fails the key check, a message is queued for a chat with no active run and no pending approval, or the chat's queue is full (Phase 9). |
 | `payload_too_large` | 413 | - | Body, upload, zip, backup, recording, share snapshot or file over the limit (`details.limitBytes`; a backup with too many entries: `details.limitEntries`). |
 | `provider_not_configured` | 400 | `configure-provider` | Provider unknown/disabled or required credentials missing, wherever a model ref is resolved (chat, media routes, `ctx.ai`, `ctx.models.resolve`, `ctx.images`, `generate_image`; an unknown provider since Phase 7). Returned before any streaming. Routes that address a provider by id (`/providers/:id/...`, `GET /models?providerId=`, model prefs, custom models) answer `404 not_found` for an unknown one. |
 | `auth_invalid` | 502 | `configure-provider` | Provider rejected the credentials (upstream 401/403). |
@@ -88,7 +88,7 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | `provider_error` | 502 | `retry` | Any other upstream error (provider, MCP server, npm registry, install URL). |
 | `plugin_error` | 500 | - | Plugin code threw, timed out, or failed to load/build (`details.pluginId`). |
 | `internal_error` | 500 | `retry` | Unexpected server error (`details.requestId`). Message is generic; details are logged. |
-| `not_implemented` | 501 | - | Route and service stubs between a contract wave and the feature wave that implements them (the Phase 0 skeleton; in Phase 6 `audio.transcribe`, `audio.speech` and `chats.deleteMessage` from P6-0a until P6-A; in Phase 7 the five `projects` routes, `keys.get`, `keys.rotate`, `data.cleanupPreview` and `data.cleanup` from P7-0a until P7-A; in Phase 8 the seven `changes` routes and the three `shellRules` routes from P8-0a until P8-A). No route of a release answers it. |
+| `not_implemented` | 501 | - | Route and service stubs between a contract wave and the feature wave that implements them (the Phase 0 skeleton; in Phase 6 `audio.transcribe`, `audio.speech` and `chats.deleteMessage` from P6-0a until P6-A; in Phase 7 the five `projects` routes, `keys.get`, `keys.rotate`, `data.cleanupPreview` and `data.cleanup` from P7-0a until P7-A; in Phase 8 the seven `changes` routes and the three `shellRules` routes from P8-0a until P8-A; in Phase 9 the three `chatQueue` routes and the two `projectFiles` routes from P9-0a until P9-A, which validate their input first, so invalid input is still `400`). No route of a release answers it. |
 
 `HarnessErrorAction` = `configure-provider | refresh-models | login | retry`.
 
@@ -97,7 +97,7 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | Code | `details` shape |
 |---|---|
 | `validation_error` | `{ issues: Array<{ path: Array<string \| number>; message: string; code: string }> }` (zod issues, flattened) |
-| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy' \| 'only-version' \| 'env-key' \| 'key-mismatch', chatId?: string }` (`run-active`: a run holds the chat, or its active leaf moved during a version switch or delete, section 5.9, or a chat of the project runs while the project is deleted, or the chat runs while it is moved, sections 5.9 and 5.22, or a chat of the project runs during a rewind, revert or undo, section 5.24; `exists`: a chat or message id is already used, a project already uses the folder, the new folder exists, section 5.22, or the shell rule already exists, section 5.25; `stale`: a plugin file or package changed since it was read or reviewed, or a chat request was stopped before its history was stored, section 5.10, or the file to revert changed since the client read it (`expectedSha`), section 5.24; `busy`: another maintenance operation (import, delete-all, key rotation, file cleanup) is running, sections 5.19 and 5.23, or a chat request arrives while a key rotation runs, section 5.10; `only-version`: the message to delete has no other version, section 5.9; `env-key`: the master key comes from `HF_MASTER_KEY` and is rotated offline, section 5.23; `key-mismatch`: the master key fails the stored key check, section 5.23) |
+| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy' \| 'only-version' \| 'env-key' \| 'key-mismatch' \| 'run-idle' \| 'queue-full', chatId?: string }` (`run-active`: a run holds the chat, or its active leaf moved during a version switch or delete, section 5.9, or a chat of the project runs while the project is deleted, or the chat runs while it is moved, sections 5.9 and 5.22, or a chat of the project runs during a rewind, revert or undo, section 5.24; `exists`: a chat or message id is already used, a project already uses the folder, the new folder exists, section 5.22, or the shell rule already exists, section 5.25, or the id of a queued message is already queued or stored, section 5.26; `stale`: a plugin file or package changed since it was read or reviewed, or a chat request was stopped before its history was stored, section 5.10, or the file to revert changed since the client read it (`expectedSha`), section 5.24; `busy`: another maintenance operation (import, delete-all, key rotation, file cleanup) is running, sections 5.19 and 5.23, or a chat request arrives while a key rotation runs, section 5.10; `only-version`: the message to delete has no other version, section 5.9; `env-key`: the master key comes from `HF_MASTER_KEY` and is rotated offline, section 5.23; `key-mismatch`: the master key fails the stored key check, section 5.23; `run-idle` (Phase 9): a message was queued for a chat with no active run and no pending approval (send it with `POST /chat` instead), section 5.26; `queue-full` (Phase 9): the chat already has 10 queued messages, section 5.26) |
 | `payload_too_large` | `{ limitBytes: number }`, or `{ limitEntries: number }` when `GET /data/export` refuses a backup for its entry count (section 5.19) |
 | `plugin_error` | `{ pluginId: string; phase?: 'load' \| 'setup' \| 'dispose' \| 'hook' \| 'tool' \| 'build' \| 'install' }` |
 | `internal_error` | `{ requestId: string }` |
@@ -156,7 +156,7 @@ export type ApiResponseSpec = z.ZodType | 'empty' | 'sse' | 'ui-message-stream' 
 export type ApiModule =
   | 'health' | 'auth' | 'settings' | 'events' | 'providers' | 'credentials' | 'models' | 'icons' | 'chats'
   | 'chat' | 'files' | 'tools' | 'mcp' | 'commands' | 'plugins' | 'pluginInstall' | 'pluginDrafts' | 'pluginFiles'
-  | 'data' | 'audio' | 'projects' | 'keys' | 'changes' | 'shellRules' | 'shares'
+  | 'data' | 'audio' | 'projects' | 'keys' | 'changes' | 'shellRules' | 'chatQueue' | 'projectFiles' | 'shares'
 
 export interface ApiRouteDef {
   module: ApiModule         // = the key prefix; server route module file = kebab-case of it (plugin-install.ts)
@@ -194,10 +194,11 @@ Module names (camelCase of the server route module file): `health`, `auth`, `set
 `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`,
 `pluginInstall`, `pluginDrafts`, `pluginFiles`, `data`, `audio` (Phase 6, ADR-029), `projects` (Phase 7, ADR-031),
 `keys` (Phase 7, ADR-034), `changes` (Phase 8, ADR-036, ADR-037), `shellRules` (Phase 8, ADR-038; file
-`shell-rules.ts`), `shares` (`shares.ts` also serves the public `/share/:token` routes). Action verbs: `list`
+`shell-rules.ts`), `chatQueue` (Phase 9, ADR-042; file `chat-queue.ts`), `projectFiles` (Phase 9, ADR-042; file
+`project-files.ts`), `shares` (`shares.ts` also serves the public `/share/:token` routes). Action verbs: `list`
 (collection GET), `get` (item GET), `create`, `update`, `remove`, plus specific verbs (`test`, `refresh`, `stop`,
 `switchBranch`, `deleteMessage`, `deleteAll`, `transcribe`, `speech`, `browse`, `rotate`, `cleanupPreview`, `cleanup`,
-`diff`, `git`, `revert`, `undo`, `rewindPreview`, `rewind`, ...).
+`diff`, `git`, `revert`, `undo`, `rewindPreview`, `rewind`, `add`, `search`, `attach`, ...).
 
 ### 3.4 Client
 
@@ -232,7 +233,9 @@ Examples: `client.chats.list({ query: { q: 'foo' } })`, `client.chats.get({ para
 `client.keys.rotate({ body: { confirm: 'ROTATE' } })`, `client.data.cleanup()`,
 `client.changes.diff({ params: { id }, query: { source: 'git', path } })`,
 `client.changes.rewind({ params: { id }, body: { messageId, conflicts: 'skip' } })`,
-`client.shellRules.create({ body: { projectId, prefix: 'pnpm test' } })`.
+`client.shellRules.create({ body: { projectId, prefix: 'pnpm test' } })`,
+`client.chatQueue.add({ params: { id }, body: { message, modelRef, reasoningEffort, toolMode } })`,
+`client.projectFiles.search({ params: { id: projectId }, query: { q: 'pars' } })`.
 
 Behavior: sends `credentials: 'same-origin'`, `Accept: application/json`, `Content-Type: application/json` for JSON
 bodies; non-2xx -> throws `HarnessError` (from the envelope, `requestId` from `X-Request-Id`); a network failure or a
@@ -244,9 +247,10 @@ Other exports:
 |---|---|
 | `errorStatusByCode` | `Record<HarnessErrorCode, number>` (table 2.2) |
 | `isReservedPluginId` | `(id: string) => boolean`: `core-*`, `mock`, every builtin provider id |
-| `BUILTIN_PLUGIN_IDS` | `['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'mock']` (`core-workspace`: the workspace tools, Phase 7, ADR-032) |
+| `BUILTIN_PLUGIN_IDS` | `['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'mock']` (`core-workspace`: the workspace tools, Phase 7, ADR-032); Phase 9 adds `core-agent` (`todo_write`, `exit_plan_mode`, `task`; ADR-041, ADR-043; section 4.25) before `mock`, together with the plugin itself (P9-0b) |
 | `BUILTIN_PROVIDER_IDS` | the 13 builtin provider ids of DECISIONS.md (without the dev-only `mock`) |
 | `CLIENT_COMMANDS` | `['new', 'model', 'effort', 'mode', 'help']` (client-only slash commands; plugins cannot register them) |
+| `HARNESS_COMMANDS` / `isHarnessCommand` | `['compact']` / `(name: string) => name is HarnessCommand`: commands the server runs itself (Phase 9, ADR-040): listed by `GET /commands`, refused as plugin command names, never steered into a running reply |
 | `mcpToolName` | `(serverId, tool) => ToolName`: `mcp__<serverId>__<tool>` with characters outside `[a-zA-Z0-9_-]` replaced by `_`; when longer than 64 chars: the first 55 chars + `_` + 8 lowercase hex chars of FNV-1a 32 of the full name |
 | `apiUrl` | `(key: ApiRouteKey, input?: { params?, query? }, baseUrl = '/api') => string` for `<img src>`, `EventSource`, downloads |
 | `createChatId` | `() => string` uuidv7 |
@@ -254,9 +258,11 @@ Other exports:
 | `createProjectId` | `() => string` `prj_` + 16 chars of `[0-9A-Za-z]` (ADR-031; project ids are generated by the server) |
 | `createShellRuleId` / `createChangeBatchId` | `() => string` `srl_` / `wcb_` + 16 chars of `[0-9A-Za-z]` (ADR-038 / ADR-036; generated by the server) |
 | `parseShellCommand` / `parseShellRule` / `matchShellRules` / `suggestShellRules` | the shared shell command parser and rule matcher (Phase 8, ADR-038; section 4.24): pure, isomorphic, fails closed |
+| `findCompaction` / `compactionMarkers` / `splitSteers` / `latestTodos` | history-derived agent state (Phase 9, `util/agent-state.ts`; section 6.9): the latest compaction marker on a message path (its message and part index, and the kept user message), every marker of a path, the messages with each assistant message split at its steers (assistant / user / assistant), the todo list of the latest `todo_write` output on a path; pure, isomorphic, branch-aware; the server and the web never re-implement them |
+| `mentionTokenAt` / `parseMentions` / `formatMention` / `scorePath` / `rankPaths` | file mentions (Phase 9, `util/mentions.ts`; section 4.27): the `@` token at the caret, the mentions of a text, the `@path` text of a path, the fuzzy match of a query against a path (`{ score, ranges }`), the best entries for a query |
 | `createMessageId` | `() => string` `msg_` + 16 chars of `[0-9A-Za-z]`; the server passes it as `generateMessageId` (equivalent to AI SDK `createIdGenerator({ prefix: 'msg', separator: '_', size: 16 })`; the SDK default separator is `-`) |
 | `parseModelRef` / `formatModelRef` | `(ref) => { providerId, modelId }` (throws on invalid) / `(providerId, modelId) => string` |
-| `LIMITS` | `{ uploadBytes: 20971520, pluginFileBytes: 1048576, jsonBodyBytes: 1048576, chatBodyBytes: 2097152, pluginZipBytes: 20971520, pageLimitDefault: 50, pageLimitMax: 100, toolOutputBytes: 65536, sseHeartbeatMs: 25000, ... }`; the schemas add `iconFileBytes` / `manifestBytes` (256 KB), `chatImportMessagesMax` (2000), `messagePartsMax` (1000), `instructionsMaxChars` (20000), `credentialValueMaxChars` (4096), `pluginLogsLimitDefault` / `pluginLogsLimitMax` (200 / 500), `commandTemplateBytes` (16 KB), `commandExpansionBytes` (64 KB); bulk data and share links (Phase 5): `backupImportBytes` (256 MB), `backupEntriesMax` (50000), `backupChatEntryBytes` (64 MB), `backupChatMessagesMax` (20000), `shareSnapshotBytes` (10 MB), `shareToolValueChars` (16384), `sharesPerChatMax` (20); images and voice (Phase 6): `imagesPerTurnMax` (4), `imageInputsMax` (4), `generatedImageBytes` (20 MB, = `uploadBytes`), `imagePromptMaxChars` (32000), `audioUploadBytes` (25 MB), `speechTextMaxChars` (4096), `transcriptionMaxSeconds` (600), `speechFirstChunkChars` (300), `speechChunkChars` (1500); agent workspace (Phase 7): `projectNameMaxChars` (80), `projectsMax` (200), `workspacePathMaxChars` (4096), `browseEntriesMax` (500), `projectFileBytes` (32768), `stepsMax` (200, the bound of `maxSteps` and `projectMaxSteps`); the workspace tools have their own `WORKSPACE_LIMITS` (section 4.21); workspace 2.0 (Phase 8): `checkpointFileMaxBytes` (8 MiB), `checkpointProjectMaxBytes` (512 MiB), `checkpointMaxAgeMs` (30 days), `changesFilesMax` (500), `changesLineCountFiles` (200), `changesLineCountMaxBytes` (256 KiB), `changeDiffSideMaxBytes` (1 MiB), `gitStatusFilesMax` (2000), `gitTimeoutMs` (15000), `gitOutputMaxBytes` (8 MiB), `rewindUntrackedListMax` (50), `workspaceEventPathsMax` (200), `shellRulesPerScopeMax` (200), `shellRulePrefixMaxChars` (200), `shellCommandSegmentsMax` (32), `journalCommandMaxChars` (1000) |
+| `LIMITS` | `{ uploadBytes: 20971520, pluginFileBytes: 1048576, jsonBodyBytes: 1048576, chatBodyBytes: 2097152, pluginZipBytes: 20971520, pageLimitDefault: 50, pageLimitMax: 100, toolOutputBytes: 65536, sseHeartbeatMs: 25000, ... }`; the schemas add `iconFileBytes` / `manifestBytes` (256 KB), `chatImportMessagesMax` (2000), `messagePartsMax` (1000), `instructionsMaxChars` (20000), `credentialValueMaxChars` (4096), `pluginLogsLimitDefault` / `pluginLogsLimitMax` (200 / 500), `commandTemplateBytes` (16 KB), `commandExpansionBytes` (64 KB); bulk data and share links (Phase 5): `backupImportBytes` (256 MB), `backupEntriesMax` (50000), `backupChatEntryBytes` (64 MB), `backupChatMessagesMax` (20000), `shareSnapshotBytes` (10 MB), `shareToolValueChars` (16384), `sharesPerChatMax` (20); images and voice (Phase 6): `imagesPerTurnMax` (4), `imageInputsMax` (4), `generatedImageBytes` (20 MB, = `uploadBytes`), `imagePromptMaxChars` (32000), `audioUploadBytes` (25 MB), `speechTextMaxChars` (4096), `transcriptionMaxSeconds` (600), `speechFirstChunkChars` (300), `speechChunkChars` (1500); agent workspace (Phase 7): `projectNameMaxChars` (80), `projectsMax` (200), `workspacePathMaxChars` (4096), `browseEntriesMax` (500), `projectFileBytes` (32768), `stepsMax` (200, the bound of `maxSteps` and `projectMaxSteps`); the workspace tools have their own `WORKSPACE_LIMITS` (section 4.21); workspace 2.0 (Phase 8): `checkpointFileMaxBytes` (8 MiB), `checkpointProjectMaxBytes` (512 MiB), `checkpointMaxAgeMs` (30 days), `changesFilesMax` (500), `changesLineCountFiles` (200), `changesLineCountMaxBytes` (256 KiB), `changeDiffSideMaxBytes` (1 MiB), `gitStatusFilesMax` (2000), `gitTimeoutMs` (15000), `gitOutputMaxBytes` (8 MiB), `rewindUntrackedListMax` (50), `workspaceEventPathsMax` (200), `shellRulesPerScopeMax` (200), `shellRulePrefixMaxChars` (200), `shellCommandSegmentsMax` (32), `journalCommandMaxChars` (1000); agent 2.0 (Phase 9): `compactionSummaryMaxChars` (60000), `compactFocusMaxChars` (1000), `compactionsPerRunMax` (10), `todoItemsMax` (50), `planMaxChars` (50000), `approvalReasonMaxChars` (2000), `taskPromptMaxChars` (20000), `taskReportMaxChars` (32000), `taskStepsShownMax` (50), `subagentParallelMax` (3), `subagentsPerRunMax` (20), `subagentTimeoutMs` (570000), `queueItemsMax` (10), `queueItemBytes` (256 KiB), `mentionQueryMaxChars` (256), `mentionResultsMax` (50), `mentionFileMaxBytes` (5 MiB), `mentionIndexFilesMax` (50000), `mentionIndexTtlMs` (30000) |
 | `UPLOAD_MIME_PATTERNS` | `['image/*', 'application/pdf', 'text/*']` |
 
 ## 4. Schemas
@@ -287,7 +293,7 @@ noted, strings are trimmed and non-empty in request schemas.
 | `iconSlugSchema` / `IconSlug` | `^[a-z0-9-]{1,64}$` |
 | `sha256HexSchema` / `Sha256Hex` | `^[0-9a-f]{64}$` |
 | `trustPinSchema` / `TrustPin` | `Sha256Hex`, or `path:<Sha256Hex>` for linked folders pinned by path |
-| `toolModeSchema` / `ToolMode` | `'off' \| 'ask' \| 'edits' \| 'auto'` (UI label: permission mode; `edits` = "Accept edits", Phase 7, ADR-032: safe tools and `ask` tools with workspace access `write` run without asking; the approval table is in section 6.7) |
+| `toolModeSchema` / `ToolMode` | `'off' \| 'ask' \| 'edits' \| 'plan' \| 'auto'` (UI label: permission mode; UI lists keep this order; `edits` = "Accept edits", Phase 7, ADR-032: safe tools and `ask` tools with workspace access `write` run without asking; `plan` = "Plan", Phase 9, ADR-041: read-only, tools with workspace access `write` / `execute` are not offered and `exit_plan_mode` is, everything else asks as in `ask`; the approval table is in section 6.7) |
 | `workspaceAccessSchema` / `WorkspaceAccess` | `'read' \| 'write' \| 'execute'`: what a tool does with the project folder (`ToolDefinition.workspace`, `ToolSummary.workspace`; ADR-032) |
 | `reasoningEffortSchema` / `ReasoningEffort` | `'auto' \| 'off' \| 'low' \| 'medium' \| 'high' \| 'max'` (re-exported by plugin-sdk) |
 | `toolPolicySchema` / `ToolPolicy` | `'safe' \| 'ask' \| 'always'` (re-exported by plugin-sdk) |
@@ -310,6 +316,8 @@ noted, strings are trimmed and non-empty in request schemas.
 | `conflictHandlingSchema` / `ConflictHandling` | `'skip' \| 'force'`: what a rewind or an undo does with a file that changed since its last recorded change (ADR-036) |
 | `workspaceChangedSourceSchema` / `WorkspaceChangedSource` | `'tool' \| 'rewind' \| 'revert' \| 'undo'`: what wrote the files of a `workspace.changed` event (ADR-036) |
 | `fileSweepModeSchema` / `FileSweepMode` | `'off' \| 'daily' \| 'weekly'`: the automatic orphaned-file sweep (setting `fileSweep`, ADR-039) |
+| `todoStatusSchema` / `TodoStatus` | `'pending' \| 'in_progress' \| 'completed'`: status of a todo item of `todo_write` (Phase 9, ADR-041; section 4.25) |
+| `taskTypeSchema` / `TaskType` | `'explore' \| 'general'`: type of a sub-agent of the `task` tool (Phase 9, ADR-043; `explore` is read-only) |
 
 ### 4.2 Common
 
@@ -365,7 +373,7 @@ type Settings = {                       // settingsSchema; every key always pres
   titleModelRef: ModelRef | null        // default null (-> provider smallModelId, else chat model)
   instructions: string                  // global instructions; default ''; <= 20000 chars
   sendKey: 'enter' | 'mod-enter'        // default 'enter'
-  defaultToolMode: ToolMode             // default 'ask' ('edits' accepted since Phase 7)
+  defaultToolMode: ToolMode             // default 'ask' ('edits' accepted since Phase 7, 'plan' since Phase 9)
   defaultReasoningEffort: ReasoningEffort  // default 'auto'
   maxSteps: number                      // integer 1..200 (LIMITS.stepsMax), default 20: steps of a run in a chat
                                         // without a project
@@ -389,6 +397,14 @@ type Settings = {                       // settingsSchema; every key always pres
   // Automatic file sweep (Phase 8, ADR-039)
   fileSweep: FileSweepMode              // default 'off' (cleanup only from Settings -> Data); 'daily' | 'weekly' run the
                                         // orphaned file cleanup automatically (section 5.19)
+  // Agent 2.0 (Phase 9, ADR-040 … ADR-043)
+  autoCompact: boolean                  // default true: compact the conversation automatically when the context fills
+                                        // up (ADR-040); false = the oldest turns are trimmed (notice context-trimmed)
+  compactModelRef: ModelRef | null      // default null = the chat model: the model that writes compaction summaries
+  subagentModelRef: ModelRef | null     // default null = the chat model: the model of sub-agents (task, ADR-043)
+  subagentMaxSteps: number              // integer 1..200, default 30: steps of one sub-agent
+  shiftTabModes: boolean                // default true: Shift+Tab in the composer cycles the permission mode (Ask ->
+                                        // Accept edits -> Plan, ADR-041); false = Shift+Tab moves the focus
 }
 
 type SettingsUpdate = Partial<Settings> // settingsUpdateSchema; strict, at least one key
@@ -554,8 +570,9 @@ type ChatSummary = {                    // chatSummarySchema
   snippet?: string                      // only for GET /chats?q=: matching excerpt, <= 160 chars, plain text
 }
 
-type UsageTotals = {                    // usageTotalsSchema; sums over the chat's usage rows (purposes 'chat' and
-                                        // 'image', ADR-028), every message version included, deleted versions
+type UsageTotals = {                    // usageTotalsSchema; sums over the chat's usage rows (purposes 'chat',
+                                        // 'image' (ADR-028), and since Phase 9 'compact' and 'subagent'), every
+                                        // message version included, deleted versions
                                         // too (the cost actually paid)
   inputTokens: number; outputTokens: number; reasoningTokens: number
   cacheReadTokens: number; cacheWriteTokens: number
@@ -684,12 +701,16 @@ type MessageUsage = {                   // messageUsageSchema; tokens, summed ov
 type CommandInvocation = {              // commandInvocationSchema
   name: CommandName
   input: string                         // text after '/name '
-  type: 'prompt' | 'reply'
+  type: 'prompt' | 'reply' | 'compact'  // 'compact': the harness command /compact [focus] (Phase 9, ADR-040)
   expansion?: string                    // prompt commands: text sent to the model instead (<= 64 KB)
 }
 
-type HarnessDataTypes = { notice: NoticeData }  // data parts: 'data-notice'; harnessDataSchemas =
-                                                // { notice: noticeDataSchema } for useChat dataPartSchemas
+type HarnessDataTypes = {               // data parts 'data-notice', 'data-compaction', 'data-steer' and the transient
+  notice: NoticeData                    // 'data-activity'; harnessDataSchemas = { notice: noticeDataSchema,
+  compaction: CompactionData            // compaction: compactionDataSchema, steer: steerDataSchema, activity:
+  steer: SteerData                      // activityDataSchema } for useChat dataPartSchemas
+  activity: ActivityData
+}
 type NoticeData = {                     // noticeDataSchema
   level: 'info' | 'warning'
   code: 'context-trimmed' | 'approvals-superseded' | 'tools-unsupported' | 'attachments-unsupported'
@@ -697,13 +718,40 @@ type NoticeData = {                     // noticeDataSchema
                                         // WebP or GIF image, over 20 MB, or bytes that do not match the type; ADR-028)
     | 'workspace-unavailable'           // the project folder of the chat could not be opened: the run continues
                                         // without workspace tools (ADR-031; section 5.10)
+    | 'compaction-failed'               // Phase 9 (ADR-040): the summary could not be written, so the oldest turns
+                                        // were trimmed instead (section 6.9)
   message: string
 }
+
+type CompactionData = {                 // compactionDataSchema; data of 'data-compaction' parts (Phase 9, ADR-040)
+  trigger: 'manual' | 'auto'            // compactionTriggerSchema: /compact, or the context guard of a run
+  keep: 'none' | 'last-user'            // compactionKeepSchema: whether the model still gets the user message of the
+                                        // turn that compacted
+  summary: string                       // <= 60000 chars (Markdown): what the model sees instead of the older context
+  focus?: string                        // <= 1000 chars: the focus of /compact [focus]
+  todos?: TodoItem[]                    // the todo list when the compaction ran (latestTodos; section 4.25)
+  modelRef: ModelRef                    // the model that wrote the summary
+  messagesCompacted: number             // messages the summary replaces
+  tokensBefore: number                  // estimated context tokens before and after
+  tokensAfter: number
+  createdAt: Timestamp
+}
+
+type SteerData = {                      // steerDataSchema; data of 'data-steer' parts (Phase 9, ADR-042): a message the
+  id: MessageId                         // user queued while the agent worked (the queued message id), delivered to
+  parts: UserMessagePart[]              // the model at a step boundary; its text and file parts (section 4.26)
+  queuedAt: Timestamp
+  deliveredAt: Timestamp
+}
+
+type ActivityData = { kind: 'compacting' | 'idle' }   // activityDataSchema; transient 'data-activity' chunks (Phase
+                                                      // 9): reach only useChat onData, never stored
 ```
 
 Note: `harnessUIMessageSchema` is structural (`id`, `role`, optional `metadata`, `parts` as an array of objects with
 a string `type`, <= 1000 parts); the server performs the deep check with AI SDK `validateUIMessages({ messages,
-metadataSchema: messageMetadataSchema, dataSchemas: harnessDataSchemas })`.
+metadataSchema: messageMetadataSchema, dataSchemas: harnessDataSchemas })`. Phase 9 only adds data part types and
+optional fields: messages, settings and chat exports written by v1.4 parse unchanged.
 
 #### Chat request
 
@@ -725,7 +773,10 @@ type ChatRequestBody = {                // chatRequestBodySchema; body of POST /
   projectId?: ProjectId                 // ADR-031: the project of a NEW chat; honored only when this request creates
 }                                       // the chat (unknown -> 404 before the chat row exists), ignored otherwise
 
-type ChatStopResult = { stopped: boolean }      // chatStopResultSchema; false when no run was active
+type ChatStopResult = {                 // chatStopResultSchema
+  stopped: boolean                      // false when no run was active
+  dropped?: QueueItem[]                 // Phase 9 (ADR-042): the queued messages the stop removed, oldest first, for
+}                                       // the stopping tab's composer; absent when none were queued (section 4.26)
 ```
 
 In-place edits were removed (ADR-023): a user message sent with `messageId` is rejected with `400`, as is `parentId`
@@ -816,7 +867,9 @@ type CommandSummary = {                 // commandSummarySchema (server-side com
 ```
 
 Client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) are defined in the web app and are not
-returned by `GET /commands`; plugins cannot register these names.
+returned by `GET /commands`; plugins cannot register these names. The harness command `/compact [focus]` (Phase 9,
+ADR-040; `HARNESS_COMMANDS`) is run by the server itself: `GET /commands` lists it, and plugins cannot register it
+either.
 
 ### 4.10 Plugins
 
@@ -1037,11 +1090,19 @@ type ServerEvent =                      // serverEventSchema, discriminated unio
   | { type: 'project.changed';  data: ProjectChangedData;                            at: Timestamp }  // Phase 7
   | { type: 'key.rotated';      data: KeyRotatedData;                                at: Timestamp }  // Phase 7
   | { type: 'workspace.changed'; data: WorkspaceChangedData;                         at: Timestamp }  // Phase 8
+  | { type: 'queue.changed';    data: QueueChangedData;                              at: Timestamp }  // Phase 9
 
 type ChatUpdatedData = ChatSummary & {                                              // chatUpdatedDataSchema (ADR-030)
   activeLeafId: MessageId | null        // the stored active leaf (chats.active_leaf_id; null = an empty chat): another
 }                                       // tab that shows the chat follows a version switch or delete
-type RunStartedData = { chatId: ChatId; messageId: MessageId; modelRef: ModelRef }   // runStartedDataSchema
+type RunStartedData = {                                                             // runStartedDataSchema
+  chatId: ChatId
+  messageId: MessageId                  // the reply
+  modelRef: ModelRef
+  origin?: 'request' | 'queue'          // runOriginSchema (Phase 9, ADR-042): a POST /chat request, or the server with
+                                        // the first queued message; absent = 'request'
+  userMessageId?: MessageId             // the user message the run answers; set when origin is 'queue'
+}
 type RunFinishedData = {                                                            // runFinishedDataSchema
   chatId: ChatId
   messageId: MessageId
@@ -1070,7 +1131,8 @@ longer exists, while the chat has messages; `GET /chats/:id` then shows the path
 `catalog.changed` with `providerId: null` means "many providers changed" (refetch everything). `key.rotated` is the last
 event of every stream: the server closes all streams right after it (the sessions were revoked, ADR-034).
 `workspace.changed` (`WorkspaceChangedData`, section 4.23) reports files of a project folder written by an agent tool or
-by a rewind, revert or undo (ADR-036).
+by a rewind, revert or undo (ADR-036). `queue.changed` (`QueueChangedData`, section 4.26) reports every change of the
+steer queue of a chat (ADR-042).
 
 ### 4.15 Params and form schemas
 
@@ -1088,6 +1150,7 @@ by a rewind, revert or undo (ADR-036).
 | `shareParamsSchema` / `ShareParams` | `{ id: ShareId }` |
 | `projectParamsSchema` / `ProjectParams` | `{ id: ProjectId }` (`PATCH` / `DELETE /projects/:id`, ADR-031) |
 | `shellRuleParamsSchema` / `ShellRuleParams` | `{ id: ShellRuleId }` (`DELETE /shell-rules/:id`, ADR-038) |
+| `chatQueueItemParamsSchema` / `ChatQueueItemParams` | `{ id: ChatId; itemId: MessageId }` (`DELETE /chat/:id/queue/:itemId`, ADR-042) |
 | `sharePublicParamsSchema` / `SharePublicParams` | `{ token: ShareToken }` (checked by the route itself: a malformed token is the same `404` as every other share failure, section 5.20) |
 | `shareFileParamsSchema` / `ShareFileParams` | `{ token: ShareToken; fileId: FileId }` (same `404` rule) |
 | `fileUploadFormSchema` / `FileUploadForm` | `{}` (only the file part `file`) |
@@ -2012,6 +2075,183 @@ type ShellRuleCreate = {                // shellRuleCreateSchema (POST /shell-ru
   project; with Accept edits this is about as strong as the auto mode for the shell. Arguments can still have side
   effects (`git diff --output=…`).
 
+### 4.25 Agent tools
+
+ADR-041, ADR-043. The builtin plugin `core-agent` (Phase 9) registers three tools (`AGENT_TOOL_NAMES`, schema
+`agentToolNameSchema`; `AGENT_TOOL_SCHEMAS` maps each tool to its input and output schemas). None declares workspace
+access, so they are offered in every chat with tools: `exit_plan_mode` only in the `plan` mode, and none of them inside
+a sub-agent. Server code recognizes them by `pluginId === 'core-agent'`; their server-side capabilities (the run's
+permission mode, the sub-agent runner) reach them through a private run side channel that third-party plugins cannot
+reach.
+
+| Tool | Input schema | Output schema | Policy / timeout |
+|---|---|---|---|
+| `todo_write` | `todoWriteInputSchema` | `todoWriteOutputSchema` | `safe` |
+| `exit_plan_mode` | `exitPlanModeInputSchema` | `exitPlanModeOutputSchema` | `always`: the plan approval card always shows (overrides and hooks cannot approve it) |
+| `task` | `taskInputSchema` | `taskOutputSchema` (streamed as preliminary outputs, section 6.9) | `safe` / 600 s |
+
+```ts
+type TodoItem = {                       // todoItemSchema
+  id: string                            // 1..64 chars, chosen by the model, unique in the list
+  content: string                       // 1..500 chars
+  status: TodoStatus                    // 'pending' | 'in_progress' | 'completed'
+  activeForm?: string                   // <= 200 chars, shown while the item is in progress ("Running the tests")
+}
+type TodoWriteInput = { todos: TodoItem[] }   // todoWriteInputSchema: the COMPLETE new list (<= 50 items, unique ids)
+type TodoWriteOutput = {                // todoWriteOutputSchema
+  todos: TodoItem[]
+  counts: { pending: number; inProgress: number; completed: number; total: number }   // todoCountsSchema
+}
+
+type ExitPlanModeInput = { plan: string }   // exitPlanModeInputSchema: the plan as Markdown, 1..50000 chars
+type ExitPlanModeOutput = {             // exitPlanModeOutputSchema; only an approved call has an output (a rejection is
+  approved: true                        // a denied approval whose reason is the user's feedback)
+  mode: 'edits' | 'ask'                 // the permission mode the user chose for the implementation
+}
+
+type TaskInput = {                      // taskInputSchema
+  description: string                   // 3..80 chars: the title shown in the UI
+  prompt: string                        // 1..20000 chars: the complete instructions (the sub-agent does not see the chat)
+  type: TaskType                        // 'explore' (read-only tools) | 'general'
+}
+type TaskStep = {                       // taskStepSchema: one tool call of the sub-agent
+  toolCallId: string                    // the call id inside the sub-agent
+  toolName: string
+  summary: string                       // <= 200 chars: a path, a pattern, a command
+  state: 'running' | 'done' | 'error' | 'denied'   // taskStepStateSchema; 'denied': the call needed an
+                                        // approval, which a sub-agent never asks for
+  resultPreview?: string                // <= 300 chars: the start of the result or of the error
+}
+type TaskOutput = {                     // taskOutputSchema
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'aborted' | 'limit'   // taskStatusSchema; 'queued': waiting
+                                        // for a free slot; 'limit': the step limit or the deadline ended it
+  type: TaskType
+  description: string
+  modelRef: ModelRef                    // the sub-agent's model (subagentModelRef, else the chat model)
+  steps: TaskStep[]                     // the latest 50 (LIMITS.taskStepsShownMax)
+  stepsOmitted: number                  // earlier steps that were not kept
+  report: string                        // <= 32000 chars: the final report (Markdown); '' until it is written
+  usage?: MessageUsage                  // every step of the sub-agent
+  costUsd?: number
+  startedAt: Timestamp
+  finishedAt?: Timestamp
+  error?: string                        // <= 2000 chars: why it failed, was stopped or hit the limit
+}
+```
+
+- **Todos** (`todo_write`): every call replaces the whole list; the model gets a one-line summary. The todo state of a
+  chat is the output of the latest successful `todo_write` call on the active path (`latestTodos`, branch-aware; no
+  table); todo calls inside a sub-agent are not parts and do not count.
+- **Plan** (`exit_plan_mode`): the agent investigates read-only in the `plan` mode and calls it with a complete
+  Markdown plan. Approve: the web sets the chat's `toolMode` to the chosen mode (`edits` or `ask`) and approves the
+  call; the continuation runs in that mode and the output is `{ approved: true, mode }`. Reject: a denied approval
+  whose `reason` is the user's feedback (<= 2000 characters, `LIMITS.approvalReasonMaxChars`), sent with `toolMode:
+  'plan'`; the model keeps planning. An approval continuation that approves the call while `toolMode` is `off` or
+  `plan` is `400` on `['toolMode']`; `PATCH /tools/exit_plan_mode` with `override: 'allow'` is `400` (section 5.12).
+- **Sub-agents** (`task`): each call runs a child agent loop with its own context (`[user: prompt]`) and the model
+  `subagentModelRef` (else the chat model), at most `subagentMaxSteps` steps (the last one without tools: "write the
+  final report now") and 570 s (`LIMITS.subagentTimeoutMs`). At most 3 run at once (`LIMITS.subagentParallelMax`; the
+  others show `queued`) and 20 per run (`LIMITS.subagentsPerRunMax`). A child only gets the tools that run without
+  approval in the parent's current mode (`explore`, or a parent in `plan`: read-only tools only), never the
+  `core-agent` tools or `generate_image` (depth 1); any approval request inside a child becomes a denial (a `denied`
+  step: "Sub-agents cannot ask the user: this call needs approval."), so no approval card ever comes from a child.
+  Child writes are journaled under the parent assistant message (tool call ids `<parent call id>/<child call id>`,
+  ADR-036), so rewind and the changes panel cover them; a child's `cd` does not move the parent's working folder. One
+  usage row (purpose `subagent`) per child; its cost is added to the reply's `costUsd`. Stop aborts every child
+  (`aborted`). The model gets only the report (on failure "Sub-agent failed: …; partial report: …"); in later model
+  history a stored `task` output is reduced to `{ status, report }`.
+
+### 4.26 Steer queue
+
+ADR-042. A message sent while a chat's run is active, or while its reply waits for an approval, joins the chat's
+queue on the server (`POST /chat/:id/queue`; in memory, lost on a restart; at most 10 messages of at most 256 KiB
+each). At the next step boundary of the run, the run takes every queued message: the model sees each one as a user
+message and the reply stores it as a `data-steer` part (section 6.9). A message still queued when the run completes
+becomes the next turn, started by the server (`run.started` with `origin: 'queue'`). Server commands (`/compact` and
+plugin commands; `turnOnly`) are never steered: they wait for the next turn.
+
+```ts
+type UserMessagePart =                  // userMessagePartSchema: the parts a user message can hold
+  | { type: 'text'; text: string }                                      // userTextPartSchema
+  | { type: 'file'; mediaType: string; filename?: string; url: string } // userFilePartSchema; url '/api/files/<id>'
+type QueueMessage = {                   // queueMessageSchema; other keys of the message and its parts are dropped
+  id: MessageId                         // client-generated (createMessageId()); also the item id
+  role: 'user'
+  parts: UserMessagePart[]              // 1..1000 parts
+}
+type QueueAddBody = {                   // queueAddBodySchema (POST /chat/:id/queue); strict
+  message: QueueMessage                 // <= 256 KiB serialized (LIMITS.queueItemBytes)
+  modelRef: ModelRef                    // the composer state: used when the message becomes the next turn
+  reasoningEffort: ReasoningEffort
+  toolMode: ToolMode
+}
+type QueueItem = {                      // queueItemSchema
+  id: MessageId                         // = message.id
+  message: QueueMessage                 // parts normalized like those of POST /chat (file parts from the stored file)
+  modelRef: ModelRef
+  reasoningEffort: ReasoningEffort
+  toolMode: ToolMode
+  createdAt: Timestamp
+  turnOnly: boolean                     // a server command: never steered, only started as the next turn
+}
+type QueueList = { items: QueueItem[] } // queueListSchema (GET /chat/:id/queue): oldest first, <= 10
+type QueueRemoval = {                   // queueRemovalSchema
+  id: MessageId
+  reason: 'delivered' | 'started' | 'cancelled' | 'stopped' | 'failed'   // queueRemovalReasonSchema
+  error?: string                        // 'failed': what went wrong (never message contents)
+}
+type QueueChangedData = {               // queueChangedDataSchema: data of the queue.changed event
+  chatId: ChatId
+  items: QueueItem[]                    // the whole queue after the change
+  removed?: QueueRemoval[]              // the messages that left it with this change
+}
+```
+
+- Removal reasons: `delivered` (steered into the running reply); `started` (became the next turn); `cancelled`
+  (`DELETE /chat/:id/queue/:itemId`); `stopped` (Stop, or an aborted run: every queued message is removed and returned
+  by `POST /chat/:id/stop` as `dropped`, oldest first, and only the stopping tab puts them back into its composer);
+  `failed` (the run failed, which removes every queued message, or the next turn could not start).
+- While an approval is pending, queued messages wait for the next run (the continuation or a new turn), which takes
+  them at its first step.
+- If a `POST /chat` of the user wins the chat while the server starts the next turn from the queue, the item goes back
+  to the head of the queue and is steered into that run.
+- Deleting the chat, a master-key rotation and shutdown empty the queue. Queued file ids are protected from the file
+  cleanup like other recent uploads.
+
+### 4.27 File mentions
+
+ADR-042. `@` in the composer of a project chat searches the files of the chat's project; picking a file inserts
+`@path ` into the text and attaches the file as an upload snapshot (a `FileRef`, as `POST /files` returns). The chat
+request is unchanged: mentions are attachments, and the text keeps `@path` so the model sees the path.
+
+```ts
+type ProjectFilesQuery = {              // projectFilesQuerySchema (GET /projects/:id/files)
+  q?: string                            // <= 256 chars (LIMITS.mentionQueryMaxChars, the longest @ token the composer
+                                        // sends), default '': matched against project-relative paths (rankPaths)
+  limit?: number                        // 1..50, default 50
+}
+type ProjectFileEntry = {               // projectFileEntrySchema
+  path: string                          // project-relative POSIX path; a folder has no trailing '/'
+  kind: 'file' | 'dir'                  // projectFileKindSchema; folders are derived from the file paths (picking one
+}                                       // narrows the query)
+type ProjectFileSearch = {              // projectFileSearchSchema
+  items: ProjectFileEntry[]             // the best matches first, at most `limit`
+  truncated: boolean                    // the index was cut (50000 files, or the limits of the walk): a match may be
+                                        // missing
+  indexedAt: Timestamp                  // when the project's index was built
+}
+type ProjectFileAttachBody = { path: string }   // projectFileAttachBodySchema; strict; workspaceToolPathSchema
+```
+
+- **Index**: one per project, in memory, built with the workspace walker (`.gitignore`, `node_modules` and the walk's
+  entry, depth and time limits; `.git` and secret-looking paths, section 4.21, are left out), at most
+  `LIMITS.mentionIndexFilesMax` files, one build at a time per project, rebuilt when older than 30 s
+  (`LIMITS.mentionIndexTtlMs`) and dropped on `workspace.changed`.
+- **Attach**: the path resolves through the workspace path guard (realpath containment, section 4.21); `.git` and
+  secret-looking paths are refused; at most 5 MiB (`LIMITS.mentionFileMaxBytes`). The bytes are stored through the
+  upload path of `POST /files` (type sniffing: text, image or PDF, else the upload's error; content-addressed), so the
+  attachment is a snapshot: later edits of the file do not change it.
+
 ## 5. Endpoints
 
 Grouped by server route module (`apps/server/src/http/routes/<module>.ts`), exactly as in DECISIONS.md. Each entry:
@@ -2206,7 +2446,8 @@ body exceeds its limit; `500 internal_error`.
 **`DELETE /chats/:id`** — `chats.remove`
 - Params `{ id: ChatId }`.
 - Stops an active run first, deletes the chat, its messages (every version) and its share links (cascade); usage
-  rows are kept with `chat_id = NULL`; uploaded files are kept (content-addressed, shared).
+  rows are kept with `chat_id = NULL`; uploaded files are kept (content-addressed, shared). Since Phase 9 it also
+  empties the chat's steer queue (clients drop their copy on `chat.deleted`).
 - Response `204`. Emits `chat.deleted`.
 - Errors: `404 not_found`.
 - Note: "Undo" in the UI delays this call (toast), the server has no soft delete.
@@ -2291,6 +2532,14 @@ body exceeds its limit; `500 internal_error`.
   `workspace-unavailable` (on every such run) and a run without workspace tools, still with `projectMaxSteps`; a chat
   without a project is never offered a tool that declares `workspace`.
 - `toolMode: 'edits'` (Accept edits, ADR-032): approvals follow the table of section 6.7.
+- `toolMode: 'plan'` (Phase 9, ADR-041): tools with workspace access `write` / `execute` are not offered,
+  `exit_plan_mode` is, everything else asks as in `ask` (section 6.7). The server accepts `plan` in every chat; the web
+  offers it in project chats only. An approval continuation that approves `exit_plan_mode` while `toolMode` is `off`
+  or `plan` is `400 validation_error` on `['toolMode']` (the web sets the chosen mode first, section 4.25).
+- `/compact [focus]` (Phase 9, ADR-040): the reply is a compaction instead of a model answer (section 6.9).
+- Phase 9 (ADR-042): while a run is active, the web queues a message with `POST /chat/:id/queue` (section 5.26)
+  instead of sending it here (`409 run-active`); a turn the server starts from the queue is announced by `run.started`
+  with `origin: 'queue'` and `userMessageId`, and is resumed with `GET /chat/:id/stream`.
 - Images (ADR-028, section 4.18): the catalog kind of `modelRef` decides. A model of `kind: 'image'` makes the request
   an **image turn** (no history is sent; the prompt and the input images as in section 4.18); the reply streams one
   `file` chunk per image (section 6.8). An image model whose provider has no `createImageModel` (only a custom model
@@ -2323,7 +2572,10 @@ body exceeds its limit; `500 internal_error`.
 **`POST /chat/:id/stop`** — `chat.stop`
 - Params `{ id: ChatId }`. No body.
 - Response `200 ChatStopResult` (`stopped: false` when no run was active). The run is aborted, the partial message
-  is persisted with `metadata.aborted = true`, `run.finished` is emitted with `outcome: 'aborted'`.
+  is persisted with `metadata.aborted = true`, `run.finished` is emitted with `outcome: 'aborted'`. Phase 9: every
+  sub-agent of the run is aborted, and the chat's steer queue is emptied: `dropped` lists the removed messages (oldest
+  first; absent when none were queued; `queue.changed` with reason `stopped`), so the stopping tab can put them back
+  into its composer.
 
 ### 5.11 `files.ts`
 
@@ -2362,9 +2614,11 @@ body exceeds its limit; `500 internal_error`.
   before v1.4 on such a tool is ignored by the approval (the tool asks) but still listed by `GET /tools` (`override:
   'allow'`) until it is changed; `ask`, `deny` and `null` stay accepted.
 - Response `200 ToolSummary`.
+- Phase 9 (ADR-041): `override: 'allow'` is refused for `exit_plan_mode` too (`400 validation_error` on
+  `['override']`): the plan approval card always shows.
 - Errors, in this order: `404 not_found` (unknown tool name, `Unknown tool "<name>".`); `400 validation_error` on
   `['override']` for `override: 'allow'` on a tool with workspace access `execute` ("Shell commands can't be always
-  allowed. Add a shell rule instead.").
+  allowed. Add a shell rule instead.") or on `exit_plan_mode`.
 
 ### 5.13 `mcp.ts`
 
@@ -2398,7 +2652,8 @@ body exceeds its limit; `500 internal_error`.
 ### 5.14 `commands.ts`
 
 **`GET /commands`** — `commands.list`
-- Response `200 ListResponse<CommandSummary>` sorted by name (server-side commands from the registry).
+- Response `200 ListResponse<CommandSummary>` sorted by name (server-side commands from the registry). Since Phase 9
+  the list includes the harness command `compact` (`/compact [focus]`, ADR-040).
 
 ### 5.15 `plugins.ts`
 
@@ -3066,6 +3321,54 @@ the prefix only at debug. Rules are never in a backup, an export or an import; d
 - Response `204`.
 - Errors: `404 not_found` (unknown rule, "Shell rule <id> not found.").
 
+### 5.26 `chat-queue.ts`
+
+The steer queue of a chat (ADR-042, DTOs in section 4.26), next to `/chat/:id/stream` and `/chat/:id/stop`. Every
+route needs a session; none needs fresh auth (a session can already send messages). Every change emits
+`queue.changed`. The queue lives in memory: a restart loses it. Message contents are never logged at info. From P9-0a
+until P9-A the three routes validate their input and then answer `501 not_implemented`.
+
+**`GET /chat/:id/queue`** — `chatQueue.list`
+- Params `ChatParams`.
+- Response `200 QueueList`: the queued messages, oldest first (empty when nothing is queued).
+- Errors: `404 not_found` (unknown chat).
+
+**`POST /chat/:id/queue`** — `chatQueue.add`
+- Params `ChatParams`. Body `QueueAddBody`. The parts are checked and normalized like the parts of a `POST /chat` user
+  message (file parts must reference uploaded files, section 6.2).
+- Response `201 QueueItem`. Emits `queue.changed`.
+- Errors: `404 not_found` (unknown chat); `400 validation_error` (a message over 256 KiB on `['message']`; a file part
+  that is not `/api/files/<id>` or names an unknown file on `['message', 'parts', i]`); `409 conflict` with `reason:
+  'run-idle'` when the chat has no active run and no pending approval (send the message with `POST /chat`; the web
+  does so), `reason: 'queue-full'` when 10 messages are queued (`LIMITS.queueItemsMax`), `reason: 'exists'` when the
+  message id is already queued or stored.
+
+**`DELETE /chat/:id/queue/:itemId`** — `chatQueue.remove`
+- Params `ChatQueueItemParams`. Cancels a queued message.
+- Response `204`. Emits `queue.changed` (reason `cancelled`).
+- Errors: `404 not_found` (unknown chat, or a message that is not queued: already delivered or started, or never
+  queued). A step boundary takes the queued messages synchronously, so a cancel either wins (`204`: the message is
+  never delivered) or loses (`404`: it was delivered).
+
+### 5.27 `project-files.ts`
+
+File mentions of project chats (ADR-042, DTOs in section 4.27). Every route needs a session; none needs fresh auth (a
+session can already read project files through the agent). Queries and file contents are never logged at info. From
+P9-0a until P9-A the two routes validate their input and then answer `501 not_implemented`.
+
+**`GET /projects/:id/files?q=&limit=`** — `projectFiles.search`
+- Params `ProjectParams`. Query `ProjectFilesQuery`.
+- Response `200 ProjectFileSearch`.
+- Errors: `404 not_found` (unknown project, "Project <id> not found."); `400 validation_error` when the project folder
+  is not available (the message names the folder and the reason, as the `workspace-unavailable` notice does).
+
+**`POST /projects/:id/files/attach`** — `projectFiles.attach`
+- Params `ProjectParams`. Body `ProjectFileAttachBody`.
+- Response `201 FileRef` (the DTO of `POST /files`; a snapshot of the file, deduplicated by content).
+- Errors: `404 not_found` (unknown project, or no such file); `400 validation_error` (the project folder is not
+  available; on `['path']`: a path outside the project folder, a folder, a `.git` path or a secret-looking path; a
+  file type the upload refuses); `413 payload_too_large` (`details.limitBytes` 5242880) for a file over 5 MiB.
+
 ## 6. Chat stream protocol
 
 `POST /api/chat` returns an **AI SDK v7 UI message stream**: `createUIMessageStreamResponse({ stream,
@@ -3112,6 +3415,8 @@ const chat = useChat<HarnessUIMessage>({
 void chat.resumeStream()                        // GET /api/chat/:id/stream, 204 -> nothing to do
 // approvals: chat.addToolApprovalResponse({ id: part.approval.id, approved, reason? })
 // stop:      await client.chat.stop({ params: { id } }); chat.stop()
+// Phase 9:   useChat({ onData }) receives the transient data-activity chunks and the data-steer deliveries;
+//            while a run is active, client.chatQueue.add(...) queues a message instead of sendMessage (section 6.9)
 ```
 
 ### 6.2 What `message` contains
@@ -3167,7 +3472,9 @@ only for models with `vision` (images) or `pdf` capability, otherwise the part i
   `tool-input-start` / `tool-input-delta` / `tool-input-available` / `tool-input-error`, `tool-approval-request`,
   `tool-output-available` / `tool-output-error` / `tool-output-denied`, `source-url`, `source-document`, `file`
   (always an `/api/files/<id>` URL, never a `data:` URL), `reasoning-file` (same rule), `data-notice`,
-  `message-metadata`, `error`, `abort`, `finish` (with `messageMetadata`). The web consumes them only through
+  `data-compaction` and `data-steer` (Phase 9), the transient `data-activity` (Phase 9, `transient: true`, never
+  stored), `message-metadata`, `error`, `abort`, `finish` (with `messageMetadata`). `tool-output-available` may carry
+  `preliminary: true` (the progress of a `task` call, Phase 9). The web consumes them only through
   `useChat`; it never parses chunks itself.
 
 ### 6.4 UI message parts the web renders
@@ -3184,7 +3491,9 @@ only for models with `vision` (images) or `pdf` capability, otherwise the part i
 | `source-document` | `sourceId`, `mediaType`, `title`, `filename?` | grouped "N sources" row |
 | `step-start` | - | step boundary (no visual, used by the approval helper) |
 | `data-notice` | `NoticeData` | muted notice row |
-| other `data-*`, `custom` | - | ignored |
+| `data-compaction` | `CompactionData` (Phase 9) | "Conversation compacted" divider with the summary; the messages before it are dimmed (section 6.9) |
+| `data-steer` | `SteerData` (Phase 9) | a note "You said while the agent worked" with the steered text and files, where the model received it |
+| other `data-*`, `custom` | - | ignored (the transient `data-activity` is never a part: it reaches only `onData`) |
 
 Tool part states (`tool-<name>` and `dynamic-tool`):
 
@@ -3194,7 +3503,7 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 | `input-available` | arguments complete, executing | spinner |
 | `approval-requested` | waits for the user (`approval.id`) | amber, `AiConfirmation` card: Deny / Allow + "Always allow {tool}" checkbox |
 | `approval-responded` | decision sent, continuation pending (`approval.approved`) | spinner (allowed) or "Denied" |
-| `output-available` | `output` (may be `preliminary: true`) | check mark, expandable input/output (4 KB cap in UI) |
+| `output-available` | `output` (may be `preliminary: true`: still running while the reply streams, Phase 9) | check mark, expandable input/output (4 KB cap in UI) |
 | `output-error` | `errorText` | cross, error text |
 | `output-denied` | `approval.approved === false` (`approval.reason`, `approval.isAutomatic`) | "Denied" |
 
@@ -3233,6 +3542,10 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   `aborted: true`; returns `{ stopped }`. The web calls it before `chat.stop()`; a client abort alone only
   disconnects (the run continues and stays resumable).
 - A second `POST /api/chat` for a chat with an active run gets `409 conflict` (`reason: 'run-active'`).
+- Phase 9 (ADR-042): while a run is active the composer queues messages (`POST /api/chat/:id/queue`, section 5.26)
+  instead of sending them; `POST /api/chat/:id/stop` also empties the queue and returns the dropped messages
+  (`dropped`). A turn the server starts from the queue is announced by `run.started` (`origin: 'queue'`,
+  `userMessageId`); a tab that does not show that user message refetches the chat, then resumes the stream.
 
 ### 6.7 Approvals
 
@@ -3255,6 +3568,7 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   | `off` | (no tools are sent to the model) | - |
   | `ask` | `safe` | everything else |
   | `edits` | `safe`, and `ask` with workspace access `write` | everything else, `always` included |
+  | `plan` (Phase 9) | `safe` (tools with workspace access `write` / `execute` are not offered) | everything else, `always` included |
   | `auto` | everything except `always` | `always` |
 
   A policy function resolves first (e.g. `write_file` on a hidden path is `always`, so it asks in every mode);
@@ -3264,6 +3578,8 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   in `ask` and `edits` (`allowedBy` in the output). The policy is `ask` without a run scope or workspace, for an input
   that does not validate and on any error. The rules are read when a run starts; an override `ask` or `deny` and the
   `tool.approve` hook still win, and a stored `allow` override of an `execute` tool is ignored.
+- `exit_plan_mode` (Phase 9, ADR-041) always asks, in every mode: its approval comes before the user's override and
+  the `tool.approve` hook. Sub-agents (ADR-043) never ask: a call that would ask inside a sub-agent is denied.
 - Approvals on other versions of a chat stay pending: switching back to such a version sets `pendingApproval` again,
   and the approval card is live because the continuation targets the active leaf.
 
@@ -3296,6 +3612,48 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 - `imageOptions` (`ChatRequestBody`): `n`, `aspectRatio`, `editPrevious` for image models; `aspectRatio` only for chat
   models with image output; the web sends it only for image-capable models (`400` otherwise, section 5.10).
 
+### 6.9 Agent 2.0 (ADR-040 … ADR-043)
+
+- **`/compact [focus]`** (a harness command, trigger `manual`, keep `none`): the user message keeps
+  `metadata.command` (`type: 'compact'`); the reply streams `start`, a transient `data-activity` `{ kind: 'compacting' }`,
+  one `data-compaction` part (`CompactionData`), `data-activity` `{ kind: 'idle' }` and `finish`, with no model text;
+  its `metadata.usage.contextTokens` is `tokensAfter`, so the context ring drops. With nothing to compact yet the reply
+  is the text "There is nothing to compact yet."; a regenerate compacts again; a `/compact` sent while a run is active
+  waits in the queue for the next turn.
+- **Automatic compaction** (trigger `auto`, keep `last-user`, or `none` when the kept user message is still too large):
+  before every model call of a run (step 0 included), when `autoCompact` is on, the model's context window is known and
+  the estimated context passes 80 % of it, at most 10 times per run (`LIMITS.compactionsPerRunMax`). The
+  `data-compaction` part is placed where it happened (before the `start-step` of that step); during the summary the
+  stream carries `data-activity` `compacting` / `idle`. The summary is written by `compactModelRef`, else the run's
+  model; it is one usage row with purpose `compact`, and its cost is added to the reply's `costUsd`. A failed summary,
+  or `autoCompact` off, falls back to trimming the oldest turns before the first step (notice `compaction-failed` or
+  `context-trimmed`); a run that cannot be compacted any further fails with `context_overflow` as before.
+- **History rule** (`findCompaction`): for the model, the latest `data-compaction` part on the path (message M at part
+  p) replaces everything before it: the history is the summary (the first part of the next user message) + (keep
+  `last-user`: the last user message before M) + M's parts after p + every later message. Stored messages are never
+  rewritten (the web shows the older ones dimmed); a branch above the marker ignores it (ADR-023), a regenerate does not
+  see the replaced reply's marker, and deleting the message that holds a marker falls back to the previous one. The
+  Markdown export shows the marker and its summary; share pages and the search text leave it out.
+- **Steering** (`data-steer`, `SteerData`): at the step boundary that takes queued messages, the reply gets one
+  `data-steer` part per message (its `id` is the queued message id; placed before the next `start-step`, step 0 of a
+  continuation or a new turn included), and the model sees each as a user message: the history splits the reply into
+  assistant / user / assistant messages at its steers (`splitSteers`). `useChat` `onData` receives the chunk, so the
+  tab marks the queued message delivered. The Markdown export shows steers as "User (during the run)", share pages as
+  user messages, and the search text includes their text.
+- **Activity** (`data-activity`, `ActivityData`): transient chunks (`transient: true`) that reach only `onData` and are
+  never stored or replayed into a part: `compacting` while a summary is written, `idle` afterwards.
+- **Plan approvals** (`exit_plan_mode`, section 4.25): the tool part waits in `approval-requested` with the plan as its
+  input. Approve = the web sets the chat's `toolMode` to the chosen mode, then sends `addToolApprovalResponse({ id,
+  approved: true })`; the continuation runs in the new mode. Reject = `addToolApprovalResponse({ id, approved: false,
+  reason })` with the feedback as `reason` (<= 2000 characters) and `toolMode: 'plan'`; the model keeps planning.
+- **Todos** (`todo_write`): the web and the server derive the todo list from the latest `todo_write` output on the
+  shown path (`latestTodos`).
+- **Sub-agents** (`task`): while a child runs, the `tool-task` part receives `tool-output-available` chunks with
+  `preliminary: true` (`TaskOutput` snapshots on tool start and finish and at step ends, at most one per 250 ms, the
+  latest wins); the last one is the final output. A preliminary output never reaches a model; a part still preliminary
+  when the run ends (Stop, a failure) is stored as `output-error` (the nested steps of a stopped child are not kept
+  after a reload). Plugin tools may stream the same way (plugin API 1.3.0: an async-generator `execute`).
+
 ## 7. Server events (`GET /api/events`)
 
 - Session required. Response `200` with `Content-Type: text/event-stream`, `Cache-Control: no-cache`,
@@ -3322,7 +3680,7 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 | `chat.created` | `POST /chats`, the first `POST /chat` for a new chat id, or `POST /data/import` (one per imported or copied chat) | `ChatSummary` | chats store: insert |
 | `chat.updated` | title generated or renamed, pin/archive/model/settings change, a move to or out of a project (Phase 7), a message persisted, a branch switch (`POST /chats/:id/branch`), a version deleted (`DELETE /chats/:id/messages/:messageId`, also off the active path) | `ChatUpdatedData` (`ChatSummary` + `activeLeafId`) | chats store: patch and re-sort (without `activeLeafId`); an idle open chat whose shown path does not end at `activeLeafId` refetches it (bursts coalesce into one refetch; a `null` or unknown leaf triggers one refetch, then waits for a different leaf) |
 | `chat.deleted` | `DELETE /chats/:id`, or `POST /data/delete` (one per deleted chat) | `{ id }` | chats store: remove; leave `/chat/:id` if open |
-| `run.started` | a run acquired the chat | `RunStartedData` | running dot |
+| `run.started` | a run acquired the chat (also a turn the server started from the queue, Phase 9) | `RunStartedData` (`origin?`, `userMessageId?` since Phase 9) | running dot; with `origin: 'queue'` and a `userMessageId` the open chat does not show: refetch the chat, then resume the stream |
 | `run.finished` | run completed, aborted or failed; sent after the reply and the active leaf are stored | `RunFinishedData` | clear running; amber dot when `awaitingApproval` |
 | `provider.changed` | credentials set/cleared, enable/disable, validation result, provider (un)registered | `{ id, provider }` | providers store: patch or remove |
 | `catalog.changed` | listing refresh, prefs or custom model change, plugin (un)load, models.dev refresh | `{ providerId }` | models store: refetch `GET /models` |
@@ -3331,8 +3689,11 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 | `project.changed` | project created, renamed, instructions changed, deleted (Phase 7, ADR-031) | `ProjectChangedData` (`{ id, project }`, `project: null` = deleted) | projects store: patch or remove; on delete, chats of the project get `projectId: null` and a list filtered by it falls back to all chats |
 | `key.rotated` | master-key rotation finished (Phase 7, ADR-034); every stream closes right after it | `KeyRotatedData` (`{ keyVersion, rotatedAt, chatIds }`) | reload the chats store; every open chat listed in `chatIds` refetches; toast; the closed stream reconnects (or the login page shows) |
 | `workspace.changed` | an agent `write_file` / `edit_file` changed files of a project folder (coalesced: at most one event per second per chat), or a rewind, revert or undo batch wrote something (one event per batch) (Phase 8, ADR-036) | `WorkspaceChangedData` (`{ projectId, chatId, batchId, source, paths }`) | the changes panel of an open chat of that project refreshes (debounced) |
+| `queue.changed` | a message was queued, cancelled, steered into the running reply, started as the next turn, dropped by Stop or removed by a failure (Phase 9, ADR-042) | `QueueChangedData` (`{ chatId, items, removed? }`) | chat-queue store: replace the chat's queue; a `delivered` message is shown where the model received it |
 
-Phase 8 adds `workspace.changed`; shell rule changes and the automatic file sweep emit nothing. Phase 7 adds
+Phase 9 adds `queue.changed` and the optional `run.started` fields `origin` and `userMessageId`; compactions, plan
+approvals, todos, sub-agents and file mentions emit nothing new (the queue is refetched after a reconnect). Phase 8
+adds `workspace.changed`; shell rule changes and the automatic file sweep emit nothing. Phase 7 adds
 `project.changed` and `key.rotated`; moving a chat to another project is a `chat.updated` (its summary carries
 `projectId`), the file cleanup emits nothing. Phases 5 and 6 add no event types: bulk import and delete-all
 report every chat through `chat.created` /
@@ -3344,7 +3705,7 @@ the chat.
 
 ## 8. Route key index
 
-Every key of `apiRoutes` (95 routes). `P` = params, `Q` = query, `B` = JSON body, `F` = multipart form.
+Every key of `apiRoutes` (100 routes). `P` = params, `Q` = query, `B` = JSON body, `F` = multipart form.
 `fresh` = always requires fresh auth when a password is set (the route table `fresh` flag); `fresh*` = only in the
 cases of section 5 (stdio MCP servers, plugins that run code), enforced by the server.
 
@@ -3439,6 +3800,11 @@ cases of section 5 (stdio MCP servers, plugins that run code), enforced by the s
 | `shellRules.list` | GET | `/shell-rules` | - | `ShellRuleList` | |
 | `shellRules.create` | POST | `/shell-rules` | B `ShellRuleCreate` | `ShellRule` | 201 |
 | `shellRules.remove` | DELETE | `/shell-rules/:id` | P `ShellRuleParams` | `'empty'` | |
+| `chatQueue.list` | GET | `/chat/:id/queue` | P `ChatParams` | `QueueList` | |
+| `chatQueue.add` | POST | `/chat/:id/queue` | P `ChatParams`, B `QueueAddBody` | `QueueItem` | 201 |
+| `chatQueue.remove` | DELETE | `/chat/:id/queue/:itemId` | P `ChatQueueItemParams` | `'empty'` | |
+| `projectFiles.search` | GET | `/projects/:id/files` | P `ProjectParams`, Q `ProjectFilesQuery` | `ProjectFileSearch` | |
+| `projectFiles.attach` | POST | `/projects/:id/files/attach` | P `ProjectParams`, B `ProjectFileAttachBody` | `FileRef` | 201 |
 | `shares.list` | GET | `/shares` | Q `SharesQuery` | `ListResponse<ShareSummary>` | |
 | `shares.create` | POST | `/shares` | B `ShareCreate` | `ShareSummary` | 201, fresh |
 | `shares.update` | PATCH | `/shares/:id` | P `ShareParams`, B `ShareUpdate` | `ShareSummary` | fresh |
@@ -3458,4 +3824,8 @@ the owner routes `/shares...` and the public routes `/share/:token...` differ in
 another. The `changes.ts` routes live under `/chats/:id` too (Phase 8): `/chats/:id/changes`, `/chats/:id/git` and
 `/chats/:id/rewind` differ from `/chats/:id/export` and `/chats/:id/branch` in their static third segment, and
 `/chats/:id/changes/diff`, `/chats/:id/changes/revert` and `/chats/:id/changes/undo` from every `chats.ts` route in
-their static segments or their method; `shell-rules.ts` paths start with their own segment (`/shell-rules`).
+their static segments or their method; `shell-rules.ts` paths start with their own segment (`/shell-rules`). The
+`chat-queue.ts` routes (Phase 9) live under `/chat/:id` next to `/chat/:id/stream` and `/chat/:id/stop`, from which
+`/chat/:id/queue` differs in its static third segment; the `project-files.ts` routes (Phase 9) live under
+`/projects/:id`: `/projects/:id/files` and `/projects/:id/files/attach` differ from `/projects/browse` and
+`/projects/:id` in their segment count, and from `/plugins/:id/files...` in their first segment.

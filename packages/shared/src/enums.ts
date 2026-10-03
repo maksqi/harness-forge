@@ -4,9 +4,11 @@ import { z } from 'zod'
 
 /**
  * Chat permission mode (UI label: permission mode). Default `ask`. `edits` ("Accept edits", Phase 7, ADR-032): safe
- * tools and `ask` tools with workspace access `write` run without asking; everything else asks.
+ * tools and `ask` tools with workspace access `write` run without asking; everything else asks. `plan` ("Plan", Phase 9,
+ * ADR-041): read-only; tools with workspace access `write` / `execute` are not offered, the agent proposes a plan with
+ * `exit_plan_mode`, everything else asks like `ask`. The order is the order of the UI lists.
  */
-export const toolModeSchema = z.enum(['off', 'ask', 'edits', 'auto'])
+export const toolModeSchema = z.enum(['off', 'ask', 'edits', 'plan', 'auto'])
 export type ToolMode = z.infer<typeof toolModeSchema>
 
 /**
@@ -114,6 +116,16 @@ export type WorkspaceChangedSource = z.infer<typeof workspaceChangedSourceSchema
 /** The automatic orphaned-file sweep (setting `fileSweep`, ADR-039): `off` (default), `daily` or `weekly`. */
 export const fileSweepModeSchema = z.enum(['off', 'daily', 'weekly'])
 export type FileSweepMode = z.infer<typeof fileSweepModeSchema>
+
+// ---------- agent 2.0 (Phase 9) ----------
+
+/** Status of a todo item of `todo_write` (ADR-041). */
+export const todoStatusSchema = z.enum(['pending', 'in_progress', 'completed'])
+export type TodoStatus = z.infer<typeof todoStatusSchema>
+
+/** Type of a sub-agent of the `task` tool (ADR-043): `explore` is read-only, `general` gets the parent's tools. */
+export const taskTypeSchema = z.enum(['explore', 'general'])
+export type TaskType = z.infer<typeof taskTypeSchema>
 
 // ---------- global settings enums ----------
 

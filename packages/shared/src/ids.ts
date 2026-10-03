@@ -130,7 +130,8 @@ export type BuiltinProviderId = (typeof BUILTIN_PROVIDER_IDS)[number]
 
 /**
  * Builtin plugins in load order (`core-workspace`: the workspace tools of Phase 7, ADR-032; `mock` only with
- * `HF_MOCK_PROVIDER=1`).
+ * `HF_MOCK_PROVIDER=1`). Phase 9 adds `core-agent` (`todo_write`, `exit_plan_mode`, `task`; ADR-041 / ADR-043) before
+ * `mock` together with the plugin itself (P9-0b).
  */
 export const BUILTIN_PLUGIN_IDS = ['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'mock'] as const
 export type BuiltinPluginId = (typeof BUILTIN_PLUGIN_IDS)[number]
@@ -142,8 +143,16 @@ export const MOCK_PROVIDER_ID = 'mock'
 export const CLIENT_COMMANDS = ['new', 'model', 'effort', 'mode', 'help'] as const
 export type ClientCommand = (typeof CLIENT_COMMANDS)[number]
 
+/**
+ * Harness commands (Phase 9, ADR-040): run by the server itself, listed by `GET /commands`, not registrable by plugins.
+ * `/compact [focus]` summarizes the conversation.
+ */
+export const HARNESS_COMMANDS = ['compact'] as const
+export type HarnessCommand = (typeof HARNESS_COMMANDS)[number]
+
 const BUILTIN_PROVIDER_ID_SET: ReadonlySet<string> = new Set(BUILTIN_PROVIDER_IDS)
 const CLIENT_COMMAND_SET: ReadonlySet<string> = new Set(CLIENT_COMMANDS)
+const HARNESS_COMMAND_SET: ReadonlySet<string> = new Set(HARNESS_COMMANDS)
 
 export function isBuiltinProviderId(id: string): id is BuiltinProviderId {
   return BUILTIN_PROVIDER_ID_SET.has(id)
@@ -156,6 +165,10 @@ export function isReservedPluginId(id: string): boolean {
 
 export function isClientCommand(name: string): name is ClientCommand {
   return CLIENT_COMMAND_SET.has(name)
+}
+
+export function isHarnessCommand(name: string): name is HarnessCommand {
+  return HARNESS_COMMAND_SET.has(name)
 }
 
 /**

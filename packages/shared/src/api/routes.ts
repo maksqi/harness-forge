@@ -47,6 +47,7 @@ import {
 import {
   chatMessageParamsSchema,
   chatParamsSchema,
+  chatQueueItemParamsSchema,
   fileParamsSchema,
   fileUploadFormSchema,
   iconParamsSchema,
@@ -85,6 +86,7 @@ import {
   pluginTrustBodySchema,
   scaffoldRequestSchema,
 } from '../schemas/plugins.ts'
+import { projectFileAttachBodySchema, projectFileSearchSchema, projectFilesQuerySchema } from '../schemas/project-files.ts'
 import {
   projectBrowseQuerySchema,
   projectBrowseSchema,
@@ -99,6 +101,7 @@ import {
   providerTestResultSchema,
   providerUpdateSchema,
 } from '../schemas/providers.ts'
+import { queueAddBodySchema, queueItemSchema, queueListSchema } from '../schemas/queue.ts'
 import {
   shareCreateSchema,
   sharesQuerySchema,
@@ -158,6 +161,8 @@ export const API_MODULES = [
   'keys',
   'changes',
   'shellRules',
+  'chatQueue',
+  'projectFiles',
   'shares',
 ] as const
 export type ApiModule = (typeof API_MODULES)[number]
@@ -192,7 +197,7 @@ export interface ApiRouteDef {
   status?: 200 | 201 | 204
 }
 
-/** Every endpoint of API.md (95 routes), keyed `<module>.<action>`. */
+/** Every endpoint of API.md (100 routes), keyed `<module>.<action>`. */
 export const apiRoutes = {
   // health.ts
   'health.get': { module: 'health', method: 'GET', path: '/health', public: true, response: healthSchema },
@@ -335,6 +340,17 @@ export const apiRoutes = {
   'shellRules.list': { module: 'shellRules', method: 'GET', path: '/shell-rules', response: shellRuleListSchema },
   'shellRules.create': { module: 'shellRules', method: 'POST', path: '/shell-rules', body: shellRuleCreateSchema, response: shellRuleSchema, status: 201 },
   'shellRules.remove': { module: 'shellRules', method: 'DELETE', path: '/shell-rules/:id', params: shellRuleParamsSchema, response: 'empty' },
+
+  // chat-queue.ts (ADR-042): the steer queue of a chat, next to `/chat/:id/stream` and `/chat/:id/stop`; a queued
+  // message is taken by the running reply at its next step boundary, or starts the next turn
+  'chatQueue.list': { module: 'chatQueue', method: 'GET', path: '/chat/:id/queue', params: chatParamsSchema, response: queueListSchema },
+  'chatQueue.add': { module: 'chatQueue', method: 'POST', path: '/chat/:id/queue', params: chatParamsSchema, body: queueAddBodySchema, response: queueItemSchema, status: 201 },
+  'chatQueue.remove': { module: 'chatQueue', method: 'DELETE', path: '/chat/:id/queue/:itemId', params: chatQueueItemParamsSchema, response: 'empty' },
+
+  // project-files.ts (ADR-042): `@` file mentions of project chats; differs from `/projects/browse` in its segment
+  // count, and from `/plugins/:id/files` in its first segment
+  'projectFiles.search': { module: 'projectFiles', method: 'GET', path: '/projects/:id/files', params: projectParamsSchema, query: projectFilesQuerySchema, response: projectFileSearchSchema },
+  'projectFiles.attach': { module: 'projectFiles', method: 'POST', path: '/projects/:id/files/attach', params: projectParamsSchema, body: projectFileAttachBodySchema, response: fileRefSchema, status: 201 },
 
   // shares.ts (ADR-025): owner routes under `/shares`, public routes under `/share/:token`
   'shares.list': { module: 'shares', method: 'GET', path: '/shares', query: sharesQuerySchema, response: listResponseSchema(shareSummarySchema) },

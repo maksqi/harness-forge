@@ -205,6 +205,33 @@ describe('unknown routes and invalid input', () => {
     }
   })
 
+  const QUEUE_MESSAGE = { id: 'msg_sample0000000002', role: 'user', parts: [{ type: 'text', text: 'More.' }] }
+  const QUEUE_BODY = { message: QUEUE_MESSAGE, modelRef: 'mock:steer', reasoningEffort: 'auto', toolMode: 'plan' }
+  it.each([
+    ['GET', '/api/chat/not-a-uuid/queue', undefined, ['id']],
+    ['POST', `/api/chat/${CHAT}/queue`, { ...QUEUE_BODY, toolMode: 'yolo' }, ['toolMode']],
+    ['POST', `/api/chat/${CHAT}/queue`, { ...QUEUE_BODY, message: { ...QUEUE_MESSAGE, role: 'assistant' } }, ['message', 'role']],
+    ['POST', `/api/chat/${CHAT}/queue`, { ...QUEUE_BODY, message: { ...QUEUE_MESSAGE, parts: [] } }, ['message', 'parts']],
+    ['POST', `/api/chat/${CHAT}/queue`, { ...QUEUE_BODY, extra: true }, []],
+    ['DELETE', `/api/chat/${CHAT}/queue/q1`, undefined, ['itemId']],
+    ['GET', '/api/projects/prj_short/files', undefined, ['id']],
+    ['GET', '/api/projects/prj_sample0000000001/files?limit=51', undefined, ['limit']],
+    ['GET', `/api/projects/prj_sample0000000001/files?q=${'x'.repeat(257)}`, undefined, ['q']],
+    ['POST', '/api/projects/prj_sample0000000001/files/attach', { path: '' }, ['path']],
+    ['POST', '/api/projects/prj_sample0000000001/files/attach', { path: 'a.txt', extra: 1 }, []],
+  ] as const)('the Phase 9 routes validate their input first: %s %s -> 400', async (method, path, body, issuePath) => {
+    const init: RequestInit = { method }
+    if (body !== undefined) {
+      init.headers = { 'content-type': 'application/json' }
+      init.body = JSON.stringify(body)
+    }
+    const response = await t.request(path, init)
+    expect(response.status).toBe(400)
+    const envelope = harnessErrorEnvelopeSchema.parse(await response.json())
+    expect(envelope.error.code).toBe('validation_error')
+    expect(envelope.error.details).toMatchObject({ issues: [expect.objectContaining({ path: [...issuePath] })] })
+  })
+
   it('malformed JSON -> 400 validation_error', async () => {
     const response = await t.request('/api/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{"displayName":' })
     expect(response.status).toBe(400)

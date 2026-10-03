@@ -28,6 +28,7 @@ import type {
   SettingsSchema,
   ToolCallContext,
   ToolDefinition,
+  ToolMode,
   ToolResultOutput,
   ToolWorkspace,
   ToolWorkspaceAccess,
@@ -73,8 +74,8 @@ describe('exports', () => {
     expect(Object.keys(sdk).sort()).toEqual([...REEXPORTED_VALUES, 'PLUGIN_API_VERSION', 'definePlugin', 'settingsValuesSchema'].sort())
   })
 
-  it('has plugin API version 1.2.0 (Phase 7: workspace tools, ImageGenerateResult.modelName)', () => {
-    expect(sdk.PLUGIN_API_VERSION).toBe('1.2.0')
+  it('has plugin API version 1.3.0 (Phase 9: the plan mode, async-generator tools)', () => {
+    expect(sdk.PLUGIN_API_VERSION).toBe('1.3.0')
   })
 
   it('definePlugin is the identity', () => {
@@ -123,8 +124,8 @@ describe('exports', () => {
     expectTypeOf<ToolCallContext['workspace']>().toEqualTypeOf<ToolWorkspace | undefined>()
     expectTypeOf<ToolDefinition['workspace']>().toEqualTypeOf<ToolWorkspaceAccess | undefined>()
     expectTypeOf<ImageGenerateResult['modelName']>().toEqualTypeOf<string>()
-    // The edits mode reaches hooks through the shared enum.
-    expectTypeOf<shared.ToolMode>().toEqualTypeOf<'off' | 'ask' | 'edits' | 'auto'>()
+    // The edits mode (and the plan mode of 1.3.0) reaches hooks through the shared enum.
+    expectTypeOf<shared.ToolMode>().toEqualTypeOf<'off' | 'ask' | 'edits' | 'plan' | 'auto'>()
     const tool: ToolDefinition<{ path: string }, string> = {
       name: 'read_note',
       description: 'Reads a note of the project.',
@@ -133,6 +134,34 @@ describe('exports', () => {
       execute: async (input, c) => `${c.workspace?.root ?? ''}/${input.path}`,
     }
     expect(tool.workspace).toBe('read')
+  })
+
+  it('types the additions of plugin API 1.3.0 (ADR-041, ADR-043)', async () => {
+    expectTypeOf<ToolMode>().toEqualTypeOf<shared.ToolMode>()
+    expectTypeOf<HookMap['chat.params'][0]['toolMode']>().toEqualTypeOf<'off' | 'ask' | 'edits' | 'plan' | 'auto'>()
+    expectTypeOf<ReturnType<ToolDefinition<unknown, number>['execute']>>().toEqualTypeOf<Promise<number> | number | AsyncIterable<number>>()
+    // An async generator: every yield is a preliminary output, the last one is the final output.
+    const streaming: ToolDefinition<{ steps: number }, { done: number }> = {
+      name: 'count',
+      description: 'Counts.',
+      inputSchema: z.object({ steps: z.number() }),
+      async* execute(input) {
+        for (let done = 1; done <= input.steps; done++)
+          yield { done }
+      },
+    }
+    // A plain value and a promise are still accepted.
+    const direct: ToolDefinition<{ steps: number }, { done: number }> = { ...streaming, execute: input => ({ done: input.steps }) }
+    const promised: ToolDefinition<{ steps: number }, { done: number }> = { ...streaming, execute: async input => ({ done: input.steps }) }
+    const stored: ToolDefinition[] = [streaming, direct, promised]
+    const context = { chatId: 'c', modelRef: 'mock:echo', toolCallId: 't', messages: [], signal: new AbortController().signal }
+    const yielded: unknown[] = []
+    for await (const value of streaming.execute({ steps: 3 }, context) as AsyncIterable<{ done: number }>)
+      yielded.push(value)
+    expect(yielded).toEqual([{ done: 1 }, { done: 2 }, { done: 3 }])
+    expect(direct.execute({ steps: 2 }, context)).toEqual({ done: 2 })
+    await expect(promised.execute({ steps: 2 }, context)).resolves.toEqual({ done: 2 })
+    expect(stored).toHaveLength(3)
   })
 
   it('derives the AI SDK types of PLUGINS.md section 9', () => {

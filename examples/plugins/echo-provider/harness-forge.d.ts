@@ -1,5 +1,5 @@
 /* eslint-disable -- copy of the harness-forge.d.ts that the code plugin templates write */
-// harness-forge plugin API 1.2.0: types for your editor.
+// harness-forge plugin API 1.3.0: types for your editor.
 //
 // This file lets "// @ts-check" with JSDoc types (index.mjs) and "import type" (index.ts) resolve
 // "@harness-forge/plugin-sdk" without installing anything. The host never loads it and it is not part of the trust
@@ -18,8 +18,11 @@ declare module '@harness-forge/plugin-sdk' {
   export type PluginSource = 'builtin' | 'created' | 'zip' | 'npm' | 'url' | 'link' | 'copy'
   export type PluginState = 'disabled' | 'untrusted' | 'incompatible' | 'loading' | 'active' | 'error'
   export type PluginPermission = 'network' | 'secrets' | 'storage' | 'hooks' | 'process'
-  /** Permission mode of a chat; 'edits' runs write tools without asking (plugin API 1.2.0). */
-  export type ToolMode = 'off' | 'ask' | 'edits' | 'auto'
+  /**
+   * Permission mode of a chat; 'edits' runs write tools without asking (plugin API 1.2.0); 'plan' is read-only:
+   * write and execute tools are not offered (plugin API 1.3.0).
+   */
+  export type ToolMode = 'off' | 'ask' | 'edits' | 'plan' | 'auto'
   /** What a tool does with the project folder of a chat (plugin API 1.2.0). */
   export type ToolWorkspaceAccess = 'read' | 'write' | 'execute'
   export type ToolPolicy = 'safe' | 'ask' | 'always'
@@ -314,8 +317,11 @@ declare module '@harness-forge/plugin-sdk' {
     timeoutMs?: number
     /** Uses the project folder: offered only in chats whose folder opened; 'write' tools run without asking in 'edits'. */
     workspace?: ToolWorkspaceAccess
-    /** The output must be JSON-serializable (capped at 64 KB). */
-    execute(input: I, c: ToolCallContext): Promise<O>
+    /**
+     * The output must be JSON-serializable (capped at 64 KB). May be an async generator (plugin API 1.3.0): every yield
+     * is a preliminary output shown while the tool runs, the last yield is the final output.
+     */
+    execute(input: I, c: ToolCallContext): Promise<O> | O | AsyncIterable<O>
     /** Converts the stored output for the model (fast and deterministic, 3 s). */
     toModelOutput?(output: O, c: { toolCallId: string, input: I }): ToolResultOutput | Promise<ToolResultOutput>
   }

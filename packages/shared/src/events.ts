@@ -7,6 +7,7 @@ import { chatSummarySchema } from './schemas/chats.ts'
 import { pluginLogEntrySchema, pluginSummarySchema } from './schemas/plugins.ts'
 import { projectSummarySchema } from './schemas/projects.ts'
 import { providerSummarySchema } from './schemas/providers.ts'
+import { queueChangedDataSchema } from './schemas/queue.ts'
 
 /** Every server event type; the SSE `event:` field equals `type`. */
 export const SERVER_EVENT_TYPES = [
@@ -22,6 +23,7 @@ export const SERVER_EVENT_TYPES = [
   'project.changed',
   'key.rotated',
   'workspace.changed',
+  'queue.changed',
 ] as const
 
 export const serverEventTypeSchema = z.enum(SERVER_EVENT_TYPES)
@@ -36,10 +38,18 @@ export const chatUpdatedDataSchema = chatSummarySchema.extend({
 })
 export type ChatUpdatedData = z.infer<typeof chatUpdatedDataSchema>
 
+/** What started a run (Phase 9, ADR-042): a `POST /chat` request, or the server with the first queued message. */
+export const runOriginSchema = z.enum(['request', 'queue'])
+export type RunOrigin = z.infer<typeof runOriginSchema>
+
 export const runStartedDataSchema = z.object({
   chatId: chatIdSchema,
   messageId: messageIdSchema,
   modelRef: modelRefSchema,
+  /** Absent in events of servers before v1.5 (= `request`). */
+  origin: runOriginSchema.optional(),
+  /** The user message the run answers; set when the server started the turn from the queue (`origin: 'queue'`). */
+  userMessageId: messageIdSchema.optional(),
 })
 export type RunStartedData = z.infer<typeof runStartedDataSchema>
 
@@ -103,6 +113,8 @@ export const serverEventSchema = z.discriminatedUnion('type', [
   eventSchema('key.rotated', keyRotatedDataSchema),
   /** Files of a project folder were written by an agent tool or by a rewind, revert or undo (ADR-036). */
   eventSchema('workspace.changed', workspaceChangedDataSchema),
+  /** The steer queue of a chat changed (ADR-042): the whole queue after the change, and what left it. */
+  eventSchema('queue.changed', queueChangedDataSchema),
 ])
 export type ServerEvent = z.infer<typeof serverEventSchema>
 export type ServerEventType = ServerEvent['type']

@@ -90,8 +90,8 @@ function tableSignatures(): string[] {
 }
 
 describe('route table', () => {
-  it('has 95 routes keyed <module>.<action>', () => {
-    expect(API_ROUTE_KEYS).toHaveLength(95)
+  it('has 100 routes keyed <module>.<action>', () => {
+    expect(API_ROUTE_KEYS).toHaveLength(100)
     for (const key of API_ROUTE_KEYS) {
       const route: ApiRouteDef = apiRoutes[key]
       expect(key.startsWith(`${route.module}.`), key).toBe(true)
@@ -107,7 +107,7 @@ describe('route table', () => {
 
   it('equals the route key index of API.md (key, method, path, module)', () => {
     const index = routeIndex()
-    expect(index).toHaveLength(95)
+    expect(index).toHaveLength(100)
     expect(index.map(row => `${row.key} ${signature(row)}`).sort()).toEqual(
       API_ROUTE_KEYS.map(key => `${key} ${signature(apiRoutes[key])}`).sort(),
     )
@@ -206,7 +206,6 @@ describe('route table', () => {
   })
 
   it('declares the change and shell rule routes as the contract says (ADR-036, ADR-037, ADR-038)', () => {
-    expect(API_MODULES).toHaveLength(25)
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'changes')).toEqual([
       'changes.list',
       'changes.diff',
@@ -236,6 +235,29 @@ describe('route table', () => {
     expect(routeSuccessStatus(apiRoutes['shellRules.create'])).toBe(201)
     expect(routeSuccessStatus(apiRoutes['shellRules.remove'])).toBe(204)
     expect(routeSuccessStatus(apiRoutes['changes.rewind'])).toBe(200)
+  })
+
+  it('declares the queue and project file routes as the contract says (ADR-042)', () => {
+    expect(API_MODULES).toHaveLength(27)
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'chatQueue')).toEqual(['chatQueue.list', 'chatQueue.add', 'chatQueue.remove'])
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'projectFiles')).toEqual(['projectFiles.search', 'projectFiles.attach'])
+    const phase9 = API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'chatQueue' || apiRoutes[key].module === 'projectFiles')
+    // None needs fresh auth and none is public.
+    for (const key of phase9) {
+      const route: ApiRouteDef = apiRoutes[key]
+      expect(route.fresh, key).toBeUndefined()
+      expect(route.public, key).toBeUndefined()
+    }
+    for (const key of phase9.filter(key => apiRoutes[key].module === 'chatQueue'))
+      expect(apiRoutes[key].path.startsWith('/chat/:id/queue'), key).toBe(true)
+    for (const key of phase9.filter(key => apiRoutes[key].module === 'projectFiles'))
+      expect(apiRoutes[key].path.startsWith('/projects/:id/files'), key).toBe(true)
+    expect(routeSuccessStatus(apiRoutes['chatQueue.add'])).toBe(201)
+    expect(routeSuccessStatus(apiRoutes['chatQueue.remove'])).toBe(204)
+    expect(routeSuccessStatus(apiRoutes['projectFiles.attach'])).toBe(201)
+    // The attach answer is the upload answer.
+    expect(apiRoutes['projectFiles.attach'].response).toBe(apiRoutes['files.upload'].response)
+    expect((apiRoutes['projectFiles.search'] as ApiRouteDef).query).toBeDefined()
   })
 })
 
@@ -337,6 +359,33 @@ describe('matchApiRoute', () => {
       ['GET', `/shell-rules/${rule}`],
       ['PATCH', `/shell-rules/${rule}`],
       ['DELETE', '/shell-rules'],
+    ] as const)
+      expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
+  })
+
+  it('matches the queue and project file routes (Phase 9) without shadowing', () => {
+    const chat = '0199a8f0-0000-7000-8000-000000000001'
+    const project = 'prj_ABCdef0123456789'
+    expect(matchApiRoute('GET', `/chat/${chat}/queue`)).toMatchObject({ key: 'chatQueue.list', params: { id: chat } })
+    expect(matchApiRoute('POST', `/chat/${chat}/queue`)).toMatchObject({ key: 'chatQueue.add', params: { id: chat } })
+    expect(matchApiRoute('DELETE', `/chat/${chat}/queue/msg_sample0000000001`)).toMatchObject({
+      key: 'chatQueue.remove',
+      params: { id: chat, itemId: 'msg_sample0000000001' },
+    })
+    expect(matchApiRoute('GET', `/projects/${project}/files`)).toMatchObject({ key: 'projectFiles.search', params: { id: project } })
+    expect(matchApiRoute('POST', `/projects/${project}/files/attach`)).toMatchObject({ key: 'projectFiles.attach', params: { id: project } })
+    // The neighbors keep their keys.
+    expect(matchApiRoute('GET', `/chat/${chat}/stream`)?.key).toBe('chat.resume')
+    expect(matchApiRoute('POST', `/chat/${chat}/stop`)?.key).toBe('chat.stop')
+    expect(matchApiRoute('GET', '/projects/browse')?.key).toBe('projects.browse')
+    expect(matchApiRoute('GET', '/plugins/my-tool/files')?.key).toBe('pluginFiles.list')
+    for (const [method, path] of [
+      ['DELETE', `/chat/${chat}/queue`],
+      ['GET', `/chat/${chat}/queue/msg_sample0000000001`],
+      ['PATCH', `/chat/${chat}/queue/msg_sample0000000001`],
+      ['POST', `/projects/${project}/files`],
+      ['GET', `/projects/${project}/files/attach`],
+      ['GET', `/projects/${project}/files/src/app.ts`],
     ] as const)
       expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
   })

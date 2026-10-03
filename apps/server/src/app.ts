@@ -22,6 +22,7 @@ import { API_BASE_PATH } from './http/route-match.ts'
 import { createAudioRoutes } from './http/routes/audio.ts'
 import { createAuthRoutes } from './http/routes/auth.ts'
 import { createChangesRoutes } from './http/routes/changes.ts'
+import { createChatQueueRoutes } from './http/routes/chat-queue.ts'
 import { createChatRoutes } from './http/routes/chat.ts'
 import { createChatsRoutes } from './http/routes/chats.ts'
 import { createCommandsRoutes } from './http/routes/commands.ts'
@@ -38,6 +39,7 @@ import { createPluginDraftsRoutes } from './http/routes/plugin-drafts.ts'
 import { createPluginFilesRoutes } from './http/routes/plugin-files.ts'
 import { createPluginInstallRoutes } from './http/routes/plugin-install.ts'
 import { createPluginsRoutes } from './http/routes/plugins.ts'
+import { createProjectFilesRoutes } from './http/routes/project-files.ts'
 import { createProjectsRoutes } from './http/routes/projects.ts'
 import { createProvidersRoutes } from './http/routes/providers.ts'
 import { createSettingsRoutes } from './http/routes/settings.ts'
@@ -47,10 +49,11 @@ import { createToolsRoutes } from './http/routes/tools.ts'
 import { createStaticRoutes } from './http/static.ts'
 
 /**
- * The 25 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
+ * The 27 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
  * with static `/plugins/<word>` paths are mounted before `plugins` (`/plugins/:id...`); no route shadows another
  * (they differ in method, segment count or static segments, API.md 8), the order is a second line of defense. `shares`
- * also serves the public `/share/:token` routes; `changes` (Phase 8) serves chat-scoped routes under `/chats/:id/...`.
+ * also serves the public `/share/:token` routes; `changes` (Phase 8) serves chat-scoped routes under `/chats/:id/...`;
+ * `chatQueue` (Phase 9) serves `/chat/:id/queue...` next to `chat`, `projectFiles` (Phase 9) `/projects/:id/files...`.
  */
 export const ROUTE_MODULES = {
   health: createHealthRoutes,
@@ -73,6 +76,8 @@ export const ROUTE_MODULES = {
   keys: createKeysRoutes,
   changes: createChangesRoutes,
   shellRules: createShellRulesRoutes,
+  chatQueue: createChatQueueRoutes,
+  projectFiles: createProjectFilesRoutes,
   shares: createSharesRoutes,
   pluginInstall: createPluginInstallRoutes,
   pluginDrafts: createPluginDraftsRoutes,

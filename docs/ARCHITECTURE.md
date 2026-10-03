@@ -18,12 +18,12 @@ flowchart LR
   subgraph Server["Node process :8787 (apps/server)"]
     Static["Static SPA<br/>.output/public + 200.html"]
     API["Hono /api<br/>middleware + route modules"]
-    Chat["chat/ pipeline<br/>AI SDK v7 streamText"]
+    Chat["chat/ pipeline<br/>AI SDK v7 streamText,<br/>prepareStep, queue, sub-agents"]
     Host["plugins/ host<br/>builtin + user plugins"]
     Reg["registry/<br/>providers, models, tools, MCP, commands, hooks"]
     Cat["catalog/<br/>model catalog"]
     MCPM["mcp/ manager"]
-    Svc["services/<br/>settings, secrets, chats, files, events, data, shares,<br/>images, audio, projects, keys, maintenance,<br/>checkpoints, shell-rules"]
+    Svc["services/<br/>settings, secrets, chats, files, events, data, shares,<br/>images, audio, projects, keys, maintenance,<br/>checkpoints, shell-rules, project-files"]
     WS["workspace/<br/>path guard, file walker, shell runner,<br/>journal, file lock, git runner"]
     DB[("SQLite WAL<br/>data/harness.db")]
   end
@@ -93,6 +93,12 @@ Key properties:
   chat's net changes and the project's Git status through one hardened git runner (6.17); the shell remembers its
   working folder between calls and runs commands that match the user's shell rules without asking (6.13, 6.2); an
   opt-in timer runs the orphaned-file cleanup (6.15).
+- **Agent 2.0** (Phase 9): long chats and long runs compact their context into a model-written summary instead of
+  dropping old turns (6.18); a read-only plan mode ends with a plan the user approves, and the agent keeps a todo list
+  (6.19); messages sent while the agent works wait in a server-side queue and reach the model at the next step
+  boundary or as the next turn (6.20); `@` mentions attach project files (6.21); sub-agents run separate agent loops in
+  parallel without ever asking for approval (6.22). All of it hangs off one step-boundary composer (`prepareStep`) and
+  one model-history builder, and every new state is either derived from the stored messages or kept in bounded memory.
 
 ## 2. Packages
 
@@ -117,7 +123,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `app.ts` | `createApp(deps)` app factory: mounts middleware and every route module under `/api`; used by `main.ts` and `createTestApp()`. |
 | `paths.ts`, `logger.ts` | Package-relative locations (server package root, migrations, bundled assets, the SPA build, installed package versions); JSON-lines logger with redaction. |
 | `http/middleware/` | Request id, structured access log (share tokens masked; it also runs the untrusted-proxy hint of `proxy-warning.ts`), secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`; `request-info.ts` resolves the client address and scheme, trusting forwarded headers only from `HF_TRUST_PROXY` peers (section 10.6). |
-| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `audio`, `shares`; Phase 7: `projects`, `keys`; Phase 8: `changes` (7 chat-scoped routes: changes, diff, git, revert, undo, rewind preview and apply; 6.16, 6.17) and `shell-rules` (3; 6.13)); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes; `audio.ts` (Phase 6) parses the multipart recording of `POST /audio/transcriptions` itself and answers `POST /audio/speech` with audio bytes (section 6.12). |
+| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `audio`, `shares`; Phase 7: `projects`, `keys`; Phase 8: `changes` (7 chat-scoped routes: changes, diff, git, revert, undo, rewind preview and apply; 6.16, 6.17) and `shell-rules` (3; 6.13); Phase 9: `chat-queue` (module `chatQueue`, 3 routes under `/chat/:id/queue`; 6.20) and `project-files` (module `projectFiles`, 2 routes under `/projects/:id/files`; 6.21)); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes; `audio.ts` (Phase 6) parses the multipart recording of `POST /audio/transcriptions` itself and answers `POST /audio/speech` with audio bytes (section 6.12). |
 | `http/static.ts` | Production SPA serving from `HF_WEB_DIR` (default `apps/web/.output/public`) with `200.html` fallback for client routes. |
 | `security/` | `keyring.ts` (master key + HKDF subkeys; Phase 7: one frozen keyring whose key and `keyVersion` swap in place during a rotation, with the module-private controls `swapMasterKey`, `beginKeyChange`, `whenKeyStable`, 6.14), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers; Phase 6: `microphone=(self)` and the SPA's `media-src`, section 10.2), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). Phase 8: `process-spawn.test.ts` fails when a non-test file other than `workspace/shell.ts`, `workspace/git.ts` and `mcp/stdio-transport.ts` imports `node:child_process`. |
 | `db/` | Drizzle schema (`schema.ts`), libsql client, `migrate()` at boot, pragmas (WAL, foreign keys, busy timeout), transaction helper. |
@@ -129,6 +135,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `services/keys/` | `KeyService` (Phase 7, ADR-034, section 6.14): `index.ts` (`status()` for `GET /keys`, read-only; `rotate()`, the online rotation), `rotate.ts` (the shared core `rotateSecretsTx` and the write-ahead `rotateWithKeyFile`), `check.ts` (the key check and `_keys`), `recover.ts` (the boot recovery `recoverKeyState`), `server-lock.ts` (`server.lock`) and `cli.ts` (the `rotate-key` CLI). |
 | `services/checkpoints/` | `CheckpointService` (Phase 8, ADR-036 / ADR-037, sections 6.16, 6.17; `index.ts` composes the modules, each of which receives a `CheckpointContext { deps, blobs, rows, now }`): `store.ts` (the content-addressed blob store `<dataDir>/checkpoints/`), `disk.ts` (`sha256Hex`, `readCheckpointBefore`, `diskSha` / `diskShas`, `writeWithoutRecording`), `journal-service.ts` (`journal({ chatId, messageId, projectId })` for a run: the `edit` rows of journaled writes, the `shell` / `untracked` rows, the coalesced `workspace.changed` events; the row writer `createChangeRowWriter`), `prune.ts` (age and budget eviction, orphan blobs and temp files; the 6-hour timer and the `chat.deleted` trigger live in `index.ts`), `plan.ts` (the pure rewind / revert / undo planner), `restore.ts` (the restore primitive: per file under the file lock), `restore-scope.ts` (the chat's project, the 409 `run-active` check, the batch event and log line), `rewind.ts`, `revert.ts`, `undo.ts`, `changes.ts` (`ChatChanges`, the chat diff), `git-changes.ts` (`GitStatus` and the HEAD diff over `workspace/git.ts`), `changes-common.ts` (the shared disk reads and diff sides), `purge()` for delete-all and `summary()` for `GET /data`. |
 | `services/shell-rules/` | `ShellRuleService` (Phase 8, ADR-038, 6.13): rule CRUD over `shell_rules` (validation through the shared `parseShellRule`, 200 rules per scope, duplicates 409 `exists`; creates serialized in-process because the table has no unique index) and `forRun(projectId)`, the global plus project rules a run matches against (one query; `forRun(null)` runs none). |
+| `services/project-files/` | The project files service (Phase 9, ADR-042, section 6.21; `types.ts` frozen, `AppDeps.projectFiles`): the per-project in-memory file index for `@` mentions (built with `workspace/walk.ts`, secret-looking paths left out, single-flight, 30 s TTL, dropped on `workspace.changed`), `search(projectId, q, limit)` ranked by the shared `rankPaths`, and `attach(projectId, path)` (path guard, `.git` / secret refusal, 5 MiB cap, then `files.upload`). |
 | `services/projects/` | `ProjectService` (Phase 7, ADR-031, section 6.13): `roots.ts` (the allowed roots, checked first in `startDeps` by `start()`, and the folder checks), `index.ts` (project CRUD, the folder browser, `openWorkspace()`, `chatCount`, `project.changed`), `project-file.ts` (`AGENTS.md` / `CLAUDE.md` with its `@file.md` lines). |
 | `workspace/` | The agent workspace (Phase 7, section 6.13): `paths.ts` (`resolveWorkspacePath` and the safe read / write helpers; frozen), `sensitive.ts` (secret-looking and hidden paths), `walk.ts` (the folder walker; `.gitignore` through `ignore`), `pattern-worker.ts` (globs through `picomatch` and regular expressions, matched in a killable Worker), `diff.ts` (diffs through `diff`), `trim.ts` (output caps), `text.ts`, `shell.ts` (the only shell runner: process groups, capped output; Phase 8: the working folder reported on fd 3 with `reportCwd`, `parseCwdReport`, `killProcessGroup` exported) and `shell-env.ts` (the environment allowlist; Phase 8: empty and relative `PATH` entries dropped, `CDPATH`, `ENV` and `BASH_ENV` never passed). Phase 8 (6.13, 6.16, 6.17): `run-scope.ts` (`bindRunScope` / `runScopeOf`: the server-only run scope bound to a tool call context), `file-lock.ts` (`withFileLock`: one promise chain per resolved path), `journal.ts` (`journaledWrite`: snapshot, write, journal row), `remove.ts` (the guarded unlink of a restore), `shell-cwd.ts` (`initialShellCwd(history)`, `checkShellFolder`, `clampEndCwd`, `cdTargetsInside`, the folder notes) and `git.ts` (the hardened git runner; the only git spawn). |
 | `services/shares/` | Share links (ADR-025, section 6.10): HMAC tokens, the allowlist sanitizer, snapshots, owner CRUD, the public view and file access, expiry, rate limits. |
@@ -151,15 +158,16 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `plugins/templates/` | Template sources (tool, provider, MCP bridge, command pack): a JSDoc-typed `index.mjs` or a TypeScript `index.ts`, the vendored API types `harness-forge.d.ts` and a README. |
 | `catalog/` | Model catalog: live listings with 24 h cache (`model_cache`), models.dev snapshot + weekly refresh, seeds, plugin models, custom ids, prefs, `classify()` (model kinds incl. `image`, `transcription`, `speech`; `imageOutput`), cost lookup (section 9). |
 | `providers/` | Model resolution: `modelRef` -> provider -> credentials (stored or env) -> `LanguageModel` (`resolveModel`), and since Phase 6 image, transcription and speech models (`resolveImageModel`, `resolveTranscriptionModel`, `resolveSpeechModel`); provider test; provider status; error mapping to `HarnessError`; the LobeHub icon service (`/api/icons/lobe`). |
-| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). Phase 8: `scope.ts` (`createRunScope`: chat, assistant message id, journal, shell rules, sticky folder, built once per run) bound to every tool call context and to policy contexts (`AssembledTools.scope`), `shell` / `untracked` journal rows after each settled workspace call (`settledCallRecord` in `tools.ts`), `effectiveOverride` in `approval.ts` (a stored `allow` override on an `execute` tool is ignored), and the workspace block says that `cd` persists (6.2, 6.13, 6.16). |
+| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). Phase 8: `scope.ts` (`createRunScope`: chat, assistant message id, journal, shell rules, sticky folder, built once per run) bound to every tool call context and to policy contexts (`AssembledTools.scope`), `shell` / `untracked` journal rows after each settled workspace call (`settledCallRecord` in `tools.ts`), `effectiveOverride` in `approval.ts` (a stored `allow` override on an `execute` tool is ignored), and the workspace block says that `cd` persists (6.2, 6.13, 6.16). Phase 9 (ADR-040 … ADR-043, sections 6.18 – 6.22): `steps.ts` (`createPrepareStep`: the one step-boundary composer: context guard → steer → sub-agent finalize nudge), `model-history.ts` (`buildModelHistory`: compaction → steer split → task output reduction → command expansions → summary merge), `markers.ts` (the instruction markers of the summarizer and of sub-agents), `agent-scope.ts` (`agentScopeOf(c)`: the private side channel of `core-agent`, a WeakMap bound to the tool call context like the run scope), `compaction/` (`history.ts`, `guard.ts`, `stream.ts`, `summarize.ts`, `prompt.ts`), `queue.ts` (the in-memory steer queue), `steer.ts` (`createSteerStep`, `stepInjector`), `modes.ts` (the plan-mode tool set and `activeTools`), `subagent/` (`index.ts` `createSubagentRunner`, `tools.ts` the child tool set and its approval, `history.ts`), plus `RunSession.inject` / `addExtraCost` / `writeTransient` and `RunContext.onReleased` in `pipeline.ts`, the `/compact` branch of `commands.ts`, the streaming tool wrapper of `tools.ts`, `case 'plan'` and the `exit_plan_mode` rule of `approval.ts`. |
 | `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect with backoff, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable; `{{settings.*}}` templating of plugin-declared servers; its own stdio transport (minimal environment, stderr lines in the owning plugin's log); the user-configured servers of the MCP panel (`mcp_servers`). Phase 8: `tools.ts` (`ToolService.update`) refuses `override: 'allow'` for tools with workspace access `execute` (400 on `['override']`, "Shell commands can't be always allowed. Add a shell rule instead."), and `GET /tools` shows `policy: null` for a tool whose policy is a function (the shell's `shellPolicy`). |
 | `builtin-plugins/index.ts` | Static list of builtin plugin modules, loaded first and trusted. |
 | `builtin-plugins/core-providers/` | The 13 builtin providers (see PROVIDERS.md): definitions, seeds, reasoning mapping, error mapping; Phase 6 (version 1.1.0, `engines ^1.1.0`): the image, transcription and speech factories of OpenAI, xAI, Google, Mistral and Groq, `imageParams`, `transcriptionOptions` and the media seeds (`lib/media.ts`; PROVIDERS.md 13). |
 | `builtin-plugins/core-tools/` | Builtin tools (version 1.2.0 since Phase 7, `engines ^1.2.0`): `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard; setting "Allow localhost in web_fetch") and `generate_image` (Phase 6, `generate-image.ts`, policy `ask`, the `imageModelRef` setting; Phase 7: its output names the model with `modelName`; section 6.11). |
 | `builtin-plugins/core-workspace/` | Phase 7 (ADR-032, version 1.0.0, `engines ^1.2.0`, permission `process`): the workspace tools `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file` (one module each) and `shell` (`shell-tool.ts`; not on Windows, removed by `HF_WORKSPACE_SHELL=0`); `policies.ts` (the policy functions of the file tools), `common.ts` (guard timeouts, the model text helper); every tool declares its workspace access (section 6.13). Phase 8: `write_file` and `edit_file` write through `journaledWrite` (snapshot first; parallel edits of one file serialize), and `shell` gets the sticky working folder, the `shellPolicy` of the shell rules and the output fields `endCwd`, `cwdNote`, `allowedBy`. |
+| `builtin-plugins/core-agent/` | Phase 9 (ADR-041, ADR-043; version 1.0.0, `engines ^1.3.0`): the agent tools `todo_write` (`todo-write.ts`, policy `safe`), `exit_plan_mode` (`exit-plan-mode.ts`, policy `always`) and `task` (`task.ts`, policy `safe`, an async-generator `execute`); `common.ts` (the model texts). They reach server internals (the run's tool mode, the sub-agent runner) only through `chat/agent-scope.ts`; server code recognizes them by `pluginId === 'core-agent'` (sections 6.19, 6.22). |
 | `builtin-plugins/core-commands/` | Builtin server-side slash commands (prompt templates such as `/explain`, `/review`, `/commit`; list in PLUGINS.md). |
 | `builtin-plugins/core-mcp/` | Owns the user-configured MCP servers (`mcp_servers` table): they are declared as its contributions, so disabling `core-mcp` closes them. Its settings (reconnect automatically, connect timeout) apply to every MCP server. |
-| `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, the Phase 6 media models `mock:image`, `mock:image-chat`, `mock:image-tool`, `mock:transcribe`, `mock:speech` (a PNG encoder and a silent WAV), plus the tool `mock_approval_tool`; Phase 7: `mock:workspace`, which walks through the workspace tools; Phase 8: `mock:checkpoint` (an edit per turn plus shell steps for rewind and the sticky folder) and `mock:shell` (runs the user text as one shell command) (behavior in PROVIDERS.md section 8). |
+| `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, the Phase 6 media models `mock:image`, `mock:image-chat`, `mock:image-tool`, `mock:transcribe`, `mock:speech` (a PNG encoder and a silent WAV), plus the tool `mock_approval_tool`; Phase 7: `mock:workspace`, which walks through the workspace tools; Phase 8: `mock:checkpoint` (an edit per turn plus shell steps for rewind and the sticky folder) and `mock:shell` (runs the user text as one shell command); Phase 9: `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer` (scripts for compaction, plan mode, todos, sub-agents and the steer queue; `MockPlan` gains parallel `toolCalls` and `stepDelayMs`) (behavior in PROVIDERS.md section 8). |
 | `testing/` | In-process test harness: `createTestApp()` (real composition over an in-memory database) and fakes (Phase 6: `fake-media.ts` with fake image and audio services; the fake media resolvers live in `providers/testing.ts`, and `chat/testing.ts` has `createMediaTestApp()`; Phase 7: `fake-keyring.ts`, a deterministic, rotatable keyring; Phase 8: `fake-checkpoints.ts` (an in-memory `CheckpointBlobStore`, a test row writer and journal-row helpers) and `fake-shell-rules.ts`). |
 | `live/` | Opt-in live provider suite (`*.live.test.ts`, `pnpm test:live`, ADR-027): real provider calls with the keys in the environment; the image and voice checks only with `HF_LIVE_MEDIA=1`; excluded from `pnpm test` (PROVIDERS.md section 12). |
 | `assets/catalog/models-dev.json` (package root) | Bundled models.dev snapshot (updated by `pnpm catalog:update`); read at runtime, so it ships next to `dist/` (section 11). |
@@ -190,11 +198,12 @@ Dependency direction (no cycles): `http/routes` -> `services`, `chat`, `catalog`
 | `components/workspace/` | Phase 8 (UI.md 7.21 – 7.23): `ChatWorkspace` (always the resizable group next to the chat; the right sheet below 1024 px; Alt+C), `changes/` (`ChangesToggle`, `ChangesPanel`, `ChangesFileRow`, `ChangesFileDiff`, `ChangesEmpty`, `RevertFileDialog`, `RevertedToast` + `revert-toasts.ts` (the toast with Undo), `changes-rows.ts`, `changes-context.ts`), `rewind/` (`RewindDialog`; the result toast `RewindResultToast` + `rewind-toast.ts`, shown by `ChatView`; `rewind.ts` with the injection key `REWIND_DIALOG_HOST`, through which the dialog hands a 404 / 409 to `ChatView`), `allowlist/` (`AllowRuleOption` on the shell approval card, `AllowlistEditor`, `AllowlistDialog`, `GlobalAllowlistSection`, `allow-rule.ts`, `allowlist.ts`), `nuxt-imports.ts`. |
 | `components/chat/parts/tools/` | Phase 7 (UI.md 7.19): the store-free registry `workspace-tools.ts` and the renderers `WorkspaceToolBody`, `DiffView`, `TerminalOutput`, `FileContent`, `FileList`, `ToolApprovalPreview`, `ToolRowSummary` (the `+12 −3` / `exit 1` summary of a row; all also used by the share page); `parts/tool-approval-context.ts` (the optional chat context of approval cards: tool mode, project name; Phase 8: project id, sticky shell folder). Phase 8: `ToolRuleBadge`, the spoken labels of row summaries, the sticky folder in `TerminalOutput`, the `DiffView` props `stats` / `lineNumbers`. |
 | `components/chat/`, `components/chat/parts/`, `components/chat/composer/` | Transcript, message and part renderers (with the `BranchSwitcher` of message versions and the Delete-version action; Phase 6: `ImageGallery`, `GeneratingImages`, `ReadAloudButton`, the attachment chips of `MessageEditor`), composer (ModelPicker, EffortMenu, PermissionMenu, SlashMenu; Phase 6: `ImageOptionsMenu`, `MicButton`, `RecordingIndicator`). Pure Phase 6 helpers next to them: `chat-format.ts` (gallery blocks, the image-turn meta line), `attachment-toasts.ts` (the rejection toasts shared by the composer and the message editor), `parts/image-gallery.ts` (tiles, download links, placeholders), `parts/tool-row.ts` (the first argument of a tool row: the `generate_image` prompt), `composer/dictation.ts` (caret insertion, recorder type, clip name), `composer/image-options.ts` (the image options menu). |
+| `components/chat/{agent,compaction,steer,queue}/`, `components/settings/agent/` | Phase 9 (UI.md 7.24 – 7.27, 9.11): `PlanApprovalCard`, `PlanBody`, `TodoList`, `TodoStrip`, `TaskBlock`, `TaskBody`, `TaskStepRow` and `todos.ts` (the todo state over the shared `latestTodos`); `CompactionDivider` and `compaction.ts` (the dimming layout over the shared `compactionMarkers`); `SteerNote`; `QueuedMessages`; `AgentSettingsSection`; in `composer/`: `MentionMenu` and `mode-cycle.ts` (Shift+Tab). |
 | `components/plugins/*` | `list`, `detail`, `forms`, `install`, `wizard`, `code`, `mcp` component groups. |
 | `components/share/` | `ShareDialog`, `SharesSettingsSection`, `SharedChatView`, `ShareToolRow`; the share page renders generated images as a gallery (Phase 6). |
 | `components/settings/`, `components/settings/{data,media,images,voice}/`, `components/providers/`, `components/common/` | Settings forms (incl. the Data and Media pages; Phase 7: `data/EncryptionKeySection`, `RotateKeyDialog`, `StorageCleanupSection` and `data/data-context.ts`, which lets the sections reload the summary and Shared links after a cleanup or a rotation; `voice/voice-settings.ts`: the dictation languages, speeds, voice field rules and the Test voice text), `ProviderIcon`, shared pieces (`Markdown.vue`, empty states). |
-| `composables/` | `useChatSession` (detached `useChat` registry), `useComposer*`, `useShortcuts`, `useGlobalShortcuts`, helpers; Phase 6: `useImageOptions`, `useVoiceInput` (dictation), `useSpeechPlayer` (the one read-aloud player), `useFreshAuth` (every password prompt; it replaced the three `fresh-auth.ts` helpers of `plugins/code`, `plugins/detail` and `share`, and the duplicate helpers of the data, install and MCP forms); Phase 8: `useChangesPanel` (the panel's open state, view and width in `localStorage`), `useChatSession` gains `cwd` and the shell rules of an approval. |
-| `stores/` | Pinia stores `auth`, `chats` (Phase 7: the project filter), `providers`, `models`, `plugins`, `projects` (Phase 7), `settings`, `ui`, `workspace` and `shell-rules` (Phase 8: the changes panel data and the shell rules) (each `use<Name>Store`), implemented over the typed client and refreshed by `/api/events`. |
+| `composables/` | `useChatSession` (detached `useChat` registry), `useComposer*`, `useShortcuts`, `useGlobalShortcuts`, helpers; Phase 6: `useImageOptions`, `useVoiceInput` (dictation), `useSpeechPlayer` (the one read-aloud player), `useFreshAuth` (every password prompt; it replaced the three `fresh-auth.ts` helpers of `plugins/code`, `plugins/detail` and `share`, and the duplicate helpers of the data, install and MCP forms); Phase 8: `useChangesPanel` (the panel's open state, view and width in `localStorage`), `useChatSession` gains `cwd` and the shell rules of an approval; Phase 9: `useProjectFiles` (mention search and attach), `useFileMentions` (the `@` menu state), and `useChatSession` gains `submit` (send or queue), `queue`, `cancelQueued`, `stop()` returning the dropped queue items, `todos`, `activity` and the plan decision of an approval. |
+| `stores/` | Pinia stores `auth`, `chats` (Phase 7: the project filter), `providers`, `models`, `plugins`, `projects` (Phase 7), `settings`, `ui`, `workspace` and `shell-rules` (Phase 8: the changes panel data and the shell rules), `chat-queue` (Phase 9: the queued messages per chat, kept in sync by `queue.changed`) (each `use<Name>Store`), implemented over the typed client and refreshed by `/api/events`. |
 | `utils/` | Pure helpers (date grouping, formatting, `data-testid` constants, `speech-text.ts`: what read-aloud speaks; Phase 7: `line-diff.ts` for approval previews, `ansi.ts` for terminal output), test helpers (`utils/testing/`, incl. `fake-media.ts`). |
 
 ## 5. Boot sequence
@@ -268,11 +277,19 @@ Notes:
   `_keys = { version: 1, check, rotatedAt: null }` when the secrets table is empty or a row decrypts (6.14). The first
   boot of v1.4 on a v1.3 data directory applies `0005_workspace_checkpoints` (the tables `workspace_changes` and
   `shell_rules`, no change to an existing table): earlier agent edits have no checkpoints (a rewind to a message from
-  before the upgrade has nothing to restore), no shell rule exists and `fileSweep` is `off`.
+  before the upgrade has nothing to restore), no shell rule exists and `fileSweep` is `off`. The first boot of v1.5 on a
+  v1.4 data directory applies `0006_shell_rule_unique` (duplicate shell rules deleted, the oldest of each scope and
+  prefix kept; two partial unique indexes; a stored `allow` override on `shell` cleared; section 8, Migrations): the
+  five new settings take their defaults (`autoCompact` on, `shiftTabModes` on, the two model refs null, 30 sub-agent
+  steps), old chats keep their permission mode, the queue starts empty, and a long chat compacts on its first run that
+  passes 80 % of the model's context window (6.18).
 - A failed boot prune of the checkpoint store is logged (`checkpoint prune failed`) and never fails the boot; the store
   folder itself must be creatable (a failing `mkdir` fails the boot like any other step).
 - Graceful shutdown (`SIGINT`/`SIGTERM`, `stopDeps()`): stop accepting connections, stop the automatic file sweep
-  first (Phase 8, `data.stop()`: clears its timer and aborts a sweep in flight between batches), abort active runs
+  first (Phase 8, `data.stop()`: clears its timer and aborts a sweep in flight between batches), then (Phase 9, in this
+  order) clear every chat's steer queue (items removed with reason `stopped`, so no run ends by starting a queued next
+  turn), abort every running sub-agent (their parent `task` calls end as aborted) and drop the mention file index, then
+  abort active runs
   (persisted as `aborted`; aborting a run kills its shell process groups and its git commands), then (Phase 8,
   `checkpoints.stop()`, after the runs so no journal write is cut off) clear the prune timers, drop the pending
   `workspace.changed` tool events and abort a running prune between its steps, waiting for it; dispose plugins (5 s
@@ -337,10 +354,11 @@ sequenceDiagram
     P-)Ev: chat.updated (id, title)
   end
   P->>P: file parts -> bytes, tools (registry + MCP, filtered; workspace tools only with an open folder), params + hooks
-  P->>P: await convertToModelMessages(history, tools), hook chat.messages, trim to 85 percent of context
-  P->>M: streamText(model, instructions, messages, tools, toolApproval, stopWhen isStepCount(maxSteps or projectMaxSteps), abortSignal run.signal)
+  P->>P: buildModelHistory(history) (Phase 9: compaction, steer split, task outputs, expansions), await convertToModelMessages, hook chat.messages
+  Note over P: Phase 9: trimming moved into the context guard of prepareStep (automatic compaction first, 6.18)
+  P->>M: streamText(model, instructions, messages, tools, activeTools?, toolApproval, prepareStep (Phase 9), stopWhen isStepCount(maxSteps or projectMaxSteps), abortSignal run.signal)
   P->>P: result.consumeStream() so the run survives a client disconnect
-  P->>P: createUIMessageStream: writer.merge(toUIMessageStream(result.stream) piped through storeGeneratedFiles)
+  P->>P: createUIMessageStream: writer.merge(toUIMessageStream(result.stream) piped through stepInjector (Phase 9) and storeGeneratedFiles)
   R-->>W: 200 createUIMessageStreamResponse(that stream) as SSE
   Note over R,Runs: consumeSseStream tees the SSE bytes into the run buffer for GET /api/chat/:id/stream
   M-->>W: start (metadata modelRef, startedAt), start-step, text / reasoning / tool chunks, finish-step ...
@@ -394,14 +412,19 @@ Notes:
 - Slash commands (`/name args` at the start of a user text part, name registered in the commands registry): the
   user message keeps the original text and gets `metadata.command`; `prompt` commands replace the text sent to the
   model with the expansion; `reply` commands write the assistant reply with `createUIMessageStream` without a model
-  call. Client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server.
+  call. Client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server. Phase 9: the
+  harness command `/compact [focus]` (`HARNESS_COMMANDS` in `shared/ids.ts`) is resolved before the registry lookup
+  and runs the compaction stream instead of a model reply (6.18); no plugin can register that name.
 - Tool assembly: registry tools + connected MCP tools, filtered by `toolMode` (`off` = no tools), tool prefs
   (`enabled: false` removes the tool; an `override` only changes approval, see 6.2), and model capability
   `capabilities.tools` (no tools for models without it, with a `tools-unsupported` notice). Phase 7: tools that declare
   workspace access are offered only in chats whose project folder opened, `execute` tools only while
   `HF_WORKSPACE_SHELL` is on, and every tool of such a run gets `ToolCallContext.workspace` (6.13). Every tool is wrapped:
   owner-plugin-active check, `tool.before` / `tool.after` hooks, `guard()` timeout (default 60 s), output capped at
-  64 KB (truncated with a marker).
+  64 KB (truncated with a marker). Phase 9: `chat/modes.ts` reduces the set for the permission mode (`plan` drops the
+  workspace `write` / `execute` tools and adds `exit_plan_mode`; 6.19) and may return `activeTools`; an async-generator
+  `execute` is wrapped as a streaming tool (preliminary outputs; 6.22); every run with tools binds the agent scope
+  (`agent-scope.ts`: the tool mode, the sub-agent runner, the todos) next to the run scope.
 - When a request sends no tools (tool mode `off`, a model without tool support, or no usable tool), earlier tool
   calls and results in the history are sent to the model as compact text (`[tool name(input) → ok: output]`,
   input ≤ 500 chars, output ≤ 2000) so providers that reject tool parts without tool definitions still work; the
@@ -468,6 +491,14 @@ offered, so `edits` behaves like `ask`.
 MCP tools derive their policy from annotations: `readOnlyHint` -> `safe`, `destructiveHint` -> `always`, otherwise
 the server's configured `policy` (default `ask`). MCP tools never have workspace access, so they ask in `edits` mode
 exactly as in `ask` mode.
+
+**Plan mode and sub-agents** (Phase 9, ADR-041 / ADR-043; 6.19, 6.22). `toolMode = plan` resolves like `ask` (steps 4
+and 5); what makes it read-only is the tool set (`chat/modes.ts` offers no workspace `write` / `execute` tool). Before
+step 1, `createToolApproval` answers `user-approval` for the `core-agent` tool `exit_plan_mode` whatever the override,
+the hooks or the mode say, so the plan card always shows (on the continuation that result is not `denied`, so the
+SDK keeps the user's decision); `PATCH /tools/exit_plan_mode { override: 'allow' }` is refused with 400. A sub-agent
+uses the same function built for the parent's mode, with every `user-approval` result mapped to `denied` ("Sub-agents
+cannot ask the user: this call needs approval."), so a child never creates an approval request.
 
 **Shell rules** (Phase 8, ADR-038). The builtin `shell` tool has the policy function `shellPolicy`
 (`core-workspace/shell-tool.ts`). `createToolApproval` passes the run scope (`AssembledTools.scope`, 6.13) to
@@ -601,6 +632,13 @@ the run first. Server shutdown aborts every run through the same path. `stop` wa
 the run to persist; a run that does not settle is released by force: its late end callback stores nothing and, when
 it was streaming, `run.finished` reports `aborted`. A run stopped while still `preparing` ends its request with
 `409 conflict` (`details.reason: 'stale'`) before its history is committed (delete-all relies on this, 6.9).
+
+**Stop order** (Phase 9, ADR-042 / ADR-043): `POST /chat/:id/stop` first empties the chat's steer queue (every item
+removed with reason `stopped`, one `queue.changed`), so the ending run cannot start a queued next turn; then the run is
+aborted, which aborts its sub-agents through the run signal (each running `task` call ends as an `output-error` with
+the stopped text, 6.22). The answer is `{ stopped, dropped: QueueItem[] }`: the web of the tab that stopped puts the
+dropped messages back into its composer. Server shutdown and a key rotation follow the same order for every chat
+(queues cleared → sub-agents aborted → runs aborted, section 5); deleting a chat drops its queue too.
 
 ### 6.4 Plugin lifecycle
 
@@ -759,7 +797,9 @@ sequenceDiagram
 - Event names and payloads: API.md, "Server events". Phase 7 adds `project.changed` (`{ id, project }`, `project` null
   = deleted; 6.13) and `key.rotated` (`{ keyVersion, rotatedAt, chatIds }`; 6.14); Phase 8 adds `workspace.changed`
   (`{ projectId, chatId, batchId, source, paths }`, 6.16: after every revert, rewind or undo batch that wrote
-  something, and for agent edits at most once a second per chat). `disconnectAll()` flushes the queued
+  something, and for agent edits at most once a second per chat); Phase 9 adds `queue.changed` (`{ chatId, items,
+  removed? }` after every change of a chat's steer queue, 6.20) and `run.started` gains `origin?` (`request` | `queue`)
+  and `userMessageId?` (a turn the server started from the queue). `disconnectAll()` flushes the queued
   events and then closes every connection: after a key rotation (`key.rotated` is the last event a stream sees) and
   after a password change, so a revoked session stops listening at once; the browsers reconnect with backoff, and a
   revoked one gets 401 and the login page.
@@ -986,7 +1026,11 @@ sequenceDiagram
   characters. Dropped: system messages, chat and global instructions, `metadata.error` (only the `failed` status
   remains), usage and cost, `command.expansion`, provider metadata, approvals, `data-*`, `step-start`,
   `reasoning-file` and `custom` parts, other URLs and anything unknown. A snapshot above 10 MiB (serialized) ->
-  `413 payload_too_large`. `file_ids` stores the only files the share may serve.
+  `413 payload_too_large`. `file_ids` stores the only files the share may serve. Phase 9 (no `sharePartSchema`
+  change): an assistant message is split at each `data-steer` part, and the steer becomes a user share message (its
+  text and file parts, sanitized like any user message); `data-compaction` and `data-activity` stay dropped (a summary
+  is never shared); a `task` tool part keeps its input and output like any tool when tool details are shared (the
+  share page renders them with the chat's components).
 - **Options** (`{ reasoning: false, toolDetails: false, attachments: true }` by default) are applied when the view is
   served: without `reasoning` the reasoning parts are left out, without `toolDetails` tool parts keep only their name
   and status, without `attachments` the file parts are left out and `shares.file` serves nothing. A changed option
@@ -2030,6 +2074,340 @@ and the web shows the newer diff first.
   init` inside `realpath(mkdtemp())` (author through `-c user.name` / `-c user.email`, `HOME` and `GIT_CONFIG_GLOBAL`
   pointed at the temp folder) and skip without git.
 
+### 6.18 Context compaction (ADR-040)
+
+Phase 9 replaces the silent trimming of old turns with a model-written summary. Three pieces share one rule: the
+manual `/compact [focus]`, automatic compaction before the first model call of a run, and automatic compaction between
+two steps of a long run. All three store the same `data-compaction` part and never rewrite a stored message.
+
+**Stored form** (`compactionDataSchema`, `shared/chat.ts`): `{ trigger: 'manual' | 'auto', keep: 'none' |
+'last-user', summary (≤ 60,000 characters), focus? (≤ 1,000), todos? (the `latestTodos` snapshot before the marker),
+modelRef (the summarizer), messagesCompacted, tokensBefore, tokensAfter, createdAt }`. There is no state field and no
+message id in it: the marker is **positional**, so it survives the id remapping of a chat import. Progress is the
+transient `data-activity { kind: 'compacting' | 'idle' }` (sent through `RunSession.writeTransient`, reaching only the
+client's `onData`); a failure is the notice `compaction-failed` (warning) plus the old trimming.
+
+**The history rule** (`compaction/history.ts` `applyCompaction`, over `findCompaction(path)` of
+`shared/util/agent-state.ts`): the latest `data-compaction` part C on the path, in message M_k at part index p,
+replaces everything before it. Model history = `[summary user message]` ++ (`keep: 'last-user'` ? the last user message
+before M_k : `[]`) ++ M_k's parts after p (when there are any) ++ M_{k+1 …}. The summary text (`compactionSummaryText`)
+is a fixed preface, the summary, the todo snapshot under "Current todo list:" when present and, for `auto`, "Continue
+the latest request without asking the user to repeat anything." The rule depends only on the path, so it is
+branch-aware for free (ADR-023): a branch edited above C ignores it, a regenerate does not see the old reply's C, a
+continuation sees the markers inside its own message, and deleting the marker's message falls back to the previous
+marker (or the full history).
+
+**`buildModelHistory(history)`** (`chat/model-history.ts`, complete and frozen since P9-0b) is the only place that
+turns a stored path into the model's view, in this order:
+
+1. `applyCompaction` (above);
+2. `splitSteers` (shared): each assistant message is split at its `data-steer` parts into assistant / user / assistant
+   (empty halves dropped; a split always falls on a step boundary, 6.20);
+3. `reduceAgentOutputs`: a stored `tool-task` output becomes `{ status, report }` (the progress trace never reaches a
+   model, 6.22);
+4. `applyCommandExpansions` (`context.ts`): `prompt` commands send their stored expansion;
+5. the summary text is merged into the following user message as its **first** part (after step 4, because an
+   expansion replaces the first text part), so the history never holds two user messages in a row.
+
+`prepareModelFiles` (`pipeline.ts`) then runs on the result, so messages before the marker never load their files.
+
+**Manual** `/compact [focus]`: `resolveCommand` (`commands.ts`) checks `compact` before the registry and answers `{
+kind: 'compact', focus }` (`commandInvocationSchema.type` gains `compact`; the user message keeps
+`metadata.command`). `launchRun` dispatches it to `compactStream` (`compaction/stream.ts`): `start` → transient
+`compacting` → summarize `buildModelHistory` of the history without the `/compact` message → one `data-compaction`
+(`trigger: 'manual'`, `keep: 'none'`) → `finish` with `metadata.usage.contextTokens = tokensAfter` (the context ring
+drops at once). Nothing to summarize → the reply text "There is nothing to compact yet." (`replyStream`). A regenerate of
+the reply compacts again; while a run is active a queued `/compact` waits for the next turn (`turnOnly`, 6.20); a
+compaction model that resolves to an image model is a 400 on `['modelRef']`.
+
+**Automatic, before and inside runs** (one code path): `createContextGuard()` (`compaction/guard.ts`) is the first
+piece of the step composer (`steps.ts`, below), which runs before **every** model call, step 0 included.
+
+- Estimate = max(`estimateTokens(messages, instructions)`, the last step's input + output tokens). Compact when the
+  estimate is above 0.8 × the model's `contextWindow`, `autoCompact` is on, the window is known and the run has used
+  fewer than 10 compactions (`compactionsPerRunMax`).
+- New messages = `[merge(summary, keptUser)]` with `keep: 'last-user'`, where `keptUser` is the run's turn user message
+  after expansions and files (converted lazily from the UI messages captured at run start); when that would still
+  exceed 0.85 × the window the user message is dropped (`keep: 'none'`). The returned `messages` are carried into the
+  later steps by the SDK, so step N+1 starts from the summary too.
+- The guard queues the `data-compaction` part for its step through `RunSession.inject(chunk, stepNumber)`; the step
+  injector places it right before that step's `start-step` (6.20), so the stored reply holds the marker exactly where
+  the model's context changed. An equivalence test asserts that the in-run model messages equal `buildModelHistory` of
+  the saved message.
+- Failure (any error but an abort) or `autoCompact` off: on step 0 only, the old `trimToContext` (`context.ts`) runs,
+  with the notice `compaction-failed` (after a failure) or `context-trimmed` (setting off); later steps go on
+  untouched. The pre-stream trim of v1.4 moved into the guard. An abort during summarizing is re-thrown (the run ends
+  `aborted`). Sub-agents run the guard in silent mode (no marker, no notice; a usage row only).
+
+**Summarizer** (`compaction/summarize.ts`, `prompt.ts`): the model messages are rendered as one text transcript (tool
+calls as `[tool name(args ≤ 500 characters)]`, results cut at 2,000 characters, files and images as `[file …]`,
+reasoning dropped), so no provider sees tool content without tool definitions; a transcript longer than 0.85 × the
+summarizer's window loses its middle (the head, which holds an earlier summary, and the newest part stay).
+`generateText` with instructions that contain `COMPACT_INSTRUCTIONS_MARKER` (`chat/markers.ts`) and Claude Code-style
+sections (request and intent, files and code, errors and fixes, every user message, pending tasks, current work, next
+step, the focus), reasoning off, `maxOutputTokens = clamp(0.2 × window, 256, 8192)`, the run signal, a 120 s timeout,
+`maxRetries: 2`. Model: `compactModelRef ?? the run model` (an unresolvable setting falls back to the run model with a
+warning). One usage row with purpose `compact` (`messageId` = the reply), its cost added to the reply through
+`RunSession.addExtraCost`.
+
+**Surfaces**: the Markdown export renders "_Conversation compacted (N messages summarized)_" and the summary
+(`services/chats/export.ts`); search text is unchanged (summaries are not indexed); chat import validates the part
+through `harnessDataSchemas`; share snapshots drop it (6.10); rewind and checkpoints are unaffected (time-based, 6.16).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant P as chat/pipeline (streamText)
+  participant S as steps.ts prepareStep
+  participant G as compaction/guard
+  participant Z as summarizer (generateText)
+  participant I as stepInjector
+  participant W as Web (useChat)
+  P->>S: before model call N (step 0 included)
+  S->>G: estimate(messages)
+  alt estimate > 0.8 x contextWindow, autoCompact on, < 10 this run
+    G-)W: transient data-activity compacting (onData only)
+    G->>Z: transcript text + COMPACT_INSTRUCTIONS_MARKER (compactModelRef or run model)
+    Z-->>G: summary (usage row purpose compact, cost via addExtraCost)
+    G->>I: inject data-compaction for step N
+    G-->>S: messages = [summary merged into the kept user message]
+  else failure or autoCompact off (step 0 only)
+    G->>I: inject notice compaction-failed or context-trimmed
+    G-->>S: messages = trimToContext(messages)
+  end
+  S-->>P: { messages } (carried into later steps)
+  I-->>W: data-compaction right before start-step N
+```
+
+### 6.19 Plan mode and todos (ADR-041)
+
+**Mode**: `toolModeSchema` = `off | ask | edits | plan | auto` (plugin API 1.3.0). The web offers `plan` in project
+chats only; the server accepts it anywhere.
+
+- **Tool set** (`chat/modes.ts`, called by `assembleTools`): in `plan` the tools with workspace access `write` or
+  `execute` are not offered (MCP and other tools stay and resolve like `ask`), and `exit_plan_mode` is added; outside
+  `plan` it is not offered, with one exception: a continuation whose message holds an **approved** `exit_plan_mode` part
+  (`approval-responded`) keeps the tool in `tools` (so the SDK can execute the approved call) but leaves it out of
+  `activeTools` (so the model never calls it again). `AssembledTools.activeTools?` is passed to `streamText`.
+- **Approval** (`chat/approval.ts`): `case 'plan'` resolves like `ask`; `exit_plan_mode` always returns
+  `user-approval` first (6.2). The continuation check of `prepare.ts` refuses to **approve** an `exit_plan_mode` call
+  while the continuation's `toolMode` is `off` or `plan` (400 on `['toolMode']`): the web sets the new mode first.
+  Approval reasons (the plan feedback) may be 2,000 characters long (`LIMITS.approvalReasonMaxChars`).
+- **`exit_plan_mode`** (`core-agent/exit-plan-mode.ts`): input `{ plan }` (markdown, ≤ 50,000 characters), policy
+  `always`. `execute` reads the mode from the agent scope and returns `{ approved: true, mode }`; the model reads "The
+  user approved the plan. Mode is now <label>. Implement it now; track progress with todo_write." A rejection is the
+  SDK's `execution-denied` with the user's `reason`, and the model keeps planning (`toolMode` stays `plan`).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant M as Model
+  participant P as chat/pipeline
+  participant W as Web (PlanApprovalCard)
+  M->>P: exit_plan_mode { plan } (toolMode plan)
+  P->>P: createToolApproval: core-agent exit_plan_mode -> user-approval (before overrides and hooks)
+  P-->>W: approval-requested, run ends awaitingApproval
+  alt Approve, accept edits (or ask before edits)
+    W->>W: session.toolMode = edits (or ask), saved on the chat
+    W->>P: continuation (toolMode edits), approval { approved: true, reason? }
+    P->>P: checkPlanApprovalMode: toolMode not off / plan; tools for edits + exit_plan_mode kept out of activeTools
+    P->>P: execute exit_plan_mode -> { approved: true, mode: edits }
+    M->>P: write_file ... (runs without a card in edits)
+  else Keep planning (feedback)
+    W->>P: continuation (toolMode plan), approval { approved: false, reason }
+    P-->>M: execution-denied with the reason; the model revises and calls exit_plan_mode again
+  end
+```
+
+**Todos** (`core-agent/todo-write.ts`): input `{ todos: { id (1–64 characters, unique), content (1–500), status:
+pending | in_progress | completed, activeForm? (≤ 200) }[] (≤ 50) }`, policy `safe`, no workspace access, so it is
+offered in every chat with tools (plan mode included). Output `{ todos, counts }`; the model gets a one-line text. There
+is no table: the state is `latestTodos(path)` (shared), the last `output-available` `tool-todo_write` part on the path,
+so it follows versions and survives reloads; a sub-agent's todo calls are not parts of the reply and are ignored. A
+compaction stores the snapshot in its marker and sends it with the summary.
+
+**Instructions** (`chat/params.ts`, after the workspace block): a plan block when the run is in `plan` (investigate
+read-only, call `exit_plan_mode` with a complete markdown plan, answer plain questions directly), a todo hint when
+`todo_write` is offered and a `task` hint when `task` is offered.
+
+**Agent scope** (`chat/agent-scope.ts`, complete and frozen since P9-0b): a WeakMap side channel bound to the tool call
+context of every run with tools, like the run scope (`workspace/run-scope.ts`): `toolMode`, `runSubagent`, `todos`.
+Only server code reaches it (`agentScopeOf(c)`); third-party plugins cannot, and nothing private reaches
+`ToolCallContext`. Server code recognizes the agent tools by `pluginId === 'core-agent'`.
+
+### 6.20 Steer queue (ADR-042)
+
+**Queue** (`chat/queue.ts`, one instance in the chat runner): in memory, per chat, at most 10 items of at most 256 KB
+each (`queueItemsMax`, `queueItemBytes`); lost on a server restart (documented; a restart kills the runs anyway). An
+item is `{ id (the client's msg_ id), message (a user UI message: text and uploaded file parts, normalized by
+normalizeUserParts), modelRef, reasoningEffort, toolMode, createdAt, turnOnly }`; `turnOnly` is set when the first text
+is a server command (a registered plugin command or `/compact`): such an item is never steered. Every change emits
+`queue.changed { chatId, items, removed?: { id, reason: delivered | started | cancelled | stopped | failed, error? }[]
+}`.
+
+| Route (module `chatQueue`) | Answer |
+|---|---|
+| `GET /chat/:id/queue` | the chat's items (404 for an unknown chat) |
+| `POST /chat/:id/queue` `{ message, modelRef, reasoningEffort, toolMode }` (strict) | 201 the item; 409 `run-idle` when the chat has neither a run nor a pending approval, 409 `queue-full`, 409 `exists` (the message id is used or queued), 404, 400 (validation, the size cap) |
+| `DELETE /chat/:id/queue/:itemId` | 204; 404 once the item was delivered or started (or never existed) |
+
+**The step composer** (`chat/steps.ts` `createPrepareStep({ contextGuard, steer, finalize? })`, complete and frozen
+since P9-0b) is the `prepareStep` of every chat run. In fixed order: (1) the context guard (6.18), which may replace
+`messages`; (2) the steer step, which appends user messages; (3) the finalize nudge (sub-agents only, 6.22). It
+returns `{ messages }` (and, for the nudge, `activeTools` / `instructions`) only when something changed, and never
+throws except to propagate an abort. The SDK calls it before every model call, step 0 included, and never after a step
+without tool calls or with an open approval.
+
+**Steer** (`createSteerStep`, `chat/steer.ts`): synchronously takes every steerable item of the chat (in order; the
+take is synchronous, so it cannot race a `DELETE`), turns each into a user model message (a one-message UI history
+through `prepareModelFiles` and `convertToModelMessages`), appends them to `messages` (carried into later steps) and
+queues a `data-steer { id, parts, queuedAt, deliveredAt }` per item through `RunSession.inject(chunk, stepNumber)`;
+`queue.changed` reports them `delivered`. Step 0 counts: the first call of a new turn or of an approval continuation
+delivers what waited.
+
+**Placement** (`stepInjector(session)`, piped as `ui.pipeThrough(injector).pipeThrough(storeGeneratedFiles)`): counts
+`finish-step` chunks, emits the injected chunks of step N right before the next `start-step` once N steps finished, and
+flushes the rest when the stream ends, so a slow consumer never misplaces them. `RunSession.finalMessage` appends any
+injected steer missing from the response message (a safety net). Because a steer always lands between two steps,
+`splitSteers` rebuilds the same history from the stored reply (assistant / user / assistant) after a reload.
+
+**Run end** (`RunContext.onReleased(ending, awaitingApproval)`, called right after `registry.release`):
+
+- **completed**, no approval pending: the first item is removed (`started`) and becomes the next turn, started by the
+  server: `runner.start({ chatId, message, trigger: 'submit-message', modelRef, reasoningEffort, toolMode }, { requestId:
+  'queue_…' })`, whose response body is cancelled at once (the tee keeps the replay buffer, so tabs resume it);
+  `run.started` carries `origin: 'queue'` and `userMessageId`. When that start loses the race to a user's `POST /chat`
+  (409), the item goes back to the head of the queue and is steered into the user's run; any other error removes it
+  as `failed` (with the error). The remaining items are steered into that next turn at its step 0 and later
+  boundaries.
+- **awaiting approval**: the items wait for the next run (the continuation or a new message) and are delivered at its
+  step 0.
+- **aborted** (Stop, shutdown, key rotation) or **failed**: every item is removed (`stopped` / `failed`); Stop returns
+  them as `dropped` (6.3).
+
+Deleting the chat drops its queue. Surfaces: share snapshots split replies at steers into user messages (6.10); the
+Markdown export renders a steer as "## User (during the run)"; `messagePlainText` indexes steer text for search; steer
+file URLs are covered by the cleanup's reference scan, and queued file ids by the upload pins (6.15).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant W as Web (tab)
+  participant Q as POST /chat/:id/queue
+  participant R as chat/queue
+  participant S as steps.ts (steer)
+  participant P as run (streamText)
+  participant Ev as events bus
+  W->>Q: { message, modelRef, reasoningEffort, toolMode } while a run streams
+  Q->>R: add (bounds, turnOnly)
+  R-)Ev: queue.changed (items)
+  P->>S: prepareStep before model call N
+  S->>R: take steerable items (synchronous)
+  S-->>P: messages + user message(s); inject data-steer for step N
+  R-)Ev: queue.changed (removed delivered)
+  P-->>W: data-steer before start-step N (SteerNote)
+  Note over P,R: the run completes with items left
+  P->>R: onReleased(completed, no approval)
+  R->>P: runner.start(first item) as the next turn (origin queue)
+  R-)Ev: queue.changed (removed started), run.started (origin queue, userMessageId)
+  W->>W: path not shown -> refresh, then resumeStream
+```
+
+### 6.21 File mentions (ADR-042)
+
+Mentions are attachments: the web inserts `@path` into the text (so the model sees the path) and uploads a snapshot of
+the file; `POST /chat` is unchanged.
+
+- **Index** (`services/project-files/`): per project, in memory, built with `walkWorkspace` (`workspace/walk.ts`: it
+  honors `.gitignore`, skips `.git`, `node_modules` and the temp files of atomic writes, never enters folder links, and
+  stops at its entry, depth and 10 s limits); at most 50,000 files (`mentionIndexFilesMax`; the rest makes the answer
+  `truncated`); secret-looking paths (`workspace/sensitive.ts`) are left out; folders are derived from the file paths.
+  Builds are single-flight per project; an entry lives 30 s (`mentionIndexTtlMs`) and is dropped at once on a
+  `workspace.changed` event of its project (so a file the agent just wrote is found by the next search), on project
+  deletion and at shutdown. No new `.gitignore` parser and no new regex path: the ReDoS heuristic of the walker stays
+  (a backlog item).
+- **Search** (`GET /projects/:id/files?q&limit`): ranked by the shared `rankPaths(q, entries, limit)` (basename prefix
+  > basename substring > path substring > subsequence, then shorter paths, then by path); `limit` ≤ 50
+  (`mentionResultsMax`); answer `{ items: { path, kind: 'file' | 'dir' }[], truncated, indexedAt }`. 404 for an unknown
+  project, 400 with the `openWorkspace` message when the folder cannot be opened.
+- **Attach** (`POST /projects/:id/files/attach { path }`): `resolveWorkspacePath` (realpath containment, a link out of
+  the project refused) → refuse a `.git` segment or a secret-looking path (400) → `readWorkspaceFile` (a regular file,
+  > 5 MiB is 413, `mentionFileMaxBytes`) → `files.upload(new File([bytes], basename))`, which sniffs the type (text,
+  image or PDF; anything else is the upload route's 400) and pins the new file id → 201 `FileRef`. The bytes are a
+  snapshot: a later edit of the file does not change the attachment.
+
+### 6.22 Sub-agents (ADR-043)
+
+**`task`** (`core-agent/task.ts`): input `{ description (3–80 characters), prompt (≤ 20,000), type: 'explore' |
+'general' }`, policy `safe`, `timeoutMs` 600,000; `execute` is an `async function*` that delegates to
+`agentScopeOf(c).runSubagent(input, { toolCallId, signal })` and yields `TaskOutput` snapshots; `toModelOutput` gives
+the model only the report ("Sub-agent failed: …; partial report: …" on failure). Output: `{ status: queued | running |
+completed | failed | aborted | limit, type, description, modelRef, steps: { toolCallId, toolName, summary (≤ 200),
+state: running | done | error | denied, resultPreview? (≤ 300) }[] (the last 50), stepsOmitted, report (≤ 32,000),
+usage?, costUsd?, startedAt, finishedAt?, error? }`, well under the 64 KB output cap.
+
+**Streaming tools** (`chat/tools.ts` `wrapToolExecute`, plugin API 1.3.0): when `definition.execute` is an async
+generator function, the wrapper returns an async generator: the plugin's iteration runs inside `plugins.guard` (the
+timeout and the abort cover the whole iteration) and pushes values into a channel; preliminary values are merged to at
+most one per 250 ms (the latest wins), each passes `capToolOutput`, at most 2,000 are sent, and the final value always
+passes; `tool.after` hooks run on the final value only, and the journal records the call once it settled. A
+non-generator `execute` that resolves to an `AsyncIterable` is drained (the last value counts). The SDK re-emits the last
+yielded value as the final output; `convertToModelMessages` drops a part that is still preliminary.
+
+**Child run** (`chat/subagent/index.ts` `createSubagentRunner`, created per run in `modelStream` and bound into the
+agent scope):
+
+- model `subagentModelRef ?? the run model`; `buildRunParams` with the child's tool list and a sub-agent preamble that
+  contains `SUBAGENT_INSTRUCTIONS_MARKER`; messages `[user: prompt]`; `stopWhen: isStepCount(subagentMaxSteps)` (setting,
+  1–200, default 30); the step composer with the context guard in silent mode and the **finalize nudge**: at the last
+  allowed step `activeTools: []` and an instruction to write the final report now (the output status is then
+  `limit`);
+- `AbortSignal.any([run.signal, AbortSignal.timeout(570 s)])` (`subagentTimeoutMs`, below the tool's 600 s guard, so a
+  partial report can still return);
+- a per-run semaphore: at most 3 children run at once (`subagentParallelMax`; a waiting call shows `queued`) and 20 per
+  run (`subagentsPerRunMax`; more calls fail);
+- the runner iterates the child's `result.stream` and yields a snapshot on every tool start / finish and step end.
+
+**Child tools** (`chat/subagent/tools.ts`): `assembleTools` with the parent's mode, workspace and scope, then minus every
+tool that can only ask in that mode, minus the `core-agent` tools (no `task`: depth 1; a test proves it is absent) and
+`generate_image`, minus tools with a user override `deny` or `ask`; type `explore`, or a parent in `plan`, also drops the
+workspace `write` / `execute` tools and lowers the effective mode to `ask`. The real gate is the child's approval
+function: `createToolApproval(parent mode, child tools)` with `user-approval` mapped to `denied` ("Sub-agents cannot ask
+the user: this call needs approval."). Result: in `ask` the safe tools run; in `edits` also workspace writes and shell
+commands that match the shell rules; in `auto` everything except `always` tools. A child never creates an approval
+request, so `pending_approval` is never set by one.
+
+**Journal, folder, usage**: child calls bind the parent's run scope with `toolCallId = <parent call id>/<child call
+id>`, so their writes are journaled under the parent assistant message (rewind and the changes panel cover them,
+6.16); a child gets a **copy** of the sticky shell folder (its `cd` never moves the parent's); no agent scope is bound
+in a child (depth 1). Each child writes one usage row (purpose `subagent`, the child's provider and model), its cost
+added to the reply through `RunSession.addExtraCost`; `ChatDetail.totals` include `compact` and `subagent` rows.
+
+**Finalize** (`chat/history.ts`): a part still `output-available` with `preliminary: true` when the run ends becomes an
+`output-error` with the stopped or failed text. The nested trace of a stopped child is therefore lost after a reload
+(accepted). Stop aborts every child through the run signal (6.3).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant M as Parent model
+  participant T as task (core-agent, async generator)
+  participant R as subagent runner (semaphore 3)
+  participant C as child streamText
+  participant W as Web (TaskBlock)
+  M->>T: task { description, prompt, type } x2 (parallel)
+  T->>R: agentScopeOf(c).runSubagent(input, { toolCallId, signal })
+  R->>C: tools = parent mode minus ask-only, core-agent, generate_image; approval user-approval -> denied
+  loop each child step
+    C-->>R: tool start / finish, step end
+    R-->>T: TaskOutput snapshot (status running)
+    T-->>W: preliminary output (throttled 250 ms)
+  end
+  C-->>R: final text = report (or the finalize nudge at the step limit)
+  R-->>T: final TaskOutput (completed / limit / failed / aborted), usage row subagent
+  T-->>M: toModelOutput: the report only
+```
+
 ## 7. Data directory
 
 ```
@@ -2172,23 +2550,23 @@ diskBytes }` of the automatic sweep, and the public key `fileSweep`).
 | `parent_id` | text | NULL; the previous message of its path (`null` = a first message); siblings are versions (ADR-023, 6.8); no FK (see Migrations) |
 | `seq` | integer | NOT NULL; creation order within the chat (0-based, unique; a parent's `seq` is lower than its children's) |
 | `role` | text | NOT NULL; `user` \| `assistant` \| `system` |
-| `parts` | json `UIMessage['parts']` | NOT NULL |
+| `parts` | json `UIMessage['parts']` | NOT NULL; Phase 9: may hold `data-compaction` and `data-steer` parts and `core-agent` tool parts (`tool-todo_write`, `tool-exit_plan_mode`, `tool-task`); `data-activity` is never stored |
 | `metadata` | json `MessageMetadata` | NULL |
 | `selected_child_id` | text | NULL; the child last shown under this message (ADR-030, 6.8), a hint: `null` or a missing child means "the latest leaf"; no FK (see Migrations) |
-| `search_text` | text | NOT NULL DEFAULT `''`; concatenated text parts, Unicode-normalized and lowercased (ADR-021), used by `GET /chats?q=`; not for display |
+| `search_text` | text | NOT NULL DEFAULT `''`; concatenated text parts (Phase 9: also the text of `data-steer` parts; never compaction summaries), Unicode-normalized and lowercased (ADR-021), used by `GET /chats?q=`; not for display |
 | `created_at` | timestamp | NOT NULL |
 | `updated_at` | timestamp | NOT NULL; changes on approval continuations |
 | | | unique index `messages_chat_seq_idx` (`chat_id`, `seq`); index `messages_chat_parent_idx` (`chat_id`, `parent_id`) |
 
-**`usage`** — one row per model call (chat run, title generation, image generation, transcription or speech); kept
-when a chat is deleted.
+**`usage`** — one row per model call (chat run, title generation, image generation, transcription or speech; Phase 9:
+a compaction summary or a sub-agent); kept when a chat is deleted.
 
 | Column | Type | Constraints |
 |---|---|---|
 | `id` | integer | PK AUTOINCREMENT |
 | `chat_id` | text | NULL; FK -> `chats.id` ON DELETE SET NULL |
 | `message_id` | text | NULL |
-| `purpose` | text | NOT NULL DEFAULT `chat`; `chat` \| `title` \| `image` \| `transcription` \| `speech` (`UsagePurpose`, a TypeScript type: the Phase 6 values needed no migration; transcription and speech rows have `chat_id` null, 0 tokens and `cost_usd` null) |
+| `purpose` | text | NOT NULL DEFAULT `chat`; `chat` \| `title` \| `image` \| `transcription` \| `speech` \| `compact` \| `subagent` (`UsagePurpose`, a TypeScript type: the Phase 6 and Phase 9 values needed no migration; transcription and speech rows have `chat_id` null, 0 tokens and `cost_usd` null; `compact` and `subagent` rows carry the chat and the reply's `message_id`, and `ChatDetail.totals` include them) |
 | `provider_id` | text | NOT NULL |
 | `model_id` | text | NOT NULL |
 | `input` | integer | NOT NULL DEFAULT 0; input tokens |
@@ -2311,7 +2689,7 @@ not in backups; deleted with their project.
 |---|---|---|
 | `id` | text | PK; `srl_` + 16 chars |
 | `project_id` | text | NULL = a global rule; FK -> `projects.id` ON DELETE CASCADE; indexed |
-| `prefix` | text | NOT NULL; the canonical prefix (<= 200 chars); unique per scope (checked by the service) |
+| `prefix` | text | NOT NULL; the canonical prefix (<= 200 chars); unique per scope: checked by the service, and since `0006` (Phase 9) by two partial unique indexes, (`prefix`) `WHERE project_id IS NULL` and (`project_id`, `prefix`) `WHERE project_id IS NOT NULL`; a unique violation answers 409 `exists` |
 | `created_at` | timestamp | NOT NULL |
 
 **`chat_shares`** — read-only share links (ADR-025, 6.10). There is no token column: tokens are recomputed from the id.
@@ -2340,6 +2718,7 @@ not in backups; deleted with their project.
 | `0003_refresh_model_listings` (Phase 6) | hand-written, no schema change: one ``UPDATE `model_cache` SET `fetched_at` = `fetched_at` - 86400000 WHERE `fetched_at` IS NOT NULL;`` that makes every successful cached provider listing stale |
 | `0004_projects` (Phase 7) | generated: `CREATE TABLE projects`, unique index `projects_path_idx`, ``ALTER TABLE `chats` ADD `project_id` text`` (nullable, no FK), index `chats_project_idx`; no backfill |
 | `0005_workspace_checkpoints` (Phase 8) | generated: `CREATE TABLE workspace_changes` and `CREATE TABLE shell_rules` with their indexes; no change to an existing table, no backfill |
+| `0006_shell_rule_unique` (Phase 9) | generated indexes with a hand-prepended cleanup: one `DELETE` of duplicate shell rules (the oldest of each scope and prefix kept, by `created_at`, then `id`), one `UPDATE tool_prefs` that clears a stored `allow` override on `shell`, then two `CREATE UNIQUE INDEX … WHERE` (the partial indexes above); no table change |
 
 The backfill turns every existing chat into a linear chain: each message's parent is the previous message by `seq`,
 and the active leaf is the last message (`null` for an empty chat):
@@ -2406,6 +2785,21 @@ journal rows and rules without service code; nothing references them. The genera
 cascades. Every text column of both tables is listed in `UNSCANNED_COLUMNS` of `services/data/references.ts` (ids,
 paths, commands and hashes, never a `data/files` id), so the schema-coverage test of the file cleanup stays green.
 
+`0006` (Phase 9, ADR-038 amendment) makes a shell rule unique per scope in the database. v1.4 serialized rule creation
+in the process only, so two concurrent requests could store the same prefix twice, and an `allow` override saved on
+`shell` before v1.4 was only ignored at run time. The migration therefore runs, in one transaction: a `DELETE` of every
+`shell_rules` row that has an older twin in the same scope (same `prefix`, same `project_id` or both null; the oldest by
+`created_at`, then `id`, survives), an `UPDATE tool_prefs SET override = NULL` for the `shell` tool's stored `allow`
+(other tools and other overrides are untouched; `current_time` keeps its `allow`), and two partial unique indexes, one
+for global rules (`WHERE project_id IS NULL`) and one per project (`WHERE project_id IS NOT NULL`), so a NULL project id
+cannot slip past uniqueness. The SQL is generated by `pnpm db:generate --name shell_rule_unique` and the two cleanup
+statements are prepended by hand with `--> statement-breakpoint`; review rejects a `DROP`, a `__new_` table, a `PRAGMA`
+or an `ALTER` (the fallback, should drizzle-kit drop the `WHERE`, is one expression index on `coalesce(project_id,
+'')` and `prefix`). `db/upgrade.test.ts` migrates a `0005` database with duplicates: the oldest rule of each scope
+survives, both scopes keep their rules, the `shell` override is cleared and the `current_time` override kept. The
+service maps the unique violation to 409 `exists`. Phase 9 adds no table (18 tables): compaction markers, steers and
+todos are message parts, settings are rows of `settings`, and the queue and the file index live in memory.
+
 Not stored in the DB: sessions (stateless HMAC cookie), active runs and resume buffers (memory), plugin logs
 (memory ring buffer), SSE subscribers (memory), share tokens (recomputed from the share id), rate-limit counters and
 the maintenance lock (memory; Phase 7, it replaced the import / delete-all mutex), the file cleanup's pins (memory),
@@ -2413,7 +2807,10 @@ the running server's identity (`server.lock` in the data directory), and (Phase 
 audio or text, which only pass through (10.8). Generated images are stored as files like uploads. Project folders are
 files on the host, never copied into the database. Phase 8: the per-file locks and the run scopes (memory), the sticky
 shell folder (derived from the stored shell outputs) and the checkpoint blobs (`checkpoints/`, the rows hold only
-hashes).
+hashes). Phase 9: the steer queues (memory, per chat, bounded; lost on restart), the mention file index (memory, per
+project, 30 s), the sub-agent semaphores and the agent scopes (memory, per run), the transient `data-activity` chunks
+(never stored), and the todo list and the compaction state (derived from the stored message parts with
+`latestTodos` / `findCompaction`).
 
 ## 9. Model catalog
 
@@ -2715,7 +3112,7 @@ There is no OS sandbox: run harness-forge in its Docker container (or as a dedic
 | Planting git hooks, CI files, editor tasks, `.npmrc` | hidden or secret paths: writes always ask (policy `always`), even in Accept edits; `.git` is never written by the file tools | a user override `allow` on the tool, or the shell |
 | Symlink escape, `..`, absolute paths | one resolver with realpath containment on every call; dangling links refused; folder links not walked; the root re-checked against its realpath | TOCTOU between check and open, hard links (6.13) |
 | Huge files, FIFOs, binary files | windowed reads with caps, `O_NONBLOCK` + `fstat` regular-file checks, binary detection, size limits on edits and searches | — |
-| ReDoS in `search_files` / `find_files` | the regex and every glob are matched in a Worker that is terminated after 20 s (or when the call ends); `.gitignore` rules, which run on the main thread, drop lines longer than 512 characters or with more than 3 runs of `*` | a crafted `.gitignore` line below those limits (a heuristic guard) |
+| ReDoS in `search_files` / `find_files` (Phase 9: and the `@` file index, which uses the same walker) | the regex and every glob are matched in a Worker that is terminated after 20 s (or when the call ends); `.gitignore` rules, which run on the main thread, drop lines longer than 512 characters or with more than 3 runs of `*` | a crafted `.gitignore` line below those limits (a heuristic guard) |
 | Fork bombs, long-running or background processes | its own process group killed on Stop, timeout, a background leftover and server exit; timeouts of at most 590 s; capped output; compose `pids_limit: 512` | a process that calls `setsid` escapes the group kill |
 | A stolen session uses the workspace | fresh auth on `POST /projects` (a new folder needs the password); the roots and `HF_WORKSPACE_SHELL` come only from the environment | a valid session can approve its own shell calls: code execution as the server user |
 | Secrets readable by the shell | the environment allowlist (no `HF_*`, no provider keys) | anything the server user can read (`/proc/<ppid>/environ`, `data/secret.key`, the database) |
@@ -2750,6 +3147,25 @@ There is no OS sandbox: run harness-forge in its Docker container (or as a dedic
   still removes the shell whatever the rules say.
 - **Git and the shell** (Phase 8): git runs only through `workspace/git.ts` and shell strings only through
   `workspace/shell.ts` (a spawn guard test enforces it, 6.17); git never writes the index or runs a write command.
+
+### 10.10 Agent 2.0 security (Phase 9, ADR-040 … ADR-043)
+
+| Threat | Mitigation | Accepted risk |
+|---|---|---|
+| A plan-mode bypass (the model or a modified client writes while the user expects a read-only plan) | plan mode is enforced on the server: the tool set has no workspace `write` / `execute` tool, `exit_plan_mode` always asks (before overrides and hooks), an `allow` override on it is refused (400), approving it while the continuation's mode is `plan` or `off` is a 400; the web only chooses the mode | MCP tools and third-party tools without workspace access stay offered in plan mode and resolve as in Ask (a destructive MCP tool still asks) |
+| Sub-agents bypass approvals | a child gets only the tools that run without approval in the parent's mode (no `core-agent` tools, no `generate_image`, no tool with a `deny` / `ask` override; `explore` and a parent in plan mode drop `write` / `execute`), and its approval function maps every `user-approval` to `denied`; depth 1 (no `task` in a child, tested); a probe asserts no `approval-requested` part and no `pending_approval` from a child | in Auto a `general` child can do whatever the parent could do without asking, now in parallel |
+| Runaway sub-agents (cost, time) | 3 at once, 20 per run, `subagentMaxSteps` (30) with a finalize step, a 570 s deadline, Stop and shutdown abort them, one usage row each; the `task` tool can be disabled in the Tools tab | a model that starts many children spends tokens up to those caps |
+| Child writes escape rewind | child calls run with the parent's run scope (journaled under the reply, `<parent>/<child>` call ids) and a copy of the sticky folder | shell side effects of children are not restorable, like the parent's (6.16) |
+| Mention traversal or secret leak | every attach path goes through `resolveWorkspacePath` (realpath containment; links out of the project refused), `.git` segments and secret-looking paths are refused (400) and never indexed, 5 MiB cap, type sniffing of the upload store; the index honors `.gitignore` and skips `node_modules` | an attached snapshot is a normal upload (served to the session, kept until the cleanup); a crafted `.gitignore` line below the walker's heuristic limits (the ReDoS item of 10.9, backlog) |
+| Memory growth from queues and indexes | queues: per chat, ≤ 10 items of ≤ 256 KB, cleared on Stop, chat deletion, key rotation and shutdown; the index: ≤ 50,000 files per project, 30 s TTL, single-flight builds, dropped on `workspace.changed`; preliminary outputs throttled to one per 250 ms, ≤ 2,000 per call, each capped, ≤ 50 steps kept | many projects searched within 30 s each hold an index |
+| A queued message changes a run the user stopped | Stop clears the queue before the run aborts and returns the dropped messages; only a completed run starts a queued next turn; a lost race with a user request re-queues the item | a steer can still land in a step the user did not expect (it is shown where it was delivered) |
+| Third-party plugins reach agent internals | the agent scope is a private WeakMap side channel (no `ToolCallContext.agent`); server code recognizes the tools by `pluginId === 'core-agent'`; `/compact` is reserved (a plugin command of that name is refused) | a plugin tool that shadows the description of `task` or `todo_write` under another name |
+| Summaries and plans leak | summaries, steers, todos and plans are message content: never in share pages (summaries; steers become user messages there), never in search (summaries), never logged at `info`; the compaction and sub-agent models (`compactModelRef`, `subagentModelRef`) receive chat content like the chat model | the user may point those settings at a different provider than the chat's |
+
+- **Logging rules** (12): never at `info` — compaction summaries, steer, todo and plan texts, sub-agent prompts,
+  reports and tool inputs / outputs, mention queries, attached file contents; counts, ids, durations and outcomes only.
+- **No new route needs fresh auth**: queueing, mentions and plan approvals act within the session's own chats and
+  projects, which the session can already read and drive.
 
 ## 11. Topology
 
@@ -2884,6 +3300,24 @@ flowchart LR
     `automatic file sweep checks use the test delay` (info: `delayMs`) and the boot warning for an ignored test delay
     (6.15); `data deleted` gains `checkpointBlobs` and `checkpointBytes`; `checkpoint store summary failed` /
     `checkpoint store purge failed` (warn: `code`, `errorName`).
+- **Agent 2.0** (Phase 9, 6.18 – 6.22): counts, ids, model refs, durations and outcomes only at `info`; never a
+  summary, a steer, todo or plan text, a sub-agent prompt, report or tool value, a mention query or file content (at
+  `debug` only where the existing rules already allow message contents, redacted).
+  - Compaction: one info line per compaction (chat id, `trigger`, `keep`, messages compacted, tokens before and after,
+    the summarizer's model ref, duration, outcome) and a warning for a failure (error code, then the trimming fallback)
+    or for an unresolvable `compactModelRef` (the run model is used); a usage row with purpose `compact`.
+  - Queue: debug lines for add / take / cancel (chat id, item id, reason); an info line when the server starts a queued
+    next turn (chat id, request id `queue_…`) or drops an item as `failed` (error code).
+  - Sub-agents: one info line per child (chat id, parent call id, type, model ref, steps, status, duration, tokens,
+    cost); a warning when a child fails (error code); a usage row with purpose `subagent` each.
+  - Mentions: an index build logs a debug line (project id, files, truncated, duration); an attach logs nothing beyond
+    the upload's own line.
+  - **Limits at a glance** (`LIMITS`, `shared/limits.ts`, no settings key unless named): compaction summary 60,000
+    characters, focus 1,000, 10 compactions per run, trigger at 80 % of the window (85 % for keeping the user
+    message); todos 50 items; plan 50,000 characters; approval reason 2,000; `task` prompt 20,000, report 32,000, 50
+    steps kept, 3 children at once, 20 per run, 570 s per child, `subagentMaxSteps` 30 (setting, 1–200); queue 10 items
+    of 256 KB per chat; mentions 50 results, 5 MiB per attached file, 50,000 indexed files, 30 s index TTL;
+    preliminary outputs one per 250 ms, at most 2,000 per call.
 - **Proxy trust** (texts in section 10.6): the boot log line `trusting reverse proxies (HF_TRUST_PROXY)` lists the
   canonical entries and the trusted ranges; one warning per untrusted peer address that sends a forwarded header the
   server would honor from a trusted proxy (header names only, at most 256 addresses); failed-login warnings carry the

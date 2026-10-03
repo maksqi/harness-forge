@@ -7,6 +7,10 @@ of a project folder on your server. By default, every tool call that can change 
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
+> **In progress:** v1.5 ("Agent 2.0"): context compaction (`/compact` and automatic, also inside long runs), a plan
+> mode with a plan you approve, a todo list, `@` file mentions, messages that reach the agent while it works, and
+> sub-agents (see [Features](#features) and the [agent features guide](docs/guides/agent-features.md)).
+>
 > **Status:** v1.4 ("Workspace 2.0"): checkpoints that rewind the agent's file changes to any of your messages, a
 > changes panel with per-file diffs, Git status and an undoable revert, shell rules for commands that may run without
 > asking, a working folder that carries over between shell commands, and an opt-in automatic cleanup of unused files.
@@ -69,6 +73,20 @@ desktop app, and it starts in dark mode.
   - The shell's working folder carries over between commands (`cd packages/web` sticks), clamped to the project.
   - Automatic cleanup of unused files (Settings -> Data, off by default, daily or weekly) and screen-reader labels for
     tool-row summaries.
+- **Agent 2.0** (v1.5, in progress; guide: [agent features](docs/guides/agent-features.md)):
+  - Context compaction: when a chat nears the model's context window, its older part is replaced by a model-written
+    summary (also between the steps of a long agent run), instead of being dropped; `/compact [focus]` does it on
+    demand. The older messages stay visible, dimmed, under a "Conversation compacted" divider with the summary.
+  - Plan mode (project chats): a read-only permission mode in which the agent explores and then proposes a plan; approve
+    it with "Accept edits" or "Ask", or send feedback and let it keep planning. Shift+Tab in the composer cycles Ask,
+    Accept edits and Plan. Enforced on the server.
+  - A todo list the agent keeps up to date, shown as a progress strip above the composer.
+  - `@` mentions: type `@` in a project chat to search the project's files and attach one.
+  - Send while the agent works: queued messages reach it at its next step (or become the next message), can be edited
+    or cancelled, and come back into the composer when you press Stop.
+  - Sub-agents: the agent can start read-only explorers or general helpers that run in parallel with their own context,
+    never ask for approval (they only get tools that run without a card in the current mode) and return a report;
+    their file edits can be rewound like any other.
 - **Images** (with your own keys):
   - Pick an image model (OpenAI GPT Image, xAI Grok Imagine) in the composer and describe a picture: 1 to 4 images
     per turn, an aspect ratio (Auto, 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16), and follow-ups such as "make it blue" that
@@ -97,9 +115,12 @@ desktop app, and it starts in dark mode.
   details and files and images are included, set an expiry date, update the snapshot or revoke the link at any time.
 - **Composer**:
   - A model picker with provider icons and capability badges, and an "Image models" group.
-  - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode for tools (Ask, Accept edits in
-    project chats, Auto, Off); image options (count, aspect ratio, edit the previous image) for image models.
-  - Slash commands: `/explain`, `/review`, `/fix`, `/translate`, `/proofread` and more, plus commands from plugins.
+  - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode for tools (Ask, Accept edits and
+    Plan in project chats, Auto, Off; v1.5: Shift+Tab cycles them); image options (count, aspect ratio, edit the
+    previous image) for image models.
+  - v1.5: `@` file mentions in project chats, and a queue for messages sent while a reply runs.
+  - Slash commands: `/explain`, `/review`, `/fix`, `/translate`, `/proofread` and more, plus commands from plugins;
+    v1.5: `/compact [focus]`.
   - A microphone button for dictation.
 - **Sidebar and navigation**: a Chat | Plugins switch, a project switcher, chats grouped by date with live status
   dots (running, needs approval, unread), a Mod+K command palette, keyboard shortcuts, a Light / Dark / System theme toggle, and 40 px
@@ -117,11 +138,12 @@ desktop app, and it starts in dark mode.
   - Declarative provider plugins, built with a five-step wizard or written as `plugin.json`.
   - Code plugins (tools, providers, commands, hooks, MCP servers) from templates, edited and rebuilt in the browser.
     Plugin API 1.1.0 lets a code provider add image, speech-to-text and text-to-speech models, and a code tool
-    generate images; plugin API 1.2.0 lets a tool work on the chat's project folder.
+    generate images; plugin API 1.2.0 lets a tool work on the chat's project folder; plugin API 1.3.0 (v1.5) lets a
+    tool stream its progress (an async-generator `execute`) and adds the Plan permission mode.
   - Install from a zip, npm, a URL with an integrity hash, or a local folder, with an explicit trust step for code.
 - **Tools and MCP**: MCP servers over stdio, Streamable HTTP and SSE. The builtin tools are `current_time`,
-  `web_fetch` (SSRF-guarded) and `generate_image`, plus the seven workspace tools of project chats. Every tool has an
-  approval policy and a per-tool override.
+  `web_fetch` (SSRF-guarded) and `generate_image`, plus the seven workspace tools of project chats and (v1.5) the agent
+  tools `todo_write`, `exit_plan_mode` and `task`. Every tool has an approval policy and a per-tool override.
 - **Self-hosting**: SQLite storage, one port, an optional password, a loopback-only bind unless you secure it,
   trusted reverse proxies (`HF_TRUST_PROXY`) so rate limits and Secure cookies see the real clients, and a Docker image
   with a `/data` volume.
@@ -326,6 +348,13 @@ harness-forge is built for **one user** on their own machine or server.
   runs any code the agent writes. Anyone who can log in can approve shell commands and add rules: keep `HF_PASSWORD`
   set, or turn the shell off with `HF_WORKSPACE_SHELL=0`. Git (the changes panel) runs read-only, with the
   repository's hooks, filters and configured programs switched off.
+- **Agent 2.0 (v1.5, in progress).** Plan mode is enforced by the server (no file-writing or shell tool is offered,
+  and the plan card cannot be auto-approved). Sub-agents never ask for approval: they get only the tools that already
+  run without a card in the chat's mode, and anything else is denied inside them; they cannot start sub-agents and
+  are capped in number, steps and time. `@` mentions go through the same path guard as the file tools and refuse
+  `.git` content and secret-looking files. The queue of messages sent during a run is bounded and lives in memory.
+  Summaries, queued messages, plans and sub-agent prompts are never logged at the `info` level, and summaries never
+  appear on share pages.
 - **Microphone and media.** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
   `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled ("Voice
   input needs HTTPS or localhost"); use the TLS reverse proxy below. The page may use only its own microphone
@@ -429,7 +458,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 
 | Document | Contents |
 |---|---|
-| [`docs/guides/`](docs/guides/) | step-by-step guides: [using projects](docs/guides/using-projects.md), [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) |
+| [`docs/guides/`](docs/guides/) | step-by-step guides: [using projects](docs/guides/using-projects.md), [agent features](docs/guides/agent-features.md) (v1.5: compaction, plan mode, todos, mentions, steering, sub-agents), [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) |
 | [`examples/plugins/`](examples/plugins/) | five example plugins with READMEs and a test that loads them |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | components, flows, data directory, database, security model, topology |
 | [`docs/API.md`](docs/API.md) | every HTTP endpoint, the error envelope, the chat stream protocol, server events |
@@ -438,7 +467,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | [`docs/UI.md`](docs/UI.md) | layout, design tokens, components, routes, shortcuts, test ids |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | phases, tasks and progress |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture decision records and the contract seed |
-| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md) |
+| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md), [9 v1.5](docs/phases/phase-9-v1-5.md) (in progress) |
 | [`AGENT.md`](AGENT.md) | rules for AI agents working on this repository |
 
 ## Development

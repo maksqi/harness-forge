@@ -7,9 +7,9 @@ import { searchFilesToolOutputSchema } from '@harness-forge/shared'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { NO_WORKSPACE_MESSAGE } from './common.ts'
 import { createSearchFilesTool, searchFilesModelText } from './search-files.ts'
-import { contextWithoutWorkspace, createTestWorkspace, modelTextOf } from './test-helpers.ts'
+import { contextWithoutWorkspace, createTestWorkspace, modelTextOf, promiseTool } from './test-helpers.ts'
 
-const tool = createSearchFilesTool()
+const tool = promiseTool(createSearchFilesTool())
 let ws: TestWorkspace
 
 beforeEach(async () => {

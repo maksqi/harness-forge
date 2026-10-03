@@ -5,8 +5,8 @@ Agents build the UI from this document. Names, props, emits, routes, store actio
 values defined here are **contracts**: several agents build components in parallel against them.
 
 - Source of truth for shared names: `docs/DECISIONS.md` (wins on conflict). DTO names come from `docs/API.md`.
-- Owners (C3, C5, W2.x, W3.x, W4.x; Phase 5: C9, W5.x; Phase 6: C12, W6.x; Phase 7: C15, W7.x; Phase 8: C20, W8.x)
-  follow the phase tables in `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
+- Owners (C3, C5, W2.x, W3.x, W4.x; Phase 5: C9, W5.x; Phase 6: C12, W6.x; Phase 7: C15, W7.x; Phase 8: C20, W8.x;
+  Phase 9: C25, W9.x) follow the phase tables in `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
 - Everything is English. Every UI string is sentence case (see [Copy guidelines](#15-copy-guidelines)).
 
 Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 Design tokens](#3-design-tokens) ·
@@ -44,6 +44,8 @@ Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 D
    What stays: sidebar with `Chat | Plugins`, New chat, Search, date-grouped chats, Settings, theme toggle,
    transcript, composer (`+`, model, effort, permission, context ring, send/stop; Phase 6: image options and the mic);
    Phase 7: the project switcher above New chat. Phase 8: the changes toggle in the header of project chats (5.6).
+   Phase 9: the todo strip and the queued messages stack above the composer in its dock (2.16, 7.25, 7.26); there is
+   still no side pane for plans, tasks or sub-agents (they render inside the transcript).
 3. **Dark by default.** `html.dark` on first load even when the OS prefers light. Light and System are opt-in.
    No light flash, ever (see [4](#4-theme-behavior)).
 4. **Keyboard-first.** Every action is reachable from the keyboard: palette (Mod+K), new chat (Mod+Shift+O),
@@ -651,6 +653,132 @@ Settings → Data, automatic cleanup inside Storage cleanup (9.8):
 │   Next automatic cleanup in 21 hours.                           │
 ```
 
+### 2.16 Agent 2.0: compaction, plan mode, todos, sub-agents, mentions and the queue (Phase 9)
+
+Legend additions: `⇵` compaction (`FoldVertical`) · `▤` plan (`ClipboardList`) · `☰` tasks (`ListTodo`) · `◉` / `○` /
+`✓` a task in progress / to do / done (`CircleDot` / `Circle` / `CircleCheck`) · `⌕` explore sub-agent (`Telescope`) ·
+`⑂` general sub-agent (`Bot`) · `@` mention (`AtSign`) · `◷` queued (`Clock`) · `✎` edit · `×` cancel · `⟳` running.
+
+A compaction divider (7.24): the rows above it are dimmed (`data-compacted`), the summary opens below the rule.
+
+```
+                                   ┌──────────────────────────────┐
+                                   │ Fix the parser…              │   dimmed (opacity-70), data-compacted
+                                   └──────────────────────────────┘
+   ──────── ⇵ Conversation compacted · 42 messages summarized · 182K → 9K tokens · Show summary ▸ ────────
+   ┌ Summary ──────────────────────────────────────────────────────────── ⧉ ┐   compaction-summary (open)
+   │ Focus: tests                                                             │
+   │ The user is moving auth to server sessions. Done: …                      │   Markdown, max-h-[50dvh]
+   └ The model sees this summary instead of the messages above. ─────────────┘
+   ▸ ✎ edit_file "src/auth.ts"                                  +4 −1   ✓     later rows: full opacity
+
+   in-run variant, inside a long reply (the blocks above it in that reply are dimmed too):
+   ──────── ⇵ Context compacted during this response · Show summary ▸ ────────
+```
+
+The plan approval card (7.25) under the `exit_plan_mode` row; the feedback goes out with whichever button is pressed.
+
+```
+   ▸ ▤ exit_plan_mode  "Move auth to server sessions"      Plan ready for review
+┌ ▤ Plan ready for review ───────────────────────────────── from core-agent ┐   plan-approval, border-info/50
+│ ┌───────────────────────────────────────────────────────────────────────┐ │   plan-approval-plan
+│ │ ## Move auth to server sessions                                       │ │   region "Plan", tabindex 0,
+│ │ 1. Add createSession() in src/auth/session.ts …                       │ │   max-h-[45dvh], scrolls
+│ └───────────────────────────────────────────────────────────────────────┘ │
+│ [ Feedback for the agent (optional)                                     ] │   plan-feedback (1 → 4 rows)
+│ [Keep planning]        [Approve, ask before edits] [Approve, accept edits]│   plan-keep-planning,
+└───────────────────────────────────────────────────────────────────────────┘   plan-approve-ask, plan-approve-edits
+   after a decision the card collapses into the row: "Approved · Accept edits" / "Approved · Ask" / "Kept planning"
+```
+
+The todo strip (7.25) in the composer dock, collapsed and expanded, and the `todo_write` row:
+
+```
+   ▸ ☰ todo_write  "Running the parser tests"                          3/7   ✓     tool-row
+ ┌ Tasks 3/7 ───────────────────────────────────────────────────────── ⌄ ┐       todo-strip (open)
+ │ ✓ Read the parser                                                      │       todo-item[data-status=completed]
+ │ ✓ Find the crash                                                       │
+ │ ✓ Write a test                                                         │
+ │ ◉ Running the parser tests                                             │       in_progress: activeForm, 500
+ │ ○ Fix the empty-input branch                                           │
+ │ ○ Run the suite                                                        │
+ └────────────────────────────────────────────────────────────────────────┘
+ ┌ ☰ 3/7 · Running the parser tests              ▰▰▰▱▱▱▱               ⌃ ┐       todo-strip (closed), h-9
+ ┌ Queued · 1 · sent at the next step ────────────────────────────────────┐       queued-messages
+ │ ◷ Also update the README                                       ✎   ×   │
+ ┌ Queue a message…                                                       ┐       composer
+ │ ＋ ✱ Sonnet ▾                                  ▤ Plan ▾  ◔  [Queue] (■) │       composer-queue left of Stop
+```
+
+Sub-agent blocks (7.27): two run in parallel, one finished and expanded.
+
+```
+ ▸ ⌕ Explore  Find the session code                                     ⟳     task-block[data-state=running]
+     └ read_file "src/auth/session.ts"                                          data-slot="task-live"
+ ▸ ⌕ Explore  Find the cookie settings                                  ⟳
+     └ search_files "cookie"
+ ▾ ⑂ Agent    Draft the migration              8 tool calls · 1m 2s      ✓     task-block-trigger
+     Prompt ▸
+     ✓ find_files "**/session*.ts"                               3 files        task-step
+     ✓ edit_file "src/auth/session.ts"                           +4 −1
+     ⊘ shell "pnpm test"                                         Skipped        denied: tooltip
+     Report                                                                     task-report
+     Sessions are created in `src/auth/session.ts` …
+     claude-haiku-5 · 18.2K tokens · $0.004 · 1m 2s
+```
+
+A steer note inside a running reply, and the `@` mention menu of a project chat (7.26):
+
+```
+    ▸ ❯ shell "pnpm test"                                       exit 1  ✗
+                         ┌──────────────────────────────────────────┐     steer-note, bg-muted/70
+                         │ Use the vitest filter instead            │
+                         └──────────────────────────────────────────┘
+                                           ↳ You · while it worked
+    I'll switch to the vitest filter…
+
+ ┌ Files in harness-forge ───────────────────────────────────────────┐   mention-menu (above the composer)
+ │ ▤ parser.ts                src/                                   │   mention-menu-item (highlighted)
+ │ ▤ parser.test.ts           src/                                   │
+ │ ▢ parsers/                 src/                                   │   data-kind="dir": opens the folder
+ │ Showing the first 50 matches. Type more to narrow it down.        │
+ └───────────────────────────────────────────────────────────────────┘
+ ┌ [▤ parser.ts ×]                                                   ┐   composer-attachment[data-kind=project]
+ │ Fix the crash in @src/parser.ts|                                  │
+ │ ＋ ✱ Sonnet ▾                                 Ask ▾  ◔  (↑)        │
+```
+
+Phone (390px): the dock stacks the strip (collapsed), the queue (at most 2 rows, then "Show {n} more") and the
+composer; the plan buttons stack full width; the mention menu spans the composer.
+
+```
+┌ 390 ──────────────────────────┐      ┌ 390 ──────────────────────────┐
+│ ▤ Plan ready for review       │      │ transcript…                   │
+│ ┌ ## Move auth to … ────────┐ │      │ ┌ ☰ 3/7 · Running tests   ⌃ ┐ │  todo-strip (h-10 on touch)
+│ │ 1. Add createSession() …  │ │      │ ┌ Queued · 3 ──────────────┐ │
+│ └───────────────────────────┘ │      │ │ ◷ Also update …    ✎  ×  │ │  40px actions
+│ [ Feedback (optional)       ] │      │ │ ◷ Check the lexer  ✎  ×  │ │
+│ [ Approve, accept edits     ] │      │ │ Show 1 more              │ │
+│ [ Approve, ask before edits ] │      │ └──────────────────────────┘ │
+│ [ Keep planning             ] │      │ ┌ Queue a message…          ┐ │
+└───────────────────────────────┘      │ │ ＋ ✱ ▾       ▤ ◔ [Q] (■)  │ │
+  flex-col-reverse, 40px each          └───────────────────────────────┘
+```
+
+Settings → General, the Agent section (9.11):
+
+```
+│ Agent                                                           │
+│ Long chats and sub-agents.                                      │
+│ ◉ Automatic compaction                                          │ settings-auto-compact
+│   Summarize older messages when a chat nears the model's        │
+│   context window. When off, older messages are left out instead.│
+│ Compaction model   [ Same model as the chat                 ▾ ] │ settings-compaction-model
+│ Sub-agent model    [ ✱ Claude Haiku 5                       ▾ ] │ settings-subagent-model
+│ Sub-agent max steps [ 30 ]                                      │ settings-subagent-max-steps
+│   How many tool calls one sub-agent may chain (1–200).          │
+```
+
 ---
 
 ## 3. Design tokens
@@ -1122,7 +1250,8 @@ Projects entry the key `projects` and the test id `settings-nav-projects`); the 
 `ChatComposer` sits in a sticky dock at the bottom of `SidebarInset` (`sticky bottom-0 z-20`), with a
 `bg-gradient-to-t from-background` fade above it, the same `max-w-3xl` column, and
 `pb-[max(12px,env(safe-area-inset-bottom))]`. Composer body: `rounded-[20px] border bg-card shadow-sm`. Full spec
-in 7.7.
+in 7.7. Phase 9: the dock stacks the todo strip (7.25) and the queued messages (7.26) above the composer, in that order
+and in the same column; each renders nothing when it has nothing to show (14.1, "Dock stacking").
 
 ### 5.9 Scroll behavior
 
@@ -1172,7 +1301,7 @@ All pages are `ssr: false` SPA routes. C5 creates every page as a stub in Phase 
 | `/settings/models` | `pages/settings/models.vue` | default + title model (chat models only), per-provider model tables | W2.5; W6.10 (Phase 6) |
 | `/settings/media` | `pages/settings/media.vue` → `MediaSettings` | "Images and voice": the Images section (image model of the `generate_image` tool) and the Voice section (speech to text, language, read aloud, voice, speed, test voice), 9.9 | C12 (stub), W6.10 |
 | `/settings/projects` | `pages/settings/projects.vue` → `ProjectsSettings` | Projects (Phase 7): the project list with rename, instructions and delete, and the Add project dialog with the folder browser (`?add=1` opens it), 9.10; Phase 8: "Allowed commands…" per project and the global rules section `GlobalAllowlistSection` below the list | C15 (stub), W7.9; W8.11 (Phase 8) |
-| `/settings/general` | `pages/settings/general.vue` | display name, send key, defaults, max steps (Phase 7: also in project chats), Alt shortcuts, instructions, password | W2.5; W7.12 (Phase 7) |
+| `/settings/general` | `pages/settings/general.vue` | display name, send key, defaults, max steps (Phase 7: also in project chats), Alt shortcuts, instructions, password; Phase 9: the Shift+Tab switch and the Agent section (9.11) | W2.5; W7.12 (Phase 7); W9.12 (Phase 9) |
 | `/settings/appearance` | `pages/settings/appearance.vue` | theme cards, reading font, text size, density, expand thinking | W2.5 |
 | `/settings/about` | `pages/settings/about.vue` | versions, license, copy diagnostics | W2.5 |
 | `/settings/data` | `pages/settings/data.vue` → `DataSettings` | summary, export, import, storage cleanup (Phase 7; Phase 8: automatic cleanup), shared links (`SharesSettingsSection`), encryption key (Phase 7), danger zone (9.8) | C9 (stub), W5.5; W5.6 (`SharesSettingsSection`); W7.13 (Phase 7 sections) |
@@ -1215,7 +1344,11 @@ v7 UI message stream; verify the exact names in `node_modules/ai/dist/index.d.ts
 | consecutive `file` parts with an `image/*` type (assistant messages) | `ImageGallery` (Phase 6, W6.8, 7.16) | one gallery block per run of images (`chat-format.ts` block kind `gallery`; parts that render nothing, such as `step-start`, never split a run, any rendered block does): generated images of an image turn, of a chat model with image output or of the `generate_image` tool; one image full width, two or more in two columns; a lightbox with previous / next and Download |
 | `source-url` / `source-document` | `SourcesPart` (`AiSources`) | consecutive sources merge into one row "3 sources" (`Link2` icon); expanded: title + hostname links (`target="_blank" rel="noopener noreferrer"`) |
 | `step-start` | — | renders nothing (no divider) |
-| `data-notice` | `NoticePart` | one muted line with the server's message and an icon per code (codes in API.md 6.4; Phase 6 adds `generated-file-dropped`, icon `ImageOff`, level warning: a generated file that is not a PNG, JPEG, WebP or GIF image, or larger than 20 MB, was not kept; it stands where the file was; Phase 7 adds `workspace-unavailable`, icon `FolderX`, level warning: the chat's project folder could not be opened, so this run has no workspace tools; the message names the folder and the reason, 7.20) |
+| `data-notice` | `NoticePart` | one muted line with the server's message and an icon per code (codes in API.md 6.4; Phase 6 adds `generated-file-dropped`, icon `ImageOff`, level warning: a generated file that is not a PNG, JPEG, WebP or GIF image, or larger than 20 MB, was not kept; it stands where the file was; Phase 7 adds `workspace-unavailable`, icon `FolderX`, level warning: the chat's project folder could not be opened, so this run has no workspace tools; the message names the folder and the reason, 7.20; Phase 9 adds `compaction-failed`, icon `FoldVertical`, level warning: an automatic compaction failed, so older messages were left out instead, 7.24) |
+| `data-compaction` (Phase 9, ADR-040) | `CompactionDivider` (`chat-format.ts` block kind `compaction`) | a full-width divider at the part's position: "Conversation compacted" / "Conversation compacted automatically" / "Context compacted during this response", "Show summary"; the rows before it are dimmed (7.24). A `/compact` reply holds only this part |
+| `data-steer` (Phase 9, ADR-042) | `SteerNote` (block kind `steer`) | a right-aligned muted note inside the running reply: a message the user sent while the agent worked, delivered at a step boundary (7.26) |
+| `data-activity` (Phase 9, transient) | — | never stored and never a part: `useChat`'s `onData` receives `{ kind: 'compacting' \| 'idle' }` and the streaming reply shows the shimmer "Compacting conversation…" instead of "Thinking…" while it is `compacting` (7.24) |
+| `tool-todo_write`, `tool-exit_plan_mode`, `tool-task` (Phase 9, `core-agent`) | `ToolPart` (todo row and plan row, 7.25), `TaskBlock` (block kind `task`, 7.27) | the agent tools: a todo row whose body is a `TodoList`, a plan row with `PlanApprovalCard` while it awaits a decision, a two-line sub-agent block; each falls back to the generic tool row when its input or output does not parse with the shared schemas |
 | `data-*` | — | ignored unless listed in `docs/API.md`; unknown data parts never render |
 | error (message `metadata.error` or stream error) | `ErrorPart` | alert at the end of the message, see 7.4 |
 
@@ -1250,6 +1383,7 @@ Layout (`--row-height`, `rounded-md`, `hover:bg-accent`, whole row is the collap
 | `approval-requested` | amber dot + "Needs approval" | `ToolApprovalCard` renders below; chat dot = `approval` |
 | `approval-responded` | `Spinner` if approved, else like `output-denied` | |
 | `output-available` | `Check` in `text-success` | |
+| `output-available` with `preliminary: true` (Phase 9) | `Spinner` while the message streams; `CircleSlash` + "Stopped" (muted) otherwise | a tool that streams progress (an async-generator `execute`, plugin API 1.3.0; the builtin `task`): the output is a snapshot, not the result |
 | `output-error` | `X` in `text-destructive` | expanded body shows the error text |
 | `output-denied` | `Ban` + "Denied" (muted) | tooltip "Skipped because you sent a new message" when superseded |
 
@@ -1270,6 +1404,20 @@ Workspace tools (Phase 7, ADR-032; `core-workspace`: `read_file`, `list_director
 status (`+12 −3`, `exit 1`, `lines 1–120 of 340`, `17 files`, `23 matches`; `tool-row-summary`), and their expanded body
 shows a diff, terminal output, file content or a file list instead of the Input / Output blocks, with a "Raw input and
 output" toggle (7.19). A row whose output does not parse with the shared schemas falls back to the generic blocks.
+
+**Preliminary outputs** (Phase 9, plugin API 1.3.0): a tool whose `execute` is an async generator streams snapshots of
+its output (`output-available` with `preliminary: true`, at most one every 250 ms; the server always sends the final
+value as a normal `output-available`). `ToolPart` shows such a part as running while the message streams and as
+"Stopped" once the stream ended without a final value (a reload of a stopped run shows the `output-error` the server
+stored instead, 7.27). Today only the builtin `task` uses it; a third-party streaming tool gets the generic row with the
+latest snapshot as its Output.
+
+**Agent rows** (Phase 9, `core-agent`; renderers in 7.25 and 7.27): `todo_write` (`ListTodo`; argument = the current
+item's `activeForm`, else its content; summary "3/7"; body `TodoList` plus "Raw input and output"), `exit_plan_mode`
+(`ClipboardList`; argument = the plan's first heading, else its first line; status texts "Plan ready for review",
+"Kept planning" (`PencilLine`), "Approved · Accept edits" / "Approved · Ask"; body `PlanBody` plus "Your feedback: …"
+when a reason was sent) and `task` (a `TaskBlock` instead of the row). Rows never auto-expand (principle 5); the todo
+strip is the live view of the list.
 
 ### 7.3 Approval card
 
@@ -1331,6 +1479,15 @@ output" toggle (7.19). A row whose output does not parse with the shared schemas
   "No rule can allow this command, so it always asks." (no valid prefix, e.g. `sudo …`). The meta line uses the
   sticky folder: "In {project}/{cwd}" where `cwd` is the call's `cwd` input, else the chat's current shell folder
   (`TOOL_APPROVAL_CONTEXT.shellCwd()`), left out when it is the project folder.
+- **Plan approval** (Phase 9, ADR-041; wireframe 2.16, full spec 7.25): the `exit_plan_mode` call of `core-agent`
+  always asks (overrides and hooks cannot approve it), and `ToolPart` renders `PlanApprovalCard` instead of
+  `ToolApprovalCard`: the plan as Markdown, an optional feedback field and three buttons, **Keep planning**,
+  **Approve, ask before edits** and **Approve, accept edits**. An approval sets the chat's permission mode (Ask or Accept
+  edits) before the response goes out, so the continuation runs in that mode; Keep planning denies the call with the
+  feedback as `reason`, and the agent keeps planning. There is no "Always allow" and no implicit Enter.
+- **Sub-agents never show a card** (ADR-043): a call a child agent would need to ask about is denied inside the child
+  (its step reads "Skipped", 7.27). The `task` call itself has policy `safe`; a user override `ask` on `task` shows the
+  normal card for it.
 
 ### 7.4 Errors
 
@@ -1364,7 +1521,9 @@ back into the composer (`takeBackUnstored()`, 11.1):
 
 - 409 `conflict` with `details.reason: 'run-active'` (a run already holds the chat, e.g. one started in another tab)
   → toast "A response is already running in this chat."; the transcript follows the running reply. A version switch
-  during a run gets the same answer and toast.
+  during a run gets the same answer and toast. Phase 9: while the session knows of a run, Send queues the message
+  instead (7.26), so this answer is left for a run that started elsewhere just before the request; a queue request
+  answered 409 `run-idle` (the run ended meanwhile) is sent as a normal message once the session is idle.
 - 404 `not_found` (an unknown `parentId` or `messageId`: the chat changed in another tab, so the shown path is stale)
   → toast "This chat changed elsewhere and was reloaded."; the session reloads the path. A version switch answered
   404 does the same.
@@ -1464,15 +1623,26 @@ sibling ids (`seq` order) and the index of the shown one (API.md, `MessageBranch
 | Session status | Transcript | Composer |
 |---|---|---|
 | `ready` | stable | Send (disabled when text and files are empty, no usable model, or voice input runs, 7.17) |
-| `submitted` | assistant placeholder: one line (`--transcript-line-height` tall) with `AiShimmer` "Thinking…" | Stop |
-| `streaming` | parts render incrementally (`Markdown final=false` on the growing text part) | Stop; Esc stops |
+| `submitted` | assistant placeholder: one line (`--transcript-line-height` tall) with `AiShimmer` "Thinking…" (Phase 9: "Compacting conversation…" while the transient activity is `compacting`, 7.24) | Stop; Phase 9: Queue message (below) |
+| `streaming` | parts render incrementally (`Markdown final=false` on the growing text part) | Stop; Esc stops; Phase 9: Enter (the send key) queues, and the outline **Queue message** button shows left of Stop while the composer has content |
 | `streaming`, image turn (Phase 6) | once the `start` chunk carries `metadata.image` and until the first `file` part: `GeneratingImages` (7.16), `n` placeholder tiles at the aspect ratio + "Generating image… 12s"; then the gallery | Stop; Esc stops (the reply is saved "Stopped", without images) |
 | `error` | `ErrorPart` on the last assistant message | Send |
 
 Stop = `session.stop()`: calls `POST /api/chat/:id/stop`, then aborts the client request (the server run
 survives disconnects, so a client abort alone would only disconnect). Leaving the page never stops a run;
 returning resumes it: `@ai-sdk/vue` 4 has no `resume` option, so the session calls `chat.resumeStream()` on mount
-when the chat has an active run (11.1).
+when the chat has an active run (11.1). Phase 9 (ADR-042): Stop also empties the chat's queue; the stop result lists the
+dropped messages (`dropped`), `session.stop()` resolves with them, and the tab that pressed Stop puts them back into its
+composer (`restoreQueued`, 7.26) with the toast "Queued messages moved back to the composer."; other tabs only see the
+queue empty. Sub-agents of the run stop with it (their blocks end "Stopped", 7.27).
+
+**Composer while a run is active** (Phase 9, ADR-042): the textarea stays enabled and its placeholder becomes "Queue a
+message…". Send (Enter, Mod+Enter or the button) does not start a second request: `session.submit()` adds the message
+to the server-side queue (`POST /api/chat/:id/queue`), the polite region announces "Message queued", and the message
+shows in `QueuedMessages` above the composer until the agent takes it at its next step boundary (a `SteerNote` appears
+in the reply) or, when the run is finishing, it becomes the next turn by itself (7.26). Server commands (`/compact` and
+plugin commands) are queued as the next turn, never steered. Esc still stops; Stop never moves (the Queue message
+button sits to its left). Client commands (`/model`, `/mode`, …) run at once as always.
 
 ### 7.7 Composer (`ChatComposer`, W2.3)
 
@@ -1487,7 +1657,8 @@ Structure inside `AiPromptInput`:
 ```
 
 - Left tools: `ComposerAddMenu` (`Plus`, `aria-label="Add"`): "Attach files" (`Paperclip`), "Commands"
-  (inserts `/` and opens `SlashMenu`). Then `ModelPicker`, then `EffortMenu` (only when the model reasons), then
+  (inserts `/` and opens `SlashMenu`), Phase 9: "Mention a file" (`AtSign`, `composer-mention`; project chats only:
+  inserts `@` at the caret and opens `MentionMenu`, 7.26). Then `ModelPicker`, then `EffortMenu` (only when the model reasons), then
   `ImageOptionsMenu` (Phase 6, only for image models and chat models with image output, below). While dictation
   records or transcribes, `RecordingIndicator` replaces the left tools (7.17; wireframe 2.11).
 - Right tools: `PermissionMenu` (only when at least one tool exists and the model has `capabilities.tools`),
@@ -1495,10 +1666,16 @@ Structure inside `AiPromptInput`:
   7.17: right before Send; hidden when the browser cannot record), `SendStopButton`: 32px circle,
   `bg-primary text-primary-foreground`, `ArrowUp` (Send) / filled `Square` (Stop); disabled = `bg-muted
   text-muted-foreground`. Same size in every state. Send is also disabled while voice input runs (tooltip "Finish
-  dictation first"). While the recording indicator shows, `PermissionMenu` and `ContextRing` step aside as well, and
+  dictation first"). Phase 9: while a run is active and the composer has text or files, `SendStopButton` (prop
+  `canQueue`, emit `queue`) adds an outline 32px button **Queue message** (`composer-queue`, `ListPlus` icon, label
+  hidden below `sm`, 40px on coarse pointers) left of Stop; it does what Enter does. While the recording indicator shows, `PermissionMenu` and `ContextRing` step aside as well, and
   Alt+M / Alt+R / Alt+P and the `/model`, `/effort`, `/mode` menus do nothing.
-- Placeholder: "Reply…" in a chat, "Ask anything…" on `/`, "Describe an image…" whenever an image model is selected.
-  Textarea font 15px (16px below `md`, iOS zoom).
+- Placeholder: "Reply…" in a chat, "Ask anything…" on `/`, "Describe an image…" whenever an image model is selected;
+  Phase 9: "Queue a message…" while a run is active. Textarea font 15px (16px below `md`, iOS zoom).
+- **File mentions** (Phase 9, ADR-042; 7.26): in a project chat, `@` at the start of the text or after whitespace opens
+  `MentionMenu` with the project's files (`GET /api/projects/:id/files?q=`); picking a file inserts `@path ` and attaches
+  a snapshot of the file as a project chip (`composer-attachment` with `data-kind="project"`, `FileCode`); picking a
+  folder inserts `@folder/` and keeps the menu open. No menu in chats without a project or inside a word (`a@b`).
 - **Image models** (Phase 6, ADR-028): the message text is the prompt (at most 32,000 characters: a longer one keeps
   Send disabled with the tooltip "The prompt can be up to 32,000 characters"; an empty prompt keeps it disabled too,
   also when files are attached). Image models have no reasoning and no tools, so `EffortMenu` and `PermissionMenu` hide
@@ -1525,7 +1702,9 @@ Structure inside `AiPromptInput`:
   input and a PDF is attached), a warning line shows under the chips ("Claude Haiku can't see images. Remove them or
   choose another model." / "… can't read PDFs. Remove them or choose another model.") and Send stays disabled with that
   text as its tooltip.
-- Drafts: unsent text per chat is kept in `sessionStorage` (`useComposerDraft`) and restored on return.
+- Drafts: unsent text per chat is kept in `sessionStorage` (`useComposerDraft`) and restored on return. Phase 9:
+  `restoreQueued(items)` (exposed, 10.6) appends the texts of messages a Stop dropped from the queue to the draft
+  (separated by blank lines) and restores their files as done chips (`attachments.addRefs`).
 - Client commands never reach the server (7.8). Server commands are sent as typed; the server expands them.
 - Focus: autofocus on desktop when a chat opens and after sending; never on touch devices. Shift+Esc focuses.
 
@@ -1548,6 +1727,14 @@ the error "Accept edits works in project chats." (7.11). `/mode` accepts a value
 hyphens read as spaces (`parseToolMode`); anything else shows "Unknown mode "{value}". Use ask, edits, auto or off."
 (`edits` listed only in a project chat). `ClientCommandContext.projectChat` tells the parser whether the chat has a
 project.
+
+Phase 9: `/mode plan` selects Plan in a project chat; outside one it changes nothing and shows "Plan mode works in
+project chats." (7.11); the unknown-mode error lists `plan` with `edits` only in project chats ("Use ask, edits, plan,
+auto or off."). **`/compact [focus]`** (ADR-040) is a reserved harness command: `GET /api/commands` lists it (group
+Commands, with its description from the server), selecting it inserts `/compact `, and the message is sent like a server command. The
+server summarizes the conversation into a `data-compaction` reply (7.24); the optional text after the name is the focus
+of the summary (at most 1,000 characters). While a run is active it is queued as the next turn (7.26). Plugins cannot
+register a command named `compact`.
 
 ### 7.9 Model picker (`ModelPicker`, W2.3)
 
@@ -1589,6 +1776,7 @@ High, Max. Hidden when the model has no reasoning capability; the value still tr
 |---|---|---|---|
 | `ask` | Ask | `Hand` | Ask before tools that can change things (default) |
 | `edits` | Accept edits | `FilePenLine` | Edit project files without asking; ask before shell commands (Phase 7) |
+| `plan` | Plan | `ClipboardList` (`text-info`) | Explore and plan; change nothing until you approve the plan (Phase 9) |
 | `auto` | Auto | `Zap` | Run tools without asking, except ones marked always-ask |
 | `off` | Off | `CircleSlash` | Don't use tools |
 
@@ -1601,6 +1789,23 @@ paths (policy `always`) and every other tool that asks in Ask still ask. In a ch
 `edits` behaves like Ask (no workspace tool is offered there). Alt+P opens it. Default for new chats:
 `settings.defaultToolMode` (Settings → General offers Accept edits too, 9.4).
 
+**Plan** (Phase 9, ADR-041; 7.25) is offered like Accept edits: in project chats, or while it is the current value
+(`offeredToolModes` treats `plan` like `edits`). The trigger and the option use `text-info` (Auto keeps the ember
+accent). In Plan the server offers only tools that change nothing (workspace `write` / `execute` tools are left out)
+plus `exit_plan_mode`; reading tools that ask in Ask still ask. The agent ends planning with a plan card (7.3), whose
+approval switches the mode to Ask or Accept edits. The server enforces Plan in every chat (a chat without a project
+simply has no workspace tools then); the UI just does not offer it there.
+
+**Shift+Tab** (Phase 9, `useModeCycle`, `mode-cycle.ts`): in the composer textarea Shift+Tab cycles **Ask → Accept
+edits → Plan → Ask** in a project chat; outside project chats the cycle is Ask only, and from Auto or Off the next mode
+is Ask (`nextToolMode(current, { projectChat })`). It takes the key only when all of these hold: Shift+Tab without
+another modifier and outside an IME composition; the setting `shiftTabModes` is on (Settings → General, 9.4); the
+permission menu shows (tools exist, the model calls tools, no recording); neither the slash menu nor the mention menu
+is open; and the next mode differs from the current one. Otherwise Shift+Tab moves focus backwards as usual, so there
+is no keyboard trap (WCAG 2.1.2). Each switch is announced through the composer's polite region ("Permission mode:
+Plan"). The trigger carries `aria-keyshortcuts="Shift+Tab"` while the cycle is on (with Alt+P as before). Alt+P and
+`/mode` keep working whatever the setting.
+
 ### 7.12 Context ring (`ContextRing`, W2.3)
 
 `AiContext` trigger: 18px circular progress = context used by the last assistant turn (input + output tokens of
@@ -1610,6 +1815,14 @@ rows, "Chat cost $0.12" (sum of message `costUsd`, hidden when unknown). Hidden 
 `contextWindow`, and always for image models (Phase 6: an image turn sends no history). With versions (7.5) the chat
 cost sums the **visible** messages only (the active path); the server's `ChatDetail.totals` sums every usage row,
 including hidden versions and image generations (the cost actually paid).
+
+Phase 9 (ADR-040): the hover card ends with a footer that follows `settings.resolved.autoCompact`: on → "Older
+messages are summarized automatically near the limit. Type /compact to do it now."; off → "Automatic compaction is
+off. Older messages are left out near the limit." After `/compact` the reply's `metadata.usage.contextTokens` is the
+size after compaction, so the ring drops at once; an automatic compaction lowers it with the next reply's usage.
+`ChatDetail.totals` (and so the cost the server reports) includes the summarizer (`compact`) and sub-agent
+(`subagent`) usage rows; the ring's chat cost sums message `costUsd`, which already carries both for the reply that
+caused them.
 
 ### 7.13 Empty state and no-provider callout (W2.2)
 
@@ -1716,6 +1929,13 @@ chats (6: the route is exempt from the auth middleware).
 - **Head**: `useHead()` sets the title ("{title} · harness-forge", "Link unavailable · harness-forge", else "Shared
   chat · harness-forge") and the meta tags `robots: noindex, nofollow` and `referrer: no-referrer` (the server also
   sends `X-Robots-Tag` and `Referrer-Policy` on every response).
+- **Agent 2.0 parity** (Phase 9; no `sharePartSchema` change): the server's sanitizer splits an assistant message at
+  each steer into user share messages (a steer reads as an ordinary user bubble on the share page, its files following
+  the attachments option), and drops compaction markers and activity parts (summaries are never shared; the dimming and
+  the divider do not exist there). `ShareToolRow` renders the agent tools when tool details are shared: `TaskBody`
+  for `task` (7.27; store-free), `TodoList` for `todo_write` and `PlanBody` for `exit_plan_mode`, with the same test
+  ids as in the chat; without tool details the rows read "Sub-agent", "Updated tasks" and "Plan" (no argument) and stay
+  static.
 
 ### 7.16 Image gallery and generating state (`ImageGallery`, `GeneratingImages`, W6.8)
 
@@ -2315,6 +2535,217 @@ the web uses the same pure parser (`packages/shared/src/util/shell-command.ts`) 
   project (`project.changed` with `project: null`, also applied locally by Settings → Projects after its own delete)
   drops its rules (the server deletes them with the project).
 
+### 7.24 Compaction (`CompactionDivider`, `compaction.ts`, W9.11; Phase 9)
+
+A **compaction** (ADR-040) replaces older context with a model-written summary, stored as a `data-compaction` part on
+the message path (ARCHITECTURE.md 6.18). For the model the latest marker on the path replaces everything before it;
+the stored messages stay and are only dimmed. Three ways it happens: **`/compact [focus]`** (manual; the reply holds
+only the marker), **automatic before a reply** (the estimate passed 80% of the context window before the first model
+call; the marker opens the reply) and **automatic during a long reply** (between two steps; the marker sits inside the
+reply). The marker data (`CompactionData` from `@harness-forge/shared`): `{ trigger: 'manual' | 'auto', keep: 'none' |
+'last-user', summary, focus?, todos?, modelRef, messagesCompacted, tokensBefore, tokensAfter, createdAt }`. It has no
+state: while the summarizer runs, the server sends the transient `data-activity { kind: 'compacting' }` (then `idle`),
+and a failure is the notice `compaction-failed` (the old trimming happened instead) rather than a failed marker.
+
+- **Layout** (`components/chat/compaction/compaction.ts`, pure): `compactionLayout(messages)` runs over
+  `compactionMarkers(messages)` from `@harness-forge/shared` (`util/agent-state.ts`; never re-implemented) and returns
+  `{ dimmed: ReadonlySet<string> }`: the ids of the messages before the **latest** marker's message, minus the kept user
+  message when that marker has `keep: 'last-user'` (the model still sees it, so it stays at full opacity). Finished
+  older messages are cached in a `WeakMap` (like `rewindable`). Inside the message that holds the latest marker,
+  `ChatMessage` dims the blocks before the marker itself (an in-run compaction). Earlier markers render as dividers but
+  dim nothing extra. A branch above a marker, a regenerate of the reply that held it or a deleted marker message simply
+  shows the path without it (the rule is the server's, ADR-023).
+- **Divider** (`CompactionDivider`, `compaction-divider`): a full-width row at the part's position (`chat-format.ts`
+  block kind `compaction`): two `aria-hidden` rules around the `FoldVertical` icon, the label, the meta line "{n}
+  messages summarized · 182K → 9K tokens" (`data-slot="compaction-meta"`; `messagesCompacted`, `tokensBefore`,
+  `tokensAfter` in the `14.3K` style; hidden below `sm`) and the toggle **Show summary** / **Hide summary**
+  (`compaction-toggle`, `data-state` `open` | `closed`, `aria-expanded`, `aria-controls`). The label (`compactionLabel`):
+  `trigger: 'manual'` → "Conversation compacted"; `auto` as the first rendered block of its message
+  (`data-variant="history"`) → "Conversation compacted automatically"; `auto` after other blocks of its message
+  (`data-variant="run"`) → "Context compacted during this response" (a manual marker is always `history`).
+- **Summary** (`compaction-summary`, collapsed by default, not persisted): "Focus: {focus}" when set, the summary as
+  `Markdown` with a `CopyButton`, and the footnote "The model sees this summary instead of the messages above.";
+  `max-h-[50dvh]`, scrolls inside.
+- **Dimmed rows** (`ChatMessage` prop `compacted`): the roots `message-user` / `message-assistant` get `data-compacted`
+  and `opacity-70 transition-opacity`, back to full opacity on hover and focus-within (actions, versions, rewind and
+  copy keep working). No per-row screen-reader text: the divider explains it.
+- **While compacting**: the session's `activity` (11.6) is `compacting` from the transient chunk until `idle` or the
+  end of the stream; meanwhile the submitted placeholder and the streaming reply show `AiShimmer` "Compacting
+  conversation…" instead of "Thinking…". `ChatView` announces "Conversation compacted" once when a new marker arrives
+  in its own stream.
+- **`/compact`** (7.8): with nothing to compact the reply is the text "There is nothing to compact yet."; Regenerate on
+  a `/compact` reply compacts again; the context ring drops right away (7.12). Its usage row has the purpose `compact`.
+- **Failure**: the notice `compaction-failed` (warning, `FoldVertical`) with the server text, e.g. "Couldn't compact
+  the conversation. Older messages were left out instead."; with `autoCompact` off the old `context-trimmed` notice
+  shows instead (9.11).
+- **Elsewhere**: the Markdown export renders "_Conversation compacted (N messages summarized)_" with the summary; share
+  pages drop the marker (7.15); search does not index summaries; chat export / import keeps the marker (positional, so
+  it survives the id remapping).
+- **Mobile**: the rules shrink, the meta line hides, the summary card scrolls inside `max-h-[50dvh]`; no horizontal
+  scroll.
+
+### 7.25 Plan mode and todos (`PlanApprovalCard`, `PlanBody`, `TodoList`, `TodoStrip`, W9.10; Phase 9)
+
+**Plan mode** (ADR-041): permission mode `plan` (7.11) lets the agent read and search but not change anything; it then
+calls `exit_plan_mode { plan }` (markdown, at most 50,000 characters) and the user decides on the card. Only project
+chats offer it.
+
+- **Card** (`PlanApprovalCard`, `components/chat/agent/`, `plan-approval`, `data-state` `pending` | `sending`; wireframe
+  2.16): rendered by `ToolPart` instead of `ToolApprovalCard` while an `exit_plan_mode` part of `core-agent` awaits its
+  decision (`approval-requested`). Built on `AiConfirmation` with `border-info/50 bg-info/5`, `role="group"` named "Plan
+  ready for review", the source "from core-agent". The plan renders through `PlanBody` (`Markdown`) inside a
+  `tabindex="0"` `role="region"` named "Plan" (`plan-approval-plan`, `max-h-[45dvh]`, scrolls). Below it the optional
+  `Textarea` "Feedback for the agent (optional)" (`plan-feedback`, 1 → 4 rows, at most 2,000 characters, the server's
+  `approvalReasonMaxChars`; a longer text shows "Use at most 2,000 characters." and disables the buttons) and the
+  buttons **Keep planning** (`plan-keep-planning`, outline), **Approve, ask before edits** (`plan-approve-ask`, outline)
+  and **Approve, accept edits** (`plan-approve-edits`, primary). There is no implicit approval on Enter; every control
+  is disabled while the decision is sent (`sending`).
+- **Decision**: the card emits `decide { approved, mode?, feedback? }`; `ToolPart` emits `approval { id, approved,
+  toolName, alwaysAllow: false, planMode, reason }` up to `ChatView`, and `session.approve()` (11.6) first sets the
+  chat's `toolMode` (`edits` or `ask`, saved on the chat) and then calls `addToolApprovalResponse({ id, approved,
+  reason })`; the continuation therefore runs in the new mode (the server refuses to approve while the continuation's
+  mode is `plan` or `off`). Keep planning sends `approved: false` with the feedback as `reason` and keeps `plan`; the
+  agent revises the plan and shows a new card. `ChatView` announces "Plan approved. Permission mode: Accept edits." (or
+  "… Ask.") or "Feedback sent. The agent keeps planning."
+- **Row after the decision**: "Approved · Accept edits" / "Approved · Ask" (`Check`) or "Kept planning" (`PencilLine`);
+  its body is `PlanBody` plus "Your feedback: {reason}" when one was sent. A plan card on another version stays pending
+  like any approval (7.3); a new user message supersedes it.
+- **Mobile**: the actions are `flex-col-reverse sm:flex-row`, full width, 40px tall on coarse pointers, so "Approve,
+  accept edits" is on top.
+
+**Todos** (`todo_write`, `core-agent`, policy `safe`, every chat with tools, plan mode included): the agent replaces
+its whole list with each call (at most 50 items `{ id, content, status: pending | in_progress | completed,
+activeForm? }`). The current list is the last finished `todo_write` call on the shown path (`latestTodos` from
+`@harness-forge/shared`; branch-aware, survives reloads; a sub-agent's todos are not part of it).
+
+- **State** (`components/chat/agent/todos.ts`, pure, over `latestTodos`): `todoState(messages)` →
+  `TodoState { todos, done, total, current: TodoItem | null, messageId, live } | null` (`current` = the first
+  `in_progress` item; `live` = the list belongs to the last assistant message of the path);
+  `todoStripVisible(state, running)` = `total > 0` and (a run is active, or the list is live and not all done). A list
+  left behind in an older turn therefore disappears from the dock (the row keeps it).
+- **List** (`TodoList`, `todo-list`, `<ul role="list">`): `todo-item` per item (`data-status`, `data-index`): pending
+  `Circle` muted; in progress `CircleDot` in `text-primary`, `font-medium`, showing `activeForm` (else the content);
+  completed `CircleCheck` in `text-success`, muted with a line-through. Screen-reader prefixes "To do:", "In progress:",
+  "Done:".
+- **Strip** (`TodoStrip`, `todo-strip`, `data-state` `open` | `closed`, `data-count` = total, `data-value` = done):
+  mounted by `ChatView` in the composer dock above `QueuedMessages`. Collapsed: one line (h-9, 40px on coarse pointers):
+  `ListTodo`, "3/7 · Running the parser tests" ("All tasks done" when finished), a `Progress` w-16
+  (`data-slot="todo-progress"`, hidden below `sm`) and a chevron. Expanded: the `TodoList` above the header line, inline,
+  `max-h-[40dvh]`, scrolls. The toggle (`todo-strip-toggle`) is named "Show tasks, 3 of 7 done" / "Hide tasks", with
+  `aria-expanded` and `aria-controls`; the open state persists in `localStorage['hf-todo-expanded']` (`1` / `0`,
+  default closed; blocked storage keeps it in memory). The strip is not a live region.
+- **Compaction** keeps the list: the marker's `todos` snapshot goes to the model with the summary.
+
+### 7.26 File mentions, queue and steering (`MentionMenu`, `QueuedMessages`, `SteerNote`, W9.8 / W9.9 / W9.11; Phase 9)
+
+**File mentions** (ADR-042): `@` in the composer of a **project chat** searches the project's files; picking one
+attaches a snapshot of it (an upload, like a dropped file) and keeps `@path` in the text, so the model sees the path
+too. The chat request is unchanged.
+
+- **Token** (`mentionTokenAt(text, caret)` from `@harness-forge/shared` `util/mentions.ts`): an `@` at the start of the
+  text or after whitespace, with no whitespace between it and the caret, at most 256 characters; `a@b` never opens the
+  menu, and neither does a chat without a project. Esc dismisses the menu for that token (remembered until the token
+  changes, like the slash menu).
+- **Search** (`useFileMentions({ projectId, text, caret })`, over `useProjectFiles().search`): `GET
+  /api/projects/:id/files?q=<query>&limit=50` 80 ms after the last keystroke, aborting the previous request, with a
+  20-query cache; the answer `{ items: { path, kind: 'file' | 'dir' }[], truncated, indexedAt }` is ranked by the server
+  (`rankPaths`); the highlight comes from `scorePath(query, path).ranges` (shared; rendered as `<mark>` runs,
+  `data-slot="mention-highlight"`, never `v-html`). The server's index respects `.gitignore`, skips `node_modules` and
+  `.git`, and leaves secret-looking paths out.
+- **Menu** (`MentionMenu`, `mention-menu`, `data-state` `loading` | `ready` | `error`, `data-count`): the same contract
+  as `SlashMenu` (an absolutely positioned listbox above the composer; the textarea keeps focus and forwards its keys;
+  exposed `handleKeydown`, `activeId`, `listId`), mounted after the slash menu; the keydown chain tries the mention
+  menu first, then the slash menu; the textarea's `aria-controls` / `aria-activedescendant` point at whichever menu is
+  open. Header (`aria-hidden`) "Files in {project}"; rows (`mention-menu-item`, `data-path`, `data-kind`): `FileText`
+  (file) or `Folder` (dir), the base name and the folder in muted text; ↑/↓ move, Enter or Tab pick, Esc closes. States:
+  loading (after 150 ms) "Searching files…"; empty "No matching files"; error "Couldn't search files." ("The project
+  folder is unavailable." for a folder that cannot be opened); `truncated` → the footer "Showing the first 50 matches.
+  Type more to narrow it down."
+- **Pick**: a file → `@path ` replaces the token (`setTextAndCaret(…, { force: true })`) and
+  `attachments.addProject(projectId, path)` adds a chip that uploads at once through `POST
+  /api/projects/:id/files/attach { path }` (201 `FileRef`): `composer-attachment` with `data-kind="project"` and
+  `data-path`, the `FileCode` icon, the base name, the full path in a tooltip; the same path is attached once. A folder
+  → `@folder/` and the menu stays open on that folder. The chip and the text are independent (removing one keeps the
+  other). Attach failures show a toast titled "{path} can't be attached": 413 → "Files can be up to 5 MB."; 404 → "The
+  file no longer exists."; 400 → the server message (a `.git` or secret-looking path, a type that is not text, an
+  image or a PDF, a folder that cannot be opened). Send waits for the chip like any upload.
+- **Mention a file** in the `+` menu (`composer-mention`, project chats only) inserts `@` at the caret (with a space
+  before it when needed) and opens the menu.
+
+**Queue and steering** (ADR-042): a message sent while a run is active waits in the chat's queue on the server
+(in memory; lost on a server restart; at most 10 messages of at most 256 KB each). At the next **step boundary** the
+run takes every queued message and the model reads it as a user message (a **steer**); the reply shows it as a
+`SteerNote`. A message still queued when the run completes becomes the **next turn**, started by the server. Server
+commands (`/compact`, plugin commands) always wait for the next turn. While an approval is pending, queued messages wait
+for the next run.
+
+- **Submit** (`session.submit(input)` → `'sent' | 'queued'`, 11.6): queues when a request is in flight, the session is
+  resuming or the chats store reports a run; `POST /api/chat/:id/queue { message, modelRef, reasoningEffort, toolMode
+  }` (a user UI message with a client `msg_` id, its text and uploaded file parts). 409 `run-idle` (the run ended in
+  between) → the session waits until it is idle and sends the message normally; 409 `queue-full` → toast "The queue is
+  full. Wait for the agent to take a message."; other failures put the text back into the composer with an error toast.
+- **List** (`QueuedMessages`, `components/chat/queue/`, `queued-messages`, `data-count`, `data-state` `queued` |
+  `approval`; mounted by `ChatView` in the dock between `TodoStrip` and the composer; hidden when empty): header
+  "Queued · {n} · sent at the next step" ("Sent after you answer the approval" while the chat awaits an approval); rows
+  (`queued-message`, `data-message-id`, `data-state` `queued` | `cancelling`): `Clock`, a paperclip count when the
+  message has files, the first line of its text (truncated), a muted "Runs after this response" for a server command,
+  and **Edit** (`queued-message-edit`, `Pencil`, "Edit queued message") and **Cancel** (`queued-message-cancel`, `X`,
+  "Cancel queued message"). Cancel → `DELETE /api/chat/:id/queue/:itemId` (204); a 404 (already delivered or started)
+  → toast "Already sent to the agent.". Edit cancels the item, then restores it into the composer like a Stop does.
+  While a cancel is in flight the row shows a spinner and disabled actions. After a cancel focus moves to the next row's
+  Cancel, else the previous row's, else the textarea. On mobile more than two rows collapse behind "Show {n} more".
+- **Sync**: `queue.changed { chatId, items, removed? }` (SSE) replaces the chat's list in every tab (the `chat-queue`
+  store, 11.6); `removed` reasons `delivered` | `started` | `cancelled` | `stopped` | `failed` drop rows; a `failed`
+  removal shows "Couldn't send a queued message." with its error in the tab that queued it. The list is fetched when a
+  chat opens and after an event-stream reconnect; `chat.deleted` drops it.
+- **Steer note** (`SteerNote`, `components/chat/steer/`, `steer-note`, `data-message-id` = the queued message id):
+  inside the running assistant message at the step boundary where it was delivered: right-aligned, `bg-muted/70
+  rounded-2xl px-3 py-2 text-sm max-w-[85%]`, the text (plain, `whitespace-pre-wrap`), its files as `FileChip`s, and
+  the muted caption "You · while it worked"; `role="note"` with the sr-only prefix "You said while the agent worked:".
+  `useChat`'s `onData` marks the item delivered when its `data-steer` chunk arrives (the row leaves the list before the
+  event). After a reload the note stays where it was delivered (the server rebuilds the model history by splitting the
+  reply there).
+- **Next turn started by the server**: `run.started` with `origin: 'queue'` and a `userMessageId` that is not on the
+  shown path makes the session reload the path, then resume the stream (once idle when it was busy), so the queued
+  message shows as a user bubble before its reply streams; other tabs follow the same way.
+- **Stop** (7.6): the queue is emptied; only the tab that pressed Stop restores the dropped messages into its composer.
+
+### 7.27 Sub-agents (`TaskBlock`, `TaskBody`, `TaskStepRow`, W9.10; Phase 9)
+
+The `task` tool (`core-agent`, ADR-043) runs a **sub-agent**: a separate agent loop with its own context, started by
+the main agent with `{ description, prompt, type: 'explore' | 'general' }`. It never asks for approval (a call that
+would ask is skipped), runs at most 3 at a time (20 per reply), streams its progress as preliminary outputs and returns
+only its report to the main agent. Type `explore` is read-only; `general` may also do what the chat's mode allows
+without asking (writes in Accept edits, everything but always-ask tools in Auto).
+
+- **Data** (`TaskOutput` from `@harness-forge/shared`): `{ status: queued | running | completed | failed | aborted |
+  limit, type, description, modelRef, steps: { toolCallId, toolName, summary, state: running | done | error | denied,
+  resultPreview? }[] (the last 50), stepsOmitted, report, usage?, costUsd?, startedAt, finishedAt?, error? }`.
+- **Block** (`TaskBlock`, `task-block`, `data-state`, `data-kind` `explore` | `general`; `ChatMessage` mounts it for
+  block kind `task`): a `Collapsible` that keeps two lines so nothing shifts on completion. Line 1 is the trigger
+  (`task-block-trigger`): chevron, `Telescope` (explore) or `Bot` (general), "Explore" / "Agent", the description
+  (truncated), "{n} tool calls · 41s" (hidden below `sm` while running) and the status cell. Line 2 (`h-5`,
+  `aria-hidden`, `data-slot="task-live"`): while running the latest step (`└ read_file "src/auth.ts"`), when finished
+  the first sentence of the report. The trigger is named "Explore sub-agent: {description}, running, 4 tool calls"
+  ("Sub-agent: …" for general; the status words below).
+- **Status** (`data-state`): `queued` ("Waiting", `Clock`: over the parallel limit), `running` (`Spinner`; a preliminary
+  output while the message streams), `completed` (`Check`), `failed` (`X`), `limit` (`TriangleAlert`, "Step limit
+  reached": the report was written at the step limit), `aborted` ("Stopped", `CircleSlash`: Stop, or a preliminary
+  output after the stream ended; after a reload the stored `output-error` reads "Stopped" too and the nested steps are
+  gone), plus the tool part states `approval` (a user override `ask` on `task`: `ToolApprovalCard` below) and `denied`.
+- **Expanded** (`TaskBody`, store-free, also used by `ShareToolRow`): "Prompt" through `ToolValueBlock`; the steps
+  (`TaskStepRow`, `task-step`, `data-tool-name`, `data-state`): the tool's icon and name, the summary, the result
+  preview muted, the status (`Spinner` / `Check` / `X` / `Ban` + "Skipped"); a denied step has the tooltip "Sub-agents
+  can't ask for approval, so this was skipped."; the latest 10 first, **Show all {n} steps** (`task-steps-more`) when
+  more are kept (at most 50), and "{k} earlier steps were not kept" when `stepsOmitted > 0`; "Report" as `Markdown`
+  (`task-report`) with a `CopyButton`; the meta line "{model} · 18.2K tokens · $0.004 · 41s"; on failure an `Alert`
+  "The sub-agent failed: {error}" above the partial report.
+- **Parallel** blocks simply stack; there is no grouping. A block that fails to parse falls back to `ToolPart`.
+- **Rewind**: sub-agent writes are journaled under the reply (ADR-036), so "Rewind files to here" counts a `task` output
+  with a done `write_file` / `edit_file` step as an edit (`ChatTranscript`'s `rewindable` pass), and the changes panel
+  lists those files. A sub-agent's `cd` does not move the chat's shell folder (`session.cwd` ignores task steps).
+- **Cost**: each sub-agent writes its own usage row (purpose `subagent`); its cost is part of the reply's cost.
+
 ---
 
 ## 8. Plugins UX spec
@@ -2643,12 +3074,16 @@ except dialogs and text fields, which save on blur or Enter.
 | Max steps per response | `Input` (`inputmode="numeric"`, at most 3 characters) 1–200 (Phase 7; was 1–100), help "How many tool calls and follow-ups one response may chain in chats without a project (1–200)." | `maxSteps` |
 | Max steps in project chats | `Input` (`inputmode="numeric"`) 1–200 (Phase 7, `settings-project-max-steps`), help "Agent runs in project chats can take more steps (1–200)." | `projectMaxSteps` |
 | Alt shortcuts | `Switch` "Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate and Alt+C for changes." (Phase 6 added Alt+V, Phase 8 Alt+C) | `altShortcuts` |
+| Shift+Tab switches the permission mode | `Switch` (Phase 9, `settings-shift-tab-modes`), help "In the composer, Shift+Tab cycles Ask, Accept edits and Plan. Off: Shift+Tab moves focus." | `shiftTabModes` |
+| (section) Agent | `AgentSettingsSection` (Phase 9, 9.11): automatic compaction, compaction model, sub-agent model, sub-agent max steps; mounted between the Chat fields and Custom instructions | `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps` |
 | Custom instructions | `Textarea` ("Sent with every chat") | `instructions` |
 
 Both step fields save on blur or Enter and Esc restores the saved value; an invalid value shows "Enter a whole number
 from 1 to 200." and keeps the saved value; a failed save rolls the field back (defaults: 20 and 100; the bound is
 `LIMITS.stepsMax`). The Default permission mode options are the composer's `TOOL_MODE_OPTIONS` (same order, labels and
-descriptions); a new chat without a project treats a default of Accept edits like Ask.
+descriptions); a new chat without a project treats a default of Accept edits like Ask. Phase 9: the options include
+Plan (`defaultToolMode: 'plan'`); a new chat without a project then starts in Plan, which the server enforces (no
+workspace tools exist there, so it reads like Ask with `exit_plan_mode` offered).
 
 Password section: status text "No password" / "Password set" / "Set by HF_PASSWORD" (read-only);
 **Set password** / **Change password** (`PasswordDialog`: current, new, confirm → `PUT /api/auth/password`, a
@@ -2972,6 +3407,26 @@ not load the projects" with **Retry**.
   - **No workspace folders** (every root missing): an `Alert` "No workspace folders. Set HF_WORKSPACE_ROOTS on the
     server." and the submit stays disabled.
 
+### 9.11 Agent settings (`AgentSettingsSection`, W9.12, Phase 9)
+
+`AgentSettingsSection` (`components/settings/agent/`, no props, no emits) is a `SettingsSection` "Agent" with the
+description "Long chats and sub-agents.", mounted by `GeneralSettings` between the Chat fields and Custom instructions
+(wireframe 2.16). It reads and writes the settings store (optimistic, rolled back with an error toast like every
+General field). The Shift+Tab switch lives in the General list itself (9.4), next to Alt shortcuts.
+
+| Field | Control and copy | Setting key | Test id |
+|---|---|---|---|
+| Automatic compaction | `Switch`, help "Summarize older messages when a chat nears the model's context window. When off, older messages are left out instead." | `autoCompact` (default on) | `settings-auto-compact` |
+| Compaction model | `SettingsModelSelect` (chat models) with `allowNone` "Same model as the chat" | `compactModelRef` (null = the chat's model) | `settings-compaction-model` |
+| Sub-agent model | the same select, `allowNone` "Same model as the chat"; when the chosen model cannot call tools (`capabilities.tools` false) a warning "{model} can't call tools, so sub-agents can't use it." | `subagentModelRef` (null = the chat's model) | `settings-subagent-model` |
+| Sub-agent max steps | `Input` (`inputmode="numeric"`) 1–200, the save and validation rules of Max steps (blur or Enter saves, Esc restores, "Enter a whole number from 1 to 200."), help "How many tool calls one sub-agent may chain (1–200)." | `subagentMaxSteps` (default 30) | `settings-subagent-max-steps` |
+
+- A model that no longer exists in the catalog shows the selects' usual unavailable state; the server then falls back
+  to the chat's model (the compaction logs a warning; ARCHITECTURE.md 6.18, 6.22).
+- `autoCompact` off: the server trims the oldest messages as before v1.5 (the notice `context-trimmed`); `/compact`
+  still works.
+- Mobile: labels stack above the controls below `sm`, like the other General fields.
+
 ---
 
 ## 10. Component inventory and contracts
@@ -3165,6 +3620,20 @@ the palette); `rewind/`: `RewindDialog` × (owned by `ChatView`, 7.22), `RewindR
 `AllowlistDialog` ×, `GlobalAllowlistSection` × (7.23), `allow-rule.ts` and `allowlist.ts` (the texts); and
 `nuxt-imports.ts` (re-exports `useHead` for `pages/chat/[id].vue`, so its tests can mock it). Also Phase 8:
 `chat/parts/tools/ToolRuleBadge` × (the rule badge of a shell row, 7.19).
+
+**Agent 2.0** (Phase 9, ADR-040 … ADR-043; C25 ships the stubs, contracts in 10.6) — `chat/compaction/`:
+`CompactionDivider` × and `compaction.ts` (`compactionLayout`, `compactionLabel`; 7.24); `chat/steer/`: `SteerNote` ×
+(7.26); `chat/agent/`: `PlanApprovalCard` ×, `PlanBody` ×, `TodoList` ×, `TodoStrip` ×, `TaskBlock` ×, `TaskBody` ×,
+`TaskStepRow` × and `todos.ts` (`todoState`, `todoStripVisible`; 7.25, 7.27); `chat/queue/`: `QueuedMessages` × (7.26);
+`chat/composer/`: `MentionMenu` × (7.26) and `mode-cycle.ts` (`nextToolMode`, `useModeCycle`; 7.11); `settings/agent/`:
+`AgentSettingsSection` × (9.11). `TaskBody`, `TodoList` and `PlanBody` are store-free (the share page reuses them).
+Phase 9 owners: W9.8 (`chat/composer/**` except the permission, mode-cycle, slash-command and context-ring files,
+`chat/queue/**`, the mention / attachment / draft / composer-shortcut composables), W9.9 (`useChatSession`,
+`useServerEvents`, the `chat-queue` store, `ChatView`), W9.10 (`chat/agent/**`, `chat/parts/**`, the permission,
+mode-cycle and slash-command files, `ShareToolRow`), W9.11 (`ChatTranscript`, `ChatMessage`, `MessageActions`,
+`chat-format`, `chat/compaction/**`, `chat/steer/**`, `ContextRing`, the share message files), W9.12
+(`settings/agent/**`, `GeneralSettings`, `ChatWorkspace`, `useChangesPanel`, `PluginToolsTable`); see
+`docs/phases/phase-9-v1-5.md`.
 
 W4.2 (UX polish) may edit every file above in Phase 4. Phase 8 owners: W8.8 (`ChatWorkspace`, `changes/**`, the
 workspace store, `useChangesPanel`, `useServerEvents`, `CommandPalette` and `chat-nav/palette*`), W8.9 (`rewind/**`,
@@ -3909,6 +4378,119 @@ defineProps<{ prefixes: readonly string[] }>()   // ShellOutput.allowedBy; rende
 //                         rule" toast when session.approve() rethrows a rule failure
 ```
 
+### 10.6 Phase 9 contracts (Agent 2.0: W9.8 – W9.12; C25 ships the stubs)
+
+The twelve components below are created by C25 in P9-0b with exactly these props, emits and root test ids and are
+frozen from Gate P9-0b (a change is a CCR); P9-A implements them behind those contracts. Types from
+`@harness-forge/shared` (names as in API.md): `CompactionData`, `SteerData`, `TodoItem`, `TaskInput`, `TaskOutput`,
+`TaskStep`, `QueueItem`, `ProjectFileEntry` (`{ path, kind: 'file' | 'dir' }`), `ToolMode`; `ToolPartLike` from
+`components/chat/parts/`; `TodoState` from `components/chat/agent/todos.ts` (11.6). History-derived state comes only
+from `packages/shared/src/util/agent-state.ts` and mention parsing / ranking only from `util/mentions.ts`; the
+components never re-implement them. Every component is imported by path.
+
+```ts
+// CompactionDivider (W9.11; stub; ChatMessage renders it for block kind 'compaction') — 7.24
+defineProps<{
+  data: CompactionData
+  variant: 'history' | 'run'     // 'history' = the first rendered block of its message (manual, or automatic before
+                                 // the reply); 'run' = after other blocks of its message (in-run compaction)
+}>()
+// Root compaction-divider (data-kind = data.trigger, data-variant, data-count = data.messagesCompacted; role="group",
+// aria-label = the label); compaction-toggle (data-state = open | closed, aria-expanded, aria-controls);
+// compaction-summary (rendered while open). No state attribute: a marker is always finished.
+
+// SteerNote (W9.11; stub; ChatMessage renders it for block kind 'steer') — 7.26
+defineProps<{ steer: SteerData }>()   // { id, parts (text | file), queuedAt, deliveredAt }
+// Root steer-note (data-message-id = steer.id; role="note", sr-only prefix "You said while the agent worked:").
+
+// PlanApprovalCard (W9.10; stub; ToolPart renders it for core-agent's exit_plan_mode in approval-requested) — 7.25
+defineProps<{ part: ToolPartLike; source?: string | null; disabled?: boolean }>()   // source: "from {plugin}"
+defineEmits<{ decide: [decision: { approved: boolean; mode?: 'edits' | 'ask'; feedback?: string }] }>()
+// Root plan-approval (data-state = pending | sending); plan-approval-plan, plan-feedback, plan-keep-planning,
+// plan-approve-ask, plan-approve-edits. mode is set only with approved: true; feedback ≤ 2,000 characters.
+
+// PlanBody (W9.10; stub; store-free) — the plan as Markdown (card, row body, share page)
+defineProps<{ plan: string; feedback?: string | null }>()   // feedback: "Your feedback: …" below the plan
+// No root test id (data-slot="plan-body").
+
+// TodoList (W9.10; stub; store-free) — the todo_write row body, the strip and the share page
+defineProps<{ todos: readonly TodoItem[]; variant?: 'row' | 'strip' }>()   // default 'row'
+// Root todo-list (<ul role="list">); todo-item (data-status = pending | in_progress | completed, data-index).
+
+// TodoStrip (W9.10; stub; ChatView mounts it in the dock above QueuedMessages) — 7.25
+defineProps<{ state: TodoState | null; running: boolean }>()   // renders nothing unless todoStripVisible(state, running)
+// Root todo-strip (data-state = open | closed, data-count = total, data-value = done); todo-strip-toggle
+// (aria-expanded, aria-controls); localStorage['hf-todo-expanded'].
+
+// TaskBlock (W9.10; stub; ChatMessage renders it for block kind 'task') — 7.27
+defineProps<{ part: ToolPartLike; streaming: boolean; superseded?: boolean }>()
+defineEmits<{ approval: [response: { id: string; approved: boolean; toolName: string; alwaysAllow: boolean }] }>()
+// Root task-block (data-state = queued | running | completed | failed | limit | aborted | approval | denied,
+// data-kind = explore | general); task-block-trigger; renders ToolApprovalCard for an approval-requested task call
+// and falls back to ToolPart when input or output do not parse (taskInputSchema / taskOutputSchema).
+
+// TaskBody (W9.10; stub; store-free, also used by ShareToolRow) — the expanded part of a task block
+defineProps<{ input: unknown; output: unknown; running: boolean }>()   // parsed inside; unparsable → nothing
+// task-step (via TaskStepRow), task-steps-more, task-report; data-slot="task-live" is TaskBlock's second line.
+
+// TaskStepRow (W9.10; stub; store-free) — one step of a sub-agent
+defineProps<{ step: TaskStep; running: boolean }>()
+// Root task-step (data-tool-name, data-state = running | done | error | denied).
+
+// MentionMenu (W9.8; stub; mounted by ChatComposer after SlashMenu) — 7.26
+defineProps<{
+  open: boolean
+  query: string
+  items: readonly ProjectFileEntry[]
+  state: 'loading' | 'ready' | 'error'
+  errorMessage?: string | null
+  truncated: boolean
+  projectName: string | null
+}>()
+defineEmits<{ select: [entry: ProjectFileEntry]; close: [] }>()
+defineExpose<{ handleKeydown(e: KeyboardEvent): boolean; activeId: string | undefined; listId: string }>()
+// Root mention-menu (data-state, data-count; role="listbox", aria-busy while loading); mention-menu-item
+// (data-path, data-kind); the same keyboard contract as SlashMenu (true = consumed).
+
+// QueuedMessages (W9.8; stub; ChatView mounts it in the dock between TodoStrip and the composer) — 7.26
+defineProps<{ items: readonly QueueItem[]; waitingForApproval?: boolean; cancelling?: readonly string[] }>()
+defineEmits<{ cancel: [id: string]; edit: [id: string] }>()
+// Root queued-messages (data-count, data-state = queued | approval; renders nothing when empty); queued-message
+// (data-message-id, data-state = queued | cancelling), queued-message-edit, queued-message-cancel.
+
+// AgentSettingsSection (W9.12; stub; mounted by GeneralSettings) — 9.11
+// No props, no emits. settings-auto-compact, settings-compaction-model, settings-subagent-model,
+// settings-subagent-max-steps (the Shift+Tab switch settings-shift-tab-modes belongs to GeneralSettings).
+
+// Prop and emit additions (C25 declares them in P9-0b; the owners use them in P9-A)
+// chat-format.ts (W9.11):  MessageBlock kinds + 'compaction' (data-compaction), 'steer' (data-steer), 'task' (a
+//                          tool part named task of core-agent); data-activity never becomes a block
+// ChatMessage (W9.11):     compacted?: boolean (default false: data-compacted + opacity-70; the blocks before the
+//                          last compaction block of a non-compacted message are dimmed by ChatMessage itself);
+//                          approval emit payload + planMode?: 'edits' | 'ask', reason?: string
+//                          + activity?: 'compacting' | null (default null; the streaming row shows "Compacting
+//                          conversation…" instead of "Thinking…")
+// ChatTranscript (W9.11):  compactionLayout(messages).dimmed → each row's compacted prop; v-memo keys + the row's
+//                          dimmed flag; rewindable also counts task outputs with a done write_file / edit_file step;
+//                          + activity?: 'compacting' | null (from session.activity through ChatView; passed to the
+//                          submitted placeholder and the streaming last row)
+// ToolPart (W9.10):        PlanApprovalCard branch; preliminary output-available = running while streaming, else
+//                          stopped; approval payload + planMode?, reason?
+// ChatView (W9.9):         the dock (TodoStrip + QueuedMessages before ChatComposer); onSubmit → session.submit();
+//                          onStop → composer.restoreQueued(await session.stop()); the plan announcements (7.25)
+// ChatComposer (W9.8):     MentionMenu mount, the keydown chain (mention → slash → mode cycle), the aria switch,
+//                          useModeCycle, canQueue to SendStopButton; defineExpose + restoreQueued(items: readonly
+//                          QueueItem[]): void; the submit / running guards dropped (uploads and voice still block)
+// SendStopButton (W9.8):   canQueue?: boolean (default false) + emit queue: []   // composer-queue left of Stop
+// ComposerAddMenu (W9.8):  projectChat?: boolean (default false) + emit mention: []   // "Mention a file"
+// ComposerAttachment (W9.8, useComposerAttachments): source: 'upload' | 'project', path?: string, file?: File
+//                          (optional for project chips); composer-attachment gains data-kind and data-path
+// PermissionMenu (W9.10):  aria-keyshortcuts includes Shift+Tab while the cycle is on (no new prop: it reads the
+//                          setting); permission-option data-value="plan"
+// ShareToolRow (W9.10):    TaskBody / TodoList / PlanBody for task / todo_write / exit_plan_mode when details exist
+// GeneralSettings (W9.12): mounts AgentSettingsSection; the shiftTabModes switch
+```
+
 ---
 
 ## 11. Pinia stores and composables
@@ -4052,7 +4634,9 @@ new cookie; other browsers are signed out and land on `/login`); `refetchLoadedS
 (after the chats store); `project.changed` goes to projects → **workspace** → chats → shell rules, in that order (the
 workspace store finds a deleted project's chats by their project before the chats store detaches them);
 `refetchLoadedStores()` also calls `workspace.refreshLoaded()` and, when the shell rules store is loaded,
-`shellRules.fetchAll()`.
+`shellRules.fetchAll()`. Phase 9 (C25 dispatch, W9.9): `queue.changed` → `chatQueue.applyEvent`; `chat.deleted` also
+goes to `chatQueue.applyEvent` (drops the chat's list); `run.started` with `origin: 'queue'` reaches the live session
+of that chat through `on()` (11.6); `refetchLoadedStores()` also calls `chatQueue.refreshLoaded()`.
 
 ### 11.1 `useChatSession(id)` (W2.2)
 
@@ -4084,8 +4668,9 @@ interface ChatSession {
                                           // another tab moved the leaf (coalesced)
   regenerate(messageId?: string): Promise<void>   // a new version of that reply (default: the last message), or a
                                           // first reply to a user message; re-sends an unstored failed message
-  approve(r: ToolApprovalDecision): Promise<void>   // below; Phase 7 adds acceptEdits
-  stop(): Promise<void>                   // POST /api/chat/:id/stop, then the client abort (an abort alone only disconnects)
+  approve(r: ToolApprovalDecision): Promise<void>   // below; Phase 7 adds acceptEdits; Phase 9 planMode / reason (11.6)
+  stop(): Promise<void>                   // POST /api/chat/:id/stop, then the client abort (an abort alone only disconnects);
+                                          // Phase 9: resolves with the dropped queue items (Promise<QueueItem[]>, 11.6)
   load(): Promise<void>                   // + GET /api/chats/:id, then resumeIfRunning()
   refresh(): Promise<void>                // + reloads the history unless a request is in flight
   resumeIfRunning(): Promise<void>        // + chat.resumeStream() when the server or the chats store reports a run
@@ -4544,6 +5129,122 @@ function diffStatsLabel(additions: number, deletions: number): string   // "12 l
 // view gains cwd: string | null (the output's cwd, else the input's)
 ```
 
+### 11.6 Phase 9 modules
+
+C25 creates these in P9-0b with exactly these signatures (frozen from Gate P9-0b) and inert bodies; P9-A implements
+them. Owners: W9.9 the `chat-queue` store and the `useChatSession` additions; W9.8 `useProjectFiles` and
+`useFileMentions`; W9.10 `mode-cycle.ts` (with `useModeCycle`) and `todos.ts`; W9.11 `compaction.ts`. The pure helpers of
+`@harness-forge/shared` (`findCompaction`, `compactionMarkers`, `splitSteers`, `latestTodos` in `util/agent-state.ts`;
+`mentionTokenAt`, `formatMention`, `scorePath`, `rankPaths` in `util/mentions.ts`) are complete from P9-0a (C23) and
+are the only implementation of these rules on the web.
+
+```ts
+// stores/chat-queue.ts — useChatQueueStore (+ Phase 9, ADR-042; 7.26)
+state:   { byChat: Record<string, QueueItem[]>; loaded: Record<string, true> }
+getters: items(chatId: string): readonly QueueItem[]          // [] when unknown
+actions: fetch(chatId: string): Promise<void>                 // GET /chat/:id/queue; replaces the list
+         enqueue(chatId: string, body: QueueAddBody): Promise<QueueItem>
+                                                              // POST /chat/:id/queue ({ message, modelRef,
+                                                              // reasoningEffort, toolMode }); the item joins the list;
+                                                              // 409 run-idle / queue-full / exists and 400 / 404 are
+                                                              // thrown (HarnessError)
+         cancel(chatId: string, itemId: string): Promise<'cancelled' | 'gone'>
+                                                              // DELETE /chat/:id/queue/:itemId; 204 → 'cancelled',
+                                                              // 404 → 'gone' (delivered or started meanwhile)
+         markDelivered(chatId: string, itemId: string): void  // a data-steer chunk arrived: drop the row now
+         applyEvent(event: ServerEvent): void                 // queue.changed: replace the chat's list (the event wins
+                                                              // over local state); chat.deleted: drop the chat
+         refreshLoaded(): Promise<void>                       // after an event-stream reconnect: fetch every loaded chat
+// Lists are per chat and live only in memory (the server's queue does not survive a restart either). An answer of an
+// older fetch never replaces a newer event.
+
+// composables/useProjectFiles.ts — (+ Phase 9) the two project-file calls through useApi(); no store
+function useProjectFiles(): {
+  search(projectId: string, q: string, opts?: { limit?: number; signal?: AbortSignal }): Promise<ProjectFileSearch>
+                                    // GET /projects/:id/files?q=&limit= (limit default 50) → { items, truncated, indexedAt }
+  attach(projectId: string, path: string, opts?: { signal?: AbortSignal }): Promise<FileRef>
+                                    // POST /projects/:id/files/attach { path } → 201 FileRef; 400 / 404 / 413 thrown
+}
+
+// composables/useFileMentions.ts — (+ Phase 9) the mention menu state of one composer
+function useFileMentions(opts: {
+  projectId: Ref<string | null>     // null: never opens
+  text: Ref<string>
+  caret: Ref<number>
+}): {
+  token: ComputedRef<{ start: number; end: number; query: string } | null>   // mentionTokenAt(text, caret)
+  open: ComputedRef<boolean>        // a token, a project and not dismissed
+  items: Readonly<Ref<readonly ProjectFileEntry[]>>
+  state: Readonly<Ref<'loading' | 'ready' | 'error'>>
+  error: Readonly<Ref<HarnessError | null>>
+  truncated: Readonly<Ref<boolean>>
+  dismiss(): void                   // Esc: remembered for this token until it changes
+  apply(entry: ProjectFileEntry): { text: string; caret: number; keepOpen: boolean }
+                                    // file: '@' + formatMention(path) + ' '; dir: '@dir/' and keepOpen
+}
+// 80 ms debounce, aborts the previous search, caches the last 20 queries per project; "Searching files…" only after
+// 150 ms.
+
+// components/chat/composer/mode-cycle.ts — (+ Phase 9) Shift+Tab (7.11): nextToolMode and useModeCycle
+function nextToolMode(current: ToolMode, opts: { projectChat: boolean }): ToolMode
+                                    // project chat: ask → edits → plan → ask; outside: ask; auto / off → ask
+function useModeCycle(opts: {
+  enabled: () => boolean            // settings.resolved.shiftTabModes && the permission menu shows && no menu is open
+  current: () => ToolMode
+  projectChat: () => boolean
+  set(mode: ToolMode): void         // the composer's v-model:tool-mode
+  announce(text: string): void      // the composer's polite region: "Permission mode: Plan"
+}): { handleKeydown(e: KeyboardEvent): boolean }   // true = consumed (preventDefault); false = native focus move
+// Also exported: MODE_CYCLE_SHORTCUT ('composer-cycle-mode', 'shift+tab', display-only in ShortcutsDialog, group
+// Composer, described "Switch the permission mode").
+
+// components/chat/agent/todos.ts — (+ Phase 9) pure, over latestTodos (7.25)
+interface TodoState {
+  todos: readonly TodoItem[]
+  done: number
+  total: number
+  current: TodoItem | null          // the first in_progress item
+  messageId: string                 // the message holding the todo_write call
+  live: boolean                     // that message is the last assistant message of the path
+}
+function todoState(messages: readonly HarnessUIMessage[]): TodoState | null
+function todoStripVisible(state: TodoState | null, running: boolean): boolean
+function todoSummary(state: TodoState): string   // "3/7 · Running the parser tests" / "All tasks done"
+
+// components/chat/compaction/compaction.ts — (+ Phase 9) pure, over compactionMarkers (7.24)
+function compactionLayout(messages: readonly HarnessUIMessage[]): { dimmed: ReadonlySet<string> }
+function compactionLabel(data: CompactionData, variant: 'history' | 'run'): string
+function compactionVariant(message: HarnessUIMessage, partIndex: number): 'history' | 'run'
+                                    // 'history' when no rendered block precedes the part in its message
+
+// composables/useChatSession.ts — additions (W9.9)
+interface ChatSession {
+  // … the members of 11.1 and 11.5
+  submit(input: { text: string; files: FileRef[] }): Promise<'sent' | 'queued'>
+                                    // + queues while busy, resuming or running (POST /chat/:id/queue with a new client
+                                    //   message id); 409 run-idle → whenIdle(), then send(); 'sent' = send() ran
+  queue: ComputedRef<readonly QueueItem[]>          // + chatQueue.items(id)
+  cancelQueued(itemId: string): Promise<'cancelled' | 'gone'>
+                                                    // + chatQueue.cancel; 'gone' → QueuedMessages' host shows
+                                                    //   "Already sent to the agent."
+  stop(): Promise<QueueItem[]>      // + Phase 9: the stop result's dropped items (only this tab restores them)
+  todos: ComputedRef<TodoState | null>              // + todoState(chat.messages)
+  activity: Readonly<Ref<'compacting' | null>>      // + the transient data-activity of the current stream (null when
+                                                    //   idle or after the stream ended)
+}
+interface ToolApprovalDecision {
+  // … the members of 11.1 and 11.5
+  planMode?: 'edits' | 'ask'        // + approve() sets toolMode (saved on the chat) before addToolApprovalResponse
+  reason?: string                   // + sent as addToolApprovalResponse({ id, approved, reason }) (plan feedback)
+}
+// useChat gets onData: data-steer → chatQueue.markDelivered(id, steer.id); data-activity → activity. run.started
+// with origin 'queue' and a userMessageId not on the shown path → refresh(), then resumeStream() (deferred until idle
+// when busy).
+```
+
+`activity` is how the transient `data-activity` reaches the transcript (`ChatView` passes it to the streaming row,
+7.24); it is part of the P9-0b session interface like the other additions.
+
 ---
 
 ## 12. Keyboard shortcuts
@@ -4562,15 +5263,16 @@ function diffStatsLabel(additions: number, deletions: number): string   // "12 l
 | Alt+P | open permission menu (when tools exist; Phase 7: with Accept edits in project chats) | chat pages, also in inputs | W2.3 (`alt+code:KeyP`, `alt: true`) |
 | Alt+V | what a click on the mic does (7.17): start dictation; while recording: stop and transcribe; while transcribing: cancel; without a speech-to-text model: the setup popover | chat pages with the composer, also in inputs; not while focus is in a dialog, menu or listbox; only where the browser can record in a secure context; with a disabled composer only while dictation runs | W6.9 (id `composer-dictate`, `alt+code:KeyV`, `alt: true`; calls `MicButton.activate()`; Phase 6) |
 | Alt+C | show or hide the changes panel (Phase 8, 7.21); opening it focuses the active view tab; closing it while focus is inside returns focus to the toggle | project chat pages, also in inputs; not while focus is in another dialog, menu or listbox (it works inside the changes sheet) | W8.8 (id `toggle-changes`, `alt+code:KeyC` = `CHANGES_SHORTCUT_KEYS`, `alt: true`, `allowInInputs`, group Chat, described "Show or hide changes"; registered by `ChatWorkspace` while the chat has a project) |
-| Enter | send (`sendKey = enter`) | composer | W2.3 |
-| Mod+Enter | send (`sendKey = mod-enter`) | composer | W2.3 |
+| Shift+Tab | switch the permission mode: Ask → Accept edits → Plan → Ask in project chats; from Auto or Off → Ask (Phase 9, 7.11); otherwise the native reverse focus move | the composer textarea only, while the permission menu shows, no slash or mention menu is open, no IME composition, `shiftTabModes` on, and the next mode differs | W9.10 (`useModeCycle`, called by the textarea's keydown after the menus; display-only registry entry `composer-cycle-mode`, `shift+tab`, group Composer, "Switch the permission mode") |
+| Enter | send (`sendKey = enter`); Phase 9: while a response runs, queue the message (7.26) | composer | W2.3; W9.8 |
+| Mod+Enter | send (`sendKey = mod-enter`); Phase 9: while a response runs, queue the message | composer | W2.3; W9.8 |
 | Shift+Enter | new line | composer | W2.3 |
-| Esc | close the open menu/dialog; else cancel a recording or transcription (Phase 6); else stop the running response | composer / chat | W2.3; W6.9 (dictation: the textarea's keydown handles Esc inside the composer; outside inputs the registry entry `composer-dictation-cancel`, registered after `composer-stop` so it wins while dictation runs) |
+| Esc | close the open menu/dialog (Phase 9: the mention menu first); else cancel a recording or transcription (Phase 6); else stop the running response (Phase 9: also while messages are queued; they return to the composer) | composer / chat | W2.3; W6.9 (dictation: the textarea's keydown handles Esc inside the composer; outside inputs the registry entry `composer-dictation-cancel`, registered after `composer-stop` so it wins while dictation runs) |
 | Esc (outside inputs and overlays) | stop reading aloud (Phase 6, 7.18), before stopping a running response | chat pages | W6.8 (registry entry `read-aloud-stop`, group Chat; registered only while something is read and removed when the reading ends) |
 | ↑ (empty composer) | edit the last user message | composer | W2.3 |
 | ← / → | previous / next version of a message | focus inside a `BranchSwitcher` | W5.2 (component keydown, not the registry) |
 | Mod+S | save the active file | code editor | W3.4 |
-| ↑ / ↓ / Enter / Tab | navigate and pick in palette, slash menu, model picker | overlays | components |
+| ↑ / ↓ / Enter / Tab | navigate and pick in palette, slash menu, model picker; Phase 9: the mention menu (Enter / Tab on a folder opens it and keeps the menu open) | overlays | components |
 
 Rules:
 - **Browser-reserved combos are never used**: Mod+N, Mod+Shift+N, Mod+T, Mod+Shift+T, Mod+W, Mod+Shift+W,
@@ -4580,8 +5282,8 @@ Rules:
   and can be turned off in Settings → General (`altShortcuts`, which covers Alt+V too). Alt+V calls
   `preventDefault()` like every matched shortcut, which should keep Firefox on Windows from opening its View menu
   (unverified). Phase 6 kept Alt+V; the Alt+J fallback of the plan was not needed.
-- Esc priority: close an open overlay → cancel a recording or transcription (composer) → cancel an inline edit → stop
-  reading aloud (outside inputs) → stop streaming. The registry tries the latest registration first and skips an entry
+- Esc priority: close an open overlay (Phase 9: in the composer the mention menu first, then the slash menu) → cancel a
+  recording or transcription (composer) → cancel an inline edit → stop reading aloud (outside inputs) → stop streaming. The registry tries the latest registration first and skips an entry
   whose `when` is false: `composer-dictation-cancel` only takes Esc while dictation runs, and `read-aloud-stop` exists
   only while something is read.
 - Shortcuts never fire while an IME composition is active or inside CodeMirror (except Mod+S and Mod+K).
@@ -4595,6 +5297,14 @@ Rules:
   Windows), Mod+Shift+D (bookmarks all tabs), Mod+\ (fails on AltGr layouts). Known caveat, as for Alt+V: Alt+C opens
   the History menu of Firefox in some locales (German); `preventDefault()` should keep it closed (unverified). Rewind
   and shell rules have no shortcut (the message action row and the approval card are reached with Tab).
+- Phase 9 adds **Shift+Tab** in the composer only (Claude Code parity). It is not a registry shortcut: the textarea's
+  keydown calls `useModeCycle().handleKeydown` after the mention and slash menus, and the registry holds a
+  display-only entry for the shortcuts dialog. The narrow conditions above keep reverse tabbing intact everywhere else
+  (outside the textarea, with a menu open, without tools, in a chat without a project while in Ask, and with the
+  setting `shiftTabModes` off), so a keyboard user is never trapped; Alt+P (when Alt shortcuts are on) and `/mode`
+  stay the other ways to change the mode. Enter while a response runs queues the message instead of being ignored;
+  the plan card, the queue rows, the todo strip and the task blocks have no shortcuts (Tab reaches them; the plan card
+  never approves on Enter).
 - `KbdCombo` renders hints: `⌘⇧O` / `⌘K` on macOS, `Ctrl Shift O` / `Ctrl K` elsewhere. Hints are hidden below `lg`
   and on touch devices.
 
@@ -4620,10 +5330,10 @@ into data attributes (`data-chat-id`, `data-message-id`, `data-model-ref`, `data
 `data-path`, `data-kind`, `data-action`, `data-code`, `data-level`, `data-dirty`, `data-hidden`; Phase 5 adds
 `data-index`, `data-count`, `data-share-id`, `data-role`, `data-outdated`, `data-expired`; Phase 6 reuses them for
 galleries and adds no new attribute name; Phase 7 adds `data-project-id` and `data-tone`; Phase 8 adds `data-conflict`,
-`data-view`, `data-rule-id` and `data-variant`). Playwright uses `getByTestId()` plus attribute filters. Ids are never
-reused for a different element; removing one is a CCR. The Phase 5 ids are collected in 13.6, except the two Settings →
-Models ids added in P5-B (`model-select-option`, `model-row-menu`, 13.4); the Phase 6 ids in 13.7; the Phase 7 ids in
-13.8; the Phase 8 ids in 13.9.
+`data-view`, `data-rule-id` and `data-variant`; Phase 9 adds `data-compacted`). Playwright uses `getByTestId()` plus
+attribute filters. Ids are never reused for a different element; removing one is a CCR. The Phase 5 ids are collected
+in 13.6, except the two Settings → Models ids added in P5-B (`model-select-option`, `model-row-menu`, 13.4); the Phase 6
+ids in 13.7; the Phase 7 ids in 13.8; the Phase 8 ids in 13.9; the Phase 9 ids in 13.10.
 
 ### 13.1 Shell and navigation
 
@@ -5044,6 +5754,58 @@ E2e hooks that are not test ids (Phase 8, no CCR needed): `data-slot` = `chat-wo
 `#hf-changes-heading`. The panel state is stored in `localStorage['hf-changes-width']` (px), `['hf-changes-open']`
 (`1` / `0`) and `['hf-changes-view']` (`chat` / `git`).
 
+### 13.10 Agent 2.0: compaction, plan mode, todos, sub-agents, mentions and the queue (Phase 9)
+
+The 32 new ids of Phase 9. C25 copies this table verbatim into `utils/testids.ts` in P9-0b (the key column is the
+`testIds` key) under a `// Agent 2.0 (Phase 9)` comment; the file stays frozen through P9-A. The only new attribute name
+is `data-compacted` (present on `message-user` / `message-assistant` rows before the latest compaction, 7.24). Reused
+ids with new values: `composer-attachment` gains `data-kind` (`upload` / `project`) and `data-path` (project chips);
+`permission-option` gets `data-value="plan"`; agent tool rows stay `tool-row`s (`data-tool-name` `todo_write` /
+`exit_plan_mode`; a `task` call renders `task-block` instead); the share page reuses these ids for `TaskBody`,
+`TodoList` and `PlanBody` inside `share-tool-row-output`; the `/compact` item is a `slash-menu-item` with
+`data-value="compact"`; the compaction notice is a `data-slot="notice-part"` line with `data-code="compaction-failed"` like every
+`data-notice`. `settings-compaction-model` keeps its name although the setting key is `compactModelRef`.
+
+| Id | Key (`testIds.*`) | Element | Data attributes |
+|---|---|---|---|
+| `compaction-divider` | `compactionDivider` | `CompactionDivider` root | `data-kind` (`manual` / `auto`: the trigger), `data-variant` (`history` / `run`), `data-count` (messages summarized) |
+| `compaction-toggle` | `compactionToggle` | "Show summary" / "Hide summary" | `data-state` (`open` / `closed`) |
+| `compaction-summary` | `compactionSummary` | the expanded summary card | |
+| `plan-approval` | `planApproval` | `PlanApprovalCard` root | `data-state` (`pending` / `sending`) |
+| `plan-approval-plan` | `planApprovalPlan` | the scrollable plan region | |
+| `plan-feedback` | `planFeedback` | "Feedback for the agent (optional)" textarea | |
+| `plan-approve-edits` | `planApproveEdits` | "Approve, accept edits" | |
+| `plan-approve-ask` | `planApproveAsk` | "Approve, ask before edits" | |
+| `plan-keep-planning` | `planKeepPlanning` | "Keep planning" | |
+| `todo-strip` | `todoStrip` | `TodoStrip` root in the dock | `data-state` (`open` / `closed`), `data-count` (total), `data-value` (done) |
+| `todo-strip-toggle` | `todoStripToggle` | the strip's toggle | |
+| `todo-list` | `todoList` | `TodoList` root (row body, strip, share page) | |
+| `todo-item` | `todoItem` | one item | `data-status` (`pending` / `in_progress` / `completed`), `data-index` |
+| `task-block` | `taskBlock` | `TaskBlock` root | `data-state` (`queued` / `running` / `completed` / `failed` / `limit` / `aborted` / `approval` / `denied`), `data-kind` (`explore` / `general`) |
+| `task-block-trigger` | `taskBlockTrigger` | the block's collapsible trigger (line 1) | |
+| `task-step` | `taskStep` | `TaskStepRow` root | `data-tool-name`, `data-state` (`running` / `done` / `error` / `denied`) |
+| `task-steps-more` | `taskStepsMore` | "Show all {n} steps" | |
+| `task-report` | `taskReport` | the report block | |
+| `mention-menu` | `mentionMenu` | `MentionMenu` root | `data-state` (`loading` / `ready` / `error`), `data-count` |
+| `mention-menu-item` | `mentionMenuItem` | one file or folder | `data-path`, `data-kind` (`file` / `dir`) |
+| `composer-mention` | `composerMention` | "Mention a file" in the `+` menu | |
+| `queued-messages` | `queuedMessages` | `QueuedMessages` root in the dock | `data-count`, `data-state` (`queued` / `approval`) |
+| `queued-message` | `queuedMessage` | one queued message | `data-message-id`, `data-state` (`queued` / `cancelling`) |
+| `queued-message-edit` | `queuedMessageEdit` | "Edit queued message" | |
+| `queued-message-cancel` | `queuedMessageCancel` | "Cancel queued message" | |
+| `composer-queue` | `composerQueue` | "Queue message" left of Stop | |
+| `steer-note` | `steerNote` | `SteerNote` root inside a reply | `data-message-id` (the queued message id) |
+| `settings-auto-compact` | `settingsAutoCompact` | "Automatic compaction" switch | `data-state` (reka: `checked` / `unchecked`) |
+| `settings-compaction-model` | `settingsCompactionModel` | "Compaction model" select trigger | |
+| `settings-subagent-model` | `settingsSubagentModel` | "Sub-agent model" select trigger | |
+| `settings-subagent-max-steps` | `settingsSubagentMaxSteps` | "Sub-agent max steps" input | |
+| `settings-shift-tab-modes` | `settingsShiftTabModes` | "Shift+Tab switches the permission mode" switch | `data-state` (reka: `checked` / `unchecked`) |
+
+E2e hooks that are not test ids (Phase 9, no CCR needed): `data-slot` = `task-live` (a task block's second line),
+`todo-progress` (the strip's progress bar), `compaction-meta` (the divider's meta line), `mention-highlight` (the
+matched runs of a mention row), `plan-body`. The strip state is stored in `localStorage['hf-todo-expanded']` (`1` /
+`0`).
+
 ---
 
 ## 14. Accessibility and responsiveness
@@ -5097,6 +5859,20 @@ E2e hooks that are not test ids (Phase 8, no CCR needed): `data-slot` = `chat-wo
   `AllowlistDialog` opens on its add input and returns focus to the row menu button; an `AllowlistEditor` keeps focus
   in its input after Add (also after an error) and, when focus was in the editor, moves it to the next rule's Remove
   (else the previous one, else the input) after a removal.
+- Phase 9: the mention menu, like the slash menu, never takes focus (the textarea forwards ↑/↓/Enter/Tab/Esc and the
+  listbox is reached through `aria-activedescendant`); picking an entry keeps the caret after the inserted `@path `.
+  Shift+Tab in the textarea switches the permission mode only under the conditions of 7.11 and otherwise moves focus
+  backwards as usual (no keyboard trap). Queueing a message keeps focus in the textarea (it clears); after a Stop the
+  restored text is in the textarea with the caret at its end. Cancelling a queued message moves focus to the next row's
+  Cancel (else the previous row's, else the textarea); Edit puts the text into the textarea and focuses it. The plan
+  card does not take focus when it appears (it is announced instead); its buttons are reached with Tab, there is no
+  Enter shortcut, and after a decision focus goes to the textarea (desktop). Opening the todo strip, a summary or a task
+  block keeps focus on its toggle.
+- **Dock stacking** (Phase 9): the composer dock (5.8) stacks, top to bottom, the todo strip, the queued messages and the
+  composer, all in the `max-w-3xl` column; Tab order follows that order (strip toggle → queue rows → composer). The
+  strip is collapsed by default and caps its open list at `40dvh`; the queue shows at most two rows on phones before
+  "Show {n} more"; the transcript's bottom padding follows the dock's measured height, so the last line never hides
+  behind it.
 
 ### 14.2 Semantics and labels
 
@@ -5155,6 +5931,21 @@ E2e hooks that are not test ids (Phase 8, no CCR needed): `data-slot` = `chat-wo
   loading list says "Loading allowed commands…" (sr-only). The automatic cleanup switch has a visible label and its
   description, the interval select is named "Automatic cleanup interval"; the status line is plain text. The pane's
   resize handle is named "Resize changes".
+- Phase 9: a compaction divider is a `role="group"` named by its label ("Conversation compacted"), its rules are
+  `aria-hidden`, the toggle has `aria-expanded` / `aria-controls`; dimmed rows carry no extra text. The plan card is a
+  `role="group"` named "Plan ready for review" with the plan in a focusable `role="region"` named "Plan" and a labelled
+  feedback field; it is announced once ("Plan ready for review"), and the decisions are announced ("Plan approved.
+  Permission mode: Accept edits.", "Feedback sent. The agent keeps planning."). Todo items carry the sr-only prefixes
+  "To do:", "In progress:", "Done:"; the strip toggle is named "Show tasks, 3 of 7 done" / "Hide tasks" and is not a
+  live region. A task block's trigger is named "Explore sub-agent: {description}, running, 4 tool calls" ("Sub-agent:
+  …" for the general type; "completed", "failed", "stopped", "step limit reached"); its live second line is
+  `aria-hidden`; a skipped step's reason is in its tooltip and its sr-only text. The mention menu is a `role="listbox"`
+  named "Files in {project}", `aria-busy` while loading, with a debounced (500 ms) polite count "{n} files" / "No
+  matching files". A steer note is a `role="note"` with the sr-only prefix "You said while the agent worked:". The queue
+  is a list named "Queued messages"; its buttons are "Edit queued message" / "Cancel queued message"; queueing announces
+  "Message queued". A permission switch by Shift+Tab announces "Permission mode: {label}" through the composer's polite
+  region, and the permission trigger gets `aria-keyshortcuts="Shift+Tab"` while the cycle is on. `ChatView` announces
+  "Conversation compacted" once per new marker of its own stream.
 
 ### 14.3 Contrast targets
 
@@ -5210,6 +6001,14 @@ instant scroll instead of smooth, no sheet slide (fade only).
   scope toggles, the rewind dialog's buttons and its force checkbox, the editor's Remove and Add, the toast Undo
   buttons, and the cleanup switch and select are at least 40px (`pointer-coarse:h-10` / `size-10`, checkboxes through
   a larger hit area); the pane's resize handle has a 24px hit area.
+- Phase 9 screens: at 390px the dock (strip, queue, composer) fits above the keyboard with the strip collapsed; the plan
+  card's buttons stack full width (`flex-col-reverse`, 40px each, "Approve, accept edits" on top) and its plan region
+  scrolls inside `max-h-[45dvh]`; a compaction summary scrolls inside `max-h-[50dvh]` and its meta line hides; a task
+  block keeps its two lines (the tool-call count and duration hide while it runs); the mention menu spans the composer
+  width, caps at `max-h-[40dvh]`, shows the folder under the file name and has 40px rows; no expanded task block,
+  summary or plan causes a horizontal page scroll (long paths and code scroll inside their blocks). On touch screens the
+  strip toggle, the queue's Edit and Cancel, the Queue message button, the task trigger, the plan buttons, the mention
+  rows and the summary toggle are at least 40px.
 - Phase 6 screens: galleries keep their two columns at 390px (tiles never overflow the column); the recording composer
   keeps the 390px layout without horizontal scroll (the indicator shows the dot, the timer and Cancel); the Media page
   stacks labels above controls below `sm`.
@@ -5237,6 +6036,9 @@ at least 40×40px, a gallery fits 390px, and there is no horizontal scroll while
 `mobile/projects.spec.ts` (W7.14): the switcher works inside the sheet, the chip is icon-only, and an expanded diff
 causes no horizontal page scroll. Phase 8 adds `mobile/changes.spec.ts` (W8.12): the panel opens as a right sheet at
 390px, an open diff causes no horizontal page scroll, Esc returns focus to the toggle, and the rewind dialog fits.
+Phase 9 adds `mobile/agent.spec.ts` (W9.13): the dock (strip, queue and composer) fits at 390px, no horizontal scroll
+with a task block or a summary expanded, the plan buttons stack and are at least 40px, and the mention menu fits;
+`mobile/changes.spec.ts` gains a check that the panel's open state survives a narrow viewport.
 
 ### 14.7 Tablet e2e and media permissions (Phase 6)
 
@@ -5245,7 +6047,8 @@ so `pointer: coarse` matches and the sidebar is not a sheet). It runs only `e2e/
 project ignores `specs/(mobile|tablet)/`. `tablet/touch-targets.spec.ts` (W6.12) collapses the sidebar and asserts that
 the icon rail is 56px wide and every icon button is at least 40×40px. Phase 7 (W7.14) extends it to the project
 switcher, the chip and the approval controls; Phase 8 (W8.12) to the changes toggle, the file rows, Revert,
-"Rewind files to here", and the allow-rule checkbox and scope.
+"Rewind files to here", and the allow-rule checkbox and scope; Phase 9 (W9.13) to the queue's Edit and Cancel, the strip
+toggle, the task trigger, the plan buttons and the mention rows.
 
 Every project runs with `use.permissions: ['microphone']` and the Chromium flags `--use-fake-ui-for-media-stream`,
 `--use-fake-device-for-media-stream` and `--autoplay-policy=no-user-gesture-required`, so the voice spec records from a
@@ -5269,6 +6072,19 @@ fake device and read-aloud plays without a gesture. If the flags fail in headles
 - **Numbers and units**: "14s", "Thought for 12s", "200K", "$0.004", "23 models", "3 sources", times in the
   user's locale.
 - **Placeholders** end with `…` ("Reply…", "Search models…").
+- **Terms** (Phase 9; use these words in UI copy and docs, not their synonyms):
+  - **sub-agent** (not "subagent", "child agent" or "worker"; the code says `task` and "child"): a separate agent the
+    main agent starts with the `task` tool; the two types read "Explore" and "Agent".
+  - **queue** / **queued**: messages sent while the agent works, waiting on the server ("Queued · 2", "Queue a
+    message…", "Queue message").
+  - **steer** is internal (code, docs, `data-steer`): the UI never says it and describes a delivered message as "You ·
+    while it worked" / "You said while the agent worked:".
+  - **compact** / **compaction**: replacing older messages with a summary ("Conversation compacted", `/compact`); never
+    "condense", "truncate" or "trim" (trimming is the older behavior that leaves messages out: "Older messages were left
+    out").
+  - **plan** / **plan mode**: the permission mode "Plan"; the agent's list of steps is the **plan**, its progress list
+    is **tasks** ("Tasks 3/7", "Updated tasks"; the tool is `todo_write`).
+  - **mention**: `@path` in the composer ("Mention a file").
 
 Key strings:
 
@@ -5330,3 +6146,10 @@ Key strings:
 | Shell rows (Phase 8) | "Now in {folder}" · "Now in the project folder" · "In {project}/{cwd}" (the sticky folder) · notes from the server: "The command ended outside the project folder; the next call starts in the project folder." · "The working folder {folder} no longer exists, so the command ran in the project folder." · "The working folder {folder} can no longer be used, so the command ran in the project folder." · spoken summaries: "{a} lines added, {d} removed" · "1 line added" · "{d} lines removed" · "New file, {n} lines" · "Updated, {n} lines" · "Exit code {n}" · "Timed out" · "Killed by {signal}" · "Exited without an exit code" · "Lines {a} to {b} of {n}" · "Lines {a} to {b}" |
 | Settings → Data (Phase 8) | "Automatic cleanup" · "Remove unused files on a schedule. They're deleted without asking and can't be restored. Files from the last 24 hours are always kept." · "Every day" · "Every week" · "Last automatic cleanup {time}: removed {n} files ({size})." · "The last automatic cleanup was skipped: plugin data is too large to scan. Run a cleanup by hand." · "The last automatic cleanup failed. It tries again after the next interval." · "Next automatic cleanup {time}." · "Next automatic cleanup soon." (the time has passed) · "Automatic cleanup interval" (the select's name) · "Plugin data is too large to scan completely, so a file only a plugin remembers may be removed." |
 | General (Phase 8) | "Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate and Alt+C for changes." |
+| Compaction (Phase 9) | "Compacting conversation…" · "Conversation compacted" · "Conversation compacted automatically" · "Context compacted during this response" · "{n} messages summarized · {before} → {after} tokens" · "Show summary" · "Hide summary" · "Focus: {focus}" · "The model sees this summary instead of the messages above." · "There is nothing to compact yet." (the `/compact` reply) · notice `compaction-failed` (text from the server, e.g. "Couldn't compact the conversation. Older messages were left out instead.") · context ring: "Older messages are summarized automatically near the limit. Type /compact to do it now." · "Automatic compaction is off. Older messages are left out near the limit." |
+| Plan mode (Phase 9) | "Plan" · "Explore and plan; change nothing until you approve the plan" · "Plan mode works in project chats." · "Use ask, edits, plan, auto or off." · "Permission mode: {label}" (announcement) · "Plan ready for review" · "Plan" (the region's name) · "Feedback for the agent (optional)" · "Use at most 2,000 characters." · "Keep planning" · "Approve, ask before edits" · "Approve, accept edits" · "Kept planning" · "Approved · Accept edits" · "Approved · Ask" · "Your feedback: {text}" · "Plan approved. Permission mode: Accept edits." · "Plan approved. Permission mode: Ask." · "Feedback sent. The agent keeps planning." |
+| Tasks (Phase 9) | "Tasks {done}/{total}" · "{done}/{total} · {activeForm}" · "All tasks done" · "Show tasks, {done} of {total} done" · "Hide tasks" · "To do:" · "In progress:" · "Done:" (sr-only prefixes) · share: "Updated tasks" |
+| Sub-agents (Phase 9) | "Explore" · "Agent" · "{n} tool calls · {duration}" · "Waiting" · "Stopped" · "Step limit reached" · "Skipped" · "Sub-agents can't ask for approval, so this was skipped." · "Prompt" · "Report" · "Show all {n} steps" · "{k} earlier steps were not kept" · "{model} · {tokens} tokens · {cost} · {duration}" · "The sub-agent failed: {error}" · "Explore sub-agent: {description}, {status}, {n} tool calls" · "Sub-agent: {description}, …" · share: "Sub-agent" |
+| Mentions (Phase 9) | "Mention a file" · "Files in {project}" · "Searching files…" · "No matching files" · "{n} files" (announcement) · "Couldn't search files." · "The project folder is unavailable." · "Showing the first 50 matches. Type more to narrow it down." · "{path} can't be attached" · "Files can be up to 5 MB." · "The file no longer exists." |
+| Queue (Phase 9) | "Queue a message…" (placeholder) · "Queue message" · "Message queued" (announcement) · "Queued · {n} · sent at the next step" · "Sent after you answer the approval" · "Runs after this response" · "Edit queued message" · "Cancel queued message" · "Show {n} more" · "Already sent to the agent." · "The queue is full. Wait for the agent to take a message." · "Couldn't send a queued message." · "Queued messages moved back to the composer." · steer note: "You · while it worked" · "You said while the agent worked:" (sr-only) |
+| General → Agent (Phase 9) | "Shift+Tab switches the permission mode" · "In the composer, Shift+Tab cycles Ask, Accept edits and Plan. Off: Shift+Tab moves focus." · "Agent" · "Long chats and sub-agents." · "Automatic compaction" · "Summarize older messages when a chat nears the model's context window. When off, older messages are left out instead." · "Compaction model" · "Same model as the chat" · "Sub-agent model" · "{model} can't call tools, so sub-agents can't use it." · "Sub-agent max steps" · "How many tool calls one sub-agent may chain (1–200)." · "Switch the permission mode" (the Shift+Tab entry in the shortcuts dialog) |

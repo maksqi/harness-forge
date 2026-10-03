@@ -102,9 +102,11 @@ export type ValidationErrorDetails = z.infer<typeof validationErrorDetailsSchema
  * `busy`: another maintenance operation (bulk import, delete-all, key rotation, file cleanup) is running (ADR-024,
  * ADR-034, ADR-035); `only-version`: a message without another version cannot be deleted (ADR-030); `env-key`: the
  * master key comes from `HF_MASTER_KEY` and can only be rotated offline with the `rotate-key` CLI (ADR-034);
- * `key-mismatch`: the master key does not match the stored key check, so a rotation would lose the secrets (ADR-034).
+ * `key-mismatch`: the master key does not match the stored key check, so a rotation would lose the secrets (ADR-034);
+ * `run-idle`: a message was queued for a chat with no active run and no pending approval (send it with `POST /chat`
+ * instead; ADR-042); `queue-full`: the chat already has `LIMITS.queueItemsMax` queued messages (ADR-042).
  */
-export const conflictReasonSchema = z.enum(['run-active', 'exists', 'stale', 'disabled', 'env-password', 'insecure-bind', 'busy', 'only-version', 'env-key', 'key-mismatch'])
+export const conflictReasonSchema = z.enum(['run-active', 'exists', 'stale', 'disabled', 'env-password', 'insecure-bind', 'busy', 'only-version', 'env-key', 'key-mismatch', 'run-idle', 'queue-full'])
 export type ConflictReason = z.infer<typeof conflictReasonSchema>
 
 export const conflictDetailsSchema = z.object({ reason: conflictReasonSchema, chatId: z.string().optional() })

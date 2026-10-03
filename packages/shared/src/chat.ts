@@ -5,35 +5,24 @@ import { reasoningEffortSchema, toolModeSchema } from './enums.ts'
 import { harnessErrorInitSchema } from './errors.ts'
 import { chatIdSchema, commandNameSchema, messageIdSchema, modelRefSchema, projectIdSchema, timestampSchema } from './ids.ts'
 import { LIMITS } from './limits.ts'
+import { todoItemSchema } from './schemas/agent.ts'
 import { imageOptionsSchema, imageTurnMetadataSchema } from './schemas/images.ts'
+import { queueItemSchema, userMessagePartSchema } from './schemas/queue.ts'
+import { messageUsageSchema } from './schemas/usage.ts'
 import { utf8ByteLength } from './util/text.ts'
 
 const tokenCountSchema = z.int().min(0)
 
-/** Tokens summed over all steps of a message. */
-export const messageUsageSchema = z.object({
-  /** AI SDK `usage.inputTokens`. */
-  inputTokens: tokenCountSchema.optional(),
-  /** `usage.outputTokens` (includes reasoning). */
-  outputTokens: tokenCountSchema.optional(),
-  /** `usage.outputTokenDetails.reasoningTokens`. */
-  reasoningTokens: tokenCountSchema.optional(),
-  /** `usage.inputTokenDetails.cacheReadTokens`. */
-  cacheReadTokens: tokenCountSchema.optional(),
-  /** `usage.inputTokenDetails.cacheWriteTokens`. */
-  cacheWriteTokens: tokenCountSchema.optional(),
-  totalTokens: tokenCountSchema.optional(),
-  /** Input + output tokens of the final step: current context occupancy (context ring). */
-  contextTokens: tokenCountSchema.optional(),
-})
-export type MessageUsage = z.infer<typeof messageUsageSchema>
+export { messageUsageSchema } from './schemas/usage.ts'
+export type { MessageUsage } from './schemas/usage.ts'
 
 /** A slash command invoked by a user message. */
 export const commandInvocationSchema = z.object({
   name: commandNameSchema,
   /** Text after `/name `. */
   input: z.string(),
-  type: z.enum(['prompt', 'reply']),
+  /** `compact`: the harness command `/compact [focus]` (Phase 9, ADR-040), run by the server. */
+  type: z.enum(['prompt', 'reply', 'compact']),
   /** Prompt commands: the text sent to the model instead (<= 64 KB). */
   expansion: z
     .string()
@@ -71,9 +60,10 @@ export const noticeLevelSchema = z.enum(['info', 'warning'])
 /**
  * `generated-file-dropped` (ADR-028): a file the model generated was not stored (not a raster image, or too large);
  * `workspace-unavailable` (ADR-031): the project folder of the chat could not be opened, so the run has no workspace
- * tools (the message names the folder and the reason).
+ * tools (the message names the folder and the reason); `compaction-failed` (ADR-040): the summary could not be written,
+ * so the oldest turns were trimmed instead.
  */
-export const noticeCodeSchema = z.enum(['context-trimmed', 'approvals-superseded', 'tools-unsupported', 'attachments-unsupported', 'generated-file-dropped', 'workspace-unavailable'])
+export const noticeCodeSchema = z.enum(['context-trimmed', 'approvals-superseded', 'tools-unsupported', 'attachments-unsupported', 'generated-file-dropped', 'workspace-unavailable', 'compaction-failed'])
 export type NoticeCode = z.infer<typeof noticeCodeSchema>
 
 /** Data of `data-notice` parts. */
@@ -84,14 +74,81 @@ export const noticeDataSchema = z.object({
 })
 export type NoticeData = z.infer<typeof noticeDataSchema>
 
+/** What started a compaction: `/compact` (`manual`) or the context guard (`auto`). */
+export const compactionTriggerSchema = z.enum(['manual', 'auto'])
+export type CompactionTrigger = z.infer<typeof compactionTriggerSchema>
+
+/**
+ * What the model still sees in full after a compaction: `none` (only the summary and what follows the marker) or
+ * `last-user` (also the user message of the turn that compacted).
+ */
+export const compactionKeepSchema = z.enum(['none', 'last-user'])
+export type CompactionKeep = z.infer<typeof compactionKeepSchema>
+
+/**
+ * Data of `data-compaction` parts (ADR-040): a model-written summary that replaces, for the model, everything before
+ * the part on the message path (earlier messages and the earlier parts of its own message). Positional: the latest
+ * marker on the path wins (`findCompaction`); stored messages are never rewritten.
+ */
+export const compactionDataSchema = z.object({
+  trigger: compactionTriggerSchema,
+  keep: compactionKeepSchema,
+  /** The summary the model sees instead of the compacted messages (Markdown), at most 60 000 characters. */
+  summary: z.string().max(LIMITS.compactionSummaryMaxChars),
+  /** The focus of `/compact [focus]`, at most 1000 characters. */
+  focus: z.string().max(LIMITS.compactFocusMaxChars).optional(),
+  /** The todo list at the time of the compaction (`latestTodos`). */
+  todos: z.array(todoItemSchema).max(LIMITS.todoItemsMax).optional(),
+  /** The model that wrote the summary. */
+  modelRef: modelRefSchema,
+  /** Messages the summary replaces. */
+  messagesCompacted: tokenCountSchema,
+  /** Estimated context tokens before and after the compaction. */
+  tokensBefore: tokenCountSchema,
+  tokensAfter: tokenCountSchema,
+  createdAt: timestampSchema,
+})
+export type CompactionData = z.infer<typeof compactionDataSchema>
+
+/**
+ * Data of `data-steer` parts (ADR-042): a message the user queued while the agent worked, delivered to the model at a
+ * step boundary. Stored inside the running assistant message; the model history splits the reply there and sends it as
+ * a user message (`splitSteers`).
+ */
+export const steerDataSchema = z.object({
+  /** The id of the queued message (a client-generated `msg_` id). */
+  id: messageIdSchema,
+  /** The text and file parts of the message, as stored for user messages. */
+  parts: z.array(userMessagePartSchema).min(1).max(LIMITS.messagePartsMax),
+  queuedAt: timestampSchema,
+  deliveredAt: timestampSchema,
+})
+export type SteerData = z.infer<typeof steerDataSchema>
+
+/** What a run does right now, shown live (`compacting`: a summary is being written). */
+export const activityKindSchema = z.enum(['compacting', 'idle'])
+export type ActivityKind = z.infer<typeof activityKindSchema>
+
+/** Data of the transient `data-activity` chunks (ADR-040): reach only `onData`, never stored in a message. */
+export const activityDataSchema = z.object({
+  kind: activityKindSchema,
+})
+export type ActivityData = z.infer<typeof activityDataSchema>
+
 /** Data part schemas for `useChat({ dataPartSchemas })` and `validateUIMessages({ dataSchemas })`. */
 export const harnessDataSchemas = {
   notice: noticeDataSchema,
+  compaction: compactionDataSchema,
+  steer: steerDataSchema,
+  activity: activityDataSchema,
 }
 
-/** Data part types (`data-notice`). A type alias (not an interface) so it satisfies the AI SDK `UIDataTypes`. */
+/**
+ * Data part types (`data-notice`, `data-compaction`, `data-steer`, the transient `data-activity`). A type alias (not an
+ * interface) so it satisfies the AI SDK `UIDataTypes`.
+ */
 // eslint-disable-next-line ts/consistent-type-definitions
-export type HarnessDataTypes = { notice: NoticeData }
+export type HarnessDataTypes = { notice: NoticeData, compaction: CompactionData, steer: SteerData, activity: ActivityData }
 
 /** AI SDK v7 UI message of this app; pass `ChatDetail.messages` directly to `useChat({ messages })`. */
 export type HarnessUIMessage = UIMessage<MessageMetadata, HarnessDataTypes>
@@ -163,8 +220,12 @@ export const chatRequestBodySchema = z.strictObject({
 })
 export type ChatRequestBody = z.infer<typeof chatRequestBodySchema>
 
-/** `POST /chat/:id/stop`: `stopped` is false when no run was active. */
+/**
+ * `POST /chat/:id/stop`: `stopped` is false when no run was active. `dropped` (Phase 9, ADR-042): the queued messages
+ * the stop removed, oldest first, for the stopping tab to put back into its composer; absent when none were queued.
+ */
 export const chatStopResultSchema = z.object({
   stopped: z.boolean(),
+  dropped: z.array(queueItemSchema).optional(),
 })
 export type ChatStopResult = z.infer<typeof chatStopResultSchema>

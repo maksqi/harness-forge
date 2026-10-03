@@ -13,6 +13,8 @@ export const SAMPLE_SHARE_ID = 'shr_sample0000000001'
 export const SAMPLE_PROJECT_ID = 'prj_sample0000000001'
 export const SAMPLE_SHELL_RULE_ID = 'srl_sample0000000001'
 export const SAMPLE_CHANGE_BATCH_ID = 'wcb_sample0000000001'
+/** A queued message (Phase 9, ADR-042): a client-generated message id. */
+export const SAMPLE_QUEUED_MESSAGE_ID = 'msg_sample0000000002'
 /** A project-relative path for the change samples (no project folder is ever touched). */
 export const SAMPLE_CHANGE_PATH = 'src/index.ts'
 /** A folder that does not exist on any test host: the project samples never touch a real folder. */
@@ -230,6 +232,21 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
   'shellRules.list': {},
   'shellRules.create': { body: { projectId: SAMPLE_PROJECT_ID, prefix: 'pnpm test' } },
   'shellRules.remove': { params: { id: SAMPLE_SHELL_RULE_ID } },
+
+  'chatQueue.list': { params: { id: SAMPLE_CHAT_ID } },
+  'chatQueue.add': {
+    params: { id: SAMPLE_CHAT_ID },
+    body: {
+      message: { id: SAMPLE_QUEUED_MESSAGE_ID, role: 'user', parts: [{ type: 'text', text: 'Also check the docs.' }] },
+      modelRef: 'mock:steer',
+      reasoningEffort: 'auto',
+      toolMode: 'ask',
+    },
+  },
+  'chatQueue.remove': { params: { id: SAMPLE_CHAT_ID, itemId: SAMPLE_QUEUED_MESSAGE_ID } },
+
+  'projectFiles.search': { params: { id: SAMPLE_PROJECT_ID }, query: { q: 'index', limit: '20' } },
+  'projectFiles.attach': { params: { id: SAMPLE_PROJECT_ID }, body: { path: SAMPLE_CHANGE_PATH } },
 
   'shares.list': { query: { chatId: SAMPLE_CHAT_ID } },
   'shares.create': { body: { chatId: SAMPLE_CHAT_ID, title: 'Sample share', options: { reasoning: true }, expiresAt: null } },

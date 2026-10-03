@@ -5,6 +5,17 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
+/**
+ * A tool whose `execute` returns a promise. Plugin API 1.3.0 (ADR-043) lets `execute` also return a plain value or an
+ * async iterable (preliminary outputs); the core tools return promises, so tests narrow them to await the output.
+ */
+export type PromiseTool<I, O> = Omit<ToolDefinition<I, O>, 'execute'> & { execute: (input: I, c: ToolCallContext) => Promise<O> }
+
+/** The same tool, typed as returning a promise from `execute` (no runtime change). */
+export function promiseTool<I, O>(tool: ToolDefinition<I, O>): PromiseTool<I, O> {
+  return tool as PromiseTool<I, O>
+}
+
 export interface TestWorkspace {
   /** The project folder (realpath). */
   root: string

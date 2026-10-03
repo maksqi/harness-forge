@@ -10,6 +10,7 @@ import { LIMITS } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createEditFileTool } from '../builtin-plugins/core-workspace/edit-file.ts'
+import { promiseTool } from '../builtin-plugins/core-workspace/test-helpers.ts'
 import { createWriteFileTool } from '../builtin-plugins/core-workspace/write-file.ts'
 import { chats, projects, workspaceChanges } from '../db/schema.ts'
 import { sha256Hex } from '../services/checkpoints/disk.ts'
@@ -125,7 +126,7 @@ describe('journaledWrite', () => {
 
   it('two parallel edit_file calls on one file serialize and both edits land (one step, one journal)', async () => {
     await writeFile(join(root, 'shared.ts'), 'const a = 1\nconst b = 2\n')
-    const tool = createEditFileTool()
+    const tool = promiseTool(createEditFileTool())
     const scoped = journal()
     const [first, second] = await Promise.all([
       tool.execute({ path: 'shared.ts', old_string: 'const a = 1', new_string: 'const a = 10' }, call('call_a', { journal: scoped })),
@@ -156,7 +157,7 @@ describe('journaledWrite', () => {
   it('binary bytes round-trip through the blob store', async () => {
     const bytes = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0, 0, 0xFF, 0x0D, 0x0A, 0x1A])
     await writeFile(join(root, 'image.png'), bytes)
-    const output = await createWriteFileTool().execute({ path: 'image.png', content: 'replaced\n' }, call('call_1', { journal: journal() }))
+    const output = await promiseTool(createWriteFileTool()).execute({ path: 'image.png', content: 'replaced\n' }, call('call_1', { journal: journal() }))
     expect(output.diff).toBeNull()
     const [row] = await rows()
     expect(row).toMatchObject({ beforeState: 'stored', beforeSha: sha256Hex(bytes), beforeSize: bytes.byteLength })

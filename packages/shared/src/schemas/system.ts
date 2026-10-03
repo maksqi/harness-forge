@@ -103,6 +103,17 @@ const settingsFields = {
   // Automatic file sweep (Phase 8, ADR-039).
   /** The automatic orphaned-file cleanup: `off` (manual only), `daily` or `weekly`. */
   fileSweep: fileSweepModeSchema,
+  // Agent 2.0 (Phase 9, ADR-040 … ADR-043).
+  /** Compact the conversation automatically when the context fills up (ADR-040); off = the oldest turns are trimmed. */
+  autoCompact: z.boolean(),
+  /** Model that writes compaction summaries; null = the chat model. */
+  compactModelRef: modelRefSchema.nullable(),
+  /** Model of sub-agents (`task`, ADR-043); null = the chat model. */
+  subagentModelRef: modelRefSchema.nullable(),
+  /** Steps of one sub-agent (1..200). */
+  subagentMaxSteps: z.int().min(1).max(LIMITS.stepsMax),
+  /** Shift+Tab in the composer cycles the permission mode (ADR-041); off = Shift+Tab moves the focus. */
+  shiftTabModes: z.boolean(),
 }
 
 /** `GET /settings`: every key always present (defaults applied by `settingsSchema.parse`). */
@@ -128,6 +139,11 @@ export const settingsSchema = z.object({
   speechSpeed: settingsFields.speechSpeed.default(1),
   projectMaxSteps: settingsFields.projectMaxSteps.default(100),
   fileSweep: settingsFields.fileSweep.default('off'),
+  autoCompact: settingsFields.autoCompact.default(true),
+  compactModelRef: settingsFields.compactModelRef.default(null),
+  subagentModelRef: settingsFields.subagentModelRef.default(null),
+  subagentMaxSteps: settingsFields.subagentMaxSteps.default(30),
+  shiftTabModes: settingsFields.shiftTabModes.default(true),
 })
 export type Settings = z.infer<typeof settingsSchema>
 

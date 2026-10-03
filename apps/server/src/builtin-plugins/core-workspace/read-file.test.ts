@@ -9,9 +9,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { openWorkspaceFile } from '../../workspace/paths.ts'
 import { NO_WORKSPACE_MESSAGE } from './common.ts'
 import { createReadFileTool, readFileModelText, readFileOutput, readWindow } from './read-file.ts'
-import { contextWithoutWorkspace, createTestWorkspace, modelTextOf } from './test-helpers.ts'
+import { contextWithoutWorkspace, createTestWorkspace, modelTextOf, promiseTool } from './test-helpers.ts'
 
-const tool = createReadFileTool()
+const tool = promiseTool(createReadFileTool())
 let ws: TestWorkspace
 
 function numbered(count: number, from = 1): string {

@@ -42,7 +42,8 @@ describe('fresh routes of the route table', () => {
     // adding a project (file and shell access to a folder, ADR-031) and rotating the master key (ADR-034) need it;
     // browsing folders, editing or deleting a project and the file cleanup do not. Phase 8: none of the change routes
     // (revert, undo and rewind are reversible) nor the shell rules (a session can already approve its own shell calls,
-    // ADR-038) needs it.
+    // ADR-038) needs it. Phase 9: neither the steer queue (a session can already send messages) nor the file mentions
+    // (a session can already read project files through the agent, ADR-042) need it.
     expect(FRESH_KEYS.sort()).toEqual([
       'auth.setPassword',
       'data.deleteAll',

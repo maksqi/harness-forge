@@ -32,6 +32,7 @@ import {
   shellStatusLine,
   shellTimeoutMs,
 } from './shell-tool.ts'
+import { promiseTool } from './test-helpers.ts'
 
 const posix = process.platform !== 'win32'
 const temps: string[] = []
@@ -140,7 +141,7 @@ describe('the shell tool definition', () => {
 
 describe.skipIf(!posix)('shell execute', () => {
   it('runs in the project folder by default', async () => {
-    const tool = createShellTool({ logger: recordingLogger().logger })
+    const tool = promiseTool(createShellTool({ logger: recordingLogger().logger }))
     const result = await tool.execute({ command: 'pwd; echo hi; echo warn 1>&2' }, callContext(root))
     expect(shellToolOutputSchema.parse(result)).toEqual(result)
     expect(result).toMatchObject({
@@ -165,7 +166,7 @@ describe.skipIf(!posix)('shell execute', () => {
     ['./sub/../sub/deep/', 'sub/deep'],
     ['.', '.'],
   ])('runs in cwd %j inside the project', async (cwd, rel) => {
-    const tool = createShellTool({ logger: recordingLogger().logger })
+    const tool = promiseTool(createShellTool({ logger: recordingLogger().logger }))
     const result = await tool.execute({ command: 'pwd', cwd }, callContext(root))
     expect(result.cwd).toBe(rel)
     expect(result.stdout).toBe(`${rel === '.' ? root : join(root, rel)}\n`)
@@ -181,7 +182,7 @@ describe.skipIf(!posix)('shell execute', () => {
     ['../..', OUTSIDE_PROJECT_MESSAGE],
     ['sub/../../x', OUTSIDE_PROJECT_MESSAGE],
   ])('refuses cwd %j outside the project', async (cwd, message) => {
-    const error = await rejection(createShellTool({ logger: recordingLogger().logger }).execute({ command: 'echo never > ran', cwd }, callContext(root)))
+    const error = await rejection(promiseTool(createShellTool({ logger: recordingLogger().logger })).execute({ command: 'echo never > ran', cwd }, callContext(root)))
     expect(error).toMatchObject({ code: 'validation_error', message, details: { issues: [{ path: ['cwd'] }] } })
   })
 
@@ -440,7 +441,7 @@ describe.skipIf(!posix)('the sticky working folder', () => {
   })
 
   it('keeps the folder when nothing is reported: exec, the command\'s own EXIT trap, a timeout, a stop', async () => {
-    const tool = createShellTool({ logger: recordingLogger().logger })
+    const tool = promiseTool(createShellTool({ logger: recordingLogger().logger }))
     const scope = runScope({ current: 'sub' })
     for (const input of [{ command: 'cd deep && exec true' }, { command: 'trap "true" EXIT; cd deep' }, { command: 'cd deep; sleep 5', timeout_ms: 1000 }]) {
       const result = await tool.execute(input, scopedContext(scope))

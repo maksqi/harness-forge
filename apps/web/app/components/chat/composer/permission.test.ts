@@ -11,7 +11,8 @@ describe('permission modes', () => {
       ['auto', 'Auto'],
       ['off', 'Off'],
     ])
-    expect([...TOOL_MODE_OPTIONS.map(option => option.value)].sort()).toEqual([...toolModeSchema.options].sort())
+    // The plan mode (Phase 9, ADR-041) joins the menu with the web skeleton (P9-0b); until then it falls back to Ask.
+    expect([...TOOL_MODE_OPTIONS.map(option => option.value)].sort()).toEqual(toolModeSchema.options.filter(mode => mode !== 'plan').sort())
   })
 
   it('finds the option of a mode, with the Accept edits icon and description', () => {

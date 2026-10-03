@@ -50,6 +50,11 @@ const settings: Settings = {
   speechSpeed: 1,
   projectMaxSteps: 100,
   fileSweep: 'off',
+  autoCompact: true,
+  compactModelRef: null,
+  subagentModelRef: null,
+  subagentMaxSteps: 30,
+  shiftTabModes: true,
 }
 
 describe('createApiClient', () => {

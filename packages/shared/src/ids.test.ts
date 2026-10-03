@@ -17,6 +17,9 @@ import {
   createShellRuleId,
   fileIdSchema,
   formatModelRef,
+  HARNESS_COMMANDS,
+  isClientCommand,
+  isHarnessCommand,
   isPluginNamespacedId,
   isReservedPluginId,
   mcpServerIdSchema,
@@ -118,6 +121,15 @@ describe('builtin and reserved ids', () => {
     expect(BUILTIN_PROVIDER_IDS).toEqual(['anthropic', 'openai', 'google', 'xai', 'deepseek', 'moonshotai', 'alibaba', 'zai', 'minimax', 'mistral', 'groq', 'openrouter', 'ollama'])
     expect(BUILTIN_PLUGIN_IDS).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'mock'])
     expect(CLIENT_COMMANDS).toEqual(['new', 'model', 'effort', 'mode', 'help'])
+    expect(HARNESS_COMMANDS).toEqual(['compact'])
+  })
+
+  it('tells harness commands apart from client and plugin commands (ADR-040)', () => {
+    expect(isHarnessCommand('compact')).toBe(true)
+    for (const name of ['new', 'mode', 'review', 'compact-x', 'Compact', ''])
+      expect(isHarnessCommand(name), name).toBe(false)
+    for (const name of HARNESS_COMMANDS)
+      expect(isClientCommand(name), name).toBe(false)
   })
 
   it('reserves core-*, mock and the builtin provider ids', () => {

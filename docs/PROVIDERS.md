@@ -322,8 +322,9 @@ errors -> `context_overflow`; `ECONNREFUSED` / `ENOTFOUND` -> `provider_unreacha
 Dev and e2e only: the builtin plugin `mock` registers provider `mock` and tool `mock_approval_tool` when
 `HF_MOCK_PROVIDER=1` (`pnpm start:e2e` sets it). Models are `MockLanguageModelV4` instances from `ai/test` streaming
 through `simulateReadableStream`. The provider has no credentials (status `connected`), no icon (monogram),
-`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its twelve models (the four chat models of v1, the five
-models of Phase 6, `workspace` of Phase 7 and `checkpoint` and `shell` of Phase 8), and `validate` always succeeds. Its
+`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its seventeen models (the four chat models of v1, the five
+models of Phase 6, `workspace` of Phase 7, `checkpoint` and `shell` of Phase 8, and `compact`, `plan`, `todo`, `subagent`
+and `steer` of Phase 9), and `validate` always succeeds. Its
 `reasoning()` maps `off` -> `none`, `low` / `medium` / `high` -> same, `max` -> `xhigh`. Since Phase 6 (manifest
 `engines.harness` `^1.1.0`) it also defines `createImageModel`, `imageParams`, `createTranscriptionModel`,
 `createSpeechModel` and a `transcriptionOptions` that returns nothing (the mock models ignore the language), with models
@@ -334,11 +335,13 @@ built on `MockImageModelV4`, `MockTranscriptionModelV4` and `MockSpeechModelV4` 
 id other than the three below rejects with a 404 `APICallError`.
 
 Names: Mock Echo, Mock Reasoning, Mock Tool Approval, Mock Error, Mock Image, Mock Image Chat, Mock Image Tool, Mock
-Transcribe, Mock Speech, Mock Workspace, Mock Checkpoint, Mock Shell. `GET /api/models` shows ten of them (the four
-chat models, `image`, `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`); `transcribe` and `speech` are
-hidden and chosen in Settings → Media. The provider's `modelCount` is 9 (visible chat models; the image model is not
+Transcribe, Mock Speech, Mock Workspace, Mock Checkpoint, Mock Shell, Mock Compact, Mock Plan, Mock Todo, Mock Sub-agent,
+Mock Steer. `GET /api/models` shows fifteen of them (the four chat models, `image`, `image-chat`, `image-tool`,
+`workspace`, `checkpoint`, `shell`, `compact`, `plan`, `todo`, `subagent`, `steer`); `transcribe` and `speech` are
+hidden and chosen in Settings → Media. The provider's `modelCount` is 14 (visible chat models; the image model is not
 counted). A data directory whose cached mock listing predates a model (the e2e server's `.tmp/e2e`: `workspace` in
-Phase 7, `checkpoint` and `shell` in Phase 8) shows the new models only after a refresh: wipe it before a gate.
+Phase 7, `checkpoint` and `shell` in Phase 8, the five agent mocks in Phase 9) shows the new models only after a
+refresh: move it aside before a gate.
 
 Common behavior (deterministic):
 
@@ -349,10 +352,11 @@ Common behavior (deterministic):
   `abortSignal` aborts.
 - **Usage**: `inputTokens` = number of whitespace-separated words in all prompt text parts; `outputTokens` = number of
   streamed text and reasoning words; `reasoningTokens` = reasoning words.
-- **Model info** (the four chat models and `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`):
-  `contextWindow: 32000`, `maxOutputTokens: 4096`, `cost: { input: 1, output: 2 }` (USD per 1M tokens, so cost displays
-  are non-zero); `image-chat`, `image-tool`, `workspace`, `checkpoint` and `shell` declare `kind: 'chat'` explicitly
-  (an explicit kind wins over `classify()`). The media models have explicit kinds:
+- **Model info** (the four chat models and `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, `compact`,
+  `plan`, `todo`, `subagent`, `steer`): `contextWindow: 32000` (`compact`: 2000, so a few turns pass 80 % of it),
+  `maxOutputTokens: 4096`, `cost: { input: 1, output: 2 }` (USD per 1M tokens, so cost displays are non-zero);
+  `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell` and the five Phase 9 models declare `kind: 'chat'`
+  explicitly (an explicit kind wins over `classify()`); the Phase 9 models have the `tools` capability only. The media models have explicit kinds:
   `image` (`kind: 'image'`, `capabilities.vision: true`, the same cost, so image turns show an estimated cost),
   `transcribe` (`kind: 'transcription'`) and `speech` (`kind: 'speech'`, `voices: ['mock-voice-a', 'mock-voice-b']`
   so the Voice suggestions can be tested); the last two have no limits and no price.
@@ -377,6 +381,44 @@ Tool `mock_approval_tool`: description "Echoes its input. Mock tool that require
 approval card (Allow -> `Tool result: {"echoed":"..."}`, Deny -> `The tool call was denied.`); in `auto` it runs
 without a card. Stop tests send a long message to `mock:echo` (400 words stream for about 10 s), or a "slow" prompt to
 `mock:image`.
+
+### Agent mocks (Phase 9)
+
+Five chat models drive compaction, plan mode, todos, sub-agents and the steer queue (ADR-040 … ADR-043). They are
+complete and frozen from Gate P9-0b; **this subsection is the contract of the gate probes and the e2e specs**. The
+shared scheduler (`MockPlan`) gains `toolCalls` (several tool calls in one step, streamed in order and run in parallel
+by the SDK) and `stepDelayMs` (an abortable wait before the step streams anything). Shared rules:
+
+- **Tool call ids**: `mock_call_<n>` as above (n = the number of assistant messages in the prompt + 1); the calls of one
+  parallel step are `mock_call_<n>_<i>` (i from 1). Every step with calls ends with `finishReason: 'tool-calls'`.
+- **Offered tools** = the tools of the call (`options.tools`; with `activeTools` only the active ones). A list of them is
+  always the names sorted by code point and joined with `", "`, or `none`.
+- **Turn**: the messages after the last user message that does not directly follow a `tool` message (a steer is a user
+  message right after a tool message; 6.20 of ARCHITECTURE.md). "Results" below count only the tool results of the
+  current turn.
+- **Markers**: the summarizer and sub-agent calls are recognized by their system text (the run's instructions)
+  containing `COMPACT_INSTRUCTIONS_MARKER` / `SUBAGENT_INSTRUCTIONS_MARKER` (`apps/server/src/chat/markers.ts`).
+- A denied result of the current turn (other than the plan cases below) ends with `The tool call was denied.`; an error
+  result as the last result with `The tool call failed: <error text>`. Without the tool a script needs: `Tools are
+  disabled.`
+- **Sentinels**: `OLD-<letters or digits>` tokens (regex `OLD-[A-Za-z0-9]+`) are plain words the probes put into
+  messages to see what the model still receives.
+
+| Model ref | Behavior |
+|---|---|
+| `mock:compact` | `contextWindow` 2000. Checked in this order. (1) **Summarizer** (the system text holds `COMPACT_INSTRUCTIONS_MARKER`): the text `MOCK-SUMMARY: <first words> \| steps-done=<K> \| focus=<focus> \| sentinels=<S>` on one line, where `<first words>` = the first 8 words of the call's user text (the rendered transcript), `<K>` = the number of `Step <k> done.` texts in the transcript plus the `steps-done=` value of a `MOCK-SUMMARY:` line in it (0 without), `<focus>` = the text after `Focus: ` on its own line of the system text (`none` without one; the summarizer states the focus that way), `<S>` = the distinct sentinels of the transcript in first-seen order joined with `,` (`none`). (2) **Reporter**: the last text part of the last user message, trimmed, is `seen?` → the text `summary:<yes\|no> seen:<S>`, where `yes` means a `MOCK-SUMMARY:` line is anywhere in the prompt and `<S>` = the distinct sentinels of the prompt's text **outside** `MOCK-SUMMARY:` lines (first-seen order, `,`-joined, `none`). (3) **Loop**: the user text of the prompt (every user message, merged summaries included) contains `loop <N>` (the first match of `\bloop (\d+)\b`, N 1–50) → with `done` = the `steps-done=` value of the latest `MOCK-SUMMARY:` line in the prompt plus the `Step <k> done.` texts after it: while `done < N`, one step that streams `Step <done+1> done.` and 120 filler words (`filler`, repeated) and calls `todo_write` with `{ "todos": [{ "id": "loop", "content": "Run <N> steps", "status": "in_progress", "activeForm": "Running step <done+1> of <N>" }] }`; then the text `Loop finished after <N> steps.` (`todo_write` not offered: `Tools are disabled.`). (4) Otherwise: the last text part of the last user message followed by 150 filler words (`filler`), so every turn grows the context by about 160 words |
+| `mock:plan` | Every call first streams the line `tools: <offered tools>`, then: (1) the current turn holds an **approved** `exit_plan_mode` result → `write_file` with `{ "path": "notes.txt", "content": "Planned and done.\n" }` when it is offered and has no result yet in the turn, then the text `Plan done in mode <mode>.` (`<mode>` = the result's `mode`, `edits` or `ask`; a text result maps "Accept edits" to `edits` and "Ask" to `ask`). (2) `exit_plan_mode` is offered: the last result of the turn is a **denied** `exit_plan_mode` → the text `Revising: <reason>` (the denial reason, `no reason` without one) and a new `exit_plan_mode` call with `{ "plan": "# Plan (revised)\n1. Create notes.txt.\n2. Address: <reason>" }`; otherwise in order by the results of the turn: `todo_write` with two items (`{ "id": "1", "content": "Explore the project", "status": "in_progress", "activeForm": "Exploring the project" }`, `{ "id": "2", "content": "Write the plan", "status": "pending", "activeForm": "Writing the plan" }`), then `list_directory` with `{ "path": "." }` when it is offered, then `exit_plan_mode` with `{ "plan": "# Plan\n1. Create notes.txt.\n2. Report back." }`. (3) Otherwise: `Plan mode is off.` |
+| `mock:todo` | Waits 400 ms before each step (so a test can see each state). Three `todo_write` calls, one per step, over the items `1` "Read the code" ("Reading the code"), `2` "Change the code" ("Changing the code"), `3` "Run the tests" ("Running the tests") (`content` and `activeForm`): call 1 all `pending`; call 2 item 1 `completed`, item 2 `in_progress`, item 3 `pending` (the strip reads "1/3 · Changing the code"); call 3 all `completed`; then the text `All 3 tasks done.` With `invalid` in the user text, the first call sends a list with duplicate ids (the tool's error result) and the script then continues with the three calls. Without `todo_write`: `Tools are disabled.` |
+| `mock:subagent` | Checked first, **Child** (the system text holds `SUBAGENT_INSTRUCTIONS_MARKER`; each step waits 300 ms first, so parallel children overlap): `<prompt>` = the text of the last user message. (1) No result yet: one call to the first offered of `list_directory` (`{ "path": "." }`) and `current_time` (`{}`). (2) The prompt contains `write`, `write_file` is offered and has no result yet: `write_file` with `{ "path": "subagent.txt", "content": "Written by a sub-agent.\n" }`. (3) The prompt contains `loop` and `list_directory` or `current_time` is offered: the call of (1) again (every step, until the finalize step offers no tool). (4) Otherwise the report: `Report: <prompt> \| tools: <offered tools>` (`none` when the finalize step removed them). **Parent** (`task` offered): when the turn has no `task` result, one step with parallel `task` calls: by default two, `{ "description": "List the project files", "prompt": "List the project files.<extra>", "type": "explore" }` and `{ "description": "Check the time", "prompt": "Check the time.<extra>", "type": "general" }`; with `parallel <N>` in the user text (N 1–10) N calls `{ "description": "Task <i>", "prompt": "Task <i>.<extra>", "type": <explore for odd i, general for even i> }`; `<extra>` = a space and the user text when it contains `write` or `loop`, else empty. After the results: `Reports: <r1> \|\| <r2> …` (each the result's text for the model, in call order). Without `task` (and not a child): `Sub-agents are not available.` |
+| `mock:steer` | A turn whose user text is exactly `steps <N>` (trimmed; N 1–20) runs N steps; each waits 400 ms (`stepDelayMs`), then calls `current_time` with `{}`, until the turn holds N `current_time` results; then the text `Finished <N> steps. Steers: <list>` (`<list>` = the texts of every steer of the turn, in order, joined with `" \| "`, or `none`). When the prompt ends with steers (user messages after the turn's last tool result), the step first streams one line `Steered: <text>.` per steer, then goes on with the plan (the next call, or the final text). Any other turn: the text of the last user message (like `mock:echo`). Without `current_time`: `Tools are disabled.` |
+
+How the probes use them (ARCHITECTURE.md 6.18 – 6.22): `mock:compact` turns with sentinels, then `/compact keep
+numbers` and `seen?` (`summary:yes seen:none`), an edit above the marker (`summary:no seen:OLD-1`), `loop 6` for an
+in-run compaction; `mock:plan` in a project chat in plan mode (approve with Accept edits → `notes.txt` and `Plan done in
+mode edits.`; Keep planning with feedback → `Revising: <feedback>`); `mock:todo` in Ask (no card); `mock:subagent` as
+both the chat model and `subagentModelRef` (two parallel children, `parallel 5` for the semaphore, `write` in Accept
+edits, `loop` with `subagentMaxSteps: 2`); `mock:steer` with `steps 5` and a message queued during step 1 (a
+`data-steer` between steps, `Steers: <text>` in the final text) or during the last step (the next turn).
 
 ## 9. Declarative provider templates (wizard)
 

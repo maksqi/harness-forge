@@ -6,9 +6,9 @@ import { listDirectoryToolOutputSchema } from '@harness-forge/shared'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { NO_WORKSPACE_MESSAGE } from './common.ts'
 import { createListDirectoryTool, listDirectoryModelText } from './list-directory.ts'
-import { contextWithoutWorkspace, createTestWorkspace, modelTextOf } from './test-helpers.ts'
+import { contextWithoutWorkspace, createTestWorkspace, modelTextOf, promiseTool } from './test-helpers.ts'
 
-const tool = createListDirectoryTool()
+const tool = promiseTool(createListDirectoryTool())
 let ws: TestWorkspace
 
 beforeEach(async () => {

@@ -30,6 +30,7 @@ A **plugin** is a directory with a `plugin.json` manifest. It can contribute:
 | Generated images from plugin code (API 1.1.0) | — | `ctx.images.generate()` |
 | Tools | — | `ctx.tools.register()` |
 | Tools that work on the chat's project folder (API 1.2.0) | — | `ToolDefinition.workspace` + `ToolCallContext.workspace` |
+| Tools that stream progress (API 1.3.0) | — | an async-generator `ToolDefinition.execute` (each yield is a preliminary output) |
 | MCP servers (their tools become tools) | `contributes.mcpServers` | `ctx.mcp.register()` |
 | Slash commands | `contributes.commands` (template) | `ctx.commands.register()` (template or `run`) |
 | Hooks into the chat pipeline | — | `ctx.hooks.on()` |
@@ -58,13 +59,16 @@ part of the server they may import server dependencies (for example the official
 | `core-commands` (Core commands) | 10 template slash commands (below) | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server |
 | `core-mcp` (MCP servers) | MCP servers configured in the MCP panel (`mcp_servers` table); the panel is its Overview | settings `autoReconnect`, `connectTimeoutSeconds` (below) |
 | `core-workspace` (Workspace tools, Phase 7) | 7 workspace tools: `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file`, `shell` (below) | offered only in chats whose project folder opened; `shell` is not registered on Windows, and `HF_WORKSPACE_SHELL=0` keeps it from every chat (it stays registered and listed in the tools table); no settings. Phase 8: writes are journaled and restorable (rewind, revert), and `shell` keeps its working folder between calls and runs commands that match the user's shell rules without a card (below) |
-| `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models; Phase 7 adds `mock:workspace`, Phase 8 `mock:checkpoint` and `mock:shell`) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
+| `core-agent` (Agent tools, Phase 9) | 3 agent tools: `todo_write`, `exit_plan_mode`, `task` (below) | offered in every chat with tools (`exit_plan_mode` only in plan mode, `task` never inside a sub-agent); no settings (the agent settings live in Settings → General: `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps`) |
+| `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models; Phase 7 adds `mock:workspace`, Phase 8 `mock:checkpoint` and `mock:shell`, Phase 9 `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer`) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
 
 Builtin manifests in v1.3: `core-tools` is version 1.2.0 and declares `engines.harness` `"^1.2.0"` (its
 `generate_image` output carries the 1.2 `modelName`); `core-workspace` is version 1.0.0 with `"^1.2.0"` and the
 permission `process` (it uses `ToolDefinition.workspace` and `ToolCallContext.workspace`); `core-providers` stays 1.1.0
 with `"^1.1.0"`; `mock` stays version 1.0.0 with `"^1.1.0"`; `core-commands` and `core-mcp` stay 1.0.0 with
-`"^1.0.0"`. Load order: `core-providers`, `core-tools`, `core-commands`, `core-mcp`, `core-workspace`, then `mock`.
+`"^1.0.0"`. v1.5 adds `core-agent`, version 1.0.0 with `"^1.3.0"` (its `task` tool has an async-generator
+`execute`). Load order: `core-providers`, `core-tools`, `core-commands`, `core-mcp`, `core-workspace`, `core-agent`, then
+`mock`.
 
 Builtin tools (`core-tools`):
 
@@ -154,11 +158,35 @@ output schema, such as one the host replaced, is sent as JSON; `N lines` is `1 l
   ignored by the approval (`GET /api/tools` still reports it as the tool's `override`). `deny` and `ask` overrides
   still work.
 
+Builtin agent tools (`core-agent`, Phase 9, ADR-041 / ADR-043; behavior in
+[ARCHITECTURE.md 6.19, 6.22](./ARCHITECTURE.md#619-plan-mode-and-todos-adr-041), schemas in `@harness-forge/shared`
+(`AGENT_TOOL_NAMES`)). They use the public plugin API (1.3.0) like every builtin; what they need from the server (the
+run's permission mode, the sub-agent runner) comes through a private side channel that third-party plugins cannot
+reach, and the server recognizes them by owner (`pluginId === 'core-agent'`): a plugin tool with another name gets none
+of this.
+
+| Tool | Access / policy / timeout | Input | Output and model text |
+|---|---|---|---|
+| `todo_write` | none / `safe` / 60 s | `{ todos: { id (1-64 characters, unique in the list), content (1-500), status: 'pending' \| 'in_progress' \| 'completed', activeForm? (<= 200) }[] }` (<= 50 items; the whole list each time) | `{ todos, counts }` (counts per status); the model reads one line with the counts. The latest call on the chat's path is the todo state (the todo strip, 7.25 of UI.md) |
+| `exit_plan_mode` | none / `always` / 60 s | `{ plan }` (markdown, 1-50,000 characters) | offered only in plan mode; always shows the plan card (overrides and `tool.approve` hooks cannot approve it; `PATCH /api/tools/exit_plan_mode` with `override: 'allow'` is refused with 400). Approved: `{ approved: true, mode }` (the mode the user switched to) and the text "The user approved the plan. Mode is now <label>. Implement it now; track progress with todo_write."; rejected: the user's feedback reaches the model as the denial reason |
+| `task` | none / `safe` / 600 s | `{ description (3-80 characters), prompt (<= 20,000), type: 'explore' \| 'general' }` | runs a sub-agent (a separate agent loop with its own context) and streams `TaskOutput` snapshots as preliminary outputs: `{ status: 'queued' \| 'running' \| 'completed' \| 'failed' \| 'aborted' \| 'limit', type, description, modelRef, steps (the last 50: tool, summary, state, preview), stepsOmitted, report (<= 32,000), usage?, costUsd?, startedAt, finishedAt?, error? }`; the model reads only the report ("Sub-agent failed: …; partial report: …" on failure). A child gets only the tools that run without approval in the chat's mode (no agent tools, no `generate_image`), and any call that would ask is denied inside it; at most 3 run at once, 20 per reply |
+
+The tools can be disabled per tool in the Tools tab like any tool (disabling `task` turns sub-agents off).
+`todo_write` and `task` are offered in every chat with tools, with or without a project; an `explore` sub-agent only
+reads.
+
 Builtin commands (`core-commands`, all `template` commands): `/explain` (code or a concept, step by step),
 `/summarize` (text, or the conversation so far when no text is given), `/review` (bugs, security, readability),
 `/fix` (root cause and fix), `/refactor` (clarity without behavior changes), `/tests` (unit tests), `/docs`
 (documentation comments), `/commit` (a commit message for a diff), `/translate` (into English, or into the language
 named first), `/proofread` (grammar, spelling, style).
+
+**Harness commands** (Phase 9, ADR-040): `/compact [focus]` is run by the server itself, not by a plugin: it summarizes
+the conversation into a compaction marker (ARCHITECTURE.md 6.18). It is listed by `GET /api/commands` next to the
+plugin commands and is reserved (`HARNESS_COMMANDS` in `@harness-forge/shared`): a plugin command named `compact`
+(declarative or `ctx.commands.register`) is refused with `validation_error`, like the client-only names, and the
+in-browser templates treat the name as taken. While a response runs, a queued `/compact` (or any server command) waits
+for the next turn instead of reaching the running agent.
 
 `core-mcp` settings apply to every MCP server (panel and plugins): **Reconnect automatically** (`autoReconnect`,
 default on: retries a failed or dropped connection with increasing delays, up to about 9 minutes) and **Connect
@@ -167,27 +195,30 @@ timeout (seconds)** (`connectTimeoutSeconds`, 5-120, default 20).
 ### API version
 
 ```ts
-export const PLUGIN_API_VERSION = '1.2.0'
+export const PLUGIN_API_VERSION = '1.3.0'
 ```
 
 `PLUGIN_API_VERSION` versions the plugin API (not the app). Minor versions only add; a major version breaks. A
 manifest declares the API range it supports in `engines.harness`; the host checks
 `semver.satisfies(PLUGIN_API_VERSION, engines.harness)` and marks the plugin `incompatible` when it fails. Use
-`"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` when the plugin uses a member of that version.
+`"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` / `"^1.3.0"` when the plugin uses a member of that version.
 
 | Version | Changes |
 |---|---|
 | `1.0.0` | v1 (Phase 0 – 5) |
 | `1.1.0` | Phase 6 (additive): the optional `ProviderDefinition` members `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel`, `transcriptionOptions`; `PluginContext.images.generate`; model kinds `transcription` and `speech`, `ModelInfo.voices`, `capabilities.imageOutput` |
 | `1.2.0` | Unchanged in Phase 8 (checkpoints, the sticky folder and shell rules need no plugin API). Phase 7 (additive, ADR-032): `ToolCallContext.workspace?: ToolWorkspace` (`{ projectId, name, root }`, frozen, set for every tool in a chat whose project folder opened, policy functions included); `ToolDefinition.workspace?: 'read' \| 'write' \| 'execute'` (registration rejects any other value with `validation_error` at `['workspace']`; such a tool is offered only in those chats; `execute` tools only while `HF_WORKSPACE_SHELL` is on; `write` + policy `ask` runs without a card in the new permission mode `edits`); `ToolMode` gains `edits` ("Accept edits"; visible to hooks in `chat.params`); `ImageGenerateResult.modelName` (the catalog name, the user's alias first, else the model id). Behavior change: an unknown provider in `ctx.ai` (`ctx.models.resolve`) and `ctx.images` is now `provider_not_configured` (400, action `configure-provider`, message `The provider "<id>" is not available. Pick another model or install the provider.`), as on chat; it was `not_found` |
+| `1.3.0` | Phase 9 (additive, ADR-041 / ADR-043): `ToolMode` gains `plan` ("Plan": read-only; tools with workspace access `write` / `execute` are not offered, and policies resolve as in `ask`; visible to hooks in `chat.params`); `ToolDefinition.execute` may be an **async generator** (`async function*`): every yielded value is a preliminary output (shown as progress, throttled to one per 250 ms, each capped at 64 KB, at most 2,000 per call) and the last yielded value is the final output (an `execute` that returns an `AsyncIterable` from a normal function is drained instead: only its last value counts). `tool.after` hooks and `toModelOutput` see only the final value; the guard timeout and the abort signal cover the whole iteration. No new `ToolCallContext` member (the agent tools of `core-agent` use a server-internal channel) |
 
-A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0` and `1.2.0`; a plugin that catches the
-old `not_found` of an unknown provider should also accept `provider_not_configured`). A plugin that uses a newer member
-should declare that version (`"^1.1.0"`, `"^1.2.0"`), so an older host reports it `incompatible` instead of silently
-ignoring the member: a 1.1 host would offer a tool with `workspace` in every chat and never fill `c.workspace`. The
-builtins follow the same rule: `core-tools` (1.2.0) and `core-workspace` declare `"^1.2.0"`, `core-providers` and
-`mock` `"^1.1.0"`. The in-browser templates and the example plugins still declare `"^1.0.0"` (they use no newer
-member).
+A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0`, `1.2.0` and `1.3.0`; a plugin that
+catches the old `not_found` of an unknown provider should also accept `provider_not_configured`; a hook or policy that
+switches on `toolMode` should treat an unknown value like `ask`, since 1.3 adds `plan`). A plugin that uses a newer
+member should declare that version (`"^1.1.0"`, `"^1.2.0"`, `"^1.3.0"`), so an older host reports it `incompatible`
+instead of silently ignoring the member: a 1.1 host would offer a tool with `workspace` in every chat and never fill
+`c.workspace`, and a 1.2 host would treat an async-generator `execute` as a plain function whose result is an iterator
+object. The builtins follow the same rule: `core-agent` declares `"^1.3.0"`, `core-tools` (1.2.0) and `core-workspace`
+`"^1.2.0"`, `core-providers` and `mock` `"^1.1.0"`. The in-browser templates and the example plugins still declare
+`"^1.0.0"` (they use no newer member).
 
 ## 2. Plugin directory layout
 
@@ -676,7 +707,7 @@ import type {
   ModelMessage, Tool, UIMessage,
 } from 'ai'
 
-export const PLUGIN_API_VERSION = '1.2.0'
+export const PLUGIN_API_VERSION = '1.3.0'
 
 /** Same type as the AI SDK `ProviderOptions` (`ai` does not re-export it). */
 export type ProviderOptions = SharedV4ProviderOptions
@@ -686,7 +717,7 @@ export type PluginKind = 'declarative' | 'code'
 export type PluginSource = 'builtin' | 'created' | 'zip' | 'npm' | 'url' | 'link' | 'copy'
 export type PluginState = 'disabled' | 'untrusted' | 'incompatible' | 'loading' | 'active' | 'error'
 export type PluginPermission = 'network' | 'secrets' | 'storage' | 'hooks' | 'process'
-export type ToolMode = 'off' | 'ask' | 'edits' | 'auto'                      // 1.2: + edits ("Accept edits")
+export type ToolMode = 'off' | 'ask' | 'edits' | 'plan' | 'auto'             // 1.2: + edits ("Accept edits"); 1.3: + plan
 export type ToolWorkspaceAccess = 'read' | 'write' | 'execute'               // 1.2 (shared WorkspaceAccess)
 export type ToolPolicy = 'safe' | 'ask' | 'always'
 export type ReasoningEffort = 'auto' | 'off' | 'low' | 'medium' | 'high' | 'max'
@@ -858,7 +889,9 @@ export interface ToolDefinition<I = unknown, O = unknown> {
   timeoutMs?: number                              // default 60_000, max 600_000
   workspace?: ToolWorkspaceAccess                 // 1.2: offered only with an open workspace; 'write' + policy 'ask'
                                                   // runs without a card in mode 'edits'; 'execute' needs HF_WORKSPACE_SHELL
-  execute(input: I, c: ToolCallContext): Promise<O>
+  execute(input: I, c: ToolCallContext): Promise<O> | AsyncIterable<O>
+                                                  // 1.3: an async generator yields preliminary outputs; the
+                                                  // last yielded value is the final output
   toModelOutput?(output: O, c: { toolCallId: string; input: I }): ToolResultOutput | Promise<ToolResultOutput>
 }
 
@@ -980,7 +1013,8 @@ values) and adds the runtime contract (`PluginContext`, `ProviderDefinition`, `T
 zod validator of a settings form. Plugin API 1.1.0 adds the type exports `ImageParamsRequest`, `ImageParamsResult`,
 `TranscriptionHints`, `PluginImagesApi`, `ImageGenerateOptions`, `ImageGenerateResult` and `GeneratedImageFile`, and
 re-exports the types `ImageAspectRatio` and `ModelKind` from shared. Plugin API 1.2.0 adds `ToolWorkspace` and
-`ToolWorkspaceAccess` (the shared `WorkspaceAccess` / `workspaceAccessSchema`). The template mirror
+`ToolWorkspaceAccess` (the shared `WorkspaceAccess` / `workspaceAccessSchema`). Plugin API 1.3.0 adds no export: the
+`ToolMode` literal gains `plan` and `ToolDefinition.execute` may return an `AsyncIterable`. The template mirror
 `apps/server/src/plugins/templates/sdk-types.ts` (the `harness-forge.d.ts` of the templates and examples) follows the
 SDK, including the `ToolMode` literal. `ModelInfo` must be imported from these packages,
 not from `ai` (which exports an unrelated type of the same name).
@@ -1105,6 +1139,40 @@ server's rights (section 13), so resolve every path against `root` and refuse an
 symbolic links with `realpath` and compare the result with `root`), as the builtin `core-workspace` tools do. Never
 start a shell from a plugin tool; offer the builtin `shell` instead.
 
+Streaming tools (1.3.0): an `execute` written as an `async function*` reports progress. Each `yield` is a
+**preliminary output**: the chat shows it in the tool row while the reply streams (UI.md 7.2), and it is not sent to
+the model. The **last** yielded value is the final output (step 6 and 7 apply to it only; `tool.after` hooks run once,
+on it). The host keeps at most one preliminary value per 250 ms (the latest wins), caps each at 64 KB and stops sending
+them after 2,000 (the final value always goes out). `timeoutMs` and `c.signal` cover the whole iteration: stop the loop
+when the signal aborts. A run that ends while the tool still yields stores the call as an error ("stopped"). Declare
+`"engines": { "harness": "^1.3.0" }`.
+
+```js
+// @ts-check
+/// <reference path="./harness-forge.d.ts" />
+
+/** @type {import('@harness-forge/plugin-sdk').PluginModule} */
+export default {
+  setup(ctx) {
+    const { z } = ctx.ai
+
+    ctx.tools.register({
+      name: 'acme_count',
+      description: 'Counts to n slowly and reports progress.',
+      inputSchema: z.object({ n: z.number().int().min(1).max(20) }),
+      policy: 'safe',
+      async* execute({ n }, c) {
+        for (let i = 1; i <= n && !c.signal.aborted; i++) {
+          await new Promise(resolve => setTimeout(resolve, 200))
+          yield { done: i, of: n } // a preliminary output: shown as progress
+        }
+        yield { done: n, of: n, finished: true } // the last value is the final output
+      },
+    })
+  },
+}
+```
+
 ### Commands
 
 `template` commands behave like [declarative commands](#6-declarative-commands). `run` commands are guarded (30 s):
@@ -1124,10 +1192,10 @@ project only shows in the `instructions` of `chat.params` and in the workspace t
 |---|---|---|---|---|---|
 | `chat.params` | `chatId`, `modelRef`, `model`, `reasoningEffort`, `toolMode` | `instructions`, `temperature?`, `maxOutputTokens?`, `maxSteps`, `reasoning?`, `providerOptions` | once per chat run (not for image turns, which call no chat model), after model resolution and `provider.reasoning()`, before `streamText`; for a chat model with image output `providerOptions` already holds the `imageParams()` options; `instructions` arrives joined (global, then in a project chat the workspace block, the project file and the project's instructions, then the chat's), `maxSteps` as the `maxSteps` or `projectMaxSteps` setting, and the result is clamped to 1-200 | 3 s | changes discarded, run continues |
 | `chat.headers` | `chatId`, `modelRef` | `headers` (sent with every model request of the run) | once per chat run, after `chat.params` (not for image turns) | 3 s | changes discarded |
-| `chat.messages` | `chatId`, `modelRef` | `messages` (`ModelMessage[]` after `convertToModelMessages`, before context trimming): the path being answered, from the first message to the new or answered user message; other versions of edited or regenerated messages are never included (ADR-023) | once per chat run (image turns send no history and run no `chat.*` hook) | 3 s | changes discarded |
-| `tool.approve` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `decision?` (`allow` / `ask` / `deny`) | per tool call in `ask` / `edits` / `auto` mode (unless a user override decided), step 2 of the approval order | 3 s | ignored; resolution falls through to the policy |
+| `chat.messages` | `chatId`, `modelRef` | `messages` (`ModelMessage[]` after `convertToModelMessages`, before context trimming): the path being answered, from the first message to the new or answered user message; other versions of edited or regenerated messages are never included (ADR-023); Phase 9: as the model sees it, so the messages before the latest compaction marker are replaced by the summary, replies are split at the messages the user sent during a run, and `task` outputs are reduced to their report | once per chat run (image turns send no history and run no `chat.*` hook) | 3 s | changes discarded |
+| `tool.approve` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `decision?` (`allow` / `ask` / `deny`) | per tool call in `ask` / `edits` / `plan` / `auto` mode (unless a user override decided), step 2 of the approval order; never for `core-agent`'s `exit_plan_mode` (always asks) or for calls inside a sub-agent whose answer would need the user (denied there) | 3 s | ignored; resolution falls through to the policy |
 | `tool.before` | `chatId`, `modelRef`, `tool`, `toolCallId` | `input` | per execution, after approval, before `execute` | 3 s | **a throw blocks the call** (error result `Blocked by <pluginId>: <message>`, not counted as a failure); a timeout also blocks and counts |
-| `tool.after` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `output` | per successful execution, before the 64 KB cap | 3 s | changes discarded (original output kept) |
+| `tool.after` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `output` | per successful execution, before the 64 KB cap (1.3.0: for a streaming tool, once, on the final value; preliminary outputs skip it) | 3 s | changes discarded (original output kept) |
 | `message.completed` | `chatId`, `modelRef`, `message`, `usage`, `costUsd?`, `aborted` | none | once per run after the assistant message is persisted (finished, aborted or failed runs; errors are in `message.metadata.error`); image turns included (their `usage` holds the image token counts); `costUsd` includes an image turn's estimated cost and the `costUsd` of `generate_image` outputs | 3 s | logged only |
 
 ## 10. Tool approval
@@ -1146,7 +1214,13 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
 | 7 | chat `toolMode` = `edits`, any other tool (policy `ask` without workspace `write`, policy `always`) | `user-approval` |
 | 8 | chat `toolMode` = `auto`, policy `always` | `user-approval` |
 | 9 | chat `toolMode` = `auto`, policy `safe` or `ask` | `not-applicable` |
+| 4–5 | chat `toolMode` = `plan` (1.3.0): as `ask`; tools with workspace access `write` / `execute` are not offered at all | `not-applicable` / `user-approval` |
 
+- Phase 9: before step 1, `core-agent`'s `exit_plan_mode` always resolves to `user-approval` (the plan card), and a
+  user override `allow` on it is refused. Inside a sub-agent (the `task` tool) the same resolution runs for the chat's
+  mode, but a `user-approval` result becomes `denied` ("Sub-agents cannot ask the user: this call needs approval."), and
+  tools that could only ask are not offered to the child at all; a plugin tool therefore runs inside a sub-agent only
+  when it would run without a card in the chat itself.
 - `toolMode = off`: no tools are sent to the model. Tools disabled in prefs (`enabled = false`) or with override
   `deny` are not sent either; step 1 only catches calls to them that still arrive.
 - `approved` / `denied` are recorded as automatic decisions (no card; denials render as `output-denied`);
@@ -1164,7 +1238,7 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
   allowlist kept by the server, per project and global), so such commands run without a card in `ask` and `edits`;
   commands with `$`, backticks, redirections, subshells, globs or here-docs always ask. A plugin cannot add rules or
   read them, and the rules never apply to a plugin's tools. The `tool.approve` hook and user
-  overrides keep their precedence (steps 1 and 2); hooks see `toolMode: 'edits'` in `chat.params`.
+  overrides keep their precedence (steps 1 and 2); hooks see `toolMode: 'edits'` (1.3.0: also `'plan'`) in `chat.params`.
 - MCP tool policy: `readOnlyHint: true` -> `safe`; else `destructiveHint: true` -> `always`; else the server's
   `policy` (default `ask`). Annotations come from the MCP server and are advisory: if you do not fully trust a
   server, set an override (`ask`) on its tools.
@@ -1174,7 +1248,7 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
 ### Load order
 
 1. Builtins (static imports, trusted): `core-providers`, `core-tools`, `core-commands`, `core-mcp`, `core-workspace`
-   (Phase 7), then `mock` when `HF_MOCK_PROVIDER=1`.
+   (Phase 7), `core-agent` (Phase 9), then `mock` when `HF_MOCK_PROVIDER=1`.
 2. Unless `HF_SAFE_MODE=1`: every directory in `data/plugins/*` (not starting with `.`) plus linked folders, sorted
    by id (ASCII), each loaded independently and guarded.
 
@@ -1382,10 +1456,10 @@ Declarative plugins without stdio servers run no code and need no trust:
 | Plugin id | `^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$`; equals the directory name; reserved: `core-*`, `mock`, builtin provider ids | unique (installing an existing id updates it) |
 | Provider id | builtins: models.dev keys; plugins: `<pluginId>` or `<pluginId>-<suffix>` with `<suffix>` matching `[a-z0-9-]+`, total <= 64 characters | first registration wins, later ones throw `conflict` |
 | Model ref | `providerId:modelId`, split on the **first** `:` (`ollama:llama3:8b`); never in URL paths | |
-| Tool name | `^[a-zA-Z0-9_-]{1,64}$`; the prefix `mcp__` is reserved for MCP tools; prefer a plugin-specific prefix (`dice_roll`) | global; duplicates throw `conflict` |
+| Tool name | `^[a-zA-Z0-9_-]{1,64}$`; the prefix `mcp__` is reserved for MCP tools; prefer a plugin-specific prefix (`dice_roll`); the builtins already hold `current_time`, `web_fetch`, `generate_image`, the seven workspace tools and (Phase 9) `todo_write`, `exit_plan_mode`, `task` | global; duplicates throw `conflict` |
 | MCP tool name | `mcp__<serverId>__<tool>`; characters of `<tool>` outside `[a-zA-Z0-9_-]` become `_`; longer than 64 characters -> the first 55 characters + `_` + 8 hex characters of the FNV-1a hash of the full name (`mcpToolName()` in `@harness-forge/shared`, synchronous and browser-safe) | global |
 | MCP server id | `^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`; plugin servers: `<pluginId>` or `<pluginId>-<suffix>` (so plugins with ids longer than 32 characters cannot declare MCP servers) | across plugins and the MCP panel |
-| Command name | `^[a-z][a-z0-9-]{0,31}$`; reserved client-only: `new`, `model`, `effort`, `mode`, `help` | first wins |
+| Command name | `^[a-z][a-z0-9-]{0,31}$`; reserved client-only: `new`, `model`, `effort`, `mode`, `help`; reserved harness command (Phase 9): `compact` | first wins |
 | Credential key, setting key | `^[a-zA-Z][a-zA-Z0-9_]{0,63}$` | within the provider / schema |
 | Secret scopes | `provider:<id>`, `plugin:<id>`, `mcp:<id>`, `auth` | |
 
@@ -1783,9 +1857,19 @@ Configuration tab; read it with `ctx.settings.get()`). Use `ctx.secrets` for tok
 `created` plugins in the in-browser editor (saves re-pin automatically), use the Trust action, or develop from a
 linked folder (pinned to the path).
 
-**My plugin is `incompatible`.** `engines.harness` does not include `PLUGIN_API_VERSION` (`1.2.0`). Use `"^1.0.0"`
+**My plugin is `incompatible`.** `engines.harness` does not include `PLUGIN_API_VERSION` (`1.3.0`). Use `"^1.0.0"`
 (or `"^1.1.0"` when the plugin uses a 1.1 member such as `createTranscriptionModel` or `ctx.images`, `"^1.2.0"` for a
-1.2 member such as `ToolDefinition.workspace`).
+1.2 member such as `ToolDefinition.workspace`, `"^1.3.0"` for an async-generator `execute`).
+
+**Can my tool show progress, like a sub-agent?** Yes, since plugin API 1.3.0: write `execute` as an `async function*`
+and `yield` snapshots; the last yielded value is the result ([Tools](#tools)). Only the final value reaches the model,
+the `tool.after` hooks and the 64 KB cap; the snapshots are throttled to one per 250 ms.
+
+**Will my tool run in plan mode or inside a sub-agent?** In plan mode (1.3.0) every tool without workspace access
+`write` / `execute` is offered and resolves as in Ask. A sub-agent gets your tool only when it would run without a card
+in the chat's mode (policy `safe`, or `ask` in Auto, or a `write` tool in Accept edits) and no user override `ask` /
+`deny` is set; a call that would still need approval is denied inside the sub-agent. `ToolCallContext` has no flag for
+it: treat a call from a sub-agent like any other call.
 
 **How do I write a tool that works on the chat's project folder?** Set `workspace: 'read'` (or `'write'`) and use
 `c.workspace.root` (plugin API 1.2.0, `"^1.2.0"`); the tool is offered only in project chats. Resolve paths yourself

@@ -125,6 +125,47 @@ export const LIMITS = {
   shellCommandSegmentsMax: 32,
   /** Characters of a shell command kept in the change journal (ADR-036). */
   journalCommandMaxChars: 1000,
+
+  // Agent 2.0 (Phase 9): compaction (ADR-040), plan mode and todos (ADR-041), the steer queue and file mentions
+  // (ADR-042), sub-agents (ADR-043).
+  /** Characters of the summary of a `data-compaction` part. */
+  compactionSummaryMaxChars: 60_000,
+  /** Characters of the focus of `/compact [focus]`. */
+  compactFocusMaxChars: 1000,
+  /** Automatic compactions of one run; above it the run falls back to trimming. */
+  compactionsPerRunMax: 10,
+  /** Items of one `todo_write` list. */
+  todoItemsMax: 50,
+  /** Characters of the plan of `exit_plan_mode`. */
+  planMaxChars: 50_000,
+  /** Characters of the reason (feedback) of a tool approval response. */
+  approvalReasonMaxChars: 2000,
+  /** Characters of the prompt of a `task` call. */
+  taskPromptMaxChars: 20_000,
+  /** Characters of the final report of a sub-agent. */
+  taskReportMaxChars: 32_000,
+  /** Steps kept in a `task` output (the latest; the rest are counted in `stepsOmitted`). */
+  taskStepsShownMax: 50,
+  /** Sub-agents of one run that run at the same time (the others wait as `queued`). */
+  subagentParallelMax: 3,
+  /** Sub-agents one run can start. */
+  subagentsPerRunMax: 20,
+  /** Deadline of one sub-agent (570 s, below the 600 s timeout of the `task` tool). */
+  subagentTimeoutMs: 570_000,
+  /** Queued messages of one chat. */
+  queueItemsMax: 10,
+  /** Serialized bytes of one queued message (256 KiB). */
+  queueItemBytes: 262_144,
+  /** Characters of the query of `GET /projects/:id/files` (= the longest `@` token of the composer). */
+  mentionQueryMaxChars: 256,
+  /** Entries of one `GET /projects/:id/files` answer (also the maximum `limit`). */
+  mentionResultsMax: 50,
+  /** Bytes of a project file attached through `POST /projects/:id/files/attach` (5 MiB). */
+  mentionFileMaxBytes: 5_242_880,
+  /** Files of the in-memory file index of one project (the rest is cut, `truncated`). */
+  mentionIndexFilesMax: 50_000,
+  /** Age after which the file index of a project is rebuilt (30 s). */
+  mentionIndexTtlMs: 30_000,
 } as const
 
 /** MIME families accepted by `POST /files` (the server also checks the content). */

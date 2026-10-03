@@ -6,10 +6,10 @@ import process from 'node:process'
 import { writeFileToolOutputSchema } from '@harness-forge/shared'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { NO_WORKSPACE_MESSAGE } from './common.ts'
-import { contextWithoutWorkspace, createTestWorkspace, modelTextOf } from './test-helpers.ts'
+import { contextWithoutWorkspace, createTestWorkspace, modelTextOf, promiseTool } from './test-helpers.ts'
 import { createWriteFileTool, writeFileModelText } from './write-file.ts'
 
-const tool = createWriteFileTool()
+const tool = promiseTool(createWriteFileTool())
 let ws: TestWorkspace
 
 beforeEach(async () => {

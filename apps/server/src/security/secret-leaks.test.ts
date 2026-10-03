@@ -235,6 +235,9 @@ function getInputs(): Partial<Record<ApiRouteKey, Array<{ params?: Record<string
     'changes.diff': [{ params: { id: chatId }, query: { source: 'chat', path: 'notes.txt' } }, { params: { id: chatId }, query: { source: 'git', path: 'notes.txt' } }],
     'changes.git': [{ params: { id: chatId } }],
     'changes.rewindPreview': [{ params: { id: chatId }, query: { messageId: userMessageId } }],
+    // Phase 9 (ADR-042): the queue of an idle chat is empty; the project does not exist (404 once implemented).
+    'chatQueue.list': [{ params: { id: chatId } }],
+    'projectFiles.search': [{ params: { id: 'prj_ABCdef0123456789' }, query: { q: 'notes' } }],
   }
 }
 

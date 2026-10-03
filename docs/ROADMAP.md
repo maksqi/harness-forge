@@ -219,7 +219,36 @@ automatic file sweep, backlog stabilization.
   - [x] W8.12 e2e-features · [x] W8.13 docs-final (W8.14 / W8.15 fix-ups not needed: the P8-A gate was green)
   - [x] Final gate (e2e ×3, screenshots, audit, v1.3 → v1.4 upgrade, Docker git) + checkpoint commit
 
-## Backlog (not in v1.4)
+## Phase 9 — v1.5: Agent 2.0
+
+Details, owned paths and acceptance criteria: `docs/phases/phase-9-v1-5.md`. Decisions: ADR-040 … ADR-043 (and
+amendment notes on ADR-023, ADR-032, ADR-036, ADR-038). Plan: context compaction (`/compact`, automatic, also inside
+long runs), plan mode + `todo_write` (plugin API 1.3.0, builtin `core-agent`), `@` file mentions and a steer queue,
+sub-agents (`task`), stabilization (unique shell rules, migration `0006`).
+
+- [x] P9-00 Stabilization start (coordinator): design reports in `.tmp/p9-designs`, CI on `316319a` green, audit
+  advisories re-checked (both still unpatched: ignores kept), memory updated, baseline 8327 tests
+- [x] P9-0a Decisions, docs, contracts
+  - [x] K1 DECISIONS (ADR-040 … ADR-043, contract seed), ROADMAP, AGENT.md (coordinator); K2 no new dependency
+  - [x] C22 contracts: shared DTOs + plugin SDK 1.3.0, 5 new routes (100), `docs/API.md`, 501 stubs
+  - [x] C23 agent-state + mention helpers (`packages/shared/src/util/{agent-state,mentions}.ts`)
+  - [x] D10 phase doc `phase-9-v1-5.md` · [x] D11 docs: UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md, guides, README
+  - [x] Gate + checkpoint commit
+- [ ] P9-0b Schema, migration `0006`, skeletons, FREEZE
+  - [ ] K3 v1.4 upgrade seed (from a `316319a` worktree) + schema + `pnpm db:generate` (coordinator)
+  - [ ] C24 server skeleton · [ ] C25 web skeleton · [ ] C26 chat seams · [ ] C27 `core-agent` skeleton + mock models
+  - [ ] Gate (incl. v1.4 data upgrade probe) + FREEZE + checkpoint commit
+- [ ] P9-A Features (12 agents)
+  - [ ] W9.1 compaction-server · [ ] W9.2 steer-queue-server · [ ] W9.3 plan-mode-server · [ ] W9.4 todo-instructions-server
+  - [ ] W9.5 subagents-server · [ ] W9.6 mentions-server · [ ] W9.7 stabilization-server
+  - [ ] W9.8 composer-web · [ ] W9.9 session-web · [ ] W9.10 agent-tools-web · [ ] W9.11 transcript-web
+  - [ ] W9.12 settings-stabilization-web
+  - [ ] Gate + checkpoint commit
+- [ ] P9-B Feature e2e, docs, fix-ups, final gate
+  - [ ] W9.13 e2e-features · [ ] W9.14 docs-final (W9.15 / W9.16 fix-ups only if the P9-A gate is red)
+  - [ ] Final gate (e2e ×3, screenshots, audit, v1.4 → v1.5 upgrade, Docker) + checkpoint commit
+
+## Backlog (not in v1.5)
 
 Multi-user accounts · child-process isolation for code plugins · plugin marketplace/registry index ·
 knowledge/RAG · desktop/CLI clients · audio attachments to chat models · declarative image and voice providers ·
@@ -229,8 +258,11 @@ verify Alt+V dictation on Firefox / Windows (Alt+J is the documented fallback) �
 syntax highlighting in diffs · stage / commit from the changes panel · a terminal pane · a persistent shell process
 (environment variables that stick) · restoring shell changes (whole-tree snapshots) · remove the two ignored audit
 advisories (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) once patched releases ship (re-checked
-2026-10-03: still unpatched) · move the `.gitignore` ReDoS heuristic of `find_files` / `search_files` off the main
-thread.
+2026-10-03: still unpatched) · move the `.gitignore` ReDoS heuristic of the workspace walker (`find_files`,
+`search_files`, the `@` file index) off the main thread · a steer queue that survives a server restart · nested
+sub-agents, user-defined agent types and background agents · plan files saved to the project · micro-compaction of
+single large tool outputs · retry a provider context overflow after compaction · `@` mentions of symbols and URLs ·
+run the live provider suite for compaction, plan mode and sub-agents with real models.
 
 ## Wave log
 
@@ -267,3 +299,5 @@ thread.
 | P8-A | W8.1 – W8.11 (+ coordinator: `deps.test.ts` phase 8 tests rewritten for the implemented members, `core-workspace/index.test.ts` `shell: shellPolicy`; follow-ups: W8.10 `currentShellCwd` aligned with the server's skip rule) | audit ok (152 paths, no frozen file touched); 8327 tests; build ok; CSP 38/38; probes 57/57 (`.tmp/gates/P8-A/probe.mjs`: checkpoints + journal rows + 0700 store, changes list, rewind preview / apply / idempotent / undo / conflict skip + force, 400 non-user message, chat revert + stale 409 + undo, run-active 409 from another chat of the project, sticky cwd + clamp + no env persistence, rules 201 / 409 / refused 400 / allowed in ask / compound, substitution and redirection ask / project scoping / `override: allow` 400, git modified + untracked + revert / undo both, not-a-repo without discovering the repository above, malicious repository config fires nothing, git missing, automatic sweep (orphan removed, plugin-data id kept, checkpoint blob untouched, status + next run, no ids outside the access log, test variable ignored without the mock flag), upgrade (old project chat: no changes, nothing to rewind, Git view works, sweep off)); e2e 77 passed on a fresh `.tmp/e2e`; screenshots of the panel (pane, diff, Git, revert confirm), rewind dialog, shell approval rule, Settings → Projects rules, Data automatic cleanup, mobile sheet reviewed; `pnpm audit --prod` clean (2 ignored) | (this commit) |
 | P8-B | W8.12, W8.13 (+ coordinator: the raw arguments under the write / edit approval preview (a P8-A regression found by W8.13), the resize handle's arrow keys (found by W8.12: reka looks the handle up once at setup; the handle now mounts disabled and is enabled on the next tick), "Git view" wording, 40 px coarse-pointer cleanup controls, shared schema comments, ADR-036 … ADR-039 / AGENT.md wording, PROVIDERS.md `mock:shell` empty output) | audit ok (34 paths); new specs (changes panel, rewind, shell rules, mobile changes) + extensions 3× green on 8891; docs reconciled; README "v1.4" | (final gate commit) |
 | Final gate v1.4 | coordinator | frozen install ok; 8327 tests; repository `git status` unchanged by `pnpm check`; build ok; CSP 38/38; probes 57/57 (incl. the real v1.3 → v1.4 upgrade of a seed made by the v1.3 build); e2e 96 passed ×3 (chromium + mobile + tablet); `@screenshots` dark + light reviewed (15 new Phase 8 screens per theme); `pnpm audit --prod` clean (2 ignored, still unpatched); Docker image (Node 24, git 2.54, bash 5.3): Git view, This chat, rewind and checkpoints/ 0700 in the container, a repository owned by another uid answers refused (8/8) | (this commit) |
+| P9-00 | coordinator | CI + Audit on `316319a` green; advisories still unpatched (ignores kept); `pnpm check` 8327 tests; design reports in `.tmp/p9-designs` | — |
+| P9-0a | coordinator (K1; K3 seed done early), C22, C23, D10, D11 (+ coordinator: the example plugins' `harness-forge.d.ts` regenerated for API 1.3.0, phase-doc reconciliation with D11 (`activity`, `chatQueue.add`, PROVIDERS.md 8, `mock:todo` 400 ms + `invalid`), C27 also owns `SH/ids*` for `core-agent`) | audit ok (69 paths; 16 C22 compile-fix files accepted); frozen install ok; 8528 tests; build ok; CSP 38/38; `pluginApiVersion` 1.3.0, 5 new routes answer 501 / 400; e2e 96 passed on a fresh `.tmp/e2e`; TypeScript 6.0.3 only | (this commit) |

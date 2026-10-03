@@ -18,6 +18,8 @@ const CODE_ICONS: Record<NoticeCode, Component> = {
   'attachments-unsupported': PaperclipIcon,
   'generated-file-dropped': ImageOffIcon,
   'workspace-unavailable': FolderXIcon,
+  // Phase 9 (ADR-040): the summary failed, so the oldest turns were trimmed instead.
+  'compaction-failed': FoldVerticalIcon,
 }
 
 const icon = computed<Component>(() => (CODE_ICONS as Partial<Record<string, Component>>)[props.notice.code]

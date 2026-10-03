@@ -412,4 +412,21 @@ describe('sEC-A5 negative controls: nothing runs code, a stale session is enough
         expect(response.status, key).toBe(501)
     }
   })
+
+  it('the steer queue and the file mentions (Phase 9, ADR-042) take a stale session', async () => {
+    const a = await passwordApp()
+    const stale = await cookie(a, FRESH_AUTH_WINDOW_MS + 60_000)
+    const keys = API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'chatQueue' || apiRoutes[key].module === 'projectFiles')
+    expect(keys).toHaveLength(5)
+    for (const key of keys) {
+      const { path, init } = sampleRequest(key, { headers: { cookie: stale } })
+      const response = await a.t.request(path, init)
+      const text = await response.text()
+      // The sample chat and project do not exist: the request reaches the route (501 while stubbed, else 404 or 409),
+      // never the fresh-auth refusal.
+      expect([401, 403], `${key}: ${text}`).not.toContain(response.status)
+      if (stubRouteKeys().has(key))
+        expect(response.status, key).toBe(501)
+    }
+  })
 })

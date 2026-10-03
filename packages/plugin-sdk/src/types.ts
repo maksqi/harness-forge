@@ -241,8 +241,14 @@ export interface ToolDefinition<I = unknown, O = unknown> {
    * tool does not use the workspace and is offered in every chat.
    */
   workspace?: ToolWorkspaceAccess
-  /** The output must be JSON-serializable; capped at 64 KB of serialized JSON. */
-  execute(input: I, c: ToolCallContext): Promise<O>
+  /**
+   * The output must be JSON-serializable; capped at 64 KB of serialized JSON. Plugin API 1.3.0 (ADR-043): `execute` may
+   * also return the output directly, or be an async generator (`async *execute(input, c) { ... }`): each yielded value
+   * is a preliminary output shown in the UI while the tool runs (throttled to one per 250 ms, the latest wins), and the
+   * last yielded value is the final output (stored, passed to `toModelOutput` and to the `tool.after` hook). The timeout
+   * and `c.signal` cover the whole iteration.
+   */
+  execute(input: I, c: ToolCallContext): Promise<O> | O | AsyncIterable<O>
   /** Converts the stored output for the model; fast and deterministic (guarded, 3 s). */
   toModelOutput?(output: O, c: { toolCallId: string, input: I }): ToolResultOutput | Promise<ToolResultOutput>
 }

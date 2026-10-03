@@ -227,7 +227,10 @@ export function keyStatus(overrides: Partial<KeyStatus> = {}): KeyStatus {
   }
 }
 
-/** The global settings: the defaults (`fileSweep: 'off'` included) with overrides. */
+/**
+ * The global settings: the defaults (`fileSweep: 'off'`, and the Phase 9 keys `autoCompact: true`, `compactModelRef:
+ * null`, `subagentModelRef: null`, `subagentMaxSteps: 30`, `shiftTabModes: true` included) with overrides.
+ */
 export function settings(overrides: Partial<Settings> = {}): Settings {
   return { ...DEFAULT_SETTINGS, ...overrides }
 }

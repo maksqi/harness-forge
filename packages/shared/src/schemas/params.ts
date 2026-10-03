@@ -49,6 +49,10 @@ export type ShareParams = z.infer<typeof shareParamsSchema>
 export const projectParamsSchema = z.object({ id: projectIdSchema })
 export type ProjectParams = z.infer<typeof projectParamsSchema>
 
+/** `/chat/:id/queue/:itemId` (a queued message, ADR-042). */
+export const chatQueueItemParamsSchema = z.object({ id: chatIdSchema, itemId: messageIdSchema })
+export type ChatQueueItemParams = z.infer<typeof chatQueueItemParamsSchema>
+
 /** `/shell-rules/:id` (ADR-038). */
 export const shellRuleParamsSchema = z.object({ id: shellRuleIdSchema })
 export type ShellRuleParams = z.infer<typeof shellRuleParamsSchema>

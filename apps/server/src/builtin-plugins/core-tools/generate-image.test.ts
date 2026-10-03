@@ -9,6 +9,7 @@ import { usage } from '../../db/schema.ts'
 import { fakeMediaProviders } from '../../providers/testing.ts'
 import { NO_IMAGE_MODEL_MESSAGE } from '../../services/images/index.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
+import { promiseTool } from '../core-workspace/test-helpers.ts'
 import { BUILTIN_PLUGINS } from '../index.ts'
 import {
   createGenerateImageTool,
@@ -99,7 +100,7 @@ describe('generate_image: execute', () => {
   })
 
   it('trims the model name, cuts it to 200 characters and omits a blank or missing one', async () => {
-    const run = async (modelName: unknown) => createGenerateImageTool(fakeImages({ modelName } as Partial<ImageGenerateResult>)).execute({ prompt: 'a fox' }, context())
+    const run = async (modelName: unknown) => promiseTool(createGenerateImageTool(fakeImages({ modelName } as Partial<ImageGenerateResult>))).execute({ prompt: 'a fox' }, context())
     expect((await run('  GPT Image 1  ')).modelName).toBe('GPT Image 1')
     const long = await run('\u{1F98A}'.repeat(150))
     expect(long.modelName).toBe('\u{1F98A}'.repeat(100))
@@ -113,7 +114,7 @@ describe('generate_image: execute', () => {
 
   it('keeps the output far below the 64 KB tool output cap, even with a long revised prompt', async () => {
     const revisedPrompt = '狐'.repeat(LIMITS.imagePromptMaxChars)
-    const output = await createGenerateImageTool(fakeImages({ images: [file(1), file(2), file(3), file(4)], revisedPrompt })).execute({ prompt: 'a fox', n: 4 }, context())
+    const output = await promiseTool(createGenerateImageTool(fakeImages({ images: [file(1), file(2), file(3), file(4)], revisedPrompt }))).execute({ prompt: 'a fox', n: 4 }, context())
     expect(Buffer.byteLength(JSON.stringify(output.revisedPrompt), 'utf8')).toBeLessThanOrEqual(GENERATE_IMAGE_REVISED_PROMPT_JSON_BYTES)
     expect(output.revisedPrompt!.length).toBeGreaterThan(5000)
     expect(Buffer.byteLength(JSON.stringify(output), 'utf8')).toBeLessThan(LIMITS.toolOutputBytes / 2)

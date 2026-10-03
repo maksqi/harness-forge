@@ -120,13 +120,18 @@ describe('settings', () => {
       speechSpeed: 1,
       projectMaxSteps: 100,
       fileSweep: 'off',
+      autoCompact: true,
+      compactModelRef: null,
+      subagentModelRef: null,
+      subagentMaxSteps: 30,
+      shiftTabModes: true,
     })
     expect(Object.isFrozen(DEFAULT_SETTINGS)).toBe(true)
-    expect(SETTINGS_KEYS).toHaveLength(21)
+    expect(SETTINGS_KEYS).toHaveLength(26)
     expect(settingsSchema.parse({ maxSteps: 5, _auth: 'internal' })).toEqual({ ...DEFAULT_SETTINGS, maxSteps: 5 })
   })
 
-  it('reads settings stored by v1.1 (without the Phase 6, 7 and 8 keys) with the new defaults', () => {
+  it('reads settings stored by v1.1 (without the Phase 6, 7, 8 and 9 keys) with the new defaults', () => {
     const v11 = {
       displayName: 'Ada',
       defaultModelRef: 'openai:gpt-6-sol',
@@ -152,7 +157,58 @@ describe('settings', () => {
       speechSpeed: 1,
       projectMaxSteps: 100,
       fileSweep: 'off',
+      autoCompact: true,
+      compactModelRef: null,
+      subagentModelRef: null,
+      subagentMaxSteps: 30,
+      shiftTabModes: true,
     })
+  })
+
+  it('reads settings stored by v1.4 (without the Phase 9 keys) with the new defaults', () => {
+    const v14 = {
+      displayName: 'Ada',
+      defaultModelRef: 'anthropic:claude-sonnet-5',
+      titleModelRef: null,
+      instructions: '',
+      sendKey: 'enter',
+      defaultToolMode: 'edits',
+      defaultReasoningEffort: 'auto',
+      maxSteps: 20,
+      altShortcuts: true,
+      showThinking: false,
+      density: 'comfortable',
+      readingFont: 'sans',
+      textSize: 'md',
+      imageModelRef: null,
+      transcriptionModelRef: null,
+      transcriptionLanguage: 'auto',
+      speechModelRef: null,
+      speechVoice: null,
+      speechSpeed: 1,
+      projectMaxSteps: 100,
+      fileSweep: 'daily',
+    }
+    expect(settingsSchema.parse(v14)).toEqual({ ...v14, autoCompact: true, compactModelRef: null, subagentModelRef: null, subagentMaxSteps: 30, shiftTabModes: true })
+  })
+
+  it('validates the agent settings and the plan mode (Phase 9, ADR-040 … ADR-043)', () => {
+    const update = { autoCompact: false, compactModelRef: 'openai:gpt-6-mini', subagentModelRef: null, subagentMaxSteps: 200, shiftTabModes: false, defaultToolMode: 'plan' }
+    expect(settingsUpdateSchema.parse(update)).toEqual(update)
+    expect(settingsSchema.parse({ subagentMaxSteps: 1 }).subagentMaxSteps).toBe(1)
+    for (const body of [
+      { autoCompact: 'yes' },
+      { autoCompact: null },
+      { compactModelRef: 'no-colon' },
+      { subagentModelRef: '' },
+      { subagentMaxSteps: 0 },
+      { subagentMaxSteps: 201 },
+      { subagentMaxSteps: 2.5 },
+      { subagentMaxSteps: null },
+      { shiftTabModes: 1 },
+      { defaultToolMode: 'planning' },
+    ])
+      expect(settingsUpdateSchema.safeParse(body).success, JSON.stringify(body)).toBe(false)
   })
 
   it('validates the automatic file sweep setting (Phase 8, ADR-039)', () => {
@@ -677,8 +733,8 @@ describe('server events', () => {
     expect(serverEventSchema.parse(event)).toEqual({ type: 'chat.updated', data: { ...summary, activeLeafId: MESSAGE_B }, at: 4 })
   })
 
-  it('covers the 12 event types', () => {
-    expect(SERVER_EVENT_TYPES).toHaveLength(12)
+  it('covers the 13 event types', () => {
+    expect(SERVER_EVENT_TYPES).toHaveLength(13)
     expectTypeOf<ServerEventType>().toEqualTypeOf<z.infer<typeof serverEventTypeSchema>>()
   })
 

@@ -6,9 +6,9 @@ import { findFilesToolOutputSchema } from '@harness-forge/shared'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { NO_WORKSPACE_MESSAGE } from './common.ts'
 import { createFindFilesTool, findFilesModelText } from './find-files.ts'
-import { contextWithoutWorkspace, createTestWorkspace, modelTextOf } from './test-helpers.ts'
+import { contextWithoutWorkspace, createTestWorkspace, modelTextOf, promiseTool } from './test-helpers.ts'
 
-const tool = createFindFilesTool()
+const tool = promiseTool(createFindFilesTool())
 let ws: TestWorkspace
 
 beforeEach(async () => {

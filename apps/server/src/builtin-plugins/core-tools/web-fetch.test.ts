@@ -8,6 +8,7 @@ import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { asSchema } from 'ai'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createSafeFetch } from '../../security/ssrf.ts'
+import { promiseTool } from '../core-workspace/test-helpers.ts'
 import {
   createWebFetchTool,
   truncateText,
@@ -187,7 +188,7 @@ describe('web_fetch tool', () => {
 
   it('blocks loopback by default and reaches it only while allowLocalhost is on', async () => {
     let allowLocalhost = false
-    const tool = createWebFetchTool({ allowLocalhost: () => allowLocalhost, userAgent: 'harness-forge/1.2.3 web_fetch' })
+    const tool = promiseTool(createWebFetchTool({ allowLocalhost: () => allowLocalhost, userAgent: 'harness-forge/1.2.3 web_fetch' }))
     const refused = await tool.execute({ url: `${base}/page` }, context).catch((error: unknown) => error)
     expect(refused).toMatchObject({ code: 'validation_error' })
     expect((refused as Error).message).toContain('127.0.0.1 is a loopback address')
