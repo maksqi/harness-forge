@@ -20,6 +20,11 @@
 //   keep the oldest rule of each scope and prefix (ties by id), clear only the `shell` override, lose no chat, message or
 //   project, and make a second identical rule a unique violation. The checks also run against copies of 0006 without its
 //   `DELETE` or `UPDATE`, which must fail.
+// - v1.5 -> v1.6 through migration 0007 (C30-T9, ADR-044 / ADR-046): a database with `0000` ... `0006`, projects, chats
+//   and messages is migrated with the real folder; 0007 must be exactly two `CREATE TABLE` and three `CREATE [UNIQUE]
+//   INDEX` statements (nothing else touched: foreign keys are on), both new tables start empty, every chat, message and
+//   project survives, a second personal definition of the same kind and name is a unique violation, and deleting a chat
+//   cascades into its `background_tasks` rows.
 import type { Database } from './client.ts'
 import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -56,6 +61,7 @@ const REMEMBERED = JOURNAL.entries.find(entry => entry.tag.startsWith('0002_'))
 const PROJECTS = JOURNAL.entries.find(entry => entry.tag.startsWith('0004_'))
 const CHECKPOINTS = JOURNAL.entries.find(entry => entry.tag.startsWith('0005_'))
 const SHELL_UNIQUE = JOURNAL.entries.find(entry => entry.tag.startsWith('0006_'))
+const CUSTOMIZATIONS = JOURNAL.entries.find(entry => entry.tag.startsWith('0007_'))
 
 const opened: Database[] = []
 const tempDirs: string[] = []
@@ -787,8 +793,8 @@ describe('upgrade of a v1.2 database through migration 0004 (projects)', () => {
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
     const shape = await schemaShape(database)
     expect(shape.tables).toEqual([...TABLE_NAMES].sort())
-    // 16 tables of v1.3 plus the two of 0005 (Phase 8), applied by the same migration run.
-    expect(shape.tables).toHaveLength(18)
+    // 16 tables of v1.3 plus the two of 0005 (Phase 8) and the two of 0007 (Phase 10), applied by the same run.
+    expect(shape.tables).toHaveLength(20)
     expect(shape.indexes.projects_path_idx).toEqual(['path'])
     expect(shape.indexes.chats_project_idx).toEqual(['project_id', 'archived', 'updated_at', 'id'])
     const fresh = await open(':memory:')
@@ -955,11 +961,11 @@ describe('upgrade of a v1.3 database through migration 0005 (workspace checkpoin
 
     const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
-    // 0005 and every later migration (Phase 9: 0006).
-    expect(applied.rows).toHaveLength(7)
+    // 0005 and every later migration (Phase 9: 0006; Phase 10: 0007).
+    expect(applied.rows).toHaveLength(8)
     const shape = await schemaShape(database)
     expect(shape.tables).toEqual([...TABLE_NAMES].sort())
-    expect(shape.tables).toHaveLength(18)
+    expect(shape.tables).toHaveLength(20)
     const fresh = await open(':memory:')
     await migrateDatabase(fresh.db)
     expect(shape).toEqual(await schemaShape(fresh))
@@ -1234,9 +1240,10 @@ describe('upgrade of a v1.4 database through migration 0006 (unique shell rules)
 
     const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
-    expect(applied.rows).toHaveLength(7)
+    // 0006 and every later migration (Phase 10: 0007).
+    expect(applied.rows).toHaveLength(8)
     const shape = await schemaShape(database)
-    expect(shape.tables).toHaveLength(18)
+    expect(shape.tables).toHaveLength(20)
     const fresh = await open(':memory:')
     await migrateDatabase(fresh.db)
     expect(shape).toEqual(await schemaShape(fresh))
@@ -1297,6 +1304,191 @@ describe('upgrade of a v1.4 database through migration 0006 (unique shell rules)
       expect(detail.pendingApproval).toBe(true)
       expect((await t.deps.shellRules.list()).map(rule => rule.id).sort()).toEqual(V14_KEPT_RULES)
       expect((await t.deps.projects.list()).map(project => project.id).sort()).toEqual([V14_PROJECT, V14_OTHER_PROJECT])
+    }
+    finally {
+      await t.close()
+    }
+  })
+})
+
+function v15Folder(): string {
+  const entries = [INITIAL, TREE, REMEMBERED, REFRESH, PROJECTS, CHECKPOINTS, SHELL_UNIQUE]
+  if (entries.includes(undefined))
+    throw new Error('a migration of 0000 - 0006 is missing from the journal')
+  const dir = tempDir()
+  mkdirSync(join(dir, 'meta'))
+  for (const entry of entries as JournalEntry[])
+    copyFileSync(join(REAL_FOLDER, `${entry.tag}.sql`), join(dir, `${entry.tag}.sql`))
+  writeFileSync(join(dir, 'meta', '_journal.json'), JSON.stringify({ ...JOURNAL, entries }))
+  return dir
+}
+
+/** The statements of migration 0007 without comments and blank lines (split like `migrate()` does). */
+function customizationStatements(): string[] {
+  if (CUSTOMIZATIONS === undefined)
+    throw new Error('migration 0007 is missing from the journal')
+  return readFileSync(join(REAL_FOLDER, `${CUSTOMIZATIONS.tag}.sql`), 'utf8')
+    .split('--> statement-breakpoint')
+    .map(statement => statement.replace(/^--.*$/gm, '').trim())
+    .filter(Boolean)
+}
+
+const V15_PROJECT = 'prj_v15project000001'
+const CHAT_S1 = '0199a8f0-0000-7000-8000-0000000000f1'
+const CHAT_S2 = '0199a8f0-0000-7000-8000-0000000000f2'
+
+/**
+ * Creates a v1.5 database file (0000 - 0006) with a project, a project chat whose assistant message holds a v1.5 `task`
+ * part, a chat without a project, a journal row, a shell rule and a usage row; returns every row of the tables 0007
+ * must not touch.
+ */
+async function seedV15Database(path: string): Promise<Record<'projects' | 'chats' | 'messages' | 'workspace_changes' | 'shell_rules' | 'usage', Record<string, unknown>[]>> {
+  const database = await open(path)
+  await migrateDatabase(database.db, { migrationsFolder: v15Folder() })
+  const before = await database.client.execute(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('customizations', 'background_tasks')`)
+  expect(before.rows).toHaveLength(0)
+  await database.client.execute({
+    sql: 'INSERT INTO projects (id, name, path, instructions, created_at, updated_at) VALUES (?, ?, ?, ?, 100, 200)',
+    args: [V15_PROJECT, 'agent-demo', '/srv/projects/agent-demo', 'Use pnpm.'],
+  })
+  for (const [index, [id, projectId]] of ([[CHAT_S1, V15_PROJECT], [CHAT_S2, null]] as const).entries()) {
+    await database.client.execute({
+      sql: 'INSERT INTO chats (id, title, title_source, model_ref, settings, pinned, archived, pending_approval, active_leaf_id, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)',
+      args: [id, `Chat ${index}`, 'user', 'mock:subagent', '{"toolMode":"ask"}', `msg_f${index + 1}00000000000001`, projectId, 1000 + index, 2000 + index],
+    })
+    for (const [seq, role] of [[0, 'user'], [1, 'assistant']] as const) {
+      const messageId = `msg_f${index + 1}0000000000000${seq}`
+      const parts = role === 'assistant'
+        ? [{ type: 'tool-task', toolCallId: 'mock_task_1', state: 'output-available', input: { description: 'Look around', prompt: 'List files', type: 'explore' }, output: { status: 'completed', type: 'explore', description: 'Look around', modelRef: 'mock:subagent', steps: [], stepsOmitted: 0, report: 'Done.', startedAt: 1, finishedAt: 2 } }]
+        : [{ type: 'text', text: `user ${messageId}` }]
+      await database.client.execute({
+        sql: 'INSERT INTO messages (id, chat_id, parent_id, selected_child_id, seq, role, parts, metadata, search_text, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)',
+        args: [messageId, id, seq === 0 ? null : `msg_f${index + 1}00000000000000`, seq, role, JSON.stringify(parts), JSON.stringify({ modelRef: 'mock:subagent', startedAt: 1 }), `${role} ${messageId}`, 3000 + seq, 4000 + seq],
+      })
+    }
+  }
+  await database.client.execute({
+    sql: `INSERT INTO workspace_changes (chat_id, project_id, message_seq, message_id, tool_call_id, kind, tool, path, before_state, after_sha, after_size, created_at)
+          VALUES (?, ?, 1, 'msg_f100000000000001', 'call_1', 'edit', 'write_file', 'a.txt', 'missing', ?, 1, 7)`,
+    args: [CHAT_S1, V15_PROJECT, 'e'.repeat(64)],
+  })
+  await database.client.execute({ sql: 'INSERT INTO shell_rules (id, project_id, prefix, created_at) VALUES (?, ?, ?, 8)', args: ['srl_v15rule000000001', V15_PROJECT, 'ls'] })
+  await database.client.execute({
+    sql: 'INSERT INTO usage (chat_id, message_id, purpose, provider_id, model_id, input, output, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    args: [CHAT_S1, 'msg_f100000000000001', 'subagent', 'mock', 'subagent', 3, 4, 5000],
+  })
+  const seeded = {
+    projects: await rows(database, 'projects', 'id'),
+    chats: await rows(database, 'chats', 'id'),
+    messages: await rows(database, 'messages', 'chat_id, seq'),
+    workspace_changes: await rows(database, 'workspace_changes', 'id'),
+    shell_rules: await rows(database, 'shell_rules', 'id'),
+    usage: await rows(database, 'usage', 'id'),
+  }
+  database.close()
+  return seeded
+}
+
+describe('upgrade of a v1.5 database through migration 0007 (customizations, background tasks)', () => {
+  it('0007 is two CREATE TABLE and three CREATE [UNIQUE] INDEX statements, never a change of an existing table', () => {
+    const statements = customizationStatements()
+    expect(statements).toHaveLength(5)
+    const tables = statements.filter(statement => statement.startsWith('CREATE TABLE '))
+    expect(tables.map(statement => statement.match(/^CREATE TABLE `(\w+)`/)?.[1]).sort()).toEqual(['background_tasks', 'customizations'])
+    const indexes = statements.filter(statement => /^CREATE (?:UNIQUE )?INDEX /.test(statement))
+    expect(indexes.map(statement => statement.match(/INDEX `(\w+)`/)?.[1]).sort()).toEqual(['background_tasks_chat_idx', 'background_tasks_pending_idx', 'customizations_kind_name_uq'])
+    expect(indexes.filter(statement => statement.startsWith('CREATE UNIQUE INDEX '))).toHaveLength(1)
+    const sql = statements.join('\n')
+    for (const forbidden of [/DROP\s+/i, /__new_/i, /PRAGMA/i, /ALTER\s+TABLE/i, /\bDELETE\s+FROM\b/i, /\bUPDATE\s+`?\w+`?\s+SET\b/i, /\bINSERT\b/i])
+      expect(sql, String(forbidden)).not.toMatch(forbidden)
+    // The only foreign key: background_tasks.chat_id -> chats.id, cascading.
+    expect(sql.match(/FOREIGN KEY/g)).toHaveLength(1)
+    expect(tables.find(statement => statement.includes('`background_tasks`'))).toMatch(/FOREIGN KEY \(`chat_id`\) REFERENCES `chats`\(`id`\) ON UPDATE no action ON DELETE cascade/)
+    expect(JOURNAL.entries.slice(0, 8)).toEqual([INITIAL, TREE, REMEMBERED, REFRESH, PROJECTS, CHECKPOINTS, SHELL_UNIQUE, CUSTOMIZATIONS])
+    expect(CUSTOMIZATIONS?.tag).toBe('0007_customizations')
+  })
+
+  it('both tables exist and are empty; every chat, message and project survives; the schema matches a fresh one', async () => {
+    const path = join(tempDir(), 'harness.db')
+    const before = await seedV15Database(path)
+    const database = await open(path)
+    await migrateDatabase(database.db)
+
+    expect(await scalar(database, 'SELECT count(*) AS n FROM customizations')).toBe(0)
+    expect(await scalar(database, 'SELECT count(*) AS n FROM background_tasks')).toBe(0)
+    expect(await rows(database, 'projects', 'id')).toEqual(before.projects)
+    expect(await rows(database, 'chats', 'id')).toEqual(before.chats)
+    expect(await rows(database, 'messages', 'chat_id, seq')).toEqual(before.messages)
+    expect(await rows(database, 'workspace_changes', 'id')).toEqual(before.workspace_changes)
+    expect(await rows(database, 'shell_rules', 'id')).toEqual(before.shell_rules)
+    expect(await rows(database, 'usage', 'id')).toEqual(before.usage)
+
+    const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
+    expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
+    expect(applied.rows).toHaveLength(8)
+    const shape = await schemaShape(database)
+    expect(shape.tables).toEqual([...TABLE_NAMES].sort())
+    expect(shape.tables).toHaveLength(20)
+    const fresh = await open(':memory:')
+    await migrateDatabase(fresh.db)
+    expect(shape).toEqual(await schemaShape(fresh))
+    expect(shape.indexes.customizations_kind_name_uq).toEqual(['kind', 'name'])
+    expect(shape.indexes.background_tasks_chat_idx).toEqual(['chat_id', 'created_at'])
+    expect(shape.indexes.background_tasks_pending_idx).toEqual(['delivered_at', 'status'])
+    expect((await database.client.execute('PRAGMA foreign_key_check')).rows).toEqual([])
+    expect((await database.client.execute('PRAGMA integrity_check')).rows.map(row => String(row.integrity_check))).toEqual(['ok'])
+
+    // Idempotent: migrating again applies nothing.
+    await migrateDatabase(database.db)
+    expect(await scalar(database, 'SELECT count(*) AS n FROM __drizzle_migrations')).toBe(JOURNAL.entries.length)
+  })
+
+  it('a second (kind, name) is a unique violation; deleting a chat cascades to its background tasks only', async () => {
+    const path = join(tempDir(), 'harness.db')
+    await seedV15Database(path)
+    const database = await open(path)
+    await migrateDatabase(database.db)
+
+    const insertCustomization = (id: string, kind: string, name: string): Promise<unknown> => database.client.execute({
+      sql: 'INSERT INTO customizations (id, kind, name, description, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 1)',
+      args: [id, kind, name, 'Reviews diffs.', `---\nname: ${name}\ndescription: Reviews diffs.\n---\nReview.`],
+    })
+    await insertCustomization('cus_v15custom0000001', 'agent', 'reviewer')
+    expect(await uniqueViolation(insertCustomization('cus_v15custom0000002', 'agent', 'reviewer'))).toBe('UNIQUE constraint failed: customizations.kind, customizations.name')
+    await insertCustomization('cus_v15custom0000003', 'command', 'reviewer')
+    expect(await scalar(database, 'SELECT count(*) AS n FROM customizations WHERE enabled = 1')).toBe(2)
+
+    const output = JSON.stringify({ status: 'running', type: 'explore', description: 'Look', modelRef: 'mock:background', steps: [], stepsOmitted: 0, report: '', startedAt: 1 })
+    for (const [id, chatId] of [['bgt_v15task00000001', CHAT_S1], ['bgt_v15task00000002', CHAT_S1], ['bgt_v15task00000003', CHAT_S2]] as const) {
+      await database.client.execute({
+        sql: `INSERT INTO background_tasks (id, chat_id, message_id, tool_call_id, type, description, status, origin, output, created_at) VALUES (?, ?, ?, 'call_1', 'explore', 'Look', 'running', 'request', ?, 1)`,
+        args: [id, chatId, chatId === CHAT_S1 ? 'msg_f100000000000001' : 'msg_f200000000000001', output],
+      })
+    }
+    await database.client.execute({ sql: 'DELETE FROM chats WHERE id = ?', args: [CHAT_S1] })
+    expect((await rows(database, 'background_tasks', 'id')).map(row => row.id)).toEqual(['bgt_v15task00000003'])
+    // Definitions are configuration: a chat delete never touches them.
+    expect(await scalar(database, 'SELECT count(*) AS n FROM customizations')).toBe(2)
+    // A task of a chat that does not exist is refused (foreign keys are on).
+    await expect(database.client.execute({
+      sql: `INSERT INTO background_tasks (id, chat_id, message_id, tool_call_id, type, description, status, origin, output, created_at) VALUES ('bgt_v15task00000004', 'missing', 'msg_x', 'call_1', 'explore', 'Look', 'running', 'request', ?, 1)`,
+      args: [output],
+    })).rejects.toThrow()
+  })
+
+  it('boots on the upgraded database: every chat is served with its v1.5 task part unchanged', async () => {
+    const dataDir = tempDir()
+    const databasePath = join(dataDir, 'harness.db')
+    const before = await seedV15Database(databasePath)
+    const t = await createTestApp({ dataDir, databasePath, start: false })
+    try {
+      const list = cursorPageSchema(chatSummarySchema).parse(await (await t.request('/api/chats')).json())
+      expect(list.items.map(chat => [chat.id, chat.projectId]).sort()).toEqual([[CHAT_S1, V15_PROJECT], [CHAT_S2, null]])
+      const detail = chatDetailSchema.parse(await (await t.request(`/api/chats/${CHAT_S1}`)).json())
+      expect(detail.messages.map(message => message.id)).toEqual(['msg_f100000000000000', 'msg_f100000000000001'])
+      const stored = before.messages.find(row => row.id === 'msg_f100000000000001')
+      expect(detail.messages[1]?.parts).toEqual(JSON.parse(String(stored?.parts)))
+      expect((await t.deps.projects.list()).map(project => project.id)).toEqual([V15_PROJECT])
     }
     finally {
       await t.close()

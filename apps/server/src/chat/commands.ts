@@ -9,10 +9,18 @@
 // Phase 9 (ADR-040): the harness command `/compact [focus]` (`HARNESS_COMMANDS`) is checked before the registry (a
 // plugin cannot register the name) and resolves to `compact`: `launchRun` answers it with a compaction instead of a
 // model call (`compaction/stream.ts`). `GET /commands` lists it with `HARNESS_COMMAND_SUMMARIES`.
+// Phase 10 (C31 seams, ADR-045; W10.2 implements them): `resolveCommand(…, { catalog })` gets the run's catalog
+// snapshot (command files and personal commands: client → harness → project `.harness` → `.claude` → personal → plugin;
+// until W10.2 only the harness command and the plugin registry resolve), `isServerCommandFor(deps, projectId, text)`
+// tells the queue which queued texts are server commands of the chat's project (`turnOnly`), and
+// `turnToolRestriction(history)` reads the `allowed-tools` of the turn's command (`PreparedRun.turnRestriction`; null
+// until W10.2).
 import type { CommandDefinition, CommandRunResult } from '@harness-forge/plugin-sdk'
-import type { CommandInvocation, CommandSummary } from '@harness-forge/shared'
+import type { CommandInvocation, CommandSummary, HarnessUIMessage } from '@harness-forge/shared'
 import type { PluginHost } from '../plugins/types.ts'
 import type { Registry } from '../registry/types.ts'
+import type { CustomizationCatalog, CustomizationService } from '../services/customizations/types.ts'
+import type { AppDeps } from '../types.ts'
 import { Buffer } from 'node:buffer'
 import { COMMAND_NAME_PATTERN, HarnessError, isClientCommand, isHarnessCommand, isHarnessError, LIMITS } from '@harness-forge/shared'
 import { GUARD_TIMEOUTS } from '../plugins/guard.ts'
@@ -57,6 +65,20 @@ export const HARNESS_COMMAND_SUMMARIES: readonly CommandSummary[] = Object.freez
 export interface CommandServices {
   registry: Pick<Registry, 'commands'>
   plugins: Pick<PluginHost, 'guard'>
+  /** Phase 10: the bodies of command files and personal commands (`load(entry, signal)`, W10.2). */
+  customizations: Pick<CustomizationService, 'load'>
+}
+
+/** The call-specific values of `resolveCommand`. */
+export interface CommandContext {
+  chatId: string
+  /** The run signal (a guarded `run`, a body load). */
+  signal: AbortSignal
+  /**
+   * The run's catalog snapshot (Phase 10, `PreparedRun.catalog`): the command files of the chat's project and the
+   * personal commands, by precedence (W10.2). Absent = the harness command and the plugin registry only.
+   */
+  catalog?: CustomizationCatalog
 }
 
 function tooLong(name: string): HarnessError {
@@ -107,7 +129,7 @@ function isRunResult(value: unknown): value is CommandRunResult {
 export async function resolveCommand(
   services: CommandServices,
   text: string,
-  context: { chatId: string, signal: AbortSignal },
+  context: CommandContext,
 ): Promise<CommandResolution | null> {
   const parsed = parseSlashCommand(text)
   if (parsed === null || isClientCommand(parsed.name))
@@ -144,4 +166,29 @@ export async function resolveCommand(
   if (result.type === 'prompt')
     return promptResolution(name, input, result.text)
   return { kind: 'reply', invocation: { name, input, type: 'reply' }, markdown: result.markdown }
+}
+
+/**
+ * True when `text` starts a server command in a chat of `projectId` (null = no project): the harness command
+ * `/compact`, a command a plugin registered, and (Phase 10, W10.2) every effective command file or personal command of
+ * the project's catalog. The queue marks such items `turnOnly` (never steered). Client commands (`/model`) are never
+ * server commands. P10-0b: the harness command and the plugin registry only (the v1.5 `isServerCommand`).
+ */
+export async function isServerCommandFor(deps: Pick<AppDeps, 'registry' | 'customizations'>, projectId: string | null, text: string): Promise<boolean> {
+  void projectId
+  const parsed = parseSlashCommand(text)
+  if (parsed === null || isClientCommand(parsed.name))
+    return false
+  return isHarnessCommand(parsed.name) || deps.registry.commands.get(parsed.name) !== undefined
+}
+
+/**
+ * The tool restriction of the turn a run answers (Phase 10, ADR-045; `PreparedRun.turnRestriction`): the
+ * `metadata.command.allowedTools` of the turn's user message (the last user message of `history`), so an approval
+ * continuation and a regenerate of the turn keep it; null = no restriction (`assembleTools({ allowedTools })`).
+ * P10-0b stub: always null (W10.2 implements it).
+ */
+export function turnToolRestriction(history: readonly HarnessUIMessage[]): readonly string[] | null {
+  void history
+  return null
 }

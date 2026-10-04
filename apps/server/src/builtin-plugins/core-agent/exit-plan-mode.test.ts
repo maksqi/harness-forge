@@ -30,6 +30,10 @@ function scope(toolMode: ToolMode): AgentRunScope {
       throw new Error('not used')
     },
     todos: () => null,
+    loadSkill: async () => {
+      throw new Error('not used')
+    },
+    savePlan: async () => ({}),
   }
 }
 

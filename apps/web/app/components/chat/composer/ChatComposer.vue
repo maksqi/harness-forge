@@ -24,6 +24,12 @@
 // placeholder reads "Queue a message…", Send (the send key or "Queue message" left of Stop, `canQueue`) emits `submit`
 // as usual and the session queues it (ChatView, W9.9); Esc still stops. `restoreQueued(items)` (exposed) puts queued
 // messages back: their texts appended to the draft with blank lines between them, their files as done chips.
+// Phase 10 (ADR-045, ADR-047; C33 wires it, W10.9 implements; frozen from Gate P10-0b): the server items of the slash
+// menu come from `useCustomizationsStore().slashCommands(projectId)` (`GET /commands?projectId=`, fetched with a 15 s
+// max age on mount, on a project change and when the slash menu opens) instead of `plugins.commands`; SlashArgumentHint
+// shows a command's argument hint over the textarea (`argumentHintAt`, linked through `aria-describedby`); `/remember
+// [text]` clears the input and opens RememberDialog with the text (mounted here, so neither the layout nor the ui store
+// changes).
 import type { ClientCommand, ImageOptions, MessageUsage, ProjectFileEntry, QueueItem, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { DictationRange } from './dictation'
@@ -31,7 +37,7 @@ import type { SlashItem } from './slash-commands'
 import type { ChatComposerExposed, ComposerSubmitInput } from './types'
 import { isClientCommand, LIMITS } from '@harness-forge/shared'
 import { useMediaQuery } from '@vueuse/core'
-import { computed, nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, useId, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import {
   PromptInput as AiPromptInput,
@@ -50,6 +56,7 @@ import { useImageOptions } from '~/composables/useImageOptions'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { useSpeechPlayer } from '~/composables/useSpeechPlayer'
 import { useVoiceInput } from '~/composables/useVoiceInput'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectsStore } from '~/stores/projects'
@@ -76,9 +83,19 @@ import { navigateTo } from './nuxt-imports'
 import { offeredToolModes } from './permission'
 import PermissionMenu from './PermissionMenu.vue'
 import RecordingIndicator from './RecordingIndicator.vue'
+import RememberDialog from './RememberDialog.vue'
 import { enterKeyAction, isComposingEvent } from './send-key'
 import SendStopButton from './SendStopButton.vue'
-import { clientSlashItems, filterSlashItems, parseClientCommand, resolveClientCommand, serverSlashItems, slashQueryAt } from './slash-commands'
+import {
+  argumentHintAt,
+  clientSlashItems,
+  filterSlashItems,
+  parseClientCommand,
+  resolveClientCommand,
+  serverSlashItems,
+  slashQueryAt,
+} from './slash-commands'
+import SlashArgumentHint from './SlashArgumentHint.vue'
 import SlashMenu from './SlashMenu.vue'
 
 const props = withDefaults(defineProps<{
@@ -122,6 +139,7 @@ const emit = defineEmits<{
 
 const models = useModelsStore()
 const plugins = usePluginsStore()
+const customizations = useCustomizationsStore()
 const projects = useProjectsStore()
 const providers = useProvidersStore()
 const settings = useSettingsStore()
@@ -223,12 +241,33 @@ function firstToken(value: string): string {
 
 const slashItems = computed<SlashItem[]>(() => [
   ...clientSlashItems(),
-  ...serverSlashItems(plugins.commands, pluginId => plugins.byId(pluginId)?.name),
+  ...serverSlashItems(customizations.slashCommands(props.projectId), pluginId => plugins.byId(pluginId)?.name),
 ])
 const slashQuery = computed(() => slashQueryAt(text.value, caret.value))
+
+/** + Phase 10: the commands of the chat's scope, refetched when older than 15 s (a command file saved on disk shows up). */
+const COMMANDS_MAX_AGE_MS = 15_000
+function refreshCommands() {
+  customizations.fetchCommands(props.projectId, { maxAgeMs: COMMANDS_MAX_AGE_MS }).catch(() => {})
+}
+watch(() => props.projectId, refreshCommands)
+watch(() => slashQuery.value !== null, (typing) => {
+  if (typing)
+    refreshCommands()
+})
+
+/** + Phase 10: the argument hint while the text is a command with a hint plus blanks (SlashArgumentHint). */
+const argumentHint = computed(() => argumentHintAt(text.value, slashItems.value))
+const argumentHintId = `composer-argument-hint-${useId()}`
+
 const slashOpen = computed(() => slashQuery.value !== null
   && firstToken(text.value) !== slashDismissed.value
   && filterSlashItems(slashItems.value, slashQuery.value).length > 0)
+
+// ---------- Remember (Phase 10, ADR-047; W10.9) ----------
+
+const rememberOpen = ref(false)
+const rememberText = ref('')
 
 // ---------- file mentions (Phase 9, ADR-042; W9.8) ----------
 
@@ -417,6 +456,10 @@ function runClientCommand(name: ClientCommand, args: string) {
       break
     case 'set-mode':
       emit('update:toolMode', action.mode)
+      break
+    case 'remember':
+      rememberText.value = action.text
+      rememberOpen.value = true
       break
   }
 }
@@ -688,6 +731,7 @@ watch(() => ui.composerFocusRequest, () => focusTextarea())
 
 onMounted(() => {
   loadComposerCatalog()
+  refreshCommands()
   syncCaret()
   autosize()
   focusTextarea()
@@ -788,6 +832,7 @@ const TEXTAREA_CLASS = [
         aria-autocomplete="list"
         :aria-controls="openMenuRef?.listId"
         :aria-activedescendant="openMenuRef?.activeId"
+        :aria-describedby="argumentHint ? argumentHintId : undefined"
         :enterkeyhint="sendKey === 'enter' ? 'send' : 'enter'"
         :data-testid="testIds.composerInput"
         :class="TEXTAREA_CLASS"
@@ -799,6 +844,7 @@ const TEXTAREA_CLASS = [
         @select="syncCaret"
         @focus="syncCaret"
       />
+      <SlashArgumentHint :text="text" :hint="argumentHint" :described-by-id="argumentHintId" />
 
       <AiPromptInputFooter class="cursor-default gap-2 px-2 pt-1 pb-2">
         <AiPromptInputTools class="min-w-0 flex-1 gap-0.5">
@@ -881,6 +927,8 @@ const TEXTAREA_CLASS = [
     </AiPromptInput>
 
     <DropOverlay :active="drop.active.value" :rect="drop.rect.value" />
+
+    <RememberDialog v-model:open="rememberOpen" :text="rememberText" :project-id="projectId" :chat-id="chatId" />
 
     <p class="sr-only" aria-live="polite" aria-atomic="true" data-slot="composer-announcer">
       {{ announcement }}

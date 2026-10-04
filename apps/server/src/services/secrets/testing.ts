@@ -64,6 +64,8 @@ export function createTestRegistry(providers: readonly RegisteredProvider[] = te
     commands: { register: ignore, get: () => undefined, list: () => [] },
     hooks: { on: ignore, list: () => [], run: async () => {} },
     mcpServers: { register: ignore, get: () => undefined, list: () => [] },
+    agents: { register: ignore, get: () => undefined, list: () => [], owner: () => undefined, onChange: ignore },
+    skills: { register: ignore, get: () => undefined, list: () => [], owner: () => undefined, onChange: ignore },
     onChange: ignore,
     contributions: () => structuredClone(EMPTY_CONTRIBUTIONS),
   }

@@ -173,6 +173,9 @@ export function createFakeRegistry(): FakeRegistry {
       get: id => mcpServers.get(id),
       list: () => [...mcpServers.values()],
     },
+    // Phase 10 (plugin API 1.4.0): no plugin agents or skills in this fake (registrations are accepted and ignored).
+    agents: { register: () => disposable(() => {}), get: () => undefined, list: () => [], owner: () => undefined, onChange: () => disposable(() => {}) },
+    skills: { register: () => disposable(() => {}), get: () => undefined, list: () => [], owner: () => undefined, onChange: () => disposable(() => {}) },
     onChange: (listener) => {
       listeners.add(listener)
       return disposable(() => listeners.delete(listener))

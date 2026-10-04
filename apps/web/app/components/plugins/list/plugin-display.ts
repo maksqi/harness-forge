@@ -32,6 +32,7 @@ export const PLUGIN_FILTER_OPTIONS: readonly PluginFilterOption[] = [
   { value: 'tools', label: 'Tools', icon: WrenchIcon },
   { value: 'mcp', label: 'MCP servers', icon: ServerIcon },
   { value: 'commands', label: 'Commands', icon: SquareSlashIcon },
+  { value: 'agents', label: 'Agents and skills', icon: BotIcon },
   { value: 'disabled', label: 'Disabled', icon: CircleOffIcon },
 ]
 

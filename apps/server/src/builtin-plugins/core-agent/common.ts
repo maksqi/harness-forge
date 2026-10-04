@@ -1,6 +1,7 @@
-// Shared pieces of the `core-agent` tools (Phase 9, ADR-041 / ADR-043): the guard timeouts of PLUGINS.md 1, the
-// `not_implemented` error of the P9-0b stubs, the permission-mode labels the model reads and the model text helper.
-// FROZEN after P9-0b (C27): the timeouts and the model texts are part of the tool contract.
+// Shared pieces of the `core-agent` tools (Phase 9, ADR-041 / ADR-043; Phase 10, ADR-045): the guard timeouts of
+// PLUGINS.md 1, the `not_implemented` error of the P9-0b stubs, the permission-mode labels the model reads and the model
+// text helper. FROZEN after P9-0b (C27; `SKILL_TIMEOUT_MS` added in P10-0b by C32): the timeouts and the model texts are
+// part of the tool contract.
 import type { ToolResultOutput } from '@harness-forge/plugin-sdk'
 import type { ToolMode } from '@harness-forge/shared'
 import type { JSONValue } from 'ai'
@@ -11,6 +12,8 @@ import { HarnessError } from '@harness-forge/shared'
 export const TODO_WRITE_TIMEOUT_MS = 60_000
 /** Guard timeout of `exit_plan_mode` (the default 60 s, explicit; the approval wait is not part of the call). */
 export const EXIT_PLAN_MODE_TIMEOUT_MS = 60_000
+/** Guard timeout of `skill` (Phase 10, ADR-045; the default 60 s, explicit). */
+export const SKILL_TIMEOUT_MS = 60_000
 /**
  * Guard timeout of `task`: the frozen guard maximum (600 s). A child has its own deadline below it
  * (`LIMITS.subagentTimeoutMs`, 570 s), so it can still return a partial report before the guard fires.

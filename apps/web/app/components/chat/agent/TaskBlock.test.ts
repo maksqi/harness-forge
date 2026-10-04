@@ -191,3 +191,17 @@ describe('taskBlock', () => {
     expect(trigger(streaming).text()).toContain('Fi')
   })
 })
+
+describe('taskBlock: any agent type (Phase 10 seam)', () => {
+  it('accepts a custom agent type: data-kind custom, data-agent-type, the generic label for now', () => {
+    const wrapper = block(taskPart({ input: taskInput({ type: 'reviewer' }), output: taskOutput({ type: 'reviewer' }) }) as ToolPartLike, false)
+    expect(root(wrapper).attributes()).toMatchObject({ 'data-kind': 'custom', 'data-agent-type': 'reviewer', 'data-state': 'completed' })
+    expect(trigger(wrapper).text()).toContain('Agent')
+    expect(wrapper.find('[data-slot="tool-part"]').exists()).toBe(false)
+  })
+
+  it('reads the general-purpose alias as general', () => {
+    const wrapper = block(taskPart({ input: taskInput({ type: 'general-purpose' }), output: taskOutput({ type: 'general' }) }) as ToolPartLike, false)
+    expect(root(wrapper).attributes()).toMatchObject({ 'data-kind': 'general', 'data-agent-type': 'general-purpose' })
+  })
+})

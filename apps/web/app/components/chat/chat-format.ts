@@ -4,7 +4,17 @@
 // Phase 9 (C25 adds the kinds, W9.11 owns them in P9-A): `data-compaction` -> `compaction` (CompactionDivider),
 // `data-steer` -> `steer` (SteerNote), a tool part named `task` -> `task` (TaskBlock, which falls back to ToolPart when
 // its input or output does not parse); the transient `data-activity` never becomes a block.
-import type { CompactionData, HarnessUIMessage, HarnessUIMessagePart, ImageTurnMetadata, NoticeData, SteerData } from '@harness-forge/shared'
+// Phase 10 (C33 adds the kind and the helpers complete, W10.11 owns them in P10-A): `data-task-result` -> `task-result`
+// (TaskResultNote, ADR-046); `taskResultsOf` / `isTaskResultMessage` are the only readers of results on the web.
+import type {
+  CompactionData,
+  HarnessUIMessage,
+  HarnessUIMessagePart,
+  ImageTurnMetadata,
+  NoticeData,
+  SteerData,
+  TaskResultData,
+} from '@harness-forge/shared'
 import type {
   DynamicToolUIPart,
   FileUIPart,
@@ -15,7 +25,7 @@ import type {
   TextUIPart,
   ToolUIPart,
 } from 'ai'
-import { compactionDataSchema, steerDataSchema } from '@harness-forge/shared'
+import { compactionDataSchema, steerDataSchema, TASK_RESULT_PART_TYPE, taskResultDataSchema } from '@harness-forge/shared'
 import { getToolName, isToolUIPart } from 'ai'
 
 export type ToolPartLike = ToolUIPart | DynamicToolUIPart
@@ -38,6 +48,8 @@ export type MessageBlock
     | { kind: 'steer', key: string, index: number, steer: SteerData }
     /** + Phase 9: a sub-agent call (a tool part named `task`, ADR-043): TaskBlock. */
     | { kind: 'task', key: string, index: number, part: ToolPartLike }
+    /** + Phase 10: the delivered result of a background agent (`data-task-result`, ADR-046): TaskResultNote. */
+    | { kind: 'task-result', key: string, index: number, part: TaskResultData }
 
 /** Characters of a tool input / output shown before "Show all" (docs/UI.md 7.2). */
 export const TOOL_BODY_PREVIEW_CHARS = 4096
@@ -61,6 +73,8 @@ export const CORE_AGENT_PLUGIN_ID = 'core-agent'
 export const TASK_TOOL_NAME = 'task'
 /** The plan tool of `core-agent` (ADR-041): its approval renders as the plan card. */
 export const PLAN_TOOL_NAME = 'exit_plan_mode'
+/** + Phase 10: the skill tool of `core-agent` (ADR-045): its body is SkillToolBody. */
+export const SKILL_TOOL_NAME = 'skill'
 
 /** A `file` part holding an image: generated images in assistant messages, attachments in user ones. */
 export function isImageFilePart(part: HarnessUIMessagePart): part is FileUIPart {
@@ -84,7 +98,8 @@ function isNoticeData(value: unknown): value is NoticeData {
  * rendered block between them form one gallery (a `reasoning-file` draft image stays a thumbnail), `step-start`,
  * unknown `data-*` and custom parts render nothing, `data-notice` becomes a notice row. Phase 9: a valid
  * `data-compaction` becomes a `compaction` block, a valid `data-steer` a `steer` block (invalid data renders nothing),
- * a tool part named `task` a `task` block; `data-activity` is transient and never a block.
+ * a tool part named `task` a `task` block; `data-activity` is transient and never a block. Phase 10: a valid
+ * `data-task-result` becomes a `task-result` block (invalid data renders nothing).
  */
 export function messageBlocks(parts: readonly HarnessUIMessagePart[]): MessageBlock[] {
   const blocks: MessageBlock[] = []
@@ -132,8 +147,48 @@ export function messageBlocks(parts: readonly HarnessUIMessagePart[]): MessageBl
       if (parsed.success)
         blocks.push({ kind: 'steer', key: `steer-${index}`, index, steer: parsed.data })
     }
+    else if (part.type === TASK_RESULT_PART_TYPE) {
+      const data = taskResultOf(part)
+      if (data)
+        blocks.push({ kind: 'task-result', key: `task-result-${data.taskId}-${index}`, index, part: data })
+    }
   })
   return blocks
+}
+
+/** The data of a valid `data-task-result` part (ADR-046), else null. */
+function taskResultOf(part: HarnessUIMessagePart): TaskResultData | null {
+  if (part.type !== TASK_RESULT_PART_TYPE)
+    return null
+  const parsed = taskResultDataSchema.safeParse((part as { data?: unknown }).data)
+  return parsed.success ? parsed.data : null
+}
+
+/**
+ * The delivered background agent results of a path (`data-task-result` parts of replies and carrier messages), by task
+ * id in path order; a task delivered twice keeps its first result. Invalid data is skipped.
+ */
+export function taskResultsOf(messages: readonly HarnessUIMessage[]): Map<string, TaskResultData> {
+  const results = new Map<string, TaskResultData>()
+  for (const message of messages) {
+    for (const part of message.parts) {
+      const data = taskResultOf(part)
+      if (data && !results.has(data.taskId))
+        results.set(data.taskId, data)
+    }
+  }
+  return results
+}
+
+/**
+ * True for the carrier of a turn the server started for finished background agents (`run.started.origin = 'task'`): a
+ * user message whose parts are all valid `data-task-result` parts (at least one). ChatMessage renders it as notes, with
+ * no bubble, actions, edit, versions or rewind.
+ */
+export function isTaskResultMessage(message: Pick<HarnessUIMessage, 'role' | 'parts'>): boolean {
+  return message.role === 'user'
+    && message.parts.length > 0
+    && message.parts.every(part => taskResultOf(part) !== null)
 }
 
 /** All text parts of a message as markdown (message "Copy", read aloud); '' when it has none. */

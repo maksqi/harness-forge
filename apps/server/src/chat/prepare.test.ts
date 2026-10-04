@@ -3,13 +3,18 @@ import type { ResolvedImageModel, ResolvedModel, ResolvedModelBase } from '../pr
 import type { ChatEnsureInput, ChatRecord } from '../services/chats/types.ts'
 import type { FilesService, StoredFile } from '../services/files/types.ts'
 import type { OpenWorkspace, OpenWorkspaceResult } from '../services/projects/types.ts'
+import type { FakeCustomizationService } from '../testing/fake-customizations.ts'
 import type { AppDeps } from '../types.ts'
 import type { CommandResolution } from './commands.ts'
 import type { RunTarget } from './prepare.ts'
 import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { createSilentLogger } from '../logger.ts'
-import { checkImageOptions, ensureChat, generatedImageIds, imagePrompt, imageTurnInputs, openRunWorkspace, resolveTarget } from './prepare.ts'
+import { createTestApp } from '../testing/create-test-app.ts'
+import { fakeCatalogEntry } from '../testing/fake-customizations.ts'
+import { checkImageOptions, commitHistory, ensureChat, generatedImageIds, imagePrompt, imageTurnInputs, openRunWorkspace, prepareRun, resolveTarget } from './prepare.ts'
+import { createRunRegistry } from './runs.ts'
+import { chatBody, testChatId } from './testing.ts'
 
 function row(id: string, mime: string): StoredFile {
   return { id, sha256: 'a'.repeat(64), name: `${id}.bin`, mime, size: 1, createdAt: 1 }
@@ -260,5 +265,33 @@ describe('openRunWorkspace', () => {
       throw new Error('database is locked')
     } } } as unknown as Pick<AppDeps, 'projects'>
     await expect(openRunWorkspace(deps, { projectId: PROJECT_ID }, chatTarget, null, createSilentLogger())).rejects.toThrow('database is locked')
+  })
+})
+
+describe('prepareRun: the Phase 10 fields (C31-T1 / T6)', () => {
+  it('takes one catalog snapshot of the chat\'s project; the chat keeps the request\'s model; no restriction yet; serverMessage accepted', async () => {
+    const t = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, customizations: 'fake' })
+    try {
+      const fake = t.deps.customizations as FakeCustomizationService
+      fake.entries.set('', [fakeCatalogEntry('skill', 'release-notes', { source: 'plugin', pluginId: 'mock' })])
+      const chatId = testChatId(0xA001)
+      for (const serverMessage of [undefined, false, true]) {
+        const before = fake.calls.catalog
+        const run = createRunRegistry().acquire(chatId, 'mock:echo')
+        const body = chatBody(chatId, 'hello')
+        const prepared = await prepareRun(t.deps, run, body, createSilentLogger(), serverMessage === undefined ? undefined : { serverMessage })
+        expect(fake.calls.catalog).toBe(before + 1)
+        expect(prepared.catalog.projectId).toBeNull()
+        expect(prepared.catalog.agents().map(entry => entry.name)).toEqual(['explore', 'general'])
+        expect(prepared.catalog.skills().map(entry => entry.name)).toEqual(['release-notes'])
+        expect(prepared.requestModelRef).toBe('mock:echo')
+        expect(prepared.requestModelRef).toBe(prepared.resolved.modelRef)
+        expect(prepared.turnRestriction).toBeNull()
+        await commitHistory(t.deps, chatId, prepared.writes)
+      }
+    }
+    finally {
+      await t.close()
+    }
   })
 })

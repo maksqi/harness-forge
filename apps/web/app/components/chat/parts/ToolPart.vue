@@ -21,11 +21,14 @@
 // `exit_plan_mode` (`ClipboardList`, the plan's first heading as the argument, the status "Plan ready for review",
 // "Kept planning" or "Approved · Accept edits" / "Approved · Ask", the body PlanBody with "Your feedback: …"); both
 // keep the generic blocks behind "Raw input and output", and a value that fails its schema keeps the generic row.
+// Phase 10 (C33 wires it, W10.11 owns it; ADR-045, ADR-047; docs/UI.md 7.25, 7.28): the `skill` row of `core-agent`
+// (`tool-row[data-tool-name="skill"]`) has SkillToolBody as its agent body, and the body of an approved `exit_plan_mode`
+// starts with PlanFileChip (the output's `planPath` / `planError`). W10.11 adds the skill row's label, source and status.
 import type { TodoItem } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import type { WorkspaceRowSummary } from './tools/workspace-tools'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
-import { shellToolOutputSchema, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
+import { shellToolOutputSchema, skillOutputSchema, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import {
   BanIcon,
   CheckIcon,
@@ -46,10 +49,12 @@ import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { doneTodos, planApprovedText, planModeOf, planOf, TODO_TOOL_NAME, todoListOf } from '../agent/agent-tools'
+import { doneTodos, planApprovedText, planFileOf, planModeOf, planOf, TODO_TOOL_NAME, todoListOf } from '../agent/agent-tools'
 import AgentToolBody from '../agent/AgentToolBody.vue'
 import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
 import PlanBody from '../agent/PlanBody.vue'
+import PlanFileChip from '../agent/PlanFileChip.vue'
+import SkillToolBody from '../agent/SkillToolBody.vue'
 import TodoList from '../agent/TodoList.vue'
 import { TRANSCRIPT_SCROLL } from '../chat-context'
 import {
@@ -58,6 +63,7 @@ import {
   isServerTruncated,
   isSupersededDenial,
   PLAN_TOOL_NAME,
+  SKILL_TOOL_NAME,
   splitMcpToolName,
   toolNameOf,
 } from '../chat-format'
@@ -128,6 +134,8 @@ const coreAgent = computed(() => tool.value === undefined || tool.value.pluginId
 const isPlanTool = computed(() => name.value === PLAN_TOOL_NAME && coreAgent.value)
 /** + Phase 9: the todo tool of `core-agent`. */
 const isTodoTool = computed(() => name.value === TODO_TOOL_NAME && coreAgent.value)
+/** + Phase 10: the skill tool of `core-agent`. */
+const isSkillTool = computed(() => name.value === SKILL_TOOL_NAME && coreAgent.value)
 const rowIcon = computed(() => {
   if (serverId.value)
     return ServerIcon
@@ -202,7 +210,12 @@ const errorText = computed(() => (props.part.state === 'output-error' ? props.pa
  * while the call runs) or the plan with the mode an approval chose; null keeps the generic blocks (an error, or a value
  * that fails its schema).
  */
-const agentView = computed<{ kind: 'todo', todos: readonly TodoItem[] } | { kind: 'plan', plan: string, mode: 'edits' | 'ask' | null } | null>(() => {
+type AgentView
+  = | { kind: 'todo', todos: readonly TodoItem[] }
+    | { kind: 'plan', plan: string, mode: 'edits' | 'ask' | null, planPath: string | null, planError: string | null }
+    | { kind: 'skill' }
+
+const agentView = computed<AgentView | null>(() => {
   if (props.part.state === 'output-error')
     return null
   const output = hasOutput.value ? props.part.output : undefined
@@ -215,10 +228,15 @@ const agentView = computed<{ kind: 'todo', todos: readonly TodoItem[] } | { kind
     const mode = planModeOf(output)
     if (plan === null || (hasOutput.value && mode === null))
       return null
-    return { kind: 'plan', plan, mode }
+    return { kind: 'plan', plan, mode, ...planFileOf(output) }
   }
+  // + Phase 10: a loaded skill (SkillToolBody); a running call or an output that fails its schema keeps the generic row.
+  if (isSkillTool.value && hasOutput.value && skillOutputSchema.safeParse(output).success)
+    return { kind: 'skill' }
   return null
 })
+/** + Phase 10: the chat belongs to a project (PlanFileChip offers Show changes there). */
+const projectChat = computed(() => (approvalContext?.projectId() ?? null) !== null)
 /** + Phase 9: the status text of an approved plan ("Approved · Accept edits" / "Approved · Ask"). */
 const planApproved = computed(() => {
   const view = agentView.value
@@ -365,7 +383,11 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
       <AiToolContent :data-testid="testIds.toolRowOutput" class="min-w-0 pt-1 pl-6">
         <AgentToolBody v-if="agentView">
           <TodoList v-if="agentView.kind === 'todo'" :todos="agentView.todos" />
-          <PlanBody v-else :plan="agentView.plan" :feedback="planFeedback" />
+          <SkillToolBody v-else-if="agentView.kind === 'skill'" :input="part.input" :output="hasOutput ? part.output : undefined" />
+          <template v-else>
+            <PlanFileChip :plan-path="agentView.planPath" :plan-error="agentView.planError" :project-chat="projectChat" />
+            <PlanBody :plan="agentView.plan" :feedback="planFeedback" />
+          </template>
           <template #raw>
             <div class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
               <ToolValueBlock label="Input" :value="inputText || '{}'" />

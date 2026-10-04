@@ -4,6 +4,8 @@
 // use registry order (builtins first in load order, then user plugins by id, then registration order); tools and
 // commands are sorted by name. Duplicate provider ids, tool names, command names and MCP server ids throw `conflict`;
 // invalid shapes throw `validation_error`. Change listeners run synchronously; a throwing listener is logged.
+// Phase 10 (C30): the agent and skill registries (`./agents.ts`, `./skills.ts`; empty until W10.7) share the change
+// listeners (kinds `agent`, `skill`) and feed the contributions `agents` / `skills`.
 import type {
   CommandDefinition,
   Disposable,
@@ -34,9 +36,11 @@ import type {
   ToolRegisterOptions,
 } from './types.ts'
 import { isGuardTimeout } from '../plugins/guard.ts'
+import { createAgentRegistry } from './agents.ts'
 import { toDisposable } from './disposable.ts'
 import { runHookEntries } from './hooks.ts'
 import { comparePluginIds, compareRegistrations } from './order.ts'
+import { createSkillRegistry } from './skills.ts'
 import {
   duplicate,
   HOOK_NAMES,
@@ -93,6 +97,17 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
       }
     }
   }
+
+  function onChange(listener: (change: RegistryChange) => void): Disposable {
+    listeners.add(listener)
+    return toDisposable(() => {
+      listeners.delete(listener)
+    })
+  }
+
+  // Phase 10 (plugin API 1.4.0): agent types and skills of plugins (empty until W10.7).
+  const agents = createAgentRegistry({ onChange })
+  const skills = createSkillRegistry({ onChange })
 
   function sorted<T>(entries: Iterable<Entry<T>>): T[] {
     return [...entries].sort(compareRegistrations).map(entry => entry.value)
@@ -238,12 +253,10 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
       list: () => sorted(mcpServers.values()),
     },
 
-    onChange: (listener) => {
-      listeners.add(listener)
-      return toDisposable(() => {
-        listeners.delete(listener)
-      })
-    },
+    agents,
+    skills,
+
+    onChange,
 
     contributions: (pluginId) => {
       const owned = <T>(entries: Iterable<Entry<T>>): Entry<T>[] => [...entries].filter(entry => entry.pluginId === pluginId)
@@ -260,9 +273,9 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
         mcpServers: serverIds,
         commands: commandNames,
         hooks: hookNames,
-        // Plugin API 1.4.0 (ADR-045): the agent and skill registries arrive in P10-0b / P10-A.
-        agents: [],
-        skills: [],
+        // Plugin API 1.4.0 (ADR-045): sorted by name (the registries list by name).
+        agents: agents.list().filter(agent => agent.pluginId === pluginId).map(agent => agent.definition.name),
+        skills: skills.list().filter(skill => skill.pluginId === pluginId).map(skill => skill.definition.name),
       }
       return contributions
     },

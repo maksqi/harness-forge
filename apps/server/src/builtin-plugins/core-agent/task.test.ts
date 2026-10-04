@@ -53,7 +53,17 @@ function wrapContext(agent: AgentRunScope | null, hooks: string[] = []): ToolWra
 }
 
 function scope(run: AgentRunScope['runSubagent']): AgentRunScope {
-  return { chatId: 'chat', messageId: MESSAGE_ID, toolMode: 'ask', runSubagent: run, todos: () => null }
+  return {
+    chatId: 'chat',
+    messageId: MESSAGE_ID,
+    toolMode: 'ask',
+    runSubagent: run,
+    todos: () => null,
+    loadSkill: async () => {
+      throw new Error('not used')
+    },
+    savePlan: async () => ({}),
+  }
 }
 
 const options: ToolExecutionOptions<unknown> = { toolCallId: 'mock_call_1_1', messages: [], context: undefined }
@@ -117,6 +127,24 @@ describe('task through the host wrapper', () => {
     expect(await convert({ toolCallId: 'c', input: INPUT, output: failed })).toEqual({ type: 'text', value: 'Sub-agent failed: Upstream: boom; partial report: Half.' })
     const limit = snapshot({ status: 'limit', report: 'Partial findings.', error: 'The sub-agent reached its step limit (2 steps).', finishedAt: 2 })
     expect(await convert({ toolCallId: 'c', input: INPUT, output: limit })).toEqual({ type: 'text', value: 'Partial findings.' })
+  })
+
+  it('a background call (Phase 10) reaches the runner unchanged; its one output reads as the launch text', async () => {
+    const inputs: TaskInput[] = []
+    const launched = snapshot({ status: 'background', taskId: 'bgt_0123456789abcdef', finishedAt: 1 })
+    const agent = scope(async function* (input) {
+      inputs.push(input)
+      yield launched
+    })
+    const background: TaskInput = { ...INPUT, type: 'reviewer', background: true }
+    const values = await collect(wrapToolExecute(registered, wrapContext(agent))(background, options))
+    expect(inputs).toEqual([background])
+    expect(values.at(-1)).toEqual(launched)
+    const convert = wrapToModelOutput(registered, { guard })
+    expect(await convert({ toolCallId: 'c', input: background, output: launched })).toEqual({
+      type: 'text',
+      value: 'Started background agent bgt_0123456789abcdef. Its report will arrive as a message; keep working.',
+    })
   })
 
   it('without an agent scope (a sub-agent calling task, depth 1) the call is one failed output', async () => {

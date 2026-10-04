@@ -21,6 +21,8 @@
 // the submitted placeholder and the streaming last row ("Compacting conversation…"). The dividers render inside
 // ChatMessage at their part's position. A `task` call (a sub-agent) whose steps hold a done `write_file` / `edit_file`
 // counts as an agent edit for "Rewind files to here" (its writes are journaled under the reply, ADR-043).
+// Phase 10 (ADR-046; C33, W10.11 owns it): a carrier message (`isTaskResultMessage`, the turn the server started for
+// finished background agents) is never edited (↑ edits the last message the user wrote) and never offers a rewind.
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { ChatStatus, FileUIPart } from 'ai'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
@@ -32,7 +34,7 @@ import AiConversation from '@/components/ai-elements/conversation/Conversation.v
 import { Skeleton } from '@/components/ui/skeleton'
 import { testIds } from '~/utils/testids'
 import { TRANSCRIPT_SCROLL } from './chat-context'
-import { TASK_TOOL_NAME, toolNameOf } from './chat-format'
+import { isTaskResultMessage, TASK_TOOL_NAME, toolNameOf } from './chat-format'
 import ChatMessage from './ChatMessage.vue'
 import { compactionLayout } from './compaction/compaction'
 import ErrorPart from './parts/ErrorPart.vue'
@@ -231,7 +233,7 @@ const rewindable = computed<ReadonlySet<string>>(() => {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]!
     if (message.role === 'user') {
-      if (edited)
+      if (edited && !isTaskResultMessage(message))
         ids.add(message.id)
       continue
     }
@@ -392,7 +394,7 @@ function startEdit(messageId: string): void {
 
 /** Opens the editor on the last user message; false when there is none. */
 function editLastUserMessage(): boolean {
-  const last = [...props.messages].reverse().find(message => message.role === 'user')
+  const last = [...props.messages].reverse().find(message => message.role === 'user' && !isTaskResultMessage(message))
   const target = last ? messageRefs.get(last.id) : undefined
   target?.startEdit()
   return !!target

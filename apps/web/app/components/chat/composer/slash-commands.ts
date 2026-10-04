@@ -1,18 +1,31 @@
 // Slash commands of the composer (docs/UI.md 7.8): the menu items, the token being typed, and the client-only
 // commands (`/new`, `/model`, `/effort`, `/mode`, `/help`), which run in the browser and never reach the server.
 // Server commands (`GET /api/commands`) are sent as typed; the server expands them.
+// Phase 10 (ADR-045, ADR-047; C33 declares, W10.9 implements; frozen from Gate P10-0b): every item has a group (App,
+// Project, Personal, Plugins, `slashGroupOf`), server items carry the command file's `argumentHint` and `namespace`,
+// `argumentHintAt` is the ghost hint of SlashArgumentHint, and `/remember [text]` resolves to the `remember` action
+// (the composer opens RememberDialog with the text).
 import type { ClientCommand, CommandSummary, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import { CLIENT_COMMANDS, isClientCommand } from '@harness-forge/shared'
 import { EFFORT_LABELS } from './effort'
 import { EDITS_NEEDS_PROJECT, isProjectOnlyMode, PLAN_NEEDS_PROJECT, TOOL_MODE_OPTIONS } from './permission'
 
-/** One row of the slash menu (docs/UI.md 10.4). */
+/** The groups of the slash menu, in display order (docs/UI.md 7.8, Phase 10). */
+export type SlashGroup = 'app' | 'project' | 'personal' | 'plugin'
+
+/** One row of the slash menu (docs/UI.md 10.4; Phase 10: 10.7, 11.7). */
 export interface SlashItem {
   name: string
   description: string
   kind: 'client' | 'server'
   /** Server commands: the name of the plugin that contributes the command. */
   source?: string
+  /** + Phase 10: the menu group (client commands and the harness `/compact`: `app`). */
+  group: SlashGroup
+  /** + Phase 10: the command file's `argument-hint` (`<file> [focus]`). */
+  argumentHint?: string
+  /** + Phase 10: the subfolder of a project command (a display label only). */
+  namespace?: string
 }
 
 export const CLIENT_COMMAND_DESCRIPTIONS: Readonly<Record<ClientCommand, string>> = {
@@ -21,12 +34,12 @@ export const CLIENT_COMMAND_DESCRIPTIONS: Readonly<Record<ClientCommand, string>
   effort: 'Set reasoning effort',
   mode: 'Set permission mode',
   help: 'Show shortcuts and commands',
-  remember: 'Save a note for the agent',
+  remember: 'Save a note to your instructions',
 }
 
 /**
- * P10-0a (C28) compile fix: `remember` became a client command in the contract (ADR-047); the Remember dialog arrives
- * with W10.9, so the menu does not offer it yet and typing it answers an error.
+ * `remember` is a client command since Phase 10 (ADR-047): typing `/remember [text]` opens RememberDialog. Until W10.9
+ * implements the dialog, the menu does not offer it (the e2e suite keeps five client commands).
  */
 const CLIENT_COMMANDS_NOT_OFFERED: ReadonlySet<ClientCommand> = new Set(['remember'])
 
@@ -34,7 +47,21 @@ const CLIENT_COMMANDS_NOT_OFFERED: ReadonlySet<ClientCommand> = new Set(['rememb
 export function clientSlashItems(): SlashItem[] {
   return CLIENT_COMMANDS
     .filter(name => !CLIENT_COMMANDS_NOT_OFFERED.has(name))
-    .map(name => ({ name, description: CLIENT_COMMAND_DESCRIPTIONS[name], kind: 'client' as const }))
+    .map(name => ({ name, description: CLIENT_COMMAND_DESCRIPTIONS[name], kind: 'client' as const, group: 'app' as const }))
+}
+
+/** The menu group of a server command: harness -> App, project -> Project, user -> Personal, plugin -> Plugins. */
+export function slashGroupOf(command: Pick<CommandSummary, 'source'>): SlashGroup {
+  switch (command.source) {
+    case 'harness':
+      return 'app'
+    case 'project':
+      return 'project'
+    case 'user':
+      return 'personal'
+    case 'plugin':
+      return 'plugin'
+  }
 }
 
 /**
@@ -53,7 +80,25 @@ export function serverSlashItems(
       kind: 'server' as const,
       // Phase 10: `pluginId` is optional (personal and project commands have none).
       ...(command.pluginId === undefined ? {} : { source: pluginName(command.pluginId) ?? command.pluginId }),
+      group: slashGroupOf(command),
+      ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
+      ...(command.namespace === undefined ? {} : { namespace: command.namespace }),
     }))
+}
+
+const HINT_PATTERN = /^\/([a-z][\da-z-]{0,31})[ \t]+$/i
+
+/**
+ * The argument hint to show after the typed command (SlashArgumentHint, docs/UI.md 7.28): the text is exactly `/name`
+ * plus one or more blanks on one line and the item named `name` has a hint; else null.
+ */
+export function argumentHintAt(text: string, items: readonly SlashItem[]): string | null {
+  const match = text.match(HINT_PATTERN)
+  if (!match)
+    return null
+  const name = match[1]!.toLowerCase()
+  const hint = items.find(item => item.name.toLowerCase() === name)?.argumentHint
+  return hint || null
 }
 
 /** Items whose name starts with `query` (case-insensitive), App group first; the order inside a group is kept. */
@@ -114,6 +159,8 @@ export type ClientCommandAction
     | { type: 'set-effort', effort: ReasoningEffort }
     | { type: 'set-mode', mode: ToolMode }
     | { type: 'error', message: string }
+    /** + Phase 10 (ADR-047): opens RememberDialog with the text after `/remember` (trimmed). */
+    | { type: 'remember', text: string }
 
 export interface ClientCommandContext {
   /** Resolves a typed model (ref, id or name) to a model ref, or null when unknown. */
@@ -153,7 +200,7 @@ export function resolveClientCommand(name: ClientCommand, args: string, context:
     case 'help':
       return { type: 'help' }
     case 'remember':
-      return { type: 'error', message: 'Remember is not available yet.' }
+      return { type: 'remember', text: value }
     case 'model': {
       if (!value)
         return { type: 'open', menu: 'model' }

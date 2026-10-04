@@ -4,15 +4,25 @@
 // that reports `imageOutput` for the image-output models, and the `mediakit` test provider.
 import type { LanguageModelV4 } from '@ai-sdk/provider'
 import type { Disposable, ModelInfo, ToolDefinition } from '@harness-forge/plugin-sdk'
-import type { CatalogModel, ChatRequestBody, GenerateImageToolInput, GenerateImageToolOutput, HarnessUIMessage, ServerEvent } from '@harness-forge/shared'
+import type {
+  CatalogModel,
+  ChatRequestBody,
+  CustomizationEntry,
+  CustomizationKind,
+  GenerateImageToolInput,
+  GenerateImageToolOutput,
+  HarnessUIMessage,
+  ServerEvent,
+} from '@harness-forge/shared'
 import type { UIMessageChunk } from 'ai'
 import type { ModelCatalog } from '../catalog/types.ts'
+import type { CustomizationCatalog } from '../services/customizations/types.ts'
 import type { TestApp } from '../testing/create-test-app.ts'
 import type { FakeImageService, FakeImageServiceOptions } from '../testing/fake-media.ts'
 import type { AppDeps } from '../types.ts'
 import type { ChatRunnerInternal, ChatRunnerOptions } from './index.ts'
 import { definePlugin } from '@harness-forge/plugin-sdk'
-import { createMessageId, GENERATE_IMAGE_TOOL_NAME, generateImageToolInputSchema } from '@harness-forge/shared'
+import { AGENT_TYPE_ALIASES, createMessageId, GENERATE_IMAGE_TOOL_NAME, generateImageToolInputSchema } from '@harness-forge/shared'
 import { getBuiltinPlugins } from '../builtin-plugins/index.ts'
 import { createModelCatalog } from '../catalog/index.ts'
 import { createFakeImageModel, fakeMediaProviders } from '../providers/testing.ts'
@@ -20,6 +30,36 @@ import { createTestApp } from '../testing/create-test-app.ts'
 import { createFakeImageService } from '../testing/fake-media.ts'
 import { createFakeFilesService } from '../testing/fakes.ts'
 import { createChatRunnerWith } from './index.ts'
+
+/** A catalog entry (Phase 10 tests): active, enabled, without diagnostics; `builtin` unless `overrides.source` says. */
+export function catalogEntry(kind: CustomizationKind, name: string, overrides: Partial<CustomizationEntry> = {}): CustomizationEntry {
+  return { kind, name, description: `The ${name} ${kind}.`, source: 'builtin', enabled: true, state: 'active', diagnostics: [], ...overrides }
+}
+
+/**
+ * A catalog snapshot over `entries` (Phase 10 tests of the chat seams; the C30 fakes serve route tests): the getters
+ * answer the active entries by kind, sorted by name; `agent(name)` resolves `AGENT_TYPE_ALIASES`. Default: the builtin
+ * agents `explore` and `general`.
+ */
+export function testCatalog(entries: readonly CustomizationEntry[] = [catalogEntry('agent', 'explore'), catalogEntry('agent', 'general')], projectId: string | null = null): CustomizationCatalog {
+  const active = (kind: CustomizationKind): readonly CustomizationEntry[] => entries
+    .filter(entry => entry.kind === kind && entry.state === 'active')
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  const named = (kind: CustomizationKind, name: string): CustomizationEntry | null => active(kind).find(entry => entry.name === name) ?? null
+  return {
+    projectId,
+    entries,
+    diagnostics: [],
+    project: null,
+    builtAt: 0,
+    agents: () => active('agent'),
+    commands: () => active('command'),
+    skills: () => active('skill'),
+    agent: name => named('agent', Object.hasOwn(AGENT_TYPE_ALIASES, name) ? AGENT_TYPE_ALIASES[name] ?? name : name),
+    command: name => named('command', name),
+    skill: name => named('skill', name),
+  }
+}
 
 export function testChatId(n: number): string {
   return `0199a8f0-0000-7000-8000-${n.toString(16).padStart(12, '0')}`

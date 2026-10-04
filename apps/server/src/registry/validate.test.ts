@@ -135,8 +135,15 @@ describe('validateCommandDefinition: reserved names', () => {
     }
   })
 
+  it('refuses /remember (Phase 10, ADR-047: the client command of the Remember dialog, through CLIENT_COMMANDS)', () => {
+    expect(CLIENT_COMMANDS).toContain('remember')
+    const error = thrown(() => validateCommandDefinition({ name: 'remember', description: 'Mine.', template: '{{input}}' }))
+    expect(error.code).toBe('validation_error')
+    expect(error.message).toBe('The command "/remember" is reserved by the app.')
+  })
+
   it('accepts names that only start like a reserved one', () => {
-    for (const name of ['compact-x', 'compactor', 'news', 'helper'])
+    for (const name of ['compact-x', 'compactor', 'news', 'helper', 'remember-me', 'remembered'])
       expect(() => validateCommandDefinition({ name, description: 'Mine.', template: '{{input}}' }), name).not.toThrow()
   })
 })

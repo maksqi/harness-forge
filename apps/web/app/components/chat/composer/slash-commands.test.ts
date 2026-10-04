@@ -1,6 +1,8 @@
 import type { ClientCommandContext } from './slash-commands'
 import { describe, expect, it } from 'vitest'
 import {
+  argumentHintAt,
+  CLIENT_COMMAND_DESCRIPTIONS,
   clientSlashItems,
   filterSlashItems,
   parseClientCommand,
@@ -8,6 +10,7 @@ import {
   parseToolMode,
   resolveClientCommand,
   serverSlashItems,
+  slashGroupOf,
   slashQueryAt,
 } from './slash-commands'
 
@@ -33,8 +36,8 @@ describe('slash menu items', () => {
 
   it('adds server commands with their plugin name (or id) and drops client names', () => {
     expect(serverSlashItems(commands, id => (id === 'core-commands' ? 'Core commands' : undefined))).toEqual([
-      { name: 'summarize', description: 'Summarize the chat', kind: 'server', source: 'Core commands' },
-      { name: 'model-card', description: 'Show a model card', kind: 'server', source: 'model-tools' },
+      { name: 'summarize', description: 'Summarize the chat', kind: 'server', source: 'Core commands', group: 'plugin' },
+      { name: 'model-card', description: 'Show a model card', kind: 'server', source: 'model-tools', group: 'plugin' },
     ])
   })
 
@@ -126,12 +129,48 @@ describe('/compact (Phase 9)', () => {
 
   it('comes from GET /commands as a server command and is sent as typed', () => {
     expect(serverSlashItems(listed, id => (id === 'core-agent' ? 'Agent tools' : undefined))).toEqual([
-      { name: 'compact', description: 'Summarize the conversation so far', kind: 'server', source: 'Agent tools' },
+      { name: 'compact', description: 'Summarize the conversation so far', kind: 'server', source: 'Agent tools', group: 'app' },
     ])
     const all = [...clientSlashItems(), ...serverSlashItems(listed)]
     expect(filterSlashItems(all, 'comp').map(item => `${item.kind}:${item.name}`)).toEqual(['server:compact'])
     expect(parseClientCommand('/compact keep numbers')).toBeNull()
     expect(parseSlashCommand('/compact keep numbers')).toEqual({ name: 'compact', args: 'keep numbers' })
+  })
+})
+
+describe('groups, argument hints and /remember (Phase 10)', () => {
+  const fileCommands = [
+    { name: 'review', description: 'Review a file for bugs', source: 'project' as const, namespace: 'frontend', argumentHint: '<file> [focus]' },
+    { name: 'standup', description: 'Draft my standup notes', source: 'user' as const },
+  ]
+
+  it('puts every item into a group and keeps the hint and the namespace of command files', () => {
+    expect(clientSlashItems().every(item => item.group === 'app')).toBe(true)
+    expect(serverSlashItems(fileCommands)).toEqual([
+      { name: 'review', description: 'Review a file for bugs', kind: 'server', group: 'project', argumentHint: '<file> [focus]', namespace: 'frontend' },
+      { name: 'standup', description: 'Draft my standup notes', kind: 'server', group: 'personal' },
+    ])
+    expect(['harness', 'project', 'user', 'plugin'].map(source => slashGroupOf({ source: source as 'harness' }))).toEqual(['app', 'project', 'personal', 'plugin'])
+  })
+
+  it('shows the argument hint only while the text is the command name plus blanks on one line', () => {
+    const all = serverSlashItems(fileCommands)
+    expect(argumentHintAt('/review ', all)).toBe('<file> [focus]')
+    expect(argumentHintAt('/REVIEW   ', all)).toBe('<file> [focus]')
+    expect(argumentHintAt('/review', all)).toBeNull()
+    expect(argumentHintAt('/review a', all)).toBeNull()
+    expect(argumentHintAt('/review \n', all)).toBeNull()
+    expect(argumentHintAt('/standup ', all)).toBeNull()
+    expect(argumentHintAt('/unknown ', all)).toBeNull()
+  })
+
+  it('resolves /remember to the remember action with the trimmed text (not offered in the menu until W10.9)', () => {
+    const context: ClientCommandContext = { resolveModel: () => null, efforts: [], toolsAvailable: true, projectChat: false }
+    expect(CLIENT_COMMAND_DESCRIPTIONS.remember).toBe('Save a note to your instructions')
+    expect(parseClientCommand('/remember  Run pnpm check first ')).toEqual({ name: 'remember', args: 'Run pnpm check first' })
+    expect(resolveClientCommand('remember', '  Run pnpm check first ', context)).toEqual({ type: 'remember', text: 'Run pnpm check first' })
+    expect(resolveClientCommand('remember', '', context)).toEqual({ type: 'remember', text: '' })
+    expect(clientSlashItems().map(item => item.name)).not.toContain('remember')
   })
 })
 

@@ -1,4 +1,5 @@
-// The model's view of a stored message path (Phase 9, ARCHITECTURE.md 6.18). FROZEN after P9-0b (C26, complete).
+// The model's view of a stored message path (Phase 9, ARCHITECTURE.md 6.18). FROZEN after P9-0b (C26, complete);
+// Phase 10 (C31, ADR-046) adds the task-result stage; FROZEN again after P10-0b.
 //
 // `buildModelHistory(history)` is the only place that turns a stored path into what the model sees, before
 // `prepareModelFiles` (`pipeline.ts`; messages left out never load their files) and `convertToModelMessages`. In this
@@ -7,15 +8,20 @@
 //      before it; `summaryText` is what the model reads instead;
 //   2. `splitSteers` (`@harness-forge/shared`): each assistant message is split at its `data-steer` parts into
 //      assistant / user / assistant (a steer is a user message for the model, ADR-042);
-//   3. `reduceAgentOutputs` (`subagent/history.ts`, W9.5): a stored `tool-task` output becomes `{ status, report }`;
-//   4. `applyCommandExpansions` (`context.ts`): prompt commands send their stored expansion;
-//   5. the summary text merged as the **first** part of the following user message (after step 4, because an
+//   3. `splitTaskResults` (`@harness-forge/shared`, Phase 10): each assistant message is split at its
+//      `data-task-result` parts into assistant / user / assistant (a delivered background task result is a user message
+//      `taskResultText` for the model), and the user-role carrier message of a server-started turn (`origin: 'task'`,
+//      only `data-task-result` parts) becomes a user message with one text part per result;
+//   4. `reduceAgentOutputs` (`subagent/history.ts`, W9.5): a stored `tool-task` output becomes `{ status, report }`;
+//   5. `applyCommandExpansions` (`context.ts`): prompt commands send their stored expansion;
+//   6. the summary text merged as the **first** part of the following user message (after step 5, because an
 //      expansion replaces the first text part), or a standalone user message when the remaining history does not start
 //      with a user message: the history never holds two user messages in a row because of the summary.
-// A path without a marker, steers and task outputs (every v1.4 path) comes back unchanged (the same message objects).
+// A path without a marker, steers, task results and task outputs (every v1.4 and v1.5 path without them) comes back
+// unchanged (the same message objects).
 import type { HarnessUIMessage } from '@harness-forge/shared'
 import type { CompactedHistory } from './compaction/history.ts'
-import { splitSteers } from '@harness-forge/shared'
+import { splitSteers, splitTaskResults } from '@harness-forge/shared'
 import { applyCompaction } from './compaction/history.ts'
 import { applyCommandExpansions } from './context.ts'
 import { reduceAgentOutputs } from './subagent/history.ts'
@@ -27,6 +33,8 @@ export const COMPACTION_SUMMARY_MESSAGE_ID = 'msg_compaction_summary'
 export interface ModelHistoryStages {
   applyCompaction: (history: readonly HarnessUIMessage[]) => CompactedHistory
   splitSteers: (messages: readonly HarnessUIMessage[]) => HarnessUIMessage[]
+  /** Phase 10 (ADR-046): delivered background task results and carrier messages as user messages. */
+  splitTaskResults: (messages: readonly HarnessUIMessage[]) => HarnessUIMessage[]
   reduceAgentOutputs: (messages: readonly HarnessUIMessage[]) => HarnessUIMessage[]
   applyCommandExpansions: (messages: readonly HarnessUIMessage[]) => HarnessUIMessage[]
 }
@@ -35,12 +43,13 @@ export interface ModelHistoryStages {
 export const MODEL_HISTORY_STAGES: Readonly<ModelHistoryStages> = Object.freeze({
   applyCompaction,
   splitSteers: (messages: readonly HarnessUIMessage[]) => splitSteers(messages),
+  splitTaskResults: (messages: readonly HarnessUIMessage[]) => splitTaskResults(messages),
   reduceAgentOutputs,
   applyCommandExpansions,
 })
 
 /**
- * Step 5: `summaryText` as the first part of the first message when it is a user message, else as a standalone user
+ * Step 6: `summaryText` as the first part of the first message when it is a user message, else as a standalone user
  * message before it. Null leaves the messages as they are.
  */
 export function mergeSummary(messages: readonly HarnessUIMessage[], summaryText: string | null): HarnessUIMessage[] {
@@ -56,7 +65,8 @@ export function mergeSummary(messages: readonly HarnessUIMessage[], summaryText:
 /** `buildModelHistory` with explicit stages (see the module comment for the order). */
 export function composeModelHistory(history: readonly HarnessUIMessage[], stages: Readonly<ModelHistoryStages>): HarnessUIMessage[] {
   const compacted = stages.applyCompaction(history)
-  const split = stages.splitSteers(compacted.messages)
+  const steered = stages.splitSteers(compacted.messages)
+  const split = stages.splitTaskResults(steered)
   const reduced = stages.reduceAgentOutputs(split)
   const expanded = stages.applyCommandExpansions(reduced)
   return mergeSummary(expanded, compacted.summaryText)

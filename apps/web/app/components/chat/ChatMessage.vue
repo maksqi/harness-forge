@@ -17,6 +17,10 @@
 // in-run compaction) are dimmed the same way. While the reply streams, `activity` = 'compacting' shows "Compacting
 // conversation…" at its end (instead of "Thinking…"); "Thinking…" also shows while nothing follows its last divider.
 // The approval payload passes the plan card's `planMode` / `reason` on.
+// Phase 10 (ADR-046; C33 declares, W10.11 implements; frozen from Gate P10-0b): block kind `task-result` renders
+// TaskResultNote (variant inline) at the part's position; a carrier user message (`isTaskResultMessage`: only
+// `data-task-result` parts, the turn the server started for finished background agents) renders its notes (variant
+// turn) left-aligned with the caption "Sent to the agent", and no bubble, actions, edit, versions or rewind.
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { FileUIPart, TextUIPart } from 'ai'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
@@ -26,8 +30,9 @@ import { cn } from '@/lib/utils'
 import { useSpeechPlayer } from '~/composables/useSpeechPlayer'
 import { testIds } from '~/utils/testids'
 import TaskBlock from './agent/TaskBlock.vue'
+import TaskResultNote from './agent/TaskResultNote.vue'
 import BranchSwitcher from './BranchSwitcher.vue'
-import { messageBlocks, messageText } from './chat-format'
+import { isTaskResultMessage, messageBlocks, messageText, taskResultsOf } from './chat-format'
 import { messageCompaction } from './compaction/compaction'
 import CompactionDivider from './compaction/CompactionDivider.vue'
 import MessageActions from './MessageActions.vue'
@@ -109,9 +114,14 @@ const emit = defineEmits<{
 
 const editing = ref(false)
 
-/** Opens the editor on a user message (Edit button, ↑ in an empty composer). */
+/** + Phase 10: the carrier of a turn the server started for finished background agents (never edited). */
+const carrier = computed(() => isTaskResultMessage(props.message))
+/** The results a carrier holds, in part order. */
+const carrierResults = computed(() => (carrier.value ? [...taskResultsOf([props.message]).values()] : []))
+
+/** Opens the editor on a user message (Edit button, ↑ in an empty composer); never on a carrier. */
 function startEdit() {
-  if (props.message.role === 'user' && !props.busy)
+  if (props.message.role === 'user' && !props.busy && !carrier.value)
     editing.value = true
 }
 
@@ -225,7 +235,21 @@ const actionsClass = computed(() => {
 
 <template>
   <div
-    v-if="message.role === 'user'"
+    v-if="carrier"
+    :data-testid="testIds.messageUser"
+    :data-message-id="message.id"
+    data-status="done"
+    :data-compacted="compacted || undefined"
+    :class="cn('flex min-w-0 flex-col items-start gap-1', compactedClass)"
+  >
+    <TaskResultNote v-for="result in carrierResults" :key="result.taskId" :result="result" variant="turn" />
+    <p aria-hidden="true" class="text-xs text-muted-foreground">
+      Sent to the agent
+    </p>
+  </div>
+
+  <div
+    v-else-if="message.role === 'user'"
     :data-testid="testIds.messageUser"
     :data-message-id="message.id"
     data-status="done"
@@ -307,6 +331,7 @@ const actionsClass = computed(() => {
         :variant="compaction?.variants.get(block.index) ?? 'history'"
       />
       <SteerNote v-else-if="block.kind === 'steer'" :class="blockClass(block.index)" :steer="block.steer" />
+      <TaskResultNote v-else-if="block.kind === 'task-result'" :class="blockClass(block.index)" :result="block.part" variant="inline" />
       <TaskBlock
         v-else-if="block.kind === 'task'"
         :class="blockClass(block.index)"

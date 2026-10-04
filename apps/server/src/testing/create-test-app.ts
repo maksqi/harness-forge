@@ -20,8 +20,14 @@
 // Phase 9 (C24-T5): `projectFiles` installs the mention file service (`'fake'`: `createFakeProjectFileService()` of
 // ./fake-project-files.ts, or a ready service); `overrides` and `factories` of the same name win. `createFakeChatRunner`
 // (./fakes.ts) has the steer queue members.
+// Phase 10 (C30-T8): `customizations` installs the customization service (`'fake'`: `createFakeCustomizationService({
+// events })` of ./fake-customizations.ts, or a ready service); `backgroundTasks` installs the background manager of the
+// real chat runner (`'fake'`: `createFakeBackgroundTasks({ events })` of ./fake-background-tasks.ts, or a ready manager;
+// through `createChatRunnerWith(deps, { backgroundTasks })`), exposed as `TestApp.backgroundTasks`. `overrides` and
+// `factories` of the same name (`customizations`, `runs`) win.
 import type { ApiClient } from '@harness-forge/shared'
 import type { Hono } from 'hono'
+import type { BackgroundTasks } from '../chat/background/types.ts'
 import type { Database, Db } from '../db/client.ts'
 import type { ServiceFactories } from '../deps.ts'
 import type { Env } from '../env.ts'
@@ -29,6 +35,7 @@ import type { AppEnv } from '../http/types.ts'
 import type { MemoryLogger } from '../logger.ts'
 import type { BuiltinPlugin } from '../plugins/types.ts'
 import type { CheckpointService } from '../services/checkpoints/types.ts'
+import type { CustomizationService } from '../services/customizations/types.ts'
 import type { ProjectFileService } from '../services/project-files/types.ts'
 import type { ShellRuleService } from '../services/shell-rules/types.ts'
 import type { AppDeps, AppServices } from '../types.ts'
@@ -38,13 +45,16 @@ import { join } from 'node:path'
 import { createApiClient } from '@harness-forge/shared'
 import { createApp } from '../app.ts'
 import { getBuiltinPlugins } from '../builtin-plugins/index.ts'
+import { createChatRunnerWith } from '../chat/index.ts'
 import { openDatabase } from '../db/client.ts'
 import { migrateDatabase } from '../db/migrate.ts'
 import { createDeps, startDeps, stopDeps } from '../deps.ts'
 import { ensureDataDir, loadEnv } from '../env.ts'
 import { createMemoryLogger } from '../logger.ts'
 import { createRedactor } from '../security/redact.ts'
+import { createFakeBackgroundTasks } from './fake-background-tasks.ts'
 import { createFakeCheckpointService } from './fake-checkpoints.ts'
+import { createFakeCustomizationService } from './fake-customizations.ts'
 import { createFakeProjectFileService } from './fake-project-files.ts'
 import { createFakeShellRuleService } from './fake-shell-rules.ts'
 import { createFakeKeyring } from './fakes.ts'
@@ -100,6 +110,19 @@ export interface TestAppOptions {
    * `overrides.projectFiles` / `factories.projectFiles` win.
    */
   projectFiles?: 'fake' | ProjectFileService
+  /**
+   * Phase 10: the customization service: `'fake'` = `createFakeCustomizationService({ events: deps.events })` (a catalog
+   * the test controls, personal definitions in memory), or a ready service; default: the real one.
+   * `overrides.customizations` / `factories.customizations` win.
+   */
+  customizations?: 'fake' | CustomizationService
+  /**
+   * Phase 10: the background manager of the real chat runner: `'fake'` = `createFakeBackgroundTasks({ events:
+   * deps.events })` (scripted launches, `finish`, an in-memory inbox), or a ready manager; default: the runner's own
+   * (`createBackgroundTasks`). Exposed as `TestApp.backgroundTasks`. `overrides.runs` / `factories.runs` win (then the
+   * option is ignored).
+   */
+  backgroundTasks?: 'fake' | BackgroundTasks
 }
 
 export interface TestRequestOptions {
@@ -129,6 +152,11 @@ export interface TestApp {
    * `getConnInfo(c)` of `@hono/node-server/conninfo` works (remote address `127.0.0.1` unless overridden).
    */
   request: (path: string, init?: RequestInit, options?: TestRequestOptions) => Promise<Response>
+  /**
+   * Phase 10: the background manager installed by `options.backgroundTasks` (the fake for `'fake'`), or null without the
+   * option (the runner's own manager is internal).
+   */
+  backgroundTasks: BackgroundTasks | null
   /** Stops the services, closes the database and removes the temp data directory. Idempotent. */
   close: () => Promise<void>
 }
@@ -138,13 +166,29 @@ function usesFakeKeyring(options: TestAppOptions): boolean {
   return options.overrides?.keyring === undefined && options.factories?.keyring === undefined
 }
 
-/** The Phase 8 and Phase 9 service options as factories (`overrides` and `factories` of the same name win). */
-function serviceOptionFactories(options: TestAppOptions): Partial<ServiceFactories> {
-  const { checkpoints, shellRules, projectFiles } = options
+/**
+ * The Phase 8 - 10 service options as factories (`overrides` and `factories` of the same name win). `background` receives
+ * the manager that `backgroundTasks` installs once the runner is built.
+ */
+function serviceOptionFactories(options: TestAppOptions, background: { manager: BackgroundTasks | null }): Partial<ServiceFactories> {
+  const { checkpoints, shellRules, projectFiles, customizations, backgroundTasks } = options
   return {
     ...(checkpoints === undefined ? {} : { checkpoints: () => (checkpoints === 'fake' ? createFakeCheckpointService() : checkpoints) }),
     ...(shellRules === undefined ? {} : { shellRules: (deps: AppDeps) => (shellRules === 'fake' ? createFakeShellRuleService(deps) : shellRules) }),
     ...(projectFiles === undefined ? {} : { projectFiles: () => (projectFiles === 'fake' ? createFakeProjectFileService() : projectFiles) }),
+    ...(customizations === undefined
+      ? {}
+      : { customizations: (deps: AppDeps) => (customizations === 'fake' ? createFakeCustomizationService({ events: deps.events }) : customizations) }),
+    ...(backgroundTasks === undefined
+      ? {}
+      : {
+          runs: (deps: AppDeps) => createChatRunnerWith(deps, {
+            backgroundTasks: (managerDeps) => {
+              background.manager = backgroundTasks === 'fake' ? createFakeBackgroundTasks({ events: managerDeps.events }) : backgroundTasks
+              return background.manager
+            },
+          }),
+        }),
   }
 }
 
@@ -161,6 +205,7 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
     ensureDataDir(env)
     const redactor = createRedactor()
     const logs = createMemoryLogger({ redactor })
+    const background: { manager: BackgroundTasks | null } = { manager: null }
     database = await openDatabase({ path: options.databasePath ?? ':memory:' })
     await migrateDatabase(database.db)
     const deps = createDeps({
@@ -170,7 +215,7 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
       db: database.db,
       builtins: options.builtins ?? getBuiltinPlugins(env),
       overrides: { ...(usesFakeKeyring(options) ? { keyring: createFakeKeyring() } : {}), ...options.overrides },
-      factories: { ...serviceOptionFactories(options), ...options.factories },
+      factories: { ...serviceOptionFactories(options, background), ...options.factories },
     })
     if (options.start ?? true)
       await startDeps(deps)
@@ -193,6 +238,9 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
       logs,
       client,
       request,
+      get backgroundTasks() {
+        return background.manager
+      },
       close: async () => {
         if (closed)
           return

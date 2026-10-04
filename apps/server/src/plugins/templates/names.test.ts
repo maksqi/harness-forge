@@ -8,8 +8,13 @@ describe('reserved command names', () => {
     for (const name of [...CLIENT_COMMANDS, ...HARNESS_COMMANDS])
       expect(isReservedCommandName(name), name).toBe(true)
     expect(HARNESS_COMMANDS).toContain('compact')
-    for (const name of ['tldr', 'wordcount', 'compact-2', 'compactor'])
+    for (const name of ['tldr', 'wordcount', 'compact-2', 'compactor', 'remember-2'])
       expect(isReservedCommandName(name), name).toBe(false)
+  })
+
+  it('treats /remember (Phase 10, the Remember dialog) as taken', () => {
+    expect(CLIENT_COMMANDS).toContain('remember')
+    expect(isReservedCommandName('remember')).toBe(true)
   })
 
   it('the command pack still picks its short names, with suffixes when taken', () => {

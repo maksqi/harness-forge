@@ -9,13 +9,16 @@ import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4Prompt
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type { ChatDetail, HarnessErrorInit, HarnessUIMessage, QueueChangedData, QueueItem, ServerEvent } from '@harness-forge/shared'
 import type { TestApp } from '../testing/create-test-app.ts'
+import type { FakeBackgroundTasks } from '../testing/fake-background-tasks.ts'
+import type { BackgroundTasksHost } from './background/types.ts'
 import { chatDetailSchema, createMessageId, harnessErrorEnvelopeSchema, queueItemSchema } from '@harness-forge/shared'
 import { convertArrayToReadableStream, MockLanguageModelV4 } from 'ai/test'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { KEY_ROTATION_RUNS_MESSAGE } from '../services/maintenance/index.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
+import { createFakeBackgroundTasks } from '../testing/fake-background-tasks.ts'
 import { createRecordingEventBus } from '../testing/fakes.ts'
-import { queueRequestId, startQueuedTurn } from './index.ts'
+import { createChatRunnerWith, queueRequestId, startQueuedTurn } from './index.ts'
 import { createChatQueue } from './queue.ts'
 import { runConflict } from './runs.ts'
 import { answerApprovals, chatBody, messageText, nextEvent, postChat, readSse, readUntil, runnerOf, streamedText, testChatId } from './testing.ts'
@@ -641,5 +644,114 @@ describe('startQueuedTurn', () => {
       throw new Error('not a harness error')
     } })
     expect(bus.ofType('queue.changed').at(-1)?.data).toEqual({ chatId, items: [], removed: [{ id: again.item.id, reason: 'failed', error: 'The next turn could not start.' }] })
+  })
+})
+
+// ---------- Phase 10 (C31-T6): the background wiring of the runner ----------
+
+describe('the background manager of the runner (Phase 10)', () => {
+  it('delegates the task members, calls onChatIdle after a completed run with nothing queued, never after an abort', async () => {
+    const app = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, backgroundTasks: 'fake' })
+    const testkit = registerTestkit(app)
+    const fake = app.backgroundTasks as FakeBackgroundTasks
+    try {
+      // `startDeps` ran the boot sweep once.
+      expect(fake.calls.start).toBe(1)
+      const runner = app.deps.runs
+      const chatId = testChatId(0x9F10)
+      expect(await runner.taskList(chatId)).toEqual([])
+      expect(await runner.stopTask(chatId, 'bgt_0000000000000001')).toBeNull()
+      expect(await runner.stopTasks(chatId)).toBe(0)
+      expect(runner.hasTasks(chatId)).toBe(false)
+      expect(fake.calls).toMatchObject({ list: 1, stop: 1, stopChat: 1, hasRunning: 1 })
+      await runner.boot()
+      expect(fake.calls.start).toBe(2)
+
+      await readSse(await postChat(app, chatBody(chatId, 'hello')))
+      await runnerOf(app).idle()
+      expect(fake.idle).toEqual([chatId])
+
+      // A stopped run keeps the inbox for the next run: no idle delivery.
+      const model = controlledModel(() => textParts('never'))
+      model.hold(1)
+      const stopped = testChatId(0x9F11)
+      const response = await postChat(app, chatBody(stopped, 'go', { modelRef: 'testkit:tools' }))
+      await model.entered(1)
+      void response.body?.cancel()
+      expect(await runner.stop(stopped)).toBe(true)
+      expect(fake.idle).toEqual([chatId])
+      // The chat's Stop never stops a background task.
+      expect(fake.calls.stopChat).toBe(1)
+    }
+    finally {
+      testkit.dispose()
+      await app.close()
+    }
+  })
+
+  it('a run awaiting an approval does not call onChatIdle', async () => {
+    const app = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, backgroundTasks: 'fake' })
+    const fake = app.backgroundTasks as FakeBackgroundTasks
+    try {
+      await readSse(await postChat(app, chatBody(testChatId(0x9F12), 'echo me', { modelRef: 'mock:tool-approval' })))
+      await runnerOf(app).idle()
+      expect(fake.idle).toEqual([])
+    }
+    finally {
+      await app.close()
+    }
+  })
+
+  it('stopAll clears the queues, then stops the background tasks, then the runs', async () => {
+    const order: string[] = []
+    const fake = createFakeBackgroundTasks()
+    const app = await createTestApp({
+      env: { HF_MOCK_PROVIDER: '1' },
+      backgroundTasks: { ...fake, stopAll: async () => {
+        order.push('background')
+        await fake.stopAll()
+      } },
+    })
+    const testkit = registerTestkit(app)
+    app.deps.events.subscribe((event) => {
+      if (event.type === 'queue.changed' || event.type === 'run.finished')
+        order.push(event.type)
+    })
+    try {
+      const model = controlledModel(() => textParts('never'))
+      model.hold(1)
+      const chatId = testChatId(0x9F13)
+      const response = await postChat(app, chatBody(chatId, 'go', { modelRef: 'testkit:tools' }))
+      await model.entered(1)
+      await enqueued(app, chatId, 'queued before shutdown')
+      void response.body?.cancel()
+      order.length = 0
+      await app.deps.runs.stopAll()
+      expect(order).toEqual(['queue.changed', 'background', 'run.finished'])
+    }
+    finally {
+      testkit.dispose()
+      await app.close()
+    }
+  })
+
+  it('the host starts a task turn with origin task (run.started carries the user message id) and tells whether a run holds the chat', async () => {
+    let host: BackgroundTasksHost | null = null
+    const runner = createChatRunnerWith(t.deps, {
+      backgroundTasks: (_deps, given) => {
+        host = given
+        return createFakeBackgroundTasks()
+      },
+    })
+    const chatId = newChatId()
+    const body = chatBody(chatId, 'results arrived')
+    const started = nextEvent(t, 'run.started', event => event.data.chatId === chatId)
+    const response = await host!.startTaskTurn(body, { logger: t.deps.logger, requestId: 'task_1' })
+    expect(host!.hasRun(chatId)).toBe(true)
+    await response.text()
+    await runner.idle()
+    expect((await started).data).toMatchObject({ chatId, origin: 'task', userMessageId: body.message.id })
+    expect(host!.hasRun(chatId)).toBe(false)
+    await runner.stopAll()
   })
 })

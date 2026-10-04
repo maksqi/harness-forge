@@ -1,8 +1,11 @@
 import type { CreateDepsOptions } from './deps.ts'
 import type { CheckpointService } from './services/checkpoints/types.ts'
+import type { CustomizationService } from './services/customizations/types.ts'
 import type { ProjectFileService } from './services/project-files/types.ts'
 import type { ShellRuleService } from './services/shell-rules/types.ts'
+import type { FakeBackgroundTasks } from './testing/fake-background-tasks.ts'
 import type { FakeCheckpointService } from './testing/fake-checkpoints.ts'
+import type { FakeCustomizationService } from './testing/fake-customizations.ts'
 import type { FakeProjectFileService } from './testing/fake-project-files.ts'
 import type { FakeProjectService } from './testing/fake-projects.ts'
 import type { FakeShellRuleService } from './testing/fake-shell-rules.ts'
@@ -15,17 +18,20 @@ import { getConnInfo } from '@hono/node-server/conninfo'
 import { afterEach, describe, expect, it } from 'vitest'
 import { chatBody, postChat, readSse, runnerOf, streamedText, testChatId } from './chat/testing.ts'
 import { openDatabase } from './db/client.ts'
-import { createDeps, SERVICE_FACTORIES, SERVICE_NAMES, SHUTDOWN_STEPS, startDeps, stopDeps } from './deps.ts'
+import { BOOT_STEPS, createDeps, SERVICE_FACTORIES, SERVICE_NAMES, SHUTDOWN_STEPS, startDeps, stopDeps } from './deps.ts'
 import { EnvError, loadEnv } from './env.ts'
 import { createMemoryLogger } from './logger.ts'
 import { createPluginInstaller } from './plugins/install/index.ts'
 import { createRedactor } from './security/redact.ts'
 import { createCheckpointService } from './services/checkpoints/index.ts'
+import { createCustomizationService } from './services/customizations/index.ts'
 import { createDataService } from './services/data/index.ts'
 import { createProjectFileService } from './services/project-files/index.ts'
 import { createProjectService } from './services/projects/index.ts'
 import { SAMPLE_SHARE_TOKEN } from './testing/api-samples.ts'
 import { createTestApp } from './testing/create-test-app.ts'
+import { createFakeBackgroundTasks } from './testing/fake-background-tasks.ts'
+import { createFakeCustomizationService } from './testing/fake-customizations.ts'
 import { createFakeProjectFileService } from './testing/fake-project-files.ts'
 import { createFakeProjectService } from './testing/fake-projects.ts'
 import {
@@ -471,7 +477,7 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
     await runnerOf(t).idle()
   })
 
-  it('startDeps order: projects -> checkpoints -> installer -> plugins -> catalog -> mcp -> data (last)', async () => {
+  it('startDeps order: projects -> checkpoints -> runs (Phase 10) -> installer -> plugins -> catalog -> mcp -> data (last)', async () => {
     const order: string[] = []
     const wrap = <K extends 'projects' | 'checkpoints' | 'plugins' | 'catalog' | 'mcp' | 'data'>(name: K, make: (d: AppDeps) => AppDeps[K]) => (d: AppDeps): AppDeps[K] => {
       const real = make(d) as AppDeps[K] & { start: () => Promise<void> }
@@ -504,8 +510,12 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
       order.push(name)
       await start()
     }
+    const boot = t.deps.runs.boot
     const deps = new Proxy(t.deps, {
       get(target, key, receiver) {
+        // Phase 10: the boot sweep of background tasks (`runs.boot()`) right after the checkpoint store.
+        if (key === 'runs')
+          return { ...target.runs, boot: watched('runs', boot) }
         if (key === 'plugins')
           return { ...target.plugins, start: watched('plugins', plugins) }
         if (key === 'catalog')
@@ -516,10 +526,11 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
       },
     })
     await startDeps(deps)
-    expect(order).toEqual(['projects', 'checkpoints', 'installer', 'plugins', 'catalog', 'mcp', 'data'])
+    expect(order).toEqual(['projects', 'checkpoints', 'runs', 'installer', 'plugins', 'catalog', 'mcp', 'data'])
+    expect(order).toEqual([...BOOT_STEPS])
   })
 
-  it('stopDeps order: data (first) -> runs -> projectFiles -> checkpoints -> plugins -> mcp -> catalog -> events; a failing step still lets the next run', async () => {
+  it('stopDeps order: data (first) -> runs -> customizations -> projectFiles -> checkpoints -> plugins -> mcp -> catalog -> events; a failing step still lets the next run', async () => {
     const t = await createTestApp()
     cleanups.push(() => t.close())
     const order: string[] = []
@@ -533,6 +544,8 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
         switch (key) {
           case 'data': return { ...target.data, stop: step('data', true) }
           case 'runs': return { ...target.runs, stopAll: step('runs') }
+          // Phase 10: the catalog caches right after the runs (a synchronous `stop()`).
+          case 'customizations': return { ...target.customizations, stop: () => void order.push('customizations') }
           // Phase 9: a synchronous `stop()` that throws is a failed step like an async one.
           case 'projectFiles': return { ...target.projectFiles, stop: () => {
             order.push('projectFiles')
@@ -548,7 +561,7 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
       },
     })
     await expect(stopDeps(deps)).resolves.toBeUndefined()
-    expect(order).toEqual(['data', 'runs', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(order).toEqual(['data', 'runs', 'customizations', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
     expect(order).toEqual([...SHUTDOWN_STEPS])
     const failures = t.logs.records.filter(record => record.msg === 'shutdown step failed').map(record => record.step)
     expect(failures).toEqual(['data', 'projectFiles', 'checkpoints'])
@@ -631,8 +644,9 @@ describe('phase 9 skeleton (project files, the steer queue members, the stop ord
   })
 
   it('the stop order: the runs (queues first, inside stopAll) -> the file index -> checkpoints', async () => {
-    expect(SHUTDOWN_STEPS).toEqual(['data', 'runs', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
-    expect(SHUTDOWN_STEPS.indexOf('projectFiles')).toBe(SHUTDOWN_STEPS.indexOf('runs') + 1)
+    // Phase 10: the customization catalog sits between the runs and the file index.
+    expect(SHUTDOWN_STEPS).toEqual(['data', 'runs', 'customizations', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(SHUTDOWN_STEPS.indexOf('projectFiles')).toBe(SHUTDOWN_STEPS.indexOf('runs') + 2)
     // A runner's stopAll runs to its end (queues cleared, runs stopped) before the index is dropped.
     const t = await createTestApp()
     cleanups.push(() => t.close())
@@ -685,5 +699,194 @@ describe('phase 9 skeleton (project files, the steer queue members, the stop ord
     cleanups.push(() => t.close())
     for (const member of ['queueList', 'enqueue', 'dequeue', 'clearQueue', 'stop', 'stopAll'] as const)
       expect(typeof t.deps.runs[member], member).toBe('function')
+  })
+})
+
+describe('phase 10 skeleton (customizations, the background task members, the boot sweep, the start and stop order)', () => {
+  const PROJECT = 'prj_AAAAAAAAAAAAAAAA'
+  const CHAT = '0199a8f0-0000-7000-8000-00000000c001'
+
+  it('wires customizations: a builtins-only catalog; load of a builtin works; personal members and source answer not_implemented', async () => {
+    const t = await createTestApp()
+    cleanups.push(() => t.close())
+    expect(SERVICE_NAMES).toContain('customizations')
+    // The stub factory has the final signature and the production factory is it.
+    expect(SERVICE_FACTORIES.customizations).toBe(createCustomizationService)
+    const { customizations } = t.deps
+
+    const global = await customizations.catalog(null)
+    expect(global.projectId).toBeNull()
+    expect(global.project).toBeNull()
+    expect(global.agents().map(entry => [entry.name, entry.source, entry.state])).toEqual([['explore', 'builtin', 'active'], ['general', 'builtin', 'active']])
+    expect(global.commands()).toEqual([])
+    expect(global.skills()).toEqual([])
+    expect(global.agent('general-purpose')?.name).toBe('general')
+    expect(global.agent('reviewer')).toBeNull()
+    expect(global.diagnostics).toEqual([])
+
+    const scoped = await customizations.catalog(PROJECT, { refresh: true })
+    expect(scoped.projectId).toBe(PROJECT)
+    expect(scoped.project).toMatchObject({ id: PROJECT, available: true, folders: [] })
+    expect(scoped.entries.map(entry => entry.name)).toEqual(['explore', 'general'])
+
+    const list = await customizations.list({ kind: 'command' })
+    expect(list).toMatchObject({ items: [], diagnostics: [], project: null })
+    expect((await customizations.list({})).items.map(entry => entry.name)).toEqual(['explore', 'general'])
+    // An unknown project is the project service's 404.
+    await expect(customizations.list({ projectId: PROJECT })).rejects.toMatchObject({ code: 'not_found' })
+    // A run never fails on its catalog: an unknown project still answers the builtins.
+    expect((await customizations.catalog(PROJECT)).agents()).toHaveLength(2)
+
+    const explore = global.agent('explore')!
+    const loaded = await customizations.load(explore)
+    expect(loaded.definition).toMatchObject({ kind: 'agent', fields: { name: 'explore', tools: null, model: null } })
+    expect(loaded.diagnostics).toEqual([])
+    await expect(customizations.load({ ...explore, source: 'project', path: '.harness/agents/explore.md' })).rejects.toMatchObject({ code: 'not_implemented' })
+
+    const id = 'cus_AAAAAAAAAAAAAAAA'
+    await expect(customizations.source({ kind: 'agent', name: 'explore', source: 'builtin' })).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(customizations.get(id)).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(customizations.create({ kind: 'agent', content: '---\nname: a\n---\n' })).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(customizations.update(id, { enabled: false })).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(customizations.remove(id)).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(customizations.exportBackup()).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(customizations.restoreBackup([])).rejects.toMatchObject({ code: 'not_implemented' })
+    expect(customizations.invalidate(PROJECT)).toBeUndefined()
+    expect(customizations.invalidate(null)).toBeUndefined()
+    expect(customizations.stop()).toBeUndefined()
+    expect(customizations.stop()).toBeUndefined()
+
+    const aborted = new AbortController()
+    aborted.abort(new Error('gone'))
+    await expect(customizations.catalog(null, { signal: aborted.signal })).rejects.toThrow('gone')
+  })
+
+  it('the ChatRunner has the background task members; the stub answers empty and stopAll resolves', async () => {
+    const t = await createTestApp()
+    cleanups.push(() => t.close())
+    const { runs } = t.deps
+    for (const member of ['boot', 'taskList', 'stopTask', 'stopTasks', 'hasTasks', 'stopAll'] as const)
+      expect(typeof runs[member], member).toBe('function')
+    await expect(runs.boot()).resolves.toBeUndefined()
+    expect(await runs.taskList(CHAT)).toEqual([])
+    expect(await runs.stopTask(CHAT, 'bgt_AAAAAAAAAAAAAAAA')).toBeNull()
+    expect(await runs.stopTasks(CHAT)).toBe(0)
+    expect(runs.hasTasks(CHAT)).toBe(false)
+  })
+
+  it('bOOT_STEPS: runs.boot() right after checkpoints.start(), before the installer and the plugins; a failing step fails the boot', async () => {
+    expect(BOOT_STEPS).toEqual(['projects', 'checkpoints', 'runs', 'installer', 'plugins', 'catalog', 'mcp', 'data'])
+    expect(BOOT_STEPS.indexOf('runs')).toBe(BOOT_STEPS.indexOf('checkpoints') + 1)
+    const t = await createTestApp({ start: false })
+    cleanups.push(() => t.close())
+    const order: string[] = []
+    const deps = new Proxy(t.deps, {
+      get(target, key, receiver) {
+        if (key === 'checkpoints')
+          return { ...target.checkpoints, start: async () => void order.push('checkpoints') }
+        if (key === 'runs') {
+          return { ...target.runs, boot: async () => {
+            order.push('runs')
+            throw new Error('sweep failed')
+          } }
+        }
+        if (key === 'installer')
+          return { ...target.installer, recover: async () => void order.push('installer') }
+        return Reflect.get(target, key, receiver)
+      },
+    })
+    await expect(startDeps(deps)).rejects.toThrow('sweep failed')
+    expect(order).toEqual(['checkpoints', 'runs'])
+  })
+
+  it('the boot sweep runs once per boot (startDeps) and the background tasks stop inside runs.stopAll, before the catalog', async () => {
+    const tasks = createFakeBackgroundTasks()
+    const t = await createTestApp({ backgroundTasks: tasks })
+    expect(t.backgroundTasks).toBe(tasks)
+    expect(tasks.calls.start).toBe(1)
+    const order: string[] = []
+    const deps = new Proxy(t.deps, {
+      get(target, key, receiver) {
+        if (key === 'customizations')
+          return { ...target.customizations, stop: () => void order.push(`customizations (tasks stopped: ${tasks.calls.stopAll})`) }
+        return Reflect.get(target, key, receiver)
+      },
+    })
+    await stopDeps(deps)
+    expect(order).toEqual(['customizations (tasks stopped: 1)'])
+    await t.close()
+  })
+
+  it('createTestApp accepts customizations: the fake and ready services; overrides and factories win', async () => {
+    const t = await createTestApp({ customizations: 'fake' })
+    cleanups.push(() => t.close())
+    const fake = t.deps.customizations as FakeCustomizationService
+    const created = await fake.create({ kind: 'command', content: '---\nname: review\ndescription: Review the diff.\n---\nReview $ARGUMENTS' })
+    expect(created).toMatchObject({ kind: 'command', name: 'review', enabled: true })
+    expect((await fake.catalog(null)).command('review')).toMatchObject({ source: 'user', id: created.id, state: 'active' })
+    expect(fake.calls.create).toBe(1)
+
+    const ready = createFakeCustomizationService()
+    const u = await createTestApp({ start: false, customizations: ready })
+    cleanups.push(() => u.close())
+    expect(u.deps.customizations).toBe(ready)
+
+    const override: CustomizationService = createFakeCustomizationService({ builtins: false })
+    const v = await createTestApp({ start: false, customizations: 'fake', overrides: { customizations: override } })
+    cleanups.push(() => v.close())
+    expect(v.deps.customizations).toBe(override)
+
+    const w = await createTestApp({ start: false, customizations: 'fake', factories: { customizations: createCustomizationService } })
+    cleanups.push(() => w.close())
+    await expect(w.deps.customizations.get('cus_AAAAAAAAAAAAAAAA')).rejects.toMatchObject({ code: 'not_implemented' })
+  })
+
+  it('createTestApp accepts backgroundTasks: the real runner delegates its task members to the fake', async () => {
+    const t = await createTestApp({ backgroundTasks: 'fake' })
+    cleanups.push(() => t.close())
+    const tasks = t.backgroundTasks as FakeBackgroundTasks
+    expect(tasks).not.toBeNull()
+    expect(tasks.calls.start).toBe(1)
+    tasks.tasks.set('bgt_AAAAAAAAAAAAAAAA', {
+      id: 'bgt_AAAAAAAAAAAAAAAA',
+      chatId: CHAT,
+      messageId: 'msg_aaaaaaaaaaaaaaaa',
+      toolCallId: 'call_1',
+      origin: 'request',
+      status: 'running',
+      output: { status: 'running', type: 'explore', description: 'Look', modelRef: 'mock:echo', steps: [], stepsOmitted: 0, report: '', startedAt: 1 },
+      createdAt: 1,
+      finishedAt: null,
+      deliveredAt: null,
+      deliveredMessageId: null,
+    })
+    expect(t.deps.runs.hasTasks(CHAT)).toBe(true)
+    expect((await t.deps.runs.taskList(CHAT)).map(task => task.id)).toEqual(['bgt_AAAAAAAAAAAAAAAA'])
+    expect(await t.deps.runs.stopTask(CHAT, 'bgt_AAAAAAAAAAAAAAAA')).toMatchObject({ status: 'aborted' })
+    expect(await t.deps.runs.stopTasks(CHAT)).toBe(0)
+    expect(t.deps.runs.hasTasks(CHAT)).toBe(false)
+
+    // Without the option the runner keeps its own manager (not exposed); `overrides.runs` wins over the option.
+    const u = await createTestApp({ start: false })
+    cleanups.push(() => u.close())
+    expect(u.backgroundTasks).toBeNull()
+  })
+
+  it('customizations has no boot step and stops at shutdown', async () => {
+    const touched: string[] = []
+    const watched = (d: AppDeps): CustomizationService => {
+      const real = createCustomizationService(d)
+      return new Proxy(real, {
+        get(target, key, receiver) {
+          touched.push(String(key))
+          return Reflect.get(target, key, receiver)
+        },
+      })
+    }
+    const t = await createTestApp({ factories: { customizations: watched } })
+    cleanups.push(() => t.close())
+    expect(touched).toEqual([])
+    await t.close()
+    expect(touched).toEqual(['stop'])
   })
 })

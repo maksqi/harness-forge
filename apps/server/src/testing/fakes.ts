@@ -26,6 +26,13 @@
 // `clearQueue`; an in-memory queue per chat, `queue.changed` on the `events` option); ./fake-project-files.ts adds
 // `createFakeProjectFileService` (paths in memory ranked by the shared `rankPaths`, a fixed `FileRef` for `attach`,
 // call counters), installed with `createTestApp({ projectFiles: 'fake' })`.
+//
+// Phase 10 (C30-T8): `createFakeChatRunner` has the background task members (`boot`, `taskList`, `stopTask`,
+// `stopTasks`, `hasTasks`), delegated to its `background` manager (default `createFakeBackgroundTasks()` of
+// ./fake-background-tasks.ts); `stopAll` stops the queues, then the background tasks, then the runs.
+// ./fake-customizations.ts adds `createFakeCustomizationService` (a catalog the test controls, personal definitions in
+// memory), installed with `createTestApp({ customizations: 'fake' })`; `createTestApp({ backgroundTasks })` installs a
+// background manager in the real chat runner.
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type {
   DataCleanupPreview,
@@ -46,6 +53,7 @@ import type {
   ShareSummary,
   ShareView,
 } from '@harness-forge/shared'
+import type { BackgroundTasks } from '../chat/background/types.ts'
 import type { ActiveRun, ChatRunner, QueueClearReason } from '../chat/types.ts'
 import type { IconService } from '../providers/types.ts'
 import type { DataService } from '../services/data/types.ts'
@@ -72,7 +80,10 @@ import { rejectsNotImplemented } from '../not-implemented.ts'
 import { createFilesService } from '../services/files/index.ts'
 import { busyError } from '../services/maintenance/index.ts'
 import { secretHint } from '../services/secrets/hint'
+import { createFakeBackgroundTasks } from './fake-background-tasks.ts'
 
+export { createFakeBackgroundTasks } from './fake-background-tasks.ts'
+export type { FakeBackgroundTasks, FakeBackgroundTasksOptions, FakeTaskFinish } from './fake-background-tasks.ts'
 export { createFakeChatsService } from './fake-chats.ts'
 export {
   createFakeCheckpointBlobStore,
@@ -83,6 +94,8 @@ export {
   insertChangeRows,
 } from './fake-checkpoints.ts'
 export type { FakeCheckpointBlobStore, FakeCheckpointService, FakeJournalRecord, TestChangeRowInput } from './fake-checkpoints.ts'
+export { catalogEntryKey, createFakeCustomizationService, fakeCatalogEntry } from './fake-customizations.ts'
+export type { FakeCustomizationService, FakeCustomizationServiceOptions } from './fake-customizations.ts'
 /** Deterministic, rotatable keyring (C16, ./fake-keyring.ts): the same subkey bytes as the Phase 1 – 6 fake. */
 export { createFakeKeyring, FAKE_KEYRING_SEED, fakeMasterKey } from './fake-keyring.ts'
 export { createFakeAudioService, createFakeImageService, NO_IMAGE_MODEL_MESSAGE } from './fake-media.ts'
@@ -266,6 +279,8 @@ export interface FakeChatRunner extends ChatRunner {
   readonly awaitingApproval: Set<string>
   /** Phase 9: every item that left a queue (through `dequeue`, `clearQueue`, `stop` or `stopAll`), in order. */
   readonly removals: Array<QueueRemoval & { chatId: string }>
+  /** Phase 10: the background manager the task members delegate to (`options.backgroundTasks`, else a fake). */
+  readonly background: BackgroundTasks
 }
 
 export interface FakeChatRunnerOptions {
@@ -273,6 +288,8 @@ export interface FakeChatRunnerOptions {
   events?: Pick<EventBus, 'emit'>
   /** Clock of `QueueItem.createdAt` (default `Date.now`). */
   now?: () => number
+  /** Phase 10: the background manager (default `createFakeBackgroundTasks({ events, now })`). */
+  backgroundTasks?: BackgroundTasks
 }
 
 /** `turnOnly` of the fake queue: the first text part starts with `/` (a server command; no registry lookup). */
@@ -290,6 +307,10 @@ function queueConflict(reason: 'run-idle' | 'queue-full' | 'exists', chatId: str
  * `streaming` entries, `stop` records the id, removes the entry and answers like the real runner (true unless the run
  * was missing or `finishing`). `start` answers `not_implemented`; `overrides` replace any member.
  *
+ * Phase 10: `boot` / `taskList` / `stopTask` / `stopTasks` / `hasTasks` delegate to `background` (`start`, `list`,
+ * `stop`, `stopChat`, `hasRunning`); the chat's `stop` never stops a background task; `stopAll` empties every queue,
+ * then stops the background tasks (`background.stopAll()`), then the runs.
+ *
  * Phase 9: the steer queue follows the `ChatRunner` contract where the routes can see it, without a database: `enqueue`
  * refuses with `conflict` (`run-idle` without a run or an `awaitingApproval` entry, `queue-full` at
  * `LIMITS.queueItemsMax`, `exists` for an id queued in any chat) but checks neither the chat nor the file parts (stored
@@ -303,6 +324,7 @@ export function createFakeChatRunner(overrides: Partial<ChatRunner> = {}, option
   const queues = new Map<string, QueueItem[]>()
   const awaitingApproval = new Set<string>()
   const removals: Array<QueueRemoval & { chatId: string }> = []
+  const background = options.backgroundTasks ?? createFakeBackgroundTasks({ ...(options.events === undefined ? {} : { events: options.events }), now })
 
   const queueOf = (chatId: string): QueueItem[] => [...(queues.get(chatId) ?? [])]
 
@@ -334,6 +356,7 @@ export function createFakeChatRunner(overrides: Partial<ChatRunner> = {}, option
     queues,
     awaitingApproval,
     removals,
+    background,
     start: rejectsNotImplemented('fake runs.start'),
     resume: () => null,
     stop,
@@ -345,9 +368,15 @@ export function createFakeChatRunner(overrides: Partial<ChatRunner> = {}, option
     stopAll: async () => {
       for (const chatId of [...queues.keys()])
         clearQueue(chatId, 'stopped')
+      await background.stopAll()
       for (const chatId of [...phases.keys()])
         await stop(chatId)
     },
+    boot: () => background.start(),
+    taskList: chatId => background.list(chatId),
+    stopTask: (chatId, taskId) => background.stop(chatId, taskId),
+    stopTasks: chatId => background.stopChat(chatId),
+    hasTasks: chatId => background.hasRunning(chatId),
     queueList: chatId => queueOf(chatId),
     enqueue: async (chatId, body) => {
       if (!phases.has(chatId) && !awaitingApproval.has(chatId))

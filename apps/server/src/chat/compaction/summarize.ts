@@ -7,10 +7,12 @@
 // instructions and the output tokens. The summary is trimmed and capped at `LIMITS.compactionSummaryMaxChars`; an empty
 // one is a failure. One usage row with purpose `compact` (`messageId` = the reply) and its cost through
 // `session.addExtraCost`. A failed call rejects with the error mapped for the summarizer's provider (an abort of the
-// signal rejects with the abort as is). The summary is never logged at info. Only mock models in tests.
+// signal rejects with the abort as is). The summary is never logged at info. Only mock models in tests. Phase 10
+// (C31-T5): the host is the structural `ChildSession` (`subagent/host.ts`; a chat run's `RunSession` fits); behavior
+// unchanged.
 import type { LanguageModelUsage, ModelMessage } from 'ai'
 import type { ResolvedModel } from '../../providers/types.ts'
-import type { RunSession } from '../pipeline.ts'
+import type { ChildSession } from '../subagent/host.ts'
 import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { generateText } from 'ai'
 import { CHARS_PER_TOKEN, CONTEXT_BUDGET_RATIO } from '../context.ts'
@@ -35,7 +37,7 @@ export interface SummarizeInput {
    * The run: deps (providers, usage rows), settings (`compactModelRef`), chat and reply ids, `addExtraCost`, the
    * logger.
    */
-  readonly session: RunSession
+  readonly session: ChildSession
   /** The run's model (the summarizer when `compactModelRef` is unset or cannot be resolved). */
   readonly runModel: ResolvedModel
   /** What to summarize, as the model sees it (rendered as a text transcript). */
@@ -87,7 +89,7 @@ function cutSummary(text: string, max: number): string {
 }
 
 /** The summarizer: `compactModelRef` when it resolves, else the run model (with a warning). */
-export async function summarizerModel(session: RunSession, runModel: ResolvedModel, signal: AbortSignal): Promise<ResolvedModel> {
+export async function summarizerModel(session: ChildSession, runModel: ResolvedModel, signal: AbortSignal): Promise<ResolvedModel> {
   const { deps, prepared, logger } = session.ctx
   const ref = prepared.settings.compactModelRef
   if (ref === null || ref === runModel.modelRef)

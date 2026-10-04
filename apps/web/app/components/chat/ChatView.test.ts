@@ -16,10 +16,27 @@ import { dispatchServerEvent } from '~/composables/useServerEvents'
 import { useChatsStore } from '~/stores/chats'
 import { useProjectsStore } from '~/stores/projects'
 import { testIds } from '~/utils/testids'
-import { assistantMessage, changeBatchId, chatDetail, chatId, messageBranch, projectId, projectSummary, queueItem, restoreResult, rewindPreview, userMessage } from '~/utils/testing/fixtures'
+import {
+  assistantMessage,
+  backgroundTask,
+  backgroundTaskId,
+  changeBatchId,
+  chatDetail,
+  chatId,
+  messageBranch,
+  projectId,
+  projectSummary,
+  queueItem,
+  restoreResult,
+  rewindPreview,
+  taskOutput,
+  taskResultCarrier,
+  userMessage,
+} from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import TodoStrip from './agent/TodoStrip.vue'
+import { AGENT_TASK_CONTEXT } from './chat-context'
 import ChatTranscript from './ChatTranscript.vue'
 import ChatView from './ChatView.vue'
 import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
@@ -1323,5 +1340,63 @@ describe('chatView: compaction and todos (Phase 9)', () => {
     finally {
       mock.todoState.mockImplementation(mock.realTodoState!)
     }
+  })
+})
+
+describe('chatView: background agents (Phase 10)', () => {
+  const U1 = 'msg_user000000000001'
+  const running = backgroundTask({ chatId: chatId(30), status: 'running', finishedAt: null, output: taskOutput({ status: 'running', description: 'Find flaky tests', finishedAt: undefined }) })
+
+  it('stacks the background agents between the todo strip and the queue, and stops one through the session', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(30), modelRef: MODEL, messages: [userMessage(U1, 'Hi')] }))
+    const { wrapper } = mountView({ chatId: chatId(30) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    expect(wrapper.find(`[data-testid="${testIds.backgroundAgents}"]`).exists()).toBe(false)
+
+    dispatchServerEvent(createServerEvent('task.changed', { chatId: chatId(30), task: running }))
+    dispatchServerEvent(createServerEvent('queue.changed', { chatId: chatId(30), items: [queueItem()] }))
+    await flushPromises()
+    const dock = wrapper.get(`[data-testid="${testIds.backgroundAgents}"]`)
+    expect(dock.attributes('data-count')).toBe('1')
+    const queued = wrapper.get(`[data-testid="${testIds.queuedMessages}"]`)
+    expect(dock.element.compareDocumentPosition(queued.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    api.chatTasks.stop.mockResolvedValueOnce({ ...running, status: 'completed', finishedAt: 1_759_000_050_000 })
+    wrapper.getComponent({ name: 'BackgroundAgents' }).vm.$emit('stop', running.id)
+    await until(() => mock.toast.mock.calls.some(call => call[0] === 'It already finished.'))
+    expect(api.chatTasks.stop).toHaveBeenCalledWith({ params: { id: chatId(30), taskId: running.id } })
+  })
+
+  it('gives task blocks the live task, the delivered result of the path and the dock reveal', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const carrier = taskResultCarrier('msg_carrier000000001')
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(31), modelRef: MODEL, messages: [userMessage(U1, 'Hi'), carrier] }))
+    const Probe = defineComponent({
+      setup() {
+        const context = inject(AGENT_TASK_CONTEXT, null)
+        return () => h('output', {
+          'data-testid': 'agent-task-context',
+          'data-live': context?.task(backgroundTaskId(2))?.status ?? 'none',
+          'data-result': context?.result(backgroundTaskId(1))?.output.status ?? 'none',
+          'data-project-id': context?.projectId() ?? 'none',
+          'onClick': () => context?.reveal(backgroundTaskId(2)),
+        })
+      },
+    })
+    const wrapper = mount(defineComponent({
+      setup: () => () => h(TooltipProvider, null, { default: () => h(ChatView, { chatId: chatId(31) }, { header: () => h(Probe) }) }),
+    }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
+    mounted.push(wrapper)
+    await until(() => wrapper.get('[data-testid="agent-task-context"]').attributes('data-result') === 'completed')
+    // The carrier renders its result notes, not a bubble.
+    expect(wrapper.find(`[data-testid="${testIds.taskResult}"][data-variant="turn"]`).exists()).toBe(true)
+    dispatchServerEvent(createServerEvent('task.changed', { chatId: chatId(31), task: { ...running, id: backgroundTaskId(2), chatId: chatId(31) } }))
+    await flushPromises()
+    const probe = wrapper.get('[data-testid="agent-task-context"]')
+    expect(probe.attributes('data-live')).toBe('running')
+    expect(probe.attributes('data-project-id')).toBe('none')
+    await probe.trigger('click')
+    expect(wrapper.getComponent({ name: 'BackgroundAgents' }).props('reveal')).toEqual({ taskId: backgroundTaskId(2), n: 1 })
   })
 })

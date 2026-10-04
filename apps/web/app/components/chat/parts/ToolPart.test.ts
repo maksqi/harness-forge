@@ -6,7 +6,7 @@ import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { planApprovalPart, shellOutput, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
+import { planApprovalPart, shellOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
 import { TOOL_BODY_PREVIEW_CHARS } from '../chat-format'
@@ -718,5 +718,40 @@ describe('toolPart: agent tools (Phase 9)', () => {
     await row(invalid).get('button').trigger('click')
     expect(invalid.get(`[data-testid="${testIds.toolRowOutput}"]`).find(`[data-testid="${testIds.todoList}"]`).exists()).toBe(false)
     expect(invalid.get('[data-label="error"]').text()).toContain('Todo ids must be unique.')
+  })
+})
+
+describe('toolPart: skills and plan files (Phase 10 seams)', () => {
+  const planPart = (output: unknown) =>
+    ({ type: 'tool-exit_plan_mode', toolCallId: 'call_plan_1', state: 'output-available', input: { plan: '# Move auth' }, output, approval: { id: 'a1', approved: true } }) as ToolPartLike
+
+  it('renders the skill body for a loaded skill, behind the raw toggle', async () => {
+    const wrapper = mountPart(skillPart() as ToolPartLike, false)
+    expect(row(wrapper).attributes('data-tool-name')).toBe('skill')
+    await row(wrapper).get('button').trigger('click')
+    const body = wrapper.get(`[data-testid="${testIds.toolRowOutput}"]`)
+    expect(body.get('[data-slot="skill-body"]').text()).toContain('How to write the release notes')
+    expect(body.find(`[data-testid="${testIds.toolRawToggle}"]`).exists()).toBe(true)
+  })
+
+  it('keeps the generic row for a skill call that failed', async () => {
+    const failed = { type: 'tool-skill', toolCallId: 'call_skill_2', state: 'output-error', input: { name: 'pdf' }, errorText: 'Skills are not available yet.' } as ToolPartLike
+    const wrapper = mountPart(failed, false)
+    await row(wrapper).get('button').trigger('click')
+    expect(wrapper.find('[data-slot="skill-body"]').exists()).toBe(false)
+    expect(wrapper.get('[data-label="error"]').text()).toContain('Skills are not available yet.')
+  })
+
+  it('starts the body of an approved plan with its plan file', async () => {
+    const saved = mountPart(planPart({ approved: true, mode: 'edits', planPath: '.harness/plans/2026-10-04-move-auth.md' }), false)
+    await row(saved).get('button').trigger('click')
+    const body = saved.get(`[data-testid="${testIds.toolRowOutput}"]`)
+    const chip = body.get(`[data-testid="${testIds.planFile}"]`)
+    expect(chip.attributes()).toMatchObject({ 'data-state': 'saved', 'data-path': '.harness/plans/2026-10-04-move-auth.md' })
+    expect(chip.element.compareDocumentPosition(body.get('[data-slot="plan-body"]').element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    const v15 = mountPart(planPart({ approved: true, mode: 'ask' }), false)
+    await row(v15).get('button').trigger('click')
+    expect(v15.find(`[data-testid="${testIds.planFile}"]`).exists()).toBe(false)
   })
 })

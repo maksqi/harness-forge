@@ -12,8 +12,8 @@ vi.mock('~/composables/useApi', () => ({ useApi: () => ({}) }))
 
 const items: SlashItem[] = [
   ...clientSlashItems(),
-  { name: 'summarize', description: 'Summarize the chat', kind: 'server', source: 'Core commands' },
-  { name: 'model-card', description: 'Show a model card', kind: 'server', source: 'model-tools' },
+  { name: 'summarize', description: 'Summarize the chat', kind: 'server', source: 'Core commands', group: 'plugin' },
+  { name: 'model-card', description: 'Show a model card', kind: 'server', source: 'model-tools', group: 'plugin' },
 ]
 
 function key(name: string, init: KeyboardEventInit = {}) {

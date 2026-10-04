@@ -10,7 +10,9 @@
 // call without an agent scope, or in another mode, fails with a tool error (it never reports a mode it is not in).
 //
 // The model reads "The user approved the plan. Mode is now <label>. Implement it now; track progress with todo_write."
-// (label "Accept edits" or "Ask").
+// (label "Accept edits" or "Ask"). Phase 10 (ADR-047; the text frozen by C32 in P10-0b, the plan file written by W10.5
+// through `scope.savePlan`): a second line "The plan was saved to <planPath>." when the plan file was written, or "The
+// plan file could not be saved: <planError>." when the write failed (the approval stands either way).
 import type { ToolDefinition, ToolResultOutput } from '@harness-forge/plugin-sdk'
 import type { ExitPlanModeInput, ExitPlanModeOutput } from '@harness-forge/shared'
 import type { AgentRunScope } from '../../chat/agent-scope.ts'
@@ -37,9 +39,13 @@ export function exitPlanModeOutput(scope: AgentRunScope | null): ExitPlanModeOut
   return { approved: true, mode }
 }
 
-/** The text the model reads for an approved `exit_plan_mode` output. */
+/** The text the model reads for an approved `exit_plan_mode` output (the plan file line only with a plan file). */
 export function exitPlanModeModelText(output: ExitPlanModeOutput): string {
-  return `The user approved the plan. Mode is now ${TOOL_MODE_LABELS[output.mode]}. Implement it now; track progress with todo_write.`
+  const approved = `The user approved the plan. Mode is now ${TOOL_MODE_LABELS[output.mode]}. Implement it now; track progress with todo_write.`
+  if (output.planPath !== undefined)
+    return `${approved}\nThe plan was saved to ${output.planPath}.`
+  const planError = (output.planError ?? '').trim().replace(/\.+$/, '')
+  return planError === '' ? approved : `${approved}\nThe plan file could not be saved: ${planError}.`
 }
 
 export function createExitPlanModeTool(): ToolDefinition<ExitPlanModeInput, ExitPlanModeOutput> {

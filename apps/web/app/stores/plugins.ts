@@ -23,8 +23,8 @@ import { createCoalescedTask } from '~/utils/coalesce'
 import { withHarnessErrors } from '~/utils/errors'
 import { omitKey } from '~/utils/records'
 
-/** The `/plugins?filter=` values (docs/DECISIONS.md "UI query parameters"). */
-export const PLUGIN_FILTERS = ['all', 'providers', 'tools', 'mcp', 'commands', 'disabled'] as const
+/** The `/plugins?filter=` values (docs/DECISIONS.md "UI query parameters"; Phase 10: `agents` = "Agents and skills"). */
+export const PLUGIN_FILTERS = ['all', 'providers', 'tools', 'mcp', 'commands', 'agents', 'disabled'] as const
 export type PluginFilter = (typeof PLUGIN_FILTERS)[number]
 
 export type PluginCounts = Record<PluginFilter, number>
@@ -48,7 +48,10 @@ export function parsePluginFilter(value: unknown): PluginFilter {
   return isPluginFilter(raw) ? raw : 'all'
 }
 
-/** True when the plugin belongs to the filter: contributes that type, or is disabled for `disabled`. */
+/**
+ * True when the plugin belongs to the filter: contributes that type (`agents`: agents or skills, plugin API 1.4.0), or is
+ * disabled for `disabled`.
+ */
 export function pluginMatchesFilter(plugin: PluginSummary, filter: PluginFilter): boolean {
   switch (filter) {
     case 'providers':
@@ -59,6 +62,8 @@ export function pluginMatchesFilter(plugin: PluginSummary, filter: PluginFilter)
       return plugin.contributions.mcpServers.length > 0
     case 'commands':
       return plugin.contributions.commands.length > 0
+    case 'agents':
+      return plugin.contributions.agents.length > 0 || plugin.contributions.skills.length > 0
     case 'disabled':
       return !plugin.enabled
     default:
@@ -123,7 +128,7 @@ export const usePluginsStore = defineStore('plugins', () => {
   const byId = computed(() => (id: string): PluginSummary | undefined => index.value.get(id))
   /** Count badges of the Browse filters. */
   const counts = computed<PluginCounts>(() => {
-    const result: PluginCounts = { all: 0, providers: 0, tools: 0, mcp: 0, commands: 0, disabled: 0 }
+    const result: PluginCounts = { all: 0, providers: 0, tools: 0, mcp: 0, commands: 0, agents: 0, disabled: 0 }
     for (const plugin of items.value) {
       for (const filter of PLUGIN_FILTERS) {
         if (pluginMatchesFilter(plugin, filter))

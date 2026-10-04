@@ -13,7 +13,7 @@ import type { Db } from '../../db/client.ts'
 import { Buffer } from 'node:buffer'
 import { sql } from 'drizzle-orm'
 import { getTableConfig } from 'drizzle-orm/sqlite-core'
-import { chats, chatShares, messages, pluginKv, pluginSettings, projects, settings } from '../../db/schema.ts'
+import { chats, chatShares, customizations, messages, pluginKv, pluginSettings, projects, settings } from '../../db/schema.ts'
 import { guardDb } from '../chats/db-errors.ts'
 
 /** Rows per keyset batch. */
@@ -40,10 +40,18 @@ export const REFERENCE_SOURCES: readonly ReferenceSource[] = [
   { table: settings, columns: [settings.value] },
   { table: chats, columns: [chats.settings] },
   { table: projects, columns: [projects.name, projects.path, projects.instructions] },
+  // Phase 10 (ADR-044): personal agents, commands and skills are free text like `projects.instructions`.
+  { table: customizations, columns: [customizations.content, customizations.description] },
 ]
 
 /** Why the columns of `workspace_changes` and `shell_rules` (Phase 8) are not scanned. */
 const CHECKPOINT_JOURNAL_REASON = 'checkpoint journal / shell rules: ids, paths, commands, hashes; never a data/files id'
+
+/**
+ * Why the columns of `background_tasks` (Phase 10, ADR-046) are not scanned: ids, enums and the sub-agent's snapshot; a
+ * delivered result lives on in a `data-task-result` part of `messages.parts` (scanned), and the rows go with their chat.
+ */
+const BACKGROUND_TASK_REASON = 'background tasks: ids, enums and the sub-agent snapshot (its delivered result is in messages.parts)'
 
 /**
  * `table.column` -> why it is not scanned: every text, JSON or blob column outside `REFERENCE_SOURCES`. A new column
@@ -123,6 +131,20 @@ export const UNSCANNED_COLUMNS: Readonly<Record<string, string>> = {
   'shell_rules.id': CHECKPOINT_JOURNAL_REASON,
   'shell_rules.project_id': CHECKPOINT_JOURNAL_REASON,
   'shell_rules.prefix': CHECKPOINT_JOURNAL_REASON,
+  // Phase 10 (ADR-044 / ADR-046): `customizations.content` and `.description` are scanned (`REFERENCE_SOURCES`).
+  'customizations.id': 'customization ids',
+  'customizations.kind': 'a kind enum',
+  'customizations.name': 'definition names (`AGENT_NAME_PATTERN` / `COMMAND_NAME_PATTERN`)',
+  'background_tasks.id': BACKGROUND_TASK_REASON,
+  'background_tasks.chat_id': BACKGROUND_TASK_REASON,
+  'background_tasks.message_id': BACKGROUND_TASK_REASON,
+  'background_tasks.tool_call_id': BACKGROUND_TASK_REASON,
+  'background_tasks.type': BACKGROUND_TASK_REASON,
+  'background_tasks.description': BACKGROUND_TASK_REASON,
+  'background_tasks.status': BACKGROUND_TASK_REASON,
+  'background_tasks.origin': BACKGROUND_TASK_REASON,
+  'background_tasks.output': BACKGROUND_TASK_REASON,
+  'background_tasks.delivered_message_id': BACKGROUND_TASK_REASON,
 }
 
 /** `table.column` names of the scanned columns. */

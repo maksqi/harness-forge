@@ -12,6 +12,12 @@
 // Phase 9 (C26 seams, W9.1): `/compact [focus]` resolves like a reply command (it decides the reply: no model call, no
 // workspace), needs a chat model (an image model is a 400 on `['modelRef']`) and a regenerate of its reply compacts
 // again; the continuation branch checks the mode of a plan approval (`checkPlanApprovalMode`, `modes.ts`).
+// Phase 10 (C31 seams, ADR-045 / ADR-046; W10.2 implements them): every run takes one catalog snapshot of its chat's
+// project (`PreparedRun.catalog`, `deps.customizations.catalog`; commands, the agent-types and skills blocks, `task`,
+// `skill`); `PreparedRun.requestModelRef` is the model the chat keeps (a command file's `model` may run the turn on
+// another model: W10.2) and `PreparedRun.turnRestriction` the turn command's `allowed-tools` (`turnToolRestriction`);
+// `prepareRun(…, { serverMessage: true })` is the path of the carrier message of a turn the server starts for finished
+// background tasks (accepted, not yet used: W10.2).
 import type {
   CatalogModel,
   ChatRequestBody,
@@ -26,6 +32,7 @@ import type {
 import type { Logger } from '../logger.ts'
 import type { ResolvedImageModel, ResolvedModel, ResolvedModelBase } from '../providers/types.ts'
 import type { ChatRecord } from '../services/chats/types.ts'
+import type { CustomizationCatalog } from '../services/customizations/types.ts'
 import type { FilesService } from '../services/files/types.ts'
 import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { AppDeps } from '../types.ts'
@@ -43,7 +50,7 @@ import {
   validationError,
 } from '@harness-forge/shared'
 import { safeValidateUIMessages } from 'ai'
-import { compactNeedsChatModel, resolveCommand } from './commands.ts'
+import { compactNeedsChatModel, resolveCommand, turnToolRestriction } from './commands.ts'
 import { applyCommandExpansions } from './context.ts'
 import { normalizeUserParts } from './files.ts'
 import { isGeneratedImageType } from './generated-files.ts'
@@ -124,6 +131,34 @@ export interface PreparedRun {
   workspace: OpenWorkspace | null
   /** Notices decided while preparing (the `workspace-unavailable` notice of a folder that could not be opened). */
   notices: NoticeData[]
+  /**
+   * The catalog snapshot of the run (Phase 10, ADR-044): the chat project's catalog (the global one without a project),
+   * taken once while preparing; commands, the agent-types and skills blocks, `task`, `skill` and background launches of
+   * this run all read it.
+   */
+  catalog: CustomizationCatalog
+  /**
+   * The model the chat keeps (Phase 10, ADR-045): `chats.model_ref` is touched with it at the start and the end of the
+   * run. It is the request's model; it differs from `resolved.modelRef` (the model that runs, `run.started.modelRef`)
+   * only when a command file's `model` runs the turn (W10.2).
+   */
+  requestModelRef: string
+  /**
+   * The tool restriction of the turn (Phase 10, `turnToolRestriction`: the turn command's `allowed-tools`); null = none.
+   * Passed to `assembleTools({ allowedTools })`.
+   */
+  turnRestriction: readonly string[] | null
+}
+
+/** Options of `prepareRun`. */
+export interface PrepareRunOptions {
+  /**
+   * The request's message was built by the server (Phase 10, ADR-046): the user-role carrier message of a turn started
+   * for finished background tasks (`run.started.origin: 'task'`), holding only `data-task-result` parts. W10.2: its parts
+   * are not normalized like a user's (data parts are refused there), the message is validated with `validateMessage`,
+   * and only such a carrier is accepted. P10-0b: accepted, not used yet.
+   */
+  readonly serverMessage?: boolean
 }
 
 /** The request was stopped before its history was stored. */
@@ -270,13 +305,15 @@ interface PrepareContext {
   body: ChatRequestBody
   resolved: ResolvedModelBase
   logger: Logger
+  /** The run's catalog snapshot (command resolution). */
+  catalog: CustomizationCatalog
 }
 
 /** The stored form of the new user message (server metadata, command invocation). */
 async function buildUserMessage(context: PrepareContext): Promise<{ message: HarnessUIMessage, command: CommandResolution | null }> {
   const { deps, run, body, resolved } = context
   const parts = await normalizeUserParts(body.message.parts, deps.files)
-  const command = await resolveCommand(deps, firstTextOf(parts), { chatId: body.chatId, signal: run.signal })
+  const command = await resolveCommand(deps, firstTextOf(parts), { chatId: body.chatId, signal: run.signal, catalog: context.catalog })
   const metadata: MessageMetadata = {
     modelRef: resolved.modelRef,
     startedAt: run.acceptedAt,
@@ -293,7 +330,7 @@ async function regeneratedCommand(context: PrepareContext, userMessage: HarnessU
   const type = userMessage.metadata?.command?.type
   if (type !== 'reply' && type !== 'compact')
     return null
-  const resolution = await resolveCommand(context.deps, firstTextOf(userMessage.parts), { chatId: context.body.chatId, signal: context.run.signal })
+  const resolution = await resolveCommand(context.deps, firstTextOf(userMessage.parts), { chatId: context.body.chatId, signal: context.run.signal, catalog: context.catalog })
   return resolution?.kind === 'prompt' ? null : resolution
 }
 
@@ -349,16 +386,19 @@ export async function openRunWorkspace(
  * Validates and plans the request. Throws `validation_error`, `not_found`, `conflict`, `provider_not_configured` (and
  * the other resolution errors) before anything but the chat row is written.
  */
-export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger): Promise<PreparedRun> {
+export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger, options: PrepareRunOptions = {}): Promise<PreparedRun> {
+  void options.serverMessage
   const planned = await planRun(deps, run, body, logger)
   const opened = await openRunWorkspace(deps, planned.chat, planned.target, planned.command, logger)
-  return { ...planned, ...opened }
+  return { ...planned, ...opened, turnRestriction: turnToolRestriction(planned.history) }
 }
 
-/** `prepareRun` without the workspace. */
-async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger): Promise<Omit<PreparedRun, 'workspace' | 'notices'>> {
+/** `prepareRun` without the workspace and the tool restriction. */
+async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger): Promise<Omit<PreparedRun, 'workspace' | 'notices' | 'turnRestriction'>> {
   const kind = classifyRequest(body)
   const chat = await ensureChat(deps, body)
+  // One catalog snapshot per run (never rejects but for an abort: an unavailable folder only adds a diagnostic).
+  const catalog = await deps.customizations.catalog(chat.projectId, { signal: run.signal })
   const resolvedTarget = await resolveTarget(deps, body.modelRef, run.signal)
   const resolved: ResolvedModelBase = resolvedTarget.model
   checkImageOptions(body.imageOptions, resolvedTarget.kind, resolved.entry)
@@ -366,8 +406,8 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
     throw badRequest('An image model cannot continue a tool call. Pick a chat model to answer the pending tool call.', ['modelRef'])
   deps.catalog.markUsed(resolved.providerId, resolved.modelId).catch((error: unknown) => logger.debug('cannot record the model use', { err: error }))
   const settings = await deps.settings.get()
-  const context: PrepareContext = { deps, run, body, resolved, logger }
-  const base = { kind, chat, resolved, settings }
+  const context: PrepareContext = { deps, run, body, resolved, logger, catalog }
+  const base = { kind, chat, resolved, settings, catalog, requestModelRef: resolved.modelRef }
 
   switch (kind) {
     case 'new': {

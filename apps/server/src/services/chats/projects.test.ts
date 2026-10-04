@@ -84,6 +84,12 @@ beforeEach(async () => {
     enqueue: async () => Promise.reject(new Error('not used')),
     dequeue: () => false,
     clearQueue: () => [],
+    // Phase 10: the background task members (no background tasks here).
+    boot: async () => {},
+    taskList: async () => [],
+    stopTask: async () => null,
+    stopTasks: async () => 0,
+    hasTasks: () => false,
   }
   t = await createTestApp({ start: false, overrides: { events, runs } })
   service = t.deps.chats

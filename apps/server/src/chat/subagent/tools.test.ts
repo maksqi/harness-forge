@@ -304,3 +304,26 @@ describe('childTools: the child run scope (journal ids, shell folder, depth)', (
     expect(agent).toBeNull()
   })
 })
+
+describe('childTools: skill (Phase 10)', () => {
+  it('task and skill are never in a child\'s set, in any mode', async () => {
+    for (const toolMode of ['ask', 'edits', 'auto', 'plan'] as const) {
+      for (const type of ['explore', 'general'] as const) {
+        const seen: Seen = []
+        const child = await childTools({
+          session: fakeSession([...registry(seen), tool('core-agent', 'skill', 'safe', undefined, seen)]),
+          type,
+          toolMode,
+          model: MODEL,
+          workspace: WORKSPACE,
+          scope: parentScope(),
+          parentCallId: 'call_parent',
+          signal: new AbortController().signal,
+        })
+        const names = Object.keys(child.tools)
+        expect(names).not.toContain('task')
+        expect(names).not.toContain('skill')
+      }
+    }
+  })
+})

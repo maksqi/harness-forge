@@ -4,8 +4,12 @@
 // (`hasRun`, W5.1, ADR-023) and delete-all (`stop` for every chat, W5.3, ADR-024). Phase 9 (C24, ADR-042): the steer
 // queue members (`queueList`, `enqueue`, `dequeue`, `clearQueue`) behind the `chatQueue` routes (API.md 4.26 / 5.26),
 // implemented by delegation to the in-memory queue of `chat/queue.ts` (C26 stubs, W9.2); `stop` and `stopAll` empty the
-// queues before they abort runs.
-import type { ChatRequestBody, QueueAddBody, QueueItem, QueueRemovalReason } from '@harness-forge/shared'
+// queues before they abort runs. Phase 10 (C30, ADR-046): the background task members (`taskList`, `stopTask`,
+// `stopTasks`, `hasTasks`) behind the `chatTasks` routes (API.md 4.29 / 5.30) and the project-busy guards, and the boot
+// hook `boot()` (the boot sweep of `background_tasks`); implemented by delegation to the runner's background manager
+// (`chat/background/types.ts` `BackgroundTasks`; wired by C31, implemented by W10.4); `stopAll` stops the background
+// tasks between the queues and the runs.
+import type { BackgroundTask, ChatRequestBody, QueueAddBody, QueueItem, QueueRemovalReason } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 
 /** An active run (at most one per chat), kept in memory. */
@@ -67,9 +71,10 @@ export interface ChatRunner {
   /** Every active run. */
   readonly active: () => ActiveRun[]
   /**
-   * Shutdown, in this order: clears every chat's steer queue (reason `stopped`, so no queued message can start a new
-   * turn), then aborts every run (persisted as `aborted`; sub-agents abort through their parent run's signal) and waits
-   * for persistence.
+   * Shutdown, in this order: clears every queue (every chat's steer queue, reason `stopped`, so no queued message can
+   * start a new turn), then aborts every background task (Phase 10: `BackgroundTasks.stopAll`, awaited at most 5 s, the
+   * rows saved), then aborts every run (persisted as `aborted`; sub-agents abort through their parent run's signal) and
+   * waits for persistence.
    */
   readonly stopAll: () => Promise<void>
 
@@ -102,4 +107,31 @@ export interface ChatRunner {
    * removed item with `reason` (no event, and an empty array, when nothing was queued).
    */
   readonly clearQueue: (chatId: string, reason: QueueClearReason) => QueueItem[]
+
+  // Background tasks (Phase 10, ADR-046; API.md 4.29 / 5.30). Delegated to the runner's `BackgroundTasks` manager
+  // (`chat/background/types.ts`). The chat's own `stop` never stops a background task.
+
+  /**
+   * Boot hook (`startDeps`, once, right after `checkpoints.start()`): the boot sweep of `background_tasks` (rows still
+   * `running` → `aborted`, undelivered results → the in-memory inboxes; no turn is started at boot). Named `boot`
+   * because `start` is `POST /chat`. A no-op until W10.4.
+   */
+  readonly boot: () => Promise<void>
+  /** `GET /chat/:id/tasks`: the chat's background tasks, newest first (the route answers `404` for an unknown chat). */
+  readonly taskList: (chatId: string) => Promise<BackgroundTask[]>
+  /**
+   * `POST /chat/:id/tasks/:taskId/stop`: aborts a running task and answers it once its row is saved; a task that already
+   * ended is answered as it is; null when the chat has no such task (route: `404`).
+   */
+  readonly stopTask: (chatId: string, taskId: string) => Promise<BackgroundTask | null>
+  /**
+   * Aborts every running background task of the chat and waits until their rows are saved (chat delete, project delete,
+   * delete-all, key rotation); returns how many were running.
+   */
+  readonly stopTasks: (chatId: string) => Promise<number>
+  /**
+   * A background task of the chat is running: its project is busy (`409 conflict`, `reason: 'run-active'`, for rewind,
+   * revert, undo, project delete, chat move and version delete; a branch switch stays allowed). Synchronous.
+   */
+  readonly hasTasks: (chatId: string) => boolean
 }

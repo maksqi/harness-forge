@@ -5,7 +5,14 @@
 // Every registration is tagged with its owner plugin id and returns a `Disposable`; disposing it (or the owner's
 // `DisposableStore` on disable / reload / uninstall) removes it. Order everywhere is "registry order": builtins first in
 // load order (`BUILTIN_PLUGIN_IDS`), then user plugins by id, then registration order within a plugin.
+//
+// Phase 10 (plugin API 1.4.0, ADR-045; C30): the kinds `agent` and `skill`, the registries `agents` and `skills` (agent
+// types and skills contributed by plugins through the manifest `contributes.agents` / `contributes.skills` and
+// `ctx.agents.register` / `ctx.skills.register`) and the contributions `agents` / `skills`. C30 lands them empty
+// (`registry/{agents,skills}.ts`: nothing registered, `register` answers `not_implemented`); W10.7 implements the
+// registration and its validation. The customization catalog reads them (`source: 'plugin'`, ADR-044).
 import type {
+  AgentDefinition,
   CommandDefinition,
   Disposable,
   HookHandler,
@@ -14,6 +21,7 @@ import type {
   McpServerDecl,
   ModelInfo,
   ProviderDefinition,
+  SkillDefinition,
   ToolDefinition,
 } from '@harness-forge/plugin-sdk'
 import type { PluginContributions } from '@harness-forge/shared'
@@ -64,9 +72,24 @@ export interface RegisteredMcpServer {
   readonly decl: McpServerDecl
 }
 
-export type RegistryKind = 'provider' | 'models' | 'tool' | 'command' | 'hook' | 'mcpServer'
+/** An agent type contributed by a plugin (manifest `contributes.agents` or `ctx.agents.register`; plugin API 1.4.0). */
+export interface RegisteredAgent {
+  readonly pluginId: string
+  readonly definition: AgentDefinition
+}
 
-/** A registration was added or removed. `key`: provider id, provider id (models), tool / command / hook name, MCP id. */
+/** A skill contributed by a plugin (manifest `contributes.skills` or `ctx.skills.register`; plugin API 1.4.0). */
+export interface RegisteredSkill {
+  readonly pluginId: string
+  readonly definition: SkillDefinition
+}
+
+export type RegistryKind = 'provider' | 'models' | 'tool' | 'command' | 'hook' | 'mcpServer' | 'agent' | 'skill'
+
+/**
+ * A registration was added or removed. `key`: provider id, provider id (models), tool / command / hook name, MCP id,
+ * agent or skill name (Phase 10).
+ */
 export interface RegistryChange {
   kind: RegistryKind
   action: 'added' | 'removed'
@@ -131,6 +154,41 @@ export interface McpServerRegistry {
   readonly list: () => RegisteredMcpServer[]
 }
 
+/**
+ * Agent types of plugins (Phase 10, plugin API 1.4.0, ADR-045). Names follow `AGENT_NAME_PATTERN`; the builtin names
+ * (`explore`, `general`, `general-purpose`) are reserved. Sorted by name.
+ */
+export interface AgentRegistry {
+  /**
+   * Validates the definition (name pattern and reserved names, description, `instructions` ≤ 64 KiB, tool names, model
+   * ref) and adds it; a name another plugin registered throws `conflict` (W10.7; the C30 stub throws `not_implemented`).
+   */
+  readonly register: (pluginId: string, definition: AgentDefinition) => Disposable
+  readonly get: (name: string) => RegisteredAgent | undefined
+  /** Sorted by name. */
+  readonly list: () => RegisteredAgent[]
+  /** The plugin that registered `name`, or undefined. */
+  readonly owner: (name: string) => string | undefined
+  /** Changes of agents only (`RegistryChange.kind === 'agent'`); listeners run synchronously. */
+  readonly onChange: (listener: (change: RegistryChange) => void) => Disposable
+}
+
+/** Skills of plugins (Phase 10, plugin API 1.4.0, ADR-045). Names follow `AGENT_NAME_PATTERN`. Sorted by name. */
+export interface SkillRegistry {
+  /**
+   * Validates the definition (name pattern, description, `content` ≤ 64 KiB) and adds it; a name another plugin
+   * registered throws `conflict` (W10.7; the C30 stub throws `not_implemented`).
+   */
+  readonly register: (pluginId: string, definition: SkillDefinition) => Disposable
+  readonly get: (name: string) => RegisteredSkill | undefined
+  /** Sorted by name. */
+  readonly list: () => RegisteredSkill[]
+  /** The plugin that registered `name`, or undefined. */
+  readonly owner: (name: string) => string | undefined
+  /** Changes of skills only (`RegistryChange.kind === 'skill'`); listeners run synchronously. */
+  readonly onChange: (listener: (change: RegistryChange) => void) => Disposable
+}
+
 export interface Registry {
   readonly providers: ProviderRegistry
   readonly models: ModelRegistry
@@ -138,8 +196,12 @@ export interface Registry {
   readonly commands: CommandRegistry
   readonly hooks: HookRegistry
   readonly mcpServers: McpServerRegistry
+  /** Agent types of plugins (Phase 10, plugin API 1.4.0). */
+  readonly agents: AgentRegistry
+  /** Skills of plugins (Phase 10, plugin API 1.4.0). */
+  readonly skills: SkillRegistry
   /** Change notifications (catalog refresh, MCP manager, `plugin.changed`); listeners run synchronously. */
   readonly onChange: (listener: (change: RegistryChange) => void) => Disposable
-  /** Current contributions of a plugin (`PluginSummary.contributions`). */
+  /** Current contributions of a plugin (`PluginSummary.contributions`; Phase 10: `agents`, `skills`). */
   readonly contributions: (pluginId: string) => PluginContributions
 }

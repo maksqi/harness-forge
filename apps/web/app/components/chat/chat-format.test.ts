@@ -1,6 +1,18 @@
 import type { HarnessUIMessagePart } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { compactionData, compactionPart, steerData, steerPart, taskPart } from '~/utils/testing/fixtures'
+import {
+  assistantMessage,
+  backgroundTaskId,
+  compactionData,
+  compactionPart,
+  steerData,
+  steerPart,
+  taskPart,
+  taskResultCarrier,
+  taskResultData,
+  taskResultPart,
+  userMessage,
+} from '~/utils/testing/fixtures'
 import {
   capText,
   firstStringArg,
@@ -12,10 +24,12 @@ import {
   isImageFilePart,
   isServerTruncated,
   isSupersededDenial,
+  isTaskResultMessage,
   messageBlocks,
   messageText,
   safeExternalUrl,
   splitMcpToolName,
+  taskResultsOf,
   TOOL_BODY_PREVIEW_CHARS,
   toolNameOf,
 } from './chat-format'
@@ -118,6 +132,49 @@ describe('messageBlocks', () => {
     expect(isImageFilePart(pdf)).toBe(false)
     expect(isImageFilePart({ type: 'reasoning-file', mediaType: 'image/png', url: '/api/files/file_3' })).toBe(false)
     expect(imageFileParts({ parts: [png, pdf, { type: 'text', text: 'x' }] })).toEqual([png])
+  })
+})
+
+describe('background agent results (Phase 10)', () => {
+  const invalid = { type: 'data-task-result', id: 'x', data: { taskId: 'nope' } } as unknown as HarnessUIMessagePart
+
+  it('turns a valid data-task-result part into a task-result block; invalid data renders nothing', () => {
+    const blocks = messageBlocks([
+      { type: 'text', text: 'Working', state: 'done' },
+      taskResultPart(),
+      invalid,
+      { type: 'text', text: 'Done', state: 'done' },
+    ])
+    expect(blocks.map(block => block.kind)).toEqual(['text', 'task-result', 'text'])
+    expect(blocks[1]).toMatchObject({ kind: 'task-result', index: 1, part: taskResultData() })
+    // A result is never part of the reply's own text (Copy, Read aloud).
+    expect(messageText({ parts: [{ type: 'text', text: 'Before', state: 'done' }, taskResultPart()] })).toBe('Before')
+  })
+
+  it('collects the delivered results of a path by task id, in path order, the first one winning', () => {
+    const second = taskResultData({ taskId: backgroundTaskId(2), toolCallId: 'call_task_2' })
+    const duplicate = taskResultData({ deliveredAt: 1_759_000_099_000 })
+    const path = [
+      userMessage('u1', 'Start two background agents'),
+      assistantMessage('a1', 'Started', { parts: [{ type: 'text', text: 'Started', state: 'done' }, taskResultPart(), invalid] }),
+      taskResultCarrier('u2', [second, duplicate]),
+      assistantMessage('a2', 'Both finished'),
+    ]
+    const results = taskResultsOf(path)
+    expect([...results.keys()]).toEqual([backgroundTaskId(1), backgroundTaskId(2)])
+    expect(results.get(backgroundTaskId(1))).toEqual(taskResultData())
+    expect(results.get(backgroundTaskId(2))).toEqual(second)
+    expect(taskResultsOf([userMessage('u1', 'Hello')]).size).toBe(0)
+  })
+
+  it('recognizes the carrier: a user message whose parts are all valid results', () => {
+    expect(isTaskResultMessage(taskResultCarrier('u1'))).toBe(true)
+    expect(isTaskResultMessage(taskResultCarrier('u1', [taskResultData(), taskResultData({ taskId: backgroundTaskId(2) })]))).toBe(true)
+    expect(isTaskResultMessage({ ...taskResultCarrier('u1'), role: 'assistant' })).toBe(false)
+    expect(isTaskResultMessage({ role: 'user', parts: [] })).toBe(false)
+    expect(isTaskResultMessage({ role: 'user', parts: [taskResultPart(), { type: 'text', text: 'and more' }] })).toBe(false)
+    expect(isTaskResultMessage({ role: 'user', parts: [invalid] })).toBe(false)
+    expect(isTaskResultMessage(userMessage('u2', 'Hello'))).toBe(false)
   })
 })
 

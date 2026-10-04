@@ -8,6 +8,7 @@ import type { Logger } from '../../logger.ts'
 import type { ResolvedModel } from '../../providers/types.ts'
 import type { UsageInput } from '../../services/chats/types.ts'
 import type { AppDeps } from '../../types.ts'
+import type { BackgroundTasks } from '../background/types.ts'
 import type { HarnessDataChunk, RunContext } from '../pipeline.ts'
 import type { PreparedRun } from '../prepare.ts'
 import type { ChatQueue } from '../queue.ts'
@@ -114,6 +115,7 @@ export function fakeSession(options: FakeSessionOptions = {}): FakeSession {
     assistantId: options.continued?.id ?? 'msg_a000000000000009',
     replyParentId: null,
     command: null,
+    requestModelRef: 'mock:run',
     ...(options.target === undefined ? {} : { target: { kind: 'chat', model: options.target } }),
   } as unknown as PreparedRun
   const deps = {
@@ -153,9 +155,10 @@ export function fakeSession(options: FakeSessionOptions = {}): FakeSession {
     tasks: new TaskTracker(),
     titleTimeoutMs: 10_000,
     lifecycle: new AbortController().signal,
-    // The steer queue is not used by the compaction code.
+    // The steer queue and the background manager are not used by the compaction code.
     queue: {} as ChatQueue,
     onReleased: () => {},
+    background: {} as BackgroundTasks,
   }
   const session = new RunSession(ctx)
   const writer = {

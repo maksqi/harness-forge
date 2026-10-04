@@ -13,6 +13,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { MENTION_SEARCH_DEBOUNCE_MS } from '~/composables/useFileMentions'
 import { IMAGE_OPTIONS_KEY, useImageOptions } from '~/composables/useImageOptions'
 import { useShortcuts } from '~/composables/useShortcuts'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
@@ -425,6 +426,47 @@ describe('chatComposer', () => {
       await flushPromises()
       expect(textarea().element.value).toBe('/')
       expect(wrapper.find(byTestId(testIds.slashMenu)).exists()).toBe(true)
+      wrapper.unmount()
+    })
+  })
+
+  describe('customized commands and Remember (Phase 10)', () => {
+    it('reads the slash commands of the chat\'s project from the customizations store', async () => {
+      api.commands.list.mockResolvedValue({ items: [{ name: 'review', description: 'Review a file', source: 'project', argumentHint: '<file> [focus]' }] })
+      const { wrapper, textarea } = mountComposer({ projectId: projectId(1) })
+      await flushPromises()
+      expect(api.commands.list).toHaveBeenCalledWith({ query: { projectId: projectId(1) } })
+      await type(textarea(), '/')
+      expect(wrapper.findAll(byTestId(testIds.slashMenuItem)).map(item => item.attributes('data-value')))
+        .toEqual(['new', 'model', 'effort', 'mode', 'help', 'review'])
+      wrapper.unmount()
+    })
+
+    it('shows the argument hint of a typed command over the textarea, linked from it', async () => {
+      useCustomizationsStore().commands = { '': [{ name: 'review', description: 'Review a file', source: 'user', argumentHint: '<file> [focus]' }] }
+      const { wrapper, textarea } = mountComposer()
+      await type(textarea(), '/review ')
+      const hint = wrapper.get(byTestId(testIds.slashArgumentHint))
+      expect(hint.attributes('aria-hidden')).toBe('true')
+      expect(hint.text()).toContain('<file> [focus]')
+      const describedBy = textarea().attributes('aria-describedby')!
+      expect(wrapper.get(`#${describedBy}`).text()).toBe('Arguments: <file> [focus]')
+      await type(textarea(), '/review src/a.ts')
+      expect(wrapper.find(byTestId(testIds.slashArgumentHint)).exists()).toBe(false)
+      expect(textarea().attributes('aria-describedby')).toBeUndefined()
+      wrapper.unmount()
+    })
+
+    it('/remember clears the input and opens the Remember dialog with the text', async () => {
+      const { wrapper, composer, textarea } = mountComposer()
+      await type(textarea(), '/remember Run pnpm check first')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(textarea().element.value).toBe('')
+      expect(composer().emitted('submit')).toBeUndefined()
+      const dialog = bodyAll(byTestId(testIds.rememberDialog))
+      expect(dialog).toHaveLength(1)
+      expect(dialog[0]!.textContent).toContain('Run pnpm check first')
       wrapper.unmount()
     })
   })

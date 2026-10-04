@@ -14,6 +14,11 @@
 // queued shows a toast), and a reconnect refetches the loaded queues (`chatQueue.refreshLoaded()`). `run.started` with
 // `origin: 'queue'` reaches the live session of its chat through `on()` (after the chats store marked it running): the
 // session reloads its path before it follows the reply when it does not show the queued message yet.
+// Phase 10 (ADR-044 - ADR-046; C33 wires it, W10.10 owns it): `task.changed` and `chat.deleted` go to the
+// background-tasks store (an upsert of the task in every tab; a deleted chat's list is dropped), `customization.changed`
+// and `plugin.changed` to the customizations store (every cached catalog and command list is stale), and a reconnect
+// refreshes the loaded lists of both stores. `run.started` with `origin: 'task'` (a turn the server started for finished
+// background agents) reaches the chat's session through `on()`, like a queue-started turn.
 import type { ServerEvent, ServerEventOf, ServerEventType } from '@harness-forge/shared'
 import type { Ref } from 'vue'
 import type { EventStreamStatus } from '~/utils/event-stream'
@@ -21,8 +26,10 @@ import { serverEventSchema } from '@harness-forge/shared'
 import { getCurrentScope, onScopeDispose, readonly, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { useAuthStore } from '~/stores/auth'
+import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { useChatQueueStore } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectsStore } from '~/stores/projects'
@@ -112,7 +119,8 @@ function applyKeyRotated(): void {
  * refetch); `catalog.changed` -> models; `plugin.changed` -> plugins (+ providers and models refetch); `plugin.log`
  * -> plugins; `project.changed` -> projects + chats + workspace + shell rules; `workspace.changed` -> workspace (and
  * `run.finished` / `chat.deleted` -> workspace too); `key.rotated` -> the chat list reloads, toast; `queue.changed` /
- * `chat.deleted` -> chat queue (Phase 9). Then leaves `/chat/<id>` when the open chat was deleted, and notifies
+ * `chat.deleted` -> chat queue (Phase 9); `task.changed` / `chat.deleted` -> background tasks, `customization.changed` /
+ * `plugin.changed` -> customizations (Phase 10). Then leaves `/chat/<id>` when the open chat was deleted, and notifies
  * `useServerEvents().on()` subscribers (the chat sessions listed by `key.rotated` reload their path there).
  */
 export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions = {}): void {
@@ -126,6 +134,7 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
       safely(() => useChatsStore().applyEvent(event))
       safely(() => useWorkspaceStore().applyEvent(event))
       safely(() => useChatQueueStore().applyEvent(event))
+      safely(() => useBackgroundTasksStore().applyEvent(event))
       break
     case 'run.finished':
       safely(() => useChatsStore().applyEvent(event))
@@ -142,6 +151,7 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
       safely(() => usePluginsStore().applyEvent(event))
       safely(() => useProvidersStore().applyEvent(event))
       safely(() => useModelsStore().applyEvent(event))
+      safely(() => useCustomizationsStore().applyEvent(event))
       break
     case 'plugin.log':
       safely(() => usePluginsStore().applyEvent(event))
@@ -162,6 +172,12 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
     case 'queue.changed':
       safely(() => useChatQueueStore().applyEvent(event))
       break
+    case 'task.changed':
+      safely(() => useBackgroundTasksStore().applyEvent(event))
+      break
+    case 'customization.changed':
+      safely(() => useCustomizationsStore().applyEvent(event))
+      break
   }
   if (event.type === 'chat.deleted' && options.navigate && useUiStore().activeChatId === event.data.id)
     safely(() => void options.navigate?.('/'))
@@ -174,8 +190,9 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
 /**
  * Refetches every loaded store after the event stream reconnects (missed events are not replayed): auth status,
  * settings, and the providers / models / plugins / chats / projects / shell rules data that was loaded before, plus the
- * loaded entries of the changes panel (`workspace.refreshLoaded()`) and the loaded chat queues
- * (`chatQueue.refreshLoaded()`, Phase 9).
+ * loaded entries of the changes panel (`workspace.refreshLoaded()`), the loaded chat queues
+ * (`chatQueue.refreshLoaded()`, Phase 9), and the loaded background task lists and customization lists
+ * (`backgroundTasks.refreshLoaded()`, `customizations.refreshLoaded()`, Phase 10).
  */
 export async function refetchLoadedStores(): Promise<void> {
   const auth = useAuthStore()
@@ -188,7 +205,17 @@ export async function refetchLoadedStores(): Promise<void> {
   const shellRules = useShellRulesStore()
   const workspace = useWorkspaceStore()
   const chatQueue = useChatQueueStore()
-  const tasks: Array<Promise<unknown>> = [auth.fetchStatus(), settings.fetch(), plugins.refreshLoaded(), workspace.refreshLoaded(), chatQueue.refreshLoaded()]
+  const backgroundTasks = useBackgroundTasksStore()
+  const customizations = useCustomizationsStore()
+  const tasks: Array<Promise<unknown>> = [
+    auth.fetchStatus(),
+    settings.fetch(),
+    plugins.refreshLoaded(),
+    workspace.refreshLoaded(),
+    chatQueue.refreshLoaded(),
+    backgroundTasks.refreshLoaded(),
+    customizations.refreshLoaded(),
+  ]
   if (providers.loaded)
     tasks.push(providers.fetchAll())
   if (models.loaded)

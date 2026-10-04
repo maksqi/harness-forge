@@ -4,7 +4,7 @@ import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { logEntry, pluginDetail, pluginSummary, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
-import { parsePluginFilter, PLUGIN_LOG_LIMIT, usePluginsStore } from './plugins'
+import { parsePluginFilter, PLUGIN_LOG_LIMIT, pluginMatchesFilter, usePluginsStore } from './plugins'
 
 const mock = vi.hoisted(() => ({ api: null as unknown }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
@@ -55,7 +55,7 @@ async function loadPlugins() {
 describe('plugins store: list', () => {
   it('counts plugins per browse filter', async () => {
     const plugins = await loadPlugins()
-    expect(plugins.counts).toEqual({ all: 3, providers: 1, tools: 1, mcp: 1, commands: 1, disabled: 1 })
+    expect(plugins.counts).toEqual({ all: 3, providers: 1, tools: 1, mcp: 1, commands: 1, agents: 0, disabled: 1 })
     expect(plugins.byId('dice-roller')?.name).toBe('Dice roller')
   })
 
@@ -70,6 +70,17 @@ describe('plugins store: list', () => {
     expect(parsePluginFilter(['mcp', 'tools'])).toBe('mcp')
     expect(parsePluginFilter('kind')).toBe('all')
     expect(parsePluginFilter(undefined)).toBe('all')
+  })
+
+  it('matches the agents filter ("Agents and skills") for plugins that contribute agents or skills', () => {
+    const contributions = core.contributions
+    const agents = pluginSummary({ id: 'agent-pack', contributions: { ...contributions, agents: ['sql-expert'], skills: [] } })
+    const skills = pluginSummary({ id: 'skill-pack', contributions: { ...contributions, agents: [], skills: ['release-notes'] } })
+    expect(pluginMatchesFilter(agents, 'agents')).toBe(true)
+    expect(pluginMatchesFilter(skills, 'agents')).toBe(true)
+    expect(pluginMatchesFilter(core, 'agents')).toBe(false)
+    expect(pluginMatchesFilter(dice, 'agents')).toBe(false)
+    expect(parsePluginFilter('agents')).toBe('agents')
   })
 
   it('enables optimistically and rolls back on failure', async () => {

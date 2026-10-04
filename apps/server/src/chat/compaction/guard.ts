@@ -20,12 +20,14 @@
 // - `autoCompact` off: on step 0 only, the v1.4 `trimToContext` (0.85 of the window) plus `context-trimmed` when it left
 //   messages out.
 // `silent` (sub-agents): no marker, no notice, no activity; the usage row (and the cost) only. A step whose messages are
-// a single user message has nothing to compact.
+// a single user message has nothing to compact. Phase 10 (C31-T5): the host is structural (`subagent/host.ts`): a chat
+// run's guard takes a `HostSession` (`RunSession`), a silent guard any `ChildSession` (a background child's detached
+// session too); behavior unchanged.
 import type { CompactionData, CompactionKeep, HarnessUIMessage, NoticeData, TodoItem } from '@harness-forge/shared'
 import type { ModelMessage, StepResult, ToolSet } from 'ai'
 import type { ResolvedModel } from '../../providers/types.ts'
-import type { RunSession } from '../pipeline.ts'
 import type { StepInput, StepPiece, StepPieceResult } from '../steps.ts'
+import type { ChildSession, HostSession } from '../subagent/host.ts'
 import { latestTodos, LIMITS, todoWriteOutputSchema } from '@harness-forge/shared'
 import { CONTEXT_BUDGET_RATIO, estimateTokens, trimToContext } from '../context.ts'
 import { NOTICES } from '../notices.ts'
@@ -38,12 +40,8 @@ export const COMPACT_TRIGGER_RATIO = 0.8
 /** The name of the agent tool whose latest output is the todo list (`core-agent`, ADR-041). */
 const TODO_WRITE_TOOL_NAME = 'todo_write'
 
-export interface ContextGuardInput {
-  /**
-   * The run (the parent run of a sub-agent): deps, settings (`autoCompact`, `compactModelRef`), chat and reply ids,
-   * history, `inject` / `writeTransient` / `addExtraCost` / notices, the run signal and the logger.
-   */
-  readonly session: RunSession
+/** The options of every context guard (`ContextGuardInput` adds the host and the mode). */
+export interface ContextGuardOptions {
   /** The model of the guarded calls (the run model, or a sub-agent's model): its context window, the summary default. */
   readonly model: ResolvedModel
   /**
@@ -52,11 +50,19 @@ export interface ContextGuardInput {
    * sub-agent's prompt; null keeps none.
    */
   readonly keptUser: () => Promise<ModelMessage | null>
-  /** Sub-agents: no marker, no notice, no activity; the usage row only (default false). */
-  readonly silent?: boolean
-  /** The signal of the guarded calls (default: the run signal). */
+  /** The signal of the guarded calls (default: the host's run signal). */
   readonly signal?: AbortSignal
 }
+
+/**
+ * The guard of a chat run (`silent` absent or false: the host places the marker, the notices and the activity) or a
+ * silent one (sub-agents: no marker, no notice, no activity; the usage row only). The host: deps, settings
+ * (`autoCompact`, `compactModelRef`), chat and reply ids, history, `addExtraCost`, the run signal and the logger.
+ */
+export type ContextGuardInput = ContextGuardOptions & (
+  | { readonly session: HostSession, readonly silent?: false }
+  | { readonly session: ChildSession, readonly silent: true }
+)
 
 /** The input + output tokens of the last finished step (0 without one). */
 export function lastStepTokens(steps: ReadonlyArray<Pick<StepResult<ToolSet>, 'usage'>>): number {
@@ -103,7 +109,9 @@ export function runTodos(history: readonly HarnessUIMessage[], steps: ReadonlyAr
 /** The context guard piece (see the module comment). */
 export function createContextGuard(input: ContextGuardInput): StepPiece {
   const { session, model, keptUser } = input
-  const silent = input.silent ?? false
+  // The chat run that places the marker, the notices and the activity; null for a silent guard.
+  const host: HostSession | null = input.silent === true ? null : input.session
+  const silent = host === null
   const logger = session.ctx.logger
   let attempts = 0
   let failed = false
@@ -124,8 +132,8 @@ export function createContextGuard(input: ContextGuardInput): StepPiece {
     if (step.stepNumber !== 0)
       return undefined
     const trimmed = trimToContext(step.messages, model.entry.contextWindow, step.instructions, ratio)
-    if (!silent && (always || trimmed.removed > 0))
-      session.inject({ type: 'data-notice', data: notice }, step.stepNumber)
+    if (host !== null && (always || trimmed.removed > 0))
+      host.inject({ type: 'data-notice', data: notice }, step.stepNumber)
     return trimmed.removed > 0 ? { messages: trimmed.messages } : undefined
   }
 
@@ -151,11 +159,11 @@ export function createContextGuard(input: ContextGuardInput): StepPiece {
       messages = [mergeSummaryMessage(summaryText, null)]
       tokensAfter = estimateTokens(messages, step.instructions)
     }
-    if (!silent) {
+    if (host !== null) {
       visibleMessages ??= applyCompaction(session.ctx.prepared.history).messages.length
       const replyPart = step.stepNumber > 0 && !replyCounted ? 1 : 0
       const messagesCompacted = Math.max(0, visibleMessages + replyPart - (keep === 'last-user' ? 1 : 0))
-      session.inject({ type: 'data-compaction', data: { ...base, keep, messagesCompacted, tokensAfter: Math.round(tokensAfter) } }, step.stepNumber)
+      host.inject({ type: 'data-compaction', data: { ...base, keep, messagesCompacted, tokensAfter: Math.round(tokensAfter) } }, step.stepNumber)
       // After this marker the model sees the kept user message, then this reply's later parts.
       visibleMessages = keep === 'last-user' ? 1 : 0
       replyCounted = false
@@ -181,8 +189,7 @@ export function createContextGuard(input: ContextGuardInput): StepPiece {
       return undefined
     const signal = signalOf()
     attempts += 1
-    if (!silent)
-      session.writeTransient({ type: 'data-activity', data: { kind: 'compacting' } })
+    host?.writeTransient({ type: 'data-activity', data: { kind: 'compacting' } })
     try {
       const result = await compact(step, window, estimate, signal)
       compactedAt = step.stepNumber
@@ -196,8 +203,7 @@ export function createContextGuard(input: ContextGuardInput): StepPiece {
       return trim(step, COMPACT_TRIGGER_RATIO, NOTICES.compactionFailed(), true)
     }
     finally {
-      if (!silent)
-        session.writeTransient({ type: 'data-activity', data: { kind: 'idle' } })
+      host?.writeTransient({ type: 'data-activity', data: { kind: 'idle' } })
     }
   }
 }

@@ -36,8 +36,15 @@
 // in it) and `reason` (the plan feedback). A turn the server started from the queue (`run.started` with `origin:
 // 'queue'` and a `userMessageId` the shown path lacks) reloads the path first, then resumes the stream, so the queued
 // message shows as a user bubble before its reply streams; a busy session does that once it is idle.
+//
+// Agent customization (Phase 10, ADR-046; C33 declares, W10.10 implements; frozen from Gate P10-0b): `load()` also
+// fetches the chat's background agents (`backgroundTasks.fetch`, kept current by `task.changed`); `backgroundTasks` is
+// that list and `stopBackgroundTask()` stops one (`backgroundTasks.stop`; the chat's own `stop()` never touches them). A
+// turn the server started for finished background agents (`run.started` with `origin: 'task'` and a carrier
+// `userMessageId` the shown path lacks) is followed exactly like a queue-started turn: reload first, then resume.
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
+  BackgroundTask,
   ChatDetail,
   ChatRequestBody,
   ChatSummary,
@@ -82,6 +89,7 @@ import { ruleProjectId } from '~/components/workspace/allowlist/allow-rule'
 import { useApi, useApiFetch } from '~/composables/useApi'
 import { useImageOptions } from '~/composables/useImageOptions'
 import { useServerEvents } from '~/composables/useServerEvents'
+import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { useChatQueueStore } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
@@ -264,6 +272,16 @@ export interface ChatSession {
    * null when idle or after the stream ended.
    */
   activity: Readonly<Ref<'compacting' | null>>
+  /**
+   * + Phase 10 (ADR-046; W10.10): the chat's background agents, newest first (`backgroundTasks.tasks(id)`; fetched when
+   * the chat loads, kept current by `task.changed`).
+   */
+  backgroundTasks: ComputedRef<readonly BackgroundTask[]>
+  /**
+   * + Phase 10: stops one background agent (`backgroundTasks.stop`): 'stopped', or 'gone' when it had already ended (the
+   * host shows "It already finished."). Throws `HarnessError` for other failures.
+   */
+  stopBackgroundTask: (taskId: string) => Promise<'stopped' | 'gone'>
 }
 
 export interface ChatSessionRegistry {
@@ -459,6 +477,7 @@ interface SessionDeps {
   imageOptions: ReturnType<typeof useImageOptions>
   shellRules: ReturnType<typeof useShellRulesStore>
   chatQueue: ReturnType<typeof useChatQueueStore>
+  backgroundTasks: ReturnType<typeof useBackgroundTasksStore>
 }
 
 interface ChatChoices {
@@ -468,7 +487,7 @@ interface ChatChoices {
 }
 
 function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSession {
-  const { api, apiFetch, chats, models, plugins, projects, settings, imageOptions, shellRules, chatQueue } = deps
+  const { api, apiFetch, chats, models, plugins, projects, settings, imageOptions, shellRules, chatQueue, backgroundTasks } = deps
   // Watchers created later (resume, stop) belong to the session, not to whichever component is active then.
   const sessionScope = getCurrentScope()
   function inSession<T>(create: () => T): T {
@@ -563,8 +582,9 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   // ---------- steer queue and activity (Phase 9, ADR-040, ADR-042) ----------
 
   /**
-   * The user message of a turn the server started from the queue (`run.started`, origin `queue`) that the shown path
-   * did not have: the next resume reloads the path first, so the message shows before its reply streams.
+   * The user message of a turn the server started from the queue (`run.started`, origin `queue`; Phase 10: origin `task`,
+   * the carrier of background agent results) that the shown path did not have: the next resume reloads the path first,
+   * so the message shows before its reply streams.
    */
   let queuedTurn: string | null = null
   /** The transient `data-activity` of the current stream (`onData`); null when idle or once the stream ended. */
@@ -725,6 +745,8 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
         persisted.value = true
         // + Phase 9: the chat's queue (kept current by `queue.changed` from now on, refetched after a reconnect).
         chatQueue.fetch(id).catch(() => {})
+        // + Phase 10: the chat's background agents (kept current by `task.changed`, refetched after a reconnect).
+        backgroundTasks.fetch(id).catch(() => {})
       }
       catch (error) {
         const failure = toHarnessError(error)
@@ -933,9 +955,11 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   })
   // + Phase 9 (ADR-042): a turn the server started from the queue. Its user message carries the queued id; a path that
   // does not show it yet is reloaded before the reply is followed (once idle when a request or a resume is in flight).
+  // + Phase 10 (ADR-046): a turn the server started for finished background agents (`origin: 'task'`, its carrier
+  // message) is followed the same way.
   events.on('run.started', (event) => {
     const { chatId, origin, userMessageId } = event.data
-    if (chatId !== id || origin !== 'queue' || !userMessageId || onPath(userMessageId))
+    if (chatId !== id || (origin !== 'queue' && origin !== 'task') || !userMessageId || onPath(userMessageId))
       return
     queuedTurn = userMessageId
     if (!busy.value && !resuming)
@@ -1343,6 +1367,12 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
 
   const todos = computed<TodoState | null>(() => todoState(chat.messages.value))
 
+  const backgroundTaskList = computed<readonly BackgroundTask[]>(() => backgroundTasks.tasks(id))
+
+  function stopBackgroundTask(taskId: string): Promise<'stopped' | 'gone'> {
+    return backgroundTasks.stop(id, taskId)
+  }
+
   return {
     id,
     chat,
@@ -1379,6 +1409,8 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     cancelQueued,
     todos,
     activity: readonly(activity),
+    backgroundTasks: backgroundTaskList,
+    stopBackgroundTask,
   }
 }
 
@@ -1444,6 +1476,7 @@ export function useChatSession(id: string, options: { isNew?: boolean } = {}): C
       imageOptions: useImageOptions(),
       shellRules: useShellRulesStore(),
       chatQueue: useChatQueueStore(),
+      backgroundTasks: useBackgroundTasksStore(),
     }
     const scope = effectScope(true)
     const session = scope.run(() => createSession(id, options.isNew === true, deps))!

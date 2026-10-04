@@ -9,7 +9,7 @@
 // `projectMaxSteps` for a chat with a project, else `maxSteps`; the `chat.params` output is clamped to
 // 1..`LIMITS.stepsMax` (200).
 import type { ProviderOptions, ReasoningLevel, ReasoningParams } from '@harness-forge/plugin-sdk'
-import type { AgentToolName, ImageAspectRatio, ReasoningEffort, Settings, ToolMode } from '@harness-forge/shared'
+import type { AgentToolName, CustomizationEntry, ImageAspectRatio, ReasoningEffort, Settings, ToolMode } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 import type { ResolvedModelBase } from '../providers/types.ts'
 import type { Registry } from '../registry/types.ts'
@@ -282,6 +282,17 @@ export interface RunParamsInput {
    * todo and `task` hints, and whether the plan block names `exit_plan_mode`. Default none.
    */
   agentTools?: readonly string[]
+  /**
+   * The active agents of the run's catalog (Phase 10, ADR-045; `PreparedRun.catalog.agents()`): the "Agent types" block
+   * after the `task` hint, only when `task` is offered (W10.3: at most `LIMITS.agentTypesListedMax`, descriptions cut to
+   * `LIMITS.listedDescriptionMaxChars`). Default none. P10-0b: accepted, not used yet.
+   */
+  agentTypes?: readonly Pick<CustomizationEntry, 'name' | 'description'>[]
+  /**
+   * The active skills of the run's catalog (Phase 10, ADR-045; `PreparedRun.catalog.skills()`): the skills block, only
+   * when `skill` is offered (W10.3: at most `LIMITS.skillsListedMax`). Default none. P10-0b: accepted, not used yet.
+   */
+  skills?: readonly Pick<CustomizationEntry, 'name' | 'description'>[]
   /** The OS named in the workspace block; default `process.platform`. */
   platform?: NodeJS.Platform
   /** The step limit before the hooks (`runMaxSteps`). */

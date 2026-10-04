@@ -23,15 +23,24 @@
 //   reply through `session.addExtraCost` and shown in the output (`usage`, `costUsd`).
 // No agent scope is bound in a child (depth 1). The prompt, the steps and the report are never logged (warnings carry
 // model refs and error codes only).
-import type { TaskInput, TaskOutput, TaskStatus, ToolMode } from '@harness-forge/shared'
+// Phase 10 (C31 seams, ADR-045 / ADR-046): the host is the structural `ChildSession` (`./host.ts`; the parent run's
+// `RunSession`, or a background task's detached session); the runner gets the run's catalog snapshot (custom agent
+// types: W10.3), its background manager and the run's origin. A `task` call with `background: true` launches through
+// `background.launch(…)` (the launch input carries everything the detached child needs), counts toward the per-run cap
+// (not the slots) and yields the launch output at once (`status: 'background'` with a `taskId`, or `failed`; until
+// W10.4 every launch fails with "Background agents are not available yet."). `runDetachedChild` (W10.3; a stub until
+// then) runs a background child on its detached host.
+import type { RunOrigin, TaskInput, TaskOutput, TaskStatus, ToolMode } from '@harness-forge/shared'
 import type { ModelMessage, TextStreamPart, ToolSet } from 'ai'
 import type { ResolvedModel } from '../../providers/types.ts'
+import type { CustomizationCatalog } from '../../services/customizations/types.ts'
 import type { OpenWorkspace } from '../../services/projects/types.ts'
 import type { WorkspaceRunScopeInit } from '../../workspace/run-scope.ts'
 import type { RunSubagentOptions } from '../agent-scope.ts'
-import type { RunSession } from '../pipeline.ts'
+import type { BackgroundLaunchInput, BackgroundTasks } from '../background/types.ts'
 import type { StepPiece } from '../steps.ts'
-import { AGENT_TYPE_ALIASES, BUILTIN_AGENT_TYPES, isHarnessError, LIMITS, taskTypeSchema } from '@harness-forge/shared'
+import type { ChildSession } from './host.ts'
+import { AGENT_TYPE_ALIASES, BUILTIN_AGENT_TYPES, HarnessError, isHarnessError, LIMITS, taskTypeSchema } from '@harness-forge/shared'
 import { isStepCount, streamText } from 'ai'
 import { toolWorkspaceAccess } from '../approval.ts'
 import { createContextGuard } from '../compaction/guard.ts'
@@ -84,10 +93,10 @@ export function subagentStepLimitText(maxSteps: number): string {
 
 export interface SubagentRunnerInput {
   /**
-   * The parent run: deps, settings (`subagentModelRef`, `subagentMaxSteps`), chat and reply ids, `addExtraCost`, the run
-   * signal, the clock and the logger.
+   * The host (`./host.ts`; the parent run): deps, settings (`subagentModelRef`, `subagentMaxSteps`), chat and reply ids,
+   * `addExtraCost`, the run signal, the clock and the logger.
    */
-  readonly session: RunSession
+  readonly session: ChildSession
   /** The parent's model (the model of a child when `subagentModelRef` is unset or cannot be resolved). */
   readonly model: ResolvedModel
   /** The parent's permission mode (a child's tools and approvals follow it, `childTools`). */
@@ -96,6 +105,12 @@ export interface SubagentRunnerInput {
   readonly workspace: OpenWorkspace | null
   /** The parent run scope (journal, shell rules, shell folder), or null without a workspace. */
   readonly scope: WorkspaceRunScopeInit | null
+  /** The run's catalog snapshot (Phase 10, `PreparedRun.catalog`): the agent types a `task` call may name (W10.3). */
+  readonly catalog: CustomizationCatalog
+  /** The runner's background manager (Phase 10, `RunContext.background`): where `task { background: true }` launches. */
+  readonly background: BackgroundTasks
+  /** The origin of the parent run (Phase 10, `RunContext.origin`): stored with a background task (the chain rule). */
+  readonly origin: RunOrigin
 }
 
 export interface SubagentRunner {
@@ -190,7 +205,7 @@ export function finalizeStep(maxSteps: number, onFinalize: () => void): StepPiec
 }
 
 /** The child's model: `subagentModelRef` when set and resolvable, else the run model (see the module comment). */
-async function resolveChildModel(session: RunSession, parent: ResolvedModel, signal: AbortSignal): Promise<ResolvedModel> {
+async function resolveChildModel(session: ChildSession, parent: ResolvedModel, signal: AbortSignal): Promise<ResolvedModel> {
   const ref = session.ctx.prepared.settings.subagentModelRef
   if (ref === null || ref === undefined || ref === parent.modelRef)
     return parent
@@ -209,7 +224,7 @@ async function resolveChildModel(session: RunSession, parent: ResolvedModel, sig
 }
 
 /** The error text of a failed child (the run error mapping; redacted, never empty). */
-function failureText(session: RunSession, model: ResolvedModel, error: unknown): string {
+function failureText(session: ChildSession, model: ResolvedModel, error: unknown): string {
   try {
     const mapped = mapRunError(session.ctx.deps.providers, model.providerId, error)
     const text = session.ctx.deps.redactor.redactText(mapped.message).trim()
@@ -221,13 +236,13 @@ function failureText(session: RunSession, model: ResolvedModel, error: unknown):
 }
 
 /** The text of a tool error of a child (redacted). */
-function toolErrorPreview(session: RunSession, error: unknown): string | undefined {
+function toolErrorPreview(session: ChildSession, error: unknown): string | undefined {
   const text = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
   return resultPreview(session.ctx.deps.redactor.redactText(text))
 }
 
 /** Writes the usage row of a child and adds its cost to the reply; returns the cost (undefined when unknown). */
-async function recordUsage(session: RunSession, model: ResolvedModel, tracker: RunTracker): Promise<number | undefined> {
+async function recordUsage(session: ChildSession, model: ResolvedModel, tracker: RunTracker): Promise<number | undefined> {
   if (!tracker.hasUsage)
     return undefined
   const usage = tracker.usage
@@ -266,7 +281,7 @@ interface ChildRun {
  * Applies one part of the child's stream to `progress`; true when a snapshot is due (a tool call started or ended, a
  * step ended). `denials` keeps the reasons of denied approvals for the step previews.
  */
-function observePart(part: TextStreamPart<ToolSet>, progress: TaskProgress, denials: Map<string, string>, session: RunSession): boolean {
+function observePart(part: TextStreamPart<ToolSet>, progress: TaskProgress, denials: Map<string, string>, session: ChildSession): boolean {
   switch (part.type) {
     case 'start-step':
       progress.startStep()
@@ -472,6 +487,43 @@ async function* runChild(run: ChildRun, task: TaskInput, options: RunSubagentOpt
   }
 }
 
+/** The launch input of a background `task` call: the parent's values (see `BackgroundLaunchInput`). */
+export function backgroundLaunchInput(input: SubagentRunnerInput, task: TaskInput, options: RunSubagentOptions): BackgroundLaunchInput {
+  const { session } = input
+  return {
+    chatId: session.chatId,
+    messageId: session.assistantId,
+    toolCallId: options.toolCallId,
+    task,
+    origin: input.origin,
+    model: input.model,
+    toolMode: input.toolMode,
+    workspace: input.workspace,
+    scope: input.scope,
+    settings: session.ctx.prepared.settings,
+    reasoningEffort: session.ctx.reasoningEffort,
+    chatInstructions: session.ctx.prepared.chat.settings.instructions,
+    catalog: input.catalog,
+    logger: session.ctx.logger,
+  }
+}
+
+/** A background launch (Phase 10): the manager's output, yielded at once; a launch that throws anyway is `failed`. */
+async function* launchBackground(input: SubagentRunnerInput, task: TaskInput, options: RunSubagentOptions): AsyncGenerator<TaskOutput, void, undefined> {
+  const { session } = input
+  let output: TaskOutput
+  try {
+    output = await input.background.launch(backgroundLaunchInput(input, task, options))
+  }
+  catch (error) {
+    session.ctx.logger.warn('a background launch failed', { ...(isHarnessError(error) ? { code: error.code } : {}) })
+    const now = session.ctx.now()
+    const progress = new TaskProgress(task, session.ctx.prepared.settings.subagentModelRef ?? input.model.modelRef, now)
+    output = progress.snapshot('failed', { finishedAt: now, error: isHarnessError(error) ? error.message : 'The background agent could not start.' })
+  }
+  yield output
+}
+
 /** The sub-agent runner of a run with explicit limits (see the module comment; `createSubagentRunner` uses `LIMITS`). */
 export function createSubagentRunnerWith(input: SubagentRunnerInput, limits: SubagentRunnerLimits = {}): SubagentRunner {
   const slots = new SubagentSlots(limits.parallelMax ?? LIMITS.subagentParallelMax)
@@ -489,9 +541,48 @@ export function createSubagentRunnerWith(input: SubagentRunnerInput, limits: Sub
           yield output
         })()
       }
+      if (task.background === true)
+        return launchBackground(input, task, options)
       return runChild({ input, slots, timeoutMs }, task, options)
     },
   }
+}
+
+/** What `runDetachedChild` runs (W10.4 builds it for a background task from its `BackgroundLaunchInput`). */
+export interface DetachedChildInput {
+  /** The task's host (`createDetachedSession`, `./host.ts`): the task's own signal as the run signal. */
+  readonly session: ChildSession
+  /** The launching run's model (the child's model when no other applies). */
+  readonly model: ResolvedModel
+  /** The launching run's permission mode (the child's tools and approvals follow it). */
+  readonly toolMode: ToolMode
+  /** The launching run's open project folder, or null. */
+  readonly workspace: OpenWorkspace | null
+  /** The launching run's scope (copied for the child: its writes are journaled under the launching message), or null. */
+  readonly scope: WorkspaceRunScopeInit | null
+  /** The launching run's catalog snapshot (the agent type and its body). */
+  readonly catalog: CustomizationCatalog
+  /** The validated `task` input (`background: true`). */
+  readonly task: TaskInput
+  /** The launching `task` call id: the child's call ids are `<toolCallId>/<child call id>`. */
+  readonly toolCallId: string
+  /**
+   * Aborted when the task's deadline (`LIMITS.backgroundTaskTimeoutMs`) passed; the run signal aborts with it. The child
+   * then ends `limit` instead of `aborted`. Absent = every abort of the run signal is a stop.
+   */
+  readonly deadline?: AbortSignal
+}
+
+/**
+ * Runs one background child on its detached host (Phase 10, ADR-046; W10.3): the child of a foreground `task` call (type
+ * resolution, tools, model, instructions, snapshots, the usage row) without the run's slots, the per-run cap and the
+ * 570 s child deadline, under `session.ctx.run.signal` (the task's Stop and deadline; no tool guard). Yields `TaskOutput`
+ * snapshots, the last one is the final output; never throws for a failed child.
+ * P10-0b (C31) stub: throws `not_implemented` (no launch reaches it before W10.4).
+ */
+export function runDetachedChild(input: DetachedChildInput): AsyncIterable<TaskOutput> {
+  void input
+  throw new HarnessError({ code: 'not_implemented', message: 'Background agents are not available yet.' })
 }
 
 /** The sub-agent runner of a run (see the module comment). */

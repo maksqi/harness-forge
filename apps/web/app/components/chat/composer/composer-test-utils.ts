@@ -3,6 +3,7 @@
 import type { CatalogModel, CommandSummary, ProviderSummary, SendKey, ToolSummary } from '@harness-forge/shared'
 import { DEFAULT_SETTINGS } from '@harness-forge/shared'
 import { defineComponent, h } from 'vue'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProvidersStore } from '~/stores/providers'
@@ -53,9 +54,14 @@ export function seedStores(options: SeedOptions = {}) {
   plugins.toolsLoaded = true
   plugins.commands = options.commands ?? [{ name: 'summarize', description: 'Summarize the chat', source: 'plugin', pluginId: 'core-commands' }]
   plugins.commandsLoaded = true
+  // Phase 10: the composer reads the slash commands of its scope from the customizations store (a chat without a
+  // project: scope ''); a list loaded just now is fresh, so mounting makes no request.
+  const customizations = useCustomizationsStore()
+  customizations.commands = { '': [...plugins.commands] }
+  customizations.loadedAt = { 'commands:': Date.now() }
   const settings = useSettingsStore()
   settings.settings = { ...DEFAULT_SETTINGS, sendKey: options.sendKey ?? 'enter' }
-  return { providers, models, plugins, settings }
+  return { providers, models, plugins, settings, customizations }
 }
 
 /** NuxtLink stand-in: an anchor with the target as href. */

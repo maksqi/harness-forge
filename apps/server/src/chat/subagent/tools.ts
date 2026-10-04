@@ -25,7 +25,7 @@ import type { ResolvedModel } from '../../providers/types.ts'
 import type { OpenWorkspace } from '../../services/projects/types.ts'
 import type { WorkspaceRunScopeInit } from '../../workspace/run-scope.ts'
 import type { ApprovalTool } from '../approval.ts'
-import type { RunSession } from '../pipeline.ts'
+import type { ChildSession } from './host.ts'
 import { GENERATE_IMAGE_TOOL_NAME } from '@harness-forge/shared'
 import { CORE_AGENT_PLUGIN_ID } from '../../builtin-plugins/core-agent/index.ts'
 import { createToolApproval, staticApprovalOutcome, toolWorkspaceAccess } from '../approval.ts'
@@ -38,8 +38,11 @@ export const SUBAGENT_APPROVAL_DENIED_TEXT = 'Sub-agents cannot ask the user: th
 export type ChildToolApproval = ReturnType<typeof createToolApproval>
 
 export interface ChildToolsInput {
-  /** The parent run: deps (registry, plugins, tool prefs, MCP, `env.workspaceShell`), chat id, the logger. */
-  readonly session: RunSession
+  /**
+   * The host (`./host.ts`; the parent run, or a background task's detached session): deps (registry, plugins, tool
+   * prefs, MCP, `env.workspaceShell`), chat id, the message id of the journal rows, the logger.
+   */
+  readonly session: ChildSession
   /** `explore` (read-only) or `general`. */
   readonly type: TaskType
   /** The parent's permission mode. */

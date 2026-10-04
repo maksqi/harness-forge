@@ -4,8 +4,10 @@ import { createServerEvent } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope } from 'vue'
+import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { useChatQueueStore } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectsStore } from '~/stores/projects'
@@ -13,7 +15,22 @@ import { useProvidersStore } from '~/stores/providers'
 import { useShellRulesStore } from '~/stores/shell-rules'
 import { useUiStore } from '~/stores/ui'
 import { useWorkspaceStore } from '~/stores/workspace'
-import { chatChanges, chatId, chatSummary, gitStatus, logEntry, pluginSummary, projectId, projectSummary, providerSummary, queueItem, workspaceChangedData } from '~/utils/testing/fixtures'
+import {
+  backgroundTask,
+  chatChanges,
+  chatId,
+  chatSummary,
+  commandSummary,
+  customizationId,
+  gitStatus,
+  logEntry,
+  pluginSummary,
+  projectId,
+  projectSummary,
+  providerSummary,
+  queueItem,
+  workspaceChangedData,
+} from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { dispatchServerEvent, KEY_ROTATED_MESSAGE, parseServerEvent, refetchLoadedStores, useServerEvents } from './useServerEvents'
@@ -152,6 +169,33 @@ describe('dispatchServerEvent', () => {
     dispatchServerEvent(deletedChat)
     expect(queueEvents.mock.calls).toEqual([[changed], [deletedChat]])
     expect(queue.items(chatId(1))).toEqual([])
+  })
+
+  it('routes task.changed and chat.deleted to the background-tasks store (Phase 10)', () => {
+    const tasks = useBackgroundTasksStore()
+    vi.spyOn(useChatsStore(), 'applyEvent').mockImplementation(() => {})
+    const taskEvents = vi.spyOn(tasks, 'applyEvent')
+    const running = backgroundTask({ status: 'running', finishedAt: null })
+    const changed = createServerEvent('task.changed', { chatId: chatId(1), task: running }, 1)
+    const deletedChat = createServerEvent('chat.deleted', { id: chatId(1) }, 2)
+    dispatchServerEvent(changed)
+    expect(tasks.tasks(chatId(1))).toEqual([running])
+    dispatchServerEvent(deletedChat)
+    expect(taskEvents.mock.calls).toEqual([[changed], [deletedChat]])
+    expect(tasks.tasks(chatId(1))).toEqual([])
+  })
+
+  it('routes customization.changed and plugin.changed to the customizations store (Phase 10)', () => {
+    const customizations = useCustomizationsStore()
+    vi.spyOn(usePluginsStore(), 'applyEvent').mockImplementation(() => {})
+    vi.spyOn(useProvidersStore(), 'applyEvent').mockImplementation(() => {})
+    vi.spyOn(useModelsStore(), 'applyEvent').mockImplementation(() => {})
+    const applied = vi.spyOn(customizations, 'applyEvent').mockImplementation(() => {})
+    const changed = createServerEvent('customization.changed', { kind: 'agent', id: customizationId(1) }, 1)
+    const plugin = createServerEvent('plugin.changed', { id: 'dice-roller', plugin: pluginSummary() }, 2)
+    dispatchServerEvent(changed)
+    dispatchServerEvent(plugin)
+    expect(applied.mock.calls).toEqual([[changed], [plugin]])
   })
 
   it('refetches the open changes 300 ms after workspace.changed, and drops a deleted project\'s chats before the chats store detaches them (Phase 8)', async () => {
@@ -304,6 +348,18 @@ describe('refetchLoadedStores', () => {
     const refresh = vi.spyOn(useChatQueueStore(), 'refreshLoaded')
     await refetchLoadedStores()
     expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes the loaded background task and customization lists (Phase 10)', async () => {
+    const tasks = vi.spyOn(useBackgroundTasksStore(), 'refreshLoaded')
+    const customizations = useCustomizationsStore()
+    const refresh = vi.spyOn(customizations, 'refreshLoaded')
+    api.commands.list.mockResolvedValue({ items: [commandSummary()] })
+    await customizations.fetchCommands(projectId(1))
+    await refetchLoadedStores()
+    expect(tasks).toHaveBeenCalledTimes(1)
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(api.commands.list.mock.calls).toEqual([[{ query: { projectId: projectId(1) } }], [{ query: { projectId: projectId(1) } }]])
   })
 
   it('a reconnect brings back the queue of every opened chat, not of the others (Phase 9)', async () => {

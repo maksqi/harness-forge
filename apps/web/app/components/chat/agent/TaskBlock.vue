@@ -11,6 +11,9 @@
 // A call whose input (or output, once there is one) does not parse with the shared schemas falls back to ToolPart.
 // Root `task-block` (`data-state` queued | running | completed | failed | limit | aborted | approval | denied,
 // `data-kind` explore | general).
+// Phase 10 (C33; W10.11 owns the block in P10-A): the type is any agent name (ADR-045): `data-kind` is `custom` for a
+// custom agent (`taskKindOf`) and `data-agent-type` names it; custom types keep the generic "Agent" label and icon until
+// W10.11 renders their name, the agent HoverCard and the background state.
 import type { ToolPartLike } from '../chat-format'
 import {
   BanIcon,
@@ -36,15 +39,16 @@ import ToolApprovalCard from '../parts/ToolApprovalCard.vue'
 import ToolPart from '../parts/ToolPart.vue'
 import {
   firstSentence,
+  taskAgentTypeOf,
   taskBlockState,
   taskDescriptionOf,
   taskDurationMs,
   taskInputOf,
+  taskKindOf,
   taskOutputOf,
   taskStepLine,
   taskToolCalls,
   taskTriggerLabel,
-  taskTypeOf,
   toolCallsText,
 } from './agent-tools'
 import TaskBody from './TaskBody.vue'
@@ -80,7 +84,9 @@ const output = computed(() => (hasOutput.value ? taskOutputOf(props.part.output)
 const fallback = computed(() => (props.part.state !== 'input-streaming' && input.value === null)
   || (hasOutput.value && output.value === null))
 
-const kind = computed(() => input.value?.type ?? taskTypeOf(props.part.input) ?? undefined)
+/** The agent type (any catalog name since Phase 10), and its kind: explore, general or custom. */
+const agentType = computed(() => input.value?.type ?? taskAgentTypeOf(props.part.input))
+const kind = computed(() => (agentType.value === null ? undefined : taskKindOf(agentType.value)))
 const description = computed(() => input.value?.description ?? taskDescriptionOf(props.part.input))
 const state = computed(() => taskBlockState(props.part, { streaming: props.streaming, superseded: props.superseded }))
 const active = computed(() => state.value === 'running' || state.value === 'queued')
@@ -156,6 +162,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
     :data-testid="testIds.taskBlock"
     :data-state="state"
     :data-kind="kind"
+    :data-agent-type="agentType ?? undefined"
     class="flex min-w-0 flex-col gap-1.5"
   >
     <ToolPart

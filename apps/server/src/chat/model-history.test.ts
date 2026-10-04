@@ -1,9 +1,10 @@
-// The model history builder (Phase 9, C26-T3): the stage order applyCompaction → splitSteers → reduceAgentOutputs →
-// applyCommandExpansions → the summary merge, with fake stages; and `buildModelHistory` with the P9-0b stages (a v1.4
-// path comes back unchanged).
+// The model history builder (Phase 9, C26-T3; Phase 10, C31-T3): the stage order applyCompaction → splitSteers →
+// splitTaskResults → reduceAgentOutputs → applyCommandExpansions → the summary merge, with fake stages; and
+// `buildModelHistory` with the real stages (a v1.4 / v1.5 path comes back unchanged, a delivered task result and a
+// carrier message become user text).
 import type { HarnessUIMessage } from '@harness-forge/shared'
 import type { ModelHistoryStages } from './model-history.ts'
-import { splitSteers } from '@harness-forge/shared'
+import { splitSteers, splitTaskResults, taskResultText } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { applyCommandExpansions } from './context.ts'
 import { buildModelHistory, COMPACTION_SUMMARY_MESSAGE_ID, composeModelHistory, mergeSummary, MODEL_HISTORY_STAGES } from './model-history.ts'
@@ -45,13 +46,14 @@ describe('composeModelHistory', () => {
         return { messages: history.slice(1), summaryText: 'SUMMARY' }
       },
       splitSteers: tag('split'),
+      splitTaskResults: tag('results'),
       reduceAgentOutputs: tag('reduce'),
       applyCommandExpansions: tag('expand'),
     }
     const result = composeModelHistory([user('msg_u0', 'old'), user('msg_u1', 'kept')], stages)
-    expect(order).toEqual(['compaction', 'split', 'reduce', 'expand'])
+    expect(order).toEqual(['compaction', 'split', 'results', 'reduce', 'expand'])
     expect(result).toEqual([
-      user('msg_u1', 'SUMMARY', { parts: [{ type: 'text', text: 'SUMMARY' }, { type: 'text', text: 'kept' }, { type: 'text', text: 'split' }, { type: 'text', text: 'reduce' }, { type: 'text', text: 'expand' }] }),
+      user('msg_u1', 'SUMMARY', { parts: [{ type: 'text', text: 'SUMMARY' }, { type: 'text', text: 'kept' }, { type: 'text', text: 'split' }, { type: 'text', text: 'results' }, { type: 'text', text: 'reduce' }, { type: 'text', text: 'expand' }] }),
     ])
   })
 
@@ -107,5 +109,78 @@ describe('buildModelHistory (P9-0b stages)', () => {
     const copy = structuredClone(V14_PATH)
     buildModelHistory(V14_PATH)
     expect(V14_PATH).toEqual(copy)
+  })
+})
+
+describe('buildModelHistory: background task results (Phase 10, C31-T3)', () => {
+  const taskId = 'bgt_0000000000000001'
+  const result = {
+    taskId,
+    toolCallId: 'call_bg',
+    messageId: 'msg_a000000000000009',
+    output: {
+      status: 'completed' as const,
+      type: 'explore',
+      description: 'Look around',
+      modelRef: 'mock:background',
+      steps: [],
+      stepsOmitted: 0,
+      report: 'Found the config.',
+      startedAt: 1,
+      finishedAt: 2,
+      taskId,
+    },
+    deliveredAt: 3,
+  }
+
+  /** A v1.5 path: the v1.4 path plus a todo call and a delivered steer (no task result). */
+  const V15_PATH: HarnessUIMessage[] = [
+    ...V14_PATH,
+    user('msg_u000000000000003', 'track it'),
+    assistant(
+      'msg_a000000000000003',
+      { type: 'step-start' },
+      { type: 'tool-todo_write', toolCallId: 'call_t', state: 'output-available', input: { todos: [] }, output: { todos: [], counts: { pending: 0, inProgress: 0, completed: 0, total: 0 } } } as unknown as HarnessUIMessage['parts'][number],
+      { type: 'data-steer', data: steerData },
+      { type: 'step-start' },
+      { type: 'text', text: 'ok', state: 'done' },
+    ),
+  ]
+
+  it('leaves a v1.5 path without task results as the Phase 9 stages built it', () => {
+    const phase9 = composeModelHistory(V15_PATH, { ...MODEL_HISTORY_STAGES, splitTaskResults: messages => [...messages] })
+    expect(buildModelHistory(V15_PATH)).toEqual(phase9)
+    const split = splitSteers(V15_PATH)
+    const results = splitTaskResults(split)
+    for (const [index, message] of results.entries())
+      expect(message).toBe(split[index])
+  })
+
+  it('splits a reply at a delivered result after the steer split: the result is a user message between the halves', () => {
+    const reply = assistant(
+      'msg_a4',
+      { type: 'step-start' },
+      { type: 'text', text: 'one' },
+      { type: 'data-steer', data: steerData },
+      { type: 'data-task-result', data: result },
+      { type: 'step-start' },
+      { type: 'text', text: 'two' },
+    )
+    const history = buildModelHistory([user('msg_u4', 'go'), reply])
+    expect(history.map(message => [message.id, message.role])).toEqual([
+      ['msg_u4', 'user'],
+      ['msg_a4', 'assistant'],
+      ['msg_s000000000000001', 'user'],
+      [taskId, 'user'],
+      ['msg_a4~1', 'assistant'],
+    ])
+    expect(history[3]!.parts).toEqual([{ type: 'text', text: taskResultText(result) }])
+  })
+
+  it('turns the carrier message of a server-started turn into a user text message', () => {
+    const carrier: HarnessUIMessage = { id: 'msg_c000000000000001', role: 'user', parts: [{ type: 'data-task-result', data: result }] }
+    const history = buildModelHistory([user('msg_u5', 'start it'), assistant('msg_a5', { type: 'text', text: 'started' }), carrier])
+    expect(history.at(-1)).toEqual({ id: 'msg_c000000000000001', role: 'user', parts: [{ type: 'text', text: taskResultText(result) }] })
+    expect(history.at(-1)!.parts[0]).toMatchObject({ text: expect.stringContaining('<background-task id="bgt_0000000000000001"') })
   })
 })

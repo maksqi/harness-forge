@@ -1,16 +1,18 @@
 // The agent scope of a run (Phase 9, ADR-041 / ADR-043, ARCHITECTURE.md 6.19 and 6.22). FROZEN after P9-0b (C26,
-// complete).
+// complete); Phase 10 (C31-T4, ADR-045 / ADR-047) adds `loadSkill` and `savePlan`; FROZEN again after P10-0b.
 //
 // A server-internal side channel like `workspace/run-scope.ts`: the chat pipeline (`chat/pipeline.ts`) builds one
 // scope per run with tools (a project chat or not) and `wrapToolExecute` binds it to the `ToolCallContext` object of
 // every call, next to `bindRunScope`, right before `definition.execute`. The builtin `core-agent` tools read it back
-// with `agentScopeOf(c)`: `exit_plan_mode` reads `toolMode`, `task` delegates to `runSubagent`. Sub-agent runs never
-// bind it (depth 1: a `task` call inside a child finds no scope and fails).
+// with `agentScopeOf(c)`: `exit_plan_mode` reads `toolMode` (and, Phase 10, writes the approved plan with `savePlan`),
+// `task` delegates to `runSubagent`, `skill` (Phase 10) to `loadSkill`. Sub-agent runs never bind it (depth 1: a `task`
+// or `skill` call inside a child finds no scope and fails).
 //
 // The binding lives in a module-private `WeakMap` keyed by the context object: nothing is added to the object (no
 // property, no symbol), so a third-party plugin that receives the same context cannot reach the sub-agent runner (the
 // plugin API 1.3.0 has no `ToolCallContext.agent`), and a context that is no longer referenced releases its scope.
-import type { TaskInput, TaskOutput, TodoState, ToolMode } from '@harness-forge/shared'
+import type { ToolCallContext } from '@harness-forge/plugin-sdk'
+import type { ExitPlanModeOutput, SkillOutput, TaskInput, TaskOutput, TodoState, ToolMode } from '@harness-forge/shared'
 
 /** The call-specific options of `AgentRunScope.runSubagent`. */
 export interface RunSubagentOptions {
@@ -19,6 +21,12 @@ export interface RunSubagentOptions {
   /** The `task` call's abort signal (the run's Stop, the tool timeout); the child also has its own deadline. */
   readonly signal: AbortSignal
 }
+
+/**
+ * What `AgentRunScope.savePlan` reports (Phase 10, ADR-047; the `exit_plan_mode` output fields): `planPath` when the
+ * plan file was written, `planError` when writing it failed; `{}` when no file is due (`planFiles` off, no project).
+ */
+export type SavedPlan = Pick<ExitPlanModeOutput, 'planPath' | 'planError'>
 
 /** What a `core-agent` tool of one call can reach through `agentScopeOf(c)`. */
 export interface AgentRunScope {
@@ -38,6 +46,18 @@ export interface AgentRunScope {
   runSubagent: (input: TaskInput, options: RunSubagentOptions) => AsyncIterable<TaskOutput>
   /** The todo list of the run's history (`latestTodos` of the path the run started from), or null. */
   todos: () => TodoState | null
+  /**
+   * Phase 10 (ADR-045; `chat/skills.ts`, W10.5): loads one skill of the run's catalog for `skill` (the body read and
+   * validated again; a project skill also lists its supporting files). Rejects for an unknown, disabled or unreadable
+   * skill (the tool error the model reads names the available skills) and when `signal` aborts.
+   */
+  loadSkill: (name: string, signal: AbortSignal) => Promise<SkillOutput>
+  /**
+   * Phase 10 (ADR-047; `chat/plan-file.ts`, W10.5): writes an approved plan to the project when `planFiles` is on and the
+   * call context `c` has a workspace (journaled through the run scope bound to `c`). Never rejects: a failed write is
+   * `{ planError }` and never fails the approval.
+   */
+  savePlan: (plan: string, c: ToolCallContext) => Promise<SavedPlan>
 }
 
 const scopes = new WeakMap<object, AgentRunScope>()

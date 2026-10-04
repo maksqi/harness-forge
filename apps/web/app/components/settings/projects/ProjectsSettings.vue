@@ -8,7 +8,8 @@
 // (project-delete -> ConfirmDialog with project-delete-confirm; 409 run-active -> toast "Wait for the responses in this
 // project to finish before deleting it."). Phase 8: the row meta adds "{n} allowed commands" ("1 allowed command", left
 // out at 0; useShellRulesStore, which pages/settings/projects.vue loads). The empty state (projects-empty) has its own
-// Add project (project-add).
+// Add project (project-add). Phase 10 (C33 adds it, W10.12 owns it): Agents, commands and skills… (project-customizations,
+// WandSparkles) opens Settings -> Customize with the project selected (`/settings/customize?project=<id>`).
 // A skeleton shows while the projects load; a failure shows SettingsLoadError "Could not load the projects" with Retry.
 // `?add=1` (the page's header action, the palette's "Add project…") opens the AddProjectDialog, and the query parameter
 // is dropped at once, so the same link works again. The list reloads on every visit (chat counts and folder states).
@@ -16,7 +17,7 @@
 // pages/settings/projects.vue inside SettingsPage, which renders the PageHeader "Projects" with the Add project action.
 import type { ProjectSummary } from '@harness-forge/shared'
 import { createServerEvent, LIMITS } from '@harness-forge/shared'
-import { FileTextIcon, FolderPlusIcon, FolderXIcon, MoreHorizontalIcon, PencilIcon, ShieldCheckIcon, Trash2Icon } from '@lucide/vue'
+import { FileTextIcon, FolderPlusIcon, FolderXIcon, MoreHorizontalIcon, PencilIcon, ShieldCheckIcon, Trash2Icon, WandSparklesIcon } from '@lucide/vue'
 import { computed, nextTick, onMounted, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Badge } from '@/components/ui/badge'
@@ -121,6 +122,11 @@ function focusMenuTrigger(id: string | undefined): void {
 
 function choose(project: ProjectSummary, action: RowAction): void {
   pending = { project, action }
+}
+
+/** Phase 10: the project's agents, commands and skills on the Customize page. */
+function openCustomizations(project: ProjectSummary): void {
+  router.push({ path: '/settings/customize', query: { project: project.id } }).catch(() => {})
 }
 
 function onMenuCloseAutoFocus(event: Event): void {
@@ -304,7 +310,7 @@ function openAdd(): void {
               <MoreHorizontalIcon aria-hidden="true" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" class="w-52" @close-auto-focus="onMenuCloseAutoFocus">
+          <DropdownMenuContent align="end" class="w-60" @close-auto-focus="onMenuCloseAutoFocus">
             <DropdownMenuItem :data-testid="testIds.projectRename" @select="choose(project, 'rename')">
               <PencilIcon aria-hidden="true" />
               Rename
@@ -316,6 +322,10 @@ function openAdd(): void {
             <DropdownMenuItem :data-testid="testIds.projectAllowlist" @select="choose(project, 'allowlist')">
               <ShieldCheckIcon aria-hidden="true" />
               Allowed commands…
+            </DropdownMenuItem>
+            <DropdownMenuItem :data-testid="testIds.projectCustomizations" @select="openCustomizations(project)">
+              <WandSparklesIcon aria-hidden="true" />
+              Agents, commands and skills…
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" :data-testid="testIds.projectDelete" @select="choose(project, 'delete')">

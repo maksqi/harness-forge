@@ -1,14 +1,17 @@
 import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider'
+import type { ToolCallContext } from '@harness-forge/plugin-sdk'
 import type { ChatDetail, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, SteerData } from '@harness-forge/shared'
 import type { LanguageModelUsage, TextStreamPart, ToolSet, UIMessageChunk, UIMessageStreamWriter } from 'ai'
 import type { ResolvedModel } from '../providers/types.ts'
 import type { TestApp } from '../testing/create-test-app.ts'
+import type { FakeCustomizationService } from '../testing/fake-customizations.ts'
 import type { AppDeps } from '../types.ts'
+import type { AgentRunScope } from './agent-scope.ts'
 import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { RunEnding } from './history.ts'
 import type { RunContext } from './pipeline.ts'
 import type { PreparedRun } from './prepare.ts'
-import { chatDetailSchema, createMessageId, HarnessError } from '@harness-forge/shared'
+import { chatDetailSchema, createMessageId, HarnessError, taskResultText } from '@harness-forge/shared'
 import { convertToModelMessages } from 'ai'
 import { convertArrayToReadableStream, MockLanguageModelV4 } from 'ai/test'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -16,12 +19,16 @@ import { z } from 'zod'
 import { createSilentLogger } from '../logger.ts'
 import { createRedactor } from '../security/redact.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
+import { fakeCatalogEntry } from '../testing/fake-customizations.ts'
+import { agentScopeOf } from './agent-scope.ts'
+import { createBackgroundTasks } from './background/index.ts'
 import { assistant, seedChat, user } from './compaction/testing.ts'
 import { COMPACT_INSTRUCTIONS_MARKER } from './markers.ts'
 import { TODO_HINT } from './params.ts'
-import { alreadyNoticed, catchStreamErrors, historyToolSet, NOTICES, RunSession, TaskTracker, withNotices } from './pipeline.ts'
+import { alreadyNoticed, catchStreamErrors, historyToolSet, keptUserMessage, launchRun, NOTICES, RunSession, TaskTracker, withNotices } from './pipeline.ts'
 import { createChatQueue } from './queue.ts'
 import { createRunRegistry } from './runs.ts'
+import { SKILLS_UNAVAILABLE_TEXT } from './skills.ts'
 import { stepInjector } from './steer.ts'
 import { chatBody, postChat, readSse, runnerOf, streamedText, testChatId } from './testing.ts'
 
@@ -113,18 +120,27 @@ function usage(input: number, output: number): LanguageModelUsage {
   }
 }
 
-/** The fakes `RunSession` persistence reaches (`#persist`): stored messages, emitted events. */
+/** The fakes `RunSession` persistence reaches (`#persist`): stored messages, emitted events, chat touches. */
 interface PersistFakes {
   stored: HarnessUIMessage[]
   events: { type: string, data: unknown }[]
+  touches?: { chatId: string, patch: unknown }[]
 }
 
-function session(previous?: MessageMetadata, clock = { now: 1000 }, extra: { onReleased?: RunContext['onReleased'], fakes?: PersistFakes } = {}): RunSession {
+interface SessionExtra {
+  onReleased?: RunContext['onReleased']
+  fakes?: PersistFakes
+  /** Fields that replace those of the minimal prepared run (Phase 10). */
+  prepared?: Record<string, unknown>
+  origin?: RunContext['origin']
+}
+
+function session(previous?: MessageMetadata, clock = { now: 1000 }, extra: SessionExtra = {}): RunSession {
   const registry = createRunRegistry()
   const run = registry.acquire('chat', 'prov:model')
   const resolved = { modelRef: 'prov:model', providerId: 'prov', modelId: 'model', entry: { cost: { input: 1, output: 2 } } } as unknown as ResolvedModel
   const continued: HarnessUIMessage | null = previous === undefined ? null : { id: 'msg_a000000000000001', role: 'assistant', metadata: previous, parts: [{ type: 'step-start' }] }
-  const prepared = { resolved, continued, assistantId: continued?.id ?? 'msg_a000000000000009', history: continued === null ? [] : [continued], replyParentId: null } as unknown as PreparedRun
+  const prepared = { resolved, continued, assistantId: continued?.id ?? 'msg_a000000000000009', history: continued === null ? [] : [continued], replyParentId: null, requestModelRef: 'prov:model', ...extra.prepared } as unknown as PreparedRun
   const fakes = extra.fakes ?? { stored: [], events: [] }
   const deps = {
     redactor: createRedactor(),
@@ -136,7 +152,9 @@ function session(previous?: MessageMetadata, clock = { now: 1000 }, extra: { onR
         },
         setActiveLeaf: async () => true,
       }),
-      touch: async () => {},
+      touch: async (chatId: string, patch: unknown) => {
+        fakes.touches?.push({ chatId, patch })
+      },
       addUsage: async () => {},
     },
     events: { emit: (type: string, data: unknown) => fakes.events.push({ type, data }) },
@@ -156,6 +174,8 @@ function session(previous?: MessageMetadata, clock = { now: 1000 }, extra: { onR
     lifecycle: new AbortController().signal,
     queue: createChatQueue(deps, { hasRun: () => false, now: () => clock.now }),
     onReleased: extra.onReleased ?? (() => {}),
+    background: createBackgroundTasks(deps, { hasRun: () => false, startTaskTurn: async () => new Response(null) }),
+    ...(extra.origin === undefined ? {} : { origin: extra.origin }),
   }
   return new RunSession(ctx)
 }
@@ -763,5 +783,202 @@ describe('historyToolSet (W9.1, from W9.3)', () => {
     // The run's own tools win over the registry entries.
     const own = { write_file: { inputSchema: z.object({}), toModelOutput: () => ({ type: 'text' as const, value: 'own' }) } } as never
     expect(historyToolSet(own, [writeTool] as never, plugins).write_file).toBe((own as Record<string, unknown>).write_file)
+  })
+})
+
+// ---------- Phase 10 (C31-T1): the chat keeps its model, task results tracked like steers, the run's seams ----------
+
+describe('runSession: Phase 10 seams', () => {
+  const taskId = 'bgt_0000000000000001'
+  function taskResult(id: string = taskId) {
+    return {
+      taskId: id,
+      toolCallId: 'call_bg',
+      messageId: 'msg_a000000000000001',
+      output: { status: 'completed' as const, type: 'explore', description: 'Look around', modelRef: 'prov:model', steps: [], stepsOmitted: 0, report: 'Found it.', startedAt: 1, finishedAt: 2, taskId: id },
+      deliveredAt: 3,
+    }
+  }
+
+  it('appends an injected task result the response lost when it saves the message, once', () => {
+    const s = session()
+    const placed = { type: 'data-task-result' as const, data: taskResult() }
+    const steered = { type: 'data-steer' as const, data: steer('msg_s000000000000001', 'lost steer') }
+    const lost = { type: 'data-task-result' as const, id: 'result-2', data: taskResult('bgt_0000000000000002') }
+    s.inject(placed, 1)
+    s.inject(steered, 2)
+    s.inject(lost, 2)
+    const response: HarnessUIMessage = {
+      id: s.assistantId,
+      role: 'assistant',
+      parts: [{ type: 'step-start' }, { type: 'text', text: 'one', state: 'done' }, { type: 'data-task-result', data: placed.data }, { type: 'step-start' }],
+    }
+    const saved = s.finalMessage(response, 'aborted')
+    expect(saved.parts).toEqual([
+      ...response.parts,
+      { type: 'data-steer', data: steered.data },
+      { type: 'data-task-result', id: 'result-2', data: lost.data },
+    ])
+    const again = s.finalMessage(saved, 'aborted')
+    expect(again.parts.filter(part => part.type === 'data-task-result')).toHaveLength(2)
+    expect(again.parts.filter(part => part.type === 'data-steer')).toHaveLength(1)
+  })
+
+  it('the guard\'s kept user message of a task turn is its carrier read as the result text', async () => {
+    const carrier: HarnessUIMessage = { id: 'msg_c000000000000001', role: 'user', parts: [{ type: 'data-task-result', data: taskResult() }] }
+    const s = session(undefined, { now: 1000 }, { prepared: { history: [carrier] } })
+    const model = { entry: { capabilities: { tools: true, vision: false, pdf: false } } } as unknown as ResolvedModel
+    const kept = await keptUserMessage(s, model, {})()
+    expect(kept).toEqual({ role: 'user', content: [{ type: 'text', text: taskResultText(taskResult()) }] })
+    const plain = session(undefined, { now: 1000 }, { prepared: { history: [{ id: 'msg_u000000000000001', role: 'user', parts: [{ type: 'text', text: 'hello' }] }] } })
+    expect(await keptUserMessage(plain, model, {})()).toEqual({ role: 'user', content: [{ type: 'text', text: 'hello' }] })
+    expect(await keptUserMessage(session(), model, {})()).toBeNull()
+  })
+
+  it('touches the chat with the request\'s model when a command model ran the turn; run.started and the reply name the model that ran', async () => {
+    const fakes: PersistFakes = { stored: [], events: [], touches: [] }
+    const userMessageId = 'msg_u000000000000001'
+    const s = session(undefined, { now: 1000 }, {
+      fakes,
+      origin: 'task',
+      prepared: {
+        requestModelRef: 'mock:echo',
+        command: { kind: 'reply', invocation: { name: 'note', input: '', type: 'reply' }, markdown: 'Done.' },
+        chat: { titleSource: 'user', settings: {} },
+        notices: [],
+        superseded: 0,
+        userMessage: { id: userMessageId, role: 'user', parts: [] },
+        target: { kind: 'chat', model: {} },
+      },
+    })
+    const response = await launchRun(s.ctx)
+    await response.text()
+    await s.ctx.run.settled
+    expect(fakes.touches).toEqual([
+      { chatId: 'chat', patch: { pendingApproval: false, modelRef: 'mock:echo' } },
+      { chatId: 'chat', patch: { pendingApproval: false, modelRef: 'mock:echo' } },
+    ])
+    expect(fakes.events.find(event => event.type === 'run.started')?.data).toEqual({
+      chatId: 'chat',
+      messageId: 'msg_a000000000000009',
+      modelRef: 'prov:model',
+      origin: 'task',
+      userMessageId,
+    })
+    expect(fakes.stored.at(-1)?.metadata?.modelRef).toBe('prov:model')
+  })
+})
+
+describe('modelStream: Phase 10 seams (C31-T1)', () => {
+  const kit = new Map<string, LanguageModelV4>()
+  let seamApp: TestApp
+  let disposables: { dispose: () => void }[] = []
+
+  beforeAll(async () => {
+    seamApp = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' } })
+    disposables.push(seamApp.deps.registry.providers.register('mock', {
+      id: 'seamkit',
+      name: 'Seam kit',
+      credentials: [],
+      seedModels: [{ id: 'agent', name: 'Agent', contextWindow: 32_000, capabilities: { tools: true }, cost: { input: 1, output: 2 } }],
+      createLanguageModel: (modelId) => {
+        const model = kit.get(modelId)
+        if (model === undefined)
+          throw new Error(`No scripted model "${modelId}".`)
+        return model
+      },
+    }))
+  })
+
+  afterAll(async () => {
+    for (const disposable of disposables)
+      disposable.dispose()
+    disposables = []
+    await seamApp.close()
+  })
+
+  /** A model that calls `toolName` with `input` in its first step and answers "done" afterwards. */
+  function callingModel(toolName: string, input: unknown, calls: LanguageModelV4CallOptions[] = []): LanguageModelV4 {
+    return new MockLanguageModelV4({
+      doStream: async (options) => {
+        calls.push(options)
+        const parts: LanguageModelV4StreamPart[] = calls.length === 1
+          ? [{ type: 'tool-call', toolCallId: 'call_1', toolName, input: JSON.stringify(input) }, streamFinish(10, 5, 'tool-calls')]
+          : stepParts('done', null)
+        return { stream: convertArrayToReadableStream(parts) }
+      },
+    })
+  }
+
+  it('a background task call yields one failed output "Background agents are not available yet." (C30 stub)', async () => {
+    kit.set('agent', callingModel('task', { description: 'Look around', prompt: 'Find the config.', type: 'explore', background: true }))
+    const chatId = testChatId(10_001)
+    const { chunks } = await readSse(await postChat(seamApp, { ...chatBody(chatId, 'go'), modelRef: 'seamkit:agent' }))
+    await runnerOf(seamApp).idle()
+    // The runner yields one output; the streaming tool wrapper sends it as its preliminary and its final value.
+    const outputs = chunks.filter(chunk => chunk.type === 'tool-output-available' && chunk.toolCallId === 'call_1') as { output: unknown, preliminary?: boolean }[]
+    const final = outputs.filter(chunk => chunk.preliminary !== true)
+    expect(final).toHaveLength(1)
+    expect(new Set(outputs.map(chunk => JSON.stringify(chunk.output))).size).toBe(1)
+    const detail = chatDetailSchema.parse(await (await seamApp.request(`/api/chats/${chatId}`)).json())
+    const part = detail.messages.at(-1)?.parts.find(entry => entry.type === 'tool-task') as { output?: { status?: string, error?: string } } | undefined
+    expect(part?.output).toMatchObject({ status: 'failed', error: 'Background agents are not available yet.', type: 'explore', description: 'Look around' })
+  })
+
+  it('binds loadSkill and savePlan into the agent scope of every call (stubs until W10.5); skill is not offered without skills', async () => {
+    const seen: (AgentRunScope | null)[] = []
+    const contexts: ToolCallContext[] = []
+    disposables.push(seamApp.deps.registry.tools.register('mock', {
+      name: 'scope_probe',
+      description: 'Records the agent scope.',
+      inputSchema: z.object({}),
+      policy: 'safe',
+      execute: async (_input, c) => {
+        seen.push(agentScopeOf(c))
+        contexts.push(c)
+        return 'ok'
+      },
+    }))
+    const calls: LanguageModelV4CallOptions[] = []
+    kit.set('agent', callingModel('scope_probe', {}, calls))
+    const chatId = testChatId(10_002)
+    await readSse(await postChat(seamApp, { ...chatBody(chatId, 'probe'), modelRef: 'seamkit:agent' }))
+    await runnerOf(seamApp).idle()
+    const scope = seen[0]
+    expect(scope).toMatchObject({ chatId, toolMode: 'ask' })
+    await expect(scope!.loadSkill('release-notes', new AbortController().signal)).rejects.toMatchObject({ code: 'not_found', message: SKILLS_UNAVAILABLE_TEXT })
+    expect(await scope!.savePlan('# Plan', contexts[0]!)).toEqual({})
+    // The plugin's context carries no scope member.
+    expect(Object.keys(contexts[0]!).sort()).toEqual(['chatId', 'messages', 'modelRef', 'signal', 'toolCallId'])
+    expect((calls[0]?.tools ?? []).map(entry => entry.name)).not.toContain('skill')
+  })
+
+  it('offers skill when the run catalog has skills', async () => {
+    const skillApp = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, customizations: 'fake' })
+    const provider = skillApp.deps.registry.providers.register('mock', {
+      id: 'seamkit',
+      name: 'Seam kit',
+      credentials: [],
+      seedModels: [{ id: 'agent', name: 'Agent', contextWindow: 32_000, capabilities: { tools: true }, cost: { input: 1, output: 2 } }],
+      createLanguageModel: () => kit.get('agent')!,
+    })
+    try {
+      const fake = skillApp.deps.customizations as FakeCustomizationService
+      fake.entries.set('', [fakeCatalogEntry('skill', 'release-notes', { source: 'plugin', pluginId: 'mock' })])
+      const calls: LanguageModelV4CallOptions[] = []
+      kit.set('agent', new MockLanguageModelV4({
+        doStream: async (options) => {
+          calls.push(options)
+          return { stream: convertArrayToReadableStream(stepParts('ok', null)) }
+        },
+      }))
+      await readSse(await postChat(skillApp, { ...chatBody(testChatId(10_003), 'hi'), modelRef: 'seamkit:agent' }))
+      await runnerOf(skillApp).idle()
+      expect((calls[0]?.tools ?? []).map(entry => entry.name)).toContain('skill')
+    }
+    finally {
+      provider.dispose()
+      await skillApp.close()
+    }
   })
 })

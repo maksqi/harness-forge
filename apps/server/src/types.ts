@@ -14,6 +14,7 @@ import type { Keyring, PasswordService, Redactor, SessionService } from './secur
 import type { AudioService } from './services/audio/types.ts'
 import type { ChatsService } from './services/chats/types.ts'
 import type { CheckpointService } from './services/checkpoints/types.ts'
+import type { CustomizationService } from './services/customizations/types.ts'
 import type { DataService } from './services/data/types.ts'
 import type { EventBus } from './services/events/types.ts'
 import type { FilesService } from './services/files/types.ts'
@@ -117,6 +118,12 @@ export interface AppServices {
    * runs stopped.
    */
   readonly projectFiles: ProjectFileService
+  /**
+   * The catalog of agents, commands and skills (builtin, plugin, personal and project definition files) and the personal
+   * definitions of the `customizations` table (Phase 10, ADR-044 / ADR-045; C30 stub, W10.1). `stop()` runs right after
+   * the runs stopped.
+   */
+  readonly customizations: CustomizationService
 }
 
 export interface AppDeps extends AppBase, AppServices {}

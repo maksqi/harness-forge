@@ -3,15 +3,19 @@
 // integers 0/1, JSON is stored as text, money is REAL USD. `created_at` / `updated_at` default to `Date.now()` when
 // an insert omits them (runtime default, not a SQL default).
 import type {
+  BackgroundTaskStatus,
   ChatSettings,
+  CustomizationKind,
   HarnessErrorInit,
   HarnessUIMessage,
   MessageMetadata,
   ModelInfo,
   PluginSource,
   ProviderStatus,
+  RunOrigin,
   ShareOptions,
   ShareSnapshot,
+  TaskOutput,
   TitleSource,
   ToolOverride,
   ToolPolicy,
@@ -381,6 +385,54 @@ export const shellRules = sqliteTable('shell_rules', {
   uniqueIndex('shell_rules_project_prefix_uq').on(table.projectId, table.prefix).where(sql`project_id is not null`),
 ])
 
+/**
+ * Personal agents, commands and skills (Phase 10, ADR-044): the raw markdown with frontmatter, parsed by
+ * `packages/shared/src/util/definitions.ts`; `name` / `description` are denormalized from it. In backups
+ * (`customizations.json`), kept by delete-all.
+ */
+export const customizations = sqliteTable('customizations', {
+  /** `cus_` + 16 chars. */
+  id: text('id').primaryKey(),
+  kind: text('kind').$type<CustomizationKind>().notNull(),
+  name: text('name').notNull(),
+  description: text('description').notNull(),
+  /** The markdown file (≤ `DEFINITION_LIMITS.contentBytes`). */
+  content: text('content').notNull(),
+  enabled: bool('enabled').notNull().default(true),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, table => [
+  uniqueIndex('customizations_kind_name_uq').on(table.kind, table.name),
+])
+
+/**
+ * Background sub-agents (Phase 10, ADR-046): one row per `task` call with `background: true`; `running` rows become
+ * `aborted` at boot. Never in backups or exports; deleted with their chat.
+ */
+export const backgroundTasks = sqliteTable('background_tasks', {
+  /** `bgt_` + 16 chars. */
+  id: text('id').primaryKey(),
+  chatId: text('chat_id').notNull().references(() => chats.id, { onDelete: 'cascade' }),
+  /** The assistant message whose `task` call launched it. */
+  messageId: text('message_id').notNull(),
+  toolCallId: text('tool_call_id').notNull(),
+  /** The agent type name. */
+  type: text('type').notNull(),
+  description: text('description').notNull(),
+  status: text('status').$type<BackgroundTaskStatus>().notNull(),
+  /** The origin of the launching run. */
+  origin: text('origin').$type<RunOrigin>().notNull(),
+  /** The latest `TaskOutput` snapshot (written at start and finish). */
+  output: json<TaskOutput>('output').notNull(),
+  createdAt: createdAt(),
+  finishedAt: timestamp('finished_at'),
+  deliveredAt: timestamp('delivered_at'),
+  deliveredMessageId: text('delivered_message_id'),
+}, table => [
+  index('background_tasks_chat_idx').on(table.chatId, table.createdAt),
+  index('background_tasks_pending_idx').on(table.deliveredAt, table.status),
+])
+
 // ---------- relations (relational query API: `db.query.chats.findFirst({ with: { messages: true } })`) ----------
 
 export const chatsRelations = relations(chats, ({ many }) => ({
@@ -401,7 +453,7 @@ export const usageRelations = relations(usage, ({ one }) => ({
   chat: one(chats, { fields: [usage.chatId], references: [chats.id] }),
 }))
 
-/** Every table name (the 18 tables of DECISIONS.md "Database tables"). */
+/** Every table name (the 20 tables of DECISIONS.md "Database tables"). */
 export const TABLE_NAMES = [
   'settings',
   'secrets',
@@ -421,6 +473,8 @@ export const TABLE_NAMES = [
   'projects',
   'workspace_changes',
   'shell_rules',
+  'customizations',
+  'background_tasks',
 ] as const
 
 // ---------- row types ----------
@@ -432,6 +486,8 @@ export type ModelCacheRow = typeof modelCache.$inferSelect
 export type ModelPrefRow = typeof modelPrefs.$inferSelect
 export type ChatRow = typeof chats.$inferSelect
 export type MessageRow = typeof messages.$inferSelect
+export type CustomizationRow = typeof customizations.$inferSelect
+export type BackgroundTaskRow = typeof backgroundTasks.$inferSelect
 export type UsageRow = typeof usage.$inferSelect
 export type PluginRow = typeof plugins.$inferSelect
 export type PluginSettingsRow = typeof pluginSettings.$inferSelect

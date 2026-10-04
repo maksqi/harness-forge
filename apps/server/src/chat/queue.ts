@@ -4,8 +4,9 @@
 // implementation is W9.2's.
 //
 // - `add` normalizes the parts like a `POST /chat` user message (`normalizeUserParts`: file parts must name uploaded
-//   files), sets `turnOnly` when the first text is a server command (`/compact` or a registered plugin command: such an
-//   item is never steered, only started as the next turn), and throws `not_found` (unknown chat), `conflict` `run-idle`
+//   files), sets `turnOnly` when the first text is a server command (`/compact` or a registered plugin command; Phase 10:
+//   `isServerCommandFor` of the chat's project, so command files count too once W10.2 resolves them: such an item is
+//   never steered, only started as the next turn), and throws `not_found` (unknown chat), `conflict` `run-idle`
 //   (no run registered and no pending approval), `queue-full` or `exists` (the message id is queued or stored). The
 //   checks that depend on the queue run synchronously right before the item is appended (after every await), so a run
 //   that ends meanwhile either sees the item at its release or the add answers `run-idle`.
@@ -21,7 +22,7 @@ import type { AppDeps } from '../types.ts'
 import type { ChatRunOptions, QueueClearReason } from './types.ts'
 import { HarnessError, isClientCommand, isHarnessCommand, LIMITS } from '@harness-forge/shared'
 import { chatNotFound } from '../services/chats/store.ts'
-import { parseSlashCommand } from './commands.ts'
+import { isServerCommandFor, parseSlashCommand } from './commands.ts'
 import { normalizeUserParts } from './files.ts'
 
 /** A queued item with the options of the request that queued it (the server-started turn logs with them). */
@@ -53,7 +54,7 @@ export interface ChatQueue {
 }
 
 /** What the queue reads (lazily, inside its methods: the runner is built inside the deps factory). */
-export type ChatQueueDeps = Pick<AppDeps, 'chats' | 'files' | 'registry' | 'events' | 'logger'>
+export type ChatQueueDeps = Pick<AppDeps, 'chats' | 'files' | 'registry' | 'customizations' | 'events' | 'logger'>
 
 export interface ChatQueueOptions {
   /** The runs registry holds the chat (a run in any phase): `add` accepts items only then or with a pending approval. */
@@ -83,7 +84,8 @@ function firstText(parts: readonly UserMessagePart[]): string {
 
 /**
  * True when `text` starts a server command: the harness command `/compact` or a command a plugin registered (client
- * commands like `/model` are the composer's and never reach the server as commands).
+ * commands like `/model` are the composer's and never reach the server as commands). The queue itself uses
+ * `isServerCommandFor` (Phase 10: the chat project's command files too).
  */
 export function isServerCommand(text: string, commands: Pick<AppDeps['registry']['commands'], 'get'>): boolean {
   const parsed = parseSlashCommand(text)
@@ -172,7 +174,7 @@ export function createChatQueue(deps: ChatQueueDeps, options: ChatQueueOptions):
       if (queues.get(chatId)?.some(entry => entry.item.id === id) || await deps.chats.getMessage(chatId, id) !== null)
         throw queueConflict('exists', chatId)
       const parts = toQueueParts(await normalizeUserParts(body.message.parts, deps.files))
-      const turnOnly = isServerCommand(firstText(parts), deps.registry.commands)
+      const turnOnly = await isServerCommandFor(deps, chat.projectId, firstText(parts))
 
       // Synchronous from here on: the state the checks read cannot change before the item is appended.
       if (token.deleted)

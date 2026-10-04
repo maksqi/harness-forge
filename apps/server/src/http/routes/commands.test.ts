@@ -1,4 +1,7 @@
 import type { TestApp } from '../../testing/create-test-app.ts'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { commandSummarySchema, listResponseSchema } from '@harness-forge/shared'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { BUILTIN_COMMANDS } from '../../builtin-plugins/core-commands/commands.ts'
@@ -39,5 +42,32 @@ describe('gET /api/commands', () => {
     }
     const { items } = await (await t.request('/api/commands')).json() as { items: { name: string }[] }
     expect(items.some(item => item.name === 'aaa-first')).toBe(false)
+  })
+})
+
+describe('gET /api/commands?projectId (Phase 10, C31-T7)', () => {
+  it('validates the project id (400), answers an unknown project with 404 and a known one with the list', async () => {
+    const invalid = await t.request('/api/commands?projectId=nope')
+    expect(invalid.status).toBe(400)
+    const unknown = await t.request('/api/commands?projectId=prj_0123456789abcdef')
+    expect(unknown.status).toBe(404)
+    expect(await unknown.json()).toMatchObject({ error: { code: 'not_found' } })
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'hf-')))
+    const app = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, workspaceRoots: [root] })
+    try {
+      const project = await app.deps.projects.create({ name: 'Demo', path: root, newFolder: 'demo' })
+      const listed = await app.request(`/api/commands?projectId=${project.id}`)
+      expect(listed.status).toBe(200)
+      const body = listResponseSchema(commandSummarySchema).parse(await listed.json())
+      const global = listResponseSchema(commandSummarySchema).parse(await (await app.request('/api/commands')).json())
+      expect(body).toEqual(global)
+      // Every item carries its source; plugin commands their plugin.
+      for (const item of body.items)
+        expect(item.source === 'harness' || (item.source === 'plugin' && item.pluginId !== undefined)).toBe(true)
+    }
+    finally {
+      await app.close()
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })

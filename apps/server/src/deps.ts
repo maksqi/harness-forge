@@ -25,6 +25,7 @@ import { createSessionService } from './security/session.ts'
 import { createAudioService } from './services/audio/index.ts'
 import { createChatsService } from './services/chats/index.ts'
 import { createCheckpointService } from './services/checkpoints/index.ts'
+import { createCustomizationService } from './services/customizations/index.ts'
 import { createDataService } from './services/data/index.ts'
 import { createEventBus } from './services/events/index.ts'
 import { createFilesService } from './services/files/index.ts'
@@ -76,6 +77,8 @@ export const SERVICE_FACTORIES: ServiceFactories = {
   shellRules: createShellRuleService,
   // Phase 9 (P9-0b): the file index of `@` mentions (C24 stub, W9.6).
   projectFiles: createProjectFileService,
+  // Phase 10 (P10-0b): the catalog of agents, commands and skills and the personal definitions (C30 stub, W10.1).
+  customizations: createCustomizationService,
 }
 
 /** Instantiation order (dependencies first; construction-time access to later services still works lazily). */
@@ -126,42 +129,57 @@ export function createDeps(options: CreateDepsOptions): AppDeps {
   return Object.freeze(deps)
 }
 
+/** The boot steps of `startDeps` after the environment warnings, in order (each named by its service). */
+export const BOOT_STEPS = ['projects', 'checkpoints', 'runs', 'installer', 'plugins', 'catalog', 'mcp', 'data'] as const
+export type BootStep = typeof BOOT_STEPS[number]
+
 /**
  * Boot sequence after migrations (ARCHITECTURE.md 5): workspace roots (Phase 7: the default root is created and every
  * root is checked; a refused root throws `EnvError`) -> the checkpoint store (Phase 8: `checkpoints/` created 0700, one
- * prune, the prune timer) -> staging recovery -> plugin host (builtins, then user plugins) -> model catalog warm-up ->
- * MCP manager -> the data service last (Phase 8: the automatic file sweep timer, ADR-039). A broken plugin never fails
- * the boot. The environment warnings (`envBootWarnings`) are logged first.
+ * prune, the prune timer) -> the boot sweep of background tasks (Phase 10: `runs.boot()`: rows still `running` become
+ * `aborted`, undelivered results fill the in-memory inboxes, no turn starts; after the checkpoint store, before any
+ * plugin) -> staging recovery -> plugin host (builtins, then user plugins) -> model catalog warm-up -> MCP manager -> the
+ * data service last (Phase 8: the automatic file sweep timer, ADR-039). A broken plugin never fails the boot. The
+ * environment warnings (`envBootWarnings`) are logged first. The customization catalog has no boot step (built lazily,
+ * Phase 10). Frozen order (Phase 10): `BOOT_STEPS`.
  */
 export async function startDeps(deps: AppDeps): Promise<void> {
   for (const warning of envBootWarnings(deps.env))
     deps.logger.warn(warning)
-  await deps.projects.start()
-  await deps.checkpoints.start()
-  await deps.installer.recover()
-  await deps.plugins.start()
-  await deps.catalog.start()
-  await deps.mcp.start()
-  await deps.data.start()
+  const steps: Array<[BootStep, () => Promise<void>]> = [
+    ['projects', () => deps.projects.start()],
+    ['checkpoints', () => deps.checkpoints.start()],
+    ['runs', () => deps.runs.boot()],
+    ['installer', () => deps.installer.recover()],
+    ['plugins', () => deps.plugins.start()],
+    ['catalog', () => deps.catalog.start()],
+    ['mcp', () => deps.mcp.start()],
+    ['data', () => deps.data.start()],
+  ]
+  // A failing step fails the boot (unlike `stopDeps`, nothing after it runs).
+  for (const [, run] of steps)
+    await run()
 }
 
 /** The steps of `stopDeps`, in order (each named by its service). */
-export const SHUTDOWN_STEPS = ['data', 'runs', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'] as const
+export const SHUTDOWN_STEPS = ['data', 'runs', 'customizations', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'] as const
 export type ShutdownStep = typeof SHUTDOWN_STEPS[number]
 
 /**
  * Shutdown (ARCHITECTURE.md 5): stop the automatic file sweep first (Phase 8: its timer, and a sweep in flight is
  * aborted) -> the runs (`runs.stopAll()`; Phase 9: every chat's steer queue cleared first, so no queued message starts
- * a new turn, then every run aborted and persisted as `aborted`, its sub-agents through the run's signal) -> drop the
- * mention file index (Phase 9, `projectFiles.stop()`) -> stop the checkpoint store (Phase 8: the prune timer, after
- * the runs so no journal write is cut off) -> dispose plugins -> close MCP clients -> stop catalog timers -> close SSE
- * streams. Every step runs even when an earlier one fails (failures are logged). The caller closes the HTTP server
- * before and the database after. Frozen order (Phase 9): `SHUTDOWN_STEPS`.
+ * a new turn; Phase 10: then every background task aborted, awaited at most 5 s, its row saved; then every run aborted
+ * and persisted as `aborted`, its sub-agents through the run's signal) -> drop the customization catalog caches (Phase
+ * 10, `customizations.stop()`) -> drop the mention file index (Phase 9, `projectFiles.stop()`) -> stop the checkpoint
+ * store (Phase 8: the prune timer, after the runs so no journal write is cut off) -> dispose plugins -> close MCP clients
+ * -> stop catalog timers -> close SSE streams. Every step runs even when an earlier one fails (failures are logged).
+ * The caller closes the HTTP server before and the database after. Frozen order (Phase 10): `SHUTDOWN_STEPS`.
  */
 export async function stopDeps(deps: AppDeps): Promise<void> {
   const steps: Array<[ShutdownStep, () => Promise<void>]> = [
     ['data', () => deps.data.stop()],
     ['runs', () => deps.runs.stopAll()],
+    ['customizations', async () => deps.customizations.stop()],
     ['projectFiles', async () => deps.projectFiles.stop()],
     ['checkpoints', () => deps.checkpoints.stop()],
     ['plugins', () => deps.plugins.stop()],

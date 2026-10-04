@@ -2,7 +2,8 @@ import type { CommandDefinition } from '@harness-forge/plugin-sdk'
 import type { CommandServices } from './commands.ts'
 import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { compactNeedsChatModel, expandTemplate, HARNESS_COMMAND_SUMMARIES, parseSlashCommand, resolveCommand } from './commands.ts'
+import { compactNeedsChatModel, expandTemplate, HARNESS_COMMAND_SUMMARIES, isServerCommandFor, parseSlashCommand, resolveCommand, turnToolRestriction } from './commands.ts'
+import { catalogEntry, testCatalog } from './testing.ts'
 
 describe('parseSlashCommand', () => {
   it('reads /name at the start followed by whitespace or the end', () => {
@@ -48,6 +49,11 @@ function services(commands: Record<string, CommandDefinition>, pluginId = 'demo'
         catch (error) {
           throw new HarnessError({ code: 'plugin_error', message: error instanceof Error ? error.message : 'failed', details: { pluginId, phase: 'tool' } })
         }
+      },
+    },
+    customizations: {
+      load: async () => {
+        throw new Error('no command file is loaded before W10.2')
       },
     },
   }
@@ -154,6 +160,7 @@ describe('resolveCommand: /compact (Phase 9)', () => {
         },
       } as unknown as CommandServices['registry'],
       plugins: { guard: async () => { throw new Error('not used') } } as unknown as CommandServices['plugins'],
+      customizations: { load: async () => { throw new Error('not used') } },
     }
     expect(await resolveCommand(changing, '/compact\n  the API\n  and errors  ', context)).toEqual({
       kind: 'compact',
@@ -168,5 +175,35 @@ describe('resolveCommand: /compact (Phase 9)', () => {
 
   it('lists compact for GET /commands under the agent tools plugin', () => {
     expect(HARNESS_COMMAND_SUMMARIES).toEqual([{ name: 'compact', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' }])
+  })
+})
+
+describe('phase 10 seams (C31-T6)', () => {
+  const review: CommandDefinition = { name: 'review', description: 'Review.', template: 'Review {{input}}' }
+
+  it('resolveCommand takes the run catalog; until W10.2 the plugin registry and the harness command resolve as before', async () => {
+    const catalog = testCatalog([catalogEntry('command', 'greet', { source: 'project', path: '.harness/commands/greet.md' })])
+    const withCatalog = { ...context, catalog }
+    expect(await resolveCommand(services({ review }), '/review it', withCatalog)).toEqual({ kind: 'prompt', invocation: { name: 'review', input: 'it', type: 'prompt', expansion: 'Review it' } })
+    expect(await resolveCommand(services({}), '/greet Ada', withCatalog)).toBeNull()
+    expect(await resolveCommand(services({}), '/compact', withCatalog)).toMatchObject({ kind: 'compact' })
+  })
+
+  it('isServerCommandFor: the harness command and plugin commands are server commands; client commands and plain text are not', async () => {
+    const deps = { registry: services({ review }).registry, customizations: {} } as unknown as Parameters<typeof isServerCommandFor>[0]
+    for (const projectId of [null, 'prj_0123456789abcdef']) {
+      expect(await isServerCommandFor(deps, projectId, '/compact')).toBe(true)
+      expect(await isServerCommandFor(deps, projectId, '/review this')).toBe(true)
+      expect(await isServerCommandFor(deps, projectId, '/help')).toBe(false)
+      expect(await isServerCommandFor(deps, projectId, '/remember a note')).toBe(false)
+      expect(await isServerCommandFor(deps, projectId, '/nope')).toBe(false)
+      expect(await isServerCommandFor(deps, projectId, 'plain text')).toBe(false)
+    }
+  })
+
+  it('turnToolRestriction is null until W10.2', () => {
+    const turn = { id: 'msg_u000000000000001', role: 'user' as const, parts: [{ type: 'text' as const, text: '/review' }], metadata: { modelRef: 'mock:echo', startedAt: 1, command: { name: 'review', input: '', type: 'prompt' as const, allowedTools: ['read_file'] } } }
+    expect(turnToolRestriction([])).toBeNull()
+    expect(turnToolRestriction([turn])).toBeNull()
   })
 })

@@ -243,8 +243,8 @@ export function validateToolDefinition(definition: ToolDefinition, options: Tool
 // ---------- commands ----------
 
 /**
- * Checks a command: name (not client-only, not a harness command: `/compact` is run by the server itself, Phase 9,
- * ADR-040), description and exactly one of `template` / `run`.
+ * Checks a command: name (not client-only, `/remember` included since Phase 10, ADR-047; not a harness command:
+ * `/compact` is run by the server itself, Phase 9, ADR-040), description and exactly one of `template` / `run`.
  */
 export function validateCommandDefinition(definition: CommandDefinition): void {
   if (!isObject(definition))

@@ -8,11 +8,26 @@ import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, nextTick } from 'vue'
+import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { useProjectsStore } from '~/stores/projects'
 import { useShellRulesStore } from '~/stores/shell-rules'
-import { catalogModel, chatDetail, chatId, chatSummary, messageBranch, messageId, projectId, projectSummary, queueItem, shellRule, steerData } from '~/utils/testing/fixtures'
+import {
+  backgroundTask,
+  catalogModel,
+  chatDetail,
+  chatId,
+  chatSummary,
+  messageBranch,
+  messageId,
+  projectId,
+  projectSummary,
+  queueItem,
+  shellRule,
+  steerData,
+  taskResultCarrier,
+} from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import {
@@ -2092,5 +2107,44 @@ describe('useChatSession: turns the server starts from the queue (Phase 9)', () 
       disposePinia(piniaB)
       setActivePinia(pinia)
     }
+  })
+})
+
+describe('useChatSession: background agents (Phase 10)', () => {
+  const U1 = 'msg_user000000000001'
+  const CARRIER = messageId('carrier1')
+  const A2 = 'msg_assistant0000002'
+
+  it('fetches the chat\'s background agents on load and lists and stops them through the store', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const tasks = useBackgroundTasksStore()
+    const fetch = vi.spyOn(tasks, 'fetch')
+    const session = await loadedSession(8, { messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a')] })
+    expect(fetch).toHaveBeenCalledWith(chatId(8))
+    expect(session.backgroundTasks.value).toEqual([])
+    const running = backgroundTask({ chatId: chatId(8), status: 'running', finishedAt: null })
+    dispatchServerEvent(createServerEvent('task.changed', { chatId: chatId(8), task: running }))
+    expect(session.backgroundTasks.value).toEqual([running])
+    api.chatTasks.stop.mockResolvedValueOnce({ ...running, status: 'aborted', finishedAt: 1_759_000_050_000 })
+    expect(await session.stopBackgroundTask(running.id)).toBe('stopped')
+    expect(api.chatTasks.stop).toHaveBeenCalledWith({ params: { id: chatId(8), taskId: running.id } })
+    expect(session.backgroundTasks.value[0]?.status).toBe('aborted')
+  })
+
+  it('follows a turn the server started for finished background agents like a queue-started turn', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const session = await loadedSession(9, { messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a')] })
+    const carrier = taskResultCarrier(CARRIER)
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(9), modelRef: MODEL, running: true, messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a'), carrier] }))
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(9), modelRef: MODEL, messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a'), carrier, assistantMessage(A2, 'The tests are flaky')] }))
+    let shownAtResume: string[] = []
+    server.resume((write) => {
+      shownAtResume = ids(session.chat.messages.value)
+      return textReply('The tests are flaky', A2)(write)
+    })
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(9), messageId: A2, modelRef: MODEL, origin: 'task', userMessageId: CARRIER }))
+    await until(() => ids(session.chat.messages.value).at(-1) === A2 && session.chat.status.value === 'ready', 'resumed')
+    expect(shownAtResume).toEqual([U1, ASSISTANT_ID, CARRIER])
+    expect(chatBodies()).toHaveLength(0)
   })
 })

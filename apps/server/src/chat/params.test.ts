@@ -398,3 +398,15 @@ describe('agent instructions (Phase 9, ADR-041 / ADR-043)', () => {
     expectTypeOf<AssembledTools>().toExtend<Parameters<typeof offeredAgentTools>[0]>()
   })
 })
+
+describe('runParamsInput.agentTypes / skills (Phase 10 seam, C31-T6)', () => {
+  it('accepts the catalog\'s agents and skills; P10-0b adds no block yet (W10.3)', async () => {
+    const plain = await buildRunParams(input({ agentTools: ['task', 'skill'] }))
+    const listed = await buildRunParams(input({
+      agentTools: ['task', 'skill'],
+      agentTypes: [{ name: 'explore', description: 'Read-only search.' }, { name: 'reviewer', description: 'Reviews diffs.' }],
+      skills: [{ name: 'release-notes', description: 'Writes release notes.' }],
+    }))
+    expect(listed).toEqual(plain)
+  })
+})

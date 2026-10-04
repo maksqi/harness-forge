@@ -1,7 +1,7 @@
 // Sidebar modes and the last route per mode (docs/UI.md 5.2).
 import type { RemovableRef } from '@vueuse/core'
 import type { Component } from 'vue'
-import { BoxesIcon, DatabaseIcon, FoldersIcon, ImagePlayIcon, InfoIcon, KeyRoundIcon, PaletteIcon, SlidersHorizontalIcon } from '@lucide/vue'
+import { BoxesIcon, DatabaseIcon, FoldersIcon, ImagePlayIcon, InfoIcon, KeyRoundIcon, PaletteIcon, SlidersHorizontalIcon, WandSparklesIcon } from '@lucide/vue'
 import { useSessionStorage } from '@vueuse/core'
 import { effectScope } from 'vue'
 import { testIds } from '~/utils/testids'
@@ -69,7 +69,7 @@ export function useLastRoutes(): RemovableRef<LastRoutes> {
 }
 
 export interface SettingsLink {
-  key: 'providers' | 'models' | 'media' | 'projects' | 'general' | 'appearance' | 'data' | 'about'
+  key: 'providers' | 'models' | 'media' | 'projects' | 'customize' | 'general' | 'appearance' | 'data' | 'about'
   label: string
   to: string
   icon: Component
@@ -82,6 +82,7 @@ export const SETTINGS_LINKS: readonly SettingsLink[] = [
   { key: 'models', label: 'Models', to: '/settings/models', icon: BoxesIcon, testId: testIds.settingsNavModels },
   { key: 'media', label: 'Media', to: '/settings/media', icon: ImagePlayIcon, testId: testIds.settingsNavMedia },
   { key: 'projects', label: 'Projects', to: '/settings/projects', icon: FoldersIcon, testId: testIds.settingsNavProjects },
+  { key: 'customize', label: 'Customize', to: '/settings/customize', icon: WandSparklesIcon, testId: testIds.settingsNavCustomize },
   { key: 'general', label: 'General', to: '/settings/general', icon: SlidersHorizontalIcon, testId: testIds.settingsNavGeneral },
   { key: 'appearance', label: 'Appearance', to: '/settings/appearance', icon: PaletteIcon, testId: testIds.settingsNavAppearance },
   { key: 'data', label: 'Data', to: '/settings/data', icon: DatabaseIcon, testId: testIds.settingsNavData },

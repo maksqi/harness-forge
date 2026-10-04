@@ -122,6 +122,7 @@ describe('pluginsNav: browse filters', () => {
       ['tools', 'Tools', '/plugins?filter=tools'],
       ['mcp', 'MCP servers', '/plugins?filter=mcp'],
       ['commands', 'Commands', '/plugins?filter=commands'],
+      ['agents', 'Agents and skills', '/plugins?filter=agents'],
       ['disabled', 'Disabled', '/plugins?filter=disabled'],
     ])
     expect(['all', 'providers', 'tools', 'mcp', 'commands', 'disabled'].map(countOf)).toEqual(['7', '1', '3', '1', '1', '1'])

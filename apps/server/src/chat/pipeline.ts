@@ -30,6 +30,15 @@
 // (`compaction/stream.ts`). W9.1: the v1.4 pre-stream trim moved into the context guard (`compaction/guard.ts`), which
 // compacts the context before any model call above 80 % of the window and injects its marker or notice for that step;
 // `run.started` carries `origin` (`RunContext.origin`, default `request`) and, for a queued turn, `userMessageId`.
+// Phase 10 (C31 seams, ADR-044 – ADR-047; COMPLETE and FROZEN after P10-0b): the run reads one catalog snapshot
+// (`PreparedRun.catalog`): its agents and skills go to `buildRunParams` (`agentTypes`, `skills`), `assembleTools` sends
+// `skill` only when it has skills and narrows the turn's tools to `PreparedRun.turnRestriction` (`allowedTools`), and the
+// sub-agent runner gets it with the runner's background manager (`RunContext.background`) and the run's origin; the
+// agent scope also binds `loadSkill` (`skills.ts`) and `savePlan` (`plan-file.ts`). The chat keeps
+// `PreparedRun.requestModelRef` (both chat touches), so a command's model never becomes the chat's model, while
+// `run.started.modelRef` and the metadata name the model that ran. `run.started.userMessageId` is set for every
+// server-started turn (`queue`, and `task`: the carrier message). `data-task-result` chunks injected at a step boundary
+// (the steer step, W10.4) are tracked like steers: one the response lost is appended to the saved reply, once.
 import type { HarnessError, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, NoticeData, ReasoningEffort, RunOrigin, ToolMode } from '@harness-forge/shared'
 import type { LanguageModelUsage, ModelMessage, TextStreamPart, Tool, ToolSet, UIMessageChunk, UIMessageStreamOnEndCallback, UIMessageStreamWriter } from 'ai'
 import type { Logger } from '../logger.ts'
@@ -39,12 +48,13 @@ import type { RegisteredTool } from '../registry/types.ts'
 import type { ImageGenerationResult } from '../services/images/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { AgentRunScope } from './agent-scope.ts'
+import type { BackgroundTasks } from './background/types.ts'
 import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { RunEnding } from './history.ts'
 import type { PreparedRun } from './prepare.ts'
 import type { ChatQueue } from './queue.ts'
 import type { Run, RunRegistry } from './runs.ts'
-import { latestTodos, LIMITS } from '@harness-forge/shared'
+import { latestTodos, LIMITS, splitTaskResults } from '@harness-forge/shared'
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -73,8 +83,10 @@ import { imageStream } from './images.ts'
 import { buildModelHistory } from './model-history.ts'
 import { NOTICES } from './notices.ts'
 import { buildRunParams, offeredAgentTools, providerImageOptions, runMaxSteps } from './params.ts'
+import { savePlan } from './plan-file.ts'
 import { SseReplayBuffer } from './runs.ts'
 import { createRunScope } from './scope.ts'
+import { loadSkill } from './skills.ts'
 import { createSteerStep, stepInjector } from './steer.ts'
 import { createPrepareStep } from './steps.ts'
 import { createSubagentRunner } from './subagent/index.ts'
@@ -181,13 +193,20 @@ export interface RunContext {
    */
   onReleased: (ending: RunEnding, awaitingApproval: boolean) => void
   /**
-   * What started the run (Phase 9, ADR-042; `run.started.origin`): a `POST /chat` request (the default) or the server
-   * with the first queued message (`queue`: `run.started` also carries the new user message id as `userMessageId`).
+   * What started the run (Phase 9, ADR-042; `run.started.origin`): a `POST /chat` request (the default), the server with
+   * the first queued message (`queue`), or (Phase 10, ADR-046) the server with the results of finished background tasks
+   * (`task`: the user message is the carrier of `data-task-result` parts). For `queue` and `task`, `run.started` also
+   * carries the new user message id as `userMessageId`. A background task launched by a `task` run never starts a turn.
    */
   origin?: RunOrigin
+  /**
+   * The runner's background manager (Phase 10, ADR-046; `chat/background/types.ts`): `task { background: true }`
+   * launches there (the sub-agent runner), and the steer step takes the finished results from it (W10.4).
+   */
+  background: BackgroundTasks
 }
 
-/** A data chunk of this app (`data-notice`, `data-compaction`, `data-steer`, `data-activity`). */
+/** A data chunk of this app (`data-notice`, `data-compaction`, `data-steer`, `data-activity`, `data-task-result`). */
 export type HarnessDataChunk = Extract<HarnessUIMessageChunk, { type: `data-${string}` }>
 
 /** How the run answers: a model run, a reply command, a failure before the model call, an image turn, `/compact`. */
@@ -241,8 +260,11 @@ export class RunSession {
   readonly #mapped = new Map<unknown, HarnessError>()
   /** Chunks injected at step boundaries and not yet placed by `stepInjector`, in injection order. */
   #injections: { chunk: HarnessDataChunk, step: number }[] = []
-  /** Every injected `data-steer` chunk (`finalMessage` appends one the response lost). */
-  readonly #injectedSteers: HarnessDataChunk[] = []
+  /**
+   * Every injected `data-steer` and (Phase 10) `data-task-result` chunk, in injection order (`finalMessage` appends one
+   * the response lost).
+   */
+  readonly #injectedTracked: HarnessDataChunk[] = []
   /** The writer of the run's UI stream (`bindWriter`), for transient chunks. */
   #writer: UIMessageStreamWriter<HarnessUIMessage> | null = null
   readonly ctx: RunContext
@@ -353,13 +375,14 @@ export class RunSession {
   /**
    * Queues a chunk for the transcript at a step boundary (Phase 9): `stepInjector` emits it right before the
    * `start-step` of step `stepNumber` (the `prepareStep` step number; 0 = the first model call of this run), or when the
-   * stream ends. Used for `data-steer` (W9.2), `data-compaction` and notices of the context guard (W9.1); not for
-   * transient chunks (`writeTransient`).
+   * stream ends. Used for `data-steer` (W9.2), `data-compaction` and notices of the context guard (W9.1) and (Phase 10)
+   * `data-task-result` (the steer step, W10.4); not for transient chunks (`writeTransient`). Steers and task results
+   * are tracked: the saved reply holds each of them exactly once.
    */
   inject(chunk: HarnessDataChunk, stepNumber: number): void {
     this.#injections.push({ chunk, step: stepNumber })
-    if (chunk.type === 'data-steer')
-      this.#injectedSteers.push(chunk)
+    if (chunk.type === 'data-steer' || chunk.type === 'data-task-result')
+      this.#injectedTracked.push(chunk)
   }
 
   /**
@@ -496,22 +519,30 @@ export class RunSession {
     let parts = finalizeParts([...head, ...tail], ending)
     if (this.notices.length > 0)
       parts = [...parts.slice(0, head.length), ...this.notices.map(data => ({ type: 'data-notice' as const, data })), ...parts.slice(head.length)]
-    const missing = this.#missingSteers(parts)
+    const missing = this.#missingInjections(parts)
     if (missing.length > 0)
       parts = [...parts, ...missing]
     const metadata = ending === 'completed' && this.finishMetadata !== null ? this.finishMetadata : this.buildFinishMetadata(this.ctx.now(), ending)
     return { id: this.assistantId, role: 'assistant', parts, metadata }
   }
 
-  /** Injected steers the response does not hold (the stream ended before they were placed), as parts. */
-  #missingSteers(parts: readonly HarnessUIMessagePart[]): HarnessUIMessagePart[] {
-    const present = new Set(parts.flatMap(part => (part.type === 'data-steer' ? [part.data.id] : [])))
+  /**
+   * Injected steers and task results the response does not hold (the stream ended before they were placed), as parts,
+   * in injection order. A steer is known by its id, a task result by its task id.
+   */
+  #missingInjections(parts: readonly HarnessUIMessagePart[]): HarnessUIMessagePart[] {
+    const steers = new Set(parts.flatMap(part => (part.type === 'data-steer' ? [part.data.id] : [])))
+    const results = new Set(parts.flatMap(part => (part.type === 'data-task-result' ? [part.data.taskId] : [])))
     const missing: HarnessUIMessagePart[] = []
-    for (const chunk of this.#injectedSteers) {
-      if (chunk.type !== 'data-steer' || present.has(chunk.data.id))
-        continue
-      present.add(chunk.data.id)
-      missing.push({ type: 'data-steer', ...(chunk.id === undefined ? {} : { id: chunk.id }), data: chunk.data })
+    for (const chunk of this.#injectedTracked) {
+      if (chunk.type === 'data-steer' && !steers.has(chunk.data.id)) {
+        steers.add(chunk.data.id)
+        missing.push({ type: 'data-steer', ...(chunk.id === undefined ? {} : { id: chunk.id }), data: chunk.data })
+      }
+      else if (chunk.type === 'data-task-result' && !results.has(chunk.data.taskId)) {
+        results.add(chunk.data.taskId)
+        missing.push({ type: 'data-task-result', ...(chunk.id === undefined ? {} : { id: chunk.id }), data: chunk.data })
+      }
     }
     return missing
   }
@@ -585,10 +616,11 @@ export class RunSession {
         }))
       }
       if (stored) {
-        // `pending_approval` describes the active path: left alone when the reply is not on it.
+        // `pending_approval` describes the active path: left alone when the reply is not on it. The chat keeps the
+        // request's model (a command's model ran only this turn).
         await this.#step('chat touch', () => deps.chats.touch(this.chatId, {
           ...(shown ? { pendingApproval: awaitingApproval } : {}),
-          modelRef: resolved.modelRef,
+          modelRef: prepared.requestModelRef,
         }))
       }
       if (this.mode === 'model') {
@@ -687,14 +719,16 @@ export function errorStream(session: RunSession, error: HarnessError): ReadableS
 /**
  * The context guard's kept user message (Phase 9): the run's turn user message (the last user message of the path) as
  * the model sees it, after its command expansion and files and without any merged summary; converted on the first call
- * only. Null when the path has no user message.
+ * only. Null when the path has no user message. Phase 10: the carrier message of a `task` turn is read as its task
+ * result texts (`splitTaskResults`, as `buildModelHistory` does).
  */
 export function keptUserMessage(session: RunSession, model: ResolvedModel, tools: ToolSet): () => Promise<ModelMessage | null> {
   let converted: Promise<ModelMessage | null> | null = null
   return () => {
     converted ??= (async () => {
       const { deps, prepared, logger } = session.ctx
-      const user = prepared.history.findLast(message => message.role === 'user')
+      const turn = prepared.history.findLast(message => message.role === 'user')
+      const [user] = turn === undefined ? [] : splitTaskResults([turn])
       if (user === undefined)
         return null
       const files = await prepareModelFiles(applyCommandExpansions([user]), { capabilities: model.entry.capabilities, files: deps.files, logger })
@@ -748,15 +782,30 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
 
   // One scope per run (Phase 8): a continuation after an approval keeps the assistant message id.
   const scope = await createRunScope(deps, { chatId, messageId: session.assistantId, workspace: prepared.workspace, history: prepared.history, logger })
-  // The agent scope (Phase 9): the run's mode, its sub-agent runner and todos, bound to every tool call of this run.
-  const subagents = createSubagentRunner({ session, model: resolved, toolMode: session.ctx.toolMode, workspace: prepared.workspace, scope })
+  // The run's catalog snapshot (Phase 10): agent types, skills, background launches.
+  const catalog = prepared.catalog
+  // The agent scope (Phase 9): the run's mode, its sub-agent runner and todos, bound to every tool call of this run;
+  // Phase 10: the skill loader and the plan file writer.
+  const subagents = createSubagentRunner({
+    session,
+    model: resolved,
+    toolMode: session.ctx.toolMode,
+    workspace: prepared.workspace,
+    scope,
+    catalog,
+    background: session.ctx.background,
+    origin: session.ctx.origin ?? 'request',
+  })
   const agent: AgentRunScope = {
     chatId,
     messageId: session.assistantId,
     toolMode: session.ctx.toolMode,
     runSubagent: (input, options) => subagents.run(input, options),
     todos: () => latestTodos(prepared.history),
+    loadSkill: (name, signal) => loadSkill({ deps, catalog, workspace: prepared.workspace, logger }, name, signal),
+    savePlan: (plan, c) => savePlan({ deps, settings: prepared.settings, logger, now: session.ctx.now }, plan, c),
   }
+  const skills = catalog.skills()
   const assembled = await assembleTools({
     chatId,
     messageId: session.assistantId,
@@ -774,6 +823,8 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     allowExecute: deps.env.workspaceShell,
     continuation: prepared.continued,
     agent,
+    allowedTools: prepared.turnRestriction,
+    skillsAvailable: skills.length > 0,
   })
   if (assembled.unsupported) {
     const notice = NOTICES.toolsUnsupported()
@@ -798,6 +849,9 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     workspaceTools: [...assembled.byName.values()].filter(entry => toolWorkspaceAccess(entry.definition) !== null).map(entry => entry.definition.name),
     // The offered `core-agent` tools (Phase 9): the plan block, the todo hint and the `task` hint of the instructions.
     agentTools: offeredAgentTools(assembled),
+    // The catalog's agent types and skills (Phase 10): their blocks, when `task` / `skill` are offered.
+    agentTypes: catalog.agents(),
+    skills,
     maxSteps: runMaxSteps(prepared.settings, prepared.chat.projectId),
     registry: deps.registry,
     logger,
@@ -937,10 +991,11 @@ export async function launchRun(ctx: RunContext): Promise<Response> {
     messageId: prepared.assistantId,
     modelRef: prepared.resolved.modelRef,
     origin,
-    ...(origin === 'queue' && prepared.userMessage !== null ? { userMessageId: prepared.userMessage.id } : {}),
+    ...(origin !== 'request' && prepared.userMessage !== null ? { userMessageId: prepared.userMessage.id } : {}),
   })
   try {
-    await deps.chats.touch(run.chatId, { pendingApproval: false, modelRef: prepared.resolved.modelRef })
+    // The chat keeps the request's model (a command's model runs only this turn).
+    await deps.chats.touch(run.chatId, { pendingApproval: false, modelRef: prepared.requestModelRef })
   }
   catch (error) {
     logger.warn('cannot touch the chat', { err: error })

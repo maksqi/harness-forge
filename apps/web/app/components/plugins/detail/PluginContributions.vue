@@ -4,6 +4,9 @@
 // renders McpServersPanel instead), commands and hooks. Tool, MCP and command details come from the plugins store
 // (`GET /api/tools`, `/api/mcp`, `/api/commands`); when one of them cannot be loaded, the names the plugin
 // registered are listed without their controls.
+// Phase 10 (C33 mounts, W10.12 implements; plugin API 1.4.0): Agents and Skills follow Commands, each a
+// PluginCustomizationList over the global catalog (`customizations.catalog(null)` by plugin; names without a catalog
+// entry are name-only rows).
 import type { PluginDetail } from '@harness-forge/shared'
 import { ArrowRightIcon, SettingsIcon } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
@@ -11,9 +14,11 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import ProviderIcon from '~/components/providers/ProviderIcon.vue'
 import ProviderStatusBadge from '~/components/providers/ProviderStatusBadge.vue'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProvidersStore } from '~/stores/providers'
 import { countLabel } from '../list/plugin-display'
+import PluginCustomizationList from './PluginCustomizationList.vue'
 import PluginDetailSection from './PluginDetailSection.vue'
 import PluginMcpServerList from './PluginMcpServerList.vue'
 import PluginToolsTable from './PluginToolsTable.vue'
@@ -22,6 +27,7 @@ const props = defineProps<{ plugin: PluginDetail }>()
 
 const plugins = usePluginsStore()
 const providers = useProvidersStore()
+const customizations = useCustomizationsStore()
 
 /** A list that failed to load: fall back to the names in `contributions`. */
 const failed = ref({ tools: false, mcp: false, commands: false })
@@ -84,6 +90,19 @@ const commands = computed(() => {
   return [...known, ...fallback].sort((a, b) => a.name.localeCompare(b.name))
 })
 
+// ---------- agents and skills (Phase 10) ----------
+
+function customizationRows(kind: 'agent' | 'skill', names: readonly string[]) {
+  const entries = customizations.entriesOf(null, kind).filter(entry => entry.source === 'plugin' && entry.pluginId === props.plugin.id)
+  const known = new Set(entries.map(entry => entry.name))
+  return { entries, missing: names.filter(name => !known.has(name)) }
+}
+
+const agents = computed(() => customizationRows('agent', contributions.value.agents))
+const agentCount = computed(() => agents.value.entries.length + agents.value.missing.length)
+const skills = computed(() => customizationRows('skill', contributions.value.skills))
+const skillCount = computed(() => skills.value.entries.length + skills.value.missing.length)
+
 const empty = computed(() => !isCoreMcp.value
   && providerRows.value.length === 0
   && modelTotal.value === 0
@@ -91,6 +110,8 @@ const empty = computed(() => !isCoreMcp.value
   && toolCount.value === 0
   && mcpCount.value === 0
   && commands.value.length === 0
+  && agentCount.value === 0
+  && skillCount.value === 0
   && contributions.value.hooks.length === 0)
 </script>
 
@@ -185,6 +206,14 @@ const empty = computed(() => !isCoreMcp.value
           <span class="min-w-0 flex-1 text-sm text-muted-foreground">{{ command.description }}</span>
         </li>
       </ul>
+    </PluginDetailSection>
+
+    <PluginDetailSection v-if="agentCount > 0" title="Agents" :count="agentCount" description="Sub-agents the main agent can start.">
+      <PluginCustomizationList kind="agent" :plugin-id="plugin.id" :entries="agents.entries" :missing="agents.missing" />
+    </PluginDetailSection>
+
+    <PluginDetailSection v-if="skillCount > 0" title="Skills" :count="skillCount" description="Instructions the agent loads when a task needs them.">
+      <PluginCustomizationList kind="skill" :plugin-id="plugin.id" :entries="skills.entries" :missing="skills.missing" />
     </PluginDetailSection>
 
     <PluginDetailSection

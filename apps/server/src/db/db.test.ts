@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase } from './client.ts'
 import { uniqueViolation } from './constraint.test-util.ts'
 import { migrateDatabase, resolveMigrationsFolder } from './migrate.ts'
-import { chats, chatShares, messages, projects, shellRules, TABLE_NAMES, usage, workspaceChanges } from './schema.ts'
+import { backgroundTasks, chats, chatShares, customizations, messages, projects, shellRules, TABLE_NAMES, usage, workspaceChanges } from './schema.ts'
 
 const opened: Database[] = []
 const tempDirs: string[] = []
@@ -68,14 +68,16 @@ describe('migrations', () => {
     expect(resolveMigrationsFolder()).toMatch(/[/\\]apps[/\\]server[/\\]drizzle$/)
   })
 
-  it('creates the 18 tables of the data model', async () => {
+  it('creates the 20 tables of the data model', async () => {
     const database = await freshDatabase()
     const tables = (await names(database, 'table')).filter(name => name !== '__drizzle_migrations')
-    expect(TABLE_NAMES).toHaveLength(18)
+    expect(TABLE_NAMES).toHaveLength(20)
     expect(TABLE_NAMES).toContain('chat_shares')
     expect(TABLE_NAMES).toContain('projects')
     expect(TABLE_NAMES).toContain('workspace_changes')
     expect(TABLE_NAMES).toContain('shell_rules')
+    expect(TABLE_NAMES).toContain('customizations')
+    expect(TABLE_NAMES).toContain('background_tasks')
     expect(tables).toEqual([...TABLE_NAMES].sort())
   })
 
@@ -98,12 +100,15 @@ describe('migrations', () => {
       'shell_rules_project_idx',
       'shell_rules_global_prefix_uq',
       'shell_rules_project_prefix_uq',
+      'customizations_kind_name_uq',
+      'background_tasks_chat_idx',
+      'background_tasks_pending_idx',
     ]))
     expect(await indexColumns(database, 'messages_chat_parent_idx')).toEqual(['chat_id', 'parent_id'])
     expect(await indexColumns(database, 'chat_shares_chat_idx')).toEqual(['chat_id'])
   })
 
-  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, 0003, 0004 projects, 0005 workspace checkpoints, 0006 shell rule unique', async () => {
+  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, 0003, 0004 projects, 0005 workspace checkpoints, 0006 shell rule unique, 0007 customizations', async () => {
     const database = await freshDatabase()
     const journal = JSON.parse(readFileSync(join(resolveMigrationsFolder(), 'meta', '_journal.json'), 'utf8')) as { entries: Array<{ tag: string }> }
     expect(journal.entries.map(entry => entry.tag)).toEqual([
@@ -114,6 +119,7 @@ describe('migrations', () => {
       '0004_projects',
       '0005_workspace_checkpoints',
       '0006_shell_rule_unique',
+      '0007_customizations',
     ])
     const applied = await database.client.execute('SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows).toHaveLength(journal.entries.length)
@@ -410,6 +416,94 @@ describe('phase 9 schema (0006: ADR-038 amendment, unique shell rules per scope)
       { providerId: 'mock', modelId: 'subagent', input: 2, purpose: 'subagent' },
     ])
     expect((await db.select({ purpose: usage.purpose }).from(usage).orderBy(usage.input)).map(row => row.purpose)).toEqual(['compact', 'subagent'])
+  })
+})
+
+describe('phase 10 schema (0007: ADR-044 personal definitions, ADR-046 background tasks)', () => {
+  const CHAT_ID = '0199a8f0-0000-7000-8000-00000000a001'
+  const OTHER_CHAT_ID = '0199a8f0-0000-7000-8000-00000000a002'
+
+  function taskRow(id: string, chatId: string, createdAt: number): typeof backgroundTasks.$inferInsert {
+    return {
+      id,
+      chatId,
+      messageId: 'msg_aaaaaaaaaaaaaaaa',
+      toolCallId: 'call_1',
+      type: 'explore',
+      description: 'Look around',
+      status: 'running',
+      origin: 'request',
+      output: { status: 'running', type: 'explore', description: 'Look around', modelRef: 'mock:echo', steps: [], stepsOmitted: 0, report: '', startedAt: createdAt },
+      createdAt,
+    }
+  }
+
+  it('creates customizations as documented: raw content, denormalized columns, enabled default true, unique (kind, name)', async () => {
+    const database = await freshDatabase()
+    const info = await columns(database, 'customizations')
+    expect(Object.keys(info).sort()).toEqual(['content', 'created_at', 'description', 'enabled', 'id', 'kind', 'name', 'updated_at'])
+    for (const name of ['id', 'kind', 'name', 'description', 'content', 'enabled', 'created_at', 'updated_at'])
+      expect(info[name]?.notnull, name).toBe(1)
+    expect(info.id?.pk).toBe(1)
+    expect(info.enabled?.dflt_value).toBe('true')
+    expect(await foreignKeys(database, 'customizations')).toEqual([])
+    expect(await indexColumns(database, 'customizations_kind_name_uq')).toEqual(['kind', 'name'])
+    const list = await database.client.execute(`PRAGMA index_list(customizations)`)
+    const flags = Object.fromEntries(list.rows.map(row => [String(row.name), Number(row.unique)]))
+    expect(flags.customizations_kind_name_uq).toBe(1)
+  })
+
+  it('creates background_tasks as documented: the snapshot columns, a cascading chat foreign key, two indexes', async () => {
+    const database = await freshDatabase()
+    const info = await columns(database, 'background_tasks')
+    expect(Object.keys(info).sort()).toEqual([
+      'chat_id',
+      'created_at',
+      'delivered_at',
+      'delivered_message_id',
+      'description',
+      'finished_at',
+      'id',
+      'message_id',
+      'origin',
+      'output',
+      'status',
+      'tool_call_id',
+      'type',
+    ])
+    for (const name of ['chat_id', 'message_id', 'tool_call_id', 'type', 'description', 'status', 'origin', 'output', 'created_at'])
+      expect(info[name]?.notnull, name).toBe(1)
+    for (const name of ['finished_at', 'delivered_at', 'delivered_message_id'])
+      expect(info[name]?.notnull, name).toBe(0)
+    expect(await foreignKeys(database, 'background_tasks')).toEqual(['chat_id -> chats.id (CASCADE)'])
+    expect(await indexColumns(database, 'background_tasks_chat_idx')).toEqual(['chat_id', 'created_at'])
+    expect(await indexColumns(database, 'background_tasks_pending_idx')).toEqual(['delivered_at', 'status'])
+  })
+
+  it('stores personal definitions; a second (kind, name) is a unique violation, the same name of another kind is fine', async () => {
+    const { db } = await freshDatabase()
+    await db.insert(customizations).values({ id: 'cus_AAAAAAAAAAAAAAAA', kind: 'agent', name: 'reviewer', description: 'Reviews.', content: '---\nname: reviewer\n---\nBody' })
+    const [row] = await db.select().from(customizations)
+    expect(row).toMatchObject({ id: 'cus_AAAAAAAAAAAAAAAA', kind: 'agent', name: 'reviewer', enabled: true })
+    expect(row?.createdAt).toBeGreaterThan(0)
+    expect(row?.updatedAt).toBeGreaterThan(0)
+    expect(await uniqueViolation(db.insert(customizations).values({ id: 'cus_BBBBBBBBBBBBBBBB', kind: 'agent', name: 'reviewer', description: 'Other.', content: 'x' })))
+      .toBe('UNIQUE constraint failed: customizations.kind, customizations.name')
+    await db.insert(customizations).values({ id: 'cus_CCCCCCCCCCCCCCCC', kind: 'skill', name: 'reviewer', description: 'A skill.', content: 'y', enabled: false })
+    expect((await db.select({ id: customizations.id, enabled: customizations.enabled }).from(customizations).orderBy(customizations.id)))
+      .toEqual([{ id: 'cus_AAAAAAAAAAAAAAAA', enabled: true }, { id: 'cus_CCCCCCCCCCCCCCCC', enabled: false }])
+  })
+
+  it('stores background tasks with their JSON snapshot; deleting a chat removes its tasks only; the chat must exist', async () => {
+    const { db } = await freshDatabase()
+    await db.insert(chats).values([{ id: CHAT_ID }, { id: OTHER_CHAT_ID }])
+    await db.insert(backgroundTasks).values([taskRow('bgt_AAAAAAAAAAAAAAAA', CHAT_ID, 1), taskRow('bgt_BBBBBBBBBBBBBBBB', CHAT_ID, 2), taskRow('bgt_CCCCCCCCCCCCCCCC', OTHER_CHAT_ID, 3)])
+    const [stored] = await db.select().from(backgroundTasks).where(eq(backgroundTasks.id, 'bgt_AAAAAAAAAAAAAAAA'))
+    expect(stored).toMatchObject({ status: 'running', origin: 'request', finishedAt: null, deliveredAt: null, deliveredMessageId: null })
+    expect(stored?.output).toMatchObject({ status: 'running', type: 'explore', report: '' })
+    await expect(db.insert(backgroundTasks).values(taskRow('bgt_DDDDDDDDDDDDDDDD', 'missing', 4))).rejects.toThrow()
+    await db.delete(chats).where(eq(chats.id, CHAT_ID))
+    expect((await db.select({ id: backgroundTasks.id }).from(backgroundTasks)).map(row => row.id)).toEqual(['bgt_CCCCCCCCCCCCCCCC'])
   })
 })
 

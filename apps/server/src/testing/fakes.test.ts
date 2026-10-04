@@ -7,7 +7,7 @@ import type { ChatCreate, HarnessUIMessage, QueueAddBody } from '@harness-forge/
 import type { ResolvedImageModel } from '../providers/types.ts'
 import type { ChatsService } from '../services/chats/types.ts'
 import type { TestApp } from './create-test-app.ts'
-import type { FakeChatRunner, RecordingEventBus } from './fakes.ts'
+import type { FakeBackgroundTasks, FakeChatRunner, RecordingEventBus } from './fakes.ts'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
 import { chatDetailSchema, chatExportSchema, dataCleanupPreviewSchema, dataCleanupResultSchema, dataImportResultSchema, HarnessError, LIMITS, queueChangedDataSchema, queueItemSchema, SHARE_TOKEN_PATTERN, shareSummarySchema, shareViewSchema } from '@harness-forge/shared'
@@ -28,6 +28,7 @@ import { seedStoredFile } from '../services/files/store.test-util.ts'
 import { createTestApp } from './create-test-app.ts'
 import {
   createFakeAudioService,
+  createFakeBackgroundTasks,
   createFakeChatRunner,
   createFakeChatsService,
   createFakeDataService,
@@ -453,6 +454,30 @@ describe('createFakeChatRunner', () => {
     await runs.stopAll()
     expect(runs.queueList(QD)).toEqual([])
     expect(runs.phases.size).toBe(0)
+  })
+
+  it('phase 10: the task members delegate to the background manager; stopAll stops queues, then tasks, then runs', async () => {
+    const runs = createFakeChatRunner()
+    const background = runs.background as FakeBackgroundTasks
+    expect(await runs.taskList(QA)).toEqual([])
+    expect(runs.hasTasks(QA)).toBe(false)
+    expect(await runs.stopTask(QA, 'bgt_AAAAAAAAAAAAAAAA')).toBeNull()
+    expect(await runs.stopTasks(QA)).toBe(0)
+    await runs.boot()
+    expect(background.calls).toMatchObject({ list: 1, hasRunning: 1, stop: 1, stopChat: 1, start: 1 })
+
+    const order: string[] = []
+    const ordered = createFakeChatRunner({}, {
+      backgroundTasks: { ...createFakeBackgroundTasks(), stopAll: async () => void order.push(`tasks (queued: ${ordered.queueList(QX).length}, stopped runs: ${ordered.stopped.length})`) },
+    })
+    ordered.phases.set(QX, 'streaming')
+    await ordered.enqueue(QX, queueBody('msg_q600000000000001'), options)
+    await ordered.stopAll()
+    expect(order).toEqual(['tasks (queued: 0, stopped runs: 0)'])
+    expect(ordered.stopped).toEqual([QX])
+    // The chat's own stop never stops a background task.
+    await ordered.stop(QX)
+    expect(order).toHaveLength(1)
   })
 })
 

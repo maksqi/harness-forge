@@ -94,6 +94,17 @@ export function planModeOf(output: unknown): 'edits' | 'ask' | null {
   return parsed.success ? parsed.data.mode : null
 }
 
+/**
+ * + Phase 10 (ADR-047): the plan file of an approved `exit_plan_mode` output (`planPath` / `planError`, absent in v1.5
+ * outputs and while plan files are off); both null when the output does not parse.
+ */
+export function planFileOf(output: unknown): { planPath: string | null, planError: string | null } {
+  const parsed = exitPlanModeOutputSchema.safeParse(output)
+  if (!parsed.success)
+    return { planPath: null, planError: null }
+  return { planPath: parsed.data.planPath ?? null, planError: parsed.data.planError ?? null }
+}
+
 /** The row status text of a decided plan: "Approved · Accept edits" / "Approved · Ask". */
 export function planApprovedText(mode: 'edits' | 'ask'): string {
   return mode === 'edits' ? 'Approved · Accept edits' : 'Approved · Ask'
@@ -125,6 +136,36 @@ export function taskTypeOf(input: unknown): TaskType | null {
     return null
   const parsed = taskTypeSchema.safeParse((input as Record<string, unknown>).type)
   return parsed.success ? parsed.data : null
+}
+
+/** The kind of a sub-agent type (Phase 10, ADR-045): the builtins `explore` and `general` (alias `general-purpose`), else `custom`. */
+export function taskKindOf(type: string): 'explore' | 'general' | 'custom' {
+  const name = type.trim().toLowerCase()
+  if (name === 'explore')
+    return 'explore'
+  if (name === 'general' || name === 'general-purpose')
+    return 'general'
+  return 'custom'
+}
+
+/** The label of a sub-agent type: "Explore", "Agent" (general), or the custom agent's name. */
+export function taskTypeLabel(type: string): string {
+  switch (taskKindOf(type)) {
+    case 'explore':
+      return 'Explore'
+    case 'general':
+      return 'Agent'
+    case 'custom':
+      return type.trim()
+  }
+}
+
+/** The raw agent type of a (possibly still streaming) input: any non-empty name (Phase 10), or null. */
+export function taskAgentTypeOf(input: unknown): string | null {
+  if (typeof input !== 'object' || input === null)
+    return null
+  const type = (input as Record<string, unknown>).type
+  return typeof type === 'string' && type.trim() !== '' ? type.trim().toLowerCase() : null
 }
 
 /** The description of a (possibly still streaming) input, or ''. */

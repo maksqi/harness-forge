@@ -330,7 +330,32 @@ reconciled docs (W10.14) follow these, not the task text further down.
   - K3S built the v1.5 seed in P10-0a (`.tmp/upgrade-v15`, ids `.tmp/upgrade-v15-ids.json`): 13 chats, 120 messages,
     3 pending approvals; a probe copies it and repoints `projects.path` by SQL; the cached mock listing predates the
     new mocks (refresh it).
-- **P10-0b (K3, C30, C31, C32, C33)**: (none recorded yet)
+- **P10-0b (K3, C30, C31, C32, C33)**:
+  - K3: `0007_customizations` = 2 CREATE TABLE + 3 indexes (the only `UPDATE` match is the foreign key's `ON UPDATE no
+    action`); a second `db:generate` reports no changes.
+  - C30: the boot sweep is **`ChatRunner.boot()`** (not `start()`, which is `POST /chat`); `BackgroundTasks.takeResults(chatId,
+    messageId)` (the delivering message is recorded as `delivered_message_id`); `createBackgroundTasks(deps, host,
+    options?)` with `BackgroundTasksHost { hasRun, startTaskTurn }`; `CustomizationService` gains `exportBackup` /
+    `restoreBackup` (for W10.6); `catalog()` never throws for an unknown project (`project-unavailable`), `list()`
+    answers 404; helpers `S/services/customizations/{snapshot,builtins}.ts`; `BOOT_STEPS` = projects, checkpoints, runs,
+    installer, plugins, catalog, mcp, data; `SHUTDOWN_STEPS` = data, runs, customizations, projectFiles, checkpoints,
+    plugins, mcp, catalog, events; registry `register` throws `not_implemented` until W10.7.
+  - C31: the frozen signatures are listed in `.tmp/waves/P10-0b-notes.md` (`ChildSession`, `HostSession`,
+    `createDetachedSession`, the `ContextGuardInput` union, `loadSkill(SkillLoadContext, …)`, `savePlan(PlanFileContext, …)`,
+    `restrictTools` / `ToolRestriction` / `isSkillTool`, `ModelHistoryStages.splitTaskResults`, `PrepareRunOptions`,
+    `CommandContext`, `isServerCommandFor`, `turnToolRestriction`, `SubagentRunnerInput.{catalog, background, origin}`,
+    `DetachedChildInput`, `ChatRunnerOptions.backgroundTasks`); `run.started.userMessageId` is set for `queue` and
+    `task` turns; the background branch counts toward the per-run sub-agent cap (W10.3 refines it).
+  - C32: the builtin agent definitions live in `S/builtin-plugins/core-agent/agents.ts` (import it directly, not
+    `core-agent/index.ts`); the mocks follow PROVIDERS.md 8 with additions (trigger on the last non-empty line, `(empty
+    message)`, code-point skill preview, `Tools are disabled.`); **the instruction blocks the mocks read are a header line
+    starting "Agent types" / "Skills" followed by `- name: description` lines** (W10.3 / W10.5 must emit exactly that).
+  - C33: the customizations store is functional (the composer reads its slash commands from it); the background-tasks
+    store fetches nothing until W10.4's route; `/remember` stays out of the slash menu until W10.9 (typing it opens the
+    stub dialog); `W/utils/download.ts` `downloadText` and `editor-setup.ts` `createMarkdownEditor` are W10.8's (outside
+    C33's globs).
+  - Gate: 9999 tests; seam probe 16/16 (`.tmp/gates/P10-0b/seam-probe.mjs`); v1.5 → v1.6 upgrade probe 42/42
+    (`.tmp/gates/P10-0b/upgrade-probe.mjs` on a copy of `.tmp/upgrade-v15` with `projects.path` repointed).
 - **P10-A (W10.1 – W10.12)**: (none recorded yet)
 - **P10-B (W10.13, W10.14) and the final gate**: (none recorded yet)
 

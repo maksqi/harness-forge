@@ -24,10 +24,12 @@ import {
   CORE_WORKSPACE_PLUGIN_ID,
   isAsyncGeneratorFunction,
   isAsyncIterable,
+  isSkillTool,
   isTruncatedToolOutput,
   offersWorkspaceTool,
   PRELIMINARY_INTERVAL_MS,
   PRELIMINARY_OUTPUTS_MAX,
+  restrictTools,
   settledCallRecord,
   toolWorkspace,
   utf8Prefix,
@@ -893,5 +895,102 @@ describe('wrapToolExecute: an AsyncIterable from a plain execute is drained (Pha
     }
     const empty = definition({ execute: async () => (async function* () {})() })
     expect(await wrapToolExecute({ pluginId: 'demo', definition: empty }, wrapContext())({ text: 'x' }, options)).toBeNull()
+  })
+})
+
+// ---------- Phase 10: the turn's allowlist and the skill tool (C31-T2) ----------
+
+describe('assembleTools: allowedTools and skillsAvailable (Phase 10)', () => {
+  const servers = [{ id: 'gh', status: 'connected' }] as McpServer[]
+  const agentTool = (name: string): RegisteredTool => registered(name, { pluginId: 'core-agent' })
+  /** Every kind of tool: plain, workspace (read / write / execute), MCP, and the four agent tools. */
+  const allTools = (): RegisteredTool[] => [
+    ...workspaceTools(),
+    registered('mcp__gh__issues', { mcpServerId: 'gh' }),
+    registered('mcp__gh__pulls', { mcpServerId: 'gh' }),
+    agentTool('todo_write'),
+    agentTool('exit_plan_mode'),
+    agentTool('task'),
+    agentTool('skill'),
+  ]
+  const names = (result: { tools: object }): string[] => Object.keys(result.tools).sort()
+  const approvedPlanExit = {
+    id: 'msg_a000000000000001',
+    role: 'assistant',
+    parts: [{ type: 'tool-exit_plan_mode', toolCallId: 'call_plan', state: 'approval-responded', input: { plan: 'p' }, approval: { id: 'ap_1', approved: true } }],
+  } as unknown as ToolAssemblyInput['continuation']
+
+  it('sends skill only when the catalog has skills; absent = none (sub-agents)', async () => {
+    const base = { tools: allTools(), servers, workspace: OPEN_WORKSPACE, toolMode: 'auto' as const }
+    expect(names(await assembleTools(assemblyInput(base)))).not.toContain('skill')
+    expect(names(await assembleTools(assemblyInput({ ...base, skillsAvailable: false })))).not.toContain('skill')
+    expect(names(await assembleTools(assemblyInput({ ...base, skillsAvailable: true })))).toContain('skill')
+    // Only core-agent's skill: a tool of another owner with that name is not the skill loader.
+    const other = await assembleTools(assemblyInput({ ...base, tools: [registered('skill')] }))
+    expect(names(other)).toEqual(['skill'])
+  })
+
+  it('narrows the tools of every mode to the allowlist, never adding one', async () => {
+    const allowedTools = ['read_file', 'shell', 'mcp__gh__*', 'not_registered', 'task']
+    for (const toolMode of ['ask', 'edits', 'auto', 'plan'] as const) {
+      const input = { tools: allTools(), servers, workspace: OPEN_WORKSPACE, toolMode, skillsAvailable: true }
+      const full = await assembleTools(assemblyInput(input))
+      const narrowed = await assembleTools(assemblyInput({ ...input, allowedTools }))
+      const kept = names(narrowed)
+      // A subset of the mode's own set: nothing is added (`shell` stays out of plan mode, `not_registered` never appears).
+      expect(kept.every(name => names(full).includes(name))).toBe(true)
+      expect([...narrowed.byName.keys()].sort()).toEqual(kept)
+      const expected = toolMode === 'plan'
+        ? ['exit_plan_mode', 'mcp__gh__issues', 'mcp__gh__pulls', 'read_file', 'task']
+        : ['mcp__gh__issues', 'mcp__gh__pulls', 'read_file', 'shell', 'task']
+      expect(kept).toEqual(expected)
+    }
+  })
+
+  it('keeps exit_plan_mode in plan mode whatever the list says; an empty list leaves no other tool', async () => {
+    const input = { tools: allTools(), servers, workspace: OPEN_WORKSPACE, skillsAvailable: true }
+    expect(names(await assembleTools(assemblyInput({ ...input, toolMode: 'plan', allowedTools: [] })))).toEqual(['exit_plan_mode'])
+    expect(names(await assembleTools(assemblyInput({ ...input, toolMode: 'plan', allowedTools: ['read_file'] })))).toEqual(['exit_plan_mode', 'read_file'])
+    const empty = await assembleTools(assemblyInput({ ...input, toolMode: 'auto', allowedTools: [] }))
+    expect(empty.tools).toEqual({})
+    expect(empty.byName.size).toBe(0)
+    // No tool left is not "unsupported" (nothing would have been sent).
+    expect((await assembleTools(assemblyInput({ ...input, toolMode: 'auto', allowedTools: [], modelSupportsTools: false }))).unsupported).toBe(false)
+  })
+
+  it('keeps an approved plan exit executable (not callable) on its continuation', async () => {
+    const result = await assembleTools(assemblyInput({
+      tools: allTools(),
+      servers,
+      workspace: OPEN_WORKSPACE,
+      toolMode: 'edits',
+      continuation: approvedPlanExit,
+      allowedTools: ['read_file'],
+    }))
+    expect(names(result)).toEqual(['exit_plan_mode', 'read_file'])
+    expect(result.activeTools).toEqual(['read_file'])
+  })
+
+  it('null or absent leaves the mode\'s set unchanged', async () => {
+    const input = { tools: allTools(), servers, workspace: OPEN_WORKSPACE, toolMode: 'auto' as const, skillsAvailable: true }
+    const full = names(await assembleTools(assemblyInput(input)))
+    expect(names(await assembleTools(assemblyInput({ ...input, allowedTools: null })))).toEqual(full)
+    expect(full).toContain('skill')
+  })
+})
+
+describe('restrictTools (Phase 10)', () => {
+  const tool = (pluginId: string, name: string) => ({ pluginId, definition: { name } })
+
+  it('returns the same result when nothing is dropped, and filters activeTools to the kept tools', () => {
+    const moded = { tools: [tool('demo', 'a'), tool('demo', 'b')] }
+    expect(restrictTools(moded, { allowedTools: null, skillsAvailable: false })).toBe(moded)
+    const withActive = { tools: [tool('demo', 'a'), tool('demo', 'b'), tool('core-agent', 'exit_plan_mode')], activeTools: ['a', 'b'] }
+    expect(restrictTools(withActive, { allowedTools: ['b'], skillsAvailable: false })).toEqual({
+      tools: [tool('demo', 'b'), tool('core-agent', 'exit_plan_mode')],
+      activeTools: ['b'],
+    })
+    expect(isSkillTool(tool('core-agent', 'skill'))).toBe(true)
+    expect(isSkillTool(tool('demo', 'skill'))).toBe(false)
   })
 })

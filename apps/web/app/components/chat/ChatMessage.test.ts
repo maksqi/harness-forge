@@ -8,7 +8,7 @@ import { defineComponent, h, nextTick, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
-import { compactionPart, planApprovalPart, steerPart, taskPart } from '~/utils/testing/fixtures'
+import { backgroundTaskId, compactionPart, planApprovalPart, steerPart, taskPart, taskResultCarrier, taskResultData, taskResultPart } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import TaskBlock from './agent/TaskBlock.vue'
 import ChatMessage from './ChatMessage.vue'
@@ -604,5 +604,29 @@ describe('chatMessage: agent parts (Phase 9 seams)', () => {
     const plan = { id: 'approval_call_plan_1', approved: true, toolName: 'exit_plan_mode', alwaysAllow: false, planMode: 'edits', reason: 'Go' }
     wrapper.findAllComponents(ToolPart).at(-1)!.vm.$emit('approval', plan)
     expect(events.approval).toEqual([[task], [plan]])
+  })
+})
+
+describe('chatMessage: background agent results (Phase 10)', () => {
+  it('renders a delivered result inside a reply as an inline note at its position', () => {
+    const message = assistant({ parts: [{ type: 'text', text: 'Working.', state: 'done' }, taskResultPart(), { type: 'text', text: 'Done.', state: 'done' }] })
+    const { wrapper } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
+    const note = wrapper.get(`[data-testid="${testIds.taskResult}"]`)
+    expect(note.attributes()).toMatchObject({ 'data-variant': 'inline', 'data-task-id': backgroundTaskId(1) })
+  })
+
+  it('renders a carrier as its notes with "Sent to the agent", without bubble, actions or edit', async () => {
+    const carrier = taskResultCarrier('msg_carrier000000001', [taskResultData(), taskResultData({ taskId: backgroundTaskId(2) })])
+    const { wrapper, instance } = mountMessage({ message: carrier, isLast: false, streaming: false, showThinking: false, canRewind: true, branch: null })
+    const row = wrapper.get(`[data-testid="${testIds.messageUser}"]`)
+    expect(row.findAll(`[data-testid="${testIds.taskResult}"]`).map(note => [note.attributes('data-task-id'), note.attributes('data-variant')]))
+      .toEqual([[backgroundTaskId(1), 'turn'], [backgroundTaskId(2), 'turn']])
+    expect(row.text()).toContain('Sent to the agent')
+    expect(row.find('[data-slot="user-message"]').exists()).toBe(false)
+    expect(row.find('[data-slot="message-action-row"]').exists()).toBe(false)
+    expect(wrapper.find(`[data-testid="${testIds.messageRewind}"]`).exists()).toBe(false)
+    instance.value?.startEdit()
+    await nextTick()
+    expect(wrapper.find(`[data-testid="${testIds.messageEditInput}"]`).exists()).toBe(false)
   })
 })

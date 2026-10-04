@@ -8,20 +8,28 @@ import type { MemoryLogger } from '../../logger.ts'
 import type { ResolvedModel } from '../../providers/types.ts'
 import type { RegisteredTool } from '../../registry/types.ts'
 import type { UsageInput } from '../../services/chats/types.ts'
+import type { AppDeps } from '../../types.ts'
 import type { AgentRunScope } from '../agent-scope.ts'
+import type { BackgroundTasks } from '../background/types.ts'
 import type { RunSession } from '../pipeline.ts'
-import type { SubagentRunner, SubagentRunnerLimits } from './index.ts'
+import type { ChildSession, HostSession } from './host.ts'
+import type { SubagentRunner, SubagentRunnerInput, SubagentRunnerLimits } from './index.ts'
 import { HarnessError, LIMITS, taskOutputSchema } from '@harness-forge/shared'
 import { convertArrayToReadableStream, MockLanguageModelV4 } from 'ai/test'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { createMemoryLogger } from '../../logger.ts'
+import { createFakeBackgroundTasks } from '../../testing/fake-background-tasks.ts'
 import { agentScopeOf } from '../agent-scope.ts'
+import { BACKGROUND_UNAVAILABLE_TEXT, createBackgroundTasks } from '../background/index.ts'
 import { SUBAGENT_INSTRUCTIONS_MARKER } from '../markers.ts'
+import { testCatalog } from '../testing.ts'
+import { createDetachedSession } from './host.ts'
 import {
   createSubagentRunner,
   createSubagentRunnerWith,
   finalizeStep,
+  runDetachedChild,
   SUBAGENT_EXPLORE_TEXT,
   SUBAGENT_FINALIZE_TEXT,
   SUBAGENT_RUN_LIMIT_TEXT,
@@ -208,8 +216,17 @@ function harness(options: HarnessOptions = {}): Harness {
   return { session, usage, extraCosts, logs, run, toolContexts }
 }
 
-function runner(h: Harness, model: LanguageModelV4, toolMode: ToolMode = 'ask', limits?: SubagentRunnerLimits): SubagentRunner {
-  const input = { session: h.session, model: resolvedModel(model), toolMode, workspace: null, scope: null }
+function runner(h: Harness, model: LanguageModelV4, toolMode: ToolMode = 'ask', limits?: SubagentRunnerLimits, background?: BackgroundTasks): SubagentRunner {
+  const input: SubagentRunnerInput = {
+    session: h.session,
+    model: resolvedModel(model),
+    toolMode,
+    workspace: null,
+    scope: null,
+    catalog: testCatalog(),
+    background: background ?? createBackgroundTasks({} as AppDeps, { hasRun: () => false, startTaskTurn: async () => new Response(null) }),
+    origin: 'request',
+  }
   return limits === undefined ? createSubagentRunner(input) : createSubagentRunnerWith(input, limits)
 }
 
@@ -501,5 +518,132 @@ describe('createSubagentRunner: abort and deadline', () => {
     await done
     expect(outputs.at(-1)).toMatchObject({ status: 'limit', report: 'Half way.', error: subagentDeadlineText(LIMITS.subagentTimeoutMs) })
     expect(subagentDeadlineText(LIMITS.subagentTimeoutMs)).toBe('The sub-agent reached its time limit (570 s).')
+  })
+})
+
+// ---------- Phase 10 (C31 seams): background launches, the detached child, the structural host ----------
+
+describe('createSubagentRunner: background launches (Phase 10)', () => {
+  const BACKGROUND_TASK: TaskInput = { ...TASK, type: 'explore', background: true }
+
+  it('yields one failed output "Background agents are not available yet." with the C30 stub, without a model call', async () => {
+    const h = harness()
+    const { model, calls } = scripted(() => textParts('never'))
+    const outputs = await collect(runner(h, model).run(BACKGROUND_TASK, callOptions()))
+    expect(outputs).toHaveLength(1)
+    expect(outputs[0]).toMatchObject({ status: 'failed', type: 'explore', description: 'List the files', error: BACKGROUND_UNAVAILABLE_TEXT, steps: [], report: '' })
+    expect(taskOutputSchema.safeParse(outputs[0]).success).toBe(true)
+    expect(calls).toHaveLength(0)
+    expect(h.usage).toEqual([])
+  })
+
+  it('launches with the parent\'s values and yields the launch output at once', async () => {
+    const h = harness()
+    const tasks = createFakeBackgroundTasks()
+    const { model, calls } = scripted(() => textParts('never'))
+    const parentModel = resolvedModel(model)
+    const input: SubagentRunnerInput = {
+      session: h.session,
+      model: parentModel,
+      toolMode: 'edits',
+      workspace: null,
+      scope: null,
+      catalog: testCatalog(),
+      background: tasks,
+      origin: 'queue',
+    }
+    const controller = new AbortController()
+    const outputs = await collect(createSubagentRunner(input).run(BACKGROUND_TASK, callOptions(controller.signal, 'call_bg')))
+    expect(outputs).toHaveLength(1)
+    expect(outputs[0]).toMatchObject({ status: 'background', taskId: expect.stringMatching(/^bgt_/) })
+    expect(calls).toHaveLength(0)
+    expect(tasks.launches).toHaveLength(1)
+    const launch = tasks.launches[0]!
+    expect(launch).toMatchObject({
+      chatId: 'chat',
+      messageId: MESSAGE_ID,
+      toolCallId: 'call_bg',
+      task: BACKGROUND_TASK,
+      origin: 'queue',
+      toolMode: 'edits',
+      workspace: null,
+      scope: null,
+      reasoningEffort: 'auto',
+      settings: expect.objectContaining({ instructions: 'Global rules.', subagentMaxSteps: 30 }),
+    })
+    expect(launch.model).toBe(parentModel)
+    expect(launch.catalog).toBe(input.catalog)
+    expect(launch.chatInstructions).toBeUndefined()
+  })
+
+  it('counts a launch toward the per-run cap; a launch that throws is a failed output', async () => {
+    const h = harness()
+    const { model } = scripted(() => textParts('Report.'))
+    const tasks = createFakeBackgroundTasks()
+    const limited = runner(h, model, 'ask', { perRunMax: 1 }, tasks)
+    expect((await collect(limited.run(BACKGROUND_TASK, callOptions())))[0]?.status).toBe('background')
+    expect((await collect(limited.run(TASK, callOptions())))).toEqual([expect.objectContaining({ status: 'failed', error: SUBAGENT_RUN_LIMIT_TEXT })])
+
+    const throwing: BackgroundTasks = { ...createFakeBackgroundTasks(), launch: async () => {
+      throw new HarnessError({ code: 'internal_error', message: 'The database is locked.' })
+    } }
+    const failed = await collect(runner(h, model, 'ask', undefined, throwing).run(BACKGROUND_TASK, callOptions()))
+    expect(failed).toEqual([expect.objectContaining({ status: 'failed', error: 'The database is locked.' })])
+  })
+
+  it('runDetachedChild is a stub until W10.3 (not_implemented)', () => {
+    const h = harness()
+    const { model } = scripted(() => textParts('never'))
+    const session = createDetachedSession({
+      deps: h.session.ctx.deps,
+      chatId: 'chat',
+      messageId: MESSAGE_ID,
+      settings: h.session.ctx.prepared.settings,
+      chatInstructions: undefined,
+      reasoningEffort: 'auto',
+      signal: new AbortController().signal,
+      logger: h.logs.logger,
+    })
+    expect(() => runDetachedChild({ session, model: resolvedModel(model), toolMode: 'ask', workspace: null, scope: null, catalog: testCatalog(), task: BACKGROUND_TASK, toolCallId: 'call_bg' }))
+      .toThrow(expect.objectContaining({ code: 'not_implemented' }))
+  })
+})
+
+describe('the structural host (Phase 10, subagent/host.ts)', () => {
+  it('a chat run satisfies ChildSession and HostSession; a detached session has the task signal, no history and its own cost sink', () => {
+    const h = harness()
+    const asChild: ChildSession = h.session
+    const asHost: HostSession = h.session
+    expect(asChild.assistantId).toBe(asHost.assistantId)
+
+    const controller = new AbortController()
+    const costs: number[] = []
+    const detached = createDetachedSession({
+      deps: h.session.ctx.deps,
+      chatId: 'chat',
+      messageId: 'msg_a000000000000002',
+      settings: h.session.ctx.prepared.settings,
+      chatInstructions: 'Chat rules.',
+      reasoningEffort: 'high',
+      signal: controller.signal,
+      logger: h.logs.logger,
+      now: () => 42,
+      onExtraCost: usd => costs.push(usd),
+    })
+    expect(detached).toMatchObject({ chatId: 'chat', assistantId: 'msg_a000000000000002' })
+    expect(detached.ctx.run.signal).toBe(controller.signal)
+    expect(detached.ctx.prepared).toMatchObject({ history: [], continued: null, chat: { settings: { instructions: 'Chat rules.' } } })
+    expect(detached.ctx.reasoningEffort).toBe('high')
+    expect(detached.ctx.now()).toBe(42)
+    detached.addExtraCost(0.5)
+    detached.addExtraCost(-1)
+    detached.addExtraCost(Number.NaN)
+    expect(costs).toEqual([0.5])
+    expect(Object.isFrozen(detached)).toBe(true)
+    expect(Object.isFrozen(detached.ctx)).toBe(true)
+    // Without a sink and without chat instructions.
+    const quiet = createDetachedSession({ ...{ deps: h.session.ctx.deps, chatId: 'chat', messageId: MESSAGE_ID, settings: h.session.ctx.prepared.settings, reasoningEffort: 'auto' as const, signal: controller.signal, logger: h.logs.logger }, chatInstructions: undefined })
+    expect(() => quiet.addExtraCost(1)).not.toThrow()
+    expect(quiet.ctx.prepared.chat.settings).toEqual({})
   })
 })

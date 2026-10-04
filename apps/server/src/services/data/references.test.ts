@@ -7,7 +7,7 @@ import { eq, is, sql } from 'drizzle-orm'
 import { getTableConfig, SQLiteTable } from 'drizzle-orm/sqlite-core'
 import { afterEach, describe, expect, it } from 'vitest'
 import * as schema from '../../db/schema.ts'
-import { chats, chatShares, messages, pluginKv, pluginSettings, projects, settings } from '../../db/schema.ts'
+import { backgroundTasks, chats, chatShares, customizations, messages, pluginKv, pluginSettings, projects, settings } from '../../db/schema.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { fileUrl } from '../files/index.ts'
 import { collectFileIds, collectReferencedFileIds, REFERENCE_BATCH, scannedColumnNames, UNSCANNED_COLUMNS } from './references.ts'
@@ -91,6 +91,9 @@ describe('referenced file ids: every source', () => {
     ['chat settings', (t, id) => chat(t, { settings: { instructions: `Describe ${fileUrl(id)} first.` } })],
     ['project instructions', (t, id) => t.db.insert(projects).values({ id: 'prj_0000000000000001', name: 'Demo', path: '/srv/demo', instructions: `The logo is ${id}.` }).then(() => {})],
     ['a project name', (t, id) => t.db.insert(projects).values({ id: 'prj_0000000000000001', name: `Assets ${id}`, path: '/srv/demo' }).then(() => {})],
+    // Phase 10 (ADR-044): personal definitions are free text.
+    ['the content of a personal definition', (t, id) => t.db.insert(customizations).values({ id: 'cus_0000000000000001', kind: 'agent', name: 'reviewer', description: 'Reviews.', content: `---\nname: reviewer\ndescription: Reviews.\n---\nCompare with ${fileUrl(id)}.` }).then(() => {})],
+    ['the description of a personal definition', (t, id) => t.db.insert(customizations).values({ id: 'cus_0000000000000001', kind: 'skill', name: 'logo', description: `Uses ${id}.`, content: '---\nname: logo\ndescription: Logo.\n---\nBody.' }).then(() => {})],
   ])('finds an id in %s', async (_label, seed) => {
     const t = await app()
     const id = createFileId()
@@ -105,6 +108,20 @@ describe('referenced file ids: every source', () => {
     await chat(t, { title: `Title ${id}` })
     await message(t, 1, [{ type: 'text', text: 'plain' }])
     await t.db.update(messages).set({ searchText: id }).where(eq(messages.id, mid(1)))
+    expect((await collectReferencedFileIds(t.db)).size).toBe(0)
+    // Phase 10: a background task row (its delivered result is a message part) and a definition name are not scanned.
+    await t.db.insert(backgroundTasks).values({
+      id: 'bgt_0000000000000001',
+      chatId: CHAT_ID,
+      messageId: mid(1),
+      toolCallId: 'call_1',
+      type: 'explore',
+      description: `Look at ${id}`,
+      status: 'completed',
+      origin: 'request',
+      output: { status: 'completed', type: 'explore', description: 'Look', modelRef: 'mock:echo', steps: [], stepsOmitted: 0, report: `Found ${id}.`, startedAt: 1 },
+    })
+    await t.db.insert(customizations).values({ id: 'cus_0000000000000001', kind: 'command', name: 'x', description: 'X.', content: '---\ndescription: X.\n---\nBody.' })
     expect((await collectReferencedFileIds(t.db)).size).toBe(0)
   })
 })
@@ -190,6 +207,8 @@ describe('referenced file ids: schema coverage', () => {
       'chat_shares.file_ids',
       'chat_shares.snapshot',
       'chats.settings',
+      'customizations.content',
+      'customizations.description',
       'messages.metadata',
       'messages.parts',
       'plugin_kv.key',

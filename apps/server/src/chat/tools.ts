@@ -29,8 +29,16 @@
 // non-generator `execute` whose result is an `AsyncIterable` is drained (the last value counts, no preliminary output).
 // Sub-agent calls (`subagent/tools.ts`) set `callIdPrefix` (`<parent call id>/`): the hooks, the call context, the run
 // scope and the journal see the prefixed call id.
+// Phase 10 (C31, ADR-045; COMPLETE and FROZEN after P10-0b): after `applyToolMode`, `restrictTools` narrows the set:
+// - `core-agent`'s `skill` is sent only when the run catalog has skills (`skillsAvailable`; never in sub-agents, which
+//   pass none);
+// - a turn's `allowedTools` (the `allowed-tools` of a command file, `metadata.command.allowedTools`, re-read on every
+//   continuation and regenerate of the turn) keeps only the tools it matches (`matchToolAllowlist`: exact names,
+//   `mcp__server__*` prefixes): it only ever narrows, never adds a tool or changes a policy; `core-agent`'s
+//   `exit_plan_mode` is exempt (`applyToolMode` keeps it in plan mode, or not callable for an approved plan's
+//   continuation); an empty list leaves no other tool; null or absent = no restriction.
 import type { ToolCallContext, ToolDefinition, ToolResultOutput, ToolWorkspace } from '@harness-forge/plugin-sdk'
-import type { HarnessUIMessage, McpServer, ToolMode } from '@harness-forge/shared'
+import type { AgentToolName, HarnessUIMessage, McpServer, ToolMode } from '@harness-forge/shared'
 import type { JSONValue, Tool, ToolExecutionOptions, ToolSet } from 'ai'
 import type { Logger } from '../logger.ts'
 import type { McpManager, ToolPref, ToolService } from '../mcp/types.ts'
@@ -39,13 +47,15 @@ import type { RegisteredTool, Registry } from '../registry/types.ts'
 import type { WorkspaceRunScopeInit } from '../workspace/run-scope.ts'
 import type { AgentRunScope } from './agent-scope.ts'
 import type { ApprovalTool } from './approval.ts'
+import type { ModeTool, ToolModeResult } from './modes.ts'
 import { Buffer } from 'node:buffer'
-import { LIMITS } from '@harness-forge/shared'
+import { LIMITS, matchToolAllowlist } from '@harness-forge/shared'
 import { asSchema, dynamicTool, tool } from 'ai'
+import { CORE_AGENT_PLUGIN_ID } from '../builtin-plugins/core-agent/index.ts'
 import { GUARD_TIMEOUT_MAX_MS, GUARD_TIMEOUTS } from '../plugins/guard.ts'
 import { bindRunScope } from '../workspace/run-scope.ts'
 import { bindAgentScope } from './agent-scope.ts'
-import { toolWorkspaceAccess } from './approval.ts'
+import { isPlanExitTool, toolWorkspaceAccess } from './approval.ts'
 import { abortReason, isAbortError, ToolFailure } from './errors.ts'
 import { applyToolMode } from './modes.ts'
 
@@ -534,6 +544,16 @@ export interface ToolAssemblyInput {
   agent?: AgentRunScope | null
   /** The call id prefix of a sub-agent's tools (`ToolWrapContext.callIdPrefix`, Phase 9); absent for chat runs. */
   callIdPrefix?: string
+  /**
+   * The tool restriction of the turn (Phase 10, `PreparedRun.turnRestriction`: a command file's `allowed-tools`): only
+   * the tools it matches are sent (`restrictTools`); null or absent = no restriction.
+   */
+  allowedTools?: readonly string[] | null
+  /**
+   * The run catalog has skills (Phase 10): `core-agent`'s `skill` is sent only then. Absent = false (sub-agents never
+   * get `skill`).
+   */
+  skillsAvailable?: boolean
 }
 
 export interface AssembledTools {
@@ -553,6 +573,42 @@ export interface AssembledTools {
    * `tools`.
    */
   activeTools?: string[]
+}
+
+/** The name of `core-agent`'s skill loader (Phase 10, ADR-045). */
+const SKILL_TOOL_NAME: AgentToolName = 'skill'
+
+/** `core-agent`'s `skill` (recognized by owner and name, like `isPlanExitTool`). */
+export function isSkillTool(tool: { readonly pluginId: string, readonly definition: { readonly name: string } }): boolean {
+  return tool.pluginId === CORE_AGENT_PLUGIN_ID && tool.definition.name === SKILL_TOOL_NAME
+}
+
+/** The Phase 10 narrowing of a tool set (`restrictTools`). */
+export interface ToolRestriction {
+  /** The turn's allowlist (`ToolAssemblyInput.allowedTools`); null = no restriction. */
+  readonly allowedTools: readonly string[] | null
+  /** The run catalog has skills (`ToolAssemblyInput.skillsAvailable`). */
+  readonly skillsAvailable: boolean
+}
+
+/**
+ * The tool set of `applyToolMode`, narrowed (see the module comment): `skill` only with `skillsAvailable`; with an
+ * `allowedTools` list only the tools it matches, `exit_plan_mode` exempt. Never adds a tool; `activeTools` (when set)
+ * keeps only names of the kept tools.
+ */
+export function restrictTools<T extends ModeTool>(moded: ToolModeResult<T>, restriction: ToolRestriction): ToolModeResult<T> {
+  const allowed = restriction.allowedTools
+  const tools = moded.tools.filter((tool) => {
+    if (isSkillTool(tool) && !restriction.skillsAvailable)
+      return false
+    return allowed === null || isPlanExitTool(tool) || matchToolAllowlist(tool.definition.name, allowed)
+  })
+  if (tools.length === moded.tools.length)
+    return moded
+  if (moded.activeTools === undefined)
+    return { tools }
+  const kept = new Set(tools.map(tool => tool.definition.name))
+  return { tools, activeTools: moded.activeTools.filter(name => kept.has(name)) }
 }
 
 /** The workspace filter of a tool (see `ToolAssemblyInput.workspace` / `allowExecute`). */
@@ -628,7 +684,10 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
     if (connected !== null)
       usable = candidates.filter(entry => entry.mcpServerId === null || connected.has(entry.mcpServerId))
   }
-  const moded = applyToolMode(usable, { toolMode: input.toolMode, continuation: input.continuation ?? null })
+  const moded = restrictTools(
+    applyToolMode(usable, { toolMode: input.toolMode, continuation: input.continuation ?? null }),
+    { allowedTools: input.allowedTools ?? null, skillsAvailable: input.skillsAvailable === true },
+  )
   if (moded.tools.length === 0)
     return empty
   if (!input.modelSupportsTools)

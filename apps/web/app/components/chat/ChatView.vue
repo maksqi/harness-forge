@@ -30,6 +30,11 @@
 // session through the approval payload; the decision is announced ("Plan approved. Permission mode: Accept edits." /
 // "Feedback sent. The agent keeps planning.") and focus goes back to the composer. A compaction marker that arrives in
 // this tab's stream is announced once ("Conversation compacted").
+// Phase 10 (ADR-046; C33 mounts, W10.10 implements; frozen from Gate P10-0b): BackgroundAgents sits in the dock between
+// TodoStrip and QueuedMessages with the session's visible background agents; its Stop goes through the session ('gone'
+// -> "It already finished."), Stop all through the store, and the composer's Stop never touches them.
+// AGENT_TASK_CONTEXT gives the task blocks the live task, the delivered result of the shown path (`taskResultsOf`), the
+// dock reveal and the scroll to a result note.
 import type { HarnessError, MessageBranch, ReasoningEffort, RestoreResult, ToolMode } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
@@ -49,6 +54,7 @@ import { REWIND_DIALOG_HOST, REWIND_RUN_ACTIVE_MESSAGE, runningChatOf } from '~/
 import { useRewindResultToast } from '~/components/workspace/rewind/rewind-toast'
 import RewindDialog from '~/components/workspace/rewind/RewindDialog.vue'
 import { isBusyConflict, isRunActiveConflict, useChatSession } from '~/composables/useChatSession'
+import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { QUEUE_ITEM_GONE_MESSAGE } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
@@ -59,8 +65,10 @@ import { useUiStore } from '~/stores/ui'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
 import TodoStrip from './agent/TodoStrip.vue'
-import { CHAT_VIEW_ACTIONS } from './chat-context'
-import { imageFileParts, messageText, PLAN_TOOL_NAME, toolNameOf } from './chat-format'
+import { visibleTasks } from './background/background-agents'
+import BackgroundAgents from './background/BackgroundAgents.vue'
+import { AGENT_TASK_CONTEXT, CHAT_VIEW_ACTIONS } from './chat-context'
+import { imageFileParts, messageText, PLAN_TOOL_NAME, taskResultsOf, toolNameOf } from './chat-format'
 import ChatNotFound from './ChatNotFound.vue'
 import ChatTranscript from './ChatTranscript.vue'
 import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
@@ -100,6 +108,7 @@ const plugins = usePluginsStore()
 const projects = useProjectsStore()
 const providers = useProvidersStore()
 const ui = useUiStore()
+const backgroundTasks = useBackgroundTasksStore()
 
 const composer = useTemplateRef<ChatComposerExposed>('composer')
 const transcript = useTemplateRef<InstanceType<typeof ChatTranscript>>('transcript')
@@ -177,6 +186,50 @@ const chatCostUsd = computed(() => {
 provide(CHAT_VIEW_ACTIONS, {
   openModelPicker: () => composer.value?.openModelPicker(),
 })
+
+// ---------- background agents (Phase 10, ADR-046; W10.10 implements) ----------
+
+/** The toast when a Stop reaches a background agent that had already ended (docs/UI.md 7.29). */
+const BACKGROUND_GONE_MESSAGE = 'It already finished.'
+
+/** What the dock shows: running background agents and finished ones whose result was not delivered yet. */
+const shownBackgroundTasks = computed(() => visibleTasks(session.backgroundTasks.value))
+const stoppingBackgroundTasks = computed(() => shownBackgroundTasks.value.filter(task => backgroundTasks.stopping[task.id]).map(task => task.id))
+/** A "Show in background agents" request of a task block (n bumps on each request). */
+const backgroundReveal = ref<{ taskId: string, n: number } | null>(null)
+/** The delivered results on the shown path, by task id. */
+const taskResults = computed(() => taskResultsOf(messages.value))
+
+provide(AGENT_TASK_CONTEXT, {
+  projectId: () => projectId.value,
+  task: taskId => session.backgroundTasks.value.find(task => task.id === taskId) ?? null,
+  tasksLoaded: () => backgroundTasks.loaded[props.chatId] === true,
+  result: taskId => taskResults.value.get(taskId) ?? null,
+  reveal: (taskId) => {
+    backgroundReveal.value = { taskId, n: (backgroundReveal.value?.n ?? 0) + 1 }
+  },
+  showResult: (taskId) => {
+    if (!taskResults.value.has(taskId) || typeof document === 'undefined')
+      return false
+    const note = [...document.querySelectorAll<HTMLElement>(`[data-testid="${testIds.taskResult}"]`)]
+      .find(element => element.dataset.taskId === taskId)
+    note?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+    return note !== undefined
+  },
+})
+
+function onStopBackgroundTask(taskId: string) {
+  session.stopBackgroundTask(taskId)
+    .then((result) => {
+      if (result === 'gone')
+        toast(BACKGROUND_GONE_MESSAGE)
+    })
+    .catch(failure => reportFailure('Could not stop the background agent', failure))
+}
+
+function onStopAllBackgroundTasks() {
+  backgroundTasks.stopAll(props.chatId).catch(failure => reportFailure('Could not stop the background agent', failure))
+}
 
 /** The name of the chat's project, once the projects store knows it. */
 const projectName = computed(() => (projectId.value ? projects.byId(projectId.value)?.name ?? null : null))
@@ -646,6 +699,13 @@ function setProject(value: string | null) {
         <div ref="dock" class="pointer-events-auto bg-background px-3 pb-[max(12px,env(safe-area-inset-bottom))] md:px-6">
           <div class="mx-auto flex w-full max-w-3xl flex-col gap-2">
             <TodoStrip :state="todos" :running="runActive" />
+            <BackgroundAgents
+              :tasks="shownBackgroundTasks"
+              :stopping="stoppingBackgroundTasks"
+              :reveal="backgroundReveal"
+              @stop="onStopBackgroundTask"
+              @stop-all="onStopAllBackgroundTasks"
+            />
             <QueuedMessages
               :items="queue"
               :waiting-for-approval="waitingForApproval"

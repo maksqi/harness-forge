@@ -8,7 +8,9 @@
 // command; ./shell.ts). Phase 9 (the agent mocks, PROVIDERS.md 8 "Agent mocks (Phase 9)", shared rules in ./turn.ts):
 // `mock:compact` (./compact.ts), `mock:plan` (./plan-mode.ts), `mock:todo` (./todo.ts), `mock:subagent`
 // (./subagent.ts) and `mock:steer` (./steer.ts); `MockPlan` gains `toolCalls` (several calls in one step, run in
-// parallel by the SDK) and `stepDelayMs` (an abortable wait before the step streams anything).
+// parallel by the SDK) and `stepDelayMs` (an abortable wait before the step streams anything). Phase 10 (the
+// customization mocks, PROVIDERS.md 8 "Customization mocks (Phase 10)", FROZEN after Gate P10-0b): `mock:agents`
+// (./agents.ts: custom agents, skills, commands) and `mock:background` (./background.ts: background sub-agents).
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
@@ -24,6 +26,8 @@ import { APICallError } from '@ai-sdk/provider'
 import { GENERATE_IMAGE_TOOL_NAME } from '@harness-forge/shared'
 import { simulateReadableStream } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
+import { mockAgentsPlan } from './agents.ts'
+import { mockBackgroundPlan } from './background.ts'
 import { mockCheckpointPlan } from './checkpoint.ts'
 import { abortableDelay, abortError, countWords, MOCK_EMPTY_MESSAGE, MOCK_PROVIDER_ID, MOCK_TOOL_DENIED, MOCK_TOOLS_DISABLED, unknownModelError, wordChunks } from './common.ts'
 import { mockCompactPlan } from './compact.ts'
@@ -40,7 +44,8 @@ export { abortableDelay, countWords, MOCK_EMPTY_MESSAGE, MOCK_PROVIDER_ID, MOCK_
 export const MOCK_TOOL_NAME = 'mock_approval_tool'
 /**
  * The language model ids of the mock provider (`createLanguageModel`): the four v1 models, the two Phase 6 ones,
- * `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8), and the five agent mocks of Phase 9.
+ * `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8), the five agent mocks of Phase 9 and the two customization
+ * mocks of Phase 10.
  */
 export const MOCK_MODEL_IDS = [
   'echo',
@@ -57,6 +62,8 @@ export const MOCK_MODEL_IDS = [
   'todo',
   'subagent',
   'steer',
+  'agents',
+  'background',
 ] as const
 export type MockModelId = (typeof MOCK_MODEL_IDS)[number]
 
@@ -293,6 +300,10 @@ export function mockPlan(modelId: MockModelId, options: LanguageModelV4CallOptio
       return mockSubagentPlan(options)
     case 'steer':
       return mockSteerPlan(options)
+    case 'agents':
+      return mockAgentsPlan(options)
+    case 'background':
+      return mockBackgroundPlan(options)
     default:
       return echoPlan(options.prompt)
   }

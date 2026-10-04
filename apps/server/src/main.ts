@@ -8,6 +8,11 @@
 // the data directory exists and its `release()` at the end of a shutdown and when the boot fails; `recoverKeyState`
 // runs after the migrations and before `createDeps`, whose keyring factory takes the `keyVersion` it returns.
 //
+// Phase 10 boot hook (C30, frozen after Gate P10-0b): the boot sweep of background tasks (`runs.boot()`: rows still
+// `running` become `aborted`, undelivered results fill the in-memory inboxes, no turn starts) runs once per process,
+// inside `startDeps` right after `checkpoints.start()` (`BOOT_STEPS`); `stopDeps` stops the background tasks inside
+// `runs.stopAll()` (queues, then background tasks, then runs) before it drops the customization catalog caches.
+//
 // Bind safety: a non-loopback `HF_HOST` needs `HF_PASSWORD`, a password stored in the data directory, or
 // `HF_INSECURE=1`; otherwise the process exits with code 1 before any plugin starts or any port is opened. An invalid
 // `HF_TRUST_PROXY` (`1`, `true`, a hop count, an unknown token) fails the boot the same way, with the format explained;

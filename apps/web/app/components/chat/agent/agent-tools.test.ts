@@ -6,15 +6,19 @@ import {
   doneTodos,
   firstSentence,
   planApprovedText,
+  planFileOf,
   planModeOf,
   planOf,
   planTitle,
+  taskAgentTypeOf,
   taskBlockState,
   taskDescriptionOf,
+  taskKindOf,
   taskMetaLine,
   taskStepLine,
   taskToolCalls,
   taskTriggerLabel,
+  taskTypeLabel,
   taskTypeOf,
   todoLabel,
   todoListOf,
@@ -129,5 +133,22 @@ describe('sub-agents', () => {
     expect(taskMetaLine(output)).toBe('claude-haiku-5 · 18K tokens · $0.004 · 41s')
     expect(taskMetaLine(taskOutput({ usage: { inputTokens: 900, outputTokens: 100 } }))).toBe('subagent · 1K tokens · 41s')
     expect(taskMetaLine(taskOutput({ finishedAt: undefined }))).toBe('subagent')
+  })
+})
+
+describe('agent types and plan files (Phase 10)', () => {
+  it('sorts types into explore, general (alias general-purpose) and custom, with their labels', () => {
+    expect(['explore', 'general', 'general-purpose', 'reviewer'].map(taskKindOf)).toEqual(['explore', 'general', 'general', 'custom'])
+    expect(['explore', 'general', 'reviewer'].map(taskTypeLabel)).toEqual(['Explore', 'Agent', 'reviewer'])
+    expect(taskAgentTypeOf({ type: ' Reviewer ' })).toBe('reviewer')
+    expect(taskAgentTypeOf({ type: '' })).toBeNull()
+    expect(taskAgentTypeOf(null)).toBeNull()
+  })
+
+  it('reads the plan file of an approved plan', () => {
+    expect(planFileOf({ approved: true, mode: 'edits', planPath: '.harness/plans/x.md' })).toEqual({ planPath: '.harness/plans/x.md', planError: null })
+    expect(planFileOf({ approved: true, mode: 'ask', planError: 'The plan folder is a link.' })).toEqual({ planPath: null, planError: 'The plan folder is a link.' })
+    expect(planFileOf({ approved: true, mode: 'ask' })).toEqual({ planPath: null, planError: null })
+    expect(planFileOf({ nope: true })).toEqual({ planPath: null, planError: null })
   })
 })

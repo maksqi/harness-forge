@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => ({
   api: null as unknown,
   useHead: vi.fn(),
   route: null as null | { path: string, query: Record<string, string | undefined> },
-  router: { replace: vi.fn() },
+  router: { replace: vi.fn(), push: vi.fn() },
   toast: Object.assign(vi.fn(), { custom: vi.fn(), error: vi.fn(), success: vi.fn(), dismiss: vi.fn() }),
 }))
 
@@ -49,6 +49,8 @@ beforeEach(() => {
   mocks.api = api
   mocks.useHead.mockReset()
   mocks.route = reactive({ path: '/settings/projects', query: {} })
+  mocks.router.push.mockReset()
+  mocks.router.push.mockResolvedValue(undefined)
   mocks.router.replace.mockReset()
   mocks.router.replace.mockImplementation(async ({ query }: { query: Record<string, string | undefined> }) => {
     mocks.route!.query = query
@@ -229,6 +231,18 @@ describe('projectsSettings', () => {
     await flushPromises()
     expect(api.shellRules.create).toHaveBeenCalledWith({ body: { projectId: projectId(1), prefix: 'pnpm lint' } })
     expect(row(projectId(1)).textContent).toContain('2 allowed commands')
+  })
+
+  it('opens the project\'s agents, commands and skills on the Customize page from the row menu (Phase 10)', async () => {
+    await mountSettings()
+    byTestId(testIds.projectRowMenu, row(projectId(2)))!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    const item = byTestId(testIds.projectCustomizations)!
+    expect(item.textContent?.trim()).toBe('Agents, commands and skills…')
+    expect(item.querySelector('svg')).not.toBeNull()
+    item.click()
+    await flushPromises()
+    expect(mocks.router.push).toHaveBeenCalledWith({ path: '/settings/customize', query: { project: projectId(2) } })
   })
 
   it('shows the load error with Retry', async () => {

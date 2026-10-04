@@ -17,15 +17,25 @@
 // - awaiting an approval: the items wait for the next run (its step 0 takes them);
 // - aborted / failed: every item is removed (`stopped` / `failed`).
 // `run.started` of user requests carries `origin: 'request'`.
+// Phase 10 (C31 wiring, ADR-046; W10.4 implements the manager): the runner creates one background manager
+// (`ChatRunnerOptions.backgroundTasks`, default `createBackgroundTasks` of `background/index.ts`) with the host
+// `{ hasRun, startTaskTurn }` (`startTaskTurn` = `start` with `origin: 'task'` and `prepareRun(…, { serverMessage: true
+// })`); every run gets it (`RunContext.background`); `boot`, `taskList`, `stopTask`, `stopTasks` and `hasTasks` delegate
+// to it; a completed run without a pending approval whose chat has no queued message to start calls
+// `background.onChatIdle(chatId)`; `stopAll` clears the queues, then stops the background tasks, then the runs. The chat's
+// `stop` never stops a background task.
 import type { QueueChangedData, RunOrigin } from '@harness-forge/shared'
 import type { EventBus } from '../services/events/types.ts'
 import type { AppDeps } from '../types.ts'
+import type { BackgroundTasks, BackgroundTasksFactory } from './background/types.ts'
 import type { RunEnding } from './history.ts'
+import type { PrepareRunOptions } from './prepare.ts'
 import type { ChatQueue, QueueEntry } from './queue.ts'
 import type { Run } from './runs.ts'
 import type { ChatRunner, ChatRunOptions } from './types.ts'
 import { isHarnessError } from '@harness-forge/shared'
 import { assertRunsAllowed } from '../services/maintenance/index.ts'
+import { createBackgroundTasks } from './background/index.ts'
 import { abortReason, preStreamError } from './errors.ts'
 import { launchRun, TaskTracker } from './pipeline.ts'
 import { commitHistory, prepareRun, stoppedBeforeStart } from './prepare.ts'
@@ -45,12 +55,16 @@ export interface ChatRunnerOptions {
   shutdownStopWaitMs?: number
   /** Interval of the `message-metadata` keep-alive of image turns (default `IMAGE_KEEPALIVE_MS`, 15 s). */
   imageKeepAliveMs?: number
+  /** Creates the runner's background manager (Phase 10; default `createBackgroundTasks`; tests pass a fake). */
+  backgroundTasks?: BackgroundTasksFactory
 }
 
 /** `ChatRunner` plus test and shutdown helpers. */
 export interface ChatRunnerInternal extends ChatRunner {
-  /** Resolves when no background task (title, `message.completed` hooks) is pending. */
+  /** Resolves when no tracked work of the runs (titles, `message.completed` hooks) is pending. */
   readonly idle: () => Promise<void>
+  /** The runner's background manager (Phase 10; tests). */
+  readonly background: BackgroundTasks
 }
 
 export function createChatRunner(deps: AppDeps): ChatRunner {
@@ -71,8 +85,8 @@ export interface QueuedTurnInput {
   entry: QueueEntry
   queue: ChatQueue
   events: Pick<EventBus, 'emit'>
-  /** The runner's start with the origin of the run. */
-  start: (body: Parameters<ChatRunner['start']>[0], options: ChatRunOptions, origin: RunOrigin) => Promise<Response>
+  /** The runner's start with the origin of the run (and, Phase 10, the options of `prepareRun`). */
+  start: (body: Parameters<ChatRunner['start']>[0], options: ChatRunOptions, origin: RunOrigin, prepareOptions?: PrepareRunOptions) => Promise<Response>
 }
 
 /**
@@ -120,11 +134,27 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
   const shutdownStopWaitMs = Math.min(stopWaitMs, options.shutdownStopWaitMs ?? SHUTDOWN_STOP_WAIT_MS)
   // The services are read lazily inside the queue's methods (the runner is built inside the deps factory).
   const queue = createChatQueue(deps, { hasRun: chatId => registry.get(chatId) !== undefined, now })
+  // The background manager (Phase 10): reads `deps` and its host lazily, like the queue.
+  const background = (options.backgroundTasks ?? createBackgroundTasks)(deps, {
+    hasRun: chatId => registry.get(chatId) !== undefined,
+    startTaskTurn: (body, runOptions) => startRun(body, runOptions, 'task', { serverMessage: true }),
+  })
+
+  /** The chat is idle after a natural ending (Phase 10): the background manager may deliver waiting results. */
+  function chatIdle(chatId: string): void {
+    try {
+      background.onChatIdle(chatId)
+    }
+    catch (error) {
+      deps.logger.warn('the background manager failed on an idle chat', { chatId, err: error })
+    }
+  }
 
   /**
    * A run of `chatId` left the registry (Phase 9, `RunContext.onReleased`): completed without a pending approval → the
-   * oldest queued item becomes the next turn; awaiting an approval → the items wait; aborted / failed → every item is
-   * removed (`stopped` / `failed`). At shutdown nothing starts (the queues were emptied first anyway).
+   * oldest queued item becomes the next turn (Phase 10: none queued → `background.onChatIdle`); awaiting an approval →
+   * the items wait; aborted / failed → every item is removed (`stopped` / `failed`; the background results wait for the
+   * next run). At shutdown nothing starts (the queues were emptied first anyway).
    */
   function onRunReleased(chatId: string, ending: RunEnding, awaitingApproval: boolean): void {
     if (ending === 'aborted' || lifecycle.signal.aborted) {
@@ -138,8 +168,10 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
     if (awaitingApproval)
       return
     const entry = queue.takeNext(chatId)
-    if (entry === null)
+    if (entry === null) {
+      chatIdle(chatId)
       return
+    }
     void startQueuedTurn({ chatId, entry, queue, events: deps.events, start: startRun })
   }
 
@@ -188,8 +220,11 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
     }).catch((error: unknown) => deps.logger.warn('cannot check the queue of a chat whose request failed', { chatId, err: error }))
   }
 
-  /** `start` with the origin of the run (`run.started`). The chat is acquired synchronously (before the first await). */
-  async function startRun(body: Parameters<ChatRunner['start']>[0], runOptions: ChatRunOptions, origin: RunOrigin): Promise<Response> {
+  /**
+   * `start` with the origin of the run (`run.started`) and the options of `prepareRun` (Phase 10: the carrier message of
+   * a `task` turn). The chat is acquired synchronously (before the first await).
+   */
+  async function startRun(body: Parameters<ChatRunner['start']>[0], runOptions: ChatRunOptions, origin: RunOrigin, prepareOptions: PrepareRunOptions = {}): Promise<Response> {
     const logger = runOptions.logger.child({ chatId: body.chatId })
     // Checked right before the chat is acquired (no await in between), so an operation that blocks runs and then
     // stops every registered run cannot miss one.
@@ -197,7 +232,7 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
     const run = registry.acquire(body.chatId, body.modelRef)
     let launched = false
     try {
-      const prepared = await prepareRun(deps, run, body, logger)
+      const prepared = await prepareRun(deps, run, body, logger, prepareOptions)
       if (run.signal.aborted)
         throw stoppedBeforeStart(body.chatId)
       await commitHistory(deps, body.chatId, prepared.writes)
@@ -218,6 +253,7 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
         queue,
         onReleased: (ending, awaitingApproval) => onRunReleased(body.chatId, ending, awaitingApproval),
         origin,
+        background,
       })
     }
     catch (error) {
@@ -266,8 +302,16 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
     }),
 
     stopAll: async () => {
+      // The queues, then the background tasks, then the runs (`ChatRunner.stopAll`); nothing starts once the lifecycle
+      // signal aborted.
       queue.clearAll('stopped')
       lifecycle.abort(abortReason('The server is shutting down.'))
+      try {
+        await background.stopAll()
+      }
+      catch (error) {
+        deps.logger.error('shutdown: the background tasks did not stop', { err: error })
+      }
       await Promise.all(registry.list().map(run => stopRun(run, 'The server is shutting down.', shutdownStopWaitMs)))
       await tasks.idle()
     },
@@ -280,6 +324,18 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
 
     clearQueue: (chatId, reason) => queue.clear(chatId, reason),
 
+    boot: () => background.start(),
+
+    taskList: chatId => background.list(chatId),
+
+    stopTask: (chatId, taskId) => background.stop(chatId, taskId),
+
+    stopTasks: chatId => background.stopChat(chatId),
+
+    hasTasks: chatId => background.hasRunning(chatId),
+
     idle: () => tasks.idle(),
+
+    background,
   }
 }
