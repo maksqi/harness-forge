@@ -1,8 +1,18 @@
 // Tool, MCP server and command DTOs (API.md section 4.9).
 import { z } from 'zod'
-import { mcpStatusSchema, toolOverrideSchema, toolPolicySchema, workspaceAccessSchema } from '../enums.ts'
+import { commandSourceSchema, mcpStatusSchema, toolOverrideSchema, toolPolicySchema, workspaceAccessSchema } from '../enums.ts'
 import { harnessErrorInitSchema } from '../errors.ts'
-import { commandNameSchema, mcpServerIdSchema, pluginIdSchema, timestampSchema, toolNameSchema } from '../ids.ts'
+import {
+  commandNameSchema,
+  mcpServerIdSchema,
+  modelRefSchema,
+  pluginIdSchema,
+  projectIdSchema,
+  timestampSchema,
+  toolNameSchema,
+} from '../ids.ts'
+import { LIMITS } from '../limits.ts'
+import { DEFINITION_LIMITS } from '../util/definitions.ts'
 import { hasControlChars } from '../util/text.ts'
 import { secretStateSchema } from './common.ts'
 import { envVarNameSchema, httpHeaderNameSchema, httpHeaderValueSchema, httpUrlSchema } from './plugin-data.ts'
@@ -141,10 +151,29 @@ export const mcpServerSchema = z.object({
 })
 export type McpServer = z.infer<typeof mcpServerSchema>
 
-/** A server-side slash command (client-only commands are not listed). */
+/**
+ * A server-side slash command (client-only commands are not listed). Phase 10 (ADR-045): the effective commands of a
+ * chat's scope, one per name (the precedence of ADR-044 applied): harness commands, project command files, personal
+ * commands and plugin commands.
+ */
 export const commandSummarySchema = z.object({
   name: commandNameSchema,
   description: z.string(),
-  pluginId: pluginIdSchema,
+  /** Where the command comes from (Phase 10). */
+  source: commandSourceSchema,
+  /** Plugin commands: the plugin; harness commands: `core-agent` (optional since Phase 10). */
+  pluginId: pluginIdSchema.optional(),
+  /** Command files in subfolders: the folder path (`frontend/forms`), a display label only. */
+  namespace: z.string().min(1).max(LIMITS.workspacePathMaxChars).optional(),
+  /** `argument-hint` of a command file (shown after `/name ` in the composer). */
+  argumentHint: z.string().max(DEFINITION_LIMITS.argumentHintMaxChars).optional(),
+  /** The `model` of a command file: the turn runs on it (the chat keeps its model). */
+  modelRef: modelRefSchema.optional(),
 })
 export type CommandSummary = z.infer<typeof commandSummarySchema>
+
+/** Query of `GET /commands` (Phase 10): include the command files of this project (an unknown project is `404`). */
+export const commandsQuerySchema = z.object({
+  projectId: projectIdSchema.optional(),
+})
+export type CommandsQuery = z.infer<typeof commandsQuerySchema>

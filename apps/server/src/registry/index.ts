@@ -260,6 +260,9 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
         mcpServers: serverIds,
         commands: commandNames,
         hooks: hookNames,
+        // Plugin API 1.4.0 (ADR-045): the agent and skill registries arrive in P10-0b / P10-A.
+        agents: [],
+        skills: [],
       }
       return contributions
     },

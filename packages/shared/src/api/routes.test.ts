@@ -90,8 +90,8 @@ function tableSignatures(): string[] {
 }
 
 describe('route table', () => {
-  it('has 100 routes keyed <module>.<action>', () => {
-    expect(API_ROUTE_KEYS).toHaveLength(100)
+  it('has 109 routes keyed <module>.<action>', () => {
+    expect(API_ROUTE_KEYS).toHaveLength(109)
     for (const key of API_ROUTE_KEYS) {
       const route: ApiRouteDef = apiRoutes[key]
       expect(key.startsWith(`${route.module}.`), key).toBe(true)
@@ -107,7 +107,7 @@ describe('route table', () => {
 
   it('equals the route key index of API.md (key, method, path, module)', () => {
     const index = routeIndex()
-    expect(index).toHaveLength(100)
+    expect(index).toHaveLength(109)
     expect(index.map(row => `${row.key} ${signature(row)}`).sort()).toEqual(
       API_ROUTE_KEYS.map(key => `${key} ${signature(apiRoutes[key])}`).sort(),
     )
@@ -238,7 +238,6 @@ describe('route table', () => {
   })
 
   it('declares the queue and project file routes as the contract says (ADR-042)', () => {
-    expect(API_MODULES).toHaveLength(27)
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'chatQueue')).toEqual(['chatQueue.list', 'chatQueue.add', 'chatQueue.remove'])
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'projectFiles')).toEqual(['projectFiles.search', 'projectFiles.attach'])
     const phase9 = API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'chatQueue' || apiRoutes[key].module === 'projectFiles')
@@ -258,6 +257,41 @@ describe('route table', () => {
     // The attach answer is the upload answer.
     expect(apiRoutes['projectFiles.attach'].response).toBe(apiRoutes['files.upload'].response)
     expect((apiRoutes['projectFiles.search'] as ApiRouteDef).query).toBeDefined()
+  })
+
+  it('declares the customization, memory and background task routes as the contract says (ADR-044 … ADR-047)', () => {
+    expect(API_MODULES).toHaveLength(30)
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'customizations')).toEqual([
+      'customizations.list',
+      'customizations.source',
+      'customizations.create',
+      'customizations.get',
+      'customizations.update',
+      'customizations.remove',
+    ])
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'memory')).toEqual(['memory.remember'])
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'chatTasks')).toEqual(['chatTasks.list', 'chatTasks.stop'])
+    const phase10 = API_ROUTE_KEYS.filter(key => ['customizations', 'memory', 'chatTasks'].includes(apiRoutes[key].module))
+    expect(phase10).toHaveLength(9)
+    // None needs fresh auth (definitions only restrict; Remember writes through the journal) and none is public.
+    for (const key of phase10) {
+      const route: ApiRouteDef = apiRoutes[key]
+      expect(route.fresh, key).toBeUndefined()
+      expect(route.public, key).toBeUndefined()
+    }
+    for (const key of phase10.filter(key => apiRoutes[key].module === 'chatTasks'))
+      expect(apiRoutes[key].path.startsWith('/chat/:id/tasks'), key).toBe(true)
+    expect(routeSuccessStatus(apiRoutes['customizations.create'])).toBe(201)
+    expect(routeSuccessStatus(apiRoutes['customizations.remove'])).toBe(204)
+    expect(routeSuccessStatus(apiRoutes['memory.remember'])).toBe(200)
+    expect(routeSuccessStatus(apiRoutes['chatTasks.stop'])).toBe(200)
+    // The personal definition answers are one shape; the stop answers the task.
+    expect(apiRoutes['customizations.get'].response).toBe(apiRoutes['customizations.create'].response)
+    expect(apiRoutes['customizations.update'].response).toBe(apiRoutes['customizations.create'].response)
+    expect((apiRoutes['customizations.list'] as ApiRouteDef).query).toBeDefined()
+    expect((apiRoutes['customizations.source'] as ApiRouteDef).query).toBeDefined()
+    // `GET /commands` gains the project query (Phase 10).
+    expect((apiRoutes['commands.list'] as ApiRouteDef).query).toBeDefined()
   })
 })
 
@@ -386,6 +420,37 @@ describe('matchApiRoute', () => {
       ['POST', `/projects/${project}/files`],
       ['GET', `/projects/${project}/files/attach`],
       ['GET', `/projects/${project}/files/src/app.ts`],
+    ] as const)
+      expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
+  })
+
+  it('matches the customization, memory and background task routes (Phase 10) without shadowing', () => {
+    const chat = '0199a8f0-0000-7000-8000-000000000001'
+    const customization = 'cus_ABCdef0123456789'
+    const task = 'bgt_ABCdef0123456789'
+    expect(matchApiRoute('GET', '/customizations')?.key).toBe('customizations.list')
+    expect(matchApiRoute('POST', '/customizations')?.key).toBe('customizations.create')
+    // The static `source` segment wins over the `:id` param.
+    expect(matchApiRoute('GET', '/customizations/source')?.key).toBe('customizations.source')
+    expect(matchApiRoute('GET', `/customizations/${customization}`)).toMatchObject({ key: 'customizations.get', params: { id: customization } })
+    expect(matchApiRoute('PATCH', `/customizations/${customization}`)?.key).toBe('customizations.update')
+    expect(matchApiRoute('DELETE', `/customizations/${customization}`)?.key).toBe('customizations.remove')
+    expect(matchApiRoute('POST', '/memory')?.key).toBe('memory.remember')
+    expect(matchApiRoute('GET', `/chat/${chat}/tasks`)).toMatchObject({ key: 'chatTasks.list', params: { id: chat } })
+    expect(matchApiRoute('POST', `/chat/${chat}/tasks/${task}/stop`)).toMatchObject({ key: 'chatTasks.stop', params: { id: chat, taskId: task } })
+    // The neighbors keep their keys.
+    expect(matchApiRoute('POST', `/chat/${chat}/stop`)?.key).toBe('chat.stop')
+    expect(matchApiRoute('GET', `/chat/${chat}/queue`)?.key).toBe('chatQueue.list')
+    expect(matchApiRoute('GET', '/commands')?.key).toBe('commands.list')
+    for (const [method, path] of [
+      ['DELETE', '/customizations'],
+      ['PUT', `/customizations/${customization}`],
+      ['GET', '/memory'],
+      ['DELETE', '/memory'],
+      ['POST', `/chat/${chat}/tasks`],
+      ['GET', `/chat/${chat}/tasks/${task}`],
+      ['POST', `/chat/${chat}/tasks/stop`],
+      ['DELETE', `/chat/${chat}/tasks/${task}`],
     ] as const)
       expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
   })

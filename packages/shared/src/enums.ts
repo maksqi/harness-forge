@@ -1,6 +1,12 @@
 // Enumerations of the contract (DECISIONS.md "Enumerations", API.md section 4.1, PLUGINS.md section 9).
 // Error codes and actions live in `errors.ts`.
 import { z } from 'zod'
+import {
+  CUSTOMIZATION_KINDS,
+  CUSTOMIZATION_SOURCES,
+  DEFINITION_DIAGNOSTIC_CODES,
+  DEFINITION_DIAGNOSTIC_LEVELS,
+} from './util/definitions.ts'
 
 /**
  * Chat permission mode (UI label: permission mode). Default `ask`. `edits` ("Accept edits", Phase 7, ADR-032): safe
@@ -123,9 +129,77 @@ export type FileSweepMode = z.infer<typeof fileSweepModeSchema>
 export const todoStatusSchema = z.enum(['pending', 'in_progress', 'completed'])
 export type TodoStatus = z.infer<typeof todoStatusSchema>
 
-/** Type of a sub-agent of the `task` tool (ADR-043): `explore` is read-only, `general` gets the parent's tools. */
+/**
+ * The builtin sub-agent types of the `task` tool (ADR-043): `explore` is read-only, `general` gets the parent's tools.
+ * Since Phase 10 (ADR-045) `task.type` names any agent of the catalog (`agentTypeInputSchema`); this enum stays the
+ * builtin set (the web picks the icons of the builtins with it).
+ */
 export const taskTypeSchema = z.enum(['explore', 'general'])
 export type TaskType = z.infer<typeof taskTypeSchema>
+
+/**
+ * What started a run (Phase 9, ADR-042; `run.started.origin`): a `POST /chat` request, the server with the first queued
+ * message (`queue`), or, since Phase 10 (ADR-046), the server with the results of finished background tasks (`task`).
+ * Also the origin of the run that launched a background task (`BackgroundTask.origin`).
+ */
+export const runOriginSchema = z.enum(['request', 'queue', 'task'])
+export type RunOrigin = z.infer<typeof runOriginSchema>
+
+// ---------- agent customization (Phase 10) ----------
+
+/** Kind of a definition (ADR-044): an agent type, a slash command or a skill (type `CustomizationKind`). */
+export const customizationKindSchema = z.enum(CUSTOMIZATION_KINDS)
+
+/**
+ * Where a catalog entry comes from (ADR-044; type `CustomizationSource`); precedence, lowest first: `builtin` < `plugin`
+ * < `user` (Settings -> Customize, table `customizations`) < `project` (`.claude/{kind}`, then `.harness/{kind}` of the
+ * project folder).
+ */
+export const customizationSourceSchema = z.enum(CUSTOMIZATION_SOURCES)
+
+/**
+ * State of a catalog entry: `active` (wins its name), `shadowed` (a higher source or an earlier file has the name),
+ * `invalid` (an `error` diagnostic: the definition cannot be used) or `off` (a personal definition turned off).
+ */
+export const customizationStateSchema = z.enum(['active', 'shadowed', 'invalid', 'off'])
+export type CustomizationState = z.infer<typeof customizationStateSchema>
+
+/** Where a server-side slash command comes from (`GET /commands`, ADR-045); `harness` = run by the server itself. */
+export const commandSourceSchema = z.enum(['harness', 'plugin', 'user', 'project'])
+export type CommandSource = z.infer<typeof commandSourceSchema>
+
+/**
+ * Where `/remember` writes (ADR-047): the project file (`AGENTS.md`, else `CLAUDE.md`, else a new `AGENTS.md`), the
+ * project's instructions, or the global Custom instructions.
+ */
+export const rememberTargetSchema = z.enum(['project-file', 'project-instructions', 'global'])
+export type RememberTarget = z.infer<typeof rememberTargetSchema>
+
+/**
+ * Level of a definition diagnostic (type `DefinitionDiagnosticLevel`): `error` (unusable, state `invalid`), `warning`
+ * (used, something dropped) or `info`.
+ */
+export const definitionDiagnosticLevelSchema = z.enum(DEFINITION_DIAGNOSTIC_LEVELS)
+
+/** Code of a definition diagnostic (`DEFINITION_DIAGNOSTIC_CODES`, type `DefinitionDiagnosticCode`). */
+export const definitionDiagnosticCodeSchema = z.enum(DEFINITION_DIAGNOSTIC_CODES)
+
+/**
+ * A problem of a definition or of a definition folder (zod mirror of the `DefinitionDiagnostic` interface, which is its
+ * type): never an error of the request; the message is one English sentence without file contents, the path is
+ * project-relative.
+ */
+export const definitionDiagnosticSchema = z.object({
+  level: definitionDiagnosticLevelSchema,
+  code: definitionDiagnosticCodeSchema,
+  message: z.string().max(1000),
+  /** 1-based line in the file, when known. */
+  line: z.int().min(1).optional(),
+  /** Project-relative path (catalog diagnostics only). */
+  path: z.string().max(4096).optional(),
+  kind: customizationKindSchema.optional(),
+  name: z.string().max(256).optional(),
+})
 
 // ---------- global settings enums ----------
 

@@ -33,7 +33,7 @@ vi.mock('./nuxt-imports', () => ({
 }))
 vi.mock('vue-sonner', () => ({ toast: mocks.toast }))
 
-const none = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [] }
+const none = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] }
 const PLUGINS: PluginSummary[] = [
   pluginSummary({ id: 'core-providers', name: 'Core providers', kind: 'code', source: 'builtin', builtin: true, removable: false, runsCode: false, description: 'Builtin LLM providers', contributions: { ...none, providers: ['anthropic'] } }),
   pluginSummary({ id: 'dice-roller', name: 'Dice roller', description: 'Rolls dice' }),

@@ -7,7 +7,12 @@ of a project folder on your server. By default, every tool call that can change 
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **Status:** v1.5 ("Agent 2.0"): context compaction that replaces the older part of a long chat with a summary
+> **Status:** v1.6 ("Agent customization") is in progress: your own sub-agent types, slash commands and skills, as
+> Markdown files in a project's `.harness/` (or `.claude/`) folder or as personal definitions in Settings → Customize,
+> plugins that contribute agents and skills (plugin API 1.4.0), background sub-agents that keep working after the reply
+> and report back, approved plans saved as project files, and `/remember` (see the
+> [customizing guide](docs/guides/customizing-agents.md)). The released version is v1.5 ("Agent 2.0"): context
+> compaction that replaces the older part of a long chat with a summary
 > (`/compact [focus]` or automatically, also between the steps of a long agent run), a plan mode in which the agent
 > explores read-only and proposes a plan you approve, a todo list the agent keeps up to date, `@` file mentions in
 > project chats, messages that reach the agent while it works (or start the next turn by themselves), and sub-agents
@@ -91,6 +96,21 @@ desktop app, and it starts in dark mode.
     their file edits can be rewound like any other.
   - Settings -> General -> Agent: automatic compaction (on by default), a separate model for summaries and for
     sub-agents, and the sub-agent step limit (30); a switch in General turns the Shift+Tab mode cycle off.
+- **Agent customization** (v1.6, in progress; guide: [customizing the agent](docs/guides/customizing-agents.md)):
+  - Custom agents: Markdown files with a YAML header (name, description, tools, model) become sub-agent types the agent
+    can start; their tool list only narrows what a sub-agent may use.
+  - Custom slash commands with `$ARGUMENTS` / `$1` … `$9`, an argument hint, an optional model for that turn and an
+    optional, narrower tool set; the slash menu groups them as App, Project, Personal and Plugins.
+  - Skills (`<name>/SKILL.md` with supporting files) that the agent loads only when a task needs them.
+  - Where they live: a project's `.harness/{agents,commands,skills}` (wins) or `.claude/{…}` (Claude Code files work
+    mostly as they are), personal definitions in Settings -> Customize (editor, import and export of `.md` files,
+    included in backups), and plugins (plugin API 1.4.0). Project files are read-only in the UI and can never grant
+    tools or approvals.
+  - Background agents: a sub-agent started in the background keeps working after the reply (a list above the composer
+    shows it, with its own Stop) and reports back exactly once, at the agent's next step or in a turn it starts by
+    itself.
+  - Approved plans saved as project files (Settings -> General -> Agent, off by default), and `/remember` to add a note
+    to `AGENTS.md`, to the project's instructions or to your custom instructions.
 - **Images** (with your own keys):
   - Pick an image model (OpenAI GPT Image, xAI Grok Imagine) in the composer and describe a picture: 1 to 4 images
     per turn, an aspect ratio (Auto, 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16), and follow-ups such as "make it blue" that
@@ -124,7 +144,7 @@ desktop app, and it starts in dark mode.
     ratio, edit the previous image) for image models.
   - v1.5: `@` file mentions in project chats, and a queue for messages sent while a reply runs.
   - Slash commands: `/explain`, `/review`, `/fix`, `/translate`, `/proofread` and more, plus commands from plugins;
-    v1.5: `/compact [focus]`.
+    v1.5: `/compact [focus]`; v1.6: project and personal commands with argument hints, and `/remember`.
   - A microphone button for dictation.
 - **Sidebar and navigation**: a Chat | Plugins switch, a project switcher, chats grouped by date with live status
   dots (running, needs approval, unread), a Mod+K command palette, keyboard shortcuts, a Light / Dark / System theme toggle, and 40 px
@@ -143,11 +163,14 @@ desktop app, and it starts in dark mode.
   - Code plugins (tools, providers, commands, hooks, MCP servers) from templates, edited and rebuilt in the browser.
     Plugin API 1.1.0 lets a code provider add image, speech-to-text and text-to-speech models, and a code tool
     generate images; plugin API 1.2.0 lets a tool work on the chat's project folder; plugin API 1.3.0 (v1.5) lets a
-    tool stream its progress (an async-generator `execute`) and adds the Plan permission mode.
+    tool stream its progress (an async-generator `execute`) and adds the Plan permission mode; plugin API 1.4.0 (v1.6)
+    lets a plugin contribute sub-agent types and skills (`contributes.agents` / `contributes.skills`,
+    `ctx.agents.register` / `ctx.skills.register`).
   - Install from a zip, npm, a URL with an integrity hash, or a local folder, with an explicit trust step for code.
 - **Tools and MCP**: MCP servers over stdio, Streamable HTTP and SSE. The builtin tools are `current_time`,
   `web_fetch` (SSRF-guarded) and `generate_image`, plus the seven workspace tools of project chats and (v1.5) the agent
-  tools `todo_write`, `exit_plan_mode` and `task`. Every tool has an approval policy and a per-tool override.
+  tools `todo_write`, `exit_plan_mode` and `task` (v1.6: and `skill`). Every tool has an approval policy and a per-tool
+  override.
 - **Self-hosting**: SQLite storage, one port, an optional password, a loopback-only bind unless you secure it,
   trusted reverse proxies (`HF_TRUST_PROXY`) so rate limits and Secure cookies see the real clients, and a Docker image
   with a `/data` volume.
@@ -239,7 +262,9 @@ with the server's permissions after you approve them (or when your shell rules a
 to turn it off. The Git view of the changes panel needs repositories owned by the container user: git refuses a
 bind-mounted folder owned by another uid ("dubious ownership"), see the guide. Details, permission modes, shell rules,
 rewind and security notes: [using projects](docs/guides/using-projects.md); plan mode, `@` mentions, the message queue
-and sub-agents: [agent features](docs/guides/agent-features.md).
+and sub-agents: [agent features](docs/guides/agent-features.md); a project's own agents, commands and skills
+(`.harness/` or `.claude/`), background agents, plan files and `/remember`:
+[customizing the agent](docs/guides/customizing-agents.md).
 
 ## Configuration
 
@@ -313,7 +338,7 @@ Or develop in your own editor with a linked folder that reloads on save.
   [writing a code plugin](docs/guides/writing-a-code-plugin.md) (also tools that work on a project folder),
   [adding an MCP server](docs/guides/adding-an-mcp-server.md).
 - Examples that load as they are: [`examples/plugins/`](examples/plugins/) (LM Studio, Together AI, a dice-roller
-  tool, a TypeScript echo provider, the MCP "everything" server).
+  tool, a TypeScript echo provider, the MCP "everything" server; v1.6: `agent-pack`, sub-agent types and skills).
 - The full contract (manifest, `PluginContext`, hooks, lifecycle, install, trust): [`docs/PLUGINS.md`](docs/PLUGINS.md).
 
 ## Security
@@ -341,7 +366,7 @@ harness-forge is built for **one user** on their own machine or server.
   never stored and never logged; revoking the link or changing the master key ends it, and every response carries
   `X-Robots-Tag: noindex, nofollow`.
 - **Backups.** The Settings -> Data zip never contains API keys, the password, plugins, MCP servers, projects, shell
-  rules or checkpoints.
+  rules or checkpoints (v1.6: it does contain your personal agents, commands and skills, which hold no secrets).
 - **Projects, files and the shell.** The workspace tools act on real files with the server's rights, and an approved
   shell command runs as the server's user; there is no sandbox inside harness-forge, so run it in Docker (or as a
   dedicated user) when the folders matter. Projects can only be created inside `HF_WORKSPACE_ROOTS`, never around the
@@ -361,6 +386,14 @@ harness-forge is built for **one user** on their own machine or server.
   `.git` content and secret-looking files. The queue of messages sent during a run is bounded and lives in memory.
   Summaries, queued messages, plans and sub-agent prompts are never logged at the `info` level, and summaries never
   appear on share pages.
+- **Agent customization (v1.6).** Agent, command and skill files in a repository are treated like `AGENTS.md`: their
+  text can steer the model, but they can never grant themselves anything. A `tools` / `allowed-tools` list only narrows
+  the tools (it never approves a call, changes the permission mode or adds a shell rule), a `model` works only with
+  your connected providers, `!` lines never run and `@file` references are never expanded. Only `.harness/` and
+  `.claude/` inside the project are read (no symbolic links, at most 64 KB per file, nothing from the home folder), and
+  writing to them always asks. Background agents never ask for approval, are capped (3 per chat, 10 per server, 30
+  minutes each), keep their project busy (no rewind while they run) and are stopped with the chat, its project, Delete
+  all data, a key rotation or the server; the chat's Stop leaves them running by design.
 - **Microphone and media.** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
   `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled ("Voice
   input needs HTTPS or localhost"); use the TLS reverse proxy below. The page may use only its own microphone
@@ -464,8 +497,8 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 
 | Document | Contents |
 |---|---|
-| [`docs/guides/`](docs/guides/) | step-by-step guides: [using projects](docs/guides/using-projects.md), [agent features](docs/guides/agent-features.md) (v1.5: compaction, plan mode, todos, mentions, steering, sub-agents), [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) |
-| [`examples/plugins/`](examples/plugins/) | five example plugins with READMEs and a test that loads them |
+| [`docs/guides/`](docs/guides/) | step-by-step guides: [using projects](docs/guides/using-projects.md), [agent features](docs/guides/agent-features.md) (v1.5: compaction, plan mode, todos, mentions, steering, sub-agents), [customizing the agent](docs/guides/customizing-agents.md) (v1.6: custom agents, commands and skills, background agents, plan files, `/remember`), [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) |
+| [`examples/plugins/`](examples/plugins/) | example plugins with READMEs and a test that loads them (v1.6 adds `agent-pack`) |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | components, flows, data directory, database, security model, topology |
 | [`docs/API.md`](docs/API.md) | every HTTP endpoint, the error envelope, the chat stream protocol, server events |
 | [`docs/PLUGINS.md`](docs/PLUGINS.md) | plugin manifest, contribution points, `PluginContext`, hooks, lifecycle, install, trust |
@@ -473,7 +506,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | [`docs/UI.md`](docs/UI.md) | layout, design tokens, components, routes, shortcuts, test ids |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | phases, tasks and progress |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture decision records and the contract seed |
-| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md), [9 v1.5](docs/phases/phase-9-v1-5.md) |
+| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md), [9 v1.5](docs/phases/phase-9-v1-5.md), [10 v1.6](docs/phases/phase-10-v1-6.md) |
 | [`AGENT.md`](AGENT.md) | rules for AI agents working on this repository |
 
 ## Development

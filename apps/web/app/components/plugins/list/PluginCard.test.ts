@@ -8,7 +8,7 @@ import { pluginSummary } from '~/utils/testing/fixtures'
 import PluginCard from './PluginCard.vue'
 import { NuxtLinkStub, settle } from './testing'
 
-const none = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [] }
+const none = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] }
 
 function mountCard(plugin: PluginSummary) {
   const events: Array<[string, unknown[]]> = []

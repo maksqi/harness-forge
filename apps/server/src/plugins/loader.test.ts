@@ -148,7 +148,7 @@ describe('manifest helpers', () => {
 
   it('lists declared contributions', () => {
     const acme = JSON.parse(readFileSync(join(fixturePath('acme-docs'), 'plugin.json'), 'utf8')) as Parameters<typeof declaredContributions>[0]
-    expect(declaredContributions(acme)).toEqual({ providers: ['acme-docs'], models: 3, tools: [], mcpServers: ['acme-docs'], commands: ['acme'], hooks: [] })
+    expect(declaredContributions(acme)).toEqual({ providers: ['acme-docs'], models: 3, tools: [], mcpServers: ['acme-docs'], commands: ['acme'], hooks: [], agents: [], skills: [] })
     expect(declaredContributions(null).providers).toEqual([])
   })
 

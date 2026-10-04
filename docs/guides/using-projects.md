@@ -4,7 +4,9 @@ A **project** is a named folder on the server. A chat can belong to one project;
 search and edit the files of that folder and run shell commands in it, after your approval or under the rules you set.
 This is the agent workspace of harness-forge (v1.3, ADR-031 … ADR-033); v1.4 adds rewinding the agent's file changes,
 a changes panel with per-file revert, shell rules and a working folder that carries over between shell commands
-(ADR-036 … ADR-038); v1.5 adds plan mode, `@` file mentions and sub-agents ([agent features](agent-features.md)).
+(ADR-036 … ADR-038); v1.5 adds plan mode, `@` file mentions and sub-agents ([agent features](agent-features.md)); v1.6
+reads the project's own agents, commands and skills from `.harness/` and `.claude/`, can save approved plans into the
+project and append `/remember` notes to its `AGENTS.md` ([customizing the agent](customizing-agents.md)).
 
 > **Read this first.** The workspace tools work on real files with the rights of the server process, and the shell runs
 > any command you approve as the server's operating-system user. There is no sandbox inside harness-forge: run it in

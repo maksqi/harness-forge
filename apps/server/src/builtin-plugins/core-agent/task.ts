@@ -34,6 +34,8 @@ const STATUS_ERRORS: Readonly<Record<TaskStatus, string>> = {
   failed: 'unknown error',
   aborted: 'it was stopped',
   limit: 'it reached its limit without a report',
+  // P10-0a (C28) compile fix: a background launch (ADR-046) gets its own model text in P10-0b.
+  background: 'it runs in the background',
 }
 
 /** The text the model reads for a `task` output (see the module comment). */

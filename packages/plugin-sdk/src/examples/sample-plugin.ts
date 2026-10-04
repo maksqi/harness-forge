@@ -1,5 +1,6 @@
 // Sample code plugin (not exported from the package entry): registers a provider (with an image model, plugin API
-// 1.1.0), a tool, a command and a hook using only `ctx` (runtime libraries come from `ctx.ai`). It doubles as a type
+// 1.1.0), a tool, a command, a hook, an agent and a skill (plugin API 1.4.0) using only `ctx` (runtime libraries come
+// from `ctx.ai`). It doubles as a type
 // test of the SDK: it must typecheck without casts. A real plugin would live in `data/plugins/sample-kit/` with this
 // manifest as `plugin.json` and `"main": "index.ts"`.
 import type { PluginManifest, ProviderRuntime, ReasoningLevel, ToolDefinition } from '../index.ts'
@@ -146,6 +147,21 @@ export default definePlugin({
 
     ctx.hooks.on('message.completed', (input) => {
       ctx.logger.info('message completed', { chatId: input.chatId, aborted: input.aborted })
+    })
+
+    // Plugin API 1.4.0: an agent type for `task` (its tools only narrow the child's tools) and a skill.
+    ctx.agents.register({
+      name: 'sample-reviewer',
+      description: 'Reviews a diff for bugs and reports them by file.',
+      instructions: 'You review code. Read the files you are given and report bugs, one bullet per finding.',
+      tools: ['read_file', 'search_files'],
+      model: 'inherit',
+    })
+
+    ctx.skills.register({
+      name: 'sample-release-notes',
+      description: 'How to write the release notes of this project.',
+      content: '# Release notes\n\n1. List the user-facing changes.\n2. Group them by area.',
     })
   },
 })

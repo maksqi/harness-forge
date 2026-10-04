@@ -11,6 +11,7 @@ import {
 } from '../enums.ts'
 import { modelRefSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
+import { hasControlChars } from '../util/text.ts'
 import { speechVoiceSchema, transcriptionLanguageSchema } from './audio.ts'
 
 /** `GET /health` (public). */
@@ -67,6 +68,22 @@ export type PasswordUpdate = z.infer<typeof passwordUpdateSchema>
 
 // ---------- global settings ----------
 
+/** Characters of the `planDirectory` setting. */
+export const PLAN_DIRECTORY_MAX_CHARS = 200
+
+/**
+ * True for a safe plan folder (setting `planDirectory`, ADR-047): a relative path inside the project, segments separated
+ * by `/` (or `\`), no leading separator or drive letter, no empty, `.` or `..` segment, no `.git` segment (any case), no
+ * control characters, at most 200 characters.
+ */
+export function isSafePlanDirectory(value: string): boolean {
+  if (value.length === 0 || value.length > PLAN_DIRECTORY_MAX_CHARS || hasControlChars(value))
+    return false
+  if (/^[/\\]/.test(value) || /^[a-z]:/i.test(value))
+    return false
+  return value.split(/[/\\]/).every(segment => segment !== '' && segment !== '.' && segment !== '..' && segment.toLowerCase() !== '.git')
+}
+
 const settingsFields = {
   displayName: z.string().trim().max(64),
   defaultModelRef: modelRefSchema.nullable(),
@@ -114,6 +131,16 @@ const settingsFields = {
   subagentMaxSteps: z.int().min(1).max(LIMITS.stepsMax),
   /** Shift+Tab in the composer cycles the permission mode (ADR-041); off = Shift+Tab moves the focus. */
   shiftTabModes: z.boolean(),
+  // Agent customization (Phase 10, ADR-047).
+  /** Save every approved plan of a project chat as a file in the project (`planDirectory`). */
+  planFiles: z.boolean(),
+  /** The project-relative folder of plan files (`isSafePlanDirectory`). */
+  planDirectory: z
+    .string()
+    .trim()
+    .min(1)
+    .max(PLAN_DIRECTORY_MAX_CHARS)
+    .refine(isSafePlanDirectory, 'Use a folder inside the project, such as ".harness/plans" (no leading "/", no "..", no ".git").'),
 }
 
 /** `GET /settings`: every key always present (defaults applied by `settingsSchema.parse`). */
@@ -144,6 +171,8 @@ export const settingsSchema = z.object({
   subagentModelRef: settingsFields.subagentModelRef.default(null),
   subagentMaxSteps: settingsFields.subagentMaxSteps.default(30),
   shiftTabModes: settingsFields.shiftTabModes.default(true),
+  planFiles: settingsFields.planFiles.default(false),
+  planDirectory: settingsFields.planDirectory.default('.harness/plans'),
 })
 export type Settings = z.infer<typeof settingsSchema>
 

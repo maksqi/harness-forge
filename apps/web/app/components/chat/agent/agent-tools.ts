@@ -186,12 +186,14 @@ export const TASK_STATE_WORDS: Readonly<Record<TaskBlockState, string>> = {
   failed: 'failed',
   aborted: 'stopped',
   limit: 'step limit reached',
+  // P10-0a (C28) compile fix: a `task` call that launched a background agent (ADR-046); W10.11 owns the final wording.
+  background: 'in the background',
   approval: 'needs approval',
   denied: 'denied',
 }
 
 /** The trigger's accessible name: "Explore sub-agent: {description}, running, 4 tool calls" ("Sub-agent: …" for general). */
-export function taskTriggerLabel(type: TaskType | null, description: string, state: TaskBlockState, toolCalls: number): string {
+export function taskTriggerLabel(type: string | null, description: string, state: TaskBlockState, toolCalls: number): string {
   const kind = type === 'explore' ? 'Explore sub-agent' : 'Sub-agent'
   return `${kind}: ${description || 'no description'}, ${TASK_STATE_WORDS[state]}, ${toolCallsText(toolCalls)}`
 }

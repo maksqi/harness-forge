@@ -322,9 +322,9 @@ errors -> `context_overflow`; `ECONNREFUSED` / `ENOTFOUND` -> `provider_unreacha
 Dev and e2e only: the builtin plugin `mock` registers provider `mock` and tool `mock_approval_tool` when
 `HF_MOCK_PROVIDER=1` (`pnpm start:e2e` sets it). Models are `MockLanguageModelV4` instances from `ai/test` streaming
 through `simulateReadableStream`. The provider has no credentials (status `connected`), no icon (monogram),
-`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its seventeen models (the four chat models of v1, the five
-models of Phase 6, `workspace` of Phase 7, `checkpoint` and `shell` of Phase 8, and `compact`, `plan`, `todo`, `subagent`
-and `steer` of Phase 9), and `validate` always succeeds. Its
+`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its nineteen models (the four chat models of v1, the five
+models of Phase 6, `workspace` of Phase 7, `checkpoint` and `shell` of Phase 8, `compact`, `plan`, `todo`, `subagent`
+and `steer` of Phase 9, and `agents` and `background` of Phase 10), and `validate` always succeeds. Its
 `reasoning()` maps `off` -> `none`, `low` / `medium` / `high` -> same, `max` -> `xhigh`. Since Phase 6 (manifest
 `engines.harness` `^1.1.0`) it also defines `createImageModel`, `imageParams`, `createTranscriptionModel`,
 `createSpeechModel` and a `transcriptionOptions` that returns nothing (the mock models ignore the language), with models
@@ -336,12 +336,13 @@ id other than the three below rejects with a 404 `APICallError`.
 
 Names: Mock Echo, Mock Reasoning, Mock Tool Approval, Mock Error, Mock Image, Mock Image Chat, Mock Image Tool, Mock
 Transcribe, Mock Speech, Mock Workspace, Mock Checkpoint, Mock Shell, Mock Compact, Mock Plan, Mock Todo, Mock Sub-agent,
-Mock Steer. `GET /api/models` shows fifteen of them (the four chat models, `image`, `image-chat`, `image-tool`,
-`workspace`, `checkpoint`, `shell`, `compact`, `plan`, `todo`, `subagent`, `steer`); `transcribe` and `speech` are
-hidden and chosen in Settings → Media. The provider's `modelCount` is 14 (visible chat models; the image model is not
-counted). A data directory whose cached mock listing predates a model (the e2e server's `.tmp/e2e`: `workspace` in
-Phase 7, `checkpoint` and `shell` in Phase 8, the five agent mocks in Phase 9) shows the new models only after a
-refresh: move it aside before a gate.
+Mock Steer, Mock Agents, Mock Background. `GET /api/models` shows seventeen of them (the four chat models, `image`,
+`image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, `compact`, `plan`, `todo`, `subagent`, `steer`,
+`agents`, `background`); `transcribe` and `speech` are hidden and chosen in Settings → Media. The provider's
+`modelCount` is 16 (visible chat models; the image model is not counted). A data directory whose cached mock listing
+predates a model (the e2e server's `.tmp/e2e`: `workspace` in Phase 7, `checkpoint` and `shell` in Phase 8, the five
+agent mocks in Phase 9, the two customization mocks in Phase 10) shows the new models only after a refresh: move it
+aside before a gate.
 
 Common behavior (deterministic):
 
@@ -353,10 +354,11 @@ Common behavior (deterministic):
 - **Usage**: `inputTokens` = number of whitespace-separated words in all prompt text parts; `outputTokens` = number of
   streamed text and reasoning words; `reasoningTokens` = reasoning words.
 - **Model info** (the four chat models and `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, `compact`,
-  `plan`, `todo`, `subagent`, `steer`): `contextWindow: 32000` (`compact`: 2000, so a few turns pass 80 % of it),
-  `maxOutputTokens: 4096`, `cost: { input: 1, output: 2 }` (USD per 1M tokens, so cost displays are non-zero);
-  `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell` and the five Phase 9 models declare `kind: 'chat'`
-  explicitly (an explicit kind wins over `classify()`); the Phase 9 models have the `tools` capability only. The media
+  `plan`, `todo`, `subagent`, `steer`, `agents`, `background`): `contextWindow: 32000` (`compact`: 2000, so a few turns
+  pass 80 % of it), `maxOutputTokens: 4096`, `cost: { input: 1, output: 2 }` (USD per 1M tokens, so cost displays are
+  non-zero); `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, the five Phase 9 models and the two Phase 10
+  models declare `kind: 'chat'` explicitly (an explicit kind wins over `classify()`); the Phase 9 and Phase 10 models
+  have the `tools` capability only. The media
   models have explicit kinds: `image` (`kind: 'image'`, `capabilities.vision: true`, the same cost, so image turns show
   an estimated cost), `transcribe` (`kind: 'transcription'`) and `speech` (`kind: 'speech'`,
   `voices: ['mock-voice-a', 'mock-voice-b']` so the Voice suggestions can be tested); the last two have no limits and
@@ -430,6 +432,35 @@ with Accept edits → `notes.txt` and `Plan done in mode edits.`; Keep planning 
 message queued during step 1 (a `data-steer` between steps, `Steers: <text>` in the final text), `steps 2` with a
 message queued during the last step (the next turn), `steps 4` with a cancelled message and `steps 6` with a queued
 `/compact` dropped by Stop.
+
+### Customization mocks (Phase 10)
+
+Two chat models drive custom agents, skills, custom commands and background sub-agents (ADR-045, ADR-046). They are
+complete and frozen from Gate P10-0b; **this subsection is the contract of the Phase 10 gate probes and e2e specs**.
+Every shared rule of the agent mocks above applies: the call ids, the offered-tools lists (sorted by code point, joined
+with `", "`, `none` when empty), the **Turn** and the steer rules, the markers (a child is recognized by
+`SUBAGENT_INSTRUCTIONS_MARKER`, `[[hf:subagent:v1]]`, in its system text), and the denied / failed endings (`The tool
+call was denied.`, `The tool call failed: <error text>`). "The user text" is the text of the turn's user message after
+command expansion, trimmed. The plan files, `/remember` and the command checks that need no special model use the
+existing `mock:plan` and `mock:echo`.
+
+| Model ref | Behavior |
+|---|---|
+| `mock:agents` | Checked in this order. (1) **Child** (the system text holds the marker): `<persona>` = the rest of the line after the first `PERSONA:` in the system text, trimmed (`none` without one; a custom agent's body sets it, e.g. a body line `PERSONA: strict reviewer`); `<prompt>` = the text of the last user message. (a) When the turn has no result yet and `list_directory` is offered: one call `list_directory` with `{ "path": "." }`. (b) When `<prompt>` contains the word `write`, `write_file` is offered and has no result in the turn: `write_file` with `{ "path": "agent.txt", "content": "Written by a custom agent.\n" }`. (c) Otherwise the text `Report: persona=<persona> \| tools: <offered tools> \| model=agents` (`model=agents` is this mock's own model id; a child that runs on another model, e.g. a custom agent with `model: mock:echo`, answers the way that model does, so the probes read the model from `TaskOutput.modelRef`). (2) **Parent**, by the user text: `agents?` → the text `Agent types: <names>` (the names of the "Agent types" block in the system text, in the listed order, joined with `", "`; `none` without the block); `skills?` → `Skills: <names>` (the skills block, likewise); `tools?` → `Tools: <offered tools>`; `agent <type>` or `agent <type> write` (the type is the second word as typed, so `agent General-Purpose` tests the server's normalization) → without `task` offered `Sub-agents are not available.`; when the turn has no `task` result, one call `task` with `{ "type": "<type>", "description": "Run <type>", "prompt": "Run the <type> agent." }` (the prompt `Run the <type> agent and write agent.txt.` with `write`); after the result, the text `Agent report: <text>` (`<text>` = the result's text for the model: a completed child's report, or `Sub-agent failed: <error>; partial report: …`, e.g. for an unknown type, whose error lists the available types); `skill <name>` → without `skill` offered `Skills are not available.`; when the turn has no `skill` result, one call `skill` with `{ "name": "<name>" }`; after the result, the text `Skill loaded: <the first 80 characters of the skill's content>` (the `content` of the JSON output, else the start of the result's text for the model, which begins with the content) (an error result ends as in the shared rules, e.g. `The tool call failed: …` for an unknown skill). (3) Any other turn: the text `Agents mock: <user text>` (so a custom command's expansion is visible: `/greet Ada` with the body `Say hello to $ARGUMENTS.` answers `Agents mock: Say hello to Ada.`). No waits |
+| `mock:background` | Checked in this order. (1) **Child** (the system text holds the marker): `<prompt>` = the text of the last user message; K = the number after the first `slow` in it (`slow <K>`, K 1–20; default 2); with the word `loop` in it, no limit. While the turn holds fewer than K `current_time` results (with `loop`: as long as `current_time` is offered, so the finalize step of the step limit ends it), one step that waits 500 ms (`stepDelayMs`) and calls `current_time` with `{}`; then the text `Report: background done` (also at once when `current_time` is not offered). (2) **Delivered result**: the turn's user message (the Turn rule: the carrier message of a server-started turn with `origin: 'task'`, or a result delivered at step 0 of the next turn, which follows the user's own message and so opens the turn) holds `<background-task` → the text `Background result: <status> \| <first report line>` (`<status>` = the `status` attribute of the first `<background-task` tag of that message, written by `taskResultText`; `<first report line>` = the first non-empty line after that tag: the report's first line, `Error: <error>` or `(no report)`), e.g. `Background result: completed \| Report: background done`. (3) **Launch**: the user text starts with the word `bg` (`bg [type] [steps <N>] [slow <K> \| loop]`): `<type>` = the second word unless it is `steps`, `slow` or `loop` (default `explore`); `steps <N>` (N 1–20) anywhere in it asks for in-run steps; the whole user text is the child's prompt (so `slow <K>` and `loop` reach the child). Without `task` offered: `Sub-agents are not available.` When the turn has no `task` result: one call `task` with `{ "type": "<type>", "description": "Background <type>", "prompt": "<user text>", "background": true }`. After its result: without `steps`, the text `Started in background: <taskId>` (`<taskId>` = the output's `taskId`, else the first `bgt_` + 16 characters in the result's text; a `failed` launch, e.g. over the 3-per-chat cap, reads `Started in background: none`); with `steps <N>`, steps that each wait 400 ms and call `current_time` with `{}` until the turn holds N `current_time` results, ending early as soon as a user message holding `<background-task` follows a tool message in the turn (a result injected at a step boundary) with the text `Finished: in-run result <status>` (the tag's `status`), else, after N steps, `Finished <N> steps without a result`. (4) Any other turn: the text `Background mock: <user text>` |
+
+How the probes use them (ARCHITECTURE.md 6.23 – 6.27): `mock:agents` as the chat model of a project chat (and so of its
+children) with `.harness/agents/` and `.claude/agents/` fixtures: `agent reviewer` (a body with `PERSONA:` and a
+`tools` list → the child's report names the persona and only the allowed tools that run without approval in the mode),
+`agent escalate write` in Accept edits (`tools: [shell, write_file]` → the write is journaled `<parent>/<child>`, the
+shell is never offered), `agent general-purpose` (→ `general`), `agent nope` (failed, the list of types), `agents?`,
+`skills?`, `skill pdf` (body, `baseDir`, `files`), `tools?` after `/review` with `allowed-tools: Read` (`Tools:
+read_file`), and a command with `model: mock:agents` sent from a `mock:echo` chat (the reply comes from `mock:agents`,
+the chat's model stays `mock:echo`); `mock:background` for the idle path (`bg` → `Started in background: bgt_…`, then a
+server-started turn `Background result: completed | Report: background done`), the in-run path (`bg explore steps 10`
+with a fast child → `Finished: in-run result completed`), stops and limits (`bg explore loop` with the row's Stop →
+`aborted`, delivered at the next user turn; a fourth `bg` in one chat → failed), and a restart (`bg explore slow 20`,
+then the server is restarted: the row reads `aborted`).
 
 ## 9. Declarative provider templates (wizard)
 

@@ -37,6 +37,7 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
 | Server | Hono 4.13 + `@hono/node-server` 2, `@hono/zod-validator`, Drizzle ORM 0.45 + `@libsql/client`, zod 4 |
 | LLM | Vercel AI SDK **v7** (`ai`), `@ai-sdk/vue` 4 (`useChat`), official `@ai-sdk/*` providers, `@openrouter/ai-sdk-provider`, `@ai-sdk/mcp` |
 | Tooling | tsx (dev), tsdown (server build), Vitest 4, Playwright (Chromium), ESLint with `@antfu/eslint-config` |
+| Parsing | `yaml` 2 (frontmatter of agent, command and skill files; imported only by `packages/shared/src/util/definitions.ts`) |
 | Icons | `@lobehub/icons-static-svg` (served by the server), `@lucide/vue` for UI icons |
 
 ## Version facts (read before coding)
@@ -93,6 +94,26 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   server (tool set + approval). Sub-agents never create approval requests (a call that would ask is denied), depth 1.
   The steer queue is in memory (`/chat/:id/queue`, SSE `queue.changed`). Tests use only mock models
   (`MockLanguageModelV4`, `simulateReadableStream` from `ai/test`).
+- **Plugin API 1.4.0** (Phase 10, additive): `contributes.agents` / `contributes.skills` (declarative), `ctx.agents.register`,
+  `ctx.skills.register` (code), `AgentDefinition { name, description, instructions, tools?, model? }`,
+  `SkillDefinition { name, description, content }`; registry kinds `agent` / `skill`. The template mirror follows.
+- **Customization** (Phase 10, ADR-044 … ADR-047): agents, commands and skills are markdown files with YAML frontmatter,
+  parsed **only** by `packages/shared/src/util/{definitions,arguments,tool-names}.ts` (`yaml` core schema, no aliases,
+  byte caps before parsing; verify the API in `node_modules/.pnpm/yaml@2.9.1/node_modules/yaml/dist/*.d.ts`). Sources,
+  lowest first: builtin < plugin < user (table `customizations`, `cus_` ids, raw markdown) < project `.claude/{agents,
+  commands,skills}` < project `.harness/{…}`; one catalog service `apps/server/src/services/customizations/`. Project
+  files are **untrusted and restrict-only**: read through `resolveWorkspacePath` / `openWorkspaceFile` (no links,
+  regular files, caps), never written by the harness, their `tools` / `allowed-tools` only narrow (never a grant, a
+  mode, an override or a shell rule), `model` resolves only to configured providers, command bodies are text (no
+  `!bash`, no `@file`). `task.type` is a catalog agent name (builtins `explore` / `general`); `skill` is the fourth
+  `core-agent` tool. Background sub-agents (`task` with `background: true`) live in `apps/server/src/chat/background/`
+  and the `background_tasks` table (`bgt_` ids): never approvals, 3 per chat / 10 per server / 30 min, stopped on chat
+  or project delete, delete-all, key rotation and shutdown but **not** by the chat's Stop, delivered exactly once as
+  `data-task-result` (steer step, or a server-started turn with `origin: 'task'` from a user-role carrier message;
+  `splitTaskResults` in `packages/shared/src/util/agent-state.ts` builds the model view), and a running one makes its
+  project busy (409 `run-active`). Plan files (`planFiles`, `planDirectory`) and `/remember` (`POST /memory`) write
+  through the journal. New ids `cus_`, `bgt_`; SSE `task.changed`, `customization.changed`; migration
+  `0007_customizations`.
 - **@ai-sdk/vue 4**: use the `useChat()` composable (the `Chat` class is deprecated); `DefaultChatTransport` is
   imported from `ai`.
 - **MCP**: `createMCPClient` from `@ai-sdk/mcp`; stdio transport from `@ai-sdk/mcp/mcp-stdio`.
@@ -218,6 +239,14 @@ server, use your slot `k` from the task prompt: `HF_PORT=879k HF_DATA_DIR=.tmp/<
   plugin SDK 1.3.0, the props / emits / root test ids of the P9-0b stub components, the `chat-queue` store, the
   `useProjectFiles` / `useFileMentions` / `useModeCycle` signatures, the `useChatSession` additions and the Phase 9 test
   ids (see `docs/phases/phase-9-v1-5.md` "FREEZE in Phase 9").
+  Added in Phase 10 (after Gate P10-0b): `services/customizations/types.ts`, `chat/background/types.ts`,
+  `chat/subagent/host.ts`, the P10-0b versions of `types.ts`, `chat/types.ts`, `registry/types.ts`, the deps start /
+  stop order and the boot sweep, `chat/{pipeline,tools,steps,markers,model-history,agent-scope}.ts`, the signatures of
+  the P10-0b chat stubs, `builtin-plugins/{index.ts,core-agent/index.ts}`, the mock models,
+  `packages/shared/src/util/{definitions,arguments,tool-names,agent-state}.ts`, plugin SDK 1.4.0, the props / emits /
+  root test ids of the P10-0b stub components, the `customizations` and `background-tasks` stores, the
+  `AGENT_TASK_CONTEXT` injection key, the `useChatSession` additions, the Customize settings route and its nav entry and
+  the Phase 10 test ids (see `docs/phases/phase-10-v1-6.md` "FREEZE in Phase 10").
 - **CCR (contract change request)**: if a frozen contract blocks you, write a local adapter inside your owned
   paths, keep working, and add a CCR to your report: file, current shape, proposed shape, reason.
 - **DEPENDENCY REQUEST**: never install packages. Use existing dependencies or Node built-ins; if something is truly

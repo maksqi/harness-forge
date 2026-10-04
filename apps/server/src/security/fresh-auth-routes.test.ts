@@ -429,4 +429,21 @@ describe('sEC-A5 negative controls: nothing runs code, a stale session is enough
         expect(response.status, key).toBe(501)
     }
   })
+
+  it('the customizations, Remember and the background tasks (Phase 10, ADR-044 … ADR-047) take a stale session', async () => {
+    const a = await passwordApp()
+    const stale = await cookie(a, FRESH_AUTH_WINDOW_MS + 60_000)
+    const keys = API_ROUTE_KEYS.filter(key => ['customizations', 'memory', 'chatTasks'].includes(apiRoutes[key].module))
+    expect(keys).toHaveLength(9)
+    for (const key of keys) {
+      const { path, init } = sampleRequest(key, { headers: { cookie: stale } })
+      const response = await a.t.request(path, init)
+      const text = await response.text()
+      // The sample chat, project, definition and task do not exist: the request reaches the route (501 while stubbed,
+      // else 404, 400 or 409), never the fresh-auth refusal.
+      expect([401, 403], `${key}: ${text}`).not.toContain(response.status)
+      if (stubRouteKeys().has(key))
+        expect(response.status, key).toBe(501)
+    }
+  })
 })

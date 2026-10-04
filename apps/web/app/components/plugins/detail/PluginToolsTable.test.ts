@@ -168,7 +168,7 @@ describe('pluginContributions', () => {
   it('falls back to the registered names when the tool list cannot be loaded', async () => {
     api.tools.list.mockRejectedValue(new HarnessError({ code: 'not_implemented', message: 'Not implemented yet.' }))
     api.commands.list.mockResolvedValue({ items: [{ name: 'roll', description: 'Roll dice from a formula', pluginId: 'dice-roller' }] })
-    const plugin = pluginDetail({ contributions: { providers: [], models: 0, tools: ['roll_dice'], mcpServers: [], commands: ['roll', 'reroll'], hooks: ['chat.before'] } })
+    const plugin = pluginDetail({ contributions: { providers: [], models: 0, tools: ['roll_dice'], mcpServers: [], commands: ['roll', 'reroll'], hooks: ['chat.before'], agents: [], skills: [] } })
     wrapper = mountInShell(PluginContributions, { plugin })
     await settle(5)
     expect(row('roll_dice').textContent).toContain('Tool settings are not available yet.')
@@ -181,7 +181,7 @@ describe('pluginContributions', () => {
   it('shows providers with status and a link to their key', async () => {
     api.providers.list.mockResolvedValue({ items: [providerSummary({ id: 'fireworks', name: 'Fireworks AI', pluginId: 'fireworks', status: 'not_configured', modelCount: 0 })] })
     api.tools.list.mockResolvedValue({ items: [] })
-    const plugin = pluginDetail({ id: 'fireworks', kind: 'declarative', contributions: { providers: ['fireworks'], models: 12, tools: [], mcpServers: [], commands: [], hooks: [] } })
+    const plugin = pluginDetail({ id: 'fireworks', kind: 'declarative', contributions: { providers: ['fireworks'], models: 12, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] } })
     wrapper = mountInShell(PluginContributions, { plugin })
     await settle(5)
     const provider = document.querySelector<HTMLElement>('[data-provider-id="fireworks"]')!

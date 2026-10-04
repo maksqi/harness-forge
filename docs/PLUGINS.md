@@ -33,6 +33,8 @@ A **plugin** is a directory with a `plugin.json` manifest. It can contribute:
 | Tools that stream progress (API 1.3.0) | — | an async-generator `ToolDefinition.execute` (each yield is a preliminary output) |
 | MCP servers (their tools become tools) | `contributes.mcpServers` | `ctx.mcp.register()` |
 | Slash commands | `contributes.commands` (template) | `ctx.commands.register()` (template or `run`) |
+| Sub-agent types (API 1.4.0) | `contributes.agents` | `ctx.agents.register()` |
+| Skills the agent loads on demand (API 1.4.0) | `contributes.skills` | `ctx.skills.register()` |
 | Hooks into the chat pipeline | — | `ctx.hooks.on()` |
 | A settings form | `settings` | `settings` (read with `ctx.settings.get()`) |
 
@@ -56,18 +58,19 @@ part of the server they may import server dependencies (for example the official
 |---|---|---|
 | `core-providers` (Core providers) | the 13 builtin providers ([PROVIDERS.md](./PROVIDERS.md)), since Phase 6 with image, transcription and speech models ([PROVIDERS.md 13](./PROVIDERS.md#13-image-and-voice-models)) | individual providers can be disabled (`PATCH /api/providers/:id`) |
 | `core-tools` (Core tools) | 3 tools: `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard) and `generate_image` (Phase 6, policy `ask`) | setting `allowLocalhost` (below); `generate_image` uses the image model of Settings → Media (`imageModelRef`) |
-| `core-commands` (Core commands) | 10 template slash commands (below) | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`) never reach the server |
+| `core-commands` (Core commands) | 10 template slash commands (below) | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`; Phase 10: `/remember`) never reach the server |
 | `core-mcp` (MCP servers) | MCP servers configured in the MCP panel (`mcp_servers` table); the panel is its Overview | settings `autoReconnect`, `connectTimeoutSeconds` (below) |
 | `core-workspace` (Workspace tools, Phase 7) | 7 workspace tools: `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file`, `shell` (below) | offered only in chats whose project folder opened; `shell` is not registered on Windows, and `HF_WORKSPACE_SHELL=0` keeps it from every chat (it stays registered and listed in the tools table); no settings. Phase 8: writes are journaled and restorable (rewind, revert), and `shell` keeps its working folder between calls and runs commands that match the user's shell rules without a card (below) |
-| `core-agent` (Agent tools, Phase 9) | 3 agent tools: `todo_write`, `exit_plan_mode`, `task` (below) | offered in every chat with tools (`exit_plan_mode` only in plan mode; none of them inside a sub-agent); no settings (the agent settings live in Settings → General: `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps`) |
-| `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models; Phase 7 adds `mock:workspace`, Phase 8 `mock:checkpoint` and `mock:shell`, Phase 9 `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer`) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
+| `core-agent` (Agent tools, Phase 9) | 3 agent tools: `todo_write`, `exit_plan_mode`, `task` (below); Phase 10: the fourth tool `skill` and the built-in agent types `explore` and `general` | offered in every chat with tools (`exit_plan_mode` only in plan mode, `skill` only when the chat's catalog has skills; none of them inside a sub-agent); no settings (the agent settings live in Settings → General: `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps`, Phase 10 `planFiles`, `planDirectory`) |
+| `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models; Phase 7 adds `mock:workspace`, Phase 8 `mock:checkpoint` and `mock:shell`, Phase 9 `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer`, Phase 10 `mock:agents` and `mock:background`) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
 
 Builtin manifests in v1.3: `core-tools` is version 1.2.0 and declares `engines.harness` `"^1.2.0"` (its
 `generate_image` output carries the 1.2 `modelName`); `core-workspace` is version 1.0.0 with `"^1.2.0"` and the
 permission `process` (it uses `ToolDefinition.workspace` and `ToolCallContext.workspace`); `core-providers` stays 1.1.0
 with `"^1.1.0"`; `mock` stays version 1.0.0 with `"^1.1.0"`; `core-commands` and `core-mcp` stay 1.0.0 with
 `"^1.0.0"`. v1.5 adds `core-agent`, version 1.0.0 with `"^1.3.0"` (its `task` tool has an async-generator
-`execute`). Load order: `core-providers`, `core-tools`, `core-commands`, `core-mcp`, `core-workspace`, `core-agent`, then
+`execute`); v1.6 moves `core-agent` to `"^1.4.0"` (it declares the built-in agent types through the 1.4.0 registries
+and adds `skill`). Load order: `core-providers`, `core-tools`, `core-commands`, `core-mcp`, `core-workspace`, `core-agent`, then
 `mock`.
 
 Builtin tools (`core-tools`):
@@ -171,9 +174,25 @@ of this.
 | `todo_write` | none / `safe` / 60 s | `{ todos: { id (1-64 characters, unique in the list), content (1-500), status: 'pending' \| 'in_progress' \| 'completed', activeForm? (<= 200) }[] }` (<= 50 items; the whole list each time) | `{ todos, counts }` (counts per status: `pending`, `inProgress`, `completed`, `total`); the model reads one line ("Todo list updated: 1 in progress, 2 pending, 0 completed.", "Todo list cleared." for an empty list). An invalid list (duplicate ids, more than 50 items, …) becomes the call's error result (the input validation error) and the run goes on. The latest call on the chat's path is the todo state (the todo strip, 7.25 of UI.md); nothing is stored elsewhere |
 | `exit_plan_mode` | none / `always` / 60 s | `{ plan }` (markdown, 1-50,000 characters) | offered only in plan mode (and kept, but not callable, on the continuation that executes an approved plan); always shows the plan card (overrides and `tool.approve` hooks cannot approve it; `PATCH /api/tools/exit_plan_mode` with `override: 'allow'` is refused with 400 on `['override']`, "Plans always ask for your approval, so exit_plan_mode can't be always allowed."). Approved: the approval continuation must carry `toolMode` `edits` or `ask` (any other mode, `auto` included, is refused with 400 on `['toolMode']`); output `{ approved: true, mode }` (the mode the user switched to) and the text "The user approved the plan. Mode is now <label>. Implement it now; track progress with todo_write." (label "Accept edits" or "Ask"); rejected ("Keep planning"): the user's feedback reaches the model as the denial reason |
 | `task` | none / `safe` / 600 s | `{ description (3-80 characters), prompt (<= 20,000), type: 'explore' \| 'general' }` | runs a sub-agent (a separate agent loop with its own context) and streams `TaskOutput` snapshots as preliminary outputs: `{ status: 'queued' \| 'running' \| 'completed' \| 'failed' \| 'aborted' \| 'limit', type, description, modelRef, steps (the last 50: toolCallId, toolName, summary (<= 200), state `running` / `done` / `error` / `denied`, resultPreview? (<= 300)), stepsOmitted, report (<= 32,000), usage?, costUsd?, startedAt, finishedAt?, error? (<= 2,000) }`; the model reads only the report (`completed`, or `limit` with a report; "Sub-agent failed: <error>; partial report: <report or (none)>" otherwise). A child gets only the tools that run without approval in the chat's mode (no agent tools, no `generate_image`; an `explore` child and every child of a plan-mode chat follow `ask` without write / execute tools; a tool with a policy function stays and is decided per call, so in `edits` a `general` child can run the shell commands that match a shell rule), and any call that would ask is denied inside it ("Sub-agents cannot ask the user: this call needs approval."); at most 3 run at once (the others wait as `queued`), 20 per reply, `subagentMaxSteps` steps and 570 s each. A call without a chat run behind it yields one `failed` output |
+| `skill` (Phase 10, ADR-045) | none / `safe` / 60 s | `{ name }` (a skill name of the chat's catalog) | loads a skill: `{ name, description, source: 'builtin' \| 'plugin' \| 'user' \| 'project', content (<= 64 KiB), truncated, baseDir?, files? (<= 50) }` (`baseDir` and `files` for project skills: the skill's folder and its supporting files, without links, hidden or secret-looking paths); the model reads the content, then "Base folder: <dir> — read supporting files with read_file" and the file list. Offered only when the run's catalog has at least one active skill, never to a sub-agent; an unknown name is an error result that lists the available skills |
 
-The tools can be disabled per tool in the Tools tab like any tool (disabling `task` turns sub-agents off; the tools
-table offers no Allow override for `exit_plan_mode`, as for `execute` tools).
+Phase 10 (ADR-045, ADR-046) widens `task`: `type` names **any agent of the chat's catalog** (the built-ins `explore`
+and `general`, the alias `general-purpose`, and the agents of plugins (below), of the user and of the project, see
+[ARCHITECTURE.md 6.23](./ARCHITECTURE.md#623-customization-catalog-adr-044)); it is trimmed and lowercased, and an
+unknown type ends the call `failed` with the list of available types. A custom agent's `tools` list narrows the child's
+tools (never widens them), its `model` picks the child's model (`inherit` = the chat's) and its instructions follow the
+sub-agent preamble. `background: true` returns at once with `{ status: 'background', taskId }` and lets the sub-agent run
+detached (3 per chat, 10 per server, 30 minutes each); its report reaches the agent later, exactly once
+([ARCHITECTURE.md 6.26](./ARCHITECTURE.md#626-background-sub-agents-adr-046)). The output gains `taskId?` and `agent?:
+{ source, description, path? }`; `status` gains `background`. A `task` part saved by v1.5 parses unchanged.
+
+With `planFiles` on (Settings → General → Agent, ADR-047), approving `exit_plan_mode` in a project chat also saves the
+plan as `<planDirectory>/<date>-<slug>.md`; the output gains `planPath` (or `planError` when the write failed), and the
+model reads "The plan was saved to <path>." after the approval text.
+
+The tools can be disabled per tool in the Tools tab like any tool (disabling `task` turns sub-agents off, disabling
+`skill` hides skills from the model; the tools table offers no Allow override for `exit_plan_mode`, as for `execute`
+tools).
 `todo_write` and `task` are offered in every chat with tools, with or without a project; an `explore` sub-agent only
 reads.
 
@@ -190,6 +209,14 @@ plugin commands and is reserved (`HARNESS_COMMANDS` in `@harness-forge/shared`):
 in-browser templates treat the name as taken. While a response runs, a queued `/compact` (or any server command) waits
 for the next turn instead of reaching the running agent.
 
+**Phase 10 (ADR-045, ADR-047)**: `/remember` became a client command (it opens the Remember dialog), so a plugin
+command named `remember` is refused like `compact` and the other client-only names (release note: a plugin that used it
+must rename it). Plugin commands now share the slash menu with the **project** commands (`.harness/commands/`,
+`.claude/commands/`) and the user's **personal** commands (Settings → Customize); when names collide, a project
+command wins over a personal one, which wins over a plugin command (the plugin command is shadowed only where the other
+one exists, e.g. in one project's chats). `GET /api/commands?projectId=` lists the effective commands with their
+`source` (`harness`, `plugin`, `user`, `project`) and `pluginId` only for plugin commands.
+
 `core-mcp` settings apply to every MCP server (panel and plugins): **Reconnect automatically** (`autoReconnect`,
 default on: retries a failed or dropped connection with increasing delays, up to about 9 minutes) and **Connect
 timeout (seconds)** (`connectTimeoutSeconds`, 5-120, default 20).
@@ -197,13 +224,13 @@ timeout (seconds)** (`connectTimeoutSeconds`, 5-120, default 20).
 ### API version
 
 ```ts
-export const PLUGIN_API_VERSION = '1.3.0'
+export const PLUGIN_API_VERSION = '1.4.0'
 ```
 
 `PLUGIN_API_VERSION` versions the plugin API (not the app). Minor versions only add; a major version breaks. A
 manifest declares the API range it supports in `engines.harness`; the host checks
 `semver.satisfies(PLUGIN_API_VERSION, engines.harness)` and marks the plugin `incompatible` when it fails. Use
-`"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` / `"^1.3.0"` when the plugin uses a member of that version.
+`"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` / `"^1.3.0"` / `"^1.4.0"` when the plugin uses a member of that version.
 
 | Version | Changes |
 |---|---|
@@ -211,16 +238,19 @@ manifest declares the API range it supports in `engines.harness`; the host check
 | `1.1.0` | Phase 6 (additive): the optional `ProviderDefinition` members `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel`, `transcriptionOptions`; `PluginContext.images.generate`; model kinds `transcription` and `speech`, `ModelInfo.voices`, `capabilities.imageOutput` |
 | `1.2.0` | Unchanged in Phase 8 (checkpoints, the sticky folder and shell rules need no plugin API). Phase 7 (additive, ADR-032): `ToolCallContext.workspace?: ToolWorkspace` (`{ projectId, name, root }`, frozen, set for every tool in a chat whose project folder opened, policy functions included); `ToolDefinition.workspace?: 'read' \| 'write' \| 'execute'` (registration rejects any other value with `validation_error` at `['workspace']`; such a tool is offered only in those chats; `execute` tools only while `HF_WORKSPACE_SHELL` is on; `write` + policy `ask` runs without a card in the new permission mode `edits`); `ToolMode` gains `edits` ("Accept edits"; visible to hooks in `chat.params`); `ImageGenerateResult.modelName` (the catalog name, the user's alias first, else the model id). Behavior change: an unknown provider in `ctx.ai` (`ctx.models.resolve`) and `ctx.images` is now `provider_not_configured` (400, action `configure-provider`, message `The provider "<id>" is not available. Pick another model or install the provider.`), as on chat; it was `not_found` |
 | `1.3.0` | Phase 9 (additive, ADR-041 / ADR-043): `ToolMode` gains `plan` ("Plan": read-only; tools with workspace access `write` / `execute` are not offered, and policies resolve as in `ask`; visible to hooks in `chat.params`); `ToolDefinition.execute` may return the output directly (`Promise<O> \| O \| AsyncIterable<O>`) or be an **async generator** (`async function*`): every yielded value is a preliminary output (shown as progress, throttled to one per 250 ms with the latest value winning and the first sent at once, each capped at 64 KB, at most 2,000 per call) and the last yielded value is the final output (an `execute` that returns an `AsyncIterable` from a normal function is drained instead: only its last value counts). `tool.after` hooks and `toModelOutput` see only the final value; the guard timeout and the abort signal cover the whole iteration. No new `ToolCallContext` member (the agent tools of `core-agent` use a server-internal channel) |
+| `1.4.0` | Phase 10 (additive, ADR-045): **agents** and **skills** as contributions. Declarative: `contributes.agents` (`DeclarativeAgent[]`, <= 50) and `contributes.skills` (`DeclarativeSkill[]`, <= 50); code: `ctx.agents.register(AgentDefinition)` and `ctx.skills.register(SkillDefinition)` (each returns a `Disposable`). `AgentDefinition { name, description, instructions, tools?, model? }` is a sub-agent type the main agent can start with `task`; `SkillDefinition { name, description, content }` is a set of instructions the agent loads with the `core-agent` tool `skill`. Registry kinds `agent` / `skill`; `PluginSummary.contributions` gains `agents` and `skills` (names). Reserved names: the agents `explore`, `general`, `general-purpose`; the command name `remember` (a client command since v1.6) is refused for every plugin, whatever its `engines` range. No new `ToolCallContext` or hook member |
 
-A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0`, `1.2.0` and `1.3.0`; a plugin that
+A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0`, `1.2.0`, `1.3.0` and `1.4.0`; a plugin that
 catches the old `not_found` of an unknown provider should also accept `provider_not_configured`; a hook or policy that
 switches on `toolMode` should treat an unknown value like `ask`, since 1.3 adds `plan`). A plugin that uses a newer
-member should declare that version (`"^1.1.0"`, `"^1.2.0"`, `"^1.3.0"`), so an older host reports it `incompatible`
-instead of silently ignoring the member: a 1.1 host would offer a tool with `workspace` in every chat and never fill
-`c.workspace`, and a 1.2 host would treat an async-generator `execute` as a plain function whose result is an iterator
-object. The builtins follow the same rule: `core-agent` declares `"^1.3.0"`, `core-tools` (1.2.0) and `core-workspace`
+member should declare that version (`"^1.1.0"`, `"^1.2.0"`, `"^1.3.0"`, `"^1.4.0"`), so an older host reports it
+`incompatible` instead of silently ignoring the member: a 1.1 host would offer a tool with `workspace` in every chat and
+never fill `c.workspace`, a 1.2 host would treat an async-generator `execute` as a plain function whose result is an
+iterator object, and a 1.3 host refuses a manifest with `contributes.agents` (unknown key) and has no `ctx.agents`. The
+builtins follow the same rule: `core-agent` declares `"^1.4.0"` (v1.6), `core-tools` (1.2.0) and `core-workspace`
 `"^1.2.0"`, `core-providers` and `mock` `"^1.1.0"`. The in-browser templates and the example plugins still declare
-`"^1.0.0"` (they use no newer member).
+`"^1.0.0"` (they use no newer member), except `examples/plugins/agent-pack` (`"^1.4.0"`). A 1.3.0 plugin loads
+unchanged on a 1.4.0 host; one with a command named `remember` loses that command (it is refused and logged).
 
 ## 2. Plugin directory layout
 
@@ -285,6 +315,8 @@ lenient pre-parse first, so a manifest written for a newer plugin API is reporte
 | `models` | `{ providerId: string; models: ModelInfo[] }[]` | adds models (or metadata) to any provider, including builtins; held until that provider is registered |
 | `mcpServers` | `McpServerDecl[]` | [section 5](#5-declarative-mcp-servers); a `stdio` server makes the plugin require trust |
 | `commands` | `DeclarativeCommand[]` | [section 6](#6-declarative-commands) |
+| `agents` | `DeclarativeAgent[]` | plugin API 1.4.0; <= 50; [section 6](#declarative-agents-plugin-api-140) |
+| `skills` | `DeclarativeSkill[]` | plugin API 1.4.0; <= 50; [section 6](#declarative-skills-plugin-api-140) |
 
 ### Permissions (advisory)
 
@@ -542,6 +574,59 @@ Connection lifecycle: servers connect in the background after the plugin is `act
   in the message `metadata.command` ([API.md](./API.md)).
 - Duplicate names: the first registration wins (builtins first, then plugins in load order); later ones are rejected
   and logged.
+- Phase 10: a project command (`.harness/commands/`, `.claude/commands/`) or a personal command (Settings → Customize)
+  with the same name wins over a plugin command; the plugin command stays registered and is used everywhere else.
+  Reserved names: the client commands (`new`, `model`, `effort`, `mode`, `help`, `remember`) and `compact`.
+
+### Declarative agents (plugin API 1.4.0)
+
+A plugin can contribute **sub-agent types**: the main agent starts them with the `task` tool (`type: "<name>"`), and
+they run with their own instructions and an optional narrower tool set and model (ADR-045,
+[ARCHITECTURE.md 6.25](./ARCHITECTURE.md#625-skills-and-custom-agents-adr-045)).
+
+```json
+{
+  "name": "code-reviewer",
+  "description": "Reviews a diff or a set of files for bugs, risky changes and missing tests. Use it after larger edits.",
+  "instructions": "You review code changes.\n\n1. Read the changed files.\n2. List real bugs first, then risky changes, then missing tests.\n3. Quote file paths and line numbers.",
+  "tools": ["read_file", "search_files", "find_files", "list_directory"]
+}
+```
+
+| Field | Validation / meaning |
+|---|---|
+| `name` | `^[a-z][a-z0-9-]{0,63}$`; not `explore`, `general` or `general-purpose` (the built-ins); unique across plugins (a second plugin with the same name gets a `conflict` in its log and that agent is not registered) |
+| `description` | 1-1024 characters; the main agent reads it (cut at 250 characters in its instructions) to decide when to use the agent, so say **when** to use it |
+| `instructions` | 1 character to 64 KiB of markdown: the sub-agent's instructions, placed after the sub-agent preamble and before the user's custom instructions |
+| `tools` | optional, <= 64 entries: harness tool names such as `read_file` or `mcp__server__tool`, or an MCP server prefix `mcp__server__*` (no duplicates); **narrows** the sub-agent's tools: it gets only the tools of this list that a sub-agent may use anyway in the chat's mode (a sub-agent never gets a tool that would ask, the `core-agent` tools or `generate_image`); absent = every tool a sub-agent may use |
+| `model` | optional: a model ref `provider:model` (used when the user has that provider; else the default sub-agent model) or `inherit` (the chat's model); absent = the Sub-agent model setting, else the chat's model |
+
+The agents of a plugin appear in Settings → Customize under **From plugins** and on the plugin's detail page
+(**Agents**); a personal or project agent with the same name wins over them (the plugin's entry is listed as
+shadowed). When the plugin is disabled, its agents disappear from every chat at once.
+
+### Declarative skills (plugin API 1.4.0)
+
+A plugin can contribute **skills**: instructions the agent loads on demand with the `core-agent` tool `skill`. The
+model sees only the names and descriptions until it loads one.
+
+```json
+{
+  "name": "commit-message",
+  "description": "How to write a commit message for this team. Load it before writing any commit message.",
+  "content": "# Commit messages\n\n- Conventional Commits: feat, fix, docs, chore.\n- Subject at most 72 characters, imperative mood.\n- Body: what and why, wrapped at 72 characters."
+}
+```
+
+| Field | Validation / meaning |
+|---|---|
+| `name` | `^[a-z][a-z0-9-]{0,63}$`; unique across plugins (`conflict` otherwise) |
+| `description` | 1-1024 characters; listed to the model (cut at 250 characters; at most 50 skills are listed), so say **when** to load it |
+| `content` | 1 character to 64 KiB of markdown, returned by `skill` |
+
+A plugin skill has no folder of its own: put everything it needs into `content` (a project skill, in
+`.harness/skills/<name>/`, can point at supporting files instead). Skills are not slash commands (not user-invocable in
+v1.6).
 
 ## 7. Settings schema
 
@@ -709,7 +794,7 @@ import type {
   ModelMessage, Tool, UIMessage,
 } from 'ai'
 
-export const PLUGIN_API_VERSION = '1.3.0'
+export const PLUGIN_API_VERSION = '1.4.0'
 
 /** Same type as the AI SDK `ProviderOptions` (`ai` does not re-export it). */
 export type ProviderOptions = SharedV4ProviderOptions
@@ -756,6 +841,8 @@ export interface PluginManifest {
     models?: { providerId: string; models: ModelInfo[] }[]
     mcpServers?: McpServerDecl[]
     commands?: DeclarativeCommand[]
+    agents?: DeclarativeAgent[]                   // 1.4: <= 50
+    skills?: DeclarativeSkill[]                   // 1.4: <= 50
   }
 }
 export interface DeclarativeProvider {
@@ -782,6 +869,8 @@ export interface McpServerDecl {
     | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
 }
 export interface DeclarativeCommand { name: string; description: string; template: string }
+// 1.4.0: DeclarativeAgent / DeclarativeSkill (contributes.agents / contributes.skills) have exactly the fields of
+// AgentDefinition / SkillDefinition below (shared zod schemas declarativeAgentSchema / declarativeSkillSchema)
 // SettingsSchema / SettingsProperty: section 7
 
 // ---------- providers and models ----------
@@ -907,6 +996,20 @@ export interface CommandDefinition {
     Promise<{ type: 'prompt'; text: string } | { type: 'reply'; markdown: string }>
 }
 
+// ---------- 1.4.0: agents and skills (Phase 10) ----------
+export interface AgentDefinition {                // a sub-agent type for the task tool
+  name: string                                    // ^[a-z][a-z0-9-]{0,63}$, not explore / general / general-purpose
+  description: string                             // 1..1024 characters: when the main agent should use it
+  instructions: string                            // markdown, <= 64 KiB: after the sub-agent preamble
+  tools?: string[]                                // <= 64 tool names or mcp__<server>__* prefixes; only narrows
+  model?: string                                  // 'provider:model' | 'inherit'; omitted = the sub-agent model setting
+}
+export interface SkillDefinition {                // loaded on demand by the core-agent tool skill
+  name: string                                    // ^[a-z][a-z0-9-]{0,63}$
+  description: string                             // 1..1024 characters: when the agent should load it
+  content: string                                 // markdown, <= 64 KiB
+}
+
 // ---------- hooks ----------
 type C = { chatId: string; modelRef: string }
 export interface HookMap {                        // [input, output]; handlers mutate output
@@ -990,6 +1093,8 @@ export interface PluginContext {
   tools: { register<I, O>(d: ToolDefinition<I, O>): Disposable }
   mcp: { register(d: McpServerDecl): Disposable }
   commands: { register(d: CommandDefinition): Disposable }
+  agents: { register(d: AgentDefinition): Disposable }   // 1.4.0 (Phase 10)
+  skills: { register(d: SkillDefinition): Disposable }   // 1.4.0 (Phase 10)
   hooks: {
     on<K extends HookName>(name: K, fn: (...args: HookMap[K]) => unknown, options?: { priority?: number }): Disposable
   }
@@ -1017,9 +1122,12 @@ zod validator of a settings form. Plugin API 1.1.0 adds the type exports `ImageP
 `TranscriptionHints`, `PluginImagesApi`, `ImageGenerateOptions`, `ImageGenerateResult` and `GeneratedImageFile`, and
 re-exports the types `ImageAspectRatio` and `ModelKind` from shared. Plugin API 1.2.0 adds `ToolWorkspace` and
 `ToolWorkspaceAccess` (the shared `WorkspaceAccess` / `workspaceAccessSchema`). Plugin API 1.3.0 adds no export: the
-`ToolMode` literal gains `plan` and `ToolDefinition.execute` may return the output directly or an `AsyncIterable`. The
+`ToolMode` literal gains `plan` and `ToolDefinition.execute` may return the output directly or an `AsyncIterable`.
+Plugin API 1.4.0 adds the type exports `AgentDefinition`, `SkillDefinition`, `DeclarativeAgent` and `DeclarativeSkill`
+(the last two with their shared schemas `declarativeAgentSchema` / `declarativeSkillSchema`) and the context members
+`ctx.agents` / `ctx.skills`. The
 template mirror `apps/server/src/plugins/templates/sdk-types.ts` (the `harness-forge.d.ts` of the templates and
-examples) follows the SDK, including the `ToolMode` literal. `ModelInfo` must be imported from these packages,
+examples) follows the SDK, including the `ToolMode` literal and the 1.4.0 members. `ModelInfo` must be imported from these packages,
 not from `ai` (which exports an unrelated type of the same name).
 
 ### `PluginContext`
@@ -1040,7 +1148,9 @@ not from `ai` (which exports an unrelated type of the same name).
 | `models.resolve(ref)` | returns a model instance for `providerId:modelId` with the user's credentials; throws `provider_not_configured` with action `configure-provider` (a disabled provider, missing credentials and, since 1.2.0, an unknown provider: `The provider "<id>" is not available. Pick another model or install the provider.`), `model_not_found` with action `refresh-models` (a model that is not in the provider's catalog) or `validation_error` (an invalid ref, an image model); use with `ctx.ai.generateText` |
 | `tools.register(d)` | validates name, schema and policy; a duplicate or `mcp__`-prefixed name throws `conflict` |
 | `mcp.register(d)` | same rules as `contributes.mcpServers` |
-| `commands.register(d)` | exactly one of `template` / `run`; a duplicate name throws `conflict` |
+| `commands.register(d)` | exactly one of `template` / `run`; a duplicate name throws `conflict`; Phase 10: the client name `remember` throws `validation_error` like the other reserved names |
+| `agents.register(d)` | 1.4.0: validates an `AgentDefinition` like `contributes.agents` (name pattern, not a built-in name, description 1-1024 characters, instructions <= 64 KiB, <= 64 tool names, a model ref or `inherit`; `validation_error` naming the field); a name another plugin already registered throws `conflict`. The agent becomes a sub-agent type of every chat ([Agents and skills](#agents-and-skills)) |
+| `skills.register(d)` | 1.4.0: validates a `SkillDefinition` like `contributes.skills` (content <= 64 KiB); a duplicate name across plugins throws `conflict`. The skill is listed to the model of every chat and loaded with the `skill` tool |
 | `hooks.on(name, fn, { priority })` | registers a hook handler; see [Hooks](#hooks) |
 | `images.generate(o)` | 1.1.0 (ADR-028): generates `o.n` images (default 1) with `o.modelRef` or the `imageModelRef` setting, stores every image as a file (PNG, JPEG, WebP or GIF, at most 20 MB, the same bytes reuse one file) and returns an `ImageGenerateResult` with file references (`url` = `/api/files/<fileId>`; `costUsd` only when the catalog prices the model; `modelName` since 1.2.0). Writes exactly one usage row (`purpose: 'image'`, attributed to `o.chatId` when given, else no chat) with the estimated cost. Aborted by `o.signal` and by `ctx.signal`: the promise rejects with the abort reason (a provider answer that arrives after the abort still writes its usage row but stores no image). Errors (`HarnessError`): options that fail the checks (the `generate_image` input rules, a `modelRef`, `chatId` <= 128 characters) → `validation_error`; no model → `validation_error` "Choose an image model in Settings → Media."; a model that is not an image model → `validation_error` (`modelRef: The model "<ref>" is not an image model.`); an image model whose provider has no `createImageModel` → `model_not_found`; an unknown provider (since 1.2.0; 1.1 answered `not_found`), a disabled provider or a missing key → `provider_not_configured` (action `configure-provider`); provider failures mapped as for chats (`auth_invalid`, `rate_limited`, `provider_error`, ...); every returned image refused by the file store → `provider_error` "The image model returned no image that could be stored: only PNG, JPEG, WebP and GIF images of at most 20 MB are kept."; a call after the plugin was disposed → `plugin_error`. The builtin `generate_image` tool uses it. `ctx.ai` has no `generateImage`: images made through `ctx.images` are stored and accounted for |
 | `ai` | host library copies ([section 8](#8-code-plugins)) |
@@ -1183,6 +1293,59 @@ export default {
 `template` commands behave like [declarative commands](#6-declarative-commands). `run` commands are guarded (30 s):
 `{ type: 'prompt', text }` replaces the text sent to the model; `{ type: 'reply', markdown }` is written as the
 assistant message without a model call. A throw or timeout is shown as a `plugin_error` in the chat.
+
+### Agents and skills
+
+Plugin API 1.4.0 (ADR-045). `ctx.agents.register(d)` and `ctx.skills.register(d)` take the shapes of
+[declarative agents and skills](#declarative-agents-plugin-api-140) and add them to the registries `agent` / `skill`
+(owner = the plugin; disposed with it). The server merges them into every chat's **customization catalog**
+([ARCHITECTURE.md 6.23](./ARCHITECTURE.md#623-customization-catalog-adr-044)), lowest precedence first: built-in <
+**plugin** < the user's personal definitions < the project's `.claude/` < the project's `.harness/`. A higher source
+with the same name wins and the plugin's entry is listed as shadowed (only where the other one exists).
+
+- **Agents** become `task` types: the main agent sees an "Agent types" list in its instructions (name and description;
+  at most 30 types) and starts one with `task { type: '<name>', description, prompt }` (optionally `background: true`).
+  The sub-agent's instructions are the sub-agent preamble, then `instructions`, then the user's custom instructions; its
+  tools are the sub-agent ceiling of the chat's mode narrowed by `tools`; its model is `model` (`inherit` = the chat's),
+  else the Sub-agent model setting. A plugin agent can never get a tool that would ask, never create an approval and
+  never start another sub-agent.
+- **Skills** are listed to the model (name and description; at most 50) when the chat's catalog has any, and loaded with
+  the `core-agent` tool `skill { name }` (policy `safe`): the result carries the `content` and the source `plugin`.
+- **Validation** happens at registration (`validation_error` naming the field: the name pattern, a built-in agent name,
+  sizes, tool names, the model ref) and, for `contributes`, at manifest validation; a name already registered by another
+  plugin is a `conflict` (logged in the plugin's log; the plugin stays active, that entry is skipped). The registries are
+  global: a plugin agent exists in every chat, with or without a project.
+- **Lifecycle**: disabling, reloading or uninstalling the plugin removes its agents and skills at once (the catalogs
+  are dropped and `customization.changed` is emitted); a running sub-agent of a removed agent finishes with the
+  definition it started with.
+- **Where users see them**: the plugin card's summary ("2 agents · 1 skill"), the **Agents and skills** filter of the
+  Plugins tab, the **Agents** / **Skills** sections of the plugin's Overview, and **From plugins** in Settings →
+  Customize (read-only, with View, Copy to personal and Export).
+
+```js
+// @ts-check
+/// <reference path="./harness-forge.d.ts" />
+
+/** @type {import('@harness-forge/plugin-sdk').PluginModule} */
+export default {
+  setup(ctx) {
+    ctx.agents.register({
+      name: 'docs-writer',
+      description: 'Writes or updates documentation for code that changed. Use it after a feature is done.',
+      instructions: 'You write concise documentation.\n\nRead the changed code, then update the README or the docs folder. Keep the existing style.',
+      tools: ['read_file', 'find_files', 'search_files', 'write_file', 'edit_file'],
+      model: 'inherit',
+    })
+    ctx.skills.register({
+      name: 'changelog-entry',
+      description: 'How to add an entry to CHANGELOG.md. Load it before editing the changelog.',
+      content: '# Changelog entries\n\nAdd the entry under "Unreleased", grouped as Added, Changed or Fixed, one line per change.',
+    })
+  },
+}
+```
+
+Declare `"engines": { "harness": "^1.4.0" }` for either form.
 
 ### Hooks
 
@@ -1463,10 +1626,12 @@ Declarative plugins without stdio servers run no code and need no trust:
 | Plugin id | `^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$`; equals the directory name; reserved: `core-*`, `mock`, builtin provider ids | unique (installing an existing id updates it) |
 | Provider id | builtins: models.dev keys; plugins: `<pluginId>` or `<pluginId>-<suffix>` with `<suffix>` matching `[a-z0-9-]+`, total <= 64 characters | first registration wins, later ones throw `conflict` |
 | Model ref | `providerId:modelId`, split on the **first** `:` (`ollama:llama3:8b`); never in URL paths | |
-| Tool name | `^[a-zA-Z0-9_-]{1,64}$`; the prefix `mcp__` is reserved for MCP tools; prefer a plugin-specific prefix (`dice_roll`); the builtins already hold `current_time`, `web_fetch`, `generate_image`, the seven workspace tools and (Phase 9) `todo_write`, `exit_plan_mode`, `task` | global; duplicates throw `conflict` |
+| Tool name | `^[a-zA-Z0-9_-]{1,64}$`; the prefix `mcp__` is reserved for MCP tools; prefer a plugin-specific prefix (`dice_roll`); the builtins already hold `current_time`, `web_fetch`, `generate_image`, the seven workspace tools, (Phase 9) `todo_write`, `exit_plan_mode`, `task` and (Phase 10) `skill` | global; duplicates throw `conflict` |
 | MCP tool name | `mcp__<serverId>__<tool>`; characters of `<tool>` outside `[a-zA-Z0-9_-]` become `_`; longer than 64 characters -> the first 55 characters + `_` + 8 hex characters of the FNV-1a hash of the full name (`mcpToolName()` in `@harness-forge/shared`, synchronous and browser-safe) | global |
 | MCP server id | `^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`; plugin servers: `<pluginId>` or `<pluginId>-<suffix>` (so plugins with ids longer than 32 characters cannot declare MCP servers) | across plugins and the MCP panel |
-| Command name | `^[a-z][a-z0-9-]{0,31}$`; reserved client-only: `new`, `model`, `effort`, `mode`, `help`; reserved harness command (Phase 9): `compact` | first wins |
+| Command name | `^[a-z][a-z0-9-]{0,31}$`; reserved client-only: `new`, `model`, `effort`, `mode`, `help` and (Phase 10) `remember`; reserved harness command (Phase 9): `compact` | first wins among plugins; Phase 10: a project or personal command of the same name wins over it |
+| Agent name (1.4.0) | `^[a-z][a-z0-9-]{0,63}$`; reserved: `explore`, `general` (the built-ins) and the alias `general-purpose` | across plugins (`conflict`); a personal or project agent of the same name wins over it |
+| Skill name (1.4.0) | `^[a-z][a-z0-9-]{0,63}$` | across plugins (`conflict`); a personal or project skill of the same name wins over it |
 | Credential key, setting key | `^[a-zA-Z][a-zA-Z0-9_]{0,63}$` | within the provider / schema |
 | Secret scopes | `provider:<id>`, `plugin:<id>`, `mcp:<id>`, `auth` | |
 
@@ -1479,9 +1644,9 @@ bridge, command pack). Step-by-step guides: [declarative provider](./guides/writ
 [code plugin](./guides/writing-a-code-plugin.md), [MCP server](./guides/adding-an-mcp-server.md).
 
 The examples below are copies of runnable plugins in [`examples/plugins/`](../examples/plugins/) (`together-ai`,
-`dice-roller`, `mcp-everything`, plus `lmstudio` and the TypeScript provider `echo-provider`); `examples.test.ts`
-loads each of them into the plugin host. Examples (c) and (e) are patterns without a folder (they need a real gateway
-or a local Whisper server).
+`dice-roller`, `mcp-everything`, plus `lmstudio` and the TypeScript provider `echo-provider`; Phase 10: `agent-pack`,
+example (f)); `examples.test.ts` loads each of them into the plugin host. Examples (c) and (e) are patterns without a
+folder (they need a real gateway or a local Whisper server).
 
 ### (a) Declarative OpenAI-compatible provider: Together AI
 
@@ -1819,6 +1984,47 @@ large v3 turbo (local)", and dictate with the microphone button (Alt+V). A text-
 `kind: 'speech'` and a `voices` list. An image provider adds `createImageModel` (`.image(modelId)` of a compatible
 factory), seeds with `kind: 'image'` and an `imageParams` that maps the aspect ratio to what the API accepts.
 
+### (f) Agents and skills: `agent-pack` (plugin API 1.4.0)
+
+[`examples/plugins/agent-pack`](../examples/plugins/agent-pack/) contributes two sub-agent types and two skills, one of
+each in `plugin.json` (declarative) and one of each from code. Because it has a `main`, it is a code plugin and needs
+trust; a plugin with only `contributes.agents` / `contributes.skills` and no `main` runs no code.
+
+```json
+{
+  "manifestVersion": 1,
+  "id": "agent-pack",
+  "name": "Agent pack",
+  "version": "1.0.0",
+  "description": "Example sub-agents and skills: a code reviewer, a docs writer, commit messages and changelog entries.",
+  "engines": { "harness": "^1.4.0" },
+  "main": "index.mjs",
+  "contributes": {
+    "agents": [
+      {
+        "name": "code-reviewer",
+        "description": "Reviews a diff or a set of files for bugs, risky changes and missing tests. Use it after larger edits.",
+        "instructions": "You review code changes.\n\n1. Read the changed files.\n2. List real bugs first, then risky changes, then missing tests.\n3. Quote file paths and line numbers.",
+        "tools": ["read_file", "search_files", "find_files", "list_directory"]
+      }
+    ],
+    "skills": [
+      {
+        "name": "commit-message",
+        "description": "How to write a commit message for this team. Load it before writing any commit message.",
+        "content": "# Commit messages\n\n- Conventional Commits: feat, fix, docs, chore.\n- Subject at most 72 characters, imperative mood.\n- Body: what and why, wrapped at 72 characters."
+      }
+    ]
+  }
+}
+```
+
+`index.mjs` registers `docs-writer` with `ctx.agents.register` and `changelog-entry` with `ctx.skills.register` (the code
+of [Agents and skills](#agents-and-skills)). After install and trust: the plugin card reads "2 agents · 2 skills", the
+**Agents and skills** filter lists it, Settings → Customize shows the four entries under **From plugins**, and in a
+chat the agent can call `task { type: 'code-reviewer', … }` or `skill { name: 'commit-message' }`. A project file
+`.harness/agents/code-reviewer.md` would shadow the plugin's reviewer in that project only.
+
 ### TypeScript entry
 
 Set `"main": "index.ts"`. The host compiles it with esbuild on load and on "Build & reload"; `definePlugin` is
@@ -1938,6 +2144,13 @@ values in place; nothing changes for the plugin. To move everything, copy the wh
 
 **How do I debug?** `ctx.logger` entries appear in the plugin's Logs tab and in the server log; link the folder for
 hot reload; set `HF_PLUGIN_WATCH=1` to hot-reload code plugins installed in `data/plugins/`.
+
+**Should an agent, a command or a skill live in a plugin, in Settings → Customize or in the project?** (Phase 10) A
+plugin, when it ships with tools or should reach several servers; a personal definition (Settings → Customize), for
+your own habits on this server; a project file (`.harness/agents/`, `.harness/commands/`, `.harness/skills/<name>/`),
+when it belongs to a repository and its team (it then wins over the other two in that project). The file format is the
+same everywhere except that a plugin writes JSON fields instead of markdown with frontmatter
+([customizing agents](./guides/customizing-agents.md)).
 
 ## Hardening notes (Phase 4)
 

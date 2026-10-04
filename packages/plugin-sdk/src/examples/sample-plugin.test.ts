@@ -1,4 +1,5 @@
 import type {
+  AgentDefinition,
   CommandDefinition,
   Disposable,
   HookHandler,
@@ -7,6 +8,7 @@ import type {
   KV,
   PluginContext,
   ProviderDefinition,
+  SkillDefinition,
   ToolCallContext,
   ToolDefinition,
 } from '../index.ts'
@@ -14,7 +16,7 @@ import { createAnthropic } from '@ai-sdk/anthropic'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
-import { isPluginNamespacedId, modelInfoSchema, pluginManifestSchema } from '@harness-forge/shared'
+import { declarativeAgentSchema, declarativeSkillSchema, isPluginNamespacedId, modelInfoSchema, pluginManifestSchema } from '@harness-forge/shared'
 import { generateText, jsonSchema, tool } from 'ai'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -43,6 +45,8 @@ function fakeContext() {
   const providers: ProviderDefinition[] = []
   const tools: ToolDefinition[] = []
   const commands: CommandDefinition[] = []
+  const agents: AgentDefinition[] = []
+  const skills: SkillDefinition[] = []
   const hooks: { name: HookName, fn: (...args: never[]) => unknown, priority: number }[] = []
   const logs: string[] = []
   const log = (message: string) => {
@@ -77,6 +81,14 @@ function fakeContext() {
       commands.push(definition)
       return disposable
     } },
+    agents: { register: (definition) => {
+      agents.push(definition)
+      return disposable
+    } },
+    skills: { register: (definition) => {
+      skills.push(definition)
+      return disposable
+    } },
     hooks: { on: (name, fn, options) => {
       hooks.push({ name, fn, priority: options?.priority ?? 0 })
       return disposable
@@ -89,7 +101,7 @@ function fakeContext() {
       },
     },
   }
-  return { ctx, providers, tools, commands, hooks, logs }
+  return { ctx, providers, tools, commands, agents, skills, hooks, logs }
 }
 
 const call: ToolCallContext = {
@@ -105,14 +117,17 @@ describe('sample plugin', () => {
     expect(pluginManifestSchema.safeParse(manifest).success).toBe(true)
   })
 
-  it('registers a provider, tools, commands and hooks', async () => {
-    const { ctx, providers, tools, commands, hooks } = fakeContext()
+  it('registers a provider, tools, commands, hooks, an agent and a skill', async () => {
+    const { ctx, providers, tools, commands, agents, skills, hooks } = fakeContext()
     await samplePlugin.setup(ctx)
     expect(providers.map(provider => provider.id)).toEqual(['sample-kit'])
     expect(providers.every(provider => isPluginNamespacedId(manifest.id, provider.id))).toBe(true)
     expect(tools.map(definition => definition.name)).toEqual(['sample_word_count', 'sample_echo'])
     expect(commands.map(command => command.name)).toEqual(['sample-tldr', 'sample-count'])
     expect(hooks.map(hook => [hook.name, hook.priority])).toEqual([['chat.params', 10], ['message.completed', 0]])
+    // Plugin API 1.4.0: the registrations pass the manifest rules of contributes.agents / contributes.skills.
+    expect(agents.map(agent => declarativeAgentSchema.parse(agent).name)).toEqual(['sample-reviewer'])
+    expect(skills.map(skill => declarativeSkillSchema.parse(skill).name)).toEqual(['sample-release-notes'])
   })
 
   it('creates provider instances without network access and maps reasoning', async () => {

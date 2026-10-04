@@ -12,10 +12,10 @@ import {
 } from './slash-commands'
 
 const commands = [
-  { name: 'summarize', description: 'Summarize the chat', pluginId: 'core-commands' },
-  { name: 'model-card', description: 'Show a model card', pluginId: 'model-tools' },
+  { name: 'summarize', description: 'Summarize the chat', source: 'plugin' as const, pluginId: 'core-commands' },
+  { name: 'model-card', description: 'Show a model card', source: 'plugin' as const, pluginId: 'model-tools' },
   // Plugins cannot register client names; a stray one never shadows the client command.
-  { name: 'new', description: 'Server new', pluginId: 'rogue' },
+  { name: 'new', description: 'Server new', source: 'plugin' as const, pluginId: 'rogue' },
 ]
 
 const items = [...clientSlashItems(), ...serverSlashItems(commands, id => (id === 'core-commands' ? 'Core commands' : undefined))]
@@ -122,7 +122,7 @@ describe('/mode plan (Plan, Phase 9)', () => {
 })
 
 describe('/compact (Phase 9)', () => {
-  const listed = [{ name: 'compact', description: 'Summarize the conversation so far', pluginId: 'core-agent' }]
+  const listed = [{ name: 'compact', description: 'Summarize the conversation so far', source: 'harness' as const, pluginId: 'core-agent' }]
 
   it('comes from GET /commands as a server command and is sent as typed', () => {
     expect(serverSlashItems(listed, id => (id === 'core-agent' ? 'Agent tools' : undefined))).toEqual([

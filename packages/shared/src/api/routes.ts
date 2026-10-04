@@ -2,6 +2,7 @@
 import type { z } from 'zod'
 import { chatRequestBodySchema, chatStopResultSchema } from '../chat.ts'
 import { audioSpeechBodySchema, audioTranscribeFormSchema, audioTranscriptionSchema } from '../schemas/audio.ts'
+import { backgroundTaskListSchema, backgroundTaskSchema, chatTaskParamsSchema } from '../schemas/background-tasks.ts'
 import {
   changeDiffQuerySchema,
   changeRevertBodySchema,
@@ -24,6 +25,18 @@ import {
   chatUpdateSchema,
 } from '../schemas/chats.ts'
 import { cursorPageSchema, listResponseSchema } from '../schemas/common.ts'
+import {
+  customizationCreateSchema,
+  customizationListSchema,
+  customizationParamsSchema,
+  customizationSchema,
+  customizationSourceQuerySchema,
+  customizationSourceResultSchema,
+  customizationsQuerySchema,
+  customizationUpdateSchema,
+  rememberBodySchema,
+  rememberResultSchema,
+} from '../schemas/customizations.ts'
 import {
   dataCleanupPreviewSchema,
   dataCleanupResultSchema,
@@ -119,6 +132,7 @@ import {
   settingsUpdateSchema,
 } from '../schemas/system.ts'
 import {
+  commandsQuerySchema,
   commandSummarySchema,
   mcpServerInputSchema,
   mcpServerSchema,
@@ -163,6 +177,9 @@ export const API_MODULES = [
   'shellRules',
   'chatQueue',
   'projectFiles',
+  'customizations',
+  'memory',
+  'chatTasks',
   'shares',
 ] as const
 export type ApiModule = (typeof API_MODULES)[number]
@@ -197,7 +214,7 @@ export interface ApiRouteDef {
   status?: 200 | 201 | 204
 }
 
-/** Every endpoint of API.md (100 routes), keyed `<module>.<action>`. */
+/** Every endpoint of API.md (109 routes), keyed `<module>.<action>`. */
 export const apiRoutes = {
   // health.ts
   'health.get': { module: 'health', method: 'GET', path: '/health', public: true, response: healthSchema },
@@ -266,7 +283,7 @@ export const apiRoutes = {
   'mcp.reconnect': { module: 'mcp', method: 'POST', path: '/mcp/:id/reconnect', params: mcpServerParamsSchema, response: mcpServerSchema },
 
   // commands.ts
-  'commands.list': { module: 'commands', method: 'GET', path: '/commands', response: listResponseSchema(commandSummarySchema) },
+  'commands.list': { module: 'commands', method: 'GET', path: '/commands', query: commandsQuerySchema, response: listResponseSchema(commandSummarySchema) },
 
   // plugins.ts
   'plugins.list': { module: 'plugins', method: 'GET', path: '/plugins', response: listResponseSchema(pluginSummarySchema) },
@@ -351,6 +368,22 @@ export const apiRoutes = {
   // count, and from `/plugins/:id/files` in its first segment
   'projectFiles.search': { module: 'projectFiles', method: 'GET', path: '/projects/:id/files', params: projectParamsSchema, query: projectFilesQuerySchema, response: projectFileSearchSchema },
   'projectFiles.attach': { module: 'projectFiles', method: 'POST', path: '/projects/:id/files/attach', params: projectParamsSchema, body: projectFileAttachBodySchema, response: fileRefSchema, status: 201 },
+
+  // customizations.ts (ADR-044, ADR-045): the catalog of agents, commands and skills, the bodies of its entries and the
+  // personal definitions; `/customizations/source` is static, so it wins over `/customizations/:id`
+  'customizations.list': { module: 'customizations', method: 'GET', path: '/customizations', query: customizationsQuerySchema, response: customizationListSchema },
+  'customizations.source': { module: 'customizations', method: 'GET', path: '/customizations/source', query: customizationSourceQuerySchema, response: customizationSourceResultSchema },
+  'customizations.create': { module: 'customizations', method: 'POST', path: '/customizations', body: customizationCreateSchema, response: customizationSchema, status: 201 },
+  'customizations.get': { module: 'customizations', method: 'GET', path: '/customizations/:id', params: customizationParamsSchema, response: customizationSchema },
+  'customizations.update': { module: 'customizations', method: 'PATCH', path: '/customizations/:id', params: customizationParamsSchema, body: customizationUpdateSchema, response: customizationSchema },
+  'customizations.remove': { module: 'customizations', method: 'DELETE', path: '/customizations/:id', params: customizationParamsSchema, response: 'empty' },
+
+  // memory.ts (ADR-047): Remember, a line for the project file, the project's instructions or the global instructions
+  'memory.remember': { module: 'memory', method: 'POST', path: '/memory', body: rememberBodySchema, response: rememberResultSchema },
+
+  // chat-tasks.ts (ADR-046): the background tasks of a chat, next to `/chat/:id/queue`; the chat's Stop never stops them
+  'chatTasks.list': { module: 'chatTasks', method: 'GET', path: '/chat/:id/tasks', params: chatParamsSchema, response: backgroundTaskListSchema },
+  'chatTasks.stop': { module: 'chatTasks', method: 'POST', path: '/chat/:id/tasks/:taskId/stop', params: chatTaskParamsSchema, response: backgroundTaskSchema },
 
   // shares.ts (ADR-025): owner routes under `/shares`, public routes under `/share/:token`
   'shares.list': { module: 'shares', method: 'GET', path: '/shares', query: sharesQuerySchema, response: listResponseSchema(shareSummarySchema) },

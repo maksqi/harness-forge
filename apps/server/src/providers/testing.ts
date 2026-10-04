@@ -184,6 +184,8 @@ export function createFakeRegistry(): FakeRegistry {
       mcpServers: [...mcpServers.values()].filter(entry => entry.pluginId === pluginId).map(entry => entry.decl.id),
       commands: [...commands.values()].filter(entry => entry.pluginId === pluginId).map(entry => entry.definition.name),
       hooks: [...new Set(hooks.filter(entry => entry.pluginId === pluginId).map(entry => entry.name))],
+      agents: [],
+      skills: [],
     }),
   }
 }
@@ -334,6 +336,10 @@ async function fakeContextImages(deps: AppDeps, pluginSignal: AbortSignal, optio
   }
 }
 
+function notYetAvailable(name: string): never {
+  throw new HarnessError({ code: 'not_implemented', message: `${name} is not available yet.` })
+}
+
 /** Runs each builtin's `setup` against the (fake) registry; no guard, state machine or user plugins. */
 export function createFakePluginHost(deps: AppDeps): FakePluginHost {
   const logEntries: FakePluginHost['logEntries'] = []
@@ -362,6 +368,9 @@ export function createFakePluginHost(deps: AppDeps): FakePluginHost {
       tools: { register: <I, O>(definition: ToolDefinition<I, O>) => track(deps.registry.tools.register(pluginId, definition as ToolDefinition)) },
       mcp: { register: (decl: McpServerDecl) => track(deps.registry.mcpServers.register(pluginId, decl)) },
       commands: { register: (definition: CommandDefinition) => track(deps.registry.commands.register(pluginId, definition)) },
+      // Plugin API 1.4.0: P10-0a contract stubs, like `ctx.agents` / `ctx.skills` of the real host.
+      agents: { register: () => notYetAvailable('ctx.agents.register') },
+      skills: { register: () => notYetAvailable('ctx.skills.register') },
       hooks: {
         on: <K extends HookName>(name: K, handler: HookHandler<K>, options?: { priority?: number }) =>
           track(deps.registry.hooks.on(pluginId, name, handler, options)),

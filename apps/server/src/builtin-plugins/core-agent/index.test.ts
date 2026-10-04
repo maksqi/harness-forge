@@ -21,6 +21,12 @@ import coreAgent, {
   TOOL_MODE_LABELS,
 } from './index.ts'
 
+/**
+ * P10-0a (C28): `skill` joined `AGENT_TOOL_NAMES` in the contract wave; `core-agent` registers it in P10-0b (C32), which
+ * puts these checks back on `AGENT_TOOL_NAMES`.
+ */
+const REGISTERED_TOOL_NAMES = AGENT_TOOL_NAMES.filter(name => name !== 'skill')
+
 const POLICIES: Record<string, string> = { todo_write: 'safe', exit_plan_mode: 'always', task: 'safe' }
 const TIMEOUTS: Record<string, number> = { todo_write: 60_000, exit_plan_mode: 60_000, task: 600_000 }
 
@@ -79,10 +85,10 @@ describe('the three agent tools', () => {
   const byName = new Map(tools.map(tool => [tool.name, tool]))
 
   it('come in the shared registration order (AGENT_TOOL_NAMES)', () => {
-    expect(tools.map(tool => tool.name)).toEqual([...AGENT_TOOL_NAMES])
+    expect(tools.map(tool => tool.name)).toEqual([...REGISTERED_TOOL_NAMES])
   })
 
-  it.each(AGENT_TOOL_NAMES.map(name => [name] as const))('%s: shared input schema, policy, timeout, no workspace access, a description', (name) => {
+  it.each(REGISTERED_TOOL_NAMES.map(name => [name] as const))('%s: shared input schema, policy, timeout, no workspace access, a description', (name) => {
     const tool = byName.get(name)!
     expect(tool.inputSchema).toBe(AGENT_TOOL_SCHEMAS[name].input)
     expect(tool.policy).toBe(POLICIES[name])
@@ -118,7 +124,7 @@ describe('the three agent tools', () => {
       },
     } as unknown as PluginContext
     await coreAgent.setup(ctx)
-    expect(registered.map(tool => tool.name)).toEqual([...AGENT_TOOL_NAMES])
+    expect(registered.map(tool => tool.name)).toEqual([...REGISTERED_TOOL_NAMES])
   })
 })
 
@@ -205,8 +211,8 @@ describe('core-agent in the plugin host', () => {
 
   it('loads active and contributes the three tools without workspace access', () => {
     expect(t.deps.plugins.state('core-agent')).toBe('active')
-    expect([...t.deps.registry.contributions('core-agent').tools].sort()).toEqual([...AGENT_TOOL_NAMES].sort())
-    for (const name of AGENT_TOOL_NAMES)
+    expect([...t.deps.registry.contributions('core-agent').tools].sort()).toEqual([...REGISTERED_TOOL_NAMES].sort())
+    for (const name of REGISTERED_TOOL_NAMES)
       expect(t.deps.registry.tools.get(name), name).toMatchObject({ pluginId: 'core-agent', mcpServerId: null, definition: { timeoutMs: TIMEOUTS[name] } })
   })
 
@@ -214,7 +220,7 @@ describe('core-agent in the plugin host', () => {
     const response = await t.request('/api/tools')
     expect(response.status).toBe(200)
     const items = listResponseSchema(toolSummarySchema).parse(await response.json()).items.filter(item => item.pluginId === 'core-agent')
-    expect(items.map(item => item.name).sort()).toEqual([...AGENT_TOOL_NAMES].sort())
+    expect(items.map(item => item.name).sort()).toEqual([...REGISTERED_TOOL_NAMES].sort())
     for (const item of items)
       expect(item.workspace ?? null).toBeNull()
   })

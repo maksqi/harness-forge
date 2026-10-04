@@ -6,8 +6,10 @@ import { isSafeRelativePath } from '../util/paths.ts'
 import { isSemver, isSemverRange } from '../util/semver.ts'
 import { duplicates, isUnique } from '../util/text.ts'
 import {
+  declarativeAgentSchema,
   declarativeCommandSchema,
   declarativeProviderSchema,
+  declarativeSkillSchema,
   httpUrlSchema,
   LOBE_ICON_PATTERN,
   mcpServerDeclSchema,
@@ -52,6 +54,10 @@ export const pluginContributesSchema = z.strictObject({
   models: z.array(contributedModelsSchema).max(64).optional(),
   mcpServers: z.array(mcpServerDeclSchema).max(32).optional(),
   commands: z.array(declarativeCommandSchema).max(100).optional(),
+  /** Plugin API 1.4.0 (ADR-045): agent types for `task` (at most 50). */
+  agents: z.array(declarativeAgentSchema).max(50).optional(),
+  /** Plugin API 1.4.0 (ADR-045): skills for the `skill` tool (at most 50). */
+  skills: z.array(declarativeSkillSchema).max(50).optional(),
 })
 export type PluginContributes = z.infer<typeof pluginContributesSchema>
 
@@ -79,7 +85,7 @@ const manifestObjectSchema = z.strictObject({
 
 /**
  * Every manifest rule except the reserved-id check: provider and MCP server ids namespaced by the plugin id, unique
- * provider / MCP server / command names, `{{settings.<key>}}` references to defined settings. Used by DTOs, which also
+ * provider / MCP server / command / agent / skill names, `{{settings.<key>}}` references to defined settings. Used by DTOs, which also
  * carry builtin manifests, and by endpoints that answer a reserved id with 403 instead of 400.
  */
 export const pluginManifestBaseSchema = manifestObjectSchema.superRefine((manifest, ctx) => {
@@ -112,6 +118,14 @@ export const pluginManifestBaseSchema = manifestObjectSchema.superRefine((manife
   const commandNames = (contributes.commands ?? []).map(command => command.name)
   for (const name of duplicates(commandNames))
     ctx.addIssue({ code: 'custom', path: ['contributes', 'commands', commandNames.lastIndexOf(name), 'name'], message: `Duplicate command "${name}".` })
+
+  const agentNames = (contributes.agents ?? []).map(agent => agent.name)
+  for (const name of duplicates(agentNames))
+    ctx.addIssue({ code: 'custom', path: ['contributes', 'agents', agentNames.lastIndexOf(name), 'name'], message: `Duplicate agent "${name}".` })
+
+  const skillNames = (contributes.skills ?? []).map(skill => skill.name)
+  for (const name of duplicates(skillNames))
+    ctx.addIssue({ code: 'custom', path: ['contributes', 'skills', skillNames.lastIndexOf(name), 'name'], message: `Duplicate skill "${name}".` })
 })
 
 /** A user plugin manifest: every rule of `pluginManifestBaseSchema` plus "the id is not reserved". */

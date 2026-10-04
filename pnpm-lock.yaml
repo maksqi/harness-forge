@@ -27,6 +27,9 @@ catalogs:
     vitest:
       specifier: ^4.0.0
       version: 4.1.11
+    yaml:
+      specifier: ^2.9.1
+      version: 2.9.1
     zod:
       specifier: ^4.1.0
       version: 4.6.5
@@ -161,6 +164,9 @@ importers:
       tar:
         specifier: ^7.5.0
         version: 7.5.22
+      yaml:
+        specifier: 'catalog:'
+        version: 2.9.1
       zod:
         specifier: 'catalog:'
         version: 4.6.5
@@ -321,6 +327,9 @@ importers:
       vue-stick-to-bottom:
         specifier: ^1.0.1
         version: 1.0.1(vue@3.5.43(typescript@6.0.3))
+      yaml:
+        specifier: 'catalog:'
+        version: 2.9.1
       zod:
         specifier: 'catalog:'
         version: 4.6.5
@@ -398,6 +407,9 @@ importers:
       ai:
         specifier: 'catalog:'
         version: 7.0.127(zod@4.6.5)
+      yaml:
+        specifier: 'catalog:'
+        version: 2.9.1
       zod:
         specifier: 'catalog:'
         version: 4.6.5

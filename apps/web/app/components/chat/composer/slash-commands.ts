@@ -21,11 +21,20 @@ export const CLIENT_COMMAND_DESCRIPTIONS: Readonly<Record<ClientCommand, string>
   effort: 'Set reasoning effort',
   mode: 'Set permission mode',
   help: 'Show shortcuts and commands',
+  remember: 'Save a note for the agent',
 }
+
+/**
+ * P10-0a (C28) compile fix: `remember` became a client command in the contract (ADR-047); the Remember dialog arrives
+ * with W10.9, so the menu does not offer it yet and typing it answers an error.
+ */
+const CLIENT_COMMANDS_NOT_OFFERED: ReadonlySet<ClientCommand> = new Set(['remember'])
 
 /** The App group: every client command, in the documented order. */
 export function clientSlashItems(): SlashItem[] {
-  return CLIENT_COMMANDS.map(name => ({ name, description: CLIENT_COMMAND_DESCRIPTIONS[name], kind: 'client' as const }))
+  return CLIENT_COMMANDS
+    .filter(name => !CLIENT_COMMANDS_NOT_OFFERED.has(name))
+    .map(name => ({ name, description: CLIENT_COMMAND_DESCRIPTIONS[name], kind: 'client' as const }))
 }
 
 /**
@@ -42,7 +51,8 @@ export function serverSlashItems(
       name: command.name,
       description: command.description,
       kind: 'server' as const,
-      source: pluginName(command.pluginId) ?? command.pluginId,
+      // Phase 10: `pluginId` is optional (personal and project commands have none).
+      ...(command.pluginId === undefined ? {} : { source: pluginName(command.pluginId) ?? command.pluginId }),
     }))
 }
 
@@ -142,6 +152,8 @@ export function resolveClientCommand(name: ClientCommand, args: string, context:
       return { type: 'new' }
     case 'help':
       return { type: 'help' }
+    case 'remember':
+      return { type: 'error', message: 'Remember is not available yet.' }
     case 'model': {
       if (!value)
         return { type: 'open', menu: 'model' }

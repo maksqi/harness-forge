@@ -1,4 +1,5 @@
 // Size and count limits shared by the web app and the server (API.md section 3.4).
+import { DEFINITION_LIMITS } from './util/definitions.ts'
 
 export const LIMITS = {
   /** `POST /files`: bytes per uploaded file. */
@@ -166,6 +167,41 @@ export const LIMITS = {
   mentionIndexFilesMax: 50_000,
   /** Age after which the file index of a project is rebuilt (30 s). */
   mentionIndexTtlMs: 30_000,
+
+  // Agent customization (Phase 10): the catalog and definition files (ADR-044), custom agents, commands and skills
+  // (ADR-045), background sub-agents (ADR-046), plan files and Remember (ADR-047).
+  /** UTF-8 bytes of one definition file or stored definition (= `DEFINITION_LIMITS.contentBytes`, 64 KiB). */
+  customizationContentBytes: DEFINITION_LIMITS.contentBytes,
+  /** UTF-8 bytes of the frontmatter block of a definition (= `DEFINITION_LIMITS.frontmatterBytes`, 8 KiB). */
+  customizationFrontmatterBytes: DEFINITION_LIMITS.frontmatterBytes,
+  /** Definition files read from one project folder (the rest is left out with a `limit` diagnostic). */
+  customizationFilesPerFolderMax: 200,
+  /** Characters of a definition `description` (= `DEFINITION_LIMITS.descriptionMaxChars`). */
+  customizationDescriptionMaxChars: DEFINITION_LIMITS.descriptionMaxChars,
+  /** Personal agents, commands or skills (each kind). */
+  customizationsPerKindMax: 200,
+  /** Age after which the catalog of a project is rebuilt (10 s). */
+  customizationIndexTtlMs: 10_000,
+  /** Agent types listed in the run instructions. */
+  agentTypesListedMax: 30,
+  /** Skills listed in the run instructions. */
+  skillsListedMax: 50,
+  /** Characters of one description in the agent type and skill listings of the run instructions. */
+  listedDescriptionMaxChars: 250,
+  /** Supporting files of a project skill listed by the `skill` tool. */
+  skillFilesListedMax: 50,
+  /** Characters of the text of one `POST /memory`. */
+  rememberTextMaxChars: 2000,
+  /** Bytes of the project file (`AGENTS.md` / `CLAUDE.md`) after a Remember append (1 MiB). */
+  rememberFileMaxBytes: 1_048_576,
+  /** Background tasks of one chat that run at the same time. */
+  backgroundTasksPerChatMax: 3,
+  /** Background tasks of the whole server that run at the same time. */
+  backgroundTasksMax: 10,
+  /** Deadline of one background task (30 min). */
+  backgroundTaskTimeoutMs: 1_800_000,
+  /** Finished background task rows kept per chat (the oldest are deleted above it). */
+  backgroundTasksKeptPerChat: 100,
 } as const
 
 /** MIME families accepted by `POST /files` (the server also checks the content). */

@@ -6,7 +6,7 @@ values defined here are **contracts**: several agents build components in parall
 
 - Source of truth for shared names: `docs/DECISIONS.md` (wins on conflict). DTO names come from `docs/API.md`.
 - Owners (C3, C5, W2.x, W3.x, W4.x; Phase 5: C9, W5.x; Phase 6: C12, W6.x; Phase 7: C15, W7.x; Phase 8: C20, W8.x;
-  Phase 9: C25, W9.x) follow the phase tables in `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
+  Phase 9: C25, W9.x; Phase 10: C33, W10.x) follow the phase tables in `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
 - Everything is English. Every UI string is sentence case (see [Copy guidelines](#15-copy-guidelines)).
 
 Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 Design tokens](#3-design-tokens) ·
@@ -31,7 +31,9 @@ Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 D
    - the Views menu;
    - Dispatch;
    - Routines;
-   - Customize;
+   - Customize as an app mode (amended in Phase 10, ADR-044: the user asked for **agent customization**, so
+     Settings → Customize lists the sub-agents, slash commands and skills of the user, the projects and the plugins,
+     9.12; it is a settings page, not a third sidebar mode, and project definition files stay read-only in the UI);
    - session filters (status/branch/environment filters above the session list; Phase 7: the project switcher is the
      only filter);
    - diff, terminal and browser panes (no split panes next to the transcript; Phase 7 keeps this: diffs and shell
@@ -45,7 +47,8 @@ Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 D
    transcript, composer (`+`, model, effort, permission, context ring, send/stop; Phase 6: image options and the mic);
    Phase 7: the project switcher above New chat. Phase 8: the changes toggle in the header of project chats (5.6).
    Phase 9: the todo strip and the queued messages stack above the composer in its dock (2.16, 7.25, 7.26); there is
-   still no side pane for plans, tasks or sub-agents (they render inside the transcript).
+   still no side pane for plans, tasks or sub-agents (they render inside the transcript). Phase 10: the background
+   agents list joins the dock between the todo strip and the queue (2.17, 7.29); still no side pane.
 3. **Dark by default.** `html.dark` on first load even when the OS prefers light. Light and System are opt-in.
    No light flash, ever (see [4](#4-theme-behavior)).
 4. **Keyboard-first.** Every action is reachable from the keyboard: palette (Mod+K), new chat (Mod+Shift+O),
@@ -789,6 +792,134 @@ Settings → General, the Agent section (9.11):
 │   How many tool calls one sub-agent may chain (1–200).          │
 ```
 
+### 2.17 Agent customization: Customize page, commands, skills, background agents, Remember (Phase 10)
+
+Legend additions: `✦` Customize (`WandSparkles`) · `⊡` custom agent (`BotMessageSquare`) · `/` command
+(`SquareSlash`) · `◫` skill (`BookOpen`) · `⊘` shadowed (`EyeOff`) · `✕` invalid (`CircleAlert`) · `⋯` row menu ·
+`■` stop · `▤` plan file (`FileText`) · `⧉` copy.
+
+Settings → Customize (9.12), desktop, the Agents tab with a project selected:
+
+```
+┌ Settings ───────┬────────────────────────────────────────────────────────────────────┐
+│ ← Back to app   │ Customize                                [Import…]  [+ New agent]  │ customize-import, customize-new
+│ Providers       │ Sub-agents, slash commands and skills: yours, your projects' and … │
+│ Models          │ [Agents 6][Commands 3][Skills 2]       Project [ harness-forge   ▾]│ customize-tab, customize-project-select
+│ Media           │ Personal · 2                                      customize-section│ data-source=user
+│ Projects        │ ┌────────────────────────────────────────────────────────────────┐ │
+│ ✦ Customize ◀   │ │ ⊡ code-reviewer  Reviews diffs for bugs and risky changes.   ⋯ │ │ customization-row
+│ General         │ │   Personal · claude-sonnet-5 · 4 tools                         │ │
+│ Appearance      │ │ ⊡ test-writer    Writes vitest tests for a module.           ⋯ │ │ data-state=shadowed
+│ Data            │ │   Personal · All tools · ⊘ Shadowed                            │ │
+│ About           │ └────────────────────────────────────────────────────────────────┘ │
+│                 │ In harness-forge · 2      .harness/agents · .claude/agents         │ data-source=project
+│                 │ │ ⊡ test-writer    Project test writer.  .harness/agents/test-…⋯ │ │
+│                 │ │ ✕ broken         Invalid                                     ⋯ │ │
+│                 │ │   Line 2: Add a description.          customization-diagnostics│ │
+│                 │ From plugins · 1  │ ⊡ sql-expert  Plans SQL migrations.  db-tools ⋯│ data-source=plugin
+│                 │ Built-in · 2      │ ⌕ explore  Read-only research   ⑂ general  …  │ data-source=builtin
+└─────────────────┴────────────────────────────────────────────────────────────────────┘
+```
+
+The editor sheet (right side, `sm:max-w-2xl`; full width at 390px) and the page at 390px:
+
+```
+┌ 390 ──────────────────────────┐   ┌ 390 ──────────────────────────┐
+│ ☰ Customize                   │   │ New agent                   × │ customization-editor (sheet)
+│ [Import…] [+ New agent]       │   │ Name [ code-reviewer        ] │ customization-name
+│ [Agents 6][Commands 3][Ski… → │   │ Description                   │ customization-description
+│ Project [ harness-forge     ▾]│   │ [ Reviews diffs for bugs …  ] │
+│ Personal · 2                  │   │ Tools (•) All tools the chat  │ customization-tools-mode
+│ │ code-reviewer            ⋯ ││   │       allows ( ) Only these   │
+│ │ Reviews diffs for bugs …   ││   │ Model [ Default sub-agent… ▾ ]│ customization-model
+│ │ Personal · sonnet-5        ││   │ Instructions       1.2 / 64 KB│
+│ In harness-forge · 2          │   │ ┌───────────────────────────┐ │ customization-body (≤ 50dvh)
+│ │ test-writer              ⋯ ││   │ │ You review diffs. …       │ │
+│ │ .harness/agents/test-wri…  ││   │ └───────────────────────────┘ │
+└───────────────────────────────┘   │ [Cancel]        [Save agent]  │ sticky footer, 40px
+                                    └───────────────────────────────┘
+```
+
+The slash menu with groups and the argument hint (7.8, 7.28):
+
+```
+ ┌ App ─────────────────────────────────────────────────────────────┐  slash-menu
+ │ /remember   Save a note to your instructions                     │  slash-menu-item[data-group=app]
+ │ /compact    [focus]  Summarize the conversation                  │
+ │ Project ─────────────────────────────────────────────────────────│
+ │ /review     <file> [focus]   Review a file for bugs     frontend │  data-group=project (namespace right)
+ │ Personal ────────────────────────────────────────────────────────│
+ │ /standup    Draft my standup notes                               │  data-group=personal
+ │ Plugins ─────────────────────────────────────────────────────────│
+ │ /tldr       Summarize the text                         Summaries │  data-group=plugin (plugin name right)
+ └──────────────────────────────────────────────────────────────────┘
+ ┌ /review <file> [focus]                                           ┐  slash-argument-hint (ghost after "/review ")
+ │ ＋ ✱ Sonnet ▾                                  Ask ▾  ◔  (↑)      │
+```
+
+The transcript: a custom agent, a background call, a skill row, a saved plan and a delivered result (7.25, 7.27, 7.28,
+7.29):
+
+```
+ ▸ ⊡ code-reviewer  Review the auth diff        8 tool calls · 1m 2s  ✓   task-block[data-kind=custom]
+     No blocking issues found.
+ ▸ ⑂ Agent  Find flaky tests        Background · 0:41  ⟳ In background    task-block[data-background]
+     └ shell "pnpm vitest --run"
+ ▸ ◫ Loaded skill  release-notes                            Project  ✓    tool-row[data-tool-name=skill]
+ ▸ ▤ exit_plan_mode "Move auth…"                 Approved · Accept edits
+     Saved to [▤ .harness/plans/2026-10-04-move-auth.md] ⧉  Show changes  plan-file
+ ┌ ⑂ Background agent finished · Agent · Find flaky tests  12 tool calls · 3m 2s ┐ task-result (dashed)
+ │ Two tests depend on wall-clock time.                          Show report ▸  │ task-result-toggle
+ └──────────────────────────────────────────────────────────────────────────────┘
+   Sent to the agent                                                    (variant turn: the carrier message)
+```
+
+The background agents list in the dock (7.29), open, between the todo strip and the queue:
+
+```
+ ┌ ☰ 3/7 · Running the parser tests                     ▰▰▰▱▱▱▱       ⌃ ┐ todo-strip
+ ┌ Background agents · 2 running                         [Stop all]      ┐ background-agents (open)
+ │ ▸ ⑂ Agent  Find flaky tests        12 tool calls · 1m 12s  ⟳   [■]   │ background-agent
+ │     └ shell "pnpm vitest --run"                                      │
+ │ ▸ ⊡ code-reviewer  Review the diff  3 tool calls · 0:20    ⟳   [■]   │ background-agent-stop
+ │ They keep running after the reply. Stop in the composer doesn't …    │
+ ├──────────────────────────────────────────────────────────────────────┤
+ │ ⟳ Hide background agents                                           ⌄ │ background-agents-toggle
+ ┌ ⟳ 2 background agents · Find flaky tests · 1m 12s                  ⌃ ┐ (closed: one h-9 line)
+ ┌ Queued · 1 · sent at the next step …                                  ┐ queued-messages
+ ┌ Reply…                                                                ┐ composer
+```
+
+The Remember dialog (7.30), opened by `/remember` in a project chat:
+
+```
+┌ Remember ─────────────────────────────────────────────── × ┐   remember-dialog
+│ ┌──────────────────────────────────────────────────────────┐ │   remember-text
+│ │ Run pnpm check before every commit.                      │ │
+│ └──────────────────────────────────────────── 36 / 2,000 ──┘ │
+│ Save to                                                      │
+│ (•) AGENTS.md in harness-forge                               │   remember-target[data-value=project-file]
+│     Added as a line at the end of the file.                  │
+│ ( ) Instructions of harness-forge                            │   data-value=project-instructions
+│     Kept by harness-forge and sent with this project's chats.│
+│ ( ) Custom instructions                                      │   data-value=global
+│     Sent with every chat.                                    │
+│                                         [Cancel]  [Save]     │   remember-save
+└──────────────────────────────────────────────────────────────┘
+```
+
+Settings → General, the Agent section with the plan-file fields (9.11):
+
+```
+│ Sub-agent max steps [ 30 ]                                      │ settings-subagent-max-steps
+│ Save approved plans                                         ○   │ settings-plan-files
+│   When you approve a plan in a project chat, it's saved as a    │
+│   Markdown file in the project.                                 │
+│ Plan folder        [ .harness/plans                         ]   │ settings-plan-directory (disabled while off)
+│   A folder inside the project. Files are named by date and plan │
+│   title.                                                        │
+```
+
 ---
 
 ## 3. Design tokens
@@ -1208,9 +1339,10 @@ Clicking the Chat tab goes to `lastRoutes.chat`; Plugins goes to `lastRoutes.plu
 1. "New plugin" row with `ChevronDown` → dropdown: "Provider" (`/plugins/new?type=provider`), "Code plugin"
    (`/plugins/new?type=code`).
 2. "Install…" row (`Download` icon) → `ui.openInstall()` (dialog mounted by `pages/plugins.vue`, see 6).
-3. "Browse" group: All, Providers, Tools, MCP servers, Commands, Disabled — each with a count badge from
-   `plugins.counts`; links to `/plugins?filter=all|providers|tools|mcp|commands|disabled` (no param = `all`;
-   DECISIONS "UI query parameters"). Active filter row is highlighted.
+3. "Browse" group: All, Providers, Tools, MCP servers, Commands, Agents and skills (Phase 10, `Bot` icon: plugins that
+   contribute agents or skills), Disabled — each with a count badge from `plugins.counts`; links to
+   `/plugins?filter=all|providers|tools|mcp|commands|agents|disabled` (no param = `all`; DECISIONS "UI query
+   parameters"). Active filter row is highlighted.
 4. "Installed" group: every plugin sorted by name (builtins first): `ProviderIcon` (sm) + name + `StatusDot`
    (`active` → ok, `disabled` → off, `loading` → running, `untrusted`/`incompatible` → warning, `error` → error).
    Links to `/plugins/<id>`.
@@ -1218,13 +1350,17 @@ Clicking the Chat tab goes to `lastRoutes.chat`; Plugins goes to `lastRoutes.plu
 ### 5.5 Settings mode contents (`SettingsNav`, C3)
 
 "← Back to app" row, then Providers (`KeyRound`), Models (`Boxes`), Media (`ImagePlay`, Phase 6: right after
-Models, `/settings/media`, 9.9), Projects (`Folders`, Phase 7: right after Media, `/settings/projects`, 9.10), General
+Models, `/settings/media`, 9.9), Projects (`Folders`, Phase 7: right after Media, `/settings/projects`, 9.10),
+Customize (`WandSparkles`, Phase 10: right after Projects, `/settings/customize`, 9.12), General
 (`SlidersHorizontal`), Appearance (`Palette`), Data (`Database`, Phase 5: between Appearance and About,
-`/settings/data`, 9.8), About (`Info`). The order is therefore Providers, Models, Media, Projects, General, Appearance,
-Data, About. Active item from the route. Footer shows only `ThemeToggle`. The links live in `SETTINGS_LINKS`
-(`components/app-shell/navigation.ts`; the Media entry has the key `media` and the test id `settings-nav-media`, the
-Projects entry the key `projects` and the test id `settings-nav-projects`); the command palette lists them too
-(`go-settings-projects`). The wireframes 2.5, 2.7 and 2.10 predate the Projects entry (2.13 shows it).
+`/settings/data`, 9.8), About (`Info`). The order is therefore Providers, Models, Media, Projects, Customize, General,
+Appearance, Data, About. Active item from the route (`/settings/customize?tab=…&project=…` keeps Customize active).
+Footer shows only `ThemeToggle`. The links live in `SETTINGS_LINKS` (`components/app-shell/navigation.ts`; the Media
+entry has the key `media` and the test id `settings-nav-media`, the Projects entry the key `projects` and the test id
+`settings-nav-projects`, the Customize entry the key `customize` and the test id `settings-nav-customize`); the command
+palette lists them too (`go-settings-projects`; Phase 10: `go-settings-customize`, "Customize", added automatically
+because the palette reads `SETTINGS_LINKS`). The wireframes 2.5, 2.7 and 2.10 predate the Projects entry (2.13 shows
+it); 2.17 shows Customize.
 
 ### 5.6 Main header
 
@@ -1261,7 +1397,9 @@ Projects entry the key `projects` and the test id `settings-nav-projects`); the 
 `bg-gradient-to-t from-background` fade above it, the same `max-w-3xl` column, and
 `pb-[max(12px,env(safe-area-inset-bottom))]`. Composer body: `rounded-[20px] border bg-card shadow-sm`. Full spec
 in 7.7. Phase 9: the dock stacks the todo strip (7.25) and the queued messages (7.26) above the composer, in that order
-and in the same column; each renders nothing when it has nothing to show (14.1, "Dock stacking").
+and in the same column; each renders nothing when it has nothing to show (14.1, "Dock stacking"). Phase 10: the
+background agents list (`BackgroundAgents`, 7.29) sits between the todo strip and the queued messages, so the order is
+todo strip → background agents → queued messages → composer.
 
 ### 5.9 Scroll behavior
 
@@ -1310,7 +1448,8 @@ All pages are `ssr: false` SPA routes. C5 creates every page as a stub in Phase 
 | `/settings/providers` | `pages/settings/providers.vue` | provider list, key dialog (`?configure=<providerId>` opens it) | W2.5 |
 | `/settings/models` | `pages/settings/models.vue` | default + title model (chat models only), per-provider model tables | W2.5; W6.10 (Phase 6) |
 | `/settings/media` | `pages/settings/media.vue` → `MediaSettings` | "Images and voice": the Images section (image model of the `generate_image` tool) and the Voice section (speech to text, language, read aloud, voice, speed, test voice), 9.9 | C12 (stub), W6.10 |
-| `/settings/projects` | `pages/settings/projects.vue` → `ProjectsSettings` | Projects (Phase 7): the project list with rename, instructions and delete, and the Add project dialog with the folder browser (`?add=1` opens it), 9.10; Phase 8: "Allowed commands…" per project and the global rules section `GlobalAllowlistSection` below the list | C15 (stub), W7.9; W8.11 (Phase 8) |
+| `/settings/projects` | `pages/settings/projects.vue` → `ProjectsSettings` | Projects (Phase 7): the project list with rename, instructions and delete, and the Add project dialog with the folder browser (`?add=1` opens it), 9.10; Phase 8: "Allowed commands…" per project and the global rules section `GlobalAllowlistSection` below the list; Phase 10: "Agents, commands and skills…" per project (links to `/settings/customize?project=<id>`) | C15 (stub), W7.9; W8.11 (Phase 8); W10.12 (Phase 10 menu item) |
+| `/settings/customize` | `pages/settings/customize.vue` → `CustomizeSettings` | Customize (Phase 10, ADR-044 / ADR-045): the sub-agents, slash commands and skills of the user (editable), of a project (read-only, from `.harness/` and `.claude/`), of the plugins and the built-ins, by source, with the editor, the viewer, import and export (9.12); `?tab=agents\|commands\|skills` (default `agents`), `?project=<id>` (default none) | C33 (stub), W10.8 |
 | `/settings/general` | `pages/settings/general.vue` | display name, send key, defaults, max steps (Phase 7: also in project chats), Alt shortcuts, instructions, password; Phase 9: the Shift+Tab switch and the Agent section (9.11) | W2.5; W7.12 (Phase 7); W9.12 (Phase 9) |
 | `/settings/appearance` | `pages/settings/appearance.vue` | theme cards, reading font, text size, density, expand thinking | W2.5 |
 | `/settings/about` | `pages/settings/about.vue` | versions, license, copy diagnostics | W2.5 |
@@ -1330,10 +1469,14 @@ redirect, and `plugins/events.client.ts`, which waits for a loaded status, never
 `$api` plugin neither marks the auth store unauthenticated nor redirects to `/login` while the current route (or the
 page being loaded) is under `/share/`. The share page calls only `GET /api/share/:token`.
 
-Query parameters used by the UI: `/plugins?filter=&q=` (`filter` = `all | providers | tools | mcp | commands |
-disabled`; not `kind`, which is the plugin kind enum), `/plugins/[id]?tab=`, `/plugins/new?type=&edit=`,
-`/settings/providers?configure=`, `/settings/projects?add=1` (Phase 7: opens the Add project dialog), `/login?redirect=`.
-Model refs and project ids never appear in paths (the project filter lives in `localStorage`, 7.20).
+Query parameters used by the UI: `/plugins?filter=&q=` (`filter` = `all | providers | tools | mcp | commands | agents |
+disabled`; `agents` = "Agents and skills", Phase 10; not `kind`, which is the plugin kind enum), `/plugins/[id]?tab=`,
+`/plugins/new?type=&edit=`, `/settings/providers?configure=`, `/settings/projects?add=1` (Phase 7: opens the Add
+project dialog), `/settings/customize?tab=&project=` (Phase 10: `tab` = `agents | commands | skills`, an unknown value
+reads as `agents`; `project` = a project id, an unknown id is dropped from the URL and shows "No project"; both are
+written back with `router.replace` when the tab or the project select changes), `/login?redirect=`.
+Model refs and project ids never appear in paths (the project filter lives in `localStorage`, 7.20; the Customize page
+takes its project from the query, never from the sidebar filter).
 
 ---
 
@@ -1358,13 +1501,16 @@ v7 UI message stream; verify the exact names in `node_modules/ai/dist/index.d.ts
 | `data-compaction` (Phase 9, ADR-040) | `CompactionDivider` (`chat-format.ts` block kind `compaction`) | a full-width divider at the part's position: "Conversation compacted" / "Conversation compacted automatically" / "Context compacted during this response", "Show summary"; the rows before it are dimmed (7.24). A `/compact` reply holds only this part |
 | `data-steer` (Phase 9, ADR-042) | `SteerNote` (block kind `steer`) | a right-aligned muted note inside the running reply: a message the user sent while the agent worked, delivered at a step boundary (7.26) |
 | `data-activity` (Phase 9, transient) | — | never stored and never a part: `useChat`'s `onData` receives `{ kind: 'compacting' \| 'idle' }` and the streaming reply shows the shimmer "Compacting conversation…" instead of "Thinking…" while it is `compacting` (7.24) |
-| `tool-todo_write`, `tool-exit_plan_mode`, `tool-task` (Phase 9, `core-agent`) | `ToolPart` (todo row and plan row, 7.25), `TaskBlock` (block kind `task`, 7.27) | the agent tools: a todo row whose body is a `TodoList`, a plan row with `PlanApprovalCard` while it awaits a decision, a two-line sub-agent block; each falls back to the generic tool row when its input or output does not parse with the shared schemas |
+| `tool-todo_write`, `tool-exit_plan_mode`, `tool-task` (Phase 9, `core-agent`) | `ToolPart` (todo row and plan row, 7.25), `TaskBlock` (block kind `task`, 7.27) | the agent tools: a todo row whose body is a `TodoList`, a plan row with `PlanApprovalCard` while it awaits a decision, a two-line sub-agent block; each falls back to the generic tool row when its input or output does not parse with the shared schemas. Phase 10: a `task` block also renders custom agent types and background calls (7.27, 7.29); an approved plan row shows `PlanFileChip` when the plan was saved as a file (7.25) |
+| `tool-skill` (Phase 10, `core-agent`, ADR-045) | `ToolPart` (skill row, 7.28) | "Loaded skill {name}" with the skill's source; the body is `SkillToolBody` (the instructions the agent read) plus "Raw input and output"; falls back to the generic row when the output does not parse |
+| `data-task-result` (Phase 10, ADR-046) | `TaskResultNote` (block kind `task-result`) | a finished **background agent** delivered to the agent (7.29): inside a running reply at the step where it was delivered (variant `inline`), or as the only content of a server-started turn's carrier user message (variant `turn`, which renders the notes instead of a bubble) |
 | `data-*` | — | ignored unless listed in `docs/API.md`; unknown data parts never render |
 | error (message `metadata.error` or stream error) | `ErrorPart` | alert at the end of the message, see 7.4 |
 
 A user message whose `metadata.command` is set shows `CommandBadge` (`SquareTerminal` + `/name`) above the
 bubble text; the text stays as typed. A `reply` command answer shows "Command reply" instead of the model name
-in the meta row.
+in the meta row. Phase 10 (7.28): the badge also tells where the command came from and which model it asked for
+(`metadata.command.source`, `modelRef`, `allowedTools`).
 
 An assistant message of an image turn (`metadata.image` set, ADR-028) that is streaming and has no file part yet
 renders `GeneratingImages` (7.16) after its parts: `n` placeholder tiles at the requested aspect ratio. A finished,
@@ -1426,7 +1572,9 @@ latest snapshot as its Output.
 item's `activeForm`, else its content; summary "3/7"; body `TodoList` plus "Raw input and output"), `exit_plan_mode`
 (`ClipboardList`; argument = the plan's first heading, else its first line; status texts "Plan ready for review",
 "Kept planning" (`PencilLine`), "Approved · Accept edits" / "Approved · Ask"; body `PlanBody` plus "Your feedback: …"
-when a reason was sent) and `task` (a `TaskBlock` instead of the row, for every tool named `task`). The todo and plan
+when a reason was sent; Phase 10: `PlanFileChip` first when the approved plan was saved, 7.25), `task` (a `TaskBlock`
+instead of the row, for every tool named `task`) and, Phase 10, `skill` (`BookOpen`; the row reads "Loaded skill" plus
+the skill name, 7.28). The todo, plan and skill
 bodies sit in `AgentToolBody` (`data-slot="agent-tool-body"`) with the generic blocks behind "Raw input and output";
 these renderers apply to tools of `core-agent` (any tool of that name until the tool list has loaded), and a value
 that does not parse keeps the generic blocks. Rows never auto-expand (principle 5); the todo strip is the live view
@@ -1647,7 +1795,9 @@ returning resumes it: `@ai-sdk/vue` 4 has no `resume` option, so the session cal
 when the chat has an active run (11.1). Phase 9 (ADR-042): Stop also empties the chat's queue; the stop result lists the
 dropped messages (`dropped`), `session.stop()` resolves with them, and the tab that pressed Stop puts them back into its
 composer (`restoreQueued`, 7.26) with the toast "Queued messages moved back to the composer."; other tabs only see the
-queue empty. Sub-agents of the run stop with it (their blocks end "Stopped", 7.27).
+queue empty. Sub-agents of the run stop with it (their blocks end "Stopped", 7.27). Phase 10 (ADR-046): **background
+agents are not stopped** by Stop or Esc (Claude Code parity); they keep running after the reply and have their own
+Stop in the background agents list (7.29), whose footnote says so.
 
 **Composer while a run is active** (Phase 9, ADR-042): the textarea stays enabled and its placeholder becomes "Queue a
 message…". Send (Enter, Mod+Enter or the button) does not start a second request: `session.submit()` adds the message
@@ -1729,7 +1879,7 @@ Opens when the textarea starts with `/` (caret in the first token); a popover an
 | Group | Items |
 |---|---|
 | App (client) | `/new` Start a new chat · `/model` Switch model · `/effort` Set reasoning effort · `/mode` Set permission mode · `/help` Show shortcuts and commands |
-| Commands (server) | from `plugins.commands` (`GET /api/commands`): `/name`, description, source plugin name (muted, right) |
+| Commands (server) | from `plugins.commands` (`GET /api/commands`): `/name`, description, source plugin name (muted, right); Phase 10: replaced by the Project, Personal and Plugins groups below |
 
 ↑/↓ move, Enter or Tab completes, Esc closes. Client commands without arguments run at once; `/model`,
 `/effort`, `/mode` without an argument open their menu; with one (`/effort high`, `/mode auto`,
@@ -1748,6 +1898,34 @@ project chats." (`PLAN_NEEDS_PROJECT`, 7.11); the unknown-mode error lists `plan
 the message is sent like a server command. The server summarizes the conversation into a `data-compaction` reply (7.24);
 the optional text after the name is the focus of the summary (at most 1,000 characters). While a run is active it is
 queued as the next turn (7.26). Plugins cannot register a command named `compact`.
+
+**Phase 10 (ADR-045): groups, argument hints, `/remember`.** The server items come from
+`useCustomizationsStore().slashCommands(projectId)` (`GET /api/commands?projectId=`, 11.7) instead of `plugins.commands`:
+the effective commands of the chat's project (none for a chat without a project), the user's personal commands, the
+plugin commands and `/compact`, each with its `source` (`harness | plugin | user | project`) and, when the command file
+sets them, `namespace`, `argumentHint` and `modelRef`. The menu shows them in four groups, always in this order:
+
+| Group (`data-group`) | Items |
+|---|---|
+| App (`app`) | the client commands (`/new`, `/model`, `/effort`, `/mode`, `/help`, and `/remember` "Save a note to your instructions", 7.30) and the harness command `/compact` (source `harness`) |
+| Project (`project`) | the project's commands from `.harness/commands/` and `.claude/commands/` (source `project`); the namespace (the subfolder, e.g. `frontend`) muted on the right |
+| Personal (`personal`) | the user's own commands from Settings → Customize (source `user`) |
+| Plugins (`plugin`) | plugin commands (source `plugin`, `core-commands` included); the plugin name muted on the right |
+
+- A group heading shows only when the group has a matching item. A name appears once: the server already resolved
+  precedence (project `.harness` > project `.claude` > personal > plugin), so a shadowed command is not listed (the
+  Customize page shows it as shadowed, 9.12).
+- Each row (`slash-menu-item`, `data-value` = the name, `data-group`): the mono `/name`, the argument hint (muted mono,
+  e.g. `<file> [focus]`, hidden below `sm`), the description, and on the right the namespace or the plugin name.
+- Filtering stays a name prefix match; the client-first order of v1 becomes the group order. Selecting a server command
+  inserts `/name ` as before; when it has an argument hint, the ghost hint appears (7.28).
+- Freshness: the composer calls `fetchCommands(projectId, { maxAgeMs: 15_000 })` when it mounts, when the chat's
+  project changes and each time the slash menu opens (a typed `/`), so a command file saved on disk shows up the next
+  time the menu opens; `customization.changed` and `plugin.changed` mark every cached list stale. While the first list
+  loads, the App group shows alone.
+- **Skills are not in the menu** (not user-invocable in v1.6; a backlog item): the agent loads them itself (7.28).
+- Plugins can no longer register a command named `remember` (it became a client command, like `compact` is a harness
+  command); such a plugin command is refused at registration (release note).
 
 ### 7.9 Model picker (`ModelPicker`, W2.3)
 
@@ -1953,6 +2131,12 @@ chats (6: the route is exempt from the auth middleware).
   which the share part does not carry), the latter two inside `AgentToolBody` with the generic blocks behind "Raw input
   and output", with the same test ids as in the chat; without tool details the rows read "Sub-agent", "Updated tasks"
   and "Plan" (no argument; `data-slot="agent-tool-label"`) and stay static.
+- **Agent customization** (Phase 10; no `sharePartSchema` change): `ShareToolRow` labels a custom agent type with its
+  name and `BotMessageSquare` (without tool details too: "Sub-agent {name}"), adds "· in the background" to a background
+  call (its output there is only the launch: "Started in the background"), and renders `skill` rows as "Loaded skill
+  {name}" (`BookOpen`; the `SkillToolBody` only with tool details). The server drops `data-task-result` parts and a
+  carrier user message that holds nothing else, so background results never appear on share pages; plan file chips
+  are not shown there either.
 
 ### 7.16 Image gallery and generating state (`ImageGallery`, `GeneratingImages`, W6.8)
 
@@ -2646,6 +2830,23 @@ chats offer it.
   like any approval (7.3); a new user message supersedes it.
 - **Mobile**: the actions are `flex-col-reverse sm:flex-row`, full width, 40px tall on coarse pointers, so "Approve,
   accept edits" is on top.
+- **Plan file** (Phase 10, ADR-047; `PlanFileChip`, `components/chat/agent/`, `plan-file`): with **Save approved plans**
+  on (`planFiles`, 9.11), approving a plan in a project chat writes it to `<planDirectory>/<YYYY-MM-DD>-<slug>.md` in
+  the project (default folder `.harness/plans`; the slug comes from the plan's first heading or line; a name that exists
+  gets `-2`, `-3`, …). The `exit_plan_mode` output then carries `planPath` (the project-relative path), or `planError`
+  when the write failed (the approval itself never fails because of it). The row body of an approved plan starts with
+  the chip, before `PlanBody`:
+  - saved (`data-state="saved"`, `data-path` = `planPath`): "Saved to" and a mono path chip (`FileText`, truncated in
+    the middle, the full path in a tooltip), a **Copy path** icon button (`CopyButton`, "Copy path") and, in a project
+    chat, **Show changes** (a link button that opens the changes panel on its "This chat" view through
+    `useChangesPanel().setOpen(true, { focus: true })`; the file is journaled under the reply, so it is listed there and
+    "Rewind files to here" removes it);
+  - failed (`data-state="failed"`): a warning line (`TriangleAlert`, `text-warning`) "Couldn't save the plan file:
+    {planError}";
+  - neither field (the setting was off, the chat has no project, the plan was rejected, an output from before v1.6):
+    no chip. The share page shows no chip (`ShareToolRow` renders only the plan).
+  - The row's collapsed status stays "Approved · Accept edits" / "Approved · Ask"; the chip is inside the body, so a
+    collapsed row never moves.
 
 **Todos** (`todo_write`, `core-agent`, policy `safe`, every chat with tools, plan mode included): the agent replaces
 its whole list with each call (at most 50 items `{ id, content, status: pending | in_progress | completed,
@@ -2828,6 +3029,212 @@ without asking (writes in Accept edits, everything but always-ask tools in Auto)
   (`session.cwd` ignores task steps).
 - **Cost**: each sub-agent writes its own usage row (purpose `subagent`); its cost is part of the reply's cost.
 
+**Phase 10 (ADR-045, ADR-046): custom agent types and background calls.** `type` now names any agent of the chat's
+catalog: the built-ins `explore` and `general` (alias `general-purpose`) and the user's, the project's and the
+plugins' agents (9.12). The input schema trims and lowercases it; the output's `type` is the resolved name, and the
+output carries `agent?: { source: builtin | plugin | user | project, description (≤ 200), path? }` (a snapshot taken
+when the call ran, so tooltips survive reloads and share pages) and, for a background call, `taskId`. `taskTypeSchema`
+stays the built-in enum (the icons); any other name is a custom type. An unknown type ends the call `failed` with an
+error that lists the available types (the block shows it like any failure).
+
+- **Kind** (`taskKindOf(type)` in `agent-tools.ts`): `explore` → `Telescope` + "Explore"; `general` → `Bot` + "Agent";
+  any other name → `custom`: `BotMessageSquare` + the agent name as the label (`font-medium`, truncated at 24
+  characters, the full name in the tooltip). The root `task-block` gets `data-kind` `explore | general | custom` and
+  `data-agent-type` = the type name (the output's, else the input's lowercased, with `general-purpose` read as
+  `general`). Every type string parses, so nothing falls back to `ToolPart` because of the type alone.
+- **Agent tooltip**: when `output.agent` exists, the label is a `HoverCard` trigger (focusable, `Tooltip` on touch)
+  showing the description and the source line: "Built-in agent", "Personal agent", "From {plugin name}" (the plugin
+  name from the plugins store, else its id) or "Project: {path}" (mono). The trigger's accessible name becomes
+  "Sub-agent {name}: {description}, {status}, {n} tool calls" for custom types.
+- **Background call** (`input.background: true`; `data-background` on the root): the call returns at once with
+  `status: 'background'`, the `taskId` and no steps; the sub-agent then runs on its own (7.29). The block reads its live
+  state from `AGENT_TASK_CONTEXT` (provided by `ChatView`, 11.7):
+  - while the background agent is `queued` / `running`: `data-state` = that status, the status cell shows the spinner
+    and "In background", the short meta reads "Background · {n} tool calls · 1m 2s" (the duration ticks), line 2 is its
+    latest step; the trigger name adds ", running in the background";
+  - once it finished: `data-state` = its final status (`completed` / `failed` / `aborted` / `limit`, with the 7.27 icons
+    and words; a stop after a server restart reads "Stopped" with the error "The server restarted before the task
+    finished."), line 2 = the first sentence of its report (else of its error);
+  - when no live state is known (the chat came from an import or the task list was pruned; a chat keeps its latest 100
+    background tasks): `data-state="background"`, `CircleDashed` and "Started in the background", line 2 empty;
+  - expanded: `TaskBody` with the live snapshot (`task.output`, else the launch output), then the reveal link
+    `task-block-reveal` (`data-target`): "Show in background agents" (`dock`; opens the dock, scrolls the row into view
+    and expands it) while the agent runs, "Go to the result" (`result`; scrolls to its `TaskResultNote` and opens its
+    report) once its result is on the shown path; no link otherwise.
+- The block never auto-expands, keeps its two lines while the state changes, and its cost is not part of the reply's
+  cost (a background agent's usage row is attributed to the reply that launched it, its cost is in its report's meta
+  line and in the chat's totals).
+
+### 7.28 Custom commands and skills in the chat (`SlashArgumentHint`, `CommandBadge`, `SkillToolBody`, W10.9 / W10.11; Phase 10)
+
+**Custom commands** (ADR-045) are markdown files: a project's `.harness/commands/**/*.md` (over `.claude/commands/`),
+or the user's personal commands from Settings → Customize. The composer lists them in the slash menu (7.8); the server
+expands them; the chat request is unchanged.
+
+- **Argument hint** (`SlashArgumentHint`, `components/chat/composer/`, `slash-argument-hint`): after a command with an
+  `argumentHint` is inserted (Enter or Tab in the menu, or typed), ghost text shows the expected arguments right after
+  the command while the text is exactly `/name` plus one or more blanks, on one line, with the caret at the end: an
+  `aria-hidden` mirror absolutely positioned over the textarea with the same padding, font, line height and wrapping,
+  holding an invisible `/name ` followed by the muted hint (`<file> [focus]`). It hides at the first argument character,
+  when the text changes to another command, or when the textarea scrolls. A sr-only element linked from the textarea's
+  `aria-describedby` reads "Arguments: {hint}" while it shows. It never takes keys (Tab still completes from the menu
+  only while the menu is open).
+- **Expansion** (server, ARCHITECTURE.md 6.24): `$ARGUMENTS` = the whole text after the name, `$1` … `$9` = single
+  words (quotes group words), `{{input}}` = the whole text; a body without a placeholder gets the text appended. Lines
+  starting with `!` are **not** run and `@path` is **not** expanded: both stay text for the model. The bubble keeps the
+  typed text; `metadata.command.expansion` holds what the model got.
+- **Model override**: a command file's `model` runs that turn on the given model (the chat keeps its own model; the
+  composer's model picker does not change). The reply's meta row names the model that ran. When the model is not
+  available (no key, unknown, an image model), the chat's model answers and the reply starts with the notice
+  `command-model-unavailable` (icon `Boxes`, level warning, the server's text, e.g. "The command's model
+  openai:gpt-6 is not available, so the chat's model answered."). Regenerate reuses the stored override.
+- **Allowed tools**: a command's `allowed-tools` narrows the tools of that turn (and of its approval continuations and
+  regenerations); it never pre-approves anything (unlike Claude Code), so calls still ask as the permission mode says.
+- **Badge** (`CommandBadge`, `parts/`): `SquareTerminal` + `/name` as before; when `metadata.command.modelRef` is set a
+  muted "· {model name}" follows; the tooltip (and the badge's accessible name) adds the source: "Project command",
+  "Personal command", "From {plugin name}" or "Built-in command" (`source` absent on messages before v1.6: no source
+  line), the model "Runs on {model name}" and, with `allowedTools`, "Tools limited to {names}" (comma list, at most 8,
+  then "and {n} more").
+- **Queue**: a project or personal command typed while a run is active is queued as the next turn like every server
+  command (never steered; 7.26).
+
+**Skills** (ADR-045) are instructions the agent loads on demand: a project's `.harness/skills/<name>/SKILL.md` (over
+`.claude/skills/`), the user's personal skills, or a plugin's. The model sees their names and descriptions in its
+instructions and calls the `core-agent` tool `skill { name }` when a task needs one. Skills are **not** in the slash
+menu.
+
+- **Row** (`ToolPart`, `tool-row` with `data-tool-name="skill"`): `BookOpen`, "Loaded skill" and the mono skill name
+  (from the input while it runs), then on the right the source ("Project", "Personal", the plugin name, "Built-in") and
+  the status. Running: "Loading skill" (shimmer); failed: "Couldn't load skill" with the error in the body (an unknown
+  skill lists the available ones). The row's accessible name is "Loaded skill {name}, {source}".
+- **Body** (`SkillToolBody`, `components/chat/agent/`, store-free; `data-slot="skill-body"`, inside `AgentToolBody`):
+  the description, the base folder in mono for project skills (`baseDir`, e.g. `.harness/skills/release-notes`) and its
+  supporting files (`files`, at most 50, mono list, `data-slot="skill-files"`; the agent reads them with `read_file`),
+  the content as `Markdown` (`max-h-[50dvh]`, scrolls) with the caption "The agent read these instructions." and, when
+  `truncated`, "Cut at 64 KB." Then "Raw input and output". A skill call never asks for approval (policy `safe`) and
+  is never offered to sub-agents.
+- **Share pages**: `ShareToolRow` shows "Loaded skill {name}" (`BookOpen`) and the body only when tool details are
+  shared.
+
+### 7.29 Background agents (`BackgroundAgents`, `BackgroundAgentRow`, `TaskResultNote`, W10.10 / W10.11; Phase 10)
+
+A **background agent** (ADR-046) is a sub-agent the main agent started with `task { …, background: true }`: the call
+returns at once and the sub-agent keeps working while the main agent goes on, also after the reply ended. When it
+finishes, its report is delivered to the main agent **exactly once**: at the next step of a running reply, or, when
+the chat is idle, through a new turn the server starts by itself. The UI calls them **background agents** (never
+"tasks": "Tasks 3/7" is the todo list, 15).
+
+- **Limits** (shown nowhere except in errors): 3 per chat and 10 per server at a time, 30 minutes each, and the
+  **Sub-agent max steps** setting; a call over a limit ends `failed` ("At most 3 background agents can run in a chat at
+  a time." from the server). They never ask for approval (like every sub-agent).
+- **Stop semantics**: the composer's Stop and Esc **do not** stop background agents (Claude Code parity). They stop
+  with their own Stop (below), when the chat or its project is deleted, on Delete all data, on a key rotation and when
+  the server shuts down; a server restart leaves a running one `aborted` ("The server restarted before the task
+  finished."), never resumed.
+- **Busy project**: while a background agent of a chat runs, its project counts as busy: Rewind, Revert, Undo, deleting
+  the project, moving the chat and deleting a version answer 409 `run-active` and show their existing "Wait for the
+  responses in this project to finish …" texts; switching versions still works.
+
+**The dock list** (`BackgroundAgents`, `components/chat/background/`, `background-agents`; mounted by `ChatView` in the
+dock between `TodoStrip` and `QueuedMessages`, 5.8). It renders nothing when no task is **visible**: visible = `queued` /
+`running`, or finished but not delivered yet (`deliveredAt` null). Data from `useBackgroundTasksStore` (11.7).
+
+- **Collapsed** (the default below `md`; `data-state="closed"`, `data-count` = running, `data-total` = visible): one
+  h-9 line (h-10 on coarse pointers) that is the toggle (`background-agents-toggle`): `Spinner` (a `CircleCheck` when
+  none runs), "2 background agents · {latest description} · 1m 12s" ("1 background agent · …"; the duration of the
+  longest-running one, ticking), or, when every visible one finished, "1 background agent finished · report pending"
+  ("2 background agents finished · reports pending"). The toggle is named "Show background agents, 2 running" ("Show
+  background agents, 1 finished") / "Hide background agents", with `aria-expanded` and `aria-controls`. The open state
+  persists in `localStorage['hf-background-expanded']` (`1` / `0`; default open from `md`, closed below; blocked storage
+  keeps it in memory).
+- **Expanded** (`data-state="open"`; the list renders above the toggle line, inline, `max-h-[40dvh]`, scrolls): a
+  header "Background agents · {n} running" with **Stop all** (`background-agents-stop-all`, outline, `Square`; shown
+  while at least one runs; it stops each running one in turn through the stop route, there is no batch route), the rows,
+  and the footnote "They keep running after the reply. Stop in the composer doesn't stop them."
+- **Row** (`BackgroundAgentRow`, `background-agent`, `data-task-id`, `data-state` = the task status, `data-kind`
+  `explore | general | custom`, `data-agent-type`): a chevron toggle (`background-agent-toggle`, "Show details of
+  {description}" / "Hide details …", `aria-expanded`) that expands `TaskBody` with the live input and output; the type
+  icon and label (7.27), the description, the latest step (mono, `└ shell "pnpm vitest --run"`), "{n} tool calls ·
+  {duration}", the status cell (spinner, or the final status icon and word), and **Stop** (`background-agent-stop`,
+  `Square`, named "Stop {description}", 32px, 40px on coarse pointers; only while `queued` / `running`). A finished,
+  undelivered row shows "Report pending" instead of Stop.
+- **Stopping**: Stop → `backgroundTasks.stop(chatId, taskId)` (`POST /api/chat/:id/tasks/:taskId/stop`); while it is in
+  flight the row shows a spinner in place of Stop and `aria-busy`. `'gone'` (the answer shows the task had already ended
+  with another status, or a 404) → toast "It already finished." Other failures → the error toast "Could not stop the
+  background agent". After a stop, focus moves to the
+  next row's Stop, else the previous row's, else the toggle. A stopped agent still delivers its partial report (status
+  `aborted`), at the next run of the chat; a stop never starts a turn by itself.
+- **Announcements**: a polite region inside the component (`data-slot="background-agents-announcer"`, without
+  `role="status"`) says "Background agent finished: {description}" / "Background agent failed: {description}" /
+  "Background agent stopped: {description}" / "Background agent reached its step limit: {description}" once per
+  transition this tab observed (never for states it only loaded).
+- **Sync**: `task.changed { chatId, task }` (SSE, at most one per second per task plus every status change) upserts the
+  task in every tab; every chat load fetches `GET /api/chat/:id/tasks`, an event-stream reconnect refetches every loaded
+  chat (`refreshLoaded()`), and `chat.deleted` drops the chat's list.
+- **Mobile (390px)**: strip (collapsed), background agents (collapsed), queue (two rows) and the composer fit above the
+  keyboard; expanded rows wrap the description under the label and hide the duration.
+
+**Results in the transcript** (`TaskResultNote`, `components/chat/agent/`, store-free, `task-result`, `data-task-id`,
+`data-status` = the final status, `data-variant` `inline | turn`). Data: the `data-task-result` part `{ taskId,
+toolCallId, messageId, output: TaskOutput, deliveredAt }`.
+
+- **Look**: visibly different from `SteerNote` and from tool rows: full width, left-aligned, `rounded-lg border
+  border-dashed bg-muted/30 px-3 py-2 text-sm`, `role="note"` named "Background agent result: {description}". Line 1:
+  the type icon, "Background agent finished" / "Background agent failed" / "Background agent stopped" / "Background
+  agent reached its step limit", then "· {label} · {description}" (label = "Explore", "Agent" or the custom name), and
+  on the right "{n} tool calls · 3m 2s" (`data-slot="task-result-meta"`, hidden below `sm`). Line 2: the report's first
+  sentence (else the error, else "No report.").
+- **Show report** / **Hide report** (`task-result-toggle`, `aria-expanded`, `aria-controls`) opens the report
+  (`task-result-report`: `Markdown`, `max-h-[50dvh]`, scrolls, with a `CopyButton` "Copy report" and the meta line
+  "{model} · {tokens} tokens · {cost} · {duration}" like `TaskBody`); an error shows as the 7.27 alert above it.
+  Collapsed by default, not persisted.
+- **Inline** (`variant="inline"`): inside a running reply, at the step where the agent received it (block kind
+  `task-result` of `chat-format.ts`), like a steer. One note per result.
+- **Turn** (`variant="turn"`): when the chat was idle, the server added a **carrier** user message that holds only
+  `data-task-result` parts and started a turn from it (`run.started` with `origin: 'task'`). `ChatMessage` renders such
+  a message (`isTaskResultMessage(message)`) as its notes, left-aligned, with the caption "Sent to the agent"
+  (`aria-hidden`, muted, below the notes), and without a bubble, `MessageActions`, edit, versions switcher or "Rewind
+  files to here". The reply below it is a normal assistant message.
+- **Server-started turns**: `run.started` with `origin: 'task'` and a `userMessageId` that is not on the shown path makes
+  the session reload the path and then resume the stream, exactly like a queue-started turn (7.26); `ChatView`
+  announces "Background agent finished: {description}" for each result of the carrier. A turn started this way never
+  starts another automatic turn (chain depth 1): a background agent it launches reports at the chat's next run.
+- **Elsewhere**: share pages leave results out (and a carrier message with nothing else); the Markdown export renders
+  "## Background task: {description} ({status})" and the report; search indexes the report; a branch made above a
+  result loses it (the task stays listed in `GET /chat/:id/tasks`).
+
+### 7.30 Remember (`RememberDialog`, W10.9; Phase 10)
+
+`/remember [text]` (a client command, ADR-047) saves a note for the agent where it will be read again. The composer
+clears the input and opens `RememberDialog` (`remember-dialog`, a form dialog mounted by `ChatComposer`, so neither the
+layout nor the ui store changes), prefilled with the text after `/remember ` (trimmed).
+
+- **Text**: a `Textarea` (`remember-text`, label "Note", 3 → 8 rows, at most 2,000 characters with the counter "{n} /
+  2,000"; over the limit: "Use at most 2,000 characters." and Save disabled).
+- **Save to** (`RadioGroup` named "Save to"; items `remember-target`, `data-value`):
+  1. `project-file` — "{file} in {project}" with "Added as a line at the end of the file." (`{file}` = the project's
+     `instructionsFile`: `AGENTS.md`, else `CLAUDE.md`); without one: "AGENTS.md in {project} (new file)". The line is
+     written as `- {text}`, journaled under the chat (the changes panel lists it; "Rewind files to here" can remove it).
+  2. `project-instructions` — "Instructions of {project}" with "Kept by harness-forge and sent with this project's
+     chats." (appended to the project's instructions, 9.10).
+  3. `global` — "Custom instructions" with "Sent with every chat." (appended to Settings → General → Custom
+     instructions).
+  - Outside a saved project chat (no project, or the draft chat on `/` before its first message), 1 and 2 are disabled
+    (`aria-disabled`) with the reason "Open a chat in a project to use this." linked by `aria-describedby`.
+  - Default: the last choice (`localStorage['hf-remember-target']`) when it is enabled; otherwise `project-file` in
+    project chats and `global` elsewhere.
+- **Save** (`remember-save`, disabled while the text is empty or a request runs; Cancel next to it) →
+  `POST /api/memory { target, text, chatId }` (the route `memory.remember` through `useApi()`; no store, 11.7). The returned project or settings are applied to the
+  projects and settings stores. Toasts: "Saved to AGENTS.md" (or the file named in the result; "Created AGENTS.md in
+  {project}" when `created`) / "Saved to the instructions of {project}" / "Saved to your custom instructions". The
+  dialog closes; focus returns to the textarea (desktop only).
+- **Errors** inline above the buttons (`remember-error`, `data-code`, `role="alert"`; the dialog stays open): 400 on the
+  instructions cap → "The instructions would be longer than 20,000 characters. Shorten them in Settings first."; 413 →
+  "The file would be larger than 1 MB."; 400 for an unavailable folder → "The project folder is unavailable."; any
+  other error → the server message (a linked `AGENTS.md`, a chat without a project, …).
+- **Keys**: Mod+Enter saves from the textarea; an empty dialog opens with focus in the textarea, a prefilled one on
+  the selected radio (arrows switch the target); Esc cancels.
+
 ---
 
 ## 8. Plugins UX spec
@@ -2840,7 +3247,7 @@ without asking (writes in Accept edits, everything but always-ask tools in Auto)
 |---|---|
 | Top row | `ProviderIcon` (lg, color variant, plugin icon) · name (`font-medium`) · version (`text-xs mono muted`) · `Switch` (enabled) right |
 | Middle | description, 2 lines max |
-| Bottom | source badge · "Runs code" badge (outline warning, `Cpu` icon) when `kind === 'code'` or it declares a stdio MCP server · contributions summary ("2 providers · 3 tools · 1 MCP server · 2 commands") |
+| Bottom | source badge · "Runs code" badge (outline warning, `Cpu` icon) when `kind === 'code'` or it declares a stdio MCP server · contributions summary ("2 providers · 3 tools · 1 MCP server · 2 commands"; Phase 10: "· 2 agents · 1 skill" from `PluginSummary.contributions.agents` / `skills`) |
 
 Source badge labels: `builtin` → Core · `created` + declarative → Declarative · `created` + code → Code · `zip` →
 zip · `npm` → npm · `url` → URL · `link` / `copy` → Local. State overlays: `error` → `border-destructive/60` and
@@ -2857,7 +3264,8 @@ for `core-agent`).
 
 `PageHeader` "Plugins" with actions: search `Input` ("Search plugins", filters name/id/description, synced to
 `?q=`), "Install…" (outline), "New plugin" split menu (Provider / Code plugin). Filter from `?filter=`:
-`providers | tools | mcp | commands` = plugins contributing that type; `disabled` = plugins not enabled; `all`
+`providers | tools | mcp | commands` = plugins contributing that type; `agents` (Phase 10, "Agents and skills") = plugins
+contributing agents or skills; `disabled` = plugins not enabled; `all`
 (default) = everything. Below `md` the filters render as a `Select` above the grid. Grid: 1 column, 2 from `md`,
 3 from `xl`, gap 12px.
 Empty filter result: `Empty` "No plugins match" + "Clear filters". Loading: 6 skeleton cards.
@@ -2998,6 +3406,8 @@ Description, author, homepage link, permission chips, then one section per contr
 | Tools | `PluginToolsTable`: name (mono) · description · policy badge (Safe / Ask / Always ask; Phase 9: "Decided per call" when the tool's `policy` is null, i.e. a policy function such as the `shell` tool's; the policy column is 8rem) · **Approval** `Select` (Default / Allow / Ask / Deny → tool pref override; Default clears it; Phase 9: Allow is not offered where the server refuses it — tools with workspace access `execute` and `core-agent`'s `exit_plan_mode` — and a stored `allow` on those reads as Default, matching the effective override `GET /api/tools` reports) · enabled `Switch` |
 | MCP servers | status dot + name + transport badge + tool count + **Restart** (`POST /api/mcp/:id/reconnect`); for `core-mcp` the full `McpServersPanel` replaces this section |
 | Commands | `/name` (mono) · description |
+| Agents (Phase 10) | `PluginCustomizationList` (`plugin-customizations`, `data-kind="agent"`), description "Sub-agents the main agent can start.": one row per agent (`plugin-customization`, `data-name`): the mono name, the description, the model id or "Default model", "{n} tools" / "All tools", a "Shadowed" badge when a personal or project agent of the same name wins; entries come from `customizations.catalog(null)` filtered by `pluginId` (a contributed name without an entry, e.g. while the catalog loads, shows as a name-only row); footer link "Open in Customize" → `/settings/customize?tab=agents` |
+| Skills (Phase 10) | the same list with `data-kind="skill"`, description "Instructions the agent loads when a task needs them."; rows show the mono name and the description; footer link → `/settings/customize?tab=skills` |
 
 ### 8.9 Configuration tab (`SchemaForm`, W3.1)
 
@@ -3160,8 +3570,8 @@ except dialogs and text fields, which save on blur or Enter.
 | Max steps in project chats | `Input` (`inputmode="numeric"`) 1–200 (Phase 7, `settings-project-max-steps`), help "Agent runs in project chats can take more steps (1–200)." | `projectMaxSteps` |
 | Alt shortcuts | `Switch` "Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate and Alt+C for changes." (Phase 6 added Alt+V, Phase 8 Alt+C) | `altShortcuts` |
 | Shift+Tab switches the permission mode | `Switch` (Phase 9, `settings-shift-tab-modes`), help "In the composer, Shift+Tab cycles Ask, Accept edits and Plan. Off: Shift+Tab moves focus." | `shiftTabModes` |
-| (section) Agent | `AgentSettingsSection` (Phase 9, 9.11): automatic compaction, compaction model, sub-agent model, sub-agent max steps; mounted between the Chat fields and Custom instructions | `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps` |
-| Custom instructions | `Textarea` ("Sent with every chat") | `instructions` |
+| (section) Agent | `AgentSettingsSection` (Phase 9, 9.11): automatic compaction, compaction model, sub-agent model, sub-agent max steps; Phase 10: save approved plans, plan folder; mounted between the Chat fields and Custom instructions | `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps`; Phase 10: `planFiles`, `planDirectory` |
+| Custom instructions | `Textarea` ("Sent with every chat"; Phase 10: `/remember` can append a line to it, 7.30, so the field shows the stored value again after a `settings` update from the dialog) | `instructions` |
 
 Both step fields save on blur or Enter and Esc restores the saved value; an invalid value shows "Enter a whole number
 from 1 to 200." and keeps the saved value; a failed save rolls the field back (defaults: 20 and 100; the bound is
@@ -3216,7 +3626,11 @@ finishes." (7.4). Phase 7: `DataSettings` provides `dataSettingsContextKey` (`da
 Shared links (remounted through a `:key`).
 
 **Export** (`SettingsSection` "Export"): "Download a zip with every chat, including archived chats and every message
-version. API keys, passwords, plugins, MCP servers and share links are never included."
+version. API keys, passwords, plugins, MCP servers and share links are never included." Phase 10 (ADR-024 amendment,
+ADR-044): every backup also holds the personal agents, commands and skills of Settings → Customize
+(`customizations.json`, raw markdown, no secrets); the description becomes "Download a zip with every chat, including
+archived chats and every message version, and your personal agents, commands and skills. API keys, passwords, plugins,
+MCP servers and share links are never included."
 
 - `Switch` "Include attachments" (`data-export-files`, on; hint "{files} files, {size}");
 - `Switch` "Include settings" (`data-export-settings`, on; hint "General and appearance settings. They are restored
@@ -3239,6 +3653,9 @@ one; a failed chat does not stop the others."
 - "If a chat already exists": `ToggleGroup` (`data-import-policy`, `data-value`) **Skip it** (`skip`, default) /
   **Import a copy** (`copy`: new ids and " (imported)" appended to the title);
 - `Switch` "Restore settings from the backup" (`data-import-restore-settings`, off; disabled for a `.json` file);
+  Phase 10: its help reads "General and appearance settings, and your personal agents, commands and skills. A personal
+  definition you already have with the same name is kept." (the web sends the restore of the definitions together with
+  this switch; the result panel adds "{n} agents, commands and skills restored · {k} kept" when the backup had any);
 - **Import** (`data-import`, `Upload` icon; disabled without a file) → `data.import({ form })` (fields `onConflict`,
   `restoreSettings`, then `file`); "Importing…" with a spinner while it runs; 409 `busy` (7.4) and 413
   `payload_too_large` become toasts, every other error shows inline (`data-import-error`, `data-code`);
@@ -3433,7 +3850,8 @@ not load the projects" with **Retry**.
 - **Row `⋯` menu** (`project-row-menu`, `aria-label="Actions for {name}"`): **Rename** (`project-rename` → the name turns
   into `InlineRename`, `project-rename-input`, at most 80 characters; `projects.update(id, { name })`, optimistic) ·
   **Edit instructions…** (`project-instructions` → `ProjectInstructionsDialog`) · **Allowed commands…** (Phase 8,
-  `project-allowlist`, `ShieldCheck` → `AllowlistDialog`, 7.23) · **Delete…** (`project-delete` → a
+  `project-allowlist`, `ShieldCheck` → `AllowlistDialog`, 7.23) · **Agents, commands and skills…** (Phase 10,
+  `project-customizations`, `WandSparkles` → navigates to `/settings/customize?project=<id>`, 9.12) · **Delete…** (`project-delete` → a
   `ConfirmDialog` "Delete {name}?" with "Its {n} chats stay and move to No project. The folder and its files are not
   touched." ("Its 1 chat stays and moves to No project. …"; without chats "It has no chats. The folder and its files
   are not touched.") and **Delete project**, `project-delete-confirm`, destructive). Delete → `projects.remove(id)` →
@@ -3495,7 +3913,7 @@ not load the projects" with **Retry**.
 ### 9.11 Agent settings (`AgentSettingsSection`, W9.12, Phase 9)
 
 `AgentSettingsSection` (`components/settings/agent/`, no props, no emits) is a `SettingsSection` "Agent" with the
-description "Long chats and sub-agents.", mounted by `GeneralSettings` between the Chat fields and Custom instructions
+description "Long chats and sub-agents." (Phase 10: "Long chats, sub-agents and plans."), mounted by `GeneralSettings` between the Chat fields and Custom instructions
 (wireframe 2.16). It reads and writes the settings store through `settings.update` (optimistic, rolled back with an
 error toast like every General field) and loads the model catalog on mount when nothing loaded it yet (the selects
 and the warning read it). The Shift+Tab switch lives in the General list itself (9.4), right after Alt shortcuts.
@@ -3505,13 +3923,167 @@ and the warning read it). The Shift+Tab switch lives in the General list itself 
 | Automatic compaction | `Switch`, help "Summarize older messages when a chat nears the model's context window. When off, older messages are left out instead." | `autoCompact` (default on) | `settings-auto-compact` |
 | Compaction model | `SettingsModelSelect` (chat models) with `allowNone` "Same model as the chat", help "Writes the summary when a chat is compacted." | `compactModelRef` (null = the chat's model) | `settings-compaction-model` |
 | Sub-agent model | the same select, `allowNone` "Same model as the chat", help "Runs the tasks the agent hands to sub-agents."; when the chosen model cannot call tools (`capabilities.tools` false) a warning `TriangleAlert` "{model} can't call tools, so sub-agents can't use it." (`text-warning`, `data-slot="subagent-model-warning"`, linked to the select by `aria-describedby`; none for a model the catalog does not know) | `subagentModelRef` (null = the chat's model) | `settings-subagent-model` |
-| Sub-agent max steps | `Input` (`inputmode="numeric"`) 1–200, the save and validation rules of Max steps (blur or Enter saves, Esc restores, "Enter a whole number from 1 to 200."), help "How many tool calls one sub-agent may chain (1–200)." | `subagentMaxSteps` (default 30) | `settings-subagent-max-steps` |
+| Sub-agent max steps | `Input` (`inputmode="numeric"`) 1–200, the save and validation rules of Max steps (blur or Enter saves, Esc restores, "Enter a whole number from 1 to 200."), help "How many tool calls one sub-agent may chain (1–200)." (Phase 10: it bounds background agents too) | `subagentMaxSteps` (default 30) | `settings-subagent-max-steps` |
+| Save approved plans (Phase 10, ADR-047) | `Switch`, help "When you approve a plan in a project chat, it's saved as a Markdown file in the project." | `planFiles` (default off) | `settings-plan-files` |
+| Plan folder (Phase 10) | mono `Input` (placeholder `.harness/plans`, at most 200 characters), disabled while Save approved plans is off; help "A folder inside the project. Files are named by date and plan title."; saves on blur or Enter, Esc restores the saved value; checked like the server (a relative path without `..` segments, without a `.git` segment, not absolute, not empty): "Use a folder inside the project, like .harness/plans." and "Use at most 200 characters."; a 400 from the server shows the same texts and keeps the saved value | `planDirectory` (default `.harness/plans`) | `settings-plan-directory` |
 
 - A model that no longer exists in the catalog shows the selects' usual unavailable state; the server then falls back
   to the chat's model (the compaction logs a warning; ARCHITECTURE.md 6.18, 6.22).
+- Plan files (Phase 10): the setting applies to the approvals made after it changed; a plan approved in a chat without a
+  project is never saved; a failed write shows in the plan row (7.25) and never blocks the approval. The saved files are
+  ordinary project files (journaled under the reply: the changes panel lists them, rewind and revert cover them).
 - `autoCompact` off: the server trims the oldest messages as before v1.5 (the notice `context-trimmed`); `/compact`
   still works.
 - Mobile: labels stack above the controls below `sm`, like the other General fields.
+
+### 9.12 Customize (`/settings/customize`, W10.8, Phase 10)
+
+Agent customization (ADR-044, ADR-045). Three **kinds** of definitions, each a markdown file with YAML frontmatter:
+**agents** (sub-agents the main agent can start with `task`; the body is the sub-agent's instructions), **commands**
+(slash commands; the body is the prompt) and **skills** (instructions the agent loads on demand; the body is the skill).
+They come from four **sources**, lowest precedence first: built-in < plugins < personal (this page, stored in the
+database) < the project (`.claude/{agents,commands,skills}`, then `.harness/…`, which wins). A higher source wins a
+name; the losers stay listed as **shadowed**. Wireframes: 2.17. User guide: `docs/guides/customizing-agents.md`.
+
+`CustomizeSettings` (`customize-settings`) in the usual `SettingsPage` frame: the page (`pages/settings/customize.vue`)
+renders the `PageHeader` "Customize" with the description "Sub-agents, slash commands and skills: yours, your projects'
+and your plugins'." and two header actions: **Import…** (`customize-import`, `FileUp`, outline) and **New agent** /
+**New command** / **New skill** (`customize-new`, `Plus`, primary, `data-kind`; the label follows the tab). Nav label
+"Customize" (5.5).
+
+- **Tabs** (`Tabs`, value synced to `?tab=`): **Agents** · **Commands** · **Skills** (`customize-tab`, `data-value`
+  `agents | commands | skills`, `data-count` = the rows of that kind in the current scope, shown as "Agents 6"). Below
+  `sm` the tab list scrolls sideways.
+- **Project** select (`customize-project-select`, `data-value` = the project id, empty for none; label "Project"):
+  "No project" and the projects sorted by name ("Folder not found" muted after a missing one). It writes `?project=`.
+  With a project the page shows that project's definitions and how they combine with the others; without one, only
+  personal, plugin and built-in definitions.
+- **Loading**: on mount and on every project change the page calls `customizations.fetchCatalog(projectId, { refresh:
+  true })` (`GET /api/customizations?projectId=&refresh=1`, so files edited on disk show at once); a skeleton of three
+  rows per section while it loads; a failure shows `SettingsLoadError` "Could not load your customizations" with the
+  server message and **Retry**. `customization.changed` (another tab, a plugin change, an edit on disk noticed by the
+  server) refetches the shown scope quietly.
+
+**Sections** (`CustomizationSection`, `customize-section`, `data-source`, `data-count`), always in this order; a section
+heading reads "{title} · {n}":
+
+| Section (`data-source`) | Contents | Editable |
+|---|---|---|
+| Personal (`user`) | the user's own definitions of the tab's kind, turned-off ones included | yes |
+| In {project} (`project`; only with a project selected) | the project's files of the tab's kind; the heading also shows the scanned folders in mono (`.harness/agents · .claude/agents`); folder-level problems (an unavailable folder, a linked folder, more than 200 files) show as an `Alert` under the heading | no (edit the files in the project) |
+| From plugins (`plugin`) | the definitions contributed by enabled plugins (plugin API 1.4.0) | no |
+| Built-in (`builtin`) | Agents: `explore` ("Explore": read-only research) and `general` ("Agent"); Commands: `/compact` and the client commands (`/new`, `/model`, `/effort`, `/mode`, `/help`, `/remember`), as rows without a menu, described "Reserved: a personal or project command can't use this name."; Skills: no section | no |
+
+**Rows** (`CustomizationRow`, `customization-row`, `data-kind`, `data-name`, `data-source`, `data-state` `active |
+shadowed | invalid | off`, plus `data-customization-id` for personal rows, `data-path` for project rows and
+`data-plugin-id` for plugin rows; at least `--row-height` per line, 40px targets on coarse pointers):
+
+- **Line 1**: the kind icon (agents: `Telescope` / `Bot` for the built-ins, `BotMessageSquare` otherwise; commands:
+  `SquareSlash`; skills: `BookOpen`), the name (commands as `/name`; mono), the description (one line, truncated; two
+  lines below `sm`).
+- **Line 2** (muted, `·`-separated, wraps): the source badge ("Personal", "Project", the plugin name, "Built-in"), the
+  project path (mono, truncated in the middle) for project rows, the namespace for project commands in a subfolder, the
+  model ("{model name}", "Same as the chat" for `inherit`; nothing when unset), the tools ("{n} tools" / "All tools" for
+  agents; "Tools limited to {n}" for commands with `allowed-tools`), the argument hint (mono) for commands.
+- **State badges**: **Shadowed** (`EyeOff`, muted; tooltip "Not used: {winner} wins.", where `{winner}` is "the
+  project's .harness/agents/x.md", "your personal agent" or "the agent from {plugin}"); **Invalid** (`CircleAlert`,
+  destructive outline: the definition cannot be used; its diagnostics list is expanded under the row,
+  `customization-diagnostics`, one line each, the diagnostic's `message` as is: it already starts with "Line N: " when
+  the line is known, so the UI never adds a prefix, e.g. "Line 2: Add a description."); **{n} warnings** (a warning dot; the button
+  toggles the same diagnostics list: "Unknown tool: foo", "The model alias sonnet is not supported: the default model
+  is used.", "Ignored: color, permissionMode"); **Off** (personal rows turned off: listed, not used, they shadow
+  nothing). Info diagnostics (ignored keys) count as warnings in the badge only when there is nothing else.
+- **⋯ menu** (`customization-row-menu`, named "Actions for {name}", always visible on touch): personal rows: **Edit…**
+  (`customization-edit`) · **Duplicate** (`customization-duplicate`: the editor in new mode with the name
+  `{name}-copy`) · **Export .md** (`customization-export`) · **Turn off** / **Turn on** (`customization-toggle`) ·
+  separator · **Delete…** (`customization-delete`, destructive); project, plugin and built-in agent rows: **View…**
+  (`customization-view`) · **Copy to personal** (`customization-duplicate`: the editor in import mode, prefilled from the
+  file) · **Export .md** (`customization-export`) · **Open plugin** (plugin rows, → `/plugins/{id}`). Built-in command
+  rows have no menu.
+- **Turn off / on**: `update(id, { enabled })`, optimistic (rolled back with an error toast on failure).
+
+**Editor** (`CustomizationEditor`, `customization-editor`, `data-kind`, `data-mode` `new | edit | import`): a right-side
+`Sheet` (`w-full sm:max-w-2xl`, full width at 390px), the body scrolls and the footer is sticky. Title "New agent" /
+"Edit {name}" / "Import agent" (commands, skills alike). Built with `@tanstack/vue-form` and the shared parser: the
+fields are serialized with `formatDefinition` (`@harness-forge/shared` `util/definitions.ts`) into the markdown that is
+saved (`{ kind, content, enabled }`), and every change is re-parsed with `parseDefinition`, so the inline errors are the
+server's rules.
+
+| Field | Agent | Command | Skill |
+|---|---|---|---|
+| Name (`customization-name`, mono) | ✓ (a-z, 0-9, `-`, ≤ 64) | ✓ with a `/` prefix adornment (≤ 32) | ✓ (≤ 64) |
+| Description (`customization-description`, `Textarea` 2 → 4 rows, ≤ 1,024) | help "When the main agent should use it. It reads this to decide." | help "Shown in the slash menu." | help "When the agent should load it. It reads this to decide." |
+| Tools (`customization-tools-mode` `RadioGroup`, `data-value` `all \| some`, + `customization-tools`) | "All tools the chat allows" / "Only these tools" | label "Allowed tools": "No restriction" / "Only these tools" | — |
+| Model (`customization-model`, `SettingsModelSelect`, chat models) | `allowNone` "Default sub-agent model" (the setting, else the chat's model) plus the option "Same as the chat" (`inherit`) | `allowNone` "The chat's model" | — |
+| Argument hint (`customization-argument-hint`, mono, ≤ 100, placeholder `<file> [focus]`) | — | ✓ help "Shown after the command while you type its arguments." | — |
+| Body (`customization-body`, `MarkdownEditor`, min 16rem, at most `50dvh` on phones) | "Instructions", help "What the sub-agent should do and how. It gets these instead of the main agent's conversation." | "Prompt", help "$ARGUMENTS is the text after the command; $1 to $9 are single words (quotes group words); {{input}} works too. Without a placeholder the text is added at the end." | "Instructions", help "A personal skill is one file. Put scripts and reference files in a project skill folder." |
+
+- **Size**: a counter under the body shows the size of the whole file as saved, "{n} KB / 64 KB"; above 64 KB: "The
+  file can be up to 64 KB." and Save is disabled.
+- **ToolMultiSelect** (shown with "Only these tools"): a `Popover` with a `Command` list of the tools grouped by plugin
+  (`plugins.tools`, `GET /api/tools`; MCP tools under their server; the `core-agent` tools are left out for agents,
+  since a sub-agent never gets them); each option (`customization-tool-option`, `data-tool-name`) has a checkbox; the
+  chosen tools show as chips (`customization-tool-chip`, `data-tool-name`) with a remove button "Remove {tool}". A name
+  the tool list does not know (an imported Claude Code name that maps to nothing, a tool of a disabled plugin) stays as
+  a warning chip with the tooltip "Not available now". At most 64.
+- **Validation copy**: "Use lowercase letters, digits and hyphens, starting with a letter."; "{name} is a built-in
+  name." (agents `explore`, `general`, `general-purpose`; commands: the client commands and `compact`); "Add a
+  description."; "Use at most {n} characters."; "The file can be up to 64 KB."; a 409 `exists` shows on the name field:
+  "You already have a {kind} named {name}."; a 400 with diagnostics lists them in the form-level alert; any other error
+  shows in the form-level alert (`customization-error`, `data-code`) with the server message (e.g. "You can have up to
+  200 agents.").
+- **Saving**: **Save agent** / **Save command** / **Save skill** (`customization-save`; disabled while invalid or
+  saving) → `customizations.create({ kind, content })` (new, import) or `update(id, { content })` (edit) → toast "Agent
+  saved" ("Command saved", "Skill saved") and the sheet closes; focus returns to the row's menu trigger (or to New /
+  Import…). Mod+Enter in any field saves.
+- **Closing with changes** (Esc, ×, Cancel, a click outside): `ConfirmDialog` "Discard changes?" with "Your changes are
+  lost." and **Discard** (`customization-discard-confirm`, destructive) / **Keep editing**.
+- **The body editor** (`MarkdownEditor`, CodeMirror with markdown highlighting): Tab is **not** captured (it moves
+  focus, so there is no keyboard trap; indentation uses spaces typed by hand), lint markers show the diagnostics with a
+  line, `aria-label` = the field label.
+
+**Viewer** (`CustomizationViewer`, `customization-viewer`): a read-only right-side sheet for project, plugin and
+built-in definitions. Title = the name; the frontmatter as a definition list (description, tools, model, argument hint,
+source); the raw file (`GET /api/customizations/source?projectId&kind&name&source` → `{ content, path? }`) in a read-only
+`MarkdownEditor` with the diagnostics as lint markers; for project files the path in mono with **Copy path**. Footer:
+**Copy to personal** (opens the editor in import mode, prefilled) and **Export .md**. A source that is gone (the file was
+deleted meanwhile, 404) shows "This file no longer exists." with **Close**.
+
+**Import and export** (in the browser; no routes):
+
+- **Import…** opens a visually hidden file input (`customize-import-input`, accepts `.md,text/markdown`, one file). A
+  file over 256 KB is refused with the toast "{file} is too large" ("Definition files can be up to 64 KB."). The text
+  (UTF-8, BOM and CRLF accepted) goes through `parseDefinition` with the current tab's kind and the file name (its stem is
+  the name fallback; a `SKILL.md` needs a `name` in its frontmatter or a name typed in the editor). The editor opens in
+  import mode, prefilled, with an `Alert` (`customization-import-notes`): "Imported from {file}. Check the fields, then
+  save." followed by one line per diagnostic ("Ignored: color, permissionMode", "Unknown tool Task: left out.", "The
+  model alias sonnet is not supported: the default model is used."). A file that cannot be parsed at all opens the
+  editor with the errors and the body as typed.
+- **Export .md**: personal rows export their stored `content`; other rows the source file. The download is
+  `downloadText(content, '{name}.md', 'text/markdown')` (`utils/download.ts`: a Blob and a temporary link); a skill
+  exports as `{name}.md` too (save it as `SKILL.md` in a folder named after the skill).
+
+**Delete**: `ConfirmDialog` "Delete {name}?" with "Chats that used it keep their messages. The agent can't start it
+anymore." (commands: "You can't run /{name} anymore."; skills: "The agent can't load it anymore.") and **Delete agent** /
+**Delete command** / **Delete skill** (`customization-delete-confirm`, destructive) → `customizations.remove(id)` → toast
+"Deleted {name}" with **Undo** (`toast-undo`, 5 s), which re-creates the definition from the content the page kept
+(a new id). Focus moves to the next row's menu trigger, else the previous one, else New.
+
+**Empty states** (`customize-empty`, `data-kind`, `data-source`):
+
+- Personal, with **New {kind}** and **Import…** buttons: "No personal agents yet. An agent is a sub-agent with its own
+  instructions and tools that the main agent can start." · "No personal commands yet. A command is a saved prompt you
+  run with /name." · "No personal skills yet. A skill is a set of instructions the agent loads when a task needs it."
+- Project: "No agents in {project}. Add Markdown files to .harness/agents/ (or .claude/agents/) in the project folder."
+  · "No commands in {project}. Add Markdown files to .harness/commands/ (or .claude/commands/) in the project folder." ·
+  "No skills in {project}. Add a folder with a SKILL.md to .harness/skills/ (or .claude/skills/) in the project folder."
+- An unavailable project folder: an `Alert` with the catalog's `project.issue` ("The project folder is unavailable:
+  …") instead of the project rows.
+- Plugins: the section is hidden when empty.
+
+**What the page never does**: edit or create files in a project (project definitions are read-only in the UI; edit
+them in the repository), read `~/.claude` or any folder outside the project, or let a definition change the permission
+mode, approve a tool or add a shell rule (a definition's tool list only narrows).
 
 ---
 
@@ -3720,6 +4292,21 @@ mode-cycle and slash-command files, `ShareToolRow`), W9.11 (`ChatTranscript`, `C
 `chat-format`, `chat/compaction/**`, `chat/steer/**`, `ContextRing`, the share message files), W9.12
 (`settings/agent/**`, `GeneralSettings`, `ChatWorkspace`, `useChangesPanel`, `PluginToolsTable`); see
 `docs/phases/phase-9-v1-5.md`.
+
+**Agent customization** (Phase 10, ADR-044 … ADR-047; C33 ships the stubs, contracts in 10.7) — `settings/customize/`:
+`CustomizeSettings` × (the body of `/settings/customize`, 9.12), `CustomizationSection` ×, `CustomizationRow` ×,
+`CustomizationEditor` ×, `CustomizationViewer` ×, `ToolMultiSelect` × and `customize.ts` (sections, badges, row meta,
+drafts, the import wrapper and the editor copy); `common/MarkdownEditor` × (CodeMirror through
+`plugins/code/editor-setup.ts`); `chat/composer/`: `SlashArgumentHint` ×, `RememberDialog` × and `remember.ts`;
+`chat/background/`: `BackgroundAgents` ×, `BackgroundAgentRow` × and `background-agents.ts`; `chat/agent/`:
+`TaskResultNote` ×, `SkillToolBody` ×, `PlanFileChip` ×; `plugins/detail/PluginCustomizationList` ×; `utils/download.ts`
+(`downloadText`). `TaskResultNote`, `SkillToolBody` and `TaskBody` are store-free. Phase 10 owners: W10.8 (the page,
+`settings/customize/**`, `MarkdownEditor`, `editor-setup`, the `customizations` store, `download`, the Data export and
+import sections), W10.9 (`ChatComposer`, `SlashMenu`, `SlashArgumentHint`, `RememberDialog`, `slash-commands.ts`,
+`remember.ts`), W10.10 (`useChatSession`, `useServerEvents`, the `background-tasks` store, `ChatView`, `chat-context`,
+`chat/background/**`), W10.11 (`chat/agent/**`, `chat/parts/**`, `ChatMessage`, `ChatTranscript`, `UserMessageBubble`,
+`MessageActions`, `chat-format`, the share rendering files), W10.12 (`settings/agent/**`, `ProjectsSettings`,
+`PluginContributions`, `PluginCustomizationList`, `plugin-display`); see `docs/phases/phase-10-v1-6.md`.
 
 W4.2 (UX polish) may edit every file above in Phase 4. Phase 8 owners: W8.8 (`ChatWorkspace`, `changes/**`, the
 workspace store, `useChangesPanel`, `useServerEvents`, `CommandPalette` and `chat-nav/palette*`), W8.9 (`rewind/**`,
@@ -4605,6 +5192,169 @@ defineEmits<{ cancel: [id: string]; edit: [id: string] }>()
 // GeneralSettings (W9.12): mounts AgentSettingsSection; the shiftTabModes switch
 ```
 
+### 10.7 Phase 10 contracts (Agent customization: W10.8 – W10.12; C33 ships the stubs)
+
+The fifteen components below are created by C33 in P10-0b with exactly these props, emits and root test ids and are
+frozen from Gate P10-0b (a change is a CCR); P10-A implements them behind those contracts. Types from
+`@harness-forge/shared` (names as in API.md 4.28+): `CustomizationKind` (`agent | command | skill`),
+`CustomizationSource` (`builtin | plugin | user | project`), `CustomizationEntry` (a catalog row: `{ kind, name,
+description, source, id?, pluginId?, path?, namespace?, argumentHint?, modelRef?, tools?, enabled, state, shadowedBy?,
+diagnostics }`), `CustomizationList` (`{ items, diagnostics, project, builtAt }`), `Customization` (a personal definition,
+discriminated on `kind`: `{ id, kind, name, description, content, enabled, fields, diagnostics, createdAt, updatedAt }`,
+`fields` = the parsed frontmatter and body or null), `DefinitionDiagnostic` and `ParsedDefinition`
+(`util/definitions.ts`), `CommandSummary`, `ToolSummary`, `BackgroundTask`, `TaskResultData`, `TaskOutput`,
+`RememberResult`. `CustomizationDraft` (the editor's structured fields: `{ kind, name, description, tools, model, argumentHint, body }`)
+and `CustomizationAction` come from `components/settings/customize/customize.ts` (11.7). Parsing and formatting
+definitions happen only through `parseDefinition` / `formatDefinition` of `@harness-forge/shared`; history-derived state
+of results only through `taskResultsOf` / `isTaskResultMessage` (`chat-format.ts`). Every component is imported by path.
+
+```ts
+// CustomizeSettings (W10.8; stub; the body of pages/settings/customize.vue) — 9.12
+// No props, no emits. Reads and writes ?tab and ?project (router.replace). Root customize-settings; renders the tabs
+// (customize-tab), the project select (customize-project-select), one CustomizationSection per source, the editor and
+// the viewer, and the hidden import input (customize-import-input). The page renders customize-new and customize-import
+// in its PageHeader and reaches the body through defineExpose<{ create(): void; import(): void }>.
+
+// CustomizationSection (W10.8; stub) — one source section of one kind
+defineProps<{
+  source: CustomizationSource
+  kind: CustomizationKind
+  entries: readonly CustomizationEntry[]
+  projectName?: string | null          // "In {project}" (source project)
+  folders?: readonly string[]          // the scanned folders shown in the project heading
+  issue?: string | null                // an unavailable project folder: an Alert instead of the rows
+  busyIds?: readonly string[]          // personal rows with a toggle / delete in flight
+}>()
+defineEmits<{ action: [action: CustomizationAction, entry: CustomizationEntry] }>()
+// Root customize-section (data-source, data-count); a CustomizationRow per entry; customize-empty (data-kind,
+// data-source) when a personal or project section is empty; built-in command rows are passed as entries with
+// source 'builtin' and render without a menu.
+
+// CustomizationRow (W10.8; stub)
+defineProps<{ entry: CustomizationEntry; busy?: boolean }>()
+defineEmits<{ action: [action: CustomizationAction] }>()
+// type CustomizationAction = 'edit' | 'view' | 'duplicate' | 'export' | 'toggle' | 'delete' | 'open-plugin'
+// Root customization-row (data-kind, data-name, data-source, data-state = active | shadowed | invalid | off, and
+// data-customization-id | data-path | data-plugin-id); customization-row-menu; the items customization-edit,
+// customization-view, customization-duplicate, customization-export, customization-toggle, customization-delete;
+// customization-diagnostics (the expanded list).
+
+// CustomizationEditor (W10.8; stub; mounted by CustomizeSettings) — 9.12
+defineProps<{
+  open: boolean
+  kind: CustomizationKind
+  mode: 'new' | 'edit' | 'import'
+  customization?: Customization | null   // edit mode
+  draft?: CustomizationDraft | null          // new (Duplicate) and import mode
+  notes?: readonly string[]                  // import notes (customization-import-notes)
+}>()
+defineEmits<{ 'update:open': [open: boolean]; saved: [customization: Customization] }>()
+// Root customization-editor (data-kind, data-mode); customization-name, customization-description,
+// customization-tools-mode (data-value = all | some), customization-tools (the ToolMultiSelect),
+// customization-model, customization-argument-hint (commands), customization-body (the MarkdownEditor root),
+// customization-save, customization-error (data-code), customization-import-notes, customization-discard-confirm.
+// Saves through the customizations store (create / update); the content is formatDefinition(fields).
+
+// CustomizationViewer (W10.8; stub; mounted by CustomizeSettings) — 9.12
+defineProps<{ open: boolean; entry: CustomizationEntry | null; projectId: string | null }>()
+defineEmits<{ 'update:open': [open: boolean]; copy: [draft: CustomizationDraft] }>()
+// Root customization-viewer; loads the file through customizations.sourceOf(entry, projectId).
+
+// ToolMultiSelect (W10.8; stub)
+defineProps<{ modelValue: string[] | null; tools: readonly ToolSummary[]; label: string; disabled?: boolean }>()
+defineEmits<{ 'update:modelValue': [value: string[] | null] }>()   // null = no restriction ("All tools")
+// No root test id (customization-tools is set by the editor); options customization-tool-option (data-tool-name),
+// chips customization-tool-chip (data-tool-name, data-state = known | unknown).
+
+// MarkdownEditor (W10.8; stub; components/common/) — a CodeMirror markdown field
+defineProps<{
+  modelValue: string
+  label: string                                  // aria-label of the editable area
+  readonly?: boolean
+  diagnostics?: readonly DefinitionDiagnostic[]  // lint markers (those with a line)
+  minHeight?: string                             // default '16rem'
+}>()
+defineEmits<{ 'update:modelValue': [value: string]; submit: [] }>()   // submit = Mod+Enter
+// data-slot="markdown-editor"; never captures Tab; a test id passed by the parent lands on the root (attribute
+// fallthrough).
+
+// SlashArgumentHint (W10.9; stub; mounted by ChatComposer over the textarea) — 7.28
+defineProps<{ text: string; hint: string | null; describedById: string }>()
+// Root slash-argument-hint (aria-hidden mirror); renders nothing unless hint is set and text is `/name` plus blanks on
+// one line; the sr-only element with id describedById reads "Arguments: {hint}".
+
+// RememberDialog (W10.9; stub; mounted by ChatComposer) — 7.30
+defineProps<{ open: boolean; text: string; projectId: string | null; chatId: string | null }>()
+defineEmits<{ 'update:open': [open: boolean]; saved: [result: RememberResult] }>()
+// Root remember-dialog; remember-text, remember-target (data-value = project-file | project-instructions | global),
+// remember-save, remember-error (data-code). projectId null or chatId null disables the project targets.
+
+// BackgroundAgents (W10.10; stub; ChatView mounts it in the dock between TodoStrip and QueuedMessages) — 7.29
+defineProps<{
+  tasks: readonly BackgroundTask[]          // the chat's visible tasks (visibleTasks), newest first
+  stopping?: readonly string[]              // task ids with a stop in flight
+  reveal?: { taskId: string; n: number } | null   // a "Show in background agents" request (n bumps on each request)
+}>()
+defineEmits<{ stop: [taskId: string]; 'stop-all': [] }>()
+// Root background-agents (data-state = open | closed, data-count = running, data-total = visible; renders nothing when
+// tasks is empty); background-agents-toggle, background-agents-stop-all; data-slot="background-agents-announcer".
+
+// BackgroundAgentRow (W10.10; stub)
+defineProps<{ task: BackgroundTask; stopping: boolean; open?: boolean }>()
+defineEmits<{ stop: []; 'update:open': [open: boolean] }>()
+// Root background-agent (data-task-id, data-state = the task status, data-kind = explore | general | custom,
+// data-agent-type); background-agent-toggle, background-agent-stop. Renders TaskBody (store-free) when open.
+
+// TaskResultNote (W10.11; stub; store-free; ChatMessage renders it for block kind 'task-result' and for carriers) — 7.29
+defineProps<{ result: TaskResultData; variant: 'inline' | 'turn' }>()
+// Root task-result (data-task-id, data-status, data-variant; role="note"); task-result-toggle, task-result-report;
+// data-slot="task-result-meta".
+
+// SkillToolBody (W10.11; stub; store-free; ToolPart and ShareToolRow render it for core-agent's skill) — 7.28
+defineProps<{ input: unknown; output: unknown }>()   // parsed inside with the shared skill schemas; unparsable → nothing
+// No root test id (data-slot="skill-body"; data-slot="skill-files").
+
+// PlanFileChip (W10.11; stub; ToolPart renders it first in the body of an approved exit_plan_mode row) — 7.25
+defineProps<{ planPath: string | null; planError: string | null; projectChat: boolean }>()
+// Root plan-file (data-state = saved | failed, data-path); renders nothing without planPath and planError.
+
+// PluginCustomizationList (W10.12; stub; PluginContributions renders one per kind) — 8.8
+defineProps<{
+  kind: 'agent' | 'skill'
+  pluginId: string
+  entries: readonly CustomizationEntry[]   // customizations.catalog(null) filtered by pluginId and kind
+  missing: readonly string[]               // contributed names without an entry (name-only rows)
+}>()
+// Root plugin-customizations (data-kind); rows plugin-customization (data-name).
+
+// Prop and emit additions (C33 declares them in P10-0b; the owners use them in P10-A)
+// chat-format.ts (W10.11):   MessageBlock kind + 'task-result' (a valid data-task-result; invalid data renders
+//                            nothing); taskResultsOf(messages): Map<taskId, TaskResultData>; isTaskResultMessage(m):
+//                            a user message whose parts are only valid data-task-result parts
+// ChatMessage (W10.11):      a carrier user message renders TaskResultNote (variant 'turn') + "Sent to the agent"
+//                            instead of UserMessageBubble; no MessageActions, edit, BranchSwitcher or rewind for it
+// UserMessageBubble, MessageActions (W10.11): never rendered for carriers (isTaskResultMessage)
+// TaskBlock (W10.11):        accepts any type string; data-kind + 'custom', data-agent-type, data-background,
+//                            data-state + 'background'; reads AGENT_TASK_CONTEXT (absent on share pages: static);
+//                            task-block-reveal (data-target = dock | result)
+// ToolPart (W10.11):         the skill branch (SkillToolBody in AgentToolBody) and PlanFileChip before PlanBody
+// CommandBadge (W10.11):     reads command.source?, command.modelRef?, command.allowedTools? (no new prop: the
+//                            command object it already gets carries them)
+// ShareToolRow (W10.11):     custom type label and icon, "· in the background" for background calls, "Loaded skill"
+//                            rows; task-result parts never reach it (the server drops them)
+// ChatView (W10.10):         BackgroundAgents in the dock + provide(AGENT_TASK_CONTEXT, …); the result
+//                            announcements; onStop never touches background agents
+// ChatComposer (W10.9):      items from useCustomizationsStore().slashCommands(projectId) (+ fetchCommands on mount,
+//                            project change and slash-menu open); SlashArgumentHint and RememberDialog mounts; the
+//                            client action 'remember'
+// SlashMenu (W10.9):         SlashItem + group: 'app' | 'project' | 'personal' | 'plugin', argumentHint?, namespace?;
+//                            group headings; slash-menu-item + data-group
+// PluginContributions (W10.12): the Agents and Skills sections (PluginCustomizationList)
+// ProjectsSettings (W10.12): the row menu item project-customizations
+// AgentSettingsSection (W10.12): settings-plan-files, settings-plan-directory (no props, no emits)
+// DataExportSection, DataImportSection (W10.8): the Phase 10 copy (9.8)
+```
+
 ---
 
 ## 11. Pinia stores and composables
@@ -4714,6 +5464,11 @@ actions: openPalette(), closePalette(), togglePalette(), openShortcuts(), openIn
          openShare(chatId) /* + sets shareChatId */, closeShare() /* + sets it back to null */
 ```
 
+Phase 10 adds the `customizations` and `background-tasks` stores (11.7, frozen from Gate P10-0b); no existing store
+signature changes: the settings store carries `planFiles` and `planDirectory` through `Settings`, the plugins store's
+`PLUGIN_FILTERS` / `counts` gain `agents` (implementation of the existing `filtered` / `counts` members; `plugins.commands`
+stays for `PluginContributions`), and the composer reads its slash items from the customizations store instead of
+`plugins.commands`.
 Phase 8 adds the `workspace` and `shell-rules` stores (11.5, frozen from Gate P8-0b); no existing store signature
 changes, and the settings store carries `fileSweep` through `Settings`. Phase 7 adds the projects store and the two
 chats store members above (frozen from Gate P7-0b); the settings store
@@ -4750,7 +5505,12 @@ workspace store finds a deleted project's chats by their project before the chat
 `refetchLoadedStores()` also calls `workspace.refreshLoaded()` and, when the shell rules store is loaded,
 `shellRules.fetchAll()`. Phase 9 (C25 dispatch, W9.9): `queue.changed` → `chatQueue.applyEvent`; `chat.deleted` also
 goes to `chatQueue.applyEvent` (drops the chat's list); `run.started` with `origin: 'queue'` reaches the live session
-of that chat through `on()` (11.6); `refetchLoadedStores()` also calls `chatQueue.refreshLoaded()`.
+of that chat through `on()` (11.6); `refetchLoadedStores()` also calls `chatQueue.refreshLoaded()`. Phase 10 (C33
+dispatch, W10.10): `task.changed` → `backgroundTasks.applyEvent`; `chat.deleted` also goes to
+`backgroundTasks.applyEvent` (drops the chat's list); `customization.changed` and `plugin.changed` →
+`customizations.applyEvent` (marks every cached catalog and command list stale and refetches the loaded scopes that a
+mounted view uses); `run.started` with `origin: 'task'` reaches the live session like `origin: 'queue'` (11.7);
+`refetchLoadedStores()` also calls `backgroundTasks.refreshLoaded()` and `customizations.refreshLoaded()`.
 
 ### 11.1 `useChatSession(id)` (W2.2)
 
@@ -5390,6 +6150,148 @@ interface ToolApprovalDecision {
 `activity` is how the transient `data-activity` reaches the transcript (`ChatView` passes it to the streaming row,
 7.24); it is part of the P9-0b session interface like the other additions.
 
+### 11.7 Phase 10 modules
+
+C33 creates these in P10-0b with exactly these signatures (frozen from Gate P10-0b) and inert bodies, except
+`taskResultsOf` / `isTaskResultMessage` and `AGENT_TASK_CONTEXT`, which are complete; P10-A implements the rest. Owners:
+W10.8 the `customizations` store, `customize.ts`, `download.ts` and `editor-setup.ts`; W10.9 `remember.ts` and the
+`slash-commands.ts` additions; W10.10 the `background-tasks` store, `background-agents.ts`, `chat-context.ts` and the
+`useChatSession` additions; W10.11 `chat-format.ts`. The pure helpers of `@harness-forge/shared` (`parseDefinition`,
+`formatDefinition`, `resolvePrecedence` in `util/definitions.ts`; `splitArguments`, `expandArguments` in
+`util/arguments.ts`; `CLAUDE_TOOL_ALIASES`, `normalizeToolList` in `util/tool-names.ts`; `TASK_RESULT_PART_TYPE`,
+`splitTaskResults`, `taskResultText` in `util/agent-state.ts`) are complete from P10-0a (C29) and are the only
+implementation of these rules on the web.
+
+```ts
+// stores/customizations.ts — useCustomizationsStore (+ Phase 10, ADR-044 / ADR-045; 9.12, 7.8)
+state:   { catalogs: Record<string, CustomizationList>          // key = projectId ?? '' (the scope)
+           commands: Record<string, CommandSummary[]>           // key = projectId ?? ''
+           loadedAt: Record<string, number>                     // per 'catalog:<key>' / 'commands:<key>'
+           stale: Record<string, true> }
+getters: catalog(projectId: string | null): CustomizationList | null
+         personal(kind: CustomizationKind): readonly CustomizationEntry[]   // the source 'user' entries of catalog(null)
+         entriesOf(projectId: string | null, kind: CustomizationKind): readonly CustomizationEntry[]
+                                    // every entry of that kind in the scope (with its project-relative state)
+         slashCommands(projectId: string | null): readonly CommandSummary[]   // [] until loaded
+actions: fetchCatalog(projectId: string | null, opts?: { maxAgeMs?: number; refresh?: boolean }): Promise<CustomizationList>
+                                    // GET /customizations?projectId=&refresh=1; single-flight per scope; a cached list
+                                    // younger than maxAgeMs and not stale is returned as is
+         fetchCommands(projectId: string | null, opts?: { maxAgeMs?: number }): Promise<readonly CommandSummary[]>
+                                    // GET /commands?projectId=; the same caching rules; a 404 (a deleted project)
+                                    // caches []
+         get(id: string): Promise<Customization>                 // GET /customizations/:id (the editor's content)
+         sourceOf(entry: CustomizationEntry, projectId: string | null): Promise<string>
+                                    // the content of GET /customizations/source?projectId&kind&name&source&path
+                                    // (project, plugin, builtin; path = entry.path, so a shadowed project file shows
+                                    // its own content); personal entries: get(entry.id).content
+         create(body: { kind: CustomizationKind; content: string; enabled?: boolean }): Promise<Customization>
+         update(id: string, patch: { content?: string; enabled?: boolean }): Promise<Customization>
+                                    // { enabled } alone is optimistic and rolls back on an error
+         remove(id: string): Promise<void>                           // a 404 counts as removed
+         applyEvent(event: ServerEvent): void   // customization.changed, plugin.changed: mark every key stale and
+                                                // refetch the scopes fetched in the last minute
+         refreshLoaded(): Promise<void>         // after an event-stream reconnect
+// Every mutation marks every key stale (a personal command changes every scope's command list). An answer of an older
+// fetch never replaces a newer one (per-key versions). 409 exists / 400 with diagnostics are thrown (HarnessError).
+
+// stores/background-tasks.ts — useBackgroundTasksStore (+ Phase 10, ADR-046; 7.29)
+state:   { byChat: Record<string, BackgroundTask[]>; loaded: Record<string, true>; stopping: Record<string, true> }
+getters: tasks(chatId: string): readonly BackgroundTask[]            // [] when unknown; newest first (as the route)
+         visible(chatId: string): readonly BackgroundTask[]          // visibleTasks(tasks(chatId))
+         byId(chatId: string, taskId: string): BackgroundTask | null
+actions: fetch(chatId: string): Promise<void>                        // GET /chat/:id/tasks; replaces the list
+         stop(chatId: string, taskId: string): Promise<'stopped' | 'gone'>
+                                    // POST /chat/:id/tasks/:taskId/stop; the returned task is upserted; 'stopped' when
+                                    // it answers aborted, 'gone' when it had already ended otherwise (the route answers
+                                    // an ended task as it is) or on a 404
+         stopAll(chatId: string): Promise<number>                    // stop() for every queued / running task in turn;
+                                                                     // resolves with the number stopped
+         applyEvent(event: ServerEvent): void   // task.changed: upsert (an event never loses to an older fetch);
+                                                // chat.deleted: drop the chat
+         refreshLoaded(): Promise<void>         // after an event-stream reconnect: fetch every loaded chat
+// Per-chat versions like chat-queue: every event, local change and fetch start bumps the chat's version.
+
+// components/chat/chat-context.ts — + AGENT_TASK_CONTEXT (complete in P10-0b; ChatView provides, TaskBlock injects)
+const AGENT_TASK_CONTEXT: InjectionKey<{
+  projectId(): string | null
+  task(taskId: string): BackgroundTask | null        // the live row from the store
+  tasksLoaded(): boolean                             // the chat's list was fetched at least once
+  result(taskId: string): TaskResultData | null      // the delivered result on the shown path (taskResultsOf)
+  reveal(taskId: string): void                       // opens the dock list and expands the row
+  showResult(taskId: string): boolean                // scrolls to the result note and opens its report; false = none
+}>
+
+// components/chat/chat-format.ts — additions (complete in P10-0b)
+function taskResultsOf(messages: readonly HarnessUIMessage[]): Map<string, TaskResultData>   // by taskId, path order
+function isTaskResultMessage(message: HarnessUIMessage): boolean
+// MessageBlock kind + 'task-result' ({ kind, part: TaskResultData, index }).
+
+// components/chat/agent/agent-tools.ts — additions (W10.11)
+function taskKindOf(type: string): 'explore' | 'general' | 'custom'   // general-purpose → general
+function taskTypeLabel(type: string): string                          // "Explore", "Agent" or the name
+
+// components/chat/background/background-agents.ts — pure (W10.10)
+function visibleTasks(tasks: readonly BackgroundTask[]): BackgroundTask[]   // queued / running, or deliveredAt null
+function summaryLine(tasks: readonly BackgroundTask[], now: number): string // the collapsed line (7.29)
+function announcementFor(prev: BackgroundTask | null, next: BackgroundTask): string | null
+const BACKGROUND_EXPANDED_KEY = 'hf-background-expanded'
+
+// components/chat/composer/slash-commands.ts — additions (W10.9)
+interface SlashItem { /* … v1 members */ group: 'app' | 'project' | 'personal' | 'plugin'; argumentHint?: string; namespace?: string }
+function slashGroupOf(command: CommandSummary): SlashItem['group']    // harness → app, project, user → personal, plugin
+// CLIENT_COMMAND_DESCRIPTIONS.remember = 'Save a note to your instructions'; resolveClientCommand('/remember x') →
+// { type: 'remember', text: 'x' }; argumentHintAt(text, items): string | null (the hint while the text is `/name `).
+
+// components/chat/composer/remember.ts — pure (W10.9)
+const REMEMBER_TARGETS: readonly { value: RememberTarget; needsProject: boolean }[]
+const REMEMBER_TARGET_KEY = 'hf-remember-target'
+function defaultTarget(projectChat: boolean, last: string | null): RememberTarget
+function rememberToast(result: RememberResult, projectName: string | null): string
+function rememberErrorText(error: HarnessError): string
+
+// components/settings/customize/customize.ts — pure (W10.8)
+type CustomizationAction = 'edit' | 'view' | 'duplicate' | 'export' | 'toggle' | 'delete' | 'open-plugin'
+interface CustomizationDraft {      // the editor's structured fields; formatDefinition turns them into the content
+  kind: CustomizationKind
+  name: string
+  description: string
+  tools: string[] | null            // agents: tools; commands: allowed-tools; null = no restriction
+  model: string | null              // a model ref, 'inherit' (agents) or null
+  argumentHint: string | null       // commands
+  body: string                      // instructions / prompt / skill content
+}
+function sectionsOf(list: CustomizationList | null, kind: CustomizationKind): { source: CustomizationSource; entries: CustomizationEntry[] }[]
+function stateBadge(entry: CustomizationEntry): { label: string; tone: 'muted' | 'warning' | 'destructive' } | null
+function rowMeta(entry: CustomizationEntry, pluginName: (id: string) => string): string[]
+function draftFromUser(customization: Customization): CustomizationDraft             // from its parsed fields
+function draftFromEntry(entry: CustomizationEntry, content: string): CustomizationDraft   // parseDefinition inside
+function importDraft(file: File, kind: CustomizationKind): Promise<{ draft: CustomizationDraft; notes: string[] }>
+const EDITOR_COPY: Readonly<Record<CustomizationKind, { title: string; body: string; bodyHelp: string; save: string }>>
+
+// utils/download.ts — (+ Phase 10, W10.8)
+function downloadText(text: string, fileName: string, type?: string): void   // Blob + a temporary <a download>
+
+// components/plugins/code/editor-setup.ts — addition (W10.8)
+function createMarkdownEditor(parent: HTMLElement, opts: {
+  dark: boolean; readonly: boolean; label: string; onChange(value: string): void; onSubmit(): void
+}): { view: EditorView; setValue(value: string): void; setDiagnostics(d: readonly DefinitionDiagnostic[]): void; destroy(): void }
+// No Tab capture (no indentWithTab), Mod+Enter → onSubmit, markdown language, lint markers.
+
+// composables/useChatSession.ts — additions (W10.10)
+interface ChatSession {
+  // … the members of 11.1, 11.5 and 11.6
+  backgroundTasks: ComputedRef<readonly BackgroundTask[]>   // + backgroundTasks.tasks(id)
+  stopBackgroundTask(taskId: string): Promise<'stopped' | 'gone'>   // + backgroundTasks.stop(id, taskId)
+}
+// load() also calls backgroundTasks.fetch(id); run.started with origin 'task' and a userMessageId that is not on the
+// shown path → refresh(), then resumeStream() (deferred until idle), exactly like origin 'queue'; stop() never
+// touches background tasks.
+```
+
+The `customizations` store is the only reader of the customization routes; the Plugins detail page reads the global
+catalog through it (`catalog(null)`), the composer its command lists, the Customize page everything. The remember call
+(`POST /api/memory`) and the task stop route are used through `useApi()` (the dialog) and the background-tasks store.
+
 ---
 
 ## 12. Keyboard shortcuts
@@ -5417,6 +6319,8 @@ interface ToolApprovalDecision {
 | ↑ (empty composer) | edit the last user message | composer | W2.3 |
 | ← / → | previous / next version of a message | focus inside a `BranchSwitcher` | W5.2 (component keydown, not the registry) |
 | Mod+S | save the active file | code editor | W3.4 |
+| Mod+Enter | save (Phase 10): the Customize editor sheet (any field, the body editor included) and the Remember dialog | `CustomizationEditor`, `RememberDialog` | W10.8 / W10.9 (component keydown, not the registry) |
+| Esc | close the Customize editor sheet (asks "Discard changes?" when it has changes) or the viewer; close the Remember dialog | sheets and dialogs | reka-ui (the editor intercepts `escape-key-down` while dirty) |
 | ↑ / ↓ / Enter / Tab | navigate and pick in palette, slash menu, model picker; Phase 9: the mention menu (Enter / Tab on a folder opens it and keeps the menu open) | overlays | components |
 
 Rules:
@@ -5450,6 +6354,13 @@ Rules:
   stay the other ways to change the mode. Enter while a response runs queues the message instead of being ignored;
   the plan card, the queue rows, the todo strip and the task blocks have no shortcuts (Tab reaches them; the plan card
   never approves on Enter).
+- Phase 10 adds no global shortcut. Mod+Enter saves inside the Customize editor and the Remember dialog (handled by the
+  components, so it never sends the composer's message; with `sendKey = mod-enter` the composer is not focused while
+  they are open). The `MarkdownEditor` never captures Tab (Tab and Shift+Tab move focus), so the editor sheet has no
+  keyboard trap; Mod+K and Mod+/ still work inside it (as in every CodeMirror field). **Esc in the composer never stops
+  background agents**: it stops the running reply only (7.6, 7.29); background agents stop from their own Stop
+  buttons. The slash menu, the argument hint and the dock add no shortcut (Tab reaches the dock's toggle, rows and Stop
+  buttons).
 - `KbdCombo` renders hints: `⌘⇧O` / `⌘K` on macOS, `Ctrl Shift O` / `Ctrl K` elsewhere. Hints are hidden below `lg`
   and on touch devices.
 
@@ -5475,10 +6386,12 @@ into data attributes (`data-chat-id`, `data-message-id`, `data-model-ref`, `data
 `data-path`, `data-kind`, `data-action`, `data-code`, `data-level`, `data-dirty`, `data-hidden`; Phase 5 adds
 `data-index`, `data-count`, `data-share-id`, `data-role`, `data-outdated`, `data-expired`; Phase 6 reuses them for
 galleries and adds no new attribute name; Phase 7 adds `data-project-id` and `data-tone`; Phase 8 adds `data-conflict`,
-`data-view`, `data-rule-id` and `data-variant`; Phase 9 adds `data-compacted`). Playwright uses `getByTestId()` plus
+`data-view`, `data-rule-id` and `data-variant`; Phase 9 adds `data-compacted`; Phase 10 adds `data-group`,
+`data-agent-type`, `data-background`, `data-source`, `data-name`, `data-customization-id`, `data-task-id`, `data-mode`,
+`data-target` and `data-total`). Playwright uses `getByTestId()` plus
 attribute filters. Ids are never reused for a different element; removing one is a CCR. The Phase 5 ids are collected
 in 13.6, except the two Settings → Models ids added in P5-B (`model-select-option`, `model-row-menu`, 13.4); the Phase 6
-ids in 13.7; the Phase 7 ids in 13.8; the Phase 8 ids in 13.9; the Phase 9 ids in 13.10.
+ids in 13.7; the Phase 7 ids in 13.8; the Phase 8 ids in 13.9; the Phase 9 ids in 13.10; the Phase 10 ids in 13.11.
 
 ### 13.1 Shell and navigation
 
@@ -5958,6 +6871,85 @@ share row's static label), `steer-text`, `steer-files`, `queued-messages-more`, 
 `data-variant` (`row` / `strip`) on `todo-list` and `data-highlighted` on the active `mention-menu-item`. The strip
 state is stored in `localStorage['hf-todo-expanded']` (`1` / `0`).
 
+### 13.11 Agent customization: Customize, commands, skills, background agents, plan files, Remember (Phase 10)
+
+The 56 new ids of Phase 10. C33 copies this table verbatim into `utils/testids.ts` in P10-0b (the key column is the
+`testIds` key) under the comment `// Agent customization: Customize, commands, skills, background agents, Remember
+(Phase 10)`; the file stays frozen through P10-A (a new id is a CCR). New attribute names: `data-group`,
+`data-agent-type`, `data-background`, `data-source`, `data-name`, `data-customization-id`, `data-task-id`, `data-mode`,
+`data-target`, `data-total`. Reused ids with new values: `task-block` gains `data-kind="custom"`, `data-agent-type` (the
+type name), `data-background` (`"true"` on background calls) and `data-state="background"` (a background call whose live
+state is unknown); `slash-menu-item` gains `data-group` (`app` / `project` / `personal` / `plugin`; the `/remember` item
+has `data-value="remember"`); the skill row is a `tool-row` with `data-tool-name="skill"`; the Undo of a deleted
+definition is `toast-undo`; the editor's model select carries `model-select-option` rows like every
+`SettingsModelSelect`; the palette entry is a `command-palette-item` with `data-value="go-settings-customize"`; the
+command-model notice is a `data-slot="notice-part"` line with `data-code="command-model-unavailable"`. There is no
+`customization-user-invocable` and no `data-skill` attribute: skills are not user-invocable in v1.6.
+
+| Id | Key (`testIds.*`) | Element | Data attributes |
+|---|---|---|---|
+| `settings-nav-customize` | `settingsNavCustomize` | the Customize link of `SettingsNav` | |
+| `customize-settings` | `customizeSettings` | `CustomizeSettings` root | |
+| `customize-tab` | `customizeTab` | one tab trigger (Agents / Commands / Skills) | `data-value` (`agents` / `commands` / `skills`), `data-count`, `data-state` (reka: `active` / `inactive`) |
+| `customize-project-select` | `customizeProjectSelect` | the Project select trigger | `data-value` (a project id, empty for none) |
+| `customize-new` | `customizeNew` | "New agent" / "New command" / "New skill" in the header | `data-kind` (`agent` / `command` / `skill`) |
+| `customize-import` | `customizeImport` | "Import…" in the header | |
+| `customize-import-input` | `customizeImportInput` | the visually hidden file input (`.md`) | |
+| `customize-section` | `customizeSection` | `CustomizationSection` root | `data-source` (`user` / `project` / `plugin` / `builtin`), `data-count` |
+| `customize-empty` | `customizeEmpty` | the empty state of a personal or project section | `data-kind`, `data-source` (`user` / `project`) |
+| `customization-row` | `customizationRow` | `CustomizationRow` root | `data-kind`, `data-name`, `data-source`, `data-state` (`active` / `shadowed` / `invalid` / `off`), `data-customization-id` (personal), `data-path` (project), `data-plugin-id` (plugin) |
+| `customization-row-menu` | `customizationRowMenu` | the row's `⋯` trigger ("Actions for {name}") | |
+| `customization-edit` | `customizationEdit` | "Edit…" (personal) | |
+| `customization-view` | `customizationView` | "View…" (project, plugin, built-in) | |
+| `customization-duplicate` | `customizationDuplicate` | "Duplicate" (personal) / "Copy to personal" (others) | |
+| `customization-export` | `customizationExport` | "Export .md" | |
+| `customization-toggle` | `customizationToggle` | "Turn off" / "Turn on" (personal) | `data-state` (`on` / `off`: the current value) |
+| `customization-delete` | `customizationDelete` | "Delete…" (personal) | |
+| `customization-delete-confirm` | `customizationDeleteConfirm` | "Delete agent" / "Delete command" / "Delete skill" in the confirm dialog | |
+| `customization-diagnostics` | `customizationDiagnostics` | the diagnostics list under a row | `data-count` |
+| `customization-editor` | `customizationEditor` | `CustomizationEditor` sheet content | `data-kind`, `data-mode` (`new` / `edit` / `import`) |
+| `customization-name` | `customizationName` | the Name input | |
+| `customization-description` | `customizationDescription` | the Description textarea | |
+| `customization-tools-mode` | `customizationToolsMode` | the Tools radio group | `data-value` (`all` / `some`) |
+| `customization-tools` | `customizationTools` | the `ToolMultiSelect` trigger | `data-count` |
+| `customization-tool-option` | `customizationToolOption` | one tool in the tool list | `data-tool-name`, `data-state` (`checked` / `unchecked`) |
+| `customization-tool-chip` | `customizationToolChip` | one chosen tool chip | `data-tool-name`, `data-state` (`known` / `unknown`) |
+| `customization-model` | `customizationModel` | the Model select trigger | `data-value` (a model ref, `inherit`, or empty) |
+| `customization-argument-hint` | `customizationArgumentHint` | the Argument hint input (commands) | |
+| `customization-body` | `customizationBody` | the body `MarkdownEditor` root | |
+| `customization-save` | `customizationSave` | "Save agent" / "Save command" / "Save skill" | |
+| `customization-error` | `customizationError` | the form-level error alert | `data-code` |
+| `customization-import-notes` | `customizationImportNotes` | the import notes alert | `data-count` |
+| `customization-viewer` | `customizationViewer` | `CustomizationViewer` sheet content | `data-kind`, `data-source` |
+| `customization-discard-confirm` | `customizationDiscardConfirm` | "Discard" in the "Discard changes?" dialog | |
+| `slash-argument-hint` | `slashArgumentHint` | `SlashArgumentHint` mirror (ghost text) | |
+| `remember-dialog` | `rememberDialog` | `RememberDialog` content | |
+| `remember-text` | `rememberText` | the note textarea | |
+| `remember-target` | `rememberTarget` | one "Save to" radio item | `data-value` (`project-file` / `project-instructions` / `global`), `data-disabled` (reka) |
+| `remember-save` | `rememberSave` | "Save" | |
+| `remember-error` | `rememberError` | the inline error | `data-code` |
+| `task-result` | `taskResult` | `TaskResultNote` root | `data-task-id`, `data-status` (`completed` / `failed` / `aborted` / `limit`), `data-variant` (`inline` / `turn`) |
+| `task-result-toggle` | `taskResultToggle` | "Show report" / "Hide report" | `data-state` (`open` / `closed`) |
+| `task-result-report` | `taskResultReport` | the expanded report | |
+| `task-block-reveal` | `taskBlockReveal` | "Show in background agents" / "Go to the result" in an expanded task block | `data-target` (`dock` / `result`) |
+| `plan-file` | `planFile` | `PlanFileChip` root | `data-state` (`saved` / `failed`), `data-path` |
+| `background-agents` | `backgroundAgents` | `BackgroundAgents` root in the dock | `data-state` (`open` / `closed`), `data-count` (running), `data-total` (visible) |
+| `background-agents-toggle` | `backgroundAgentsToggle` | the list's toggle line | |
+| `background-agents-stop-all` | `backgroundAgentsStopAll` | "Stop all" | |
+| `background-agent` | `backgroundAgent` | `BackgroundAgentRow` root | `data-task-id`, `data-state` (the task status), `data-kind` (`explore` / `general` / `custom`), `data-agent-type` |
+| `background-agent-toggle` | `backgroundAgentToggle` | a row's details chevron | `data-state` (`open` / `closed`) |
+| `background-agent-stop` | `backgroundAgentStop` | a row's Stop | |
+| `settings-plan-files` | `settingsPlanFiles` | "Save approved plans" switch | `data-state` (reka: `checked` / `unchecked`) |
+| `settings-plan-directory` | `settingsPlanDirectory` | "Plan folder" input | |
+| `plugin-customizations` | `pluginCustomizations` | `PluginCustomizationList` root (plugin detail) | `data-kind` (`agent` / `skill`), `data-count` |
+| `plugin-customization` | `pluginCustomization` | one agent or skill of a plugin | `data-name`, `data-state` (`active` / `shadowed`) |
+| `project-customizations` | `projectCustomizations` | "Agents, commands and skills…" in a project row menu | |
+
+E2e hooks that are not test ids (Phase 10, no CCR needed): `data-slot` = `markdown-editor` (the CodeMirror root),
+`skill-body`, `skill-files`, `task-result-meta`, `background-agents-announcer`, `background-agents-footnote`,
+`command-badge-source` (the source line of a command badge's tooltip); `data-group` on the slash menu's group headings.
+Stored in `localStorage`: `hf-background-expanded` (`1` / `0`) and `hf-remember-target` (the last target).
+
 ---
 
 ## 14. Accessibility and responsiveness
@@ -6024,7 +7016,22 @@ state is stored in `localStorage['hf-todo-expanded']` (`1` / `0`).
   composer, all in the `max-w-3xl` column; Tab order follows that order (strip toggle → queue rows → composer). The
   strip is collapsed by default and caps its open list at `40dvh`; the queue shows at most two rows on phones before
   "Show {n} more"; the transcript's bottom padding follows the dock's measured height, so the last line never hides
-  behind it.
+  behind it. Phase 10: the background agents list sits between the strip and the queue (strip toggle → background
+  agents toggle and rows → queue rows → composer); it is collapsed by default below `md` and caps its open list at
+  `40dvh`.
+- Phase 10: the Customize editor sheet opens with focus on Name (new and import mode) or Description (edit mode, where
+  the name keeps its value); closing it (saved, cancelled or discarded) returns focus to the element that opened it
+  (the row's `⋯` trigger, New or Import…); the "Discard changes?" dialog opens on **Keep editing** and returns focus to
+  the field that had it. The viewer opens on its Close button and returns focus to the row's `⋯` trigger. After a
+  delete focus moves to the next row's `⋯` trigger (else the previous one, else New); Undo puts it on the restored row.
+  Choosing a file in Import… opens the editor with focus on Name. The tabs, the project select and the row menus are
+  reka components (arrow keys inside, Tab between them). In the body editor Tab and Shift+Tab move focus (never
+  indent). The slash menu's group headings are not focusable; the argument hint never takes focus. The Remember dialog
+  focuses the textarea when it is empty, else the selected target; closing it returns focus to the composer textarea
+  (desktop). Opening the dock list keeps focus on its toggle; after a Stop focus moves to the next row's Stop (else the
+  previous one, else the toggle); Stop all keeps focus on itself until it disappears, then the toggle. "Show in
+  background agents" opens the list and focuses the row's details toggle; "Go to the result" scrolls to the note and
+  focuses its Show report button. A carrier message is not focusable (it has no actions); its notes' toggles are.
 
 ### 14.2 Semantics and labels
 
@@ -6098,6 +7105,28 @@ state is stored in `localStorage['hf-todo-expanded']` (`1` / `0`).
   "Message queued". A permission switch by Shift+Tab announces "Permission mode: {label}" through the composer's polite
   region, and the permission trigger gets `aria-keyshortcuts="Shift+Tab"` while the cycle is on. `ChatView` announces
   "Conversation compacted" once per new marker of its own stream.
+- Phase 10: the Customize page has one `h1` (the page title) and an `h2` per section ("Personal · 2"); the tabs are reka
+  `Tabs` with their counts in the accessible name ("Agents, 6"); each row is a list item whose name, description and
+  meta line are text, its badges carry text ("Shadowed", "Invalid", "2 warnings", "Off"; the shadowed tooltip is also
+  the badge's `aria-describedby`), and its `⋯` trigger is named "Actions for {name}"; the diagnostics list is a `ul`
+  named "Problems in {name}". The editor sheet is a dialog named by its title; every field has a visible label, the
+  inline errors are linked with `aria-describedby` and `aria-invalid`, the form-level error is a `role="alert"`; the
+  tools radio group is named "Tools" ("Allowed tools" for commands); the tool chips' remove buttons are named "Remove
+  {tool}" and an unknown chip says "{tool}, not available now"; the body editor's editable area has `aria-label` =
+  its field label and `aria-multiline="true"`; the size counter is `aria-live="off"`, its over-limit message is part of
+  the field's description. The viewer is a dialog named by the definition's name, its file read-only (`aria-readonly`).
+  The slash menu's groups are `role="group"` elements labelled by their heading ("App", "Project", "Personal",
+  "Plugins"); an item's accessible name is "/{name}, {description}" plus ", arguments {hint}" when it has a hint; the
+  argument hint's mirror is `aria-hidden` and the textarea's description reads "Arguments: {hint}" while it shows. A
+  custom task block's trigger is named "Sub-agent {name}: {description}, {status}, {n} tool calls" (", running in the
+  background" for a background call); a skill row is named "Loaded skill {name}, {source}". The background agents list
+  is a `region` named "Background agents"; its toggle has `aria-expanded` / `aria-controls`; the rows are a list
+  named "Background agents"; each Stop is named "Stop {description}"; the announcer is a polite region without
+  `role="status"`. A result note is a `role="note"` named "Background agent result: {description}"; its toggle has
+  `aria-expanded` / `aria-controls`; the carrier caption "Sent to the agent" is `aria-hidden` (the note's name already
+  says it). The Remember dialog's radio group is named "Save to"; a disabled target has `aria-disabled` and its reason
+  in `aria-describedby`; the error is a `role="alert"`. The plan file chip's path has the full path as its accessible
+  name ("Plan saved to {path}"); Copy path and Show changes name their actions.
 
 ### 14.3 Contrast targets
 
@@ -6161,6 +7190,15 @@ instant scroll instead of smooth, no sheet slide (fade only).
   summary or plan causes a horizontal page scroll (long paths and code scroll inside their blocks). On touch screens the
   strip toggle, the queue's Edit and Cancel, the Queue message button, the task trigger, the plan buttons, the mention
   rows and the summary toggle are at least 40px.
+- Phase 10 screens: at 390px the Customize page has no horizontal scroll (the tab list scrolls sideways inside itself,
+  rows wrap their meta line, paths truncate in the middle), the header actions wrap under the title, the editor and the
+  viewer are full-width sheets whose footers stay visible above the keyboard, the body editor is at most `50dvh` tall
+  and scrolls inside, the tool list popover spans the sheet width; the slash menu with group headings caps at
+  `max-h-[40dvh]` and hides the argument hints of its rows; the dock (strip, background agents and queue collapsed or two
+  rows, composer) fits; a result note's meta line hides; the Remember dialog follows the form-dialog rule. On touch
+  screens the row `⋯` triggers (always visible), the tabs, the project select, the editor's buttons and tool chips'
+  remove buttons, the dock toggle, the row toggles, Stop and Stop all, the result toggle, the Remember radios and Save,
+  Copy path and Show changes are at least 40px.
 - Phase 6 screens: galleries keep their two columns at 390px (tiles never overflow the column); the recording composer
   keeps the 390px layout without horizontal scroll (the indicator shows the dot, the timer and Cancel); the Media page
   stacks labels above controls below `sm`.
@@ -6190,7 +7228,10 @@ causes no horizontal page scroll. Phase 8 adds `mobile/changes.spec.ts` (W8.12):
 390px, an open diff causes no horizontal page scroll, Esc returns focus to the toggle, and the rewind dialog fits.
 Phase 9 adds `mobile/agent.spec.ts` (W9.13): the dock (strip, queue and composer) fits at 390px, no horizontal scroll
 with a task block or a summary expanded, the plan buttons stack and are at least 40px, and the mention menu fits;
-`mobile/changes.spec.ts` gains a check that the panel's open state survives a narrow viewport.
+`mobile/changes.spec.ts` gains a check that the panel's open state survives a narrow viewport. Phase 10 adds
+`mobile/customize.spec.ts` (W10.13): no horizontal scroll on `/settings/customize`, the editor sheet fits with its
+footer visible, the tabs scroll, the row menus are at least 40px; and `mobile/agent.spec.ts` gains the dock with the
+strip, the background agents and the queue fitting at 390px, the Remember dialog and the grouped slash menu.
 
 ### 14.7 Tablet e2e and media permissions (Phase 6)
 
@@ -6200,7 +7241,8 @@ project ignores `specs/(mobile|tablet)/`. `tablet/touch-targets.spec.ts` (W6.12)
 the icon rail is 56px wide and every icon button is at least 40×40px. Phase 7 (W7.14) extends it to the project
 switcher, the chip and the approval controls; Phase 8 (W8.12) to the changes toggle, the file rows, Revert,
 "Rewind files to here", and the allow-rule checkbox and scope; Phase 9 (W9.13) to the queue's Edit and Cancel, the strip
-toggle, the task trigger, the plan buttons and the mention rows.
+toggle, the task trigger, the plan buttons and the mention rows; Phase 10 (W10.13) to the dock toggle, a row's Stop,
+Stop all, the Customize row menus, the Remember radios and the editor's footer buttons.
 
 Every project runs with `use.permissions: ['microphone']` and the Chromium flags `--use-fake-ui-for-media-stream`,
 `--use-fake-device-for-media-stream` and `--autoplay-policy=no-user-gesture-required`, so the voice spec records from a
@@ -6237,6 +7279,20 @@ fake device and read-aloud plays without a gesture. If the flags fail in headles
   - **plan** / **plan mode**: the permission mode "Plan"; the agent's list of steps is the **plan**, its progress list
     is **tasks** ("Tasks 3/7", "Updated tasks"; the tool is `todo_write`).
   - **mention**: `@path` in the composer ("Mention a file").
+- **Terms** (Phase 10):
+  - **background agent** (not "background task", "job" or "worker"): a sub-agent the agent started in the background;
+    it keeps running after the reply, and Stop in the composer doesn't stop it ("Background agents · 2 running",
+    "Background agent finished"). The UI never calls it a **task**: "Tasks" is the todo list (above). The code and the
+    API say `task` / `background task` (`background_tasks`, `bgt_`, `task.changed`); the Markdown export keeps the
+    heading "Background task: …" (a document for other readers, ADR-046).
+  - **agent** / **custom agent**: a sub-agent type with its own instructions and tools ("New agent", "Personal agent");
+    the built-ins stay "Explore" and "Agent" in the transcript.
+  - **command**: a saved prompt run with `/name` ("New command"); **skill**: instructions the agent loads when a task
+    needs them ("Loaded skill"); never "prompt template", "macro" or "playbook".
+  - **personal** (the user's own, stored in harness-forge), **project** (files in `.harness/` or `.claude/`), **from
+    plugins**, **built-in**: the four sources; **shadowed**: listed but not used because a higher source has the name
+    ("Not used: … wins."); never "overridden" in the UI.
+  - **Customize** (the settings page, 9.12); **Remember** (the dialog and `/remember`).
 
 Key strings:
 
@@ -6306,3 +7362,12 @@ Key strings:
 | Queue (Phase 9) | "Queue a message…" (placeholder) · "Queue message" · "Message queued" (announcement) · "Queued · {n} · sent at the next step" · "Sent after you answer the approval" · "Runs after this response" · "Edit queued message" · "Cancel queued message" · "Show {n} more" · "Already sent to the agent." · "The queue is full. Wait for the agent to take a message." · "Couldn't send a queued message." · "Queued messages moved back to the composer." (after Stop and after Edit) · "Could not send the message" · "Could not cancel the message" (error toast titles) · "{n} files attached" / "1 file attached" (sr-only) · "Queued messages" (the list's name) · steer note: "You · while it worked" · "You said while the agent worked:" (sr-only) |
 | General → Agent (Phase 9) | "Shift+Tab switches the permission mode" · "In the composer, Shift+Tab cycles Ask, Accept edits and Plan. Off: Shift+Tab moves focus." · "Agent" · "Long chats and sub-agents." · "Automatic compaction" · "Summarize older messages when a chat nears the model's context window. When off, older messages are left out instead." · "Compaction model" · "Writes the summary when a chat is compacted." · "Same model as the chat" · "Sub-agent model" · "Runs the tasks the agent hands to sub-agents." · "{model} can't call tools, so sub-agents can't use it." · "Sub-agent max steps" · "How many tool calls one sub-agent may chain (1–200)." · "Switch the permission mode" (the Shift+Tab entry in the shortcuts dialog) |
 | Plugins tools table (Phase 9) | "Decided per call" (a tool whose policy is decided per call, e.g. `shell`) |
+| Settings → Customize (Phase 10) | "Customize" · "Sub-agents, slash commands and skills: yours, your projects' and your plugins'." · "Import…" · "New agent" · "New command" · "New skill" · "Agents" · "Commands" · "Skills" · "Project" · "No project" · "Personal · {n}" · "In {project} · {n}" · "From plugins · {n}" · "Built-in · {n}" · "Personal" · "Project" · "Built-in" · "All tools" · "{n} tools" · "Tools limited to {n}" · "Same as the chat" · "Shadowed" · "Not used: {winner} wins." · "Invalid" · "{n} warnings" ("1 warning") · "Off" · "Actions for {name}" · "Edit…" · "View…" · "Duplicate" · "Copy to personal" · "Export .md" · "Turn off" · "Turn on" · "Open plugin" · "Delete…" · "Reserved: a personal or project command can't use this name." · "Could not load your customizations" · "Retry" · "The project folder is unavailable: {issue}" · empty states: "No personal agents yet. An agent is a sub-agent with its own instructions and tools that the main agent can start." · "No personal commands yet. A command is a saved prompt you run with /name." · "No personal skills yet. A skill is a set of instructions the agent loads when a task needs it." · "No agents in {project}. Add Markdown files to .harness/agents/ (or .claude/agents/) in the project folder." · "No commands in {project}. Add Markdown files to .harness/commands/ (or .claude/commands/) in the project folder." · "No skills in {project}. Add a folder with a SKILL.md to .harness/skills/ (or .claude/skills/) in the project folder." |
+| Customize editor (Phase 10) | "New agent" · "Edit {name}" · "Import agent" (and the command / skill forms) · "Name" · "Description" · "When the main agent should use it. It reads this to decide." · "Shown in the slash menu." · "When the agent should load it. It reads this to decide." · "Tools" · "Allowed tools" · "All tools the chat allows" · "No restriction" · "Only these tools" · "Remove {tool}" · "Not available now" · "Model" · "Default sub-agent model" · "The chat's model" · "Same as the chat" · "Argument hint" · "Shown after the command while you type its arguments." · "Instructions" · "Prompt" · "What the sub-agent should do and how. It gets these instead of the main agent's conversation." · "$ARGUMENTS is the text after the command; $1 to $9 are single words (quotes group words); {{input}} works too. Without a placeholder the text is added at the end." · "A personal skill is one file. Put scripts and reference files in a project skill folder." · "{n} KB / 64 KB" · "Use lowercase letters, digits and hyphens, starting with a letter." · "{name} is a built-in name." · "Add a description." · "Use at most {n} characters." · "The file can be up to 64 KB." · "You already have a {kind} named {name}." · "Save agent" · "Save command" · "Save skill" · "Agent saved" · "Command saved" · "Skill saved" · "Cancel" · "Discard changes?" · "Your changes are lost." · "Discard" · "Keep editing" · import: "Imported from {file}. Check the fields, then save." · "{file} is too large" · "Definition files can be up to 64 KB." · viewer: "Copy path" · "This file no longer exists." · "Close" · delete: "Delete {name}?" · "Chats that used it keep their messages. The agent can't start it anymore." · "You can't run /{name} anymore." · "The agent can't load it anymore." · "Delete agent" · "Delete command" · "Delete skill" · "Deleted {name}" · "Undo" |
+| Slash menu and commands (Phase 10) | groups "App" · "Project" · "Personal" · "Plugins" · "Save a note to your instructions" (`/remember`) · "Arguments: {hint}" (sr-only) · badge tooltip: "Project command" · "Personal command" · "From {plugin}" · "Built-in command" · "Runs on {model}" · "Tools limited to {names}" · "and {n} more" · notice `command-model-unavailable` (text from the server, e.g. "The command's model {model} is not available, so the chat's model answered.") |
+| Custom agents and skills in the chat (Phase 10) | "Built-in agent" · "Personal agent" · "From {plugin}" · "Project: {path}" · "Sub-agent {name}: {description}, {status}, {n} tool calls" · "Loaded skill" · "Loading skill" · "Couldn't load skill" · "Loaded skill {name}, {source}" · "The agent read these instructions." · "Cut at 64 KB." |
+| Background agents (Phase 10) | "In background" · "Background · {n} tool calls · {duration}" · ", running in the background" · "Started in the background" · "Show in background agents" · "Go to the result" · "Background agents · {n} running" · "{n} background agents · {description} · {duration}" ("1 background agent · …") · "{n} background agents finished · reports pending" ("1 background agent finished · report pending") · "Show background agents, {n} running" · "Show background agents, {n} finished" · "Hide background agents" · "Stop all" · "Stop {description}" · "Show details of {description}" · "Hide details of {description}" · "Report pending" · "They keep running after the reply. Stop in the composer doesn't stop them." · "It already finished." · "Could not stop the background agent" · "The server restarted before the task finished." (server text) · announcements: "Background agent finished: {description}" · "Background agent failed: {description}" · "Background agent stopped: {description}" · "Background agent reached its step limit: {description}" · notes: "Background agent finished" · "Background agent failed" · "Background agent stopped" · "Background agent reached its step limit" · "Background agent result: {description}" · "No report." · "Show report" · "Hide report" · "Copy report" · "Sent to the agent" |
+| Remember (Phase 10) | "Remember" · "Note" · "{n} / 2,000" · "Use at most 2,000 characters." · "Save to" · "{file} in {project}" · "AGENTS.md in {project} (new file)" · "Added as a line at the end of the file." · "Instructions of {project}" · "Kept by harness-forge and sent with this project's chats." · "Custom instructions" · "Sent with every chat." · "Open a chat in a project to use this." · "Save" · "Cancel" · "Saved to {file}" · "Created AGENTS.md in {project}" · "Saved to the instructions of {project}" · "Saved to your custom instructions" · "The instructions would be longer than 20,000 characters. Shorten them in Settings first." · "The file would be larger than 1 MB." · "The project folder is unavailable." |
+| Plan files and General → Agent (Phase 10) | "Long chats, sub-agents and plans." · "Save approved plans" · "When you approve a plan in a project chat, it's saved as a Markdown file in the project." · "Plan folder" · "A folder inside the project. Files are named by date and plan title." · "Use a folder inside the project, like .harness/plans." · "Use at most 200 characters." · chip: "Saved to" · "Plan saved to {path}" · "Copy path" · "Show changes" · "Couldn't save the plan file: {error}" |
+| Plugins and projects (Phase 10) | "Agents and skills" (filter) · "{n} agents" ("1 agent") · "{n} skills" ("1 skill") · "Agents" · "Sub-agents the main agent can start." · "Skills" · "Instructions the agent loads when a task needs them." · "Default model" · "Open in Customize" · "Agents, commands and skills…" (project row menu) |
+| Settings → Data (Phase 10) | "Download a zip with every chat, including archived chats and every message version, and your personal agents, commands and skills. API keys, passwords, plugins, MCP servers and share links are never included." · "General and appearance settings, and your personal agents, commands and skills. A personal definition you already have with the same name is kept." |

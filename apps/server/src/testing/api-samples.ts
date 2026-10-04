@@ -15,6 +15,12 @@ export const SAMPLE_SHELL_RULE_ID = 'srl_sample0000000001'
 export const SAMPLE_CHANGE_BATCH_ID = 'wcb_sample0000000001'
 /** A queued message (Phase 9, ADR-042): a client-generated message id. */
 export const SAMPLE_QUEUED_MESSAGE_ID = 'msg_sample0000000002'
+/** A personal agent, command or skill (Phase 10, ADR-044). */
+export const SAMPLE_CUSTOMIZATION_ID = 'cus_sample0000000001'
+/** A background task (Phase 10, ADR-046). */
+export const SAMPLE_BACKGROUND_TASK_ID = 'bgt_sample0000000001'
+/** An agent definition file (Phase 10, ADR-044): frontmatter (Claude Code tool names) and the instructions. */
+export const SAMPLE_AGENT_MARKDOWN = '---\nname: reviewer\ndescription: Reviews a diff and reports bugs\ntools: Read, Grep\n---\nReview the diff. Report each bug with its file and line.\n'
 /** A project-relative path for the change samples (no project folder is ever touched). */
 export const SAMPLE_CHANGE_PATH = 'src/index.ts'
 /** A folder that does not exist on any test host: the project samples never touch a real folder. */
@@ -247,6 +253,18 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
 
   'projectFiles.search': { params: { id: SAMPLE_PROJECT_ID }, query: { q: 'index', limit: '20' } },
   'projectFiles.attach': { params: { id: SAMPLE_PROJECT_ID }, body: { path: SAMPLE_CHANGE_PATH } },
+
+  'customizations.list': { query: { projectId: SAMPLE_PROJECT_ID, kind: 'agent', refresh: 'true' } },
+  'customizations.source': { query: { projectId: SAMPLE_PROJECT_ID, kind: 'agent', name: 'reviewer', source: 'project' } },
+  'customizations.create': { body: { kind: 'agent', content: SAMPLE_AGENT_MARKDOWN } },
+  'customizations.get': { params: { id: SAMPLE_CUSTOMIZATION_ID } },
+  'customizations.update': { params: { id: SAMPLE_CUSTOMIZATION_ID }, body: { enabled: false } },
+  'customizations.remove': { params: { id: SAMPLE_CUSTOMIZATION_ID } },
+
+  'memory.remember': { body: { target: 'project-file', text: 'Run pnpm test before committing.', chatId: SAMPLE_CHAT_ID } },
+
+  'chatTasks.list': { params: { id: SAMPLE_CHAT_ID } },
+  'chatTasks.stop': { params: { id: SAMPLE_CHAT_ID, taskId: SAMPLE_BACKGROUND_TASK_ID } },
 
   'shares.list': { query: { chatId: SAMPLE_CHAT_ID } },
   'shares.create': { body: { chatId: SAMPLE_CHAT_ID, title: 'Sample share', options: { reasoning: true }, expiresAt: null } },

@@ -160,6 +160,9 @@ export function declaredContributions(manifest: PluginManifest | null): PluginCo
     mcpServers: (contributes?.mcpServers ?? []).map(server => server.id),
     commands: (contributes?.commands ?? []).map(command => command.name).sort(),
     hooks: [],
+    // Plugin API 1.4.0 (ADR-045): the declared agents and skills.
+    agents: (contributes?.agents ?? []).map(agent => agent.name).sort(),
+    skills: (contributes?.skills ?? []).map(skill => skill.name).sort(),
   }
 }
 

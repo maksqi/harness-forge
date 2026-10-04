@@ -1,14 +1,17 @@
 // Chat contract: UI messages, message metadata, data parts and the `POST /chat` request (API.md sections 4.7, 6).
 import type { UIMessage } from 'ai'
+import type { TaskResultData } from './schemas/background-tasks.ts'
 import { z } from 'zod'
-import { reasoningEffortSchema, toolModeSchema } from './enums.ts'
+import { commandSourceSchema, reasoningEffortSchema, toolModeSchema } from './enums.ts'
 import { harnessErrorInitSchema } from './errors.ts'
 import { chatIdSchema, commandNameSchema, messageIdSchema, modelRefSchema, projectIdSchema, timestampSchema } from './ids.ts'
 import { LIMITS } from './limits.ts'
 import { todoItemSchema } from './schemas/agent.ts'
+import { taskResultDataSchema } from './schemas/background-tasks.ts'
 import { imageOptionsSchema, imageTurnMetadataSchema } from './schemas/images.ts'
 import { queueItemSchema, userMessagePartSchema } from './schemas/queue.ts'
 import { messageUsageSchema } from './schemas/usage.ts'
+import { DEFINITION_LIMITS } from './util/definitions.ts'
 import { utf8ByteLength } from './util/text.ts'
 
 const tokenCountSchema = z.int().min(0)
@@ -28,6 +31,18 @@ export const commandInvocationSchema = z.object({
     .string()
     .refine(value => utf8ByteLength(value) <= LIMITS.commandExpansionBytes, 'Expansions are limited to 64 KB.')
     .optional(),
+  /** Where the command came from (Phase 10, ADR-045; absent in v1.5 messages = a plugin or harness command). */
+  source: commandSourceSchema.optional(),
+  /**
+   * The `model` of a command file (Phase 10): the turn runs on it, the chat keeps its model; a continuation or a
+   * regenerate of the turn reuses it. When it cannot run, the chat model answers (notice `command-model-unavailable`).
+   */
+  modelRef: modelRefSchema.optional(),
+  /**
+   * The `allowed-tools` of a command file (Phase 10): narrows the tools of the turn (never a grant); a continuation or a
+   * regenerate of the turn reads it again.
+   */
+  allowedTools: z.array(z.string().min(1).max(256)).max(DEFINITION_LIMITS.toolsMax).optional(),
 })
 export type CommandInvocation = z.infer<typeof commandInvocationSchema>
 
@@ -61,9 +76,19 @@ export const noticeLevelSchema = z.enum(['info', 'warning'])
  * `generated-file-dropped` (ADR-028): a file the model generated was not stored (not a raster image, or too large);
  * `workspace-unavailable` (ADR-031): the project folder of the chat could not be opened, so the run has no workspace
  * tools (the message names the folder and the reason); `compaction-failed` (ADR-040): the summary could not be written,
- * so the oldest turns were trimmed instead.
+ * so the oldest turns were trimmed instead; `command-model-unavailable` (Phase 10, ADR-045): the `model` of a command
+ * file cannot run, so the chat model answered.
  */
-export const noticeCodeSchema = z.enum(['context-trimmed', 'approvals-superseded', 'tools-unsupported', 'attachments-unsupported', 'generated-file-dropped', 'workspace-unavailable', 'compaction-failed'])
+export const noticeCodeSchema = z.enum([
+  'context-trimmed',
+  'approvals-superseded',
+  'tools-unsupported',
+  'attachments-unsupported',
+  'generated-file-dropped',
+  'workspace-unavailable',
+  'compaction-failed',
+  'command-model-unavailable',
+])
 export type NoticeCode = z.infer<typeof noticeCodeSchema>
 
 /** Data of `data-notice` parts. */
@@ -135,20 +160,30 @@ export const activityDataSchema = z.object({
 })
 export type ActivityData = z.infer<typeof activityDataSchema>
 
-/** Data part schemas for `useChat({ dataPartSchemas })` and `validateUIMessages({ dataSchemas })`. */
+/**
+ * Data part schemas for `useChat({ dataPartSchemas })` and `validateUIMessages({ dataSchemas })`. `task-result` (Phase
+ * 10, ADR-046): the result of a background task (`data-task-result`, `taskResultDataSchema`).
+ */
 export const harnessDataSchemas = {
-  notice: noticeDataSchema,
-  compaction: compactionDataSchema,
-  steer: steerDataSchema,
-  activity: activityDataSchema,
+  'notice': noticeDataSchema,
+  'compaction': compactionDataSchema,
+  'steer': steerDataSchema,
+  'activity': activityDataSchema,
+  'task-result': taskResultDataSchema,
 }
 
 /**
- * Data part types (`data-notice`, `data-compaction`, `data-steer`, the transient `data-activity`). A type alias (not an
- * interface) so it satisfies the AI SDK `UIDataTypes`.
+ * Data part types (`data-notice`, `data-compaction`, `data-steer`, the transient `data-activity`, `data-task-result`). A
+ * type alias (not an interface) so it satisfies the AI SDK `UIDataTypes`.
  */
 // eslint-disable-next-line ts/consistent-type-definitions
-export type HarnessDataTypes = { notice: NoticeData, compaction: CompactionData, steer: SteerData, activity: ActivityData }
+export type HarnessDataTypes = {
+  'notice': NoticeData
+  'compaction': CompactionData
+  'steer': SteerData
+  'activity': ActivityData
+  'task-result': TaskResultData
+}
 
 /** AI SDK v7 UI message of this app; pass `ChatDetail.messages` directly to `useChat({ messages })`. */
 export type HarnessUIMessage = UIMessage<MessageMetadata, HarnessDataTypes>

@@ -232,6 +232,48 @@ describe('unknown routes and invalid input', () => {
     expect(envelope.error.details).toMatchObject({ issues: [expect.objectContaining({ path: [...issuePath] })] })
   })
 
+  const AGENT_MD = '---\nname: reviewer\ndescription: Reviews diffs\n---\nReview.\n'
+  it.each([
+    ['GET', '/api/customizations?projectId=prj_short', undefined, ['projectId']],
+    ['GET', '/api/customizations?kind=hook', undefined, ['kind']],
+    ['GET', '/api/customizations?refresh=yes', undefined, ['refresh']],
+    ['GET', '/api/customizations/source?kind=agent&name=reviewer', undefined, ['source']],
+    ['GET', '/api/customizations/source?kind=agent&name=reviewer&source=home', undefined, ['source']],
+    ['POST', '/api/customizations', { kind: 'hook', content: AGENT_MD }, ['kind']],
+    ['POST', '/api/customizations', { kind: 'agent', content: '' }, ['content']],
+    ['POST', '/api/customizations', { kind: 'agent', content: AGENT_MD, name: 'reviewer' }, []],
+    ['GET', '/api/customizations/cus_short', undefined, ['id']],
+    ['PATCH', '/api/customizations/cus_sample0000000001', {}, []],
+    ['PATCH', '/api/customizations/cus_sample0000000001', { content: AGENT_MD, kind: 'agent' }, []],
+    ['DELETE', '/api/customizations/reviewer', undefined, ['id']],
+    ['POST', '/api/memory', { target: 'project-file', text: 'Use pnpm.' }, ['chatId']],
+    ['POST', '/api/memory', { target: 'global', text: '   ' }, ['text']],
+    ['POST', '/api/memory', { target: 'project', text: 'x', chatId: CHAT }, ['target']],
+    ['POST', '/api/memory', { target: 'global', text: 'x', projectId: 'prj_sample0000000001' }, []],
+    ['GET', '/api/chat/not-a-uuid/tasks', undefined, ['id']],
+    ['POST', `/api/chat/${CHAT}/tasks/bgt_short/stop`, undefined, ['taskId']],
+  ] as const)('the Phase 10 routes validate their input first: %s %s -> 400', async (method, path, body, issuePath) => {
+    const init: RequestInit = { method }
+    if (body !== undefined) {
+      init.headers = { 'content-type': 'application/json' }
+      init.body = JSON.stringify(body)
+    }
+    const response = await t.request(path, init)
+    expect(response.status).toBe(400)
+    const envelope = harnessErrorEnvelopeSchema.parse(await response.json())
+    expect(envelope.error.code).toBe('validation_error')
+    expect(envelope.error.details).toMatchObject({ issues: [expect.objectContaining({ path: [...issuePath] })] })
+  })
+
+  it('/customizations/source is never taken for a customization id (static segment first)', async () => {
+    const response = await t.request('/api/customizations/source?kind=skill&name=pdf&source=builtin')
+    const envelope = harnessErrorEnvelopeSchema.parse(await response.json())
+    // While stubbed the source route answers 501 with its own key; never a 400 on `id` from `/customizations/:id`.
+    if (stubRouteKeys().has('customizations.source'))
+      expect(envelope.error.message).toContain('(customizations.source)')
+    expect(envelope.error.details ?? {}).not.toMatchObject({ issues: [expect.objectContaining({ path: ['id'] })] })
+  })
+
   it('malformed JSON -> 400 validation_error', async () => {
     const response = await t.request('/api/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{"displayName":' })
     expect(response.status).toBe(400)

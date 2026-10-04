@@ -9,6 +9,9 @@ own context.
 Most of this works in any chat with a model that can call tools. Plan mode, `@` mentions and the file work of
 sub-agents need a **project chat** (see [using projects](using-projects.md)).
 
+v1.6 builds on these: your own sub-agent types, slash commands and skills, background sub-agents, saved plan files and
+`/remember` are in [customizing the agent](customizing-agents.md).
+
 Reference: [ARCHITECTURE.md 6.18 – 6.22](../ARCHITECTURE.md#618-context-compaction-adr-040) (how it works) and
 [10.10](../ARCHITECTURE.md#1010-agent-20-security-phase-9-adr-040--adr-043) (security),
 [UI.md 7.24 – 7.27, 9.11](../UI.md#724-compaction-compactiondivider-compactionts-w911-phase-9) (the screens),

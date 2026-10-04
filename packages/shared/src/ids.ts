@@ -22,6 +22,10 @@ export const PROJECT_ID_PATTERN = /^prj_[\dA-Za-z]{16}$/
 export const SHELL_RULE_ID_PATTERN = /^srl_[\dA-Za-z]{16}$/
 /** `wcb_` + 16 characters of `[0-9A-Za-z]`: a workspace change batch, one revert, rewind or undo (ADR-036). */
 export const CHANGE_BATCH_ID_PATTERN = /^wcb_[\dA-Za-z]{16}$/
+/** `cus_` + 16 characters of `[0-9A-Za-z]`: a personal agent, command or skill (table `customizations`, ADR-044). */
+export const CUSTOMIZATION_ID_PATTERN = /^cus_[\dA-Za-z]{16}$/
+/** `bgt_` + 16 characters of `[0-9A-Za-z]`: a background task (table `background_tasks`, ADR-046). */
+export const BACKGROUND_TASK_ID_PATTERN = /^bgt_[\dA-Za-z]{16}$/
 /**
  * Share token (ADR-025): the 16-character suffix of the share id + the first 22 base64url characters of
  * `HMAC-SHA256(subkey 'share', 'harness-forge/share/v1:' + shareId)`. Never stored; the share page is `/share/<token>`.
@@ -35,6 +39,8 @@ export const PROVIDER_ID_PATTERN = /^[\da-z](?:[\da-z-]{0,62}[\da-z])?$/
 export const TOOL_NAME_PATTERN = /^[\w-]{1,64}$/
 /** Slash command name (typed as `/name`). */
 export const COMMAND_NAME_PATTERN = /^[a-z][\da-z-]{0,31}$/
+/** Agent type and skill name (Phase 10, ADR-044): 1..64 characters of `[a-z0-9-]`, starting with a-z. */
+export const AGENT_NAME_PATTERN = /^[a-z][\da-z-]{0,63}$/
 /** MCP server id: 1..32 characters of `[a-z0-9-]`, no leading or trailing `-`. */
 export const MCP_SERVER_ID_PATTERN = /^[\da-z](?:[\da-z-]{0,30}[\da-z])?$/
 /** LobeHub icon slug (variants are separate slugs: `claude`, `claude-color`). */
@@ -83,6 +89,12 @@ export type ShellRuleId = z.infer<typeof shellRuleIdSchema>
 export const changeBatchIdSchema = z.string().regex(CHANGE_BATCH_ID_PATTERN, 'Expected a change batch id "wcb_" + 16 characters.')
 export type ChangeBatchId = z.infer<typeof changeBatchIdSchema>
 
+export const customizationIdSchema = z.string().regex(CUSTOMIZATION_ID_PATTERN, 'Expected a customization id "cus_" + 16 characters.')
+export type CustomizationId = z.infer<typeof customizationIdSchema>
+
+export const backgroundTaskIdSchema = z.string().regex(BACKGROUND_TASK_ID_PATTERN, 'Expected a background task id "bgt_" + 16 characters.')
+export type BackgroundTaskId = z.infer<typeof backgroundTaskIdSchema>
+
 export const pluginIdSchema = z.string().regex(PLUGIN_ID_PATTERN, 'Plugin ids use 1-40 characters of a-z, 0-9 and "-", without a leading or trailing "-".')
 export type PluginId = z.infer<typeof pluginIdSchema>
 
@@ -95,6 +107,9 @@ export type ModelId = z.infer<typeof modelIdSchema>
 
 export const toolNameSchema = z.string().regex(TOOL_NAME_PATTERN, 'Tool names use 1-64 characters of a-z, A-Z, 0-9, "_" and "-".')
 export type ToolName = z.infer<typeof toolNameSchema>
+
+export const agentNameSchema = z.string().regex(AGENT_NAME_PATTERN, 'Names start with a-z and use up to 64 characters of a-z, 0-9 and "-".')
+export type AgentName = z.infer<typeof agentNameSchema>
 
 export const commandNameSchema = z.string().regex(COMMAND_NAME_PATTERN, 'Command names start with a-z and use up to 32 characters of a-z, 0-9 and "-".')
 export type CommandName = z.infer<typeof commandNameSchema>
@@ -139,8 +154,11 @@ export type BuiltinPluginId = (typeof BUILTIN_PLUGIN_IDS)[number]
 /** Id of the dev-only mock provider and plugin. */
 export const MOCK_PROVIDER_ID = 'mock'
 
-/** Client-only slash commands: handled by the web app, never sent to the server, not registrable by plugins. */
-export const CLIENT_COMMANDS = ['new', 'model', 'effort', 'mode', 'help'] as const
+/**
+ * Client-only slash commands: handled by the web app, never sent to the server, not registrable by plugins (and never
+ * the name of a custom command). `remember` (Phase 10, ADR-047) opens the Remember dialog (`POST /memory`).
+ */
+export const CLIENT_COMMANDS = ['new', 'model', 'effort', 'mode', 'help', 'remember'] as const
 export type ClientCommand = (typeof CLIENT_COMMANDS)[number]
 
 /**
@@ -150,7 +168,15 @@ export type ClientCommand = (typeof CLIENT_COMMANDS)[number]
 export const HARNESS_COMMANDS = ['compact'] as const
 export type HarnessCommand = (typeof HARNESS_COMMANDS)[number]
 
+/** Builtin sub-agent types (Phase 9 ADR-043; reserved names in the Phase 10 catalog, ADR-045). */
+export const BUILTIN_AGENT_TYPES = ['explore', 'general'] as const
+export type BuiltinAgentType = (typeof BUILTIN_AGENT_TYPES)[number]
+
+/** Accepted aliases of agent type names (Claude Code's `general-purpose`). */
+export const AGENT_TYPE_ALIASES: Readonly<Record<string, BuiltinAgentType>> = { 'general-purpose': 'general' }
+
 const BUILTIN_PROVIDER_ID_SET: ReadonlySet<string> = new Set(BUILTIN_PROVIDER_IDS)
+const BUILTIN_AGENT_TYPE_SET: ReadonlySet<string> = new Set(BUILTIN_AGENT_TYPES)
 const CLIENT_COMMAND_SET: ReadonlySet<string> = new Set(CLIENT_COMMANDS)
 const HARNESS_COMMAND_SET: ReadonlySet<string> = new Set(HARNESS_COMMANDS)
 
@@ -169,6 +195,11 @@ export function isClientCommand(name: string): name is ClientCommand {
 
 export function isHarnessCommand(name: string): name is HarnessCommand {
   return HARNESS_COMMAND_SET.has(name)
+}
+
+/** True for the builtin agent types and their aliases (a catalog entry with such a name gets `reserved-name`). */
+export function isReservedAgentName(name: string): boolean {
+  return BUILTIN_AGENT_TYPE_SET.has(name) || Object.hasOwn(AGENT_TYPE_ALIASES, name)
 }
 
 /**
@@ -334,4 +365,14 @@ export function createShellRuleId(): ShellRuleId {
  */
 export function createChangeBatchId(): ChangeBatchId {
   return `wcb_${randomString(16)}`
+}
+
+/** A new customization id: `cus_` + 16 random characters of `[0-9A-Za-z]` (ADR-044; generated by the server). */
+export function createCustomizationId(): CustomizationId {
+  return `cus_${randomString(16)}`
+}
+
+/** A new background task id: `bgt_` + 16 random characters of `[0-9A-Za-z]` (ADR-046; generated by the server). */
+export function createBackgroundTaskId(): BackgroundTaskId {
+  return `bgt_${randomString(16)}`
 }

@@ -55,6 +55,8 @@ const settings: Settings = {
   subagentModelRef: null,
   subagentMaxSteps: 30,
   shiftTabModes: true,
+  planFiles: false,
+  planDirectory: '.harness/plans',
 }
 
 describe('createApiClient', () => {

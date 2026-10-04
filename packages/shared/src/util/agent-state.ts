@@ -1,5 +1,5 @@
 // Agent state derived from the message path (Phase 9): compaction markers (ADR-040), steers inside replies (ADR-042)
-// and the todo list (ADR-041). Pure and isomorphic; the server (model history, summarizer, share, export) and the web
+// and the todo list (ADR-041); Phase 10: background task results (ADR-046, `splitTaskResults`, `taskResultText`). Pure and isomorphic; the server (model history, summarizer, share, export) and the web
 // (transcript, todo strip) use these functions and never re-implement them.
 //
 // Every function takes a `path`: the messages of one branch of the chat tree, oldest first (`ChatDetail.messages`, the
@@ -298,4 +298,150 @@ export function latestTodos(path: readonly AgentStateMessage[]): TodoState | nul
     }
   }
   return null
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Background task results (Phase 10, ADR-046)
+
+/** Part type of background task results (`data-task-result`): written into a reply or a carrier user message. */
+export const TASK_RESULT_PART_TYPE = 'data-task-result'
+
+/**
+ * The fields of a `data-task-result` part's data that `taskResultText` reads. Structural: the shared
+ * `{ taskId, toolCallId, messageId, output: TaskOutput, deliveredAt }` data satisfies it.
+ */
+export interface TaskResultTextInput {
+  readonly taskId: string
+  readonly output: {
+    readonly status: string
+    readonly type: string
+    readonly description: string
+    readonly report: string
+    readonly error?: string
+  }
+}
+
+function escapeAttribute(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
+}
+
+/**
+ * What the model reads for a background task result:
+ * `<background-task id="…" type="…" status="…" description="…">`, a newline, the report (trimmed; `Error: …` when the
+ * report is empty and the output has an error; `(no report)` when it has neither), a newline, `</background-task>`.
+ * Attribute values escape `&`, `"` and `<`.
+ */
+export function taskResultText(data: TaskResultTextInput): string {
+  const output = data.output
+  const attributes = [
+    `id="${escapeAttribute(data.taskId)}"`,
+    `type="${escapeAttribute(output.type)}"`,
+    `status="${escapeAttribute(output.status)}"`,
+    `description="${escapeAttribute(output.description)}"`,
+  ].join(' ')
+  const report = output.report.trim()
+  const error = typeof output.error === 'string' ? output.error.trim() : ''
+  const content = report !== '' ? report : error !== '' ? `Error: ${error}` : '(no report)'
+  return `<background-task ${attributes}>\n${content}\n</background-task>`
+}
+
+/** The data of a valid `data-task-result` part (read structurally), else null. */
+function taskResultDataOf(part: unknown): TaskResultTextInput | null {
+  if (!isPart(part) || part.type !== TASK_RESULT_PART_TYPE)
+    return null
+  const data = part.data
+  if (!isRecord(data) || typeof data.taskId !== 'string' || !isRecord(data.output))
+    return null
+  const { status, type, description, report, error } = data.output
+  if (typeof status !== 'string' || typeof type !== 'string' || typeof description !== 'string' || typeof report !== 'string')
+    return null
+  if (error !== undefined && typeof error !== 'string')
+    return null
+  return { taskId: data.taskId, output: error === undefined ? { status, type, description, report } : { status, type, description, report, error } }
+}
+
+function isTaskResultPart(part: unknown): boolean {
+  return isPart(part) && part.type === TASK_RESULT_PART_TYPE
+}
+
+function taskResultTextPart(data: TaskResultTextInput): AgentStatePart {
+  return { type: 'text', text: taskResultText(data) }
+}
+
+/** A user message whose parts are all `data-task-result` parts: the carrier of a turn the server started. */
+function isCarrierMessage(message: unknown): boolean {
+  return isRecord(message)
+    && message.role === 'user'
+    && Array.isArray(message.parts)
+    && message.parts.length > 0
+    && message.parts.every(isTaskResultPart)
+}
+
+function hasTaskResult(message: unknown): boolean {
+  const parts = assistantParts(message)
+  return parts !== null && parts.some(isTaskResultPart)
+}
+
+/**
+ * The model's view of background task results (a model-history stage that runs after `splitSteers`):
+ * - an assistant message holding `data-task-result` parts is split at each of them, in order, into
+ *   `assistant(parts before) / user(result) / assistant(parts after)`, like `splitSteers`: the user message has
+ *   `id = data.taskId`, `role: 'user'`, one text part `taskResultText(data)` and the other fields of the original
+ *   message except `metadata`; assistant halves keep every field of the original; the first kept half keeps the
+ *   original id and each later kept half gets `${originalId}~r${k}` (k = 1, 2, …; `~r` so the ids never collide with
+ *   the `~k` halves of `splitSteers`); a half without content parts (`isContentPart`) is dropped; a result part whose
+ *   data is invalid and malformed (non-object) parts of a split message are removed;
+ * - a user message whose parts are all `data-task-result` parts (the carrier of a server-started turn) keeps every
+ *   field and gets one text part `taskResultText(data)` per valid result; a carrier without a valid result is dropped;
+ * - every other message is returned as the same object. Idempotent; never throws.
+ */
+export function splitTaskResults<M extends AgentStateMessage>(messages: readonly M[]): M[] {
+  const result: M[] = []
+  if (!Array.isArray(messages))
+    return result
+  for (const message of messages) {
+    if (isCarrierMessage(message)) {
+      const parts: AgentStatePart[] = []
+      for (const part of message.parts) {
+        const data = taskResultDataOf(part)
+        if (data !== null)
+          parts.push(taskResultTextPart(data))
+      }
+      if (parts.length > 0)
+        result.push({ ...message, parts })
+      continue
+    }
+    if (!hasTaskResult(message)) {
+      result.push(message)
+      continue
+    }
+    let current: AgentStatePart[] = []
+    let kept = 0
+    const flush = (): void => {
+      if (current.some(isContentPart)) {
+        result.push({ ...message, id: kept === 0 ? message.id : `${message.id}~r${kept}`, parts: current })
+        kept++
+      }
+      current = []
+    }
+    for (const part of message.parts as readonly unknown[]) {
+      if (isTaskResultPart(part)) {
+        const data = taskResultDataOf(part)
+        if (data === null)
+          continue
+        flush()
+        result.push(taskResultMessage(message, data))
+        continue
+      }
+      if (isPart(part))
+        current.push(part)
+    }
+    flush()
+  }
+  return result
+}
+
+function taskResultMessage<M extends AgentStateMessage>(message: M, data: TaskResultTextInput): M {
+  const { metadata: _metadata, ...rest } = message as M & { metadata?: unknown }
+  return { ...rest, id: data.taskId, role: 'user', parts: [taskResultTextPart(data)] } as unknown as M
 }

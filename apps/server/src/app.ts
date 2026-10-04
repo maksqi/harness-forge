@@ -23,10 +23,12 @@ import { createAudioRoutes } from './http/routes/audio.ts'
 import { createAuthRoutes } from './http/routes/auth.ts'
 import { createChangesRoutes } from './http/routes/changes.ts'
 import { createChatQueueRoutes } from './http/routes/chat-queue.ts'
+import { createChatTasksRoutes } from './http/routes/chat-tasks.ts'
 import { createChatRoutes } from './http/routes/chat.ts'
 import { createChatsRoutes } from './http/routes/chats.ts'
 import { createCommandsRoutes } from './http/routes/commands.ts'
 import { createCredentialsRoutes } from './http/routes/credentials.ts'
+import { createCustomizationsRoutes } from './http/routes/customizations.ts'
 import { createDataRoutes } from './http/routes/data.ts'
 import { createEventsRoutes } from './http/routes/events.ts'
 import { createFilesRoutes } from './http/routes/files.ts'
@@ -34,6 +36,7 @@ import { createHealthRoutes } from './http/routes/health.ts'
 import { createIconsRoutes } from './http/routes/icons.ts'
 import { createKeysRoutes } from './http/routes/keys.ts'
 import { createMcpRoutes } from './http/routes/mcp.ts'
+import { createMemoryRoutes } from './http/routes/memory.ts'
 import { createModelsRoutes } from './http/routes/models.ts'
 import { createPluginDraftsRoutes } from './http/routes/plugin-drafts.ts'
 import { createPluginFilesRoutes } from './http/routes/plugin-files.ts'
@@ -49,11 +52,13 @@ import { createToolsRoutes } from './http/routes/tools.ts'
 import { createStaticRoutes } from './http/static.ts'
 
 /**
- * The 27 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
+ * The 30 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
  * with static `/plugins/<word>` paths are mounted before `plugins` (`/plugins/:id...`); no route shadows another
  * (they differ in method, segment count or static segments, API.md 8), the order is a second line of defense. `shares`
  * also serves the public `/share/:token` routes; `changes` (Phase 8) serves chat-scoped routes under `/chats/:id/...`;
- * `chatQueue` (Phase 9) serves `/chat/:id/queue...` next to `chat`, `projectFiles` (Phase 9) `/projects/:id/files...`.
+ * `chatQueue` (Phase 9) serves `/chat/:id/queue...` next to `chat`, `projectFiles` (Phase 9) `/projects/:id/files...`;
+ * Phase 10: `customizations` (`/customizations/source` is registered before `/customizations/:id` inside the module),
+ * `memory` (`/memory`) and `chatTasks` (`/chat/:id/tasks...`).
  */
 export const ROUTE_MODULES = {
   health: createHealthRoutes,
@@ -78,6 +83,9 @@ export const ROUTE_MODULES = {
   shellRules: createShellRulesRoutes,
   chatQueue: createChatQueueRoutes,
   projectFiles: createProjectFilesRoutes,
+  customizations: createCustomizationsRoutes,
+  memory: createMemoryRoutes,
+  chatTasks: createChatTasksRoutes,
   shares: createSharesRoutes,
   pluginInstall: createPluginInstallRoutes,
   pluginDrafts: createPluginDraftsRoutes,

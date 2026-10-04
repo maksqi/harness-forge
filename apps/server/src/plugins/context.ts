@@ -13,6 +13,7 @@
 // `provider_error` when the provider returned no image that could be stored. An unknown provider is
 // `provider_not_configured` (plugin API 1.2.0; the resolver's error).
 import type {
+  AgentDefinition,
   CommandDefinition,
   Disposable,
   HookHandler,
@@ -27,6 +28,7 @@ import type {
   PluginManifest,
   PluginPermission,
   ProviderDefinition,
+  SkillDefinition,
   ToolDefinition,
 } from '@harness-forge/plugin-sdk'
 import type { LogLevel } from '@harness-forge/shared'
@@ -356,6 +358,19 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
       register: (definition: CommandDefinition) => {
         assertLive()
         return track(registry.commands.register(pluginId, definition))
+      },
+    }),
+    // Plugin API 1.4.0 (ADR-045): P10-0a contract stubs; the agent and skill registries arrive in P10-0b / P10-A.
+    agents: Object.freeze({
+      register: (_definition: AgentDefinition): Disposable => {
+        assertLive()
+        throw new HarnessError({ code: 'not_implemented', message: 'ctx.agents.register is not available yet.' })
+      },
+    }),
+    skills: Object.freeze({
+      register: (_definition: SkillDefinition): Disposable => {
+        assertLive()
+        throw new HarnessError({ code: 'not_implemented', message: 'ctx.skills.register is not available yet.' })
       },
     }),
     hooks: Object.freeze({

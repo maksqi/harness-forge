@@ -13,7 +13,7 @@ export function listCommands(deps: Pick<AppDeps, 'registry'>): CommandSummary[] 
   const registered = deps.registry.commands
     .list()
     .filter(entry => !isClientCommand(entry.definition.name) && !isHarnessCommand(entry.definition.name))
-    .map(entry => ({ name: entry.definition.name, description: entry.definition.description, pluginId: entry.pluginId }))
+    .map((entry): CommandSummary => ({ name: entry.definition.name, description: entry.definition.description, source: 'plugin', pluginId: entry.pluginId }))
   return [...HARNESS_COMMAND_SUMMARIES.map(summary => ({ ...summary })), ...registered]
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 }

@@ -31,7 +31,7 @@ import type { WorkspaceRunScopeInit } from '../../workspace/run-scope.ts'
 import type { RunSubagentOptions } from '../agent-scope.ts'
 import type { RunSession } from '../pipeline.ts'
 import type { StepPiece } from '../steps.ts'
-import { isHarnessError, LIMITS } from '@harness-forge/shared'
+import { AGENT_TYPE_ALIASES, BUILTIN_AGENT_TYPES, isHarnessError, LIMITS, taskTypeSchema } from '@harness-forge/shared'
 import { isStepCount, streamText } from 'ai'
 import { toolWorkspaceAccess } from '../approval.ts'
 import { createContextGuard } from '../compaction/guard.ts'
@@ -315,6 +315,15 @@ async function* runChild(run: ChildRun, task: TaskInput, options: RunSubagentOpt
   const now = (): number => session.ctx.now()
   const progress = new TaskProgress(task, session.ctx.prepared.settings.subagentModelRef ?? input.model.modelRef, now())
 
+  // P10-0a (C28) compile fix: `task.type` names any catalog agent since Phase 10 (ADR-045). Until the catalog reaches the
+  // runner, only the builtin types run (`general-purpose` is `general`); any other name fails the call, as v1.5 did.
+  const builtinType = taskTypeSchema.safeParse(AGENT_TYPE_ALIASES[task.type] ?? task.type)
+  if (!builtinType.success) {
+    yield progress.snapshot('failed', { finishedAt: now(), error: `Unknown agent type "${task.type}". Available types: ${BUILTIN_AGENT_TYPES.join(', ')}.` })
+    return
+  }
+  const type = builtinType.data
+
   const deadline = new AbortController()
   const timer = setTimeout(() => deadline.abort(abortReason(subagentDeadlineText(timeoutMs))), timeoutMs)
   timer.unref?.()
@@ -357,11 +366,11 @@ async function* runChild(run: ChildRun, task: TaskInput, options: RunSubagentOpt
     yield progress.snapshot('running')
 
     const settings = session.ctx.prepared.settings
-    const mode = childToolMode(task.type, input.toolMode)
+    const mode = childToolMode(type, input.toolMode)
     const maxSteps = settings.subagentMaxSteps
     const tools = await childTools({
       session,
-      type: task.type,
+      type,
       toolMode: input.toolMode,
       model,
       workspace: input.workspace,
@@ -375,7 +384,7 @@ async function* runChild(run: ChildRun, task: TaskInput, options: RunSubagentOpt
       resolved: model,
       reasoningEffort: session.ctx.reasoningEffort,
       toolMode: mode,
-      globalInstructions: joinInstructions(SUBAGENT_PREAMBLE, task.type === 'explore' ? SUBAGENT_EXPLORE_TEXT : undefined, settings.instructions),
+      globalInstructions: joinInstructions(SUBAGENT_PREAMBLE, type === 'explore' ? SUBAGENT_EXPLORE_TEXT : undefined, settings.instructions),
       chatInstructions: session.ctx.prepared.chat.settings.instructions,
       workspace: input.workspace,
       workspaceTools: [...tools.byName.values()].filter(entry => toolWorkspaceAccess(entry.definition) !== null).map(entry => entry.definition.name),

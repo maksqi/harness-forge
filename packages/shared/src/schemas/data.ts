@@ -1,6 +1,7 @@
 // Bulk data DTOs (API.md section 4.16, ADR-024, ADR-035, ADR-039): the backup zip format and the bodies of `GET /data`,
 // `GET /data/export`, `POST /data/import`, `POST /data/delete` and the orphaned file cleanup (`/data/cleanup`, manual or
-// automatic).
+// automatic). Phase 10 (ADR-044): backups also carry the personal agents, commands and skills (`customizations.json`,
+// `backupCustomizationsSchema` in `customizations.ts`).
 import { z } from 'zod'
 import { fileSweepModeSchema } from '../enums.ts'
 import { chatIdSchema, fileIdSchema, sha256HexSchema, timestampSchema } from '../ids.ts'
@@ -21,8 +22,10 @@ export const backupManifestSchema = z.object({
   appVersion: z.string().max(64),
   /** `version` of every `chats/<chatId>.json` (`ChatExport`). */
   chatExportVersion: z.literal(2),
-  includes: z.object({ files: z.boolean(), settings: z.boolean() }),
-  counts: z.object({ chats: countSchema, messages: countSchema, files: countSchema, fileBytes: countSchema }),
+  /** `customizations` (Phase 10): the backup holds `customizations.json`; absent in older backups (= false). */
+  includes: z.object({ files: z.boolean(), settings: z.boolean(), customizations: z.boolean().optional() }),
+  /** `customizations` (Phase 10): the items of `customizations.json`; absent in older backups. */
+  counts: z.object({ chats: countSchema, messages: countSchema, files: countSchema, fileBytes: countSchema, customizations: countSchema.optional() }),
 })
 export type BackupManifest = z.infer<typeof backupManifestSchema>
 
@@ -108,12 +111,14 @@ export const dataSummarySchema = z.object({
 })
 export type DataSummary = z.infer<typeof dataSummarySchema>
 
-/** Query of `GET /data/export`; both parts default to true. */
+/** Query of `GET /data/export`; every part defaults to true. */
 export const dataExportQuerySchema = z.object({
   /** Attachments referenced by message parts (`files/index.json` + `files/<sha256>`). */
   files: queryBooleanSchema.optional(),
   /** The public global settings (`settings.json`). */
   settings: queryBooleanSchema.optional(),
+  /** The personal agents, commands and skills (`customizations.json`, Phase 10). */
+  customizations: queryBooleanSchema.optional(),
 })
 export type DataExportQuery = z.infer<typeof dataExportQuerySchema>
 
@@ -127,6 +132,11 @@ export const dataImportFormSchema = z.object({
   onConflict: dataConflictPolicySchema.optional(),
   /** Apply the known keys of the backup's `settings.json`; default false. */
   restoreSettings: queryBooleanSchema.optional(),
+  /**
+   * Restore the personal agents, commands and skills of the backup's `customizations.json` (Phase 10); default false. A
+   * definition whose kind and name already exist is kept (skipped).
+   */
+  restoreCustomizations: queryBooleanSchema.optional(),
 })
 export type DataImportForm = z.infer<typeof dataImportFormSchema>
 
@@ -166,6 +176,11 @@ export const dataImportResultSchema = z.object({
     filesMissing: countSchema,
   }),
   settingsRestored: z.boolean(),
+  /**
+   * Phase 10: what `restoreCustomizations` did with `customizations.json` (`imported` rows, `skipped` = the kind and
+   * name already existed, `failed` = invalid content or the per-kind limit); absent when nothing was restored.
+   */
+  customizations: z.object({ imported: countSchema, skipped: countSchema, failed: countSchema }).optional(),
   items: z.array(dataImportItemSchema),
   /** Unknown entries, missing files, settings keys that failed validation, ... */
   warnings: z.array(z.string().max(300)).max(100),

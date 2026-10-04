@@ -42,7 +42,7 @@ export function testProviders(extra: readonly ProviderDefinition[] = [ACME_PROVI
   ]
 }
 
-const EMPTY_CONTRIBUTIONS: PluginContributions = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [] }
+const EMPTY_CONTRIBUTIONS: PluginContributions = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] }
 
 /** A registry that knows providers only (other registrations are accepted and ignored). */
 export function createTestRegistry(providers: readonly RegisteredProvider[] = testProviders()): Registry {

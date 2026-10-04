@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { logLevelSchema, pluginKindSchema, pluginSourceSchema, pluginStateSchema, pluginTemplateIdSchema } from '../enums.ts'
 import { harnessErrorInitSchema } from '../errors.ts'
 import {
+  agentNameSchema,
   commandNameSchema,
   modelIdSchema,
   pluginIdSchema,
@@ -32,6 +33,10 @@ export const pluginContributionsSchema = z.object({
   commands: z.array(commandNameSchema),
   /** `HookMap` keys with at least one handler. */
   hooks: z.array(z.string()),
+  /** Agent types (manifest + `ctx.agents.register`; plugin API 1.4.0). */
+  agents: z.array(agentNameSchema),
+  /** Skills (manifest + `ctx.skills.register`; plugin API 1.4.0). */
+  skills: z.array(agentNameSchema),
 })
 export type PluginContributions = z.infer<typeof pluginContributionsSchema>
 

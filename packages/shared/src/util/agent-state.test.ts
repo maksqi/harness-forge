@@ -12,6 +12,9 @@ import {
   latestTodos,
   NON_CONTENT_PART_TYPES,
   splitSteers,
+  splitTaskResults,
+  TASK_RESULT_PART_TYPE,
+  taskResultText,
 } from './agent-state.ts'
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -636,5 +639,184 @@ describe('fuzzing', () => {
     expect(exercised.keptUser).toBeGreaterThan(50)
     expect(exercised.steers).toBeGreaterThan(300)
     expect(exercised.todos).toBeGreaterThan(300)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Background task results (Phase 10)
+
+interface TaskOutputFields {
+  status: string
+  type: string
+  description: string
+  report: string
+  error?: string
+}
+
+function taskResultData(taskId: string, overrides: Partial<TaskOutputFields> = {}): Record<string, unknown> {
+  return {
+    taskId,
+    toolCallId: `call_${taskId}`,
+    messageId: msgId(50),
+    output: {
+      status: 'completed',
+      type: 'explore',
+      description: 'Find the parser',
+      modelRef: 'mock:echo',
+      steps: [],
+      stepsOmitted: 0,
+      report: 'Found it in src/a.ts.',
+      startedAt: AT,
+      finishedAt: AT + 5,
+      ...overrides,
+    },
+    deliveredAt: AT + 6,
+  }
+}
+
+function taskResult(data: unknown): HarnessUIMessagePart {
+  return { type: 'data-task-result', data } as unknown as HarnessUIMessagePart
+}
+
+function resultText(taskId: string, overrides: Partial<TaskOutputFields> = {}): HarnessUIMessagePart {
+  return text(taskResultText(taskResultData(taskId, overrides) as unknown as Parameters<typeof taskResultText>[0]))
+}
+
+describe('taskResultText', () => {
+  it('wraps the report in a background-task element', () => {
+    expect(TASK_RESULT_PART_TYPE).toBe('data-task-result')
+    expect(taskResultText({ taskId: 'bgt_0000000000000001', output: { status: 'completed', type: 'explore', description: 'Find the parser', report: '\n  Found it.\n\n' } }))
+      .toBe('<background-task id="bgt_0000000000000001" type="explore" status="completed" description="Find the parser">\nFound it.\n</background-task>')
+  })
+
+  it('uses the error when the report is empty, else a placeholder', () => {
+    expect(taskResultText({ taskId: 't', output: { status: 'failed', type: 'reviewer', description: 'd', report: ' ', error: 'The model failed.' } }))
+      .toBe('<background-task id="t" type="reviewer" status="failed" description="d">\nError: The model failed.\n</background-task>')
+    expect(taskResultText({ taskId: 't', output: { status: 'limit', type: 'general', description: 'd', report: 'Partial.', error: 'Step limit.' } }))
+      .toBe('<background-task id="t" type="general" status="limit" description="d">\nPartial.\n</background-task>')
+    expect(taskResultText({ taskId: 't', output: { status: 'aborted', type: 'general', description: 'd', report: '' } }))
+      .toBe('<background-task id="t" type="general" status="aborted" description="d">\n(no report)\n</background-task>')
+  })
+
+  it('escapes &, " and < in attributes', () => {
+    expect(taskResultText({ taskId: 'a"b', output: { status: 'completed', type: '<x>', description: 'Tom & "Jerry" <b>', report: 'r' } }))
+      .toBe('<background-task id="a&quot;b" type="&lt;x>" status="completed" description="Tom &amp; &quot;Jerry&quot; &lt;b>">\nr\n</background-task>')
+  })
+})
+
+describe('splitTaskResults', () => {
+  it('returns a new array with the same objects when there are no results', () => {
+    const path = [user('u1'), assistant('a1', STEP, text('x')), user('u2', text('y'), taskResult(taskResultData('t1'))), assistant('a2')]
+    const result = splitTaskResults(path)
+    expect(result).not.toBe(path)
+    result.forEach((message, index) => expect(message).toBe(path[index]))
+    expect(splitTaskResults([])).toEqual([])
+    expect(splitTaskResults(null as unknown as HarnessUIMessage[])).toEqual([])
+  })
+
+  it('splits a reply at a result delivered mid-reply', () => {
+    const call = toolPart('task', 'c1', { output: { status: 'background', taskId: 'bgt_1' } })
+    const reply = assistant('a1', STEP, text('Launching'), call, STEP, text('Meanwhile'), taskResult(taskResultData('bgt_1')), STEP, text('The explorer found it'))
+    const result = splitTaskResults([user('u1'), reply])
+    expect(result).toEqual([
+      user('u1'),
+      { ...reply, parts: [STEP, text('Launching'), call, STEP, text('Meanwhile')] },
+      { id: 'bgt_1', role: 'user', parts: [resultText('bgt_1')] },
+      { ...reply, id: 'a1~r1', parts: [STEP, text('The explorer found it')] },
+    ])
+    expect('metadata' in result[2]!).toBe(false)
+    expect(result[1]!.metadata).toBe(reply.metadata)
+    expect(result[3]!.metadata).toBe(reply.metadata)
+    expect(result[1]!.parts[2]).toBe(call)
+  })
+
+  it('splits several results in order and drops empty halves', () => {
+    const reply = assistant('a1', taskResult(taskResultData('t1')), STEP, notice(), taskResult(taskResultData('t2')), taskResult(taskResultData('t3', { status: 'failed', report: '', error: 'Boom.' })), STEP, text('answer'), taskResult(taskResultData('t4')), STEP)
+    const result = splitTaskResults([reply])
+    expect(result.map(message => [message.id, message.role])).toEqual([
+      ['t1', 'user'],
+      ['t2', 'user'],
+      ['t3', 'user'],
+      ['a1', 'assistant'],
+      ['t4', 'user'],
+    ])
+    expect(result[2]!.parts).toEqual([resultText('t3', { status: 'failed', report: '', error: 'Boom.' })])
+    expect(result[3]!.parts).toEqual([STEP, text('answer')])
+  })
+
+  it('removes results with invalid data without splitting', () => {
+    const invalid = [
+      null,
+      'text',
+      { output: taskResultData('x').output },
+      { taskId: 7, output: taskResultData('x').output },
+      { taskId: 'x', output: null },
+      { taskId: 'x', output: { ...(taskResultData('x').output as object), report: 5 } },
+      { taskId: 'x', output: { ...(taskResultData('x').output as object), status: undefined } },
+      { taskId: 'x', output: { ...(taskResultData('x').output as object), error: 42 } },
+    ]
+    for (const data of invalid) {
+      const reply = assistant('a1', STEP, text('one'), taskResult(data), STEP, text('two'))
+      const result = splitTaskResults([reply])
+      expect(result, JSON.stringify(data)).toEqual([{ ...reply, parts: [STEP, text('one'), STEP, text('two')] }])
+    }
+  })
+
+  it('turns a carrier user message into one text part per result', () => {
+    const carrier = user('u2', taskResult(taskResultData('t1')), taskResult(taskResultData('t2', { type: 'reviewer', report: 'LGTM' })))
+    const result = splitTaskResults([user('u1'), assistant('a1', STEP, text('x')), carrier])
+    expect(result[2]).toEqual({ ...carrier, parts: [resultText('t1'), resultText('t2', { type: 'reviewer', report: 'LGTM' })] })
+    expect(result[2]!.metadata).toBe(carrier.metadata)
+  })
+
+  it('drops invalid results of a carrier and a carrier without a valid result', () => {
+    const mixed = user('u2', taskResult(null), taskResult(taskResultData('t1')))
+    expect(splitTaskResults([mixed])).toEqual([{ ...mixed, parts: [resultText('t1')] }])
+    expect(splitTaskResults([user('u1'), user('u2', taskResult({ taskId: 1 }))])).toEqual([user('u1')])
+  })
+
+  it('runs after splitSteers on a reply that holds steers and results', () => {
+    const s = steerData(msgId(1), 'also check the docs')
+    const reply = assistant('a1', STEP, text('one'), taskResult(taskResultData('t1')), STEP, text('two'), steer(s), STEP, text('three'), taskResult(taskResultData('t2')), STEP, text('four'))
+    const result = splitTaskResults(splitSteers([user('u1'), reply]))
+    expect(result.map(message => [message.id, message.role])).toEqual([
+      ['u1', 'user'],
+      ['a1', 'assistant'],
+      ['t1', 'user'],
+      ['a1~r1', 'assistant'],
+      [msgId(1), 'user'],
+      ['a1~1', 'assistant'],
+      ['t2', 'user'],
+      ['a1~1~r1', 'assistant'],
+    ])
+    expect(new Set(result.map(message => message.id)).size).toBe(result.length)
+    expect(result.map(message => message.parts.filter(part => part.type === 'text').map(part => (part as { text: string }).text).join('|'))).toEqual([
+      'question u1',
+      'one',
+      taskResultText(taskResultData('t1') as unknown as Parameters<typeof taskResultText>[0]),
+      'two',
+      'also check the docs',
+      'three',
+      taskResultText(taskResultData('t2') as unknown as Parameters<typeof taskResultText>[0]),
+      'four',
+    ])
+  })
+
+  it('is idempotent', () => {
+    const path = [
+      user('u1'),
+      assistant('a1', STEP, text('one'), taskResult(taskResultData('t1')), STEP, text('two')),
+      user('u2', taskResult(taskResultData('t2'))),
+      assistant('a2', STEP, text('three')),
+    ]
+    const once = splitTaskResults(path)
+    const twice = splitTaskResults(once)
+    expect(twice).toEqual(once)
+    twice.forEach((message, index) => expect(message).toBe(once[index]))
+  })
+
+  it('accepts structural messages', () => {
+    const path: AgentStateMessage[] = [{ id: 'a', role: 'assistant', parts: [{ type: TASK_RESULT_PART_TYPE, data: taskResultData('t') }] }]
+    expect(splitTaskResults(path)).toEqual([{ id: 't', role: 'user', parts: [resultText('t')] }])
   })
 })

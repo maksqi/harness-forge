@@ -51,7 +51,7 @@ export type CommandResolution
 
 /** The harness commands as `GET /commands` lists them (Phase 9; `pluginId` names the plugin of the agent tools). */
 export const HARNESS_COMMAND_SUMMARIES: readonly CommandSummary[] = Object.freeze([
-  Object.freeze({ name: 'compact', description: 'Summarize the conversation to free up context', pluginId: 'core-agent' }),
+  Object.freeze({ name: 'compact', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' }),
 ])
 
 export interface CommandServices {

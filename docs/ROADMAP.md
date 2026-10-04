@@ -248,7 +248,38 @@ sub-agents (`task`), stabilization (unique shell rules, migration `0006`).
   - [x] W9.13 e2e-features · [x] W9.14 docs-final (W9.15 / W9.16 fix-ups only if the P9-A gate is red)
   - [x] Final gate (e2e ×3, screenshots, audit, v1.4 → v1.5 upgrade, Docker) + checkpoint commit
 
-## Backlog (not in v1.5)
+## Phase 10 — v1.6: Agent customization
+
+Details, owned paths and acceptance criteria: `docs/phases/phase-10-v1-6.md`. Decisions: ADR-044 … ADR-047 (and
+amendment notes on ADR-024, ADR-036, ADR-041, ADR-042, ADR-043). Plan: custom sub-agent types, custom slash commands
+and skills from markdown files (project `.harness/` over `.claude/`, personal ones in the database, plugin ones through
+plugin API 1.4.0) on a new Settings → Customize page, background sub-agents, plan files saved to the project, a
+Remember flow (`/remember`).
+
+- [x] P10-00 Stabilization start (coordinator): design reports in `.tmp/p10-designs`, CI + Audit on `5481fb3` green, no
+  open PRs, audit advisories re-checked (both still unpatched: ignores kept), baseline 9469 tests, `.tmp/v15` worktree
+  built
+- [x] P10-0a Decisions, docs, contracts
+  - [x] K1 DECISIONS (ADR-044 … ADR-047, contract seed), ROADMAP, AGENT.md (coordinator); K2 dependency `yaml` 2
+  - [x] C28 contracts: shared DTOs + plugin SDK 1.4.0, 9 new routes (109), `docs/API.md`, 501 stubs
+  - [x] C29 definition helpers (`packages/shared/src/util/{definitions,arguments,tool-names}.ts`, `splitTaskResults`)
+  - [x] D12 phase doc `phase-10-v1-6.md` · [x] D13 docs: UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md, guides, README
+  - [x] Gate + checkpoint commit
+- [ ] P10-0b Schema, migration `0007`, skeletons, FREEZE
+  - [ ] K3 schema + `pnpm db:generate` (coordinator; the v1.5 upgrade seed from a `5481fb3` worktree was built in P10-0a by K3S)
+  - [ ] C30 server skeleton · [ ] C31 chat seams · [ ] C32 `core-agent` + mock models · [ ] C33 web skeleton
+  - [ ] Gate (incl. v1.5 data upgrade probe) + FREEZE + checkpoint commit
+- [ ] P10-A Features (12 agents)
+  - [ ] W10.1 customizations-server · [ ] W10.2 commands-server · [ ] W10.3 agents-server · [ ] W10.4 background-server
+  - [ ] W10.5 skills-plan-server · [ ] W10.6 memory-data-server · [ ] W10.7 plugin-api-server
+  - [ ] W10.8 customize-web · [ ] W10.9 composer-web · [ ] W10.10 session-dock-web · [ ] W10.11 transcript-web
+  - [ ] W10.12 settings-plugins-web
+  - [ ] Gate + checkpoint commit
+- [ ] P10-B Feature e2e, docs, fix-ups, final gate
+  - [ ] W10.13 e2e-features · [ ] W10.14 docs-final (W10.15 / W10.16 fix-ups only if the P10-A gate is red)
+  - [ ] Final gate (e2e ×3, screenshots, audit, v1.5 → v1.6 upgrade, Docker) + checkpoint commit
+
+## Backlog (not in v1.6)
 
 Multi-user accounts · child-process isolation for code plugins · plugin marketplace/registry index ·
 knowledge/RAG · desktop/CLI clients · audio attachments to chat models · declarative image and voice providers ·
@@ -258,11 +289,15 @@ verify Alt+V dictation on Firefox / Windows (Alt+J is the documented fallback) �
 syntax highlighting in diffs · stage / commit from the changes panel · a terminal pane · a persistent shell process
 (environment variables that stick) · restoring shell changes (whole-tree snapshots) · remove the two ignored audit
 advisories (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) once patched releases ship (re-checked
-2026-10-03: still unpatched) · move the `.gitignore` ReDoS heuristic of the workspace walker (`find_files`,
+2026-10-04: still unpatched) · move the `.gitignore` ReDoS heuristic of the workspace walker (`find_files`,
 `search_files`, the `@` file index) off the main thread · a steer queue that survives a server restart · nested
-sub-agents, user-defined agent types and background agents · plan files saved to the project · micro-compaction of
+sub-agents · micro-compaction of
 single large tool outputs · retry a provider context overflow after compaction · `@` mentions of symbols and URLs ·
-run the live provider suite for compaction, plan mode and sub-agents with real models.
+run the live provider suite for compaction, plan mode and sub-agents with real models · user-defined shell hooks ·
+project `.mcp.json` servers · output styles · `!bash` and `@file` inside command files · user-invocable skills (`/skill`)
+· editing project definition files in the UI · importing definitions from the home folder (`~/.claude`) · background
+tasks that survive a server restart · a sidebar activity dot for background agents · run the live provider suite for
+custom agents, skills and background agents with real models.
 
 ## Wave log
 
@@ -305,3 +340,4 @@ run the live provider suite for compaction, plan mode and sub-agents with real m
 | P9-A | W9.1 – W9.12 (+ coordinator: `truncated` covers matches beyond the limit, share snapshots leave out `/compact` exchanges, the `core-agent` stub test and the `deps` project-files pins updated; relays: `agentTools` + the pre-mode tool set for history (W9.1), the lowered child mode (W9.5), `isPlanExitTool` (W9.7)) | audit ok (175 paths, no frozen file touched); 9467 tests; build ok; CSP 38/38; probes 71/71 (`.tmp/gates/P9-A/probe.mjs`: manual + automatic + in-run compaction, branch above the marker, failure fallback, export / share; plan tool set, card, approve with Accept edits writes + journals, keep planning with feedback, 400s; todos incl. invalid list and the compaction snapshot; steer between steps, server-started next turn, cancel, Stop `dropped`, `run-idle`; parallel sub-agents without approvals, preliminary outputs, journal `<parent>/<child>`, cap, Stop, step limit; mentions ranking, ignores, attach guards, 413; unique rules race; v1.4 upgrade compaction); P8-A regression 47/47; e2e 96 passed on a fresh `.tmp/e2e`; 22 screenshots of the new screens reviewed (desktop + phone); `pnpm audit --prod` clean (2 ignored) | (this commit) |
 | P9-B | W9.13, W9.14 (+ coordinator: Shift+Tab listed in the shortcuts dialog, same-tick announcements joined (a `/compact` reply is announced), `exit_plan_mode` effective override always null, DECISIONS wording; both e2e `fixme`s enabled) | audit ok (35 paths); 30 new e2e tests (chromium +23, mobile +5, tablet +2), 126 passed ×3 on 8891; docs reconciled; README "v1.5" | (final gate commit) |
 | Final gate v1.5 | coordinator | frozen install ok; 9469 tests (Phase 5 flaky share-token test fixed); repository `git status` unchanged by `pnpm check`; build ok; CSP 38/38; probes 71/71 + full P8-A probes 57/57; e2e 128 passed ×3 (chromium + mobile + tablet); `@screenshots` dark + light reviewed, README images from full-frame `@readme` shots; `pnpm audit --prod` clean (2 ignored, still unpatched); real v1.4 → v1.5 upgrade (fresh seed by the `316319a` build) 31/31; Docker (Node 24, uid 1000) on that seed 10/10 | (this commit) |
+| P10-0a | coordinator (K1, K2; contract skeletons of `SH/util/{definitions,arguments,tool-names}.ts` + agent-name ids), C28, C29, D12, D13, K3S (v1.5 seed, built early) (+ coordinator: D12 open points confirmed, point 10 changed (task results are separate user messages, like steers), C28 CCRs accepted (`customizations.source` `path` query, `runOriginSchema` in `enums.ts`), 33 C28 compile-fix files accepted) | audit ok (104 paths); frozen install ok (`yaml` 2.9.1 only, TypeScript 6.0.3 only); 9790 tests; build ok (web +10 KB gz vs v1.5); CSP 38/38; `pluginApiVersion` 1.4.0, 9 new routes answer 501 / 400; e2e 128 passed on a fresh `.tmp/e2e`; `pnpm audit --prod` clean (2 ignored) | (this commit) |

@@ -1,9 +1,12 @@
 // Server-sent events of `GET /api/events` (API.md sections 4.14 and 7).
 import { z } from 'zod'
+import { runOriginSchema } from './enums.ts'
 import { harnessErrorInitSchema } from './errors.ts'
 import { chatIdSchema, messageIdSchema, modelRefSchema, pluginIdSchema, projectIdSchema, providerIdSchema, timestampSchema } from './ids.ts'
+import { taskChangedDataSchema } from './schemas/background-tasks.ts'
 import { workspaceChangedDataSchema } from './schemas/changes.ts'
 import { chatSummarySchema } from './schemas/chats.ts'
+import { customizationChangedDataSchema } from './schemas/customizations.ts'
 import { pluginLogEntrySchema, pluginSummarySchema } from './schemas/plugins.ts'
 import { projectSummarySchema } from './schemas/projects.ts'
 import { providerSummarySchema } from './schemas/providers.ts'
@@ -24,6 +27,8 @@ export const SERVER_EVENT_TYPES = [
   'key.rotated',
   'workspace.changed',
   'queue.changed',
+  'task.changed',
+  'customization.changed',
 ] as const
 
 export const serverEventTypeSchema = z.enum(SERVER_EVENT_TYPES)
@@ -38,17 +43,19 @@ export const chatUpdatedDataSchema = chatSummarySchema.extend({
 })
 export type ChatUpdatedData = z.infer<typeof chatUpdatedDataSchema>
 
-/** What started a run (Phase 9, ADR-042): a `POST /chat` request, or the server with the first queued message. */
-export const runOriginSchema = z.enum(['request', 'queue'])
-export type RunOrigin = z.infer<typeof runOriginSchema>
-
 export const runStartedDataSchema = z.object({
   chatId: chatIdSchema,
   messageId: messageIdSchema,
   modelRef: modelRefSchema,
-  /** Absent in events of servers before v1.5 (= `request`). */
+  /**
+   * What started the run (`runOriginSchema`, in `enums.ts`): `request`, `queue` (Phase 9) or `task` (Phase 10, ADR-046:
+   * the results of finished background tasks). Absent in events of servers before v1.5 (= `request`).
+   */
   origin: runOriginSchema.optional(),
-  /** The user message the run answers; set when the server started the turn from the queue (`origin: 'queue'`). */
+  /**
+   * The user message the run answers; set when the server started the turn (`origin: 'queue'`, or `origin: 'task'`:
+   * the user-role carrier message that holds only `data-task-result` parts).
+   */
   userMessageId: messageIdSchema.optional(),
 })
 export type RunStartedData = z.infer<typeof runStartedDataSchema>
@@ -115,6 +122,10 @@ export const serverEventSchema = z.discriminatedUnion('type', [
   eventSchema('workspace.changed', workspaceChangedDataSchema),
   /** The steer queue of a chat changed (ADR-042): the whole queue after the change, and what left it. */
   eventSchema('queue.changed', queueChangedDataSchema),
+  /** A background task of a chat changed (ADR-046): the task after the change (an upsert; at most 1/s per task). */
+  eventSchema('task.changed', taskChangedDataSchema),
+  /** The catalog of agents, commands and skills changed (ADR-044): refetch what it names. */
+  eventSchema('customization.changed', customizationChangedDataSchema),
 ])
 export type ServerEvent = z.infer<typeof serverEventSchema>
 export type ServerEventType = ServerEvent['type']

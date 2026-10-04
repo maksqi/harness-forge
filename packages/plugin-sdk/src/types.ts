@@ -275,6 +275,42 @@ export interface CommandDefinition {
   run?(i: CommandRunInput): Promise<CommandRunResult>
 }
 
+// ---------- agents and skills (plugin API 1.4.0) ----------
+
+/**
+ * An agent type for the `task` tool (plugin API 1.4.0, ADR-045): the same fields as an agent file of a project
+ * (`.harness/agents/<name>.md`). A sub-agent of this type runs with `instructions` after the sub-agent preamble; its
+ * `tools` only narrow the tools a child gets in the parent's mode (never widen them). Validated like
+ * `contributes.agents` (`declarativeAgentSchema`): the builtin types `explore` and `general` (and `general-purpose`) are
+ * reserved, a name another plugin registered throws `conflict`; personal and project agents of the same name win.
+ */
+export interface AgentDefinition {
+  /** `^[a-z][a-z0-9-]{0,63}$`; the value of `task.type`. */
+  name: string
+  /** When to use the agent (1..1024 characters; listed to the model and in the UI). */
+  description: string
+  /** The child's instructions (Markdown, at most 64 KiB). */
+  instructions: string
+  /** Tool names (or `mcp__<server>__*` prefixes) the child may use, at most 64; omitted = every tool the mode allows. */
+  tools?: string[]
+  /** `provider:model`, or `inherit` (the parent run's model); omitted = the sub-agent model setting. */
+  model?: string
+}
+
+/**
+ * A skill (plugin API 1.4.0, ADR-045): listed to the model by name and description, its `content` loaded on demand by
+ * the `skill` tool. Validated like `contributes.skills` (`declarativeSkillSchema`); a name another plugin registered
+ * throws `conflict`; personal and project skills of the same name win.
+ */
+export interface SkillDefinition {
+  /** `^[a-z][a-z0-9-]{0,63}$`. */
+  name: string
+  /** When to use the skill (1..1024 characters). */
+  description: string
+  /** The skill body (Markdown, at most 64 KiB). */
+  content: string
+}
+
 // ---------- hooks ----------
 
 /** Input fields shared by every hook. */
@@ -443,6 +479,16 @@ export interface PluginContext {
   commands: {
     /** Exactly one of `template` / `run`; a duplicate name throws `conflict`. */
     register(d: CommandDefinition): Disposable
+  }
+  /** Plugin API 1.4.0 (ADR-045): agent types for the `task` tool. */
+  agents: {
+    /** Validates `d` (`declarativeAgentSchema`); a reserved name or one another plugin registered throws. */
+    register(d: AgentDefinition): Disposable
+  }
+  /** Plugin API 1.4.0 (ADR-045): skills for the `skill` tool. */
+  skills: {
+    /** Validates `d` (`declarativeSkillSchema`); a name another plugin registered throws `conflict`. */
+    register(d: SkillDefinition): Disposable
   }
   hooks: {
     /** Higher `priority` first (default 0), then plugin load order, then registration order. */

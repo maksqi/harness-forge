@@ -1049,7 +1049,8 @@ describe('useChatSession: image options', () => {
 
 describe('useChatSession: data parts', () => {
   it('registers every data-part schema under its chunk type as well (AI SDK 7 looks up `data-<name>`)', () => {
-    expect(Object.keys(chatDataPartSchemas).sort()).toEqual(['activity', 'compaction', 'data-activity', 'data-compaction', 'data-notice', 'data-steer', 'notice', 'steer'])
+    // Phase 10 (ADR-046) adds `task-result`.
+    expect(Object.keys(chatDataPartSchemas).sort()).toEqual(['activity', 'compaction', 'data-activity', 'data-compaction', 'data-notice', 'data-steer', 'data-task-result', 'notice', 'steer', 'task-result'])
     expect(chatDataPartSchemas['data-notice' as 'notice']).toBe(chatDataPartSchemas.notice)
   })
 

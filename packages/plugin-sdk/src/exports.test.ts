@@ -9,6 +9,10 @@ import type {
 } from '@ai-sdk/provider'
 import type { generateImage, Tool } from 'ai'
 import type {
+  AgentDefinition,
+  DeclarativeAgent,
+  DeclarativeSkill,
+  Disposable,
   GeneratedImageFile,
   HarnessErrorInit,
   HookMap,
@@ -26,6 +30,7 @@ import type {
   ProviderDefinition,
   ReasoningLevel,
   SettingsSchema,
+  SkillDefinition,
   ToolCallContext,
   ToolDefinition,
   ToolMode,
@@ -74,8 +79,8 @@ describe('exports', () => {
     expect(Object.keys(sdk).sort()).toEqual([...REEXPORTED_VALUES, 'PLUGIN_API_VERSION', 'definePlugin', 'settingsValuesSchema'].sort())
   })
 
-  it('has plugin API version 1.3.0 (Phase 9: the plan mode, async-generator tools)', () => {
-    expect(sdk.PLUGIN_API_VERSION).toBe('1.3.0')
+  it('has plugin API version 1.4.0 (Phase 10: agents and skills)', () => {
+    expect(sdk.PLUGIN_API_VERSION).toBe('1.4.0')
   })
 
   it('definePlugin is the identity', () => {
@@ -162,6 +167,24 @@ describe('exports', () => {
     expect(direct.execute({ steps: 2 }, context)).toEqual({ done: 2 })
     await expect(promised.execute({ steps: 2 }, context)).resolves.toEqual({ done: 2 })
     expect(stored).toHaveLength(3)
+  })
+
+  it('types the additions of plugin API 1.4.0 (ADR-045)', () => {
+    expectTypeOf<PluginContext['agents']['register']>().toEqualTypeOf<(d: AgentDefinition) => Disposable>()
+    expectTypeOf<PluginContext['skills']['register']>().toEqualTypeOf<(d: SkillDefinition) => Disposable>()
+    expectTypeOf<keyof AgentDefinition>().toEqualTypeOf<'name' | 'description' | 'instructions' | 'tools' | 'model'>()
+    expectTypeOf<keyof SkillDefinition>().toEqualTypeOf<'name' | 'description' | 'content'>()
+    expectTypeOf<DeclarativeAgent>().toEqualTypeOf<shared.DeclarativeAgent>()
+    expectTypeOf<DeclarativeSkill>().toEqualTypeOf<shared.DeclarativeSkill>()
+    // A manifest entry is a valid code registration, and the manifest declares both lists.
+    expectTypeOf<DeclarativeAgent>().toExtend<AgentDefinition>()
+    expectTypeOf<DeclarativeSkill>().toExtend<SkillDefinition>()
+    expectTypeOf<NonNullable<PluginManifest['contributes']>['agents']>().toEqualTypeOf<DeclarativeAgent[] | undefined>()
+    expectTypeOf<NonNullable<PluginManifest['contributes']>['skills']>().toEqualTypeOf<DeclarativeSkill[] | undefined>()
+    const agent: AgentDefinition = { name: 'reviewer', description: 'Reviews diffs.', instructions: 'Review the diff.', tools: ['read_file'], model: 'inherit' }
+    const skill: SkillDefinition = { name: 'release-notes', description: 'Writes release notes.', content: '# Steps' }
+    expect(shared.declarativeAgentSchema.parse(agent)).toEqual(agent)
+    expect(shared.declarativeSkillSchema.parse(skill)).toEqual(skill)
   })
 
   it('derives the AI SDK types of PLUGINS.md section 9', () => {

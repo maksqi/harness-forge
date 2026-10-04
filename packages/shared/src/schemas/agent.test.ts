@@ -51,7 +51,8 @@ describe('enums (Phase 9)', () => {
     expect(toolModeSchema.options).toEqual(['off', 'ask', 'edits', 'plan', 'auto'])
     expect(todoStatusSchema.options).toEqual(['pending', 'in_progress', 'completed'])
     expect(taskTypeSchema.options).toEqual(['explore', 'general'])
-    expect(noticeCodeSchema.options).toHaveLength(7)
+    // Phase 10 adds `command-model-unavailable` (8 codes).
+    expect(noticeCodeSchema.options).toHaveLength(8)
     expect(noticeCodeSchema.options).toContain('compaction-failed')
     expect(commandInvocationSchema.parse({ name: 'compact', input: 'tests', type: 'compact' }).type).toBe('compact')
     // The error codes stay 16; the queue conflicts are reasons.
@@ -87,7 +88,8 @@ describe('enums (Phase 9)', () => {
 
 describe('agent tools (ADR-041, ADR-043)', () => {
   it('names the core-agent tools and maps their schemas', () => {
-    expect(AGENT_TOOL_NAMES).toEqual(['todo_write', 'exit_plan_mode', 'task'])
+    // Phase 10 (ADR-045) adds `skill`.
+    expect(AGENT_TOOL_NAMES).toEqual(['todo_write', 'exit_plan_mode', 'task', 'skill'])
     expect(Object.keys(AGENT_TOOL_SCHEMAS)).toEqual([...AGENT_TOOL_NAMES])
   })
 
@@ -126,7 +128,8 @@ describe('agent tools (ADR-041, ADR-043)', () => {
   it('validates task inputs and outputs', () => {
     const input = { description: 'Map the repo', prompt: 'List the packages.', type: 'explore' }
     expect(taskInputSchema.parse(input)).toEqual(input)
-    for (const change of [{ description: 'ab' }, { description: 'x'.repeat(81) }, { prompt: '' }, { prompt: 'x'.repeat(LIMITS.taskPromptMaxChars + 1) }, { type: 'nested' }, { type: undefined }])
+    // Phase 10 (ADR-045): any agent name passes the schema (the runner checks the catalog); not a malformed one.
+    for (const change of [{ description: 'ab' }, { description: 'x'.repeat(81) }, { prompt: '' }, { prompt: 'x'.repeat(LIMITS.taskPromptMaxChars + 1) }, { type: 'nested agent' }, { type: 'code_review' }, { type: undefined }])
       expect(taskInputSchema.safeParse({ ...input, ...change }).success, JSON.stringify(change).slice(0, 80)).toBe(false)
     const output = {
       status: 'completed',
@@ -192,7 +195,8 @@ describe('data parts (ADR-040, ADR-042)', () => {
       expect(steerDataSchema.safeParse({ ...steer, ...change }).success, JSON.stringify(change)).toBe(false)
     expect(activityDataSchema.parse({ kind: 'compacting' })).toEqual({ kind: 'compacting' })
     expect(activityDataSchema.safeParse({ kind: 'thinking' }).success).toBe(false)
-    expect(Object.keys(harnessDataSchemas)).toEqual(['notice', 'compaction', 'steer', 'activity'])
+    // Phase 10 (ADR-046) adds `task-result`.
+    expect(Object.keys(harnessDataSchemas)).toEqual(['notice', 'compaction', 'steer', 'activity', 'task-result'])
   })
 
   it('validates the new parts with the AI SDK validateUIMessages', async () => {

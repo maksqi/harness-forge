@@ -4,6 +4,7 @@ export { definePlugin } from './define-plugin.ts'
 export { settingsValuesSchema } from './settings.ts'
 export type { SettingsValuesSchemaOptions } from './settings.ts'
 export type {
+  AgentDefinition,
   CommandDefinition,
   CommandRunInput,
   CommandRunResult,
@@ -28,6 +29,7 @@ export type {
   ProviderRuntime,
   ReasoningLevel,
   ReasoningParams,
+  SkillDefinition,
   ToolCallContext,
   ToolDefinition,
   ToolPolicyFunction,
@@ -63,8 +65,10 @@ export {
 export type {
   ApiFormat,
   CredentialField,
+  DeclarativeAgent,
   DeclarativeCommand,
   DeclarativeProvider,
+  DeclarativeSkill,
   HarnessErrorAction,
   HarnessErrorCode,
   HarnessErrorInit,

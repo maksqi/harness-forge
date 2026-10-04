@@ -34,7 +34,7 @@ vi.mock('~/components/plugins/list/nuxt-imports', () => ({
 vi.mock('~/utils/download', () => ({ downloadResponse: mocks.download }))
 vi.mock('vue-sonner', () => ({ toast: mocks.toast }))
 
-const none = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [] }
+const none = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] }
 const settingsSchema = { type: 'object' as const, properties: { sides: { type: 'integer' as const, title: 'Sides', default: 6 } } }
 
 const DETAILS: Record<string, PluginDetail> = {

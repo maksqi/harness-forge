@@ -156,6 +156,30 @@ declare module '@harness-forge/plugin-sdk' {
     template: string
   }
 
+  /** An agent type for the task tool (plugin API 1.4.0); explore, general and general-purpose are reserved. */
+  export interface DeclarativeAgent {
+    /** ^[a-z][a-z0-9-]{0,63}$ */
+    name: string
+    /** When to use the agent (1..1024 characters). */
+    description: string
+    /** The sub-agent's instructions (Markdown, at most 64 KB). */
+    instructions: string
+    /** Tool names (or "mcp__<server>__*") the sub-agent may use; they only narrow its tools. */
+    tools?: string[]
+    /** "provider:model", or "inherit" (the parent's model). */
+    model?: string
+  }
+
+  /** A skill the agent can load with the skill tool (plugin API 1.4.0). */
+  export interface DeclarativeSkill {
+    /** ^[a-z][a-z0-9-]{0,63}$ */
+    name: string
+    /** When to use the skill (1..1024 characters). */
+    description: string
+    /** The skill body (Markdown, at most 64 KB). */
+    content: string
+  }
+
   export interface DeclarativeProvider {
     id: string
     name: string
@@ -205,6 +229,10 @@ declare module '@harness-forge/plugin-sdk' {
       models?: { providerId: string, models: ModelInfo[] }[]
       mcpServers?: McpServerDecl[]
       commands?: DeclarativeCommand[]
+      /** Plugin API 1.4.0. */
+      agents?: DeclarativeAgent[]
+      /** Plugin API 1.4.0. */
+      skills?: DeclarativeSkill[]
     }
   }
 
@@ -355,6 +383,32 @@ declare module '@harness-forge/plugin-sdk' {
     run?(i: CommandRunInput): Promise<CommandRunResult>
   }
 
+  // ---------- agents and skills (plugin API 1.4.0) ----------
+
+  /** An agent type for the task tool; its tools only narrow what a sub-agent gets (never widen it). */
+  export interface AgentDefinition {
+    /** ^[a-z][a-z0-9-]{0,63}$; explore, general and general-purpose are reserved. */
+    name: string
+    /** When to use the agent (1..1024 characters). */
+    description: string
+    /** The sub-agent's instructions (Markdown, at most 64 KB). */
+    instructions: string
+    /** Tool names (or "mcp__<server>__*") the sub-agent may use; omitted: every tool the mode allows. */
+    tools?: string[]
+    /** "provider:model", or "inherit" (the parent's model); omitted: the sub-agent model setting. */
+    model?: string
+  }
+
+  /** A skill: listed to the model by name and description, its content loaded by the skill tool. */
+  export interface SkillDefinition {
+    /** ^[a-z][a-z0-9-]{0,63}$ */
+    name: string
+    /** When to use the skill (1..1024 characters). */
+    description: string
+    /** The skill body (Markdown, at most 64 KB). */
+    content: string
+  }
+
   // ---------- hooks ----------
 
   export interface HookChatContext {
@@ -490,6 +544,14 @@ declare module '@harness-forge/plugin-sdk' {
     }
     commands: {
       register(d: CommandDefinition): Disposable
+    }
+    /** Agent types for the task tool (plugin API 1.4.0). */
+    agents: {
+      register(d: AgentDefinition): Disposable
+    }
+    /** Skills for the skill tool (plugin API 1.4.0). */
+    skills: {
+      register(d: SkillDefinition): Disposable
     }
     hooks: {
       /** Higher priority runs first (default 0). */

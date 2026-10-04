@@ -125,9 +125,11 @@ describe('settings', () => {
       subagentModelRef: null,
       subagentMaxSteps: 30,
       shiftTabModes: true,
+      planFiles: false,
+      planDirectory: '.harness/plans',
     })
     expect(Object.isFrozen(DEFAULT_SETTINGS)).toBe(true)
-    expect(SETTINGS_KEYS).toHaveLength(26)
+    expect(SETTINGS_KEYS).toHaveLength(28)
     expect(settingsSchema.parse({ maxSteps: 5, _auth: 'internal' })).toEqual({ ...DEFAULT_SETTINGS, maxSteps: 5 })
   })
 
@@ -162,6 +164,8 @@ describe('settings', () => {
       subagentModelRef: null,
       subagentMaxSteps: 30,
       shiftTabModes: true,
+      planFiles: false,
+      planDirectory: '.harness/plans',
     })
   })
 
@@ -189,7 +193,45 @@ describe('settings', () => {
       projectMaxSteps: 100,
       fileSweep: 'daily',
     }
-    expect(settingsSchema.parse(v14)).toEqual({ ...v14, autoCompact: true, compactModelRef: null, subagentModelRef: null, subagentMaxSteps: 30, shiftTabModes: true })
+    expect(settingsSchema.parse(v14)).toEqual({ ...v14, autoCompact: true, compactModelRef: null, subagentModelRef: null, subagentMaxSteps: 30, shiftTabModes: true, planFiles: false, planDirectory: '.harness/plans' })
+  })
+
+  it('reads settings stored by v1.5 (without the Phase 10 keys) with the new defaults', () => {
+    const v15 = { ...DEFAULT_SETTINGS, instructions: 'Be brief.', subagentMaxSteps: 12 } as Record<string, unknown>
+    delete v15.planFiles
+    delete v15.planDirectory
+    expect(settingsSchema.parse(v15)).toEqual({ ...DEFAULT_SETTINGS, instructions: 'Be brief.', subagentMaxSteps: 12 })
+  })
+
+  it('validates the plan file settings (Phase 10, ADR-047)', () => {
+    const update = { planFiles: true, planDirectory: 'docs/plans' }
+    expect(settingsUpdateSchema.parse(update)).toEqual(update)
+    expect(settingsUpdateSchema.parse({ planDirectory: '  .harness/plans  ' })).toEqual({ planDirectory: '.harness/plans' })
+    for (const value of ['plans', '.harness/plans', 'a/b/c', 'notes.d/plans', '.claude/plans', 'x'.repeat(200)])
+      expect(settingsUpdateSchema.safeParse({ planDirectory: value }).success, value).toBe(true)
+    for (const value of [
+      '',
+      '   ',
+      '/abs/plans',
+      '\\server\\plans',
+      'C:/plans',
+      'c:plans',
+      '../x',
+      'a/../b',
+      'a/..',
+      '.git/x',
+      'a/.GIT/b',
+      'a//b',
+      'a/',
+      './plans',
+      'a\u0000b',
+      'a\nb',
+      'x'.repeat(201),
+      null,
+    ])
+      expect(settingsUpdateSchema.safeParse({ planDirectory: value }).success, JSON.stringify(value)).toBe(false)
+    for (const value of ['yes', null, 1])
+      expect(settingsUpdateSchema.safeParse({ planFiles: value }).success, JSON.stringify(value)).toBe(false)
   })
 
   it('validates the agent settings and the plan mode (Phase 9, ADR-040 … ADR-043)', () => {
@@ -733,8 +775,8 @@ describe('server events', () => {
     expect(serverEventSchema.parse(event)).toEqual({ type: 'chat.updated', data: { ...summary, activeLeafId: MESSAGE_B }, at: 4 })
   })
 
-  it('covers the 13 event types', () => {
-    expect(SERVER_EVENT_TYPES).toHaveLength(13)
+  it('covers the 15 event types', () => {
+    expect(SERVER_EVENT_TYPES).toHaveLength(15)
     expectTypeOf<ServerEventType>().toEqualTypeOf<z.infer<typeof serverEventTypeSchema>>()
   })
 

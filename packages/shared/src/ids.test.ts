@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { HarnessError } from './errors.ts'
 import {
+  AGENT_NAME_PATTERN,
+  AGENT_TYPE_ALIASES,
+  agentNameSchema,
+  BACKGROUND_TASK_ID_PATTERN,
+  backgroundTaskIdSchema,
+  BUILTIN_AGENT_TYPES,
   BUILTIN_PLUGIN_IDS,
   BUILTIN_PROVIDER_IDS,
   CHANGE_BATCH_ID_PATTERN,
@@ -8,19 +14,24 @@ import {
   chatIdSchema,
   CLIENT_COMMANDS,
   commandNameSchema,
+  createBackgroundTaskId,
   createChangeBatchId,
   createChatId,
+  createCustomizationId,
   createFileId,
   createMessageId,
   createProjectId,
   createShareId,
   createShellRuleId,
+  CUSTOMIZATION_ID_PATTERN,
+  customizationIdSchema,
   fileIdSchema,
   formatModelRef,
   HARNESS_COMMANDS,
   isClientCommand,
   isHarnessCommand,
   isPluginNamespacedId,
+  isReservedAgentName,
   isReservedPluginId,
   mcpServerIdSchema,
   mcpToolName,
@@ -94,6 +105,14 @@ describe('id schemas', () => {
     expect(modelIdSchema.safeParse('tab\there').success).toBe(false)
   })
 
+  it('validates agent and skill names (ADR-044)', () => {
+    for (const name of ['a', 'reviewer', 'release-notes', 'x1', `a${'b'.repeat(63)}`, 'general-purpose'])
+      expect(agentNameSchema.safeParse(name).success, name).toBe(true)
+    for (const name of ['', '1abc', '-x', 'Reviewer', 'code_review', 'a b', `a${'b'.repeat(64)}`])
+      expect(agentNameSchema.safeParse(name).success, name).toBe(false)
+    expect(AGENT_NAME_PATTERN.test('reviewer')).toBe(true)
+  })
+
   it('validates chat, message and file ids', () => {
     expect(chatIdSchema.safeParse('0199a8f0-0000-7000-8000-000000000001').success).toBe(true)
     expect(chatIdSchema.safeParse('0199A8F0-0000-7000-8000-000000000001').success).toBe(false)
@@ -120,8 +139,19 @@ describe('builtin and reserved ids', () => {
   it('lists the builtin ids of DECISIONS.md', () => {
     expect(BUILTIN_PROVIDER_IDS).toEqual(['anthropic', 'openai', 'google', 'xai', 'deepseek', 'moonshotai', 'alibaba', 'zai', 'minimax', 'mistral', 'groq', 'openrouter', 'ollama'])
     expect(BUILTIN_PLUGIN_IDS).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'core-agent', 'mock'])
-    expect(CLIENT_COMMANDS).toEqual(['new', 'model', 'effort', 'mode', 'help'])
+    // Phase 10 (ADR-047): `/remember` is a client command, so no plugin or command file can take the name.
+    expect(CLIENT_COMMANDS).toEqual(['new', 'model', 'effort', 'mode', 'help', 'remember'])
+    expect(isClientCommand('remember')).toBe(true)
     expect(HARNESS_COMMANDS).toEqual(['compact'])
+  })
+
+  it('reserves the builtin agent types and their aliases (ADR-045)', () => {
+    expect(BUILTIN_AGENT_TYPES).toEqual(['explore', 'general'])
+    expect(AGENT_TYPE_ALIASES).toEqual({ 'general-purpose': 'general' })
+    for (const name of ['explore', 'general', 'general-purpose'])
+      expect(isReservedAgentName(name), name).toBe(true)
+    for (const name of ['reviewer', 'explorer', 'general-x', 'toString', 'constructor', ''])
+      expect(isReservedAgentName(name), name).toBe(false)
   })
 
   it('tells harness commands apart from client and plugin commands (ADR-040)', () => {
@@ -214,6 +244,21 @@ describe('id generators', () => {
       expect(shellRuleIdSchema.safeParse(bad).success, bad).toBe(false)
     for (const bad of ['wcb_short', `wcb_${'a'.repeat(17)}`, `WCB_${'a'.repeat(16)}`, `wcb_${'a'.repeat(15)}_`, `srl_${'a'.repeat(16)}`])
       expect(changeBatchIdSchema.safeParse(bad).success, bad).toBe(false)
+  })
+
+  it('creates customization ids (ADR-044) and background task ids (ADR-046)', () => {
+    const customization = createCustomizationId()
+    expect(customization).toMatch(CUSTOMIZATION_ID_PATTERN)
+    expect(customizationIdSchema.safeParse(customization).success).toBe(true)
+    expect(createCustomizationId()).not.toBe(customization)
+    const task = createBackgroundTaskId()
+    expect(task).toMatch(BACKGROUND_TASK_ID_PATTERN)
+    expect(backgroundTaskIdSchema.safeParse(task).success).toBe(true)
+    expect(createBackgroundTaskId()).not.toBe(task)
+    for (const bad of ['cus_short', `cus_${'a'.repeat(17)}`, `CUS_${'a'.repeat(16)}`, `cus_${'a'.repeat(15)}-`, `bgt_${'a'.repeat(16)}`])
+      expect(customizationIdSchema.safeParse(bad).success, bad).toBe(false)
+    for (const bad of ['bgt_short', `bgt_${'a'.repeat(17)}`, `BGT_${'a'.repeat(16)}`, `bgt_${'a'.repeat(15)}_`, `cus_${'a'.repeat(16)}`])
+      expect(backgroundTaskIdSchema.safeParse(bad).success, bad).toBe(false)
   })
 
   it('creates share ids whose suffix can start a share token', () => {

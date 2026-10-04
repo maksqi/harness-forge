@@ -223,6 +223,7 @@ describe('sEC-B2: GET and HEAD never change stored state', () => {
       'changes.diff': { params: { id: chatId }, query: { source: 'chat', path: 'notes.txt' } },
       'changes.git': { params: { id: chatId } },
       'chatQueue.list': { params: { id: chatId } },
+      'chatTasks.list': { params: { id: chatId } },
     }
     const before = await storedState(t)
     // The baseline really holds state for the routes to touch.

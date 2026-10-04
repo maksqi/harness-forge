@@ -167,6 +167,6 @@ describe('resolveCommand: /compact (Phase 9)', () => {
   })
 
   it('lists compact for GET /commands under the agent tools plugin', () => {
-    expect(HARNESS_COMMAND_SUMMARIES).toEqual([{ name: 'compact', description: 'Summarize the conversation to free up context', pluginId: 'core-agent' }])
+    expect(HARNESS_COMMAND_SUMMARIES).toEqual([{ name: 'compact', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' }])
   })
 })

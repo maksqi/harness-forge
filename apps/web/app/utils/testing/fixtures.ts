@@ -1,15 +1,21 @@
 // Test helper (not app code): DTO factories with valid defaults, overridable per test.
 import type {
   AuthStatus,
+  BackgroundTask,
   CatalogModel,
   ChatChangeFile,
   ChatChanges,
   ChatDetail,
   ChatSummary,
+  CommandSummary,
   CompactionData,
+  Customization,
+  CustomizationEntry,
+  CustomizationList,
   DataCleanupPreview,
   DataCleanupResult,
   DataSummary,
+  DefinitionDiagnostic,
   FileDiff,
   FileSweepStatus,
   GitStatus,
@@ -25,14 +31,17 @@ import type {
   ProjectSummary,
   ProviderSummary,
   QueueItem,
+  RememberResult,
   RestoreResult,
   RewindPreview,
   Settings,
   ShellOutput,
   ShellRule,
+  SkillOutput,
   SteerData,
   TaskInput,
   TaskOutput,
+  TaskResultData,
   TaskStep,
   TodoItem,
   ToolSummary,
@@ -184,7 +193,7 @@ export function pluginSummary(overrides: Partial<PluginSummary> = {}): PluginSum
     enabled: true,
     state: 'active',
     runsCode: true,
-    contributions: { providers: [], models: 0, tools: ['roll_dice'], mcpServers: [], commands: [], hooks: [] },
+    contributions: { providers: [], models: 0, tools: ['roll_dice'], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] },
     lastError: null,
     installedAt: 1_759_000_000_000,
     updatedAt: 1_759_000_000_000,
@@ -237,8 +246,9 @@ export function keyStatus(overrides: Partial<KeyStatus> = {}): KeyStatus {
 }
 
 /**
- * The global settings: the defaults (`fileSweep: 'off'`, and the Phase 9 keys `autoCompact: true`, `compactModelRef:
- * null`, `subagentModelRef: null`, `subagentMaxSteps: 30`, `shiftTabModes: true` included) with overrides.
+ * The global settings: the defaults (`fileSweep: 'off'`, the Phase 9 keys `autoCompact: true`, `compactModelRef: null`,
+ * `subagentModelRef: null`, `subagentMaxSteps: 30`, `shiftTabModes: true`, and the Phase 10 keys `planFiles: false`,
+ * `planDirectory: '.harness/plans'` included) with overrides.
  */
 export function settings(overrides: Partial<Settings> = {}): Settings {
   return { ...DEFAULT_SETTINGS, ...overrides }
@@ -544,4 +554,175 @@ export function taskPart(options: { toolCallId?: string, input?: TaskInput, outp
 /** A candidate of the `@` menu (`GET /projects/:id/files`). */
 export function projectFileEntry(path = 'src/parser.ts', kind: ProjectFileEntry['kind'] = 'file'): ProjectFileEntry {
   return { path, kind }
+}
+
+// ---------- Agent customization (Phase 10): catalog, personal definitions, commands, skills, background agents ----------
+
+/** A fixed customization id with a varying end: customizationId(1) -> 'cus_sample0000000001'. */
+export function customizationId(n: number): string {
+  return `cus_sample${String(n).padStart(10, '0')}`
+}
+
+/** A fixed background task id with a varying end: backgroundTaskId(1) -> 'bgt_sample0000000001'. */
+export function backgroundTaskId(n: number): string {
+  return `bgt_sample${String(n).padStart(10, '0')}`
+}
+
+/** A server-side command of `GET /commands` (a plugin command). */
+export function commandSummary(overrides: Partial<CommandSummary> = {}): CommandSummary {
+  return { name: 'summarize', description: 'Summarize the chat', source: 'plugin', pluginId: 'core-commands', ...overrides }
+}
+
+/** A definition diagnostic: an unknown tool of a project agent (a warning). */
+export function definitionDiagnostic(overrides: Partial<DefinitionDiagnostic> = {}): DefinitionDiagnostic {
+  return { level: 'warning', code: 'unknown-tool', message: 'Line 4: The tool "NotebookEdit" is unknown and was dropped.', line: 4, ...overrides }
+}
+
+/** The markdown of an agent definition (`reviewer`, Claude Code tool names). */
+export const AGENT_MARKDOWN = '---\nname: reviewer\ndescription: Reviews a diff and reports bugs\ntools: Read, Grep\n---\nReview the diff. Report each bug with its file and line.\n'
+
+/** A catalog entry: the active project agent `reviewer` of `.harness/agents/reviewer.md`. */
+export function customizationEntry(overrides: Partial<CustomizationEntry> = {}): CustomizationEntry {
+  return {
+    kind: 'agent',
+    name: 'reviewer',
+    description: 'Reviews a diff and reports bugs',
+    source: 'project',
+    path: '.harness/agents/reviewer.md',
+    tools: ['read_file', 'search_files'],
+    enabled: true,
+    state: 'active',
+    diagnostics: [],
+    ...overrides,
+  }
+}
+
+/** `GET /customizations?projectId=` of project 1: the builtin agents and one project agent. */
+export function customizationList(overrides: Partial<CustomizationList> = {}): CustomizationList {
+  return {
+    items: [
+      customizationEntry({ name: 'explore', description: 'Read-only research', source: 'builtin', path: undefined, tools: undefined }),
+      customizationEntry({ name: 'general', description: 'General-purpose agent', source: 'builtin', path: undefined, tools: undefined }),
+      customizationEntry(),
+    ],
+    diagnostics: [],
+    project: { id: projectId(1), available: true, folders: ['.harness/agents'], scannedAt: 1_759_000_000_000 },
+    builtAt: 1_759_000_000_000,
+    ...overrides,
+  }
+}
+
+/** A personal agent (`GET /customizations/:id`) with its parsed fields. */
+export function agentCustomization(overrides: Partial<Extract<Customization, { kind: 'agent' }>> = {}): Customization {
+  return {
+    id: customizationId(1),
+    kind: 'agent',
+    name: 'reviewer',
+    description: 'Reviews a diff and reports bugs',
+    content: AGENT_MARKDOWN,
+    enabled: true,
+    fields: {
+      name: 'reviewer',
+      description: 'Reviews a diff and reports bugs',
+      tools: ['read_file', 'search_files'],
+      model: null,
+      instructions: 'Review the diff. Report each bug with its file and line.\n',
+    },
+    diagnostics: [],
+    createdAt: 1_759_000_000_000,
+    updatedAt: 1_759_000_000_000,
+    ...overrides,
+  }
+}
+
+/** A personal command with an argument hint and a model. */
+export function commandCustomization(overrides: Partial<Extract<Customization, { kind: 'command' }>> = {}): Customization {
+  return {
+    id: customizationId(2),
+    kind: 'command',
+    name: 'greet',
+    description: 'Greet someone',
+    content: '---\ndescription: Greet someone\nargument-hint: <name>\nmodel: mock:echo\n---\nSay hello to $ARGUMENTS.\n',
+    enabled: true,
+    fields: { name: 'greet', description: 'Greet someone', argumentHint: '<name>', model: 'mock:echo', allowedTools: null, body: 'Say hello to $ARGUMENTS.\n' },
+    diagnostics: [],
+    createdAt: 1_759_000_000_000,
+    updatedAt: 1_759_000_000_000,
+    ...overrides,
+  }
+}
+
+/** The output of a background `task` call: launched (`status: background`, the task id, no steps). */
+export function backgroundLaunchOutput(overrides: Partial<TaskOutput> = {}): TaskOutput {
+  return taskOutput({ status: 'background', steps: [], report: '', finishedAt: undefined, taskId: backgroundTaskId(1), ...overrides })
+}
+
+/** A background task of chat 1 that completed and was not delivered yet. */
+export function backgroundTask(overrides: Partial<BackgroundTask> = {}): BackgroundTask {
+  return {
+    id: backgroundTaskId(1),
+    chatId: chatId(1),
+    messageId: messageId('a1'),
+    toolCallId: 'call_task_1',
+    origin: 'request',
+    status: 'completed',
+    output: taskOutput({ taskId: backgroundTaskId(1), modelRef: 'mock:background' }),
+    createdAt: 1_759_000_000_000,
+    finishedAt: 1_759_000_041_000,
+    deliveredAt: null,
+    deliveredMessageId: null,
+    ...overrides,
+  }
+}
+
+/** The data of a `data-task-result` part (ADR-046): the result of background task 1. */
+export function taskResultData(overrides: Partial<TaskResultData> = {}): TaskResultData {
+  return {
+    taskId: backgroundTaskId(1),
+    toolCallId: 'call_task_1',
+    messageId: messageId('a1'),
+    output: taskOutput({ taskId: backgroundTaskId(1), modelRef: 'mock:background' }),
+    deliveredAt: 1_759_000_042_000,
+    ...overrides,
+  }
+}
+
+/** A `data-task-result` part. */
+export function taskResultPart(overrides: Partial<TaskResultData> = {}): HarnessUIMessagePart {
+  const data = taskResultData(overrides)
+  return { type: 'data-task-result', id: data.taskId, data }
+}
+
+/** The user-role carrier message of a turn the server started for finished background tasks (`origin: 'task'`). */
+export function taskResultCarrier(id: string, results: TaskResultData[] = [taskResultData()]): HarnessUIMessage {
+  return {
+    id,
+    role: 'user',
+    metadata: { modelRef: 'mock:background', startedAt: 1_759_000_042_000 },
+    parts: results.map(data => ({ type: 'data-task-result', id: data.taskId, data })),
+  }
+}
+
+/** The output of a `skill` call: a project skill with one supporting file. */
+export function skillOutput(overrides: Partial<SkillOutput> = {}): SkillOutput {
+  return {
+    name: 'release-notes',
+    description: 'How to write the release notes',
+    source: 'project',
+    content: '# Release notes\n\n1. List the user-facing changes.',
+    truncated: false,
+    baseDir: '.harness/skills/release-notes',
+    files: ['template.md'],
+    ...overrides,
+  }
+}
+
+/** A finished `skill` call. */
+export function skillPart(output: SkillOutput = skillOutput(), toolCallId = 'call_skill_1'): HarnessUIMessagePart {
+  return { type: 'tool-skill', toolCallId, state: 'output-available', input: { name: output.name }, output }
+}
+
+/** The answer of `POST /memory` for the project file: `AGENTS.md` was appended to. */
+export function rememberResult(overrides: Partial<RememberResult> = {}): RememberResult {
+  return { target: 'project-file', file: 'AGENTS.md', created: false, project: projectSummary({ instructionsFile: 'AGENTS.md' }), ...overrides }
 }

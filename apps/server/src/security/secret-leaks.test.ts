@@ -238,6 +238,12 @@ function getInputs(): Partial<Record<ApiRouteKey, Array<{ params?: Record<string
     // Phase 9 (ADR-042): the queue of an idle chat is empty; the project does not exist (404 once implemented).
     'chatQueue.list': [{ params: { id: chatId } }],
     'projectFiles.search': [{ params: { id: 'prj_ABCdef0123456789' }, query: { q: 'notes' } }],
+    // Phase 10 (ADR-044, ADR-046): the global catalog, a builtin body, an unknown personal definition (404 once
+    // implemented) and the background tasks of the chat (none).
+    'customizations.list': [{}, { query: { kind: 'agent' } }],
+    'customizations.source': [{ query: { kind: 'agent', name: 'explore', source: 'builtin' } }],
+    'customizations.get': [{ params: { id: 'cus_ABCdef0123456789' } }],
+    'chatTasks.list': [{ params: { id: chatId } }],
   }
 }
 

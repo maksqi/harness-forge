@@ -1,9 +1,11 @@
 // Plugin data shapes embedded by the API DTOs (ADR-018; PLUGINS.md sections 4-6 and 9): credential fields, model
-// info, declarative providers, MCP server declarations and declarative commands. `@harness-forge/plugin-sdk`
-// re-exports them unchanged.
+// info, declarative providers, MCP server declarations, declarative commands and (plugin API 1.4.0) declarative agents
+// and skills. `@harness-forge/plugin-sdk` re-exports them unchanged.
 import { z } from 'zod'
 import { apiFormatSchema, credentialFieldTypeSchema, modelKindSchema, reasoningStyleSchema, toolPolicySchema } from '../enums.ts'
 import {
+  agentNameSchema,
+  BUILTIN_AGENT_TYPES,
   CLIENT_COMMANDS,
   commandNameSchema,
   ENV_VAR_NAME_PATTERN,
@@ -12,8 +14,10 @@ import {
   HTTP_HEADER_NAME_PATTERN,
   isClientCommand,
   isHarnessCommand,
+  isReservedAgentName,
   mcpServerIdSchema,
   modelIdSchema,
+  modelRefSchema,
   providerIdSchema,
 } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
@@ -173,6 +177,51 @@ export const declarativeCommandSchema = z.strictObject({
     .refine(value => utf8ByteLength(value) <= LIMITS.commandTemplateBytes, 'Templates are limited to 16 KB.'),
 })
 export type DeclarativeCommand = z.infer<typeof declarativeCommandSchema>
+
+// ---------- declarative agents and skills (plugin API 1.4.0, ADR-045) ----------
+
+/** A tool of an agent's `tools` list: a tool name, or a `mcp__<server>__*` prefix (only ever a restriction). */
+export const TOOL_ALLOWLIST_ENTRY_PATTERN = /^(?:[\w-]{1,64}|mcp__[\w-]{1,58}\*)$/
+
+/** Markdown of at most 64 KiB of UTF-8 (agent instructions, skill content). */
+const definitionBodySchema = z
+  .string()
+  .min(1)
+  .refine(value => utf8ByteLength(value) <= LIMITS.customizationContentBytes, 'Limited to 64 KB.')
+
+/**
+ * An agent type contributed by a plugin (`contributes.agents`, `ctx.agents.register`): the same fields as an agent file
+ * (ADR-045). The builtin types and their aliases are reserved; a name another plugin registered is a `conflict`.
+ */
+export const declarativeAgentSchema = z.strictObject({
+  name: agentNameSchema.refine(
+    name => !isReservedAgentName(name),
+    `Reserved agent type (${BUILTIN_AGENT_TYPES.join(', ')}, general-purpose).`,
+  ),
+  /** When to use the agent (shown to the model and in the UI). */
+  description: z.string().trim().min(1).max(LIMITS.customizationDescriptionMaxChars),
+  /** The child's instructions (after the sub-agent preamble). */
+  instructions: definitionBodySchema,
+  /** Narrows the child's tools (never widens the ADR-043 ceiling); omitted = every tool the parent's mode allows. */
+  tools: z
+    .array(z.string().regex(TOOL_ALLOWLIST_ENTRY_PATTERN, 'Use tool names (or an "mcp__<server>__*" prefix).'))
+    .max(64)
+    .refine(isUnique, 'Tools must be unique.')
+    .optional(),
+  /** `provider:model`, or `inherit` (the parent run's model); omitted = the sub-agent model setting. */
+  model: z.union([modelRefSchema, z.literal('inherit')]).optional(),
+})
+export type DeclarativeAgent = z.infer<typeof declarativeAgentSchema>
+
+/** A skill contributed by a plugin (`contributes.skills`, `ctx.skills.register`): listed to the model, loaded by `skill`. */
+export const declarativeSkillSchema = z.strictObject({
+  name: agentNameSchema,
+  /** When to use the skill (shown to the model and in the UI). */
+  description: z.string().trim().min(1).max(LIMITS.customizationDescriptionMaxChars),
+  /** The skill body (Markdown). */
+  content: definitionBodySchema,
+})
+export type DeclarativeSkill = z.infer<typeof declarativeSkillSchema>
 
 // ---------- MCP server declarations ----------
 
