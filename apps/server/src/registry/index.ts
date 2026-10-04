@@ -1,11 +1,13 @@
 // Contribution registry (ARCHITECTURE.md 3 `registry/`, PLUGINS.md 9 / 11 / 14). Owner: W1.3 (W1.3-T5).
 //
 // Every registration is tagged with its owner plugin id and returns a `Disposable` that removes it (idempotent). Lists
-// use registry order (builtins first in load order, then user plugins by id, then registration order); tools and
-// commands are sorted by name. Duplicate provider ids, tool names, command names and MCP server ids throw `conflict`;
-// invalid shapes throw `validation_error`. Change listeners run synchronously; a throwing listener is logged.
-// Phase 10 (C30): the agent and skill registries (`./agents.ts`, `./skills.ts`; empty until W10.7) share the change
-// listeners (kinds `agent`, `skill`) and feed the contributions `agents` / `skills`.
+// use registry order (builtins first in load order, then user plugins by id, then registration order); tools, commands,
+// agents and skills are sorted by name. Duplicate provider ids, tool names, command names, MCP server ids, agent names
+// and skill names throw `conflict`; invalid shapes throw `validation_error`. Change listeners run synchronously; a
+// throwing listener is logged.
+// Phase 10 (plugin API 1.4.0, ADR-045; C30, W10.7): the agent and skill registries (`./agents.ts`, `./skills.ts`, on
+// `./definitions.ts`) share the change listeners (kinds `agent`, `skill`), feed the contributions `agents` / `skills`
+// (sorted by name) and are part of `removeOwner`.
 import type {
   CommandDefinition,
   Disposable,
@@ -87,7 +89,10 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
   const mcpServers = new Map<string, Entry<RegisteredMcpServer>>()
 
   function notify(kind: RegistryKind, action: RegistryChange['action'], pluginId: string, key: string): void {
-    const change: RegistryChange = { kind, action, pluginId, key }
+    notifyChange({ kind, action, pluginId, key })
+  }
+
+  function notifyChange(change: RegistryChange): void {
     for (const listener of [...listeners]) {
       try {
         listener(change)
@@ -105,9 +110,9 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
     })
   }
 
-  // Phase 10 (plugin API 1.4.0): agent types and skills of plugins (empty until W10.7).
-  const agents = createAgentRegistry({ onChange })
-  const skills = createSkillRegistry({ onChange })
+  // Phase 10 (plugin API 1.4.0, ADR-045): agent types and skills of plugins.
+  const agents = createAgentRegistry({ onChange, notify: notifyChange })
+  const skills = createSkillRegistry({ onChange, notify: notifyChange })
 
   function sorted<T>(entries: Iterable<Entry<T>>): T[] {
     return [...entries].sort(compareRegistrations).map(entry => entry.value)
@@ -295,6 +300,7 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
       dropKeyed(tools, 'tool')
       dropKeyed(commands, 'command')
       dropKeyed(mcpServers, 'mcpServer')
+      removed += agents.removeOwner(pluginId) + skills.removeOwner(pluginId)
       for (const entry of [...models]) {
         if (entry.pluginId === pluginId) {
           models.delete(entry)

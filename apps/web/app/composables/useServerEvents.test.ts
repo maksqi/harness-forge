@@ -271,6 +271,34 @@ describe('dispatchServerEvent', () => {
     scope.stop()
   })
 
+  it('hands run.started of a task turn to subscribers after the chats store marked the chat running (Phase 10)', () => {
+    const seen: Array<{ origin: string | undefined, userMessageId: string | undefined, running: string | undefined }> = []
+    const scope = effectScope()
+    scope.run(() => useServerEvents().on('run.started', (event) => {
+      seen.push({ origin: event.data.origin, userMessageId: event.data.userMessageId, running: useChatsStore().runState[event.data.chatId] })
+    }))
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(1), messageId: 'msg_asst000000000003', modelRef: 'mock:background', origin: 'task', userMessageId: 'msg_carrier000000001' }, 1))
+    expect(seen).toEqual([{ origin: 'task', userMessageId: 'msg_carrier000000001', running: 'running' }])
+    scope.stop()
+  })
+
+  it('task.changed reaches subscribers after the store applied it; a deleted chat\'s late event lists nothing (Phase 10)', () => {
+    const tasks = useBackgroundTasksStore()
+    vi.spyOn(useChatsStore(), 'applyEvent').mockImplementation(() => {})
+    const running = backgroundTask({ status: 'running', finishedAt: null })
+    const seen: string[] = []
+    const scope = effectScope()
+    scope.run(() => useServerEvents().on('task.changed', (event) => {
+      seen.push(tasks.byId(event.data.chatId, event.data.task.id)?.status ?? 'none')
+    }))
+    dispatchServerEvent(createServerEvent('task.changed', { chatId: chatId(1), task: running }, 1))
+    dispatchServerEvent(createServerEvent('chat.deleted', { id: chatId(1) }, 2))
+    dispatchServerEvent(createServerEvent('task.changed', { chatId: chatId(1), task: { ...running, status: 'aborted', finishedAt: 1_759_000_050_000 } }, 3))
+    expect(seen).toEqual(['running', 'none'])
+    expect(tasks.byChat).toEqual({})
+    scope.stop()
+  })
+
   it('a failed queued message is reported in the tab that queued it (Phase 9)', async () => {
     const queue = useChatQueueStore()
     const item = queueItem()
@@ -373,5 +401,20 @@ describe('refetchLoadedStores', () => {
     await refetchLoadedStores()
     expect(api.chatQueue.list.mock.calls).toEqual([[{ params: { id: chatId(1) } }], [{ params: { id: chatId(1) } }]])
     expect(queue.items(chatId(1))).toEqual([item])
+  })
+
+  it('a reconnect brings back the background agents of every opened chat, not of the others (Phase 10)', async () => {
+    const tasks = useBackgroundTasksStore()
+    const running = backgroundTask({ status: 'running', finishedAt: null })
+    api.chatTasks.list.mockResolvedValueOnce({ items: [running] })
+    await tasks.fetch(chatId(1))
+    // Missed while disconnected: the agent finished.
+    const done = { ...running, status: 'completed' as const, finishedAt: 1_759_000_041_000 }
+    api.chatTasks.list.mockResolvedValueOnce({ items: [done] })
+    // Another chat's ended agent (not opened here): not refetched.
+    dispatchServerEvent(createServerEvent('task.changed', { chatId: chatId(2), task: { ...done, chatId: chatId(2) } }, 1))
+    await refetchLoadedStores()
+    expect(api.chatTasks.list.mock.calls).toEqual([[{ params: { id: chatId(1) } }], [{ params: { id: chatId(1) } }]])
+    expect(tasks.tasks(chatId(1))).toEqual([done])
   })
 })

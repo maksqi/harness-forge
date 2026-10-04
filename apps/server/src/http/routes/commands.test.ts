@@ -1,4 +1,6 @@
+import type { CommandSummary } from '@harness-forge/shared'
 import type { TestApp } from '../../testing/create-test-app.ts'
+import type { FakeCustomizationService } from '../../testing/fake-customizations.ts'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,6 +8,7 @@ import { commandSummarySchema, listResponseSchema } from '@harness-forge/shared'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { BUILTIN_COMMANDS } from '../../builtin-plugins/core-commands/commands.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
+import { fakeCatalogEntry } from '../../testing/fake-customizations.ts'
 
 let t: TestApp
 
@@ -69,5 +72,68 @@ describe('gET /api/commands?projectId (Phase 10, C31-T7)', () => {
       await app.close()
       await rm(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('gET /api/commands?projectId: command files and personal commands (W10.2-T6)', () => {
+  let app: TestApp
+  let root: string
+  let projectA: string
+  let projectB: string
+
+  beforeAll(async () => {
+    root = await realpath(await mkdtemp(join(tmpdir(), 'hf-')))
+    app = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, workspaceRoots: [root], customizations: 'fake' })
+    projectA = (await app.deps.projects.create({ name: 'Alpha', path: root, newFolder: 'alpha' })).id
+    projectB = (await app.deps.projects.create({ name: 'Beta', path: root, newFolder: 'beta' })).id
+    const fake = app.deps.customizations as FakeCustomizationService
+    fake.entries.set(projectA, [
+      fakeCatalogEntry('command', 'review', { argumentHint: '<files>', modelRef: 'mock:agents', tools: ['read_file'] }),
+      fakeCatalogEntry('command', 'review', { path: '.claude/commands/review.md', description: 'The Claude review.' }),
+      fakeCatalogEntry('command', 'deploy', { path: '.harness/commands/ops/deploy.md', namespace: 'ops' }),
+      fakeCatalogEntry('command', 'broken', { path: '.harness/commands/broken.md', state: 'invalid' }),
+    ])
+    await fake.create({ kind: 'command', content: '---\nname: standup\ndescription: My standup notes.\n---\nWrite my standup.' })
+    await fake.create({ kind: 'command', content: '---\nname: later\ndescription: Off.\n---\nLater.', enabled: false })
+  })
+
+  afterAll(async () => {
+    await app.close()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  async function list(query = ''): Promise<CommandSummary[]> {
+    const response = await app.request(`/api/commands${query}`)
+    expect(response.status).toBe(200)
+    return listResponseSchema(commandSummarySchema).parse(await response.json()).items
+  }
+
+  it('lists the project\'s effective commands with their fields over the personal and plugin commands, sorted by name', async () => {
+    const items = await list(`?projectId=${projectA}`)
+    expect(items.map(item => item.name)).toEqual([...items.map(item => item.name)].sort())
+    expect(items.find(item => item.name === 'review')).toEqual({ name: 'review', description: 'The review command.', source: 'project', argumentHint: '<files>', modelRef: 'mock:agents' })
+    expect(items.filter(item => item.name === 'review')).toHaveLength(1)
+    expect(items.find(item => item.name === 'deploy')).toEqual({ name: 'deploy', description: 'The deploy command.', source: 'project', namespace: 'ops' })
+    expect(items.find(item => item.name === 'standup')).toEqual({ name: 'standup', description: 'My standup notes.', source: 'user' })
+    expect(items.find(item => item.name === 'compact')).toMatchObject({ source: 'harness', pluginId: 'core-agent' })
+    expect(items.find(item => item.name === 'summarize')).toMatchObject({ source: 'plugin', pluginId: 'core-commands' })
+    // Invalid and turned-off definitions are not usable commands.
+    expect(items.some(item => item.name === 'broken' || item.name === 'later')).toBe(false)
+  })
+
+  it('another project\'s list and the global list never show the project\'s commands (the plugin command is back)', async () => {
+    for (const query of [`?projectId=${projectB}`, '']) {
+      const items = await list(query)
+      expect(items.find(item => item.name === 'review'), query).toMatchObject({ source: 'plugin', pluginId: 'core-commands' })
+      expect(items.some(item => item.name === 'deploy'), query).toBe(false)
+      expect(items.find(item => item.name === 'standup'), query).toMatchObject({ source: 'user' })
+      for (const item of items)
+        expect(item.source === 'project', query).toBe(false)
+    }
+  })
+
+  it('answers an unknown project with 404 and an invalid id with 400', async () => {
+    expect((await app.request('/api/commands?projectId=prj_0000000000000000')).status).toBe(404)
+    expect((await app.request('/api/commands?projectId=../x')).status).toBe(400)
   })
 })

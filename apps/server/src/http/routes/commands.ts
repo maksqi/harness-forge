@@ -2,30 +2,28 @@
 // only: a disabled plugin's registrations are disposed), sorted by name; client-only commands never appear. Phase 9
 // (C26, ADR-040): the harness command `compact` is listed too (`pluginId: 'core-agent'`); a registered command with a
 // harness command name is left out (the server runs its own).
-// Phase 10 (C31-T7, ADR-045): every item carries its `source` (`harness` for `/compact`, `plugin` with `pluginId` for
-// plugin commands); the query `?projectId=` is validated (`commandsQuerySchema`) and an unknown project is `404`. The
-// command files of the project and the personal commands (`source: 'project' | 'user'`, by the catalog's precedence)
-// are listed by W10.2.
+// Phase 10 (ADR-045, ARCHITECTURE.md 6.24): every item carries its `source` (`harness` for `/compact`, `plugin` with
+// `pluginId` for plugin commands, `user` for personal commands, `project` for command files); the query `?projectId=`
+// is validated (`commandsQuerySchema`; an unknown project is `404`) and adds that project's command files. The list is
+// the catalog's effective commands (`listServerCommands`): a project command over a personal one over a plugin one,
+// so a plugin command shadowed by a project command is shadowed only in that project's list; without `projectId` only
+// the global entries (personal and plugin commands). Command files carry `namespace`, `argumentHint` and `modelRef`
+// when they declare them. An unavailable project folder lists no project commands (the catalog reports it).
 import type { CommandSummary, ListResponse } from '@harness-forge/shared'
+import type { CustomizationCatalog } from '../../services/customizations/types.ts'
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
-import { apiRoutes, commandsQuerySchema, isClientCommand, isHarnessCommand } from '@harness-forge/shared'
+import { apiRoutes, commandsQuerySchema } from '@harness-forge/shared'
 import { Hono } from 'hono'
-import { HARNESS_COMMAND_SUMMARIES } from '../../chat/commands.ts'
+import { listServerCommands } from '../../chat/commands.ts'
 import { validate } from '../validate.ts'
 
 /**
- * The effective server-side commands of a chat of `projectId` (null = no project), sorted by name. P10-0b: the harness
- * command and the plugin commands (the project's command files and the personal commands: W10.2).
+ * The effective server-side commands of a scope, sorted by name: `/compact`, the plugin commands and, with a catalog,
+ * its project and personal commands (by precedence). Without a catalog: the harness command and the plugin commands.
  */
-export function listCommands(deps: Pick<AppDeps, 'registry'>, projectId: string | null = null): CommandSummary[] {
-  void projectId
-  const registered = deps.registry.commands
-    .list()
-    .filter(entry => !isClientCommand(entry.definition.name) && !isHarnessCommand(entry.definition.name))
-    .map((entry): CommandSummary => ({ name: entry.definition.name, description: entry.definition.description, source: 'plugin', pluginId: entry.pluginId }))
-  return [...HARNESS_COMMAND_SUMMARIES.map(summary => ({ ...summary })), ...registered]
-    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+export function listCommands(deps: Pick<AppDeps, 'registry'>, catalog: CustomizationCatalog | null = null): CommandSummary[] {
+  return listServerCommands(deps.registry, catalog)
 }
 
 export function createCommandsRoutes(deps: AppDeps): Hono<AppEnv> {
@@ -35,7 +33,8 @@ export function createCommandsRoutes(deps: AppDeps): Hono<AppEnv> {
     // An unknown project is `404 not_found` ("Project <id> not found.").
     if (projectId !== undefined)
       await deps.projects.get(projectId)
-    const body: ListResponse<CommandSummary> = { items: listCommands(deps, projectId ?? null) }
+    const catalog = await deps.customizations.catalog(projectId ?? null, { signal: c.req.raw.signal })
+    const body: ListResponse<CommandSummary> = { items: listCommands(deps, catalog) }
     return c.json(body)
   })
   return app

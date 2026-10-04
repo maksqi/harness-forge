@@ -3,8 +3,9 @@
 //
 // `reduceAgentOutputs(messages)`, step 3 of `buildModelHistory` (`model-history.ts`): every stored `tool-task` part of
 // an assistant message whose output is a `TaskOutput` (any object with a string `status` and a string `report`) keeps
-// only `{ status, report, error? }`, so the progress trace (steps, previews, usage, the model) never reaches a model,
-// also when the `task` tool is not offered in a later run (the tool parts then go to the model as text). The model text
+// only `{ status, report, error?, taskId? }` (Phase 10: the `taskId` of a background launch, ADR-046), so the progress
+// trace (steps, previews, usage, the model) never reaches a model, also when the `task` tool is not offered in a later
+// run (the tool parts then go to the model as text). The model text
 // of `task` (`taskModelText`) reads exactly these fields. Other outputs (a hook's replacement, the truncation marker)
 // and other parts stay as they are; messages without such parts are returned as the same objects.
 import type { HarnessUIMessage, HarnessUIMessagePart } from '@harness-forge/shared'
@@ -18,16 +19,23 @@ export interface ReducedTaskOutput {
   status: string
   report: string
   error?: string
+  /** Phase 10: the background task of a `background: true` launch (the model text names it). */
+  taskId?: string
 }
 
-/** `{ status, report, error? }` of a `TaskOutput`-like value, or null when it is not one. */
+/** `{ status, report, error?, taskId? }` of a `TaskOutput`-like value, or null when it is not one. */
 export function reduceTaskOutput(output: unknown): ReducedTaskOutput | null {
   if (typeof output !== 'object' || output === null || Array.isArray(output))
     return null
-  const { status, report, error } = output as Record<string, unknown>
+  const { status, report, error, taskId } = output as Record<string, unknown>
   if (typeof status !== 'string' || typeof report !== 'string')
     return null
-  return typeof error === 'string' ? { status, report, error } : { status, report }
+  return {
+    status,
+    report,
+    ...(typeof error === 'string' ? { error } : {}),
+    ...(typeof taskId === 'string' ? { taskId } : {}),
+  }
 }
 
 /** The part with its `task` output reduced, or the same part when there is nothing to reduce. */

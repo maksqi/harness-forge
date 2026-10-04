@@ -4,7 +4,8 @@
 // hook output is plugin data: every value is checked before it reaches `streamText`.
 // Instructions, in this order (Phase 7, ADR-031): global → the workspace block (project name, folder, OS, and rules
 // built only from the workspace tools offered in this run) → the agent blocks (Phase 9, ADR-041 / ADR-043: the plan
-// block in plan mode, the todo hint when `todo_write` is offered, the `task` hint when `task` is offered) → the
+// block in plan mode, the todo hint when `todo_write` is offered, the `task` hint when `task` is offered; Phase 10,
+// ADR-045: the "Agent types" block right after the `task` hint, the skills block when `skill` is offered) → the
 // project file (`AGENTS.md`, else `CLAUDE.md`) → the project's own instructions → the chat instructions. Steps:
 // `projectMaxSteps` for a chat with a project, else `maxSteps`; the `chat.params` output is clamped to
 // 1..`LIMITS.stepsMax` (200).
@@ -15,7 +16,7 @@ import type { ResolvedModelBase } from '../providers/types.ts'
 import type { Registry } from '../registry/types.ts'
 import type { OpenWorkspace } from '../services/projects/types.ts'
 import process from 'node:process'
-import { AGENT_TOOL_NAMES, HTTP_HEADER_NAME_PATTERN, LIMITS } from '@harness-forge/shared'
+import { AGENT_NAME_PATTERN, AGENT_TOOL_NAMES, BUILTIN_AGENT_TYPES, HTTP_HEADER_NAME_PATTERN, LIMITS } from '@harness-forge/shared'
 import { CORE_AGENT_PLUGIN_ID } from '../builtin-plugins/core-agent/index.ts'
 
 export interface RunParams {
@@ -134,36 +135,138 @@ export const TODO_HINT = 'Track multi-step work with todo_write: for a task with
 /** The hint of a run that offers `task` (ADR-043). */
 export const TASK_HINT = 'Delegate with task: a sub-agent works in its own context and returns only its report. Use type "explore" to search and read (read-only) and "general" when it also has to change things. Sub-agents cannot ask the user for approval (a call that needs approval is denied), and they do not see this conversation, so give each one a complete prompt: the goal, the relevant paths and facts, and what to report back. Several task calls in one step run in parallel; do small lookups yourself.'
 
+/** A catalog entry as the listings of the instructions read it (`CustomizationEntry` fits). */
+export type ListedEntry = Pick<CustomizationEntry, 'name' | 'description'>
+
+/**
+ * The header line of the agent-types block (Phase 10, ADR-045). The block format is a contract with the mocks
+ * (`mock:agents`, PROVIDERS.md 8): a header line starting "Agent types", then one `- name: description` line per entry.
+ */
+export const AGENT_TYPES_HEADER = 'Agent types (the type of a task call):'
+
+/** The header line of the skills block (Phase 10, ADR-045; same format as the agent-types block, header "Skills"). */
+export const SKILLS_HEADER = 'Skills (when a request matches one, load it with the skill tool before you start; it gives you its instructions):'
+
+/** `text` on one line (runs of whitespace become one space, trimmed), cut to `max` characters with a trailing `…`. */
+export function listedDescription(text: string, max: number = LIMITS.listedDescriptionMaxChars): string {
+  const line = text.replace(/\s+/g, ' ').trim()
+  if (line.length <= max)
+    return line
+  const end = max - 1
+  const last = line.charCodeAt(end - 1)
+  return `${line.slice(0, last >= 0xD800 && last <= 0xDBFF ? end - 1 : end).trimEnd()}…`
+}
+
+function compareNames(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+/** The rank of a builtin agent type (`BUILTIN_AGENT_TYPES` order); every other name ranks after them. */
+function builtinRank(name: string): number {
+  const index = (BUILTIN_AGENT_TYPES as readonly string[]).indexOf(name)
+  return index === -1 ? BUILTIN_AGENT_TYPES.length : index
+}
+
+/**
+ * The entries a listing shows: valid names only (`AGENT_NAME_PATTERN`; anything else could break the one-line format),
+ * the first entry of a name, in `compare` order, at most `max`.
+ */
+function listed(entries: readonly ListedEntry[], max: number, compare: (a: ListedEntry, b: ListedEntry) => number): ListedEntry[] {
+  const seen = new Set<string>()
+  const valid = entries.filter((entry) => {
+    if (typeof entry.name !== 'string' || !AGENT_NAME_PATTERN.test(entry.name) || seen.has(entry.name))
+      return false
+    seen.add(entry.name)
+    return true
+  })
+  return valid.sort(compare).slice(0, Math.max(0, max))
+}
+
+/**
+ * The agent types in listing order (Phase 10, ARCHITECTURE.md 6.25): the builtins first (`explore`, `general`), then by
+ * name; at most `max` (`LIMITS.agentTypesListedMax`). Also the order of the available types an unknown `task` type lists.
+ */
+export function orderAgentTypes<T extends ListedEntry>(entries: readonly T[], max: number = LIMITS.agentTypesListedMax): T[] {
+  return listed(entries, max, (a, b) => builtinRank(a.name) - builtinRank(b.name) || compareNames(a.name, b.name)) as T[]
+}
+
+/** The lines of a block: the header, then `- name: description` (the description on one line, cut). */
+function listBlock(header: string, entries: readonly ListedEntry[]): string {
+  if (entries.length === 0)
+    return ''
+  const lines = entries.map((entry) => {
+    const description = listedDescription(typeof entry.description === 'string' ? entry.description : '')
+    return description === '' ? `- ${entry.name}` : `- ${entry.name}: ${description}`
+  })
+  return [header, ...lines].join('\n')
+}
+
+/**
+ * The "Agent types" block (Phase 10, ADR-045): the active agents of the run's catalog in `orderAgentTypes` order, at most
+ * `LIMITS.agentTypesListedMax`, descriptions on one line cut to `LIMITS.listedDescriptionMaxChars`; '' without entries.
+ */
+export function agentTypesBlock(agentTypes: readonly ListedEntry[]): string {
+  return listBlock(AGENT_TYPES_HEADER, orderAgentTypes(agentTypes))
+}
+
+/**
+ * The skills block (Phase 10, ADR-045): the active skills of the run's catalog by name, at most `LIMITS.skillsListedMax`,
+ * descriptions on one line cut to `LIMITS.listedDescriptionMaxChars`; '' without entries.
+ */
+export function skillsBlock(skills: readonly ListedEntry[]): string {
+  return listBlock(SKILLS_HEADER, listed(skills, LIMITS.skillsListedMax, (a, b) => compareNames(a.name, b.name)))
+}
+
+/** The catalog listings of the agent blocks (Phase 10; `RunParamsInput.agentTypes` / `skills`). */
+export interface AgentListings {
+  readonly agentTypes?: readonly ListedEntry[]
+  readonly skills?: readonly ListedEntry[]
+}
+
 /**
  * The agent blocks of a run, in order (each one or none): the plan block (`toolMode` `plan`), the todo hint
- * (`todo_write` offered) and the `task` hint (`task` offered). `agentTools`: the offered `core-agent` tools
- * (`offeredAgentTools`); default none.
+ * (`todo_write` offered), the `task` hint and right after it the "Agent types" block (`task` offered; the block only
+ * with `listings.agentTypes`), and the skills block (`skill` offered and `listings.skills` not empty). `agentTools`: the
+ * offered `core-agent` tools (`offeredAgentTools`); default none.
  */
-export function agentBlocks(toolMode: ToolMode | undefined, agentTools: readonly string[] = []): string[] {
+export function agentBlocks(toolMode: ToolMode | undefined, agentTools: readonly string[] = [], listings: AgentListings = {}): string[] {
   const offered = new Set(agentTools)
   const blocks: string[] = []
   if (toolMode === 'plan')
     blocks.push(planModeBlock(offered.has('exit_plan_mode')))
   if (offered.has('todo_write'))
     blocks.push(TODO_HINT)
-  if (offered.has('task'))
+  if (offered.has('task')) {
     blocks.push(TASK_HINT)
+    const types = agentTypesBlock(listings.agentTypes ?? [])
+    if (types !== '')
+      blocks.push(types)
+  }
+  if (offered.has('skill')) {
+    const skills = skillsBlock(listings.skills ?? [])
+    if (skills !== '')
+      blocks.push(skills)
+  }
   return blocks
 }
 
 /**
  * The instructions before the `chat.params` hooks: global → workspace block → agent blocks (plan block, todo hint,
- * `task` hint) → project file → project instructions → chat instructions (each trimmed, empty parts skipped,
- * separated by a blank line). Without `toolMode` and `agentTools` there are no agent blocks.
+ * `task` hint, agent types, skills) → project file → project instructions → chat instructions (each trimmed, empty
+ * parts skipped, separated by a blank line). Without `toolMode` and `agentTools` there are no agent blocks.
  */
 export function runInstructions(
-  input: Pick<RunParamsInput, 'globalInstructions' | 'chatInstructions' | 'workspace' | 'workspaceTools' | 'platform' | 'agentTools'> & { toolMode?: ToolMode },
+  input: Pick<RunParamsInput, 'globalInstructions' | 'chatInstructions' | 'workspace' | 'workspaceTools' | 'platform' | 'agentTools' | 'agentTypes' | 'skills'> & { toolMode?: ToolMode },
 ): string {
   const workspace = input.workspace ?? null
+  const listings: AgentListings = {
+    ...(input.agentTypes === undefined ? {} : { agentTypes: input.agentTypes }),
+    ...(input.skills === undefined ? {} : { skills: input.skills }),
+  }
   return joinInstructions(
     input.globalInstructions,
     workspace === null ? undefined : workspaceBlock(workspace, input.workspaceTools ?? [], input.platform),
-    ...agentBlocks(input.toolMode, input.agentTools),
+    ...agentBlocks(input.toolMode, input.agentTools, listings),
     workspace === null ? undefined : projectFileInstructions(workspace.projectFile),
     workspace?.instructions,
     input.chatInstructions,
@@ -284,13 +387,13 @@ export interface RunParamsInput {
   agentTools?: readonly string[]
   /**
    * The active agents of the run's catalog (Phase 10, ADR-045; `PreparedRun.catalog.agents()`): the "Agent types" block
-   * after the `task` hint, only when `task` is offered (W10.3: at most `LIMITS.agentTypesListedMax`, descriptions cut to
-   * `LIMITS.listedDescriptionMaxChars`). Default none. P10-0b: accepted, not used yet.
+   * after the `task` hint, only when `task` is offered (`agentTypesBlock`: builtins first, then by name; at most
+   * `LIMITS.agentTypesListedMax`, descriptions cut to `LIMITS.listedDescriptionMaxChars`). Default none.
    */
   agentTypes?: readonly Pick<CustomizationEntry, 'name' | 'description'>[]
   /**
    * The active skills of the run's catalog (Phase 10, ADR-045; `PreparedRun.catalog.skills()`): the skills block, only
-   * when `skill` is offered (W10.3: at most `LIMITS.skillsListedMax`). Default none. P10-0b: accepted, not used yet.
+   * when `skill` is offered (`skillsBlock`: by name, at most `LIMITS.skillsListedMax`). Default none.
    */
   skills?: readonly Pick<CustomizationEntry, 'name' | 'description'>[]
   /** The OS named in the workspace block; default `process.platform`. */

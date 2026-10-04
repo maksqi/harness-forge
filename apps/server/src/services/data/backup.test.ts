@@ -1,16 +1,19 @@
 // Backup export (W5.3-T2): layout, lazy pulls, manifest last, public settings only, secret scan, files=false, the zip
-// limits of the pre-check, and blobs that went missing.
-import type { BackupFileIndex, BackupManifest, FileRef } from '@harness-forge/shared'
+// limits of the pre-check, and blobs that went missing. Phase 10 (W10.6-T2): `customizations.json` (the personal
+// definitions of the C30 fake, written when there is any, `customizations=false`, a failed read), its pre-check, and
+// background tasks that never reach a backup.
+import type { BackupCustomizations, BackupFileIndex, BackupManifest, FileRef, HarnessUIMessage } from '@harness-forge/shared'
 import type { DataTestApp } from './fixtures.test-util.ts'
 import { Buffer } from 'node:buffer'
 import { rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { backupManifestSchema, chatExportSchema, HarnessError, SETTINGS_KEYS } from '@harness-forge/shared'
+import { backupCustomizationsSchema, backupManifestSchema, chatExportSchema, HarnessError, SETTINGS_KEYS } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { chats } from '../../db/schema.ts'
+import { backgroundTasks, chats, customizations } from '../../db/schema.ts'
 import { readAllBytes } from '../../testing/fakes.ts'
 import { PNG, TEXT } from '../files/fixtures.test-util.ts'
+import { closeCustomizedApps, customizedDataApp, definition } from './backup-fixtures.test-util.ts'
 import { backupFilename } from './backup.ts'
 import {
   assistant,
@@ -30,6 +33,7 @@ import {
 
 afterEach(async () => {
   await closeDataApps()
+  await closeCustomizedApps()
 })
 
 async function rejection(promise: Promise<unknown>): Promise<HarnessError> {
@@ -63,12 +67,14 @@ async function seed(app: DataTestApp): Promise<{ png: FileRef, text: FileRef }> 
 describe('backup export', () => {
   it('writes the settings, every chat, each referenced blob once, the index and the manifest last', async () => {
     const exportedAt = Date.UTC(2026, 8, 28, 12, 30, 10)
-    const app = await dataApp({ data: { now: () => exportedAt } })
+    // The C30 fake without personal definitions: no customizations.json, `includes.customizations` true, count 0.
+    const app = await customizedDataApp({ data: { now: () => exportedAt } })
     const { png, text } = await seed(app)
     // A second chat referencing the same image adds no blob.
     await app.deps.chats.create({ id: chatId(4), title: 'Again', messages: [user(401, 'again', [filePart(png)])] })
 
     const backup = await app.deps.data.exportBackup({})
+    expect(app.customizations.calls.exportBackup).toBe(0)
     expect(backup.filename).toBe('harness-forge-backup-2026-09-28.zip')
     expect(backup.exportedAt).toBe(exportedAt)
     const zip = await readAllBytes(backup.stream)
@@ -108,9 +114,10 @@ describe('backup export', () => {
       exportedAt,
       appVersion: expect.any(String),
       chatExportVersion: 2,
-      includes: { files: true, settings: true },
-      counts: { chats: 4, messages: 6 + 1 + 0 + 1, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength },
+      includes: { files: true, settings: true, customizations: true },
+      counts: { chats: 4, messages: 6 + 1 + 0 + 1, files: 2, fileBytes: PNG.byteLength + TEXT.byteLength, customizations: 0 },
     } satisfies BackupManifest)
+    expect(app.customizations.calls.exportBackup).toBe(1)
 
     // Every chat entry is exactly its chat JSON export (v2), archived chats included.
     for (const n of [1, 2, 3, 4]) {
@@ -293,7 +300,7 @@ describe('backup export', () => {
     expect(entries[`files/${sha256(PNG)}`]).toBeUndefined()
     expect(entryJson<BackupFileIndex>(entries, 'files/index.json').items).toEqual([])
     expect(Object.keys(entries).filter(name => name.startsWith('chats/'))).toEqual([`chats/${chatId(1)}.json`, `chats/${chatId(2)}.json`])
-    expect(entryJson<BackupManifest>(entries, 'manifest.json').counts).toEqual({ chats: 2, messages: 7, files: 0, fileBytes: 0 })
+    expect(entryJson<BackupManifest>(entries, 'manifest.json').counts).toEqual({ chats: 2, messages: 7, files: 0, fileBytes: 0, customizations: 0 })
     expect(app.t.logs.records.some(record => record.msg.includes('missing on disk'))).toBe(true)
     expect(app.t.logs.records.some(record => record.msg.includes('no longer matches'))).toBe(true)
   })
@@ -327,5 +334,107 @@ describe('backup export', () => {
     const backup = await app.deps.data.exportBackup({})
     await expect(readAllBytes(backup.stream)).rejects.toThrow('disk on fire')
     expect(app.t.logs.records.some(record => record.msg === 'backup export failed')).toBe(true)
+  })
+})
+
+describe('backup export: personal agents, commands and skills (Phase 10)', () => {
+  it('writes customizations.json after the attachments: the four backup fields of every definition, by kind and name', async () => {
+    const app = await customizedDataApp()
+    await app.deps.chats.create({ id: chatId(1), title: 'One', messages: [user(1), assistant(2)] })
+    const fake = app.customizations
+    await fake.create({ kind: 'skill', content: definition('skill', 'notes') })
+    await fake.create({ kind: 'command', content: definition('command', 'review'), enabled: false })
+    await fake.create({ kind: 'agent', content: definition('agent', 'zeta') })
+    await fake.create({ kind: 'agent', content: definition('agent', 'alpha') })
+
+    const entries = unzip(await exportBytes(app.deps, { settings: false }))
+    expect(Object.keys(entries)).toEqual([`chats/${chatId(1)}.json`, 'files/index.json', 'customizations.json', 'manifest.json'])
+    const stored = backupCustomizationsSchema.parse(entryJson(entries, 'customizations.json'))
+    expect(stored).toEqual({
+      items: [
+        { kind: 'agent', name: 'alpha', content: definition('agent', 'alpha'), enabled: true },
+        { kind: 'agent', name: 'zeta', content: definition('agent', 'zeta'), enabled: true },
+        { kind: 'command', name: 'review', content: definition('command', 'review'), enabled: false },
+        { kind: 'skill', name: 'notes', content: definition('skill', 'notes'), enabled: true },
+      ],
+    } satisfies BackupCustomizations)
+    // No ids, no timestamps: exactly the four backup fields.
+    expect(JSON.stringify(stored)).not.toMatch(/cus_|createdAt|updatedAt|"id"/)
+    expect(entryJson<BackupManifest>(entries, 'manifest.json')).toMatchObject({
+      includes: { files: true, settings: false, customizations: true },
+      counts: { chats: 1, messages: 2, customizations: 4 },
+    })
+  })
+
+  it('leaves them out with customizations=false, and goes on without them when they cannot be read', async () => {
+    const app = await customizedDataApp()
+    await app.customizations.create({ kind: 'agent', content: definition('agent', 'alpha') })
+    const excluded = unzip(await readAllBytes((await app.deps.data.exportBackup({ files: false, settings: false, customizations: false })).stream))
+    expect(Object.keys(excluded)).toEqual(['manifest.json'])
+    expect(entryJson<BackupManifest>(excluded, 'manifest.json')).toMatchObject({ includes: { customizations: false }, counts: { customizations: 0 } })
+    expect(app.customizations.calls.exportBackup).toBe(0)
+
+    const failing = await customizedDataApp({
+      wrap: fake => ({
+        ...fake,
+        exportBackup: async () => {
+          throw new Error('customizations table on fire')
+        },
+      }),
+    })
+    await failing.deps.chats.create({ id: chatId(1), messages: [user(1)] })
+    const entries = unzip(await exportBytes(failing.deps, { files: false }))
+    expect(Object.keys(entries)).toEqual(['settings.json', `chats/${chatId(1)}.json`, 'manifest.json'])
+    expect(entryJson<BackupManifest>(entries, 'manifest.json')).toMatchObject({ includes: { customizations: false }, counts: { chats: 1, customizations: 0 } })
+    expect(failing.t.logs.records.some(record => record.level === 'warn' && record.msg.includes('personal agents, commands and skills could not be read'))).toBe(true)
+  })
+
+  it('counts the definitions in the pre-check (an entry and their bytes)', async () => {
+    const app = await customizedDataApp({ data: { limits: { backupEntries: 2 } } })
+    await app.deps.chats.create({ id: chatId(1) })
+    // One chat + the manifest fit; a stored definition adds customizations.json.
+    expect(unzip(await exportBytes(app.deps, { files: false, settings: false }))['manifest.json']).toBeDefined()
+    await app.t.db.insert(customizations).values({ id: 'cus_0000000000000001', kind: 'agent', name: 'alpha', description: 'Alpha.', content: definition('agent', 'alpha') })
+    const entries = await rejection(app.deps.data.exportBackup({ files: false, settings: false }))
+    expect(entries).toMatchObject({ code: 'payload_too_large', details: { limitEntries: 2 } })
+    expect(unzip(await readAllBytes((await app.deps.data.exportBackup({ files: false, settings: false, customizations: false })).stream))['manifest.json']).toBeDefined()
+
+    const sized = await customizedDataApp({ data: { limits: { backupBytes: 200_000 } } })
+    await sized.t.db.insert(customizations).values({ id: 'cus_0000000000000002', kind: 'skill', name: 'big', description: 'Big.', content: definition('skill', 'big', 'x'.repeat(150_000)) })
+    expect(await rejection(sized.deps.data.exportBackup({ files: false }))).toMatchObject({ code: 'payload_too_large', details: { limitBytes: 200_000 } })
+  })
+
+  it('never writes background tasks: a delivered result travels only as a part of its message', async () => {
+    const app = await customizedDataApp()
+    const result: HarnessUIMessage['parts'][number] = {
+      type: 'data-task-result',
+      data: {
+        taskId: 'bgt_0000000000000001',
+        toolCallId: 'call_bg',
+        messageId: 'msg_0000000000000002',
+        output: { status: 'completed', type: 'explore', description: 'Scan', modelRef: 'mock:background', steps: [], stepsOmitted: 0, report: 'DELIVERED-REPORT-q4', startedAt: 1, finishedAt: 2 },
+        deliveredAt: 3,
+      },
+    } as HarnessUIMessage['parts'][number]
+    await app.deps.chats.create({ id: chatId(1), messages: [user(1), assistant(2), { id: 'msg_0000000000000003', role: 'user', parts: [result] }] })
+    await app.t.db.insert(backgroundTasks).values({
+      id: 'bgt_0000000000000002',
+      chatId: chatId(1),
+      messageId: 'msg_0000000000000002',
+      toolCallId: 'call_bg2',
+      type: 'explore',
+      description: 'ROW-DESCRIPTION-q4',
+      status: 'running',
+      origin: 'request',
+      output: { status: 'running', type: 'explore', description: 'Running', modelRef: 'mock:background', steps: [], stepsOmitted: 0, report: 'ROW-REPORT-q4', startedAt: 1 },
+    })
+    const entries = unzip(await exportBytes(app.deps))
+    const text = Object.values(entries).map(bytes => Buffer.from(bytes).toString('utf8')).join('\n')
+    expect(text).not.toContain('ROW-DESCRIPTION-q4')
+    expect(text).not.toContain('ROW-REPORT-q4')
+    expect(Object.keys(entries).some(name => /task|background/i.test(name))).toBe(false)
+    // The delivered result is kept in its carrier message.
+    const exported = chatExportSchema.parse(entryJson(entries, `chats/${chatId(1)}.json`))
+    expect(exported.chat.messages.at(-1)?.parts).toEqual([result])
   })
 })

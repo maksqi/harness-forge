@@ -12,8 +12,9 @@
 // declared one. Provider requests go through `rt.fetch` (same-origin redirects only).
 //
 // `registerDeclaredContributions()` registers a manifest's `contributes` through the plugin's own `ctx`: providers
-// (+ their `models`), `models`, MCP server declarations and template commands (a duplicate command name is skipped and
-// logged, as PLUGINS.md 6 specifies; every other conflict fails the load).
+// (+ their `models`), `models`, MCP server declarations, template commands and (plugin API 1.4.0, ADR-045) agent types
+// and skills. A command, agent or skill whose name another plugin already registered is skipped and logged (`warn`), as
+// PLUGINS.md 6 specifies; every other failure fails the load.
 import type {
   DeclarativeProvider,
   ModelInfo,
@@ -406,10 +407,22 @@ export function createDeclarativeProvider(provider: DeclarativeProvider, options
 
 // ---------- contributions of a manifest ----------
 
+/** Runs one registration; a `conflict` (the name is taken by another plugin) is logged as skipped instead of thrown. */
+function registerOrSkip(ctx: PluginContext, what: string, register: () => void): void {
+  try {
+    register()
+  }
+  catch (error) {
+    if (!isHarnessError(error) || error.code !== 'conflict')
+      throw error
+    ctx.logger.warn(`${what} was skipped: ${error.message}`)
+  }
+}
+
 /**
  * Registers `manifest.contributes` through `ctx` (so the plugin's `DisposableStore` removes everything on disable):
- * providers and their models, models for other providers, MCP server declarations and template commands. A duplicate
- * command is skipped with a `warn` log entry; other failures throw and fail the load.
+ * providers and their models, models for other providers, MCP server declarations, template commands, agent types and
+ * skills. A duplicate command, agent or skill is skipped with a `warn` log entry; other failures throw and fail the load.
  */
 export function registerDeclaredContributions(ctx: PluginContext, manifest: PluginManifest): void {
   const contributes = manifest.contributes
@@ -425,13 +438,26 @@ export function registerDeclaredContributions(ctx: PluginContext, manifest: Plug
   for (const server of contributes.mcpServers ?? [])
     ctx.mcp.register(server)
   for (const command of contributes.commands ?? []) {
-    try {
+    registerOrSkip(ctx, `The command "/${command.name}"`, () => {
       ctx.commands.register({ name: command.name, description: command.description, template: command.template })
-    }
-    catch (error) {
-      if (!isHarnessError(error) || error.code !== 'conflict')
-        throw error
-      ctx.logger.warn(`The command "/${command.name}" was skipped: ${error.message}`)
-    }
+    })
+  }
+  // Plugin API 1.4.0 (ADR-045). A manifest without these keys (every plugin written for 1.3.0 or older) registers
+  // exactly what it did before.
+  for (const agent of contributes.agents ?? []) {
+    registerOrSkip(ctx, `The agent "${agent.name}"`, () => {
+      ctx.agents.register({
+        name: agent.name,
+        description: agent.description,
+        instructions: agent.instructions,
+        ...(agent.tools === undefined ? {} : { tools: [...agent.tools] }),
+        ...(agent.model === undefined ? {} : { model: agent.model }),
+      })
+    })
+  }
+  for (const skill of contributes.skills ?? []) {
+    registerOrSkip(ctx, `The skill "${skill.name}"`, () => {
+      ctx.skills.register({ name: skill.name, description: skill.description, content: skill.content })
+    })
   }
 }

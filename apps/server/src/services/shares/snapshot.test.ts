@@ -356,6 +356,50 @@ describe('sanitizeSnapshot: agent parts (Phase 9)', () => {
   })
 })
 
+// ---------- Phase 10: background task results (W10.6-T4) ----------
+
+function taskResult(n: number): unknown {
+  return {
+    type: 'data-task-result',
+    data: {
+      taskId: `bgt_000000000000000${n}`,
+      toolCallId: `call_bg${n}`,
+      messageId: 'msg_0000000000000002',
+      output: { status: 'completed', type: 'explore', description: 'Scan', modelRef: 'mock:background', steps: [], stepsOmitted: 0, report: `TASK-REPORT-${n}`, startedAt: 1, finishedAt: 2 },
+      deliveredAt: 3,
+    },
+  }
+}
+
+describe('sanitizeSnapshot: background task results (Phase 10)', () => {
+  it('drops result parts, and a carrier user message that holds only results', () => {
+    const path = [
+      message(1, 'user', [{ type: 'text', text: 'Scan in the background' }]),
+      message(2, 'assistant', [{ type: 'step-start' }, { type: 'text', text: 'Started' }, taskResult(1), { type: 'step-start' }, { type: 'text', text: 'One is in' }], { modelRef: 'mock:background' }),
+      // The carrier of a turn the server started (results and parts that are no content).
+      message(3, 'user', [taskResult(2), { type: 'step-start' }]),
+      message(4, 'assistant', [{ type: 'step-start' }, { type: 'text', text: 'Both are in' }], { modelRef: 'mock:background' }),
+      // A user message with text besides a result stays (only the result is dropped).
+      message(5, 'user', [taskResult(3), { type: 'text', text: 'Thanks' }]),
+      // A reply that holds only a result stays, with no parts (it is still a reply of the chat).
+      message(6, 'assistant', [{ type: 'step-start' }, taskResult(4)], { modelRef: 'mock:background' }),
+    ]
+    const { snapshot } = sanitizeSnapshot('Background', path, fileIdOf)
+    expect(shareSnapshotSchema.parse(snapshot)).toEqual(snapshot)
+    expect(snapshot.messages).toEqual([
+      { role: 'user', parts: [{ type: 'text', text: 'Scan in the background' }] },
+      { role: 'assistant', modelRef: 'mock:background', parts: [{ type: 'text', text: 'Started' }, { type: 'text', text: 'One is in' }] },
+      { role: 'assistant', modelRef: 'mock:background', parts: [{ type: 'text', text: 'Both are in' }] },
+      { role: 'user', parts: [{ type: 'text', text: 'Thanks' }] },
+      { role: 'assistant', modelRef: 'mock:background', parts: [] },
+    ])
+    expect(shareableMessageCount(path)).toBe(snapshot.messages.length)
+    const json = JSON.stringify(snapshot)
+    for (const leaked of ['TASK-REPORT', 'bgt_', 'data-', 'call_bg'])
+      expect(json, leaked).not.toContain(leaked)
+  })
+})
+
 describe('capToolValue', () => {
   it('copies values whose JSON fits, cuts the others with a marker', () => {
     const value = { a: [1, 'two', { three: true }], nothing: null }

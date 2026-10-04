@@ -10,7 +10,10 @@ import {
   parseToolMode,
   resolveClientCommand,
   serverSlashItems,
+  SLASH_GROUPS,
   slashGroupOf,
+  slashItemDetail,
+  slashItemLabel,
   slashQueryAt,
 } from './slash-commands'
 
@@ -24,13 +27,14 @@ const commands = [
 const items = [...clientSlashItems(), ...serverSlashItems(commands, id => (id === 'core-commands' ? 'Core commands' : undefined))]
 
 describe('slash menu items', () => {
-  it('lists the client commands first, in the documented order', () => {
+  it('lists the client commands first, in the documented order, /remember included (Phase 10)', () => {
     expect(clientSlashItems().map(item => [item.name, item.description])).toEqual([
       ['new', 'Start a new chat'],
       ['model', 'Switch model'],
       ['effort', 'Set reasoning effort'],
       ['mode', 'Set permission mode'],
       ['help', 'Show shortcuts and commands'],
+      ['remember', 'Save a note to your instructions'],
     ])
   })
 
@@ -42,7 +46,7 @@ describe('slash menu items', () => {
   })
 
   it('filters by prefix, case-insensitively, App group first', () => {
-    expect(filterSlashItems(items, '').map(item => item.name)).toEqual(['new', 'model', 'effort', 'mode', 'help', 'summarize', 'model-card'])
+    expect(filterSlashItems(items, '').map(item => item.name)).toEqual(['new', 'model', 'effort', 'mode', 'help', 'remember', 'summarize', 'model-card'])
     expect(filterSlashItems(items, 'mo').map(item => `${item.kind}:${item.name}`)).toEqual(['client:model', 'client:mode', 'server:model-card'])
     expect(filterSlashItems(items, 'MODEL').map(item => item.name)).toEqual(['model', 'model-card'])
     expect(filterSlashItems(items, 'sum').map(item => item.name)).toEqual(['summarize'])
@@ -164,13 +168,73 @@ describe('groups, argument hints and /remember (Phase 10)', () => {
     expect(argumentHintAt('/unknown ', all)).toBeNull()
   })
 
-  it('resolves /remember to the remember action with the trimmed text (not offered in the menu until W10.9)', () => {
+  it('resolves /remember to the remember action with the trimmed text and lists it in the App group', () => {
     const context: ClientCommandContext = { resolveModel: () => null, efforts: [], toolsAvailable: true, projectChat: false }
     expect(CLIENT_COMMAND_DESCRIPTIONS.remember).toBe('Save a note to your instructions')
     expect(parseClientCommand('/remember  Run pnpm check first ')).toEqual({ name: 'remember', args: 'Run pnpm check first' })
+    expect(parseClientCommand('/REMEMBER line one\nline two')).toEqual({ name: 'remember', args: 'line one\nline two' })
     expect(resolveClientCommand('remember', '  Run pnpm check first ', context)).toEqual({ type: 'remember', text: 'Run pnpm check first' })
     expect(resolveClientCommand('remember', '', context)).toEqual({ type: 'remember', text: '' })
-    expect(clientSlashItems().map(item => item.name)).not.toContain('remember')
+    // It works without tools and without a project (it is not a model feature).
+    expect(resolveClientCommand('remember', 'x', { ...context, toolsAvailable: false })).toEqual({ type: 'remember', text: 'x' })
+    expect(clientSlashItems().find(item => item.name === 'remember')).toEqual({
+      name: 'remember',
+      description: 'Save a note to your instructions',
+      kind: 'client',
+      group: 'app',
+    })
+    // A plugin or command file can never take the name.
+    expect(serverSlashItems([{ name: 'remember', description: 'Plugin remember', source: 'plugin', pluginId: 'rogue' }])).toEqual([])
+  })
+
+  it('orders the matches by group (App, Project, Personal, Plugins), keeping the order inside a group', () => {
+    expect(SLASH_GROUPS).toEqual([
+      { value: 'app', label: 'App' },
+      { value: 'project', label: 'Project' },
+      { value: 'personal', label: 'Personal' },
+      { value: 'plugin', label: 'Plugins' },
+    ])
+    // The server answers by name; the menu regroups.
+    const server = serverSlashItems([
+      { name: 'compact', description: 'Summarize the conversation', source: 'harness', pluginId: 'core-agent' },
+      { name: 'deploy', description: 'Deploy', source: 'plugin', pluginId: 'ops' },
+      { name: 'release', description: 'Release notes', source: 'project', namespace: 'docs' },
+      { name: 'review', description: 'Review a file', source: 'project', namespace: 'frontend', argumentHint: '<file> [focus]' },
+      { name: 'standup', description: 'Standup notes', source: 'user' },
+      { name: 'summarize', description: 'Summarize', source: 'plugin', pluginId: 'core-commands' },
+    ], id => ({ 'core-agent': 'Agent tools', 'core-commands': 'Core commands' })[id])
+    const all = [...clientSlashItems(), ...server]
+    expect(filterSlashItems(all, '').map(item => `${item.group}:${item.name}`)).toEqual([
+      'app:new',
+      'app:model',
+      'app:effort',
+      'app:mode',
+      'app:help',
+      'app:remember',
+      'app:compact',
+      'project:release',
+      'project:review',
+      'personal:standup',
+      'plugin:deploy',
+      'plugin:summarize',
+    ])
+    expect(filterSlashItems(all, 're').map(item => `${item.group}:${item.name}`)).toEqual(['app:remember', 'project:release', 'project:review'])
+    expect(filterSlashItems(all, 's').map(item => item.name)).toEqual(['standup', 'summarize'])
+  })
+
+  it('shows the namespace or the plugin name on the right, and names a row with its hint', () => {
+    const [compact, deploy, review, standup] = serverSlashItems([
+      { name: 'compact', description: 'Summarize the conversation', source: 'harness', pluginId: 'core-agent', argumentHint: '[focus]' },
+      { name: 'deploy', description: 'Deploy', source: 'plugin', pluginId: 'ops' },
+      { name: 'review', description: 'Review a file', source: 'project', namespace: 'frontend', argumentHint: '<file> [focus]' },
+      { name: 'standup', description: 'Standup notes', source: 'user' },
+    ], id => (id === 'core-agent' ? 'Agent tools' : undefined))
+    expect([compact, deploy, review, standup].map(item => slashItemDetail(item!))).toEqual([null, 'ops', 'frontend', null])
+    expect(slashItemDetail(clientSlashItems()[0]!)).toBeNull()
+    expect(slashItemLabel(review!)).toBe('/review, Review a file, arguments <file> [focus]')
+    expect(slashItemLabel(compact!)).toBe('/compact, Summarize the conversation, arguments [focus]')
+    expect(slashItemLabel(standup!)).toBe('/standup, Standup notes')
+    expect(slashItemLabel({ name: 'x', description: '', kind: 'server', group: 'personal' })).toBe('/x')
   })
 })
 

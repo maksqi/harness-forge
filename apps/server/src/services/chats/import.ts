@@ -7,7 +7,11 @@
 // Phase 9 (ADR-040 / ADR-042, W9.7): `harnessDataSchemas` validates the agent parts, so a chat export with compaction
 // markers (`data-compaction`) and steers (`data-steer`) round-trips unchanged (a marker is positional, so it survives
 // replaced message ids). A `data-activity` part is transient and never stored: an import drops it from replies (the
-// only messages the server writes data parts into).
+// only messages the server writes data parts into, besides the carrier below).
+//
+// Phase 10 (ADR-046, W10.6): background task results (`data-task-result`, `harnessDataSchemas['task-result']`) are
+// validated the same way and kept as they are, in replies and in the user-role carrier message of a turn the server
+// started; the background task rows themselves are never part of an export, so an imported result is history only.
 import type { HarnessUIMessage, HarnessUIMessagePart } from '@harness-forge/shared'
 import { createMessageId, harnessDataSchemas, MESSAGE_ID_PATTERN, messageMetadataSchema, validationError } from '@harness-forge/shared'
 import { safeValidateUIMessages } from 'ai'

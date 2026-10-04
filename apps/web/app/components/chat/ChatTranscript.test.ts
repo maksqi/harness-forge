@@ -6,7 +6,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h, nextTick, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
-import { assistantMessage, compactionPart, messageBranch, taskOutput, taskPart, taskStep, userMessage } from '~/utils/testing/fixtures'
+import {
+  assistantMessage,
+  backgroundLaunchOutput,
+  backgroundTaskId,
+  compactionPart,
+  messageBranch,
+  taskInput,
+  taskOutput,
+  taskPart,
+  taskResultCarrier,
+  taskResultData,
+  taskResultPart,
+  taskStep,
+  userMessage,
+} from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import ChatMessage from './ChatMessage.vue'
 import ChatTranscript from './ChatTranscript.vue'
@@ -450,6 +464,81 @@ describe('chatTranscript: rewind files after sub-agent edits (Phase 9)', () => {
     ])
     await nextTick()
     expect(rewindable(wrapper)).toEqual([])
+  })
+})
+
+describe('chatTranscript: background agents (Phase 10)', () => {
+  const U1 = 'msg_user0000000000b1'
+  const A1 = 'msg_asst0000000000b1'
+  const U2 = 'msg_user0000000000b2'
+  const A2 = 'msg_asst0000000000b2'
+  const C1 = 'msg_carr0000000000b1'
+  const launch = taskPart({ input: taskInput({ type: 'general', background: true }), output: backgroundLaunchOutput() })
+  const wrote = taskOutput({ taskId: backgroundTaskId(1), steps: [taskStep({ toolName: 'write_file', state: 'done' })] })
+
+  function mountChat(messages: HarnessUIMessage[]) {
+    const transcript = ref<InstanceType<typeof ChatTranscript> | null>(null)
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, {
+        default: () => h(ChatTranscript, { ref: transcript, messages, status: 'ready', showThinking: false, projectId: 'prj_sample0000000001' }),
+      }),
+    }, { attachTo: document.body })
+    return { wrapper, transcript }
+  }
+
+  function rewindable(wrapper: ReturnType<typeof mountChat>['wrapper']): string[] {
+    return wrapper.findAll(`[data-testid="${testIds.messageUser}"]`)
+      .filter(row => row.find(`[data-testid="${testIds.messageRewind}"]`).exists())
+      .map(row => row.attributes('data-message-id')!)
+  }
+
+  it('counts the files a background agent wrote for the reply that launched it, from its delivered result', async () => {
+    const { wrapper } = mountChat([
+      userMessage(U1, 'q1'),
+      assistantMessage(A1, '', { parts: [launch, { type: 'text', text: 'Started it.', state: 'done' }] }),
+      taskResultCarrier(C1, [taskResultData({ messageId: A1, output: wrote })]),
+      assistantMessage(A2, 'It wrote agent.txt.'),
+    ])
+    await nextTick()
+    // The launching reply counts; the carrier never offers a rewind.
+    expect(rewindable(wrapper)).toEqual([U1])
+  })
+
+  it('also counts a result delivered inside a later running reply, and ignores results that only read', async () => {
+    const delivered = mountChat([
+      userMessage(U1, 'q1'),
+      assistantMessage(A1, '', { parts: [launch] }),
+      userMessage(U2, 'q2'),
+      assistantMessage(A2, '', { parts: [taskResultPart({ messageId: A1, output: wrote }), { type: 'text', text: 'Noted.', state: 'done' }] }),
+    ])
+    await nextTick()
+    expect(rewindable(delivered.wrapper)).toEqual([U1])
+    delivered.wrapper.unmount()
+
+    const readOnly = mountChat([
+      userMessage(U1, 'q1'),
+      assistantMessage(A1, '', { parts: [launch] }),
+      taskResultCarrier(C1, [taskResultData({ messageId: A1 })]),
+      assistantMessage(A2, 'Done.'),
+    ])
+    await nextTick()
+    expect(rewindable(readOnly.wrapper)).toEqual([])
+  })
+
+  it('renders a carrier as notes, and ↑ edits the last message the user wrote instead', async () => {
+    const { wrapper, transcript } = mountChat([
+      userMessage(U1, 'q1'),
+      assistantMessage(A1, '', { parts: [launch] }),
+      taskResultCarrier(C1),
+      assistantMessage(A2, 'Done.'),
+    ])
+    await nextTick()
+    const carrier = wrapper.get(`[data-message-id="${C1}"]`)
+    expect(carrier.get(`[data-testid="${testIds.taskResult}"]`).attributes('data-variant')).toBe('turn')
+    expect(carrier.find('[data-slot="user-message"]').exists()).toBe(false)
+    expect(transcript.value!.editLastUserMessage()).toBe(true)
+    await nextTick()
+    expect(wrapper.get(`[data-message-id="${U1}"]`).find(`[data-testid="${testIds.messageEditInput}"]`).exists()).toBe(true)
   })
 })
 

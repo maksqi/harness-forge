@@ -94,7 +94,7 @@ test.describe('settings', () => {
 
     await page.goto('/settings/general')
     await expect(page.getByTestId(testIds.settingsNavGeneral)).toHaveAttribute('data-state', 'active')
-    await expect(page.getByRole('main')).toContainText('Long chats and sub-agents.')
+    await expect(page.getByRole('main')).toContainText('Long chats, sub-agents and plans.')
 
     // Automatic compaction.
     const autoCompact = page.getByTestId(testIds.settingsAutoCompact)

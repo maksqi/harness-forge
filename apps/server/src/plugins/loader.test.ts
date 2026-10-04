@@ -137,6 +137,56 @@ describe('inspectPluginDirectory', () => {
   })
 })
 
+describe('plugin API 1.4.0 manifests (ADR-045)', () => {
+  it.each(['^1.0.0', '^1.3.0', '>=1.3.0 <2', '^1.4.0', '1.x'])('engines %s is compatible with this host', async (harness) => {
+    const read = await readPluginDirectory(plugin('compat', { 'plugin.json': manifest('compat', { engines: { harness } }) }), { expectedId: 'compat' })
+    expect(read.problem).toBeNull()
+    expect(read.compatible).toBe(true)
+  })
+
+  it.each(['^1.5.0', '^2.0.0', '~1.3.0'])('engines %s is incompatible (needs another plugin API)', async (harness) => {
+    const read = await readPluginDirectory(plugin('compat', { 'plugin.json': manifest('compat', { engines: { harness } }) }), { expectedId: 'compat' })
+    expect(read.compatible).toBe(false)
+    expect(read.problem?.state).toBe('incompatible')
+  })
+
+  it('a 1.3.0 declarative manifest (commands only) reads unchanged and declares no agents or skills', async () => {
+    const dir = plugin('older', {
+      'plugin.json': manifest('older', { engines: { harness: '^1.3.0' }, contributes: { commands: [{ name: 'hello', description: 'Hello.', template: 'Hello {{input}}' }] } }),
+    })
+    const read = await readPluginDirectory(dir, { expectedId: 'older' })
+    expect(read.problem).toBeNull()
+    expect(read.requiresTrust).toBe(false)
+    expect(declaredContributions(read.manifest)).toMatchObject({ commands: ['hello'], agents: [], skills: [] })
+  })
+
+  it('accepts contributes.agents / skills and refuses reserved names, bad fields and duplicates at manifest validation', async () => {
+    const agentsOf = (agents: unknown[], skills: unknown[] = []): Record<string, unknown> =>
+      manifest('pack', { engines: { harness: '^1.4.0' }, contributes: { agents, skills } })
+    const ok = await readPluginDirectory(plugin('pack', { 'plugin.json': agentsOf([{ name: 'reviewer', description: 'R.', instructions: 'r' }], [{ name: 'notes', description: 'N.', content: 'n' }]) }), { expectedId: 'pack' })
+    expect(ok.problem).toBeNull()
+    expect(ok.requiresTrust).toBe(false)
+    expect(declaredContributions(ok.manifest)).toMatchObject({ agents: ['reviewer'], skills: ['notes'] })
+
+    const cases: Array<[unknown[], unknown[], RegExp]> = [
+      [[{ name: 'explore', description: 'x', instructions: 'x' }], [], /contributes\.agents\.0\.name: Reserved agent type/],
+      [[{ name: 'general-purpose', description: 'x', instructions: 'x' }], [], /contributes\.agents\.0\.name: Reserved agent type/],
+      [[{ name: 'a', description: 'x', instructions: 'x', model: 'sonnet' }], [], /contributes\.agents\.0\.model/],
+      [[{ name: 'a', description: 'x', instructions: 'x', tools: ['Read(*)'] }], [], /contributes\.agents\.0\.tools\.0/],
+      [[{ name: 'a', description: 'x', instructions: 'x' }, { name: 'a', description: 'y', instructions: 'y' }], [], /Duplicate agent/],
+      [[], [{ name: 'n', description: 'x', content: 'x' }, { name: 'n', description: 'y', content: 'y' }], /Duplicate skill/],
+      [[], [{ name: 'n', description: 'x', content: 'x'.repeat(65_537) }], /contributes\.skills\.0\.content/],
+      [Array.from({ length: 51 }, (_, index) => ({ name: `a${index}`, description: 'x', instructions: 'x' })), [], /contributes\.agents/],
+    ]
+    for (const [agents, skills, expected] of cases) {
+      const read = await readPluginDirectory(plugin('pack', { 'plugin.json': agentsOf(agents, skills) }), { expectedId: 'pack' })
+      expect(read.manifest, String(expected)).toBeNull()
+      expect(read.problem?.state).toBe('error')
+      expect(read.problem?.error.message, String(expected)).toMatch(expected)
+    }
+  })
+})
+
 describe('manifest helpers', () => {
   it('reads lenient fields and synthesizes a valid manifest', () => {
     expect(lenientManifest({ id: 'x', name: 'X', version: 'nope', engines: { harness: '^1' }, main: 'a.mjs' })).toEqual({ id: 'x', name: 'X', main: 'a.mjs', harness: '^1' })
@@ -150,6 +200,20 @@ describe('manifest helpers', () => {
     const acme = JSON.parse(readFileSync(join(fixturePath('acme-docs'), 'plugin.json'), 'utf8')) as Parameters<typeof declaredContributions>[0]
     expect(declaredContributions(acme)).toEqual({ providers: ['acme-docs'], models: 3, tools: [], mcpServers: ['acme-docs'], commands: ['acme'], hooks: [], agents: [], skills: [] })
     expect(declaredContributions(null).providers).toEqual([])
+  })
+
+  it('lists declared agents and skills (plugin API 1.4.0) sorted by name', () => {
+    const declared = declaredContributions(pluginManifestBaseSchema.parse(manifest('agent-pack', {
+      engines: { harness: '^1.4.0' },
+      contributes: {
+        agents: [
+          { name: 'zeta', description: 'Z.', instructions: 'z' },
+          { name: 'alpha', description: 'A.', instructions: 'a', tools: ['read_file'], model: 'inherit' },
+        ],
+        skills: [{ name: 'notes', description: 'N.', content: '# N' }, { name: 'commit-message', description: 'C.', content: '# C' }],
+      },
+    })))
+    expect(declared).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: ['alpha', 'zeta'], skills: ['commit-message', 'notes'] })
   })
 
   it('pins linked folders by path and checks containment', () => {

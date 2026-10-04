@@ -1,6 +1,6 @@
 // Chat-wide actions offered by ChatView to deeply nested transcript pieces (e.g. the "Choose model" error action),
 // so the message contract stays small.
-import type { BackgroundTask, TaskResultData } from '@harness-forge/shared'
+import type { BackgroundTask, TaskInput, TaskResultData } from '@harness-forge/shared'
 import type { InjectionKey } from 'vue'
 
 export interface ChatViewActions {
@@ -41,3 +41,12 @@ export interface AgentTaskContext {
 }
 
 export const AGENT_TASK_CONTEXT: InjectionKey<AgentTaskContext> = Symbol('hf-agent-task-context')
+
+/**
+ * The input of the `task` call that launched a background agent (W10.10; docs/UI.md 7.29): ChatView provides it from the
+ * shown path (the launching message's `tool-task` part, parsed), the dock's rows read it for `TaskBody`. Null when the
+ * path does not show that call (the details toggle is then left out).
+ */
+export type BackgroundTaskInput = (task: BackgroundTask) => TaskInput | null
+
+export const BACKGROUND_TASK_INPUT: InjectionKey<BackgroundTaskInput> = Symbol('hf-background-task-input')

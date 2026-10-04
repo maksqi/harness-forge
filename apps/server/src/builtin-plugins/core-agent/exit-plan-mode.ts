@@ -13,11 +13,16 @@
 // (label "Accept edits" or "Ask"). Phase 10 (ADR-047; the text frozen by C32 in P10-0b, the plan file written by W10.5
 // through `scope.savePlan`): a second line "The plan was saved to <planPath>." when the plan file was written, or "The
 // plan file could not be saved: <planError>." when the write failed (the approval stands either way).
-import type { ToolDefinition, ToolResultOutput } from '@harness-forge/plugin-sdk'
+//
+// W10.5: after the mode check, `execute` asks the scope to save the plan (`scope.savePlan(plan, c)`, `chat/plan-file.ts`:
+// only with `planFiles` on in a project chat, journaled under the reply) and adds `planPath` or `planError` to the
+// output (`withSavedPlan`); a rejected or malformed save result never fails the approval.
+import type { ToolCallContext, ToolDefinition, ToolResultOutput } from '@harness-forge/plugin-sdk'
 import type { ExitPlanModeInput, ExitPlanModeOutput } from '@harness-forge/shared'
-import type { AgentRunScope } from '../../chat/agent-scope.ts'
-import { exitPlanModeInputSchema, exitPlanModeOutputSchema } from '@harness-forge/shared'
+import type { AgentRunScope, SavedPlan } from '../../chat/agent-scope.ts'
+import { exitPlanModeInputSchema, exitPlanModeOutputSchema, LIMITS } from '@harness-forge/shared'
 import { agentScopeOf } from '../../chat/agent-scope.ts'
+import { capPlanError, PLAN_FILE_FAILED_ERROR } from '../../chat/plan-file.ts'
 import { EXIT_PLAN_MODE_TIMEOUT_MS, textModelOutput, TOOL_MODE_LABELS } from './common.ts'
 
 export const EXIT_PLAN_MODE_TOOL_NAME = 'exit_plan_mode'
@@ -39,6 +44,28 @@ export function exitPlanModeOutput(scope: AgentRunScope | null): ExitPlanModeOut
   return { approved: true, mode }
 }
 
+/**
+ * The output with the plan file result of `savePlan`: `planPath` when it is a usable project-relative path, else
+ * `planError` (one line, at most 500 characters) when one is given, else the output unchanged.
+ */
+export function withSavedPlan(output: ExitPlanModeOutput, saved: SavedPlan | null | undefined): ExitPlanModeOutput {
+  const planPath = saved?.planPath
+  if (typeof planPath === 'string' && planPath.trim() !== '' && planPath.length <= LIMITS.workspacePathMaxChars)
+    return { ...output, planPath }
+  const planError = typeof saved?.planError === 'string' ? capPlanError(saved.planError) : ''
+  return planError === '' ? output : { ...output, planError }
+}
+
+/** `scope.savePlan`, which never rejects by contract; a rejection still only becomes `planError`. */
+async function savedPlanOf(scope: AgentRunScope, plan: string, c: ToolCallContext): Promise<SavedPlan> {
+  try {
+    return await scope.savePlan(plan, c)
+  }
+  catch {
+    return { planError: PLAN_FILE_FAILED_ERROR }
+  }
+}
+
 /** The text the model reads for an approved `exit_plan_mode` output (the plan file line only with a plan file). */
 export function exitPlanModeModelText(output: ExitPlanModeOutput): string {
   const approved = `The user approved the plan. Mode is now ${TOOL_MODE_LABELS[output.mode]}. Implement it now; track progress with todo_write.`
@@ -55,8 +82,10 @@ export function createExitPlanModeTool(): ToolDefinition<ExitPlanModeInput, Exit
     inputSchema: exitPlanModeInputSchema,
     policy: 'always',
     timeoutMs: EXIT_PLAN_MODE_TIMEOUT_MS,
-    async execute(_input, c) {
-      return exitPlanModeOutput(agentScopeOf(c))
+    async execute(input, c) {
+      const scope = agentScopeOf(c)
+      const output = exitPlanModeOutput(scope)
+      return withSavedPlan(output, await savedPlanOf(scope!, input.plan, c))
     },
     toModelOutput(output): ToolResultOutput {
       return textModelOutput(exitPlanModeOutputSchema, output, exitPlanModeModelText)

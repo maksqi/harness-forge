@@ -144,6 +144,59 @@ describe('plugin context', () => {
     expect(() => ctx.mcp.register({ id: 'ctx-test', name: 'x', transport: { type: 'http', url: 'https://x.example.com', headers: { A: '{{settings.missing}}' } } })).toThrow(/undefined setting/)
   })
 
+  it('ctx.agents / ctx.skills register owned agent types and skills (plugin API 1.4.0) and dispose them', async () => {
+    const { runtime, registry, logs } = await setup({ ...BASE_MANIFEST, engines: { harness: '^1.4.0' } })
+    const { ctx } = runtime
+    const changes: string[] = []
+    registry.onChange(change => changes.push(`${change.kind}:${change.action}:${change.pluginId}:${change.key}`))
+    const reviewer = ctx.agents.register({ name: 'docs-writer', description: 'Writes docs.', instructions: 'Write docs.', tools: ['read_file', 'write_file'], model: 'inherit' })
+    ctx.agents.register({ name: 'code-reviewer', description: 'Reviews code.', instructions: 'Review.' })
+    const notes = ctx.skills.register({ name: 'changelog-entry', description: 'Changelog entries.', content: '# Changelog' })
+    expect(registry.agents.get('docs-writer')).toEqual({ pluginId: 'ctx-test', definition: { name: 'docs-writer', description: 'Writes docs.', instructions: 'Write docs.', tools: ['read_file', 'write_file'], model: 'inherit' } })
+    expect(registry.contributions('ctx-test')).toMatchObject({ agents: ['code-reviewer', 'docs-writer'], skills: ['changelog-entry'] })
+
+    // A handle removes its own entry; disposing it again (or through the store later) is a no-op.
+    reviewer.dispose()
+    notes.dispose()
+    expect(registry.agents.get('docs-writer')).toBeUndefined()
+    expect(registry.skills.get('changelog-entry')).toBeUndefined()
+    expect(registry.contributions('ctx-test')).toMatchObject({ agents: ['code-reviewer'], skills: [] })
+
+    runtime.disposeContributions()
+    expect(registry.contributions('ctx-test')).toMatchObject({ agents: [], skills: [] })
+    expect(changes).toEqual([
+      'agent:added:ctx-test:docs-writer',
+      'agent:added:ctx-test:code-reviewer',
+      'skill:added:ctx-test:changelog-entry',
+      'agent:removed:ctx-test:docs-writer',
+      'skill:removed:ctx-test:changelog-entry',
+      'agent:removed:ctx-test:code-reviewer',
+    ])
+    // No permission is involved: agents and skills are data.
+    expect(logs).toEqual([])
+    expect(() => ctx.agents.register({ name: 'late', description: 'Late.', instructions: 'x' })).toThrow(expect.objectContaining({ code: 'plugin_error' }))
+    expect(() => ctx.skills.register({ name: 'late', description: 'Late.', content: 'x' })).toThrow(expect.objectContaining({ code: 'plugin_error' }))
+  })
+
+  it('ctx.agents / ctx.skills surface validation errors and conflicts with another plugin', async () => {
+    const { runtime, registry } = await setup()
+    const { ctx } = runtime
+    registry.agents.register('other-plugin', { name: 'reviewer', description: 'Theirs.', instructions: 'x' })
+    registry.skills.register('other-plugin', { name: 'notes', description: 'Theirs.', content: 'x' })
+    expect(() => ctx.agents.register({ name: 'reviewer', description: 'Mine.', instructions: 'x' })).toThrow(expect.objectContaining({
+      code: 'conflict',
+      message: 'The agent "reviewer" is already registered by the plugin "other-plugin".',
+    }))
+    expect(() => ctx.skills.register({ name: 'notes', description: 'Mine.', content: 'x' })).toThrow(expect.objectContaining({ code: 'conflict' }))
+    expect(() => ctx.agents.register({ name: 'explore', description: 'Mine.', instructions: 'x' })).toThrow(expect.objectContaining({ code: 'validation_error', message: expect.stringContaining('Reserved agent type') }))
+    expect(() => ctx.agents.register({ name: 'big', description: 'Mine.', instructions: 'x'.repeat(65_537) })).toThrow(expect.objectContaining({ code: 'validation_error' }))
+    expect(() => ctx.skills.register({ name: 'Notes!', description: 'Mine.', content: 'x' })).toThrow(expect.objectContaining({ code: 'validation_error' }))
+    // Refused registrations are not tracked: the other plugin keeps its entries after this plugin is disposed.
+    runtime.disposeContributions()
+    expect(registry.agents.owner('reviewer')).toBe('other-plugin')
+    expect(registry.skills.owner('notes')).toBe('other-plugin')
+  })
+
   it('returns settings copies and runs onChange callbacks on update', async () => {
     const { runtime, registry } = await setup()
     const { ctx } = runtime

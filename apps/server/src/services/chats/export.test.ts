@@ -1,7 +1,7 @@
 import type { ChatDetail } from '@harness-forge/shared'
 import { chatExportAnySchema, chatExportSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { buildChatExport, compactionLine, EXPORT_TOOL_OUTPUT_BYTES, exportFilename, linearTree, renderChatMarkdown, STEER_HEADING, titleSlug } from './export.ts'
+import { buildChatExport, compactionLine, EXPORT_TOOL_OUTPUT_BYTES, exportFilename, linearTree, renderChatMarkdown, STEER_HEADING, taskResultHeading, titleSlug } from './export.ts'
 
 const CHAT_ID = '0199a8f0-0000-7000-8000-000000000001'
 const NOW = Date.UTC(2026, 8, 28, 12, 30)
@@ -283,6 +283,102 @@ describe('markdown export: agent parts (Phase 9)', () => {
   it('the json export keeps the parts as stored', () => {
     const parsed = chatExportSchema.parse(JSON.parse(buildChatExport(agentChat(), 'json', NOW).body))
     expect(parsed.chat.messages).toEqual(agentChat().messages)
+  })
+})
+
+// ---------- Phase 10: background task results (W10.6-T4) ----------
+
+/** A `data-task-result` part (ADR-046) of the task `n`. */
+function taskResult(n: number, output: Record<string, unknown> = {}): ChatDetail['messages'][number]['parts'][number] {
+  return {
+    type: 'data-task-result',
+    data: {
+      taskId: `bgt_000000000000000${n}`,
+      toolCallId: `call_bg${n}`,
+      messageId: 'msg_asst000000000021',
+      output: { status: 'completed', type: 'explore', description: `Scan part ${n}`, modelRef: 'mock:background', steps: [], stepsOmitted: 0, report: `Report ${n}: found **3** files.`, startedAt: 1, finishedAt: 2, ...output },
+      deliveredAt: 3,
+    },
+  } as ChatDetail['messages'][number]['parts'][number]
+}
+
+function backgroundChat(): ChatDetail {
+  return {
+    ...sampleChat(),
+    title: 'Background work',
+    modelRef: 'mock:background',
+    messages: [
+      { id: 'msg_user000000000021', role: 'user', parts: [{ type: 'text', text: 'Scan the repo in the background.' }] },
+      {
+        id: 'msg_asst000000000021',
+        role: 'assistant',
+        metadata: { modelRef: 'mock:background', startedAt: 2 },
+        parts: [
+          { type: 'step-start' },
+          { type: 'text', text: 'Started two scans.' },
+          { type: 'step-start' },
+          taskResult(1),
+          { type: 'step-start' },
+          { type: 'text', text: 'The first scan is in.' },
+          // Invalid result data is left out (no split, no section).
+          { type: 'data-task-result', data: { taskId: 'nope', output: { report: 'BROKEN-RESULT' } } } as ChatDetail['messages'][number]['parts'][number],
+        ],
+      },
+      // The carrier of a turn the server started: only results, no "## User" heading.
+      { id: 'msg_user000000000022', role: 'user', parts: [taskResult(2, { status: 'failed', report: '  ', error: 'The model was not available.', description: 'Scan\npart  2' })] },
+      { id: 'msg_asst000000000022', role: 'assistant', metadata: { modelRef: 'mock:background', startedAt: 4 }, parts: [{ type: 'step-start' }, { type: 'text', text: 'The second scan failed.' }] },
+      { id: 'msg_user000000000023', role: 'user', parts: [taskResult(3, { status: 'aborted', report: '', description: '' })] },
+    ],
+  } as ChatDetail
+}
+
+const BACKGROUND_MARKDOWN = `# Background work
+
+Exported from harness-forge on 2026-09-28 · Model: mock:background
+
+## User
+
+Scan the repo in the background.
+
+## Assistant (mock:background)
+
+Started two scans.
+
+## Background task: Scan part 1 (completed)
+
+Report 1: found **3** files.
+
+## Assistant (mock:background)
+
+The first scan is in.
+
+## Background task: Scan part 2 (failed)
+
+Error: The model was not available.
+
+## Assistant (mock:background)
+
+The second scan failed.
+
+## Background task: explore (aborted)
+
+_(no report)_
+`
+
+describe('markdown export: background task results (Phase 10)', () => {
+  it('renders each result as a section with its report, splitting a reply and replacing the carrier heading', () => {
+    expect(renderChatMarkdown(backgroundChat(), NOW)).toBe(BACKGROUND_MARKDOWN)
+    expect(BACKGROUND_MARKDOWN).not.toContain('BROKEN-RESULT')
+    expect(BACKGROUND_MARKDOWN).not.toContain('bgt_')
+    expect(taskResultHeading({ description: ' Look  around ', type: 'explore', status: 'limit' })).toBe('## Background task: Look around (limit)')
+  })
+
+  it('a reply that holds only a result gets no empty heading, and the json export keeps the parts', () => {
+    const chat = backgroundChat()
+    const only: ChatDetail = { ...chat, messages: [{ id: 'msg_asst000000000029', role: 'assistant', parts: [{ type: 'step-start' }, taskResult(4)] }] }
+    expect(renderChatMarkdown(only, NOW).split('\n\n').slice(2)).toEqual(['## Background task: Scan part 4 (completed)', 'Report 4: found **3** files.\n'])
+    const parsed = chatExportSchema.parse(JSON.parse(buildChatExport(chat, 'json', NOW).body))
+    expect(parsed.chat.messages).toEqual(chat.messages)
   })
 })
 

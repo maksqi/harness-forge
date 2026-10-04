@@ -2,7 +2,7 @@ import type { MockApi } from '~/utils/testing/mock-api'
 import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { agentCustomization, commandSummary, customizationEntry, customizationId, customizationList, pluginSummary, projectId } from '~/utils/testing/fixtures'
+import { AGENT_MARKDOWN, agentCustomization, commandSummary, customizationEntry, customizationId, customizationList, pluginSummary, projectId } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { customizationScopeKey, useCustomizationsStore } from './customizations'
 
@@ -132,5 +132,132 @@ describe('customizations store: personal definitions', () => {
     expect(api.customizations.source).toHaveBeenCalledWith({
       query: { projectId: projectId(1), kind: 'agent', name: 'reviewer', source: 'project', path: '.harness/agents/reviewer.md' },
     })
+  })
+})
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+describe('customizations store: ordering (W10.8)', () => {
+  it('never lets an answer older than the last event or a newer fetch win', async () => {
+    const store = useCustomizationsStore()
+    const old = customizationList({ builtAt: 1 })
+    const fresh = customizationList({ builtAt: 2 })
+    const first = deferred<typeof old>()
+    api.customizations.list.mockReturnValueOnce(first.promise)
+    const pendingFirst = store.fetchCatalog(projectId(1))
+    // A customization.changed arrives while the first fetch runs: the scope was just used, so it is refetched.
+    api.customizations.list.mockResolvedValueOnce(fresh)
+    store.applyEvent(createServerEvent('customization.changed', { kind: 'agent', projectId: projectId(1) }, 1))
+    await vi.waitFor(() => expect(store.catalog(projectId(1))?.builtAt).toBe(2))
+    first.resolve(old)
+    // The caller still gets its answer; the cache keeps the newer one.
+    expect((await pendingFirst).builtAt).toBe(1)
+    expect(store.catalog(projectId(1))?.builtAt).toBe(2)
+    expect(api.customizations.list).toHaveBeenCalledTimes(2)
+
+    // A refresh started after a plain fetch wins even when the plain fetch answers last.
+    const plain = deferred<typeof old>()
+    const refreshed = deferred<typeof old>()
+    api.customizations.list.mockReturnValueOnce(plain.promise).mockReturnValueOnce(refreshed.promise)
+    const a = store.fetchCatalog(null)
+    const b = store.fetchCatalog(null, { refresh: true })
+    refreshed.resolve(customizationList({ project: null, builtAt: 4 }))
+    await b
+    plain.resolve(customizationList({ project: null, builtAt: 3 }))
+    await a
+    expect(store.catalog(null)?.builtAt).toBe(4)
+  })
+
+  it('refetches at once only the lists used in the last minute; the others wait for their next use', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const store = useCustomizationsStore()
+    api.customizations.list.mockResolvedValue(customizationList())
+    api.commands.list.mockResolvedValue({ items: [commandSummary()] })
+    await store.fetchCatalog(projectId(1))
+    await store.fetchCommands(projectId(1))
+    vi.setSystemTime(Date.now() + 61_000)
+    await store.fetchCommands(null)
+    store.applyEvent(createServerEvent('plugin.changed', { id: 'core-commands', plugin: pluginSummary() }, 1))
+    await vi.waitFor(() => expect(api.commands.list).toHaveBeenCalledTimes(3))
+    expect(api.commands.list).toHaveBeenLastCalledWith({ query: {} })
+    expect(api.customizations.list).toHaveBeenCalledTimes(1)
+    expect(store.stale[`catalog:${projectId(1)}`]).toBe(true)
+    expect(store.stale[`commands:${projectId(1)}`]).toBe(true)
+    // The next use refetches a stale list even when it is young enough.
+    await store.fetchCatalog(projectId(1), { maxAgeMs: 10 * 60_000 })
+    expect(api.customizations.list).toHaveBeenCalledTimes(2)
+    expect(store.stale[`catalog:${projectId(1)}`]).toBeUndefined()
+    // Event refetches do not count as a use: a second event a minute later leaves the list alone.
+    vi.setSystemTime(Date.now() + 61_000)
+    store.applyEvent(createServerEvent('customization.changed', {}, 2))
+    await Promise.resolve()
+    expect(api.customizations.list).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('customizations store: optimistic toggle and errors (W10.8)', () => {
+  const mine = customizationEntry({ name: 'mine', source: 'user', id: customizationId(1), path: undefined })
+
+  it('shows a turned-off definition at once in every cached scope and keeps it on success', async () => {
+    const store = useCustomizationsStore()
+    api.customizations.list.mockResolvedValueOnce(customizationList({ items: [mine], project: null }))
+    api.customizations.list.mockResolvedValueOnce(customizationList({ items: [mine, customizationEntry()] }))
+    await store.fetchCatalog(null)
+    await store.fetchCatalog(projectId(1))
+    const request = deferred<ReturnType<typeof agentCustomization>>()
+    api.customizations.update.mockReturnValueOnce(request.promise)
+    const done = store.update(customizationId(1), { enabled: false })
+    expect(store.personal('agent')[0]).toMatchObject({ enabled: false, state: 'off' })
+    expect(store.entriesOf(projectId(1), 'agent').find(entry => entry.name === 'mine')).toMatchObject({ enabled: false, state: 'off' })
+    request.resolve({ ...agentCustomization(), enabled: false })
+    expect((await done).enabled).toBe(false)
+    expect(store.personal('agent')[0]?.state).toBe('off')
+    expect(store.stale['catalog:']).toBe(true)
+  })
+
+  it('keeps the optimistic state when a fetch answers while the update runs', async () => {
+    const store = useCustomizationsStore()
+    api.customizations.list.mockResolvedValue(customizationList({ items: [mine], project: null }))
+    await store.fetchCatalog(null)
+    const request = deferred<ReturnType<typeof agentCustomization>>()
+    api.customizations.update.mockReturnValueOnce(request.promise)
+    const done = store.update(customizationId(1), { enabled: false })
+    // The server has not applied the change yet: the refetch still says "on".
+    await store.fetchCatalog(null)
+    expect(store.personal('agent')[0]).toMatchObject({ enabled: false, state: 'off' })
+    request.resolve({ ...agentCustomization(), enabled: false })
+    await done
+    expect(store.personal('agent')[0]).toMatchObject({ enabled: false, state: 'off' })
+  })
+
+  it('rolls the optimistic state back on a failure and throws the HarnessError', async () => {
+    const store = useCustomizationsStore()
+    api.customizations.list.mockResolvedValueOnce(customizationList({ items: [{ ...mine, enabled: false, state: 'off' }], project: null }))
+    await store.fetchCatalog(null)
+    api.customizations.update.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Boom' }))
+    const done = store.update(customizationId(1), { enabled: true })
+    expect(store.personal('agent')[0]).toMatchObject({ enabled: true, state: 'active' })
+    await expect(done).rejects.toMatchObject({ code: 'internal_error', message: 'Boom' })
+    expect(store.personal('agent')[0]).toMatchObject({ enabled: false, state: 'off' })
+  })
+
+  it('keeps 409 exists and 400 diagnostics as typed errors for the editor', async () => {
+    const store = useCustomizationsStore()
+    api.customizations.create.mockRejectedValueOnce({ error: { code: 'conflict', message: 'A personal agent named "reviewer" already exists.', details: { reason: 'exists' } } })
+    const conflict = await store.create({ kind: 'agent', content: AGENT_MARKDOWN }).catch((error: unknown) => error)
+    expect(conflict).toBeInstanceOf(HarnessError)
+    expect(conflict).toMatchObject({ code: 'conflict', details: { reason: 'exists' } })
+    const diagnostics = [{ level: 'error', code: 'missing-field', message: 'Line 1: Add a description.', line: 1 }]
+    api.customizations.update.mockRejectedValueOnce(new HarnessError({ code: 'validation_error', message: 'The definition has errors.', details: { issues: [], diagnostics } }))
+    const invalid = await store.update(customizationId(1), { content: '---\nname: x\n---\n' }).catch((error: unknown) => error)
+    expect(invalid).toMatchObject({ code: 'validation_error', details: { diagnostics } })
   })
 })

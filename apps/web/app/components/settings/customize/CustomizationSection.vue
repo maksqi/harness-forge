@@ -1,13 +1,19 @@
 <script setup lang="ts">
-// One source section of one kind on the Customize page (docs/UI.md 9.12, 10.7): the heading "{title} · {n}" (the
-// scanned folders for a project), the rows, the empty state of a personal or project section, or an Alert for an
-// unavailable project folder. Built-in command rows come in as entries with source 'builtin' (no menu). Props, emits
-// and the root test id are frozen from Gate P10-0b (C33 stub); W10.8 implements the section in P10-A.
+// One source section of one kind on the Customize page (docs/UI.md 2.17, 9.12, 10.7, 14.2): the heading "{title} · {n}"
+// (an h2; the project section also shows the scanned folders of the kind in mono), the rows in a list, the empty state
+// of a personal or project section (`customize-empty`; the personal one ends with the parent's New / Import… buttons
+// through the `empty-actions` slot), or an Alert for an unavailable project folder instead of the rows. Folder-level
+// problems of the project (a linked folder, too many files) come through the `notices` slot under the heading. Built-in
+// command rows come in as entries with source 'builtin' (no menu).
+// Props, emits and the root test id are frozen from Gate P10-0b (C33).
 import type { CustomizationEntry, CustomizationKind, CustomizationSource } from '@harness-forge/shared'
 import type { CustomizationAction } from './customize'
+import { FolderXIcon } from '@lucide/vue'
 import { computed } from 'vue'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { testIds } from '~/utils/testids'
 import CustomizationRow from './CustomizationRow.vue'
+import { PERSONAL_EMPTY, projectEmpty } from './customize'
 
 const props = defineProps<{
   source: CustomizationSource
@@ -25,6 +31,13 @@ const props = defineProps<{
 
 const emit = defineEmits<{ action: [action: CustomizationAction, entry: CustomizationEntry] }>()
 
+defineSlots<{
+  /** Folder-level problems under the heading (project sections). */
+  'notices'?: () => any
+  /** Buttons after the personal empty state (New {kind}, Import…). */
+  'empty-actions'?: () => any
+}>()
+
 const TITLES: Readonly<Record<CustomizationSource, string>> = {
   user: 'Personal',
   project: 'Project',
@@ -32,47 +45,65 @@ const TITLES: Readonly<Record<CustomizationSource, string>> = {
   builtin: 'Built-in',
 }
 
-const PERSONAL_EMPTY: Readonly<Record<CustomizationKind, string>> = {
-  agent: 'No personal agents yet. An agent is a sub-agent with its own instructions and tools that the main agent can start.',
-  command: 'No personal commands yet. A command is a saved prompt you run with /name.',
-  skill: 'No personal skills yet. A skill is a set of instructions the agent loads when a task needs it.',
-}
-
-const PROJECT_EMPTY: Readonly<Record<CustomizationKind, (project: string) => string>> = {
-  agent: project => `No agents in ${project}. Add Markdown files to .harness/agents/ (or .claude/agents/) in the project folder.`,
-  command: project => `No commands in ${project}. Add Markdown files to .harness/commands/ (or .claude/commands/) in the project folder.`,
-  skill: project => `No skills in ${project}. Add a folder with a SKILL.md to .harness/skills/ (or .claude/skills/) in the project folder.`,
-}
-
 const title = computed(() => (props.source === 'project' && props.projectName ? `In ${props.projectName}` : TITLES[props.source]))
+const count = computed(() => (props.issue ? 0 : props.entries.length))
 const emptyText = computed(() => {
   if (props.entries.length > 0 || props.issue)
     return null
   if (props.source === 'user')
     return PERSONAL_EMPTY[props.kind]
   if (props.source === 'project')
-    return PROJECT_EMPTY[props.kind](props.projectName ?? 'this project')
+    return projectEmpty(props.kind, props.projectName ?? 'this project')
   return null
 })
+
+function rowKey(entry: CustomizationEntry): string {
+  return `${entry.source}:${entry.id ?? entry.path ?? entry.pluginId ?? ''}:${entry.name}`
+}
 </script>
 
 <template>
-  <section :data-testid="testIds.customizeSection" :data-source="source" :data-count="entries.length" class="flex flex-col gap-1 py-3">
-    <h3 class="text-sm font-medium">
-      {{ title }} · {{ entries.length }}
-    </h3>
-    <p v-if="issue" role="alert" class="text-sm text-muted-foreground">
-      {{ issue }}
-    </p>
-    <p v-else-if="emptyText" :data-testid="testIds.customizeEmpty" :data-kind="kind" :data-source="source" class="text-sm text-muted-foreground">
-      {{ emptyText }}
-    </p>
-    <CustomizationRow
-      v-for="entry in entries"
-      :key="`${entry.source}:${entry.id ?? entry.path ?? entry.pluginId ?? ''}:${entry.name}`"
-      :entry="entry"
-      :busy="entry.id !== undefined && (busyIds ?? []).includes(entry.id)"
-      @action="action => emit('action', action, entry)"
-    />
+  <section :data-testid="testIds.customizeSection" :data-source="source" :data-count="count" class="flex flex-col gap-2 py-3">
+    <div class="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5">
+      <h2 class="text-sm font-medium">
+        {{ title }} · {{ count }}
+      </h2>
+      <p v-if="source === 'project' && folders && folders.length > 0" class="min-w-0 font-mono text-xs break-all text-muted-foreground">
+        {{ folders.join(' · ') }}
+      </p>
+    </div>
+    <slot name="notices" />
+
+    <Alert v-if="issue" role="alert" class="border-warning/40 bg-warning/5 dark:bg-warning/10 *:[svg]:text-warning">
+      <FolderXIcon aria-hidden="true" />
+      <AlertDescription class="text-foreground">
+        {{ issue }}
+      </AlertDescription>
+    </Alert>
+
+    <div
+      v-else-if="emptyText"
+      :data-testid="testIds.customizeEmpty"
+      :data-kind="kind"
+      :data-source="source"
+      class="flex flex-col items-start gap-3 rounded-lg border border-dashed p-4"
+    >
+      <p class="text-sm text-muted-foreground">
+        {{ emptyText }}
+      </p>
+      <div v-if="source === 'user' && $slots['empty-actions']" class="flex flex-wrap gap-2">
+        <slot name="empty-actions" />
+      </div>
+    </div>
+
+    <ul v-else-if="entries.length > 0" class="flex flex-col divide-y rounded-lg border">
+      <CustomizationRow
+        v-for="entry in entries"
+        :key="rowKey(entry)"
+        :entry="entry"
+        :busy="entry.id !== undefined && (busyIds ?? []).includes(entry.id)"
+        @action="action => emit('action', action, entry)"
+      />
+    </ul>
   </section>
 </template>

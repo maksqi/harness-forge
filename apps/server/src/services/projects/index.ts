@@ -51,6 +51,8 @@ export const PROJECT_EXISTS_MESSAGE = 'A project for this folder already exists.
 export const FOLDER_EXISTS_MESSAGE = 'A folder with this name already exists.'
 export const PROJECTS_MAX_MESSAGE = `A server can have up to ${LIMITS.projectsMax} projects.`
 export const PROJECT_RUNNING_MESSAGE = 'A chat of this project is running. Stop it first, then try again.'
+/** Phase 10 (ADR-046): a background agent of a chat of the project runs (`409 run-active`, like a run). */
+export const PROJECT_TASKS_MESSAGE = 'A background agent of a chat of this project is running. Stop it first, then try again.'
 export const PROJECT_GONE_MESSAGE = 'The project of this chat no longer exists.'
 
 /** The `workspace-unavailable` notice text of `openWorkspace` ("The project folder … is not available: …"). */
@@ -278,6 +280,10 @@ export function createProjectService(deps: AppDeps): ProjectService {
     const running = members.find(chat => deps.runs.hasRun(chat.id))
     if (running !== undefined)
       throw conflict(PROJECT_RUNNING_MESSAGE, 'run-active', { chatId: running.id })
+    // Phase 10: a running background task writes into the project folder (and journals under its chat).
+    const tasked = members.find(chat => deps.runs.hasTasks(chat.id))
+    if (tasked !== undefined)
+      throw conflict(PROJECT_TASKS_MESSAGE, 'run-active', { chatId: tasked.id })
     // One transaction: the chats leave the project and the row goes; the folder is never touched.
     const [, deleted] = await guardDb(async () => db.batch([
       db.update(chats).set({ projectId: null }).where(eq(chats.projectId, id)),

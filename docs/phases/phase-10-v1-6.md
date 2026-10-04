@@ -356,7 +356,33 @@ reconciled docs (W10.14) follow these, not the task text further down.
     C33's globs).
   - Gate: 9999 tests; seam probe 16/16 (`.tmp/gates/P10-0b/seam-probe.mjs`); v1.5 → v1.6 upgrade probe 42/42
     (`.tmp/gates/P10-0b/upgrade-probe.mjs` on a copy of `.tmp/upgrade-v15` with `projects.path` repointed).
-- **P10-A (W10.1 – W10.12)**: (none recorded yet)
+- **P10-A (W10.1 – W10.12)** (full digest: `.tmp/waves/P10-A-notes.md`):
+  - W10.1: an invalid-YAML file the C29 line reader can read is listed **active** with an `invalid-frontmatter`
+    warning (the seed's `broken.md`); the catalog also lists plugin commands; cache ≤ 50 project catalogs, scans stop at
+    2000 entries per folder / 100 command subfolders, discovery reads 9 KiB first; `workspace.changed` drops a catalog
+    only when the six definition folders are touched; registry changes and restores emit `customization.changed {}`;
+    the 200-per-kind cap answers 409 `exists`; linked files are folder-level `link` diagnostics; secret-looking names
+    are never read. Each run opens the project twice (its workspace + its catalog).
+  - W10.2: the request's model is resolved **before** the command's override (keeps the v1.5 errors and image checks);
+    "unavailable" = a resolution error or a non-chat catalog kind; plugin / harness invocations carry no `source`.
+  - W10.3: `escalate` (`tools: [shell, write_file]`) in `edits` IS offered `shell` by the ADR-043 ceiling (commands
+    outside the rules are denied); the instruction blocks are "Agent types (the type of a task call):" and "Skills
+    (when a request matches one, …):" with `- name: description` lines. **CCR accepted**: `taskAgent.pluginId?`.
+  - W10.4: the manager subscribes to events only while a task runs; key rotation stops tasks but keeps their results for
+    the next run; a normal shutdown ends a running task "The background task was stopped." (a crash leaves "The server
+    restarted before the task finished."); row writes retry ≤ 8 times on `TRANSACTION_ACTIVE` (single-connection
+    in-memory test database only).
+  - W10.5: plan files also need a bound run scope; the plan folder is checked again (`isSafePlanDirectory`, any link
+    refused); suffixes up to `-99`.
+  - W10.6: `background_tasks.output` is scanned for file ids (coordinator decision); `customizations.json` is written
+    only with ≥ 1 definition; Remember project targets need a project chat (400 on `['chatId']`).
+  - W10.7: `agent-pack` is a code plugin (2 agents / skills from the manifest, 2 from `index.mjs`); a manifest command
+    named `remember` fails manifest validation.
+  - W10.8 – W10.12: `/remember` is listed in the App group; one announcement per finished background agent per tab
+    (dock first); "Same as the chat" (`inherit`) is a checkbox under the model select; the import result panel shows
+    the restored definitions (coordinator fix).
+  - Gate: 10561 tests; probes 173/173 (`.tmp/gates/P10-A/probe.mjs`; "spec differs": invalid YAML stays active,
+    `escalate` gets `shell` in `edits` but no command runs); P9-A 71/71, P8-A 47/47; e2e 128.
 - **P10-B (W10.13, W10.14) and the final gate**: (none recorded yet)
 
 ## Rules for every Phase 10 agent

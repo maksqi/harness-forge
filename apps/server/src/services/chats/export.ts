@@ -8,10 +8,16 @@
 // steers (`data-steer`, the shared `splitSteers`): each steer becomes a "## User (during the run)" section between
 // the parts of the reply before and after it. Invalid marker or steer data is left out. JSON exports carry the parts as
 // stored (the import validates them with `harnessDataSchemas`).
-import type { ChatDetail, ChatExport, ChatExportFormat, CompactionData, HarnessUIMessage } from '@harness-forge/shared'
+//
+// Phase 10 (ADR-046, W10.6): a background task result (`data-task-result`) reads "## Background task: <description>
+// (<status>)" followed by its report (else "Error: <error>", else "_(no report)_"), at its place: a reply is split
+// there like at a steer (the parts after it get the reply's heading again), and the user-role carrier message of a turn
+// the server started (only results) shows its results without a "## User" heading. Invalid result data is left out.
+// JSON exports keep the parts (background task rows are never exported).
+import type { ChatDetail, ChatExport, ChatExportFormat, CompactionData, HarnessUIMessage, TaskOutput } from '@harness-forge/shared'
 import type { ChatExportFile } from './types.ts'
 import { Buffer } from 'node:buffer'
-import { COMPACTION_PART_TYPE, compactionDataSchema, splitSteers } from '@harness-forge/shared'
+import { COMPACTION_PART_TYPE, compactionDataSchema, splitSteers, TASK_RESULT_PART_TYPE, taskResultDataSchema } from '@harness-forge/shared'
 
 /** Tool outputs longer than this (UTF-8 bytes) are truncated in Markdown exports. */
 export const EXPORT_TOOL_OUTPUT_BYTES = 4096
@@ -147,6 +153,23 @@ function partBlocks(part: HarnessUIMessage['parts'][number]): string[] {
   }
 }
 
+/** The heading of a background task result (ADR-046): its description (its type when empty) and status, on one line. */
+export function taskResultHeading(output: Pick<TaskOutput, 'description' | 'type' | 'status'>): string {
+  const description = output.description.replace(/\s+/g, ' ').trim()
+  return `## Background task: ${description === '' ? output.type : description} (${output.status})`
+}
+
+/** A background task result: its heading and its report (else the error, else a placeholder); nothing for invalid data. */
+function taskResultBlocks(part: Record<string, unknown>): string[] {
+  const parsed = taskResultDataSchema.safeParse(part.data)
+  if (!parsed.success)
+    return []
+  const { output } = parsed.data
+  const report = output.report.trim()
+  const error = output.error?.trim() ?? ''
+  return [taskResultHeading(output), report !== '' ? report : error !== '' ? `Error: ${error}` : '_(no report)_']
+}
+
 /** The heading of a steer: a message the user queued while the agent worked (ADR-042). */
 export const STEER_HEADING = '## User (during the run)'
 
@@ -159,19 +182,48 @@ function messageHeading(message: HarnessUIMessage, chatModelRef: string | null, 
   return modelRef ? `## Assistant (${modelRef})` : '## Assistant'
 }
 
-/** Markdown export: title, an export line (date, model), then one section per message (replies split at steers). */
+/**
+ * The sections of one message (or one piece of a reply split at its steers): its heading and its blocks; with
+ * background task results, each result is a section of its own and the parts around it keep the message's heading
+ * (a run of parts that renders nothing gets no heading).
+ */
+function messageSections(piece: HarnessUIMessage, chatModelRef: string | null, steer: boolean): string[] {
+  if (!piece.parts.some(part => part.type === TASK_RESULT_PART_TYPE))
+    return [messageHeading(piece, chatModelRef, steer), ...piece.parts.flatMap(partBlocks)]
+  const sections: string[] = []
+  let blocks: string[] = []
+  const flush = (): void => {
+    if (blocks.length > 0)
+      sections.push(messageHeading(piece, chatModelRef, steer), ...blocks)
+    blocks = []
+  }
+  for (const part of piece.parts) {
+    if (part.type !== TASK_RESULT_PART_TYPE) {
+      blocks.push(...partBlocks(part))
+      continue
+    }
+    const result = taskResultBlocks(part as unknown as Record<string, unknown>)
+    if (result.length === 0)
+      continue
+    flush()
+    sections.push(...result)
+  }
+  flush()
+  return sections
+}
+
+/**
+ * Markdown export: title, an export line (date, model), then one section per message (replies split at steers and at
+ * background task results).
+ */
 export function renderChatMarkdown(chat: ChatDetail, at: number): string {
   const title = chat.title ?? UNTITLED
   const exportLine = `Exported from harness-forge on ${isoDate(at)}${chat.modelRef ? ` · Model: ${chat.modelRef}` : ''}`
   const sections = [`# ${title}`, exportLine]
   for (const message of chat.messages) {
     // Only an assistant message is split; every user message that comes out of it is a steer.
-    const pieces = splitSteers([message])
-    for (const piece of pieces) {
-      sections.push(messageHeading(piece, chat.modelRef, piece.role === 'user' && message.role === 'assistant'))
-      for (const part of piece.parts)
-        sections.push(...partBlocks(part))
-    }
+    for (const piece of splitSteers([message]))
+      sections.push(...messageSections(piece, chat.modelRef, piece.role === 'user' && message.role === 'assistant'))
   }
   return `${sections.join('\n\n')}\n`
 }

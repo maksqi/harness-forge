@@ -1,32 +1,23 @@
-// Agent types of plugins (Phase 10, plugin API 1.4.0, ADR-045): `Registry.agents`. C30 lands the registry empty
-// (nothing is registered, `register` answers `not_implemented`, `onChange` is subscribable); W10.7 implements the
-// registration (manifest `contributes.agents`, `ctx.agents.register`) and its validation behind the same interface.
-import type { Disposable } from '@harness-forge/plugin-sdk'
-import type { AgentRegistry, RegistryChange } from './types.ts'
-import { notImplementedError } from '../not-implemented.ts'
+// Agent types of plugins (Phase 10, plugin API 1.4.0, ADR-045; PLUGINS.md 6 "Declarative agents" and 9 "Agents and
+// skills"): `Registry.agents`. Owner: W10.7 (C30 landed the empty registry).
+//
+// Registered through the manifest (`contributes.agents`, `registerDeclaredContributions`) and `ctx.agents.register`;
+// validated by `validateAgentDefinition` (the name pattern, the reserved builtin names `explore` / `general` and the
+// alias `general-purpose`, the description, `instructions` <= 64 KiB, tool names, the model ref or `inherit`). A name
+// another plugin registered throws `conflict` (first wins). The customization catalog lists them as `source: 'plugin'`
+// entries (ADR-044) and drops its caches on their `agent` changes.
+import type { AgentDefinition } from '@harness-forge/plugin-sdk'
+import type { DefinitionRegistry, DefinitionRegistryCore } from './definitions.ts'
+import type { AgentRegistry } from './types.ts'
+import { createDefinitionRegistry } from './definitions.ts'
+import { validateAgentDefinition } from './validate.ts'
 
-/** What a definition registry needs from the registry core. */
-export interface DefinitionRegistryCore {
-  /** The registry's change listeners (`Registry.onChange`). */
-  readonly onChange: (listener: (change: RegistryChange) => void) => Disposable
-}
+export type { DefinitionRegistryCore } from './definitions.ts'
+export { kindListener } from './definitions.ts'
 
-/** `listener` for the changes of one kind only. */
-export function kindListener(kind: RegistryChange['kind'], listener: (change: RegistryChange) => void): (change: RegistryChange) => void {
-  return (change) => {
-    if (change.kind === kind)
-      listener(change)
-  }
-}
+/** `AgentRegistry` plus the host-only `removeOwner`. */
+export type PluginAgentRegistry = AgentRegistry & Pick<DefinitionRegistry<AgentDefinition>, 'removeOwner'>
 
-export function createAgentRegistry(core: DefinitionRegistryCore): AgentRegistry {
-  return {
-    register: () => {
-      throw notImplementedError('Plugin agents')
-    },
-    get: () => undefined,
-    list: () => [],
-    owner: () => undefined,
-    onChange: listener => core.onChange(kindListener('agent', listener)),
-  }
+export function createAgentRegistry(core: DefinitionRegistryCore): PluginAgentRegistry {
+  return createDefinitionRegistry<AgentDefinition>(core, { kind: 'agent', label: 'agent', validate: validateAgentDefinition })
 }

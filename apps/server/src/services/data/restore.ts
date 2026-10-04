@@ -15,8 +15,16 @@
 //   checked again (`FilesService.importFile`, deduplicated by content), and the `/api/files/<id>` URLs of its `file` /
 //   `reasoning-file` parts are rewritten to the stored ids. An attachment that is not in the upload (or unusable) but
 //   is stored here under the same id is reused; otherwise it counts as missing and its URL is left as it was;
-// - with `restoreSettings`, the known keys of `settings.json` are applied, each validated on its own.
+// - with `restoreSettings`, the known keys of `settings.json` are applied, each validated on its own;
+// - Phase 10 (ADR-044): with `restoreCustomizations`, the items of `customizations.json` (at most
+//   `CUSTOMIZATION_ITEMS_MAX`, each checked against `backupCustomizationSchema` here) go to
+//   `CustomizationService.restoreBackup`, which parses every content again with the shared `parseDefinition` like a
+//   create and keeps an existing definition of the same kind and name (`skipped`); invalid items and items beyond the
+//   per-kind limit are `failed` with a warning that names the kind and name, never the content. A definition can only
+//   narrow a run (ADR-045), so nothing in the file grants a tool, a mode or a shell rule. Background tasks are never
+//   part of a backup (a delivered result is a `data-task-result` part of its message and comes back with the chat).
 import type {
+  BackupCustomization,
   BackupFileEntry,
   BackupManifest,
   ChatExportAny,
@@ -29,11 +37,14 @@ import type {
 } from '@harness-forge/shared'
 import type { OpenedZip, ZipEntry } from '../../plugins/install/zip.ts'
 import type { AppDeps } from '../../types.ts'
+import type { CustomizationRestoreResult } from '../customizations/types.ts'
 import type { DataLimits } from './limits.ts'
 import {
+  backupCustomizationSchema,
   backupFileIndexSchema,
   backupManifestSchema,
   chatExportAnySchema,
+  CUSTOMIZATION_KINDS,
   isHarnessError,
   LIMITS,
   SETTINGS_KEYS,
@@ -51,6 +62,11 @@ import { referencedFileIds, rewriteFileUrls } from './parts.ts'
 const MANIFEST_MAX_BYTES = 1024 * 1024
 const SETTINGS_MAX_BYTES = 1024 * 1024
 const INDEX_MAX_BYTES = LIMITS.backupChatEntryBytes
+/** `customizations.json`: at most 600 definitions of 64 KiB each, JSON-escaped (checked before it is inflated). */
+const CUSTOMIZATIONS_MAX_BYTES = LIMITS.backupChatEntryBytes
+/** Items of `customizations.json` read at most (`backupCustomizationsSchema`: every kind's limit). */
+export const CUSTOMIZATION_ITEMS_MAX = CUSTOMIZATION_KINDS.length * LIMITS.customizationsPerKindMax
+const CUSTOMIZATIONS_NAME = 'customizations.json'
 /** Bytes read to decide between a zip and a chat JSON. */
 const SNIFF_BYTES = 1024
 const WARNINGS_MAX = 100
@@ -156,6 +172,8 @@ class ImportRun {
   /** Missing attachments that are not in the upload at all (reported in one warning). */
   #absent = 0
   settingsRestored = false
+  /** Phase 10: what the restore of `customizations.json` did; undefined when it did not run. */
+  customizations: DataImportResult['customizations'] = undefined
 
   constructor(deps: AppDeps, policy: DataConflictPolicy, source: AttachmentSource) {
     this.#deps = deps
@@ -321,6 +339,7 @@ class ImportRun {
       kind,
       counts: { ...this.#counts },
       settingsRestored: this.settingsRestored,
+      ...(this.customizations === undefined ? {} : { customizations: { ...this.customizations } }),
       items: [...this.#items],
       warnings,
     }
@@ -334,6 +353,8 @@ interface BackupLayout {
   manifest: ZipEntry
   settings: ZipEntry | undefined
   index: ZipEntry | undefined
+  /** Phase 10: `customizations.json`. */
+  customizations: ZipEntry | undefined
   /** `chats/<name>.json` entries, sorted by name. */
   chats: Array<{ entry: ZipEntry, name: string }>
   /** `files/<sha256>` entries by sha256. */
@@ -359,7 +380,7 @@ function backupRoot(entries: readonly ZipEntry[]): string {
 function backupLayout(entries: readonly ZipEntry[]): BackupLayout {
   const prefix = backupRoot(entries)
   let manifest: ZipEntry | undefined
-  const layout: Omit<BackupLayout, 'manifest'> = { settings: undefined, index: undefined, chats: [], blobs: new Map(), unknown: [] }
+  const layout: Omit<BackupLayout, 'manifest'> = { settings: undefined, index: undefined, customizations: undefined, chats: [], blobs: new Map(), unknown: [] }
   for (const entry of entries) {
     if (entry.type !== 'file')
       continue
@@ -370,6 +391,8 @@ function backupLayout(entries: readonly ZipEntry[]): BackupLayout {
       layout.settings = entry
     else if (name === 'files/index.json')
       layout.index = entry
+    else if (name === CUSTOMIZATIONS_NAME)
+      layout.customizations = entry
     else if (CHAT_ENTRY.test(name))
       layout.chats.push({ entry, name })
     else if (name.startsWith(BLOB_PREFIX) && SHA256_HEX_PATTERN.test(name.slice(BLOB_PREFIX.length)))
@@ -481,6 +504,73 @@ async function restoreSettings(deps: AppDeps, run: ImportRun, zip: OpenedZip, en
   run.settingsRestored = true
 }
 
+/** `The personal agent "name"` of a `customizations.json` item, or `Item <n>` when it has no usable kind and name. */
+function describeItem(raw: unknown, index: number): string {
+  if (isRecord(raw) && typeof raw.name === 'string' && (CUSTOMIZATION_KINDS as readonly unknown[]).includes(raw.kind))
+    return `The personal ${String(raw.kind)} ${quote(raw.name)}`
+  return `Item ${index + 1}`
+}
+
+/** `restoreCustomizations`: the items of `customizations.json` through `CustomizationService.restoreBackup`. */
+async function restoreCustomizations(deps: AppDeps, run: ImportRun, zip: OpenedZip, entry: ZipEntry | undefined, manifest: BackupManifest): Promise<void> {
+  const none = 'no personal agents, commands or skills were restored'
+  if (entry === undefined) {
+    if (manifest.includes.customizations !== true)
+      run.warn(`The backup has no personal agents, commands or skills (customizations.json), so ${none}.`)
+    else if ((manifest.counts.customizations ?? 0) > 0)
+      run.warn(`The backup lists personal agents, commands or skills, but customizations.json is missing, so ${none}.`)
+    return
+  }
+  let value: unknown
+  try {
+    value = await readJsonEntry(zip, entry, CUSTOMIZATIONS_MAX_BYTES, CUSTOMIZATIONS_NAME)
+  }
+  catch (error) {
+    if (!isHarnessError(error))
+      throw error
+    run.warn(`No personal agents, commands or skills were restored: ${error.message}`)
+    return
+  }
+  const list = isRecord(value) && Array.isArray(value.items) ? value.items as unknown[] : null
+  if (list === null) {
+    run.warn(`No personal agents, commands or skills were restored: ${CUSTOMIZATIONS_NAME} has no "items" list.`)
+    return
+  }
+  const items: BackupCustomization[] = []
+  let failed = 0
+  for (const [index, raw] of list.slice(0, CUSTOMIZATION_ITEMS_MAX).entries()) {
+    const parsed = backupCustomizationSchema.safeParse(raw)
+    if (parsed.success) {
+      items.push(parsed.data)
+      continue
+    }
+    failed += 1
+    run.warn(`${describeItem(raw, index)} in ${CUSTOMIZATIONS_NAME} is invalid and was not restored.`)
+  }
+  if (list.length > CUSTOMIZATION_ITEMS_MAX) {
+    failed += list.length - CUSTOMIZATION_ITEMS_MAX
+    run.warn(`${CUSTOMIZATIONS_NAME} holds ${list.length} items; only the first ${CUSTOMIZATION_ITEMS_MAX} were read.`)
+  }
+  let restored: CustomizationRestoreResult
+  try {
+    restored = await deps.customizations.restoreBackup(items)
+  }
+  catch (error) {
+    // The chats are imported already: report it instead of failing the whole import.
+    if (isHarnessError(error)) {
+      run.warn(`No personal agents, commands or skills were restored: ${error.message}`)
+    }
+    else {
+      deps.logger.warn('data import: the personal definitions could not be restored', { err: error })
+      run.warn('No personal agents, commands or skills were restored because of a server error.')
+    }
+    return
+  }
+  for (const warning of restored.warnings)
+    run.warn(warning)
+  run.customizations = { imported: restored.imported, skipped: restored.skipped, failed: restored.failed + failed }
+}
+
 async function importBackup(deps: AppDeps, upload: Blob, form: DataImportForm, limits: DataLimits): Promise<DataImportResult> {
   // The collector's expanded-size check speaks of plugins: the total is checked below with a backup message instead.
   const zip = await openZip(upload, new EntryCollector({ entries: limits.backupEntries, expandedBytes: Number.MAX_SAFE_INTEGER }, ['file']))
@@ -524,6 +614,8 @@ async function importBackup(deps: AppDeps, upload: Blob, form: DataImportForm, l
   }
   if (form.restoreSettings === true)
     await restoreSettings(deps, run, zip, layout.settings)
+  if (form.restoreCustomizations === true)
+    await restoreCustomizations(deps, run, zip, layout.customizations, manifest)
   return run.result('backup', !manifest.includes.files)
 }
 
@@ -560,11 +652,18 @@ export async function importUpload(deps: AppDeps, upload: Blob, form: DataImport
     await run.chat(exported, true)
     if (form.restoreSettings === true)
       run.warn('Settings are restored only from a backup zip.')
+    if (form.restoreCustomizations === true)
+      run.warn('Personal agents, commands and skills are restored only from a backup zip.')
     result = run.result('chat')
   }
   else {
     throw invalidUpload('Upload a backup zip or a chat JSON export.')
   }
-  deps.logger.info('data import finished', { kind: result.kind, ...result.counts, warnings: result.warnings.length })
+  deps.logger.info('data import finished', {
+    kind: result.kind,
+    ...result.counts,
+    ...(result.customizations === undefined ? {} : { customizations: result.customizations }),
+    warnings: result.warnings.length,
+  })
   return result
 }

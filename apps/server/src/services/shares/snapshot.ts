@@ -17,12 +17,16 @@
 // Compaction markers (`data-compaction`, summaries are never shared) and activity parts (`data-activity`) are dropped
 // like every other `data-*` part. `shareableMessageCount` counts the messages after the split, like the snapshot.
 //
+// Phase 10 (ADR-046, W10.6; no `sharePartSchema` change): background task results (`data-task-result`) are dropped like
+// every other `data-*` part (a reply is not split at them), and the user-role carrier message of a turn the server
+// started (only results, besides parts that are no content) is left out of the snapshot and of the count.
+//
 // `renderShareMessages` applies the options when the view is served: reasoning parts, tool inputs / outputs / error
 // texts and file parts are left out when disabled, and app file URLs become `/api/share/<token>/files/<id>` (only for
 // ids of the share's `file_ids`).
 import type { HarnessUIMessage, ShareMessage, ShareOptions, SharePart, ShareSnapshot, ShareToolStatus } from '@harness-forge/shared'
 import { Buffer } from 'node:buffer'
-import { COMMAND_NAME_PATTERN, isContentPart, LIMITS, safeParseModelRef, splitSteers, TOOL_NAME_PATTERN } from '@harness-forge/shared'
+import { COMMAND_NAME_PATTERN, isContentPart, LIMITS, safeParseModelRef, splitSteers, TASK_RESULT_PART_TYPE, TOOL_NAME_PATTERN } from '@harness-forge/shared'
 
 /** The file id of an app file URL (`/api/files/<id>`), else null: `FilesService.idFromUrl`. */
 export type FileIdOf = (url: string) => string | null
@@ -263,22 +267,34 @@ export interface SanitizedSnapshot {
   fileIds: string[]
 }
 
+/** The parts of a message that have a string `type`. */
+function typedParts(message: HarnessUIMessage): { type: string }[] {
+  return (Array.isArray(message.parts) ? message.parts as unknown[] : [])
+    .filter((part): part is { type: string } => typeof part === 'object' && part !== null && typeof (part as { type?: unknown }).type === 'string')
+}
+
+/** True when `parts` hold a part of `type` and every other part is no content (`isContentPart`). */
+function holdsOnly(parts: readonly { type: string }[], type: string): boolean {
+  return parts.some(part => part.type === type) && parts.every(part => !isContentPart(part) || part.type === type)
+}
+
 function isShareable(message: HarnessUIMessage): boolean {
-  if (message.role === 'user')
-    return message.metadata?.command?.type !== 'compact'
+  if (message.role === 'user') {
+    // The carrier of a turn the server started holds only background task results (dropped from shares).
+    return message.metadata?.command?.type !== 'compact' && !holdsOnly(typedParts(message), TASK_RESULT_PART_TYPE)
+  }
   if (message.role !== 'assistant')
     return false
   // A `/compact` reply holds only its marker (dropped from shares), so the whole exchange is left out.
-  const parts = (Array.isArray(message.parts) ? message.parts as unknown[] : [])
-    .filter((part): part is { type: string } => typeof part === 'object' && part !== null && typeof (part as { type?: unknown }).type === 'string')
-  return !(parts.some(part => part.type === 'data-compaction') && parts.every(part => !isContentPart(part) || part.type === 'data-compaction'))
+  return !holdsOnly(typedParts(message), 'data-compaction')
 }
 
 /**
  * The snapshot of an active path (`ChatDetail.messages`). `title` is the chat title at snapshot time (the page shows
  * the share's custom title instead when it has one). Only `user` and `assistant` messages are kept (a `/compact`
- * exchange is left out), each assistant message split at its steers (`splitSteers`), so `snapshot.messages.length` is the share's `message_count`. A tool
- * waiting for an approval counts as denied when a later share message exists (the steer after it included).
+ * exchange and the carrier of background task results are left out), each assistant message split at its steers
+ * (`splitSteers`), so `snapshot.messages.length` is the share's `message_count`. A tool waiting for an approval counts
+ * as denied when a later share message exists (the steer after it included).
  */
 export function sanitizeSnapshot(title: string | null, path: readonly HarnessUIMessage[], fileIdOf: FileIdOf): SanitizedSnapshot {
   const fileIds = new Set<string>()

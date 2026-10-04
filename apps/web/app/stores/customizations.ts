@@ -3,11 +3,12 @@
 // entries and the personal definitions. It is the only reader of the customization routes: the Customize page reads
 // everything, the composer its command lists (`fetchCommands` / `slashCommands`), the plugin detail page the global
 // catalog (`catalog(null)`).
-// Signature frozen from Gate P10-0b (C33); implementation W10.8. P10-0b ships it working but plain: per-scope caches
-// with `loadedAt` and a stale flag, single-flight fetches per scope, per-scope versions (an answer of a fetch that an
-// event or a mutation overtook is returned to its caller but never cached), and every mutation marks every scope stale.
-// W10.8 adds the optimistic `{ enabled }` update with its rollback, the refetch of recently used scopes on events and
-// the error mapping of the editor.
+// Signature frozen from Gate P10-0b (C33); implementation W10.8: per-scope caches with `loadedAt` and a stale flag,
+// single-flight fetches per scope, per-list versions (an answer of a fetch that a newer fetch, an event or a mutation
+// overtook is returned to its caller but never cached), every mutation marks every scope stale, `update(id,
+// { enabled })` alone is optimistic (rolled back on a failure), and an event refetches the lists used in the last
+// minute (the others are refetched on their next use). Errors are thrown as `HarnessError` (409 `exists`, 400 with the
+// diagnostics in `details`); the editor maps them to its fields.
 import type {
   CommandSummary,
   Customization,
@@ -37,6 +38,30 @@ export interface FetchCommandsOptions {
 
 const NO_ENTRIES: readonly CustomizationEntry[] = Object.freeze([])
 const NO_COMMANDS: readonly CommandSummary[] = Object.freeze([])
+
+/** An event refetches at once the lists used (fetched or read through a fetch call) this recently. */
+export const CUSTOMIZATIONS_RECENT_MS = 60_000
+
+/**
+ * `list` with the personal entries of `overrides` turned on or off (state 'off', or 'active' for an entry that was off);
+ * the same object when none of them is in it.
+ */
+function withEnabled(list: CustomizationList, overrides: Readonly<Record<string, boolean>>): CustomizationList {
+  const touched = (entry: CustomizationEntry): boolean => entry.source === 'user' && entry.id !== undefined && Object.hasOwn(overrides, entry.id)
+  if (!list.items.some(touched))
+    return list
+  return {
+    ...list,
+    items: list.items.map((entry): CustomizationEntry => {
+      if (!touched(entry))
+        return entry
+      const enabled = overrides[entry.id!]!
+      if (entry.enabled === enabled)
+        return entry
+      return { ...entry, enabled, state: enabled ? (entry.state === 'off' ? 'active' : entry.state) : 'off' }
+    }),
+  }
+}
 
 /** The cache key of a scope: the project id, '' for none. */
 export function customizationScopeKey(projectId: string | null): string {
@@ -70,18 +95,37 @@ export const useCustomizationsStore = defineStore('customizations', () => {
   const versions = new Map<string, number>()
   /** Per list key (+ ':refresh'): the fetch in flight. */
   const pending = new Map<string, Promise<unknown>>()
+  /** Per list key: when a caller last asked for it (`fetchCatalog` / `fetchCommands`, cached answers included). */
+  const usedAt = new Map<string, number>()
+  /**
+   * Personal definitions with a `{ enabled }` update in flight and the value they get (not exposed): the getters show
+   * every cached catalog with it, so an answer that arrives meanwhile cannot undo the optimistic state, and a failure
+   * only has to drop the entry.
+   */
+  const pendingEnabled = ref<Record<string, boolean>>({})
 
   // ---------- getters ----------
 
+  /** The cached catalogs as the getters show them (the pending `{ enabled }` updates applied). */
+  const shown = computed<Record<string, CustomizationList>>(() => {
+    const overrides = pendingEnabled.value
+    if (Object.keys(overrides).length === 0)
+      return catalogs.value
+    const out: Record<string, CustomizationList> = {}
+    for (const [scope, list] of Object.entries(catalogs.value))
+      out[scope] = withEnabled(list, overrides)
+    return out
+  })
+
   /** `catalog(projectId)`: the cached catalog of the scope, or null before its first fetch. */
   const catalog = computed(() => (projectId: string | null): CustomizationList | null =>
-    catalogs.value[customizationScopeKey(projectId)] ?? null)
+    shown.value[customizationScopeKey(projectId)] ?? null)
   /** `personal(kind)`: the personal (`source: 'user'`) entries of a kind in the global catalog. */
   const personal = computed(() => (kind: CustomizationKind): readonly CustomizationEntry[] =>
-    catalogs.value['']?.items.filter(entry => entry.kind === kind && entry.source === 'user') ?? NO_ENTRIES)
+    shown.value['']?.items.filter(entry => entry.kind === kind && entry.source === 'user') ?? NO_ENTRIES)
   /** `entriesOf(projectId, kind)`: every entry of that kind in the scope (with its project-relative state). */
   const entriesOf = computed(() => (projectId: string | null, kind: CustomizationKind): readonly CustomizationEntry[] =>
-    catalogs.value[customizationScopeKey(projectId)]?.items.filter(entry => entry.kind === kind) ?? NO_ENTRIES)
+    shown.value[customizationScopeKey(projectId)]?.items.filter(entry => entry.kind === kind) ?? NO_ENTRIES)
   /** `slashCommands(projectId)`: the slash commands of the scope; [] until loaded. */
   const slashCommands = computed(() => (projectId: string | null): readonly CommandSummary[] =>
     commands.value[customizationScopeKey(projectId)] ?? NO_COMMANDS)
@@ -145,6 +189,12 @@ export const useCustomizationsStore = defineStore('customizations', () => {
    * younger than `maxAgeMs` and not stale is returned as is. Throws `HarnessError` (404 for an unknown project).
    */
   function fetchCatalog(projectId: string | null, opts: FetchCatalogOptions = {}): Promise<CustomizationList> {
+    usedAt.set(catalogKey(customizationScopeKey(projectId)), Date.now())
+    return loadCatalog(projectId, opts)
+  }
+
+  /** `fetchCatalog` without counting as a use (event and reconnect refetches). */
+  function loadCatalog(projectId: string | null, opts: FetchCatalogOptions = {}): Promise<CustomizationList> {
     const scope = customizationScopeKey(projectId)
     const key = catalogKey(scope)
     const cached = catalogs.value[scope]
@@ -170,6 +220,12 @@ export const useCustomizationsStore = defineStore('customizations', () => {
    * caches []. Throws `HarnessError` for other failures.
    */
   function fetchCommands(projectId: string | null, opts: FetchCommandsOptions = {}): Promise<readonly CommandSummary[]> {
+    usedAt.set(commandsKey(customizationScopeKey(projectId)), Date.now())
+    return loadCommands(projectId, opts)
+  }
+
+  /** `fetchCommands` without counting as a use (event and reconnect refetches). */
+  function loadCommands(projectId: string | null, opts: FetchCommandsOptions = {}): Promise<readonly CommandSummary[]> {
     const scope = customizationScopeKey(projectId)
     const key = commandsKey(scope)
     const cached = commands.value[scope]
@@ -231,12 +287,28 @@ export const useCustomizationsStore = defineStore('customizations', () => {
     return created
   }
 
-  /** `PATCH /customizations/:id` (`content` and / or `enabled`). Marks every scope stale. Throws `HarnessError`. */
+  /**
+   * `PATCH /customizations/:id` (`content` and / or `enabled`). `{ enabled }` alone is optimistic: every cached catalog
+   * shows the new state at once (state 'off', or 'active' until the next fetch says otherwise), answers arriving
+   * meanwhile included, and a failure brings the previous state back. Marks every scope stale. Throws `HarnessError`.
+   */
   async function update(id: string, patch: CustomizationUpdate): Promise<Customization> {
+    const optimistic = patch.enabled !== undefined && patch.content === undefined
+    if (optimistic)
+      pendingEnabled.value = { ...pendingEnabled.value, [id]: patch.enabled! }
     try {
-      return await withHarnessErrors(api.customizations.update({ params: { id }, body: patch }))
+      const updated = await withHarnessErrors(api.customizations.update({ params: { id }, body: patch }))
+      if (optimistic) {
+        // Keep showing the new state until the refetch of the stale scopes answers.
+        catalogs.value = Object.fromEntries(Object.entries(catalogs.value).map(([scope, list]) => [scope, withEnabled(list, { [id]: updated.enabled })]))
+      }
+      return updated
     }
     finally {
+      if (optimistic) {
+        const { [id]: _done, ...rest } = pendingEnabled.value
+        pendingEnabled.value = rest
+      }
       markAllStale()
     }
   }
@@ -258,24 +330,34 @@ export const useCustomizationsStore = defineStore('customizations', () => {
   // ---------- events and reconnects ----------
 
   /**
-   * `customization.changed` and `plugin.changed`: every cached list is stale (refetched on its next use); the loaded
-   * command lists are refetched at once, so the slash menu follows plugin changes like before Phase 10.
+   * `customization.changed` and `plugin.changed`: every cached list is stale (refetched on its next use), and the lists
+   * used in the last minute are refetched at once (the open Customize page, the composer's slash menu), quietly.
    */
   function applyEvent(event: ServerEvent): void {
     if (event.type !== 'customization.changed' && event.type !== 'plugin.changed')
       return
     markAllStale()
-    for (const scope of Object.keys(commands.value))
-      fetchCommands(scope === '' ? null : scope).catch(() => {})
+    // Every recently used list, cached or not: a fetch in flight was just overtaken and will not be cached.
+    const since = Date.now() - CUSTOMIZATIONS_RECENT_MS
+    for (const [key, at] of usedAt) {
+      if (at < since)
+        continue
+      const scope = key.slice(key.indexOf(':') + 1)
+      const projectId = scope === '' ? null : scope
+      if (key === catalogKey(scope))
+        loadCatalog(projectId).catch(() => {})
+      else
+        loadCommands(projectId).catch(() => {})
+    }
   }
 
   /** Refetches every loaded list (after the event stream reconnects: missed events are not replayed). */
   async function refreshLoaded(): Promise<void> {
     const tasks: Array<Promise<unknown>> = []
     for (const scope of Object.keys(catalogs.value))
-      tasks.push(fetchCatalog(scope === '' ? null : scope))
+      tasks.push(loadCatalog(scope === '' ? null : scope))
     for (const scope of Object.keys(commands.value))
-      tasks.push(fetchCommands(scope === '' ? null : scope))
+      tasks.push(loadCommands(scope === '' ? null : scope))
     await Promise.allSettled(tasks)
   }
 

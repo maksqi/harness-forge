@@ -629,4 +629,30 @@ describe('chatMessage: background agent results (Phase 10)', () => {
     await nextTick()
     expect(wrapper.find(`[data-testid="${testIds.messageEditInput}"]`).exists()).toBe(false)
   })
+
+  it('keeps the carrier itself unfocusable, its caption hidden from screen readers and its notes\' toggles working', async () => {
+    const { wrapper } = mountMessage({ message: taskResultCarrier('msg_carrier000000002'), isLast: false, streaming: false, showThinking: false })
+    const row = wrapper.get(`[data-testid="${testIds.messageUser}"]`)
+    expect(row.attributes('tabindex')).toBeUndefined()
+    expect(row.classes()).toContain('items-start')
+    const caption = row.findAll('p').at(-1)!
+    expect(caption.text()).toBe('Sent to the agent')
+    expect(caption.attributes('aria-hidden')).toBe('true')
+    await row.get(`[data-testid="${testIds.taskResultToggle}"]`).trigger('click')
+    expect(row.find(`[data-testid="${testIds.taskResultReport}"]`).exists()).toBe(true)
+  })
+})
+
+describe('chatMessage: command badge (Phase 10)', () => {
+  it('passes the message\'s command to the badge: its model and its source', () => {
+    const message: HarnessUIMessage = {
+      ...user,
+      metadata: { modelRef: 'mock:echo', startedAt: 1, command: { name: 'review', input: 'src/a.ts', type: 'prompt', source: 'project', modelRef: 'openai:gpt-6' } },
+      parts: [{ type: 'text', text: '/review src/a.ts' }],
+    }
+    const { wrapper } = mountMessage({ message, isLast: false, streaming: false, showThinking: false })
+    const badge = wrapper.get('[data-slot="command-badge"]')
+    expect(badge.get('[data-slot="command-badge-model"]').text()).toBe('· gpt-6')
+    expect(badge.text()).toContain(', Project command, Runs on gpt-6')
+  })
 })

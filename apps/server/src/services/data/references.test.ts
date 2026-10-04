@@ -1,5 +1,7 @@
 // Referenced file ids of the orphaned file cleanup (W7.8-T1, ADR-035): every reference source, the loose matcher,
 // keyset batches and the schema-coverage test (a text / JSON / blob column that is neither scanned nor excluded fails).
+// Phase 10 (W10.6, Gate P10-A decision): the snapshot of a background task (`background_tasks.output`) is scanned, so a
+// file named only by an undelivered report survives a cleanup.
 import type { HarnessUIMessage, MessageMetadata } from '@harness-forge/shared'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import { createFileId } from '@harness-forge/shared'
@@ -10,6 +12,7 @@ import * as schema from '../../db/schema.ts'
 import { backgroundTasks, chats, chatShares, customizations, messages, pluginKv, pluginSettings, projects, settings } from '../../db/schema.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { fileUrl } from '../files/index.ts'
+import { DAY_MS, seedStoredFile } from '../files/store.test-util.ts'
 import { collectFileIds, collectReferencedFileIds, REFERENCE_BATCH, scannedColumnNames, UNSCANNED_COLUMNS } from './references.ts'
 
 const apps: TestApp[] = []
@@ -49,6 +52,22 @@ async function message(t: TestApp, n: number, parts: unknown[], metadata?: unkno
 
 function filePart(id: string): unknown {
   return { type: 'file', mediaType: 'image/png', url: fileUrl(id) }
+}
+
+/** A background task row of `CHAT_ID` whose report and description are given (the chat row is created). */
+async function backgroundTask(t: TestApp, report: string, description = 'Scan'): Promise<void> {
+  await chat(t)
+  await t.db.insert(backgroundTasks).values({
+    id: 'bgt_0000000000000001',
+    chatId: CHAT_ID,
+    messageId: mid(1),
+    toolCallId: 'call_1',
+    type: 'explore',
+    description,
+    status: 'completed',
+    origin: 'request',
+    output: { status: 'completed', type: 'explore', description: 'Look', modelRef: 'mock:echo', steps: [], stepsOmitted: 0, report, startedAt: 1 },
+  })
 }
 
 describe('referenced file ids: every source', () => {
@@ -94,6 +113,8 @@ describe('referenced file ids: every source', () => {
     // Phase 10 (ADR-044): personal definitions are free text.
     ['the content of a personal definition', (t, id) => t.db.insert(customizations).values({ id: 'cus_0000000000000001', kind: 'agent', name: 'reviewer', description: 'Reviews.', content: `---\nname: reviewer\ndescription: Reviews.\n---\nCompare with ${fileUrl(id)}.` }).then(() => {})],
     ['the description of a personal definition', (t, id) => t.db.insert(customizations).values({ id: 'cus_0000000000000001', kind: 'skill', name: 'logo', description: `Uses ${id}.`, content: '---\nname: logo\ndescription: Logo.\n---\nBody.' }).then(() => {})],
+    // Phase 10 (ADR-046): an undelivered report is the only copy of what the sub-agent found.
+    ['the report of a background task', (t, id) => backgroundTask(t, `Saved the chart as ${fileUrl(id)}.`)],
   ])('finds an id in %s', async (_label, seed) => {
     const t = await app()
     const id = createFileId()
@@ -109,20 +130,29 @@ describe('referenced file ids: every source', () => {
     await message(t, 1, [{ type: 'text', text: 'plain' }])
     await t.db.update(messages).set({ searchText: id }).where(eq(messages.id, mid(1)))
     expect((await collectReferencedFileIds(t.db)).size).toBe(0)
-    // Phase 10: a background task row (its delivered result is a message part) and a definition name are not scanned.
-    await t.db.insert(backgroundTasks).values({
-      id: 'bgt_0000000000000001',
-      chatId: CHAT_ID,
-      messageId: mid(1),
-      toolCallId: 'call_1',
-      type: 'explore',
-      description: `Look at ${id}`,
-      status: 'completed',
-      origin: 'request',
-      output: { status: 'completed', type: 'explore', description: 'Look', modelRef: 'mock:echo', steps: [], stepsOmitted: 0, report: `Found ${id}.`, startedAt: 1 },
-    })
+    // Phase 10: the description of a background task and a definition name are not scanned.
+    await backgroundTask(t, 'Found nothing.', `Look at ${id}`)
     await t.db.insert(customizations).values({ id: 'cus_0000000000000001', kind: 'command', name: 'x', description: 'X.', content: '---\ndescription: X.\n---\nBody.' })
     expect((await collectReferencedFileIds(t.db)).size).toBe(0)
+  })
+})
+
+describe('referenced file ids: background tasks and the cleanup (Phase 10)', () => {
+  it('a cleanup keeps a file named only by a background task report, and removes it once the row is gone', async () => {
+    const t = await app()
+    const old = Date.now() - 3 * DAY_MS
+    const kept = await seedStoredFile(t.deps, new TextEncoder().encode('chart bytes'), { createdAt: old, name: 'chart.png', mime: 'image/png' })
+    const orphan = await seedStoredFile(t.deps, new TextEncoder().encode('nobody'), { createdAt: old, name: 'nobody.txt', mime: 'text/plain' })
+    await backgroundTask(t, `The chart is at ${fileUrl(kept.id)}.`)
+
+    expect(await t.deps.data.cleanup()).toMatchObject({ files: 1 })
+    expect((await t.db.select({ id: schema.files.id }).from(schema.files)).map(row => row.id)).toEqual([kept.id])
+    expect(await t.deps.files.get(orphan.id)).toBeNull()
+
+    // Delivered (or the chat deleted): the row is gone and nothing else names the file.
+    await t.db.delete(backgroundTasks)
+    expect(await t.deps.data.cleanup()).toMatchObject({ files: 1 })
+    expect(await t.deps.files.get(kept.id)).toBeNull()
   })
 })
 
@@ -204,6 +234,7 @@ describe('referenced file ids: schema coverage', () => {
 
   it('scans exactly the reference columns of ADR-035', () => {
     expect(scanned.sort()).toEqual([
+      'background_tasks.output',
       'chat_shares.file_ids',
       'chat_shares.snapshot',
       'chats.settings',

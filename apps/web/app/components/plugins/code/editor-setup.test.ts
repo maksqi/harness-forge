@@ -2,7 +2,7 @@ import { diagnosticCount } from '@codemirror/lint'
 import { Text } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createSourceEditor, placeDiagnostics } from './editor-setup'
+import { createMarkdownEditor, createSourceEditor, placeDefinitionDiagnostics, placeDiagnostics } from './editor-setup'
 
 const editors: Array<ReturnType<typeof createSourceEditor>> = []
 
@@ -137,5 +137,97 @@ describe('createSourceEditor', () => {
     editor.setReadOnly(true)
     editor.view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
     expect(editor.content()).toBe('a  b')
+  })
+})
+
+describe('createMarkdownEditor (Phase 10)', () => {
+  const markdownEditors: Array<ReturnType<typeof createMarkdownEditor>> = []
+
+  afterEach(() => {
+    for (const editor of markdownEditors.splice(0))
+      editor.destroy()
+  })
+
+  function mountMarkdown(options: { dark?: boolean, readonly?: boolean } = {}) {
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    const onChange = vi.fn()
+    const onSubmit = vi.fn()
+    const editor = createMarkdownEditor(parent, {
+      dark: options.dark ?? true,
+      readonly: options.readonly ?? false,
+      label: 'Instructions',
+      onChange,
+      onSubmit,
+    })
+    markdownEditors.push(editor)
+    return { editor, parent, onChange, onSubmit }
+  }
+
+  function key(editor: ReturnType<typeof createMarkdownEditor>, init: KeyboardEventInit): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+    editor.view.contentDOM.dispatchEvent(event)
+    return event
+  }
+
+  it('labels the editable area, reports user edits but not setValue, and never captures Tab', () => {
+    const { editor, onChange } = mountMarkdown()
+    expect(editor.view.contentDOM.getAttribute('aria-label')).toBe('Instructions')
+    expect(editor.view.contentDOM.getAttribute('aria-multiline')).toBe('true')
+    editor.setValue('Review the diff.')
+    expect(editor.view.state.doc.toString()).toBe('Review the diff.')
+    expect(onChange).not.toHaveBeenCalled()
+    editor.view.dispatch({ changes: { from: 0, insert: '# ' } })
+    expect(onChange).toHaveBeenLastCalledWith('# Review the diff.')
+    editor.view.dispatch({ selection: { anchor: 0 } })
+    const tab = key(editor, { key: 'Tab' })
+    const shiftTab = key(editor, { key: 'Tab', shiftKey: true })
+    expect(tab.defaultPrevented).toBe(false)
+    expect(shiftTab.defaultPrevented).toBe(false)
+    expect(editor.view.state.doc.toString()).toBe('# Review the diff.')
+  })
+
+  it('submits on Mod+Enter instead of inserting a line', () => {
+    const { editor, onSubmit } = mountMarkdown()
+    editor.setValue('a')
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform)
+    const event = key(editor, { key: 'Enter', metaKey: mac, ctrlKey: !mac })
+    expect(event.defaultPrevented).toBe(true)
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(editor.view.state.doc.toString()).toBe('a')
+  })
+
+  it('marks the lines of diagnostics that have one and clears them on a new value', () => {
+    const { editor, parent } = mountMarkdown()
+    editor.setValue('---\nname: x\ncolor: blue\n---\nBody')
+    editor.setDiagnostics([
+      { level: 'info', code: 'ignored-key', message: 'Line 3: The key "color" is ignored.', line: 3 },
+      { level: 'error', code: 'missing-field', message: 'Add a description.' },
+    ])
+    expect(diagnosticCount(editor.view.state)).toBe(1)
+    const marker = parent.querySelector('.cm-hf-lint-marker-warning')
+    expect(marker?.getAttribute('title')).toBe('Line 3: The key "color" is ignored.')
+    editor.setValue('other')
+    expect(diagnosticCount(editor.view.state)).toBe(0)
+  })
+
+  it('places whole lines, clamped to the document', () => {
+    const doc = Text.of(['a', 'bb'])
+    expect(placeDefinitionDiagnostics(doc, [
+      { level: 'warning', code: 'unknown-tool', message: 'Line 9: x', line: 9 },
+      { level: 'error', code: 'too-large', message: 'big' },
+    ])).toEqual([{ from: 2, to: 4, severity: 'warning', message: 'Line 9: x', markClass: 'cm-hf-diagnostic-warning' }])
+  })
+
+  it('switches the theme and the read-only mode', () => {
+    const { editor } = mountMarkdown({ dark: false, readonly: true })
+    expect(editor.view.state.facet(EditorView.darkTheme)).toBe(false)
+    expect(editor.view.state.readOnly).toBe(true)
+    expect(editor.view.contentDOM.getAttribute('aria-readonly')).toBe('true')
+    editor.setDark(true)
+    editor.setReadOnly(false)
+    expect(editor.view.state.facet(EditorView.darkTheme)).toBe(true)
+    expect(editor.view.state.readOnly).toBe(false)
+    expect(editor.view.contentDOM.getAttribute('aria-readonly')).toBeNull()
   })
 })

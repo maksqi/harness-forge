@@ -12,12 +12,18 @@
 // Phase 9 (C26 seams, W9.1): `/compact [focus]` resolves like a reply command (it decides the reply: no model call, no
 // workspace), needs a chat model (an image model is a 400 on `['modelRef']`) and a regenerate of its reply compacts
 // again; the continuation branch checks the mode of a plan approval (`checkPlanApprovalMode`, `modes.ts`).
-// Phase 10 (C31 seams, ADR-045 / ADR-046; W10.2 implements them): every run takes one catalog snapshot of its chat's
-// project (`PreparedRun.catalog`, `deps.customizations.catalog`; commands, the agent-types and skills blocks, `task`,
-// `skill`); `PreparedRun.requestModelRef` is the model the chat keeps (a command file's `model` may run the turn on
-// another model: W10.2) and `PreparedRun.turnRestriction` the turn command's `allowed-tools` (`turnToolRestriction`);
-// `prepareRun(…, { serverMessage: true })` is the path of the carrier message of a turn the server starts for finished
-// background tasks (accepted, not yet used: W10.2).
+// Phase 10 (ADR-045 / ADR-046, ARCHITECTURE.md 6.24): every run takes one catalog snapshot of its chat's project
+// (`PreparedRun.catalog`, `deps.customizations.catalog`; commands, the agent-types and skills blocks, `task`, `skill`).
+// A command file's `model` (`metadata.command.modelRef` of the turn's user message: a new message's command, the stored
+// one for a regenerate and an approval continuation) runs the turn when it resolves to a chat model; otherwise the
+// request's model runs and the reply starts with the notice `command-model-unavailable` (once per reply). The request's
+// model is resolved first, as before (its errors, image options and the image-continuation check are unchanged), and
+// stays the chat's model (`PreparedRun.requestModelRef`); the request's image options are not applied to a command's
+// model. `PreparedRun.turnRestriction` is the turn command's `allowed-tools` (`turnToolRestriction`).
+// `prepareRun(…, { serverMessage: true })` is the path of the user-role carrier message of a turn the server starts for
+// finished background tasks (`origin: 'task'`): only a new message whose parts are all `data-task-result` parts is
+// accepted; its parts skip `normalizeUserParts` (which refuses data parts) and the message is checked with
+// `validateMessage`; it resolves no command.
 import type {
   CatalogModel,
   ChatRequestBody,
@@ -47,6 +53,7 @@ import {
   LIMITS,
   messageMetadataSchema,
   safeParseModelRef,
+  TASK_RESULT_PART_TYPE,
   validationError,
 } from '@harness-forge/shared'
 import { safeValidateUIMessages } from 'ai'
@@ -140,7 +147,7 @@ export interface PreparedRun {
   /**
    * The model the chat keeps (Phase 10, ADR-045): `chats.model_ref` is touched with it at the start and the end of the
    * run. It is the request's model; it differs from `resolved.modelRef` (the model that runs, `run.started.modelRef`)
-   * only when a command file's `model` runs the turn (W10.2).
+   * only when a command file's `model` runs the turn.
    */
   requestModelRef: string
   /**
@@ -154,9 +161,10 @@ export interface PreparedRun {
 export interface PrepareRunOptions {
   /**
    * The request's message was built by the server (Phase 10, ADR-046): the user-role carrier message of a turn started
-   * for finished background tasks (`run.started.origin: 'task'`), holding only `data-task-result` parts. W10.2: its parts
-   * are not normalized like a user's (data parts are refused there), the message is validated with `validateMessage`,
-   * and only such a carrier is accepted. P10-0b: accepted, not used yet.
+   * for finished background tasks (`run.started.origin: 'task'`), holding only `data-task-result` parts. Its parts are
+   * not normalized like a user's (data parts are refused there), the message is validated with `validateMessage`, and
+   * only such a carrier is accepted (a new user message; any other part, an empty message, a regenerate or a
+   * continuation is a `validation_error`). It resolves no command.
    */
   readonly serverMessage?: boolean
 }
@@ -303,23 +311,39 @@ interface PrepareContext {
   deps: AppDeps
   run: Run
   body: ChatRequestBody
-  resolved: ResolvedModelBase
+  /** The request's model (`body.modelRef`), resolved before the turn is planned: the chat keeps it. */
+  request: ResolvedTarget
   logger: Logger
   /** The run's catalog snapshot (command resolution). */
   catalog: CustomizationCatalog
+  /** The request's message is a server-built carrier (`PrepareRunOptions.serverMessage`). */
+  serverMessage: boolean
 }
 
-/** The stored form of the new user message (server metadata, command invocation). */
+/**
+ * The parts of a server-built carrier message (Phase 10, ADR-046): one or more `data-task-result` parts, kept as
+ * `{ type, id?, data }` (`validateMessage` checks the data); anything else is a `validation_error` on the part.
+ */
+function carrierParts(parts: readonly unknown[]): HarnessUIMessagePart[] {
+  if (parts.length === 0)
+    throw badRequest('A server-started turn needs at least one background task result.', ['message', 'parts'])
+  return parts.map((raw, index): HarnessUIMessagePart => {
+    const part = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+    if (part.type !== TASK_RESULT_PART_TYPE)
+      throw badRequest('A server-started turn can only carry background task results.', ['message', 'parts', index])
+    return { type: TASK_RESULT_PART_TYPE, ...(typeof part.id === 'string' ? { id: part.id } : {}), data: part.data } as HarnessUIMessagePart
+  })
+}
+
+/** The stored form of the new user message (server metadata, command invocation; a carrier's parts as built). */
 async function buildUserMessage(context: PrepareContext): Promise<{ message: HarnessUIMessage, command: CommandResolution | null }> {
-  const { deps, run, body, resolved } = context
+  const { deps, run, body, request } = context
+  const metadata: MessageMetadata = { modelRef: request.model.modelRef, startedAt: run.acceptedAt }
+  if (context.serverMessage)
+    return { message: { id: body.message.id, role: 'user', parts: carrierParts(body.message.parts), metadata }, command: null }
   const parts = await normalizeUserParts(body.message.parts, deps.files)
   const command = await resolveCommand(deps, firstTextOf(parts), { chatId: body.chatId, signal: run.signal, catalog: context.catalog })
-  const metadata: MessageMetadata = {
-    modelRef: resolved.modelRef,
-    startedAt: run.acceptedAt,
-    ...(command === null ? {} : { command: command.invocation }),
-  }
-  return { message: { id: body.message.id, role: 'user', parts, metadata }, command }
+  return { message: { id: body.message.id, role: 'user', parts, metadata: { ...metadata, ...(command === null ? {} : { command: command.invocation }) } }, command }
 }
 
 /**
@@ -382,33 +406,125 @@ export async function openRunWorkspace(
   return { workspace: null, notices: [NOTICES.workspaceUnavailable(result.message)] }
 }
 
+/** The model a turn runs on (Phase 10, ADR-045) and what comes with it. */
+export interface TurnModel {
+  /** The command's model when it can run, else the request's model. */
+  target: ResolvedTarget
+  /** The request's image options for the request's model; none when a command's model runs. */
+  imageOptions: ImageOptions | undefined
+  /** `command-model-unavailable` when the command's model cannot run (at most one). */
+  notices: NoticeData[]
+}
+
+/** The `metadata.command.modelRef` of a stored user message (the turn's command file `model`). */
+export function storedCommandModel(message: HarnessUIMessage | null | undefined): string | undefined {
+  const modelRef = message?.role === 'user' ? message.metadata?.command?.modelRef : undefined
+  return typeof modelRef === 'string' && modelRef !== '' ? modelRef : undefined
+}
+
+/** The last user message of a path (the user message of the turn a continuation continues). */
+function turnUserMessage(path: readonly HarnessUIMessage[]): HarnessUIMessage | undefined {
+  return path.findLast(message => message.role === 'user')
+}
+
+/** True when `message` already shows a notice with `code` (a continuation does not repeat it). */
+function hasNotice(message: HarnessUIMessage | null | undefined, code: NoticeData['code']): boolean {
+  return message?.parts.some(part => part.type === 'data-notice' && (part.data as Partial<NoticeData> | undefined)?.code === code) === true
+}
+
+/**
+ * A command's model as a chat model, or null when it cannot run: an unknown, disabled or unconfigured provider, a model
+ * that is not in the catalog, a failing factory, or a model whose catalog kind is not `chat` (an image model). The abort
+ * of a stopped run is rethrown.
+ */
+async function resolveCommandModel(deps: Pick<AppDeps, 'providers'>, modelRef: string, signal: AbortSignal, logger: Logger): Promise<ResolvedModel | null> {
+  try {
+    const model = await deps.providers.resolveModel(modelRef, { signal })
+    if (model.entry.kind === 'chat')
+      return model
+    logger.info('the model of the command is not a chat model; the chat\'s model answers', { modelRef, kind: model.entry.kind })
+    return null
+  }
+  catch (error) {
+    if (signal.aborted)
+      throw error
+    logger.info('the model of the command cannot run; the chat\'s model answers', { modelRef, code: isHarnessError(error) ? error.code : 'unknown' })
+    return null
+  }
+}
+
+/**
+ * The model of a turn (Phase 10, ADR-045): `override` (the turn command's `model`) when it differs from the request's
+ * model and resolves to a chat model; otherwise the request's model, with the notice `command-model-unavailable` when an
+ * override could not run (unless `continued` already shows it: one notice per reply).
+ */
+export async function resolveTurnModel(
+  deps: Pick<AppDeps, 'providers'>,
+  request: { target: ResolvedTarget, imageOptions: ImageOptions | undefined },
+  override: string | undefined,
+  options: { signal: AbortSignal, logger: Logger, continued?: HarnessUIMessage | null },
+): Promise<TurnModel> {
+  const requested: TurnModel = { target: request.target, imageOptions: request.imageOptions, notices: [] }
+  if (override === undefined || override === request.target.model.modelRef)
+    return requested
+  const model = await resolveCommandModel(deps, override, options.signal, options.logger)
+  if (model !== null)
+    return { target: { kind: 'chat', model }, imageOptions: undefined, notices: [] }
+  if (hasNotice(options.continued, 'command-model-unavailable'))
+    return requested
+  return { ...requested, notices: [NOTICES.commandModelUnavailable(override)] }
+}
+
 /**
  * Validates and plans the request. Throws `validation_error`, `not_found`, `conflict`, `provider_not_configured` (and
  * the other resolution errors) before anything but the chat row is written.
  */
 export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger, options: PrepareRunOptions = {}): Promise<PreparedRun> {
-  void options.serverMessage
-  const planned = await planRun(deps, run, body, logger)
+  const planned = await planRun(deps, run, body, logger, options)
   const opened = await openRunWorkspace(deps, planned.chat, planned.target, planned.command, logger)
-  return { ...planned, ...opened, turnRestriction: turnToolRestriction(planned.history) }
+  return {
+    ...planned,
+    workspace: opened.workspace,
+    notices: [...planned.notices, ...opened.notices],
+    turnRestriction: turnToolRestriction(planned.history),
+  }
 }
 
-/** `prepareRun` without the workspace and the tool restriction. */
-async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger): Promise<Omit<PreparedRun, 'workspace' | 'notices' | 'turnRestriction'>> {
+/** `prepareRun` without the workspace and the tool restriction (`notices`: the turn model's). */
+async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger, options: PrepareRunOptions): Promise<Omit<PreparedRun, 'workspace' | 'turnRestriction'>> {
   const kind = classifyRequest(body)
+  const serverMessage = options.serverMessage === true
+  if (serverMessage && kind !== 'new')
+    throw badRequest('A server-started turn sends a new user message.', ['message'])
   const chat = await ensureChat(deps, body)
   // One catalog snapshot per run (never rejects but for an abort: an unavailable folder only adds a diagnostic).
   const catalog = await deps.customizations.catalog(chat.projectId, { signal: run.signal })
-  const resolvedTarget = await resolveTarget(deps, body.modelRef, run.signal)
-  const resolved: ResolvedModelBase = resolvedTarget.model
-  checkImageOptions(body.imageOptions, resolvedTarget.kind, resolved.entry)
-  if (resolvedTarget.kind === 'image' && kind === 'continuation')
+  // The request's model first (its errors before anything else); a command's model may run the turn instead.
+  const request = await resolveTarget(deps, body.modelRef, run.signal)
+  checkImageOptions(body.imageOptions, request.kind, request.model.entry)
+  if (request.kind === 'image' && kind === 'continuation')
     throw badRequest('An image model cannot continue a tool call. Pick a chat model to answer the pending tool call.', ['modelRef'])
-  deps.catalog.markUsed(resolved.providerId, resolved.modelId).catch((error: unknown) => logger.debug('cannot record the model use', { err: error }))
   const settings = await deps.settings.get()
-  const context: PrepareContext = { deps, run, body, resolved, logger, catalog }
-  const base = { kind, chat, resolved, settings, catalog, requestModelRef: resolved.modelRef }
+  const context: PrepareContext = { deps, run, body, request, logger, catalog, serverMessage }
+  const turnModel = (override: string | undefined, continued: HarnessUIMessage | null = null): Promise<TurnModel> =>
+    resolveTurnModel(deps, { target: request, imageOptions: body.imageOptions }, override, { signal: run.signal, logger, continued })
+  const planned = await planHistory(context, kind, chat, turnModel)
+  const resolved: ResolvedModelBase = planned.target.model
+  deps.catalog.markUsed(resolved.providerId, resolved.modelId).catch((error: unknown) => logger.debug('cannot record the model use', { err: error }))
+  return { ...planned, kind, chat, resolved, settings, catalog, requestModelRef: request.model.modelRef }
+}
 
+/** What `planHistory` decides (the rest of `PreparedRun` comes from `planRun`). */
+type PlannedHistory = Pick<PreparedRun, 'target' | 'history' | 'userMessage' | 'continued' | 'assistantId' | 'replyParentId' | 'command' | 'superseded' | 'writes' | 'notices'>
+
+/** The history operation of a request and the model of its turn. */
+async function planHistory(
+  context: PrepareContext,
+  kind: RequestKind,
+  chat: ChatRecord,
+  turnModel: (override: string | undefined, continued?: HarnessUIMessage | null) => Promise<TurnModel>,
+): Promise<PlannedHistory> {
+  const { deps, body } = context
   switch (kind) {
     case 'new': {
       if (await deps.chats.getMessage(body.chatId, body.message.id) !== null)
@@ -421,10 +537,10 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
       // Only the approvals of this path: those of other versions stay pending.
       const superseded = supersedeApprovals(path)
       const decides = command?.kind === 'prompt' ? null : command
-      checkCompactTarget(decides, resolvedTarget.kind)
+      const model = await turnModel(command?.kind === 'prompt' ? command.invocation.modelRef : undefined)
+      checkCompactTarget(decides, model.target.kind)
       return {
-        ...base,
-        target: await planTarget(context, resolvedTarget, { message, parent: path.at(-1), decides, countDropped: true }),
+        target: await planTarget(context, model, { message, parent: path.at(-1), decides, countDropped: true }),
         history: [...superseded.messages, message],
         userMessage: message,
         continued: null,
@@ -433,6 +549,7 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
         command: decides,
         superseded: superseded.count,
         writes: { updates: pathWrites(superseded.changed, path), append: { message, parentId }, activeLeafId: message.id },
+        notices: model.notices,
       }
     }
     case 'regenerate': {
@@ -446,10 +563,11 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
       const kept = path.slice(0, answeredIndex + 1)
       const superseded = supersedeApprovals(kept)
       const command = await regeneratedCommand(context, answered)
-      checkCompactTarget(command, resolvedTarget.kind)
+      // A prompt command keeps its stored expansion and model (a file changed since does not matter).
+      const model = await turnModel(command === null ? storedCommandModel(answered) : undefined)
+      checkCompactTarget(command, model.target.kind)
       return {
-        ...base,
-        target: await planTarget(context, resolvedTarget, { message: answered, parent: kept.at(-2), decides: command, countDropped: false }),
+        target: await planTarget(context, model, { message: answered, parent: kept.at(-2), decides: command, countDropped: false }),
         history: superseded.messages,
         userMessage: null,
         continued: null,
@@ -458,6 +576,7 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
         command,
         superseded: superseded.count,
         writes: { updates: pathWrites(superseded.changed, kept), append: null, activeLeafId: answered.id },
+        notices: model.notices,
       }
     }
     case 'continuation': {
@@ -473,9 +592,10 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
       checkPlanApprovalMode(last, message, body.toolMode)
       await validateMessage(message)
       const parentId = path.at(-2)?.id ?? null
+      // The turn's command model again (the reply already shows the notice when it could not run).
+      const model = await turnModel(storedCommandModel(turnUserMessage(path)), last)
       return {
-        ...base,
-        target: await planTarget(context, resolvedTarget, { message, parent: path.at(-2), decides: null, countDropped: false }),
+        target: await planTarget(context, model, { message, parent: path.at(-2), decides: null, countDropped: false }),
         history: [...path.slice(0, -1), message],
         userMessage: null,
         continued: message,
@@ -484,6 +604,7 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
         command: null,
         superseded: 0,
         writes: { updates: [{ message, parentId }], append: null, activeLeafId: message.id },
+        notices: model.notices,
       }
     }
   }
@@ -502,10 +623,12 @@ interface PlannedTurn {
 /**
  * The target of a run. For an image model: the prompt (the user text after slash-command expansion, `400` when empty
  * or longer than `LIMITS.imagePromptMaxChars` unless a command writes the reply), `n`, the aspect ratio and the input
- * images (see `imageTurnInputs`). For a chat model with image output: the requested aspect ratio.
+ * images (see `imageTurnInputs`). For a chat model with image output: the requested aspect ratio. The image options are
+ * the turn model's (the request's for the request's model, none for a command's model).
  */
-async function planTarget(context: PrepareContext, resolved: ResolvedTarget, turn: PlannedTurn): Promise<RunTarget> {
-  const options = context.body.imageOptions
+async function planTarget(context: PrepareContext, model: TurnModel, turn: PlannedTurn): Promise<RunTarget> {
+  const resolved = model.target
+  const options = model.imageOptions
   if (resolved.kind === 'chat') {
     const aspectRatio = resolved.model.entry.capabilities.imageOutput ? options?.aspectRatio : undefined
     return { kind: 'chat', model: resolved.model, ...(aspectRatio === undefined ? {} : { aspectRatio }) }

@@ -4,6 +4,8 @@
 // `workspace-unavailable` notice (Phase 7, ADR-031) is decided in `prepare.ts` and shown on every run it applies to.
 // Phase 9 (ADR-040): the context guard (`compaction/guard.ts`) injects `context-trimmed` (automatic compaction off) or
 // `compaction-failed` (the summary could not be written) right before the first step of the run it trimmed.
+// Phase 10 (ADR-045): `command-model-unavailable` is decided in `prepare.ts` when the `model` of the turn's command file
+// cannot run (the chat's model answers instead); a continuation whose reply already shows it does not add it again.
 import type { NoticeData } from '@harness-forge/shared'
 import { LIMITS } from '@harness-forge/shared'
 
@@ -40,6 +42,15 @@ export const NOTICES = {
     level: 'warning',
     code: 'compaction-failed',
     message: 'Couldn\'t compact the conversation. Older messages were left out instead.',
+  }),
+  /**
+   * The `model` of the turn's command file cannot run (Phase 10, ADR-045: an unknown, disabled or unconfigured provider,
+   * a model missing from the catalog, an image or other non-chat model), so the chat's model answered (`prepare.ts`).
+   */
+  commandModelUnavailable: (modelRef: string): NoticeData => ({
+    level: 'warning',
+    code: 'command-model-unavailable',
+    message: `The command's model ${modelRef} is not available, so the chat's model answered.`,
   }),
   /** The project folder of the chat could not be opened (`OpenWorkspaceResult.message`, safe to show). */
   workspaceUnavailable: (message: string): NoticeData => ({

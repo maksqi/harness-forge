@@ -6,19 +6,22 @@
 // hidden from assistive technology, so new diagnostics are also announced through the editor's live region).
 // Messages are text only.
 // Loaded with a dynamic import by SourceEditor.vue, so CodeMirror is only downloaded when the Source tab opens.
+// Phase 10 (docs/UI.md 9.12, 11.7): `createMarkdownEditor`, the markdown field of Settings -> Customize (MarkdownEditor):
+// line wrapping, no Tab capture (Tab and Shift+Tab move focus: no keyboard trap), Mod+Enter submits, the definition
+// diagnostics that have a line as lint markers; loaded with a dynamic import by MarkdownEditor.vue.
 import type { Diagnostic } from '@codemirror/lint'
 import type { Extension, Text } from '@codemirror/state'
-import type { BuildDiagnostic } from '@harness-forge/shared'
+import type { BuildDiagnostic, DefinitionDiagnostic } from '@harness-forge/shared'
 import type { SourceLanguage } from './source-files'
 import { indentLess, indentMore } from '@codemirror/commands'
 import { javascript } from '@codemirror/lang-javascript'
 import { json } from '@codemirror/lang-json'
 import { markdown } from '@codemirror/lang-markdown'
-import { forEachDiagnostic, setDiagnostics } from '@codemirror/lint'
-import { Compartment, EditorState, RangeSet } from '@codemirror/state'
+import { forEachDiagnostic, lintKeymap, setDiagnostics } from '@codemirror/lint'
+import { Compartment, EditorState, Prec, RangeSet } from '@codemirror/state'
 import { oneDark } from '@codemirror/theme-one-dark'
-import { EditorView, gutter, GutterMarker, keymap } from '@codemirror/view'
-import { basicSetup } from 'codemirror'
+import { EditorView, gutter, GutterMarker, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from '@codemirror/view'
+import { basicSetup, minimalSetup } from 'codemirror'
 import { byteColumnToIndex, languageOf } from './source-files'
 
 /** A build diagnostic placed in the document (UTF-16 offsets), as `@codemirror/lint` shows it. */
@@ -308,5 +311,165 @@ export function createSourceEditor(parent: HTMLElement, options: SourceEditorOpt
       states.clear()
       view.destroy()
     },
+  }
+}
+
+// ---------- the markdown field (Phase 10) ----------
+
+/** A definition diagnostic placed in the document: the whole line it names. */
+export interface MarkdownEditorDiagnostic extends Diagnostic {
+  severity: 'error' | 'warning' | 'info'
+}
+
+/**
+ * Places definition diagnostics (`parseDefinition`, the catalog) in `doc`: only those with a line, each marking that
+ * whole line (clamped to the document). Their messages already start with "Line N: " and are shown as they are.
+ */
+export function placeDefinitionDiagnostics(doc: Text, diagnostics: readonly DefinitionDiagnostic[]): MarkdownEditorDiagnostic[] {
+  const placed: MarkdownEditorDiagnostic[] = []
+  for (const diagnostic of diagnostics) {
+    if (diagnostic.line === undefined)
+      continue
+    const line = doc.line(Math.min(Math.max(diagnostic.line, 1), doc.lines))
+    placed.push({
+      from: line.from,
+      to: line.to,
+      severity: diagnostic.level,
+      message: diagnostic.message,
+      markClass: `cm-hf-diagnostic-${diagnostic.level}`,
+    })
+  }
+  return placed
+}
+
+export interface MarkdownEditorOptions {
+  dark: boolean
+  readonly: boolean
+  /** The accessible name of the editable area (the field label). */
+  label: string
+  /** The id of the element that describes the editable area (help text, errors). */
+  describedBy?: string
+  /** A document change by the user (typing, paste, undo); never for `setValue`. */
+  onChange: (value: string) => void
+  /** Mod+Enter (the form saves). */
+  onSubmit: () => void
+}
+
+export interface MarkdownEditorController {
+  readonly view: EditorView
+  /** Replaces the text (a new value from the parent); no change event, the diagnostics are cleared. */
+  setValue: (value: string) => void
+  /** Lint markers for the diagnostics that have a line. */
+  setDiagnostics: (diagnostics: readonly DefinitionDiagnostic[]) => void
+  setDark: (dark: boolean) => void
+  setReadOnly: (readonly: boolean) => void
+  /** A new accessible name (and description) of the editable area. */
+  setLabel: (label: string, describedBy?: string) => void
+  focus: () => void
+  destroy: () => void
+}
+
+/** The field's height rules: the host sets the min / max height, the editor follows it and scrolls inside. */
+const markdownFieldTheme = EditorView.theme({
+  '&': { height: 'auto', minHeight: 'inherit', maxHeight: 'inherit', fontSize: '13px' },
+  '.cm-scroller': { overflow: 'auto', minHeight: 'inherit' },
+  '.cm-content': { padding: '8px 0' },
+  '.cm-line': { padding: '0 10px 0 6px' },
+})
+
+/**
+ * The markdown field of Settings -> Customize (docs/UI.md 9.12, 11.7): CodeMirror with markdown highlighting, line
+ * numbers, line wrapping and undo, the one-dark theme in dark mode, a read-only mode (`aria-readonly`), lint markers
+ * from definition diagnostics. Tab is never bound (no `indentWithTab`), so Tab and Shift+Tab move focus; Mod+Enter
+ * calls `onSubmit` (it outranks the default "insert blank line").
+ */
+export function createMarkdownEditor(parent: HTMLElement, options: MarkdownEditorOptions): MarkdownEditorController {
+  const theme = new Compartment()
+  const editable = new Compartment()
+  const labelled = new Compartment()
+  let dark = options.dark
+  let readonly = options.readonly
+
+  let describedBy = options.describedBy
+  const labelExtension = (label: string): Extension => EditorView.contentAttributes.of({
+    'aria-label': label,
+    'aria-multiline': 'true',
+    ...(describedBy ? { 'aria-describedby': describedBy } : {}),
+  })
+  const readOnlyExtension = (value: boolean): Extension => [
+    EditorState.readOnly.of(value),
+    EditorView.editable.of(!value),
+    EditorView.contentAttributes.of(value ? { 'aria-readonly': 'true' } : {}),
+  ]
+
+  const submitKeymap = Prec.highest(keymap.of([{
+    key: 'Mod-Enter',
+    run: () => {
+      options.onSubmit()
+      return true
+    },
+  }]))
+
+  const view = new EditorView({
+    parent,
+    state: EditorState.create({
+      doc: '',
+      extensions: [
+        submitKeymap,
+        minimalSetup,
+        lineNumbers(),
+        highlightActiveLine(),
+        highlightActiveLineGutter(),
+        keymap.of(lintKeymap),
+        EditorView.lineWrapping,
+        markdown(),
+        theme.of(themeExtension(dark)),
+        markdownFieldTheme,
+        editable.of(readOnlyExtension(readonly)),
+        diagnosticsGutter(),
+        labelled.of(labelExtension(options.label)),
+        EditorView.updateListener.of((update) => {
+          if (!update.docChanged)
+            return
+          if (update.transactions.every(transaction => transaction.isUserEvent(SILENT_USER_EVENT)))
+            return
+          options.onChange(update.state.doc.toString())
+        }),
+      ],
+    }),
+  })
+
+  return {
+    view,
+    setValue: (value) => {
+      if (view.state.doc.toString() === value)
+        return
+      view.dispatch({
+        ...setDiagnostics(view.state, []),
+        changes: { from: 0, to: view.state.doc.length, insert: value },
+        userEvent: SILENT_USER_EVENT,
+      })
+    },
+    setDiagnostics: (diagnostics) => {
+      view.dispatch(setDiagnostics(view.state, placeDefinitionDiagnostics(view.state.doc, diagnostics)))
+    },
+    setDark: (value) => {
+      if (value === dark)
+        return
+      dark = value
+      view.dispatch({ effects: theme.reconfigure(themeExtension(dark)) })
+    },
+    setReadOnly: (value) => {
+      if (value === readonly)
+        return
+      readonly = value
+      view.dispatch({ effects: editable.reconfigure(readOnlyExtension(readonly)) })
+    },
+    setLabel: (label, nextDescribedBy) => {
+      describedBy = nextDescribedBy
+      view.dispatch({ effects: labelled.reconfigure(labelExtension(label)) })
+    },
+    focus: () => view.focus(),
+    destroy: () => view.destroy(),
   }
 }

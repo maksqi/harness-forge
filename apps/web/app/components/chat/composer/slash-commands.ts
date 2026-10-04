@@ -1,10 +1,12 @@
 // Slash commands of the composer (docs/UI.md 7.8): the menu items, the token being typed, and the client-only
-// commands (`/new`, `/model`, `/effort`, `/mode`, `/help`), which run in the browser and never reach the server.
-// Server commands (`GET /api/commands`) are sent as typed; the server expands them.
-// Phase 10 (ADR-045, ADR-047; C33 declares, W10.9 implements; frozen from Gate P10-0b): every item has a group (App,
-// Project, Personal, Plugins, `slashGroupOf`), server items carry the command file's `argumentHint` and `namespace`,
-// `argumentHintAt` is the ghost hint of SlashArgumentHint, and `/remember [text]` resolves to the `remember` action
-// (the composer opens RememberDialog with the text).
+// commands (`/new`, `/model`, `/effort`, `/mode`, `/help`, `/remember`), which run in the browser and never reach the
+// server. Server commands (`GET /api/commands?projectId=`) are sent as typed; the server expands them.
+// Phase 10 (ADR-045, ADR-047; C33 declared, W10.9 implements; signatures frozen from Gate P10-0b): every item has a
+// group, shown in the order App · Project · Personal · Plugins (`SLASH_GROUPS`, `slashGroupOf`: client commands and the
+// harness `/compact` are App); server items carry the command file's `argumentHint` and `namespace`; a row shows the
+// namespace (project commands) or the plugin name (plugin commands) on the right (`slashItemDetail`) and is named
+// "/{name}, {description}, arguments {hint}" (`slashItemLabel`); `argumentHintAt` is the ghost hint of
+// SlashArgumentHint; `/remember [text]` resolves to the `remember` action (the composer opens RememberDialog).
 import type { ClientCommand, CommandSummary, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import { CLIENT_COMMANDS, isClientCommand } from '@harness-forge/shared'
 import { EFFORT_LABELS } from './effort'
@@ -12,6 +14,14 @@ import { EDITS_NEEDS_PROJECT, isProjectOnlyMode, PLAN_NEEDS_PROJECT, TOOL_MODE_O
 
 /** The groups of the slash menu, in display order (docs/UI.md 7.8, Phase 10). */
 export type SlashGroup = 'app' | 'project' | 'personal' | 'plugin'
+
+/** The groups in display order with their headings (`data-group` = `value`). */
+export const SLASH_GROUPS: readonly { value: SlashGroup, label: string }[] = [
+  { value: 'app', label: 'App' },
+  { value: 'project', label: 'Project' },
+  { value: 'personal', label: 'Personal' },
+  { value: 'plugin', label: 'Plugins' },
+]
 
 /** One row of the slash menu (docs/UI.md 10.4; Phase 10: 10.7, 11.7). */
 export interface SlashItem {
@@ -38,16 +48,11 @@ export const CLIENT_COMMAND_DESCRIPTIONS: Readonly<Record<ClientCommand, string>
 }
 
 /**
- * `remember` is a client command since Phase 10 (ADR-047): typing `/remember [text]` opens RememberDialog. Until W10.9
- * implements the dialog, the menu does not offer it (the e2e suite keeps five client commands).
+ * The App group's client commands, in the documented order (`remember` last: since Phase 10, ADR-047, typing
+ * `/remember [text]` or picking it opens RememberDialog).
  */
-const CLIENT_COMMANDS_NOT_OFFERED: ReadonlySet<ClientCommand> = new Set(['remember'])
-
-/** The App group: every client command, in the documented order. */
 export function clientSlashItems(): SlashItem[] {
-  return CLIENT_COMMANDS
-    .filter(name => !CLIENT_COMMANDS_NOT_OFFERED.has(name))
-    .map(name => ({ name, description: CLIENT_COMMAND_DESCRIPTIONS[name], kind: 'client' as const, group: 'app' as const }))
+  return CLIENT_COMMANDS.map(name => ({ name, description: CLIENT_COMMAND_DESCRIPTIONS[name], kind: 'client' as const, group: 'app' as const }))
 }
 
 /** The menu group of a server command: harness -> App, project -> Project, user -> Personal, plugin -> Plugins. */
@@ -65,8 +70,10 @@ export function slashGroupOf(command: Pick<CommandSummary, 'source'>): SlashGrou
 }
 
 /**
- * The Commands group: server commands with the contributing plugin's name. A server command can never shadow a
- * client command (plugins cannot register those names; this is a second guard).
+ * The server items: `/compact` (App), the project's, the personal and the plugin commands, with the contributing
+ * plugin's name, the argument hint and the namespace. The server already resolved the precedence (one item per name).
+ * A server command can never shadow a client command (plugins and command files cannot take those names; this is a
+ * second guard).
  */
 export function serverSlashItems(
   commands: readonly CommandSummary[],
@@ -101,11 +108,30 @@ export function argumentHintAt(text: string, items: readonly SlashItem[]): strin
   return hint || null
 }
 
-/** Items whose name starts with `query` (case-insensitive), App group first; the order inside a group is kept. */
+/**
+ * The muted text on the right of a row: the namespace of a command file (`frontend`), else the plugin name of a plugin
+ * command; App and personal rows show none.
+ */
+export function slashItemDetail(item: SlashItem): string | null {
+  if (item.namespace)
+    return item.namespace
+  return item.group === 'plugin' && item.source ? item.source : null
+}
+
+/** The accessible name of a row: "/{name}, {description}" plus ", arguments {hint}" when it has a hint. */
+export function slashItemLabel(item: SlashItem): string {
+  const base = item.description ? `/${item.name}, ${item.description}` : `/${item.name}`
+  return item.argumentHint ? `${base}, arguments ${item.argumentHint}` : base
+}
+
+/**
+ * Items whose name starts with `query` (case-insensitive), in group order (App, Project, Personal, Plugins); the order
+ * inside a group is kept (client commands before `/compact` in App).
+ */
 export function filterSlashItems(items: readonly SlashItem[], query: string): SlashItem[] {
   const needle = query.toLowerCase()
   const matches = items.filter(item => item.name.toLowerCase().startsWith(needle))
-  return [...matches.filter(item => item.kind === 'client'), ...matches.filter(item => item.kind === 'server')]
+  return SLASH_GROUPS.flatMap(group => matches.filter(item => item.group === group.value))
 }
 
 const QUERY_PATTERN = /^[\w-]{0,32}$/

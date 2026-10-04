@@ -32,9 +32,14 @@
 // this tab's stream is announced once ("Conversation compacted").
 // Phase 10 (ADR-046; C33 mounts, W10.10 implements; frozen from Gate P10-0b): BackgroundAgents sits in the dock between
 // TodoStrip and QueuedMessages with the session's visible background agents; its Stop goes through the session ('gone'
-// -> "It already finished."), Stop all through the store, and the composer's Stop never touches them.
-// AGENT_TASK_CONTEXT gives the task blocks the live task, the delivered result of the shown path (`taskResultsOf`), the
-// dock reveal and the scroll to a result note.
+// -> "It already finished.", other failures "Could not stop the background agent"), Stop all through the store (one
+// at a time), and the composer's Stop and Esc never touch them. AGENT_TASK_CONTEXT gives the task blocks the live task,
+// the delivered result of the shown path (`taskResultsOf`), the dock reveal (open the list, expand and focus the row)
+// and "Go to the result" (scroll to the note, open its report, focus its toggle); BACKGROUND_TASK_INPUT gives the dock's
+// rows the input of the launching `task` call. A turn the server started for finished background agents (`run.started`
+// with `origin: 'task'`) announces "Background agent finished: {description}" for each result of its carrier once the
+// carrier shows (the session reloads the path, then resumes), unless the dock already announced that agent's ending in
+// this tab (`announcedTasks`: one announcement per agent and tab).
 import type { HarnessError, MessageBranch, ReasoningEffort, RestoreResult, ToolMode } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
@@ -54,6 +59,7 @@ import { REWIND_DIALOG_HOST, REWIND_RUN_ACTIVE_MESSAGE, runningChatOf } from '~/
 import { useRewindResultToast } from '~/components/workspace/rewind/rewind-toast'
 import RewindDialog from '~/components/workspace/rewind/RewindDialog.vue'
 import { isBusyConflict, isRunActiveConflict, useChatSession } from '~/composables/useChatSession'
+import { useServerEvents } from '~/composables/useServerEvents'
 import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { QUEUE_ITEM_GONE_MESSAGE } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
@@ -64,11 +70,18 @@ import { useProvidersStore } from '~/stores/providers'
 import { useUiStore } from '~/stores/ui'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
+import { taskInputOf } from './agent/agent-tools'
 import TodoStrip from './agent/TodoStrip.vue'
-import { visibleTasks } from './background/background-agents'
+import {
+  announcedTasks,
+  BACKGROUND_GONE_MESSAGE,
+  BACKGROUND_STOP_FAILED_MESSAGE,
+  endedAnnouncement,
+  visibleTasks,
+} from './background/background-agents'
 import BackgroundAgents from './background/BackgroundAgents.vue'
-import { AGENT_TASK_CONTEXT, CHAT_VIEW_ACTIONS } from './chat-context'
-import { imageFileParts, messageText, PLAN_TOOL_NAME, taskResultsOf, toolNameOf } from './chat-format'
+import { AGENT_TASK_CONTEXT, BACKGROUND_TASK_INPUT, CHAT_VIEW_ACTIONS } from './chat-context'
+import { imageFileParts, isTaskResultMessage, messageText, PLAN_TOOL_NAME, taskResultsOf, toolNameOf } from './chat-format'
 import ChatNotFound from './ChatNotFound.vue'
 import ChatTranscript from './ChatTranscript.vue'
 import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
@@ -189,9 +202,6 @@ provide(CHAT_VIEW_ACTIONS, {
 
 // ---------- background agents (Phase 10, ADR-046; W10.10 implements) ----------
 
-/** The toast when a Stop reaches a background agent that had already ended (docs/UI.md 7.29). */
-const BACKGROUND_GONE_MESSAGE = 'It already finished.'
-
 /** What the dock shows: running background agents and finished ones whose result was not delivered yet. */
 const shownBackgroundTasks = computed(() => visibleTasks(session.backgroundTasks.value))
 const stoppingBackgroundTasks = computed(() => shownBackgroundTasks.value.filter(task => backgroundTasks.stopping[task.id]).map(task => task.id))
@@ -199,6 +209,19 @@ const stoppingBackgroundTasks = computed(() => shownBackgroundTasks.value.filter
 const backgroundReveal = ref<{ taskId: string, n: number } | null>(null)
 /** The delivered results on the shown path, by task id. */
 const taskResults = computed(() => taskResultsOf(messages.value))
+const view = useTemplateRef<HTMLElement>('view')
+
+/** Scrolls to the result note of a task, opens its report and focuses its toggle (docs/UI.md 14.1). */
+function revealResultNote(taskId: string) {
+  const note = [...(view.value?.querySelectorAll<HTMLElement>(`[data-testid="${testIds.taskResult}"]`) ?? [])]
+    .find(element => element.dataset.taskId === taskId)
+  if (!note)
+    return
+  note.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+  // Opens the report when it is closed (the toggle's data-state), then focuses the toggle.
+  note.querySelector<HTMLElement>(`[data-testid="${testIds.taskResultToggle}"][data-state="closed"]`)?.click()
+  note.querySelector<HTMLElement>(`[data-testid="${testIds.taskResultToggle}"]`)?.focus({ preventScroll: true })
+}
 
 provide(AGENT_TASK_CONTEXT, {
   projectId: () => projectId.value,
@@ -209,26 +232,41 @@ provide(AGENT_TASK_CONTEXT, {
     backgroundReveal.value = { taskId, n: (backgroundReveal.value?.n ?? 0) + 1 }
   },
   showResult: (taskId) => {
-    if (!taskResults.value.has(taskId) || typeof document === 'undefined')
+    if (!taskResults.value.has(taskId))
       return false
-    const note = [...document.querySelectorAll<HTMLElement>(`[data-testid="${testIds.taskResult}"]`)]
-      .find(element => element.dataset.taskId === taskId)
-    note?.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
-    return note !== undefined
+    revealResultNote(taskId)
+    return true
   },
 })
 
+// The dock's rows read the input of the `task` call that launched each agent (its prompt) from the shown path.
+provide(BACKGROUND_TASK_INPUT, (task) => {
+  const message = messages.value.find(item => item.id === task.messageId)
+  const part = message?.parts.find(item => isToolUIPart(item) && item.toolCallId === task.toolCallId)
+  return part && isToolUIPart(part) ? taskInputOf(part.input) : null
+})
+
+/** Stop of one background agent (never the composer's Stop): 'gone' -> "It already finished." */
 function onStopBackgroundTask(taskId: string) {
   session.stopBackgroundTask(taskId)
     .then((result) => {
       if (result === 'gone')
         toast(BACKGROUND_GONE_MESSAGE)
     })
-    .catch(failure => reportFailure('Could not stop the background agent', failure))
+    .catch(failure => reportFailure(BACKGROUND_STOP_FAILED_MESSAGE, failure))
 }
 
+/** Stop all: one stop per running agent, in turn (there is no batch route); a second press waits for the first. */
+let stoppingAll = false
 function onStopAllBackgroundTasks() {
-  backgroundTasks.stopAll(props.chatId).catch(failure => reportFailure('Could not stop the background agent', failure))
+  if (stoppingAll)
+    return
+  stoppingAll = true
+  backgroundTasks.stopAll(props.chatId)
+    .catch(failure => reportFailure(BACKGROUND_STOP_FAILED_MESSAGE, failure))
+    .finally(() => {
+      stoppingAll = false
+    })
 }
 
 /** The name of the chat's project, once the projects store knows it. */
@@ -312,6 +350,45 @@ watch(() => messages.value.at(-1), (last) => {
   if (arrived && streaming)
     void announce('Conversation compacted')
 }, { immediate: true })
+
+/**
+ * + Phase 10 (ADR-046): the carrier messages of turns the server started for finished background agents
+ * (`run.started` with `origin: 'task'`) that this view has not shown yet. When its carrier shows, each result whose
+ * ending the dock did not announce in this tab (`announcedTasks`) is announced ("Background agent finished:
+ * {description}"); carriers of a loaded path are never announced.
+ */
+const pendingCarriers = new Set<string>()
+const announcedCarriers = new Set<string>()
+
+function announceCarriers() {
+  if (pendingCarriers.size === 0)
+    return
+  for (const message of messages.value) {
+    if (!pendingCarriers.has(message.id))
+      continue
+    pendingCarriers.delete(message.id)
+    if (announcedCarriers.has(message.id) || !isTaskResultMessage(message))
+      continue
+    announcedCarriers.add(message.id)
+    // Once per tab: only the results whose ending the dock did not announce (e.g. right after a reload).
+    for (const result of taskResultsOf([message]).values()) {
+      if (announcedTasks.add(result.taskId))
+        void announce(endedAnnouncement(result.output))
+    }
+  }
+}
+
+useServerEvents().on('run.started', (event) => {
+  const { chatId, origin, userMessageId } = event.data
+  if (chatId !== props.chatId || origin !== 'task' || !userMessageId || announcedCarriers.has(userMessageId))
+    return
+  pendingCarriers.add(userMessageId)
+  // A carrier the path never showed (another version is shown) is forgotten after a while.
+  if (pendingCarriers.size > 20)
+    pendingCarriers.delete(pendingCarriers.values().next().value!)
+  announceCarriers()
+})
+watch(messages, announceCarriers)
 
 // ---------- data the transcript needs ----------
 
@@ -621,7 +698,7 @@ function setProject(value: string | null) {
 </script>
 
 <template>
-  <div data-slot="chat-view" :data-chat-id="chatId" class="relative flex h-dvh min-h-0 flex-col" :style="composerStyle">
+  <div ref="view" data-slot="chat-view" :data-chat-id="chatId" class="relative flex h-dvh min-h-0 flex-col" :style="composerStyle">
     <slot v-if="!notFound" name="header" :scrolled="scrolled" :title="title" :loading="!loaded" :project-id="projectId" />
 
     <ChatNotFound v-if="notFound" />

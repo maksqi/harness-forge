@@ -309,4 +309,88 @@ describe('registerDeclaredContributions', () => {
     expect(calls).toEqual(['provider:acme', 'models:acme:1', 'models:openai:2', 'mcp:acme', 'command:free'])
     expect(warnings).toEqual([expect.stringContaining('The command "/taken" was skipped')])
   })
+
+  it('registers agents and skills (plugin API 1.4.0) through ctx with exactly the declared fields; a taken name is skipped and logged', () => {
+    const agents: unknown[] = []
+    const skills: unknown[] = []
+    const warnings: string[] = []
+    const conflict = (message: string): Error => Object.assign(new Error(message), { name: 'HarnessError', code: 'conflict' })
+    const ctx = {
+      agents: {
+        register: (definition: { name: string }) => {
+          if (definition.name === 'taken-agent')
+            throw conflict('The agent "taken-agent" is already registered by the plugin "first".')
+          agents.push(definition)
+        },
+      },
+      skills: {
+        register: (definition: { name: string }) => {
+          if (definition.name === 'taken-skill')
+            throw conflict('The skill "taken-skill" is already registered by the plugin "first".')
+          skills.push(definition)
+        },
+      },
+      logger: { warn: (message: string) => void warnings.push(message) },
+    } as unknown as PluginContext
+    registerDeclaredContributions(ctx, {
+      manifestVersion: 1,
+      id: 'acme',
+      name: 'Acme',
+      version: '1.0.0',
+      engines: { harness: '^1.4.0' },
+      contributes: {
+        agents: [
+          { name: 'taken-agent', description: 'x', instructions: 'x' },
+          { name: 'reviewer', description: 'Reviews.', instructions: 'Review.', tools: ['read_file'], model: 'inherit' },
+          { name: 'plain', description: 'Plain.', instructions: 'Plain.' },
+        ],
+        skills: [{ name: 'taken-skill', description: 'x', content: 'x' }, { name: 'notes', description: 'Notes.', content: '# Notes' }],
+      },
+    })
+    expect(agents).toEqual([
+      { name: 'reviewer', description: 'Reviews.', instructions: 'Review.', tools: ['read_file'], model: 'inherit' },
+      { name: 'plain', description: 'Plain.', instructions: 'Plain.' },
+    ])
+    // No `tools: undefined` / `model: undefined` keys reach the strict validation.
+    expect(Object.keys(agents[1] as object)).toEqual(['name', 'description', 'instructions'])
+    expect(skills).toEqual([{ name: 'notes', description: 'Notes.', content: '# Notes' }])
+    expect(warnings).toEqual([
+      'The agent "taken-agent" was skipped: The agent "taken-agent" is already registered by the plugin "first".',
+      'The skill "taken-skill" was skipped: The skill "taken-skill" is already registered by the plugin "first".',
+    ])
+  })
+
+  it('fails the load on an agent or skill error other than a conflict', () => {
+    const invalid = Object.assign(new Error('Agent "x": model: bad'), { name: 'HarnessError', code: 'validation_error' })
+    const ctx = {
+      agents: { register: () => { throw invalid } },
+      skills: { register: () => {} },
+      logger: { warn: () => {} },
+    } as unknown as PluginContext
+    expect(() => registerDeclaredContributions(ctx, {
+      manifestVersion: 1,
+      id: 'acme',
+      name: 'Acme',
+      version: '1.0.0',
+      engines: { harness: '^1.4.0' },
+      contributes: { agents: [{ name: 'x', description: 'x', instructions: 'x' }] },
+    })).toThrow(invalid)
+  })
+
+  it('a manifest of plugin API 1.3.0 (no agents or skills) never touches ctx.agents / ctx.skills', () => {
+    const calls: string[] = []
+    const ctx = {
+      commands: { register: (command: { name: string }) => void calls.push(`command:${command.name}`) },
+      logger: { warn: () => {} },
+    } as unknown as PluginContext
+    registerDeclaredContributions(ctx, {
+      manifestVersion: 1,
+      id: 'acme',
+      name: 'Acme',
+      version: '1.0.0',
+      engines: { harness: '^1.3.0' },
+      contributes: { commands: [{ name: 'hello', description: 'Hello.', template: 'Hello {{input}}' }] },
+    })
+    expect(calls).toEqual(['command:hello'])
+  })
 })

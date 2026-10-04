@@ -11,44 +11,61 @@
 // A call whose input (or output, once there is one) does not parse with the shared schemas falls back to ToolPart.
 // Root `task-block` (`data-state` queued | running | completed | failed | limit | aborted | approval | denied,
 // `data-kind` explore | general).
-// Phase 10 (C33; W10.11 owns the block in P10-A): the type is any agent name (ADR-045): `data-kind` is `custom` for a
-// custom agent (`taskKindOf`) and `data-agent-type` names it; custom types keep the generic "Agent" label and icon until
-// W10.11 renders their name, the agent HoverCard and the background state.
+// Phase 10 (W10.11; ADR-045, ADR-046; docs/UI.md 7.27, 13.11, 14.2): the type is any agent name. A custom type
+// (`data-kind="custom"`) shows `BotMessageSquare` and its name (cut at 24 characters, the full name in a tooltip);
+// `data-agent-type` names the type (the output's, else the input's; `general-purpose` reads as `general`). With an
+// agent snapshot (`output.agent`) the label opens a HoverCard with the agent's description and source ("Built-in
+// agent", "Personal agent", "From {plugin}", "Project: {path}"); keyboard focus on the trigger opens it too and the
+// trigger's description carries the same text. A background call (`data-background="true"`) reads its live state from
+// AGENT_TASK_CONTEXT (ChatView): the background task while it waits or runs (spinner, "In background", "Background ·
+// {n} tool calls · {duration}", the latest step; the trigger name adds ", running in the background"), its final status
+// once it ended or its result was delivered, else `data-state="background"` ("Started in the background"). Expanded, a
+// background block shows TaskBody with the live snapshot and `task-block-reveal`: "Show in background agents" while it
+// runs (`data-target="dock"`), "Go to the result" once its result is on the shown path (`data-target="result"`).
+// Without the context (outside a chat view) a background block stays static.
 import type { ToolPartLike } from '../chat-format'
 import {
   BanIcon,
   BotIcon,
+  BotMessageSquareIcon,
   CheckIcon,
   ChevronRightIcon,
+  CircleDashedIcon,
   CircleSlashIcon,
   ClockIcon,
   TelescopeIcon,
   TriangleAlertIcon,
   XIcon,
 } from '@lucide/vue'
-import { computed, inject, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { TRANSCRIPT_SCROLL } from '../chat-context'
+import { AGENT_TASK_CONTEXT, TRANSCRIPT_SCROLL } from '../chat-context'
 import { formatDuration, isSupersededDenial, toolNameOf } from '../chat-format'
 import ToolApprovalCard from '../parts/ToolApprovalCard.vue'
 import ToolPart from '../parts/ToolPart.vue'
 import {
+  backgroundTaskState,
   firstSentence,
-  taskAgentTypeOf,
+  taskAgentSourceText,
+  taskAgentTypeName,
   taskBlockState,
   taskDescriptionOf,
   taskDurationMs,
   taskInputOf,
+  taskIsBackground,
   taskKindOf,
   taskOutputOf,
   taskStepLine,
   taskToolCalls,
   taskTriggerLabel,
+  taskTypeLabel,
+  taskTypeLabelShort,
   toolCallsText,
 } from './agent-tools'
 import TaskBody from './TaskBody.vue'
@@ -70,6 +87,8 @@ const emit = defineEmits<{
 const plugins = usePluginsStore()
 const open = ref(false)
 const scroll = inject(TRANSCRIPT_SCROLL, null)
+/** + Phase 10: the chat's background agents (absent outside a chat view: background blocks stay static). */
+const tasks = inject(AGENT_TASK_CONTEXT, null)
 watch(open, (isOpen) => {
   if (isOpen)
     scroll?.holdPosition()
@@ -85,12 +104,38 @@ const fallback = computed(() => (props.part.state !== 'input-streaming' && input
   || (hasOutput.value && output.value === null))
 
 /** The agent type (any catalog name since Phase 10), and its kind: explore, general or custom. */
-const agentType = computed(() => input.value?.type ?? taskAgentTypeOf(props.part.input))
+const agentType = computed(() => taskAgentTypeName(props.part.input, output.value))
 const kind = computed(() => (agentType.value === null ? undefined : taskKindOf(agentType.value)))
+/** + Phase 10: the label ("Explore", "Agent" or the custom name, cut at 24 characters) and the full name. */
+const label = computed(() => (agentType.value === null ? 'Agent' : taskTypeLabelShort(agentType.value)))
+const fullLabel = computed(() => (agentType.value === null ? 'Agent' : taskTypeLabel(agentType.value)))
 const description = computed(() => input.value?.description ?? taskDescriptionOf(props.part.input))
-const state = computed(() => taskBlockState(props.part, { streaming: props.streaming, superseded: props.superseded }))
+
+// ---------- background calls (Phase 10, ADR-046) ----------
+
+/** + Phase 10: the call asked for a background sub-agent (`data-background`). */
+const background = computed(() => taskIsBackground(props.part.input, output.value))
+/** + Phase 10: the call launched its background sub-agent (the final output `status: 'background'` with its task id). */
+const launched = computed(() => output.value?.status === 'background')
+const taskId = computed(() => (launched.value ? output.value?.taskId ?? null : null))
+/** + Phase 10: the live state of a launched background agent: the task, else its delivered result, else unknown. */
+const live = computed(() => {
+  if (!launched.value)
+    return null
+  const id = taskId.value
+  const task = id && tasks ? tasks.task(id) : null
+  const result = id && tasks ? tasks.result(id) : null
+  return backgroundTaskState(task, result)
+})
+/** The output the block reads: the live snapshot of a background agent, else the call's own output. */
+const shown = computed(() => (live.value ? live.value.output : output.value))
+
+const state = computed(() => live.value?.state
+  ?? taskBlockState(props.part, { streaming: props.streaming, superseded: props.superseded }))
 const active = computed(() => state.value === 'running' || state.value === 'queued')
-const toolCalls = computed(() => taskToolCalls(output.value))
+/** + Phase 10: a background agent that waits or runs ("In background"). */
+const runningInBackground = computed(() => live.value !== null && active.value)
+const toolCalls = computed(() => taskToolCalls(shown.value))
 const awaitingDecision = computed(() => props.part.state === 'approval-requested' && !props.superseded)
 const supersededDenial = computed(() => state.value === 'denied'
   && (isSupersededDenial(props.part) || props.part.state === 'approval-requested'))
@@ -116,7 +161,7 @@ watch(active, (isActive) => {
 onBeforeUnmount(stopTicker)
 
 const duration = computed(() => {
-  const value = output.value
+  const value = shown.value
   if (!value)
     return ''
   if (value.finishedAt === undefined && !active.value)
@@ -124,14 +169,18 @@ const duration = computed(() => {
   return formatDuration(taskDurationMs(value, now.value))
 })
 const metaText = computed(() => {
-  if (!output.value)
+  if (!shown.value)
     return ''
-  return [toolCallsText(toolCalls.value), duration.value].filter(Boolean).join(' · ')
+  const items = [toolCallsText(toolCalls.value), duration.value]
+  // + Phase 10: "Background · {n} tool calls · 1m 2s".
+  if (live.value)
+    items.unshift('Background')
+  return items.filter(Boolean).join(' · ')
 })
 
 /** Line 2: the latest step while running; the first sentence of the report (else of the error) once finished. */
 const liveLine = computed(() => {
-  const value = output.value
+  const value = shown.value
   if (active.value) {
     const step = value?.steps.at(-1)
     return step ? `└ ${taskStepLine(step)}` : ''
@@ -147,7 +196,69 @@ const liveLine = computed(() => {
   return ''
 })
 
-const triggerLabel = computed(() => taskTriggerLabel(kind.value ?? null, description.value, state.value, toolCalls.value))
+const triggerLabel = computed(() => taskTriggerLabel(agentType.value, description.value, state.value, toolCalls.value, {
+  background: live.value !== null,
+}))
+
+// ---------- the agent card (Phase 10, ADR-045) ----------
+
+/** + Phase 10: the agent definition the sub-agent ran with (a snapshot taken when the call ran). */
+const agent = computed(() => shown.value?.agent ?? output.value?.agent ?? null)
+/**
+ * + Phase 10: the plugin of a plugin agent: the snapshot's `pluginId` by its name in the plugins store (else the id);
+ * a snapshot without one (written before the field existed) looks for the plugin that contributes the type.
+ */
+const pluginName = computed(() => {
+  const value = agent.value
+  if (value?.source !== 'plugin')
+    return null
+  if (value.pluginId)
+    return plugins.byId(value.pluginId)?.name ?? value.pluginId
+  const type = agentType.value
+  return type === null ? null : plugins.items.find(plugin => plugin.contributions.agents.includes(type))?.name ?? null
+})
+const agentSource = computed(() => (agent.value ? taskAgentSourceText(agent.value, pluginName.value) : ''))
+const agentCardOpen = ref(false)
+const agentDescriptionId = useId()
+/** The name is cut: a tooltip shows the whole name (without an agent card). */
+const labelCut = computed(() => label.value !== fullLabel.value)
+
+/** Keyboard focus on the trigger opens the agent card (a pointer opens it by hovering the label). */
+function onTriggerFocus(event: FocusEvent) {
+  if (!agent.value)
+    return
+  let keyboard = false
+  try {
+    keyboard = (event.target as HTMLElement | null)?.matches(':focus-visible') === true
+  }
+  catch {
+    keyboard = false
+  }
+  if (keyboard)
+    agentCardOpen.value = true
+}
+
+// ---------- the reveal link (Phase 10) ----------
+
+/** + Phase 10: "Show in background agents" while it runs, "Go to the result" once its result is on the shown path. */
+const revealTarget = computed<'dock' | 'result' | null>(() => {
+  const id = taskId.value
+  if (!id || !tasks || !live.value)
+    return null
+  if (active.value)
+    return 'dock'
+  return tasks.result(id) ? 'result' : null
+})
+
+function onReveal() {
+  const id = taskId.value
+  if (!id || !tasks)
+    return
+  if (revealTarget.value === 'dock')
+    tasks.reveal(id)
+  else if (revealTarget.value === 'result')
+    tasks.showResult(id)
+}
 
 function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
   const approval = props.part.approval
@@ -163,6 +274,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
     :data-state="state"
     :data-kind="kind"
     :data-agent-type="agentType ?? undefined"
+    :data-background="background ? 'true' : undefined"
     class="flex min-w-0 flex-col gap-1.5"
   >
     <ToolPart
@@ -177,23 +289,63 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
         <CollapsibleTrigger
           :data-testid="testIds.taskBlockTrigger"
           :aria-label="triggerLabel"
+          :aria-describedby="agent ? agentDescriptionId : undefined"
           class="group/task -mx-1.5 flex h-(--row-height) w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-md px-1.5 text-left text-sm outline-none transition-colors duration-(--duration-fast) hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50 pointer-coarse:h-10"
+          @focus="onTriggerFocus"
+          @blur="agentCardOpen = false"
         >
           <ChevronRightIcon
             aria-hidden="true"
             class="size-3.5 shrink-0 text-muted-foreground transition-transform duration-(--duration-base) group-data-[state=open]/task:rotate-90"
           />
           <TelescopeIcon v-if="kind === 'explore'" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
+          <BotMessageSquareIcon v-else-if="kind === 'custom'" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
           <BotIcon v-else aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
-          <span class="shrink-0 font-medium">{{ kind === 'explore' ? 'Explore' : 'Agent' }}</span>
+          <HoverCard v-if="agent" v-model:open="agentCardOpen" :open-delay="400" :close-delay="100">
+            <HoverCardTrigger as-child>
+              <span data-slot="task-agent-label" class="max-w-[24ch] shrink-0 truncate font-medium">{{ label }}</span>
+            </HoverCardTrigger>
+            <HoverCardContent align="start" class="w-72 p-3 text-xs" data-slot="task-agent-card">
+              <p class="truncate text-sm font-medium">
+                {{ fullLabel }}
+              </p>
+              <p v-if="agent.description" class="mt-1 break-words text-muted-foreground">
+                {{ agent.description }}
+              </p>
+              <p data-slot="task-agent-source" class="mt-2 break-words text-muted-foreground">
+                <template v-if="agent.source === 'project' && agent.path">
+                  Project: <span class="font-mono text-foreground">{{ agent.path }}</span>
+                </template>
+                <template v-else>
+                  {{ agentSource }}
+                </template>
+              </p>
+            </HoverCardContent>
+          </HoverCard>
+          <Tooltip v-else-if="labelCut">
+            <TooltipTrigger as-child>
+              <span data-slot="task-agent-label" class="max-w-[24ch] shrink-0 truncate font-medium">{{ label }}</span>
+            </TooltipTrigger>
+            <TooltipContent>{{ fullLabel }}</TooltipContent>
+          </Tooltip>
+          <span v-else data-slot="task-agent-label" class="shrink-0 font-medium">{{ label }}</span>
           <span class="min-w-0 truncate text-muted-foreground">{{ description }}</span>
+          <span v-if="agent" :id="agentDescriptionId" class="sr-only">{{ [agent.description, agentSource].filter(Boolean).join('. ') }}</span>
           <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs text-muted-foreground">
             <span v-if="metaText" data-slot="task-meta-short" :class="cn('tabular-nums', active && 'max-sm:hidden')">{{ metaText }}</span>
-            <template v-if="state === 'queued'">
+            <template v-if="runningInBackground">
+              <Spinner class="size-3" />
+              <span>In background</span>
+            </template>
+            <template v-else-if="state === 'queued'">
               <ClockIcon aria-hidden="true" class="size-3.5" />
               <span>Waiting</span>
             </template>
             <Spinner v-else-if="state === 'running'" class="size-3" />
+            <template v-else-if="state === 'background'">
+              <CircleDashedIcon aria-hidden="true" class="size-3.5" />
+              <span>Started in the background</span>
+            </template>
             <template v-else-if="state === 'approval'">
               <span aria-hidden="true" class="size-2 rounded-full bg-warning" />
               <span>Needs approval</span>
@@ -231,7 +383,17 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
           {{ liveLine }}
         </p>
         <CollapsibleContent class="min-w-0 pt-1 pl-5 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0">
-          <TaskBody :input="part.input" :output="hasOutput ? part.output : undefined" :running="active" />
+          <TaskBody :input="part.input" :output="shown ?? (hasOutput ? part.output : undefined)" :running="active" />
+          <button
+            v-if="revealTarget"
+            type="button"
+            :data-testid="testIds.taskBlockReveal"
+            :data-target="revealTarget"
+            class="mt-1.5 flex h-7 items-center rounded-sm px-1 -ml-1 text-xs font-medium text-muted-foreground underline decoration-primary/60 underline-offset-2 outline-none hover:text-foreground hover:decoration-primary focus-visible:ring-2 focus-visible:ring-ring/50 pointer-coarse:h-10"
+            @click="onReveal"
+          >
+            {{ revealTarget === 'dock' ? 'Show in background agents' : 'Go to the result' }}
+          </button>
         </CollapsibleContent>
       </Collapsible>
       <ToolApprovalCard

@@ -13,6 +13,8 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { MENTION_SEARCH_DEBOUNCE_MS } from '~/composables/useFileMentions'
 import { IMAGE_OPTIONS_KEY, useImageOptions } from '~/composables/useImageOptions'
 import { useShortcuts } from '~/composables/useShortcuts'
+import { useBackgroundTasksStore } from '~/stores/background-tasks'
+import { useChatsStore } from '~/stores/chats'
 import { useCustomizationsStore } from '~/stores/customizations'
 import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
@@ -20,7 +22,7 @@ import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
 import { installFakeMedia } from '~/utils/testing/fake-media'
-import { catalogModel, chatId, messageId, projectFileEntry, projectId, projectSummary, queueItem } from '~/utils/testing/fixtures'
+import { catalogModel, chatId, chatSummary, messageId, projectFileEntry, projectId, projectSummary, queueItem, rememberResult } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import ChatComposer from './ChatComposer.vue'
@@ -33,12 +35,16 @@ const mock = vi.hoisted(() => ({
   navigateTo: null as unknown as Mock<(...args: unknown[]) => unknown>,
   toast: null as unknown as Mock<(...args: unknown[]) => unknown>,
   toastError: null as unknown as Mock<(...args: unknown[]) => unknown>,
+  toastSuccess: null as unknown as Mock<(...args: unknown[]) => unknown>,
   player: { stop: null as unknown as Mock<() => void> },
 }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
 vi.mock('./nuxt-imports', () => ({ navigateTo: (...args: unknown[]) => mock.navigateTo(...args) }))
 vi.mock('vue-sonner', () => ({
-  toast: Object.assign((...args: unknown[]) => mock.toast(...args), { error: (...args: unknown[]) => mock.toastError(...args) }),
+  toast: Object.assign((...args: unknown[]) => mock.toast(...args), {
+    error: (...args: unknown[]) => mock.toastError(...args),
+    success: (...args: unknown[]) => mock.toastSuccess(...args),
+  }),
 }))
 vi.mock('~/composables/useSpeechPlayer', () => ({ useSpeechPlayer: () => mock.player }))
 
@@ -161,6 +167,7 @@ describe('chatComposer', () => {
     mock.navigateTo = vi.fn()
     mock.toast = vi.fn()
     mock.toastError = vi.fn()
+    mock.toastSuccess = vi.fn()
     mock.player.stop = vi.fn()
     stubLocalStorage()
     useImageOptions().set({ n: undefined, aspectRatio: undefined, editPrevious: undefined })
@@ -312,7 +319,7 @@ describe('chatComposer', () => {
       await type(textarea(), '/')
       const menu = wrapper.get(byTestId(testIds.slashMenu))
       expect(menu.findAll(byTestId(testIds.slashMenuItem)).map(item => item.attributes('data-value')))
-        .toEqual(['new', 'model', 'effort', 'mode', 'help', 'summarize'])
+        .toEqual(['new', 'model', 'effort', 'mode', 'help', 'remember', 'summarize'])
       expect(textarea().attributes('aria-controls')).toBe(menu.attributes('id'))
 
       await type(textarea(), '/mo')
@@ -431,14 +438,92 @@ describe('chatComposer', () => {
   })
 
   describe('customized commands and Remember (Phase 10)', () => {
-    it('reads the slash commands of the chat\'s project from the customizations store', async () => {
-      api.commands.list.mockResolvedValue({ items: [{ name: 'review', description: 'Review a file', source: 'project', argumentHint: '<file> [focus]' }] })
+    const projectCommands = [
+      { name: 'compact', description: 'Summarize the conversation', source: 'harness' as const, pluginId: 'core-agent', argumentHint: '[focus]' },
+      { name: 'review', description: 'Review a file for bugs', source: 'project' as const, namespace: 'frontend', argumentHint: '<file> [focus]' },
+      { name: 'standup', description: 'Draft my standup notes', source: 'user' as const },
+      { name: 'summarize', description: 'Summarize the chat', source: 'plugin' as const, pluginId: 'core-commands' },
+    ]
+
+    function rows(wrapper: ReturnType<typeof mountComposer>['wrapper']) {
+      return wrapper.findAll(byTestId(testIds.slashMenuItem)).map(item => `${item.attributes('data-group')}:${item.attributes('data-value')}`)
+    }
+
+    /** A saved chat (the chats store knows it) of project 1. */
+    function seedProjectChat() {
+      useProjectsStore().items = [projectSummary({ id: projectId(1), name: 'website', instructionsFile: 'AGENTS.md' })]
+      useChatsStore().items = [chatSummary({ id: chatId(1), projectId: projectId(1) })]
+    }
+
+    function rememberNote(): HTMLTextAreaElement {
+      return bodyAll(byTestId(testIds.rememberText))[0] as HTMLTextAreaElement
+    }
+
+    function rememberTarget(value: string): HTMLButtonElement {
+      return bodyAll(byTestId(testIds.rememberTarget, `[data-value="${value}"]`))[0] as HTMLButtonElement
+    }
+
+    it('lists the project\'s commands in the groups App, Project, Personal and Plugins', async () => {
+      api.commands.list.mockResolvedValue({ items: projectCommands })
       const { wrapper, textarea } = mountComposer({ projectId: projectId(1) })
       await flushPromises()
       expect(api.commands.list).toHaveBeenCalledWith({ query: { projectId: projectId(1) } })
       await type(textarea(), '/')
-      expect(wrapper.findAll(byTestId(testIds.slashMenuItem)).map(item => item.attributes('data-value')))
-        .toEqual(['new', 'model', 'effort', 'mode', 'help', 'review'])
+      expect(rows(wrapper)).toEqual([
+        'app:new',
+        'app:model',
+        'app:effort',
+        'app:mode',
+        'app:help',
+        'app:remember',
+        'app:compact',
+        'project:review',
+        'personal:standup',
+        'plugin:summarize',
+      ])
+      const menu = wrapper.get(byTestId(testIds.slashMenu))
+      expect(menu.findAll('[role="group"]').map(group => wrapper.get(`#${group.attributes('aria-labelledby')}`).text()))
+        .toEqual(['App', 'Project', 'Personal', 'Plugins'])
+      await type(textarea(), '/re')
+      expect(rows(wrapper)).toEqual(['app:remember', 'project:review'])
+      wrapper.unmount()
+    })
+
+    it('shows the App group alone while the first list loads', async () => {
+      api.commands.list.mockReturnValue(new Promise(() => {}))
+      const { wrapper, textarea } = mountComposer({ projectId: projectId(1) })
+      await type(textarea(), '/')
+      expect(new Set(rows(wrapper).map(row => row.split(':')[0]))).toEqual(new Set(['app']))
+      wrapper.unmount()
+    })
+
+    it('refetches the commands on a project change and when the menu opens, at most every 15 s', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      api.commands.list.mockResolvedValue({ items: projectCommands })
+      const { wrapper, state, textarea } = mountComposer({ projectId: projectId(1) })
+      await flushPromises()
+      expect(api.commands.list).toHaveBeenCalledTimes(1)
+
+      // A list younger than 15 s is used as it is.
+      await type(textarea(), '/')
+      await flushPromises()
+      expect(api.commands.list).toHaveBeenCalledTimes(1)
+      await type(textarea(), '')
+
+      // Older: opening the menu fetches it again (a command file saved on disk shows up).
+      vi.setSystemTime(Date.now() + 16_000)
+      await type(textarea(), '/')
+      await flushPromises()
+      expect(api.commands.list).toHaveBeenCalledTimes(2)
+      // Typing more of the name does not refetch.
+      await type(textarea(), '/re')
+      await flushPromises()
+      expect(api.commands.list).toHaveBeenCalledTimes(2)
+
+      state.projectId = projectId(2)
+      await flushPromises()
+      expect(api.commands.list).toHaveBeenCalledTimes(3)
+      expect(api.commands.list).toHaveBeenLastCalledWith({ query: { projectId: projectId(2) } })
       wrapper.unmount()
     })
 
@@ -449,6 +534,9 @@ describe('chatComposer', () => {
       const hint = wrapper.get(byTestId(testIds.slashArgumentHint))
       expect(hint.attributes('aria-hidden')).toBe('true')
       expect(hint.text()).toContain('<file> [focus]')
+      // The mirror lies over the textarea's own box.
+      expect(hint.element.parentElement).toBe(textarea().element.parentElement)
+      expect(hint.element.parentElement?.classList.contains('relative')).toBe(true)
       const describedBy = textarea().attributes('aria-describedby')!
       expect(wrapper.get(`#${describedBy}`).text()).toBe('Arguments: <file> [focus]')
       await type(textarea(), '/review src/a.ts')
@@ -457,16 +545,147 @@ describe('chatComposer', () => {
       wrapper.unmount()
     })
 
-    it('/remember clears the input and opens the Remember dialog with the text', async () => {
+    it('shows the hint after Tab completes a command, and hides it when the caret leaves the end or the text scrolls', async () => {
+      useCustomizationsStore().commands = { '': [{ name: 'review', description: 'Review a file', source: 'user', argumentHint: '<file> [focus]' }] }
+      const { wrapper, textarea } = mountComposer()
+      const hint = () => wrapper.find(byTestId(testIds.slashArgumentHint))
+      await type(textarea(), '/rev')
+      press(textarea().element, { key: 'Tab' })
+      await flushPromises()
+      expect(textarea().element.value).toBe('/review ')
+      expect(hint().exists()).toBe(true)
+
+      // The hint never takes keys: with the menu closed Tab is left to the browser.
+      const tab = press(textarea().element, { key: 'Tab' })
+      expect(tab.defaultPrevented).toBe(false)
+
+      textarea().element.setSelectionRange(3, 3)
+      await textarea().trigger('keyup', { key: 'ArrowLeft' })
+      expect(hint().exists()).toBe(false)
+      textarea().element.setSelectionRange(8, 8)
+      await textarea().trigger('keyup', { key: 'End' })
+      expect(hint().exists()).toBe(true)
+
+      textarea().element.scrollTop = 12
+      await textarea().trigger('scroll')
+      expect(hint().exists()).toBe(false)
+      textarea().element.scrollTop = 0
+      await textarea().trigger('scroll')
+      expect(hint().exists()).toBe(true)
+
+      await type(textarea(), '/standup ')
+      expect(hint().exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('/remember <text> clears the input and opens the Remember dialog with the text', async () => {
       const { wrapper, composer, textarea } = mountComposer()
       await type(textarea(), '/remember Run pnpm check first')
       press(textarea().element, { key: 'Enter' })
       await flushPromises()
       expect(textarea().element.value).toBe('')
       expect(composer().emitted('submit')).toBeUndefined()
-      const dialog = bodyAll(byTestId(testIds.rememberDialog))
-      expect(dialog).toHaveLength(1)
-      expect(dialog[0]!.textContent).toContain('Run pnpm check first')
+      expect(bodyAll(byTestId(testIds.rememberDialog))).toHaveLength(1)
+      expect(rememberNote().value).toBe('Run pnpm check first')
+      // Not a saved project chat: the project targets are disabled, the custom instructions selected.
+      expect(rememberTarget('project-file').disabled).toBe(true)
+      expect(rememberTarget('global').getAttribute('aria-checked')).toBe('true')
+      expect(api.memory.remember).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+
+    it('picking /remember in the menu opens an empty dialog; closing it gives the focus back to the textarea', async () => {
+      const { wrapper, textarea } = mountComposer()
+      await type(textarea(), '/rem')
+      expect(rows(wrapper)).toEqual(['app:remember'])
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(textarea().element.value).toBe('')
+      expect(bodyAll(byTestId(testIds.rememberDialog))).toHaveLength(1)
+      expect(rememberNote().value).toBe('')
+      expect(document.activeElement).toBe(rememberNote())
+
+      press(rememberNote(), { key: 'Escape' })
+      await flushPromises()
+      expect(bodyAll(byTestId(testIds.rememberDialog))).toHaveLength(0)
+      expect(document.activeElement).toBe(textarea().element)
+      wrapper.unmount()
+    })
+
+    it('in a saved project chat saves to the project file with the chat id', async () => {
+      seedProjectChat()
+      api.commands.list.mockResolvedValue({ items: [] })
+      api.memory.remember.mockResolvedValue(rememberResult({ project: projectSummary({ id: projectId(1), name: 'website', instructionsFile: 'AGENTS.md' }) }))
+      const { wrapper, textarea } = mountComposer({ projectId: projectId(1) })
+      await type(textarea(), '/remember Use pnpm')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(rememberTarget('project-file').disabled).toBe(false)
+      expect(rememberTarget('project-file').getAttribute('aria-checked')).toBe('true')
+      expect(document.activeElement).toBe(rememberTarget('project-file'))
+      press(rememberNote(), { key: 'Enter', ctrlKey: true })
+      await flushPromises()
+      expect(api.memory.remember).toHaveBeenCalledWith({ body: { target: 'project-file', text: 'Use pnpm', chatId: chatId(1) } })
+      expect(mock.toastSuccess).toHaveBeenCalledWith('Saved to AGENTS.md')
+      expect(bodyAll(byTestId(testIds.rememberDialog))).toHaveLength(0)
+      expect(document.activeElement).toBe(textarea().element)
+      wrapper.unmount()
+    })
+
+    it('in the draft chat of a project (not saved yet) the project targets wait for the first message', async () => {
+      useProjectsStore().items = [projectSummary({ id: projectId(1), name: 'website' })]
+      api.commands.list.mockResolvedValue({ items: [] })
+      api.memory.remember.mockResolvedValue({ target: 'global', settings: useSettingsStore().resolved })
+      const { wrapper, textarea } = mountComposer({ projectId: projectId(1) })
+      await type(textarea(), '/remember Use pnpm')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(rememberTarget('project-file').disabled).toBe(true)
+      expect(rememberTarget('project-instructions').disabled).toBe(true)
+      bodyAll(byTestId(testIds.rememberSave))[0]!.click()
+      await flushPromises()
+      expect(api.memory.remember).toHaveBeenCalledWith({ body: { target: 'global', text: 'Use pnpm' } })
+      wrapper.unmount()
+    })
+  })
+
+  describe('keyboard chain (Phase 10)', () => {
+    it('esc closes the slash menu first, then stops the response; it never stops background agents', async () => {
+      const tasks = useBackgroundTasksStore()
+      const stopTask = vi.spyOn(tasks, 'stop')
+      const stopAll = vi.spyOn(tasks, 'stopAll')
+      const { wrapper, composer, textarea } = mountComposer({ status: 'streaming' })
+      await type(textarea(), '/mo')
+      const close = press(textarea().element, { key: 'Escape' })
+      await nextTick()
+      expect(close.defaultPrevented).toBe(true)
+      expect(wrapper.find(byTestId(testIds.slashMenu)).exists()).toBe(false)
+      expect(composer().emitted('stop')).toBeUndefined()
+
+      press(textarea().element, { key: 'Escape' })
+      expect(composer().emitted('stop')).toHaveLength(1)
+      // Outside inputs too (the registry's composer-stop).
+      textarea().element.blur()
+      press(document.body, { key: 'Escape' })
+      expect(composer().emitted('stop')).toHaveLength(2)
+      await flushPromises()
+      expect(stopTask).not.toHaveBeenCalled()
+      expect(stopAll).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+
+    it('shift+Tab cycles the mode only while the slash menu is closed', async () => {
+      useProjectsStore().items = [projectSummary({ id: projectId(1), name: 'website' })]
+      const { wrapper, state, textarea } = mountComposer({ projectId: projectId(1) })
+      await type(textarea(), '/re')
+      const inMenu = press(textarea().element, { key: 'Tab', shiftKey: true })
+      expect(inMenu.defaultPrevented).toBe(false)
+      expect(state.toolMode).toBe('ask')
+      await type(textarea(), 'plain text')
+      const cycle = press(textarea().element, { key: 'Tab', shiftKey: true })
+      await flushPromises()
+      expect(cycle.defaultPrevented).toBe(true)
+      expect(state.toolMode).toBe('edits')
       wrapper.unmount()
     })
   })

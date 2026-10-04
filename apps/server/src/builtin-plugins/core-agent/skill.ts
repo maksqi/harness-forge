@@ -4,22 +4,26 @@
 // least one active skill (`assembleTools({ skillsAvailable })`) and never to a sub-agent (ARCHITECTURE.md 6.25).
 //
 // P10-0b (C32): the definition (name, description, schema, policy, timeout, model text) is final and frozen. `execute`
-// is a stub that fails with a tool error until W10.5 implements it through the run's agent scope
-// (`agentScopeOf(c).loadSkill(name, signal)`; a call without a scope, a child or a context without a run, stays a
-// tool error; an unknown name is a tool error that lists the available skills).
+// (W10.5) loads the skill through the run's agent scope (`agentScopeOf(c).loadSkill(name, c.signal)`, `chat/skills.ts`):
+// a call without a scope (a sub-agent, a context outside a chat run) fails with `SKILLS_NOT_AVAILABLE_ERROR`; an
+// unknown, turned-off or unreadable skill is a tool error that lists the available skills.
 //
 // The model reads the content; for a project skill then "Base folder: <baseDir> — read supporting files with
 // read_file" and the supporting files as project-relative paths (`files` are relative to `baseDir`).
 import type { ToolDefinition, ToolResultOutput } from '@harness-forge/plugin-sdk'
 import type { SkillInput, SkillOutput } from '@harness-forge/shared'
 import { skillInputSchema, skillOutputSchema } from '@harness-forge/shared'
+import { agentScopeOf } from '../../chat/agent-scope.ts'
 import { SKILL_TIMEOUT_MS, textModelOutput } from './common.ts'
 
 export const SKILL_TOOL_NAME = 'skill'
 
 export const SKILL_DESCRIPTION = 'Load a skill: instructions for one kind of task, written by the user, a plugin or the project. The "Skills" block of your instructions lists the available skills with what each one is for. When a request matches a skill\'s description, call this tool with its name before you start and follow the instructions it returns. A project skill can come with supporting files in its folder (templates, references, scripts): the result names them, read them with read_file when the instructions point at them. Load a skill once; its instructions stay in the conversation. Do not load skills that do not match the task, and never guess names that are not listed.'
 
-/** The tool error of the P10-0b stub (W10.5 loads skills through the agent scope). */
+/**
+ * The tool error of a call without an agent scope (a sub-agent, which is never offered `skill`, or a context outside a
+ * chat run). The text of the P10-0b stub, kept: `index.test.ts` pins it.
+ */
 export const SKILLS_NOT_AVAILABLE_ERROR = 'Skills are not available yet.'
 
 /** The line the model reads after the content of a project skill. */
@@ -50,8 +54,11 @@ export function createSkillTool(): ToolDefinition<SkillInput, SkillOutput> {
     inputSchema: skillInputSchema,
     policy: 'safe',
     timeoutMs: SKILL_TIMEOUT_MS,
-    async execute(): Promise<SkillOutput> {
-      throw new Error(SKILLS_NOT_AVAILABLE_ERROR)
+    async execute(input, c): Promise<SkillOutput> {
+      const scope = agentScopeOf(c)
+      if (scope === null)
+        throw new Error(SKILLS_NOT_AVAILABLE_ERROR)
+      return scope.loadSkill(input.name, c.signal)
     },
     toModelOutput(output): ToolResultOutput {
       return textModelOutput(skillOutputSchema, output, skillModelText)

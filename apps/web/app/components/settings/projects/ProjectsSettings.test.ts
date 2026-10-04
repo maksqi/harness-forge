@@ -1,7 +1,8 @@
-// Settings -> Projects (docs/UI.md 9.10, 10.4; W7.9-T6, W8.11-T2): the page frame with Add project, the skeleton, the
-// load error with Retry, the rows (path, chat count, missing folder, project file, allowed commands), rename, the
-// instructions dialog, the allowed commands dialog, delete with its confirmation and the 409 toast, the empty state,
-// `?add=1`, and the global shell rules below the list (loaded on every visit).
+// Settings -> Projects (docs/UI.md 9.10, 10.4; W7.9-T6, W8.11-T2, W10.12-T4): the page frame with Add project, the
+// skeleton, the load error with Retry, the rows (path, chat count, missing folder, project file, allowed commands),
+// rename, the instructions dialog, the allowed commands dialog, the link to the project's agents, commands and skills
+// (Phase 10), delete with its confirmation and the 409 toast, the empty state, `?add=1`, and the global shell rules
+// below the list (loaded on every visit).
 import type { VueWrapper } from '@vue/test-utils'
 import type { ComputedRef } from 'vue'
 import type { MockApi } from '~/utils/testing/mock-api'
@@ -237,12 +238,41 @@ describe('projectsSettings', () => {
     await mountSettings()
     byTestId(testIds.projectRowMenu, row(projectId(2)))!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
     await flushPromises()
+    const items = [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    // After Allowed commands…, before the separator and Delete… (docs/UI.md 9.10).
+    expect(items.map(item => item.dataset.testid)).toEqual([
+      testIds.projectRename,
+      testIds.projectInstructions,
+      testIds.projectAllowlist,
+      testIds.projectCustomizations,
+      testIds.projectDelete,
+    ])
+    // 40px touch targets on coarse pointers.
+    for (const item of items)
+      expect(item.className, item.dataset.testid).toContain('pointer-coarse:min-h-10')
     const item = byTestId(testIds.projectCustomizations)!
     expect(item.textContent?.trim()).toBe('Agents, commands and skills…')
     expect(item.querySelector('svg')).not.toBeNull()
     item.click()
     await flushPromises()
+    // A project whose folder is missing opens too: the Customize page explains it.
+    expect(mocks.router.push).toHaveBeenCalledTimes(1)
     expect(mocks.router.push).toHaveBeenCalledWith({ path: '/settings/customize', query: { project: projectId(2) } })
+    expect(byTestId(testIds.projectCustomizations)).toBeNull()
+  })
+
+  it('opens the Customize page with the keyboard from the row menu (Phase 10)', async () => {
+    await mountSettings()
+    byTestId(testIds.projectRowMenu, row(projectId(1)))!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    byTestId(testIds.projectCustomizations)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    await nextTick()
+    await flushPromises()
+    expect(mocks.router.push).toHaveBeenCalledWith({ path: '/settings/customize', query: { project: projectId(1) } })
+    // No dialog of another menu item opened.
+    expect(byTestId(testIds.allowlistDialog)).toBeNull()
+    expect(byTestId(testIds.projectRenameInput)).toBeNull()
   })
 
   it('shows the load error with Retry', async () => {

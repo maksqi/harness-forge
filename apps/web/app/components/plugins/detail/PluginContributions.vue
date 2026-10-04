@@ -4,12 +4,14 @@
 // renders McpServersPanel instead), commands and hooks. Tool, MCP and command details come from the plugins store
 // (`GET /api/tools`, `/api/mcp`, `/api/commands`); when one of them cannot be loaded, the names the plugin
 // registered are listed without their controls.
-// Phase 10 (C33 mounts, W10.12 implements; plugin API 1.4.0): Agents and Skills follow Commands, each a
-// PluginCustomizationList over the global catalog (`customizations.catalog(null)` by plugin; names without a catalog
-// entry are name-only rows).
+// Phase 10 (plugin API 1.4.0): Agents ("Sub-agents the main agent can start.") and Skills ("Instructions the agent loads
+// when a task needs them.") follow Commands, each a PluginCustomizationList over the global catalog
+// (`customizations.catalog(null)`, the plugin's entries of the kind). The catalog is fetched (at most
+// CATALOG_MAX_AGE_MS old) whenever the plugin contributes agents or skills; names without a catalog entry (still
+// loading, or the catalog could not be loaded) are name-only rows.
 import type { PluginDetail } from '@harness-forge/shared'
 import { ArrowRightIcon, SettingsIcon } from '@lucide/vue'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import ProviderIcon from '~/components/providers/ProviderIcon.vue'
@@ -24,6 +26,9 @@ import PluginMcpServerList from './PluginMcpServerList.vue'
 import PluginToolsTable from './PluginToolsTable.vue'
 
 const props = defineProps<{ plugin: PluginDetail }>()
+
+/** A global catalog younger than this (and not stale) is used as is; a `plugin.changed` event makes it stale. */
+const CATALOG_MAX_AGE_MS = 15_000
 
 const plugins = usePluginsStore()
 const providers = useProvidersStore()
@@ -92,8 +97,22 @@ const commands = computed(() => {
 
 // ---------- agents and skills (Phase 10) ----------
 
+/** The contributed agent and skill names, as one key: a plugin reload that changes them fetches the catalog again. */
+const customizationNames = computed(() => [...contributions.value.agents, ...contributions.value.skills].join('\n'))
+
+watch(customizationNames, (names) => {
+  if (names)
+    customizations.fetchCatalog(null, { maxAgeMs: CATALOG_MAX_AGE_MS }).catch(() => {})
+}, { immediate: true })
+
+/**
+ * The rows of one kind: the plugin's catalog entries of the names it contributes now (a catalog older than a plugin
+ * reload may still list a removed one), and the contributed names the catalog does not know yet.
+ */
 function customizationRows(kind: 'agent' | 'skill', names: readonly string[]) {
-  const entries = customizations.entriesOf(null, kind).filter(entry => entry.source === 'plugin' && entry.pluginId === props.plugin.id)
+  const contributed = new Set(names)
+  const entries = customizations.entriesOf(null, kind)
+    .filter(entry => entry.source === 'plugin' && entry.pluginId === props.plugin.id && contributed.has(entry.name))
   const known = new Set(entries.map(entry => entry.name))
   return { entries, missing: names.filter(name => !known.has(name)) }
 }

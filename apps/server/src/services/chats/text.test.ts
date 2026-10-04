@@ -68,6 +68,24 @@ describe('message text', () => {
     expect(messagePlainText([parts[2]])).toBe('Also cover the PINEAPPLE case')
   })
 
+  it('includes the report of background task results at their place, nothing else of them (Phase 10)', () => {
+    const result = (report: unknown, description = 'DESCRIPTION-TEXT') => ({
+      type: 'data-task-result',
+      data: { taskId: 'bgt_0000000000000001', toolCallId: 'call_bg', messageId: 'msg_0000000000000001', output: { status: 'completed', type: 'explore', description, modelRef: 'mock:background', report, steps: [], stepsOmitted: 0, startedAt: 1 }, deliveredAt: 2 },
+    })
+    const reply = [{ type: 'text', text: 'Before' }, result('  Found the MANGO module.  '), { type: 'text', text: 'After' }]
+    expect(messagePlainText(reply)).toBe('Before\nFound the MANGO module.\nAfter')
+    expect(toSearchText(reply)).toContain('mango')
+    expect(toSearchText(reply)).not.toContain('description-text')
+    // The carrier of a server-started turn: only results.
+    expect(messagePlainText([result('First report'), result('Second report')])).toBe('First report\nSecond report')
+    // An empty or missing report and malformed data are not text.
+    expect(messagePlainText([result('   '), result(42), { type: 'data-task-result', data: null }, { type: 'data-task-result' }])).toBe('')
+    // With a steer in the same reply, both keep their places.
+    const steer = { type: 'data-steer', data: { id: 'msg_steer00000000002', parts: [{ type: 'text', text: 'Steer text' }], queuedAt: 1, deliveredAt: 2 } }
+    expect(messagePlainText([{ type: 'text', text: 'A' }, steer, result('Report text'), { type: 'text', text: 'B' }])).toBe('A\nSteer text\nReport text\nB')
+  })
+
   it('stores search text NFC-normalized and lowercased with Unicode rules', () => {
     expect(toSearchText([{ type: 'text', text: `Hello \u00DCBER ${GREEK_WORLD_UPPER}` }])).toBe(`hello \u00FCber ${GREEK_WORLD_LOWER}`)
     // A decomposed "e" + combining acute becomes the composed character.

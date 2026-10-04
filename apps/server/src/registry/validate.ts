@@ -1,12 +1,15 @@
 // Validation of registrations (PLUGINS.md 9 and 14): provider definitions, models, tools, commands, hooks and MCP server
-// declarations. Invalid shapes throw `validation_error`; duplicate names and the reserved `mcp__` tool prefix throw
-// `conflict` (checked by the registry). Plugin code reaches these checks through `ctx`, so messages name the field.
+// declarations, and (plugin API 1.4.0, ADR-045) agent types and skills. Invalid shapes throw `validation_error`;
+// duplicate names and the reserved `mcp__` tool prefix throw `conflict` (checked by the registry). Plugin code reaches
+// these checks through `ctx`, so messages name the field.
 import type {
+  AgentDefinition,
   CommandDefinition,
   HookName,
   McpServerDecl,
   ModelInfo,
   ProviderDefinition,
+  SkillDefinition,
   ToolDefinition,
 } from '@harness-forge/plugin-sdk'
 import type { ToolRegisterOptions } from './types.ts'
@@ -14,6 +17,8 @@ import { Buffer } from 'node:buffer'
 import {
   COMMAND_NAME_PATTERN,
   credentialFieldSchema,
+  declarativeAgentSchema,
+  declarativeSkillSchema,
   HarnessError,
   httpUrlSchema,
   isClientCommand,
@@ -295,4 +300,44 @@ export function validateMcpServerDecl(pluginId: string, decl: McpServerDecl): Mc
   if (!isBuiltinPluginId(pluginId) && !isPluginNamespacedId(pluginId, parsed.data.id))
     throw invalid(`MCP server id "${parsed.data.id}" must be "${pluginId}" or start with "${pluginId}-".`, ['id'])
   return parsed.data
+}
+
+// ---------- agents and skills (plugin API 1.4.0, ADR-045) ----------
+
+/**
+ * Checks an agent type like `contributes.agents` (`declarativeAgentSchema`): the name pattern `AGENT_NAME_PATTERN`, not a
+ * builtin type (`explore`, `general`) or its alias (`general-purpose`), the description (1-1024 characters after
+ * trimming), the instructions (1 character to 64 KiB of UTF-8), at most 64 unique tool names or `mcp__<server>__*`
+ * prefixes, and the model (`provider:model` or `inherit`); unknown keys are refused. Returns a frozen copy (the
+ * description trimmed), so a plugin cannot change a definition after it was checked.
+ */
+export function validateAgentDefinition(definition: AgentDefinition): AgentDefinition {
+  if (!isObject(definition) || Array.isArray(definition))
+    throw invalid('An agent definition must be an object.')
+  const parsed = declarativeAgentSchema.safeParse(definition)
+  if (!parsed.success)
+    throw withPrefix(`Agent ${describeValue(definition.name)}`, validationError(parsed.error))
+  const { name, description, instructions, tools, model } = parsed.data
+  return Object.freeze({
+    name,
+    description,
+    instructions,
+    ...(tools === undefined ? {} : { tools: Object.freeze([...tools]) as string[] }),
+    ...(model === undefined ? {} : { model }),
+  })
+}
+
+/**
+ * Checks a skill like `contributes.skills` (`declarativeSkillSchema`): the name pattern `AGENT_NAME_PATTERN`, the
+ * description (1-1024 characters after trimming) and the content (1 character to 64 KiB of UTF-8); unknown keys are
+ * refused. Returns a frozen copy (the description trimmed).
+ */
+export function validateSkillDefinition(definition: SkillDefinition): SkillDefinition {
+  if (!isObject(definition) || Array.isArray(definition))
+    throw invalid('A skill definition must be an object.')
+  const parsed = declarativeSkillSchema.safeParse(definition)
+  if (!parsed.success)
+    throw withPrefix(`Skill ${describeValue(definition.name)}`, validationError(parsed.error))
+  const { name, description, content } = parsed.data
+  return Object.freeze({ name, description, content })
 }

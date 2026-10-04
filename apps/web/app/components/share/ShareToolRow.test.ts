@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
-import { taskInput, taskOutput, taskStep, todoItem } from '~/utils/testing/fixtures'
+import { backgroundLaunchOutput, skillOutput, taskInput, taskOutput, taskStep, todoItem } from '~/utils/testing/fixtures'
 import ShareToolRow from './ShareToolRow.vue'
 import { allByTestId, byTestId, settle } from './testing'
 
@@ -397,5 +397,71 @@ describe('shareToolRow: agent tools (Phase 9)', () => {
     failed.querySelector('button')!.click()
     await settle()
     expect(byTestId(testIds.todoList, byTestId(testIds.shareToolRowOutput)!)).toBeNull()
+  })
+})
+
+describe('shareToolRow: custom agents, background calls and skills (Phase 10)', () => {
+  it('reads a custom agent type as its name, with its icon', () => {
+    mountRow({ type: 'tool', toolName: 'task', status: 'done', input: taskInput({ type: 'reviewer', description: 'Review the diff' }), output: taskOutput({ type: 'reviewer' }) })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain('reviewer')
+    expect(row.textContent).toContain('Review the diff')
+    expect(row.textContent).not.toContain('Agent')
+    expect(row.querySelector('.lucide-bot-message-square')).not.toBeNull()
+    expect(row.querySelector('[data-slot="share-task-background"]')).toBeNull()
+  })
+
+  it('cuts a long custom name and adds "· in the background" for a background call', async () => {
+    const name = 'a-very-long-custom-agent-name-indeed'
+    mountRow({
+      type: 'tool',
+      toolName: 'task',
+      status: 'done',
+      input: taskInput({ type: name, description: 'Find flaky tests', background: true }),
+      output: backgroundLaunchOutput({ type: name, description: 'Find flaky tests' }),
+    })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain(`${name.slice(0, 23)}…`)
+    expect(row.querySelector('[data-slot="share-task-background"]')?.textContent).toBe('· in the background')
+    row.querySelector('button')!.click()
+    await settle()
+    expect(byTestId(testIds.shareToolRowOutput)!.querySelector('[data-slot="task-body"]')).not.toBeNull()
+  })
+
+  it('reads "Loaded skill" without tool details, as a static row', () => {
+    mountRow({ type: 'tool', toolName: 'skill', status: 'done' })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.querySelector('[data-slot="agent-tool-label"]')?.textContent).toBe('Loaded skill')
+    expect(row.querySelector('.lucide-book-open')).not.toBeNull()
+    expect(row.querySelector('button')).toBeNull()
+  })
+
+  it('reads "Loaded skill {name}" with tool details and shows SkillToolBody behind the raw toggle', async () => {
+    mountRow({ type: 'tool', toolName: 'skill', status: 'done', input: { name: 'release-notes' }, output: skillOutput() })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain('Loaded skill')
+    expect(row.textContent).toContain('release-notes')
+    row.querySelector('button')!.click()
+    await settle()
+    const body = byTestId(testIds.shareToolRowOutput)!
+    expect(body.querySelector('[data-slot="skill-body"]')?.textContent).toContain('How to write the release notes')
+    expect(body.querySelector('[data-slot="tool-value"]')).toBeNull()
+    byTestId(testIds.toolRawToggle, body)!.click()
+    await settle()
+    expect(Array.from(body.querySelectorAll<HTMLElement>('[data-slot="tool-value"]')).map(block => block.dataset.label)).toEqual(['input', 'output'])
+  })
+
+  it('keeps the generic row for a failed skill call or a cut skill output', async () => {
+    const failed = mountRow({ type: 'tool', toolName: 'skill', status: 'error', input: { name: 'pdf' }, errorText: 'Unknown skill "pdf".' })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain('skill')
+    expect(row.textContent).toContain('"pdf"')
+    failed.unmount()
+
+    mountRow({ type: 'tool', toolName: 'skill', status: 'done', input: { name: 'pdf' }, output: '{"name": "pdf", "content": "\n[truncated]' })
+    const cut = byTestId(testIds.shareToolRow)!
+    cut.querySelector('button')!.click()
+    await settle()
+    expect(byTestId(testIds.shareToolRowOutput)!.querySelector('[data-slot="skill-body"]')).toBeNull()
   })
 })

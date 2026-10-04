@@ -1,5 +1,7 @@
 // Import (W5.3-T4): round trip into another server, skip / copy, attachment remapping, the zip guards, per-chat
-// failures, single chat JSON (v1 / v2), settings restore, events and the mutex.
+// failures, single chat JSON (v1 / v2), settings restore, events and the mutex. Phase 10 (W10.6-T2): the personal
+// definitions of `customizations.json` round-trip into a fresh server through the C30 fake (`restoreCustomizations`; an
+// existing kind and name kept), invalid items and files, and a background task result that comes back with its chat.
 import type { BackupFileEntry, BackupManifest, ChatExportV1, ChatExportV2, DataImportResult, FileRef, HarnessUIMessage } from '@harness-forge/shared'
 import type { DataTestApp } from './fixtures.test-util.ts'
 import { chatExportSchema, dataImportResultSchema, DEFAULT_SETTINGS, HarnessError, LIMITS } from '@harness-forge/shared'
@@ -9,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { chats, files } from '../../db/schema.ts'
 import { patchZip, unixMode, zipOf } from '../../plugins/install/testing.ts'
 import { PNG, TEXT } from '../files/fixtures.test-util.ts'
+import { closeCustomizedApps, customizedDataApp, definition } from './backup-fixtures.test-util.ts'
 import {
   assistant,
   chatId,
@@ -22,10 +25,11 @@ import {
   unzip,
   user,
 } from './fixtures.test-util.ts'
-import { copyTitle } from './restore.ts'
+import { copyTitle, CUSTOMIZATION_ITEMS_MAX } from './restore.ts'
 
 afterEach(async () => {
   await closeDataApps()
+  await closeCustomizedApps()
 })
 
 const ZERO_TOTALS = { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null }
@@ -486,5 +490,134 @@ describe('copyTitle', () => {
     const emoji = copyTitle('\u{1F600}'.repeat(199))!
     expect(Array.from(emoji)).toHaveLength(200)
     expect(emoji.startsWith('\u{1F600}'.repeat(189))).toBe(true)
+  })
+})
+
+describe('import: personal agents, commands and skills (Phase 10)', () => {
+  it('round-trips customizations.json into a fresh server on request, keeping an existing kind and name', async () => {
+    const source = await customizedDataApp()
+    await source.deps.chats.create({ id: chatId(1), title: 'With definitions', messages: [user(1), assistant(2)] })
+    await source.customizations.create({ kind: 'agent', content: definition('agent', 'reviewer', 'Review from the backup.') })
+    await source.customizations.create({ kind: 'command', content: definition('command', 'ship'), enabled: false })
+    await source.customizations.create({ kind: 'skill', content: definition('skill', 'notes') })
+    const zip = await exportBytes(source.deps, { files: false })
+    expect(Object.keys(unzip(zip))).toContain('customizations.json')
+
+    const target = await customizedDataApp()
+    const kept = await target.customizations.create({ kind: 'agent', content: definition('agent', 'reviewer', 'Review the local way.') })
+    // Without the flag nothing is restored, and the entry is no unknown entry.
+    const plain = await importBytes(target, zip)
+    expect(plain).toMatchObject({ counts: { imported: 1 }, warnings: [] })
+    expect(plain.customizations).toBeUndefined()
+    expect(target.customizations.calls.restoreBackup).toBe(0)
+
+    target.events.clear()
+    const restored = await importBytes(target, zip, { restoreCustomizations: true })
+    expect(restored.customizations).toEqual({ imported: 2, skipped: 1, failed: 0 })
+    expect(restored.warnings).toEqual([])
+    const items = (await target.deps.customizations.exportBackup()).items
+    expect(items.map(item => [item.kind, item.name, item.enabled])).toEqual([['agent', 'reviewer', true], ['command', 'ship', false], ['skill', 'notes', true]])
+    expect(items[0]!.content).toBe(kept.content)
+    expect(target.events.ofType('customization.changed')).toHaveLength(2)
+    // Running it again changes nothing.
+    expect((await importBytes(target, zip, { restoreCustomizations: true })).customizations).toEqual({ imported: 0, skipped: 3, failed: 0 })
+  })
+
+  it('fails invalid items with a warning that names them (never their content) and restores the rest', async () => {
+    const target = await customizedDataApp()
+    const secretBody = 'CONTENT-SENTINEL-q5'
+    const zip = backupZip({
+      'manifest.json': manifestOf(0, { includes: { files: false, settings: false, customizations: true }, counts: { chats: 0, messages: 0, files: 0, fileBytes: 0, customizations: 5 } }),
+      'customizations.json': {
+        items: [
+          { kind: 'agent', name: 'good', content: definition('agent', 'good'), enabled: true },
+          { kind: 'widget', name: 'odd', content: definition('agent', 'odd'), enabled: true },
+          { kind: 'skill', name: 'huge', content: definition('skill', 'huge', `${secretBody}${'x'.repeat(70 * 1024)}`), enabled: true },
+          { kind: 'command', name: 'unparsable', content: `---\nname: [unclosed\n---\n${secretBody}`, enabled: true },
+          'not an item',
+        ],
+      },
+    })
+    const result = await importBytes(target, zip, { restoreCustomizations: true })
+    expect(result.customizations).toEqual({ imported: 1, skipped: 0, failed: 4 })
+    expect(result.warnings).toEqual([
+      'Item 2 in customizations.json is invalid and was not restored.',
+      'The personal skill "huge" in customizations.json is invalid and was not restored.',
+      'Item 5 in customizations.json is invalid and was not restored.',
+      'The personal command "unparsable" was not restored.',
+    ])
+    expect(JSON.stringify(result)).not.toContain(secretBody)
+    expect((await target.deps.customizations.exportBackup()).items.map(item => item.name)).toEqual(['good'])
+  })
+
+  it('reads at most the items of every kind\'s limit', async () => {
+    const target = await customizedDataApp()
+    const items = Array.from({ length: CUSTOMIZATION_ITEMS_MAX + 2 }, (_value, index) => ({ kind: 'agent', name: `a${index}`, content: definition('agent', `a${index}`), enabled: true }))
+    const zip = backupZip({ 'manifest.json': manifestOf(0, { includes: { files: false, settings: false, customizations: true } }), 'customizations.json': { items } })
+    const result = await importBytes(target, zip, { restoreCustomizations: true })
+    // The fake keeps the per-kind limit (200 agents); the 2 items past the file's cap fail without being read.
+    expect(result.customizations).toEqual({ imported: 200, skipped: 0, failed: CUSTOMIZATION_ITEMS_MAX + 2 - 200 })
+    expect(result.warnings).toContain(`customizations.json holds ${CUSTOMIZATION_ITEMS_MAX + 2} items; only the first ${CUSTOMIZATION_ITEMS_MAX} were read.`)
+    expect(target.customizations.calls.restoreBackup).toBe(1)
+  })
+
+  it('warns when there is nothing to restore, the file is unusable, the restore fails or the upload is a chat JSON', async () => {
+    const target = await customizedDataApp()
+    const old = await importBytes(target, backupZip({ 'manifest.json': manifestOf(0) }), { restoreCustomizations: true })
+    expect(old).toMatchObject({ warnings: ['The backup has no personal agents, commands or skills (customizations.json), so no personal agents, commands or skills were restored.'] })
+    expect(old.customizations).toBeUndefined()
+    // A backup that had none: nothing to say.
+    const empty = await importBytes(target, backupZip({ 'manifest.json': manifestOf(0, { includes: { files: false, settings: false, customizations: true } }) }), { restoreCustomizations: true })
+    expect(empty.warnings).toEqual([])
+    const missing = await importBytes(target, backupZip({ 'manifest.json': manifestOf(0, { includes: { files: false, settings: false, customizations: true }, counts: { chats: 0, messages: 0, files: 0, fileBytes: 0, customizations: 2 } }) }), { restoreCustomizations: true })
+    expect(missing.warnings).toEqual(['The backup lists personal agents, commands or skills, but customizations.json is missing, so no personal agents, commands or skills were restored.'])
+
+    const notJson = await importBytes(target, backupZip({ 'manifest.json': manifestOf(0), 'customizations.json': 'not json' }), { restoreCustomizations: true })
+    expect(notJson.warnings).toEqual(['No personal agents, commands or skills were restored: customizations.json is not valid UTF-8 JSON.'])
+    const noList = await importBytes(target, backupZip({ 'manifest.json': manifestOf(0), 'customizations.json': { entries: [] } }), { restoreCustomizations: true })
+    expect(noList.warnings).toEqual(['No personal agents, commands or skills were restored: customizations.json has no "items" list.'])
+    expect(target.customizations.calls.restoreBackup).toBe(0)
+
+    const failing = await customizedDataApp({
+      wrap: fake => ({
+        ...fake,
+        restoreBackup: async () => {
+          throw new Error('table locked')
+        },
+      }),
+    })
+    const zip = backupZip({
+      'manifest.json': manifestOf(1),
+      [`chats/${chatId(1)}.json`]: exportOf(chatId(1), [user(1)]),
+      'customizations.json': { items: [{ kind: 'agent', name: 'good', content: definition('agent', 'good'), enabled: true }] },
+    })
+    const failed = await importBytes(failing, zip, { restoreCustomizations: true })
+    expect(failed).toMatchObject({ counts: { imported: 1 }, warnings: ['No personal agents, commands or skills were restored because of a server error.'] })
+    expect(failed.customizations).toBeUndefined()
+
+    const chat = await importBytes(target, JSON.stringify(exportOf(chatId(2), [user(2)])), { restoreCustomizations: true })
+    expect(chat.warnings).toEqual(['Personal agents, commands and skills are restored only from a backup zip.'])
+  })
+
+  it('brings a delivered background task result back with its chat (the parts, never a task row)', async () => {
+    const source = await customizedDataApp()
+    const taskResult = {
+      type: 'data-task-result',
+      data: {
+        taskId: 'bgt_0000000000000001',
+        toolCallId: 'call_bg',
+        messageId: mid(2),
+        output: { status: 'completed', type: 'explore', description: 'Scan', modelRef: 'mock:background', steps: [], stepsOmitted: 0, report: 'Found 3 files.', startedAt: 1, finishedAt: 2 },
+        deliveredAt: 3,
+      },
+    } as unknown as HarnessUIMessage['parts'][number]
+    const reply: HarnessUIMessage = { ...assistant(4, 'Before'), parts: [{ type: 'text', text: 'Before', state: 'done' }, taskResult, { type: 'text', text: 'After', state: 'done' }] }
+    await source.deps.chats.create({ id: chatId(1), messages: [user(1), assistant(2), { id: mid(3), role: 'user', parts: [taskResult] }, reply] })
+    const zip = await exportBytes(source.deps, { files: false })
+    const target = await customizedDataApp()
+    const result = await importBytes(target, zip)
+    expect(result.counts.imported).toBe(1)
+    const messages = await target.deps.chats.listMessages(chatId(1))
+    expect(messages.map(message => message.parts.filter(part => part.type === 'data-task-result'))).toEqual([[], [], [taskResult], [taskResult]])
   })
 })

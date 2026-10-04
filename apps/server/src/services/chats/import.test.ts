@@ -1,6 +1,6 @@
 import type { ChatDetail, HarnessUIMessage } from '@harness-forge/shared'
 import type { TestApp } from '../../testing/create-test-app.ts'
-import { chatExportAnySchema, findCompaction, HarnessError, MESSAGE_ID_PATTERN, splitSteers } from '@harness-forge/shared'
+import { chatExportAnySchema, findCompaction, HarnessError, MESSAGE_ID_PATTERN, splitSteers, splitTaskResults } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { buildChatExport } from './export.ts'
@@ -306,5 +306,61 @@ describe('chat export -> import round trip: agent parts (Phase 9)', () => {
     messages[1] = { ...reply, parts: [...reply.parts, { type: 'data-activity', data: { kind: 'idle' } } as HarnessUIMessage['parts'][number]] }
     const { id } = await t.deps.chats.importChat({ exported: exportOf(agentChat(messages)), id: 'keep', restore: true })
     expect((await t.deps.chats.get(id)).messages).toEqual(agentMessages())
+  })
+})
+
+// ---------- Phase 10: background task results (W10.6-T4) ----------
+
+function taskResultPart(n: number, report = `Report ${n}: the KUMQUAT module.`): HarnessUIMessage['parts'][number] {
+  return {
+    type: 'data-task-result',
+    data: {
+      taskId: `bgt_taskimport00000${n}`,
+      toolCallId: `call_bg${n}`,
+      messageId: 'msg_agentimport00012',
+      output: { status: 'completed', type: 'explore', description: `Scan ${n}`, modelRef: 'mock:background', steps: [], stepsOmitted: 0, report, startedAt: 1, finishedAt: 2 },
+      deliveredAt: 3,
+    },
+  } as HarnessUIMessage['parts'][number]
+}
+
+/** A reply with an in-run result, then the carrier of a turn the server started and its reply. */
+function backgroundMessages(): HarnessUIMessage[] {
+  return [
+    { id: 'msg_agentimport00011', role: 'user', metadata: META, parts: [{ type: 'text', text: 'Scan in the background' }] },
+    {
+      id: 'msg_agentimport00012',
+      role: 'assistant',
+      metadata: { modelRef: 'mock:background', startedAt: 2, finishedAt: 3 },
+      parts: [{ type: 'step-start' }, { type: 'text', text: 'Started', state: 'done' }, taskResultPart(1), { type: 'step-start' }, { type: 'text', text: 'One is in', state: 'done' }],
+    },
+    { id: 'msg_agentimport00013', role: 'user', metadata: META, parts: [taskResultPart(2)] },
+    { id: 'msg_agentimport00014', role: 'assistant', metadata: { modelRef: 'mock:background', startedAt: 4, finishedAt: 5 }, parts: [{ type: 'step-start' }, { type: 'text', text: 'Both are in', state: 'done' }] },
+  ] as HarnessUIMessage[]
+}
+
+describe('chat export -> import round trip: background task results (Phase 10)', () => {
+  it('keeps result parts in replies and carrier messages, under kept or new ids, and indexes the reports', async () => {
+    const t = await testApp()
+    const exported = exportOf(agentChat(backgroundMessages()))
+    const { id } = await t.deps.chats.importChat({ exported, id: 'keep', restore: true })
+    expect((await t.deps.chats.get(id)).messages).toEqual(backgroundMessages())
+    const again = (await t.deps.chats.export(id, 'json')).body
+    expect(chatExportAnySchema.parse(JSON.parse(again)).chat.messages).toEqual(exported.chat.messages)
+
+    const copy = await t.deps.chats.importChat({ exported: exportOf(agentChat(backgroundMessages())), id: 'new', restore: false })
+    const path = (await t.deps.chats.get(copy.id)).messages
+    expect(path.map(message => message.parts)).toEqual(backgroundMessages().map(message => message.parts))
+    // The model's view of the imported path: each result becomes its own user message.
+    expect(splitTaskResults(path).map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'assistant'])
+    expect((await t.deps.chats.list({ q: 'kumquat' })).items.map(chat => chat.id).sort()).toEqual([id, copy.id].sort())
+  })
+
+  it('rejects invalid result data with the issue path', async () => {
+    const [, reply] = backgroundMessages()
+    const bad = { ...reply!, parts: [{ type: 'data-task-result', data: { taskId: 'not-a-task', toolCallId: 'c', messageId: 'msg_agentimport00012', output: {}, deliveredAt: 1 } }] } as unknown as HarnessUIMessage
+    const error = await rejection(validateImportedMessages([bad], ['chat']))
+    expect(error.code).toBe('validation_error')
+    expect((error.details as { issues: { path: unknown[] }[] }).issues[0]!.path.slice(0, 3)).toEqual(['chat', 'messages', 0])
   })
 })

@@ -1,27 +1,126 @@
+import type { CustomizationEntry } from '@harness-forge/shared'
+// CustomizationViewer (docs/UI.md 9.12, 10.7, 14; W10.8-T4): the frontmatter as a definition list, the raw file from
+// `GET /customizations/source` in a read-only editor, Copy path, Copy to personal (the parsed draft), Export .md, and
+// "This file no longer exists." for a 404.
+import type { VueWrapper } from '@vue/test-utils'
+import type { MockApi } from '~/utils/testing/mock-api'
+import { HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
-import { afterEach, describe, expect, it } from 'vitest'
+import { createPinia, disposePinia, setActivePinia } from 'pinia'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { defineComponent, h, nextTick, reactive } from 'vue'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
-import { customizationEntry, projectId } from '~/utils/testing/fixtures'
+import { AGENT_MARKDOWN, customizationEntry, definitionDiagnostic, projectId } from '~/utils/testing/fixtures'
+import { createMockApi } from '~/utils/testing/mock-api'
 import CustomizationViewer from './CustomizationViewer.vue'
 
-afterEach(() => {
-  document.body.replaceChildren()
+const mocks = vi.hoisted(() => ({ api: null as unknown, downloadText: vi.fn() }))
+
+vi.mock('~/composables/useApi', () => ({ useApi: () => mocks.api }))
+vi.mock('~/utils/download', () => ({ downloadText: mocks.downloadText }))
+
+let api: MockApi
+let pinia: ReturnType<typeof createPinia>
+let wrapper: VueWrapper | null = null
+
+beforeEach(() => {
+  api = createMockApi()
+  mocks.api = api
+  mocks.downloadText.mockReset()
+  pinia = createPinia()
+  setActivePinia(pinia)
 })
 
-describe('customizationViewer (P10-0b stub)', () => {
-  it('renders its root with the entry\'s kind and source while open', async () => {
-    const wrapper = mount(CustomizationViewer, { props: { open: true, entry: customizationEntry(), projectId: projectId(1) }, attachTo: document.body })
-    await flushPromises()
-    const viewer = document.body.querySelector<HTMLElement>(`[data-testid="${testIds.customizationViewer}"]`)!
-    expect(viewer.dataset).toMatchObject({ kind: 'agent', source: 'project' })
-    expect(viewer.textContent).toContain('reviewer')
-    wrapper.unmount()
+afterEach(() => {
+  wrapper?.unmount()
+  wrapper = null
+  document.body.replaceChildren()
+  disposePinia(pinia)
+})
+
+async function mountViewer(entry: CustomizationEntry) {
+  const state = reactive({ open: true })
+  const emitted = { open: [] as boolean[], copy: [] as unknown[] }
+  const Host = defineComponent({
+    setup: () => () => h(TooltipProvider, null, {
+      default: () => h(CustomizationViewer, {
+        'open': state.open,
+        entry,
+        'projectId': projectId(1),
+        'onUpdate:open': (value: boolean) => {
+          emitted.open.push(value)
+          state.open = value
+        },
+        'onCopy': (draft: unknown) => emitted.copy.push(draft),
+      }),
+    }),
+  })
+  wrapper = mount(Host, { attachTo: document.body, global: { plugins: [pinia] } })
+  await flushPromises()
+  return { state, emitted }
+}
+
+function viewer(): HTMLElement {
+  return document.body.querySelector<HTMLElement>(`[data-testid="${testIds.customizationViewer}"]`)!
+}
+
+function button(label: string): HTMLButtonElement {
+  return [...viewer().querySelectorAll<HTMLButtonElement>('button')].find(element => element.textContent?.trim() === label)!
+}
+
+describe('customizationViewer', () => {
+  it('shows the frontmatter, the raw file read-only with lint markers, and the path of a project file', async () => {
+    api.customizations.source.mockResolvedValue({ content: AGENT_MARKDOWN, path: '.harness/agents/reviewer.md' })
+    const entry = customizationEntry({ diagnostics: [definitionDiagnostic()] })
+    await mountViewer(entry)
+    expect(api.customizations.source).toHaveBeenCalledWith({
+      query: { projectId: projectId(1), kind: 'agent', name: 'reviewer', source: 'project', path: '.harness/agents/reviewer.md' },
+    })
+    expect(viewer().dataset).toMatchObject({ kind: 'agent', source: 'project' })
+    expect(viewer().getAttribute('role')).toBe('dialog')
+    expect(viewer().textContent).toContain('reviewer')
+    const terms = [...viewer().querySelectorAll('dt')].map(term => term.textContent?.trim())
+    expect(terms).toEqual(['Description', 'Tools', 'Model', 'Source'])
+    expect(viewer().querySelector('dl')?.textContent).toContain('read_file, search_files')
+    expect(viewer().querySelector('dl')?.textContent).toContain('Default sub-agent model')
+    expect(viewer().textContent).toContain('.harness/agents/reviewer.md')
+    expect(button('Copy path')).toBeDefined()
+    await vi.waitFor(() => expect(viewer().querySelector('[data-slot="markdown-editor"]')?.getAttribute('data-ready')).toBe('true'))
+    await nextTick()
+    const content = viewer().querySelector<HTMLElement>('.cm-content')!
+    expect(content.getAttribute('aria-readonly')).toBe('true')
+    expect(content.getAttribute('aria-label')).toBe('Contents of .harness/agents/reviewer.md')
+    expect(content.textContent).toContain('Review the diff.')
+    expect(viewer().querySelector('.cm-hf-lint-marker-warning')).not.toBeNull()
+    await vi.waitFor(() => expect(document.activeElement?.getAttribute('data-slot')).toBe('sheet-close'))
   })
 
-  it('renders nothing without an entry', async () => {
-    const wrapper = mount(CustomizationViewer, { props: { open: true, entry: null, projectId: null }, attachTo: document.body })
+  it('copies the parsed file to personal and exports it as {name}.md', async () => {
+    api.customizations.source.mockResolvedValue({ content: AGENT_MARKDOWN })
+    const { emitted } = await mountViewer(customizationEntry({ source: 'builtin', name: 'reviewer', path: undefined }))
+    button('Copy to personal').click()
+    expect(emitted.copy).toEqual([{
+      kind: 'agent',
+      name: 'reviewer',
+      description: 'Reviews a diff and reports bugs',
+      tools: ['read_file', 'search_files'],
+      model: null,
+      argumentHint: null,
+      body: 'Review the diff. Report each bug with its file and line.',
+    }])
+    button('Export .md').click()
+    expect(mocks.downloadText).toHaveBeenCalledWith(AGENT_MARKDOWN, 'reviewer.md', 'text/markdown')
+    expect(viewer().textContent).not.toContain('Copy path')
+  })
+
+  it('says when the file no longer exists and closes', async () => {
+    api.customizations.source.mockRejectedValue(new HarnessError({ code: 'not_found', message: 'Not found.' }))
+    const { emitted } = await mountViewer(customizationEntry())
+    expect(viewer().textContent).toContain('This file no longer exists.')
+    expect(button('Copy to personal')).toBeUndefined()
+    button('Close').click()
     await flushPromises()
-    expect(document.body.querySelector(`[data-testid="${testIds.customizationViewer}"]`)).toBeNull()
-    wrapper.unmount()
+    expect(emitted.open).toEqual([false])
   })
 })

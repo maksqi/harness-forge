@@ -3,7 +3,8 @@
 // `planBackup` is the pre-check: it lists the chats and estimates the zip from the database (message, title and
 // settings bytes, the distinct attachment blobs that `file` / `reasoning-file` parts point at) and refuses with
 // `payload_too_large` a backup that an import could not take (more than `backupEntries` entries or index items) or
-// that could exceed a zip without zip64 (fflate cannot write zip64). Nothing else is read before the stream is pulled.
+// that could exceed a zip without zip64 (fflate cannot write zip64); Phase 10: the personal definitions count with
+// their content bytes (`customizations` table). Nothing else is read before the stream is pulled.
 //
 // `createBackupStream` builds the zip while it is read: a pull-based `ReadableStream` (high water mark 0, so nothing
 // happens before the first read) drives fflate's streaming `Zip`; every pull pushes one piece (64 KB of a chat body or
@@ -13,14 +14,20 @@
 //   chats/<chatId>.json   `ChatsService.export(id, 'json')`: chat export v2, archived chats included, deflated
 //   files/<sha256>        each referenced blob once: stored for images and PDF, deflated for text/*   (files=true)
 //   files/index.json      one item per referenced file row whose blob was written and verified         (files=true)
+//   customizations.json   Phase 10 (ADR-044): the personal agents, commands and skills of
+//                         `CustomizationService.exportBackup()` (kind, name, raw content, enabled; no ids, timestamps or
+//                         secrets), written when there is any                                (customizations=true)
 //   manifest.json         written last, with the exact counts
 //
 // Nothing else is ever read: no secrets, credentials, password, plugins, MCP servers, model or tool preferences, share
-// links or usage rows. A chat deleted during the export is left out; a blob that is missing or no longer matches its
-// sha256 is left out of the index (the import then reports it missing). A cancel (HEAD, a client that went away)
-// terminates the zip and releases the open file. If the zip would still exceed the zip limits while it is written
-// (chats grew after the pre-check), the stream fails instead of producing a broken archive.
-import type { BackupFileEntry, BackupManifest, DataExportQuery } from '@harness-forge/shared'
+// links, usage rows, projects, checkpoints, shell rules or (Phase 10) background tasks (a delivered result stays in its
+// message, so the chat exports carry it). A chat deleted during the export is left out; a blob that is missing or no
+// longer matches its sha256 is left out of the index (the import then reports it missing); the personal definitions
+// are read after the attachments, and when that read fails the backup goes on without them (`includes.customizations:
+// false`, a warning in the log). A cancel (HEAD, a client that went away) terminates the zip and releases the open
+// file. If the zip would still exceed the zip limits while it is written (chats grew after the pre-check), the stream
+// fails instead of producing a broken archive.
+import type { BackupCustomization, BackupFileEntry, BackupManifest, DataExportQuery } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
 import type { StoredFile } from '../files/types.ts'
 import type { DataLimits } from './limits.ts'
@@ -28,7 +35,7 @@ import { createHash } from 'node:crypto'
 import { backupFileEntrySchema, isHarnessError, LIMITS, settingsSchema, SHA256_HEX_PATTERN } from '@harness-forge/shared'
 import { asc, inArray, sql } from 'drizzle-orm'
 import { Zip, ZipDeflate, ZipPassThrough } from 'fflate'
-import { chats, files, messages } from '../../db/schema.ts'
+import { chats, customizations, files, messages } from '../../db/schema.ts'
 import { appVersion } from '../../paths.ts'
 import { guardDb } from '../chats/db-errors.ts'
 import { referencedFileIdsQuery } from '../files/sweep.ts'
@@ -51,6 +58,8 @@ const ZIP_MAX_OFFSET = 0xFFFF_FFFF
 const ENTRY_OVERHEAD_BYTES = 256
 const CHAT_OVERHEAD_BYTES = 2048
 const INDEX_ITEM_BYTES = 512
+/** JSON escaping, the name, the kind and the flag of one personal definition in `customizations.json`. */
+const DEFINITION_OVERHEAD_BYTES = 1024
 const FIXED_BYTES = 64 * 1024
 /** Ids per `IN (...)` lookup. */
 const ID_CHUNK = 500
@@ -64,6 +73,8 @@ export interface BackupPlan {
   appVersion: string
   includeFiles: boolean
   includeSettings: boolean
+  /** Phase 10: write the personal agents, commands and skills (`customizations.json`). */
+  includeCustomizations: boolean
   /** Every chat id at the time of the pre-check, archived chats included, in id order (uuidv7: creation order). */
   chatIds: string[]
 }
@@ -87,14 +98,23 @@ async function referencedBlobs(deps: AppDeps): Promise<{ blobs: number, bytes: n
   }
 }
 
+/** The personal definitions in the database (the pre-check's estimate of `customizations.json`). */
+async function personalDefinitions(deps: AppDeps): Promise<{ rows: number, bytes: number }> {
+  const [totals] = await deps.db
+    .select({ rows: sql<number>`count(*)`, bytes: sql<number>`coalesce(sum(length(CAST(${customizations.content} AS BLOB))), 0)` })
+    .from(customizations)
+  return { rows: Number(totals?.rows ?? 0), bytes: Number(totals?.bytes ?? 0) }
+}
+
 /**
- * The pre-check of `GET /data/export` (`files` and `settings` default to true): lists the chats and refuses with
- * `payload_too_large` (the message suggests `files=false` when that would help) a backup with more entries than
- * `limits.backupEntries` or an estimated size above `limits.backupBytes`.
+ * The pre-check of `GET /data/export` (`files`, `settings` and `customizations` default to true): lists the chats and
+ * refuses with `payload_too_large` (the message suggests `files=false` when that would help) a backup with more
+ * entries than `limits.backupEntries` or an estimated size above `limits.backupBytes`.
  */
 export async function planBackup(deps: AppDeps, query: DataExportQuery, limits: DataLimits, exportedAt: number): Promise<BackupPlan> {
   const includeFiles = query.files ?? true
   const includeSettings = query.settings ?? true
+  const includeCustomizations = query.customizations ?? true
   const { db } = deps
   return guardDb(async () => {
     const chatRows = await db
@@ -105,11 +125,13 @@ export async function planBackup(deps: AppDeps, query: DataExportQuery, limits: 
       .select({ bytes: sql<number>`coalesce(sum(length(CAST(${messages.parts} AS BLOB)) + coalesce(length(CAST(${messages.metadata} AS BLOB)), 0)), 0)` })
       .from(messages)
     const blobs = includeFiles ? await referencedBlobs(deps) : { blobs: 0, bytes: 0, rows: 0 }
+    const definitions = includeCustomizations ? await personalDefinitions(deps) : { rows: 0, bytes: 0 }
 
-    const baseEntries = 1 + (includeSettings ? 1 : 0) + chatRows.length
+    const baseEntries = 1 + (includeSettings ? 1 : 0) + chatRows.length + (definitions.rows > 0 ? 1 : 0)
     const entries = baseEntries + (includeFiles ? 1 + blobs.blobs : 0)
     const baseBytes = FIXED_BYTES + Number(messageTotals?.bytes ?? 0)
       + chatRows.reduce((total, row) => total + Number(row.bytes) + CHAT_OVERHEAD_BYTES, 0)
+      + definitions.bytes + definitions.rows * DEFINITION_OVERHEAD_BYTES
       + baseEntries * ENTRY_OVERHEAD_BYTES
     const bytes = baseBytes + (includeFiles ? blobs.bytes + blobs.rows * INDEX_ITEM_BYTES + (1 + blobs.blobs) * ENTRY_OVERHEAD_BYTES : 0)
     const withoutFilesFits = baseEntries <= limits.backupEntries && baseBytes <= limits.backupBytes
@@ -125,7 +147,7 @@ export async function planBackup(deps: AppDeps, query: DataExportQuery, limits: 
     }
     if (bytes > limits.backupBytes)
       throw payloadTooLarge(`The backup would be about ${formatBytes(bytes)}, more than the ${formatBytes(limits.backupBytes)} a backup zip can hold. ${hint}`, limits.backupBytes)
-    return { exportedAt, appVersion: appVersion().slice(0, 64), includeFiles, includeSettings, chatIds: chatRows.map(row => row.id) }
+    return { exportedAt, appVersion: appVersion().slice(0, 64), includeFiles, includeSettings, includeCustomizations, chatIds: chatRows.map(row => row.id) }
   })
 }
 
@@ -280,6 +302,21 @@ export function createBackupStream(deps: AppDeps, plan: BackupPlan): ReadableStr
     return size
   }
 
+  /**
+   * The personal definitions (only the four backup fields of each), or null when they cannot be read: the backup goes
+   * on without them (see the module comment).
+   */
+  async function personalItems(): Promise<BackupCustomization[] | null> {
+    try {
+      const { items } = await deps.customizations.exportBackup()
+      return items.map(item => ({ kind: item.kind, name: item.name, content: item.content, enabled: item.enabled }))
+    }
+    catch (error) {
+      logger.warn('backup: the personal agents, commands and skills could not be read and are left out', { err: error })
+      return null
+    }
+  }
+
   function indexItems(group: BlobGroup, size: number): BackupFileEntry[] {
     return group.rows.flatMap((row) => {
       const parsed = backupFileEntrySchema.safeParse({ id: row.id, sha256: row.sha256, name: row.name, mime: row.mime, size, createdAt: row.createdAt })
@@ -317,14 +354,23 @@ export function createBackupStream(deps: AppDeps, plan: BackupPlan): ReadableStr
       items.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       yield* writeBytes('files/index.json', json({ items }), true)
     }
+    const definitions = plan.includeCustomizations ? await personalItems() : null
+    if (definitions !== null && definitions.length > 0)
+      yield* writeBytes('customizations.json', json({ items: definitions }), true)
     const manifest: BackupManifest = {
       format: 'harness-forge.backup',
       version: 1,
       exportedAt: plan.exportedAt,
       appVersion: plan.appVersion,
       chatExportVersion: 2,
-      includes: { files: plan.includeFiles, settings: plan.includeSettings },
-      counts: { chats: counts.chats, messages: counts.messages, files: items.length, fileBytes: items.reduce((total, item) => total + item.size, 0) },
+      includes: { files: plan.includeFiles, settings: plan.includeSettings, customizations: definitions !== null },
+      counts: {
+        chats: counts.chats,
+        messages: counts.messages,
+        files: items.length,
+        fileBytes: items.reduce((total, item) => total + item.size, 0),
+        customizations: definitions?.length ?? 0,
+      },
     }
     yield* writeBytes('manifest.json', json(manifest), true)
     if (bytesOut > ZIP_MAX_OFFSET)

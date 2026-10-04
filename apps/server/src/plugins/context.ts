@@ -1,4 +1,5 @@
-// The per-plugin `PluginContext` (PLUGINS.md 9 "PluginContext"). Owner: W1.3 (W1.3-T4); `ctx.images` W6.4 (ADR-028).
+// The per-plugin `PluginContext` (PLUGINS.md 9 "PluginContext"). Owner: W1.3 (W1.3-T4); `ctx.images` W6.4 (ADR-028);
+// `ctx.agents` / `ctx.skills` W10.7 (plugin API 1.4.0, ADR-045).
 //
 // Every `register` goes through the registry with the plugin id as owner and is tracked in the plugin's
 // `DisposableStore`; disposing the runtime unregisters everything, and `abort()` aborts `ctx.signal` (disable, reload,
@@ -360,17 +361,18 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
         return track(registry.commands.register(pluginId, definition))
       },
     }),
-    // Plugin API 1.4.0 (ADR-045): P10-0a contract stubs; the agent and skill registries arrive in P10-0b / P10-A.
+    // Plugin API 1.4.0 (ADR-045): agent types and skills, validated by the registry (`validation_error` naming the
+    // field; a name another plugin registered throws `conflict`) and owned by this plugin.
     agents: Object.freeze({
-      register: (_definition: AgentDefinition): Disposable => {
+      register: (definition: AgentDefinition): Disposable => {
         assertLive()
-        throw new HarnessError({ code: 'not_implemented', message: 'ctx.agents.register is not available yet.' })
+        return track(registry.agents.register(pluginId, definition))
       },
     }),
     skills: Object.freeze({
-      register: (_definition: SkillDefinition): Disposable => {
+      register: (definition: SkillDefinition): Disposable => {
         assertLive()
-        throw new HarnessError({ code: 'not_implemented', message: 'ctx.skills.register is not available yet.' })
+        return track(registry.skills.register(pluginId, definition))
       },
     }),
     hooks: Object.freeze({

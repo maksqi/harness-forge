@@ -2,7 +2,8 @@
 // Settings -> Customize (docs/UI.md 2.17, 9.12; ADR-044, ADR-045): the agents, commands and skills of every source.
 // A thin SettingsPage around CustomizeSettings; the header actions Import... (customize-import, FileUp, outline) and New
 // agent / New command / New skill (customize-new, Plus, primary; the label follows `?tab=`) reach the body through its
-// exposed `import()` / `create()`. Nav label "Customize" (5.5).
+// exposed `import()` / `create()`. Nav label "Customize" (5.5). Below `sm` Import… keeps only its icon (the
+// label stays for screen readers), so the title is not cut.
 import { FileUpIcon, PlusIcon } from '@lucide/vue'
 import { computed, useTemplateRef } from 'vue'
 import { Button } from '@/components/ui/button'
@@ -30,7 +31,7 @@ const kind = computed(() => kindOfTab(route.query.tab))
         @click="body?.import()"
       >
         <FileUpIcon aria-hidden="true" data-icon="inline-start" />
-        Import…
+        <span class="max-sm:sr-only">Import…</span>
       </Button>
       <Button type="button" size="sm" :data-testid="testIds.customizeNew" :data-kind="kind" class="pointer-coarse:h-10" @click="body?.create()">
         <PlusIcon aria-hidden="true" data-icon="inline-start" />

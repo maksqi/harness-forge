@@ -269,12 +269,12 @@ Remember flow (`/remember`).
   - [x] K3 schema + `pnpm db:generate` (coordinator; the v1.5 upgrade seed from a `5481fb3` worktree was built in P10-0a by K3S)
   - [x] C30 server skeleton · [x] C31 chat seams · [x] C32 `core-agent` + mock models · [x] C33 web skeleton
   - [x] Gate (incl. v1.5 data upgrade probe) + FREEZE + checkpoint commit
-- [ ] P10-A Features (12 agents)
-  - [ ] W10.1 customizations-server · [ ] W10.2 commands-server · [ ] W10.3 agents-server · [ ] W10.4 background-server
-  - [ ] W10.5 skills-plan-server · [ ] W10.6 memory-data-server · [ ] W10.7 plugin-api-server
-  - [ ] W10.8 customize-web · [ ] W10.9 composer-web · [ ] W10.10 session-dock-web · [ ] W10.11 transcript-web
-  - [ ] W10.12 settings-plugins-web
-  - [ ] Gate + checkpoint commit
+- [x] P10-A Features (12 agents)
+  - [x] W10.1 customizations-server · [x] W10.2 commands-server · [x] W10.3 agents-server · [x] W10.4 background-server
+  - [x] W10.5 skills-plan-server · [x] W10.6 memory-data-server · [x] W10.7 plugin-api-server
+  - [x] W10.8 customize-web · [x] W10.9 composer-web · [x] W10.10 session-dock-web · [x] W10.11 transcript-web
+  - [x] W10.12 settings-plugins-web
+  - [x] Gate + checkpoint commit
 - [ ] P10-B Feature e2e, docs, fix-ups, final gate
   - [ ] W10.13 e2e-features · [ ] W10.14 docs-final (W10.15 / W10.16 fix-ups only if the P10-A gate is red)
   - [ ] Final gate (e2e ×3, screenshots, audit, v1.5 → v1.6 upgrade, Docker) + checkpoint commit
@@ -342,3 +342,4 @@ custom agents, skills and background agents with real models.
 | Final gate v1.5 | coordinator | frozen install ok; 9469 tests (Phase 5 flaky share-token test fixed); repository `git status` unchanged by `pnpm check`; build ok; CSP 38/38; probes 71/71 + full P8-A probes 57/57; e2e 128 passed ×3 (chromium + mobile + tablet); `@screenshots` dark + light reviewed, README images from full-frame `@readme` shots; `pnpm audit --prod` clean (2 ignored, still unpatched); real v1.4 → v1.5 upgrade (fresh seed by the `316319a` build) 31/31; Docker (Node 24, uid 1000) on that seed 10/10 | (this commit) |
 | P10-0a | coordinator (K1, K2; contract skeletons of `SH/util/{definitions,arguments,tool-names}.ts` + agent-name ids), C28, C29, D12, D13, K3S (v1.5 seed, built early) (+ coordinator: D12 open points confirmed, point 10 changed (task results are separate user messages, like steers), C28 CCRs accepted (`customizations.source` `path` query, `runOriginSchema` in `enums.ts`), 33 C28 compile-fix files accepted) | audit ok (104 paths); frozen install ok (`yaml` 2.9.1 only, TypeScript 6.0.3 only); 9790 tests; build ok (web +10 KB gz vs v1.5); CSP 38/38; `pluginApiVersion` 1.4.0, 9 new routes answer 501 / 400; e2e 128 passed on a fresh `.tmp/e2e`; `pnpm audit --prod` clean (2 ignored) | (this commit) |
 | P10-0b | coordinator (K3: schema + `0007_customizations`), C30, C31, C32, C33 (+ coordinator: 11 test-fix files of C30 / C32 / C33 accepted; deviations recorded: `ChatRunner.boot()` boot sweep, `takeResults(chatId, messageId)`, customization backup members, the instruction-block shape the mocks read) | audit ok (170 paths); `0007` = 2 CREATE TABLE + 3 indexes, a second generate: no changes; 9999 tests; build ok; CSP 38/38; seam probe 16/16; upgrade probe on a v1.5 copy 42/42 (8 migrations, empty new tables, counts unchanged, old task parts byte-identical, 3 approvals pending, `skill` listed, new settings defaulted); e2e 128 passed on a fresh `.tmp/e2e`; `pnpm audit --prod` clean (2 ignored); FREEZE | (this commit) |
+| P10-A | W10.1 – W10.12, G10P (gate probes) (+ coordinator: CCR `taskAgent.pluginId` applied; follow-ups: one announcement per finished background agent (W10.10), `background_tasks.output` scanned (W10.6); test pins in `deps.test.ts`, `pipeline.test.ts`, `workspace.test.ts`; the import result panel line for restored definitions; e2e pins for `/remember` and the Agent section copy) | audit ok (189 paths, no frozen file touched beyond the accepted CCR); 10561 tests; build ok (`yaml` external in `dist/main.mjs`); CSP 38/38; probes 173/173 (`.tmp/gates/P10-A/probe.mjs`: catalog, agents, commands, skills, background, plan files, Remember, plugin API, hygiene, v1.5 upgrade) + P9-A 71/71 + P8-A 47/47; e2e 128 passed on a fresh `.tmp/e2e`; screenshots of the Customize page, editor, slash groups, argument hint, Remember (desktop + phone) reviewed; `pnpm audit --prod` clean (2 ignored) | (this commit) |

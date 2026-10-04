@@ -910,7 +910,7 @@ describe('modelStream: Phase 10 seams (C31-T1)', () => {
     })
   }
 
-  it('a background task call yields one failed output "Background agents are not available yet." (C30 stub)', async () => {
+  it('a background task call yields one launch output { status: background, taskId } (W10.4 manager)', async () => {
     kit.set('agent', callingModel('task', { description: 'Look around', prompt: 'Find the config.', type: 'explore', background: true }))
     const chatId = testChatId(10_001)
     const { chunks } = await readSse(await postChat(seamApp, { ...chatBody(chatId, 'go'), modelRef: 'seamkit:agent' }))
@@ -920,9 +920,14 @@ describe('modelStream: Phase 10 seams (C31-T1)', () => {
     const final = outputs.filter(chunk => chunk.preliminary !== true)
     expect(final).toHaveLength(1)
     expect(new Set(outputs.map(chunk => JSON.stringify(chunk.output))).size).toBe(1)
+    // The seam-kit child ends at once, so the server starts the task turn that delivers it (W10.4); wait for that run
+    // too (the in-memory test database has a single connection, so reading during a run's transaction fails).
+    for (let i = 0; i < 50 && (runnerOf(seamApp).hasTasks(chatId) || runnerOf(seamApp).hasRun(chatId)); i++)
+      await new Promise(resolve => setTimeout(resolve, 20))
+    await runnerOf(seamApp).idle()
     const detail = chatDetailSchema.parse(await (await seamApp.request(`/api/chats/${chatId}`)).json())
-    const part = detail.messages.at(-1)?.parts.find(entry => entry.type === 'tool-task') as { output?: { status?: string, error?: string } } | undefined
-    expect(part?.output).toMatchObject({ status: 'failed', error: 'Background agents are not available yet.', type: 'explore', description: 'Look around' })
+    const part = detail.messages.flatMap(message => message.parts).find(entry => entry.type === 'tool-task') as { output?: { status?: string, error?: string } } | undefined
+    expect(part?.output).toMatchObject({ status: 'background', taskId: expect.stringMatching(/^bgt_/), type: 'explore', description: 'Look around' })
   })
 
   it('binds loadSkill and savePlan into the agent scope of every call (stubs until W10.5); skill is not offered without skills', async () => {

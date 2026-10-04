@@ -18,6 +18,7 @@ import { KEY_ROTATION_RUNS_MESSAGE } from '../services/maintenance/index.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { createFakeBackgroundTasks } from '../testing/fake-background-tasks.ts'
 import { createRecordingEventBus } from '../testing/fakes.ts'
+import { carrierMessage } from './background/index.ts'
 import { createChatRunnerWith, queueRequestId, startQueuedTurn } from './index.ts'
 import { createChatQueue } from './queue.ts'
 import { runConflict } from './runs.ts'
@@ -744,7 +745,15 @@ describe('the background manager of the runner (Phase 10)', () => {
       },
     })
     const chatId = newChatId()
-    const body = chatBody(chatId, 'results arrived')
+    // A carrier: one `data-task-result` part, nothing else (`prepareRun(…, { serverMessage: true })`).
+    const result = {
+      taskId: 'bgt_0000000000000042',
+      toolCallId: 'call_bg',
+      messageId: 'msg_llllllllllllllll',
+      output: { status: 'completed' as const, type: 'explore', description: 'Look around', modelRef: 'mock:echo', steps: [], stepsOmitted: 0, report: 'Report: done', startedAt: 1, finishedAt: 2 },
+      deliveredAt: 3,
+    }
+    const body = { ...chatBody(chatId, ''), message: carrierMessage([result]) }
     const started = nextEvent(t, 'run.started', event => event.data.chatId === chatId)
     const response = await host!.startTaskTurn(body, { logger: t.deps.logger, requestId: 'task_1' })
     expect(host!.hasRun(chatId)).toBe(true)
@@ -752,6 +761,8 @@ describe('the background manager of the runner (Phase 10)', () => {
     await runner.idle()
     expect((await started).data).toMatchObject({ chatId, origin: 'task', userMessageId: body.message.id })
     expect(host!.hasRun(chatId)).toBe(false)
+    const stored = (await detailOf(t, chatId)).messages[0]
+    expect(stored).toMatchObject({ id: body.message.id, role: 'user', parts: [{ type: 'data-task-result', data: result }] })
     await runner.stopAll()
   })
 })

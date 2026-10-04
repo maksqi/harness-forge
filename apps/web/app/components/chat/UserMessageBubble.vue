@@ -1,8 +1,10 @@
 <script setup lang="ts">
 // User message (docs/UI.md 5.7, 7.1): attachments right-aligned above a `bg-muted rounded-2xl` bubble of plain text
 // (not markdown, whitespace kept); a slash command shows its badge and the text as typed.
-// Phase 10 (C33; W10.11 owns it): never a bubble for the carrier of a turn the server started for finished background
-// agents (`isTaskResultMessage`; ChatMessage renders its notes instead), so this renders nothing for one.
+// Phase 10 (W10.11): never a bubble for the carrier of a turn the server started for finished background agents
+// (`isTaskResultMessage`; ChatMessage renders its notes instead), so this renders nothing for one. The command badge
+// gets the whole `metadata.command` (its source, model and tool limit, docs/UI.md 7.28); a shared message carries only
+// the name.
 import type { HarnessUIMessage } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import { computed } from 'vue'
@@ -29,7 +31,7 @@ const carrier = computed(() => isTaskResultMessage(props.message))
       v-if="text || command"
       class="min-w-0 rounded-2xl bg-muted px-4 py-2.5 break-words whitespace-pre-wrap text-foreground"
     >
-      <CommandBadge v-if="command" :name="command.name" class="mb-1.5 flex w-fit" />
+      <CommandBadge v-if="command" :name="command.name" :command="command" class="mb-1.5 flex w-fit" />
       <span v-if="text">{{ text }}</span>
     </div>
   </div>

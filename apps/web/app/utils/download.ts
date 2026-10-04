@@ -1,4 +1,5 @@
-// Saving binary API responses as files (chat exports, plugin exports). Auto-imported (utils/).
+// Saving files in the browser: binary API responses (chat exports, plugin exports) and text the page built itself
+// (Phase 10: definition exports of Settings -> Customize). Auto-imported (utils/).
 
 /** A file name without path separators or control characters, at most 200 characters; null when nothing is left. */
 function cleanFileName(name: string): string | null {
@@ -38,13 +39,8 @@ export function fileNameFromDisposition(header: string | null | undefined): stri
   return bare?.[1] ? cleanFileName(bare[1]) : null
 }
 
-/**
- * Saves a response body as a download named by its `Content-Disposition` (else `fallbackName`) through a temporary
- * object URL and a hidden link.
- */
-export async function downloadResponse(response: Response, fallbackName: string): Promise<void> {
-  const blob = await response.blob()
-  const name = fileNameFromDisposition(response.headers.get('content-disposition')) ?? cleanFileName(fallbackName) ?? 'download'
+/** Saves a blob as a download named `name` through a temporary object URL and a hidden link. */
+function saveBlob(blob: Blob, name: string): void {
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
@@ -60,4 +56,24 @@ export async function downloadResponse(response: Response, fallbackName: string)
     // Some browsers read the object URL after click() returns; release it a little later.
     setTimeout(() => URL.revokeObjectURL(url), 30_000)
   }
+}
+
+/**
+ * Saves a response body as a download named by its `Content-Disposition` (else `fallbackName`) through a temporary
+ * object URL and a hidden link.
+ */
+export async function downloadResponse(response: Response, fallbackName: string): Promise<void> {
+  const blob = await response.blob()
+  const name = fileNameFromDisposition(response.headers.get('content-disposition')) ?? cleanFileName(fallbackName) ?? 'download'
+  saveBlob(blob, name)
+}
+
+/**
+ * Saves `text` as a UTF-8 file named `fileName` (path separators and control characters removed; `download` when
+ * nothing is left) through a Blob and a temporary link (docs/UI.md 9.12: Export .md of Settings -> Customize).
+ * `type` is the MIME type without a charset (default `text/plain`); `; charset=utf-8` is added.
+ */
+export function downloadText(text: string, fileName: string, type = 'text/plain'): void {
+  const blob = new Blob([text], { type: `${type}; charset=utf-8` })
+  saveBlob(blob, cleanFileName(fileName) ?? 'download')
 }

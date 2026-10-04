@@ -4,9 +4,10 @@
 // - `summary`: counts straight from the database (every chat and message version, file rows and their bytes).
 // - `exportBackup`: the pre-check and the streamed zip of ./backup.ts.
 // - `importData`: ./restore.ts (a backup zip or one chat JSON).
-// - `deleteAll`: stops every run, deletes every chat (and its messages and share links) through `ChatsService`,
-//   optionally the usage rows and every uploaded file, then stops any run whose chat appeared meanwhile. Settings,
-//   providers, credentials, plugins and MCP servers stay.
+// - `deleteAll`: stops every chat's background tasks (Phase 10, ADR-046) and run, deletes every chat (and its messages,
+//   share links and background task rows) through `ChatsService`, optionally the usage rows and every uploaded file,
+//   then stops any run or task whose chat appeared meanwhile. Settings, providers, credentials, plugins, MCP servers and
+//   the personal customizations stay.
 // - Imports and delete-all run under the maintenance lock (Phase 7, C16-T1: `deps.maintenance.exclusive('import' |
 //   'delete-all', ...)`, shared with the key rotation and the file cleanup; it replaced the private mutex): while
 //   another maintenance operation runs they fail at once with `409 conflict` (`reason: 'busy'`). Summaries and exports
@@ -111,14 +112,21 @@ async function purgeCheckpoints(deps: AppDeps): Promise<{ bytes: number, blobs: 
   }
 }
 
+/** Stops the chat's background tasks (Phase 10, rows saved), then its run (`stop` waits until it is released). */
+async function stopChatWork(deps: AppDeps, id: string): Promise<void> {
+  await deps.runs.stopTasks(id)
+  await deps.runs.stop(id)
+}
+
 async function deleteEverything(deps: AppDeps, body: DataDeleteBody): Promise<DataDeleteResult> {
   const ids = await deps.chats.allIds()
-  // `stop` also refuses runs that are still preparing, and waits until each run is released.
-  await Promise.all(ids.map(id => deps.runs.stop(id)))
+  // `stop` also refuses runs that are still preparing, and waits until each run is released; the background tasks of
+  // every chat stop first (Phase 10, ADR-046). The `customizations` rows are kept (they are settings, not chat data).
+  await Promise.all(ids.map(id => stopChatWork(deps, id)))
   const removed = await deps.chats.removeAll({ usage: body.usage === true })
   const purged = body.files === true ? await deps.files.purge() : { files: 0, bytes: 0 }
-  // Runs of chats that appeared (or started) while everything was deleted.
-  await Promise.all(removed.chatIds.filter(id => deps.runs.hasRun(id)).map(id => deps.runs.stop(id)))
+  // Runs and background tasks of chats that appeared (or started) while everything was deleted.
+  await Promise.all(removed.chatIds.filter(id => deps.runs.hasRun(id) || deps.runs.hasTasks(id)).map(id => stopChatWork(deps, id)))
   // Phase 8: the before-states of the deleted chats' workspace edits, after every run stopped.
   const checkpoints = await purgeCheckpoints(deps)
   const result: DataDeleteResult = {

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 // Import of Settings -> Data (docs/UI.md 9.8, 7.4; docs/API.md 5.19): a backup zip or a chat exported as JSON (at most
 // 256 MB, checked before the upload), "If a chat already exists" (skip / copy) and "Restore settings from the backup"
-// (zip only) -> `POST /api/data/import` (multipart). The result panel lists every chat; the chat list reloads, and so
-// do the settings when the backup restored them. 409 `busy` and 413 become toasts, other failures show inline.
+// (zip only) -> `POST /api/data/import` (multipart). Phase 10 (ADR-044): the same switch also restores the personal
+// agents, commands and skills of the backup (`restoreCustomizations`; a definition you already have is kept). The
+// result panel lists every chat; the chat list reloads, and so do the settings when the backup restored them, and the
+// customizations when it restored any. 409 `busy` and 413 become toasts, other failures show inline.
 import type { DataConflictPolicy, DataImportResult } from '@harness-forge/shared'
 import { CircleAlertIcon, FileArchiveIcon, FileBracesIcon, FolderOpenIcon, UploadIcon } from '@lucide/vue'
 import { computed, nextTick, ref, useId } from 'vue'
@@ -16,6 +18,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { formatBytes } from '~/components/common/format'
 import { useApi } from '~/composables/useApi'
 import { useChatsStore } from '~/stores/chats'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { useSettingsStore } from '~/stores/settings'
 import { toHarnessError, withHarnessErrors } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
@@ -32,6 +35,7 @@ const emit = defineEmits<{
 const api = useApi()
 const chats = useChatsStore()
 const settings = useSettingsStore()
+const customizations = useCustomizationsStore()
 const ids = { fileName: useId(), policy: useId(), restore: useId() }
 
 const POLICY_OPTIONS: ReadonlyArray<{ value: DataConflictPolicy, label: string, hint: string }> = [
@@ -52,7 +56,7 @@ const kind = computed(() => (file.value ? importKindOf(file.value) : null))
 const policyHint = computed(() => POLICY_OPTIONS.find(option => option.value === policy.value)?.hint)
 const restoreHint = computed(() => (kind.value === 'chat'
   ? 'A chat exported as JSON carries no settings.'
-  : 'Your general and appearance settings are replaced by the ones in the backup.'))
+  : 'General and appearance settings, and your personal agents, commands and skills. A personal definition you already have with the same name is kept.'))
 
 function chooseFile(): void {
   fileInput.value?.click()
@@ -98,7 +102,9 @@ async function runImport(): Promise<void> {
   // The small fields go first: a streaming multipart parser reads them before the upload.
   const form = new FormData()
   form.set('onConflict', policy.value)
-  form.set('restoreSettings', String(kind.value === 'backup' && restoreSettings.value))
+  const restore = String(kind.value === 'backup' && restoreSettings.value)
+  form.set('restoreSettings', restore)
+  form.set('restoreCustomizations', restore)
   form.set('file', chosen, chosen.name)
   try {
     const outcome = await withHarnessErrors(api.data.import({ form }))
@@ -110,6 +116,8 @@ async function runImport(): Promise<void> {
     chats.fetchPage({ reset: true }).catch(() => {})
     if (outcome.settingsRestored)
       settings.fetch().catch(() => {})
+    if ((outcome.customizations?.imported ?? 0) > 0)
+      customizations.refreshLoaded().catch(() => {})
   }
   catch (error) {
     const harnessError = toHarnessError(error)

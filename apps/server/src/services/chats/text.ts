@@ -5,12 +5,15 @@
 // the user queued during the run; read through the shared `splitSteers`, in place), so a search finds them and the
 // snippet can show them; compaction summaries (`data-compaction`) are never indexed.
 //
+// Phase 10 (ADR-046, W10.6): the report of a background task result (`data-task-result`, in a reply or in the carrier
+// message of a turn the server started) is text of its message, at its place; the rest of the result is not.
+//
 // Case-insensitive search: SQLite's LIKE folds ASCII letters only, so `search_text` stores the message text
 // NFC-normalized and lowercased with JavaScript's Unicode-aware `toLowerCase()`, and the query is normalized the same
 // way before it becomes a LIKE pattern (`%` and `_` escaped). Titles are matched in JavaScript with the same rule.
 // Snippets are cut from the original (not lowercased) text of the matching message.
 import type { AgentStateMessage } from '@harness-forge/shared'
-import { splitSteers, STEER_PART_TYPE } from '@harness-forge/shared'
+import { splitSteers, STEER_PART_TYPE, TASK_RESULT_PART_TYPE } from '@harness-forge/shared'
 
 /** Maximum length of `ChatSummary.snippet`. */
 export const SNIPPET_MAX_LENGTH = 160
@@ -58,19 +61,37 @@ export function truncateCodePoints(value: string, max: number): string {
   return chars.length <= max ? value : chars.slice(0, max).join('')
 }
 
+/** The trimmed report of a `data-task-result` part's data (read structurally); '' when it has none. */
+function taskResultReport(data: unknown): string {
+  if (typeof data !== 'object' || data === null)
+    return ''
+  const output = (data as { output?: unknown }).output
+  if (typeof output !== 'object' || output === null)
+    return ''
+  const report = (output as { report?: unknown }).report
+  return typeof report === 'string' ? report.trim() : ''
+}
+
 function collectTexts(parts: readonly unknown[], texts: string[]): void {
   for (const part of parts) {
     if (typeof part !== 'object' || part === null)
       continue
-    const { type, text } = part as { type?: unknown, text?: unknown }
-    if (type === 'text' && typeof text === 'string' && text !== '')
+    const { type, text, data } = part as { type?: unknown, text?: unknown, data?: unknown }
+    if (type === 'text' && typeof text === 'string' && text !== '') {
       texts.push(text)
+    }
+    else if (type === TASK_RESULT_PART_TYPE) {
+      const report = taskResultReport(data)
+      if (report !== '')
+        texts.push(report)
+    }
   }
 }
 
 /**
  * Plain text of a message: its `text` parts joined with newlines, with the text of each valid steer (`data-steer`,
- * `splitSteers`) at its place in the reply. Other data parts (compaction summaries, notices) are not text.
+ * `splitSteers`) and the report of each background task result (`data-task-result`) at its place in the message. Other
+ * data parts (compaction summaries, notices) are not text.
  */
 export function messagePlainText(parts: readonly unknown[]): string {
   const texts: string[] = []

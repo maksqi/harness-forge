@@ -1,0 +1,26 @@
+{
+  "manifestVersion": 1,
+  "id": "agent-pack",
+  "name": "Agent pack",
+  "version": "1.0.0",
+  "description": "Example sub-agents and skills: a code reviewer, a docs writer, commit messages and changelog entries.",
+  "engines": { "harness": "^1.4.0" },
+  "main": "index.mjs",
+  "contributes": {
+    "agents": [
+      {
+        "name": "code-reviewer",
+        "description": "Reviews a diff or a set of files for bugs, risky changes and missing tests. Use it after larger edits.",
+        "instructions": "You review code changes.\n\n1. Read the changed files.\n2. List real bugs first, then risky changes, then missing tests.\n3. Quote file paths and line numbers.",
+        "tools": ["read_file", "search_files", "find_files", "list_directory"]
+      }
+    ],
+    "skills": [
+      {
+        "name": "commit-message",
+        "description": "How to write a commit message for this team. Load it before writing any commit message.",
+        "content": "# Commit messages\n\n- Conventional Commits: feat, fix, docs, chore.\n- Subject at most 72 characters, imperative mood.\n- Body: what and why, wrapped at 72 characters."
+      }
+    ]
+  }
+}

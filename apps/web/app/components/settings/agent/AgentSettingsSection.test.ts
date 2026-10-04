@@ -1,6 +1,7 @@
 // Settings -> General -> Agent (docs/UI.md 9.11): Automatic compaction, the compaction and sub-agent model selects
-// ("Same model as the chat" = null, the warning of a sub-agent model without tools) and Sub-agent max steps (1-200 with
-// the rules of Max steps). Every field saves through settings.update and rolls back with a toast on failure.
+// ("Same model as the chat" = null, the warning of a sub-agent model without tools), Sub-agent max steps (1-200 with
+// the rules of Max steps) and (Phase 10) Save approved plans and Plan folder. Every field saves through settings.update
+// and rolls back with a toast on failure; the plan folder shows a server 400 inline.
 import type { Settings } from '@harness-forge/shared'
 import type { VueWrapper } from '@vue/test-utils'
 import type { MockApi } from '~/utils/testing/mock-api'
@@ -17,7 +18,14 @@ import { testIds } from '~/utils/testids'
 import { catalogModel, providerSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
-import { SAME_MODEL_LABEL, subagentModelWarning } from './agent-settings'
+import {
+  PLAN_DIRECTORY_FOLDER_ERROR,
+  PLAN_DIRECTORY_LENGTH_ERROR,
+  PLAN_DIRECTORY_PLACEHOLDER,
+  planDirectoryError,
+  SAME_MODEL_LABEL,
+  subagentModelWarning,
+} from './agent-settings'
 import AgentSettingsSection from './AgentSettingsSection.vue'
 
 const mock = vi.hoisted(() => ({ api: null as unknown }))
@@ -101,12 +109,12 @@ function warning(): HTMLElement | null {
 }
 
 describe('agentSettingsSection', () => {
-  it('renders the Agent section with its four fields and the defaults', async () => {
+  it('renders the Agent section with its fields and the defaults', async () => {
     preloadCatalog()
     const host = await mountAgent()
     const section = host.get('[data-slot="settings-section"]')
     expect(section.get('h2').text()).toBe('Agent')
-    expect(section.text()).toContain('Long chats and sub-agents.')
+    expect(section.text()).toContain('Long chats, sub-agents and plans.')
     expect(section.text()).toContain('Automatic compaction')
     expect(section.text()).toContain('Summarize older messages when a chat nears the model\'s context window. When off, older messages are left out instead.')
     expect(section.text()).toContain('Compaction model')
@@ -302,11 +310,216 @@ describe('agentSettingsSection', () => {
   })
 })
 
+describe('agentSettingsSection: plan files (Phase 10)', () => {
+  function planFiles(): HTMLElement {
+    return byTestId(testIds.settingsPlanFiles)
+  }
+
+  function planDirectory() {
+    return wrapper!.get<HTMLInputElement>(`[data-testid="${testIds.settingsPlanDirectory}"]`)
+  }
+
+  function fieldError(): string | null {
+    const input = planDirectory().element
+    return input.closest('[data-slot="field"]')!.querySelector('[data-slot="field-error"]')?.textContent?.trim() ?? null
+  }
+
+  async function commit(value: string, key: 'Enter' | null = null) {
+    const input = planDirectory()
+    await input.trigger('focus')
+    await input.setValue(value)
+    if (key)
+      await input.trigger('keydown', { key })
+    await input.trigger('blur')
+    await flushPromises()
+  }
+
+  async function mountWithPlanFiles(on: boolean) {
+    preloadCatalog()
+    saved = { ...saved, planFiles: on }
+    useSettingsStore().settings = { ...saved }
+    await mountAgent()
+  }
+
+  it('renders Save approved plans (off) and Plan folder (disabled, mono, the default folder) after Sub-agent max steps', async () => {
+    preloadCatalog()
+    const host = await mountAgent()
+    const text = host.text()
+    expect(text).toContain('Save approved plans')
+    expect(text).toContain('When you approve a plan in a project chat, it\'s saved as a Markdown file in the project.')
+    expect(text).toContain('Plan folder')
+    expect(text).toContain('A folder inside the project. Files are named by date and plan title.')
+    expect(text.indexOf('Sub-agent max steps')).toBeLessThan(text.indexOf('Save approved plans'))
+    expect(text.indexOf('Save approved plans')).toBeLessThan(text.indexOf('Plan folder'))
+
+    const toggle = planFiles()
+    expect(toggle.getAttribute('role')).toBe('switch')
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    expect(toggle.dataset.state).toBe('unchecked')
+    expect(host.find(`label[for="${toggle.id}"]`).text()).toBe('Save approved plans')
+
+    const input = planDirectory()
+    expect(input.element.value).toBe('.harness/plans')
+    expect(input.attributes('placeholder')).toBe('.harness/plans')
+    expect(PLAN_DIRECTORY_PLACEHOLDER).toBe('.harness/plans')
+    expect(input.element.disabled).toBe(true)
+    expect(input.classes()).toContain('font-mono')
+    expect(host.find(`label[for="${input.element.id}"]`).text()).toBe('Plan folder')
+    // The help text describes the input.
+    const help = document.getElementById(input.attributes('aria-describedby')!)
+    expect(help?.textContent?.trim()).toBe('A folder inside the project. Files are named by date and plan title.')
+  })
+
+  it('saves Save approved plans at once, enables Plan folder, and rolls a failed save back with a toast', async () => {
+    preloadCatalog()
+    await mountAgent()
+    planFiles().click()
+    await flushPromises()
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { planFiles: true } })
+    expect(useSettingsStore().resolved.planFiles).toBe(true)
+    expect(planFiles().getAttribute('aria-checked')).toBe('true')
+    expect(planDirectory().element.disabled).toBe(false)
+
+    api.settings.update.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Disk full.' }))
+    planFiles().click()
+    await flushPromises()
+    expect(api.settings.update).toHaveBeenLastCalledWith({ body: { planFiles: false } })
+    expect(toasts.error).toHaveBeenCalledWith('Something went wrong', { description: 'Disk full.' })
+    expect(useSettingsStore().resolved.planFiles).toBe(true)
+    expect(planDirectory().element.disabled).toBe(false)
+  })
+
+  it('checks the plan folder like the server and keeps the saved value', async () => {
+    await mountWithPlanFiles(true)
+    const cases: Array<[string, string]> = [
+      ['', PLAN_DIRECTORY_FOLDER_ERROR],
+      ['   ', PLAN_DIRECTORY_FOLDER_ERROR],
+      ['/srv/plans', PLAN_DIRECTORY_FOLDER_ERROR],
+      ['\\plans', PLAN_DIRECTORY_FOLDER_ERROR],
+      ['C:/plans', PLAN_DIRECTORY_FOLDER_ERROR],
+      ['../plans', PLAN_DIRECTORY_FOLDER_ERROR],
+      ['docs/../../plans', PLAN_DIRECTORY_FOLDER_ERROR],
+      ['./plans', PLAN_DIRECTORY_FOLDER_ERROR],
+      ['docs//plans', PLAN_DIRECTORY_FOLDER_ERROR],
+      ['.git/plans', PLAN_DIRECTORY_FOLDER_ERROR],
+      ['docs/.GIT', PLAN_DIRECTORY_FOLDER_ERROR],
+      ['a'.repeat(201), PLAN_DIRECTORY_LENGTH_ERROR],
+    ]
+    for (const [value, error] of cases) {
+      await commit(value)
+      expect(fieldError(), value).toBe(error)
+      expect(planDirectory().attributes('aria-invalid')).toBe('true')
+      expect(planDirectory().element.value).toBe(value)
+    }
+    expect(api.settings.update).not.toHaveBeenCalled()
+    expect(useSettingsStore().resolved.planDirectory).toBe('.harness/plans')
+    expect(fieldError()).toBe('Use at most 200 characters.')
+    // The error is announced with the help text.
+    const describedBy = planDirectory().attributes('aria-describedby')!.split(' ')
+    expect(describedBy).toHaveLength(2)
+    expect(document.getElementById(describedBy[1]!)?.textContent?.trim()).toBe('Use at most 200 characters.')
+
+    // Esc restores the saved value and clears the error.
+    await planDirectory().trigger('focus')
+    await planDirectory().trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(planDirectory().element.value).toBe('.harness/plans')
+    expect(fieldError()).toBeNull()
+    expect(planDirectory().attributes('aria-invalid')).toBeUndefined()
+    expect(planDirectory().attributes('aria-describedby')!.split(' ')).toHaveLength(1)
+    expect(api.settings.update).not.toHaveBeenCalled()
+  })
+
+  it('saves the trimmed plan folder on Enter or blur, and nothing for an unchanged value', async () => {
+    await mountWithPlanFiles(true)
+    await commit('  .harness/plans  ')
+    expect(api.settings.update).not.toHaveBeenCalled()
+    expect(planDirectory().element.value).toBe('.harness/plans')
+
+    await commit('  docs/plans  ', 'Enter')
+    expect(api.settings.update).toHaveBeenCalledTimes(1)
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { planDirectory: 'docs/plans' } })
+    expect(useSettingsStore().resolved.planDirectory).toBe('docs/plans')
+    expect(planDirectory().element.value).toBe('docs/plans')
+
+    const longest = `p/${'a'.repeat(198)}`
+    await commit(longest)
+    expect(api.settings.update).toHaveBeenLastCalledWith({ body: { planDirectory: longest } })
+    expect(fieldError()).toBeNull()
+    expect(toasts.error).not.toHaveBeenCalled()
+  })
+
+  it('shows a 400 from the server inline and keeps the saved value', async () => {
+    await mountWithPlanFiles(true)
+    api.settings.update.mockRejectedValueOnce(new HarnessError({ code: 'validation_error', message: 'Invalid settings.' }))
+    await commit('notes/plans')
+    await flushPromises()
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { planDirectory: 'notes/plans' } })
+    expect(toasts.error).not.toHaveBeenCalled()
+    expect(useSettingsStore().resolved.planDirectory).toBe('.harness/plans')
+    expect(fieldError()).toBe(PLAN_DIRECTORY_FOLDER_ERROR)
+    expect(planDirectory().element.value).toBe('notes/plans')
+  })
+
+  it('restores the saved plan folder with a toast when saving fails otherwise', async () => {
+    await mountWithPlanFiles(true)
+    api.settings.update.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Disk full.' }))
+    await commit('notes/plans')
+    expect(toasts.error).toHaveBeenCalledWith('Something went wrong', { description: 'Disk full.' })
+    expect(useSettingsStore().resolved.planDirectory).toBe('.harness/plans')
+    expect(planDirectory().element.value).toBe('.harness/plans')
+    expect(fieldError()).toBeNull()
+  })
+
+  it('drops an invalid draft when plan files are turned off', async () => {
+    await mountWithPlanFiles(true)
+    await commit('../plans')
+    expect(fieldError()).toBe(PLAN_DIRECTORY_FOLDER_ERROR)
+    planFiles().click()
+    await flushPromises()
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { planFiles: false } })
+    expect(planDirectory().element.disabled).toBe(true)
+    expect(planDirectory().element.value).toBe('.harness/plans')
+    expect(fieldError()).toBeNull()
+  })
+
+  it('shows a saved plan folder that arrives later unless the user is editing', async () => {
+    await mountWithPlanFiles(true)
+    useSettingsStore().settings = { ...saved, planDirectory: 'docs/plans' }
+    await flushPromises()
+    expect(planDirectory().element.value).toBe('docs/plans')
+
+    await planDirectory().trigger('focus')
+    await planDirectory().setValue('mine')
+    useSettingsStore().settings = { ...saved, planDirectory: 'other/plans' }
+    await flushPromises()
+    expect(planDirectory().element.value).toBe('mine')
+  })
+
+  it('gives the switches and inputs 40px targets on coarse pointers', async () => {
+    preloadCatalog()
+    await mountAgent()
+    for (const id of [testIds.settingsAutoCompact, testIds.settingsPlanFiles])
+      expect(byTestId(id).className, id).toContain('pointer-coarse:after:-inset-y-[11px]')
+    for (const id of [testIds.settingsSubagentMaxSteps, testIds.settingsPlanDirectory])
+      expect(byTestId(id).className, id).toContain('pointer-coarse:h-10')
+  })
+})
+
 describe('agent settings rules', () => {
   it('warns only for a known model without tool calls', () => {
     expect(subagentModelWarning(undefined)).toBeNull()
     expect(subagentModelWarning(sonnet)).toBeNull()
     expect(subagentModelWarning(noTools)).toBe('Tiny Chat can\'t call tools, so sub-agents can\'t use it.')
     expect(SAME_MODEL_LABEL).toBe('Same model as the chat')
+  })
+
+  it('checks the plan folder with the shared settings schema', () => {
+    for (const value of ['.harness/plans', 'plans', 'docs/plans', ' docs/plans ', 'docs\\plans', '.plans/2026', 'a'.repeat(200)])
+      expect(planDirectoryError(value), value).toBeNull()
+    for (const value of ['', ' ', '/plans', '\\plans', 'c:plans', '..', 'a/..', 'a/./b', 'a//b', 'a/', '.git', 'x/.Git/y', 'tab\tname'])
+      expect(planDirectoryError(value), value).toBe('Use a folder inside the project, like .harness/plans.')
+    expect(planDirectoryError('a'.repeat(201))).toBe('Use at most 200 characters.')
+    expect(planDirectoryError(`/${'a'.repeat(250)}`)).toBe('Use at most 200 characters.')
   })
 })

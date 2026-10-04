@@ -8,7 +8,8 @@ import type { MemoryLogger } from '../../logger.ts'
 import type { ResolvedModel } from '../../providers/types.ts'
 import type { RegisteredTool } from '../../registry/types.ts'
 import type { UsageInput } from '../../services/chats/types.ts'
-import type { AppDeps } from '../../types.ts'
+import type { CustomizationCatalog } from '../../services/customizations/types.ts'
+import type { FakeCustomizationService } from '../../testing/fake-customizations.ts'
 import type { AgentRunScope } from '../agent-scope.ts'
 import type { BackgroundTasks } from '../background/types.ts'
 import type { RunSession } from '../pipeline.ts'
@@ -20,15 +21,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { createMemoryLogger } from '../../logger.ts'
 import { createFakeBackgroundTasks } from '../../testing/fake-background-tasks.ts'
+import { catalogEntryKey, createFakeCustomizationService } from '../../testing/fake-customizations.ts'
 import { agentScopeOf } from '../agent-scope.ts'
-import { BACKGROUND_UNAVAILABLE_TEXT, createBackgroundTasks } from '../background/index.ts'
+import { BACKGROUND_STOPPED_TEXT } from '../background/types.ts'
 import { SUBAGENT_INSTRUCTIONS_MARKER } from '../markers.ts'
-import { testCatalog } from '../testing.ts'
+import { catalogEntry, testCatalog } from '../testing.ts'
 import { createDetachedSession } from './host.ts'
 import {
+  agentSnapshot,
+  availableAgentTypes,
+  BACKGROUND_DEADLINE_TEXT,
   createSubagentRunner,
   createSubagentRunnerWith,
   finalizeStep,
+  normalizeAgentType,
+  resolveAgentType,
   runDetachedChild,
   SUBAGENT_EXPLORE_TEXT,
   SUBAGENT_FINALIZE_TEXT,
@@ -37,6 +44,7 @@ import {
   subagentDeadlineText,
   SubagentSlots,
   subagentStepLimitText,
+  unknownAgentTypeText,
 } from './index.ts'
 import { SUBAGENT_APPROVAL_DENIED_TEXT } from './tools.ts'
 
@@ -158,6 +166,8 @@ interface HarnessOptions {
   settings?: Partial<Settings>
   tools?: (contexts: Harness['toolContexts']) => RegisteredTool[]
   resolve?: (ref: string) => Promise<ResolvedModel>
+  /** The customization service custom agents load their definitions from (Phase 10). */
+  customizations?: FakeCustomizationService
 }
 
 function harness(options: HarnessOptions = {}): Harness {
@@ -195,6 +205,7 @@ function harness(options: HarnessOptions = {}): Harness {
     },
     chats: { addUsage: async (row: UsageInput) => void usage.push(row) },
     redactor: { redactText: (text: string) => text },
+    customizations: options.customizations ?? createFakeCustomizationService(),
   }
   const settings = { instructions: 'Global rules.', subagentModelRef: null, subagentMaxSteps: 30, autoCompact: false, compactModelRef: null, ...options.settings }
   const session = {
@@ -216,15 +227,15 @@ function harness(options: HarnessOptions = {}): Harness {
   return { session, usage, extraCosts, logs, run, toolContexts }
 }
 
-function runner(h: Harness, model: LanguageModelV4, toolMode: ToolMode = 'ask', limits?: SubagentRunnerLimits, background?: BackgroundTasks): SubagentRunner {
+function runner(h: Harness, model: LanguageModelV4, toolMode: ToolMode = 'ask', limits?: SubagentRunnerLimits, background?: BackgroundTasks, catalog?: CustomizationCatalog): SubagentRunner {
   const input: SubagentRunnerInput = {
     session: h.session,
     model: resolvedModel(model),
     toolMode,
     workspace: null,
     scope: null,
-    catalog: testCatalog(),
-    background: background ?? createBackgroundTasks({} as AppDeps, { hasRun: () => false, startTaskTurn: async () => new Response(null) }),
+    catalog: catalog ?? testCatalog(),
+    background: background ?? createFakeBackgroundTasks(),
     origin: 'request',
   }
   return limits === undefined ? createSubagentRunner(input) : createSubagentRunnerWith(input, limits)
@@ -523,15 +534,43 @@ describe('createSubagentRunner: abort and deadline', () => {
 
 // ---------- Phase 10 (C31 seams): background launches, the detached child, the structural host ----------
 
+const REVIEWER_PATH = '.harness/agents/reviewer.md'
+const REVIEWER_BODY = 'PERSONA: strict reviewer\nReview the diff line by line.'
+
+/** A catalog with the builtins, the project agent `reviewer` and inactive entries (shadowed, invalid, off). */
+function customCatalog(extra: Parameters<typeof catalogEntry>[2] = {}): CustomizationCatalog {
+  return testCatalog([
+    catalogEntry('agent', 'explore'),
+    catalogEntry('agent', 'general'),
+    catalogEntry('agent', 'reviewer', { source: 'project', path: REVIEWER_PATH, description: 'Reviews the diff.', ...extra }),
+    catalogEntry('agent', 'old', { source: 'user', state: 'shadowed' }),
+    catalogEntry('agent', 'broken', { source: 'project', state: 'invalid' }),
+    catalogEntry('agent', 'paused', { source: 'user', state: 'off' }),
+  ])
+}
+
+/** A fake customization service whose `reviewer` body has these frontmatter lines. */
+function reviewerService(frontmatter: string[] = [], body = REVIEWER_BODY): FakeCustomizationService {
+  const service = createFakeCustomizationService()
+  const content = ['---', 'name: reviewer', 'description: Reviews the diff.', ...frontmatter, '---', body].join('\n')
+  service.bodies.set(catalogEntryKey({ kind: 'agent', source: 'project', name: 'reviewer', path: REVIEWER_PATH }), content)
+  return service
+}
+
 describe('createSubagentRunner: background launches (Phase 10)', () => {
   const BACKGROUND_TASK: TaskInput = { ...TASK, type: 'explore', background: true }
 
-  it('yields one failed output "Background agents are not available yet." with the C30 stub, without a model call', async () => {
+  it('yields the manager\'s failed launch output (a cap) as it is, without a model call', async () => {
     const h = harness()
     const { model, calls } = scripted(() => textParts('never'))
-    const outputs = await collect(runner(h, model).run(BACKGROUND_TASK, callOptions()))
+    const capped = 'At most 3 background agents run per chat. Wait for one to finish.'
+    const tasks = createFakeBackgroundTasks({
+      launch: input => ({ status: 'failed', type: input.task.type, description: input.task.description, modelRef: input.model.modelRef, steps: [], stepsOmitted: 0, report: '', startedAt: 1, finishedAt: 1, error: capped }),
+    })
+    const outputs = await collect(runner(h, model, 'ask', undefined, tasks).run(BACKGROUND_TASK, callOptions()))
     expect(outputs).toHaveLength(1)
-    expect(outputs[0]).toMatchObject({ status: 'failed', type: 'explore', description: 'List the files', error: BACKGROUND_UNAVAILABLE_TEXT, steps: [], report: '' })
+    expect(outputs[0]).toMatchObject({ status: 'failed', type: 'explore', description: 'List the files', error: capped, steps: [], report: '' })
+    expect(outputs[0]!.agent).toBeUndefined()
     expect(taskOutputSchema.safeParse(outputs[0]).success).toBe(true)
     expect(calls).toHaveLength(0)
     expect(h.usage).toEqual([])
@@ -591,21 +630,307 @@ describe('createSubagentRunner: background launches (Phase 10)', () => {
     expect(failed).toEqual([expect.objectContaining({ status: 'failed', error: 'The database is locked.' })])
   })
 
-  it('runDetachedChild is a stub until W10.3 (not_implemented)', () => {
+  it('resolves the type before a launch: an unknown type fails without one; the launch carries the resolved name', async () => {
     const h = harness()
-    const { model } = scripted(() => textParts('never'))
-    const session = createDetachedSession({
+    const { model, calls } = scripted(() => textParts('never'))
+    const tasks = createFakeBackgroundTasks()
+    const catalog = customCatalog()
+    const unknown = await collect(runner(h, model, 'ask', undefined, tasks, catalog).run({ ...BACKGROUND_TASK, type: 'nope' }, callOptions()))
+    expect(unknown).toEqual([expect.objectContaining({ status: 'failed', type: 'nope', error: unknownAgentTypeText('nope', ['explore', 'general', 'reviewer']) })])
+    expect(tasks.launches).toHaveLength(0)
+
+    const alias = await collect(runner(h, model, 'ask', undefined, tasks, catalog).run({ ...BACKGROUND_TASK, type: 'general-purpose' }, callOptions()))
+    expect(alias).toEqual([expect.objectContaining({ status: 'background', agent: { source: 'builtin', description: 'The general agent.' } })])
+    expect(tasks.launches[0]!.task.type).toBe('general')
+
+    const custom = await collect(runner(h, model, 'ask', undefined, tasks, catalog).run({ ...BACKGROUND_TASK, type: 'reviewer' }, callOptions()))
+    expect(custom[0]).toMatchObject({ status: 'background', agent: { source: 'project', description: 'Reviews the diff.', path: REVIEWER_PATH } })
+    expect(tasks.launches[1]!.task.type).toBe('reviewer')
+    expect(calls).toHaveLength(0)
+  })
+})
+
+// ---------- Phase 10 (W10.3): custom agent types ----------
+
+describe('custom agent types (Phase 10, W10.3)', () => {
+  it('resolveAgentType: builtins (aliases, case), active catalog agents only', () => {
+    const catalog = customCatalog()
+    expect(normalizeAgentType('  General-Purpose ')).toBe('general')
+    expect(resolveAgentType(catalog, 'general-purpose')).toEqual({ name: 'general', base: 'general', entry: null, agent: { source: 'builtin', description: 'The general agent.' } })
+    expect(resolveAgentType(catalog, 'EXPLORE')).toMatchObject({ name: 'explore', base: 'explore', entry: null })
+    // A builtin is always available, also from a catalog that does not list it (its own description then).
+    expect(resolveAgentType(testCatalog([]), 'explore')?.agent.description).toMatch(/^Searches and reads the project/)
+    expect(resolveAgentType(catalog, 'reviewer')).toMatchObject({ name: 'reviewer', base: 'general', entry: { name: 'reviewer', source: 'project' }, agent: { source: 'project', path: REVIEWER_PATH } })
+    for (const name of ['old', 'broken', 'paused', 'nope'])
+      expect(resolveAgentType(catalog, name)).toBeNull()
+    expect(availableAgentTypes(catalog)).toEqual(['explore', 'general', 'reviewer'])
+    expect(availableAgentTypes(testCatalog([catalogEntry('agent', 'zeta', { source: 'user' }), catalogEntry('agent', 'alpha', { source: 'plugin', pluginId: 'acme' })]))).toEqual(['explore', 'general', 'alpha', 'zeta'])
+    expect(agentSnapshot({ source: 'plugin', description: `Line one\n${'d'.repeat(300)}` }).description).toHaveLength(200)
+    expect(unknownAgentTypeText('x', ['explore', 'general', 'reviewer'])).toBe('Unknown agent type x. Available: explore, general, reviewer.')
+    const many = Array.from({ length: LIMITS.agentTypesListedMax + 2 }, (_, index) => `a${index}`)
+    expect(unknownAgentTypeText('x', many)).toMatch(/ and 2 more\.$/)
+  })
+
+  it('an unknown or inactive type fails at once with the available types (no model call, no slot, no usage)', async () => {
+    const h = harness()
+    const { model, calls } = scripted(() => textParts('never'))
+    const subagents = runner(h, model, 'ask', { parallelMax: 1 }, undefined, customCatalog())
+    for (const type of ['nope', 'old', 'broken', 'paused']) {
+      const outputs = await collect(subagents.run({ ...TASK, type }, callOptions()))
+      expect(outputs).toHaveLength(1)
+      expect(outputs[0]).toMatchObject({ status: 'failed', type, steps: [], report: '', error: `Unknown agent type ${type}. Available: explore, general, reviewer.` })
+      expect(outputs[0]!.agent).toBeUndefined()
+      expect(taskOutputSchema.safeParse(outputs[0]).success).toBe(true)
+    }
+    expect(calls).toHaveLength(0)
+    expect(h.usage).toEqual([])
+  })
+
+  it('a builtin keeps its behavior; the output carries the resolved type and the builtin snapshot', async () => {
+    const h = harness()
+    const { model, calls } = scripted(() => textParts('Done.'))
+    const outputs = await collect(runner(h, model, 'auto', undefined, undefined, customCatalog()).run({ ...TASK, type: 'general-purpose' }, callOptions()))
+    expect(outputs.every(output => output.type === 'general' && output.agent?.source === 'builtin')).toBe(true)
+    expect(outputs.at(-1)).toMatchObject({ status: 'completed', agent: { source: 'builtin', description: 'The general agent.' } })
+    expect(systemOf(calls[0])).not.toContain(SUBAGENT_EXPLORE_TEXT)
+    const explore = scripted(() => textParts('Read.'))
+    await collect(runner(h, explore.model, 'auto', undefined, undefined, customCatalog()).run({ ...TASK, type: 'explore' }, callOptions()))
+    expect(systemOf(explore.calls[0])).toContain(SUBAGENT_EXPLORE_TEXT)
+  })
+
+  it('a custom agent: the marker first, then its body, then the global rules; its tools narrow the set; the snapshot', async () => {
+    const h = harness({
+      customizations: reviewerService(['tools: probe, task, skill, generate_image, missing_tool']),
+      tools: contexts => [
+        registered('acme', { name: 'probe' }, contexts),
+        registered('acme', { name: 'other' }, contexts),
+        registered('core-tools', { name: 'generate_image' }, contexts),
+        registered('core-agent', { name: 'task' }, contexts),
+        registered('core-agent', { name: 'skill' }, contexts),
+      ],
+    })
+    const { model, calls } = scripted((_options, call) => (call === 1 ? callParts('c1', 'probe', { path: 'src' }) : textParts('Looks good.')))
+    const outputs = await collect(runner(h, model, 'auto', undefined, undefined, customCatalog()).run({ ...TASK, type: 'reviewer' }, callOptions()))
+    const final = outputs.at(-1)!
+    expect(final).toMatchObject({ status: 'completed', type: 'reviewer', report: 'Looks good.', agent: { source: 'project', description: 'Reviews the diff.', path: REVIEWER_PATH } })
+    expect(outputs.every(output => output.agent?.path === REVIEWER_PATH)).toBe(true)
+    expect(taskOutputSchema.safeParse(final).success).toBe(true)
+
+    const system = systemOf(calls[0])
+    expect(system.startsWith(SUBAGENT_INSTRUCTIONS_MARKER)).toBe(true)
+    const body = system.indexOf('PERSONA: strict reviewer')
+    expect(body).toBeGreaterThan(system.indexOf('Do not ask questions back.'))
+    expect(system.indexOf('Global rules.')).toBeGreaterThan(body)
+    expect(system).not.toContain(SUBAGENT_EXPLORE_TEXT)
+    // Only `probe` (listed and under the ceiling): never task, skill or generate_image, never an unlisted tool.
+    expect(toolNames(calls[0])).toEqual(['probe'])
+    expect(h.toolContexts.map(entry => entry.c.toolCallId)).toEqual(['call_parent/c1'])
+    expect(JSON.stringify(h.logs.records)).not.toContain('Review the diff line by line')
+  })
+
+  it('an empty tools list runs the agent without tools; no tools key keeps the whole ceiling', async () => {
+    const none = harness({ customizations: reviewerService(['tools: []']) })
+    const first = scripted(() => textParts('No tools.'))
+    expect((await collect(runner(none, first.model, 'auto', undefined, undefined, customCatalog()).run({ ...TASK, type: 'reviewer' }, callOptions()))).at(-1)?.status).toBe('completed')
+    expect(toolNames(first.calls[0])).toEqual([])
+
+    const all = harness({ customizations: reviewerService() })
+    const second = scripted(() => textParts('All tools.'))
+    await collect(runner(all, second.model, 'auto', undefined, undefined, customCatalog()).run({ ...TASK, type: 'reviewer' }, callOptions()))
+    expect(toolNames(second.calls[0])).toEqual(['probe'])
+  })
+
+  it('a definition that is gone or no longer valid fails the call (logged without the body)', async () => {
+    const gone = harness()
+    const { model, calls } = scripted(() => textParts('never'))
+    const missing = await collect(runner(gone, model, 'ask', undefined, undefined, customCatalog()).run({ ...TASK, type: 'reviewer' }, callOptions()))
+    expect(missing.at(-1)).toMatchObject({ status: 'failed', type: 'reviewer', error: 'The agent "reviewer" is no longer available.', agent: { source: 'project' } })
+    expect(gone.logs.records).toContainEqual(expect.objectContaining({ msg: 'a custom agent definition cannot be loaded' }))
+
+    // The file lost its description since the catalog was built: the error names what is wrong.
+    const service = createFakeCustomizationService()
+    service.bodies.set(catalogEntryKey({ kind: 'agent', source: 'project', name: 'reviewer', path: REVIEWER_PATH }), `---\nname: reviewer\n---\n${REVIEWER_BODY}`)
+    const invalid = harness({ customizations: service })
+    const failed = await collect(runner(invalid, model, 'ask', undefined, undefined, customCatalog()).run({ ...TASK, type: 'reviewer' }, callOptions()))
+    expect(failed.at(-1)).toMatchObject({ status: 'failed', error: 'Add a description.' })
+    expect(calls).toHaveLength(0)
+    expect(JSON.stringify(invalid.logs.records)).not.toContain('PERSONA')
+  })
+
+  describe('the model of a custom agent', () => {
+    const own = scripted(() => textParts('From the agent model.'))
+    const small = scripted(() => textParts('From the sub-agent model.'))
+    const resolve = async (ref: string): Promise<ResolvedModel> => {
+      if (ref === 'testkit:own')
+        return resolvedModel(own.model, 'own')
+      if (ref === 'testkit:small')
+        return resolvedModel(small.model, 'small')
+      throw new HarnessError({ code: 'model_not_found', message: `No model ${ref}.` })
+    }
+
+    async function finalOf(frontmatter: string[], settings: Partial<Settings> = {}): Promise<{ output: TaskOutput, logs: MemoryLogger, parent: number }> {
+      const h = harness({ customizations: reviewerService(frontmatter), resolve, settings })
+      const parent = scripted(() => textParts('From the run model.'))
+      const outputs = await collect(runner(h, parent.model, 'ask', undefined, undefined, customCatalog()).run({ ...TASK, type: 'reviewer' }, callOptions()))
+      return { output: outputs.at(-1)!, logs: h.logs, parent: parent.calls.length }
+    }
+
+    it('a declared model runs the child (output.modelRef is the model that ran)', async () => {
+      const { output, parent } = await finalOf(['model: testkit:own'], { subagentModelRef: 'testkit:small' })
+      expect(output).toMatchObject({ status: 'completed', modelRef: 'testkit:own', report: 'From the agent model.' })
+      expect(parent).toBe(0)
+    })
+
+    it('a declared model that cannot be resolved falls back to subagentModelRef, else the parent, with a warning', async () => {
+      const toSetting = await finalOf(['model: testkit:gone'], { subagentModelRef: 'testkit:small' })
+      expect(toSetting.output).toMatchObject({ status: 'completed', modelRef: 'testkit:small' })
+      expect(toSetting.logs.records).toContainEqual(expect.objectContaining({ level: 'warn', msg: 'the agent\'s model cannot be resolved; the default model runs the sub-agent' }))
+      const toParent = await finalOf(['model: testkit:gone'])
+      expect(toParent.output).toMatchObject({ status: 'completed', modelRef: 'testkit:child', report: 'From the run model.' })
+    })
+
+    it('inherit runs the parent model even with subagentModelRef set; no model uses the default', async () => {
+      expect((await finalOf(['model: inherit'], { subagentModelRef: 'testkit:small' })).output).toMatchObject({ modelRef: 'testkit:child', report: 'From the run model.' })
+      expect((await finalOf([], { subagentModelRef: 'testkit:small' })).output).toMatchObject({ modelRef: 'testkit:small', report: 'From the sub-agent model.' })
+      expect((await finalOf([])).output).toMatchObject({ modelRef: 'testkit:child' })
+    })
+
+    it('the first snapshot names the declared model while the call waits for a slot', async () => {
+      const h = harness({ customizations: reviewerService(['model: testkit:own']), resolve })
+      const { model } = scripted(options => hangingStream(options))
+      const subagents = runner(h, model, 'ask', { parallelMax: 1 }, undefined, customCatalog({ modelRef: 'testkit:own' }))
+      const first = collect(subagents.run(TASK, callOptions()))
+      const queued: TaskOutput[] = []
+      const second = (async () => {
+        for await (const output of subagents.run({ ...TASK, type: 'reviewer' }, callOptions()))
+          queued.push(output)
+      })()
+      await vi.waitFor(() => expect(queued[0]?.status).toBe('queued'))
+      expect(queued[0]).toMatchObject({ modelRef: 'testkit:own', type: 'reviewer' })
+      h.run.abort(new DOMException('stopped', 'AbortError'))
+      await first
+      await second
+    })
+  })
+})
+
+// ---------- Phase 10 (W10.3): the detached child of a background task ----------
+
+describe('runDetachedChild (Phase 10, W10.3)', () => {
+  const LAUNCHING = 'msg_a000000000000009'
+
+  function detached(h: Harness, signal: AbortSignal, costs: number[] = []): ChildSession {
+    return createDetachedSession({
       deps: h.session.ctx.deps,
       chatId: 'chat',
-      messageId: MESSAGE_ID,
+      messageId: LAUNCHING,
       settings: h.session.ctx.prepared.settings,
-      chatInstructions: undefined,
+      chatInstructions: 'Chat rules.',
       reasoningEffort: 'auto',
-      signal: new AbortController().signal,
+      signal,
       logger: h.logs.logger,
+      onExtraCost: usd => costs.push(usd),
     })
-    expect(() => runDetachedChild({ session, model: resolvedModel(model), toolMode: 'ask', workspace: null, scope: null, catalog: testCatalog(), task: BACKGROUND_TASK, toolCallId: 'call_bg' }))
-      .toThrow(expect.objectContaining({ code: 'not_implemented' }))
+  }
+
+  it('runs a custom child on its own host: the report, the usage row under the launching message, the cost sink', async () => {
+    const h = harness({ customizations: reviewerService(['tools: probe']) })
+    const costs: number[] = []
+    const { model, calls } = scripted((_options, call) => (call === 1 ? callParts('c1', 'probe', { path: '.' }) : textParts('Background report.')))
+    const outputs = await collect(runDetachedChild({
+      session: detached(h, new AbortController().signal, costs),
+      model: resolvedModel(model),
+      toolMode: 'ask',
+      workspace: null,
+      scope: null,
+      catalog: customCatalog(),
+      task: { ...TASK, type: 'reviewer', background: true },
+      toolCallId: 'call_bg',
+    }))
+    expect(outputs[0]?.status).toBe('running')
+    const final = outputs.at(-1)!
+    expect(final).toMatchObject({ status: 'completed', type: 'reviewer', report: 'Background report.', agent: { source: 'project', path: REVIEWER_PATH } })
+    expect(final.steps).toEqual([expect.objectContaining({ toolCallId: 'c1', toolName: 'probe', state: 'done' })])
+    expect(h.toolContexts.map(entry => entry.c.toolCallId)).toEqual(['call_bg/c1'])
+    expect(h.toolContexts[0]!.agent).toBeNull()
+    const system = systemOf(calls[0])
+    expect(system.startsWith(SUBAGENT_INSTRUCTIONS_MARKER)).toBe(true)
+    expect(system.indexOf('Chat rules.')).toBeGreaterThan(system.indexOf('PERSONA: strict reviewer'))
+    expect(h.usage).toEqual([expect.objectContaining({ chatId: 'chat', messageId: LAUNCHING, purpose: 'subagent', modelId: 'child' })])
+    expect(costs).toHaveLength(1)
+    expect(final.costUsd).toBeCloseTo(costs[0]!, 12)
+    expect(h.extraCosts).toEqual([])
+  })
+
+  it('needs no slot: more children than the parallel limit run at once', async () => {
+    const h = harness()
+    let active = 0
+    let peak = 0
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const model = new MockLanguageModelV4({
+      provider: 'testkit',
+      modelId: 'child',
+      doStream: async () => {
+        active += 1
+        peak = Math.max(peak, active)
+        await gate
+        return { stream: convertArrayToReadableStream(textParts('Done.')) }
+      },
+    })
+    const count = LIMITS.subagentParallelMax + 2
+    const runs = Array.from({ length: count }, (_, index) => collect(runDetachedChild({
+      session: detached(h, new AbortController().signal),
+      model: resolvedModel(model),
+      toolMode: 'ask',
+      workspace: null,
+      scope: null,
+      catalog: testCatalog(),
+      task: { ...TASK, background: true },
+      toolCallId: `call_${index}`,
+    })))
+    await vi.waitFor(() => expect(active).toBe(count))
+    release()
+    const outputs = await Promise.all(runs)
+    expect(peak).toBe(count)
+    expect(outputs.map(list => list.at(-1)?.status)).toEqual(Array.from({ length: count }).fill('completed'))
+  })
+
+  it('the task\'s stop ends it aborted; its deadline ends it limit; an unknown type fails at once', async () => {
+    const h = harness()
+    const { model } = scripted(options => hangingStream(options, [{ type: 'text-start', id: 't' }, { type: 'text-delta', id: 't', delta: 'Partial.' }]))
+    const base = { model: resolvedModel(model), toolMode: 'ask' as const, workspace: null, scope: null, catalog: testCatalog(), task: { ...TASK, background: true }, toolCallId: 'call_bg' }
+
+    const stop = new AbortController()
+    const stopped: TaskOutput[] = []
+    const stopping = (async () => {
+      for await (const output of runDetachedChild({ ...base, session: detached(h, stop.signal) }))
+        stopped.push(output)
+    })()
+    await vi.waitFor(() => expect(stopped.length).toBeGreaterThan(0))
+    stop.abort(new DOMException('stopped', 'AbortError'))
+    await stopping
+    expect(stopped.at(-1)).toMatchObject({ status: 'aborted', error: BACKGROUND_STOPPED_TEXT, report: 'Partial.' })
+
+    // The manager aborts the task signal together with the deadline.
+    const task = new AbortController()
+    const deadline = new AbortController()
+    const limited: TaskOutput[] = []
+    const limiting = (async () => {
+      for await (const output of runDetachedChild({ ...base, session: detached(h, task.signal), deadline: deadline.signal }))
+        limited.push(output)
+    })()
+    await vi.waitFor(() => expect(limited.length).toBeGreaterThan(0))
+    deadline.abort()
+    task.abort()
+    await limiting
+    expect(limited.at(-1)).toMatchObject({ status: 'limit', error: BACKGROUND_DEADLINE_TEXT, report: 'Partial.' })
+    expect(BACKGROUND_DEADLINE_TEXT).toBe('The background agent reached its time limit (30 minutes).')
+
+    const unknown = await collect(runDetachedChild({ ...base, session: detached(h, new AbortController().signal), task: { ...base.task, type: 'nope' } }))
+    expect(unknown).toEqual([expect.objectContaining({ status: 'failed', error: unknownAgentTypeText('nope', ['explore', 'general']) })])
   })
 })
 

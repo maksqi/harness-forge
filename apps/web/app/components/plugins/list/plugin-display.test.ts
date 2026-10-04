@@ -1,17 +1,21 @@
 import { BUILTIN_PLUGIN_IDS, MOCK_PROVIDER_ID } from '@harness-forge/shared'
 import { BotIcon, FolderCodeIcon } from '@lucide/vue'
 import { describe, expect, it } from 'vitest'
-import { pluginSummary } from '~/utils/testing/fixtures'
+import { customizationEntry, pluginSummary } from '~/utils/testing/fixtures'
 import {
   BUILTIN_PLUGIN_GLYPHS,
   contributionsSummary,
   countLabel,
+  customizationMeta,
+  customizeRoute,
+  PLUGIN_FILTER_OPTIONS,
   pluginDetailRoute,
   pluginFilterLabel,
   pluginFilterRoute,
   pluginSourceDescription,
   pluginSourceLabel,
   pluginStateDot,
+  shadowedNote,
   sortPluginsByName,
 } from './plugin-display'
 
@@ -46,6 +50,14 @@ describe('plugin display rules', () => {
     expect(countLabel(1, 'MCP server')).toBe('1 MCP server')
   })
 
+  it('adds agents and skills after commands and before hooks (Phase 10)', () => {
+    expect(contributionsSummary({ ...none, agents: ['a', 'b'], skills: ['s'] })).toBe('2 agents · 1 skill')
+    expect(contributionsSummary({ ...none, agents: ['a'] })).toBe('1 agent')
+    expect(contributionsSummary({ ...none, skills: ['s', 't'] })).toBe('2 skills')
+    expect(contributionsSummary({ ...none, tools: ['x'], commands: ['c', 'd'], agents: ['a', 'b'], skills: ['s'], hooks: ['chat.before'] }))
+      .toBe('1 tool · 2 commands · 2 agents · 1 skill · 1 hook')
+  })
+
   it('orders builtins first, then by name without case, then by id', () => {
     const sorted = sortPluginsByName([
       pluginSummary({ id: 'b', name: 'beta' }),
@@ -64,6 +76,43 @@ describe('plugin display rules', () => {
     expect(pluginDetailRoute('dice-roller')).toBe('/plugins/dice-roller')
     expect(pluginDetailRoute('dice-roller', 'logs')).toBe('/plugins/dice-roller?tab=logs')
     expect(pluginDetailRoute('dice-roller', 'overview')).toBe('/plugins/dice-roller')
+  })
+
+  it('offers the "Agents and skills" filter with the agent glyph (Phase 10)', () => {
+    expect(PLUGIN_FILTER_OPTIONS.map(option => option.value)).toEqual(['all', 'providers', 'tools', 'mcp', 'commands', 'agents', 'disabled'])
+    expect(pluginFilterLabel('agents')).toBe('Agents and skills')
+    expect(PLUGIN_FILTER_OPTIONS.find(option => option.value === 'agents')?.icon).toBe(BotIcon)
+    expect(pluginFilterRoute('agents')).toEqual({ path: '/plugins', query: { filter: 'agents' } })
+  })
+
+  it('describes a plugin agent by its model and tools; skills have no meta line (Phase 10)', () => {
+    const agent = { kind: 'agent' as const, modelRef: undefined, tools: undefined }
+    expect(customizationMeta(agent)).toEqual(['Default model', 'All tools'])
+    expect(customizationMeta({ ...agent, modelRef: 'inherit', tools: ['read_file'] })).toEqual(['Same as the chat', '1 tool'])
+    expect(customizationMeta({ ...agent, modelRef: 'anthropic:claude-haiku-5', tools: ['read_file', 'search_files'] }))
+      .toEqual(['anthropic:claude-haiku-5', '2 tools'])
+    expect(customizationMeta({ ...agent, tools: [] })).toEqual(['Default model', 'No tools'])
+    expect(customizationMeta({ kind: 'skill', modelRef: undefined, tools: undefined })).toEqual([])
+  })
+
+  it('names the winner of a shadowed agent or skill (Phase 10)', () => {
+    const pluginName = (id: string) => (id === 'db-tools' ? 'Database tools' : id)
+    const entry = customizationEntry({ source: 'plugin', pluginId: 'agent-pack', path: undefined })
+    expect(shadowedNote(entry, pluginName)).toBeNull()
+    const shadowed = { ...entry, state: 'shadowed' as const }
+    expect(shadowedNote({ ...shadowed, shadowedBy: { source: 'user' } }, pluginName)).toBe('Not used: your personal agent wins.')
+    expect(shadowedNote({ ...shadowed, kind: 'skill', shadowedBy: { source: 'user' } }, pluginName)).toBe('Not used: your personal skill wins.')
+    expect(shadowedNote({ ...shadowed, shadowedBy: { source: 'project', path: '.harness/agents/reviewer.md' } }, pluginName))
+      .toBe('Not used: the project\'s .harness/agents/reviewer.md wins.')
+    expect(shadowedNote({ ...shadowed, shadowedBy: { source: 'plugin', pluginId: 'db-tools' } }, pluginName))
+      .toBe('Not used: the agent from Database tools wins.')
+    expect(shadowedNote({ ...shadowed, shadowedBy: { source: 'builtin' } }, pluginName)).toBe('Not used: the built-in agent wins.')
+    expect(shadowedNote({ ...shadowed, shadowedBy: undefined }, pluginName)).toBe('Not used: another agent of the same name wins.')
+  })
+
+  it('links agents and skills to their Customize tab (Phase 10)', () => {
+    expect(customizeRoute('agent')).toEqual({ path: '/settings/customize', query: { tab: 'agents' } })
+    expect(customizeRoute('skill')).toEqual({ path: '/settings/customize', query: { tab: 'skills' } })
   })
 
   it('draws a glyph for every core plugin, the agent tools included (Phase 9)', () => {

@@ -149,7 +149,9 @@ describe('workspace tools, instructions, notice and steps (real core-workspace d
       expect((await detailOf(t, chatId)).projectId).toBe(project.id)
       await patchChat(t, chatId, { settings: { instructions: 'Chat rules.' } })
       await readSse(await postChat(t, chatBody(chatId, 'second', { modelRef: 'testkit:agent' })))
-      expect(projects.opened.filter(id => id === project.id)).toHaveLength(2)
+      // Each run opens the folder twice: its workspace and its customization catalog (Phase 10, W10.1; `run.finished`
+      // drops the cached catalog, so the next run builds it again).
+      expect(projects.opened.filter(id => id === project.id)).toHaveLength(4)
 
       const sent = toolNames(calls[1])
       for (const name of WORKSPACE_TOOLS.filter(name => name !== 'shell' || SHELL_OFFERED))

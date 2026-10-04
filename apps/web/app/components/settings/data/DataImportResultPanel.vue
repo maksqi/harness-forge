@@ -23,6 +23,18 @@ const STATUS_STYLES: Record<DataImportStatus, string> = {
 const headline = computed(() => importHeadline(props.result))
 const filesLine = computed(() => importFilesLine(props.result))
 const failed = computed(() => props.result.counts.failed > 0)
+// Phase 10 (ADR-044): the personal agents, commands and skills restored from `customizations.json`.
+const customizationsLine = computed(() => {
+  const c = props.result.customizations
+  if (!c)
+    return null
+  const parts = [`${c.imported} ${c.imported === 1 ? 'agent, command or skill' : 'agents, commands and skills'} restored`]
+  if (c.skipped > 0)
+    parts.push(`${c.skipped} kept`)
+  if (c.failed > 0)
+    parts.push(`${c.failed} failed`)
+  return parts.join(' · ')
+})
 const rows = computed(() => props.result.items.map((item, index) => ({
   key: `${index}:${item.sourceId}`,
   item,
@@ -49,6 +61,9 @@ const rows = computed(() => props.result.items.map((item, index) => ({
         </p>
         <p v-if="result.settingsRestored" class="text-muted-foreground" data-slot="data-import-settings">
           Settings restored
+        </p>
+        <p v-if="customizationsLine" class="text-muted-foreground tabular-nums" data-slot="data-import-customizations">
+          {{ customizationsLine }}
         </p>
       </div>
     </div>

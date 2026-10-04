@@ -3,15 +3,20 @@ import type { ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ResolvedModel } from '../providers/types.ts'
 import type { OfferedTool, RunParamsInput } from './params.ts'
 import type { AssembledTools } from './tools.ts'
-import { AGENT_TOOL_NAMES, toolModeSchema } from '@harness-forge/shared'
+import { AGENT_TOOL_NAMES, LIMITS, toolModeSchema } from '@harness-forge/shared'
 import { describe, expect, expectTypeOf, it } from 'vitest'
+import { mockAgentTypeNames, mockSkillNames } from '../builtin-plugins/mock/agents.ts'
 import { createSilentLogger } from '../logger.ts'
 import {
+  AGENT_TYPES_HEADER,
   agentBlocks,
+  agentTypesBlock,
   buildRunParams,
   joinInstructions,
+  listedDescription,
   mergeProviderOptions,
   offeredAgentTools,
+  orderAgentTypes,
   osName,
   planModeBlock,
   projectFileInstructions,
@@ -19,6 +24,8 @@ import {
   providerReasoning,
   runInstructions,
   runMaxSteps,
+  SKILLS_HEADER,
+  skillsBlock,
   TASK_HINT,
   TODO_HINT,
   workspaceBlock,
@@ -399,14 +406,121 @@ describe('agent instructions (Phase 9, ADR-041 / ADR-043)', () => {
   })
 })
 
-describe('runParamsInput.agentTypes / skills (Phase 10 seam, C31-T6)', () => {
-  it('accepts the catalog\'s agents and skills; P10-0b adds no block yet (W10.3)', async () => {
+describe('the agent-types and skills blocks (Phase 10, W10.3-T6)', () => {
+  const PROJECT = {
+    name: 'Demo app',
+    root: '/srv/projects/demo',
+    instructions: 'Project rules.',
+    projectFile: { name: 'AGENTS.md' as const, content: 'Run the tests.', truncated: false },
+  }
+  const TYPES = [
+    { name: 'reviewer', description: 'Reviews diffs.' },
+    { name: 'general', description: 'General agent.' },
+    { name: 'debugger', description: 'Finds bugs.' },
+    { name: 'explore', description: 'Read-only search.' },
+  ]
+  const SKILLS = [{ name: 'release-notes', description: 'Writes release notes.' }, { name: 'pdf', description: 'Reads PDF files.' }]
+
+  it('lists the agent types after the task hint (builtins first, then by name) in the format the mocks read', () => {
+    const block = agentTypesBlock(TYPES)
+    expect(block).toBe([
+      AGENT_TYPES_HEADER,
+      '- explore: Read-only search.',
+      '- general: General agent.',
+      '- debugger: Finds bugs.',
+      '- reviewer: Reviews diffs.',
+    ].join('\n'))
+    expect(AGENT_TYPES_HEADER.startsWith('Agent types')).toBe(true)
+    expect(mockAgentTypeNames(block)).toEqual(['explore', 'general', 'debugger', 'reviewer'])
+    expect(agentTypesBlock([])).toBe('')
+  })
+
+  it('lists the skills by name in the format the mocks read', () => {
+    const block = skillsBlock(SKILLS)
+    expect(block).toBe([SKILLS_HEADER, '- pdf: Reads PDF files.', '- release-notes: Writes release notes.'].join('\n'))
+    expect(SKILLS_HEADER.startsWith('Skills')).toBe(true)
+    expect(mockSkillNames(block)).toEqual(['pdf', 'release-notes'])
+    // The two blocks never read as each other.
+    expect(mockSkillNames(agentTypesBlock(TYPES))).toEqual([])
+    expect(mockAgentTypeNames(block)).toEqual([])
+    expect(skillsBlock([])).toBe('')
+  })
+
+  it('present only when the tool is offered; order: task hint, agent types, skills, then the project file', () => {
+    const text = runInstructions({
+      globalInstructions: 'Global.',
+      chatInstructions: 'Chat.',
+      workspace: PROJECT,
+      workspaceTools: [],
+      platform: 'linux',
+      toolMode: 'edits',
+      agentTools: ['todo_write', 'task', 'skill'],
+      agentTypes: TYPES,
+      skills: SKILLS,
+    })
+    expect(text).toBe([
+      'Global.',
+      'Project "Demo app", folder /srv/projects/demo (Linux).',
+      TODO_HINT,
+      TASK_HINT,
+      agentTypesBlock(TYPES),
+      skillsBlock(SKILLS),
+      'Instructions from AGENTS.md in the project folder:\n\nRun the tests.',
+      'Project rules.',
+      'Chat.',
+    ].join('\n\n'))
+    expect(mockAgentTypeNames(text)).toEqual(['explore', 'general', 'debugger', 'reviewer'])
+    expect(mockSkillNames(text)).toEqual(['pdf', 'release-notes'])
+
+    // `task` not offered: no agent types (skills only with `skill`); `skill` not offered: no skills block.
+    expect(agentBlocks('ask', ['skill'], { agentTypes: TYPES, skills: SKILLS })).toEqual([skillsBlock(SKILLS)])
+    expect(agentBlocks('ask', ['task'], { agentTypes: TYPES, skills: SKILLS })).toEqual([TASK_HINT, agentTypesBlock(TYPES)])
+    expect(agentBlocks('ask', [], { agentTypes: TYPES, skills: SKILLS })).toEqual([])
+    // An offered `skill` with an empty list adds nothing (the pipeline never offers it then).
+    expect(agentBlocks('ask', ['task', 'skill'], { agentTypes: [], skills: [] })).toEqual([TASK_HINT])
+    // Plan mode keeps the plan block first.
+    expect(agentBlocks('plan', ['task', 'exit_plan_mode'], { agentTypes: TYPES })).toEqual([planModeBlock(true), TASK_HINT, agentTypesBlock(TYPES)])
+  })
+
+  it(`caps: ${LIMITS.agentTypesListedMax} agent types, ${LIMITS.skillsListedMax} skills, descriptions of ${LIMITS.listedDescriptionMaxChars} characters on one line`, () => {
+    const many = Array.from({ length: 40 }, (_, index) => ({ name: `agent-${String(index).padStart(2, '0')}`, description: `Agent ${index}.` }))
+    const typeNames = mockAgentTypeNames(agentTypesBlock([...many, { name: 'general', description: 'G.' }, { name: 'explore', description: 'E.' }]))
+    expect(typeNames).toHaveLength(LIMITS.agentTypesListedMax)
+    expect(typeNames.slice(0, 3)).toEqual(['explore', 'general', 'agent-00'])
+    expect(typeNames.at(-1)).toBe(`agent-${String(LIMITS.agentTypesListedMax - 3).padStart(2, '0')}`)
+
+    const skills = Array.from({ length: 60 }, (_, index) => ({ name: `skill-${String(index).padStart(2, '0')}`, description: 'S.' }))
+    expect(mockSkillNames(skillsBlock(skills))).toHaveLength(LIMITS.skillsListedMax)
+
+    const long = `First line\n\n  second   line ${'x'.repeat(400)}`
+    const line = agentTypesBlock([{ name: 'wordy', description: long }]).split('\n')[1]!
+    const description = line.slice('- wordy: '.length)
+    expect(description.startsWith('First line second line xxx')).toBe(true)
+    expect(description).toHaveLength(LIMITS.listedDescriptionMaxChars)
+    expect(description.endsWith('…')).toBe(true)
+    expect(listedDescription('Short.')).toBe('Short.')
+    expect(listedDescription(` ${'y'.repeat(LIMITS.listedDescriptionMaxChars)} `)).toHaveLength(LIMITS.listedDescriptionMaxChars)
+    // A surrogate pair is never split.
+    expect(listedDescription(`${'a'.repeat(248)}\u{1F600}tail`)).toBe(`${'a'.repeat(248)}…`)
+  })
+
+  it('skips invalid and duplicate names; an entry without a description is listed by name', () => {
+    const block = agentTypesBlock([
+      { name: 'Bad Name', description: 'x' },
+      { name: 'evil\n- injected', description: 'x' },
+      { name: 'quiet', description: '   ' },
+      { name: 'quiet', description: 'Second.' },
+    ])
+    expect(block).toBe(`${AGENT_TYPES_HEADER}\n- quiet`)
+    expect(orderAgentTypes([{ name: 'b', description: '' }, { name: 'explore', description: '' }, { name: 'a', description: '' }], 2).map(entry => entry.name)).toEqual(['explore', 'a'])
+  })
+
+  it('buildRunParams lists the catalog\'s agents and skills when task and skill are offered', async () => {
     const plain = await buildRunParams(input({ agentTools: ['task', 'skill'] }))
-    const listed = await buildRunParams(input({
-      agentTools: ['task', 'skill'],
-      agentTypes: [{ name: 'explore', description: 'Read-only search.' }, { name: 'reviewer', description: 'Reviews diffs.' }],
-      skills: [{ name: 'release-notes', description: 'Writes release notes.' }],
-    }))
-    expect(listed).toEqual(plain)
+    expect(plain.instructions).toBe(['Global.', TASK_HINT, 'Chat.'].join('\n\n'))
+    const listed = await buildRunParams(input({ agentTools: ['task', 'skill'], agentTypes: TYPES, skills: SKILLS }))
+    expect(listed.instructions).toBe(['Global.', TASK_HINT, agentTypesBlock(TYPES), skillsBlock(SKILLS), 'Chat.'].join('\n\n'))
+    const none = await buildRunParams(input({ agentTypes: TYPES, skills: SKILLS }))
+    expect(none.instructions).toBe('Global.\n\nChat.')
   })
 })

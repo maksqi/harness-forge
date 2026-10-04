@@ -6,7 +6,7 @@ import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { planApprovalPart, shellOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
+import { planApprovalPart, pluginSummary, shellOutput, skillOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
 import { TOOL_BODY_PREVIEW_CHARS } from '../chat-format'
@@ -721,9 +721,46 @@ describe('toolPart: agent tools (Phase 9)', () => {
   })
 })
 
-describe('toolPart: skills and plan files (Phase 10 seams)', () => {
+describe('toolPart: skills and plan files (Phase 10)', () => {
   const planPart = (output: unknown) =>
     ({ type: 'tool-exit_plan_mode', toolCallId: 'call_plan_1', state: 'output-available', input: { plan: '# Move auth' }, output, approval: { id: 'a1', approved: true } }) as ToolPartLike
+
+  it('shows a loaded skill as "Loaded skill" + the mono name, its source and the check, named for screen readers', () => {
+    const wrapper = mountPart(skillPart() as ToolPartLike, false)
+    expect(row(wrapper).attributes()).toMatchObject({ 'data-tool-name': 'skill', 'data-status': 'done' })
+    const trigger = row(wrapper).get('button')
+    expect(trigger.get('[data-slot="skill-row-label"]').text()).toBe('Loaded skill')
+    const name = trigger.get('[data-slot="skill-row-name"]')
+    expect(name.text()).toBe('release-notes')
+    expect(name.classes()).toContain('font-mono')
+    expect(trigger.get('[data-slot="skill-row-source"]').text()).toBe('Project')
+    expect(trigger.find('.text-success').exists()).toBe(true)
+    expect(trigger.find('.lucide-book-open-icon, .lucide-book-open').exists()).toBe(true)
+    expect(trigger.attributes('aria-label')).toBe('Loaded skill release-notes, Project')
+  })
+
+  it('names the plugin of a plugin skill and reads personal and built-in skills', () => {
+    const plugins = usePluginsStore()
+    plugins.items = [pluginSummary({ id: 'docs-kit', name: 'Docs kit', contributions: { ...pluginSummary().contributions, skills: ['release-notes'] } })]
+    const plugin = mountPart(skillPart(skillOutput({ source: 'plugin', baseDir: undefined, files: undefined })) as ToolPartLike, false)
+    expect(row(plugin).get('[data-slot="skill-row-source"]').text()).toBe('Docs kit')
+    expect(row(plugin).get('button').attributes('aria-label')).toBe('Loaded skill release-notes, Docs kit')
+    const personal = mountPart(skillPart(skillOutput({ source: 'user' })) as ToolPartLike, false)
+    expect(row(personal).get('[data-slot="skill-row-source"]').text()).toBe('Personal')
+    const builtin = mountPart(skillPart(skillOutput({ source: 'builtin' })) as ToolPartLike, false)
+    expect(row(builtin).get('[data-slot="skill-row-source"]').text()).toBe('Built-in')
+  })
+
+  it('reads "Loading skill" (shimmering) with the input\'s name while the call runs', () => {
+    const running = { type: 'tool-skill', toolCallId: 'call_skill_3', state: 'input-available', input: { name: 'Release-Notes' } } as ToolPartLike
+    const wrapper = mountPart(running, true)
+    const label = row(wrapper).get('[data-slot="skill-row-label"]')
+    expect(label.text()).toBe('Loading skill')
+    expect(label.classes()).toContain('hf-shimmer-text')
+    expect(row(wrapper).get('[data-slot="skill-row-name"]').text()).toBe('release-notes')
+    expect(row(wrapper).find('[data-slot="skill-row-source"]').exists()).toBe(false)
+    expect(row(wrapper).get('button').attributes('aria-label')).toBe('Loading skill release-notes')
+  })
 
   it('renders the skill body for a loaded skill, behind the raw toggle', async () => {
     const wrapper = mountPart(skillPart() as ToolPartLike, false)
@@ -734,12 +771,35 @@ describe('toolPart: skills and plan files (Phase 10 seams)', () => {
     expect(body.find(`[data-testid="${testIds.toolRawToggle}"]`).exists()).toBe(true)
   })
 
-  it('keeps the generic row for a skill call that failed', async () => {
-    const failed = { type: 'tool-skill', toolCallId: 'call_skill_2', state: 'output-error', input: { name: 'pdf' }, errorText: 'Skills are not available yet.' } as ToolPartLike
+  it('reads "Couldn\'t load skill" for a failed call and keeps the error in the generic body', async () => {
+    const failed = { type: 'tool-skill', toolCallId: 'call_skill_2', state: 'output-error', input: { name: 'pdf' }, errorText: 'Unknown skill "pdf". Available skills: release-notes.' } as ToolPartLike
     const wrapper = mountPart(failed, false)
+    expect(row(wrapper).get('[data-slot="skill-row-label"]').text()).toBe('Couldn\'t load skill')
+    expect(row(wrapper).get('button').attributes('aria-label')).toBe('Couldn\'t load skill pdf')
     await row(wrapper).get('button').trigger('click')
     expect(wrapper.find('[data-slot="skill-body"]').exists()).toBe(false)
-    expect(wrapper.get('[data-label="error"]').text()).toContain('Skills are not available yet.')
+    expect(wrapper.get('[data-label="error"]').text()).toContain('Available skills: release-notes.')
+  })
+
+  it('keeps the generic row for a skill tool of another plugin', () => {
+    const plugins = usePluginsStore()
+    plugins.tools = [toolSummary({ name: 'skill', pluginId: 'other-plugin' })]
+    const wrapper = mountPart(skillPart() as ToolPartLike, false)
+    expect(row(wrapper).find('[data-slot="skill-row-label"]').exists()).toBe(false)
+    expect(row(wrapper).get('button').attributes('aria-label')).toBeUndefined()
+  })
+
+  it('opens the changes panel from the plan file chip of a project chat', async () => {
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, {
+        default: () => h(ToolPart, { part: planPart({ approved: true, mode: 'edits', planPath: '.harness/plans/p.md' }), streaming: false }),
+      }),
+    }, {
+      attachTo: document.body,
+      global: { provide: { [TOOL_APPROVAL_CONTEXT as symbol]: { toolMode: () => 'edits', projectName: () => 'demo', projectId: () => 'prj_1', shellCwd: () => null } } },
+    })
+    await row(wrapper).get('button').trigger('click')
+    expect(wrapper.find('[data-slot="plan-file-show-changes"]').exists()).toBe(true)
   })
 
   it('starts the body of an approved plan with its plan file', async () => {

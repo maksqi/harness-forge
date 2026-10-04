@@ -2147,4 +2147,137 @@ describe('useChatSession: background agents (Phase 10)', () => {
     expect(shownAtResume).toEqual([U1, ASSISTANT_ID, CARRIER])
     expect(chatBodies()).toHaveLength(0)
   })
+
+  it('stop() never stops a background agent', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const running = backgroundTask({ chatId: chatId(10), status: 'running', finishedAt: null })
+    api.chatTasks.list.mockResolvedValue({ items: [running] })
+    const session = await loadedSession(10, { messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a')] })
+    await until(() => session.backgroundTasks.value.length === 1, 'tasks')
+    expect(api.chatTasks.list).toHaveBeenCalledWith({ params: { id: chatId(10) } })
+    expect(useBackgroundTasksStore().loaded[chatId(10)]).toBe(true)
+    await session.stop()
+    expect(api.chat.stop).toHaveBeenCalledWith({ params: { id: chatId(10) } })
+    expect(api.chatTasks.stop).not.toHaveBeenCalled()
+    expect(session.backgroundTasks.value[0]?.status).toBe('running')
+  })
+
+  it('a busy session follows a task turn once its own request ended', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const { session, gate, sending } = await streamingSession(11)
+    const userId = chatBodies()[0]!.message.id
+    const path = [userMessage(userId, 'Fix the parser'), assistantMessage(ASSISTANT_ID, 'working on it'), taskResultCarrier(CARRIER)]
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(11), modelRef: MODEL, running: true, messages: path }))
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(11), modelRef: MODEL, messages: [...path, assistantMessage(A2, 'The tests are flaky')] }))
+    server.resume(textReply('The tests are flaky', A2))
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(11), messageId: A2, modelRef: MODEL, origin: 'task', userMessageId: CARRIER }))
+    await new Promise(resolve => setTimeout(resolve, 20))
+    // Deferred: nothing is reloaded while its own reply streams.
+    expect(api.chats.get).not.toHaveBeenCalled()
+    gate.resolve()
+    await sending
+    await until(() => ids(session.chat.messages.value).at(-1) === A2 && session.chat.status.value === 'ready', 'followed')
+    expect(ids(session.chat.messages.value)).toEqual([userId, ASSISTANT_ID, CARRIER, A2])
+    expect(chatBodies()).toHaveLength(1)
+  })
+
+  it('two tabs: both list the agents and their stops; the idle tab follows the task turn at once, the busy one after its reply', async () => {
+    // Tab A: this module. Tab B: its own copy of the app modules and stores (another browser tab), same server.
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    api.chatTasks.list.mockResolvedValue({ items: [] })
+    const n = 12
+    let phase: 'initial' | 'sent' | 'task-turn' | 'done' = 'initial'
+    let userId = ''
+    const path = (): HarnessUIMessage[] => {
+      const base = [userMessage(U1, 'q'), assistantMessage('msg_assistant0000000', 'a')]
+      if (phase === 'initial')
+        return base
+      const turn = [...base, userMessage(userId, 'Find flaky tests in the background'), assistantMessage(ASSISTANT_ID, 'Started it')]
+      if (phase === 'sent')
+        return turn
+      const carried = [...turn, taskResultCarrier(CARRIER)]
+      return phase === 'done' ? [...carried, assistantMessage(A2, 'The tests are flaky')] : carried
+    }
+    api.chats.get.mockImplementation(async () => chatDetail({ id: chatId(n), modelRef: MODEL, running: phase === 'task-turn', messages: path() }))
+
+    const tabA = useChatSession(chatId(n))
+    await until(() => tabA.loaded.value, 'tab A load')
+    vi.resetModules()
+    const piniaB = createPinia()
+    setActivePinia(piniaB)
+    const tabBSessions = await import('./useChatSession')
+    const tabBEvents = await import('./useServerEvents')
+    const tabB = tabBSessions.useChatSession(chatId(n))
+    await until(() => tabB.loaded.value, 'tab B load')
+    setActivePinia(pinia)
+    const dispatchBoth = (event: Parameters<typeof dispatchServerEvent>[0]) => {
+      dispatchServerEvent(event)
+      setActivePinia(piniaB)
+      tabBEvents.dispatchServerEvent(event)
+      setActivePinia(pinia)
+    }
+    try {
+      // Tab A sends; its reply launches a background agent and keeps streaming.
+      const gateR1 = deferred()
+      server.reply(textReply('Started it', ASSISTANT_ID, gateR1.promise))
+      const sending = tabA.submit({ text: 'Find flaky tests in the background', files: [] })
+      await until(() => tabA.chat.status.value === 'streaming', 'tab A streams')
+      userId = chatBodies()[0]!.message.id
+      phase = 'sent'
+      const task = backgroundTask({ chatId: chatId(n), messageId: ASSISTANT_ID, status: 'running', finishedAt: null })
+      dispatchBoth(createServerEvent('task.changed', { chatId: chatId(n), task }))
+      expect(tabA.backgroundTasks.value).toEqual([task])
+      expect(tabB.backgroundTasks.value).toEqual([task])
+
+      // It finishes; the server starts a turn from its carrier.
+      const done = { ...task, status: 'completed' as const, finishedAt: 1_759_000_041_000 }
+      dispatchBoth(createServerEvent('task.changed', { chatId: chatId(n), task: done }))
+      expect(tabB.backgroundTasks.value[0]?.status).toBe('completed')
+      const gateB = deferred()
+      const gateA = deferred()
+      let tabBAtResume: string[] = []
+      let tabAAtResume: string[] = []
+      server.resume(afterGate(gateB.promise, (write) => {
+        tabBAtResume = ids(tabB.chat.messages.value)
+        return textReply('The tests are flaky', A2)(write)
+      }))
+      server.resume(afterGate(gateA.promise, (write) => {
+        tabAAtResume = ids(tabA.chat.messages.value)
+        return textReply('The tests are flaky', A2)(write)
+      }))
+      phase = 'task-turn'
+      dispatchBoth(createServerEvent('task.changed', { chatId: chatId(n), task: { ...done, deliveredAt: 1_759_000_042_000, deliveredMessageId: CARRIER } }))
+      dispatchBoth(createServerEvent('run.started', { chatId: chatId(n), messageId: A2, modelRef: MODEL, origin: 'task', userMessageId: CARRIER }))
+
+      // Tab B (idle) reloads, shows the carrier, then follows the reply.
+      const streamCalls = () => server.calls.filter(call => call.url === `/api/chat/${chatId(n)}/stream`).length
+      await until(() => streamCalls() === 1, 'tab B resumes')
+      expect(ids(tabB.chat.messages.value)).toEqual([U1, 'msg_assistant0000000', userId, ASSISTANT_ID, CARRIER])
+      expect(tabA.chat.status.value).toBe('streaming')
+      expect(ids(tabA.chat.messages.value)).not.toContain(CARRIER)
+
+      gateR1.resolve()
+      await sending
+      await until(() => streamCalls() === 2, 'tab A resumes')
+      expect(ids(tabA.chat.messages.value)).toEqual([U1, 'msg_assistant0000000', userId, ASSISTANT_ID, CARRIER])
+
+      phase = 'done'
+      gateB.resolve()
+      gateA.resolve()
+      const final = [U1, 'msg_assistant0000000', userId, ASSISTANT_ID, CARRIER, A2]
+      await until(() => tabA.chat.status.value === 'ready' && ids(tabA.chat.messages.value).join() === final.join(), 'tab A done')
+      await until(() => tabB.chat.status.value === 'ready' && ids(tabB.chat.messages.value).join() === final.join(), 'tab B done')
+      expect(tabBAtResume).toEqual(final.slice(0, 5))
+      expect(tabAAtResume).toEqual(final.slice(0, 5))
+      // The agent was delivered: both lists still hold it (the dock hides it).
+      expect(tabA.backgroundTasks.value[0]?.deliveredAt).toBe(1_759_000_042_000)
+      expect(tabB.backgroundTasks.value[0]?.deliveredAt).toBe(1_759_000_042_000)
+      expect(chatBodies()).toHaveLength(1)
+    }
+    finally {
+      tabBSessions.resetChatSessions()
+      disposePinia(piniaB)
+      setActivePinia(pinia)
+    }
+  })
 })

@@ -1,13 +1,19 @@
 <script setup lang="ts">
 // Slash menu (docs/UI.md 7.8): a list above the composer while the text starts with `/` and the caret is in the
-// first token. Items are filtered by prefix (App commands first, then server Commands with their plugin, muted, on
-// the right), at most 8 rows visible. Focus stays in the textarea: the composer forwards its keydown events to
-// `handleKeydown` (↑/↓ move, Enter or Tab picks, Esc closes) and points `aria-activedescendant` at `activeId`.
-import type { SlashItem } from './slash-commands'
+// first token. Items are filtered by name prefix, at most 8 rows visible (40dvh at most on small screens). Focus stays
+// in the textarea: the composer forwards its keydown events to `handleKeydown` (↑/↓ move, Enter or Tab picks, Esc
+// closes) and points `aria-activedescendant` at `activeId`.
+// Phase 10 (ADR-045; W10.9): four groups in this order, each a `role="group"` labelled by its heading (`data-group`;
+// a heading shows only when its group has a match, and is never focusable): App (the client commands, `/remember`
+// included, and the harness `/compact`), Project, Personal, Plugins. A row (`slash-menu-item`, `data-value`,
+// `data-kind`, `data-group`) shows the mono `/name`, the argument hint (muted mono, hidden below `sm`), the description
+// and, muted on the right, the namespace or the plugin name; its accessible name is "/{name}, {description}" plus
+// ", arguments {hint}".
+import type { SlashGroup, SlashItem } from './slash-commands'
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { cn } from '@/lib/utils'
 import { testIds } from '~/utils/testids'
-import { filterSlashItems } from './slash-commands'
+import { filterSlashItems, SLASH_GROUPS, slashItemDetail, slashItemLabel } from './slash-commands'
 
 const props = defineProps<{
   open: boolean
@@ -36,16 +42,26 @@ interface Row {
   index: number
 }
 
-const groups = computed(() => {
+interface Group {
+  value: SlashGroup
+  label: string
+  rows: Row[]
+}
+
+// `matches` is already in group order, so the option indexes run top to bottom.
+const groups = computed<Group[]>(() => {
   const rows: Row[] = matches.value.map((item, index) => ({ item, index }))
-  return [
-    { label: 'App', rows: rows.filter(row => row.item.kind === 'client') },
-    { label: 'Commands', rows: rows.filter(row => row.item.kind === 'server') },
-  ].filter(group => group.rows.length > 0)
+  return SLASH_GROUPS
+    .map(group => ({ ...group, rows: rows.filter(row => row.item.group === group.value) }))
+    .filter(group => group.rows.length > 0)
 })
 
 function optionId(index: number): string {
   return `${listId}-option-${index}`
+}
+
+function headingId(group: SlashGroup): string {
+  return `${listId}-group-${group}`
 }
 
 /** Id of the highlighted option (for `aria-activedescendant`), or undefined when the menu is closed. */
@@ -107,9 +123,14 @@ defineExpose({ handleKeydown, activeId, listId })
     :data-testid="testIds.slashMenu"
     class="absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-md animate-in fade-in-0 slide-in-from-bottom-1 duration-(--duration-fast)"
   >
-    <div class="max-h-[calc(var(--row-height)*8+3.5rem)] overflow-y-auto overscroll-contain p-1">
-      <div v-for="group in groups" :key="group.label" role="group" :aria-label="group.label">
-        <div aria-hidden="true" class="px-2 pt-1.5 pb-1 text-xs font-medium text-muted-foreground">
+    <div class="max-h-[min(calc(var(--row-height)*8+3.5rem),40dvh)] overflow-y-auto overscroll-contain p-1">
+      <div v-for="group in groups" :key="group.value" role="group" :aria-labelledby="headingId(group.value)">
+        <div
+          :id="headingId(group.value)"
+          aria-hidden="true"
+          :data-group="group.value"
+          class="px-2 pt-1.5 pb-1 text-xs font-medium text-muted-foreground"
+        >
           {{ group.label }}
         </div>
         <div
@@ -118,9 +139,11 @@ defineExpose({ handleKeydown, activeId, listId })
           :key="`${row.item.kind}:${row.item.name}`"
           role="option"
           :aria-selected="row.index === active"
+          :aria-label="slashItemLabel(row.item)"
           :data-testid="testIds.slashMenuItem"
           :data-value="row.item.name"
           :data-kind="row.item.kind"
+          :data-group="row.item.group"
           :data-highlighted="row.index === active ? '' : undefined"
           :class="cn(
             'flex h-(--row-height) cursor-default items-center gap-3 rounded-md px-2 text-sm select-none',
@@ -131,8 +154,17 @@ defineExpose({ handleKeydown, activeId, listId })
           @click="pick(row.index)"
         >
           <span class="shrink-0 font-mono text-[13px] font-medium">/{{ row.item.name }}</span>
+          <span
+            v-if="row.item.argumentHint"
+            data-slot="slash-menu-hint"
+            class="hidden max-w-[30%] shrink-0 truncate font-mono text-xs text-muted-foreground sm:inline"
+          >{{ row.item.argumentHint }}</span>
           <span class="min-w-0 flex-1 truncate text-muted-foreground">{{ row.item.description }}</span>
-          <span v-if="row.item.source" class="max-w-[40%] shrink-0 truncate text-xs text-muted-foreground">{{ row.item.source }}</span>
+          <span
+            v-if="slashItemDetail(row.item)"
+            data-slot="slash-menu-detail"
+            class="max-w-[40%] shrink-0 truncate text-xs text-muted-foreground"
+          >{{ slashItemDetail(row.item) }}</span>
         </div>
       </div>
     </div>

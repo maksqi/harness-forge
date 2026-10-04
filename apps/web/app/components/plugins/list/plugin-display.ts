@@ -1,7 +1,15 @@
-// Display rules of the Plugins tab (docs/UI.md 5.4, 8.1, 8.7): source badge labels, state labels and dots, the
-// contributions summary, browse filters and the order of the installed list. Pure functions, shared by the sidebar
-// (PluginsNav), the list page and the detail page.
-import type { PluginContributions, PluginKind, PluginSource, PluginState, PluginSummary } from '@harness-forge/shared'
+// Display rules of the Plugins tab (docs/UI.md 5.4, 8.1, 8.7, 8.8): source badge labels, state labels and dots, the
+// contributions summary, browse filters, the order of the installed list and (Phase 10) the rows of a plugin's agents
+// and skills. Pure functions, shared by the sidebar (PluginsNav), the list page and the detail page.
+import type {
+  CustomizationEntry,
+  CustomizationShadowedBy,
+  PluginContributions,
+  PluginKind,
+  PluginSource,
+  PluginState,
+  PluginSummary,
+} from '@harness-forge/shared'
 import type { Component } from 'vue'
 import type { StatusDotStatus } from '~/components/common/status'
 import type { PluginFilter } from '~/stores/plugins'
@@ -125,9 +133,9 @@ export function countLabel(count: number, singular: string, plural = `${singular
 }
 
 /**
- * One-line summary of what a plugin adds: "2 providers · 3 tools · 1 MCP server · 2 commands". Models are listed
- * only for plugins that add models without providers of their own; hooks are listed last. Empty when nothing is
- * registered.
+ * One-line summary of what a plugin adds: "2 providers · 3 tools · 1 MCP server · 2 commands · 2 agents · 1 skill"
+ * (agents and skills since plugin API 1.4.0). Models are listed only for plugins that add models without providers of
+ * their own; hooks are listed last. Empty when nothing is registered.
  */
 export function contributionsSummary(contributions: PluginContributions): string {
   const parts: string[] = []
@@ -141,9 +149,73 @@ export function contributionsSummary(contributions: PluginContributions): string
     parts.push(countLabel(contributions.mcpServers.length, 'MCP server'))
   if (contributions.commands.length > 0)
     parts.push(countLabel(contributions.commands.length, 'command'))
+  if (contributions.agents.length > 0)
+    parts.push(countLabel(contributions.agents.length, 'agent'))
+  if (contributions.skills.length > 0)
+    parts.push(countLabel(contributions.skills.length, 'skill'))
   if (contributions.hooks.length > 0)
     parts.push(countLabel(contributions.hooks.length, 'hook'))
   return parts.join(' · ')
+}
+
+// ---------- agents and skills (Phase 10, plugin API 1.4.0) ----------
+
+/** The kinds a plugin contributes to the customization catalog (docs/UI.md 8.8). */
+export type PluginCustomizationKind = 'agent' | 'skill'
+
+/** "Open in Customize": Settings -> Customize on the tab of the kind (`?tab=agents` / `?tab=skills`). */
+export function customizeRoute(kind: PluginCustomizationKind): { path: string, query: { tab: 'agents' | 'skills' } } {
+  return { path: '/settings/customize', query: { tab: kind === 'agent' ? 'agents' : 'skills' } }
+}
+
+/**
+ * The meta line of a plugin agent (docs/UI.md 8.8): the model ("Default model" when unset, "Same as the chat" for
+ * `inherit`, else the model id) and the tools ("All tools" without a list, "No tools" for an empty one, else "{n}
+ * tools"). Skills have no meta line.
+ */
+export function customizationMeta(entry: Pick<CustomizationEntry, 'kind' | 'modelRef' | 'tools'>): string[] {
+  if (entry.kind !== 'agent')
+    return []
+  const model = entry.modelRef === undefined
+    ? 'Default model'
+    : entry.modelRef === 'inherit' ? 'Same as the chat' : entry.modelRef
+  const tools = entry.tools === undefined
+    ? 'All tools'
+    : entry.tools.length === 0 ? 'No tools' : countLabel(entry.tools.length, 'tool')
+  return [model, tools]
+}
+
+/**
+ * The tooltip of a "Shadowed" row (docs/UI.md 8.8, 9.12): "Not used: {winner} wins.", where the winner is "your
+ * personal agent", "the project's .harness/agents/x.md", "the agent from {plugin}" or "the built-in agent". Null for an
+ * entry that is not shadowed.
+ */
+export function shadowedNote(
+  entry: Pick<CustomizationEntry, 'kind' | 'state' | 'shadowedBy'>,
+  pluginName: (id: string) => string,
+): string | null {
+  if (entry.state !== 'shadowed')
+    return null
+  return `Not used: ${shadowWinner(entry.kind, entry.shadowedBy, pluginName)} wins.`
+}
+
+function shadowWinner(
+  kind: CustomizationEntry['kind'],
+  winner: CustomizationShadowedBy | undefined,
+  pluginName: (id: string) => string,
+): string {
+  switch (winner?.source) {
+    case 'user':
+      return `your personal ${kind}`
+    case 'project':
+      return winner.path ? `the project's ${winner.path}` : `the project's ${kind}`
+    case 'plugin':
+      return winner.pluginId ? `the ${kind} from ${pluginName(winner.pluginId)}` : `a plugin's ${kind}`
+    case 'builtin':
+      return `the built-in ${kind}`
+    default:
+      return `another ${kind} of the same name`
+  }
 }
 
 // ---------- ordering ----------

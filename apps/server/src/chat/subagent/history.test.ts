@@ -38,6 +38,10 @@ describe('reduceTaskOutput', () => {
     expect(reduceTaskOutput({ status: 1, report: 'x' })).toBeNull()
     expect(reduceTaskOutput('text')).toBeNull()
     expect(reduceTaskOutput(null)).toBeNull()
+    // Phase 10: a background launch keeps its task id (the model text names it); the agent snapshot is dropped.
+    const launch = { ...FULL, status: 'background', report: '', taskId: 'bgt_0123456789abcdef', agent: { source: 'project', description: 'Reviews.', path: '.harness/agents/r.md' } }
+    expect(reduceTaskOutput(launch)).toEqual({ status: 'background', report: '', taskId: 'bgt_0123456789abcdef' })
+    expect(reduceTaskOutput({ ...FULL, taskId: 7 })).toEqual({ status: 'completed', report: 'Found 3 files.' })
     expect(reduceTaskOutput([FULL])).toBeNull()
   })
 })

@@ -9,8 +9,10 @@
 //   `LIMITS.taskReportMaxChars` characters;
 // - every snapshot fits `TASK_OUTPUT_BYTES_MAX` of serialized JSON (below the 64 KB tool output cap, so a `task` output
 //   is never replaced by the truncation marker): the oldest steps go first, then the end of the report.
+// - Phase 10 (ADR-045): the `agent` snapshot of the definition the child runs with (`{ source, description, path? }`),
+//   on every snapshot of the call.
 // Nothing here is logged: the prompts, the previews and the report never reach the server log.
-import type { MessageUsage, TaskInput, TaskOutput, TaskStatus, TaskStep, TaskStepState } from '@harness-forge/shared'
+import type { MessageUsage, TaskAgent, TaskInput, TaskOutput, TaskStatus, TaskStep, TaskStepState } from '@harness-forge/shared'
 import { Buffer } from 'node:buffer'
 import { LIMITS } from '@harness-forge/shared'
 import { utf8Prefix } from '../tools.ts'
@@ -118,11 +120,14 @@ export class TaskProgress {
   #lastText = ''
   #usage: MessageUsage | undefined
   #costUsd: number | undefined
+  readonly #agent: TaskAgent | undefined
 
-  constructor(input: TaskInput, modelRef: string, startedAt: number) {
+  /** `agent`: the snapshot of the agent definition (Phase 10); absent = none in the outputs. */
+  constructor(input: TaskInput, modelRef: string, startedAt: number, agent?: TaskAgent) {
     this.#input = input
     this.#modelRef = modelRef
     this.#startedAt = startedAt
+    this.#agent = agent === undefined ? undefined : { ...agent }
   }
 
   /** The child started running (after its slot): its model and start time. */
@@ -209,6 +214,7 @@ export class TaskProgress {
       startedAt: this.#startedAt,
       ...(end.finishedAt === undefined ? {} : { finishedAt: end.finishedAt }),
       ...(end.error === undefined ? {} : { error: cutChars(end.error, TASK_ERROR_MAX_CHARS) }),
+      ...(this.#agent === undefined ? {} : { agent: { ...this.#agent } }),
     }
     return fitTaskOutput(output)
   }

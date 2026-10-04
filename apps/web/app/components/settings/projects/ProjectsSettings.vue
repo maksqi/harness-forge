@@ -8,8 +8,9 @@
 // (project-delete -> ConfirmDialog with project-delete-confirm; 409 run-active -> toast "Wait for the responses in this
 // project to finish before deleting it."). Phase 8: the row meta adds "{n} allowed commands" ("1 allowed command", left
 // out at 0; useShellRulesStore, which pages/settings/projects.vue loads). The empty state (projects-empty) has its own
-// Add project (project-add). Phase 10 (C33 adds it, W10.12 owns it): Agents, commands and skills… (project-customizations,
-// WandSparkles) opens Settings -> Customize with the project selected (`/settings/customize?project=<id>`).
+// Add project (project-add). Phase 10: Agents, commands and skills… (project-customizations, WandSparkles) opens
+// Settings -> Customize with the project selected (`/settings/customize?project=<id>`, also for a project whose folder
+// is missing: the page explains it). The menu items are 40px tall on coarse pointers (docs/UI.md 14.5).
 // A skeleton shows while the projects load; a failure shows SettingsLoadError "Could not load the projects" with Retry.
 // `?add=1` (the page's header action, the palette's "Add project…") opens the AddProjectDialog, and the query parameter
 // is dropped at once, so the same link works again. The list reloads on every visit (chat counts and folder states).
@@ -47,6 +48,9 @@ import { useRoute, useRouter } from '../nuxt-imports'
 import SettingsLoadError from '../SettingsLoadError.vue'
 
 type RowAction = 'rename' | 'instructions' | 'allowlist' | 'delete'
+
+/** The row menu items: 40px touch targets on coarse pointers. */
+const ITEM_CLASS = 'pointer-coarse:min-h-10'
 
 const projects = useProjectsStore()
 const chats = useChatsStore()
@@ -311,24 +315,24 @@ function openAdd(): void {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" class="w-60" @close-auto-focus="onMenuCloseAutoFocus">
-            <DropdownMenuItem :data-testid="testIds.projectRename" @select="choose(project, 'rename')">
+            <DropdownMenuItem :data-testid="testIds.projectRename" :class="ITEM_CLASS" @select="choose(project, 'rename')">
               <PencilIcon aria-hidden="true" />
               Rename
             </DropdownMenuItem>
-            <DropdownMenuItem :data-testid="testIds.projectInstructions" @select="choose(project, 'instructions')">
+            <DropdownMenuItem :data-testid="testIds.projectInstructions" :class="ITEM_CLASS" @select="choose(project, 'instructions')">
               <FileTextIcon aria-hidden="true" />
               Edit instructions…
             </DropdownMenuItem>
-            <DropdownMenuItem :data-testid="testIds.projectAllowlist" @select="choose(project, 'allowlist')">
+            <DropdownMenuItem :data-testid="testIds.projectAllowlist" :class="ITEM_CLASS" @select="choose(project, 'allowlist')">
               <ShieldCheckIcon aria-hidden="true" />
               Allowed commands…
             </DropdownMenuItem>
-            <DropdownMenuItem :data-testid="testIds.projectCustomizations" @select="openCustomizations(project)">
+            <DropdownMenuItem :data-testid="testIds.projectCustomizations" :class="ITEM_CLASS" @select="openCustomizations(project)">
               <WandSparklesIcon aria-hidden="true" />
               Agents, commands and skills…
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" :data-testid="testIds.projectDelete" @select="choose(project, 'delete')">
+            <DropdownMenuItem variant="destructive" :data-testid="testIds.projectDelete" :class="ITEM_CLASS" @select="choose(project, 'delete')">
               <Trash2Icon aria-hidden="true" />
               Delete…
             </DropdownMenuItem>

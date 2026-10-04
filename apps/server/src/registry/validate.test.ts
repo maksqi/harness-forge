@@ -1,4 +1,4 @@
-import type { ProviderDefinition, ToolDefinition } from '@harness-forge/plugin-sdk'
+import type { AgentDefinition, ProviderDefinition, SkillDefinition, ToolDefinition } from '@harness-forge/plugin-sdk'
 import type { ToolRegisterOptions } from './types.ts'
 import { CLIENT_COMMANDS, HARNESS_COMMANDS, HarnessError, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
@@ -6,7 +6,7 @@ import { z } from 'zod'
 import { PROVIDER_DEFINITIONS } from '../builtin-plugins/core-providers/index.ts'
 import { createWorkspaceTools } from '../builtin-plugins/core-workspace/index.ts'
 import { createMemoryLogger } from '../logger.ts'
-import { validateCommandDefinition, validateProviderDefinition, validateToolDefinition } from './validate.ts'
+import { validateAgentDefinition, validateCommandDefinition, validateProviderDefinition, validateSkillDefinition, validateToolDefinition } from './validate.ts'
 
 function unused(): never {
   throw new Error('unused')
@@ -145,5 +145,149 @@ describe('validateCommandDefinition: reserved names', () => {
   it('accepts names that only start like a reserved one', () => {
     for (const name of ['compact-x', 'compactor', 'news', 'helper', 'remember-me', 'remembered'])
       expect(() => validateCommandDefinition({ name, description: 'Mine.', template: '{{input}}' }), name).not.toThrow()
+  })
+})
+
+describe('validateAgentDefinition (plugin API 1.4.0, ADR-045)', () => {
+  const agent = (extra: Record<string, unknown> = {}): AgentDefinition =>
+    ({ name: 'code-reviewer', description: 'Reviews diffs.', instructions: 'Review the diff.', ...extra }) as AgentDefinition
+  const agentFailure = (definition: unknown): HarnessError => thrown(() => validateAgentDefinition(definition as AgentDefinition))
+
+  it('accepts the documented shapes and returns a frozen copy with the description trimmed', () => {
+    const tools = ['read_file', 'mcp__github__*', 'mcp__github__create_issue', 'shell']
+    const input = agent({ description: '  Reviews diffs.  ', tools, model: 'openrouter:anthropic/claude-sonnet-5' })
+    const result = validateAgentDefinition(input)
+    expect(result).toEqual({ name: 'code-reviewer', description: 'Reviews diffs.', instructions: 'Review the diff.', tools, model: 'openrouter:anthropic/claude-sonnet-5' })
+    expect(result).not.toBe(input)
+    expect(Object.isFrozen(result)).toBe(true)
+    expect(Object.isFrozen(result.tools)).toBe(true)
+    tools.push('write_file')
+    expect(result.tools).toHaveLength(4)
+    expect(validateAgentDefinition(agent({ model: 'inherit' })).model).toBe('inherit')
+    expect(validateAgentDefinition(agent({ model: 'ollama:llama3:8b' })).model).toBe('ollama:llama3:8b')
+    expect(validateAgentDefinition(agent({ tools: [] })).tools).toEqual([])
+    expect(validateAgentDefinition(agent())).not.toHaveProperty('tools')
+    expect(Object.keys(validateAgentDefinition(agent({ tools: undefined, model: undefined })))).toEqual(['name', 'description', 'instructions'])
+  })
+
+  it.each([
+    ['a', true],
+    ['a1-b2', true],
+    [`a${'b'.repeat(63)}`, true],
+    [`a${'b'.repeat(64)}`, false],
+    ['Reviewer', false],
+    ['1reviewer', false],
+    ['-reviewer', false],
+    ['code_reviewer', false],
+    ['code reviewer', false],
+    ['', false],
+  ])('name %j valid: %s', (name, valid) => {
+    if (valid) {
+      expect(validateAgentDefinition(agent({ name })).name).toBe(name)
+      return
+    }
+    const error = agentFailure(agent({ name }))
+    expect(error.code).toBe('validation_error')
+    expect(error.details).toMatchObject({ issues: [expect.objectContaining({ path: ['name'] })] })
+  })
+
+  it.each(['explore', 'general', 'general-purpose'])('refuses the reserved name "%s" with validation_error naming the field', (name) => {
+    const error = agentFailure(agent({ name }))
+    expect(error.code).toBe('validation_error')
+    expect(error.message).toBe(`Agent "${name}": name: Reserved agent type (explore, general, general-purpose).`)
+    expect(error.details).toMatchObject({ issues: [expect.objectContaining({ path: ['name'] })] })
+  })
+
+  it('accepts names that only start like a reserved one', () => {
+    for (const name of ['explorer', 'general-x', 'explore-docs', 'generalist'])
+      expect(() => validateAgentDefinition(agent({ name })), name).not.toThrow()
+  })
+
+  it.each([
+    ['description', { description: '' }],
+    ['description', { description: '   ' }],
+    ['description', { description: 'x'.repeat(1025) }],
+    ['description', { description: 42 }],
+    ['instructions', { instructions: '' }],
+    ['instructions', { instructions: 'x'.repeat(65_537) }],
+    ['instructions', { instructions: 'é'.repeat(32_769) }],
+    ['instructions', { instructions: undefined }],
+    ['tools', { tools: 'read_file' }],
+    ['tools', { tools: ['read_file', 'read_file'] }],
+    ['tools', { tools: Array.from({ length: 65 }, (_, index) => `tool_${index}`) }],
+    ['tools.0', { tools: ['Bash(git:*)'] }],
+    ['tools.0', { tools: ['read file'] }],
+    ['tools.0', { tools: ['x'.repeat(65)] }],
+    ['tools.0', { tools: ['mcp__*'] }],
+    ['tools.0', { tools: ['*'] }],
+    ['tools.0', { tools: [42] }],
+    ['model', { model: 'sonnet' }],
+    ['model', { model: '' }],
+    ['model', { model: ':model' }],
+    ['model', { model: 'provider:' }],
+    ['model', { model: 7 }],
+  ])('refuses an invalid %s with validation_error naming the field', (path, extra) => {
+    const error = agentFailure(agent(extra))
+    expect(error.code).toBe('validation_error')
+    expect(error.message).toMatch(new RegExp(`^Agent "code-reviewer": ${path.replace('.', '\\.')}: `))
+    expect(error.details).toMatchObject({ issues: [expect.objectContaining({ path: path.split('.').map(part => /^\d+$/.test(part) ? Number(part) : part) })] })
+  })
+
+  it('accepts the size limits exactly: 1024 description characters, 64 KiB of instructions, 64 tools', () => {
+    expect(() => validateAgentDefinition(agent({
+      description: 'd'.repeat(1024),
+      instructions: 'x'.repeat(65_536),
+      tools: Array.from({ length: 64 }, (_, index) => `tool_${index}`),
+    }))).not.toThrow()
+    // 64 KiB is counted in UTF-8 bytes: 32 768 two-byte characters fit.
+    expect(() => validateAgentDefinition(agent({ instructions: 'é'.repeat(32_768) }))).not.toThrow()
+  })
+
+  it('refuses unknown keys and non-objects', () => {
+    expect(agentFailure(agent({ color: 'blue' }))).toMatchObject({ code: 'validation_error', message: expect.stringContaining('color') })
+    for (const value of [null, 'reviewer', 42, ['reviewer']])
+      expect(agentFailure(value)).toMatchObject({ code: 'validation_error', message: 'An agent definition must be an object.' })
+  })
+})
+
+describe('validateSkillDefinition (plugin API 1.4.0, ADR-045)', () => {
+  const skill = (extra: Record<string, unknown> = {}): SkillDefinition =>
+    ({ name: 'commit-message', description: 'How to write commit messages.', content: '# Commit messages', ...extra }) as SkillDefinition
+  const skillFailure = (definition: unknown): HarnessError => thrown(() => validateSkillDefinition(definition as SkillDefinition))
+
+  it('accepts a skill and returns a frozen copy with the description trimmed', () => {
+    const input = skill({ description: ' How to write commit messages. ' })
+    const result = validateSkillDefinition(input)
+    expect(result).toEqual({ name: 'commit-message', description: 'How to write commit messages.', content: '# Commit messages' })
+    expect(result).not.toBe(input)
+    expect(Object.isFrozen(result)).toBe(true)
+    expect(() => validateSkillDefinition(skill({ description: 'd'.repeat(1024), content: 'x'.repeat(65_536) }))).not.toThrow()
+  })
+
+  it('has no reserved names (only agents reserve the builtin types)', () => {
+    for (const name of ['explore', 'general', 'general-purpose'])
+      expect(validateSkillDefinition(skill({ name })).name).toBe(name)
+  })
+
+  it.each([
+    ['name', { name: 'Commit' }],
+    ['name', { name: `a${'b'.repeat(64)}` }],
+    ['name', { name: undefined }],
+    ['description', { description: '' }],
+    ['description', { description: 'x'.repeat(1025) }],
+    ['content', { content: '' }],
+    ['content', { content: 'x'.repeat(65_537) }],
+    ['content', { content: null }],
+  ])('refuses an invalid %s with validation_error naming the field', (path, extra) => {
+    const error = skillFailure(skill(extra))
+    expect(error.code).toBe('validation_error')
+    expect(error.message).toMatch(new RegExp(`^Skill .+: ${path}: `))
+    expect(error.details).toMatchObject({ issues: [expect.objectContaining({ path: [path] })] })
+  })
+
+  it('refuses unknown keys (an agent shape is not a skill) and non-objects', () => {
+    expect(skillFailure(skill({ instructions: 'x' }))).toMatchObject({ code: 'validation_error', message: expect.stringContaining('instructions') })
+    for (const value of [undefined, 'skill', [skill()]])
+      expect(skillFailure(value)).toMatchObject({ code: 'validation_error', message: 'A skill definition must be an object.' })
   })
 })

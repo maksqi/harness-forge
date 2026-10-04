@@ -190,7 +190,7 @@ export function createFakeCustomizationService(options: FakeCustomizationService
     if (nameTaken(kind, name))
       throw exists(kind, name)
     if ([...personal.values()].filter(row => row.kind === kind).length >= LIMITS.customizationsPerKindMax)
-      throw new HarnessError({ code: 'conflict', message: `At most ${LIMITS.customizationsPerKindMax} personal ${kind}s can be stored.`, details: { reason: 'limit' } })
+      throw new HarnessError({ code: 'conflict', message: `At most ${LIMITS.customizationsPerKindMax} personal ${kind}s can be stored; delete one first.`, details: { reason: 'exists' } })
     const at = now()
     const row = toCustomization({ id: createCustomizationId(), name, description: definition.fields.description, content, enabled, diagnostics: found, createdAt: at, updatedAt: at }, kind, definition)
     personal.set(row.id, row)
@@ -315,6 +315,12 @@ export function createFakeCustomizationService(options: FakeCustomizationService
       for (const item of items) {
         if (nameTaken(item.kind, item.name)) {
           skipped += 1
+          continue
+        }
+        // The per-kind limit fails the item (the real store's answer); a taken name is skipped.
+        if ([...personal.values()].filter(row => row.kind === item.kind).length >= LIMITS.customizationsPerKindMax) {
+          failed += 1
+          warnings.push(`The personal ${item.kind} "${item.name}" was not restored.`.slice(0, 300))
           continue
         }
         try {

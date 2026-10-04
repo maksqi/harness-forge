@@ -13,7 +13,7 @@ import type { Db } from '../../db/client.ts'
 import { Buffer } from 'node:buffer'
 import { sql } from 'drizzle-orm'
 import { getTableConfig } from 'drizzle-orm/sqlite-core'
-import { chats, chatShares, customizations, messages, pluginKv, pluginSettings, projects, settings } from '../../db/schema.ts'
+import { backgroundTasks, chats, chatShares, customizations, messages, pluginKv, pluginSettings, projects, settings } from '../../db/schema.ts'
 import { guardDb } from '../chats/db-errors.ts'
 
 /** Rows per keyset batch. */
@@ -42,16 +42,20 @@ export const REFERENCE_SOURCES: readonly ReferenceSource[] = [
   { table: projects, columns: [projects.name, projects.path, projects.instructions] },
   // Phase 10 (ADR-044): personal agents, commands and skills are free text like `projects.instructions`.
   { table: customizations, columns: [customizations.content, customizations.description] },
+  // Phase 10 (ADR-046, Gate P10-A decision): the sub-agent snapshot of a background task holds its report, the only
+  // copy of it until the result is delivered into `messages.parts` (possibly days later, after a restart); a file id
+  // the report names must survive a cleanup meanwhile.
+  { table: backgroundTasks, columns: [backgroundTasks.output] },
 ]
 
 /** Why the columns of `workspace_changes` and `shell_rules` (Phase 8) are not scanned. */
 const CHECKPOINT_JOURNAL_REASON = 'checkpoint journal / shell rules: ids, paths, commands, hashes; never a data/files id'
 
 /**
- * Why the columns of `background_tasks` (Phase 10, ADR-046) are not scanned: ids, enums and the sub-agent's snapshot; a
- * delivered result lives on in a `data-task-result` part of `messages.parts` (scanned), and the rows go with their chat.
+ * Why the other columns of `background_tasks` (Phase 10, ADR-046) are not scanned: ids, enums, the agent type and the
+ * short description (`output`, the sub-agent snapshot with the report, is scanned).
  */
-const BACKGROUND_TASK_REASON = 'background tasks: ids, enums and the sub-agent snapshot (its delivered result is in messages.parts)'
+const BACKGROUND_TASK_REASON = 'background tasks: ids, enums, the agent type and the description (the snapshot `output` is scanned)'
 
 /**
  * `table.column` -> why it is not scanned: every text, JSON or blob column outside `REFERENCE_SOURCES`. A new column
@@ -131,7 +135,8 @@ export const UNSCANNED_COLUMNS: Readonly<Record<string, string>> = {
   'shell_rules.id': CHECKPOINT_JOURNAL_REASON,
   'shell_rules.project_id': CHECKPOINT_JOURNAL_REASON,
   'shell_rules.prefix': CHECKPOINT_JOURNAL_REASON,
-  // Phase 10 (ADR-044 / ADR-046): `customizations.content` and `.description` are scanned (`REFERENCE_SOURCES`).
+  // Phase 10 (ADR-044 / ADR-046): `customizations.content` and `.description` and `background_tasks.output` are scanned
+  // (`REFERENCE_SOURCES`).
   'customizations.id': 'customization ids',
   'customizations.kind': 'a kind enum',
   'customizations.name': 'definition names (`AGENT_NAME_PATTERN` / `COMMAND_NAME_PATTERN`)',
@@ -143,7 +148,6 @@ export const UNSCANNED_COLUMNS: Readonly<Record<string, string>> = {
   'background_tasks.description': BACKGROUND_TASK_REASON,
   'background_tasks.status': BACKGROUND_TASK_REASON,
   'background_tasks.origin': BACKGROUND_TASK_REASON,
-  'background_tasks.output': BACKGROUND_TASK_REASON,
   'background_tasks.delivered_message_id': BACKGROUND_TASK_REASON,
 }
 

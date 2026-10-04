@@ -9,20 +9,34 @@
 // Phase 9 (ADR-040): the harness command `/compact [focus]` (`HARNESS_COMMANDS`) is checked before the registry (a
 // plugin cannot register the name) and resolves to `compact`: `launchRun` answers it with a compaction instead of a
 // model call (`compaction/stream.ts`). `GET /commands` lists it with `HARNESS_COMMAND_SUMMARIES`.
-// Phase 10 (C31 seams, ADR-045; W10.2 implements them): `resolveCommand(…, { catalog })` gets the run's catalog
-// snapshot (command files and personal commands: client → harness → project `.harness` → `.claude` → personal → plugin;
-// until W10.2 only the harness command and the plugin registry resolve), `isServerCommandFor(deps, projectId, text)`
-// tells the queue which queued texts are server commands of the chat's project (`turnOnly`), and
-// `turnToolRestriction(history)` reads the `allowed-tools` of the turn's command (`PreparedRun.turnRestriction`; null
-// until W10.2).
+// Phase 10 (ADR-045, ARCHITECTURE.md 6.24): command files and personal commands. `resolveCommand(…, { catalog })` looks
+// a name up in this order: client commands (never the server's) → the harness command → the run catalog's active
+// command (a project `.harness` file over a `.claude` file over a personal command over a plugin command: the catalog's
+// precedence) → the plugin registry. A project or personal command is loaded again (`customizations.load`: the file read
+// and validated through the discovery guards) and expanded with the shared `expandArguments` (`$ARGUMENTS`, `$1` …
+// `$9`, `{{input}}`; ≤ 64 KB); its invocation carries `source` and, when the definition declares them, `modelRef` (the
+// turn runs on it, `prepare.ts`) and `allowedTools` (the turn's tools narrow to them, `turnToolRestriction`). A body is
+// text: `!` lines are never run and `@file` references never expanded. A plugin command (also when the catalog lists it)
+// keeps the v1.5 path through the registry. `isServerCommandFor(deps, projectId, text)` tells the queue which queued
+// texts are server commands of the chat's project (`turnOnly`). Bodies and expansions are never logged.
 import type { CommandDefinition, CommandRunResult } from '@harness-forge/plugin-sdk'
-import type { CommandInvocation, CommandSummary, HarnessUIMessage } from '@harness-forge/shared'
+import type { CommandInvocation, CommandSource, CommandSummary, CustomizationEntry, HarnessUIMessage } from '@harness-forge/shared'
 import type { PluginHost } from '../plugins/types.ts'
 import type { Registry } from '../registry/types.ts'
-import type { CustomizationCatalog, CustomizationService } from '../services/customizations/types.ts'
+import type { CustomizationCatalog, CustomizationService, LoadedDefinition } from '../services/customizations/types.ts'
 import type { AppDeps } from '../types.ts'
 import { Buffer } from 'node:buffer'
-import { COMMAND_NAME_PATTERN, HarnessError, isClientCommand, isHarnessCommand, isHarnessError, LIMITS } from '@harness-forge/shared'
+import {
+  COMMAND_NAME_PATTERN,
+  DEFINITION_LIMITS,
+  expandArguments,
+  HarnessError,
+  isClientCommand,
+  isHarnessCommand,
+  isHarnessError,
+  LIMITS,
+  modelRefSchema,
+} from '@harness-forge/shared'
 import { GUARD_TIMEOUTS } from '../plugins/guard.ts'
 
 export interface ParsedCommand {
@@ -65,7 +79,7 @@ export const HARNESS_COMMAND_SUMMARIES: readonly CommandSummary[] = Object.freez
 export interface CommandServices {
   registry: Pick<Registry, 'commands'>
   plugins: Pick<PluginHost, 'guard'>
-  /** Phase 10: the bodies of command files and personal commands (`load(entry, signal)`, W10.2). */
+  /** Phase 10: the bodies of command files and personal commands (`load(entry, signal)`). */
   customizations: Pick<CustomizationService, 'load'>
 }
 
@@ -76,7 +90,7 @@ export interface CommandContext {
   signal: AbortSignal
   /**
    * The run's catalog snapshot (Phase 10, `PreparedRun.catalog`): the command files of the chat's project and the
-   * personal commands, by precedence (W10.2). Absent = the harness command and the plugin registry only.
+   * personal commands, by precedence. Absent = the harness command and the plugin registry only.
    */
   catalog?: CustomizationCatalog
 }
@@ -104,10 +118,13 @@ export function compactNeedsChatModel(): HarnessError {
   return new HarnessError({ code: 'validation_error', message, details: { issues: [{ path: ['modelRef'], message, code: 'custom' }] } })
 }
 
-function promptResolution(name: string, input: string, expansion: string): CommandResolution {
+/** The optional Phase 10 fields of a prompt invocation (a command file's `source`, `modelRef`, `allowedTools`). */
+type InvocationExtras = Pick<CommandInvocation, 'source' | 'modelRef' | 'allowedTools'>
+
+function promptResolution(name: string, input: string, expansion: string, extras: InvocationExtras = {}): CommandResolution {
   if (Buffer.byteLength(expansion, 'utf8') > LIMITS.commandExpansionBytes)
     throw tooLong(name)
-  return { kind: 'prompt', invocation: { name, input, type: 'prompt', expansion } }
+  return { kind: 'prompt', invocation: { name, input, type: 'prompt', expansion, ...extras } }
 }
 
 function commandError(pluginId: string, message: string, cause?: unknown): HarnessError {
@@ -121,10 +138,88 @@ function isRunResult(value: unknown): value is CommandRunResult {
   return (result.type === 'prompt' && typeof result.text === 'string') || (result.type === 'reply' && typeof result.markdown === 'string')
 }
 
+/** A catalog entry that is a command file or a personal command (resolved here, not through the registry). */
+function isDefinitionCommand(entry: CustomizationEntry | null | undefined): entry is CustomizationEntry & { source: 'project' | 'user' } {
+  return entry?.kind === 'command' && entry.state === 'active' && (entry.source === 'project' || entry.source === 'user')
+}
+
 /**
- * The command invoked by `text`, or null when the text is not a harness command or a registered server-side command.
- * Throws `validation_error` when a prompt expansion is larger than 64 KB or a `/compact` focus longer than 1000
- * characters, and the abort reason when the run was stopped; a failing `run` is returned as `failed`.
+ * The project or personal command of `name` in the catalog (its active entry), else null (no catalog, a plugin entry,
+ * no entry, or a client or harness command name, which a definition can never take).
+ */
+export function definitionCommand(catalog: CustomizationCatalog | null | undefined, name: string): (CustomizationEntry & { source: 'project' | 'user' }) | null {
+  if (catalog === null || catalog === undefined || isClientCommand(name) || isHarnessCommand(name))
+    return null
+  const entry = catalog.command(name)
+  return isDefinitionCommand(entry) ? entry : null
+}
+
+/** The `model` of a command definition when it is a model reference (the parser drops anything else). */
+function commandModelRef(model: string | null | undefined): string | undefined {
+  if (typeof model !== 'string')
+    return undefined
+  return modelRefSchema.safeParse(model).success ? model : undefined
+}
+
+/** The `allowed-tools` of a command definition as stored in the invocation (≤ 64 names of 1 – 256 characters). */
+function commandAllowedTools(tools: readonly string[] | null | undefined): string[] | undefined {
+  if (!Array.isArray(tools))
+    return undefined
+  return tools
+    .filter((tool): tool is string => typeof tool === 'string' && tool.length > 0 && tool.length <= 256)
+    .slice(0, DEFINITION_LIMITS.toolsMax)
+}
+
+/** A command definition that cannot be loaded any more (the file changed since the catalog listed it). */
+function definitionUnavailable(name: string, error: unknown): HarnessError {
+  const reason = isHarnessError(error) ? HarnessError.from(error).message : 'Its definition could not be read.'
+  const message = `The /${name} command cannot be used right now. ${reason}`.slice(0, 1000)
+  return new HarnessError(
+    { code: 'validation_error', message, details: { issues: [{ path: ['message', 'parts'], message, code: 'custom' }] } },
+    { cause: error },
+  )
+}
+
+/**
+ * A project or personal command (Phase 10): the definition loaded again (`load`: the same guards as the discovery),
+ * its body expanded with `expandArguments`. A definition that cannot be loaded any more is a `validation_error` on the
+ * message (nothing is stored); the abort of a stopped run is rethrown.
+ */
+async function definitionResolution(
+  services: CommandServices,
+  entry: CustomizationEntry & { source: 'project' | 'user' },
+  parsed: ParsedCommand,
+  context: CommandContext,
+): Promise<CommandResolution> {
+  let loaded: LoadedDefinition
+  try {
+    loaded = await services.customizations.load(entry, context.signal)
+  }
+  catch (error) {
+    if (context.signal.aborted)
+      throw error
+    throw definitionUnavailable(parsed.name, error)
+  }
+  const definition = loaded.definition
+  if (definition.kind !== 'command')
+    throw definitionUnavailable(parsed.name, new HarnessError({ code: 'validation_error', message: 'The definition is not a command.' }))
+  const fields = definition.fields
+  const source: CommandSource = entry.source
+  const modelRef = commandModelRef(fields.model)
+  const allowedTools = commandAllowedTools(fields.allowedTools)
+  const expansion = expandArguments(fields.body, parsed.input).text
+  return promptResolution(parsed.name, parsed.input, expansion, {
+    source,
+    ...(modelRef === undefined ? {} : { modelRef }),
+    ...(allowedTools === undefined ? {} : { allowedTools }),
+  })
+}
+
+/**
+ * The command invoked by `text`, or null when the text is not a harness command, a command of the run catalog or a
+ * registered server-side command. Throws `validation_error` when a prompt expansion is larger than 64 KB, a `/compact`
+ * focus longer than 1000 characters or a command definition can no longer be loaded, and the abort reason when the run
+ * was stopped; a failing `run` is returned as `failed`.
  */
 export async function resolveCommand(
   services: CommandServices,
@@ -136,6 +231,9 @@ export async function resolveCommand(
     return null
   if (isHarnessCommand(parsed.name))
     return compactResolution(parsed.input)
+  const definitionEntry = definitionCommand(context.catalog, parsed.name)
+  if (definitionEntry !== null)
+    return definitionResolution(services, definitionEntry, parsed, context)
   const registered = services.registry.commands.get(parsed.name)
   if (registered === undefined)
     return null
@@ -169,26 +267,73 @@ export async function resolveCommand(
 }
 
 /**
+ * The effective server-side commands of a scope (`GET /commands`), sorted by name: `/compact`, then one entry per name
+ * of the catalog's project and personal commands and the plugin registry (a project or personal command wins its name
+ * over a plugin command: the catalog's precedence). Plugin commands come from the live registry (a catalog that still
+ * lists a disposed plugin's command does not bring it back); client and harness names are never taken.
+ */
+export function listServerCommands(registry: Pick<Registry, 'commands'>, catalog: CustomizationCatalog | null): CommandSummary[] {
+  const byName = new Map<string, CommandSummary>()
+  for (const entry of registry.commands.list()) {
+    const name = entry.definition.name
+    if (isClientCommand(name) || isHarnessCommand(name) || byName.has(name))
+      continue
+    byName.set(name, { name, description: entry.definition.description, source: 'plugin', pluginId: entry.pluginId })
+  }
+  for (const listed of catalog?.commands() ?? []) {
+    // The name's active entry, when it is a command file or a personal command (plugin entries: the registry above).
+    const entry = COMMAND_NAME_PATTERN.test(listed.name) ? definitionCommand(catalog, listed.name) : null
+    if (entry === null)
+      continue
+    const modelRef = typeof entry.modelRef === 'string' ? commandModelRef(entry.modelRef) : undefined
+    byName.set(entry.name, {
+      name: entry.name,
+      description: entry.description,
+      source: entry.source,
+      ...(entry.namespace === undefined ? {} : { namespace: entry.namespace }),
+      ...(entry.argumentHint === undefined ? {} : { argumentHint: entry.argumentHint }),
+      ...(modelRef === undefined ? {} : { modelRef }),
+    })
+  }
+  return [...HARNESS_COMMAND_SUMMARIES.map(summary => ({ ...summary })), ...byName.values()]
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+}
+
+/**
  * True when `text` starts a server command in a chat of `projectId` (null = no project): the harness command
- * `/compact`, a command a plugin registered, and (Phase 10, W10.2) every effective command file or personal command of
- * the project's catalog. The queue marks such items `turnOnly` (never steered). Client commands (`/model`) are never
- * server commands. P10-0b: the harness command and the plugin registry only (the v1.5 `isServerCommand`).
+ * `/compact`, a command a plugin registered, and (Phase 10) every active command file or personal command of the
+ * project's catalog (`deps.customizations.catalog`, cached). The queue marks such items `turnOnly` (never steered).
+ * Client commands (`/model`, `/remember`) and plain text are never server commands. A catalog that cannot be read
+ * (it never rejects by contract) adds nothing: the v1.5 answer (harness and plugin commands only).
  */
 export async function isServerCommandFor(deps: Pick<AppDeps, 'registry' | 'customizations'>, projectId: string | null, text: string): Promise<boolean> {
-  void projectId
   const parsed = parseSlashCommand(text)
   if (parsed === null || isClientCommand(parsed.name))
     return false
-  return isHarnessCommand(parsed.name) || deps.registry.commands.get(parsed.name) !== undefined
+  if (isHarnessCommand(parsed.name) || deps.registry.commands.get(parsed.name) !== undefined)
+    return true
+  try {
+    const catalog = await deps.customizations.catalog(projectId)
+    return definitionCommand(catalog, parsed.name) !== null
+  }
+  catch {
+    return false
+  }
 }
 
 /**
  * The tool restriction of the turn a run answers (Phase 10, ADR-045; `PreparedRun.turnRestriction`): the
  * `metadata.command.allowedTools` of the turn's user message (the last user message of `history`), so an approval
- * continuation and a regenerate of the turn keep it; null = no restriction (`assembleTools({ allowedTools })`).
- * P10-0b stub: always null (W10.2 implements it).
+ * continuation and a regenerate of the turn keep it; null = no restriction (`assembleTools({ allowedTools })`; an empty
+ * list leaves no tool but `exit_plan_mode` in plan mode).
  */
 export function turnToolRestriction(history: readonly HarnessUIMessage[]): readonly string[] | null {
-  void history
+  for (let index = history.length - 1; index >= 0; index--) {
+    const message = history[index]
+    if (message?.role !== 'user')
+      continue
+    const tools = commandAllowedTools(message.metadata?.command?.allowedTools)
+    return tools === undefined ? null : Object.freeze(tools)
+  }
   return null
 }

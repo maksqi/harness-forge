@@ -7,7 +7,8 @@
 //   must still be its own realpath, a directory inside a root); a chat without a project or a folder that cannot be
 //   opened is `400 validation_error` with the project service's message.
 // - `assertProjectIdle`: `409 conflict` (`reason: 'run-active'`, `details.chatId`) while **any** chat of the project
-//   holds a run (`deps.runs.hasRun`, the check of project deletion); nothing is written then.
+//   holds a run (`deps.runs.hasRun`, the check of project deletion) or, Phase 10 (ADR-046, W10.4), runs a background
+//   task (`deps.runs.hasTasks`: its child writes into the folder); nothing is written then.
 // - `journalRows`: rows of the chat in its current project (rows recorded while the chat belonged to another project
 //   are ignored), in journal order.
 // - `restoreDepsOf`, `finishBatch`: the restore primitive's deps, and after a batch the `workspace.changed` event (only
@@ -21,7 +22,7 @@ import type { CheckpointContext } from './types.ts'
 import { HarnessError, LIMITS, validationError } from '@harness-forge/shared'
 import { and, asc, eq } from 'drizzle-orm'
 import { chats, workspaceChanges } from '../../db/schema.ts'
-import { PROJECT_RUNNING_MESSAGE } from '../projects/index.ts'
+import { PROJECT_RUNNING_MESSAGE, PROJECT_TASKS_MESSAGE } from '../projects/index.ts'
 import { NO_PROJECT_MESSAGE } from './changes-common.ts'
 
 export { NO_PROJECT_MESSAGE, requireChat } from './changes-common.ts'
@@ -52,7 +53,7 @@ export async function openChatWorkspace(ctx: CheckpointContext, chat: ChatRecord
   return { chatId: chat.id, projectId: opened.workspace.projectId, root: opened.workspace.root }
 }
 
-/** `409 conflict` (`run-active`, `details.chatId`) while any chat of the project holds a run. */
+/** `409 conflict` (`run-active`, `details.chatId`) while any chat of the project holds a run or a background task. */
 export async function assertProjectIdle(ctx: CheckpointContext, projectId: string): Promise<void> {
   const members = await ctx.deps.db.select({ id: chats.id }).from(chats).where(eq(chats.projectId, projectId))
   const running = members.find(chat => ctx.deps.runs.hasRun(chat.id))
@@ -61,6 +62,14 @@ export async function assertProjectIdle(ctx: CheckpointContext, projectId: strin
       code: 'conflict',
       message: PROJECT_RUNNING_MESSAGE,
       details: { reason: 'run-active', chatId: running.id },
+    })
+  }
+  const tasked = members.find(chat => ctx.deps.runs.hasTasks(chat.id))
+  if (tasked !== undefined) {
+    throw new HarnessError({
+      code: 'conflict',
+      message: PROJECT_TASKS_MESSAGE,
+      details: { reason: 'run-active', chatId: tasked.id },
     })
   }
 }

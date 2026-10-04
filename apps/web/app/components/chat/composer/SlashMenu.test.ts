@@ -16,12 +16,21 @@ const items: SlashItem[] = [
   { name: 'model-card', description: 'Show a model card', kind: 'server', source: 'model-tools', group: 'plugin' },
 ]
 
+/** The groups' names, from the headings their `aria-labelledby` points at. */
+function groupLabels(wrapper: ReturnType<typeof mount>): string[] {
+  return wrapper.findAll('[role="group"]').map((group) => {
+    const heading = wrapper.find(`#${group.attributes('aria-labelledby')}`)
+    expect(heading.attributes('aria-hidden')).toBe('true')
+    return heading.text()
+  })
+}
+
 function key(name: string, init: KeyboardEventInit = {}) {
   return new KeyboardEvent('keydown', { key: name, cancelable: true, ...init })
 }
 
 describe('slashMenu', () => {
-  it('renders App and Commands groups with the plugin on the right', () => {
+  it('renders the App and Plugins groups with the plugin on the right', () => {
     const wrapper = mount(SlashMenu, { props: { open: true, query: '', items } })
     const rows = wrapper.findAll(byTestId(testIds.slashMenuItem))
     expect(rows.map(row => `${row.attributes('data-kind')}:${row.attributes('data-value')}`)).toEqual([
@@ -30,13 +39,67 @@ describe('slashMenu', () => {
       'client:effort',
       'client:mode',
       'client:help',
+      'client:remember',
       'server:summarize',
       'server:model-card',
     ])
-    expect(wrapper.findAll('[role="group"]').map(group => group.attributes('aria-label'))).toEqual(['App', 'Commands'])
-    expect(rows[5]!.text()).toContain('/summarize')
-    expect(rows[5]!.text()).toContain('Core commands')
+    expect(groupLabels(wrapper)).toEqual(['App', 'Plugins'])
+    expect(rows[6]!.text()).toContain('/summarize')
+    expect(rows[6]!.text()).toContain('Core commands')
+    expect(rows[6]!.attributes('data-group')).toBe('plugin')
+    expect(rows[5]!.attributes()).toMatchObject({ 'data-group': 'app', 'aria-label': '/remember, Save a note to your instructions' })
     expect(rows[0]!.attributes('aria-selected')).toBe('true')
+  })
+
+  it('shows the four groups in order with their headings, hints and namespaces (Phase 10)', () => {
+    const grouped: SlashItem[] = [
+      ...items,
+      { name: 'compact', description: 'Summarize the conversation', kind: 'server', source: 'Agent tools', group: 'app', argumentHint: '[focus]' },
+      { name: 'standup', description: 'Draft my standup notes', kind: 'server', group: 'personal' },
+      { name: 'review', description: 'Review a file for bugs', kind: 'server', group: 'project', namespace: 'frontend', argumentHint: '<file> [focus]' },
+    ]
+    const wrapper = mount(SlashMenu, { props: { open: true, query: '', items: grouped } })
+    expect(groupLabels(wrapper)).toEqual(['App', 'Project', 'Personal', 'Plugins'])
+    expect(wrapper.findAll('[data-group]:not([data-testid])').map(heading => heading.attributes('data-group'))).toEqual(['app', 'project', 'personal', 'plugin'])
+    const rows = wrapper.findAll(byTestId(testIds.slashMenuItem))
+    expect(rows.map(row => `${row.attributes('data-group')}:${row.attributes('data-value')}`)).toEqual([
+      'app:new',
+      'app:model',
+      'app:effort',
+      'app:mode',
+      'app:help',
+      'app:remember',
+      'app:compact',
+      'project:review',
+      'personal:standup',
+      'plugin:summarize',
+      'plugin:model-card',
+    ])
+    // The option ids follow the visual order, so ↓ walks the rows top to bottom.
+    expect(rows.map(row => row.attributes('id'))).toEqual(rows.map((_row, index) => expect.stringMatching(new RegExp(`-option-${index}$`))))
+
+    const review = rows[7]!
+    expect(review.attributes('aria-label')).toBe('/review, Review a file for bugs, arguments <file> [focus]')
+    const hint = review.get('[data-slot="slash-menu-hint"]')
+    expect(hint.text()).toBe('<file> [focus]')
+    expect(hint.classes()).toEqual(expect.arrayContaining(['hidden', 'sm:inline', 'font-mono']))
+    expect(review.get('[data-slot="slash-menu-detail"]').text()).toBe('frontend')
+    // /compact (harness) and personal rows have nothing on the right; plugin rows the plugin name.
+    expect(rows[6]!.find('[data-slot="slash-menu-detail"]').exists()).toBe(false)
+    expect(rows[6]!.get('[data-slot="slash-menu-hint"]').text()).toBe('[focus]')
+    expect(rows[8]!.find('[data-slot="slash-menu-detail"]').exists()).toBe(false)
+    expect(rows[9]!.get('[data-slot="slash-menu-detail"]').text()).toBe('Core commands')
+  })
+
+  it('shows a heading only for groups with a match', async () => {
+    const grouped: SlashItem[] = [
+      ...items,
+      { name: 'review', description: 'Review a file', kind: 'server', group: 'project' },
+    ]
+    const wrapper = mount(SlashMenu, { props: { open: true, query: 'rev', items: grouped } })
+    expect(groupLabels(wrapper)).toEqual(['Project'])
+    await wrapper.setProps({ query: 'rem' })
+    expect(groupLabels(wrapper)).toEqual(['App'])
   })
 
   it('filters by prefix and hides when nothing matches or closed', async () => {

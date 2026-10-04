@@ -34,6 +34,9 @@
 //   id checks the `projects` row inside the statement (a subquery or `WHERE EXISTS`), so a project deleted meanwhile is
 //   never referenced (the project service detaches the chats of a deleted project). A move is refused while a run holds
 //   the chat and keeps `updated_at`. Exports and imports never carry a project (./export.ts, `importChat`).
+// - Background tasks (Phase 10, ADR-046, W10.4): a move is also refused (`409 run-active`) while a background task of
+//   the chat runs (`deps.runs.hasTasks`: its writes are journaled in the chat's project); `remove` and `removeAll` delete
+//   the chat's `background_tasks` rows in their batch (the foreign key cascades too; the runner stops the tasks first).
 import type { ChatDetail, ChatSettings, ChatSummary, CursorPage, HarnessUIMessage, UsageTotals } from '@harness-forge/shared'
 import type { SQL } from 'drizzle-orm'
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core'
@@ -56,8 +59,9 @@ import {
   validationError,
 } from '@harness-forge/shared'
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm'
+import { backgroundConflict } from '../../chat/background/busy.ts'
 import { runConflict } from '../../chat/runs.ts'
-import { chats, messages, projects, usage } from '../../db/schema.ts'
+import { backgroundTasks, chats, messages, projects, usage } from '../../db/schema.ts'
 import { decodeChatCursor, encodeChatCursor } from './cursor.ts'
 import { databaseError, guardDb, isConstraintError } from './db-errors.ts'
 import { buildChatExport } from './export.ts'
@@ -283,6 +287,16 @@ export function createChatsService(deps: AppDeps): ChatsService {
   function holdsRun(id: string): boolean {
     try {
       return deps.runs.hasRun(id)
+    }
+    catch {
+      return false
+    }
+  }
+
+  /** A background task of the chat runs (Phase 10, `deps.runs.hasTasks`, read at call time like `holdsRun`). */
+  function holdsTasks(id: string): boolean {
+    try {
+      return deps.runs.hasTasks(id)
     }
     catch {
       return false
@@ -529,6 +543,8 @@ export function createChatsService(deps: AppDeps): ChatsService {
       if (projectId !== undefined) {
         if (holdsRun(id))
           throw runConflict(id)
+        if (holdsTasks(id))
+          throw backgroundConflict(id)
         set.projectId = projectId
         guard = projectId === null ? undefined : projectExistsSql(projectId)
       }
@@ -544,10 +560,12 @@ export function createChatsService(deps: AppDeps): ChatsService {
     remove: id => guardDb(async () => {
       if (!CHAT_ID_PATTERN.test(id))
         throw chatNotFound(id)
-      // Messages go with the chat (also without foreign key enforcement); usage rows are kept, detached.
-      const [, , deleted] = await db.batch([
+      // Messages and background task rows go with the chat (also without foreign key enforcement); usage rows are
+      // kept, detached.
+      const [, , , deleted] = await db.batch([
         db.update(usage).set({ chatId: null }).where(eq(usage.chatId, id)),
         db.delete(messages).where(eq(messages.chatId, id)),
+        db.delete(backgroundTasks).where(eq(backgroundTasks.chatId, id)),
         db.delete(chats).where(eq(chats.id, id)).returning({ id: chats.id }),
       ])
       if (deleted.length === 0)
@@ -678,9 +696,10 @@ export function createChatsService(deps: AppDeps): ChatsService {
       const usageStatement = options.usage
         ? db.delete(usage).returning({ id: usage.id })
         : db.update(usage).set({ chatId: null }).where(isNotNull(usage.chatId)).returning({ id: usage.id })
-      const [usageRows, messageResult, deleted] = await db.batch([
+      const [usageRows, messageResult, , deleted] = await db.batch([
         usageStatement,
         db.delete(messages),
+        db.delete(backgroundTasks),
         db.delete(chats).returning({ id: chats.id }),
       ])
       const chatIds = deleted.map(entry => entry.id).sort()

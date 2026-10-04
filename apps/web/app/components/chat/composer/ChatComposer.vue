@@ -24,12 +24,17 @@
 // placeholder reads "Queue a message…", Send (the send key or "Queue message" left of Stop, `canQueue`) emits `submit`
 // as usual and the session queues it (ChatView, W9.9); Esc still stops. `restoreQueued(items)` (exposed) puts queued
 // messages back: their texts appended to the draft with blank lines between them, their files as done chips.
-// Phase 10 (ADR-045, ADR-047; C33 wires it, W10.9 implements; frozen from Gate P10-0b): the server items of the slash
+// Phase 10 (ADR-045, ADR-047; C33 wired it, W10.9 implements; frozen from Gate P10-0b): the server items of the slash
 // menu come from `useCustomizationsStore().slashCommands(projectId)` (`GET /commands?projectId=`, fetched with a 15 s
-// max age on mount, on a project change and when the slash menu opens) instead of `plugins.commands`; SlashArgumentHint
-// shows a command's argument hint over the textarea (`argumentHintAt`, linked through `aria-describedby`); `/remember
-// [text]` clears the input and opens RememberDialog with the text (mounted here, so neither the layout nor the ui store
-// changes).
+// max age on mount, on a project change and each time the slash menu opens, so a command file saved on disk shows up)
+// instead of `plugins.commands`, grouped App · Project · Personal · Plugins (SlashMenu). SlashArgumentHint shows a
+// command's argument hint over the textarea (`argumentHintAt`) while the text is exactly `/name ` plus blanks, the caret
+// is at the end and the textarea is not scrolled; it is linked through `aria-describedby` and never takes keys.
+// `/remember [text]` (typed or picked) clears the input and opens RememberDialog with the text (mounted here, so
+// neither the layout nor the ui store changes); the project targets need a saved chat of a project (`chatId` only once
+// the chats store knows the chat, so the draft on `/` sends none); closing it gives focus back to the textarea
+// (desktop). The keydown chain stays mention menu -> slash menu -> mode cycle; Esc stops only the running response
+// (background agents have their own Stop, docs/UI.md 7.29).
 import type { ClientCommand, ImageOptions, MessageUsage, ProjectFileEntry, QueueItem, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { DictationRange } from './dictation'
@@ -56,6 +61,7 @@ import { useImageOptions } from '~/composables/useImageOptions'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { useSpeechPlayer } from '~/composables/useSpeechPlayer'
 import { useVoiceInput } from '~/composables/useVoiceInput'
+import { useChatsStore } from '~/stores/chats'
 import { useCustomizationsStore } from '~/stores/customizations'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
@@ -138,6 +144,7 @@ const emit = defineEmits<{
 }>()
 
 const models = useModelsStore()
+const chats = useChatsStore()
 const plugins = usePluginsStore()
 const customizations = useCustomizationsStore()
 const projects = useProjectsStore()
@@ -256,8 +263,21 @@ watch(() => slashQuery.value !== null, (typing) => {
     refreshCommands()
 })
 
-/** + Phase 10: the argument hint while the text is a command with a hint plus blanks (SlashArgumentHint). */
-const argumentHint = computed(() => argumentHintAt(text.value, slashItems.value))
+/** The textarea is scrolled: the ghost hint would no longer line up with the text. */
+const textScrolled = ref(false)
+function onTextScroll() {
+  textScrolled.value = (textarea.value?.scrollTop ?? 0) > 0
+}
+
+/**
+ * + Phase 10: the argument hint while the text is a command with a hint plus blanks on one line, with the caret at the
+ * end and the textarea not scrolled (SlashArgumentHint).
+ */
+const argumentHint = computed(() => {
+  if (textScrolled.value || caret.value !== text.value.length)
+    return null
+  return argumentHintAt(text.value, slashItems.value)
+})
 const argumentHintId = `composer-argument-hint-${useId()}`
 
 const slashOpen = computed(() => slashQuery.value !== null
@@ -268,6 +288,14 @@ const slashOpen = computed(() => slashQuery.value !== null
 
 const rememberOpen = ref(false)
 const rememberText = ref('')
+/** The chat once it is saved (the chats store knows it); the draft chat on `/` has none, so the project targets wait. */
+const rememberChatId = computed(() => (chats.byId(props.chatId) ? props.chatId : null))
+
+// Closing the dialog (saved or cancelled) gives focus back to the textarea (desktop only, docs/UI.md 14.1).
+watch(rememberOpen, (open) => {
+  if (!open)
+    void nextTick(() => focusTextarea())
+})
 
 // ---------- file mentions (Phase 9, ADR-042; W9.8) ----------
 
@@ -381,7 +409,10 @@ function autosize() {
   element.style.height = 'auto'
   element.style.height = `${element.scrollHeight}px`
 }
-watch(text, () => void nextTick(autosize))
+watch(text, () => void nextTick(() => {
+  autosize()
+  onTextScroll()
+}))
 
 // ---------- client commands ----------
 
@@ -764,6 +795,8 @@ const CARD_CLASS = [
   '*:data-[slot=input-group]:transition-[border-color] *:data-[slot=input-group]:duration-(--duration-fast)',
 ].join(' ')
 
+// SlashArgumentHint repeats the padding, font size and line height (px-4 pt-3 pb-1, text-base leading-6
+// md:text-[15px]): keep them in sync.
 const TEXTAREA_CLASS = [
   'min-h-11 max-h-[40vh] overflow-y-auto px-4 pt-3 pb-1',
   'text-base leading-6 md:text-[15px]',
@@ -822,29 +855,33 @@ const TEXTAREA_CLASS = [
         />
       </AiPromptInputHeader>
 
-      <InputGroupTextarea
-        ref="textarea"
-        v-model="text"
-        name="message"
-        rows="1"
-        :placeholder="effectivePlaceholder"
-        aria-label="Message"
-        aria-autocomplete="list"
-        :aria-controls="openMenuRef?.listId"
-        :aria-activedescendant="openMenuRef?.activeId"
-        :aria-describedby="argumentHint ? argumentHintId : undefined"
-        :enterkeyhint="sendKey === 'enter' ? 'send' : 'enter'"
-        :data-testid="testIds.composerInput"
-        :class="TEXTAREA_CLASS"
-        @keydown="onKeydown"
-        @paste="onPaste"
-        @input="syncCaret"
-        @keyup="syncCaret"
-        @click="syncCaret"
-        @select="syncCaret"
-        @focus="syncCaret"
-      />
-      <SlashArgumentHint :text="text" :hint="argumentHint" :described-by-id="argumentHintId" />
+      <!-- The textarea's own box: SlashArgumentHint lies exactly over it. -->
+      <div class="relative flex w-full min-w-0" data-slot="composer-text">
+        <InputGroupTextarea
+          ref="textarea"
+          v-model="text"
+          name="message"
+          rows="1"
+          :placeholder="effectivePlaceholder"
+          aria-label="Message"
+          aria-autocomplete="list"
+          :aria-controls="openMenuRef?.listId"
+          :aria-activedescendant="openMenuRef?.activeId"
+          :aria-describedby="argumentHint ? argumentHintId : undefined"
+          :enterkeyhint="sendKey === 'enter' ? 'send' : 'enter'"
+          :data-testid="testIds.composerInput"
+          :class="TEXTAREA_CLASS"
+          @keydown="onKeydown"
+          @paste="onPaste"
+          @input="syncCaret"
+          @keyup="syncCaret"
+          @click="syncCaret"
+          @select="syncCaret"
+          @focus="syncCaret"
+          @scroll="onTextScroll"
+        />
+        <SlashArgumentHint :text="text" :hint="argumentHint" :described-by-id="argumentHintId" />
+      </div>
 
       <AiPromptInputFooter class="cursor-default gap-2 px-2 pt-1 pb-2">
         <AiPromptInputTools class="min-w-0 flex-1 gap-0.5">
@@ -928,7 +965,7 @@ const TEXTAREA_CLASS = [
 
     <DropOverlay :active="drop.active.value" :rect="drop.rect.value" />
 
-    <RememberDialog v-model:open="rememberOpen" :text="rememberText" :project-id="projectId" :chat-id="chatId" />
+    <RememberDialog v-model:open="rememberOpen" :text="rememberText" :project-id="projectId" :chat-id="rememberChatId" />
 
     <p class="sr-only" aria-live="polite" aria-atomic="true" data-slot="composer-announcer">
       {{ announcement }}

@@ -15,15 +15,21 @@
 // and TodoList, `exit_plan_mode` with PlanBody ("Approved · …" / "Kept planning"), the latter two with the generic
 // blocks behind "Raw input and output" (same test ids as in the chat). Without tool details the rows read "Sub-agent",
 // "Updated tasks" and "Plan" (no argument) and stay static. A value that fails its schema keeps the generic row.
+// Phase 10 (W10.11, docs/UI.md 7.27, 7.28, 7.29): a custom agent type reads as its name (`BotMessageSquare`, cut at 24
+// characters) and a background call adds "· in the background"; a `skill` call reads "Loaded skill {name}" (`BookOpen`)
+// with SkillToolBody behind "Raw input and output" when tool details are shared, "Loaded skill" without them. The
+// server drops task results from shares, so no result note reaches this row.
 // Contract (docs/UI.md 10.4): `part` is the snapshot's tool part (toolName, status, input?, output?, errorText?).
 import type { TodoItem } from '@harness-forge/shared'
 import type { Component } from 'vue'
 import type { ShareToolPart } from './share-view'
 import type { WorkspaceRowSummary } from '~/components/chat/parts/tools/workspace-tools'
-import { shellToolOutputSchema } from '@harness-forge/shared'
+import { shellToolOutputSchema, skillOutputSchema } from '@harness-forge/shared'
 import {
   BanIcon,
+  BookOpenIcon,
   BotIcon,
+  BotMessageSquareIcon,
   CheckIcon,
   ChevronRightIcon,
   CircleSlashIcon,
@@ -44,16 +50,29 @@ import {
   planApprovedText,
   planModeOf,
   planOf,
+  skillNameOf,
+  taskAgentTypeName,
   taskInputOf,
+  taskIsBackground,
+  taskKindOf,
   taskOutputOf,
+  taskTypeLabelShort,
   TODO_TOOL_NAME,
   todoListOf,
 } from '~/components/chat/agent/agent-tools'
 import AgentToolBody from '~/components/chat/agent/AgentToolBody.vue'
 import PlanBody from '~/components/chat/agent/PlanBody.vue'
+import SkillToolBody from '~/components/chat/agent/SkillToolBody.vue'
 import TaskBody from '~/components/chat/agent/TaskBody.vue'
 import TodoList from '~/components/chat/agent/TodoList.vue'
-import { formatToolValue, isServerTruncated, PLAN_TOOL_NAME, splitMcpToolName, TASK_TOOL_NAME } from '~/components/chat/chat-format'
+import {
+  formatToolValue,
+  isServerTruncated,
+  PLAN_TOOL_NAME,
+  SKILL_TOOL_NAME,
+  splitMcpToolName,
+  TASK_TOOL_NAME,
+} from '~/components/chat/chat-format'
 import { toolRowArgument } from '~/components/chat/parts/tool-row'
 import ToolRowSummary from '~/components/chat/parts/tools/ToolRowSummary.vue'
 import ToolRuleBadge from '~/components/chat/parts/tools/ToolRuleBadge.vue'
@@ -78,8 +97,8 @@ const outputText = computed(() => formatToolValue(props.part.output))
 // A value over the share limit arrives as its JSON text, cut and marked "[truncated]" (ADR-025).
 const inputTruncated = computed(() => hasInput.value && isServerTruncated(props.part.input))
 const outputTruncated = computed(() => hasOutput.value && isServerTruncated(props.part.output))
-/** + Phase 9: the agent tool of this row (by name; the snapshot has no plugin id), or null. */
-const agentTool = computed<'task' | 'todo' | 'plan' | null>(() => {
+/** + Phase 9: the agent tool of this row (by name; the snapshot has no plugin id), or null; + Phase 10: `skill`. */
+const agentTool = computed<'task' | 'todo' | 'plan' | 'skill' | null>(() => {
   switch (props.part.toolName) {
     case TASK_TOOL_NAME:
       return 'task'
@@ -87,20 +106,23 @@ const agentTool = computed<'task' | 'todo' | 'plan' | null>(() => {
       return 'todo'
     case PLAN_TOOL_NAME:
       return 'plan'
+    case SKILL_TOOL_NAME:
+      return 'skill'
     default:
       return null
   }
 })
-/** + Phase 9: what an agent row reads without tool details. */
-const AGENT_LABELS = { task: 'Sub-agent', todo: 'Updated tasks', plan: 'Plan' } as const
+/** + Phase 9: what an agent row reads without tool details (+ Phase 10: "Loaded skill"). */
+const AGENT_LABELS = { task: 'Sub-agent', todo: 'Updated tasks', plan: 'Plan', skill: 'Loaded skill' } as const
 /**
  * + Phase 9: the agent view with tool details (7.25, 7.27): the sub-agent (its input parses, and its output when there
  * is one), the todo list or the plan; null keeps the generic row (no details, an error, a value the share cut).
  */
 const agentView = computed<
-  | { kind: 'task', explore: boolean, description: string }
+  | { kind: 'task', type: 'explore' | 'general' | 'custom', label: string, description: string, background: boolean }
   | { kind: 'todo', todos: readonly TodoItem[] }
   | { kind: 'plan', plan: string, mode: 'edits' | 'ask' | null }
+  | { kind: 'skill', name: string }
   | null
 >(() => {
   if (!agentTool.value || !hasInput.value || props.part.status === 'error')
@@ -108,9 +130,26 @@ const agentView = computed<
   const output = hasOutput.value ? props.part.output : undefined
   if (agentTool.value === 'task') {
     const task = taskInputOf(props.part.input)
-    if (!task || (hasOutput.value && !taskOutputOf(output)))
+    const result = hasOutput.value ? taskOutputOf(output) : null
+    if (!task || (hasOutput.value && !result))
       return null
-    return { kind: 'task', explore: task.type === 'explore', description: task.description }
+    // + Phase 10: any agent type (the output's resolved name first) and background calls.
+    const type = taskAgentTypeName(props.part.input, result) ?? task.type
+    return {
+      kind: 'task',
+      type: taskKindOf(type),
+      label: taskTypeLabelShort(type),
+      description: task.description,
+      background: taskIsBackground(props.part.input, result),
+    }
+  }
+  if (agentTool.value === 'skill') {
+    // + Phase 10: a loaded skill (its output parses); anything else keeps the generic row.
+    const skill = hasOutput.value ? skillOutputSchema.safeParse(output) : null
+    const name = skill?.success ? skill.data.name : skillNameOf(props.part.input)
+    if (!skill?.success || !name)
+      return null
+    return { kind: 'skill', name }
   }
   if (agentTool.value === 'todo') {
     const todos = todoListOf(props.part.input, output)
@@ -127,8 +166,12 @@ const agentLabel = computed(() => (agentTool.value && !expandable.value ? AGENT_
 const rowIcon = computed<Component>(() => {
   if (mcp.value)
     return ServerIcon
-  if (agentTool.value === 'task')
-    return agentView.value?.kind === 'task' && agentView.value.explore ? TelescopeIcon : BotIcon
+  if (agentTool.value === 'task') {
+    const type = agentView.value?.kind === 'task' ? agentView.value.type : 'general'
+    return type === 'explore' ? TelescopeIcon : type === 'custom' ? BotMessageSquareIcon : BotIcon
+  }
+  if (agentTool.value === 'skill')
+    return BookOpenIcon
   if (agentTool.value === 'todo')
     return ListTodoIcon
   if (agentTool.value === 'plan')
@@ -189,8 +232,13 @@ const ROW_CLASS = '-mx-1.5 flex h-(--row-height) w-[calc(100%+0.75rem)] min-w-0 
       <component :is="rowIcon" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
       <span v-if="agentLabel" data-slot="agent-tool-label" class="min-w-0 truncate font-medium">{{ agentLabel }}</span>
       <template v-else-if="agentView?.kind === 'task'">
-        <span class="shrink-0 font-medium">{{ agentView.explore ? 'Explore' : 'Agent' }}</span>
+        <span class="shrink-0 font-medium">{{ agentView.label }}</span>
         <span class="min-w-0 truncate text-muted-foreground">{{ agentView.description }}</span>
+        <span v-if="agentView.background" data-slot="share-task-background" class="shrink-0 text-muted-foreground">· in the background</span>
+      </template>
+      <template v-else-if="agentView?.kind === 'skill'">
+        <span class="shrink-0 font-medium">Loaded skill</span>
+        <span class="min-w-0 truncate font-mono text-[13px]">{{ agentView.name }}</span>
       </template>
       <template v-else>
         <span class="shrink-0 font-mono text-[13px] font-medium">{{ displayName }}</span>
@@ -231,6 +279,7 @@ const ROW_CLASS = '-mx-1.5 flex h-(--row-height) w-[calc(100%+0.75rem)] min-w-0 
       <TaskBody v-if="agentView?.kind === 'task'" :input="part.input" :output="part.output" :running="false" />
       <AgentToolBody v-else-if="agentView">
         <TodoList v-if="agentView.kind === 'todo'" :todos="agentView.todos" />
+        <SkillToolBody v-else-if="agentView.kind === 'skill'" :input="part.input" :output="part.output" />
         <PlanBody v-else :plan="agentView.plan" />
         <template #raw>
           <div class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">

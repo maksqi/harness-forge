@@ -20,12 +20,18 @@
 //   `buildModelHistory` + `prepareModelFiles` make of the saved steer later) and appends them to `messages` (the SDK
 //   carries them into later steps). An aborted run takes nothing (its end empties the queue). Steer texts are never
 //   logged.
-import type { HarnessUIMessage, QueueItem } from '@harness-forge/shared'
+//   Phase 10 (ADR-046, W10.4): right after the queue, the same synchronous take empties the chat's inbox of finished
+//   background tasks (`RunContext.background.takeResults(chatId, replyId)`: each result is delivered exactly once, into
+//   this reply) and injects one `data-task-result` part per result for the step, after the steers; the model reads each
+//   as a user message with `taskResultText` (one text part: exactly what `splitTaskResults` makes of the saved part).
+//   Step 0 counts here too: a new turn or an approval continuation takes what waited. Reports are never logged.
+import type { HarnessUIMessage, QueueItem, TaskResultData } from '@harness-forge/shared'
 import type { ModelMessage, ToolSet } from 'ai'
 import type { ResolvedModel } from '../providers/types.ts'
 import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { HarnessDataChunk, RunSession } from './pipeline.ts'
 import type { StepPiece } from './steps.ts'
+import { taskResultText } from '@harness-forge/shared'
 import { convertToModelMessages } from 'ai'
 import { prepareModelFiles } from './files.ts'
 
@@ -102,6 +108,31 @@ export async function steerModelMessages(item: QueueItem, input: SteerStepInput)
   }
 }
 
+/** The `data-task-result` chunk of a delivered background task result (Phase 10). */
+export function taskResultChunk(data: TaskResultData): HarnessDataChunk {
+  return { type: 'data-task-result', data }
+}
+
+/**
+ * The user model message of a delivered background task result: one text part with `taskResultText`, exactly what
+ * `buildModelHistory` (`splitTaskResults`) + `convertToModelMessages` make of the saved part later.
+ */
+export function taskResultModelMessage(data: TaskResultData): ModelMessage {
+  return { role: 'user', content: [{ type: 'text', text: taskResultText(data) }] }
+}
+
+/** The finished background results waiting for the chat (`[]` when the manager fails: they stay undelivered then). */
+function takeTaskResults(session: RunSession): TaskResultData[] {
+  const { ctx } = session
+  try {
+    return ctx.background.takeResults(session.chatId, session.assistantId)
+  }
+  catch (error) {
+    ctx.logger.warn('cannot take the finished background tasks of the chat', { err: error })
+    return []
+  }
+}
+
 /** The steer piece of the step composer (see the module comment). */
 export function createSteerStep(input: SteerStepInput): StepPiece {
   const { session } = input
@@ -109,17 +140,26 @@ export function createSteerStep(input: SteerStepInput): StepPiece {
     const { ctx } = session
     if (ctx.run.signal.aborted)
       return undefined
-    // Synchronous take and injection: a `DELETE` either removed the item before or answers 404 now.
+    // Synchronous takes and injections: a `DELETE` either removed the item before or answers 404 now; a background
+    // result is either taken here (exactly once) or waits for a later boundary or the run's release.
     const items = ctx.queue.takeSteerable(session.chatId)
-    if (items.length === 0)
+    const results = takeTaskResults(session)
+    if (items.length === 0 && results.length === 0)
       return undefined
     const deliveredAt = ctx.now()
     for (const item of items)
       session.inject(steerChunk(item, deliveredAt), stepNumber)
-    ctx.logger.debug('steered queued messages into the run', { stepNumber, count: items.length, itemIds: items.map(item => item.id) })
+    for (const result of results)
+      session.inject(taskResultChunk(result), stepNumber)
+    if (items.length > 0)
+      ctx.logger.debug('steered queued messages into the run', { stepNumber, count: items.length, itemIds: items.map(item => item.id) })
+    if (results.length > 0)
+      ctx.logger.debug('delivered background task results into the run', { stepNumber, count: results.length, taskIds: results.map(result => result.taskId) })
     const steered: ModelMessage[] = []
     for (const item of items)
       steered.push(...await steerModelMessages(item, input))
+    for (const result of results)
+      steered.push(taskResultModelMessage(result))
     return { messages: [...messages, ...steered] }
   }
 }

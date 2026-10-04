@@ -4,7 +4,7 @@
 // short text through `toModelOutput`). API.md sections 4.25 and 6.9.
 import { z } from 'zod'
 import { customizationSourceSchema, todoStatusSchema } from '../enums.ts'
-import { AGENT_NAME_PATTERN, agentNameSchema, backgroundTaskIdSchema, modelRefSchema, timestampSchema } from '../ids.ts'
+import { AGENT_NAME_PATTERN, agentNameSchema, backgroundTaskIdSchema, modelRefSchema, pluginIdSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { DEFINITION_LIMITS } from '../util/definitions.ts'
 import { messageUsageSchema } from './usage.ts'
@@ -157,6 +157,8 @@ export const taskAgentSchema = z.object({
   description: z.string().max(200),
   /** Project agents: the project-relative path of the definition file. */
   path: z.string().max(LIMITS.workspacePathMaxChars).optional(),
+  /** Plugin agents (P10-A CCR): the contributing plugin, for the "From {plugin}" tooltip. */
+  pluginId: pluginIdSchema.optional(),
 })
 export type TaskAgent = z.infer<typeof taskAgentSchema>
 

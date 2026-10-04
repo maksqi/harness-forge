@@ -21,9 +21,13 @@
 // `exit_plan_mode` (`ClipboardList`, the plan's first heading as the argument, the status "Plan ready for review",
 // "Kept planning" or "Approved · Accept edits" / "Approved · Ask", the body PlanBody with "Your feedback: …"); both
 // keep the generic blocks behind "Raw input and output", and a value that fails its schema keeps the generic row.
-// Phase 10 (C33 wires it, W10.11 owns it; ADR-045, ADR-047; docs/UI.md 7.25, 7.28): the `skill` row of `core-agent`
-// (`tool-row[data-tool-name="skill"]`) has SkillToolBody as its agent body, and the body of an approved `exit_plan_mode`
-// starts with PlanFileChip (the output's `planPath` / `planError`). W10.11 adds the skill row's label, source and status.
+// Phase 10 (W10.11; ADR-045, ADR-047; docs/UI.md 7.25, 7.28, 14.2): the `skill` row of `core-agent`
+// (`tool-row[data-tool-name="skill"]`): `BookOpen`, "Loaded skill" and the mono skill name (the input's while it runs:
+// "Loading skill", shimmering; "Couldn't load skill" when it failed, the error in the body), the source on the right
+// ("Project", "Personal", the plugin's name, "Built-in") and the status; the row is named "Loaded skill {name},
+// {source}". Its agent body is SkillToolBody, with the generic blocks behind "Raw input and output". The body of an
+// approved `exit_plan_mode` starts with PlanFileChip (the output's `planPath` / `planError`; Show changes in project
+// chats).
 import type { TodoItem } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import type { WorkspaceRowSummary } from './tools/workspace-tools'
@@ -31,6 +35,7 @@ import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
 import { shellToolOutputSchema, skillOutputSchema, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import {
   BanIcon,
+  BookOpenIcon,
   CheckIcon,
   ChevronRightIcon,
   CircleSlashIcon,
@@ -47,9 +52,20 @@ import { Badge } from '@/components/ui/badge'
 import { CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { doneTodos, planApprovedText, planFileOf, planModeOf, planOf, TODO_TOOL_NAME, todoListOf } from '../agent/agent-tools'
+import {
+  doneTodos,
+  planApprovedText,
+  planFileOf,
+  planModeOf,
+  planOf,
+  skillNameOf,
+  skillSourceText,
+  TODO_TOOL_NAME,
+  todoListOf,
+} from '../agent/agent-tools'
 import AgentToolBody from '../agent/AgentToolBody.vue'
 import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
 import PlanBody from '../agent/PlanBody.vue'
@@ -143,6 +159,8 @@ const rowIcon = computed(() => {
     return ClipboardListIcon
   if (isTodoTool.value)
     return ListTodoIcon
+  if (isSkillTool.value)
+    return BookOpenIcon
   return workspaceToolIcon(name.value) ?? WrenchIcon
 })
 /**
@@ -198,6 +216,31 @@ const statusLabel = computed(() => ({
   denied: 'Denied',
   stopped: 'Stopped',
 })[status.value])
+
+/**
+ * + Phase 10 (7.28): the skill row: the name (the output's, else the input's while it runs), the source of a loaded
+ * skill (the plugin's name from the plugins store: the output has no plugin id), the label by status and the row's
+ * accessible name; null for every other tool.
+ */
+const skillRow = computed(() => {
+  if (!isSkillTool.value)
+    return null
+  const parsed = props.part.state === 'output-available' ? skillOutputSchema.safeParse(props.part.output) : null
+  const output = parsed?.success ? parsed.data : null
+  const skillName = output?.name ?? skillNameOf(props.part.input) ?? ''
+  const pluginName = output?.source === 'plugin'
+    ? plugins.items.find(plugin => plugin.contributions.skills.includes(output.name))?.name ?? null
+    : null
+  const source = output ? skillSourceText(output.source, pluginName) : null
+  const label = status.value === 'running' ? 'Loading skill' : status.value === 'error' ? 'Couldn\'t load skill' : 'Loaded skill'
+  const named = skillName ? `${label} ${skillName}` : label
+  let ariaLabel = named
+  if (status.value === 'done')
+    ariaLabel = source ? `${named}, ${source}` : named
+  else if (status.value !== 'running' && status.value !== 'error')
+    ariaLabel = `${named}, ${statusLabel.value.toLowerCase()}`
+  return { name: skillName, source, label, ariaLabel }
+})
 
 const inputText = computed(() => formatToolValue(props.part.input))
 const hasOutput = computed(() => props.part.state === 'output-available')
@@ -323,6 +366,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
         :data-status="status"
       >
         <CollapsibleTrigger
+          :aria-label="skillRow?.ariaLabel"
           class="group/tool-row -mx-1.5 flex h-(--row-height) pointer-coarse:h-10 w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-md px-1.5 text-left text-sm outline-none transition-colors duration-(--duration-fast) hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50"
         >
           <ChevronRightIcon
@@ -330,12 +374,19 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
             class="size-3.5 shrink-0 text-muted-foreground transition-transform duration-(--duration-base) group-data-[state=open]/tool-row:rotate-90"
           />
           <component :is="rowIcon" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
-          <span class="shrink-0 font-mono text-[13px] font-medium">{{ displayName }}</span>
-          <span v-if="firstArg" class="min-w-0 truncate font-mono text-xs text-muted-foreground">"{{ firstArg }}"</span>
+          <template v-if="skillRow">
+            <span data-slot="skill-row-label" :class="cn('shrink-0 font-medium', status === 'running' && 'hf-shimmer-text')">{{ skillRow.label }}</span>
+            <span v-if="skillRow.name" data-slot="skill-row-name" class="min-w-0 truncate font-mono text-[13px]">{{ skillRow.name }}</span>
+          </template>
+          <template v-else>
+            <span class="shrink-0 font-mono text-[13px] font-medium">{{ displayName }}</span>
+            <span v-if="firstArg" class="min-w-0 truncate font-mono text-xs text-muted-foreground">"{{ firstArg }}"</span>
+          </template>
           <Badge v-if="serverName" variant="outline" class="h-4 shrink-0 px-1.5 text-[10px] font-normal text-muted-foreground">
             {{ serverName }}
           </Badge>
           <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs text-muted-foreground">
+            <span v-if="skillRow?.source" data-slot="skill-row-source" class="max-w-[16ch] truncate">{{ skillRow.source }}</span>
             <ToolRuleBadge v-if="allowedBy.length > 0" :prefixes="allowedBy" />
             <ToolRowSummary v-if="summary" :summary="summary" class="mr-0.5" />
             <Spinner v-if="status === 'running'" class="size-3" />

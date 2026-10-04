@@ -706,55 +706,40 @@ describe('phase 10 skeleton (customizations, the background task members, the bo
   const PROJECT = 'prj_AAAAAAAAAAAAAAAA'
   const CHAT = '0199a8f0-0000-7000-8000-00000000c001'
 
-  it('wires customizations: a builtins-only catalog; load of a builtin works; personal members and source answer not_implemented', async () => {
+  it('wires customizations: builtins and plugin commands in the catalog, aliases, the user store (P10-A)', async () => {
     const t = await createTestApp()
     cleanups.push(() => t.close())
     expect(SERVICE_NAMES).toContain('customizations')
-    // The stub factory has the final signature and the production factory is it.
     expect(SERVICE_FACTORIES.customizations).toBe(createCustomizationService)
     const { customizations } = t.deps
 
     const global = await customizations.catalog(null)
     expect(global.projectId).toBeNull()
     expect(global.project).toBeNull()
-    expect(global.agents().map(entry => [entry.name, entry.source, entry.state])).toEqual([['explore', 'builtin', 'active'], ['general', 'builtin', 'active']])
-    expect(global.commands()).toEqual([])
-    expect(global.skills()).toEqual([])
+    expect(global.agents().filter(entry => entry.source === 'builtin').map(entry => entry.name)).toEqual(['explore', 'general'])
     expect(global.agent('general-purpose')?.name).toBe('general')
     expect(global.agent('reviewer')).toBeNull()
-    expect(global.diagnostics).toEqual([])
+    // Plugin commands are listed too (W10.1), so shadowing is visible.
+    expect(global.commands().some(entry => entry.source === 'plugin')).toBe(true)
 
-    const scoped = await customizations.catalog(PROJECT, { refresh: true })
-    expect(scoped.projectId).toBe(PROJECT)
-    expect(scoped.project).toMatchObject({ id: PROJECT, available: true, folders: [] })
-    expect(scoped.entries.map(entry => entry.name)).toEqual(['explore', 'general'])
-
-    const list = await customizations.list({ kind: 'command' })
-    expect(list).toMatchObject({ items: [], diagnostics: [], project: null })
-    expect((await customizations.list({})).items.map(entry => entry.name)).toEqual(['explore', 'general'])
-    // An unknown project is the project service's 404.
+    // An unknown project is the project service's 404 for the route answer; a run's catalog never fails.
     await expect(customizations.list({ projectId: PROJECT })).rejects.toMatchObject({ code: 'not_found' })
-    // A run never fails on its catalog: an unknown project still answers the builtins.
-    expect((await customizations.catalog(PROJECT)).agents()).toHaveLength(2)
+    expect((await customizations.catalog(PROJECT)).agent('explore')?.source).toBe('builtin')
 
     const explore = global.agent('explore')!
     const loaded = await customizations.load(explore)
     expect(loaded.definition).toMatchObject({ kind: 'agent', fields: { name: 'explore', tools: null, model: null } })
-    expect(loaded.diagnostics).toEqual([])
-    await expect(customizations.load({ ...explore, source: 'project', path: '.harness/agents/explore.md' })).rejects.toMatchObject({ code: 'not_implemented' })
 
-    const id = 'cus_AAAAAAAAAAAAAAAA'
-    await expect(customizations.source({ kind: 'agent', name: 'explore', source: 'builtin' })).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(customizations.get(id)).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(customizations.create({ kind: 'agent', content: '---\nname: a\n---\n' })).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(customizations.update(id, { enabled: false })).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(customizations.remove(id)).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(customizations.exportBackup()).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(customizations.restoreBackup([])).rejects.toMatchObject({ code: 'not_implemented' })
+    // The user store (W10.1): create, get, remove; an unknown id is a 404.
+    await expect(customizations.get('cus_AAAAAAAAAAAAAAAA')).rejects.toMatchObject({ code: 'not_found' })
+    const created = await customizations.create({ kind: 'agent', content: '---\nname: probe-agent\ndescription: A probe agent.\n---\nPERSONA: probe\n' })
+    expect(created).toMatchObject({ kind: 'agent', name: 'probe-agent', enabled: true })
+    expect((await customizations.catalog(null)).agent('probe-agent')?.source).toBe('user')
+    await customizations.remove(created.id)
+    await expect(customizations.get(created.id)).rejects.toMatchObject({ code: 'not_found' })
+
     expect(customizations.invalidate(PROJECT)).toBeUndefined()
     expect(customizations.invalidate(null)).toBeUndefined()
-    expect(customizations.stop()).toBeUndefined()
-    expect(customizations.stop()).toBeUndefined()
 
     const aborted = new AbortController()
     aborted.abort(new Error('gone'))
@@ -838,7 +823,7 @@ describe('phase 10 skeleton (customizations, the background task members, the bo
 
     const w = await createTestApp({ start: false, customizations: 'fake', factories: { customizations: createCustomizationService } })
     cleanups.push(() => w.close())
-    await expect(w.deps.customizations.get('cus_AAAAAAAAAAAAAAAA')).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(w.deps.customizations.get('cus_AAAAAAAAAAAAAAAA')).rejects.toMatchObject({ code: 'not_found' })
   })
 
   it('createTestApp accepts backgroundTasks: the real runner delegates its task members to the fake', async () => {

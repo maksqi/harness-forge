@@ -1,12 +1,26 @@
+import type { BackgroundTask, TaskResultData } from '@harness-forge/shared'
+import type { AgentTaskContext } from '../chat-context'
 import type { ToolPartLike } from '../chat-format'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { h } from 'vue'
+import { defineComponent, h, provide, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { taskInput, taskOutput, taskPart, taskStep } from '~/utils/testing/fixtures'
+import {
+  backgroundLaunchOutput,
+  backgroundTask,
+  backgroundTaskId,
+  pluginSummary,
+  taskInput,
+  taskOutput,
+  taskPart,
+  taskResultData,
+  taskStep,
+} from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
+import { AGENT_TASK_CONTEXT } from '../chat-context'
 import TaskBlock from './TaskBlock.vue'
 
 const mock = vi.hoisted(() => ({ api: null as unknown }))
@@ -192,16 +206,193 @@ describe('taskBlock', () => {
   })
 })
 
-describe('taskBlock: any agent type (Phase 10 seam)', () => {
-  it('accepts a custom agent type: data-kind custom, data-agent-type, the generic label for now', () => {
-    const wrapper = block(taskPart({ input: taskInput({ type: 'reviewer' }), output: taskOutput({ type: 'reviewer' }) }) as ToolPartLike, false)
+describe('taskBlock: custom agent types (Phase 10)', () => {
+  const reviewer = () => taskPart({
+    input: taskInput({ type: 'reviewer', description: 'Review the auth diff' }),
+    output: taskOutput({ type: 'reviewer', description: 'Review the auth diff', agent: { source: 'project', description: 'Reviews diffs for bugs.', path: '.harness/agents/reviewer.md' } }),
+  }) as ToolPartLike
+
+  it('shows a custom type with its icon and name, data-kind custom and data-agent-type', () => {
+    const wrapper = block(reviewer(), false)
     expect(root(wrapper).attributes()).toMatchObject({ 'data-kind': 'custom', 'data-agent-type': 'reviewer', 'data-state': 'completed' })
-    expect(trigger(wrapper).text()).toContain('Agent')
+    expect(root(wrapper).attributes('data-background')).toBeUndefined()
+    expect(trigger(wrapper).get('[data-slot="task-agent-label"]').text()).toBe('reviewer')
+    expect(trigger(wrapper).find('.lucide-bot-message-square-icon, .lucide-bot-message-square').exists()).toBe(true)
+    expect(trigger(wrapper).attributes('aria-label')).toBe('Sub-agent reviewer: Review the auth diff, completed, 1 tool call')
     expect(wrapper.find('[data-slot="tool-part"]').exists()).toBe(false)
+  })
+
+  it('describes the agent snapshot to screen readers and opens the agent card on hover', async () => {
+    vi.useFakeTimers()
+    const wrapper = block(reviewer(), false)
+    const describedBy = trigger(wrapper).attributes('aria-describedby')!
+    expect(document.getElementById(describedBy)!.textContent).toBe('Reviews diffs for bugs.. Project: .harness/agents/reviewer.md')
+    await trigger(wrapper).get('[data-slot="task-agent-label"]').trigger('pointerenter', { pointerType: 'mouse' })
+    await vi.advanceTimersByTimeAsync(500)
+    await flushPromises()
+    const card = document.querySelector('[data-slot="task-agent-card"]')!
+    expect(card.textContent).toContain('Reviews diffs for bugs.')
+    expect(card.querySelector('[data-slot="task-agent-source"]')!.textContent!.replace(/\s+/g, ' ').trim()).toBe('Project: .harness/agents/reviewer.md')
+    wrapper.unmount()
+  })
+
+  it('names the plugin of a plugin agent: its pluginId by name, else the id, else the contributing plugin', () => {
+    const plugins = usePluginsStore()
+    plugins.items = [
+      pluginSummary({ id: 'db-tools', name: 'DB tools' }),
+      pluginSummary({ id: 'legacy-pack', name: 'Legacy pack', contributions: { ...pluginSummary().contributions, agents: ['old-agent'] } }),
+    ]
+    const description = (type: string, agent: { source: 'plugin', description: string, pluginId?: string }) => {
+      const wrapper = block(taskPart({ input: taskInput({ type }), output: taskOutput({ type, agent }) }) as ToolPartLike, false)
+      const text = document.getElementById(trigger(wrapper).attributes('aria-describedby')!)!.textContent
+      wrapper.unmount()
+      return text
+    }
+    expect(description('sql-expert', { source: 'plugin', description: 'Plans SQL migrations.', pluginId: 'db-tools' }))
+      .toBe('Plans SQL migrations.. From DB tools')
+    expect(description('sql-expert', { source: 'plugin', description: 'Plans SQL migrations.', pluginId: 'gone-plugin' }))
+      .toBe('Plans SQL migrations.. From gone-plugin')
+    expect(description('old-agent', { source: 'plugin', description: 'Old.' })).toBe('Old.. From Legacy pack')
+    expect(description('unknown-agent', { source: 'plugin', description: 'Odd.' })).toBe('Odd.. From a plugin')
+  })
+
+  it('cuts a long name at 24 characters, with the full name in a tooltip (no agent snapshot)', () => {
+    const name = 'a-very-long-custom-agent-name-indeed'
+    const wrapper = block(taskPart({ input: taskInput({ type: name }), output: taskOutput({ type: name }) }) as ToolPartLike, false)
+    expect(trigger(wrapper).get('[data-slot="task-agent-label"]').text()).toBe(`${name.slice(0, 23)}…`)
+    expect(trigger(wrapper).attributes('aria-describedby')).toBeUndefined()
+    expect(trigger(wrapper).attributes('aria-label')).toContain(`Sub-agent ${name}: `)
   })
 
   it('reads the general-purpose alias as general', () => {
     const wrapper = block(taskPart({ input: taskInput({ type: 'general-purpose' }), output: taskOutput({ type: 'general' }) }) as ToolPartLike, false)
-    expect(root(wrapper).attributes()).toMatchObject({ 'data-kind': 'general', 'data-agent-type': 'general-purpose' })
+    expect(root(wrapper).attributes()).toMatchObject({ 'data-kind': 'general', 'data-agent-type': 'general' })
+    expect(trigger(wrapper).get('[data-slot="task-agent-label"]').text()).toBe('Agent')
+    const streaming = block({ type: 'tool-task', toolCallId: 'call_s', state: 'input-streaming', input: { description: 'Draft', type: 'general-purpose' } } as ToolPartLike)
+    expect(root(streaming).attributes('data-agent-type')).toBe('general')
+  })
+})
+
+describe('taskBlock: background calls (Phase 10)', () => {
+  const taskId = backgroundTaskId(1)
+  const launch = (overrides: Parameters<typeof backgroundLaunchOutput>[0] = {}) => taskPart({
+    input: taskInput({ type: 'general', description: 'Find flaky tests', background: true }),
+    output: backgroundLaunchOutput({ type: 'general', description: 'Find flaky tests', startedAt: 1_759_000_000_000, ...overrides }),
+  }) as ToolPartLike
+
+  interface Live { task: BackgroundTask | null, result: TaskResultData | null }
+
+  function withContext(part: ToolPartLike, initial: Live) {
+    const live = ref<Live>(initial)
+    const calls = { reveal: [] as string[], showResult: [] as string[] }
+    const context: AgentTaskContext = {
+      projectId: () => null,
+      task: id => (live.value.task?.id === id ? live.value.task : null),
+      tasksLoaded: () => true,
+      result: id => (live.value.result?.taskId === id ? live.value.result : null),
+      reveal: (id) => {
+        calls.reveal.push(id)
+      },
+      showResult: (id) => {
+        calls.showResult.push(id)
+        return true
+      },
+    }
+    const Host = defineComponent({
+      setup() {
+        provide(AGENT_TASK_CONTEXT, context)
+        return () => h(TaskBlock, { part, streaming: false })
+      },
+    })
+    const wrapper = mount({ render: () => h(TooltipProvider, null, { default: () => h(Host) }) }, { attachTo: document.body })
+    return { wrapper, live, calls }
+  }
+
+  it('shows the live state of a running background agent: "In background", its meta and its latest step', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_759_000_062_000)
+    const task = backgroundTask({
+      status: 'running',
+      finishedAt: null,
+      output: taskOutput({ status: 'running', type: 'general', description: 'Find flaky tests', taskId, finishedAt: undefined, report: '', startedAt: 1_759_000_000_000, steps: [taskStep({ toolName: 'shell', summary: 'pnpm vitest --run', state: 'running' })], stepsOmitted: 7 }),
+    })
+    const { wrapper, calls } = withContext(launch(), { task, result: null })
+    expect(root(wrapper).attributes()).toMatchObject({ 'data-state': 'running', 'data-background': 'true', 'data-kind': 'general' })
+    expect(trigger(wrapper).text()).toContain('In background')
+    expect(trigger(wrapper).find('[role="status"]').exists()).toBe(true)
+    expect(trigger(wrapper).get('[data-slot="task-meta-short"]').text()).toBe('Background · 8 tool calls · 1m 2s')
+    expect(trigger(wrapper).attributes('aria-label')).toBe('Sub-agent: Find flaky tests, running, 8 tool calls, running in the background')
+    expect(live(wrapper).text()).toBe('└ shell "pnpm vitest --run"')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(trigger(wrapper).get('[data-slot="task-meta-short"]').text()).toBe('Background · 8 tool calls · 1m 4s')
+
+    // Expanded: TaskBody with the live snapshot, then "Show in background agents".
+    await trigger(wrapper).trigger('click')
+    expect(wrapper.findAll(`[data-testid="${testIds.taskStep}"]`)).toHaveLength(1)
+    const reveal = wrapper.get(`[data-testid="${testIds.taskBlockReveal}"]`)
+    expect(reveal.attributes('data-target')).toBe('dock')
+    expect(reveal.text()).toBe('Show in background agents')
+    await reveal.trigger('click')
+    expect(calls.reveal).toEqual([taskId])
+    wrapper.unmount()
+  })
+
+  it('follows the task to its final status, then offers "Go to the result" once delivered', async () => {
+    const running = backgroundTask({ status: 'running', finishedAt: null, output: taskOutput({ status: 'running', taskId, finishedAt: undefined, report: '' }) })
+    const { wrapper, live: state, calls } = withContext(launch(), { task: running, result: null })
+    expect(root(wrapper).attributes('data-state')).toBe('running')
+    const done = backgroundTask({ output: taskOutput({ taskId, report: 'Two tests depend on wall-clock time. Details below.' }) })
+    state.value = { task: done, result: null }
+    await flushPromises()
+    expect(root(wrapper).attributes('data-state')).toBe('completed')
+    expect(trigger(wrapper).find('.text-success').exists()).toBe(true)
+    expect(trigger(wrapper).text()).not.toContain('In background')
+    expect(trigger(wrapper).get('[data-slot="task-meta-short"]').text()).toBe('Background · 1 tool call · 41s')
+    expect(live(wrapper).text()).toBe('Two tests depend on wall-clock time.')
+    await trigger(wrapper).trigger('click')
+    // Finished but not delivered yet: no link.
+    expect(wrapper.find(`[data-testid="${testIds.taskBlockReveal}"]`).exists()).toBe(false)
+    state.value = { task: done, result: taskResultData({ output: done.output }) }
+    await flushPromises()
+    const reveal = wrapper.get(`[data-testid="${testIds.taskBlockReveal}"]`)
+    expect(reveal.attributes('data-target')).toBe('result')
+    expect(reveal.text()).toBe('Go to the result')
+    await reveal.trigger('click')
+    expect(calls.showResult).toEqual([taskId])
+  })
+
+  it('reads a delivered result when the task list no longer has the task, and a restart as stopped', () => {
+    const result = taskResultData({ output: taskOutput({ taskId, status: 'failed', report: '', error: 'The model is not available.' }) })
+    const delivered = withContext(launch(), { task: null, result })
+    expect(root(delivered.wrapper).attributes('data-state')).toBe('failed')
+    expect(live(delivered.wrapper).text()).toBe('The model is not available.')
+
+    const restarted = backgroundTask({ status: 'aborted', output: taskOutput({ taskId, status: 'aborted', report: '', error: 'The server restarted before the task finished.' }) })
+    const stopped = withContext(launch(), { task: restarted, result: null })
+    expect(root(stopped.wrapper).attributes('data-state')).toBe('aborted')
+    expect(trigger(stopped.wrapper).text()).toContain('Stopped')
+    expect(live(stopped.wrapper).text()).toBe('The server restarted before the task finished.')
+  })
+
+  it('shows "Started in the background" when nothing is known, and stays static without a chat context', async () => {
+    const unknown = withContext(launch(), { task: null, result: null })
+    expect(root(unknown.wrapper).attributes()).toMatchObject({ 'data-state': 'background', 'data-background': 'true' })
+    expect(trigger(unknown.wrapper).text()).toContain('Started in the background')
+    expect(trigger(unknown.wrapper).find('[data-slot="task-meta-short"]').exists()).toBe(false)
+    expect(live(unknown.wrapper).text()).toBe('')
+    expect(trigger(unknown.wrapper).attributes('aria-label')).toBe('Sub-agent: Find flaky tests, started in the background, 0 tool calls')
+    await trigger(unknown.wrapper).trigger('click')
+    expect(unknown.wrapper.find(`[data-testid="${testIds.taskBlockReveal}"]`).exists()).toBe(false)
+
+    const bare = block(launch(), false)
+    expect(root(bare).attributes()).toMatchObject({ 'data-state': 'background', 'data-background': 'true' })
+  })
+
+  it('marks a background call that is still starting, and one the server refused', () => {
+    const starting = block({ type: 'tool-task', toolCallId: 'call_b', state: 'input-available', input: taskInput({ background: true }) } as ToolPartLike)
+    expect(root(starting).attributes()).toMatchObject({ 'data-state': 'running', 'data-background': 'true' })
+    const refused = block(taskPart({ input: taskInput({ background: true }), output: taskOutput({ status: 'failed', report: '', error: 'At most 3 background agents can run in a chat at a time.' }) }) as ToolPartLike, false)
+    expect(root(refused).attributes()).toMatchObject({ 'data-state': 'failed', 'data-background': 'true' })
+    expect(live(refused).text()).toBe('At most 3 background agents can run in a chat at a time.')
   })
 })

@@ -1,8 +1,10 @@
 // Validates the example plugins of `examples/plugins/<id>/` (docs/PLUGINS.md 15, docs/guides/): every manifest parses
 // with the shared `pluginManifestSchema`, and every example loads through the real plugin host (`createTestApp`) and
-// works: the dice tool rolls, the echo provider (a TypeScript entry compiled by the host) streams a chat answer, and
-// the LM Studio and Together AI manifests talk to a fake OpenAI-compatible server. The code snippets of PLUGINS.md
-// section 15 must equal the example files, and the plugins shown in docs/guides/ must load too.
+// works: the dice tool rolls, the echo provider (a TypeScript entry compiled by the host) streams a chat answer, the
+// LM Studio and Together AI manifests talk to a fake OpenAI-compatible server, and the agent pack (plugin API 1.4.0)
+// registers its agents and skills from the manifest and from code. The code snippets of PLUGINS.md section 15 (and the
+// agent pack's `index.mjs` shown in PLUGINS.md 9 "Agents and skills") must equal the example files, and the plugins
+// shown in docs/guides/ must load too.
 //
 // The MCP manager is replaced by a no-op fake, so the stdio server of `mcp-everything` (`npx -y ...`) never runs here.
 import type { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse } from 'node:http'
@@ -22,8 +24,17 @@ import { HarnessError, manifestRequiresTrust, pluginManifestSchema } from '../..
 
 const EXAMPLES_DIR = dirname(fileURLToPath(import.meta.url))
 /** Folder name = plugin id (DECISIONS.md "Example plugins"). */
-const EXAMPLE_IDS = ['dice-roller', 'echo-provider', 'lmstudio', 'mcp-everything', 'together-ai'] as const
+const EXAMPLE_IDS = ['agent-pack', 'dice-roller', 'echo-provider', 'lmstudio', 'mcp-everything', 'together-ai'] as const
 type ExampleId = (typeof EXAMPLE_IDS)[number]
+/** `engines.harness` of each example: `^1.0.0` unless it uses a newer plugin API member (PLUGINS.md 3 "Versioning"). */
+const EXAMPLE_ENGINES: Record<ExampleId, string> = {
+  'agent-pack': '^1.4.0',
+  'dice-roller': '^1.0.0',
+  'echo-provider': '^1.0.0',
+  'lmstudio': '^1.0.0',
+  'mcp-everything': '^1.0.0',
+  'together-ai': '^1.0.0',
+}
 /** First line of the vendored `harness-forge.d.ts` copies (the root ESLint config lints them; the scaffold's are not). */
 const EDITOR_TYPES_HEADER = '/* eslint-disable -- copy of the harness-forge.d.ts that the code plugin templates write */\n'
 
@@ -51,6 +62,16 @@ function snippet(doc: string, file: string): string {
   return doc.slice(start, doc.indexOf('\n```', start) + 1)
 }
 
+/** The fenced `lang` code block after the first occurrence of `heading` (a line of its own) in `doc`. */
+function blockAfterHeading(doc: string, heading: string, lang: string): string {
+  const at = doc.indexOf(`\n${heading}\n`)
+  expect(at, `the document has the heading ${heading}`).toBeGreaterThan(-1)
+  const fence = doc.indexOf(`\n\`\`\`${lang}\n`, at) + 1
+  expect(fence, `a ${lang} block follows ${heading}`).toBeGreaterThan(0)
+  const start = doc.indexOf('\n', fence) + 1
+  return doc.slice(start, doc.indexOf('\n```', start) + 1)
+}
+
 /** Every complete manifest (a JSON block with `manifestVersion`) of a document. */
 function manifestBlocks(doc: string): Record<string, unknown>[] {
   return [...doc.matchAll(/```json\n([\s\S]*?)\n```/g)]
@@ -69,7 +90,7 @@ describe('example manifests', () => {
     const dir = exampleDir(id)
     const manifest = pluginManifestSchema.parse(readManifestJson(dir))
     expect(manifest.id).toBe(id)
-    expect(manifest.engines.harness).toBe('^1.0.0')
+    expect(manifest.engines.harness).toBe(EXAMPLE_ENGINES[id])
     expect(existsSync(join(dir, 'README.md'))).toBe(true)
     if (manifest.icon !== undefined && !manifest.icon.startsWith('lobe:'))
       expect(existsSync(join(dir, manifest.icon))).toBe(true)
@@ -90,6 +111,11 @@ describe('docs/PLUGINS.md section 15 shows the examples as shipped', () => {
 
   it('dice-roller/index.mjs', () => {
     expect(snippet(doc, 'dice-roller/index.mjs')).toBe(readFileSync(join(exampleDir('dice-roller'), 'index.mjs'), 'utf8'))
+  })
+
+  it('agent-pack/plugin.json (example (f)) and its index.mjs (section 9 "Agents and skills")', () => {
+    expect(JSON.parse(blockAfterHeading(doc, '### (f) Agents and skills: `agent-pack` (plugin API 1.4.0)', 'json'))).toEqual(readManifestJson(exampleDir('agent-pack')))
+    expect(blockAfterHeading(doc, '### Agents and skills', 'js')).toBe(readFileSync(join(exampleDir('agent-pack'), 'index.mjs'), 'utf8'))
   })
 })
 
@@ -265,6 +291,7 @@ describe('examples in the plugin host', () => {
       expect(detail.trust).toMatchObject({ required: requiresTrust, trusted: true })
     }
     expect((await t.client.plugins.get({ params: { id: 'dice-roller' } })).kind).toBe('code')
+    expect((await t.client.plugins.get({ params: { id: 'agent-pack' } })).kind).toBe('code')
     expect((await t.client.plugins.get({ params: { id: 'lmstudio' } })).kind).toBe('declarative')
   })
 
@@ -275,6 +302,18 @@ describe('examples in the plugin host', () => {
     expect(await contributions('dice-roller')).toMatchObject({ providers: [], tools: ['roll_dice'], commands: [], hooks: [] })
     expect(await contributions('echo-provider')).toMatchObject({ providers: ['echo-provider'], tools: [] })
     expect(await contributions('mcp-everything')).toMatchObject({ providers: [], mcpServers: ['mcp-everything'] })
+    expect(await contributions('agent-pack')).toEqual({
+      providers: [],
+      models: 0,
+      tools: [],
+      mcpServers: [],
+      commands: [],
+      hooks: [],
+      agents: ['code-reviewer', 'docs-writer'],
+      skills: ['changelog-entry', 'commit-message'],
+    })
+    for (const id of EXAMPLE_IDS.filter(other => other !== 'agent-pack'))
+      expect(await contributions(id)).toMatchObject({ agents: [], skills: [] })
 
     const providers = (await t.client.providers.list()).items
     const status = (id: string): unknown => providers.find(provider => provider.id === id)?.status
@@ -284,6 +323,33 @@ describe('examples in the plugin host', () => {
 
     const server = t.deps.registry.mcpServers.get('mcp-everything')
     expect(server?.decl.transport).toEqual({ type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-everything'] })
+  })
+
+  it('agent-pack: GET /plugins lists it with its agents and skills; the registries hold the manifest and the code entries', async () => {
+    const listed = (await t.client.plugins.list()).items.find(plugin => plugin.id === 'agent-pack')
+    expect(listed).toMatchObject({ state: 'active', kind: 'code', contributions: { agents: ['code-reviewer', 'docs-writer'], skills: ['changelog-entry', 'commit-message'] } })
+
+    const { agents, skills } = t.deps.registry
+    // Declarative (plugin.json) and code (index.mjs) registrations, both owned by the plugin.
+    expect(agents.get('code-reviewer')).toEqual({
+      pluginId: 'agent-pack',
+      definition: {
+        name: 'code-reviewer',
+        description: 'Reviews a diff or a set of files for bugs, risky changes and missing tests. Use it after larger edits.',
+        instructions: 'You review code changes.\n\n1. Read the changed files.\n2. List real bugs first, then risky changes, then missing tests.\n3. Quote file paths and line numbers.',
+        tools: ['read_file', 'search_files', 'find_files', 'list_directory'],
+      },
+    })
+    expect(agents.get('docs-writer')?.definition).toMatchObject({ model: 'inherit', tools: ['read_file', 'find_files', 'search_files', 'write_file', 'edit_file'] })
+    expect(skills.get('commit-message')?.definition.content).toMatch(/^# Commit messages\n/)
+    expect(skills.get('changelog-entry')?.definition.content).toMatch(/^# Changelog entries\n/)
+    expect(agents.list().map(agent => `${agent.pluginId}:${agent.definition.name}`)).toEqual(['agent-pack:code-reviewer', 'agent-pack:docs-writer'])
+    expect(skills.list().map(skill => `${skill.pluginId}:${skill.definition.name}`)).toEqual(['agent-pack:changelog-entry', 'agent-pack:commit-message'])
+    expect([agents.owner('docs-writer'), skills.owner('commit-message')]).toEqual(['agent-pack', 'agent-pack'])
+
+    // Nothing was skipped or refused.
+    const logs = (await t.client.plugins.logs({ params: { id: 'agent-pack' } })).items
+    expect(logs.filter(entry => entry.level === 'warn' || entry.level === 'error')).toEqual([])
   })
 
   it('serves the file icons of the code examples', async () => {

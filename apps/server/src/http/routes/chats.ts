@@ -7,6 +7,10 @@
 // Phase 7 (ADR-031, W7.5): `GET /chats?projectId=<id>|none` filters by project; `POST /chats` and `PATCH /chats/:id`
 // with `projectId` answer `404` for an unknown project; the move of `PATCH` is refused with `409 run-active` while a run
 // holds the chat. The chats service checks both (`update` asks `deps.runs.hasRun` itself), so the routes stay thin.
+// Phase 10 (ADR-046, W10.4): `DELETE /chats/:id` stops the chat's background tasks first (`deps.runs.stopTasks`: their
+// rows are saved, then they go with the chat); deleting a version is also refused (`409 run-active`) while a background
+// task of the chat runs (`deps.runs.hasTasks`; it may write files journaled under a message of the chat); a version
+// switch stays allowed (the tasks keep running and deliver into the active path).
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import {
@@ -20,6 +24,7 @@ import {
   chatUpdateSchema,
 } from '@harness-forge/shared'
 import { Hono } from 'hono'
+import { backgroundConflict } from '../../chat/background/busy.ts'
 import { runConflict } from '../../chat/runs.ts'
 import { contentDisposition } from '../../services/files/names.ts'
 import { validate } from '../validate.ts'
@@ -45,6 +50,9 @@ export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
 
   app.delete(apiRoutes['chats.remove'].path, validate('param', chatParamsSchema), async (c) => {
     const { id } = c.req.valid('param')
+    // The background tasks first (their rows saved; a task launched by the stopping run meanwhile is stopped by the
+    // manager on `chat.deleted`), then the run.
+    await deps.runs.stopTasks(id)
     await deps.runs.stop(id)
     await deps.chats.remove(id)
     return c.body(null, 204)
@@ -72,6 +80,8 @@ export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
     const { id, messageId } = c.req.valid('param')
     if (deps.runs.hasRun(id))
       throw runConflict(id)
+    if (deps.runs.hasTasks(id))
+      throw backgroundConflict(id)
     return c.json(await deps.chats.deleteMessage(id, messageId))
   })
 

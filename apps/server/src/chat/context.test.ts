@@ -26,6 +26,16 @@ describe('applyCommandExpansions', () => {
     const [message] = applyCommandExpansions([{ id: 'msg_u000000000000001', role: 'user', metadata: { modelRef: 'mock:echo', startedAt: 1, command: { name: 'x', input: '', type: 'prompt', expansion: 'E' } }, parts: [{ type: 'file', mediaType: 'image/png', url: 'data:image/png;base64,AA==' }] }])
     expect(message?.parts[0]).toEqual({ type: 'text', text: 'E' })
   })
+
+  it('sends the stored expansion of a command file (W10.2-T6: the file is never read again, so a later change does not matter)', () => {
+    const command = { name: 'review', input: 'a.ts', type: 'prompt' as const, expansion: 'Review a.ts with the rules of the day.', source: 'project' as const, modelRef: 'mock:agents', allowedTools: ['read_file'] }
+    const message: HarnessUIMessage = { id: 'msg_u000000000000001', role: 'user', metadata: { modelRef: 'mock:echo', startedAt: 1, command }, parts: [{ type: 'text', text: '/review a.ts' }] }
+    const [expanded] = applyCommandExpansions([message])
+    expect(expanded?.parts).toEqual([{ type: 'text', text: 'Review a.ts with the rules of the day.' }])
+    // A `!` line and an `@file` reference stay text for the model.
+    const raw = { ...message, metadata: { modelRef: 'mock:echo', startedAt: 1, command: { ...command, expansion: '!rm -rf /\nRead @src/a.ts.' } } }
+    expect(applyCommandExpansions([raw])[0]?.parts).toEqual([{ type: 'text', text: '!rm -rf /\nRead @src/a.ts.' }])
+  })
 })
 
 function user(text: string): ModelMessage {

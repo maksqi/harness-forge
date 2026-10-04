@@ -810,7 +810,7 @@ const SCREENS: Screen[] = [
     open: page => openSettings(page, '/settings/general', async (page) => {
       await expect(page.getByTestId(testIds.settingsSubagentModel)).toHaveAttribute('data-value', 'mock:subagent')
       await expect(page.getByTestId(testIds.settingsCompactionModel)).toHaveAttribute('data-value', 'mock:compact')
-      await page.getByText('Long chats and sub-agents.').evaluate(element => element.scrollIntoView({ block: 'center' }))
+      await page.getByText('Long chats, sub-agents and plans.').evaluate(element => element.scrollIntoView({ block: 'center' }))
     }),
   },
   {

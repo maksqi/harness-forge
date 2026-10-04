@@ -81,6 +81,29 @@ describe('share view helpers', () => {
     expect(new Set(blocks.map(block => block.key)).size).toBe(blocks.length)
   })
 
+  it('routes skill calls and custom or background sub-agents to tool rows; task results never arrive (Phase 10)', () => {
+    const blocks = shareMessageBlocks([
+      { type: 'tool', toolName: 'skill', status: 'done' },
+      { type: 'tool', toolName: 'skill', status: 'done', input: { name: 'release-notes' } },
+      { type: 'tool', toolName: 'task', status: 'done', input: { description: 'Review the diff', prompt: 'Review.', type: 'reviewer', background: true } },
+      { type: 'text', text: 'Done.' },
+    ])
+    expect(blocks.map(block => [block.kind, block.kind === 'tool' ? block.part.toolName : null])).toEqual([
+      ['tool', 'skill'],
+      ['tool', 'skill'],
+      ['tool', 'task'],
+      ['text', null],
+    ])
+    // The server drops data-task-result parts (and a carrier holding only them); a stray part is not a snapshot part.
+    const stray = shareMessageBlocks([{ type: 'data-task-result', data: {} } as never, { type: 'text', text: 'Hi' }])
+    expect(stray.map(block => block.kind)).toEqual(['text'])
+  })
+
+  it('keeps only the command name of a shared user message: the badge shows no source, model or tools (Phase 10)', () => {
+    const message = toUserMessage({ role: 'user', command: { name: 'review' }, parts: [{ type: 'text', text: 'src/auth.ts' }] }, 'share-message-4')
+    expect(message.metadata?.command).toEqual({ name: 'review' })
+  })
+
   it('builds a plain user bubble from a steer the server split out of a reply (Phase 9)', () => {
     const message = toUserMessage({
       role: 'user',

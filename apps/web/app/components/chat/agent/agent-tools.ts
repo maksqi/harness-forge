@@ -2,7 +2,21 @@
 // `exit_plan_mode` and `task` parts as the rows, the plan card, the task blocks and the share page show them. Every
 // value is parsed with the shared schemas; a value that does not parse yields null, so the caller keeps the generic
 // tool row. No Vue components, no stores (the share page uses these too).
-import type { TaskInput, TaskOutput, TaskStatus, TaskStep, TaskType, TodoItem } from '@harness-forge/shared'
+// Phase 10 (W10.11; ADR-045 … ADR-047; docs/UI.md 7.27 – 7.29): custom agent types (`taskKindOf`, `taskTypeLabel`, the
+// agent source line), background calls (the launch, the live state from the background task or its delivered result),
+// the skill row's source and the task result note's texts.
+import type {
+  BackgroundTask,
+  CustomizationSource,
+  TaskAgent,
+  TaskInput,
+  TaskOutput,
+  TaskResultData,
+  TaskStatus,
+  TaskStep,
+  TaskType,
+  TodoItem,
+} from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import {
   exitPlanModeInputSchema,
@@ -138,8 +152,11 @@ export function taskTypeOf(input: unknown): TaskType | null {
   return parsed.success ? parsed.data : null
 }
 
+/** + Phase 10: `task-block[data-kind]` and the icon of a type (`Telescope`, `Bot`, `BotMessageSquare`). */
+export type TaskKind = 'explore' | 'general' | 'custom'
+
 /** The kind of a sub-agent type (Phase 10, ADR-045): the builtins `explore` and `general` (alias `general-purpose`), else `custom`. */
-export function taskKindOf(type: string): 'explore' | 'general' | 'custom' {
+export function taskKindOf(type: string): TaskKind {
   const name = type.trim().toLowerCase()
   if (name === 'explore')
     return 'explore'
@@ -160,12 +177,124 @@ export function taskTypeLabel(type: string): string {
   }
 }
 
+/** + Phase 10: characters of a custom agent's name shown in a block's label (the full name is in its tooltip). */
+export const TASK_TYPE_LABEL_MAX_CHARS = 24
+
+/** + Phase 10: the shown label of a type: `taskTypeLabel`, a custom name cut at 24 characters with "…". */
+export function taskTypeLabelShort(type: string): string {
+  const label = taskTypeLabel(type)
+  return label.length > TASK_TYPE_LABEL_MAX_CHARS ? `${label.slice(0, TASK_TYPE_LABEL_MAX_CHARS - 1)}…` : label
+}
+
 /** The raw agent type of a (possibly still streaming) input: any non-empty name (Phase 10), or null. */
 export function taskAgentTypeOf(input: unknown): string | null {
   if (typeof input !== 'object' || input === null)
     return null
   const type = (input as Record<string, unknown>).type
   return typeof type === 'string' && type.trim() !== '' ? type.trim().toLowerCase() : null
+}
+
+/**
+ * + Phase 10 (`task-block[data-agent-type]`): the agent type of a call: the output's (the resolved name), else the
+ * input's lowercased; `general-purpose` reads as `general`. Null while the input has no type yet.
+ */
+export function taskAgentTypeName(input: unknown, output: Pick<TaskOutput, 'type'> | null): string | null {
+  const type = output?.type ?? taskAgentTypeOf(input)
+  if (type === null)
+    return null
+  return type === 'general-purpose' ? 'general' : type
+}
+
+/**
+ * + Phase 10 (ADR-045): the source line of an agent snapshot (`output.agent`): "Built-in agent", "Personal agent",
+ * "From {plugin}" (the plugin's name when known, else "a plugin") or "Project: {path}" ("Project agent" without a path).
+ */
+export function taskAgentSourceText(agent: Pick<TaskAgent, 'source' | 'path'>, pluginName: string | null = null): string {
+  switch (agent.source) {
+    case 'builtin':
+      return 'Built-in agent'
+    case 'user':
+      return 'Personal agent'
+    case 'plugin':
+      return `From ${pluginName ?? 'a plugin'}`
+    case 'project':
+      return agent.path ? `Project: ${agent.path}` : 'Project agent'
+  }
+}
+
+/** + Phase 10 (ADR-046): a call that asked for a background sub-agent (`input.background: true`, also while it streams). */
+export function taskIsBackground(input: unknown, output: Pick<TaskOutput, 'status'> | null = null): boolean {
+  if (output?.status === 'background')
+    return true
+  return typeof input === 'object' && input !== null && (input as Record<string, unknown>).background === true
+}
+
+/**
+ * + Phase 10 (ADR-046; docs/UI.md 7.27): the state of a launched background call (its output has `status:
+ * 'background'`): the live background task first (`queued` / `running` while it runs, else its final status), else
+ * the delivered result on the shown path, else `background` (nothing is known: an import, a pruned task list, a share).
+ * `output` is the snapshot to show (the task's latest output, else the result's), null when nothing is known.
+ */
+export function backgroundTaskState(
+  task: Pick<BackgroundTask, 'status' | 'output'> | null,
+  result: Pick<TaskResultData, 'output'> | null,
+): { state: TaskBlockState, output: TaskOutput | null } {
+  if (task) {
+    if (task.status === 'running')
+      return { state: task.output.status === 'queued' ? 'queued' : 'running', output: task.output }
+    return { state: task.status, output: task.output }
+  }
+  if (result) {
+    const status = result.output.status
+    // A delivered result is final; a snapshot status there (never sent by the server) reads as completed.
+    const final = status === 'queued' || status === 'running' || status === 'background' ? 'completed' : status
+    return { state: final, output: result.output }
+  }
+  return { state: 'background', output: null }
+}
+
+/**
+ * + Phase 10 (ADR-045): the source of a loaded skill on its row: "Project", "Personal", the plugin's name ("Plugin"
+ * when unknown) or "Built-in".
+ */
+export function skillSourceText(source: CustomizationSource, pluginName: string | null = null): string {
+  switch (source) {
+    case 'project':
+      return 'Project'
+    case 'user':
+      return 'Personal'
+    case 'plugin':
+      return pluginName ?? 'Plugin'
+    case 'builtin':
+      return 'Built-in'
+  }
+}
+
+/** + Phase 10: the skill name of a (possibly still streaming) `skill` input, trimmed and lowercased, or null. */
+export function skillNameOf(input: unknown): string | null {
+  if (typeof input !== 'object' || input === null)
+    return null
+  const name = (input as Record<string, unknown>).name
+  return typeof name === 'string' && name.trim() !== '' ? name.trim().toLowerCase() : null
+}
+
+/** + Phase 10 (docs/UI.md 7.29): the first line of a result note by the final status. */
+export function taskResultHeading(status: TaskStatus): string {
+  switch (status) {
+    case 'failed':
+      return 'Background agent failed'
+    case 'aborted':
+      return 'Background agent stopped'
+    case 'limit':
+      return 'Background agent reached its step limit'
+    default:
+      return 'Background agent finished'
+  }
+}
+
+/** + Phase 10: the second line of a result note: the report's first sentence, else the error's, else "No report.". */
+export function taskResultSummary(output: Pick<TaskOutput, 'report' | 'error'>): string {
+  return firstSentence(output.report) || firstSentence(output.error ?? '') || 'No report.'
 }
 
 /** The description of a (possibly still streaming) input, or ''. */
@@ -227,16 +356,28 @@ export const TASK_STATE_WORDS: Readonly<Record<TaskBlockState, string>> = {
   failed: 'failed',
   aborted: 'stopped',
   limit: 'step limit reached',
-  // P10-0a (C28) compile fix: a `task` call that launched a background agent (ADR-046); W10.11 owns the final wording.
-  background: 'in the background',
+  // + Phase 10 (ADR-046): a background call whose live state is unknown ("Started in the background").
+  background: 'started in the background',
   approval: 'needs approval',
   denied: 'denied',
 }
 
-/** The trigger's accessible name: "Explore sub-agent: {description}, running, 4 tool calls" ("Sub-agent: …" for general). */
-export function taskTriggerLabel(type: string | null, description: string, state: TaskBlockState, toolCalls: number): string {
-  const kind = type === 'explore' ? 'Explore sub-agent' : 'Sub-agent'
-  return `${kind}: ${description || 'no description'}, ${TASK_STATE_WORDS[state]}, ${toolCallsText(toolCalls)}`
+/**
+ * The trigger's accessible name: "Explore sub-agent: {description}, running, 4 tool calls" ("Sub-agent: …" for general;
+ * + Phase 10: "Sub-agent {name}: …" for a custom agent type, and ", running in the background" appended while a
+ * background agent waits or runs).
+ */
+export function taskTriggerLabel(
+  type: string | null,
+  description: string,
+  state: TaskBlockState,
+  toolCalls: number,
+  opts: { background?: boolean } = {},
+): string {
+  const kind = type === null ? 'general' : taskKindOf(type)
+  const prefix = kind === 'explore' ? 'Explore sub-agent' : kind === 'general' ? 'Sub-agent' : `Sub-agent ${type!.trim()}`
+  const running = opts.background === true && (state === 'running' || state === 'queued')
+  return `${prefix}: ${description || 'no description'}, ${TASK_STATE_WORDS[state]}, ${toolCallsText(toolCalls)}${running ? ', running in the background' : ''}`
 }
 
 /** A step as one line: `read_file "src/auth.ts"` (the summary quoted when present). */

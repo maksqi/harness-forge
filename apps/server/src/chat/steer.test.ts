@@ -3,17 +3,19 @@
 // stream ends); `createSteerStep` takes the steerable queued items synchronously, injects their `data-steer` chunks for
 // the step and appends them as user model messages (files loaded for the model like the saved history's). The run-level
 // round trips (placement in the stored reply, the model history after a reload) are in `index.test.ts`.
-import type { QueueItem } from '@harness-forge/shared'
+import type { QueueItem, TaskResultData } from '@harness-forge/shared'
 import type { ResolvedModel } from '../providers/types.ts'
+import type { BackgroundTasks } from './background/types.ts'
 import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { HarnessDataChunk, RunSession } from './pipeline.ts'
 import type { ChatQueue } from './queue.ts'
 import type { StepInjectionSource } from './steer.ts'
 import { Buffer } from 'node:buffer'
+import { taskResultText } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { createMemoryLogger } from '../logger.ts'
 import { UNREADABLE_ATTACHMENTS_TEXT } from './files.ts'
-import { createSteerStep, steerChunk as itemSteerChunk, steerUIMessage, stepInjector } from './steer.ts'
+import { createSteerStep, steerChunk as itemSteerChunk, steerUIMessage, stepInjector, taskResultChunk, taskResultModelMessage } from './steer.ts'
 
 /** The injection queue of `RunSession`, standing alone. */
 function injections(): StepInjectionSource & { inject: (chunk: HarnessUIMessageChunk, step: number) => void } {
@@ -161,17 +163,39 @@ function fakeQueue(items: QueueItem[]): ChatQueue & { items: QueueItem[], takes:
   return state as unknown as ChatQueue & { items: QueueItem[], takes: number }
 }
 
+const REPLY = 'msg_rrrrrrrrrrrrrrrr'
+const REPORT_SECRET = 'task-report-sentinel-4b1d'
+
+/** The background inbox of the steer step (Phase 10): `takeResults` empties it once and records the calls. */
+function fakeBackground(results: TaskResultData[] = []): Pick<BackgroundTasks, 'takeResults'> & { inbox: TaskResultData[], takes: Array<[string, string]>, order: string[] } {
+  const state = {
+    inbox: [...results],
+    takes: [] as Array<[string, string]>,
+    order: [] as string[],
+    takeResults: (chatId: string, messageId: string) => {
+      state.takes.push([chatId, messageId])
+      state.order.push('results')
+      const taken = state.inbox
+      state.inbox = []
+      return taken
+    },
+  }
+  return state
+}
+
 interface SteerHarness {
   session: RunSession
   queue: ReturnType<typeof fakeQueue>
+  background: ReturnType<typeof fakeBackground>
   injected: Array<{ chunk: HarnessDataChunk, step: number }>
   controller: AbortController
   logs: ReturnType<typeof createMemoryLogger>
   model: ResolvedModel
 }
 
-function steerHarness(items: QueueItem[], capabilities: { vision: boolean, pdf: boolean } = { vision: false, pdf: false }): SteerHarness {
+function steerHarness(items: QueueItem[], capabilities: { vision: boolean, pdf: boolean } = { vision: false, pdf: false }, results: TaskResultData[] = []): SteerHarness {
   const queue = fakeQueue(items)
+  const background = fakeBackground(results)
   const injected: SteerHarness['injected'] = []
   const controller = new AbortController()
   const logs = createMemoryLogger()
@@ -187,11 +211,22 @@ function steerHarness(items: QueueItem[], capabilities: { vision: boolean, pdf: 
   }
   const session = {
     chatId: CHAT,
-    ctx: { run: { signal: controller.signal }, queue, now: () => 5000, deps: { files }, logger: logs.logger },
+    assistantId: REPLY,
+    ctx: { run: { signal: controller.signal }, queue, background, now: () => 5000, deps: { files }, logger: logs.logger },
     inject: (chunk: HarnessDataChunk, step: number) => injected.push({ chunk, step }),
   } as unknown as RunSession
   const model = { entry: { capabilities: { tools: true, ...capabilities } } } as unknown as ResolvedModel
-  return { session, queue, injected, controller, logs, model }
+  return { session, queue, background, injected, controller, logs, model }
+}
+
+function taskResult(n: number, report: string = `report ${n}`): TaskResultData {
+  return {
+    taskId: `bgt_${n.toString().padStart(16, '0')}`,
+    toolCallId: `call_${n}`,
+    messageId: 'msg_llllllllllllllll',
+    output: { status: 'completed', type: 'explore', description: `Task ${n}`, modelRef: 'mock:background', steps: [], stepsOmitted: 0, report, startedAt: 1, finishedAt: 2 },
+    deliveredAt: 5000,
+  }
 }
 
 const BEFORE = [{ role: 'user' as const, content: 'steps 3' }]
@@ -268,5 +303,55 @@ describe('createSteerStep', () => {
     await createSteerStep({ session: h.session, model: h.model, tools: {} })({ stepNumber: 1, messages: [], instructions: undefined, steps: [] })
     expect(h.logs.records.length).toBeGreaterThan(0)
     expect(h.logs.text()).not.toContain(STEER_SECRET)
+  })
+
+  it('takes the finished background results synchronously after the queue, into this reply, and appends them as user messages', async () => {
+    const steer = item(1, [{ type: 'text', text: 'and the docs' }])
+    const first = taskResult(1)
+    const second = taskResult(2, '')
+    const h = steerHarness([steer], undefined, [first, { ...second, output: { ...second.output, status: 'failed', error: 'boom' } }])
+    const pending = createSteerStep({ session: h.session, model: h.model, tools: {} })({ stepNumber: 3, messages: BEFORE, instructions: undefined, steps: [] })
+    // Before any await: both takes happened (the inbox is empty now) and every chunk is injected for the step, steers first.
+    expect(h.background.takes).toEqual([[CHAT, REPLY]])
+    expect(h.background.inbox).toEqual([])
+    expect(h.injected.map(entry => [entry.chunk.type, entry.step])).toEqual([['data-steer', 3], ['data-task-result', 3], ['data-task-result', 3]])
+    expect(h.injected[1]?.chunk).toEqual({ type: 'data-task-result', data: first })
+    const result = await pending
+    expect(result?.messages).toEqual([
+      ...BEFORE,
+      { role: 'user', content: [{ type: 'text', text: 'and the docs' }] },
+      { role: 'user', content: [{ type: 'text', text: taskResultText(first) }] },
+      { role: 'user', content: [{ type: 'text', text: expect.stringContaining('Error: boom') }] },
+    ])
+    expect(taskResultChunk(first)).toEqual({ type: 'data-task-result', data: first })
+    expect(taskResultModelMessage(first)).toEqual({ role: 'user', content: [{ type: 'text', text: taskResultText(first) }] })
+  })
+
+  it('results alone count; step 0 takes them; an aborted run takes nothing; a failing manager is logged', async () => {
+    const h = steerHarness([], undefined, [taskResult(1, REPORT_SECRET)])
+    const result = await createSteerStep({ session: h.session, model: h.model, tools: {} })({ stepNumber: 0, messages: [], instructions: undefined, steps: [] })
+    expect(h.injected.map(entry => [entry.chunk.type, entry.step])).toEqual([['data-task-result', 0]])
+    expect(result?.messages).toHaveLength(1)
+    expect(h.logs.text()).not.toContain(REPORT_SECRET)
+
+    const empty = steerHarness([])
+    expect(await createSteerStep({ session: empty.session, model: empty.model, tools: {} })({ stepNumber: 1, messages: BEFORE, instructions: undefined, steps: [] })).toBeUndefined()
+    expect(empty.background.takes).toEqual([[CHAT, REPLY]])
+
+    const aborted = steerHarness([], undefined, [taskResult(1)])
+    aborted.controller.abort()
+    expect(await createSteerStep({ session: aborted.session, model: aborted.model, tools: {} })({ stepNumber: 1, messages: BEFORE, instructions: undefined, steps: [] })).toBeUndefined()
+    expect(aborted.background.takes).toEqual([])
+    expect(aborted.background.inbox).toHaveLength(1)
+
+    const broken = steerHarness([item(1, [{ type: 'text', text: 'still steered' }])])
+    ;(broken.session.ctx as unknown as { background: Pick<BackgroundTasks, 'takeResults'> }).background = {
+      takeResults: () => {
+        throw new Error('manager broke')
+      },
+    }
+    const steered = await createSteerStep({ session: broken.session, model: broken.model, tools: {} })({ stepNumber: 1, messages: [], instructions: undefined, steps: [] })
+    expect(steered?.messages).toEqual([{ role: 'user', content: [{ type: 'text', text: 'still steered' }] }])
+    expect(broken.logs.records.some(record => record.level === 'warn' && record.msg.includes('background'))).toBe(true)
   })
 })

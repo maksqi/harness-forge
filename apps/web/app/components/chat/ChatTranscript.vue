@@ -21,8 +21,10 @@
 // the submitted placeholder and the streaming last row ("Compacting conversation…"). The dividers render inside
 // ChatMessage at their part's position. A `task` call (a sub-agent) whose steps hold a done `write_file` / `edit_file`
 // counts as an agent edit for "Rewind files to here" (its writes are journaled under the reply, ADR-043).
-// Phase 10 (ADR-046; C33, W10.11 owns it): a carrier message (`isTaskResultMessage`, the turn the server started for
-// finished background agents) is never edited (↑ edits the last message the user wrote) and never offers a rewind.
+// Phase 10 (ADR-046; W10.11): a carrier message (`isTaskResultMessage`, the turn the server started for finished
+// background agents) is never edited (↑ edits the last message the user wrote) and never offers a rewind. A background
+// agent's writes are journaled under the reply that launched it, so a delivered result on the shown path whose steps
+// hold a done `write_file` / `edit_file` counts as an edit of that reply.
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { ChatStatus, FileUIPart } from 'ai'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
@@ -34,7 +36,7 @@ import AiConversation from '@/components/ai-elements/conversation/Conversation.v
 import { Skeleton } from '@/components/ui/skeleton'
 import { testIds } from '~/utils/testids'
 import { TRANSCRIPT_SCROLL } from './chat-context'
-import { isTaskResultMessage, TASK_TOOL_NAME, toolNameOf } from './chat-format'
+import { isTaskResultMessage, TASK_TOOL_NAME, taskResultsOf, toolNameOf } from './chat-format'
 import ChatMessage from './ChatMessage.vue'
 import { compactionLayout } from './compaction/compaction'
 import ErrorPart from './parts/ErrorPart.vue'
@@ -217,6 +219,19 @@ function hasFinishedEdit(message: HarnessUIMessage): boolean {
   })
 }
 
+/**
+ * + Phase 10: the replies whose background agents wrote files, from the results delivered on the shown path
+ * (`TaskResultData.messageId` is the launching reply; ADR-046).
+ */
+function backgroundEditors(messages: readonly HarnessUIMessage[]): ReadonlySet<string> {
+  const ids = new Set<string>()
+  for (const result of taskResultsOf(messages).values()) {
+    if (taskWroteFiles(result.output))
+      ids.add(result.messageId)
+  }
+  return ids
+}
+
 /** Older messages are finished, so their answer is kept (the last one may still change in place). */
 const finishedEdits = new WeakMap<HarnessUIMessage, boolean>()
 
@@ -229,6 +244,7 @@ const rewindable = computed<ReadonlySet<string>>(() => {
   if (!props.projectId)
     return ids
   const messages = props.messages
+  const background = backgroundEditors(messages)
   let edited = false
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]!
@@ -239,6 +255,10 @@ const rewindable = computed<ReadonlySet<string>>(() => {
     }
     if (edited || message.role !== 'assistant')
       continue
+    if (background.has(message.id)) {
+      edited = true
+      continue
+    }
     if (index === messages.length - 1) {
       edited = hasFinishedEdit(message)
       continue

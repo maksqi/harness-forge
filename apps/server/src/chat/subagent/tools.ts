@@ -15,6 +15,10 @@
 //   (`approval.ts`) of the tool's static policy and the user override (`ask` / `deny` overrides drop the tool); a policy
 //   function decides per call, so such a tool stays and the approval function is the gate (`edits`: writes and the shell
 //   commands that match a shell rule; `auto`: everything except `always`).
+// - Phase 10 (ADR-045): a custom agent's `tools` list (`allowlist`) filters **after** this ceiling with the shared
+//   `matchToolAllowlist` (exact names, `*` prefixes, `mcp__<server>` entries): it only narrows the set, so it never adds
+//   a tool, never brings back a tool that would ask, a `core-agent` tool (`task`, `skill`) or `generate_image`; a custom
+//   agent runs with the type `general` (an `explore` child stays read-only).
 // The approval function is `createToolApproval` of the effective mode over the child's tools and scope, with
 // `user-approval` mapped to a denial (`SUBAGENT_APPROVAL_DENIED_TEXT`); the hooks see the prefixed call id.
 // The child's scope is a shallow copy of the parent's with its own `shellCwd` object: a child's `cd` never moves the
@@ -26,7 +30,7 @@ import type { OpenWorkspace } from '../../services/projects/types.ts'
 import type { WorkspaceRunScopeInit } from '../../workspace/run-scope.ts'
 import type { ApprovalTool } from '../approval.ts'
 import type { ChildSession } from './host.ts'
-import { GENERATE_IMAGE_TOOL_NAME } from '@harness-forge/shared'
+import { GENERATE_IMAGE_TOOL_NAME, matchToolAllowlist } from '@harness-forge/shared'
 import { CORE_AGENT_PLUGIN_ID } from '../../builtin-plugins/core-agent/index.ts'
 import { createToolApproval, staticApprovalOutcome, toolWorkspaceAccess } from '../approval.ts'
 import { assembleTools } from '../tools.ts'
@@ -43,7 +47,7 @@ export interface ChildToolsInput {
    * prefs, MCP, `env.workspaceShell`), chat id, the message id of the journal rows, the logger.
    */
   readonly session: ChildSession
-  /** `explore` (read-only) or `general`. */
+  /** `explore` (read-only) or `general` (also every custom agent type, Phase 10). */
   readonly type: TaskType
   /** The parent's permission mode. */
   readonly toolMode: ToolMode
@@ -57,6 +61,11 @@ export interface ChildToolsInput {
   readonly parentCallId: string
   /** The child's signal (the parent call's signal and the child deadline). */
   readonly signal: AbortSignal
+  /**
+   * Phase 10 (ADR-045): a custom agent's normalized `tools` list; only the tools of the ceiling it matches stay
+   * (`matchToolAllowlist`). Null or absent = no restriction (the builtins, an agent without `tools`); `[]` = no tool.
+   */
+  readonly allowlist?: readonly string[] | null
 }
 
 export interface ChildTools {
@@ -135,6 +144,7 @@ export async function childTools(input: ChildToolsInput): Promise<ChildTools> {
   })
 
   const active = assembled.activeTools === undefined ? null : new Set(assembled.activeTools)
+  const allowlist = input.allowlist ?? null
   const tools: ToolSet = {}
   const byName = new Map<string, ApprovalTool>()
   for (const [name, entry] of assembled.byName) {
@@ -142,6 +152,8 @@ export async function childTools(input: ChildToolsInput): Promise<ChildTools> {
     if (tool === undefined || (active !== null && !active.has(name)))
       continue
     if (!offeredToChild(entry, mode, assembled.prefs.get(name)?.override ?? null))
+      continue
+    if (allowlist !== null && !matchToolAllowlist(name, allowlist))
       continue
     tools[name] = tool
     byName.set(name, entry)

@@ -8,7 +8,7 @@ import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { defineComponent, h, inject } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { resetChatSessions, useChatSession } from '~/composables/useChatSession'
@@ -18,6 +18,7 @@ import { useProjectsStore } from '~/stores/projects'
 import { testIds } from '~/utils/testids'
 import {
   assistantMessage,
+  backgroundLaunchOutput,
   backgroundTask,
   backgroundTaskId,
   changeBatchId,
@@ -29,13 +30,17 @@ import {
   queueItem,
   restoreResult,
   rewindPreview,
+  taskInput,
   taskOutput,
+  taskPart,
   taskResultCarrier,
+  taskResultData,
   userMessage,
 } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import TodoStrip from './agent/TodoStrip.vue'
+import { announcedTasks } from './background/background-agents'
 import { AGENT_TASK_CONTEXT } from './chat-context'
 import ChatTranscript from './ChatTranscript.vue'
 import ChatView from './ChatView.vue'
@@ -76,6 +81,37 @@ vi.mock('vue-sonner', () => {
     dismiss: vi.fn(),
   })
   return { toast }
+})
+// The result note belongs to W10.11; this stand-in keeps its contract (docs/UI.md 7.29, 13.11): the root with its task
+// id and variant, and the Show report toggle.
+vi.mock('~/components/chat/agent/TaskResultNote.vue', async () => {
+  const { defineComponent: define, h: render, ref: reference } = await import('vue')
+  return {
+    default: define({
+      name: 'TaskResultNote',
+      props: ['result', 'variant'],
+      setup(props) {
+        const open = reference(false)
+        return () => render('div', {
+          'data-testid': 'task-result',
+          'data-task-id': props.result.taskId,
+          'data-status': props.result.output.status,
+          'data-variant': props.variant,
+          'role': 'note',
+        }, [
+          render('button', {
+            'type': 'button',
+            'data-testid': 'task-result-toggle',
+            'data-state': open.value ? 'open' : 'closed',
+            'aria-expanded': String(open.value),
+            'onClick': () => {
+              open.value = !open.value
+            },
+          }, open.value ? 'Hide report' : 'Show report'),
+        ])
+      },
+    }),
+  }
 })
 // The real composer belongs to W2.3; this stand-in keeps its contract (docs/UI.md 10.4).
 vi.mock('~/components/chat/composer/ChatComposer.vue', async () => {
@@ -142,6 +178,7 @@ const mounted: VueWrapper[] = []
 
 beforeEach(() => {
   stubLocalStorage()
+  announcedTasks.clear()
   calls = []
   replies = []
   mock.toast = vi.fn()
@@ -1398,5 +1435,126 @@ describe('chatView: background agents (Phase 10)', () => {
     expect(probe.attributes('data-project-id')).toBe('none')
     await probe.trigger('click')
     expect(wrapper.getComponent({ name: 'BackgroundAgents' }).props('reveal')).toEqual({ taskId: backgroundTaskId(2), n: 1 })
+  })
+
+  it('stop all stops each running agent in turn; a failure shows the error toast; the composer\'s Stop never stops them', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const other = { ...running, id: backgroundTaskId(3) }
+    api.chatTasks.list.mockResolvedValue({ items: [running, other] })
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(30), modelRef: MODEL, messages: [userMessage(U1, 'Hi')] }))
+    api.chat.stop.mockResolvedValue({ stopped: false })
+    const { wrapper } = mountView({ chatId: chatId(30) })
+    await until(() => wrapper.find(`[data-testid="${testIds.backgroundAgents}"]`).exists())
+    expect(api.chatTasks.list).toHaveBeenCalledWith({ params: { id: chatId(30) } })
+    expect(wrapper.get(`[data-testid="${testIds.backgroundAgents}"]`).attributes()).toMatchObject({ 'data-count': '2', 'data-total': '2' })
+
+    await wrapper.get('[data-action="stop"]').trigger('click')
+    await flushPromises()
+    expect(api.chat.stop).toHaveBeenCalledOnce()
+    expect(api.chatTasks.stop).not.toHaveBeenCalled()
+
+    api.chatTasks.stop.mockResolvedValueOnce({ ...running, status: 'aborted', finishedAt: 1_759_000_050_000 })
+    api.chatTasks.stop.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Boom' }))
+    wrapper.getComponent({ name: 'BackgroundAgents' }).vm.$emit('stop-all')
+    wrapper.getComponent({ name: 'BackgroundAgents' }).vm.$emit('stop-all')
+    await until(() => mock.toast.mock.calls.length === 1)
+    expect(mock.toast).toHaveBeenCalledWith('Could not stop the background agent', { description: 'Boom' })
+    expect(api.chatTasks.stop.mock.calls.map(call => (call[0] as { params: { taskId: string } }).params.taskId)).toEqual([running.id, other.id])
+    await until(() => wrapper.get(`[data-testid="${testIds.backgroundAgents}"]`).attributes('data-count') === '1')
+  })
+
+  it('the dock\'s rows open TaskBody with the prompt of the call that launched them', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const launch = { id: 'msg_asst000000000007', role: 'assistant' as const, metadata: { modelRef: MODEL, startedAt: 1 }, parts: [taskPart({ toolCallId: running.toolCallId, input: taskInput({ description: 'Find flaky tests', prompt: 'Run the suite ten times.', background: true }), output: backgroundLaunchOutput() })] }
+    const task = { ...running, messageId: launch.id }
+    api.chatTasks.list.mockResolvedValue({ items: [task, { ...task, id: backgroundTaskId(4), toolCallId: 'call_elsewhere' }] })
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(30), modelRef: MODEL, messages: [userMessage(U1, 'Hi'), launch] }))
+    const { wrapper } = mountView({ chatId: chatId(30) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.backgroundAgent}"]`).length === 2)
+    const rows = wrapper.findAll(`[data-testid="${testIds.backgroundAgent}"]`)
+    // The call of the second task is not on the path: no details toggle.
+    expect(rows[1]!.find(`[data-testid="${testIds.backgroundAgentToggle}"]`).exists()).toBe(false)
+    await rows[0]!.get(`[data-testid="${testIds.backgroundAgentToggle}"]`).trigger('click')
+    expect(rows[0]!.get('[data-slot="task-body"]').text()).toContain('Run the suite ten times.')
+  })
+
+  it('"Go to the result" scrolls to the note, opens its report and focuses its toggle; false without a result', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const carrier = taskResultCarrier('msg_carrier000000001')
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(31), modelRef: MODEL, messages: [userMessage(U1, 'Hi'), carrier] }))
+    let showResult: ((taskId: string) => boolean) | undefined
+    const Probe = defineComponent({
+      setup() {
+        showResult = inject(AGENT_TASK_CONTEXT, null)?.showResult
+        return () => null
+      },
+    })
+    const scrolled = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {})
+    onTestFinished(() => scrolled.mockRestore())
+    const wrapper = mount(defineComponent({
+      setup: () => () => h(TooltipProvider, null, { default: () => h(ChatView, { chatId: chatId(31) }, { header: () => h(Probe) }) }),
+    }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
+    mounted.push(wrapper)
+    await until(() => wrapper.find(`[data-testid="${testIds.taskResult}"]`).exists())
+    expect(showResult!(backgroundTaskId(9))).toBe(false)
+    expect(showResult!(backgroundTaskId(1))).toBe(true)
+    const toggle = wrapper.get(`[data-testid="${testIds.taskResult}"] [data-testid="${testIds.taskResultToggle}"]`)
+    expect(scrolled).toHaveBeenCalledOnce()
+    await flushPromises()
+    expect(toggle.attributes()).toMatchObject({ 'aria-expanded': 'true', 'data-state': 'open' })
+    expect(document.activeElement).toBe(toggle.element)
+    // Already open: it stays open.
+    expect(showResult!(backgroundTaskId(1))).toBe(true)
+    await flushPromises()
+    expect(toggle.attributes('data-state')).toBe('open')
+  })
+
+  it('a turn the server started for finished agents announces each result once its carrier shows; a loaded carrier says nothing', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const loadedCarrier = taskResultCarrier('msg_carrier000000001')
+    const base = [userMessage(U1, 'Hi'), loadedCarrier]
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(32), modelRef: MODEL, messages: base }))
+    const { wrapper } = mountView({ chatId: chatId(32) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.taskResult}"]`).length === 1)
+    expect(announced(wrapper)).toBe('')
+
+    const results = [
+      taskResultData({ taskId: backgroundTaskId(2), output: taskOutput({ description: 'Find flaky tests' }) }),
+      taskResultData({ taskId: backgroundTaskId(3), output: taskOutput({ status: 'failed', description: 'Review the diff', error: 'Boom' }) }),
+    ]
+    const carrier = taskResultCarrier('msg_carrier000000002', results)
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(32), modelRef: MODEL, running: true, messages: [...base, carrier] }))
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(32), messageId: 'msg_asst000000000002', modelRef: MODEL, origin: 'task', userMessageId: carrier.id }))
+    await until(() => announced(wrapper) === 'Background agent finished: Find flaky tests. Background agent failed: Review the diff')
+    expect(wrapper.findAll(`[data-testid="${testIds.taskResult}"]`)).toHaveLength(3)
+    // Once per carrier: a second event for it says nothing new.
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(32), messageId: 'msg_asst000000000002', modelRef: MODEL, origin: 'task', userMessageId: carrier.id }))
+    await flushPromises()
+    expect(announced(wrapper)).toBe('Background agent finished: Find flaky tests. Background agent failed: Review the diff')
+  })
+
+  it('announces each finished agent once per tab: the dock saw it end, so its carrier turn says nothing more', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    api.chatTasks.list.mockResolvedValue({ items: [] })
+    const base = [userMessage(U1, 'Hi')]
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(33), modelRef: MODEL, messages: base }))
+    const { wrapper } = mountView({ chatId: chatId(33) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    const live = { ...running, chatId: chatId(33) }
+    dispatchServerEvent(createServerEvent('task.changed', { chatId: chatId(33), task: live }))
+    await flushPromises()
+    const done = { ...live, status: 'completed' as const, finishedAt: 1_759_000_041_000, output: { ...live.output, status: 'completed' as const } }
+    dispatchServerEvent(createServerEvent('task.changed', { chatId: chatId(33), task: done }))
+    const dockAnnouncer = () => wrapper.get('[data-slot="background-agents-announcer"]').text()
+    await until(() => dockAnnouncer() === 'Background agent finished: Find flaky tests')
+
+    const carrier = taskResultCarrier('msg_carrier000000003', [taskResultData({ taskId: live.id, output: done.output })])
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(33), modelRef: MODEL, running: true, messages: [...base, carrier] }))
+    dispatchServerEvent(createServerEvent('task.changed', { chatId: chatId(33), task: { ...done, deliveredAt: 1_759_000_042_000, deliveredMessageId: carrier.id } }))
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(33), messageId: 'msg_asst000000000003', modelRef: MODEL, origin: 'task', userMessageId: carrier.id }))
+    await until(() => wrapper.findAll(`[data-testid="${testIds.taskResult}"]`).length === 1)
+    await flushPromises()
+    expect(announced(wrapper)).toBe('')
+    expect(dockAnnouncer()).toBe('Background agent finished: Find flaky tests')
   })
 })

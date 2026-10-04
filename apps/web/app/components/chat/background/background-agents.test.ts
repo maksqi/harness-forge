@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { backgroundTask, backgroundTaskId, taskOutput } from '~/utils/testing/fixtures'
-import { announcementFor, BACKGROUND_EXPANDED_KEY, summaryLine, visibleTasks } from './background-agents'
+import { backgroundTask, backgroundTaskId, taskOutput, taskStep } from '~/utils/testing/fixtures'
+import {
+  announcementFor,
+  BACKGROUND_EXPANDED_KEY,
+  createAnnouncedTasks,
+  endedAnnouncement,
+  focusAfterStop,
+  headerLine,
+  summaryLine,
+  taskRunMs,
+  taskToolCallCount,
+  toggleName,
+  visibleTasks,
+} from './background-agents'
 
 const T0 = 1_759_000_000_000
 
@@ -33,5 +45,50 @@ describe('background agents', () => {
     expect(announcementFor(before, { ...before, status: 'limit' })).toBe('Background agent reached its step limit: Find flaky tests')
     expect(announcementFor(null, { ...before, status: 'completed' })).toBeNull()
     expect(announcementFor(before, before)).toBeNull()
+  })
+
+  it('names the toggle and the open list by what runs', () => {
+    const live = [running(2, 'Review the diff', T0), running(1, 'Find flaky tests', T0)]
+    expect(toggleName(live, false)).toBe('Show background agents, 2 running')
+    expect(toggleName([backgroundTask()], false)).toBe('Show background agents, 1 finished')
+    expect(toggleName(live, true)).toBe('Hide background agents')
+    expect(headerLine([...live, backgroundTask()])).toBe('Background agents · 2 running')
+    expect(headerLine([backgroundTask()])).toBe('Background agents')
+  })
+
+  it('announces a delivered result by its status', () => {
+    expect(endedAnnouncement(taskOutput({ status: 'completed', description: 'Find flaky tests' }))).toBe('Background agent finished: Find flaky tests')
+    expect(endedAnnouncement(taskOutput({ status: 'failed', description: 'Find flaky tests' }))).toBe('Background agent failed: Find flaky tests')
+    expect(endedAnnouncement(taskOutput({ status: 'aborted', description: 'Find flaky tests' }))).toBe('Background agent stopped: Find flaky tests')
+    expect(endedAnnouncement(taskOutput({ status: 'limit', description: 'Find flaky tests' }))).toBe('Background agent reached its step limit: Find flaky tests')
+  })
+
+  it('counts tool calls and the run time (ticking while it runs, fixed once it ended)', () => {
+    const live = backgroundTask({ status: 'running', finishedAt: null, output: taskOutput({ status: 'running', startedAt: T0, finishedAt: undefined, steps: [taskStep(), taskStep({ toolCallId: 'c2' })], stepsOmitted: 3 }) })
+    expect(taskToolCallCount(live)).toBe(5)
+    expect(taskRunMs(live, T0 + 5_000)).toBe(5_000)
+    expect(taskRunMs(backgroundTask(), T0 + 900_000)).toBe(41_000)
+    expect(taskRunMs(live, T0 - 1_000)).toBe(0)
+  })
+
+  it('moves focus after a stop to the next running row, else the previous one, else the toggle', () => {
+    const order = ['a', 'b', 'c', 'd']
+    expect(focusAfterStop(order, 'b', new Set(['a', 'c', 'd']))).toBe('c')
+    expect(focusAfterStop(order, 'b', new Set(['a', 'd']))).toBe('d')
+    expect(focusAfterStop(order, 'd', new Set(['a', 'b']))).toBe('b')
+    expect(focusAfterStop(order, 'b', new Set())).toBeNull()
+    expect(focusAfterStop(order, 'x', new Set(['c']))).toBe('c')
+  })
+
+  it('remembers announced agents once each, bounded', () => {
+    const announced = createAnnouncedTasks(2)
+    expect(announced.add('a')).toBe(true)
+    expect(announced.add('a')).toBe(false)
+    expect(announced.add('b')).toBe(true)
+    expect(announced.add('c')).toBe(true)
+    expect(announced.has('a')).toBe(false)
+    expect(announced.has('c')).toBe(true)
+    announced.clear()
+    expect(announced.has('c')).toBe(false)
   })
 })
