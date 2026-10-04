@@ -5,20 +5,28 @@
 //   are 40 px targets and the divider hides its meta line.
 // - The plan card's buttons stack full width, 40 px tall, "Approve, accept edits" on top.
 // - The `@` mention menu spans the composer inside the screen, with 40 px rows.
+// Phase 10 (W10.13, docs/UI.md 7.29, 7.30, 14.6): while a `mock:steer` reply runs after a finished `mock:todo` list and
+// with a running background agent, the strip, the background agents (collapsed: one 40 px line), the queue and the
+// composer lie inside the screen in that order; opened, the agent's row Stop and Stop all are 40 px targets and nothing
+// scrolls sideways. The Remember dialog fits the screen with 40 px targets; the grouped slash menu spans the composer
+// inside the screen, at most 40 % of its height.
 import type { Locator, Page } from '@playwright/test'
 import {
+  backgroundAgents,
   boxOf,
   byTestId,
   documentWidths,
   expect,
   expectMessageStatus,
   lastAssistantMessage,
+  MOCK_BACKGROUND_MODEL,
   seedProjectChat,
   test,
   testIds,
   touchTargetSize,
   uniqueId,
   useAgentSettings,
+  waitForChatTask,
 } from '../../helpers/index.ts'
 
 const VIEWPORT = { width: 390, height: 844 }
@@ -169,5 +177,90 @@ test.describe('mobile agent', () => {
     await expect(input).toHaveValue('@src/parser.ts ')
     await expect(menu).toHaveCount(0)
     await input.fill('')
+  })
+
+  test('the dock fits with a running background agent: strip, background agents, queue and composer; 40 px stops', async ({ page, api, cleanup }) => {
+    await useAgentSettings(api, cleanup, { subagentModelRef: null })
+    const chat = await api.createChat({ title: `Phone background ${uniqueId('dock')}`, modelRef: 'mock:todo' })
+    cleanup(api => api.removeChat(chat.id))
+    // A finished todo list, a background agent that runs until it is stopped, then the steer model.
+    await api.sendChat({ chatId: chat.id, modelRef: 'mock:todo', toolMode: 'ask', text: 'Do the three tasks.' })
+    await api.sendChat({ chatId: chat.id, modelRef: MOCK_BACKGROUND_MODEL, toolMode: 'ask', text: 'bg explore loop' })
+    const task = await waitForChatTask(api, chat.id, item => item.status === 'running')
+    await api.sendChat({ chatId: chat.id, modelRef: 'mock:steer', toolMode: 'ask', text: 'Ready.' })
+
+    await page.goto(`/chat/${chat.id}`)
+    await expectMessageStatus(lastAssistantMessage(page), 'done')
+    await page.getByTestId(testIds.composerInput).fill('steps 12')
+    await page.getByTestId(testIds.composerSend).tap()
+    const reply = lastAssistantMessage(page)
+    await expectMessageStatus(reply, 'streaming')
+    await page.getByTestId(testIds.composerInput).fill('/compact')
+    await page.getByTestId(testIds.composerQueue).tap()
+    const list = page.getByTestId(testIds.queuedMessages)
+    await expect(list).toHaveAttribute('data-count', '1')
+
+    // Collapsed below md: one 40 px line between the strip and the queue.
+    const strip = page.getByTestId(testIds.todoStrip)
+    const dock = backgroundAgents(page)
+    await expect(dock).toHaveAttribute('data-state', 'closed')
+    await expect(dock).toHaveAttribute('data-count', '1')
+    const toggle = dock.getByTestId(testIds.backgroundAgentsToggle)
+    await expect(toggle).toContainText('1 background agent · Background explore')
+    await expect.poll(async () => (await touchTargetSize(toggle)).height, { message: 'the dock toggle height' }).toBeGreaterThanOrEqual(40)
+    const composer = page.getByTestId(testIds.composer)
+    for (const [target, name] of [[strip, 'the strip'], [dock, 'the background agents'], [list, 'the queue'], [composer, 'the composer']] as const)
+      await expectInsideViewport(target, name)
+    const boxes = [await boxOf(strip), await boxOf(dock), await boxOf(list), await boxOf(composer)]
+    for (let index = 1; index < boxes.length; index++)
+      expect(boxes[index - 1]!.y + boxes[index - 1]!.height, `dock part ${index - 1} is above part ${index}`).toBeLessThanOrEqual(boxes[index]!.y + 1)
+    await expectNoSidewaysScroll(page, 'the dock with background agents')
+
+    // Opened: the row's Stop and Stop all are 40 px targets.
+    await toggle.tap()
+    await expect(dock).toHaveAttribute('data-state', 'open')
+    const row = byTestId(dock, testIds.backgroundAgent, { 'data-task-id': task.id })
+    await expectTouchTarget(row.getByTestId(testIds.backgroundAgentStop), 'the row Stop')
+    await expect.poll(async () => (await touchTargetSize(dock.getByTestId(testIds.backgroundAgentsStopAll))).height, { message: 'Stop all height' }).toBeGreaterThanOrEqual(40)
+    await expectInsideViewport(dock, 'the open background agents')
+    await expectNoSidewaysScroll(page, 'the open background agents')
+    await row.getByTestId(testIds.backgroundAgentStop).tap()
+    await expect(row).toHaveAttribute('data-state', 'aborted')
+
+    await page.getByTestId(testIds.composerStop).tap()
+    await expectMessageStatus(reply, 'aborted')
+    await page.getByTestId(testIds.composerInput).fill('')
+  })
+
+  test('the Remember dialog and the grouped slash menu fit the screen', async ({ page, api, cleanup }) => {
+    const { chatId } = await seedProjectChat(api, cleanup, { modelRef: 'mock:echo', prefix: 'phone' })
+    await api.sendChat({ chatId, modelRef: 'mock:echo', text: 'Hello.' })
+    await page.goto(`/chat/${chatId}`)
+    const input = page.getByTestId(testIds.composerInput)
+
+    // The grouped slash menu: inside the screen, spanning the composer, at most 40 % of the screen tall.
+    await input.tap()
+    await input.fill('/')
+    const menu = page.getByTestId(testIds.slashMenu)
+    await expect(menu).toBeVisible()
+    await expect(byTestId(menu, testIds.slashMenuItem, { 'data-value': 'remember', 'data-group': 'app' })).toBeAttached()
+    await expectInsideViewport(menu, 'the slash menu')
+    expect(Math.round((await boxOf(menu)).width), 'the menu spans the composer').toBe(Math.round((await boxOf(page.getByTestId(testIds.composer))).width))
+    expect((await boxOf(menu)).height, 'the menu is at most 40dvh').toBeLessThanOrEqual(VIEWPORT.height * 0.4 + 2)
+    await expectNoSidewaysScroll(page, 'the slash menu')
+
+    // The Remember dialog: inside the screen, 40 px targets.
+    await input.fill('/remember Use pnpm, never npm, in this project.')
+    await page.getByTestId(testIds.composerSend).tap()
+    const dialog = page.getByTestId(testIds.rememberDialog)
+    await expect(dialog).toBeVisible()
+    await expectInsideViewport(dialog, 'the Remember dialog')
+    for (const target of await dialog.getByTestId(testIds.rememberTarget).all())
+      await expect.poll(async () => (await touchTargetSize(target)).height, { message: 'a target height' }).toBeGreaterThanOrEqual(40)
+    await expect.poll(async () => (await touchTargetSize(dialog.getByTestId(testIds.rememberSave))).height, { message: 'Save height' }).toBeGreaterThanOrEqual(40)
+    await expect.poll(async () => (await touchTargetSize(dialog.getByRole('button', { name: 'Cancel' }))).height, { message: 'Cancel height' }).toBeGreaterThanOrEqual(40)
+    await expectNoSidewaysScroll(page, 'the Remember dialog')
+    await dialog.getByRole('button', { name: 'Cancel' }).tap()
+    await expect(dialog).toBeHidden()
   })
 })

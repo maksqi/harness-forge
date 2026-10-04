@@ -10,12 +10,18 @@
 // `mock:subagent` sub-agents, an approved `mock:plan` plan and a `/compact` shows, with tool details, the steer as a user
 // message between the two parts of its reply, the todo list ("3/3"), the sub-agents' steps and reports and the plan
 // ("Approved · Accept edits"); the `/compact` exchange and its summary are left out.
+// Phase 10 (W10.13, docs/UI.md 7.15, 7.27 – 7.29): a project chat with a custom agent (`mock:agents`), a project skill
+// and a background agent whose result came back through a server-started turn shows, with tool details, the custom
+// task row (its name, its report), the background row ("· in the background") and the "Loaded skill" row with its
+// body; the result notes and their carrier message are left out (the reply to them stays).
 import type { Locator, Page } from '@playwright/test'
 import type { PasswordServer } from '../../helpers/index.ts'
 import {
   assistantMessages,
   byTestId,
+  chatTasks,
   createProject,
+  definitionFile,
   expect,
   HarnessApi,
   MOCK_CHECKPOINT_DIR,
@@ -25,6 +31,9 @@ import {
   MOCK_PLAN_FILE,
   MOCK_SUBAGENT_TASKS,
   MOCK_TODO_DONE,
+  mockAgentReport,
+  mockBackgroundDescription,
+  mockBackgroundResult,
   mockPlanDone,
   mockSteerFinished,
   removeProject,
@@ -313,6 +322,80 @@ test.describe('share', () => {
       await planRow.getByRole('button').first().click()
       await expect(planRow.getByTestId(testIds.shareToolRowOutput).locator('[data-slot="plan-body"]')).toContainText('Create notes.txt.')
       await expect(byTestId(guest, testIds.shareToolRow, { 'data-tool-name': 'write_file' })).toContainText(MOCK_PLAN_FILE)
+    }
+    finally {
+      await visitor.close()
+    }
+  })
+
+  test('the share page shows custom and background task rows and skill rows, without the result notes @smoke', async ({ browser, cleanup }) => {
+    const { baseURL } = server!
+    const api = owner!
+    // The sub-agents run on the chat's models (`mock:agents`, `mock:background`).
+    await useAgentSettings(api, cleanup, { subagentModelRef: null })
+    const reviewer = uniqueId('rv')
+    const skill = uniqueId('notes')
+    const folder = await seedWorkspaceFolder(api, {
+      prefix: 'share-custom',
+      files: {
+        [`.harness/agents/${reviewer}.md`]: definitionFile({ name: reviewer, description: 'Reviews code for the share.', tools: ['read_file', 'list_directory'] }, 'PERSONA: share reviewer\n'),
+        [`.harness/skills/${skill}/SKILL.md`]: definitionFile({ name: skill, description: 'How to write release notes.' }, 'RELEASE-NOTES: list the user-facing changes.\n'),
+      },
+    })
+    cleanup(() => folder.remove())
+    const project = await createProject(api, { name: `Share custom ${uniqueId('share')}`, path: folder.path })
+    cleanup(() => removeProject(api, project.id))
+    const chat = await api.createChat({ title: `Share custom ${uniqueId('chat')}`, projectId: project.id, modelRef: 'mock:agents' })
+    cleanup(() => api.removeChat(chat.id))
+
+    expect((await api.sendChat({ chatId: chat.id, modelRef: 'mock:agents', toolMode: 'ask', text: `agent ${reviewer}` })).text).toContain('Agent report:')
+    expect((await api.sendChat({ chatId: chat.id, modelRef: 'mock:agents', toolMode: 'ask', text: `skill ${skill}` })).text).toContain('Skill loaded: RELEASE-NOTES')
+    expect((await api.sendChat({ chatId: chat.id, modelRef: 'mock:background', toolMode: 'ask', text: 'bg explore' })).text).toMatch(/^Started in background: bgt_/)
+    // The agent finishes; the server delivers its result in a turn of its own (a carrier message, then a reply).
+    await expect.poll(async () => {
+      const messages = (await api.getChat(chat.id)).messages
+      const last = messages.at(-1)
+      return messages.length === 8 && last?.role === 'assistant' && last.metadata?.finishedAt !== undefined
+        && last.parts.some(part => part.type === 'text' && part.text.startsWith(mockBackgroundResult('completed')))
+    }, { timeout: 15_000, message: 'the server-started turn answered the result' }).toBe(true)
+    expect((await chatTasks(api, chat.id))[0]).toMatchObject({ status: 'completed', deliveredAt: expect.any(Number) })
+    const share = await api.client.shares.create({ body: { chatId: chat.id, options: { toolDetails: true } } })
+
+    const visitor = await browser.newContext()
+    try {
+      const guest = await visitor.newPage()
+      await guest.goto(`${baseURL}${share.path}`)
+      await expect(guest.getByTestId(testIds.sharePage)).toHaveAttribute('data-state', 'ready')
+      const transcript = guest.getByTestId(testIds.shareTranscript)
+      const messages = transcript.getByTestId(testIds.shareMessage)
+
+      // The custom agent: its name and description, its report behind the row.
+      const taskRows = byTestId(guest, testIds.shareToolRow, { 'data-tool-name': 'task' })
+      await expect(taskRows).toHaveCount(2)
+      const custom = taskRows.filter({ hasText: reviewer })
+      await expect(custom).toContainText(`${reviewer}Run ${reviewer}`)
+      await expect(custom.locator('[data-slot="share-task-background"]')).toHaveCount(0)
+      await custom.getByRole('button').first().click()
+      await expect(custom.getByTestId(testIds.shareToolRowOutput).getByTestId(testIds.taskReport)).toContainText(mockAgentReport('share reviewer', ['list_directory', 'read_file']))
+
+      // The background agent: "· in the background".
+      const background = taskRows.filter({ hasText: mockBackgroundDescription() })
+      await expect(background.locator('[data-slot="share-task-background"]')).toHaveText('· in the background')
+      await expect(background).toContainText(`Explore${mockBackgroundDescription()}`)
+
+      // The skill: "Loaded skill {name}" and its body.
+      const skillRow = byTestId(guest, testIds.shareToolRow, { 'data-tool-name': 'skill' })
+      await expect(skillRow).toContainText(`Loaded skill${skill}`)
+      await skillRow.getByRole('button').first().click()
+      await expect(skillRow.getByTestId(testIds.shareToolRowOutput).locator('[data-slot="skill-content"]')).toContainText('RELEASE-NOTES: list the user-facing changes.')
+
+      // No result note and no carrier message; the reply to the result stays.
+      await expect(transcript.getByTestId(testIds.taskResult)).toHaveCount(0)
+      await expect(transcript).not.toContainText('Sent to the agent')
+      await expect(transcript).not.toContainText('<background-task')
+      const roles = await messages.evaluateAll(items => items.map(item => item.getAttribute('data-role')))
+      expect(roles.filter(role => role === 'user'), 'three user messages: the carrier is gone').toHaveLength(3)
+      await expect(messages.last()).toContainText(mockBackgroundResult('completed'))
     }
     finally {
       await visitor.close()

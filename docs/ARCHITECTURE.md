@@ -127,7 +127,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 |---|---|
 | `main.ts` | Process entry: dispatches the `rotate-key` CLI (Phase 7, 6.14) before anything boots; otherwise installs the signal handlers for graceful shutdown (before the boot starts, Phase 6 hotfix), then runs the boot sequence (section 5) with the key recovery and the `server.lock` hooks (Phase 7). |
 | `env.ts` | Loads `<repo root>/.env`, parses and validates `HF_*` environment variables (zod) into a frozen `Env` object; resolves `HF_DATA_DIR` and `HF_WEB_DIR`; bind-safety check; Phase 7: the syntax of `HF_WORKSPACE_ROOTS` (`Env.workspaceRoots`, `workspaceRootsDefault`) and `HF_WORKSPACE_SHELL` (`Env.workspaceShell`), `DataPaths.workspaces`; Phase 8: `DataPaths.checkpoints` and the test-only `Env.testFileSweepDelayMs` (`HF_TEST_FILE_SWEEP_DELAY_MS`, honored only with `HF_MOCK_PROVIDER=1`, else null; `envBootWarnings(env)` then returns the warning "the test-only automatic file sweep delay is ignored: it is honored only with HF_MOCK_PROVIDER=1", which `startDeps` logs first; the text names the variable in words because the log redactor masks `HF_` followed by 16 or more word characters). |
-| `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5; Phase 8: `checkpoints.start()` right after `projects.start()`, before the staging recovery and the plugins, and `data.start()` last; `data.stop()` first, `checkpoints.stop()` right after the runs stopped; Phase 10: `runs.start()` right after `checkpoints.start()` (the boot sweep of `background_tasks`), and `runs.stopAll()` stops the queues, then the background tasks, then the runs; `customizations.stop()` right after the runs). |
+| `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5; Phase 8: `checkpoints.start()` right after `projects.start()`, before the staging recovery and the plugins, and `data.start()` last; `data.stop()` first, `checkpoints.stop()` right after the runs stopped; Phase 10: `runs.boot()` right after `checkpoints.start()` (the boot sweep of `background_tasks`; `runs.start()` is `POST /chat`), and `runs.stopAll()` stops the queues, then the background tasks, then the runs; `customizations.stop()` right after the runs; the frozen orders are `BOOT_STEPS` and `SHUTDOWN_STEPS`). |
 | `app.ts` | `createApp(deps)` app factory: mounts middleware and every route module under `/api`; used by `main.ts` and `createTestApp()`. |
 | `paths.ts`, `logger.ts` | Package-relative locations (server package root, migrations, bundled assets, the SPA build, installed package versions); JSON-lines logger with redaction. |
 | `http/middleware/` | Request id, structured access log (share tokens masked; it also runs the untrusted-proxy hint of `proxy-warning.ts`), secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`; `request-info.ts` resolves the client address and scheme, trusting forwarded headers only from `HF_TRUST_PROXY` peers (section 10.6). |
@@ -167,7 +167,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `plugins/templates/` | Template sources (tool, provider, MCP bridge, command pack): a JSDoc-typed `index.mjs` or a TypeScript `index.ts`, the vendored API types `harness-forge.d.ts` and a README. |
 | `catalog/` | Model catalog: live listings with 24 h cache (`model_cache`), models.dev snapshot + weekly refresh, seeds, plugin models, custom ids, prefs, `classify()` (model kinds incl. `image`, `transcription`, `speech`; `imageOutput`), cost lookup (section 9). |
 | `providers/` | Model resolution: `modelRef` -> provider -> credentials (stored or env) -> `LanguageModel` (`resolveModel`), and since Phase 6 image, transcription and speech models (`resolveImageModel`, `resolveTranscriptionModel`, `resolveSpeechModel`); provider test; provider status; error mapping to `HarnessError`; the LobeHub icon service (`/api/icons/lobe`). |
-| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). Phase 8: `scope.ts` (`createRunScope`: chat, assistant message id, journal, shell rules, sticky folder, built once per run) bound to every tool call context and to policy contexts (`AssembledTools.scope`), `shell` / `untracked` journal rows after each settled workspace call (`settledCallRecord` in `tools.ts`), `effectiveOverride` in `approval.ts` (a stored `allow` override on an `execute` tool is ignored), and the workspace block says that `cd` persists (6.2, 6.13, 6.16). Phase 9 (ADR-040 … ADR-043, sections 6.18 – 6.22): `steps.ts` (`createPrepareStep`: the one step-boundary composer: context guard → steer → sub-agent finalize nudge), `model-history.ts` (`buildModelHistory`: compaction → steer split → task output reduction → command expansions → summary merge), `markers.ts` (the instruction markers of the summarizer and of sub-agents), `agent-scope.ts` (`agentScopeOf(c)`: the private side channel of `core-agent`, a WeakMap bound to the tool call context like the run scope), `compaction/` (`history.ts`, `guard.ts`, `stream.ts`, `summarize.ts`, `prompt.ts`), `queue.ts` (the in-memory steer queue), `steer.ts` (`createSteerStep`, `stepInjector`), `modes.ts` (the plan-mode tool set and `activeTools`), `subagent/` (`index.ts` `createSubagentRunner`, `tools.ts` the child tool set and its approval, `history.ts`), plus `RunSession.inject` / `addExtraCost` / `writeTransient` and `RunContext.onReleased` in `pipeline.ts`, the `/compact` branch of `commands.ts`, the streaming tool wrapper of `tools.ts`, `case 'plan'` and the `exit_plan_mode` rule of `approval.ts`. Phase 10 (ADR-045 … ADR-047, sections 6.23 – 6.27): `PreparedRun.catalog` (one catalog per run), `requestModelRef` (a command's model never becomes the chat's model) and `turnRestriction` (a command's `allowed-tools`); `commands.ts` resolves file commands (`resolveCommand(…, { catalog })`, `isServerCommandFor`) and `prepare.ts` resolves the command before the target model; `tools.ts` applies `allowedTools` after the mode and drops `skill` without skills; `params.ts` adds the agent-types and skills blocks; `subagent/` runs custom agent types (`host.ts`: the structural `ChildSession` shared with detached children); `background/` (the per-chat manager of background tasks: launch, caps, persistence in `background_tasks`, `task.changed`, the result inbox, idle delivery, guards, the boot sweep; 6.26); `steer.ts` also takes finished background results; `model-history.ts` gains the `splitTaskResults` stage; `skills.ts` (`loadSkill`) and `plan-file.ts` (`savePlan`), both reached through `agent-scope.ts`. |
+| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). Phase 8: `scope.ts` (`createRunScope`: chat, assistant message id, journal, shell rules, sticky folder, built once per run) bound to every tool call context and to policy contexts (`AssembledTools.scope`), `shell` / `untracked` journal rows after each settled workspace call (`settledCallRecord` in `tools.ts`), `effectiveOverride` in `approval.ts` (a stored `allow` override on an `execute` tool is ignored), and the workspace block says that `cd` persists (6.2, 6.13, 6.16). Phase 9 (ADR-040 … ADR-043, sections 6.18 – 6.22): `steps.ts` (`createPrepareStep`: the one step-boundary composer: context guard → steer → sub-agent finalize nudge), `model-history.ts` (`buildModelHistory`: compaction → steer split → task output reduction → command expansions → summary merge), `markers.ts` (the instruction markers of the summarizer and of sub-agents), `agent-scope.ts` (`agentScopeOf(c)`: the private side channel of `core-agent`, a WeakMap bound to the tool call context like the run scope), `compaction/` (`history.ts`, `guard.ts`, `stream.ts`, `summarize.ts`, `prompt.ts`), `queue.ts` (the in-memory steer queue), `steer.ts` (`createSteerStep`, `stepInjector`), `modes.ts` (the plan-mode tool set and `activeTools`), `subagent/` (`index.ts` `createSubagentRunner`, `tools.ts` the child tool set and its approval, `history.ts`), plus `RunSession.inject` / `addExtraCost` / `writeTransient` and `RunContext.onReleased` in `pipeline.ts`, the `/compact` branch of `commands.ts`, the streaming tool wrapper of `tools.ts`, `case 'plan'` and the `exit_plan_mode` rule of `approval.ts`. Phase 10 (ADR-045 … ADR-047, sections 6.23 – 6.27): `PreparedRun.catalog` (one catalog per run), `requestModelRef` (a command's model never becomes the chat's model) and `turnRestriction` (a command's `allowed-tools`); `commands.ts` resolves file commands (`resolveCommand(…, { catalog })`, `isServerCommandFor`) and `prepare.ts` resolves the request's model first, then the command's `model` override (`resolveTurnModel`); `tools.ts` applies `allowedTools` after the mode and drops `skill` without skills; `params.ts` adds the agent-types and skills blocks; `subagent/` runs custom agent types (`host.ts`: the structural `ChildSession` shared with detached children); `background/` (the per-chat manager of background tasks: launch, caps, persistence in `background_tasks`, `task.changed`, the result inbox, idle delivery, guards, the boot sweep; 6.26); `steer.ts` also takes finished background results; `model-history.ts` gains the `splitTaskResults` stage; `skills.ts` (`loadSkill`) and `plan-file.ts` (`savePlan`), both reached through `agent-scope.ts`. |
 | `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect with backoff, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable; `{{settings.*}}` templating of plugin-declared servers; its own stdio transport (minimal environment, stderr lines in the owning plugin's log); the user-configured servers of the MCP panel (`mcp_servers`). Phase 8: `tools.ts` (`ToolService.update`) refuses `override: 'allow'` for tools with workspace access `execute` (400 on `['override']`, "Shell commands can't be always allowed. Add a shell rule instead."), and `GET /tools` shows `policy: null` for a tool whose policy is a function (the shell's `shellPolicy`). |
 | `builtin-plugins/index.ts` | Static list of builtin plugin modules, loaded first and trusted. |
 | `builtin-plugins/core-providers/` | The 13 builtin providers (see PROVIDERS.md): definitions, seeds, reasoning mapping, error mapping; Phase 6 (version 1.1.0, `engines ^1.1.0`): the image, transcription and speech factories of OpenAI, xAI, Google, Mistral and Groq, `imageParams`, `transcriptionOptions` and the media seeds (`lib/media.ts`; PROVIDERS.md 13). |
@@ -243,7 +243,7 @@ sequenceDiagram
   Deps->>Deps: log envBootWarnings (Phase 8: an ignored HF_TEST_FILE_SWEEP_DELAY_MS)
   Deps->>Deps: projects.start(): realpath and check HF_WORKSPACE_ROOTS, create the default root (0700) (Phase 7)
   Deps->>Deps: checkpoints.start(): create checkpoints/ (0700), one prune (age, budget, orphan blobs, temp files); with background on, then every 6 h and 60 s after a chat.deleted burst (Phase 8)
-  Deps->>Deps: runs.start(): background_tasks rows still running -> aborted ("The server restarted before the task finished."); undelivered rows -> the in-memory inboxes (delivered at each chat's next run; no turn is started at boot) (Phase 10)
+  Deps->>Deps: runs.boot(): background_tasks rows still running -> aborted ("The server restarted before the task finished."); undelivered rows -> the in-memory inboxes (delivered at each chat's next run; no turn is started at boot) (Phase 10)
   Deps->>Deps: installer.recover(): restore an interrupted swap, clean plugins/.staging
   Deps->>Host: start(): builtins (static imports, trusted), then unless HF_SAFE_MODE=1 data/plugins/* + linked folders, sorted by id, each guarded
   Host-->>Deps: registry populated (providers, models, tools, MCP decls, commands, hooks)
@@ -300,11 +300,18 @@ Notes:
   `type` is a built-in name).
 - A failed boot prune of the checkpoint store is logged (`checkpoint prune failed`) and never fails the boot; the store
   folder itself must be creatable (a failing `mkdir` fails the boot like any other step).
+- Phase 10: the boot sweep of background tasks is `runs.boot()` (`ChatRunner.boot()` → `BackgroundTasks.start()`; not
+  `runs.start()`, which is `POST /chat`), the third of `BOOT_STEPS` (projects, checkpoints, runs, installer, plugins,
+  catalog, mcp, data); it logs `background tasks after the restart` (`aborted`, `undelivered`) when it changed
+  something. The customization catalog has no boot step: it is built on first use (6.23).
 - Graceful shutdown (`SIGINT`/`SIGTERM`, `stopDeps()`): stop accepting connections, stop the automatic file sweep
   first (Phase 8, `data.stop()`: clears its timer and aborts a sweep in flight between batches), then `runs.stopAll()`:
   (Phase 9) clear every chat's steer queue (items removed with reason `stopped`, so no run ends by starting a queued
-  next turn), then (Phase 10) stop every background task (abort its signal, wait at most 5 s, save its row as
-  `aborted`; no result starts a turn any more), then abort active runs (persisted as `aborted`, waiting at most 5 s each; aborting a run kills its shell
+  next turn), then (Phase 10, `BackgroundTasks.stopAll`) stop every background task (abort its signal, wait at most
+  5 s, save its row as `aborted` with "The background task was stopped."; no result starts a turn any more, the
+  in-memory inboxes are cleared, and the undelivered rows are loaded again by the next boot's `runs.boot()`; a crash
+  instead leaves the rows `running`, which that sweep ends with "The server restarted before the task finished."),
+  then abort active runs (persisted as `aborted`, waiting at most 5 s each; aborting a run kills its shell
   process groups and its git commands and, through the run signal, its running sub-agents, whose `task` calls end as
   stopped), then (Phase 10, `customizations.stop()`) drop the catalog caches and abort the scans in flight, then (Phase
   9, `projectFiles.stop()`) abort the file index walks in flight and drop the mention file
@@ -957,10 +964,12 @@ files/index.json       BackupFileIndex { items: [{ id, sha256, name, mime, size,
                        whose blob was written and still matched its sha256 (only when includes.files)
 customizations.json    Phase 10 (ADR-024 amendment, ADR-044): BackupCustomizations { items: [{ kind, name, content,
                        enabled }] }, the personal agents, commands and skills as raw markdown, ordered by kind and
-                       name (written with every backup that has any; no ids, no timestamps, no secrets)
+                       name (only when the query `customizations` is on (default true), the definitions could be
+                       read and at least one exists; no ids, no timestamps, no secrets)
 manifest.json          BackupManifest { format: 'harness-forge.backup', version: 1, exportedAt, appVersion,
-                       chatExportVersion: 2, includes: { files, settings }, counts: { chats, messages, files,
-                       fileBytes } } (written last)
+                       chatExportVersion: 2, includes: { files, settings, customizations? }, counts: { chats, messages,
+                       files, fileBytes, customizations? } } (written last; Phase 10 writes includes.customizations =
+                       the definitions were read (true also with none), counts.customizations always)
 ```
 
 A backup never contains secrets, credentials, the password, plugins, MCP servers, model or tool preferences, share
@@ -1002,11 +1011,15 @@ links or usage rows (the per-message `metadata.usage` survives, so `ChatDetail.t
      `filesMissing` with a warning, and its part keeps its URL;
   6. with `restoreSettings` (backup zips only), only known settings keys are applied, each validated on its own;
      unknown or invalid keys become warnings; Phase 10: the personal definitions of `customizations.json` are restored
-     when the import asks for them (the web sends that request together with "Restore settings from the backup"): each
-     item is re-parsed with the shared `parseDefinition` like a create (`content` ≤ 64 KiB, a valid name, not
-     reserved); an existing entry with the same kind and name is kept (counted as skipped), an invalid item and items
-     beyond 200 per kind become warnings; the result reports the counts. Nothing in the file can grant a tool, a mode or
-     a shell rule (a definition only narrows, 6.23);
+     only with `restoreCustomizations=true` (backup zips only; the web sends it together with "Restore settings from
+     the backup"): at most 600 items are read, each is checked against `backupCustomizationSchema` and re-parsed with
+     the shared `parseDefinition` like a create (`content` ≤ 64 KiB, a valid name, not reserved); an existing entry with
+     the same kind and name is kept (`skipped`), an invalid item and items beyond 200 per kind are `failed` with a
+     warning that names the kind and the name (never the content); the result's `customizations { imported, skipped,
+     failed }` is absent when the restore did not run (not asked, the file missing, or the read failed: a warning).
+     When the export could not read the definitions the backup goes on without them (`includes.customizations: false`,
+     a warning in the log). Nothing in the file can grant a tool, a mode or a shell rule (a definition only narrows,
+     6.23);
   7. the answer (`DataImportResult`) lists every chat with its status (`imported`, `copied`, `skipped` or `failed` with
      a message), the counts and at most 100 warnings; one failing chat never stops the others.
 - **Delete-all** (`{ confirm: 'DELETE', files?, usage? }`): take the mutex -> `chats.allIds()` -> `runs.stop` for
@@ -2596,12 +2609,18 @@ web editor saves through it; the two round-trip).
 Agent and skill names match `^[a-z][a-z0-9-]{0,63}$` (`AGENT_NAME_PATTERN`); a description longer than 1,024 characters
 is cut (warning). Claude Code keys the harness does not use (`color`, `permissionMode`, `hooks`, …) are ignored (`info`
 `ignored-key`); the model aliases `sonnet`, `opus` and `haiku` fall back to the default model (`info` `model-alias`); a
-`provider:model` the catalog cannot resolve is a warning (`invalid-model`) and the default applies at run time; a tool
-pattern such as `Bash(git:*)` keeps the tool and adds `tool-pattern` (the pattern itself is not enforced); a tool name the
-live tool list does not know is a warning (`unknown-tool`) and matches nothing; a `tools` / `allowed-tools` value that
-is neither text nor a list gives **no** tools (`[]`, a warning `invalid-field`): a broken list fails closed.
+`provider:model` whose provider is not configured (unknown, disabled or without credentials) is a warning
+(`invalid-model`; the catalog checks only the providers its entries reference, and a run resolves the model again and
+falls back); a tool pattern such as `Bash(git:*)` keeps the tool and adds `tool-pattern` (the pattern itself is not
+enforced); a tool name the live tool registry does not know is a warning (`unknown-tool`, at most 10 named per entry)
+and matches nothing (`mcp__*` names are not checked: MCP servers come and go); a `tools` / `allowed-tools` value that
+is neither text nor a list gives **no** tools (`[]`, a warning `invalid-field`): a broken list fails closed. A
+frontmatter that is not valid YAML but that the line reader can still read keeps the entry **active** with an
+`invalid-frontmatter` warning (the seed's `broken.md` case); only a parse without a usable definition is `invalid`.
 
-**Sources and precedence**, lowest first: **builtin** (the agents `explore` and `general`, declared by `core-agent`) <
+**Sources and precedence**, lowest first: **builtin** (the agents `explore` and `general` of
+`builtin-plugins/core-agent/agents.ts`, read by `services/customizations/builtins.ts`; they are not registry entries,
+and the agent registry refuses their names) <
 **plugin** (`registry.agents`, `registry.skills` and the plugin commands; plugin API 1.4.0; only enabled plugins; none in
 `HF_SAFE_MODE`) < **user** (the enabled rows of the `customizations` table) < project **`.claude/`** < project
 **`.harness/`**. `resolvePrecedence` (shared) keeps one winner per kind and name; every loser is listed with `state:
@@ -2620,28 +2639,42 @@ folder-level diagnostic `project-unavailable`):
    `resolveWorkspacePath(root, F)` (`workspace/paths.ts`) must exist as a directory **and** resolve to exactly `F`
    (`resolved.rel === F`), which proves that no symbolic link sits anywhere on the path (a linked `.harness` or
    `.harness/agents` is skipped with `link`).
-2. `opendir` with dirents: only `dirent.isFile()` entries count (links are skipped with `link`), no hidden names, only
-   `.md`; agents: the folder's own files; commands: `**/*.md` up to 3 folders deep (the subfolders form a display-only
-   `namespace`, `frontend/review.md` → `/review` in namespace `frontend`); skills: `<dir>/SKILL.md` one level down (the
-   folder must not be a link). At most 200 entries per folder (`customizationFilesPerFolderMax`; the rest `limit`).
-3. Each file is opened with `openWorkspaceFile` (`O_NOFOLLOW`), checked with `fstat` (a regular file ≤ 64 KiB, else
-   `too-large`), and only its first 8 KiB are read for the frontmatter (a NUL byte → `binary`; the `readCapped` pattern of
-   `project-file.ts`). Discovery never reads a body.
-4. Diagnostics carry project-relative paths only. Nothing is ever read from the home folder (`~/.claude`,
-   `~/.harness`): personal definitions live in the database.
+2. `opendir` with dirents: only `dirent.isFile()` entries count (a linked file is skipped with a folder-level `link`
+   diagnostic), no hidden names, only `.md`; agents: the folder's own files; commands: `**/*.md` up to 3 folders deep
+   (the subfolders form a display-only `namespace`, `frontend/review.md` → `/review` in namespace `frontend`; at most
+   100 subfolders, `COMMAND_SUBFOLDERS_MAX`); skills: `<dir>/SKILL.md` one level down (the folder must not be a link);
+   every subfolder is checked like the folder itself. At most 200 definitions per folder
+   (`customizationFilesPerFolderMax`, the first sorted paths; the rest `limit`) and at most 2,000 directory entries
+   looked at per folder (`DIRENTS_SCANNED_MAX`; the rest `limit`).
+3. Each file: a secret-looking name (`secrets.md`) is never opened (a folder-level `read-failed` info); otherwise it is
+   opened with `openWorkspaceFile` (`O_NOFOLLOW | O_NONBLOCK`) after the same `rel` check, checked with `fstat` (a
+   regular file ≤ 64 KiB), and only its first 9 KiB are read (`DISCOVERY_READ_BYTES`: the 8 KiB frontmatter cap plus
+   the delimiter lines and the start of the body; a NUL byte in the first 8 KiB → `binary`), at most 8 files at a time.
+   A cut head whose parse has no definition, an `error` or a missing field is read again whole (≤ 64 KiB), so a long
+   file is never judged on a cut. A file that is too large, binary or unreadable is listed as an `invalid` entry
+   (`too-large`, `binary`, `read-failed`). Discovery never uses a body.
+4. Diagnostics carry project-relative paths only (folder-level ones at most 100). Nothing is ever read from the home
+   folder (`~/.claude`, `~/.harness`): personal definitions live in the database.
 
 **The catalog** (`catalog.ts`): `catalog(projectId | null)` merges the four sources into `CustomizationList { items:
 CustomizationEntry[], diagnostics (folder-level), project: { id, available, issue?, folders, scannedAt } | null, builtAt
-}`; an entry
+}` (`issue` is `openWorkspace`'s message, at most 500 characters, which may name the folder path); an entry
 is `{ kind, name, description, source, id? (user), pluginId?, path? (project), namespace?, argumentHint?, modelRef?,
 tools?, enabled, state: active | shadowed | invalid | off, shadowedBy?, diagnostics[] }`. The global catalog
-(`projectId` null) has no project entries.
+(`projectId` null) has no project entries. `catalog()` never rejects but for an abort: an unknown project or a folder
+that cannot be opened gives `project-unavailable` (the route answers 404 for an unknown project), and a build that
+fails (the database) answers the built-in agents with a `read-failed` warning, not cached. The catalog also lists the
+plugin commands (so a project or personal command that shadows one shows it).
 
-- **Cache**: per project (and one global), a TTL of 10 s (`customizationIndexTtlMs`), single-flight builds; dropped at
-  once on `workspace.changed`, `project.changed` and `run.finished` of the project (shell commands write without a
-  `workspace.changed`), on a registry change of agents, skills or commands (plugin enable, disable, reload), on any user
-  create / update / delete, and by `GET /customizations?refresh=1`; a build already running when its cache is dropped
-  is not kept. Files edited outside the agent show up within 10 s.
+- **Cache** (`cache.ts`): per project (at most 50 project catalogs, `CUSTOMIZATION_CACHE_PROJECTS_MAX`, the least
+  recently used dropped first) and one global, a TTL of 10 s (`customizationIndexTtlMs`, from the start of the build),
+  single-flight builds; a project's catalog is dropped at once on a `workspace.changed` whose paths touch one of the six
+  definition folders (or that lists 200 paths, `workspaceEventPathsMax`, so it may be cut), on `project.changed` and on
+  `run.finished` of one of its chats (shell commands write without a `workspace.changed`); every catalog is dropped on a
+  registry change of agents, skills or commands (plugin enable, disable, reload), on any personal create / update /
+  delete and on a restore that imported something; `GET /customizations?refresh=1` rebuilds. A build already running
+  when its cache is dropped is not kept. The subscriptions start with the first build. Files edited outside the agent
+  show up within 10 s. A run opens its project folder twice: once for its workspace and once for its catalog.
 - **`load(entry, signal)`**: a run that uses an agent body, a skill or a command reads the whole file again (≤ 64 KiB,
   the same guards), parses it again and checks that the name still matches; a file that disappeared or became invalid
   meanwhile is `not_found` / invalid for that call (the agent gets an error result, the command is not expanded). Plugin
@@ -2651,7 +2684,8 @@ tools?, enabled, state: active | shadowed | invalid | off, shadowedBy?, diagnost
 
 **User store** (table `customizations`, ids `cus_` + 16 characters): a row keeps the raw markdown (`content`) and the
 denormalized `kind`, `name`, `description`, `enabled`; `(kind, name)` is unique (409 `exists`), at most 200 per kind
-(`customizationsPerKindMax`; more is a 409). Create and update bodies are `{ kind, content, enabled? }`
+(`customizationsPerKindMax`; more is a 409 with the reason `exists` too, the only conflict reason that fits). Writes run
+one at a time, so the cap holds. Create and update bodies are `{ kind, content, enabled? }`
 (strict); the server parses the content with `parseDefinition` and answers 400 `validation_error` with the diagnostics in
 `details` when it has an `error`. `references.ts` scans `content` and `description` for file ids (like
 `projects.instructions`); the other columns are unscanned. Personal definitions are configuration: delete-all keeps them,
@@ -2667,32 +2701,44 @@ backups carry them (6.9).
 | `DELETE /customizations/:id` | 204 (404) |
 
 None needs fresh auth (a personal definition only narrows what the session can already do). Every change emits
-`customization.changed { kind?, id?, projectId? }`: `id` (and `kind`) after a personal definition was created, updated
-or deleted; `projectId` when a project's definition files changed or were read again; neither when plugin agents,
-skills or commands changed (refetch everything). The web marks its cached catalogs and command lists stale (UI.md
-11.7).
+`customization.changed { kind?, id?, projectId? }`: `{ kind, id }` at once after a personal definition was created,
+updated or deleted; `{ projectId }` when a cached catalog of that project was dropped or a rebuild found other files
+(compared on the project entries, the folder diagnostics and the folders; coalesced, at most one per second per
+project); `{}` after a registry change of plugin agents, skills or commands (coalesced, at most one per second) and
+after a restore that imported definitions (refetch everything). The web marks its cached catalogs and command lists
+stale (UI.md 11.7).
 
 ### 6.24 Custom commands (ADR-045)
 
 **Resolution** (`chat/commands.ts` `resolveCommand(services, text, { chatId, signal, catalog })`): the first text part
 of a new user message that starts with `/name` (followed by whitespace or the end) is looked up in this order: client
-commands (never reach the server) → harness commands (`/compact`) → the project's `.harness/commands` → its
-`.claude/commands` → the user's commands → the plugin registry. A file command (project or user) becomes `{ kind:
-'prompt', invocation: { name, input, type: 'prompt', expansion, source, modelRef?, allowedTools? } }`, stored as the
-message's `metadata.command` (the transcript keeps the typed text).
+commands (never reach the server) → harness commands (`/compact`) → the run catalog's active command when it is a
+project or personal one (the catalog's precedence: `.harness/commands` over `.claude/commands` over the user's commands
+over a plugin command) → the plugin registry (a plugin command keeps the v1.5 path, also when the catalog lists it). A
+file command (project or user) is loaded again (`customizations.load`) and becomes `{ kind: 'prompt', invocation: {
+name, input, type: 'prompt', expansion, source, modelRef?, allowedTools? } }`, stored as the message's
+`metadata.command` (the transcript keeps the typed text); plugin and harness invocations carry no `source` (the v1.5
+shape). A definition that can no longer be loaded when the message is sent (gone, renamed, invalid) is a 400
+`validation_error` on `['message', 'parts']` ("The /name command cannot be used right now. …") and nothing is
+stored.
 
 - **Expansion** (`expandArguments(body, input)` of `util/arguments.ts`): `$ARGUMENTS` = the whole input (trimmed),
   `$1` … `$9` = its words (double and single quotes group words; a missing word is empty), `{{input}}` = the whole input
   (template compatibility). A body without any placeholder gets the input appended after a blank line (the `expandTemplate`
-  rule of plugin templates). The expansion is capped at 64 KB (larger: 400 `validation_error`). Lines starting with `!`
+  rule of plugin templates). The expansion is capped at 64 KB (`commandExpansionBytes`; larger: 400 `validation_error`
+  on `['message', 'parts']`, nothing stored). Lines starting with `!`
   are **never run** and `@path` references are **never expanded**: both reach the model as text.
-- **Model override**: `planRun` (`prepare.ts`) resolves the command before the target model, then
-  `resolveTarget(invocation.modelRef ?? body.modelRef)`. When the command's model cannot run (unknown provider or
-  model, missing key, an image model, a model without the capabilities the turn needs), the chat's model answers and
-  the reply starts with the notice `command-model-unavailable` (warning). `PreparedRun.requestModelRef` keeps the
+- **Model override**: `planRun` (`prepare.ts`) resolves the **request's** model first, as in v1.5 (its errors, the
+  image-option checks and the image-continuation 400 are unchanged), then `resolveTurnModel` tries the command's
+  `model` when it differs from it: the command's model runs the turn when it resolves (`providers.resolveModel`) to a
+  model whose catalog kind is `chat` (no capability checks); otherwise (a resolution error or another kind, such as an
+  image model) the request's model answers and the reply starts with the notice `command-model-unavailable` (warning,
+  "The command's model X is not available, so the chat's model answered.", once per reply: a continuation that already
+  shows it does not repeat it). So a chat whose own model cannot be resolved fails even when the command's model could
+  run, and a command's model never gets the request's `imageOptions`. `PreparedRun.requestModelRef` keeps the
   request's model, so the run's touches never store the command's model as the chat's model; `run.started.modelRef`
-  and the reply metadata name the model that ran. Regenerate reads the stored `metadata.command.modelRef`; a stored
-  expansion is reused even if the file changed since.
+  and the reply metadata name the model that ran. Regenerate and approval continuations read the stored
+  `metadata.command.modelRef`; a stored expansion is reused even if the file changed since.
 - **Allowed tools narrow** (`turnToolRestriction(history)`): the turn's user message carries
   `metadata.command.allowedTools` (≤ 64 names), so approval continuations and regenerations keep the restriction.
   `assembleTools({ allowedTools })` applies it **after** the mode (`applyToolMode`): only tools that match the list
@@ -2700,52 +2746,70 @@ message's `metadata.command` (the transcript keeps the typed text).
   never adds a tool, never changes an approval, never creates an override or a shell rule: unlike Claude Code, where
   `allowed-tools` pre-approves calls, a cloned repository must not be able to approve the shell.
 - **Queue**: `isServerCommandFor(deps, projectId, text)` replaces `isServerCommand`, so a queued file command is
-  `turnOnly` (never steered) like plugin commands and `/compact` (6.20).
+  `turnOnly` (never steered) like plugin commands and `/compact` (6.20); when the catalog cannot be read it answers
+  false for file commands (the v1.5 answer: harness and plugin commands only).
 - **Listing** (`GET /commands?projectId=`): `{ items: CommandSummary[] }` with `{ name, description, source: harness |
-  plugin | user | project, pluginId?, namespace?, argumentHint?, modelRef? }`: `/compact`, then the effective (winning,
-  usable) commands of the scope; an unknown project is a 404, an unavailable project folder simply has no project
-  commands. A plugin command shadowed by a project command is shadowed only in that project's chats.
+  plugin | user | project, pluginId?, namespace?, argumentHint?, modelRef? }`, sorted by name: `/compact` and the
+  effective (winning, usable) commands of the scope; the plugin commands come from the live registry (a catalog that
+  still lists a disposed plugin's command does not bring it back); an unknown project is a 404, an unavailable project
+  folder simply has no project commands. A plugin command shadowed by a project command is shadowed only in that
+  project's chats.
 
 ### 6.25 Skills and custom agents (ADR-045)
 
 **Custom agent types** (`chat/subagent/**`, `chat/params.ts`; amends 6.22): the `task` input `type` is
 `agentTypeInputSchema` (trimmed, lowercased, `AGENT_NAME_PATTERN`) and the output `type` an `agentNameSchema` name;
-`taskTypeSchema` stays the built-in enum (the web's icons), so v1.5 parts parse unchanged. `runChild` resolves the type
-against the run's catalog: `general-purpose` → `general`; the built-ins run as before; an active catalog agent runs with
-its definition; anything else (unknown, shadowed by nothing, invalid, off) ends the call `failed` with an error that
-lists the available types.
+`taskTypeSchema` stays the built-in enum (the web's icons), so v1.5 parts parse unchanged. `resolveAgentType` resolves
+the type against the run's catalog: trimmed, lowercased, `general-purpose` → `general`; the built-ins always run as
+before (whatever the catalog lists); an active catalog agent runs with its definition (as a `general` child); anything
+else (unknown, invalid, shadowed, off) ends the call `failed` at once, without a model call or a slot, with "Unknown
+agent type x. Available: explore, general, …" (the built-ins first, then by name, at most 30 named, then "and N more").
+A custom agent whose definition can no longer be loaded fails the call ("The agent type x could not be loaded."). A
+background call resolves its type the same way before anything is launched.
 
 - **Instructions**: `joinInstructions(SUBAGENT_PREAMBLE, body, settings.instructions)`: the sub-agent preamble (its
   marker first, so `mock:*` and the step composer still recognize a child), then the agent's body (loaded with
   `load()`), then the user's global instructions; then `buildRunParams` as for any child (no agent blocks).
-- **Tools**: `childTools({ …, allowlist })` filters **after** the 6.22 ceiling (`offeredToChild`): the child gets the
-  intersection of its `tools` list and what a `general` child may run without approval in the parent's mode
+- **Tools**: `childTools({ …, allowlist })` filters **after** the 6.22 ceiling (`offeredToChild`) with the shared
+  `matchToolAllowlist` (exact names, `*` prefixes, `mcp__<server>` entries): the child gets the intersection of its
+  `tools` list and what a `general` child may run without approval in the parent's mode
   (`childToolMode('general', parent)`); a list can only narrow and never brings back a tool that would ask, the
-  `core-agent` tools or `generate_image`; without `tools` the child gets the whole ceiling. The child's approval function
-  still maps every `user-approval` to a denial.
+  `core-agent` tools or `generate_image`; without `tools` the child gets the whole ceiling. The ceiling keeps a tool whose
+  policy decides per call, so an agent with `tools: [shell, write_file]` in Accept edits **is** offered `shell`: the
+  child's approval function still maps every `user-approval` to a denial, so only the commands a shell rule allows run.
 - **Model**: the frontmatter `provider:model` (when it cannot be resolved: the default below, with the warning `the
   agent's model cannot be resolved; the default model runs the sub-agent`), `inherit` (the parent run's model), or none
   (`subagentModelRef ?? the parent run's model`).
-- **Output**: `TaskOutput` gains `agent?: { source, description (≤ 200), path? }` (a snapshot for tooltips and share
-  pages) and `taskId?` (background calls, 6.26); `reduceAgentOutputs` keeps `taskId`.
-- **Listing**: when `task` is offered, `params.ts` appends an "Agent types" block right after the `task` hint: the active
-  agents of the catalog (built-ins first, then by name; at most 30, `agentTypesListedMax`), one line each with the name
-  and the description cut at 250 characters (`listedDescriptionMaxChars`). The static `task` tool description is
-  unchanged (it never depends on the catalog). Depth stays 1: children never get `task`.
+- **Output**: every output (built-ins too) carries the resolved `type` and `agent?: { source, description (≤ 200, one
+  line), path?, pluginId? }` (a snapshot for tooltips and share pages; `pluginId` for plugin agents) and `taskId?`
+  (background calls, 6.26); `reduceAgentOutputs` keeps `taskId`.
+- **Listing**: when `task` is offered, `params.ts` appends an "Agent types" block right after the `task` hint: the header
+  line `Agent types (the type of a task call):`, then one `- name: description` line per active agent of the catalog
+  (built-ins first, then by name; at most 30, `agentTypesListedMax`; the description on one line, cut at 250
+  characters with a trailing `…`, `listedDescriptionMaxChars`). The mock models read exactly this shape (PROVIDERS.md
+  8). The `task` tool description changed in v1.6 (it points at the "Agent types" block and explains `background:
+  true`) but stays static: it never depends on the catalog. Depth stays 1: children never get `task`.
 
 **Skills** (`chat/skills.ts`, `core-agent/skill.ts`): the fourth `core-agent` tool `skill { name }` (policy `safe`, no
-workspace access) is offered only when the run's catalog has at least one active skill (`assembleTools({ skillsAvailable
-})`) and never to a sub-agent. The instructions then carry a skills block (after the agent blocks; at most 50,
-`skillsListedMax`, names with descriptions cut at 250 characters) that tells the model to load a skill with `skill` when
-a task matches it.
+workspace access, 60 s) is offered only when the run's catalog has at least one active skill (`assembleTools({
+skillsAvailable })`) and never to a sub-agent. The instructions then carry a skills block (the last agent block): the
+header line `Skills (when a request matches one, load it with the skill tool before you start; it gives you its
+instructions):`, then one `- name: description` line per active skill (by name; at most 50, `skillsListedMax`;
+descriptions cut at 250 characters with `…`).
 
-- `execute` → `agentScopeOf(c).loadSkill(name, signal)` → the run's catalog → `load()`; an unknown name is an error
-  result that lists the available skills. Output `{ name, description, source, content (≤ 64 KiB), truncated, baseDir?,
-  files? }`: for a project skill `baseDir` is its folder (`.harness/skills/x`) and `files` its supporting files (found
-  with `walkWorkspace` from that folder: depth 3, at most 50, `skillFilesListedMax`; links, hidden names and
-  secret-looking paths left out).
-- The model reads the body, then "Base folder: .harness/skills/x — read supporting files with read_file" and the file
-  list. `read_file` of `.harness/**` is `safe` (it is not a secret-looking path), so reading them never asks; **writing**
+- `execute` → `agentScopeOf(c).loadSkill(name, signal)` → the run's catalog → `load()`. Errors are tool results the model
+  reads: `Unknown skill "x".`, `The skill "x" is turned off.`, `The skill "x" is not valid.` or `The skill "x" could not
+  be loaded. …`, each followed by "Available skills: a, b." (at most 50 named); a catalog without skills answers "No
+  skills are available in this chat." (`SKILLS_UNAVAILABLE_TEXT`); a call without an agent scope "Skills are not
+  available yet." (`SKILLS_NOT_AVAILABLE_ERROR`, kept from the P10-0b stub). Output `{ name, description, source,
+  content (≤ 64 KiB, cut at a character boundary), truncated, baseDir?, files? }`: only for a project skill in a run
+  whose project folder is open, `baseDir` is its folder (`.harness/skills/x`) and `files` its supporting files relative
+  to it (found with `walkWorkspace` from that folder: 3 folder levels, at most 2,000 entries looked at and 2 s, at most
+  50 listed, `skillFilesListedMax`; links, hidden names, secret-looking paths, the skill's own `SKILL.md`, gitignored
+  paths and `node_modules` left out). A skill folder that is or goes through a link (even into the project) gets
+  `files: []`; a listing that fails never fails the load.
+- The model reads the body (with "(The skill was cut here: it is longer than 64 KB.)" when truncated), then "Base folder:
+  .harness/skills/x — read supporting files with read_file" and "Supporting files: …" (project-relative paths). `read_file` of `.harness/**` is `safe` (it is not a secret-looking path), so reading them never asks; **writing**
   under `.harness/` or `.claude/` stays `always` (hidden paths, 6.13), so the agent can never silently rewrite its own
   customizations.
 - Skills are not user-invocable in v1.6 (no `/skill` command; backlog).
@@ -2761,36 +2825,47 @@ a per-chat manager (`chat/background/`, inside the `ChatRunner`), until it finis
 result is then delivered to the parent conversation **exactly once**.
 
 1. **Launch** (`runSubagent` sees `input.background`): `ctx.background.launch({ chatId, messageId, toolCallId, task,
-   origin, model, toolMode, workspace, scope, settings, … })`. The caps are checked first: 3 per chat
-   (`backgroundTasksPerChatMax`) and 10 per server (`backgroundTasksMax`) running at once; past a cap the call ends
-   `failed` with a message naming the limit. Otherwise a `background_tasks` row is inserted (`bgt_` id, status
+   origin, model, toolMode, workspace, scope, settings, … })`; the type is resolved first (an unknown type fails without
+   a launch), then the caps are checked: 3 per chat (`backgroundTasksPerChatMax`) and 10 per server
+   (`backgroundTasksMax`) running at once; past a cap the call ends `failed` with "At most 3 background agents run per
+   chat. Wait for one to finish." or "At most 10 background agents run on this server. Wait for one to finish." (no log
+   line; a launch during shutdown fails with "The server is shutting down."). The slot is taken synchronously, so
+   concurrent launches respect the caps. Otherwise a `background_tasks` row is inserted (`bgt_` id, status
    `running`), a detached `ChildSession` (`chat/subagent/host.ts`, structural) is built with its **own**
-   `AbortController` (stop + a 30-minute deadline, `backgroundTaskTimeoutMs`; the 570 s child deadline and the 600 s
-   tool guard of 6.22 no longer apply) and `subagentMaxSteps`, and the tool yields `{ status: 'background', taskId }`
-   with no steps. A background launch counts toward the run's 20 sub-agents (`subagentsPerRunMax`) but not toward its 3
-   parallel slots.
+   `AbortController` (stop + a 30-minute deadline, `backgroundTaskTimeoutMs`, which ends the task `limit` with "The
+   background agent reached its time limit (30 minutes)."; the 570 s child deadline and the 600 s tool guard of 6.22
+   no longer apply) and `subagentMaxSteps`, run by `runDetachedChild`, and the tool yields `{ status: 'background',
+   taskId }` with no steps (the model reads "Started background agent bgt_…. Its report will arrive as a message; keep
+   working."). A background launch counts toward the run's 20 sub-agents (`subagentsPerRunMax`) but not toward its 3
+   parallel slots. The old delivered rows of the chat are pruned when a task starts (6.26 table).
 2. **Progress**: snapshots stay in memory and go out as `task.changed { chatId, task: BackgroundTask }` (at most one per
    second per task, plus every status change); the row is written at the start and at the end. The child's tool calls
    run with a copy of the launching run's scope, so its writes are journaled under the **launching message** (call ids
    `<parent call>/<child call>`; rewind and the changes panel cover them, 6.16) and its `cd` never moves the chat's
    folder. One usage row (purpose `subagent`, the launching message) per child: its cost is in `TaskOutput.costUsd` and
-   the chat's totals, but not in any message's metadata.
+   the chat's totals, but not in any message's metadata. The manager subscribes to `chat.deleted` and `key.rotated`
+   only while a task runs (subscribed with the first running task, disposed when the last one ended), so an idle
+   manager holds no subscription. Row writes retry at most 8 times on `TRANSACTION_ACTIVE` (only the single-connection
+   in-memory test database answers that; a file database has a pool).
 3. **Finish** (`completed`, `failed`, `limit` or `aborted`): the final snapshot is saved (`status`, `output`,
    `finished_at`) and a `TaskResultData { taskId, toolCallId, messageId, output, deliveredAt }` joins the chat's
    **inbox**; then `deliver(chatId)`:
    - a run of the chat is registered → nothing now: the steer step takes it at the next step boundary (4), or the run's
      release does (5);
-   - the chat is idle and the ending was natural (not a stop) and the task's `origin` is not `task` (**chain depth 1**:
-     a background agent launched from a server-started task turn never starts another turn) and no approval is pending
-     and no maintenance operation blocks runs and the chat's model is not an image model → `startRun(…, origin
-     'task')` with a **carrier message**: a user-role message (client-style `msg_` id) whose parts are only the inbox's
+   - the chat is idle and the inbox holds a result that may start a turn (a natural ending, not a stop, of a task whose
+     `origin` is not `task`: **chain depth 1**, a background agent launched from a server-started task turn never
+     starts another turn; never a result loaded at boot) and no approval is pending and no maintenance operation blocks
+     runs and the chat's model (its `modelRef`, else the default model) is not an image model → `startRun(…, origin
+     'task')` (request id `task_…`) with a **carrier message**: a user-role message (client-style `msg_` id) whose parts
+     are **every** waiting result of the inbox (also aborted ones and those of task-started turns) as
      `data-task-result` parts, prepared by `prepareRun(…, { serverMessage })` (it skips the upload normalization and is
-     checked by `validateMessage`). `run.started` carries `origin: 'task'` and the carrier's `userMessageId`; the web
-     resumes it like a queue-started turn. A 409 `run-active` (a user request won the race) puts the results back at the
-     head of the inbox (the `startQueuedTurn` pattern); another error keeps them undelivered (warning);
+     checked by `validateMessage`). The turn's mode and effort are the chat's settings, else the launching run's, else
+     the defaults. `run.started` carries `origin: 'task'` and the carrier's `userMessageId`; the web resumes it like a
+     queue-started turn. A 409 `run-active` (a user request won the race) puts the results back at the head of the
+     inbox (the `startQueuedTurn` pattern); another error keeps them for the chat's next run (warning);
    - otherwise they wait in the inbox for the chat's next run (its step 0).
 4. **Steer step** (`chat/steer.ts`): one synchronous take of the queue's steerable items, then
-   `background.takeResults(chatId)`; for each result one `data-task-result` part is injected at the step boundary (like
+   `background.takeResults(chatId, replyId)` at every step boundary (step 0 included); for each result one `data-task-result` part is injected at the step boundary (like
    a steer) and one user model message with `taskResultText(result)` (`util/agent-state.ts`: an opening tag
    `<background-task …>` with the task's `id`, `type`, `status` and `description` attributes, then the report, else
    `Error: <error>`, else `(no report)`, then `</background-task>`) is appended; the rows get `delivered_at` and
@@ -2802,21 +2877,26 @@ result is then delivered to the parent conversation **exactly once**.
    unchanged): a reply is split at its results like at steers, and a carrier message becomes a user message with the
    `taskResultText` of each result.
 7. **Stop and guards**: the chat's Stop and Esc do **not** stop background tasks (Claude Code parity).
-   `POST /chat/:id/tasks/:taskId/stop` does (abort, the row saved `aborted`, the partial report delivered later like any
-   result, never by an automatic turn); so do `DELETE /chats/:id` (stops first, then the rows cascade), delete-all,
-   `chat.deleted` and `key.rotated` (the manager subscribes to both) and shutdown (`stopAll`: queues → background tasks
-   (abort, wait ≤ 5 s, save the rows) → runs). While a task of a chat runs, `ChatRunner.hasTasks(chatId)` makes the
-   project busy: rewind, revert and undo (`assertProjectIdle`), project deletion, moving the chat to another project
-   and deleting a message version answer 409 `run-active`; switching versions still works. Background tasks never
-   create approvals (`pending_approval` stays as it was).
-8. **Restart**: `runs.start()` (after `checkpoints.start()`) marks every `running` row `aborted` with the error "The
-   server restarted before the task finished." and loads every undelivered row into the in-memory inboxes; they are
-   delivered at each chat's next run (no turn is started at boot). Tasks never resume.
+   `POST /chat/:id/tasks/:taskId/stop` does (abort, the row saved `aborted` with "The background task was stopped.",
+   the partial report delivered later like any result, at the chat's next run, never by an automatic turn); so do
+   `DELETE /chats/:id` (stops first, then the rows cascade), delete-all and `chat.deleted` (the chat's inbox is
+   dropped), a key rotation (`key.rotated`: every task is stopped, their results are kept for the chat's next run) and
+   shutdown (`stopAll`: queues → background tasks (abort, wait ≤ 5 s, save the rows, clear the inboxes) → runs). A
+   child that does not end within 5 s of a stop is saved as it is. While a task of a chat runs,
+   `ChatRunner.hasTasks(chatId)` makes the project busy: rewind, revert and undo (`assertProjectIdle`), project
+   deletion ("A background agent of a chat of this project is running. Stop it first, then try again."), moving the
+   chat to another project and deleting a message version ("A background agent of this chat is running. Stop it or
+   wait until it finishes, then try again.") answer 409 `run-active`; a project deletion does not stop the tasks.
+   Switching versions still works. Background tasks never create approvals (`pending_approval` stays as it was).
+8. **Restart**: `runs.boot()` (`ChatRunner.boot()`, after `checkpoints.start()`) marks every `running` row `aborted`
+   with the error "The server restarted before the task finished." (a crash; a normal shutdown already saved them as
+   stopped) and loads every undelivered row into the in-memory inboxes; they are delivered at each chat's next run (a
+   result loaded at boot never starts a turn). Tasks never resume.
 
 | Route (module `chatTasks`) | Answer |
 |---|---|
-| `GET /chat/:id/tasks` | `{ items: BackgroundTask[] }`, newest first, the chat's latest 100 (`backgroundTasksKeptPerChat`; older rows are pruned when new ones start); 404 for an unknown chat |
-| `POST /chat/:id/tasks/:taskId/stop` | 200 the `BackgroundTask`: a running task is aborted ("The background task was stopped.") and answered once its row is saved; a task that already ended is answered as it is; `task.changed`; 404 for an unknown chat or a task of another chat |
+| `GET /chat/:id/tasks` | `{ items: BackgroundTask[] }`, newest first (running tasks with their latest in-memory snapshot), the chat's latest 100 (`backgroundTasksKeptPerChat`; when a task starts, the chat's oldest delivered, finished rows above 100 are pruned; undelivered and running rows never are); 404 for an unknown chat |
+| `POST /chat/:id/tasks/:taskId/stop` | 200 the `BackgroundTask`: a running task is aborted ("The background task was stopped.") and answered once its row is saved; a task that already ended is answered as it is; `task.changed`; 404 for an unknown chat or a task of another chat ("Background task x not found in chat y."); logs `background task stop requested` |
 
 `BackgroundTask` = `{ id, chatId, messageId, toolCallId, origin: request | queue | task, status, output: TaskOutput
 (the latest snapshot: type, description, steps, report, …), createdAt, finishedAt, deliveredAt, deliveredMessageId }`;
@@ -2824,7 +2904,10 @@ result is then delivered to the parent conversation **exactly once**.
 
 **Consumers of `data-task-result`**: the model history (`splitTaskResults`), share snapshots (the parts are dropped, and
 a carrier message with nothing else is dropped), the Markdown export ("## Background task: <description> (<status>)"
-and the report), the search text (the report), chat import (`harnessDataSchemas['task-result']`), the message tree (a
+(the type when the description is empty) and the report, else "Error: …", else "_(no report)_"; a reply is split at
+each result and a carrier gets no "## User" heading), the search text (the report), chat import (`harnessDataSchemas['task-result']`), the file reference
+scan (`background_tasks.output` holds the only copy of a report until it is delivered, so the files it names survive a
+cleanup), the message tree (a
 result belongs to the message it landed in: a regenerate or edit above it leaves it on the old branch, while `GET
 /chat/:id/tasks` still lists the task), compaction (it reads the model messages, so results are already text) and
 rewind (the child's writes are journaled under the launching message).
@@ -2859,36 +2942,49 @@ sequenceDiagram
 
 **Plan files** (`chat/plan-file.ts`): with the setting `planFiles` on (default off), approving `exit_plan_mode` in a
 project chat saves the plan. The approval's continuation executes the tool (6.19), which calls `scope.savePlan(plan, c)`
-through the agent scope when `planFiles` is on and `c.workspace` is set.
+through the agent scope; a file is written only when `planFiles` is on, `c.workspace` is set and the run scope of that
+project is bound to `c` (a plan file is never written outside a chat run).
 
 - **Path**: `<planDirectory>/<YYYY-MM-DD>-<slug>.md`; `planDirectory` (default `.harness/plans`) is a safe relative path
-  (no `..` segment, no `.git` segment, not absolute, ≤ 200 characters; the settings route answers 400 otherwise); the
-  date is UTC; the slug comes from the plan's first heading, else its first line (`[a-z0-9-]`, ≤ 48 characters,
-  fallback `plan`).
+  (no `..` segment, no `.git` segment, not absolute, ≤ 200 characters; the settings route answers 400 otherwise) and is
+  checked again at write time (`isSafePlanDirectory`, so a tampered setting never leaves the project); the folder must
+  resolve to exactly its own spelling through `resolveWorkspacePath`: a symbolic link anywhere on it is refused, even
+  one into the project. The date is UTC; the slug comes from the plan's first heading (its closing `#`s dropped), else
+  its first non-empty line: lowercased, accents dropped, every other run of characters one `-`, a hard cut at 48
+  characters (`[a-z0-9-]`, fallback `plan`).
 - **Write**: `journaledWrite(c, root, { tool: 'exit_plan_mode', path }, produce)` (`workspace/journal.ts`), under the file
-  lock and through the path guard; `produce` refuses when a file already exists, and the next name is tried (`-2`, `-3`,
-  …). The file is journaled under the reply, so the changes panel lists it, "Rewind files to here" removes it and undo
-  restores it.
-- **Result**: the output gains `planPath` (the project-relative path) or, when the write failed, `planError` (with a
-  warning log); the approval itself never fails because of the file. The model reads "The plan was saved to <path>." after
-  the usual approval text. No file in a chat without a project, with the setting off, or for a rejected plan.
+  lock and through the path guard; a name already taken (a file, a folder or a dangling link) is skipped, `produce`
+  refuses when a file appeared meanwhile, and the next name is tried (`-2`, `-3`, … up to `-99`, then the write
+  fails); the content ends with a newline. The file is journaled under the reply, so the changes panel lists it,
+  "Rewind files to here" removes it and undo restores it.
+- **Result**: the output gains `planPath` (the project-relative path) or, when the write failed, `planError` (one
+  sentence, at most 500 characters, logged as the warning `cannot save the plan file`); the approval itself never fails
+  because of the file. The model reads "The plan was saved to <path>." (or "The plan file could not be saved:
+  <planError>.") after the usual approval text. No file in a chat without a project, with the setting off, or for a
+  rejected plan.
 
 **Remember** (`services/customizations/memory.ts`, `http/routes/memory.ts`, module `memory`): the client command
 `/remember` opens a dialog that calls `POST /memory { target: project-file | project-instructions | global, text (1 –
-2,000 characters), chatId? }` (strict) → `{ target, file?, created?, project?, settings? }`. Control characters other
-than `\n` are stripped from the text.
+2,000 characters), chatId? }` (strict) → `{ target, file?, created?, project?, settings? }`. `\r\n` and `\r` become
+`\n`, every other control character (C0 / C1, DEL, the line and paragraph separators, bidi overrides and isolates) is
+removed, lone surrogates become U+FFFD; an empty result is a 400 on `['text']`.
 
-- **`project-file`** and **`project-instructions`** need `chatId` of a chat with a project (400 otherwise); the project
-  comes from the chat.
-- **`project-file`**: the file is `AGENTS.md` when it exists, else `CLAUDE.md`, else a new `AGENTS.md`; a symbolic link
-  is refused (`lstat`, 400); the line `- {text}` is appended (a newline added first when the file does not end with
-  one); the result must stay ≤ 1 MiB (`rememberFileMaxBytes`; 413 otherwise). The write goes through
-  `deps.checkpoints.journal({ chatId, messageId: null, projectId })` (tool `remember`, the file lock), so it is
-  rewindable, revertible and listed by `GET /chats/:id/changes`, and the journal emits the usual coalesced
-  `workspace.changed`.
+- **`project-file`** and **`project-instructions`** need `chatId` of a chat with a project: 404 for an unknown chat,
+  400 on `['chatId']` without a project ("This chat has no project: Remember can save to the project only from a chat
+  of a project.") or when the project folder cannot be opened; the project always comes from the chat. `chatId` is
+  ignored for `global`.
+- **`project-file`**: the file is `AGENTS.md` when it exists, else `CLAUDE.md`, else a new `AGENTS.md`, in the project
+  root only; a symbolic link (`lstat`, checked again under the file lock), a folder or anything but a regular file, and
+  a file with a NUL byte in its first 8 KiB (binary) are refused (400); the line `- {text}` is appended (a newline added
+  first when the file does not end with one); the result must stay ≤ 1 MiB (`rememberFileMaxBytes`; 413 otherwise).
+  The write goes through `deps.checkpoints.journal({ chatId, messageId: null, projectId })` with the tool call id
+  `remember_<16 hex>` and the tool `remember` (the file lock, the path guard), so it is rewindable, revertible and
+  listed by `GET /chats/:id/changes`, and the journal emits the usual coalesced `workspace.changed` (source `tool`).
 - **`project-instructions`**: `projects.update(id, { instructions })` with the line appended (`project.changed`); more
-  than 20,000 characters (`instructionsMaxChars`) is a 400.
+  than 20,000 characters (`instructionsMaxChars`) is a 400 on `['text']`.
 - **`global`**: `settings.update({ instructions })` with the line appended; the same cap.
+- The text is never logged: the info line `remember saved` carries the target, the ids, the file name, `created` and
+  the length.
 - No fresh auth (the session can already edit these through the settings and project routes).
 
 ## 7. Data directory
@@ -3186,13 +3282,14 @@ delete-all, carried by backups (`customizations.json`), never deleted with a cha
 | `kind` | text | NOT NULL; `agent` \| `command` \| `skill` |
 | `name` | text | NOT NULL; the parsed name (agents and skills `^[a-z][a-z0-9-]{0,63}$`, commands `^[a-z][a-z0-9-]{0,31}$`); unique index (`kind`, `name`); a violation answers 409 `exists` |
 | `description` | text | NOT NULL; the parsed description (<= 1,024 chars), denormalized for listings |
-| `content` | text | NOT NULL; the raw markdown with frontmatter (<= 64 KiB), the source of truth (re-parsed on every read) |
+| `content` | text | NOT NULL; the raw markdown with frontmatter (<= 64 KiB), the source of truth (parsed on every create and update; the parse of a row is memoized until its next write) |
 | `enabled` | boolean | NOT NULL DEFAULT true; a row turned off is listed (`off`) but not used |
 | `created_at` | timestamp | NOT NULL |
 | `updated_at` | timestamp | NOT NULL |
 
 **`background_tasks`** — background sub-agents (Phase 10, ADR-046, 6.26). Not in backups or exports; deleted with their
-chat; the latest 100 per chat are kept.
+chat; when a task starts, the chat's oldest delivered, finished rows above 100 are pruned (undelivered and running rows
+are kept).
 
 | Column | Type | Constraints |
 |---|---|---|
@@ -3326,9 +3423,11 @@ customizations` writes two `CREATE TABLE` and three `CREATE [UNIQUE] INDEX` stat
 foreign key of `background_tasks.chat_id` carries `ON DELETE CASCADE`, so deleting a chat removes its task rows without
 service code (the manager stops a running task first); `customizations` references nothing. `db/upgrade.test.ts`
 migrates a `0006` database with data and checks 20 tables, the tags `0000` … `0007`, the old rows intact and the
-cascade. `references.ts` scans `customizations.content` and `.description` (a definition may mention a file URL); every
-other new column is in `UNSCANNED_COLUMNS` (ids, names, statuses, timestamps; `background_tasks.output` holds tool
-summaries and a report, never a `data/files` id that is not also in a message).
+cascade. `references.ts` scans `customizations.content` and `.description` (a definition may mention a file URL) and
+`background_tasks.output` (Gate P10-A decision: the sub-agent snapshot holds the report, its only copy until the result
+is delivered into `messages.parts`, possibly after a restart, so a file id it names must survive a cleanup meanwhile);
+every other new text column is in `UNSCANNED_COLUMNS` (ids, kinds, names, and the task rows' type, description,
+status and origin).
 
 Not stored in the DB: sessions (stateless HMAC cookie), active runs and resume buffers (memory), plugin logs
 (memory ring buffer), SSE subscribers (memory), share tokens (recomputed from the share id), rate-limit counters and
@@ -3707,15 +3806,15 @@ Project definition files arrive with cloned repositories, so they are **untruste
 | Threat | Mitigation | Accepted risk |
 |---|---|---|
 | A hostile `.claude/` or `.harness/` folder grants itself tools or approvals | definitions are **restrict-only**: an agent's `tools` and a command's `allowed-tools` only narrow the tool set (after the mode and the 6.22 ceiling), never add a tool, change the permission mode, approve a call, create a tool override or a shell rule; `model` resolves only through the providers the user configured (an unknown one falls back with a notice or a warning); `!` lines never run and `@path` is never expanded; skill bodies reach the model only through an explicit `skill` call; the UI shows every definition's source and the project's files read-only | a prompt-injected body can still ask the model to misuse the tools the mode already allows (as with `AGENTS.md`) |
-| Link or traversal escapes while scanning a project | only `.harness/{kind}` and `.claude/{kind}` under the project root; `resolveWorkspacePath` must resolve each folder to itself (no link anywhere on the path), dirent types (links skipped), `O_NOFOLLOW` opens, `fstat` regular-file checks; diagnostics carry project-relative paths only; nothing is read from the home folder | TOCTOU between the check and the open of a file (as in 6.13; `O_NOFOLLOW` covers the last segment) |
-| YAML or discovery denial of service (alias bombs, deep nesting, huge files, many files) | byte caps before parsing (64 KiB per file, 8 KiB of frontmatter read at discovery), `maxAliasCount: 0`, the YAML core schema (no custom tags), unique keys, at most 200 files per folder and 3 folder levels for commands, frontmatter-only discovery, a 10 s cache with single-flight builds; the parser never throws (fuzzed in its tests) | a project with many large definitions costs one scan per 10 s while it is used |
+| Link or traversal escapes while scanning a project | only `.harness/{kind}` and `.claude/{kind}` under the project root; `resolveWorkspacePath` must resolve each folder and each file to itself (no link anywhere on the path), dirent types (links skipped with a `link` diagnostic), `O_NOFOLLOW` opens, `fstat` regular-file checks; secret-looking names are never opened; `load` and `source` read only paths inside the six definition folders; diagnostics carry project-relative paths only; nothing is read from the home folder | TOCTOU between the check and the open of a file (as in 6.13; `O_NOFOLLOW` covers the last segment) |
+| YAML or discovery denial of service (alias bombs, deep nesting, huge files, many files) | byte caps before parsing (64 KiB per file, 8 KiB of frontmatter; discovery reads 9 KiB per file and the whole file only when the cut does not parse), `maxAliasCount: 0`, the YAML core schema (no custom tags), unique keys, at most 200 definitions and 2,000 directory entries per folder, 3 folder levels and 100 subfolders for commands, 8 files read at a time, frontmatter-only discovery, a 10 s cache (at most 50 projects) with single-flight builds; the parser never throws (fuzzed in its tests) | a project with many large definitions costs one scan per 10 s while it is used |
 | The agent rewrites its own customizations to persist an injection | writes under `.harness/` and `.claude/` are hidden-path writes and always ask (policy `always`, also in Accept edits), and the harness itself never writes definition files (the UI edits only personal rows); reading them (`read_file`) is `safe` so skills can point at their files | an approved write, a shell command in Auto mode or one a shell rule allows (the ADR-033 risk) |
-| Runaway background agents (cost, time, writes) | 3 per chat and 10 per server at once, 30 minutes and `subagentMaxSteps` each, never approvals (every `user-approval` denied), depth 1, no automatic turn while an approval is pending, at boot or from a task-started turn (chain depth 1); stopped by their Stop, chat and project deletion, delete-all, key rotation and shutdown; their project is busy (409 `run-active` for rewind, revert, undo, project delete, chat move, version delete); writes journaled under the launching message; status persisted, a restart leaves them `aborted` | the chat's Stop leaves them running (by design, ADR-046); a model can launch up to the caps on every reply |
+| Runaway background agents (cost, time, writes) | 3 per chat and 10 per server at once, 30 minutes and `subagentMaxSteps` each, never approvals (every `user-approval` denied), depth 1, no automatic turn while an approval is pending, during a maintenance operation that blocks runs, from a result loaded at boot or from a task-started turn (chain depth 1); stopped by their Stop, chat deletion, delete-all, key rotation and shutdown; their project is busy (409 `run-active` for rewind, revert, undo, project delete, chat move, version delete); writes journaled under the launching message; status persisted, a restart leaves them `aborted` | the chat's Stop leaves them running (by design, ADR-046); a model can launch up to the caps on every reply |
 | Delivery races (a run ends while a result arrives, a user request wins the chat) | the inbox take is synchronous, `onRunReleased` delivers on release, a lost `startRun` (409) puts the results back at the head of the inbox, `delivered_at` is set once | a result can land in a later turn than expected (it shows where it was delivered) |
 | A command's model override changes the chat for good | `requestModelRef` keeps the chat's model; the reply names the model that ran | — |
 | Plan files or `/remember` write outside the project or through a link | fixed names under the project root through the path guard and the journal (`journaledWrite`, the file lock), a `planDirectory` without `..` / `.git` / absolute paths (400), `lstat` refuses a linked `AGENTS.md` / `CLAUDE.md`, a 1 MiB cap, the 20,000-character instruction cap; every write is rewindable | — |
 | A crafted backup plants personal definitions | they are parsed like a create (caps, names, reserved names) and, being definitions, can only narrow; existing entries are kept | a restored definition's instructions steer the model like a typed one |
-| Plugin agents and skills | the plugin API 1.4.0 registries check names, reserved names, 64 KiB bodies, tool names and model refs; a duplicate across plugins is a `conflict` in the plugin log; a disabled plugin's entries disappear at once | a trusted code plugin can register anything a code plugin can (13 of PLUGINS.md) |
+| Plugin agents and skills | the plugin API 1.4.0 registries validate every registration with the shared `declarativeAgentSchema` / `declarativeSkillSchema` (names, reserved names such as the built-in agent types, 64 KiB bodies, tool names, model refs); the first registration of a name wins: a taken name throws `conflict` to a code plugin (`ctx.agents.register`) and is skipped with a warning in the plugin log for a manifest contribution; a disabled plugin's entries disappear at once | a trusted code plugin can register anything a code plugin can (13 of PLUGINS.md) |
 
 - **Logging rules** (12): never at `info` — definition and skill bodies, command expansions and inputs, background task
   prompts and reports, `/remember` texts, plan texts; counts, ids, names, sources, codes, durations and outcomes only.
@@ -3891,22 +3990,41 @@ flowchart LR
   `info`; never a definition or skill body, a command expansion or input, a background prompt or report, a `/remember`
   text or a plan text (at `debug` only where message contents may already be logged, redacted). Diagnostics are not
   logged one by one (they reach the UI); file paths only at `debug`.
-  - Catalog (component `customizations`): debug `customization catalog built` (`projectId`, `items`, `diagnostics`,
-    `files`, `durationMs`, `cached`); warnings `the project folder cannot be scanned` (`projectId`, `code`) and `a
-    definition could not be loaded` (`kind`, `name`, `source`, `code`); info `customization created` / `updated` /
-    `deleted` (`id`, `kind`, `name`).
-  - Commands: the run's log line gains `command` (the name) and `commandSource`; a model fallback logs `the command's
-    model cannot run; the chat model answers` (warn: `modelRef`, `code`).
+  - Catalog (component `customizations`): debug `customization catalog built` (`projectId`, `entries`,
+    `projectEntries`, `diagnostics`, `ms`) and `customization loaded` (`kind`, `name`, `source`, `projectId`); warnings
+    `customization catalog: project not opened` (`projectId`), `customization catalog failed` (`projectId`; the
+    built-in agents answer), `customization.changed not sent` and `customization catalog not dropped`; info
+    `customization created` / `customization updated` (`content`, `enabled`) / `customization removed`
+    (`customizationId`, `kind`), `customizations restored` (`imported`, `skipped`, `failed`) and the warning
+    `customization not restored` (`kind`, never the content). Backups: the warning `backup: the personal agents,
+    commands and skills could not be read and are left out`; `data import finished` gains `customizations` (the
+    counts); `data import: the personal definitions could not be restored` (warn).
+  - Plugins: a manifest agent, skill or command whose name another plugin took is skipped with a warning in the plugin
+    log (`The agent "x" was skipped: …`).
+  - Commands: no line per command; a command's model that cannot run logs `the model of the command cannot run; the
+    chat's model answers` (info: `modelRef`, `code`) or `the model of the command is not a chat model; the chat's model
+    answers` (info: `modelRef`, `kind`).
   - Agents and skills: warnings `the agent's model cannot be resolved; the default model runs the sub-agent`
-    (`modelRef`, `code`) and `a skill could not be loaded` (`name`, `source`, `code`); no line per successful call (the
-    tool part records it).
-  - Background tasks (component `background`): info `background task started` (`taskId`, `chatId`, `type`, `origin`),
-    `background task finished` (`taskId`, `status`, `steps`, `durationMs`, `costUsd`), `background task delivered`
-    (`taskId`, `via` `steer` / `turn` / `next-run`), `background tasks marked aborted at boot` (`count`); warnings `a
-    background task could not start a turn` (`chatId`, `code`) and `a background task row could not be saved`
-    (`taskId`, `code`); a refused launch over a cap is a debug line (the call's output says why).
-  - Plan files and remember: info `plan saved` (`chatId`, `projectId`, `bytes`) or warn `the plan could not be saved`
-    (`code`); info `note remembered` (`target`, `chatId`, `created`, `chars`).
+    (`agentType`, `modelRef`, `code`) and `a custom agent definition cannot be loaded` (`agentType`, `source`,
+    `code`); debug `skill loaded` (`name`, `source`, `bytes`, `truncated`, `files`), `skill not available`, `skill could
+    not be loaded` (`name`, `source`, `code`; a warning for an unexpected error) and `skill files not listed`; no line
+    per successful call (the tool part records it).
+  - Background tasks (component `background-tasks`; a task's lines use the launching run's logger with `taskId`):
+    info `background agent started` (`type`, `origin`) and `background agent ended` (`status`, `steps`, `cause`); info
+    `a turn started for finished background agents` (`reqId: task_…`, `chatId`, `count`, `userMessageId`), debug `a task
+    turn lost the chat to another request; the results go back to the inbox`, warn `finished background agents could
+    not start a turn; their results wait for the next run` (`count`, `code`); debug `delivered background task results
+    into the run` (`stepNumber`, `count`, `taskIds`); info `background agents of a chat stopped` (`chatId`, `count`),
+    `background agents stopped` (`count`, `cause` `rotation` / `shutdown`), `background tasks after the restart`
+    (`aborted`, `undelivered`) and, from the route, `background task stop requested` (`chatId`, `taskId`, `status`);
+    warnings `a background agent could not start`, `a background agent threw` (`code`), `a background agent did not end
+    after a stop; its row is saved as it is`, `too many undelivered background results; the oldest wait for a restart`,
+    `a background launch failed` and `cannot take the finished background tasks of the chat`; errors `background task
+    row: <end | delivery | prune> failed` (`chatId`) and `shutdown: the background tasks did not stop
+    cleanly`. A launch refused by a cap logs nothing (the call's output says why).
+  - Plan files and Remember: debug `plan file saved` (`projectId`, `path`) or warn `cannot save the plan file`
+    (`projectId`, `reason`: the `planError` sentence, which may name the plan folder); info `remember saved` (`target`, `chatId`, `projectId`, `file`,
+    `created`, `chars`).
   - **Limits at a glance** (`LIMITS`, Phase 10 group): a definition 64 KiB, frontmatter 8 KiB, description 1,024
     characters, argument hint 100, 64 tool names, 200 files per project folder, 200 personal definitions per kind, a
     10 s catalog TTL; 30 agent types and 50 skills listed (descriptions cut at 250 characters); a skill 64 KiB with at

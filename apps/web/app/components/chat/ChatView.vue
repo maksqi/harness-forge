@@ -399,6 +399,9 @@ onMounted(() => {
     models.fetchAll().catch(() => {})
   if (!plugins.toolsLoaded)
     plugins.fetchTools().catch(() => {})
+  // The plugin names of the slash menu and the command badge (Phase 10; the plugins page may never have been opened).
+  if (!plugins.loaded)
+    plugins.fetchAll().catch(() => {})
   // The project chip, the new-chat picker and "Move to project" (the sidebar may not be mounted, e.g. on mobile).
   if (!projects.loaded && !projects.loading)
     projects.fetchAll().catch(() => {})

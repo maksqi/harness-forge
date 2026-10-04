@@ -17,15 +17,18 @@ the two mock models from `docs/PROVIDERS.md` (8 "Customization mocks (Phase 10)"
 are written by D13 in P10-0a, API.md by C28 (C28 and D13 fix the final section numbers). W10.14 reconciles every doc
 with the code in P10-B.
 
-**Status (2026-10-04): in progress.** P10-00 is done: the baseline `pnpm check` is green with 9469 tests and
-`git status --porcelain` was identical before and after it; CI run `37162957905` and Audit run `37162958016` are green
-on `5481fb3` (`origin/main`, v1.5); there are no open PRs; both audit advisories are still unpatched (re-checked
-2026-10-04, ignores kept); the `.tmp/v15` worktree (`5481fb3`) is installed and built. In P10-0a, K1 (DECISIONS, ROADMAP,
-AGENT.md) and K2 (the `yaml` dependency) are done; the coordinator also wrote the contract skeletons
-`packages/shared/src/util/{definitions,arguments,tool-names}.ts` and the agent-name ids in `packages/shared/src/ids.ts`
-so C28 and C29 could work in parallel. C28, C29, D12, D13 and the K3 seed (agent K3S) run now. "Deviations from the
-plan" holds the binding changes to the plan sections below; "Deviations found while building" will hold what each wave
-changed; "Outcome" the gate results.
+**Status (2026-10-04): done.** v1.6 is complete (final gate commit `chore: final gate for harness-forge v1.6`). P10-00 is done: the
+baseline `pnpm check` was green with 9469 tests and `git status --porcelain` was identical before and after it; CI run
+`37162957905` and Audit run `37162958016` are green on `5481fb3` (`origin/main`, v1.5); there were no open PRs; both
+audit advisories are still unpatched (re-checked 2026-10-04, ignores kept); the `.tmp/v15` worktree (`5481fb3`) is
+installed and built. P10-0a (K1, K2, the contract skeletons, C28, C29, D12, D13 and the v1.5 seed by K3S) is committed
+as `e10b0fe` (9790 tests). P10-0b (K3 schema and `0007_customizations`, C30, C31, C32, C33, FREEZE) is committed as
+`24340eb` (9999 tests, seam probe 16/16, v1.5 upgrade probe 42/42). P10-A (W10.1 – W10.12 and the gate probes) is
+committed as `e70473a` (10561 tests, probes 173/173, P9-A 71/71, P8-A 47/47, e2e 128). In P10-B, W10.13 wrote the
+feature e2e specs and W10.14 reconciled the docs with the code; W10.15 / W10.16 were not needed (the P10-A gate was
+green): the coordinator fixed the three product bugs W10.13 found (the plugins store on chat pages, `firstSentence`
+keeping `_` inside words, the command badge's accessible name) at the final gate. "Deviations from the plan" holds the binding changes to the plan sections below; "Deviations found while
+building" what each wave changed; "Outcome" the gate results.
 
 Paths: `S` = `apps/server/src`, `W` = `apps/web/app`, `SH` = `packages/shared/src`.
 
@@ -271,8 +274,9 @@ Open points decided by D12 while writing this file (to be confirmed by the coord
    move, version delete) and `stopTasks` to chat deletion and delete-all.
 4. **Stop and start order**: `SHUTDOWN_STEPS` = data, runs (`stopAll`: queues cleared → background tasks aborted,
    awaited ≤ 5 s, rows saved → runs aborted), customizations (the catalog cache), projectFiles, checkpoints, plugins,
-   mcp, catalog, events; `startDeps` calls `runs.start()` after `checkpoints.start()` (the boot sweep: `running` rows →
-   `aborted`, undelivered rows → the in-memory inbox, no turns at boot). C30 fixes the step names and reports them.
+   mcp, catalog, events; `startDeps` calls `runs.start()` (built as **`runs.boot()`**, see P10-0b C30) after
+   `checkpoints.start()` (the boot sweep: `running` rows → `aborted`, undelivered rows → the in-memory inbox, no turns at
+   boot). C30 fixes the step names and reports them.
 5. **The plugin filter** `agents` ("Agents and skills") and its `pluginMatchesFilter` branch in `W/stores/plugins.ts`
    are complete in P10-0b (C33): the store has no P10-A owner; W10.12 only renders.
 6. **The example plugin's test pin**: W10.7 also owns `examples/plugins/examples.test.ts` (`EXAMPLE_IDS` gains
@@ -383,7 +387,22 @@ reconciled docs (W10.14) follow these, not the task text further down.
     the restored definitions (coordinator fix).
   - Gate: 10561 tests; probes 173/173 (`.tmp/gates/P10-A/probe.mjs`; "spec differs": invalid YAML stays active,
     `escalate` gets `shell` in `edits` but no command runs); P9-A 71/71, P8-A 47/47; e2e 128.
-- **P10-B (W10.13, W10.14) and the final gate**: (none recorded yet)
+- **P10-B (W10.13, W10.14) and the final gate**:
+  - W10.14 reconciled API.md, UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md 8, the guides (`customizing-agents.md`,
+    `writing-a-code-plugin.md` with `ctx.agents` / `ctx.skills`), README (v1.6), `.env.example` and
+    `examples/plugins/README.md` (six examples) with the code. Doc statements the code corrected: the boot sweep is
+    `runs.boot()` everywhere; a normal shutdown ends a running background task "The background task was stopped."
+    (only a crash leaves "The server restarted before the task finished."); a project delete while a background task
+    runs is refused (409 `run-active`), it does not stop the task; `escalate` in Accept edits is offered `shell`
+    (only commands the shell rules allow run); a manifest command named `remember` fails the manifest schema (plugin
+    `error`) and `ctx.commands.register` throws `validation_error`; the built-in agent types are catalog builtins, not
+    registry contributions (the registry refuses their names); `CommandInvocation.source` is only `user` / `project`;
+    the three `customization.changed` payloads; too-large and binary project definition files are `invalid` entries
+    (only links, hidden and secret-looking names are skipped); command files and personal commands are never steered;
+    the Phase 10 log lines of ARCHITECTURE.md 12 are the real ones; PROVIDERS.md 8 documents the instruction-block
+    format and the C32 additions; UI.md 13.11 equals `utils/testids.ts` (56 ids) and lists every P10-A data-slot.
+  - The D13 note above ("`customizations.json` is always written") is superseded by W10.6: it is written only with at
+    least one definition.
 
 ## Rules for every Phase 10 agent
 
@@ -1040,8 +1059,8 @@ C33 start in one launch once the migration exists (C30's upgrade test needs it).
      registry tests green.
   5. **C30-T5 Deps and boot** — the factory `createCustomizationService`; `SHUTDOWN_STEPS` = data, runs (`stopAll`:
      queues → background tasks → runs), customizations, projectFiles, checkpoints, plugins, mcp, catalog, events;
-     `startDeps`: `runs.start()` after `checkpoints.start()` (the boot sweep hook; a no-op until W10.4); `S/main.ts`
-     calls it once at boot. *Accept:* `deps.test.ts` checks both orders (a failing step still lets the next run).
+     `startDeps`: `runs.start()` (built as `runs.boot()`: `start` is `POST /chat`) after `checkpoints.start()` (the
+     boot sweep hook; a no-op until W10.4); `S/main.ts` calls it once at boot. *Accept:* `deps.test.ts` checks both orders (a failing step still lets the next run).
   6. **C30-T6 Environment** — no new variable; `S/env*` only for compile fixes (reported).
   7. **C30-T7 Column classification** — `customizations.content` and `.description` in `REFERENCE_SOURCES` (scanned
      like `projects.instructions`); every other column of both tables in `UNSCANNED_COLUMNS`. *Accept:*
@@ -2200,11 +2219,11 @@ Completed by the coordinator at each gate ("audit" is the ownership audit of `sc
 | Wave | Agents | Gate result | Commit |
 |---|---|---|---|
 | P10-00 | coordinator | CI `37162957905` + Audit `37162958016` on `5481fb3` green; no open PRs; advisories still unpatched (ignores kept, re-checked 2026-10-04); design reports in `.tmp/p10-designs`; `pnpm check` 9469 tests, `git status` unchanged; `.tmp/v15` built | (no commit) |
-| P10-0a | coordinator (K1, K2, contract skeletons, K3 seed by K3S), C28, C29, D12, D13 | (pending) | (pending) `feat: add phase 10 contracts and docs` |
-| P10-0b | coordinator (K3), C30, C31, C32, C33 | (pending) | (pending) `feat: add phase 10 schema, migration and skeletons` |
-| P10-A | W10.1 – W10.12 | (pending) | (pending) `feat: add custom agents, commands, skills and background agents` |
-| P10-B | W10.13, W10.14 (+ W10.15 / W10.16 if needed) | (pending) | (final gate commit) |
-| Final gate v1.6 | coordinator | (pending) | (pending) `chore: final gate for harness-forge v1.6` |
+| P10-0a | coordinator (K1, K2, contract skeletons, K3 seed by K3S), C28, C29, D12, D13 | D12 open points 1 – 9 and 11 – 15 confirmed, point 10 changed (task results are separate user messages); C28 CCRs accepted (`customizations.source` `path`, `runOriginSchema` in `enums.ts`), 33 compile-fix files; audit ok (104 paths); frozen install ok (`yaml` 2.9.1, TypeScript 6.0.3 only); 9790 tests; build ok (web +10 KB gz); CSP 38/38; `pluginApiVersion` 1.4.0, the 9 new routes answer 501 / 400; e2e 128; `pnpm audit --prod` clean (2 ignored) | `e10b0fe` `feat: add phase 10 contracts and docs` |
+| P10-0b | coordinator (K3), C30, C31, C32, C33 | 11 test-fix files accepted; deviations recorded (`ChatRunner.boot()`, `takeResults(chatId, messageId)`, the backup members, the instruction-block shape the mocks read); audit ok (170 paths); `0007` = 2 CREATE TABLE + 3 indexes; 9999 tests; build ok; CSP 38/38; seam probe 16/16; v1.5 upgrade probe 42/42; e2e 128; `pnpm audit --prod` clean (2 ignored); FREEZE | `24340eb` `feat: add phase 10 schema, migration and skeletons` |
+| P10-A | W10.1 – W10.12, G10P (gate probes) | CCR `taskAgent.pluginId` applied; follow-ups (one announcement per finished background agent, `background_tasks.output` scanned); test pins fixed by the coordinator; audit ok (189 paths); 10561 tests; build ok (`yaml` external); CSP 38/38; probes 173/173 + P9-A 71/71 + P8-A 47/47; e2e 128; screenshots reviewed; `pnpm audit --prod` clean (2 ignored) | `e70473a` `feat: add custom agents, commands, skills and background agents` |
+| P10-B | W10.13, W10.14 (W10.15 / W10.16 not needed: the P10-A gate was green) | 27 new e2e tests (+1 fixme, enabled after the coordinator fixed the plugin-name bug), 3 runs of 155 on 8891; docs reconciled, README "v1.6"; DECISIONS mismatches fixed by the coordinator (ADR-044, ADR-046, contract seed); audit ok (35 paths) | (final gate commit) |
+| Final gate v1.6 | coordinator | frozen install ok; 10562 tests; `git status` unchanged by `pnpm check`; build ok; CSP 38/38; probes 173/173 + P9-A 71/71 + P8-A 47/47 on fresh data; e2e 156 passed ×3 (chromium + mobile + tablet) on a fresh `.tmp/e2e`; `@screenshots` dark + light (123 each) reviewed, README images from the `@readme` shots (+ `customize-dark.png`); `pnpm audit --prod` clean (2 ignored, still unpatched); real v1.5 → v1.6 upgrade 42/42 (seed made by the `5481fb3` build); Docker (Node 24, uid 1000) on that seed 16/16 (custom agent from `/data/workspaces`, background delivery, `/remember` writes `AGENTS.md` as uid 1000) | `chore: final gate for harness-forge v1.6` |
 
 ---
 

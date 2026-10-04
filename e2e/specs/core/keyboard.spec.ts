@@ -10,22 +10,32 @@
 // Phase 9 (W9.13): in a project chat Shift+Tab in the composer switches Ask -> Accept edits -> Plan -> Ask (announced,
 // focus kept) and the shortcuts dialog lists it; Enter while a reply runs queues the message; Esc closes the `@` mention
 // menu first (the reply keeps running), then stops the reply, and the queued message comes back into the composer.
+// Phase 10 (W10.13, docs/UI.md 12): Esc in the composer stops the reply but never a background agent; the Remember
+// dialog opens on the selected target (arrows switch it), saves with Mod+Enter and closes with Esc, focus back in the
+// composer; the Customize editor saves with Mod+Enter from its body editor (Tab leaves the body: no trap) and asks
+// "Discard changes?" on Esc when it has changes.
 import type { Locator, Page } from '@playwright/test'
 import type { TestId } from '../../helpers/index.ts'
 import {
+  backgroundAgentRow,
   byTestId,
   changesPanel,
   changesToggle,
   changesViewTab,
   CHAT_URL_PATTERN,
   chatIdFromUrl,
+  cleanupPersonalDefinition,
   composer,
   composerAnnouncement,
+  customizationRow,
+  customizeSection,
   expect,
   expectMessageStatus,
   expectStreamingWith,
   lastAssistantMessage,
   looseQuotes,
+  markdownEditorInput,
+  MOCK_BACKGROUND_MODEL,
   MOCK_CHECKPOINT_DONE,
   openNewChat,
   pressShortcut,
@@ -35,8 +45,11 @@ import {
   selectAllText,
   test,
   testIds,
+  toastWith,
   uniqueId,
+  useAgentSettings,
   userMessages,
+  waitForChatTask,
   wordList,
 } from '../../helpers/index.ts'
 
@@ -363,5 +376,117 @@ test.describe('keyboard', () => {
     const shortcuts = page.getByTestId(testIds.shortcutsDialog)
     await pressShortcut(page, 'Mod+/')
     await expect(shortcuts).toContainText('Switch the permission mode')
+  })
+
+  test('Esc stops the reply but never a background agent @smoke', async ({ page, api, cleanup }) => {
+    await useAgentSettings(api, cleanup, { subagentModelRef: null })
+    const chat = await api.createChat({ title: `Keys background ${uniqueId('keys')}`, modelRef: MOCK_BACKGROUND_MODEL })
+    cleanup(api => api.removeChat(chat.id))
+    await page.goto(`/chat/${chat.id}`)
+    await page.keyboard.press('Shift+Escape')
+    await expect(composerInput(page)).toBeFocused()
+    // A child that runs until it is stopped, and a reply that stays busy for ten steps.
+    await page.keyboard.insertText('bg explore loop steps 10')
+    await page.keyboard.press('Enter')
+    const reply = lastAssistantMessage(page)
+    const task = await waitForChatTask(api, chat.id, item => item.status === 'running')
+    const row = backgroundAgentRow(page, { 'data-task-id': task.id })
+    await expect(row).toHaveAttribute('data-state', 'running')
+    await expectMessageStatus(reply, 'streaming')
+    await expect(composerInput(page)).toBeFocused()
+
+    await page.keyboard.press('Escape')
+    await expectMessageStatus(reply, 'aborted')
+    await expect(composerInput(page)).toBeFocused()
+    await expect(row).toHaveAttribute('data-state', 'running')
+    expect((await api.client.chatTasks.list({ params: { id: chat.id } })).items.find(item => item.id === task.id)?.status).toBe('running')
+    // A second Esc in an idle composer stops nothing either.
+    await page.keyboard.press('Escape')
+    await expect(row).toHaveAttribute('data-state', 'running')
+  })
+
+  test('the Remember dialog: focus on the target, arrows, Mod+Enter saves and Esc cancels @smoke', async ({ page, api, cleanup }) => {
+    const settings = await api.getSettings()
+    cleanup(api => api.updateSettings({ instructions: settings.instructions }))
+    const { chatId } = await seedProjectChat(api, cleanup, { modelRef: 'mock:echo', prefix: 'keys' })
+    await api.sendChat({ chatId, modelRef: 'mock:echo', text: 'Hello.' })
+    const note = `Keep answers short ${uniqueId('note')}.`
+    await page.goto(`/chat/${chatId}`)
+    await page.keyboard.press('Shift+Escape')
+    await expect(composerInput(page)).toBeFocused()
+
+    // A prefilled dialog opens on the selected target; the arrows move to the next ones.
+    await page.keyboard.insertText(`/remember ${note}`)
+    await page.keyboard.press('Enter')
+    const dialog = page.getByTestId(testIds.rememberDialog)
+    await expect(dialog).toBeVisible()
+    const targetOf = (value: string) => byTestId(dialog, testIds.rememberTarget, { 'data-value': value })
+    await expect(targetOf('project-file')).toBeFocused()
+    // reka checks a radio the arrow keys focused while the key is still down (a `press` releases it too early).
+    for (const value of ['project-instructions', 'global']) {
+      await page.keyboard.down('ArrowDown')
+      await expect(targetOf(value)).toBeFocused()
+      await expect(targetOf(value)).toHaveAttribute('data-state', 'checked')
+      await page.keyboard.up('ArrowDown')
+    }
+
+    // Mod+Enter saves; focus returns to the composer.
+    await pressShortcut(page, 'Mod+Enter')
+    await expect(toastWith(page, 'Saved to your custom instructions')).toBeVisible()
+    await expect(dialog).toBeHidden()
+    await expect(composerInput(page)).toBeFocused()
+    await expect(composerInput(page)).toHaveValue('')
+    await expect.poll(async () => (await api.getSettings()).instructions.endsWith(`- ${note}`)).toBe(true)
+
+    // An empty dialog opens in the note; Esc cancels without saving.
+    await page.keyboard.insertText('/remember')
+    await page.keyboard.press('Enter')
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByTestId(testIds.rememberText)).toBeFocused()
+    await page.keyboard.insertText('Never saved.')
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeHidden()
+    await expect(composerInput(page)).toBeFocused()
+    expect((await api.getSettings()).instructions).not.toContain('Never saved.')
+  })
+
+  test('the Customize editor: Tab leaves the body, Mod+Enter saves, Esc with changes asks first @smoke', async ({ page, cleanup }) => {
+    const name = uniqueId('keys-agent')
+    cleanupPersonalDefinition(cleanup, 'agent', name)
+    await page.goto('/settings/customize?tab=agents')
+    await expect(customizeSection(page, 'user')).toBeVisible()
+    const newButton = page.getByTestId(testIds.customizeNew)
+    await newButton.focus()
+    await page.keyboard.press('Enter')
+    const editor = page.getByTestId(testIds.customizationEditor)
+    await expect(editor).toHaveAttribute('data-mode', 'new')
+    await expect(editor.getByTestId(testIds.customizationName)).toBeFocused()
+
+    // Esc with changes asks first; Keep editing goes back to the editor.
+    await page.keyboard.insertText(name)
+    await page.keyboard.press('Escape')
+    const discard = page.getByTestId(testIds.customizationDiscardConfirm)
+    await expect(discard).toBeVisible()
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Keep editing' }).click()
+    await expect(discard).toBeHidden()
+    await expect(editor).toBeVisible()
+
+    // The description, then the body: Tab moves focus out of the body (no keyboard trap).
+    await editor.getByTestId(testIds.customizationDescription).fill('Saved from the keyboard.')
+    const body = markdownEditorInput(editor.getByTestId(testIds.customizationBody))
+    await expect(editor.getByTestId(testIds.customizationBody)).toHaveAttribute('data-ready', 'true')
+    await body.click()
+    await page.keyboard.insertText('PERSONA: keyboard')
+    await page.keyboard.press('Tab')
+    await expect(body).not.toBeFocused()
+    await body.click()
+    await expect(body).toBeFocused()
+
+    // Mod+Enter in the body saves (CodeMirror resolves Mod from the host, like the plugin specs' code editor).
+    await page.keyboard.press('ControlOrMeta+Enter')
+    await expect(toastWith(page, 'Agent saved')).toBeVisible()
+    await expect(editor).toBeHidden()
+    await expect(customizationRow(customizeSection(page, 'user'), { 'data-name': name })).toBeVisible()
+    await expect(newButton).toBeFocused()
   })
 })

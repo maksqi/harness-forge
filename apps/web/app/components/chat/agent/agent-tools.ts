@@ -387,10 +387,18 @@ export function taskStepLine(step: TaskStep): string {
 }
 
 /** The first sentence of a Markdown text on one line (headings, list and quote markers, emphasis and code marks removed). */
+/** Removes code ticks and emphasis markers, keeping `_` / `*` inside words (`list_directory`). */
+function stripInlineMarkdown(text: string): string {
+  return text
+    .replace(/`/g, '')
+    .replace(/(\*\*|__)(?=\S)(.+?)(?<=\S)\1/g, '$2')
+    .replace(/(^|[^\w*])([*_])(?=\S)(.+?)(?<=\S)\2(?![\w*])/g, '$1$3')
+}
+
 export function firstSentence(text: string): string {
   const line = text
     .split(/\r?\n/)
-    .map(item => item.replace(/^\s*(?:#{1,6}\s+|[-*+>]\s+|\d+[.)]\s+)*/, '').replace(/[*_`]/g, '').trim())
+    .map(item => stripInlineMarkdown(item.replace(/^\s*(?:#{1,6}\s+|[-*+>]\s+|\d+[.)]\s+)*/, '')).trim())
     .find(item => item.length > 0) ?? ''
   const end = line.search(/[.!?](?:\s|$)/)
   return end === -1 ? line : line.slice(0, end + 1)

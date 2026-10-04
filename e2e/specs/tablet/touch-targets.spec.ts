@@ -8,9 +8,13 @@
 // with" checkbox, the prefix input and both scope options are 40 px targets (at 1024 px the panel is the desktop pane).
 // Phase 9 (W9.13): the todo strip toggle, the queue's Edit and Cancel and "Queue message" while a reply runs, and the
 // sub-agent trigger, the plan card's buttons and the `@` mention rows are 40 px targets.
+// Phase 10 (W10.13): with two running background agents the dock's toggle, a row's Stop and Stop all; the Remember
+// dialog's targets, Save and Cancel; the `⋯` menus of Settings -> Customize and the editor's footer (Cancel, Save) are
+// 40 px targets.
 import type { Locator, Page } from '@playwright/test'
 import type { CleanupTask, HarnessApi } from '../../helpers/index.ts'
 import {
+  backgroundAgents,
   boxOf,
   byTestId,
   changesFile,
@@ -18,9 +22,14 @@ import {
   changesPane,
   changesPanel,
   changesToggle,
+  createPersonalDefinition,
+  customizationRow,
+  customizeSection,
+  definitionFile,
   expect,
   expectMessageStatus,
   lastAssistantMessage,
+  MOCK_BACKGROUND_MODEL,
   MOCK_CHECKPOINT_DONE,
   MOCK_CHECKPOINT_FILE,
   seedProject,
@@ -31,6 +40,7 @@ import {
   uniqueId,
   useAgentSettings,
   userMessages,
+  waitForChatTask,
 } from '../../helpers/index.ts'
 
 /** The collapsed rail on touch devices (`pointer-coarse:[--sidebar-width-icon:3.5rem]`). */
@@ -276,5 +286,70 @@ test.describe('tablet touch targets of the agent controls', () => {
       expect((await touchTargetSize(row)).height, 'a mention row height').toBeGreaterThanOrEqual(MIN_TARGET)
     await page.keyboard.press('Escape')
     await page.getByTestId(testIds.composerInput).fill('')
+  })
+})
+
+test.describe('tablet touch targets of the customization controls', () => {
+  test('the background agents\' toggle, Stop and Stop all, and the Remember dialog are at least 40 px', async ({ page, api, cleanup }) => {
+    await useAgentSettings(api, cleanup, { subagentModelRef: null })
+    const { chatId } = await seedProjectChat(api, cleanup, { modelRef: MOCK_BACKGROUND_MODEL, prefix: 'tablet' })
+    for (const type of ['explore', 'general'])
+      await api.sendChat({ chatId, modelRef: MOCK_BACKGROUND_MODEL, toolMode: 'ask', text: `bg ${type} loop` })
+    await waitForChatTask(api, chatId, task => task.status === 'running' && task.output.type === 'general')
+
+    await page.goto(`/chat/${chatId}`)
+    const dock = backgroundAgents(page)
+    await expect(dock).toHaveAttribute('data-count', '2')
+    // 1024 px: open by default.
+    await expect(dock).toHaveAttribute('data-state', 'open')
+    const toggle = dock.getByTestId(testIds.backgroundAgentsToggle)
+    await expectTouchTarget(toggle, 'the dock toggle')
+    await expectTouchTarget(dock.getByTestId(testIds.backgroundAgentsStopAll), 'Stop all')
+    const rows = dock.getByTestId(testIds.backgroundAgent)
+    await expect(rows).toHaveCount(2)
+    for (const row of await rows.all())
+      await expectTouchTarget(row.getByTestId(testIds.backgroundAgentStop), 'a row Stop')
+    await dock.getByTestId(testIds.backgroundAgentsStopAll).tap()
+    await expect(byTestId(dock, testIds.backgroundAgent, { 'data-state': 'aborted' })).toHaveCount(2)
+
+    // The Remember dialog of the project chat.
+    const input = page.getByTestId(testIds.composerInput)
+    await input.fill('/remember Run the tests before every push.')
+    await page.getByTestId(testIds.composerSend).tap()
+    const dialog = page.getByTestId(testIds.rememberDialog)
+    await expect(dialog).toBeVisible()
+    const targets = dialog.getByTestId(testIds.rememberTarget)
+    await expect(targets).toHaveCount(3)
+    for (const target of await targets.all())
+      await expectTouchTarget(target, 'a Remember target')
+    await expectTouchTarget(dialog.getByTestId(testIds.rememberSave), 'Save')
+    await expectTouchTarget(dialog.getByRole('button', { name: 'Cancel' }), 'Cancel')
+    await dialog.getByRole('button', { name: 'Cancel' }).tap()
+    await expect(dialog).toBeHidden()
+  })
+
+  test('the Customize row menus and the editor\'s footer are at least 40 px', async ({ page, api, cleanup }) => {
+    const name = uniqueId('tablet-agent')
+    await createPersonalDefinition(api, cleanup, { kind: 'agent', name, content: definitionFile({ name, description: 'An agent on a tablet.' }, 'PERSONA: tablet\n') })
+    await page.goto('/settings/customize?tab=agents')
+    const row = customizationRow(customizeSection(page, 'user'), { 'data-name': name })
+    await expect(row).toBeVisible()
+    for (const menu of await page.getByTestId(testIds.customizationRowMenu).all())
+      await expectTouchTarget(menu, 'a row menu')
+
+    await page.getByTestId(testIds.customizeNew).tap()
+    const editor = page.getByTestId(testIds.customizationEditor)
+    await expect(editor).toHaveAttribute('data-mode', 'new')
+    const save = editor.getByTestId(testIds.customizationSave)
+    const cancel = editor.getByRole('button', { name: 'Cancel' })
+    for (const [target, label] of [[save, 'Save'], [cancel, 'Cancel']] as const) {
+      await expect(target).toBeVisible()
+      await expect.poll(async () => (await touchTargetSize(target)).height, { message: `${label} height` }).toBeGreaterThanOrEqual(MIN_TARGET)
+    }
+    await expectTouchTarget(editor.getByTestId(testIds.customizationModel), 'the model select')
+    for (const radio of await editor.getByTestId(testIds.customizationToolsMode).getByRole('radio').all())
+      await expect.poll(async () => (await boxOf(radio.locator('xpath=..'))).height, { message: 'a tools option height' }).toBeGreaterThanOrEqual(MIN_TARGET)
+    await cancel.tap()
+    await expect(editor).toBeHidden()
   })
 })

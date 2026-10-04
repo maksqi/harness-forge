@@ -4,6 +4,9 @@
 // (case-sensitive) and, because the login is more than 10 minutes old by then (the browser clock is moved forward),
 // the password, and deletes the share links too; importing the zip brings every chat back, into the sidebar with its
 // messages (share links are not restored); importing it again skips every chat.
+// Phase 10 (W10.13, ADR-044): the backup holds `customizations.json` with the personal agent and command; delete-all
+// keeps them, so the spec removes them before the import, and "Restore settings from the backup" brings them back ("2
+// agents, commands and skills restored"); the second import keeps the existing ones ("2 kept").
 import type { Locator, Page } from '@playwright/test'
 import type { Buffer } from 'node:buffer'
 import type { PasswordServer } from '../../helpers/index.ts'
@@ -11,11 +14,13 @@ import { readFile } from 'node:fs/promises'
 import {
   byTestId,
   chatRow,
+  definitionFile,
   expect,
   HarnessApi,
   isZip,
   lastAssistantMessage,
   readZipText,
+  removePersonalDefinitions,
   startPasswordServer,
   test,
   testIds,
@@ -56,6 +61,8 @@ async function importBackup(page: Page, file: { name: string, buffer: Buffer }):
 test.describe('data', () => {
   let server: PasswordServer | undefined
   const chats: SeededChat[] = []
+  /** The personal definitions of the seed (Phase 10). */
+  const definitions = { agent: uniqueId('backup-agent'), command: uniqueId('backup-cmd') }
 
   test.beforeAll(async () => {
     server = await startPasswordServer({ dedicated: true, label: 'hf-e2e-data' })
@@ -69,6 +76,8 @@ test.describe('data', () => {
         await owner.sendChat({ chatId: chat.id, text, modelRef: 'mock:echo' })
         chats.push({ id: chat.id, title: chat.title ?? '', text })
       }
+      await owner.client.customizations.create({ body: { kind: 'agent', content: definitionFile({ name: definitions.agent, description: 'Kept in the backup.' }, 'PERSONA: backup\n') } })
+      await owner.client.customizations.create({ body: { kind: 'command', content: definitionFile({ name: definitions.command, description: 'A personal command.' }, 'Personal: $ARGUMENTS\n') } })
     }
     finally {
       await owner.dispose()
@@ -110,7 +119,9 @@ test.describe('data', () => {
     expect(buffer.length).toBeGreaterThan(0)
     expect(isZip(buffer), 'the download starts with PK\\x03\\x04').toBe(true)
     const entries = zipEntries(buffer).map(entry => entry.name)
-    expect(entries).toEqual(expect.arrayContaining(['manifest.json', 'settings.json', ...chats.map(chat => `chats/${chat.id}.json`)]))
+    expect(entries).toEqual(expect.arrayContaining(['manifest.json', 'settings.json', 'customizations.json', ...chats.map(chat => `chats/${chat.id}.json`)]))
+    const customizations = JSON.parse(readZipText(buffer, 'customizations.json')) as { items: { kind: string, name: string }[] }
+    expect(customizations.items.map(item => `${item.kind}:${item.name}`).sort()).toEqual([`agent:${definitions.agent}`, `command:${definitions.command}`])
     expect(JSON.parse(readZipText(buffer, 'manifest.json'))).toMatchObject({
       format: 'harness-forge.backup',
       version: 1,
@@ -161,10 +172,22 @@ test.describe('data', () => {
     await expect(summary).toHaveText(EMPTY_SUMMARY)
     await expect(shares.getByTestId(testIds.sharesEmpty)).toBeVisible()
 
-    // Import the backup (existing chats are skipped by default): every chat is imported again.
+    // Delete-all keeps the personal definitions: remove them, so the import has something to restore.
+    const listed = async () => (await session.client.customizations.list({})).items.filter(item => item.source === 'user').map(item => item.name).sort()
+    expect(await listed()).toEqual([definitions.agent, definitions.command].sort())
+    await removePersonalDefinitions(session, 'agent', definitions.agent)
+    await removePersonalDefinitions(session, 'command', definitions.command)
+    expect(await listed()).toEqual([])
+
+    // Import the backup (existing chats are skipped by default) with "Restore settings": every chat and both
+    // definitions come back.
     await expect(page.getByTestId(testIds.dataImportPolicy)).toHaveAttribute('data-value', 'skip')
+    await page.getByTestId(testIds.dataImportRestoreSettings).click()
+    await expect(page.getByTestId(testIds.dataImportRestoreSettings)).toHaveAttribute('data-state', 'checked')
     const imported = await importBackup(page, backup)
     await expect(imported).toContainText('Imported 2 chats')
+    await expect(imported.locator('[data-slot="data-import-customizations"]')).toHaveText('2 agents, commands and skills restored')
+    expect(await listed()).toEqual([definitions.agent, definitions.command].sort())
     await expect(imported.getByTestId(testIds.dataImportItem)).toHaveCount(2)
     for (const chat of chats)
       await expect(byTestId(imported, testIds.dataImportItem, { 'data-chat-id': chat.id })).toHaveAttribute('data-status', 'imported')
@@ -184,8 +207,10 @@ test.describe('data', () => {
 
     // The same backup again: every chat already exists, so every item is skipped and nothing changes.
     await openDataSettings(page)
+    await page.getByTestId(testIds.dataImportRestoreSettings).click()
     const again = await importBackup(page, backup)
     await expect(again).toContainText('Imported 0 chats · skipped 2')
+    await expect(again.locator('[data-slot="data-import-customizations"]')).toHaveText('0 agents, commands and skills restored · 2 kept')
     await expect(again.getByTestId(testIds.dataImportItem)).toHaveCount(2)
     await expect(byTestId(again, testIds.dataImportItem, { 'data-status': 'skipped' })).toHaveCount(2)
     for (const chat of chats)

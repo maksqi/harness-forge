@@ -1,9 +1,10 @@
 # Writing a code plugin
 
 A **code plugin** is a `plugin.json` plus one JavaScript or TypeScript file. The file's `setup(ctx)` function
-registers tools, providers, slash commands, MCP servers and hooks through `ctx`. Use a code plugin when a manifest is
-not enough: a tool the model can call, a provider for an unusual API, a command that computes its answer, or a hook
-that changes prompts and tool calls.
+registers tools, providers, slash commands, MCP servers, hooks and (plugin API 1.4.0) sub-agent types and skills
+through `ctx`. Use a code plugin when a manifest is not enough: a tool the model can call, a provider for an unusual
+API, a command that computes its answer, a hook that changes prompts and tool calls, or agents and skills built from
+code.
 
 > **Trust.** A code plugin runs **inside the server process with its full rights**. It can read every API key and
 > conversation, the data directory and `process.env`, make any network request and start programs. harness-forge
@@ -11,7 +12,8 @@ that changes prompts and tool calls.
 
 Reference: [PLUGINS.md sections 8-13](../PLUGINS.md#8-code-plugins) · Runnable examples:
 [`dice-roller`](../../examples/plugins/dice-roller/) (JavaScript tool),
-[`echo-provider`](../../examples/plugins/echo-provider/) (TypeScript provider).
+[`echo-provider`](../../examples/plugins/echo-provider/) (TypeScript provider),
+[`agent-pack`](../../examples/plugins/agent-pack/) (agents and skills, plugin API 1.4.0).
 
 ## Two ways to work
 
@@ -62,7 +64,7 @@ The entry default-exports `{ setup(ctx), dispose? }`:
 
 | `ctx` member | Use |
 |---|---|
-| `tools.register`, `providers.register`, `models.register`, `commands.register`, `mcp.register`, `hooks.on` | contributions (each returns a `Disposable`) |
+| `tools.register`, `providers.register`, `models.register`, `commands.register`, `mcp.register`, `hooks.on`, (1.4.0) `agents.register`, `skills.register` | contributions (each returns a `Disposable`) |
 | `settings.get()`, `settings.onChange()` | the plugin's settings form (Configuration tab) |
 | `secrets`, `storage` | encrypted strings and JSON values scoped to the plugin |
 | `models.resolve(ref)` + `ai.generateText` | call any configured model |
@@ -369,8 +371,50 @@ A command runs when a user message starts with `/name`. The text after the name 
 | `run` returning `{ type: 'reply', markdown }` | shown as the answer, with no model call (30 s limit) |
 
 Command names are global: the first plugin to register a name wins, and a later registration throws. The names
-`new`, `model`, `effort`, `mode` and `help` belong to the composer. The builtin commands (`/explain`, `/review`,
-`/translate`, ...) are listed in [PLUGINS.md section 1](../PLUGINS.md#builtin-plugins).
+`new`, `model`, `effort`, `mode`, `help` and (since v1.6) `remember` belong to the composer, and `compact` to the
+server: registering one of them throws `validation_error`. The builtin commands (`/explain`, `/review`,
+`/translate`, ...) are listed in [PLUGINS.md section 1](../PLUGINS.md#builtin-plugins). Since v1.6 a user's personal
+command (Settings -> Customize) or a project command (`.harness/commands/`, `.claude/commands/`) with the same name
+wins over yours where it exists ([customizing agents](./customizing-agents.md)).
+
+## Agents and skills (plugin API 1.4.0)
+
+`ctx.agents.register()` adds a **sub-agent type**: the main agent starts it with the `task` tool
+(`type: '<name>'`), and it runs with your `instructions` after the sub-agent preamble. `ctx.skills.register()` adds a
+**skill**: the model sees its name and description and loads its `content` with the `skill` tool when a request
+matches. Both return a `Disposable` and disappear when the plugin is disabled, reloaded or uninstalled.
+
+```js
+export default {
+  setup(ctx) {
+    ctx.agents.register({
+      name: 'docs-writer', // a-z, 0-9 and "-", up to 64 characters; not explore, general or general-purpose
+      description: 'Writes or updates documentation for code that changed. Use it after a feature is done.',
+      instructions: 'You write concise documentation.',
+      tools: ['read_file', 'find_files', 'write_file', 'edit_file'], // optional; only narrows
+      model: 'inherit', // optional: 'provider:model' or 'inherit' (the chat's model)
+    })
+    ctx.skills.register({
+      name: 'changelog-entry',
+      description: 'How to add an entry to CHANGELOG.md. Load it before editing the changelog.',
+      content: '# Changelog entries\n\nAdd the entry under "Unreleased".',
+    })
+  },
+}
+```
+
+- **Validation**: the same rules as `contributes.agents` / `contributes.skills` (descriptions 1-1024 characters,
+  `instructions` / `content` up to 64 KiB, at most 64 tool names or `mcp__<server>__*` prefixes). A bad field throws
+  `validation_error`; a name another plugin already registered throws `conflict`, so catch it in `setup` if the plugin
+  should load anyway.
+- **Tools only narrow**: a sub-agent never gets a tool that would ask in the chat's mode, the agent tools or
+  `generate_image`, whatever `tools` lists. Without `tools` it gets every tool a sub-agent may use.
+- **Names are shared**: a personal agent or skill (Settings -> Customize) or a project file (`.harness/agents/`,
+  `.claude/agents/`, `.harness/skills/<name>/SKILL.md`, ...) with the same name wins over yours where it exists.
+- **No code needed** for fixed definitions: `contributes.agents` / `contributes.skills` in `plugin.json` take the same
+  fields and run no code. Declare `"engines": { "harness": "^1.4.0" }` for either form.
+
+Reference: [PLUGINS.md "Agents and skills"](../PLUGINS.md#agents-and-skills).
 
 ## Hooks
 
@@ -414,8 +458,8 @@ Calls are billed to the user's key, so say in your description that the plugin m
 ## Lifecycle, debugging and trust
 
 - **States**: `active`, `disabled`, `untrusted` (the files changed since they were trusted), `incompatible`
-  (`engines.harness` does not match the plugin API `1.3.0`, so use `"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` /
-  `"^1.3.0"` for the members of those versions),
+  (`engines.harness` does not match the plugin API `1.4.0`, so use `"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` /
+  `"^1.3.0"` / `"^1.4.0"` for the members of those versions),
   `error` (invalid manifest, `setup` threw or timed out, build failed). The plugin card and the detail header show the
   state and the last error.
 - **Logs**: `ctx.logger.debug/info/warn/error(message, data)` shows up in the Logs tab (last 500 entries) and the

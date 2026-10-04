@@ -444,6 +444,25 @@ call was denied.`, `The tool call failed: <error text>`). "The user text" is the
 command expansion, trimmed. The plan files, `/remember` and the command checks that need no special model use the
 existing `mock:plan` and `mock:echo`.
 
+Details as implemented (C32, `builtin-plugins/mock/{agents,background}.ts`):
+
+- **Trigger**: the parent rules of `mock:agents` read the **last non-empty line** of the user text (the whole text for a
+  one-line message; for a command whose body has no placeholder, the appended input), so `/review tools?` reaches the
+  `tools?` rule after the command's body. An empty user text reads `(empty message)` in the fallback answers
+  (`Agents mock: (empty message)`, `Background mock: (empty message)`).
+- **Instruction blocks**: the server writes the header lines `Agent types (the type of a task call):` and `Skills (when
+  a request matches one, load it with the skill tool before you start; it gives you its instructions):`, each followed
+  by one `- name: description` line per entry (descriptions on one line, cut to 250 characters with `…`; at most 30
+  agent types and 50 skills). The mock finds a block at a line whose text (after optional Markdown heading marks or `**`)
+  starts with `Agent types` / `Skills` (case-insensitive; an `Available ` prefix is allowed) and reads the list lines that
+  follow (`- name: description`, `* name`, `1. name` or `name: description`; blank lines before the first entry are
+  skipped) up to the first other line; the name is the entry's first `[a-z][a-z0-9-]*` token. The first such block with
+  at least one entry wins.
+- **Persona**: an empty `PERSONA:` line reads as `none`.
+- **Skill preview**: `Skill loaded: ` is followed by the first 80 code points of the content (trailing spaces trimmed).
+- `mock:background`: in-run steps (`steps <N>`) without `current_time` offered answer `Tools are disabled.`; a `bg` launch
+  whose output has no `taskId` and whose text holds no `bgt_` id reads `Started in background: none`.
+
 | Model ref | Behavior |
 |---|---|
 | `mock:agents` | Checked in this order. (1) **Child** (the system text holds the marker): `<persona>` = the rest of the line after the first `PERSONA:` in the system text, trimmed (`none` without one; a custom agent's body sets it, e.g. a body line `PERSONA: strict reviewer`); `<prompt>` = the text of the last user message. (a) When the turn has no result yet and `list_directory` is offered: one call `list_directory` with `{ "path": "." }`. (b) When `<prompt>` contains the word `write`, `write_file` is offered and has no result in the turn: `write_file` with `{ "path": "agent.txt", "content": "Written by a custom agent.\n" }`. (c) Otherwise the text `Report: persona=<persona> \| tools: <offered tools> \| model=agents` (`model=agents` is this mock's own model id; a child that runs on another model, e.g. a custom agent with `model: mock:echo`, answers the way that model does, so the probes read the model from `TaskOutput.modelRef`). (2) **Parent**, by the user text: `agents?` → the text `Agent types: <names>` (the names of the "Agent types" block in the system text, in the listed order, joined with `", "`; `none` without the block); `skills?` → `Skills: <names>` (the skills block, likewise); `tools?` → `Tools: <offered tools>`; `agent <type>` or `agent <type> write` (the type is the second word as typed, so `agent General-Purpose` tests the server's normalization) → without `task` offered `Sub-agents are not available.`; when the turn has no `task` result, one call `task` with `{ "type": "<type>", "description": "Run <type>", "prompt": "Run the <type> agent." }` (the prompt `Run the <type> agent and write agent.txt.` with `write`); after the result, the text `Agent report: <text>` (`<text>` = the result's text for the model: a completed child's report, or `Sub-agent failed: <error>; partial report: …`, e.g. for an unknown type, whose error lists the available types); `skill <name>` → without `skill` offered `Skills are not available.`; when the turn has no `skill` result, one call `skill` with `{ "name": "<name>" }`; after the result, the text `Skill loaded: <the first 80 characters of the skill's content>` (the `content` of the JSON output, else the start of the result's text for the model, which begins with the content) (an error result ends as in the shared rules, e.g. `The tool call failed: …` for an unknown skill). (3) Any other turn: the text `Agents mock: <user text>` (so a custom command's expansion is visible: `/greet Ada` with the body `Say hello to $ARGUMENTS.` answers `Agents mock: Say hello to Ada.`). No waits |
@@ -452,15 +471,17 @@ existing `mock:plan` and `mock:echo`.
 How the probes use them (ARCHITECTURE.md 6.23 – 6.27): `mock:agents` as the chat model of a project chat (and so of its
 children) with `.harness/agents/` and `.claude/agents/` fixtures: `agent reviewer` (a body with `PERSONA:` and a
 `tools` list → the child's report names the persona and only the allowed tools that run without approval in the mode),
-`agent escalate write` in Accept edits (`tools: [shell, write_file]` → the write is journaled `<parent>/<child>`, the
-shell is never offered), `agent general-purpose` (→ `general`), `agent nope` (failed, the list of types), `agents?`,
+`agent escalate write` in Accept edits (`tools: [shell, write_file]` → the write is journaled `<parent>/<child>`; the
+ADR-043 ceiling does offer `shell` in Accept edits, since its policy is decided per call, but every command outside the
+user's shell rules is denied inside the child, so no unapproved command runs), `agent general-purpose` (→ `general`), `agent nope` (failed, the list of types), `agents?`,
 `skills?`, `skill pdf` (body, `baseDir`, `files`), `tools?` after `/review` with `allowed-tools: Read` (`Tools:
 read_file`), and a command with `model: mock:agents` sent from a `mock:echo` chat (the reply comes from `mock:agents`,
 the chat's model stays `mock:echo`); `mock:background` for the idle path (`bg` → `Started in background: bgt_…`, then a
 server-started turn `Background result: completed | Report: background done`), the in-run path (`bg explore steps 10`
 with a fast child → `Finished: in-run result completed`), stops and limits (`bg explore loop` with the row's Stop →
 `aborted`, delivered at the next user turn; a fourth `bg` in one chat → failed), and a restart (`bg explore slow 20`,
-then the server is restarted: the row reads `aborted`).
+then the server is restarted: the row reads `aborted`, with "The background task was stopped." after a normal shutdown
+and "The server restarted before the task finished." after a crash).
 
 ## 9. Declarative provider templates (wizard)
 

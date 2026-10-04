@@ -62,6 +62,8 @@ const srDetails = computed(() => [lines.value.source, lines.value.model, lines.v
       <span
         data-slot="command-badge"
         tabindex="0"
+        role="note"
+        :aria-label="srDetails ? `Command /${name}, ${srDetails}` : `Command /${name}`"
         v-bind="$attrs"
         class="inline-flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded-md border bg-card px-2 font-mono text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       >

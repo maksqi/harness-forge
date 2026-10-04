@@ -29,7 +29,7 @@ Reference: [ARCHITECTURE.md 6.23 – 6.27](../ARCHITECTURE.md#623-customization-
 | Source | Where | Edited in | Wins over |
 |---|---|---|---|
 | Built-in | the agents `explore` and `general`; the commands `/compact`, `/new`, `/model`, `/effort`, `/mode`, `/help`, `/remember` | — (reserved names) | — |
-| Plugins | `contributes.agents` / `contributes.skills` / `contributes.commands` of an installed plugin | the plugin | built-in |
+| Plugins | the agents, skills and commands an installed plugin contributes (`contributes.agents` / `contributes.skills` / `contributes.commands` of its manifest, or registered by its code) | the plugin | built-in |
 | Personal | the harness-forge database (all your chats, every project) | Settings → Customize | plugins |
 | Project, `.claude/` | `.claude/agents/`, `.claude/commands/`, `.claude/skills/` in the project folder | your editor or the agent (with approval) | personal |
 | Project, `.harness/` | `.harness/agents/`, `.harness/commands/`, `.harness/skills/` in the project folder | your editor or the agent (with approval) | everything |
@@ -74,14 +74,20 @@ The body: the agent's instructions, the command's prompt or the skill's content.
 ```
 
 - **Names**: agents and skills use `a-z`, `0-9` and `-`, start with a letter, at most 64 characters; commands at most 32.
-  Without `name`, the file name is used (`review.md` → `review`), or for a skill its folder name.
-- **Description**: required for agents and skills, recommended for commands (the slash menu shows it). The agent
-  **reads** the descriptions of agents and skills to decide when to use them, so say *when*: "Use it after larger
-  edits.", "Load it before writing release notes." Longer than 1,024 characters is cut.
-- **Size**: at most 64 KB per file, the header at most 8 KB. Text only (a binary file is skipped).
-- **Lists**: `tools` and `allowed-tools` take a comma-separated string (`Read, Grep, Glob`) or a YAML list.
+  Upper-case letters are lowered (`Code-Reviewer` → `code-reviewer`). Without `name`, the file name is used (`review.md`
+  → `review`), or for a skill its folder name.
+- **Description**: required for agents and skills, recommended for commands (the slash menu shows it; without one, the
+  first line of the body is used). The agent **reads** the descriptions of agents and skills to decide when to use
+  them, so say *when*: "Use it after larger edits.", "Load it before writing release notes." Longer than 1,024
+  characters is cut.
+- **Size**: at most 64 KB per file, the header at most 8 KB. Text only: a larger or binary file is listed as **Invalid**.
+- **Lists**: `tools` and `allowed-tools` take a comma-separated string (`Read, Grep, Glob`), a space-separated one
+  (`Read Grep Glob`) or a YAML list. `mcp__github__*` matches every tool whose name starts with it, and
+  `mcp__github` every tool of that MCP server.
 - Problems never break anything: a file that cannot be used is listed as **Invalid** with the reason ("Line 2: Add a
-  description."), and warnings ("Unknown tool: foo") are shown next to the definition.
+  description."), and warnings ("Unknown tool: foo; it matches nothing.") are shown next to the definition. A header
+  that is not valid YAML but has plain `key: value` lines is read line by line: the definition still works, with a
+  warning.
 
 ### Agents (`.harness/agents/<name>.md`)
 
@@ -102,8 +108,8 @@ You review code changes.
 | Key | Meaning |
 |---|---|
 | `name`, `description` | required |
-| `tools` | optional: the only tools this agent may use (harness names such as `read_file`, or Claude Code names, section 6). It can only **narrow**: the agent never gets a tool that would need your approval in the chat's current mode, the agent tools (`task`, `todo_write`, …) or `generate_image`. Without `tools`, it gets everything a sub-agent may use in that mode |
-| `model` | optional: a model ref such as `openai:gpt-6` (used when that provider is connected; else the default below), or `inherit` (the chat's model). Without it: Settings → General → Agent → **Sub-agent model**, else the chat's model |
+| `tools` | optional: the only tools this agent may use (harness names such as `read_file`, or Claude Code names, section 6). It can only **narrow** what a sub-agent may use in the chat's current mode: a tool that can only ask there is never offered, and a tool that decides per call (file edits, the shell) runs only the calls that need no approval (in Accept edits: file edits, and the shell commands your shell rules allow; every other call is denied). It never gets the agent tools (`task`, `skill`, `todo_write`, …) or `generate_image`. Without `tools`, it gets everything a sub-agent may use in that mode |
+| `model` | optional: a model ref such as `openai:gpt-6` (used when that provider is connected; else the default below, with a warning), or `inherit` (the chat's model; the editor's **Same as the chat**). Without it: Settings → General → Agent → **Sub-agent model**, else the chat's model |
 | body | the agent's instructions; it reads them after harness-forge's sub-agent preamble and before your custom instructions. A sub-agent does not see the conversation: the main agent writes it a prompt |
 
 The main agent sees the list of agent types (names and descriptions) and picks one when a task fits. You can also ask
@@ -127,8 +133,9 @@ Report the findings as a list with line numbers.
 |---|---|
 | `description` | shown in the slash menu |
 | `argument-hint` | shown after the command while you type its arguments (`/review <file> [focus]`); write it as is, brackets need no quotes |
-| `model` | optional: this turn runs on that model; the chat keeps its own model. When the model is not available (no key, unknown, an image model), the chat's model answers and the reply says so |
-| `allowed-tools` | optional: the tools of this turn are limited to this list (also for the approvals and regenerations of the turn). It never approves anything: calls still ask as the permission mode says |
+| `model` | optional: this turn runs on that model; the chat keeps its own model (which must still be usable: it is checked first). When the command's model is not available (no key, unknown, an image model), the chat's model answers and the reply starts with "The command's model … is not available, so the chat's model answered." |
+| `allowed-tools` | optional: the tools of this turn are limited to this list (also for the approvals and regenerations of the turn). It never approves anything: calls still ask as the permission mode says. List `task` or `skill` too when the turn should start sub-agents or load skills; in plan mode `exit_plan_mode` always stays |
+| body | the prompt (required) |
 | `$ARGUMENTS` | everything you typed after `/review ` |
 | `$1` … `$9` | single words of it; quotes group words (`/review "src/a b.ts" naming` → `$1` = `src/a b.ts`) |
 | `{{input}}` | same as `$ARGUMENTS` (the syntax of plugin templates) |
@@ -156,7 +163,7 @@ description: How this project writes release notes. Load it before writing or ed
 |---|---|
 | `name`, `description` | required (the name defaults to the folder name) |
 | body | the skill; the agent reads it when it loads the skill |
-| other files in the folder | supporting files (up to 50 are listed, three folders deep; hidden and secret-looking files and links are left out). The agent gets the folder's path and reads them with `read_file`, without asking |
+| other files in the folder | supporting files (up to 50 are listed, three folders deep; hidden, secret-looking and gitignored files, `node_modules`, links and the `SKILL.md` itself are left out). The agent gets the folder's path and reads them with `read_file`, without asking. They are listed only while the project folder is available |
 
 The agent sees the names and descriptions of the skills (up to 50) and loads one with the `skill` tool when a task
 matches; the chat shows a row "Loaded skill release-notes". Skills are not slash commands in v1.6 (you cannot type
@@ -168,7 +175,8 @@ its body.
 - **Same name, different sources**: project `.harness/` > project `.claude/` > personal > plugin > built-in. The winner
   is used; the others are listed as **Shadowed** ("Not used: the project's .harness/agents/code-reviewer.md wins.").
 - **Same name in one folder** (two command files `review.md` in different subfolders): the first path in alphabetical
-  order wins; the other is marked as a duplicate.
+  order wins; the other is listed as **Shadowed** with a warning ("Not used: .harness/commands/a/review.md has the same
+  name and comes first in .harness/commands.").
 - **Reserved**: agents `explore`, `general` and `general-purpose` (Claude Code's name for `general`, which the agent may
   use); commands `/compact`, `/new`, `/model`, `/effort`, `/mode`, `/help`, `/remember`. A definition with such a name is
   **Invalid**. (A plugin command named `remember` is refused since v1.6.)
@@ -181,14 +189,20 @@ in Settings → Projects) lists everything by tab (**Agents**, **Commands**, **S
 {project}** (pick the project at the top), **From plugins** and **Built-in**.
 
 - **New agent / command / skill** opens an editor with fields for the header (name, description, tools, model, argument
-  hint) and a Markdown editor for the body; it saves the same file format as above. Ctrl+Enter (⌘Enter on macOS) saves.
-  Tab in the body editor moves to the next field (it does not indent).
+  hint) and a Markdown editor for the body; it saves the same file format as above. **Tools** is "All tools the chat
+  allows" (commands: "No restriction") or **Only these tools**; an agent's **Model** has a **Same as the chat**
+  checkbox (`model: inherit`). Ctrl+Enter (⌘Enter on macOS) saves. Tab in the body editor moves to the next field (it
+  does not indent).
 - **Edit**, **Duplicate**, **Export .md** (download the file), **Turn off / Turn on** and **Delete** (with Undo) are in
   each personal row's menu.
 - **Import…** reads a `.md` file (an agent, command or skill from a repository or from Claude Code; up to 64 KB) into
   the editor, with notes about what was ignored; check it and save.
 - **Project and plugin definitions are read-only** here: **View** shows the file, **Copy to personal** makes an
-  editable copy, **Export .md** downloads it. Edit project files in the repository.
+  editable copy, **Export .md** downloads it (and **Open plugin** opens a plugin's page). Edit project files in the
+  repository. Folder problems (a symbolic link that was skipped, a folder over the limit) show as notes above the
+  project's list.
+- A plugin's agents and skills are also listed on its page in the **Plugins** tab (the filter **Agents and skills**
+  finds such plugins), with **Open in Customize**.
 - Personal definitions are part of every backup (Settings → Data → Export); **Restore settings from the backup** brings
   them back on import (one you already have with the same name is kept). Delete all data keeps them.
 - At most 200 personal definitions of each kind.
@@ -213,12 +227,13 @@ unchanged; these are the differences:
 | In the file | harness-forge | Why |
 |---|---|---|
 | tool names `Read`, `Write`, `Edit`, `MultiEdit`, `Grep`, `Glob`, `LS`, `Bash`, `WebFetch` | mapped to `read_file`, `write_file`, `edit_file`, `edit_file`, `search_files`, `find_files`, `list_directory`, `shell`, `web_fetch`; `mcp__…` names kept | same tools, other names |
-| other tool names (`Task`, `TodoWrite`, `NotebookEdit`, …) | left out with a warning ("Unknown tool") | there is no such tool, and a sub-agent never gets the agent tools |
+| other tool names (`Task`, `TodoWrite`, `NotebookEdit`, …) | match nothing, with a warning ("Unknown tool: Task; it matches nothing.") | there is no such tool, and a sub-agent never gets the agent tools |
 | `Bash(git:*)`-style patterns | the tool (`shell`) is kept, the pattern is ignored with a warning; every shell call still asks unless your shell rules allow it | harness-forge has its own shell rules (Settings → Projects) |
 | a `tools` value that is neither text nor a list | **no tools** at all, with a warning | a broken list must not grant everything |
 | `allowed-tools` of a command | **narrows** the turn's tools; it does **not** pre-approve them | in Claude Code it pre-approves; a cloned repository must not be able to approve the shell for you |
-| `model: sonnet` / `opus` / `haiku` | the default model is used (a note says so) | harness-forge uses explicit model refs (`provider:model`), any provider |
+| `model: sonnet` / `opus` / `haiku` | an agent uses the default sub-agent model, a command the chat's model (a note says so) | harness-forge uses explicit model refs (`provider:model`), any provider |
 | `model: inherit` | the chat's model | same meaning |
+| a header that is not valid YAML | read line by line when it has plain `key: value` lines (a warning; the definition stays usable), else **Invalid** | Claude Code is lenient with hand-written headers |
 | lines starting with `!` in a command (`!git status`) | left as text; **never run** | a command file must not run programs |
 | `@path` in a command (`@src/main.ts`) | left as text; **never expanded** | ask the agent to read the file, or mention it with `@` in the composer |
 | other header keys (`color`, `permissionMode`, `hooks`, …) | ignored (listed as "Ignored" in the editor) | not supported; a file can never change the permission mode |
@@ -238,8 +253,9 @@ steer the model (check what a repository ships), but they can **never give thems
 - command bodies never run programs or read files by themselves;
 - the agent cannot quietly rewrite them: writing to `.harness/` or `.claude/` always asks, even in Accept edits (reading
   them does not);
-- symbolic links, files larger than 64 KB, binary files and more than 200 files per folder are skipped; only `.harness/`
-  and `.claude/` inside the project folder are read.
+- symbolic links (and anything reached through one), hidden and secret-looking file names and the files past 200 per
+  folder are skipped; files larger than 64 KB and binary files are listed as **Invalid** and never used; only
+  `.harness/` and `.claude/` inside the project folder are read.
 
 ## 8. Background agents
 
@@ -250,21 +266,24 @@ reply goes on (or ends), and the **background agent** keeps working. When it is 
 - while the agent is still replying, at its next step (a dashed note "Background agent finished" appears in the reply);
 - when the chat is idle, harness-forge starts a new turn by itself with the report (the note stands where your message
   would be, captioned "Sent to the agent"), and the agent continues from it;
-- when an approval is pending, or the turn that started it was itself started by a background agent, the report waits
-  for your next message.
+- when an approval is pending, the turn that started it was itself started by a background agent, the agent was
+  stopped, or the chat's model is an image model, the report waits for your next message.
 
 **Above the composer**, the **Background agents** list shows what runs ("2 background agents · Find flaky tests ·
-1m 12s"); open it for each agent's live steps, a **Stop** per agent and **Stop all**.
+1m 12s") and finished agents whose report was not delivered yet ("1 background agent finished · report pending"); open
+it for each agent's live steps, a **Stop** per agent and **Stop all**.
 
 - **Stop in the composer (or Esc) does not stop background agents** (as in Claude Code). Use their own Stop. Deleting
   the chat or its project, Delete all data, a key rotation and stopping the server stop them too. A stopped agent still
-  reports what it found.
+  reports what it found, at the chat's next turn (deleting the chat drops it).
 - **Limits**: 3 at a time per chat and 10 on the server, 30 minutes and **Sub-agent max steps** each. They never ask for
   approval.
 - **While one runs, its project is busy**: Rewind, Revert, Undo, deleting the project, moving the chat and deleting a
   message version wait until it ends ("Wait for the responses in this project to finish…"). Switching versions works.
-- **A server restart** ends running background agents (they show as stopped: "The server restarted before the task
-  finished."); their reports are delivered at the chat's next turn.
+- **A server restart** ends running background agents; they are never resumed. Stopping the server ends them as stopped
+  ("The background task was stopped."); after a crash they show as stopped with "The server restarted before the task
+  finished.". Their reports, and every report not delivered yet, are delivered at the chat's next turn (no turn starts by
+  itself after a restart).
 - Their file edits are journaled under the reply that started them (Rewind covers them); their cost is in the chat's
   totals and in each agent's report line.
 - Share links never include background results.
@@ -273,14 +292,15 @@ reply goes on (or ends), and the **background agent** keeps working. When it is 
 
 Turn on **Settings → General → Agent → Save approved plans**. When you approve a plan in a project chat (plan mode,
 see [agent features](agent-features.md#2-plan-mode-look-first-then-change)), harness-forge writes it to
-`.harness/plans/<date>-<title>.md` (for example `.harness/plans/2026-10-04-move-auth-to-server-sessions.md`; a name that
-exists gets `-2`, `-3`, …).
+`.harness/plans/<date>-<title>.md` (for example `.harness/plans/2026-10-04-move-auth-to-server-sessions.md`: the date in
+UTC, the title from the plan's first heading, else its first line, in lower case, at most 48 characters; a name that
+exists gets `-2`, `-3`, … up to `-99`; an existing file is never overwritten).
 
 - **Plan folder** changes the folder: a path inside the project, such as `docs/plans` (no `..`, not `.git`, at most 200
-  characters).
+  characters; a symbolic link anywhere on it is refused).
 - The plan row shows "Saved to <path>" with **Copy path** and **Show changes**; the file is listed in the changes panel,
   and **Rewind files to here** removes it.
-- When the file cannot be written, the row says why; the approval goes on anyway.
+- When the file cannot be written, the row says why ("Couldn't save the plan file: …"); the approval goes on anyway.
 - Off by default; chats without a project never save plans.
 
 ## 10. Remember
@@ -290,19 +310,21 @@ save it:
 
 | Target | Effect |
 |---|---|
-| **AGENTS.md in {project}** | adds the line `- <note>` at the end of the project's `AGENTS.md` (else `CLAUDE.md`; with neither, a new `AGENTS.md` is created). Listed in the changes panel; Rewind can remove it |
-| **Instructions of {project}** | appends the note to the project's instructions (Settings → Projects → Edit instructions) |
-| **Custom instructions** | appends the note to Settings → General → Custom instructions (every chat) |
+| **AGENTS.md in {project}** (or **CLAUDE.md in {project}**; "AGENTS.md in {project} (new file)" when there is neither) | adds the line `- <note>` at the end of the project's `AGENTS.md` (else `CLAUDE.md`; with neither, a new `AGENTS.md` is created), in the project folder itself. Listed in the changes panel; Rewind and Revert can remove it |
+| **Instructions of {project}** | appends the line `- <note>` to the project's instructions (Settings → Projects → Edit instructions) |
+| **Custom instructions** | appends the line `- <note>` to Settings → General → Custom instructions (every chat) |
 
-The project targets work in project chats only. Notes are up to 2,000 characters; the instructions can hold 20,000
-characters and `AGENTS.md` up to 1 MB. A linked (symbolic link) `AGENTS.md` is refused.
+The project targets work in saved chats of a project only; elsewhere they are disabled with "Open a chat in a project
+to use this.". The dialog remembers the last target you saved to. Notes are up to 2,000 characters; the instructions can
+hold 20,000 characters and `AGENTS.md` up to 1 MB. An `AGENTS.md` / `CLAUDE.md` that is a symbolic link, a folder or a
+binary file is refused.
 
 ## 11. Limits
 
 | What | Limit |
 |---|---|
 | A definition file | 64 KB, header 8 KB, description 1,024 characters, argument hint 100 characters, 64 tool names |
-| Project folders | 200 files per folder, commands up to 3 subfolders deep, skills with up to 50 listed supporting files |
+| Project folders | 200 definitions per folder, commands up to 3 subfolders deep (100 subfolders), skills with up to 50 listed supporting files |
 | Personal definitions | 200 per kind |
 | Listed to the model | 30 agent types and 50 skills, descriptions cut at 250 characters |
 | A command's expanded prompt | 64 KB |
@@ -315,15 +337,17 @@ Changes on disk show up within 10 seconds (Settings → Customize reads the fold
 ## 12. Troubleshooting
 
 - **My project agent does not appear**: check Settings → Customize with the project selected. **Invalid** shows the
-  reason; **Shadowed** names the winner; nothing at all means the file is not where it should be (`.harness/agents/x.md`,
-  not deeper; `.md` only; not a symbolic link, and no link in `.harness` or `.harness/agents` either) or the project
-  folder is unavailable.
+  reason; **Shadowed** names the winner; a note above the project's list names a skipped symbolic link or a folder over
+  the limit; nothing at all means the file is not where it should be (`.harness/agents/x.md`, not deeper; `.md` only;
+  not a hidden or secret-looking name such as `secrets.md`) or the project folder is unavailable.
 - **A command shows in one chat but not another**: project commands exist only in that project's chats.
 - **The command ran on the chat's model**: the command's `model` is not available (no key for that provider, an unknown
   model, or an image model); the reply's notice says so.
 - **The custom agent did not get a tool from its list**: a sub-agent only gets tools that run without approval in the
-  chat's mode. In Ask that means read-only tools; switch to Accept edits for file edits (shell commands also need a
-  shell rule).
+  chat's mode. In Ask that means read-only tools; switch to Accept edits for file edits (it gets `shell` there too, but
+  only the commands your shell rules allow run; the others are denied).
+- **A command's turn could not start a sub-agent or load a skill**: its `allowed-tools` leaves `task` / `skill` out; add
+  them to the list.
 - **"Loaded skill" never happens**: the agent loads a skill only when its description matches the task. Make the
   description say when to load it, or ask: "Use the release-notes skill."
 - **A background agent keeps running after I pressed Stop**: by design. Stop it in the Background agents list above the

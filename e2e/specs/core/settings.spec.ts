@@ -5,6 +5,8 @@
 // back even when the test fails or times out.
 // Phase 9 (W9.13, docs/UI.md 9.11): General -> Agent (automatic compaction, the compaction and sub-agent models with the
 // "can't call tools" warning, sub-agent max steps with its validation) and the Shift+Tab switch persist.
+// Phase 10 (W10.13, docs/UI.md 9.11): "Save approved plans" and the plan folder (disabled while off, a folder outside the
+// project refused inline, Esc restores, Enter saves) persist.
 import type { Settings } from '../../../packages/shared/src/index.ts'
 import {
   agentSettingsOf,
@@ -19,6 +21,7 @@ import {
   test,
   testIds,
   uniqueId,
+  usePlanSettings,
   userMessages,
 } from '../../helpers/index.ts'
 
@@ -155,6 +158,43 @@ test.describe('settings', () => {
     await expect(page.getByTestId(testIds.settingsSubagentModel)).toHaveAttribute('data-value', 'mock:subagent')
     await expect(page.getByTestId(testIds.settingsSubagentMaxSteps)).toHaveValue('12')
     await expect(page.getByTestId(testIds.settingsShiftTabModes)).toHaveAttribute('data-state', 'unchecked')
+  })
+
+  test('agent: the plan-file fields save at once, refuse a folder outside the project and persist @smoke', async ({ page, api, cleanup }) => {
+    await usePlanSettings(api, cleanup, { planFiles: false, planDirectory: '.harness/plans' })
+
+    await page.goto('/settings/general')
+    const planFiles = page.getByTestId(testIds.settingsPlanFiles)
+    const folder = page.getByTestId(testIds.settingsPlanDirectory)
+    await expect(planFiles).toHaveAttribute('data-state', 'unchecked')
+    await expect(folder).toHaveValue('.harness/plans')
+    await expect(folder).toBeDisabled()
+
+    // On: the folder field opens.
+    await planFiles.click()
+    await expect(planFiles).toHaveAttribute('data-state', 'checked')
+    await expect.poll(async () => (await api.getSettings()).planFiles).toBe(true)
+    await expect(folder).toBeEnabled()
+
+    // A folder outside the project is refused inline and the saved value stays.
+    await folder.fill('../plans')
+    await folder.press('Enter')
+    await expect(page.getByRole('main')).toContainText('Use a folder inside the project, like .harness/plans.')
+    await expect(folder).toHaveAttribute('aria-invalid', 'true')
+    expect((await api.getSettings()).planDirectory).toBe('.harness/plans')
+    // Esc restores the saved value; a folder inside the project saves on Enter.
+    await folder.press('Escape')
+    await expect(folder).toHaveValue('.harness/plans')
+    await folder.fill('docs/plans')
+    await folder.press('Enter')
+    await expect.poll(async () => (await api.getSettings()).planDirectory).toBe('docs/plans')
+    await expect(page.getByRole('main')).not.toContainText('Use a folder inside the project, like .harness/plans.')
+
+    // A reload keeps both.
+    await page.reload()
+    await expect(page.getByTestId(testIds.settingsPlanFiles)).toHaveAttribute('data-state', 'checked')
+    await expect(page.getByTestId(testIds.settingsPlanDirectory)).toHaveValue('docs/plans')
+    await expect(page.getByTestId(testIds.settingsPlanDirectory)).toBeEnabled()
   })
 
   test('appearance: theme, reading font, text size, density and thinking apply at once and persist @smoke', async ({ page, api, cleanup }) => {

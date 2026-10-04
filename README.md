@@ -3,21 +3,20 @@
 harness-forge is a self-hosted, bring-your-own-key (BYOK) AI chat and agent harness. It runs as one Node process
 with a web UI. Connect your own API keys for Claude, ChatGPT, Gemini, Grok, DeepSeek, Kimi, Qwen, GLM and more, or
 point it at a local Ollama. Then chat, watch the models reason, and let them call tools, or let them work on the files
-of a project folder on your server. By default, every tool call that can change something waits for your approval. A **Plugins** tab adds LLM providers, models, tools, MCP servers and slash commands, either
+of a project folder on your server. By default, every tool call that can change something waits for your approval. A **Plugins** tab adds LLM providers, models, tools, MCP servers, slash commands, sub-agent types and skills, either
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **Status:** v1.6 ("Agent customization") is in progress: your own sub-agent types, slash commands and skills, as
-> Markdown files in a project's `.harness/` (or `.claude/`) folder or as personal definitions in Settings → Customize,
-> plugins that contribute agents and skills (plugin API 1.4.0), background sub-agents that keep working after the reply
-> and report back, approved plans saved as project files, and `/remember` (see the
-> [customizing guide](docs/guides/customizing-agents.md)). The released version is v1.5 ("Agent 2.0"): context
+> **Status:** v1.6 ("Agent customization"): your own sub-agent types, slash commands and skills, as Markdown files in
+> a project's `.harness/` (or `.claude/`) folder or as personal definitions on the new Settings → Customize page, plugins
+> that contribute agents and skills (plugin API 1.4.0), background agents that keep working after the reply and report
+> back by themselves, approved plans saved as project files, and `/remember` to keep a note for the agent (see
+> [Features](#features) and the [customizing guide](docs/guides/customizing-agents.md)). v1.5 ("Agent 2.0") added context
 > compaction that replaces the older part of a long chat with a summary
 > (`/compact [focus]` or automatically, also between the steps of a long agent run), a plan mode in which the agent
 > explores read-only and proposes a plan you approve, a todo list the agent keeps up to date, `@` file mentions in
 > project chats, messages that reach the agent while it works (or start the next turn by themselves), and sub-agents
-> that explore or work in parallel (see [Features](#features) and the
-> [agent features guide](docs/guides/agent-features.md)). v1.4 added checkpoints that rewind the agent's file changes to
+> that explore or work in parallel (see the [agent features guide](docs/guides/agent-features.md)). v1.4 added checkpoints that rewind the agent's file changes to
 > any of your messages, a changes panel with per-file diffs, Git status and an undoable revert, shell rules for commands
 > that may run without asking, a working folder that carries over between shell commands, and an opt-in automatic
 > cleanup of unused files. v1.3 added projects and an agent workspace (file tools and a shell with approval, an "Accept
@@ -33,6 +32,8 @@ desktop app, and it starts in dark mode.
 ![A project chat: write_file and edit_file ran in Accept edits mode (+1 −1), the shell command waits for approval with Deny and Run (dark theme)](docs/assets/screenshots/workspace-dark.png)
 
 ![The changes panel next to a project chat: This chat lists checkpoint.txt with its diff and notes that shell commands may have changed files too (dark theme)](docs/assets/screenshots/changes-panel-dark.png)
+
+![Settings -> Customize: personal agents, the project's agents from .harness/agents and .claude/agents with a shadowed and an invalid file, and the built-in explore and general agents (dark theme)](docs/assets/screenshots/customize-dark.png)
 
 | Plugins | Provider wizard |
 |---|---|
@@ -96,21 +97,27 @@ desktop app, and it starts in dark mode.
     their file edits can be rewound like any other.
   - Settings -> General -> Agent: automatic compaction (on by default), a separate model for summaries and for
     sub-agents, and the sub-agent step limit (30); a switch in General turns the Shift+Tab mode cycle off.
-- **Agent customization** (v1.6, in progress; guide: [customizing the agent](docs/guides/customizing-agents.md)):
+- **Agent customization** (v1.6; guide: [customizing the agent](docs/guides/customizing-agents.md)):
   - Custom agents: Markdown files with a YAML header (name, description, tools, model) become sub-agent types the agent
-    can start; their tool list only narrows what a sub-agent may use.
-  - Custom slash commands with `$ARGUMENTS` / `$1` … `$9`, an argument hint, an optional model for that turn and an
-    optional, narrower tool set; the slash menu groups them as App, Project, Personal and Plugins.
-  - Skills (`<name>/SKILL.md` with supporting files) that the agent loads only when a task needs them.
+    can start; their body becomes the sub-agent's instructions and their tool list only narrows what a sub-agent may
+    use. The transcript shows each custom sub-agent with its name and where it came from.
+  - Custom slash commands with `$ARGUMENTS` / `$1` … `$9` / `{{input}}`, an argument hint shown as ghost text, an
+    optional model for that turn and an optional, narrower tool set; the slash menu groups them as App, Project,
+    Personal and Plugins.
+  - Skills (`<name>/SKILL.md` with supporting files) that the agent lists by name and loads only when a task needs them.
   - Where they live: a project's `.harness/{agents,commands,skills}` (wins) or `.claude/{…}` (Claude Code files work
-    mostly as they are), personal definitions in Settings -> Customize (editor, import and export of `.md` files,
-    included in backups), and plugins (plugin API 1.4.0). Project files are read-only in the UI and can never grant
-    tools or approvals.
-  - Background agents: a sub-agent started in the background keeps working after the reply (a list above the composer
-    shows it, with its own Stop) and reports back exactly once, at the agent's next step or in a turn it starts by
-    itself.
-  - Approved plans saved as project files (Settings -> General -> Agent, off by default), and `/remember` to add a note
-    to `AGENTS.md`, to the project's instructions or to your custom instructions.
+    mostly as they are), personal definitions, and plugins (plugin API 1.4.0). Project files are read-only in the UI and
+    can never grant tools, approvals or a permission mode.
+  - Settings -> Customize: one tab each for agents, commands and skills, with the built-in, plugin, personal and
+    project entries (shadowed and invalid files shown with the reason), an editor for personal definitions, import
+    and export of `.md` files, turn off, duplicate and "Copy to personal". Personal definitions are included in
+    backups.
+  - Background agents: a sub-agent started in the background keeps working after the reply (at most 3 per chat, 30
+    minutes each). A list above the composer shows them with their own Stop and a Stop all; the composer's Stop leaves
+    them running. Each reports back exactly once, at the agent's next step or in a turn it starts by itself.
+  - Approved plans saved as project files (Settings -> General -> Agent, off by default; listed in the changes panel and
+    rewindable), and `/remember` to add a note to the project's `AGENTS.md` (or `CLAUDE.md`), to the project's
+    instructions or to your custom instructions.
 - **Images** (with your own keys):
   - Pick an image model (OpenAI GPT Image, xAI Grok Imagine) in the composer and describe a picture: 1 to 4 images
     per turn, an aspect ratio (Auto, 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16), and follow-ups such as "make it blue" that
@@ -330,7 +337,8 @@ provider:
 ```
 
 The same plugin can be built without JSON in **Plugins** -> **New plugin** -> **Provider**. **Code** plugins are a
-single JavaScript or TypeScript file whose `setup(ctx)` registers tools, providers, commands, MCP servers and hooks.
+single JavaScript or TypeScript file whose `setup(ctx)` registers tools, providers, commands, MCP servers, hooks and
+(plugin API 1.4.0) sub-agent types and skills.
 Start one from a template (**New plugin** -> **Code plugin**), then edit it and use **Build & reload** in the browser.
 Or develop in your own editor with a linked folder that reloads on save.
 

@@ -246,3 +246,11 @@ describe('custom agents, background calls, skills and results (Phase 10)', () =>
     expect(taskResultSummary({ report: ' ', error: undefined })).toBe('No report.')
   })
 })
+
+describe('firstSentence keeps tool names (Gate P10-B fix)', () => {
+  it('keeps underscores and asterisks inside words, strips emphasis around words', () => {
+    expect(firstSentence('Called list_directory and read_file on the root.')).toBe('Called list_directory and read_file on the root.')
+    expect(firstSentence('Use _this_ and *that* and **bold** and __strong__ now')).toBe('Use this and that and bold and strong now')
+    expect(firstSentence('Ran `pnpm vitest --run` with 2*3 = 6 workers')).toBe('Ran pnpm vitest --run with 2*3 = 6 workers')
+  })
+})

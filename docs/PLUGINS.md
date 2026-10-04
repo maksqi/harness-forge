@@ -69,8 +69,10 @@ Builtin manifests in v1.3: `core-tools` is version 1.2.0 and declares `engines.h
 permission `process` (it uses `ToolDefinition.workspace` and `ToolCallContext.workspace`); `core-providers` stays 1.1.0
 with `"^1.1.0"`; `mock` stays version 1.0.0 with `"^1.1.0"`; `core-commands` and `core-mcp` stay 1.0.0 with
 `"^1.0.0"`. v1.5 adds `core-agent`, version 1.0.0 with `"^1.3.0"` (its `task` tool has an async-generator
-`execute`); v1.6 moves `core-agent` to `"^1.4.0"` (it declares the built-in agent types through the 1.4.0 registries
-and adds `skill`). Load order: `core-providers`, `core-tools`, `core-commands`, `core-mcp`, `core-workspace`, `core-agent`, then
+`execute`); v1.6 moves `core-agent` to `"^1.4.0"` (its `task` tool takes `background` and any agent type of the
+catalog, and it adds `skill`). The built-in agent types `explore` and `general` are not registry contributions: the
+catalog lists them as `builtin` entries (`core-agent/agents.ts`), and the `agent` registry refuses their names (and the
+alias `general-purpose`) for every plugin. Load order: `core-providers`, `core-tools`, `core-commands`, `core-mcp`, `core-workspace`, `core-agent`, then
 `mock`.
 
 Builtin tools (`core-tools`):
@@ -164,8 +166,9 @@ output schema, such as one the host replaced, is sent as JSON; `N lines` is `1 l
 
 Builtin agent tools (`core-agent`, Phase 9, ADR-041 / ADR-043; behavior in
 [ARCHITECTURE.md 6.19, 6.22](./ARCHITECTURE.md#619-plan-mode-and-todos-adr-041), schemas in `@harness-forge/shared`
-(`AGENT_TOOL_NAMES`)). They use the public plugin API (1.3.0) like every builtin; what they need from the server (the
-run's permission mode, the sub-agent runner) comes through a private side channel that third-party plugins cannot
+(`AGENT_TOOL_NAMES`)). They use the public plugin API (1.3.0; 1.4.0 since v1.6) like every builtin; what they need
+from the server (the run's permission mode, the sub-agent runner; Phase 10: the skill loader and the plan file writer)
+comes through a private side channel that third-party plugins cannot
 reach, and the server recognizes them by owner (`pluginId === 'core-agent'`): a plugin tool with another name gets none
 of this.
 
@@ -173,8 +176,8 @@ of this.
 |---|---|---|---|
 | `todo_write` | none / `safe` / 60 s | `{ todos: { id (1-64 characters, unique in the list), content (1-500), status: 'pending' \| 'in_progress' \| 'completed', activeForm? (<= 200) }[] }` (<= 50 items; the whole list each time) | `{ todos, counts }` (counts per status: `pending`, `inProgress`, `completed`, `total`); the model reads one line ("Todo list updated: 1 in progress, 2 pending, 0 completed.", "Todo list cleared." for an empty list). An invalid list (duplicate ids, more than 50 items, …) becomes the call's error result (the input validation error) and the run goes on. The latest call on the chat's path is the todo state (the todo strip, 7.25 of UI.md); nothing is stored elsewhere |
 | `exit_plan_mode` | none / `always` / 60 s | `{ plan }` (markdown, 1-50,000 characters) | offered only in plan mode (and kept, but not callable, on the continuation that executes an approved plan); always shows the plan card (overrides and `tool.approve` hooks cannot approve it; `PATCH /api/tools/exit_plan_mode` with `override: 'allow'` is refused with 400 on `['override']`, "Plans always ask for your approval, so exit_plan_mode can't be always allowed."). Approved: the approval continuation must carry `toolMode` `edits` or `ask` (any other mode, `auto` included, is refused with 400 on `['toolMode']`); output `{ approved: true, mode }` (the mode the user switched to) and the text "The user approved the plan. Mode is now <label>. Implement it now; track progress with todo_write." (label "Accept edits" or "Ask"); rejected ("Keep planning"): the user's feedback reaches the model as the denial reason |
-| `task` | none / `safe` / 600 s | `{ description (3-80 characters), prompt (<= 20,000), type: 'explore' \| 'general' }` | runs a sub-agent (a separate agent loop with its own context) and streams `TaskOutput` snapshots as preliminary outputs: `{ status: 'queued' \| 'running' \| 'completed' \| 'failed' \| 'aborted' \| 'limit', type, description, modelRef, steps (the last 50: toolCallId, toolName, summary (<= 200), state `running` / `done` / `error` / `denied`, resultPreview? (<= 300)), stepsOmitted, report (<= 32,000), usage?, costUsd?, startedAt, finishedAt?, error? (<= 2,000) }`; the model reads only the report (`completed`, or `limit` with a report; "Sub-agent failed: <error>; partial report: <report or (none)>" otherwise). A child gets only the tools that run without approval in the chat's mode (no agent tools, no `generate_image`; an `explore` child and every child of a plan-mode chat follow `ask` without write / execute tools; a tool with a policy function stays and is decided per call, so in `edits` a `general` child can run the shell commands that match a shell rule), and any call that would ask is denied inside it ("Sub-agents cannot ask the user: this call needs approval."); at most 3 run at once (the others wait as `queued`), 20 per reply, `subagentMaxSteps` steps and 570 s each. A call without a chat run behind it yields one `failed` output |
-| `skill` (Phase 10, ADR-045) | none / `safe` / 60 s | `{ name }` (a skill name of the chat's catalog) | loads a skill: `{ name, description, source: 'builtin' \| 'plugin' \| 'user' \| 'project', content (<= 64 KiB), truncated, baseDir?, files? (<= 50) }` (`baseDir` and `files` for project skills: the skill's folder and its supporting files, without links, hidden or secret-looking paths); the model reads the content, then "Base folder: <dir> — read supporting files with read_file" and the file list. Offered only when the run's catalog has at least one active skill, never to a sub-agent; an unknown name is an error result that lists the available skills |
+| `task` | none / `safe` / 600 s | `{ description (3-80 characters), prompt (<= 20,000), type, background? }` (`type`: `'explore' \| 'general'` in v1.5; Phase 10: any agent name of the chat's catalog, and `background`, below) | runs a sub-agent (a separate agent loop with its own context) and streams `TaskOutput` snapshots as preliminary outputs: `{ status: 'queued' \| 'running' \| 'completed' \| 'failed' \| 'aborted' \| 'limit', type, description, modelRef, steps (the last 50: toolCallId, toolName, summary (<= 200), state `running` / `done` / `error` / `denied`, resultPreview? (<= 300)), stepsOmitted, report (<= 32,000), usage?, costUsd?, startedAt, finishedAt?, error? (<= 2,000) }`; the model reads only the report (`completed`, or `limit` with a report; "Sub-agent failed: <error>; partial report: <report or (none)>" otherwise). A child gets only the tools that run without approval in the chat's mode (no agent tools, no `generate_image`; an `explore` child and every child of a plan-mode chat follow `ask` without write / execute tools; a tool with a policy function stays and is decided per call, so in `edits` a `general` child can run the shell commands that match a shell rule), and any call that would ask is denied inside it ("Sub-agents cannot ask the user: this call needs approval."); at most 3 run at once (the others wait as `queued`), 20 per reply, `subagentMaxSteps` steps and 570 s each. A call without a chat run behind it yields one `failed` output |
+| `skill` (Phase 10, ADR-045) | none / `safe` / 60 s | `{ name }` (a skill name of the chat's catalog) | loads a skill: `{ name, description, source: 'builtin' \| 'plugin' \| 'user' \| 'project', content (<= 64 KiB), truncated, baseDir?, files? (<= 50) }` (`baseDir` and `files` only for project skills while the project folder is open: the skill's folder and its supporting files relative to it, at most 3 folders deep, without links, hidden or secret-looking paths, git-ignored files, `node_modules` and the skill's own `SKILL.md`; a linked skill folder lists no files); the model reads the content (then "(The skill was cut here: it is longer than 64 KB.)" when `truncated`), then "Base folder: <dir> — read supporting files with read_file" and "Supporting files: <dir>/<file>, …". Offered only when the run's catalog has at least one active skill, never to a sub-agent; an unknown, turned-off or invalid name is an error result ("Unknown skill "x".", "The skill "x" is turned off.", "The skill "x" is not valid.") that lists the available skills, and a chat without skills answers "No skills are available in this chat." |
 
 Phase 10 (ADR-045, ADR-046) widens `task`: `type` names **any agent of the chat's catalog** (the built-ins `explore`
 and `general`, the alias `general-purpose`, and the agents of plugins (below), of the user and of the project, see
@@ -250,7 +253,10 @@ iterator object, and a 1.3 host refuses a manifest with `contributes.agents` (un
 builtins follow the same rule: `core-agent` declares `"^1.4.0"` (v1.6), `core-tools` (1.2.0) and `core-workspace`
 `"^1.2.0"`, `core-providers` and `mock` `"^1.1.0"`. The in-browser templates and the example plugins still declare
 `"^1.0.0"` (they use no newer member), except `examples/plugins/agent-pack` (`"^1.4.0"`). A 1.3.0 plugin loads
-unchanged on a 1.4.0 host; one with a command named `remember` loses that command (it is refused and logged).
+unchanged on a 1.4.0 host unless it uses the command name `remember`: a manifest with `contributes.commands` named
+`remember` now fails the strict manifest schema (the plugin goes to `error`, "Reserved client-only command (…)"), and
+`ctx.commands.register({ name: 'remember', … })` throws `validation_error` ("The command "/remember" is reserved by the
+app."), which puts the plugin in `error` unless its `setup` catches it.
 
 ## 2. Plugin directory layout
 
@@ -1313,14 +1319,16 @@ with the same name wins and the plugin's entry is listed as shadowed (only where
   the `core-agent` tool `skill { name }` (policy `safe`): the result carries the `content` and the source `plugin`.
 - **Validation** happens at registration (`validation_error` naming the field: the name pattern, a built-in agent name,
   sizes, tool names, the model ref) and, for `contributes`, at manifest validation; a name already registered by another
-  plugin is a `conflict` (logged in the plugin's log; the plugin stays active, that entry is skipped). The registries are
+  plugin is a `conflict`: a `contributes` entry is skipped with a `warn` line in the plugin's log ("The agent "x" was
+  skipped: …"; the plugin stays active), while `ctx.agents.register` / `ctx.skills.register` throw it to the plugin
+  (catch it in `setup` to keep loading). The first registration wins; lists are sorted by name. The registries are
   global: a plugin agent exists in every chat, with or without a project.
 - **Lifecycle**: disabling, reloading or uninstalling the plugin removes its agents and skills at once (the catalogs
   are dropped and `customization.changed` is emitted); a running sub-agent of a removed agent finishes with the
   definition it started with.
 - **Where users see them**: the plugin card's summary ("2 agents · 1 skill"), the **Agents and skills** filter of the
   Plugins tab, the **Agents** / **Skills** sections of the plugin's Overview, and **From plugins** in Settings →
-  Customize (read-only, with View, Copy to personal and Export).
+  Customize (read-only, with View…, Copy to personal, Export .md and Open plugin).
 
 ```js
 // @ts-check
@@ -1358,7 +1366,7 @@ project only shows in the `instructions` of `chat.params` and in the workspace t
 
 | Hook | Input (read-only) | Output (mutable) | When it runs | Timeout | Failure behavior |
 |---|---|---|---|---|---|
-| `chat.params` | `chatId`, `modelRef`, `model`, `reasoningEffort`, `toolMode` | `instructions`, `temperature?`, `maxOutputTokens?`, `maxSteps`, `reasoning?`, `providerOptions` | once per chat run (not for image turns, which call no chat model, nor for a compaction's summary call, `/compact` included), after model resolution and `provider.reasoning()`, before `streamText`; for a chat model with image output `providerOptions` already holds the `imageParams()` options; `instructions` arrives joined (global, then in a project chat the workspace block, then (Phase 9) the agent blocks: the plan-mode block in `plan`, the todo hint and the `task` hint when those tools are offered, then the project file and the project's instructions, then the chat's), `maxSteps` as the `maxSteps` or `projectMaxSteps` setting, and the result is clamped to 1-200. Phase 9: every sub-agent runs `chat.params` and `chat.headers` once more for itself (its own `modelRef`, its lowered `toolMode`, instructions that start with the sub-agent preamble, no agent blocks) | 3 s | changes discarded, run continues |
+| `chat.params` | `chatId`, `modelRef`, `model`, `reasoningEffort`, `toolMode` | `instructions`, `temperature?`, `maxOutputTokens?`, `maxSteps`, `reasoning?`, `providerOptions` | once per chat run (not for image turns, which call no chat model, nor for a compaction's summary call, `/compact` included), after model resolution and `provider.reasoning()`, before `streamText`; for a chat model with image output `providerOptions` already holds the `imageParams()` options; `instructions` arrives joined (global, then in a project chat the workspace block, then (Phase 9) the agent blocks: the plan-mode block in `plan`, the todo hint and the `task` hint when those tools are offered, Phase 10: the "Agent types" block right after the `task` hint and the "Skills" block when `skill` is offered, then the project file and the project's instructions, then the chat's), `maxSteps` as the `maxSteps` or `projectMaxSteps` setting, and the result is clamped to 1-200. Phase 9: every sub-agent runs `chat.params` and `chat.headers` once more for itself (its own `modelRef`, its lowered `toolMode`, instructions that start with the sub-agent preamble, no agent blocks) | 3 s | changes discarded, run continues |
 | `chat.headers` | `chatId`, `modelRef` | `headers` (sent with every model request of the run) | once per chat run, after `chat.params` (not for image turns) | 3 s | changes discarded |
 | `chat.messages` | `chatId`, `modelRef` | `messages` (`ModelMessage[]` after `convertToModelMessages`, before context trimming): the path being answered, from the first message to the new or answered user message; other versions of edited or regenerated messages are never included (ADR-023); Phase 9: as the model sees it, so the messages before the latest compaction marker are replaced by the summary, replies are split at the messages the user sent during a run, and `task` outputs are reduced to their report; a compaction or a steer inside the run happens later, at a step boundary, and is not seen by the hook | once per chat run (image turns send no history and run no `chat.*` hook; never for a sub-agent or a `/compact` turn) | 3 s | changes discarded |
 | `tool.approve` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `decision?` (`allow` / `ask` / `deny`) | per tool call in `ask` / `edits` / `plan` / `auto` mode (unless a user override decided), step 2 of the approval order; never for `core-agent`'s `exit_plan_mode` (always asks). Inside a sub-agent it runs too (`toolCallId` `<parent call id>/<child call id>`, the sub-agent's mode), and an `ask` decision is denied there | 3 s | ignored; resolution falls through to the policy |
@@ -2070,9 +2078,10 @@ Configuration tab; read it with `ctx.settings.get()`). Use `ctx.secrets` for tok
 `created` plugins in the in-browser editor (saves re-pin automatically), use the Trust action, or develop from a
 linked folder (pinned to the path).
 
-**My plugin is `incompatible`.** `engines.harness` does not include `PLUGIN_API_VERSION` (`1.3.0`). Use `"^1.0.0"`
+**My plugin is `incompatible`.** `engines.harness` does not include `PLUGIN_API_VERSION` (`1.4.0`). Use `"^1.0.0"`
 (or `"^1.1.0"` when the plugin uses a 1.1 member such as `createTranscriptionModel` or `ctx.images`, `"^1.2.0"` for a
-1.2 member such as `ToolDefinition.workspace`, `"^1.3.0"` for an async-generator `execute`).
+1.2 member such as `ToolDefinition.workspace`, `"^1.3.0"` for an async-generator `execute`, `"^1.4.0"` for
+`contributes.agents` / `contributes.skills` or `ctx.agents` / `ctx.skills`).
 
 **Can my tool show progress, like a sub-agent?** Yes, since plugin API 1.3.0: write `execute` as an `async function*`
 and `yield` snapshots; the last yielded value is the result ([Tools](#tools)). Only the final value reaches the model

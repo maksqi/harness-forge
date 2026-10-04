@@ -19,11 +19,19 @@
 // `mock:todo` run stopped after its second list), two finished sub-agents with one expanded, a compacted chat with the
 // summary open, a live `mock:steer` run with a steer note and a queued server command, the `@` mention menu, and Settings
 // -> General -> Agent; the sub-agent and compaction models are set for the whole run (`mock:subagent`, `mock:compact`).
+// Phase 10 screens (W10.13): Settings -> Customize with the `notes` project (personal, project, shadowed and invalid
+// rows), the definition editor, the grouped slash menu, a live chat with two background agents, a background agent's
+// result note, the Remember dialog and a plugin's Agents and Skills sections. Their data: definition files in the `notes`
+// project folder (never in `harness-forge`, whose files show in the mention and Git screens), four personal
+// definitions, a `mock:agents` chat in `notes` that ran a custom agent and a `mock:background` chat whose agent
+// reported through a server-started turn (both seeded with the sub-agent model cleared); the live background chat and
+// the plugin are made by their screens and removed again in `close`.
 // A screen that starts something (a run, a recording, a dialog, settings only it needs, the open changes panel) undoes
 // it in `close`, so the other screens look the same in every run.
 // `@readme` (also `@screenshots`): the README images as full 1440x900 frames, written to `.tmp/screenshots/readme/`
 // with the file names of `docs/assets/screenshots/` (chat-dark, chat-light, plugins-dark, provider-wizard-dark,
-// settings-dark, workspace-dark, changes-panel-dark).
+// settings-dark, workspace-dark, changes-panel-dark) plus customize-dark (Phase 10: Settings -> Customize, a candidate for
+// the README).
 import type { Locator, Page } from '@playwright/test'
 import type { StartedServer, UiStreamChunk } from '../../helpers/index.ts'
 import { createHash } from 'node:crypto'
@@ -117,6 +125,12 @@ interface Seed {
   todos: string
   /** Phase 9: three questions, then `/compact keep the parser details` (summarized by `mock:compact`). */
   compacted: string
+  /** Phase 10: the `notes` project (its folder holds agent, command and skill files). */
+  notes: string
+  /** Phase 10: a `mock:agents` chat in `notes` that ran the personal agent `code-reviewer`. */
+  customAgent: string
+  /** Phase 10: a `mock:background` chat whose background agent reported through a server-started turn. */
+  taskResult: string
   /** The screenshot server (API calls of the screens that start something). */
   baseURL: string
   /** The start of the browser clock: a little after the seed, so relative times read "2m ago". */
@@ -164,6 +178,29 @@ const PROJECT_FILES: Readonly<Record<string, string>> = {
   [`${MOCK_CHECKPOINT_DIR}/index.html`]: '<!doctype html>\n',
 }
 
+/** Phase 10: the definition files of the `notes` project (Customize, the slash menu, the Remember dialog). */
+const NOTES_FILES: Readonly<Record<string, string>> = {
+  'README.md': '# Notes\n\nRelease notes and meeting notes.\n',
+  '.harness/agents/test-writer.md': '---\nname: test-writer\ndescription: Writes vitest tests for a module and runs them.\ntools: [read_file, write_file, shell]\n---\nWrite focused tests first.\n',
+  '.claude/agents/test-writer.md': '---\nname: test-writer\ndescription: Writes tests (the Claude Code version).\n---\nWrite tests.\n',
+  '.claude/agents/broken.md': '---\nname: broken\n---\nA file without a description.\n',
+  '.harness/commands/review.md': '---\ndescription: Review a file for bugs\nargument-hint: <file> [focus]\n---\nReview $1 with a focus on $2.\n',
+  '.harness/commands/frontend/lint.md': '---\ndescription: Lint the frontend and fix what is safe\n---\nLint the frontend.\n',
+  '.harness/skills/release-notes/SKILL.md': '---\nname: release-notes\ndescription: How this project writes release notes.\n---\nList the user-facing changes first.\n',
+  '.harness/skills/release-notes/template.md': '# Release {version}\n',
+}
+
+/** Phase 10: the personal definitions of the run (`test-writer` loses to the project's file in `notes`). */
+const PERSONAL_DEFINITIONS: readonly { kind: 'agent' | 'command' | 'skill', content: string }[] = [
+  { kind: 'agent', content: '---\nname: code-reviewer\ndescription: Reviews diffs for bugs and risky changes.\ntools: Read, Grep, Glob\nmodel: inherit\n---\nPERSONA: careful reviewer\nList real bugs first, then risky changes.\n' },
+  { kind: 'agent', content: '---\nname: test-writer\ndescription: Writes tests the way I like them.\n---\nPERSONA: test writer\n' },
+  { kind: 'command', content: '---\nname: standup\ndescription: Draft my standup notes\n---\nDraft my standup notes from $ARGUMENTS.\n' },
+  { kind: 'skill', content: '---\nname: pdf-forms\ndescription: Fill PDF forms from a description.\n---\nUse the form fields as listed.\n' },
+]
+
+/** Phase 10: the plugin of the plugin-detail-agents screen (made in `open`, removed in `close`). */
+const AGENT_PLUGIN_ID = 'db-tools'
+
 interface Screen {
   name: string
   only?: Viewport
@@ -186,6 +223,8 @@ const NO_SPEECH_SETTINGS = { speechModelRef: null, speechVoice: null, speechSpee
 let generatingChatId: string | null = null
 /** The chat of the live steer screen (deleted again in `close`). */
 let steerChatId: string | null = null
+/** Phase 10: the chat of the live background agents screen (deleted again in `close`). */
+let backgroundChatId: string | null = null
 /** How far the page clock ran ahead of the real one before the image-turn screen set it to the real time. */
 let clockOffsetMs = 0
 
@@ -668,6 +707,79 @@ const SCREENS: Screen[] = [
     },
   },
   {
+    name: 'composer-slash-groups',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await openChat(page, seed.customAgent)
+      await page.getByTestId(testIds.composerInput).click()
+      await page.keyboard.type('/')
+      const menu = page.getByTestId(testIds.slashMenu)
+      await expect(byTestId(menu, testIds.slashMenuItem, { 'data-value': 'review', 'data-group': 'project' })).toBeVisible()
+      await expect(byTestId(menu, testIds.slashMenuItem, { 'data-value': 'standup', 'data-group': 'personal' })).toBeAttached()
+      // The App group fills the first rows: scroll the Project heading to the top, so Project, Personal and Plugins show.
+      await menu.locator('[data-group="project"]:not([data-testid])').evaluate(element => element.scrollIntoView({ block: 'start' }))
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await page.getByTestId(testIds.composerInput).fill('')
+    },
+  },
+  {
+    name: 'chat-background-agents',
+    open: async (page, seed) => {
+      // Two agents that run until they are stopped, on the chat's model (`mock:background`); the durations count from the
+      // server's start times, so the page clock runs at the real time here (`close` puts the offset back).
+      const api = pageApi(page, seed)
+      await api.updateSettings({ subagentModelRef: null })
+      clockOffsetMs = await page.evaluate<number>('Date.now()') - Date.now()
+      await page.clock.setSystemTime(Date.now())
+      backgroundChatId = (await api.createChat({ title: 'Check the flaky tests', modelRef: 'mock:background' })).id
+      await api.sendChat({ chatId: backgroundChatId, modelRef: 'mock:background', toolMode: 'ask', text: 'bg explore loop' })
+      await api.sendChat({ chatId: backgroundChatId, modelRef: 'mock:background', toolMode: 'ask', text: 'bg general loop' })
+      await openChat(page, backgroundChatId)
+      const dock = page.getByTestId(testIds.backgroundAgents)
+      await expect(dock).toHaveAttribute('data-count', '2')
+      await expect(byTestId(page, testIds.taskBlock, { 'data-background': 'true', 'data-state': 'running' })).toHaveCount(2)
+      if (!isPhone(page))
+        await expect(dock.locator('[data-slot="background-agent-live"]').first()).toContainText('current_time')
+    },
+    close: async (page, seed) => {
+      if (backgroundChatId)
+        await pageApi(page, seed).removeChat(backgroundChatId)
+      backgroundChatId = null
+      await pageApi(page, seed).updateSettings({ subagentModelRef: 'mock:subagent' })
+      await page.clock.setSystemTime(Date.now() + clockOffsetMs)
+    },
+  },
+  {
+    name: 'chat-task-result',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await openChat(page, seed.taskResult)
+      const note = byTestId(page, testIds.taskResult, { 'data-variant': 'turn' })
+      await expect(note).toHaveAttribute('data-status', 'completed')
+      await note.getByTestId(testIds.taskResultToggle).click()
+      await expect(note.getByTestId(testIds.taskResultReport)).toBeVisible()
+      await expectTranscriptAtBottom(page)
+    },
+  },
+  {
+    name: 'remember-dialog',
+    open: async (page, seed) => {
+      await openChat(page, seed.customAgent)
+      const input = page.getByTestId(testIds.composerInput)
+      await input.fill('/remember Run pnpm check before every commit.')
+      await input.press('Enter')
+      const dialog = page.getByTestId(testIds.rememberDialog)
+      await expect(dialog).toBeVisible()
+      await expect(byTestId(dialog, testIds.rememberTarget, { 'data-value': 'project-file' })).toHaveAttribute('data-state', 'checked')
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.rememberDialog)).toHaveCount(0)
+    },
+  },
+  {
     name: 'share-dialog',
     open: async (page, seed) => {
       await openChat(page, seed.shared)
@@ -751,6 +863,40 @@ const SCREENS: Screen[] = [
     },
   },
   {
+    name: 'plugin-detail-agents',
+    only: 'desktop',
+    open: async (page, seed) => {
+      // A plugin of its own (removed in `close`): two agents, one of them shadowed by the personal `code-reviewer`.
+      await pageApi(page, seed).client.pluginDrafts.create({
+        body: {
+          manifest: {
+            manifestVersion: 1,
+            id: AGENT_PLUGIN_ID,
+            name: 'Database tools',
+            version: '1.2.0',
+            description: 'Sub-agents and skills for SQL work: a migration planner, a reviewer and a checklist.',
+            engines: { harness: '^1.4.0' },
+            contributes: {
+              agents: [
+                { name: 'sql-expert', description: 'Plans SQL migrations and checks them for locking problems.', instructions: 'Plan the migration step by step.', tools: ['read_file', 'search_files', 'find_files'], model: 'mock:agents' },
+                { name: 'code-reviewer', description: 'Reviews SQL in a diff.', instructions: 'Review the SQL.' },
+              ],
+              skills: [{ name: 'migration-checklist', description: 'What to check before a schema migration ships.', content: '# Migration checklist\n\n- Backfill first.\n' }],
+            },
+          } as never,
+        },
+      })
+      await page.goto(`/plugins/${AGENT_PLUGIN_ID}`)
+      const agents = byTestId(page, testIds.pluginCustomizations, { 'data-kind': 'agent' })
+      await expect(byTestId(agents, testIds.pluginCustomization, { 'data-name': 'code-reviewer' })).toHaveAttribute('data-state', 'shadowed')
+      await expect(byTestId(page, testIds.pluginCustomizations, { 'data-kind': 'skill' })).toHaveAttribute('data-count', '1')
+      await agents.scrollIntoViewIfNeeded()
+    },
+    close: async (page, seed) => {
+      await pageApi(page, seed).client.plugins.remove({ params: { id: AGENT_PLUGIN_ID }, query: {} })
+    },
+  },
+  {
     name: 'plugin-new-provider',
     open: async (page) => {
       await page.goto('/plugins/new?type=provider')
@@ -812,6 +958,32 @@ const SCREENS: Screen[] = [
       await expect(page.getByTestId(testIds.settingsCompactionModel)).toHaveAttribute('data-value', 'mock:compact')
       await page.getByText('Long chats, sub-agents and plans.').evaluate(element => element.scrollIntoView({ block: 'center' }))
     }),
+  },
+  {
+    name: 'settings-customize',
+    open: (page, seed) => openSettings(page, `/settings/customize?tab=agents&project=${seed.notes}`, async (page) => {
+      await expect(byTestId(page, testIds.customizeSection, { 'data-source': 'project' })).toHaveAttribute('data-count', '3')
+      await expect(byTestId(page, testIds.customizationRow, { 'data-source': 'user', 'data-name': 'test-writer' })).toHaveAttribute('data-state', 'shadowed')
+      await expect(byTestId(page, testIds.customizationRow, { 'data-source': 'project', 'data-name': 'broken' })).toHaveAttribute('data-state', 'invalid')
+    }),
+  },
+  {
+    name: 'customization-editor',
+    open: async (page, seed) => {
+      await openSettings(page, `/settings/customize?tab=agents&project=${seed.notes}`, async (page) => {
+        await expect(byTestId(page, testIds.customizationRow, { 'data-source': 'user', 'data-name': 'code-reviewer' })).toBeVisible()
+      })
+      await byTestId(page, testIds.customizationRow, { 'data-source': 'user', 'data-name': 'code-reviewer' }).getByTestId(testIds.customizationRowMenu).click()
+      await page.getByTestId(testIds.customizationEdit).click()
+      const editor = page.getByTestId(testIds.customizationEditor)
+      await expect(editor).toHaveAttribute('data-mode', 'edit')
+      await expect(editor.getByTestId(testIds.customizationBody)).toHaveAttribute('data-ready', 'true')
+      await expect(byTestId(editor, testIds.customizationToolChip, { 'data-tool-name': 'read_file' })).toBeVisible()
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.customizationEditor)).toHaveCount(0)
+    },
   },
   {
     name: 'settings-appearance',
@@ -946,7 +1118,25 @@ async function seed(server: StartedServer): Promise<Seed> {
     for (const folder of ['harness-forge/apps', 'harness-forge/packages', 'notes', 'playground/api', 'playground/scripts', 'playground/web'])
       await mkdir(join(root, folder), { recursive: true })
     const project = (await api.client.projects.create({ body: { name: 'harness-forge', path: join(root, 'harness-forge') } })).id
-    await api.client.projects.create({ body: { name: 'notes', path: join(root, 'notes') } })
+    for (const [file, content] of Object.entries(NOTES_FILES)) {
+      await mkdir(join(root, 'notes', dirname(file)), { recursive: true })
+      await writeFile(join(root, 'notes', file), content)
+    }
+    const notes = (await api.client.projects.create({ body: { name: 'notes', path: join(root, 'notes') } })).id
+    // Phase 10 first (the oldest chats: the sidebar lists them last), with the sub-agents on the chats' own models.
+    for (const definition of PERSONAL_DEFINITIONS)
+      await api.client.customizations.create({ body: definition })
+    await api.updateSettings({ subagentModelRef: null })
+    const taskResult = (await api.createChat({ title: 'Find the flaky tests', modelRef: 'mock:background' })).id
+    await api.sendChat({ chatId: taskResult, modelRef: 'mock:background', toolMode: 'ask', text: 'bg explore Find the flaky tests.' })
+    // The agent reports through a turn the server starts by itself: wait for its reply.
+    await expect.poll(async () => {
+      const last = (await api.getChat(taskResult)).messages.at(-1)
+      return last?.role === 'assistant' && last.metadata?.finishedAt !== undefined && last.parts.some(part => part.type === 'text' && part.text.startsWith('Background result:'))
+    }, { timeout: 15_000, message: 'the background agent reported' }).toBe(true)
+    const customAgent = (await api.createChat({ title: 'Review the release notes', projectId: notes, modelRef: 'mock:agents' })).id
+    await api.sendChat({ chatId: customAgent, modelRef: 'mock:agents', toolMode: 'ask', text: 'agent code-reviewer' })
+    await api.updateSettings({ subagentModelRef: 'mock:subagent' })
     // Phase 9 first (the oldest chats: the sidebar lists them last). Nothing here writes into the project folder.
     const plan = (await api.createChat({ title: 'Plan the cookie settings', projectId: project, modelRef: 'mock:plan' })).id
     await api.sendChat({ chatId: plan, modelRef: 'mock:plan', toolMode: 'plan', text: 'Plan moving the session cookie settings into one module.' })
@@ -1060,6 +1250,9 @@ async function seed(server: StartedServer): Promise<Seed> {
       subagents,
       todos,
       compacted,
+      notes,
+      customAgent,
+      taskResult,
       baseURL: server.baseURL,
       now: Date.now() + 2 * 60_000,
     }
@@ -1134,6 +1327,8 @@ const README_SHOTS: readonly { file: string, screen: string, theme: Theme }[] = 
   { file: 'provider-wizard-dark', screen: WIZARD_API_SCREEN.name, theme: 'dark' },
   { file: 'settings-dark', screen: 'settings-providers', theme: 'dark' },
   { file: 'chat-light', screen: 'chat-approval', theme: 'light' },
+  // Phase 10: a candidate for the README (W10.14 decides).
+  { file: 'customize-dark', screen: 'settings-customize', theme: 'dark' },
 ]
 
 /** Captures the README images of one theme as full 1440x900 frames (no crops) into `.tmp/screenshots/readme/`. */

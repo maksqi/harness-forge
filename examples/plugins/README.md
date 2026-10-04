@@ -1,6 +1,6 @@
 # Example plugins
 
-Five small plugins that install as they are. Each folder is one plugin, and its name is the plugin id. Every example
+Six small plugins that install as they are. Each folder is one plugin, and its name is the plugin id. Every example
 has a README that explains how it works and how to change it.
 
 | Example | Kind | What it shows | Needs |
@@ -10,6 +10,7 @@ has a README that explains how it works and how to change it.
 | [`dice-roller`](./dice-roller/) | code (`index.mjs`, JSDoc) | a tool with a zod input schema and the `safe` policy | trust |
 | [`echo-provider`](./echo-provider/) | code (`index.ts`, TypeScript) | a provider with a hand-written AI SDK `LanguageModelV4` (no key, no network) | trust |
 | [`mcp-everything`](./mcp-everything/) | declarative + stdio MCP | an MCP server started with `npx`, whose tools the model can call | trust, `npx` on the server |
+| [`agent-pack`](./agent-pack/) | code (`index.mjs`) + `contributes` | sub-agent types and skills (plugin API 1.4.0), declared in `plugin.json` and registered from code | trust, a harness with plugin API 1.4.0 |
 
 ## Install an example
 
@@ -27,9 +28,12 @@ server runs on another machine or in Docker.
 
 ## Tests
 
-`examples.test.ts` checks every manifest with the shared `pluginManifestSchema`. It then loads all five examples
-into the real plugin host, with no network access and no `npx`. It calls the dice tool, streams a chat from the echo
-provider, and runs the LM Studio and Together AI manifests against a fake OpenAI-compatible server. The examples are
+`examples.test.ts` checks every manifest with the shared `pluginManifestSchema` (and each `engines.harness` range). It
+then loads all six examples into the real plugin host, with no network access and no `npx`. It calls the dice tool,
+streams a chat from the echo provider, runs the LM Studio and Together AI manifests against a fake OpenAI-compatible
+server, and checks that the agent pack registers its two agents and two skills (one of each from `plugin.json`, one of
+each from `index.mjs`) without a warning. It also checks that the snippets of `docs/PLUGINS.md` equal the shipped files
+(including the agent pack's `plugin.json` and `index.mjs`) and that the manifests of the guides parse. The examples are
 a project of the root Vitest config:
 
 ```sh

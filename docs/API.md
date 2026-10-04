@@ -439,7 +439,9 @@ type Settings = {                       // settingsSchema; every key always pres
   planDirectory: string                 // default '.harness/plans'; trimmed, 1..200 chars, a relative folder inside the
                                         // project (isSafePlanDirectory): no leading '/' or '\' or drive letter, no
                                         // empty, '.' or '..' segment, no '.git' segment (any case), no control
-                                        // characters (else 400 on ['planDirectory'])
+                                        // characters (else 400 on ['planDirectory']); when a plan is written, '\' is
+                                        // read as '/' and a trailing separator is dropped ('docs\plans/' is
+                                        // 'docs/plans')
 }
 
 type SettingsUpdate = Partial<Settings> // settingsUpdateSchema; strict, at least one key
@@ -739,7 +741,8 @@ type CommandInvocation = {              // commandInvocationSchema
   type: 'prompt' | 'reply' | 'compact'  // 'compact': the harness command /compact [focus] (Phase 9, ADR-040)
   expansion?: string                    // prompt commands: text sent to the model instead (<= 64 KB)
   // Phase 10 (ADR-045): command files and personal commands; absent in v1.5 messages
-  source?: CommandSource                // 'harness' | 'plugin' | 'user' | 'project'
+  source?: CommandSource                // 'user' | 'project' (a personal command or a command file); plugin and
+                                        // harness invocations carry no source (their v1.5 shape)
   modelRef?: ModelRef                   // the command's model: the turn runs on it (the chat keeps its model); a
                                         // continuation or regenerate of the turn reuses it; when it cannot run the
                                         // chat model answers with the notice command-model-unavailable
@@ -762,9 +765,10 @@ type NoticeData = {                     // noticeDataSchema
                                         // without workspace tools (ADR-031; section 5.10)
     | 'compaction-failed'               // Phase 9 (ADR-040): the summary could not be written, so the oldest turns
                                         // were trimmed instead (section 6.9)
-    | 'command-model-unavailable'       // Phase 10 (ADR-045): the model of a command file cannot run (unknown,
-                                        // disabled or unconfigured), so the chat model answered (the message names
-                                        // the requested model)
+    | 'command-model-unavailable'       // Phase 10 (ADR-045): the model of a command file cannot run (it does not
+                                        // resolve: unknown, disabled or unconfigured; or its catalog kind is not
+                                        // 'chat'), so the chat model answered: "The command's model <ref> is not
+                                        // available, so the chat's model answered." (once per reply)
   message: string
 }
 
@@ -1198,7 +1202,11 @@ event of every stream: the server closes all streams right after it (the session
 by a rewind, revert or undo (ADR-036). `queue.changed` (`QueueChangedData`, section 4.26) reports every change of the
 steer queue of a chat (ADR-042). Phase 10: `task.changed` (`TaskChangedData`, section 4.29) reports a background task
 of a chat (an upsert: at most one event per second per task, plus every status change and the delivery);
-`customization.changed` (`CustomizationChangedData`, section 4.28) says the catalog changed (refetch what it names).
+`customization.changed` (`CustomizationChangedData`, section 4.28) says the catalog changed (refetch what it names):
+`{ kind, id }` right after every personal create, update or delete; `{}` (coalesced, at most one per second) after a
+registry change of plugin agents, skills or commands and after a backup restore that added definitions; `{ projectId }`
+(coalesced, at most one per second per project) when a cached project catalog is dropped or a rebuild finds other
+definition files.
 
 ### 4.15 Params and form schemas
 
@@ -1275,11 +1283,13 @@ type DataImportResult = {               // dataImportResultSchema (POST /data/im
                                         // the upload, or unusable (over 20 MB, damaged, sha256 or type mismatch)
   }
   settingsRestored: boolean
-  customizations?: {                    // Phase 10: what restoreCustomizations did; absent when nothing was restored
+  customizations?: {                    // Phase 10: what restoreCustomizations did; absent when it was not asked for,
+                                        // the backup has no customizations.json, or the file could not be read (a
+                                        // warning says why)
     imported: number                    // personal definitions created
     skipped: number                     // the kind and name already existed (kept)
-    failed: number                      // invalid content, or the per-kind limit (200)
-  }
+    failed: number                      // invalid items or content, or the per-kind limit (200); each with a warning
+  }                                     // that names the kind and the name, never the content
   items: DataImportItem[]
   warnings: string[]                    // <= 100, each <= 300 chars: unknown entries, a chat count that differs from
 }                                       // the manifest, attachments not restored, settings keys that are unknown or
@@ -1354,7 +1364,10 @@ type BackupManifest = {                 // backupManifestSchema; manifest.json, 
   chatExportVersion: 2                  // version of every chats/<chatId>.json
   includes: { files: boolean; settings: boolean; customizations?: boolean }   // customizations: Phase 10 (absent in
   counts: { chats: number; messages: number; files: number; fileBytes: number; customizations?: number }  // older
-}                                       // backups = false / 0)
+}                                       // backups = false / 0): includes.customizations is true whenever the personal
+                                        // definitions were read (also with none), false when customizations=false or
+                                        // the read failed (the backup goes on without them); counts.customizations is
+                                        // always written (0 then)
 
 type BackupFileEntry = {                // backupFileEntrySchema; one item of files/index.json
   id: FileId                            // the id in the part URLs (/api/files/<id>); remapped on import when needed
@@ -1377,7 +1390,7 @@ Backup zip layout (`GET /data/export`; every entry mode 0644 with mtime = `expor
 | `chats/<chatId>.json` | the `ChatExport` (version 2) of every chat, archived ones included |
 | `files/index.json` | `BackupFileIndex` (only with `files=true`) |
 | `files/<sha256>` | attachment bytes, deduplicated by sha256: stored for images and PDF, deflated for text |
-| `customizations.json` | `BackupCustomizations` (Phase 10, ADR-044; section 4.28): every personal agent, command and skill as raw markdown with its `enabled` flag (only with `customizations=true`; restored only on opt-in) |
+| `customizations.json` | `BackupCustomizations` (Phase 10, ADR-044; section 4.28): every personal agent, command and skill as raw markdown with its `enabled` flag (only with `customizations=true` and at least one definition; restored only on opt-in, `restoreCustomizations=true`) |
 
 Never in a backup: secrets, credentials, the password, plugins, MCP servers, model and tool preferences, share links,
 projects (and the `projectId` of chats, ADR-031; so no project definition files either), background tasks (Phase 10;
@@ -2183,7 +2196,7 @@ run offers (and, in `plan`, the plan-mode block), after the workspace block and 
 | `todo_write` | `todoWriteInputSchema` | `todoWriteOutputSchema` | `safe` |
 | `exit_plan_mode` | `exitPlanModeInputSchema` | `exitPlanModeOutputSchema` | `always`: the plan approval card always shows (overrides and hooks cannot approve it) |
 | `task` | `taskInputSchema` | `taskOutputSchema` (streamed as preliminary outputs, section 6.9) | `safe` / 600 s |
-| `skill` (Phase 10) | `skillInputSchema` | `skillOutputSchema` | `safe`; offered only when the run's catalog has skills, never inside a sub-agent |
+| `skill` (Phase 10) | `skillInputSchema` | `skillOutputSchema` | `safe` / 60 s; offered only when the run's catalog has at least one active skill, never inside a sub-agent |
 
 ```ts
 type TodoItem = {                       // todoItemSchema
@@ -2246,7 +2259,8 @@ type TaskAgent = {                      // taskAgentSchema (Phase 10)
   source: CustomizationSource           // 'builtin' | 'plugin' | 'user' | 'project'
   description: string                   // <= 200 chars (the agent's description, cut)
   path?: string                         // project agents: the project-relative path of the definition file
-}
+  pluginId?: PluginId                   // plugin agents (P10-A CCR): the contributing plugin ("From {plugin}")
+}                                       // builtin agents get a snapshot too ({ source: 'builtin', description })
 
 type SkillInput = { name: string }      // skillInputSchema (Phase 10): skillNameInputSchema, trimmed and lowercased
 type SkillOutput = {                    // skillOutputSchema (Phase 10)
@@ -2255,9 +2269,12 @@ type SkillOutput = {                    // skillOutputSchema (Phase 10)
   source: CustomizationSource
   content: string                       // the skill body (Markdown), <= 65536 chars
   truncated: boolean                    // the body was cut
-  baseDir?: string                      // project skills: the project-relative folder ('.harness/skills/<name>')
-  files?: string[]                      // project skills: supporting files relative to baseDir (<= 50; no links, no
-}                                       // hidden or secret-looking files)
+  baseDir?: string                      // project skills, when the project folder is open: the project-relative
+                                        // folder of its SKILL.md ('.harness/skills/<name>')
+  files?: string[]                      // with baseDir: supporting files relative to baseDir, in walk order (<= 50,
+}                                       // 3 folder levels; no links, hidden, secret-looking or gitignored files, no
+                                        // node_modules, not the SKILL.md itself; [] when the folder goes through a
+                                        // link or the listing fails)
 ```
 
 - **Todos** (`todo_write`): every call replaces the whole list (unknown keys dropped); the model gets a one-line
@@ -2303,25 +2320,47 @@ type SkillOutput = {                    // skillOutputSchema (Phase 10)
 - **Custom agents** (Phase 10, ADR-045): `type` names any agent of the run's catalog (section 4.28; the builtins
   `explore` and `general`, plugin, personal and project agents; `general-purpose` is `general`). A custom agent's body
   becomes the child's instructions after the sub-agent preamble; its `tools` narrow the set a `general` child would get
-  in the parent's mode (never widen it: no tool above the ceiling above, never an approval-requiring tool); its `model`
-  picks the child model (`inherit` = the parent run's model; a model that cannot be resolved falls back to the default
-  with a warning); `agent` in the output records the definition. An unknown type ends the call as `failed`, listing the
-  available types. The run instructions list the agent types (at most 30, `LIMITS.agentTypesListedMax`, descriptions
-  cut to 250 characters); the tool description stays static.
-- **Background sub-agents** (Phase 10, ADR-046): with `background: true` the call returns at once with `status:
-  'background'` and a `taskId`; the child runs detached (section 4.29). The model reads a short text naming the task;
-  the result arrives later as a `data-task-result` part (section 6.10). At most 3 per chat
-  (`LIMITS.backgroundTasksPerChatMax`) and 10 per server run at once; past a limit the call ends as `failed`.
-- **Skills** (`skill`, Phase 10, ADR-045): the run instructions list the catalog's skills (name and description, at
-  most 50, `LIMITS.skillsListedMax`) when `skill` is offered; the model loads one body on demand. The model text is the
-  body, plus for project skills the base folder and its supporting files, which the model reads with `read_file` (a
-  `safe` read; writes under `.harness` / `.claude` still always ask); an unknown name is the call's error result. Skills
-  are not user-invocable (no `/skill`).
-- **Plan files** (Phase 10, ADR-047): with `planFiles` on, approving `exit_plan_mode` in a project chat writes the plan
-  to `<planDirectory>/<YYYY-MM-DD>-<slug>.md` (UTC date; the slug from the first heading or line, `[a-z0-9-]`, at most
-  48 characters, else `plan`; `-2`, `-3`, … on a collision) through the change journal of the reply (rewindable, listed
-  in the changes panel); the output carries `planPath` and the model text adds "The plan was saved to <path>.". A failed
-  write never fails the approval: the output carries `planError`.
+  in the parent's mode (never widen it: no tool above the ceiling above, never an approval-requiring tool; so a custom
+  agent that lists `shell` gets it in `edits` too, where a command outside the shell rules is denied); its `model` picks
+  the child model (`inherit` = the parent run's model; no `model` = the default, `subagentModelRef` else the parent's
+  model; a model that cannot be resolved falls back to that default with a warning in the log); `agent` in the output
+  records the definition (every output carries the resolved `type` and an `agent` snapshot, builtins included). The
+  body is loaded again when the call starts: a definition that is gone or no longer valid ends the call as `failed`
+  ("The agent type <name> could not be loaded."). An unknown, turned-off, invalid or shadowed type ends the call as
+  `failed` at once: "Unknown agent type <type>. Available: explore, general, …" (the builtins first, then by name).
+  The run instructions list the agent types right after the `task` hint, as the block "Agent types (the type of a
+  task call):" with one `- name: description` line per active agent (at most 30, `LIMITS.agentTypesListedMax`,
+  descriptions on one line cut to 250 characters with "…"); the tool description stays static.
+- **Background sub-agents** (Phase 10, ADR-046): with `background: true` the type is resolved first (an unknown type
+  fails without a launch), then the call returns at once with `status: 'background'` and a `taskId`; the child runs
+  detached (section 4.29). The model reads "Started background agent <taskId>. Its report will arrive as a message;
+  keep working."; the result arrives later as a `data-task-result` part (section 6.10). A launch counts toward the
+  per-run cap of 20 (not toward the 3 parallel slots). At most 3 run per chat (`LIMITS.backgroundTasksPerChatMax`) and
+  10 per server (`LIMITS.backgroundTasksMax`); past a limit the call ends as `failed` ("At most 3 background agents run
+  per chat. Wait for one to finish.", "At most 10 background agents run on this server. Wait for one to finish."; during
+  shutdown "The server is shutting down.").
+- **Skills** (`skill`, Phase 10, ADR-045; 60 s): the run instructions list the catalog's active skills when `skill` is
+  offered, as the block "Skills (when a request matches one, load it with the skill tool before you start; it gives you
+  its instructions):" with one `- name: description` line each (by name, at most 50, `LIMITS.skillsListedMax`,
+  descriptions cut to 250 characters); the model loads one body on demand (read and validated again; a body over 64 KiB
+  is cut, `truncated`, and the model text says so). The model text is the body, plus for project skills "Base folder:
+  <baseDir> — read supporting files with read_file" and "Supporting files: …" (project-relative paths), which the
+  model reads with `read_file` (a `safe` read; writes under `.harness` / `.claude` still always ask). Errors are the
+  call's error result: "Unknown skill "<name>".", "The skill "<name>" is turned off.", "The skill "<name>" is not
+  valid." or "The skill "<name>" could not be loaded. <reason>", each followed by " Available skills: a, b." (at most
+  50 names); a catalog without skills: "No skills are available in this chat."; a call without the run's agent scope:
+  "Skills are not available yet.". Skills are not user-invocable (no `/skill`).
+- **Plan files** (Phase 10, ADR-047): with `planFiles` on, approving `exit_plan_mode` in a project chat (a chat run
+  with its project folder open) writes the plan to `<planDirectory>/<YYYY-MM-DD>-<slug>.md` (UTC date; the slug from
+  the first heading, else the first non-empty line: accents dropped, `[a-z0-9-]`, cut at 48 characters, else `plan`;
+  `-2` … `-99` when the name is taken, also by a folder or a dangling link; a file is never overwritten; the content
+  ends with a newline) through the change journal of the reply (rewindable, revertible, listed in the changes panel).
+  `planDirectory` is checked again (`isSafePlanDirectory`) and must resolve to its own spelling (a symbolic link
+  anywhere on it is refused, even one into the project); missing folders are created. The output carries `planPath`
+  and the model text adds "The plan was saved to <path>.". A failed write never fails the approval: the output carries
+  `planError` (one line, at most 500 characters, e.g. "The plan folder setting is not a folder inside the project.",
+  "The reply was stopped before the plan file was written.", "The plan file could not be written.") and the model text
+  adds "The plan file could not be saved: <planError>.".
 
 ### 4.26 Steer queue
 
@@ -2329,8 +2368,9 @@ ADR-042. A message sent while a chat's run is active, or while its reply waits f
 queue on the server (`POST /chat/:id/queue`; in memory, lost on a restart; at most 10 messages of at most 256 KiB
 each). At the next step boundary of the run, the run takes every queued message: the model sees each one as a user
 message and the reply stores it as a `data-steer` part (section 6.9). A message still queued when the run completes
-becomes the next turn, started by the server (`run.started` with `origin: 'queue'`). Server commands (`/compact` and
-plugin commands; `turnOnly`) are never steered: they wait for the next turn.
+becomes the next turn, started by the server (`run.started` with `origin: 'queue'`). Server commands (`/compact`,
+plugin commands and, since Phase 10, the command files of the chat's project and the personal commands; `turnOnly`)
+are never steered: they wait for the next turn.
 
 ```ts
 type UserMessagePart =                  // userMessagePartSchema: the parts a user message can hold
@@ -2457,9 +2497,9 @@ commands) < `user` (personal definitions, table `customizations`, Settings → C
 
 | Kind | Project files | Frontmatter (besides `name`, `description`) | Body |
 |---|---|---|---|
-| `agent` | `.harness/agents/<name>.md`, `.claude/agents/<name>.md` (top level) | `tools` (a comma string or a list; Claude Code names map: Read → `read_file`, Write → `write_file`, Edit / MultiEdit → `edit_file`, Grep → `search_files`, Glob → `find_files`, LS → `list_directory`, Bash → `shell`, WebFetch → `web_fetch`; `mcp__*` kept; others dropped with a diagnostic), `model` (`provider:model` or `inherit`; `sonnet` / `opus` / `haiku` fall back to the default with `model-alias`) | the child's instructions |
-| `command` | `.harness/commands/**/<name>.md` (up to 3 folders deep; a folder is a display-only `namespace`) | `argument-hint`, `model`, `allowed-tools` (narrows the turn's tools; never a grant) | the prompt: `$ARGUMENTS`, `$1` … `$9` (quotes group words), `{{input}}`; without a placeholder the input is appended; `!` lines and `@file` stay text |
-| `skill` | `.harness/skills/<name>/SKILL.md` | - | the skill content (loaded by `skill`) |
+| `agent` | `.harness/agents/<name>.md`, `.claude/agents/<name>.md` (top level) | `tools` (a comma string or a list; Claude Code names map: Read → `read_file`, Write → `write_file`, Edit / MultiEdit → `edit_file`, Grep → `search_files`, Glob → `find_files`, LS → `list_directory`, Bash → `shell`, WebFetch → `web_fetch`; `mcp__*` kept; a pattern such as `Bash(git:*)` keeps the tool with `tool-pattern`; other tool-like names are kept and checked against the registered tools, `unknown-tool` when nothing matches; anything else dropped with `unknown-tool`), `model` (`provider:model` or `inherit`; `sonnet` / `opus` / `haiku` fall back to the default with `model-alias`) | the child's instructions |
+| `command` | `.harness/commands/**/<name>.md`, `.claude/commands/**/<name>.md` (up to 3 folders deep, at most 100 subfolders; a folder is a display-only `namespace`) | `argument-hint`, `model`, `allowed-tools` (narrows the turn's tools; never a grant) | the prompt: `$ARGUMENTS`, `$1` … `$9` (quotes group words), `{{input}}`; without a placeholder the input is appended; `!` lines and `@file` stay text |
+| `skill` | `.harness/skills/<name>/SKILL.md`, `.claude/skills/<name>/SKILL.md` | - | the skill content (loaded by `skill`) |
 
 Names: agents and skills `AGENT_NAME_PATTERN` (`^[a-z][a-z0-9-]{0,63}$`), commands `COMMAND_NAME_PATTERN`; the `name`
 key, else the file stem (agents, commands) or the folder name (skills). Reserved: the agent types `explore`, `general`,
@@ -2568,8 +2608,9 @@ type CustomizationUpdate = {            // customizationUpdateSchema (PATCH /cus
 type CustomizationChangedData = {       // customizationChangedDataSchema: data of customization.changed
   kind?: CustomizationKind
   id?: CustomizationId                  // a personal definition was created, updated or deleted
-  projectId?: ProjectId                 // the definition files of a project changed
-}                                       // none: refetch everything (plugin agents or skills changed)
+  projectId?: ProjectId                 // the definition files of a project changed (or its cached catalog was dropped)
+}                                       // none: refetch everything (plugin agents, skills or commands changed, or a
+                                        // backup restore added personal definitions)
 
 type BackupCustomization = {            // backupCustomizationSchema: one item of customizations.json
   kind: CustomizationKind; name: string; content: string; enabled: boolean
@@ -2588,26 +2629,47 @@ type DeclarativeSkill = {               // declarativeSkillSchema (contributes.s
 }
 ```
 
-- **Caching**: the project part of a catalog is cached per project for 10 s (`LIMITS.customizationIndexTtlMs`), built
-  one at a time, and dropped on `workspace.changed` or `project.changed` of the project and when a run of one of its
-  chats finishes; plugin and personal changes rebuild the global part. Discovery reads only the frontmatter; a body is
-  read (and validated) again when it is used.
+- **Caching**: a catalog is cached per project for 10 s (`LIMITS.customizationIndexTtlMs`; at most 50 project
+  catalogs), built one at a time, and dropped on a `workspace.changed` of the project whose paths touch one of the six
+  definition folders (or that lists 200 paths, so it may be cut), on `project.changed` and when a run of one of its
+  chats finishes (`run.finished`: shell commands write without `workspace.changed`); a registry change of plugin
+  agents, skills or commands, every personal change and a restore drop every catalog. A build that fails (the
+  database) answers the builtins with a `read-failed` diagnostic and is not cached.
+- **Discovery** reads the first 9 KiB of each file (the 8 KiB frontmatter cap and the start of the body; a file whose
+  cut does not parse is read again whole) and checks the first 8 KiB for a NUL byte; a body is read (and validated)
+  again when it is used. Scans stop at 2000 entries per folder and at 100 subfolders of a commands folder (`limit`).
+  A linked file or folder is a folder-level `link` diagnostic; a file that is too large, binary or unreadable is an
+  `invalid` entry with `too-large` / `binary` / `read-failed`; a secret-looking name (`secrets.md`) is never read (an
+  `info` `read-failed` diagnostic). A file whose YAML is invalid but that the line reader still reads is listed
+  `active` with an `invalid-frontmatter` warning. `invalid-model` checks only the providers the entries reference
+  (configured and enabled); `unknown-tool` checks against the registered tools and skips `mcp__*` names.
+  `project.issue` carries the project service's message (it names the folder path).
 - **Use**: a run loads the catalog of its chat once (`task` types and skills); `GET /commands?projectId=` lists the
   effective commands (section 5.14). An `invalid`, `shadowed` or `off` entry is never used.
 - **Personal definitions** keep their raw markdown; the server parses it on every write (an `error` diagnostic is
-  `400`), keeps the denormalized kind, name, description and enabled flag, and allows 200 per kind. They are in
-  backups (`customizations.json`) and survive delete-all.
+  `400`), keeps the denormalized kind, name, description and enabled flag, and allows 200 per kind (`409` `exists`
+  above). They are in backups (`customizations.json`) and survive delete-all.
+- **Plugin commands** are listed in the catalog too (`source: 'plugin'`), so a project or personal command that
+  shadows one shows it; plugin agents and skills come from the registries of plugin API 1.4.0 (PLUGINS.md).
 
 ### 4.29 Background tasks and task results
 
 ADR-046. A `task` call with `background: true` returns at once (`status: 'background'`, `taskId`); its child runs
-detached from the tool call under a per-chat manager with its own abort signal (Stop of the task, chat or project
-delete, delete-all, key rotation, shutdown; never the chat's Stop) and a 30-minute deadline
+detached from the tool call under a per-chat manager with its own abort signal (Stop of the task, chat delete,
+delete-all, key rotation, shutdown; never the chat's Stop; a project with a running task cannot be deleted) and a
+30-minute deadline
 (`LIMITS.backgroundTaskTimeoutMs`), with `subagentMaxSteps`, at most 3 per chat and 10 per server. A background child
 never asks for approval (a call that would ask is denied, as for every sub-agent); its writes are journaled under the
 launching message; while one runs, its project is busy (`409 run-active` for rewind, revert, undo, project delete, chat
-move and version delete). Tasks are stored in `background_tasks`; a server restart ends a running task as `aborted`
-("The server restarted before the task finished.") and delivers its result at the chat's next run.
+move and version delete). Tasks are stored in `background_tasks` (the row is written at the start and at the end; the
+live snapshots stay in memory). End states and their `output.error`: the deadline ends a task as `limit` ("The
+background agent reached its time limit (30 minutes)."), the step limit as `limit` too; its Stop, a chat delete,
+delete-all, a key rotation and a normal shutdown end it as `aborted` ("The background task was stopped.", the
+partial report kept); a task the server could not stop (a crash) is still `running` at the next boot, which ends it as
+`aborted` ("The server restarted before the task finished."). An undelivered result (also one of a task stopped by a
+key rotation or a shutdown) is delivered at the chat's next run; chat deletion and delete-all drop it with the chat.
+Rows are pruned per chat to 100 (`LIMITS.backgroundTasksKeptPerChat`) when a task starts: the oldest delivered,
+finished rows go first (undelivered and running rows are never pruned).
 
 ```ts
 type BackgroundTaskStatus = 'running' | 'completed' | 'failed' | 'aborted' | 'limit'   // backgroundTaskStatusSchema
@@ -2640,16 +2702,26 @@ type TaskChangedData = { chatId: ChatId; task: BackgroundTask }   // taskChanged
 
 - **Delivery** (section 6.10): a finished task's result is delivered once, as one `data-task-result` part: at the next
   step boundary of a running reply of the chat (like a steer), or, when the chat is idle after a natural ending, through
-  a turn the server starts (`run.started.origin = 'task'`) whose user-role carrier message holds only the results. No
-  automatic turn starts while an approval is pending, during maintenance, at boot, for an image chat model, or from a
-  turn that itself had `origin: 'task'` (a task launched there delivers at the next run); a result that cannot start a
-  turn waits for the chat's next run.
+  a turn the server starts (`run.started.origin = 'task'`, request id `task_…`) whose user-role carrier message holds
+  only the results. Only a natural ending (`completed`, `failed`, `limit`) of a task launched by a `request` or `queue`
+  run may start a turn: never a stopped task, never a result loaded at boot, never a task launched from a turn that
+  itself had `origin: 'task'` (chain depth 1). No automatic turn starts while an approval is pending, while a
+  maintenance operation blocks runs, or when the chat's model (else the default model) is missing or an image model;
+  such results wait for the chat's next run (its step 0). A started turn takes every waiting result of the chat (also
+  aborted ones and those of task-started turns); it runs on the chat's model (else the default model) with the chat's
+  mode and effort (else those of the launching run, else the defaults). A turn that loses the chat to a `POST /chat`
+  (`409 run-active`) puts the results back at the head (that run's step boundaries take them); any other failure keeps
+  them for the next run.
 - **Cost**: one usage row (purpose `subagent`, `messageId` = the launching reply) per task; the cost is in
   `output.costUsd` and the chat totals, not in any message's metadata.
-- **Consumers of `data-task-result`**: the model history (`splitTaskResults`: the model reads `taskResultText`, a
-  `<background-task id type status>` block with the report), the Markdown export ("Background task: <description>
-  (<status>)" and the report), the search text (the report), chat import (`harnessDataSchemas`); share pages drop the
-  part (and a carrier message that holds only results).
+- **Consumers of `data-task-result`**: the model history (`splitTaskResults`, after `splitSteers`: each result is a
+  user message of its own whose id is the task id, the reply's later halves get `~r<k>` ids; the model reads
+  `taskResultText`, a `<background-task id type status description>` block with the report, else `Error: <error>`,
+  else `(no report)`), the Markdown export (a section "## Background task: <description, else the type> (<status>)"
+  with the report, else "Error: <error>", else "_(no report)_", at its place: a reply is split at each result, and a
+  carrier message gets no "## User" heading), the search text (the report only), chat import
+  (`harnessDataSchemas`; an imported result is history only); share pages drop the part (and a user message that
+  holds only results or other non-content parts).
 
 ### 4.30 Remember
 
@@ -2659,9 +2731,11 @@ name) opens a dialog that saves one line for the agent (`POST /memory`, section 
 ```ts
 type RememberBody = {                   // rememberBodySchema (POST /memory); strict
   target: 'project-file' | 'project-instructions' | 'global'   // rememberTargetSchema
-  text: string                          // trimmed, 1..2000 chars (LIMITS.rememberTextMaxChars)
+  text: string                          // trimmed, 1..2000 chars (LIMITS.rememberTextMaxChars); CRLF / CR become LF,
+                                        // other control characters are removed, lone surrogates become U+FFFD (an
+                                        // empty result is 400 on ['text'])
   chatId?: ChatId                       // required for the project targets (the project is the chat's; else 400 on
-}                                       // ['chatId'])
+}                                       // ['chatId']); ignored for 'global'
 type RememberResult = {                 // rememberResultSchema
   target: RememberTarget
   file?: 'AGENTS.md' | 'CLAUDE.md'      // project-file: the file written (projectInstructionsFileSchema)
@@ -2860,14 +2934,18 @@ body exceeds its limit; `500 internal_error`.
   EXISTS`), so a project deleted meanwhile leaves no dangling id.
 - Errors: `404 not_found` (unknown chat; or unknown `projectId`, "Project <id> not found.": the whole patch is dropped,
   its other keys included); `409 conflict` (`reason: 'run-active'`, `chatId`) whenever `projectId` is in the patch
-  (also `null`) while a run holds the chat, in any phase: nothing of the patch is applied.
+  (also `null`) while a run holds the chat, in any phase, or (Phase 10, ADR-046) while a background task of the chat
+  runs ("A background agent of this chat is running. Stop it or wait until it finishes, then try again."): nothing of
+  the patch is applied.
 
 **`DELETE /chats/:id`** — `chats.remove`
 - Params `{ id: ChatId }`.
 - Stops an active run first, deletes the chat, its messages (every version) and its share links (cascade); usage
   rows are kept with `chat_id = NULL`; uploaded files are kept (content-addressed, shared). Since Phase 9 it also
   empties the chat's steer queue (`queue.changed` with reason `stopped`; also a queue request still in flight for the
-  chat fails with `404`; clients drop their copy on `chat.deleted`).
+  chat fails with `404`; clients drop their copy on `chat.deleted`). Since Phase 10 (ADR-046) it first stops the
+  chat's background tasks (their rows saved as `aborted`, then deleted with the chat; undelivered results are
+  dropped).
 - Response `204`. Emits `chat.deleted`.
 - Errors: `404 not_found`.
 - Note: "Undo" in the UI delays this call (toast), the server has no soft delete.
@@ -2926,7 +3004,9 @@ body exceeds its limit; `500 internal_error`.
   - `409 conflict`, `reason: 'only-version'` (no `chatId`): the message has no other version ("This is the only
     version of the message. Delete the chat instead.").
   - `409 conflict`, `reason: 'run-active'`, `chatId`: a run holds the chat, in any phase (checked first: "A reply is
-    already being generated for this chat. Stop it or wait until it finishes."), or the active leaf moved meanwhile
+    already being generated for this chat. Stop it or wait until it finishes."), a background task of the chat runs
+    (Phase 10, ADR-046: "A background agent of this chat is running. Stop it or wait until it finishes, then try
+    again."), or the active leaf moved meanwhile
     ("The chat changed while deleting the version. Wait until the reply finishes, then try again."). After such a
     missed compare-and-set the error is derived again: `404` when the chat or the message is gone by then,
     `only-version` when the other versions were deleted meanwhile.
@@ -2973,6 +3053,16 @@ body exceeds its limit; `500 internal_error`.
 - Phase 9 (ADR-042): while a run is active, the web queues a message with `POST /chat/:id/queue` (section 5.26)
   instead of sending it here (`409 run-active`); a turn the server starts from the queue is announced by `run.started`
   with `origin: 'queue'` and `userMessageId`, and is resumed with `GET /chat/:id/stream`.
+- Phase 10 (ADR-045): a command file or a personal command (section 6.10) is loaded and validated again when the
+  message is sent: one that can no longer be read is `400 validation_error` on `['message', 'parts']` ("The /<name>
+  command cannot be used right now. <reason>"), an expansion over 64 KB too ("The expanded /<name> command is larger
+  than 64 KB. Shorten the input."); nothing is stored. The request's `modelRef` is resolved first, as before (its
+  errors, the image options and the image-continuation check are unchanged; a chat whose own model cannot be resolved
+  fails even when the command's model could run), then the command's `model` overrides the turn when it resolves to a
+  chat model (the request's image options never apply to it); otherwise the request's model answers with the notice
+  `command-model-unavailable`. A turn the server starts for finished background tasks (`origin: 'task'`, section 6.10)
+  is announced by `run.started` with its carrier message as `userMessageId` and resumed the same way; a client cannot
+  send `data-task-result` parts (user messages hold text and file parts only).
 - Images (ADR-028, section 4.18): the catalog kind of `modelRef` decides. A model of `kind: 'image'` makes the request
   an **image turn** (no history is sent; the prompt and the input images as in section 4.18); the reply streams one
   `file` chunk per image (section 6.8). An image model whose provider has no `createImageModel` (only a custom model
@@ -3313,8 +3403,11 @@ event types: the chat events of section 7 report the changes.
   before-states (`checkpoints`; never part of a backup; omitted, with a warning in the log, when the checkpoint store
   cannot be read).
 
-**`GET /data/export?files=true|false&settings=true|false`** — `data.export` · response `'binary'`
-- Query `DataExportQuery` (both default `true`).
+**`GET /data/export?files=true|false&settings=true|false&customizations=true|false`** — `data.export` · response `'binary'`
+- Query `DataExportQuery` (all default `true`; `customizations` since Phase 10: the personal agents, commands and
+  skills as `customizations.json`, written only when there is at least one; they are read after the attachments, and
+  when that read fails the backup goes on without them, `includes.customizations: false`, a warning in the log; the
+  pre-check counts them with their content bytes).
 - Response `200 application/zip`, streamed while it is downloaded, with
   `Content-Disposition: attachment; filename="harness-forge-backup-<yyyy-mm-dd>.zip"` and `Cache-Control: no-store`;
   the layout of section 4.16 (`manifest.json` last). A `HEAD` request runs the pre-check and gets the headers only (no
@@ -3353,6 +3446,13 @@ event types: the chat events of section 7 report the changes.
   `reasoning-file` parts rewritten to the stored ids.
 - `restoreSettings=true` applies the known keys of `settings.json`, each validated on its own (unknown and invalid keys
   become warnings; with a chat JSON it only adds a warning); secrets and the password are never part of a backup.
+- `restoreCustomizations=true` (Phase 10, ADR-044; the web sends it with "Restore settings") restores the items of
+  `customizations.json` (at most 600, each checked against `backupCustomizationSchema`, its content parsed again like
+  a create): a definition whose kind and name exist is kept (`skipped`), invalid items and items past the per-kind
+  limit are `failed` with a warning that names the kind and the name (never the content); the result's
+  `customizations` reports the counts. A backup without the file adds a warning instead. A restore that added
+  definitions emits `customization.changed` (`{}`). Nothing in the file can grant a tool, a mode or a shell rule
+  (definitions only narrow, ADR-045).
 - Response `200 DataImportResult`. Emits `chat.created` for every imported or copied chat.
 - Errors: `400 validation_error` (the whole-upload failures above); `409 conflict` (`reason: 'busy'`);
   `413 payload_too_large` (an upload over 256 MB, a chat JSON over 64 MB, a backup whose entries declare more than
@@ -3366,7 +3466,8 @@ event types: the chat events of section 7 report the changes.
   run that started meanwhile on a deleted chat. Since Phase 8 it also empties the checkpoint store
   (`<dataDir>/checkpoints`; the change journal rows go with their chats; a failure there is logged and does not fail
   the request). Settings, providers, credentials, plugins, MCP servers, projects and shell rules are kept (projects keep
-  no chats).
+  no chats). Since Phase 10 (ADR-046) the background tasks of every chat are stopped before the runs (their rows go
+  with their chats; also tasks of chats that started meanwhile), and the personal agents, commands and skills are kept.
 - Response `200 DataDeleteResult` (the checkpoint store is not counted in it; the `data deleted` log line carries
   `checkpointBlobs` / `checkpointBytes`). Emits `chat.deleted` for every deleted chat.
 - Errors: `403 forbidden` (fresh auth missing, `action: 'login'`); `409 conflict` (`reason: 'busy'`).
@@ -3388,7 +3489,9 @@ event types: the chat events of section 7 report the changes.
   plugin storage (keys and values) and plugin settings, settings, chat settings and projects, and since Phase 8 the
   files of `<dataDir>/plugins/.data` (a loose scan: it may keep an extra file, never removes a referenced one; links
   are never followed; the plugin data scan has a budget, section 4.16, `pluginData: 'partial'` when it stopped early or
-  could not read an entry). Workspace before-states
+  could not read an entry); since Phase 10 also the personal definitions (`customizations.content` and `.description`)
+  and the output snapshots of background tasks (`background_tasks.output`, which hold their reports). Workspace
+  before-states
   (`<dataDir>/checkpoints`) are never touched. The DELETE re-checks the message references, so a message committed
   after the scan keeps its file; files returned by an upload, import or image generation within the last 24 hours are
   pinned in memory and kept (`recentFiles`). Deleting a chat or a message version leaves its files in place until the
@@ -3583,7 +3686,9 @@ Common path errors (create and browse): the path is resolved to its canonical re
 - Response `204`. Emits one `project.changed` with `project: null` (no `chat.updated` per detached chat: clients clear
   `projectId` themselves).
 - Errors: `404 not_found`; `409 conflict` (`reason: 'run-active'`, `chatId`: the running chat) while a chat of the
-  project runs ("A chat of this project is running. Stop it first, then try again.").
+  project runs ("A chat of this project is running. Stop it first, then try again.") or (Phase 10, ADR-046) a
+  background task of a chat of the project runs ("A background agent of a chat of this project is running. Stop it
+  first, then try again.").
 
 **`GET /projects/browse?path=`** — `projects.browse`
 - Query `ProjectBrowseQuery`. Without `path`: the roots only (`path: null`, `parent: null`, no entries), each with
@@ -3614,8 +3719,10 @@ confirmation.
 - Effects: every other session ends (the caller gets a new cookie and stays signed in and fresh); every share URL
   changes (owners copy the new links; the old URLs answer `404`); pending approvals are denied; runs were stopped;
   `key.rotated` is emitted, then every event stream closes. Since Phase 9 every steer queue is emptied on `key.rotated`
-  (reason `stopped`; also the queues of chats that waited for an approval, which the rotation does not stop). There is
-  no downgrade to v1.2 after a rotation.
+  (reason `stopped`; also the queues of chats that waited for an approval, which the rotation does not stop). Since
+  Phase 10 (ADR-046) `key.rotated` also stops every running background task (`aborted`, "The background task was
+  stopped."); their results are kept and delivered at each chat's next run. There is no downgrade to v1.2 after a
+  rotation.
 - Response `200 KeyRotationResult` + exactly one `Set-Cookie: hf_session=...` signed with the new key and keeping the
   caller's login time, so it stays fresh (no cookie when no password is set).
 - Errors: `409 conflict` with `reason: 'env-key'` ("The master key comes from HF_MASTER_KEY and cannot be rotated
@@ -3641,7 +3748,9 @@ Common errors:
   project." or the project service's ("The project of this chat no longer exists.", "The project folder <path> is not
   available: <issue>").
 - Revert, undo and rewind: `409 conflict` (`reason: 'run-active'`, `chatId`: the running chat) while **any** chat of the
-  project runs ("A chat of this project is running. Stop it first, then try again."); nothing is written. The `GET`
+  project runs ("A chat of this project is running. Stop it first, then try again.") or (Phase 10, ADR-046) runs a
+  background task ("A background agent of a chat of this project is running. Stop it first, then try again."); nothing
+  is written. The `GET`
   routes also answer during a run. This check comes after every `400` / `404` of the route.
 - A path the workspace guard refuses (invalid, outside the folder, the folder itself, a link out of the folder; for
   revert also a path inside `.git`): `400 validation_error` on `['path']`.
@@ -3789,7 +3898,8 @@ only). (Between P9-0a and P9-A the routes answered `501 not_implemented` after v
 **`POST /chat/:id/queue`** — `chatQueue.add`
 - Params `ChatParams`. Body `QueueAddBody`. The parts are checked and normalized like the parts of a `POST /chat` user
   message (file parts must reference uploaded files, section 6.2). `turnOnly` is set when the first text starts a
-  server command (`/compact` or a command a plugin registered; client commands never reach the server).
+  server command (`/compact` or a command a plugin registered; since Phase 10 also a command file of the chat's project
+  or a personal command, `isServerCommandFor`; client commands never reach the server).
 - Accepted while a run holds the chat in any phase (also while the request that started it is still being prepared)
   or while the chat waits for a tool approval.
 - Response `201 QueueItem`. Emits `queue.changed`.
@@ -3839,9 +3949,10 @@ and durations at debug only; the access log never logs the query string). (Betwe
 The catalog of agents, commands and skills and the personal definitions (ADR-044, ADR-045; DTOs in section 4.28).
 Every route needs a session; none needs fresh auth (a definition can only restrict what the agent may do; a project
 file is never written by these routes). Definition bodies are never logged at `info`. Every change of a personal
-definition emits `customization.changed` (`{ kind, id }`); a rebuilt project catalog whose files changed emits it with
-`projectId`. `/customizations/source` is registered before `/customizations/:id`, so the static segment wins. (Between
-P10-0a and P10-A the routes answered `501 not_implemented` after validating their input.)
+definition emits `customization.changed` (`{ kind, id }`); a dropped or rebuilt project catalog whose files changed
+emits it with `projectId`, registry changes and restores with `{}` (section 4.14). `/customizations/source` is
+registered before `/customizations/:id`, so the static segment wins. (Between P10-0a and P10-A the routes answered
+`501 not_implemented` after validating their input.)
 
 **`GET /customizations?projectId=&kind=&refresh=`** — `customizations.list`
 - Query `CustomizationsQuery`.
@@ -3857,23 +3968,26 @@ P10-0a and P10-A the routes answered `501 not_implemented` after validating thei
 - Response `200 CustomizationSourceResult`: the markdown of a project file (read again through the workspace path
   guard: no links, a regular file of at most 64 KiB, not binary; `path` names a shadowed file of the same name), or of a
   plugin or builtin definition (formatted with `formatDefinition`).
-- Errors: `400 validation_error` (`source: 'user'`: read personal definitions with `GET /customizations/:id`; `source:
-  'project'` without `projectId`; the project folder is not available); `404 not_found` (unknown project, or no such
-  entry).
+- Errors: `400 validation_error` (on `['source']` for `source: 'user'`: "Read personal definitions with GET
+  /customizations/:id."; on `['projectId']` for `source: 'project'` without `projectId` or when the project folder is
+  not available; on `['path']` when the file is now a link, too large, binary or unreadable: the read-failure
+  sentence); `404 not_found` (unknown project, or no such entry: "The <kind> "<name>" was not found."; also a project
+  file that is gone or has a secret-looking name).
 
 **`POST /customizations`** — `customizations.create`
 - Body `CustomizationCreate`. The content is parsed with `parseDefinition(kind, content)`.
 - Response `201 Customization`. Emits `customization.changed`.
 - Errors: `400 validation_error` (an `error` diagnostic: `details.diagnostics` holds the `DefinitionDiagnostic`s and
   `details.issues` one issue on `['content']`; a builtin or reserved name: `explore`, `general`, `general-purpose` for
-  agents, a client or harness command name for commands); `409 conflict` `reason: 'exists'` (a personal definition of
-  the same kind and name: "A personal agent named "<name>" already exists."; also above 200 of a kind,
-  `LIMITS.customizationsPerKindMax`).
+  agents, a client or harness command name for commands: diagnostic `reserved-name`); `409 conflict` `reason:
+  'exists'` (a personal definition of the same kind and name: "A personal agent named "<name>" already exists."; also
+  at 200 of a kind, `LIMITS.customizationsPerKindMax`: "At most 200 personal agents can be stored; delete one first.",
+  the API has no other conflict reason for it).
 
 **`GET /customizations/:id`** — `customizations.get`
 - Params `CustomizationParams`.
 - Response `200 Customization`.
-- Errors: `404 not_found` (unknown id).
+- Errors: `404 not_found` (unknown id: "Customization <id> not found.").
 
 **`PATCH /customizations/:id`** — `customizations.update`
 - Params `CustomizationParams`. Body `CustomizationUpdate`; new `content` is parsed like a create (the kind stays; a
@@ -3896,16 +4010,25 @@ its input.)
 **`POST /memory`** — `memory.remember`
 - Body `RememberBody`. Control characters other than line breaks are removed; the line written is `- <text>`.
 - `target: 'project-file'`: appends the line to the project's `AGENTS.md`, else its `CLAUDE.md`, else creates
-  `AGENTS.md` (the project is the chat's). The write goes through the change journal of the chat (`messageId: null`),
-  so it is listed in `GET /chats/:id/changes`, revertible and rewindable, and emits `workspace.changed`.
-- `target: 'project-instructions'`: appends the line to the project's instructions (`PATCH /projects/:id` semantics;
-  emits `project.changed`).
-- `target: 'global'`: appends the line to the global Custom instructions (`settings.instructions`).
+  `AGENTS.md` (in the project root; the project is the chat's). A `\n` goes first when the file does not end with one;
+  the existing bytes are kept as they are. The write goes through the change journal of the chat (`messageId: null`,
+  tool `remember`, tool call id `remember_<16 hex>`) under the per-file lock, so it is listed in
+  `GET /chats/:id/changes`, revertible and rewindable, and emits `workspace.changed` (source `tool`).
+- `target: 'project-instructions'`: appends the line to the project's instructions on a line of its own
+  (`PATCH /projects/:id` semantics; emits `project.changed`).
+- `target: 'global'`: appends the line to the global Custom instructions (`settings.instructions`); `chatId` is
+  ignored.
 - Response `200 RememberResult`.
-- Errors: `404 not_found` (unknown chat); `400 validation_error` (a project target for a chat without a project, or
-  whose project folder is not available; the project file is a link or not a regular file; the instructions would pass
-  20 000 characters, `LIMITS.instructionsMaxChars`); `413 payload_too_large` (the project file would pass 1 MiB,
-  `LIMITS.rememberFileMaxBytes`).
+- Errors: `404 not_found` (unknown chat); `400 validation_error` on `['chatId']` (a project target without `chatId`,
+  for a chat without a project ("This chat has no project: Remember can save to the project only from a chat of a
+  project."), whose project no longer exists, or whose project folder is not available: the project service's
+  message); on `['text']` (the text is empty after cleaning; the instructions would pass 20 000 characters,
+  `LIMITS.instructionsMaxChars`: "The project instructions would be longer than 20,000 characters with this line." /
+  "The global instructions …"); without a path (the project file is a symbolic link, also one that replaced it before
+  the write: "AGENTS.md is a symbolic link: Remember never writes through a link."; a folder or another non-regular
+  file; a binary file with a NUL byte in its first 8 KiB: "AGENTS.md is not a text file."); `413 payload_too_large`
+  (the project file would pass 1 MiB, `LIMITS.rememberFileMaxBytes`: "AGENTS.md would be larger than 1 MiB with this
+  line; shorten the file first.", `details.limitBytes`). Nothing is written on an error.
 
 ### 5.30 `chat-tasks.ts`
 
@@ -3917,15 +4040,18 @@ answered `501 not_implemented` after validating their input.)
 **`GET /chat/:id/tasks`** — `chatTasks.list`
 - Params `ChatParams`.
 - Response `200 BackgroundTaskList`: the chat's background tasks, newest first (running ones with their latest
-  snapshot; at most 100 finished ones are kept per chat, `LIMITS.backgroundTasksKeptPerChat`).
+  snapshot; rows are pruned to 100 per chat, `LIMITS.backgroundTasksKeptPerChat`, when a task starts: the oldest
+  delivered ones first, section 4.29). Row writes still in flight for the chat are awaited first.
 - Errors: `404 not_found` (unknown chat).
 
 **`POST /chat/:id/tasks/:taskId/stop`** — `chatTasks.stop`
 - Params `ChatTaskParams`.
 - Response `200 BackgroundTask`: a running task is aborted (`status: 'aborted'`, "The background task was stopped.")
   and answered once its row is saved; a task that already ended is answered as it is. The stopped task's result is
-  still delivered (at the chat's next run; a stop never starts a turn). Emits `task.changed`.
-- Errors: `404 not_found` (unknown chat, or a task of another chat).
+  still delivered (at the chat's next run; a stop never starts a turn). A child that does not end within 5 s is saved
+  as it is. Emits `task.changed`. One info log line (`background task stop requested`: ids and status only).
+- Errors: `404 not_found` (unknown chat, "Chat <id> not found."; or a task of another chat or an unknown task:
+  "Background task <taskId> not found in chat <id>.").
 
 ## 6. Chat stream protocol
 
@@ -4246,12 +4372,18 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 ### 6.10 Agent customization (ADR-044 … ADR-047)
 
 - **Requests are unchanged.** A command file runs like a plugin prompt command: the user message keeps the typed text
-  and `metadata.command` (`CommandInvocation`) gets `source`, the `expansion` (`$ARGUMENTS`, `$1` … `$9`, `{{input}}`),
-  and, when the file declares them, `modelRef` and `allowedTools`. The turn runs on the command's model (the reply's
-  `metadata.modelRef` names it; the chat's `modelRef` and the composer stay unchanged); when it cannot run, the chat
-  model answers and the reply starts with the notice `command-model-unavailable`. `allowedTools` narrows the turn's
-  tools after the permission mode (`exit_plan_mode` stays in `plan`); an approval continuation and a regenerate of the
-  turn read both again from the turn's user message.
+  and `metadata.command` (`CommandInvocation`) gets `source` (`project` or `user`), the `expansion` (`$ARGUMENTS`,
+  `$1` … `$9`, `{{input}}`), and, when the file declares them, `modelRef` and `allowedTools`. A name resolves in this
+  order: client commands (never the server's), the harness command `/compact`, the run catalog's active command (a
+  `.harness` file over a `.claude` file over a personal command over a plugin command), then the plugin registry
+  (plugin commands keep their v1.5 path and carry no `source`). The turn runs on the command's model (the reply's
+  `metadata.modelRef` names it; the chat's `modelRef` and the composer stay unchanged); when it cannot run (it does not
+  resolve, or its catalog kind is not `chat`), the chat model answers and the reply starts with the notice
+  `command-model-unavailable` ("The command's model <ref> is not available, so the chat's model answered."; once per
+  reply, a continuation does not repeat it). The request's model is resolved first (section 5.10). `allowedTools`
+  narrows the turn's tools after the permission mode (`exit_plan_mode` stays in `plan`); an approval continuation and a
+  regenerate of the turn read both again from the turn's user message. A body is text: `!` lines never run and `@file`
+  is never expanded.
 - **Custom agents** stream like the builtin sub-agents (section 6.9): the `tool-task` part's snapshots carry the agent
   `type` (a catalog name) and `agent` (the definition snapshot).
 - **Skills**: a `tool-skill` part (`SkillInput`, `SkillOutput`); the model reads the body as the tool result.
@@ -4263,14 +4395,20 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   part per result (before the next `start-step`), and the model sees each as a user message with `taskResultText`
   (`splitTaskResults`, after `splitSteers`). When the chat is idle after a natural ending, the server starts a turn
   (`run.started` with `origin: 'task'` and `userMessageId`) from a **user-role carrier message** that holds only
-  `data-task-result` parts; the web treats it like a turn started from the queue (refetch the chat, then resume the
-  stream) and shows the carrier as a note, not as a user bubble. Each result is delivered once (`deliveredAt`,
-  `deliveredMessageId`); a regenerate above the message that holds it loses the part (the task stays listed).
+  `data-task-result` parts (`{ id, role: 'user', parts: [{ type: 'data-task-result', data }, …] }`, one part per
+  waiting result; it is stored like a user message, resolves no command and is never sent by a client); the rules
+  of section 4.29 decide when such a turn starts and on which model. The web treats it like a turn started from the
+  queue (refetch the chat, then resume the stream) and shows the carrier as a note, not as a user bubble. Each result
+  is delivered once (`deliveredAt`, `deliveredMessageId`); a regenerate above the message that holds it loses the part
+  (the task stays listed).
 - **Stop**: `POST /chat/:id/stop` (and Esc in the composer) stops the run, never a background task; a task stops only
-  through `POST /chat/:id/tasks/:taskId/stop`, deleting its chat or project, delete-all, a key rotation or shutdown. A
-  stopped task's result (`aborted`, with its partial report) is still delivered, at the chat's next run.
+  through `POST /chat/:id/tasks/:taskId/stop`, deleting its chat, delete-all, a key rotation or shutdown (a project
+  with a running task cannot be deleted: `409 run-active`). A stopped task's result (`aborted`, with its partial
+  report) is still delivered, at the chat's next run (never by an automatic turn).
 - **Plan files**: an approved `exit_plan_mode` whose output carries `planPath` wrote a file through the journal of the
-  continuation's reply; the changes panel lists it and a rewind removes it.
+  continuation's reply (`workspace.changed`); the changes panel lists it and a rewind removes it.
+- **Remember** (`POST /memory`, section 5.29) is not part of the stream: the `/remember` client command opens a dialog;
+  a project-file write is journaled under the chat (`messageId: null`) and listed in the changes panel.
 
 ## 7. Server events (`GET /api/events`)
 
@@ -4309,7 +4447,7 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 | `workspace.changed` | an agent `write_file` / `edit_file` changed files of a project folder (coalesced: at most one event per second per chat), or a rewind, revert or undo batch wrote something (one event per batch) (Phase 8, ADR-036) | `WorkspaceChangedData` (`{ projectId, chatId, batchId, source, paths }`) | the changes panel of an open chat of that project refreshes (debounced) |
 | `queue.changed` | a message was queued, cancelled, steered into the running reply, started as the next turn, dropped by Stop or removed by a failure (Phase 9, ADR-042) | `QueueChangedData` (`{ chatId, items, removed? }`) | chat-queue store: replace the chat's queue; a `delivered` message is shown where the model received it |
 | `task.changed` | a background task of a chat was launched, made progress (at most once per second), ended or was delivered (Phase 10, ADR-046) | `TaskChangedData` (`{ chatId, task }`) | background-tasks store: upsert; the dock of the open chat updates and announces endings |
-| `customization.changed` | a personal agent, command or skill was created, updated or deleted, a project catalog was rebuilt with changes, or plugin agents or skills changed (Phase 10, ADR-044) | `CustomizationChangedData` (`{ kind?, id?, projectId? }`) | customizations store: mark stale and refetch what is shown (Settings → Customize, the slash menu) |
+| `customization.changed` | a personal agent, command or skill was created, updated or deleted (`{ kind, id }`); a cached project catalog was dropped or rebuilt with other files (`{ projectId }`, at most one per second per project); plugin agents, skills or commands changed, or a backup restore added definitions (`{}`, at most one per second) (Phase 10, ADR-044) | `CustomizationChangedData` (`{ kind?, id?, projectId? }`) | customizations store: mark stale and refetch what is shown (Settings → Customize, the slash menu) |
 
 Phase 10 adds `task.changed` and `customization.changed` (15 event types) and the `run.started` origin `task` (a turn
 the server started for finished background tasks; its `userMessageId` is the carrier message); plan files and Remember
