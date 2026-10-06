@@ -19,10 +19,12 @@ defaults:
     # bash -eo pipefail
     shell: bash
 
+# Every job (here, in audit.yml and in live.yml) runs on a pinned ubuntu-24.04 image: ubuntu-latest moves to Ubuntu 26
+# from 2026-10-19, and Playwright's --with-deps and the Docker job should move only on purpose.
 jobs:
   actionlint:
     name: Lint workflows (actionlint + shellcheck)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -35,7 +37,7 @@ jobs:
 
   check:
     name: Check (English, lint, typecheck, unit tests)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -52,7 +54,7 @@ jobs:
 
   e2e:
     name: Build and e2e (Playwright, Chromium)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -107,7 +109,7 @@ jobs:
 
   docker:
     name: Docker image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7

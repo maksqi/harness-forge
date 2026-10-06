@@ -35,7 +35,7 @@ concurrency:
 jobs:
   live:
     name: Live provider suite (paid calls)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     # The environment holds the keys and requires a reviewer's approval before the job starts.
     environment: live-providers
