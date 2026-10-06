@@ -57,6 +57,10 @@ const emit = defineEmits<{
   'saved': [server: McpServer]
 }>()
 
+// URL literals stay out of template props: vue-tsc 3.3.12 breaks on `//` inside a component prop value
+// (vuejs/language-tools#6240).
+const URL_PLACEHOLDERS = { http: 'https://mcp.example.com/mcp', sse: 'https://mcp.example.com/sse' } as const
+
 /** Two example arguments, one per line. */
 const ARGS_PLACEHOLDER = '-y\n@modelcontextprotocol/server-everything'
 
@@ -370,7 +374,7 @@ function secretListOf(type: McpTransportType): SecretList {
                   :disabled="busy"
                   :aria-invalid="errors.url ? true : undefined"
                   data-field="url"
-                  :placeholder="option.value === 'sse' ? 'https://mcp.example.com/sse' : 'https://mcp.example.com/mcp'"
+                  :placeholder="option.value === 'sse' ? URL_PLACEHOLDERS.sse : URL_PLACEHOLDERS.http"
                   autocomplete="off"
                   autocapitalize="off"
                   spellcheck="false"

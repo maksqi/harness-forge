@@ -19,6 +19,10 @@ import { testIds } from '~/utils/testids'
 import { changeAuthStyle, emptyCredentialField, splitOptions } from './wizard'
 import { useWizardContext } from './wizard-context'
 
+// URL literals stay out of template props: vue-tsc 3.3.12 breaks on `//` inside a component prop value
+// (vuejs/language-tools#6240).
+const HELP_URL_PLACEHOLDER = 'https://example.com/keys'
+
 const { form, values, editing, errorOf, touch, patch } = useWizardContext()
 const ids = { auth: useId(), header: useId(), fields: useId(), headers: useId(), testing: useId() }
 
@@ -283,7 +287,7 @@ function toggleExpanded(index: number) {
                 :id="`${ids.fields}-help-${index}`"
                 :model-value="field.helpUrl"
                 type="url"
-                placeholder="https://example.com/keys"
+                :placeholder="HELP_URL_PLACEHOLDER"
                 class="h-8 font-mono text-[13px] placeholder:font-sans placeholder:text-sm"
                 :aria-invalid="errorOf(`credentials.${index}.helpUrl`) ? true : undefined"
                 @update:model-value="value => setCredential(index, 'helpUrl', String(value))"

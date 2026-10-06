@@ -42,6 +42,10 @@ const emit = defineEmits<{
   'blur': []
 }>()
 
+// URL literals stay out of template props: vue-tsc 3.3.12 breaks on `//` inside a component prop value
+// (vuejs/language-tools#6240).
+const URL_PLACEHOLDER = 'https://…'
+
 /** Select value of "no value" (reka-ui items cannot use ''). */
 const NONE = '__none__'
 
@@ -249,7 +253,7 @@ function onToggleOption(option: string, checked: boolean | 'indeterminate') {
       :id="controlId"
       :model-value="text"
       :type="kind === 'url' ? 'url' : 'text'"
-      :placeholder="kind === 'url' ? 'https://…' : undefined"
+      :placeholder="kind === 'url' ? URL_PLACEHOLDER : undefined"
       :inputmode="kind === 'url' ? 'url' : undefined"
       autocomplete="off"
       :spellcheck="kind === 'url' ? 'false' : undefined"

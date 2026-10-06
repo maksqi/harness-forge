@@ -72,6 +72,10 @@ const emit = defineEmits<{
   'installed': [id: string]
 }>()
 
+// URL literals stay out of template props: vue-tsc 3.3.12 breaks on `//` inside a component prop value
+// (vuejs/language-tools#6240).
+const URL_PLACEHOLDER = 'https://example.com/my-plugin.zip'
+
 type Step = 'source' | 'preview'
 type Phase = 'idle' | 'inspecting' | 'installing'
 
@@ -503,7 +507,7 @@ function onErrorAction(action: HarnessErrorUiAction) {
                 :id="ids.url"
                 v-model="draft.url"
                 type="url"
-                placeholder="https://example.com/my-plugin.zip"
+                :placeholder="URL_PLACEHOLDER"
                 autocomplete="off"
                 spellcheck="false"
                 :disabled="busy"
