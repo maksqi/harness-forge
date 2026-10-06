@@ -44,7 +44,7 @@
     "esbuild": "^0.28.0",
     "fflate": "^0.8.2",
     "hono": "catalog:",
-    "ignore": "^7.0.10",
+    "ignore": "^7.0.12",
     "picomatch": "^4.0.7",
     "semver": "^7.7.0",
     "tar": "^7.5.0",
