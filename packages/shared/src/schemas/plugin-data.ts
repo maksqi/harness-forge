@@ -1,6 +1,7 @@
 // Plugin data shapes embedded by the API DTOs (ADR-018; PLUGINS.md sections 4-6 and 9): credential fields, model
-// info, declarative providers, MCP server declarations, declarative commands and (plugin API 1.4.0) declarative agents
-// and skills. `@harness-forge/plugin-sdk` re-exports them unchanged.
+// info, declarative providers, MCP server declarations, declarative commands, (plugin API 1.4.0) declarative agents
+// and skills and (plugin API 1.5.0) declarative output styles. `@harness-forge/plugin-sdk` re-exports them unchanged.
+// The Claude Code `hooks` format of `contributes.hooks` is `hooksConfigSchema` (`schemas/hooks.ts`).
 import { z } from 'zod'
 import { apiFormatSchema, credentialFieldTypeSchema, modelKindSchema, reasoningStyleSchema, toolPolicySchema } from '../enums.ts'
 import {
@@ -21,6 +22,7 @@ import {
   providerIdSchema,
 } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
+import { BUILTIN_OUTPUT_STYLE_NAMES } from '../util/output-styles.ts'
 import { compileRegExp, duplicates, hasControlChars, isUnique, utf8ByteLength } from '../util/text.ts'
 import { isHttpUrl, parseHttpUrl } from '../util/url.ts'
 import { modelCapabilitiesSchema, modelCostSchema, reasoningEffortListSchema } from './models.ts'
@@ -222,6 +224,27 @@ export const declarativeSkillSchema = z.strictObject({
   content: definitionBodySchema,
 })
 export type DeclarativeSkill = z.infer<typeof declarativeSkillSchema>
+
+// ---------- declarative output styles (plugin API 1.5.0, ADR-051) ----------
+
+/**
+ * An output style contributed by a plugin (`contributes.outputStyles`, `ctx.outputStyles.register`): the fields of a
+ * style file (ADR-051). The builtin style names (`default`, `explanatory`, `learning`) are reserved; a name another
+ * plugin registered is a `conflict`.
+ */
+export const declarativeOutputStyleSchema = z.strictObject({
+  name: agentNameSchema.refine(
+    name => !(BUILTIN_OUTPUT_STYLE_NAMES as readonly string[]).includes(name),
+    `Reserved output style (${BUILTIN_OUTPUT_STYLE_NAMES.join(', ')}).`,
+  ),
+  /** What the style does (shown in the style menu). */
+  description: z.string().trim().min(1).max(LIMITS.customizationDescriptionMaxChars),
+  /** The style body (Markdown): added first to the main agent's instructions while the style is active. */
+  content: definitionBodySchema,
+  /** Keep the workspace tool rules and the todo / task hints (default false). */
+  keepCodingInstructions: z.boolean().optional(),
+})
+export type DeclarativeOutputStyle = z.infer<typeof declarativeOutputStyleSchema>
 
 // ---------- MCP server declarations ----------
 

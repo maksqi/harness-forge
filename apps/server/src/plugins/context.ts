@@ -1,5 +1,6 @@
 // The per-plugin `PluginContext` (PLUGINS.md 9 "PluginContext"). Owner: W1.3 (W1.3-T4); `ctx.images` W6.4 (ADR-028);
-// `ctx.agents` / `ctx.skills` W10.7 (plugin API 1.4.0, ADR-045).
+// `ctx.agents` / `ctx.skills` W10.7 (plugin API 1.4.0, ADR-045); `ctx.outputStyles` (plugin API 1.5.0, ADR-051): a
+// P11-0a seam that validates the definition and registers nothing yet (W11.7 wires it to `registry.styles`).
 //
 // Every `register` goes through the registry with the plugin id as owner and is tracked in the plugin's
 // `DisposableStore`; disposing the runtime unregisters everything, and `abort()` aborts `ctx.signal` (disable, reload,
@@ -25,6 +26,7 @@ import type {
   KV,
   McpServerDecl,
   ModelInfo,
+  OutputStyleDefinition,
   PluginContext,
   PluginManifest,
   PluginPermission,
@@ -45,6 +47,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import {
+  declarativeOutputStyleSchema,
   generateImageToolInputSchema,
   HarnessError,
   mcpServerDeclSchema,
@@ -373,6 +376,18 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
       register: (definition: SkillDefinition): Disposable => {
         assertLive()
         return track(registry.skills.register(pluginId, definition))
+      },
+    }),
+    // Plugin API 1.5.0 (ADR-051): output styles, validated like `contributes.outputStyles` (`validation_error` naming the
+    // field). P11-0a seam: nothing is registered yet; W11.7 registers them in `registry.styles` (a `conflict` for a name
+    // another plugin registered).
+    outputStyles: Object.freeze({
+      register: (definition: OutputStyleDefinition): Disposable => {
+        assertLive()
+        const parsed = declarativeOutputStyleSchema.safeParse(definition)
+        if (!parsed.success)
+          throw validationError(parsed.error)
+        return track(toDisposable(() => {}))
       },
     }),
     hooks: Object.freeze({

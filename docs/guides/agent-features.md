@@ -10,7 +10,8 @@ Most of this works in any chat with a model that can call tools. Plan mode, `@` 
 sub-agents need a **project chat** (see [using projects](using-projects.md)).
 
 v1.6 builds on these: your own sub-agent types, slash commands and skills, background sub-agents, saved plan files and
-`/remember` are in [customizing the agent](customizing-agents.md).
+`/remember` are in [customizing the agent](customizing-agents.md). v1.7 adds hooks and a project's `.mcp.json` servers
+([hooks and project MCP servers](hooks-and-project-mcp.md)) and [output styles](output-styles.md).
 
 Reference: [ARCHITECTURE.md 6.18 – 6.22](../ARCHITECTURE.md#618-context-compaction-adr-040) (how it works) and
 [10.10](../ARCHITECTURE.md#1010-agent-20-security-phase-9-adr-040--adr-043) (security),

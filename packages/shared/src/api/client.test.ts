@@ -57,6 +57,8 @@ const settings: Settings = {
   shiftTabModes: true,
   planFiles: false,
   planDirectory: '.harness/plans',
+  outputStyle: 'default',
+  hooksEnabled: true,
 }
 
 describe('createApiClient', () => {

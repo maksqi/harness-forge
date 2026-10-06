@@ -2,7 +2,7 @@
 // (`HF_WORKSPACE_ROOTS`, default `<dataDir>/workspaces`); a chat optionally belongs to one (`ChatSummary.projectId`).
 // Routes `/projects` (module `projects`), event `project.changed`. Projects are not part of backups or chat exports.
 import { z } from 'zod'
-import { projectIdSchema, timestampSchema } from '../ids.ts'
+import { agentNameSchema, projectIdSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 
 /** No control character (C0, DEL, C1): NUL included. */
@@ -77,6 +77,11 @@ export const projectSummarySchema = z.object({
   instructionsFile: projectInstructionsFileSchema.nullable(),
   /** Chats of the project, archived ones included. */
   chatCount: z.int().min(0),
+  /**
+   * The project's output style (Phase 11, ADR-051; column `projects.output_style`): wins over the global `outputStyle`,
+   * loses to a chat's own choice; null = the global setting.
+   */
+  outputStyle: z.string().nullable(),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
 })
@@ -101,6 +106,8 @@ export const projectUpdateSchema = z
     name: projectNameSchema.optional(),
     /** null (or an empty string) removes the instructions. */
     instructions: projectInstructionsSchema.nullable().optional(),
+    /** Phase 11 (ADR-051): a style name, or null = the global setting. */
+    outputStyle: agentNameSchema.nullable().optional(),
   })
   .refine(value => Object.keys(value).length > 0, 'Send at least one field.')
 export type ProjectUpdate = z.infer<typeof projectUpdateSchema>

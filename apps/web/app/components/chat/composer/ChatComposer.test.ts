@@ -319,7 +319,7 @@ describe('chatComposer', () => {
       await type(textarea(), '/')
       const menu = wrapper.get(byTestId(testIds.slashMenu))
       expect(menu.findAll(byTestId(testIds.slashMenuItem)).map(item => item.attributes('data-value')))
-        .toEqual(['new', 'model', 'effort', 'mode', 'help', 'remember', 'summarize'])
+        .toEqual(['new', 'model', 'effort', 'mode', 'help', 'remember', 'output-style', 'summarize'])
       expect(textarea().attributes('aria-controls')).toBe(menu.attributes('id'))
 
       await type(textarea(), '/mo')
@@ -476,6 +476,7 @@ describe('chatComposer', () => {
         'app:mode',
         'app:help',
         'app:remember',
+        'app:output-style',
         'app:compact',
         'project:review',
         'personal:standup',

@@ -9,7 +9,7 @@ import {
   textSizeSchema,
   toolModeSchema,
 } from '../enums.ts'
-import { modelRefSchema, timestampSchema } from '../ids.ts'
+import { agentNameSchema, modelRefSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { hasControlChars } from '../util/text.ts'
 import { speechVoiceSchema, transcriptionLanguageSchema } from './audio.ts'
@@ -141,6 +141,14 @@ const settingsFields = {
     .min(1)
     .max(PLAN_DIRECTORY_MAX_CHARS)
     .refine(isSafePlanDirectory, 'Use a folder inside the project, such as ".harness/plans" (no leading "/", no "..", no ".git").'),
+  // Hooks and output styles (Phase 11, ADR-048 / ADR-051); neither needs fresh auth.
+  /**
+   * The global output style (a style name of the catalog; builtins `default`, `explanatory`, `learning`); a project's
+   * and a chat's own choice win over it. An unknown name is not refused: runs use `default` with a notice.
+   */
+  outputStyle: agentNameSchema,
+  /** Run command hooks (personal, project and plugin); off = no command hook runs (plugin code hooks still run). */
+  hooksEnabled: z.boolean(),
 }
 
 /** `GET /settings`: every key always present (defaults applied by `settingsSchema.parse`). */
@@ -173,6 +181,8 @@ export const settingsSchema = z.object({
   shiftTabModes: settingsFields.shiftTabModes.default(true),
   planFiles: settingsFields.planFiles.default(false),
   planDirectory: settingsFields.planDirectory.default('.harness/plans'),
+  outputStyle: settingsFields.outputStyle.default('default'),
+  hooksEnabled: settingsFields.hooksEnabled.default(true),
 })
 export type Settings = z.infer<typeof settingsSchema>
 

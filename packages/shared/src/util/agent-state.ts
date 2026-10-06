@@ -1,6 +1,8 @@
 // Agent state derived from the message path (Phase 9): compaction markers (ADR-040), steers inside replies (ADR-042)
-// and the todo list (ADR-041); Phase 10: background task results (ADR-046, `splitTaskResults`, `taskResultText`). Pure and isomorphic; the server (model history, summarizer, share, export) and the web
-// (transcript, todo strip) use these functions and never re-implement them.
+// and the todo list (ADR-041); Phase 10: background task results (ADR-046, `splitTaskResults`, `taskResultText`); Phase
+// 11: hook records (ADR-048, `splitHooks`, `hookModelText`, `isHookCarrier`, `hookChainLength`, `sessionStartSource`).
+// Pure and isomorphic; the server (model history, summarizer, share, export) and the web (transcript, todo strip) use
+// these functions and never re-implement them.
 //
 // Every function takes a `path`: the messages of one branch of the chat tree, oldest first (`ChatDetail.messages`, the
 // run's history, `useChat` messages). They only look at the given path, so the state is branch-aware (ADR-023): a
@@ -444,4 +446,236 @@ export function splitTaskResults<M extends AgentStateMessage>(messages: readonly
 function taskResultMessage<M extends AgentStateMessage>(message: M, data: TaskResultTextInput): M {
   const { metadata: _metadata, ...rest } = message as M & { metadata?: unknown }
   return { ...rest, id: data.taskId, role: 'user', parts: [taskResultTextPart(data)] } as unknown as M
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Hook records (Phase 11, ADR-048)
+
+/**
+ * Part type of hook records (`data-hook`): written into a reply where the hooks ran (tool hooks linked by
+ * `toolCallId`), onto the user message of a turn (UserPromptSubmit / SessionStart context), or as the only parts of the
+ * carrier user message of a Stop continuation (`run.started.origin = hook`).
+ */
+export const HOOK_PART_TYPE = 'data-hook'
+
+/**
+ * The fields of a `data-hook` part's data that `hookModelText` reads. Structural: the shared `{ id, event, outcome,
+ * toolCallId?, toolName?, createdAt, hooks, context?, reason?, updatedInput? }` data satisfies it.
+ */
+export interface HookModelTextInput {
+  readonly event: string
+  readonly outcome: string
+  readonly toolName?: string
+  readonly context?: string
+  readonly reason?: string
+}
+
+/** Feedback text of a block without a reason. */
+const HOOK_NO_REASON = '(no reason given)'
+
+function hookElement(tag: 'hook-context' | 'hook-feedback', data: HookModelTextInput, content: string): string {
+  const attributes = [`event="${escapeAttribute(data.event)}"`]
+  if (typeof data.toolName === 'string' && data.toolName !== '')
+    attributes.push(`tool="${escapeAttribute(data.toolName)}"`)
+  return `<${tag} ${attributes.join(' ')}>\n${content}\n</${tag}>`
+}
+
+/**
+ * What the model reads for a hook record, or null when the record is display-only:
+ * - `context` (trimmed, non-empty) → `<hook-context event="…" tool="…">`, a newline, the context, a newline,
+ *   `</hook-context>` (`tool` only when the record names one);
+ * - in a reply (`role: 'assistant'`): a blocked `PostToolUse` record (exit 2 / `decision: block`) also gives
+ *   `<hook-feedback event="PostToolUse" tool="…">` with the reason;
+ * - on a user message (`role: 'user'`, the carrier of a hook turn): a `Stop` / `SubagentStop` record with outcome
+ *   `continued` or `blocked` gives `<hook-feedback event="Stop">` with the reason (`(no reason given)` when empty);
+ * - both blocks, when present, are joined by a blank line (context first). Everything else (PreToolUse decisions, whose
+ *   reason reaches the model through the tool result, errors, system messages) is display-only. Attribute values escape
+ *   `&`, `"` and `<`.
+ */
+export function hookModelText(data: HookModelTextInput, role: 'assistant' | 'user'): string | null {
+  if (!isRecord(data) || typeof data.event !== 'string')
+    return null
+  const blocks: string[] = []
+  const context = typeof data.context === 'string' ? data.context.trim() : ''
+  if (context !== '')
+    blocks.push(hookElement('hook-context', data, context))
+  const reason = typeof data.reason === 'string' ? data.reason.trim() : ''
+  const feedback = role === 'assistant'
+    ? data.event === 'PostToolUse' && data.outcome === 'blocked'
+    : (data.event === 'Stop' || data.event === 'SubagentStop') && (data.outcome === 'continued' || data.outcome === 'blocked')
+  if (feedback)
+    blocks.push(hookElement('hook-feedback', data, reason === '' ? HOOK_NO_REASON : reason))
+  return blocks.length === 0 ? null : blocks.join('\n\n')
+}
+
+interface HookPartData extends HookModelTextInput {
+  readonly id: string
+}
+
+/** The data of a valid `data-hook` part (read structurally: string `id`, `event`, `outcome`; optional strings), else null. */
+function hookDataOf(part: unknown): HookPartData | null {
+  if (!isPart(part) || part.type !== HOOK_PART_TYPE)
+    return null
+  const data = part.data
+  if (!isRecord(data) || typeof data.id !== 'string' || typeof data.event !== 'string' || typeof data.outcome !== 'string')
+    return null
+  for (const key of ['toolName', 'context', 'reason'] as const) {
+    if (data[key] !== undefined && typeof data[key] !== 'string')
+      return null
+  }
+  return data as unknown as HookPartData
+}
+
+function isHookPart(part: unknown): boolean {
+  return isPart(part) && part.type === HOOK_PART_TYPE
+}
+
+function hasHookPart(message: unknown): boolean {
+  return isRecord(message) && (message.role === 'assistant' || message.role === 'user') && Array.isArray(message.parts) && message.parts.some(isHookPart)
+}
+
+/** A user message whose parts are all `data-hook` parts: the carrier of a hook turn the server started. */
+export function isHookCarrier(message: unknown): boolean {
+  return isRecord(message)
+    && message.role === 'user'
+    && Array.isArray(message.parts)
+    && message.parts.length > 0
+    && message.parts.every(isHookPart)
+}
+
+function isTaskCarrier(message: unknown): boolean {
+  return isCarrierMessage(message)
+}
+
+function hookTextPart(text: string): AgentStatePart {
+  return { type: 'text', text }
+}
+
+/**
+ * The model's view of hook records (the model-history stage after `splitTaskResults`):
+ * - an assistant message holding `data-hook` parts is split at each record with model text (`hookModelText(data,
+ *   'assistant')`), in order, into `assistant(parts before) / user(text) / assistant(parts after)`, like
+ *   `splitTaskResults`: the user message has `id = data.id`, `role: 'user'`, one text part and the other fields of the
+ *   original message except `metadata`; assistant halves keep every field of the original; the first kept half keeps
+ *   the original id and each later kept half gets `${originalId}~h${k}` (k = 1, 2, …); display-only records, invalid
+ *   records and malformed (non-object) parts of such a message are removed, then halves without content parts
+ *   (`isContentPart`) are dropped;
+ * - in a user message, each record becomes a text part `hookModelText(data, 'user')` in place or is removed (no model
+ *   text, invalid data); a carrier (only `data-hook` parts) without model text is dropped;
+ * - every other message (a v1.6 history has no `data-hook` part) is returned as the same object. Idempotent; never
+ *   throws.
+ */
+export function splitHooks<M extends AgentStateMessage>(messages: readonly M[]): M[] {
+  const result: M[] = []
+  if (!Array.isArray(messages))
+    return result
+  for (const message of messages) {
+    if (!hasHookPart(message)) {
+      result.push(message)
+      continue
+    }
+    if (message.role === 'user') {
+      const parts: AgentStatePart[] = []
+      for (const part of message.parts as readonly unknown[]) {
+        if (isHookPart(part)) {
+          const data = hookDataOf(part)
+          const text = data === null ? null : hookModelText(data, 'user')
+          if (text !== null)
+            parts.push(hookTextPart(text))
+          continue
+        }
+        if (isPart(part))
+          parts.push(part)
+      }
+      if (parts.length > 0)
+        result.push({ ...message, parts })
+      continue
+    }
+    let current: AgentStatePart[] = []
+    let kept = 0
+    const flush = (): void => {
+      if (current.some(isContentPart)) {
+        result.push({ ...message, id: kept === 0 ? message.id : `${message.id}~h${kept}`, parts: current })
+        kept++
+      }
+      current = []
+    }
+    for (const part of message.parts as readonly unknown[]) {
+      if (isHookPart(part)) {
+        const data = hookDataOf(part)
+        const text = data === null ? null : hookModelText(data, 'assistant')
+        if (data === null || text === null)
+          continue
+        flush()
+        result.push(hookMessage(message, data.id, text))
+        continue
+      }
+      if (isPart(part))
+        current.push(part)
+    }
+    flush()
+  }
+  return result
+}
+
+function hookMessage<M extends AgentStateMessage>(message: M, id: string, text: string): M {
+  const { metadata: _metadata, ...rest } = message as M & { metadata?: unknown }
+  return { ...rest, id, role: 'user', parts: [hookTextPart(text)] } as unknown as M
+}
+
+/** True for a user message the user wrote (not a carrier of a turn the server started). */
+function isUserAuthored(message: unknown): boolean {
+  return isRecord(message) && message.role === 'user' && !isHookCarrier(message) && !isTaskCarrier(message)
+}
+
+/**
+ * The number of hook carriers (`isHookCarrier`) on the path since the last user-authored message: the consecutive
+ * Stop-hook continuations the server started. Assistant messages and task carriers (`data-task-result` only) do not
+ * reset the count; 0 for an empty path.
+ */
+export function hookChainLength(path: readonly AgentStateMessage[]): number {
+  if (!Array.isArray(path))
+    return 0
+  let count = 0
+  for (let index = path.length - 1; index >= 0; index--) {
+    const message = path[index]
+    if (!isRecord(message) || message.role !== 'user')
+      continue
+    if (isHookCarrier(message)) {
+      count++
+      continue
+    }
+    if (isTaskCarrier(message))
+      continue
+    break
+  }
+  return count
+}
+
+/**
+ * The SessionStart `source` for a new user message, given the path before it: `startup` when the path is empty (a new
+ * chat, or an edit of its first message); `compact` when the latest compaction marker (`findCompaction`) is followed by
+ * neither a user-authored message nor a SessionStart record (the first turn after a compaction); else null (no
+ * SessionStart hooks run).
+ */
+export function sessionStartSource(path: readonly AgentStateMessage[]): 'startup' | 'compact' | null {
+  if (!Array.isArray(path) || path.length === 0)
+    return 'startup'
+  const latest = findCompaction(path)
+  if (latest === null)
+    return null
+  for (let index = latest.messageIndex; index < path.length; index++) {
+    const message = path[index]
+    if (index > latest.messageIndex && isUserAuthored(message))
+      return null
+    if (!isRecord(message) || !Array.isArray(message.parts))
+      continue
+    const parts = message.parts as readonly unknown[]
+    for (let partIndex = index === latest.messageIndex ? latest.partIndex + 1 : 0; partIndex < parts.length; partIndex++) {
+      const data = hookDataOf(parts[partIndex])
+      if (data !== null && data.event === 'SessionStart')
+        return null
+    }
+  }
+  return 'compact'
 }

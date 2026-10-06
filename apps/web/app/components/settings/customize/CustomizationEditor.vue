@@ -130,8 +130,8 @@ function draftOf(values: FormValues): CustomizationDraft {
     kind: props.kind,
     name: values.name,
     description: values.description,
-    tools: props.kind === 'skill' || values.toolsMode === 'all' ? null : [...values.tools],
-    model: props.kind === 'skill' ? null : values.model,
+    tools: props.kind === 'skill' || props.kind === 'style' || values.toolsMode === 'all' ? null : [...values.tools],
+    model: props.kind === 'skill' || props.kind === 'style' ? null : values.model,
     argumentHint: props.kind === 'command' ? values.argumentHint : null,
     body: values.body,
   }
@@ -438,7 +438,7 @@ function errorProps(field: DraftField, errorId: string, meta?: { isBlurred: bool
             </template>
           </form.Field>
 
-          <form.Field v-if="kind !== 'skill'" name="toolsMode">
+          <form.Field v-if="kind === 'agent' || kind === 'command'" name="toolsMode">
             <template #default="{ field, state }">
               <fieldset class="grid gap-2.5">
                 <legend class="mb-2 text-sm font-medium">
@@ -481,7 +481,7 @@ function errorProps(field: DraftField, errorId: string, meta?: { isBlurred: bool
             </template>
           </form.Field>
 
-          <form.Field v-if="kind !== 'skill'" name="model">
+          <form.Field v-if="kind === 'agent' || kind === 'command'" name="model">
             <template #default="{ field, state }">
               <div class="grid gap-2">
                 <Label :for="ids.model">Model</Label>

@@ -189,6 +189,9 @@ export function createFakeRegistry(): FakeRegistry {
       hooks: [...new Set(hooks.filter(entry => entry.pluginId === pluginId).map(entry => entry.name))],
       agents: [],
       skills: [],
+      // Plugin API 1.5.0: no command hooks or output styles in this fake.
+      commandHooks: 0,
+      outputStyles: [],
     }),
   }
 }
@@ -374,6 +377,8 @@ export function createFakePluginHost(deps: AppDeps): FakePluginHost {
       // Plugin API 1.4.0: P10-0a contract stubs, like `ctx.agents` / `ctx.skills` of the real host.
       agents: { register: () => notYetAvailable('ctx.agents.register') },
       skills: { register: () => notYetAvailable('ctx.skills.register') },
+      // Plugin API 1.5.0: accepted and ignored, like the P11-0a seam of the real host.
+      outputStyles: { register: () => track({ dispose: noop }) },
       hooks: {
         on: <K extends HookName>(name: K, handler: HookHandler<K>, options?: { priority?: number }) =>
           track(deps.registry.hooks.on(pluginId, name, handler, options)),

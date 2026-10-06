@@ -99,8 +99,22 @@ export function entryFromParse(kind: CustomizationKind, source: CustomizationSou
         state,
       }
     }
-    case 'skill':
-      return { ...base, name: definition.fields.name, description, state }
+    case 'skill': {
+      const { name, userInvocable, modelInvocable, argumentHint } = definition.fields
+      return {
+        ...base,
+        name,
+        description,
+        ...(argumentHint === undefined ? {} : { argumentHint }),
+        ...(userInvocable === undefined ? {} : { userInvocable }),
+        ...(modelInvocable === undefined ? {} : { modelInvocable }),
+        state,
+      }
+    }
+    case 'style': {
+      const { name, label, keepCodingInstructions } = definition.fields
+      return { ...base, name, description, label: cut(label, ENTRY_NAME_MAX), keepCodingInstructions, state }
+    }
   }
 }
 

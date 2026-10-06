@@ -2,7 +2,7 @@
 // server command from `GET /api/commands`, filters by prefix and closes on Escape.
 import { byTestId, expect, openNewChat, test, testIds } from '../../helpers/index.ts'
 
-const CLIENT_COMMANDS = ['new', 'model', 'effort', 'mode', 'help', 'remember']
+const CLIENT_COMMANDS = ['new', 'model', 'effort', 'mode', 'help', 'remember', 'output-style']
 
 test.describe('composer', () => {
   test('the slash menu lists the app and server commands @smoke', async ({ page, api }) => {

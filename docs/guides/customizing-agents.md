@@ -17,6 +17,11 @@ Agents, commands and skills are plain Markdown files with a small YAML header (f
 folder (`.harness/` or `.claude/`, so they travel with the repository), keep personal ones in **Settings → Customize**,
 or install them with a plugin. Files written for Claude Code mostly work as they are; section 6 lists the differences.
 
+v1.7 (ADR-051, ADR-052) adds: commands whose `` !`cmd` `` lines run and whose `@path` references are inlined (section 2;
+for a project's command files only after you approve them), skills you run yourself as `/skill-name` (section 2),
+**output styles** (a fourth kind, [output styles](output-styles.md)) and **hooks** and project **`.mcp.json`** servers
+([hooks and project MCP servers](hooks-and-project-mcp.md)).
+
 Reference: [ARCHITECTURE.md 6.23 – 6.27](../ARCHITECTURE.md#623-customization-catalog-adr-044) (how it works) and
 [10.11](../ARCHITECTURE.md#1011-agent-customization-security-phase-10-adr-044--adr-047) (security),
 [UI.md 7.28 – 7.30, 9.12](../UI.md#912-customize-settingscustomize-w108-phase-10) (the screens),
@@ -28,7 +33,7 @@ Reference: [ARCHITECTURE.md 6.23 – 6.27](../ARCHITECTURE.md#623-customization-
 
 | Source | Where | Edited in | Wins over |
 |---|---|---|---|
-| Built-in | the agents `explore` and `general`; the commands `/compact`, `/new`, `/model`, `/effort`, `/mode`, `/help`, `/remember` | — (reserved names) | — |
+| Built-in | the agents `explore` and `general`; the commands `/compact`, `/new`, `/model`, `/effort`, `/mode`, `/help`, `/remember` (v1.7: `/output-style`); the output styles Default, Explanatory, Learning (v1.7) | — (reserved names) | — |
 | Plugins | the agents, skills and commands an installed plugin contributes (`contributes.agents` / `contributes.skills` / `contributes.commands` of its manifest, or registered by its code) | the plugin | built-in |
 | Personal | the harness-forge database (all your chats, every project) | Settings → Customize | plugins |
 | Project, `.claude/` | `.claude/agents/`, `.claude/commands/`, `.claude/skills/` in the project folder | your editor or the agent (with approval) | personal |
@@ -54,8 +59,12 @@ my-project/
         template.md                 a supporting file the agent reads with read_file
     plans/
       2026-10-04-move-auth.md       a saved plan (section 9)
+    output-styles/
+      terse.md                      v1.7: an output style (see the output styles guide)
+    settings.json                   v1.7: only its "hooks" are read, after approval (see the hooks guide)
   .claude/
-    agents/ commands/ skills/       the same layout, lower precedence
+    agents/ commands/ skills/       the same layout, lower precedence (v1.7: also output-styles/ and settings.json)
+  .mcp.json                         v1.7: the project's MCP servers, after approval (see the hooks guide)
 ```
 
 Nothing is read from your home folder (`~/.claude`, `~/.harness`): personal definitions live in Settings → Customize.
@@ -140,6 +149,41 @@ Report the findings as a list with line numbers.
 | `$1` … `$9` | single words of it; quotes group words (`/review "src/a b.ts" naming` → `$1` = `src/a b.ts`) |
 | `{{input}}` | same as `$ARGUMENTS` (the syntax of plugin templates) |
 | no placeholder | your text is added after the body, separated by a blank line |
+| `` !`cmd` `` (v1.7) | runs `cmd` in the project folder before the model is called; its output replaces the span (section below) |
+| `@path` (v1.7) | inlines the project file `path` (`@README.md`, `@src/config.ts`) after the prompt |
+
+**Shell lines and file references** (v1.7, ADR-052). A command can gather context before the model answers:
+
+```markdown
+---
+description: Summarize the working tree
+---
+Here is the current state of the repository:
+
+!`git status --short`
+!`git log --oneline -5`
+
+Summarize what changed and what is left to do. Follow the conventions in @CONTRIBUTING.md.
+```
+
+- A span is `` !`command` `` on one line (no backtick inside). Spans run one after the other in the project folder,
+  through the same shell as the agent's `shell` tool (30 s each, 60 s in total, the first 16 KB of output each, at most
+  10 per command); a span past the time budget is skipped with a note. A non-zero exit code is part of the output.
+- `@path` (a path with a `.` or `/`, outside spans) inlines that project file, at most 32 KB each and 10 per command;
+  secret-looking paths (`.env`, keys), files outside the project and symbolic links are refused; a missing file stays as
+  text.
+- **Your arguments never go inside a span**: the file is scanned before `$ARGUMENTS` and friends are replaced, so
+  `/status ; rm -rf x` cannot inject a command.
+- Spans and file references work **only in project chats** (a span in a chat without a project is refused) and only
+  while the shell is on (`HF_WORKSPACE_SHELL=0` refuses them). They run in every permission mode: typing the command is
+  your explicit request.
+- **Trust**: your personal commands and the commands of trusted plugins run their spans directly; a **project's**
+  command file with spans runs them only after you **approve** it in the project's review dialog (the same one as
+  project hooks; the approval pins the file's spans by hash, and any change needs a new approval). An unapproved one is
+  refused in the composer ("/status runs shell lines you haven't approved." with **Review…**); your text stays.
+- The result is **frozen** into the message: regenerating the reply or answering an approval reuses it, the spans never
+  run twice. Span output is not journaled (like a command you type in a terminal).
+- A personal command with spans restored from a backup comes back **turned off**: check it, then turn it on.
 
 Subfolders group commands: `.harness/commands/frontend/component.md` is `/component`, shown with the label
 "frontend" (the folder is only a label; names must stay unique). The bubble shows what you typed; the expanded prompt
@@ -162,13 +206,18 @@ description: How this project writes release notes. Load it before writing or ed
 | Key | Meaning |
 |---|---|
 | `name`, `description` | required (the name defaults to the folder name) |
+| `user-invocable` (v1.7) | optional, default `true`: the skill is also listed in the slash menu as `/name` |
+| `disable-model-invocation` (v1.7) | optional, default `false`: `true` keeps the skill away from the agent (not listed to it, not loadable with the `skill` tool); it runs only when you type `/name` |
+| `argument-hint` (v1.7) | optional: shown after `/name` while you type its arguments |
 | body | the skill; the agent reads it when it loads the skill |
 | other files in the folder | supporting files (up to 50 are listed, three folders deep; hidden, secret-looking and gitignored files, `node_modules`, links and the `SKILL.md` itself are left out). The agent gets the folder's path and reads them with `read_file`, without asking. They are listed only while the project folder is available |
 
 The agent sees the names and descriptions of the skills (up to 50) and loads one with the `skill` tool when a task
-matches; the chat shows a row "Loaded skill release-notes". Skills are not slash commands in v1.6 (you cannot type
-`/release-notes`); ask the agent to use it instead. A personal or plugin skill is one file: put everything it needs in
-its body.
+matches; the chat shows a row "Loaded skill release-notes". Since v1.7 you can also run a skill yourself: type
+`/release-notes [what you want]` (the slash menu lists skills in its **Skills** group); your text is added to the
+skill's content like a command's arguments (`$ARGUMENTS` works too), and the badge on your message says it was a
+skill. Skill names may have up to 64 characters in the menu; when a command and a skill share a name, the command
+wins. A personal or plugin skill is one file: put everything it needs in its body.
 
 ## 3. Precedence, duplicates and reserved names
 
@@ -178,8 +227,11 @@ its body.
   order wins; the other is listed as **Shadowed** with a warning ("Not used: .harness/commands/a/review.md has the same
   name and comes first in .harness/commands.").
 - **Reserved**: agents `explore`, `general` and `general-purpose` (Claude Code's name for `general`, which the agent may
-  use); commands `/compact`, `/new`, `/model`, `/effort`, `/mode`, `/help`, `/remember`. A definition with such a name is
-  **Invalid**. (A plugin command named `remember` is refused since v1.6.)
+  use); commands `/compact`, `/new`, `/model`, `/effort`, `/mode`, `/help`, `/remember` and (v1.7) `/output-style`. A
+  definition with such a name is **Invalid**. (A plugin command named `remember` is refused since v1.6, one named
+  `output-style` since v1.7.)
+- **A command and a skill with the same name** (v1.7): the command wins in the slash menu; the skill can still be
+  loaded by the agent.
 - **Turned off** personal definitions are listed as **Off** and shadow nothing.
 
 ## 4. Personal definitions: Settings → Customize
@@ -206,11 +258,16 @@ in Settings → Projects) lists everything by tab (**Agents**, **Commands**, **S
 - Personal definitions are part of every backup (Settings → Data → Export); **Restore settings from the backup** brings
   them back on import (one you already have with the same name is kept). Delete all data keeps them.
 - At most 200 personal definitions of each kind.
+- v1.7 adds two tabs: **Output styles** ([output styles](output-styles.md)) and **Hooks**
+  ([hooks and project MCP servers](hooks-and-project-mcp.md)); the skill editor gains **Show in the slash menu**
+  (`user-invocable`) and **Only when you run it** (`disable-model-invocation`), and project command rows with `!` lines
+  show **Needs approval** with **Review…**.
 
 ## 5. Using them in the chat
 
-- **Commands**: type `/`. The menu groups the commands: **App** (built-in, `/remember`, `/compact`), **Project**,
-  **Personal** and **Plugins**. After you pick one, a faded hint shows its arguments. Project commands appear only in
+- **Commands**: type `/`. The menu groups the commands: **App** (built-in, `/remember`, `/compact`; v1.7
+  `/output-style`), **Project**, **Personal**, **Plugins** and (v1.7) **Skills**. A project command whose shell lines
+  are not approved yet shows **Needs approval**. After you pick one, a faded hint shows its arguments. Project commands appear only in
   that project's chats; a command file saved on disk shows up when you open the menu again (it can take up to half a
   minute). The bubble's badge tells where the command came from and which model it asked for.
 - **Agents**: the main agent decides when to use one; mention it by name to ask for it. Each runs as a sub-agent block
@@ -234,13 +291,15 @@ unchanged; these are the differences:
 | `model: sonnet` / `opus` / `haiku` | an agent uses the default sub-agent model, a command the chat's model (a note says so) | harness-forge uses explicit model refs (`provider:model`), any provider |
 | `model: inherit` | the chat's model | same meaning |
 | a header that is not valid YAML | read line by line when it has plain `key: value` lines (a warning; the definition stays usable), else **Invalid** | Claude Code is lenient with hand-written headers |
-| lines starting with `!` in a command (`!git status`) | left as text; **never run** | a command file must not run programs |
-| `@path` in a command (`@src/main.ts`) | left as text; **never expanded** | ask the agent to read the file, or mention it with `@` in the composer |
+| `` !`git status` `` spans in a command | v1.7: **run** in the project folder before the model call, for personal and trusted plugin commands, and for a project's command files only after you approve them (section 2); v1.6 left them as text | a repository must not run programs without your consent |
+| `@path` in a command (`@src/main.ts`) | v1.7: the project file is **inlined** (project chats only; secret-looking paths refused); v1.6 left it as text | the same guard as the agent's file tools |
 | other header keys (`color`, `permissionMode`, `hooks`, …) | ignored (listed as "Ignored" in the editor) | not supported; a file can never change the permission mode |
 | YAML anchors and aliases (`&x`, `*x`) | the header is read line by line instead, aliases are not expanded (a warning) | protects against oversized headers |
 | `~/.claude/…` (your home folder) | not read | use Settings → Customize (or Import…) for personal definitions |
 | sub-agents that start sub-agents | not supported (depth 1) | the same rule as for the built-in sub-agents |
-| skills as `/skill-name` commands | not in v1.6 | the agent loads skills itself |
+| skills as `/skill-name` commands | v1.7: yes (`user-invocable`, default on; `disable-model-invocation` hides a skill from the agent); not in v1.6 | — |
+| `.claude/settings.json` `hooks`, `.mcp.json` | v1.7: used after approval ([hooks and project MCP servers](hooks-and-project-mcp.md)); the other keys of `settings.json` are ignored | a repository must not grant permissions or environment variables |
+| `.claude/output-styles/*.md` | v1.7: used ([output styles](output-styles.md)) | — |
 
 ## 7. Trust: what a definition can and cannot do
 
@@ -250,7 +309,9 @@ steer the model (check what a repository ships), but they can **never give thems
 - a `tools` or `allowed-tools` list only removes tools; it never adds one, never approves a call, never changes the
   permission mode, never creates a tool override or a shell rule;
 - `model` works only with providers you connected;
-- command bodies never run programs or read files by themselves;
+- command bodies never run programs by themselves: since v1.7 a project command's `` !`cmd` `` spans run only after you
+  approve that file (pinned by hash; any change needs a new approval), and `@path` reads only project files through the
+  agent's path guard (no secret-looking paths, no links, nothing outside the project);
 - the agent cannot quietly rewrite them: writing to `.harness/` or `.claude/` always asks, even in Accept edits (reading
   them does not);
 - symbolic links (and anything reached through one), hidden and secret-looking file names and the files past 200 per
@@ -328,6 +389,8 @@ binary file is refused.
 | Personal definitions | 200 per kind |
 | Listed to the model | 30 agent types and 50 skills, descriptions cut at 250 characters |
 | A command's expanded prompt | 64 KB |
+| A command's `!` spans (v1.7) | 10 per command, 30 s each, 60 s in total, 16 KB of output each |
+| A command's `@path` files (v1.7) | 10 per command, 32 KB each |
 | Background agents | 3 per chat and 10 per server at once, 30 minutes each, Sub-agent max steps; the latest 100 per chat are kept |
 | `/remember` | 2,000 characters per note; `AGENTS.md` up to 1 MB; instructions up to 20,000 characters |
 | Plan folder | a relative path inside the project, at most 200 characters |
@@ -341,6 +404,10 @@ Changes on disk show up within 10 seconds (Settings → Customize reads the fold
   the limit; nothing at all means the file is not where it should be (`.harness/agents/x.md`, not deeper; `.md` only;
   not a hidden or secret-looking name such as `secrets.md`) or the project folder is unavailable.
 - **A command shows in one chat but not another**: project commands exist only in that project's chats.
+- **"/name runs shell lines you haven't approved."** (v1.7): the project's command file has `!` spans; press
+  **Review…**, check the commands and approve the file (it is pending again after every change to it).
+- **A command with `!` lines is refused in a chat without a project**, or with "the shell is off": spans need a
+  project folder and `HF_WORKSPACE_SHELL` on.
 - **The command ran on the chat's model**: the command's `model` is not available (no key for that provider, an unknown
   model, or an image model); the reply's notice says so.
 - **The custom agent did not get a tool from its list**: a sub-agent only gets tools that run without approval in the

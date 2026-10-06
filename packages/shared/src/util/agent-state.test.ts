@@ -8,9 +8,15 @@ import {
   compactionMarkers,
   countTodos,
   findCompaction,
+  HOOK_PART_TYPE,
+  hookChainLength,
+  hookModelText,
   isContentPart,
+  isHookCarrier,
   latestTodos,
   NON_CONTENT_PART_TYPES,
+  sessionStartSource,
+  splitHooks,
   splitSteers,
   splitTaskResults,
   TASK_RESULT_PART_TYPE,
@@ -819,4 +825,295 @@ describe('splitTaskResults', () => {
     const path: AgentStateMessage[] = [{ id: 'a', role: 'assistant', parts: [{ type: TASK_RESULT_PART_TYPE, data: taskResultData('t') }] }]
     expect(splitTaskResults(path)).toEqual([{ id: 't', role: 'user', parts: [resultText('t')] }])
   })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Hook records (Phase 11)
+
+interface HookFields {
+  event: string
+  outcome: string
+  toolCallId?: string
+  toolName?: string
+  context?: string
+  reason?: string
+}
+
+let hookCounter = 0
+
+function hookData(fields: HookFields, id = `hev_${String(++hookCounter).padStart(16, '0')}`): Record<string, unknown> {
+  return { id, createdAt: AT, hooks: [{ source: 'project', label: 'sh .claude/hooks/x.sh', exitCode: 0, durationMs: 5 }], ...fields }
+}
+
+function hook(data: unknown): HarnessUIMessagePart {
+  return { type: 'data-hook', data } as unknown as HarnessUIMessagePart
+}
+
+describe('hookModelText', () => {
+  it('writes context blocks in replies and on user messages', () => {
+    expect(HOOK_PART_TYPE).toBe('data-hook')
+    expect(hookModelText({ event: 'PostToolUse', outcome: 'context', toolName: 'write_file', context: '  2 lint warnings\n' }, 'assistant'))
+      .toBe('<hook-context event="PostToolUse" tool="write_file">\n2 lint warnings\n</hook-context>')
+    expect(hookModelText({ event: 'UserPromptSubmit', outcome: 'context', context: 'Branch: main' }, 'user'))
+      .toBe('<hook-context event="UserPromptSubmit">\nBranch: main\n</hook-context>')
+    expect(hookModelText({ event: 'SessionStart', outcome: 'context', context: 'Open issues: 3' }, 'user'))
+      .toBe('<hook-context event="SessionStart">\nOpen issues: 3\n</hook-context>')
+  })
+
+  it('writes feedback for a blocked PostToolUse and a Stop continuation', () => {
+    expect(hookModelText({ event: 'PostToolUse', outcome: 'blocked', toolName: 'shell', reason: 'Tests fail.' }, 'assistant'))
+      .toBe('<hook-feedback event="PostToolUse" tool="shell">\nTests fail.\n</hook-feedback>')
+    expect(hookModelText({ event: 'PostToolUse', outcome: 'blocked', toolName: 'shell', reason: 'Tests fail.', context: 'ctx' }, 'assistant'))
+      .toBe('<hook-context event="PostToolUse" tool="shell">\nctx\n</hook-context>\n\n<hook-feedback event="PostToolUse" tool="shell">\nTests fail.\n</hook-feedback>')
+    expect(hookModelText({ event: 'Stop', outcome: 'continued', reason: 'Run the tests first.' }, 'user'))
+      .toBe('<hook-feedback event="Stop">\nRun the tests first.\n</hook-feedback>')
+    expect(hookModelText({ event: 'Stop', outcome: 'blocked', reason: ' ' }, 'user'))
+      .toBe('<hook-feedback event="Stop">\n(no reason given)\n</hook-feedback>')
+  })
+
+  it('is null for display-only records', () => {
+    const displayOnly: Array<[HookFields, 'assistant' | 'user']> = [
+      [{ event: 'PreToolUse', outcome: 'denied', toolName: 'shell', reason: 'No rm.' }, 'assistant'],
+      [{ event: 'PreToolUse', outcome: 'rewritten', toolName: 'shell' }, 'assistant'],
+      [{ event: 'PostToolUse', outcome: 'error', reason: 'stderr' }, 'assistant'],
+      [{ event: 'PostToolUse', outcome: 'blocked', reason: 'r' }, 'user'],
+      [{ event: 'Stop', outcome: 'continued', reason: 'r' }, 'assistant'],
+      [{ event: 'Stop', outcome: 'stopped', reason: 'r' }, 'user'],
+      [{ event: 'PreCompact', outcome: 'error' }, 'assistant'],
+      [{ event: 'SessionStart', outcome: 'context', context: '   ' }, 'user'],
+    ]
+    for (const [data, role] of displayOnly)
+      expect(hookModelText(data, role), JSON.stringify(data)).toBeNull()
+    expect(hookModelText(null as unknown as HookFields, 'user')).toBeNull()
+  })
+
+  it('escapes attributes', () => {
+    expect(hookModelText({ event: 'PostToolUse', outcome: 'context', toolName: 'a"<&', context: 'c' }, 'assistant'))
+      .toBe('<hook-context event="PostToolUse" tool="a&quot;&lt;&amp;">\nc\n</hook-context>')
+  })
+})
+
+describe('splitHooks', () => {
+  it('returns the same objects for a v1.6 history (byte-identical)', () => {
+    const s = steerData(msgId(7), 'also check the docs')
+    const path = [
+      user('u1'),
+      assistant('a1', STEP, text('Reading'), toolPart('read_file', 'c1'), steer(s), STEP, text('Done'), taskResult(taskResultData('t1')), STEP, notice()),
+      user('u2', taskResult(taskResultData('t2'))),
+      assistant('a2', marker(compaction({ keep: 'last-user' }), 'p1'), STEP, todoPart('td1', [todo('1', 'in_progress')]), text('ok')),
+      user('u3', text('/greet Ada')),
+      assistant('a3', STEP, text('Hello Ada')),
+    ]
+    const before = splitTaskResults(splitSteers(path))
+    const after = splitHooks(before)
+    expect(after).not.toBe(before)
+    after.forEach((message, index) => expect(message).toBe(before[index]))
+    expect(JSON.stringify(after)).toBe(JSON.stringify(before))
+    expect(splitHooks(path).every((message, index) => message === path[index])).toBe(true)
+    expect(splitHooks([])).toEqual([])
+    expect(splitHooks(null as unknown as HarnessUIMessage[])).toEqual([])
+  })
+
+  it('splits a reply at model-visible records and drops display-only ones', () => {
+    const pre = hook(hookData({ event: 'PreToolUse', outcome: 'rewritten', toolCallId: 'c1', toolName: 'shell' }))
+    const call = toolPart('shell', 'c1')
+    const post = hookData({ event: 'PostToolUse', outcome: 'context', toolCallId: 'c1', toolName: 'shell', context: 'Formatted 2 files.' }, 'hev_post')
+    const reply = assistant('a1', STEP, pre, call, STEP, hook(post), text('Next'), call, STEP, hook(hookData({ event: 'PostToolUse', outcome: 'error', toolName: 'shell' })), text('Done'))
+    const result = splitHooks([user('u1'), reply])
+    expect(result).toEqual([
+      user('u1'),
+      { ...reply, parts: [STEP, call, STEP] },
+      { id: 'hev_post', role: 'user', parts: [text('<hook-context event="PostToolUse" tool="shell">\nFormatted 2 files.\n</hook-context>')] },
+      { ...reply, id: 'a1~h1', parts: [text('Next'), call, STEP, text('Done')] },
+    ])
+    expect('metadata' in result[2]!).toBe(false)
+    expect(result[1]!.metadata).toBe(reply.metadata)
+    expect(result[3]!.metadata).toBe(reply.metadata)
+  })
+
+  it('drops halves without content and invalid records', () => {
+    const blocked = hookData({ event: 'PostToolUse', outcome: 'blocked', toolName: 'shell', reason: 'Lint failed.' }, 'hev_b')
+    const reply = assistant('a1', hook(blocked), STEP, notice(), hook({ id: 1, event: 'PostToolUse', outcome: 'context', context: 'x' }), hook(null), 'junk' as unknown as HarnessUIMessagePart, STEP, text('fixed'))
+    expect(splitHooks([reply])).toEqual([
+      { id: 'hev_b', role: 'user', parts: [text('<hook-feedback event="PostToolUse" tool="shell">\nLint failed.\n</hook-feedback>')] },
+      { ...reply, parts: [STEP, notice(), STEP, text('fixed')] },
+    ])
+    const onlyDisplay = assistant('a2', STEP, hook(hookData({ event: 'Stop', outcome: 'continued', reason: 'r' })))
+    expect(splitHooks([onlyDisplay])).toEqual([])
+  })
+
+  it('turns records on user messages into text parts and drops empty carriers', () => {
+    const prompt = user('u1', text('Fix the parser'), hook(hookData({ event: 'SessionStart', outcome: 'context', context: 'Issue #12 is open.' })), hook(hookData({ event: 'UserPromptSubmit', outcome: 'context', context: 'Branch: main' })), hook(hookData({ event: 'UserPromptSubmit', outcome: 'allowed' })))
+    expect(splitHooks([prompt])).toEqual([{
+      ...prompt,
+      parts: [
+        text('Fix the parser'),
+        text('<hook-context event="SessionStart">\nIssue #12 is open.\n</hook-context>'),
+        text('<hook-context event="UserPromptSubmit">\nBranch: main\n</hook-context>'),
+      ],
+    }])
+    const carrier = user('u2', hook(hookData({ event: 'Stop', outcome: 'continued', reason: 'Run the tests.' })))
+    const result = splitHooks([user('u1'), assistant('a1', STEP, text('done')), carrier])
+    expect(result[2]).toEqual({ ...carrier, parts: [text('<hook-feedback event="Stop">\nRun the tests.\n</hook-feedback>')] })
+    expect(result[2]!.metadata).toBe(carrier.metadata)
+    const silent = user('u3', hook(hookData({ event: 'Stop', outcome: 'stopped' })), hook({ bad: true }))
+    expect(splitHooks([user('u1'), silent])).toEqual([user('u1')])
+  })
+
+  it('splits at a steer boundary after splitSteers and splitTaskResults', () => {
+    const s = steerData(msgId(3), 'use pnpm')
+    const reply = assistant(
+      'a1',
+      STEP,
+      text('one'),
+      steer(s),
+      hook(hookData({ event: 'UserPromptSubmit', outcome: 'context', context: 'Steer context' }, 'hev_steer')),
+      STEP,
+      text('two'),
+      taskResult(taskResultData('t1')),
+      STEP,
+      toolPart('write_file', 'c9'),
+      hook(hookData({ event: 'PostToolUse', outcome: 'context', toolName: 'write_file', context: 'Saved.' }, 'hev_post')),
+      STEP,
+      text('three'),
+    )
+    const result = splitHooks(splitTaskResults(splitSteers([user('u1'), reply])))
+    expect(result.map(message => [message.id, message.role])).toEqual([
+      ['u1', 'user'],
+      ['a1', 'assistant'],
+      [msgId(3), 'user'],
+      ['hev_steer', 'user'],
+      ['a1~1', 'assistant'],
+      ['t1', 'user'],
+      ['a1~1~r1', 'assistant'],
+      ['hev_post', 'user'],
+      ['a1~1~r1~h1', 'assistant'],
+    ])
+    expect(new Set(result.map(message => message.id)).size).toBe(result.length)
+    expect(result.flatMap(message => message.parts).some(part => part.type === 'data-hook')).toBe(false)
+  })
+
+  it('is idempotent and accepts structural messages', () => {
+    const path = [
+      user('u1', text('q'), hook(hookData({ event: 'UserPromptSubmit', outcome: 'context', context: 'c' }))),
+      assistant('a1', STEP, text('x'), hook(hookData({ event: 'PostToolUse', outcome: 'context', context: 'y' })), text('z')),
+      user('u2', hook(hookData({ event: 'Stop', outcome: 'continued', reason: 'go on' }))),
+    ]
+    const once = splitHooks(path)
+    const twice = splitHooks(once)
+    expect(twice).toEqual(once)
+    twice.forEach((message, index) => expect(message).toBe(once[index]))
+    const structural: AgentStateMessage[] = [{ id: 'a', role: 'assistant', parts: [{ type: HOOK_PART_TYPE, data: hookData({ event: 'PostToolUse', outcome: 'context', context: 'k' }, 'hev_k') }] }]
+    expect(splitHooks(structural)).toEqual([{ id: 'hev_k', role: 'user', parts: [{ type: 'text', text: '<hook-context event="PostToolUse">\nk\n</hook-context>' }] }])
+    const system = { id: 's', role: 'system', parts: [hook(hookData({ event: 'Stop', outcome: 'continued' }))] } as unknown as HarnessUIMessage
+    expect(splitHooks([system])[0]).toBe(system)
+  })
+})
+
+describe('hook carriers and chains', () => {
+  const stopCarrier = (id: string): HarnessUIMessage => user(id, hook(hookData({ event: 'Stop', outcome: 'continued', reason: 'again' })))
+
+  it('recognizes carriers', () => {
+    expect(isHookCarrier(stopCarrier('c1'))).toBe(true)
+    expect(isHookCarrier(user('u1'))).toBe(false)
+    expect(isHookCarrier(user('u1', text('x'), hook(hookData({ event: 'UserPromptSubmit', outcome: 'context', context: 'c' }))))).toBe(false)
+    expect(isHookCarrier(user('u1', taskResult(taskResultData('t'))))).toBe(false)
+    expect(isHookCarrier({ id: 'x', role: 'user', parts: [] })).toBe(false)
+    expect(isHookCarrier(assistant('a', hook(hookData({ event: 'Stop', outcome: 'continued' }))))).toBe(false)
+    expect(isHookCarrier(null)).toBe(false)
+  })
+
+  it('counts consecutive carriers since the last user-authored message', () => {
+    expect(hookChainLength([])).toBe(0)
+    expect(hookChainLength([user('u1'), assistant('a1')])).toBe(0)
+    expect(hookChainLength([user('u1'), assistant('a1'), stopCarrier('c1'), assistant('a2'), stopCarrier('c2'), assistant('a3')])).toBe(2)
+    expect(hookChainLength([stopCarrier('c0'), user('u1'), assistant('a1'), stopCarrier('c1'), assistant('a2')])).toBe(1)
+    expect(hookChainLength([user('u1'), assistant('a1'), stopCarrier('c1'), assistant('a2'), user('t', taskResult(taskResultData('t1'))), assistant('a3'), stopCarrier('c2')])).toBe(2)
+    expect(hookChainLength(null as unknown as HarnessUIMessage[])).toBe(0)
+  })
+})
+
+describe('sessionStartSource', () => {
+  it('is startup for an empty path', () => {
+    expect(sessionStartSource([])).toBe('startup')
+    expect(sessionStartSource(null as unknown as HarnessUIMessage[])).toBe('startup')
+  })
+
+  it('is null without a compaction', () => {
+    expect(sessionStartSource([user('u1'), assistant('a1', STEP, text('x'))])).toBeNull()
+  })
+
+  it('is compact for the first user turn after the latest marker', () => {
+    const compacted = [user('u1'), assistant('a1', text('x')), user('u2', text('/compact')), assistant('a2', marker(compaction()))]
+    expect(sessionStartSource(compacted)).toBe('compact')
+    const inline = [user('u1'), assistant('a1', STEP, text('x'), marker(compaction({ trigger: 'auto', keep: 'last-user' })), STEP, text('y'))]
+    expect(sessionStartSource(inline)).toBe('compact')
+    expect(sessionStartSource([...compacted, stopCarrier('c1'), assistant('a3', text('z'))])).toBe('compact')
+    expect(sessionStartSource([...compacted, user('u3', text('next')), assistant('a3', text('z'))])).toBeNull()
+    const recorded = [...compacted.slice(0, 3), assistant('a2', marker(compaction()), hook(hookData({ event: 'SessionStart', outcome: 'context', context: 'c' })))]
+    expect(sessionStartSource(recorded)).toBeNull()
+    const earlierRecord = [user('u1', text('q'), hook(hookData({ event: 'SessionStart', outcome: 'context', context: 'c' }))), assistant('a1', marker(compaction()))]
+    expect(sessionStartSource(earlierRecord)).toBe('compact')
+  })
+
+  function stopCarrier(id: string): HarnessUIMessage {
+    return user(id, hook(hookData({ event: 'Stop', outcome: 'continued', reason: 'again' })))
+  }
+})
+
+describe('hook fuzzing', () => {
+  const random = prng(0x40C35)
+  const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!
+  const events = ['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionStart', 'PreCompact', 'Notification', 'SubagentStop']
+  const outcomes = ['context', 'denied', 'asked', 'allowed', 'rewritten', 'blocked', 'continued', 'stopped', 'error']
+
+  function randomPart(): HarnessUIMessagePart {
+    const roll = random()
+    if (roll < 0.15)
+      return STEP
+    if (roll < 0.3)
+      return text(pick(['a', 'b', '']))
+    if (roll < 0.6) {
+      const data = random() < 0.9
+        ? hookData({ event: pick(events), outcome: pick(outcomes), ...(random() < 0.5 ? { context: pick(['c', ' ', 'ctx']) } : {}), ...(random() < 0.5 ? { reason: pick(['r', '']) } : {}), ...(random() < 0.3 ? { toolName: 'shell' } : {}) })
+        : pick([null, { id: 'x' }, { id: 'x', event: 1, outcome: 'context' }])
+      return hook(data)
+    }
+    if (roll < 0.7)
+      return steer(steerData(msgId(Math.floor(random() * 1000)), 's'))
+    if (roll < 0.8)
+      return taskResult(taskResultData(`t${Math.floor(random() * 100)}`))
+    if (roll < 0.9)
+      return toolPart('shell', `c${Math.floor(random() * 100)}`)
+    return pick([notice(), marker(compaction()), 'x' as unknown as HarnessUIMessagePart])
+  }
+
+  it('keeps every invariant on 2000 random paths', () => {
+    for (let iteration = 0; iteration < 2000; iteration++) {
+      const path: HarnessUIMessage[] = Array.from({ length: Math.floor(random() * 6) }, (_, index) => {
+        const parts = Array.from({ length: Math.floor(random() * 7) }, randomPart)
+        return { id: `m${index}`, role: pick(['user', 'assistant', 'assistant']), parts, metadata: { modelRef: 'mock:echo', startedAt: AT } } as HarnessUIMessage
+      })
+      const before = splitTaskResults(splitSteers(path))
+      const history = splitHooks(before)
+      expect(history.flatMap(message => message.parts).some(part => isObject(part) && part.type === 'data-hook')).toBe(false)
+      expect(splitHooks(history)).toEqual(history)
+      for (const message of history) {
+        // Messages the stage rebuilt (it never touches the others) have content.
+        if (before.includes(message))
+          continue
+        if (message.role === 'assistant')
+          expect(message.parts.some(part => isObject(part) && isContentPart(part))).toBe(true)
+        if (message.role === 'user')
+          expect(message.parts.length).toBeGreaterThan(0)
+      }
+      const length = hookChainLength(path)
+      expect(length >= 0 && length <= path.length).toBe(true)
+      expect(['startup', 'compact', null]).toContain(sessionStartSource(path))
+    }
+  })
+
+  function isObject(part: unknown): part is AgentStatePart {
+    return typeof part === 'object' && part !== null && typeof (part as { type?: unknown }).type === 'string'
+  }
 })

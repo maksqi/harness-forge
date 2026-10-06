@@ -309,8 +309,10 @@ describe('examples in the plugin host', () => {
       mcpServers: [],
       commands: [],
       hooks: [],
+      commandHooks: 0,
       agents: ['code-reviewer', 'docs-writer'],
       skills: ['changelog-entry', 'commit-message'],
+      outputStyles: [],
     })
     for (const id of EXAMPLE_IDS.filter(other => other !== 'agent-pack'))
       expect(await contributions(id)).toMatchObject({ agents: [], skills: [] })

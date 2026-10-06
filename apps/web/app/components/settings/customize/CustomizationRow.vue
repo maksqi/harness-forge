@@ -63,7 +63,7 @@ const icon = computed(() => {
   const { kind, source, name } = props.entry
   if (kind === 'command')
     return SquareSlashIcon
-  if (kind === 'skill')
+  if (kind === 'skill' || kind === 'style')
     return BookOpenIcon
   if (source === 'builtin')
     return name === 'explore' ? TelescopeIcon : BotIcon

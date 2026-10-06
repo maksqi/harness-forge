@@ -6,6 +6,7 @@ import type {
   HookMap,
   HookName,
   KV,
+  OutputStyleDefinition,
   PluginContext,
   ProviderDefinition,
   SkillDefinition,
@@ -16,7 +17,7 @@ import { createAnthropic } from '@ai-sdk/anthropic'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
-import { declarativeAgentSchema, declarativeSkillSchema, isPluginNamespacedId, modelInfoSchema, pluginManifestSchema } from '@harness-forge/shared'
+import { declarativeAgentSchema, declarativeOutputStyleSchema, declarativeSkillSchema, isPluginNamespacedId, modelInfoSchema, pluginManifestSchema } from '@harness-forge/shared'
 import { generateText, jsonSchema, tool } from 'ai'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -47,6 +48,7 @@ function fakeContext() {
   const commands: CommandDefinition[] = []
   const agents: AgentDefinition[] = []
   const skills: SkillDefinition[] = []
+  const styles: OutputStyleDefinition[] = []
   const hooks: { name: HookName, fn: (...args: never[]) => unknown, priority: number }[] = []
   const logs: string[] = []
   const log = (message: string) => {
@@ -89,6 +91,10 @@ function fakeContext() {
       skills.push(definition)
       return disposable
     } },
+    outputStyles: { register: (definition) => {
+      styles.push(definition)
+      return disposable
+    } },
     hooks: { on: (name, fn, options) => {
       hooks.push({ name, fn, priority: options?.priority ?? 0 })
       return disposable
@@ -101,7 +107,7 @@ function fakeContext() {
       },
     },
   }
-  return { ctx, providers, tools, commands, agents, skills, hooks, logs }
+  return { ctx, providers, tools, commands, agents, skills, styles, hooks, logs }
 }
 
 const call: ToolCallContext = {
@@ -117,8 +123,8 @@ describe('sample plugin', () => {
     expect(pluginManifestSchema.safeParse(manifest).success).toBe(true)
   })
 
-  it('registers a provider, tools, commands, hooks, an agent and a skill', async () => {
-    const { ctx, providers, tools, commands, agents, skills, hooks } = fakeContext()
+  it('registers a provider, tools, commands, hooks, an agent, a skill and an output style', async () => {
+    const { ctx, providers, tools, commands, agents, skills, styles, hooks } = fakeContext()
     await samplePlugin.setup(ctx)
     expect(providers.map(provider => provider.id)).toEqual(['sample-kit'])
     expect(providers.every(provider => isPluginNamespacedId(manifest.id, provider.id))).toBe(true)
@@ -128,6 +134,8 @@ describe('sample plugin', () => {
     // Plugin API 1.4.0: the registrations pass the manifest rules of contributes.agents / contributes.skills.
     expect(agents.map(agent => declarativeAgentSchema.parse(agent).name)).toEqual(['sample-reviewer'])
     expect(skills.map(skill => declarativeSkillSchema.parse(skill).name)).toEqual(['sample-release-notes'])
+    // Plugin API 1.5.0: the style passes the rules of contributes.outputStyles.
+    expect(styles.map(style => declarativeOutputStyleSchema.parse(style).name)).toEqual(['sample-terse'])
   })
 
   it('creates provider instances without network access and maps reasoning', async () => {

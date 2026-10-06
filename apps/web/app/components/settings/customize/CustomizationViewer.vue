@@ -51,7 +51,7 @@ const details = computed(() => {
     rows.push({ term: 'Tools', value: entry.tools ? (entry.tools.length > 0 ? entry.tools.join(', ') : 'None') : 'All tools', mono: !!entry.tools?.length })
   else if (entry.kind === 'command')
     rows.push({ term: 'Allowed tools', value: entry.tools ? (entry.tools.length > 0 ? entry.tools.join(', ') : 'None') : 'No restriction', mono: !!entry.tools?.length })
-  if (entry.kind !== 'skill') {
+  if (entry.kind === 'agent' || entry.kind === 'command') {
     const model = entry.modelRef === 'inherit'
       ? 'Same as the chat'
       : entry.modelRef

@@ -30,8 +30,8 @@ import { openWorkspaceFile, resolveWorkspacePath } from '../../workspace/paths.t
 import { isSecretLookingPath } from '../../workspace/sensitive.ts'
 import { DIAGNOSTICS_MAX, entryFromParse, pushDiagnostic } from './entries.ts'
 
-/** The folder of each kind below `.claude` / `.harness`. */
-export const DEFINITION_KIND_FOLDERS: Readonly<Record<CustomizationKind, string>> = { agent: 'agents', command: 'commands', skill: 'skills' }
+/** The folder of each kind below `.claude` / `.harness` (Phase 11: output styles, ADR-051). */
+export const DEFINITION_KIND_FOLDERS: Readonly<Record<CustomizationKind, string>> = { agent: 'agents', command: 'commands', skill: 'skills', style: 'output-styles' }
 
 /** One definition folder of a project. */
 export interface ProjectDefinitionFolder {
@@ -41,7 +41,7 @@ export interface ProjectDefinitionFolder {
   readonly folder: string
 }
 
-/** The six definition folders, lowest precedence first (every `.claude` folder before every `.harness` one). */
+/** The eight definition folders, lowest precedence first (every `.claude` folder before every `.harness` one). */
 export const PROJECT_DEFINITION_FOLDERS: readonly ProjectDefinitionFolder[] = Object.freeze(DEFINITION_FOLDERS.flatMap(base =>
   CUSTOMIZATION_KINDS.map(kind => Object.freeze({ base, kind, folder: `${base}/${DEFINITION_KIND_FOLDERS[kind]}` }))))
 
@@ -319,7 +319,8 @@ function scanLimit(folder: string, diagnostics: FolderDiagnostics): void {
   diagnostics.limit(folder, `${folder} has more than ${DIRENTS_SCANNED_MAX} entries; the rest was not read.`)
 }
 
-async function agentCandidates(folder: string, absolute: string, diagnostics: FolderDiagnostics): Promise<Candidate[]> {
+/** The top-level `*.md` files of an agents folder (or, Phase 11, an output styles folder: the same layout). */
+async function agentCandidates(folder: string, absolute: string, diagnostics: FolderDiagnostics, kind: 'agent' | 'style' = 'agent'): Promise<Candidate[]> {
   const listing = await listFolder(absolute)
   if (listing === null) {
     diagnostics.unreadable(folder)
@@ -335,7 +336,7 @@ async function agentCandidates(folder: string, absolute: string, diagnostics: Fo
     if (item.type === 'link')
       diagnostics.link(path)
     else if (item.type === 'file')
-      candidates.push({ kind: 'agent', path, parse: { fileName: item.name }, fallbackName: fileStem(item.name) })
+      candidates.push({ kind, path, parse: { fileName: item.name }, fallbackName: fileStem(item.name) })
   }
   return capCandidates(folder, candidates, diagnostics)
 }
@@ -532,6 +533,9 @@ export async function discoverProject(root: string, options: DiscoverOptions = {
         break
       case 'skill':
         candidates.push(...await skillCandidates(root, folder, check.absolute, diagnostics))
+        break
+      case 'style':
+        candidates.push(...await agentCandidates(folder, check.absolute, diagnostics, 'style'))
         break
     }
   }

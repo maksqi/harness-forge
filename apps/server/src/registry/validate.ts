@@ -56,6 +56,13 @@ const HOOK_NAME_RECORD: Record<HookName, true> = {
   'tool.before': true,
   'tool.after': true,
   'message.completed': true,
+  // Plugin API 1.5.0 (ADR-048): accepted at registration; the chat pipeline calls them from P11-A on.
+  'prompt.submit': true,
+  'session.start': true,
+  'run.stop': true,
+  'subagent.stop': true,
+  'compact.before': true,
+  'notification': true,
 }
 export const HOOK_NAMES = Object.keys(HOOK_NAME_RECORD) as HookName[]
 

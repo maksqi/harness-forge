@@ -203,7 +203,7 @@ describe('change notifications, contributions and owner removal', () => {
 
     expect(registry.removeOwner('acme')).toBe(4)
     expect(removed.sort()).toEqual(['agent:alpha', 'agent:zeta', 'skill:notes', 'tool:acme_tool'])
-    expect(registry.contributions('acme')).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] })
+    expect(registry.contributions('acme')).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] })
     expect(registry.agents.list().map(entry => entry.definition.name)).toEqual(['kept'])
     expect(registry.skills.list().map(entry => entry.definition.name)).toEqual(['kept-skill'])
     expect(registry.removeOwner('acme')).toBe(0)

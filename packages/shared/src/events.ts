@@ -7,7 +7,9 @@ import { taskChangedDataSchema } from './schemas/background-tasks.ts'
 import { workspaceChangedDataSchema } from './schemas/changes.ts'
 import { chatSummarySchema } from './schemas/chats.ts'
 import { customizationChangedDataSchema } from './schemas/customizations.ts'
+import { hooksChangedDataSchema } from './schemas/hooks.ts'
 import { pluginLogEntrySchema, pluginSummarySchema } from './schemas/plugins.ts'
+import { projectMcpChangedDataSchema, projectTrustChangedDataSchema } from './schemas/project-trust.ts'
 import { projectSummarySchema } from './schemas/projects.ts'
 import { providerSummarySchema } from './schemas/providers.ts'
 import { queueChangedDataSchema } from './schemas/queue.ts'
@@ -29,6 +31,9 @@ export const SERVER_EVENT_TYPES = [
   'queue.changed',
   'task.changed',
   'customization.changed',
+  'hooks.changed',
+  'project-trust.changed',
+  'project-mcp.changed',
 ] as const
 
 export const serverEventTypeSchema = z.enum(SERVER_EVENT_TYPES)
@@ -48,13 +53,15 @@ export const runStartedDataSchema = z.object({
   messageId: messageIdSchema,
   modelRef: modelRefSchema,
   /**
-   * What started the run (`runOriginSchema`, in `enums.ts`): `request`, `queue` (Phase 9) or `task` (Phase 10, ADR-046:
-   * the results of finished background tasks). Absent in events of servers before v1.5 (= `request`).
+   * What started the run (`runOriginSchema`, in `enums.ts`): `request`, `queue` (Phase 9), `task` (Phase 10, ADR-046:
+   * the results of finished background tasks) or `hook` (Phase 11, ADR-048: a `Stop` hook blocked the end of the
+   * previous run). Absent in events of servers before v1.5 (= `request`).
    */
   origin: runOriginSchema.optional(),
   /**
-   * The user message the run answers; set when the server started the turn (`origin: 'queue'`, or `origin: 'task'`:
-   * the user-role carrier message that holds only `data-task-result` parts).
+   * The user message the run answers; set when the server started the turn (`origin: 'queue'`; `origin: 'task'`: the
+   * user-role carrier message that holds only `data-task-result` parts; `origin: 'hook'`: the carrier message that holds
+   * only `data-hook` parts).
    */
   userMessageId: messageIdSchema.optional(),
 })
@@ -124,8 +131,14 @@ export const serverEventSchema = z.discriminatedUnion('type', [
   eventSchema('queue.changed', queueChangedDataSchema),
   /** A background task of a chat changed (ADR-046): the task after the change (an upsert; at most 1/s per task). */
   eventSchema('task.changed', taskChangedDataSchema),
-  /** The catalog of agents, commands and skills changed (ADR-044): refetch what it names. */
+  /** The catalog of agents, commands, skills and output styles changed (ADR-044): refetch what it names. */
   eventSchema('customization.changed', customizationChangedDataSchema),
+  /** The hooks of a scope changed (ADR-048): refetch `GET /hooks` (`projectId: null` = personal or plugin hooks). */
+  eventSchema('hooks.changed', hooksChangedDataSchema),
+  /** The approvals or the executable items of a project changed (ADR-049): refetch its trust list. */
+  eventSchema('project-trust.changed', projectTrustChangedDataSchema),
+  /** The MCP servers of a project changed state (ADR-050): the servers after the change. */
+  eventSchema('project-mcp.changed', projectMcpChangedDataSchema),
 ])
 export type ServerEvent = z.infer<typeof serverEventSchema>
 export type ServerEventType = ServerEvent['type']

@@ -244,6 +244,11 @@ function getInputs(): Partial<Record<ApiRouteKey, Array<{ params?: Record<string
     'customizations.source': [{ query: { kind: 'agent', name: 'explore', source: 'builtin' } }],
     'customizations.get': [{ params: { id: 'cus_ABCdef0123456789' } }],
     'chatTasks.list': [{ params: { id: chatId } }],
+    // Phase 11 (ADR-048 … ADR-050): the personal and plugin hooks with the kill switches, the run log, and the trust
+    // items and MCP servers of an unknown project (404 once implemented; never a variable value).
+    'hooks.list': [{}, { query: { projectId: 'prj_ABCdef0123456789' } }],
+    'projectTrust.list': [{ params: { id: 'prj_ABCdef0123456789' } }],
+    'projectMcp.list': [{ params: { id: 'prj_ABCdef0123456789' } }],
   }
 }
 

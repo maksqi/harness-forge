@@ -38,6 +38,9 @@ function definitionOf(kind: CustomizationKind, registration: unknown): ParsedDef
       return { kind, fields: { name, description, content: text('content') } }
     case 'command':
       return { kind, fields: { name, description, argumentHint: null, model: null, allowedTools: null, body: text('template') } }
+    case 'style':
+      // Plugin output styles arrive with plugin API 1.5.0 (`registry.styles`, P11-A).
+      return null
   }
 }
 
@@ -66,7 +69,7 @@ export function pluginCatalogEntries(registry: Registry, safeMode: boolean): Cus
  * registered, now belongs to another plugin, or the plugin is not listed (safe mode).
  */
 export function pluginDefinition(registry: Registry, kind: CustomizationKind, name: string, pluginId: string | undefined, safeMode: boolean): { pluginId: string, definition: ParsedDefinition } | null {
-  const registration = kind === 'agent' ? registry.agents.get(name) : kind === 'skill' ? registry.skills.get(name) : registry.commands.get(name)
+  const registration = kind === 'agent' ? registry.agents.get(name) : kind === 'skill' ? registry.skills.get(name) : kind === 'command' ? registry.commands.get(name) : undefined
   if (registration === undefined || (pluginId !== undefined && registration.pluginId !== pluginId) || !pluginListed(registration.pluginId, safeMode))
     return null
   const definition = definitionOf(kind, registration.definition)

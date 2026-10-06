@@ -51,14 +51,15 @@ describe('enums (Phase 9)', () => {
     expect(toolModeSchema.options).toEqual(['off', 'ask', 'edits', 'plan', 'auto'])
     expect(todoStatusSchema.options).toEqual(['pending', 'in_progress', 'completed'])
     expect(taskTypeSchema.options).toEqual(['explore', 'general'])
-    // Phase 10 adds `command-model-unavailable` (8 codes).
-    expect(noticeCodeSchema.options).toHaveLength(8)
+    // Phase 10 adds `command-model-unavailable` (8 codes), Phase 11 three more (11).
+    expect(noticeCodeSchema.options).toHaveLength(11)
     expect(noticeCodeSchema.options).toContain('compaction-failed')
     expect(commandInvocationSchema.parse({ name: 'compact', input: 'tests', type: 'compact' }).type).toBe('compact')
     // The error codes stay 16; the queue conflicts are reasons.
     expect(HARNESS_ERROR_CODES).toHaveLength(16)
     expect(conflictReasonSchema.options).toEqual(expect.arrayContaining(['run-idle', 'queue-full']))
-    expect(conflictReasonSchema.options).toHaveLength(12)
+    // Phase 11 adds `hook-blocked` and `untrusted` (14).
+    expect(conflictReasonSchema.options).toHaveLength(14)
   })
 
   it('declares the Phase 9 limits', () => {
@@ -195,8 +196,8 @@ describe('data parts (ADR-040, ADR-042)', () => {
       expect(steerDataSchema.safeParse({ ...steer, ...change }).success, JSON.stringify(change)).toBe(false)
     expect(activityDataSchema.parse({ kind: 'compacting' })).toEqual({ kind: 'compacting' })
     expect(activityDataSchema.safeParse({ kind: 'thinking' }).success).toBe(false)
-    // Phase 10 (ADR-046) adds `task-result`.
-    expect(Object.keys(harnessDataSchemas)).toEqual(['notice', 'compaction', 'steer', 'activity', 'task-result'])
+    // Phase 10 (ADR-046) adds `task-result`, Phase 11 (ADR-048) `hook`.
+    expect(Object.keys(harnessDataSchemas)).toEqual(['notice', 'compaction', 'steer', 'activity', 'task-result', 'hook'])
   })
 
   it('validates the new parts with the AI SDK validateUIMessages', async () => {
@@ -222,7 +223,8 @@ describe('data parts (ADR-040, ADR-042)', () => {
     type Part = HarnessUIMessage['parts'][number]
     expectTypeOf<Extract<Part, { type: 'data-compaction' }>['data']['keep']>().toEqualTypeOf<'none' | 'last-user'>()
     expectTypeOf<Extract<Part, { type: 'data-steer' }>['data']['id']>().toEqualTypeOf<string>()
-    expectTypeOf<Extract<Part, { type: 'data-activity' }>['data']['kind']>().toEqualTypeOf<'compacting' | 'idle'>()
+    // Phase 11 (ADR-048) adds `hooks` ("Running hook…").
+    expectTypeOf<Extract<Part, { type: 'data-activity' }>['data']['kind']>().toEqualTypeOf<'compacting' | 'idle' | 'hooks'>()
   })
 })
 

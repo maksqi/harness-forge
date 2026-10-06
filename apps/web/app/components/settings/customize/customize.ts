@@ -20,6 +20,7 @@ import {
   COMMAND_NAME_PATTERN,
   DEFINITION_LIMITS,
   formatDefinition,
+  isBuiltinOutputStyle,
   isClientCommand,
   isHarnessCommand,
   isReservedAgentName,
@@ -45,11 +46,12 @@ export interface CustomizationDraft {
   body: string
 }
 
-/** The `?tab=` value of each kind. */
-export const CUSTOMIZE_TABS: Readonly<Record<CustomizationKind, 'agents' | 'commands' | 'skills'>> = {
+/** The `?tab=` value of each kind (Phase 11: output styles, ADR-051). */
+export const CUSTOMIZE_TABS: Readonly<Record<CustomizationKind, 'agents' | 'commands' | 'skills' | 'output-styles'>> = {
   agent: 'agents',
   command: 'commands',
   skill: 'skills',
+  style: 'output-styles',
 }
 
 /** The kind of a `?tab=` value: `agents` when it is missing or unknown. */
@@ -104,8 +106,8 @@ export function stateBadge(entry: CustomizationEntry): { label: string, tone: 'm
   return { label: `${warnings} warning${warnings === 1 ? '' : 's'}`, tone: 'warning' }
 }
 
-/** The kind as a word ("agent", "command", "skill"). */
-export const KIND_LABEL: Readonly<Record<CustomizationKind, string>> = { agent: 'agent', command: 'command', skill: 'skill' }
+/** The kind as a word ("agent", "command", "skill", "output style"). */
+export const KIND_LABEL: Readonly<Record<CustomizationKind, string>> = { agent: 'agent', command: 'command', skill: 'skill', style: 'output style' }
 
 /** The description of the built-in command rows (docs/UI.md 9.12). */
 export const RESERVED_COMMAND_NOTE = 'Reserved: a personal or project command can\'t use this name.'
@@ -273,6 +275,10 @@ export function draftFromDefinition(definition: ParsedDefinition): Customization
       const fields = definition.fields
       return { kind: 'skill', name: fields.name, description: fields.description, tools: null, model: null, argumentHint: null, body: fields.content }
     }
+    case 'style': {
+      const fields = definition.fields
+      return { kind: 'style', name: fields.name, description: fields.description, tools: null, model: null, argumentHint: null, body: fields.content }
+    }
   }
 }
 
@@ -375,6 +381,8 @@ export function draftDefinition(draft: CustomizationDraft): ParsedDefinition {
       }
     case 'skill':
       return { kind: 'skill', fields: { name, description, content: draft.body } }
+    case 'style':
+      return { kind: 'style', fields: { name, label: name, description, keepCodingInstructions: false, content: draft.body } }
   }
 }
 
@@ -428,7 +436,11 @@ export function nameError(kind: CustomizationKind, value: string): string | null
     return atMost(nameMaxChars(kind))
   if (!(kind === 'command' ? COMMAND_NAME_PATTERN : AGENT_NAME_PATTERN).test(name))
     return 'Use lowercase letters, digits and hyphens, starting with a letter.'
-  const reserved = kind === 'agent' ? isReservedAgentName(name) : kind === 'command' && (isClientCommand(name) || isHarnessCommand(name))
+  const reserved = kind === 'agent'
+    ? isReservedAgentName(name)
+    : kind === 'command'
+      ? isClientCommand(name) || isHarnessCommand(name)
+      : kind === 'style' && isBuiltinOutputStyle(name)
   return reserved ? `${name} is a built-in name.` : null
 }
 
@@ -456,7 +468,7 @@ export function bodyError(draft: CustomizationDraft): string | null {
 
 /** The 409 `exists` message of the name field. */
 export function existsError(kind: CustomizationKind, name: string): string {
-  return `You already have a${kind === 'agent' ? 'n' : ''} ${KIND_LABEL[kind]} named ${name.trim()}.`
+  return `You already have a${kind === 'agent' || kind === 'style' ? 'n' : ''} ${KIND_LABEL[kind]} named ${name.trim()}.`
 }
 
 /** The editor field a parser diagnostic belongs to (warnings of the live parse), else null (form level). */
@@ -519,7 +531,9 @@ export function deleteCopy(kind: CustomizationKind, name: string): { title: stri
     ? 'Chats that used it keep their messages. The agent can\'t start it anymore.'
     : kind === 'command'
       ? `Chats that used it keep their messages. You can't run /${name} anymore.`
-      : 'Chats that used it keep their messages. The agent can\'t load it anymore.'
+      : kind === 'style'
+        ? 'Chats that used it keep their messages and use the default style from now on.'
+        : 'Chats that used it keep their messages. The agent can\'t load it anymore.'
   return { title: `Delete ${name}?`, description, confirm: `Delete ${KIND_LABEL[kind]}`, toast: `Deleted ${name}` }
 }
 
@@ -542,6 +556,12 @@ export const EDITOR_COPY: Readonly<Record<CustomizationKind, { title: string, bo
     body: 'Instructions',
     bodyHelp: 'A personal skill is one file. Put scripts and reference files in a project skill folder.',
     save: 'Save skill',
+  },
+  style: {
+    title: 'output style',
+    body: 'Instructions',
+    bodyHelp: 'How the agent should write its replies. They go first in its instructions.',
+    save: 'Save output style',
   },
 }
 
@@ -574,6 +594,13 @@ export const EDITOR_FIELD_COPY: Readonly<Record<CustomizationKind, {
     modelNone: 'Default sub-agent model',
     saved: 'Skill saved',
   },
+  style: {
+    descriptionHelp: 'Shown in the output style menu.',
+    toolsLabel: 'Tools',
+    toolsAll: 'All tools the chat allows',
+    modelNone: 'The chat\'s model',
+    saved: 'Output style saved',
+  },
 }
 
 /** The empty states of the Personal and project sections (docs/UI.md 9.12). */
@@ -581,6 +608,7 @@ export const PERSONAL_EMPTY: Readonly<Record<CustomizationKind, string>> = {
   agent: 'No personal agents yet. An agent is a sub-agent with its own instructions and tools that the main agent can start.',
   command: 'No personal commands yet. A command is a saved prompt you run with /name.',
   skill: 'No personal skills yet. A skill is a set of instructions the agent loads when a task needs it.',
+  style: 'No personal output styles yet. An output style changes how the agent writes its replies.',
 }
 
 export function projectEmpty(kind: CustomizationKind, project: string): string {
@@ -591,6 +619,8 @@ export function projectEmpty(kind: CustomizationKind, project: string): string {
       return `No commands in ${project}. Add Markdown files to .harness/commands/ (or .claude/commands/) in the project folder.`
     case 'skill':
       return `No skills in ${project}. Add a folder with a SKILL.md to .harness/skills/ (or .claude/skills/) in the project folder.`
+    case 'style':
+      return `No output styles in ${project}. Add Markdown files to .harness/output-styles/ (or .claude/output-styles/) in the project folder.`
   }
 }
 

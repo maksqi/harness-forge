@@ -98,7 +98,7 @@ describe('loading and states', () => {
     expect(registry.commands.get('acme')?.definition.template).toContain('{{input}}')
     expect(registry.mcpServers.get('acme-docs')?.decl.transport).toMatchObject({ type: 'http' })
     const summary = await host.summary('acme-docs')
-    expect(summary.contributions).toEqual({ providers: ['acme-docs'], models: 3, tools: [], mcpServers: ['acme-docs'], commands: ['acme'], hooks: [], agents: [], skills: [] })
+    expect(summary.contributions).toEqual({ providers: ['acme-docs'], models: 3, tools: [], mcpServers: ['acme-docs'], commands: ['acme'], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] })
     expect(summary).toMatchObject({ kind: 'declarative', runsCode: false, source: 'copy', builtin: false, removable: true, enabled: true })
     expect(summary.icon?.color).toMatch(/^\/api\/plugins\/acme-docs\/icon\?v=[\da-f]{8}$/)
     const view = await detail(h, 'acme-docs')
@@ -118,7 +118,7 @@ describe('loading and states', () => {
     await registry.hooks.run('chat.params', { chatId: 'c', modelRef: 'mock:echo', model: { id: 'echo' }, reasoningEffort: 'auto', toolMode: 'ask' }, output)
     expect(output.instructions).toBe('Be brief.\nDice are available.')
     const logs = await host.logs('word-count')
-    expect(logs.map(entry => entry.message)).toEqual(expect.arrayContaining(['word count ready (plugin API 1.4.0)']))
+    expect(logs.map(entry => entry.message)).toEqual(expect.arrayContaining(['word count ready (plugin API 1.5.0)']))
     const compiled = join(h.t.env.paths.pluginCache, 'word-count')
     expect(existsSync(compiled)).toBe(true)
     // Build output never lands inside the plugin directory.
@@ -280,7 +280,7 @@ describe('lifecycle actions', () => {
     expect(registry.models.list('openrouter')).toEqual([])
     expect(registry.commands.get('acme')).toBeUndefined()
     expect(registry.mcpServers.get('acme-docs')).toBeUndefined()
-    expect(registry.contributions('acme-docs')).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] })
+    expect(registry.contributions('acme-docs')).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] })
     expect(h.events.ofType('plugin.changed').at(-1)?.data).toMatchObject({ id: 'acme-docs', plugin: { state: 'disabled' } })
     expect(h.events.ofType('catalog.changed').length).toBeGreaterThan(0)
 

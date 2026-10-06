@@ -39,12 +39,13 @@ export interface SlashItem {
 }
 
 export const CLIENT_COMMAND_DESCRIPTIONS: Readonly<Record<ClientCommand, string>> = {
-  new: 'Start a new chat',
-  model: 'Switch model',
-  effort: 'Set reasoning effort',
-  mode: 'Set permission mode',
-  help: 'Show shortcuts and commands',
-  remember: 'Save a note to your instructions',
+  'new': 'Start a new chat',
+  'model': 'Switch model',
+  'effort': 'Set reasoning effort',
+  'mode': 'Set permission mode',
+  'help': 'Show shortcuts and commands',
+  'remember': 'Save a note to your instructions',
+  'output-style': 'Set the output style',
 }
 
 /**
@@ -227,6 +228,9 @@ export function resolveClientCommand(name: ClientCommand, args: string, context:
       return { type: 'help' }
     case 'remember':
       return { type: 'remember', text: value }
+    // Phase 11 (ADR-051): a P11-0a placeholder; W11.10 opens the style menu or sets the chat's style.
+    case 'output-style':
+      return { type: 'error', message: 'Output styles are not available yet.' }
     case 'model': {
       if (!value)
         return { type: 'open', menu: 'model' }

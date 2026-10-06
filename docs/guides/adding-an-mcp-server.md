@@ -11,6 +11,7 @@ There are three ways to add a server:
 | [The MCP servers panel](#1-the-mcp-servers-panel) | your own servers, set up in the UI | stdio servers need a password confirmation (when a password is set) |
 | [A declarative plugin](#2-a-declarative-plugin) | sharing a server setup as a folder, zip or npm package | stdio servers need trust |
 | [A code plugin](#3-a-code-plugin) | servers that depend on settings or logic (`ctx.mcp.register`) | always (code plugin) |
+| A project's `.mcp.json` (v1.7) | servers a repository needs, only in that project's chats | each server is approved in the project's review dialog; `${VARIABLES}` are stored per project ([hooks and project MCP servers](hooks-and-project-mcp.md#7-mcpjson-mcp-servers-of-a-project)) |
 
 Transports:
 

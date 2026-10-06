@@ -152,7 +152,8 @@ describe('with a password and no session', () => {
     // Phase 6: dictation, read-aloud (ADR-029) and deleting a version (ADR-030) need a session; Phase 7: projects
     // (ADR-031), the master key (ADR-034) and the file cleanup (ADR-035) too; Phase 8: the changes panel, revert, undo
     // and rewind (ADR-036, ADR-037) and the shell rules (ADR-038); Phase 9: the steer queue and the file mentions
-    // (ADR-042); Phase 10: the customizations, Remember and the background tasks (ADR-044 … ADR-047).
+    // (ADR-042); Phase 10: the customizations, Remember and the background tasks (ADR-044 … ADR-047); Phase 11: the
+    // hooks, the project trust and the project MCP servers (ADR-048 … ADR-050).
     expect(PRIVATE_KEYS).toEqual(expect.arrayContaining(['audio.transcribe', 'audio.speech', 'chats.deleteMessage']))
     expect(PRIVATE_KEYS).toEqual(expect.arrayContaining([
       'changes.list',
@@ -177,6 +178,19 @@ describe('with a password and no session', () => {
       'memory.remember',
       'chatTasks.list',
       'chatTasks.stop',
+    ]))
+    expect(PRIVATE_KEYS).toEqual(expect.arrayContaining([
+      'hooks.list',
+      'hooks.runs',
+      'hooks.create',
+      'hooks.update',
+      'hooks.remove',
+      'projectTrust.list',
+      'projectTrust.approve',
+      'projectTrust.revoke',
+      'projectMcp.list',
+      'projectMcp.setVariables',
+      'projectMcp.reconnect',
     ]))
     expect(PRIVATE_KEYS).toEqual(expect.arrayContaining([
       'projects.list',

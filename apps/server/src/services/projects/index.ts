@@ -165,6 +165,8 @@ export function createProjectService(deps: AppDeps): ProjectService {
       issue,
       instructionsFile: issue === null ? await probeProjectFile(row.path) : null,
       chatCount,
+      // Phase 11 (ADR-051): the column `projects.output_style` arrives with migration 0008 (P11-0b).
+      outputStyle: null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     }

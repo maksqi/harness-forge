@@ -26,7 +26,7 @@ vi.mock('./nuxt-imports', () => ({
 }))
 
 const builtin = { kind: 'code', source: 'builtin', builtin: true, removable: false, runsCode: false } as const
-const noContributions = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] }
+const noContributions = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] }
 
 const PLUGINS: PluginSummary[] = [
   pluginSummary({ id: 'core-providers', name: 'Core providers', ...builtin, contributions: { ...noContributions, providers: ['anthropic', 'openai'] } }),

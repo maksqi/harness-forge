@@ -19,6 +19,8 @@ import {
   createChatId,
   createCustomizationId,
   createFileId,
+  createHookId,
+  createHookRecordId,
   createMessageId,
   createProjectId,
   createShareId,
@@ -28,6 +30,10 @@ import {
   fileIdSchema,
   formatModelRef,
   HARNESS_COMMANDS,
+  HOOK_ID_PATTERN,
+  HOOK_RECORD_ID_PATTERN,
+  hookIdSchema,
+  hookRecordIdSchema,
   isClientCommand,
   isHarnessCommand,
   isPluginNamespacedId,
@@ -48,6 +54,8 @@ import {
   shareTokenSchema,
   SHELL_RULE_ID_PATTERN,
   shellRuleIdSchema,
+  SLASH_NAME_PATTERN,
+  slashNameSchema,
   toolNameSchema,
 } from './ids.ts'
 import { fnv1a32Hex } from './util/hash.ts'
@@ -113,6 +121,16 @@ describe('id schemas', () => {
     expect(AGENT_NAME_PATTERN.test('reviewer')).toBe(true)
   })
 
+  it('validates slash names: commands up to 32 characters, user-invocable skills up to 64 (ADR-052)', () => {
+    expect(SLASH_NAME_PATTERN).toBe(AGENT_NAME_PATTERN)
+    for (const name of ['deploy', 'release-notes', `a${'b'.repeat(31)}`, `a${'b'.repeat(63)}`])
+      expect(slashNameSchema.safeParse(name).success, name).toBe(true)
+    for (const name of ['', '1abc', '-x', 'Deploy', 'a_b', `a${'b'.repeat(64)}`])
+      expect(slashNameSchema.safeParse(name).success, name).toBe(false)
+    // Commands keep their 32-character limit.
+    expect(commandNameSchema.safeParse(`a${'b'.repeat(32)}`).success).toBe(false)
+  })
+
   it('validates chat, message and file ids', () => {
     expect(chatIdSchema.safeParse('0199a8f0-0000-7000-8000-000000000001').success).toBe(true)
     expect(chatIdSchema.safeParse('0199A8F0-0000-7000-8000-000000000001').success).toBe(false)
@@ -139,9 +157,11 @@ describe('builtin and reserved ids', () => {
   it('lists the builtin ids of DECISIONS.md', () => {
     expect(BUILTIN_PROVIDER_IDS).toEqual(['anthropic', 'openai', 'google', 'xai', 'deepseek', 'moonshotai', 'alibaba', 'zai', 'minimax', 'mistral', 'groq', 'openrouter', 'ollama'])
     expect(BUILTIN_PLUGIN_IDS).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'core-agent', 'mock'])
-    // Phase 10 (ADR-047): `/remember` is a client command, so no plugin or command file can take the name.
-    expect(CLIENT_COMMANDS).toEqual(['new', 'model', 'effort', 'mode', 'help', 'remember'])
+    // Phase 10 (ADR-047): `/remember` is a client command, so no plugin or command file can take the name; Phase 11
+    // (ADR-051) adds `/output-style`.
+    expect(CLIENT_COMMANDS).toEqual(['new', 'model', 'effort', 'mode', 'help', 'remember', 'output-style'])
     expect(isClientCommand('remember')).toBe(true)
+    expect(isClientCommand('output-style')).toBe(true)
     expect(HARNESS_COMMANDS).toEqual(['compact'])
   })
 
@@ -259,6 +279,21 @@ describe('id generators', () => {
       expect(customizationIdSchema.safeParse(bad).success, bad).toBe(false)
     for (const bad of ['bgt_short', `bgt_${'a'.repeat(17)}`, `BGT_${'a'.repeat(16)}`, `bgt_${'a'.repeat(15)}_`, `cus_${'a'.repeat(16)}`])
       expect(backgroundTaskIdSchema.safeParse(bad).success, bad).toBe(false)
+  })
+
+  it('creates personal hook ids and hook record ids (ADR-048)', () => {
+    const hook = createHookId()
+    expect(hook).toMatch(HOOK_ID_PATTERN)
+    expect(hookIdSchema.safeParse(hook).success).toBe(true)
+    expect(createHookId()).not.toBe(hook)
+    const record = createHookRecordId()
+    expect(record).toMatch(HOOK_RECORD_ID_PATTERN)
+    expect(hookRecordIdSchema.safeParse(record).success).toBe(true)
+    expect(createHookRecordId()).not.toBe(record)
+    for (const bad of ['hok_short', `hok_${'a'.repeat(17)}`, `HOK_${'a'.repeat(16)}`, `hok_${'a'.repeat(15)}-`, `hev_${'a'.repeat(16)}`])
+      expect(hookIdSchema.safeParse(bad).success, bad).toBe(false)
+    for (const bad of ['hev_short', `hev_${'a'.repeat(17)}`, `HEV_${'a'.repeat(16)}`, `hev_${'a'.repeat(15)}_`, `hok_${'a'.repeat(16)}`])
+      expect(hookRecordIdSchema.safeParse(bad).success, bad).toBe(false)
   })
 
   it('creates share ids whose suffix can start a share token', () => {

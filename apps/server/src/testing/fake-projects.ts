@@ -171,6 +171,7 @@ export function createFakeProjectService(deps: AppDeps, options: FakeProjectServ
       issue,
       instructionsFile: file?.name ?? null,
       chatCount,
+      outputStyle: null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     }

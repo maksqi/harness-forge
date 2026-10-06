@@ -65,9 +65,11 @@ describe('the definition folders', () => {
       '.claude/agents',
       '.claude/commands',
       '.claude/skills',
+      '.claude/output-styles',
       '.harness/agents',
       '.harness/commands',
       '.harness/skills',
+      '.harness/output-styles',
     ])
   })
 })

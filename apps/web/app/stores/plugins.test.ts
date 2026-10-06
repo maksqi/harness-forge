@@ -33,7 +33,7 @@ const core = pluginSummary({
   removable: false,
   runsCode: false,
   description: 'Built-in LLM providers',
-  contributions: { providers: ['anthropic', 'openai'], models: 20, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] },
+  contributions: { providers: ['anthropic', 'openai'], models: 20, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] },
 })
 const dice = pluginSummary()
 const mcpPlugin = pluginSummary({
@@ -42,7 +42,7 @@ const mcpPlugin = pluginSummary({
   description: 'Reference MCP server',
   enabled: false,
   state: 'disabled',
-  contributions: { providers: [], models: 0, tools: [], mcpServers: ['everything'], commands: ['echo'], hooks: [], agents: [], skills: [] },
+  contributions: { providers: [], models: 0, tools: [], mcpServers: ['everything'], commands: ['echo'], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] },
 })
 
 async function loadPlugins() {

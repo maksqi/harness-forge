@@ -31,12 +31,19 @@ export const pluginContributionsSchema = z.object({
   /** Declared MCP server ids. */
   mcpServers: z.array(z.string()),
   commands: z.array(commandNameSchema),
-  /** `HookMap` keys with at least one handler. */
+  /** `HookMap` keys with at least one handler (code hooks, `ctx.hooks.on`). */
   hooks: z.array(z.string()),
   /** Agent types (manifest + `ctx.agents.register`; plugin API 1.4.0). */
   agents: z.array(agentNameSchema),
   /** Skills (manifest + `ctx.skills.register`; plugin API 1.4.0). */
   skills: z.array(agentNameSchema),
+  /**
+   * Command hook handlers of `contributes.hooks` (plugin API 1.5.0, ADR-048; `GET /hooks` lists them). Named apart from
+   * `hooks`, which lists the code hooks.
+   */
+  commandHooks: z.int().min(0),
+  /** Output styles (manifest + `ctx.outputStyles.register`; plugin API 1.5.0, ADR-051). */
+  outputStyles: z.array(agentNameSchema),
 })
 export type PluginContributions = z.infer<typeof pluginContributionsSchema>
 
@@ -45,7 +52,10 @@ export const trustPinSchema = z.string().regex(/^(?:path:)?[\da-f]{64}$/, 'Expec
 export type TrustPin = z.infer<typeof trustPinSchema>
 
 export const pluginTrustSchema = z.object({
-  /** Code plugin, or declares a stdio MCP server. */
+  /**
+   * Code plugin, or declares a stdio MCP server, or (plugin API 1.5.0) command hooks or `` !`cmd` `` spans in a command
+   * template (`manifestRequiresTrust`).
+   */
   required: z.boolean(),
   /** `!required`, or the pin matches (source `link`: path pinned). */
   trusted: z.boolean(),

@@ -3,8 +3,8 @@ import type { z } from 'zod'
 // `skill` tool, plan files, Remember, the new data part and events, plugin API 1.4.0 manifests, backups, and the v1.5
 // shapes that must keep parsing.
 import type { HarnessUIMessage } from '../chat.ts'
-import type { AgentDefinitionFields, CommandDefinitionFields, DefinitionDiagnostic, SkillDefinitionFields } from '../util/definitions.ts'
-import type { agentDefinitionFieldsSchema, commandDefinitionFieldsSchema, Customization, skillDefinitionFieldsSchema } from './customizations.ts'
+import type { AgentDefinitionFields, CommandDefinitionFields, DefinitionDiagnostic, SkillDefinitionFields, StyleDefinitionFields } from '../util/definitions.ts'
+import type { agentDefinitionFieldsSchema, commandDefinitionFieldsSchema, Customization, skillDefinitionFieldsSchema, styleDefinitionFieldsSchema } from './customizations.ts'
 import { validateUIMessages } from 'ai'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { commandInvocationSchema, harnessDataSchemas, messageMetadataSchema, noticeCodeSchema } from '../chat.ts'
@@ -104,19 +104,22 @@ const task = {
 describe('enums and limits (Phase 10)', () => {
   it('declares the customization enums from the definition constants', () => {
     expect(customizationKindSchema.options).toEqual([...CUSTOMIZATION_KINDS])
-    expect(customizationKindSchema.options).toEqual(['agent', 'command', 'skill'])
+    // Phase 11 (ADR-051) adds `style`.
+    expect(customizationKindSchema.options).toEqual(['agent', 'command', 'skill', 'style'])
     expect(customizationSourceSchema.options).toEqual([...CUSTOMIZATION_SOURCES])
     expect(customizationSourceSchema.options).toEqual(['builtin', 'plugin', 'user', 'project'])
     expect(customizationStateSchema.options).toEqual(['active', 'shadowed', 'invalid', 'off'])
     expect(commandSourceSchema.options).toEqual(['harness', 'plugin', 'user', 'project'])
     expect(rememberTargetSchema.options).toEqual(['project-file', 'project-instructions', 'global'])
-    expect(runOriginSchema.options).toEqual(['request', 'queue', 'task'])
+    // Phase 11 (ADR-048) adds `hook`.
+    expect(runOriginSchema.options).toEqual(['request', 'queue', 'task', 'hook'])
     // The builtin task type enum stays (the web picks the builtin icons with it); task statuses gain `background`.
     expect(taskTypeSchema.options).toEqual(['explore', 'general'])
     expect(taskStatusSchema.options).toEqual(['queued', 'running', 'completed', 'failed', 'aborted', 'limit', 'background'])
     expect(backgroundTaskStatusSchema.options).toEqual(['running', 'completed', 'failed', 'aborted', 'limit'])
-    expect(noticeCodeSchema.options).toHaveLength(8)
-    expect(noticeCodeSchema.options.at(-1)).toBe('command-model-unavailable')
+    // Phase 11 adds three notices after `command-model-unavailable` (11).
+    expect(noticeCodeSchema.options).toHaveLength(11)
+    expect(noticeCodeSchema.options[7]).toBe('command-model-unavailable')
     expect(HARNESS_ERROR_CODES).toHaveLength(16)
     expect(CLIENT_COMMANDS).toContain('remember')
   })
@@ -283,6 +286,18 @@ describe('catalog and personal definitions (ADR-044)', () => {
       expect(customizationsQuerySchema.safeParse(query).success, JSON.stringify(query)).toBe(false)
   })
 
+  it('lists output styles and user-invocable skills with their Phase 11 fields (ADR-051, ADR-052)', () => {
+    const style = { kind: 'style', name: 'terse-reviews', label: 'Terse Reviews', description: 'Short', source: 'project', path: '.harness/output-styles/terse.md', keepCodingInstructions: false, enabled: true, state: 'active', diagnostics: [] }
+    expect(customizationEntrySchema.parse(style)).toEqual(style)
+    const skill = { kind: 'skill', name: 'deploy', description: 'Deploys', source: 'project', argumentHint: '<env>', userInvocable: true, modelInvocable: false, enabled: true, state: 'active', diagnostics: [] }
+    expect(customizationEntrySchema.parse(skill)).toEqual(skill)
+    // Eight definition folders now (`output-styles` in both folders).
+    const folders = ['agents', 'commands', 'skills', 'output-styles'].flatMap(name => [`.claude/${name}`, `.harness/${name}`])
+    const scan = { id: PROJECT_ID, available: true, folders, scannedAt: 3 }
+    expect(customizationListSchema.parse({ items: [style], diagnostics: [], project: scan, builtAt: 3 }).project?.folders).toHaveLength(8)
+    expect(customizationListSchema.safeParse({ items: [], diagnostics: [], project: { ...scan, folders: [...folders, '.x'] }, builtAt: 3 }).success).toBe(false)
+  })
+
   it('validates the source query and answer', () => {
     const query = { projectId: PROJECT_ID, kind: 'agent', name: 'reviewer', source: 'project', path: '.claude/agents/reviewer.md' }
     expect(customizationSourceQuerySchema.parse(query)).toEqual(query)
@@ -300,6 +315,12 @@ describe('catalog and personal definitions (ADR-044)', () => {
     expect(customizationSchema.parse(command)).toEqual(command)
     const skill = { ...base, kind: 'skill', name: 'pdf', fields: null }
     expect(customizationSchema.parse(skill)).toEqual(skill)
+    // Phase 11: skill keys and the style kind.
+    const deploy = { ...base, kind: 'skill', name: 'deploy', fields: { name: 'deploy', description: 'Deploys', content: 'Deploy $ARGUMENTS.', userInvocable: true, modelInvocable: false, argumentHint: '<env>' } }
+    expect(customizationSchema.parse(deploy)).toEqual(deploy)
+    const style = { ...base, kind: 'style', name: 'terse', fields: { name: 'terse', label: 'Terse', description: 'Short', keepCodingInstructions: false, content: 'Be brief.' } }
+    expect(customizationSchema.parse(style)).toEqual(style)
+    expect(customizationSchema.safeParse({ ...style, fields: deploy.fields }).success).toBe(false)
     // The fields must fit the kind.
     expect(customizationSchema.safeParse({ ...command, kind: 'agent' }).success).toBe(false)
     expect(customizationSchema.safeParse({ ...agent, id: 'cus_short' }).success).toBe(false)
@@ -310,6 +331,8 @@ describe('catalog and personal definitions (ADR-044)', () => {
     expectTypeOf<Readonly<z.infer<typeof agentDefinitionFieldsSchema>>>().toEqualTypeOf<AgentDefinitionFields>()
     expectTypeOf<Readonly<z.infer<typeof commandDefinitionFieldsSchema>>>().toEqualTypeOf<CommandDefinitionFields>()
     expectTypeOf<Readonly<z.infer<typeof skillDefinitionFieldsSchema>>>().toEqualTypeOf<SkillDefinitionFields>()
+    // Phase 11 (ADR-051): output styles.
+    expectTypeOf<Readonly<z.infer<typeof styleDefinitionFieldsSchema>>>().toEqualTypeOf<StyleDefinitionFields>()
     // The parsed fields of `parseDefinition` can be sent as they are.
     expectTypeOf<AgentDefinitionFields>().toExtend<z.infer<typeof agentDefinitionFieldsSchema>>()
     expectTypeOf<CommandDefinitionFields>().toExtend<z.infer<typeof commandDefinitionFieldsSchema>>()
@@ -410,7 +433,7 @@ describe('plugin API 1.4.0 manifests (ADR-045)', () => {
   it('still parses 1.3.0 manifests and summarizes agents and skills in contributions', () => {
     const v13 = { ...base, id: 'old-pack', engines: { harness: '^1.3.0' }, contributes: { commands: [{ name: 'tldr', description: 'Summarize', template: 'Summarize: {{input}}' }] } }
     expect(pluginManifestSchema.parse(v13)).toEqual(v13)
-    const contributions = { providers: [], models: 0, tools: [], mcpServers: [], commands: ['tldr'], hooks: [], agents: ['reviewer'], skills: ['release-notes'] }
+    const contributions = { providers: [], models: 0, tools: [], mcpServers: [], commands: ['tldr'], hooks: [], agents: ['reviewer'], skills: ['release-notes'], commandHooks: 0, outputStyles: [] }
     expect(pluginContributionsSchema.parse(contributions)).toEqual(contributions)
     expect(pluginContributionsSchema.safeParse({ ...contributions, agents: ['Bad'] }).success).toBe(false)
   })
@@ -425,7 +448,10 @@ describe('backups (ADR-024 amendment) and Remember (ADR-047)', () => {
     const items = [{ kind: 'agent', name: 'reviewer', content: AGENT_MD, enabled: true }, { kind: 'command', name: 'greet', content: '---\ndescription: Greets\n---\nHi $ARGUMENTS', enabled: false }]
     expect(backupCustomizationsSchema.parse({ items })).toEqual({ items })
     expect(backupCustomizationsSchema.safeParse({ items: [{ ...items[0], kind: 'hook' }] }).success).toBe(false)
-    expect(backupCustomizationsSchema.safeParse({ items: Array.from({ length: 601 }).fill(items[0]) }).success).toBe(false)
+    // Phase 11: personal output styles travel here too (4 kinds x 200).
+    const style = { kind: 'style', name: 'terse', content: '---\ndescription: Short\n---\nBe brief.', enabled: true }
+    expect(backupCustomizationsSchema.parse({ items: [style] })).toEqual({ items: [style] })
+    expect(backupCustomizationsSchema.safeParse({ items: Array.from({ length: 801 }).fill(items[0]) }).success).toBe(false)
     expect(dataExportQuerySchema.parse({ customizations: 'false' })).toEqual({ customizations: false })
     expect(dataImportFormSchema.parse({ restoreSettings: 'true', restoreCustomizations: '1' })).toEqual({ restoreSettings: true, restoreCustomizations: true })
     const result = { kind: 'backup', counts: { imported: 1, copied: 0, skipped: 0, failed: 0, filesImported: 0, filesReused: 0, filesMissing: 0 }, settingsRestored: false, items: [], warnings: [] }

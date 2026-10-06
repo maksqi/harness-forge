@@ -24,7 +24,7 @@ function inspection(overrides: Partial<PluginInspection> = {}): PluginInspection
     kind: 'declarative',
     source: 'zip',
     sha256: HASH,
-    contributions: { providers: [], models: 0, tools: [], mcpServers: ['mcp-echo'], commands: [], hooks: [], agents: [], skills: [] },
+    contributions: { providers: [], models: 0, tools: [], mcpServers: ['mcp-echo'], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] },
     networkHosts: [],
     secretsRequested: [],
     permissions: ['process', 'network'],

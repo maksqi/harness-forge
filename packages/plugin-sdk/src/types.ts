@@ -24,6 +24,7 @@ import type {
   McpServerDecl,
   ModelInfo,
   ReasoningEffort,
+  RunOrigin,
   ToolMode,
   ToolPolicy,
   WorkspaceAccess,
@@ -311,6 +312,58 @@ export interface SkillDefinition {
   content: string
 }
 
+// ---------- output styles and command hooks (plugin API 1.5.0) ----------
+
+/**
+ * An output style (plugin API 1.5.0, ADR-051): how the agent writes its replies. Its `content` goes first in the main
+ * agent's instructions while the style is active (sub-agents never get a style). Validated like
+ * `contributes.outputStyles` (`declarativeOutputStyleSchema`): the builtin names `default`, `explanatory` and `learning`
+ * are reserved, a name another plugin registered throws `conflict`; personal and project styles of the same name win.
+ */
+export interface OutputStyleDefinition {
+  /** `^[a-z][a-z0-9-]{0,63}$`, not a builtin style name. */
+  name: string
+  /** What the style does (1..1024 characters; shown in the style menu). */
+  description: string
+  /** The style body (Markdown, at most 64 KiB). */
+  content: string
+  /** Keep the workspace tool rules and the todo / task hints while the style is active (default false). */
+  keepCodingInstructions?: boolean
+}
+
+/** The eight command hook events (Claude Code names; plugin API 1.5.0, ADR-048). */
+export type HookEventName
+  = | 'PreToolUse'
+    | 'PostToolUse'
+    | 'UserPromptSubmit'
+    | 'Notification'
+    | 'Stop'
+    | 'SubagentStop'
+    | 'PreCompact'
+    | 'SessionStart'
+
+/** One command hook handler (Claude Code format); a `prompt` handler is not supported. */
+export interface CommandHookSpec {
+  type: 'command'
+  /** Run with `sh` in the chat's project folder (else a private folder), the event as JSON on stdin; 1..4096 chars. */
+  command: string
+  /** Seconds, 1..600; default 60. */
+  timeout?: number
+}
+
+/** A matcher group: `matcher` names the tools of `PreToolUse` / `PostToolUse` (`Bash|Edit`, `mcp__github__*`, `*`). */
+export interface HookMatcherGroup {
+  /** The safe subset: names, `|`, `*` / `.*` wildcards (no regular expressions); omitted = every tool. */
+  matcher?: string
+  hooks: CommandHookSpec[]
+}
+
+/**
+ * The Claude Code `hooks` object of `contributes.hooks` (at most 50 handlers): a plugin with command hooks requires
+ * trust, and its hooks run only while it is active and trusted.
+ */
+export type HooksConfig = Partial<Record<HookEventName, HookMatcherGroup[]>>
+
 // ---------- hooks ----------
 
 /** Input fields shared by every hook. */
@@ -337,11 +390,36 @@ export interface HookMap {
   'tool.approve': [HookChatContext & { tool: string, toolCallId: string, input: unknown }, { decision?: 'allow' | 'ask' | 'deny' }]
   /** A throw blocks the call. */
   'tool.before': [HookChatContext & { tool: string, toolCallId: string }, { input: unknown }]
-  'tool.after': [HookChatContext & { tool: string, toolCallId: string, input: unknown }, { output: unknown }]
+  /** Plugin API 1.5.0: `context` = text the model reads at its next step. */
+  'tool.after': [HookChatContext & { tool: string, toolCallId: string, input: unknown }, { output: unknown, context?: string }]
   'message.completed': [
     HookChatContext & { message: UIMessage, usage: LanguageModelUsage, costUsd?: number, aborted: boolean },
     void,
   ]
+  /**
+   * Plugin API 1.5.0: a new user message was submitted or queued (not a regenerate or an approval continuation), before
+   * anything is stored; `block` refuses it with that reason (409 `hook-blocked`), `context` is added to the turn.
+   */
+  'prompt.submit': [
+    HookChatContext & { prompt: string, projectId: string | null, command?: string },
+    { block?: string, context?: string },
+  ]
+  /** Plugin API 1.5.0: the first turn of a chat (`startup`) or the first turn after a compaction (`compact`). */
+  'session.start': [HookChatContext & { source: 'startup' | 'compact', projectId: string | null }, { context?: string }]
+  /**
+   * Plugin API 1.5.0: a model run is about to finish normally; `continue` (a reason) starts a follow-up turn
+   * (`run.started.origin = 'hook'`, at most 5 in a row). `hookActive` = this run is itself a hook continuation.
+   */
+  'run.stop': [HookChatContext & { origin: RunOrigin, hookActive: boolean, projectId: string | null }, { continue?: string }]
+  /** Plugin API 1.5.0: a sub-agent is about to complete; `continue` gives it one more round (at most 2). */
+  'subagent.stop': [
+    HookChatContext & { type: string, toolCallId: string, report: string, hookActive: boolean },
+    { continue?: string },
+  ]
+  /** Plugin API 1.5.0: before every compaction (observe only). */
+  'compact.before': [HookChatContext & { trigger: 'manual' | 'auto', focus: string | null }, void]
+  /** Plugin API 1.5.0: the agent waits for the user (an approval request); observe only. */
+  'notification': [HookChatContext & { type: 'permission_prompt', message: string }, void]
 }
 export type HookName = keyof HookMap
 
@@ -489,6 +567,11 @@ export interface PluginContext {
   skills: {
     /** Validates `d` (`declarativeSkillSchema`); a name another plugin registered throws `conflict`. */
     register(d: SkillDefinition): Disposable
+  }
+  /** Plugin API 1.5.0 (ADR-051): output styles. */
+  outputStyles: {
+    /** Validates `d` (`declarativeOutputStyleSchema`); a builtin name or one another plugin registered throws. */
+    register(d: OutputStyleDefinition): Disposable
   }
   hooks: {
     /** Higher `priority` first (default 0), then plugin load order, then registration order. */

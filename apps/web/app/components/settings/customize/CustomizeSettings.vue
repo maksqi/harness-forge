@@ -60,7 +60,7 @@ const UNDO_MS = 5000
 /** The Built-in command rows reuse a command list this young. */
 const COMMANDS_MAX_AGE_MS = 15_000
 const NO_PROJECT = '__none__'
-const TAB_LABELS: Readonly<Record<CustomizationKind, string>> = { agent: 'Agents', command: 'Commands', skill: 'Skills' }
+const TAB_LABELS: Readonly<Record<CustomizationKind, string>> = { agent: 'Agents', command: 'Commands', skill: 'Skills', style: 'Output styles' }
 
 const route = useRoute()
 const router = useRouter()

@@ -1,5 +1,5 @@
 // Agent customization DTOs (Phase 10, ADR-044 … ADR-047; API.md sections 4.28 and 4.30): the catalog of agents,
-// commands and skills (`GET /customizations`), the bodies of catalog entries (`GET /customizations/source`), the
+// commands, skills and (Phase 11, ADR-051) output styles (`GET /customizations`), the bodies of catalog entries (`GET /customizations/source`), the
 // personal definitions (`/customizations/:id`, table `customizations`), the `customization.changed` event, the backup
 // file `customizations.json` and Remember (`POST /memory`). Definition files are parsed only by `util/definitions.ts`.
 import { z } from 'zod'
@@ -69,8 +69,22 @@ export const customizationEntrySchema = z.object({
   path: pathSchema.optional(),
   /** Commands in subfolders: the folder path below the commands folder (`frontend/forms`), a display label only. */
   namespace: z.string().min(1).max(LIMITS.workspacePathMaxChars).optional(),
-  /** Commands: `argument-hint` (at most 100 characters). */
+  /** Commands and (Phase 11) skills: `argument-hint` (at most 100 characters). */
   argumentHint: z.string().max(DEFINITION_LIMITS.argumentHintMaxChars).optional(),
+  /** Styles (Phase 11, ADR-051): the display name as written (the `name` is its slug). */
+  label: z.string().min(1).max(256).optional(),
+  /**
+   * Styles (Phase 11): `keep-coding-instructions` (default false: the workspace tool rules and the todo / task hints are
+   * left out of the instructions while the style is active).
+   */
+  keepCodingInstructions: z.boolean().optional(),
+  /** Skills (Phase 11, ADR-052): `user-invocable` (default true: the skill runs as `/name [arguments]`). */
+  userInvocable: z.boolean().optional(),
+  /**
+   * Skills (Phase 11): false when `disable-model-invocation: true` (the skill is left out of the skills listing, the
+   * `skill` tool and `loadSkill`).
+   */
+  modelInvocable: z.boolean().optional(),
   /** Agents and commands: the declared `model` (`provider:model`, or `inherit` for agents); absent = the default. */
   modelRef: z.union([modelRefSchema, z.literal('inherit')]).optional(),
   /** Agents: `tools`; commands: `allowed-tools` (normalized); absent = no restriction ("All tools"). */
@@ -102,8 +116,11 @@ export const customizationProjectScanSchema = z.object({
   available: z.boolean(),
   /** Why the folder is unavailable (one sentence, safe to show). */
   issue: z.string().max(500).optional(),
-  /** The definition folders that exist (`.claude/agents`, `.harness/commands`, ...), lowest precedence first. */
-  folders: z.array(z.string().min(1).max(64)).max(6),
+  /**
+   * The definition folders that exist (`.claude/agents`, `.harness/commands`, ..., Phase 11: `.claude/output-styles`,
+   * `.harness/output-styles`), lowest precedence first.
+   */
+  folders: z.array(z.string().min(1).max(64)).max(8),
   /** When the project part of the catalog was built. */
   scannedAt: timestampSchema,
 })
@@ -176,11 +193,30 @@ export const skillDefinitionFieldsSchema = z.object({
   name: z.string(),
   description: z.string(),
   content: z.string(),
+  /** Phase 11 (ADR-052): `user-invocable`; absent = true (the skill runs as `/name [arguments]`). */
+  userInvocable: z.boolean().optional(),
+  /** Phase 11: not `disable-model-invocation`; absent = true (the model may load the skill). */
+  modelInvocable: z.boolean().optional(),
+  /** Phase 11: `argument-hint` of a user-invocable skill; absent = none. */
+  argumentHint: z.string().optional(),
+})
+
+/** The parsed fields of an output style (Phase 11, ADR-051; zod mirror of `StyleDefinitionFields`). */
+export const styleDefinitionFieldsSchema = z.object({
+  /** The slug (`AGENT_NAME_PATTERN`). */
+  name: z.string(),
+  /** The name as written. */
+  label: z.string(),
+  description: z.string(),
+  /** `keep-coding-instructions` (default false). */
+  keepCodingInstructions: z.boolean(),
+  /** The style body: added first to the main agent's instructions. */
+  content: z.string(),
 })
 
 const customizationBaseShape = {
   id: customizationIdSchema,
-  /** The parsed name (`AGENT_NAME_PATTERN` for agents and skills, `COMMAND_NAME_PATTERN` for commands). */
+  /** The parsed name (`AGENT_NAME_PATTERN` for agents, skills and styles, `COMMAND_NAME_PATTERN` for commands). */
   name: z.string().min(1).max(64),
   description: z.string().max(DEFINITION_LIMITS.descriptionMaxChars),
   /** The stored markdown (frontmatter + body), exactly as saved. */
@@ -194,13 +230,15 @@ const customizationBaseShape = {
 }
 
 /**
- * A personal agent, command or skill (`GET /customizations/:id`, create / update answers), discriminated on `kind`;
- * `fields` holds the parsed frontmatter and body (null when the stored content no longer parses).
+ * A personal agent, command, skill or (Phase 11) output style (`GET /customizations/:id`, create / update answers),
+ * discriminated on `kind`; `fields` holds the parsed frontmatter and body (null when the stored content no longer
+ * parses).
  */
 export const customizationSchema = z.discriminatedUnion('kind', [
   z.object({ ...customizationBaseShape, kind: z.literal('agent'), fields: agentDefinitionFieldsSchema.nullable() }),
   z.object({ ...customizationBaseShape, kind: z.literal('command'), fields: commandDefinitionFieldsSchema.nullable() }),
   z.object({ ...customizationBaseShape, kind: z.literal('skill'), fields: skillDefinitionFieldsSchema.nullable() }),
+  z.object({ ...customizationBaseShape, kind: z.literal('style'), fields: styleDefinitionFieldsSchema.nullable() }),
 ])
 export type Customization = z.infer<typeof customizationSchema>
 
@@ -244,7 +282,10 @@ export type CustomizationChangedData = z.infer<typeof customizationChangedDataSc
 
 // ---------- backup (customizations.json) ----------
 
-/** One personal definition in a backup (no ids, no timestamps; no secrets: definitions never hold any). */
+/**
+ * One personal definition in a backup (no ids, no timestamps; no secrets: definitions never hold any). Phase 11: personal
+ * output styles travel here too; a personal command with `` !`cmd` `` spans is restored turned off (ADR-052).
+ */
 export const backupCustomizationSchema = z.object({
   kind: customizationKindSchema,
   name: z.string().min(1).max(64),
@@ -253,7 +294,10 @@ export const backupCustomizationSchema = z.object({
 })
 export type BackupCustomization = z.infer<typeof backupCustomizationSchema>
 
-/** `customizations.json` of a backup zip: every personal definition. */
+/**
+ * `customizations.json` of a backup zip: every personal definition. Personal hooks, project approvals and project MCP
+ * variables are never in a backup (Phase 11).
+ */
 export const backupCustomizationsSchema = z.object({
   items: z.array(backupCustomizationSchema).max(CUSTOMIZATION_KINDS.length * LIMITS.customizationsPerKindMax),
 })

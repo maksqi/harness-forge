@@ -19,7 +19,7 @@ import PluginContributions from './PluginContributions.vue'
 const mock = vi.hoisted(() => ({ api: null as unknown }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
 
-const none: PluginContributionsData = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] }
+const none: PluginContributionsData = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] }
 
 let api: MockApi
 /** The plugin the mounted sections show (swapped to simulate a plugin reload). */

@@ -45,14 +45,20 @@ describe('fresh routes of the route table', () => {
     // ADR-038) needs it. Phase 9: neither the steer queue (a session can already send messages) nor the file mentions
     // (a session can already read project files through the agent, ADR-042) need it. Phase 10: neither the
     // customizations (definitions only restrict, ADR-044), Remember (journaled, rewindable, ADR-047) nor the background
-    // tasks (ADR-046) need it.
+    // tasks (ADR-046) need it. Phase 11: creating a personal hook (ADR-048), approving project items (ADR-049) and
+    // setting project MCP variables (ADR-050) need it; changing a hook needs it unless the body only turns the hook off
+    // (checked by the route, like stdio `mcp.update`); listing, the run log, deleting a hook, revoking an approval and
+    // reconnecting a server do not.
     expect(FRESH_KEYS.sort()).toEqual([
       'auth.setPassword',
       'data.deleteAll',
+      'hooks.create',
       'keys.rotate',
       'pluginFiles.build',
       'pluginFiles.scaffold',
       'pluginInstall.trust',
+      'projectMcp.setVariables',
+      'projectTrust.approve',
       'projects.create',
       'shares.create',
       'shares.update',

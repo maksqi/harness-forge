@@ -119,6 +119,8 @@ export function isDefinitionPath(kind: CustomizationKind, path: string): boolean
       return segments.length <= 6 && file.endsWith('.md')
     case 'skill':
       return segments.length === 4 && file === 'SKILL.md'
+    case 'style':
+      return segments.length === 3 && file.endsWith('.md')
   }
 }
 

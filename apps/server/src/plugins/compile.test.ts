@@ -99,6 +99,6 @@ describe('messages', () => {
     expect(forbiddenImportMessage('ai', true)).toMatch(/ctx\.ai\.tool, ctx\.ai\.jsonSchema and ctx\.ai\.generateText/)
     expect(forbiddenImportMessage('left-pad', true)).toMatch(/Node built-ins and the host libraries/)
     expect(forbiddenImportMessage('/abs/path.mjs', false)).toMatch(/single file/)
-    expect(SDK_SHIM_SOURCE).toContain('PLUGIN_API_VERSION = "1.4.0"')
+    expect(SDK_SHIM_SOURCE).toContain('PLUGIN_API_VERSION = "1.5.0"')
   })
 })

@@ -75,7 +75,7 @@ export function resolveAgentAlias(name: string): string {
 /** Builds an immutable snapshot; the getters index the `active` entries only (the first active entry of a name wins). */
 export function createCatalogSnapshot(input: CatalogSnapshotInput): CustomizationCatalog {
   const entries = Object.freeze(sortCatalogEntries(input.entries))
-  const active: Record<CustomizationKind, Map<string, CustomizationEntry>> = { agent: new Map(), command: new Map(), skill: new Map() }
+  const active: Record<CustomizationKind, Map<string, CustomizationEntry>> = { agent: new Map(), command: new Map(), skill: new Map(), style: new Map() }
   for (const entry of entries) {
     if (entry.state === 'active' && !active[entry.kind].has(entry.name))
       active[entry.kind].set(entry.name, entry)
@@ -84,6 +84,7 @@ export function createCatalogSnapshot(input: CatalogSnapshotInput): Customizatio
     agent: Object.freeze([...active.agent.values()]),
     command: Object.freeze([...active.command.values()]),
     skill: Object.freeze([...active.skill.values()]),
+    style: Object.freeze([...active.style.values()]),
   }
   return Object.freeze({
     projectId: input.projectId,

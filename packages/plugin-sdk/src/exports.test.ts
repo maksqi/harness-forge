@@ -10,12 +10,17 @@ import type {
 import type { generateImage, Tool } from 'ai'
 import type {
   AgentDefinition,
+  CommandHookSpec,
   DeclarativeAgent,
+  DeclarativeOutputStyle,
   DeclarativeSkill,
   Disposable,
   GeneratedImageFile,
   HarnessErrorInit,
+  HookEventName,
   HookMap,
+  HookMatcherGroup,
+  HooksConfig,
   ImageAspectRatio,
   ImageGenerateOptions,
   ImageGenerateResult,
@@ -23,6 +28,7 @@ import type {
   ImageParamsResult,
   ModelInfo,
   ModelKind,
+  OutputStyleDefinition,
   PluginContext,
   PluginImagesApi,
   PluginManifest,
@@ -79,8 +85,8 @@ describe('exports', () => {
     expect(Object.keys(sdk).sort()).toEqual([...REEXPORTED_VALUES, 'PLUGIN_API_VERSION', 'definePlugin', 'settingsValuesSchema'].sort())
   })
 
-  it('has plugin API version 1.4.0 (Phase 10: agents and skills)', () => {
-    expect(sdk.PLUGIN_API_VERSION).toBe('1.4.0')
+  it('has plugin API version 1.5.0 (Phase 11: command hooks and output styles)', () => {
+    expect(sdk.PLUGIN_API_VERSION).toBe('1.5.0')
   })
 
   it('definePlugin is the identity', () => {
@@ -187,11 +193,52 @@ describe('exports', () => {
     expect(shared.declarativeSkillSchema.parse(skill)).toEqual(skill)
   })
 
+  it('types the additions of plugin API 1.5.0 (ADR-048, ADR-051, ADR-052)', () => {
+    expectTypeOf<PluginContext['outputStyles']['register']>().toEqualTypeOf<(d: OutputStyleDefinition) => Disposable>()
+    expectTypeOf<keyof OutputStyleDefinition>().toEqualTypeOf<'name' | 'description' | 'content' | 'keepCodingInstructions'>()
+    expectTypeOf<DeclarativeOutputStyle>().toEqualTypeOf<shared.DeclarativeOutputStyle>()
+    expectTypeOf<DeclarativeOutputStyle>().toExtend<OutputStyleDefinition>()
+    expectTypeOf<NonNullable<PluginManifest['contributes']>['outputStyles']>().toEqualTypeOf<DeclarativeOutputStyle[] | undefined>()
+    // The command hook events are the shared enum; a manifest `hooks` object is a valid `HooksConfig`.
+    expectTypeOf<HookEventName>().toEqualTypeOf<shared.HookEvent>()
+    expectTypeOf<CommandHookSpec['type']>().toEqualTypeOf<'command'>()
+    expectTypeOf<HookMatcherGroup['hooks']>().toEqualTypeOf<CommandHookSpec[]>()
+    expectTypeOf<HooksConfig>().toEqualTypeOf<Partial<Record<HookEventName, HookMatcherGroup[]>>>()
+    expectTypeOf<NonNullable<NonNullable<PluginManifest['contributes']>['hooks']>>().toExtend<HooksConfig>()
+    // The new code hook events.
+    expectTypeOf<HookMap['prompt.submit'][1]>().toEqualTypeOf<{ block?: string, context?: string }>()
+    expectTypeOf<HookMap['session.start'][0]['source']>().toEqualTypeOf<'startup' | 'compact'>()
+    expectTypeOf<HookMap['run.stop'][0]['origin']>().toEqualTypeOf<shared.RunOrigin>()
+    expectTypeOf<HookMap['run.stop'][1]>().toEqualTypeOf<{ continue?: string }>()
+    expectTypeOf<HookMap['subagent.stop'][1]>().toEqualTypeOf<{ continue?: string }>()
+    expectTypeOf<HookMap['compact.before'][0]['trigger']>().toEqualTypeOf<'manual' | 'auto'>()
+    expectTypeOf<HookMap['notification'][0]['type']>().toEqualTypeOf<'permission_prompt'>()
+    expectTypeOf<HookMap['tool.after'][1]>().toEqualTypeOf<{ output: unknown, context?: string }>()
+    const style: OutputStyleDefinition = { name: 'terse', description: 'Short answers.', content: 'Answer briefly.', keepCodingInstructions: true }
+    expect(shared.declarativeOutputStyleSchema.parse(style)).toEqual(style)
+    const hooks: HooksConfig = { PostToolUse: [{ matcher: 'Write|Edit', hooks: [{ type: 'command', command: 'sh after.sh', timeout: 30 }] }] }
+    expect(shared.countHookHandlers(hooks)).toBe(1)
+  })
+
   it('derives the AI SDK types of PLUGINS.md section 9', () => {
     expectTypeOf<ReasoningLevel>().toEqualTypeOf<'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'>()
     expectTypeOf<ToolResultOutput['type']>().toEqualTypeOf<'text' | 'json' | 'execution-denied' | 'error-text' | 'error-json' | 'content'>()
     expectTypeOf<ToolResultOutput>().toEqualTypeOf<Awaited<ReturnType<NonNullable<Tool['toModelOutput']>>>>()
-    expectTypeOf<keyof HookMap>().toEqualTypeOf<'chat.params' | 'chat.headers' | 'chat.messages' | 'tool.approve' | 'tool.before' | 'tool.after' | 'message.completed'>()
+    expectTypeOf<keyof HookMap>().toEqualTypeOf<
+      | 'chat.params'
+      | 'chat.headers'
+      | 'chat.messages'
+      | 'tool.approve'
+      | 'tool.before'
+      | 'tool.after'
+      | 'message.completed'
+      | 'prompt.submit'
+      | 'session.start'
+      | 'run.stop'
+      | 'subagent.stop'
+      | 'compact.before'
+      | 'notification'
+    >()
     expectTypeOf<PluginContext['ai']['z']>().toEqualTypeOf<typeof import('zod').z>()
   })
 

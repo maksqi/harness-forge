@@ -180,7 +180,7 @@ describe('plugin agents and skills in the plugin host', () => {
       ],
     })
     expect(Object.fromEntries((await h.t.deps.plugins.list()).map(plugin => [plugin.id, plugin.state]))).toEqual({ 'older': 'active', 'older-code': 'active', 'pack-a': 'active' })
-    expect((await h.t.deps.plugins.summary('older')).contributions).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: ['hello'], hooks: [], agents: [], skills: [] })
+    expect((await h.t.deps.plugins.summary('older')).contributions).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: ['hello'], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] })
     expect((await h.t.deps.plugins.summary('older-code')).contributions).toMatchObject({ commands: ['greet'], agents: [], skills: [] })
     expect(await warnings(h, 'older')).toEqual([])
   })

@@ -20,7 +20,10 @@ import {
   formatDefinition,
   parseDefinition,
   resolvePrecedence,
+  skillInvocation,
+  styleNameFromLabel,
 } from './definitions.ts'
+import { BUILTIN_OUTPUT_STYLE_NAMES } from './output-styles.ts'
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Helpers
@@ -626,6 +629,113 @@ describe('parseDefinition: limits', () => {
   })
 })
 
+describe('parseDefinition: skill keys (Phase 11)', () => {
+  it('reads user-invocable, disable-model-invocation and argument-hint', () => {
+    const result = parseDefinition('skill', md([
+      '---',
+      'name: deploy',
+      'description: Deploy the app.',
+      'argument-hint: [environment]',
+      'user-invocable: true',
+      'disable-model-invocation: true',
+      '---',
+      'Deploy to $ARGUMENTS.',
+    ]))
+    expect(skill(result)).toEqual({ name: 'deploy', description: 'Deploy the app.', content: 'Deploy to $ARGUMENTS.', modelInvocable: false, argumentHint: '[environment]' })
+    expect(codes(result)).toEqual([])
+    expect(skillInvocation(skill(result))).toEqual({ userInvocable: true, modelInvocable: false, argumentHint: '[environment]' })
+    const internal = skill(parseDefinition('skill', md(['---', 'name: internal', 'description: d', 'user-invocable: false', '---', 'x'])))
+    expect(internal).toEqual({ name: 'internal', description: 'd', content: 'x', userInvocable: false })
+    expect(skillInvocation(internal)).toEqual({ userInvocable: false, modelInvocable: true, argumentHint: null })
+    expect(skillInvocation(skill(parseDefinition('skill', md(['---', 'name: a', 'description: d', '---', 'x']))))).toEqual({ userInvocable: true, modelInvocable: true, argumentHint: null })
+  })
+
+  it('warns about values that are not booleans and reads the line reader text', () => {
+    const invalid = parseDefinition('skill', md(['---', 'name: a', 'description: d', 'user-invocable: sometimes', 'disable-model-invocation: [x]', '---', 'x']))
+    expect(skill(invalid)).toEqual({ name: 'a', description: 'd', content: 'x' })
+    expect(codes(invalid)).toEqual(['warning:invalid-field@4', 'warning:invalid-field@5'])
+    const lenient = parseDefinition('skill', md(['---', 'name: a', 'description: d: e', 'user-invocable: False', 'disable-model-invocation: "true"', '---', 'x']))
+    expect(skill(lenient)).toMatchObject({ userInvocable: false, modelInvocable: false })
+    expect(codes(lenient)).toEqual(['warning:invalid-frontmatter@3'])
+  })
+
+  it('formats the skill keys and round-trips them', () => {
+    const fields = { name: 'deploy', description: 'Deploy.', content: 'Go.', userInvocable: false, modelInvocable: false, argumentHint: '[env] [region]' }
+    const text = formatDefinition({ kind: 'skill', fields })
+    expect(text).toBe('---\nname: deploy\ndescription: Deploy.\nargument-hint: "[env] [region]"\nuser-invocable: false\ndisable-model-invocation: true\n---\n\nGo.\n')
+    expect(parseDefinition('skill', text).definition).toEqual({ kind: 'skill', fields })
+    expect(formatDefinition({ kind: 'skill', fields: { name: 'a', description: 'd', content: 'x', userInvocable: true, modelInvocable: true } })).toBe('---\nname: a\ndescription: d\n---\n\nx\n')
+  })
+})
+
+describe('parseDefinition: output styles (Phase 11)', () => {
+  it('reads a Claude Code output style', () => {
+    const result = parseDefinition('style', md([
+      '---',
+      'name: My Custom Style',
+      'description: A brief description of what this style does',
+      'keep-coding-instructions: true',
+      '---',
+      '# Custom Style Instructions',
+      '',
+      'Answer like a pirate.',
+    ]), { fileName: 'my-custom-style.md' })
+    expect(result.definition).toEqual({
+      kind: 'style',
+      fields: {
+        name: 'my-custom-style',
+        label: 'My Custom Style',
+        description: 'A brief description of what this style does',
+        keepCodingInstructions: true,
+        content: '# Custom Style Instructions\n\nAnswer like a pirate.',
+      },
+    })
+    expect(codes(result)).toEqual([])
+  })
+
+  it('takes the name from the file stem and the description from the body', () => {
+    const result = parseDefinition('style', 'Be terse.\n\nNo filler.\n', { fileName: '.harness/output-styles/Terse.md' })
+    expect(result.definition).toEqual({ kind: 'style', fields: { name: 'terse', label: 'Terse', description: 'Be terse.', keepCodingInstructions: false, content: 'Be terse.\n\nNo filler.' } })
+    expect(codes(parseDefinition('style', '---\nname: plain\n---\n'))).toEqual(['error:missing-field', 'warning:missing-field'])
+    expect(codes(parseDefinition('style', '---\nname: plain\ndescription: d\n---\n'))).toEqual(['warning:missing-field'])
+  })
+
+  it('slugs names, keeps labels and refuses invalid or reserved names', () => {
+    expect(styleNameFromLabel('My Style!')).toBe('my-style')
+    expect(styleNameFromLabel('  Café   Crème ')).toBe('cafe-creme')
+    expect(styleNameFromLabel('terse')).toBe('terse')
+    expect(styleNameFromLabel('ab-')).toBe('ab-')
+    expect(styleNameFromLabel('Ab_')).toBe('ab')
+    expect(styleNameFromLabel('2 Fast')).toBeNull()
+    expect(styleNameFromLabel('!!!')).toBeNull()
+    expect(styleNameFromLabel('x'.repeat(65))).toBeNull()
+    expect(styleNameFromLabel(5 as unknown as string)).toBeNull()
+    const label = (name: string): unknown => parseDefinition('style', md(['---', `name: "${name}"`, 'description: d', '---', 'x'])).definition
+    expect(label('Very  Terse\t')).toMatchObject({ fields: { name: 'very-terse', label: 'Very Terse' } })
+    expect(codes(parseDefinition('style', md(['---', 'name: 2 Fast', 'description: d', '---', 'x'])))).toEqual(['error:invalid-name@2'])
+    expect(codes(parseDefinition('style', md(['---', `name: ${'a '.repeat(70)}`, 'description: d', '---', 'x'])))).toEqual(['error:invalid-name@2'])
+    expect(codes(parseDefinition('style', md(['---', 'name: Explanatory', 'description: d', '---', 'x'])))).toEqual(['error:reserved-name@2'])
+    expect(codes(parseDefinition('style', md(['---', 'description: d', '---', 'x']), { fileName: 'learning.md' }))).toEqual(['error:reserved-name'])
+    expect(codes(parseDefinition('style', md(['---', 'description: d', '---', 'x']), { fileName: '1.md' }))).toEqual(['error:invalid-name'])
+    expect(codes(parseDefinition('style', md(['---', 'name: [a]', 'description: d', '---', 'x'])))).toEqual(['error:invalid-field@2'])
+  })
+
+  it('reads keep-coding-instructions and ignores other keys', () => {
+    const result = parseDefinition('style', md(['---', 'name: a', 'description: d', 'keep-coding-instructions: yes', 'tools: Read', '---', 'x']))
+    expect(result.definition).toMatchObject({ fields: { keepCodingInstructions: false } })
+    expect(codes(result)).toEqual(['warning:invalid-field@4', 'info:ignored-key@5'])
+  })
+
+  it('formats styles with the label as the name', () => {
+    const fields = { name: 'my-style', label: 'My Style', description: 'd', keepCodingInstructions: true, content: 'Body' }
+    const text = formatDefinition({ kind: 'style', fields })
+    expect(text).toBe('---\nname: My Style\ndescription: d\nkeep-coding-instructions: true\n---\n\nBody\n')
+    expect(parseDefinition('style', text).definition).toEqual({ kind: 'style', fields })
+    expect(formatDefinition({ kind: 'style', fields: { ...fields, label: 'Something Else', keepCodingInstructions: false } }))
+      .toBe('---\nname: my-style\ndescription: d\n---\n\nBody\n')
+  })
+})
+
 describe('parseDefinition: messages', () => {
   it('never quotes values or bodies', () => {
     const secret = 'SecretToken'
@@ -861,6 +971,15 @@ function randomDefinition(random: () => number, kind: CustomizationKind): Parsed
         kind,
         fields: { name: randomName(random, 64, () => false), description: randomDescription(random), content: randomBody(random, false) },
       }
+    case 'style': {
+      const name = randomName(random, 64, candidate => (BUILTIN_OUTPUT_STYLE_NAMES as readonly string[]).includes(candidate))
+      const pretty = /^[a-z][\da-z]*(?:-[\da-z]+)*$/.test(name) && random() < 0.5
+      const label = pretty ? name.split('-').map(word => `${word[0]?.toUpperCase() ?? ''}${word.slice(1)}`).join(' ') : name
+      return {
+        kind,
+        fields: { name, label, description: randomDescription(random), keepCodingInstructions: random() < 0.5, content: randomBody(random, false) },
+      }
+    }
   }
 }
 

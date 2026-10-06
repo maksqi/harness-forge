@@ -1,5 +1,9 @@
 // Size and count limits shared by the web app and the server (API.md section 3.4).
-import { DEFINITION_LIMITS } from './util/definitions.ts'
+//
+// This module imports nothing: the helper modules under `util/` import `LIMITS` (directly or through `schemas/`), so an
+// import from `util/` here would close a cycle (a TDZ error at load). Values mirrored by a `util/` constant
+// (`DEFINITION_LIMITS`, `HOOK_LIMITS`, `TRUST_LIMITS`, `MCP_CONFIG_LIMITS`, `COMMAND_TEMPLATE_LIMITS`) are literals here,
+// and `limits.test.ts` checks that they are equal.
 
 export const LIMITS = {
   /** `POST /files`: bytes per uploaded file. */
@@ -171,13 +175,13 @@ export const LIMITS = {
   // Agent customization (Phase 10): the catalog and definition files (ADR-044), custom agents, commands and skills
   // (ADR-045), background sub-agents (ADR-046), plan files and Remember (ADR-047).
   /** UTF-8 bytes of one definition file or stored definition (= `DEFINITION_LIMITS.contentBytes`, 64 KiB). */
-  customizationContentBytes: DEFINITION_LIMITS.contentBytes,
+  customizationContentBytes: 65_536,
   /** UTF-8 bytes of the frontmatter block of a definition (= `DEFINITION_LIMITS.frontmatterBytes`, 8 KiB). */
-  customizationFrontmatterBytes: DEFINITION_LIMITS.frontmatterBytes,
+  customizationFrontmatterBytes: 8192,
   /** Definition files read from one project folder (the rest is left out with a `limit` diagnostic). */
   customizationFilesPerFolderMax: 200,
   /** Characters of a definition `description` (= `DEFINITION_LIMITS.descriptionMaxChars`). */
-  customizationDescriptionMaxChars: DEFINITION_LIMITS.descriptionMaxChars,
+  customizationDescriptionMaxChars: 1024,
   /** Personal agents, commands or skills (each kind). */
   customizationsPerKindMax: 200,
   /** Age after which the catalog of a project is rebuilt (10 s). */
@@ -202,6 +206,92 @@ export const LIMITS = {
   backgroundTaskTimeoutMs: 1_800_000,
   /** Finished background task rows kept per chat (the oldest are deleted above it). */
   backgroundTasksKeptPerChat: 100,
+
+  // Hooks, trust, project MCP and output styles (Phase 11): command hooks (ADR-048), project trust (ADR-049), project
+  // `.mcp.json` servers (ADR-050), command `!` spans and `@` files (ADR-052). Mirrors: `HOOK_LIMITS`, `TRUST_LIMITS`,
+  // `MCP_CONFIG_LIMITS`, `COMMAND_TEMPLATE_LIMITS` (`util/{hooks,trust,mcp-config,command-template}.ts`).
+  /** Default timeout of one command hook (60 s; a hook's own `timeout` is in seconds, Claude Code parity). */
+  hookTimeoutDefaultMs: 60_000,
+  /** Maximum timeout of one command hook (600 s). */
+  hookTimeoutMaxMs: 600_000,
+  /** Matching hooks run for one event (in parallel; the rest are skipped with a diagnostic). */
+  hooksPerEventMax: 20,
+  /** Personal hooks (table `hooks`). */
+  personalHooksMax: 100,
+  /** Command hook processes of the whole server that run at the same time (the others wait). */
+  hookProcessesMax: 16,
+  /** Bytes of the stdin payload of one hook (`tool_response`, then `tool_input` are cut to fit). */
+  hookPayloadBytes: 262_144,
+  /** Bytes of the stdout kept from one hook run. */
+  hookStdoutBytes: 65_536,
+  /** Bytes of the stderr kept from one hook run. */
+  hookStderrBytes: 16_384,
+  /** Characters of a hook command. */
+  hookCommandMaxChars: 4096,
+  /** Characters of a hook matcher. */
+  hookMatcherMaxChars: 200,
+  /** Characters of the label of a hook (a hook record entry, the run log). */
+  hookLabelMaxChars: 200,
+  /** Characters of the model-visible context of one event (`data-hook` `context`, every handler joined). */
+  hookContextMaxChars: 10_000,
+  /** Characters of a block or decision reason (`data-hook` `reason`). */
+  hookReasonMaxChars: 2000,
+  /** Characters of a hook's `systemMessage` and of the error of one hook in a `data-hook` part. */
+  hookSystemMessageMaxChars: 2000,
+  /** Serialized bytes of a `PreToolUse` `updatedInput` (64 KiB). */
+  hookUpdatedInputBytes: 65_536,
+  /** `Stop` hook continuations in a row (turns with run origin `hook`); then notice `hook-continuation-limit`. */
+  hookContinuationsMax: 5,
+  /** Extra rounds a `SubagentStop` hook can give one sub-agent. */
+  subagentStopContinuationsMax: 2,
+  /** Entries of the hook run log (`GET /hooks/runs`, in memory; the oldest are dropped). */
+  hookRunsKept: 200,
+  /** Characters of the error of one run log entry. */
+  hookRunErrorMaxChars: 500,
+  /** Entries of `GET /hooks` (personal, project and plugin hooks together). */
+  hookListItemsMax: 300,
+  /** Command hook handlers of one plugin (`contributes.hooks`, plugin API 1.5.0). */
+  pluginHooksMax: 50,
+  /** Output styles of one plugin (`contributes.outputStyles`, plugin API 1.5.0). */
+  pluginOutputStylesMax: 20,
+  /** Bytes of one project settings file read for its `hooks` key (`.claude` / `.harness` `settings{,.local}.json`). */
+  projectSettingsFileBytes: 262_144,
+  /** Hook handlers of one project (every settings file together). */
+  projectHookItemsMax: 100,
+  /** Bytes of a project `.mcp.json`. */
+  projectMcpFileBytes: 262_144,
+  /** Servers of a project `.mcp.json`. */
+  projectMcpServersMax: 20,
+  /** Variables of the project MCP servers of one project (`${VAR}` names with a stored value). */
+  projectMcpVariablesMax: 50,
+  /** Characters of one project MCP variable value. */
+  projectMcpVariableValueMaxChars: 4096,
+  /** Tools listed per project MCP server. */
+  projectMcpToolsMax: 1000,
+  /** How long the first run of a project chat waits for its MCP servers (else notice `project-mcp-unavailable`). */
+  projectMcpConnectWaitMs: 5000,
+  /** Idle time after which a project MCP server stops (10 min). */
+  projectMcpIdleMs: 600_000,
+  /** Executable items listed by `GET /projects/:id/trust`. */
+  trustItemsMax: 200,
+  /** Items of one `POST /projects/:id/trust`. */
+  trustApproveItemsMax: 50,
+  /** Script files a command names that are hashed into its trust hash. */
+  trustRefFilesMax: 8,
+  /** Bytes of one referenced script file (a larger one is hashed as missing). */
+  trustRefFileBytes: 1_048_576,
+  /** `` !`cmd` `` spans of one command file. */
+  commandShellSpansMax: 10,
+  /** Timeout of one span. */
+  commandShellTimeoutMs: 30_000,
+  /** Time all spans of one command may take together. */
+  commandShellTotalMs: 60_000,
+  /** Bytes of the output kept per span. */
+  commandShellOutputBytes: 16_384,
+  /** `@path` files inlined by one command file. */
+  commandFileRefsMax: 10,
+  /** Bytes inlined per `@path` file. */
+  commandFileRefBytes: 32_768,
 } as const
 
 /** MIME families accepted by `POST /files` (the server also checks the content). */

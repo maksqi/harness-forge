@@ -1,13 +1,20 @@
 // Tool, MCP server and command DTOs (API.md section 4.9).
 import { z } from 'zod'
-import { commandSourceSchema, mcpStatusSchema, toolOverrideSchema, toolPolicySchema, workspaceAccessSchema } from '../enums.ts'
+import {
+  commandSourceSchema,
+  invocationKindSchema,
+  mcpStatusSchema,
+  toolOverrideSchema,
+  toolPolicySchema,
+  workspaceAccessSchema,
+} from '../enums.ts'
 import { harnessErrorInitSchema } from '../errors.ts'
 import {
-  commandNameSchema,
   mcpServerIdSchema,
   modelRefSchema,
   pluginIdSchema,
   projectIdSchema,
+  slashNameSchema,
   timestampSchema,
   toolNameSchema,
 } from '../ids.ts'
@@ -154,10 +161,14 @@ export type McpServer = z.infer<typeof mcpServerSchema>
 /**
  * A server-side slash command (client-only commands are not listed). Phase 10 (ADR-045): the effective commands of a
  * chat's scope, one per name (the precedence of ADR-044 applied): harness commands, project command files, personal
- * commands and plugin commands.
+ * commands and plugin commands. Phase 11 (ADR-052): user-invocable skills join the list (`kind: 'skill'`, names up to
+ * 64 characters); a command wins a name over a skill.
  */
 export const commandSummarySchema = z.object({
-  name: commandNameSchema,
+  /** A command name (up to 32 characters) or a skill name (up to 64; `slashNameSchema`). */
+  name: slashNameSchema,
+  /** Phase 11: `skill` for a user-invocable skill; absent = a command. */
+  kind: invocationKindSchema.optional(),
   description: z.string(),
   /** Where the command comes from (Phase 10). */
   source: commandSourceSchema,
@@ -165,7 +176,7 @@ export const commandSummarySchema = z.object({
   pluginId: pluginIdSchema.optional(),
   /** Command files in subfolders: the folder path (`frontend/forms`), a display label only. */
   namespace: z.string().min(1).max(LIMITS.workspacePathMaxChars).optional(),
-  /** `argument-hint` of a command file (shown after `/name ` in the composer). */
+  /** `argument-hint` of a command file or a skill (shown after `/name ` in the composer). */
   argumentHint: z.string().max(DEFINITION_LIMITS.argumentHintMaxChars).optional(),
   /** The `model` of a command file: the turn runs on it (the chat keeps its model). */
   modelRef: modelRefSchema.optional(),

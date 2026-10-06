@@ -322,9 +322,10 @@ errors -> `context_overflow`; `ECONNREFUSED` / `ENOTFOUND` -> `provider_unreacha
 Dev and e2e only: the builtin plugin `mock` registers provider `mock` and tool `mock_approval_tool` when
 `HF_MOCK_PROVIDER=1` (`pnpm start:e2e` sets it). Models are `MockLanguageModelV4` instances from `ai/test` streaming
 through `simulateReadableStream`. The provider has no credentials (status `connected`), no icon (monogram),
-`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its nineteen models (the four chat models of v1, the five
+`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its twenty models (the four chat models of v1, the five
 models of Phase 6, `workspace` of Phase 7, `checkpoint` and `shell` of Phase 8, `compact`, `plan`, `todo`, `subagent`
-and `steer` of Phase 9, and `agents` and `background` of Phase 10), and `validate` always succeeds. Its
+and `steer` of Phase 9, `agents` and `background` of Phase 10, and `hooks` of Phase 11), and `validate` always
+succeeds. Its
 `reasoning()` maps `off` -> `none`, `low` / `medium` / `high` -> same, `max` -> `xhigh`. Since Phase 6 (manifest
 `engines.harness` `^1.1.0`) it also defines `createImageModel`, `imageParams`, `createTranscriptionModel`,
 `createSpeechModel` and a `transcriptionOptions` that returns nothing (the mock models ignore the language), with models
@@ -336,13 +337,13 @@ id other than the three below rejects with a 404 `APICallError`.
 
 Names: Mock Echo, Mock Reasoning, Mock Tool Approval, Mock Error, Mock Image, Mock Image Chat, Mock Image Tool, Mock
 Transcribe, Mock Speech, Mock Workspace, Mock Checkpoint, Mock Shell, Mock Compact, Mock Plan, Mock Todo, Mock Sub-agent,
-Mock Steer, Mock Agents, Mock Background. `GET /api/models` shows seventeen of them (the four chat models, `image`,
-`image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, `compact`, `plan`, `todo`, `subagent`, `steer`,
-`agents`, `background`); `transcribe` and `speech` are hidden and chosen in Settings → Media. The provider's
-`modelCount` is 16 (visible chat models; the image model is not counted). A data directory whose cached mock listing
+Mock Steer, Mock Agents, Mock Background, Mock Hooks. `GET /api/models` shows eighteen of them (the four chat models,
+`image`, `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, `compact`, `plan`, `todo`, `subagent`, `steer`,
+`agents`, `background`, `hooks`); `transcribe` and `speech` are hidden and chosen in Settings → Media. The provider's
+`modelCount` is 17 (visible chat models; the image model is not counted). A data directory whose cached mock listing
 predates a model (the e2e server's `.tmp/e2e`: `workspace` in Phase 7, `checkpoint` and `shell` in Phase 8, the five
-agent mocks in Phase 9, the two customization mocks in Phase 10) shows the new models only after a refresh: move it
-aside before a gate.
+agent mocks in Phase 9, the two customization mocks in Phase 10, `hooks` in Phase 11) shows the new models only after a
+refresh: move it aside before a gate.
 
 Common behavior (deterministic):
 
@@ -354,11 +355,11 @@ Common behavior (deterministic):
 - **Usage**: `inputTokens` = number of whitespace-separated words in all prompt text parts; `outputTokens` = number of
   streamed text and reasoning words; `reasoningTokens` = reasoning words.
 - **Model info** (the four chat models and `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, `compact`,
-  `plan`, `todo`, `subagent`, `steer`, `agents`, `background`): `contextWindow: 32000` (`compact`: 2000, so a few turns
+  `plan`, `todo`, `subagent`, `steer`, `agents`, `background`, `hooks`): `contextWindow: 32000` (`compact`: 2000, so a few turns
   pass 80 % of it), `maxOutputTokens: 4096`, `cost: { input: 1, output: 2 }` (USD per 1M tokens, so cost displays are
-  non-zero); `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, the five Phase 9 models and the two Phase 10
-  models declare `kind: 'chat'` explicitly (an explicit kind wins over `classify()`); the Phase 9 and Phase 10 models
-  have the `tools` capability only. The media
+  non-zero); `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, the five Phase 9 models, the two Phase 10
+  models and the Phase 11 model declare `kind: 'chat'` explicitly (an explicit kind wins over `classify()`); the Phase 9,
+  Phase 10 and Phase 11 models have the `tools` capability only. The media
   models have explicit kinds: `image` (`kind: 'image'`, `capabilities.vision: true`, the same cost, so image turns show
   an estimated cost), `transcribe` (`kind: 'transcription'`) and `speech` (`kind: 'speech'`,
   `voices: ['mock-voice-a', 'mock-voice-b']` so the Voice suggestions can be tested); the last two have no limits and
@@ -482,6 +483,58 @@ with a fast child → `Finished: in-run result completed`), stops and limits (`b
 `aborted`, delivered at the next user turn; a fourth `bg` in one chat → failed), and a restart (`bg explore slow 20`,
 then the server is restarted: the row reads `aborted`, with "The background task was stopped." after a normal shutdown
 and "The server restarted before the task finished." after a crash).
+
+### Hook mocks (Phase 11)
+
+One chat model drives the hooks, the project MCP servers, the output styles and the command extras (ADR-048 …
+ADR-052). It is complete and frozen from Gate P11-0b; **this subsection is the contract of the Phase 11 gate probes and
+e2e specs**. Every shared rule of the agent mocks above applies: the call ids (`mock_call_<n>`, `finishReason:
+'tool-calls'`), the offered-tools lists (sorted by code point, joined with `", "`, `none` when empty), the markers (a
+child is recognized by `SUBAGENT_INSTRUCTIONS_MARKER`, `[[hf:subagent:v1]]`, in its system text), the denied and failed
+endings, and `Tools are disabled.` / `Sub-agents are not available.` when a script needs a tool that is not offered. No
+step waits. Model info as in "Common behavior" (`kind: 'chat'`, the `tools` capability only).
+
+Definitions:
+
+- **Hook blocks**: the model text of the `data-hook` parts in the prompt (`hookModelText` of
+  `packages/shared/src/util/agent-state.ts`): `<hook-context event="<Event>" …>…</hook-context>` (hook context in a
+  reply or on a user message) and `<hook-feedback event="<Event>">…</hook-feedback>` (block feedback, the text of a Stop
+  carrier or of a SubagentStop round). A block's **first line** is the first non-empty line of the text between its
+  tags, trimmed; its **item** is `<Event>:<first line>` (the `event` attribute, a colon, no space). Blocks are searched
+  in the user and assistant messages of the prompt, never in the system text.
+- **The user text**: the text parts of the turn's user message (the last user message of the prompt that is not a steer
+  and that holds text outside hook blocks), with every hook block removed, trimmed; it is the text after command
+  expansion, so the outputs of `` !`cmd` `` spans and the `<file path="…">` blocks of `@path` references are part of it.
+  An empty user text reads `(empty message)`. The **trigger** is the last non-empty line of the user text, trimmed (so a
+  command whose body has no placeholder reaches the trigger rules with its appended input).
+- **The turn** and its results follow the shared Turn rule from the turn's user message; a user message that holds only
+  hook blocks (hook context injected at a step boundary) never opens a turn.
+
+| Model ref | Behavior |
+|---|---|
+| `mock:hooks` | Checked in this order. (1) **Child** (the system text holds the marker): (a) the last user message of the prompt holds `<hook-feedback` (a SubagentStop round) → the text `Child continued: <first line of its first hook-feedback block>`; (b) the trigger of the child's user text is a `call …` or `run …` line (rule 3) and the turn has no result of that tool yet → that one call; (c) otherwise the text `Child done` (also after the call of (b) returned, whatever its result: the parent reads the step's state in `TaskOutput.steps`). (2) **Hook continuation**: the last user message of the prompt holds `<hook-feedback` (the carrier of a turn with `origin: 'hook'`) → the text `Hook continuation: <first line of its first hook-feedback block>`. (3) **Triggers**, by the trigger line. `call <tool> <json>`: `<tool>` = the second whitespace-separated word, `<json>` = the rest of the line, parsed with `JSON.parse` (a missing or invalid value, or one that is not an object, gives `{}`); without `<tool>` offered: `Tools are disabled.`; when the turn has no result of `<tool>`, one call `<tool>` with that input; after the result, the text `Called <tool>: <status> \| <detail> \| hooks: <hooks>`, where `<status>` = `denied` for a denied result (an `execution-denied` output or a denied approval response: a PreToolUse hook's `deny` or exit 2 gives one, with the reason `Blocked by hook: …`), `failed` for an error result, else `ok`; `<detail>` = the denial reason (`none` without one), the error text, or the result's text for the model (`toModelOutput`; a JSON output as `JSON.stringify`), with every run of whitespace (newlines included) replaced by one space, trimmed and cut to its first 120 code points; `<hooks>` = the first lines of the hook blocks of the messages **after** that tool result (PostToolUse context or feedback delivered at the next step), in order, joined with `"; "`, or `none`. `run <cmd>`: the same with the tool `shell` and the input `{ "command": "<cmd>" }` (`<cmd>` = the rest of the line after `run `, trimmed), so the reply reads `Called shell: ok \| Exit code: 0 stdout: hi \| hooks: none`. `agent <prompt>` (`<prompt>` = the rest of the line): without `task` offered `Sub-agents are not available.`; when the turn has no `task` result, one call `task` with `{ "type": "general", "description": "Hook child", "prompt": "<prompt>" }`; after the result, the text `Agent report: <text>` (`<text>` = the result's text for the model: the child's report, e.g. `Child done` or `Child continued: …`, or `Sub-agent failed: <error>; partial report: …`). `context?` → `Context: <items>`: the items of every hook block of the prompt, in order, joined with `"; "`, or `none` (e.g. `Context: SessionStart:branch main; UserPromptSubmit:ticket HF-12`). `style?` → `Style: <name> \| workspace-rules: <yes\|no> \| todo-hint: <yes\|no>`, where `<name>` = the rest of the system text's **first line** after `Output style: ` when that line starts with it (the style's label, trimmed), else `none` (a style block anywhere else does not count: the probes check that it comes first); `workspace-rules: yes` when the system text holds the line `- Use paths relative to the project folder.` (the first rule line of the workspace block); `todo-hint: yes` when it holds `Track multi-step work with todo_write` (the start of the server's `TODO_HINT`). `mcp?` → `MCP tools: <names>` (the offered tools whose names start with `mcp__`, sorted, joined, `none`). `tools?` → `Tools: <offered tools>`. (4) Any other turn: the text `Hooks mock: <user text>` (the whole user text, so a command's `!` span outputs and inlined files are visible) |
+
+The hook scripts of the tests and probes (`apps/server/src/testing/hook-scripts.ts`) are POSIX `sh` files written into
+a temporary project and invoked as `sh <relative path>`; each reads its stdin first: `deny` (`permissionDecision:
+deny` with a reason), `ask`, `allow`, `rewrite` (`updatedInput` `{"command":"echo rewritten"}`), `context`
+(`additionalContext`), `exit2` (exit 2, stderr `nope`), `error` (exit 1), `sleep` (outlives its timeout), `record`
+(appends the payload to `$HARNESS_PROJECT_DIR/.hook-log`), `env` (writes the environment to `.hook-env`), `stop-once`
+(exits 0 when the payload holds `"stop_hook_active":true`, else prints `{"decision":"block","reason":"run the tests"}`)
+and `prompt-block` (a UserPromptSubmit block).
+
+How the probes use them (ARCHITECTURE.md 6.28 – 6.32): `mock:hooks` as the chat model of a project chat with personal,
+project and plugin hooks: `run rm -rf build` with a `deny` or `exit2` PreToolUse hook on `Bash` (→ `Called shell:
+denied | Blocked by hook: … | hooks: none`, no process), `rewrite` (→ `Called shell: ok | Exit code: 0 stdout:
+rewritten | …` while the tool part keeps the model's input), `ask` in Auto (a card), `allow` in Ask (`write_file` runs
+without a card, `shell` still asks), `record` counting one PreToolUse across an approval and its continuation, a
+PostToolUse `context` script (→ `hooks: <its first line>`), `prompt-block` (409 `hook-blocked`, nothing stored),
+`context?` after UserPromptSubmit / SessionStart context, `stop-once` (a turn with `origin: 'hook'`, `Hook continuation:
+run the tests`, then the stop) and an always-blocking Stop hook (5 continuations, then the notice
+`hook-continuation-limit`), `agent run ls` with a child `ask` hook (the child's call is denied, `Agent report: Child
+done`) and a SubagentStop block (`Agent report: Child continued: …`), `style?` with chat, project and global styles and
+`keep-coding-instructions: false` (`todo-hint: no`), `mcp?` and `tools?` in chats of a project with an approved
+`.mcp.json` fixture (and in other chats), and project commands with `` !`cmd` `` spans and `@README.md` (→ `Hooks
+mock: …` with the output inlined; a regenerate shows the same text without running the span again).
 
 ## 9. Declarative provider templates (wizard)
 

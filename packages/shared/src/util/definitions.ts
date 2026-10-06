@@ -1,11 +1,15 @@
 /**
  * Customization definition files (Phase 10, ADR-044 / ADR-045): agents, commands and skills are markdown files with YAML
- * frontmatter (`---` at byte 0, BOM allowed). This module is the ONLY parser and formatter (server and web): `yaml`
- * core schema, no aliases, unique keys, byte caps applied before parsing; it never throws — every problem is a
- * diagnostic. Contract skeleton written by the coordinator in P10-0a (K1); implemented by C29.
+ * frontmatter (`---` at byte 0, BOM allowed); Phase 11 (ADR-051, ADR-052) adds output styles (kind `style`) and the
+ * skill keys `user-invocable`, `disable-model-invocation` and `argument-hint`. This module is the ONLY parser and
+ * formatter (server and web): `yaml` core schema, no aliases, unique keys, byte caps applied before parsing; it never
+ * throws — every problem is a diagnostic. Contract skeleton written by the coordinator in P10-0a (K1); implemented by
+ * C29; Phase 11 additions by C35.
  *
- * Name rule (all kinds): the frontmatter `name`, else the file stem (agents, commands) or the folder name (skills),
- * else an `error` diagnostic `missing-field`.
+ * Name rule (all kinds): the frontmatter `name`, else the file stem (agents, commands, styles) or the folder name
+ * (skills), else an `error` diagnostic `missing-field`. Styles (Claude Code writes `name: My Style`) keep the name as
+ * written as their `label` and use its slug as the name (`styleNameFromLabel`); the builtin style names `default`,
+ * `explanatory` and `learning` are reserved.
  *
  * Parsing, in order: the UTF-8 byte cap, a NUL probe of the first 8 KiB, BOM strip and CRLF / CR → LF; frontmatter only
  * when the text starts with `---\n`, closed by the next line that is exactly `---` or `...` (≤ 8 KiB); `yaml` with the
@@ -17,9 +21,10 @@
  */
 import { isMap, parseDocument, stringify } from 'yaml'
 import { AGENT_NAME_PATTERN, COMMAND_NAME_PATTERN, isClientCommand, isHarnessCommand, isReservedAgentName, safeParseModelRef } from '../ids.ts'
+import { isBuiltinOutputStyle } from './output-styles.ts'
 import { normalizeToolList } from './tool-names.ts'
 
-export const CUSTOMIZATION_KINDS = ['agent', 'command', 'skill'] as const
+export const CUSTOMIZATION_KINDS = ['agent', 'command', 'skill', 'style'] as const
 export type CustomizationKind = (typeof CUSTOMIZATION_KINDS)[number]
 
 /** Where a catalog entry comes from (ADR-044); precedence, lowest first: builtin < plugin < user < project. */
@@ -38,6 +43,8 @@ export const DEFINITION_LIMITS = {
   frontmatterBytes: 8192,
   /** `description` is cut to this many characters (warning). */
   descriptionMaxChars: 1024,
+  /** A style's `label` (the name as written; Phase 11). */
+  labelMaxChars: 128,
   /** `argument-hint`. */
   argumentHintMaxChars: 100,
   /** Entries of a `tools` / `allowed-tools` list. */
@@ -106,10 +113,33 @@ export interface CommandDefinitionFields {
   readonly body: string
 }
 
+/**
+ * Skill fields. The Phase 11 keys are present only when the file sets a value other than the default (so a Phase 10
+ * skill parses to exactly `{ name, description, content }`); read them with `skillInvocation`.
+ */
 export interface SkillDefinitionFields {
   readonly name: string
   readonly description: string
   /** The SKILL.md body. */
+  readonly content: string
+  /** `user-invocable` (Phase 11): absent = true (the skill runs as `/name [arguments]`). */
+  readonly userInvocable?: boolean
+  /** Not `disable-model-invocation` (Phase 11): absent = true (the model may load the skill). */
+  readonly modelInvocable?: boolean
+  /** `argument-hint` (Phase 11): absent = none. */
+  readonly argumentHint?: string
+}
+
+/** Output style fields (Phase 11, ADR-051). */
+export interface StyleDefinitionFields {
+  /** The slug of the label (`AGENT_NAME_PATTERN`). */
+  readonly name: string
+  /** The name as written (`My Style`), or the file stem; at most `DEFINITION_LIMITS.labelMaxChars`. */
+  readonly label: string
+  readonly description: string
+  /** `keep-coding-instructions` (default false). */
+  readonly keepCodingInstructions: boolean
+  /** The style body (the instructions block). */
   readonly content: string
 }
 
@@ -117,6 +147,7 @@ export type ParsedDefinition
   = | { readonly kind: 'agent', readonly fields: AgentDefinitionFields }
     | { readonly kind: 'command', readonly fields: CommandDefinitionFields }
     | { readonly kind: 'skill', readonly fields: SkillDefinitionFields }
+    | { readonly kind: 'style', readonly fields: StyleDefinitionFields }
 
 export interface ParseDefinitionOptions {
   /** The file name (`reviewer.md`): its stem is the name fallback of agents and commands. */
@@ -151,7 +182,8 @@ const KEY_NAME_SHOWN_MAX = 64
 const KIND_KEYS: Readonly<Record<CustomizationKind, readonly string[]>> = {
   agent: ['name', 'description', 'tools', 'model'],
   command: ['name', 'description', 'argument-hint', 'model', 'allowed-tools'],
-  skill: ['name', 'description'],
+  skill: ['name', 'description', 'argument-hint', 'user-invocable', 'disable-model-invocation'],
+  style: ['name', 'description', 'keep-coding-instructions'],
 }
 
 /**
@@ -536,6 +568,44 @@ function isAbsent(field: FieldValue | null): boolean {
 // ---------------------------------------------------------------------------------------------------------------------
 // Fields
 
+/** The name and label of a style (the label is the name as written, or the file stem). */
+function readStyleName(front: Frontmatter | null, options: ParseDefinitionOptions, diagnostics: DefinitionDiagnostic[]): { name: string, label: string } | null {
+  const field = fieldOf(front, 'name')
+  let raw = ''
+  let line: number | undefined
+  if (field !== null && !isAbsent(field)) {
+    if (typeof field.value !== 'string') {
+      diagnostics.push(diagnostic('error', 'invalid-field', 'The name must be text.', field.line))
+      return null
+    }
+    raw = field.value
+    line = field.line
+  }
+  let label = styleLabel(raw)
+  const fromFile = label === ''
+  if (fromFile) {
+    label = styleLabel(fileStem(options.fileName))
+    if (label === '') {
+      diagnostics.push(diagnostic('error', 'missing-field', 'Add a name.'))
+      return null
+    }
+  }
+  const name = label.length > DEFINITION_LIMITS.labelMaxChars ? null : styleNameFromLabel(label)
+  if (name === null) {
+    const rule = `a letter first and at most 64 letters, digits, blanks or hyphens (${DEFINITION_LIMITS.labelMaxChars} characters as written)`
+    const message = fromFile
+      ? `The file name is not a valid style name; add a name with ${rule}.`
+      : `Style names need ${rule}.`
+    diagnostics.push(diagnostic('error', 'invalid-name', message, line))
+    return null
+  }
+  if (isBuiltinOutputStyle(name)) {
+    diagnostics.push(diagnostic('error', 'reserved-name', `${name} is a built-in name.`, line))
+    return null
+  }
+  return { name, label }
+}
+
 function readName(kind: CustomizationKind, front: Frontmatter | null, options: ParseDefinitionOptions, diagnostics: DefinitionDiagnostic[]): string | null {
   const field = fieldOf(front, 'name')
   let raw = ''
@@ -597,6 +667,8 @@ function readDescription(kind: CustomizationKind, front: Frontmatter | null, bod
   }
   if (text === '') {
     if (kind === 'command')
+      return firstLineDescription(body)
+    if (kind === 'style' && firstLineDescription(body) !== '')
       return firstLineDescription(body)
     diagnostics.push(diagnostic('error', 'missing-field', 'Add a description.', field?.line))
     return null
@@ -666,6 +738,24 @@ function readArgumentHint(front: Frontmatter | null, diagnostics: DefinitionDiag
   return text
 }
 
+/** A `true` / `false` key (YAML booleans; the line reader's `true` / `false` text); null when absent or invalid. */
+function readBoolean(key: string, front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): boolean | null {
+  const field = fieldOf(front, key)
+  if (field === null || isAbsent(field))
+    return null
+  if (typeof field.value === 'boolean')
+    return field.value
+  if (typeof field.value === 'string') {
+    const text = unquote(field.value.trim()).toLowerCase()
+    if (text === 'true')
+      return true
+    if (text === 'false')
+      return false
+  }
+  diagnostics.push(diagnostic('warning', 'invalid-field', `"${key}" must be true or false; the default is used.`, field.line))
+  return null
+}
+
 function readTools(key: 'tools' | 'allowed-tools', front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): readonly string[] | null {
   const field = fieldOf(front, key)
   if (field === null)
@@ -727,7 +817,8 @@ function parseUnchecked(kind: CustomizationKind, text: string, options: ParseDef
     return { definition: null, diagnostics }
 
   const body = normalizeBody(split.body)
-  const name = readName(kind, front, options, diagnostics)
+  const style = kind === 'style' ? readStyleName(front, options, diagnostics) : null
+  const name = kind === 'style' ? style?.name ?? null : readName(kind, front, options, diagnostics)
   const description = readDescription(kind, front, body, diagnostics)
   let definition: ParsedDefinition | null = null
   switch (kind) {
@@ -749,10 +840,32 @@ function parseUnchecked(kind: CustomizationKind, text: string, options: ParseDef
       break
     }
     case 'skill': {
+      const argumentHint = readArgumentHint(front, diagnostics)
+      const userInvocable = readBoolean('user-invocable', front, diagnostics)
+      const disableModelInvocation = readBoolean('disable-model-invocation', front, diagnostics)
       if (body === '')
         diagnostics.push(diagnostic('warning', 'missing-field', 'The skill has no instructions below the frontmatter.'))
-      if (name !== null && description !== null)
-        definition = { kind, fields: { name, description, content: body } }
+      if (name !== null && description !== null) {
+        definition = {
+          kind,
+          fields: {
+            name,
+            description,
+            content: body,
+            ...(userInvocable === false ? { userInvocable: false } : {}),
+            ...(disableModelInvocation === true ? { modelInvocable: false } : {}),
+            ...(argumentHint !== null ? { argumentHint } : {}),
+          },
+        }
+      }
+      break
+    }
+    case 'style': {
+      const keepCodingInstructions = readBoolean('keep-coding-instructions', front, diagnostics) ?? false
+      if (body === '')
+        diagnostics.push(diagnostic('warning', 'missing-field', 'The style has no instructions below the frontmatter.'))
+      if (style !== null && description !== null)
+        definition = { kind, fields: { name: style.name, label: style.label, description, keepCodingInstructions, content: body } }
       break
     }
   }
@@ -777,11 +890,49 @@ export function parseDefinition(kind: CustomizationKind, text: string, options?:
   }
 }
 
+/** A style label as read: control characters removed, blanks collapsed, trimmed. */
+function styleLabel(value: string): string {
+  return value.replace(CONTROL_CHARACTERS, '').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * The name of a style from its label (Phase 11): a label that is already a valid name in lower case is that name
+ * (`terse`, `Terse`); otherwise accents are removed, the text is lowercased, every run of other characters becomes `-`
+ * and leading / trailing `-` are dropped (`My Style!` → `my-style`). null when the result does not match
+ * `AGENT_NAME_PATTERN` (empty, a digit first, longer than 64 characters).
+ */
+export function styleNameFromLabel(label: string): string | null {
+  if (typeof label !== 'string')
+    return null
+  const text = styleLabel(label.slice(0, 1024))
+  const lower = text.toLowerCase()
+  if (AGENT_NAME_PATTERN.test(lower))
+    return lower
+  const slug = lower
+    .normalize('NFKD')
+    .replace(/\p{M}+/gu, '')
+    .replace(/[^\da-z]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return AGENT_NAME_PATTERN.test(slug) ? slug : null
+}
+
+/** The Phase 11 skill keys with their defaults applied. */
+export function skillInvocation(fields: SkillDefinitionFields): { userInvocable: boolean, modelInvocable: boolean, argumentHint: string | null } {
+  const value = typeof fields === 'object' && fields !== null ? fields : ({} as Partial<SkillDefinitionFields>)
+  return {
+    userInvocable: value.userInvocable !== false,
+    modelInvocable: value.modelInvocable !== false,
+    argumentHint: typeof value.argumentHint === 'string' && value.argumentHint !== '' ? value.argumentHint : null,
+  }
+}
+
 /**
  * Formats a definition as markdown with frontmatter; `parseDefinition(formatDefinition(d))` round-trips the fields.
- * Keys in order: `name`, `description`, then `tools`, `model` (agents) or `argument-hint`, `model`, `allowed-tools`
- * (commands); null values are omitted; tool lists are YAML lists. The body follows after a blank line (leading blank
- * lines and trailing whitespace removed, as the parser reads it) and ends with a newline.
+ * Keys in order: `name`, `description`, then `tools`, `model` (agents), `argument-hint`, `model`, `allowed-tools`
+ * (commands), `argument-hint`, `user-invocable` (only `false`), `disable-model-invocation` (only `true`) (skills) or
+ * `keep-coding-instructions` (only `true`) (styles); a style writes its label as `name` when the label's slug is the
+ * name, else the name; null values are omitted; tool lists are YAML lists. The body follows after a blank line (leading
+ * blank lines and trailing whitespace removed, as the parser reads it) and ends with a newline.
  */
 export function formatDefinition(definition: ParsedDefinition): string {
   const front: Record<string, unknown> = {}
@@ -814,6 +965,18 @@ export function formatDefinition(definition: ParsedDefinition): string {
       const fields = definition.fields
       set('name', fields.name)
       set('description', fields.description)
+      set('argument-hint', typeof fields.argumentHint === 'string' && fields.argumentHint !== '' ? fields.argumentHint : null)
+      set('user-invocable', fields.userInvocable === false ? false : null)
+      set('disable-model-invocation', fields.modelInvocable === false ? true : null)
+      body = fields.content
+      break
+    }
+    case 'style': {
+      const fields = definition.fields
+      const label = typeof fields.label === 'string' ? styleLabel(fields.label) : ''
+      set('name', label !== '' && styleNameFromLabel(label) === fields.name ? label : fields.name)
+      set('description', fields.description)
+      set('keep-coding-instructions', fields.keepCodingInstructions === true ? true : null)
       body = fields.content
       break
     }

@@ -279,7 +279,42 @@ Remember flow (`/remember`).
   - [x] W10.13 e2e-features · [x] W10.14 docs-final (W10.15 / W10.16 fix-ups not needed: the P10-A gate was green)
   - [x] Final gate (e2e ×3, screenshots, audit, v1.5 → v1.6 upgrade, Docker) + checkpoint commit
 
-## Backlog (not in v1.6)
+## Phase 11 — v1.7: Hooks, project MCP and output styles
+
+Details, owned paths and acceptance criteria: `docs/phases/phase-11-v1-7.md`. Decisions: ADR-048 … ADR-052 (and
+amendment notes on ADR-008, ADR-017, ADR-024, ADR-031, ADR-033, ADR-034, ADR-040, ADR-042 … ADR-046). Plan: Claude
+Code-format shell hooks (eight events) from personal, project and plugin sources; per-item project trust pinned by
+sha256 for every executable repository item; project `.mcp.json` servers; output styles (a fourth catalog kind with
+chat / project / global selection); user-invocable skills; `!` spans and `@file` in command files; plugin API 1.5.0.
+
+- [x] P11-00 Stabilization start (coordinator): design reports in `.tmp/p11-designs`, baseline 10562 tests, vue-tsc
+  3.3.12 workaround (`4765743`), Dependabot #8 (`fe6dbeb`) and #7 (`b636a1a`) merged, audit advisories re-checked
+  (node-forge and braces still unpatched: ignores kept; new on 2026-10-06: source-map-js patched by an override, four
+  devtools-only simple-git advisories ignored, `60389e0`), `.tmp/v16` worktree built, old `.tmp` content moved to
+  `.tmp/_archive`
+- [x] P11-0a Decisions, docs, contracts
+  - [x] K1 DECISIONS (ADR-048 … ADR-052, contract seed), ROADMAP, AGENT.md (coordinator); K2 no new dependency
+  - [x] C34 contracts: shared DTOs + plugin SDK 1.5.0, 11 new routes (120), `docs/API.md`, 501 stubs
+  - [x] C35 helpers (`packages/shared/src/util/{hooks,trust,mcp-config,command-template,output-styles}.ts`, the
+    `style` kind, `splitHooks`)
+  - [x] D14 phase doc `phase-11-v1-7.md` · [x] D15 docs: UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md, guides, README
+  - [x] K3S v1.6 upgrade seed (`.tmp/upgrade-v16`)
+  - [x] Gate + checkpoint commit
+- [ ] P11-0b Schema, migration `0008`, skeletons, FREEZE
+  - [ ] K3 schema + `pnpm db:generate` (coordinator)
+  - [ ] C36 server skeleton · [ ] C37 chat seams · [ ] C38 processes + `mock:hooks` · [ ] C39 web skeleton
+  - [ ] Gate (incl. v1.6 data upgrade probe) + FREEZE + checkpoint commit
+- [ ] P11-A Features (12 agents + gate probes)
+  - [ ] W11.1 hooks-server · [ ] W11.2 hook-events-server · [ ] W11.3 trust-server · [ ] W11.4 project-mcp-server
+  - [ ] W11.5 commands-server · [ ] W11.6 styles-catalog-server · [ ] W11.7 plugins-data-server
+  - [ ] W11.8 customize-web · [ ] W11.9 trust-mcp-web · [ ] W11.10 composer-web · [ ] W11.11 session-web
+  - [ ] W11.12 transcript-web · [ ] G11P gate probes
+  - [ ] Gate + checkpoint commit
+- [ ] P11-B Feature e2e, docs, fix-ups, final gate
+  - [ ] W11.13 e2e-features · [ ] W11.14 docs-final (W11.15 / W11.16 fix-ups only if the P11-A gate is red)
+  - [ ] Final gate (e2e ×3, screenshots, audit, v1.6 → v1.7 upgrade, Docker) + checkpoint commit
+
+## Backlog (not in v1.7)
 
 Multi-user accounts · child-process isolation for code plugins · plugin marketplace/registry index ·
 knowledge/RAG · desktop/CLI clients · audio attachments to chat models · declarative image and voice providers ·
@@ -289,15 +324,16 @@ verify Alt+V dictation on Firefox / Windows (Alt+J is the documented fallback) �
 syntax highlighting in diffs · stage / commit from the changes panel · a terminal pane · a persistent shell process
 (environment variables that stick) · restoring shell changes (whole-tree snapshots) · remove the two ignored audit
 advisories (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) once patched releases ship (re-checked
-2026-10-04: still unpatched) · move the `.gitignore` ReDoS heuristic of the workspace walker (`find_files`,
+2026-10-06: still unpatched) · move the `.gitignore` ReDoS heuristic of the workspace walker (`find_files`,
 `search_files`, the `@` file index) off the main thread · a steer queue that survives a server restart · nested
 sub-agents · micro-compaction of
 single large tool outputs · retry a provider context overflow after compaction · `@` mentions of symbols and URLs ·
-run the live provider suite for compaction, plan mode and sub-agents with real models · user-defined shell hooks ·
-project `.mcp.json` servers · output styles · `!bash` and `@file` inside command files · user-invocable skills (`/skill`)
-· editing project definition files in the UI · importing definitions from the home folder (`~/.claude`) · background
+run the live provider suite for compaction, plan mode and sub-agents with real models · editing project
+definition files in the UI · importing definitions from the home folder (`~/.claude`) · background
 tasks that survive a server restart · a sidebar activity dot for background agents · run the live provider suite for
-custom agents, skills and background agents with real models.
+custom agents, skills and background agents with real models · prompt-based hooks (`type: prompt`) and hook
+`transcript_path` · an OS-level sandbox for hooks and project MCP servers · importing personal hooks and MCP servers from
+`~/.claude` · run the live provider suite for hooks, project MCP servers and output styles with real models.
 
 ## Wave log
 
@@ -345,3 +381,5 @@ custom agents, skills and background agents with real models.
 | P10-A | W10.1 – W10.12, G10P (gate probes) (+ coordinator: CCR `taskAgent.pluginId` applied; follow-ups: one announcement per finished background agent (W10.10), `background_tasks.output` scanned (W10.6); test pins in `deps.test.ts`, `pipeline.test.ts`, `workspace.test.ts`; the import result panel line for restored definitions; e2e pins for `/remember` and the Agent section copy) | audit ok (189 paths, no frozen file touched beyond the accepted CCR); 10561 tests; build ok (`yaml` external in `dist/main.mjs`); CSP 38/38; probes 173/173 (`.tmp/gates/P10-A/probe.mjs`: catalog, agents, commands, skills, background, plan files, Remember, plugin API, hygiene, v1.5 upgrade) + P9-A 71/71 + P8-A 47/47; e2e 128 passed on a fresh `.tmp/e2e`; screenshots of the Customize page, editor, slash groups, argument hint, Remember (desktop + phone) reviewed; `pnpm audit --prod` clean (2 ignored) | (this commit) |
 | P10-B | W10.13, W10.14 (+ coordinator: the three product bugs W10.13 found — the plugins store on chat pages, `firstSentence` keeping `_` inside words, the command badge's accessible name — fixed and the fixme enabled; DECISIONS ADR-044 / ADR-046 / contract seed matched to the code; README image `customize-dark.png`) | audit ok (35 paths); 27 new e2e tests, 3 runs of 155 on 8891; docs reconciled; README "v1.6" | (final gate commit) |
 | Final gate v1.6 | coordinator | frozen install ok; 10562 tests; repository `git status` unchanged by `pnpm check`; build ok; CSP 38/38; probes 173/173 + P9-A 71/71 + P8-A 47/47 on fresh data; e2e 156 passed ×3 (chromium + mobile + tablet); `@screenshots` dark + light reviewed, README images from the `@readme` shots; `pnpm audit --prod` clean (2 ignored, still unpatched); real v1.5 → v1.6 upgrade 42/42; Docker (Node 24, uid 1000) on the v1.5 seed 16/16 | (this commit) |
+| P11-00 | coordinator | baseline 10562 tests, `git status` unchanged; vue-tsc 3.3.12 workaround + guard test verified on #7's branch (10563 passed); CI on `4765743` green; Dependabot #8 / #7 squash-merged; new advisories: source-map-js override, four devtools-only simple-git advisories ignored; `pnpm audit --prod` clean (6 ignored); `.tmp/v16` built | `4765743`, `fe6dbeb`, `b636a1a`, `60389e0` |
+| P11-0a | coordinator (K1; SH util skeletons), C34, C35, D14, D15, K3S (+ coordinator: `examples/plugins/*/harness-forge.d.ts` regenerated for 1.5.0, agent-pack contributions pin, the e2e slash-menu list gains `output-style`, PLUGINS / ARCHITECTURE `commandHooks` wording; decisions: trust item `changed?`, 409 `hook-blocked` `details.hook`, no route flag on `hooks.update`, the 17 phase-doc open points) | audit ok (130 paths; 34 C34 + 12 C35 compile-fix files accepted); frozen install ok (TypeScript 6.0.3 only, `yaml` 2.9.1, MCP SDK 1.32 root-dev only); 10912 tests, `git status` unchanged; build ok (`yaml` external, web entry +8 B gz vs v1.6); CSP 38/38; `pluginApiVersion` 1.5.0, 11 new routes answer 501 / 400 (18/18); e2e 156 passed on a fresh `.tmp/e2e`; `pnpm audit --prod` clean (6 ignored); v1.6 seed 20 chats / 136 messages in `.tmp/upgrade-v16` | (this commit) |

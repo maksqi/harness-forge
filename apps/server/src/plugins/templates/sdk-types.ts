@@ -47,6 +47,8 @@ declare module '@harness-forge/plugin-sdk' {
   export type ModelKind = 'chat' | 'embedding' | 'image' | 'audio' | 'transcription' | 'speech' | 'other'
   /** Aspect ratios of generated images. */
   export type ImageAspectRatio = '1:1' | '3:2' | '2:3' | '4:3' | '3:4' | '16:9' | '9:16'
+  /** What started a run: a request, the queue, finished background tasks, or a Stop hook (plugin API 1.5.0). */
+  export type RunOrigin = 'request' | 'queue' | 'task' | 'hook'
 
   // ---------- library values (ctx.ai) ----------
 
@@ -180,6 +182,42 @@ declare module '@harness-forge/plugin-sdk' {
     content: string
   }
 
+  /** An output style (plugin API 1.5.0); default, explanatory and learning are reserved. */
+  export interface DeclarativeOutputStyle {
+    /** ^[a-z][a-z0-9-]{0,63}$ */
+    name: string
+    /** What the style does (1..1024 characters; shown in the style menu). */
+    description: string
+    /** The style body (Markdown, at most 64 KB): first in the main agent's instructions while it is active. */
+    content: string
+    /** Keep the coding instructions (workspace rules, todo and task hints) while it is active; default false. */
+    keepCodingInstructions?: boolean
+  }
+
+  /** The eight command hook events (Claude Code names; plugin API 1.5.0). */
+  export type HookEventName
+    = | 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit' | 'Notification'
+      | 'Stop' | 'SubagentStop' | 'PreCompact' | 'SessionStart'
+
+  /** One command hook handler; "prompt" handlers are not supported. */
+  export interface CommandHookSpec {
+    type: 'command'
+    /** Run with sh in the chat's project folder (else a private folder), the event as JSON on stdin; 1..4096 chars. */
+    command: string
+    /** Seconds, 1..600; default 60. */
+    timeout?: number
+  }
+
+  /** A matcher group: matcher names the tools of PreToolUse / PostToolUse ("Bash|Edit", "mcp__github__*", "*"). */
+  export interface HookMatcherGroup {
+    /** Names, "|", "*" and ".*" only (no regular expressions); omitted: every tool. */
+    matcher?: string
+    hooks: CommandHookSpec[]
+  }
+
+  /** The Claude Code "hooks" object of contributes.hooks (at most 50 handlers; the plugin then requires trust). */
+  export type HooksConfig = Partial<Record<HookEventName, HookMatcherGroup[]>>
+
   export interface DeclarativeProvider {
     id: string
     name: string
@@ -233,6 +271,10 @@ declare module '@harness-forge/plugin-sdk' {
       agents?: DeclarativeAgent[]
       /** Plugin API 1.4.0. */
       skills?: DeclarativeSkill[]
+      /** Plugin API 1.5.0: command hooks (the plugin then requires trust). */
+      hooks?: HooksConfig
+      /** Plugin API 1.5.0. */
+      outputStyles?: DeclarativeOutputStyle[]
     }
   }
 
@@ -409,6 +451,20 @@ declare module '@harness-forge/plugin-sdk' {
     content: string
   }
 
+  // ---------- output styles (plugin API 1.5.0) ----------
+
+  /** How the agent writes its replies: the content goes first in the main agent's instructions while it is active. */
+  export interface OutputStyleDefinition {
+    /** ^[a-z][a-z0-9-]{0,63}$; default, explanatory and learning are reserved. */
+    name: string
+    /** What the style does (1..1024 characters). */
+    description: string
+    /** The style body (Markdown, at most 64 KB). */
+    content: string
+    /** Keep the coding instructions while the style is active; default false. */
+    keepCodingInstructions?: boolean
+  }
+
   // ---------- hooks ----------
 
   export interface HookChatContext {
@@ -434,11 +490,30 @@ declare module '@harness-forge/plugin-sdk' {
     'tool.approve': [HookChatContext & { tool: string, toolCallId: string, input: unknown }, { decision?: 'allow' | 'ask' | 'deny' }]
     /** A throw blocks the call. */
     'tool.before': [HookChatContext & { tool: string, toolCallId: string }, { input: unknown }]
-    'tool.after': [HookChatContext & { tool: string, toolCallId: string, input: unknown }, { output: unknown }]
+    /** context (plugin API 1.5.0): text the model reads at its next step. */
+    'tool.after': [HookChatContext & { tool: string, toolCallId: string, input: unknown }, { output: unknown, context?: string }]
     'message.completed': [
       HookChatContext & { message: UIMessage, usage: LanguageModelUsage, costUsd?: number, aborted: boolean },
       void,
     ]
+    /** Plugin API 1.5.0: a new user message, before it is stored; block refuses it, context is added to the turn. */
+    'prompt.submit': [
+      HookChatContext & { prompt: string, projectId: string | null, command?: string },
+      { block?: string, context?: string },
+    ]
+    /** Plugin API 1.5.0: the first turn of a chat (startup) or after a compaction (compact). */
+    'session.start': [HookChatContext & { source: 'startup' | 'compact', projectId: string | null }, { context?: string }]
+    /** Plugin API 1.5.0: a run is about to finish; continue (a reason) starts a follow-up turn (at most 5 in a row). */
+    'run.stop': [HookChatContext & { origin: RunOrigin, hookActive: boolean, projectId: string | null }, { continue?: string }]
+    /** Plugin API 1.5.0: a sub-agent is about to complete; continue gives it one more round (at most 2). */
+    'subagent.stop': [
+      HookChatContext & { type: string, toolCallId: string, report: string, hookActive: boolean },
+      { continue?: string },
+    ]
+    /** Plugin API 1.5.0: before every compaction (observe only). */
+    'compact.before': [HookChatContext & { trigger: 'manual' | 'auto', focus: string | null }, void]
+    /** Plugin API 1.5.0: the agent waits for an approval (observe only). */
+    'notification': [HookChatContext & { type: 'permission_prompt', message: string }, void]
   }
   export type HookName = keyof HookMap
   export type HookHandler<K extends HookName> = (...args: HookMap[K]) => unknown
@@ -552,6 +627,10 @@ declare module '@harness-forge/plugin-sdk' {
     /** Skills for the skill tool (plugin API 1.4.0). */
     skills: {
       register(d: SkillDefinition): Disposable
+    }
+    /** Output styles (plugin API 1.5.0). */
+    outputStyles: {
+      register(d: OutputStyleDefinition): Disposable
     }
     hooks: {
       /** Higher priority runs first (default 0). */

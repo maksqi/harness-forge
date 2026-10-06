@@ -48,6 +48,15 @@ import {
   dataSummarySchema,
 } from '../schemas/data.ts'
 import { fileRefSchema } from '../schemas/files.ts'
+import {
+  hookCreateSchema,
+  hookListSchema,
+  hookParamsSchema,
+  hookRunListSchema,
+  hooksQuerySchema,
+  hookUpdateSchema,
+  personalHookSchema,
+} from '../schemas/hooks.ts'
 import { lobeIconListSchema } from '../schemas/icons.ts'
 import { keyRotateBodySchema, keyRotationResultSchema, keyStatusSchema } from '../schemas/keys.ts'
 import {
@@ -100,6 +109,15 @@ import {
   scaffoldRequestSchema,
 } from '../schemas/plugins.ts'
 import { projectFileAttachBodySchema, projectFileSearchSchema, projectFilesQuerySchema } from '../schemas/project-files.ts'
+import {
+  projectMcpListSchema,
+  projectMcpServerParamsSchema,
+  projectMcpServerSchema,
+  projectMcpVariablesBodySchema,
+  projectTrustApproveBodySchema,
+  projectTrustItemParamsSchema,
+  projectTrustListSchema,
+} from '../schemas/project-trust.ts'
 import {
   projectBrowseQuerySchema,
   projectBrowseSchema,
@@ -180,6 +198,9 @@ export const API_MODULES = [
   'customizations',
   'memory',
   'chatTasks',
+  'hooks',
+  'projectTrust',
+  'projectMcp',
   'shares',
 ] as const
 export type ApiModule = (typeof API_MODULES)[number]
@@ -195,8 +216,8 @@ export interface ApiRouteDef {
   /**
    * Always requires fresh auth when a password is set. Conditional cases (`mcp.create` / `mcp.update` with stdio,
    * `pluginInstall.install` of a plugin that requires trust, `pluginDrafts.create` / `pluginDrafts.updateManifest`
-   * with a stdio MCP server, `plugins.reload` and `pluginFiles.write` / `pluginFiles.remove` of code plugins) are
-   * enforced by the server only.
+   * with a stdio MCP server, `plugins.reload` and `pluginFiles.write` / `pluginFiles.remove` of code plugins, and since
+   * Phase 11 `hooks.update` unless the body only turns the hook off) are enforced by the server only.
    */
   fresh?: true
   /** Path params. */
@@ -214,7 +235,7 @@ export interface ApiRouteDef {
   status?: 200 | 201 | 204
 }
 
-/** Every endpoint of API.md (109 routes), keyed `<module>.<action>`. */
+/** Every endpoint of API.md (120 routes), keyed `<module>.<action>`. */
 export const apiRoutes = {
   // health.ts
   'health.get': { module: 'health', method: 'GET', path: '/health', public: true, response: healthSchema },
@@ -384,6 +405,27 @@ export const apiRoutes = {
   // chat-tasks.ts (ADR-046): the background tasks of a chat, next to `/chat/:id/queue`; the chat's Stop never stops them
   'chatTasks.list': { module: 'chatTasks', method: 'GET', path: '/chat/:id/tasks', params: chatParamsSchema, response: backgroundTaskListSchema },
   'chatTasks.stop': { module: 'chatTasks', method: 'POST', path: '/chat/:id/tasks/:taskId/stop', params: chatTaskParamsSchema, response: backgroundTaskSchema },
+
+  // hooks.ts (ADR-048): the hook listing of a scope, the run log and the personal hooks; there is no `GET /hooks/:id`,
+  // so `/hooks/runs` never meets a param route of the same method. Creating a hook needs fresh auth; changing one too,
+  // unless the body only turns it off (`isHookTurnOff`, enforced by the route, so `hooks.update` has no `fresh` flag)
+  'hooks.list': { module: 'hooks', method: 'GET', path: '/hooks', query: hooksQuerySchema, response: hookListSchema },
+  'hooks.runs': { module: 'hooks', method: 'GET', path: '/hooks/runs', response: hookRunListSchema },
+  'hooks.create': { module: 'hooks', method: 'POST', path: '/hooks', fresh: true, body: hookCreateSchema, response: personalHookSchema, status: 201 },
+  'hooks.update': { module: 'hooks', method: 'PATCH', path: '/hooks/:id', params: hookParamsSchema, body: hookUpdateSchema, response: personalHookSchema },
+  'hooks.remove': { module: 'hooks', method: 'DELETE', path: '/hooks/:id', params: hookParamsSchema, response: 'empty' },
+
+  // project-trust.ts (ADR-049): the executable items of a project folder and their approvals (approve needs fresh auth;
+  // revoke does not); differs from `/projects/:id/files...` in its static third segment
+  'projectTrust.list': { module: 'projectTrust', method: 'GET', path: '/projects/:id/trust', params: projectParamsSchema, response: projectTrustListSchema },
+  'projectTrust.approve': { module: 'projectTrust', method: 'POST', path: '/projects/:id/trust', fresh: true, params: projectParamsSchema, body: projectTrustApproveBodySchema, response: projectTrustListSchema },
+  'projectTrust.revoke': { module: 'projectTrust', method: 'DELETE', path: '/projects/:id/trust/:sha256', params: projectTrustItemParamsSchema, response: projectTrustListSchema },
+
+  // project-mcp.ts (ADR-050): the servers of a project's `.mcp.json` and their variables (setting variables needs fresh
+  // auth: a value can change what an approved stdio server runs)
+  'projectMcp.list': { module: 'projectMcp', method: 'GET', path: '/projects/:id/mcp', params: projectParamsSchema, response: projectMcpListSchema },
+  'projectMcp.setVariables': { module: 'projectMcp', method: 'PUT', path: '/projects/:id/mcp/variables', fresh: true, params: projectParamsSchema, body: projectMcpVariablesBodySchema, response: projectMcpListSchema },
+  'projectMcp.reconnect': { module: 'projectMcp', method: 'POST', path: '/projects/:id/mcp/:serverId/reconnect', params: projectMcpServerParamsSchema, response: projectMcpServerSchema },
 
   // shares.ts (ADR-025): owner routes under `/shares`, public routes under `/share/:token`
   'shares.list': { module: 'shares', method: 'GET', path: '/shares', query: sharesQuerySchema, response: listResponseSchema(shareSummarySchema) },

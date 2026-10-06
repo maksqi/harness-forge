@@ -48,7 +48,7 @@ export function catalogEntryKey(entry: Pick<CustomizationEntry, 'kind' | 'source
 /** A valid catalog entry for tests: `source: 'project'`, `active`, a description, no diagnostics; `fields` win. */
 export function fakeCatalogEntry(kind: CustomizationKind, name: string, fields: Partial<CustomizationEntry> = {}): CustomizationEntry {
   const source: CustomizationSource = fields.source ?? 'project'
-  const folder = kind === 'skill' ? `skills/${name}/SKILL.md` : `${kind}s/${name}.md`
+  const folder = kind === 'skill' ? `skills/${name}/SKILL.md` : kind === 'style' ? `output-styles/${name}.md` : `${kind}s/${name}.md`
   return {
     kind,
     name,

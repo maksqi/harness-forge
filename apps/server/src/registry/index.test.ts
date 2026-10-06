@@ -339,9 +339,11 @@ describe('contributions, change notifications and owner removal', () => {
       hooks: ['chat.params', 'tool.after'],
       agents: [],
       skills: [],
+      commandHooks: 0,
+      outputStyles: [],
     })
     expect(registry.removeOwner('acme')).toBe(7)
-    expect(registry.contributions('acme')).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] })
+    expect(registry.contributions('acme')).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] })
     expect(registry.tools.get('other_tool')).toBeDefined()
     expect(changes.filter(change => change.includes(':removed:'))).toHaveLength(7)
   })

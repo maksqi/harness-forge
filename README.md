@@ -7,7 +7,14 @@ of a project folder on your server. By default, every tool call that can change 
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **Status:** v1.6 ("Agent customization"): your own sub-agent types, slash commands and skills, as Markdown files in
+> **Status:** v1.7 ("Hooks, project MCP and output styles") is **in progress** on `main`: Claude Code-format shell hooks
+> (eight events, such as before a tool call or when a reply ends) from Settings → Customize → Hooks, a project's
+> `.harness/` or `.claude/` settings files and plugins; project files that can run commands (hooks, `.mcp.json`
+> servers, commands with `` !`cmd` `` lines) run only after you approve each item, pinned by its hash; MCP servers from a
+> project's `.mcp.json` for that project's chats; output styles (Default, Explanatory, Learning or your own) per chat,
+> project or server; skills you run as `/name`; and `` !`cmd` `` / `@file` in command files (plugin API 1.5.0; guides:
+> [hooks and project MCP](docs/guides/hooks-and-project-mcp.md), [output styles](docs/guides/output-styles.md)).
+> v1.6 ("Agent customization") added your own sub-agent types, slash commands and skills, as Markdown files in
 > a project's `.harness/` (or `.claude/`) folder or as personal definitions on the new Settings → Customize page, plugins
 > that contribute agents and skills (plugin API 1.4.0), background agents that keep working after the reply and report
 > back by themselves, approved plans saved as project files, and `/remember` to keep a note for the agent (see
@@ -118,6 +125,20 @@ desktop app, and it starts in dark mode.
   - Approved plans saved as project files (Settings -> General -> Agent, off by default; listed in the changes panel and
     rewindable), and `/remember` to add a note to the project's `AGENTS.md` (or `CLAUDE.md`), to the project's
     instructions or to your custom instructions.
+- **Hooks, project MCP and output styles** (v1.7, in progress; guides: [hooks and project
+  MCP](docs/guides/hooks-and-project-mcp.md), [output styles](docs/guides/output-styles.md)):
+  - Hooks: shell commands in Claude Code's `hooks` format that run before or after tool calls, when you send a
+    message, when a reply or a sub-agent ends, before a compaction and when a chat starts; they can block a call, add
+    context, change a tool's input or make the agent continue (at most 5 times in a row). Personal hooks live in
+    Settings → Customize → Hooks (with an import of Claude Code settings JSON), project hooks in
+    `.harness/settings.json` or `.claude/settings.json`, plugin hooks in plugins (plugin API 1.5.0).
+  - Project trust: a project's hooks, `.mcp.json` servers and commands with shell lines run only after you approve each
+    one in a review dialog that shows the exact commands; editing the item or a script it runs needs a new approval.
+  - Project MCP servers from `.mcp.json`, for that project's chats only, with `${VARIABLES}` you store encrypted per
+    project (never read from the server's environment).
+  - Output styles: Default, Explanatory, Learning or your own Markdown styles, chosen per chat in the composer (or
+    `/output-style`), per project or as your default.
+  - Skills you run as `/name` from the slash menu, and `` !`cmd` `` / `@file` in command files.
 - **Images** (with your own keys):
   - Pick an image model (OpenAI GPT Image, xAI Grok Imagine) in the composer and describe a picture: 1 to 4 images
     per turn, an aspect ratio (Auto, 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16), and follow-ups such as "make it blue" that
@@ -285,12 +306,12 @@ Every variable is optional. [`.env.example`](.env.example) lists them with comme
 | `HF_PASSWORD` | unset | enables the login screen; overrides a password stored in Settings |
 | `HF_MASTER_KEY` | unset | base64 of 32 bytes used to encrypt secrets; otherwise `data/secret.key` is generated (mode 0600) |
 | `HF_MOCK_PROVIDER` | unset | `1` registers the dev-only `mock` provider (deterministic models for tests and demos) |
-| `HF_SAFE_MODE` | unset | `1` loads builtin plugins only (recovery when a plugin breaks the start) |
+| `HF_SAFE_MODE` | unset | `1` loads builtin plugins only (recovery when a plugin breaks the start); v1.7: also runs no command hook and starts no project MCP server |
 | `HF_PLUGIN_WATCH` | unset | `1` hot-reloads code plugins in the data directory when their files change (linked folders always reload) |
 | `HF_OFFLINE` | unset | `1` never downloads the models.dev catalog (the bundled snapshot is used) |
 | `HF_INSECURE` | unset | `1` allows a non-loopback bind without a password (only behind another authentication layer); it also disables the DNS-rebinding guard that restricts a password-less server to `localhost` host names |
 | `HF_WORKSPACE_ROOTS` | `<data dir>/workspaces` | folders that may hold project folders: a comma list of absolute paths; a relative path, `/`, a missing folder (or a file), the data directory or a folder inside it (other than `<data dir>/workspaces`) stops the start. See [using projects](docs/guides/using-projects.md) |
-| `HF_WORKSPACE_SHELL` | `1` | `0` removes the `shell` tool from every chat (the file tools keep working); no setting in the app can turn it back on |
+| `HF_WORKSPACE_SHELL` | `1` | `0` removes the `shell` tool from every chat (the file tools keep working); v1.7: also runs no command hook and no `` !`cmd` `` line of a command; no setting in the app can turn it back on |
 | `HF_TRUST_PROXY` | unset | reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` headers are trusted: a comma list of `loopback` (127.0.0.0/8, ::1), `private` (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7), IP addresses and CIDR ranges. `1`, `true`, `*` and other booleans, hop counts, `/0` ranges, `localhost` (write `loopback`) and unknown words stop the start with the format explained; `X-Forwarded-Host` is never used. Unset: `X-Forwarded-For` is ignored and `X-Forwarded-Proto` is honored from any peer (v1). See [Behind a reverse proxy](#behind-a-reverse-proxy) |
 | `HF_WEB_DIR` | `apps/web/.output/public` | directory of the built web app served in production |
 | `HF_API_TARGET` | `http://localhost:8787` | where `nuxt dev` proxies `/api` (development only) |
@@ -338,7 +359,8 @@ provider:
 
 The same plugin can be built without JSON in **Plugins** -> **New plugin** -> **Provider**. **Code** plugins are a
 single JavaScript or TypeScript file whose `setup(ctx)` registers tools, providers, commands, MCP servers, hooks and
-(plugin API 1.4.0) sub-agent types and skills.
+(plugin API 1.4.0) sub-agent types and skills (plugin API 1.5.0: output styles and the new hook events; declarative
+plugins can add command hooks and output styles too).
 Start one from a template (**New plugin** -> **Code plugin**), then edit it and use **Build & reload** in the browser.
 Or develop in your own editor with a linked folder that reloads on save.
 
@@ -346,7 +368,8 @@ Or develop in your own editor with a linked folder that reloads on save.
   [writing a code plugin](docs/guides/writing-a-code-plugin.md) (also tools that work on a project folder),
   [adding an MCP server](docs/guides/adding-an-mcp-server.md).
 - Examples that load as they are: [`examples/plugins/`](examples/plugins/) (LM Studio, Together AI, a dice-roller
-  tool, a TypeScript echo provider, the MCP "everything" server; v1.6: `agent-pack`, sub-agent types and skills).
+  tool, a TypeScript echo provider, the MCP "everything" server; v1.6: `agent-pack`, sub-agent types and skills; v1.7:
+  `hook-pack`, a command hook and an output style).
 - The full contract (manifest, `PluginContext`, hooks, lifecycle, install, trust): [`docs/PLUGINS.md`](docs/PLUGINS.md).
 
 ## Security
@@ -374,7 +397,8 @@ harness-forge is built for **one user** on their own machine or server.
   never stored and never logged; revoking the link or changing the master key ends it, and every response carries
   `X-Robots-Tag: noindex, nofollow`.
 - **Backups.** The Settings -> Data zip never contains API keys, the password, plugins, MCP servers, projects, shell
-  rules or checkpoints (v1.6: it does contain your personal agents, commands and skills, which hold no secrets).
+  rules or checkpoints (v1.6: it does contain your personal agents, commands and skills, which hold no secrets; v1.7:
+  and your output styles, but never hooks, project approvals or project MCP variables).
 - **Projects, files and the shell.** The workspace tools act on real files with the server's rights, and an approved
   shell command runs as the server's user; there is no sandbox inside harness-forge, so run it in Docker (or as a
   dedicated user) when the folders matter. Projects can only be created inside `HF_WORKSPACE_ROOTS`, never around the
@@ -402,6 +426,12 @@ harness-forge is built for **one user** on their own machine or server.
   writing to them always asks. Background agents never ask for approval, are capped (3 per chat, 10 per server, 30
   minutes each), keep their project busy (no rewind while they run) and are stopped with the chat, its project, Delete
   all data, a key rotation or the server; the chat's Stop leaves them running by design.
+- **Hooks and project files that run commands (v1.7, in progress).** A cloned repository never runs anything by
+  itself: its hooks, `.mcp.json` servers and commands with shell lines run only after you approve each item (with your
+  password), and the approval pins a hash of the item and of the scripts it names, checked again before every run.
+  Hooks run through the same shell runner as the `shell` tool (minimal environment, own process group, timeouts) and
+  can be turned off with the Run hooks switch, `HF_WORKSPACE_SHELL=0` or `HF_SAFE_MODE=1`; `.mcp.json` variables come
+  only from values you store per project. Hook commands, payloads and outputs are never logged at the `info` level.
 - **Microphone and media.** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
   `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled ("Voice
   input needs HTTPS or localhost"); use the TLS reverse proxy below. The page may use only its own microphone
@@ -505,7 +535,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 
 | Document | Contents |
 |---|---|
-| [`docs/guides/`](docs/guides/) | step-by-step guides: [using projects](docs/guides/using-projects.md), [agent features](docs/guides/agent-features.md) (v1.5: compaction, plan mode, todos, mentions, steering, sub-agents), [customizing the agent](docs/guides/customizing-agents.md) (v1.6: custom agents, commands and skills, background agents, plan files, `/remember`), [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) |
+| [`docs/guides/`](docs/guides/) | step-by-step guides: [using projects](docs/guides/using-projects.md), [agent features](docs/guides/agent-features.md) (v1.5: compaction, plan mode, todos, mentions, steering, sub-agents), [customizing the agent](docs/guides/customizing-agents.md) (v1.6: custom agents, commands and skills, background agents, plan files, `/remember`), [hooks and project MCP](docs/guides/hooks-and-project-mcp.md) (v1.7: hooks, project approvals, `.mcp.json`), [output styles](docs/guides/output-styles.md) (v1.7), [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) |
 | [`examples/plugins/`](examples/plugins/) | example plugins with READMEs and a test that loads them (v1.6 adds `agent-pack`) |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | components, flows, data directory, database, security model, topology |
 | [`docs/API.md`](docs/API.md) | every HTTP endpoint, the error envelope, the chat stream protocol, server events |
@@ -514,7 +544,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | [`docs/UI.md`](docs/UI.md) | layout, design tokens, components, routes, shortcuts, test ids |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | phases, tasks and progress |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture decision records and the contract seed |
-| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md), [9 v1.5](docs/phases/phase-9-v1-5.md), [10 v1.6](docs/phases/phase-10-v1-6.md) |
+| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md), [9 v1.5](docs/phases/phase-9-v1-5.md), [10 v1.6](docs/phases/phase-10-v1-6.md), [11 v1.7](docs/phases/phase-11-v1-7.md) |
 | [`AGENT.md`](AGENT.md) | rules for AI agents working on this repository |
 
 ## Development

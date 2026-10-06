@@ -120,7 +120,7 @@ describe('customize built-in commands and row details (W10.8)', () => {
       commandSummary({ name: 'compact', description: 'Summarize the conversation', source: 'harness', pluginId: 'core-agent' }),
       commandSummary(),
     ])
-    expect(rows.map(row => row.name)).toEqual(['compact', 'effort', 'help', 'mode', 'model', 'new', 'remember'])
+    expect(rows.map(row => row.name)).toEqual(['compact', 'effort', 'help', 'mode', 'model', 'new', 'output-style', 'remember'])
     expect(rows[0]).toMatchObject({ kind: 'command', source: 'builtin', state: 'active', description: 'Summarize the conversation' })
     expect(rows.find(row => row.name === 'remember')?.description).toBe('Save a note to your instructions')
     expect(hasRowMenu(rows[0]!)).toBe(false)

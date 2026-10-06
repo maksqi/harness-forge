@@ -21,6 +21,12 @@ export const SAMPLE_CUSTOMIZATION_ID = 'cus_sample0000000001'
 export const SAMPLE_BACKGROUND_TASK_ID = 'bgt_sample0000000001'
 /** An agent definition file (Phase 10, ADR-044): frontmatter (Claude Code tool names) and the instructions. */
 export const SAMPLE_AGENT_MARKDOWN = '---\nname: reviewer\ndescription: Reviews a diff and reports bugs\ntools: Read, Grep\n---\nReview the diff. Report each bug with its file and line.\n'
+/** A personal hook (Phase 11, ADR-048). */
+export const SAMPLE_HOOK_ID = 'hok_sample0000000001'
+/** A trust hash of a project item (Phase 11, ADR-049). */
+export const SAMPLE_TRUST_SHA256 = 'a'.repeat(64)
+/** A project `.mcp.json` server id (Phase 11, ADR-050). */
+export const SAMPLE_PROJECT_MCP_SERVER_ID = 'memory'
 /** A project-relative path for the change samples (no project folder is ever touched). */
 export const SAMPLE_CHANGE_PATH = 'src/index.ts'
 /** A folder that does not exist on any test host: the project samples never touch a real folder. */
@@ -265,6 +271,20 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
 
   'chatTasks.list': { params: { id: SAMPLE_CHAT_ID } },
   'chatTasks.stop': { params: { id: SAMPLE_CHAT_ID, taskId: SAMPLE_BACKGROUND_TASK_ID } },
+
+  'hooks.list': { query: { projectId: SAMPLE_PROJECT_ID } },
+  'hooks.runs': {},
+  'hooks.create': { body: { event: 'PostToolUse', matcher: 'Write|Edit', command: 'sh .claude/hooks/format.sh', timeout: 30 } },
+  'hooks.update': { params: { id: SAMPLE_HOOK_ID }, body: { command: 'sh .claude/hooks/lint.sh' } },
+  'hooks.remove': { params: { id: SAMPLE_HOOK_ID } },
+
+  'projectTrust.list': { params: { id: SAMPLE_PROJECT_ID } },
+  'projectTrust.approve': { params: { id: SAMPLE_PROJECT_ID }, body: { items: [{ kind: 'hook', sha256: SAMPLE_TRUST_SHA256 }] } },
+  'projectTrust.revoke': { params: { id: SAMPLE_PROJECT_ID, sha256: SAMPLE_TRUST_SHA256 } },
+
+  'projectMcp.list': { params: { id: SAMPLE_PROJECT_ID } },
+  'projectMcp.setVariables': { params: { id: SAMPLE_PROJECT_ID }, body: { values: { MCP_TOKEN: 'sample-token', MCP_PORT: null } } },
+  'projectMcp.reconnect': { params: { id: SAMPLE_PROJECT_ID, serverId: SAMPLE_PROJECT_MCP_SERVER_ID } },
 
   'shares.list': { query: { chatId: SAMPLE_CHAT_ID } },
   'shares.create': { body: { chatId: SAMPLE_CHAT_ID, title: 'Sample share', options: { reasoning: true }, expiresAt: null } },

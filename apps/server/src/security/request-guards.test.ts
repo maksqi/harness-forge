@@ -224,6 +224,8 @@ describe('sEC-B2: GET and HEAD never change stored state', () => {
       'changes.git': { params: { id: chatId } },
       'chatQueue.list': { params: { id: chatId } },
       'chatTasks.list': { params: { id: chatId } },
+      // Phase 11: the hook listing without a project (the run log takes no input; the project routes use the samples).
+      'hooks.list': {},
     }
     const before = await storedState(t)
     // The baseline really holds state for the routes to touch.

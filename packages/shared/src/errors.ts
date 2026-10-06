@@ -1,4 +1,5 @@
 // Error envelope, error codes and the `HarnessError` class (API.md section 2).
+import type { HookData } from './chat.ts'
 import { z } from 'zod'
 
 // ---------- codes and actions ----------
@@ -104,12 +105,39 @@ export type ValidationErrorDetails = z.infer<typeof validationErrorDetailsSchema
  * master key comes from `HF_MASTER_KEY` and can only be rotated offline with the `rotate-key` CLI (ADR-034);
  * `key-mismatch`: the master key does not match the stored key check, so a rotation would lose the secrets (ADR-034);
  * `run-idle`: a message was queued for a chat with no active run and no pending approval (send it with `POST /chat`
- * instead; ADR-042); `queue-full`: the chat already has `LIMITS.queueItemsMax` queued messages (ADR-042).
+ * instead; ADR-042); `queue-full`: the chat already has `LIMITS.queueItemsMax` queued messages (ADR-042);
+ * `hook-blocked` (Phase 11, ADR-048): a `UserPromptSubmit` or `SessionStart` hook refused the turn (exit 2, `decision:
+ * block` or `continue: false`; the message is the hook's reason) and nothing was stored; `untrusted` (Phase 11,
+ * ADR-049 / ADR-052): a project command file with `` !`cmd` `` spans whose trust hash is not approved for the project.
  */
-export const conflictReasonSchema = z.enum(['run-active', 'exists', 'stale', 'disabled', 'env-password', 'insecure-bind', 'busy', 'only-version', 'env-key', 'key-mismatch', 'run-idle', 'queue-full'])
+export const conflictReasonSchema = z.enum([
+  'run-active',
+  'exists',
+  'stale',
+  'disabled',
+  'env-password',
+  'insecure-bind',
+  'busy',
+  'only-version',
+  'env-key',
+  'key-mismatch',
+  'run-idle',
+  'queue-full',
+  'hook-blocked',
+  'untrusted',
+])
 export type ConflictReason = z.infer<typeof conflictReasonSchema>
 
-export const conflictDetailsSchema = z.object({ reason: conflictReasonSchema, chatId: z.string().optional() })
+export const conflictDetailsSchema = z.object({
+  reason: conflictReasonSchema,
+  chatId: z.string().optional(),
+  /**
+   * `hook-blocked` only (Phase 11, ADR-048): the record of the blocking event (`HookData`, the `data-hook` shape of
+   * `hookDataSchema` in `chat.ts`; checked here only as an object, since `chat.ts` imports this module). No other reason
+   * sets it.
+   */
+  hook: z.custom<HookData>(value => typeof value === 'object' && value !== null && !Array.isArray(value), 'Expected a hook record.').optional(),
+})
 export type ConflictDetails = z.infer<typeof conflictDetailsSchema>
 
 export const payloadTooLargeDetailsSchema = z.object({ limitBytes: z.int().min(0) })

@@ -127,7 +127,7 @@ describe('plugin context', () => {
     expect(registry.tools.get('ctx_tool')).toBeUndefined()
 
     runtime.disposeContributions()
-    expect(registry.contributions('ctx-test')).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] })
+    expect(registry.contributions('ctx-test')).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] })
     expect(runtime.isDisposed).toBe(true)
     expect(() => ctx.commands.register({ name: 'late', description: 'Late', template: 'x' })).toThrow(expect.objectContaining({ code: 'plugin_error' }))
     await expect(ctx.storage.get('x')).rejects.toMatchObject({ code: 'plugin_error' })

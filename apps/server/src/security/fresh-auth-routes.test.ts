@@ -3,7 +3,8 @@
 // must cover every route flagged `fresh` in the shared route table plus the conditional cases the server enforces
 // (installing / trusting code or stdio-MCP plugins, scaffold, code-file writes and deletes, build, reload of code
 // plugins, stdio MCP create / update, drafts that declare a stdio server, password change, adding a project, rotating
-// the master key). Each case runs twice on a
+// the master key; Phase 11: creating a personal hook, changing one unless the body only turns it off, approving project
+// items, setting project MCP variables). Each case runs twice on a
 // fresh app: with a stale session (refused, no side effect), then with a fresh one (succeeds). Negative controls show
 // that the same routes stay usable with a stale session when nothing runs code.
 import type { ApiRouteDef, ApiRouteKey } from '@harness-forge/shared'
@@ -44,6 +45,8 @@ const CONDITIONAL_FRESH_KEYS: readonly ApiRouteKey[] = [
   'mcp.update',
   'pluginDrafts.create',
   'pluginDrafts.updateManifest',
+  // Phase 11 (ADR-048): unless the body only turns the hook off (`{ enabled: false }`).
+  'hooks.update',
 ]
 const ALWAYS_FRESH_KEYS = API_ROUTE_KEYS.filter(key => (apiRoutes[key] as ApiRouteDef).fresh === true)
 
@@ -306,6 +309,39 @@ const CASES: FreshCase[] = [
       expect(existsSync(`${a.t.env.paths.secretKey}.next`)).toBe(false)
     },
   },
+  {
+    // ADR-048: a personal hook runs a shell command at every matching event.
+    name: 'creating a personal hook',
+    key: 'hooks.create',
+    attempt: { method: 'POST', path: '/api/hooks', json: { event: 'PostToolUse', command: 'sh .claude/hooks/format.sh', timeout: 30 } },
+    ok: 201,
+    unchanged: async () => {},
+  },
+  {
+    // ADR-048: a new command changes what runs (turning a hook off needs no fresh auth, see the negative controls). The
+    // unknown hook proves the request reached the route.
+    name: 'changing the command of a personal hook (an unknown hook proves the request reached the route)',
+    key: 'hooks.update',
+    attempt: { method: 'PATCH', path: '/api/hooks/hok_fresh00000000001', json: { command: 'sh .claude/hooks/lint.sh' } },
+    ok: 404,
+    unchanged: async () => {},
+  },
+  {
+    // ADR-049: an approval lets repository content run. The unknown project proves the request reached the route.
+    name: 'approving project items (an unknown project proves the request reached the route)',
+    key: 'projectTrust.approve',
+    attempt: { method: 'POST', path: '/api/projects/prj_fresh00000000001/trust', json: { items: [{ kind: 'hook', sha256: 'a'.repeat(64) }] } },
+    ok: 404,
+    unchanged: async () => {},
+  },
+  {
+    // ADR-050: a variable can change what an approved stdio server runs.
+    name: 'setting project MCP variables (an unknown project proves the request reached the route)',
+    key: 'projectMcp.setVariables',
+    attempt: { method: 'PUT', path: '/api/projects/prj_fresh00000000001/mcp/variables', json: { values: { MCP_TOKEN: 'fresh-token' } } },
+    ok: 404,
+    unchanged: async () => {},
+  },
 ]
 
 async function cookie(a: InstallTestApp, authAgeMs: number): Promise<string> {
@@ -349,10 +385,13 @@ describe('sEC-A5 fresh auth table', () => {
     expect([...ALWAYS_FRESH_KEYS].sort()).toEqual([
       'auth.setPassword',
       'data.deleteAll',
+      'hooks.create',
       'keys.rotate',
       'pluginFiles.build',
       'pluginFiles.scaffold',
       'pluginInstall.trust',
+      'projectMcp.setVariables',
+      'projectTrust.approve',
       'projects.create',
       'shares.create',
       'shares.update',
@@ -444,6 +483,34 @@ describe('sEC-A5 negative controls: nothing runs code, a stale session is enough
       expect([401, 403], `${key}: ${text}`).not.toContain(response.status)
       if (stubRouteKeys().has(key))
         expect(response.status, key).toBe(501)
+    }
+  })
+
+  it('the hook, project trust and project MCP routes (Phase 11, ADR-048 … ADR-050) other than the fresh ones take a stale session', async () => {
+    const a = await passwordApp()
+    const stale = await cookie(a, FRESH_AUTH_WINDOW_MS + 60_000)
+    const phase11 = API_ROUTE_KEYS.filter(key => ['hooks', 'projectTrust', 'projectMcp'].includes(apiRoutes[key].module))
+    expect(phase11).toHaveLength(11)
+    const keys = phase11.filter(key => (apiRoutes[key] as ApiRouteDef).fresh !== true && key !== 'hooks.update')
+    expect(keys).toEqual(['hooks.list', 'hooks.runs', 'hooks.remove', 'projectTrust.list', 'projectTrust.revoke', 'projectMcp.list', 'projectMcp.reconnect'])
+    for (const key of keys) {
+      const { path, init } = sampleRequest(key, { headers: { cookie: stale } })
+      const response = await a.t.request(path, init)
+      const text = await response.text()
+      // The sample project, hook and server do not exist: the request reaches the route (501 while stubbed, else 404 or
+      // 200), never the fresh-auth refusal.
+      expect([401, 403], `${key}: ${text}`).not.toContain(response.status)
+      if (stubRouteKeys().has(key))
+        expect(response.status, key).toBe(501)
+    }
+    // Turning a hook off needs no fresh auth (any other change does: the fresh auth table above).
+    const off = await send(a, { method: 'PATCH', path: '/api/hooks/hok_stale00000000001', json: { enabled: false } }, stale)
+    expect([401, 403], await off.text()).not.toContain(off.status)
+    if (stubRouteKeys().has('hooks.update'))
+      expect(off.status).toBe(501)
+    for (const json of [{ enabled: true }, { enabled: false, timeout: 5 }]) {
+      const refused = await send(a, { method: 'PATCH', path: '/api/hooks/hok_stale00000000001', json }, stale)
+      expect(refused.status, JSON.stringify(json)).toBe(403)
     }
   })
 })

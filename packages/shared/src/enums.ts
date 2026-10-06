@@ -7,6 +7,9 @@ import {
   DEFINITION_DIAGNOSTIC_CODES,
   DEFINITION_DIAGNOSTIC_LEVELS,
 } from './util/definitions.ts'
+import { HOOK_DIAGNOSTIC_CODES, HOOK_EVENTS, HOOK_SOURCES } from './util/hooks.ts'
+import { MCP_JSON_TRANSPORTS } from './util/mcp-config.ts'
+import { TRUST_ITEM_KINDS } from './util/trust.ts'
 
 /**
  * Chat permission mode (UI label: permission mode). Default `ask`. `edits` ("Accept edits", Phase 7, ADR-032): safe
@@ -139,10 +142,12 @@ export type TaskType = z.infer<typeof taskTypeSchema>
 
 /**
  * What started a run (Phase 9, ADR-042; `run.started.origin`): a `POST /chat` request, the server with the first queued
- * message (`queue`), or, since Phase 10 (ADR-046), the server with the results of finished background tasks (`task`).
- * Also the origin of the run that launched a background task (`BackgroundTask.origin`).
+ * message (`queue`), since Phase 10 (ADR-046) the server with the results of finished background tasks (`task`), and
+ * since Phase 11 (ADR-048) the server after a `Stop` hook blocked the end of a run (`hook`: a follow-up turn from a
+ * user-role carrier message that holds only `data-hook` parts). Also the origin of the run that launched a background
+ * task (`BackgroundTask.origin`).
  */
-export const runOriginSchema = z.enum(['request', 'queue', 'task'])
+export const runOriginSchema = z.enum(['request', 'queue', 'task', 'hook'])
 export type RunOrigin = z.infer<typeof runOriginSchema>
 
 // ---------- agent customization (Phase 10) ----------
@@ -200,6 +205,84 @@ export const definitionDiagnosticSchema = z.object({
   kind: customizationKindSchema.optional(),
   name: z.string().max(256).optional(),
 })
+
+// ---------- hooks, trust, project MCP and output styles (Phase 11) ----------
+
+/**
+ * The eight command hook events (ADR-048; Claude Code names, `HOOK_EVENTS` of `util/hooks.ts`, type `HookEvent`):
+ * `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionStart`.
+ */
+export const hookEventSchema = z.enum(HOOK_EVENTS)
+
+/**
+ * Where a command hook comes from (ADR-048; `HOOK_SOURCES`, type `HookSource`): a personal hook (table `hooks`), a
+ * project settings file (`.harness` / `.claude` `settings{,.local}.json`, only after approval, ADR-049) or a plugin.
+ */
+export const hookSourceSchema = z.enum(HOOK_SOURCES)
+
+/** A command hook (a shell command run through the workspace shell runner) or a plugin code hook (`ctx.hooks.on`). */
+export const hookKindSchema = z.enum(['command', 'code'])
+export type HookKind = z.infer<typeof hookKindSchema>
+
+/**
+ * State of a hook in `GET /hooks` (ADR-048): `active` (runs), `pending` (a project hook whose hash is not approved,
+ * ADR-049), `off` (a personal hook turned off), `invalid` (an `error` diagnostic, e.g. a regex-like matcher: never runs)
+ * or `blocked` (a kill switch is on: the setting `hooksEnabled`, `HF_WORKSPACE_SHELL=0` or `HF_SAFE_MODE`).
+ */
+export const hookStateSchema = z.enum(['active', 'pending', 'off', 'invalid', 'blocked'])
+export type HookState = z.infer<typeof hookStateSchema>
+
+/**
+ * What the hooks of one event did (`data-hook` `outcome`, the run log; ADR-048; named apart from the `HookOutcome`
+ * reading of one process in `util/hooks.ts`): `context` (model-visible context
+ * added), `denied` (`PreToolUse` deny or exit 2: the tool call was refused), `asked` (`PreToolUse` ask: an approval card),
+ * `allowed` (`PreToolUse` allow: the card was skipped), `rewritten` (`PreToolUse` `updatedInput`), `blocked` (a block
+ * with a reason: `PostToolUse` feedback, `UserPromptSubmit` / `SessionStart` refusal, a `SubagentStop` continuation),
+ * `continued` (a `Stop` hook blocked the end of the run: a follow-up turn), `stopped` (`continue: false`) or `error` (a
+ * non-blocking failure: another exit code, a timeout, invalid output).
+ */
+export const hookRecordOutcomeSchema = z.enum(['context', 'denied', 'asked', 'allowed', 'rewritten', 'blocked', 'continued', 'stopped', 'error'])
+export type HookRecordOutcome = z.infer<typeof hookRecordOutcomeSchema>
+
+/** Code of a hook configuration diagnostic (`HOOK_DIAGNOSTIC_CODES`, type `HookDiagnosticCode`). */
+export const hookDiagnosticCodeSchema = z.enum(HOOK_DIAGNOSTIC_CODES)
+
+/**
+ * Kind of an executable item of a project folder (ADR-049; `TRUST_ITEM_KINDS`, type `TrustItemKind`): a hook of its
+ * settings files, a server of its `.mcp.json`, or a command file with `` !`cmd` `` spans.
+ */
+export const trustItemKindSchema = z.enum(TRUST_ITEM_KINDS)
+
+/** Whether the current sha256 of a project item is in the project's approved set (ADR-049). */
+export const trustStateSchema = z.enum(['approved', 'pending'])
+export type TrustState = z.infer<typeof trustStateSchema>
+
+/**
+ * A review warning of a project item (ADR-049, ADR-050): `private-network` (an http / sse server on a loopback or private
+ * address), `referenced-file-missing` (a script file the command names is missing, unreadable or larger than 1 MiB) or
+ * `runs-repository-code` (the command runs code of the repository, e.g. `npm test`, whose files are not pinned).
+ */
+export const trustWarningSchema = z.enum(['private-network', 'referenced-file-missing', 'runs-repository-code'])
+export type TrustWarning = z.infer<typeof trustWarningSchema>
+
+/** Transport of a project `.mcp.json` server (`MCP_JSON_TRANSPORTS`, type `McpJsonTransport`; ADR-050). */
+export const projectMcpTransportSchema = z.enum(MCP_JSON_TRANSPORTS)
+
+/**
+ * State of a project MCP server (ADR-050): `pending` (not approved), `needs-variables` (approved, a `${VAR}` without a
+ * value or a default), `idle` (approved and ready, not started: servers start lazily for the first run of a project
+ * chat, and stop after 10 idle minutes), `connecting`, `connected`, `error` (`error` says why) or `disabled`
+ * (`HF_SAFE_MODE`, or the project folder is unavailable).
+ */
+export const projectMcpStateSchema = z.enum(['pending', 'needs-variables', 'idle', 'connecting', 'connected', 'error', 'disabled'])
+export type ProjectMcpState = z.infer<typeof projectMcpStateSchema>
+
+/**
+ * What a slash name invokes (Phase 11, ADR-052; `CommandSummary.kind`, `metadata.command.kind`): a command, or a
+ * user-invocable skill (`/name [arguments]`; a command wins a name over a skill).
+ */
+export const invocationKindSchema = z.enum(['command', 'skill'])
+export type InvocationKind = z.infer<typeof invocationKindSchema>
 
 // ---------- global settings enums ----------
 

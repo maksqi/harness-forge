@@ -19,7 +19,7 @@ import {
   sortPluginsByName,
 } from './plugin-display'
 
-const none = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] }
+const none = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] }
 
 describe('plugin display rules', () => {
   it('labels every source like the source badge of docs/UI.md 8.1', () => {

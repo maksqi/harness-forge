@@ -1,6 +1,6 @@
 // Sample code plugin (not exported from the package entry): registers a provider (with an image model, plugin API
-// 1.1.0), a tool, a command, a hook, an agent and a skill (plugin API 1.4.0) using only `ctx` (runtime libraries come
-// from `ctx.ai`). It doubles as a type
+// 1.1.0), a tool, a command, a hook, an agent and a skill (plugin API 1.4.0) and an output style (plugin API 1.5.0)
+// using only `ctx` (runtime libraries come from `ctx.ai`). It doubles as a type
 // test of the SDK: it must typecheck without casts. A real plugin would live in `data/plugins/sample-kit/` with this
 // manifest as `plugin.json` and `"main": "index.ts"`.
 import type { PluginManifest, ProviderRuntime, ReasoningLevel, ToolDefinition } from '../index.ts'
@@ -162,6 +162,14 @@ export default definePlugin({
       name: 'sample-release-notes',
       description: 'How to write the release notes of this project.',
       content: '# Release notes\n\n1. List the user-facing changes.\n2. Group them by area.',
+    })
+
+    // Plugin API 1.5.0: an output style (its content goes first in the main agent's instructions while it is active).
+    ctx.outputStyles.register({
+      name: 'sample-terse',
+      description: 'Short answers without preamble.',
+      content: 'Answer in at most three sentences. Skip greetings and summaries.',
+      keepCodingInstructions: true,
     })
   },
 })

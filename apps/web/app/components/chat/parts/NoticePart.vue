@@ -5,7 +5,7 @@
 // it. Unknown codes fall back to the level icon.
 import type { NoticeCode, NoticeData } from '@harness-forge/shared'
 import type { Component } from 'vue'
-import { BanIcon, CpuIcon, FolderXIcon, FoldVerticalIcon, ImageOffIcon, InfoIcon, PaperclipIcon, TriangleAlertIcon, WrenchIcon } from '@lucide/vue'
+import { BanIcon, CpuIcon, FolderXIcon, FoldVerticalIcon, ImageOffIcon, InfoIcon, PaletteIcon, PaperclipIcon, RepeatIcon, ServerOffIcon, TriangleAlertIcon, WrenchIcon } from '@lucide/vue'
 import { computed } from 'vue'
 import { cn } from '@/lib/utils'
 
@@ -22,6 +22,11 @@ const CODE_ICONS: Record<NoticeCode, Component> = {
   'compaction-failed': FoldVerticalIcon,
   // Phase 10 (ADR-045): the model of a command file cannot run, so the chat model answered.
   'command-model-unavailable': CpuIcon,
+  // Phase 11: the output style is unknown (ADR-051), Stop hooks hit their cap (ADR-048), a project MCP server was not
+  // ready (ADR-050).
+  'output-style-unavailable': PaletteIcon,
+  'hook-continuation-limit': RepeatIcon,
+  'project-mcp-unavailable': ServerOffIcon,
 }
 
 const icon = computed<Component>(() => (CODE_ICONS as Partial<Record<string, Component>>)[props.notice.code]

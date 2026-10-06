@@ -35,6 +35,8 @@ describe('slash menu items', () => {
       ['mode', 'Set permission mode'],
       ['help', 'Show shortcuts and commands'],
       ['remember', 'Save a note to your instructions'],
+      // Phase 11 (ADR-051).
+      ['output-style', 'Set the output style'],
     ])
   })
 
@@ -46,7 +48,7 @@ describe('slash menu items', () => {
   })
 
   it('filters by prefix, case-insensitively, App group first', () => {
-    expect(filterSlashItems(items, '').map(item => item.name)).toEqual(['new', 'model', 'effort', 'mode', 'help', 'remember', 'summarize', 'model-card'])
+    expect(filterSlashItems(items, '').map(item => item.name)).toEqual(['new', 'model', 'effort', 'mode', 'help', 'remember', 'output-style', 'summarize', 'model-card'])
     expect(filterSlashItems(items, 'mo').map(item => `${item.kind}:${item.name}`)).toEqual(['client:model', 'client:mode', 'server:model-card'])
     expect(filterSlashItems(items, 'MODEL').map(item => item.name)).toEqual(['model', 'model-card'])
     expect(filterSlashItems(items, 'sum').map(item => item.name)).toEqual(['summarize'])
@@ -211,6 +213,7 @@ describe('groups, argument hints and /remember (Phase 10)', () => {
       'app:mode',
       'app:help',
       'app:remember',
+      'app:output-style',
       'app:compact',
       'project:release',
       'project:review',

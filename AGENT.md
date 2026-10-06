@@ -114,6 +114,33 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   project busy (409 `run-active`). Plan files (`planFiles`, `planDirectory`) and `/remember` (`POST /memory`) write
   through the journal. New ids `cus_`, `bgt_`; SSE `task.changed`, `customization.changed`; migration
   `0007_customizations`.
+- **Plugin API 1.5.0** (Phase 11, additive): `contributes.hooks` (Claude Code `hooks` format; a plugin with command
+  hooks or `!` spans in a command template needs a trust pin like a stdio MCP declaration), `contributes.outputStyles`,
+  `ctx.outputStyles.register` (`OutputStyleDefinition { name, description, content, keepCodingInstructions? }`), code
+  hook events `prompt.submit`, `session.start`, `run.stop`, `subagent.stop`, `compact.before`, `notification`
+  and `tool.after` output `context?`; registry `styles`, `hookCommands`. The template mirror follows.
+- **Hooks, trust and project MCP** (Phase 11, ADR-048 … ADR-052): command hooks (eight Claude Code events) come from
+  personal rows (table `hooks`, `hok_` ids), the `hooks` key of a project's `.harness` / `.claude`
+  `settings{,.local}.json` and plugins; they are parsed, matched (a safe subset: names, `|`, `*` / `.*`, never a
+  `RegExp` from input) and read **only** by `packages/shared/src/util/{hooks,trust,mcp-config,command-template,
+  output-styles}.ts`; they run **only** through `runShellCommand` (`apps/server/src/workspace/shell.ts`, `input` /
+  `env` options; still the only shell-string spawn) with a stdin JSON payload (Claude Code fields + `harness`), in the
+  project folder (else `<dataDir>/hooks`). Every executable project item (project hooks, `.mcp.json` servers incl.
+  http / sse, command files with `` !`cmd` `` spans) runs only when the sha256 of `trustHashInput(item)` (the item
+  **and** the script files it names) is approved for the project (table `project_trust`, fresh auth, never in
+  backups) and is re-checked right before every spawn. `.mcp.json` variables (`${VAR}`, `${VAR:-default}`) come only
+  from encrypted per-project values (secret scope `project:<projectId>`), **never from `process.env`**. Hook output
+  is a persisted `data-hook` part (`hev_` ids, model view through `splitHooks` in
+  `packages/shared/src/util/agent-state.ts`); a blocking Stop hook starts a server turn with `origin: 'hook'` (≤ 5 in a
+  row). Kill switches: setting `hooksEnabled`, `HF_WORKSPACE_SHELL=0` (no shell string at all), `HF_SAFE_MODE` (no
+  command hooks, no project MCP). Output styles are the catalog kind `style` (`output-styles` folders, builtins
+  `default` / `explanatory` / `learning`; chat ?? project ?? global `outputStyle`). Migration `0008_hooks_trust`;
+  SSE `hooks.changed`, `project-trust.changed`, `project-mcp.changed`; mock `mock:hooks`.
+- **Never create `.claude/`, `.harness/` or `.mcp.json` at the repository root**: they would configure the
+  coordinator's own Claude Code session. Test fixtures and seeds live in temp folders or under `.tmp/`.
+- **vue-tsc 3.3.12** (vuejs/language-tools#6240): a `//` inside a component prop value in a template (a URL literal)
+  corrupts the generated code; put URLs into script constants (`apps/web/app/components/template-literals.test.ts`
+  guards it).
 - **@ai-sdk/vue 4**: use the `useChat()` composable (the `Chat` class is deprecated); `DefaultChatTransport` is
   imported from `ai`.
 - **MCP**: `createMCPClient` from `@ai-sdk/mcp`; stdio transport from `@ai-sdk/mcp/mcp-stdio`.
@@ -195,8 +222,8 @@ data/                                          runtime data (gitignored)
 `HF_PASSWORD`, `HF_MASTER_KEY`, `HF_MOCK_PROVIDER`, `HF_SAFE_MODE`, `HF_PLUGIN_WATCH`, `HF_OFFLINE`, `HF_INSECURE`,
 `HF_TRUST_PROXY` (trusted reverse proxies, ADR-026), `HF_API_TARGET` (web dev proxy target), `HF_WORKSPACE_ROOTS`
 (folders that may hold projects, default `<dataDir>/workspaces`, ADR-031), `HF_WORKSPACE_SHELL` (`0` removes the
-`shell` tool, ADR-033), plus provider key fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). CLI-only:
-`HF_NEW_MASTER_KEY` (read by `rotate-key`, ADR-034). Test-only: `HF_LIVE`, `HF_LIVE_PROVIDERS`,
+`shell` tool, ADR-033, and since Phase 11 runs no command hook and no command `!` span), plus provider key
+fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). CLI-only: `HF_NEW_MASTER_KEY` (read by `rotate-key`, ADR-034). Test-only: `HF_LIVE`, `HF_LIVE_PROVIDERS`,
 `HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`, `HF_TEST_FILE_SWEEP_DELAY_MS`
 (only with `HF_MOCK_PROVIDER=1`, ADR-039). See `.env.example` and
 `docs/DECISIONS.md` (Contract seed).
@@ -247,6 +274,14 @@ server, use your slot `k` from the task prompt: `HF_PORT=879k HF_DATA_DIR=.tmp/<
   root test ids of the P10-0b stub components, the `customizations` and `background-tasks` stores, the
   `AGENT_TASK_CONTEXT` injection key, the `useChatSession` additions, the Customize settings route and its nav entry and
   the Phase 10 test ids (see `docs/phases/phase-10-v1-6.md` "FREEZE in Phase 10").
+  Added in Phase 11 (after Gate P11-0b): `services/{hooks,project-config,project-trust}/types.ts`, `mcp/types.ts`, the
+  P11-0b versions of `types.ts`, `chat/types.ts`, `registry/types.ts` and the deps start / stop order,
+  `chat/{pipeline,tools,approval,steps,model-history,agent-scope,hooks}.ts`, the signatures of the P11-0b chat stubs,
+  `workspace/shell.ts`, `mcp/stdio-transport.ts`, `builtin-plugins/{index.ts,core-agent/**}` (incl. the builtin output
+  styles), the mock models, `packages/shared/src/util/{hooks,trust,mcp-config,command-template,output-styles,definitions,
+  agent-state}.ts`, plugin SDK 1.5.0, the props / emits / root test ids of the P11-0b stub components, the `hooks`,
+  `project-trust` and `project-mcp` stores, the pure-module signatures, the `useChatSession` additions, the Customize
+  tab query and the Phase 11 test ids (see `docs/phases/phase-11-v1-7.md` "FREEZE in Phase 11").
 - **CCR (contract change request)**: if a frozen contract blocks you, write a local adapter inside your owned
   paths, keep working, and add a CCR to your report: file, current shape, proposed shape, reason.
 - **DEPENDENCY REQUEST**: never install packages. Use existing dependencies or Node built-ins; if something is truly

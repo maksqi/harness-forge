@@ -22,13 +22,21 @@ import type {
   GitStatusFile,
   HarnessUIMessage,
   HarnessUIMessagePart,
+  HookData,
+  HookEntry,
+  HookList,
+  HookRun,
   KeyStatus,
   MessageBranch,
+  PersonalHook,
   PluginDetail,
   PluginLogEntry,
   PluginSummary,
   ProjectFileEntry,
+  ProjectMcpList,
+  ProjectMcpServer,
   ProjectSummary,
+  ProjectTrustList,
   ProviderSummary,
   QueueItem,
   RememberResult,
@@ -45,6 +53,7 @@ import type {
   TaskStep,
   TodoItem,
   ToolSummary,
+  TrustItem,
   WorkspaceChangedData,
 } from '@harness-forge/shared'
 import type { ChangesRow } from '~/components/workspace/changes/changes-rows'
@@ -117,6 +126,7 @@ export function projectSummary(overrides: Partial<ProjectSummary> = {}): Project
     issue: null,
     instructionsFile: null,
     chatCount: 0,
+    outputStyle: null,
     createdAt: 1_759_000_000_000,
     updatedAt: 1_759_000_000_000,
     ...overrides,
@@ -193,7 +203,7 @@ export function pluginSummary(overrides: Partial<PluginSummary> = {}): PluginSum
     enabled: true,
     state: 'active',
     runsCode: true,
-    contributions: { providers: [], models: 0, tools: ['roll_dice'], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] },
+    contributions: { providers: [], models: 0, tools: ['roll_dice'], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] },
     lastError: null,
     installedAt: 1_759_000_000_000,
     updatedAt: 1_759_000_000_000,
@@ -725,4 +735,223 @@ export function skillPart(output: SkillOutput = skillOutput(), toolCallId = 'cal
 /** The answer of `POST /memory` for the project file: `AGENTS.md` was appended to. */
 export function rememberResult(overrides: Partial<RememberResult> = {}): RememberResult {
   return { target: 'project-file', file: 'AGENTS.md', created: false, project: projectSummary({ instructionsFile: 'AGENTS.md' }), ...overrides }
+}
+
+// ---------- Phase 11: hooks, project trust, project MCP and output styles ----------
+
+/** A fixed personal hook id with a varying end: hookId(1) -> 'hok_sample0000000001'. */
+export function hookId(n: number): string {
+  return `hok_sample${String(n).padStart(10, '0')}`
+}
+
+/** A fixed hook record id with a varying end: hookRecordId(1) -> 'hev_sample0000000001'. */
+export function hookRecordId(n: number): string {
+  return `hev_sample${String(n).padStart(10, '0')}`
+}
+
+/** A fixed trust hash: trustSha(1) -> 'a' repeated 64 times, trustSha(2) -> 'b' ... */
+export function trustSha(n: number): string {
+  return String.fromCharCode(96 + n).repeat(64)
+}
+
+/** A personal `PostToolUse` hook (`GET /hooks` entry source `personal`). */
+export function personalHook(overrides: Partial<PersonalHook> = {}): PersonalHook {
+  return {
+    id: hookId(1),
+    event: 'PostToolUse',
+    matcher: 'Write|Edit',
+    command: 'sh .claude/hooks/format.sh',
+    timeout: null,
+    enabled: true,
+    createdAt: 1_759_000_000_000,
+    updatedAt: 1_759_000_000_000,
+    ...overrides,
+  }
+}
+
+/** A command hook of `GET /hooks`: the personal hook 1, active. */
+export function hookEntry(overrides: Partial<Extract<HookEntry, { kind: 'command' }>> = {}): HookEntry {
+  return {
+    key: `personal:${hookId(1)}`,
+    source: 'personal',
+    kind: 'command',
+    event: 'PostToolUse',
+    matcher: 'Write|Edit',
+    command: 'sh .claude/hooks/format.sh',
+    timeout: null,
+    state: 'active',
+    id: hookId(1),
+    diagnostics: [],
+    ...overrides,
+  }
+}
+
+/** A plugin code hook of `GET /hooks` (`ctx.hooks.on('prompt.submit')`). */
+export function codeHookEntry(overrides: Partial<Extract<HookEntry, { kind: 'code' }>> = {}): HookEntry {
+  return { key: 'plugin:hook-pack:0', source: 'plugin', kind: 'code', event: 'prompt.submit', state: 'active', pluginId: 'hook-pack', diagnostics: [], ...overrides }
+}
+
+/** `GET /hooks?projectId=` of project 1: the personal hook and one pending project hook; every switch on. */
+export function hookList(overrides: Partial<HookList> = {}): HookList {
+  return {
+    items: [
+      hookEntry(),
+      hookEntry({ key: `project:${trustSha(1)}`, source: 'project', id: undefined, event: 'PreToolUse', matcher: 'Bash', command: 'sh .claude/hooks/guard.sh', state: 'pending', path: '.claude/settings.json', sha256: trustSha(1) }),
+    ],
+    diagnostics: [],
+    switches: { setting: true, shell: true, safeMode: false },
+    project: { id: projectId(1), available: true, files: ['.claude/settings.json'], pending: 1, scannedAt: 1_759_000_000_000 },
+    ...overrides,
+  }
+}
+
+/** One entry of the hook run log (`GET /hooks/runs`): a silent success. */
+export function hookRun(overrides: Partial<HookRun> = {}): HookRun {
+  return {
+    id: hookRecordId(1),
+    at: 1_759_000_000_000,
+    event: 'PostToolUse',
+    source: 'personal',
+    label: 'sh .claude/hooks/format.sh',
+    chatId: chatId(1),
+    exitCode: 0,
+    timedOut: false,
+    durationMs: 42,
+    outcome: null,
+    ...overrides,
+  }
+}
+
+/** The data of a `data-hook` part: a `PreToolUse` hook denied `write_file` (exit 2). */
+export function hookData(overrides: Partial<HookData> = {}): HookData {
+  return {
+    id: hookRecordId(1),
+    event: 'PreToolUse',
+    outcome: 'denied',
+    toolCallId: 'call_write_1',
+    toolName: 'write_file',
+    createdAt: 1_759_000_000_000,
+    hooks: [{ source: 'project', label: 'sh .claude/hooks/guard.sh', exitCode: 2, durationMs: 12 }],
+    reason: 'Writes to dist/ are not allowed.',
+    ...overrides,
+  }
+}
+
+/** A `data-hook` part. */
+export function hookPart(overrides: Partial<HookData> = {}): HarnessUIMessagePart {
+  const data = hookData(overrides)
+  return { type: 'data-hook', id: data.id, data }
+}
+
+/** The user-role carrier message of a turn the server started after a `Stop` hook blocked (`origin: 'hook'`). */
+export function hookCarrier(id: string, records: HookData[] = [hookData({ event: 'Stop', outcome: 'continued', toolCallId: undefined, toolName: undefined, reason: 'Run the tests first.' })]): HarnessUIMessage {
+  return {
+    id,
+    role: 'user',
+    metadata: { modelRef: 'mock:hooks', startedAt: 1_759_000_000_000 },
+    parts: records.map(data => ({ type: 'data-hook', id: data.id, data })),
+  }
+}
+
+/** A pending hook item of a project's trust list. */
+export function trustHookItem(overrides: Partial<Extract<TrustItem, { kind: 'hook' }>> = {}): TrustItem {
+  return {
+    kind: 'hook',
+    sha256: trustSha(1),
+    state: 'pending',
+    label: 'sh .claude/hooks/guard.sh',
+    path: '.claude/settings.json',
+    refs: [{ path: '.claude/hooks/guard.sh', sha256: trustSha(2) }],
+    warnings: [],
+    detail: { event: 'PreToolUse', matcher: 'Bash', command: 'sh .claude/hooks/guard.sh', timeout: null },
+    ...overrides,
+  }
+}
+
+/** A pending `.mcp.json` server item (stdio) of a project's trust list. */
+export function trustMcpItem(overrides: Partial<Extract<TrustItem, { kind: 'mcp' }>> = {}): TrustItem {
+  return {
+    kind: 'mcp',
+    sha256: trustSha(3),
+    state: 'pending',
+    label: 'memory',
+    path: '.mcp.json',
+    refs: [],
+    warnings: ['runs-repository-code'],
+    detail: { name: 'memory', id: 'memory', transport: 'stdio', command: 'node', args: ['tools/mcp-memory.mjs'], envNames: ['MCP_TOKEN'], headerNames: [], variables: ['MCP_TOKEN'] },
+    ...overrides,
+  }
+}
+
+/** An approved command file item with one `!` span. */
+export function trustCommandItem(overrides: Partial<Extract<TrustItem, { kind: 'command' }>> = {}): TrustItem {
+  return {
+    kind: 'command',
+    sha256: trustSha(4),
+    state: 'approved',
+    label: '/status',
+    path: '.claude/commands/status.md',
+    refs: [],
+    warnings: [],
+    detail: { name: 'status', spans: ['git status --short'] },
+    ...overrides,
+  }
+}
+
+/** `GET /projects/:id/trust` of project 1: one item of each kind. */
+export function projectTrustList(overrides: Partial<ProjectTrustList> = {}): ProjectTrustList {
+  return { items: [trustHookItem(), trustMcpItem(), trustCommandItem()], orphaned: 0, scannedAt: 1_759_000_000_000, available: true, ...overrides }
+}
+
+/** A project MCP server that waits for a variable. */
+export function projectMcpServer(overrides: Partial<ProjectMcpServer> = {}): ProjectMcpServer {
+  return {
+    id: 'memory',
+    name: 'memory',
+    transport: 'stdio',
+    state: 'needs-variables',
+    sha256: trustSha(3),
+    tools: [],
+    missingVariables: ['MCP_TOKEN'],
+    ...overrides,
+  }
+}
+
+/** `GET /projects/:id/mcp` of project 1: the memory server and its variable. */
+export function projectMcpList(overrides: Partial<ProjectMcpList> = {}): ProjectMcpList {
+  return { items: [projectMcpServer()], variables: [{ name: 'MCP_TOKEN', set: false, hint: null, usedBy: ['memory'] }], ...overrides }
+}
+
+/** A catalog entry of kind `style`: the project style `terse` (`.harness/output-styles/terse.md`). */
+export function styleEntry(overrides: Partial<CustomizationEntry> = {}): CustomizationEntry {
+  return {
+    kind: 'style',
+    name: 'terse',
+    label: 'Terse',
+    description: 'Short answers without preamble',
+    source: 'project',
+    path: '.harness/output-styles/terse.md',
+    keepCodingInstructions: true,
+    enabled: true,
+    state: 'active',
+    diagnostics: [],
+    ...overrides,
+  }
+}
+
+/** A personal output style with its parsed fields. */
+export function styleCustomization(overrides: Partial<Extract<Customization, { kind: 'style' }>> = {}): Customization {
+  return {
+    id: customizationId(3),
+    kind: 'style',
+    name: 'terse',
+    description: 'Short answers without preamble',
+    content: '---\nname: Terse\ndescription: Short answers without preamble\nkeep-coding-instructions: true\n---\nAnswer in at most three sentences.\n',
+    enabled: true,
+    fields: { name: 'terse', label: 'Terse', description: 'Short answers without preamble', keepCodingInstructions: true, content: 'Answer in at most three sentences.\n' },
+    diagnostics: [],
+    createdAt: 1_759_000_000_000,
+    updatedAt: 1_759_000_000_000,
+    ...overrides,
+  }
 }

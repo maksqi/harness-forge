@@ -281,6 +281,10 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
         // Plugin API 1.4.0 (ADR-045): sorted by name (the registries list by name).
         agents: agents.list().filter(agent => agent.pluginId === pluginId).map(agent => agent.definition.name),
         skills: skills.list().filter(skill => skill.pluginId === pluginId).map(skill => skill.definition.name),
+        // Plugin API 1.5.0 (ADR-048, ADR-051): P11-0a seam; the command hooks and output styles join the registry
+        // (`hookCommands`, `styles`) in P11-0b / P11-A.
+        commandHooks: 0,
+        outputStyles: [],
       }
       return contributions
     },

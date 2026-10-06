@@ -2,12 +2,16 @@
 import { z } from 'zod'
 import { pluginPermissionSchema } from '../enums.ts'
 import { isPluginNamespacedId, isReservedPluginId, pluginIdSchema, providerIdSchema } from '../ids.ts'
+import { LIMITS } from '../limits.ts'
+import { planCommandExpansion } from '../util/command-template.ts'
 import { isSafeRelativePath } from '../util/paths.ts'
 import { isSemver, isSemverRange } from '../util/semver.ts'
 import { duplicates, isUnique } from '../util/text.ts'
+import { countHookHandlers, hooksConfigSchema } from './hooks.ts'
 import {
   declarativeAgentSchema,
   declarativeCommandSchema,
+  declarativeOutputStyleSchema,
   declarativeProviderSchema,
   declarativeSkillSchema,
   httpUrlSchema,
@@ -58,6 +62,13 @@ export const pluginContributesSchema = z.strictObject({
   agents: z.array(declarativeAgentSchema).max(50).optional(),
   /** Plugin API 1.4.0 (ADR-045): skills for the `skill` tool (at most 50). */
   skills: z.array(declarativeSkillSchema).max(50).optional(),
+  /**
+   * Plugin API 1.5.0 (ADR-048): command hooks in the Claude Code `hooks` format (at most 50 handlers). A plugin with
+   * command hooks requires trust (like a stdio MCP server); they run only while the plugin is active and trusted.
+   */
+  hooks: hooksConfigSchema.optional(),
+  /** Plugin API 1.5.0 (ADR-051): output styles (at most 20). */
+  outputStyles: z.array(declarativeOutputStyleSchema).max(LIMITS.pluginOutputStylesMax).optional(),
 })
 export type PluginContributes = z.infer<typeof pluginContributesSchema>
 
@@ -85,8 +96,9 @@ const manifestObjectSchema = z.strictObject({
 
 /**
  * Every manifest rule except the reserved-id check: provider and MCP server ids namespaced by the plugin id, unique
- * provider / MCP server / command / agent / skill names, `{{settings.<key>}}` references to defined settings. Used by DTOs, which also
- * carry builtin manifests, and by endpoints that answer a reserved id with 403 instead of 400.
+ * provider / MCP server / command / agent / skill / output style names, `{{settings.<key>}}` references to defined
+ * settings. Used by DTOs, which also carry builtin manifests, and by endpoints that answer a reserved id with 403 instead
+ * of 400.
  */
 export const pluginManifestBaseSchema = manifestObjectSchema.superRefine((manifest, ctx) => {
   const contributes = manifest.contributes
@@ -126,6 +138,10 @@ export const pluginManifestBaseSchema = manifestObjectSchema.superRefine((manife
   const skillNames = (contributes.skills ?? []).map(skill => skill.name)
   for (const name of duplicates(skillNames))
     ctx.addIssue({ code: 'custom', path: ['contributes', 'skills', skillNames.lastIndexOf(name), 'name'], message: `Duplicate skill "${name}".` })
+
+  const styleNames = (contributes.outputStyles ?? []).map(style => style.name)
+  for (const name of duplicates(styleNames))
+    ctx.addIssue({ code: 'custom', path: ['contributes', 'outputStyles', styleNames.lastIndexOf(name), 'name'], message: `Duplicate output style "${name}".` })
 })
 
 /** A user plugin manifest: every rule of `pluginManifestBaseSchema` plus "the id is not reserved". */
@@ -145,7 +161,23 @@ export function declaresStdioMcpServer(manifest: Pick<PluginManifest, 'contribut
   return (manifest.contributes?.mcpServers ?? []).some(server => server.transport.type === 'stdio')
 }
 
-/** Code plugins and plugins with a stdio MCP server require trust (sha256 pinning). */
+/** True when the manifest declares command hooks (`contributes.hooks` with at least one handler; plugin API 1.5.0). */
+export function declaresCommandHooks(manifest: Pick<PluginManifest, 'contributes'>): boolean {
+  return countHookHandlers(manifest.contributes?.hooks) > 0
+}
+
+/**
+ * True when a command template of the manifest holds a `` !`cmd` `` span (plugin API 1.5.0, ADR-052): scanned with
+ * `planCommandExpansion`, the only span scanner (a template without the two characters `` !` `` cannot hold one).
+ */
+export function declaresCommandShellSpans(manifest: Pick<PluginManifest, 'contributes'>): boolean {
+  return (manifest.contributes?.commands ?? []).some(command => command.template.includes('!`') && planCommandExpansion(command.template).shellCommands.length > 0)
+}
+
+/**
+ * Plugins that can run commands require trust (sha256 pinning): code plugins, plugins with a stdio MCP server and, since
+ * plugin API 1.5.0, plugins with command hooks or with `` !`cmd` `` spans in a command template.
+ */
 export function manifestRequiresTrust(manifest: Pick<PluginManifest, 'main' | 'contributes'>): boolean {
-  return isCodePluginManifest(manifest) || declaresStdioMcpServer(manifest)
+  return isCodePluginManifest(manifest) || declaresStdioMcpServer(manifest) || declaresCommandHooks(manifest) || declaresCommandShellSpans(manifest)
 }

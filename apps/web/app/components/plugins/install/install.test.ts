@@ -87,9 +87,9 @@ describe('labels', () => {
   })
 
   it('summarizes contributions, files, permissions and icons', () => {
-    expect(contributionSummary({ providers: ['a', 'b'], models: 3, tools: [], mcpServers: ['m'], commands: ['c', 'd'], hooks: [], agents: [], skills: [] }))
+    expect(contributionSummary({ providers: ['a', 'b'], models: 3, tools: [], mcpServers: ['m'], commands: ['c', 'd'], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] }))
       .toBe('2 providers · 3 models · 1 MCP server · 2 commands')
-    expect(contributionSummary({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] })).toBe('')
+    expect(contributionSummary({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] })).toBe('')
     expect(filesSummary({ count: 1, bytes: 2048 })).toBe('1 file · 2 KB')
     expect(permissionLabel('hooks')).toBe('Reads and changes conversations')
     expect(permissionLabel('unknown')).toBe('unknown')

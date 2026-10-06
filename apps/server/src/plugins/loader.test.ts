@@ -138,13 +138,13 @@ describe('inspectPluginDirectory', () => {
 })
 
 describe('plugin API 1.4.0 manifests (ADR-045)', () => {
-  it.each(['^1.0.0', '^1.3.0', '>=1.3.0 <2', '^1.4.0', '1.x'])('engines %s is compatible with this host', async (harness) => {
+  it.each(['^1.0.0', '^1.3.0', '>=1.3.0 <2', '^1.4.0', '^1.5.0', '1.x'])('engines %s is compatible with this host', async (harness) => {
     const read = await readPluginDirectory(plugin('compat', { 'plugin.json': manifest('compat', { engines: { harness } }) }), { expectedId: 'compat' })
     expect(read.problem).toBeNull()
     expect(read.compatible).toBe(true)
   })
 
-  it.each(['^1.5.0', '^2.0.0', '~1.3.0'])('engines %s is incompatible (needs another plugin API)', async (harness) => {
+  it.each(['^1.6.0', '^2.0.0', '~1.3.0'])('engines %s is incompatible (needs another plugin API)', async (harness) => {
     const read = await readPluginDirectory(plugin('compat', { 'plugin.json': manifest('compat', { engines: { harness } }) }), { expectedId: 'compat' })
     expect(read.compatible).toBe(false)
     expect(read.problem?.state).toBe('incompatible')
@@ -198,7 +198,7 @@ describe('manifest helpers', () => {
 
   it('lists declared contributions', () => {
     const acme = JSON.parse(readFileSync(join(fixturePath('acme-docs'), 'plugin.json'), 'utf8')) as Parameters<typeof declaredContributions>[0]
-    expect(declaredContributions(acme)).toEqual({ providers: ['acme-docs'], models: 3, tools: [], mcpServers: ['acme-docs'], commands: ['acme'], hooks: [], agents: [], skills: [] })
+    expect(declaredContributions(acme)).toEqual({ providers: ['acme-docs'], models: 3, tools: [], mcpServers: ['acme-docs'], commands: ['acme'], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] })
     expect(declaredContributions(null).providers).toEqual([])
   })
 
@@ -213,7 +213,7 @@ describe('manifest helpers', () => {
         skills: [{ name: 'notes', description: 'N.', content: '# N' }, { name: 'commit-message', description: 'C.', content: '# C' }],
       },
     })))
-    expect(declared).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: ['alpha', 'zeta'], skills: ['commit-message', 'notes'] })
+    expect(declared).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: ['alpha', 'zeta'], skills: ['commit-message', 'notes'], commandHooks: 0, outputStyles: [] })
   })
 
   it('pins linked folders by path and checks containment', () => {

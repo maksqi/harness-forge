@@ -18,6 +18,7 @@ import { extname, isAbsolute, join, relative, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { PLUGIN_API_VERSION } from '@harness-forge/plugin-sdk'
 import {
+  countHookHandlers,
   flattenValidationIssues,
   HarnessError,
   isReservedPluginId,
@@ -163,6 +164,9 @@ export function declaredContributions(manifest: PluginManifest | null): PluginCo
     // Plugin API 1.4.0 (ADR-045): the declared agents and skills.
     agents: (contributes?.agents ?? []).map(agent => agent.name).sort(),
     skills: (contributes?.skills ?? []).map(skill => skill.name).sort(),
+    // Plugin API 1.5.0 (ADR-048, ADR-051): the declared command hooks and output styles.
+    commandHooks: countHookHandlers(contributes?.hooks),
+    outputStyles: (contributes?.outputStyles ?? []).map(style => style.name).sort(),
   }
 }
 

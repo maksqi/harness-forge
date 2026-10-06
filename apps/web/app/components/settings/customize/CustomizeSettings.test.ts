@@ -160,9 +160,11 @@ describe('customizeSettings', () => {
     const tabs = allByTestId(testIds.customizeTab)
     expect(tabs.map(tab => [tab.dataset.value, tab.dataset.count, tab.dataset.state])).toEqual([
       ['agents', '4', 'active'],
-      // /compact and the six client commands.
-      ['commands', '7', 'inactive'],
+      // /compact and the seven client commands (Phase 11 adds /output-style).
+      ['commands', '8', 'inactive'],
       ['skills', '0', 'inactive'],
+      // Phase 11 (ADR-051): the output styles tab.
+      ['output-styles', '0', 'inactive'],
     ])
     expect(tabs[0]!.textContent?.replace(/\s+/g, ' ').trim()).toBe('Agents, 4')
     expect(byTestId(testIds.customizeProjectSelect)?.dataset.value).toBe('')
@@ -175,7 +177,7 @@ describe('customizeSettings', () => {
     await settle()
     expect(mocks.router.replace).toHaveBeenLastCalledWith({ query: { tab: 'commands' } })
     const builtin = sections().find(section => section.dataset.source === 'builtin')!
-    expect(allByTestId(testIds.customizationRow, builtin).map(element => element.dataset.name)).toEqual(['compact', 'effort', 'help', 'mode', 'model', 'new', 'remember'])
+    expect(allByTestId(testIds.customizationRow, builtin).map(element => element.dataset.name)).toEqual(['compact', 'effort', 'help', 'mode', 'model', 'new', 'output-style', 'remember'])
     expect(byTestId(testIds.customizationRowMenu, builtin)).toBeNull()
     expect(builtin.textContent).toContain('Summarize the conversation')
     const empty = byTestId(testIds.customizeEmpty)!

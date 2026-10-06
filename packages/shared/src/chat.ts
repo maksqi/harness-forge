@@ -2,9 +2,27 @@
 import type { UIMessage } from 'ai'
 import type { TaskResultData } from './schemas/background-tasks.ts'
 import { z } from 'zod'
-import { commandSourceSchema, reasoningEffortSchema, toolModeSchema } from './enums.ts'
+import {
+  commandSourceSchema,
+  hookEventSchema,
+  hookRecordOutcomeSchema,
+  hookSourceSchema,
+  invocationKindSchema,
+  reasoningEffortSchema,
+  toolModeSchema,
+} from './enums.ts'
 import { harnessErrorInitSchema } from './errors.ts'
-import { chatIdSchema, commandNameSchema, messageIdSchema, modelRefSchema, projectIdSchema, timestampSchema } from './ids.ts'
+import {
+  agentNameSchema,
+  chatIdSchema,
+  hookRecordIdSchema,
+  messageIdSchema,
+  modelRefSchema,
+  pluginIdSchema,
+  projectIdSchema,
+  slashNameSchema,
+  timestampSchema,
+} from './ids.ts'
 import { LIMITS } from './limits.ts'
 import { todoItemSchema } from './schemas/agent.ts'
 import { taskResultDataSchema } from './schemas/background-tasks.ts'
@@ -19,9 +37,10 @@ const tokenCountSchema = z.int().min(0)
 export { messageUsageSchema } from './schemas/usage.ts'
 export type { MessageUsage } from './schemas/usage.ts'
 
-/** A slash command invoked by a user message. */
+/** A slash command (or, since Phase 11, a user-invocable skill) invoked by a user message. */
 export const commandInvocationSchema = z.object({
-  name: commandNameSchema,
+  /** A command name (up to 32 characters) or, since Phase 11 (ADR-052), a skill name (up to 64; `slashNameSchema`). */
+  name: slashNameSchema,
   /** Text after `/name `. */
   input: z.string(),
   /** `compact`: the harness command `/compact [focus]` (Phase 9, ADR-040), run by the server. */
@@ -43,6 +62,22 @@ export const commandInvocationSchema = z.object({
    * regenerate of the turn reads it again.
    */
   allowedTools: z.array(z.string().min(1).max(256)).max(DEFINITION_LIMITS.toolsMax).optional(),
+  /**
+   * What the name invoked (Phase 11, ADR-052): a command, or a user-invocable skill (`/name [arguments]`, its content is
+   * the expansion). Absent in v1.6 messages (= `command`).
+   */
+  kind: invocationKindSchema.optional(),
+  /**
+   * What a trusted command file inlined into `expansion` before the model call (Phase 11, ADR-052): the number of
+   * `` !`cmd` `` spans that ran and the project-relative `@path` files that were read. Frozen with the expansion, so a
+   * regenerate or a continuation never runs the spans again. Absent when nothing was inlined.
+   */
+  inlined: z
+    .object({
+      shell: z.int().min(0).max(LIMITS.commandShellSpansMax),
+      files: z.array(z.string().min(1).max(LIMITS.workspacePathMaxChars)).max(LIMITS.commandFileRefsMax),
+    })
+    .optional(),
 })
 export type CommandInvocation = z.infer<typeof commandInvocationSchema>
 
@@ -77,7 +112,10 @@ export const noticeLevelSchema = z.enum(['info', 'warning'])
  * `workspace-unavailable` (ADR-031): the project folder of the chat could not be opened, so the run has no workspace
  * tools (the message names the folder and the reason); `compaction-failed` (ADR-040): the summary could not be written,
  * so the oldest turns were trimmed instead; `command-model-unavailable` (Phase 10, ADR-045): the `model` of a command
- * file cannot run, so the chat model answered.
+ * file cannot run, so the chat model answered; Phase 11: `output-style-unavailable` (ADR-051): the effective output
+ * style is unknown or inactive, so the run used `default`; `hook-continuation-limit` (ADR-048): `Stop` hooks blocked 5
+ * runs in a row, so no further follow-up turn starts; `project-mcp-unavailable` (ADR-050): an approved project MCP server
+ * was not ready within 5 s (or failed), so the run has no tools of it.
  */
 export const noticeCodeSchema = z.enum([
   'context-trimmed',
@@ -88,6 +126,9 @@ export const noticeCodeSchema = z.enum([
   'workspace-unavailable',
   'compaction-failed',
   'command-model-unavailable',
+  'output-style-unavailable',
+  'hook-continuation-limit',
+  'project-mcp-unavailable',
 ])
 export type NoticeCode = z.infer<typeof noticeCodeSchema>
 
@@ -150,19 +191,92 @@ export const steerDataSchema = z.object({
 })
 export type SteerData = z.infer<typeof steerDataSchema>
 
-/** What a run does right now, shown live (`compacting`: a summary is being written). */
-export const activityKindSchema = z.enum(['compacting', 'idle'])
+/**
+ * What a run does right now, shown live (`compacting`: a summary is being written; `hooks` (Phase 11, ADR-048): command
+ * hooks of an event are running, "Running hook…"; `idle`: nothing special any more).
+ */
+export const activityKindSchema = z.enum(['compacting', 'idle', 'hooks'])
 export type ActivityKind = z.infer<typeof activityKindSchema>
 
 /** Data of the transient `data-activity` chunks (ADR-040): reach only `onData`, never stored in a message. */
 export const activityDataSchema = z.object({
   kind: activityKindSchema,
+  /** `hooks`: the event whose hooks run (Phase 11). */
+  event: hookEventSchema.optional(),
+  /** `hooks` of `PreToolUse` / `PostToolUse`: the tool call they run for (Phase 11). */
+  toolCallId: z.string().min(1).max(256).optional(),
 })
 export type ActivityData = z.infer<typeof activityDataSchema>
 
+function isJsonWithin(value: unknown, maxBytes: number): boolean {
+  try {
+    return utf8ByteLength(JSON.stringify(value) ?? '') <= maxBytes
+  }
+  catch {
+    return false
+  }
+}
+
+/**
+ * One hook that ran for a `data-hook` record (Phase 11, ADR-048). Never holds the payload, stdout or stderr: `error` is
+ * a short description (an exit code, a timeout, invalid output) and `systemMessage` is the hook's own message to the
+ * user.
+ */
+export const hookResultSchema = z.object({
+  source: hookSourceSchema,
+  /** The hook's command (a personal, project or plugin command hook) or `<pluginId>: <event>` (a code hook), cut. */
+  label: z.string().max(LIMITS.hookLabelMaxChars),
+  /** Plugin hooks: the plugin. */
+  pluginId: pluginIdSchema.optional(),
+  /** null when the process did not exit normally (timeout, killed, failed to start) and for code hooks. */
+  exitCode: z.int().nullable(),
+  timedOut: z.boolean().optional(),
+  durationMs: z.number().min(0),
+  /** A non-blocking failure, safe to show (never the raw stderr). */
+  error: z.string().max(LIMITS.hookSystemMessageMaxChars).optional(),
+  /** The hook's `systemMessage` for the user (never sent to the model). */
+  systemMessage: z.string().max(LIMITS.hookSystemMessageMaxChars).optional(),
+})
+export type HookResult = z.infer<typeof hookResultSchema>
+
+/**
+ * Data of `data-hook` parts (Phase 11, ADR-048): what the hooks of one event did, stored where they ran (a silent
+ * success stores nothing). In an assistant reply at the point of the event (tool hooks carry the tool call id); the
+ * context of `UserPromptSubmit` / `SessionStart` on the user message; a `Stop` continuation is a user-role carrier
+ * message that holds only `data-hook` parts (`run.started.origin = hook`). `context` (and in a carrier the `reason`)
+ * reach the model through `splitHooks` / `hookModelText` (`util/agent-state.ts`); everything else is display-only.
+ */
+export const hookDataSchema = z.object({
+  /** `hev_` + 16 characters; also the id of the run log entries of this event. */
+  id: hookRecordIdSchema,
+  event: hookEventSchema,
+  outcome: hookRecordOutcomeSchema,
+  /** `PreToolUse` / `PostToolUse`: the tool call (the tool part with the same `toolCallId`). */
+  toolCallId: z.string().min(1).max(256).optional(),
+  /** `PreToolUse` / `PostToolUse`: the harness tool name. */
+  toolName: z.string().min(1).max(256).optional(),
+  createdAt: timestampSchema,
+  /** Every hook that ran for the event (at most 20). */
+  hooks: z.array(hookResultSchema).max(LIMITS.hooksPerEventMax),
+  /** Model-visible context (`additionalContext`, plain stdout of `UserPromptSubmit` / `SessionStart`; joined, capped). */
+  context: z.string().max(LIMITS.hookContextMaxChars).optional(),
+  /** A block or decision reason (user-visible; the model sees it as feedback where the event allows). */
+  reason: z.string().max(LIMITS.hookReasonMaxChars).optional(),
+  /**
+   * `PreToolUse` `updatedInput` (`outcome: 'rewritten'`): the input the tool ran with (at most 64 KiB of JSON); the tool
+   * part keeps the model's input.
+   */
+  updatedInput: z
+    .unknown()
+    .refine(value => value === undefined || isJsonWithin(value, LIMITS.hookUpdatedInputBytes), 'The updated input is limited to 64 KB of JSON.')
+    .optional(),
+})
+export type HookData = z.infer<typeof hookDataSchema>
+
 /**
  * Data part schemas for `useChat({ dataPartSchemas })` and `validateUIMessages({ dataSchemas })`. `task-result` (Phase
- * 10, ADR-046): the result of a background task (`data-task-result`, `taskResultDataSchema`).
+ * 10, ADR-046): the result of a background task (`data-task-result`, `taskResultDataSchema`); `hook` (Phase 11,
+ * ADR-048): what the hooks of one event did (`data-hook`, `hookDataSchema`).
  */
 export const harnessDataSchemas = {
   'notice': noticeDataSchema,
@@ -170,11 +284,12 @@ export const harnessDataSchemas = {
   'steer': steerDataSchema,
   'activity': activityDataSchema,
   'task-result': taskResultDataSchema,
+  'hook': hookDataSchema,
 }
 
 /**
- * Data part types (`data-notice`, `data-compaction`, `data-steer`, the transient `data-activity`, `data-task-result`). A
- * type alias (not an interface) so it satisfies the AI SDK `UIDataTypes`.
+ * Data part types (`data-notice`, `data-compaction`, `data-steer`, the transient `data-activity`, `data-task-result`,
+ * `data-hook`). A type alias (not an interface) so it satisfies the AI SDK `UIDataTypes`.
  */
 // eslint-disable-next-line ts/consistent-type-definitions
 export type HarnessDataTypes = {
@@ -183,6 +298,7 @@ export type HarnessDataTypes = {
   'steer': SteerData
   'activity': ActivityData
   'task-result': TaskResultData
+  'hook': HookData
 }
 
 /** AI SDK v7 UI message of this app; pass `ChatDetail.messages` directly to `useChat({ messages })`. */
@@ -252,6 +368,13 @@ export const chatRequestBodySchema = z.strictObject({
    * `404` before the chat row exists); ignored for an existing chat (move a chat with `PATCH /chats/:id`).
    */
   projectId: projectIdSchema.optional(),
+  /**
+   * The output style of a new chat (Phase 11, ADR-051): a style name, or null = automatic (the project's, else the
+   * global `outputStyle`). Honored only when this request creates the chat (saved as `settings.outputStyle`); ignored
+   * for an existing chat (change it with `PATCH /chats/:id`). An unknown style is not an error: the run uses `default`
+   * with notice `output-style-unavailable`.
+   */
+  outputStyle: agentNameSchema.nullable().optional(),
 })
 export type ChatRequestBody = z.infer<typeof chatRequestBodySchema>
 

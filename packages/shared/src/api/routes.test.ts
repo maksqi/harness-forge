@@ -90,8 +90,8 @@ function tableSignatures(): string[] {
 }
 
 describe('route table', () => {
-  it('has 109 routes keyed <module>.<action>', () => {
-    expect(API_ROUTE_KEYS).toHaveLength(109)
+  it('has 120 routes keyed <module>.<action>', () => {
+    expect(API_ROUTE_KEYS).toHaveLength(120)
     for (const key of API_ROUTE_KEYS) {
       const route: ApiRouteDef = apiRoutes[key]
       expect(key.startsWith(`${route.module}.`), key).toBe(true)
@@ -107,7 +107,7 @@ describe('route table', () => {
 
   it('equals the route key index of API.md (key, method, path, module)', () => {
     const index = routeIndex()
-    expect(index).toHaveLength(109)
+    expect(index).toHaveLength(120)
     expect(index.map(row => `${row.key} ${signature(row)}`).sort()).toEqual(
       API_ROUTE_KEYS.map(key => `${key} ${signature(apiRoutes[key])}`).sort(),
     )
@@ -260,7 +260,6 @@ describe('route table', () => {
   })
 
   it('declares the customization, memory and background task routes as the contract says (ADR-044 … ADR-047)', () => {
-    expect(API_MODULES).toHaveLength(30)
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'customizations')).toEqual([
       'customizations.list',
       'customizations.source',
@@ -292,6 +291,34 @@ describe('route table', () => {
     expect((apiRoutes['customizations.source'] as ApiRouteDef).query).toBeDefined()
     // `GET /commands` gains the project query (Phase 10).
     expect((apiRoutes['commands.list'] as ApiRouteDef).query).toBeDefined()
+  })
+
+  it('declares the hook, project trust and project MCP routes as the contract says (ADR-048 … ADR-050)', () => {
+    expect(API_MODULES).toHaveLength(33)
+    expect(API_MODULES.slice(-4)).toEqual(['hooks', 'projectTrust', 'projectMcp', 'shares'])
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'hooks')).toEqual(['hooks.list', 'hooks.runs', 'hooks.create', 'hooks.update', 'hooks.remove'])
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'projectTrust')).toEqual(['projectTrust.list', 'projectTrust.approve', 'projectTrust.revoke'])
+    expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'projectMcp')).toEqual(['projectMcp.list', 'projectMcp.setVariables', 'projectMcp.reconnect'])
+    const phase11 = API_ROUTE_KEYS.filter(key => ['hooks', 'projectTrust', 'projectMcp'].includes(apiRoutes[key].module))
+    expect(phase11).toHaveLength(11)
+    // Creating a hook, approving project items and setting project MCP variables always need fresh auth; changing a
+    // hook needs it unless the body only turns the hook off (enforced by the route, so the table has no flag).
+    const fresh = phase11.filter(key => (apiRoutes[key] as ApiRouteDef).fresh === true)
+    expect(fresh).toEqual(['hooks.create', 'projectTrust.approve', 'projectMcp.setVariables'])
+    for (const key of phase11)
+      expect((apiRoutes[key] as ApiRouteDef).public, key).toBeUndefined()
+    for (const key of phase11.filter(key => apiRoutes[key].module !== 'hooks'))
+      expect(apiRoutes[key].path.startsWith('/projects/:id/'), key).toBe(true)
+    expect(routeSuccessStatus(apiRoutes['hooks.create'])).toBe(201)
+    expect(routeSuccessStatus(apiRoutes['hooks.remove'])).toBe(204)
+    expect(routeSuccessStatus(apiRoutes['projectTrust.approve'])).toBe(200)
+    expect(routeSuccessStatus(apiRoutes['projectTrust.revoke'])).toBe(200)
+    // Approve and revoke answer the fresh list; setting variables answers the servers and variables.
+    expect(apiRoutes['projectTrust.approve'].response).toBe(apiRoutes['projectTrust.list'].response)
+    expect(apiRoutes['projectTrust.revoke'].response).toBe(apiRoutes['projectTrust.list'].response)
+    expect(apiRoutes['projectMcp.setVariables'].response).toBe(apiRoutes['projectMcp.list'].response)
+    expect(apiRoutes['hooks.update'].response).toBe(apiRoutes['hooks.create'].response)
+    expect((apiRoutes['hooks.list'] as ApiRouteDef).query).toBeDefined()
   })
 })
 
@@ -451,6 +478,40 @@ describe('matchApiRoute', () => {
       ['GET', `/chat/${chat}/tasks/${task}`],
       ['POST', `/chat/${chat}/tasks/stop`],
       ['DELETE', `/chat/${chat}/tasks/${task}`],
+    ] as const)
+      expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
+  })
+
+  it('matches the hook, project trust and project MCP routes (Phase 11) without shadowing', () => {
+    const project = 'prj_ABCdef0123456789'
+    const hook = 'hok_ABCdef0123456789'
+    const sha = 'a'.repeat(64)
+    expect(matchApiRoute('GET', '/hooks')?.key).toBe('hooks.list')
+    expect(matchApiRoute('GET', '/hooks/runs')?.key).toBe('hooks.runs')
+    expect(matchApiRoute('POST', '/hooks')?.key).toBe('hooks.create')
+    expect(matchApiRoute('PATCH', `/hooks/${hook}`)).toMatchObject({ key: 'hooks.update', params: { id: hook } })
+    expect(matchApiRoute('DELETE', `/hooks/${hook}`)).toMatchObject({ key: 'hooks.remove', params: { id: hook } })
+    expect(matchApiRoute('GET', `/projects/${project}/trust`)).toMatchObject({ key: 'projectTrust.list', params: { id: project } })
+    expect(matchApiRoute('POST', `/projects/${project}/trust`)?.key).toBe('projectTrust.approve')
+    expect(matchApiRoute('DELETE', `/projects/${project}/trust/${sha}`)).toMatchObject({ key: 'projectTrust.revoke', params: { id: project, sha256: sha } })
+    expect(matchApiRoute('GET', `/projects/${project}/mcp`)).toMatchObject({ key: 'projectMcp.list', params: { id: project } })
+    expect(matchApiRoute('PUT', `/projects/${project}/mcp/variables`)).toMatchObject({ key: 'projectMcp.setVariables', params: { id: project } })
+    expect(matchApiRoute('POST', `/projects/${project}/mcp/memory/reconnect`)).toMatchObject({ key: 'projectMcp.reconnect', params: { id: project, serverId: 'memory' } })
+    // The neighbors keep their keys.
+    expect(matchApiRoute('GET', `/projects/${project}/files`)?.key).toBe('projectFiles.search')
+    expect(matchApiRoute('DELETE', `/projects/${project}`)?.key).toBe('projects.remove')
+    expect(matchApiRoute('GET', '/projects/browse')?.key).toBe('projects.browse')
+    for (const [method, path] of [
+      ['GET', `/hooks/${hook}`],
+      ['PATCH', '/hooks/runs/x'],
+      ['DELETE', '/hooks'],
+      ['PUT', `/projects/${project}/trust`],
+      ['GET', `/projects/${project}/trust/${sha}`],
+      ['DELETE', `/projects/${project}/trust`],
+      ['GET', `/projects/${project}/mcp/variables`],
+      ['POST', `/projects/${project}/mcp`],
+      ['GET', `/projects/${project}/mcp/memory/reconnect`],
+      ['PUT', `/projects/${project}/mcp/memory/variables`],
     ] as const)
       expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
   })

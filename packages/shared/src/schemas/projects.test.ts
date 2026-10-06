@@ -30,6 +30,7 @@ const project = {
   issue: null,
   instructionsFile: 'AGENTS.md',
   chatCount: 3,
+  outputStyle: null,
   createdAt: 1,
   updatedAt: 2,
 }

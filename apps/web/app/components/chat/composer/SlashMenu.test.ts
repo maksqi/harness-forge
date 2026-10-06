@@ -40,13 +40,14 @@ describe('slashMenu', () => {
       'client:mode',
       'client:help',
       'client:remember',
+      'client:output-style',
       'server:summarize',
       'server:model-card',
     ])
     expect(groupLabels(wrapper)).toEqual(['App', 'Plugins'])
-    expect(rows[6]!.text()).toContain('/summarize')
-    expect(rows[6]!.text()).toContain('Core commands')
-    expect(rows[6]!.attributes('data-group')).toBe('plugin')
+    expect(rows[7]!.text()).toContain('/summarize')
+    expect(rows[7]!.text()).toContain('Core commands')
+    expect(rows[7]!.attributes('data-group')).toBe('plugin')
     expect(rows[5]!.attributes()).toMatchObject({ 'data-group': 'app', 'aria-label': '/remember, Save a note to your instructions' })
     expect(rows[0]!.attributes('aria-selected')).toBe('true')
   })
@@ -69,6 +70,7 @@ describe('slashMenu', () => {
       'app:mode',
       'app:help',
       'app:remember',
+      'app:output-style',
       'app:compact',
       'project:review',
       'personal:standup',
@@ -78,17 +80,17 @@ describe('slashMenu', () => {
     // The option ids follow the visual order, so ↓ walks the rows top to bottom.
     expect(rows.map(row => row.attributes('id'))).toEqual(rows.map((_row, index) => expect.stringMatching(new RegExp(`-option-${index}$`))))
 
-    const review = rows[7]!
+    const review = rows[8]!
     expect(review.attributes('aria-label')).toBe('/review, Review a file for bugs, arguments <file> [focus]')
     const hint = review.get('[data-slot="slash-menu-hint"]')
     expect(hint.text()).toBe('<file> [focus]')
     expect(hint.classes()).toEqual(expect.arrayContaining(['hidden', 'sm:inline', 'font-mono']))
     expect(review.get('[data-slot="slash-menu-detail"]').text()).toBe('frontend')
     // /compact (harness) and personal rows have nothing on the right; plugin rows the plugin name.
-    expect(rows[6]!.find('[data-slot="slash-menu-detail"]').exists()).toBe(false)
-    expect(rows[6]!.get('[data-slot="slash-menu-hint"]').text()).toBe('[focus]')
-    expect(rows[8]!.find('[data-slot="slash-menu-detail"]').exists()).toBe(false)
-    expect(rows[9]!.get('[data-slot="slash-menu-detail"]').text()).toBe('Core commands')
+    expect(rows[7]!.find('[data-slot="slash-menu-detail"]').exists()).toBe(false)
+    expect(rows[7]!.get('[data-slot="slash-menu-hint"]').text()).toBe('[focus]')
+    expect(rows[9]!.find('[data-slot="slash-menu-detail"]').exists()).toBe(false)
+    expect(rows[10]!.get('[data-slot="slash-menu-detail"]').text()).toBe('Core commands')
   })
 
   it('shows a heading only for groups with a match', async () => {

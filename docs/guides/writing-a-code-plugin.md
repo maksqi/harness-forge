@@ -429,8 +429,47 @@ changes discarded; after 5 failures in a row it is switched off until the plugin
 | `chat.messages` | `messages` sent to the model | inject context, strip content |
 | `tool.approve` | `decision`: `allow` / `ask` / `deny` | auto-approve trusted inputs, deny dangerous ones |
 | `tool.before` | `input`; **throw to block the call** | validation, redaction |
-| `tool.after` | `output` | post-processing, redaction |
+| `tool.after` | `output`; 1.5.0: `context` (a text the model reads at its next step) | post-processing, redaction, a lint hint |
 | `message.completed` | nothing (observe) | logging, usage accounting |
+| `prompt.submit` (1.5.0) | `block` (refuse the message with a reason), `context` | a secret scanner, ticket context |
+| `session.start` (1.5.0) | `context` (at a chat's first turn and after a compaction) | project facts, the current branch |
+| `run.stop` (1.5.0) | `continue` (a reason: the agent goes on; at most 5 in a row) | "the tests are red, keep going" |
+| `subagent.stop` (1.5.0) | `continue` (one more sub-agent round, at most 2) | a report that misses a section |
+| `compact.before` (1.5.0) | nothing (observe) | logging |
+| `notification` (1.5.0) | nothing (observe; a run waits for an approval) | desktop or chat notifications |
+
+`prompt.submit`, `session.start` and `run.stop` carry `projectId` (null outside projects). Declare `"engines": { "harness": "^1.5.0" }` when you use
+one. A plugin can also ship **command hooks** without code: `contributes.hooks` in `plugin.json`, Claude Code's
+format; such a plugin needs trust ([PLUGINS.md](../PLUGINS.md#declarative-hooks-plugin-api-150),
+[hooks and project MCP servers](hooks-and-project-mcp.md)).
+
+```js
+// Refuse messages that contain an API key, and give the agent the time zone at the start of each chat.
+ctx.hooks.on('prompt.submit', (input, output) => {
+  if (/\bsk-[A-Za-z0-9_-]{20,}/.test(input.prompt))
+    output.block = 'This message seems to contain an API key. Remove it and send it again.'
+})
+ctx.hooks.on('session.start', (_input, output) => {
+  output.context = `The user's time zone is ${Intl.DateTimeFormat().resolvedOptions().timeZone}.`
+})
+```
+
+## Output styles (plugin API 1.5.0)
+
+An output style changes how the agent writes its replies; the user picks it in the composer, per project or as the
+default. Register one from code, or declare it in `contributes.outputStyles` (no code needed):
+
+```js
+ctx.outputStyles.register({
+  name: 'release-manager',
+  description: 'Replies as a release checklist with risks first.',
+  content: 'Answer as a release manager: list the risks first, then a numbered checklist. Keep it short.',
+  keepCodingInstructions: true, // false (the default) drops harness-forge's coding instructions while it is used
+})
+```
+
+The name follows the agent and skill pattern and cannot be `default`, `explanatory` or `learning`; a personal or
+project style of the same name wins. Guide: [output styles](output-styles.md).
 
 ## Settings, secrets and storage
 

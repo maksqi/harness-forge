@@ -265,6 +265,68 @@ describe('unknown routes and invalid input', () => {
     expect(envelope.error.details).toMatchObject({ issues: [expect.objectContaining({ path: [...issuePath] })] })
   })
 
+  const PROJECT = 'prj_sample0000000001'
+  const SHA = 'a'.repeat(64)
+  it.each([
+    ['GET', '/api/hooks?projectId=prj_short', undefined, ['projectId']],
+    ['POST', '/api/hooks', { event: 'BeforeTool', command: 'sh x.sh' }, ['event']],
+    ['POST', '/api/hooks', { event: 'Stop', command: '' }, ['command']],
+    ['POST', '/api/hooks', { event: 'Stop', command: 'sh x.sh', timeout: 601 }, ['timeout']],
+    ['POST', '/api/hooks', { event: 'Stop', command: 'sh x.sh', id: 'hok_sample0000000001' }, []],
+    ['PATCH', '/api/hooks/hok_short', { enabled: false }, ['id']],
+    ['PATCH', '/api/hooks/hok_sample0000000001', {}, []],
+    ['PATCH', '/api/hooks/hok_sample0000000001', { enabled: false, source: 'project' }, []],
+    ['DELETE', '/api/hooks/hev_sample0000000001', undefined, ['id']],
+    ['GET', '/api/projects/prj_short/trust', undefined, ['id']],
+    ['POST', `/api/projects/${PROJECT}/trust`, { items: [] }, ['items']],
+    ['POST', `/api/projects/${PROJECT}/trust`, { items: [{ kind: 'hook', sha256: 'ABC' }] }, ['items', 0, 'sha256']],
+    ['POST', `/api/projects/${PROJECT}/trust`, { items: [{ kind: 'plugin', sha256: SHA }] }, ['items', 0, 'kind']],
+    ['POST', `/api/projects/${PROJECT}/trust`, { items: [{ kind: 'hook', sha256: SHA }], all: true }, []],
+    ['DELETE', `/api/projects/${PROJECT}/trust/ABC`, undefined, ['sha256']],
+    ['GET', '/api/projects/prj_short/mcp', undefined, ['id']],
+    ['PUT', `/api/projects/${PROJECT}/mcp/variables`, { values: { MCP_TOKEN: '' } }, ['values', 'MCP_TOKEN']],
+    ['PUT', `/api/projects/${PROJECT}/mcp/variables`, { values: {}, serverId: 'memory' }, []],
+    ['POST', `/api/projects/${PROJECT}/mcp/My_Server/reconnect`, undefined, ['serverId']],
+  ] as const)('the Phase 11 routes validate their input first: %s %s -> 400', async (method, path, body, issuePath) => {
+    const init: RequestInit = { method }
+    if (body !== undefined) {
+      init.headers = { 'content-type': 'application/json' }
+      init.body = JSON.stringify(body)
+    }
+    const response = await t.request(path, init)
+    expect(response.status).toBe(400)
+    const envelope = harnessErrorEnvelopeSchema.parse(await response.json())
+    expect(envelope.error.code).toBe('validation_error')
+    expect(envelope.error.details).toMatchObject({ issues: [expect.objectContaining({ path: [...issuePath] })] })
+  })
+
+  it('a regex-like hook matcher -> 400 on matcher (the safe subset, ADR-048)', async () => {
+    for (const [method, path] of [['POST', '/api/hooks'], ['PATCH', '/api/hooks/hok_sample0000000001']] as const) {
+      const body = method === 'POST' ? { event: 'PreToolUse', matcher: '^Bash', command: 'sh x.sh' } : { matcher: '(Write|Edit)+' }
+      const response = await t.request(path, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      expect(response.status, path).toBe(400)
+      const envelope = harnessErrorEnvelopeSchema.parse(await response.json())
+      expect(envelope.error.details, path).toMatchObject({ issues: [expect.objectContaining({ path: ['matcher'] })] })
+    }
+  })
+
+  it('/hooks/runs is a static route and the project trust / MCP routes never shadow the project routes', async () => {
+    const runs = harnessErrorEnvelopeSchema.safeParse(await (await t.request('/api/hooks/runs')).json())
+    if (stubRouteKeys().has('hooks.runs'))
+      expect(runs.data?.error.message).toContain('(hooks.runs)')
+    for (const [method, path, key] of [
+      ['GET', `/api/projects/${PROJECT}/trust`, 'projectTrust.list'],
+      ['GET', `/api/projects/${PROJECT}/mcp`, 'projectMcp.list'],
+      ['POST', `/api/projects/${PROJECT}/mcp/memory/reconnect`, 'projectMcp.reconnect'],
+      ['DELETE', `/api/projects/${PROJECT}/trust/${SHA}`, 'projectTrust.revoke'],
+    ] as const) {
+      if (!stubRouteKeys().has(key))
+        continue
+      const envelope = harnessErrorEnvelopeSchema.parse(await (await t.request(path, { method })).json())
+      expect(envelope.error.message, key).toContain(`(${key})`)
+    }
+  })
+
   it('/customizations/source is never taken for a customization id (static segment first)', async () => {
     const response = await t.request('/api/customizations/source?kind=skill&name=pdf&source=builtin')
     const envelope = harnessErrorEnvelopeSchema.parse(await response.json())

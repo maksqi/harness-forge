@@ -28,7 +28,7 @@ function inspection(overrides: Partial<PluginInspection> = {}): PluginInspection
     kind: 'declarative',
     source: 'zip',
     sha256: HASH,
-    contributions: { providers: ['acme'], models: 2, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [] },
+    contributions: { providers: ['acme'], models: 2, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] },
     networkHosts: ['api.acme.test'],
     secretsRequested: ['API key (Acme)'],
     permissions: [],
