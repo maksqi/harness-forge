@@ -3,9 +3,9 @@
 Part of the harness-forge build plan. Progress is tracked in `docs/ROADMAP.md` (coordinator only). Shared names come
 from `docs/DECISIONS.md` (ADR-048 … ADR-052, the amendment notes on ADR-008, ADR-017, ADR-024, ADR-031, ADR-033,
 ADR-034, ADR-040 and ADR-042 … ADR-046, and the Phase 11 contract seed; it wins on conflict); endpoints and DTOs from
-`docs/API.md` (the new schema sections "API.md 4.x (C34)" for hooks, the `data-hook` part, project trust and project
-MCP, the route sections "API.md 5.x (C34)" for the modules `hooks`, `projectTrust` and `projectMcp`, the stream
-section "API.md 6.x (C34)" for `data-hook`, the hook carrier message, the run origin `hook`, the activity kind `hooks`,
+`docs/API.md` (the new schema sections 4.31 (hooks, the `data-hook` part) and 4.32 (project trust and project MCP),
+the route sections 5.31 – 5.33 for the modules `hooks`, `projectTrust` and `projectMcp`, the stream section 6.11 for
+`data-hook`, the hook carrier message, the run origin `hook`, the activity kind `hooks`,
 `metadata.command.kind` / `.inlined`, the request field `outputStyle`, the 409 reasons `hook-blocked` / `untrusted` and
 the three notices, the events `hooks.changed` / `project-trust.changed` / `project-mcp.changed`, the two settings and
 the 120-route key index; C34 fixes the final numbers); components, props, store and module signatures, shortcuts and
@@ -15,28 +15,20 @@ composer, 7.33 project trust and project MCP, 8.4 the trust warning (hook comman
 output styles), 9.4 General (Output style), 9.10 Projects (row menu), 9.13 Customize: Output styles and Hooks, 10.8
 contracts, 11.8 modules, 12 shortcuts, 13.12 test ids, 14 accessibility, 15 copy); flows, tables and security rules
 from `docs/ARCHITECTURE.md` (the stop order, backups, the new flow sections for hooks, project trust, project MCP,
-output styles and command extras, `0008`, the Phase 11 security section, the log rules; D15 fixes the section
-numbers); plugin API 1.5.0 (`contributes.hooks`, `contributes.outputStyles`, `ctx.outputStyles.register`, the new code
-hook events) from `docs/PLUGINS.md`; the mock model `mock:hooks` from `docs/PROVIDERS.md` (8, "Hook mocks (Phase 11)":
+output styles and command extras (6.28 – 6.32), `0008`, the Phase 11 security section (10.12), the log rules);
+plugin API 1.5.0 (`contributes.hooks`, `contributes.outputStyles`, `ctx.outputStyles.register`, the new code hook
+events) from `docs/PLUGINS.md`; the mock model `mock:hooks` from `docs/PROVIDERS.md` (8, "Hook mocks (Phase 11)":
 the probe contract); the user guides `docs/guides/hooks-and-project-mcp.md` and `docs/guides/output-styles.md`. The new
 UI.md, ARCHITECTURE.md, PLUGINS.md and PROVIDERS.md sections and the guides are written by D15 in P11-0a, API.md by
 C34. W11.14 reconciles every doc with the code in P11-B.
 
-**Status (2026-10-06): in progress.** P11-00 (coordinator) so far: the design reports are extracted into
-`.tmp/p11-designs` (with the binding `plan.md`, `README.md` and the rules draft `agent-rules.md`); the baseline
-`pnpm check` on `45e974c` (v1.6, `origin/main`) was green with 10562 tests and `git status --porcelain` was identical
-before and after it (`.tmp/gates/P11-00/`); the vue-tsc 3.3.12 regression (vuejs/language-tools#6240: a `//` inside a
-component prop value in a template corrupts the generated code) that kept Dependabot #7 red is worked around by commit
-`4765743` `fix(web): keep URL literals out of component props` (the URL placeholders of `McpServerDialog.vue`,
-`WizardCredentialsStep.vue`, `InstallDialog.vue` and `SchemaField.vue` moved into script constants) with the guard test
-`apps/web/app/components/template-literals.test.ts`, verified on #7's branch in a temporary worktree (`pnpm check`
-10563 passed, 1 skipped: the first unit-test run of #7) and pushed; Dependabot #8 (`diff` 9) and #7 (minor-and-patch,
-9 updates) are being merged; both audit advisories are still unpatched (re-checked 2026-10-06 with the P8-00 rule,
-ignores kept); the `.tmp/v16` worktree (`45e974c`) is installed and built (the old build for the upgrade seed); the old
-`.tmp` content is moved to `.tmp/_archive` (the user deletes it). P11-0a is running: K1, K2 and the contract
-skeletons are done; C34, C35, D14, D15 and the v1.6 seed (K3S) are at work. "Deviations from the plan" holds the
-binding changes to the plan sections below; "Deviations found while building" what each wave changed; "Outcome" the
-gate results.
+**Status (2026-10-06): done.** v1.7 is complete (final gate commit `chore: final gate for harness-forge v1.7`). P11-00:
+`4765743` (vue-tsc workaround), Dependabot #8 `fe6dbeb` and #7 `b636a1a`, `60389e0` (source-map-js override, four
+devtools-only simple-git advisories ignored); P11-0a `d1f7836` (10912 tests); P11-0b `9f169a1` (11212 tests, v1.6
+upgrade probe 57/57, seam probe 37/37); P11-A `3cff82d` (11760 tests, probes 356/356 after W11.15 / W11.16, P10-A /
+P9-A / P8-A green, e2e 156); P11-B: W11.13 (25 new e2e tests), W11.14 (docs), W11.17 – W11.19 (fix-ups) and the final
+gate (11787 tests, probes 345/345, e2e 191 ×3, Docker 49/49). "Deviations found while building" holds what each wave
+changed; "Outcome" the gate results.
 
 Paths: `S` = `apps/server/src`, `W` = `apps/web/app`, `SH` = `packages/shared/src`, `SDK` = `packages/plugin-sdk/src`.
 File:line references point at `main` = `45e974c` (they drift as the waves land; search for the named symbol).
@@ -369,7 +361,139 @@ Open points decided by D14 while writing this file (confirmed by the coordinator
 Recorded by the coordinator from the agent reports (`.tmp/waves/P11-*-notes.md`) and the gates; the code and the
 reconciled docs (W11.14) follow these, not the task text further down.
 
-- (none yet — filled in at Gate P11-0a)
+- **P11-0a (K1, K2, K3S, C34, C35, D14, D15)**:
+  - Open points: 1 kept as prompted (C35 adds `style` to `CUSTOMIZATION_KINDS`, C34 adds `output-style` to
+    `CLIENT_COMMANDS`, each with its compile fixes, the web maps included); 2 accepted (no route flag on
+    `hooks.update`: the handler asks for fresh auth unless the body is exactly `{ enabled: false }`); 12 decided: the
+    optional `changed?: boolean` of a trust item (C34 adds it, W11.3 computes it; "Changed" instead of "New"); the
+    others accepted as written.
+  - C34: the plugin contributions count is **`commandHooks: number`** (`hooks: string[]` keeps listing the code hooks);
+    the outcome enum is `hookRecordOutcomeSchema` / `HookRecordOutcome` (`HookOutcome` is the helper type of
+    `util/hooks.ts`); `details.hook` of a 409 `hook-blocked` is checked only as an object in `errors.ts` (import cycle
+    with `chat.ts`); `/output-style` showed a "not available yet" toast until W11.10; the secret scope `project:` landed
+    in `services/secrets/types.ts` (C36). Pins: 120 routes / 33 modules, 18 SSE types, 30 settings, 11 notices, 14
+    conflict reasons, 6 data parts, 7 client commands, the origin `hook`, 4 customization kinds.
+  - C35: `limits.ts` imports no util file (cycle limits → trust → shell-command → limits): the Phase 11 limits are
+    literals with an equality test against the util mirrors; the skill keys `userInvocable` / `modelInvocable` /
+    `argumentHint` are optional (present only when not the default; `skillInvocation()` applies the defaults); new
+    exports `HOOK_MATCHER_SUBJECTS`, `isAllowedMcpUrl`, `extractArgsFileRefs`, `skillInvocation`,
+    `styleNameFromLabel`, `DEFINITION_LIMITS.labelMaxChars` (128); `hookTargetNames` also maps `task` / `todo_write` /
+    `exit_plan_mode` / `skill` to `Task` / `TodoWrite` / `ExitPlanMode` / `Skill`; `sessionStartSource` is `compact`
+    only when no user-authored message and no SessionStart record follow the latest compaction marker; fenced code
+    blocks are plain text for `!` spans and `@` references; a cut payload carries `harness.truncated: true`; the model
+    text is `<hook-context event tool>` / `<hook-feedback>` with the fallback `(no reason given)`; in `.mcp.json` a URL
+    with variables must start with `http(s)://` or a variable and a default cannot hold another variable; discovery
+    scans eight folders (`output-styles` included).
+  - D15: W11.8 owns the Data copy (`W/components/settings/data/{DataExportSection,DataImportSection}*`); a 409
+    `hook-blocked` carries `details.hook`; `project-mcp-variable[data-state]` = `set | default | missing`,
+    `hooks-disabled[data-reason]` = `safe-mode | shell-off`; UI.md 13.12 lists 79 test ids.
+  - K3S: the v1.6 seed `.tmp/upgrade-v16/{data,roots}` (20 chats, 136 messages; the projects `git-demo` with Phase 11
+    files and `untrusted` with invalid, oversized and linked files); v1.6 already runs user stdio servers in
+    `<dataDir>/plugins/.data/core-mcp` (a `.mcp-started-*` marker exists there), so the "nothing ran" checks look only
+    at project folders.
+  - P11-00 completion: Dependabot #8 and #7 merged; the source-map-js advisory is overridden, the simple-git advisories
+    (only through the disabled `@nuxt/devtools`) are ignored with a dated comment (`60389e0`).
+  - Gate: the examples' `harness-forge.d.ts` regenerated; the agent-pack contributions expectation gained
+    `commandHooks: 0` and `outputStyles: []`.
+- **P11-0b (K3, C36, C37, C38, C39)**:
+  - K3: `0008_hooks_trust` = 2 CREATE TABLE (`hooks`; `project_trust` with the primary key project + sha256 and a
+    cascading foreign key) + 1 `ALTER TABLE projects ADD output_style`, no index; 22 tables; a second `db:generate`
+    reports no changes.
+  - C36 / C37 names (full list in `.tmp/waves/P11-0b-notes.md`): `HookScope`,
+    `HookService.snapshot(scope, { signal? })`, `HookSnapshot { scope, has, run }`, `HookRunInput` (+ `command?`;
+    SubagentStop passes the `task` call as `input.tool`), `HookEventResult`,
+    `ProjectMcpManager.toolsFor(projectId, { signal, waitMs })` → `{ tools, shadowed, unavailable }`,
+    `RunReleaseFollowUp = { kind: 'hook', data }` (an interface; no new `ChatRunner` member),
+    `ProjectConfigService { snapshot, verify, invalidate, stop }`, `ProjectTrustService.revoke` answers the list; the
+    fake snapshot option is `present`; `<dataDir>/hooks` has no `env.paths` entry (joined from the data directory).
+  - C37: `applyHookDecision` writes "Blocked by hook: …"; a hook `allow` applies only when the call would ask, is not an
+    `execute` tool and its policy is `safe` / `ask`; a rewrite happens before `tool.before` (fail closed); PostToolUse
+    runs on success only; `steps.ts` runs guard → hooks → steer → finalize; **open point 14**: a `hook-blocked` refusal
+    deletes the chat row the request created (`chat.created`, then `chat.deleted`); Notification is fired by the
+    pipeline itself; PreCompact runs through `HostSession.hooks.preCompact`; `carrierParts` holds task results or hook
+    parts, never both; `ensureRunChat` saves `outputStyle` only when it creates the chat; `GET /commands` items carry
+    `kind: 'command'`.
+  - C38: `RunShellOptions.input` / `.env` (`SHELL_ENV_RESERVED`, `mergeShellEnvironment`); every stdio MCP server
+    (global ones too) runs in its own process group on POSIX; the fixtures `mcp-min.mjs` / `grandchild.mjs`; the
+    `mock:hooks` continuation rules apply only when the last user message is not a steer; the `record` script writes a
+    `.hook-log` file (not a folder); the mock listing has 20 models (`GET /api/models` 18).
+  - C39: Customize tabs `agents | commands | skills | output-styles | hooks`; UI.md won over the task text: `focusKey` /
+    `data-key` (not the sha256), `HOOK_EVENT_INFO` (not `HOOK_EVENT_COPY`), `HookAction` without `copy-to-personal`,
+    the extra props `ProjectTrustItem.variables?` and `ProjectMcpServerRow.trust`; the stores `hooks` (+ `runs()`),
+    `project-trust` (`pending()` → `number | null`) and `project-mcp` (`saveVariables`).
+  - Gate: 11212 tests; the v1.6 upgrade probe 57/57 and the seam probe 37/37; after a real upgrade the cached v1.6 mock
+    listing hides `mock:hooks` until a refresh; `GET /tools` still lists `shell` with `HF_WORKSPACE_SHELL=0`
+    (registered, not offered; unchanged).
+- **P11-A (W11.1 – W11.12, G11P; fix-ups W11.15, W11.16)** (full digest: `.tmp/waves/P11-A-notes.md`):
+  - Coordinator CCRs applied during the wave: `chat/pipeline.ts` counts only model-invocable skills for
+    `skillsAvailable` (W11.6); `SH/schemas/shares.ts` command `{ name: slashNameSchema, kind?: invocationKindSchema }`
+    (W11.12: skills up to 64 characters, share pages read "Skill"); `chat/tools.ts` passes the `tool.after` draft to
+    `postToolUse`, so a plugin's `tool.after` `context` is recorded as a `PostToolUse` record (source plugin, label
+    `tool.after`, outcome `context`) and reaches the model at the next step (W11.1); `services/secrets/scope.ts` accepts
+    `project:` scopes (found by W11.7).
+  - W11.1: outcomes: a Stop block → `continued`, a SubagentStop block → `blocked`, `continue: false` → `stopped` (wins
+    over a Stop block), a `systemMessage` alone → `context`; labels are the redacted command head (project items
+    prefixed `<file>: `); code hooks are listed as `plugin:<id>:code:<event>:<n>` and logged once per plugin (`exitCode`
+    null); a hook snapshot opens the project folder 0 times; a `workspace.changed` under `.claude/` / `.harness/` emits
+    `hooks.changed { projectId }`.
+  - W11.2: two hook snapshots per request (prepare + run; the pin of `pipeline-hooks.test.ts` changed); hook turns use
+    request ids `hook_…`; UserPromptSubmit also runs at enqueue (the records travel with the queue entry); the
+    PreCompact record sits right before the marker; each SubagentStop round gets the child's remaining steps; `/compact`
+    and each enqueue open the project folder once (for the hook scope).
+  - W11.3: revoke answers **200 with the list** (not 204); more `project-trust.changed` emits (a hash change after a
+    rebuild or a verify mismatch, a pending-count change, `{ pending: 0 }` on project delete); `orphaned` is 0 while
+    the folder is unavailable; a span longer than 4096 characters is never listed; linked, oversized or unreadable
+    settings files are `not-an-object` / `too-large` diagnostics; no DNS lookups for `private-network`; no folder
+    opens per run.
+  - W11.4: stored variables no server uses are listed with `usedBy: []`; `reconnect` of a pending or needs-variables
+    server answers 200 with that state; `shadows` only for approved servers; `.mcp.json` is read again every 15 s while
+    a server runs; a crashed server is retried at the next run (no timer); the manager subscribes to events at its first
+    use.
+  - W11.5: one `TurnWorkspace` per turn (the folder opens at most once in prepare, the run reuses it); 409 `untrusted` /
+    `disabled` also delete the chat row the request created (400 keeps the v1.6 behavior); plugin templates run spans
+    and references too; `@README.md,` keeps the comma (frozen mention grammar) and is not inlined (backlog); the frozen
+    expansion carries `kind: 'command'`, and `inlined` only when something was inlined.
+  - W11.6: a plugin style with a builtin name is `invalid`; a restored command with `!` spans is turned off; the style
+    resolves chat ?? project ?? setting, and an unavailable one runs as `default` with the notice once per model.
+  - W11.7: `runsCode` is true for declarative plugins with command hooks or `!` spans (it follows
+    `manifestRequiresTrust`); the first plugin that registers a style name wins (the second is logged as skipped); the
+    restore warnings said "agents, commands or skills" (styles included; W11.17 changed them to "personal
+    definitions").
+  - W11.8: the CCRs stay local adapters (`CustomizationDraft.label?`, the `HookSection` slots `notices` /
+    `empty-actions`, `customizeRoute` with `'style' | 'hook'`); the hooks panel reads on / off from `state` (`HookEntry`
+    has no `enabled`).
+  - W11.9: the variables prompt uses UI.md's text; Enter never approves; more than 50 approvals go in batches of 50;
+    Review… in the MCP dialog opens a nested trust dialog.
+  - W11.10: the style menu gets its project scope through the `OUTPUT_STYLE_SCOPE` provide / inject adapter (kept at the
+    gate, no prop change); a plugin hook's refusal line reads "Plugin hook" (no plugin name in the data).
+  - W11.11 / W11.16: on `/` the page moves to `/chat/<id>` once the server accepted the first request (a 2xx answer,
+    seen by the transport's `fetch`; the additive frozen member `ChatSession.accepted`), not at the first chunk (an
+    image turn streams nothing before its image: the e2e regression of the gate); a refused first message keeps the
+    page on `/`; a refused edit puts the text and the files back in the composer and the previous version reloads.
+  - W11.12: hook notes read "Project hook" (`HookData` has no path).
+  - G11P: 353 checks passed, 3 failed; regressions (P10-A copy, P9-A, P8-A `ws git`) green. Fix-ups: **W11.15** —
+    `PUT /settings { hooksEnabled }` emits `hooks.changed { projectId: null }`; a PreToolUse `allow` never skips the
+    card in plan mode (`applyHookDecision(…, toolMode?)`; known limitation: the record keeps the hook's outcome
+    `allowed` while the harness still asks, in plan mode, for `execute` tools and `always` policies); bare script names
+    (`sh count.sh`, `node hook.mjs`) are trust references (a security fix in `SH/util/trust.ts`); a personal hook that
+    is off reads `off` before `blocked` (already so; tests added). **W11.16** — `created` on an accepted response; the
+    import result copy "{n} personal definitions restored · {k} kept · {f} failed". Spec differences settled in the
+    docs: a regex-looking project matcher is only a diagnostic (its group is dropped), `shadows` is absent until the
+    server is approved, a linked `.claude` folder is `not-an-object`.
+  - Backlog: `@path,` keeps the comma; dedicated diagnostic codes for linked / oversized settings files; a
+    `turnedOff` count in the import result; the plugin name in a plugin hook's refusal line.
+- **P11-B (W11.13, W11.14, W11.17, W11.18)**: W11.14 reconciled README, `.env.example`, API.md, ARCHITECTURE.md,
+  PLUGINS.md, PROVIDERS.md, UI.md, the guides and `examples/plugins/README.md` with the code of `3cff82d`, then with the
+  round-2 fix-ups it triggered. W11.17 (server): `POST /plugins` and every manifest save ask for fresh auth whenever the
+  manifest requires trust (`manifestRequiresTrust`: a stdio MCP server, command hooks or `!` spans; the pin is set only
+  after the check, and dropping the trust-requiring parts clears it); the restore warnings say "personal definitions";
+  `SessionStart` / `UserPromptSubmit` run before a command's `!` spans and `@path` reads (the checks still come first,
+  the trust hash is checked again right before the spans, a hook block runs nothing; image turns expand while
+  planning); foreground and background sub-agents use the parent run's project MCP result (shadowing and the project
+  tools under the child ceiling). W11.18 (web): the data-slot `hook-system-message`; the tool-row hook badge's tooltip
+  opens while the row button has keyboard focus; the install preview lists agents and skills; the shadowed tooltip says
+  "output style"; the hook command help says "Runs with bash (or sh when bash is missing) …". The final gate adds the
+  rest.
 
 ## Rules for every Phase 11 agent
 
@@ -2612,12 +2736,12 @@ Completed by the coordinator at each gate ("audit" is the ownership audit of `sc
 
 | Wave | Agents | Gate result | Commit |
 |---|---|---|---|
-| P11-00 | coordinator | baseline `pnpm check` 10562 green on `45e974c`, `git status` unchanged; vue-tsc workaround pushed; #8 / #7 (pending); advisories still unpatched (ignores kept, re-checked 2026-10-06); design reports in `.tmp/p11-designs`; `.tmp/v16` built; `.tmp` archived | `4765743` `fix(web): keep URL literals out of component props` |
-| P11-0a | coordinator (K1, K2, contract skeletons, K3 seed by K3S), C34, C35, D14, D15 | (pending) | (pending) `feat: add phase 11 contracts and docs` |
-| P11-0b | coordinator (K3), C36, C37, C38, C39 | (pending) | (pending) `feat: add phase 11 schema, migration and skeletons` |
-| P11-A | W11.1 – W11.12, G11P | (pending) | (pending) `feat: add hooks, project mcp servers and output styles` |
-| P11-B | W11.13, W11.14 (W11.15 / W11.16 only if needed) | (pending) | (final gate commit) |
-| Final gate v1.7 | coordinator | (pending) | (pending) `chore: final gate for harness-forge v1.7` |
+| P11-00 | coordinator | baseline `pnpm check` 10562 green on `45e974c`, `git status` unchanged; vue-tsc workaround pushed; #8 / #7 merged; `60389e0` audit fix; advisories still unpatched (ignores kept, re-checked 2026-10-06); design reports in `.tmp/p11-designs`; `.tmp/v16` built; `.tmp` archived | `4765743` `fix(web): keep URL literals out of component props` |
+| P11-0a | coordinator (K1, K2, contract skeletons, K3 seed by K3S), C34, C35, D14, D15 | audit ok (130 paths); 10912 tests; build ok; CSP 38/38; 11 new routes 501 / 400 (18/18); `pluginApiVersion` 1.5.0; e2e 156; v1.6 seed 20 chats / 136 messages | `d1f7836` |
+| P11-0b | coordinator (K3), C36, C37, C38, C39, G11B | audit ok (189 paths); `0008` = 2 CREATE TABLE + 1 ALTER ADD; 11212 tests; build ok; CSP 38/38; e2e 156; v1.6 upgrade probe 57/57; seam probe 37/37 | `9f169a1` |
+| P11-A | W11.1 – W11.12, G11P, W11.15 / W11.16 | audit ok (249 paths); 11760 tests; build ok; CSP 38/38; probes 356/356 after the fix-ups + P10-A copy 173/0 + P9-A + P8-A 47/0; e2e 156 | `3cff82d` |
+| P11-B | W11.13, W11.14, W11.17 – W11.19, G11D | 11787 tests; build ok; CSP 38/38; probes 345/345 (incl. the real v1.6 → v1.7 upgrade 45/45) + regressions; e2e 191 ×3; screenshots reviewed; audit clean (6 ignored); Docker 49/49 | (final gate commit) |
+| Final gate v1.7 | coordinator | see the row above and the ROADMAP wave log (frozen install, check, build, CSP, probes + regressions on fresh data, e2e ×3, screenshots, audit, real v1.6 → v1.7 upgrade, Docker) | `chore: final gate for harness-forge v1.7` |
 
 ---
 

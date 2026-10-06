@@ -56,6 +56,18 @@ describe('slashArgumentHint', () => {
     }
   })
 
+  it('follows the 64-character slash name rule (W11.19: skill names longer than 32 characters)', () => {
+    const name = `fill-forms-${'x'.repeat(53)}`
+    expect(name).toHaveLength(64)
+    const long = mount(SlashArgumentHint, { props: { text: `/${name} `, hint: '<form>', describedById: 'hint-5' } })
+    expect(long.get(`[data-testid="${testIds.slashArgumentHint}"]`).text()).toContain('<form>')
+    expect(long.get('#hint-5').text()).toBe('Arguments: <form>')
+    // One character more is no slash name.
+    const tooLong = mount(SlashArgumentHint, { props: { text: `/${name}x `, hint: '<form>', describedById: 'hint-6' } })
+    expect(tooLong.find(`[data-testid="${testIds.slashArgumentHint}"]`).exists()).toBe(false)
+    expect(tooLong.find('#hint-6').exists()).toBe(false)
+  })
+
   it('hides as soon as the text gets an argument', async () => {
     const wrapper = mount(SlashArgumentHint, { props: { text: '/review ', hint: '<file>', describedById: 'hint-4' } })
     expect(wrapper.find(`[data-testid="${testIds.slashArgumentHint}"]`).exists()).toBe(true)

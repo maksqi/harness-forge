@@ -26,21 +26,32 @@
 // definitions, a `mock:agents` chat in `notes` that ran a custom agent and a `mock:background` chat whose agent
 // reported through a server-started turn (both seeded with the sub-agent model cleared); the live background chat and
 // the plugin are made by their screens and removed again in `close`.
+// Phase 11 screens (W11.13): Settings -> Customize -> Hooks with the `hooks-demo` project (personal, project and plugin
+// rows), the hook editor, the hook import with a preview, the project trust dialog (new, changed and approved items), the
+// project MCP dialog (a connected stdio server, an HTTP server waiting for approval, the variables), the Output styles
+// tab, the composer's style menu, a message a UserPromptSubmit hook refused, the hook notes of a chat (a SessionStart
+// note, a shell call a PreToolUse hook blocked, a failed Stop hook), a Stop hook continuation and the hook-pack plugin's
+// Hooks and Output styles sections. Their data: the `hooks-demo` project folder (hook scripts written by
+// `writeHookScript` and run as `sh .harness/hooks/<file>.sh`, three versions of its `.harness/settings.json`: one per
+// seeded chat, then the final one, `.mcp.json` with the dependency-free stdio fixture `mcp-min.mjs`, a command with
+// shell lines, a project output style), approved through the API; two personal hooks (made last: no seeded turn runs
+// them) and a personal style; the hook-pack plugin is installed by its screens and removed again in `close`.
 // A screen that starts something (a run, a recording, a dialog, settings only it needs, the open changes panel) undoes
 // it in `close`, so the other screens look the same in every run.
 // `@readme` (also `@screenshots`): the README images as full 1440x900 frames, written to `.tmp/screenshots/readme/`
 // with the file names of `docs/assets/screenshots/` (chat-dark, chat-light, plugins-dark, provider-wizard-dark,
-// settings-dark, workspace-dark, changes-panel-dark) plus customize-dark (Phase 10: Settings -> Customize, a candidate for
-// the README).
+// settings-dark, workspace-dark, changes-panel-dark) plus customize-dark (Phase 10: Settings -> Customize) and hooks-dark
+// (Phase 11: Settings -> Customize -> Hooks), candidates for the README.
 import type { Locator, Page } from '@playwright/test'
-import type { StartedServer, UiStreamChunk } from '../../helpers/index.ts'
+import type { HooksConfig, HookScriptName, HookScriptOptions, StartedServer, UiStreamChunk } from '../../helpers/index.ts'
 import { createHash } from 'node:crypto'
-import { mkdir, utimes, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, utimes, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import process from 'node:process'
 import { devices } from '@playwright/test'
 import { createMessageId } from '../../../packages/shared/src/index.ts'
 import {
+  approveProjectItems,
   byTestId,
   changesFile,
   changesFileButton,
@@ -54,24 +65,32 @@ import {
   expectMessageStatus,
   gitAvailable,
   HarnessApi,
+  hookGroup,
+  hookNote,
   initGitRepository,
   lastAssistantMessage,
+  mcpVariable,
   MOCK_CHECKPOINT_DIR,
   MOCK_CHECKPOINT_DONE,
   MOCK_CHECKPOINT_FILE,
+  MOCK_HOOKS_MODEL,
   MOCK_WORKSPACE_DONE,
   naturalSize,
   openRewind,
   parseUiMessageStream,
   pressShortcut,
+  projectSettings,
   REPO_ROOT,
   sendMessage,
   startServer,
   test,
   testIds,
+  trustItem,
   userMessages,
   waitForTestId,
   workspaceRoot,
+  writeHookScript,
+  writeProjectFile,
 } from '../../helpers/index.ts'
 
 const ENABLED = process.env.E2E_SCREENSHOTS === '1'
@@ -131,6 +150,12 @@ interface Seed {
   customAgent: string
   /** Phase 10: a `mock:background` chat whose background agent reported through a server-started turn. */
   taskResult: string
+  /** Phase 11: the `hooks-demo` project (hooks, `.mcp.json`, a command with shell lines, the project style Learning). */
+  hooksDemo: string
+  /** Phase 11: a `mock:hooks` chat in `hooks-demo`: a SessionStart note, a shell call a hook blocked, a failed Stop hook. */
+  hookNotes: string
+  /** Phase 11: a `mock:hooks` chat in `hooks-demo` whose Stop hook asked the agent to continue (the carrier note). */
+  hookContinuation: string
   /** The screenshot server (API calls of the screens that start something). */
   baseURL: string
   /** The start of the browser clock: a little after the seed, so relative times read "2m ago". */
@@ -200,6 +225,56 @@ const PERSONAL_DEFINITIONS: readonly { kind: 'agent' | 'command' | 'skill', cont
 
 /** Phase 10: the plugin of the plugin-detail-agents screen (made in `open`, removed in `close`). */
 const AGENT_PLUGIN_ID = 'db-tools'
+
+/** Phase 11: the project of the hook, trust, project MCP and output style screens (never `harness-forge` or `notes`). */
+const HOOKS_PROJECT = 'hooks-demo'
+/** Phase 11: the example plugin of the plugin hook screens (installed in `open`, removed in `close`). */
+const HOOK_PLUGIN_ID = 'hook-pack'
+/** Phase 11: the dependency-free stdio MCP fixture, copied into `hooks-demo/tools/`. */
+const MCP_MIN_FIXTURE = join(REPO_ROOT, 'apps/server/src/mcp/__fixtures__/mcp-min.mjs')
+
+/**
+ * Phase 11: the hook scripts of `hooks-demo` (`writeHookScript`: POSIX sh files run as `sh .harness/hooks/<file>.sh`
+ * from the project folder), by file name.
+ */
+const HOOK_SCRIPTS: Readonly<Record<string, readonly [HookScriptName, HookScriptOptions]>> = {
+  guard: ['deny', { file: 'guard', text: 'Deleting the build folder isn\'t allowed here.' }],
+  branch: ['context', { file: 'branch', text: 'Branch main, 3 files changed since v1.6.' }],
+  lint: ['error', { file: 'lint', text: 'eslint: 2 problems in src/app.ts' }],
+  tests: ['stop-once', { file: 'tests', text: 'Run the parser tests before you stop: 1 test fails.' }],
+  secrets: ['prompt-block', { file: 'secrets', text: 'Don\'t paste API keys into the chat.' }],
+  format: ['context', { file: 'format', text: 'prettier rewrote the file.' }],
+}
+
+/** Phase 11: the other files of `hooks-demo`. */
+const HOOKS_FILES: Readonly<Record<string, string>> = {
+  'README.md': '# hooks-demo\n\nA small app with project hooks and MCP servers.\n',
+  'src/app.ts': 'export const ready = true\n',
+  '.harness/output-styles/release-notes.md': '---\nname: Release notes\ndescription: User-facing changes first, as short bullets.\nkeep-coding-instructions: true\n---\nWrite like release notes: user-facing changes first, one short bullet each.\n',
+  '.harness/commands/status.md': '---\ndescription: Summarize the working tree before a release\n---\nThe state of the repository:\n\n!`git status --short`\n!`ls docs`\n\nSummarize what changed since the last release.\n',
+  // Variable references (`mcpVariable`) stay as written: the server expands them from the project's variables.
+  '.mcp.json': `${JSON.stringify({
+    mcpServers: {
+      docs: { command: 'node', args: ['tools/mcp-min.mjs', '--name', 'docs'], env: { DOCS_TOKEN: mcpVariable('DOCS_TOKEN') } },
+      github: { type: 'http', url: `https://${mcpVariable('GITHUB_HOST', 'api.githubcopilot.com')}/mcp/`, headers: { Authorization: `Bearer ${mcpVariable('GITHUB_TOKEN')}` } },
+    },
+  }, null, 2)}\n`,
+}
+
+/** Phase 11: the personal output style (the composer's menu and the Output styles tab). */
+const PERSONAL_STYLE = '---\nname: terse\ndescription: Short, direct answers without a preamble.\n---\nAnswer in as few words as possible. No preamble, no summary.\n'
+
+/** Phase 11: the Claude Code settings the hook-import screen pastes (two hooks, one invalid matcher, an ignored prompt hook). */
+const HOOK_IMPORT_JSON = JSON.stringify({
+  permissions: { allow: ['Bash(pnpm test)'] },
+  hooks: {
+    PreToolUse: [
+      { matcher: 'Bash', hooks: [{ type: 'command', command: './scripts/guard.sh', timeout: 60 }] },
+      { matcher: '^Bash.*$', hooks: [{ type: 'command', command: './scripts/audit.sh' }] },
+    ],
+    Stop: [{ hooks: [{ type: 'command', command: 'pnpm lint --quiet' }, { type: 'prompt', prompt: 'Check the work.' }] }],
+  },
+}, null, 2)
 
 interface Screen {
   name: string
@@ -310,6 +385,38 @@ async function expandWorkspaceRow(page: Page, toolName: string): Promise<Locator
   await expect(row).toHaveAttribute('data-state', 'output-available')
   await row.getByRole('button').click()
   return row.locator('xpath=ancestor::*[@data-slot="tool-part"][1]').getByTestId(testIds.toolRowOutput)
+}
+
+/**
+ * Phase 11: installs the hook-pack example (a copy, trusted: its command hook runs only while it is trusted). Pinning the
+ * trust needs a fresh login, so the browser's session logs in again first.
+ */
+async function installHookPack(page: Page, seed: Seed): Promise<void> {
+  const api = pageApi(page, seed)
+  await api.client.auth.login({ body: { password: PASSWORD } })
+  const plugin = await api.client.pluginInstall.install({ body: { source: 'path', path: join(REPO_ROOT, 'examples/plugins', HOOK_PLUGIN_ID), mode: 'copy', trust: true } })
+  expect(plugin.state, 'hook-pack is active').toBe('active')
+}
+
+async function removeHookPack(page: Page, seed: Seed): Promise<void> {
+  await pageApi(page, seed).client.plugins.remove({ params: { id: HOOK_PLUGIN_ID }, query: {} })
+}
+
+/**
+ * Phase 11: the active tab of Settings -> Customize scrolled into view. With five tabs and the Project select the tab
+ * list scrolls (also at 1440 px) and does not reveal the active tab by itself, which cuts the last tabs off.
+ */
+async function revealCustomizeTab(page: Page, tab: 'hooks' | 'output-styles'): Promise<void> {
+  await byTestId(page, testIds.customizeTab, { 'data-value': tab }).evaluate(element => element.scrollIntoView({ block: 'nearest', inline: 'end' }))
+}
+
+/** Phase 11: Settings -> Customize on the Hooks tab with `hooks-demo` selected, once its sections loaded. */
+async function openHooksTab(page: Page, seed: Seed): Promise<void> {
+  await openSettings(page, `/settings/customize?tab=hooks&project=${seed.hooksDemo}`, async (page) => {
+    await expect(byTestId(page, testIds.hooksSection, { 'data-source': 'personal' })).toHaveAttribute('data-count', '2')
+    await expect(byTestId(page, testIds.hooksSection, { 'data-source': 'project' })).toHaveAttribute('data-count', '5')
+    await revealCustomizeTab(page, 'hooks')
+  })
 }
 
 const SCREENS: Screen[] = [
@@ -444,7 +551,7 @@ const SCREENS: Screen[] = [
       if (isPhone(page))
         await page.getByTestId(testIds.sidebarTrigger).click()
       await page.getByTestId(testIds.projectSwitcher).click()
-      await expect(page.getByTestId(testIds.projectSwitcherOption)).toHaveCount(4)
+      await expect(page.getByTestId(testIds.projectSwitcherOption)).toHaveCount(5)
       await expect(page.getByTestId(testIds.projectManage)).toBeVisible()
     },
   },
@@ -453,7 +560,7 @@ const SCREENS: Screen[] = [
     open: async (page) => {
       await openNewChatScreen(page)
       await page.getByTestId(testIds.newChatProject).click()
-      await expect(page.getByTestId(testIds.projectOption)).toHaveCount(3)
+      await expect(page.getByTestId(testIds.projectOption)).toHaveCount(4)
     },
   },
   {
@@ -473,7 +580,7 @@ const SCREENS: Screen[] = [
   {
     name: 'settings-projects',
     open: page => openSettings(page, '/settings/projects', async (page) => {
-      await expect(page.getByTestId(testIds.projectRow)).toHaveCount(2)
+      await expect(page.getByTestId(testIds.projectRow)).toHaveCount(3)
     }),
   },
   {
@@ -490,6 +597,53 @@ const SCREENS: Screen[] = [
     close: async (page) => {
       await page.keyboard.press('Escape')
       await expect(page.getByTestId(testIds.allowlistDialog)).toBeHidden()
+    },
+  },
+  {
+    name: 'project-trust-dialog',
+    open: async (page, seed) => {
+      // From the chat header's chip: 4 items wait (two hooks, an MCP server, a command), one of them changed.
+      await openChat(page, seed.hookNotes)
+      const chip = page.getByTestId(testIds.projectTrustChip)
+      await expect(chip).toHaveAttribute('data-count', '4')
+      await chip.click()
+      const dialog = page.getByTestId(testIds.projectTrustDialog)
+      await expect(dialog.getByTestId(testIds.projectTrustGroup)).toHaveCount(3)
+      await expect(trustItem(dialog, { 'data-state': 'changed' })).toHaveCount(1)
+      await expect(dialog.getByTestId(testIds.projectTrustFilter)).toHaveAttribute('data-value', 'pending')
+      // One item selected ("1 selected", "Approve 1 item"); `close` never approves it.
+      await trustItem(dialog, { 'data-kind': 'hook', 'data-state': 'new' }).getByTestId(testIds.projectTrustSelect).click()
+      await expect(dialog.getByTestId(testIds.projectTrustApprove)).toHaveAttribute('data-count', '1')
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.projectTrustDialog)).toHaveCount(0)
+    },
+  },
+  {
+    name: 'project-mcp-dialog',
+    open: async (page, seed) => {
+      // The approved stdio server stops after 10 idle minutes: start it again for the picture.
+      const docs = await pageApi(page, seed).client.projectMcp.reconnect({ params: { id: seed.hooksDemo, serverId: 'docs' } })
+      expect(docs.state, 'the docs server connected').toBe('connected')
+      await openSettings(page, '/settings/projects', async (page) => {
+        const row = byTestId(page, testIds.projectRow, { 'data-project-id': seed.hooksDemo })
+        await row.getByTestId(testIds.projectRowMenu).click()
+        await page.getByRole('menu').getByTestId(testIds.projectMcp).click()
+      })
+      const dialog = page.getByTestId(testIds.projectMcpDialog)
+      await expect(byTestId(dialog, testIds.projectMcpServer, { 'data-server-id': 'docs' })).toHaveAttribute('data-state', 'connected')
+      await expect(byTestId(dialog, testIds.projectMcpServer, { 'data-server-id': 'github' })).toHaveAttribute('data-state', 'pending')
+      await expect(dialog.getByTestId(testIds.projectMcpVariables)).toHaveAttribute('data-count', '3')
+      // On the desktop the connected server shows its tools too.
+      if (!isPhone(page)) {
+        await byTestId(dialog, testIds.projectMcpServer, { 'data-server-id': 'docs' }).locator('[data-action="toggle"]').click()
+        await expect(dialog.locator('[data-slot="project-mcp-tools"]')).toBeVisible()
+      }
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.projectMcpDialog)).toHaveCount(0)
     },
   },
   {
@@ -725,6 +879,40 @@ const SCREENS: Screen[] = [
     },
   },
   {
+    name: 'composer-output-style',
+    open: async (page, seed) => {
+      // `hooks-demo` uses Learning; the chat follows it (Automatic).
+      await openChat(page, seed.hookContinuation)
+      const trigger = composer(page).getByTestId(testIds.outputStyleTrigger)
+      await expect(trigger).toHaveAttribute('data-value', 'learning')
+      await trigger.click()
+      await expect(byTestId(page, testIds.outputStyleOption, { 'data-value': '' })).toHaveAttribute('data-state', 'checked')
+      await expect(byTestId(page, testIds.outputStyleOption, { 'data-value': 'terse' })).toBeVisible()
+      await expect(byTestId(page, testIds.outputStyleOption, { 'data-value': 'release-notes' })).toBeVisible()
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.outputStyleOption)).toHaveCount(0)
+    },
+  },
+  {
+    name: 'composer-refusal',
+    open: async (page, seed) => {
+      // The project's UserPromptSubmit hook refuses every message: the text stays in the composer, nothing is stored.
+      await openChat(page, seed.hookNotes)
+      await sendMessage(page, 'Here is the staging key sk-demo-0000, deploy with it.')
+      const refusal = page.getByTestId(testIds.composerRefusal)
+      await expect(refusal).toHaveAttribute('data-code', 'hook-blocked')
+      await expect(refusal).toContainText('Don\'t paste API keys into the chat.')
+      await expect(page.getByTestId(testIds.composerInput)).toHaveValue(/sk-demo-0000/)
+    },
+    close: async (page) => {
+      await page.getByTestId(testIds.composerRefusalDismiss).click()
+      await expect(page.getByTestId(testIds.composerRefusal)).toHaveCount(0)
+      await page.getByTestId(testIds.composerInput).fill('')
+    },
+  },
+  {
     name: 'chat-background-agents',
     open: async (page, seed) => {
       // Two agents that run until they are stopped, on the chat's model (`mock:background`); the durations count from the
@@ -760,6 +948,35 @@ const SCREENS: Screen[] = [
       await expect(note).toHaveAttribute('data-status', 'completed')
       await note.getByTestId(testIds.taskResultToggle).click()
       await expect(note.getByTestId(testIds.taskResultReport)).toBeVisible()
+      await expectTranscriptAtBottom(page)
+    },
+  },
+  {
+    name: 'chat-hook-notes',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await openChat(page, seed.hookNotes)
+      const reply = lastAssistantMessage(page)
+      await expectMessageStatus(reply)
+      await expect(hookNote(page, { 'data-event': 'SessionStart', 'data-outcome': 'context' })).toBeVisible()
+      await expect(hookNote(reply, { 'data-event': 'Stop', 'data-outcome': 'error' })).toBeVisible()
+      const row = byTestId(reply, testIds.toolRow, { 'data-tool-name': 'shell' })
+      await expect(row.getByTestId(testIds.toolRowHook)).toHaveAttribute('data-value', 'denied')
+      await row.getByRole('button').first().click()
+      const blocked = hookNote(reply, { 'data-variant': 'tool', 'data-outcome': 'denied' })
+      await expect(blocked).toBeVisible()
+      await blocked.getByTestId(testIds.hookNoteToggle).click()
+      await expect(blocked.getByTestId(testIds.hookNoteDetails)).toBeVisible()
+      await expectTranscriptAtBottom(page)
+    },
+  },
+  {
+    name: 'chat-hook-continuation',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await openChat(page, seed.hookContinuation)
+      await expect(hookNote(page, { 'data-variant': 'turn', 'data-outcome': 'continued' })).toBeVisible()
+      await expect(lastAssistantMessage(page)).toContainText('Hook continuation: Run the parser tests')
       await expectTranscriptAtBottom(page)
     },
   },
@@ -897,6 +1114,19 @@ const SCREENS: Screen[] = [
     },
   },
   {
+    name: 'plugin-detail-hooks',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await installHookPack(page, seed)
+      await page.goto(`/plugins/${HOOK_PLUGIN_ID}`)
+      const hooks = page.getByTestId(testIds.pluginHooks)
+      await expect(hooks).toHaveAttribute('data-count', '1')
+      await expect(byTestId(page, testIds.pluginCustomizations, { 'data-kind': 'style' })).toBeVisible()
+      await hooks.scrollIntoViewIfNeeded()
+    },
+    close: removeHookPack,
+  },
+  {
     name: 'plugin-new-provider',
     open: async (page) => {
       await page.goto('/plugins/new?type=provider')
@@ -984,6 +1214,67 @@ const SCREENS: Screen[] = [
       await page.keyboard.press('Escape')
       await expect(page.getByTestId(testIds.customizationEditor)).toHaveCount(0)
     },
+  },
+  {
+    name: 'settings-customize-hooks',
+    open: async (page, seed) => {
+      // With the hook-pack plugin for the "From plugins" section (removed in `close`).
+      await installHookPack(page, seed)
+      await openHooksTab(page, seed)
+      await expect(byTestId(page, testIds.hooksSection, { 'data-source': 'plugin' })).toHaveAttribute('data-count', '1')
+      await expect(page.getByTestId(testIds.customizeTrustReview)).toHaveAttribute('data-count', '2')
+    },
+    close: removeHookPack,
+  },
+  {
+    name: 'hook-editor',
+    open: async (page, seed) => {
+      await openHooksTab(page, seed)
+      const row = byTestId(page, testIds.hookRow, { 'data-source': 'personal', 'data-event': 'PreToolUse' })
+      await row.getByTestId(testIds.hookRowMenu).click()
+      await page.getByRole('menu').getByTestId(testIds.hookEdit).click()
+      const editor = page.getByTestId(testIds.hookEditor)
+      await expect(editor).toHaveAttribute('data-mode', 'edit')
+      await expect(editor.getByTestId(testIds.hookMatcherPreview)).toContainText('Matches')
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.hookEditor)).toHaveCount(0)
+    },
+  },
+  {
+    name: 'hook-import',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await openHooksTab(page, seed)
+      await page.getByTestId(testIds.customizeImport).click()
+      const dialog = page.getByTestId(testIds.hookImportDialog)
+      await expect(dialog).toBeVisible()
+      const input = dialog.getByTestId(testIds.hookImportInput)
+      await input.fill(HOOK_IMPORT_JSON)
+      await expect(dialog.getByTestId(testIds.hookImportPreview)).toHaveAttribute('data-count', '3')
+      await expect(byTestId(dialog, testIds.hookImportItem, { 'data-state': 'invalid' })).toHaveCount(1)
+      await expect(dialog.getByTestId(testIds.hookImportSubmit)).toHaveAttribute('data-count', '2')
+      // The pasted text from its start, without the focus ring.
+      await input.evaluate((element) => {
+        element.scrollTop = 0
+      })
+      await input.blur()
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.hookImportDialog)).toHaveCount(0)
+    },
+  },
+  {
+    name: 'customize-output-styles',
+    only: 'desktop',
+    open: (page, seed) => openSettings(page, `/settings/customize?tab=output-styles&project=${seed.hooksDemo}`, async (page) => {
+      await expect(page.getByTestId(testIds.customizeStyleDefault)).toHaveAttribute('data-value', 'learning')
+      await expect(byTestId(page, testIds.customizationRow, { 'data-source': 'project', 'data-name': 'release-notes' })).toBeVisible()
+      await expect(byTestId(page, testIds.customizationRow, { 'data-source': 'user', 'data-name': 'terse' })).toBeVisible()
+      await revealCustomizeTab(page, 'output-styles')
+    }),
   },
   {
     name: 'settings-appearance',
@@ -1103,6 +1394,65 @@ async function streamTurn(
   }
 }
 
+/**
+ * Phase 11: the `hooks-demo` project. Its `.harness/settings.json` changes three times: hooks for the notes chat, then a
+ * Stop hook for the continuation chat, then the final hooks the Customize and trust screens show (two approved earlier,
+ * the prompt hook approved now, a new PostToolUse hook and a Stop hook whose script changed since its approval wait).
+ * `.mcp.json` holds an approved stdio server with its variable set and an HTTP server waiting for approval; a command
+ * with shell lines waits too. The project uses the output style Learning.
+ */
+async function seedHooksProject(api: HarnessApi, root: string): Promise<{ project: string, notes: string, continuation: string }> {
+  const folder = join(root, HOOKS_PROJECT)
+  await mkdir(folder, { recursive: true })
+  const commands: Record<string, string> = {}
+  for (const [file, [name, options]] of Object.entries(HOOK_SCRIPTS))
+    commands[file] = await writeHookScript(folder, name, options)
+  for (const [file, content] of Object.entries(HOOKS_FILES))
+    await writeProjectFile(folder, file, content)
+  await mkdir(join(folder, 'tools'), { recursive: true })
+  await copyFile(MCP_MIN_FIXTURE, join(folder, 'tools/mcp-min.mjs'))
+  const project = (await api.client.projects.create({ body: { name: HOOKS_PROJECT, path: folder } })).id
+  const useHooks = async (hooks: HooksConfig, approve: Parameters<typeof approveProjectItems>[2]) => {
+    await writeProjectFile(folder, '.harness/settings.json', projectSettings(hooks))
+    await approveProjectItems(api, project, approve)
+  }
+  const hookChat = async (title: string) => (await api.createChat({ title, projectId: project, modelRef: MOCK_HOOKS_MODEL })).id
+
+  // A SessionStart note, a shell call a PreToolUse hook denies, and a Stop hook that fails.
+  await useHooks({
+    PreToolUse: [hookGroup(commands.guard!, { matcher: 'Bash' })],
+    SessionStart: [hookGroup(commands.branch!)],
+    Stop: [hookGroup(commands.lint!)],
+  }, item => item.kind === 'hook')
+  const notes = await hookChat('Clean the build folder')
+  const blocked = await api.sendChat({ chatId: notes, modelRef: MOCK_HOOKS_MODEL, toolMode: 'auto', text: 'run rm -rf build' })
+  if (!blocked.text.startsWith('Called shell: denied'))
+    throw new Error(`mock:hooks answered ${JSON.stringify(blocked.text)}.`)
+
+  // A Stop hook that asks for one more turn once: the server starts it from a carrier message.
+  await useHooks({ Stop: [hookGroup(commands.tests!)] }, item => item.kind === 'hook')
+  const continuation = await hookChat('Fix the parser test')
+  await api.sendChat({ chatId: continuation, modelRef: MOCK_HOOKS_MODEL, toolMode: 'auto', text: 'Fix the failing parser test.' })
+  await expect.poll(async () => {
+    const last = (await api.getChat(continuation)).messages.at(-1)
+    return last?.role === 'assistant' && last.metadata?.finishedAt !== undefined && last.parts.some(part => part.type === 'text' && part.text.startsWith('Hook continuation:'))
+  }, { timeout: 15_000, message: 'the Stop hook continuation finished' }).toBe(true)
+
+  // The final hooks. The lint script changes after its approval ("Changed"); the PostToolUse hook is new; the prompt
+  // hook and the stdio MCP server are approved now (the command and the HTTP server keep waiting).
+  await writeHookScript(folder, 'error', { file: 'lint', text: 'eslint: 3 problems in src/app.ts' })
+  await useHooks({
+    PreToolUse: [hookGroup(commands.guard!, { matcher: 'Bash' })],
+    PostToolUse: [hookGroup(commands.format!, { matcher: 'Write|Edit', timeout: 30 })],
+    UserPromptSubmit: [hookGroup(commands.secrets!)],
+    SessionStart: [hookGroup(commands.branch!)],
+    Stop: [hookGroup(commands.lint!)],
+  }, item => (item.kind === 'hook' && item.detail.event === 'UserPromptSubmit') || (item.kind === 'mcp' && item.detail.name === 'docs'))
+  await api.client.projectMcp.setVariables({ params: { id: project }, body: { values: { DOCS_TOKEN: 'docs-demo-token' } } })
+  await api.client.projects.update({ params: { id: project }, body: { outputStyle: 'learning' } })
+  return { project, notes, continuation }
+}
+
 /** Creates the chats of the screenshots through the API of the screenshot server. */
 async function seed(server: StartedServer): Promise<Seed> {
   const api = await HarnessApi.create(server.baseURL)
@@ -1123,6 +1473,8 @@ async function seed(server: StartedServer): Promise<Seed> {
       await writeFile(join(root, 'notes', file), content)
     }
     const notes = (await api.client.projects.create({ body: { name: 'notes', path: join(root, 'notes') } })).id
+    // Phase 11 first of all (the oldest chats: the sidebar lists them last).
+    const hooks = await seedHooksProject(api, root)
     // Phase 10 first (the oldest chats: the sidebar lists them last), with the sub-agents on the chats' own models.
     for (const definition of PERSONAL_DEFINITIONS)
       await api.client.customizations.create({ body: definition })
@@ -1228,6 +1580,12 @@ async function seed(server: StartedServer): Promise<Seed> {
     await api.sendChat({ chatId: reasoning, modelRef: 'mock:reasoning', reasoningEffort: 'high', text: 'Why is a server session safer than a token in local storage for this app?' })
     const markdown = await titled('Refactor auth flow')
     await api.sendChat({ chatId: markdown, modelRef: 'mock:echo', toolMode: 'off', text: MARKDOWN })
+    // Phase 11: the personal hooks last (no seeded turn runs them; no screen calls shell or edit_file afterwards) and a
+    // personal style. Creating a hook needs a fresh login.
+    await api.client.auth.login({ body: { password: PASSWORD } })
+    await api.client.hooks.create({ body: { event: 'PreToolUse', matcher: 'Bash|Edit', command: './scripts/guard.sh', timeout: 30 } })
+    await api.client.hooks.create({ body: { event: 'Stop', command: 'pnpm lint --quiet', enabled: false } })
+    await api.client.customizations.create({ body: { kind: 'style', content: PERSONAL_STYLE } })
     return {
       markdown,
       reasoning,
@@ -1253,6 +1611,9 @@ async function seed(server: StartedServer): Promise<Seed> {
       notes,
       customAgent,
       taskResult,
+      hooksDemo: hooks.project,
+      hookNotes: hooks.notes,
+      hookContinuation: hooks.continuation,
       baseURL: server.baseURL,
       now: Date.now() + 2 * 60_000,
     }
@@ -1329,6 +1690,8 @@ const README_SHOTS: readonly { file: string, screen: string, theme: Theme }[] = 
   { file: 'chat-light', screen: 'chat-approval', theme: 'light' },
   // Phase 10: a candidate for the README (W10.14 decides).
   { file: 'customize-dark', screen: 'settings-customize', theme: 'dark' },
+  // Phase 11: a candidate for the README (W11.14 decides).
+  { file: 'hooks-dark', screen: 'settings-customize-hooks', theme: 'dark' },
 ]
 
 /** Captures the README images of one theme as full 1440x900 frames (no crops) into `.tmp/screenshots/readme/`. */

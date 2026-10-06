@@ -1,7 +1,8 @@
 // `!` spans and `@path` references through `resolveCommand` (W11.5-T2 – T4): with an expansion host, a command file, a
 // personal command or a plugin template is scanned before its arguments are expanded and inlines what its trusted spans
 // print and the project files it names; the invocation records `kind: 'command'` and `inlined`; without a host (a
-// regenerate, a continuation) and for bodies without anything to inline the Phase 10 expansion is unchanged. Real shells
+// regenerate, a continuation) and for bodies without anything to inline the Phase 10 expansion is unchanged; with
+// `deferExpansion` (W11.17) the checks run while resolving and the spans and reads wait for `finish()`. Real shells
 // in `realpath(mkdtemp())` projects (POSIX `sh` only; skipped on Windows); the catalog is the fake.
 import type { CommandDefinition } from '@harness-forge/plugin-sdk'
 import type { CustomizationEntry } from '@harness-forge/shared'
@@ -18,6 +19,7 @@ import { commandTrustSubject } from '../services/project-config/index.ts'
 import { catalogEntryKey, createFakeCustomizationService, fakeCatalogEntry } from '../testing/fake-customizations.ts'
 import { killLiveShellGroups } from '../workspace/shell.ts'
 import { resolveCommand } from './commands.ts'
+import { minimalExpansion } from './inline/index.ts'
 
 const posix = process.platform !== 'win32'
 const PROJECT = 'prj_0123456789abcdef'
@@ -202,6 +204,46 @@ describe.skipIf(!posix)('resolveCommand with an expansion host (W11.5)', () => {
     })
     expect(host.asked).toEqual(['workspace'])
     expect(invocationOf(await resolve('/tldr x', host, plugins))).toEqual({ name: 'tldr', input: 'x', type: 'prompt', expansion: 'TL;DR $ARGUMENTS: x' })
+  })
+
+  it('defers the spans and reads to finish() (W11.17) and checks a project file\'s hash again before its spans run', async () => {
+    const body = 'Count: !`sh scripts/count.sh $1` for $ARGUMENTS'
+    const plan = planCommandExpansion(body)
+    const script = join(root, 'scripts', 'count.sh')
+    const original = await readFile(script, 'utf8')
+    const counter = async (): Promise<string> => readFile(join(root, 'counter.txt'), 'utf8').catch(() => '')
+    const host = hostOf(root)
+    host.approved.add((await commandTrustSubject(root, 'count', plan.shellCommands)).sha256)
+    const catalog = await fake.catalog(PROJECT)
+    const deferred = async (): Promise<CommandResolution | null> =>
+      resolveCommand(services(fake), '/count two', { chatId: 'chat', signal, catalog, expansion: host, deferExpansion: true })
+
+    const before = await counter()
+    const resolution = await deferred()
+    // Checked (folder, trust) but nothing ran: a placeholder expansion without `kind` / `inlined`.
+    expect(host.asked).toEqual(['workspace', 'trusted'])
+    expect(invocationOf(resolution)).toEqual({ name: 'count', input: 'two', type: 'prompt', expansion: minimalExpansion(plan, 'two'), source: 'project' })
+    expect(await counter()).toBe(before)
+    const finished = resolution?.kind === 'prompt' ? await resolution.finish?.() : undefined
+    expect(finished?.invocation).toEqual({ name: 'count', input: 'two', type: 'prompt', expansion: 'Count: counted for two', source: 'project', kind: 'command', inlined: { shell: 1, files: [] } })
+    expect(finished?.finish).toBeUndefined()
+    expect(host.asked).toEqual(['workspace', 'trusted', 'trusted'])
+    expect(await counter()).toBe(`${before}run\n`)
+
+    // The script changed between the check and the run: the spans are refused (409 untrusted) and nothing runs.
+    const changing = await deferred()
+    await writeFile(script, 'echo changed >> counter.txt\n')
+    try {
+      await expect(changing?.kind === 'prompt' ? changing.finish?.() : undefined).rejects.toMatchObject({ code: 'conflict', details: { reason: 'untrusted' } })
+      expect(await counter()).toBe(`${before}run\n`)
+    }
+    finally {
+      await writeFile(script, original)
+    }
+
+    // Without spans or references a deferred resolution is final at once.
+    expect(await resolveCommand(services(fake), '/plain hi', { chatId: 'chat', signal, catalog: await fake.catalog(null), expansion: hostOf(null), deferExpansion: true }))
+      .toEqual({ kind: 'prompt', invocation: { name: 'plain', input: 'hi', type: 'prompt', expansion: 'Say hi about @README.md', source: 'user' } })
   })
 
   it('rethrows the abort of a stopped run while a span runs', async () => {

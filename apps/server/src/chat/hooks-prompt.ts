@@ -26,14 +26,16 @@
 //   the user message of the turn it starts, or injected after its `data-steer` part by the steer step). A `/compact`
 //   item and an image model run no hook (they never reach a model with the text).
 // Prompts, contexts and reasons are never logged (the event and the outcome only, at `debug`).
-import type { ChatRequestBody, HookData, HookEvent, QueueAddBody, RunOrigin, UserMessagePart } from '@harness-forge/shared'
+// W11.19: the accepted response of a request whose new user message got records says how many
+// (`PROMPT_HOOKS_HEADER`, set by the runner through `withPromptHooksHeader`), so the client reloads that message once.
+import type { ChatRequestBody, HarnessUIMessage, HookData, HookEvent, QueueAddBody, RunOrigin, UserMessagePart } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 import type { ChatRecord } from '../services/chats/types.ts'
 import type { HookEventResult, HookRunInput, HookScope, HookSnapshot } from '../services/hooks/types.ts'
 import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { PreparedRun } from './prepare.ts'
-import { createHookRecordId, HarnessError, isHarnessCommand, isHarnessError, LIMITS, safeParseModelRef, sessionStartSource } from '@harness-forge/shared'
+import { createHookRecordId, HarnessError, HOOK_PART_TYPE, isHarnessCommand, isHarnessError, LIMITS, safeParseModelRef, sessionStartSource } from '@harness-forge/shared'
 import { parseSlashCommand } from './commands.ts'
 
 /** The planned run the prompt hooks look at (`prepareRun` before it returns). */
@@ -59,6 +61,33 @@ export interface PromptHooksInput {
 export interface PromptHooksResult {
   /** The `data-hook` records for the new user message, in order (`SessionStart`, then `UserPromptSubmit`). */
   readonly records: readonly HookData[]
+}
+
+/**
+ * W11.19: the response header of an accepted `POST /chat` whose new user message got `data-hook` records from the prompt
+ * hooks (`SessionStart` / `UserPromptSubmit`): their number. The client's own copy of that message lacks them, so it
+ * reloads the message once the run finished (`useChatSession`) instead of after every turn. Absent without records.
+ */
+export const PROMPT_HOOKS_HEADER = 'X-Harness-Prompt-Hooks'
+
+/**
+ * Sets `PROMPT_HOOKS_HEADER` on the stream response of a request (`origin: 'request'`) whose new user message carries
+ * `data-hook` parts (a client message never does: only the prompt hooks add them). Never throws: the response of a
+ * launched run goes out either way.
+ */
+export function withPromptHooksHeader(response: Response, message: Pick<HarnessUIMessage, 'parts'> | null, origin: RunOrigin): Response {
+  if (origin !== 'request' || message === null)
+    return response
+  const count = message.parts.filter(part => part.type === HOOK_PART_TYPE).length
+  if (count === 0)
+    return response
+  try {
+    response.headers.set(PROMPT_HOOKS_HEADER, String(count))
+  }
+  catch {
+    // Immutable headers (never for the stream response): the records show after a reload, as before.
+  }
+  return response
 }
 
 /** The 409 of a blocked turn (`details.reason: 'hook-blocked'`, `details.hook`: the blocking record). */

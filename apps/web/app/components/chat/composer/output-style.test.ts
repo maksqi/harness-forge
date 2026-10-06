@@ -18,8 +18,24 @@ import {
 
 describe('refusalOf', () => {
   it('maps a hook-blocked conflict with its record', () => {
-    const error = new HarnessError({ code: 'conflict', message: 'Do not paste keys.', details: { reason: 'hook-blocked', hook: hookData({ event: 'UserPromptSubmit', outcome: 'blocked', toolCallId: undefined, toolName: undefined }) } })
+    const error = new HarnessError({ code: 'conflict', message: 'A hook blocked this message: Do not paste keys.', details: { reason: 'hook-blocked', hook: hookData({ event: 'UserPromptSubmit', outcome: 'blocked', toolCallId: undefined, toolName: undefined, reason: 'Do not paste keys.' }) } })
     expect(refusalOf(error)).toEqual({ code: 'hook-blocked', reason: 'Do not paste keys.', event: 'UserPromptSubmit', source: 'project', command: null })
+  })
+
+  it('the reason never repeats the title (W11.19): the record\'s reason, else the message without the server\'s title', () => {
+    const blocked = (message: string, hook: unknown) => refusalOf(new HarnessError({ code: 'conflict', message, details: { reason: 'hook-blocked', hook } }))?.reason
+    const record = (reason: string | undefined) => hookData({ event: 'UserPromptSubmit', outcome: 'blocked', toolCallId: undefined, toolName: undefined, reason })
+    // The server's message (`hookBlockedError`) puts the title before the record's reason.
+    expect(blocked('A hook blocked this message: Prompt blocked by hook.', record('Prompt blocked by hook.'))).toBe('Prompt blocked by hook.')
+    expect(blocked('A hook blocked this message: Line one\nline two', record('  Line one\nline two '))).toBe('Line one\nline two')
+    // Without a record (or a reason in it), the message loses the title; a hook without a reason leaves none.
+    expect(blocked('A hook blocked this message: Prompt blocked by hook.', { id: 'x' })).toBe('Prompt blocked by hook.')
+    expect(blocked('A hook blocked this message: wait for the review', record(undefined))).toBe('wait for the review')
+    expect(blocked('A hook blocked this message.', record(undefined))).toBe('')
+    expect(blocked('A hook blocked this message.', undefined)).toBe('')
+    // Any other message stays as it is.
+    expect(blocked('Blocked by policy.', undefined)).toBe('Blocked by policy.')
+    expect(blocked('A hook blocked this messageboard post.', undefined)).toBe('A hook blocked this messageboard post.')
   })
 
   it('maps a hook-blocked conflict without a valid record and an untrusted conflict', () => {

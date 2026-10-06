@@ -128,8 +128,13 @@ switcher first in their action row (7.5).
 └──────────────────────┴─────────────────────────────────────────────────────────────────┘
 ```
 
-The greeting block sits at ~38% of the viewport height. The first send creates the chat and replaces the URL
-with `/chat/<id>` without remounting the transcript (the stream keeps running).
+The greeting block sits at ~38% of the viewport height. The first send creates the chat. Since Phase 11 the page
+replaces the URL with `/chat/<id>` once the server accepted the first request (its 2xx answer, seen by the transport's
+`fetch` before anything streams: `session.accepted`; resumes are GETs and never count), without remounting the
+transcript (the stream keeps running); the first streamed chunk, or the request ending with the message still shown,
+are fallbacks. A first message refused with 409 `hook-blocked` / `untrusted` keeps the page on `/` and puts its text
+and files back in the composer with the refusal (section 7.31); the server's `chat.created` followed by `chat.deleted`
+for that chat makes the session a new chat again (the next send carries the project and the style again).
 
 ### 2.3 Plugins mode — list (`/plugins?filter=`)
 
@@ -945,12 +950,16 @@ Settings → Customize, the Hooks tab with a project selected (9.13), desktop:
 │                 │ │   Personal · timeout 30s                                            │
 │                 │ │ ↯ Stop                     pnpm lint --quiet                       ⋯ │ data-state=off
 │                 │ │   Personal · Off                                                    │
-│                 │ In harness-forge · 3  .harness/settings.json · .claude/settings.json [Review 2…]
-│                 │ │ ↯ PostToolUse  Write|Edit  prettier --write …         ⛉ Approved    ⋯ │ data-source=project
-│                 │ │ ↯ SessionStart             cat .harness/context.md    ⛉? Needs approval ⋯ │ data-state=pending
-│                 │ │ ↯ PreToolUse   *           node .claude/hooks/check.js ⛉? Needs approval ⋯│
+│                 │ In harness-forge · 3  .claude/settings.json · .harness/settings.json [Review 2…]
+│                 │ │ ↯ PostToolUse  Write|Edit  prettier --write …                       ⋯ │ data-source=project
+│                 │ │   Project · .harness/settings.json  ⛉ Approved                      │ hook-row-state
+│                 │ │ ↯ SessionStart             cat .harness/context.md                  ⋯ │ data-state=pending
+│                 │ │   Project · .harness/settings.json  ⛉? Needs approval               │
+│                 │ │ ↯ PreToolUse   All tools   node .claude/hooks/check.js              ⋯ │
+│                 │ │   Project · .claude/settings.json  ⛉? Needs approval                │
 │                 │ From plugins · 1                                                         │ data-source=plugin
-│                 │ │ ↯ PostToolUse  Write|Edit  sh "$HARNESS_PLUGIN_ROOT/…"   hook-pack ⋯ │ data-kind=command
+│                 │ │ ↯ PostToolUse  Write|Edit  sh "$HARNESS_PLUGIN_ROOT/…"              ⋯ │ data-kind=command
+│                 │ │   Hook pack · timeout 10s                                           │ (the plugin's name)
 └─────────────────┴──────────────────────────────────────────────────────────────────────────┘
   with HF_WORKSPACE_SHELL=0 or HF_SAFE_MODE=1 an alert replaces the switch's help:     hooks-disabled[data-reason]
   ┌ ⓘ Hooks are turned off on this server (HF_WORKSPACE_SHELL=0). ───────────────────────┐
@@ -973,7 +982,7 @@ The hook editor sheet and the import dialog at 390px (both full width; footers s
 │ ┌───────────────────────────┐ │             │     Use tool names, | and * only.     │
 │ │ ./scripts/guard.sh        │ │             │ Ignored: "prompt" hooks aren't        │
 │ └───────────────────────────┘ │             │ supported.                            │
-│ Runs with sh in the project … │             │            [Cancel]  [Add 2 hooks]    │ hook-import-submit
+│ Runs with bash (or sh) …      │             │            [Cancel]  [Add 2 hooks]    │ hook-import-submit
 │ Timeout [ 60 ] seconds        │ hook-timeout└───────────────────────────────────────┘
 │ On                         ◉  │ hook-editor-enabled
 │ [Cancel]         [Save hook]  │ hook-save (sticky footer)
@@ -1050,7 +1059,7 @@ The composer's output style picker (7.32) and the output style editor (9.13, 390
 Hooks in the transcript (7.31): notes, tool-row badges, the approval banner and a continuation turn:
 
 ```
- ↯ Hook added context · SessionStart · Project                  Show context ▸   hook-note[data-outcome=context]
+ ↯ Hook added context · SessionStart · Project hook             Show context ▸   hook-note[data-outcome=context]
  ▸ ⌘ shell "rm -rf build"                                ⦸ Blocked by hook      tool-row-hook[data-value=denied]
      ↯ Blocked by a PreToolUse hook: Deleting build isn't allowed here.          hook-note[data-variant=tool]
        Project hook · sh .harness/hooks/guard.sh · exit 2 · 0.1s                 (details)
@@ -1060,7 +1069,7 @@ Hooks in the transcript (7.31): notes, tool-row badges, the approval banner and 
  ⚠ A PostToolUse hook failed: exit 1                              Show output ▸   data-outcome=error
  ↯ A PostToolUse hook told the agent: Lint errors in src/a.ts                    data-outcome=blocked
  ⦸ A hook stopped the agent: Build is red.                                       data-outcome=stopped
- ↯ Running hooks…                                                                 data-slot=running-hook
+   Running hooks…                                                                 data-slot=running-hook (text only)
  ┌ ↯ A Stop hook asked the agent to continue ───────────────────────────┐       data-variant=turn
  │ Tests are failing: fix them before you stop.                         │       (a carrier message)
  └──────────────────────────────────────────────────────────────────────┘ Sent to the agent
@@ -2036,8 +2045,9 @@ Structure inside `AiPromptInput`:
 - Client commands never reach the server (7.8). Server commands are sent as typed; the server expands them.
 - **Refused messages** (Phase 11, 7.31): when a send is answered with 409 `hook-blocked` (a hook blocked the message) or
   `untrusted` (a project command's `!` lines are not approved), nothing was stored: the composer gets the text and the
-  files back (`restoreInput`) and shows `ComposerRefusal` above the text until the text changes, the next send or ×;
-  Esc never dismisses it.
+  files back (`restoreInput`; also for a refused queued message, edit or retry) and shows `ComposerRefusal` at the top
+  of the card (above the attachment chips and the text) until the text changes, the next send, × or a chat switch; Esc
+  never dismisses it. A restored `/name` keeps the slash menu closed.
 - Focus: autofocus on desktop when a chat opens and after sending; never on touch devices. Shift+Esc focuses.
 
 ### 7.8 Slash menu (`SlashMenu`, W2.3)
@@ -2104,9 +2114,11 @@ sets them, `namespace`, `argumentHint` and `modelRef`. The menu shows them in fo
 
 - A fifth group, **Skills** (`data-group="skill"`, always last): the user-invocable skills of the scope (`GET
   /api/commands?projectId=` lists them with `kind: 'skill'`; a skill with `user-invocable: false` is not listed), each
-  with its argument hint and, on the right, its source and `BookOpen`. Selecting one inserts `/name ` like a server
-  command; the server expands the skill (7.28) and the bubble's badge reads "Skill". When a command and a skill share a
-  name, the server lists only the command (a command wins). The group order is App, Project, Personal, Plugins, Skills.
+  with its argument hint and, on the right, its source ("Project", "Personal", the plugin's name ("Plugin" when unknown)
+  or "Built-in") and `BookOpen`. Selecting one inserts `/name ` like a server command; the server expands the skill
+  (7.28) and the bubble's badge shows `BookOpen` + `/name`, announced as "Skill" (sr-only text). When a command and a
+  skill share a name, the server lists only the command (a command wins). The group order is App, Project, Personal,
+  Plugins, Skills.
 - **`/output-style`** joins the App group (a client command, "Set the output style", 7.32): alone it opens the style
   menu; `/output-style <name>` or `/output-style auto` applies on Enter and clears the input; an unknown name shows
   "Unknown output style "{value}". Use auto, default, explanatory, learning or a style from the menu." Plugins can no
@@ -2115,8 +2127,10 @@ sets them, `namespace`, `argumentHint` and `modelRef`. The menu shows them in fo
   command patterns of `slash-commands.ts` accept `/name` up to 64 characters.
 - **Needs approval**: a project command whose `` !`cmd` `` lines are not approved (its trust item, kind `command`, is
   pending in `useProjectTrustStore().trust(projectId)`, 7.33) shows a muted `ShieldQuestionMark` "Needs approval" on
-  the right (`data-trust="pending"`); selecting it still inserts it, and sending it gives the `untrusted` refusal
-  (7.31). The badge needs the project's trust list, which the composer fetches lazily: no badge until it has loaded.
+  the right (`data-trust="pending"`, `data-slot="slash-menu-trust"`) and its row's name adds ", needs approval";
+  selecting it still inserts it, and sending it gives the `untrusted` refusal (7.31). The badge needs the project's
+  trust list, which the composer fetches lazily (at most 15 s old) when the slash menu opens in a project chat that
+  lists project commands: no badge until it has loaded.
 
 ### 7.9 Model picker (`ModelPicker`, W2.3)
 
@@ -3338,13 +3352,16 @@ menu (v1.6; Phase 11: user-invocable skills are, 7.8, below).
   otherwise the send is refused (`untrusted`: the composer refusal of 7.31; no project or the shell off: the server's
   error). Spans run one after another (30 s each, 60 s in total, 16 KiB of output each, at most 10), in any permission
   mode (sending the command is the approval), and the arguments are never put inside a span.
-- **`@path`**: a project file named in the body (`@README.md`) is appended as a `<file path="…">` block (at most 32 KiB
-  each, at most 10; a secret-looking, linked or outside path stays text); project chats only.
+- **`@path`**: a project file named in the body (`@README.md`; the path needs a `.` or a `/`) is appended as a
+  `<file path="…">` block (at most 32 KiB each, at most 10; a `.git`, secret-looking, linked or outside path stays
+  text); project chats only. Punctuation glued to an unquoted path is part of it, so `@README.md,` is not inlined.
 - **Frozen**: the result is stored with the message (`metadata.command.expansion` and `inlined { shell, files }`), so
   regenerate and approval continuations reuse it and never run a span again; span output is not journaled (like a
   command typed in a terminal). A command typed while the agent works runs its spans when its turn starts.
-- **Badge**: `CommandBadge` (prop `kind`) adds "Ran {n} shell commands" and "Included {paths}" to its tooltip
-  (`data-slot="command-badge-inlined"`); a skill invocation shows `BookOpen` and reads "Skill".
+- **Badge**: `CommandBadge` (prop `kind`) adds "Ran {n} shell commands" ("Ran 1 shell command") and "Included {paths}"
+  (at most 5 paths, then " and {n} more") to its tooltip (`data-slot="command-badge-inlined"`); a skill invocation
+  shows `BookOpen`, is announced as "Skill" (sr-only) and its source line reads "Project skill", "Personal skill",
+  "From {plugin}" or "Built-in skill".
 - **Skills you run**: `/name [arguments]` of a user-invocable skill (the Skills group, 7.8) sends the skill's content,
   with the arguments expanded like a command's (`$ARGUMENTS`, `$1` … `$9`, `{{input}}`, else appended), as the turn's
   prompt; skills never run `!` spans or inline `@path`. With `disable-model-invocation: true` a skill is left out of
@@ -3528,11 +3545,14 @@ parser; the model text of a record is the server's business (`hookModelText`, AR
   agent" (`aria-hidden`, muted), and without a bubble, `MessageActions`, edit, versions switcher or "Rewind files to
   here". The reply below it is a normal assistant message.
 
-**`HookNote`** (`components/chat/hooks/`, store-free, `hook-note`, `role="note"`): one line (icon, text, source) and a
-details toggle (`hook-note-toggle`, `aria-expanded`, `aria-controls`; closed by default, not persisted) that opens
-`hook-note-details`. `data-event`, `data-outcome`, `data-variant` (`inline | turn | tool`) and `data-source` (the
-`source` of the record's first hook: `personal | project | plugin`). Inline notes are `text-sm text-muted-foreground`
-without a border; the turn variant is a card (`rounded-lg border bg-muted/30 px-3 py-2`).
+**`HookNote`** (`components/chat/hooks/`, store-free, `hook-note`, `role="note"`): one line (icon, the text in
+`data-slot="hook-note-line"`, then " · {source}" of the only hook or " · {n} hooks" in `data-slot="hook-note-source"`)
+and a details toggle (`hook-note-toggle`, `aria-expanded`, `aria-controls`, `data-state` `open | closed`; closed by
+default, not persisted; "Show context" / "Hide context" for `context`, "Show output" / "Hide output" for `error`, else
+"Show details" / "Hide details") that opens `hook-note-details`; a turn note's reason is `data-slot="hook-note-reason"`.
+`data-event`, `data-outcome`, `data-variant` (`inline | turn | tool`) and `data-source` (the `source` of the record's
+first hook: `personal | project | plugin`). Inline notes are `text-sm text-muted-foreground` without a border; the turn
+variant is a card (`rounded-lg border bg-muted/30 px-3 py-2`).
 
 | `outcome` | Line (icon) | Details |
 |---|---|---|
@@ -3540,16 +3560,19 @@ without a border; the turn variant is a card (`rounded-lg border bg-muted/30 px-
 | `denied` | "Blocked by a {event} hook: {reason}" (`ShieldBan`, `text-destructive`) | the source lines |
 | `asked` | "A hook asked you to confirm this call: {reason}" (`Webhook`) | the source lines |
 | `allowed` | "Allowed by a {event} hook" plus ": {reason}" when there is one (`Webhook`) | the source lines |
-| `rewritten` | "Input changed by a {event} hook" (`Webhook`) | "Input the tool ran with": `updatedInput` as JSON (`pre`); the row's own input stays the model's input |
-| `blocked` | "A {event} hook told the agent: {reason}" (`Webhook`; `{reason}` is the record's `reason`, else the first line of its `context`, which carries a PostToolUse block's feedback) | the feedback (`context`) and the source lines |
-| `continued` | "A Stop hook asked the agent to continue" (`Webhook`) | inline (the reply that ended): the source lines only, the carrier below carries the reason; turn: the reason as the card's body, always open |
+| `rewritten` | "Input changed by a {event} hook" (`Webhook`) | "Input the tool ran with": `updatedInput` as JSON (`pre`, `data-slot="hook-updated-input"`); the row's own input stays the model's input and is labelled "Original input" |
+| `blocked` | "A {event} hook told the agent: {reason}" (`Webhook`; `{reason}` is the record's `reason`, else the first line of its `context`, which carries a PostToolUse block's feedback); "A {event} hook sent the agent feedback" with neither | the feedback (`context`) and the source lines |
+| `continued` | "A {event} hook asked the agent to continue" (`Webhook`; the event is Stop for a carrier) | inline (the reply that ended): the source lines only, the carrier below carries the reason; turn: the reason as the card's body, always open |
 | `stopped` | "A hook stopped the agent: {reason}" (`ShieldBan`) | the source lines |
 | `error` | "A {event} hook failed: exit {n}" / "A {event} hook timed out after {n}s" / "A {event} hook failed" (no exit code) (`TriangleAlert`, `text-warning`) | "Show output" / "Hide output": each hook's `error` text (`data-slot="hook-output"`, `pre`) |
 
-- **Source lines** (in the details, one per entry of `hooks`, `hookSourceText`): "Personal hook" · "Project hook" ·
-  "From {plugin}" (the plugin's name from the plugins store, else its id), then the entry's `label` in mono (the start of
-  its command, or the plugin's event for a code hook) and "exit {n} · {duration}" (muted, `tabular-nums`).
-- **System messages**: each hook's `systemMessage` adds a line "Hook: {message}" under the note's line (always visible).
+- **Source lines** (in the details, one per entry of `hooks`, `hookSourceText`, `data-slot="hook-source"` with
+  `data-source`): "Personal hook" · "Project hook" · "From {plugin}" (the plugin's name from the plugins store, else its
+  id, else "From a plugin"), then the entry's `label` in mono (the start of its command, or the plugin's event for a
+  code hook) and "exit {n} · {duration}" (muted, `tabular-nums`; the duration alone when `exitCode` is null: a timeout,
+  a kill or a code hook). A project hook's line never names its file (`HookData` has no path).
+- **System messages**: each hook's `systemMessage` adds a line "Hook: {message}" under the note's line (always visible;
+  `data-slot="hook-system-message"`; `hook-output` is only the error `pre` of the details).
 - The note's accessible name is "Hook {event}: {summary}" (the line's text).
 
 **Tool rows** (`ToolPart`, `hooks` prop = `toolHooksOf(parts).get(toolCallId)`):
@@ -3558,9 +3581,15 @@ without a border; the turn variant is a card (`rounded-lg border bg-muted/30 px-
   record): `denied` → **"Blocked by hook"** (`ShieldBan`, `text-destructive`) **replaces** "Denied" in the status cell;
   `allowed` → a `Webhook` icon with a check, tooltip "Allowed by hook"; `rewritten` → a `Webhook` icon with a pencil,
   tooltip "Input changed by hook". The sr-only text adds ", blocked by hook" / ", allowed by hook" / ", input changed
-  by hook" to the row's name (the `ToolRuleBadge` pattern: tooltip on hover and focus). No badge for other outcomes.
+  by hook" to the row's name. The badge sits inside the row's button and a button may not contain a focusable element,
+  so the badge itself is not focusable: its tooltip opens on hover and while the row button has keyboard focus
+  (`:focus-visible`; a click's focus does not count; Escape, a pointer down or leaving closes it), and the sr-only text
+  carries it for screen reader users. No badge for other outcomes.
 - **The approval card** (`ToolApprovalCard`, prop `hookReason`): a PreToolUse hook that answered `ask` adds the banner
-  "A hook asks you to confirm this call: {reason}" (`tool-approval-hook`, `Webhook`, above the buttons). In a sub-agent
+  "A hook asks you to confirm this call: {reason}" ("A hook asks you to confirm this call" without a reason;
+  `tool-approval-hook`, `Webhook`, above the buttons). A hook's `allow` never skips the card in plan mode, for an
+  `execute` tool or an `always` policy; the record (and so the badge) still reads `allowed` while the card shows (a
+  known limitation, ARCHITECTURE.md 6.28). In a sub-agent
   a hook's `ask` is a denial (sub-agents never ask), which the task block shows as a denied step.
 - The hook part linked by `toolCallId` is what tells a hook denial from a user denial: without it the row reads "Denied"
   as before.
@@ -3569,34 +3598,45 @@ without a border; the turn variant is a card (`rounded-lg border bg-muted/30 px-
 session's `activity` to `'hooks'` and `hookActivity` to `{ event, toolCallId }` until the next chunk of another kind or
 `idle`. With a `toolCallId` that matches a tool row, that row's status cell shows "Running hook…" (shimmer;
 `data-slot="running-hook"`); the row reads it through the `HOOK_ACTIVITY` injection, because the transcript's rows are
-memoized. Otherwise (UserPromptSubmit, SessionStart, Stop, PreCompact) the end of the reply shows "Running hooks…"
-(shimmer), also after text (Stop hooks run after the reply's text). Reduced motion: static muted text.
+memoized. A `task` row never shows it: the hooks of a `task` call show "Running hooks…" at the end of the reply.
+Otherwise (Stop, PreCompact) the end of the reply shows "Running hooks…" (shimmer, text only), also after text (Stop
+hooks run after the reply's text); UserPromptSubmit and SessionStart run before anything streams. Reduced motion: static
+muted text.
 
 **Refused messages** (`ComposerRefusal`, `components/chat/composer/`, `composer-refusal`, `role="alert"`): a
 UserPromptSubmit or SessionStart hook that blocks answers `POST /chat` (and `POST /chat/:id/queue`, where it runs at
-enqueue) with 409 `conflict`, `details.reason: 'hook-blocked'`, before anything streams; nothing is stored (on `/` no
-chat row exists, so the page stays). A project command whose `` !`cmd` `` lines are not approved answers 409
-`untrusted`. The composer then **keeps** the text and the files (`restoreInput(input)`, the chips come back as done) and
-shows the refusal inside the card, above the text:
+enqueue) with 409 `conflict`, `details.reason: 'hook-blocked'`, before anything streams; nothing is stored (a chat row
+the request created is removed again: `chat.created`, then `chat.deleted`; on `/` the page stays, since it moves only
+once a request was accepted, 2.2). A project command whose `` !`cmd` `` lines are not approved answers 409 `untrusted`.
+The composer then **keeps** the text and the files (`restoreInput(input)`, the chips come back as done) and shows the
+refusal at the top of the card, above the attachment chips and the text:
 
-- `hook-blocked` (`data-code="hook-blocked"`, `data-event` = the event when known): `ShieldBan` "A hook blocked this
-  message", the reason (the error's message), and "{event} · {source}" ("UserPromptSubmit · Project hook"): the 409
-  carries the hook record in `details.hook` (a `HookData`), whose `event` and the `source` of its first hook give the
-  line (a client that gets no record leaves the line out).
-- `untrusted` (`data-code="untrusted"`): `ShieldQuestionMark` "/{name} runs shell lines you haven't approved." and
-  **Review…** (`composer-refusal-review`), which opens the project trust dialog (7.33) through `openProjectTrust()`.
-- It clears when the text changes, on the next send or with **×** (`composer-refusal-dismiss`, "Dismiss"). **Esc never
+- `hook-blocked` (`data-code="hook-blocked"`, `data-event` = the event, `""` when unknown): `ShieldBan` "A hook blocked
+  this message", the reason (`data-slot="composer-refusal-reason"`), and "{event} · {source}" ("UserPromptSubmit ·
+  Project hook"; the source is "Personal hook", "Project hook" or "Plugin hook", the plugin's name is not in the data;
+  `data-slot="composer-refusal-source"`): the 409 carries the hook record in `details.hook` (a `HookData`), whose
+  `event` and the `source` of its first hook give the line ("{event}" alone with an unknown source; a client that gets
+  no record leaves the line out).
+- `untrusted` (`data-code="untrusted"`): `ShieldQuestionMark` "/{name} runs shell lines you haven't approved." (the
+  name is parsed from the refused text when the 409 has none; "This command runs shell lines you haven't approved."
+  without one) and **Review…** (`composer-refusal-review`), which opens the project trust dialog (7.33) through
+  `openProjectTrust(sha256)` focused on the command's pending item when the trust list is loaded, else
+  `openProjectTrust()`.
+- It clears when the text changes, on the next send, with **×** (`composer-refusal-dismiss`, "Dismiss") or on a chat
+  switch. **Esc never
   dismisses it** (Esc keeps its composer meaning). The textarea's `aria-describedby` points at it; focus stays in the
   textarea. `refusalOf(error)` (`composer/output-style.ts`) turns the error into `ComposerRefusalData`; other errors keep
   their v1.6 handling.
-- Editing a user message re-runs UserPromptSubmit: a refused edit keeps the message editor open with its text and shows
-  "A hook blocked this message: {reason}" as its error. Regenerate and approval continuations reuse the stored result
-  and never re-run it.
+- Editing a user message re-runs UserPromptSubmit: a refused edit sends its text and files to the composer with the
+  refusal and reloads the path, so the previous version shows again. A refused retry or queued message restores its
+  text, files and refusal the same way. A refused request that sent no new message (a regenerate of a command whose
+  shell lines are no longer approved: `untrusted`) reloads the path and only shows the refusal. Regenerate and approval
+  continuations otherwise reuse the stored result and never re-run the prompt hooks.
 
 **Continuation turns**: `run.started` with `origin: 'hook'` and a `userMessageId` that is not on the shown path makes
 the session reload the path and then resume the stream, exactly like `task` and `queue` (7.26, 7.29). Once the carrier
 shows, `ChatView` announces "A hook asked the agent to continue" (once per carrier per tab; carriers of a path loaded
-later are never announced). After 5 continuations in a row the server stops and the next reply starts with the notice
+later are never announced). After 5 continuations in a row the server stops and the last reply (the 6th) ends with the notice
 `hook-continuation-limit` (icon `Webhook`, level info, the server's text, e.g. "Stopped after 5 hook continuations in a
 row."). The composer's Stop during a reply's Stop hooks ends the chain (the server cancels the follow-up); the web only
 stops. A queued message always goes before a hook turn.
@@ -3605,8 +3645,8 @@ stops. A queued message always goes before a hook turn.
 stored (a child's denied call shows as a denied step of its task block); share pages leave hook records out (and a
 carrier message with nothing else), and a tool a hook denied reads "Denied" there; the Markdown export and the search
 text include hook records (server-side, ARCHITECTURE.md 6.28). Announcements (`ChatView`, polite, once per part per
-tab, like compaction markers): "A hook blocked {tool}" for a `denied` record of this tab's own stream, "A hook asked the
-agent to continue" for a carrier.
+tab, like compaction markers): "A hook blocked {tool}" for a `denied` record of this tab's own stream (the row's title,
+else the record's tool name, else "a tool call"), "A hook asked the agent to continue" for a carrier.
 
 ### 7.32 Output styles in the composer (`OutputStyleMenu`, W11.10; Phase 11)
 
@@ -3620,24 +3660,31 @@ General → Output style, 9.4); the chat's choice can be **Automatic** (no choic
   models (their turns have no instructions) and, like the other left tools, while dictation records or transcribes. It
   shows whether or not the model calls tools.
 - **Trigger** (`output-style-trigger`, `data-value` = the effective style name, `data-source` `automatic | chat`): a
-  ghost h-8 button (40px on coarse pointers) with `Feather`, plus the effective style's label when it is not Default
-  (from `sm`; the label truncates at 14ch). Below `sm` it is icon-only with a small dot when the effective style is not
+  ghost h-8 button (40px on coarse pointers) with `Feather`, plus the effective style's label
+  (`data-slot="output-style-label"`) when it is not Default and a `ChevronDown` (from `sm`; the label truncates at
+  14ch). Below `sm` it is icon-only with a small dot (`data-slot="output-style-dot"`) when the effective style is not
   Default. Tooltip "Output style: {name}"; accessible name "Output style: {name}" plus " (automatic)" when the chat has
   no choice of its own.
 - **Menu** (`DropdownMenu` with a radio group named "Output style"; `output-style-option` rows, `data-value` = the name,
-  `''` for Automatic): **Automatic** with the line "Uses {name}, set for {project}" (a project style applies) or "Uses
-  {name}, your default in Settings"; then the built-ins Default, Explanatory, Learning ("Built-in" muted on the right),
-  then the active personal, project and plugin styles (the source muted on the right: "Personal", "Project", the plugin
-  name), each with its description under the name (one line, truncated). Shadowed, invalid and turned-off styles are not
+  `''` for Automatic): **Automatic** with the line (`data-slot="output-style-automatic"`) "Uses {name}, set for
+  {project}" (whenever the project has its own style; "this project" when its name is unknown) or "Uses {name}, your
+  default in Settings" (a style that resolves to nothing offered reads "Uses Default, …"); then the built-ins Default,
+  Explanatory, Learning ("Built-in" muted on the right), then the active personal, project and plugin styles (the source
+  muted on the right, `data-slot="output-style-source"`: "Personal", "Project", the plugin name, else "Plugin"), each
+  with its description under the name (one line, truncated). Shadowed, invalid and turned-off styles are not
   offered. Footer **Manage output styles** (`output-style-manage`) → `/settings/customize?tab=output-styles&project=<id>`
   (no `project` without one). The options come from `styleOptions(entries)` over `useCustomizationsStore().entriesOf
-  (projectId, 'style')`; the Automatic line from `automaticStyle(projectStyle, globalStyle, options)`.
+  (projectId, 'style')`; the Automatic line from `automaticStyle(projectStyle, globalStyle, options)`. The composer
+  fetches the catalog on mount and on a project change (at most 60 s old) and when the menu opens (at most 15 s old).
+  The project's id, name and style and the plugin names reach the menu through `OUTPUT_STYLE_SCOPE`, a provide / inject
+  adapter of `ChatComposer` (the menu's props stay as frozen; kept at Gate P11-A).
 - **Choosing**: the session's `outputStyle` (the chat's own choice; `null` = Automatic) → `chats.update(id, { settings: {
   outputStyle } })`; on `/` the choice travels with the first message as `outputStyle` of the chat request and is saved
-  with the new chat. It applies from the next turn (a running reply keeps its style). The composer's polite region
-  announces "Output style: {name}". The choice is **never pinned**: `pinChoices()` pins the model, effort and permission
-  mode of a chat on its first send, but not the style, so an Automatic chat follows later changes of the project's or the
-  global default.
+  with the new chat (a style picked while a new chat's first request runs is saved once the chat exists). It applies
+  from the next turn (a running reply keeps its style). The composer's polite region announces "Output style: {name}"
+  (plus " (automatic)" for Automatic). The choice is **never pinned**: `pinChoices()` pins the model, effort and
+  permission mode of a chat on its first send, but not the style, so an Automatic chat follows later changes of the
+  project's or the global default.
 - **`/output-style`** (a client command, App group, "Set the output style"; reserved: a plugin command with this name is
   refused, release note): `/output-style` alone opens the menu; `/output-style <name>` sets a style (the name or the
   label, case-insensitive); `/output-style auto` (or `automatic`) returns to Automatic; anything else shows "Unknown
@@ -3645,7 +3692,8 @@ General → Output style, 9.4); the chat's choice can be **Automatic** (no choic
   match, like `/mode`.
 - **A missing style**: a chosen style that no longer exists (deleted, renamed, invalid, its plugin turned off) stays
   selected in the menu with "Not available" muted; the server answers that turn with Default and the notice
-  `output-style-unavailable` (icon `Feather`, level warning, the server's text, once per model).
+  `output-style-unavailable` (icon `Feather`, level warning, the server's text "The output style "{name}" is not
+  available, so the default style was used.", once per path and model).
 - **Mobile (390px)**: the trigger is icon-only; the model name truncates first; the menu is at most `60dvh` tall and
   scrolls.
 
@@ -3660,16 +3708,22 @@ time; the UI shows how many items wait and where to review them. There is **no "
 Data: `useProjectTrustStore()` (`GET /api/projects/:id/trust` → `ProjectTrustList { items, orphaned, scannedAt,
 available, issue? }`; a `TrustItem` is `{ kind: hook | mcp | command, sha256, state: approved | pending, changed?, label,
 path, refs, warnings, detail }`; `changed` marks a pending item whose kind and label match an approved row whose hash
-the scan no longer finds: the item changed since the user approved it) and `useProjectMcpStore()` (`GET /api/projects/:id/mcp` → `ProjectMcpList { items, variables
-}`). **Pending counts** (`pending(projectId)`): the pending items of a fetched list, else the `pending` of the latest
-`project-trust.changed` event, else null (unknown). Lists are fetched lazily: when a chat of the project opens, when
-Settings → Projects shows (one request per project row), when Customize selects the project and when a dialog opens.
+the scan no longer finds: the item changed since the user approved it) and `useProjectMcpStore()` (`GET
+/api/projects/:id/mcp` → `ProjectMcpList { items, variables }`; a stored variable no server uses is listed with
+`usedBy: []`). **Pending counts** (`pending(projectId)`): the `pending` of the latest `project-trust.changed` event
+when it is newer than the fetched list, else the pending items of a fetched list, else null (unknown). Both stores fetch
+with one request in flight per project and a version counter (a stale answer never overwrites a newer one); a 409
+`stale` refetches the list before it throws, a 404 drops the project. Lists are fetched lazily: when a chat of the
+project opens (the chip, at most 60 s old), when Settings → Projects shows (one request per project row whose folder is
+available, at most 4 at a time), when Customize selects the project, when the slash menu opens (7.8) and when a dialog
+opens.
 
 **Entry points**:
 
 1. **Chat header**: `ProjectTrustChip` (`project-trust-chip`, `data-count`) right after `ChatProjectChip`, only while
    `pending(projectId)` is above 0: a ghost h-8 pill (40px on coarse pointers) with `ShieldQuestionMark` and "{n} to
-   review" (icon and count only below `sm`), named "Review {n} items in {project} that can run commands"; it calls
+   review" (icon and count only below `sm`), named "Review {n} items in {project} that can run commands" ("Review 1
+   item in {project} that can run commands"); it calls
    `openProjectTrust()` of `CHAT_VIEW_ACTIONS`. The `ChatProjectChip` menu gains **Review commands and hooks…**
    (`chat-project-trust`, `ShieldCheck`) and **MCP servers…** (`chat-project-mcp`, `ServerCog`).
 2. **Settings → Projects** (9.10): the same two row menu items (`project-trust`, `project-mcp`) and the meta badge "{n}
@@ -3678,11 +3732,13 @@ Settings → Projects shows (one request per project row), when Customize select
    and the "Needs approval" badge with **Review…** on project command rows whose `!` lines wait.
 4. **Composer**: the `untrusted` refusal's **Review…** (7.31); the slash menu's "Needs approval" badge (7.8) is only a
    hint.
-5. **MCP servers dialog**: **Review…** on a pending server.
+5. **MCP servers dialog**: **Review…** on a pending server (it opens a nested `ProjectTrustDialog`).
+6. **Notices**: the notice `project-mcp-unavailable` (`ServerOff`) has **MCP servers…** (`data-slot="notice-action"`,
+   `data-action="project-mcp"`), which calls `openProjectMcp()`.
 
 **`ProjectTrustDialog`** (`project-trust-dialog`; a form dialog, `sm:max-w-3xl`, full width minus 1rem at 390px,
-`max-h-[90dvh]`, the body scrolls, the footer stays visible; mounted by `ChatView` and by the Projects and Customize
-pages; props `projectId`, `focusKey`):
+`max-h-[90dvh]`, the body scrolls, the footer stays visible; mounted by `ChatView`, the Projects page, the Customize
+page and its `HooksPanel`, and nested inside `ProjectMcpDialog`; props `projectId`, `focusKey`):
 
 - Title "Review {project}"; intro "Files in this project can run commands on your server. Nothing below runs until you
   approve it. Any change needs a new approval."; the warning `Alert` (`project-trust-warning`, `ShieldAlert`): "Approve
@@ -3690,40 +3746,53 @@ pages; props `projectId`, `focusKey`):
   this server and make network requests."
 - When `orphaned` is above 0 and no item is `changed`: a note "{n} earlier approvals no longer match: an approved item
   was removed or renamed." ("1 earlier approval no longer matches: …"; `data-slot="project-trust-orphaned"`).
-- **Filter** (`project-trust-filter`, `ToggleGroup`, `data-value` `pending | all`): "Needs review · {n}" (the New and
-  Changed items) and "All · {n}"; it opens on Needs review when anything is pending, else on All.
+- **Filter** (`project-trust-filter`, `ToggleGroup` named "Filter items", `data-value` `pending | all`): "Needs review ·
+  {n}" (the New and Changed items) and "All · {n}"; it opens on Needs review when anything is pending, else on All; with
+  a `focusKey` it opens on that item's filter (an approved item gives All).
 - **Groups** (`project-trust-group`, `data-kind`, `data-count`), in this order and only when they have items: **Hooks**,
-  **MCP servers**, **Commands with shell lines**; each heading has **Select all {n}** (`project-trust-select-all`, a
+  **MCP servers**, **Commands with shell lines** (the heading reads "{group} · {n}"); each heading has **Select all
+  {n}** (`project-trust-select-all`, a
   checkbox for the group's pending items in the current filter; it sits above the items it selects, so they are on
   screen when it is used).
-- **Items** (`ProjectTrustItem`, `project-trust-item`, an `<article>` named "{kind} {label}, {state}", `data-kind`,
-  `data-state` `new | changed | approved` (`pending` without / with `changed`, or `approved`), `data-key` = the sha256):
-  - a checkbox (`project-trust-select`, pending items only) or, for approved items, **Revoke** (`project-trust-revoke`);
+- **Items** (`ProjectTrustItem`, `project-trust-item`, an `<article>` named "{kind} {label}, {state}" with the kind
+  words "Hook", "MCP server" or "Command", e.g. "MCP server memory, New"; `data-kind`, `data-state` `new | changed |
+  approved` (`pending` without / with `changed`, or `approved`), `data-key` = the sha256):
+  - a checkbox (`project-trust-select`, pending items only) or, for approved items, **Revoke** (`project-trust-revoke`,
+    named "Revoke {title}");
   - the title: hooks "{event}" plus " · {matcher}" when set; MCP servers the name and a transport badge (stdio / HTTP /
     SSE); commands "/{name}"; then the path (mono, muted) and the state badge **New** (`ShieldQuestionMark`),
     **Changed** (`ShieldAlert`, `text-warning`, with the line "Changed since you approved it." under the title; the
-    earlier version is not stored, so there is no "Previously approved" text) or **Approved** (`ShieldCheck`);
-  - the exact text in a `pre` named "Command" (`CopyButton` "Copy command"): a hook's command (and "timeout {n}s"); a
-    stdio server's command and its arguments; an HTTP / SSE server's URL; a command file's `!` lines, one per line;
-  - details: "Runs {path}" for every referenced file ("{path} (not found)" when its hash is null), "Environment: {names}"
-    and "Headers: {names}" (names only, never values), "Variables: {name} ({set | not set})" (from the MCP list);
-  - warnings (`ShieldAlert`, `text-warning`): `runs-repository-code` "Runs code from this repository that isn't pinned
+    earlier version is not stored, so there is no "Previously approved" text) or **Approved** (`ShieldCheck`); the badge
+    is `data-slot="project-trust-state"` (`data-value`);
+  - the exact text in a `pre` named "Command" (`data-slot="project-trust-command"`, `CopyButton` "Copy command"): a
+    hook's command; a stdio server's command and its arguments; an HTTP / SSE server's URL; a command file's `!` lines,
+    one per line;
+  - details (`data-slot="project-trust-details"`): "timeout {n}s" (a hook with its own timeout), "Runs {path}" for every
+    referenced file ("Runs {path} (not found)" when its hash is null), "Environment: {names}" and "Headers: {names}"
+    (names only, never values), "Variables: {name} (set | not set)" (from the MCP list; the names alone until it has
+    loaded);
+  - warnings (`data-slot="project-trust-warnings"`, each `li` with `data-value` = the warning code; `ShieldAlert`,
+    `text-warning`): `runs-repository-code` "Runs code from this repository that isn't pinned
     (like npm test): later changes to that code run without a new approval."; `private-network` "Connects to a private
     network address."; `referenced-file-missing` "A file this command runs is missing.".
 - **Approve {n} items** / **Approve 1 item** (`project-trust-approve`, `data-count`; disabled at 0; never the dialog's
-  default button: Enter never approves) with "{n} selected" next to it → `useFreshAuth().run(() =>
-  trust.approve(projectId, selected), { required: true })` ("Approving project commands needs your password.", 8.4) →
-  `POST /api/projects/:id/trust { items: [{ kind, sha256 }] }` → toast "Approved {n} items in {project}"; when nothing
-  is pending any more the list shows "Everything in {project} is approved.". A 409 `stale` (an item changed while the
-  dialog was open) refetches the list and shows the alert "{n} items changed while you were reviewing. Check them
-  again." (`project-trust-error`, `data-code="conflict"`, `role="alert"`, focused); changed items lose their selection.
+  default button, and Enter on the focused button is ignored too: only Space or a click approves) with "{n} selected"
+  next to it → `useFreshAuth().run(() => trust.approve(projectId, selected), { required: true })` ("Approving project
+  commands needs your password.", 8.4) → `POST /api/projects/:id/trust { items: [{ kind, sha256 }] }` (in batches of 50,
+  `LIMITS.trustApproveItemsMax`, inside one password prompt) → toast "Approved {n} items in {project}" ("Approved 1 item
+  in {project}"); focus then moves to the first pending checkbox, else the filter; when nothing is pending any more the
+  list shows "Everything in {project} is approved." (`data-slot="project-trust-done"`). A 409 `stale` (an item changed
+  while the dialog was open) refetches the list and shows the alert "{n} items changed while you were reviewing. Check
+  them again." ("1 item changed while you were reviewing. Check it again."; `project-trust-error`,
+  `data-code="conflict"`, `role="alert"`, focused); changed items lose their selection.
 - **Revoke** → `trust.revoke(projectId, sha256)` (`DELETE …/trust/:sha256`, no fresh auth) → toast "Revoked {label}. It
   won't run until you approve it again."; focus moves to the item's checkbox.
 - Empty (`project-trust-empty`): "This project has no hooks, MCP servers or commands that run shell commands."; an
-  unavailable project folder shows the list's `issue` instead. Other errors: `project-trust-error` with the server
-  message.
-- **Close** (or Esc) never approves. `project-trust.changed` refetches the open list quietly and keeps the selection of
-  items that are still there.
+  unavailable project folder shows the list's `issue` instead. **States**: while the list loads, a skeleton
+  (`data-slot="project-trust-loading"`) and focus waits on Close until the list arrives; a failed load shows
+  `project-trust-error` with the server message and **Retry**.
+- **Close** (the footer's `data-action="close"`, or Esc) never approves. `project-trust.changed` refetches the open list
+  quietly and keeps the selection of items that are still there.
 
 **`ProjectMcpDialog`** (`project-mcp-dialog`, the same dialog frame; props `projectId`, `focusServerId`): title "MCP
 servers in {project}", intro "From .mcp.json in the project folder. They run only in this project's chats, after you
@@ -3732,23 +3801,29 @@ approve them."
 - **Rows** (`ProjectMcpServerRow`, `project-mcp-server`, `data-server-id`, `data-state`, `data-transport`): a status dot,
   `ServerCog`, the name, the transport badge and the status text: `pending` "Needs approval" (with **Review…**,
   `project-mcp-review`, which opens the trust dialog focused on the server's item), `needs-variables` "Set {n}
-  variables", `idle` "Starts with the first chat", `connecting` "Connecting…", `connected` "Connected · {n} tools",
-  `error` "Error: {message}", `disabled` "Off on this server (safe mode)" (or the server's `error` message, e.g. an
-  unavailable project folder). Below: the exact command or URL (from the
-  trust item with the same sha256) and, when the server shadows a global one, "Replaces your server {id} in this
-  project's chats." **Reconnect** (`project-mcp-reconnect`; for `connected`, `error` and `idle`) →
-  `projectMcp.reconnect(projectId, serverId)`. The row's toggle shows its tools (mono names).
+  variables" ("Set 1 variable"), `idle` "Starts with the first chat", `connecting` "Connecting…", `connected` "Connected
+  · {n} tools" ("Connected · 1 tool"), `error` "Error: {message}" ("Error" without one), `disabled` "Off on this server
+  (safe mode)" (or the server's `error` message) (`data-slot="project-mcp-status"`; the dot's sr-only words "Needs
+  approval", "Needs variables", "Idle", "Connecting", "Connected", "Error", "Off"). Below: the exact command or URL
+  (`data-slot="project-mcp-command"`, from the trust item with the same sha256) and, when the server shadows a global
+  one (only an approved server does), "Replaces your server {id} in this project's chats."
+  (`data-slot="project-mcp-shadows"`). **Review…** (named "Review {name}…") shows for a pending server, **Reconnect**
+  (`project-mcp-reconnect`, named "Reconnect {name}"; for `connected`, `error` and `idle`) →
+  `projectMcp.reconnect(projectId, serverId)`. The row's toggle (`data-action="toggle"`) shows its tools (mono names, a
+  list named "Tools of {name}", `data-slot="project-mcp-tools"`; "No tools yet." without any).
 - **Variables** (`project-mcp-variables`, a collapsible section "Variables · {n}", one list for the whole project): a
   row per variable (`project-mcp-variable`, `data-name`, `data-state` `set | default | missing`: a stored value; none
   but the `:-default` of `.mcp.json` applies (`hint`); none at all): `$` + the name (mono), the servers that use it
   (`usedBy`, muted), and a write-only password input, always empty: the placeholder "•••• · stored" when a value is
-  stored (with **Clear**, which marks it for removal), "Default: {hint}" when only the default applies; the value is
-  never read back. The note "Values are encrypted on this server and
+  stored (with **Clear**, `data-action="clear-variable"`, `aria-pressed`, which toggles the removal mark), "Default:
+  {hint}" when only the default applies; the value is never read back. The note "Values are encrypted on this server and
   used only for this project's servers. harness-forge never reads them from the server's environment." **Save
-  variables** (`project-mcp-variables-save`, disabled until something changed) → `useFreshAuth().run(() =>
-  mcp.saveVariables(projectId, values), { required: true })` ("Saving the variables of this project's MCP servers needs
-  your password.") → toast "Variables saved"; the servers that use a changed variable restart.
-- Empty (`project-mcp-empty`): "This project has no .mcp.json."; errors `project-mcp-error` (`data-code`).
+  variables** (`project-mcp-variables-save`, `aria-disabled` until something changed, so it keeps its focus) →
+  `useFreshAuth().run(() => mcp.saveVariables(projectId, values), { required: true })` ("Saving the variables of this
+  project's MCP servers needs your password.") → toast "Variables saved"; the servers that use a changed variable
+  restart.
+- Empty (`project-mcp-empty`): "This project has no .mcp.json."; errors `project-mcp-error` (`data-code`); while the
+  list loads, `data-slot="project-mcp-loading"`; a failed load shows **Retry**.
 - `project-mcp.changed` updates the rows (status, tools) of an open dialog.
 - **Tool rows** of a project server read its name through the project-mcp store (falling back to the server id).
 
@@ -3767,7 +3842,7 @@ approve without the password prompt (when a password is set).
 |---|---|
 | Top row | `ProviderIcon` (lg, color variant, plugin icon) · name (`font-medium`) · version (`text-xs mono muted`) · `Switch` (enabled) right |
 | Middle | description, 2 lines max |
-| Bottom | source badge · "Runs code" badge (outline warning, `Cpu` icon) when `kind === 'code'` or it declares a stdio MCP server · contributions summary ("2 providers · 3 tools · 1 MCP server · 2 commands"; Phase 10: "· 2 agents · 1 skill" from `PluginSummary.contributions.agents` / `skills`) |
+| Bottom | source badge · "Runs code" badge (outline warning, `Cpu` icon) when `PluginSummary.runsCode`: `kind === 'code'`, a stdio MCP server or (plugin API 1.5.0) command hooks or `` !`cmd` `` lines in a command template (`manifestRequiresTrust`; never for builtins) · contributions summary ("2 providers · 3 tools · 1 MCP server · 2 commands"; Phase 10: "· 2 agents · 1 skill" from `PluginSummary.contributions.agents` / `skills`; Phase 11: "· 1 output style · 2 hooks", always last, hooks = code hooks + command hook handlers, `contributionsSummary`) |
 
 Source badge labels: `builtin` → Core · `created` + declarative → Declarative · `created` + code → Code · `zip` →
 zip · `npm` → npm · `url` → URL · `link` / `copy` → Local. State overlays: `error` → `border-destructive/60` and
@@ -3801,7 +3876,8 @@ Empty filter result: `Empty` "No plugins match" + "Clear filters". Loading: 6 sk
 2. **Preview** (`InspectPreview`, from `PluginInspection`): icon, name, version, id, description, kind badge,
    contributions list, network hosts (base URLs, MCP URLs), requested permissions (advisory chips), declared
    secrets, sha256 (mono + `CopyButton`), warnings (e.g. "Replaces installed version 1.0.0").
-3. **Trust** (code plugins and stdio MCP only): `TrustWarning` + required checkbox "I trust {source}" (source =
+3. **Trust** (plugins that require trust only: code, a stdio MCP server and, Phase 11, command hooks or `!` lines):
+   `TrustWarning` + required checkbox "I trust {source}" (source =
    the file name, package, URL host or folder). When a password is set (`AuthStatus.enabled`) and the session is
    not fresh (`AuthStatus.freshUntil` missing or past), a "Confirm your password" field (`trust-password`) is
    required too: installing such a plugin is a fresh-auth route (API.md, ADR-017).
@@ -3829,17 +3905,20 @@ files changed on disk): "I trust {source}" checkbox + the same "Confirm your pas
 /api/plugins/:id/trust` (`{ sha256: trust.hash }`, through `run(pin, { required: true })`) → toast "Trusted {name}",
 emits `trusted(id)`. A stale hash (the files changed meanwhile) reloads the plugin and asks for the consent again.
 Phase 11 (plugin API 1.5.0): a declarative plugin with command hooks (`contributes.hooks`) or `` !`cmd` `` lines in a
-command template requires trust like one with a stdio MCP server, and `TrustWarning` lists its hook commands under "Runs
-these commands" (the event, the matcher and the command in mono; `install.ts` collects them next to the stdio
-commands).
+command template requires trust like one with a stdio MCP server, and `TrustWarning` lists what it runs under "Runs
+these commands" (`data-slot="trust-run-commands"`; `runCommands()` of `install.ts`, read with the shared
+`readHooksConfig` / `planCommandExpansion`, in manifest order): every command hook and every `!` span, each with a
+muted source line ("PreToolUse hook", "/deploy") and the command in mono; no matcher is shown.
 
 **Fresh auth everywhere** (Phase 6, S4: one composable, `useFreshAuth`, W6.11; signature in 11). Fresh-auth
 actions (API.md **fresh**): installing or trusting a plugin that runs code (8.3, above), creating a plugin from a
 template (8.6), saving or deleting files of a **code** plugin and Build & reload (8.10), reloading a code plugin (8.7),
-saving a stdio MCP server (8.12), changing the password (9.4), creating or updating a share link (7.14), deleting
-all data (9.8) and, since Phase 7, adding a project (9.10) and rotating the master key (9.8); Phase 11: saving a hook
-(creating one, or an update that does more than turn it off; turning it on included, 9.13), approving project items
-(7.33) and saving the variables of a project's MCP servers (7.33). Every component follows the same rules:
+saving a stdio MCP server (8.12), creating or saving a declarative plugin whose manifest requires trust (8.5: a stdio
+server, 1.5.0 command hooks or `!` spans; every such save), changing the password (9.4), creating or updating a share
+link (7.14), deleting all data (9.8) and, since Phase 7, adding a project (9.10) and rotating the master key (9.8);
+Phase 11: saving a hook (creating one, or an update that does more than turn it off; turning it on included, 9.13),
+approving project items (7.33) and saving the variables of a project's MCP servers (7.33). Every component follows the
+same rules:
 
 - `run(task, { required })`: with `required` (the action is known to need fresh auth) and a session that is not fresh
   (`auth.fresh` false), `ConfirmPasswordDialog` opens **first**; otherwise the request runs, and a `403 forbidden` +
@@ -3854,12 +3933,14 @@ all data (9.8) and, since Phase 7, adding a project (9.10) and rotating the mast
   "Wrong password").
 - Where `required` is set: the code plugin form (scaffold), the Share dialog and the delete-all dialog (always), the Add
   project dialog and the Rotate key dialog (always, Phase 7), the trust dialog (always), the install dialog (when the
-  inspection says `requiresTrust`: code, or a stdio MCP server), the Source tab (code plugins: saving, deleting or
-  renaming files and Build & reload ask for the password first when the session is not fresh; for a declarative plugin's
-  `plugin.json` the prompt comes only after a refusal), the plugin header's Reload (code plugins), the MCP server dialog
-  (when the request needs it: a stdio server); Phase 11: the hook editor, the hook import, turning a personal hook on,
-  the trust dialog's Approve and the MCP servers dialog's Save variables (always); the provider wizard runs without
-  `required` (a 403 prompts once, and a second refusal is shown as the error instead of prompting again).
+  inspection says `requiresTrust`: code, a stdio MCP server or, Phase 11, command hooks or `!` lines), the Source tab
+  (code plugins: saving, deleting or renaming files and Build & reload ask for the password first when the session is
+  not fresh; for a declarative plugin's `plugin.json` the prompt comes only after a refusal), the plugin header's Reload
+  (code plugins), the MCP server dialog (when the request needs it: a stdio server); Phase 11: the hook editor (below),
+  the hook import, turning a personal hook on, the trust dialog's Approve and the MCP servers dialog's Save variables
+  (always); the provider wizard runs without `required` (a 403 prompts once, and a second refusal is shown as the error
+  instead of prompting again). The hook editor asks first for a create and for every edit except one whose only change
+  turns the hook off (`required: !isHookTurnOff(patch)`); an edit without a change closes without a request.
 - The install and trust dialogs keep their inline "Confirm your password" field (`trust-password`): it calls
   `login(password)` (its error text shows under the field, without a countdown), then the request runs through
   `run(send, { required })`; the error alert's **Log in** action calls `confirm()` (the prompt) and then submits again.
@@ -3936,14 +4017,18 @@ Description, author, homepage link, permission chips, then one section per contr
 | Commands | `/name` (mono) · description |
 | Agents (Phase 10) | `PluginCustomizationList` (`plugin-customizations`, `data-kind="agent"`, `data-count`), after Commands, description "Sub-agents the main agent can start.": one row per agent, sorted by name (`plugin-customization`, `data-name`, `data-state` `active \| shadowed`): the mono name, a "Shadowed" badge (`EyeOff`, `data-slot="plugin-customization-shadowed"`, focusable, tooltip and `aria-description` "Not used: {winner} wins.", e.g. "your personal agent") when another agent of the same name wins, the description, and the meta line (`data-slot="plugin-customization-meta"`): the model ("Default model" when unset, "Same as the chat" for `inherit`, else the model ref) · the tools ("All tools" without a list, "No tools" for an empty one, else "{n} tools"); entries come from `customizations.catalog(null)` filtered by `pluginId` and limited to the names the plugin contributes now (a catalog older than a plugin reload may still list a removed one); a contributed name without an entry (the catalog is loading or failed) shows as a name-only row. The page fetches the catalog with `fetchCatalog(null, { maxAgeMs: 15_000 })` whenever the plugin contributes agents or skills (a list younger than 15 s is reused). Footer link "Open in Customize" (`data-slot="plugin-customizations-open"`) → `/settings/customize?tab=agents` |
 | Skills (Phase 10) | the same list with `data-kind="skill"`, description "Instructions the agent loads when a task needs them."; rows show the mono name, the Shadowed badge and the description (no meta line); footer link → `/settings/customize?tab=skills` |
-| Hooks (Phase 11) | `PluginHookList` (`plugin-hooks`, `data-count`) replaces the v1.6 list of code hook names: the plugin's command hooks (from `useHooksStore().list(null)`, source `plugin` and this `pluginId`), one row per handler (`plugin-hook`, `data-event`, `data-kind="command"`: the event, the matcher or "All tools", the command in mono) with the description "Runs only while you trust this plugin.", then its code hooks as chips (the `HookMap` events it registered, `data-kind="code"`); footer link "Open in Customize" → `/settings/customize?tab=hooks` |
-| Output styles (Phase 11) | `PluginCustomizationList` with `data-kind="style"`, description "How the agent writes its replies."; rows show the mono name, the Shadowed badge and the description; footer link → `/settings/customize?tab=output-styles` |
+| Output styles (Phase 11) | `PluginCustomizationList` with `data-kind="style"`, description "How the agent writes its replies."; rows show the mono name, the Shadowed badge and the description (its tooltip names the kind as a word: "Not used: your personal output style wins."); footer link → `/settings/customize?tab=output-styles` |
+| Hooks (Phase 11, last) | `PluginHookList` (`plugin-hooks`, `data-count`) replaces the v1.6 list of code hook names: the plugin's command hooks (from `useHooksStore().list(null)`, fetched with `maxAgeMs: 15_000` when `contributions.commandHooks` is above 0; source `plugin` and this `pluginId`), one row per handler (`plugin-hook`, `data-event`, `data-kind="command"`: the event, the matcher ("All tools" for an every-tool matcher; a non-tool event shows its matcher when one is set), the command in mono) under the note "Runs only while you trust this plugin." (`data-slot="plugin-hooks-trust-note"`, only with command hooks), then its code hooks as chips (the `HookMap` events it registered, `data-kind="code"`, a list named "Code hooks"); the section description "Hooks can read and change prompts, messages and tool calls." shows only when the plugin has code hooks; the count is max(listed command hooks, `contributions.commandHooks`) + code hooks; footer link "Open in Customize" (`data-slot="plugin-hooks-open"`) → `/settings/customize?tab=hooks` |
 
-The plugin card's summary (`contributionsSummary`) adds "{n} hooks" ("1 hook") and "{n} output styles" ("1 output
-style") in Phase 11. A plugin that adds nothing (agents, skills, hooks and output styles included) shows the unchanged
-empty state "This plugin does not add
-providers, tools, MCP servers or commands." ("This plugin is turned off. Turn it on to register its providers, tools
-and commands." while it is off).
+The sections follow in this order: … Commands, Agents, Skills, Output styles, Hooks. The plugin card's summary
+(`contributionsSummary`) adds "{n} output styles" ("1 output style") and then "{n} hooks" ("1 hook"; code hooks and
+command hook handlers together) at its end in Phase 11 ("… · 1 skill · 1 output style · 2 hooks"). The install
+preview's summary (`contributionSummary` of `install.ts`) lists every kind of the card's summary in the same order, plus
+the model count next to the providers ("2 providers · 3 models · 1 tool · 1 MCP server · 2 commands · 2 agents · 1
+skill · 1 output style · 3 hooks"; empty parts omitted).
+A plugin that adds nothing (agents, skills, hooks and output styles included) shows the unchanged empty state "This
+plugin does not add providers, tools, MCP servers or commands." ("This plugin is turned off. Turn it on to register its
+providers, tools and commands." while it is off).
 
 ### 8.9 Configuration tab (`SchemaForm`, W3.1)
 
@@ -4102,7 +4187,7 @@ except dialogs and text fields, which save on blur or Enter.
 | Send messages with | `ToggleGroup` Enter / ⌘ Enter (Ctrl Enter off macOS) | `sendKey` |
 | Default permission mode | `Select` Ask / Accept edits / Plan / Auto / Off (the options of `TOOL_MODE_OPTIONS`, 7.11; Accept edits since Phase 7, Plan since Phase 9) | `defaultToolMode` |
 | Default reasoning effort | `Select` Auto / Off / Low / Medium / High / Max | `defaultReasoningEffort` |
-| Output style (Phase 11) | `Select` (`settings-output-style`, `data-value`) of the active styles of the global catalog (Default, Explanatory, Learning, then personal and plugin styles), help "How replies are written in chats that don't choose one. Projects can choose their own." (7.32, 9.13) | `outputStyle` |
+| Output style (Phase 11) | `Select` (`settings-output-style`, `data-value`) of the active styles of the global catalog (Default, Explanatory, Learning, then personal and plugin styles), help "How replies are written in chats that don't choose one. Projects can choose their own." (7.32, 9.13); a stored style that is no longer an option stays listed with "Not available"; the catalog is fetched on mount (at most 15 s old) | `outputStyle` |
 | Max steps per response | `Input` (`inputmode="numeric"`, at most 3 characters) 1–200 (Phase 7; was 1–100), help "How many tool calls and follow-ups one response may chain in chats without a project (1–200)." | `maxSteps` |
 | Max steps in project chats | `Input` (`inputmode="numeric"`) 1–200 (Phase 7, `settings-project-max-steps`), help "Agent runs in project chats can take more steps (1–200)." | `projectMaxSteps` |
 | Alt shortcuts | `Switch` "Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate and Alt+C for changes." (Phase 6 added Alt+V, Phase 8 Alt+C) | `altShortcuts` |
@@ -4171,7 +4256,8 @@ MCP servers and share links are never included." Phase 11 (ADR-024 amendment, AD
 styles join `customizations.json`; personal hooks, project approvals and project MCP variables are never in a backup;
 the description becomes "Download a zip with every chat, including archived chats and every message version, and your
 personal agents, commands, skills and output styles. API keys, passwords, plugins, MCP servers, hooks, project approvals
-and share links are never included." (W11.8 owns these copy changes of `DataExportSection` / `DataImportSection`.)
+and share links are never included." (W11.8 owns these copy changes of `DataExportSection` / `DataImportSection`;
+W11.16 the result line of `DataImportResultPanel`.)
 
 - `Switch` "Include attachments" (`data-export-files`, on; hint "{files} files, {size}");
 - `Switch` "Include settings" (`data-export-settings`, on; hint "General and appearance settings. They are restored
@@ -4199,11 +4285,13 @@ one; a failed chat does not stop the others."
   settings."). The web sends the form field `restoreCustomizations` with the same value as `restoreSettings` (true only
   for a backup with the switch on), so the definitions are restored together with the settings (Phase 11: the help
   reads "General and appearance settings, and your personal agents, commands, skills and output styles. A personal
-  definition you already have with the same name is kept; commands with shell lines come back turned off.", and the
-  result line reads "{n} personal definitions restored" ("1 personal definition restored")); the result panel adds
-  "{n} agents, commands and skills restored · {k} kept · {f} failed" ("1 agent, command or skill restored"; zero kept
-  and failed counts left out; `data-slot="data-import-customizations"`) when the result carries `customizations`, and
-  a restore of at least one definition refetches the loaded customization lists (`customizations.refreshLoaded()`);
+  definition you already have with the same name is kept; commands with shell lines come back turned off."); the result
+  panel adds "{n} personal definitions restored · {k} kept · {f} failed" ("1 personal definition restored"; zero kept
+  and failed counts left out; Phase 10 read "{n} agents, commands and skills restored"; the result carries no count of
+  the commands that came back turned off; `data-slot="data-import-customizations"`) when the result carries
+  `customizations`, and a restore of at least one definition refetches the loaded customization lists
+  (`customizations.refreshLoaded()`). The server's import warnings about definitions speak of "personal definitions"
+  (output styles included; e.g. "No personal definitions were restored: …");
 - **Import** (`data-import`, `Upload` icon; disabled without a file) → `data.import({ form })` (fields `onConflict`,
   `restoreSettings`, Phase 10 `restoreCustomizations`, then `file`); "Importing…" with a spinner while it runs; 409 `busy` (7.4) and 413
   `payload_too_large` become toasts, every other error shows inline (`data-import-error`, `data-code`);
@@ -4394,9 +4482,11 @@ not load the projects" with **Retry**.
   full path in its `title`), "{n} chats" / "1 chat" (`chatCount`), the warning badge "Folder not found"
   (`project-missing`; its tooltip is `issue`) when `available` is false, and a muted "Uses AGENTS.md" / "Uses CLAUDE.md"
   when `instructionsFile` is set; Phase 8: "{n} allowed commands" ("1 allowed command", left out at 0;
-  `shellRules.countForProject(id)`); Phase 11: the badge "{n} to review" (`project-trust-pending`, `data-count`,
-  `ShieldQuestionMark`, text-warning) while the project has items waiting for approval (the page fetches each project's
-  trust list lazily, 7.33) and "Style: {name}" when the project has its own output style.
+  `shellRules.countForProject(id)`); Phase 11: "Style: {name}" (`data-slot="project-style"`; the stored style name
+  `project.outputStyle`, not its label) when the project has its own output style, then the badge "{n} to review"
+  (`project-trust-pending`, `data-count`, `ShieldQuestionMark`, text-warning) while the project has items waiting for
+  approval (the page fetches the trust list of each row whose folder is available once per visit, at most 4 requests
+  at a time, reusing a list younger than 30 s; failures stay quiet; 7.33).
 - **Row `⋯` menu** (`project-row-menu`, `aria-label="Actions for {name}"`): **Rename** (`project-rename` → the name turns
   into `InlineRename`, `project-rename-input`, at most 80 characters; `projects.update(id, { name })`, optimistic) ·
   **Edit instructions…** (`project-instructions` → `ProjectInstructionsDialog`) · **Allowed commands…** (Phase 8,
@@ -4503,11 +4593,14 @@ rows gain `/output-style`.
 renders the `PageHeader` "Customize" with the description "Sub-agents, slash commands and skills: yours, your projects'
 and your plugins'." and two header actions: **Import…** (`customize-import`, `FileUp`, outline) and **New agent** /
 **New command** / **New skill** (`customize-new`, `Plus`, primary, `data-kind`; the label follows the tab). Nav label
-"Customize" (5.5).
+"Customize" (5.5). Phase 11 (9.13): the description reads "Agents, commands, skills, output styles and hooks: yours,
+your projects' and your plugins'." and the action adds **New output style** / **New hook**.
 
 - **Tabs** (`Tabs`, value synced to `?tab=`): **Agents** · **Commands** · **Skills** (`customize-tab`, `data-value`
   `agents | commands | skills`, `data-count` = the rows of that kind in the current scope, shown as "Agents 6"). Picking
-  a tab always writes `?tab=` (the default `agents` too). Below `sm` the tab list scrolls sideways.
+  a tab always writes `?tab=` (the default `agents` too). Phase 11: at 1280 px the five tabs fit on one row; the Project
+  select moves to its own line below them when both do not fit (always below `sm`); a tab row that still does not fit
+  scrolls sideways inside itself and keeps the active tab in view on load, on a tab change and when the counts arrive.
 - **Project** select (`customize-project-select`, `data-value` = the project id, empty for none; label "Project"):
   "No project" and the projects sorted by name ("Folder not found" muted after a missing one). It writes `?project=`.
   With a project the page shows that project's definitions and how they combine with the others; without one, only
@@ -4610,13 +4703,16 @@ server's rules.
   body's own line numbers), `aria-label` = the field label, the help text linked through `aria-describedby`.
 
 **Viewer** (`CustomizationViewer`, `customization-viewer`): a read-only right-side sheet for project, plugin and
-built-in definitions. Title = the name; the frontmatter as a definition list (description, tools, model, argument hint,
-source); the raw file (`customizations.sourceOf(entry, projectId)` = `GET
-/api/customizations/source?projectId&kind&name&source&path` → `{ content, path? }`; `path` = the entry's own file, so a
-shadowed project file shows its own content) in a read-only `MarkdownEditor` with the diagnostics as lint markers; for
-project files the path in mono with **Copy path**. Footer: **Copy to personal** (opens the editor in import mode,
-prefilled) and **Export .md**. A source that is gone (the file was deleted meanwhile, 404) shows "This file no longer
-exists." (`data-slot="customization-viewer-gone"`) with **Close**; another failure shows its message.
+built-in definitions. Title = the name (Phase 11: a style's label); the frontmatter as a definition list (description,
+tools, model, argument hint, source; Phase 11: a skill adds "Slash menu" ("/{name}" or "Not shown") and, with
+`disable-model-invocation`, "Loading" ("Only when you run it"); a style adds "Name" (the name, when it differs from the
+label) and "Coding" ("Keeps coding instructions" / "Replaces coding instructions")); the raw file
+(`customizations.sourceOf(entry, projectId)` = `GET /api/customizations/source?projectId&kind&name&source&path` →
+`{ content, path? }`; `path` = the entry's own file, so a shadowed project file shows its own content) in a read-only
+`MarkdownEditor` with the diagnostics as lint markers; for project files the path in mono with **Copy path**. Footer:
+**Copy to personal** (opens the editor in import mode, prefilled) and **Export .md**. A source that is gone (the file
+was deleted meanwhile, 404) shows "This file no longer exists." (`data-slot="customization-viewer-gone"`) with
+**Close**; another failure shows its message.
 
 **Import and export** (in the browser; no routes):
 
@@ -4676,14 +4772,16 @@ query, falling back to `agents`. Wireframes: 2.18. User guides: `docs/guides/out
   default"), above the sections: without a project "Your default" with a select of the active styles (writes the
   setting `outputStyle` through the settings store; the same value as Settings → General, 9.4); with a project "Style
   in {project}" with "Same as your default" and the styles (writes `projects.update(id, { outputStyle })`, `null` for
-  Same as your default), and the line "Your default: {name}" under it.
+  Same as your default), and the line "Your default: {name}" under it. The `customize-style-default` id sits on the
+  select's trigger. A chosen style that is no longer an option stays listed with "Not available".
 - **Sections**: Personal, In {project} (the folders `.harness/output-styles · .claude/output-styles`), From plugins,
-  Built-in (Default, Explanatory and Learning: rows with **View…**, **Copy to personal** and **Use by default** in
-  their menu).
+  Built-in (Default, Explanatory and Learning: rows with **View…**, **Copy to personal**, **Export .md** and **Use by
+  default** in their menu).
 - **Rows**: icon `Feather`; the name (the style's `label` when it has one; the slug in the meta line); the description;
   meta "Keeps coding instructions" / "Replaces coding instructions" (from `keepCodingInstructions`); the badges **Your
-  default** and **Default in {project}**. The row menu adds **Use by default** (`customization-set-default`): the global
-  default without a project, the project's style with one.
+  default** and **Default in {project}** (`data-slot="style-default-badge"`; hidden on shadowed and invalid rows). The
+  row menu adds **Use by default** (`customization-set-default`; only on active rows, disabled while the style already
+  is that default): the global default without a project, the project's style with one.
 - **Editor** (kind `style`): Name, Description (help "Shown in the composer's style menu."), **Keep coding
   instructions** (`Switch`, `customization-keep-coding`, default off; help "On: the agent keeps its tool rules and task
   hints. Off: only this style shapes its replies."), and the body "Instructions" (help "How the agent writes its replies.
@@ -4701,41 +4799,56 @@ slash menu accepts them, 7.8). Row meta: "/{name}" when it is in the slash menu,
 does not load it.
 
 **Commands tab** (Phase 11 additions): project commands with `` !`cmd` `` lines whose approval is pending show **Needs
-approval** (`ShieldQuestionMark`) and a **Review…** item (`customization-review`) that opens the project trust dialog
-focused on the command (7.33); the Built-in rows gain `/output-style`.
+approval** (`ShieldQuestionMark`, `data-slot="customization-needs-approval"`) and a **Review…** item
+(`customization-review`, the first item of the row menu) that opens the project trust dialog focused on the command
+(7.33); the Built-in rows gain `/output-style`.
 
 **Hooks tab** (`HooksPanel`, `hooks-panel`; data from `useHooksStore().fetch(projectId)` = `GET /api/hooks?projectId=`,
-on mount, on every project change and quietly when the store marks the scope stale):
+on mount, on every project change and quietly when the store marks the scope stale): while it loads, a skeleton with
+the sr-only "Loading your hooks…"; a failure shows `SettingsLoadError` "Could not load your hooks" with **Retry** (a
+404 for a project deleted meanwhile shows nothing). The tab's `data-count` counts the scope's rows (project rows left
+out while the folder is unavailable); `CustomizeSettings` fetches the list with the catalog (`maxAgeMs` 15 s).
 
 - **Run hooks** (`hooks-enabled`, a `Switch`, setting `hooksEnabled`, optimistic, no password): help "Shell commands
   that run at points of the agent's work, like before a tool call. Off: no command hook runs, from any source." Plugin
-  code hooks are not affected (they are part of their plugin).
+  code hooks are not affected (they are part of their plugin). The rows follow the switch through the server's
+  `hooks.changed { projectId: null }` on a `hooksEnabled` change (active ↔ blocked; a blocked row reads "Off on this
+  server" whichever switch is off).
 - **Server switches**: when the list's `switches` say the server turns command hooks off, an `Alert`
   (`hooks-disabled`, `data-reason` `safe-mode | shell-off`; safe mode first) replaces the help: "Hooks are turned off on
   this server (safe mode)." / "Hooks are turned off on this server (HF_WORKSPACE_SHELL=0)." Rows still list.
 - **Sections** (`HookSection`, `hooks-section`, `data-source` `personal | project | plugin`, `data-count`), each "{title}
-  · {n}": **Personal** (editable); **In {project}** (only with a project; from the list's `project` scan: the heading lists the settings files
-  that were read (`files`) in mono, `.harness/settings.json · .claude/settings.json · .claude/settings.local.json`, and
+  · {n}": **Personal** (editable); **In {project}** (only with a project; from the list's `project` scan: the heading
+  lists the settings files that were read (`files`, at most four, lowest precedence first) in mono,
+  `.claude/settings.json · .claude/settings.local.json · .harness/settings.json · .harness/settings.local.json`, and
   **Review {n}…** (`customize-trust-review`, `data-count` = `pending`, the project hooks waiting for approval) while
-  any wait; file problems from the list's `diagnostics` show as a warning `Alert` under it; an unavailable project
-  folder (`available: false`) replaces the rows with an `Alert` holding `issue`); **From plugins**
-  (command hooks with the plugin's name; code hooks as rows of kind `code` that show their `HookMap` event, e.g.
-  `prompt.submit`, and "Code hook"; hidden when empty). Rows are sorted in event order (`HOOK_EVENTS`), then by matcher. Empty (`hooks-empty`, `data-source`):
-  "No personal hooks yet. A hook runs a shell command when something happens, like before a tool call." · "No hooks in
-  {project}. Add a "hooks" object to .harness/settings.json (or .claude/settings.json) in the project folder."
+  any wait; file problems from the list's `diagnostics` show as a warning `Alert` under it, one line "{file}: {message}"
+  each (info-level ones and, while the folder is unavailable, all of them hidden; an invalid matcher in a settings file
+  drops its group, so it shows only here); an unavailable project folder (`available: false`) replaces the rows with an
+  `Alert` "The project folder is unavailable: {issue}"); **From plugins** (command hooks with the plugin's name; code
+  hooks as rows of kind `code` that show their `HookMap` event, e.g. `prompt.submit`, and "Code hook"; hidden when
+  empty). Rows are sorted in event order (`HOOK_EVENTS`), then by matcher, then by command; code hooks last, by event
+  name. Empty (`hooks-empty`, `data-source`): "No personal hooks yet. A hook runs a shell command when something
+  happens, like before a tool call." (with **New hook** / **Import…** buttons, `data-action="new"` / `"import"`) · "No
+  hooks in {project}. Add a "hooks" object to .harness/settings.json (or .claude/settings.json) in the project folder."
 - **Rows** (`HookRow`, `hook-row`, `data-source`, `data-event`, `data-kind` `command | code`, `data-state` `active |
   pending | off | invalid | blocked`, plus `data-hook-id` (personal), `data-path` (project), `data-plugin-id`
-  (plugin)): `Webhook` (`WebhookOff` for `off` and `blocked`), the event, the matcher (mono; "All tools" when empty or
-  `*` on PreToolUse / PostToolUse; nothing for the other events), the command (mono, truncated in the middle, the full
-  text in its `title`); the state badge (project rows **Approved** / **Needs approval**; **Off**; **Invalid** with the
-  diagnostics under the row; **Off on this server** for `blocked`; plugin rows "Plugin not trusted" when the plugin
-  waits for trust); line 2: the source ("Personal", "Project", the plugin name) · "timeout {n}s" · the path. Menu
-  (`hook-row-menu`, "Actions for {event} hook"): personal **Edit…** (`hook-edit`) · **Duplicate** (`hook-duplicate`) ·
-  **Turn off** / **Turn on** (`hook-toggle`, `data-state`) · **Copy as JSON** (`hook-copy-json`) · **Delete…**
-  (`hook-delete`); project **Review…** (`hook-review`) · **Copy to personal** (`hook-duplicate`) · **Copy as JSON**;
-  plugin **Open plugin** · **Copy as JSON** (command hooks only).
-- **Turn off / on**: `update(id, { enabled })`, optimistic; turning a hook off needs no password, turning it on asks
-  for it like a save ("Saving a hook needs your password.").
+  (plugin)): `Webhook` (`WebhookOff` for `off` and `blocked`), the event, the matcher (mono,
+  `data-slot="hook-row-matcher"`; "All tools" for an every-tool matcher on PreToolUse / PostToolUse: empty, `*`, `.*` or
+  a wildcard-only alternative such as `Bash|*`; the other events show their matcher when one is set), the command (mono,
+  truncated in the middle, the full text in its `title`, `data-slot="hook-row-command"`); line 2: the source
+  ("Personal", "Project", the plugin name) · "timeout {n}s" · the path (a code hook: "Code hook"), then the state badge
+  (`data-slot="hook-row-state"`: project rows **Approved** / **Needs approval**; **Off**; **Invalid**; **Off on this
+  server** for `blocked`; the command hooks of a plugin that waits for trust are not listed in v1.7 — the plugin detail
+  page shows them; the "Plugin not trusted" row is backlog). Every row lists its error
+  and warning diagnostics under it (`data-slot="hook-row-diagnostics"`, a list named "Problems in this {event} hook",
+  errors first). Menu (`hook-row-menu`, "Actions for {event} hook"): personal **Edit…** (`hook-edit`) · **Duplicate**
+  (`hook-duplicate`) · **Turn off** / **Turn on** (`hook-toggle`, `data-state`) · **Copy as JSON** (`hook-copy-json`) ·
+  **Delete…** (`hook-delete`); project **Review…** (`hook-review`) · **Copy to personal** (`hook-duplicate`) · **Copy as
+  JSON**; plugin **Open plugin** (`data-action="open-plugin"`) · **Copy as JSON** (command hooks only).
+- **Turn off / on**: `update(id, { enabled })`; turning a hook off is optimistic (rolled back on failure) and needs no
+  password; turning it on waits for the server and asks for the password like a save ("Saving a hook needs your
+  password."). The on / off state is read from `state` (`HookEntry` has no `enabled`).
 - **Delete…**: `ConfirmDialog` "Delete this hook?" with "It stops running at once." and **Delete hook**
   (`hook-delete-confirm`) → `hooks.remove(id)` (no password) → toast "Deleted hook"; focus moves to the next row's
   menu, else the previous one, else New hook.
@@ -4750,28 +4863,36 @@ their event happens. Only add commands you understand."
 | Field | Control and copy |
 |---|---|
 | Event (`hook-event`, `data-value`) | `Select` of the eight events in `HOOK_EVENTS` order, each with its description below the select (15) |
-| Tools (`hook-matcher`, mono; PreToolUse and PostToolUse only, hidden otherwise) | help "Tool names separated by \|. Claude Code names work too (Bash, Read, Write, Edit, Grep, Glob, WebFetch). Leave it empty or use * for every tool."; the preview (`hook-matcher-preview`, `data-count`, `aria-live="polite"`, debounced 300 ms) "Matches {list}" (the harness names with the Claude alias in brackets, e.g. "shell (Bash), edit_file (Edit)") or "No tool is named {name} now."; an invalid matcher: "Use tool names, \| and * only." |
-| Command (`hook-command`, a mono `Textarea`, 1 → 6 rows, at most 4,096 characters) | help "Runs with sh in the project folder (outside projects, in a private folder). It gets the event as JSON on stdin; exit code 2 blocks with stderr as the reason."; empty: "Add the command." |
+| Tools (`hook-matcher`, mono; PreToolUse and PostToolUse only, hidden otherwise) | help "Tool names separated by \|. Claude Code names work too (Bash, Read, Write, Edit, Grep, Glob, WebFetch). Leave it empty or use * for every tool."; the preview (`hook-matcher-preview`, `data-count`, `aria-live="polite"`, debounced 300 ms) "Matches {list}" (the harness names with the Claude alias in brackets, e.g. "shell (Bash), edit_file (Edit)") or "No tool is named {name} now." (both joined by ". " when both apply; at most 8 names, then "{names} and {n} more"; an empty, `*` or wildcard-only matcher shows no preview text); an invalid matcher: "Use tool names, \| and * only."; over 200 characters: "Use at most 200 characters." |
+| Command (`hook-command`, a mono `Textarea`, 1 → 6 rows, at most 4,096 characters) | help "Runs with bash (or sh when bash is missing) in the project folder (outside projects, in a private folder). It gets the event as JSON on stdin; exit code 2 blocks with stderr as the reason."; empty: "Add the command."; "Use at most 4,096 characters."; "The command cannot contain NUL characters." |
 | Timeout (`hook-timeout`, `inputmode="numeric"`) | "{n} seconds", empty = 60; "Enter a whole number from 1 to 600." |
 | On (`hook-editor-enabled`) | `Switch`, default on |
 
 - The matcher is checked with the shared `compileMatcher` (the server's rule), the preview with `matcherPreview(matcher,
-  tools)` over the tools store and `CLAUDE_TOOL_ALIASES`.
-- **Save hook** (`hook-save`) → `useFreshAuth().run(() => hooks.create(body) | hooks.update(id, patch), { required:
-  true })` ("Saving a hook needs your password.", 8.4) → toast "Hook saved"; the sheet closes and focus returns to the
-  opener. Errors: `hook-error` (`data-code`, the server message; a 400 on `matcher` shows on the field). Mod+Enter saves.
+  tools)` over `usePluginsStore().tools` (fetched when the sheet opens) and the shared `hookTargetNames` /
+  `claudeToolName`. A non-tool event keeps an unchanged stored matcher.
+- **Save hook** (`hook-save`) → `useFreshAuth().run(() => hooks.create(body) | hooks.update(id, patch), { required })`
+  (`required` is true for a create and for an edit unless its only change turns the hook off, `!isHookTurnOff(patch)`;
+  an edit without a change closes without a request; "Saving a hook needs your password.", 8.4) → toast "Hook saved";
+  the sheet closes and focus returns to the opener. Errors: `hook-error` (`data-code`, the server message; a 400 on
+  `matcher` shows on the field). Mod+Enter saves.
 - Closing with changes asks "Discard changes?" (`hook-discard-confirm`), like 9.12.
 
 **Hook import** (`HookImportDialog`, `hook-import-dialog`; a form dialog, full width minus 1rem at 390px): "Import
 hooks", "Paste Claude Code settings JSON (the whole file or its "hooks" object)." A mono `Textarea`
-(`hook-import-input`) and **Choose file…** (`hook-import-file`, `.json`, at most 256 KB). The text goes through
+(`hook-import-input`, labelled "Settings JSON") and **Choose file…** (`hook-import-file`, `.json`, at most 256 KB; a
+larger file shows "{file} is too large" in `hook-import-error`; a pasted text over the cap gets the shared "The settings
+file is larger than 256 KiB."). The text goes through
 `importHooks(text)` (the shared `readSettingsHooks` / `readHooksConfig`; only the `hooks` key is read, `permissions`
 and every other key are ignored): the preview (`hook-import-preview`) "Found {n} hooks" lists every handler
-(`hook-import-item`, `data-event`, `data-state` `ready | invalid`) with a checkbox (checked when `ready`), its event,
-matcher, command and timeout; an invalid one is unchecked and disabled with its diagnostic ("Use tool names, | and *
-only."); notes list what was left out ("Ignored: "prompt" hooks aren't supported."). Errors (`hook-import-error`):
-"This isn't valid JSON." · "No hooks found." **Add {n} hooks** / **Add 1 hook** (`hook-import-submit`) creates the
-checked ones as personal hooks, one request each under one password prompt → toast "Added {n} hooks". Mod+Enter adds.
+(`hook-import-item`, `data-event`, `data-state` `ready | invalid`) with a checkbox (checked when `ready`), "{event} ·
+{matcher}" ("All tools" for an every-tool matcher), the command and "{timeout}s" (60 when unset); an invalid one is
+unchecked and disabled with its diagnostic ("Use tool names, | and * only."); notes (`data-slot="hook-import-notes"`)
+list what was left out ("Ignored: "prompt" hooks aren't supported.", "Ignored: {message}", "{event}: {message}").
+Errors (`hook-import-error`): "This isn't valid JSON." · "No hooks found." **Add {n} hooks** / **Add 1 hook**
+(`hook-import-submit`, `data-count`) creates the checked ones as personal hooks, one request each under one password
+prompt → toast "Added {n} hooks" ("Added 1 hook"). A failure partway shows `data-slot="hook-import-submit-error"`
+(`data-code`) with "Added {n} hooks" so far; a retry skips the ones already created. Mod+Enter adds.
 
 **What the page never does**: write a project's settings files (they are edited in the repository), read `~/.claude`,
 run a hook, or show a hook's output (records live in the chats, 7.31; `GET /api/hooks/runs` has no screen in v1.7).
@@ -6082,7 +6203,9 @@ component is imported by path.
 defineProps<{ projectId: string | null; projectName: string | null }>()
 defineExpose<{ create(): void; import(): void }>()   // the page's New hook / Import… buttons
 // Root hooks-panel; hooks-enabled, hooks-disabled (data-reason = safe-mode | shell-off), a HookSection per source,
-// the HookEditor and the HookImportDialog.
+// the HookEditor and the HookImportDialog; W11.8 also mounts a ProjectTrustDialog (Review…, focusKey = the item's
+// sha256), a ConfirmDialog (hook-delete-confirm) and ConfirmPasswordDialog. HookEntry has no `enabled`: on / off is
+// read from state === 'off'.
 
 // HookSection (W11.8; stub)
 defineProps<{
@@ -6096,13 +6219,16 @@ defineProps<{
 }>()
 defineEmits<{ action: [action: HookAction, entry: HookEntry]; review: [] }>()
 // Root hooks-section (data-source, data-count); hooks-empty (data-source); customize-trust-review (data-count).
+// W11.8 CCR (additive, kept as is): slots `notices` (the file problems) and `empty-actions` (New hook / Import…).
 
 // HookRow (W11.8; stub)
 defineProps<{ entry: HookEntry; busy?: boolean }>()
 defineEmits<{ action: [action: HookAction] }>()
 // type HookAction = 'edit' | 'duplicate' | 'toggle' | 'copy-json' | 'delete' | 'review' | 'open-plugin'
 // Root hook-row (data-source, data-event, data-kind, data-state, data-hook-id | data-path | data-plugin-id);
-// hook-row-menu; the items hook-edit, hook-duplicate, hook-toggle, hook-copy-json, hook-review, hook-delete.
+// hook-row-menu; the items hook-edit, hook-duplicate, hook-toggle, hook-copy-json, hook-review, hook-delete;
+// data-slot hook-row-matcher, hook-row-command, hook-row-state, hook-row-diagnostics; Open plugin
+// data-action="open-plugin".
 
 // HookEditor (W11.8; stub; mounted by HooksPanel) — 9.13
 defineProps<{
@@ -6114,31 +6240,36 @@ defineProps<{
 defineEmits<{ 'update:open': [open: boolean]; saved: [hook: PersonalHook] }>()
 // Root hook-editor (data-mode); hook-warning, hook-event (data-value), hook-matcher, hook-matcher-preview (data-count),
 // hook-command, hook-timeout, hook-editor-enabled, hook-save, hook-error (data-code), hook-discard-confirm. Saves
-// through the hooks store inside useFreshAuth().run(…, { required: true }).
+// through the hooks store inside useFreshAuth().run(…, { required }): true for a create, !isHookTurnOff(patch) for
+// an edit.
 
 // HookImportDialog (W11.8; stub; mounted by HooksPanel) — 9.13
 defineProps<{ open: boolean }>()
 defineEmits<{ 'update:open': [open: boolean]; imported: [hooks: PersonalHook[]] }>()
 // Root hook-import-dialog; hook-import-input, hook-import-file, hook-import-preview, hook-import-item (data-event,
-// data-state = ready | invalid), hook-import-submit, hook-import-error.
+// data-state = ready | invalid), hook-import-submit (data-count), hook-import-error; data-slot hook-import-notes,
+// hook-import-submit-error (data-code).
 
 // StyleScopeBar (W11.8; stub; the Output styles tab) — 9.13
 defineProps<{ projectId: string | null; projectName: string | null; options: readonly OutputStyleOption[] }>()
-// Root customize-style-default (data-value; '' = Same as your default). Writes the setting outputStyle or
-// projects.update(id, { outputStyle }) itself.
+// customize-style-default (data-value; '' = Same as your default) sits on the select's trigger (the root has no
+// id). Writes the setting outputStyle or projects.update(id, { outputStyle }) itself.
 
-// ProjectTrustDialog (W11.9; stub; mounted by ChatView, ProjectsSettings and CustomizeSettings) — 7.33
+// ProjectTrustDialog (W11.9; stub; mounted by ChatView, ProjectsSettings, CustomizeSettings, HooksPanel and, nested,
+// ProjectMcpDialog) — 7.33
 defineProps<{ open: boolean; projectId: string | null; focusKey?: string | null }>()   // focusKey = a TrustItem.sha256
 defineEmits<{ 'update:open': [open: boolean] }>()
 // Root project-trust-dialog; project-trust-warning, project-trust-filter (data-value = pending | all),
 // project-trust-group (data-kind, data-count), project-trust-select-all, project-trust-approve (data-count),
-// project-trust-error (data-code), project-trust-empty.
+// project-trust-error (data-code), project-trust-empty; data-slot project-trust-loading, project-trust-done;
+// the footer Close data-action="close".
 
 // ProjectTrustItem (W11.9; stub)
 defineProps<{ item: TrustItem; selected: boolean; busy: boolean; variables?: ProjectMcpList['variables'] }>()
 defineEmits<{ toggle: []; revoke: [] }>()
 // Root project-trust-item (data-kind, data-state = new | changed | approved, data-key); project-trust-select,
-// project-trust-revoke.
+// project-trust-revoke; data-slot project-trust-state (data-value), project-trust-command, project-trust-details,
+// project-trust-warnings (li data-value = the warning code).
 
 // ProjectTrustChip (W11.9; stub; ChatHeader renders it after ChatProjectChip) — 7.33
 defineProps<{ projectId: string | null }>()   // injects CHAT_VIEW_ACTIONS (openProjectTrust)
@@ -6149,17 +6280,22 @@ defineProps<{ open: boolean; projectId: string | null; focusServerId?: string | 
 defineEmits<{ 'update:open': [open: boolean] }>()
 // Root project-mcp-dialog; project-mcp-variables, project-mcp-variable (data-name, data-state = set | default |
 // missing),
-// project-mcp-variables-save, project-mcp-error (data-code), project-mcp-empty.
+// project-mcp-variables-save (aria-disabled until a change), project-mcp-error (data-code), project-mcp-empty;
+// data-slot project-mcp-loading; Clear data-action="clear-variable" (aria-pressed).
 
 // ProjectMcpServerRow (W11.9; stub)
 defineProps<{ server: ProjectMcpServer; trust: TrustItem | null; expanded: boolean; busy: boolean }>()
 defineEmits<{ toggle: []; reconnect: []; review: [] }>()
-// Root project-mcp-server (data-server-id, data-state, data-transport); project-mcp-reconnect, project-mcp-review.
+// Root project-mcp-server (data-server-id, data-state, data-transport); project-mcp-reconnect, project-mcp-review;
+// data-slot project-mcp-status, project-mcp-command, project-mcp-shadows, project-mcp-tools; the toggle
+// data-action="toggle".
 
 // HookNote (W11.12; stub; store-free; ChatMessage, ToolPart and the carrier branch render it) — 7.31
 defineProps<{ data: HookData; variant: 'inline' | 'turn' | 'tool'; pluginName?: string | null }>()
 // Root hook-note (data-event, data-outcome, data-source, data-variant; role="note"); hook-note-toggle,
-// hook-note-details; data-slot="hook-context", data-slot="hook-output".
+// hook-note-details; the toggle carries data-state (open | closed); data-slot hook-note-line, hook-note-source,
+// hook-note-reason, hook-context, hook-output (only the error pre of the details), hook-system-message (the
+// "Hook: {message}" lines), hook-updated-input, hook-source (data-source).
 
 // ToolHookBadge (W11.12; stub; store-free; in ToolPart's status cell) — 7.31
 defineProps<{ hooks: readonly HookData[] }>()
@@ -6176,32 +6312,39 @@ defineProps<{
 }>()
 defineEmits<{ 'update:open': [open: boolean]; 'update:modelValue': [value: string | null] }>()
 // Root output-style-trigger (data-value = the effective name, data-source = automatic | chat); output-style-option
-// (data-value; '' = Automatic); output-style-manage.
+// (data-value; '' = Automatic); output-style-manage; data-slot output-style-label, output-style-dot,
+// output-style-automatic, output-style-source. Its project scope comes from OUTPUT_STYLE_SCOPE (provided by
+// ChatComposer; a local adapter instead of a prop, kept at Gate P11-A).
 
-// ComposerRefusal (W11.10; stub; ChatComposer renders it above the textarea) — 7.31; refusalOf(error) fills
+// ComposerRefusal (W11.10; stub; ChatComposer renders it at the top of the card, above the attachment chips and the
+// textarea) — 7.31; refusalOf(error) fills
 // ComposerRefusalData from a 409 conflict: details.reason hook-blocked | untrusted, and for hook-blocked the record in
 // details.hook (HookData: event, hooks[0].source) for the "{event} · {source}" line
 defineProps<{ refusal: ComposerRefusalData | null }>()
 defineEmits<{ dismiss: []; review: [] }>()
-// Root composer-refusal (data-code = hook-blocked | untrusted, data-event); composer-refusal-dismiss,
-// composer-refusal-review.
+// Root composer-refusal (data-code = hook-blocked | untrusted, data-event, '' when unknown); composer-refusal-dismiss,
+// composer-refusal-review; data-slot composer-refusal-reason, composer-refusal-source.
 
 // PluginHookList (W11.8; stub; PluginContributions renders it) — 8.8
 defineProps<{ entries: readonly HookEntry[]; codeHooks: readonly string[] }>()   // the plugin's command hooks; code
                                                                                  // hook names (HookMap keys)
-// Root plugin-hooks (data-count); rows plugin-hook (data-event, data-kind = command | code).
+// Root plugin-hooks (data-count); rows plugin-hook (data-event, data-kind = command | code); data-slot
+// plugin-hooks-trust-note, plugin-hooks-open.
 
 // Prop, emit and type additions (C39 declares them in P11-0b; the owners use them in P11-A)
 // useChatSession (W11.11):   outputStyle: WritableComputedRef<string | null> (the chat's own choice, never pinned);
 //                            hookActivity: Readonly<Ref<{ event: HookEvent; toolCallId: string | null } | null>>;
 //                            activity widens to 'compacting' | 'hooks' | null; run.started origin 'hook' joins the
-//                            queue / task path; buildChatRequestBody gains outputStyle (new chats)
+//                            queue / task path; buildChatRequestBody gains outputStyle (new chats); W11.16 (additive):
+//                            accepted: Readonly<Ref<number>> (POSTs answered 2xx, seen by the transport's fetch;
+//                            resumes never count); chat.created then chat.deleted of an unseen chat → becomeNew()
 // ChatTranscript, ChatMessage, SubmittedPlaceholder (W11.12): the activity props widen to 'compacting' | 'hooks' | null
 // chat-context.ts (W11.11):  CHAT_VIEW_ACTIONS + openProjectTrust(focusKey?: string): void and
 //                            openProjectMcp(serverId?: string): void; HOOK_ACTIVITY (11.8)
 // ChatComposer (W11.10):     + prop outputStyle: string | null and emit 'update:outputStyle'; ChatComposerExposed +
 //                            showRefusal(refusal: ComposerRefusalData | null): void and
-//                            restoreInput(input: ComposerSubmitInput): void; mounts OutputStyleMenu and ComposerRefusal
+//                            restoreInput(input: ComposerSubmitInput): void; mounts OutputStyleMenu and
+//                            ComposerRefusal; provide(OUTPUT_STYLE_SCOPE)
 // chat-format.ts (W11.12):   MessageBlock kind + 'hook' ({ kind, key, index, data: HookData }); tool-linked data-hook
 //                            parts are not emitted as blocks
 // ChatMessage (W11.12):      a carrier (isHookCarrierMessage) renders HookNote (variant 'turn') + "Sent to the agent"
@@ -6212,19 +6355,28 @@ defineProps<{ entries: readonly HookEntry[]; codeHooks: readonly string[] }>()  
 //                            commands" and "Included {paths}" from metadata.command.inlined
 // ChatHeader (W11.9):        ProjectTrustChip after ChatProjectChip; ChatProjectChip's menu items chat-project-trust,
 //                            chat-project-mcp
-// ProjectsSettings (W11.9):  the row menu items project-trust, project-mcp and the badge project-trust-pending
+// ProjectsSettings (W11.9):  the row menu items project-trust, project-mcp, the badge project-trust-pending and the
+//                            meta "Style: {name}" (data-slot project-style)
 // slash-commands.ts (W11.10): SlashGroup + 'skill' (SLASH_GROUPS adds "Skills", last); SlashItem + skill?: boolean,
 //                            pending?: boolean; ClientCommandAction + { type: 'open'; menu: 'style' } and
 //                            { type: 'set-style'; style: string | null }; ClientCommandContext + styles; name patterns
 //                            widen to 64 characters
 // customize.ts (W11.8):      CUSTOMIZE_TABS + output-styles; CustomizeTab = CustomizationKind | 'hook' and tabOf();
 //                            CustomizationDraft + keepCodingInstructions, userInvocable, modelInvocable (argumentHint
-//                            is reused for skills); CustomizationAction + 'review' | 'set-default'
+//                            is reused for skills) and, a W11.8 CCR, label?; CustomizationAction + 'review' |
+//                            'set-default'; W11.8 exports CUSTOMIZE_TAB_ORDER, CUSTOMIZE_TAB_VALUES, displayName,
+//                            StyleDefaults / styleDefaultBadges / isScopeDefault, pendingCommandTrust; the new
+//                            customize-context.ts exports CUSTOMIZE_ROW_CONTEXT (CustomizationRow's props are frozen)
 // PluginCustomizationList (W11.8): kind widens to 'agent' | 'skill' | 'style'
+// plugin-display.ts (W11.8 CCR): PluginCustomizationKind + 'style'; customizeRoute('agent' | 'skill' | 'style' |
+//                            'hook'); contributionsSummary adds output styles and hooks (last)
+// CustomizationViewer, CustomizationRow (W11.8): the style and skill rows (9.12), customization-needs-approval
+// TrustWarning (W11.8):      "Runs these commands" (data-slot trust-run-commands, 8.4)
 // PluginContributions (W11.8): the Hooks section (PluginHookList) and the Output styles section
 // GeneralSettings (W11.8):   the Output style field (settings-output-style)
 // DataExportSection, DataImportSection (W11.8): the Phase 11 copy (9.8: output styles in backups; hooks, approvals and
 //                            MCP variables never; commands with shell lines restored turned off)
+// DataImportResultPanel (W11.16): "{n} personal definitions restored · {k} kept · {f} failed" (9.8)
 // useServerEvents (W11.11):  hooks.changed → hooks store; project-trust.changed → project-trust store (and the hooks
 //                            store: project rows change state); project-mcp.changed → project-mcp store; a reconnect
 //                            calls refreshLoaded() of the three stores
@@ -7240,18 +7392,23 @@ actions: fetch(projectId: string | null, opts?: { maxAgeMs?: number }): Promise<
          update(id: string, patch: HookUpdate): Promise<PersonalHook> // PATCH /hooks/:id; { enabled: false } alone is
                                                                       // optimistic and needs no fresh auth
          remove(id: string): Promise<void>                            // DELETE /hooks/:id; a 404 counts as removed
+         runs(): Promise<HookRunList>            // GET /hooks/runs (the in-memory run log; no screen in v1.7)
          applyEvent(event: ServerEvent): void   // hooks.changed, project-trust.changed, plugin.changed,
-                                                // customization.changed: mark the affected scopes stale and refetch the
-                                                // ones fetched in the last minute
+                                                // customization.changed (only with a projectId): mark the affected
+                                                // scopes stale and refetch the ones used (any fetch call, cached
+                                                // answers included) in the last 60 s (HOOKS_RECENT_MS);
+                                                // project.changed with project null drops that scope
          refreshLoaded(): Promise<void>         // after an event-stream reconnect
 // Every mutation marks every scope stale (personal rows show in every scope). Per-scope versions: an older answer never
-// replaces a newer one. There is no get(id) (no GET /hooks/:id): the editor reads the personal entry of the list.
+// replaces a newer one. There is no get(id) (no GET /hooks/:id): the editor reads the personal entry of the list. Only
+// turning a hook off is optimistic: a failure rolls it back, and answers that arrive meanwhile cannot undo it.
 
 // stores/project-trust.ts — useProjectTrustStore (+ Phase 11, ADR-049; 7.33)
 state:   { byProject: Record<string, ProjectTrustList>; loadedAt: Record<string, number>
            pendingByEvent: Record<string, number> }        // the pending count of the latest project-trust.changed
 getters: trust(projectId: string): ProjectTrustList | null
-         pending(projectId: string | null): number | null  // pending items of the list, else the event count, else null
+         pending(projectId: string | null): number | null  // the latest event count when newer than the list, else the
+                                                           // list's pending items, else null
 actions: fetch(projectId: string, opts?: { maxAgeMs?: number }): Promise<ProjectTrustList>   // GET /projects/:id/trust
          approve(projectId: string, items: readonly TrustApproval[]): Promise<ProjectTrustList>   // { kind, sha256 }
                                     // POST /projects/:id/trust (fresh; 403 login is thrown); a 409 stale refetches the
@@ -7271,7 +7428,8 @@ actions: fetch(projectId: string, opts?: { maxAgeMs?: number }): Promise<Project
                                     // PUT /projects/:id/mcp/variables (fresh; 403 login is thrown); null clears a value
          reconnect(projectId: string, serverId: string): Promise<void>  // POST /projects/:id/mcp/:serverId/reconnect
          applyEvent(event: ServerEvent): void   // project-mcp.changed: replace the servers; project-trust.changed:
-                                                // refetch a loaded project
+                                                // refetch a loaded project; project.changed with project null: drop
+                                                // the project
          refreshLoaded(): Promise<void>
 // The three stores throw a 403 with action 'login'; components wrap their calls in useFreshAuth().run(task, { required })
 // (8.4). Prompt texts: "Saving a hook needs your password.", "Approving project commands needs your password.",
@@ -7289,6 +7447,8 @@ function hookJson(entries: readonly HookEntry[]): string     // the Claude Code 
 function importHooks(text: string): { items: { draft: HookDraft; valid: boolean; message: string | null }[]; notes: string[]; error: string | null }
 const HOOK_COPY: Readonly<Record<string, string>>            // the 9.13 / 15 strings
 function hookDeleteCopy(entry: HookEntry): { title: string; description: string; confirm: string }
+// W11.8 additions: matchesEveryTool, hookMatcherText, sortHookEntries, ImportedHook, HOOK_IMPORT_MAX_BYTES (256 KB),
+// foundHooksText / addHooksText / addedHooksText, matcherError, commandError, parseHookTimeout
 
 // components/projects/trust/project-trust.ts — pure (W11.9)
 function trustGroups(list: ProjectTrustList, filter: 'pending' | 'all'): { kind: TrustItemKind; items: TrustItem[] }[]
@@ -7299,8 +7459,11 @@ function trustWarningText(warning: TrustItem['warnings'][number]): string
 function approveLabel(n: number): string                     // "Approve {n} items" / "Approve 1 item"
 function staleText(n: number): string
 function orphanedText(n: number): string
-function variableStateText(variable: ProjectMcpList['variables'][number]): string
+function variableStateText(variable: ProjectMcpList['variables'][number]): string   // unused by the dialogs
 function mcpStatusText(server: ProjectMcpServer): string
+// W11.9 additions the dialogs use: TRUST_KIND_NAMES, trustItemName, trustCommandText, trustItemDetails, pendingItems,
+// selectedText, approvedText, revokedText, showOrphaned, keepSelection, changedCount, approvalsOf, approvalBatches,
+// variableState, variablePlaceholder, mcpStatusDot, canReconnect, mcpServerCommand
 
 // components/chat/hooks/hook-notes.ts — pure (W11.12; the first three complete in P11-0b)
 function hookDataOf(part: unknown): HookData | null           // a valid data-hook part, else null
@@ -7309,7 +7472,9 @@ function isHookCarrierMessage(message: HarnessUIMessage): boolean          // a 
                                                                            // data-hook parts (the shared isHookCarrier)
 function hookOutcomeText(data: HookData): string             // the line of 7.31
 function hookSourceText(hook: HookData['hooks'][number], pluginName: string | null): string
-function hookAnnouncement(data: HookData, toolTitle: string | null): string | null
+function hookAnnouncement(data: HookData, toolTitle: string | null): string | null   // falls back to "a tool call"
+function hookDetailsKind(data: HookData): 'context' | 'output' | 'details'   // + W11.12: the toggle's word
+function hookPluginId(data: HookData): string | null                         // + W11.12: the first plugin hook
 
 // components/chat/composer/output-style.ts — pure (W11.10)
 interface OutputStyleOption { name: string; label: string; description: string; source: CustomizationSource; available: boolean }
@@ -7320,6 +7485,9 @@ function resolveStyleQuery(query: string, options: readonly OutputStyleOption[])
 function refusalOf(error: unknown): ComposerRefusalData | null   // a 409 conflict with details.reason hook-blocked |
                                                                  // untrusted (hook-blocked: event and source from
                                                                  // details.hook, a HookData), else null
+// W11.10 additions: OUTPUT_STYLE_SCOPE (InjectionKey of OutputStyleScope { projectId, projectName, projectStyle,
+// pluginNames }), NO_OUTPUT_STYLE_SCOPE, isDefaultStyle, styleSourceText, automaticStyleLine, missingStyle,
+// styleTriggerName, manageStylesHref, refusalSourceLine, refusalTitle
 
 // components/chat/chat-context.ts — + HOOK_ACTIVITY (complete in P11-0b; ChatView provides, ToolPart injects)
 const HOOK_ACTIVITY: InjectionKey<Readonly<Ref<{ event: HookEvent; toolCallId: string | null } | null>>>
@@ -7328,7 +7496,8 @@ const HOOK_ACTIVITY: InjectionKey<Readonly<Ref<{ event: HookEvent; toolCallId: s
 // CLIENT_COMMAND_DESCRIPTIONS['output-style'] = 'Set the output style'; resolveClientCommand('/output-style') →
 // { type: 'open', menu: 'style' }; '/output-style auto' → { type: 'set-style', style: null }; '/output-style x' →
 // { type: 'set-style', style: 'x' } after resolveStyleQuery (else the error text); slashGroupOf(command) → 'skill' for
-// kind 'skill'; SlashItem.pending = a project command whose trust item is pending.
+// kind 'skill'; SlashItem.pending = a project command whose trust item is pending; + W11.10: pendingCommandNames,
+// withPendingCommands; slashItemLabel adds ", needs approval".
 
 // composables/useChatSession.ts — additions (W11.11)
 interface ChatSession {
@@ -7336,10 +7505,14 @@ interface ChatSession {
   outputStyle: WritableComputedRef<string | null>   // chats.settings.outputStyle; set → chats.update (never pinned)
   hookActivity: Readonly<Ref<{ event: HookEvent; toolCallId: string | null } | null>>
   activity: Readonly<Ref<'compacting' | 'hooks' | null>>
+  accepted: Readonly<Ref<number>>                   // + W11.16: POSTs answered 2xx (the transport's fetch); ChatView
+                                                    // moves a new chat to /chat/<id> on the first one (2.2)
 }
 // run.started with origin 'hook' and a userMessageId that is not on the shown path → refresh(), then resumeStream(),
 // exactly like origin 'queue' / 'task'; a submit refused with 409 hook-blocked / untrusted rejects with the error so
-// ChatView can call composer.restoreInput(input) and composer.showRefusal(refusalOf(error)).
+// ChatView can call composer.restoreInput(input) and composer.showRefusal(refusalOf(error)); chat.created followed by
+// chat.deleted for a chat the session never described resets it to a new chat (becomeNew(): the next send carries the
+// project and the style again).
 ```
 
 The hooks store is the only reader of the hook routes, the project-trust and project-mcp stores the only readers of
@@ -7418,10 +7591,10 @@ Rules:
   buttons).
 - Phase 11 adds no global shortcut. Mod+Enter saves inside the hook editor and adds inside the hook import (component
   keydown, like Phase 10). `/output-style` is a slash command, not a key; the style menu has no shortcut of its own
-  (Tab reaches its trigger). The trust dialog's Approve is never the default button, so Enter never approves; Esc
-  closes the dialog without approving. **Esc never dismisses the composer's refusal**: in the composer it keeps the
-  priority above (close a menu, cancel dictation, stop the reply); the refusal goes away when the text changes, on the
-  next send or with its × button.
+  (Tab reaches its trigger). The trust dialog's Approve is never the default button, and Enter on the focused Approve
+  is ignored too: only Space or a click approves; Esc closes the dialog without approving. **Esc never dismisses the
+  composer's refusal**: in the composer it keeps the priority above (close a menu, cancel dictation, stop the reply);
+  the refusal goes away when the text changes, on the next send, with its × button or on a chat switch.
 - `KbdCombo` renders hints: `⌘⇧O` / `⌘K` on macOS, `Ctrl Shift O` / `Ctrl K` elsewhere. Hints are hidden below `lg`
   and on touch devices.
 
@@ -8125,12 +8298,24 @@ server's `HookData.outcome` enum; the states of `hook-row` and `project-mcp-serv
 | `plugin-hooks` | `pluginHooks` | `PluginHookList` root (plugin detail) | `data-count` |
 | `plugin-hook` | `pluginHook` | one hook of a plugin | `data-event`, `data-kind` (`command` / `code`) |
 
-E2e hooks that are not test ids (Phase 11, no CCR needed; all `data-slot`): transcript `running-hook` (the "Running
-hook…" / "Running hooks…" line), `hook-context` (the context `pre` of a note), `hook-output` (a hook's error text or
-system message), `command-badge-inlined` (the badge tooltip's "Ran {n} shell commands" / "Included {paths}" lines); composer `output-style-dot` (the not-Default dot of the icon-only trigger); Customize
-`hook-row-command`, `hook-row-matcher`, `style-default-badge` ("Your default" / "Default in {project}"); trust
-`project-trust-command` (the `pre` of an item), `project-trust-orphaned` (the orphaned note). Stored in `localStorage`:
-nothing new (the chat's style is server state; the trust dialog's filter is not remembered).
+E2e hooks that are not test ids (Phase 11, no CCR needed; all `data-slot` unless named otherwise): transcript
+`running-hook` (the "Running hook…" / "Running hooks…" line), `hook-note-line`, `hook-note-source`, `hook-note-reason`
+(the line, its source and a turn note's reason), `hook-context` (the context `pre` of a note), `hook-output` (a hook's
+error text in the details), `hook-system-message` (a hook's "Hook: {message}" lines), `hook-updated-input` (the input
+the tool ran with), `hook-source` (a source line, `data-source`), `notice-action` (`data-action="project-mcp"`: "MCP
+servers…" of the `project-mcp-unavailable` notice), `command-badge-inlined` (the badge tooltip's "Ran {n} shell
+commands" / "Included {paths}" lines); composer `output-style-label`, `output-style-dot` (the not-Default dot of the
+icon-only trigger), `output-style-automatic`, `output-style-source`, `slash-menu-trust` (the "Needs approval" badge),
+`composer-refusal-reason`, `composer-refusal-source`; Customize `hook-row-command`, `hook-row-matcher`,
+`hook-row-state`, `hook-row-diagnostics`, `hook-import-notes`, `hook-import-submit-error` (`data-code`),
+`style-default-badge` ("Your default" / "Default in {project}"), `customization-needs-approval`, and the `data-action`
+values `new` / `import` (the personal empty state) and `open-plugin` (a plugin hook row's menu); plugins
+`plugin-hooks-trust-note`, `plugin-hooks-open`, `trust-run-commands` ("Runs these commands"); Projects `project-style`;
+trust `project-trust-command` (the `pre` of an item), `project-trust-orphaned` (the orphaned note),
+`project-trust-state`, `project-trust-details`, `project-trust-warnings`, `project-trust-loading`, `project-trust-done`
+and `data-action="close"`; MCP `project-mcp-status`, `project-mcp-command`, `project-mcp-shadows`, `project-mcp-tools`,
+`project-mcp-loading`, `data-action="toggle"` (a row's tools toggle) and `data-action="clear-variable"`. Stored in
+`localStorage`: nothing new (the chat's style is server state; the trust dialog's filter is not remembered).
 
 ---
 
@@ -8218,14 +8403,18 @@ nothing new (the chat's style is server state; the trust dialog's filter is not 
 - Phase 11: the hook editor opens on Event (new) or Command (edit and copy); Tab is never captured (the command field is
   a plain textarea); closing it returns focus to the opener (New hook, the row's `⋯` trigger, Copy to personal), and
   "Discard changes?" opens on **Keep editing**. The hook import opens on its textarea and returns focus to Import….
-  The project trust dialog opens on the first pending item's checkbox, else on the filter; Approve is never the
-  default button; the stale alert takes focus; after a Revoke focus moves to that item's checkbox; closing returns focus
+  The project trust dialog opens on the `focusKey` item (its checkbox, or Revoke for an approved one), else on the first
+  pending item's checkbox, else on the filter, else Close (while the list loads focus waits on Close); Approve is never
+  the default button; after an approval focus moves to the first pending checkbox, else the filter; the stale alert
+  takes focus; after a Revoke focus moves to that item's checkbox; closing returns focus
   to the opener (the chip, a row menu trigger, Review…). The MCP servers dialog opens on its first row's toggle (or the
   focused server's) and returns focus to its opener; Save variables keeps focus. The style menu opens on the checked
   option and returns focus to the textarea after a pick (desktop), like the image options menu. A refusal never takes
-  focus: it is announced, and focus stays in the textarea; its Review… opens the trust dialog, which returns focus to
-  the textarea. Hook notes, tool-row badges and the approval banner take no focus by themselves (their toggles and
-  tooltips are reached with Tab).
+  focus: it is announced, and focus stays in the textarea; its Review… opens the trust dialog, which (no close-focus
+  handling of its own) returns focus to the element focused when it opened, the Review… button. Hook notes, tool-row
+  badges and the approval banner take no focus by themselves (the notes' toggles are reached with Tab; the tool-row
+  hook badge sits inside the row button and is not focusable: its tooltip opens while the row button has keyboard
+  focus, and its sr-only text carries it).
 
 ### 14.2 Semantics and labels
 
@@ -8330,17 +8519,21 @@ nothing new (the chat's style is server state; the trust dialog's filter is not 
   hook". The hook editor is a dialog named by its title; every field has a visible label; the matcher preview is
   `aria-live="polite"` (debounced 300 ms); inline errors use `aria-describedby` / `aria-invalid`; the warning is text
   inside the sheet. The trust dialog's groups are `role="group"` elements labelled by their heading; each item is an
-  `<article>` named "{kind} {label}, {state}"; its command is a `pre` named "Command"; the select-all and item
+  `<article>` named "{kind} {label}, {state}" (kind words "Hook", "MCP server", "Command"); its command is a `pre`
+  named "Command"; Revoke is named "Revoke {title}"; the filter is named "Filter items"; the select-all and item
   checkboxes have visible labels; the stale alert is a `role="alert"`. The MCP rows' status dot carries sr-only text
-  (the status word), each variable input is named "{name} value", and "Clear" is named "Clear {name}". The style
+  (the status word), Review… and Reconnect are named "Review {name}…" and "Reconnect {name}", the server list is named
+  "Servers" and each tool list "Tools of {name}"; each variable input is named "{name} value", and "Clear" is named
+  "Clear {name}" (`aria-pressed`). The style
   trigger is named "Output style: {name}" (plus " (automatic)"); the menu is a radio group named "Output style".
   `HookNote` is a `role="note"` named "Hook {event}: {summary}" with a toggle (`aria-expanded`, `aria-controls`);
   `ToolHookBadge` adds ", blocked by hook" / ", allowed by hook" / ", input changed by hook" to the row's name (sr-only,
-  plus a tooltip on hover and focus); the approval banner is text inside the card's group. `ComposerRefusal` is a
-  `role="alert"` linked from the textarea's `aria-describedby`; its × is named "Dismiss". `ChatView` announces "A hook
-  blocked {tool}" and "A hook asked the agent to continue" once per part per tab, like compaction markers; "Running
-  hook…" / "Running hooks…" are never announced (shimmer text only). The trust chip is named "Review {n} items in
-  {project} that can run commands".
+  plus a tooltip on hover and while the row button has keyboard focus; the badge itself, inside the row button, is not
+  focusable); the approval banner is text inside the card's group.
+  `ComposerRefusal` is a `role="alert"` linked from the textarea's `aria-describedby`; its × is named "Dismiss".
+  `ChatView` announces "A hook blocked {tool}" and "A hook asked the agent to continue" once per part per tab, like
+  compaction markers; "Running hook…" / "Running hooks…" are never announced (shimmer text only). The trust chip is
+  named "Review {n} items in {project} that can run commands" ("Review 1 item in {project} that can run commands").
 
 ### 14.3 Contrast targets
 
@@ -8611,15 +8804,15 @@ Key strings:
 | Remember (Phase 10) | "Remember" · "Save a note to your instructions." (sr-only description) · "Note" · "{n} / 2,000" · "Use at most 2,000 characters." · "Save to" · "{file} in {project}" · "AGENTS.md in {project} (new file)" · "AGENTS.md in a project (new file)" · "Instructions of a project" (without a known project) · "Added as a line at the end of the file." · "Instructions of {project}" · "Kept by harness-forge and sent with this project's chats." · "Custom instructions" · "Sent with every chat." · "Open a chat in a project to use this." · "Save" · "Cancel" · "Saved to {file}" · "Created AGENTS.md in {project}" · "Saved to the instructions of {project}" · "Saved to your custom instructions" · "The instructions would be longer than 20,000 characters. Shorten them in Settings first." · "The file would be larger than 1 MB." · "The project folder is unavailable." |
 | Plan files and General → Agent (Phase 10) | "Long chats, sub-agents and plans." · "Save approved plans" · "When you approve a plan in a project chat, it's saved as a Markdown file in the project." · "Plan folder" · "A folder inside the project. Files are named by date and plan title." · "Use a folder inside the project, like .harness/plans." · "Use at most 200 characters." · chip: "Saved to" · "Plan saved to {path}" · "Copy path" · "Show changes" · "Couldn't save the plan file: {error}" |
 | Plugins and projects (Phase 10) | "Agents and skills" (filter) · "{n} agents" ("1 agent") · "{n} skills" ("1 skill") · "Agents" · "Sub-agents the main agent can start." · "Skills" · "Instructions the agent loads when a task needs them." · "Default model" · "Same as the chat" · "All tools" · "No tools" · "{n} tools" · "Shadowed" · "Not used: {winner} wins." · "Open in Customize" · "Agents, commands and skills…" (project row menu); the plugin detail's empty state keeps "This plugin does not add providers, tools, MCP servers or commands." |
-| Settings → Data (Phase 10) | "Download a zip with every chat, including archived chats and every message version, and your personal agents, commands and skills. API keys, passwords, plugins, MCP servers and share links are never included." · "General and appearance settings, and your personal agents, commands and skills. A personal definition you already have with the same name is kept." · result panel: "{n} agents, commands and skills restored" ("1 agent, command or skill restored") · "{k} kept" · "{f} failed" |
-| Customize → Hooks (Phase 11) | "Agents, commands, skills, output styles and hooks: yours, your projects' and your plugins'." · "Output styles" · "Hooks" · "New hook" · "Run hooks" · "Shell commands that run at points of the agent's work, like before a tool call. Off: no command hook runs, from any source." · "Hooks are turned off on this server (HF_WORKSPACE_SHELL=0)." · "Hooks are turned off on this server (safe mode)." · "Personal · {n}" · "In {project} · {n}" · "From plugins · {n}" · "Review {n}…" · "All tools" · "timeout {n}s" · "Needs approval" · "Approved" · "Off" · "Off on this server" · "Invalid" · "Plugin not trusted" · "Code hook" · "Actions for {event} hook" · "Edit…" · "Duplicate" · "Turn off" · "Turn on" · "Copy as JSON" · "Copied hook as JSON" · "Review…" · "Copy to personal" · "Open plugin" · "Delete…" · empty states: "No personal hooks yet. A hook runs a shell command when something happens, like before a tool call." · "No hooks in {project}. Add a "hooks" object to .harness/settings.json (or .claude/settings.json) in the project folder." |
+| Settings → Data (Phase 10) | "Download a zip with every chat, including archived chats and every message version, and your personal agents, commands and skills. API keys, passwords, plugins, MCP servers and share links are never included." · "General and appearance settings, and your personal agents, commands and skills. A personal definition you already have with the same name is kept." · result panel: (Phase 10 read "{n} agents, commands and skills restored"; Phase 11 replaced it, see the next rows) · "{k} kept" · "{f} failed" |
+| Customize → Hooks (Phase 11) | "Agents, commands, skills, output styles and hooks: yours, your projects' and your plugins'." · "Output styles" · "Hooks" · "New hook" · "Run hooks" · "Shell commands that run at points of the agent's work, like before a tool call. Off: no command hook runs, from any source." · "Hooks are turned off on this server (HF_WORKSPACE_SHELL=0)." · "Hooks are turned off on this server (safe mode)." · "Personal · {n}" · "In {project} · {n}" · "From plugins · {n}" · "Review {n}…" · "All tools" · "timeout {n}s" · "Needs approval" · "Approved" · "Off" · "Off on this server" · "Invalid" · "Plugin not trusted" · "Code hook" · "Actions for {event} hook" · "Edit…" · "Duplicate" · "Turn off" · "Turn on" · "Copy as JSON" · "Copied hook as JSON" · "Review…" · "Copy to personal" · "Open plugin" · "Delete…" · "Could not load your hooks" · "Loading your hooks…" (sr-only) · "Import…" · "Project" / "Plugin" (row meta) · "Problems in this {event} hook" · "{file}: {message}" · "The project folder is unavailable: {issue}" · empty states: "No personal hooks yet. A hook runs a shell command when something happens, like before a tool call." · "No hooks in {project}. Add a "hooks" object to .harness/settings.json (or .claude/settings.json) in the project folder." |
 | Hook events (Phase 11) | PreToolUse: "Before a tool runs. It can block the call, allow it without asking or change its input." · PostToolUse: "After a tool finished. It can give the agent feedback." · UserPromptSubmit: "When you send a message, before the agent reads it. It can add context or block the message." · Notification: "When the agent needs your attention, like an approval." · Stop: "When the agent finishes a reply. It can make it continue." · SubagentStop: "When a sub-agent finishes. It can make it continue." · PreCompact: "Before the conversation is compacted." · SessionStart: "When a chat's first reply starts, and again after a compaction. It can add context." |
-| Hook editor and import (Phase 11) | "New hook" · "Edit hook" · "Copy hook" · "Hooks run shell commands on your server with harness-forge's permissions, without asking, whenever their event happens. Only add commands you understand." · "Event" · "Tools" · "Tool names separated by \|. Claude Code names work too (Bash, Read, Write, Edit, Grep, Glob, WebFetch). Leave it empty or use * for every tool." · "Matches {list}" · "No tool is named {name} now." · "Use tool names, \| and * only." · "Command" · "Runs with sh in the project folder (outside projects, in a private folder). It gets the event as JSON on stdin; exit code 2 blocks with stderr as the reason." · "Add the command." · "Timeout" · "seconds" · "Enter a whole number from 1 to 600." · "On" · "Save hook" · "Hook saved" · "Saving a hook needs your password." · "Discard changes?" · "Delete this hook?" · "It stops running at once." · "Delete hook" · "Deleted hook" · import: "Import hooks" · "Paste Claude Code settings JSON (the whole file or its "hooks" object)." · "Choose file…" · "Found {n} hooks" ("Found 1 hook") · "Ignored: "prompt" hooks aren't supported." · "This isn't valid JSON." · "No hooks found." · "Add {n} hooks" / "Add 1 hook" · "Added {n} hooks" ("Added 1 hook") |
-| Project trust (Phase 11) | "Review {project}" · "Files in this project can run commands on your server. Nothing below runs until you approve it. Any change needs a new approval." · "Approve only what you would run yourself. These commands run with harness-forge's permissions: they can read files and keys on this server and make network requests." · "{n} earlier approvals no longer match: an approved item was removed or renamed." ("1 earlier approval no longer matches: …") · "Needs review · {n}" · "All · {n}" · "Hooks" · "MCP servers" · "Commands with shell lines" · "Select all {n}" · "New" · "Changed" · "Changed since you approved it." · "Approved" · "Command" · "Copy command" · "Runs {path}" · "{path} (not found)" · "Environment: {names}" · "Headers: {names}" · "Variables: {name} (set)" / "(not set)" · "Runs code from this repository that isn't pinned (like npm test): later changes to that code run without a new approval." · "Connects to a private network address." · "A file this command runs is missing." · "{n} selected" · "Approve {n} items" / "Approve 1 item" · "Approving project commands needs your password." · "Approved {n} items in {project}" ("Approved 1 item in {project}") · "Everything in {project} is approved." · "Revoke" · "Revoked {label}. It won't run until you approve it again." · "{n} items changed while you were reviewing. Check them again." · "This project has no hooks, MCP servers or commands that run shell commands." · entry points: "{n} to review" · "Review commands and hooks…" · "MCP servers…" · "Review {n} items in {project} that can run commands" (chip name) |
-| Project MCP servers (Phase 11) | "MCP servers in {project}" · "From .mcp.json in the project folder. They run only in this project's chats, after you approve them." · "Needs approval" · "Set {n} variables" ("Set 1 variable") · "Starts with the first chat" · "Connecting…" · "Connected · {n} tools" · "Error: {message}" · "Off on this server (safe mode)" · "Replaces your server {id} in this project's chats." · "Reconnect" · "Review…" · "Variables · {n}" · "Values are encrypted on this server and used only for this project's servers. harness-forge never reads them from the server's environment." · "•••• · stored" · "Default: {value}" · "Clear" · "Clear {name}" · "{name} value" · "Save variables" · "Variables saved" · "Saving the variables of this project's MCP servers needs your password." · "This project has no .mcp.json." · notice `project-mcp-unavailable` (text from the server) |
-| Output styles (Phase 11) | tab: "New output style" · "Save output style" · "Output style saved" · "Your default" · "Default in {project}" · "Use by default" · "Same as your default" · "Style in {project}" · "Your default: {name}" · "Keep coding instructions" · "On: the agent keeps its tool rules and task hints. Off: only this style shapes its replies." · "How the agent writes its replies. They go first in the main agent's instructions, never in sub-agents'." · "Shown in the composer's style menu." · "Keeps coding instructions" · "Replaces coding instructions" · "{name} is a built-in name." · "Delete output style" · "Chats that use it fall back to Default." · empty states: "No personal output styles yet. A style changes how the agent writes its replies." · "No output styles in {project}. Add Markdown files to .harness/output-styles/ (or .claude/output-styles/) in the project folder." · composer: "Output style" · "Automatic" · "Uses {name}, set for {project}" · "Uses {name}, your default in Settings" · "Built-in" · "Personal" · "Project" · "Not available" · "Manage output styles" · "Output style: {name}" (tooltip, accessible name and announcement) · " (automatic)" · `/output-style`: "Set the output style" · "Unknown output style "{value}". Use auto, default, explanatory, learning or a style from the menu." · General: "Output style" · "How replies are written in chats that don't choose one. Projects can choose their own." · built-in names "Default" · "Explanatory" · "Learning" · notice `output-style-unavailable` (text from the server) |
-| Skills and commands (Phase 11) | "Show in the slash menu" · "Only when you run it" · "The agent doesn't load it by itself; it runs only as /name." · slash group "Skills" · "Needs approval" · badge: "Skill" · "Ran {n} shell commands" ("Ran 1 shell command") · "Included {paths}" |
-| Hooks in the chat (Phase 11) | "Hook added context · {event}" · "Show context" · "Hide context" · "Hook: {message}" · "A {event} hook failed: exit {n}" · "A {event} hook timed out after {n}s" · "A {event} hook failed" · "Show output" · "Hide output" · "Blocked by hook" · "Blocked by a {event} hook: {reason}" · "Allowed by hook" · "Allowed by a {event} hook" · "Input changed by hook" · "Input changed by a {event} hook" · "Input the tool ran with" · "A hook asks you to confirm this call: {reason}" (approval banner) · "A hook asked you to confirm this call: {reason}" · "A {event} hook told the agent: {reason}" · "A Stop hook asked the agent to continue" · "A hook stopped the agent: {reason}" · "Sent to the agent" · source lines "Personal hook" · "Project hook" · "From {plugin}" · "exit {n} · {duration}" · activity "Running hook…" · "Running hooks…" · sr-only ", blocked by hook" · ", allowed by hook" · ", input changed by hook" · announcements "A hook blocked {tool}" · "A hook asked the agent to continue" · notice `hook-continuation-limit` (text from the server, e.g. "Stopped after 5 hook continuations in a row.") |
-| Composer refusal (Phase 11) | "A hook blocked this message" · "{event} · {source}" · "/{name} runs shell lines you haven't approved." · "Review…" · "Dismiss" · message editor: "A hook blocked this message: {reason}" |
-| Plugins (Phase 11) | "Hooks" · "Runs only while you trust this plugin." · "Runs these commands" · "Output styles" · "How the agent writes its replies." · "{n} hooks" ("1 hook") · "{n} output styles" ("1 output style") · "Open in Customize" |
-| Settings → Data (Phase 11) | "Download a zip with every chat, including archived chats and every message version, and your personal agents, commands, skills and output styles. API keys, passwords, plugins, MCP servers, hooks, project approvals and share links are never included." · "General and appearance settings, and your personal agents, commands, skills and output styles. A personal definition you already have with the same name is kept; commands with shell lines come back turned off." · "{n} personal definitions restored" ("1 personal definition restored") |
+| Hook editor and import (Phase 11) | "New hook" · "Edit hook" · "Copy hook" · "Hooks run shell commands on your server with harness-forge's permissions, without asking, whenever their event happens. Only add commands you understand." · "Event" · "Tools" · "Tool names separated by \|. Claude Code names work too (Bash, Read, Write, Edit, Grep, Glob, WebFetch). Leave it empty or use * for every tool." · "Matches {list}" · "No tool is named {name} now." · "Use tool names, \| and * only." · "Command" · "Runs with bash (or sh when bash is missing) in the project folder (outside projects, in a private folder). It gets the event as JSON on stdin; exit code 2 blocks with stderr as the reason." · "Add the command." · "Timeout" · "seconds" · "Enter a whole number from 1 to 600." · "On" · "Save hook" · "Hook saved" · "Saving a hook needs your password." · "Use at most {n} characters." ("Use at most 200 characters." for the matcher, "Use at most 4,096 characters." for the command) · "The command cannot contain NUL characters." · "{names} and {n} more" (the matcher preview) · "Discard changes?" · "Your changes are lost." · "Discard" · "Keep editing" · "Cancel" · "Delete this hook?" · "It stops running at once." · "Delete hook" · "Deleted hook" · import: "Import hooks" · "Paste Claude Code settings JSON (the whole file or its "hooks" object)." · "Settings JSON" · "Choose file…" · "{file} is too large" · "Found {n} hooks" ("Found 1 hook") · "{event} · {matcher}" · "{n}s" · "Ignored: "prompt" hooks aren't supported." · "Ignored: {message}" · "{event}: {message}" · "This isn't valid JSON." · "No hooks found." · "Add {n} hooks" / "Add 1 hook" · "Added {n} hooks" ("Added 1 hook") |
+| Project trust (Phase 11) | "Review {project}" · "Files in this project can run commands on your server. Nothing below runs until you approve it. Any change needs a new approval." · "Approve only what you would run yourself. These commands run with harness-forge's permissions: they can read files and keys on this server and make network requests." · "{n} earlier approvals no longer match: an approved item was removed or renamed." ("1 earlier approval no longer matches: …") · "Needs review · {n}" · "All · {n}" · "Hooks" · "MCP servers" · "Commands with shell lines" · "Filter items" · "{group} · {n}" · "Select all {n}" · "New" · "Changed" · "Changed since you approved it." · "Approved" · item kinds "Hook" · "MCP server" · "Command" · "Copy command" · "timeout {n}s" · "Runs {path}" · "Runs {path} (not found)" · "Environment: {names}" · "Headers: {names}" · "Variables: {name} (set)" / "(not set)" · "Runs code from this repository that isn't pinned (like npm test): later changes to that code run without a new approval." · "Connects to a private network address." · "A file this command runs is missing." · "{n} selected" · "Approve {n} items" / "Approve 1 item" · "Approving project commands needs your password." · "Approved {n} items in {project}" ("Approved 1 item in {project}") · "Everything in {project} is approved." · "Revoke" · "Revoke {title}" · "Revoked {label}. It won't run until you approve it again." · "{n} items changed while you were reviewing. Check them again." ("1 item changed while you were reviewing. Check it again.") · "This project has no hooks, MCP servers or commands that run shell commands." · "Retry" · "Close" · entry points: "{n} to review" · "Review commands and hooks…" · "MCP servers…" · "Review {n} items in {project} that can run commands" ("Review 1 item in {project} that can run commands"; chip name) |
+| Project MCP servers (Phase 11) | "MCP servers in {project}" · "From .mcp.json in the project folder. They run only in this project's chats, after you approve them." · "Needs approval" · "Set {n} variables" ("Set 1 variable") · "Starts with the first chat" · "Connecting…" · "Connected · {n} tools" ("Connected · 1 tool") · "Error: {message}" ("Error") · "Off on this server (safe mode)" · status words "Needs approval" · "Needs variables" · "Idle" · "Connecting" · "Connected" · "Error" · "Off" · "Replaces your server {id} in this project's chats." · "Servers" · "Tools of {name}" · "No tools yet." · "Reconnect" · "Reconnect {name}" · "Review…" · "Review {name}…" · "Variables · {n}" · "Values are encrypted on this server and used only for this project's servers. harness-forge never reads them from the server's environment." · "•••• · stored" · "Default: {value}" · "Clear" · "Clear {name}" · "{name} value" · "Save variables" · "Variables saved" · "Saving the variables of this project's MCP servers needs your password." · "This project has no .mcp.json." · "Retry" · notice `project-mcp-unavailable` (text from the server) and its action "MCP servers…" |
+| Output styles (Phase 11) | tab: "New output style" · "Save output style" · "Output style saved" · "Your default" · "Default in {project}" · "Use by default" · "Same as your default" · "Style in {project}" · "Your default: {name}" · "Keep coding instructions" · "On: the agent keeps its tool rules and task hints. Off: only this style shapes its replies." · "How the agent writes its replies. They go first in the main agent's instructions, never in sub-agents'." · "Shown in the composer's style menu." · "Keeps coding instructions" · "Replaces coding instructions" · "{name} is a built-in name." · "Delete output style" · "Chats that use it fall back to Default." · "Edit {name}" · "Import output style" · "You already have an output style named {name}." · "Deleted {name}" · "Undo" · viewer: "Name" · "Coding" · empty states: "No personal output styles yet. A style changes how the agent writes its replies." · "No output styles in {project}. Add Markdown files to .harness/output-styles/ (or .claude/output-styles/) in the project folder." · composer: "Output style" · "Automatic" · "Uses {name}, set for {project}" · "Uses {name}, your default in Settings" · "Built-in" · "Personal" · "Project" · "Plugin" (unknown plugin) · "this project" · "Not available" (composer, scope bar and General) · "Manage output styles" · "Output style: {name}" (tooltip, accessible name and announcement) · " (automatic)" · `/output-style`: "Set the output style" · "Unknown output style "{value}". Use auto, default, explanatory, learning or a style from the menu." · General: "Output style" · "How replies are written in chats that don't choose one. Projects can choose their own." · built-in names "Default" · "Explanatory" · "Learning" · notice `output-style-unavailable` (text from the server) |
+| Skills and commands (Phase 11) | "Show in the slash menu" · "Only when you run it" · "The agent doesn't load it by itself; it runs only as /name." · viewer: "Slash menu" · "/{name}" · "Not shown" · "Loading" · slash group "Skills" · skill sources "Project" · "Personal" · "{plugin}" ("Plugin") · "Built-in" · "Needs approval" · ", needs approval" (row name) · badge: "Skill" (sr-only) · "Project skill" · "Personal skill" · "Built-in skill" · "Ran {n} shell commands" ("Ran 1 shell command") · "Included {paths}" · " and {n} more" (after 5 paths) |
+| Hooks in the chat (Phase 11) | "Hook added context · {event}" · "Show context" · "Hide context" · "Show details" · "Hide details" · "{n} hooks" · "Hook: {message}" · "A {event} hook failed: exit {n}" · "A {event} hook timed out after {n}s" · "A {event} hook failed" · "Show output" · "Hide output" · "Blocked by hook" · "Blocked by a {event} hook: {reason}" · "Allowed by hook" · "Allowed by a {event} hook" · "Input changed by hook" · "Input changed by a {event} hook" · "Input the tool ran with" · "Original input" · "A hook asks you to confirm this call: {reason}" ("A hook asks you to confirm this call" without one; approval banner) · "A hook asked you to confirm this call: {reason}" · "A {event} hook told the agent: {reason}" · "A {event} hook sent the agent feedback" · "A {event} hook asked the agent to continue" · "A hook stopped the agent: {reason}" · "Sent to the agent" · source lines "Personal hook" · "Project hook" · "From {plugin}" ("From a plugin") · "exit {n} · {duration}" · activity "Running hook…" · "Running hooks…" · sr-only ", blocked by hook" · ", allowed by hook" · ", input changed by hook" · announcements "A hook blocked {tool}" ("a tool call" when the tool is unknown) · "A hook asked the agent to continue" · notice `hook-continuation-limit` (text from the server, e.g. "Stopped after 5 hook continuations in a row.") |
+| Composer refusal (Phase 11) | "A hook blocked this message" · "{event} · {source}" · "Personal hook" · "Project hook" · "Plugin hook" · "/{name} runs shell lines you haven't approved." · "This command runs shell lines you haven't approved." · "Review…" · "Dismiss" |
+| Plugins (Phase 11) | "Hooks" · "Runs only while you trust this plugin." · "Hooks can read and change prompts, messages and tool calls." · "Code hooks" (list name) · "Runs these commands" · "{event} hook" · "/{name}" (their sources) · "Output styles" · "How the agent writes its replies." · "{n} hooks" ("1 hook") · "{n} output styles" ("1 output style") · "Open in Customize" |
+| Settings → Data (Phase 11) | "Download a zip with every chat, including archived chats and every message version, and your personal agents, commands, skills and output styles. API keys, passwords, plugins, MCP servers, hooks, project approvals and share links are never included." · "General and appearance settings, and your personal agents, commands, skills and output styles. A personal definition you already have with the same name is kept; commands with shell lines come back turned off." · result panel: "{n} personal definitions restored" ("1 personal definition restored") · "{k} kept" · "{f} failed" · Projects: "Style: {name}" |

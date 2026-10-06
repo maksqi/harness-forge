@@ -14,6 +14,11 @@
 // dialog opens on the selected target (arrows switch it), saves with Mod+Enter and closes with Esc, focus back in the
 // composer; the Customize editor saves with Mod+Enter from its body editor (Tab leaves the body: no trap) and asks
 // "Discard changes?" on Esc when it has changes.
+// Phase 11 (W11.13, docs/UI.md 7.31, 9.13, 12): a hook's refusal of a sent message stays on Esc (Esc keeps its composer
+// meaning; the text and the focus stay) and goes away with the next edit of the text; the hook editor saves with
+// Mod+Enter from its Command field and focus returns to New hook; the hook import adds with Mod+Enter. The personal hooks
+// made here never run in another spec's chats (a matcher that names no tool, a Notification hook) and are removed
+// through `cleanup` by a unique marker.
 import type { Locator, Page } from '@playwright/test'
 import type { TestId } from '../../helpers/index.ts'
 import {
@@ -32,6 +37,9 @@ import {
   expect,
   expectMessageStatus,
   expectStreamingWith,
+  HOOK_SCRIPT_TEXT,
+  hookGroup,
+  hookRow,
   lastAssistantMessage,
   looseQuotes,
   markdownEditorInput,
@@ -40,6 +48,8 @@ import {
   openNewChat,
   pressShortcut,
   pressUntilFocused,
+  removePersonalHooksWith,
+  seedHookProjectChat,
   seedProject,
   seedProjectChat,
   selectAllText,
@@ -488,5 +498,89 @@ test.describe('keyboard', () => {
     await expect(editor).toBeHidden()
     await expect(customizationRow(customizeSection(page, 'user'), { 'data-name': name })).toBeVisible()
     await expect(newButton).toBeFocused()
+  })
+
+  test('a hook refusal stays on Esc and leaves with the next edit @smoke', async ({ page, api, cleanup }) => {
+    const { chatId } = await seedHookProjectChat(api, cleanup, {
+      prefix: 'keys-refusal',
+      scripts: ['prompt-block'],
+      hooks: commands => ({ UserPromptSubmit: [hookGroup(commands['prompt-block']!)] }),
+    })
+    await page.goto(`/chat/${chatId}`)
+    const input = composerInput(page)
+    await expect(input).toBeEditable()
+    await input.focus()
+    const text = `Refused ${uniqueId('esc')}`
+    await page.keyboard.insertText(text)
+    await page.keyboard.press('Enter')
+
+    const refusal = page.getByTestId(testIds.composerRefusal)
+    await expect(refusal).toHaveAttribute('data-code', 'hook-blocked')
+    await expect(refusal).toHaveAttribute('data-event', 'UserPromptSubmit')
+    await expect(refusal).toContainText('A hook blocked this message')
+    // The reason line holds the hook's stderr (the web shows the 409's message, which repeats the title before it).
+    await expect(refusal.locator('[data-slot="composer-refusal-reason"]')).toContainText(HOOK_SCRIPT_TEXT.promptBlock)
+    await expect(refusal.locator('[data-slot="composer-refusal-source"]')).toHaveText('UserPromptSubmit · Project hook')
+    await expect(input).toHaveValue(text)
+    await expect(input).toBeFocused()
+    await expect(input).toHaveAccessibleDescription(/A hook blocked this message/)
+    await expect(userMessages(page)).toHaveCount(0)
+
+    // Esc never dismisses it: the refusal, the text and the focus stay.
+    await page.keyboard.press('Escape')
+    await expect(refusal).toBeVisible()
+    await expect(input).toHaveValue(text)
+    await expect(input).toBeFocused()
+
+    // The next edit of the text clears it.
+    await page.keyboard.insertText('!')
+    await expect(refusal).toHaveCount(0)
+    await expect(input).toHaveValue(`${text}!`)
+    await expect(input).toBeFocused()
+  })
+
+  test('the hook editor saves with Mod+Enter and the hook import adds with Mod+Enter @smoke', async ({ page, cleanup }) => {
+    const marker = uniqueId('keys-hook')
+    cleanup(api => removePersonalHooksWith(api, marker))
+    const tool = `e2e_none_${marker.replaceAll('-', '_')}`
+    await page.goto('/settings/customize?tab=hooks')
+    const panel = page.getByTestId(testIds.hooksPanel)
+    await expect(panel).toBeVisible()
+    const personal = byTestId(panel, testIds.hooksSection, { 'data-source': 'personal' })
+
+    // New hook from the keyboard: Event, Tools, Command, then Mod+Enter saves.
+    const newButton = page.getByTestId(testIds.customizeNew)
+    await expect(newButton).toHaveAttribute('data-kind', 'hook')
+    await newButton.focus()
+    await page.keyboard.press('Enter')
+    const editor = page.getByTestId(testIds.hookEditor)
+    await expect(editor).toHaveAttribute('data-mode', 'new')
+    await expect(editor.getByTestId(testIds.hookEvent)).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(editor.getByTestId(testIds.hookMatcher)).toBeFocused()
+    await page.keyboard.insertText(tool)
+    await page.keyboard.press('Tab')
+    await expect(editor.getByTestId(testIds.hookCommand)).toBeFocused()
+    await page.keyboard.insertText(`sh ${marker}-editor.sh`)
+    await pressShortcut(page, 'Mod+Enter')
+    await expect(toastWith(page, 'Hook saved')).toBeVisible()
+    await expect(editor).toBeHidden()
+    await expect(hookRow(personal, { 'data-event': 'PreToolUse' }).filter({ hasText: `${marker}-editor.sh` })).toBeVisible()
+    await expect(newButton).toBeFocused()
+
+    // Import… from the keyboard: paste, then Mod+Enter adds.
+    const importButton = page.getByTestId(testIds.customizeImport)
+    await importButton.focus()
+    await page.keyboard.press('Enter')
+    const dialog = page.getByTestId(testIds.hookImportDialog)
+    await expect(dialog).toBeVisible()
+    const importInput = dialog.getByTestId(testIds.hookImportInput)
+    await pressUntilFocused(page, 'Tab', importInput)
+    await page.keyboard.insertText(JSON.stringify({ hooks: { Notification: [{ hooks: [{ type: 'command', command: `sh ${marker}-import.sh` }] }] } }))
+    await expect(dialog.getByTestId(testIds.hookImportSubmit)).toHaveText('Add 1 hook')
+    await pressShortcut(page, 'Mod+Enter')
+    await expect(toastWith(page, 'Added 1 hook')).toBeVisible()
+    await expect(dialog).toBeHidden()
+    await expect(hookRow(personal, { 'data-event': 'Notification' }).filter({ hasText: `${marker}-import.sh` })).toBeVisible()
   })
 })

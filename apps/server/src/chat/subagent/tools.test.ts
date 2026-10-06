@@ -1,5 +1,6 @@
 // The tool set of a sub-agent (W9.5-T4, ADR-043): the tools per parent mode and task type, `task` never offered, every
-// request for approval denied, the child's run scope (prefixed call ids, its own shell folder) and no agent scope.
+// request for approval denied, the child's run scope (prefixed call ids, its own shell folder) and no agent scope;
+// (W11.17) the parent run's project MCP result: shadowed global servers hidden, project tools under the ceiling.
 import type { ToolCallContext, ToolDefinition, ToolPolicy, ToolWorkspaceAccess } from '@harness-forge/plugin-sdk'
 import type { McpServer, TaskType, ToolMode, ToolOverride } from '@harness-forge/shared'
 import type { ToolExecutionOptions } from 'ai'
@@ -9,10 +10,12 @@ import type { RegisteredTool } from '../../registry/types.ts'
 import type { WorkspaceRunScope, WorkspaceRunScopeInit } from '../../workspace/run-scope.ts'
 import type { AgentRunScope } from '../agent-scope.ts'
 import type { RunSession } from '../pipeline.ts'
+import type { ChildProjectTools } from './tools.ts'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { createSilentLogger } from '../../logger.ts'
 import { createFakeCheckpointService } from '../../testing/fake-checkpoints.ts'
+import { fakeProjectMcpTool, fakeProjectMcpTools } from '../../testing/fake-project-mcp.ts'
 import { runScopeOf } from '../../workspace/run-scope.ts'
 import { agentScopeOf } from '../agent-scope.ts'
 import { DENIED_UNAVAILABLE } from '../approval.ts'
@@ -111,7 +114,7 @@ function parentScope(): WorkspaceRunScopeInit {
   }
 }
 
-async function namesFor(toolMode: ToolMode, type: TaskType, options: FakeSessionOptions & { workspace?: boolean, allowlist?: readonly string[] | null, extra?: (seen: Seen) => RegisteredTool[] } = {}): Promise<string[]> {
+async function namesFor(toolMode: ToolMode, type: TaskType, options: FakeSessionOptions & { workspace?: boolean, allowlist?: readonly string[] | null, extra?: (seen: Seen) => RegisteredTool[], projectTools?: ChildProjectTools | null } = {}): Promise<string[]> {
   const seen: Seen = []
   const workspace = options.workspace ?? true
   const child = await childTools({
@@ -124,6 +127,7 @@ async function namesFor(toolMode: ToolMode, type: TaskType, options: FakeSession
     parentCallId: 'call_parent',
     signal: new AbortController().signal,
     ...(options.allowlist === undefined ? {} : { allowlist: options.allowlist }),
+    ...(options.projectTools === undefined ? {} : { projectTools: options.projectTools }),
   })
   expect(Object.keys(child.tools).sort()).toEqual([...child.byName.keys()].sort())
   return Object.keys(child.tools).sort()
@@ -377,6 +381,46 @@ describe('childTools: a custom agent\'s allowlist (Phase 10, W10.3-T2)', () => {
       ['current_time', { enabled: true, override: 'ask' }],
     ])
     expect(await namesFor('auto', 'general', { prefs, allowlist: ['read_file', 'list_directory', 'current_time', 'acme_safe'] })).toEqual(['acme_safe'])
+  })
+
+  it('the parent run\'s project MCP result: a shadowed global server is hidden, project tools follow the ceiling (W11.17)', async () => {
+    // The C36 fake's `toolsFor` answer: `docs` shadows nothing, `srv` replaces the global server of the same id.
+    const projectTools = fakeProjectMcpTools(
+      [fakeProjectMcpTool('docs', 'search', { policy: 'safe' }), fakeProjectMcpTool('docs', 'write'), fakeProjectMcpTool('srv', 'lookup', { policy: 'safe' })],
+      { shadowed: ['srv'], names: { docs: 'Docs', srv: 'srv' } },
+    )
+    const project = (await namesFor('auto', 'general', { projectTools })).filter(name => name.startsWith('mcp__'))
+    // The project's `srv` tool replaces the global one (same name, the project's binding); `docs` tools join.
+    expect(project).toEqual(['mcp__docs__search', 'mcp__docs__write', 'mcp__srv__lookup'])
+    // Ask: only the project tools that run without approval (an `ask` tool would only ask, so a child never gets it).
+    expect((await namesFor('ask', 'general', { projectTools })).filter(name => name.startsWith('mcp__'))).toEqual(['mcp__docs__search', 'mcp__srv__lookup'])
+    // A shadowed global server without a project tool of the same name: its tools are gone.
+    const shadowOnly = fakeProjectMcpTools([fakeProjectMcpTool('docs', 'search', { policy: 'safe' })], { shadowed: ['srv'] })
+    expect((await namesFor('auto', 'general', { projectTools: shadowOnly })).filter(name => name.startsWith('mcp__'))).toEqual(['mcp__docs__search'])
+    // An allowlist narrows the project tools like any other; none = the v1.6 set.
+    expect(await namesFor('auto', 'general', { projectTools, allowlist: ['mcp__docs'] })).toEqual(['mcp__docs__search', 'mcp__docs__write'])
+    expect((await namesFor('auto', 'general', { projectTools: null })).filter(name => name.startsWith('mcp__'))).toEqual(['mcp__srv__lookup'])
+  })
+
+  it('a shadowed global tool is not callable by the child; the project tool of the same name answers instead', async () => {
+    const seen: Seen = []
+    const projectTools = fakeProjectMcpTools([fakeProjectMcpTool('srv', 'lookup', { policy: 'safe', text: 'project lookup' })], { shadowed: ['srv'] })
+    const child = await childTools({
+      session: fakeSession(registry(seen)),
+      type: 'general',
+      toolMode: 'auto',
+      model: MODEL,
+      workspace: WORKSPACE,
+      scope: parentScope(),
+      parentCallId: 'call_parent',
+      signal: new AbortController().signal,
+      projectTools,
+    })
+    expect(child.byName.get('mcp__srv__lookup')?.definition).toBe(projectTools.tools[0]?.definition)
+    const options: ToolExecutionOptions<unknown> = { toolCallId: 'c1', messages: [], context: undefined }
+    const output = await child.tools.mcp__srv__lookup!.execute!({}, options)
+    expect(JSON.stringify(output)).toContain('project lookup')
+    expect(seen).toEqual([])
   })
 
   it('the approval function still denies what would ask (an allowed shell command outside the rules)', async () => {

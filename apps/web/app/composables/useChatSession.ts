@@ -59,7 +59,11 @@
 // the draft id of `/` is released once a first reply streams (also when its page was left meanwhile). W11.16: `accepted`
 // counts the chat requests the server accepted (a 2xx answer to `POST /api/chat`, seen by the transport's `fetch`; every
 // refusal is an error answer before the stream starts), so the chat is known from that answer on, before its first chunk
-// (an image turn streams nothing until its image is ready): ChatView moves a new chat's page then.
+// (an image turn streams nothing until its image is ready): ChatView moves a new chat's page then. W11.19: the server
+// stores the SessionStart / UserPromptSubmit records of a new user message as its `data-hook` parts, which the session's
+// own copy of that message lacks; an accepted response that counts them (`PROMPT_HOOKS_HEADER`) makes the session reload
+// the path from that message on once the run finished (`run.finished`: the reply is stored by then), so its notes show
+// without a reload of the page (one request per such turn, none for turns without records).
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   BackgroundTask,
@@ -124,6 +128,18 @@ export const MAX_CHAT_SESSIONS = 8
 
 /** Endpoint of `POST /api/chat`; `GET {api}/{id}/stream` is the resume URL of `DefaultChatTransport`. */
 export const CHAT_API = '/api/chat'
+
+/**
+ * + W11.19: the header of an accepted `POST /api/chat` that counts the `data-hook` records the prompt hooks added to the
+ * new user message (`PROMPT_HOOKS_HEADER` of the server's `chat/hooks-prompt.ts`; absent without records).
+ */
+export const PROMPT_HOOKS_HEADER = 'X-Harness-Prompt-Hooks'
+
+/** + W11.19: the number of hook records an accepted chat response reports for its new user message (0 = none). */
+export function promptHookCount(response: Pick<Response, 'headers'>): number {
+  const count = Number.parseInt(response.headers.get(PROMPT_HOOKS_HEADER) ?? '', 10)
+  return Number.isFinite(count) && count > 0 ? count : 0
+}
 
 /**
  * Data-part schemas for `useChat`. AI SDK 7.0.116 looks them up by the full chunk type (`data-notice`) while its types
@@ -664,6 +680,12 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   let stalePath = false
   /** This session's edit or regenerate added a version: `branches` is refetched once its run finished. */
   let branchesStale = false
+  /**
+   * + W11.19: the earliest new user message of this session whose stored copy has hook records (`data-hook` parts) that
+   * the shown copy lacks (`PROMPT_HOOKS_HEADER` of its accepted response): its run's `run.finished` reloads the path from
+   * it on, and every reload keeps local message objects only before it. Cleared once a reload showed the stored copies.
+   */
+  let hookedMessageId: string | null = null
 
   // ---------- other tabs (ADR-030) ----------
 
@@ -741,8 +763,13 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     // refusal is an error answer before the stream starts. Seen here, before the first chunk arrives.
     fetch: async (input, init) => {
       const response = await apiFetch(input, init)
-      if (response.ok && init?.method === 'POST')
+      if (response.ok && init?.method === 'POST') {
+        // + W11.19: the server added hook records to the new user message (its run's end reloads it). An earlier hooked
+        // message still on the path stays the one to reload from (that covers this one too).
+        if (request?.userMessageId && promptHookCount(response) > 0 && (hookedMessageId === null || !onPath(hookedMessageId)))
+          hookedMessageId = request.userMessageId
         onAccepted()
+      }
       return response
     },
     prepareSendMessagesRequest: ({ id: chatId, messages, trigger, messageId }) => {
@@ -863,6 +890,16 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   watch(runState, () => scheduleTrim())
 
   /**
+   * The shown messages whose objects a `keepPrefix` apply may keep: + W11.19 only those before the hooked message (its
+   * stored copy has the hook records its local copy lacks).
+   */
+  function reusablePrefix(): HarnessUIMessage[] {
+    const messages = chat.messages.value
+    const index = hookedMessageId === null ? -1 : messages.findIndex(message => message.id === hookedMessageId)
+    return index === -1 ? messages : messages.slice(0, index)
+  }
+
+  /**
    * Shows a chat detail from the server: the summary and stored choices, and (unless a request is in flight) its
    * path and versions. `keepPrefix` keeps the message objects of the unchanged prefix (a switch, a branch refresh).
    */
@@ -876,9 +913,11 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     storedStyle.value = detail.settings.outputStyle ?? null
     if (busy.value)
       return
-    chat.messages.value = options.keepPrefix ? mergePath(chat.messages.value, detail.messages) : [...detail.messages]
+    chat.messages.value = options.keepPrefix ? mergePath(reusablePrefix(), detail.messages) : [...detail.messages]
     branches.value = detail.branches
     branchesStale = false
+    // + W11.19: the stored copies show now (the hooked message's local copy was not reused).
+    hookedMessageId = null
     // The server never had it, so it is not on the path it sent.
     unstoredMessageId = null
   }
@@ -913,7 +952,12 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     return pendingLoad.then(() => resumeIfRunning())
   }
 
-  async function refresh(): Promise<void> {
+  function refresh(): Promise<void> {
+    return reload()
+  }
+
+  /** `refresh()`; + W11.19: `keepPrefix` keeps the objects of the unchanged prefix (`reusablePrefix`). */
+  async function reload(options: { keepPrefix?: boolean } = {}): Promise<void> {
     if (busy.value || !persisted.value)
       return
     const before = chat.messages.value
@@ -922,7 +966,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       // A request started meanwhile, or the transcript changed: the newer local state wins.
       if (busy.value || chat.messages.value !== before)
         return
-      applyDetail(detail)
+      applyDetail(detail, options)
       loaded.value = true
     }
     catch {
@@ -1035,6 +1079,12 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   // ---------- server events ----------
 
   function onRunFinished(finished: { messageId: string, outcome: string }) {
+    // + W11.19: the run of a message whose stored copy has hook records: the path from that message on is reloaded (its
+    // reply is stored by now). That reload also covers what the cases below need (versions, a failed or stopped reply).
+    if (hookedMessageId !== null) {
+      void reload({ keepPrefix: true })
+      return
+    }
     if (ownMessageIds.has(finished.messageId)) {
       // This session streamed the reply, so its transcript is current; an edit or a regenerate added a version.
       if (branchesStale) {

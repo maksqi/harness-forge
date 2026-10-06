@@ -518,12 +518,12 @@ function describeItem(raw: unknown, index: number): string {
 
 /** `restoreCustomizations`: the items of `customizations.json` through `CustomizationService.restoreBackup`. */
 async function restoreCustomizations(deps: AppDeps, run: ImportRun, zip: OpenedZip, entry: ZipEntry | undefined, manifest: BackupManifest): Promise<void> {
-  const none = 'no personal agents, commands or skills were restored'
+  const none = 'no personal definitions were restored'
   if (entry === undefined) {
     if (manifest.includes.customizations !== true)
-      run.warn(`The backup has no personal agents, commands or skills (customizations.json), so ${none}.`)
+      run.warn(`The backup has no personal definitions (customizations.json), so ${none}.`)
     else if ((manifest.counts.customizations ?? 0) > 0)
-      run.warn(`The backup lists personal agents, commands or skills, but customizations.json is missing, so ${none}.`)
+      run.warn(`The backup lists personal definitions, but customizations.json is missing, so ${none}.`)
     return
   }
   let value: unknown
@@ -533,12 +533,12 @@ async function restoreCustomizations(deps: AppDeps, run: ImportRun, zip: OpenedZ
   catch (error) {
     if (!isHarnessError(error))
       throw error
-    run.warn(`No personal agents, commands or skills were restored: ${error.message}`)
+    run.warn(`No personal definitions were restored: ${error.message}`)
     return
   }
   const list = isRecord(value) && Array.isArray(value.items) ? value.items as unknown[] : null
   if (list === null) {
-    run.warn(`No personal agents, commands or skills were restored: ${CUSTOMIZATIONS_NAME} has no "items" list.`)
+    run.warn(`No personal definitions were restored: ${CUSTOMIZATIONS_NAME} has no "items" list.`)
     return
   }
   const items: BackupCustomization[] = []
@@ -563,11 +563,11 @@ async function restoreCustomizations(deps: AppDeps, run: ImportRun, zip: OpenedZ
   catch (error) {
     // The chats are imported already: report it instead of failing the whole import.
     if (isHarnessError(error)) {
-      run.warn(`No personal agents, commands or skills were restored: ${error.message}`)
+      run.warn(`No personal definitions were restored: ${error.message}`)
     }
     else {
       deps.logger.warn('data import: the personal definitions could not be restored', { err: error })
-      run.warn('No personal agents, commands or skills were restored because of a server error.')
+      run.warn('No personal definitions were restored because of a server error.')
     }
     return
   }
@@ -658,7 +658,7 @@ export async function importUpload(deps: AppDeps, upload: Blob, form: DataImport
     if (form.restoreSettings === true)
       run.warn('Settings are restored only from a backup zip.')
     if (form.restoreCustomizations === true)
-      run.warn('Personal agents, commands and skills are restored only from a backup zip.')
+      run.warn('Personal definitions are restored only from a backup zip.')
     result = run.result('chat')
   }
   else {

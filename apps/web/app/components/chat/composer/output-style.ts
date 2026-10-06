@@ -24,7 +24,9 @@ export interface OutputStyleOption {
 /** What ComposerRefusal shows (docs/UI.md 7.31). */
 export interface ComposerRefusalData {
   code: 'hook-blocked' | 'untrusted'
-  /** The error's message (the hook's reason, or the server's text). */
+  /**
+   * `hook-blocked`: the hook's reason only (never the title; empty without one); `untrusted`: the error's message.
+   */
   reason: string
   /** `hook-blocked`: the event of `details.hook`, when the record came with the error. */
   event: HookEvent | null
@@ -92,9 +94,25 @@ export function resolveStyleQuery(query: string, options: readonly OutputStyleOp
   return { error: `Unknown output style "${value}". Use auto, default, explanatory, learning or a style from the menu.` }
 }
 
+/** The title the server puts before a hook's reason in the message of a 409 `hook-blocked` (`hookBlockedError`). */
+const HOOK_BLOCKED_PREFIX = /^A hook blocked this message(?::\s*|\.?\s*$)/i
+
+/**
+ * W11.19: the reason line of a `hook-blocked` refusal: the record's own reason, else the error message without the title
+ * the server puts before it ("A hook blocked this message: …"; the refusal shows that title once, `refusalTitle`). Empty
+ * when the hook gave no reason.
+ */
+function hookBlockedReason(message: string, record: { reason?: string } | null): string {
+  const reason = record?.reason?.trim()
+  if (reason)
+    return reason
+  return message.trim().replace(HOOK_BLOCKED_PREFIX, '').trim()
+}
+
 /**
  * The refusal of a submit: a `409 conflict` with `details.reason` `hook-blocked` (the event and the first hook's source
- * from `details.hook`, a `HookData`, when it is valid) or `untrusted`; null for every other error.
+ * from `details.hook`, a `HookData`, when it is valid; the reason without the title, W11.19) or `untrusted`; null for
+ * every other error.
  */
 export function refusalOf(error: unknown): ComposerRefusalData | null {
   if (error === null || error === undefined)
@@ -111,7 +129,7 @@ export function refusalOf(error: unknown): ComposerRefusalData | null {
   const record = parsed.success ? parsed.data : null
   return {
     code: 'hook-blocked',
-    reason: harness.message,
+    reason: hookBlockedReason(harness.message, record),
     event: record?.event ?? null,
     source: record?.hooks[0]?.source ?? null,
     command: null,

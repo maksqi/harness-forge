@@ -245,11 +245,15 @@ with their chat or project, and they are never part of a backup. Edits made befo
 - The changes panel runs git only to read the repository, with hooks, `core.fsmonitor`, external diff tools, pagers
   and filter drivers switched off and never above the workspace root, so opening a cloned repository does not run its
   configured programs.
-- v1.7: a project can ship hooks (`.harness/settings.json`, `.claude/settings.json`), MCP servers (`.mcp.json`) and
-  command files with `` !`cmd` `` lines. **None of them runs before you approve it** in the project's review dialog
-  (the chat header shows "{n} to review"); the approval is pinned to the exact text (and the scripts a hook calls), so
-  any change needs a new approval. `HF_WORKSPACE_SHELL=0` also turns hooks and `!` lines off, and `HF_SAFE_MODE=1`
-  starts no hook and no project MCP server. See [hooks and project MCP servers](hooks-and-project-mcp.md).
+- v1.7: a project can ship hooks (`.harness/settings.json`, `.claude/settings.json` and their `settings.local.json`),
+  MCP servers (`.mcp.json`) and command files with `` !`cmd` `` lines. **None of them runs before you approve it** in
+  the project's review dialog (the chat header shows "{n} to review"; Settings → Projects shows the same count on the
+  project's row, whose menu has **Review commands and hooks…** and **MCP servers…**); the approval is pinned to the
+  exact text (and the scripts it names), so any change needs a new approval. `HF_WORKSPACE_SHELL=0` also turns hooks and
+  `!` lines off (project MCP servers still start), and `HF_SAFE_MODE=1` starts no hook and no project MCP server (`!`
+  lines still run). A project can also have its own output style (Settings → Customize → Output styles, with the
+  project selected; the row in Settings → Projects shows "Style: {name}"). See
+  [hooks and project MCP servers](hooks-and-project-mcp.md).
 
 ## 11. Rotate the master key
 

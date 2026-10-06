@@ -40,7 +40,9 @@ import type { Disposable } from '@harness-forge/plugin-sdk'
 // folder, mode, origin and model) and gives the detached host `detachedHooks(…)` over it: the child runs `PreToolUse`
 // (an `ask` is denied), `PostToolUse` and `SubagentStop` (a block continues it, `subagent/index.ts`) like a foreground
 // child; nothing of it is stored. A snapshot that cannot be taken runs the child without hooks (logged unless the task
-// was stopped meanwhile).
+// was stopped meanwhile). W11.17 (ADR-050): the launching run's project MCP result (`input.projectTools`) goes to the
+// child's tool assembly (the shadowed global servers hidden, the project server tools under the child ceiling) and its
+// server names to the task's hook matchers.
 import type { BackgroundTask, BackgroundTaskStatus, ChatRequestBody, HarnessUIMessage, ReasoningEffort, TaskOutput, TaskResultData, ToolMode } from '@harness-forge/shared'
 import type { Logger } from '../../logger.ts'
 import type { AppDeps } from '../../types.ts'
@@ -599,7 +601,8 @@ export function createBackgroundTasks(deps: AppDeps, host: BackgroundTasksHost, 
         origin: input.origin,
         modelRef: input.model.modelRef,
       }, { signal })
-      return detachedHooks({ snapshot, messageId: input.messageId, logger })
+      const mcpServerNames = input.projectTools?.names
+      return detachedHooks({ snapshot, messageId: input.messageId, logger, ...(mcpServerNames === undefined ? {} : { mcpServerNames }) })
     }
     catch (error) {
       // A stop during the snapshot: the child ends at once anyway (its signal aborted).
@@ -698,6 +701,7 @@ export function createBackgroundTasks(deps: AppDeps, host: BackgroundTasksHost, 
         task: input.task,
         toolCallId: input.toolCallId,
         deadline: deadline.signal,
+        projectTools: input.projectTools ?? null,
       })
       await insertTaskRow(deps.db, task)
     }

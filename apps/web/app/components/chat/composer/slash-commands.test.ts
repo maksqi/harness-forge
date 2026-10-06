@@ -7,6 +7,7 @@ import {
   CLIENT_COMMAND_DESCRIPTIONS,
   clientSlashItems,
   filterSlashItems,
+  isTypedCommand,
   parseClientCommand,
   parseSlashCommand,
   parseToolMode,
@@ -322,6 +323,12 @@ describe('skills and long names (Phase 11, P11-0b types)', () => {
     expect(parseSlashCommand(`/${long}x`)).toBeNull()
     const longItems = serverSlashItems([{ name: long, kind: 'skill', description: 'A long skill', source: 'user', argumentHint: '<env>' }])
     expect(argumentHintAt(`/${long} `, longItems)).toBe('<env>')
+    // W11.19: where SlashArgumentHint shows the hint follows the same rule.
+    expect(isTypedCommand(`/${long} `)).toBe(true)
+    expect(isTypedCommand(`/${long}\t`)).toBe(true)
+    expect(isTypedCommand(`/${long}x `)).toBe(false)
+    expect(isTypedCommand(`/${long} a`)).toBe(false)
+    expect(isTypedCommand(`/${long}`)).toBe(false)
   })
 })
 

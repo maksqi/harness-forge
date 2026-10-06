@@ -147,6 +147,8 @@ describe('customize hooks helpers', () => {
     expect(commandError('  ')).toBe('Add the command.')
     expect(commandError('x'.repeat(4097))).toBe('Use at most 4,096 characters.')
     expect(commandError('pnpm lint')).toBeNull()
+    // The runner prefers bash and falls back to sh.
+    expect(HOOK_COPY.commandHelp).toMatch(/^Runs with bash \(or sh when bash is missing\) in the project folder /)
     expect(parseHookTimeout('')).toEqual({ value: null })
     expect(parseHookTimeout(' 30 ')).toEqual({ value: 30 })
     expect(parseHookTimeout('0')).toEqual({ error: 'Enter a whole number from 1 to 600.' })

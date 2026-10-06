@@ -25,17 +25,21 @@ project MCP servers in [hooks and project MCP servers](hooks-and-project-mcp.md)
   style** menu. **Automatic** follows the project's style, else your default, and says which one it uses ("Uses
   Learning, set for harness-forge"); any other choice is kept **for this chat** and applies from the next reply. The
   button shows the style's name when it is not Default (an icon with a dot on phones).
-- **With a command**: `/output-style` opens the menu, `/output-style learning` sets a style, `/output-style auto` goes
-  back to Automatic. An unknown name shows "Unknown output style "…". Use auto, default, explanatory, learning…".
+- **With a command**: `/output-style` opens the menu, `/output-style learning` sets a style (a name or a label, in any
+  case), `/output-style auto` (or `automatic`) goes back to Automatic. An unknown name shows "Unknown output style
+  "{name}". Use auto, default, explanatory, learning or a style from the menu."
   `/output-style` is a built-in client command (a plugin command of that name is refused).
 - **For a project**: Settings → Customize → **Output styles**, with the project selected at the top: **Style in
   {project}** ("Same as your default" clears it).
 - **Your default**: Settings → General → **Output style** (also the scope bar of the Output styles tab without a
-  project), or **Use by default** in a style's menu.
+  project), or **Use by default** in a style's menu (with a project selected at the top, it sets that project's style
+  instead).
 
 **Selection order**: the chat's choice, else the project's style, else your default, else Default. A new chat starts on
 Automatic. A style that is no longer available (a deleted file, a disabled plugin, a turned-off personal style) falls
-back to Default for that reply, and the reply starts with a notice that says so.
+back to Default for that reply, and the reply starts with the notice "The output style "{name}" is not available, so
+the default style was used." (shown once per chat and model, not on every reply). A style that is no longer available
+stays in the menus, marked "Not available".
 
 ## 3. Writing a style
 
@@ -55,8 +59,8 @@ Answer in as few words as the task allows.
 
 | Key | Meaning |
 |---|---|
-| `name` | the style's name; written any way (`Terse Answers`), it becomes a slug (`terse-answers`: lower case, spaces become `-`) and the original is kept as the label the menu shows; without `name`, the file name is used |
-| `description` | shown under the name in the composer menu and in Customize |
+| `name` | the style's name; written any way (`Terse Answers`), it becomes a slug (`terse-answers`: lower case, accents removed, every run of other characters becomes `-`; at most 64 characters) and the original is kept as the label the menu shows (at most 128 characters); without `name`, the file name is used |
+| `description` | shown under the name in the composer menu and in Customize; optional: without it, the first line of the body is used |
 | `keep-coding-instructions` | optional, default `false`; section 4 |
 | body | the style's instructions (at most 64 KB for the whole file) |
 
@@ -100,10 +104,11 @@ styles instead), and a chat's choice is remembered per chat instead of per folde
 ## 6. Troubleshooting
 
 - **My project style is not in the menu**: check Settings → Customize → Output styles with the project selected:
-  **Invalid** shows the reason (a missing description, a reserved name, a file over 64 KB), **Shadowed** names the
-  winner; the file must be directly in `.harness/output-styles/` or `.claude/output-styles/` and end in `.md`.
+  **Invalid** shows the reason (no description and an empty body, a reserved name, a file over 64 KB), **Shadowed**
+  names the winner; the file must be directly in `.harness/output-styles/` or `.claude/output-styles/` and end in `.md`.
 - **The style does not seem to apply**: it applies from the next reply after you choose it; Automatic may be using the
   project's style (the menu says which); a sub-agent's report never follows it.
 - **The agent forgot how to use the tools**: the style has `keep-coding-instructions: false`; set it to `true`.
-- **A notice says the style is not available**: the chosen style is gone or turned off, so Default answered; pick
-  another one or switch back to Automatic.
+- **A notice says the style is not available** ("The output style "{name}" is not available, so the default style was
+  used."): the chosen style is gone, turned off or unreadable, so Default answered; pick another one or switch back to
+  Automatic.

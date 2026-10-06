@@ -229,8 +229,10 @@ function plural(count: number, one: string, many: string): string {
 }
 
 /**
- * "2 providers · 3 models · 1 MCP server · 2 commands · 1 output style · 3 hooks" (empty parts omitted; Phase 11: output
- * styles, and the command hook handlers counted with the code hooks).
+ * "2 providers · 3 models · 1 tool · 1 MCP server · 2 commands · 2 agents · 1 skill · 1 output style · 3 hooks" (empty
+ * parts omitted): every kind of the plugin card's summary (`contributionsSummary`), in its order, plus the model count
+ * next to the providers (the preview lists both). Agents and skills since plugin API 1.4.0; output styles and the
+ * command hook handlers (counted with the code hooks) since 1.5.0.
  */
 export function contributionSummary(contributions: PluginContributions): string {
   const parts: string[] = []
@@ -244,6 +246,10 @@ export function contributionSummary(contributions: PluginContributions): string 
     parts.push(plural(contributions.mcpServers.length, 'MCP server', 'MCP servers'))
   if (contributions.commands.length > 0)
     parts.push(plural(contributions.commands.length, 'command', 'commands'))
+  if (contributions.agents.length > 0)
+    parts.push(plural(contributions.agents.length, 'agent', 'agents'))
+  if (contributions.skills.length > 0)
+    parts.push(plural(contributions.skills.length, 'skill', 'skills'))
   if (contributions.outputStyles.length > 0)
     parts.push(plural(contributions.outputStyles.length, 'output style', 'output styles'))
   const hooks = contributions.hooks.length + contributions.commandHooks

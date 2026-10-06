@@ -41,7 +41,9 @@ import {
   sizeLabel,
   stateBadge,
   styleDefaultBadges,
+  TAB_REVEAL_INSET,
   tabOf,
+  tabRevealOffset,
 } from './customize'
 
 const pluginName = (id: string) => (id === 'db-tools' ? 'DB tools' : id)
@@ -83,6 +85,23 @@ describe('customize sections', () => {
     // The definition kind of the hooks tab falls back to agents (the page's New button, W11.8).
     expect(kindOfTab('hooks')).toBe('agent')
     expect(kindFolders(['.harness/output-styles', '.claude/output-styles', '.harness/agents'], 'style')).toEqual(['.harness/output-styles', '.claude/output-styles'])
+  })
+
+  it('tabRevealOffset: how far the tab row scrolls so the active tab shows whole, with the inset beside it (W11.19)', () => {
+    const row = { left: 0, right: 358 }
+    expect(TAB_REVEAL_INSET).toBe(16)
+    // Visible with room on both sides: no scroll.
+    expect(tabRevealOffset(row, { left: 100, right: 200 })).toBe(0)
+    // Cut off at the end, or too close to it: forward to the tab's end plus the inset.
+    expect(tabRevealOffset(row, { left: 391, right: 472 })).toBe(472 + 16 - 358)
+    expect(tabRevealOffset(row, { left: 300, right: 350 })).toBe(8)
+    // Cut off at the start: back to the tab's start minus the inset.
+    expect(tabRevealOffset(row, { left: -50, right: 30 })).toBe(-66)
+    // A tab wider than the row keeps its start in view.
+    expect(tabRevealOffset(row, { left: 40, right: 600 })).toBe(24)
+    // A row with its own offset in the viewport, and another inset.
+    expect(tabRevealOffset({ left: 240, right: 960 }, { left: 900, right: 980 }, 0)).toBe(20)
+    expect(tabRevealOffset({ left: 240, right: 960 }, { left: 240, right: 320 }, 0)).toBe(0)
   })
 
   it('keeps the style and skill fields of a parsed definition in the draft and writes them back (Phase 11)', () => {

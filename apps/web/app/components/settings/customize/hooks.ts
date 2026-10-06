@@ -66,7 +66,8 @@ export const HOOK_COPY: Readonly<Record<string, string>> = {
   warning: 'Hooks run shell commands on your server with harness-forge\'s permissions, without asking, whenever their event happens. Only add commands you understand.',
   matcherHelp: 'Tool names separated by |. Claude Code names work too (Bash, Read, Write, Edit, Grep, Glob, WebFetch). Leave it empty or use * for every tool.',
   matcherInvalid: 'Use tool names, | and * only.',
-  commandHelp: 'Runs with sh in the project folder (outside projects, in a private folder). It gets the event as JSON on stdin; exit code 2 blocks with stderr as the reason.',
+  // The runner (workspace/shell.ts) prefers /bin/bash and falls back to /bin/sh.
+  commandHelp: 'Runs with bash (or sh when bash is missing) in the project folder (outside projects, in a private folder). It gets the event as JSON on stdin; exit code 2 blocks with stderr as the reason.',
   commandMissing: 'Add the command.',
   timeoutInvalid: 'Enter a whole number from 1 to 600.',
   saved: 'Hook saved',

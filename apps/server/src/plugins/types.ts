@@ -305,15 +305,17 @@ export interface PluginInstaller {
 export interface PluginDrafts {
   /**
    * Creates `data/plugins/<id>/plugin.json` (+ icon) through staging, `source: 'created'`, saves `credentials` as
-   * provider credentials and loads it. A manifest with a stdio MCP server calls `requireFreshAuth` and is pinned.
+   * provider credentials and loads it. A manifest that requires trust (`manifestRequiresTrust`: a stdio MCP server,
+   * command hooks, `!` spans) calls `requireFreshAuth` and is pinned.
    * `forbidden` (reserved id), `conflict` (`exists`), `validation_error`.
    */
   readonly create: (draft: PluginDraft, options: SensitiveOperationOptions) => Promise<PluginDetail>
   /** Temporary provider from the draft (nothing stored), 15 s; failures are `ok: false`. */
   readonly test: (request: DraftTestRequest) => Promise<DraftTestResult>
   /**
-   * Replaces `plugin.json` of an editable declarative plugin and reloads it; declaring or changing a stdio MCP server
-   * calls `requireFreshAuth` and re-pins. `not_found`, `forbidden`, `validation_error` (id changed).
+   * Replaces `plugin.json` of an editable declarative plugin and reloads it; a manifest that requires trust
+   * (`manifestRequiresTrust`) calls `requireFreshAuth` on every save and re-pins. `not_found`, `forbidden`,
+   * `validation_error` (id changed).
    */
   readonly updateManifest: (id: string, update: PluginManifestUpdate, options: SensitiveOperationOptions) => Promise<PluginDetail>
 }

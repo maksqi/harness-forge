@@ -61,7 +61,8 @@ my-project/
       2026-10-04-move-auth.md       a saved plan (section 9)
     output-styles/
       terse.md                      v1.7: an output style (see the output styles guide)
-    settings.json                   v1.7: only its "hooks" are read, after approval (see the hooks guide)
+    settings.json                   v1.7: only its "hooks" are read, after approval (see the hooks guide); also
+                                    settings.local.json
   .claude/
     agents/ commands/ skills/       the same layout, lower precedence (v1.7: also output-styles/ and settings.json)
   .mcp.json                         v1.7: the project's MCP servers, after approval (see the hooks guide)
@@ -82,14 +83,15 @@ description: Reviews a diff or a set of files for bugs, risky changes and missin
 The body: the agent's instructions, the command's prompt or the skill's content.
 ```
 
-- **Names**: agents and skills use `a-z`, `0-9` and `-`, start with a letter, at most 64 characters; commands at most 32.
-  Upper-case letters are lowered (`Code-Reviewer` → `code-reviewer`). Without `name`, the file name is used (`review.md`
-  → `review`), or for a skill its folder name.
+- **Names**: agents and skills use `a-z`, `0-9` and `-`, start with a letter, at most 64 characters; commands at most
+  32. Upper-case letters are lowered (`Code-Reviewer` → `code-reviewer`). Without `name`, the file name is used
+  (`review.md` → `review`), or for a skill its folder name.
 - **Description**: required for agents and skills, recommended for commands (the slash menu shows it; without one, the
   first line of the body is used). The agent **reads** the descriptions of agents and skills to decide when to use
   them, so say *when*: "Use it after larger edits.", "Load it before writing release notes." Longer than 1,024
   characters is cut.
-- **Size**: at most 64 KB per file, the header at most 8 KB. Text only: a larger or binary file is listed as **Invalid**.
+- **Size**: at most 64 KB per file, the header at most 8 KB. Text only: a larger or binary file is listed as
+  **Invalid**.
 - **Lists**: `tools` and `allowed-tools` take a comma-separated string (`Read, Grep, Glob`), a space-separated one
   (`Read Grep Glob`) or a YAML list. `mcp__github__*` matches every tool whose name starts with it, and
   `mcp__github` every tool of that MCP server.
@@ -150,7 +152,7 @@ Report the findings as a list with line numbers.
 | `{{input}}` | same as `$ARGUMENTS` (the syntax of plugin templates) |
 | no placeholder | your text is added after the body, separated by a blank line |
 | `` !`cmd` `` (v1.7) | runs `cmd` in the project folder before the model is called; its output replaces the span (section below) |
-| `@path` (v1.7) | inlines the project file `path` (`@README.md`, `@src/config.ts`) after the prompt |
+| `@path` (v1.7) | inlines the project file `path` (`@README.md`, `@src/config.ts`) after the prompt; quote a path that is followed by punctuation (`@"README.md",`) |
 
 **Shell lines and file references** (v1.7, ADR-052). A command can gather context before the model answers:
 
@@ -163,24 +165,41 @@ Here is the current state of the repository:
 !`git status --short`
 !`git log --oneline -5`
 
-Summarize what changed and what is left to do. Follow the conventions in @CONTRIBUTING.md.
+Summarize what changed and what is left to do. Follow the conventions in @"CONTRIBUTING.md".
 ```
 
 - A span is `` !`command` `` on one line (no backtick inside). Spans run one after the other in the project folder,
-  through the same shell as the agent's `shell` tool (30 s each, 60 s in total, the first 16 KB of output each, at most
-  10 per command); a span past the time budget is skipped with a note. A non-zero exit code is part of the output.
-- `@path` (a path with a `.` or `/`, outside spans) inlines that project file, at most 32 KB each and 10 per command;
-  secret-looking paths (`.env`, keys), files outside the project and symbolic links are refused; a missing file stays as
-  text.
+  through the same shell as the agent's `shell` tool, with its minimal environment plus `HARNESS_PROJECT_DIR` and
+  `CLAUDE_PROJECT_DIR` (the project folder): 30 s each, 60 s in total, at most 10 per command (later spans stay text).
+  The output is stdout then stderr (the start and the end of each), cut to 16 KB with `[output truncated]`; a timeout
+  adds `[timed out]`, a non-zero exit code `[exit code N]`, and a span past the time budget is replaced by
+  `[skipped: time limit]`.
+- `@path` (a path with a `.` or `/`, outside spans) inlines that project file, at most 32 KB each (a longer one is cut)
+  and 10 per command: the `@path` text stays where it is and the file is added after the prompt and your arguments as
+  a `<file path="…">` block (a binary file as `[binary file not inlined]`). Secret-looking paths (`.env`, keys), `.git`
+  paths, files outside the project and symbolic links are refused; a missing or refused file stays as text. An unquoted
+  path runs to the next blank, so punctuation right after it is part of the path (`@README.md,` looks for
+  `README.md,`): add a blank or quote it, `@"README.md",`.
+- Spans and `@path` inside a fenced code block stay text.
 - **Your arguments never go inside a span**: the file is scanned before `$ARGUMENTS` and friends are replaced, so
   `/status ; rm -rf x` cannot inject a command.
-- Spans and file references work **only in project chats** (a span in a chat without a project is refused) and only
-  while the shell is on (`HF_WORKSPACE_SHELL=0` refuses them). They run in every permission mode: typing the command is
-  your explicit request.
-- **Trust**: your personal commands and the commands of trusted plugins run their spans directly; a **project's**
-  command file with spans runs them only after you **approve** it in the project's review dialog (the same one as
-  project hooks; the approval pins the file's spans by hash, and any change needs a new approval). An unapproved one is
-  refused in the composer ("/status runs shell lines you haven't approved." with **Review…**); your text stays.
+- Spans and file references work **only in project chats** and only while the shell is on. A command with spans is
+  refused in a chat without a project ("The /status command runs shell lines, which need a chat in a project."), when
+  the project folder is not available ("The /status command runs shell lines, but the project folder of this chat is
+  not available.") and with `HF_WORKSPACE_SHELL=0` ("The /status command runs shell lines, but shell commands are
+  turned off on this server (HF_WORKSPACE_SHELL=0)."); without a project, `@path` simply stays text. Spans run in every
+  permission mode (typing the command is your explicit request), after the `SessionStart` / `UserPromptSubmit` hooks:
+  those hooks see what you typed and the command's name (never the expansion), and when one refuses the message no
+  span runs and no file is read. The checks above come first, and a project command's approval is checked again right
+  before its spans run. A command whose prompt would be
+  larger than 64 KB even with empty span outputs is refused before any span runs.
+- **Trust**: your personal commands and the `template` commands of loaded plugins run their spans directly (a
+  declarative plugin with spans needs the plugin trust step first; the prompt a plugin's `run` command returns is not
+  scanned); a **project's** command file with spans runs them only after you **approve** it in the project's review
+  dialog (the same one as project hooks; the approval pins the file's spans, and the scripts they name, by hash; any
+  change needs a new approval; a file with a span longer than 4,096 characters is never listed, so it can never be
+  approved). An unapproved one is refused in the composer ("/status runs shell lines you haven't approved. Review the
+  project's files to run it." with **Review…**); your text stays.
 - The result is **frozen** into the message: regenerating the reply or answering an approval reuses it, the spans never
   run twice. Span output is not journaled (like a command you type in a terminal).
 - A personal command with spans restored from a backup comes back **turned off**: check it, then turn it on.
@@ -215,9 +234,9 @@ description: How this project writes release notes. Load it before writing or ed
 The agent sees the names and descriptions of the skills (up to 50) and loads one with the `skill` tool when a task
 matches; the chat shows a row "Loaded skill release-notes". Since v1.7 you can also run a skill yourself: type
 `/release-notes [what you want]` (the slash menu lists skills in its **Skills** group); your text is added to the
-skill's content like a command's arguments (`$ARGUMENTS` works too), and the badge on your message says it was a
-skill. Skill names may have up to 64 characters in the menu; when a command and a skill share a name, the command
-wins. A personal or plugin skill is one file: put everything it needs in its body.
+skill's content like a command's arguments (`$ARGUMENTS` works too; a skill's `!` spans and `@path` stay text), and the
+badge on your message says it was a skill. Skill names may have up to 64 characters in the menu; when a command and a
+skill share a name, the command wins. A personal or plugin skill is one file: put everything it needs in its body.
 
 ## 3. Precedence, duplicates and reserved names
 
@@ -267,9 +286,9 @@ in Settings → Projects) lists everything by tab (**Agents**, **Commands**, **S
 
 - **Commands**: type `/`. The menu groups the commands: **App** (built-in, `/remember`, `/compact`; v1.7
   `/output-style`), **Project**, **Personal**, **Plugins** and (v1.7) **Skills**. A project command whose shell lines
-  are not approved yet shows **Needs approval**. After you pick one, a faded hint shows its arguments. Project commands appear only in
-  that project's chats; a command file saved on disk shows up when you open the menu again (it can take up to half a
-  minute). The bubble's badge tells where the command came from and which model it asked for.
+  are not approved yet shows **Needs approval**. After you pick one, a faded hint shows its arguments. Project commands
+  appear only in that project's chats; a command file saved on disk shows up when you open the menu again (it can take
+  up to half a minute). The bubble's badge tells where the command came from and which model it asked for.
 - **Agents**: the main agent decides when to use one; mention it by name to ask for it. Each runs as a sub-agent block
   with its name; it never asks you for approval (a call that would need it is skipped), like every sub-agent.
 - **Skills**: the main agent loads them; the "Loaded skill" row shows what it read.
@@ -311,7 +330,8 @@ steer the model (check what a repository ships), but they can **never give thems
 - `model` works only with providers you connected;
 - command bodies never run programs by themselves: since v1.7 a project command's `` !`cmd` `` spans run only after you
   approve that file (pinned by hash; any change needs a new approval), and `@path` reads only project files through the
-  agent's path guard (no secret-looking paths, no links, nothing outside the project);
+  agent's path guard (no secret-looking paths, no `.git`, no links, nothing outside the project; it needs no
+  approval);
 - the agent cannot quietly rewrite them: writing to `.harness/` or `.claude/` always asks, even in Accept edits (reading
   them does not);
 - symbolic links (and anything reached through one), hidden and secret-looking file names and the files past 200 per
@@ -343,8 +363,8 @@ it for each agent's live steps, a **Stop** per agent and **Stop all**.
   message version wait until it ends ("Wait for the responses in this project to finish…"). Switching versions works.
 - **A server restart** ends running background agents; they are never resumed. Stopping the server ends them as stopped
   ("The background task was stopped."); after a crash they show as stopped with "The server restarted before the task
-  finished.". Their reports, and every report not delivered yet, are delivered at the chat's next turn (no turn starts by
-  itself after a restart).
+  finished.". Their reports, and every report not delivered yet, are delivered at the chat's next turn (no turn starts
+  by itself after a restart).
 - Their file edits are journaled under the reply that started them (Rewind covers them); their cost is in the chat's
   totals and in each agent's report line.
 - Share links never include background results.
@@ -388,8 +408,8 @@ binary file is refused.
 | Project folders | 200 definitions per folder, commands up to 3 subfolders deep (100 subfolders), skills with up to 50 listed supporting files |
 | Personal definitions | 200 per kind |
 | Listed to the model | 30 agent types and 50 skills, descriptions cut at 250 characters |
-| A command's expanded prompt | 64 KB |
-| A command's `!` spans (v1.7) | 10 per command, 30 s each, 60 s in total, 16 KB of output each |
+| A command's expanded prompt | 64 KB (v1.7: also checked with empty span outputs before any span runs) |
+| A command's `!` spans (v1.7) | 10 per command, 30 s each, 60 s in total, 16 KB of output each (stdout then stderr, the start and end of each) |
 | A command's `@path` files (v1.7) | 10 per command, 32 KB each |
 | Background agents | 3 per chat and 10 per server at once, 30 minutes each, Sub-agent max steps; the latest 100 per chat are kept |
 | `/remember` | 2,000 characters per note; `AGENTS.md` up to 1 MB; instructions up to 20,000 characters |
@@ -404,10 +424,15 @@ Changes on disk show up within 10 seconds (Settings → Customize reads the fold
   the limit; nothing at all means the file is not where it should be (`.harness/agents/x.md`, not deeper; `.md` only;
   not a hidden or secret-looking name such as `secrets.md`) or the project folder is unavailable.
 - **A command shows in one chat but not another**: project commands exist only in that project's chats.
-- **"/name runs shell lines you haven't approved."** (v1.7): the project's command file has `!` spans; press
-  **Review…**, check the commands and approve the file (it is pending again after every change to it).
-- **A command with `!` lines is refused in a chat without a project**, or with "the shell is off": spans need a
-  project folder and `HF_WORKSPACE_SHELL` on.
+- **"/name runs shell lines you haven't approved. Review the project's files to run it."** (v1.7): the project's command
+  file has `!` spans; press **Review…**, check the commands and approve the file (it is pending again after every change
+  to it).
+- **A command with `!` lines is refused** with "The /name command runs shell lines, which need a chat in a project.",
+  "The /name command runs shell lines, but the project folder of this chat is not available." or "The /name command
+  runs shell lines, but shell commands are turned off on this server (HF_WORKSPACE_SHELL=0).": spans need a project
+  chat whose folder is available and `HF_WORKSPACE_SHELL` on.
+- **An `@path` was not inlined**: the path must hold a `.` or `/`, exist in the project, and not be secret-looking, a
+  `.git` path or a link; punctuation glued to it is part of the path (write `@"README.md",`).
 - **The command ran on the chat's model**: the command's `model` is not available (no key for that provider, an unknown
   model, or an image model); the reply's notice says so.
 - **The custom agent did not get a tool from its list**: a sub-agent only gets tools that run without approval in the

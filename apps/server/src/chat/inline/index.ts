@@ -15,6 +15,10 @@
 //   5. the spans run one after another in the project root (`inline/shell.ts`), in every permission mode (sending the
 //      command is the approval).
 // A 409 of 2 or 4 (`isSpanRefusal`) also removes the chat row the request created (`prepare.ts`, like a hook block).
+// W11.17: `prepareCommandPlan` runs the checks 1 – 4 only and returns the runner of the spans and file reads, so
+// `prepare.ts` runs the prompt hooks (`SessionStart`, `UserPromptSubmit`) in between: nothing runs and no file is read
+// before they passed. The runner checks a project command file's trust hash again right before its spans run
+// (verify-before-run: time passed since the check). `expandCommandPlan` does both at once.
 // `@path` references are inlined in project chats only (`inline/files.ts`; a refused, missing or unreadable file keeps
 // its text); without a project they stay text. The result (`renderCommandExpansion`) is checked against the 64 KB
 // expansion cap by the caller and frozen in `metadata.command.expansion` with `inlined { shell, files }`, so a regenerate
@@ -121,6 +125,15 @@ export function minimalExpansion(plan: CommandTemplatePlan, input: string): stri
   return renderCommandExpansion(plan, { shell, files: [] }, input).text
 }
 
+/** Check 4 of the module comment: a project command file's trust item is approved (else 409 `untrusted`). */
+async function assertTrusted(request: ExpandCommandPlanInput, workspace: OpenWorkspace, projectId: string): Promise<void> {
+  if (request.source !== 'project')
+    return
+  const subject = await commandTrustSubject(workspace.root, request.name, request.plan.shellCommands, request.signal)
+  if (!await request.host.trusted(projectId, subject.sha256))
+    throw spansUntrusted(request.name)
+}
+
 /** The project folder for the spans: checks 1 – 4 of the module comment. */
 async function spanWorkspace(request: ExpandCommandPlanInput): Promise<OpenWorkspace> {
   const { host, name } = request
@@ -133,26 +146,21 @@ async function spanWorkspace(request: ExpandCommandPlanInput): Promise<OpenWorks
   request.signal.throwIfAborted()
   if (workspace === null)
     throw spansFolderUnavailable(name)
-  if (request.source === 'project') {
-    const subject = await commandTrustSubject(workspace.root, name, request.plan.shellCommands, request.signal)
-    if (!await host.trusted(projectId, subject.sha256))
-      throw spansUntrusted(name)
-  }
+  await assertTrusted(request, workspace, projectId)
   return workspace
 }
 
-/**
- * Runs the spans and reads the referenced files of `plan` (see the module comment) and renders the expansion. Throws
- * the errors of the checks, and the abort of a stopped run.
- */
-export async function expandCommandPlan(request: ExpandCommandPlanInput): Promise<CommandBodyExpansion> {
+/** Runs the spans (in the checked `workspace`) and reads the referenced files of `plan`, then renders the expansion. */
+async function runCommandPlan(request: ExpandCommandPlanInput, checked: OpenWorkspace | null, verify: boolean): Promise<CommandBodyExpansion> {
   const { plan, host, signal } = request
+  signal.throwIfAborted()
   let shell: ShellSpanResult[] = []
   let ran = 0
-  let workspace: OpenWorkspace | null = null
-  if (plan.shellCommands.length > 0) {
-    workspace = await spanWorkspace(request)
-    const spans = await runCommandSpans(plan.shellCommands, { root: workspace.root, signal })
+  let workspace = checked
+  if (checked !== null && plan.shellCommands.length > 0) {
+    if (verify && host.projectId !== null)
+      await assertTrusted(request, checked, host.projectId)
+    const spans = await runCommandSpans(plan.shellCommands, { root: checked.root, signal })
     shell = spans.results
     ran = spans.ran
     request.logger?.info('command shell lines ran', { spans: plan.shellCommands.length, ran: spans.ran, failed: spans.failed, durationMs: spans.durationMs })
@@ -167,4 +175,26 @@ export async function expandCommandPlan(request: ExpandCommandPlanInput): Promis
   const read = plan.filePaths.filter((_path, index) => files[index] !== null && files[index] !== undefined)
   const text = renderCommandExpansion(plan, { shell, files }, request.input).text
   return ran === 0 && read.length === 0 ? { text } : { text, inlined: { shell: ran, files: read } }
+}
+
+/** The spans and file reads of a checked plan (`prepareCommandPlan`); rejects like `expandCommandPlan`. */
+export type CommandPlanRunner = () => Promise<CommandBodyExpansion>
+
+/**
+ * Checks `plan` (checks 1 – 4 of the module comment; nothing runs, no referenced file is read) and returns the runner of
+ * its spans and file reads (W11.17: `prepare.ts` runs the prompt hooks in between). The runner checks a project command
+ * file's trust hash again before its spans run. Throws the errors of the checks, and the abort of a stopped run.
+ */
+export async function prepareCommandPlan(request: ExpandCommandPlanInput): Promise<CommandPlanRunner> {
+  const workspace = request.plan.shellCommands.length > 0 ? await spanWorkspace(request) : null
+  return () => runCommandPlan(request, workspace, true)
+}
+
+/**
+ * Runs the spans and reads the referenced files of `plan` (see the module comment) and renders the expansion. Throws
+ * the errors of the checks, and the abort of a stopped run.
+ */
+export async function expandCommandPlan(request: ExpandCommandPlanInput): Promise<CommandBodyExpansion> {
+  const workspace = request.plan.shellCommands.length > 0 ? await spanWorkspace(request) : null
+  return runCommandPlan(request, workspace, false)
 }

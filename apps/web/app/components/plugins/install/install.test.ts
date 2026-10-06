@@ -93,6 +93,11 @@ describe('labels', () => {
     // Phase 11: output styles, and the command hooks counted with the code hooks.
     expect(contributionSummary({ providers: [], models: 0, tools: [], mcpServers: [], commands: ['c'], hooks: ['prompt.submit'], agents: [], skills: [], commandHooks: 2, outputStyles: ['terse'] }))
       .toBe('1 command · 1 output style · 3 hooks')
+    // Every kind of the plugin card's summary, in its order: agents and skills after commands, hooks last.
+    expect(contributionSummary({ providers: [], models: 0, tools: ['t'], mcpServers: [], commands: ['c'], hooks: ['chat.before'], agents: ['a', 'b'], skills: ['s'], commandHooks: 1, outputStyles: ['terse', 'plain'] }))
+      .toBe('1 tool · 1 command · 2 agents · 1 skill · 2 output styles · 2 hooks')
+    expect(contributionSummary({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: ['a'], skills: [], commandHooks: 0, outputStyles: [] })).toBe('1 agent')
+    expect(contributionSummary({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: ['s', 't'], commandHooks: 0, outputStyles: [] })).toBe('2 skills')
     expect(filesSummary({ count: 1, bytes: 2048 })).toBe('1 file · 2 KB')
     expect(permissionLabel('hooks')).toBe('Reads and changes conversations')
     expect(permissionLabel('unknown')).toBe('unknown')

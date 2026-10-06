@@ -1,15 +1,17 @@
 // Declarative plugins created and edited in the browser (API.md 5.17, PLUGINS.md 4 / 12 / 13, UI.md 8.5). Owner: W3.3.
 //
 // `create`: validate the draft (declarative manifest, reserved ids -> 403, credentials against the declared fields,
-//   icon file decoded and sanitized) -> fresh auth when it declares a stdio MCP server (ADR-017) -> id free (plugin row,
+//   icon file decoded and sanitized) -> fresh auth when the manifest requires trust (ADR-017 / ADR-052,
+//   `manifestRequiresTrust`: a stdio MCP server, command hooks or `!` spans in a command template) -> id free (plugin row,
 //   host entry, `data/plugins/<id>`) and provider / MCP server ids not used by another plugin (409 `exists`) ->
 //   `plugin.json` (+ icon) written into `data/plugins/.staging/<uuid>`, validated by the host
 //   (`inspectDirectory`) and renamed atomically to `data/plugins/<id>` -> `plugins` row (`source: 'created'`,
 //   pinned when it requires trust) -> host load -> credentials stored as provider credentials (never in
 //   `plugin.json`), then checked and listed in the background like `PUT /providers/:id/credentials` does.
 // `updateManifest`: an editable declarative plugin gets its new `plugin.json` (+ icon) written atomically without
-//   triggering the watcher, then reloads (hot reload on save). Declaring or changing a stdio MCP server (or keeping one
-//   that is not trusted) needs fresh auth; a manifest with a stdio server is re-pinned through the host's trust action.
+//   triggering the watcher, then reloads (hot reload on save). Saving a manifest that requires trust
+//   (`manifestRequiresTrust`) needs fresh auth (W11.17: every such save, since it re-pins the new `plugin.json` through
+//   the host's trust action); a pin is only ever set after that check.
 // `test`: `test-provider.ts`.
 import type { CredentialField, PluginManifest } from '@harness-forge/plugin-sdk'
 import type { DraftTestRequest, DraftTestResult, PluginDetail, PluginDraft, PluginManifestUpdate } from '@harness-forge/shared'
@@ -22,10 +24,10 @@ import { lstat, mkdir, realpath, rename, rm, stat, writeFile } from 'node:fs/pro
 import { extname, isAbsolute, join, relative, sep } from 'node:path'
 import {
   applyDeclarativeProviderDefaults,
-  declaresStdioMcpServer,
   HarnessError,
   isReservedPluginId,
   LIMITS,
+  manifestRequiresTrust,
   pluginDraftSchema,
   pluginManifestUpdateSchema,
   validationError,
@@ -97,15 +99,6 @@ async function writeFileAtomic(dir: string, name: string, bytes: Uint8Array): Pr
     await rm(temporary, { force: true }).catch(() => {})
     throw error
   }
-}
-
-/** The stdio MCP server declarations of a manifest (their change needs fresh auth). */
-function stdioServers(manifest: PluginManifest): unknown[] {
-  return (manifest.contributes?.mcpServers ?? []).filter(server => server.transport.type === 'stdio')
-}
-
-function sameJson(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b)
 }
 
 export function createPluginDrafts(deps: AppDeps): PluginDrafts {
@@ -240,8 +233,10 @@ export function createPluginDraftsWith(deps: AppDeps, options: PluginDraftsOptio
     const credentials = draftCredentials(manifest, parsed.data.credentials ?? {})
     const icon: IconFile | null = parsed.data.iconFile ? decodeIconFile(parsed.data.iconFile) : null
     const manifestBytes = serializeManifest(manifest)
-    // ADR-017: a stdio MCP server starts a program on the server.
-    if (declaresStdioMcpServer(manifest))
+    // ADR-017 / ADR-052: a manifest that requires trust (a stdio MCP server, command hooks, `!` spans) runs commands on
+    // the server; it is pinned below only after this check.
+    const requiresTrust = manifestRequiresTrust(manifest)
+    if (requiresTrust)
       sensitive.requireFreshAuth()
     await assertIdFree(id)
     assertContributionIdsFree(id, manifest)
@@ -270,7 +265,7 @@ export function createPluginDraftsWith(deps: AppDeps, options: PluginDraftsOptio
         sourceRef: null,
         version: manifest.version,
         enabled: parsed.data.enable ?? true,
-        trustedHash: inspection.requiresTrust ? inspection.sha256 : null,
+        trustedHash: requiresTrust && inspection.requiresTrust ? inspection.sha256 : null,
       })
     }
     catch (error) {
@@ -315,10 +310,9 @@ export function createPluginDraftsWith(deps: AppDeps, options: PluginDraftsOptio
     const manifestBytes = serializeManifest(manifest)
     assertContributionIdsFree(id, manifest)
 
-    // ADR-017: declaring or changing a stdio MCP server, or keeping one that is not trusted, needs fresh auth.
-    const stdio = stdioServers(manifest)
-    const requiresTrust = stdio.length > 0
-    if (requiresTrust && (!sameJson(stdio, stdioServers(current.manifest)) || !current.trust.trusted))
+    // ADR-017 / ADR-052: every save of a manifest that requires trust re-pins it below, so it needs fresh auth first.
+    const requiresTrust = manifestRequiresTrust(manifest)
+    if (requiresTrust)
       sensitive.requireFreshAuth()
 
     await deps.plugins.withoutWatch(id, async () => {
@@ -335,7 +329,7 @@ export function createPluginDraftsWith(deps: AppDeps, options: PluginDraftsOptio
       return deps.plugins.trust(id, inspection.sha256)
     }
     if (current.trust.trustedHash !== null && current.source !== 'link') {
-      // The stdio server is gone: the pin of the old plugin.json is meaningless now.
+      // Nothing that requires trust is left: the pin of the old plugin.json is meaningless now.
       await deps.plugins.saveRecord({ id, source: current.source, version: manifest.version, trustedHash: null })
     }
     return deps.plugins.load(id)

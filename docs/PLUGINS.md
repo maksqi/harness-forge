@@ -255,7 +255,7 @@ version.
 | `1.2.0` | Unchanged in Phase 8 (checkpoints, the sticky folder and shell rules need no plugin API). Phase 7 (additive, ADR-032): `ToolCallContext.workspace?: ToolWorkspace` (`{ projectId, name, root }`, frozen, set for every tool in a chat whose project folder opened, policy functions included); `ToolDefinition.workspace?: 'read' \| 'write' \| 'execute'` (registration rejects any other value with `validation_error` at `['workspace']`; such a tool is offered only in those chats; `execute` tools only while `HF_WORKSPACE_SHELL` is on; `write` + policy `ask` runs without a card in the new permission mode `edits`); `ToolMode` gains `edits` ("Accept edits"; visible to hooks in `chat.params`); `ImageGenerateResult.modelName` (the catalog name, the user's alias first, else the model id). Behavior change: an unknown provider in `ctx.ai` (`ctx.models.resolve`) and `ctx.images` is now `provider_not_configured` (400, action `configure-provider`, message `The provider "<id>" is not available. Pick another model or install the provider.`), as on chat; it was `not_found` |
 | `1.3.0` | Phase 9 (additive, ADR-041 / ADR-043): `ToolMode` gains `plan` ("Plan": read-only; tools with workspace access `write` / `execute` are not offered, and policies resolve as in `ask`; visible to hooks in `chat.params`); `ToolDefinition.execute` may return the output directly (`Promise<O> \| O \| AsyncIterable<O>`) or be an **async generator** (`async function*`): every yielded value is a preliminary output (shown as progress, throttled to one per 250 ms with the latest value winning and the first sent at once, each capped at 64 KB, at most 2,000 per call) and the last yielded value is the final output (an `execute` that returns an `AsyncIterable` from a normal function is drained instead: only its last value counts). `tool.after` hooks and `toModelOutput` see only the final value; the guard timeout and the abort signal cover the whole iteration. No new `ToolCallContext` member (the agent tools of `core-agent` use a server-internal channel) |
 | `1.4.0` | Phase 10 (additive, ADR-045): **agents** and **skills** as contributions. Declarative: `contributes.agents` (`DeclarativeAgent[]`, <= 50) and `contributes.skills` (`DeclarativeSkill[]`, <= 50); code: `ctx.agents.register(AgentDefinition)` and `ctx.skills.register(SkillDefinition)` (each returns a `Disposable`). `AgentDefinition { name, description, instructions, tools?, model? }` is a sub-agent type the main agent can start with `task`; `SkillDefinition { name, description, content }` is a set of instructions the agent loads with the `core-agent` tool `skill`. Registry kinds `agent` / `skill`; `PluginSummary.contributions` gains `agents` and `skills` (names). Reserved names: the agents `explore`, `general`, `general-purpose`; the command name `remember` (a client command since v1.6) is refused for every plugin, whatever its `engines` range. No new `ToolCallContext` or hook member |
-| `1.5.0` | Phase 11 (additive, ADR-048, ADR-051, ADR-052): **command hooks** and **output styles** as contributions. Declarative: `contributes.hooks` (the Claude Code `hooks` object, `HooksConfig`, <= 50 handlers; a plugin with command hooks needs trust like one with a stdio MCP server) and `contributes.outputStyles` (`OutputStyleDefinition[]`, <= 20); code: `ctx.outputStyles.register(OutputStyleDefinition)` (returns a `Disposable`). `OutputStyleDefinition { name, description, content, keepCodingInstructions? }`. Six new code hook events in `HookMap`: `prompt.submit`, `session.start`, `run.stop`, `subagent.stop`, `compact.before`, `notification`; the output of `tool.after` gains `context?` (text the model reads at its next step). Registry kinds `style` and command hooks (`registry.styles`, `registry.hookCommands`); `PluginSummary.contributions` gains `commandHooks` (the number of command hooks; `hooks` still lists the code hook names) and `outputStyles` (names). A command template with a `` !`cmd` `` span makes the plugin require trust too. The command name `output-style` (a client command since v1.7) is refused for every plugin, whatever its `engines` range |
+| `1.5.0` | Phase 11 (additive, ADR-048, ADR-051, ADR-052): **command hooks** and **output styles** as contributions. Declarative: `contributes.hooks` (the Claude Code `hooks` object, `HooksConfig`, <= 50 handlers; a plugin with command hooks needs trust like one with a stdio MCP server) and `contributes.outputStyles` (`DeclarativeOutputStyle[]`, the fields of `OutputStyleDefinition`, <= 20 per plugin with the registered ones); code: `ctx.outputStyles.register(OutputStyleDefinition)` (returns a `Disposable`). `OutputStyleDefinition { name, description, content, keepCodingInstructions? }`. Six new code hook events in `HookMap`: `prompt.submit`, `session.start`, `run.stop`, `subagent.stop`, `compact.before`, `notification`; the output of `tool.after` gains `context?` (text the model reads at its next step). Registry kinds `style` and `hookCommands` (`registry.styles`, `registry.hookCommands`); `PluginSummary.contributions` gains `commandHooks` (the number of command hooks; `hooks` still lists the code hook names) and `outputStyles` (names). A command template with a `` !`cmd` `` span makes the plugin require trust too. The command name `output-style` (a client command since v1.7) is refused for every plugin, whatever its `engines` range |
 
 A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0`, `1.2.0`, `1.3.0`, `1.4.0` and `1.5.0`; a plugin that
 catches the old `not_found` of an unknown provider should also accept `provider_not_configured`; a hook or policy that
@@ -343,7 +343,7 @@ lenient pre-parse first, so a manifest written for a newer plugin API is reporte
 | `agents` | `DeclarativeAgent[]` | plugin API 1.4.0; <= 50; [section 6](#declarative-agents-plugin-api-140) |
 | `skills` | `DeclarativeSkill[]` | plugin API 1.4.0; <= 50; [section 6](#declarative-skills-plugin-api-140) |
 | `hooks` | `HooksConfig` (the Claude Code `hooks` object) | plugin API 1.5.0; <= 50 handlers; makes the plugin require trust; [section 6](#declarative-hooks-plugin-api-150) |
-| `outputStyles` | `OutputStyleDefinition[]` | plugin API 1.5.0; <= 20; [section 6](#declarative-output-styles-plugin-api-150) |
+| `outputStyles` | `DeclarativeOutputStyle[]` (the fields of `OutputStyleDefinition`) | plugin API 1.5.0; <= 20; [section 6](#declarative-output-styles-plugin-api-150) |
 
 ### Permissions (advisory)
 
@@ -356,7 +356,7 @@ detail. The host writes one `warn` log entry the first time a plugin uses a capa
 | `secrets` | stores secrets (`ctx.secrets`) | Stores secrets | `ctx.secrets.*` |
 | `storage` | stores data (`ctx.storage`, files in `ctx.plugin.dataDir`) | Stores data | `ctx.storage.*` |
 | `hooks` | registers hooks (it can read and change prompts, messages and tool calls; 1.5.0: also block a message, add context and continue a finished reply) | Reads and changes conversations | `ctx.hooks.on` |
-| `process` | starts processes, including stdio MCP servers and (1.5.0) command hooks and `!` spans of its command templates | Starts programs | stdio `McpServerDecl`, `contributes.hooks`, a template `!` span |
+| `process` | starts processes, including stdio MCP servers and (1.5.0) command hooks and `!` spans of its command templates | Starts programs | stdio `McpServerDecl` (command hooks and `!` spans are not detected: no warning is logged, so declaring `process` for them is optional; `examples/plugins/hook-pack` declares none) |
 
 ### Example (declarative, with settings, a command and an HTTP MCP server)
 
@@ -686,12 +686,12 @@ Code's `hooks` format. `contributes.hooks` is the value of the `hooks` key of a 
 
 | Part | Validation / meaning |
 |---|---|
-| event key | `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionStart`; another key is ignored with a diagnostic |
-| `matcher` | optional; for `PreToolUse` / `PostToolUse` the tool names it matches: names separated by `\|`, `*` or `.*` as wildcards, matched against the whole name, case-sensitive, against the harness name (`shell`), its Claude Code aliases (`Bash`) and `mcp__<server>__<tool>`; empty, missing or `*` matches every tool. A matcher with `^ $ [ ( + ? \ {` is invalid and never runs |
-| `hooks[].type` | `command` only; a `prompt` hook is skipped with a diagnostic (`unsupported-type`) |
+| event key | `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionStart`; any other key makes the manifest invalid (`validation_error`, the plugin goes to `error`) |
+| `matcher` | optional, at most 200 characters; for `PreToolUse` / `PostToolUse` the tool names it matches: names separated by `\|`, `*` or `.*` as wildcards, matched against the whole name, case-sensitive, against the harness name (`shell`), its Claude Code aliases (`Bash`) and `mcp__<server>__<tool>`; empty, missing or `*` matches every tool. For `SessionStart` it is tested against the source (`startup` / `compact`), for `PreCompact` against the trigger (`manual` / `auto`), for `Notification` against the type (`permission_prompt`); `UserPromptSubmit`, `Stop` and `SubagentStop` ignore it (`HOOK_MATCHER_SUBJECTS`). A matcher with `^ $ [ ( + ? \ {` is refused by the manifest schema (the plugin goes to `error`) |
+| `hooks[].type` | `command` only; any other type (`prompt`) or an unknown key of a handler or a group makes the manifest invalid (`unsupported-type` diagnostics exist only for project settings files) |
 | `hooks[].command` | 1-4096 characters, run with `sh` |
-| `hooks[].timeout` | optional, seconds, 1-600 (default 60) |
-| count | at most 50 handlers per plugin |
+| `hooks[].timeout` | optional, whole seconds, 1-600 (default 60) |
+| count | at most 50 handlers per plugin; every group needs at least one handler |
 
 - **Where and how they run**: like the user's own hooks: in the chat's project folder (else a private
   `<dataDir>/hooks` folder), with the event as JSON on stdin, through the server's shell runner (its own process group,
@@ -728,9 +728,9 @@ user picks a style per chat in the composer, per project or as the default.
 
 | Field | Validation / meaning |
 |---|---|
-| `name` | `^[a-z][a-z0-9-]{0,63}$`; not `default`, `explanatory` or `learning` (the built-ins); unique across plugins (`conflict` otherwise) |
+| `name` | `^[a-z][a-z0-9-]{0,63}$`; not `default`, `explanatory` or `learning` (the built-ins); unique across plugins: the first registration wins, a later plugin's entry is skipped with a `warn` line in its log ("The output style "x" was skipped: …") and the plugin stays `active`; at most 20 styles per plugin, manifest and `ctx.outputStyles.register` together (`validation_error` above that) |
 | `description` | 1-1024 characters, shown in the style menu |
-| `content` | 1 character to 64 KiB of markdown: the style's instructions; they go first in the main agent's instructions, after the line `Output style: <name>`, never into a sub-agent's |
+| `content` | 1 character to 64 KiB of markdown: the style's instructions; they go first in the main agent's instructions, after the line `Output style: <label>` (a plugin style's label is its name), never into a sub-agent's |
 | `keepCodingInstructions` | optional, default `false`: `false` drops harness-forge's coding instructions (the workspace tool rules and the todo / task hints) while the style is used, `true` keeps them |
 
 A personal or project style with the same name wins over a plugin's (the plugin's entry is listed as shadowed in
@@ -903,7 +903,7 @@ import type {
   ModelMessage, Tool, UIMessage,
 } from 'ai'
 
-export const PLUGIN_API_VERSION = '1.4.0'
+export const PLUGIN_API_VERSION = '1.5.0'
 
 /** Same type as the AI SDK `ProviderOptions` (`ai` does not re-export it). */
 export type ProviderOptions = SharedV4ProviderOptions
@@ -952,6 +952,8 @@ export interface PluginManifest {
     commands?: DeclarativeCommand[]
     agents?: DeclarativeAgent[]                   // 1.4: <= 50
     skills?: DeclarativeSkill[]                   // 1.4: <= 50
+    hooks?: HooksConfig                           // 1.5: <= 50 handlers; requires trust
+    outputStyles?: DeclarativeOutputStyle[]       // 1.5: <= 20
   }
 }
 export interface DeclarativeProvider {
@@ -980,6 +982,8 @@ export interface McpServerDecl {
 export interface DeclarativeCommand { name: string; description: string; template: string }
 // 1.4.0: DeclarativeAgent / DeclarativeSkill (contributes.agents / contributes.skills) have exactly the fields of
 // AgentDefinition / SkillDefinition below (shared zod schemas declarativeAgentSchema / declarativeSkillSchema)
+// 1.5.0: DeclarativeOutputStyle (contributes.outputStyles) has exactly the fields of OutputStyleDefinition below
+// (declarativeOutputStyleSchema)
 // SettingsSchema / SettingsProperty: section 7
 
 // ---------- providers and models ----------
@@ -1130,13 +1134,15 @@ export type HookEventName =
   | 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit' | 'Notification'
   | 'Stop' | 'SubagentStop' | 'PreCompact' | 'SessionStart'
 export interface CommandHookSpec {
-  type: 'command'                                 // 'prompt' hooks are not supported (skipped with a diagnostic)
+  type: 'command'                                 // 'prompt' hooks are not supported (the manifest is refused)
   command: string                                 // run with sh; 1..4096 characters
-  timeout?: number                                // seconds, 1..600, default 60
+  timeout?: number                                // whole seconds, 1..600, default 60
 }
 export interface HookMatcherGroup {
   matcher?: string                                // tool names: 'Bash|Edit', 'mcp__github__*', '*'; omitted = every tool
-  hooks: CommandHookSpec[]
+                                                  // (SessionStart: the source, PreCompact: the trigger, Notification:
+                                                  // the type; the other events ignore it)
+  hooks: CommandHookSpec[]                        // 1..50
 }
 export type HooksConfig = Partial<Record<HookEventName, HookMatcherGroup[]>>   // contributes.hooks (<= 50 handlers)
 
@@ -1269,7 +1275,8 @@ re-exports the types `ImageAspectRatio` and `ModelKind` from shared. Plugin API 
 Plugin API 1.4.0 adds the type exports `AgentDefinition`, `SkillDefinition`, `DeclarativeAgent` and `DeclarativeSkill`
 (the last two with their shared schemas `declarativeAgentSchema` / `declarativeSkillSchema`) and the context members
 `ctx.agents` / `ctx.skills`. Plugin API 1.5.0 adds the type exports `OutputStyleDefinition`, `HookEventName`,
-`CommandHookSpec`, `HookMatcherGroup` and `HooksConfig` (the manifest shapes of `contributes.hooks` /
+`CommandHookSpec`, `HookMatcherGroup`, `HooksConfig`, `DeclarativeOutputStyle` and `RunOrigin` (the last two
+re-exported from shared; the manifest shapes of `contributes.hooks` /
 `contributes.outputStyles` come from shared schemas, as for agents and skills), the context member
 `ctx.outputStyles`, the six new `HookMap` events
 and the `context` output of `tool.after`. The
@@ -1298,7 +1305,7 @@ not from `ai` (which exports an unrelated type of the same name).
 | `commands.register(d)` | exactly one of `template` / `run`; a duplicate name throws `conflict`; Phase 10: the client name `remember` throws `validation_error` like the other reserved names |
 | `agents.register(d)` | 1.4.0: validates an `AgentDefinition` like `contributes.agents` (name pattern, not a built-in name, description 1-1024 characters, instructions <= 64 KiB, <= 64 tool names, a model ref or `inherit`; `validation_error` naming the field); a name another plugin already registered throws `conflict`. The agent becomes a sub-agent type of every chat ([Agents and skills](#agents-and-skills)) |
 | `skills.register(d)` | 1.4.0: validates a `SkillDefinition` like `contributes.skills` (content <= 64 KiB); a duplicate name across plugins throws `conflict`. The skill is listed to the model of every chat and loaded with the `skill` tool |
-| `outputStyles.register(d)` | 1.5.0: validates an `OutputStyleDefinition` like `contributes.outputStyles` (name pattern, not a builtin style name, description 1-1024 characters, content <= 64 KiB; `validation_error` naming the field); a name another plugin already registered throws `conflict`. The style joins every chat's catalog (Settings → Customize → Output styles, the composer's style menu); a personal or project style of the same name wins |
+| `outputStyles.register(d)` | 1.5.0: validates an `OutputStyleDefinition` like `contributes.outputStyles` (name pattern, not a builtin style name, description 1-1024 characters, content <= 64 KiB; `validation_error` naming the field); a name another plugin already registered throws `conflict`; at most 20 styles per plugin, the manifest's included (the 21st throws `validation_error`). The style joins every chat's catalog (Settings → Customize → Output styles, the composer's style menu); a personal or project style of the same name wins |
 | `hooks.on(name, fn, { priority })` | registers a hook handler; see [Hooks](#hooks) |
 | `images.generate(o)` | 1.1.0 (ADR-028): generates `o.n` images (default 1) with `o.modelRef` or the `imageModelRef` setting, stores every image as a file (PNG, JPEG, WebP or GIF, at most 20 MB, the same bytes reuse one file) and returns an `ImageGenerateResult` with file references (`url` = `/api/files/<fileId>`; `costUsd` only when the catalog prices the model; `modelName` since 1.2.0). Writes exactly one usage row (`purpose: 'image'`, attributed to `o.chatId` when given, else no chat) with the estimated cost. Aborted by `o.signal` and by `ctx.signal`: the promise rejects with the abort reason (a provider answer that arrives after the abort still writes its usage row but stores no image). Errors (`HarnessError`): options that fail the checks (the `generate_image` input rules, a `modelRef`, `chatId` <= 128 characters) → `validation_error`; no model → `validation_error` "Choose an image model in Settings → Media."; a model that is not an image model → `validation_error` (`modelRef: The model "<ref>" is not an image model.`); an image model whose provider has no `createImageModel` → `model_not_found`; an unknown provider (since 1.2.0; 1.1 answered `not_found`), a disabled provider or a missing key → `provider_not_configured` (action `configure-provider`); provider failures mapped as for chats (`auth_invalid`, `rate_limited`, `provider_error`, ...); every returned image refused by the file store → `provider_error` "The image model returned no image that could be stored: only PNG, JPEG, WebP and GIF images of at most 20 MB are kept."; a call after the plugin was disposed → `plugin_error`. The builtin `generate_image` tool uses it. `ctx.ai` has no `generateImage`: images made through `ctx.images` are stored and accounted for |
 | `ai` | host library copies ([section 8](#8-code-plugins)) |
@@ -1515,9 +1522,9 @@ the folder path).
 | `chat.messages` | `chatId`, `modelRef` | `messages` (`ModelMessage[]` after `convertToModelMessages`, before context trimming): the path being answered, from the first message to the new or answered user message; other versions of edited or regenerated messages are never included (ADR-023); Phase 9: as the model sees it, so the messages before the latest compaction marker are replaced by the summary, replies are split at the messages the user sent during a run, and `task` outputs are reduced to their report; a compaction or a steer inside the run happens later, at a step boundary, and is not seen by the hook | once per chat run (image turns send no history and run no `chat.*` hook; never for a sub-agent or a `/compact` turn) | 3 s | changes discarded |
 | `tool.approve` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `decision?` (`allow` / `ask` / `deny`) | per tool call in `ask` / `edits` / `plan` / `auto` mode (unless a user override decided), step 2 of the approval order; never for `core-agent`'s `exit_plan_mode` (always asks). Inside a sub-agent it runs too (`toolCallId` `<parent call id>/<child call id>`, the sub-agent's mode), and an `ask` decision is denied there | 3 s | ignored; resolution falls through to the policy |
 | `tool.before` | `chatId`, `modelRef`, `tool`, `toolCallId` | `input` | per execution, after approval, before `execute` | 3 s | **a throw blocks the call** (error result `Blocked by <pluginId>: <message>`, not counted as a failure); a timeout also blocks and counts |
-| `tool.after` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `output`; 1.5.0: `context?` (a text the model reads at its next step, delivered like a `PostToolUse` hook's context and shown as a hook note in the chat) | per successful execution, before the 64 KB cap (1.3.0: for a streaming tool, once, on the final value; preliminary outputs skip it) | 3 s | changes discarded (original output kept) |
+| `tool.after` | `chatId`, `modelRef`, `tool`, `toolCallId`, `input` | `output`; 1.5.0: `context?` (a text the model reads at its next step, delivered like a `PostToolUse` hook's context: recorded as a `PostToolUse` hook note in the chat with source plugin, label `tool.after` and outcome `context`, trimmed, at most 10,000 characters; also without any `PostToolUse` command hook) | per successful execution, before the 64 KB cap (1.3.0: for a streaming tool, once, on the final value; preliminary outputs skip it) | 3 s | changes discarded (original output kept) |
 | `message.completed` | `chatId`, `modelRef`, `message`, `usage`, `costUsd?`, `aborted` | none | once per run after the assistant message is persisted (finished, aborted or failed runs; errors are in `message.metadata.error`); image turns included (their `usage` holds the image token counts); `costUsd` includes an image turn's estimated cost and the `costUsd` of `generate_image` outputs | 3 s | logged only |
-| `prompt.submit` (1.5.0) | `chatId`, `modelRef`, `prompt` (the user's text), `projectId`, `command?` (the expansion when the message is a command) | `block?` (refuse the message: the reason the user sees), `context?` (added for the model to this turn) | when a new user message is submitted (`POST /api/chat`) or queued while a run is active, before anything is stored; with the `UserPromptSubmit` command hooks. Not for regenerate or approval continuations (an edit runs it again) | 3 s | ignored (the message goes on) |
+| `prompt.submit` (1.5.0) | `chatId`, `modelRef`, `prompt` (the user's text), `projectId`, `command?` (the slash command's name when the message is a command; for a queued message only a server command's) | `block?` (refuse the message: the reason the user sees; the request answers 409 `conflict` with `details.reason: 'hook-blocked'` and nothing is stored or queued), `context?` (added for the model to this turn) | when a new user message is submitted (`POST /api/chat`) or queued while a run is active, before anything is stored; with the `UserPromptSubmit` command hooks. Not for regenerate or approval continuations (an edit runs it again) | 3 s | ignored (the message goes on) |
 | `session.start` (1.5.0) | `chatId`, `modelRef`, `source` (`startup`: the chat's first turn; `compact`: the first turn after a compaction), `projectId` | `context?` | before the first turn of a chat and before the first turn after a compaction; with the `SessionStart` command hooks | 3 s | ignored |
 | `run.stop` (1.5.0) | `chatId`, `modelRef`, `origin` (the run's `run.started.origin`), `hookActive` (true when this run is itself a hook continuation), `projectId` | `continue?` (a reason: the agent goes on with it) | when a model run is about to finish normally (not aborted, no error, no approval pending, no queued message); with the `Stop` command hooks. A `continue` starts a follow-up turn (`run.started.origin = 'hook'`) under the same cap as `Stop` hooks: at most 5 in a row | 3 s | ignored (the run finishes) |
 | `subagent.stop` (1.5.0) | `chatId`, `modelRef`, `type` (the agent type), `toolCallId`, `report`, `hookActive` | `continue?` | when a sub-agent (foreground or background) is about to complete; with the `SubagentStop` command hooks. A `continue` gives the child one more round with the reason, at most 2 | 3 s | ignored |
@@ -1575,8 +1582,11 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
   approval's continuation, so a hook never runs twice for one call. The resolution above is computed as usual, then
   combined: a harness `denied` always wins; a hook `deny` makes the call `denied` ("Blocked by hook: <reason>"); a hook
   `ask` makes it `user-approval` (denied inside a sub-agent); a hook `allow` makes it `approved` **only** when the
-  resolution was `user-approval`, the tool is not a workspace `execute` tool and its policy is not `always` (narrower
-  than Claude Code: a hook can never skip the card of the shell or of an always-ask tool). A hook's `updatedInput`
+  resolution was `user-approval`, the tool is not a workspace `execute` tool, its policy is `safe` or `ask` (not
+  `always`) and the chat is not in plan mode (narrower than Claude Code: a hook can never skip the card of the shell,
+  of an always-ask tool or of a plan-mode chat). Known limitation: the hook note keeps the hook's own outcome
+  (`allowed`) when the harness still asks, so it reads "Allowed by hook" while the card shows. A `deny` without a
+  reason reads "Blocked by hook.". A hook's `updatedInput`
   replaces the input after approval, before `tool.before`, and is validated again against `inputSchema` (an invalid
   one fails the call); the tool row keeps the model's input and the hook note shows the new one.
 - `toolMode = off`: no tools are sent to the model. Tools disabled in prefs (`enabled = false`) or with override
@@ -1674,7 +1684,9 @@ or an invalid result is logged and ignored (the request goes out without those a
 
 Disable: guarded `dispose()` (5 s) -> the plugin's `DisposableStore` unregisters every contribution (providers,
 models, tools, MCP servers, commands, hooks; 1.4.0 agents and skills; 1.5.0 command hooks and output styles) -> its
-MCP clients close (stdio children terminate) -> `ctx.signal` aborts -> `plugin.changed` and `catalog.changed` events. In-flight tool calls of the plugin get "tool unavailable";
+MCP clients close (stdio children terminate) -> `ctx.signal` aborts -> `plugin.changed` and `catalog.changed` events
+(1.5.0: and `hooks.changed` when the plugin had command hooks or listed code hooks, `customization.changed` when it had
+output styles). In-flight tool calls of the plugin get "tool unavailable";
 chats whose model belongs to a removed provider fail with `provider_not_configured` until it returns.
 
 Reload = disable + load (state `loading`), keeping settings, storage and secrets.
@@ -1711,8 +1723,9 @@ sessions. A reload of a hash-pinned plugin whose files changed ends in `untruste
    validates, and returns a preview: manifest, kind, contributions (providers with base URLs, models, MCP servers
    with URLs / commands, commands, settings), requested secrets, permissions, the sha256 pin, warnings (plain HTTP
    host, downgrade, replaces an installed version), and whether trust is required. The staging copy is removed.
-2. **Review**: the Install dialog shows the preview; code plugins and stdio MCP plugins show the trust warning
-   ([section 13](#13-trust-and-security)) and the "I trust <source>" checkbox. Installing without trust is allowed:
+2. **Review**: the Install dialog shows the preview; every plugin that requires trust (code, a stdio MCP server,
+   1.5.0: command hooks or `!` spans) shows the trust warning ([section 13](#13-trust-and-security)) and the "I trust
+   <source>" checkbox. Installing without trust is allowed:
    the plugin is installed `untrusted` (inert) until it is trusted.
 3. **Install** (`POST /api/plugins/install`; fresh auth for every plugin that requires trust, ADR-017): the source
    is fetched and validated again, then committed with an atomic swap:
@@ -1723,8 +1736,8 @@ sessions. A reload of a hash-pinned plugin whose files changed ends in `untruste
      restored and reloaded.
 
 Request and response shapes: [API.md](./API.md). Installing an id that already exists from the **same source** is
-an update: settings, storage, secrets and `dataDir` are kept; a code or stdio plugin must be trusted again whenever
-its pin changes. The same id from a different source is rejected with `409 conflict` (uninstall first).
+an update: settings, storage, secrets and `dataDir` are kept; a plugin that requires trust must be trusted again
+whenever its pin changes. The same id from a different source is rejected with `409 conflict` (uninstall first).
 
 ### Archive rules
 
@@ -1783,19 +1796,26 @@ again by:
 - for plugins with source `created`: saving or deleting a file in the in-browser editor (`PUT` / `DELETE
   /api/plugins/:id/files/*`) re-pins automatically (ADR-017) when the plugin was trusted before the edit (a plugin
   whose files had changed outside the editor stays `untrusted` and logs a warning), and a successful "Build & reload"
-  (`POST /api/plugins/:id/build`) re-pins it; for code plugins these writes require fresh auth when a password is
-  set. Editor saves of `copy` plugins never re-pin (use Trust); `link` plugins are pinned to their path;
+  (`POST /api/plugins/:id/build`) re-pins it; for plugins that run code (code plugins and, 1.5.0, declarative plugins
+  with a stdio server, command hooks or `!` spans, before or after the write) these writes require fresh auth when a
+  password is set. Editor saves of `copy` plugins never re-pin (use Trust); `link` plugins are pinned to their path;
 - creating a declarative plugin with a stdio MCP server (1.5.0: or command hooks, or `!` spans) in the UI (`POST
-  /api/plugins`) pins it at creation.
+  /api/plugins`) pins it at creation, and every save of such a manifest (`PUT /api/plugins/:id/manifest`) re-pins it;
+  both need fresh auth when a password is set (`manifestRequiresTrust`), and the pin is set only after that check. A
+  save that drops every trust-requiring part clears the pin.
 
 Files changed on disk outside the editor require re-trust, except in linked folders (pinned to the path). Which
 routes require fresh auth is defined in [API.md](./API.md) (routes marked **fresh**: trusting, installing a plugin
-that requires trust, scaffolding and building code plugins, creating or changing stdio MCP servers, changing the
-password).
+that requires trust, scaffolding and building code plugins, creating or changing stdio MCP servers, creating or saving
+a declarative plugin whose manifest requires trust, changing the password).
 
 ### Declarative plugin safety
 
-Declarative plugins without stdio servers, command hooks or `!` spans run no code and need no trust:
+Declarative plugins with a stdio server, command hooks or `!` spans (1.5.0) carry the **Runs code** badge
+(`runsCode: true`, which follows `manifestRequiresTrust`); until they are trusted they stay `untrusted` with the log
+line "Not loaded: the plugin runs code (or starts a program or shell commands) and its files are not trusted. Review
+and trust it to load it." Declarative plugins without stdio servers, command hooks or `!` spans run no code and need no
+trust:
 
 - a provider sends credentials only to its own `baseURL` (and same-origin listing URLs); declarative manifests cannot
   read environment variables (`envVar` is rejected) and cannot reference other providers' credentials;
@@ -2266,13 +2286,13 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalC
 ```
 
 After install and trust: the install dialog listed `sh "$HARNESS_PLUGIN_ROOT/scripts/remind-tests.sh"` under "Runs these
-commands"; the plugin card reads "1 hook · 1 output style"; the Overview has a **Hooks** section (the event, the matcher
-and the command, "Runs only while you trust this plugin.") and an **Output styles** section; Settings → Customize lists
-the hook under **Hooks → From plugins** and the style under **Output styles → From plugins**; the composer's style
-menu offers **reviewer**. In a project chat, after `write_file` or `edit_file` succeeds, the reply shows the note "Hook
-added context · PostToolUse" and the agent reads the reminder at its next step. Turning **Run hooks** off (Settings →
-Customize → Hooks), `HF_WORKSPACE_SHELL=0` or disabling the plugin stops the hook; disabling the plugin also removes
-the style (a chat that used it falls back to Default with a notice).
+commands"; the plugin card reads "1 output style · 1 hook"; the Overview has an **Output styles** section and a
+**Hooks** section (the event, the matcher and the command, with the note "Runs only while you trust this plugin.");
+Settings → Customize lists the hook under **Hooks → From plugins** and the style under **Output styles → From plugins**;
+the composer's style menu offers **reviewer**. In a project chat, after `write_file` or `edit_file` succeeds, the reply
+shows the note "Hook added context · PostToolUse · From Hook pack" and the agent reads the reminder at its next step.
+Turning **Run hooks** off (Settings → Customize → Hooks), `HF_WORKSPACE_SHELL=0` or disabling the plugin stops the hook;
+disabling the plugin also removes the style (a chat that used it falls back to Default with a notice).
 
 ### TypeScript entry
 

@@ -26,9 +26,14 @@
 // Phase 11 (C37, ADR-048): a child with hooks (`ChildToolsInput.hooks`, `ChildHooks` of `../hooks.ts`) runs `PreToolUse`
 // in its approval function (an `ask` becomes the sub-agent denial above, never a card) and the `PreToolUse` rewrite and
 // `PostToolUse` in its tool wrapper, with the prefixed call ids; nothing of it is stored.
+// Phase 11 (ADR-050, W11.17): a child of a project chat gets its parent run's project MCP result
+// (`ChildToolsInput.projectTools`, the `RunProjectTools` of `pipeline.ts`, foreground and background alike): the global
+// servers a project server shadows are not offered, and the project server tools join the candidates under the same
+// ceiling (only those that run without approval in the effective mode).
 import type { TaskType, ToolMode } from '@harness-forge/shared'
 import type { ToolApprovalStatus, ToolSet } from 'ai'
 import type { ResolvedModel } from '../../providers/types.ts'
+import type { RegisteredTool } from '../../registry/types.ts'
 import type { OpenWorkspace } from '../../services/projects/types.ts'
 import type { WorkspaceRunScopeInit } from '../../workspace/run-scope.ts'
 import type { ApprovalTool } from '../approval.ts'
@@ -44,6 +49,19 @@ export const SUBAGENT_APPROVAL_DENIED_TEXT = 'Sub-agents cannot ask the user: th
 
 /** The approval function of a child (`streamText({ toolApproval })`). */
 export type ChildToolApproval = ReturnType<typeof createToolApproval>
+
+/**
+ * The project MCP tools of the parent run (Phase 11, ADR-050; `RunProjectTools` of `pipeline.ts`, which fits): what
+ * `ProjectMcpManager.toolsFor` answered for the launching run.
+ */
+export interface ChildProjectTools {
+  /** The project server tools (`mcp__<id>__<tool>`): candidates of the child under its ceiling. */
+  readonly tools: readonly RegisteredTool[]
+  /** Global MCP server ids a project server shadows: their registry tools are never offered to the child. */
+  readonly shadowed: ReadonlySet<string>
+  /** Server id → the name as written in `.mcp.json` (the hook matchers of a background child). */
+  readonly names?: ReadonlyMap<string, string>
+}
 
 export interface ChildToolsInput {
   /**
@@ -75,6 +93,8 @@ export interface ChildToolsInput {
    * absent = none.
    */
   readonly hooks?: ToolHooks | null
+  /** Phase 11 (ADR-050, W11.17): the parent run's project MCP tools; null or absent = none (no project server). */
+  readonly projectTools?: ChildProjectTools | null
 }
 
 export interface ChildTools {
@@ -132,6 +152,7 @@ export async function childTools(input: ChildToolsInput): Promise<ChildTools> {
   const mode = childToolMode(input.type, input.toolMode)
   const scope = childRunScope(input.scope)
   const callIdPrefix = childCallIdPrefix(input.parentCallId)
+  const projectTools = input.projectTools ?? null
   const assembled = await assembleTools({
     chatId: session.chatId,
     messageId: session.assistantId,
@@ -151,6 +172,7 @@ export async function childTools(input: ChildToolsInput): Promise<ChildTools> {
     agent: null,
     callIdPrefix,
     hooks: input.hooks ?? null,
+    ...(projectTools === null ? {} : { extraTools: projectTools.tools, shadowedMcpServers: projectTools.shadowed }),
   })
 
   const active = assembled.activeTools === undefined ? null : new Set(assembled.activeTools)

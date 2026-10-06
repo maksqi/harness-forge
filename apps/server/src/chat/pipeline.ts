@@ -53,7 +53,8 @@
 //   commands, failures, image turns, `/compact`) have no hooks (`RunSession.hooks` is an empty instance);
 // - project MCP: a run of a project chat with an open folder (tools on, a model with tools) asks
 //   `deps.projectMcp.toolsFor(projectId, { signal, waitMs: LIMITS.projectMcpConnectWaitMs })` and hands its tools and
-//   shadowed global server ids to `assembleTools({ extraTools, shadowedMcpServers })`; servers that were not ready add
+//   shadowed global server ids to `assembleTools({ extraTools, shadowedMcpServers })` and (W11.17) to the sub-agent runner
+//   (`createSubagentRunner({ projectTools })`: foreground and background children); servers that were not ready add
 //   the notice `project-mcp-unavailable`;
 // - output styles: `PreparedRun.outputStyle` (`output-style.ts`, resolved while preparing) reaches `buildRunParams`
 //   (`RunParamsInput.outputStyle`; the main agent only).
@@ -935,6 +936,7 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     catalog,
     background: session.ctx.background,
     origin,
+    projectTools,
   })
   const agent: AgentRunScope = {
     chatId,

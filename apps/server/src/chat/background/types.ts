@@ -33,6 +33,7 @@ import type { CustomizationCatalog } from '../../services/customizations/types.t
 import type { OpenWorkspace } from '../../services/projects/types.ts'
 import type { AppDeps } from '../../types.ts'
 import type { WorkspaceRunScopeInit } from '../../workspace/run-scope.ts'
+import type { ChildProjectTools } from '../subagent/tools.ts'
 import type { ChatRunOptions } from '../types.ts'
 
 /** The error of a background launch before W10.4 (the C30 stub). */
@@ -75,6 +76,12 @@ export interface BackgroundLaunchInput {
   readonly catalog: CustomizationCatalog
   /** The launching run's logger (the task logs with its own child logger). */
   readonly logger: Logger
+  /**
+   * The launching run's project MCP tools (Phase 11, ADR-050, W11.17; `RunProjectTools`): the child's tool assembly
+   * hides the global servers they shadow and offers the project server tools under the child ceiling; the names feed
+   * the task's hook matchers. Null or absent = none.
+   */
+  readonly projectTools?: ChildProjectTools | null
 }
 
 /**

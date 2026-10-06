@@ -24,6 +24,9 @@
 // `CUSTOMIZE_ROW_CONTEXT` (the project's trust list is loaded with the catalog); the Hooks tab counts the scope's hooks
 // (`useHooksStore().list(projectId)`, fetched with the catalog); the empty-state buttons name the kind ("New output
 // style").
+// W11.19: the Project select wraps below the tabs when both do not fit on one line (always below `sm`; at 1280 px the
+// five tabs keep the whole width), and a tab row that still does not fit scrolls sideways with the active tab scrolled
+// into view (`tabRevealOffset`) on load, on a tab change and when the counts arrive.
 import type { Customization, CustomizationEntry, CustomizationKind } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
 import type { CustomizationAction, CustomizationDraft, CustomizeTab } from './customize'
@@ -74,6 +77,7 @@ import {
   pendingCommandTrust,
   sectionsOf,
   tabOf,
+  tabRevealOffset,
 } from './customize'
 import { CUSTOMIZE_ROW_CONTEXT } from './customize-context'
 import HooksPanel from './HooksPanel.vue'
@@ -97,6 +101,8 @@ const hooks = useHooksStore()
 const settings = useSettingsStore()
 const projectTrust = useProjectTrustStore()
 const root = useTemplateRef<HTMLElement>('root')
+/** W11.19: the scroll box of the tab list (it scrolls sideways when the tabs do not fit). */
+const tabRow = useTemplateRef<HTMLElement>('tabRow')
 const fileInput = useTemplateRef<HTMLInputElement>('fileInput')
 const hooksPanel = useTemplateRef<InstanceType<typeof HooksPanel>>('hooksPanel')
 const ids = { project: useId() }
@@ -251,7 +257,25 @@ onMounted(() => {
   // + Phase 11: the global output style (the scope bar and the "Your default" badges).
   if (!settings.loaded)
     settings.fetch().catch(() => {})
+  revealActiveTab()
 })
+
+// ---------- the tab row (W11.19) ----------
+
+/**
+ * Scrolls the tab row sideways (never the page) so the active tab is fully visible: on load (`?tab=hooks` on a narrow
+ * screen), on a tab change and when the counts change the tabs' widths.
+ */
+function revealActiveTab(): void {
+  const row = tabRow.value
+  const active = row?.querySelector<HTMLElement>('[role="tab"][data-state="active"]')
+  if (!row || !active)
+    return
+  const offset = tabRevealOffset(row.getBoundingClientRect(), active.getBoundingClientRect())
+  if (offset !== 0)
+    row.scrollLeft += offset
+}
+watch([tab, counts, hookCount], () => revealActiveTab(), { flush: 'post' })
 
 // ---------- the rows' context (Phase 11) ----------
 
@@ -603,8 +627,8 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
 <template>
   <div ref="root" :data-testid="testIds.customizeSettings" class="flex min-w-0 flex-col gap-2 pt-2 pb-4">
     <Tabs :model-value="tab" class="min-w-0 gap-3" @update:model-value="setTab">
-      <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div class="-mx-4 min-w-0 overflow-x-auto px-4 sm:mx-0 sm:px-0">
+      <div class="flex min-w-0 flex-wrap items-end justify-between gap-3">
+        <div ref="tabRow" class="-mx-4 min-w-0 overflow-x-auto px-4 sm:mx-0 sm:px-0">
           <TabsList aria-label="Kinds" class="w-max">
             <TabsTrigger
               v-for="of in CUSTOMIZE_TAB_ORDER"
@@ -622,7 +646,7 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
             </TabsTrigger>
           </TabsList>
         </div>
-        <div class="flex min-w-0 items-center gap-2">
+        <div class="flex w-full min-w-0 items-center gap-2 sm:w-auto">
           <Label :for="ids.project" class="shrink-0 text-sm text-muted-foreground">Project</Label>
           <Select :model-value="projectId ?? NO_PROJECT" @update:model-value="setProject">
             <SelectTrigger

@@ -160,8 +160,8 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `services/projects/` | `ProjectService` (Phase 7, ADR-031, section 6.13): `roots.ts` (the allowed roots, checked first in `startDeps` by `start()`, and the folder checks), `index.ts` (project CRUD, the folder browser, `openWorkspace()`, `chatCount`, `project.changed`), `project-file.ts` (`AGENTS.md` / `CLAUDE.md` with its `@file.md` lines). Phase 10: project deletion is refused (409 `run-active`) while a background task of one of its chats runs. Phase 11: `ProjectSummary.outputStyle` (the column `projects.output_style`, set through the project update; 6.31); deleting a project cascades its approvals (`project_trust`), deletes its secret scope `project:<projectId>` and stops its MCP runtimes (6.30). |
 | `services/customizations/` | The customization catalog (Phase 10, ADR-044 / ADR-045, sections 6.23 – 6.25; `types.ts` frozen from P10-0b, `AppDeps.customizations`): `discover.ts` (the guarded scan of a project's `.harness/` and `.claude/` folders: frontmatter only), the user store over the `customizations` table (`cus_` ids, raw markdown), `catalog.ts` (the merge of built-in, plugin, user and project entries with the shared `resolvePrecedence`, diagnostics, the per-project cache with a 10 s TTL and single-flight builds, the invalidation subscriptions), `load(entry)` (re-reads and re-validates one body for a run), `memory.ts` (`/remember`, 6.27); `customization.changed` events. Phase 11 (ADR-051, ADR-052): the fourth kind `style` (folders `.harness/output-styles` and `.claude/output-styles`, 8 project folders; the builtin styles; plugin styles from `registry.styles`), `styles()` / `style(name)`, and the skill keys `user-invocable` / `disable-model-invocation` (6.31, 6.32). |
 | `services/hooks/` | The hook service (Phase 11, ADR-048, section 6.28; `types.ts` frozen from P11-0b, `AppDeps.hooks`): `HookService { snapshot(scope), list, create, update, remove, runs, invalidate, stop }`; the merge of the personal rows (table `hooks`, `hok_` ids), the approved project items of `projectConfig.snapshot` and the plugin hooks (`registry.hookCommands`, code events through `registry.hooks`), the matcher, the runner (stdin payload, caps, parallel handlers, the server-wide semaphore of 16 processes, timeouts, process-group kills), the kill switches, the combination of outcomes (the shared `util/hooks.ts`), the in-memory run log (200 entries, `GET /hooks/runs`) and `hooks.changed` events. |
-| `services/project-config/` | The project config reader (Phase 11, ADR-049, section 6.29; `types.ts` frozen, `AppDeps.projectConfig`): `snapshot(projectId, { signal, refresh })` reads the `hooks` key of `.harness/settings{,.local}.json` and `.claude/settings{,.local}.json` and the project's `.mcp.json` through the workspace path guard (no links, regular files, ≤ 256 KiB before `JSON.parse`), parses them with the shared helpers, hashes the script files each item names, and caches the result per project for 10 s (dropped on `workspace.changed`, `project.changed` and `run.finished` of the project). |
-| `services/project-trust/` | Project trust (Phase 11, ADR-049, section 6.29; `types.ts` frozen, `AppDeps.projectTrust`): the `project_trust` table (one row per project and approved sha256), `approved(projectId)` (memoized), `list` (hooks, MCP servers and project commands with `!` spans, with their hashes and states), `approve` (a batch, fresh auth, 409 `stale`), `revoke` (idempotent, also removes orphaned hashes) and `project-trust.changed` events; approve and revoke also emit `hooks.changed` and stop the affected project MCP runtimes. |
+| `services/project-config/` | The project config reader (Phase 11, ADR-049, section 6.29; `types.ts` frozen, `AppDeps.projectConfig`): `snapshot(projectId, { signal, refresh })` reads the `hooks` key of `.harness/settings{,.local}.json` and `.claude/settings{,.local}.json` and the project's `.mcp.json` through the workspace path guard (no links, regular files, ≤ 256 KiB before `JSON.parse`), parses them with the shared helpers, hashes the script files each item names, and caches the result per project for 10 s (at most 50 projects; dropped on a `workspace.changed` that touches a config, `.claude/` / `.harness/` or referenced file, `project.changed` and `run.finished` of the project, then rebuilt after 1 s); `verify(projectId, item)` (verify-before-run, opens nothing); a rebuild whose hashes changed emits `project-trust.changed` (and `hooks.changed` when hook items changed); it never opens the workspace (0 folder opens per run). |
+| `services/project-trust/` | Project trust (Phase 11, ADR-049, section 6.29; `types.ts` frozen, `AppDeps.projectTrust`): the `project_trust` table (one row per project and approved sha256), `approved(projectId)` (memoized), `list` (hooks, MCP servers and project commands with `!` spans, with their hashes and states), `approve` (a batch, fresh auth, 409 `stale`), `revoke` (idempotent, answers the list, also removes orphaned hashes), `pending(projectId)` and `project-trust.changed` events; approve and revoke also emit `hooks.changed`; the trust service only emits, and the project MCP manager reacts by stopping the runtimes whose hash was revoked or replaced. |
 | `workspace/` | The agent workspace (Phase 7, section 6.13): `paths.ts` (`resolveWorkspacePath` and the safe read / write helpers; frozen), `sensitive.ts` (secret-looking and hidden paths), `walk.ts` (the folder walker; `.gitignore` through `ignore`), `pattern-worker.ts` (globs through `picomatch` and regular expressions, matched in a killable Worker), `diff.ts` (diffs through `diff`), `trim.ts` (output caps), `text.ts`, `shell.ts` (the only shell runner: process groups, capped output; Phase 8: the working folder reported on fd 3 with `reportCwd`, `parseCwdReport`, `killProcessGroup` exported) and `shell-env.ts` (the environment allowlist; Phase 8: empty and relative `PATH` entries dropped, `CDPATH`, `ENV` and `BASH_ENV` never passed). Phase 8 (6.13, 6.16, 6.17): `run-scope.ts` (`bindRunScope` / `runScopeOf`: the server-only run scope bound to a tool call context), `file-lock.ts` (`withFileLock`: one promise chain per resolved path), `journal.ts` (`journaledWrite`: snapshot, write, journal row), `remove.ts` (the guarded unlink of a restore), `shell-cwd.ts` (`initialShellCwd(history)`, `checkShellFolder`, `clampEndCwd`, `cdTargetsInside`, the folder notes) and `git.ts` (the hardened git runner; the only git spawn). Phase 11 (frozen from P11-0b): `runShellCommand` gains `input` (written to the process's stdin, a closed pipe swallowed; before Phase 11 stdin was `ignore`) and `env` (extra variables on top of `shellEnvironment`; an attempt to override an allowlisted or fixed key is refused); it stays the only shell-string spawn and also runs command hooks (6.28) and command `!` spans (6.32). |
 | `services/shares/` | Share links (ADR-025, section 6.10): HMAC tokens, the allowlist sanitizer, snapshots, owner CRUD, the public view and file access, expiry, rate limits. |
 | `services/files/` | Content-addressed upload store (`data/files/<aa>/<sha256>`), MIME/size validation, `files` rows, read streams; for bulk data `importFile` (deduplicated by sha256, keeps the preferred id when it is free) and `purge` (every row and blob); Phase 7: `sweep()` for the cleanup (`sweep.ts`), in-memory pins of fresh ids (`pins.ts`) and a shared / exclusive gate (`gate.ts`; 6.15); `saveGenerated` (Phase 6, rules in `generated.ts`) stores a generated raster image (PNG, JPEG, WebP or GIF whose magic bytes match its type, at most 20 MiB; a row with the same content and type is reused, and concurrent saves of the same bytes are serialized, section 6.11). Phase 8: `FileSweepInput.signal` (the automatic sweep aborts between batches); the store gate (`gate.ts`) is reused by the checkpoint store (6.16). |
@@ -183,7 +183,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `plugins/templates/` | Template sources (tool, provider, MCP bridge, command pack): a JSDoc-typed `index.mjs` or a TypeScript `index.ts`, the vendored API types `harness-forge.d.ts` and a README. |
 | `catalog/` | Model catalog: live listings with 24 h cache (`model_cache`), models.dev snapshot + weekly refresh, seeds, plugin models, custom ids, prefs, `classify()` (model kinds incl. `image`, `transcription`, `speech`; `imageOutput`), cost lookup (section 9). |
 | `providers/` | Model resolution: `modelRef` -> provider -> credentials (stored or env) -> `LanguageModel` (`resolveModel`), and since Phase 6 image, transcription and speech models (`resolveImageModel`, `resolveTranscriptionModel`, `resolveSpeechModel`); provider test; provider status; error mapping to `HarnessError`; the LobeHub icon service (`/api/icons/lobe`). |
-| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). Phase 8: `scope.ts` (`createRunScope`: chat, assistant message id, journal, shell rules, sticky folder, built once per run) bound to every tool call context and to policy contexts (`AssembledTools.scope`), `shell` / `untracked` journal rows after each settled workspace call (`settledCallRecord` in `tools.ts`), `effectiveOverride` in `approval.ts` (a stored `allow` override on an `execute` tool is ignored), and the workspace block says that `cd` persists (6.2, 6.13, 6.16). Phase 9 (ADR-040 … ADR-043, sections 6.18 – 6.22): `steps.ts` (`createPrepareStep`: the one step-boundary composer: context guard → steer → sub-agent finalize nudge), `model-history.ts` (`buildModelHistory`: compaction → steer split → task output reduction → command expansions → summary merge), `markers.ts` (the instruction markers of the summarizer and of sub-agents), `agent-scope.ts` (`agentScopeOf(c)`: the private side channel of `core-agent`, a WeakMap bound to the tool call context like the run scope), `compaction/` (`history.ts`, `guard.ts`, `stream.ts`, `summarize.ts`, `prompt.ts`), `queue.ts` (the in-memory steer queue), `steer.ts` (`createSteerStep`, `stepInjector`), `modes.ts` (the plan-mode tool set and `activeTools`), `subagent/` (`index.ts` `createSubagentRunner`, `tools.ts` the child tool set and its approval, `history.ts`), plus `RunSession.inject` / `addExtraCost` / `writeTransient` and `RunContext.onReleased` in `pipeline.ts`, the `/compact` branch of `commands.ts`, the streaming tool wrapper of `tools.ts`, `case 'plan'` and the `exit_plan_mode` rule of `approval.ts`. Phase 10 (ADR-045 … ADR-047, sections 6.23 – 6.27): `PreparedRun.catalog` (one catalog per run), `requestModelRef` (a command's model never becomes the chat's model) and `turnRestriction` (a command's `allowed-tools`); `commands.ts` resolves file commands (`resolveCommand(…, { catalog })`, `isServerCommandFor`) and `prepare.ts` resolves the request's model first, then the command's `model` override (`resolveTurnModel`); `tools.ts` applies `allowedTools` after the mode and drops `skill` without skills; `params.ts` adds the agent-types and skills blocks; `subagent/` runs custom agent types (`host.ts`: the structural `ChildSession` shared with detached children); `background/` (the per-chat manager of background tasks: launch, caps, persistence in `background_tasks`, `task.changed`, the result inbox, idle delivery, guards, the boot sweep; 6.26); `steer.ts` also takes finished background results; `model-history.ts` gains the `splitTaskResults` stage; `skills.ts` (`loadSkill`) and `plan-file.ts` (`savePlan`), both reached through `agent-scope.ts`. Phase 11 (ADR-048 … ADR-052, sections 6.28 – 6.32; the seams complete and frozen from P11-0b): `hooks.ts` (`RunHooks`, the per-run hook runtime over a `HookSnapshot`: `record(data)` injects a `data-hook` part, queued contexts for the next step, the answered / replayed PreToolUse decisions of a continuation, `forChild(prefix)` for sub-agents, and the `hookGate` transform that holds `finish` for the `Stop` hooks), `hooks-prompt.ts` (`UserPromptSubmit` and `SessionStart` at submit and at enqueue), `output-style.ts` (`resolveRunOutputStyle` → `PreparedRun.outputStyle` → `RunParamsInput.outputStyle`; `agentBlocks(…, { codingHints })`), `inline/` (the `!` span runner and the `@path` reader behind `CommandContext.expansion`); `approval.ts` runs `PreToolUse` after the unknown-tool and `exit_plan_mode` rules (skipped for answered tool call ids and replayed from the stored part); `tools.ts` applies a hook's `updatedInput` in `prepareInput` (before `tool.before`, re-validated), runs `PostToolUse` after `tool.after`, and `assembleTools({ extraTools, shadowedMcpServers })` adds the project MCP tools; the step composer runs context guard → **hooks** → steer → finalize; `model-history.ts` gains the `splitHooks` stage after `splitTaskResults`; `RunContext.origin` gains `hook`, `onReleased(ending, awaitingApproval, followUp)` and `startHookTurn` start a hook continuation, and `carrierParts` accepts `data-hook` carriers; `modelStream` asks `projectMcp.toolsFor` for project chats. |
+| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). Phase 8: `scope.ts` (`createRunScope`: chat, assistant message id, journal, shell rules, sticky folder, built once per run) bound to every tool call context and to policy contexts (`AssembledTools.scope`), `shell` / `untracked` journal rows after each settled workspace call (`settledCallRecord` in `tools.ts`), `effectiveOverride` in `approval.ts` (a stored `allow` override on an `execute` tool is ignored), and the workspace block says that `cd` persists (6.2, 6.13, 6.16). Phase 9 (ADR-040 … ADR-043, sections 6.18 – 6.22): `steps.ts` (`createPrepareStep`: the one step-boundary composer: context guard → steer → sub-agent finalize nudge), `model-history.ts` (`buildModelHistory`: compaction → steer split → task output reduction → command expansions → summary merge), `markers.ts` (the instruction markers of the summarizer and of sub-agents), `agent-scope.ts` (`agentScopeOf(c)`: the private side channel of `core-agent`, a WeakMap bound to the tool call context like the run scope), `compaction/` (`history.ts`, `guard.ts`, `stream.ts`, `summarize.ts`, `prompt.ts`), `queue.ts` (the in-memory steer queue), `steer.ts` (`createSteerStep`, `stepInjector`), `modes.ts` (the plan-mode tool set and `activeTools`), `subagent/` (`index.ts` `createSubagentRunner`, `tools.ts` the child tool set and its approval, `history.ts`), plus `RunSession.inject` / `addExtraCost` / `writeTransient` and `RunContext.onReleased` in `pipeline.ts`, the `/compact` branch of `commands.ts`, the streaming tool wrapper of `tools.ts`, `case 'plan'` and the `exit_plan_mode` rule of `approval.ts`. Phase 10 (ADR-045 … ADR-047, sections 6.23 – 6.27): `PreparedRun.catalog` (one catalog per run), `requestModelRef` (a command's model never becomes the chat's model) and `turnRestriction` (a command's `allowed-tools`); `commands.ts` resolves file commands (`resolveCommand(…, { catalog })`, `isServerCommandFor`) and `prepare.ts` resolves the request's model first, then the command's `model` override (`resolveTurnModel`); `tools.ts` applies `allowedTools` after the mode and drops `skill` without skills; `params.ts` adds the agent-types and skills blocks; `subagent/` runs custom agent types (`host.ts`: the structural `ChildSession` shared with detached children); `background/` (the per-chat manager of background tasks: launch, caps, persistence in `background_tasks`, `task.changed`, the result inbox, idle delivery, guards, the boot sweep; 6.26); `steer.ts` also takes finished background results; `model-history.ts` gains the `splitTaskResults` stage; `skills.ts` (`loadSkill`) and `plan-file.ts` (`savePlan`), both reached through `agent-scope.ts`. Phase 11 (ADR-048 … ADR-052, sections 6.28 – 6.32; the seams complete and frozen from P11-0b): `hooks.ts` (`RunHooks`, the per-run hook runtime over a `HookSnapshot`: `record(data)` injects a `data-hook` part, queued contexts for the next step, the answered / replayed PreToolUse decisions of a continuation, the record of a plugin's `tool.after` `context`, `forChild(prefix)` for sub-agents and `detachedHooks` for background children, and the `hookGate` transform that holds `finish` for the `Stop` hooks), `hooks-prompt.ts` (`SessionStart` and `UserPromptSubmit` at submit; `UserPromptSubmit` also at enqueue), `prepare.ts` (`TurnWorkspace`: the project folder opened at most once per turn, shared by the command expansion and `openRunWorkspace`), `output-style.ts` (`resolveRunOutputStyle` → `PreparedRun.outputStyle` → `RunParamsInput.outputStyle`; `agentBlocks(…, { codingHints })`), `inline/` (the `!` span runner and the `@path` reader behind `CommandContext.expansion`); `approval.ts` runs `PreToolUse` after the unknown-tool and `exit_plan_mode` rules (skipped for answered tool call ids and replayed from the stored part); `tools.ts` applies a hook's `updatedInput` in `prepareInput` (before `tool.before`, re-validated), runs `PostToolUse` after `tool.after`, and `assembleTools({ extraTools, shadowedMcpServers })` adds the project MCP tools; the step composer runs context guard → **hooks** → steer → finalize; `model-history.ts` gains the `splitHooks` stage after `splitTaskResults`; `RunContext.origin` gains `hook`, `onReleased(ending, awaitingApproval, followUp)` and `startHookTurn` start a hook continuation, and `carrierParts` accepts `data-hook` carriers; `pipeline.ts` fires `Notification` when a run is released waiting for an approval; `modelStream` asks `projectMcp.toolsFor` for project chats (tools on, a tool-capable model). |
 | `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect with backoff, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable; `{{settings.*}}` templating of plugin-declared servers; its own stdio transport (minimal environment, stderr lines in the owning plugin's log); the user-configured servers of the MCP panel (`mcp_servers`). Phase 8: `tools.ts` (`ToolService.update`) refuses `override: 'allow'` for tools with workspace access `execute` (400 on `['override']`, "Shell commands can't be always allowed. Add a shell rule instead."), and `GET /tools` shows `policy: null` for a tool whose policy is a function (the shell's `shellPolicy`). Phase 11 (ADR-050, section 6.30): `project*.ts` (the `ProjectMcpManager` of `.mcp.json` servers, interface in the frozen `mcp/types.ts`: lazy runtimes per project and server id, the variables, `toolsFor`, shadowing, idle and revoke stops, `project-mcp.changed`); the stdio transport gains `processGroup` (the child starts detached and is killed with its whole process group on close), used for **every** stdio server, global and project. |
 | `builtin-plugins/index.ts` | Static list of builtin plugin modules, loaded first and trusted. |
 | `builtin-plugins/core-providers/` | The 13 builtin providers (see PROVIDERS.md): definitions, seeds, reasoning mapping, error mapping; Phase 6 (version 1.1.0, `engines ^1.1.0`): the image, transcription and speech factories of OpenAI, xAI, Google, Mistral and Groq, `imageParams`, `transcriptionOptions` and the media seeds (`lib/media.ts`; PROVIDERS.md 13). |
@@ -340,11 +340,13 @@ Notes:
   then abort active runs (persisted as `aborted`, waiting at most 5 s each; aborting a run kills its shell
   process groups and its git commands and, through the run signal, its running sub-agents, whose `task` calls end as
   stopped; Phase 11: the hook processes of a run, `Stop` hooks included, are killed with their process groups and a
-  pending hook continuation is cancelled), then (Phase 11, `hooks.stop()`) kill the hook processes that belong to no
-  run (a fire-and-forget `Notification` hook) with their process groups and drop the snapshots, then (Phase 11,
+  pending hook continuation is cancelled; `Notification` and enqueue hooks are aborted by the chat runner's lifecycle
+  signal), then (Phase 11, `hooks.stop()`) kill every hook process still running with its process group (awaited) and
+  drop the personal-row cache and the event subscriptions, then (Phase 11,
   `projectMcp.stop()`) close every project MCP runtime, killing each stdio server's process group, then (Phase 10,
   `customizations.stop()`) drop the catalog caches and abort the scans in flight, then (Phase 11,
-  `projectConfig.stop()`) drop the project config caches and abort their reads, then (Phase
+  `projectConfig.stop()`) drop the project config caches, roots, recheck timers and the event subscription (a read
+  in flight finishes; nothing is cached after the stop), then (Phase
   9, `projectFiles.stop()`) abort the file index walks in flight and drop the mention file
   index, then (Phase 8, `checkpoints.stop()`, after the runs and the background tasks so no journal write is cut off)
   clear the prune timers,
@@ -791,7 +793,7 @@ sequenceDiagram
     I->>FS: delete staging dir
     I-->>W: 409 conflict (stale): inspect again
   end
-  I->>I: requires trust (code or stdio MCP)? fresh auth when a password is set
+  I->>I: requires trust (code, stdio MCP, command hooks or ! spans)? fresh auth when a password is set
   opt a previous version exists
     I->>FS: rename plugins/{id} to plugins/.staging/{id}.prev-{uuid} (kept until the new one is active)
     I->>H: disable old version (dispose)
@@ -2643,7 +2645,9 @@ sequenceDiagram
 Phase 11 (ADR-048, ADR-051; 6.28, 6.31): a child runs the `PreToolUse` hooks (an `ask` becomes a denial), the
 `PostToolUse` hooks (their context goes into the child's own next step, nothing is stored) and the `SubagentStop`
 hooks (a block gives the child at most 2 more rounds); it never runs `UserPromptSubmit`, `SessionStart` or `Stop`
-hooks and never gets an output style.
+hooks and never gets an output style. Phase 11 (ADR-050, W11.17; 6.30): in a project chat, foreground and background
+children use the parent run's project MCP result: the global MCP servers a project server shadows are not offered,
+and the project server tools join the candidates under the same ceiling as every other tool.
 
 ### 6.23 Customization catalog (ADR-044)
 
@@ -3091,8 +3095,11 @@ file, maxBytes })` in `packages/shared/src/util/hooks.ts` (the module also holds
 output reader and the combination; it never throws and never builds a `RegExp` from input). Problems are diagnostics
 (`invalid-json`, `not-an-object`, `too-large`, `unknown-event` (info), `unsupported-type`, `invalid-matcher`,
 `invalid-command`, `invalid-timeout`, `too-many`, `too-long`, …) with project-relative files, never errors; an item
-with an `error` diagnostic never runs. Caps: a settings file 256 KiB (before `JSON.parse`), 100 handlers per
-configuration, a command 4,096 characters, a matcher 200, a timeout 1 – 600 s (default 60 s).
+with an `error` diagnostic never runs (an invalid matcher in a settings file drops its whole group: the group appears
+only as an `error` diagnostic, never as an entry). Caps: a settings file 256 KiB (before `JSON.parse`), 100 handlers
+per configuration, a command 4,096 characters, a matcher 200, a timeout 1 – 600 s (default 60 s; in a settings file a
+larger one is clamped to 600 s, a fraction rounds up and an invalid one uses the default, each with an
+`invalid-timeout` warning; a personal hook's timeout is an integer 1 – 600).
 
 **Events**: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`,
 `SessionStart` (`HOOK_EVENTS`).
@@ -3106,10 +3113,16 @@ configuration, a command 4,096 characters, a matcher 200, a timeout 1 – 600 s 
 | plugin (command) | `contributes.hooks` of an active plugin (plugin API 1.5.0, ≤ 50 handlers; `registry.hookCommands`) | the plugin is active, so trusted (a plugin with command hooks needs a trust pin like a stdio MCP declaration) | env adds `HARNESS_PLUGIN_ROOT` / `CLAUDE_PLUGIN_ROOT` (the plugin folder); the pin covers `plugin.json` only |
 | plugin (code) | `ctx.hooks.on` of the events `prompt.submit`, `session.start`, `run.stop`, `subagent.stop`, `compact.before`, `notification` and `tool.after` (`context?`) | the plugin is active | in-process with the 3 s guard (PLUGINS.md 9); their results join the combination of the matching command event |
 
-`hooks.snapshot(scope)` (`HookService`, frozen `services/hooks/types.ts`) merges the sources once per run and once per
-prepare: `HookSnapshot { has(event), run(event, input, { signal, target?, aliases? }) }` → `HookEventResult { ran,
-decision, reason, context, updatedInput?, block, continue, stopReason, record }`. `has()` makes an event without hooks
-free (no payload, no process). `hooks.invalidate(projectId | null)` drops cached snapshot inputs on `hooks.changed`.
+`hooks.snapshot(scope)` (`HookService`, frozen `services/hooks/types.ts`) merges the sources once per prepare and once
+per run (so a `POST /chat` request takes two snapshots, pinned by `pipeline-hooks.test.ts`), and once per enqueue and
+per `/compact`: `HookSnapshot { scope, has(event), run(event, input, { signal, target?, aliases? }) }` →
+`HookEventResult { ran, decision, reason, context, updatedInput?, block, continue, stopReason, record }`. `has()` makes
+an event without hooks free (no payload, no process). A snapshot **opens the project folder 0 times**: its working
+folder is `scope.workspace.root` (the folder the run already opened), and the project items come from
+`projectConfig.snapshot` (6.29) only when `projectTrust.approved(projectId)` is not empty. Nothing of a project is
+cached by the hook service (the project config reader and project trust cache their own reads); `hooks.invalidate(null)`
+drops the cached personal rows (on `project-trust.changed`, `project.changed` and a `workspace.changed` of `.claude/` /
+`.harness/` it is called with the project id, which drops nothing here).
 
 **Kill switches** (command hooks only; plugin code hooks still run, they are trusted in-process code): the setting
 `hooksEnabled` (default true; off = no command hook from any source), `HF_WORKSPACE_SHELL=0` (no shell string at all:
@@ -3120,12 +3133,16 @@ blocked entries with `state: blocked`.
 **Matcher** (`compileMatcher`): alternatives separated by `|`; each uses only `[A-Za-z0-9_.\- *]`; `*` and `.*` are
 wildcards and any other `.` is a literal; an alternative matches the **whole** name, case-sensitively; an empty, absent
 or `*` matcher matches everything; a matcher holding `^ $ [ ( + ? \ {` is `invalid-matcher` and never runs (a personal
-hook with one is refused with 400). Only `PreToolUse` and `PostToolUse` match tool names; the other events ignore the
-matcher. A tool is matched under every name of `hookTargetNames(tool)`: the harness name, its Claude Code aliases
-(`CLAUDE_TOOL_ALIASES` reversed: `shell` → `Bash`, `edit_file` → `Edit` and `MultiEdit`, `write_file` → `Write`,
-`read_file` → `Read`, `search_files` → `Grep`, `find_files` → `Glob`, `list_directory` → `LS`, `web_fetch` → `WebFetch`)
-and, for a project MCP tool, `mcp__<name as written in .mcp.json>__<tool>` next to the harness `mcp__<id>__<tool>`. So
-`Bash` matches `shell`, `Write|Edit` both file editors, `mcp__github__.*` every tool of that server; `^Bash` is invalid.
+hook with one is refused with 400; a plugin manifest with one is refused by its schema). `PreToolUse` and `PostToolUse`
+match tool names; `SessionStart` matches its `source` (`startup` / `compact`), `PreCompact` its `trigger` (`manual` /
+`auto`) and `Notification` its type (`permission_prompt`) (`HOOK_MATCHER_SUBJECTS`); `UserPromptSubmit`, `Stop` and
+`SubagentStop` ignore the matcher. A tool is matched under every name of `hookTargetNames(tool)`: the harness name, its
+Claude Code aliases (`CLAUDE_TOOL_ALIASES` reversed: `shell` → `Bash`, `edit_file` → `Edit` and `MultiEdit`,
+`write_file` → `Write`, `read_file` → `Read`, `search_files` → `Grep`, `find_files` → `Glob`, `list_directory` → `LS`,
+`web_fetch` → `WebFetch`, `task` → `Task`, `todo_write` → `TodoWrite`, `exit_plan_mode` → `ExitPlanMode`, `skill` →
+`Skill`) and, for a project MCP tool, `mcp__<name as written in .mcp.json>__<tool>` next to the harness
+`mcp__<id>__<tool>`. So `Bash` matches `shell`, `Write|Edit` both file editors, `mcp__github__.*` every tool of that
+server; `^Bash` is invalid.
 
 **Payload** (stdin, `buildHookPayload`): Claude Code's field names plus a `harness` object; fields that do not apply to
 the event are left out.
@@ -3135,14 +3152,15 @@ the event are left out.
 | `session_id`, `cwd`, `hook_event_name`, `permission_mode` | all | the chat id; the hook's working folder; the event; the chat's mode mapped by `hookPermissionMode` (`ask` / `off` → `default`, `plan` → `plan`, `edits` → `acceptEdits`, `auto` → `bypassPermissions`) |
 | `tool_name`, `tool_input`, `tool_use_id` | PreToolUse, PostToolUse | the Claude Code name when one exists (`Bash`), else the harness name; the model's input; the tool call id |
 | `tool_response` | PostToolUse | the tool's output |
-| `prompt` | UserPromptSubmit | the user's text (for a command, the typed text; `harness.command` carries the expansion) |
+| `prompt` | UserPromptSubmit | the user's text (for a command, the typed `/name args`; no expansion is sent, and the payload has no command field: only the plugin code hook `prompt.submit` gets the command's name as `command`) |
 | `stop_hook_active` | Stop, SubagentStop | true when the run (or child round) was itself started by a hook continuation |
-| `trigger`, `custom_instructions` | PreCompact | `manual` (`/compact`) or `auto`; the `/compact` focus or null |
+| `trigger`, `custom_instructions` | PreCompact | `manual` (`/compact`) or `auto`; the `/compact` focus, else `""` |
 | `source` | SessionStart | `startup` or `compact` |
-| `message`, `notification_type` | Notification | the text; `permission_prompt` |
+| `message`, `notification_type` | Notification | "The agent needs your permission to use <tools>." (Claude Code names when there are, at most three, then "and N more"); `permission_prompt` |
 | `harness` | all | `{ version: 1, chatId, projectId, messageId?, modelRef, origin, tool?, source }` (`tool` = the harness tool name, `source` = the hook's source) |
 
-The payload is at most 256 KiB (`hookPayloadBytes`): `tool_response`, then `tool_input` are cut to fit. There is no
+The payload is at most 256 KiB (`hookPayloadBytes`): `tool_response`, `tool_input`, `prompt`, `custom_instructions`
+and `message` are cut in that order until it fits, and a cut payload carries `harness.truncated: true`. There is no
 `transcript_path` (no transcript file exists; a hook gets the event, not the conversation).
 
 **Output** (`readHookOutput(event, { exitCode, timedOut, stdout, stdoutTruncated, stderr })`):
@@ -3171,28 +3189,32 @@ other server variables (no `HF_*`, no provider keys). The working folder is the 
 (created 0700 on first use, empty). The matching handlers of one event run **in parallel** (at most 20,
 `hooksPerEventMax`), each with its own timeout (its `timeout` in seconds, default 60 s, at most 600 s) and its own
 process group; a server-wide semaphore admits 16 hook processes at once (`hookProcessesMax`, acquired with the run's
-signal). stdout keeps its first 64 KiB, stderr 16 KiB. A timeout, the run's Stop or abort, and shutdown kill the
-process group. A project item's hash is computed again (command and referenced files re-read) right before its spawn;
-a mismatch skips it as pending and emits `project-trust.changed` (6.29).
+signal); matching handlers past the 20th are skipped with a log warning. stdout keeps its first 64 KiB, stderr 16 KiB.
+A timeout, the run's Stop or abort, and shutdown kill the process group. Right before its spawn a project item is
+verified (`projectConfig.verify`: the scanned item is hashed again with its referenced files read again; the settings
+file is not re-read); a mismatch skips it, drops the project's config cache, logs at `info` and emits
+`project-trust.changed { projectId, pending }` plus `hooks.changed { projectId }` (6.29).
 
 **The eight events** (insertion points in `apps/server/src/chat/`):
 
 | Event | Where it fires | What a hook can do | Stored |
 |---|---|---|---|
-| `PreToolUse` | `approval.ts` `createToolApproval`, after the unknown-tool denial and the `exit_plan_mode` rule, before the user override (6.2); target = the tool and its aliases; **skipped for tool call ids that already have an approval response** (the SDK runs the approval function again on approved continuations) and replayed from the stored record | a harness `denied` wins; `deny` (or exit 2) → `denied` with "Blocked by hook: <reason>"; `ask` → the approval card (a denial inside a sub-agent); `allow` → `approved` only when the harness result was `user-approval`, the tool's access is not `execute` and its policy is not `always`; `updatedInput` is applied in `tools.ts` `prepareInput` **before** `tool.before` and re-validated against the input schema (too large or invalid → the call fails, fail closed); the tool part keeps the model's input (the HMAC-signed approval input never changes) and the hook record shows the new one | a record (outcome `denied` / `asked` / `allowed` / `rewritten`, linked by `toolCallId`) in the reply |
+| `PreToolUse` | `approval.ts` `createToolApproval`, after the unknown-tool denial and the `exit_plan_mode` rule, before the user override (6.2); target = the tool and its aliases; **skipped for tool call ids that already have an approval response** (the SDK runs the approval function again on approved continuations) and replayed from the stored record | a harness `denied` wins; `deny` (or exit 2) → `denied` with "Blocked by hook: <reason>" ("Blocked by hook." without a reason); `ask` → the approval card, also where the harness would run the call (a denial inside a sub-agent); `allow` → `approved` only when the harness result was `user-approval`, the chat is not in plan mode (`applyHookDecision(…, toolMode)`: in plan mode an `allow` never skips the card), the tool's access is not `execute` and its policy is `safe` or `ask` (never `always`); known limitation: when the harness still asks (plan mode, an `execute` tool, an `always` policy) the record keeps the hook's own outcome `allowed`, so the badge says allowed while the card shows; `continue: false` ends the run after the step; `updatedInput` is applied in `tools.ts` `prepareInput` **before** `tool.before` and re-validated against the input schema (too large or invalid → the call fails, fail closed); the tool part keeps the model's input (the HMAC-signed approval input never changes) and the hook record shows the new one | a record (outcome `denied` / `asked` / `allowed` / `rewritten`, linked by `toolCallId`) in the reply |
 | `PostToolUse` | `tools.ts` after the `tool.after` plugin hooks (`runToolCall`, `streamToolCall`), on success only, before the output cap | context, exit 2 or `decision: block` → model-visible feedback at the **next** step (the hooks piece of the step composer); `continue: false` → the run ends after the step (an extra `stopWhen` condition reads `session.hookStop`) | a record only when there is something to show |
-| `UserPromptSubmit` | at submit: `prepare.ts` for a new turn of `POST /chat` (after `openRunWorkspace`, before streaming; not for server messages, regenerate, continuations, image turns or `/compact`), and `POST /chat/:id/queue` at enqueue | a block (exit 2, `decision: block`) or `continue: false` → `HarnessError` 409 `conflict` with the reason `hook-blocked` (the message is the reason); **nothing is stored** (on a new chat not even the chat row) and the composer keeps the text; context → a `data-hook` part on the **user message** (a queued item keeps it and delivers it with the steer or on its turn's user message) | an edit re-runs it; regenerate and continuations reuse the stored part |
-| `SessionStart` | the same place, before `UserPromptSubmit`, when `sessionStartSource(path)` is not null: `startup` (the path before the new message is empty) or `compact` (the newest compaction marker is newer than the last `SessionStart` record) | context → a part on the user message; `continue: false` → 409 `hook-blocked` | kept through compaction (`keptUserMessage` applies `splitHooks`) |
+| `UserPromptSubmit` | at submit: `prepare.ts` for a new turn of `POST /chat` (after `openRunWorkspace` and after the command's checks, **before** its `!` spans and `@path` reads, which run only once the hooks passed, 6.32; before streaming; not for server messages, regenerate, continuations, image turns, `/compact`, reply commands or a failed `run`), and `POST /chat/:id/queue` at enqueue (a queued turn does not run it again when it starts) | a block (exit 2, `decision: block`, or a plugin `prompt.submit` `block`) or `continue: false` → `HarnessError` 409 `conflict` with `details { reason: 'hook-blocked', chatId, hook }` and the message "A hook blocked this message: <reason>" ("A hook blocked this message." without one); **nothing is stored or queued**: a chat row this request created is removed again (`chat.created`, then `chat.deleted`; ADR-048 open point 14) and the composer keeps the text and the files; context → a `data-hook` part on the **user message** (a queued item keeps it and delivers it with the steer or on its turn's user message) | an edit re-runs it; regenerate and continuations reuse the stored part |
+| `SessionStart` | the same place, before `UserPromptSubmit`, for `request` and `queue` turns, when `sessionStartSource(path)` is not null: `startup` (the path before the new message is empty) or `compact` (neither a `SessionStart` record nor a user-authored message follows the latest compaction marker) | context → a part on the user message; `continue: false` → 409 `hook-blocked` (exit 2 and `decision: block` are non-blocking errors here); a blocked queued turn removes its item as failed | kept through compaction (`keptUserMessage` applies `splitHooks`) |
 | `Stop` | `pipeline.ts` `hookGate`, a stream transform after `stepInjector` that holds `finish` when the run was a model run, not aborted, saw no `error` or approval request, no hook stopped it, the chat's queue is empty and `has('Stop')`; it writes the transient `data-activity { kind: 'hooks', event: 'Stop' }` while the hooks run | a block → a **continuation**: `session.followUp = { kind: 'hook', data }`; `continue: false` → no continuation (outcome `stopped`) | the record is injected before `finish`; the continuation is a carrier (below) |
-| `SubagentStop` | `subagent/index.ts` after a child's stream loop when it would end `completed` (foreground and background children) | a block → one more child round with the feedback as a user message, at most 2 (`subagentStopContinuationsMax`) | never persisted (run log only) |
-| `PreCompact` | `compaction/guard.ts` (automatic, `trigger: auto`) and `compaction/stream.ts` (`/compact`, `manual`, `custom_instructions` = the focus) | observe only (`continue: false` is ignored with a diagnostic) | its record at the compaction step or in the `/compact` reply |
-| `Notification` | `index.ts` `onRunReleased` when the run ended waiting for an approval (`notification_type: permission_prompt`) | observe only; fire-and-forget through the task tracker | run log only |
+| `SubagentStop` | `subagent/index.ts` (`executeChild`) after a child's stream loop when it would end `completed` (foreground and background children; the payload has no tool fields) | a block → one more child round with `<hook-feedback event="SubagentStop">` as a user message, at most 2 (`subagentStopContinuationsMax`), within the child's remaining steps (its usage is the sum of its steps), `stop_hook_active` true from the second round | never persisted (run log only) |
+| `PreCompact` | `compaction/guard.ts` (automatic, `trigger: auto`, through `HostSession.hooks.preCompact`) and `compaction/stream.ts` (`/compact`, `manual`, `custom_instructions` = the focus; `/compact` takes its own snapshot and opens the project folder once); both run before the `compacting` activity | observe only (`continue: false` is ignored with a diagnostic, exit 2 is a non-blocking error) | its record right before the compaction marker |
+| `Notification` | `pipeline.ts` (`RunSession.#notifyApproval`) when the run is released waiting for an approval (`notification_type: permission_prompt`) | observe only (exit 2 is a non-blocking error); fire-and-forget through the task tracker, aborted at shutdown | run log only |
 
 **Stop continuations**: `onReleased(ending, awaitingApproval, followUp)` hands the follow-up to `index.ts`, which
 starts `startHookTurn` = `startRun(…, 'hook', { serverMessage: true })` with a **carrier**: a user-role message that
 holds only `data-hook` parts (the model reads `<hook-feedback event="Stop">reason</hook-feedback>`), and `run.started`
-carries `origin: 'hook'` and the carrier's id, so the web refreshes the path and resumes like a queued turn. The run
-of a hook turn passes `stop_hook_active: true`. At most **5** continuations in a row (`hookContinuationsMax`;
+carries `origin: 'hook'` and the carrier's id, so the web refreshes the path and resumes like a queued turn. A hook
+turn has a request id `hook_…`, runs on the ended run's model, reasoning effort and tool mode, and passes
+`stop_hook_active: true` to its own `Stop` hooks; only a `Stop` record starts one (a start that fails logs "a hook turn
+could not start" and the chat goes idle). At most **5** continuations in a row (`hookContinuationsMax`;
 `hookChainLength(path)` counts the consecutive hook carriers since the last user-authored message, task carriers do
 not reset it); past the cap the reply gets the notice `hook-continuation-limit` and the run ends. Priority when a run
 ends: a queued item, then a hook continuation, then the idle background delivery (6.26); never while an approval is
@@ -3226,45 +3248,66 @@ sequenceDiagram
 ```
 
 **The `data-hook` part** (`HOOK_PART_TYPE`, `hev_` ids; `HookData`): `{ id, event, outcome, toolCallId?, toolName?,
-createdAt, hooks: [{ source, label (≤ 200: the command's first characters, a plugin name), pluginId?, exitCode | null,
-timedOut?, durationMs, error? (≤ 2,000), systemMessage? (≤ 2,000) }] (≤ 20), context? (≤ 10,000), reason? (≤ 2,000),
-updatedInput? (≤ 64 KiB of JSON) }`, outcome `context | denied | asked | allowed | rewritten | blocked | continued |
-stopped | error`. A hook run that succeeds silently stores nothing; a record is written only when there is a decision,
-context, a block, a stop, an error or a `systemMessage`. Placement: in the assistant reply where the hooks ran (tool
-hooks linked by `toolCallId`; `RunHooks.record(data)` → `session.inject` at the next step, tracked, and
+createdAt, hooks: [{ source, label (≤ 200), pluginId?, exitCode | null, timedOut?, durationMs, error? (≤ 2,000),
+systemMessage? (≤ 2,000) }] (≤ 20), context? (≤ 10,000), reason? (≤ 2,000), updatedInput? (≤ 64 KiB of JSON) }`, outcome
+`context | denied | asked | allowed | rewritten | blocked | continued | stopped | error`. A hook's `label` is the
+redacted command with its whitespace collapsed (prefixed `<file>: ` for a project hook), `<pluginId>: <HookMap key>` for
+a code hook and `tool.after` for a plugin's `tool.after` context. **Outcome mapping** (`recordOutcome`,
+`services/hooks/record.ts`): for `PreToolUse` a block or `deny` → `denied`, then `ask` → `asked`, `allow` → `allowed`,
+an `updatedInput` alone → `rewritten`; then (every event) `continue: false` → `stopped` (it wins over a Stop block; the
+`reason` is the `stopReason`); a block → `continued` for `Stop`, `blocked` for every other event (`SubagentStop`
+included); a context → `context`; an error → `error`; a `systemMessage` alone → `context`; else nothing is stored. A
+hook run that succeeds silently stores nothing. Placement: in the assistant reply where the hooks ran (tool hooks linked
+by `toolCallId`; `RunHooks.record(data)` → `session.inject` at the next step, tracked, and
 `RunSession.#missingInjections` now also covers `data-hook` by id, so a record is never lost when the stream ends
-first); `UserPromptSubmit` and `SessionStart` context on the **user message**; a `Stop` continuation in its carrier.
-`context` is the only model-visible field (added context, or a `PostToolUse` block's feedback): `hookModelText(data,
-role)` turns it into `<hook-context event="…" tool="…">…</hook-context>` in an assistant message or a user message and
-a carrier's reason into `<hook-feedback event="Stop">…</hook-feedback>`; everything else is display-only. The model
-history gains the stage `splitHooks` after `splitTaskResults` (compaction → steers → task results → **hooks** → task
-output reduction → command expansions): an assistant message is split at its model-text hook parts like at task
-results (ids `~h<k>`), display-only parts are dropped, user-message parts become text, and a carrier without model text
-is dropped. During a run the hooks piece of the step composer (context guard → **hooks** → steer → finalize) appends
-the queued contexts as user model messages at the step it records, so the in-run order equals what `splitHooks`
-rebuilds later. While hooks run, the transient `data-activity { kind: 'hooks', event, toolCallId? }` drives "Running
-hook…" (never stored). Consumers: the model history, the search text, the Markdown export, the chat import (validated
-like every part) and share snapshots (dropped by the allowlist: a hook-denied tool reads "Denied" there).
+first); `UserPromptSubmit` and `SessionStart` records with something to show on the **user message** (a queued item
+keeps them and they land on its turn's user message, or right after its `data-steer` part when it is steered in); the
+`Stop` record in the reply before `finish`, with a copy (same id) in the continuation's carrier; the `PreCompact` record
+right before the compaction marker. `Notification` records and every sub-agent record are never stored (run log only). A
+plugin's `tool.after` `context` (plugin API 1.5.0) gets its own `PostToolUse` record (source `plugin`, label
+`tool.after`, outcome `context`, trimmed and capped at 10,000 characters) and is queued for the model, also without any
+`PostToolUse` hook. Model-visible are the `context` and the `reason` of a `PostToolUse` block or of a `Stop` /
+`SubagentStop` continuation: `hookModelText(data, role)` turns a context into `<hook-context event="…"
+tool="…">…</hook-context>` (in an assistant or a user message), a blocked `PostToolUse` record in a reply into
+`<hook-feedback event="PostToolUse" tool="…">` and a carrier's reason into `<hook-feedback
+event="Stop">…</hook-feedback>` (`(no reason given)` when empty); everything else (PreToolUse decisions, whose reason
+reaches the model through the tool result, errors, system messages) is display-only. The model history gains the stage
+`splitHooks` after `splitTaskResults` (compaction → steers → task results → **hooks** → task output reduction → command
+expansions): an assistant message is split at its model-text hook parts like at task results (ids `~h<k>`), display-only
+parts are dropped, user-message parts become text, and a carrier without model text is dropped. During a run the hooks
+piece of the step composer (context guard → **hooks** → steer → finalize) appends the queued contexts as user model
+messages at the step it records, so the in-run order equals what `splitHooks` rebuilds later. While the hooks of
+`PreToolUse`, `PostToolUse`, `Stop` or `PreCompact` of a chat run run (also when only plugin code hooks run), the
+transient `data-activity { kind: 'hooks', event, toolCallId? }` drives "Running hook…" on the tool row (never on a
+`task` row) and "Running hooks…" at the end of the reply (never stored; `UserPromptSubmit` / `SessionStart` run before
+the stream, `Notification` and sub-agents write no activity). Consumers: the model history, the search text, the
+Markdown export, the chat import (validated like every part) and share snapshots (dropped by the allowlist: a
+hook-denied tool reads "Denied" there).
 
-**Sub-agents** get `RunHooks.forChild(callIdPrefix)`: `PreToolUse` (an `ask` is a denial) and `PostToolUse` (its
-context goes into the child's own next step through a hooks piece of the child's composer; nothing is persisted);
-children never run `UserPromptSubmit`, `SessionStart` or `Stop` hooks; `SubagentStop` runs at the child's end.
+**Sub-agents** get `RunHooks.forChild(callIdPrefix)` (a background child gets `detachedHooks` over the launching
+run's snapshot): `PreToolUse` (an `ask` is a denial) and `PostToolUse` (its context goes into the child's own next step
+through a hooks piece of the child's composer; nothing is persisted); children never run `UserPromptSubmit`,
+`SessionStart` or `Stop` hooks; `SubagentStop` runs at the child's end (at most 2 extra rounds, above).
 
 **Personal hooks** (table `hooks`, module `hooks`):
 
 | Route | Answer |
 |---|---|
-| `GET /hooks?projectId` | `HookList` `{ items, diagnostics, switches }`: at most 300 `HookEntry` items `{ key, source, kind: command \| code, event, matcher, command?, timeout, state: active \| pending \| off \| invalid \| blocked, id?, pluginId?, path?, sha256?, diagnostics }`: the personal rows, the project's items with their trust state (with `projectId`), plugin command hooks and code events |
-| `GET /hooks/runs` | the in-memory run log (the last 200 runs, `hookRunsKept`): `{ id, at, event, source, label, chatId?, exitCode, timedOut, durationMs, outcome, error? (≤ 500) }`; never a command, payload or output |
-| `POST /hooks` `{ event, matcher, command, timeout, enabled }` | 201 `PersonalHook`; **fresh auth**; the matcher is compiled (400 when invalid); at most 100 rows |
+| `GET /hooks?projectId` | `HookList` `{ items, diagnostics, switches, project? }`: at most 300 `HookEntry` items `{ key, source, kind: command \| code, event, matcher?, command?, timeout?, state: active \| pending \| off \| invalid \| blocked, id?, pluginId?, path?, sha256?, diagnostics }` in run order: the personal rows, the plugin command hooks, the plugin code hooks (keys `plugin:<id>:code:<event>:<n>`, the six Phase 11 events and `tool.after`; no matcher, command or timeout), then the project's items with their trust state (with `projectId`); `project` = `{ id, available, issue?, files, pending, scannedAt }`; `diagnostics` also holds the problems of handlers that are not listed (a dropped project group) |
+| `GET /hooks/runs` | the in-memory run log (the last 200 runs, `hookRunsKept`): `{ id, at, event, source, label, pluginId?, chatId?, exitCode, timedOut, durationMs, outcome \| null, error? (≤ 500) }` (code hooks: one entry per plugin with `exitCode` null; the `tool.after` context writes none); never a command, payload or output |
+| `POST /hooks` `{ event, matcher, command, timeout, enabled }` | 201 `PersonalHook`; **fresh auth**; the matcher is compiled (400 when invalid); at most 100 rows (409 `exists`: "At most 100 personal hooks can be stored; delete one first.") |
 | `PATCH /hooks/:id` (partial, at least one key) | `PersonalHook`; **fresh auth** unless the body only turns the hook off (`{ enabled: false }`) |
 | `DELETE /hooks/:id` | 204 (404); no fresh auth (removing a hook only takes power away) |
 
-Every change emits `hooks.changed { projectId: null }`; trust changes emit `hooks.changed { projectId }`. Personal
-hooks are configuration: delete-all keeps them, backups never contain them (6.9).
+`hooks.changed { projectId: null }` follows every personal change, a change of the setting `hooksEnabled` (an in-process
+`onSettingsChange` listener, so it also comes before the service's first use) and a registry change of plugin hooks
+(command hooks, the listed code hook events); `hooks.changed { projectId }` follows trust changes, a `workspace.changed`
+that touches `.claude/` or `.harness/`, a config rebuild whose hook hashes changed and a project hook that fails its
+verify-before-run (coalesced per project; the event subscriptions start at the service's first use). Personal hooks
+are configuration: delete-all keeps them, backups never contain them (6.9).
 
-**Logging** (12): `info` lines carry the event, the source, a hash prefix of the label, the exit code, the duration
-and the outcome; commands, payloads, stdout and stderr only at `debug`, redacted.
+**Logging** (12): one `info` line `hook ran` per command hook with the event, the source, a hash prefix of the label,
+the exit code, the duration and the outcome; the redacted command only at `debug`; payloads, stdout and stderr never.
 
 ### 6.29 Project trust and project settings files (ADR-049)
 
@@ -3281,19 +3324,31 @@ only after the user approved its sha256 for that project:
 the four settings files and `.mcp.json` at the project root only, each read through `resolveWorkspacePath` /
 `openWorkspaceFile` (no link anywhere on the path, a regular file, at most 256 KiB **before** `JSON.parse`), parsed
 with the shared `readSettingsHooks` / `parseMcpJson` (only the `hooks` key of a settings file), with diagnostics for
-invalid, oversized, linked or unreadable files (project-relative paths, never contents). Nothing is ever read from the
-home folder (`~/.claude`). The snapshot is cached per project for 10 s with single-flight builds and dropped on a
-`workspace.changed` of the project, `project.changed` and `run.finished` of one of its chats (shell commands write
-without a `workspace.changed`); `refresh` bypasses it.
+invalid, oversized, linked or unreadable files (project-relative paths, never contents; a linked, non-regular or
+unreadable file, also one below a linked `.claude` / `.harness` folder, is `not-an-object`, a larger one `too-large`).
+Nothing is ever read from the home folder (`~/.claude`). Identical hook items (the same hash) are listed once, in the
+first file (at most 100 hook items). The snapshot is cached per project (at most 50 projects) for 10 s with
+single-flight builds and dropped on a `workspace.changed` that touches a settings file, `.mcp.json`, `.claude/`,
+`.harness/` or a referenced file (or lists 200 paths), on `project.changed` and on `run.finished` of one of its chats
+(shell commands write without a `workspace.changed`); a dropped snapshot is rebuilt after 1 s, so a change is noticed
+without a consumer, and a rebuild whose item hashes changed emits `project-trust.changed { projectId, pending }` (plus
+`hooks.changed { projectId }` when hook items changed). `refresh` bypasses the cache. The reader **never opens the
+workspace** (`openWorkspace`): the first lookup of a project's root goes through `projects.get` (the same folder checks,
+without reading `AGENTS.md`), every later use only re-checks `realpath(root) === root` and that it is a folder, and
+every file read goes through `resolveWorkspacePath`; so a run's hook and trust reads open the project folder 0 times,
+and `verify(projectId, item)` opens nothing.
 
 **The hash**: sha256 (hex, `node:crypto`) of `trustHashInput(item)` (`packages/shared/src/util/trust.ts`), a canonical
 JSON array `[kind, 1, …fields, refs]` with object keys sorted and refs sorted by path, so reformatting a file does not
 change it while any change of a hashed field does. **Referenced files** pin the scripts a command runs:
 `extractCommandFileRefs(command)` takes the tokens of the shared shell parser (else a whitespace split) of the form
-`$CLAUDE_PROJECT_DIR/…`, `${CLAUDE_PROJECT_DIR}/…`, `"$HARNESS_PROJECT_DIR"/…`, `./…`, `.claude/…`, `.harness/…` or a
-relative path with `/` and a script extension (normalized, never `..`, at most 8); each is read through the path guard
-(a regular file of at most 1 MiB, no links) and its sha256 joins the hash; a missing, linked, unreadable or larger file
-counts as `sha256: null` with the warning `referenced-file-missing`. So editing `.claude/hooks/check.sh` makes the
+`$CLAUDE_PROJECT_DIR/…`, `${CLAUDE_PROJECT_DIR}/…`, `"$HARNESS_PROJECT_DIR"/…`, `./…`, `.claude/…`, `.harness/…`, or a
+relative path or a **bare file name** with a script extension (`scripts/x.py`, `sh count.sh`, `node hook.mjs`; never
+an option, an option value, an assignment, a URL or a `host:path`; normalized, never `..`, at most 8);
+`extractArgsFileRefs([command, ...args])` does the same for the literal words of a stdio server. Each is read through
+the path guard (a regular file of at most 1 MiB, no links) and its sha256 joins the hash; a missing, linked,
+secret-looking, unreadable or larger file, or a word that names no file (`echo foo.sh`), counts as `sha256: null` with
+the warning `referenced-file-missing`. So editing `.claude/hooks/check.sh` makes the
 hook that runs it pending again. Code a command runs without naming it (`npm test`, `make`, an interpreter that loads
 other project files) cannot be pinned: such items carry the warning `runs-repository-code`.
 
@@ -3303,19 +3358,23 @@ approval means pending**: the item never runs and nothing asks at run time.
 
 | Route (module `projectTrust`) | Answer |
 |---|---|
-| `GET /projects/:id/trust` | `ProjectTrustList` `{ items, orphaned, scannedAt, available, issue? }`: at most 200 `TrustItem` items `{ kind, sha256, state: approved \| pending, label, path, refs: [{ path, sha256 \| null }], warnings: (private-network \| referenced-file-missing \| runs-repository-code)[], detail }`; `detail` by kind: hook `{ event, matcher, command, timeout }`, mcp `{ name, id, transport, command?, args?, url?, envNames, headerNames, variables }`, command `{ name, spans }`; command bodies come through `customizations.load` on demand; `orphaned` counts approved hashes that no current item has (an item that changed or disappeared) |
-| `POST /projects/:id/trust` `{ items: [{ kind, sha256 }] }` (≤ 50, strict) | the new list; **fresh auth**; the project is scanned again with `refresh`, and when any requested hash is not a current item the whole batch is refused with 409 `conflict` (reason `stale`: the file changed while the user reviewed it); otherwise the rows are inserted in one transaction |
-| `DELETE /projects/:id/trust/:sha256` | 204, idempotent; no fresh auth (revoking only takes power away); it also removes the project's orphaned hashes |
+| `GET /projects/:id/trust` | `ProjectTrustList` `{ items, orphaned, scannedAt, available, issue? }` from a fresh scan: at most 200 `TrustItem` items (hooks, then servers, then commands; the pending count covers every item) `{ kind, sha256, state: approved \| pending, changed?, label, path, refs: [{ path, sha256 \| null }], warnings: (private-network \| referenced-file-missing \| runs-repository-code)[], detail }`; `changed: true` on a pending item that replaced an approved one of the same kind and label ("Changed" instead of "New"); `detail` by kind: hook `{ event, matcher, command, timeout }`, mcp `{ name, id, transport, command?, args?, url?, envNames, headerNames, variables }`, command `{ name, spans }`; command bodies come through `customizations.load` on demand (a command whose name is longer than 64 characters or with a span longer than 4,096 characters is never listed, so never approvable); `orphaned` counts approved hashes that no current item has (an item that changed or disappeared; 0 while the folder is unavailable); a list whose pending count differs from the last one announced emits `project-trust.changed` |
+| `POST /projects/:id/trust` `{ items: [{ kind, sha256 }] }` (≤ 50, strict, unique hashes) | the new list; **fresh auth**; the project is scanned again with `refresh`, and when any requested hash is not a current item the whole batch is refused with 409 `conflict` (reason `stale`, "The project files changed while you reviewed them. Review them again."; nothing is written); otherwise the rows are inserted in one transaction |
+| `DELETE /projects/:id/trust/:sha256` | **200 with the fresh list**, idempotent; no fresh auth (revoking only takes power away); when the scan is complete (the folder opened and every command file loaded) it also removes the project's orphaned hashes |
 
-Approve and revoke emit `project-trust.changed { projectId, pending }` and `hooks.changed { projectId }` and stop the
-affected project MCP runtimes (a server whose hash was revoked or replaced). **Verify-before-run**: every consumer
-re-reads and re-hashes an item right before it spawns or connects anything (a hook process, a stdio server, an http
-connection, a `!` span) and skips it as pending when the hash is no longer approved; the small window between that
-check and the `exec` is accepted (10.12). Consumers: the hooks snapshot (6.28), the project MCP manager (6.30) and the
-command resolution for `!` spans (6.32). Approvals are configuration of this server: never in backups or exports,
-kept by delete-all, deleted with their project; project files otherwise stay restrict-only (6.23, 10.11). The review
-dialog shows the exact commands, URLs and environment / header / variable names, groups the items by kind, has no
-"Approve all" and needs the password (UI.md 7.33).
+`project-trust.changed { projectId, pending }` follows an approve or a revoke (with `hooks.changed { projectId }`), a
+rebuild of the project's items that found other hashes (also after a verify-before-run mismatch), a list that found
+another pending count than the last one announced, and the project's deletion (`pending: 0`, after its
+`project.changed`). The trust service only emits; the project MCP manager reacts to the event and stops the runtimes
+whose hash was revoked or replaced (6.30). **Verify-before-run**: every consumer checks an item right before it spawns
+or connects anything and skips it as pending when the hash is no longer approved: the hook snapshot verifies the scanned
+item with its referenced files read again (`projectConfig.verify`), the project MCP manager reads the folder again
+(`snapshot` with `refresh`) and verifies before a start, and a `!` span recomputes `commandTrustSubject` from the loaded
+command body (6.32); the small window between that check and the `exec` is accepted (10.12). Consumers: the hooks
+snapshot (6.28), the project MCP manager (6.30) and the command resolution for `!` spans (6.32). Approvals are
+configuration of this server: never in backups or exports, kept by delete-all, deleted with their project; project files
+otherwise stay restrict-only (6.23, 10.11). The review dialog shows the exact commands, URLs and environment / header /
+variable names, groups the items by kind, has no "Approve all" and needs the password (UI.md 7.33).
 
 ### 6.30 Project MCP servers (ADR-050)
 
@@ -3346,41 +3405,63 @@ A project's `.mcp.json` (project root only) adds MCP servers to **that project's
   as usual, and hooks also match `mcp__<name>__<tool>` (6.28).
 - **Approval**: each server is a trust item (6.29) whose hash covers the raw, unexpanded server object; http and sse
   servers need approval too. There is no SSRF block (local development servers are the main use case): a URL on a
-  loopback, private or link-local address gets the review warning `private-network` (`classifyAddress`), and requests
-  use `redirect: 'error'`.
+  loopback, private, link-local, CGNAT, metadata, multicast, unspecified or reserved address (`classifyAddress`) or
+  with a local name (`localhost`, `*.local`, `*.internal`, `*.lan`, `*.home.arpa`, a single label) gets the review
+  warning `private-network`, judged from the URL as written with its `:-default`s: **no DNS lookup** is made, and a host
+  that comes from a variable without a default is not flagged. A URL with variables must start with `http(s)://` or a
+  variable, and the expanded URL is checked again (`isAllowedMcpUrl`) before connecting; requests use
+  `redirect: 'error'`.
 - **Variables**: `${VAR}` and `${VAR:-default}` in `command`, `args`, `env` values, `url` and `headers` values
   (`extractVariables`, `expandVariables`) resolve **only** from values the user stored for the project: secret scope
   `project:<projectId>`, names `mcp.var.<NAME>` (`^[A-Z_a-z]\w{0,63}$`, at most 50), AES-256-GCM like every secret,
   registered with the log redactor while in use. The server environment is **never** read (`process.env` included); a
   default applies when no value is stored; a reference with neither keeps the server in `needs-variables` (no connect);
-  any other `$…` stays literal. `PUT /projects/:id/mcp/variables { values: { NAME: string | null } }` (null clears)
-  needs **fresh auth** (a variable can change what an approved stdio server runs) and restarts the servers that use a
-  changed variable; values are never returned (the list gives `set`, a masked `hint` and `usedBy`). A key rotation
+  any other `$…` stays literal (a default cannot hold another variable). `PUT /projects/:id/mcp/variables { values: {
+  NAME: string | null } }` (null clears) needs **fresh auth** (a variable can change what an approved stdio server
+  runs) and restarts the running servers that use a changed variable; more than 50 stored variables answer 409 `exists`
+  ("A project can store at most 50 variables. Remove some first.", nothing written). Values are never returned: the
+  list gives `set`, `hint` (the `${VAR:-default}` default of the first server that references the name, never a stored
+  value) and `usedBy` (`[]` for a stored variable no server references, listed so it can be removed). A key rotation
   re-encrypts them; deleting the project deletes the scope.
 - **Runtimes** (`ProjectMcpManager`, `mcp/project*.ts`, interface in `mcp/types.ts`): one per (project, server id),
   with a generation, created **lazily** by `toolsFor(projectId, { signal, waitMs })`, which `modelStream` calls for a
-  project chat whose folder opened; it waits at most 5 s (`projectMcpConnectWaitMs`), and a server that is not ready by
-  then is left out of that run with the notice `project-mcp-unavailable` while it keeps connecting. States: `pending`
-  (not approved), `needs-variables`, `idle` (approved, not started), `connecting`, `connected`, `error`, `disabled`
-  (`HF_SAFE_MODE`: nothing starts). A runtime stops after 10 idle minutes (`projectMcpIdleMs`), on revoke, on a hash
-  change (verified before every start), on a variables change (restart), on project deletion (`project.changed` with
-  `project: null` → `stopProject` + `secrets.deleteScope('project:<id>')`) and at shutdown. Nothing starts at boot.
+  project chat whose folder opened, with tools on and a tool-capable model (`toolsFor` reads nothing when nothing is
+  approved and nothing runs, and reads the folder again with `refresh` and verifies right before a start); it waits at
+  most 5 s (`projectMcpConnectWaitMs`), and a server that is not ready by then is left out of that run with the notice
+  `project-mcp-unavailable` while it keeps connecting. Each run starts the approved servers that are not running (after
+  an idle stop or a crash; nothing retries on a timer). States: `pending` (not approved, or changed since: a server
+  that fails verify-before-run is listed `pending`), `needs-variables`, `idle` (approved, not started), `connecting`,
+  `connected`, `error`, `disabled` (`HF_SAFE_MODE`: nothing starts). A runtime stops after 10 idle minutes
+  (`projectMcpIdleMs`; deferred while a run of the project or a tool call is active), on revoke, on a hash change
+  (found by any later read: `toolsFor`, `list`, `reconnect`, a `workspace.changed` of the project and a re-read of
+  `.mcp.json` every 15 s while a server of the project runs), when its server is removed from `.mcp.json`, on a
+  variables change (restart), on project deletion (`project.changed` with `project: null` → the runtimes stop and the
+  variables are deleted; the manager follows events from its first use, which also sweeps the variables of projects
+  deleted before) and at shutdown. Nothing starts at boot. stderr lines of stdio servers go to the `core-mcp` plugin
+  log at `debug` (at most 100 per server and minute); connection errors are logged with their code only.
 - **stdio**: argument-array spawn through `mcp/stdio-transport.ts` with `processGroup` (detached, the whole group
   killed on close; since Phase 11 for every stdio server, global ones included), cwd = the project root, env = the
   minimal `stdioEnvironment` plus the server's declared env (expanded).
-- **Tools**: `mcpToolDefinition(tool, { serverId, pluginId: 'core-mcp', serverPolicy: 'ask', call })`: the policy
-  comes from the annotations (`readOnlyHint` → `safe`, `destructiveHint` → `always`, else `ask`). `assembleTools({
-  extraTools, shadowedMcpServers })` drops the registry tools whose MCP server id a project server **shadows** and adds
-  the project tools before `applyToolMode`, so a project server with a global server's id replaces it in that
-  project's chats only. Tool preferences (`tool_prefs`) apply by name to both. Global MCP behavior is unchanged.
+- **Tools**: `mcpToolDefinition(tool, { serverId, pluginId: 'core-mcp', serverPolicy: 'ask', call })`: the policy comes
+  from the annotations (`readOnlyHint` → `safe`, `destructiveHint` → `always`, else `ask`). `assembleTools({ extraTools,
+  shadowedMcpServers })` drops the registry tools whose MCP server id a project server **shadows** and adds the project
+  tools before `applyToolMode`, so an **approved** project server with a global server's id replaces it in that
+  project's chats only (also while it is not connected; `shadows` is absent while it is pending or disabled). Tool
+  preferences (`tool_prefs`) apply by name to both. Sub-agents (W11.17): foreground and background children use the
+  parent run's `toolsFor` result (`RunProjectTools`, passed through `createSubagentRunner({ projectTools })` and the
+  background launch input to `childTools({ projectTools })`): the global servers a project server shadows are never
+  offered to them, and the project server tools join their candidates under the child ceiling (only tools that run
+  without approval in the effective mode, then the custom agent's allowlist); a background child's hook matchers also
+  get the server names of `.mcp.json`. Global MCP behavior is unchanged.
 
 | Route (module `projectMcp`) | Answer |
 |---|---|
-| `GET /projects/:id/mcp` | `ProjectMcpList { items: [{ id, name, transport, state, sha256, error?, tools, shadows?, missingVariables }], variables: [{ name, set, hint, usedBy }] }` |
+| `GET /projects/:id/mcp` | `ProjectMcpList { items: [{ id, name, transport, state, sha256, error?, tools, shadows?, missingVariables }], variables: [{ name, set, hint, usedBy }] }`; the folder is read afresh (servers whose item changed or lost approval stop); an unavailable folder lists no servers |
 | `PUT /projects/:id/mcp/variables` | the list; **fresh auth**; ≤ 50 keys, values 1 – 4,096 characters or null |
-| `POST /projects/:id/mcp/:serverId/reconnect` | the list; restarts an approved server (a pending one stays pending) |
+| `POST /projects/:id/mcp/:serverId/reconnect` | the single `ProjectMcpServer`, after waiting at most 10 s for the restart (`connecting` when slower); a pending or needs-variables server answers 200 with that state; 404 `Unknown project MCP server "<id>".`; 409 `disabled` in safe mode ("Project MCP servers do not start in safe mode.") |
 
-Every state change emits `project-mcp.changed { projectId, servers }`.
+Every state change (also a changed tool list or a removed server) emits `project-mcp.changed { projectId, servers }`
+(coalesced; never for a deleted project).
 
 ### 6.31 Output styles (ADR-051)
 
@@ -3398,8 +3479,9 @@ in all). `CustomizationCatalog` gains `styles()` and `style(name)`.
   the project's (`projects.output_style`, read from the row, independent of the folder) ?? the global setting
   `outputStyle` (default `default`) (`effectiveStyleName`).
 - **Resolution** (`chat/output-style.ts` `resolveRunOutputStyle`, in `prepareRun`): the name is looked up in the run's
-  catalog; an unknown, invalid or turned-off style falls back to `default` with the notice
-  `output-style-unavailable` (once per model, `alreadyNoticed`); the body comes through `customizations.load`. The
+  catalog; an unknown, invalid, turned-off or unreadable style falls back to `default` with the notice
+  `output-style-unavailable` (once per path and model: not repeated while an earlier reply of that model on the path
+  shows it, `alreadyNoticed`); the body comes through `customizations.load`. The
   result is `PreparedRun.outputStyle` → `RunParamsInput.outputStyle`.
 - **Instructions**: `runInstructions` puts the style block **first**: `Output style: <label>` + the body
   (`outputStyleBlock`; `default` adds nothing), then global → workspace block → agent blocks → project file → project
@@ -3420,29 +3502,53 @@ substituted inside a span (`/x ; touch pwned` stays an argument).
 
 - **Who may run spans**: a trusted source only: a personal command, a command template of a loaded plugin (a plugin
   whose template holds a span needs a trust pin, `manifestRequiresTrust`), or a project command file whose trust item
-  (6.29) is approved (else 409 `conflict` reason **`untrusted`**, nothing stored). Spans need a project chat (else 400
-  `validation_error`) and the shell (`HF_WORKSPACE_SHELL=0` → 409 `disabled`).
+  (6.29) is approved. The checks run in this order, and nothing runs or is stored when one fails: a chat without a
+  project → 400 `validation_error` "The /<name> command runs shell lines, which need a chat in a project."; the shell
+  off (`HF_WORKSPACE_SHELL=0`) → 409 `conflict` reason `disabled` "The /<name> command runs shell lines, but shell
+  commands are turned off on this server (HF_WORKSPACE_SHELL=0)."; a project folder that does not open → 400 "The
+  /<name> command runs shell lines, but the project folder of this chat is not available."; a project command file
+  whose hash (`commandTrustSubject`: the name, the spans and the script files they name, read now, so this is the
+  verify-before-run) is not approved → 409 `conflict` reason **`untrusted`** "/<name> runs shell lines you haven't
+  approved. Review the project's files to run it.". The two 409s (`isSpanRefusal`) also remove a chat row the request
+  created (`chat.created`, then `chat.deleted`, like a hook block); the 400s keep it (the v1.6 behavior).
 - **Execution** (`chat/inline/`, behind `CommandContext.expansion = { workspace(), shellEnabled, trusted(projectId,
-  sha256), projectId }`, built in `buildUserMessage`, which opens the workspace once and lazily because commands are
-  resolved before the run's workspace): the spans run **one after another** through `runShellCommand` in the project
-  root (30 s each, 60 s in total, later spans become `[skipped: time limit]`; output cut at 16 KiB each; at most 10
-  spans); `formatShellSpanOutput` notes a non-zero exit or a timeout. `@path` references (project chats only, at most
-  10) go through `resolveWorkspacePath`, the secret-looking-path refusal and `openWorkspaceFile` (at most 32 KiB, a
-  binary file becomes a marker, a missing file leaves the text unchanged) and are appended as `<file path="…">…</file>`
-  blocks (`renderCommandExpansion`). The result must stay within 64 KB.
-- **Frozen**: the result is stored in `metadata.command.expansion` with `inlined: { shell, files }` (counts and paths,
-  never outputs), so regenerate and continuations reuse it and never run a span again; a queued command runs its spans
-  when its turn starts. Spans run in every permission mode (an explicit invocation of trusted content); their output is
-  not journaled (like a command the user types in a terminal). A personal command with spans restored from a backup
-  comes back turned off (6.9).
+  sha256), projectId }`, built in `buildUserMessage`): the folder is opened at most once per turn (`TurnWorkspace` in
+  `prepare.ts`: the expansion opens it lazily and `openRunWorkspace` reuses it, so a run still opens its project folder
+  once). The spans run **one after another** through `runShellCommand` in the project root with
+  `HARNESS_PROJECT_DIR` / `CLAUDE_PROJECT_DIR` set to it (30 s each, 60 s in total, later spans become
+  `[skipped: time limit]`; at most 10 spans): stdout then stderr, each stream keeping 12 KiB of its start and 4 KiB of
+  its end, then cut to 16 KiB by `formatShellSpanOutput`, which notes `[output truncated]`, `[timed out]`,
+  `[exit code N]` or `[did not finish]`; a shell that cannot start gives "The shell could not be started.". Before any
+  span runs, a body whose text with empty spans already exceeds 64 KB is refused. Order (W11.17): `buildUserMessage`
+  resolves the command with `deferExpansion`, which runs every check (the 64 KB floor, the 400s, 409 `disabled`, 409
+  `untrusted`) but not the spans or the `@path` reads (`prepareCommandPlan`; the message holds a placeholder expansion
+  that is never stored); `prepareRun` then runs `SessionStart` / `UserPromptSubmit` (6.28; they see the typed text and
+  the command's name, never the expansion) and only after they passed `withCommandExpansion` runs the spans and reads
+  (`finish()`), checking a project command file's trust hash again right before the spans. A hook block therefore runs
+  nothing and stores nothing. An image turn runs no prompt hook: its command is expanded while the request is planned
+  (`planHistory`). `@path` references (the mention grammar: a `.` or `/` is required, and punctuation glued to an
+  unquoted path is part of it, so `@README.md,` is not inlined; project chats only, else they stay text; at most 10) go
+  through `resolveWorkspacePath` (no link on the path), the secret-looking-path and `.git` refusals and
+  `openWorkspaceFile` (a regular file; at most 32 KiB, a longer file is cut; a NUL byte in the first 8 KiB makes it
+  binary: a marker block; a refused, missing or unreadable file leaves the text unchanged) and are appended as
+  `<file path="…">…</file>` blocks (`renderCommandExpansion`). The result must stay within 64 KB. The log gets one
+  `info` line `command shell lines ran` with counts and the duration only.
+- **Frozen**: the result is stored in `metadata.command.expansion` with `kind: 'command'` and
+  `inlined: { shell, files }` (counts and paths, never outputs; both only when something was inlined, else the v1.6
+  shape), so regenerate and continuations reuse it and never run a span again; a queued command runs its spans when its
+  turn starts. Spans run in every permission mode (an explicit invocation of trusted content); their output is not
+  journaled (like a command the user types in a terminal). A personal command with spans restored from a backup comes
+  back turned off (6.9).
 
 **User-invocable skills**: skill keys `user-invocable` (default true), `disable-model-invocation` (default false) and
 `argument-hint`. Resolution order of `/name`: client command → harness command → definition command (project,
 personal) → plugin command → an active user-invocable skill, so a command wins a name. A skill invocation expands its
-content with `expandArguments` (text only, no spans) and is stored as `metadata.command` with `kind: 'skill'`.
+content with `expandArguments` (text only: its `!` spans and `@path` stay text) and is stored as `metadata.command`
+with `kind: 'skill'` and its catalog `source`.
 `listServerCommands` / `isServerCommandFor` include skills (`kind: 'skill'`, `argumentHint`); slash names may have up
 to 64 characters (`slashNameSchema`, `COMMAND_PREFIX`), commands stay ≤ 32. `disable-model-invocation: true` removes a
-skill from the skills block, from `skillsAvailable` and from `loadSkill` (the `skill` tool refuses it).
+skill from the skills block, from `skillsAvailable` (`modelInvocableSkills`) and from `loadSkill` (the `skill` tool
+refuses it with `forbidden`: "The skill "<name>" can only be run by the user (as /<name>); you cannot load it.").
 
 ## 7. Data directory
 
@@ -4340,11 +4446,11 @@ the user approved its hash** (6.29). There is still no OS sandbox (Docker or a d
 | A cloned repository runs code when it is opened (settings-file hooks, `.mcp.json` servers incl. http / sse, command `!` lines) | nothing runs without a per-item sha256 approval for that project (`project_trust`); a missing approval means pending, never a prompt at run time; nothing starts at boot; the review shows the exact commands, URLs and environment / header / variable names, has no "Approve all" and needs fresh auth; the warnings `runs-repository-code`, `private-network` and `referenced-file-missing`; project files are read only through the path guard (no links, regular files, 256 KiB before `JSON.parse`), never from `~/.claude` | the user approves something they did not read |
 | An approved item changes later (an edited settings file or `.mcp.json`, a rewritten referenced script) | the hash covers the canonical item **and** the script files its command names (≤ 8, ≤ 1 MiB each); any change makes it pending again; verify-before-run re-reads and re-hashes right before every spawn or connect | code the command runs without naming it (`npm test`, `make`, an interpreter loading other files) is not pinned (`runs-repository-code`); a file swapped between the verification and the `exec` (TOCTOU, a process that already runs as the server user) |
 | Variable exfiltration through `.mcp.json` (`${AWS_SECRET_ACCESS_KEY}` sent to a remote URL) | `${VAR}` resolves **only** from values the user stored for the project (secret scope `project:<projectId>`), never from `process.env`; hooks and stdio servers get the minimal environment (no `HF_*`, no provider keys) plus the documented project / plugin root variables; values are encrypted, write-only, redacted in logs; setting them needs fresh auth | a value the user stores is sent where the approved server says |
-| SSRF through a project http / sse server | approval required for remote servers too; `http:` / `https:` only; `redirect: 'error'`; a loopback, private or link-local address is a review warning (`private-network`) | no block: local servers are the main use case |
+| SSRF through a project http / sse server | approval required for remote servers too; `http:` / `https:` only (checked again after the variables are expanded); `redirect: 'error'`; a non-public address or a local host name is a review warning (`private-network`) | no block: local servers are the main use case; no DNS lookup is made (the warning judges the URL as written), so a public name that resolves to a private address, or a host taken from a variable without a default, is not flagged |
 | Hook loops and slow hooks | at most 5 `Stop` continuations in a row (notice `hook-continuation-limit`), 2 `SubagentStop` rounds, never with an approval pending; per-hook timeouts (≤ 600 s), ≤ 20 handlers per event, a server-wide limit of 16 hook processes; Stop cancels a running hook and the pending continuation | a hook that sleeps up to its timeout delays its event |
 | `PreToolUse` runs again on approved continuations | the call ids that already have an approval response are skipped and their stored decision replayed (frozen seam), so a hook runs once per call; a probe counts the runs | — |
-| Approval honesty with `updatedInput` | `allow` never skips the card for `execute` tools or `always` policies (narrower than Claude Code); `updatedInput` is applied after approval, re-validated, fail closed; the tool part keeps the model's input (the approval HMAC signs it) and the `data-hook` record linked by `toolCallId` shows the input that ran, on the row and the card | a user who approves without reading the hook's note |
-| Process leaks (hooks, stdio servers and their grandchildren) | every hook and every stdio MCP server (since Phase 11, global ones too) runs in its own process group, killed on timeout, Stop, revoke, idle stop, project delete and shutdown; the shutdown order stops hooks and project MCP runtimes; the spawn allowlist stays at 3 modules | a process that calls `setsid` escapes the group kill (10.9) |
+| Approval honesty with `updatedInput` | `allow` never skips the card in plan mode, for `execute` tools or for `always` policies (narrower than Claude Code); `updatedInput` is applied after approval, re-validated, fail closed; the tool part keeps the model's input (the approval HMAC signs it) and the `data-hook` record linked by `toolCallId` shows the input that ran, on the row and the card | a user who approves without reading the hook's note; when the harness still asks after an `allow` (plan mode, `execute`, `always`) the record keeps the hook's outcome `allowed`, so the badge says allowed while the card shows |
+| Process leaks (hooks, stdio servers and their grandchildren) | every hook and every stdio MCP server (since Phase 11, global ones too) runs in its own process group, killed on timeout, Stop, revoke, a hash change, a variables change (restart), a server removed from `.mcp.json`, idle stop, project delete and shutdown; the shutdown order stops hooks and project MCP runtimes; the spawn allowlist stays at 3 modules | a process that calls `setsid` escapes the group kill (10.9) |
 | Plugin command hooks | a plugin with `contributes.hooks` (or `!` spans in a command template) needs a trust pin like a stdio MCP declaration, installed and trusted with fresh auth; the trust warning lists the commands | the pin covers `plugin.json` only: the plugin's scripts are not pinned (as for a code plugin's other files) |
 | A crafted backup plants something that runs | personal hooks, approvals and MCP variables are never exported or imported; a restored personal command with `!` spans comes back turned off | — |
 | Prompt injection through hook output or spans | hook context and span output are model input like a tool result (capped: 10,000 characters of context, 16 KiB per span); `systemMessage` and reasons are shown to the user, not the model | a hook or a script that prints instructions the model follows |
@@ -4352,8 +4458,9 @@ the user approved its hash** (6.29). There is still no OS sandbox (Docker or a d
 | Kill switches | `hooksEnabled` (setting), `HF_WORKSPACE_SHELL=0` (no shell string at all) and `HF_SAFE_MODE` (no command hooks, no project MCP) come from the settings or the environment; plugin code hooks still run (in-process trusted code) | — |
 
 - **Logging rules** (12): never at `info` — hook commands, payloads (stdin), stdout and stderr, `!` commands and their
-  output, `@file` contents, `.mcp.json` variable values or the resolved env, args and headers of a server; hook runs
-  log only the event, the source, a hash prefix of the label, the exit code, the duration and the outcome.
+  output, `@file` contents, `.mcp.json` variable values or the resolved env, args and headers of a server (those are
+  never logged at all); hook runs log only the event, the source, a hash prefix of the label, the exit code, the
+  duration and the outcome.
 - **Fresh auth**: creating a personal hook and changing one (unless it is only turned off), approving project items and
   setting project MCP variables; revoking an approval, deleting a hook and turning one off need none (they only take
   power away).
@@ -4573,18 +4680,25 @@ flowchart LR
   contents, a `.mcp.json` variable value or a resolved environment, argument list or header (at `debug` only,
   redacted; variable values are registered with the redactor while in use). Diagnostics carry project-relative paths
   and never file contents.
-  - Hook runs (component `hooks`): one `info` line per hook process with the event, the source (`personal` /
-    `project` / `plugin`), a hash prefix of the label (never the command), the exit code, `timedOut`, the duration and
-    the outcome; each run also enters the in-memory run log (`GET /hooks/runs`, the last 200); warnings for a hook that
-    failed to start, a project item skipped because its hash no longer matches (verify-before-run) and a continuation
-    that could not start; the command, the payload and the outputs only at `debug`, redacted. Personal hook changes log
-    `hook created` / `hook updated` / `hook removed` (the id and the event).
-  - Trust (component `project-trust`): `info` on approve and revoke (project id, kinds, counts, hash prefixes), a
-    `debug` line per project config scan (counts, diagnostics, duration); never file contents.
-  - Project MCP (component `project-mcp`): `info` when a project server starts, connects, stops (`cause`: `idle`,
-    `revoke`, `changed`, `variables`, `project-deleted`, `shutdown`) or fails (`code`); the variables only by name.
-  - Commands: one `debug` line per `!` span (exit code, duration, bytes) and per `@file` (path, bytes); the command
-    text, its output and the file contents never at `info`.
+  - Hook runs (component `hooks`): one `info` line `hook ran` per hook process with the event, the source (`personal`
+    / `project` / `plugin`), a hash prefix of the label (never the command), the exit code, the duration and the
+    outcome (a hook that failed to start is outcome `error` there); each run also enters the in-memory run log
+    (`GET /hooks/runs`, the last 200); an `info` line for a project item skipped because its hash no longer matches
+    (verify-before-run), a warning when more than 20 hooks match one event and when a hook continuation could not
+    start ("a hook turn could not start"); the redacted command only at `debug`; payloads and outputs never. Personal
+    hook changes write no log line of their own (the route's request line only).
+  - Trust (component `project-trust`): `info` `project items approved` (project id, item count, kinds; no hashes) and
+    `project item approval revoked` (project id, a 12-character hash prefix, `orphansRemoved`); the project config
+    reader (component `project-config`) writes a `debug` line `project config read` per scan (counts, diagnostics,
+    duration); never file contents.
+  - Project MCP (the server logger, no component): `info` when a project server connects (transport, tool count), is
+    reconnecting, or stops (`reason`: `idle`, `removed`, `changed`, `not approved`, `variables changed`, `project
+    stopped`), when variables changed or were deleted with their project (counts only); `warn` when a server failed to
+    start or disconnected (`code` only; the redacted message at `debug`); stderr lines of stdio servers go to the
+    `core-mcp` plugin log at `debug`; variables only by name or count.
+  - Commands: one `info` line `command shell lines ran` per command with spans (`spans`, `ran`, `failed`,
+    `durationMs`); no per-span or per-file lines; the command text, its output and the file contents are never
+    logged.
   - **Limits at a glance** (`LIMITS`, Phase 11 group): a hook timeout of 60 s by default and 600 s at most, 20 handlers
     per event, 100 personal hooks, 16 hook processes on the server, a payload of 256 KiB, stdout 64 KiB and stderr 16
     KiB per hook, context 10,000 characters, reasons 2,000, `updatedInput` 64 KiB, 5 `Stop` continuations and 2

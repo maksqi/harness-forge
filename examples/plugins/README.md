@@ -1,6 +1,6 @@
 # Example plugins
 
-Six small plugins that install as they are. Each folder is one plugin, and its name is the plugin id. Every example
+Seven small plugins that install as they are. Each folder is one plugin, and its name is the plugin id. Every example
 has a README that explains how it works and how to change it.
 
 | Example | Kind | What it shows | Needs |
@@ -11,6 +11,7 @@ has a README that explains how it works and how to change it.
 | [`echo-provider`](./echo-provider/) | code (`index.ts`, TypeScript) | a provider with a hand-written AI SDK `LanguageModelV4` (no key, no network) | trust |
 | [`mcp-everything`](./mcp-everything/) | declarative + stdio MCP | an MCP server started with `npx`, whose tools the model can call | trust, `npx` on the server |
 | [`agent-pack`](./agent-pack/) | code (`index.mjs`) + `contributes` | sub-agent types and skills (plugin API 1.4.0), declared in `plugin.json` and registered from code | trust, a harness with plugin API 1.4.0 |
+| [`hook-pack`](./hook-pack/) | declarative + command hook | a `PostToolUse` command hook that reminds the agent to run the tests after a file edit, and the output style `reviewer` (plugin API 1.5.0) | trust, POSIX `sh` on the server, a harness with plugin API 1.5.0 |
 
 ## Install an example
 
@@ -19,7 +20,8 @@ has a README that explains how it works and how to change it.
    The folder must be on the machine that runs the server.
 3. Choose **Link** (the plugin runs from this folder and reloads when you edit it) or **Copy** (a snapshot is copied
    into the data directory).
-4. Review the preview. Code plugins and plugins with a stdio MCP server show the trust warning. Check
+4. Review the preview. Code plugins, plugins with a stdio MCP server and (plugin API 1.5.0) plugins with command hooks
+   or commands with `` !`cmd` `` lines show the trust warning, which lists the commands such a plugin runs. Check
    **I trust …** to load the plugin; when a password is set, you confirm it first.
 5. Press **Install**.
 
@@ -29,11 +31,14 @@ server runs on another machine or in Docker.
 ## Tests
 
 `examples.test.ts` checks every manifest with the shared `pluginManifestSchema` (and each `engines.harness` range). It
-then loads all six examples into the real plugin host, with no network access and no `npx`. It calls the dice tool,
+then loads all seven examples into the real plugin host, with no network access and no `npx`. It calls the dice tool,
 streams a chat from the echo provider, runs the LM Studio and Together AI manifests against a fake OpenAI-compatible
-server, and checks that the agent pack registers its two agents and two skills (one of each from `plugin.json`, one of
-each from `index.mjs`) without a warning. It also checks that the snippets of `docs/PLUGINS.md` equal the shipped files
-(including the agent pack's `plugin.json` and `index.mjs`) and that the manifests of the guides parse. The examples are
+server, checks that the agent pack registers its two agents and two skills (one of each from `plugin.json`, one of
+each from `index.mjs`) without a warning, and checks that the hook pack requires trust, registers its command hook
+(rooted at the plugin folder) and its style, and that its script prints a `PostToolUse` context under POSIX `sh`. It
+also checks that the snippets of `docs/PLUGINS.md` equal the shipped files (including the agent pack's `plugin.json`
+and `index.mjs` and the hook pack's `plugin.json` and `scripts/remind-tests.sh`) and that the manifests of the guides
+parse. The examples are
 a project of the root Vitest config:
 
 ```sh
@@ -45,4 +50,6 @@ pnpm exec vitest run --project examples
 - [Writing a declarative provider](../../docs/guides/writing-a-declarative-provider.md)
 - [Writing a code plugin](../../docs/guides/writing-a-code-plugin.md)
 - [Adding an MCP server](../../docs/guides/adding-an-mcp-server.md)
+- [Hooks and project MCP servers](../../docs/guides/hooks-and-project-mcp.md) and
+  [output styles](../../docs/guides/output-styles.md) (plugin API 1.5.0)
 - [PLUGINS.md](../../docs/PLUGINS.md): the complete plugin contract

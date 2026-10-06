@@ -237,6 +237,41 @@ describe('pOST /api/plugins', () => {
     expect(detail.trust.trustedHash).toBe(detail.trust.hash)
   })
 
+  it.each([
+    ['command hooks', { hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ type: 'command' as const, command: 'sh remind.sh' }] }] } }],
+    ['! spans', { commands: [{ name: 'branch', description: 'Branch.', template: 'On !`git branch --show-current`: {{input}}' }] }],
+  ])('requires fresh auth for a manifest with %s only and pins it only after it (ADR-052)', async (label, contributes) => {
+    const id = label === 'command hooks' ? 'hooks-only' : 'spans-only'
+    const draft = { ...manifest(id), engines: { harness: '^1.5.0' }, contributes }
+    vi.mocked(requireFreshAuth).mockImplementation(() => {
+      throw Object.assign(new Error('fresh auth needed'), { name: 'HarnessError', code: 'forbidden', action: 'login' })
+    })
+    const refused = await send('POST', '/api/plugins', { manifest: draft })
+    expect(refused.status).toBe(403)
+    expect(error(refused.body)).toMatchObject({ code: 'forbidden', action: 'login' })
+    expect(existsSync(pluginDir(id))).toBe(false)
+    expect(await t.deps.plugins.record(id)).toBeNull()
+
+    vi.mocked(requireFreshAuth).mockReset()
+    const created = await send('POST', '/api/plugins', { manifest: draft })
+    expect(created.status).toBe(201)
+    expect(requireFreshAuth).toHaveBeenCalledTimes(1)
+    const detail = pluginDetailSchema.parse(created.body)
+    expect(detail).toMatchObject({ runsCode: true, trust: { required: true, trusted: true } })
+    expect(detail.trust.trustedHash).toBe(detail.trust.hash)
+  })
+
+  it('creates a plugin that requires no trust without fresh auth and without a pin', async () => {
+    vi.mocked(requireFreshAuth).mockImplementation(() => {
+      throw Object.assign(new Error('fresh auth needed'), { name: 'HarnessError', code: 'forbidden', action: 'login' })
+    })
+    const plain = { ...manifest('plain-commands'), contributes: { commands: [{ name: 'tldr', description: 'TL;DR.', template: 'TL;DR: {{input}}' }] } }
+    const created = await send('POST', '/api/plugins', { manifest: plain })
+    expect(created.status).toBe(201)
+    expect(requireFreshAuth).not.toHaveBeenCalled()
+    expect(pluginDetailSchema.parse(created.body)).toMatchObject({ runsCode: false, trust: { required: false, trustedHash: null } })
+  })
+
   it('keeps the credentials of a plugin created disabled', async () => {
     const created = await send('POST', '/api/plugins', { manifest: manifest('later'), credentials: { later: { apiKey: KEY } }, enable: false })
     expect(created.status).toBe(201)
@@ -391,10 +426,46 @@ describe('pUT /api/plugins/:id/manifest', () => {
     const detail = pluginDetailSchema.parse(saved.body)
     expect(detail).toMatchObject({ state: 'active', trust: { required: true, trusted: true } })
 
-    // Unchanged stdio server of a trusted plugin: no new prompt, still trusted after the save.
+    // Every save of a manifest that requires trust re-pins it, so it asks again (ADR-052, W11.17).
     const renamed = { ...withStdio, description: 'Now with tools' }
     const again = await send('PUT', '/api/plugins/fake-gw/manifest', { manifest: renamed })
-    expect(requireFreshAuth).toHaveBeenCalledTimes(1)
+    expect(requireFreshAuth).toHaveBeenCalledTimes(2)
     expect(pluginDetailSchema.parse(again.body)).toMatchObject({ state: 'active', description: 'Now with tools', trust: { trusted: true } })
+  })
+
+  it.each([
+    ['command hooks', { hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ type: 'command' as const, command: 'sh remind.sh' }] }] } }],
+    ['! spans', { commands: [{ name: 'branch', description: 'Branch.', template: 'On !`git branch --show-current`: {{input}}' }] }],
+  ])('requires fresh auth for every save of a manifest with %s and re-pins it only after it (ADR-052)', async (_label, extra) => {
+    await send('POST', '/api/plugins', { manifest: manifest('fake-gw') })
+    const base = manifest('fake-gw')
+    const trusting = { ...base, engines: { harness: '^1.5.0' }, contributes: { ...base.contributes, ...extra } }
+    vi.mocked(requireFreshAuth).mockImplementation(() => {
+      throw Object.assign(new Error('fresh auth needed'), { name: 'HarnessError', code: 'forbidden', action: 'login' })
+    })
+    const refused = await send('PUT', '/api/plugins/fake-gw/manifest', { manifest: trusting })
+    expect(refused.status).toBe(403)
+    expect(error(refused.body)).toMatchObject({ code: 'forbidden', action: 'login' })
+    const stored = JSON.parse(readFileSync(join(pluginDir('fake-gw'), 'plugin.json'), 'utf8')) as PluginManifest
+    expect(stored.contributes?.hooks).toBeUndefined()
+    expect(stored.contributes?.commands).toBeUndefined()
+    expect((await t.deps.plugins.record('fake-gw'))?.trustedHash ?? null).toBeNull()
+
+    vi.mocked(requireFreshAuth).mockReset()
+    const saved = await send('PUT', '/api/plugins/fake-gw/manifest', { manifest: trusting })
+    expect(saved.status).toBe(200)
+    expect(requireFreshAuth).toHaveBeenCalledTimes(1)
+    const detail = pluginDetailSchema.parse(saved.body)
+    expect(detail).toMatchObject({ runsCode: true, trust: { required: true, trusted: true } })
+    expect(detail.trust.trustedHash).toBe(detail.trust.hash)
+
+    // A later save of the trusted manifest needs fresh auth again; dropping what requires trust needs none and unpins.
+    vi.mocked(requireFreshAuth).mockImplementation(() => {
+      throw Object.assign(new Error('fresh auth needed'), { name: 'HarnessError', code: 'forbidden', action: 'login' })
+    })
+    expect((await send('PUT', '/api/plugins/fake-gw/manifest', { manifest: { ...trusting, description: 'Renamed' } })).status).toBe(403)
+    const dropped = await send('PUT', '/api/plugins/fake-gw/manifest', { manifest: base })
+    expect(dropped.status).toBe(200)
+    expect(pluginDetailSchema.parse(dropped.body)).toMatchObject({ state: 'active', runsCode: false, trust: { required: false, trustedHash: null } })
   })
 })

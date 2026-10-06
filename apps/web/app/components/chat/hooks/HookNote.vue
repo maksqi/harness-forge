@@ -2,11 +2,12 @@
 // One hook record in the transcript (Phase 11, ADR-048; docs/UI.md 7.31, 10.8, 14.2): `role="note"` named "Hook {event}:
 // {summary}". One line (the outcome's icon, the text of `hookOutcomeText`, the source: "Personal hook", "Project hook",
 // "From {plugin}" or "{n} hooks"), each hook's `systemMessage` as "Hook: {message}" under it (always visible,
-// `data-slot="hook-output"`), and a details toggle (`hook-note-toggle`, `aria-expanded` / `aria-controls`, `data-state`;
-// closed by default, not persisted): "Show context" (outcome `context`), "Show output" (`error`), else "Show details". The
-// details (`hook-note-details`): the context (`context`, and the feedback of a `blocked` record) in a `pre`
-// (`data-slot="hook-context"`), each hook's error text (`error`, `data-slot="hook-output"`), "Input the tool ran with"
-// (`rewritten`: `updatedInput` as JSON), then one source line per hook ("{source} · {label} · exit {n} · {duration}").
+// `data-slot="hook-system-message"`), and a details toggle (`hook-note-toggle`, `aria-expanded` / `aria-controls`,
+// `data-state`; closed by default, not persisted): "Show context" (outcome `context`), "Show output" (`error`), else
+// "Show details". The details (`hook-note-details`): the context (`context`, and the feedback of a `blocked` record) in
+// a `pre` (`data-slot="hook-context"`), each hook's error text (`error`, `data-slot="hook-output"`), "Input the tool
+// ran with" (`rewritten`: `updatedInput` as JSON), then one source line per hook ("{source} · {label} · exit {n} ·
+// {duration}").
 // Variants: `inline` and `tool` are muted lines without a border; `turn` (a hook carrier) is a card whose body is the
 // reason and whose details are always open (no toggle). Hook texts are plain text (never HTML). Store-free: ChatMessage
 // renders it for block kind `hook` (variant inline), under a user message's bubble (inline), for a hook carrier (turn)
@@ -127,7 +128,7 @@ const toggleLabel = computed(() => `${open.value ? 'Hide' : 'Show'} ${hookDetail
     <p
       v-for="(message, index) in systemMessages"
       :key="`message-${index}`"
-      data-slot="hook-output"
+      data-slot="hook-system-message"
       class="min-w-0 pl-5.5 break-words whitespace-pre-wrap"
     >
       Hook: {{ message }}

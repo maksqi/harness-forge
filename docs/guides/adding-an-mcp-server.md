@@ -4,7 +4,7 @@
 hands their tools to the model. The tools are named `mcp__<serverId>__<tool>` and use the same approval flow as any
 other tool.
 
-There are three ways to add a server:
+There are four ways to add a server:
 
 | Way | Best for | Trust |
 |---|---|---|

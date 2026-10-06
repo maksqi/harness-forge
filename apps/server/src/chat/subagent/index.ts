@@ -56,6 +56,9 @@
 // `LIMITS.subagentStopContinuationsMax` times and within the child's step budget (each round gets the steps left, the
 // finalize nudge at its last one). Never stored; the rounds are logged without the reason. With such hooks the child's
 // usage is the sum of its steps.
+// W11.17 (ADR-050): the parent run's project MCP result (`SubagentRunnerInput.projectTools`) goes to every child's tool
+// assembly (`childTools({ projectTools })`), and through the launch input to background children, so a child never sees
+// a global MCP server its project shadows.
 import type { AgentDefinitionFields, CustomizationEntry, RunOrigin, Settings, TaskAgent, TaskInput, TaskOutput, TaskStatus, TaskType, ToolMode } from '@harness-forge/shared'
 import type { ModelMessage, TextStreamPart, ToolSet } from 'ai'
 import type { Logger } from '../../logger.ts'
@@ -69,6 +72,7 @@ import type { BackgroundLaunchInput, BackgroundTasks } from '../background/types
 import type { ChildHooks } from '../hooks.ts'
 import type { StepPiece } from '../steps.ts'
 import type { ChildSession } from './host.ts'
+import type { ChildProjectTools } from './tools.ts'
 import { AGENT_TYPE_ALIASES, hookModelText, isHarnessError, LIMITS } from '@harness-forge/shared'
 import { isStepCount, streamText } from 'ai'
 import { BUILTIN_AGENT_DEFINITIONS, builtinAgentDefinition } from '../../builtin-plugins/core-agent/agents.ts'
@@ -236,6 +240,11 @@ export interface SubagentRunnerInput {
   readonly background: BackgroundTasks
   /** The origin of the parent run (Phase 10, `RunContext.origin`): stored with a background task (the chain rule). */
   readonly origin: RunOrigin
+  /**
+   * The parent run's project MCP tools (Phase 11, ADR-050; `RunProjectTools`): passed to every child's tool assembly
+   * and to background launches. Null or absent = none.
+   */
+  readonly projectTools?: ChildProjectTools | null
 }
 
 export interface SubagentRunner {
@@ -445,6 +454,8 @@ interface ChildHost {
   readonly scope: WorkspaceRunScopeInit | null
   /** The launching `task` call (the prefix of the child's call ids). */
   readonly toolCallId: string
+  /** The parent run's project MCP tools (shadowed global servers, project server tools), or null. */
+  readonly projectTools: ChildProjectTools | null
 }
 
 /** The control of one child: its signal, its slot and how an interruption reads. */
@@ -630,6 +641,7 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
       signal,
       allowlist: definition?.tools ?? null,
       hooks,
+      projectTools: host.projectTools,
     })
     // The preamble (its marker first), then the agent's body (a builtin: the read-only line of `explore`), then the
     // user's global instructions.
@@ -784,6 +796,7 @@ async function* runChild(run: ChildRun, task: TaskInput, options: RunSubagentOpt
     workspace: input.workspace,
     scope: input.scope,
     toolCallId: options.toolCallId,
+    projectTools: input.projectTools ?? null,
   }
   try {
     yield* executeChild(host, task, choice, {
@@ -822,6 +835,7 @@ export function backgroundLaunchInput(input: SubagentRunnerInput, task: TaskInpu
     chatInstructions: session.ctx.prepared.chat.settings.instructions,
     catalog: input.catalog,
     logger: session.ctx.logger,
+    projectTools: input.projectTools ?? null,
   }
 }
 
@@ -900,6 +914,8 @@ export interface DetachedChildInput {
    * then ends `limit` instead of `aborted`. Absent = every abort of the run signal is a stop.
    */
   readonly deadline?: AbortSignal
+  /** The launching run's project MCP tools (Phase 11, `BackgroundLaunchInput.projectTools`); null or absent = none. */
+  readonly projectTools?: ChildProjectTools | null
 }
 
 /**
@@ -930,6 +946,7 @@ async function* detachedChild(input: DetachedChildInput): AsyncGenerator<TaskOut
     workspace: input.workspace,
     scope: input.scope,
     toolCallId: input.toolCallId,
+    projectTools: input.projectTools ?? null,
   }
   yield* executeChild(host, input.task, choice, {
     signal,

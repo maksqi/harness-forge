@@ -2,11 +2,12 @@
 // (the project folder opened at most once per turn, reused by the run), the expansion frozen in `metadata.command`
 // (`kind`, `inlined`) so a regenerate never runs a span again and a v1.6 stored expansion is reused as stored, a refused
 // first message (409 `untrusted`) that leaves no chat row, the output style notices appended once, and the texts of the
-// three Phase 11 notices. Real shells in a `realpath(mkdtemp())` project (POSIX `sh` only; skipped on Windows); the
+// three Phase 11 notices, and (W11.17) the prompt hooks running before any span or `@path` read. Real shells in a `realpath(mkdtemp())` project (POSIX `sh` only; skipped on Windows); the
 // catalog, the trust service and the hooks are fakes.
 import type { ChatRequestBody, HarnessUIMessage } from '@harness-forge/shared'
 import type { TestApp } from '../testing/create-test-app.ts'
 import type { FakeCustomizationService } from '../testing/fake-customizations.ts'
+import type { FakeHookService } from '../testing/fake-hooks.ts'
 import type { FakeProjectTrustService } from '../testing/fake-project-trust.ts'
 import type { PreparedRun } from './prepare.ts'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
@@ -19,6 +20,7 @@ import { createSilentLogger } from '../logger.ts'
 import { commandTrustSubject } from '../services/project-config/index.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { catalogEntryKey, fakeCatalogEntry } from '../testing/fake-customizations.ts'
+import { fakeHookRecord, fakeHookResult } from '../testing/fake-hooks.ts'
 import { killLiveShellGroups } from '../workspace/shell.ts'
 import { applyCommandExpansions } from './context.ts'
 import { NOTICES } from './notices.ts'
@@ -151,6 +153,73 @@ describe.skipIf(!posix)('prepareRun: command extras (W11.5)', () => {
     const approved = await prepare(chatBody(existing, '/deploy', { projectId }))
     expect(approved.userMessage?.metadata?.command).toMatchObject({ name: 'deploy', expansion: 'Deploy: counted', source: 'project', kind: 'command', inlined: { shell: 1, files: [] } })
     expect(await counter()).toBe(`${before}run\n`)
+  })
+
+  it('runs UserPromptSubmit before any span: a block runs nothing and stores nothing; an allowing hook runs the span once (W11.17)', async () => {
+    const hooks = t.deps.hooks as FakeHookService
+    await writeFile(join(projectRoot, 'scripts', 'sentinel.sh'), 'echo ran >> sentinel.txt\necho sentinel\n')
+    const sentinel = async (): Promise<string> => readFile(join(projectRoot, 'sentinel.txt'), 'utf8').catch(() => '')
+    const fake = t.deps.customizations as FakeCustomizationService
+    await fake.create({ kind: 'command', content: '---\nname: sentinel\ndescription: Sentinel.\n---\nSentinel: !`sh scripts/sentinel.sh` with @README.md' })
+    try {
+      // A blocking hook: 409 `hook-blocked`, no sentinel, no chat row (this request created it).
+      const record = fakeHookRecord('UserPromptSubmit', 'blocked', { reason: 'not now' })
+      hooks.results.set('UserPromptSubmit', fakeHookResult({ block: true, reason: 'not now', record }))
+      const fresh = newChatId()
+      const runsBefore = hooks.runCalls.length
+      const blocked = await prepare(chatBody(fresh, '/sentinel go', { projectId })).catch((error: unknown) => error)
+      expect(blocked).toMatchObject({ code: 'conflict', details: { reason: 'hook-blocked', hook: { event: 'UserPromptSubmit', outcome: 'blocked' } } })
+      expect(await sentinel()).toBe('')
+      expect(await t.deps.chats.find(fresh)).toBeNull()
+      // The hook saw the typed text and the command's name, never the expansion.
+      expect(hooks.runCalls.slice(runsBefore).map(call => [call.event, call.input.prompt, call.input.command])).toEqual([['UserPromptSubmit', '/sentinel go', 'sentinel']])
+
+      // An allowing hook: it runs first (nothing ran yet), then the span runs once and the file is inlined.
+      const seen: string[] = []
+      hooks.results.set('UserPromptSubmit', async () => {
+        seen.push(await sentinel())
+        return fakeHookResult({ record: fakeHookRecord('UserPromptSubmit', 'context', { context: 'ok' }) })
+      })
+      opened.length = 0
+      const prepared = await prepare(chatBody(newChatId(), '/sentinel go', { projectId }))
+      expect(seen).toEqual([''])
+      expect(await sentinel()).toBe('ran\n')
+      expect(opened).toEqual([projectId])
+      expect(prepared.userMessage?.metadata?.command).toEqual({
+        name: 'sentinel',
+        input: 'go',
+        type: 'prompt',
+        expansion: 'Sentinel: sentinel with @README.md\n\ngo\n\n<file path="README.md">\nHello readme\n</file>',
+        source: 'user',
+        kind: 'command',
+        inlined: { shell: 1, files: ['README.md'] },
+      })
+      expect(prepared.userMessage?.parts.at(-1)).toMatchObject({ type: 'data-hook', data: { event: 'UserPromptSubmit', outcome: 'context' } })
+      expect(prepared.history.at(-1)).toBe(prepared.userMessage)
+      expect(prepared.writes.append?.message).toBe(prepared.userMessage)
+    }
+    finally {
+      hooks.results.delete('UserPromptSubmit')
+    }
+  })
+
+  it('refuses an unapproved project command before its prompt hooks run (W11.17)', async () => {
+    const hooks = t.deps.hooks as FakeHookService
+    const fake = t.deps.customizations as FakeCustomizationService
+    const gated = fakeCatalogEntry('command', 'gated', { source: 'project', path: '.harness/commands/gated.md' })
+    fake.entries.set(projectId, [...(fake.entries.get(projectId) ?? []), gated])
+    fake.bodies.set(catalogEntryKey(gated), '---\ndescription: Gated.\n---\nGated: !`sh scripts/count.sh`')
+    hooks.results.set('UserPromptSubmit', fakeHookResult())
+    try {
+      const before = hooks.runCalls.length
+      const counted = await counter()
+      await expect(prepare(chatBody(newChatId(), '/gated', { projectId }))).rejects.toMatchObject({ code: 'conflict', details: { reason: 'untrusted' } })
+      expect(hooks.runCalls.length).toBe(before)
+      expect(await counter()).toBe(counted)
+    }
+    finally {
+      hooks.results.delete('UserPromptSubmit')
+    }
   })
 
   it('refuses spans in a chat without a project with a 400 on the message', async () => {

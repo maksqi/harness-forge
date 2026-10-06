@@ -39,6 +39,12 @@
 //   new user message as `data-hook` parts; a block is the 409 `hook-blocked` before anything but the chat row is written,
 //   and the chat row is removed again when this request created it (open point 14: a blocked first message on `/`
 //   leaves no chat; `chat.created` is followed by `chat.deleted`);
+// - W11.17: the prompt hooks run BEFORE any `!` span or `@path` read of the new message's command: the command is
+//   resolved with `deferExpansion` (its checks: the 64 KB floor, 400 without a project or folder, 409 `disabled`, 409
+//   `untrusted`, before anything runs), the hooks see the typed text as `prompt` and the command's name (no expansion),
+//   and the spans and reads run only after the hooks passed (`withCommandExpansion`; a blocked message runs nothing and
+//   stores nothing). An image turn runs no prompt hook: its expansion (its prompt) is finished while planning;
+//   `PreparedRun` never holds the placeholder expansion;
 // - then `resolveRunOutputStyle` (`output-style.ts`, W11.6) gives `PreparedRun.outputStyle` for a chat-model run that
 //   calls the model (null for image turns and command replies) and its notices.
 import type {
@@ -61,7 +67,7 @@ import type { CustomizationCatalog } from '../services/customizations/types.ts'
 import type { FilesService } from '../services/files/types.ts'
 import type { OpenWorkspace, OpenWorkspaceResult } from '../services/projects/types.ts'
 import type { AppDeps } from '../types.ts'
-import type { CommandExpansionHost, CommandResolution } from './commands.ts'
+import type { CommandExpansionHost, CommandResolution, PromptCommandResolution } from './commands.ts'
 import type { RequestKind } from './history.ts'
 import type { RunOutputStyle } from './output-style.ts'
 import type { Run } from './runs.ts'
@@ -427,21 +433,47 @@ export function commandExpansionHost(deps: Pick<AppDeps, 'env' | 'projects' | 'p
   return expansionHost(deps, turnWorkspace(deps, projectId))
 }
 
-/** The stored form of the new user message (server metadata, command invocation; a carrier's parts as built). */
-async function buildUserMessage(context: PrepareContext): Promise<{ message: HarnessUIMessage, command: CommandResolution | null }> {
+/** The spans and `@path` reads of a new message's command that still have to run (`PromptCommandResolution.finish`). */
+type PendingExpansion = () => Promise<PromptCommandResolution>
+
+/**
+ * The stored form of the new user message (server metadata, command invocation; a carrier's parts as built). A command
+ * with spans or references comes back checked but not run (`expand`; its `metadata.command` holds a placeholder until
+ * `finishCommandExpansion`).
+ */
+async function buildUserMessage(context: PrepareContext): Promise<{ message: HarnessUIMessage, command: CommandResolution | null, expand: PendingExpansion | null }> {
   const { deps, run, body, request } = context
   const metadata: MessageMetadata = { modelRef: request.model.modelRef, startedAt: run.acceptedAt }
   if (context.serverMessage)
-    return { message: { id: body.message.id, role: 'user', parts: carrierParts(body.message.parts), metadata }, command: null }
+    return { message: { id: body.message.id, role: 'user', parts: carrierParts(body.message.parts), metadata }, command: null, expand: null }
   const parts = await normalizeUserParts(body.message.parts, deps.files)
-  const command = await resolveCommand(deps, firstTextOf(parts), {
+  const resolved = await resolveCommand(deps, firstTextOf(parts), {
     chatId: body.chatId,
     signal: run.signal,
     catalog: context.catalog,
     expansion: expansionHost(deps, context.turnWorkspace),
     logger: context.logger,
+    deferExpansion: true,
   })
-  return { message: { id: body.message.id, role: 'user', parts, metadata: { ...metadata, ...(command === null ? {} : { command: command.invocation }) } }, command }
+  let command = resolved
+  let expand: PendingExpansion | null = null
+  if (resolved?.kind === 'prompt' && resolved.finish !== undefined) {
+    const { finish, ...pending } = resolved
+    command = pending
+    expand = finish
+  }
+  return { message: { id: body.message.id, role: 'user', parts, metadata: { ...metadata, ...(command === null ? {} : { command: command.invocation }) } }, command, expand }
+}
+
+/** The new user message with the final invocation of its command: the spans and `@path` reads run now (W11.17). */
+async function finishCommandExpansion(message: HarnessUIMessage, expand: PendingExpansion): Promise<HarnessUIMessage> {
+  const metadata = message.metadata
+  if (metadata === undefined)
+    throw new Error('A new user message always has metadata.')
+  const resolution = await expand()
+  const finished: HarnessUIMessage = { ...message, metadata: { ...metadata, command: resolution.invocation } }
+  await validateMessage(finished)
+  return finished
 }
 
 /**
@@ -593,7 +625,7 @@ export async function resolveTurnModel(
  * the other resolution errors) before anything but the chat row is written.
  */
 export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger, options: PrepareRunOptions = {}): Promise<PreparedRun> {
-  const { planned, created, turn } = await planRun(deps, run, body, logger, options)
+  const { planned, created, turn, expand } = await planRun(deps, run, body, logger, options)
   const opened = await openRunWorkspace(deps, planned.chat, planned.target, planned.command, logger, turn)
   const prepared: PreparedRun = {
     ...planned,
@@ -602,6 +634,7 @@ export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody,
     turnRestriction: turnToolRestriction(planned.history),
   }
   // Phase 11 (ADR-048): `SessionStart` / `UserPromptSubmit`; a block stores nothing (the chat row of this request goes).
+  // W11.17: the command's spans and `@path` reads run only after them (a refusal of the spans removes the row too).
   let hooked: PreparedRun
   try {
     const prompt = await runPromptHooks({
@@ -615,9 +648,11 @@ export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody,
       logger,
     })
     hooked = await withHookRecords(prepared, prompt.records)
+    if (expand !== null)
+      hooked = await withCommandExpansion(hooked, expand)
   }
   catch (error) {
-    if (created && isHookBlockedError(error))
+    if (created && (isHookBlockedError(error) || isSpanRefusal(error)))
       await removeCreatedChat(deps, body.chatId, logger)
     throw error
   }
@@ -647,13 +682,29 @@ export async function withHookRecords(prepared: PreparedRun, records: readonly H
     return prepared
   const hooked: HarnessUIMessage = { ...message, parts: [...message.parts, ...records.map(data => ({ type: HOOK_PART_TYPE, data }) as HarnessUIMessagePart)] }
   await validateMessage(hooked)
+  return replaceUserMessage(prepared, message, hooked)
+}
+
+/** The prepared run with its new user message `message` replaced by `next` (the history and the append write too). */
+function replaceUserMessage(prepared: PreparedRun, message: HarnessUIMessage, next: HarnessUIMessage): PreparedRun {
   const append = prepared.writes.append
   return {
     ...prepared,
-    userMessage: hooked,
-    history: prepared.history.map(entry => (entry === message ? hooked : entry)),
-    writes: { ...prepared.writes, append: append !== null && append.message === message ? { ...append, message: hooked } : append },
+    userMessage: next,
+    history: prepared.history.map(entry => (entry === message ? next : entry)),
+    writes: { ...prepared.writes, append: append !== null && append.message === message ? { ...append, message: next } : append },
   }
+}
+
+/**
+ * The prepared run once the spans and `@path` reads of its new message's command ran (W11.17, after the prompt hooks):
+ * the new user message carries the final `metadata.command` (expansion, `kind`, `inlined`).
+ */
+async function withCommandExpansion(prepared: PreparedRun, expand: PendingExpansion): Promise<PreparedRun> {
+  const message = prepared.userMessage
+  if (message === null)
+    throw new Error('A command expansion needs the new user message.')
+  return replaceUserMessage(prepared, message, await finishCommandExpansion(message, expand))
 }
 
 /** Removes the chat row a blocked request created (Phase 11, open point 14); a failure is logged. */
@@ -672,6 +723,8 @@ interface PlannedRun {
   created: boolean
   /** The turn's project folder (opened at most once: the command expansion may have opened it). */
   turn: TurnWorkspace
+  /** The spans and `@path` reads of the new message's command, run after the prompt hooks (W11.17); null = none. */
+  expand: PendingExpansion | null
 }
 
 /** `prepareRun` without the workspace, the tool restriction, the prompt hooks and the output style. */
@@ -693,7 +746,7 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
   const context: PrepareContext = { deps, run, body, request, logger, catalog, serverMessage, turnWorkspace: turn }
   const turnModel = (override: string | undefined, continued: HarnessUIMessage | null = null): Promise<TurnModel> =>
     resolveTurnModel(deps, { target: request, imageOptions: body.imageOptions }, override, { signal: run.signal, logger, continued })
-  let planned: PlannedHistory
+  let planned: PlannedHistory & { expand: PendingExpansion | null }
   try {
     planned = await planHistory(context, kind, chat, turnModel)
   }
@@ -703,9 +756,10 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
       await removeCreatedChat(deps, body.chatId, logger)
     throw error
   }
-  const resolved: ResolvedModelBase = planned.target.model
+  const { expand, ...history } = planned
+  const resolved: ResolvedModelBase = history.target.model
   deps.catalog.markUsed(resolved.providerId, resolved.modelId).catch((error: unknown) => logger.debug('cannot record the model use', { err: error }))
-  return { planned: { ...planned, kind, chat, resolved, settings, catalog, requestModelRef: request.model.modelRef }, created, turn }
+  return { planned: { ...history, kind, chat, resolved, settings, catalog, requestModelRef: request.model.modelRef }, created, turn, expand }
 }
 
 /** What `planHistory` decides (the rest of `PreparedRun` comes from `planRun`). */
@@ -717,7 +771,7 @@ async function planHistory(
   kind: RequestKind,
   chat: ChatRecord,
   turnModel: (override: string | undefined, continued?: HarnessUIMessage | null) => Promise<TurnModel>,
-): Promise<PlannedHistory> {
+): Promise<PlannedHistory & { expand: PendingExpansion | null }> {
   const { deps, body } = context
   switch (kind) {
     case 'new': {
@@ -726,13 +780,20 @@ async function planHistory(
       // The path the message continues: `parentId`, or the active leaf when it is omitted (`not_found` when unknown).
       const parentId = body.parentId === undefined ? chat.activeLeafId : body.parentId
       const path = await deps.chats.listPath(body.chatId, parentId)
-      const { message, command } = await buildUserMessage(context)
+      const built = await buildUserMessage(context)
+      const { command } = built
+      let { message, expand } = built
       await validateMessage(message)
       // Only the approvals of this path: those of other versions stay pending.
       const superseded = supersedeApprovals(path)
       const decides = command?.kind === 'prompt' ? null : command
       const model = await turnModel(command?.kind === 'prompt' ? command.invocation.modelRef : undefined)
       checkCompactTarget(decides, model.target.kind)
+      if (expand !== null && model.target.kind !== 'chat') {
+        // An image turn runs no prompt hook and its prompt is the expansion: the spans and reads run now (W11.17).
+        message = await finishCommandExpansion(message, expand)
+        expand = null
+      }
       return {
         target: await planTarget(context, model, { message, parent: path.at(-1), decides, countDropped: true }),
         history: [...superseded.messages, message],
@@ -744,6 +805,7 @@ async function planHistory(
         superseded: superseded.count,
         writes: { updates: pathWrites(superseded.changed, path), append: { message, parentId }, activeLeafId: message.id },
         notices: model.notices,
+        expand,
       }
     }
     case 'regenerate': {
@@ -771,6 +833,7 @@ async function planHistory(
         superseded: superseded.count,
         writes: { updates: pathWrites(superseded.changed, kept), append: null, activeLeafId: answered.id },
         notices: model.notices,
+        expand: null,
       }
     }
     case 'continuation': {
@@ -799,6 +862,7 @@ async function planHistory(
         superseded: 0,
         writes: { updates: [{ message, parentId }], append: null, activeLeafId: message.id },
         notices: model.notices,
+        expand: null,
       }
     }
   }

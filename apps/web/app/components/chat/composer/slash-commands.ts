@@ -161,6 +161,14 @@ export function withPendingCommands(items: SlashItem[], pending: ReadonlySet<str
 const HINT_PATTERN = /^\/([a-z][\da-z-]{0,63})[ \t]+$/i
 
 /**
+ * W11.19: the text is exactly `/name` plus one or more blanks on one line, `name` following the slash name rule (up to 64
+ * characters, like `argumentHintAt`): where SlashArgumentHint shows its ghost hint.
+ */
+export function isTypedCommand(text: string): boolean {
+  return HINT_PATTERN.test(text)
+}
+
+/**
  * The argument hint to show after the typed command (SlashArgumentHint, docs/UI.md 7.28): the text is exactly `/name`
  * plus one or more blanks on one line and the item named `name` has a hint; else null.
  */

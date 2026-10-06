@@ -11,9 +11,13 @@
 // Phase 10 (W10.13): with two running background agents the dock's toggle, a row's Stop and Stop all; the Remember
 // dialog's targets, Save and Cancel; the `⋯` menus of Settings -> Customize and the editor's footer (Cancel, Save) are
 // 40 px targets.
+// Phase 11 (W11.13, docs/UI.md 7.32, 7.33, 9.13): the hook rows' `⋯` menus, the trust dialog's checkboxes and Approve,
+// the MCP servers dialog's Reconnect and variable input, and the composer's output style trigger and options are 40 px
+// targets.
 import type { Locator, Page } from '@playwright/test'
 import type { CleanupTask, HarnessApi } from '../../helpers/index.ts'
 import {
+  approveProjectItems,
   backgroundAgents,
   boxOf,
   byTestId,
@@ -22,16 +26,21 @@ import {
   changesPane,
   changesPanel,
   changesToggle,
+  composer,
   createPersonalDefinition,
   customizationRow,
   customizeSection,
   definitionFile,
   expect,
   expectMessageStatus,
+  hookGroup,
+  hookRow,
   lastAssistantMessage,
+  mcpVariable,
   MOCK_BACKGROUND_MODEL,
   MOCK_CHECKPOINT_DONE,
   MOCK_CHECKPOINT_FILE,
+  seedHookProjectChat,
   seedProject,
   seedProjectChat,
   test,
@@ -41,6 +50,8 @@ import {
   useAgentSettings,
   userMessages,
   waitForChatTask,
+  writeHookScript,
+  writeProjectFile,
 } from '../../helpers/index.ts'
 
 /** The collapsed rail on touch devices (`pointer-coarse:[--sidebar-width-icon:3.5rem]`). */
@@ -351,5 +362,67 @@ test.describe('tablet touch targets of the customization controls', () => {
       await expect.poll(async () => (await boxOf(radio.locator('xpath=..'))).height, { message: 'a tools option height' }).toBeGreaterThanOrEqual(MIN_TARGET)
     await cancel.tap()
     await expect(editor).toBeHidden()
+  })
+})
+
+test.describe('tablet touch targets of hooks, trust, project MCP and output styles', () => {
+  test('the hook row menus, the trust checkboxes and Approve, Reconnect, a variable input and the style menu are at least 40 px', async ({ page, api, cleanup }) => {
+    const { project, folder, chatId } = await seedHookProjectChat(api, cleanup, {
+      prefix: 'tablet-hooks',
+      scripts: [['record', { file: 'approved' }]],
+      hooks: commands => ({ PostToolUse: [hookGroup(commands.approved!, { matcher: 'Write' })] }),
+      files: { '.mcp.json': `${JSON.stringify({ mcpServers: { echo: { command: 'node', args: ['tools/echo.mjs'], env: { TOKEN: mcpVariable('TOKEN', 'abc') } } } })}\n` },
+    })
+    await approveProjectItems(api, project.id, item => item.kind === 'mcp')
+    // A second settings file adds a hook that waits for its approval.
+    const pending = await writeHookScript(folder.path, 'record', { file: 'pending' })
+    await writeProjectFile(folder.path, '.claude/settings.json', JSON.stringify({ hooks: { SessionStart: [hookGroup(pending)] } }))
+
+    // The Hooks tab: every row menu; Review… opens the trust dialog.
+    await page.goto(`/settings/customize?tab=hooks&project=${project.id}`)
+    const section = byTestId(page, testIds.hooksSection, { 'data-source': 'project' })
+    await expect(hookRow(section, { 'data-state': 'pending' })).toBeVisible()
+    for (const menu of await page.getByTestId(testIds.hookRowMenu).all())
+      await expectTouchTarget(menu, 'a hook row menu')
+    await section.getByTestId(testIds.customizeTrustReview).tap()
+    const trust = page.getByTestId(testIds.projectTrustDialog)
+    const item = byTestId(trust, testIds.projectTrustItem, { 'data-kind': 'hook', 'data-state': 'new' })
+    await expect(item).toBeVisible()
+    await expectTouchTarget(item.getByTestId(testIds.projectTrustSelect), 'an item checkbox')
+    await expectTouchTarget(trust.getByTestId(testIds.projectTrustSelectAll).first(), 'Select all')
+    await item.getByTestId(testIds.projectTrustSelect).tap()
+    await expect(trust.getByTestId(testIds.projectTrustApprove)).toHaveAttribute('data-count', '1')
+    await expectTouchTarget(trust.getByTestId(testIds.projectTrustApprove), 'Approve')
+    await page.keyboard.press('Escape')
+    await expect(trust).toBeHidden()
+
+    // The MCP servers dialog of the chat: Reconnect of the approved (idle) server and its variable's input.
+    await page.goto(`/chat/${chatId}`)
+    await page.getByTestId(testIds.chatProjectChip).tap()
+    await page.getByTestId(testIds.chatProjectMcp).tap()
+    const mcp = page.getByTestId(testIds.projectMcpDialog)
+    const server = byTestId(mcp, testIds.projectMcpServer, { 'data-server-id': 'echo' })
+    await expect(server).toHaveAttribute('data-state', 'idle')
+    await expectTouchTarget(server.getByTestId(testIds.projectMcpReconnect), 'Reconnect')
+    const variables = mcp.getByTestId(testIds.projectMcpVariables)
+    const toggle = variables.getByRole('button', { name: /^Variables/ })
+    if (await toggle.getAttribute('aria-expanded') !== 'true')
+      await toggle.tap()
+    const variable = byTestId(variables, testIds.projectMcpVariable, { 'data-name': 'TOKEN' })
+    await expect(variable).toHaveAttribute('data-state', 'default')
+    await expect.poll(async () => (await touchTargetSize(variable.getByRole('textbox'))).height, { message: 'the variable input height' }).toBeGreaterThanOrEqual(MIN_TARGET)
+    await page.keyboard.press('Escape')
+    await expect(mcp).toBeHidden()
+
+    // The composer's output style trigger and its options.
+    const trigger = composer(page).getByTestId(testIds.outputStyleTrigger)
+    await expectTouchTarget(trigger, 'the output style trigger')
+    await trigger.tap()
+    const options = page.getByTestId(testIds.outputStyleOption)
+    await expect(options.first()).toBeVisible()
+    for (const option of await options.all())
+      await expect.poll(async () => (await boxOf(option)).height, { message: 'a style option height' }).toBeGreaterThanOrEqual(MIN_TARGET)
+    await page.keyboard.press('Escape')
+    await expect(options).toHaveCount(0)
   })
 })

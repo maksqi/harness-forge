@@ -1,6 +1,7 @@
 // Declarative plugin draft routes (API.md 5.17). Owner: W3.3 (W3.3-T3). Thin: validate with the shared schemas and
 // call `deps.drafts` (`plugins/drafts/`). A reserved id answers 403 (`pluginDraftSchema` accepts it on purpose); fresh
-// auth (ADR-017) is decided by the service, which knows whether a manifest declares a stdio MCP server.
+// auth (ADR-017 / ADR-052) is decided by the service, which knows whether a manifest requires trust
+// (`manifestRequiresTrust`: a stdio MCP server, command hooks or `!` spans in a command template).
 import type { AppDeps, SensitiveOperationOptions } from '../../types.ts'
 import type { AppContext, AppEnv } from '../types.ts'
 import { apiRoutes, draftTestRequestSchema, pluginDraftSchema, pluginManifestUpdateSchema, pluginParamsSchema } from '@harness-forge/shared'

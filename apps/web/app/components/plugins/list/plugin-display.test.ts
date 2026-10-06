@@ -116,6 +116,20 @@ describe('plugin display rules', () => {
     expect(shadowedNote({ ...shadowed, shadowedBy: undefined }, pluginName)).toBe('Not used: another agent of the same name wins.')
   })
 
+  it('names a shadowed style an "output style", never by its raw kind (Phase 11)', () => {
+    const pluginName = (id: string) => (id === 'db-tools' ? 'Database tools' : id)
+    const style = { ...customizationEntry({ source: 'plugin', pluginId: 'style-pack', path: undefined }), kind: 'style' as const, state: 'shadowed' as const }
+    expect(shadowedNote({ ...style, shadowedBy: { source: 'user' } }, pluginName)).toBe('Not used: your personal output style wins.')
+    expect(shadowedNote({ ...style, shadowedBy: { source: 'project' } }, pluginName)).toBe('Not used: the project\'s output style wins.')
+    expect(shadowedNote({ ...style, shadowedBy: { source: 'project', path: '.harness/output-styles/terse.md' } }, pluginName))
+      .toBe('Not used: the project\'s .harness/output-styles/terse.md wins.')
+    expect(shadowedNote({ ...style, shadowedBy: { source: 'plugin', pluginId: 'db-tools' } }, pluginName))
+      .toBe('Not used: the output style from Database tools wins.')
+    expect(shadowedNote({ ...style, shadowedBy: { source: 'plugin' } }, pluginName)).toBe('Not used: a plugin\'s output style wins.')
+    expect(shadowedNote({ ...style, shadowedBy: { source: 'builtin' } }, pluginName)).toBe('Not used: the built-in output style wins.')
+    expect(shadowedNote({ ...style, shadowedBy: undefined }, pluginName)).toBe('Not used: another output style of the same name wins.')
+  })
+
   it('links agents and skills to their Customize tab (Phase 10)', () => {
     expect(customizeRoute('agent')).toEqual({ path: '/settings/customize', query: { tab: 'agents' } })
     expect(customizeRoute('skill')).toEqual({ path: '/settings/customize', query: { tab: 'skills' } })

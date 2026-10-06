@@ -1,10 +1,11 @@
 # Writing a code plugin
 
 A **code plugin** is a `plugin.json` plus one JavaScript or TypeScript file. The file's `setup(ctx)` function
-registers tools, providers, slash commands, MCP servers, hooks and (plugin API 1.4.0) sub-agent types and skills
-through `ctx`. Use a code plugin when a manifest is not enough: a tool the model can call, a provider for an unusual
-API, a command that computes its answer, a hook that changes prompts and tool calls, or agents and skills built from
-code.
+registers tools, providers, slash commands, MCP servers, hooks, (plugin API 1.4.0) sub-agent types and skills and
+(plugin API 1.5.0) output styles through `ctx`. Use a code plugin when a manifest is not enough: a tool the model can
+call, a provider for an unusual API, a command that computes its answer, a hook that changes prompts and tool calls, or
+agents, skills and styles built from code. (Command hooks, the shell commands of Claude Code's `hooks` format, are
+declared in `plugin.json` as `contributes.hooks`; plugin API 1.5.0 has no `ctx` API for them.)
 
 > **Trust.** A code plugin runs **inside the server process with its full rights**. It can read every API key and
 > conversation, the data directory and `process.env`, make any network request and start programs. harness-forge
@@ -64,7 +65,7 @@ The entry default-exports `{ setup(ctx), dispose? }`:
 
 | `ctx` member | Use |
 |---|---|
-| `tools.register`, `providers.register`, `models.register`, `commands.register`, `mcp.register`, `hooks.on`, (1.4.0) `agents.register`, `skills.register` | contributions (each returns a `Disposable`) |
+| `tools.register`, `providers.register`, `models.register`, `commands.register`, `mcp.register`, `hooks.on`, (1.4.0) `agents.register`, `skills.register`, (1.5.0) `outputStyles.register` | contributions (each returns a `Disposable`) |
 | `settings.get()`, `settings.onChange()` | the plugin's settings form (Configuration tab) |
 | `secrets`, `storage` | encrypted strings and JSON values scoped to the plugin |
 | `models.resolve(ref)` + `ai.generateText` | call any configured model |
@@ -370,12 +371,18 @@ A command runs when a user message starts with `/name`. The text after the name 
 | `run` returning `{ type: 'prompt', text }` | `text` goes to the model instead of the message |
 | `run` returning `{ type: 'reply', markdown }` | shown as the answer, with no model call (30 s limit) |
 
-Command names are global: the first plugin to register a name wins, and a later registration throws. The names
-`new`, `model`, `effort`, `mode`, `help` and (since v1.6) `remember` belong to the composer, and `compact` to the
-server: registering one of them throws `validation_error`. The builtin commands (`/explain`, `/review`,
+Command names are global: the first plugin to register a name wins, and a later registration throws. The names `new`,
+`model`, `effort`, `mode`, `help`, (since v1.6) `remember` and (since v1.7) `output-style` belong to the composer, and
+`compact` to the server: registering one of them throws `validation_error`. The builtin commands (`/explain`, `/review`,
 `/translate`, ...) are listed in [PLUGINS.md section 1](../PLUGINS.md#builtin-plugins). Since v1.6 a user's personal
-command (Settings -> Customize) or a project command (`.harness/commands/`, `.claude/commands/`) with the same name
-wins over yours where it exists ([customizing agents](./customizing-agents.md)).
+command (Settings -> Customize) or a project command (`.harness/commands/`, `.claude/commands/`) with the same name wins
+over yours where it exists ([customizing agents](./customizing-agents.md)).
+
+Since plugin API 1.5.0 a `template` can hold `` !`cmd` `` lines and `@path` references, like a project command file:
+in a project chat the lines run in the project folder before the model is called and the files are inlined
+([customizing agents](./customizing-agents.md#commands-harnesscommandsnamemd)); outside projects a template with
+`` !`cmd` `` lines is refused and `@path` stays text. A declarative manifest whose template holds such a line requires
+trust, like a code plugin. The prompt a `run` command returns is never scanned for them.
 
 ## Agents and skills (plugin API 1.4.0)
 
@@ -429,18 +436,21 @@ changes discarded; after 5 failures in a row it is switched off until the plugin
 | `chat.messages` | `messages` sent to the model | inject context, strip content |
 | `tool.approve` | `decision`: `allow` / `ask` / `deny` | auto-approve trusted inputs, deny dangerous ones |
 | `tool.before` | `input`; **throw to block the call** | validation, redaction |
-| `tool.after` | `output`; 1.5.0: `context` (a text the model reads at its next step) | post-processing, redaction, a lint hint |
+| `tool.after` | `output`; 1.5.0: `context` (a text the model reads at its next step; the reply shows it as a `PostToolUse` hook note from your plugin, labelled `tool.after`, at most 10,000 characters) | post-processing, redaction, a lint hint |
 | `message.completed` | nothing (observe) | logging, usage accounting |
-| `prompt.submit` (1.5.0) | `block` (refuse the message with a reason), `context` | a secret scanner, ticket context |
+| `prompt.submit` (1.5.0) | `block` (refuse the message with a reason: a 409 `hook-blocked`, the message stays in the composer and nothing is stored), `context`; `input.command` is the slash command's name when the message is a command | a secret scanner, ticket context |
 | `session.start` (1.5.0) | `context` (at a chat's first turn and after a compaction) | project facts, the current branch |
 | `run.stop` (1.5.0) | `continue` (a reason: the agent goes on; at most 5 in a row) | "the tests are red, keep going" |
 | `subagent.stop` (1.5.0) | `continue` (one more sub-agent round, at most 2) | a report that misses a section |
 | `compact.before` (1.5.0) | nothing (observe) | logging |
 | `notification` (1.5.0) | nothing (observe; a run waits for an approval) | desktop or chat notifications |
 
-`prompt.submit`, `session.start` and `run.stop` carry `projectId` (null outside projects). Declare `"engines": { "harness": "^1.5.0" }` when you use
-one. A plugin can also ship **command hooks** without code: `contributes.hooks` in `plugin.json`, Claude Code's
-format; such a plugin needs trust ([PLUGINS.md](../PLUGINS.md#declarative-hooks-plugin-api-150),
+`prompt.submit`, `session.start` and `run.stop` carry `projectId` (null outside projects). Declare
+`"engines": { "harness": "^1.5.0" }` when you use one. The 1.5.0 events run together with the command hooks of the same
+event and are listed in Settings → Customize → Hooks under your plugin; the kill switches of command hooks (**Run
+hooks**, `HF_WORKSPACE_SHELL=0`) do not stop them. A plugin can also ship **command hooks** without code:
+`contributes.hooks` in `plugin.json`, Claude Code's format; such a plugin needs trust, and the trust pin covers
+`plugin.json`, not the scripts its hooks call ([PLUGINS.md](../PLUGINS.md#declarative-hooks-plugin-api-150),
 [hooks and project MCP servers](hooks-and-project-mcp.md)).
 
 ```js
@@ -469,7 +479,9 @@ ctx.outputStyles.register({
 ```
 
 The name follows the agent and skill pattern and cannot be `default`, `explanatory` or `learning`; a personal or
-project style of the same name wins. Guide: [output styles](output-styles.md).
+project style of the same name wins. At most 20 styles per plugin (manifest and code together; more throws
+`validation_error`); a name another plugin registered first throws `conflict` (a manifest entry is skipped with a
+warning in the Logs tab instead). Guide: [output styles](output-styles.md).
 
 ## Settings, secrets and storage
 
@@ -497,8 +509,8 @@ Calls are billed to the user's key, so say in your description that the plugin m
 ## Lifecycle, debugging and trust
 
 - **States**: `active`, `disabled`, `untrusted` (the files changed since they were trusted), `incompatible`
-  (`engines.harness` does not match the plugin API `1.4.0`, so use `"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` /
-  `"^1.3.0"` / `"^1.4.0"` for the members of those versions),
+  (`engines.harness` does not match the plugin API `1.5.0`, so use `"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` /
+  `"^1.3.0"` / `"^1.4.0"` / `"^1.5.0"` for the members of those versions),
   `error` (invalid manifest, `setup` threw or timed out, build failed). The plugin card and the detail header show the
   state and the last error.
 - **Logs**: `ctx.logger.debug/info/warn/error(message, data)` shows up in the Logs tab (last 500 entries) and the

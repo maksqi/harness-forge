@@ -1,5 +1,5 @@
 import type { HookData } from '@harness-forge/shared'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -11,10 +11,24 @@ function badge(hooks: readonly HookData[]) {
   return mount({ render: () => h(TooltipProvider, { delayDuration: 0 }, { default: () => h(ToolHookBadge, { hooks }) }) }, { attachTo: document.body })
 }
 
+/** The badge inside a row button, like ToolPart's CollapsibleTrigger. */
+async function badgeInRow(hooks: readonly HookData[]) {
+  const wrapper = mount({
+    render: () => h(TooltipProvider, { delayDuration: 0 }, {
+      default: () => h('button', { 'type': 'button', 'data-row': '' }, [h('span', 'write_file'), h(ToolHookBadge, { hooks })]),
+    }),
+  }, { attachTo: document.body })
+  // The badge finds its row once its trigger is mounted (a post-flush watcher adds the focus listeners).
+  await flushPromises()
+  return { wrapper, row: wrapper.get('[data-row]').element as HTMLButtonElement }
+}
+
 afterEach(() => {
   vi.useRealTimers()
   document.body.replaceChildren()
 })
+// Registered last, so it runs first (after hooks run in reverse order): unmount before the body is cleared.
+enableAutoUnmount(afterEach)
 
 describe('toolHookBadge', () => {
   it('reads "Blocked by hook" for a PreToolUse denial, with the screen reader text', () => {
@@ -45,6 +59,41 @@ describe('toolHookBadge', () => {
     expect(root.attributes('data-value')).toBe('rewritten')
     expect(root.text()).toBe(', input changed by hook')
     expect(root.findAll('svg')[1]!.classes().join(' ')).toMatch(/pencil/)
+  })
+
+  it('shows its tooltip while the row has keyboard focus; the badge itself takes no focus', async () => {
+    const { row } = await badgeInRow([hookData({ outcome: 'allowed', reason: undefined })])
+    const root = document.querySelector(`[data-testid="${testIds.toolRowHook}"]`)!
+    expect(root.hasAttribute('tabindex')).toBe(false)
+    expect(document.body.querySelector('[role="tooltip"]')).toBeNull()
+
+    row.focus()
+    await flushPromises()
+    expect(document.body.querySelector('[role="tooltip"]')?.textContent).toBe('Allowed by hook')
+
+    row.blur()
+    await flushPromises()
+    expect(document.body.querySelector('[role="tooltip"]')).toBeNull()
+
+    // Escape closes it while the row keeps its focus.
+    row.focus()
+    await flushPromises()
+    expect(document.body.textContent).toContain('Allowed by hook')
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+    expect(document.body.querySelector('[role="tooltip"]')).toBeNull()
+  })
+
+  it('keeps the tooltip closed when the row got its focus from a click (not :focus-visible)', async () => {
+    const { row } = await badgeInRow([hookData({ outcome: 'rewritten', reason: undefined, updatedInput: { path: 'b' } })])
+    const original = Element.prototype.matches
+    const matches = vi.spyOn(Element.prototype, 'matches').mockImplementation(function (this: Element, selector: string) {
+      return selector === ':focus-visible' ? false : original.call(this, selector)
+    })
+    row.focus()
+    await flushPromises()
+    matches.mockRestore()
+    expect(document.body.querySelector('[role="tooltip"]')).toBeNull()
   })
 
   it('renders nothing without a PreToolUse record of a badge outcome', () => {

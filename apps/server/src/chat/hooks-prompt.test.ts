@@ -15,7 +15,7 @@ import { z } from 'zod'
 import { createSilentLogger } from '../logger.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { createFakeHookSnapshot, fakeHookRecord, fakeHookResult } from '../testing/fake-hooks.ts'
-import { blockingRecord, hookBlockedError, isHookBlockedError, promptText, runPromptHooks } from './hooks-prompt.ts'
+import { blockingRecord, hookBlockedError, isHookBlockedError, PROMPT_HOOKS_HEADER, promptText, runPromptHooks, withPromptHooksHeader } from './hooks-prompt.ts'
 import { answerApprovals, chatBody, messageText, postChat, readSse, runnerOf, streamedText, testChatId } from './testing.ts'
 
 const PROMPT_SECRET = 'prompt-sentinel-3f9a'
@@ -185,6 +185,47 @@ describe('prompt hooks at submit (W11.2-T1, T3)', () => {
     hooks.runCalls.length = 0
     await send(hooksBody(chatId, 'again'))
     expect(hooks.runCalls.map(call => call.event)).toEqual(['UserPromptSubmit'])
+  })
+
+  it('the accepted response counts the records added to the new user message (W11.19); none without records', async () => {
+    hooks.results.set('SessionStart', fakeHookResult({ context: 'Session notes', record: fakeHookRecord('SessionStart', 'context', { context: 'Session notes' }) }))
+    hooks.results.set('UserPromptSubmit', fakeHookResult({ context: 'Prompt notes', record: fakeHookRecord('UserPromptSubmit', 'context', { context: 'Prompt notes' }) }))
+    const chatId = newChatId()
+    const first = hooksBody(chatId, 'context?')
+    const response = await postChat(t, first)
+    expect(response.status).toBe(200)
+    expect(response.headers.get(PROMPT_HOOKS_HEADER)).toBe('2')
+    await readSse(response)
+    await runnerOf(t).idle()
+    const stored = await detail(chatId)
+    expect(recordsOf(stored.messages[0])).toHaveLength(2)
+
+    // A regenerate reuses the stored records (no new user message): no header.
+    const regenerated = await postChat(t, { ...first, trigger: 'regenerate-message', messageId: stored.messages[1]!.id })
+    expect(regenerated.headers.has(PROMPT_HOOKS_HEADER)).toBe(false)
+    await readSse(regenerated)
+    await runnerOf(t).idle()
+
+    // A message whose hooks said nothing.
+    hooks.results.clear()
+    hooks.present.add('UserPromptSubmit')
+    const plain = await postChat(t, hooksBody(chatId, 'plain', { parentId: (await detail(chatId)).messages.at(-1)!.id }))
+    expect(plain.status).toBe(200)
+    expect(plain.headers.has(PROMPT_HOOKS_HEADER)).toBe(false)
+    await readSse(plain)
+    await runnerOf(t).idle()
+  })
+
+  it('withPromptHooksHeader: only for a request whose new user message has hook records', () => {
+    const record = fakeHookRecord('UserPromptSubmit', 'context', { context: 'c' })
+    const hooked = { parts: [{ type: 'text', text: 'hi' }, { type: 'data-hook', data: record }, { type: 'data-hook', data: record }] } as HarnessUIMessage
+    expect(withPromptHooksHeader(new Response('x'), hooked, 'request').headers.get(PROMPT_HOOKS_HEADER)).toBe('2')
+    expect(withPromptHooksHeader(new Response('x'), hooked, 'queue').headers.has(PROMPT_HOOKS_HEADER)).toBe(false)
+    expect(withPromptHooksHeader(new Response('x'), { parts: [{ type: 'text', text: 'hi' }] } as HarnessUIMessage, 'request').headers.has(PROMPT_HOOKS_HEADER)).toBe(false)
+    expect(withPromptHooksHeader(new Response('x'), null, 'request').headers.has(PROMPT_HOOKS_HEADER)).toBe(false)
+    // Immutable headers (a fetched response) never make it throw.
+    const frozen = Response.error()
+    expect(withPromptHooksHeader(frozen, hooked, 'request')).toBe(frozen)
   })
 
   it('sessionStart continue: false blocks the message (409 hook-blocked, nothing stored)', async () => {

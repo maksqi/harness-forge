@@ -8,14 +8,15 @@
 // ChatComposer mounts it next to the textarea inside a `relative` box of the textarea's size; the mirror's padding,
 // font size, line height and wrapping repeat the textarea's (ChatComposer TEXTAREA_CLASS: px-4 pt-3 pb-1, text-base
 // leading-6 md:text-[15px]; keep them in sync). Props and the root test id are frozen from Gate P10-0b (C33).
+// W11.19: the typed name follows the slash name rule of `argumentHintAt` (`isTypedCommand`: up to 64 characters, the
+// skill names of Phase 11), so a long name gets its hint too.
 import { computed } from 'vue'
 import { testIds } from '~/utils/testids'
+import { isTypedCommand } from './slash-commands'
 
 const props = defineProps<{ text: string, hint: string | null, describedById: string }>()
 
-const TYPED_COMMAND = /^\/[a-z][\da-z-]{0,31}[ \t]+$/i
-
-const visible = computed(() => props.hint !== null && props.hint !== '' && TYPED_COMMAND.test(props.text))
+const visible = computed(() => props.hint !== null && props.hint !== '' && isTypedCommand(props.text))
 </script>
 
 <template>

@@ -34,6 +34,10 @@
 // content with `expandArguments` (text only, no spans) into a prompt invocation with `kind: 'skill'`. Names may have 64
 // characters (`SLASH_NAME_PATTERN`; commands stay at 32). `listServerCommands` / `isServerCommandFor` include the
 // skills. Span commands, outputs and file contents are never logged.
+// W11.17: with `CommandContext.deferExpansion` (`prepare.ts`, a new message), a body with something to inline is checked
+// (the 64 KB floor, the project, the shell switch, the folder, the trust hash) but its spans and `@path` reads wait: the
+// prompt resolution carries `finish()` and a placeholder expansion (every span empty, no file block) that is never
+// stored; `prepare.ts` runs the prompt hooks first and calls `finish()` only once they passed.
 import type { CommandDefinition, CommandRunResult } from '@harness-forge/plugin-sdk'
 import type { CommandInvocation, CommandSource, CommandSummary, CustomizationEntry, CustomizationSource, HarnessUIMessage } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
@@ -42,7 +46,7 @@ import type { Registry } from '../registry/types.ts'
 import type { CustomizationCatalog, CustomizationService, LoadedDefinition } from '../services/customizations/types.ts'
 import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { AppDeps } from '../types.ts'
-import type { CommandBodyExpansion, CommandBodySource } from './inline/index.ts'
+import type { CommandBodyExpansion, CommandBodySource, CommandPlanRunner } from './inline/index.ts'
 import { Buffer } from 'node:buffer'
 import {
   COMMAND_NAME_PATTERN,
@@ -59,7 +63,7 @@ import {
   SLASH_NAME_PATTERN,
 } from '@harness-forge/shared'
 import { GUARD_TIMEOUTS } from '../plugins/guard.ts'
-import { expandCommandPlan, minimalExpansion, needsInlining } from './inline/index.ts'
+import { expandCommandPlan, minimalExpansion, needsInlining, prepareCommandPlan } from './inline/index.ts'
 
 export interface ParsedCommand {
   name: string
@@ -87,8 +91,20 @@ export function expandTemplate(template: string, input: string): string {
   return input === '' ? template : `${template}\n\n${input}`
 }
 
+/** A command whose expansion is sent to the model instead of the typed text. */
+export interface PromptCommandResolution {
+  kind: 'prompt'
+  invocation: CommandInvocation & { type: 'prompt', expansion: string }
+  /**
+   * W11.17 (`CommandContext.deferExpansion`): the body's `!` spans and `@path` files are checked but have not run;
+   * `invocation.expansion` is a placeholder (every span empty, no file block, never stored) until `finish()` runs them
+   * and answers the final resolution (rejects with the errors of the spans, the 64 KB cap and the abort of the run).
+   */
+  finish?: () => Promise<PromptCommandResolution>
+}
+
 export type CommandResolution
-  = | { kind: 'prompt', invocation: CommandInvocation & { type: 'prompt', expansion: string } }
+  = | PromptCommandResolution
     | { kind: 'reply', invocation: CommandInvocation & { type: 'reply' }, markdown: string }
     | { kind: 'failed', invocation: CommandInvocation & { type: 'reply' }, error: HarnessError }
     /** `/compact [focus]` (Phase 9): `focus` is the input, trimmed (null when empty). */
@@ -138,6 +154,11 @@ export interface CommandContext {
   expansion?: CommandExpansionHost
   /** Phase 11: the request's logger (counts and durations of spans only, never commands, outputs or contents). */
   logger?: Logger
+  /**
+   * W11.17: check a body's spans and references but run them only when the resolution's `finish()` is called (the
+   * prompt hooks run in between, `prepare.ts`); default false (they run while resolving).
+   */
+  deferExpansion?: boolean
 }
 
 function tooLong(name: string): HarnessError {
@@ -169,7 +190,7 @@ export function compactNeedsChatModel(): HarnessError {
  */
 type InvocationExtras = Pick<CommandInvocation, 'source' | 'modelRef' | 'allowedTools' | 'kind' | 'inlined'>
 
-function promptResolution(name: string, input: string, expansion: string, extras: InvocationExtras = {}): CommandResolution {
+function promptResolution(name: string, input: string, expansion: string, extras: InvocationExtras = {}): PromptCommandResolution {
   if (Buffer.byteLength(expansion, 'utf8') > LIMITS.commandExpansionBytes)
     throw tooLong(name)
   return { kind: 'prompt', invocation: { name, input, type: 'prompt', expansion, ...extras } }
@@ -233,11 +254,17 @@ function inlinedExtras(expansion: CommandBodyExpansion): InvocationExtras {
   return expansion.inlined === undefined ? {} : { kind: 'command', inlined: expansion.inlined }
 }
 
+/** The expansion of a command body: done, or (`deferExpansion`) checked and waiting for `run` behind a placeholder. */
+type BodyExpansion
+  = | { readonly done: CommandBodyExpansion }
+    | { readonly placeholder: string, readonly run: CommandPlanRunner }
+
 /**
  * The expansion of a command body (Phase 11, ADR-052). With an expansion host and something to inline (spans; `@path`
  * references in a project chat), the body is scanned before the arguments, refused above 64 KB before anything runs,
- * and expanded by `chat/inline/` (the checks, the spans, the files); otherwise `fallback()` (the Phase 10 expansion:
- * `expandArguments` for definitions, `expandTemplate` for plugin templates).
+ * and expanded by `chat/inline/` (the checks, the spans, the files; W11.17: with `deferExpansion` only the checks, the
+ * spans and files wait for `run`); otherwise `fallback()` (the Phase 10 expansion: `expandArguments` for definitions,
+ * `expandTemplate` for plugin templates).
  */
 async function bodyExpansion(
   name: string,
@@ -246,16 +273,31 @@ async function bodyExpansion(
   source: CommandBodySource,
   context: CommandContext,
   fallback: () => string,
-): Promise<CommandBodyExpansion> {
+): Promise<BodyExpansion> {
   const host = context.expansion
   if (host === undefined)
-    return { text: fallback() }
+    return { done: { text: fallback() } }
   const plan = planCommandExpansion(body)
   if (!needsInlining(plan, host))
-    return { text: fallback() }
-  if (Buffer.byteLength(minimalExpansion(plan, input), 'utf8') > LIMITS.commandExpansionBytes)
+    return { done: { text: fallback() } }
+  const placeholder = minimalExpansion(plan, input)
+  if (Buffer.byteLength(placeholder, 'utf8') > LIMITS.commandExpansionBytes)
     throw tooLong(name)
-  return expandCommandPlan({ name, input, plan, source, host, signal: context.signal, ...(context.logger === undefined ? {} : { logger: context.logger }) })
+  const request = { name, input, plan, source, host, signal: context.signal, ...(context.logger === undefined ? {} : { logger: context.logger }) }
+  if (context.deferExpansion !== true)
+    return { done: await expandCommandPlan(request) }
+  return { placeholder, run: await prepareCommandPlan(request) }
+}
+
+/** The prompt resolution of a body expansion (`extras`: the definition's fields; `kind` / `inlined` follow the body). */
+function bodyResolution(name: string, input: string, body: BodyExpansion, extras: InvocationExtras = {}): PromptCommandResolution {
+  if ('done' in body)
+    return promptResolution(name, input, body.done.text, { ...extras, ...inlinedExtras(body.done) })
+  const finish = async (): Promise<PromptCommandResolution> => {
+    const done = await body.run()
+    return promptResolution(name, input, done.text, { ...extras, ...inlinedExtras(done) })
+  }
+  return { ...promptResolution(name, input, body.placeholder, extras), finish }
 }
 
 /** The entry or definition cannot be used: the abort of a stopped run is rethrown, anything else is `definitionUnavailable`. */
@@ -290,11 +332,10 @@ async function definitionResolution(
   const modelRef = commandModelRef(fields.model)
   const allowedTools = commandAllowedTools(fields.allowedTools)
   const expansion = await bodyExpansion(parsed.name, fields.body, parsed.input, entry.source, context, () => expandArguments(fields.body, parsed.input).text)
-  return promptResolution(parsed.name, parsed.input, expansion.text, {
+  return bodyResolution(parsed.name, parsed.input, expansion, {
     source,
     ...(modelRef === undefined ? {} : { modelRef }),
     ...(allowedTools === undefined ? {} : { allowedTools }),
-    ...inlinedExtras(expansion),
   })
 }
 
@@ -362,7 +403,7 @@ export async function resolveCommand(
   if (template !== undefined) {
     // A loaded plugin's template is a trusted source of spans (Phase 11); without spans or references: `expandTemplate`.
     const expansion = await bodyExpansion(name, template, input, 'plugin', context, () => expandTemplate(template, input))
-    return promptResolution(name, input, expansion.text, inlinedExtras(expansion))
+    return bodyResolution(name, input, expansion)
   }
   const run = definition.run
   if (run === undefined)

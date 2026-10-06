@@ -506,7 +506,7 @@ describe('copyTitle', () => {
   })
 })
 
-describe('import: personal agents, commands and skills (Phase 10)', () => {
+describe('import: personal definitions (Phase 10; Phase 11 adds output styles)', () => {
   it('round-trips customizations.json into a fresh server on request, keeping an existing kind and name', async () => {
     const source = await customizedDataApp()
     await source.deps.chats.create({ id: chatId(1), title: 'With definitions', messages: [user(1), assistant(2)] })
@@ -577,18 +577,18 @@ describe('import: personal agents, commands and skills (Phase 10)', () => {
   it('warns when there is nothing to restore, the file is unusable, the restore fails or the upload is a chat JSON', async () => {
     const target = await customizedDataApp()
     const old = await importBytes(target, backupZip({ 'manifest.json': manifestOf(0) }), { restoreCustomizations: true })
-    expect(old).toMatchObject({ warnings: ['The backup has no personal agents, commands or skills (customizations.json), so no personal agents, commands or skills were restored.'] })
+    expect(old).toMatchObject({ warnings: ['The backup has no personal definitions (customizations.json), so no personal definitions were restored.'] })
     expect(old.customizations).toBeUndefined()
     // A backup that had none: nothing to say.
     const empty = await importBytes(target, backupZip({ 'manifest.json': manifestOf(0, { includes: { files: false, settings: false, customizations: true } }) }), { restoreCustomizations: true })
     expect(empty.warnings).toEqual([])
     const missing = await importBytes(target, backupZip({ 'manifest.json': manifestOf(0, { includes: { files: false, settings: false, customizations: true }, counts: { chats: 0, messages: 0, files: 0, fileBytes: 0, customizations: 2 } }) }), { restoreCustomizations: true })
-    expect(missing.warnings).toEqual(['The backup lists personal agents, commands or skills, but customizations.json is missing, so no personal agents, commands or skills were restored.'])
+    expect(missing.warnings).toEqual(['The backup lists personal definitions, but customizations.json is missing, so no personal definitions were restored.'])
 
     const notJson = await importBytes(target, backupZip({ 'manifest.json': manifestOf(0), 'customizations.json': 'not json' }), { restoreCustomizations: true })
-    expect(notJson.warnings).toEqual(['No personal agents, commands or skills were restored: customizations.json is not valid UTF-8 JSON.'])
+    expect(notJson.warnings).toEqual(['No personal definitions were restored: customizations.json is not valid UTF-8 JSON.'])
     const noList = await importBytes(target, backupZip({ 'manifest.json': manifestOf(0), 'customizations.json': { entries: [] } }), { restoreCustomizations: true })
-    expect(noList.warnings).toEqual(['No personal agents, commands or skills were restored: customizations.json has no "items" list.'])
+    expect(noList.warnings).toEqual(['No personal definitions were restored: customizations.json has no "items" list.'])
     expect(target.customizations.calls.restoreBackup).toBe(0)
 
     const failing = await customizedDataApp({
@@ -605,11 +605,11 @@ describe('import: personal agents, commands and skills (Phase 10)', () => {
       'customizations.json': { items: [{ kind: 'agent', name: 'good', content: definition('agent', 'good'), enabled: true }] },
     })
     const failed = await importBytes(failing, zip, { restoreCustomizations: true })
-    expect(failed).toMatchObject({ counts: { imported: 1 }, warnings: ['No personal agents, commands or skills were restored because of a server error.'] })
+    expect(failed).toMatchObject({ counts: { imported: 1 }, warnings: ['No personal definitions were restored because of a server error.'] })
     expect(failed.customizations).toBeUndefined()
 
     const chat = await importBytes(target, JSON.stringify(exportOf(chatId(2), [user(2)])), { restoreCustomizations: true })
-    expect(chat.warnings).toEqual(['Personal agents, commands and skills are restored only from a backup zip.'])
+    expect(chat.warnings).toEqual(['Personal definitions are restored only from a backup zip.'])
   })
 
   it('brings a delivered background task result back with its chat (the parts, never a task row)', async () => {

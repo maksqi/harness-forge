@@ -16,7 +16,7 @@ code reviewer.
 1. Install this folder: **Plugins** -> **Install…** -> **Local folder** -> Link or Copy, then check **I trust …**
    (see [the examples README](../README.md#install-an-example)). The trust warning lists the command it runs:
    `sh "$HARNESS_PLUGIN_ROOT/scripts/remind-tests.sh"`.
-2. The plugin card reads "1 hook · 1 output style". Settings -> Customize lists the hook under **Hooks -> From plugins**
+2. The plugin card reads "1 output style · 1 hook". Settings -> Customize lists the hook under **Hooks -> From plugins**
    and the style under **Output styles -> From plugins**.
 3. In a project chat with a tool-capable model, ask the agent to change a file. After `write_file` or `edit_file`
    succeeds, the reply shows the note "Hook added context · PostToolUse" and the agent reads the reminder at its next

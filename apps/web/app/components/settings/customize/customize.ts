@@ -94,6 +94,22 @@ export function tabOf(tab: unknown): CustomizeTab {
   return CUSTOMIZE_TAB_ORDER.find(item => CUSTOMIZE_TAB_VALUES[item] === value) ?? 'agent'
 }
 
+/** W11.19: the space kept beside the active tab when the tab row scrolls it into view (px). */
+export const TAB_REVEAL_INSET = 16
+
+/**
+ * W11.19: how far the tab row must scroll sideways (`scrollLeft += offset`) so the active tab lies inside its visible part
+ * with `inset` beside it: negative to the start, positive to the end, 0 when it is visible already. A tab wider than the
+ * row keeps its start in view. Boxes are viewport rectangles (`getBoundingClientRect`).
+ */
+export function tabRevealOffset(row: { left: number, right: number }, tab: { left: number, right: number }, inset = TAB_REVEAL_INSET): number {
+  const before = tab.left - (row.left + inset)
+  if (before < 0)
+    return before
+  const after = tab.right - (row.right - inset)
+  return after > 0 ? Math.min(after, before) : 0
+}
+
 /** The kind of a `?tab=` value: `agents` when it is missing or unknown (the hooks tab included). */
 export function kindOfTab(tab: unknown): CustomizationKind {
   const value = Array.isArray(tab) ? tab[0] : tab

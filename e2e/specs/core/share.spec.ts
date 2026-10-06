@@ -14,9 +14,13 @@
 // and a background agent whose result came back through a server-started turn shows, with tool details, the custom
 // task row (its name, its report), the background row ("· in the background") and the "Loaded skill" row with its
 // body; the result notes and their carrier message are left out (the reply to them stays).
+// Phase 11 (W11.13, docs/UI.md 7.15, 7.31): a project chat whose approved project hooks blocked a `shell` call (a
+// PreToolUse exit 2) and added context after a `write_file` (PostToolUse) shows the hook badge and note in the chat; the
+// share page leaves every hook record out (no notes, no badges, no hook text) and the blocked call reads "Denied".
 import type { Locator, Page } from '@playwright/test'
 import type { PasswordServer } from '../../helpers/index.ts'
 import {
+  approveProjectItems,
   assistantMessages,
   byTestId,
   chatTasks,
@@ -24,27 +28,36 @@ import {
   definitionFile,
   expect,
   HarnessApi,
+  HOOK_SCRIPT_TEXT,
+  hookGroup,
+  hookNote,
   MOCK_CHECKPOINT_DIR,
   MOCK_CHECKPOINT_DONE,
   MOCK_CHECKPOINT_LS,
   MOCK_CHECKPOINT_MKDIR,
+  MOCK_HOOKS_MODEL,
   MOCK_PLAN_FILE,
   MOCK_SUBAGENT_TASKS,
   MOCK_TODO_DONE,
   mockAgentReport,
   mockBackgroundDescription,
   mockBackgroundResult,
+  mockCall,
   mockPlanDone,
   mockSteerFinished,
+  projectSettings,
   removeProject,
   seedWorkspaceFolder,
   sendMessage,
   startPasswordServer,
   test,
   testIds,
+  toolRowHook,
   uniqueId,
   useAgentSettings,
   waitForTestId,
+  writeHookScript,
+  writeProjectFile,
 } from '../../helpers/index.ts'
 
 /** What a shell row shows, in the chat (`tool-row`) and on the share page (`share-tool-row`). */
@@ -396,6 +409,69 @@ test.describe('share', () => {
       const roles = await messages.evaluateAll(items => items.map(item => item.getAttribute('data-role')))
       expect(roles.filter(role => role === 'user'), 'three user messages: the carrier is gone').toHaveLength(3)
       await expect(messages.last()).toContainText(mockBackgroundResult('completed'))
+    }
+    finally {
+      await visitor.close()
+    }
+  })
+
+  test('the share page leaves the hook records out; a call a hook blocked reads "Denied" @smoke', async ({ page, browser, cleanup }) => {
+    const { baseURL, password } = server!
+    const api = owner!
+    // Approving project hooks and adding a project need a fresh login.
+    await api.client.auth.login({ body: { password } })
+    const reason = 'Deleting build is not allowed here.'
+    const folder = await seedWorkspaceFolder(api, { prefix: 'share-hooks' })
+    cleanup(() => folder.remove())
+    const block = await writeHookScript(folder.path, 'exit2', { text: reason })
+    const context = await writeHookScript(folder.path, 'context')
+    await writeProjectFile(folder.path, '.harness/settings.json', projectSettings({
+      PreToolUse: [hookGroup(block, { matcher: 'Bash' })],
+      PostToolUse: [hookGroup(context, { matcher: 'Write' })],
+    }))
+    const project = await createProject(api, { name: `Share hooks ${uniqueId('share')}`, path: folder.path })
+    cleanup(() => removeProject(api, project.id))
+    await approveProjectItems(api, project.id)
+    const chat = await api.createChat({ title: `Share hooks ${uniqueId('chat')}`, projectId: project.id, modelRef: MOCK_HOOKS_MODEL })
+    cleanup(() => api.removeChat(chat.id))
+    const blocked = await api.sendChat({ chatId: chat.id, modelRef: MOCK_HOOKS_MODEL, toolMode: 'auto', text: 'run rm -rf build' })
+    expect(blocked.text).toBe(`Called shell: denied | Blocked by hook: ${reason} | hooks: none`)
+    const written = await api.sendChat({ chatId: chat.id, modelRef: MOCK_HOOKS_MODEL, toolMode: 'auto', text: mockCall('write_file', { path: 'notes.txt', content: 'notes\n' }) })
+    expect(written.text).toMatch(new RegExp(`\\| hooks: ${HOOK_SCRIPT_TEXT.context}$`))
+    const share = await api.client.shares.create({ body: { chatId: chat.id, options: { toolDetails: true } } })
+
+    // The chat shows the records: the badge and the note of the blocked call, the context note of the write.
+    await new HarnessApi(page.request, baseURL).client.auth.login({ body: { password } })
+    await page.goto(`${baseURL}/chat/${chat.id}`)
+    await expect(assistantMessages(page)).toHaveCount(2)
+    const shellRow = byTestId(assistantMessages(page).first(), testIds.toolRow, { 'data-tool-name': 'shell' })
+    await expect(toolRowHook(shellRow, { 'data-value': 'denied' })).toContainText('Blocked by hook')
+    await shellRow.getByRole('button').first().click()
+    await expect(hookNote(shellRow.locator('xpath=ancestor::*[@data-slot="tool-part"][1]'), { 'data-outcome': 'denied', 'data-variant': 'tool' })).toContainText(`Blocked by a PreToolUse hook: ${reason}`)
+
+    // The share page, in a browser without a session: no hook record anywhere, the blocked call reads "Denied".
+    const visitor = await browser.newContext()
+    try {
+      const guest = await visitor.newPage()
+      await guest.goto(`${baseURL}${share.path}`)
+      await expect(guest.getByTestId(testIds.sharePage)).toHaveAttribute('data-state', 'ready')
+      const transcript = guest.getByTestId(testIds.shareTranscript)
+      await expect(transcript.getByTestId(testIds.shareMessage)).toHaveCount(4)
+      const shareShell = byTestId(transcript, testIds.shareToolRow, { 'data-tool-name': 'shell' })
+      await expect(shareShell).toHaveAttribute('data-status', 'denied')
+      await expect(shareShell).toContainText('Denied')
+      await expect(shareShell).not.toContainText('Blocked by hook')
+      await shareShell.getByRole('button').first().click()
+      await expect(shareShell.getByTestId(testIds.shareToolRowOutput)).toBeVisible()
+      const shareWrite = byTestId(transcript, testIds.shareToolRow, { 'data-tool-name': 'write_file' })
+      await expect(shareWrite).toHaveAttribute('data-status', 'done')
+      await shareWrite.getByRole('button').first().click()
+      await expect(shareWrite.getByTestId(testIds.shareToolRowOutput)).toBeVisible()
+      for (const id of [testIds.hookNote, testIds.toolRowHook, testIds.toolApprovalHook])
+        await expect(guest.getByTestId(id), `no ${id} on the share page`).toHaveCount(0)
+      await expect(transcript).not.toContainText('Hook added context')
+      await expect(transcript).not.toContainText('Blocked by a PreToolUse hook')
+      await expect(transcript).not.toContainText('<hook-')
     }
     finally {
       await visitor.close()

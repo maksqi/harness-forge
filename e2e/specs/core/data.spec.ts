@@ -7,6 +7,9 @@
 // Phase 10 (W10.13, ADR-044): the backup holds `customizations.json` with the personal agent and command; delete-all
 // keeps them, so the spec removes them before the import, and "Restore settings from the backup" brings them back ("2
 // personal definitions restored"); the second import keeps the existing ones ("2 kept").
+// Phase 11 (W11.13, ADR-048 - ADR-051): a personal output style travels with the backup like the other definitions
+// ("3 personal definitions restored"); a personal hook, a project approval and a project MCP variable never do (no
+// entry of the zip holds the hook's command, the approved hash or the variable's value), and delete-all keeps all three.
 import type { Locator, Page } from '@playwright/test'
 import type { Buffer } from 'node:buffer'
 import type { PasswordServer } from '../../helpers/index.ts'
@@ -14,13 +17,17 @@ import { readFile } from 'node:fs/promises'
 import {
   byTestId,
   chatRow,
+  createProject,
   definitionFile,
   expect,
   HarnessApi,
+  hookGroup,
   isZip,
   lastAssistantMessage,
+  projectSettings,
   readZipText,
   removePersonalDefinitions,
+  seedWorkspaceFolder,
   startPasswordServer,
   test,
   testIds,
@@ -61,8 +68,10 @@ async function importBackup(page: Page, file: { name: string, buffer: Buffer }):
 test.describe('data', () => {
   let server: PasswordServer | undefined
   const chats: SeededChat[] = []
-  /** The personal definitions of the seed (Phase 10). */
-  const definitions = { agent: uniqueId('backup-agent'), command: uniqueId('backup-cmd') }
+  /** The personal definitions of the seed (Phase 10, plus the Phase 11 style). */
+  const definitions = { agent: uniqueId('backup-agent'), command: uniqueId('backup-cmd'), style: uniqueId('backup-style') }
+  /** Phase 11 state that never goes into a backup: a personal hook, a project approval and a project MCP variable. */
+  const kept = { hookMarker: uniqueId('backup-hook'), hookId: '', projectId: '', approved: '', variable: `secret-${uniqueId('value')}` }
 
   test.beforeAll(async () => {
     server = await startPasswordServer({ dedicated: true, label: 'hf-e2e-data' })
@@ -78,6 +87,25 @@ test.describe('data', () => {
       }
       await owner.client.customizations.create({ body: { kind: 'agent', content: definitionFile({ name: definitions.agent, description: 'Kept in the backup.' }, 'PERSONA: backup\n') } })
       await owner.client.customizations.create({ body: { kind: 'command', content: definitionFile({ name: definitions.command, description: 'A personal command.' }, 'Personal: $ARGUMENTS\n') } })
+      await owner.client.customizations.create({ body: { kind: 'style', content: definitionFile({ name: definitions.style, description: 'A personal style.' }, 'Answer briefly.\n') } })
+      // Phase 11: a personal hook (Notification: never shown, never run here), and a project whose hook is approved and
+      // whose MCP variable is stored (the login above is fresh).
+      kept.hookId = (await owner.client.hooks.create({ body: { event: 'Notification', command: `sh ${kept.hookMarker}.sh` } })).id
+      const command = 'sh .harness/hooks/note.sh'
+      const folder = await seedWorkspaceFolder(owner, {
+        prefix: 'backup',
+        files: {
+          '.harness/hooks/note.sh': '#!/bin/sh\ncat > /dev/null\n',
+          '.harness/settings.json': projectSettings({ SessionStart: [hookGroup(command)] }),
+        },
+      })
+      const project = await createProject(owner, { name: folder.name, path: folder.path })
+      kept.projectId = project.id
+      const pending = (await owner.client.projectTrust.list({ params: { id: project.id } })).items.filter(item => item.state === 'pending')
+      expect(pending.map(item => item.kind)).toEqual(['hook'])
+      kept.approved = pending[0]!.sha256
+      await owner.client.projectTrust.approve({ params: { id: project.id }, body: { items: [{ kind: 'hook', sha256: kept.approved }] } })
+      await owner.client.projectMcp.setVariables({ params: { id: project.id }, body: { values: { BACKUP_TOKEN: kept.variable } } })
     }
     finally {
       await owner.dispose()
@@ -121,7 +149,7 @@ test.describe('data', () => {
     const entries = zipEntries(buffer).map(entry => entry.name)
     expect(entries).toEqual(expect.arrayContaining(['manifest.json', 'settings.json', 'customizations.json', ...chats.map(chat => `chats/${chat.id}.json`)]))
     const customizations = JSON.parse(readZipText(buffer, 'customizations.json')) as { items: { kind: string, name: string }[] }
-    expect(customizations.items.map(item => `${item.kind}:${item.name}`).sort()).toEqual([`agent:${definitions.agent}`, `command:${definitions.command}`])
+    expect(customizations.items.map(item => `${item.kind}:${item.name}`).sort()).toEqual([`agent:${definitions.agent}`, `command:${definitions.command}`, `style:${definitions.style}`])
     expect(JSON.parse(readZipText(buffer, 'manifest.json'))).toMatchObject({
       format: 'harness-forge.backup',
       version: 1,
@@ -133,6 +161,11 @@ test.describe('data', () => {
       const content = readZipText(buffer, entry)
       expect(content, `${entry} has no share link`).not.toContain(share.id)
       expect(content, `${entry} has no share token`).not.toContain(shareToken)
+      // Phase 11: no personal hook, project approval or project MCP variable.
+      expect(content, `${entry} has no personal hook`).not.toContain(kept.hookMarker)
+      expect(content, `${entry} has no hook id`).not.toContain(kept.hookId)
+      expect(content, `${entry} has no approval`).not.toContain(kept.approved)
+      expect(content, `${entry} has no variable value`).not.toContain(kept.variable)
     }
     const backup = { name, buffer }
 
@@ -172,22 +205,31 @@ test.describe('data', () => {
     await expect(summary).toHaveText(EMPTY_SUMMARY)
     await expect(shares.getByTestId(testIds.sharesEmpty)).toBeVisible()
 
+    // Delete-all keeps the personal hook, the approval and the variable (configuration, like projects).
+    expect((await session.client.hooks.list({ query: {} })).items.some(item => item.id === kept.hookId)).toBe(true)
+    const trust = await session.client.projectTrust.list({ params: { id: kept.projectId } })
+    expect(trust.items.find(item => item.sha256 === kept.approved)?.state).toBe('approved')
+    const mcp = await session.client.projectMcp.list({ params: { id: kept.projectId } })
+    expect(mcp.variables.find(variable => variable.name === 'BACKUP_TOKEN')?.set).toBe(true)
+
     // Delete-all keeps the personal definitions: remove them, so the import has something to restore.
+    const all = [definitions.agent, definitions.command, definitions.style].sort()
     const listed = async () => (await session.client.customizations.list({})).items.filter(item => item.source === 'user').map(item => item.name).sort()
-    expect(await listed()).toEqual([definitions.agent, definitions.command].sort())
+    expect(await listed()).toEqual(all)
     await removePersonalDefinitions(session, 'agent', definitions.agent)
     await removePersonalDefinitions(session, 'command', definitions.command)
+    await removePersonalDefinitions(session, 'style', definitions.style)
     expect(await listed()).toEqual([])
 
-    // Import the backup (existing chats are skipped by default) with "Restore settings": every chat and both
+    // Import the backup (existing chats are skipped by default) with "Restore settings": every chat and the three
     // definitions come back.
     await expect(page.getByTestId(testIds.dataImportPolicy)).toHaveAttribute('data-value', 'skip')
     await page.getByTestId(testIds.dataImportRestoreSettings).click()
     await expect(page.getByTestId(testIds.dataImportRestoreSettings)).toHaveAttribute('data-state', 'checked')
     const imported = await importBackup(page, backup)
     await expect(imported).toContainText('Imported 2 chats')
-    await expect(imported.locator('[data-slot="data-import-customizations"]')).toHaveText('2 personal definitions restored')
-    expect(await listed()).toEqual([definitions.agent, definitions.command].sort())
+    await expect(imported.locator('[data-slot="data-import-customizations"]')).toHaveText('3 personal definitions restored')
+    expect(await listed()).toEqual(all)
     await expect(imported.getByTestId(testIds.dataImportItem)).toHaveCount(2)
     for (const chat of chats)
       await expect(byTestId(imported, testIds.dataImportItem, { 'data-chat-id': chat.id })).toHaveAttribute('data-status', 'imported')
@@ -210,7 +252,7 @@ test.describe('data', () => {
     await page.getByTestId(testIds.dataImportRestoreSettings).click()
     const again = await importBackup(page, backup)
     await expect(again).toContainText('Imported 0 chats · skipped 2')
-    await expect(again.locator('[data-slot="data-import-customizations"]')).toHaveText('0 personal definitions restored · 2 kept')
+    await expect(again.locator('[data-slot="data-import-customizations"]')).toHaveText('0 personal definitions restored · 3 kept')
     await expect(again.getByTestId(testIds.dataImportItem)).toHaveCount(2)
     await expect(byTestId(again, testIds.dataImportItem, { 'data-status': 'skipped' })).toHaveCount(2)
     for (const chat of chats)

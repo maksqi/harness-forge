@@ -293,6 +293,50 @@ describe('customizeSettings', () => {
     expect(row('terse').querySelector('[data-slot="style-default-badge"]')?.textContent?.trim()).toBe('Default in website')
   })
 
+  it('scrolls the tab row so the active tab shows whole: on load, on a tab change (W11.19)', async () => {
+    // A 390 px screen: the row shows 0 … 358 px of the tabs (472 px wide in all); a tab's box moves with the row's scroll.
+    const widths: Record<string, [number, number]> = { 'agents': [0, 84], 'commands': [84, 187], 'skills': [187, 264], 'output-styles': [264, 391], 'hooks': [391, 472] }
+    const box = (left: number, right: number) => ({ left, right, x: left, width: right - left, top: 0, bottom: 36, y: 0, height: 36, toJSON: () => ({}) }) as DOMRect
+    const spy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.querySelector(':scope > [role="tablist"]'))
+        return box(0, 358)
+      const span = this.getAttribute('role') === 'tab' ? widths[this.dataset.value ?? ''] : undefined
+      const scroll = this.closest('[role="tablist"]')?.parentElement?.scrollLeft ?? 0
+      return span ? box(span[0] - scroll, span[1] - scroll) : box(0, 0)
+    })
+    try {
+      mocks.route!.query = { tab: 'hooks' }
+      await mountIn(CustomizeSettings)
+      const row = document.body.querySelector<HTMLElement>('[role="tablist"]')!.parentElement!
+      // The end of Hooks (472) plus the inset (16) at the end of the row (358).
+      expect(row.scrollLeft).toBe(472 + 16 - 358)
+
+      // Commands is cut off at the start now: the row scrolls back to it.
+      mocks.route!.query = { tab: 'commands' }
+      await settle()
+      expect(row.scrollLeft).toBe(84 - 16)
+      // Skills lies inside the visible part: nothing moves.
+      mocks.route!.query = { tab: 'skills' }
+      await settle()
+      expect(row.scrollLeft).toBe(84 - 16)
+    }
+    finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('lets the Project select wrap below the tabs instead of squeezing the tab row (W11.19)', async () => {
+    await mountIn(CustomizeSettings)
+    const row = document.body.querySelector<HTMLElement>('[role="tablist"]')!.parentElement!
+    expect(row.classList).toContain('overflow-x-auto')
+    // One wrapping line: the tabs keep their width and the Project select takes the next line when both do not fit.
+    expect(row.parentElement!.classList).toContain('flex-wrap')
+    const project = byTestId(testIds.customizeProjectSelect)!.parentElement!
+    expect([...row.parentElement!.children]).toEqual([row, project])
+    expect(project.classList).toContain('w-full')
+    expect(project.classList).toContain('sm:w-auto')
+  })
+
   it('switches tabs through ?tab and lists the built-in commands without a menu', async () => {
     await mountIn(CustomizeSettings)
     allByTestId(testIds.customizeTab)[1]!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))

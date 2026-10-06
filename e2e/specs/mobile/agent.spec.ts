@@ -10,16 +10,25 @@
 // composer lie inside the screen in that order; opened, the agent's row Stop and Stop all are 40 px targets and nothing
 // scrolls sideways. The Remember dialog fits the screen with 40 px targets; the grouped slash menu spans the composer
 // inside the screen, at most 40 % of its height.
+// Phase 11 (W11.13, docs/UI.md 7.31, 7.32): in a project chat whose project's UserPromptSubmit hook refuses every
+// message, the composer's toolbar holds the output style trigger, icon-only (a 40 px target with the not-Default dot,
+// no label) inside the composer; a refused message keeps its text and the refusal card fits the screen, with a 40 px
+// Dismiss and no sideways scroll.
 import type { Locator, Page } from '@playwright/test'
 import {
   backgroundAgents,
   boxOf,
   byTestId,
+  composer,
+  composerRefusal,
   documentWidths,
   expect,
   expectMessageStatus,
+  HOOK_SCRIPT_TEXT,
+  hookGroup,
   lastAssistantMessage,
   MOCK_BACKGROUND_MODEL,
+  seedHookProjectChat,
   seedProjectChat,
   test,
   testIds,
@@ -262,5 +271,42 @@ test.describe('mobile agent', () => {
     await expectNoSidewaysScroll(page, 'the Remember dialog')
     await dialog.getByRole('button', { name: 'Cancel' }).tap()
     await expect(dialog).toBeHidden()
+  })
+
+  test('the toolbar holds the icon-only style trigger; a refused message keeps its text and the refusal fits', async ({ page, api, cleanup }) => {
+    const { chatId } = await seedHookProjectChat(api, cleanup, {
+      prefix: 'phone-refusal',
+      scripts: ['prompt-block'],
+      hooks: commands => ({ UserPromptSubmit: [hookGroup(commands['prompt-block']!)] }),
+    })
+    await api.client.chats.update({ params: { id: chatId }, body: { settings: { outputStyle: 'explanatory' } } })
+    await page.goto(`/chat/${chatId}`)
+
+    // The style trigger: icon-only below `sm`, with the dot of a style that is not Default, inside the composer.
+    const trigger = composer(page).getByTestId(testIds.outputStyleTrigger)
+    await expect(trigger).toHaveAttribute('data-value', 'explanatory')
+    await expectTouchTarget(trigger, 'the output style trigger')
+    await expect(trigger.locator('[data-slot="output-style-label"]')).toBeHidden()
+    await expect(trigger.locator('[data-slot="output-style-dot"]')).toBeVisible()
+    const composerBox = await boxOf(composer(page))
+    const triggerBox = await boxOf(trigger)
+    expect(triggerBox.x + triggerBox.width, 'the trigger lies inside the composer').toBeLessThanOrEqual(composerBox.x + composerBox.width + 0.5)
+    await expectInsideViewport(composer(page), 'the composer')
+    await expectNoSidewaysScroll(page, 'the composer with the style trigger')
+
+    // A refused message: the text stays, the refusal card fits the screen.
+    const text = 'Please summarize the release notes of this project for the weekly update, including every breaking change.'
+    const input = page.getByTestId(testIds.composerInput)
+    await input.fill(text)
+    await page.getByTestId(testIds.composerSend).tap()
+    const refusal = composerRefusal(page)
+    await expect(refusal).toHaveAttribute('data-code', 'hook-blocked')
+    await expect(refusal).toContainText(HOOK_SCRIPT_TEXT.promptBlock)
+    await expect(input).toHaveValue(text)
+    await expectInsideViewport(refusal, 'the refusal')
+    await expectInsideViewport(composer(page), 'the composer with the refusal')
+    await expectTouchTarget(refusal.getByTestId(testIds.composerRefusalDismiss), 'Dismiss')
+    await expectNoSidewaysScroll(page, 'the refusal')
+    expect((await api.getChat(chatId)).messages, 'nothing was stored').toHaveLength(0)
   })
 })

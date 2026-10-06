@@ -27,14 +27,15 @@ servers work) and [10.12](../ARCHITECTURE.md) (security), [UI.md 7.31, 7.33, 9.1
 1. Open **Settings → Customize → Hooks** and press **New hook**.
 2. Choose the **Event** (for example **PreToolUse**: before a tool runs).
 3. For a tool event, fill in **Tools**: the tool names the hook is for, separated by `|` (`Bash|Edit`). Claude Code
-   names work (section 5). Leave it empty, or write `*`, for every tool.
+   names work (section 5). Leave it empty, or write `*`, for every tool. A matcher with regular-expression characters
+   cannot be saved ("Use tool names, | and * only.").
 4. Write the **Command**. It runs with a shell in the project folder (outside projects, in a private, empty folder)
    and gets the event as JSON on its standard input (section 3).
 5. Set the **Timeout** (seconds, 1 – 600, default 60) and press **Save hook**.
 
-Saving a new hook, or changing one, asks for your password when a password is set (a hook runs commands on your
-server without asking). Turning a hook off and deleting it do not. The switch **Run hooks** at the top of the tab
-turns every command hook off at once, from every source.
+Saving a new hook, or changing one, asks for your password when a password is set and your last login is more than 10
+minutes old (a hook runs commands on your server without asking). Turning a hook off and deleting it do not. The switch
+**Run hooks** at the top of the tab turns every command hook off at once, from every source.
 
 **Import…** reads Claude Code settings JSON (a whole `settings.json`, or just its `hooks` object), shows what it found,
 and adds the hooks you keep checked: invalid ones are listed unchecked with the reason, and `prompt` hooks are skipped
@@ -69,11 +70,11 @@ its command handlers.
 
 | Key | Meaning |
 |---|---|
-| event (`PreToolUse`, …) | one of the eight events (section 3); an unknown event is ignored, with a note |
-| `matcher` | optional; tool names for `PreToolUse` and `PostToolUse` (section 5); leave it out for the other events |
+| event (`PreToolUse`, …) | one of the eight events (section 3); an unknown event is ignored (Import… lists it in its notes) |
+| `matcher` | optional; tool names for `PreToolUse` and `PostToolUse` (section 5); for `SessionStart` it matches the source (`startup` / `compact`), for `PreCompact` the trigger (`manual` / `auto`), for `Notification` the type (`permission_prompt`); `UserPromptSubmit`, `Stop` and `SubagentStop` ignore it |
 | `type` | `command` (a `prompt` hook is skipped: not supported) |
 | `command` | the shell command, at most 4,096 characters |
-| `timeout` | optional, in seconds, 1 – 600; default 60 |
+| `timeout` | optional, in seconds, 1 – 600; default 60 (in a settings file a larger value is cut to 600 and an invalid one uses 60, each with a note; fractions round up) |
 
 Every matching handler of an event runs, all of them **in parallel** (at most 20 per event). A hook that finishes
 quietly (exit 0, nothing to report) leaves no trace in the chat; a decision, context, a failure or a message shows as a
@@ -85,12 +86,12 @@ small **hook note** in the reply, or inside the tool's row for tool hooks.
 |---|---|---|
 | `PreToolUse` | before a tool call runs (once per call, also in sub-agents) | **deny** the call, **ask** you (shows the approval card; denied inside a sub-agent), **allow** it without the card (only where section 10 says), or **change its input** |
 | `PostToolUse` | after a tool call succeeded (also in sub-agents) | give the agent **feedback** or context, which it reads at its next step; **stop** the agent |
-| `UserPromptSubmit` | when you send a message, or queue one while the agent works, before anything is stored | **refuse** the message (it stays in the composer with the reason), or **add context** for the agent |
-| `Notification` | when a reply ends waiting for your approval | nothing (observe it: send yourself a notification) |
+| `UserPromptSubmit` | when you send a message, or queue one while the agent works, before anything is stored (not for `/compact` or a message to an image model) | **refuse** the message (it stays in the composer with the reason), or **add context** for the agent |
+| `Notification` | when a reply ends waiting for your approval (`message`: "The agent needs your permission to use Bash.") | nothing (observe it: send yourself a notification) |
 | `Stop` | when the agent is about to finish a reply | make it **continue** with a reason: harness-forge starts a follow-up turn by itself (at most 5 in a row) |
 | `SubagentStop` | when a sub-agent is about to finish | make it **continue** for one more round (at most 2); nothing is stored |
 | `PreCompact` | before the conversation is compacted (`/compact` or automatically) | nothing (observe it) |
-| `SessionStart` | before a chat's first reply, and before the first reply after a compaction | **add context** for the agent, or **refuse** the message |
+| `SessionStart` | before a chat's first reply, and before the first reply after a compaction (also for a queued message that starts the turn) | **add context** for the agent, or **refuse** the message (only with `continue: false`) |
 
 `Stop` hooks never run when the reply was stopped, failed, ended waiting for an approval or the agent stopped because
 of a hook, nor while a queued message is waiting (it goes first). Sub-agents run only `PreToolUse`, `PostToolUse` and
@@ -107,17 +108,18 @@ The event as one JSON object, with Claude Code's field names plus a `harness` ob
 | `hook_event_name` | all | the event |
 | `permission_mode` | all | `default` (Ask, Off), `plan`, `acceptEdits` (Accept edits), `bypassPermissions` (Auto) |
 | `tool_name` | `PreToolUse`, `PostToolUse` | the Claude Code name when the tool has one (`Bash`, `Write`, `Edit`, `Read`, …), else the harness name |
-| `tool_input` | `PreToolUse`, `PostToolUse` | the input the model sent |
+| `tool_input` | `PreToolUse`, `PostToolUse` | `PreToolUse`: the input the model sent; `PostToolUse`: the input the tool ran with (after an `updatedInput`) |
 | `tool_use_id` | `PreToolUse`, `PostToolUse` | the tool call id |
 | `tool_response` | `PostToolUse` | the tool's output |
 | `prompt` | `UserPromptSubmit` | the text of your message |
 | `stop_hook_active` | `Stop`, `SubagentStop` | `true` when this reply is already a hook continuation: check it to avoid loops |
-| `trigger`, `custom_instructions` | `PreCompact` | `manual` or `auto`; the focus of `/compact <focus>` (or null) |
+| `trigger`, `custom_instructions` | `PreCompact` | `manual` or `auto`; the focus of `/compact <focus>` (empty when there is none) |
 | `source` | `SessionStart` | `startup` or `compact` |
-| `message`, `notification_type` | `Notification` | the text; `permission_prompt` |
+| `message`, `notification_type` | `Notification` | "The agent needs your permission to use <tools>." (Claude Code names, at most 3, then "and N more"); `permission_prompt` |
 | `harness` | all | `{ version: 1, chatId, projectId, messageId?, modelRef, origin, tool?, source }`: `origin` is how the run started (`request`, `queue`, `task`, `hook`), `tool` the harness tool name, `source` where this hook comes from (`personal`, `project`, `plugin`) |
 
-The payload is at most 256 KiB: a large `tool_response` is cut first, then `tool_input`. There is no
+The payload is at most 256 KiB: a large `tool_response` is cut first, then `tool_input`, `prompt`,
+`custom_instructions` and `message`, and a cut payload carries `harness.truncated: true`. There is no
 `transcript_path`: harness-forge keeps chats in its database, not in transcript files.
 
 ### Exit codes
@@ -125,8 +127,8 @@ The payload is at most 256 KiB: a large `tool_response` is cut first, then `tool
 | Exit | Meaning |
 |---|---|
 | `0` | success: a JSON object on stdout is read (below); otherwise plain stdout is **context** for `UserPromptSubmit` and `SessionStart` and ignored for the other events |
-| `2` | **block**, with stderr as the reason: `PreToolUse` denies the call ("Blocked by hook: …"); `PostToolUse` sends the reason to the agent as feedback (the call already ran); `UserPromptSubmit` refuses your message; `Stop` and `SubagentStop` make the agent continue with the reason; for the other events it changes nothing |
-| other, or a timeout | a **non-blocking error**: the note "A PostToolUse hook failed: exit 1" (or "… timed out after 60s") shows the start of stderr, and the agent goes on |
+| `2` | **block**, with stderr as the reason: `PreToolUse` denies the call ("Blocked by hook: …"); `PostToolUse` sends the reason to the agent as feedback (the call already ran); `UserPromptSubmit` refuses your message; `Stop` and `SubagentStop` make the agent continue with the reason; `SessionStart`, `PreCompact` and `Notification` cannot block: it is a non-blocking error ("The hook exited with code 2, but SessionStart hooks cannot block.") |
+| other, or a timeout | a **non-blocking error**: the note "A PostToolUse hook failed: exit 1" (or "A PostToolUse hook timed out after 60s"), whose **Show output** reads "The hook failed with exit code 1." (or "The hook timed out."); stderr is never shown, it is only the reason of an exit 2; the agent goes on |
 
 A hook that times out is killed with everything it started (its process group).
 
@@ -134,7 +136,7 @@ A hook that times out is killed with everything it started (its process group).
 
 | Field | Events | Effect |
 |---|---|---|
-| `continue: false` | `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop` | stop: after a `PostToolUse` the agent stops after this step ("A hook stopped the agent: …"); `UserPromptSubmit` and `SessionStart` refuse the message; a `Stop` hook ends the reply without a continuation |
+| `continue: false` | `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop`, `SubagentStop` | stop: after a `PreToolUse` or `PostToolUse` the agent stops after this step ("A hook stopped the agent: …"); `UserPromptSubmit` and `SessionStart` refuse the message; a `Stop` hook ends the reply without a continuation (even when another hook blocks); a `SubagentStop` hook ends the sub-agent without another round; `PreCompact` and `Notification` ignore it |
 | `stopReason` | with `continue: false` | the reason shown to you |
 | `systemMessage` | all | a line shown to you in the hook note (not sent to the agent) |
 | `suppressOutput` | all | accepted; harness-forge never shows a hook's raw stdout anyway |
@@ -150,6 +152,14 @@ A field an event does not use is ignored (with a note). When several hooks answe
 **ask**, which wins over **allow**; the first `updatedInput` wins, in the order personal → plugin → project; contexts
 and reasons are joined (at most 10,000 characters of context per event); the agent goes on only when every hook lets
 it (`continue`).
+
+One hook note sums up what the hooks of one event did, the strongest result first: for `PreToolUse` "Blocked by a
+PreToolUse hook: …" (deny), then "A hook asked you to confirm this call: …" (ask), "Allowed by a PreToolUse hook"
+(allow), "Input changed by a PreToolUse hook" (`updatedInput`); then "A hook stopped the agent: …" (`continue: false`,
+which also wins over a `Stop` block); then a block: "A Stop hook asked the agent to continue" for `Stop`, "A
+PostToolUse hook told the agent: …" for `PostToolUse`; then "Hook added context · {event}", then "A {event} hook
+failed: exit {n}". A hook that only sends a `systemMessage` gets a context note with the line "Hook: {message}".
+`SubagentStop` and `Notification` leave no note.
 
 ## 4. Where hooks run
 
@@ -170,8 +180,11 @@ A matcher is a short pattern, not a regular expression:
 - alternatives separated by `|`: `Bash|Edit`;
 - `*` (or `.*`) matches any run of characters: `mcp__github__*`, `Notebook*`;
 - each alternative must match the **whole** name, **case-sensitively** (`bash` does not match `Bash`);
-- allowed characters: letters, digits, `_`, `.`, `-`, space and `*`; a matcher with `^ $ [ ( + ? \ {` is **invalid**:
-  it is listed with a note and **never runs** (`^Bash.*$` → write `Bash`);
+- allowed characters: letters, digits, `_`, `.`, `-` and `*`, and blanks only around `|` (`Bash | Edit`; "A tool name in
+  the matcher contains a blank." otherwise); a matcher with `^ $ [ ( + ? \ {` is **invalid** and **never runs**
+  (`^Bash.*$` → write `Bash`): a personal hook with one cannot be saved ("Invalid matcher: …"; the editor says "Use
+  tool names, | and * only."), and in a settings file or a plugin the whole group is dropped and only a note about the
+  file is shown;
 - empty, missing or `*`: every tool.
 
 A tool is matched under its harness name and its Claude Code names:
@@ -186,38 +199,49 @@ A tool is matched under its harness name and its Claude Code names:
 | `find_files` | `Glob` |
 | `list_directory` | `LS` |
 | `web_fetch` | `WebFetch` |
+| `task` | `Task` |
+| `todo_write` | `TodoWrite` |
+| `exit_plan_mode` | `ExitPlanMode` |
+| `skill` | `Skill` |
 | `mcp__<server id>__<tool>` | for a project MCP server also `mcp__<name in .mcp.json>__<tool>` (Claude Code's name) |
 
-Other tools (`todo_write`, `task`, `skill`, `exit_plan_mode`, `generate_image`, `current_time`, plugin tools) match only
-their own names. The hook editor shows which tools a matcher matches as you type ("Matches shell (Bash), edit_file
-(Edit)").
+The payload's `tool_name` uses the Claude Code name when there is one. Other tools (`generate_image`, `current_time`,
+plugin tools) match only their own names. The hook editor shows which tools a matcher matches as you type ("Matches
+shell (Bash), edit_file (Edit)").
 
 ## 6. Project hooks and approval
 
-A project can ship hooks in its settings files, read in this order: `.harness/settings.json`,
-`.harness/settings.local.json`, `.claude/settings.json`, `.claude/settings.local.json`. Their hooks add up (an
-identical hook in two files runs once). **Only the `hooks` key is read**: `permissions`, `env`, `model` and every other
-key of a Claude Code settings file are ignored, so a repository can never grant itself tools, approvals or environment
-variables. The files are read like every project definition: inside the project folder only, no symbolic links,
-regular files of at most 256 KiB; a broken file is listed with the problem, never an error.
+A project can ship hooks in its settings files, read in this order: `.claude/settings.json`,
+`.claude/settings.local.json`, `.harness/settings.json`, `.harness/settings.local.json`. Their hooks add up (an
+identical hook in two files runs once and is listed under the first file). **Only the `hooks` key is read**:
+`permissions`, `env`, `model` and every other key of a Claude Code settings file are ignored, so a repository can never
+grant itself tools, approvals or environment variables. The files are read like every project definition: inside the
+project folder only, no symbolic links, regular files of at most 256 KiB; a broken file is listed with the problem,
+never an error (a linked file, or a file under a linked `.claude` folder, is "not an object": it is not read).
 
 **Nothing in a cloned repository runs until you approve it.** A project hook is **Needs approval** until you review
 it:
 
-- the chat header shows **{n} to review** while a project chat has pending items; the same review is in Settings →
-  Projects (**Review commands and hooks…**) and Settings → Customize → Hooks (**Review {n}…**);
+- the chat header shows **{n} to review** while a project chat has pending items (its accessible name: "Review {n}
+  items in {project} that can run commands"); the same review is in Settings → Projects (**Review commands and
+  hooks…**) and Settings → Customize → Hooks (**Review {n}…**);
 - the **Review** dialog shows every hook (and every `.mcp.json` server and every command file with `!` lines) with its
   exact command, the file it comes from and the scripts it calls; tick what you would run yourself and press
-  **Approve** (your password is asked when one is set). There is no "Approve all": "Select all" works per group, after
-  you have seen it;
+  **Approve** (Space or a click; Enter never approves; your password is asked when one is set and your last login is
+  more than 10 minutes old). There is no "Approve all": "Select all" works per group, after you have seen it. When an
+  item changed while the dialog was open, nothing is approved and the dialog asks you to check it again;
 - an approval pins a **hash** of the hook (event, matcher, command, timeout) **and of the scripts its command names**
-  (`./…`, `.claude/…`, `.harness/…`, `"$CLAUDE_PROJECT_DIR"/…` and relative paths of script files; up to 8 files of at
-  most 1 MiB). Editing the hook **or one of those scripts** makes it pending again; the hash is checked once more right
-  before every run;
+  (`./…`, `.claude/…`, `.harness/…`, `"$CLAUDE_PROJECT_DIR"/…` or `"$HARNESS_PROJECT_DIR"/…`, relative paths of script
+  files and bare script names such as `sh count.sh` or `node hook.mjs`; options, assignments and URLs never count; up to
+  8 files of at most 1 MiB). Editing the hook **or one of those scripts** makes it pending again; the hash is checked
+  once more right before every run. A named file that is missing, linked, secret-looking or larger than 1 MiB, or a
+  word that names no file (`echo notes.sh`), is shown as "Runs notes.sh (not found)" with the warning "A file this
+  command runs is missing.";
 - a pending hook simply does not run (harness-forge never asks in the middle of a reply);
 - **Revoke** in the dialog takes an approval back (no password needed);
-- a warning marks hooks that run repository code harness-forge cannot pin (`npm test`, `make`, `pnpm lint`: what they
-  run can change without changing the hook), and scripts that are missing.
+- a warning marks hooks (and servers and commands) that run repository code harness-forge cannot pin (`npm test`,
+  `make`, `pnpm lint`: what they run can change without changing the hook; an interpreter such as `node x.mjs` or
+  `python x.py`: the script is pinned, the files it imports are not), and scripts that are missing.
 
 Approvals belong to the project: they are kept by Delete all data, removed with the project, and never part of a
 backup.
@@ -226,9 +250,10 @@ backup.
 
 A `Stop` hook that blocks (exit 2, or `decision: "block"`) makes the agent continue: harness-forge adds a small note
 "A Stop hook asked the agent to continue" (captioned "Sent to the agent") and starts a new turn by itself with the
-reason. In that turn `stop_hook_active` is `true`. After **5** continuations in a row the chain ends, with a notice
-that says so. A message you queue goes first; a continuation never starts while an
-approval is pending; pressing Stop during the hooks cancels it.
+reason (the agent reads `<hook-feedback event="Stop">…</hook-feedback>`, "(no reason given)" without one). In that turn
+`stop_hook_active` is `true`. After **5** continuations in a row the chain ends, with the notice "Stopped after 5 hook
+continuations in a row.". A message you queue goes first; a continuation never starts while an approval is pending;
+pressing Stop during the hooks cancels it.
 
 ## 7. `.mcp.json`: MCP servers of a project
 
@@ -252,36 +277,47 @@ Put a `.mcp.json` at the project root (Claude Code's format):
 ```
 
 - **Type**: a server with `command` is `stdio`; otherwise `type` (`http`, the default, or `sse`) with a `url`
-  (`http:` / `https:` only; redirects are refused). At most 20 servers.
+  (`http:` / `https:` only: a URL with variables must start with `http://`, `https://` or a variable, and it is checked
+  again once the variables are filled in; redirects are refused). At most 20 servers; a server name has at most 64
+  characters.
 - **Variables**: `${NAME}` and `${NAME:-default}` in `command`, `args`, `env` values, `url` and `headers` values take
   their values **only from what you store for this project** in its **MCP servers** dialog (Settings → Projects →
   **MCP servers…**, or the project chip's menu in a chat). They are encrypted on the server, used only for this
   project's servers and never read from the server's environment: even `${HOME}` must be set in the dialog (any other
-  `$…` stays as written). Saving variables asks for your password, because a value can change what an approved server
-  runs. A server with a missing variable (and no default) does not start ("Set {n} variables").
+  `$…` stays as written). A default is literal text up to the next `}`: it cannot hold another variable
+  (`${A:-${B}}` does not read `B`), and an empty stored value uses the default. Saving variables asks for your password
+  (when your last login is more than 10 minutes old), because a value can change what an approved server runs. A
+  server with a missing variable (and no default) does not start ("Set {n} variables"); a stored variable no server
+  uses any more is still listed, so you can clear it.
 - **Approval**: every server, stdio or remote, needs approval in the review dialog (section 6), which shows the exact
-  command or URL and the names of its environment variables and headers (never their values). A server on a local or
-  private address is marked with a warning, not refused (local servers are the main use). Any change to its entry makes
-  it pending again.
-- **Lifecycle**: an approved server starts with the first reply in one of the project's chats (the reply waits up to
-  5 seconds for it; a slower server's tools arrive in a later reply, with the notice that it was not ready), stops after
-  10 idle minutes, and stops at once when you revoke it, change the file or its variables, delete the project or stop
-  the server. A stdio server runs in the project folder, in its own process group, with the minimal environment plus
-  its own `env`.
+  command or URL and the names of its environment variables and headers (never their values). The hash also covers the
+  script files its command and arguments name (`node ./server.js`). A server on a local or private address (or a local
+  name such as `localhost` or `*.local`) is marked with a warning, not refused (local servers are the main use); the
+  check reads the URL as written, without a DNS lookup, so a host that comes from a variable without a default is not
+  flagged. Any change to its entry makes it pending again.
+- **Lifecycle**: an approved server starts with the first reply in one of the project's chats that uses tools (the
+  reply waits up to 5 seconds for it; a slower server's tools arrive in a later reply, with the notice "The project MCP
+  server "<name>" is not ready, so its tools were not sent."), stops after 10 idle minutes (not while a reply of the
+  project or one of its tool calls runs), restarts when its variables change, and stops at once when you revoke it,
+  change or remove its entry, delete the project or stop the server. A server that crashed starts again with the next
+  reply. A stdio server runs in the project folder, in its own process group, with the minimal environment plus its
+  own `env`.
 - **Tools**: named `mcp__<id>__<tool>`, where the id comes from the server's name (lower case, spaces, `_` and `.`
-  become `-`, at most 32 characters: `My_Server.v2` → `my-server-v2`). They are offered only in this project's chats and
+  become `-`, other characters are dropped, at most 32 characters, `server` when nothing is left, `-2`, `-3` … when
+  the id is taken: `My_Server.v2` → `my-server-v2`). They are offered only in this project's chats and
   ask for approval by default (a tool the server marks read-only runs without asking, a destructive one always asks). A
   project server with the id of one of your global MCP servers **replaces** it in this project's chats ("Replaces your
   server github in this project's chats."). Tool preferences (enabled, overrides) apply by tool name.
-- `HF_SAFE_MODE=1` starts no project MCP server.
+- `HF_SAFE_MODE=1` starts no project MCP server (they are listed **Off**). `HF_WORKSPACE_SHELL=0` does not stop them:
+  it turns off shell strings, and a stdio server is started as a program, not through the shell.
 
 ## 8. Kill switches
 
 | Switch | Effect |
 |---|---|
 | **Run hooks** (Settings → Customize → Hooks; setting `hooksEnabled`) | no command hook runs, from any source |
-| `HF_WORKSPACE_SHELL=0` (environment) | no shell string runs at all: no command hook, no `!` line of a command, no `shell` tool |
-| `HF_SAFE_MODE=1` (environment) | no command hook, no project MCP server, no user plugin |
+| `HF_WORKSPACE_SHELL=0` (environment) | no shell string runs at all: no command hook, no `!` line of a command (personal, project or plugin), no `shell` tool; project MCP servers still start |
+| `HF_SAFE_MODE=1` (environment) | no command hook, no project MCP server, no user plugin (the `!` lines of personal and approved project commands still run) |
 
 Plugin **code** hooks (`ctx.hooks.on`, PLUGINS.md 9) are not command hooks: the switches above do not stop them (safe
 mode loads no user plugin, so there are none). The Hooks tab says when the server turned hooks off ("Hooks are turned
@@ -291,7 +327,7 @@ off on this server (HF_WORKSPACE_SHELL=0)." / "… (safe mode).").
 
 - A hook runs **without asking**, with the server user's permissions, every time its event happens: only add commands
   you understand. That is why saving a personal hook, approving a project item and saving MCP variables ask for your
-  password.
+  password (when your last login is more than 10 minutes old).
 - Project content is untrusted: nothing from a repository runs before you approve its exact text; any change needs a
   new approval; scripts named by a hook are part of the approval; repository code run by a tool such as `npm test` is
   not, and the review says so.
@@ -304,7 +340,7 @@ off on this server (HF_WORKSPACE_SHELL=0)." / "… (safe mode).").
 
 | Claude Code | harness-forge | Why |
 |---|---|---|
-| a `PreToolUse` `allow` skips every permission prompt | `allow` skips the card only for a call that would ask and is neither the shell (or another `execute` tool) nor an always-ask tool | a repository's hook must not approve shell commands for you; use shell rules or Auto |
+| a `PreToolUse` `allow` skips every permission prompt | `allow` skips the card only for a call that would ask and is neither the shell (or another `execute` tool) nor an always-ask tool, and never in Plan mode (the note still reads "Allowed by a PreToolUse hook" while the card shows) | a repository's hook must not approve shell commands for you; use shell rules or Auto |
 | `transcript_path` in the payload | not sent | chats live in the database |
 | `prompt` hooks | skipped (with a note) | only `command` hooks run |
 | every key of `settings.json` is read | only `hooks` | `permissions` and `env` must not come from a cloned repository |
@@ -352,15 +388,18 @@ that text at the start of every chat of the project.
 
 ## 12. Troubleshooting
 
-- **My hook never runs**: check the Hooks tab: **Off**, **Needs approval** (a project hook), **Invalid** (the reason is
-  listed: an unknown event, a matcher with regular-expression characters, a `prompt` hook), the **Run hooks** switch or
-  a server alert (`HF_WORKSPACE_SHELL=0`, safe mode). For a tool hook, check the matcher against the tool's names
-  (section 5).
+- **My hook never runs**: check the Hooks tab: **Off**, **Needs approval** (a project hook), the **Run hooks** switch or
+  a server alert (`HF_WORKSPACE_SHELL=0`, safe mode). A hook of a settings file or a plugin that the tab does not list
+  at all was dropped: the notes above the list say why ("{file}: …": a matcher with regular-expression characters, a
+  `prompt` hook); an unknown event is not shown anywhere (Import… lists it). For a tool hook, check the matcher against
+  the tool's names (section 5).
 - **The hook ran but nothing happened**: exit 0 without JSON is silent except for `UserPromptSubmit` and `SessionStart`
   (whose stdout is context); JSON must be one object, with `hookSpecificOutput.hookEventName` equal to the event.
-- **"A hook failed: exit 1"**: the note shows the start of stderr; run the command yourself in the project folder with
-  a sample payload: `printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | sh .harness/hooks/guard.sh`.
-- **`allow` still shows the card**: hooks cannot approve the shell or always-ask tools (section 10).
+- **"A PostToolUse hook failed: exit 1"**: the note does not show stderr (only an exit 2 uses it, as the reason); run
+  the command yourself in the project folder with a sample payload:
+  `printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | sh .harness/hooks/guard.sh`.
+- **`allow` still shows the card**: hooks cannot approve the shell or always-ask tools, and nothing in Plan mode
+  (section 10); the note still reads "Allowed by a PreToolUse hook".
 - **A Stop hook loops**: check `stop_hook_active` and let the hook pass when it is `true`; the chain stops after 5
   continuations anyway.
 - **A project hook keeps going back to Needs approval**: a script it names changes (a build writes it, line endings

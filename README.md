@@ -3,17 +3,20 @@
 harness-forge is a self-hosted, bring-your-own-key (BYOK) AI chat and agent harness. It runs as one Node process
 with a web UI. Connect your own API keys for Claude, ChatGPT, Gemini, Grok, DeepSeek, Kimi, Qwen, GLM and more, or
 point it at a local Ollama. Then chat, watch the models reason, and let them call tools, or let them work on the files
-of a project folder on your server. By default, every tool call that can change something waits for your approval. A **Plugins** tab adds LLM providers, models, tools, MCP servers, slash commands, sub-agent types and skills, either
+of a project folder on your server. By default, every tool call that can change something waits for your approval. A **Plugins** tab adds LLM providers, models, tools, MCP servers, slash commands, sub-agent types, skills, hooks and
+output styles, either
 from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
 desktop app, and it starts in dark mode.
 
-> **Status:** v1.7 ("Hooks, project MCP and output styles") is **in progress** on `main`: Claude Code-format shell hooks
-> (eight events, such as before a tool call or when a reply ends) from Settings → Customize → Hooks, a project's
+> **Status:** v1.7 ("Hooks, project MCP and output styles"): Claude Code-format shell hooks (eight events, such as
+> before a tool call, when you send a message or when a reply ends) from Settings → Customize → Hooks, a project's
 > `.harness/` or `.claude/` settings files and plugins; project files that can run commands (hooks, `.mcp.json`
-> servers, commands with `` !`cmd` `` lines) run only after you approve each item, pinned by its hash; MCP servers from a
-> project's `.mcp.json` for that project's chats; output styles (Default, Explanatory, Learning or your own) per chat,
-> project or server; skills you run as `/name`; and `` !`cmd` `` / `@file` in command files (plugin API 1.5.0; guides:
-> [hooks and project MCP](docs/guides/hooks-and-project-mcp.md), [output styles](docs/guides/output-styles.md)).
+> servers, commands with `` !`cmd` `` lines) run only after you review and approve each item, pinned by a hash of the
+> item and of the scripts it names; MCP servers from a project's `.mcp.json` for that project's chats, with variables
+> stored encrypted per project; output styles (Default, Explanatory, Learning or your own) per chat, project or as your
+> default; skills you run as `/name`; `` !`cmd` `` / `@file` in command files; and plugin API 1.5.0 (command hooks,
+> output styles and six new hook events for plugins). See [Features](#features) and the guides
+> [hooks and project MCP](docs/guides/hooks-and-project-mcp.md) and [output styles](docs/guides/output-styles.md).
 > v1.6 ("Agent customization") added your own sub-agent types, slash commands and skills, as Markdown files in
 > a project's `.harness/` (or `.claude/`) folder or as personal definitions on the new Settings → Customize page, plugins
 > that contribute agents and skills (plugin API 1.4.0), background agents that keep working after the reply and report
@@ -41,6 +44,8 @@ desktop app, and it starts in dark mode.
 ![The changes panel next to a project chat: This chat lists checkpoint.txt with its diff and notes that shell commands may have changed files too (dark theme)](docs/assets/screenshots/changes-panel-dark.png)
 
 ![Settings -> Customize: personal agents, the project's agents from .harness/agents and .claude/agents with a shadowed and an invalid file, and the built-in explore and general agents (dark theme)](docs/assets/screenshots/customize-dark.png)
+
+![Settings -> Customize -> Hooks: personal hooks, the project's hooks from .harness/settings.json with their approval state (Approved / Needs approval), and a plugin's command hook (dark theme)](docs/assets/screenshots/hooks-dark.png)
 
 | Plugins | Provider wizard |
 |---|---|
@@ -125,20 +130,26 @@ desktop app, and it starts in dark mode.
   - Approved plans saved as project files (Settings -> General -> Agent, off by default; listed in the changes panel and
     rewindable), and `/remember` to add a note to the project's `AGENTS.md` (or `CLAUDE.md`), to the project's
     instructions or to your custom instructions.
-- **Hooks, project MCP and output styles** (v1.7, in progress; guides: [hooks and project
+- **Hooks, project MCP and output styles** (v1.7; guides: [hooks and project
   MCP](docs/guides/hooks-and-project-mcp.md), [output styles](docs/guides/output-styles.md)):
   - Hooks: shell commands in Claude Code's `hooks` format that run before or after tool calls, when you send a
     message, when a reply or a sub-agent ends, before a compaction and when a chat starts; they can block a call, add
     context, change a tool's input or make the agent continue (at most 5 times in a row). Personal hooks live in
-    Settings → Customize → Hooks (with an import of Claude Code settings JSON), project hooks in
-    `.harness/settings.json` or `.claude/settings.json`, plugin hooks in plugins (plugin API 1.5.0).
+    Settings → Customize → Hooks (with an import of Claude Code settings JSON and a "Run hooks" switch), project hooks
+    in `.harness/settings.json` or `.claude/settings.json`, plugin hooks in plugins (plugin API 1.5.0). The transcript
+    shows what a hook did (blocked a call, changed its input, added context, made the agent continue), and a message
+    a hook refuses stays in the composer with the reason.
   - Project trust: a project's hooks, `.mcp.json` servers and commands with shell lines run only after you approve each
-    one in a review dialog that shows the exact commands; editing the item or a script it runs needs a new approval.
-  - Project MCP servers from `.mcp.json`, for that project's chats only, with `${VARIABLES}` you store encrypted per
-    project (never read from the server's environment).
+    one in a review dialog that shows the exact commands and the scripts they run (a "to review" chip in the chat
+    header, Settings → Projects and Customize open it); editing the item or a script it names needs a new approval.
+  - Project MCP servers from `.mcp.json`, for that project's chats only (a server with the id of a global one replaces
+    it there), started when a project chat first needs them, with `${VARIABLES}` you store encrypted per project
+    (never read from the server's environment).
   - Output styles: Default, Explanatory, Learning or your own Markdown styles, chosen per chat in the composer (or
     `/output-style`), per project or as your default.
-  - Skills you run as `/name` from the slash menu, and `` !`cmd` `` / `@file` in command files.
+  - Skills you run as `/name` from the slash menu (unless they set `user-invocable: false`), and `` !`cmd` `` lines and
+    `@file` references in command files: an approved project command runs its shell lines and inlines the files when
+    you send it, and a regenerate reuses the result instead of running them again.
 - **Images** (with your own keys):
   - Pick an image model (OpenAI GPT Image, xAI Grok Imagine) in the composer and describe a picture: 1 to 4 images
     per turn, an aspect ratio (Auto, 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16), and follow-ups such as "make it blue" that
@@ -172,7 +183,9 @@ desktop app, and it starts in dark mode.
     ratio, edit the previous image) for image models.
   - v1.5: `@` file mentions in project chats, and a queue for messages sent while a reply runs.
   - Slash commands: `/explain`, `/review`, `/fix`, `/translate`, `/proofread` and more, plus commands from plugins;
-    v1.5: `/compact [focus]`; v1.6: project and personal commands with argument hints, and `/remember`.
+    v1.5: `/compact [focus]`; v1.6: project and personal commands with argument hints, and `/remember`; v1.7: skills
+    and `/output-style`.
+  - v1.7: an output style menu (Automatic, Default, Explanatory, Learning and your styles).
   - A microphone button for dictation.
 - **Sidebar and navigation**: a Chat | Plugins switch, a project switcher, chats grouped by date with live status
   dots (running, needs approval, unread), a Mod+K command palette, keyboard shortcuts, a Light / Dark / System theme toggle, and 40 px
@@ -193,12 +206,14 @@ desktop app, and it starts in dark mode.
     generate images; plugin API 1.2.0 lets a tool work on the chat's project folder; plugin API 1.3.0 (v1.5) lets a
     tool stream its progress (an async-generator `execute`) and adds the Plan permission mode; plugin API 1.4.0 (v1.6)
     lets a plugin contribute sub-agent types and skills (`contributes.agents` / `contributes.skills`,
-    `ctx.agents.register` / `ctx.skills.register`).
+    `ctx.agents.register` / `ctx.skills.register`); plugin API 1.5.0 (v1.7) adds command hooks and output styles
+    (`contributes.hooks` / `contributes.outputStyles`, `ctx.outputStyles.register`) and six hook events for code
+    plugins.
   - Install from a zip, npm, a URL with an integrity hash, or a local folder, with an explicit trust step for code.
 - **Tools and MCP**: MCP servers over stdio, Streamable HTTP and SSE. The builtin tools are `current_time`,
   `web_fetch` (SSRF-guarded) and `generate_image`, plus the seven workspace tools of project chats and (v1.5) the agent
   tools `todo_write`, `exit_plan_mode` and `task` (v1.6: and `skill`). Every tool has an approval policy and a per-tool
-  override.
+  override. v1.7: a project's `.mcp.json` servers add their tools to that project's chats after you approve them.
 - **Self-hosting**: SQLite storage, one port, an optional password, a loopback-only bind unless you secure it,
   trusted reverse proxies (`HF_TRUST_PROXY`) so rate limits and Secure cookies see the real clients, and a Docker image
   with a `/data` volume.
@@ -390,8 +405,9 @@ harness-forge is built for **one user** on their own machine or server.
 - **Sessions and CSRF.** An HttpOnly, SameSite=Strict HMAC session cookie; state-changing requests must come from
   the same origin. With a password set, creating, installing, trusting, editing, building or reloading code plugins,
   adding stdio MCP servers, changing the password, creating or updating share links, adding a project, rotating the
-  master key and deleting all data require a login within the last 10 minutes; when the last login is older, the app asks for the password once and then carries
-  out the action.
+  master key, deleting all data and (v1.7) creating or changing a personal hook, approving a project's files and
+  storing project MCP variables require a login within the last 10 minutes; when the last login is older, the app
+  asks for the password once and then carries out the action.
 - **Share links.** A link shows a sanitized snapshot of one conversation path: no instructions, errors, usage, costs
   or approvals; reasoning, tool details and files and images only when you include them. Its token is an HMAC that is
   never stored and never logged; revoking the link or changing the master key ends it, and every response carries
@@ -421,17 +437,20 @@ harness-forge is built for **one user** on their own machine or server.
 - **Agent customization (v1.6).** Agent, command and skill files in a repository are treated like `AGENTS.md`: their
   text can steer the model, but they can never grant themselves anything. A `tools` / `allowed-tools` list only narrows
   the tools (it never approves a call, changes the permission mode or adds a shell rule), a `model` works only with
-  your connected providers, `!` lines never run and `@file` references are never expanded. Only `.harness/` and
+  your connected providers, and (until v1.7, see below) `!` lines never run and `@file` references are never
+  expanded. Only `.harness/` and
   `.claude/` inside the project are read (no symbolic links, at most 64 KB per file, nothing from the home folder), and
   writing to them always asks. Background agents never ask for approval, are capped (3 per chat, 10 per server, 30
   minutes each), keep their project busy (no rewind while they run) and are stopped with the chat, its project, Delete
   all data, a key rotation or the server; the chat's Stop leaves them running by design.
-- **Hooks and project files that run commands (v1.7, in progress).** A cloned repository never runs anything by
+- **Hooks and project files that run commands (v1.7).** A cloned repository never runs anything by
   itself: its hooks, `.mcp.json` servers and commands with shell lines run only after you approve each item (with your
   password), and the approval pins a hash of the item and of the scripts it names, checked again before every run.
   Hooks run through the same shell runner as the `shell` tool (minimal environment, own process group, timeouts) and
   can be turned off with the Run hooks switch, `HF_WORKSPACE_SHELL=0` or `HF_SAFE_MODE=1`; `.mcp.json` variables come
-  only from values you store per project. Hook commands, payloads and outputs are never logged at the `info` level.
+  only from values you store per project, and a project MCP server runs in the project folder in its own process
+  group. An approved command's `@file` references go through the same path guard as the file tools. Hook commands,
+  payloads and outputs are never logged at the `info` level.
 - **Microphone and media.** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
   `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled ("Voice
   input needs HTTPS or localhost"); use the TLS reverse proxy below. The page may use only its own microphone
@@ -444,7 +463,9 @@ harness-forge is built for **one user** on their own machine or server.
   browsers out, changes every share link and expires pending approvals, and v1.2 cannot read the data afterwards.
 - **Plugins.** Code plugins and stdio MCP servers run **with the full rights of the server process**. They load only
   after you trust their exact files (SHA-256 pin) and become untrusted again when those files change. Declarative
-  plugins run no code. `HF_SAFE_MODE=1` starts with builtin plugins only.
+  plugins run no code, unless they start a stdio MCP server or (v1.7) declare command hooks or commands with shell
+  lines: those need the same trust step, and the trust dialog lists the commands they run (the pin covers
+  `plugin.json`, not a script a hook calls). `HF_SAFE_MODE=1` starts with builtin plugins only.
 - **Tools.** Tool calls wait for approval in **Ask** mode, except tools marked safe; **Accept edits** also runs edits of
   ordinary project files without asking. `web_fetch` reaches only public
   addresses (loopback only when you allow it in the Core tools settings), and every redirect is re-checked. Model
@@ -536,7 +557,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | Document | Contents |
 |---|---|
 | [`docs/guides/`](docs/guides/) | step-by-step guides: [using projects](docs/guides/using-projects.md), [agent features](docs/guides/agent-features.md) (v1.5: compaction, plan mode, todos, mentions, steering, sub-agents), [customizing the agent](docs/guides/customizing-agents.md) (v1.6: custom agents, commands and skills, background agents, plan files, `/remember`), [hooks and project MCP](docs/guides/hooks-and-project-mcp.md) (v1.7: hooks, project approvals, `.mcp.json`), [output styles](docs/guides/output-styles.md) (v1.7), [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) |
-| [`examples/plugins/`](examples/plugins/) | example plugins with READMEs and a test that loads them (v1.6 adds `agent-pack`) |
+| [`examples/plugins/`](examples/plugins/) | example plugins with READMEs and a test that loads them (v1.6 adds `agent-pack`, v1.7 `hook-pack`) |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | components, flows, data directory, database, security model, topology |
 | [`docs/API.md`](docs/API.md) | every HTTP endpoint, the error envelope, the chat stream protocol, server events |
 | [`docs/PLUGINS.md`](docs/PLUGINS.md) | plugin manifest, contribution points, `PluginContext`, hooks, lifecycle, install, trust |

@@ -82,7 +82,20 @@ describe('hookNote', () => {
       { source: 'personal', label: 'audit.sh', exitCode: 0, durationMs: 9, systemMessage: '  ' },
     ] })
     const { root } = note(data)
-    expect(root().findAll('[data-slot="hook-output"]').map(line => line.text())).toEqual(['Hook: Use the staging bucket.'])
+    expect(root().findAll('[data-slot="hook-system-message"]').map(line => line.text())).toEqual(['Hook: Use the staging bucket.'])
+    // The system message has its own slot: `hook-output` is only a failed hook's error text in the details.
+    expect(root().find('[data-slot="hook-output"]').exists()).toBe(false)
+  })
+
+  it('keeps the system messages and the error output of a failed hook in separate slots', async () => {
+    const data = hookData({ event: 'PostToolUse', outcome: 'error', reason: undefined, hooks: [
+      { source: 'project', label: 'prettier --write', exitCode: 1, durationMs: 20, error: 'prettier: not found', systemMessage: 'Formatting skipped.' },
+    ] })
+    const { wrapper, root } = note(data, 'tool')
+    await wrapper.get(`[data-testid="${testIds.hookNoteToggle}"]`).trigger('click')
+    expect(root().findAll('[data-slot="hook-system-message"]').map(line => line.text())).toEqual(['Hook: Formatting skipped.'])
+    const outputs = root().findAll('[data-slot="hook-output"]')
+    expect(outputs.map(output => [output.element.tagName, output.text()])).toEqual([['PRE', 'prettier: not found']])
   })
 
   it('names a plugin hook by the plugin\'s name, other plugins by their id', async () => {

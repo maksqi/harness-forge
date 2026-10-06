@@ -10,6 +10,10 @@
 // - With a project selected: the `.harness/agents` file wins its name over `.claude/agents` (Shadowed, with the winner),
 //   a file without a description is Invalid with its diagnostics; View… shows the file; Copy to personal saves a copy
 //   that the project's file shadows; a reload keeps the project; without a project the copy is used.
+// - Phase 11 (W11.13): five tabs in order Agents · Commands · Skills · Output styles · Hooks (`data-value` agents,
+//   commands, skills, output-styles, hooks); New follows the tab (`data-kind` agent / command / skill / style / hook,
+//   "New output style", "New hook") and so does `?tab=`; the Hooks tab shows the hooks panel, the Output styles tab its
+//   default select and the built-in styles; an unknown `?tab=` falls back to Agents.
 import { Buffer } from 'node:buffer'
 import { readFile } from 'node:fs/promises'
 import {
@@ -308,5 +312,57 @@ test.describe('customize', () => {
     await selectCustomizeProject(page, null)
     await expect(customizeSection(page, 'project')).toHaveCount(0)
     await expect(personal).toHaveAttribute('data-state', 'active')
+  })
+
+  test('five tabs: Agents, Commands, Skills, Output styles and Hooks; New and the query follow the tab @smoke', async ({ page }) => {
+    await page.goto('/settings/customize')
+    const tabs = page.getByTestId(testIds.customizeTab)
+    await expect(tabs).toHaveCount(5)
+    const values = ['agents', 'commands', 'skills', 'output-styles', 'hooks']
+    expect(await tabs.evaluateAll(items => items.map(item => item.getAttribute('data-value')))).toEqual(values)
+    const labels = await tabs.evaluateAll(items => items.map(item => (item.textContent ?? '').replace(/[\d,\s]+$/, '').trim()))
+    expect(labels).toEqual(['Agents', 'Commands', 'Skills', 'Output styles', 'Hooks'])
+    await expect(page.getByTestId(testIds.customizeSettings)).toBeVisible()
+    await expect(page.getByText('Agents, commands, skills, output styles and hooks: yours, your projects\' and your plugins\'.')).toBeVisible()
+
+    const newButton = page.getByTestId(testIds.customizeNew)
+    const expected: [string, string, string][] = [
+      ['commands', 'command', 'New command'],
+      ['skills', 'skill', 'New skill'],
+      ['output-styles', 'style', 'New output style'],
+      ['hooks', 'hook', 'New hook'],
+      ['agents', 'agent', 'New agent'],
+    ]
+    for (const [value, kind, label] of expected) {
+      const tab = byTestId(page, testIds.customizeTab, { 'data-value': value })
+      await tab.click()
+      await expect(tab).toHaveAttribute('data-state', 'active')
+      await expect(page).toHaveURL(new RegExp(`[?&]tab=${value}(?:&|$)`))
+      await expect(newButton).toHaveAttribute('data-kind', kind)
+      await expect(newButton).toHaveText(label)
+      if (value === 'hooks')
+        await expect(page.getByTestId(testIds.hooksPanel)).toBeVisible()
+      if (value === 'output-styles')
+        await expect(page.getByTestId(testIds.customizeStyleDefault)).toBeVisible()
+    }
+
+    // The query opens a tab directly; an unknown value falls back to Agents.
+    await page.goto('/settings/customize?tab=output-styles')
+    await expect(byTestId(page, testIds.customizeTab, { 'data-value': 'output-styles' })).toHaveAttribute('data-state', 'active')
+    await expect(customizationRow(customizeSection(page, 'builtin'), { 'data-name': 'explanatory' })).toBeVisible()
+    await page.goto('/settings/customize?tab=nope')
+    await expect(byTestId(page, testIds.customizeTab, { 'data-value': 'agents' })).toHaveAttribute('data-state', 'active')
+  })
+
+  // The five tabs fit on a desktop and the active tab stays in view (fixed in P11-B, W11.19).
+  test('a page opened on the Hooks tab shows the whole active tab', async ({ page }) => {
+    await page.goto('/settings/customize?tab=hooks')
+    const tab = byTestId(page, testIds.customizeTab, { 'data-value': 'hooks' })
+    await expect(tab).toHaveAttribute('data-state', 'active')
+    const row = page.getByRole('tablist', { name: 'Kinds' }).locator('xpath=..')
+    await expect.poll(async () => {
+      const [tabBox, rowBox] = [await tab.boundingBox(), await row.boundingBox()]
+      return tabBox !== null && rowBox !== null && tabBox.x >= rowBox.x - 0.5 && tabBox.x + tabBox.width <= rowBox.x + rowBox.width + 0.5
+    }, { message: 'the active tab lies inside the visible part of its row' }).toBe(true)
   })
 })

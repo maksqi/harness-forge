@@ -77,7 +77,7 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | `unauthorized` | 401 | `login` | No valid session (or wrong password on `POST /auth/login`). |
 | `forbidden` | 403 | `login` when fresh auth is missing | Origin check failed, fresh auth missing, operation not allowed for this resource (builtin plugin, read-only source). |
 | `not_found` | 404 | - | Unknown route, chat, message, plugin, provider, file, tool, MCP server, icon, share link, project, shell rule or change batch, a file the chat never changed, a missing project folder, or a message that is not queued (already delivered or started; Phase 9). Every failure of the public share routes is the same 404 (section 5.20). |
-| `conflict` | 409 | - | State conflict: a run is active for the chat (or for a chat of the project, also during a rewind, revert or undo), id already exists (also a project for the folder, the new folder, or a shell rule), stale file `baseEtag` (or a revert's `expectedSha`), password managed by `HF_PASSWORD`, another maintenance operation (import, delete-all, key rotation, file cleanup) is running, a chat request arrives during a key rotation, the message to delete is its only version, the master key comes from `HF_MASTER_KEY` or fails the key check, a message is queued for a chat with no active run and no pending approval, or the chat's queue is full (Phase 9), a `UserPromptSubmit` / `SessionStart` hook refused the turn, or a project command's `!` spans are not approved (Phase 11). |
+| `conflict` | 409 | - | State conflict: a run is active for the chat (or for a chat of the project, also during a rewind, revert or undo), id already exists (also a project for the folder, the new folder, or a shell rule), stale file `baseEtag` (or a revert's `expectedSha`), password managed by `HF_PASSWORD`, another maintenance operation (import, delete-all, key rotation, file cleanup) is running, a chat request arrives during a key rotation, the message to delete is its only version, the master key comes from `HF_MASTER_KEY` or fails the key check, a message is queued for a chat with no active run and no pending approval, or the chat's queue is full (Phase 9), a `UserPromptSubmit` / `SessionStart` hook refused the turn or a queued message, a project command's `!` spans are not approved, a command's `!` spans while `HF_WORKSPACE_SHELL=0`, a project approval whose hashes changed, or the personal hook (100) or project MCP variable (50) limit (Phase 11). |
 | `payload_too_large` | 413 | - | Body, upload, zip, backup, recording, share snapshot or file over the limit (`details.limitBytes`; a backup with too many entries: `details.limitEntries`). |
 | `provider_not_configured` | 400 | `configure-provider` | Provider unknown/disabled or required credentials missing, wherever a model ref is resolved (chat, media routes, `ctx.ai`, `ctx.models.resolve`, `ctx.images`, `generate_image`; an unknown provider since Phase 7). Returned before any streaming. Routes that address a provider by id (`/providers/:id/...`, `GET /models?providerId=`, model prefs, custom models) answer `404 not_found` for an unknown one. |
 | `auth_invalid` | 502 | `configure-provider` | Provider rejected the credentials (upstream 401/403). |
@@ -97,7 +97,7 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | Code | `details` shape |
 |---|---|
 | `validation_error` | `{ issues: Array<{ path: Array<string \| number>; message: string; code: string }> }` (zod issues, flattened) |
-| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy' \| 'only-version' \| 'env-key' \| 'key-mismatch' \| 'run-idle' \| 'queue-full' \| 'hook-blocked' \| 'untrusted', chatId?: string, hook?: HookData }` (`run-active`: a run holds the chat, or its active leaf moved during a version switch or delete, section 5.9, or a chat of the project runs while the project is deleted, or the chat runs while it is moved, sections 5.9 and 5.22, or a chat of the project runs during a rewind, revert or undo, section 5.24; `exists`: a chat or message id is already used, a project already uses the folder, the new folder exists, section 5.22, or the shell rule already exists, section 5.25, or the id of a queued message is already queued or stored, section 5.26; `stale`: a plugin file or package changed since it was read or reviewed, or a chat request was stopped before its history was stored, section 5.10, or the file to revert changed since the client read it (`expectedSha`), section 5.24; `busy`: another maintenance operation (import, delete-all, key rotation, file cleanup) is running, sections 5.19 and 5.23, or a chat request arrives while a key rotation runs, section 5.10; `only-version`: the message to delete has no other version, section 5.9; `env-key`: the master key comes from `HF_MASTER_KEY` and is rotated offline, section 5.23; `key-mismatch`: the master key fails the stored key check, section 5.23; `run-idle` (Phase 9): a message was queued for a chat with no active run and no pending approval (send it with `POST /chat` instead), section 5.26; `queue-full` (Phase 9): the chat already has 10 queued messages, section 5.26; `hook-blocked` (Phase 11, ADR-048): a `UserPromptSubmit` or `SessionStart` hook refused the turn (exit 2, `decision: 'block'` or `continue: false`; the message is the hook's reason) and nothing was stored, section 5.10; only this reason sets `hook` = the `HookData` record of the blocking event (section 4.31; checked by `conflictDetailsSchema` only as an object, its shape is `hookDataSchema`); `untrusted` (Phase 11, ADR-049 / ADR-052): a project command file with `` !`cmd` `` spans whose trust hash is not approved, section 5.10 (the web opens the project trust review); `disabled` also answers a command with spans while `HF_WORKSPACE_SHELL=0` and a project MCP reconnect in safe mode (Phase 11)) |
+| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy' \| 'only-version' \| 'env-key' \| 'key-mismatch' \| 'run-idle' \| 'queue-full' \| 'hook-blocked' \| 'untrusted', chatId?: string, hook?: HookData }` (`run-active`: a run holds the chat, or its active leaf moved during a version switch or delete, section 5.9, or a chat of the project runs while the project is deleted, or the chat runs while it is moved, sections 5.9 and 5.22, or a chat of the project runs during a rewind, revert or undo, section 5.24; `exists`: a chat or message id is already used, a project already uses the folder, the new folder exists, section 5.22, or the shell rule already exists, section 5.25, or the id of a queued message is already queued or stored, section 5.26, or 100 personal hooks are stored, section 5.31, or 50 variables of a project, section 5.33 (Phase 11); `stale`: a plugin file or package changed since it was read or reviewed, or a chat request was stopped before its history was stored, section 5.10, or the file to revert changed since the client read it (`expectedSha`), section 5.24, or (Phase 11) a project trust approval whose hash is no longer current ("The project files changed while you reviewed them. Review them again."), section 5.32; `busy`: another maintenance operation (import, delete-all, key rotation, file cleanup) is running, sections 5.19 and 5.23, or a chat request arrives while a key rotation runs, section 5.10; `only-version`: the message to delete has no other version, section 5.9; `env-key`: the master key comes from `HF_MASTER_KEY` and is rotated offline, section 5.23; `key-mismatch`: the master key fails the stored key check, section 5.23; `run-idle` (Phase 9): a message was queued for a chat with no active run and no pending approval (send it with `POST /chat` instead), section 5.26; `queue-full` (Phase 9): the chat already has 10 queued messages, section 5.26; `hook-blocked` (Phase 11, ADR-048): a `UserPromptSubmit` hook blocked (exit 2, `decision: 'block'`, `continue: false`, or a plugin `prompt.submit` `block`) or a `SessionStart` hook answered `continue: false`, and nothing was stored or queued (the message is "A hook blocked this message: <reason>", or "A hook blocked this message." without one; `chatId` is set), sections 5.10 and 5.26; only this reason sets `hook` = the `HookData` record of the blocking event (section 4.31; checked by `conflictDetailsSchema` only as an object, its shape is `hookDataSchema`); `untrusted` (Phase 11, ADR-049 / ADR-052): a project command file with `` !`cmd` `` spans whose trust hash is not approved, section 5.10 (the web opens the project trust review); `disabled` also answers a command with spans while `HF_WORKSPACE_SHELL=0` and a project MCP reconnect in safe mode (Phase 11)) |
 | `payload_too_large` | `{ limitBytes: number }`, or `{ limitEntries: number }` when `GET /data/export` refuses a backup for its entry count (section 5.19) |
 | `plugin_error` | `{ pluginId: string; phase?: 'load' \| 'setup' \| 'dispose' \| 'hook' \| 'tool' \| 'build' \| 'install' }` |
 | `internal_error` | `{ requestId: string }` |
@@ -168,10 +168,11 @@ export interface ApiRouteDef {
   public?: true             // no session required (default: session required)
   fresh?: true              // ALWAYS requires fresh auth when a password is set; conditional cases
                             // (mcp.create / mcp.update with stdio, pluginInstall.install of a plugin that
-                            // requires trust, pluginDrafts.create / pluginDrafts.updateManifest with a stdio MCP
-                            // server, plugins.reload of a code plugin, pluginFiles.write / pluginFiles.remove of a
-                            // plugin that runs code, and since Phase 11 hooks.update unless the body is exactly
-                            // { enabled: false }) are enforced by the server only
+                            // requires trust, pluginDrafts.create / pluginDrafts.updateManifest of a manifest that
+                            // requires trust (manifestRequiresTrust: a stdio MCP server, since Phase 11 also command
+                            // hooks or !`cmd` spans), plugins.reload of a code plugin, pluginFiles.write /
+                            // pluginFiles.remove of a plugin that runs code, and since Phase 11 hooks.update
+                            // unless the body is exactly { enabled: false }) are enforced by the server only
   params?: z.ZodType        // path params
   query?: z.ZodType
   body?: z.ZodType          // JSON body
@@ -276,8 +277,8 @@ Other exports:
 | `isHookTurnOff` / `countHookHandlers` | `(update: HookUpdate) => boolean`: true for exactly `{ enabled: false }` (the one `PATCH /hooks/:id` body without fresh auth); `(config) => number`: the handlers of a `hooks` object (Phase 11, section 4.31) |
 | `declaresCommandHooks` / `declaresCommandShellSpans` / `manifestRequiresTrust` | `(manifest) => boolean`: `contributes.hooks` has a handler; a command template holds a `` !`cmd` `` span (scanned with `planCommandExpansion`); code plugins, stdio MCP servers and (plugin API 1.5.0) either of the former two require trust |
 | `readHooksConfig` / `readSettingsHooks` / `compileMatcher` / `hookTargetNames` / `claudeToolName` / `hookPermissionMode` / `buildHookPayload` / `readHookOutput` / `combineHookOutcomes` | command hooks (Phase 11, `util/hooks.ts`, the only reader of hook configurations; section 4.31): pure, isomorphic, never throw, never build a `RegExp` from input; `HOOK_EVENTS`, `HOOK_SOURCES`, `HOOK_LIMITS`, `HOOK_DIAGNOSTIC_CODES` |
-| `canonicalJson` / `trustHashInput` / `extractCommandFileRefs` | project trust (Phase 11, `util/trust.ts`; section 4.32): the canonical text whose sha256 pins an item (the server hashes it), the script files a command names; `TRUST_ITEM_KINDS`, `TRUST_LIMITS` |
-| `parseMcpJson` / `mcpServerIdFromName` / `extractVariables` / `serverVariables` / `expandVariables` | project `.mcp.json` (Phase 11, `util/mcp-config.ts`; section 4.32): never reads the server environment; `MCP_JSON_TRANSPORTS`, `MCP_VARIABLE_NAME_PATTERN`, `MCP_CONFIG_LIMITS` |
+| `canonicalJson` / `trustHashInput` / `extractCommandFileRefs` / `extractArgsFileRefs` | project trust (Phase 11, `util/trust.ts`; section 4.32): the canonical text whose sha256 pins an item (the server hashes it), the script files a command (or a stdio server's command and args) names, bare script names such as `sh count.sh` included; `TRUST_ITEM_KINDS`, `TRUST_LIMITS` |
+| `parseMcpJson` / `mcpServerIdFromName` / `extractVariables` / `serverVariables` / `expandVariables` / `isAllowedMcpUrl` | project `.mcp.json` (Phase 11, `util/mcp-config.ts`; section 4.32): never reads the server environment; the URL check of an expanded URL; `MCP_JSON_TRANSPORTS`, `MCP_VARIABLE_NAME_PATTERN`, `MCP_CONFIG_LIMITS` |
 | `planCommandExpansion` / `renderCommandExpansion` / `formatShellSpanOutput` | command `` !`cmd` `` spans and `@path` files (Phase 11, `util/command-template.ts`; section 6.11): the body is scanned before the arguments are expanded, so arguments never reach a span; `COMMAND_TEMPLATE_LIMITS` |
 | `BUILTIN_OUTPUT_STYLES` / `effectiveStyleName` / `outputStyleBlock` / `isBuiltinOutputStyle` | output styles (Phase 11, `util/output-styles.ts`; ADR-051): the builtins `default`, `explanatory`, `learning`, chat ?? project ?? global, the `Output style: <label>` block; `DEFAULT_OUTPUT_STYLE`, `OUTPUT_STYLE_HEADER` |
 | `AGENT_NAME_PATTERN` / `agentNameSchema` / `BUILTIN_AGENT_TYPES` / `AGENT_TYPE_ALIASES` / `isReservedAgentName` | agent and skill names `^[a-z][a-z0-9-]{0,63}$`; the builtin agent types `['explore', 'general']`; `{ 'general-purpose': 'general' }`; `(name) => boolean`: a builtin type or an alias (Phase 10, ADR-044 / ADR-045) |
@@ -363,15 +364,15 @@ noted, strings are trimmed and non-empty in request schemas.
 | `hookEventSchema` / `HookEvent` | `'PreToolUse' \| 'PostToolUse' \| 'UserPromptSubmit' \| 'Notification' \| 'Stop' \| 'SubagentStop' \| 'PreCompact' \| 'SessionStart'` (`HOOK_EVENTS` of `util/hooks.ts`; Phase 11, ADR-048: the Claude Code hook events) |
 | `hookSourceSchema` / `HookSource` | `'personal' \| 'project' \| 'plugin'` (`HOOK_SOURCES`): a personal hook (table `hooks`), a project settings file (only after approval, ADR-049) or a plugin |
 | `hookKindSchema` / `HookKind` | `'command' \| 'code'`: a command hook (a shell command) or a plugin code hook (`ctx.hooks.on`) |
-| `hookStateSchema` / `HookState` | `'active' \| 'pending' \| 'off' \| 'invalid' \| 'blocked'`: state of a hook in `GET /hooks` (`pending`: a project hook whose hash is not approved; `off`: a personal hook turned off; `invalid`: an `error` diagnostic such as a regex-like matcher, never runs; `blocked`: a kill switch is on) |
+| `hookStateSchema` / `HookState` | `'active' \| 'pending' \| 'off' \| 'invalid' \| 'blocked'`: state of a hook in `GET /hooks` (`pending`: a project hook whose hash is not approved; `off`: a personal hook turned off, or a hook of an inactive plugin; `invalid`: a personal or plugin hook whose matcher does not compile, never runs (an invalid matcher in a project settings file drops its group: only an `error` diagnostic in `HookList.diagnostics`); `blocked`: a kill switch is on; `off`, `invalid` and `pending` win over `blocked`) |
 | `hookRecordOutcomeSchema` / `HookRecordOutcome` | `'context' \| 'denied' \| 'asked' \| 'allowed' \| 'rewritten' \| 'blocked' \| 'continued' \| 'stopped' \| 'error'`: what the hooks of one event did (`data-hook` `outcome`, run log; section 4.31). Named apart from the `HookOutcome` interface of `util/hooks.ts` (the reading of one process) |
 | `hookDiagnosticCodeSchema` / `HookDiagnosticCode` | `HOOK_DIAGNOSTIC_CODES`: `invalid-json`, `not-an-object`, `too-large`, `unknown-event`, `unsupported-type`, `invalid-matcher`, `invalid-command`, `invalid-timeout`, `too-many`, `too-long`, `invalid-output`, `ignored-field`, `conflict` |
 | `trustItemKindSchema` / `TrustItemKind` | `'hook' \| 'mcp' \| 'command'` (`TRUST_ITEM_KINDS` of `util/trust.ts`; Phase 11, ADR-049): an executable item of a project folder |
 | `trustStateSchema` / `TrustState` | `'approved' \| 'pending'`: whether the current sha256 of an item is in the project's approved set |
 | `trustWarningSchema` / `TrustWarning` | `'private-network' \| 'referenced-file-missing' \| 'runs-repository-code'`: review warnings of a project item (section 4.32) |
 | `projectMcpTransportSchema` / `McpJsonTransport` | `'stdio' \| 'http' \| 'sse'` (`MCP_JSON_TRANSPORTS` of `util/mcp-config.ts`; ADR-050) |
-| `projectMcpStateSchema` / `ProjectMcpState` | `'pending' \| 'needs-variables' \| 'idle' \| 'connecting' \| 'connected' \| 'error' \| 'disabled'`: state of a project MCP server (section 4.32) |
-| `invocationKindSchema` / `InvocationKind` | `'command' \| 'skill'` (Phase 11, ADR-052): what a slash name invokes (`CommandSummary.kind`, `CommandInvocation.kind`) |
+| `projectMcpStateSchema` / `ProjectMcpState` | `'pending' \| 'needs-variables' \| 'idle' \| 'connecting' \| 'connected' \| 'error' \| 'disabled'`: state of a project MCP server (section 4.32): `pending` not approved (or changed since the approval), `needs-variables` a referenced variable has no value and no default, `idle` approved and not running, `connecting`, `connected`, `error` (with the reason), `disabled` only in safe mode (`HF_SAFE_MODE`); an unavailable project folder lists no servers |
+| `invocationKindSchema` / `InvocationKind` | `'command' \| 'skill'` (Phase 11, ADR-052): what a slash name invokes (`CommandSummary.kind`, `CommandInvocation.kind`, `ShareMessage.command.kind`) |
 
 ### 4.2 Common
 
@@ -477,7 +478,8 @@ type Settings = {                       // settingsSchema; every key always pres
                                         // choice win over it; an unknown name is not refused (runs use 'default' with
                                         // the notice output-style-unavailable)
   hooksEnabled: boolean                 // default true: run command hooks (personal, project, plugin); false = no command
-                                        // hook runs (plugin code hooks still run); the kill switches of GET /hooks
+                                        // hook runs (plugin code hooks still run); the kill switches of GET /hooks;
+                                        // a change emits hooks.changed { projectId: null }
 }
 
 type SettingsUpdate = Partial<Settings> // settingsUpdateSchema; strict, at least one key
@@ -781,8 +783,10 @@ type CommandInvocation = {              // commandInvocationSchema
   type: 'prompt' | 'reply' | 'compact'  // 'compact': the harness command /compact [focus] (Phase 9, ADR-040)
   expansion?: string                    // prompt commands: text sent to the model instead (<= 64 KB)
   // Phase 10 (ADR-045): command files and personal commands; absent in v1.5 messages
-  source?: CommandSource                // 'user' | 'project' (a personal command or a command file); plugin and
-                                        // harness invocations carry no source (their v1.5 shape)
+  source?: CommandSource                // 'user' | 'project' (a personal command or a command file); plugin
+                                        // commands and /compact carry no source (their v1.5 shape); a skill
+                                        // invocation (Phase 11) carries its catalog source
+                                        // ('project' | 'user' | 'plugin')
   modelRef?: ModelRef                   // the command's model: the turn runs on it (the chat keeps its model); a
                                         // continuation or regenerate of the turn reuses it; when it cannot run the
                                         // chat model answers with the notice command-model-unavailable
@@ -790,8 +794,11 @@ type CommandInvocation = {              // commandInvocationSchema
                                         // turn (never a grant); a continuation or regenerate reads it again
   // Phase 11 (ADR-052); absent in v1.6 messages
   kind?: InvocationKind                 // 'command' | 'skill': a user-invocable skill (/name [arguments]; its content
-                                        // is the expansion); absent = 'command'
-  inlined?: {                           // what a trusted command file inlined into `expansion` before the model call:
+                                        // is the expansion) always has 'skill'; a command sets 'command' only
+                                        // together with `inlined`; absent = 'command' (the v1.6 shape)
+  inlined?: {                           // what a trusted command body (a personal command, a loaded plugin's
+                                        // template, an approved project file) inlined into `expansion` before the
+                                        // model call:
     shell: number                       // 0..10 !`cmd` spans that ran
     files: string[]                     // <= 10 project-relative @path files that were read
   }                                     // frozen with the expansion: a regenerate or a continuation never runs the
@@ -818,12 +825,19 @@ type NoticeData = {                     // noticeDataSchema
                                         // resolve: unknown, disabled or unconfigured; or its catalog kind is not
                                         // 'chat'), so the chat model answered: "The command's model <ref> is not
                                         // available, so the chat's model answered." (once per reply)
-    | 'output-style-unavailable'        // Phase 11 (ADR-051): the effective output style is unknown or inactive, so
-                                        // the run used 'default' (once per reply)
-    | 'hook-continuation-limit'         // Phase 11 (ADR-048): Stop hooks blocked 5 runs in a row
-                                        // (LIMITS.hookContinuationsMax), so no further follow-up turn starts
-    | 'project-mcp-unavailable'         // Phase 11 (ADR-050): an approved project MCP server was not ready within
-                                        // 5 s (or failed), so the run has no tools of it (the message names it)
+    | 'output-style-unavailable'        // Phase 11 (ADR-051; warning): the effective output style is unknown,
+                                        // inactive or unreadable, so the run used 'default': "The output style
+                                        // "<name>" is not available, so the default style was used." (once per path
+                                        // and model: not repeated while an earlier reply of the model shows it)
+    | 'hook-continuation-limit'         // Phase 11 (ADR-048; info): after 5 hook continuations in a row
+                                        // (LIMITS.hookContinuationsMax) a further Stop block starts no turn:
+                                        // "Stopped after 5 hook continuations in a row."
+    | 'project-mcp-unavailable'         // Phase 11 (ADR-050; warning, every run): an approved project MCP server
+                                        // was not ready within 5 s (or failed), so the run has no tools of it: "The
+                                        // project MCP server "<name>" is not ready, so its tools were not sent." or
+                                        // "<n> project MCP servers are not ready ("a", "b"), so their tools were not
+                                        // sent." (servers that are pending, need variables or failed
+                                        // verify-before-run are not named)
   message: string
 }
 
@@ -849,9 +863,10 @@ type SteerData = {                      // steerDataSchema; data of 'data-steer'
 }
 
 type ActivityData = {                   // activityDataSchema; transient 'data-activity' chunks (Phase 9): reach only
-  kind: 'compacting' | 'idle' | 'hooks' // useChat onData, never stored; 'hooks' (Phase 11, ADR-048): command hooks
-  event?: HookEvent                     // of `event` are running ("Running hook…"); for PreToolUse / PostToolUse
-  toolCallId?: string                   // the tool call they run for
+  kind: 'compacting' | 'idle' | 'hooks' // useChat onData, never stored; 'hooks' (Phase 11, ADR-048): the hooks
+  event?: HookEvent                     // of `event` are running (the tool row shows "Running hook…" for
+  toolCallId?: string                   // PreToolUse / PostToolUse, with the tool call they run for; else the
+                                        // reply shows "Running hooks…")
 }
 ```
 
@@ -981,11 +996,13 @@ type McpServer = {                      // mcpServerSchema
 
 type CommandSummary = {                 // commandSummarySchema (server-side commands only)
   name: SlashName                       // a command (<= 32 chars) or, since Phase 11, a user-invocable skill (<= 64)
-  kind?: InvocationKind                 // Phase 11 (ADR-052): 'skill' for a user-invocable skill; absent = a command
+  kind?: InvocationKind                 // Phase 11 (ADR-052): 'command' or 'skill' (a user-invocable skill); the
+                                        // server always sends it since v1.7 (absent = a command, the v1.6 shape)
   description: string
   source: CommandSource                 // Phase 10: 'harness' | 'plugin' | 'user' | 'project'
-  pluginId?: PluginId                   // plugin commands, and 'core-agent' for the harness command (optional since
-                                        // Phase 10: personal and project commands have none)
+  pluginId?: PluginId                   // plugin commands and (Phase 11) plugin skills, and 'core-agent' for the
+                                        // harness command (optional since Phase 10: personal and project commands
+                                        // have none)
   namespace?: string                    // command files in subfolders: the folder path ('frontend/forms'), a display
                                         // label only (the name is the file stem)
   argumentHint?: string                 // <= 100 chars: the argument-hint of the command file or skill (shown after
@@ -1042,7 +1059,9 @@ type PluginSummary = {                  // pluginSummarySchema
   removable: boolean                    // false for builtins
   enabled: boolean                      // user intent
   state: PluginState
-  runsCode: boolean                     // "Runs code" badge
+  runsCode: boolean                     // "Runs code" badge: not builtin and a code plugin or a manifest that requires
+                                        // trust (manifestRequiresTrust: a stdio MCP server, plugin API 1.5.0 command
+                                        // hooks or !`cmd` spans in a command template)
   contributions: PluginContributions
   lastError: HarnessErrorInit | null
   installedAt: Timestamp
@@ -1339,8 +1358,8 @@ type DataSummary = {                    // dataSummarySchema (GET /data)
 type DataExportQuery = {                // dataExportQuerySchema (GET /data/export)
   files?: boolean                       // default true: attachments referenced by message parts
   settings?: boolean                    // default true: the public Settings (settings.json)
-  customizations?: boolean              // default true (Phase 10): the personal agents, commands and skills
-}                                       // (customizations.json)
+  customizations?: boolean              // default true (Phase 10): the personal agents, commands, skills and
+}                                       // (Phase 11) output styles (customizations.json)
 
 type DataConflictPolicy = 'skip' | 'copy'   // dataConflictPolicySchema: a chat whose id already exists is kept
                                             // ('skip') or imported again under new ids ('copy')
@@ -1551,7 +1570,8 @@ type SharePart =                        // sharePartSchema, discriminated on `ty
 type ShareMessage = {                   // shareMessageSchema; user and assistant messages only, no ids
   role: 'user' | 'assistant'
   modelRef?: ModelRef                   // assistant: the model that answered
-  command?: { name: CommandName }       // user: the slash command invoked (never its expansion)
+  command?: { name: SlashName; kind?: InvocationKind }   // user: the slash command or (Phase 11) skill invoked
+                                        // (names up to 64 chars; never its input, expansion or what it inlined)
   status?: 'failed' | 'stopped'         // the reply ended with an error (no details) or was stopped
   parts: SharePart[]                    // <= 1000
 }
@@ -1586,6 +1606,11 @@ piece, and `messageCount` / `outdated` count the messages after the split. Compa
 summaries are never shared) and `data-activity` are dropped like every `data-*` part, and a `/compact` exchange (the
 user message and its marker-only reply) is left out entirely. Agent tool parts (`todo_write`, `exit_plan_mode`,
 `task`) are ordinary tool parts: their inputs and outputs follow `toolDetails`.
+
+Phase 10 / 11 (ADR-046, ADR-048; no schema change beyond the command's `kind`): `data-task-result` and `data-hook`
+parts are dropped; the user-role carrier messages of background results and of `Stop` continuations are left out of
+the snapshot and of `messageCount`; a call a hook denied shows `denied` (the hook's reason is not copied); a command or
+skill invocation keeps its `kind` (share pages read "Skill").
 
 ### 4.18 Images
 
@@ -2289,7 +2314,7 @@ run offers (and, in `plan`, the plan-mode block), after the workspace block and 
 | `todo_write` | `todoWriteInputSchema` | `todoWriteOutputSchema` | `safe` |
 | `exit_plan_mode` | `exitPlanModeInputSchema` | `exitPlanModeOutputSchema` | `always`: the plan approval card always shows (overrides and hooks cannot approve it) |
 | `task` | `taskInputSchema` | `taskOutputSchema` (streamed as preliminary outputs, section 6.9) | `safe` / 600 s |
-| `skill` (Phase 10) | `skillInputSchema` | `skillOutputSchema` | `safe` / 60 s; offered only when the run's catalog has at least one active skill, never inside a sub-agent |
+| `skill` (Phase 10) | `skillInputSchema` | `skillOutputSchema` | `safe` / 60 s; offered only when the run's catalog has at least one active skill the model may load (Phase 11: not `disable-model-invocation`), never inside a sub-agent |
 
 ```ts
 type TodoItem = {                       // todoItemSchema
@@ -2442,7 +2467,10 @@ type SkillOutput = {                    // skillOutputSchema (Phase 10)
   call's error result: "Unknown skill "<name>".", "The skill "<name>" is turned off.", "The skill "<name>" is not
   valid." or "The skill "<name>" could not be loaded. <reason>", each followed by " Available skills: a, b." (at most
   50 names); a catalog without skills: "No skills are available in this chat."; a call without the run's agent scope:
-  "Skills are not available yet.". Skills are not user-invocable (no `/skill`).
+  "Skills are not available yet.". Phase 11 (ADR-052): the listing and the " Available skills: …" suffix hold only the
+  skills the model may load; a user-only skill (`disable-model-invocation: true`) is refused with `forbidden` ("The
+  skill "<name>" can only be run by the user (as /<name>); you cannot load it." plus the suffix), and user-invocable
+  skills run as `/name [arguments]` (sections 5.14 and 6.11).
 - **Plan files** (Phase 10, ADR-047): with `planFiles` on, approving `exit_plan_mode` in a project chat (a chat run
   with its project folder open) writes the plan to `<planDirectory>/<YYYY-MM-DD>-<slug>.md` (UTC date; the slug from
   the first heading, else the first non-empty line: accents dropped, `[a-z0-9-]`, cut at 48 characters, else `plan`;
@@ -2462,8 +2490,10 @@ queue on the server (`POST /chat/:id/queue`; in memory, lost on a restart; at mo
 each). At the next step boundary of the run, the run takes every queued message: the model sees each one as a user
 message and the reply stores it as a `data-steer` part (section 6.9). A message still queued when the run completes
 becomes the next turn, started by the server (`run.started` with `origin: 'queue'`). Server commands (`/compact`,
-plugin commands and, since Phase 10, the command files of the chat's project and the personal commands; `turnOnly`)
-are never steered: they wait for the next turn.
+plugin commands and, since Phase 10, the command files of the chat's project and the personal commands, since Phase 11
+also the user-invocable skills; `turnOnly`) are never steered: they wait for the next turn. Phase 11 (ADR-048): the
+`UserPromptSubmit` hooks of a queued message run when it is queued (section 5.26); their records travel with the item
+(never in `QueueItem`).
 
 ```ts
 type UserMessagePart =                  // userMessagePartSchema: the parts a user message can hold
@@ -2580,20 +2610,22 @@ type ProjectFileAttachBody = { path: string }   // projectFileAttachBodySchema; 
 
 ADR-044, ADR-045. Agents, commands and skills are markdown files with YAML frontmatter (`---` at byte 0, a BOM is
 allowed; the frontmatter at most 8 KiB, the whole file at most 64 KiB); the body is the agent's instructions, the
-command's prompt template or the skill content. One parser serves the server and the web: `parseDefinition(kind, text,
-options)` of `util/definitions.ts` (`yaml` core schema, no aliases, unique keys, byte caps before parsing; it never
-throws: every problem is a `DefinitionDiagnostic`). The catalog of a chat merges five sources, lowest precedence first:
-`builtin` (the agent types `explore` and `general`) < `plugin` (`contributes.agents` / `contributes.skills`, plugin
-commands) < `user` (personal definitions, table `customizations`, Settings → Customize) < `project` `.claude/{kind}` <
-`project` `.harness/{kind}` (of the chat's project folder). A higher source wins a name; the losers are listed with
-`state: 'shadowed'` and `shadowedBy`; inside one folder the first sorted path wins (`duplicate-name`).
+command's prompt template or the skill content. One parser serves the server and the web:
+`parseDefinition(kind, text, options)` of `util/definitions.ts` (`yaml` core schema, no aliases, unique keys, byte caps
+before parsing; it never throws: every problem is a `DefinitionDiagnostic`). The catalog of a chat merges five sources,
+lowest precedence first: `builtin` (the agent types `explore` and `general`, and since Phase 11 the output styles
+`default`, `explanatory`, `learning`) < `plugin` (`contributes.agents` / `contributes.skills`, plugin commands, and
+since plugin API 1.5.0 `contributes.outputStyles` / `ctx.outputStyles.register`) < `user` (personal definitions, table
+`customizations`, Settings → Customize) < `project` `.claude/{kind}` < `project` `.harness/{kind}` (of the chat's
+project folder). A higher source wins a name; the losers are listed with `state: 'shadowed'` and `shadowedBy`; inside
+one folder the first sorted path wins (`duplicate-name`).
 
 | Kind | Project files | Frontmatter (besides `name`, `description`) | Body |
 |---|---|---|---|
 | `agent` | `.harness/agents/<name>.md`, `.claude/agents/<name>.md` (top level) | `tools` (a comma string or a list; Claude Code names map: Read → `read_file`, Write → `write_file`, Edit / MultiEdit → `edit_file`, Grep → `search_files`, Glob → `find_files`, LS → `list_directory`, Bash → `shell`, WebFetch → `web_fetch`; `mcp__*` kept; a pattern such as `Bash(git:*)` keeps the tool with `tool-pattern`; other tool-like names are kept and checked against the registered tools, `unknown-tool` when nothing matches; anything else dropped with `unknown-tool`), `model` (`provider:model` or `inherit`; `sonnet` / `opus` / `haiku` fall back to the default with `model-alias`) | the child's instructions |
-| `command` | `.harness/commands/**/<name>.md`, `.claude/commands/**/<name>.md` (up to 3 folders deep, at most 100 subfolders; a folder is a display-only `namespace`) | `argument-hint`, `model`, `allowed-tools` (narrows the turn's tools; never a grant) | the prompt: `$ARGUMENTS`, `$1` … `$9` (quotes group words), `{{input}}`; without a placeholder the input is appended; `!` lines and `@file` stay text |
-| `skill` | `.harness/skills/<name>/SKILL.md`, `.claude/skills/<name>/SKILL.md` | Phase 11 (ADR-052): `user-invocable` (default true: `/name [arguments]` in the slash menu), `disable-model-invocation` (default false: true leaves the skill out of the skills listing, the `skill` tool and `loadSkill`), `argument-hint` | the skill content (loaded by `skill`; as `/name` it expands like a command body) |
-| `style` (Phase 11, ADR-051) | `.harness/output-styles/<name>.md`, `.claude/output-styles/<name>.md` (top level) | `keep-coding-instructions` (default false: the workspace tool rules and the todo / task hints are left out while the style is active); `name` may be a display name (`Terse Reviews`): the catalog name is its slug (`terse-reviews`), the original is the `label` | the style block (`Output style: <label>` + the body, first in the main agent's instructions) |
+| `command` | `.harness/commands/**/<name>.md`, `.claude/commands/**/<name>.md` (up to 3 folders deep, at most 100 subfolders; a folder is a display-only `namespace`) | `argument-hint`, `model`, `allowed-tools` (narrows the turn's tools; never a grant) | the prompt: `$ARGUMENTS`, `$1` … `$9` (quotes group words), `{{input}}`; without a placeholder the input is appended; in Phase 10 `!` lines and `@file` stay text; Phase 11 (ADR-052): the `` !`cmd` `` spans of a trusted command run in the project folder and `@path` references are inlined in project chats (section 6.11); arguments are never substituted inside a span |
+| `skill` | `.harness/skills/<name>/SKILL.md`, `.claude/skills/<name>/SKILL.md` | Phase 11 (ADR-052): `user-invocable` (default true: `/name [arguments]` in the slash menu), `disable-model-invocation` (default false: true leaves the skill out of the skills listing, the `skill` tool and `loadSkill`), `argument-hint` | the skill content (loaded by `skill`; as `/name` it expands its arguments like a command body (`$ARGUMENTS`, `$1` …, `{{input}}`), but its `!` spans and `@path` stay text) |
+| `style` (Phase 11, ADR-051) | `.harness/output-styles/<name>.md`, `.claude/output-styles/<name>.md` (top level) | `keep-coding-instructions` (default false: the workspace tool rules and the todo / task hints are left out while the style is active); `name` may be a display name (`Terse Reviews`): the catalog name is its slug (`terse-reviews`), the original is the `label`; a missing `description` is the first line of the body | the style block (`Output style: <label>` + the body, first in the main agent's instructions) |
 
 Names: agents, skills and styles `AGENT_NAME_PATTERN` (`^[a-z][a-z0-9-]{0,63}$`), commands `COMMAND_NAME_PATTERN`; the
 `name` key, else the file stem (agents, commands, styles) or the folder name (skills). Reserved: the agent types
@@ -2702,7 +2734,8 @@ type SkillDefinitionFields = {          // skillDefinitionFieldsSchema
 }
 type StyleDefinitionFields = {          // styleDefinitionFieldsSchema (Phase 11, ADR-051)
   name: string                          // the slug (AGENT_NAME_PATTERN)
-  label: string                         // the name as written
+  label: string                         // the name as written (plugin styles: the name; builtins: Default,
+                                        // Explanatory, Learning, which all keep the coding instructions)
   description: string
   keepCodingInstructions: boolean       // default false
   content: string                       // the style body
@@ -2753,9 +2786,11 @@ type DeclarativeOutputStyle = {         // declarativeOutputStyleSchema (plugin 
 - **Caching**: a catalog is cached per project for 10 s (`LIMITS.customizationIndexTtlMs`; at most 50 project
   catalogs), built one at a time, and dropped on a `workspace.changed` of the project whose paths touch one of the
   definition folders (eight since Phase 11, which adds the `output-styles` folders; or that lists 200 paths, so it may
-  be cut), on `project.changed` and when a run of one of its chats finishes (`run.finished`: shell commands write without `workspace.changed`); a registry change of plugin
-  agents, skills or commands, every personal change and a restore drop every catalog. A build that fails (the
-  database) answers the builtins with a `read-failed` diagnostic and is not cached.
+  be cut), on `project.changed` and when a run of one of its chats finishes (`run.finished`: shell commands write
+  without `workspace.changed`); a registry change of plugin agents, skills, commands or (Phase 11) output styles, every
+  personal change and a restore drop every catalog. A build that fails (the database) answers the builtins with a
+  `read-failed` diagnostic ("The catalog could not be read completely; only the built-in agents and output styles are
+  listed.") and is not cached.
 - **Discovery** reads the first 9 KiB of each file (the 8 KiB frontmatter cap and the start of the body; a file whose
   cut does not parse is read again whole) and checks the first 8 KiB for a NUL byte; a body is read (and validated)
   again when it is used. Scans stop at 2000 entries per folder and at 100 subfolders of a commands folder (`limit`).
@@ -2765,13 +2800,15 @@ type DeclarativeOutputStyle = {         // declarativeOutputStyleSchema (plugin 
   `active` with an `invalid-frontmatter` warning. `invalid-model` checks only the providers the entries reference
   (configured and enabled); `unknown-tool` checks against the registered tools and skips `mcp__*` names.
   `project.issue` carries the project service's message (it names the folder path).
-- **Use**: a run loads the catalog of its chat once (`task` types and skills); `GET /commands?projectId=` lists the
-  effective commands (section 5.14). An `invalid`, `shadowed` or `off` entry is never used.
+- **Use**: a run loads the catalog of its chat once (`task` types, skills, commands, `/skill` invocations and, since
+  Phase 11, the output style); `GET /commands?projectId=` lists the effective commands and user-invocable skills
+  (section 5.14). An `invalid`, `shadowed` or `off` entry is never used.
 - **Personal definitions** keep their raw markdown; the server parses it on every write (an `error` diagnostic is
   `400`), keeps the denormalized kind, name, description and enabled flag, and allows 200 per kind (`409` `exists`
   above). They are in backups (`customizations.json`) and survive delete-all.
 - **Plugin commands** are listed in the catalog too (`source: 'plugin'`), so a project or personal command that
-  shadows one shows it; plugin agents and skills come from the registries of plugin API 1.4.0 (PLUGINS.md).
+  shadows one shows it; plugin agents and skills come from the registries of plugin API 1.4.0 and plugin output styles
+  from `registry.styles` of plugin API 1.5.0 (PLUGINS.md; a plugin style with a builtin name is `invalid`).
 
 ### 4.29 Background tasks and task results
 
@@ -2876,23 +2913,39 @@ plugin API 1.5.0, only while the plugin is active and trusted) and the project's
 `.claude/settings.local.json`, `.harness/settings.json` and `.harness/settings.local.json` (each at most 256 KiB, read
 through the workspace path guard; a project hook runs only while its trust hash is approved, section 4.32). Hook
 configurations are read only by `util/hooks.ts` (`readHooksConfig`, `readSettingsHooks`; problems are
-`HookDiagnostic`s, never errors). Matchers (`PreToolUse` / `PostToolUse`) are a safe subset matched by `compileMatcher`:
-`|` alternatives of `[A-Za-z0-9_.\- *]`, `*` and `.*` wildcards, full-match, case-sensitive; an empty or missing matcher
-or `*` matches every tool; any of `^ $ [ ( + ? \ {` makes the matcher invalid (state `invalid`, never runs; `400` for a
-personal hook). A matcher is tested against the harness tool name, its Claude Code aliases (`shell` → `Bash`,
-`edit_file` → `Edit` and `MultiEdit`, ...) and `mcp__<server>__<tool>` (`hookTargetNames`).
+`HookDiagnostic`s, never errors). The plugin code hooks of plugin API 1.5.0 (`prompt.submit`, `session.start`,
+`run.stop`, `subagent.stop`, `compact.before`, `notification`; PLUGINS.md 9) run with the command hooks of their event
+and join the combination as `plugin` outcomes (a `prompt.submit` `block` refuses the turn, a `run.stop` /
+`subagent.stop` `continue` continues); the kill switches never stop them. Matchers are a safe subset matched by
+`compileMatcher`: `|` alternatives of `[A-Za-z0-9_.\- *]`, `*` and `.*` wildcards, full-match, case-sensitive; an empty
+or missing matcher, `*` or `.*` matches everything; any of `^ $ [ ( + ? \ {` makes the matcher invalid (never runs:
+`400` for a personal hook; a plugin manifest with one is refused; in a project settings file the group is dropped with
+an `invalid-matcher` error diagnostic). They apply to `PreToolUse` / `PostToolUse` (tool names), `SessionStart` (the
+source `startup` / `compact`), `PreCompact` (the trigger `manual` / `auto`) and `Notification` (`permission_prompt`;
+`HOOK_MATCHER_SUBJECTS`); the other events ignore them. A tool matcher is tested against the harness tool name, its
+Claude Code aliases (`shell` → `Bash`, `edit_file` → `Edit` and `MultiEdit`, `task` → `Task`, `todo_write` →
+`TodoWrite`, `exit_plan_mode` → `ExitPlanMode`, `skill` → `Skill`, ...) and, for a project MCP tool, `mcp__<name in
+.mcp.json>__<tool>` (`hookTargetNames`; the harness name is already `mcp__<id>__<tool>`).
 
 The hook gets a JSON payload on stdin (Claude Code field names: `session_id` = the chat id, `cwd`, `hook_event_name`,
-`permission_mode`, `tool_name`, `tool_input`, `tool_use_id`, `tool_response`, `prompt`, `stop_hook_active`, `trigger`,
-`custom_instructions`, `source`, `message`, `notification_type`, plus `harness: { version: 1, chatId, projectId,
-messageId?, modelRef, origin, tool?, source }`; at most 256 KiB, `tool_response` then `tool_input` cut to fit; no
-`transcript_path`), runs in the project folder (else `<dataDir>/hooks`) with the minimal shell environment plus
-`HARNESS_PROJECT_DIR` / `CLAUDE_PROJECT_DIR` (and `HARNESS_PLUGIN_ROOT` / `CLAUDE_PLUGIN_ROOT` for plugin hooks), with
-its timeout (default 60 s, at most 600 s; `LIMITS.hookTimeoutDefaultMs` / `hookTimeoutMaxMs`). Exit 0 continues (a
-JSON object on stdout may decide: `continue`, `stopReason`, `systemMessage`, `decision`, `reason`,
-`hookSpecificOutput.{hookEventName, permissionDecision, permissionDecisionReason, updatedInput, additionalContext}`;
-plain stdout is context for `UserPromptSubmit` / `SessionStart`); exit 2 blocks with stderr as the reason; any other
-exit or a timeout is a non-blocking error. Kill switches (command hooks only; plugin code hooks still run): the setting
+`permission_mode` (Ask and Off → `default`, Plan → `plan`, Accept edits → `acceptEdits`, Auto →
+`bypassPermissions`), `tool_name` (the Claude Code name when there is one, `shell` → `Bash`; the harness name is in
+`harness.tool`), `tool_input` (PostToolUse: the input the tool ran with), `tool_use_id`, `tool_response`, `prompt`,
+`stop_hook_active`, `trigger`, `custom_instructions` (the `/compact` focus, else `""`), `source`, `message`,
+`notification_type`, plus `harness: { version: 1, chatId, projectId, messageId?, modelRef, origin, tool?, source,
+truncated? }`; SubagentStop sends no tool fields; at most 256 KiB: `tool_response`, `tool_input`, `prompt`,
+`custom_instructions` and `message` are cut in that order and `harness.truncated` is set; no `transcript_path`), runs
+in the project folder (else `<dataDir>/hooks`) with the minimal shell environment plus `HARNESS_PROJECT_DIR` /
+`CLAUDE_PROJECT_DIR` (both = the working folder; and `HARNESS_PLUGIN_ROOT` / `CLAUDE_PLUGIN_ROOT` for plugin hooks),
+with its timeout (default 60 s, at most 600 s; `LIMITS.hookTimeoutDefaultMs` / `hookTimeoutMaxMs`). Up to 20 matching
+command hooks of an event run in parallel (the rest are skipped with a log warning), at most 16 hook processes
+server-wide; stdout keeps its first 64 KiB and stderr 16 KiB. Exit 0 continues (a JSON object on stdout may decide:
+`continue`, `stopReason`, `systemMessage`, `decision`, `reason`, `hookSpecificOutput.{hookEventName,
+permissionDecision, permissionDecisionReason, updatedInput, additionalContext}`; plain stdout is context for
+`UserPromptSubmit` / `SessionStart`); exit 2 blocks with stderr as the reason for `PreToolUse`, `PostToolUse`,
+`UserPromptSubmit`, `Stop` and `SubagentStop` (for `SessionStart`, `PreCompact` and `Notification` it is a
+non-blocking error; `continue: false` is ignored for `PreCompact` and `Notification`); any other exit or a timeout is a
+non-blocking error. Kill switches (command hooks only; plugin code hooks still run): the setting
 `hooksEnabled`, `HF_WORKSPACE_SHELL=0`, `HF_SAFE_MODE`. Personal hooks, project approvals and the run log are never in
 backups.
 
@@ -2940,7 +2993,8 @@ type HookEntry =                        // hookEntrySchema: one hook of GET /hoo
     })
   | (HookEntryBase & { kind: 'code'; event: string })   // a plugin code hook: event = the HookMap key
 type HookEntryBase = {
-  key: string                           // stable UI key: 'personal:<id>', 'project:<sha256>', 'plugin:<id>:<n>'
+  key: string                           // stable UI key: 'personal:<id>', 'project:<sha256>', 'plugin:<id>:<n>';
+                                        // a code hook 'plugin:<id>:code:<HookMap key>:<n>'
   source: HookSource                    // 'personal' | 'project' | 'plugin'
   state: HookState                      // 'active' | 'pending' | 'off' | 'invalid' | 'blocked'
   id?: HookId                           // personal hooks
@@ -2962,7 +3016,8 @@ type HookProjectScan = {                // hookProjectScanSchema: what GET /hook
 }
 type HookList = {                       // hookListSchema (GET /hooks)
   items: HookEntry[]                    // <= 300, in run order: personal, plugin, project
-  diagnostics: HookDiagnostic[]         // file-level problems (unreadable, too large, invalid JSON, ...)
+  diagnostics: HookDiagnostic[]         // file-level problems (unreadable, too large, invalid JSON, ...) and the
+                                        // problems of handlers that are not listed (e.g. an invalid project matcher)
   switches: HookSwitches
   project?: HookProjectScan             // absent without projectId
 }
@@ -2972,13 +3027,13 @@ type HookRun = {                        // hookRunSchema: one entry of the run l
   at: Timestamp
   event: HookEvent
   source: HookSource
-  label: string                         // the command, cut to 200 chars
+  label: string                         // as HookResult.label
   pluginId?: PluginId
   chatId?: ChatId
-  exitCode: number | null               // null: the process did not exit normally
-  timedOut: boolean
+  exitCode: number | null               // null: the process did not exit normally, or plugin code hooks (one entry
+  timedOut: boolean                     // per plugin; only the first carries the outcome)
   durationMs: number
-  outcome: HookRecordOutcome | null     // null = a silent success
+  outcome: HookRecordOutcome | null     // null = a silent success (a plugin tool.after context writes no entry)
   error?: string                        // <= 500 chars, safe to show (never the raw stderr)
 }
 type HookRunList = { items: HookRun[] } // hookRunListSchema: the last 200 runs, newest first (in memory)
@@ -2993,11 +3048,14 @@ type HookData = {                       // hookDataSchema (chat.ts): data of 'da
   hooks: HookResult[]                   // every hook that ran for the event (<= 20)
   context?: string                      // <= 10000 chars, model-visible (joined, capped)
   reason?: string                       // <= 2000 chars: a block or decision reason
-  updatedInput?: unknown                // PreToolUse 'rewritten': the input the tool ran with (<= 64 KiB of JSON);
-}                                       // the tool part keeps the model's input
+  updatedInput?: unknown                // PreToolUse: the input the tool ran with (outcome 'rewritten', or 'asked' /
+}                                       // 'allowed' when a hook also decided; <= 64 KiB of JSON); the tool part
+                                        // keeps the model's input
 type HookResult = {                     // hookResultSchema: one hook of a record
   source: HookSource
-  label: string                         // <= 200 chars: the command, or '<pluginId>: <event>' for a code hook
+  label: string                         // <= 200 chars: the redacted command with whitespace collapsed (a project
+                                        // hook prefixed '<file>: '), '<pluginId>: <HookMap key>' for a code hook
+                                        // ('p: run.stop'), 'tool.after' for a plugin's tool.after context
   pluginId?: PluginId
   exitCode: number | null
   timedOut?: boolean
@@ -3017,31 +3075,58 @@ type HooksConfigInput = Partial<Record<HookEvent, HookMatcherGroupInput[]>>     
                                         // with it (readHooksConfig turns their problems into diagnostics)
 ```
 
-- **Where records go** (ADR-048): a silent success stores nothing; otherwise one `data-hook` part per event, in the
-  assistant reply where the event ran (tool hooks carry the `toolCallId`), on the user message for the context of
-  `UserPromptSubmit` / `SessionStart`, and in a user-role **carrier message** (only `data-hook` parts) for a `Stop`
-  continuation (`run.started.origin = 'hook'`). The model reads `context` (and a carrier's `reason`) through
-  `splitHooks` / `hookModelText` (`util/agent-state.ts`); everything else is display-only. Share pages drop the parts
-  (a hook-denied tool reads "Denied"); the Markdown export and the search text include them.
-- **Refusals**: a `UserPromptSubmit` or `SessionStart` hook that blocks (exit 2, `decision: 'block'`, `continue: false`)
-  answers `409 conflict` with `details.reason: 'hook-blocked'` and `details.hook` (the `HookData` of the event; the
-  message is the reason) before anything is stored (section 5.10).
+- **Where records go** (ADR-048): a silent success stores nothing; otherwise one `data-hook` part per event: in the
+  assistant reply where the event ran (`PreToolUse` / `PostToolUse` carry the `toolCallId`); on the user message for
+  a `UserPromptSubmit` / `SessionStart` record with something to show (context, errors, system messages); the `Stop`
+  record in the reply before `finish`, and a copy with the same id in the user-role **carrier message** (only
+  `data-hook` parts) of a `Stop` continuation (`run.started.origin = 'hook'`); the `PreCompact` record right before the
+  compaction marker. `Notification` records and every sub-agent record (`PreToolUse`, `PostToolUse`, `SubagentStop`)
+  are never stored. A plugin's `tool.after` `context` (plugin API 1.5.0) gets its own `PostToolUse` record (source
+  `plugin`, label `tool.after`, outcome `context`), even without PostToolUse hooks. The model reads `context`
+  (`<hook-context event tool>`) and the `reason` of a `PostToolUse` block or of a Stop / SubagentStop continuation
+  (`<hook-feedback event>`, "(no reason given)" when empty) through `splitHooks` / `hookModelText`
+  (`util/agent-state.ts`); everything else is display-only. Share pages drop the parts (a hook-denied tool reads
+  "Denied"); the Markdown export and the search text include them.
+- **Outcome of a record** (`services/hooks/record.ts`): `PreToolUse` decisions first (`denied` > `asked` > `allowed` >
+  `rewritten`), then `stopped` (`continue: false`; it wins over a Stop block; its `reason` is the `stopReason`), then a
+  block (`continued` for `Stop`, `blocked` for the other events, `SubagentStop` included), then `context`, then
+  `error`; a record with only a `systemMessage` is `context`.
+- **Refusals**: a `UserPromptSubmit` hook that blocks (exit 2, `decision: 'block'`, `continue: false`, or a plugin
+  `prompt.submit` `block`) or a `SessionStart` hook with `continue: false` answers `409 conflict` with
+  `details.reason: 'hook-blocked'`, `details.chatId` and `details.hook` (the `HookData` of the event; the message is "A
+  hook blocked this message: <reason>", or "A hook blocked this message." without one) before anything is stored; a
+  chat row this request created is removed again (`chat.created`, then `chat.deleted`; section 5.10). A queued message
+  is refused the same way at `POST /chat/:id/queue` (nothing is queued; section 5.26).
 
 ### 4.32 Project trust and project MCP servers
 
 ADR-049, ADR-050. An executable item of a project folder runs only while the sha256 of its canonical text
-(`trustHashInput(item)` of `util/trust.ts`: the item **and** the script files its command names, at most 8 files of at
-most 1 MiB, `extractCommandFileRefs`) is in the project's approved set (table `project_trust`, one row per project and
-hash; never in backups; delete-all keeps it; cascades with the project). Items: the hooks of the project's settings
-files, the servers of its `.mcp.json` (stdio, http and sse) and the command files with `` !`cmd` `` spans. The hash is
-recomputed right before every spawn (verify-before-run): a mismatch skips the item. A missing approval means pending,
-never a prompt at run time. Approving needs fresh auth and answers `409 stale` when a hash is not current; revoking does
-not need fresh auth. `.mcp.json` (at the project root, at most 256 KiB, at most 20 servers) is parsed only by
-`util/mcp-config.ts` (`parseMcpJson`): the type is inferred (`command` → stdio, else `type ?? 'http'`), only `http:` /
-`https:` URLs; server names map to ids (`mcpServerIdFromName`: lowercase, other characters → `-`, at most 32, `-2` … on
-collisions). `${VAR}` / `${VAR:-default}` references (in the command, args, env values, URL and header values) resolve
-**only** from the values stored per project (secret scope `project:<projectId>`, names `mcp.var.<NAME>`, AES-256-GCM),
-never from the server environment.
+(`trustHashInput(item)` of `util/trust.ts`: the item **and** the script files it names) is in the project's approved set
+(table `project_trust`, one row per project and hash; never in backups; delete-all keeps it; cascades with the
+project). The named files come from `extractCommandFileRefs` (hook commands and `!` spans) and `extractArgsFileRefs`
+(the command and args of a stdio server): `$CLAUDE_PROJECT_DIR/…` / `$HARNESS_PROJECT_DIR/…`, `./…`, `.claude/…`,
+`.harness/…`, or a relative path or bare name with a script extension (`scripts/x.py`, `sh count.sh`,
+`node hook.mjs`); options, option values, assignments, URLs and remote paths are never references; at most 8 files of
+at most 1 MiB. Items: the hooks of the project's settings files, the servers of its `.mcp.json` (stdio, http and sse)
+and the command files with `` !`cmd` `` spans. Identical hooks are one item (listed in the first file; at most 100 hook
+items); a command file whose name is longer than 64 characters or that has a span longer than 4096 characters is never
+listed, so it can never be approved. The hash is recomputed right before every spawn (verify-before-run): a mismatch
+skips the item (a project MCP server that fails it is listed `pending`). Runs read the items through a per-project
+cache (10 s, single flight; dropped when `workspace.changed` touches a settings, `.mcp.json`, command or referenced
+file, on `project.changed` and on `run.finished` of a chat of the project, and after a verify mismatch); the trust
+routes always scan the folder afresh. A missing approval means pending, never a prompt at run time. Approving needs
+fresh auth and answers `409 stale` when a hash is not current; revoking does not need fresh auth. `.mcp.json` (at the
+project root, at most 256 KiB, at most 20 servers: the rest are skipped) is parsed only by `util/mcp-config.ts`
+(`parseMcpJson`): the type is inferred (`command` → stdio, else `type ?? 'http'`), only `http:` / `https:` URLs (a URL
+with variables must start with `http(s)://` or a variable; the expanded URL is checked again with `isAllowedMcpUrl`
+before connecting), a server name longer than 64 characters is invalid (an invalid server is not listed); server
+names map to ids (`mcpServerIdFromName`: lowercase, whitespace / `_` / `.` → `-`, other characters dropped, `server`
+when empty, at most 32, `-2` … on collisions). A linked, non-regular or unreadable settings file or `.mcp.json` (also
+one below a linked `.claude` / `.harness` folder) is not read (diagnostic `not-an-object`; a larger one `too-large`).
+`${VAR}` / `${VAR:-default}` references (in the command, args, env values, URL and header values) resolve **only**
+from the values stored per project (secret scope `project:<projectId>`, names `mcp.var.<NAME>`, AES-256-GCM), never
+from the server environment; a default is literal text up to the next `}` and cannot hold another variable, and
+`$NAME` or any other `${…}` stays literal.
 
 ```ts
 type TrustItem =                        // trustItemSchema, discriminated on kind
@@ -3057,11 +3142,13 @@ type TrustItemBase = {
   path: string                          // the project-relative file ('.claude/settings.json', '.mcp.json',
                                         // '.harness/commands/status.md')
   refs: { path: string; sha256: Sha256Hex | null }[]   // trustRefSchema, <= 8: the script files the command names
-                                                       // (null = missing, unreadable or larger than 1 MiB)
+                                                       // (null = missing, linked, not a regular file,
+                                                       // secret-looking, unreadable or larger than 1 MiB)
   warnings: TrustWarning[]              // 'private-network' | 'referenced-file-missing' | 'runs-repository-code'
 }
 type TrustHookDetail = {                // trustHookDetailSchema: exactly what the settings file says
-  event: HookEvent; matcher: string | null; command: string; timeout: number | null
+  event: HookEvent; matcher: string | null; command: string
+  timeout: number | null                // seconds; null = the default (60 s)
 }
 type TrustMcpDetail = {                 // trustMcpDetailSchema: unexpanded (${VAR} kept); values are never shown
   name: string                          // the name in .mcp.json
@@ -3073,11 +3160,13 @@ type TrustMcpDetail = {                 // trustMcpDetailSchema: unexpanded (${V
   headerNames: string[]                 // only the NAMES of its headers
   variables: McpVariableName[]          // the ${VAR} names it references
 }
-type TrustCommandDetail = { name: string; spans: string[] }   // trustCommandDetailSchema: '/name' and its !`cmd`
-                                                              // spans in order (<= 10)
+type TrustCommandDetail = { name: string; spans: string[] }   // trustCommandDetailSchema: the command name (no
+                                                              // slash, <= 64; the label is '/name') and its
+                                                              // !`cmd` spans in order (<= 10, each <= 4096 chars)
 type ProjectTrustList = {               // projectTrustListSchema (GET /projects/:id/trust, approve and revoke answers)
-  items: TrustItem[]                    // <= 200, from a fresh scan of the folder
-  orphaned: number                      // approved hashes no current item has (kept until revoked; they run nothing)
+  items: TrustItem[]                    // <= 200, from a fresh scan of the folder: hooks, then servers, then commands
+  orphaned: number                      // approved hashes no current item has (they run nothing; 0 while the folder
+                                        // is unavailable; every revoke with a complete scan deletes them)
   scannedAt: Timestamp
   available: boolean                    // false: the folder could not be opened (no items; issue says why)
   issue?: string
@@ -3101,14 +3190,17 @@ type ProjectMcpServer = {               // projectMcpServerSchema
   error?: HarnessErrorInit              // state 'error': why (redacted)
   tools: string[]                       // <= 1000 registered tool names (mcp__<id>__<tool>), live or last known
   shadows?: McpServerId                 // the global MCP server with the same id that this one replaces in the
-                                        // project's chats
+                                        // project's chats; only for approved servers (absent while pending or
+                                        // disabled)
   missingVariables: McpVariableName[]   // ${VAR} names without a stored value and without a default
 }
 type ProjectMcpVariable = {             // projectMcpVariableSchema; values are never answered
   name: McpVariableName
   set: boolean                          // a value is stored for the project
-  hint: string | null                   // the :-default of the first reference (a placeholder); null = none
-  usedBy: McpServerId[]                 // the servers that reference it
+  hint: string | null                   // the :-default of the first server that references it (a placeholder);
+                                        // null = none (also when that server uses it without a default)
+  usedBy: McpServerId[]                 // the servers that reference it; [] for a stored variable no server
+                                        // references (listed after the referenced ones, so it can be removed)
 }
 type ProjectMcpList = {                 // projectMcpListSchema (GET /projects/:id/mcp, PUT .../variables answer)
   items: ProjectMcpServer[]             // <= 20
@@ -3124,15 +3216,26 @@ type ProjectMcpChangedData = {          // projectMcpChangedDataSchema: data of 
 }
 ```
 
-- **Review warnings**: `private-network` (an http / sse server on a loopback or private address: a warning, not a block,
-  since local servers are the main use), `referenced-file-missing` (a named script file is missing, unreadable or too
-  large), `runs-repository-code` (the command runs code of the repository, e.g. `npm test`, whose files are not pinned).
-- **Project MCP lifecycle**: servers start lazily for the first run of a project chat (the run waits at most 5 s,
-  `LIMITS.projectMcpConnectWaitMs`, else notice `project-mcp-unavailable`), stop after 10 idle minutes and on revoke, a
-  change of the item or of a variable, project delete and shutdown; stdio servers run in the project folder with the
-  minimal stdio environment in their own process group; redirects are refused; `HF_SAFE_MODE` starts none (state
-  `disabled`). Tool preferences apply by name; a project server shadows a global server with the same id in that
-  project's chats only.
+- **Review warnings**: `private-network` (an http / sse server on a non-public address: loopback, private, link-local,
+  CGNAT, metadata, multicast, unspecified or reserved, or a local name such as `localhost`, `*.local`, `*.internal`,
+  `*.lan`, `*.home.arpa` or a single label; judged from the URL as written with its `:-default`s, without a DNS lookup,
+  so a host that comes from a variable without a default is not flagged; a warning, not a block, since local servers
+  are the main use), `referenced-file-missing` (a named file could not be hashed: missing, linked, secret-looking,
+  unreadable, too large, or a word that names no file such as `echo foo.sh`), `runs-repository-code` (the command runs
+  code of the repository whose files are not pinned: a package manager or build / test runner such as `npm test`, or an
+  interpreter running a project script or module such as `node hook.mjs` or `python -m x`).
+- **Project MCP lifecycle**: servers start lazily for a run of a project chat with tools on and a tool-capable model
+  (each run starts the approved servers with complete variables that are not running, e.g. after an idle stop or a
+  crash; nothing retries on a timer; the folder is read again and the item verified right before a start; the run
+  waits at most 5 s, `LIMITS.projectMcpConnectWaitMs`, else notice `project-mcp-unavailable`); they stop after 10 idle
+  minutes (deferred while a run of the project or a tool call is active), on revoke, a change or removal of the item
+  (`.mcp.json` is read again on `workspace.changed` and every 15 s while a server runs), project delete and shutdown;
+  a change of a variable restarts the running servers that use it. stdio servers run in the project folder with the
+  minimal stdio environment plus their expanded `env`, in their own process group; http / sse redirects are refused;
+  `HF_SAFE_MODE` starts none (state `disabled`). Tool preferences apply by name; an approved project server shadows a
+  global server with the same id in that project's chats only; foreground and background sub-agents use the parent
+  run's result (the shadowed global server is hidden from them too, and the project server tools join their tools
+  under the sub-agent ceiling: only tools that run without approval in the chat's mode).
 
 ## 5. Endpoints
 
@@ -3416,8 +3519,9 @@ body exceeds its limit; `500 internal_error`.
   no user message to answer (`messageId`: an empty chat, or a target whose previous message is not a user message),
   and a continuation that carries no approval decision (`['message', 'parts']`)). Section 6.2 lists what each action
   sends.
-- Such an error stores no message: at most the chat row is created (a new chat id, with `chat.created`) or its model,
-  mode and effort are updated, so the web can send the same text again under a new message id.
+- Such an error stores no message: at most the chat row is created (a new chat id, with `chat.created`; Phase 11:
+  removed again after a 409 `hook-blocked`, `untrusted` or `disabled`, with `chat.deleted`) or its model, mode and
+  effort are updated, so the web can send the same text again under a new message id.
 - Projects (ADR-031): `projectId` is honored only by the request that creates the chat: an unknown project is
   `404 not_found` before the chat row exists; for an existing chat it is ignored. In a chat with a project, every
   chat-model run opens the project folder (section 4.20; not image turns, not the reply of a slash command that
@@ -3455,13 +3559,27 @@ body exceeds its limit; `500 internal_error`.
 - Phase 11 (ADR-048 … ADR-052): `outputStyle` is honored only by the request that creates the chat (saved as
   `settings.outputStyle`; null = automatic). A `UserPromptSubmit` hook (or a `SessionStart` hook of the chat's first
   turn or of the first turn after a compaction) that blocks is `409 conflict` with `details: { reason: 'hook-blocked',
-  hook: HookData }` (the message is the hook's reason) before anything is stored: on a new chat not even the chat row
-  is created (a regenerate or an approval continuation never runs `UserPromptSubmit`; an edit runs it again). A project
-  command file with `` !`cmd` `` spans whose trust hash is not approved is `409 conflict` with `reason: 'untrusted'`;
-  spans of a trusted command in a chat without a project are `400 validation_error` on `['message', 'parts']`, and with
-  the shell off (`HF_WORKSPACE_SHELL=0`) `409 conflict` with `reason: 'disabled'`; nothing is stored in each case. A
-  turn the server starts after a `Stop` hook blocked (`origin: 'hook'`, at most 5 in a row, never while an approval is
-  pending) is announced by `run.started` with its carrier message (only `data-hook` parts) as `userMessageId` and
+  chatId, hook: HookData }` ("A hook blocked this message: <reason>", or "A hook blocked this message." without one)
+  before anything is stored: on a new chat the row this request created is removed again (`chat.created`, then
+  `chat.deleted`); an existing chat keeps its updated model, mode and effort (a regenerate or an approval continuation
+  never runs `UserPromptSubmit`; an edit runs it again; no prompt hook runs for a slash command that answers without
+  the model, a failed command, `/compact` or an image turn).
+- Phase 11 (ADR-052): the `` !`cmd` `` spans and `@path` reads of a command (a personal command, a loaded plugin's
+  `template` or a project command file) run in every permission mode, **after** the prompt hooks: `SessionStart` /
+  `UserPromptSubmit` see the typed text and the command's name, never the expansion, and a block runs nothing and stores
+  nothing. An image turn runs no prompt hook, so its command is expanded while the request is planned. The checks still
+  come first, before any hook or span runs, in this order: a chat without a project is `400 validation_error` on
+  `['message', 'parts']` ("The /<name> command runs shell lines, which need a chat in a project."); the shell off
+  (`HF_WORKSPACE_SHELL=0`) is `409 conflict` with `reason: 'disabled'` ("The /<name> command runs shell lines, but shell
+  commands are turned off on this server (HF_WORKSPACE_SHELL=0)."); a project folder that does not open is
+  `400 validation_error` ("The /<name> command runs shell lines, but the project folder of this chat is not
+  available."); a project command file whose trust hash is not approved is `409 conflict` with `reason: 'untrusted'`
+  ("/<name> runs shell lines you haven't approved. Review the project's files to run it."). A body whose expansion with
+  empty span outputs is over 64 KB is the 64 KB `400` of Phase 10 (checked first). A project command file's trust hash
+  is checked again right before its spans run (verify-before-run; a mismatch is the same 409 `untrusted`). Nothing is
+  stored in each case; the 409s remove a chat row this request created, the 400s keep it.
+- A turn the server starts after a `Stop` hook blocked (`origin: 'hook'`, at most 5 in a row, never while an approval
+  is pending) is announced by `run.started` with its carrier message (only `data-hook` parts) as `userMessageId` and
   resumed the same way; a client cannot send `data-hook` parts.
 - Images (ADR-028, section 4.18): the catalog kind of `modelRef` decides. A model of `kind: 'image'` makes the request
   an **image turn** (no history is sent; the prompt and the input images as in section 4.18); the reply streams one
@@ -3582,17 +3700,20 @@ body exceeds its limit; `500 internal_error`.
 **`GET /commands?projectId=`** — `commands.list`
 - Query `CommandsQuery` (Phase 10): `projectId` adds the command files of that project's folder.
 - Response `200 ListResponse<CommandSummary>` sorted by name: the effective server-side commands, one per name.
-  Since Phase 9 the list includes the harness command `compact` (`/compact [focus]`, ADR-040) as `{ name: 'compact',
-  description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' }`; a
-  registered command with a harness command name is left out (plugins cannot register it anyway). Phase 10 (ADR-045):
+  Since Phase 9 the list includes the harness command `compact` (`/compact [focus]`, ADR-040) as
+  `{ name: 'compact', kind: 'command', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' }`
+  (`kind` since Phase 11); a registered command with a harness command name is left out (plugins cannot register it
+  anyway). Phase 10 (ADR-045):
   every item carries its `source`; with `projectId` the project's command files (`.harness/commands` over
   `.claude/commands`) and, always, the enabled personal commands (Settings → Customize) are merged with the plugin
   commands by the precedence of ADR-044 (project > personal > plugin; a harness or client command name is never
   taken: such a file gets the diagnostic `reserved-name` in the catalog). Command files carry `argumentHint`,
-  `namespace` and `modelRef` when they declare them; `pluginId` is set for plugin and harness commands only. Phase 11
-  (ADR-052): the active user-invocable skills of the scope (`user-invocable` not false) join the list with
-  `kind: 'skill'` (names up to 64 characters, `argumentHint` from their `argument-hint`); a command wins a name over a
-  skill (the skill is left out). Commands carry no `kind`.
+  `namespace` and `modelRef` when they declare them; `pluginId` is set for plugin and harness commands (and plugin
+  skills) only. Phase 11
+  (ADR-052): every item carries `kind`: `'command'` for the entries above (`/compact` included) and `'skill'` for the
+  active user-invocable skills of the scope (`user-invocable` not false), which join the list with names up to 64
+  characters, `argumentHint` from their `argument-hint`, `source` `project`, `user` or `plugin` (with `pluginId`); a
+  command wins a name over a skill (the skill is left out).
 - Errors: `404 not_found` (unknown project, "Project <id> not found."). An unavailable project folder lists no project
   commands (no error; the catalog reports it).
 
@@ -3702,11 +3823,12 @@ body exceeds its limit; `500 internal_error`.
 
 ### 5.17 `plugin-drafts.ts`
 
-**`POST /plugins`** — `pluginDrafts.create` · **fresh** when the manifest declares a stdio MCP server
+**`POST /plugins`** — `pluginDrafts.create` · **fresh** when the manifest requires trust
 - Body `PluginDraft`. Creates a declarative plugin (`source: 'created'`, `kind: 'declarative'`) through staging:
   `plugin.json` (+ `iconFile`, SVG sanitized), loads it, then saves `credentials` as provider credentials (never in
   `plugin.json`) and validates / lists them in the background like `PUT /providers/:id/credentials`. A manifest that
-  declares a stdio MCP server requires fresh auth and is trusted on creation.
+  requires trust (`manifestRequiresTrust`: a stdio MCP server, since Phase 11 also command hooks or `` !`cmd` `` spans
+  in a command template) requires fresh auth and is trusted on creation (the pin is set only after that check).
 - Response `201 PluginDetail`. Emits `plugin.changed`, `provider.changed`, `catalog.changed`.
 - Errors: `400 validation_error` (manifest with `main`, provider ids not `<pluginId>` / `<pluginId>-<suffix>`,
   icon mismatch, credentials for an undeclared provider); `403 forbidden` (reserved id); `409 conflict`
@@ -3717,10 +3839,11 @@ body exceeds its limit; `500 internal_error`.
   (15 s timeout).
 - Response `200 DraftTestResult` (`ok: false` + `error` on failure, not an HTTP error).
 
-**`PUT /plugins/:id/manifest`** — `pluginDrafts.updateManifest` · **fresh** when a stdio MCP server is declared or changed
+**`PUT /plugins/:id/manifest`** — `pluginDrafts.updateManifest` · **fresh** when the manifest requires trust
 - Params `{ id: PluginId }`. Body `PluginManifestUpdate`. Replaces `plugin.json` of a declarative editable plugin
-  and reloads it (hot reload on save). A manifest that declares or changes a stdio MCP server requires fresh auth
-  and re-pins the trust hash.
+  and reloads it (hot reload on save). Every save of a manifest that requires trust (`manifestRequiresTrust`: a stdio
+  MCP server, command hooks or `` !`cmd` `` spans) requires fresh auth and re-pins the trust hash after that check; a
+  save that drops every trust-requiring part clears the pin (a `link` plugin stays pinned to its path).
 - Response `200 PluginDetail`.
 - Errors: `404 not_found`; `403 forbidden` (not editable, builtin, or a code plugin: use the files API);
   `400 validation_error` (id changed, invalid manifest).
@@ -3807,10 +3930,10 @@ event types: the chat events of section 7 report the changes.
   cannot be read).
 
 **`GET /data/export?files=true|false&settings=true|false&customizations=true|false`** — `data.export` · response `'binary'`
-- Query `DataExportQuery` (all default `true`; `customizations` since Phase 10: the personal agents, commands and
-  skills as `customizations.json`, written only when there is at least one; they are read after the attachments, and
-  when that read fails the backup goes on without them, `includes.customizations: false`, a warning in the log; the
-  pre-check counts them with their content bytes).
+- Query `DataExportQuery` (all default `true`; `customizations` since Phase 10: the personal agents, commands and skills
+  (Phase 11: and output styles) as `customizations.json`, written only when there is at least one; they are read after
+  the attachments, and when that read fails the backup goes on without them, `includes.customizations: false`, a warning
+  in the log; the pre-check counts them with their content bytes).
 - Response `200 application/zip`, streamed while it is downloaded, with
   `Content-Disposition: attachment; filename="harness-forge-backup-<yyyy-mm-dd>.zip"` and `Cache-Control: no-store`;
   the layout of section 4.16 (`manifest.json` last). A `HEAD` request runs the pre-check and gets the headers only (no
@@ -3855,7 +3978,11 @@ event types: the chat events of section 7 report the changes.
   limit are `failed` with a warning that names the kind and the name (never the content); the result's
   `customizations` reports the counts. A backup without the file adds a warning instead. A restore that added
   definitions emits `customization.changed` (`{}`). Nothing in the file can grant a tool, a mode or a shell rule
-  (definitions only narrow, ADR-045).
+  (definitions only narrow, ADR-045), or run a shell line: a restored personal command with `` !`cmd` `` spans is stored
+  turned off (`enabled: false`; Phase 11, ADR-052); it still counts in `imported`, with no warning (the info log
+  `customizations restored` carries `turnedOff`). The warnings speak of "personal definitions" (agents, commands,
+  skills and output styles), e.g. "Personal definitions are restored only from a backup zip.". Hooks, project
+  approvals and project MCP variables are never in a backup.
 - Response `200 DataImportResult`. Emits `chat.created` for every imported or copied chat.
 - Errors: `400 validation_error` (the whole-upload failures above); `409 conflict` (`reason: 'busy'`);
   `413 payload_too_large` (an upload over 256 MB, a chat JSON over 64 MB, a backup whose entries declare more than
@@ -3870,7 +3997,9 @@ event types: the chat events of section 7 report the changes.
   (`<dataDir>/checkpoints`; the change journal rows go with their chats; a failure there is logged and does not fail
   the request). Settings, providers, credentials, plugins, MCP servers, projects and shell rules are kept (projects keep
   no chats). Since Phase 10 (ADR-046) the background tasks of every chat are stopped before the runs (their rows go
-  with their chats; also tasks of chats that started meanwhile), and the personal agents, commands and skills are kept.
+  with their chats; also tasks of chats that started meanwhile), and the personal agents, commands and skills are kept;
+  since Phase 11 also the personal output styles, the personal hooks, the project approvals and the project MCP
+  variables.
 - Response `200 DataDeleteResult` (the checkpoint store is not counted in it; the `data deleted` log line carries
   `checkpointBlobs` / `checkpointBytes`). Emits `chat.deleted` for every deleted chat.
 - Errors: `403 forbidden` (fresh auth missing, `action: 'login'`); `409 conflict` (`reason: 'busy'`).
@@ -4095,8 +4224,10 @@ Common path errors (create and browse): the path is resolved to its canonical re
   background task of a chat of the project runs ("A background agent of a chat of this project is running. Stop it
   first, then try again.").
 - Phase 11 (ADR-049, ADR-050): deleting a project also drops its approvals (`project_trust` cascades) and its MCP
-  variables (secret scope `project:<projectId>`), and stops its MCP servers; `project-trust.changed` /
-  `project-mcp.changed` are not sent for a deleted project (clients drop it on `project.changed` with `project: null`).
+  variables (secret scope `project:<projectId>`; at once while the project MCP manager is in use since boot, else at its
+  first use), and stops its MCP servers; `project-mcp.changed` is not sent for a deleted project, and
+  `project-trust.changed` follows the `project.changed` with `pending: 0` (once the trust service is in use); clients
+  drop the project on `project.changed` with `project: null`.
 
 **`GET /projects/browse?path=`** — `projects.browse`
 - Query `ProjectBrowseQuery`. Without `path`: the roots only (`path: null`, `parent: null`, no entries), each with
@@ -4307,7 +4438,14 @@ only). (Between P9-0a and P9-A the routes answered `501 not_implemented` after v
 - Params `ChatParams`. Body `QueueAddBody`. The parts are checked and normalized like the parts of a `POST /chat` user
   message (file parts must reference uploaded files, section 6.2). `turnOnly` is set when the first text starts a
   server command (`/compact` or a command a plugin registered; since Phase 10 also a command file of the chat's project
-  or a personal command, `isServerCommandFor`; client commands never reach the server).
+  or a personal command, since Phase 11 also a user-invocable skill, `isServerCommandFor`; client commands never reach
+  the server).
+- Phase 11 (ADR-048): after the queue checks, the `UserPromptSubmit` hooks run (origin `queue`; not for `/compact` or
+  an image model; the payload carries `command` only for a server command). A block is `409 conflict` with `reason:
+  'hook-blocked'`, `chatId` and `hook` ("A hook blocked this message: <reason>"), and nothing is queued. The checks run
+  again after the hooks, so a run that ended meanwhile answers `409 run-idle` (the web sends the message with
+  `POST /chat`, where the hooks run again). The records go with the item: a `data-hook` part right after its
+  `data-steer` when it is steered in, or on the queued turn's user message.
 - Accepted while a run holds the chat in any phase (also while the request that started it is still being prepared)
   or while the chat waits for a tool approval.
 - Response `201 QueueItem`. Emits `queue.changed`.
@@ -4391,7 +4529,8 @@ whose content holds `` !`cmd` `` spans is stored like any other (its spans run o
 - Response `201 Customization`. Emits `customization.changed`.
 - Errors: `400 validation_error` (an `error` diagnostic: `details.diagnostics` holds the `DefinitionDiagnostic`s and
   `details.issues` one issue on `['content']`; a builtin or reserved name: `explore`, `general`, `general-purpose` for
-  agents, a client or harness command name for commands: diagnostic `reserved-name`); `409 conflict` `reason:
+  agents, a client or harness command name for commands, `default`, `explanatory`, `learning` for styles: diagnostic
+  `reserved-name`); `409 conflict` `reason:
   'exists'` (a personal definition of the same kind and name: "A personal agent named "<name>" already exists."; also
   at 200 of a kind, `LIMITS.customizationsPerKindMax`: "At most 200 personal agents can be stored; delete one first.",
   the API has no other conflict reason for it).
@@ -4472,17 +4611,19 @@ Command hooks (ADR-048; DTOs in section 4.31). Every route needs a session. Crea
 which the route checks after validating the body (`hooks.update` has no table flag; `fresh*` in section 8); listing,
 the run log and deleting do not. Every write emits `hooks.changed` with `projectId: null`. Hook commands, payloads,
 stdout and stderr are never logged at `info` (only the event, source, a hash prefix of the label, the exit code, the
-duration and the outcome). Personal hooks are never in backups and survive delete-all. (From P11-0a until P11-A the
-routes answer `501 not_implemented` after validating their input, and `hooks.update` after its fresh-auth check.)
+duration and the outcome). Personal hooks are never in backups and survive delete-all.
 
 **`GET /hooks?projectId=`** — `hooks.list`
 - Query `HooksQuery`.
 - Response `200 HookList`: every hook that would run for the scope, in run order: the personal hooks, the plugin
-  command hooks (`contributes.hooks` of active, trusted plugins) and plugin code hooks (`ctx.hooks.on`, `kind: 'code'`),
-  and with `projectId` the hooks of the project's settings files with their trust state (`pending` until the item's
-  hash is approved, section 4.32) and `project` (the files read, the pending count); the kill switches as `switches`
-  (a switch that is off makes every command hook `blocked`); configuration problems as diagnostics (an invalid matcher
-  makes its hook `invalid`).
+  command hooks (`contributes.hooks` of active, trusted plugins), the plugin code hooks (`ctx.hooks.on`, `kind:
+  'code'`: only `prompt.submit`, `session.start`, `run.stop`, `subagent.stop`, `compact.before`, `notification` and
+  `tool.after`; `active`, or `off` while the plugin is inactive), and with `projectId` the hooks of the project's
+  settings files with their trust state (`pending` until the item's hash is approved, section 4.32) and `project` (the
+  files read, the pending count); the kill switches as `switches` (a switch that is off makes every otherwise active
+  command hook `blocked`; `off`, `invalid` and `pending` win, so a project hook stays `pending` whatever the switches);
+  configuration problems as diagnostics (an invalid personal or plugin matcher makes its hook `invalid`; an invalid
+  project matcher drops its group, so it is only a diagnostic).
 - Errors: `404 not_found` (unknown project). An unavailable project folder is not an error (`project.available: false`).
 
 **`GET /hooks/runs`** — `hooks.runs`
@@ -4511,27 +4652,34 @@ routes answer `501 not_implemented` after validating their input, and `hooks.upd
 
 Project trust (ADR-049; DTOs in section 4.32): the executable items of a project folder and their approvals, next to
 `/projects/:id/files`. Every route needs a session; approving needs fresh auth, revoking does not. Approve and revoke
-emit `project-trust.changed` (`{ projectId, pending }`) and `hooks.changed` (`{ projectId }`), and stop the project MCP
-servers whose item lost its approval. Commands, URLs and variable names are never logged at `info`. Approvals are
-never in backups; delete-all keeps them; deleting the project drops them. (From P11-0a until P11-A the routes answer
-`501 not_implemented` after validating their input.)
+emit `project-trust.changed` (`{ projectId, pending }`) and `hooks.changed` (`{ projectId }`); the project MCP manager
+then stops the servers whose item lost its approval. `project-trust.changed` is also sent when a rebuild of the
+project's items finds other hashes (after a settings, `.mcp.json`, command or referenced file changed, also after a
+verify-before-run mismatch; with `hooks.changed` when hook items changed), when a list finds another pending count than
+the last one announced, and with `pending: 0` after the project is deleted. Commands, URLs and variable names are never
+logged at `info` (approve logs the project, the count and the kinds; revoke a 12-character hash prefix and the orphans
+removed). Approvals are never in backups; delete-all keeps them; deleting the project drops them.
 
 **`GET /projects/:id/trust`** — `projectTrust.list`
 - Params `ProjectParams`.
 - Response `200 ProjectTrustList`: the items of a fresh scan of the folder (hooks of `.claude` / `.harness`
   `settings{,.local}.json`, servers of `.mcp.json`, command files with `` !`cmd` `` spans) with their state, the
-  referenced script files and their hashes, the review warnings, and the count of orphaned approvals.
+  referenced script files and their hashes, the review warnings, and the count of orphaned approvals (at most 200
+  items, hooks then servers then commands; the pending count covers every item).
 - Errors: `404 not_found` (unknown project). An unavailable folder answers `available: false`, `issue` and no items.
 
 **`POST /projects/:id/trust`** — `projectTrust.approve` · **fresh**
 - Params `ProjectParams`. Body `ProjectTrustApproveBody` (strict; 1..50 items of `{ kind, sha256 }`, unique hashes).
 - The folder is scanned again first; every hash must be the current hash of an item of that kind.
 - Response `200 ProjectTrustList` (the fresh list).
-- Errors: `403 forbidden` (action `login`) without fresh auth; `404 not_found` (unknown project); `409 conflict`
-  (`reason: 'stale'`) when a hash is not current (the item changed or is gone; nothing is approved: review again).
+- Errors: `400 validation_error` (duplicate hashes: "Hashes must be unique."); `403 forbidden` (action `login`) without
+  fresh auth; `404 not_found` (unknown project); `409 conflict` (`reason: 'stale'`, "The project files changed while
+  you reviewed them. Review them again.") when a hash is not current (the item changed or is gone; nothing is
+  approved: review again).
 
 **`DELETE /projects/:id/trust/:sha256`** — `projectTrust.revoke`
-- Params `ProjectTrustItemParams`. Idempotent (an unknown hash is not an error); also removes an orphaned approval.
+- Params `ProjectTrustItemParams`. Idempotent (an unknown hash is not an error); then, when the folder opened and every
+  command file loaded, every orphaned approval of the project is removed too.
 - Response `200 ProjectTrustList` (the fresh list).
 - Errors: `404 not_found` (unknown project).
 
@@ -4540,14 +4688,18 @@ never in backups; delete-all keeps them; deleting the project drops them. (From 
 Project MCP servers (ADR-050; DTOs in section 4.32): the servers of a project's `.mcp.json`, offered only in that
 project's chats after their item is approved. Every route needs a session; setting variables needs fresh auth (a value
 can change what an approved stdio server runs). Every state change emits `project-mcp.changed` (`{ projectId,
-servers }`). Variable values and resolved environments, arguments and headers are never answered or logged at `info`.
-Variables are never in backups; key rotation re-encrypts them; deleting the project removes them. (From P11-0a until
-P11-A the routes answer `501 not_implemented` after validating their input.)
+servers }`; coalesced, also when a server's tools change or it is removed, never for a deleted project). Variable
+values, resolved environments, arguments, headers and URLs are never answered or logged; connection errors are logged
+with their code only (`warn`, the redacted message at `debug`), and a server's stderr lines go to the `core-mcp` plugin
+log at `debug` (at most 100 per server and minute). Variables are never in backups; key rotation re-encrypts them;
+deleting the project removes them (at once while the project MCP manager is in use since boot, else at its first use).
 
 **`GET /projects/:id/mcp`** — `projectMcp.list`
 - Params `ProjectParams`.
 - Response `200 ProjectMcpList`: the servers of `.mcp.json` (state, tools, the global server each shadows, missing
-  variables) and the variables they reference (whether a value is stored; the `:-default` as a hint).
+  variables) and the variables they reference (whether a value is stored; the `:-default` as a hint), plus the stored
+  variables no server uses (`usedBy: []`). The folder is read afresh (servers whose item changed or lost its approval
+  stop); an unavailable folder lists no servers.
 - Errors: `404 not_found` (unknown project).
 
 **`PUT /projects/:id/mcp/variables`** — `projectMcp.setVariables` · **fresh**
@@ -4557,14 +4709,16 @@ P11-A the routes answer `501 not_implemented` after validating their input.)
   variable restart. Variables never come from the server environment.
 - Response `200 ProjectMcpList`.
 - Errors: `403 forbidden` (action `login`) without fresh auth; `404 not_found` (unknown project); `409 conflict`
-  (`reason: 'exists'`) above 50 stored variables for the project.
+  (`reason: 'exists'`, "A project can store at most 50 variables. Remove some first.") above 50 stored variables for
+  the project (nothing is written). A value equal to the stored one is no change.
 
 **`POST /projects/:id/mcp/:serverId/reconnect`** — `projectMcp.reconnect`
 - Params `ProjectMcpServerParams`.
-- Restarts one approved server (a server that is not approved stays `pending`; one with missing variables stays
-  `needs-variables`).
-- Response `200 ProjectMcpServer`.
-- Errors: `404 not_found` (unknown project or server); `409 conflict` (`reason: 'disabled'`) in safe mode
+- Restarts one approved server and waits at most 10 s for it (a server that is not approved stays `pending`; one with
+  missing variables stays `needs-variables`; both answer 200 with that state).
+- Response `200 ProjectMcpServer`: its state at that moment (`connecting` when the start takes longer).
+- Errors: `404 not_found` (unknown project, or `Unknown project MCP server "<id>".`, also while the folder is
+  unavailable); `409 conflict` (`reason: 'disabled'`, "Project MCP servers do not start in safe mode.") in safe mode
   (`HF_SAFE_MODE`).
 
 ## 6. Chat stream protocol
@@ -4573,6 +4727,10 @@ P11-A the routes answer `501 not_implemented` after validating their input.)
 consumeSseStream })`, where `stream` is built with `createUIMessageStream` for every run since Phase 6 (section 6.3),
 so generated files are stored before they are streamed and the saved message equals the streamed one. Verify every AI
 SDK name against the installed `node_modules/ai` types before implementing.
+
+Phase 11: when the `SessionStart` / `UserPromptSubmit` hooks of a new turn added `n` records (`data-hook` parts) to the
+new user message, the accepted response carries the header `X-Harness-Prompt-Hooks: <n>` (absent otherwise); the web
+reloads the chat once at that run's `run.finished`, so the hook notes on the user message show without a reload.
 
 ### 6.1 Client setup (reference)
 
@@ -4695,7 +4853,7 @@ only for models with `vision` (images) or `pdf` capability, otherwise the part i
 | `data-compaction` | `CompactionData` (Phase 9) | a divider ("Conversation compacted", "Conversation compacted automatically" or "Context compacted during this response") with the summary behind "Show summary"; what the model no longer sees is dimmed (section 6.9) |
 | `data-steer` | `SteerData` (Phase 9) | a note "You said while the agent worked" with the steered text and files, where the model received it |
 | `data-task-result` | `TaskResultData` (Phase 10) | a note "Background agent finished" (failed / stopped / reached its step limit) with the report behind "Show report"; inline in a reply, or as the carrier turn of a server-started turn (section 6.10) |
-| `data-hook` | `HookData` (Phase 11) | a hook note ("Blocked by hook", "Allowed by hook", "Input changed by hook", added context, errors); a tool record (`toolCallId`) is shown on its tool row, not as its own block; a `Stop` carrier is shown as the carrier turn of a server-started turn (section 6.11) |
+| `data-hook` | `HookData` (Phase 11) | a hook note, one line per outcome ("Hook added context · {event}", "Blocked by a {event} hook: {reason}", "A hook asked you to confirm this call: {reason}", "Allowed by a {event} hook", "Input changed by a {event} hook", "A {event} hook told the agent: {reason}", "A {event} hook asked the agent to continue", "A hook stopped the agent: {reason}", "A {event} hook failed: exit {n}" / "… timed out after {n}s"; UI.md 7.31); a tool record (`toolCallId`) is shown on its tool row, not as its own block; a `Stop` carrier is shown as the carrier turn of a server-started turn (section 6.11) |
 | other `data-*`, `custom` | - | ignored (the transient `data-activity` is never a part: it reaches only `onData`) |
 
 Tool part states (`tool-<name>` and `dynamic-tool`):
@@ -4897,8 +5055,9 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   `command-model-unavailable` ("The command's model <ref> is not available, so the chat's model answered."; once per
   reply, a continuation does not repeat it). The request's model is resolved first (section 5.10). `allowedTools`
   narrows the turn's tools after the permission mode (`exit_plan_mode` stays in `plan`); an approval continuation and a
-  regenerate of the turn read both again from the turn's user message. A body is text: `!` lines never run and `@file`
-  is never expanded.
+  regenerate of the turn read both again from the turn's user message. In Phase 10 a body is text: `!` lines never run
+  and `@file` is never expanded (since Phase 11 see section 6.11). Phase 11: after the plugin registry, an active
+  user-invocable skill resolves the name.
 - **Custom agents** stream like the builtin sub-agents (section 6.9): the `tool-task` part's snapshots carry the agent
   `type` (a catalog name) and `agent` (the definition snapshot).
 - **Skills**: a `tool-skill` part (`SkillInput`, `SkillOutput`); the model reads the body as the tool result.
@@ -4930,37 +5089,68 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 - **Request**: `ChatRequestBody.outputStyle` (a style name or null) is saved when the request creates the chat; the
   rest of the request is unchanged. `UserPromptSubmit` (and `SessionStart` on the chat's first turn and the first turn
   after a compaction) run at submit, before streaming: a block answers `409 hook-blocked` with `details.hook` and stores
-  nothing (section 5.10); a context is stored as a `data-hook` part on the user message.
+  nothing (section 5.10); a context, an error or a system message is stored as a `data-hook` part on the user message.
+  `SessionStart` also runs for a turn the server starts from the queue; the `UserPromptSubmit` of a queued message runs
+  at enqueue (`POST /chat/:id/queue`: a block is `409 hook-blocked` and nothing is queued; its record goes onto the
+  queued turn's user message, or after the `data-steer` part when the message is steered in), and a `SessionStart`
+  block of a queued turn removes the item as `failed`.
 - **`data-hook` parts** (`HookData`, section 4.31): one per event whose hooks had an effect (context, a decision, a
   block, an error, a system message), streamed and stored where the event ran: `PreToolUse` / `PostToolUse` records in
   the reply next to the tool part with the same `toolCallId` (a `PreToolUse` record is written once per tool call: its
   decision is replayed on an approved continuation; `outcome: 'rewritten'` carries the input the tool ran with while the
-  tool part keeps the model's input); a `PostToolUse` context or block reaches the model at the next step. A hook
-  `deny` makes the call `output-denied` ("Blocked by hook: <reason>"); `ask` shows the approval card (a sub-agent's
-  call is denied instead); `allow` skips the card only for a tool that would ask and is neither an `execute` tool nor
-  an `always` policy.
-- **Running hooks**: a transient `data-activity` chunk `{ kind: 'hooks', event, toolCallId? }` ("Running hook…") while
-  command hooks of an event run, then `{ kind: 'idle' }`; never stored.
+  tool part keeps the model's input; a rewritten input that fails the tool's schema or is over 64 KB fails the call);
+  `PostToolUse` runs only for successful calls, after the plugins' `tool.after`, and its context or block reaches the
+  model at the next step; `continue: false` from `PreToolUse` / `PostToolUse` stops the run after the current step. A
+  hook `deny` makes the call `output-denied` ("Blocked by hook: <reason>", or "Blocked by hook." without one); a harness
+  denial (a deny override or policy) beats every hook decision; `ask` shows the approval card even where the harness
+  would run the call (a sub-agent's call is denied instead); `allow` skips the card only for a tool that would ask, is
+  neither an `execute` tool nor an `always` policy, and never in plan mode. Known limitation: the record keeps the
+  hook's own outcome (`allowed`) when the harness still asks (plan mode, an `execute` tool, an `always` policy), so the
+  hook note says allowed while the card shows.
+- **Running hooks**: a transient `data-activity` chunk `{ kind: 'hooks', event, toolCallId? }` while the hooks of
+  `PreToolUse`, `PostToolUse`, `Stop` or `PreCompact` of a chat run run (also when only plugin code hooks run), then
+  `{ kind: 'idle' }`; never stored. The tool row shows "Running hook…" (never on a `task` row), the reply "Running
+  hooks…". `UserPromptSubmit` / `SessionStart` (before the stream), `Notification` and sub-agents write none.
 - **Stop continuation**: when a `Stop` hook blocks the natural end of a model run (not aborted, no error, no approval
   pending, no queued message), the reply finishes normally and the server starts a follow-up turn
   (`run.started` with `origin: 'hook'` and `userMessageId`) from a **user-role carrier message** that holds only
-  `data-hook` parts (the model reads `<hook-feedback event="Stop">reason</hook-feedback>`); at most 5 in a row
-  (`hookChainLength`; then the notice `hook-continuation-limit`), `stop_hook_active` is true inside such a turn, a queued
-  message goes first, and Stop during the hooks cancels the follow-up. The web treats the turn like a queue turn
-  (refetch, then resume) and shows the carrier as a note.
+  `data-hook` parts (the model reads `<hook-feedback event="Stop">reason</hook-feedback>`, "(no reason given)" when
+  empty; the `Stop` record itself is written into the reply before `finish`). The follow-up uses the ended run's model,
+  reasoning effort and tool mode and gets a request id `hook_…`; at most 5 in a row (`hookChainLength`; then the
+  record stays `continued` and the notice `hook-continuation-limit` follows), `stop_hook_active` is true inside such a
+  turn, a message queued meanwhile goes first (the follow-up is dropped), and Stop during the hooks cancels the
+  follow-up. The web treats the turn like a queue turn (refetch, then resume) and shows the carrier as a note.
+- **Other events**: `SubagentStop` runs when a foreground or background sub-agent would complete; a block gives it
+  another round with `<hook-feedback event="SubagentStop">` (at most 2, `subagentStopContinuationsMax`, within its
+  remaining steps, `stop_hook_active` from round 2; never stored). `PreCompact` runs before `/compact` (`manual`,
+  `custom_instructions` = the focus) and before an automatic compaction (`auto`), before the `compacting` activity;
+  it only observes. `Notification` (`permission_prompt`, "The agent needs your permission to use <tools>.", at most 3
+  names, then "and N more") runs without waiting once a run waits for an approval. Sub-agents never run
+  `UserPromptSubmit`, `SessionStart` or `Stop`.
 - **Output style**: the effective style (chat ?? project ?? global `outputStyle`) puts `Output style: <label>` and its
   body first in the main agent's instructions (sub-agents never get one; `keep-coding-instructions: false` drops the
-  workspace tool rules and the todo / task hints); an unknown or inactive style runs as `default` with the notice
-  `output-style-unavailable`. The stream itself is unchanged.
-- **Command extras**: a trusted command file's `` !`cmd` `` spans run in the project folder before the model call (one
-  after another, 30 s each, 60 s in total, 16 KiB of output each, at most 10) and `@path` files are inlined (at most 10,
-  32 KiB each, through the workspace path guard and the sensitive-path rules); the result is frozen in
-  `metadata.command.expansion` with `metadata.command.inlined` (`{ shell, files }`), so a regenerate or a continuation
-  never runs the spans again. Arguments are never substituted inside a span. A user-invocable skill invoked as
-  `/name [arguments]` is a prompt invocation with `metadata.command.kind: 'skill'`.
-- **Project MCP tools** are offered only in the project's chats (`mcp__<id>__<tool>` dynamic tools, like global MCP
-  tools); a server that is not ready within 5 s gives the notice `project-mcp-unavailable` and the run goes on without
-  its tools.
+  workspace tool rules and the todo / task hints); an unknown, inactive or unreadable style runs as `default` with the
+  notice `output-style-unavailable` (once per path and model). The stream itself is unchanged.
+- **Command extras**: the `` !`cmd` `` spans of a trusted command body (a personal command, a loaded plugin's
+  `template`, not a `run` result, or an approved project file) run in the project folder in every permission mode,
+  after the prompt hooks passed and before the model call (one after another, 30 s each, 60 s in total, at most 10; the
+  shell tool's minimal environment plus `HARNESS_PROJECT_DIR` / `CLAUDE_PROJECT_DIR`). A span's output is stdout then
+  stderr, each stream keeping its first 12 KiB and last 4 KiB, then cut to 16 KiB, with the notes `[output
+  truncated]`, `[timed out]`, `[exit code N]`, `[did not finish]` or `[skipped: time limit]` ("The shell could not be
+  started." when the shell fails to start). `@path` files are inlined in project chats only (otherwise the text stays):
+  at most 10, 32 KiB each, through the workspace path guard and the sensitive-path rules (`.git`, links and
+  secret-looking names are refused); a path needs a `.` or `/`, punctuation glued to an unquoted path is part of it
+  (`@README.md,` is not inlined; quote it or add a blank), and each file is appended as a `<file path="…">` block
+  (binary files get a marker). Spans and references inside fenced code blocks stay text. The result is frozen in
+  `metadata.command.expansion` with `kind: 'command'` and `metadata.command.inlined` (`{ shell, files }`, set only
+  when something was inlined), so a regenerate or a continuation never runs the spans again. Arguments are never
+  substituted inside a span. The info log `command shell lines ran` carries only counts and the duration. A
+  user-invocable skill invoked as `/name [arguments]` is a prompt invocation with `metadata.command.kind: 'skill'` (its
+  arguments are expanded; its `!` spans and `@path` stay text).
+- **Project MCP tools** are offered only in the project's chats whose folder opened, with a permission mode other than
+  `off` and a tool-capable model (`mcp__<id>__<tool>` dynamic tools, like global MCP tools; never in safe mode;
+  sub-agents get them from the parent run, under their ceiling, and never the global server a project server shadows); a
+  server that is not ready within 5 s gives the notice `project-mcp-unavailable` and the run goes on without its tools.
 
 ## 7. Server events (`GET /api/events`)
 
@@ -4987,7 +5177,7 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 |---|---|---|---|
 | `chat.created` | `POST /chats`, the first `POST /chat` for a new chat id, or `POST /data/import` (one per imported or copied chat) | `ChatSummary` | chats store: insert |
 | `chat.updated` | title generated or renamed, pin/archive/model/settings change, a move to or out of a project (Phase 7), a message persisted, a branch switch (`POST /chats/:id/branch`), a version deleted (`DELETE /chats/:id/messages/:messageId`, also off the active path) | `ChatUpdatedData` (`ChatSummary` + `activeLeafId`) | chats store: patch and re-sort (without `activeLeafId`); an idle open chat whose shown path does not end at `activeLeafId` refetches it (bursts coalesce into one refetch; a `null` or unknown leaf triggers one refetch, then waits for a different leaf) |
-| `chat.deleted` | `DELETE /chats/:id`, or `POST /data/delete` (one per deleted chat) | `{ id }` | chats store: remove; leave `/chat/:id` if open |
+| `chat.deleted` | `DELETE /chats/:id`, or `POST /data/delete` (one per deleted chat), or (Phase 11) a first `POST /chat` that a hook or an unapproved / disabled `!` command refused (the chat row the request created is removed again, right after its `chat.created`) | `{ id }` | chats store: remove; leave `/chat/:id` if open |
 | `run.started` | a run acquired the chat (also a turn the server started from the queue, Phase 9, for finished background tasks, Phase 10, or after a `Stop` hook blocked, Phase 11) | `RunStartedData` (`origin?`, `userMessageId?` since Phase 9) | running dot; with `origin: 'queue'`, `'task'` or `'hook'` and a `userMessageId` the open chat does not show: refetch the chat, then resume the stream |
 | `run.finished` | run completed, aborted or failed; sent after the reply and the active leaf are stored | `RunFinishedData` | clear running; amber dot when `awaitingApproval` |
 | `provider.changed` | credentials set/cleared, enable/disable, validation result, provider (un)registered | `{ id, provider }` | providers store: patch or remove |
@@ -5000,25 +5190,26 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 | `queue.changed` | a message was queued, cancelled, steered into the running reply, started as the next turn, dropped by Stop or removed by a failure (Phase 9, ADR-042) | `QueueChangedData` (`{ chatId, items, removed? }`) | chat-queue store: replace the chat's queue; a `delivered` message is shown where the model received it |
 | `task.changed` | a background task of a chat was launched, made progress (at most once per second), ended or was delivered (Phase 10, ADR-046) | `TaskChangedData` (`{ chatId, task }`) | background-tasks store: upsert; the dock of the open chat updates and announces endings |
 | `customization.changed` | a personal agent, command or skill was created, updated or deleted (`{ kind, id }`); a cached project catalog was dropped or rebuilt with other files (`{ projectId }`, at most one per second per project); plugin agents, skills or commands changed, or a backup restore added definitions (`{}`, at most one per second) (Phase 10, ADR-044); since Phase 11 output styles too | `CustomizationChangedData` (`{ kind?, id?, projectId? }`) | customizations store: mark stale and refetch what is shown (Settings → Customize, the slash menu, the style menu) |
-| `hooks.changed` | a personal hook was created, updated or deleted, the setting `hooksEnabled` changed, a plugin with hooks changed (`projectId: null`); a project's settings files or approvals changed (`{ projectId }`) (Phase 11, ADR-048) | `HooksChangedData` (`{ projectId }`) | hooks store: mark the scope stale and refetch what is shown (Settings → Customize → Hooks) |
-| `project-trust.changed` | an approval was added or revoked, a scan found other executable items, or the project's items changed on disk (Phase 11, ADR-049) | `ProjectTrustChangedData` (`{ projectId, pending }`) | project-trust store: update the pending count (trust chip) and refetch an open review dialog |
-| `project-mcp.changed` | a project MCP server changed state (connected, stopped, error, needs variables, ...) (Phase 11, ADR-050) | `ProjectMcpChangedData` (`{ projectId, servers }`) | project-mcp store: replace the project's servers |
+| `hooks.changed` | a personal hook was created, updated or deleted, the setting `hooksEnabled` changed, a plugin with hooks changed (`projectId: null`); a project's approvals changed, a write touched a `.claude/` or `.harness/` path of the project (`workspace.changed`), a rebuild of the project's items found other hook items, or an approved project hook failed verify-before-run (`{ projectId }`) (Phase 11, ADR-048) | `HooksChangedData` (`{ projectId }`) | hooks store: mark the scope stale and refetch what is shown (Settings → Customize → Hooks) |
+| `project-trust.changed` | an approval was added or revoked; a rebuild of the project's items found other hashes (after a settings, `.mcp.json`, command or referenced file changed, `project.changed`, `run.finished` of a chat of the project, or a verify-before-run mismatch); a list found another pending count than the last one announced; the project was deleted (`pending: 0`) (Phase 11, ADR-049) | `ProjectTrustChangedData` (`{ projectId, pending }`) | project-trust store: update the pending count (trust chip) and refetch an open review dialog |
+| `project-mcp.changed` | a project MCP server changed state (connected, stopped, error, needs variables, ...), its tools changed or it was removed (coalesced; never for a deleted project) (Phase 11, ADR-050) | `ProjectMcpChangedData` (`{ projectId, servers }`) | project-mcp store: replace the project's servers |
 
-Phase 11 adds `hooks.changed`, `project-trust.changed` and `project-mcp.changed` (18 event types) and the
-`run.started` origin `hook` (a turn the server started after a `Stop` hook blocked; its `userMessageId` is the carrier
-message); a hook run, a `!` span and an output style change emit nothing else (a chat's style is a `chat.updated`, a
-project's a `project.changed`). Phase 10 adds `task.changed` and `customization.changed` (15 event types) and the `run.started` origin `task` (a turn
-the server started for finished background tasks; its `userMessageId` is the carrier message); plan files and Remember
-emit what their writes emit (`workspace.changed`, `project.changed`; a global Remember emits nothing, the settings are
-refetched). Phase 9 adds `queue.changed` and the optional `run.started` fields `origin` and `userMessageId`; compactions, plan
-approvals, todos, sub-agents and file mentions emit nothing new (the queue is refetched after a reconnect). Phase 8
-adds `workspace.changed`; shell rule changes and the automatic file sweep emit nothing. Phase 7 adds
-`project.changed` and `key.rotated`; moving a chat to another project is a `chat.updated` (its summary carries
-`projectId`), the file cleanup emits nothing. Phases 5 and 6 add no event types: bulk import and delete-all
-report every chat through `chat.created` /
+Phase 11 adds `hooks.changed`, `project-trust.changed` and `project-mcp.changed` (18 event types) and the `run.started`
+origin `hook` (a turn the server started after a `Stop` hook blocked; its `userMessageId` is the carrier message); a
+hook run, a `!` span and an output style change emit nothing else (a chat's style is a `chat.updated`, a project's a
+`project.changed`), except that a refused first message emits `chat.created` then `chat.deleted` and an approved project
+item that fails verify-before-run emits `project-trust.changed` and (for a hook) `hooks.changed`. Phase 10 adds
+`task.changed` and `customization.changed` (15 event types) and the `run.started` origin `task` (a turn the server
+started for finished background tasks; its `userMessageId` is the carrier message); plan files and Remember emit what
+their writes emit (`workspace.changed`, `project.changed`; a global Remember emits nothing, the settings are refetched).
+Phase 9 adds `queue.changed` and the optional `run.started` fields `origin` and `userMessageId`; compactions, plan
+approvals, todos, sub-agents and file mentions emit nothing new (the queue is refetched after a reconnect). Phase 8 adds
+`workspace.changed`; shell rule changes and the automatic file sweep emit nothing. Phase 7 adds `project.changed` and
+`key.rotated`; moving a chat to another project is a `chat.updated` (its summary carries `projectId`), the file cleanup
+emits nothing. Phases 5 and 6 add no event types: bulk import and delete-all report every chat through `chat.created` /
 `chat.deleted`, a version switch or delete through `chat.updated`; share link actions, dictation and read-aloud emit
-nothing (the owner UI refetches). Since Phase 6 `chat.updated` carries the active leaf (`ChatUpdatedData`, ADR-030),
-so another tab that shows the chat follows a version switch; deleting a version that is not on the active path emits
+nothing (the owner UI refetches). Since Phase 6 `chat.updated` carries the active leaf (`ChatUpdatedData`, ADR-030), so
+another tab that shows the chat follows a version switch; deleting a version that is not on the active path emits
 `chat.updated` with the unchanged leaf, so other tabs do not refetch and show stale version counters until they reload
 the chat.
 

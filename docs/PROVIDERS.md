@@ -503,24 +503,58 @@ Definitions:
   tags, trimmed; its **item** is `<Event>:<first line>` (the `event` attribute, a colon, no space). Blocks are searched
   in the user and assistant messages of the prompt, never in the system text.
 - **The user text**: the text parts of the turn's user message (the last user message of the prompt that is not a steer
-  and that holds text outside hook blocks), with every hook block removed, trimmed; it is the text after command
+  and is not made of hook blocks only), with every hook block removed, joined with a space, trimmed; it is the text
+  after command
   expansion, so the outputs of `` !`cmd` `` spans and the `<file path="…">` blocks of `@path` references are part of it.
   An empty user text reads `(empty message)`. The **trigger** is the last non-empty line of the user text, trimmed (so a
   command whose body has no placeholder reaches the trigger rules with its appended input).
 - **The turn** and its results follow the shared Turn rule from the turn's user message; a user message that holds only
   hook blocks (hook context injected at a step boundary) never opens a turn.
+- **The steer reading** (reported by C38): rules 1(a) and 2 look at the last user message of the prompt only when it is
+  not a steer (a user message right after a tool message, or after such a steer). A Stop carrier and a SubagentStop
+  round follow an assistant message, so they count; PostToolUse context or feedback delivered at a step boundary is a
+  hook-only user message right after a tool message, so it counts only in `<hooks>` of rule 3.
 
 | Model ref | Behavior |
 |---|---|
-| `mock:hooks` | Checked in this order. (1) **Child** (the system text holds the marker): (a) the last user message of the prompt holds `<hook-feedback` (a SubagentStop round) → the text `Child continued: <first line of its first hook-feedback block>`; (b) the trigger of the child's user text is a `call …` or `run …` line (rule 3) and the turn has no result of that tool yet → that one call; (c) otherwise the text `Child done` (also after the call of (b) returned, whatever its result: the parent reads the step's state in `TaskOutput.steps`). (2) **Hook continuation**: the last user message of the prompt holds `<hook-feedback` (the carrier of a turn with `origin: 'hook'`) → the text `Hook continuation: <first line of its first hook-feedback block>`. (3) **Triggers**, by the trigger line. `call <tool> <json>`: `<tool>` = the second whitespace-separated word, `<json>` = the rest of the line, parsed with `JSON.parse` (a missing or invalid value, or one that is not an object, gives `{}`); without `<tool>` offered: `Tools are disabled.`; when the turn has no result of `<tool>`, one call `<tool>` with that input; after the result, the text `Called <tool>: <status> \| <detail> \| hooks: <hooks>`, where `<status>` = `denied` for a denied result (an `execution-denied` output or a denied approval response: a PreToolUse hook's `deny` or exit 2 gives one, with the reason `Blocked by hook: …`), `failed` for an error result, else `ok`; `<detail>` = the denial reason (`none` without one), the error text, or the result's text for the model (`toModelOutput`; a JSON output as `JSON.stringify`), with every run of whitespace (newlines included) replaced by one space, trimmed and cut to its first 120 code points; `<hooks>` = the first lines of the hook blocks of the messages **after** that tool result (PostToolUse context or feedback delivered at the next step), in order, joined with `"; "`, or `none`. `run <cmd>`: the same with the tool `shell` and the input `{ "command": "<cmd>" }` (`<cmd>` = the rest of the line after `run `, trimmed), so the reply reads `Called shell: ok \| Exit code: 0 stdout: hi \| hooks: none`. `agent <prompt>` (`<prompt>` = the rest of the line): without `task` offered `Sub-agents are not available.`; when the turn has no `task` result, one call `task` with `{ "type": "general", "description": "Hook child", "prompt": "<prompt>" }`; after the result, the text `Agent report: <text>` (`<text>` = the result's text for the model: the child's report, e.g. `Child done` or `Child continued: …`, or `Sub-agent failed: <error>; partial report: …`). `context?` → `Context: <items>`: the items of every hook block of the prompt, in order, joined with `"; "`, or `none` (e.g. `Context: SessionStart:branch main; UserPromptSubmit:ticket HF-12`). `style?` → `Style: <name> \| workspace-rules: <yes\|no> \| todo-hint: <yes\|no>`, where `<name>` = the rest of the system text's **first line** after `Output style: ` when that line starts with it (the style's label, trimmed), else `none` (a style block anywhere else does not count: the probes check that it comes first); `workspace-rules: yes` when the system text holds the line `- Use paths relative to the project folder.` (the first rule line of the workspace block); `todo-hint: yes` when it holds `Track multi-step work with todo_write` (the start of the server's `TODO_HINT`). `mcp?` → `MCP tools: <names>` (the offered tools whose names start with `mcp__`, sorted, joined, `none`). `tools?` → `Tools: <offered tools>`. (4) Any other turn: the text `Hooks mock: <user text>` (the whole user text, so a command's `!` span outputs and inlined files are visible) |
+| `mock:hooks` | Checked in this order. (1) **Child** (the system text holds the marker): (a) the last user message of the prompt holds `<hook-feedback` and is not a steer (a SubagentStop round, which follows an assistant message) → the text `Child continued: <first line of its first hook-feedback block>`; (b) the trigger of the child's user text is a `call …` or `run …` line (rule 3) and the turn has no result of that tool yet → that one call (`Tools are disabled.` when that tool is not offered); (c) otherwise the text `Child done` (also after the call of (b) returned, whatever its result: the parent reads the step's state in `TaskOutput.steps`). (2) **Hook continuation**: the last user message of the prompt holds `<hook-feedback` and is not a steer (the carrier of a turn with `origin: 'hook'`, which follows an assistant message; PostToolUse context or feedback delivered at a step boundary is a hook-only user message right after a tool message, so it counts only in `<hooks>` of rule 3) → the text `Hook continuation: <first line of its first hook-feedback block>`. (3) **Triggers**, by the trigger line. `call <tool> <json>`: `<tool>` = the second whitespace-separated word, `<json>` = the rest of the line, parsed with `JSON.parse` (a missing or invalid value, or one that is not an object, gives `{}`); without `<tool>` offered: `Tools are disabled.`; when the turn has no result of `<tool>`, one call `<tool>` with that input; after the result, the text `Called <tool>: <status> \| <detail> \| hooks: <hooks>`, where `<status>` = `denied` for a denied result (an `execution-denied` output or a denied approval response: a PreToolUse hook's `deny` or exit 2 gives one, with the reason `Blocked by hook: …`), `failed` for an error result, else `ok`; `<detail>` = the denial reason (`none` without one), the error text, or the result's text for the model (`toModelOutput`; a JSON output as `JSON.stringify`), with every run of whitespace (newlines included) replaced by one space, trimmed and cut to its first 120 code points; `<hooks>` = the first lines of the hook blocks of the messages **after** that tool result (PostToolUse context or feedback delivered at the next step), in order, joined with `"; "`, or `none`. `run <cmd>`: the same with the tool `shell` and the input `{ "command": "<cmd>" }` (`<cmd>` = the rest of the line after `run `, trimmed), so the reply reads `Called shell: ok \| Exit code: 0 stdout: hi \| hooks: none`. `agent <prompt>` (`<prompt>` = the rest of the line): without `task` offered `Sub-agents are not available.`; when the turn has no `task` result, one call `task` with `{ "type": "general", "description": "Hook child", "prompt": "<prompt>" }`; after the result, the text `Agent report: <text>` (`<text>` = the result's text for the model: the child's report, e.g. `Child done` or `Child continued: …`, or `Sub-agent failed: <error>; partial report: …`). `context?` → `Context: <items>`: the items of every hook block of the prompt, in order, joined with `"; "`, or `none` (e.g. `Context: SessionStart:branch main; UserPromptSubmit:ticket HF-12`). `style?` → `Style: <name> \| workspace-rules: <yes\|no> \| todo-hint: <yes\|no>`, where `<name>` = the rest of the system text's **first line** after `Output style: ` when that line starts with it (the style's label, trimmed), else `none` (a style block anywhere else does not count: the probes check that it comes first); `workspace-rules: yes` when the system text holds the line `- Use paths relative to the project folder.` (the first rule line of the workspace block); `todo-hint: yes` when it holds `Track multi-step work with todo_write` (the start of the server's `TODO_HINT`). `mcp?` → `MCP tools: <names>` (the offered tools whose names start with `mcp__`, sorted, joined, `none`). `tools?` → `Tools: <offered tools>`. (4) Any other turn: the text `Hooks mock: <user text>` (the whole user text, so a command's `!` span outputs and inlined files are visible) |
 
-The hook scripts of the tests and probes (`apps/server/src/testing/hook-scripts.ts`) are POSIX `sh` files written into
-a temporary project and invoked as `sh <relative path>`; each reads its stdin first: `deny` (`permissionDecision:
-deny` with a reason), `ask`, `allow`, `rewrite` (`updatedInput` `{"command":"echo rewritten"}`), `context`
-(`additionalContext`), `exit2` (exit 2, stderr `nope`), `error` (exit 1), `sleep` (outlives its timeout), `record`
-(appends the payload to `$HARNESS_PROJECT_DIR/.hook-log`), `env` (writes the environment to `.hook-env`), `stop-once`
-(exits 0 when the payload holds `"stop_hook_active":true`, else prints `{"decision":"block","reason":"run the tests"}`)
-and `prompt-block` (a UserPromptSubmit block).
+The hook scripts of the tests and probes (`apps/server/src/testing/hook-scripts.ts`, the 12 `HOOK_SCRIPT_NAMES`) are
+POSIX `sh` files (busybox / dash compatible, no `jq`) written into a temporary project, by default under
+`.harness/hooks` (so a project hook's trust hash covers them); `writeHookScript(projectDir, name)` returns the command
+`sh .harness/hooks/<name>.sh`, run from the project folder (never an inline `sh -c` string). Each script reads its
+stdin first:
+
+- `deny` / `ask` / `allow`: a PreToolUse `permissionDecision` with the reason `Denied by the deny hook.` / `The ask hook
+  wants a confirmation.` / `Allowed by the allow hook.`;
+- `rewrite`: a PreToolUse `updatedInput` `{"command":"echo rewritten"}` (no decision);
+- `context`: `additionalContext` `lint ok`, with the payload's `hook_event_name` as `hookEventName` (PostToolUse,
+  UserPromptSubmit and SessionStart read it);
+- `exit2`: stderr `nope`, exit 2; `error`: stderr `hook failed`, exit 1 (a non-blocking error);
+- `sleep`: starts `sleep 30` in the background, appends `<script pid> <sleep pid>` to `.hook-sleep-pids`, then waits
+  (it outlives any short timeout; `readSleepPids` proves both pids are gone after the kill);
+- `record`: appends the payload as one JSON line to the **file** `.hook-log` (`readHookLog`);
+- `env`: writes `env` to the file `.hook-env` (`readHookEnv`);
+- `stop-once`: exits 0 when the payload holds `"stop_hook_active":true`, else prints
+  `{"decision":"block","reason":"run the tests"}`;
+- `prompt-block`: stderr `Prompt blocked by hook.`, exit 2 (a UserPromptSubmit block).
+
+The files go to `$HARNESS_PROJECT_DIR` (`.` when it is unset: the hook's working folder). A `text` option replaces a
+script's fixed text, `seconds` the sleep, `dir` / `file` the location.
+
+The MCP fixtures (`apps/server/src/mcp/__fixtures__/`): `mcp-min.mjs` is a dependency-free stdio MCP server (Node
+built-ins only, newline-delimited JSON-RPC; it exits when stdin closes). Its tools: `echo` `{ text }` → `<name> echo:
+<text>`; `pid` → `{"pid":…,"grandchild":…|null}`; `env` `{ name? }` → `{"value":…|null}`, or without a name
+`{"names":[…]}` (every variable name, sorted, never a value). Its flags (all optional): `--name <name>` (the serverInfo
+name and the echo prefix, default `mcp-min`), `--marker` (writes `.mcp-started-<pid>` into its working folder, with
+whether `TOKEN` is set but never its value, so a probe can prove it never started before approval), `--grandchild`
+(starts `grandchild.mjs` in the server's own process group), `--pid-file <path>` (appends `<pid> [<grandchild pid>]`),
+`--fail-init` (answers `initialize` with a JSON-RPC error), `--exit-on-init` (exits 1 on `initialize`, leaving the
+grandchild behind), `--ignore-term` (ignores SIGTERM, the grandchild too, so only SIGKILL stops them). `grandchild.mjs`
+is a long-lived process without stdio (`--ignore-term`, `--lifetime-ms <ms>`, default 120 s). Tests build the
+transport with `mcpMinStdio(args, env)` and read the pid file with `readMcpPids` (`harness.ts`, `MCP_MIN_PATH`,
+`GRANDCHILD_PATH`). Since Phase 11 the `env` tool of `echo-server.mjs` without a `name` also lists the variable names
+(sorted, never values).
 
 How the probes use them (ARCHITECTURE.md 6.28 – 6.32): `mock:hooks` as the chat model of a project chat with personal,
 project and plugin hooks: `run rm -rf build` with a `deny` or `exit2` PreToolUse hook on `Bash` (→ `Called shell:

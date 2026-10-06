@@ -111,14 +111,17 @@ import QueuedMessages from './queue/QueuedMessages.vue'
 
 const props = withDefaults(defineProps<{
   chatId: string
-  /** The `/` page: no history to load; the first send emits `created`. */
+  /** The `/` page: no history to load; the first send emits `created` once the server accepted it. */
   isNew?: boolean
 }>(), {
   isNew: false,
 })
 
 const emit = defineEmits<{
-  /** After the first send of a new chat. */
+  /**
+   * The server accepted the first send of a new chat (its 2xx answer, `session.accepted`; not the first chunk, which an
+   * image turn sends only once its image is ready). A refused first message never emits it.
+   */
   created: [chatId: string]
 }>()
 

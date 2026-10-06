@@ -200,10 +200,18 @@ export function customizationMeta(entry: Pick<CustomizationEntry, 'kind' | 'mode
   return [model, tools]
 }
 
+/** The kind as a word in UI copy (docs/UI.md 15): a `style` entry is an "output style". */
+const KIND_NOUN: Readonly<Record<CustomizationEntry['kind'], string>> = {
+  agent: 'agent',
+  command: 'command',
+  skill: 'skill',
+  style: 'output style',
+}
+
 /**
  * The tooltip of a "Shadowed" row (docs/UI.md 8.8, 9.12): "Not used: {winner} wins.", where the winner is "your
- * personal agent", "the project's .harness/agents/x.md", "the agent from {plugin}" or "the built-in agent". Null for an
- * entry that is not shadowed.
+ * personal agent", "the project's .harness/agents/x.md", "the agent from {plugin}" or "the built-in agent" ("your
+ * personal output style", … for a style). Null for an entry that is not shadowed.
  */
 export function shadowedNote(
   entry: Pick<CustomizationEntry, 'kind' | 'state' | 'shadowedBy'>,
@@ -215,10 +223,11 @@ export function shadowedNote(
 }
 
 function shadowWinner(
-  kind: CustomizationEntry['kind'],
+  entryKind: CustomizationEntry['kind'],
   winner: CustomizationShadowedBy | undefined,
   pluginName: (id: string) => string,
 ): string {
+  const kind = KIND_NOUN[entryKind]
   switch (winner?.source) {
     case 'user':
       return `your personal ${kind}`

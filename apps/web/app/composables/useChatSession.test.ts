@@ -21,6 +21,8 @@ import {
   chatSummary,
   hookCarrier,
   hookData,
+  hookPart,
+  hookRecordId,
   messageBranch,
   messageId,
   projectId,
@@ -40,6 +42,8 @@ import {
   leafMovedElsewhere,
   MAX_CHAT_SESSIONS,
   mergePath,
+  PROMPT_HOOKS_HEADER,
+  promptHookCount,
   resetChatSessions,
   samePathIds,
   sendInputOf,
@@ -2732,5 +2736,88 @@ describe('useChatSession: hooks, refusals and output styles (Phase 11, W11.11)',
       disposePinia(piniaB)
       setActivePinia(pinia)
     }
+  })
+})
+
+describe('useChatSession: hook records of a new user message (W11.19)', () => {
+  const U0 = 'msg_user000000000001'
+  const A0 = 'msg_asst000000000001'
+  const A1 = 'msg_asst000000000002'
+  const A2 = 'msg_asst000000000003'
+
+  /** A POST /api/chat answer whose header counts the hook records the server added to the new user message. */
+  function counted(writer: StreamWriter, count: string): () => Response {
+    return () => {
+      const response = streamResponse(writer)
+      response.headers.set(PROMPT_HOOKS_HEADER, count)
+      return response
+    }
+  }
+
+  function finished(n: number, messageId: string) {
+    dispatchServerEvent(createServerEvent('run.finished', { chatId: chatId(n), messageId, outcome: 'completed', awaitingApproval: false }))
+  }
+
+  const records = [
+    hookPart({ id: hookRecordId(2), event: 'SessionStart', outcome: 'context', toolCallId: undefined, toolName: undefined, reason: undefined, context: 'Session notes' }),
+    hookPart({ id: hookRecordId(3), event: 'UserPromptSubmit', outcome: 'context', toolCallId: undefined, toolName: undefined, reason: undefined, context: 'Prompt notes' }),
+  ]
+
+  it('promptHookCount reads the count of an accepted answer (0 without a valid one)', () => {
+    const answer = (value?: string) => new Response(null, value === undefined ? {} : { headers: { [PROMPT_HOOKS_HEADER]: value } })
+    expect(promptHookCount(answer('2'))).toBe(2)
+    expect(promptHookCount(answer())).toBe(0)
+    expect(promptHookCount(answer('0'))).toBe(0)
+    expect(promptHookCount(answer('many'))).toBe(0)
+  })
+
+  it('reloads the path from the hooked message once its run finished, so the notes show without a page reload', async () => {
+    const path = [userMessage(U0, 'q0'), assistantMessage(A0, 'a0')]
+    const session = await loadedSession(60, { messages: path })
+    // A copy: the SDK appends to the array it was given.
+    const before = [...session.chat.messages.value]
+    const gate = deferred()
+    server.respond(counted(textReply('With context', A1, gate.promise), '2'))
+    const sending = session.send({ text: 'context?', files: [] })
+    await until(() => session.accepted.value === 1, 'accepted')
+    const sent = chatBodies()[0]!.message
+    expect(sent.parts.some(part => part.type === 'data-hook')).toBe(false)
+    const stored: HarnessUIMessage = { ...fromServer([sent])[0]!, parts: [...sent.parts, ...records] }
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(60), modelRef: MODEL, messages: [...fromServer(path), stored, assistantMessage(A1, 'With context')] }))
+    // The run's end arrives before the stream's: the reload waits until the session is idle.
+    finished(60, A1)
+    await nextTick()
+    expect(api.chats.get).toHaveBeenCalledTimes(1)
+    gate.resolve()
+    await sending
+    await until(() => session.chat.messages.value[2]?.parts.some(part => part.type === 'data-hook') === true, 'the stored copy')
+    expect(api.chats.get).toHaveBeenCalledTimes(2)
+    const after = session.chat.messages.value
+    expect(after.map(message => message.id)).toEqual([U0, A0, sent.id, A1])
+    // The prefix before the hooked message keeps its objects; the hooked message and its reply are the stored copies.
+    expect(after[0]).toBe(before[0])
+    expect(after[1]).toBe(before[1])
+    expect(after[2]!.parts.filter(part => part.type === 'data-hook')).toEqual(records)
+
+    // A turn without records: its own completed run reloads nothing (no request per turn).
+    server.reply(textReply('Plain', A2))
+    await session.send({ text: 'plain', files: [] })
+    finished(60, A2)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(api.chats.get).toHaveBeenCalledTimes(2)
+    expect(session.chat.messages.value.map(message => message.id)).toEqual([U0, A0, sent.id, A1, chatBodies()[1]!.message.id, A2])
+  })
+
+  it('a new chat\'s first message: the run\'s end shows the SessionStart and UserPromptSubmit notes', async () => {
+    const session = newSession(61)
+    server.respond(counted(textReply('With context', A1), '2'))
+    await session.send({ text: 'context?', files: [] })
+    expect(api.chats.get).not.toHaveBeenCalled()
+    const sent = chatBodies()[0]!.message
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(61), modelRef: MODEL, messages: [{ ...fromServer([sent])[0]!, parts: [...sent.parts, ...records] }, assistantMessage(A1, 'With context')] }))
+    finished(61, A1)
+    await until(() => session.chat.messages.value[0]?.parts.length === 3, 'the stored copy')
+    expect(session.chat.messages.value.map(message => message.id)).toEqual([sent.id, A1])
+    expect(api.chats.get).toHaveBeenCalledTimes(1)
   })
 })
