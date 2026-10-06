@@ -14,10 +14,25 @@
 // there like at a steer (the parts after it get the reply's heading again), and the user-role carrier message of a turn
 // the server started (only results) shows its results without a "## User" heading. Invalid result data is left out.
 // JSON exports keep the parts (background task rows are never exported).
-import type { ChatDetail, ChatExport, ChatExportFormat, CompactionData, HarnessUIMessage, TaskOutput } from '@harness-forge/shared'
+//
+// Phase 11 (ADR-048, W11.7): a hook record (`data-hook`) reads "_Hook: <event> (<outcome>)_" followed by its context as
+// a quote and "Reason: <reason>", at its place (in a reply, or on the user message of a UserPromptSubmit / SessionStart
+// context); the user-role carrier message of a Stop continuation (only hook records) shows its records without a
+// "## User" heading, after the reply that ran the hook. Invalid record data is left out; the hooks that ran, their
+// errors and a rewritten input are not rendered. JSON exports keep the parts as stored.
+import type { ChatDetail, ChatExport, ChatExportFormat, CompactionData, HarnessUIMessage, HookData, TaskOutput } from '@harness-forge/shared'
 import type { ChatExportFile } from './types.ts'
 import { Buffer } from 'node:buffer'
-import { COMPACTION_PART_TYPE, compactionDataSchema, splitSteers, TASK_RESULT_PART_TYPE, taskResultDataSchema } from '@harness-forge/shared'
+import {
+  COMPACTION_PART_TYPE,
+  compactionDataSchema,
+  HOOK_PART_TYPE,
+  hookDataSchema,
+  isHookCarrier,
+  splitSteers,
+  TASK_RESULT_PART_TYPE,
+  taskResultDataSchema,
+} from '@harness-forge/shared'
 
 /** Tool outputs longer than this (UTF-8 bytes) are truncated in Markdown exports. */
 export const EXPORT_TOOL_OUTPUT_BYTES = 4096
@@ -131,6 +146,21 @@ function toolBlocks(part: Record<string, unknown>): string[] {
   return blocks
 }
 
+/** The line of a hook record (ADR-048): the event and the outcome of its hooks. */
+export function hookLine(data: Pick<HookData, 'event' | 'outcome'>): string {
+  return `_Hook: ${data.event} (${data.outcome})_`
+}
+
+/** A hook record: its line, its context as a quote and its reason; nothing for invalid data. */
+function hookBlocks(part: Record<string, unknown>): string[] {
+  const parsed = hookDataSchema.safeParse(part.data)
+  if (!parsed.success)
+    return []
+  const context = parsed.data.context?.trim() ?? ''
+  const reason = parsed.data.reason?.trim() ?? ''
+  return [hookLine(parsed.data), ...(context === '' ? [] : [quote(context)]), ...(reason === '' ? [] : [`Reason: ${reason}`])]
+}
+
 function partBlocks(part: HarnessUIMessage['parts'][number]): string[] {
   const loose = part as unknown as Record<string, unknown>
   switch (part.type) {
@@ -149,6 +179,8 @@ function partBlocks(part: HarnessUIMessage['parts'][number]): string[] {
     default:
       if (part.type === COMPACTION_PART_TYPE)
         return compactionBlocks(loose)
+      if (part.type === HOOK_PART_TYPE)
+        return hookBlocks(loose)
       return part.type.startsWith('tool-') || part.type === 'dynamic-tool' ? toolBlocks(loose) : []
   }
 }
@@ -188,6 +220,9 @@ function messageHeading(message: HarnessUIMessage, chatModelRef: string | null, 
  * (a run of parts that renders nothing gets no heading).
  */
 function messageSections(piece: HarnessUIMessage, chatModelRef: string | null, steer: boolean): string[] {
+  // The carrier of a Stop continuation (only hook records): its records follow the reply that ran the hook.
+  if (isHookCarrier(piece))
+    return piece.parts.flatMap(partBlocks)
   if (!piece.parts.some(part => part.type === TASK_RESULT_PART_TYPE))
     return [messageHeading(piece, chatModelRef, steer), ...piece.parts.flatMap(partBlocks)]
   const sections: string[] = []
@@ -214,7 +249,7 @@ function messageSections(piece: HarnessUIMessage, chatModelRef: string | null, s
 
 /**
  * Markdown export: title, an export line (date, model), then one section per message (replies split at steers and at
- * background task results).
+ * background task results; hook records at their place, a hook carrier without a heading).
  */
 export function renderChatMarkdown(chat: ChatDetail, at: number): string {
   const title = chat.title ?? UNTITLED

@@ -8,7 +8,7 @@ import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { HookGateInput, RunHookHost } from './hooks.ts'
 import type { HarnessDataChunk } from './pipeline.ts'
 import type { RunReleaseFollowUp } from './types.ts'
-import { hookModelText, LIMITS } from '@harness-forge/shared'
+import { hookDataSchema, hookModelText, LIMITS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { createSilentLogger } from '../logger.ts'
 import { createFakeHookSnapshot, fakeHookRecord, fakeHookResult, hookTargetKey } from '../testing/fake-hooks.ts'
@@ -209,6 +209,19 @@ describe('runHooks: PostToolUse and the hooks piece', () => {
     await hooks.postToolUse({ toolName: 'shell', toolCallId: 'c1', input: {}, output: 'x' }, signal)
     expect(host.injected).toHaveLength(1)
     expect(hooks.takeQueued()).toEqual([])
+  })
+
+  it('records and queues the context of the plugin tool.after handlers (plugin API 1.5.0), even without hooks', async () => {
+    const { hooks, host, snapshot } = runHooks()
+    await hooks.postToolUse({ toolName: 'shell', toolCallId: 'c1', input: {}, output: 'x', pluginContext: '  lint: 2 warnings  ' }, signal)
+    expect(snapshot.calls).toHaveLength(0)
+    expect(host.injected).toHaveLength(1)
+    const record = (host.injected[0]!.chunk as { data: HookData }).data
+    expect(record).toMatchObject({ event: 'PostToolUse', outcome: 'context', toolCallId: 'c1', toolName: 'shell', context: 'lint: 2 warnings', hooks: [{ source: 'plugin', label: 'tool.after', exitCode: null }] })
+    expect(hookDataSchema.safeParse(record).success).toBe(true)
+    expect(hooks.takeQueued()).toEqual([hookModelMessage(hookModelText(record, 'assistant')!)])
+    await hooks.postToolUse({ toolName: 'shell', toolCallId: 'c2', input: {}, output: 'x', pluginContext: '   ' }, signal)
+    expect(host.injected).toHaveLength(1)
   })
 })
 

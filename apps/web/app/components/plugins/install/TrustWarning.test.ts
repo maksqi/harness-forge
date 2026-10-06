@@ -72,4 +72,33 @@ describe('trustWarning', () => {
     expect(wrapper.text()).not.toContain('Starts these programs')
     wrapper.unmount()
   })
+
+  it('lists the commands of command hooks and command `!` lines under "Runs these commands" (Phase 11)', () => {
+    const wrapper = render({
+      inspection: inspection({
+        manifest: {
+          manifestVersion: 1,
+          id: 'hook-pack',
+          name: 'Hook pack',
+          version: '1.0.0',
+          engines: { harness: '^1.5.0' },
+          contributes: {
+            hooks: {
+              PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'sh "$HARNESS_PLUGIN_ROOT/guard.sh"' }] }],
+              Stop: [{ hooks: [{ type: 'command', command: 'pnpm lint --quiet', timeout: 30 }] }],
+            },
+            commands: [{ name: 'status', description: 'Show the status', template: 'Status:\n!`git status --short`\nSummarize it.' }],
+          },
+        },
+      }),
+    })
+    const block = wrapper.get('[data-slot="trust-run-commands"]')
+    expect(block.text()).toContain('Runs these commands')
+    expect(block.findAll('li').map(item => item.text())).toEqual([
+      'PreToolUse hooksh "$HARNESS_PLUGIN_ROOT/guard.sh"',
+      'Stop hookpnpm lint --quiet',
+      '/statusgit status --short',
+    ])
+    wrapper.unmount()
+  })
 })

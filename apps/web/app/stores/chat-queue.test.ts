@@ -7,7 +7,7 @@ import type { MockApi } from '~/utils/testing/mock-api'
 import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { chatId, messageId, queueItem } from '~/utils/testing/fixtures'
+import { chatId, hookData, messageId, queueItem } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { QUEUE_SEND_FAILED_MESSAGE, useChatQueueStore } from './chat-queue'
 
@@ -233,6 +233,28 @@ describe('chat-queue store: enqueue', () => {
         .toSatisfy((error: HarnessError) => error instanceof HarnessError && (error.details as { reason: string }).reason === reason)
     }
     expect(store.items(chatId(1))).toEqual([])
+  })
+
+  it('a message refused at enqueue (Phase 11): the refusal is thrown with its hook record, nothing is queued, the id is not ours', async () => {
+    const store = useChatQueueStore()
+    api.chatQueue.add.mockResolvedValueOnce(second)
+    await store.enqueue(chatId(1), addBody(second))
+    const hook = hookData({ event: 'UserPromptSubmit', outcome: 'stopped', toolCallId: undefined, toolName: undefined, reason: 'No secrets, please.' })
+    api.chatQueue.add.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'No secrets, please.', details: { reason: 'hook-blocked', hook } }))
+    await expect(store.enqueue(chatId(1), addBody(first)))
+      .rejects
+      .toSatisfy((error: HarnessError) => error instanceof HarnessError && (error.details as { reason: string, hook: unknown }).reason === 'hook-blocked'
+        && JSON.stringify((error.details as { hook: unknown }).hook) === JSON.stringify(hook))
+    api.chatQueue.add.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'The command /deploy runs shell lines that are not approved.', details: { reason: 'untrusted' } }))
+    await expect(store.enqueue(chatId(1), addBody(first))).rejects.toSatisfy((error: HarnessError) => (error.details as { reason: string }).reason === 'untrusted')
+    expect(store.items(chatId(1)).map(item => item.id)).toEqual([second.id])
+    // A failure the server reports for that id later is not this tab's (it never queued it); its own items still are.
+    store.applyEvent(createServerEvent('queue.changed', {
+      chatId: chatId(1),
+      items: [],
+      removed: [{ id: first.id, reason: 'failed', error: 'Boom.' }, { id: second.id, reason: 'failed', error: 'The model is not available.' }],
+    }))
+    expect(mock.toastError.mock.calls).toEqual([[QUEUE_SEND_FAILED_MESSAGE, { description: 'The model is not available.' }]])
   })
 })
 

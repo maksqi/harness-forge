@@ -29,10 +29,15 @@
 // approved `exit_plan_mode` starts with PlanFileChip (the output's `planPath` / `planError`; Show changes in project
 // chats).
 // Phase 11 (ADR-048; C39 wires it, W11.12 owns it; frozen from Gate P11-0b): `hooks` = the call's hook records
-// (`toolHooksOf(parts).get(toolCallId)`): ToolHookBadge in the status cell (a PreToolUse `denied` reads "Blocked by
-// hook" instead of "Denied"), the notes (HookNote, variant tool) at the top of the body, and the reason of an `asked`
-// record as the approval card's `hookReason`; the HOOK_ACTIVITY injection (the rows are `v-memo`ed) shows "Running
-// hook…" (`data-slot="running-hook"`) while the hooks of this call run.
+// (`toolHooksOf(parts).get(toolCallId)`): ToolHookBadge in the status cell (a denied call with a PreToolUse `denied`
+// record reads "Blocked by hook" instead of "Denied"; `allowed` / `rewritten` add their icon before the summary), the
+// notes (HookNote, variant tool, the plugin's name from the plugins store) at the top of the body, the model's input
+// labelled "Original input" when a hook rewrote it (the note shows the input the tool ran with), and the reason of an
+// `asked` record as the approval card's `hookReason` ('' when the hook gave none). The HOOK_ACTIVITY injection (the rows
+// are `v-memo`ed) shows "Running hook…" (`data-slot="running-hook"`, shimmer, instead of the spinner) while the hooks of
+// this call run; a `task` call never shows it (ChatMessage shows "Running hooks…" for it). A tool of a project MCP server
+// reads the server's name from the project-mcp store (the chat's project from TOOL_APPROVAL_CONTEXT), else the global
+// server's name, else its id.
 import type { HookData, TodoItem } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import type { WorkspaceRowSummary } from './tools/workspace-tools'
@@ -59,6 +64,7 @@ import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectMcpStore } from '~/stores/project-mcp'
 import { testIds } from '~/utils/testids'
 import {
   doneTodos,
@@ -86,8 +92,10 @@ import {
   PLAN_TOOL_NAME,
   SKILL_TOOL_NAME,
   splitMcpToolName,
+  TASK_TOOL_NAME,
   toolNameOf,
 } from '../chat-format'
+import { hookPluginId } from '../hooks/hook-notes'
 import HookNote from '../hooks/HookNote.vue'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
 import { toolRowArgument } from './tool-row'
@@ -133,6 +141,7 @@ const emit = defineEmits<{
 }>()
 
 const plugins = usePluginsStore()
+const projectMcp = useProjectMcpStore()
 const open = ref(false)
 const scroll = inject(TRANSCRIPT_SCROLL, null)
 const approvalContext = inject(TOOL_APPROVAL_CONTEXT, null)
@@ -147,16 +156,25 @@ const name = computed(() => toolNameOf(props.part))
 const tool = computed(() => plugins.tools.find(item => item.name === name.value))
 const mcp = computed(() => splitMcpToolName(name.value))
 const serverId = computed(() => tool.value?.mcpServerId ?? mcp.value?.serverId ?? null)
+/** + Phase 11: the chat's project (its `.mcp.json` servers shadow global servers with the same id there). */
+const projectId = computed(() => approvalContext?.projectId() ?? null)
 const serverName = computed(() => {
   if (!serverId.value)
     return null
-  return plugins.mcp.find(server => server.id === serverId.value)?.name ?? serverId.value
+  const projectServer = projectId.value ? projectMcp.byId(projectId.value, serverId.value) : null
+  return projectServer?.name ?? plugins.mcp.find(server => server.id === serverId.value)?.name ?? serverId.value
 })
 const displayName = computed(() => mcp.value?.tool ?? name.value)
 // The badge names the server; a transcript opened after a reload may be the first place that needs the MCP list.
 watch(serverId, (id) => {
   if (id && !plugins.mcpLoaded)
     plugins.fetchMcp().catch(() => {})
+}, { immediate: true })
+/** + Phase 11: a project chat's tool rows of MCP servers need the project's servers (names), fetched once a minute at most. */
+const PROJECT_MCP_MAX_AGE_MS = 60_000
+watch([serverId, projectId], ([id, project]) => {
+  if (id && project && !(project in projectMcp.byProject))
+    projectMcp.fetch(project, { maxAgeMs: PROJECT_MCP_MAX_AGE_MS }).catch(() => {})
 }, { immediate: true })
 const firstArg = computed(() => toolRowArgument(name.value, props.part.input))
 /** + Phase 9: a tool of `core-agent` (before the tool list has loaded, any tool with an agent tool's name). */
@@ -221,12 +239,25 @@ const status = computed<RowStatus>(() => {
 })
 
 const awaitingDecision = computed(() => props.part.state === 'approval-requested' && !props.superseded)
-/** + Phase 11: the hooks of this call run right now ("Running hook…"). */
-const runningHook = computed(() => !!props.part.toolCallId && hookActivity?.value?.toolCallId === props.part.toolCallId)
-/** + Phase 11: the reason of a PreToolUse hook that asked for the card (null = no hook asked). */
-const hookReason = computed(() => props.hooks.find(data => data.event === 'PreToolUse' && data.outcome === 'asked')?.reason ?? null)
+/** + Phase 11: the hooks of this call run right now ("Running hook…"); a `task` call leaves it to its message. */
+const runningHook = computed(() => !!props.part.toolCallId
+  && name.value !== TASK_TOOL_NAME
+  && hookActivity?.value?.toolCallId === props.part.toolCallId)
+/** + Phase 11: the call's PreToolUse record, if any. */
+const preToolUse = computed(() => props.hooks.find(data => data.event === 'PreToolUse') ?? null)
+/** + Phase 11: the reason of a PreToolUse hook that asked for the card ('' without one; null = no hook asked). */
+const hookReason = computed(() => (preToolUse.value?.outcome === 'asked' ? preToolUse.value.reason ?? '' : null))
+/** + Phase 11: the label of the model's input in the body ("Original input" when a hook rewrote it). */
+const inputLabel = computed(() => (preToolUse.value?.outcome === 'rewritten' ? 'Original input' : 'Input'))
+/** + Phase 11: the name of the plugin of a hook record (the plugins store), for its note's source line. */
+function hookPluginName(data: HookData): string | null {
+  const id = hookPluginId(data)
+  return id ? plugins.byId(id)?.name ?? null : null
+}
 const supersededDenial = computed(() => status.value === 'denied'
   && (isSupersededDenial(props.part) || props.part.state === 'approval-requested'))
+/** + Phase 11: a denial a PreToolUse hook made ("Blocked by hook" replaces "Denied"). */
+const hookDenied = computed(() => status.value === 'denied' && !supersededDenial.value && preToolUse.value?.outcome === 'denied')
 const statusLabel = computed(() => ({
   running: 'Running',
   approval: 'Needs approval',
@@ -407,10 +438,12 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
           <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs text-muted-foreground">
             <span v-if="skillRow?.source" data-slot="skill-row-source" class="max-w-[16ch] truncate">{{ skillRow.source }}</span>
             <span v-if="runningHook" data-slot="running-hook" class="hf-shimmer-text">Running hook…</span>
-            <ToolHookBadge v-if="hooks.length > 0" :hooks="hooks" />
+            <ToolHookBadge v-if="hooks.length > 0 && !hookDenied" :hooks="hooks" />
             <ToolRuleBadge v-if="allowedBy.length > 0" :prefixes="allowedBy" />
             <ToolRowSummary v-if="summary" :summary="summary" class="mr-0.5" />
-            <Spinner v-if="status === 'running'" class="size-3" />
+            <template v-if="status === 'running'">
+              <Spinner v-if="!runningHook" class="size-3" />
+            </template>
             <template v-else-if="status === 'approval' && isPlanTool">
               <span aria-hidden="true" class="size-2 rounded-full bg-info" />
               <span>Plan ready for review</span>
@@ -426,7 +459,8 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
             <CheckIcon v-else-if="status === 'done'" aria-hidden="true" class="size-3.5 text-success" />
             <XIcon v-else-if="status === 'error'" aria-hidden="true" class="size-3.5 text-destructive" />
             <template v-else-if="status === 'denied'">
-              <Tooltip v-if="supersededDenial">
+              <ToolHookBadge v-if="hookDenied" :hooks="hooks" />
+              <Tooltip v-else-if="supersededDenial">
                 <TooltipTrigger as-child>
                   <span class="inline-flex items-center gap-1.5">
                     <BanIcon aria-hidden="true" class="size-3.5" />
@@ -454,7 +488,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
       </div>
       <AiToolContent :data-testid="testIds.toolRowOutput" class="min-w-0 pt-1 pl-6">
         <div v-if="hooks.length > 0" data-slot="tool-hook-notes" class="mb-2 flex min-w-0 flex-col gap-1">
-          <HookNote v-for="data in hooks" :key="data.id" :data="data" variant="tool" />
+          <HookNote v-for="data in hooks" :key="data.id" :data="data" variant="tool" :plugin-name="hookPluginName(data)" />
         </div>
         <AgentToolBody v-if="agentView">
           <TodoList v-if="agentView.kind === 'todo'" :todos="agentView.todos" />
@@ -465,7 +499,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
           </template>
           <template #raw>
             <div class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
-              <ToolValueBlock label="Input" :value="inputText || '{}'" />
+              <ToolValueBlock :label="inputLabel" :value="inputText || '{}'" />
               <ToolValueBlock v-if="hasOutput" label="Output" :value="outputText" :server-truncated="outputTruncated" />
             </div>
           </template>
@@ -473,13 +507,13 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
         <WorkspaceToolBody v-else-if="view" :view="view" :running="status === 'running'">
           <template #raw>
             <div class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
-              <ToolValueBlock label="Input" :value="inputText || '{}'" />
+              <ToolValueBlock :label="inputLabel" :value="inputText || '{}'" />
               <ToolValueBlock v-if="hasOutput" label="Output" :value="outputText" :server-truncated="outputTruncated" />
             </div>
           </template>
         </WorkspaceToolBody>
         <div v-else class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
-          <ToolValueBlock label="Input" :value="inputText || '{}'" />
+          <ToolValueBlock :label="inputLabel" :value="inputText || '{}'" />
           <ToolValueBlock v-if="hasOutput" label="Output" :value="outputText" :server-truncated="outputTruncated" />
           <ToolValueBlock v-if="errorText" label="Error" :value="errorText" tone="error" />
         </div>

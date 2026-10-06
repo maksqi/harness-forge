@@ -90,6 +90,9 @@ describe('labels', () => {
     expect(contributionSummary({ providers: ['a', 'b'], models: 3, tools: [], mcpServers: ['m'], commands: ['c', 'd'], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] }))
       .toBe('2 providers · 3 models · 1 MCP server · 2 commands')
     expect(contributionSummary({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] })).toBe('')
+    // Phase 11: output styles, and the command hooks counted with the code hooks.
+    expect(contributionSummary({ providers: [], models: 0, tools: [], mcpServers: [], commands: ['c'], hooks: ['prompt.submit'], agents: [], skills: [], commandHooks: 2, outputStyles: ['terse'] }))
+      .toBe('1 command · 1 output style · 3 hooks')
     expect(filesSummary({ count: 1, bytes: 2048 })).toBe('1 file · 2 KB')
     expect(permissionLabel('hooks')).toBe('Reads and changes conversations')
     expect(permissionLabel('unknown')).toBe('unknown')

@@ -86,6 +86,44 @@ describe('message text', () => {
     expect(messagePlainText([{ type: 'text', text: 'A' }, steer, result('Report text'), { type: 'text', text: 'B' }])).toBe('A\nSteer text\nReport text\nB')
   })
 
+  it('includes the context and the reason of hook records at their place, nothing else of them (Phase 11)', () => {
+    const record = (data: Record<string, unknown>) => ({
+      type: 'data-hook',
+      data: {
+        id: 'hev_0000000000000001',
+        event: 'PostToolUse',
+        outcome: 'context',
+        toolCallId: 'call_1',
+        toolName: 'write_file',
+        createdAt: 1,
+        hooks: [{ source: 'project', label: 'sh LABEL-COMMAND.sh', exitCode: 0, durationMs: 5, systemMessage: 'SYSTEM-MESSAGE' }],
+        updatedInput: { path: 'UPDATED-INPUT' },
+        ...data,
+      },
+    })
+    const reply = [
+      { type: 'text', text: 'Before' },
+      record({ context: '  Run the KIWI tests.  ' }),
+      { type: 'text', text: 'After' },
+      record({ id: 'hev_0000000000000002', event: 'PreToolUse', outcome: 'denied', reason: 'Blocked: no PAPAYA writes.' }),
+    ]
+    expect(messagePlainText(reply)).toBe('Before\nRun the KIWI tests.\nAfter\nBlocked: no PAPAYA writes.')
+    const search = toSearchText(reply)
+    expect(search).toContain('kiwi')
+    expect(search).toContain('papaya')
+    for (const hidden of ['label-command', 'system-message', 'updated-input', 'write_file'])
+      expect(search).not.toContain(hidden)
+    // Both fields of one record: the context first, then the reason.
+    expect(messagePlainText([record({ event: 'Stop', outcome: 'continued', context: 'Context text', reason: 'Reason text' })])).toBe('Context text\nReason text')
+    // A UserPromptSubmit context on the user message follows the user's text.
+    expect(messagePlainText([{ type: 'text', text: 'Fix the bug' }, record({ event: 'UserPromptSubmit', outcome: 'context', toolCallId: undefined, toolName: undefined, context: 'Branch: main' })]))
+      .toBe('Fix the bug\nBranch: main')
+    // The carrier of a Stop continuation: only records.
+    expect(messagePlainText([record({ event: 'Stop', outcome: 'continued', reason: 'Run the tests' })])).toBe('Run the tests')
+    // Empty texts, a record without context or reason and malformed data are not text.
+    expect(messagePlainText([record({ context: '   ', reason: '' }), record({ outcome: 'error' }), record({ context: 42 }), { type: 'data-hook', data: null }, { type: 'data-hook' }])).toBe('')
+  })
+
   it('stores search text NFC-normalized and lowercased with Unicode rules', () => {
     expect(toSearchText([{ type: 'text', text: `Hello \u00DCBER ${GREEK_WORLD_UPPER}` }])).toBe(`hello \u00FCber ${GREEK_WORLD_LOWER}`)
     // A decomposed "e" + combining acute becomes the composed character.

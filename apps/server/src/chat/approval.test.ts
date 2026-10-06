@@ -525,6 +525,63 @@ describe('createToolApproval: PreToolUse command hooks (Phase 11, C37-T2)', () =
     expect(blockedByHookReason('why')).toBe('Blocked by hook: why')
   })
 
+  it('applyHookDecision: in plan mode an allow keeps the harness result; deny and ask still apply', () => {
+    const ask = { outcome: 'user-approval' as const }
+    for (const workspace of ACCESS) {
+      for (const policy of ['safe', 'ask', 'always', null] as const)
+        expect(applyHookDecision(ask, { decision: 'allow', reason: null }, workspace, policy, 'plan')).toBe(ask)
+    }
+    expect(applyHookDecision({ outcome: 'not-applicable' }, { decision: 'allow', reason: null }, null, 'safe', 'plan')).toEqual({ outcome: 'not-applicable' })
+    expect(applyHookDecision({ outcome: 'not-applicable' }, { decision: 'deny', reason: 'no' }, null, 'safe', 'plan')).toEqual({ outcome: 'denied', reason: 'Blocked by hook: no' })
+    expect(applyHookDecision({ outcome: 'not-applicable' }, { decision: 'ask', reason: null }, null, 'safe', 'plan')).toEqual({ outcome: 'user-approval' })
+    // Every other mode keeps the narrow allow.
+    for (const toolMode of ['ask', 'edits', 'auto'] as const) {
+      expect(applyHookDecision(ask, { decision: 'allow', reason: null }, 'write', 'ask', toolMode)).toEqual({ outcome: 'approved' })
+      expect(applyHookDecision(ask, { decision: 'allow', reason: null }, 'execute', 'ask', toolMode)).toBe(ask)
+      expect(applyHookDecision(ask, { decision: 'allow', reason: null }, null, 'always', toolMode)).toBe(ask)
+    }
+  })
+
+  it('plan mode: a hook allow never skips the card; ask mode: it approves a non-execute ask tool', async () => {
+    const allow = () => hooked({ results: { PreToolUse: fakeHookResult({ decision: 'allow' }) } }).hooks
+    const approve = (tool: ApprovalTool, toolMode: ToolMode, overrides: Partial<ToolApprovalContext> = {}) =>
+      createToolApproval(context({ tool, toolMode, hooks: allow(), ...overrides }))(call)
+    for (const access of [undefined, 'read', 'write'] as const) {
+      const tool = { pluginId: 'demo', definition: definition('ask', access) }
+      expect(await approve(tool, 'plan')).toBe('user-approval')
+      expect(await approve(tool, 'ask')).toBe('approved')
+    }
+    // A policy function answering `ask`: approved in ask mode, the card in plan mode.
+    expect(await approve({ pluginId: 'demo', definition: definition(() => 'ask') }, 'ask')).toBe('approved')
+    expect(await approve({ pluginId: 'demo', definition: definition(() => 'ask') }, 'plan')).toBe('user-approval')
+    // An `ask` override in plan mode: the card, and the policy is not evaluated for the allow.
+    let evaluated = 0
+    const counted: ApprovalTool = { pluginId: 'demo', definition: definition(() => {
+      evaluated += 1
+      return 'ask' as const
+    }) }
+    const askOverride = new Map([['demo_tool', { enabled: true, override: 'ask' as const }]])
+    expect(await approve(counted, 'plan', { prefs: askOverride })).toBe('user-approval')
+    expect(evaluated).toBe(0)
+    expect(await approve(counted, 'ask', { prefs: askOverride })).toBe('approved')
+    expect(evaluated).toBe(1)
+    // A safe tool runs without a card in plan mode either way (the harness result).
+    expect(await approve({ pluginId: 'demo', definition: definition('safe') }, 'plan')).toBe('not-applicable')
+    // execute and always still ask, in every mode that asks for them.
+    for (const toolMode of ['ask', 'plan', 'edits'] as const) {
+      expect(await approve({ pluginId: 'demo', definition: definition('ask', 'execute') }, toolMode)).toBe('user-approval')
+      expect(await approve({ pluginId: 'demo', definition: definition('always', 'write') }, toolMode)).toBe('user-approval')
+    }
+    expect(await approve({ pluginId: 'demo', definition: definition('always') }, 'auto')).toBe('user-approval')
+    // A deny wins in every mode, whatever the policy.
+    for (const toolMode of MODES_WITH_TOOLS) {
+      for (const policy of ['safe', 'ask', 'always'] as const) {
+        const deny = hooked({ results: { PreToolUse: fakeHookResult({ decision: 'deny', reason: 'stop' }) } }).hooks
+        expect(await createToolApproval(context({ tool: { pluginId: 'demo', definition: definition(policy) }, toolMode, hooks: deny }))(call)).toEqual({ type: 'denied', reason: 'Blocked by hook: stop' })
+      }
+    }
+  })
+
   it('deny blocks and ask asks in every mode, for every access', async () => {
     for (const toolMode of MODES_WITH_TOOLS) {
       for (const access of [undefined, 'read', 'write', 'execute'] as const) {

@@ -8,6 +8,7 @@
 // Phase 9: a steer arrives as its own user message (the server splits the reply there) and reads as an ordinary user
 // bubble; compaction markers never reach a snapshot; the agent tools render through ShareToolRow (task, todo and plan
 // bodies when tool details are shared).
+// Phase 11: hook records never reach a snapshot (no notes, no carriers; a hook denial reads "Denied").
 import type { ShareMessage } from '@harness-forge/shared'
 import { CircleAlertIcon } from '@lucide/vue'
 import { computed } from 'vue'

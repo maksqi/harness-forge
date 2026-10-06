@@ -12,6 +12,10 @@
 // asks "Discard changes?" (`customization-discard-confirm`; opens on Keep editing). Opens with focus on Name (new,
 // import) or Description (edit); reka returns focus to the element that had it when the sheet opened.
 // Props, emits and the root test id are frozen from Gate P10-0b (C33).
+// Phase 11 (W11.8; docs/UI.md 9.13): output styles (kind `style`) have Name, Description, Keep coding instructions
+// (`customization-keep-coding`, a Switch, default off) and the body (no Tools or Model); skills add Show in the slash menu
+// (`customization-user-invocable`, default on), Only when you run it (`customization-model-invocation`, default off) and
+// the Argument hint. A style keeps its label as written while its name is still the label's slug.
 import type { Customization, CustomizationKind, DefinitionDiagnostic, ToolSummary } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
 import type { CustomizationDraft, DraftField } from './customize'
@@ -29,6 +33,7 @@ import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Spinner } from '@/components/ui/spinner'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import MarkdownEditor from '~/components/common/MarkdownEditor.vue'
@@ -79,6 +84,12 @@ interface FormValues {
   model: string | null
   argumentHint: string
   body: string
+  /** + Phase 11: styles. */
+  keepCodingInstructions: boolean
+  /** + Phase 11: skills ("Show in the slash menu"). */
+  userInvocable: boolean
+  /** + Phase 11: skills ("Only when you run it" = not model-invocable). */
+  onlyWhenRun: boolean
 }
 
 const customizations = useCustomizationsStore()
@@ -95,6 +106,11 @@ const ids = {
   argumentHintHelp: useId(),
   body: useId(),
   bodyHelp: useId(),
+  keepCoding: useId(),
+  keepCodingHelp: useId(),
+  userInvocable: useId(),
+  modelInvocation: useId(),
+  modelInvocationHelp: useId(),
 }
 
 const copy = computed(() => EDITOR_COPY[props.kind])
@@ -122,19 +138,36 @@ function valuesOf(draft: CustomizationDraft): FormValues {
     model: draft.model,
     argumentHint: draft.argumentHint ?? '',
     body: draft.body,
+    keepCodingInstructions: draft.keepCodingInstructions ?? false,
+    userInvocable: draft.userInvocable ?? true,
+    onlyWhenRun: draft.modelInvocable === false,
   }
 }
 
 function draftOf(values: FormValues): CustomizationDraft {
-  return {
+  const draft: CustomizationDraft = {
     kind: props.kind,
     name: values.name,
     description: values.description,
     tools: props.kind === 'skill' || props.kind === 'style' || values.toolsMode === 'all' ? null : [...values.tools],
     model: props.kind === 'skill' || props.kind === 'style' ? null : values.model,
-    argumentHint: props.kind === 'command' ? values.argumentHint : null,
+    argumentHint: props.kind === 'command' || props.kind === 'skill' ? values.argumentHint : null,
     body: values.body,
   }
+  // + Phase 11: the style and skill keys (absent = the default, like the parser's fields).
+  if (props.kind === 'style') {
+    draft.keepCodingInstructions = values.keepCodingInstructions
+    const label = initial.value.label
+    if (label)
+      draft.label = label
+  }
+  if (props.kind === 'skill') {
+    if (!values.userInvocable)
+      draft.userInvocable = false
+    if (values.onlyWhenRun)
+      draft.modelInvocable = false
+  }
+  return draft
 }
 
 const form = useForm({
@@ -163,7 +196,7 @@ const errors = computed<Partial<Record<DraftField, string>>>(() => {
   const description = descriptionError(props.kind, draft.description)
   if (description)
     found.description = description
-  const hint = props.kind === 'command' ? argumentHintError(draft.argumentHint) : null
+  const hint = props.kind === 'command' || props.kind === 'skill' ? argumentHintError(draft.argumentHint) : null
   if (hint)
     found.argumentHint = hint
   const body = bodyError(draft)
@@ -513,7 +546,67 @@ function errorProps(field: DraftField, errorId: string, meta?: { isBlurred: bool
             </template>
           </form.Field>
 
-          <form.Field v-if="kind === 'command'" name="argumentHint">
+          <template v-if="kind === 'skill'">
+            <form.Field name="userInvocable">
+              <template #default="{ field, state }">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="grid gap-1">
+                    <Label :for="ids.userInvocable">Show in the slash menu</Label>
+                  </div>
+                  <Switch
+                    :id="ids.userInvocable"
+                    :model-value="state.value"
+                    :data-testid="testIds.customizationUserInvocable"
+                    class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+                    @update:model-value="value => field.handleChange(value === true)"
+                  />
+                </div>
+              </template>
+            </form.Field>
+            <form.Field name="onlyWhenRun">
+              <template #default="{ field, state }">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="grid gap-1">
+                    <Label :for="ids.modelInvocation">Only when you run it</Label>
+                    <p :id="ids.modelInvocationHelp" class="text-xs text-muted-foreground">
+                      The agent doesn't load it by itself; it runs only as /name.
+                    </p>
+                  </div>
+                  <Switch
+                    :id="ids.modelInvocation"
+                    :model-value="state.value"
+                    :aria-describedby="ids.modelInvocationHelp"
+                    :data-testid="testIds.customizationModelInvocation"
+                    class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+                    @update:model-value="value => field.handleChange(value === true)"
+                  />
+                </div>
+              </template>
+            </form.Field>
+          </template>
+
+          <form.Field v-if="kind === 'style'" name="keepCodingInstructions">
+            <template #default="{ field, state }">
+              <div class="flex items-start justify-between gap-3">
+                <div class="grid gap-1">
+                  <Label :for="ids.keepCoding">Keep coding instructions</Label>
+                  <p :id="ids.keepCodingHelp" class="text-xs text-muted-foreground">
+                    On: the agent keeps its tool rules and task hints. Off: only this style shapes its replies.
+                  </p>
+                </div>
+                <Switch
+                  :id="ids.keepCoding"
+                  :model-value="state.value"
+                  :aria-describedby="ids.keepCodingHelp"
+                  :data-testid="testIds.customizationKeepCoding"
+                  class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+                  @update:model-value="value => field.handleChange(value === true)"
+                />
+              </div>
+            </template>
+          </form.Field>
+
+          <form.Field v-if="kind === 'command' || kind === 'skill'" name="argumentHint">
             <template #default="{ field, state }">
               <div class="grid gap-2">
                 <Label :for="ids.argumentHint">Argument hint</Label>

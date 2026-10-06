@@ -27,22 +27,28 @@
 // (UserPromptSubmit / SessionStart context) render as inline notes under the bubble (right-aligned, like the
 // attachments); a hook carrier (`isHookCarrierMessage`: only `data-hook` parts, the turn the server started after a
 // Stop hook blocked) renders its notes (variant turn) left-aligned with the caption "Sent to the agent", and no bubble,
-// actions, edit, versions or rewind. `activity` widens to 'compacting' | 'hooks' | null ("Running hooks…").
+// actions, edit, versions or rewind. `activity` widens to 'compacting' | 'hooks' | null: "Running hooks…" at the end of a
+// streaming reply, also after text (Stop hooks run after the reply's text), unless the running hooks belong to a tool row
+// of this reply (the HOOK_ACTIVITY injection: that row shows "Running hook…"). The notes name a plugin hook's plugin
+// from the plugins store (when a store is active).
 import type { HarnessUIMessage, HookData, MessageBranch } from '@harness-forge/shared'
 import type { FileUIPart, TextUIPart } from 'ai'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
 import { isFileUIPart } from 'ai'
-import { computed, ref } from 'vue'
+import { getActivePinia } from 'pinia'
+import { computed, inject, ref } from 'vue'
 import { cn } from '@/lib/utils'
 import { useSpeechPlayer } from '~/composables/useSpeechPlayer'
+import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
 import TaskBlock from './agent/TaskBlock.vue'
 import TaskResultNote from './agent/TaskResultNote.vue'
 import BranchSwitcher from './BranchSwitcher.vue'
+import { HOOK_ACTIVITY } from './chat-context'
 import { isTaskResultMessage, messageBlocks, messageText, taskResultsOf } from './chat-format'
 import { messageCompaction } from './compaction/compaction'
 import CompactionDivider from './compaction/CompactionDivider.vue'
-import { hookDataOf, isHookCarrierMessage, toolHooksOf } from './hooks/hook-notes'
+import { hookDataOf, hookPluginId, isHookCarrierMessage, toolHooksOf } from './hooks/hook-notes'
 import HookNote from './hooks/HookNote.vue'
 import MessageActions from './MessageActions.vue'
 import MessageEditor from './MessageEditor.vue'
@@ -139,6 +145,14 @@ const userHooks = computed<HookData[]>(() => (props.message.role === 'user'
   : []))
 /** + Phase 11: the tool-linked hook records of a reply, by tool call id. */
 const toolHooks = computed(() => (props.message.role === 'assistant' ? toolHooksOf(props.message.parts) : new Map<string, HookData[]>()))
+/** + Phase 11: the plugins store names a plugin hook's plugin (absent without an active store). */
+const plugins = getActivePinia() ? usePluginsStore() : null
+function hookPluginName(data: HookData): string | null {
+  const id = hookPluginId(data)
+  return id && plugins ? plugins.byId(id)?.name ?? null : null
+}
+/** + Phase 11: the hooks running in the chat's stream (ChatView provides it; the rows are memoized, so it is injected). */
+const hookActivity = inject(HOOK_ACTIVITY, null)
 
 /** Opens the editor on a user message (Edit button, ↑ in an empty composer); never on a carrier. */
 function startEdit() {
@@ -229,16 +243,30 @@ function blockClass(index: number): string | undefined {
 }
 
 /**
- * The streaming reply's activity line: "Compacting conversation…" while the session compacts, else "Thinking…" while
- * nothing renders yet or nothing follows the last compaction divider (the next step has not started).
+ * + Phase 11: hooks of a message-level event run (UserPromptSubmit, SessionStart, Stop, PreCompact): the session's
+ * activity is 'hooks' and the running hooks do not belong to a tool row of this reply (that row shows "Running hook…").
+ */
+const messageHooksRunning = computed(() => {
+  if (props.activity !== 'hooks')
+    return false
+  const callId = hookActivity?.value?.toolCallId ?? null
+  return callId === null || !blocks.value.some(block => block.kind === 'tool' && block.part.toolCallId === callId)
+})
+
+/**
+ * The streaming reply's activity line: "Compacting conversation…" while the session compacts, + Phase 11 "Running
+ * hooks…" while hooks of a message-level event run (also after text), else "Thinking…" while nothing renders yet or
+ * nothing follows the last compaction divider (the next step has not started).
  */
 const showPlaceholder = computed(() => {
   if (!props.streaming)
     return false
-  if (props.activity === 'compacting' || blocks.value.length === 0)
+  if (props.activity === 'compacting' || messageHooksRunning.value || blocks.value.length === 0)
     return true
   return blocks.value.at(-1)!.kind === 'compaction'
 })
+/** The placeholder's activity: 'hooks' only for message-level hooks (a tool row's own hooks show in that row). */
+const placeholderActivity = computed(() => (props.activity === 'hooks' && !messageHooksRunning.value ? null : props.activity))
 
 const actionsClass = computed(() => {
   if (props.streaming)
@@ -277,7 +305,7 @@ const actionsClass = computed(() => {
     :data-compacted="compacted || undefined"
     :class="cn('flex min-w-0 flex-col items-start gap-1', compactedClass)"
   >
-    <HookNote v-for="data in userHooks" :key="data.id" :data="data" variant="turn" />
+    <HookNote v-for="data in userHooks" :key="data.id" :data="data" variant="turn" :plugin-name="hookPluginName(data)" />
     <p aria-hidden="true" class="text-xs text-muted-foreground">
       Sent to the agent
     </p>
@@ -295,7 +323,7 @@ const actionsClass = computed(() => {
     <template v-else>
       <UserMessageBubble :message="message" />
       <div v-if="userHooks.length > 0" data-slot="user-hook-notes" class="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
-        <HookNote v-for="data in userHooks" :key="data.id" :data="data" variant="inline" />
+        <HookNote v-for="data in userHooks" :key="data.id" :data="data" variant="inline" :plugin-name="hookPluginName(data)" />
       </div>
       <div data-slot="message-action-row" class="flex h-7 max-w-full min-w-0 items-center justify-end gap-0.5 pointer-coarse:h-10">
         <BranchSwitcher
@@ -371,7 +399,13 @@ const actionsClass = computed(() => {
       />
       <SteerNote v-else-if="block.kind === 'steer'" :class="blockClass(block.index)" :steer="block.steer" />
       <TaskResultNote v-else-if="block.kind === 'task-result'" :class="blockClass(block.index)" :result="block.part" variant="inline" />
-      <HookNote v-else-if="block.kind === 'hook'" :class="blockClass(block.index)" :data="block.data" variant="inline" />
+      <HookNote
+        v-else-if="block.kind === 'hook'"
+        :class="blockClass(block.index)"
+        :data="block.data"
+        variant="inline"
+        :plugin-name="hookPluginName(block.data)"
+      />
       <template v-else-if="block.kind === 'task'">
         <TaskBlock
           :class="blockClass(block.index)"
@@ -386,6 +420,7 @@ const actionsClass = computed(() => {
           :class="blockClass(block.index)"
           :data="data"
           variant="inline"
+          :plugin-name="hookPluginName(data)"
         />
       </template>
     </template>
@@ -395,7 +430,7 @@ const actionsClass = computed(() => {
       :aspect-ratio="generatingImages.aspectRatio"
       :started-at="generatingImages.startedAt"
     />
-    <SubmittedPlaceholder v-else-if="showPlaceholder" :activity="activity" />
+    <SubmittedPlaceholder v-else-if="showPlaceholder" :activity="placeholderActivity" />
     <ErrorPart v-if="displayError && !streaming" :error="displayError" @retry="emit('retry')" />
     <div data-slot="message-action-row" class="flex h-7 min-w-0 items-center gap-0.5 pointer-coarse:h-10">
       <BranchSwitcher

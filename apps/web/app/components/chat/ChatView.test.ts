@@ -1,4 +1,4 @@
-import type { ChatRequestBody, HarnessUIMessage, QueueAddBody, QueueItem } from '@harness-forge/shared'
+import type { ChatRequestBody, FileRef, HarnessUIMessage, QueueAddBody, QueueItem } from '@harness-forge/shared'
 import type { VueWrapper } from '@vue/test-utils'
 import type { UIMessageChunk } from 'ai'
 import type { Mock } from 'vitest'
@@ -9,8 +9,9 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { defineComponent, h, inject } from 'vue'
+import { defineComponent, effectScope, h, inject } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import ProjectTrustDialog from '~/components/projects/trust/ProjectTrustDialog.vue'
 import { resetChatSessions, useChatSession } from '~/composables/useChatSession'
 import { dispatchServerEvent } from '~/composables/useServerEvents'
 import { useChatsStore } from '~/stores/chats'
@@ -24,6 +25,10 @@ import {
   changeBatchId,
   chatDetail,
   chatId,
+  chatSummary,
+  hookCarrier,
+  hookData,
+  hookPart,
   messageBranch,
   projectId,
   projectSummary,
@@ -59,6 +64,10 @@ const mock = vi.hoisted(() => ({
     restoreQueued: null as unknown as Mock,
     showRefusal: null as unknown as Mock,
     restoreInput: null as unknown as Mock,
+    /** What the composer's next submit sends (default: "Hello", no files). */
+    input: null as unknown as { text: string, files: FileRef[] },
+    /** The placeholder of the composer each `restoreInput` / `showRefusal` reached (the empty state's or the dock's). */
+    reached: [] as string[],
   },
   /** `todoState` of the todo helpers (W9.10's): the real one unless a test replaces it. */
   todoState: null as unknown as Mock<TodoStateFn>,
@@ -122,20 +131,29 @@ vi.mock('~/components/chat/agent/TaskResultNote.vue', async () => {
 })
 // The real composer belongs to W2.3; this stand-in keeps its contract (docs/UI.md 10.4).
 vi.mock('~/components/chat/composer/ChatComposer.vue', async () => {
-  const { defineComponent: define, h: render } = await import('vue')
+  const { defineComponent: define, h: render, inject: injectFrom } = await import('vue')
+  const { CHAT_VIEW_ACTIONS: viewActions } = await import('./chat-context')
   return {
     default: define({
       name: 'ChatComposer',
       props: ['chatId', 'status', 'modelRef', 'reasoningEffort', 'toolMode', 'usage', 'chatCostUsd', 'disabled', 'placeholder', 'previousImages', 'projectId', 'outputStyle'],
       emits: ['update:modelRef', 'update:reasoningEffort', 'update:toolMode', 'update:outputStyle', 'submit', 'stop', 'edit-last'],
       setup(props, { emit, expose }) {
+        // Like the real composer: the refusal's Review… opens the trust dialog through the view's actions.
+        const chatView = injectFrom(viewActions, null)
         expose({
           focus: () => mock.composer.focus(),
           setText: (text: string) => mock.composer.setText(text),
           openModelPicker: () => mock.composer.openModelPicker(),
           restoreQueued: (items: readonly QueueItem[]) => mock.composer.restoreQueued(items),
-          showRefusal: (refusal: unknown) => mock.composer.showRefusal(refusal),
-          restoreInput: (input: unknown) => mock.composer.restoreInput(input),
+          showRefusal: (refusal: unknown) => {
+            mock.composer.reached.push(`showRefusal:${props.placeholder}`)
+            mock.composer.showRefusal(refusal)
+          },
+          restoreInput: (input: unknown) => {
+            mock.composer.reached.push(`restoreInput:${props.placeholder}`)
+            mock.composer.restoreInput(input)
+          },
         })
         return () => render('form', {
           'data-testid': 'composer',
@@ -149,11 +167,12 @@ vi.mock('~/components/chat/composer/ChatComposer.vue', async () => {
           'data-output-style': props.outputStyle ?? 'automatic',
           'onSubmit': (event: Event) => {
             event.preventDefault()
-            emit('submit', { text: 'Hello', files: [] })
+            emit('submit', mock.composer.input)
           },
         }, [
           render('button', { 'type': 'button', 'data-action': 'edit-last', 'onClick': () => emit('edit-last') }),
           render('button', { 'type': 'button', 'data-action': 'stop', 'onClick': () => emit('stop') }),
+          render('button', { 'type': 'button', 'data-action': 'review', 'onClick': () => chatView?.openProjectTrust() }),
         ])
       },
     }),
@@ -199,6 +218,8 @@ beforeEach(() => {
   mock.composer.restoreQueued = vi.fn()
   mock.composer.showRefusal = vi.fn()
   mock.composer.restoreInput = vi.fn()
+  mock.composer.input = { text: 'Hello', files: [] }
+  mock.composer.reached = []
   mock.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const body = typeof init?.body === 'string' ? JSON.parse(init.body) as ChatRequestBody : null
@@ -274,6 +295,8 @@ describe('chatView: new chat', () => {
     wrapper.getComponent({ name: 'ChatComposer' }).vm.$emit('update:modelRef', MODEL)
     replies.push(textReply('Hi there'))
     await wrapper.get('[data-testid="composer"]').trigger('submit')
+    // + Phase 11: once the server took the message (W11.16: it accepted the request), not before.
+    await until(() => created.mock.calls.length === 1)
     expect(created).toHaveBeenCalledWith(chatId(1))
     await until(() => wrapper.findAll(`[data-testid="${testIds.messageAssistant}"]`).length === 1)
     expect(calls[0]!.body).toMatchObject({ chatId: chatId(1), trigger: 'submit-message', modelRef: MODEL })
@@ -1642,5 +1665,246 @@ describe('chatView: hooks, project trust and output styles (Phase 11, P11-0b mou
     expect(mock.composer.restoreInput).toHaveBeenCalledWith({ text: 'Hello', files: [] })
     // Nothing was stored: the refused message left the transcript.
     expect(wrapper.findAll(`[data-testid="${testIds.messageUser}"]`)).toHaveLength(1)
+  })
+})
+
+describe('chatView: refused messages, hook turns and announcements (Phase 11, W11.11)', () => {
+  const U1 = 'msg_user000000000001'
+  const A1 = 'msg_asst000000000009'
+  const DOC: FileRef = { id: 'file_notes00000000000', name: 'notes.md', mime: 'text/markdown', size: 42, url: '/api/files/file_notes00000000000' }
+  /** The record of the UserPromptSubmit hook that blocked the message (`details.hook`). */
+  const blockedRecord = hookData({ event: 'UserPromptSubmit', outcome: 'stopped', toolCallId: undefined, toolName: undefined, reason: 'No secrets, please.' })
+
+  function refusal(reason: 'hook-blocked' | 'untrusted', message: string): () => Response {
+    const details = reason === 'hook-blocked' ? { reason, hook: blockedRecord } : { reason }
+    return () => new Response(JSON.stringify({ error: { code: 'conflict', message, details } }), { status: 409, headers: { 'content-type': 'application/json' } })
+  }
+
+  beforeEach(() => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    api.projects.list.mockResolvedValue({ items: [projectSummary({ id: projectId(1), name: 'website' })] })
+  })
+
+  it('on `/`: a refused first message stays a new chat (no created), its text and files come back with the refusal; the next send creates the chat', async () => {
+    const { wrapper, created } = mountView({ chatId: chatId(51), isNew: true })
+    wrapper.getComponent({ name: 'ChatComposer' }).vm.$emit('update:modelRef', MODEL)
+    mock.composer.input = { text: 'my password is hunter2', files: [DOC] }
+    // The server created the row, ran the hook, removed the row and answered 409 (open point 14).
+    replies.push(() => {
+      dispatchServerEvent(createServerEvent('chat.created', chatSummary({ id: chatId(51) })))
+      dispatchServerEvent(createServerEvent('chat.deleted', { id: chatId(51) }))
+      return refusal('hook-blocked', 'No secrets, please.')()
+    })
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => mock.composer.showRefusal.mock.calls.length === 1)
+    expect(mock.composer.restoreInput).toHaveBeenCalledWith({ text: 'my password is hunter2', files: [DOC] })
+    expect(mock.composer.showRefusal).toHaveBeenCalledWith({ code: 'hook-blocked', reason: 'No secrets, please.', event: 'UserPromptSubmit', source: 'project', command: null })
+    // The empty state is back, and the input reached its composer (not the dock's, which left with the message).
+    expect(wrapper.find(`[data-testid="${testIds.emptyGreeting}"]`).exists()).toBe(true)
+    expect(mock.composer.reached).toEqual(['restoreInput:Ask anything…', 'showRefusal:Ask anything…'])
+    expect(wrapper.find(`[data-testid="${testIds.messageUser}"]`).exists()).toBe(false)
+    expect(created).not.toHaveBeenCalled()
+    expect(mock.toast).not.toHaveBeenCalled()
+    expect(useChatsStore().byId(chatId(51))).toBeUndefined()
+
+    // The next send is a first message again: it creates the chat, then the page moves.
+    mock.composer.input = { text: 'Hello', files: [] }
+    replies.push(textReply('Hi there'))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => created.mock.calls.length === 1)
+    expect(created).toHaveBeenCalledWith(chatId(51))
+    expect(calls.filter(call => call.url === '/api/chat').map(call => call.body!.parentId)).toEqual([null, null])
+  })
+
+  it('on `/`: the page moves as soon as the server accepted the first message, before anything streams (an image turn, W11.16)', async () => {
+    const { wrapper, created } = mountView({ chatId: chatId(57), isNew: true })
+    wrapper.getComponent({ name: 'ChatComposer' }).vm.$emit('update:modelRef', MODEL)
+    mock.composer.input = { text: 'a lighthouse at dusk', files: [] }
+    // Like an image turn: `start` (the placeholders), then nothing until the image is ready.
+    const gate = deferred()
+    replies.push(streamReply(async (write) => {
+      write({ type: 'start', messageId: 'msg_asst000000000001', messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'start-step' })
+      await gate.promise
+      write({ type: 'finish-step' })
+      write({ type: 'finish', messageMetadata: { modelRef: MODEL, startedAt: 1, durationMs: 2000 } })
+    }))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => created.mock.calls.length === 1)
+    expect(created).toHaveBeenCalledWith(chatId(57))
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-status')).toBe('submitted')
+    gate.resolve()
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'ready')
+    expect(created).toHaveBeenCalledOnce()
+  })
+
+  it('on `/`: a first message the transcript keeps (an error with Retry) still moves the page', async () => {
+    const { wrapper, created } = mountView({ chatId: chatId(52), isNew: true })
+    wrapper.getComponent({ name: 'ChatComposer' }).vm.$emit('update:modelRef', MODEL)
+    replies.push(() => new Response(JSON.stringify({ error: { code: 'internal_error', message: 'Boom.' } }), { status: 500, headers: { 'content-type': 'application/json' } }))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => created.mock.calls.length === 1)
+    expect(wrapper.findAll(`[data-testid="${testIds.messageUser}"]`)).toHaveLength(1)
+    expect(mock.composer.showRefusal).not.toHaveBeenCalled()
+  })
+
+  it('an existing chat: a new turn refused by a hook goes back with its files; nothing stays in the transcript', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(53), modelRef: MODEL, messages: [userMessage(U1, 'Hi'), assistantMessage(A1, 'Hello')] }))
+    const { wrapper } = mountView({ chatId: chatId(53) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    mock.composer.input = { text: 'Read my notes', files: [DOC] }
+    replies.push(refusal('hook-blocked', 'No secrets, please.'))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => mock.composer.showRefusal.mock.calls.length === 1)
+    expect(mock.composer.restoreInput).toHaveBeenCalledWith({ text: 'Read my notes', files: [DOC] })
+    expect(mock.composer.showRefusal.mock.calls[0]![0]).toMatchObject({ code: 'hook-blocked', event: 'UserPromptSubmit', source: 'project' })
+    expect(wrapper.findAll(`[data-testid="${testIds.messageUser}"]`)).toHaveLength(1)
+    expect(wrapper.find(`[data-testid="${testIds.chatError}"]`).exists()).toBe(false)
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-status')).toBe('ready')
+    expect(mock.toast).not.toHaveBeenCalled()
+  })
+
+  it('an untrusted command names itself; Review… opens the trust dialog of the chat\'s project', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(54), modelRef: MODEL, projectId: projectId(1), messages: [userMessage(U1, 'Hi')] }))
+    const { wrapper } = mountView({ chatId: chatId(54) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    mock.composer.input = { text: '/deploy staging', files: [] }
+    replies.push(refusal('untrusted', 'The command /deploy runs shell lines that are not approved.'))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => mock.composer.showRefusal.mock.calls.length === 1)
+    expect(mock.composer.showRefusal).toHaveBeenCalledWith({ code: 'untrusted', reason: 'The command /deploy runs shell lines that are not approved.', event: null, source: null, command: 'deploy' })
+    expect(mock.composer.restoreInput).toHaveBeenCalledWith({ text: '/deploy staging', files: [] })
+    expect(wrapper.getComponent(ProjectTrustDialog).props()).toMatchObject({ open: false, projectId: projectId(1) })
+    await wrapper.get('[data-action="review"]').trigger('click')
+    expect(wrapper.getComponent(ProjectTrustDialog).props()).toMatchObject({ open: true, projectId: projectId(1), focusKey: null })
+  })
+
+  it('a queued message refused at enqueue goes back with its files and the hook\'s line', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(55), modelRef: MODEL, messages: [userMessage(U1, 'Hi')] }))
+    const { wrapper } = mountView({ chatId: chatId(55) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    const gate = deferred()
+    replies.push(gatedReply('Working on it', gate.promise))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'streaming')
+    api.chatQueue.add.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'No secrets, please.', details: { reason: 'hook-blocked', hook: blockedRecord } }))
+    mock.composer.input = { text: 'Also read my notes', files: [DOC] }
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => mock.composer.showRefusal.mock.calls.length === 1)
+    expect(mock.composer.restoreInput).toHaveBeenCalledWith({ text: 'Also read my notes', files: [DOC] })
+    expect(mock.composer.showRefusal).toHaveBeenCalledWith({ code: 'hook-blocked', reason: 'No secrets, please.', event: 'UserPromptSubmit', source: 'project', command: null })
+    expect(announced(wrapper)).not.toBe('Message queued')
+    expect(mock.toast).not.toHaveBeenCalled()
+    gate.resolve()
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'ready')
+  })
+
+  it('an edit refused by a hook: its text and files go to the composer and the previous version shows again', async () => {
+    const detail = chatDetail({ id: chatId(56), modelRef: MODEL, messages: [userMessage(U1, 'First question'), assistantMessage(A1, 'Answer')] })
+    api.chats.get.mockResolvedValue(detail)
+    const { wrapper } = mountView({ chatId: chatId(56) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    replies.push(refusal('hook-blocked', 'No secrets, please.'))
+    const file = { type: 'file' as const, mediaType: DOC.mime, filename: DOC.name, url: DOC.url }
+    wrapper.getComponent(ChatTranscript).vm.$emit('edit', U1, 'my password is hunter2', [file])
+    await until(() => mock.composer.showRefusal.mock.calls.length === 1)
+    expect(mock.composer.restoreInput).toHaveBeenCalledWith({ text: 'my password is hunter2', files: [{ ...DOC, size: 0 }] })
+    // The previous version is reloaded from the server.
+    await until(() => api.chats.get.mock.calls.length === 2)
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageAssistant}"]`).length === 1)
+    expect(wrapper.get(`[data-testid="${testIds.messageUser}"]`).text()).toContain('First question')
+    expect(calls.filter(call => call.url === '/api/chat')[0]!.body).toMatchObject({ parentId: null, message: { role: 'user' } })
+  })
+
+  it('a regenerate refused because the command\'s shell lines are no longer approved: the path reloads and only the refusal shows', async () => {
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(60), modelRef: MODEL, projectId: projectId(1), messages: [userMessage(U1, '/deploy staging'), assistantMessage(A1, 'Deployed')] }))
+    const { wrapper } = mountView({ chatId: chatId(60) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageAssistant}"]`).length === 1)
+    replies.push(refusal('untrusted', 'The command /deploy runs shell lines that are not approved.'))
+    wrapper.getComponent(ChatTranscript).vm.$emit('regenerate', A1)
+    await until(() => mock.composer.showRefusal.mock.calls.length === 1)
+    expect(mock.composer.showRefusal.mock.calls[0]![0]).toMatchObject({ code: 'untrusted', command: 'deploy' })
+    expect(mock.composer.restoreInput).not.toHaveBeenCalled()
+    await until(() => api.chats.get.mock.calls.length === 2)
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageAssistant}"]`).length === 1)
+    expect(wrapper.find(`[data-testid="${testIds.chatError}"]`).exists()).toBe(false)
+  })
+
+  it('a refusal that arrived while the chat was not shown is handled when it shows again', async () => {
+    const component = effectScope()
+    const session = component.run(() => useChatSession(chatId(57), { isNew: true }))!
+    session.modelRef.value = MODEL
+    replies.push(refusal('hook-blocked', 'No secrets, please.'))
+    await session.submit({ text: 'Hello again', files: [] })
+    component.stop()
+    expect(session.chat.status.value).toBe('error')
+    const { wrapper } = mountView({ chatId: chatId(57), isNew: true })
+    await until(() => mock.composer.showRefusal.mock.calls.length === 1)
+    expect(mock.composer.restoreInput).toHaveBeenCalledWith({ text: 'Hello again', files: [] })
+    expect(wrapper.find(`[data-testid="${testIds.emptyGreeting}"]`).exists()).toBe(true)
+  })
+
+  it('a hook turn: the carrier shows before its reply and is announced once; a loaded carrier says nothing', async () => {
+    const loadedCarrier = hookCarrier('msg_hookcarrier00001')
+    const base = [userMessage(U1, 'Fix it'), assistantMessage(A1, 'Done'), loadedCarrier, assistantMessage('msg_asst000000000010', 'Tests pass')]
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(58), modelRef: MODEL, messages: base }))
+    const { wrapper } = mountView({ chatId: chatId(58) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageAssistant}"]`).length === 2)
+    await flushPromises()
+    expect(announced(wrapper)).toBe('')
+
+    const carrier = hookCarrier('msg_hookcarrier00002')
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(58), modelRef: MODEL, running: true, messages: [...base, carrier] }))
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(58), messageId: 'msg_asst000000000011', modelRef: MODEL, origin: 'hook', userMessageId: carrier.id }))
+    await until(() => announced(wrapper) === 'A hook asked the agent to continue')
+    expect(api.chats.get).toHaveBeenCalledTimes(2)
+    // Once per carrier: a second event for it says nothing new.
+    await wrapper.vm.$nextTick()
+    const region = wrapper.findAll('[role="status"]').at(-1)!.element
+    const seen: string[] = []
+    const observer = new MutationObserver(() => seen.push(region.textContent ?? ''))
+    observer.observe(region, { childList: true, characterData: true, subtree: true })
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(58), messageId: 'msg_asst000000000011', modelRef: MODEL, origin: 'hook', userMessageId: carrier.id }))
+    await flushPromises()
+    observer.disconnect()
+    expect(seen).toEqual([])
+  })
+
+  it('announces "A hook blocked {tool}" once for a denial in this tab\'s stream, never for a loaded one', async () => {
+    const denied = hookPart({ id: 'hev_sample0000000007', toolCallId: 'call_write_7' })
+    const loadedReply: HarnessUIMessage = {
+      id: A1,
+      role: 'assistant',
+      metadata: { modelRef: MODEL, startedAt: 1 },
+      parts: [
+        { type: 'tool-write_file', toolCallId: 'call_write_7', state: 'output-denied', input: { path: 'dist/a.js', content: 'x' }, approval: { id: 'appr_7', approved: false, reason: 'Blocked by hook: Writes to dist/ are not allowed.' } } as never,
+        denied,
+      ],
+    }
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(59), modelRef: MODEL, messages: [userMessage(U1, 'Build it'), loadedReply] }))
+    const { wrapper } = mountView({ chatId: chatId(59) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageAssistant}"]`).length === 1)
+    await flushPromises()
+    expect(announced(wrapper)).toBe('')
+
+    const gate = deferred()
+    const record = hookData({ id: 'hev_sample0000000008', toolCallId: 'call_write_8' })
+    replies.push(streamReply(async (write) => {
+      write({ type: 'start', messageId: 'msg_asst000000000012', messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'start-step' })
+      write({ type: 'tool-input-available', toolCallId: 'call_write_8', toolName: 'write_file', input: { path: 'dist/b.js', content: 'y' } })
+      write({ type: 'data-hook', id: record.id, data: record } as UIMessageChunk)
+      write({ type: 'tool-output-denied', toolCallId: 'call_write_8' } as UIMessageChunk)
+      write({ type: 'text-start', id: 't' })
+      write({ type: 'text-delta', id: 't', delta: 'I cannot write there.' })
+      await gate.promise
+      write({ type: 'text-end', id: 't' })
+      write({ type: 'finish-step' })
+      write({ type: 'finish', messageMetadata: { modelRef: MODEL, startedAt: 1, durationMs: 5 } })
+    }))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => announced(wrapper) === 'A hook blocked write_file')
+    gate.resolve()
+    await until(() => announced(wrapper) === 'Response finished')
   })
 })

@@ -10,6 +10,12 @@
 // Export .md · Open plugin (plugin rows); built-in command rows have no menu. A chosen item is emitted once the menu
 // has closed (focus is back on the trigger, so a sheet or dialog it opens returns focus there).
 // Props, emits and the root test id are frozen from Gate P10-0b (C33).
+// Phase 11 (W11.8; docs/UI.md 9.13): style rows show the `Feather` icon, the label (the slug in the meta line), the
+// coding-instructions meta and the badges "Your default" / "Default in {project}" (`data-slot="style-default-badge"`),
+// and their menu adds Use by default (`customization-set-default`; disabled while it already is); skill rows show
+// "/{name}" and "Only when you run it"; a project command whose `!` lines wait for approval shows Needs approval
+// (`ShieldQuestionMark`) and the menu item Review… (`customization-review`). The defaults and the pending trust come
+// from CustomizeSettings through `CUSTOMIZE_ROW_CONTEXT` (the props are frozen).
 import type { CustomizationEntry } from '@harness-forge/shared'
 import type { CustomizationAction } from './customize'
 import {
@@ -23,15 +29,18 @@ import {
   ExternalLinkIcon,
   EyeIcon,
   EyeOffIcon,
+  FeatherIcon,
   MoreHorizontalIcon,
   PencilIcon,
   PowerIcon,
   PowerOffIcon,
+  ShieldQuestionMarkIcon,
   SquareSlashIcon,
+  StarIcon,
   TelescopeIcon,
   Trash2Icon,
 } from '@lucide/vue'
-import { computed, nextTick, ref, useId } from 'vue'
+import { computed, inject, nextTick, ref, useId } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -45,7 +54,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { hasRowMenu, rowDiagnostics, rowMetaItems, shadowedTooltip, stateBadge } from './customize'
+import { displayName as displayNameOf, hasRowMenu, isScopeDefault, rowDiagnostics, rowMetaItems, shadowedTooltip, stateBadge, styleDefaultBadges } from './customize'
+import { CUSTOMIZE_ROW_CONTEXT } from './customize-context'
 
 const props = defineProps<{ entry: CustomizationEntry, busy?: boolean }>()
 const emit = defineEmits<{ action: [action: CustomizationAction] }>()
@@ -57,13 +67,17 @@ const ids = { shadowed: useId(), diagnostics: useId() }
 const pluginName = (id: string): string => plugins.byId(id)?.name ?? id
 const modelName = (ref: string): string => models.byRef(ref)?.name ?? ref
 
+const context = inject(CUSTOMIZE_ROW_CONTEXT, null)
+
 const personal = computed(() => props.entry.source === 'user')
-const displayName = computed(() => (props.entry.kind === 'command' ? `/${props.entry.name}` : props.entry.name))
+const displayName = computed(() => displayNameOf(props.entry))
 const icon = computed(() => {
   const { kind, source, name } = props.entry
   if (kind === 'command')
     return SquareSlashIcon
-  if (kind === 'skill' || kind === 'style')
+  if (kind === 'style')
+    return FeatherIcon
+  if (kind === 'skill')
     return BookOpenIcon
   if (source === 'builtin')
     return name === 'explore' ? TelescopeIcon : BotIcon
@@ -81,6 +95,13 @@ const extraWarnings = computed(() => {
 const warningsOpen = ref(false)
 const showDiagnostics = computed(() => diagnostics.value.length > 0 && (props.entry.state === 'invalid' || warningsOpen.value))
 const shadowedText = computed(() => (props.entry.state === 'shadowed' ? shadowedTooltip(props.entry, pluginName) : null))
+/** + Phase 11: "Your default" / "Default in {project}" of a style row. */
+const defaultBadges = computed(() => styleDefaultBadges(props.entry, context?.styleDefaults.value ?? null))
+/** + Phase 11: Use by default (active style rows); disabled while the style already is the scope's default. */
+const canSetDefault = computed(() => props.entry.kind === 'style' && props.entry.state === 'active' && !!context)
+const isDefault = computed(() => isScopeDefault(props.entry, context?.styleDefaults.value ?? null))
+/** + Phase 11: a project command whose `!` lines wait for approval. */
+const needsApproval = computed(() => !!context?.pendingTrust(props.entry))
 
 /** The item chosen; emitted once the menu has closed and focus is back on the trigger. */
 let pending: CustomizationAction | null = null
@@ -114,7 +135,10 @@ function onMenuCloseAutoFocus(): void {
       <component :is="icon" aria-hidden="true" class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
       <div class="flex min-w-0 flex-1 flex-col gap-1">
         <div class="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-2.5">
-          <span class="shrink-0 truncate font-mono text-[13px] font-medium" :class="entry.state === 'off' || entry.state === 'shadowed' ? 'text-muted-foreground' : undefined">
+          <span
+            class="shrink-0 truncate text-[13px] font-medium"
+            :class="[entry.kind === 'style' && displayName !== entry.name ? undefined : 'font-mono', entry.state === 'off' || entry.state === 'shadowed' ? 'text-muted-foreground' : undefined]"
+          >
             {{ displayName }}
           </span>
           <span class="line-clamp-2 min-w-0 text-sm text-muted-foreground sm:line-clamp-1 sm:truncate" :title="entry.description || undefined">
@@ -168,6 +192,25 @@ function onMenuCloseAutoFocus(): void {
             {{ extraWarnings.label }}
           </button>
           <span v-if="shadowedText" :id="ids.shadowed" class="sr-only">{{ shadowedText }}</span>
+          <Badge
+            v-for="label in defaultBadges"
+            :key="label"
+            variant="outline"
+            data-slot="style-default-badge"
+            class="ml-1 gap-1 border-primary/40 text-foreground"
+          >
+            <StarIcon aria-hidden="true" class="text-primary" />
+            {{ label }}
+          </Badge>
+          <Badge
+            v-if="needsApproval"
+            variant="outline"
+            data-slot="customization-needs-approval"
+            class="ml-1 gap-1 border-warning/50 text-foreground"
+          >
+            <ShieldQuestionMarkIcon aria-hidden="true" class="text-warning" />
+            Needs approval
+          </Badge>
         </div>
       </div>
 
@@ -208,6 +251,15 @@ function onMenuCloseAutoFocus(): void {
               <PowerIcon v-else aria-hidden="true" />
               {{ entry.enabled ? 'Turn off' : 'Turn on' }}
             </DropdownMenuItem>
+            <DropdownMenuItem
+              v-if="canSetDefault"
+              :data-testid="testIds.customizationSetDefault"
+              :disabled="isDefault"
+              @select="choose('set-default')"
+            >
+              <StarIcon aria-hidden="true" />
+              Use by default
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" :data-testid="testIds.customizationDelete" :disabled="busy" @select="choose('delete')">
               <Trash2Icon aria-hidden="true" />
@@ -215,6 +267,10 @@ function onMenuCloseAutoFocus(): void {
             </DropdownMenuItem>
           </template>
           <template v-else>
+            <DropdownMenuItem v-if="needsApproval" :data-testid="testIds.customizationReview" @select="choose('review')">
+              <ShieldQuestionMarkIcon aria-hidden="true" />
+              Review…
+            </DropdownMenuItem>
             <DropdownMenuItem :data-testid="testIds.customizationView" @select="choose('view')">
               <EyeIcon aria-hidden="true" />
               View…
@@ -226,6 +282,15 @@ function onMenuCloseAutoFocus(): void {
             <DropdownMenuItem :data-testid="testIds.customizationExport" @select="choose('export')">
               <DownloadIcon aria-hidden="true" />
               Export .md
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              v-if="canSetDefault"
+              :data-testid="testIds.customizationSetDefault"
+              :disabled="isDefault"
+              @select="choose('set-default')"
+            >
+              <StarIcon aria-hidden="true" />
+              Use by default
             </DropdownMenuItem>
             <DropdownMenuItem v-if="entry.source === 'plugin' && entry.pluginId" data-action="open-plugin" @select="choose('open-plugin')">
               <ExternalLinkIcon aria-hidden="true" />

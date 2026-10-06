@@ -6,6 +6,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { usePluginsStore } from '~/stores/plugins'
 import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
 import {
@@ -16,6 +17,7 @@ import {
   hookPart,
   hookRecordId,
   planApprovalPart,
+  pluginSummary,
   steerPart,
   taskPart,
   taskResultCarrier,
@@ -24,6 +26,7 @@ import {
 } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import TaskBlock from './agent/TaskBlock.vue'
+import { HOOK_ACTIVITY } from './chat-context'
 import ChatMessage from './ChatMessage.vue'
 import ToolPart from './parts/ToolPart.vue'
 
@@ -656,7 +659,7 @@ describe('chatMessage: background agent results (Phase 10)', () => {
   })
 })
 
-describe('chatMessage: hook records (Phase 11, P11-0b mounts)', () => {
+describe('chatMessage: hook records (Phase 11)', () => {
   it('renders an unlinked record as an inline note at its position and gives tool-linked records to their row', () => {
     const tool = { type: 'tool-write_file', toolCallId: 'call_write_1', state: 'output-denied', input: { path: 'dist/a.js' }, approval: { id: 'a1', approved: false } } as unknown as HarnessUIMessage['parts'][number]
     const stop = hookData({ id: hookRecordId(2), event: 'Stop', outcome: 'stopped', toolCallId: undefined, toolName: undefined, reason: 'Build is red.' })
@@ -705,6 +708,53 @@ describe('chatMessage: hook records (Phase 11, P11-0b mounts)', () => {
   it('shows "Running hooks…" for the hooks activity of a streaming reply without blocks', () => {
     const { wrapper } = mountMessage({ message: assistant({ parts: [] }), isLast: true, streaming: true, showThinking: false, activity: 'hooks' })
     expect(wrapper.get(`[data-testid="${testIds.submittedPlaceholder}"]`).text()).toBe('Running hooks…')
+    expect(wrapper.get('[data-slot="running-hook"]').text()).toBe('Running hooks…')
+  })
+
+  function mountWithActivity(message: HarnessUIMessage, activity: 'compacting' | 'hooks' | null, hookActivity: { event: 'Stop' | 'PreToolUse', toolCallId: string | null } | null) {
+    const current = ref(hookActivity)
+    const live = ref(activity)
+    const wrapper = mount(defineComponent({
+      setup: () => () => h(TooltipProvider, null, {
+        default: () => h(ChatMessage, { message, isLast: true, streaming: true, showThinking: false, activity: live.value }),
+      }),
+    }), { attachTo: document.body, global: { provide: { [HOOK_ACTIVITY as symbol]: current } } })
+    return { wrapper, current, live }
+  }
+
+  it('shows "Running hooks…" at the end of a reply also after its text (Stop hooks), then nothing', async () => {
+    const message = assistant({ parts: [{ type: 'text', text: 'All done.', state: 'done' }] })
+    const { wrapper, current, live } = mountWithActivity(message, 'hooks', { event: 'Stop', toolCallId: null })
+    const reply = wrapper.get(`[data-testid="${testIds.messageAssistant}"]`)
+    expect(reply.get('[data-slot="running-hook"]').text()).toBe('Running hooks…')
+    // The line comes after the text.
+    expect(reply.text().indexOf('All done.')).toBeLessThan(reply.text().indexOf('Running hooks…'))
+    current.value = null
+    live.value = null
+    await nextTick()
+    expect(wrapper.find(`[data-testid="${testIds.submittedPlaceholder}"]`).exists()).toBe(false)
+  })
+
+  it('leaves the hooks of a tool call to its row ("Running hook…") and shows no message-level line', () => {
+    const tool = { type: 'tool-write_file', toolCallId: 'call_write_1', state: 'input-available', input: { path: 'a.ts' } } as unknown as HarnessUIMessage['parts'][number]
+    const message = assistant({ parts: [{ type: 'text', text: 'Writing.', state: 'done' }, tool] })
+    const { wrapper } = mountWithActivity(message, 'hooks', { event: 'PreToolUse', toolCallId: 'call_write_1' })
+    expect(wrapper.find(`[data-testid="${testIds.submittedPlaceholder}"]`).exists()).toBe(false)
+    expect(wrapper.findAll('[data-slot="running-hook"]').map(line => line.text())).toEqual(['Running hook…'])
+  })
+
+  it('shows "Running hooks…" for a tool call that has no row yet and for a task call', () => {
+    const unknown = mountWithActivity(assistant({ parts: [{ type: 'text', text: 'x', state: 'done' }] }), 'hooks', { event: 'PreToolUse', toolCallId: 'call_later' })
+    expect(unknown.wrapper.get(`[data-testid="${testIds.submittedPlaceholder}"]`).text()).toBe('Running hooks…')
+    const task = mountWithActivity(assistant({ parts: [taskPart({ toolCallId: 'call_task_1' })] }), 'hooks', { event: 'PreToolUse', toolCallId: 'call_task_1' })
+    expect(task.wrapper.findAll('[data-slot="running-hook"]').map(line => line.text())).toEqual(['Running hooks…'])
+  })
+
+  it('names a plugin hook\'s plugin from the plugins store in its note', () => {
+    usePluginsStore().items = [pluginSummary({ id: 'hook-pack', name: 'Hook pack' })]
+    const stop = hookData({ id: hookRecordId(2), event: 'Stop', outcome: 'stopped', toolCallId: undefined, toolName: undefined, reason: 'Build is red.', hooks: [{ source: 'plugin', pluginId: 'hook-pack', label: 'sh stop.sh', exitCode: 0, durationMs: 4 }] })
+    const { wrapper } = mountMessage({ message: assistant({ parts: [{ type: 'data-hook', id: stop.id, data: stop }] }), isLast: true, streaming: false, showThinking: false })
+    expect(wrapper.get(`[data-testid="${testIds.hookNote}"]`).text()).toContain('A hook stopped the agent: Build is red. · From Hook pack')
   })
 })
 

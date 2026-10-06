@@ -58,6 +58,12 @@ describe('plugin display rules', () => {
       .toBe('1 tool · 2 commands · 2 agents · 1 skill · 1 hook')
   })
 
+  it('adds output styles and counts command hooks with the code hooks (Phase 11)', () => {
+    expect(contributionsSummary({ ...none, commandHooks: 1, hooks: ['prompt.submit'], outputStyles: ['terse'] })).toBe('1 output style · 2 hooks')
+    expect(contributionsSummary({ ...none, commandHooks: 1 })).toBe('1 hook')
+    expect(contributionsSummary({ ...none, skills: ['s'], outputStyles: ['a', 'b'] })).toBe('1 skill · 2 output styles')
+  })
+
   it('orders builtins first, then by name without case, then by id', () => {
     const sorted = sortPluginsByName([
       pluginSummary({ id: 'b', name: 'beta' }),
@@ -113,6 +119,9 @@ describe('plugin display rules', () => {
   it('links agents and skills to their Customize tab (Phase 10)', () => {
     expect(customizeRoute('agent')).toEqual({ path: '/settings/customize', query: { tab: 'agents' } })
     expect(customizeRoute('skill')).toEqual({ path: '/settings/customize', query: { tab: 'skills' } })
+    // Phase 11: output styles and hooks.
+    expect(customizeRoute('style')).toEqual({ path: '/settings/customize', query: { tab: 'output-styles' } })
+    expect(customizeRoute('hook')).toEqual({ path: '/settings/customize', query: { tab: 'hooks' } })
   })
 
   it('draws a glyph for every core plugin, the agent tools included (Phase 9)', () => {

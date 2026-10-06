@@ -1,7 +1,9 @@
 // Backup export (W5.3-T2): layout, lazy pulls, manifest last, public settings only, secret scan, files=false, the zip
 // limits of the pre-check, and blobs that went missing. Phase 10 (W10.6-T2): `customizations.json` (the personal
 // definitions of the C30 fake, written when there is any, `customizations=false`, a failed read), its pre-check, and
-// background tasks that never reach a backup.
+// background tasks that never reach a backup. Phase 11 (W11.7-T6): with the real services, the settings `outputStyle` /
+// `hooksEnabled`, a personal output style and personal commands are written; personal hooks, project approvals and
+// project MCP variables never are, and hook records travel as parts of their messages.
 import type { BackupCustomizations, BackupFileIndex, BackupManifest, FileRef, HarnessUIMessage } from '@harness-forge/shared'
 import type { DataTestApp } from './fixtures.test-util.ts'
 import { Buffer } from 'node:buffer'
@@ -13,7 +15,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { backgroundTasks, chats, customizations } from '../../db/schema.ts'
 import { readAllBytes } from '../../testing/fakes.ts'
 import { PNG, TEXT } from '../files/fixtures.test-util.ts'
-import { closeCustomizedApps, customizedDataApp, definition } from './backup-fixtures.test-util.ts'
+import {
+  closeCustomizedApps,
+  customizedDataApp,
+  definition,
+  hookChatMessages,
+  PHASE11_SENTINELS,
+  PLAIN_COMMAND_CONTENT,
+  realDataApp,
+  seedPhase11,
+  SPAN_COMMAND_CONTENT,
+  STYLE_CONTENT,
+} from './backup-fixtures.test-util.ts'
 import { backupFilename } from './backup.ts'
 import {
   assistant,
@@ -436,5 +449,33 @@ describe('backup export: personal agents, commands and skills (Phase 10)', () =>
     // The delivered result is kept in its carrier message.
     const exported = chatExportSchema.parse(entryJson(entries, `chats/${chatId(1)}.json`))
     expect(exported.chat.messages.at(-1)?.parts).toEqual([result])
+  })
+})
+
+describe('backup export: Phase 11 (settings, output styles; never hooks, approvals or variables)', () => {
+  it('writes outputStyle / hooksEnabled and the personal style and commands; never a hook, an approval, a variable or the project', async () => {
+    const t = await realDataApp()
+    const seeded = await seedPhase11(t)
+    const entries = unzip(await exportBytes(t.deps, { files: false }))
+    expect(Object.keys(entries)).toEqual(['settings.json', `chats/${seeded.chatId}.json`, 'customizations.json', 'manifest.json'])
+
+    expect(entryJson<Record<string, unknown>>(entries, 'settings.json')).toMatchObject({ outputStyle: 'terse', hooksEnabled: false })
+    const stored = backupCustomizationsSchema.parse(entryJson(entries, 'customizations.json'))
+    expect(stored.items).toEqual([
+      { kind: 'command', name: 'review', content: PLAIN_COMMAND_CONTENT, enabled: true },
+      { kind: 'command', name: 'status', content: SPAN_COMMAND_CONTENT, enabled: true },
+      { kind: 'style', name: 'terse', content: STYLE_CONTENT, enabled: true },
+    ])
+    expect(entryJson<BackupManifest>(entries, 'manifest.json')).toMatchObject({ includes: { customizations: true }, counts: { chats: 1, messages: 4, customizations: 3 } })
+
+    // The chat keeps its hook records and its own style; its project is never exported.
+    const exported = chatExportSchema.parse(entryJson(entries, `chats/${seeded.chatId}.json`))
+    expect(exported.chat.messages).toEqual(hookChatMessages())
+    expect(exported.chat.settings).toMatchObject({ outputStyle: 'terse' })
+
+    const text = Object.values(entries).map(bytes => Buffer.from(bytes).toString('utf8')).join('\n')
+    for (const leaked of [PHASE11_SENTINELS.hookCommand, PHASE11_SENTINELS.trustLabel, PHASE11_SENTINELS.trustSha256, PHASE11_SENTINELS.variable, seeded.projectId, 'mcp.var.', 'hok_'])
+      expect(text, leaked).not.toContain(leaked)
+    expect(Object.keys(entries).some(name => /hook|trust|project|secret/i.test(name))).toBe(false)
   })
 })

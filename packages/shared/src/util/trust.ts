@@ -213,7 +213,7 @@ export function trustHashInput(item: TrustHashItem): string {
 
 /** Commands longer than this are scanned up to here (hook commands are ≤ 4096 characters). */
 const COMMAND_SCAN_MAX_CHARS = 65_536
-/** File extensions of scripts a bare relative path (`scripts/check.sh`) is recognized by. */
+/** File extensions of scripts a relative path (`scripts/check.sh`) or a bare file name (`count.sh`) is recognized by. */
 const SCRIPT_EXTENSIONS = new Set([
   'sh',
   'bash',
@@ -278,6 +278,14 @@ function hasScriptExtension(path: string): boolean {
 }
 
 /**
+ * A word the extension rule never reads as a file: an option or an option value (`-x`, `--config=x.sh`), an assignment
+ * (`HOOK=x.sh`), a URL or a remote path (`https://host/x.sh`, `host:x.sh`).
+ */
+function isOptionOrUrl(token: string): boolean {
+  return token.startsWith('-') || token.includes('=') || token.includes(':')
+}
+
+/**
  * How a word was obtained: `parsed` (unquoted by `parseShellCommand`, which refuses `$`), `split` (the whitespace
  * fallback: quotes and trailing shell punctuation still present) or `argv` (one literal argument).
  */
@@ -317,7 +325,9 @@ function refOfWord(word: string, mode: WordMode): string | null {
   }
   if (token.startsWith('./') || token.startsWith('.claude/') || token.startsWith('.harness/'))
     return normalizeRef(token)
-  if (token.includes('/') && hasScriptExtension(token))
+  // A relative path with `/` (`scripts/check.sh`) or a bare file name (`count.sh`: `sh count.sh`, `node hook.mjs`
+  // run in the project folder) with a script extension.
+  if (!isOptionOrUrl(token) && hasScriptExtension(token))
     return normalizeRef(token)
   return null
 }
@@ -340,8 +350,11 @@ function collectRefs(words: Iterable<unknown>, mode: WordMode): string[] {
 /**
  * The project-relative script files a command names (≤ `TRUST_LIMITS.refFilesMax`): tokens of `parseShellCommand`
  * (else a whitespace split) of the form `$CLAUDE_PROJECT_DIR/…`, `${CLAUDE_PROJECT_DIR}/…`, `"$HARNESS_PROJECT_DIR"/…`,
- * `./…`, `.claude/…`, `.harness/…`, or a relative path with `/` and a script extension; normalized, never with `..`.
- * Paths with shell syntax, globs, quotes inside, absolute paths and folders (`…/`) are never references; the result
+ * `./…`, `.claude/…`, `.harness/…`, or a relative path with a script extension, with or without `/` (`scripts/x.py`,
+ * `count.sh`; Gate P11-A: a bare script name is a reference too, so editing the script of `sh count.sh` makes the item
+ * pending again; a name that is no file, `echo foo.sh`, is hashed as missing); normalized, never with `..`. Paths with
+ * shell syntax, globs, quotes inside, absolute paths and folders (`…/`) are never references, nor are options, option
+ * values, assignments and URLs for the extension rule (`--config=x.sh`, `A=x.sh`, `https://host/x.sh`); the result
  * keeps the first-seen order without duplicates.
  */
 export function extractCommandFileRefs(command: string): string[] {

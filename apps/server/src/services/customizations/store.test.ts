@@ -2,7 +2,8 @@
 // denormalized columns, `cus_` ids), a duplicate (409 `exists`), invalid content and reserved names (400 with the
 // diagnostics), update (content, a rename, a rename onto a taken name), toggle (`off` in the catalog), delete, the
 // per-kind cap, `load` of a personal entry, and the backup members (export order, restore: imported / skipped /
-// failed).
+// failed). Phase 11 (W11.6-T3): personal output styles (slug names and labels, reserved builtin names, the per-kind
+// cap, backups) and personal commands with `!` spans restored turned off (open point 9).
 import type { BackupCustomization } from '@harness-forge/shared'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import { customizationSchema, HarnessError, LIMITS } from '@harness-forge/shared'
@@ -10,6 +11,7 @@ import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { customizations } from '../../db/schema.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
+import { runsShellSpans } from './store.ts'
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -213,5 +215,97 @@ describe('backups', () => {
       { kind: 'agent', name: 'over', content: '---\nname: over\ndescription: Over.\n---\nBody.', enabled: true },
     ])
     expect(result).toEqual({ imported: 1, skipped: 0, failed: 1, warnings: ['The personal agent "over" was not restored: the limit of 200 personal agents is reached.'] })
+  })
+})
+
+describe('output styles and commands with spans (Phase 11)', () => {
+  const TERSE = '---\nname: Terse Replies\ndescription: Short answers.\nkeep-coding-instructions: true\n---\nAnswer in three lines at most.\n'
+
+  it('stores personal styles by their slug with the label; refuses builtin names and taken names; the cap holds', async () => {
+    const t = await open()
+    const created = await t.deps.customizations.create({ kind: 'style', content: TERSE })
+    expect(customizationSchema.safeParse(created).success).toBe(true)
+    expect(created).toMatchObject({
+      kind: 'style',
+      name: 'terse-replies',
+      description: 'Short answers.',
+      enabled: true,
+      fields: { name: 'terse-replies', label: 'Terse Replies', keepCodingInstructions: true, content: 'Answer in three lines at most.' },
+    })
+    const [row] = await t.db.select().from(customizations).where(eq(customizations.id, created.id))
+    expect(row).toMatchObject({ kind: 'style', name: 'terse-replies', content: TERSE })
+    const entry = (await t.deps.customizations.catalog(null)).style('terse-replies')
+    expect(entry).toMatchObject({ source: 'user', id: created.id, label: 'Terse Replies', keepCodingInstructions: true, state: 'active' })
+
+    const reserved = await rejection(t.deps.customizations.create({ kind: 'style', content: '---\nname: Explanatory\ndescription: Mine.\n---\nNo.' }))
+    expect(reserved.code).toBe('validation_error')
+    expect((reserved.details as { diagnostics: Array<{ code: string }> }).diagnostics.map(item => item.code)).toContain('reserved-name')
+    const taken = await rejection(t.deps.customizations.create({ kind: 'style', content: TERSE.replace('Short answers.', 'Again.') }))
+    expect(taken).toMatchObject({ code: 'conflict', details: { reason: 'exists' } })
+    // The same name in another kind is fine.
+    expect(await t.deps.customizations.create({ kind: 'skill', content: '---\nname: terse-replies\ndescription: A skill.\n---\nBody.' })).toMatchObject({ kind: 'skill' })
+
+    const at = Date.now()
+    await t.db.insert(customizations).values(Array.from({ length: LIMITS.customizationsPerKindMax - 1 }, (_, index) => ({
+      id: `cus_${String(index).padStart(16, '0')}`,
+      kind: 'style' as const,
+      name: `s${index}`,
+      description: 'A style.',
+      content: `---\nname: s${index}\ndescription: A style.\n---\nBody.`,
+      enabled: true,
+      createdAt: at,
+      updatedAt: at,
+    })))
+    const full = await rejection(t.deps.customizations.create({ kind: 'style', content: '---\nname: one-more\ndescription: Over.\n---\nBody.' }))
+    expect(full).toMatchObject({ code: 'conflict', details: { reason: 'exists' } })
+    expect(full.message).toBe('At most 200 personal styles can be stored; delete one first.')
+  })
+
+  it('backs personal styles up and restores them; a restored command with !`…` spans comes back turned off', async () => {
+    const source = await open()
+    await source.deps.customizations.create({ kind: 'style', content: TERSE, enabled: false })
+    await source.deps.customizations.create({ kind: 'command', content: '---\nname: status\ndescription: Status.\n---\nStatus: !`git status --short`\n' })
+    await source.deps.customizations.create({ kind: 'command', content: '---\nname: plain\ndescription: Plain.\n---\nSay $ARGUMENTS.\n' })
+    const backup = await source.deps.customizations.exportBackup()
+    expect(backup.items.map(item => [item.kind, item.name, item.enabled])).toEqual([
+      ['command', 'plain', true],
+      ['command', 'status', true],
+      ['style', 'terse-replies', false],
+    ])
+
+    const target = await open()
+    const fenced = '---\nname: fenced\ndescription: Fenced.\n---\nExample:\n\n```\n!`rm -rf /`\n```\n'
+    const items: BackupCustomization[] = [
+      ...backup.items,
+      { kind: 'command', name: 'already-off', content: '---\nname: already-off\ndescription: Off.\n---\nRun !`ls`', enabled: false },
+      { kind: 'command', name: 'fenced', content: fenced, enabled: true },
+      { kind: 'style', name: 'default', content: '---\nname: default\ndescription: Reserved.\n---\nNo.', enabled: true },
+    ]
+    const result = await target.deps.customizations.restoreBackup(items)
+    expect(result).toMatchObject({ imported: 5, skipped: 0, failed: 1 })
+    expect(result.warnings).toEqual(['The personal style "default" was not restored: Line 2: default is a built-in name.'])
+    const restored = await target.deps.customizations.exportBackup()
+    expect(restored.items.map(item => [item.kind, item.name, item.enabled])).toEqual([
+      ['command', 'already-off', false],
+      // Spans only inside a fenced block are text: the command stays on.
+      ['command', 'fenced', true],
+      ['command', 'plain', true],
+      ['command', 'status', false],
+      ['style', 'terse-replies', false],
+    ])
+    const catalog = await target.deps.customizations.catalog(null)
+    expect(catalog.command('status')).toBeNull()
+    expect(catalog.entries.find(entry => entry.kind === 'command' && entry.name === 'status')).toMatchObject({ state: 'off', enabled: false })
+    expect(catalog.style('terse-replies')).toBeNull()
+    expect(target.logs.text()).toMatch(/customizations restored/)
+  })
+
+  it('runsShellSpans: only commands whose body holds a span outside fences', () => {
+    const command = (body: string) => ({ kind: 'command' as const, fields: { name: 'x', description: 'X.', argumentHint: null, model: null, allowedTools: null, body } })
+    expect(runsShellSpans(command('Run !`git status`'))).toBe(true)
+    expect(runsShellSpans(command('Plain $ARGUMENTS and @README.md'))).toBe(false)
+    expect(runsShellSpans(command('```\n!`ls`\n```'))).toBe(false)
+    expect(runsShellSpans(command('Empty !` ` span'))).toBe(false)
+    expect(runsShellSpans({ kind: 'skill', fields: { name: 'x', description: 'X.', content: 'Run !`ls`' } })).toBe(false)
   })
 })

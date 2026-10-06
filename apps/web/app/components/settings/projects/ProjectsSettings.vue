@@ -12,8 +12,10 @@
 // Settings -> Customize with the project selected (`/settings/customize?project=<id>`, also for a project whose folder
 // is missing: the page explains it). The menu items are 40px tall on coarse pointers (docs/UI.md 14.5).
 // Phase 11 (ADR-049, ADR-050; C39 adds them, W11.9 owns them): Review commands and hooks… (project-trust, ShieldCheck ->
-// ProjectTrustDialog) and MCP servers… (project-mcp, ServerCog -> ProjectMcpDialog), and the meta badge "{n} to review"
-// (project-trust-pending, data-count; `useProjectTrustStore().pending(id)`, fetched lazily per row by W11.9).
+// ProjectTrustDialog) and MCP servers… (project-mcp, ServerCog -> ProjectMcpDialog), the meta badge "{n} to review"
+// (project-trust-pending, data-count, text-warning; `useProjectTrustStore().pending(id)`: the page fetches the trust list
+// of every row whose folder is available once per visit, a few at a time, quietly; `project-trust.changed` keeps the
+// counts current) and "Style: {name}" when the project has its own output style.
 // A skeleton shows while the projects load; a failure shows SettingsLoadError "Could not load the projects" with Retry.
 // `?add=1` (the page's header action, the palette's "Add project…") opens the AddProjectDialog, and the query parameter
 // is dropped at once, so the same link works again. The list reloads on every visit (chat counts and folder states).
@@ -96,6 +98,30 @@ function pendingCount(id: string): number {
   return trust.pending(id) ?? 0
 }
 
+/** + Phase 11: trust lists fetched for the badges at most this many at a time (each is a scan of the folder). */
+const TRUST_CONCURRENCY = 4
+/** + Phase 11: a trust list fetched this recently (a chat, a dialog) is reused for the badge. */
+const TRUST_MAX_AGE_MS = 30_000
+/** The rows whose trust list this visit already asked for. */
+const trustRequested = new Set<string>()
+
+/** + Phase 11: fetches the trust list of each new row (one request per project, a few at a time; failures stay quiet). */
+function loadPendingCounts(ids: readonly string[]): void {
+  const queue = ids.filter(id => !trustRequested.has(id))
+  for (const id of queue)
+    trustRequested.add(id)
+  let next = 0
+  async function worker(): Promise<void> {
+    while (next < queue.length) {
+      const id = queue[next]!
+      next += 1
+      await trust.fetch(id, { maxAgeMs: TRUST_MAX_AGE_MS }).catch(() => {})
+    }
+  }
+  for (let index = 0; index < Math.min(TRUST_CONCURRENCY, queue.length); index++)
+    void worker()
+}
+
 /** "{n} allowed commands" of a row; null without rules. */
 function rulesLabel(id: string): string | null {
   return allowedCommandsLabel(shellRules.countForProject(id))
@@ -121,6 +147,13 @@ async function load(): Promise<void> {
 }
 
 onMounted(() => void load())
+
+// + Phase 11: the rows with an available folder get their "{n} to review" count (a missing folder has no items).
+watch(
+  () => (projects.loaded ? projects.sorted.filter(project => project.available).map(project => project.id) : []),
+  ids => loadPendingCounts(ids),
+  { immediate: true },
+)
 
 // `?add=1` opens the dialog; the parameter goes away so the header button (and the palette) can set it again.
 watch(() => route.query.add, (value) => {
@@ -324,6 +357,10 @@ function openAdd(): void {
           <template v-if="rulesLabel(project.id)">
             <span aria-hidden="true" class="hidden sm:inline">·</span>
             <span>{{ rulesLabel(project.id) }}</span>
+          </template>
+          <template v-if="project.outputStyle">
+            <span aria-hidden="true" class="hidden sm:inline">·</span>
+            <span data-slot="project-style">Style: {{ project.outputStyle }}</span>
           </template>
           <Badge
             v-if="pendingCount(project.id) > 0"

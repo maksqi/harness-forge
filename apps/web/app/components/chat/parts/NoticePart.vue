@@ -3,11 +3,15 @@
 // The icon names what happened (trimmed context, superseded approvals, a model without tools or without support for
 // the attached files, a generated file that was not kept, a project folder that could not be opened); the level colors
 // it. Unknown codes fall back to the level icon.
+// Phase 11 (W11.12; docs/UI.md 7.31 – 7.33): `output-style-unavailable` (`Feather`), `hook-continuation-limit` (`Webhook`)
+// and `project-mcp-unavailable` (`ServerOff`; the texts come from the server). The last one adds "MCP servers…", which
+// opens the project MCP dialog through CHAT_VIEW_ACTIONS (only inside a chat view).
 import type { NoticeCode, NoticeData } from '@harness-forge/shared'
 import type { Component } from 'vue'
-import { BanIcon, CpuIcon, FolderXIcon, FoldVerticalIcon, ImageOffIcon, InfoIcon, PaletteIcon, PaperclipIcon, RepeatIcon, ServerOffIcon, TriangleAlertIcon, WrenchIcon } from '@lucide/vue'
-import { computed } from 'vue'
+import { BanIcon, CpuIcon, FeatherIcon, FolderXIcon, FoldVerticalIcon, ImageOffIcon, InfoIcon, PaperclipIcon, ServerOffIcon, TriangleAlertIcon, WebhookIcon, WrenchIcon } from '@lucide/vue'
+import { computed, inject } from 'vue'
 import { cn } from '@/lib/utils'
+import { CHAT_VIEW_ACTIONS } from '../chat-context'
 
 const props = defineProps<{ notice: NoticeData }>()
 
@@ -24,13 +28,17 @@ const CODE_ICONS: Record<NoticeCode, Component> = {
   'command-model-unavailable': CpuIcon,
   // Phase 11: the output style is unknown (ADR-051), Stop hooks hit their cap (ADR-048), a project MCP server was not
   // ready (ADR-050).
-  'output-style-unavailable': PaletteIcon,
-  'hook-continuation-limit': RepeatIcon,
+  'output-style-unavailable': FeatherIcon,
+  'hook-continuation-limit': WebhookIcon,
   'project-mcp-unavailable': ServerOffIcon,
 }
 
 const icon = computed<Component>(() => (CODE_ICONS as Partial<Record<string, Component>>)[props.notice.code]
   ?? (props.notice.level === 'warning' ? TriangleAlertIcon : InfoIcon))
+
+const actions = inject(CHAT_VIEW_ACTIONS, null)
+/** + Phase 11: a project MCP server was not ready: "MCP servers…" opens the project's servers (inside a chat view). */
+const offersMcp = computed(() => props.notice.code === 'project-mcp-unavailable' && actions !== null)
 </script>
 
 <template>
@@ -46,5 +54,15 @@ const icon = computed<Component>(() => (CODE_ICONS as Partial<Record<string, Com
       :class="cn('mt-[3px] size-3.5 shrink-0', notice.level === 'warning' && 'text-warning')"
     />
     <span class="min-w-0 break-words"><span v-if="notice.level === 'warning'" class="sr-only">Warning: </span>{{ notice.message }}</span>
+    <button
+      v-if="offersMcp"
+      type="button"
+      data-slot="notice-action"
+      data-action="project-mcp"
+      class="-my-0.5 shrink-0 rounded-sm px-1 font-medium text-foreground underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/50 pointer-coarse:min-h-10"
+      @click="actions?.openProjectMcp()"
+    >
+      MCP servers…
+    </button>
   </p>
 </template>

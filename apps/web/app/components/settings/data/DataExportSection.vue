@@ -1,9 +1,10 @@
 <script setup lang="ts">
 // Export of Settings -> Data (docs/UI.md 9.8, docs/API.md 5.19): "Include attachments" and "Include settings" (both on)
 // become the query of `GET /api/data/export`; every backup also holds the personal agents, commands and skills of
-// Settings -> Customize (Phase 10, `customizations.json`); the zip streams in and is saved through `downloadResponse`. A warning shows
-// while the attachments alone exceed what the browser import accepts. A failure, e.g. 413 `payload_too_large` when the
-// zip would exceed the server's limits, becomes a toast with the server message.
+// Settings -> Customize (Phase 10, `customizations.json`; Phase 11: the personal output styles too, never the personal
+// hooks, the project approvals or the project MCP variables); the zip streams in and is saved through
+// `downloadResponse`. A warning shows while the attachments alone exceed what the browser import accepts. A failure,
+// e.g. 413 `payload_too_large` when the zip would exceed the server's limits, becomes a toast with the server message.
 import type { DataSummary } from '@harness-forge/shared'
 import { DownloadIcon, TriangleAlertIcon } from '@lucide/vue'
 import { computed, ref, useId } from 'vue'
@@ -59,7 +60,7 @@ async function exportBackup(): Promise<void> {
 <template>
   <SettingsSection
     title="Export"
-    description="Download a zip with every chat, including archived chats and every message version, and your personal agents, commands and skills. API keys, passwords, plugins, MCP servers and share links are never included."
+    description="Download a zip with every chat, including archived chats and every message version, and your personal agents, commands, skills and output styles. API keys, passwords, plugins, MCP servers, hooks, project approvals and share links are never included."
   >
     <div class="grid gap-4 sm:grid-cols-2">
       <Field orientation="horizontal">

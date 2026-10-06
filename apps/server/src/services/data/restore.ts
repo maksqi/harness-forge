@@ -23,6 +23,11 @@
 //   per-kind limit are `failed` with a warning that names the kind and name, never the content. A definition can only
 //   narrow a run (ADR-045), so nothing in the file grants a tool, a mode or a shell rule. Background tasks are never
 //   part of a backup (a delivered result is a `data-task-result` part of its message and comes back with the chat).
+// - Phase 11 (ADR-048 … ADR-052): `settings.json` carries `outputStyle` and `hooksEnabled` (restored like every public
+//   setting); personal output styles (kind `style`) come back through `customizations.json`; a personal command whose
+//   body holds `` !`cmd` `` spans is restored turned off (`enabled: false`, the customization store's rule), so a
+//   backup cannot plant a shell line that runs on the next `/name`. Personal hooks, project approvals and project MCP
+//   variables are never part of a backup, and nothing here writes them; `data-hook` parts come back with their chats.
 import type {
   BackupCustomization,
   BackupFileEntry,

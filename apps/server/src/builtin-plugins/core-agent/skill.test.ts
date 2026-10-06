@@ -2,7 +2,8 @@
 // scope (`loadSkill(name, c.signal)`), a call without a scope (a sub-agent, a context outside a run) is a tool error;
 // the model reads the content, the base folder line and the supporting files. Reading a supporting file under
 // `.harness/` is a `safe` read (no approval in `ask`), writing there still always asks. End to end: `mock:agents` loads a
-// project skill (`skill pdf`) and a scripted model reads its `ref.md` in `ask` without an approval card.
+// project skill (`skill pdf`) and a scripted model reads its `ref.md` in `ask` without an approval card. Phase 11
+// (W11.6-T6): a `disable-model-invocation` skill is absent from the skills block (`skills?`) and refused by `skill`.
 import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4StreamPart } from '@ai-sdk/provider'
 import type { Disposable, ToolCallContext, ToolDefinition } from '@harness-forge/plugin-sdk'
 import type { ChatDetail, ProjectSummary, SkillOutput } from '@harness-forge/shared'
@@ -152,8 +153,11 @@ describe('skills in a project chat (mock:agents, PROVIDERS.md 8)', { timeout: 30
     })
     const fake = t.deps.customizations as FakeCustomizationService
     const entry = fakeCatalogEntry('skill', 'pdf', { description: 'Fill PDF forms.' })
-    fake.entries.set(project.id, [entry])
+    // Phase 11: a skill only the user may run (`disable-model-invocation: true`).
+    const internal = fakeCatalogEntry('skill', 'internal', { description: 'Internal notes.', modelInvocable: false })
+    fake.entries.set(project.id, [entry, internal])
     fake.bodies.set(catalogEntryKey(entry), `---\nname: pdf\ndescription: Fill PDF forms.\n---\n${SKILL_BODY}\n`)
+    fake.bodies.set(catalogEntryKey(internal), '---\nname: internal\ndescription: Internal notes.\ndisable-model-invocation: true\n---\nINTERNAL-BODY\n')
     provider = t.deps.registry.providers.register('mock', {
       id: 'skillkit',
       name: 'Skill kit',
@@ -196,6 +200,20 @@ describe('skills in a project chat (mock:agents, PROVIDERS.md 8)', { timeout: 30
     const { chunks } = await readSse(await postChat(t, chatBody(chatId, 'skill docx', { modelRef: 'mock:agents', toolMode: 'ask', projectId: project.id })))
     await runnerOf(t).idle()
     expect(streamedText(chunks)).toContain('Unknown skill "docx". Available skills: pdf.')
+    expect(toolPart(await detailOf(chatId), 'tool-skill')?.state).toBe('output-error')
+  })
+
+  it('a disable-model-invocation skill is not listed to the model and the skill tool refuses it (Phase 11)', async () => {
+    const listing = await readSse(await postChat(t, chatBody(testChatId(10_605), 'skills?', { modelRef: 'mock:agents', toolMode: 'ask', projectId: project.id })))
+    await runnerOf(t).idle()
+    expect(streamedText(listing.chunks)).toContain('Skills: pdf')
+    expect(streamedText(listing.chunks)).not.toContain('internal')
+
+    const chatId = testChatId(10_606)
+    const { chunks } = await readSse(await postChat(t, chatBody(chatId, 'skill internal', { modelRef: 'mock:agents', toolMode: 'ask', projectId: project.id })))
+    await runnerOf(t).idle()
+    expect(streamedText(chunks)).toContain('The skill "internal" can only be run by the user (as /internal); you cannot load it. Available skills: pdf.')
+    expect(streamedText(chunks)).not.toContain('INTERNAL-BODY')
     expect(toolPart(await detailOf(chatId), 'tool-skill')?.state).toBe('output-error')
   })
 

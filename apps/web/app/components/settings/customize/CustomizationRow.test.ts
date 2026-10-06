@@ -5,13 +5,14 @@ import type { VueWrapper } from '@vue/test-utils'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { defineComponent, h, nextTick } from 'vue'
+import { computed, defineComponent, h, nextTick, provide } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { customizationEntry, customizationId, definitionDiagnostic, pluginSummary } from '~/utils/testing/fixtures'
+import { customizationEntry, customizationId, definitionDiagnostic, pluginSummary, styleEntry, trustCommandItem } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import CustomizationRow from './CustomizationRow.vue'
+import { CUSTOMIZE_ROW_CONTEXT } from './customize-context'
 
 vi.mock('~/composables/useApi', () => ({ useApi: () => createMockApi() }))
 
@@ -168,5 +169,61 @@ describe('customizationRow', () => {
     await openMenu(row())
     expect(byTestId(testIds.customizationToggle)?.hasAttribute('data-disabled')).toBe(true)
     expect(byTestId(testIds.customizationDelete)?.hasAttribute('data-disabled')).toBe(true)
+  })
+
+  describe('phase 11 rows (W11.8)', () => {
+    function mountWithContext(entry: CustomizationEntry, defaults: { global: string, project: string | null, projectName: string | null }, pending = false) {
+      const actions: string[] = []
+      const Host = defineComponent({
+        setup() {
+          provide(CUSTOMIZE_ROW_CONTEXT, {
+            styleDefaults: computed(() => defaults),
+            pendingTrust: () => (pending ? trustCommandItem({ state: 'pending' }) : null),
+          })
+          return () => h(TooltipProvider, null, {
+            default: () => h('ul', null, [h(CustomizationRow, { entry, onAction: (action: string) => actions.push(action) })]),
+          })
+        },
+      })
+      wrapper = mount(Host, { attachTo: document.body })
+      return { actions, row: () => document.body.querySelector<HTMLElement>(`[data-testid="${testIds.customizationRow}"]`)! }
+    }
+
+    it('shows a style by its label with its default badges and offers Use by default', async () => {
+      const { row, actions } = mountWithContext(styleEntry({ name: 'terse', label: 'Terse Mode', source: 'user', id: customizationId(3), path: undefined }), { global: 'terse', project: 'terse', projectName: 'website' })
+      expect(row().dataset.kind).toBe('style')
+      expect(row().textContent).toContain('Terse Mode')
+      expect(row().textContent).toContain('terse')
+      expect(row().textContent).toContain('Keeps coding instructions')
+      expect([...row().querySelectorAll('[data-slot="style-default-badge"]')].map(badge => badge.textContent?.trim())).toEqual(['Your default', 'Default in website'])
+      await openMenu(row())
+      // Already the project's style: Use by default is disabled.
+      expect(byTestId(testIds.customizationSetDefault)?.hasAttribute('data-disabled')).toBe(true)
+      wrapper!.unmount()
+
+      const other = mountWithContext(styleEntry({ source: 'builtin', name: 'learning', label: 'Learning', path: undefined }), { global: 'default', project: null, projectName: null })
+      expect(other.row().querySelector('[data-slot="style-default-badge"]')).toBeNull()
+      await openMenu(other.row())
+      const items = [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].map(item => item.textContent?.trim())
+      expect(items).toEqual(['View…', 'Copy to personal', 'Export .md', 'Use by default'])
+      await choose(testIds.customizationSetDefault)
+      expect(other.actions).toEqual(['set-default'])
+      expect(actions).toEqual([])
+    })
+
+    it('marks a project command whose shell lines wait for approval and offers Review…', async () => {
+      const { row, actions } = mountWithContext(customizationEntry({ kind: 'command', name: 'deploy', path: '.harness/commands/deploy.md', tools: undefined }), { global: 'default', project: null, projectName: 'website' }, true)
+      expect(row().querySelector('[data-slot="customization-needs-approval"]')?.textContent?.trim()).toBe('Needs approval')
+      await openMenu(row())
+      expect(document.body.querySelector('[role="menuitem"]')?.textContent?.trim()).toBe('Review…')
+      await choose(testIds.customizationReview)
+      expect(actions).toEqual(['review'])
+    })
+
+    it('shows neither without the page context', () => {
+      const { row } = mountRow(styleEntry())
+      expect(row().querySelector('[data-slot="style-default-badge"]')).toBeNull()
+      expect(row().querySelector('[data-slot="customization-needs-approval"]')).toBeNull()
+    })
   })
 })

@@ -3,8 +3,12 @@
 // file and a reserved `explore.md` as diagnostics, no linked content anywhere), an unavailable folder, the cache (TTL,
 // single flight, `refresh`) and every invalidation trigger with its `customization.changed`, plugin entries (a plugin
 // disposed, safe mode), `load` (deleted, renamed, grown past the cap, swapped for a link, a copied entry), `source`,
-// `stop`, and the logs (never a body). Project folders are `realpath(mkdtemp())` workspace roots.
+// `stop`, and the logs (never a body). Project folders are `realpath(mkdtemp())` workspace roots. Phase 11 (W11.6): output
+// styles end to end (builtins, `.harness` over `.claude`, reserved and invalid files, personal rows, plugin styles of a
+// fake `registry.styles` until their plugin is disposed, `load` / `source`, the invalidation by a style folder change).
+import type { Disposable, OutputStyleDefinition } from '@harness-forge/plugin-sdk'
 import type { CustomizationChangedData, ProjectSummary } from '@harness-forge/shared'
+import type { RegisteredStyle, Registry, RegistryChange, StyleRegistry } from '../../registry/types.ts'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import type { AppDeps } from '../../types.ts'
 import type { OpenDefinitionFile } from './discover.ts'
@@ -470,10 +474,185 @@ describe('logging', () => {
     await h.t.deps.customizations.source({ projectId: h.project.id, kind: 'agent', name: 'a', source: 'project' })
     await h.t.deps.customizations.restoreBackup([{ kind: 'skill', name: 's', content: '---\nname: s\ndescription: RESTORED-MARKER\n---\nRESTORED-BODY', enabled: true }])
     await h.t.deps.customizations.remove(created.id)
+    // Phase 11: output styles (a project file, a personal row, a restored command with a span).
+    await write(h.dir, { '.harness/output-styles/s.md': '---\nname: s\ndescription: STYLE-DESCRIPTION\n---\nSTYLE-BODY-MARKER' })
+    await h.t.deps.customizations.create({ kind: 'style', content: '---\nname: Mine\ndescription: USER-STYLE-DESCRIPTION\n---\nUSER-STYLE-BODY' })
+    const styles = await h.t.deps.customizations.catalog(h.project.id, { refresh: true })
+    await h.t.deps.customizations.load(styles.style('s')!)
+    await h.t.deps.customizations.load(styles.style('mine')!)
+    await h.t.deps.customizations.restoreBackup([{ kind: 'command', name: 'st', content: '---\nname: st\ndescription: SPAN-DESCRIPTION\n---\nStatus: !`git status SPAN-MARKER`', enabled: true }])
     const logs = h.t.logs.text()
     expect(logs).toContain('customization created')
-    for (const marker of ['FILE-DESCRIPTION', 'FILE-BODY-MARKER', 'USER-DESCRIPTION', 'USER-BODY-MARKER', 'RESTORED-MARKER', 'RESTORED-BODY'])
+    for (const marker of ['FILE-DESCRIPTION', 'FILE-BODY-MARKER', 'USER-DESCRIPTION', 'USER-BODY-MARKER', 'RESTORED-MARKER', 'RESTORED-BODY', 'STYLE-DESCRIPTION', 'STYLE-BODY-MARKER', 'USER-STYLE-BODY', 'SPAN-DESCRIPTION', 'SPAN-MARKER'])
       expect(logs).not.toContain(marker)
+  })
+})
+
+function style(name: string, description: string, extra = '', body = `STYLE-BODY ${name}`): string {
+  return `---\nname: ${name}\ndescription: ${description}\n${extra}---\n${body}\n`
+}
+
+/**
+ * A `registry.styles` double (W11.7 implements the real one): registrations announce `style` changes on the registry's
+ * own listeners, like the host's `removeOwner` does when a plugin is disabled.
+ */
+function withFakeStyles(registry: Registry): { registry: Registry, styles: StyleRegistry } {
+  const entries = new Map<string, RegisteredStyle>()
+  const listeners = new Set<(change: RegistryChange) => void>()
+  const notify = (change: RegistryChange): void => {
+    for (const listener of [...listeners])
+      listener(change)
+  }
+  const styles: StyleRegistry = {
+    register: (pluginId: string, definition: OutputStyleDefinition): Disposable => {
+      entries.set(definition.name, { pluginId, definition })
+      notify({ kind: 'style', action: 'added', pluginId, key: definition.name })
+      return {
+        dispose: () => {
+          if (entries.get(definition.name)?.pluginId !== pluginId)
+            return
+          entries.delete(definition.name)
+          notify({ kind: 'style', action: 'removed', pluginId, key: definition.name })
+        },
+      }
+    },
+    get: name => entries.get(name),
+    list: () => [...entries.values()].sort((a, b) => (a.definition.name < b.definition.name ? -1 : 1)),
+    owner: name => entries.get(name)?.pluginId,
+    onChange: (listener) => {
+      const own = (change: RegistryChange): void => {
+        if (change.kind === 'style')
+          listener(change)
+      }
+      listeners.add(own)
+      return { dispose: () => listeners.delete(own) }
+    },
+  }
+  const wrapped: Registry = {
+    ...registry,
+    styles,
+    onChange: (listener) => {
+      listeners.add(listener)
+      const inner = registry.onChange(listener)
+      return {
+        dispose: () => {
+          listeners.delete(listener)
+          inner.dispose()
+        },
+      }
+    },
+  }
+  return { registry: wrapped, styles }
+}
+
+describe('output styles (Phase 11)', () => {
+  it('lists the builtins, .harness over .claude, personal styles; reserved and invalid files; load re-reads the winner', async () => {
+    const h = await open()
+    await write(h.dir, {
+      '.claude/output-styles/terse.md': style('terse', 'The claude copy.'),
+      '.harness/output-styles/terse.md': style('Terse', 'The harness copy.', 'keep-coding-instructions: true\n', 'HARNESS-TERSE-BODY'),
+      '.claude/output-styles/explanatory.md': style('explanatory', 'Tries to replace the builtin.'),
+      '.claude/output-styles/nodesc.md': '---\nname: nodesc\n---\n',
+      '.harness/output-styles/plain.md': style('plain', 'Plain prose.'),
+    })
+    const personal = await h.t.deps.customizations.create({ kind: 'style', content: style('Team Voice', 'PERSONAL-DESCRIPTION', '', 'PERSONAL-BODY') })
+    expect(personal).toMatchObject({ kind: 'style', name: 'team-voice', fields: { label: 'Team Voice', keepCodingInstructions: false, content: 'PERSONAL-BODY' } })
+    await expect(h.t.deps.customizations.create({ kind: 'style', content: style('learning', 'Mine.') })).rejects.toMatchObject({ code: 'validation_error' })
+
+    const list = await h.t.deps.customizations.list({ projectId: h.project.id, kind: 'style' })
+    expect(customizationListSchema.safeParse(list).success).toBe(true)
+    expect(list.items.map(entry => [entry.name, entry.source, entry.path ?? null, entry.state])).toEqual([
+      ['default', 'builtin', null, 'active'],
+      ['explanatory', 'builtin', null, 'active'],
+      ['explanatory', 'project', '.claude/output-styles/explanatory.md', 'invalid'],
+      ['learning', 'builtin', null, 'active'],
+      ['nodesc', 'project', '.claude/output-styles/nodesc.md', 'invalid'],
+      ['plain', 'project', '.harness/output-styles/plain.md', 'active'],
+      ['team-voice', 'user', null, 'active'],
+      ['terse', 'project', '.harness/output-styles/terse.md', 'active'],
+      ['terse', 'project', '.claude/output-styles/terse.md', 'shadowed'],
+    ])
+    expect(list.items.find(entry => entry.path === '.claude/output-styles/explanatory.md')?.diagnostics.map(item => item.code)).toEqual(['reserved-name'])
+    expect(list.items.find(entry => entry.path === '.claude/output-styles/terse.md')?.shadowedBy).toEqual({ source: 'project', path: '.harness/output-styles/terse.md' })
+    expect(list.project?.folders).toEqual(['.claude/output-styles', '.harness/output-styles'])
+
+    const catalog = await h.t.deps.customizations.catalog(h.project.id)
+    expect(catalog.styles().map(entry => entry.name)).toEqual(['default', 'explanatory', 'learning', 'plain', 'team-voice', 'terse'])
+    const terse = catalog.style('terse')!
+    expect(terse).toMatchObject({ source: 'project', label: 'Terse', keepCodingInstructions: true })
+    expect(catalog.style('nodesc')).toBeNull()
+    expect(catalog.style('explanatory')?.source).toBe('builtin')
+    expect(await h.t.deps.customizations.load(terse)).toMatchObject({ definition: { kind: 'style', fields: { name: 'terse', label: 'Terse', keepCodingInstructions: true, content: 'HARNESS-TERSE-BODY' } } })
+    expect(await h.t.deps.customizations.load(catalog.style('team-voice')!)).toMatchObject({ definition: { kind: 'style', fields: { content: 'PERSONAL-BODY' } } })
+    expect((await h.t.deps.customizations.load(catalog.style('learning')!)).definition).toMatchObject({ kind: 'style', fields: { name: 'learning', label: 'Learning', keepCodingInstructions: true } })
+    // The global catalog: builtins and personal styles only.
+    expect((await h.t.deps.customizations.catalog(null)).styles().map(entry => entry.name)).toEqual(['default', 'explanatory', 'learning', 'team-voice'])
+
+    // A personal style turned off is listed `off` and is no longer active.
+    await h.t.deps.customizations.update(personal.id, { enabled: false })
+    expect((await h.t.deps.customizations.catalog(h.project.id)).style('team-voice')).toBeNull()
+
+    // `source` of a project style (the winner or a shadowed path) and of a builtin.
+    expect((await h.t.deps.customizations.source({ projectId: h.project.id, kind: 'style', name: 'terse', source: 'project' })).path).toBe('.harness/output-styles/terse.md')
+    expect((await h.t.deps.customizations.source({ projectId: h.project.id, kind: 'style', name: 'terse', source: 'project', path: '.claude/output-styles/terse.md' })).content).toContain('The claude copy.')
+    expect((await h.t.deps.customizations.source({ kind: 'style', name: 'learning', source: 'builtin' })).content).toMatch(/^---\nname: Learning\ndescription: .+\nkeep-coding-instructions: true\n---\n\nTeach the user/)
+  })
+
+  it('drops a project catalog when a file of a style folder changes', async () => {
+    const h = await open()
+    const s = instrumented(h)
+    await write(h.dir, { '.harness/output-styles/a.md': style('a', 'A.') })
+    expect((await s.service.catalog(h.project.id)).style('a')).not.toBeNull()
+    await write(h.dir, { '.harness/output-styles/b.md': style('b', 'B.') })
+    expect((await s.service.catalog(h.project.id)).style('b')).toBeNull()
+    h.t.deps.events.emit('workspace.changed', { projectId: h.project.id, chatId: null, batchId: null, source: 'tool', paths: ['.harness/output-styles/b.md'] })
+    expect((await s.service.catalog(h.project.id)).style('b')).toMatchObject({ source: 'project' })
+    expect(touchesDefinitions(['.claude/output-styles/x.md'])).toBe(true)
+  })
+
+  it('lists plugin styles of registry.styles until the plugin is disposed (every catalog dropped, an event)', async () => {
+    const h = await open()
+    const fake = withFakeStyles(h.t.deps.registry)
+    const service = createCustomizationService({ ...h.t.deps, registry: fake.registry } as AppDeps, { eventIntervalMs: 0 })
+    cleanups.push(() => service.stop())
+    await write(h.dir, { '.claude/output-styles/pirate.md': style('pirate', 'The project pirate.') })
+    expect((await service.catalog(null)).style('pirate')).toBeNull()
+
+    const registration = fake.styles.register('acme', { name: 'pirate', description: 'Talks like a pirate.', content: 'PLUGIN-PIRATE-BODY', keepCodingInstructions: true })
+    fake.styles.register('acme', { name: 'haiku', description: 'Answers in haiku.', content: 'Five, seven, five.' })
+    const global = await service.catalog(null)
+    expect(global.style('pirate')).toMatchObject({ source: 'plugin', pluginId: 'acme', label: 'pirate', keepCodingInstructions: true, state: 'active' })
+    expect(global.style('haiku')).toMatchObject({ source: 'plugin', keepCodingInstructions: false })
+    expect(await service.load(global.style('pirate')!)).toMatchObject({ definition: { kind: 'style', fields: { name: 'pirate', content: 'PLUGIN-PIRATE-BODY', keepCodingInstructions: true } } })
+    expect((await service.source({ kind: 'style', name: 'pirate', source: 'plugin' })).content).toBe('---\nname: pirate\ndescription: Talks like a pirate.\nkeep-coding-instructions: true\n---\n\nPLUGIN-PIRATE-BODY\n')
+    // A project file wins the name.
+    const project = await service.catalog(h.project.id)
+    expect(project.style('pirate')).toMatchObject({ source: 'project' })
+    expect(project.entries.find(entry => entry.kind === 'style' && entry.source === 'plugin' && entry.name === 'pirate')).toMatchObject({ state: 'shadowed' })
+
+    const events: CustomizationChangedData[] = []
+    const subscription = h.t.deps.events.subscribe((event) => {
+      if (event.type === 'customization.changed')
+        events.push(event.data)
+    })
+    cleanups.push(() => subscription.dispose())
+    const loaded = global.style('pirate')!
+    registration.dispose()
+    expect((await service.catalog(null)).style('pirate')).toBeNull()
+    expect((await service.catalog(h.project.id)).entries.filter(entry => entry.source === 'plugin' && entry.kind === 'style').map(entry => entry.name)).toEqual(['haiku'])
+    await expect(service.load(loaded)).rejects.toMatchObject({ code: 'not_found' })
+    await vi.waitFor(() => expect(events).toContainEqual({}))
+  })
+
+  it('in safe mode lists no plugin style but the builtins', async () => {
+    const h = await open({ env: { HF_SAFE_MODE: '1' } })
+    const fake = withFakeStyles(h.t.deps.registry)
+    const service = createCustomizationService({ ...h.t.deps, registry: fake.registry } as AppDeps)
+    cleanups.push(() => service.stop())
+    fake.styles.register('acme', { name: 'pirate', description: 'Talks like a pirate.', content: 'Arr.' })
+    const catalog = await service.catalog(null)
+    expect(catalog.styles().map(entry => entry.name)).toEqual(['default', 'explanatory', 'learning'])
+    await expect(service.source({ kind: 'style', name: 'pirate', source: 'plugin' })).rejects.toMatchObject({ code: 'not_found' })
   })
 })
 
@@ -499,5 +678,8 @@ describe('helpers', () => {
     expect(isDefinitionPath('skill', '.harness/skills/pdf/SKILL.md')).toBe(true)
     expect(isDefinitionPath('skill', '.harness/skills/pdf/ref.md')).toBe(false)
     expect(isDefinitionPath('agent', 'AGENTS.md')).toBe(false)
+    expect(isDefinitionPath('style', '.harness/output-styles/terse.md')).toBe(true)
+    expect(isDefinitionPath('style', '.claude/output-styles/x/terse.md')).toBe(false)
+    expect(isDefinitionPath('style', '.harness/agents/terse.md')).toBe(false)
   })
 })

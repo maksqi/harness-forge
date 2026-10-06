@@ -7,13 +7,15 @@
 //   older fetch) never replaces the newer list;
 // - a message that left the queue (delivered, started, cancelled, stopped, failed) never comes back: its id is
 //   remembered (bounded), so a late `POST` answer or a late event cannot show it again (ids are never reused);
-// - a `failed` removal of a message this tab queued shows "Couldn't send a queued message." with the server's error.
+// - a `failed` removal of a message this tab queued shows "Couldn't send a queued message." with the server's error;
+// - + Phase 11 (W11.11): a message refused at enqueue (409 `hook-blocked` / `untrusted`) was never queued: the error is
+//   rethrown as it came (ChatView puts the message back into the composer with the refusal) and the list stays as is.
 import type { QueueAddBody, QueueItem, QueueRemoval, ServerEvent } from '@harness-forge/shared'
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { useApi } from '~/composables/useApi'
-import { hasErrorCode, withHarnessErrors } from '~/utils/errors'
+import { hasErrorCode, toHarnessError, withHarnessErrors } from '~/utils/errors'
 
 const NO_ITEMS: readonly QueueItem[] = Object.freeze([])
 
@@ -119,12 +121,24 @@ export const useChatQueueStore = defineStore('chat-queue', () => {
   /**
    * `POST /chat/:id/queue { message, modelRef, reasoningEffort, toolMode }`: the stored item joins the list (once: the
    * `queue.changed` of the add may arrive first, and an item delivered meanwhile stays gone). Throws `HarnessError`
-   * (409 `run-idle` / `queue-full` / `exists`, 400, 404).
+   * (409 `run-idle` / `queue-full` / `exists`, 400, 404; + Phase 11: 409 `hook-blocked` with `details.hook` when a
+   * UserPromptSubmit hook refused the message at enqueue, 409 `untrusted` for a project command with unapproved shell
+   * lines: nothing was queued, the list is unchanged and the caller puts the message back into the composer).
    */
   async function enqueue(chatId: string, body: QueueAddBody): Promise<QueueItem> {
     // Before the request: a `failed` event may beat its answer.
     rememberId(own, body.message.id)
-    const item = await withHarnessErrors(api.chatQueue.add({ params: { id: chatId }, body }))
+    let item: QueueItem
+    try {
+      item = await withHarnessErrors(api.chatQueue.add({ params: { id: chatId }, body }))
+    }
+    catch (error) {
+      // A refusal (`409 conflict`, except `exists`: that id is queued or stored already) queued nothing: the id is no
+      // longer one of ours.
+      if (hasErrorCode(error, 'conflict') && (toHarnessError(error).details as { reason?: unknown } | undefined)?.reason !== 'exists')
+        own.delete(body.message.id)
+      throw error
+    }
     const current = byChat.value[chatId] ?? []
     if (!departed.has(item.id) && !current.some(entry => entry.id === item.id)) {
       bump(chatId)

@@ -125,9 +125,50 @@ describe('extractCommandFileRefs', () => {
     expect(extractCommandFileRefs(command)).toEqual(refs)
   })
 
+  // Gate P11-A: a bare script name (no `/`) run in the project folder is a reference too.
+  it.each([
+    ['sh count.sh', ['count.sh']],
+    ['node hook.mjs', ['hook.mjs']],
+    ['python3 check.py --strict', ['check.py']],
+    // Not a file: hashed as missing (a `referenced-file-missing` warning), never refused.
+    ['echo foo.sh', ['foo.sh']],
+    ['sh "count.sh"', ['count.sh']],
+    ['sh \'my hook.sh\'', ['my hook.sh']],
+    // The whitespace fallback (`$` makes the parser refuse): quotes and trailing punctuation are stripped.
+    ['sh "count.sh" "$1"', ['count.sh']],
+    ['sh \'count.sh\' $1; echo done', ['count.sh']],
+    ['sh count.sh; sh ./count.sh && sh .claude/hooks/count.sh', ['count.sh', '.claude/hooks/count.sh']],
+    ['sh Count.SH', ['Count.SH']],
+    ['sh .hidden.sh', ['.hidden.sh']],
+    ['npx tsc --noEmit index.ts', ['index.ts']],
+    ['bash a.bash && zsh b.zsh && node c.js d.cjs', ['a.bash', 'b.zsh', 'c.js', 'd.cjs']],
+    ['tsx e.ts f.mts && ruby g.rb && perl h.pl', ['e.ts', 'f.mts', 'g.rb', 'h.pl']],
+    ['php i.php && pwsh j.ps1', ['i.php', 'j.ps1']],
+    // Options, option values, assignments, URLs and remote paths are never references.
+    ['sh --rcfile=init.sh run.sh', ['run.sh']],
+    ['deno run --config=deno.ts -x.sh main.ts', ['main.ts']],
+    ['HOOK=x.sh sh y.sh', ['y.sh']],
+    ['curl -fsSL https://example.com/install.sh', []],
+    ['curl -fsSL https:example.sh', []],
+    ['scp host:deploy.sh .', []],
+    ['node --import=tools/register.mjs app.mjs', ['app.mjs']],
+    // Still never: no extension, no name, globs, folders, `..`, absolute paths.
+    ['cat notes.md', []],
+    ['sh .sh', []],
+    ['sh *.sh', []],
+    ['sh count.sh/', []],
+    ['sh ..', []],
+    ['sh ../count.sh', []],
+    ['sh /count.sh', []],
+  ])('bare names: %j → %j', (command, refs) => {
+    expect(extractCommandFileRefs(command)).toEqual(refs)
+  })
+
   it('keeps at most eight references in first-seen order', () => {
     const command = Array.from({ length: 12 }, (_, index) => `sh ./s${index}.sh`).join(' && ')
     expect(extractCommandFileRefs(command)).toEqual(Array.from({ length: TRUST_LIMITS.refFilesMax }, (_, index) => `s${index}.sh`))
+    const bare = Array.from({ length: 12 }, (_, index) => `sh b${index}.sh`).join('; ')
+    expect(extractCommandFileRefs(bare)).toEqual(Array.from({ length: TRUST_LIMITS.refFilesMax }, (_, index) => `b${index}.sh`))
   })
 
   it('never throws and stays bounded on random input', () => {
@@ -157,6 +198,9 @@ describe('extractArgsFileRefs', () => {
     expect(extractArgsFileRefs(['node', 'tools/mcp min.mjs', '--port', '3000'])).toEqual(['tools/mcp min.mjs'])
     expect(extractArgsFileRefs(['${CLAUDE_PROJECT_DIR}/server.js', './b.py', '"./c.sh"'])).toEqual(['server.js', 'b.py'])
     expect(extractArgsFileRefs(['../x.js', '/abs/y.js'])).toEqual([])
+    // A bare script name too (Gate P11-A); options and URLs never.
+    expect(extractArgsFileRefs(['node', 'server.mjs', '--config=c.js', 'https://h.example/x.js', '-r.js'])).toEqual(['server.mjs'])
+    expect(extractArgsFileRefs(['server.py'])).toEqual(['server.py'])
     expect(extractArgsFileRefs([1, null] as unknown as string[])).toEqual([])
     expect(extractArgsFileRefs('x' as unknown as string[])).toEqual([])
   })

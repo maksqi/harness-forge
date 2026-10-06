@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // Result panel of an import (docs/UI.md 2.7, 9.8): "Imported {n} chats · copied {n} · skipped {n} · failed {n}", the
-// attachments ("{n} files ({reused} reused, {missing} missing)"), "Settings restored", then one row per chat (its title,
-// a link to /chat/<id> for imported and copied chats, a status badge and the error of a failed one) and the warnings.
+// attachments ("{n} files ({reused} reused, {missing} missing)"), "Settings restored", the personal definitions restored
+// ("{n} personal definitions restored · {k} kept · {f} failed"), then one row per chat (its title, a link to /chat/<id>
+// for imported and copied chats, a status badge and the error of a failed one) and the warnings.
 import type { DataImportResult, DataImportStatus } from '@harness-forge/shared'
 import { CircleAlertIcon, CircleCheckIcon } from '@lucide/vue'
 import { computed } from 'vue'
@@ -23,12 +24,14 @@ const STATUS_STYLES: Record<DataImportStatus, string> = {
 const headline = computed(() => importHeadline(props.result))
 const filesLine = computed(() => importFilesLine(props.result))
 const failed = computed(() => props.result.counts.failed > 0)
-// Phase 10 (ADR-044): the personal agents, commands and skills restored from `customizations.json`.
+// Phase 10 (ADR-044): the personal definitions restored from `customizations.json`. Phase 11 (docs/UI.md 9.8): output
+// styles are personal definitions too, so the line reads "{n} personal definitions restored"; commands with shell lines
+// come back turned off (the import's help says so; the result carries no count of them).
 const customizationsLine = computed(() => {
   const c = props.result.customizations
   if (!c)
     return null
-  const parts = [`${c.imported} ${c.imported === 1 ? 'agent, command or skill' : 'agents, commands and skills'} restored`]
+  const parts = [`${c.imported} ${c.imported === 1 ? 'personal definition' : 'personal definitions'} restored`]
   if (c.skipped > 0)
     parts.push(`${c.skipped} kept`)
   if (c.failed > 0)

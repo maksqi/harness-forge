@@ -1,7 +1,9 @@
 // Discovery of project definition files (W10.1-T1, T2): the folder rules (links on the path, hidden names, `.md` only,
 // the command depth and namespace, skills one level down), the per-file guards (a linked file, a 70 KiB file, a binary
 // file, a secret-looking name), invalid YAML, the 200-file limit, the whole read of a cut head that does not parse, and
-// a spy proving that no linked target is ever opened. Project folders are `realpath(mkdtemp())`.
+// a spy proving that no linked target is ever opened. Project folders are `realpath(mkdtemp())`. Phase 11 (W11.6-T1):
+// the output styles folders (top-level `*.md`, labels and slug names, `keep-coding-instructions`, a reserved builtin
+// name, a broken file, links and subfolders skipped) and the skill keys of the entries.
 import type { CustomizationEntry } from '@harness-forge/shared'
 import type { OpenDefinitionFile } from './discover.ts'
 import { Buffer } from 'node:buffer'
@@ -189,6 +191,70 @@ describe('discoverProject', () => {
     expect(states['.harness/commands/compact.md']).toEqual(['invalid', ['reserved-name']])
     expect(found.entries.find(entry => entry.path === '.harness/agents/broken.md')?.name).toBe('broken')
     expect(JSON.stringify(found)).not.toContain('SECRET-VALUE')
+  })
+
+  it('reads the top-level output styles of both folders: labels, slug names, the keep flag; reserved and broken files invalid', async () => {
+    const root = await tempFolder()
+    const style = (name: string, extra = '', body = 'Answer in short sentences.'): string => `---\nname: ${name}\ndescription: The ${name} style.\n${extra}---\n${body}\n`
+    await write(root, {
+      '.claude/output-styles/terse.md': style('Terse'),
+      '.harness/output-styles/terse.md': style('terse', 'keep-coding-instructions: true\n'),
+      '.harness/output-styles/team-voice.md': style('Team Voice!'),
+      '.harness/output-styles/stem.md': '---\ndescription: Named by its file.\n---\nBe kind.\n',
+      '.harness/output-styles/explanatory.md': style('explanatory'),
+      // The seeded file of the gate: read line by line (a warning), so it stays usable.
+      '.harness/output-styles/broken.md': '---\nname: broken\ndescription: [unclosed\nkeep-coding-instructions: : :\n---\nSTYLE-BROKEN\n',
+      // No description and no body line to take it from.
+      '.harness/output-styles/nodesc.md': '---\nname: nodesc\n---\n',
+      '.harness/output-styles/garbage.md': '---\n[unclosed SECRET-VALUE\n---\nBody\n',
+      '.harness/output-styles/nested/deep.md': style('deep'),
+      '.harness/output-styles/notes.txt': 'not markdown',
+    })
+    if (!isWindows)
+      await symlink(join(root, '.claude/output-styles/terse.md'), join(root, '.harness/output-styles/linked.md'))
+    const spy = spyOpener()
+    const found = await discoverProject(root, { openFile: spy.open })
+    expect(found.folders).toEqual(['.claude/output-styles', '.harness/output-styles'])
+    const styles = found.entries.filter(entry => entry.kind === 'style')
+    expect(styles.map(entry => [entry.path, entry.name, entry.state, entry.label ?? null, entry.keepCodingInstructions ?? null])).toEqual([
+      ['.claude/output-styles/terse.md', 'terse', 'active', 'Terse', false],
+      ['.harness/output-styles/broken.md', 'broken', 'active', 'broken', false],
+      ['.harness/output-styles/explanatory.md', 'explanatory', 'invalid', null, null],
+      ['.harness/output-styles/garbage.md', 'garbage', 'invalid', null, null],
+      ['.harness/output-styles/nodesc.md', 'nodesc', 'invalid', null, null],
+      ['.harness/output-styles/stem.md', 'stem', 'active', 'stem', false],
+      ['.harness/output-styles/team-voice.md', 'team-voice', 'active', 'Team Voice!', false],
+      ['.harness/output-styles/terse.md', 'terse', 'active', 'terse', true],
+    ])
+    expect(byPath(styles, '.harness/output-styles/explanatory.md')!.diagnostics.map(item => item.code)).toEqual(['reserved-name'])
+    expect(byPath(styles, '.harness/output-styles/broken.md')!.diagnostics.map(item => `${item.level}:${item.code}`)).toEqual(['warning:invalid-frontmatter', 'warning:invalid-field'])
+    expect(byPath(styles, '.harness/output-styles/garbage.md')!.diagnostics.map(item => item.code)).toEqual(['invalid-frontmatter'])
+    expect(byPath(styles, '.harness/output-styles/nodesc.md')!.diagnostics.map(item => `${item.level}:${item.code}`)).toEqual(['error:missing-field', 'warning:missing-field'])
+    for (const entry of styles)
+      expect(customizationEntrySchema.safeParse(entry).success, entry.path).toBe(true)
+    // Subfolders, other files and links are never read.
+    expect(spy.opened.filter(path => path.includes('output-styles')).sort()).toEqual(styles.map(entry => entry.path).sort())
+    if (!isWindows)
+      expect(found.diagnostics).toContainEqual(expect.objectContaining({ code: 'link', path: '.harness/output-styles/linked.md' }))
+    expect(JSON.stringify(found)).not.toContain('SECRET-VALUE')
+    expect(JSON.stringify(found)).not.toMatch(/short sentences|STYLE-BROKEN/)
+  })
+
+  it('lists the skill keys of Phase 11 (user-invocable, disable-model-invocation, argument-hint) only when set', async () => {
+    const root = await tempFolder()
+    await write(root, {
+      '.harness/skills/deploy/SKILL.md': '---\nname: deploy\ndescription: Deploys.\nargument-hint: [env]\n---\nDeploy to $ARGUMENTS.\n',
+      '.harness/skills/internal/SKILL.md': '---\nname: internal\ndescription: Internal notes.\ndisable-model-invocation: true\nuser-invocable: false\n---\nNotes.\n',
+      '.harness/skills/plain/SKILL.md': '---\nname: plain\ndescription: Plain.\n---\nPlain.\n',
+    })
+    const found = await discoverProject(root)
+    const pick = (path: string) => {
+      const entry = byPath(found.entries, path)!
+      return { name: entry.name, argumentHint: entry.argumentHint, userInvocable: entry.userInvocable, modelInvocable: entry.modelInvocable }
+    }
+    expect(pick('.harness/skills/deploy/SKILL.md')).toEqual({ name: 'deploy', argumentHint: '[env]', userInvocable: undefined, modelInvocable: undefined })
+    expect(pick('.harness/skills/internal/SKILL.md')).toEqual({ name: 'internal', argumentHint: undefined, userInvocable: false, modelInvocable: false })
+    expect(pick('.harness/skills/plain/SKILL.md')).toEqual({ name: 'plain', argumentHint: undefined, userInvocable: undefined, modelInvocable: undefined })
   })
 
   it('reads at most 200 definitions per folder (the first sorted paths) and reports `limit`', async () => {

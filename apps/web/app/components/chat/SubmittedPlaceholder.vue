@@ -3,7 +3,8 @@
 // Phase 9 (ADR-040, docs/UI.md 7.24): "Compacting conversation…" instead while the session's transient activity is
 // `compacting` (a summary is being written before or during the reply).
 // Phase 11 (ADR-048; C39 widens the prop, W11.12 owns it; frozen from Gate P11-0b): "Running hooks…" while it is `hooks`
-// (command hooks of a message-level event run: UserPromptSubmit, SessionStart, Stop, PreCompact).
+// (command hooks of a message-level event run: UserPromptSubmit, SessionStart, Stop, PreCompact), the line marked
+// `data-slot="running-hook"`; never announced (`aria-hidden`); reduced motion shows static muted text.
 import { computed } from 'vue'
 import { testIds } from '~/utils/testids'
 
@@ -26,6 +27,6 @@ const label = computed(() => {
 
 <template>
   <p :data-testid="testIds.submittedPlaceholder" class="h-[1lh] text-muted-foreground" aria-hidden="true">
-    <span class="hf-shimmer-text">{{ label }}</span>
+    <span class="hf-shimmer-text" :data-slot="activity === 'hooks' ? 'running-hook' : undefined">{{ label }}</span>
   </p>
 </template>

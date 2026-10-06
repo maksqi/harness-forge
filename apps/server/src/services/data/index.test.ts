@@ -2,7 +2,8 @@
 // events) and the mutex shared by imports and delete-all (Phase 7, C16-T1: the maintenance lock, also taken by the key
 // rotation and the file cleanup); the orphaned file cleanup (W7.8-T4: preview, run, references, `_files`, logs, lock).
 // Phase 8 (W8.7): `DataSummary.checkpoints`, the checkpoint purge of delete-all, the plugin data in the manual cleanup
-// (the automatic sweep has its own file, ./auto-sweep.test.ts).
+// (the automatic sweep has its own file, ./auto-sweep.test.ts). Phase 11 (W11.7-T6): delete-all keeps the personal hooks,
+// the project approvals and the project MCP variables (configuration, like projects and settings).
 import type { MaintenanceOperation } from '../maintenance/types.ts'
 import type { DataTestApp } from './fixtures.test-util.ts'
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
@@ -10,18 +11,20 @@ import { join } from 'node:path'
 import { dataCleanupPreviewSchema, dataCleanupResultSchema, dataDeleteResultSchema, DEFAULT_SETTINGS, HarnessError } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { chatShares, files, messages, pluginKv, usage } from '../../db/schema.ts'
+import { chatShares, files, hooks, messages, pluginKv, projects, projectTrust, secrets, usage } from '../../db/schema.ts'
 import { freshAuthRequiredError } from '../../http/middleware/fresh-auth.ts'
 import { createFakeCheckpointService } from '../../testing/fake-checkpoints.ts'
 import { GIF, JPEG, PNG, TEXT } from '../files/fixtures.test-util.ts'
 import { fileUrl } from '../files/index.ts'
 import { DAY_MS, HOUR_MS, seedStoredFile, sha256Of } from '../files/store.test-util.ts'
 import { MAINTENANCE_BUSY_MESSAGE } from '../maintenance/index.ts'
+import { closeCustomizedApps, PHASE11_SENTINELS, realDataApp, seedPhase11 } from './backup-fixtures.test-util.ts'
 import { FILE_STATE_SETTING } from './cleanup.ts'
 import { assistant, chatId, checkpointsOf, closeDataApps, dataApp, filePart, mid, treeChat, user } from './fixtures.test-util.ts'
 
 afterEach(async () => {
   await closeDataApps()
+  await closeCustomizedApps()
 })
 
 async function rejection(promise: Promise<unknown>): Promise<HarnessError> {
@@ -159,6 +162,24 @@ describe('delete-all', () => {
     expect((await running).chats).toBe(3)
     expect(await app.deps.data.deleteAll({ confirm: 'DELETE' })).toEqual({ chats: 0, messages: 0, files: 0, fileBytes: 0, usageRows: 0 })
     expect(await app.deps.settings.get()).toEqual(DEFAULT_SETTINGS)
+  })
+})
+
+describe('delete-all keeps the Phase 11 configuration', () => {
+  it('keeps personal hooks, project approvals, project MCP variables, the project, its style and the personal definitions', async () => {
+    const t = await realDataApp()
+    const seeded = await seedPhase11(t)
+    const result = await t.deps.data.deleteAll({ confirm: 'DELETE', files: true, usage: true })
+    expect(result).toMatchObject({ chats: 1, messages: 4 })
+    expect((await t.deps.chats.list({})).items).toEqual([])
+
+    expect((await t.deps.db.select().from(hooks)).map(row => row.command)).toEqual([PHASE11_SENTINELS.hookCommand])
+    expect(await t.deps.db.select({ projectId: projectTrust.projectId, sha256: projectTrust.sha256 }).from(projectTrust)).toEqual([{ projectId: seeded.projectId, sha256: PHASE11_SENTINELS.trustSha256 }])
+    expect((await t.deps.db.select().from(secrets)).filter(row => row.scope === `project:${seeded.projectId}`).map(row => row.name)).toEqual(['mcp.var.MCP_TOKEN'])
+    expect(await t.deps.db.select({ id: projects.id }).from(projects)).toEqual([{ id: seeded.projectId }])
+    expect((await t.deps.projects.get(seeded.projectId)).outputStyle).toBe('terse')
+    expect(await t.deps.settings.get()).toMatchObject({ outputStyle: 'terse', hooksEnabled: false })
+    expect((await t.deps.customizations.exportBackup()).items.map(item => item.name)).toEqual(['review', 'status', 'terse'])
   })
 })
 

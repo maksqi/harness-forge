@@ -25,11 +25,13 @@
 // (steps 1-6) is computed as before and combined with the hook decision (`applyHookDecision`): a harness `denied` wins;
 // hook `deny` (or a blocking exit 2) → denied "Blocked by hook: <reason>"; hook `ask` → user-approval (a child's approval
 // wrapper turns it into a denial, `denyUserApproval`); hook `allow` → approved only when the harness would ask, the
-// tool's workspace access is not `execute` and its policy is `safe` or `ask` (narrower than Claude Code: a hook never
-// skips the card of the shell or of a hidden-path write, whose policy is `always`); otherwise the harness result. The
-// hook record is stored by the hooks (`data-hook`); its `updatedInput` is applied by the tool wrapper (`tools.ts`), so
-// the tool part and the approval signature keep the model's input. Plan mode is unchanged (its tool set is `modes.ts`'s;
-// the plan card is decided before the hooks).
+// tool's workspace access is not `execute`, its policy is `safe` or `ask` and the run is not in plan mode (narrower
+// than Claude Code: a hook never skips the card of the shell or of a hidden-path write, whose policy is `always`, nor
+// any card in plan mode); otherwise the harness result. In plan mode a hook `deny` still blocks and a hook `ask` still
+// asks, but an `allow` never approves (Gate P11-A decision: the user reviews every call while planning; the tool set is
+// `modes.ts`'s and the plan card is decided before the hooks). The hook record is stored by the hooks (`data-hook`);
+// its `updatedInput` is applied by the tool wrapper (`tools.ts`), so the tool part and the approval signature keep the
+// model's input.
 import type { ToolCallContext, ToolDefinition, ToolWorkspace, ToolWorkspaceAccess } from '@harness-forge/plugin-sdk'
 import type { ToolMode, ToolOverride, ToolPolicy } from '@harness-forge/shared'
 import type { ModelMessage, ToolApprovalStatus, ToolSet } from 'ai'
@@ -246,14 +248,16 @@ export interface HarnessApproval {
 /**
  * Combines the harness result of a call with its `PreToolUse` decision (Phase 11, see the module comment): a harness
  * `denied` wins; `deny` → denied "Blocked by hook: …"; `ask` → user-approval; `allow` → approved only when the harness
- * result is `user-approval`, `workspace` is not `execute` and `policy` is `safe` or `ask` (an `allow` with an unknown
- * policy, null, keeps the harness result); no decision → the harness result.
+ * result is `user-approval`, `workspace` is not `execute`, `policy` is `safe` or `ask` (an `allow` with an unknown
+ * policy, null, keeps the harness result) and `toolMode` is not `plan` (in plan mode an `allow` keeps the harness
+ * result: the card); no decision → the harness result.
  */
 export function applyHookDecision(
   harness: ApprovalResult,
   hook: Pick<PreToolUseDecision, 'decision' | 'reason'> | null,
   workspace: ToolWorkspaceAccess | null,
   policy: EffectivePolicy | null,
+  toolMode?: ToolMode,
 ): ApprovalResult {
   if (hook === null || hook.decision === null || harness.outcome === 'denied')
     return harness
@@ -263,12 +267,18 @@ export function applyHookDecision(
     case 'ask':
       return { outcome: 'user-approval' }
     case 'allow':
-      return harness.outcome === 'user-approval' && workspace !== 'execute' && (policy === 'safe' || policy === 'ask')
-        ? { outcome: 'approved' }
-        : harness
+      return allowApproves(harness, workspace, policy, toolMode) ? { outcome: 'approved' } : harness
     default:
       return harness
   }
+}
+
+/** A hook `allow` turns this harness result into `approved` (see `applyHookDecision`). */
+function allowApproves(harness: ApprovalResult, workspace: ToolWorkspaceAccess | null, policy: EffectivePolicy | null, toolMode: ToolMode | undefined): boolean {
+  return harness.outcome === 'user-approval'
+    && toolMode !== 'plan'
+    && workspace !== 'execute'
+    && (policy === 'safe' || policy === 'ask')
 }
 
 /** A tool call as the approval function receives it. */
@@ -345,11 +355,12 @@ export function createToolApproval(context: ToolApprovalContext) {
       const harness = await harnessApproval(context, tool, workspace, toolCall, options.messages)
       if (hook === null || hook.decision === null)
         return toApprovalStatus(harness.result)
-      // An `allow` needs the tool's policy: evaluated now when an override or a `tool.approve` hook decided.
-      const policy = hook.decision === 'allow' && harness.result.outcome === 'user-approval' && harness.policy === null
+      // An `allow` needs the tool's policy: evaluated now when an override or a `tool.approve` hook decided (never in
+      // plan mode, where an `allow` keeps the card).
+      const policy = hook.decision === 'allow' && harness.result.outcome === 'user-approval' && harness.policy === null && context.toolMode !== 'plan'
         ? await callPolicy(context, tool, toolCall, options.messages)
         : harness.policy
-      return toApprovalStatus(applyHookDecision(harness.result, hook, workspace, policy))
+      return toApprovalStatus(applyHookDecision(harness.result, hook, workspace, policy, context.toolMode))
     }
     catch (error) {
       context.logger.warn('tool approval failed, asking the user', { tool: toolCall.toolName, err: error })

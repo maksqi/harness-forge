@@ -1,7 +1,8 @@
 // CustomizationEditor (docs/UI.md 9.12, 10.7, 12, 14; W10.8-T3): create, edit, the field rules (a reserved name), a
 // duplicate name (409 `exists` on the name field), server diagnostics in the form-level alert, the discard
 // confirmation, Mod+Enter, the command and skill fields, and the import notes. The body editor is stubbed with a
-// textarea (MarkdownEditor has its own test).
+// textarea (MarkdownEditor has its own test). Phase 11 (W11.8-T6, T7): the output style editor (Keep coding
+// instructions, no Tools or Model, the label kept on save) and the skill switches and argument hint.
 import type { VueWrapper } from '@vue/test-utils'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { formatDefinition, HarnessError } from '@harness-forge/shared'
@@ -12,7 +13,7 @@ import { defineComponent, h, nextTick, reactive } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { agentCustomization, commandCustomization, toolSummary } from '~/utils/testing/fixtures'
+import { agentCustomization, commandCustomization, customizationId, styleCustomization, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import CustomizationEditor from './CustomizationEditor.vue'
 
@@ -69,7 +70,7 @@ afterEach(() => {
 
 interface EditorProps {
   open?: boolean
-  kind?: 'agent' | 'command' | 'skill'
+  kind?: 'agent' | 'command' | 'skill' | 'style'
   mode?: 'new' | 'edit' | 'import'
   customization?: unknown
   draft?: unknown
@@ -306,5 +307,60 @@ describe('customizationEditor', () => {
     // search_files is chosen but not in the tool list: a warning chip.
     const chip = document.body.querySelector<HTMLElement>(`[data-testid="${testIds.customizationToolChip}"][data-tool-name="search_files"]`)
     expect(chip?.dataset.state).toBe('unknown')
+  })
+
+  it('edits an output style: Keep coding instructions, no Tools or Model, the label kept (Phase 11)', async () => {
+    const style = styleCustomization()
+    api.customizations.update.mockResolvedValue(style)
+    const { emitted } = await mountEditor({ kind: 'style', mode: 'edit', customization: style })
+    const editor = byTestId(testIds.customizationEditor)!
+    expect(editor.dataset.kind).toBe('style')
+    expect(editor.textContent).toContain('Edit terse')
+    expect(editor.textContent).toContain('Shown in the composer\'s style menu.')
+    expect(editor.textContent).toContain('How the agent writes its replies. They go first in the main agent\'s instructions, never in sub-agents\'.')
+    expect(byTestId(testIds.customizationToolsMode)).toBeNull()
+    expect(byTestId(testIds.customizationModel)).toBeNull()
+    const keep = byTestId(testIds.customizationKeepCoding)!
+    expect(keep.dataset.state).toBe('checked')
+    expect(editor.textContent).toContain('On: the agent keeps its tool rules and task hints. Off: only this style shapes its replies.')
+    keep.click()
+    await flushPromises()
+    expect(keep.dataset.state).toBe('unchecked')
+    expect(save().textContent?.trim()).toBe('Save output style')
+    save().click()
+    await flushPromises()
+    // The label as written ("Terse") survives; the flag is left out when off.
+    expect(api.customizations.update).toHaveBeenCalledWith({
+      params: { id: customizationId(3) },
+      body: { content: '---\nname: Terse\ndescription: Short answers without preamble\n---\n\nAnswer in at most three sentences.\n' },
+    })
+    expect(mocks.toast.success).toHaveBeenCalledWith('Output style saved')
+    expect(emitted.saved).toHaveLength(1)
+  })
+
+  it('creates a skill with the slash menu switches and an argument hint (Phase 11)', async () => {
+    api.customizations.create.mockResolvedValue(commandCustomization())
+    await mountEditor({ kind: 'skill' })
+    const editor = byTestId(testIds.customizationEditor)!
+    const inMenu = byTestId(testIds.customizationUserInvocable)!
+    const onlyRun = byTestId(testIds.customizationModelInvocation)!
+    expect(inMenu.dataset.state).toBe('checked')
+    expect(onlyRun.dataset.state).toBe('unchecked')
+    expect(editor.textContent).toContain('Show in the slash menu')
+    expect(editor.textContent).toContain('The agent doesn\'t load it by itself; it runs only as /name.')
+    expect(byTestId(testIds.customizationKeepCoding)).toBeNull()
+    await type(byTestId<HTMLInputElement>(testIds.customizationName), 'deploy')
+    await type(byTestId<HTMLTextAreaElement>(testIds.customizationDescription), 'Deploy the app')
+    await type(byTestId<HTMLInputElement>(testIds.customizationArgumentHint), '<env>')
+    await type(body(), 'Run the deploy for $ARGUMENTS.')
+    onlyRun.click()
+    await flushPromises()
+    save().click()
+    await flushPromises()
+    const content = (api.customizations.create.mock.calls[0]![0] as { body: { kind: string, content: string } }).body
+    expect(content.kind).toBe('skill')
+    expect(content.content).toContain('argument-hint: <env>')
+    expect(content.content).toContain('disable-model-invocation: true')
+    expect(content.content).not.toContain('user-invocable')
   })
 })

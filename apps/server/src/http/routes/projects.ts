@@ -4,7 +4,10 @@
 //   `freshAuthOptions(c)` before it writes anything): adding a folder turns a session into file and shell access to it.
 // - There is no `GET /projects/:id`, so `GET /projects/browse` never meets a param route of the same method.
 // - Deleting a project detaches its chats in one transaction and never touches the folder; deleting while a chat of it
-//   runs is `409` (`run-active`).
+//   runs is `409` (`run-active`). Phase 11: its `project_trust` rows go with it (foreign key cascade); the project MCP
+//   runtimes, its variables and the hooks cache follow the `project.changed { project: null }` event.
+// - Phase 11 (ADR-051): `PATCH /projects/:id { outputStyle }` sets the project's output style (any valid style name, an
+//   unknown one falls back at run time; null clears it). No fresh auth: a style only changes how the agent writes.
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import { apiRoutes, projectBrowseQuerySchema, projectCreateSchema, projectParamsSchema, projectUpdateSchema } from '@harness-forge/shared'

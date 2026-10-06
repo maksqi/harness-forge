@@ -16,13 +16,15 @@ import { useShortcuts } from '~/composables/useShortcuts'
 import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { useChatsStore } from '~/stores/chats'
 import { useCustomizationsStore } from '~/stores/customizations'
+import { usePluginsStore } from '~/stores/plugins'
+import { useProjectTrustStore } from '~/stores/project-trust'
 import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
 import { installFakeMedia } from '~/utils/testing/fake-media'
-import { catalogModel, chatId, chatSummary, messageId, projectFileEntry, projectId, projectSummary, queueItem, rememberResult } from '~/utils/testing/fixtures'
+import { catalogModel, chatId, chatSummary, customizationList, messageId, pluginSummary, projectFileEntry, projectId, projectSummary, projectTrustList, queueItem, rememberResult, styleEntry, trustCommandItem } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { CHAT_VIEW_ACTIONS } from '../chat-context'
@@ -60,10 +62,13 @@ interface HarnessState {
   disabled: boolean
   previousImages: number
   projectId: string | null
+  outputStyle: string | null
 }
 
 let pinia: ReturnType<typeof createPinia>
 let api: MockApi
+/** CHAT_VIEW_ACTIONS as ChatView provides them (reset before each test). */
+let chatViewActions = { openModelPicker: vi.fn(), openProjectTrust: vi.fn(), openProjectMcp: vi.fn() }
 
 function mountComposer(overrides: Partial<HarnessState> = {}) {
   const state = reactive<HarnessState>({
@@ -77,6 +82,7 @@ function mountComposer(overrides: Partial<HarnessState> = {}) {
     disabled: false,
     previousImages: 0,
     projectId: null,
+    outputStyle: null,
     ...overrides,
   })
   const wrapper = mount({
@@ -92,9 +98,12 @@ function mountComposer(overrides: Partial<HarnessState> = {}) {
         'onUpdate:toolMode': (value: ToolMode) => {
           state.toolMode = value
         },
+        'onUpdate:outputStyle': (value: string | null) => {
+          state.outputStyle = value
+        },
       }),
     }),
-  }, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink: NuxtLinkStub } } })
+  }, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink: NuxtLinkStub }, provide: { [CHAT_VIEW_ACTIONS as symbol]: chatViewActions } } })
   const composer = () => wrapper.findComponent(ChatComposer)
   const textarea = () => wrapper.get<HTMLTextAreaElement>(byTestId(testIds.composerInput))
   const send = () => wrapper.find(byTestId(testIds.composerSend))
@@ -176,6 +185,7 @@ describe('chatComposer', () => {
     pinia = createPinia()
     setActivePinia(pinia)
     seedStores()
+    chatViewActions = { openModelPicker: vi.fn(), openProjectTrust: vi.fn(), openProjectMcp: vi.fn() }
   })
 
   afterEach(() => {
@@ -1649,7 +1659,7 @@ describe('chatComposer', () => {
     })
   })
 
-  describe('output style and refusal (Phase 11, P11-0b seams)', () => {
+  describe('output style and refusal (Phase 11)', () => {
     it('mounts OutputStyleMenu right after EffortMenu with the chat\'s style; hidden for image models', async () => {
       seedStores()
       const { wrapper } = mountComposer()
@@ -1707,6 +1717,267 @@ describe('chatComposer', () => {
       press(wrapper.get(byTestId(testIds.composerInput)).element, { key: 'Enter' })
       await flushPromises()
       expect(composer.emitted('submit')).toHaveLength(1)
+      expect(wrapper.find(byTestId(testIds.composerRefusal)).exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    /** Project 1 ("website") with the style terse in its catalog; `outputStyle` = the project's own style. */
+    function seedStyles(outputStyle: string | null = null) {
+      useProjectsStore().items = [projectSummary({ id: projectId(1), name: 'website', outputStyle })]
+      api.customizations.list.mockResolvedValue(customizationList({ items: [styleEntry(), styleEntry({ name: 'pirate', label: 'Pirate', source: 'plugin', pluginId: 'fun-pack', path: undefined })] }))
+      usePluginsStore().items = [pluginSummary({ id: 'fun-pack', name: 'Fun pack' })]
+    }
+
+    function styleRow(value: string): HTMLElement {
+      return bodyAll(byTestId(testIds.outputStyleOption, `[data-value="${value}"]`))[0]!
+    }
+
+    it('fetches the catalog of the chat\'s scope and resolves Automatic to the project\'s style', async () => {
+      seedStyles('terse')
+      const { wrapper } = mountComposer({ projectId: projectId(1) })
+      await flushPromises()
+      expect(api.customizations.list).toHaveBeenCalledWith({ query: { projectId: projectId(1) } })
+      const trigger = wrapper.get(byTestId(testIds.outputStyleTrigger))
+      expect(trigger.attributes()).toMatchObject({ 'data-value': 'terse', 'data-source': 'automatic', 'aria-label': 'Output style: Terse (automatic)' })
+
+      await trigger.trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+      expect(bodyAll(byTestId(testIds.outputStyleOption)).map(option => option.dataset.value)).toEqual(['', 'default', 'explanatory', 'learning', 'terse', 'pirate'])
+      expect(styleRow('').textContent).toContain('Uses Terse, set for website')
+      expect(styleRow('pirate').textContent).toContain('Fun pack')
+      wrapper.unmount()
+    })
+
+    it('reads the global default without a project style, and refetches the catalog on a project change', async () => {
+      seedStyles(null)
+      useSettingsStore().settings = { ...useSettingsStore().settings!, outputStyle: 'learning' }
+      const { wrapper, state } = mountComposer({ projectId: projectId(1) })
+      await flushPromises()
+      expect(wrapper.get(byTestId(testIds.outputStyleTrigger)).attributes('data-value')).toBe('learning')
+      expect(api.customizations.list).toHaveBeenCalledTimes(1)
+      state.projectId = null
+      await flushPromises()
+      expect(api.customizations.list).toHaveBeenCalledTimes(2)
+      expect(api.customizations.list).toHaveBeenLastCalledWith({ query: {} })
+      wrapper.unmount()
+    })
+
+    it('a pick in the menu sets the chat\'s style, is announced and gives focus back to the textarea', async () => {
+      seedStyles()
+      const { wrapper, state, textarea, announcer } = mountComposer({ projectId: projectId(1) })
+      await flushPromises()
+      await wrapper.get(byTestId(testIds.outputStyleTrigger)).trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+      styleRow('terse').click()
+      await flushPromises()
+      expect(state.outputStyle).toBe('terse')
+      expect(announcer().text()).toBe('Output style: Terse')
+      expect(document.activeElement).toBe(textarea().element)
+      const trigger = wrapper.get(byTestId(testIds.outputStyleTrigger))
+      expect(trigger.attributes()).toMatchObject({ 'data-value': 'terse', 'data-source': 'chat' })
+      expect(trigger.get('[data-slot="output-style-label"]').text()).toBe('Terse')
+      wrapper.unmount()
+    })
+
+    it('/output-style opens the menu; with a name or auto it sets the style and clears the input', async () => {
+      seedStyles()
+      const { wrapper, state, composer, textarea, announcer } = mountComposer({ projectId: projectId(1) })
+      await flushPromises()
+      await type(textarea(), '/output-style')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(textarea().element.value).toBe('')
+      expect(bodyAll(byTestId(testIds.outputStyleOption)).length).toBeGreaterThan(0)
+      press(document.activeElement!, { key: 'Escape' })
+      await flushPromises()
+
+      await type(textarea(), '/output-style Terse')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(state.outputStyle).toBe('terse')
+      expect(textarea().element.value).toBe('')
+      expect(announcer().text()).toBe('Output style: Terse')
+
+      await type(textarea(), '/output-style auto')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(state.outputStyle).toBeNull()
+      expect(announcer().text()).toBe('Output style: Default (automatic)')
+      expect(composer().emitted('update:outputStyle')).toEqual([['terse'], [null]])
+      expect(composer().emitted('submit')).toBeUndefined()
+      wrapper.unmount()
+    })
+
+    it('/output-style explains an unknown name and keeps the text', async () => {
+      const { wrapper, composer, textarea } = mountComposer()
+      await type(textarea(), '/output-style pirate')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(mock.toastError).toHaveBeenCalledWith('Unknown output style "pirate". Use auto, default, explanatory, learning or a style from the menu.')
+      expect(textarea().element.value).toBe('/output-style pirate')
+      expect(composer().emitted('update:outputStyle')).toBeUndefined()
+      wrapper.unmount()
+    })
+
+    it('/output-style opens no menu for an image model, but a name still sets the style', async () => {
+      seedStores({ models: [sonnet, gptImage] })
+      const { wrapper, state, textarea } = mountComposer({ modelRef: gptImage.ref })
+      await type(textarea(), '/output-style')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(bodyAll(byTestId(testIds.outputStyleOption))).toHaveLength(0)
+      // A later text model does not find the menu open.
+      state.modelRef = sonnet.ref
+      await flushPromises()
+      expect(bodyAll(byTestId(testIds.outputStyleOption))).toHaveLength(0)
+      await type(textarea(), '/output-style learning')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(state.outputStyle).toBe('learning')
+      wrapper.unmount()
+    })
+
+    it('lists user-invocable skills in the Skills group, last, and inserts them like commands', async () => {
+      api.commands.list.mockResolvedValue({
+        items: [
+          { name: 'review', description: 'Review a file', source: 'project' },
+          { name: 'release-notes', kind: 'skill', description: 'Write release notes', source: 'user', argumentHint: '<version>' },
+        ],
+      })
+      api.projectTrust.list.mockResolvedValue(projectTrustList({ items: [] }))
+      const { wrapper, composer, textarea } = mountComposer({ projectId: projectId(1) })
+      await flushPromises()
+      await type(textarea(), '/re')
+      const rows = wrapper.findAll(byTestId(testIds.slashMenuItem)).map(item => `${item.attributes('data-group')}:${item.attributes('data-value')}`)
+      expect(rows).toEqual(['app:remember', 'project:review', 'skill:release-notes'])
+      await type(textarea(), '/rel')
+      press(textarea().element, { key: 'Tab' })
+      await flushPromises()
+      expect(textarea().element.value).toBe('/release-notes ')
+      expect(wrapper.get(byTestId(testIds.slashArgumentHint)).text()).toContain('<version>')
+      await type(textarea(), '/release-notes 1.7')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(composer().emitted('submit')).toEqual([[{ text: '/release-notes 1.7', files: [] }]])
+      wrapper.unmount()
+    })
+
+    it('marks project commands with pending shell lines "Needs approval" once the trust list loaded', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      api.commands.list.mockResolvedValue({ items: [{ name: 'deploy', description: 'Deploy the app', source: 'project' }, { name: 'status', description: 'Git status', source: 'project' }] })
+      api.projectTrust.list.mockResolvedValue(projectTrustList({
+        items: [trustCommandItem({ state: 'pending', label: '/deploy', detail: { name: 'deploy', spans: ['./deploy.sh'] } }), trustCommandItem()],
+      }))
+      const { wrapper, composer, textarea } = mountComposer({ projectId: projectId(1) })
+      await flushPromises()
+      // Lazily: nothing until the slash menu opens.
+      expect(api.projectTrust.list).not.toHaveBeenCalled()
+      await type(textarea(), '/')
+      await flushPromises()
+      expect(api.projectTrust.list).toHaveBeenCalledWith({ params: { id: projectId(1) } })
+      const deploy = wrapper.get(`${byTestId(testIds.slashMenuItem)}[data-value="deploy"]`)
+      expect(deploy.attributes('data-trust')).toBe('pending')
+      expect(deploy.text()).toContain('Needs approval')
+      expect(wrapper.get(`${byTestId(testIds.slashMenuItem)}[data-value="status"]`).attributes('data-trust')).toBeUndefined()
+
+      // Reopening within 15 s uses the loaded list.
+      await type(textarea(), '')
+      await type(textarea(), '/')
+      await flushPromises()
+      expect(api.projectTrust.list).toHaveBeenCalledTimes(1)
+
+      // Selecting it still inserts it, and it is sent as typed.
+      await type(textarea(), '/dep')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(textarea().element.value).toBe('/deploy ')
+      await type(textarea(), '/deploy prod')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(composer().emitted('submit')).toEqual([[{ text: '/deploy prod', files: [] }]])
+      wrapper.unmount()
+    })
+
+    it('fetches no trust list without project commands or outside projects', async () => {
+      api.commands.list.mockResolvedValue({ items: [{ name: 'standup', description: 'Draft my standup notes', source: 'user' }] })
+      const project = mountComposer({ projectId: projectId(1) })
+      await flushPromises()
+      await type(project.textarea(), '/')
+      await flushPromises()
+      project.wrapper.unmount()
+      const plain = mountComposer()
+      await type(plain.textarea(), '/')
+      await flushPromises()
+      plain.wrapper.unmount()
+      expect(api.projectTrust.list).not.toHaveBeenCalled()
+    })
+
+    it('a refusal stays while the refused text is back, links the textarea and clears when the text changes', async () => {
+      const { wrapper, composer, textarea } = mountComposer()
+      const exposed = composer().vm as unknown as ChatComposerExposed
+      await type(textarea(), 'Here is my key sk-test')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(textarea().element.value).toBe('')
+
+      // The host may show the refusal before it restores the input.
+      exposed.showRefusal({ code: 'hook-blocked', reason: 'Don\'t paste API keys into the chat.', event: 'UserPromptSubmit', source: 'project', command: null })
+      exposed.restoreInput({ text: 'Here is my key sk-test', files: [] })
+      await flushPromises()
+      const refusal = wrapper.get(byTestId(testIds.composerRefusal))
+      expect(refusal.attributes()).toMatchObject({ 'data-code': 'hook-blocked', 'data-event': 'UserPromptSubmit', 'role': 'alert' })
+      expect(refusal.text()).toContain('UserPromptSubmit · Project hook')
+      expect(textarea().element.value).toBe('Here is my key sk-test')
+      expect(textarea().attributes('aria-describedby')).toBe(refusal.attributes('id'))
+      expect(document.activeElement).toBe(textarea().element)
+      // At the top of the card: before the text.
+      const card = textarea().element.closest('[data-slot="input-group"]')!
+      expect(refusal.element.parentElement).toBe(card)
+      expect(refusal.classes()).toContain('order-first')
+
+      // Esc never dismisses it.
+      press(textarea().element, { key: 'Escape' })
+      await flushPromises()
+      expect(wrapper.find(byTestId(testIds.composerRefusal)).exists()).toBe(true)
+
+      // Typing does.
+      await type(textarea(), 'Here is my key')
+      await flushPromises()
+      expect(wrapper.find(byTestId(testIds.composerRefusal)).exists()).toBe(false)
+      expect(textarea().attributes('aria-describedby')).toBeUndefined()
+      wrapper.unmount()
+    })
+
+    it('an untrusted refusal names the command from the refused text and Review… opens its trust item', async () => {
+      api.projectTrust.list.mockResolvedValue(projectTrustList({
+        items: [trustCommandItem({ state: 'pending', sha256: 'f'.repeat(64), label: '/deploy', detail: { name: 'deploy', spans: ['./deploy.sh'] } })],
+      }))
+      await useProjectTrustStore().fetch(projectId(1))
+      const { wrapper, composer } = mountComposer({ projectId: projectId(1) })
+      const exposed = composer().vm as unknown as ChatComposerExposed
+      const shot = fileRef('shot.png', 'image/png')
+      exposed.restoreInput({ text: '/deploy prod', files: [shot] })
+      exposed.showRefusal({ code: 'untrusted', reason: 'Approve the shell lines of /deploy first.', event: null, source: null, command: null })
+      await flushPromises()
+      const refusal = wrapper.get(byTestId(testIds.composerRefusal))
+      expect(refusal.text()).toContain('/deploy runs shell lines you haven\'t approved.')
+      expect(wrapper.get(byTestId(testIds.composerAttachment)).attributes('data-state')).toBe('done')
+      // The restored command keeps the slash menu closed.
+      expect(wrapper.find(byTestId(testIds.slashMenu)).exists()).toBe(false)
+      await wrapper.get(byTestId(testIds.composerRefusalReview)).trigger('click')
+      expect(chatViewActions.openProjectTrust).toHaveBeenCalledWith('f'.repeat(64))
+      expect(wrapper.find(byTestId(testIds.composerRefusal)).exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('a refusal clears when the chat changes', async () => {
+      const { wrapper, state, composer } = mountComposer()
+      const exposed = composer().vm as unknown as ChatComposerExposed
+      exposed.showRefusal({ code: 'hook-blocked', reason: 'No.', event: null, source: null, command: null })
+      await flushPromises()
+      expect(wrapper.find(byTestId(testIds.composerRefusal)).exists()).toBe(true)
+      state.chatId = chatId(2)
+      await flushPromises()
       expect(wrapper.find(byTestId(testIds.composerRefusal)).exists()).toBe(false)
       wrapper.unmount()
     })

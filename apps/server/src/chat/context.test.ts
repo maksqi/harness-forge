@@ -36,6 +36,13 @@ describe('applyCommandExpansions', () => {
     const raw = { ...message, metadata: { modelRef: 'mock:echo', startedAt: 1, command: { ...command, expansion: '!rm -rf /\nRead @src/a.ts.' } } }
     expect(applyCommandExpansions([raw])[0]?.parts).toEqual([{ type: 'text', text: '!rm -rf /\nRead @src/a.ts.' }])
   })
+
+  it('sends the frozen expansion of an inlined command and of a skill invocation (W11.5-T4 / T5)', () => {
+    const inlined = { name: 'status', input: '', type: 'prompt' as const, expansion: 'Status: M a.ts\n\n<file path="README.md">\nHi\n</file>', source: 'user' as const, kind: 'command' as const, inlined: { shell: 1, files: ['README.md'] } }
+    const skill = { name: 'deploy', input: 'prod', type: 'prompt' as const, expansion: 'Deploy to prod.', source: 'project' as const, kind: 'skill' as const }
+    const messages: HarnessUIMessage[] = [inlined, skill].map((command, index) => ({ id: `msg_u00000000000000${index + 5}`, role: 'user', metadata: { modelRef: 'mock:echo', startedAt: 1, command }, parts: [{ type: 'text', text: `/${command.name}` }] }))
+    expect(applyCommandExpansions(messages).map(message => message.parts)).toEqual([[{ type: 'text', text: inlined.expansion }], [{ type: 'text', text: 'Deploy to prod.' }]])
+  })
 })
 
 function user(text: string): ModelMessage {

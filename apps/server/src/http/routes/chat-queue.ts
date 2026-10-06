@@ -8,6 +8,9 @@
 //   the parts are normalized like the parts of `POST /chat` (`normalizeUserParts`); every change emits `queue.changed`.
 // - `DELETE /chat/:id/queue/:itemId` (`204`): `404` once the message was delivered or started (or never queued); the
 //   removal is synchronous, like the step boundary that takes the queue, so a cancel either wins or answers 404.
+// - Phase 11 (ADR-048, W11.2): `UserPromptSubmit` runs synchronously before the item is queued (the queue's `add`,
+//   `runQueuedPromptHooks`): a block is `409` `conflict` with `details: { reason: 'hook-blocked', chatId, hook }` and
+//   queues nothing; a context is kept with the item (attached when it is delivered, never part of the answered item).
 // - No fresh auth (a session can already send messages); never logs message contents.
 import type { QueueList } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'

@@ -10,6 +10,13 @@
 // `provider.changed` / `catalog.changed`. `refresh` re-reads a plugin's row and files for its DTO without loading it
 // (after the editor re-pinned its trust hash).
 //
+// Plugin API 1.5.0 (ADR-048, ADR-052; W11.7): a declarative manifest with command hooks (`contributes.hooks`) or a
+// `` !`cmd` `` span in a command template requires trust like one with a stdio MCP server (`manifestRequiresTrust`;
+// `runsCode` follows it). Its contributions, the command hooks (`registry.hookCommands`, through the runtime) and
+// output styles (`registry.styles`) included, are registered only by a load, so they exist only while the plugin is
+// active and trusted; disable, reload, uninstall and safe mode remove them. The pin still covers `plugin.json` only:
+// a script that a hook calls is not pinned.
+//
 // Robustness: operations on one plugin are serialized; a failing plugin ends in `error` / `incompatible` /
 // `untrusted` and never breaks `start()` or other plugins; the boot sentinel (`plugins.loading_since`) skips a plugin
 // that crashed the process while loading; disposal runs `dispose()` (5 s), unregisters every contribution and aborts
@@ -48,10 +55,10 @@ import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 import { settingsValuesSchema } from '@harness-forge/plugin-sdk'
 import {
-  declaresStdioMcpServer,
   HarnessError,
   isBuiltinProviderId,
   isPluginNamespacedId,
+  manifestRequiresTrust,
   MOCK_PROVIDER_ID,
   PLUGIN_ID_PATTERN,
   settingsPropertyValueSchema,
@@ -305,7 +312,9 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       removable: !builtin,
       enabled: entry.record?.enabled ?? true,
       state: entry.state,
-      runsCode: !builtin && (kind === 'code' || (entry.valid && declaresStdioMcpServer(entry.manifest))),
+      // A declarative plugin runs commands exactly when it requires trust: a stdio MCP server or (plugin API 1.5.0)
+      // command hooks or `!` spans in a command template.
+      runsCode: !builtin && (kind === 'code' || (entry.valid && manifestRequiresTrust(entry.manifest))),
       contributions: contributionsOf(entry),
       lastError: entry.lastError,
       installedAt: entry.record?.installedAt ?? now,
@@ -547,7 +556,8 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
     })
     entry.runtime = runtime
     try {
-      await guard(id, () => registerDeclaredContributions(runtime.ctx, manifest), { timeoutMs: GUARD_TIMEOUTS.setup, phase: 'load', label: 'contributions' })
+      // Plugin API 1.5.0: the command hooks of the manifest go through the runtime (no `ctx` API), owned like the rest.
+      await guard(id, () => registerDeclaredContributions(runtime.ctx, manifest, runtime), { timeoutMs: GUARD_TIMEOUTS.setup, phase: 'load', label: 'contributions' })
       let module: LoadedModule | null = entry.builtin ? entry.builtin.module as LoadedModule : null
       const deadline = Date.now() + GUARD_TIMEOUTS.setup
       if (!module && outputFile !== null) {
@@ -739,7 +749,7 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
     if (read.requiresTrust && !isPinned(record, read)) {
       await teardown(entry, true)
       setState(entry, 'untrusted', null)
-      log(id, 'warn', 'Not loaded: the plugin runs code (or starts a program) and its files are not trusted. Review and trust it to load it.')
+      log(id, 'warn', 'Not loaded: the plugin runs code (or starts a program or shell commands) and its files are not trusted. Review and trust it to load it.')
       return
     }
 

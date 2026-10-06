@@ -17,7 +17,7 @@ import { useChatsStore } from '~/stores/chats'
 import { useProjectTrustStore } from '~/stores/project-trust'
 import { useShellRulesStore } from '~/stores/shell-rules'
 import { testIds } from '~/utils/testids'
-import { chatId, chatSummary, projectId, projectSummary, shellRule, shellRuleId } from '~/utils/testing/fixtures'
+import { chatId, chatSummary, projectId, projectSummary, projectTrustList, shellRule, shellRuleId } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import ProjectsSettings from './ProjectsSettings.vue'
@@ -359,6 +359,26 @@ describe('projectsSettings', () => {
     const badge = byTestId(testIds.projectTrustPending, row(projectId(1)))!
     expect(badge.dataset.count).toBe('3')
     expect(badge.textContent?.trim()).toBe('3 to review')
+  })
+
+  it('fetches the trust list of every row with an available folder once per visit for its badge (Phase 11)', async () => {
+    api.projectTrust.list.mockImplementation(async ({ params }: { params: { id: string } }) => (params.id === projectId(1)
+      ? projectTrustList()
+      : projectTrustList({ items: [] })))
+    const third = projectSummary({ id: projectId(3), name: 'Docs', path: '/srv/workspaces/docs' })
+    await mountSettings([website, notes, third])
+    // The missing folder of Notes has no items: it is not scanned.
+    expect(api.projectTrust.list.mock.calls.map(call => call[0].params.id).sort()).toEqual([projectId(1), projectId(3)].sort())
+    expect(byTestId(testIds.projectTrustPending, row(projectId(1)))!.dataset.count).toBe('2')
+    expect(byTestId(testIds.projectTrustPending, row(projectId(3)))).toBeNull()
+    // A failed fetch stays quiet.
+    expect(mocks.toast.error).not.toHaveBeenCalled()
+  })
+
+  it('shows the project\'s own output style in the row meta (Phase 11)', async () => {
+    await mountSettings([projectSummary({ id: projectId(1), name: 'website', outputStyle: 'terse' }), notes])
+    expect(row(projectId(1)).querySelector('[data-slot="project-style"]')!.textContent).toBe('Style: terse')
+    expect(row(projectId(2)).querySelector('[data-slot="project-style"]')).toBeNull()
   })
 
   it('opens the instructions dialog of the row', async () => {

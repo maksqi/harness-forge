@@ -161,4 +161,36 @@ describe('noticePart', () => {
     expect(icons[1]).toMatch(/ban/)
     expect(icons[2]).toMatch(/wrench/)
   })
+
+  it('shows the Phase 11 notices with their icons and the server\'s text', () => {
+    const cases = [
+      ['output-style-unavailable', 'warning', 'The output style "terse" is not available, so the default style was used.', /feather/],
+      ['hook-continuation-limit', 'info', 'Stopped after 5 hook continuations in a row.', /webhook/],
+      ['project-mcp-unavailable', 'warning', 'The project MCP server "memory" is not ready, so its tools were not sent.', /server-off/],
+    ] as const
+    for (const [code, level, message, icon] of cases) {
+      const wrapper = mount(NoticePart, { props: { notice: { level, code, message } } })
+      const row = wrapper.get('[data-slot="notice-part"]')
+      expect(row.attributes()).toMatchObject({ 'data-code': code, 'data-level': level })
+      expect(row.text()).toContain(message)
+      expect(row.find('svg').classes().join(' ')).toMatch(icon)
+      // Outside a chat view (no CHAT_VIEW_ACTIONS) there is no action.
+      expect(row.find('[data-slot="notice-action"]').exists()).toBe(false)
+    }
+  })
+
+  it('opens the project\'s MCP servers from a project-mcp-unavailable notice inside a chat view', async () => {
+    const openProjectMcp = vi.fn()
+    const actions = { openModelPicker: vi.fn(), openProjectTrust: vi.fn(), openProjectMcp }
+    const notice = { level: 'warning', code: 'project-mcp-unavailable', message: 'The project MCP server "memory" is not ready, so its tools were not sent.' } as const
+    const wrapper = mount(NoticePart, { props: { notice }, global: { provide: { [CHAT_VIEW_ACTIONS as symbol]: actions } } })
+    const action = wrapper.get('[data-slot="notice-action"]')
+    expect(action.element.tagName).toBe('BUTTON')
+    expect(action.text()).toBe('MCP servers…')
+    await action.trigger('click')
+    expect(openProjectMcp).toHaveBeenCalledTimes(1)
+    expect(openProjectMcp).toHaveBeenCalledWith()
+    const other = mount(NoticePart, { props: { notice: { level: 'info', code: 'hook-continuation-limit', message: 'Stopped.' } }, global: { provide: { [CHAT_VIEW_ACTIONS as symbol]: actions } } })
+    expect(other.find('[data-slot="notice-action"]').exists()).toBe(false)
+  })
 })

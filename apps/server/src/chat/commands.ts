@@ -15,22 +15,34 @@
 // precedence) → the plugin registry. A project or personal command is loaded again (`customizations.load`: the file read
 // and validated through the discovery guards) and expanded with the shared `expandArguments` (`$ARGUMENTS`, `$1` …
 // `$9`, `{{input}}`; ≤ 64 KB); its invocation carries `source` and, when the definition declares them, `modelRef` (the
-// turn runs on it, `prepare.ts`) and `allowedTools` (the turn's tools narrow to them, `turnToolRestriction`). A body is
-// text: `!` lines are never run and `@file` references never expanded. A plugin command (also when the catalog lists it)
-// keeps the v1.5 path through the registry. `isServerCommandFor(deps, projectId, text)` tells the queue which queued
-// texts are server commands of the chat's project (`turnOnly`). Bodies and expansions are never logged.
-// Phase 11 (C37 seams, ADR-052; W11.5 implements the features): `CommandContext.expansion` (`CommandExpansionHost`,
-// built by `prepare.ts`) carries what `` !`cmd` `` spans and `@path` references of a command file need: the chat's
-// project folder (opened lazily, once), the shell switch and the trust check of a project command file's hash
-// (accepted, not used yet: a body is still text). `GET /commands` items carry `kind: 'command'` (user-invocable skills
-// join the list as `kind: 'skill'` in W11.5).
+// turn runs on it, `prepare.ts`) and `allowedTools` (the turn's tools narrow to them, `turnToolRestriction`). In Phase
+// 10 a body was text (`!` lines never run, `@file` never expanded; Phase 11 below). A plugin command (also when the
+// catalog lists it) keeps the v1.5 path through the registry. `isServerCommandFor(deps, projectId, text)` tells the
+// queue which queued texts are server commands of the chat's project (`turnOnly`). Bodies and expansions are never
+// logged.
+// Phase 11 (ADR-052, ARCHITECTURE.md 6.32; C37 seams, W11.5): `CommandContext.expansion` (`CommandExpansionHost`, built
+// by `prepare.ts`) carries what `` !`cmd` `` spans and `@path` references need: the chat's project folder (opened lazily,
+// once per turn), the shell switch and the trust check of a project command file's hash. With a host, the body of a
+// command file, a personal command or a plugin template is scanned with the shared `planCommandExpansion` BEFORE the
+// arguments are expanded (an argument is never inside a span) and expanded by `chat/inline/` (spans of trusted sources
+// only: personal commands, loaded plugins, approved project files, else 409 `untrusted`; a project chat, else 400; the
+// shell on, else 409 `disabled`; `@path` files in project chats only); a 64 KB floor is checked before anything runs.
+// The result is frozen in the invocation (`expansion`, `kind: 'command'`, `inlined { shell, files }`), so a regenerate
+// or a continuation (no host) never runs a span again; without a host, and for bodies without spans and (in project
+// chats) references, the Phase 10 expansion is unchanged. User-invocable skills (`user-invocable` not false) resolve
+// last: client → harness → definition command → plugin command → skill (a command wins a name); a skill expands its
+// content with `expandArguments` (text only, no spans) into a prompt invocation with `kind: 'skill'`. Names may have 64
+// characters (`SLASH_NAME_PATTERN`; commands stay at 32). `listServerCommands` / `isServerCommandFor` include the
+// skills. Span commands, outputs and file contents are never logged.
 import type { CommandDefinition, CommandRunResult } from '@harness-forge/plugin-sdk'
-import type { CommandInvocation, CommandSource, CommandSummary, CustomizationEntry, HarnessUIMessage } from '@harness-forge/shared'
+import type { CommandInvocation, CommandSource, CommandSummary, CustomizationEntry, CustomizationSource, HarnessUIMessage } from '@harness-forge/shared'
+import type { Logger } from '../logger.ts'
 import type { PluginHost } from '../plugins/types.ts'
 import type { Registry } from '../registry/types.ts'
 import type { CustomizationCatalog, CustomizationService, LoadedDefinition } from '../services/customizations/types.ts'
 import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { AppDeps } from '../types.ts'
+import type { CommandBodyExpansion, CommandBodySource } from './inline/index.ts'
 import { Buffer } from 'node:buffer'
 import {
   COMMAND_NAME_PATTERN,
@@ -42,8 +54,12 @@ import {
   isHarnessError,
   LIMITS,
   modelRefSchema,
+  planCommandExpansion,
+  skillInvocation,
+  SLASH_NAME_PATTERN,
 } from '@harness-forge/shared'
 import { GUARD_TIMEOUTS } from '../plugins/guard.ts'
+import { expandCommandPlan, minimalExpansion, needsInlining } from './inline/index.ts'
 
 export interface ParsedCommand {
   name: string
@@ -51,14 +67,15 @@ export interface ParsedCommand {
   input: string
 }
 
-const COMMAND_PREFIX = /^\/([a-z][\da-z-]{0,31})(?=\s|$)/
+/** `/name` of up to 64 characters (Phase 11: user-invocable skills; command names stay at 32). */
+const COMMAND_PREFIX = /^\/([a-z][\da-z-]{0,63})(?=\s|$)/
 
 /** `/name input` at the start of `text` (leading whitespace ignored), else null. */
 export function parseSlashCommand(text: string): ParsedCommand | null {
   const trimmed = text.trimStart()
   const match = trimmed.match(COMMAND_PREFIX)
   const name = match?.[1]
-  if (match === null || name === undefined || !COMMAND_NAME_PATTERN.test(name))
+  if (match === null || name === undefined || !SLASH_NAME_PATTERN.test(name))
     return null
   return { name, input: trimmed.slice(match[0].length).trim() }
 }
@@ -100,7 +117,7 @@ export interface CommandExpansionHost {
   readonly shellEnabled: boolean
   /** The trust hash `sha256` of a project command file is approved for `projectId` (`ProjectTrustService.approved`). */
   readonly trusted: (projectId: string, sha256: string) => Promise<boolean>
-  /** The chat's project, or null (spans and references need one: else 400). */
+  /** The chat's project, or null (spans need one: else 400; `@path` references then stay text). */
   readonly projectId: string | null
 }
 
@@ -116,9 +133,11 @@ export interface CommandContext {
   catalog?: CustomizationCatalog
   /**
    * Phase 11 (ADR-052): what `!` spans and `@path` references of a command file need (`prepare.ts`); absent = they are
-   * text (a regenerate re-resolves only reply commands). Accepted, not used yet (W11.5).
+   * text (a regenerate re-resolves only reply commands).
    */
   expansion?: CommandExpansionHost
+  /** Phase 11: the request's logger (counts and durations of spans only, never commands, outputs or contents). */
+  logger?: Logger
 }
 
 function tooLong(name: string): HarnessError {
@@ -144,8 +163,11 @@ export function compactNeedsChatModel(): HarnessError {
   return new HarnessError({ code: 'validation_error', message, details: { issues: [{ path: ['modelRef'], message, code: 'custom' }] } })
 }
 
-/** The optional Phase 10 fields of a prompt invocation (a command file's `source`, `modelRef`, `allowedTools`). */
-type InvocationExtras = Pick<CommandInvocation, 'source' | 'modelRef' | 'allowedTools'>
+/**
+ * The optional fields of a prompt invocation: a command file's `source`, `modelRef`, `allowedTools` (Phase 10), the
+ * `kind` and what a body `inlined` (Phase 11).
+ */
+type InvocationExtras = Pick<CommandInvocation, 'source' | 'modelRef' | 'allowedTools' | 'kind' | 'inlined'>
 
 function promptResolution(name: string, input: string, expansion: string, extras: InvocationExtras = {}): CommandResolution {
   if (Buffer.byteLength(expansion, 'utf8') > LIMITS.commandExpansionBytes)
@@ -206,10 +228,53 @@ function definitionUnavailable(name: string, error: unknown): HarnessError {
   )
 }
 
+/** `kind: 'command'` and `inlined` of an expansion that inlined something; nothing otherwise (the v1.6 shape). */
+function inlinedExtras(expansion: CommandBodyExpansion): InvocationExtras {
+  return expansion.inlined === undefined ? {} : { kind: 'command', inlined: expansion.inlined }
+}
+
+/**
+ * The expansion of a command body (Phase 11, ADR-052). With an expansion host and something to inline (spans; `@path`
+ * references in a project chat), the body is scanned before the arguments, refused above 64 KB before anything runs,
+ * and expanded by `chat/inline/` (the checks, the spans, the files); otherwise `fallback()` (the Phase 10 expansion:
+ * `expandArguments` for definitions, `expandTemplate` for plugin templates).
+ */
+async function bodyExpansion(
+  name: string,
+  body: string,
+  input: string,
+  source: CommandBodySource,
+  context: CommandContext,
+  fallback: () => string,
+): Promise<CommandBodyExpansion> {
+  const host = context.expansion
+  if (host === undefined)
+    return { text: fallback() }
+  const plan = planCommandExpansion(body)
+  if (!needsInlining(plan, host))
+    return { text: fallback() }
+  if (Buffer.byteLength(minimalExpansion(plan, input), 'utf8') > LIMITS.commandExpansionBytes)
+    throw tooLong(name)
+  return expandCommandPlan({ name, input, plan, source, host, signal: context.signal, ...(context.logger === undefined ? {} : { logger: context.logger }) })
+}
+
+/** The entry or definition cannot be used: the abort of a stopped run is rethrown, anything else is `definitionUnavailable`. */
+async function loadDefinition(services: CommandServices, entry: CustomizationEntry, name: string, signal: AbortSignal): Promise<LoadedDefinition> {
+  try {
+    return await services.customizations.load(entry, signal)
+  }
+  catch (error) {
+    if (signal.aborted)
+      throw error
+    throw definitionUnavailable(name, error)
+  }
+}
+
 /**
  * A project or personal command (Phase 10): the definition loaded again (`load`: the same guards as the discovery),
- * its body expanded with `expandArguments`. A definition that cannot be loaded any more is a `validation_error` on the
- * message (nothing is stored); the abort of a stopped run is rethrown.
+ * its body expanded with `expandArguments` (Phase 11: `bodyExpansion`, the spans and references of a trusted body). A
+ * definition that cannot be loaded any more is a `validation_error` on the message (nothing is stored); the abort of a
+ * stopped run is rethrown.
  */
 async function definitionResolution(
   services: CommandServices,
@@ -217,35 +282,60 @@ async function definitionResolution(
   parsed: ParsedCommand,
   context: CommandContext,
 ): Promise<CommandResolution> {
-  let loaded: LoadedDefinition
-  try {
-    loaded = await services.customizations.load(entry, context.signal)
-  }
-  catch (error) {
-    if (context.signal.aborted)
-      throw error
-    throw definitionUnavailable(parsed.name, error)
-  }
-  const definition = loaded.definition
+  const definition = (await loadDefinition(services, entry, parsed.name, context.signal)).definition
   if (definition.kind !== 'command')
     throw definitionUnavailable(parsed.name, new HarnessError({ code: 'validation_error', message: 'The definition is not a command.' }))
   const fields = definition.fields
   const source: CommandSource = entry.source
   const modelRef = commandModelRef(fields.model)
   const allowedTools = commandAllowedTools(fields.allowedTools)
-  const expansion = expandArguments(fields.body, parsed.input).text
-  return promptResolution(parsed.name, parsed.input, expansion, {
+  const expansion = await bodyExpansion(parsed.name, fields.body, parsed.input, entry.source, context, () => expandArguments(fields.body, parsed.input).text)
+  return promptResolution(parsed.name, parsed.input, expansion.text, {
     source,
     ...(modelRef === undefined ? {} : { modelRef }),
     ...(allowedTools === undefined ? {} : { allowedTools }),
+    ...inlinedExtras(expansion),
   })
 }
 
+/** The source of a skill invocation or listing (`CommandSource` has no `builtin`: a builtin is the harness's). */
+function skillSource(source: CustomizationSource): CommandSource {
+  return source === 'builtin' ? 'harness' : source
+}
+
 /**
- * The command invoked by `text`, or null when the text is not a harness command, a command of the run catalog or a
- * registered server-side command. Throws `validation_error` when a prompt expansion is larger than 64 KB, a `/compact`
- * focus longer than 1000 characters or a command definition can no longer be loaded, and the abort reason when the run
- * was stopped; a failing `run` is returned as `failed`.
+ * The active user-invocable skill of `name` in the catalog (Phase 11, ADR-052: `user-invocable` not false), else null
+ * (no catalog, no such skill, or a client or harness command name, which a skill never takes).
+ */
+export function invocableSkill(catalog: CustomizationCatalog | null | undefined, name: string): CustomizationEntry | null {
+  if (catalog === null || catalog === undefined || isClientCommand(name) || isHarnessCommand(name) || !SLASH_NAME_PATTERN.test(name))
+    return null
+  const entry = catalog.skill(name)
+  return entry !== null && entry.kind === 'skill' && entry.state === 'active' && entry.userInvocable !== false ? entry : null
+}
+
+/**
+ * A user-invocable skill run as `/name [arguments]` (Phase 11, ADR-052): its content loaded again (`load`) and expanded
+ * with `expandArguments` (text only: no spans, no references); a skill that is no longer user-invocable or cannot be
+ * loaded is a `validation_error` on the message.
+ */
+async function skillResolution(services: CommandServices, entry: CustomizationEntry, parsed: ParsedCommand, context: CommandContext): Promise<CommandResolution> {
+  const definition = (await loadDefinition(services, entry, parsed.name, context.signal)).definition
+  if (definition.kind !== 'skill')
+    throw definitionUnavailable(parsed.name, new HarnessError({ code: 'validation_error', message: 'The definition is not a skill.' }))
+  if (!skillInvocation(definition.fields).userInvocable)
+    throw definitionUnavailable(parsed.name, new HarnessError({ code: 'validation_error', message: 'The skill can no longer be run as a command.' }))
+  const expansion = expandArguments(definition.fields.content, parsed.input).text
+  return promptResolution(parsed.name, parsed.input, expansion, { kind: 'skill', source: skillSource(entry.source) })
+}
+
+/**
+ * The command invoked by `text`, or null when the text is not a harness command, a command of the run catalog, a
+ * registered server-side command or (Phase 11) a user-invocable skill of the run catalog. Throws `validation_error` when
+ * a prompt expansion is larger than 64 KB, a `/compact` focus longer than 1000 characters or a command definition can no
+ * longer be loaded, and (Phase 11, with `context.expansion`) the errors of `!` spans: `validation_error` without a
+ * project (or its folder), `conflict` `disabled` with the shell off, `conflict` `untrusted` for a project command file
+ * whose trust hash is not approved; the abort reason when the run was stopped; a failing `run` is returned as `failed`.
  */
 export async function resolveCommand(
   services: CommandServices,
@@ -261,12 +351,19 @@ export async function resolveCommand(
   if (definitionEntry !== null)
     return definitionResolution(services, definitionEntry, parsed, context)
   const registered = services.registry.commands.get(parsed.name)
-  if (registered === undefined)
-    return null
+  if (registered === undefined) {
+    // Phase 11: a user-invocable skill comes last (a command of any source wins the name).
+    const skill = invocableSkill(context.catalog, parsed.name)
+    return skill === null ? null : skillResolution(services, skill, parsed, context)
+  }
   const { name, input } = parsed
   const definition: CommandDefinition = registered.definition
-  if (definition.template !== undefined)
-    return promptResolution(name, input, expandTemplate(definition.template, input))
+  const template = definition.template
+  if (template !== undefined) {
+    // A loaded plugin's template is a trusted source of spans (Phase 11); without spans or references: `expandTemplate`.
+    const expansion = await bodyExpansion(name, template, input, 'plugin', context, () => expandTemplate(template, input))
+    return promptResolution(name, input, expansion.text, inlinedExtras(expansion))
+  }
   const run = definition.run
   if (run === undefined)
     return null
@@ -296,8 +393,9 @@ export async function resolveCommand(
  * The effective server-side commands of a scope (`GET /commands`), sorted by name: `/compact`, then one entry per name
  * of the catalog's project and personal commands and the plugin registry (a project or personal command wins its name
  * over a plugin command: the catalog's precedence). Plugin commands come from the live registry (a catalog that still
- * lists a disposed plugin's command does not bring it back); client and harness names are never taken. Every entry is
- * `kind: 'command'` (Phase 11).
+ * lists a disposed plugin's command does not bring it back); client and harness names are never taken. Every command
+ * is `kind: 'command'`; the catalog's active user-invocable skills (Phase 11, ADR-052) follow as `kind: 'skill'` with
+ * their `argumentHint` (and `pluginId` for a plugin skill) unless a command has the name.
  */
 export function listServerCommands(registry: Pick<Registry, 'commands'>, catalog: CustomizationCatalog | null): CommandSummary[] {
   const byName = new Map<string, CommandSummary>()
@@ -323,14 +421,28 @@ export function listServerCommands(registry: Pick<Registry, 'commands'>, catalog
       ...(modelRef === undefined ? {} : { modelRef }),
     })
   }
+  for (const listed of catalog?.skills() ?? []) {
+    const entry = byName.has(listed.name) ? null : invocableSkill(catalog, listed.name)
+    if (entry === null || entry.name !== listed.name)
+      continue
+    byName.set(entry.name, {
+      name: entry.name,
+      kind: 'skill',
+      description: entry.description,
+      source: skillSource(entry.source),
+      ...(entry.source === 'plugin' && entry.pluginId !== undefined ? { pluginId: entry.pluginId } : {}),
+      ...(entry.argumentHint === undefined ? {} : { argumentHint: entry.argumentHint }),
+    })
+  }
   return [...HARNESS_COMMAND_SUMMARIES.map(summary => ({ ...summary })), ...byName.values()]
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 }
 
 /**
  * True when `text` starts a server command in a chat of `projectId` (null = no project): the harness command
- * `/compact`, a command a plugin registered, and (Phase 10) every active command file or personal command of the
- * project's catalog (`deps.customizations.catalog`, cached). The queue marks such items `turnOnly` (never steered).
+ * `/compact`, a command a plugin registered, (Phase 10) every active command file or personal command of the project's
+ * catalog (`deps.customizations.catalog`, cached) and (Phase 11) every active user-invocable skill of that catalog. The
+ * queue marks such items `turnOnly` (never steered).
  * Client commands (`/model`, `/remember`) and plain text are never server commands. A catalog that cannot be read
  * (it never rejects by contract) adds nothing: the v1.5 answer (harness and plugin commands only).
  */
@@ -342,7 +454,7 @@ export async function isServerCommandFor(deps: Pick<AppDeps, 'registry' | 'custo
     return true
   try {
     const catalog = await deps.customizations.catalog(projectId)
-    return definitionCommand(catalog, parsed.name) !== null
+    return definitionCommand(catalog, parsed.name) !== null || invocableSkill(catalog, parsed.name) !== null
   }
   catch {
     return false

@@ -8,7 +8,9 @@
 // kinds plus the hooks (`CustomizeTab`, `tabOf`, `?tab=agents|commands|skills|output-styles|hooks`; the styles tab's
 // value is its folder name, so `kindFolders` keeps matching); the draft gains the style's `keepCodingInstructions` and
 // the skill's `userInvocable` / `modelInvocable` (the skill reuses `argumentHint`); the row menu gains `review` (a
-// project command whose `!` lines wait for approval) and `set-default` (Use by default, a style).
+// project command whose `!` lines wait for approval) and `set-default` (Use by default, a style). W11.8 (P11-A): the style
+// rows (label, coding-instructions meta, default badges), the skill meta (`/name`, "Only when you run it"), the style's
+// label kept on save (`CustomizationDraft.label`, CCR) and the Phase 11 copy.
 import type {
   CommandSummary,
   Customization,
@@ -18,6 +20,8 @@ import type {
   CustomizationSource,
   DefinitionDiagnostic,
   ParsedDefinition,
+  ProjectTrustList,
+  TrustItem,
 } from '@harness-forge/shared'
 import {
   AGENT_NAME_PATTERN,
@@ -31,6 +35,7 @@ import {
   isHarnessCommand,
   isReservedAgentName,
   parseDefinition,
+  styleNameFromLabel,
 } from '@harness-forge/shared'
 import { CLIENT_COMMAND_DESCRIPTIONS } from '~/components/chat/composer/slash-commands'
 
@@ -59,6 +64,11 @@ export interface CustomizationDraft {
   userInvocable?: boolean
   /** + Phase 11 (skills, ADR-052): not `disable-model-invocation` (off = "Only when you run it"); absent = on. */
   modelInvocable?: boolean
+  /**
+   * + Phase 11 (styles, W11.8 CCR): the style's name as written (`name: My Style`); kept on save while the slug in `name`
+   * still matches it. Absent = the slug.
+   */
+  label?: string
 }
 
 /** The `?tab=` value of each kind (Phase 11: output styles, ADR-051). */
@@ -245,6 +255,9 @@ export function rowMetaItems(
   modelName: (ref: string) => string = ref => ref,
 ): RowMetaItem[] {
   const items: RowMetaItem[] = [{ text: sourceLabel(entry, pluginName) }]
+  // + Phase 11: a style shown by its label keeps its slug in the meta line.
+  if (entry.kind === 'style' && displayName(entry) !== entry.name)
+    items.push({ text: entry.name, mono: true })
   if (entry.path) {
     const short = middleTruncate(entry.path)
     items.push(short === entry.path ? { text: entry.path, mono: true } : { text: short, mono: true, title: entry.path })
@@ -257,11 +270,67 @@ export function rowMetaItems(
     items.push({ text: entry.tools ? `${entry.tools.length} tool${entry.tools.length === 1 ? '' : 's'}` : 'All tools' })
   else if (entry.kind === 'command' && entry.tools)
     items.push({ text: `Tools limited to ${entry.tools.length}` })
+  // + Phase 11 (ADR-052): a skill in the slash menu shows how to run it; one the agent does not load by itself says so.
+  if (entry.kind === 'skill' && entry.userInvocable !== false)
+    items.push({ text: `/${entry.name}`, mono: true })
   if (entry.argumentHint)
     items.push({ text: entry.argumentHint, mono: true })
+  if (entry.kind === 'skill' && entry.modelInvocable === false)
+    items.push({ text: 'Only when you run it' })
+  // + Phase 11 (ADR-051): what a style does with the coding instructions.
+  if (entry.kind === 'style')
+    items.push({ text: entry.keepCodingInstructions ? 'Keeps coding instructions' : 'Replaces coding instructions' })
   if (entry.source === 'builtin' && entry.kind === 'command')
     items.push({ text: RESERVED_COMMAND_NOTE })
   return items
+}
+
+/** + Phase 11: the name a row shows: commands as `/name`, styles by their label, the rest by their name. */
+export function displayName(entry: Pick<CustomizationEntry, 'kind' | 'name' | 'label'>): string {
+  if (entry.kind === 'command')
+    return `/${entry.name}`
+  if (entry.kind === 'style')
+    return entry.label?.trim() || entry.name
+  return entry.name
+}
+
+/** + Phase 11: the output style defaults a row is (docs/UI.md 9.13): the global one and the selected project's. */
+export interface StyleDefaults {
+  /** The setting `outputStyle`. */
+  global: string
+  /** The selected project's style (null = Same as your default, or no project). */
+  project: string | null
+  /** The selected project's name, or null without a project. */
+  projectName: string | null
+}
+
+/** + Phase 11: the default badges of a style row: "Your default" and "Default in {project}". */
+export function styleDefaultBadges(entry: Pick<CustomizationEntry, 'kind' | 'name' | 'state'>, defaults: StyleDefaults | null): string[] {
+  if (entry.kind !== 'style' || !defaults || entry.state === 'shadowed' || entry.state === 'invalid')
+    return []
+  const badges: string[] = []
+  if (entry.name === defaults.global)
+    badges.push('Your default')
+  if (defaults.projectName !== null && defaults.project !== null && entry.name === defaults.project)
+    badges.push(`Default in ${defaults.projectName}`)
+  return badges
+}
+
+/** + Phase 11: true when "Use by default" would change nothing (the style is already the default of the scope). */
+export function isScopeDefault(entry: Pick<CustomizationEntry, 'name'>, defaults: StyleDefaults | null): boolean {
+  if (!defaults)
+    return false
+  return defaults.projectName !== null ? defaults.project === entry.name : defaults.global === entry.name
+}
+
+/**
+ * + Phase 11 (ADR-049, ADR-052): the pending trust item of a project command with `` !`cmd` `` lines (the same file in the
+ * project's trust list), else null: the row shows "Needs approval" and Review….
+ */
+export function pendingCommandTrust(entry: Pick<CustomizationEntry, 'kind' | 'source' | 'path'>, trust: ProjectTrustList | null): TrustItem | null {
+  if (entry.kind !== 'command' || entry.source !== 'project' || !entry.path || !trust)
+    return null
+  return trust.items.find(item => item.kind === 'command' && item.state === 'pending' && item.path === entry.path) ?? null
 }
 
 /** The texts of `rowMetaItems` (paths in full, models as their refs). */
@@ -327,6 +396,8 @@ export function draftFromDefinition(definition: ParsedDefinition): Customization
         argumentHint: null,
         body: fields.content,
         keepCodingInstructions: fields.keepCodingInstructions,
+        // The name as written; formatDefinition writes it back while the slug matches.
+        ...(fields.label && fields.label !== fields.name ? { label: fields.label } : {}),
       }
     }
   }
@@ -444,8 +515,11 @@ export function draftDefinition(draft: CustomizationDraft): ParsedDefinition {
         },
       }
     }
-    case 'style':
-      return { kind: 'style', fields: { name, label: name, description, keepCodingInstructions: draft.keepCodingInstructions ?? false, content: draft.body } }
+    case 'style': {
+      // The label as written survives while the name is still its slug (a renamed style takes the new name).
+      const label = draft.label?.trim() && styleNameFromLabel(draft.label) === name ? draft.label.trim() : name
+      return { kind: 'style', fields: { name, label, description, keepCodingInstructions: draft.keepCodingInstructions ?? false, content: draft.body } }
+    }
   }
 }
 
@@ -595,7 +669,7 @@ export function deleteCopy(kind: CustomizationKind, name: string): { title: stri
     : kind === 'command'
       ? `Chats that used it keep their messages. You can't run /${name} anymore.`
       : kind === 'style'
-        ? 'Chats that used it keep their messages and use the default style from now on.'
+        ? 'Chats that use it fall back to Default.'
         : 'Chats that used it keep their messages. The agent can\'t load it anymore.'
   return { title: `Delete ${name}?`, description, confirm: `Delete ${KIND_LABEL[kind]}`, toast: `Deleted ${name}` }
 }
@@ -623,7 +697,7 @@ export const EDITOR_COPY: Readonly<Record<CustomizationKind, { title: string, bo
   style: {
     title: 'output style',
     body: 'Instructions',
-    bodyHelp: 'How the agent should write its replies. They go first in its instructions.',
+    bodyHelp: 'How the agent writes its replies. They go first in the main agent\'s instructions, never in sub-agents\'.',
     save: 'Save output style',
   },
 }
@@ -658,7 +732,7 @@ export const EDITOR_FIELD_COPY: Readonly<Record<CustomizationKind, {
     saved: 'Skill saved',
   },
   style: {
-    descriptionHelp: 'Shown in the output style menu.',
+    descriptionHelp: 'Shown in the composer\'s style menu.',
     toolsLabel: 'Tools',
     toolsAll: 'All tools the chat allows',
     modelNone: 'The chat\'s model',
@@ -671,7 +745,7 @@ export const PERSONAL_EMPTY: Readonly<Record<CustomizationKind, string>> = {
   agent: 'No personal agents yet. An agent is a sub-agent with its own instructions and tools that the main agent can start.',
   command: 'No personal commands yet. A command is a saved prompt you run with /name.',
   skill: 'No personal skills yet. A skill is a set of instructions the agent loads when a task needs it.',
-  style: 'No personal output styles yet. An output style changes how the agent writes its replies.',
+  style: 'No personal output styles yet. A style changes how the agent writes its replies.',
 }
 
 export function projectEmpty(kind: CustomizationKind, project: string): string {

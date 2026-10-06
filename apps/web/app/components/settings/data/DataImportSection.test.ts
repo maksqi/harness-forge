@@ -68,7 +68,7 @@ describe('dataImportSection (Phase 10)', () => {
     await chooseBackup()
     const restore = byTestId(testIds.dataImportRestoreSettings)!
     expect(restore.closest('[data-slot="field"]')?.textContent)
-      .toContain('General and appearance settings, and your personal agents, commands and skills. A personal definition you already have with the same name is kept.')
+      .toContain('General and appearance settings, and your personal agents, commands, skills and output styles. A personal definition you already have with the same name is kept; commands with shell lines come back turned off.')
     restore.click()
     await flushPromises()
     byTestId(testIds.dataImport)!.click()

@@ -6,7 +6,9 @@ import type { AssembledTools } from './tools.ts'
 import { AGENT_TOOL_NAMES, LIMITS, toolModeSchema } from '@harness-forge/shared'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { mockAgentTypeNames, mockSkillNames } from '../builtin-plugins/mock/agents.ts'
+import { mockHooksStyleText } from '../builtin-plugins/mock/hooks.ts'
 import { createSilentLogger } from '../logger.ts'
+import { builtinRunOutputStyle, DEFAULT_RUN_OUTPUT_STYLE } from './output-style.ts'
 import {
   AGENT_TYPES_HEADER,
   agentBlocks,
@@ -26,6 +28,7 @@ import {
   runMaxSteps,
   SKILLS_HEADER,
   skillsBlock,
+  styleBlock,
   TASK_HINT,
   TODO_HINT,
   workspaceBlock,
@@ -522,5 +525,103 @@ describe('the agent-types and skills blocks (Phase 10, W10.3-T6)', () => {
     expect(listed.instructions).toBe(['Global.', TASK_HINT, agentTypesBlock(TYPES), skillsBlock(SKILLS), 'Chat.'].join('\n\n'))
     const none = await buildRunParams(input({ agentTypes: TYPES, skills: SKILLS }))
     expect(none.instructions).toBe('Global.\n\nChat.')
+  })
+})
+
+describe('output styles and model-invocable skills (Phase 11, W11.6-T5 / T6)', () => {
+  const PROJECT = {
+    name: 'Demo app',
+    root: '/srv/projects/demo',
+    instructions: 'Project rules.',
+    projectFile: { name: 'AGENTS.md' as const, content: 'Run the tests.', truncated: false },
+  }
+  const TOOLS = ['read_file', 'edit_file', 'write_file', 'shell']
+  const TYPES = [{ name: 'explore', description: 'Read-only search.' }]
+  const SKILLS = [
+    { name: 'pdf', description: 'Reads PDF files.' },
+    { name: 'internal', description: 'Internal notes.', modelInvocable: false },
+    { name: 'deploy', description: 'Deploys.', modelInvocable: true },
+  ]
+  const TERSE = { name: 'terse', label: 'Terse Replies', content: 'Answer in three lines at most.\n', keepCodingInstructions: false }
+  const base = {
+    globalInstructions: 'Global.',
+    chatInstructions: 'Chat.',
+    workspace: PROJECT,
+    workspaceTools: TOOLS,
+    platform: 'linux' as const,
+    toolMode: 'edits' as const,
+    agentTools: ['todo_write', 'task', 'skill'],
+    agentTypes: TYPES,
+    skills: SKILLS,
+  }
+
+  it('puts the style block first; keep-coding-instructions false drops the tool rules and the todo / task hints only', () => {
+    const plain = runInstructions(base)
+    const styled = runInstructions({ ...base, outputStyle: TERSE })
+    expect(styled).toBe([
+      'Output style: Terse Replies\n\nAnswer in three lines at most.',
+      'Global.',
+      'Project "Demo app", folder /srv/projects/demo (Linux).',
+      agentTypesBlock(TYPES),
+      skillsBlock(SKILLS),
+      'Instructions from AGENTS.md in the project folder:\n\nRun the tests.',
+      'Project rules.',
+      'Chat.',
+    ].join('\n\n'))
+    expect(styled).not.toContain(TODO_HINT)
+    expect(styled).not.toContain(TASK_HINT)
+    expect(styled).not.toContain('- Use paths relative to the project folder.')
+    // What `mock:hooks` reports for `style?`.
+    expect(mockHooksStyleText(styled)).toBe('Style: Terse Replies | workspace-rules: no | todo-hint: no')
+    expect(mockHooksStyleText(plain)).toBe('Style: none | workspace-rules: yes | todo-hint: yes')
+    // Keeping the coding instructions: the same text as without a style, the block first.
+    const kept = runInstructions({ ...base, outputStyle: { ...TERSE, keepCodingInstructions: true } })
+    expect(kept).toBe(`Output style: Terse Replies\n\nAnswer in three lines at most.\n\n${plain}`)
+    expect(mockHooksStyleText(kept)).toBe('Style: Terse Replies | workspace-rules: yes | todo-hint: yes')
+    // Plan mode keeps its block (and the listings) with keep = false.
+    const plan = runInstructions({ ...base, toolMode: 'plan', agentTools: ['task', 'exit_plan_mode'], outputStyle: TERSE })
+    expect(plan).toContain(planModeBlock(true))
+    expect(plan).toContain(agentTypesBlock(TYPES))
+    expect(plan).not.toContain(TASK_HINT)
+    // Without a workspace there is no head line to keep.
+    expect(runInstructions({ ...base, workspace: null, outputStyle: TERSE }).split('\n\n').slice(0, 3)).toEqual(['Output style: Terse Replies', 'Answer in three lines at most.', 'Global.'])
+  })
+
+  it('default, null and absent add nothing; builtin styles keep the coding instructions', () => {
+    const plain = runInstructions(base)
+    expect(runInstructions({ ...base, outputStyle: DEFAULT_RUN_OUTPUT_STYLE })).toBe(plain)
+    expect(runInstructions({ ...base, outputStyle: null })).toBe(plain)
+    // An empty body adds no block (and its keep flag still applies).
+    expect(runInstructions({ ...base, outputStyle: { ...TERSE, content: '  ' } }).startsWith('Global.')).toBe(true)
+    const explanatory = runInstructions({ ...base, outputStyle: builtinRunOutputStyle('explanatory') })
+    expect(explanatory.startsWith('Output style: Explanatory\n\nBesides doing the task')).toBe(true)
+    expect(explanatory).toContain(TODO_HINT)
+    expect(mockHooksStyleText(explanatory)).toBe('Style: Explanatory | workspace-rules: yes | todo-hint: yes')
+    expect(styleBlock(null)).toBeNull()
+    expect(styleBlock(DEFAULT_RUN_OUTPUT_STYLE)).toBeNull()
+    expect(styleBlock({ label: '', content: 'Body.' })).toBe('Output style: Custom\n\nBody.')
+  })
+
+  it('buildRunParams: the block first for the main agent, before the chat.params hooks; a child without a style has none', async () => {
+    let seen = ''
+    const run: HookRun = async (name, ...args) => {
+      if (name === 'chat.params')
+        seen = (args[1] as { instructions: string }).instructions
+    }
+    const main = await buildRunParams(input({ run, agentTools: ['todo_write'], outputStyle: TERSE }))
+    expect(main.instructions).toBe(['Output style: Terse Replies\n\nAnswer in three lines at most.', 'Global.', 'Chat.'].join('\n\n'))
+    expect(seen).toBe(main.instructions)
+    // Sub-agents never pass `outputStyle`: their instructions have no block and keep the hints.
+    const child = await buildRunParams(input({ agentTools: ['todo_write'] }))
+    expect(child.instructions).toBe(['Global.', TODO_HINT, 'Chat.'].join('\n\n'))
+    expect(mockHooksStyleText(child.instructions!)).toBe('Style: none | workspace-rules: no | todo-hint: yes')
+  })
+
+  it('the skills block lists only model-invocable skills (disable-model-invocation leaves a skill out)', () => {
+    const block = skillsBlock(SKILLS)
+    expect(block).toBe([SKILLS_HEADER, '- deploy: Deploys.', '- pdf: Reads PDF files.'].join('\n'))
+    expect(mockSkillNames(block)).toEqual(['deploy', 'pdf'])
+    expect(skillsBlock([{ name: 'internal', description: 'Internal.', modelInvocable: false }])).toBe('')
+    expect(agentBlocks('ask', ['skill'], { skills: [{ name: 'internal', description: 'Internal.', modelInvocable: false }] })).toEqual([])
   })
 })

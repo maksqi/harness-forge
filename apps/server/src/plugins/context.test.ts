@@ -197,6 +197,60 @@ describe('plugin context', () => {
     expect(registry.skills.owner('notes')).toBe('other-plugin')
   })
 
+  it('ctx.outputStyles registers owned output styles (plugin API 1.5.0) and surfaces conflicts and validation errors', async () => {
+    const { runtime, registry, logs } = await setup({ ...BASE_MANIFEST, engines: { harness: '^1.5.0' } })
+    const { ctx } = runtime
+    const changes: string[] = []
+    registry.styles.onChange(change => changes.push(`${change.action}:${change.pluginId}:${change.key}`))
+    registry.styles.register('other-plugin', { name: 'theirs', description: 'Theirs.', content: 'x' })
+    const terse = ctx.outputStyles.register({ name: 'terse', description: 'Short answers.', content: 'Be brief.' })
+    ctx.outputStyles.register({ name: 'teacher', description: 'Explains.', content: 'Explain.', keepCodingInstructions: true })
+    expect(registry.styles.get('terse')).toEqual({ pluginId: 'ctx-test', definition: { name: 'terse', description: 'Short answers.', content: 'Be brief.', keepCodingInstructions: false } })
+    expect(registry.contributions('ctx-test')).toMatchObject({ outputStyles: ['teacher', 'terse'] })
+    expect(() => ctx.outputStyles.register({ name: 'theirs', description: 'Mine.', content: 'x' })).toThrow(expect.objectContaining({
+      code: 'conflict',
+      message: 'The output style "theirs" is already registered by the plugin "other-plugin".',
+    }))
+    expect(() => ctx.outputStyles.register({ name: 'explanatory', description: 'Mine.', content: 'x' })).toThrow(expect.objectContaining({ code: 'validation_error', message: expect.stringContaining('builtin style') }))
+    expect(() => ctx.outputStyles.register({ name: 'big', description: 'Mine.', content: 'x'.repeat(65_537) })).toThrow(expect.objectContaining({ code: 'validation_error' }))
+
+    terse.dispose()
+    expect(registry.styles.get('terse')).toBeUndefined()
+    runtime.disposeContributions()
+    expect(registry.contributions('ctx-test')).toMatchObject({ outputStyles: [] })
+    // Refused registrations are not tracked: the other plugin keeps its style.
+    expect(registry.styles.owner('theirs')).toBe('other-plugin')
+    expect(changes).toEqual([
+      'added:other-plugin:theirs',
+      'added:ctx-test:terse',
+      'added:ctx-test:teacher',
+      'removed:ctx-test:terse',
+      'removed:ctx-test:teacher',
+    ])
+    // Styles are data: no permission is involved.
+    expect(logs).toEqual([])
+    expect(() => ctx.outputStyles.register({ name: 'late', description: 'Late.', content: 'x' })).toThrow(expect.objectContaining({ code: 'plugin_error' }))
+  })
+
+  it('registerHookCommands (host-only) registers the manifest hooks with the plugin folder as root, owned by the plugin', async () => {
+    const { runtime, registry } = await setup({ ...BASE_MANIFEST, engines: { harness: '^1.5.0' } })
+    const hooks = { Stop: [{ hooks: [{ type: 'command' as const, command: 'sh "$HARNESS_PLUGIN_ROOT/stop.sh"' }] }] }
+    runtime.registerHookCommands(hooks)
+    expect(registry.hookCommands.get('ctx-test')).toEqual({
+      pluginId: 'ctx-test',
+      root: '/plugins/ctx-test',
+      hooks: [{ event: 'Stop', matcher: null, command: 'sh "$HARNESS_PLUGIN_ROOT/stop.sh"', timeoutSec: null, position: [0, 0] }],
+      diagnostics: [],
+    })
+    expect(registry.contributions('ctx-test').commandHooks).toBe(1)
+    expect(() => runtime.registerHookCommands(hooks)).toThrow(expect.objectContaining({ code: 'conflict' }))
+    // Plugin code has no API to add command hooks.
+    expect(Object.keys(runtime.ctx)).not.toContain('hookCommands')
+    runtime.disposeContributions()
+    expect(registry.hookCommands.get('ctx-test')).toBeUndefined()
+    expect(() => runtime.registerHookCommands(hooks)).toThrow(expect.objectContaining({ code: 'plugin_error' }))
+  })
+
   it('returns settings copies and runs onChange callbacks on update', async () => {
     const { runtime, registry } = await setup()
     const { ctx } = runtime

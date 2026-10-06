@@ -17,13 +17,19 @@
 // styles tab renders through the kind sections, the Hooks tab through HooksPanel (`projectId`, `projectName`), and the
 // exposed `create()` / `import()` follow the tab (on the Hooks tab they open the hook editor and the hook import). The
 // row action `review` (a project command whose `!` lines wait for approval) opens the project trust dialog of the
-// selected project (ProjectTrustDialog, mounted here); `set-default` (Use by default, a style) is W11.8's.
+// selected project (ProjectTrustDialog, mounted here, focused on the command's trust item).
+// W11.8 (P11-A): the Output styles tab shows StyleScopeBar above its sections (the global default without a project,
+// the project's style with one); `set-default` (Use by default) writes the setting `outputStyle` without a project and
+// `projects.update(id, { outputStyle })` with one; the rows get the style defaults and the pending command trust through
+// `CUSTOMIZE_ROW_CONTEXT` (the project's trust list is loaded with the catalog); the Hooks tab counts the scope's hooks
+// (`useHooksStore().list(projectId)`, fetched with the catalog); the empty-state buttons name the kind ("New output
+// style").
 import type { Customization, CustomizationEntry, CustomizationKind } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
 import type { CustomizationAction, CustomizationDraft, CustomizeTab } from './customize'
 import { CUSTOMIZATION_KINDS } from '@harness-forge/shared'
 import { FileUpIcon, PlusIcon, TriangleAlertIcon } from '@lucide/vue'
-import { computed, markRaw, nextTick, onMounted, ref, shallowRef, useId, useTemplateRef, watch } from 'vue'
+import { computed, markRaw, nextTick, onMounted, provide, ref, shallowRef, useId, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -31,13 +37,17 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { styleOptions } from '~/components/chat/composer/output-style'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import ProjectTrustDialog from '~/components/projects/trust/ProjectTrustDialog.vue'
 import { useCustomizationsStore } from '~/stores/customizations'
+import { useHooksStore } from '~/stores/hooks'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectTrustStore } from '~/stores/project-trust'
 import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
+import { useSettingsStore } from '~/stores/settings'
 import { downloadText } from '~/utils/download'
 import { hasErrorCode } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
@@ -59,11 +69,15 @@ import {
   freeName,
   importDraft,
   importTooLarge,
+  KIND_LABEL,
   kindFolders,
+  pendingCommandTrust,
   sectionsOf,
   tabOf,
 } from './customize'
+import { CUSTOMIZE_ROW_CONTEXT } from './customize-context'
 import HooksPanel from './HooksPanel.vue'
+import StyleScopeBar from './StyleScopeBar.vue'
 
 /** How long Undo stays offered after a delete. */
 const UNDO_MS = 5000
@@ -79,6 +93,9 @@ const projects = useProjectsStore()
 const plugins = usePluginsStore()
 const providers = useProvidersStore()
 const models = useModelsStore()
+const hooks = useHooksStore()
+const settings = useSettingsStore()
+const projectTrust = useProjectTrustStore()
 const root = useTemplateRef<HTMLElement>('root')
 const fileInput = useTemplateRef<HTMLInputElement>('fileInput')
 const hooksPanel = useTemplateRef<InstanceType<typeof HooksPanel>>('hooksPanel')
@@ -128,6 +145,17 @@ const counts = computed(() => Object.fromEntries(CUSTOMIZATION_KINDS.map(of => [
   sectionsByKind.value[of].reduce((sum, section) => sum + (section.source === 'project' && projectIssue.value ? 0 : section.entries.length), 0),
 ])) as Record<CustomizationKind, number>)
 
+/** + Phase 11: the hooks of the scope (the Hooks tab's count), once listed. */
+const hookCount = computed(() => {
+  const listed = hooks.list(projectId.value)
+  if (!listed)
+    return null
+  return listed.items.filter(entry => entry.source !== 'project' || listed.project?.available !== false).length
+})
+
+/** + Phase 11: the styles of the scope's scope bar (the built-ins first, then the active styles of the catalog). */
+const styleChoices = computed(() => styleOptions(customizations.entriesOf(projectId.value, 'style')))
+
 /** Folder-level problems of the project for this kind (a linked folder, too many files, an unreadable folder). */
 const folderNotices = computed(() => (list.value?.diagnostics ?? [])
   .filter(diagnostic => diagnostic.code !== 'project-unavailable' && (diagnostic.kind === undefined || diagnostic.kind === kind.value))
@@ -170,6 +198,10 @@ async function load(): Promise<void> {
   loading.value = true
   loadError.value = null
   try {
+    // + Phase 11: the Hooks tab's count and the project's trust items (Needs approval of command rows), quietly.
+    hooks.fetch(scope, { maxAgeMs: COMMANDS_MAX_AGE_MS }).catch(() => {})
+    if (scope !== null)
+      projectTrust.fetch(scope, { maxAgeMs: COMMANDS_MAX_AGE_MS }).catch(() => {})
     await Promise.all([
       customizations.fetchCatalog(scope, { refresh: true }),
       customizations.fetchCommands(scope, { maxAgeMs: COMMANDS_MAX_AGE_MS }).catch(() => []),
@@ -216,6 +248,18 @@ onMounted(() => {
     providers.fetchAll().catch(() => {})
   if (!models.loaded)
     models.fetchAll().catch(() => {})
+  // + Phase 11: the global output style (the scope bar and the "Your default" badges).
+  if (!settings.loaded)
+    settings.fetch().catch(() => {})
+})
+
+// ---------- the rows' context (Phase 11) ----------
+
+provide(CUSTOMIZE_ROW_CONTEXT, {
+  styleDefaults: computed(() => (settings.loaded
+    ? { global: settings.resolved.outputStyle, project: project.value?.outputStyle ?? null, projectName: projectId.value ? projectName.value ?? 'this project' : null }
+    : null)),
+  pendingTrust: entry => (projectId.value ? pendingCommandTrust(entry, projectTrust.trust(projectId.value)) : null),
 })
 
 /** Refetches the shown scope (after a change made here), ignoring failures. */
@@ -494,6 +538,25 @@ async function restore(kept: Customization): Promise<void> {
 
 /** The trust dialog of the selected project ("Review…" of a project command with pending `!` lines). */
 const trustOpen = ref(false)
+/** The trust item the dialog opens on (the command's sha256). */
+const trustFocus = ref<string | null>(null)
+
+// ---------- output styles (Phase 11, ADR-051) ----------
+
+/** Use by default: the global default without a project, the project's style with one. */
+async function setDefault(entry: CustomizationEntry): Promise<void> {
+  if (entry.kind !== 'style')
+    return
+  try {
+    if (projectId.value)
+      await projects.update(projectId.value, { outputStyle: entry.name })
+    else
+      await settings.update({ outputStyle: entry.name })
+  }
+  catch (error) {
+    toastError(error)
+  }
+}
 
 // ---------- dispatch ----------
 
@@ -523,8 +586,13 @@ function onAction(action: CustomizationAction, entry: CustomizationEntry): void 
         router.push(`/plugins/${entry.pluginId}`).catch(() => {})
       break
     case 'review':
-      if (projectId.value)
+      if (projectId.value) {
+        trustFocus.value = pendingCommandTrust(entry, projectTrust.trust(projectId.value))?.sha256 ?? null
         trustOpen.value = true
+      }
+      break
+    case 'set-default':
+      void setDefault(entry)
       break
   }
 }
@@ -544,12 +612,12 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
               :value="CUSTOMIZE_TAB_VALUES[of]"
               :data-testid="testIds.customizeTab"
               :data-value="CUSTOMIZE_TAB_VALUES[of]"
-              :data-count="list && of !== 'hook' ? counts[of] : undefined"
+              :data-count="of === 'hook' ? hookCount ?? undefined : list ? counts[of] : undefined"
               class="flex-none px-3 pointer-coarse:h-10"
             >
-              {{ TAB_LABELS[of] }}<template v-if="list && of !== 'hook'">
+              {{ TAB_LABELS[of] }}<template v-if="of === 'hook' ? hookCount !== null : list">
                 <span class="sr-only">, </span>
-                <span class="text-xs text-muted-foreground tabular-nums">{{ counts[of] }}</span>
+                <span class="text-xs text-muted-foreground tabular-nums">{{ of === 'hook' ? hookCount : counts[of as CustomizationKind] }}</span>
               </template>
             </TabsTrigger>
           </TabsList>
@@ -600,6 +668,12 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
           </div>
         </div>
         <template v-else-if="list">
+          <StyleScopeBar
+            v-if="of === 'style'"
+            :project-id="projectId"
+            :project-name="projectName"
+            :options="styleChoices"
+          />
           <CustomizationSection
             v-for="section in sectionsByKind[of]"
             :key="section.source"
@@ -627,7 +701,7 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
             <template v-if="section.source === 'user'" #empty-actions>
               <Button type="button" size="sm" data-action="new" class="pointer-coarse:h-10" @click="create">
                 <PlusIcon aria-hidden="true" data-icon="inline-start" />
-                New {{ of }}
+                New {{ KIND_LABEL[of] }}
               </Button>
               <Button type="button" size="sm" variant="outline" data-action="import" class="pointer-coarse:h-10" @click="importFile">
                 <FileUpIcon aria-hidden="true" data-icon="inline-start" />
@@ -662,7 +736,7 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
       :notes="editorNotes"
       @saved="onSaved"
     />
-    <ProjectTrustDialog v-model:open="trustOpen" :project-id="projectId" />
+    <ProjectTrustDialog v-model:open="trustOpen" :project-id="projectId" :focus-key="trustFocus" />
     <CustomizationViewer
       v-model:open="viewerOpen"
       :entry="viewerEntry"

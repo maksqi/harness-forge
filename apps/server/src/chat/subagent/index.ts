@@ -49,23 +49,34 @@
 // function (an `ask` is denied) and the `updatedInput` rewrite and `PostToolUse` in its tool wrapper, its step composer
 // gets the hooks piece (guard → hooks → finalize: a `PostToolUse` context reaches the child's next step) and a
 // `continue: false` hook stops it (an extra `stopWhen` condition); nothing of it is stored. A host without hooks: none.
+// W11.2: `SubagentStop` runs when a child (foreground or background: a detached host carries the hooks its task took)
+// would end `completed`, with the `task` call (its input and the report) for the code hooks; a block continues the child
+// for one more round (`streamText` again with the messages so far, its response messages and a feedback user message
+// `<hook-feedback event="SubagentStop">`; `stop_hook_active` from the second round), at most
+// `LIMITS.subagentStopContinuationsMax` times and within the child's step budget (each round gets the steps left, the
+// finalize nudge at its last one). Never stored; the rounds are logged without the reason. With such hooks the child's
+// usage is the sum of its steps.
 import type { AgentDefinitionFields, CustomizationEntry, RunOrigin, Settings, TaskAgent, TaskInput, TaskOutput, TaskStatus, TaskType, ToolMode } from '@harness-forge/shared'
 import type { ModelMessage, TextStreamPart, ToolSet } from 'ai'
+import type { Logger } from '../../logger.ts'
 import type { ResolvedModel } from '../../providers/types.ts'
 import type { CustomizationCatalog } from '../../services/customizations/types.ts'
+import type { HookEventResult } from '../../services/hooks/types.ts'
 import type { OpenWorkspace } from '../../services/projects/types.ts'
 import type { WorkspaceRunScopeInit } from '../../workspace/run-scope.ts'
 import type { RunSubagentOptions } from '../agent-scope.ts'
 import type { BackgroundLaunchInput, BackgroundTasks } from '../background/types.ts'
+import type { ChildHooks } from '../hooks.ts'
 import type { StepPiece } from '../steps.ts'
 import type { ChildSession } from './host.ts'
-import { AGENT_TYPE_ALIASES, isHarnessError, LIMITS } from '@harness-forge/shared'
+import { AGENT_TYPE_ALIASES, hookModelText, isHarnessError, LIMITS } from '@harness-forge/shared'
 import { isStepCount, streamText } from 'ai'
 import { BUILTIN_AGENT_DEFINITIONS, builtinAgentDefinition } from '../../builtin-plugins/core-agent/agents.ts'
 import { toolWorkspaceAccess } from '../approval.ts'
 import { BACKGROUND_STOPPED_TEXT } from '../background/types.ts'
 import { createContextGuard } from '../compaction/guard.ts'
 import { abortReason, isAbortError, mapRunError } from '../errors.ts'
+import { hookModelMessage } from '../hooks.ts'
 import { SUBAGENT_INSTRUCTIONS_MARKER } from '../markers.ts'
 import { buildRunParams, joinInstructions, orderAgentTypes } from '../params.ts'
 import { createPrepareStep, noopStepPiece } from '../steps.ts'
@@ -513,6 +524,44 @@ async function loadAgent(session: ChildSession, choice: AgentChoice, signal: Abo
   }
 }
 
+/** What `subagentStopFeedback` needs of the round that would complete. */
+interface SubagentStopRound {
+  /** 0 for the child's first round, then one more per continuation (`stop_hook_active` from round 1). */
+  readonly round: number
+  /** The `task` input with its resolved type. */
+  readonly task: TaskInput
+  /** The child's report so far. */
+  readonly report: string
+  /** The launching `task` call id. */
+  readonly callId: string
+}
+
+/**
+ * Runs `SubagentStop` for a child that would complete (Phase 11, ADR-048, W11.2) and answers the feedback user message
+ * of a block (`hookModelText` of a `continued` record: `<hook-feedback event="SubagentStop">`), or null when the child
+ * may end (no block, `continue: false`, a hook failure). Nothing is stored (`ChildHooks` only logs its records); the
+ * reason is never logged. Rejects only on an abort of `signal`.
+ */
+export async function subagentStopFeedback(hooks: ChildHooks, input: SubagentStopRound, signal: AbortSignal, logger: Logger): Promise<ModelMessage | null> {
+  let result: HookEventResult
+  try {
+    result = await hooks.subagentStop({ stopHookActive: input.round > 0, task: { callId: input.callId, input: input.task, output: input.report } }, signal)
+  }
+  catch (error) {
+    if (signal.aborted)
+      throw error
+    logger.warn('the SubagentStop hooks failed; the sub-agent ends', { err: error })
+    return null
+  }
+  if (result.record !== null)
+    logger.debug('a SubagentStop hook record is not stored', { outcome: result.record.outcome })
+  if (!result.block || !result.continue)
+    return null
+  const reason = result.reason ?? result.record?.reason ?? ''
+  const text = hookModelText({ event: 'SubagentStop', outcome: 'continued', reason }, 'user')
+  return text === null ? null : hookModelMessage(text)
+}
+
 /** One child on its host (see the module comment); never throws. */
 async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoice, control: ChildControl): AsyncGenerator<TaskOutput, void, undefined> {
   const { session } = host
@@ -603,58 +652,92 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
 
     const user: ModelMessage = { role: 'user', content: [{ type: 'text', text: task.prompt }] }
     let finalized = false
-    const prepareStep = createPrepareStep({
-      contextGuard: createContextGuard({ session, model, keptUser: async () => user, silent: true, signal }),
-      ...(hooks === null ? {} : { hooks: hooks.stepPiece() }),
-      steer: noopStepPiece,
-      finalize: finalizeStep(maxSteps, () => {
-        finalized = true
-      }),
-      logger,
-    })
     const hasTools = Object.keys(tools.tools).length > 0
-    const result = streamText({
-      model: model.model,
-      instructions: params.instructions,
-      messages: [user],
-      ...(hasTools ? { tools: tools.tools } : {}),
-      prepareStep,
-      toolApproval: tools.toolApproval,
-      stopWhen: hooks === null ? isStepCount(maxSteps) : [isStepCount(maxSteps), hooks.stopCondition],
-      abortSignal: signal,
-      maxRetries: CHILD_MAX_RETRIES,
-      providerOptions: params.providerOptions,
-      ...(Object.keys(params.headers).length > 0 ? { headers: params.headers } : {}),
-      ...(params.reasoning === undefined ? {} : { reasoning: params.reasoning }),
-      ...(params.temperature === undefined ? {} : { temperature: params.temperature }),
-      ...(params.maxOutputTokens === undefined ? {} : { maxOutputTokens: params.maxOutputTokens }),
-      onError: ({ error }) => {
-        if (!(signal.aborted && isAbortError(error)))
-          logger.debug('sub-agent model stream error', { modelRef: model.modelRef, err: error })
-      },
-    })
-
+    // Phase 11 (W11.2): with `SubagentStop` hooks the child may run more rounds, so its usage is the sum of its steps
+    // (the `finish` total of one round would hide the others).
+    const stopHooks = hooks !== null && hooks.has('SubagentStop')
     tracker = new RunTracker(now)
     const denials = new Map<string, string>()
     let failure: unknown = null
-    try {
-      for await (const part of result.stream) {
-        tracker.observe(part)
-        if (part.type === 'error') {
-          if (!(signal.aborted && isAbortError(part.error)))
-            failure ??= part.error
-          continue
+    let messages: ModelMessage[] = [user]
+    let stepsUsed = 0
+    for (let round = 0; ; round += 1) {
+      // Each round gets the steps the child has left (the finalize nudge at its last one).
+      const budget = Math.max(1, maxSteps - stepsUsed)
+      const prepareStep = createPrepareStep({
+        contextGuard: createContextGuard({ session, model, keptUser: async () => user, silent: true, signal }),
+        ...(hooks === null ? {} : { hooks: hooks.stepPiece() }),
+        steer: noopStepPiece,
+        finalize: finalizeStep(budget, () => {
+          finalized = true
+        }),
+        logger,
+      })
+      const result = streamText({
+        model: model.model,
+        instructions: params.instructions,
+        messages,
+        ...(hasTools ? { tools: tools.tools } : {}),
+        prepareStep,
+        toolApproval: tools.toolApproval,
+        stopWhen: hooks === null ? isStepCount(budget) : [isStepCount(budget), hooks.stopCondition],
+        abortSignal: signal,
+        maxRetries: CHILD_MAX_RETRIES,
+        providerOptions: params.providerOptions,
+        ...(Object.keys(params.headers).length > 0 ? { headers: params.headers } : {}),
+        ...(params.reasoning === undefined ? {} : { reasoning: params.reasoning }),
+        ...(params.temperature === undefined ? {} : { temperature: params.temperature }),
+        ...(params.maxOutputTokens === undefined ? {} : { maxOutputTokens: params.maxOutputTokens }),
+        onError: ({ error }) => {
+          if (!(signal.aborted && isAbortError(error)))
+            logger.debug('sub-agent model stream error', { modelRef: model.modelRef, err: error })
+        },
+      })
+
+      try {
+        for await (const part of result.stream) {
+          if (part.type !== 'finish' || !stopHooks)
+            tracker.observe(part)
+          if (part.type === 'finish-step')
+            stepsUsed += 1
+          if (part.type === 'error') {
+            if (!(signal.aborted && isAbortError(part.error)))
+              failure ??= part.error
+            continue
+          }
+          if (!observePart(part, progress, denials, session))
+            continue
+          if (part.type === 'finish-step')
+            progress.setUsage(toMessageUsage(tracker.usage, tracker.finalStepUsage), tracker.cost(model.entry.cost))
+          yield progress.snapshot('running')
         }
-        if (!observePart(part, progress, denials, session))
-          continue
-        if (part.type === 'finish-step')
-          progress.setUsage(toMessageUsage(tracker.usage, tracker.finalStepUsage), tracker.cost(model.entry.cost))
-        yield progress.snapshot('running')
       }
-    }
-    catch (error) {
-      if (!(signal.aborted && isAbortError(error)))
-        failure ??= error
+      catch (error) {
+        if (!(signal.aborted && isAbortError(error)))
+          failure ??= error
+      }
+
+      // `SubagentStop` (Phase 11, W11.2): only for a child that would complete.
+      if (!stopHooks || hooks === null || failure !== null || finalized || control.interrupted() !== null)
+        break
+      const feedback = await subagentStopFeedback(hooks, { round, task: { ...task, type: choice.name }, report: progress.report, callId: host.toolCallId }, signal, logger)
+      if (feedback === null)
+        break
+      if (round >= LIMITS.subagentStopContinuationsMax || stepsUsed >= maxSteps || hooks.stopRequested) {
+        logger.info('a SubagentStop hook blocked again; the sub-agent ends', { rounds: round + 1, cap: LIMITS.subagentStopContinuationsMax })
+        break
+      }
+      let responses: ModelMessage[]
+      try {
+        responses = await result.responseMessages
+      }
+      catch (error) {
+        if (!(signal.aborted && isAbortError(error)))
+          failure ??= error
+        break
+      }
+      logger.info('a SubagentStop hook blocked; the sub-agent continues', { round: round + 1 })
+      messages = [...messages, ...responses, feedback]
     }
 
     await settleUsage()

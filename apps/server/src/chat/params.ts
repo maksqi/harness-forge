@@ -9,10 +9,12 @@
 // project file (`AGENTS.md`, else `CLAUDE.md`) → the project's own instructions → the chat instructions. Steps:
 // `projectMaxSteps` for a chat with a project, else `maxSteps`; the `chat.params` output is clamped to
 // 1..`LIMITS.stepsMax` (200).
-// Phase 11 (C37 seams, ADR-051; W11.6 implements them): `RunParamsInput.outputStyle` (the run's output style,
-// `output-style.ts`; accepted, not used yet: its block will go first and `keepCodingInstructions: false` will drop the
-// workspace tool rules and the coding hints) and `agentBlocks(…, { codingHints })` (false leaves out the todo and `task`
-// hints; the plan block and the listings stay).
+// Phase 11 (C37 seams, ADR-051 / ADR-052; W11.6): `RunParamsInput.outputStyle` (the run's output style,
+// `output-style.ts`, the main agent only: sub-agents never pass one) puts its block (`outputStyleBlock`: `Output style:
+// <label>` and the body; `default` adds nothing) FIRST, before the global instructions, and `keepCodingInstructions:
+// false` drops the workspace tool rules (the head line stays) and the coding hints (`agentBlocks(…, { codingHints })`:
+// the todo and `task` hints; the plan block and the agent-type and skill listings stay, they are the format contract of
+// the mocks). The skills block lists only model-invocable skills (`disable-model-invocation: true` leaves a skill out).
 import type { ProviderOptions, ReasoningLevel, ReasoningParams } from '@harness-forge/plugin-sdk'
 import type { AgentToolName, CustomizationEntry, ImageAspectRatio, ReasoningEffort, Settings, ToolMode } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
@@ -21,7 +23,7 @@ import type { Registry } from '../registry/types.ts'
 import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { RunOutputStyle } from './output-style.ts'
 import process from 'node:process'
-import { AGENT_NAME_PATTERN, AGENT_TOOL_NAMES, BUILTIN_AGENT_TYPES, HTTP_HEADER_NAME_PATTERN, LIMITS } from '@harness-forge/shared'
+import { AGENT_NAME_PATTERN, AGENT_TOOL_NAMES, BUILTIN_AGENT_TYPES, HTTP_HEADER_NAME_PATTERN, LIMITS, outputStyleBlock } from '@harness-forge/shared'
 import { CORE_AGENT_PLUGIN_ID } from '../builtin-plugins/core-agent/index.ts'
 
 export interface RunParams {
@@ -140,8 +142,11 @@ export const TODO_HINT = 'Track multi-step work with todo_write: for a task with
 /** The hint of a run that offers `task` (ADR-043). */
 export const TASK_HINT = 'Delegate with task: a sub-agent works in its own context and returns only its report. Use type "explore" to search and read (read-only) and "general" when it also has to change things. Sub-agents cannot ask the user for approval (a call that needs approval is denied), and they do not see this conversation, so give each one a complete prompt: the goal, the relevant paths and facts, and what to report back. Several task calls in one step run in parallel; do small lookups yourself.'
 
-/** A catalog entry as the listings of the instructions read it (`CustomizationEntry` fits). */
-export type ListedEntry = Pick<CustomizationEntry, 'name' | 'description'>
+/**
+ * A catalog entry as the listings of the instructions read it (`CustomizationEntry` fits); `modelInvocable: false` (a
+ * skill with `disable-model-invocation: true`, Phase 11) keeps a skill out of the skills block.
+ */
+export type ListedEntry = Pick<CustomizationEntry, 'name' | 'description' | 'modelInvocable'>
 
 /**
  * The header line of the agent-types block (Phase 10, ADR-045). The block format is a contract with the mocks
@@ -216,10 +221,12 @@ export function agentTypesBlock(agentTypes: readonly ListedEntry[]): string {
 
 /**
  * The skills block (Phase 10, ADR-045): the active skills of the run's catalog by name, at most `LIMITS.skillsListedMax`,
- * descriptions on one line cut to `LIMITS.listedDescriptionMaxChars`; '' without entries.
+ * descriptions on one line cut to `LIMITS.listedDescriptionMaxChars`; '' without entries. Phase 11 (ADR-052): only the
+ * model-invocable ones (`modelInvocable !== false`).
  */
 export function skillsBlock(skills: readonly ListedEntry[]): string {
-  return listBlock(SKILLS_HEADER, listed(skills, LIMITS.skillsListedMax, (a, b) => compareNames(a.name, b.name)))
+  const invocable = skills.filter(entry => entry.modelInvocable !== false)
+  return listBlock(SKILLS_HEADER, listed(invocable, LIMITS.skillsListedMax, (a, b) => compareNames(a.name, b.name)))
 }
 
 /** The catalog listings of the agent blocks (Phase 10; `RunParamsInput.agentTypes` / `skills`). */
@@ -268,22 +275,35 @@ export function agentBlocks(toolMode: ToolMode | undefined, agentTools: readonly
 }
 
 /**
- * The instructions before the `chat.params` hooks: global → workspace block → agent blocks (plan block, todo hint,
- * `task` hint, agent types, skills) → project file → project instructions → chat instructions (each trimmed, empty
- * parts skipped, separated by a blank line). Without `toolMode` and `agentTools` there are no agent blocks.
+ * The instruction block of the run's output style (Phase 11, ADR-051): `Output style: <label>`, a blank line, the body;
+ * null without a style or for an empty body (`default`).
+ */
+export function styleBlock(style: Pick<RunOutputStyle, 'label' | 'content'> | null | undefined): string | null {
+  return style === null || style === undefined ? null : outputStyleBlock(style)
+}
+
+/**
+ * The instructions before the `chat.params` hooks: the output style block (Phase 11, the main agent only) → global →
+ * workspace block → agent blocks (plan block, todo hint, `task` hint, agent types, skills) → project file → project
+ * instructions → chat instructions (each trimmed, empty parts skipped, separated by a blank line). Without `toolMode`
+ * and `agentTools` there are no agent blocks. A style with `keepCodingInstructions: false` leaves the workspace block
+ * with its head line only and drops the todo and `task` hints.
  */
 export function runInstructions(
-  input: Pick<RunParamsInput, 'globalInstructions' | 'chatInstructions' | 'workspace' | 'workspaceTools' | 'platform' | 'agentTools' | 'agentTypes' | 'skills'> & { toolMode?: ToolMode },
+  input: Pick<RunParamsInput, 'globalInstructions' | 'chatInstructions' | 'workspace' | 'workspaceTools' | 'platform' | 'agentTools' | 'agentTypes' | 'skills' | 'outputStyle'> & { toolMode?: ToolMode },
 ): string {
   const workspace = input.workspace ?? null
+  const style = input.outputStyle ?? null
+  const keep = style === null || style.keepCodingInstructions !== false
   const listings: AgentListings = {
     ...(input.agentTypes === undefined ? {} : { agentTypes: input.agentTypes }),
     ...(input.skills === undefined ? {} : { skills: input.skills }),
   }
   return joinInstructions(
+    styleBlock(style),
     input.globalInstructions,
-    workspace === null ? undefined : workspaceBlock(workspace, input.workspaceTools ?? [], input.platform),
-    ...agentBlocks(input.toolMode, input.agentTools, listings),
+    workspace === null ? undefined : workspaceBlock(workspace, keep ? input.workspaceTools ?? [] : [], input.platform),
+    ...agentBlocks(input.toolMode, input.agentTools, listings, { codingHints: keep }),
     workspace === null ? undefined : projectFileInstructions(workspace.projectFile),
     workspace?.instructions,
     input.chatInstructions,
@@ -410,15 +430,16 @@ export interface RunParamsInput {
   agentTypes?: readonly Pick<CustomizationEntry, 'name' | 'description'>[]
   /**
    * The active skills of the run's catalog (Phase 10, ADR-045; `PreparedRun.catalog.skills()`): the skills block, only
-   * when `skill` is offered (`skillsBlock`: by name, at most `LIMITS.skillsListedMax`). Default none.
+   * when `skill` is offered (`skillsBlock`: by name, at most `LIMITS.skillsListedMax`; Phase 11: a skill with
+   * `modelInvocable: false` is left out). Default none.
    */
-  skills?: readonly Pick<CustomizationEntry, 'name' | 'description'>[]
+  skills?: readonly ListedEntry[]
   /** The OS named in the workspace block; default `process.platform`. */
   platform?: NodeJS.Platform
   /**
-   * The output style of the run (Phase 11, ADR-051; `PreparedRun.outputStyle`, the main agent only); null or absent =
-   * none. Accepted, not used yet (W11.6: its block first, `keepCodingInstructions: false` drops the workspace tool rules
-   * and the coding hints).
+   * The output style of the run (Phase 11, ADR-051; `PreparedRun.outputStyle`, the main agent only: sub-agents never
+   * pass one); null or absent = none. Its block goes first (`styleBlock`; `default` has none), and
+   * `keepCodingInstructions: false` drops the workspace tool rules and the coding hints.
    */
   outputStyle?: RunOutputStyle | null
   /** The step limit before the hooks (`runMaxSteps`). */

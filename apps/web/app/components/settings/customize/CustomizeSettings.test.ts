@@ -1,7 +1,8 @@
 // Settings -> Customize (docs/UI.md 2.17, 9.12, 10.7, 14; W10.8-T2 … T6): the page frame, the catalog load (refresh)
 // with its skeleton and error, the tabs with counts and the project select (both in the query), the source sections
 // with the Built-in commands, and the row actions: edit, duplicate, copy to personal, view, export, turn off, delete
-// with Undo, plus New and Import….
+// with Undo, plus New and Import…. Phase 11 (W11.8-T2, T6): the five tabs with the hooks count, the header buttons per
+// tab, the Output styles tab (scope bar, default badges, Use by default) and the review of a project command.
 import type { VueWrapper } from '@vue/test-utils'
 import type { ComputedRef } from 'vue'
 import type { MockApi } from '~/utils/testing/mock-api'
@@ -20,8 +21,15 @@ import {
   customizationEntry,
   customizationId,
   customizationList,
+  hookEntry,
+  hookList,
   projectId,
   projectSummary,
+  projectTrustList,
+  settings,
+  styleEntry,
+  trustCommandItem,
+  trustSha,
 } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import CustomizeSettings from './CustomizeSettings.vue'
@@ -83,6 +91,8 @@ beforeEach(() => {
   api.projects.list.mockResolvedValue({ items: [website, notes] })
   api.customizations.list.mockImplementation(async ({ query }: { query: { projectId?: string } }) => (query.projectId === projectId(1) ? projectList : globalList))
   api.commands.list.mockResolvedValue({ items: [commandSummary({ name: 'compact', description: 'Summarize the conversation', source: 'harness', pluginId: 'core-agent' })] })
+  api.hooks.list.mockResolvedValue(hookList({ items: [hookEntry()], project: undefined }))
+  api.settings.get.mockResolvedValue(settings())
 })
 
 afterEach(() => {
@@ -133,7 +143,7 @@ describe('settings customize page', () => {
   it('renders CustomizeSettings in the settings page frame with Import… and New {kind} following ?tab', async () => {
     await mountIn(CustomizePage)
     expect(byTestId(testIds.pageHeader)?.querySelector('h1')?.textContent).toBe('Customize')
-    expect(byTestId(testIds.pageHeader)?.textContent).toContain('Sub-agents, slash commands and skills: yours, your projects\' and your plugins\'.')
+    expect(byTestId(testIds.pageHeader)?.textContent).toContain('Agents, commands, skills, output styles and hooks: yours, your projects\' and your plugins\'.')
     expect(byTestId(testIds.customizeSettings)).not.toBeNull()
     expect(byTestId(testIds.customizeImport)?.textContent?.trim()).toBe('Import…')
     const create = byTestId(testIds.customizeNew)!
@@ -148,6 +158,28 @@ describe('settings customize page', () => {
     byTestId(testIds.customizeNew)!.click()
     await settle()
     expect(byTestId(testIds.customizationEditor)?.dataset).toMatchObject({ kind: 'skill', mode: 'new' })
+    document.body.querySelector<HTMLElement>('[data-slot="sheet-close"]')!.click()
+    await settle()
+
+    // Phase 11: the output styles and hooks tabs.
+    mocks.route!.query = { tab: 'output-styles' }
+    await settle()
+    expect(byTestId(testIds.customizeNew)?.textContent?.trim()).toBe('New output style')
+    expect(byTestId(testIds.customizeNew)?.dataset.kind).toBe('style')
+    byTestId(testIds.customizeNew)!.click()
+    await settle()
+    expect(byTestId(testIds.customizationEditor)?.dataset).toMatchObject({ kind: 'style', mode: 'new' })
+    expect(byTestId(testIds.customizationEditor)?.textContent).toContain('New output style')
+    document.body.querySelector<HTMLElement>('[data-slot="sheet-close"]')!.click()
+    await settle()
+
+    mocks.route!.query = { tab: 'hooks' }
+    await settle()
+    expect(byTestId(testIds.customizeNew)?.textContent?.trim()).toBe('New hook')
+    expect(byTestId(testIds.customizeNew)?.dataset.kind).toBe('hook')
+    byTestId(testIds.customizeNew)!.click()
+    await settle()
+    expect(byTestId(testIds.hookEditor)?.dataset.mode).toBe('new')
   })
 })
 
@@ -163,10 +195,11 @@ describe('customizeSettings', () => {
       // /compact and the seven client commands (Phase 11 adds /output-style).
       ['commands', '8', 'inactive'],
       ['skills', '0', 'inactive'],
-      // Phase 11 (ADR-051): the output styles tab; (ADR-048) the hooks tab, without a count until W11.8.
+      // Phase 11 (ADR-051): the output styles tab; (ADR-048) the hooks tab with the hooks of the scope.
       ['output-styles', '0', 'inactive'],
-      ['hooks', undefined, 'inactive'],
+      ['hooks', '1', 'inactive'],
     ])
+    expect(api.hooks.list).toHaveBeenCalledWith({ query: {} })
     expect(tabs[0]!.textContent?.replace(/\s+/g, ' ').trim()).toBe('Agents, 4')
     expect(byTestId(testIds.customizeProjectSelect)?.dataset.value).toBe('')
     expect(byTestId(testIds.customizeProjectSelect)?.textContent).toContain('No project')
@@ -200,6 +233,64 @@ describe('customizeSettings', () => {
     host.findComponent({ name: 'CustomizationSection' }).vm.$emit('action', 'review', customizationEntry())
     await settle()
     expect(byTestId(testIds.projectTrustDialog)?.textContent).toContain('Review website')
+  })
+
+  it('marks a project command with pending `!` lines and reviews it focused on its item (Phase 11)', async () => {
+    mocks.route!.query = { project: projectId(1), tab: 'commands' }
+    const deploy = customizationEntry({ kind: 'command', name: 'deploy', description: 'Deploy', source: 'project', path: '.harness/commands/deploy.md', tools: undefined })
+    api.customizations.list.mockResolvedValue({ ...projectList, items: [...projectList.items, deploy] })
+    api.projectTrust.list.mockResolvedValue(projectTrustList({ items: [trustCommandItem({ state: 'pending', path: '.harness/commands/deploy.md', sha256: trustSha(4) })] }))
+    const host = await mountIn(CustomizeSettings)
+    expect(api.projectTrust.list).toHaveBeenCalledWith({ params: { id: projectId(1) } })
+    const pending = row('deploy')
+    expect(pending.querySelector('[data-slot="customization-needs-approval"]')?.textContent?.trim()).toBe('Needs approval')
+    await chooseFromMenu('deploy', testIds.customizationReview)
+    expect(byTestId(testIds.projectTrustDialog)).not.toBeNull()
+    expect(host.findComponent({ name: 'ProjectTrustDialog' }).props('focusKey')).toBe(trustSha(4))
+  })
+
+  it('shows the output styles with the scope bar and the default badges, and uses a style by default (Phase 11)', async () => {
+    const builtins = [
+      styleEntry({ name: 'default', label: 'Default', description: 'The agent\'s usual replies.', source: 'builtin', path: undefined, keepCodingInstructions: true }),
+      styleEntry({ name: 'explanatory', label: 'Explanatory', description: 'Explains its choices.', source: 'builtin', path: undefined, keepCodingInstructions: true }),
+    ]
+    const terse = styleEntry({ name: 'terse', label: 'Terse', source: 'user', id: customizationId(3), path: undefined, keepCodingInstructions: false })
+    api.customizations.list.mockResolvedValue({ ...globalList, items: [...globalList.items, ...builtins, terse] })
+    api.settings.update.mockImplementation(async ({ body }: { body: object }) => settings(body))
+    mocks.route!.query = { tab: 'output-styles' }
+    await mountIn(CustomizeSettings)
+    expect(allByTestId(testIds.customizeTab).find(tab => tab.dataset.value === 'output-styles')?.dataset.count).toBe('3')
+    const bar = byTestId(testIds.customizeStyleDefault)!
+    expect(bar.dataset.value).toBe('default')
+    expect(sections().map(section => section.dataset.source)).toEqual(['user', 'builtin'])
+    const mine = row('terse')
+    expect(mine.dataset.kind).toBe('style')
+    expect(mine.textContent).toContain('Terse')
+    expect(mine.textContent).toContain('Replaces coding instructions')
+    expect(row('default').querySelector('[data-slot="style-default-badge"]')?.textContent?.trim()).toBe('Your default')
+    expect(mine.querySelector('[data-slot="style-default-badge"]')).toBeNull()
+
+    await chooseFromMenu('terse', testIds.customizationSetDefault)
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { outputStyle: 'terse' } })
+    expect(row('terse').querySelector('[data-slot="style-default-badge"]')?.textContent?.trim()).toBe('Your default')
+    expect(byTestId(testIds.customizeStyleDefault)?.dataset.value).toBe('terse')
+  })
+
+  it('sets a project\'s style from a row and badges it "Default in {project}" (Phase 11)', async () => {
+    const terse = styleEntry({ name: 'terse', label: 'Terse' })
+    api.customizations.list.mockImplementation(async ({ query }: { query: { projectId?: string } }) => (query.projectId === projectId(1)
+      ? { ...projectList, items: [...projectList.items, terse], project: { ...projectList.project!, folders: ['.harness/output-styles'] } }
+      : globalList))
+    api.projects.update.mockImplementation(async ({ body }: { body: object }) => ({ ...website, ...body }))
+    mocks.route!.query = { tab: 'output-styles', project: projectId(1) }
+    await mountIn(CustomizeSettings)
+    expect(byTestId(testIds.customizeStyleDefault)?.dataset.value).toBe('')
+    expect(byTestId(testIds.customizeSettings)?.textContent).toContain('Style in website')
+    const project = sections().find(section => section.dataset.source === 'project')!
+    expect(project.textContent).toContain('.harness/output-styles')
+    await chooseFromMenu('terse', testIds.customizationSetDefault)
+    expect(api.projects.update).toHaveBeenCalledWith({ params: { id: projectId(1) }, body: { outputStyle: 'terse' } })
+    expect(row('terse').querySelector('[data-slot="style-default-badge"]')?.textContent?.trim()).toBe('Default in website')
   })
 
   it('switches tabs through ?tab and lists the built-in commands without a menu', async () => {

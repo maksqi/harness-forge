@@ -44,7 +44,7 @@ import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { HarnessDataChunk } from './pipeline.ts'
 import type { StepPiece } from './steps.ts'
 import type { RunReleaseFollowUp } from './types.ts'
-import { claudeToolName, HOOK_PART_TYPE, hookChainLength, hookDataSchema, hookModelText, hookTargetNames, LIMITS } from '@harness-forge/shared'
+import { claudeToolName, createHookRecordId, HOOK_PART_TYPE, hookChainLength, hookDataSchema, hookModelText, hookTargetNames, LIMITS } from '@harness-forge/shared'
 import { isAbortError } from './errors.ts'
 import { isToolPart } from './history.ts'
 import { NOTICES } from './notices.ts'
@@ -85,6 +85,11 @@ export interface HookToolCall {
 export interface HookToolResult extends HookToolCall {
   /** The tool's output after `tool.after` (before the 64 KB cap). */
   readonly output: unknown
+  /**
+   * Plugin API 1.5.0: the `context` the plugin `tool.after` handlers set (text the model reads at its next step); it
+   * gets its own `PostToolUse` record (source `plugin`, label `tool.after`, outcome `context`).
+   */
+  readonly pluginContext?: string
 }
 
 /** What `PreToolUse` decided for one call (run in this run, or replayed from the stored record). */
@@ -402,6 +407,7 @@ class ToolHookRuntime implements ToolHooks {
   }
 
   async postToolUse(result: HookToolResult, signal: AbortSignal): Promise<void> {
+    this.pluginToolContext(result)
     if (!this.has('PostToolUse'))
       return
     let outcome: HookEventResult
@@ -426,6 +432,27 @@ class ToolHookRuntime implements ToolHooks {
     }
     if (!outcome.continue)
       this.requestStop(outcome.stopReason)
+  }
+
+  /** Records and queues the `context` of the plugin `tool.after` handlers (plugin API 1.5.0), when there is one. */
+  private pluginToolContext(result: HookToolResult): void {
+    const context = typeof result.pluginContext === 'string' ? result.pluginContext.trim().slice(0, LIMITS.hookContextMaxChars) : ''
+    if (context === '')
+      return
+    const record: HookData = {
+      id: createHookRecordId(),
+      event: 'PostToolUse',
+      outcome: 'context',
+      toolCallId: result.toolCallId,
+      toolName: result.toolName,
+      createdAt: Date.now(),
+      hooks: [{ source: 'plugin', label: 'tool.after', exitCode: null, durationMs: 0 }],
+      context,
+    }
+    this.record(record)
+    const text = hookModelText(record, 'assistant')
+    if (text !== null)
+      this.queue(text)
   }
 
   /** The composer piece of a child: appends the queued model texts (a chat run's piece also records the step). */

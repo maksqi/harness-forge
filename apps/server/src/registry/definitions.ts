@@ -1,17 +1,20 @@
 // The shared implementation of the definition registries of plugin API 1.4.0 (ADR-045, PLUGINS.md 9 "Agents and
-// skills"): `Registry.agents` (./agents.ts) and `Registry.skills` (./skills.ts). Owner: W10.7.
+// skills"): `Registry.agents` (./agents.ts) and `Registry.skills` (./skills.ts). Owner: W10.7. Plugin API 1.5.0
+// (ADR-051, W11.7): `Registry.styles` (./styles.ts), with a per-plugin cap (`LIMITS.pluginOutputStylesMax`).
 //
 // A registration is validated first (`validation_error` naming the field), then keyed by its name: a name that any plugin
 // (the same one included) already registered throws `conflict` (`reason: 'exists'`), so the first registration wins.
 // Every registration is tagged with its owner plugin id and returns a `Disposable` that removes exactly that entry
 // (idempotent); the plugin's `DisposableStore` disposes it on disable / reload / uninstall, and `removeOwner` is the
 // host's safety net. Adds and removals are announced through the registry's change listeners with the registry's kind
-// (`agent` / `skill`), so `Registry.onChange` sees them and `agents.onChange` / `skills.onChange` see only their own.
-// Definitions are stored as the frozen copies the validators return; lists are sorted by name.
+// (`agent` / `skill` / `style`), so `Registry.onChange` sees them and `agents.onChange` / `skills.onChange` /
+// `styles.onChange` see only their own. A registry with `perPluginMax` refuses (`validation_error`) a registration that
+// would give one plugin more entries than that. Definitions are stored as the frozen copies the validators return;
+// lists are sorted by name.
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type { RegistryChange } from './types.ts'
 import { toDisposable } from './disposable.ts'
-import { duplicate } from './validate.ts'
+import { duplicate, invalid } from './validate.ts'
 
 /** What a definition registry needs from the registry core. */
 export interface DefinitionRegistryCore {
@@ -49,15 +52,25 @@ export interface DefinitionRegistry<D extends { name: string }> {
 }
 
 export interface DefinitionRegistrySpec<D extends { name: string }> {
-  readonly kind: Extract<RegistryChange['kind'], 'agent' | 'skill'>
+  readonly kind: Extract<RegistryChange['kind'], 'agent' | 'skill' | 'style'>
   /** Shown in conflict messages ("The agent "x" is already registered ..."). */
   readonly label: string
   /** Throws `validation_error`; returns the (frozen) definition to store. */
   readonly validate: (definition: D) => D
+  /** At most this many entries per plugin (`validation_error` on `['name']` beyond it); default unlimited. */
+  readonly perPluginMax?: number
 }
 
 export function createDefinitionRegistry<D extends { name: string }>(core: DefinitionRegistryCore, spec: DefinitionRegistrySpec<D>): DefinitionRegistry<D> {
   const entries = new Map<string, RegisteredDefinition<D>>()
+  const countOwned = (pluginId: string): number => {
+    let count = 0
+    for (const entry of entries.values()) {
+      if (entry.pluginId === pluginId)
+        count += 1
+    }
+    return count
+  }
 
   return {
     register: (pluginId, definition) => {
@@ -66,6 +79,8 @@ export function createDefinitionRegistry<D extends { name: string }>(core: Defin
       const existing = entries.get(name)
       if (existing)
         throw duplicate(`The ${spec.label} "${name}" is already registered by the plugin "${existing.pluginId}".`)
+      if (spec.perPluginMax !== undefined && countOwned(pluginId) >= spec.perPluginMax)
+        throw invalid(`The plugin "${pluginId}" cannot register more than ${spec.perPluginMax} ${spec.label}s.`, ['name'])
       const entry: RegisteredDefinition<D> = Object.freeze({ pluginId, definition: validated })
       entries.set(name, entry)
       core.notify({ kind: spec.kind, action: 'added', pluginId, key: name })

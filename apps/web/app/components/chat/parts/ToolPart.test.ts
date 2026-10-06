@@ -1,12 +1,14 @@
 import type { ToolPartLike } from '../chat-format'
+import type { MockApi } from '~/utils/testing/mock-api'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectMcpStore } from '~/stores/project-mcp'
 import { testIds } from '~/utils/testids'
-import { hookData, hookRecordId, planApprovalPart, pluginSummary, shellOutput, skillOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
+import { hookData, hookRecordId, planApprovalPart, pluginSummary, projectMcpList, projectMcpServer, shellOutput, skillOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
 import { HOOK_ACTIVITY } from '../chat-context'
@@ -817,36 +819,140 @@ describe('toolPart: skills and plan files (Phase 10)', () => {
   })
 })
 
-describe('toolPart: hooks (Phase 11, P11-0b seams)', () => {
-  it('shows the badge of the call\'s PreToolUse record and its notes in the body', async () => {
-    const denied = part({ state: 'output-denied', approval: { id: 'appr_1', approved: false } } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
-    const wrapper = mount({
-      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: denied, streaming: false, hooks: [hookData({ toolCallId: 'call_1' })] }) }),
-    }, { attachTo: document.body })
-    expect(row(wrapper).get(`[data-testid="${testIds.toolRowHook}"]`).attributes('data-value')).toBe('denied')
+describe('toolPart: hooks (Phase 11)', () => {
+  const deniedPart = () => part({ state: 'output-denied', approval: { id: 'appr_1', approved: false } } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+  function mountHooks(toolPart: ToolPartLike, hooks: Parameters<typeof hookData>[0][], streaming = false, provide: Record<symbol, unknown> = {}) {
+    return mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: toolPart, streaming, hooks: hooks.map(overrides => hookData(overrides)) }) }),
+    }, { attachTo: document.body, global: { provide } })
+  }
+
+  it('reads "Blocked by hook" instead of "Denied" for a hook denial and shows the note in the body', async () => {
+    const wrapper = mountHooks(deniedPart(), [{ toolCallId: 'call_1' }])
+    const badge = row(wrapper).get(`[data-testid="${testIds.toolRowHook}"]`)
+    expect(badge.attributes('data-value')).toBe('denied')
+    expect(row(wrapper).text()).toContain('Blocked by hook')
+    expect(row(wrapper).text()).not.toContain('Denied')
+    expect(row(wrapper).findAll(`[data-testid="${testIds.toolRowHook}"]`)).toHaveLength(1)
+    // The row's name: "web_fetch "…", blocked by hook".
+    expect(row(wrapper).get('button').text()).toContain(', blocked by hook')
     await row(wrapper).get('button').trigger('click')
     await flushPromises()
-    expect(wrapper.get(`[data-testid="${testIds.toolRowOutput}"]`).get(`[data-testid="${testIds.hookNote}"]`).attributes('data-variant')).toBe('tool')
+    const notes = wrapper.get(`[data-testid="${testIds.toolRowOutput}"]`).findAll(`[data-testid="${testIds.hookNote}"]`)
+    expect(notes.map(note => note.attributes('data-variant'))).toEqual(['tool'])
+    expect(notes[0]!.text()).toContain('Blocked by a PreToolUse hook: Writes to dist/ are not allowed.')
   })
 
-  it('passes the reason of an asking hook to the approval card', () => {
-    const asked = hookData({ id: hookRecordId(2), toolCallId: 'call_1', outcome: 'asked', reason: 'Touches production.' })
-    const wrapper = mount({
-      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: part({ state: 'approval-requested', approval: { id: 'appr_1' } }), streaming: true, hooks: [asked] }) }),
-    }, { attachTo: document.body })
+  it('keeps "Denied" for a denial without a hook record (the user\'s)', () => {
+    const post = { id: hookRecordId(2), event: 'PostToolUse', outcome: 'context', context: 'ok' } as const
+    const wrapper = mountHooks(deniedPart(), [post])
+    expect(row(wrapper).text()).toContain('Denied')
+    expect(row(wrapper).find(`[data-testid="${testIds.toolRowHook}"]`).exists()).toBe(false)
+  })
+
+  it('marks an allowed call and labels the model\'s input "Original input" when a hook rewrote it', async () => {
+    const done = part({ state: 'output-available', output: { ok: true } })
+    const allowed = mountHooks(done, [{ toolCallId: 'call_1', outcome: 'allowed', reason: undefined }])
+    expect(row(allowed).get(`[data-testid="${testIds.toolRowHook}"]`).attributes('data-value')).toBe('allowed')
+    expect(row(allowed).attributes('data-status')).toBe('done')
+    await row(allowed).get('button').trigger('click')
+    await flushPromises()
+    expect(allowed.get(`[data-testid="${testIds.toolRowOutput}"]`).text()).not.toContain('Original input')
+
+    const rewritten = mountHooks(done, [{ toolCallId: 'call_1', outcome: 'rewritten', reason: undefined, updatedInput: { url: 'https://example.com' } }])
+    expect(row(rewritten).get(`[data-testid="${testIds.toolRowHook}"]`).attributes('data-value')).toBe('rewritten')
+    await row(rewritten).get('button').trigger('click')
+    await flushPromises()
+    const body = rewritten.get(`[data-testid="${testIds.toolRowOutput}"]`)
+    expect(body.text()).toContain('Original input')
+    expect(body.text()).toContain('https://nuxt.com/docs')
+    await body.get(`[data-testid="${testIds.hookNoteToggle}"]`).trigger('click')
+    expect(body.get('[data-slot="hook-updated-input"]').text()).toContain('https://example.com')
+  })
+
+  it('passes the reason of an asking hook to the approval card, and an empty reason when it gave none', () => {
+    const request = part({ state: 'approval-requested', approval: { id: 'appr_1' } })
+    const wrapper = mountHooks(request, [{ id: hookRecordId(2), toolCallId: 'call_1', outcome: 'asked', reason: 'Touches production.' }], true)
     expect(wrapper.getComponent(ToolApprovalCard).props('hookReason')).toBe('Touches production.')
-    expect(wrapper.get(`[data-testid="${testIds.toolApprovalHook}"]`).text()).toContain('Touches production.')
+    const banner = wrapper.get(`[data-testid="${testIds.toolApprovalHook}"]`)
+    expect(banner.text()).toBe('A hook asks you to confirm this call: Touches production.')
+    expect(banner.find('svg').classes().join(' ')).toMatch(/webhook/)
+
+    const silent = mountHooks(request, [{ id: hookRecordId(3), toolCallId: 'call_1', outcome: 'asked', reason: undefined }], true)
+    expect(silent.getComponent(ToolApprovalCard).props('hookReason')).toBe('')
+    expect(silent.get(`[data-testid="${testIds.toolApprovalHook}"]`).text()).toBe('A hook asks you to confirm this call')
+
+    const none = mountHooks(request, [], true)
+    expect(none.getComponent(ToolApprovalCard).props('hookReason')).toBeNull()
+    expect(none.find(`[data-testid="${testIds.toolApprovalHook}"]`).exists()).toBe(false)
   })
 
-  it('shows "Running hook…" while the hooks of this call run (HOOK_ACTIVITY), and no badge without records', async () => {
+  it('names the plugin of a plugin hook in its note', async () => {
+    usePluginsStore().items = [pluginSummary({ id: 'hook-pack', name: 'Hook pack' })]
+    const wrapper = mountHooks(deniedPart(), [{ hooks: [{ source: 'plugin', pluginId: 'hook-pack', label: 'sh guard.sh', exitCode: 2, durationMs: 5 }] }])
+    await row(wrapper).get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get(`[data-testid="${testIds.hookNote}"]`).get('[data-slot="hook-note-source"]').text()).toBe('· From Hook pack')
+  })
+
+  it('shows "Running hook…" instead of the spinner while the hooks of this call run (HOOK_ACTIVITY), and no badge without records', async () => {
     const activity = ref<{ event: 'PreToolUse', toolCallId: string | null } | null>({ event: 'PreToolUse', toolCallId: 'call_1' })
     const wrapper = mount({
       render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: part({ state: 'input-available' }), streaming: true }) }),
     }, { attachTo: document.body, global: { provide: { [HOOK_ACTIVITY as symbol]: activity } } })
-    expect(row(wrapper).get('[data-slot="running-hook"]').text()).toBe('Running hook…')
+    const running = row(wrapper).get('[data-slot="running-hook"]')
+    expect(running.text()).toBe('Running hook…')
+    expect(running.classes()).toContain('hf-shimmer-text')
+    expect(row(wrapper).find('[role="status"]').exists()).toBe(false)
     expect(row(wrapper).find(`[data-testid="${testIds.toolRowHook}"]`).exists()).toBe(false)
     activity.value = { event: 'PreToolUse', toolCallId: 'call_other' }
     await flushPromises()
     expect(row(wrapper).find('[data-slot="running-hook"]').exists()).toBe(false)
+    expect(row(wrapper).find('[role="status"]').exists()).toBe(true)
+  })
+
+  it('never shows "Running hook…" on a task call (its message shows "Running hooks…")', () => {
+    const activity = ref({ event: 'PreToolUse' as const, toolCallId: 'call_task_1' })
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: taskPart() as ToolPartLike, streaming: true }) }),
+    }, { attachTo: document.body, global: { provide: { [HOOK_ACTIVITY as symbol]: activity } } })
+    expect(row(wrapper).find('[data-slot="running-hook"]').exists()).toBe(false)
+  })
+})
+
+describe('toolPart: project MCP servers (Phase 11)', () => {
+  const projectContext = (projectId: string | null) => ({
+    [TOOL_APPROVAL_CONTEXT as symbol]: { toolMode: () => 'ask', projectName: () => 'website', projectId: () => projectId, shellCwd: () => null },
+  })
+  const mcpPart = (): ToolPartLike => ({ type: 'dynamic-tool', toolName: 'mcp__memory__recall', toolCallId: 'c', state: 'output-available', input: { q: 'x' }, output: 'y' })
+
+  it('names the server of a project chat\'s tool from the project-mcp store, fetching the project\'s servers once', async () => {
+    const api = mock.api as MockApi
+    api.projectMcp.list.mockResolvedValue(projectMcpList({ items: [projectMcpServer({ id: 'memory', name: 'Memory_Server.v2' })] }))
+    api.mcp.list.mockResolvedValue([])
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: mcpPart(), streaming: false }) }),
+    }, { attachTo: document.body, global: { provide: projectContext('prj_1') } })
+    await flushPromises()
+    expect(api.projectMcp.list).toHaveBeenCalledTimes(1)
+    expect(api.projectMcp.list.mock.calls[0]![0]).toMatchObject({ params: { id: 'prj_1' } })
+    expect(row(wrapper).text()).toContain('Memory_Server.v2')
+    expect(useProjectMcpStore().byId('prj_1', 'memory')?.name).toBe('Memory_Server.v2')
+  })
+
+  it('falls back to the server id outside a project and when the project has no such server', async () => {
+    const api = mock.api as MockApi
+    api.projectMcp.list.mockResolvedValue(projectMcpList({ items: [] }))
+    const outside = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: mcpPart(), streaming: false }) }),
+    }, { attachTo: document.body, global: { provide: projectContext(null) } })
+    await flushPromises()
+    expect(api.projectMcp.list).not.toHaveBeenCalled()
+    expect(row(outside).text()).toContain('memory')
+    const inside = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: mcpPart(), streaming: false }) }),
+    }, { attachTo: document.body, global: { provide: projectContext('prj_1') } })
+    await flushPromises()
+    expect(row(inside).text()).toContain('memory')
   })
 })

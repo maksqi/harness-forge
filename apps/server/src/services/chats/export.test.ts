@@ -1,7 +1,7 @@
 import type { ChatDetail } from '@harness-forge/shared'
 import { chatExportAnySchema, chatExportSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { buildChatExport, compactionLine, EXPORT_TOOL_OUTPUT_BYTES, exportFilename, linearTree, renderChatMarkdown, STEER_HEADING, taskResultHeading, titleSlug } from './export.ts'
+import { buildChatExport, compactionLine, EXPORT_TOOL_OUTPUT_BYTES, exportFilename, hookLine, linearTree, renderChatMarkdown, STEER_HEADING, taskResultHeading, titleSlug } from './export.ts'
 
 const CHAT_ID = '0199a8f0-0000-7000-8000-000000000001'
 const NOW = Date.UTC(2026, 8, 28, 12, 30)
@@ -377,6 +377,109 @@ describe('markdown export: background task results (Phase 10)', () => {
     const chat = backgroundChat()
     const only: ChatDetail = { ...chat, messages: [{ id: 'msg_asst000000000029', role: 'assistant', parts: [{ type: 'step-start' }, taskResult(4)] }] }
     expect(renderChatMarkdown(only, NOW).split('\n\n').slice(2)).toEqual(['## Background task: Scan part 4 (completed)', 'Report 4: found **3** files.\n'])
+    const parsed = chatExportSchema.parse(JSON.parse(buildChatExport(chat, 'json', NOW).body))
+    expect(parsed.chat.messages).toEqual(chat.messages)
+  })
+})
+
+/** A `data-hook` part (ADR-048): the record `n` of `event` with `outcome` and extra fields. */
+function hookRecord(n: number, event: string, outcome: string, extra: Record<string, unknown> = {}): ChatDetail['messages'][number]['parts'][number] {
+  return {
+    type: 'data-hook',
+    data: {
+      id: `hev_000000000000000${n}`,
+      event,
+      outcome,
+      createdAt: 5,
+      hooks: [{ source: 'project', label: 'sh .claude/hooks/SECRET-LABEL.sh', exitCode: 0, durationMs: 12, systemMessage: 'SYSTEM-MESSAGE' }],
+      ...extra,
+    },
+  } as ChatDetail['messages'][number]['parts'][number]
+}
+
+function hookChat(): ChatDetail {
+  return {
+    ...sampleChat(),
+    title: 'Hooks at work',
+    modelRef: 'mock:hooks',
+    messages: [
+      {
+        id: 'msg_user000000000031',
+        role: 'user',
+        parts: [{ type: 'text', text: 'Fix the bug.' }, hookRecord(1, 'UserPromptSubmit', 'context', { context: 'Branch: main\nOpen issues: 2' })],
+      },
+      {
+        id: 'msg_asst000000000031',
+        role: 'assistant',
+        metadata: { modelRef: 'mock:hooks', startedAt: 2 },
+        parts: [
+          { type: 'step-start' },
+          { type: 'tool-write_file', toolCallId: 'call_w1', state: 'output-denied', input: { path: 'a.txt' }, approval: { id: 'ap_1', approved: false, reason: 'Blocked by hook: no writes' } },
+          hookRecord(2, 'PreToolUse', 'denied', { toolCallId: 'call_w1', toolName: 'write_file', reason: 'No writes to a.txt.' }),
+          hookRecord(3, 'PostToolUse', 'rewritten', { toolCallId: 'call_w2', toolName: 'write_file', updatedInput: { path: 'UPDATED-PATH' } }),
+          // Invalid record data is left out.
+          { type: 'data-hook', data: { id: 'nope', event: 'Stop', reason: 'BROKEN-RECORD' } } as ChatDetail['messages'][number]['parts'][number],
+          { type: 'text', text: 'I could not write the file.' },
+        ],
+      },
+      // The carrier of a Stop continuation: only records, no "## User" heading.
+      { id: 'msg_user000000000032', role: 'user', parts: [hookRecord(4, 'Stop', 'continued', { reason: 'Run the tests first.' })] },
+      { id: 'msg_asst000000000032', role: 'assistant', metadata: { modelRef: 'mock:hooks', startedAt: 4 }, parts: [{ type: 'step-start' }, { type: 'text', text: 'Hook continuation: Run the tests first.' }] },
+    ],
+  } as ChatDetail
+}
+
+const HOOK_MARKDOWN = `# Hooks at work
+
+Exported from harness-forge on 2026-09-28 · Model: mock:hooks
+
+## User
+
+Fix the bug.
+
+_Hook: UserPromptSubmit (context)_
+
+> Branch: main
+> Open issues: 2
+
+## Assistant (mock:hooks)
+
+**Tool** \`write_file\` (output-denied)
+
+\`\`\`json
+{
+  "path": "a.txt"
+}
+\`\`\`
+
+_Hook: PreToolUse (denied)_
+
+Reason: No writes to a.txt.
+
+_Hook: PostToolUse (rewritten)_
+
+I could not write the file.
+
+_Hook: Stop (continued)_
+
+Reason: Run the tests first.
+
+## Assistant (mock:hooks)
+
+Hook continuation: Run the tests first.
+`
+
+describe('markdown export: hook records (Phase 11)', () => {
+  it('renders each record as a line with its context and reason at its place; a carrier has no heading', () => {
+    const markdown = renderChatMarkdown(hookChat(), NOW)
+    expect(markdown).toBe(HOOK_MARKDOWN)
+    for (const hidden of ['BROKEN-RECORD', 'SECRET-LABEL', 'SYSTEM-MESSAGE', 'UPDATED-PATH', 'hev_'])
+      expect(markdown).not.toContain(hidden)
+    expect(hookLine({ event: 'SessionStart', outcome: 'context' })).toBe('_Hook: SessionStart (context)_')
+  })
+
+  it('the json export keeps the hook parts as stored', () => {
+    const chat = hookChat()
     const parsed = chatExportSchema.parse(JSON.parse(buildChatExport(chat, 'json', NOW).body))
     expect(parsed.chat.messages).toEqual(chat.messages)
   })

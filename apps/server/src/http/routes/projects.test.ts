@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { harnessErrorEnvelopeSchema, listResponseSchema, projectBrowseSchema, projectSummarySchema } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
-import { chats } from '../../db/schema.ts'
+import { chats, projectTrust } from '../../db/schema.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createFakeChatRunner, createRecordingEventBus } from '../../testing/fakes.ts'
 import { FRESH_AUTH_REQUIRED_MESSAGE } from '../middleware/fresh-auth.ts'
@@ -186,6 +186,43 @@ describe('projects routes: list, update, remove', () => {
     expect(await readFile(join(project.path, 'keep.txt'), 'utf8')).toBe('kept')
     expect((await send(h, 'DELETE', `/api/projects/${project.id}`)).status).toBe(404)
     expect(listResponseSchema(projectSummarySchema).parse((await send(h, 'GET', '/api/projects')).body).items).toEqual([])
+  })
+})
+
+describe('projects routes: output style and trust cascade (Phase 11)', () => {
+  it('pATCH { outputStyle } round-trips through GET /projects with a stale session; unknown names accepted, null clears, bad names 400', async () => {
+    const h = await open()
+    const project = projectSummarySchema.parse((await send(h, 'POST', '/api/projects', { body: { name: 'Demo', path: h.root, newFolder: 'demo' }, cookie: h.fresh })).body)
+    expect(project.outputStyle).toBeNull()
+
+    const styled = await send(h, 'PATCH', `/api/projects/${project.id}`, { body: { outputStyle: 'explanatory' } })
+    expect(styled.status).toBe(200)
+    expect(projectSummarySchema.parse(styled.body)).toMatchObject({ id: project.id, outputStyle: 'explanatory' })
+    const listed = listResponseSchema(projectSummarySchema).parse((await send(h, 'GET', '/api/projects')).body).items
+    expect(listed.map(item => [item.id, item.outputStyle])).toEqual([[project.id, 'explanatory']])
+
+    expect((await send(h, 'PATCH', `/api/projects/${project.id}`, { body: { outputStyle: 'my-team-style' } })).body).toMatchObject({ outputStyle: 'my-team-style' })
+    expect((await send(h, 'PATCH', `/api/projects/${project.id}`, { body: { instructions: 'Be brief.' } })).body).toMatchObject({ outputStyle: 'my-team-style', instructions: 'Be brief.' })
+    expect((await send(h, 'PATCH', `/api/projects/${project.id}`, { body: { outputStyle: null } })).body).toMatchObject({ outputStyle: null })
+
+    for (const outputStyle of ['Explanatory', '', 42, 'a b'])
+      expect((await send(h, 'PATCH', `/api/projects/${project.id}`, { body: { outputStyle } })).status).toBe(400)
+    expect((await send(h, 'PATCH', '/api/projects/prj_BBBBBBBBBBBBBBBB', { body: { outputStyle: 'learning' } })).status).toBe(404)
+  })
+
+  it('delete removes the trust approvals of the project with it (foreign key cascade) and emits project.changed { project: null }', async () => {
+    const h = await open()
+    const project = projectSummarySchema.parse((await send(h, 'POST', '/api/projects', { body: { name: 'Demo', path: h.root, newFolder: 'demo' }, cookie: h.fresh })).body)
+    const other = projectSummarySchema.parse((await send(h, 'POST', '/api/projects', { body: { name: 'Other', path: h.root, newFolder: 'other' }, cookie: h.fresh })).body)
+    const at = Date.now()
+    await h.t.db.insert(projectTrust).values([
+      { projectId: project.id, sha256: 'c'.repeat(64), kind: 'command', label: 'status', createdAt: at },
+      { projectId: other.id, sha256: 'd'.repeat(64), kind: 'mcp', label: 'docs', createdAt: at },
+    ])
+    h.events.clear()
+    expect((await h.t.request(`/api/projects/${project.id}`, { method: 'DELETE', headers: { cookie: h.stale } })).status).toBe(204)
+    expect(h.events.events.map(event => [event.type, event.data])).toEqual([['project.changed', { id: project.id, project: null }]])
+    expect(await h.t.db.select({ projectId: projectTrust.projectId, sha256: projectTrust.sha256 }).from(projectTrust)).toEqual([{ projectId: other.id, sha256: 'd'.repeat(64) }])
   })
 })
 

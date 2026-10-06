@@ -9,9 +9,11 @@
 // `./definitions.ts`) share the change listeners (kinds `agent`, `skill`), feed the contributions `agents` / `skills`
 // (sorted by name) and are part of `removeOwner`.
 // Phase 11 (plugin API 1.5.0, ADR-048 / ADR-051; C36, W11.7): the output style and command hook registries
-// (`./styles.ts`, `./hook-commands.ts`; empty until W11.7) share the change listeners (kinds `style`, `hookCommands`),
-// feed the contributions `outputStyles` (sorted by name) / `commandHooks` (the handler count) and are part of
-// `removeOwner`.
+// (`./styles.ts`, `./hook-commands.ts`) share the change listeners (kinds `style`, `hookCommands`), feed the
+// contributions `outputStyles` (sorted by name) / `commandHooks` (the count of the plugin's valid command hook handlers)
+// and are part of `removeOwner`. The code hook events of 1.5.0 (`prompt.submit`, `session.start`, `run.stop`,
+// `subagent.stop`, `compact.before`, `notification`, and the `tool.after` output `context?`) run through `hooks.run`
+// like every other `HookMap` event (3 s guard, failures counted, nothing rethrown).
 import type {
   CommandDefinition,
   Disposable,

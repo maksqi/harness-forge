@@ -9,7 +9,11 @@
 // `data-kind`, `data-group`) shows the mono `/name`, the argument hint (muted mono, hidden below `sm`), the description
 // and, muted on the right, the namespace or the plugin name; its accessible name is "/{name}, {description}" plus
 // ", arguments {hint}".
+// Phase 11 (ADR-049, ADR-052; W11.10): a fifth group Skills (`data-group="skill"`, last) whose rows show the source and
+// `BookOpen` on the right; a project command whose `!` lines wait for approval shows a muted `ShieldQuestionMark` "Needs
+// approval" on the right (`data-trust="pending"`, named ", needs approval"); picking it still inserts it.
 import type { SlashGroup, SlashItem } from './slash-commands'
+import { BookOpenIcon, ShieldQuestionMarkIcon } from '@lucide/vue'
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { cn } from '@/lib/utils'
 import { testIds } from '~/utils/testids'
@@ -144,6 +148,7 @@ defineExpose({ handleKeydown, activeId, listId })
           :data-value="row.item.name"
           :data-kind="row.item.kind"
           :data-group="row.item.group"
+          :data-trust="row.item.pending ? 'pending' : undefined"
           :data-highlighted="row.index === active ? '' : undefined"
           :class="cn(
             'flex h-(--row-height) cursor-default items-center gap-3 rounded-md px-2 text-sm select-none',
@@ -153,7 +158,7 @@ defineExpose({ handleKeydown, activeId, listId })
           @pointermove="active = row.index"
           @click="pick(row.index)"
         >
-          <span class="shrink-0 font-mono text-[13px] font-medium">/{{ row.item.name }}</span>
+          <span class="max-w-[60%] shrink-0 truncate font-mono text-[13px] font-medium">/{{ row.item.name }}</span>
           <span
             v-if="row.item.argumentHint"
             data-slot="slash-menu-hint"
@@ -165,6 +170,15 @@ defineExpose({ handleKeydown, activeId, listId })
             data-slot="slash-menu-detail"
             class="max-w-[40%] shrink-0 truncate text-xs text-muted-foreground"
           >{{ slashItemDetail(row.item) }}</span>
+          <BookOpenIcon v-if="row.item.group === 'skill'" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
+          <span
+            v-if="row.item.pending"
+            data-slot="slash-menu-trust"
+            class="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
+          >
+            <ShieldQuestionMarkIcon aria-hidden="true" class="size-3.5" />
+            Needs approval
+          </span>
         </div>
       </div>
     </div>

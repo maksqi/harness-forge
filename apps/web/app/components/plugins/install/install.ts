@@ -1,6 +1,9 @@
 // Rules of the install and trust dialogs (docs/UI.md 8.3, 8.4; docs/PLUGINS.md 12, 13): the source draft of each tab,
 // its client-side validation with the shared schemas, the request it becomes, how server validation issues map back
 // to fields, the "I trust {source}" label, permission labels and the stale-review answer (fresh auth is useFreshAuth's).
+// Phase 11 (plugin API 1.5.0, W11.8): the commands a manifest runs ("Runs these commands": every command hook and every
+// `!` span of a command template, read with the shared `readHooksConfig` / `planCommandExpansion`) and the summary's
+// hooks and output styles.
 import type {
   PluginContributions,
   PluginInspection,
@@ -10,7 +13,7 @@ import type {
   PluginPermission,
   PluginSource,
 } from '@harness-forge/shared'
-import { LIMITS, pluginInspectBodySchema } from '@harness-forge/shared'
+import { LIMITS, planCommandExpansion, pluginInspectBodySchema, readHooksConfig } from '@harness-forge/shared'
 import { formatBytes } from '~/components/common/format'
 import { toHarnessError } from '~/utils/errors'
 
@@ -225,7 +228,10 @@ function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`
 }
 
-/** "2 providers · 3 models · 1 MCP server · 2 commands" (empty parts omitted). */
+/**
+ * "2 providers · 3 models · 1 MCP server · 2 commands · 1 output style · 3 hooks" (empty parts omitted; Phase 11: output
+ * styles, and the command hook handlers counted with the code hooks).
+ */
 export function contributionSummary(contributions: PluginContributions): string {
   const parts: string[] = []
   if (contributions.providers.length > 0)
@@ -238,8 +244,11 @@ export function contributionSummary(contributions: PluginContributions): string 
     parts.push(plural(contributions.mcpServers.length, 'MCP server', 'MCP servers'))
   if (contributions.commands.length > 0)
     parts.push(plural(contributions.commands.length, 'command', 'commands'))
-  if (contributions.hooks.length > 0)
-    parts.push(plural(contributions.hooks.length, 'hook', 'hooks'))
+  if (contributions.outputStyles.length > 0)
+    parts.push(plural(contributions.outputStyles.length, 'output style', 'output styles'))
+  const hooks = contributions.hooks.length + contributions.commandHooks
+  if (hooks > 0)
+    parts.push(plural(hooks, 'hook', 'hooks'))
   return parts.join(' · ')
 }
 
@@ -252,6 +261,26 @@ export function filesSummary(files: PluginInspection['files']): string {
 export function stdioCommands(manifest: PluginManifest): string[] {
   return (manifest.contributes?.mcpServers ?? [])
     .flatMap(server => server.transport.type === 'stdio' ? [[server.transport.command, ...(server.transport.args ?? [])].join(' ')] : [])
+}
+
+/** One shell command a manifest runs (plugin API 1.5.0): a command hook (with its event) or a `!` span of a command. */
+export interface ManifestRunCommand {
+  /** "PreToolUse hook", "/deploy". */
+  source: string
+  command: string
+}
+
+/**
+ * Shell commands a manifest runs (plugin API 1.5.0, docs/PLUGINS.md 13 "Runs these commands"): the command of every
+ * command hook (`contributes.hooks`, read with the shared `readHooksConfig`) and every `` !`cmd` `` span of a command
+ * template (scanned with the shared `planCommandExpansion`), in manifest order.
+ */
+export function runCommands(manifest: PluginManifest): ManifestRunCommand[] {
+  const hooks = readHooksConfig(manifest.contributes?.hooks, { source: 'plugin' }).items.map(hook => ({ source: `${hook.event} hook`, command: hook.command }))
+  const spans = (manifest.contributes?.commands ?? [])
+    .flatMap(command => (command.template.includes('!`') ? planCommandExpansion(command.template).shellCommands : [])
+      .map(span => ({ source: `/${command.name}`, command: span })))
+  return [...hooks, ...spans]
 }
 
 /**

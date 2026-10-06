@@ -5,8 +5,8 @@
 // is dropped rather than published. Kept: `user` and `assistant` messages, text, `file` parts (an app file
 // `/api/files/<id>`, whose id joins the share's `file_ids`, or a raster image data URL), http(s) `source-url` and
 // `source-document` parts, reasoning text, tool parts (name, status, input / output / error text, each value capped),
-// the model ref of a reply, the command name of a user message and a `failed` / `stopped` status. Dropped: system
-// messages, `metadata.error` (only `status: 'failed'` remains), usage and cost, `command.expansion` and `input`,
+// the model ref of a reply, the command name (and kind) of a user message and a `failed` / `stopped` status. Dropped:
+// system messages, `metadata.error` (only `status: 'failed'` remains), usage and cost, `command.expansion` and `input`,
 // provider metadata, approvals, `data-*`, `step-start`, `reasoning-file`, `custom` and unknown parts, other URLs.
 // Reasoning and tool details are always stored, so the share's options can change what the page shows at once.
 //
@@ -21,12 +21,30 @@
 // every other `data-*` part (a reply is not split at them), and the user-role carrier message of a turn the server
 // started (only results, besides parts that are no content) is left out of the snapshot and of the count.
 //
+// Phase 11 (ADR-048, W11.7; no `sharePartSchema` change): hook records (`data-hook`) are dropped like every other
+// `data-*` part (their context, reason, commands and outputs are never published), and the user-role carrier message of
+// a Stop continuation (only hook records, besides parts that are no content) is left out of the snapshot and of the
+// count. A tool call a hook denied is stored by the SDK as a denied approval, so it reads "denied" like any other
+// denial (the hook's reason is not copied). The command of a user message keeps its name (a slash name: a command of up
+// to 32 or a user-invocable skill of up to 64 characters, ADR-052) and its `kind` (`command` / `skill`, so the page can
+// say "Skill"); never its input, expansion or what its `!` / `@` lines inlined.
+//
 // `renderShareMessages` applies the options when the view is served: reasoning parts, tool inputs / outputs / error
 // texts and file parts are left out when disabled, and app file URLs become `/api/share/<token>/files/<id>` (only for
 // ids of the share's `file_ids`).
 import type { HarnessUIMessage, ShareMessage, ShareOptions, SharePart, ShareSnapshot, ShareToolStatus } from '@harness-forge/shared'
 import { Buffer } from 'node:buffer'
-import { COMMAND_NAME_PATTERN, isContentPart, LIMITS, safeParseModelRef, splitSteers, TASK_RESULT_PART_TYPE, TOOL_NAME_PATTERN } from '@harness-forge/shared'
+import {
+  HOOK_PART_TYPE,
+  invocationKindSchema,
+  isContentPart,
+  LIMITS,
+  safeParseModelRef,
+  SLASH_NAME_PATTERN,
+  splitSteers,
+  TASK_RESULT_PART_TYPE,
+  TOOL_NAME_PATTERN,
+} from '@harness-forge/shared'
 
 /** The file id of an app file URL (`/api/files/<id>`), else null: `FilesService.idFromUrl`. */
 export type FileIdOf = (url: string) => string | null
@@ -246,9 +264,12 @@ function sanitizeMessage(message: HarnessUIMessage, context: SanitizeContext, wi
       shared.status = 'stopped'
   }
   else {
-    const name = asRecord(metadata?.command)?.name
-    if (typeof name === 'string' && COMMAND_NAME_PATTERN.test(name))
-      shared.command = { name }
+    const command = asRecord(metadata?.command)
+    const name = command?.name
+    if (typeof name === 'string' && SLASH_NAME_PATTERN.test(name)) {
+      const kind = invocationKindSchema.safeParse(command?.kind)
+      shared.command = kind.success ? { name, kind: kind.data } : { name }
+    }
   }
   const parts: unknown[] = Array.isArray(message.parts) ? message.parts : []
   for (const part of parts) {
@@ -280,8 +301,10 @@ function holdsOnly(parts: readonly { type: string }[], type: string): boolean {
 
 function isShareable(message: HarnessUIMessage): boolean {
   if (message.role === 'user') {
-    // The carrier of a turn the server started holds only background task results (dropped from shares).
-    return message.metadata?.command?.type !== 'compact' && !holdsOnly(typedParts(message), TASK_RESULT_PART_TYPE)
+    // The carrier of a turn the server started holds only background task results or (Phase 11) only hook records
+    // (both dropped from shares).
+    const parts = typedParts(message)
+    return message.metadata?.command?.type !== 'compact' && !holdsOnly(parts, TASK_RESULT_PART_TYPE) && !holdsOnly(parts, HOOK_PART_TYPE)
   }
   if (message.role !== 'assistant')
     return false
@@ -292,7 +315,8 @@ function isShareable(message: HarnessUIMessage): boolean {
 /**
  * The snapshot of an active path (`ChatDetail.messages`). `title` is the chat title at snapshot time (the page shows
  * the share's custom title instead when it has one). Only `user` and `assistant` messages are kept (a `/compact`
- * exchange and the carrier of background task results are left out), each assistant message split at its steers
+ * exchange and the carriers of background task results and of hook continuations are left out), each assistant message
+ * split at its steers
  * (`splitSteers`), so `snapshot.messages.length` is the share's `message_count`. A tool waiting for an approval counts
  * as denied when a later share message exists (the steer after it included).
  */
@@ -386,6 +410,12 @@ function renderPart(part: SharePart, context: RenderContext): SharePart | null {
   }
 }
 
+/** The command of a stored user message, copied field by field (`kind` only when it is a known invocation kind). */
+function renderCommand(command: NonNullable<ShareMessage['command']>): NonNullable<ShareMessage['command']> {
+  const kind = invocationKindSchema.safeParse(command.kind)
+  return kind.success ? { name: command.name, kind: kind.data } : { name: command.name }
+}
+
 /** The messages of a stored snapshot with the share's options applied and file URLs rewritten (see the module comment). */
 export function renderShareMessages(snapshot: ShareSnapshot | null | undefined, context: RenderContext): ShareMessage[] {
   const messages: unknown[] = Array.isArray(snapshot?.messages) ? snapshot.messages : []
@@ -399,7 +429,7 @@ export function renderShareMessages(snapshot: ShareSnapshot | null | undefined, 
     rendered.push({
       role: stored.role,
       ...(typeof stored.modelRef === 'string' ? { modelRef: stored.modelRef } : {}),
-      ...(typeof stored.command?.name === 'string' ? { command: { name: stored.command.name } } : {}),
+      ...(typeof stored.command?.name === 'string' ? { command: renderCommand(stored.command) } : {}),
       ...(stored.status === 'failed' || stored.status === 'stopped' ? { status: stored.status } : {}),
       parts: parts.flatMap((part) => {
         const shown = asRecord(part) === null ? null : renderPart(part as SharePart, context)

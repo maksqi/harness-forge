@@ -2,9 +2,11 @@
 // with the shared `pluginManifestSchema`, and every example loads through the real plugin host (`createTestApp`) and
 // works: the dice tool rolls, the echo provider (a TypeScript entry compiled by the host) streams a chat answer, the
 // LM Studio and Together AI manifests talk to a fake OpenAI-compatible server, and the agent pack (plugin API 1.4.0)
-// registers its agents and skills from the manifest and from code. The code snippets of PLUGINS.md section 15 (and the
-// agent pack's `index.mjs` shown in PLUGINS.md 9 "Agents and skills") must equal the example files, and the plugins
-// shown in docs/guides/ must load too.
+// registers its agents and skills from the manifest and from code, and the hook pack (plugin API 1.5.0) registers its
+// command hook (with the plugin folder as its root; its script prints a PostToolUse context) and its output style. The
+// code snippets of PLUGINS.md section 15 (and the agent pack's `index.mjs` shown in PLUGINS.md 9 "Agents and skills",
+// the hook pack's `plugin.json` and script of example (g)) must equal the example files, and the plugins shown in
+// docs/guides/ must load too.
 //
 // The MCP manager is replaced by a no-op fake, so the stdio server of `mcp-everything` (`npx -y ...`) never runs here.
 import type { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse } from 'node:http'
@@ -12,25 +14,29 @@ import type { AddressInfo } from 'node:net'
 import type { McpManager } from '../../apps/server/src/mcp/types.ts'
 import type { TestApp } from '../../apps/server/src/testing/create-test-app.ts'
 import { Buffer } from 'node:buffer'
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { chatBody, postChat, readSse, streamedText, testChatId } from '../../apps/server/src/chat/testing.ts'
 import { SDK_TYPES_SOURCE } from '../../apps/server/src/plugins/templates/sdk-types.ts'
 import { createTestApp } from '../../apps/server/src/testing/create-test-app.ts'
-import { HarnessError, manifestRequiresTrust, pluginManifestSchema } from '../../packages/shared/src/index.ts'
+import { capturedText, runShellCommand } from '../../apps/server/src/workspace/shell.ts'
+import { HarnessError, manifestRequiresTrust, pluginManifestSchema, readHookOutput } from '../../packages/shared/src/index.ts'
 
 const EXAMPLES_DIR = dirname(fileURLToPath(import.meta.url))
 /** Folder name = plugin id (DECISIONS.md "Example plugins"). */
-const EXAMPLE_IDS = ['agent-pack', 'dice-roller', 'echo-provider', 'lmstudio', 'mcp-everything', 'together-ai'] as const
+const EXAMPLE_IDS = ['agent-pack', 'dice-roller', 'echo-provider', 'hook-pack', 'lmstudio', 'mcp-everything', 'together-ai'] as const
 type ExampleId = (typeof EXAMPLE_IDS)[number]
 /** `engines.harness` of each example: `^1.0.0` unless it uses a newer plugin API member (PLUGINS.md 3 "Versioning"). */
 const EXAMPLE_ENGINES: Record<ExampleId, string> = {
   'agent-pack': '^1.4.0',
   'dice-roller': '^1.0.0',
   'echo-provider': '^1.0.0',
+  'hook-pack': '^1.5.0',
   'lmstudio': '^1.0.0',
   'mcp-everything': '^1.0.0',
   'together-ai': '^1.0.0',
@@ -116,6 +122,12 @@ describe('docs/PLUGINS.md section 15 shows the examples as shipped', () => {
   it('agent-pack/plugin.json (example (f)) and its index.mjs (section 9 "Agents and skills")', () => {
     expect(JSON.parse(blockAfterHeading(doc, '### (f) Agents and skills: `agent-pack` (plugin API 1.4.0)', 'json'))).toEqual(readManifestJson(exampleDir('agent-pack')))
     expect(blockAfterHeading(doc, '### Agents and skills', 'js')).toBe(readFileSync(join(exampleDir('agent-pack'), 'index.mjs'), 'utf8'))
+  })
+
+  it('hook-pack/plugin.json and scripts/remind-tests.sh (example (g))', () => {
+    const heading = '### (g) Hooks and an output style: `hook-pack` (plugin API 1.5.0)'
+    expect(JSON.parse(blockAfterHeading(doc, heading, 'json'))).toEqual(readManifestJson(exampleDir('hook-pack')))
+    expect(blockAfterHeading(doc, heading, 'sh')).toBe(readFileSync(join(exampleDir('hook-pack'), 'scripts', 'remind-tests.sh'), 'utf8'))
   })
 })
 
@@ -283,7 +295,7 @@ describe('examples in the plugin host', () => {
     expect(t.deps.plugins.state(id)).toBe('active')
   }
 
-  it('loads every example as active, with trust required only for code and stdio plugins', async () => {
+  it('loads every example as active, with trust required only for code, stdio and command hook plugins', async () => {
     for (const id of EXAMPLE_IDS) {
       const detail = await t.client.plugins.get({ params: { id } })
       expect({ id, state: detail.state, lastError: detail.lastError }).toEqual({ id, state: 'active', lastError: null })
@@ -293,6 +305,8 @@ describe('examples in the plugin host', () => {
     expect((await t.client.plugins.get({ params: { id: 'dice-roller' } })).kind).toBe('code')
     expect((await t.client.plugins.get({ params: { id: 'agent-pack' } })).kind).toBe('code')
     expect((await t.client.plugins.get({ params: { id: 'lmstudio' } })).kind).toBe('declarative')
+    // Plugin API 1.5.0: a declarative plugin with command hooks requires trust and runs commands.
+    expect(await t.client.plugins.get({ params: { id: 'hook-pack' } })).toMatchObject({ kind: 'declarative', runsCode: true, trust: { required: true, trusted: true } })
   })
 
   it('registers the documented contributions', async () => {
@@ -316,6 +330,20 @@ describe('examples in the plugin host', () => {
     })
     for (const id of EXAMPLE_IDS.filter(other => other !== 'agent-pack'))
       expect(await contributions(id)).toMatchObject({ agents: [], skills: [] })
+    expect(await contributions('hook-pack')).toEqual({
+      providers: [],
+      models: 0,
+      tools: [],
+      mcpServers: [],
+      commands: [],
+      hooks: [],
+      commandHooks: 1,
+      agents: [],
+      skills: [],
+      outputStyles: ['reviewer'],
+    })
+    for (const id of EXAMPLE_IDS.filter(other => other !== 'hook-pack'))
+      expect(await contributions(id)).toMatchObject({ commandHooks: 0, outputStyles: [] })
 
     const providers = (await t.client.providers.list()).items
     const status = (id: string): unknown => providers.find(provider => provider.id === id)?.status
@@ -352,6 +380,61 @@ describe('examples in the plugin host', () => {
     // Nothing was skipped or refused.
     const logs = (await t.client.plugins.logs({ params: { id: 'agent-pack' } })).items
     expect(logs.filter(entry => entry.level === 'warn' || entry.level === 'error')).toEqual([])
+  })
+
+  it('hook-pack: GET /plugins lists it; the registries hold its command hook (rooted at the plugin folder) and its style', async () => {
+    const listed = (await t.client.plugins.list()).items.find(plugin => plugin.id === 'hook-pack')
+    expect(listed).toMatchObject({ state: 'active', kind: 'declarative', runsCode: true, contributions: { commandHooks: 1, outputStyles: ['reviewer'] } })
+
+    const root = realpathSync(join(t.env.paths.plugins, 'hook-pack'))
+    expect(t.deps.registry.hookCommands.list().map(entry => entry.pluginId)).toEqual(['hook-pack'])
+    expect(t.deps.registry.hookCommands.get('hook-pack')).toEqual({
+      pluginId: 'hook-pack',
+      root,
+      hooks: [{ event: 'PostToolUse', matcher: 'Write|Edit|MultiEdit', command: 'sh "$HARNESS_PLUGIN_ROOT/scripts/remind-tests.sh"', timeoutSec: 10, position: [0, 0] }],
+      diagnostics: [],
+    })
+    expect(t.deps.registry.styles.get('reviewer')).toEqual({
+      pluginId: 'hook-pack',
+      definition: {
+        name: 'reviewer',
+        description: 'Short, critical replies that list risks and open questions first.',
+        content: 'Write like a careful code reviewer.\n\n- Start with risks, bugs and open questions, then the answer.\n- Use short bullet points; quote file paths and line numbers.\n- Say plainly when something is fine.',
+        keepCodingInstructions: true,
+      },
+    })
+    expect(t.deps.registry.styles.list().map(style => `${style.pluginId}:${style.definition.name}`)).toEqual(['hook-pack:reviewer'])
+
+    const logs = (await t.client.plugins.logs({ params: { id: 'hook-pack' } })).items
+    expect(logs.filter(entry => entry.level === 'warn' || entry.level === 'error')).toEqual([])
+  })
+
+  it.skipIf(process.platform === 'win32')('hook-pack: the hook command prints a PostToolUse context with POSIX sh', async () => {
+    const spec = t.deps.registry.hookCommands.get('hook-pack')!.hooks[0]!
+    const root = t.deps.registry.hookCommands.get('hook-pack')!.root
+    // A project folder as the working folder, like the hook service uses (`realpath`: macOS `/var` is a link).
+    const project = realpathSync(mkdtempSync(join(tmpdir(), 'hf-hook-pack-')))
+    try {
+      const result = await runShellCommand({
+        command: spec.command,
+        cwd: project,
+        timeoutMs: 10_000,
+        input: JSON.stringify({ hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: 'notes.txt', content: 'x' } }),
+        env: { HARNESS_PLUGIN_ROOT: root, CLAUDE_PLUGIN_ROOT: root, HARNESS_PROJECT_DIR: project, CLAUDE_PROJECT_DIR: project },
+      })
+      expect({ exitCode: result.exitCode, timedOut: result.timedOut }).toEqual({ exitCode: 0, timedOut: false })
+      const outcome = readHookOutput('PostToolUse', {
+        exitCode: result.exitCode,
+        timedOut: result.timedOut,
+        stdout: capturedText(result.stdout),
+        stdoutTruncated: result.stdout.omittedBytes > 0,
+        stderr: capturedText(result.stderr),
+      })
+      expect(outcome).toMatchObject({ status: 'ok', context: 'A file changed: run the project tests before you finish.', error: null, continue: true })
+    }
+    finally {
+      rmSync(project, { recursive: true, force: true })
+    }
   })
 
   it('serves the file icons of the code examples', async () => {

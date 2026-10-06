@@ -193,8 +193,11 @@ describe('pipeline seams (Phase 11, C37-T5)', () => {
     scripted.set('agent', scriptedModel(call => (call === 1 ? callParts('hook_probe', { text: 'a' }) : textParts('done'))).model)
     const chatId = newChatId()
     const reply = await post(body(chatId, 'go'))
-    expect(hooks.snapshots).toHaveLength(1)
-    expect(hooks.snapshots[0]!.scope).toEqual({ chatId, projectId: null, workspace: null, toolMode: 'ask', origin: 'request', modelRef: 'hookkit:agent' })
+    // Two snapshots per request (W11.2, the plan's "one per prepare and one per run"): `prepareRun`'s for
+    // UserPromptSubmit / SessionStart (`runPromptHooks`), then the run's own; both with the run's scope.
+    expect(hooks.snapshots).toHaveLength(2)
+    for (const snapshot of hooks.snapshots)
+      expect(snapshot.scope).toEqual({ chatId, projectId: null, workspace: null, toolMode: 'ask', origin: 'request', modelRef: 'hookkit:agent' })
     expect(hooks.runCalls).toEqual([])
     expect(reply.parts.some(part => part.type === 'data-hook')).toBe(false)
     expect(probes).toEqual([{ text: 'a' }])

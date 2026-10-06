@@ -38,20 +38,28 @@
 // Phase 11 (ADR-048, ADR-051; C39 wires it, W11.10 implements; frozen from Gate P11-0b): `outputStyle` = the chat's own
 // output style (null = Automatic) with `update:outputStyle`; OutputStyleMenu sits after EffortMenu (hidden for image
 // models; options from the catalog's style entries through `styleOptions`, Automatic from the project's style and the
-// global setting through `automaticStyle`); `/output-style` opens it (`{ type: 'open', menu: 'style' }`) or sets the
-// style (`set-style`). ComposerRefusal shows above the text the refusal the host passes to the exposed `showRefusal`
-// (a hook blocked the submit, or it runs unapproved shell lines); it clears on the next send and with its × (W11.10 adds
-// a text change), its Review… opens the project trust dialog through CHAT_VIEW_ACTIONS; `restoreInput` puts a refused
-// submit back (the text and the files).
+// global setting through `automaticStyle`; the catalog of the chat's scope is fetched on mount and on a project change
+// with a 60 s max age, and with 15 s when the menu opens; the project and the plugin names reach the menu through
+// `OUTPUT_STYLE_SCOPE`); `/output-style` opens it (`{ type: 'open', menu: 'style' }`) or sets the style (`set-style`);
+// a change is announced "Output style: {name}" (+ " (automatic)"). ComposerRefusal shows at the top of the card, above
+// the text, the refusal the host passes to the exposed `showRefusal` (a hook blocked the submit, or it runs unapproved
+// shell lines; an `untrusted` refusal without a command name takes it from the refused text); the textarea's
+// `aria-describedby` points at it and focus stays in the textarea; it clears when the text changes (typing, a paste,
+// another chat), on the next send and with its ×, never on Esc; its Review… opens the project trust dialog through
+// CHAT_VIEW_ACTIONS (focused on the command's pending trust item when the trust list is loaded). `restoreInput` puts a
+// refused submit back (the text replaces the draft, the files come back as done chips) without clearing the refusal.
+// The slash menu's Skills group comes from `GET /commands` (`kind: 'skill'`); in a project chat with project commands,
+// opening the menu fetches the project's trust list (15 s max age), and its pending `command` items mark their
+// commands "Needs approval".
 import type { ClientCommand, ImageOptions, MessageUsage, ProjectFileEntry, QueueItem, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { DictationRange } from './dictation'
-import type { ComposerRefusalData } from './output-style'
+import type { ComposerRefusalData, OutputStyleScope } from './output-style'
 import type { SlashItem } from './slash-commands'
 import type { ChatComposerExposed, ComposerSubmitInput } from './types'
 import { isClientCommand, LIMITS } from '@harness-forge/shared'
 import { useMediaQuery } from '@vueuse/core'
-import { computed, inject, nextTick, onMounted, ref, useId, useTemplateRef, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, provide, ref, useId, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import {
   PromptInput as AiPromptInput,
@@ -74,6 +82,7 @@ import { useChatsStore } from '~/stores/chats'
 import { useCustomizationsStore } from '~/stores/customizations'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectTrustStore } from '~/stores/project-trust'
 import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
@@ -97,7 +106,7 @@ import { useModeCycle } from './mode-cycle'
 import { isPickerModel, resolveModelQuery } from './model-picker'
 import ModelPicker from './ModelPicker.vue'
 import { navigateTo } from './nuxt-imports'
-import { automaticStyle, styleOptions } from './output-style'
+import { automaticStyle, OUTPUT_STYLE_SCOPE, styleOptions, styleTriggerName } from './output-style'
 import OutputStyleMenu from './OutputStyleMenu.vue'
 import { offeredToolModes } from './permission'
 import PermissionMenu from './PermissionMenu.vue'
@@ -110,9 +119,12 @@ import {
   clientSlashItems,
   filterSlashItems,
   parseClientCommand,
+  parseSlashCommand,
+  pendingCommandNames,
   resolveClientCommand,
   serverSlashItems,
   slashQueryAt,
+  withPendingCommands,
 } from './slash-commands'
 import SlashArgumentHint from './SlashArgumentHint.vue'
 import SlashMenu from './SlashMenu.vue'
@@ -169,6 +181,7 @@ const chats = useChatsStore()
 const plugins = usePluginsStore()
 const customizations = useCustomizationsStore()
 const projects = useProjectsStore()
+const projectTrust = useProjectTrustStore()
 const providers = useProvidersStore()
 const settings = useSettingsStore()
 const ui = useUiStore()
@@ -239,32 +252,89 @@ function onImageOptionsChange(value: ImageOptions) {
 
 // ---------- output style (Phase 11, ADR-051; W11.10) ----------
 
+/** The style entries of the chat's scope (the catalog, fetched below). */
+const styleEntries = computed(() => customizations.entriesOf(props.projectId, 'style'))
 /** The styles of the menu: the built-ins, then the catalog's active styles of the chat's scope. */
-const outputStyles = computed(() => styleOptions(customizations.entriesOf(props.projectId, 'style')))
+const outputStyles = computed(() => styleOptions(styleEntries.value))
+/** The chat's project, its own style and the plugin names of plugin styles (OutputStyleMenu's scope). */
+const outputStyleScope = computed<OutputStyleScope>(() => {
+  const project = props.projectId ? projects.byId(props.projectId) : null
+  const pluginNames: Record<string, string> = {}
+  for (const entry of styleEntries.value) {
+    if (entry.source === 'plugin' && entry.pluginId)
+      pluginNames[entry.name] = plugins.byId(entry.pluginId)?.name ?? entry.pluginId
+  }
+  return {
+    projectId: props.projectId,
+    projectName: project?.name ?? null,
+    projectStyle: project?.outputStyle?.trim() || null,
+    pluginNames,
+  }
+})
+provide(OUTPUT_STYLE_SCOPE, outputStyleScope)
 /** What Automatic resolves to: the project's style, else the global setting. */
-const automaticOutputStyle = computed(() => {
-  const projectStyle = props.projectId ? projects.byId(props.projectId)?.outputStyle ?? null : null
-  return automaticStyle(projectStyle, settings.resolved.outputStyle, outputStyles.value)
+const automaticOutputStyle = computed(() =>
+  automaticStyle(outputStyleScope.value.projectStyle, settings.resolved.outputStyle, outputStyles.value))
+
+/** The catalog of the chat's scope (the style entries): on mount and on a project change, and when the menu opens. */
+const STYLES_MAX_AGE_MS = 60_000
+const STYLES_OPEN_MAX_AGE_MS = 15_000
+function refreshStyles(maxAgeMs: number) {
+  customizations.fetchCatalog(props.projectId, { maxAgeMs }).catch(() => {})
+}
+watch(styleOpen, (open) => {
+  if (open)
+    refreshStyles(STYLES_OPEN_MAX_AGE_MS)
 })
 
+/** The menu's pick or `/output-style`: emitted when it differs, and announced ("Output style: {name}"). */
 function onOutputStyleChange(value: string | null) {
-  if (value !== props.outputStyle)
-    emit('update:outputStyle', value)
+  if (value === props.outputStyle)
+    return
+  emit('update:outputStyle', value)
+  const label = value === null
+    ? automaticOutputStyle.value?.label ?? 'Default'
+    : outputStyles.value.find(option => option.name === value)?.label ?? value
+  announce(styleTriggerName(label, value === null))
 }
 
 // ---------- refusal (Phase 11, ADR-048; W11.10) ----------
 
-/** The refusal of the last submit (ComposerRefusal), shown until the next send or its × (P11-0b). */
+/** The refusal of the last submit (ComposerRefusal), shown until the text changes, the next send or its ×. */
 const refusal = ref<ComposerRefusalData | null>(null)
+/** The text the refusal belongs to (the refused text once `restoreInput` put it back): any other text clears it. */
+let refusalText: string | null = null
+const refusalId = `composer-refusal-${useId()}`
 const chatView = inject(CHAT_VIEW_ACTIONS, null)
 
 function showRefusal(value: ComposerRefusalData | null) {
   refusal.value = value
+  refusalText = value ? text.value : null
 }
 
-/** Review… of an `untrusted` refusal: the project trust dialog of the chat's project. */
+/** What ComposerRefusal shows: an `untrusted` refusal without a command name takes it from the refused text. */
+const shownRefusal = computed<ComposerRefusalData | null>(() => {
+  const value = refusal.value
+  if (!value || value.code !== 'untrusted' || value.command)
+    return value
+  const command = parseSlashCommand(text.value)?.name ?? null
+  return command ? { ...value, command } : value
+})
+
+/**
+ * Review… of an `untrusted` refusal: the project trust dialog of the chat's project, focused on the command's pending
+ * trust item when the project's trust list is loaded.
+ */
 function onRefusalReview() {
-  chatView?.openProjectTrust()
+  const command = shownRefusal.value?.command ?? null
+  const list = props.projectId ? projectTrust.trust(props.projectId) : null
+  const item = command
+    ? list?.items.find(entry => entry.kind === 'command' && entry.state === 'pending' && entry.detail.name.toLowerCase() === command)
+    : undefined
+  if (item)
+    chatView?.openProjectTrust(item.sha256)
+  else
+    chatView?.openProjectTrust()
 }
 
 // ---------- dictation (ADR-029) ----------
@@ -299,10 +369,12 @@ function firstToken(value: string): string {
   return end === -1 ? value : value.slice(0, end)
 }
 
-const slashItems = computed<SlashItem[]>(() => [
+/** + Phase 11: the project commands whose `!` lines wait for approval ("Needs approval"; empty until the list loaded). */
+const pendingCommands = computed(() => pendingCommandNames(props.projectId ? projectTrust.trust(props.projectId) : null))
+const slashItems = computed<SlashItem[]>(() => withPendingCommands([
   ...clientSlashItems(),
   ...serverSlashItems(customizations.slashCommands(props.projectId), pluginId => plugins.byId(pluginId)?.name),
-])
+], pendingCommands.value))
 const slashQuery = computed(() => slashQueryAt(text.value, caret.value))
 
 /** + Phase 10: the commands of the chat's scope, refetched when older than 15 s (a command file saved on disk shows up). */
@@ -310,10 +382,26 @@ const COMMANDS_MAX_AGE_MS = 15_000
 function refreshCommands() {
   customizations.fetchCommands(props.projectId, { maxAgeMs: COMMANDS_MAX_AGE_MS }).catch(() => {})
 }
-watch(() => props.projectId, refreshCommands)
+watch(() => props.projectId, () => {
+  refreshCommands()
+  refreshStyles(STYLES_MAX_AGE_MS)
+})
 watch(() => slashQuery.value !== null, (typing) => {
   if (typing)
     refreshCommands()
+})
+
+/**
+ * + Phase 11: the project's trust list for the "Needs approval" badges, fetched lazily (15 s max age) when the slash
+ * menu opens in a project chat that has project commands.
+ */
+const TRUST_MAX_AGE_MS = 15_000
+const hasProjectCommands = computed(() => props.projectId !== null
+  && customizations.slashCommands(props.projectId).some(command => command.source === 'project' && command.kind !== 'skill'))
+watch(() => slashQuery.value !== null && hasProjectCommands.value, (needed) => {
+  const projectId = props.projectId
+  if (needed && projectId)
+    projectTrust.fetch(projectId, { maxAgeMs: TRUST_MAX_AGE_MS }).catch(() => {})
 })
 
 /** The textarea is scrolled: the ghost hint would no longer line up with the text. */
@@ -482,8 +570,8 @@ function onModelPicked(modelRef: string | null) {
 }
 
 function openMenu(menu: 'model' | 'effort' | 'mode' | 'style') {
-  // The menus sit in the tools the recording indicator replaces.
-  if (voiceIndicator.value)
+  // The menus sit in the tools the recording indicator replaces; image models have no style menu.
+  if (voiceIndicator.value || (menu === 'style' && isImageModel.value))
     return
   if (menu === 'model')
     pickerOpen.value = true
@@ -649,7 +737,7 @@ async function submit() {
     const input: ComposerSubmitInput = { text: text.value.trim(), files: attachments.fileRefs.value }
     if (props.modelRef)
       models.touchRecent(props.modelRef)
-    refusal.value = null
+    showRefusal(null)
     emit('submit', input)
     clearText()
     attachments.clear()
@@ -808,6 +896,7 @@ useShortcuts().register([
 
 watch(() => props.chatId, () => {
   attachments.clear()
+  showRefusal(null)
   slashDismissed.value = null
   pendingSubmit.value = false
   cancelDictation()
@@ -823,16 +912,34 @@ watch(() => ui.composerFocusRequest, () => focusTextarea())
 onMounted(() => {
   loadComposerCatalog()
   refreshCommands()
+  refreshStyles(STYLES_MAX_AGE_MS)
   syncCaret()
   autosize()
   focusTextarea()
 })
 
-/** + Phase 11: a refused submit back into the composer: its text replaces the draft, its files come back as chips. */
+/**
+ * + Phase 11: a refused submit back into the composer: its text replaces the draft (the slash menu stays closed for
+ * it), its files come back as done chips; a refusal shown before stays (it belongs to this text).
+ */
 function restoreInput(input: ComposerSubmitInput) {
+  if (refusal.value)
+    refusalText = input.text
+  slashDismissed.value = input.text.startsWith('/') ? firstToken(input.text) : null
   setTextAndCaret(input.text, input.text.length)
   attachments.addRefs(input.files)
 }
+
+// The refusal belongs to the refused text: typing, a paste, a dictation or another chat's draft clears it.
+watch(text, (value) => {
+  if (refusal.value && value !== refusalText)
+    showRefusal(null)
+})
+
+/** The textarea's descriptions: the argument hint and the refusal. */
+const describedBy = computed(() => [argumentHint.value ? argumentHintId : null, shownRefusal.value ? refusalId : null]
+  .filter(id => id !== null)
+  .join(' ') || undefined)
 
 /** Queued messages back into the composer (after a Stop, or Edit of a queued message): texts and files. */
 function restoreQueued(items: readonly QueueItem[]) {
@@ -914,6 +1021,15 @@ const TEXTAREA_CLASS = [
     >
 
     <AiPromptInput role="form" aria-label="Message composer" :class="CARD_CLASS" @submit="submit">
+      <!-- Above the attachments and the text (both order-first: the DOM order decides). -->
+      <ComposerRefusal
+        :id="refusalId"
+        class="order-first"
+        :refusal="shownRefusal"
+        @dismiss="showRefusal(null)"
+        @review="onRefusalReview"
+      />
+
       <AiPromptInputHeader v-if="attachmentItems.length > 0 || warnings.length > 0" class="cursor-default px-3 pt-3 pb-0">
         <ComposerAttachments
           :items="attachmentItems"
@@ -922,8 +1038,6 @@ const TEXTAREA_CLASS = [
           @retry="attachments.retry"
         />
       </AiPromptInputHeader>
-
-      <ComposerRefusal :refusal="refusal" @dismiss="showRefusal(null)" @review="onRefusalReview" />
 
       <!-- The textarea's own box: SlashArgumentHint lies exactly over it. -->
       <div class="relative flex w-full min-w-0" data-slot="composer-text">
@@ -937,7 +1051,7 @@ const TEXTAREA_CLASS = [
           aria-autocomplete="list"
           :aria-controls="openMenuRef?.listId"
           :aria-activedescendant="openMenuRef?.activeId"
-          :aria-describedby="argumentHint ? argumentHintId : undefined"
+          :aria-describedby="describedBy"
           :enterkeyhint="sendKey === 'enter' ? 'send' : 'enter'"
           :data-testid="testIds.composerInput"
           :class="TEXTAREA_CLASS"

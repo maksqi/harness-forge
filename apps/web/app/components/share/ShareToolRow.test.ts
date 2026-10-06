@@ -56,6 +56,16 @@ describe('shareToolRow', () => {
     ])
   })
 
+  it('reads "Denied" for a call a hook denied: the share has no hook records (Phase 11)', () => {
+    mountRow({ type: 'tool', toolName: 'write_file', status: 'denied', input: { path: 'dist/a.js' } })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.dataset.status).toBe('denied')
+    expect(row.querySelector('.ml-auto')!.textContent?.trim()).toBe('Denied')
+    expect(row.textContent).not.toContain('hook')
+    expect(byTestId(testIds.toolRowHook)).toBeNull()
+    expect(byTestId(testIds.hookNote)).toBeNull()
+  })
+
   it('names MCP tools by their tool name with a server badge', () => {
     mountRow({ type: 'tool', toolName: 'mcp__docs__search', status: 'done' })
     const row = byTestId(testIds.shareToolRow)!

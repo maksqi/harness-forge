@@ -56,6 +56,33 @@ describe('readPluginDirectory', () => {
     expect(contentHash(readFileSync(join(dir, 'plugin.json')), readFileSync(join(dir, 'index.mjs')))).toBe(expected)
   })
 
+  it('plugin API 1.5.0: command hooks or a `!` span require trust; the hash still covers plugin.json only', async () => {
+    const hooks = { PostToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'sh "$HARNESS_PLUGIN_ROOT/scripts/after.sh"' }] }] }
+    const dir = plugin('hooky', {
+      'plugin.json': manifest('hooky', { engines: { harness: '^1.5.0' }, contributes: { hooks, outputStyles: [{ name: 'terse', description: 'Short.', content: 'Be brief.' }] } }),
+      'scripts/after.sh': 'echo one\n',
+    })
+    const read = await readPluginDirectory(dir, { expectedId: 'hooky' })
+    expect(read.problem).toBeNull()
+    expect(read.requiresTrust).toBe(true)
+    expect(read.hash).toBe(createHash('sha256').update(readFileSync(join(dir, 'plugin.json'))).digest('hex'))
+    // The script a hook calls is not pinned: changing it keeps the hash.
+    writeFileSync(join(dir, 'scripts', 'after.sh'), 'echo two\n')
+    expect((await readPluginDirectory(dir, { expectedId: 'hooky' })).hash).toBe(read.hash)
+
+    const spans = await readPluginDirectory(plugin('spans', {
+      'plugin.json': manifest('spans', { engines: { harness: '^1.5.0' }, contributes: { commands: [{ name: 'status', description: 'S.', template: 'Status: !`git status` {{input}}' }] } }),
+    }), { expectedId: 'spans' })
+    expect(spans.requiresTrust).toBe(true)
+    const styles = await readPluginDirectory(plugin('styles', {
+      'plugin.json': manifest('styles', { engines: { harness: '^1.5.0' }, contributes: { outputStyles: [{ name: 'terse', description: 'Short.', content: 'Be brief.' }], commands: [{ name: 'hello', description: 'H.', template: 'Hello! {{input}}' }] } }),
+    }), { expectedId: 'styles' })
+    expect(styles.requiresTrust).toBe(false)
+    // A manifest written for 1.4.0 is compatible and unchanged.
+    const older = await readPluginDirectory(plugin('older', { 'plugin.json': manifest('older', { engines: { harness: '^1.4.0' } }) }), { expectedId: 'older' })
+    expect({ problem: older.problem, compatible: older.compatible, requiresTrust: older.requiresTrust }).toEqual({ problem: null, compatible: true, requiresTrust: false })
+  })
+
   it('fails the documented steps in order', async () => {
     const cases: Array<[string, Record<string, string | object>, RegExp, 'error' | 'incompatible']> = [
       ['no-manifest', { 'readme.txt': 'x' }, /plugin\.json is missing/, 'error'],
@@ -214,6 +241,20 @@ describe('manifest helpers', () => {
       },
     })))
     expect(declared).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: ['alpha', 'zeta'], skills: ['commit-message', 'notes'], commandHooks: 0, outputStyles: [] })
+  })
+
+  it('counts declared command hook handlers and lists output styles (plugin API 1.5.0) sorted by name', () => {
+    const declared = declaredContributions(pluginManifestBaseSchema.parse(manifest('hook-pack', {
+      engines: { harness: '^1.5.0' },
+      contributes: {
+        hooks: {
+          PostToolUse: [{ matcher: 'Write|Edit', hooks: [{ type: 'command', command: 'sh a.sh' }, { type: 'command', command: 'sh b.sh', timeout: 5 }] }],
+          Stop: [{ hooks: [{ type: 'command', command: 'sh stop.sh' }] }],
+        },
+        outputStyles: [{ name: 'zeta', description: 'Z.', content: 'z' }, { name: 'alpha', description: 'A.', content: 'a', keepCodingInstructions: true }],
+      },
+    })))
+    expect(declared).toEqual({ providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 3, outputStyles: ['alpha', 'zeta'] })
   })
 
   it('pins linked folders by path and checks containment', () => {

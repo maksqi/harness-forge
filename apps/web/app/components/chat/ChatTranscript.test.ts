@@ -23,6 +23,7 @@ import {
   userMessage,
 } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
+import { HOOK_ACTIVITY } from './chat-context'
 import ChatMessage from './ChatMessage.vue'
 import ChatTranscript from './ChatTranscript.vue'
 
@@ -685,7 +686,7 @@ describe('chatTranscript: Phase 9 seams', () => {
   })
 })
 
-describe('chatTranscript: hooks (Phase 11, P11-0b seams)', () => {
+describe('chatTranscript: hooks (Phase 11)', () => {
   it('passes the hooks activity to the streaming last reply and the submitted placeholder', async () => {
     const state = ref<{ status: ChatStatus, messages: HarnessUIMessage[] }>({
       status: 'submitted',
@@ -701,6 +702,26 @@ describe('chatTranscript: hooks (Phase 11, P11-0b seams)', () => {
     state.value = { status: 'streaming', messages: [...state.value.messages, assistantMessage('msg_a000000000000001', '', { parts: [] })] }
     await nextTick()
     expect(wrapper.findAllComponents(ChatMessage).map(row => row.props('activity'))).toEqual([null, 'hooks'])
+  })
+
+  it('moves "Running hook…" between the tool row and the end of the memoized reply through HOOK_ACTIVITY', async () => {
+    const tool = { type: 'tool-write_file', toolCallId: 'call_w1', state: 'input-available', input: { path: 'a.txt', content: 'x' } } as unknown as HarnessUIMessage['parts'][number]
+    const messages = [userMessage('msg_u000000000000001', 'Question'), assistantMessage('msg_a000000000000001', '', { parts: [{ type: 'text', text: 'Writing.', state: 'done' }, tool] })]
+    const hookActivity = ref<{ event: 'PreToolUse' | 'Stop', toolCallId: string | null } | null>({ event: 'PreToolUse', toolCallId: 'call_w1' })
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, {
+        default: () => h(ChatTranscript, { messages, status: 'streaming', showThinking: false, activity: 'hooks' }),
+      }),
+    }, { attachTo: document.body, global: { provide: { [HOOK_ACTIVITY as symbol]: hookActivity } } })
+    await nextTick()
+    const lines = () => wrapper.findAll('[data-slot="running-hook"]').map(line => line.text())
+    expect(lines()).toEqual(['Running hook…'])
+    expect(wrapper.get(`[data-testid="${testIds.toolRow}"]`).find('[data-slot="running-hook"]').exists()).toBe(true)
+    // Only the injected activity changes: the memoized row still follows it.
+    hookActivity.value = { event: 'Stop', toolCallId: null }
+    await nextTick()
+    expect(lines()).toEqual(['Running hooks…'])
+    expect(wrapper.get(`[data-testid="${testIds.toolRow}"]`).find('[data-slot="running-hook"]').exists()).toBe(false)
   })
 
   it('renders a hook carrier as notes: never rewound, and ↑ edits the last message the user wrote', async () => {

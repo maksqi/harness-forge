@@ -183,6 +183,20 @@ describe('pluginContributions: hooks and output styles (Phase 11, P11-0b mounts)
     expect(list.findAll(`[data-testid="${testIds.pluginHook}"]`).map(row => row.attributes('data-kind'))).toEqual(['command', 'code'])
   })
 
+  it('fetches the global hook listing for a plugin with command hooks (W11.8)', async () => {
+    api.hooks.list.mockResolvedValue(hookList({
+      items: [hookEntry({ key: 'plugin:agent-pack:0', source: 'plugin', id: undefined, pluginId: 'agent-pack', event: 'Stop', matcher: null, command: 'sh hooks/stop.sh' })],
+      project: undefined,
+    }))
+    const wrapper = mountContributions({ ...none, commandHooks: 1 })
+    await flushPromises()
+    expect(api.hooks.list).toHaveBeenCalledWith({ query: {} })
+    const rows = wrapper.findAll(`[data-testid="${testIds.pluginHook}"]`)
+    expect(rows.map(row => [row.attributes('data-event'), row.attributes('data-kind')])).toEqual([['Stop', 'command']])
+    expect(wrapper.text()).toContain('Runs only while you trust this plugin.')
+    expect(wrapper.text()).not.toContain('Hooks can read and change prompts, messages and tool calls.')
+  })
+
   it('lists the contributed output styles in a style section', async () => {
     useCustomizationsStore().catalogs = { '': customizationList({ project: null, items: [styleEntry({ source: 'plugin', pluginId: 'agent-pack', path: undefined })] }) }
     api.customizations.list.mockResolvedValue(useCustomizationsStore().catalogs['']!)

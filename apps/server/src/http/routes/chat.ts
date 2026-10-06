@@ -5,6 +5,9 @@
 //   empties the chat's steer queue (`clearQueue(id, 'stopped')`, also without a run: a chat waiting for an approval) and
 //   answers the removed messages as `dropped` (oldest first; absent when none were queued), so the stopping tab puts
 //   them back into its composer.
+// Phase 11 (ADR-048, W11.2): `POST /chat` of a new user message runs `SessionStart` / `UserPromptSubmit` while it is
+// prepared: a block answers `409` `conflict` (`details.reason: 'hook-blocked'`, `details.hook`) before anything is stored
+// (a first message on `/` leaves no chat); a `Stop` hook that blocks starts a server turn (`run.started.origin: 'hook'`).
 import type { ChatStopResult } from '@harness-forge/shared'
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'

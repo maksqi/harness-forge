@@ -1,5 +1,6 @@
 // Validation of registrations (PLUGINS.md 9 and 14): provider definitions, models, tools, commands, hooks and MCP server
-// declarations, (plugin API 1.4.0, ADR-045) agent types and skills, and (plugin API 1.5.0, ADR-051) output styles.
+// declarations, (plugin API 1.4.0, ADR-045) agent types and skills, and (plugin API 1.5.0, ADR-048 / ADR-051) output
+// styles and the command hooks of a plugin (`contributes.hooks`, read with the shared `readHooksConfig`).
 // Reserved names: client commands (`/remember` since Phase 10, `/output-style` since Phase 11, through
 // `CLIENT_COMMANDS`) and harness commands are no plugin commands; the builtin agent types and the builtin output styles
 // (`default`, `explanatory`, `learning`) are no plugin definitions. Invalid shapes throw `validation_error`;
@@ -16,8 +17,10 @@ import type {
   SkillDefinition,
   ToolDefinition,
 } from '@harness-forge/plugin-sdk'
-import type { ToolRegisterOptions } from './types.ts'
+import type { HookDiagnostic, HookSpec } from '@harness-forge/shared'
+import type { HookCommandsRegistration, ToolRegisterOptions } from './types.ts'
 import { Buffer } from 'node:buffer'
+import { isAbsolute } from 'node:path'
 import {
   BUILTIN_OUTPUT_STYLE_NAMES,
   COMMAND_NAME_PATTERN,
@@ -38,6 +41,7 @@ import {
   modelIdSchema,
   modelInfoListSchema,
   providerIdSchema,
+  readHooksConfig,
   TOOL_NAME_PATTERN,
   toolPolicySchema,
   validationError,
@@ -377,4 +381,60 @@ export function validateOutputStyleDefinition(definition: OutputStyleDefinition)
     throw withPrefix(`Output style ${describeValue(definition.name)}`, validationError(parsed.error))
   const { name, description, content, keepCodingInstructions } = parsed.data
   return Object.freeze({ name, description, content, keepCodingInstructions: keepCodingInstructions ?? false })
+}
+
+// ---------- command hooks of plugins (plugin API 1.5.0, ADR-048) ----------
+
+/** What `validateHookCommands` keeps of a registration: the handlers that may run and the reader's diagnostics. */
+export interface ValidatedHookCommands {
+  readonly root: string
+  /** The valid handlers in declaration order (frozen); a handler with an `error` diagnostic is not listed. */
+  readonly hooks: readonly HookSpec[]
+  readonly diagnostics: readonly HookDiagnostic[]
+}
+
+/** Handlers declared in a raw `hooks` object (every event, every group), counted before anything is read. */
+function declaredHookHandlers(hooks: Record<string, unknown>): number {
+  let count = 0
+  for (const groups of Object.values(hooks)) {
+    if (!Array.isArray(groups))
+      continue
+    for (const group of groups) {
+      const handlers = isObject(group) ? group.hooks : undefined
+      if (Array.isArray(handlers))
+        count += handlers.length
+    }
+  }
+  return count
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value === 'object' && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value)
+    for (const item of Object.values(value))
+      deepFreeze(item)
+  }
+  return value
+}
+
+/**
+ * Checks the command hooks of a plugin (`HookCommandRegistry.register`): `root` is an absolute path (the plugin folder),
+ * `hooks` an object keyed by event (the Claude Code `hooks` format) with at most `LIMITS.pluginHooksMax` handlers in
+ * total (`validation_error` naming the field otherwise); then reads it with the shared `readHooksConfig(hooks, {
+ * source: 'plugin' })`, whose diagnostics are kept (an unknown event, a `prompt` handler or an invalid matcher is a
+ * diagnostic, not an error). Never quotes a command.
+ */
+export function validateHookCommands(registration: HookCommandsRegistration): ValidatedHookCommands {
+  if (!isObject(registration))
+    throw invalid('A command hook registration must be an object.')
+  const { root, hooks } = registration as { root?: unknown, hooks?: unknown }
+  if (typeof root !== 'string' || !isAbsolute(root) || root.includes('\0') || root.length > LIMITS.workspacePathMaxChars)
+    throw invalid('Command hooks: "root" must be the absolute path of the plugin folder.', ['root'])
+  if (!isObject(hooks) || Array.isArray(hooks))
+    throw invalid('Command hooks: "hooks" must be an object keyed by event name.', ['hooks'])
+  const declared = declaredHookHandlers(hooks)
+  if (declared > LIMITS.pluginHooksMax)
+    throw invalid(`Command hooks: a plugin can declare at most ${LIMITS.pluginHooksMax} hook handlers (found ${declared}).`, ['hooks'])
+  const read = readHooksConfig(hooks, { source: 'plugin' })
+  return deepFreeze({ root, hooks: [...read.items], diagnostics: [...read.diagnostics] })
 }

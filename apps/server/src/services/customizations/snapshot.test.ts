@@ -1,9 +1,11 @@
 // The catalog snapshot helpers (Phase 10, C30-T2): the catalog order, the precedence of ADR-044 over merged candidates
 // (`resolvePrecedence`), the active-entry getters with the agent aliases, the route answer; the builtin entries.
+// Phase 11 (W11.6-T2): the builtin output styles and the style getters.
 import type { CustomizationEntry, CustomizationKind } from '@harness-forge/shared'
 import { customizationEntrySchema, customizationListSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { BUILTIN_AGENT_DEFINITIONS } from '../../builtin-plugins/core-agent/agents.ts'
+import { BUILTIN_STYLE_DEFINITIONS } from '../../builtin-plugins/core-agent/styles.ts'
 import { builtinCatalogEntries, loadBuiltin } from './builtins.ts'
 import { applyPrecedence, catalogList, createCatalogSnapshot, resolveAgentAlias, sortCatalogEntries } from './snapshot.ts'
 
@@ -17,8 +19,11 @@ describe('builtin entries', () => {
     expect(entries.map(item => [item.kind, item.name, item.source, item.state, item.enabled])).toEqual([
       ['agent', 'explore', 'builtin', 'active', true],
       ['agent', 'general', 'builtin', 'active', true],
+      ['style', 'default', 'builtin', 'active', true],
+      ['style', 'explanatory', 'builtin', 'active', true],
+      ['style', 'learning', 'builtin', 'active', true],
     ])
-    expect(entries.map(item => item.description)).toEqual(BUILTIN_AGENT_DEFINITIONS.map(definition => definition.description))
+    expect(entries.slice(0, 2).map(item => item.description)).toEqual(BUILTIN_AGENT_DEFINITIONS.map(definition => definition.description))
     for (const item of entries)
       expect(customizationEntrySchema.safeParse(item).success, item.name).toBe(true)
     expect(loadBuiltin(entries[1]!)).toEqual({
@@ -26,10 +31,28 @@ describe('builtin entries', () => {
       definition: { kind: 'agent', fields: { name: 'general', description: entries[1]!.description, tools: null, model: null, instructions: '' } },
       diagnostics: [],
     })
-    // Only builtin agents load here.
+    // Only builtin agents and styles load here.
     expect(loadBuiltin({ ...entries[0]!, source: 'user' })).toBeNull()
     expect(loadBuiltin(entry('skill', 'explore', { source: 'builtin' }))).toBeNull()
     expect(loadBuiltin(entry('agent', 'reviewer', { source: 'builtin' }))).toBeNull()
+    expect(loadBuiltin(entry('style', 'terse', { source: 'builtin' }))).toBeNull()
+    expect(loadBuiltin(entry('agent', 'learning', { source: 'builtin' }))).toBeNull()
+  })
+
+  it('lists the builtin output styles with their labels and flags (Phase 11); load gives their texts', () => {
+    const styles = builtinCatalogEntries().filter(item => item.kind === 'style')
+    expect(styles.map(item => [item.name, item.label, item.keepCodingInstructions, item.description])).toEqual(
+      BUILTIN_STYLE_DEFINITIONS.map(definition => [definition.name, definition.label, definition.keepCodingInstructions, definition.description]),
+    )
+    expect(styles.map(item => item.label)).toEqual(['Default', 'Explanatory', 'Learning'])
+    const loaded = loadBuiltin(styles[1]!)
+    expect(loaded).toEqual({
+      entry: styles[1],
+      definition: { kind: 'style', fields: { name: 'explanatory', label: 'Explanatory', description: styles[1]!.description, keepCodingInstructions: true, content: BUILTIN_STYLE_DEFINITIONS[1]!.content } },
+      diagnostics: [],
+    })
+    expect(loaded!.definition.kind === 'style' && loaded!.definition.fields.content).toContain('Insight:')
+    expect(loadBuiltin(styles[0]!)?.definition.fields).toMatchObject({ name: 'default', content: '' })
   })
 })
 
@@ -92,7 +115,13 @@ describe('createCatalogSnapshot', () => {
       'command:review:active',
       'command:review:shadowed',
       'skill:notes:active',
+      'style:default:active',
+      'style:explanatory:active',
+      'style:learning:active',
     ])
+    expect(catalog.styles().map(item => item.name)).toEqual(['default', 'explanatory', 'learning'])
+    expect(catalog.style('learning')).toMatchObject({ source: 'builtin', label: 'Learning' })
+    expect(catalog.style('terse')).toBeNull()
     expect(catalog.agents().map(item => item.name)).toEqual(['explore', 'general'])
     expect(catalog.agent('zeta')).toBeNull()
     expect(catalog.agent('general-purpose')?.name).toBe('general')
@@ -117,9 +146,28 @@ describe('createCatalogSnapshot', () => {
     })
     const all = catalogList(catalog)
     expect(customizationListSchema.parse(all)).toEqual(all)
-    expect(all.items).toHaveLength(3)
+    expect(all.items).toHaveLength(6)
     expect(catalogList(catalog, 'command').items.map(item => item.name)).toEqual(['review'])
+    expect(catalogList(catalog, 'style').items.map(item => item.name)).toEqual(['default', 'explanatory', 'learning'])
     expect(catalogList(catalog, 'skill')).toMatchObject({ items: [], diagnostics: [{ code: 'link' }], project: { folders: ['.harness/commands'] }, builtAt: 9 })
+  })
+
+  it('styles() and style(name) index only the active styles (Phase 11)', () => {
+    const merged = applyPrecedence([
+      ...builtinCatalogEntries(),
+      entry('style', 'terse', { path: '.claude/output-styles/terse.md', label: 'Terse' }),
+      entry('style', 'terse', { path: '.harness/output-styles/terse.md', label: 'Terse' }),
+      entry('style', 'broken', { path: '.harness/output-styles/broken.md', state: 'invalid' }),
+      entry('style', 'quiet', { source: 'user', path: undefined, id: 'cus_AAAAAAAAAAAAAAAA', enabled: false, state: 'off' }),
+    ])
+    const catalog = createCatalogSnapshot({ projectId: 'prj_AAAAAAAAAAAAAAAA', entries: merged, builtAt: 1 })
+    expect(catalog.styles().map(item => item.name)).toEqual(['default', 'explanatory', 'learning', 'terse'])
+    expect(catalog.style('terse')?.path).toBe('.harness/output-styles/terse.md')
+    expect(catalog.style('broken')).toBeNull()
+    expect(catalog.style('quiet')).toBeNull()
+    // Kinds never mix: a style name is no agent, command or skill.
+    expect(catalog.agent('terse')).toBeNull()
+    expect(catalog.skill('learning')).toBeNull()
   })
 
   it('resolveAgentAlias and sortCatalogEntries', () => {

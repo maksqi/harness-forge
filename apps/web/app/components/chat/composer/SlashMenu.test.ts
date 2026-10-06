@@ -93,6 +93,44 @@ describe('slashMenu', () => {
     expect(rows[10]!.get('[data-slot="slash-menu-detail"]').text()).toBe('Core commands')
   })
 
+  it('lists the Skills group last with the source and BookOpen, and badges pending project commands (Phase 11)', async () => {
+    const grouped: SlashItem[] = [
+      ...items,
+      { name: 'release-notes', description: 'Write release notes', kind: 'server', group: 'skill', skill: true, source: 'Project', argumentHint: '<version>' },
+      { name: 'deploy', description: 'Deploy the app', kind: 'server', group: 'project', namespace: 'ops', pending: true },
+      { name: 'standup', description: 'Draft my standup notes', kind: 'server', group: 'personal' },
+    ]
+    const wrapper = mount(SlashMenu, { props: { open: true, query: '', items: grouped } })
+    expect(groupLabels(wrapper)).toEqual(['App', 'Project', 'Personal', 'Plugins', 'Skills'])
+    const rows = wrapper.findAll(byTestId(testIds.slashMenuItem))
+    const skill = rows.at(-1)!
+    expect(skill.attributes()).toMatchObject({ 'data-group': 'skill', 'data-value': 'release-notes', 'aria-label': '/release-notes, Write release notes, arguments <version>' })
+    expect(skill.get('[data-slot="slash-menu-detail"]').text()).toBe('Project')
+    expect(skill.get('[data-slot="slash-menu-hint"]').text()).toBe('<version>')
+    expect(skill.find('svg[aria-hidden="true"]').exists()).toBe(true)
+    expect(skill.attributes('data-trust')).toBeUndefined()
+
+    const deploy = wrapper.get(`${byTestId(testIds.slashMenuItem)}[data-value="deploy"]`)
+    expect(deploy.attributes()).toMatchObject({ 'data-group': 'project', 'data-trust': 'pending', 'aria-label': '/deploy, Deploy the app, needs approval' })
+    expect(deploy.get('[data-slot="slash-menu-trust"]').text()).toBe('Needs approval')
+    expect(deploy.get('[data-slot="slash-menu-detail"]').text()).toBe('ops')
+    expect(wrapper.get(`${byTestId(testIds.slashMenuItem)}[data-value="standup"]`).attributes('data-trust')).toBeUndefined()
+
+    // Picking a pending command still inserts it.
+    await wrapper.setProps({ query: 'dep' })
+    const vm = wrapper.vm as unknown as { handleKeydown: (event: KeyboardEvent) => boolean }
+    vm.handleKeydown(key('Enter'))
+    expect(wrapper.emitted('select')?.[0]?.[0]).toMatchObject({ name: 'deploy', pending: true })
+  })
+
+  it('truncates a long skill name instead of widening the row', () => {
+    const long = `a${'b'.repeat(63)}`
+    const wrapper = mount(SlashMenu, { props: { open: true, query: 'a', items: [{ name: long, description: 'Long', kind: 'server', group: 'skill', skill: true, source: 'Personal' }] } })
+    const name = wrapper.get(byTestId(testIds.slashMenuItem)).get('span')
+    expect(name.text()).toBe(`/${long}`)
+    expect(name.classes()).toEqual(expect.arrayContaining(['truncate', 'max-w-[60%]']))
+  })
+
   it('shows a heading only for groups with a match', async () => {
     const grouped: SlashItem[] = [
       ...items,

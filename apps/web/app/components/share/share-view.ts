@@ -6,6 +6,9 @@
 // user share messages (they render as ordinary user bubbles, `toUserMessage`) and drops compaction markers and activity
 // parts (summaries are never shared: no divider and no dimming here); the agent tools (`task`, `todo_write`,
 // `exit_plan_mode`) are tool parts like any other and render through ShareToolRow.
+// Phase 11 (ADR-048, ADR-052; no `sharePartSchema` change): the allowlist drops `data-hook` parts and a hook carrier
+// holding only them, so a call a hook denied reads "Denied" like any denial; a skill the user ran keeps its name
+// (`command.name`) and shows the command badge (a snapshot does not say it was a skill).
 import type { HarnessError, HarnessUIMessage, MessageMetadata, ShareMessage, SharePart } from '@harness-forge/shared'
 import type { FileUIPart, ReasoningUIPart, TextUIPart } from 'ai'
 import type { SourcePart } from '~/components/chat/chat-format'

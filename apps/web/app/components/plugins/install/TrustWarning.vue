@@ -5,13 +5,15 @@
 // programs the plugin declares, and the sha256 that trust pins. Exactly one of the props is passed: the install
 // dialog passes the inspection (its preview shows the source), installed plugins pass their PluginDetail
 // (sha256 = trust.hash, permissions = manifest.permissions, source = sourceRef).
+// Phase 11 (plugin API 1.5.0, W11.8): "Runs these commands" lists every command hook and every `!` span of a command
+// template (`runCommands`), each in mono with where it comes from ("PreToolUse hook", "/deploy").
 import type { PluginDetail, PluginInspection } from '@harness-forge/shared'
 import { ShieldAlertIcon } from '@lucide/vue'
 import { computed } from 'vue'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import CopyButton from '~/components/common/CopyButton.vue'
 import { testIds } from '~/utils/testids'
-import { manifestHosts, permissionLabel, pluginSourceLabel, stdioCommands, TRUST_WARNING_TEXT } from './install'
+import { manifestHosts, permissionLabel, pluginSourceLabel, runCommands, stdioCommands, TRUST_WARNING_TEXT } from './install'
 
 const props = defineProps<{
   inspection?: PluginInspection
@@ -22,6 +24,8 @@ const manifest = computed(() => props.inspection?.manifest ?? props.plugin?.mani
 const sha256 = computed(() => props.inspection?.sha256 ?? props.plugin?.trust.hash ?? null)
 const permissions = computed(() => props.inspection?.permissions ?? props.plugin?.manifest.permissions ?? [])
 const commands = computed(() => (manifest.value ? stdioCommands(manifest.value) : []))
+/** + Phase 11: the shell commands of command hooks and `!` spans. */
+const shellCommands = computed(() => (manifest.value ? runCommands(manifest.value) : []))
 const hosts = computed(() => props.inspection?.networkHosts ?? (manifest.value ? manifestHosts(manifest.value) : []))
 const source = computed(() => (props.plugin ? pluginSourceLabel(props.plugin) : null))
 </script>
@@ -70,6 +74,15 @@ const source = computed(() => (props.plugin ? pluginSourceLabel(props.plugin) : 
         <ul class="grid gap-1">
           <li v-for="command in commands" :key="command" class="font-mono text-xs break-all text-foreground">
             {{ command }}
+          </li>
+        </ul>
+      </div>
+      <div v-if="shellCommands.length" class="grid gap-1.5" data-slot="trust-run-commands">
+        <span class="text-xs font-medium text-muted-foreground">Runs these commands</span>
+        <ul class="grid gap-1.5">
+          <li v-for="(item, index) in shellCommands" :key="index" class="grid gap-0.5">
+            <span class="text-xs text-muted-foreground">{{ item.source }}</span>
+            <code class="font-mono text-xs break-all whitespace-pre-wrap text-foreground">{{ item.command }}</code>
           </li>
         </ul>
       </div>

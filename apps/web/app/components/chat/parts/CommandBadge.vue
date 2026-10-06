@@ -8,11 +8,13 @@
 // only a plugin command reads the plugins store, for the plugin's name (the share page never passes a source, so it
 // stays store-free).
 // Phase 11 (ADR-052; C39 declares the prop, W11.12 implements it; frozen from Gate P11-0b): `kind` (else the invocation's
-// `kind`) names a skill invocation: the screen reader text says "Skill" instead of "Command"; W11.12 adds the icon and
-// the tooltip lines "Ran {n} shell commands" / "Included {paths}" from `metadata.command.inlined`.
+// `kind`) names a skill invocation: `BookOpen` instead of `SquareTerminal`, the screen reader text "Skill" instead of
+// "Command" and the source "Project skill" / "Personal skill" / "From {plugin}" / "Built-in skill" (a plugin skill's
+// plugin from the plugins store); the tooltip (and the screen reader text) adds "Ran {n} shell commands" / "Included
+// {paths}" from `metadata.command.inlined` (`data-slot="command-badge-inlined"`).
 import type { CommandInvocation } from '@harness-forge/shared'
 import { safeParseModelRef } from '@harness-forge/shared'
-import { SquareTerminalIcon } from '@lucide/vue'
+import { BookOpenIcon, SquareTerminalIcon } from '@lucide/vue'
 import { getActivePinia } from 'pinia'
 import { computed, inject } from 'vue'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -35,8 +37,11 @@ const props = withDefaults(defineProps<{
 })
 
 const resolveModel = inject(MODEL_LABEL_RESOLVER, null)
+/** + Phase 11: what the name invoked (the prop, else the invocation's kind, else a command). */
+const invocationKind = computed<'command' | 'skill'>(() => props.kind ?? props.command?.kind ?? 'command')
 /** + Phase 11: "Skill" for a skill invocation, else "Command". */
-const kindLabel = computed(() => ((props.kind ?? props.command?.kind) === 'skill' ? 'Skill' : 'Command'))
+const kindLabel = computed(() => (invocationKind.value === 'skill' ? 'Skill' : 'Command'))
+const kindIcon = computed(() => (invocationKind.value === 'skill' ? BookOpenIcon : SquareTerminalIcon))
 // Only a plugin command needs the plugins store (the plugin's name); the source is absent on share pages.
 const plugins = props.command?.source === 'plugin' && getActivePinia() ? usePluginsStore() : null
 
@@ -44,9 +49,10 @@ const pluginName = computed(() => {
   if (!plugins || props.command?.source !== 'plugin')
     return null
   const listed = plugins.commands.find(command => command.name === props.name && command.source === 'plugin')
-  const plugin = listed?.pluginId
-    ? plugins.byId(listed.pluginId)
-    : plugins.items.find(item => item.contributions.commands.includes(props.name))
+  const contributed = (item: (typeof plugins.items)[number]): boolean => (invocationKind.value === 'skill'
+    ? item.contributions.skills.includes(props.name)
+    : item.contributions.commands.includes(props.name))
+  const plugin = listed?.pluginId ? plugins.byId(listed.pluginId) : plugins.items.find(contributed)
   return plugin?.name ?? listed?.pluginId ?? null
 })
 
@@ -58,10 +64,11 @@ const modelName = computed(() => {
 })
 
 const lines = computed(() => (props.command
-  ? commandBadgeLines(props.command, { plugin: pluginName.value, model: modelName.value })
-  : { source: null, model: null, tools: null }))
-const hasDetails = computed(() => lines.value.source !== null || lines.value.model !== null || lines.value.tools !== null)
-const srDetails = computed(() => [lines.value.source, lines.value.model, lines.value.tools].filter(Boolean).join(', '))
+  ? commandBadgeLines(props.command, { plugin: pluginName.value, model: modelName.value }, invocationKind.value)
+  : { source: null, model: null, tools: null, inlined: [] as string[] }))
+const hasDetails = computed(() => lines.value.source !== null || lines.value.model !== null || lines.value.tools !== null
+  || lines.value.inlined.length > 0)
+const srDetails = computed(() => [lines.value.source, lines.value.model, lines.value.tools, ...lines.value.inlined].filter(Boolean).join(', '))
 </script>
 
 <template>
@@ -75,7 +82,7 @@ const srDetails = computed(() => [lines.value.source, lines.value.model, lines.v
         v-bind="$attrs"
         class="inline-flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded-md border bg-card px-2 font-mono text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       >
-        <SquareTerminalIcon aria-hidden="true" class="size-3.5 shrink-0" />
+        <component :is="kindIcon" aria-hidden="true" class="size-3.5 shrink-0" />
         <span class="sr-only">{{ kindLabel }}</span>
         <span class="truncate">/{{ name }}</span>
         <span v-if="modelName" data-slot="command-badge-model" class="min-w-0 truncate font-sans" aria-hidden="true">· {{ modelName }}</span>
@@ -86,6 +93,7 @@ const srDetails = computed(() => [lines.value.source, lines.value.model, lines.v
       <span v-if="lines.source" data-slot="command-badge-source">{{ lines.source }}</span>
       <span v-if="lines.model" data-slot="command-badge-runs-on">{{ lines.model }}</span>
       <span v-if="lines.tools" data-slot="command-badge-tools" class="break-words">{{ lines.tools }}</span>
+      <span v-for="line in lines.inlined" :key="line" data-slot="command-badge-inlined" class="break-words">{{ line }}</span>
     </TooltipContent>
   </Tooltip>
   <span
@@ -94,7 +102,7 @@ const srDetails = computed(() => [lines.value.source, lines.value.model, lines.v
     v-bind="$attrs"
     class="inline-flex h-6 items-center gap-1.5 rounded-md border bg-card px-2 font-mono text-xs text-muted-foreground"
   >
-    <SquareTerminalIcon aria-hidden="true" class="size-3.5" />
+    <component :is="kindIcon" aria-hidden="true" class="size-3.5" />
     <span class="sr-only">{{ kindLabel }}</span>/{{ name }}
   </span>
 </template>

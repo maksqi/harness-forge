@@ -2,16 +2,29 @@
 // failures, single chat JSON (v1 / v2), settings restore, events and the mutex. Phase 10 (W10.6-T2): the personal
 // definitions of `customizations.json` round-trip into a fresh server through the C30 fake (`restoreCustomizations`; an
 // existing kind and name kept), invalid items and files, and a background task result that comes back with its chat.
+// Phase 11 (W11.7-T6): a v1.7 backup round-trips into a fresh server with the real services: the settings `outputStyle`
+// / `hooksEnabled`, the personal output style, a personal command with `!` spans restored turned off (the customization
+// store's rule, W11.6), the chat with its hook records; no personal hook, project approval or project MCP variable.
 import type { BackupFileEntry, BackupManifest, ChatExportV1, ChatExportV2, DataImportResult, FileRef, HarnessUIMessage } from '@harness-forge/shared'
 import type { DataTestApp } from './fixtures.test-util.ts'
 import { chatExportSchema, dataImportResultSchema, DEFAULT_SETTINGS, HarnessError, LIMITS } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { zipSync } from 'fflate'
 import { afterEach, describe, expect, it } from 'vitest'
-import { chats, files } from '../../db/schema.ts'
+import { chats, files, hooks, projects, projectTrust, secrets } from '../../db/schema.ts'
 import { patchZip, unixMode, zipOf } from '../../plugins/install/testing.ts'
 import { PNG, TEXT } from '../files/fixtures.test-util.ts'
-import { closeCustomizedApps, customizedDataApp, definition } from './backup-fixtures.test-util.ts'
+import {
+  closeCustomizedApps,
+  customizedDataApp,
+  definition,
+  hookChatMessages,
+  PLAIN_COMMAND_CONTENT,
+  realDataApp,
+  seedPhase11,
+  SPAN_COMMAND_CONTENT,
+  STYLE_CONTENT,
+} from './backup-fixtures.test-util.ts'
 import {
   assistant,
   chatId,
@@ -619,5 +632,42 @@ describe('import: personal agents, commands and skills (Phase 10)', () => {
     expect(result.counts.imported).toBe(1)
     const messages = await target.deps.chats.listMessages(chatId(1))
     expect(messages.map(message => message.parts.filter(part => part.type === 'data-task-result'))).toEqual([[], [], [taskResult], [taskResult]])
+  })
+})
+
+describe('import: Phase 11 round trip into a fresh server (settings, styles, commands; never hooks, approvals or variables)', () => {
+  it('restores outputStyle / hooksEnabled, the style and the commands (a command with spans turned off) and the hook records', async () => {
+    const source = await realDataApp()
+    const seeded = await seedPhase11(source)
+    const zip = await exportBytes(source.deps, { files: false })
+
+    const target = await realDataApp()
+    const before = await target.deps.settings.get()
+    expect(before).toMatchObject({ outputStyle: 'default', hooksEnabled: true })
+    const result = dataImportResultSchema.parse(await target.deps.data.importData(new Blob([new Uint8Array(zip)]), { restoreSettings: true, restoreCustomizations: true }))
+    expect(result).toMatchObject({ counts: { imported: 1, failed: 0 }, settingsRestored: true, customizations: { imported: 3, skipped: 0, failed: 0 } })
+    expect(result.warnings).toEqual([])
+
+    expect(await target.deps.settings.get()).toMatchObject({ outputStyle: 'terse', hooksEnabled: false })
+    const items = (await target.deps.customizations.exportBackup()).items
+    expect(items.map(item => [item.kind, item.name, item.enabled])).toEqual([['command', 'review', true], ['command', 'status', false], ['style', 'terse', true]])
+    expect(items.map(item => item.content)).toEqual([PLAIN_COMMAND_CONTENT, SPAN_COMMAND_CONTENT, STYLE_CONTENT])
+
+    // The chat comes back with its hook records and its own style, outside any project.
+    const chat = await target.deps.chats.get(seeded.chatId)
+    expect(chat.messages).toEqual(hookChatMessages())
+    expect(chat.projectId).toBeNull()
+    expect(chat.settings).toMatchObject({ outputStyle: 'terse' })
+    expect((await target.deps.chats.list({ q: 'run the tests first' })).items.map(item => item.id)).toEqual([seeded.chatId])
+
+    // Configuration that can run something never travels.
+    expect(await target.deps.db.select().from(hooks)).toEqual([])
+    expect(await target.deps.db.select().from(projectTrust)).toEqual([])
+    expect(await target.deps.db.select().from(projects)).toEqual([])
+    expect((await target.deps.db.select().from(secrets)).filter(row => row.scope.startsWith('project:'))).toEqual([])
+
+    // Importing the same backup again keeps what is there (the commands stay as they are).
+    const again = dataImportResultSchema.parse(await target.deps.data.importData(new Blob([new Uint8Array(zip)]), { restoreCustomizations: true }))
+    expect(again.customizations).toEqual({ imported: 0, skipped: 3, failed: 0 })
   })
 })

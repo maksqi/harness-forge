@@ -377,6 +377,77 @@ describe('registerDeclaredContributions', () => {
     })).toThrow(invalid)
   })
 
+  it('registers output styles (plugin API 1.5.0) with exactly the declared fields; a taken name is skipped and logged', () => {
+    const styles: unknown[] = []
+    const warnings: string[] = []
+    const ctx = {
+      outputStyles: {
+        register: (definition: { name: string }) => {
+          if (definition.name === 'taken')
+            throw Object.assign(new Error('The output style "taken" is already registered by the plugin "first".'), { name: 'HarnessError', code: 'conflict' })
+          styles.push(definition)
+        },
+      },
+      logger: { warn: (message: string) => void warnings.push(message) },
+    } as unknown as PluginContext
+    const hookCalls: unknown[] = []
+    registerDeclaredContributions(ctx, {
+      manifestVersion: 1,
+      id: 'acme',
+      name: 'Acme',
+      version: '1.0.0',
+      engines: { harness: '^1.5.0' },
+      contributes: {
+        outputStyles: [
+          { name: 'taken', description: 'x', content: 'x' },
+          { name: 'reviewer', description: 'Reviews.', content: 'Review.', keepCodingInstructions: true },
+          { name: 'terse', description: 'Short.', content: 'Be brief.' },
+        ],
+      },
+    }, { registerHookCommands: (hooks) => {
+      hookCalls.push(hooks)
+      return { dispose: () => {} }
+    } })
+    expect(styles).toEqual([
+      { name: 'reviewer', description: 'Reviews.', content: 'Review.', keepCodingInstructions: true },
+      { name: 'terse', description: 'Short.', content: 'Be brief.' },
+    ])
+    // No `keepCodingInstructions: undefined` key reaches the strict validation.
+    expect(Object.keys(styles[1] as object)).toEqual(['name', 'description', 'content'])
+    expect(warnings).toEqual(['The output style "taken" was skipped: The output style "taken" is already registered by the plugin "first".'])
+    // No hooks declared: the host is not asked.
+    expect(hookCalls).toEqual([])
+  })
+
+  it('registers command hooks (plugin API 1.5.0) once through the host, only when at least one handler is declared', () => {
+    const ctx = { logger: { warn: () => {} } } as unknown as PluginContext
+    const hooks = { PostToolUse: [{ matcher: 'Write|Edit', hooks: [{ type: 'command' as const, command: 'sh "$HARNESS_PLUGIN_ROOT/after.sh"', timeout: 10 }] }] }
+    const base = { manifestVersion: 1 as const, id: 'acme', name: 'Acme', version: '1.0.0', engines: { harness: '^1.5.0' } }
+    const calls: unknown[] = []
+    const host = {
+      registerHookCommands: (value: unknown) => {
+        calls.push(value)
+        return { dispose: () => {} }
+      },
+    }
+    registerDeclaredContributions(ctx, { ...base, contributes: { hooks } }, host)
+    expect(calls).toEqual([hooks])
+    registerDeclaredContributions(ctx, { ...base, contributes: { hooks: {} } }, host)
+    registerDeclaredContributions(ctx, { ...base, contributes: { hooks: { Stop: [] } } }, host)
+    expect(calls).toHaveLength(1)
+    // Without a host (no runtime), command hooks are not registered at all.
+    expect(() => registerDeclaredContributions(ctx, { ...base, contributes: { hooks } })).not.toThrow()
+    expect(calls).toHaveLength(1)
+    // A host failure (an invalid registration) fails the load.
+    const invalid = Object.assign(new Error('Command hooks: bad'), { name: 'HarnessError', code: 'validation_error' })
+    const failing = {
+      registerHookCommands: (): never => {
+        throw invalid
+      },
+    }
+    expect(() => registerDeclaredContributions(ctx, { ...base, contributes: { hooks } }, failing)).toThrow(invalid)
+  })
+
   it('a manifest of plugin API 1.3.0 (no agents or skills) never touches ctx.agents / ctx.skills', () => {
     const calls: string[] = []
     const ctx = {
@@ -390,7 +461,11 @@ describe('registerDeclaredContributions', () => {
       version: '1.0.0',
       engines: { harness: '^1.3.0' },
       contributes: { commands: [{ name: 'hello', description: 'Hello.', template: 'Hello {{input}}' }] },
-    })
+    }, { registerHookCommands: () => {
+      calls.push('hooks')
+      return { dispose: () => {} }
+    } })
+    // Nor ctx.outputStyles or the host's command hooks (plugin API 1.5.0).
     expect(calls).toEqual(['command:hello'])
   })
 })

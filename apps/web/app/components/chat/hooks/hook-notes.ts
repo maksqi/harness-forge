@@ -4,7 +4,7 @@
 // turn the server started after a Stop hook blocked (`run.started.origin = 'hook'`). The model's view of a record is the
 // server's business (`hookModelText`); the carrier rule is the shared `isHookCarrier` plus a valid record in every part.
 // No Vue, no stores. Signatures frozen from Gate P11-0b (C39); `hookDataOf`, `toolHooksOf` and `isHookCarrierMessage` are
-// complete; W11.12 owns the texts in P11-A (P11-0b: plain placeholders).
+// C39's; W11.12 wrote the texts (`hookOutcomeText`, `hookSourceText`, `hookAnnouncement`) and the note helpers below.
 import type { HarnessUIMessage, HookData } from '@harness-forge/shared'
 import { HOOK_PART_TYPE, hookDataSchema, isHookCarrier } from '@harness-forge/shared'
 
@@ -50,14 +50,72 @@ export function isHookCarrierMessage(message: HarnessUIMessage): boolean {
   return isHookCarrier(message) && message.parts.every(part => hookDataOf(part) !== null)
 }
 
-/** The note's line (docs/UI.md 7.31, the table by `outcome`). P11-0b placeholder: "Hook · {event}"; W11.12 implements it. */
-export function hookOutcomeText(data: HookData): string {
-  return `Hook · ${data.event}`
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function firstLine(text: string): string {
+  return text.split(/\r?\n/).map(line => line.trim()).find(line => line.length > 0) ?? ''
+}
+
+/** Whole seconds of a duration (at least 1), for "timed out after {n}s". */
+function wholeSeconds(ms: number): number {
+  return Math.max(1, Math.round(ms / 1000))
+}
+
+/** The hook of a record that failed first: a timeout, else a non-zero exit, else one with an error text; else null. */
+function failedHook(data: HookData): HookData['hooks'][number] | null {
+  return data.hooks.find(hook => hook.timedOut === true)
+    ?? data.hooks.find(hook => hook.exitCode !== null && hook.exitCode !== 0)
+    ?? data.hooks.find(hook => hook.error !== undefined && hook.error.trim() !== '')
+    ?? null
 }
 
 /**
- * The source line of one hook of a record: "Personal hook" · "Project hook" · "From {plugin}" (the plugin's name, else its
- * id). P11-0b placeholder; W11.12 implements it.
+ * The note's line (docs/UI.md 7.31, the table by `outcome`; the reason on one line): "Hook added context · {event}",
+ * "Blocked by a {event} hook: {reason}", "A hook asked you to confirm this call: {reason}", "Allowed by a {event} hook"
+ * (+ ": {reason}"), "Input changed by a {event} hook", "A {event} hook told the agent: {reason}" (the reason, else the
+ * first line of the context: a PostToolUse block's feedback), "A {event} hook asked the agent to continue", "A hook
+ * stopped the agent: {reason}", "A {event} hook failed: exit {n}" / "A {event} hook timed out after {n}s" / "A {event}
+ * hook failed". A missing reason leaves out ": {reason}".
+ */
+export function hookOutcomeText(data: HookData): string {
+  const event = data.event
+  const reason = data.reason ? oneLine(data.reason) : ''
+  const withReason = (text: string): string => (reason ? `${text}: ${reason}` : text)
+  switch (data.outcome) {
+    case 'context':
+      return `Hook added context · ${event}`
+    case 'denied':
+      return withReason(`Blocked by a ${event} hook`)
+    case 'asked':
+      return withReason('A hook asked you to confirm this call')
+    case 'allowed':
+      return withReason(`Allowed by a ${event} hook`)
+    case 'rewritten':
+      return `Input changed by a ${event} hook`
+    case 'blocked': {
+      const feedback = reason || oneLine(firstLine(data.context ?? ''))
+      return feedback ? `A ${event} hook told the agent: ${feedback}` : `A ${event} hook sent the agent feedback`
+    }
+    case 'continued':
+      return `A ${event} hook asked the agent to continue`
+    case 'stopped':
+      return withReason('A hook stopped the agent')
+    case 'error': {
+      const failed = failedHook(data)
+      if (failed?.timedOut === true)
+        return `A ${event} hook timed out after ${wholeSeconds(failed.durationMs)}s`
+      if (failed && failed.exitCode !== null && failed.exitCode !== 0)
+        return `A ${event} hook failed: exit ${failed.exitCode}`
+      return `A ${event} hook failed`
+    }
+  }
+}
+
+/**
+ * The source line of one hook of a record: "Personal hook" · "Project hook" · "From {plugin}" (the plugin's name, else
+ * its id).
  */
 export function hookSourceText(hook: HookData['hooks'][number], pluginName: string | null): string {
   switch (hook.source) {
@@ -71,9 +129,26 @@ export function hookSourceText(hook: HookData['hooks'][number], pluginName: stri
 }
 
 /**
- * The polite announcement of a record ("A hook blocked {tool}" for a `denied` record, "A hook asked the agent to
- * continue" for a carrier's `continued` record), else null. P11-0b: null for every record; W11.12 implements it.
+ * The polite announcement of a record (ChatView, once per part per tab): "A hook blocked {tool}" for a `denied` record
+ * (the row's title, else the record's tool name), "A hook asked the agent to continue" for a `continued` record (a
+ * carrier's); null for every other record.
  */
-export function hookAnnouncement(_data: HookData, _toolTitle: string | null): string | null {
+export function hookAnnouncement(data: HookData, toolTitle: string | null): string | null {
+  if (data.outcome === 'denied')
+    return `A hook blocked ${toolTitle?.trim() || data.toolName || 'a tool call'}`
+  if (data.outcome === 'continued')
+    return 'A hook asked the agent to continue'
   return null
+}
+
+/** What a note's details toggle names: the context, the hooks' output (errors) or the details (the source lines). */
+export function hookDetailsKind(data: HookData): 'context' | 'output' | 'details' {
+  if (data.outcome === 'context')
+    return 'context'
+  return data.outcome === 'error' ? 'output' : 'details'
+}
+
+/** The plugin of a record's first plugin hook (its name comes from the plugins store, outside this module), else null. */
+export function hookPluginId(data: HookData): string | null {
+  return data.hooks.find(hook => hook.source === 'plugin' && hook.pluginId)?.pluginId ?? null
 }

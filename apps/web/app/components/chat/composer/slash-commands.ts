@@ -11,11 +11,14 @@
 // Skills (`skill`: user-invocable skills, `CommandSummary.kind === 'skill'`, `SlashItem.skill`), `SlashItem.pending` (a
 // project command whose `!` lines wait for approval), the actions `{ type: 'open', menu: 'style' }` and
 // `{ type: 'set-style', style }` of `/output-style` (with `ClientCommandContext.styles`), and command and skill names
-// of up to 64 characters in the hint, query and command patterns.
-import type { ClientCommand, CommandSummary, ReasoningEffort, ToolMode } from '@harness-forge/shared'
+// of up to 64 characters in the hint, query and command patterns. A skill row shows its source on the right ("Project",
+// "Personal", the plugin's name, "Built-in"); a pending project command shows "Needs approval" (`withPendingCommands`
+// over the project's trust list, `pendingCommandNames`) and its name adds ", needs approval".
+import type { ClientCommand, CommandSummary, ProjectTrustList, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { OutputStyleOption } from './output-style'
 import { CLIENT_COMMANDS, isClientCommand } from '@harness-forge/shared'
 import { EFFORT_LABELS } from './effort'
+import { resolveStyleQuery, styleOptions } from './output-style'
 import { EDITS_NEEDS_PROJECT, isProjectOnlyMode, PLAN_NEEDS_PROJECT, TOOL_MODE_OPTIONS } from './permission'
 
 /** The groups of the slash menu, in display order (docs/UI.md 7.8, Phase 10; + Phase 11: `skill`, last). */
@@ -35,7 +38,10 @@ export interface SlashItem {
   name: string
   description: string
   kind: 'client' | 'server'
-  /** Server commands: the name of the plugin that contributes the command. */
+  /**
+   * Server commands: the name of the plugin that contributes the command; + Phase 11, skills: the source text shown on
+   * the right ("Project", "Personal", the plugin's name, "Built-in").
+   */
   source?: string
   /** + Phase 10: the menu group (client commands and the harness `/compact`: `app`). */
   group: SlashGroup
@@ -86,11 +92,26 @@ export function slashGroupOf(command: Pick<CommandSummary, 'source' | 'kind'>): 
   }
 }
 
+/** + Phase 11: the source text of a skill row ("Project", "Personal", the plugin's name or "Plugin", "Built-in"). */
+function skillSourceText(command: Pick<CommandSummary, 'source' | 'pluginId'>, pluginName: (pluginId: string) => string | undefined): string {
+  switch (command.source) {
+    case 'project':
+      return 'Project'
+    case 'user':
+      return 'Personal'
+    case 'plugin':
+      return command.pluginId === undefined ? 'Plugin' : pluginName(command.pluginId) ?? command.pluginId
+    case 'harness':
+      return 'Built-in'
+  }
+}
+
 /**
  * The server items: `/compact` (App), the project's, the personal and the plugin commands, with the contributing
- * plugin's name, the argument hint and the namespace. The server already resolved the precedence (one item per name).
- * A server command can never shadow a client command (plugins and command files cannot take those names; this is a
- * second guard).
+ * plugin's name, the argument hint and the namespace; + Phase 11: the user-invocable skills (group `skill`, `source` =
+ * the skill's source text). The server already resolved the precedence (one item per name; a command wins over a
+ * skill). A server command can never shadow a client command (plugins and command files cannot take those names; this
+ * is a second guard).
  */
 export function serverSlashItems(
   commands: readonly CommandSummary[],
@@ -98,17 +119,43 @@ export function serverSlashItems(
 ): SlashItem[] {
   return commands
     .filter(command => !isClientCommand(command.name))
-    .map(command => ({
-      name: command.name,
-      description: command.description,
-      kind: 'server' as const,
+    .map((command) => {
+      const skill = command.kind === 'skill'
       // Phase 10: `pluginId` is optional (personal and project commands have none).
-      ...(command.pluginId === undefined ? {} : { source: pluginName(command.pluginId) ?? command.pluginId }),
-      group: slashGroupOf(command),
-      ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
-      ...(command.namespace === undefined ? {} : { namespace: command.namespace }),
-      ...(command.kind === 'skill' ? { skill: true } : {}),
-    }))
+      const source = skill
+        ? skillSourceText(command, pluginName)
+        : command.pluginId === undefined ? undefined : pluginName(command.pluginId) ?? command.pluginId
+      return {
+        name: command.name,
+        description: command.description,
+        kind: 'server' as const,
+        ...(source === undefined ? {} : { source }),
+        group: slashGroupOf(command),
+        ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
+        ...(command.namespace === undefined ? {} : { namespace: command.namespace }),
+        ...(skill ? { skill: true } : {}),
+      }
+    })
+}
+
+/**
+ * + Phase 11 (ADR-049): the names of the project commands whose `` !`cmd` `` lines wait for approval: the pending trust
+ * items of kind `command` of the project's trust list (empty before it loaded: no badge until then).
+ */
+export function pendingCommandNames(list: ProjectTrustList | null): ReadonlySet<string> {
+  const names = new Set<string>()
+  for (const item of list?.items ?? []) {
+    if (item.kind === 'command' && item.state === 'pending')
+      names.add(item.detail.name.toLowerCase())
+  }
+  return names
+}
+
+/** + Phase 11: marks the project commands named in `pending` ("Needs approval"); the same array when none matches. */
+export function withPendingCommands(items: SlashItem[], pending: ReadonlySet<string>): SlashItem[] {
+  if (pending.size === 0 || !items.some(item => item.group === 'project' && pending.has(item.name.toLowerCase())))
+    return items
+  return items.map(item => (item.group === 'project' && pending.has(item.name.toLowerCase()) ? { ...item, pending: true } : item))
 }
 
 const HINT_PATTERN = /^\/([a-z][\da-z-]{0,63})[ \t]+$/i
@@ -128,18 +175,24 @@ export function argumentHintAt(text: string, items: readonly SlashItem[]): strin
 
 /**
  * The muted text on the right of a row: the namespace of a command file (`frontend`), else the plugin name of a plugin
- * command; App and personal rows show none.
+ * command; + Phase 11: a skill's source text. App and personal rows show none.
  */
 export function slashItemDetail(item: SlashItem): string | null {
+  if (item.group === 'skill')
+    return item.source ?? null
   if (item.namespace)
     return item.namespace
   return item.group === 'plugin' && item.source ? item.source : null
 }
 
-/** The accessible name of a row: "/{name}, {description}" plus ", arguments {hint}" when it has a hint. */
+/**
+ * The accessible name of a row: "/{name}, {description}" plus ", arguments {hint}" when it has a hint; + Phase 11:
+ * ", needs approval" for a project command whose `!` lines wait for approval.
+ */
 export function slashItemLabel(item: SlashItem): string {
   const base = item.description ? `/${item.name}, ${item.description}` : `/${item.name}`
-  return item.argumentHint ? `${base}, arguments ${item.argumentHint}` : base
+  const withHint = item.argumentHint ? `${base}, arguments ${item.argumentHint}` : base
+  return item.pending ? `${withHint}, needs approval` : withHint
 }
 
 /**
@@ -241,8 +294,9 @@ export function parseToolMode(value: string): ToolMode | null {
 }
 
 /**
- * Turns `/name args` into an action: no argument opens the matching menu (`/model`, `/effort`, `/mode`) or runs the
- * command (`/new`, `/help`); an argument applies the value. Invalid values yield an error message for a toast.
+ * Turns `/name args` into an action: no argument opens the matching menu (`/model`, `/effort`, `/mode`, + Phase 11
+ * `/output-style`) or runs the command (`/new`, `/help`); an argument applies the value. Invalid values yield an error
+ * message for a toast.
  */
 export function resolveClientCommand(name: ClientCommand, args: string, context: ClientCommandContext): ClientCommandAction {
   const value = args.trim()
@@ -253,9 +307,13 @@ export function resolveClientCommand(name: ClientCommand, args: string, context:
       return { type: 'help' }
     case 'remember':
       return { type: 'remember', text: value }
-    // Phase 11 (ADR-051): a P11-0a placeholder; W11.10 opens the style menu or sets the chat's style.
-    case 'output-style':
-      return { type: 'error', message: 'Output styles are not available yet.' }
+    // Phase 11 (ADR-051): alone it opens the style menu; with a name, a label or `auto` it sets the chat's style.
+    case 'output-style': {
+      if (!value)
+        return { type: 'open', menu: 'style' }
+      const resolved = resolveStyleQuery(value, context.styles ?? styleOptions([]))
+      return 'error' in resolved ? { type: 'error', message: resolved.error } : { type: 'set-style', style: resolved.style }
+    }
     case 'model': {
       if (!value)
         return { type: 'open', menu: 'model' }

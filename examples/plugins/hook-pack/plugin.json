@@ -1,0 +1,26 @@
+{
+  "manifestVersion": 1,
+  "id": "hook-pack",
+  "name": "Hook pack",
+  "version": "1.0.0",
+  "description": "Example command hook and output style: a reminder to run the tests after a file edit, and a reviewer style.",
+  "engines": { "harness": "^1.5.0" },
+  "contributes": {
+    "hooks": {
+      "PostToolUse": [
+        {
+          "matcher": "Write|Edit|MultiEdit",
+          "hooks": [{ "type": "command", "command": "sh \"$HARNESS_PLUGIN_ROOT/scripts/remind-tests.sh\"", "timeout": 10 }]
+        }
+      ]
+    },
+    "outputStyles": [
+      {
+        "name": "reviewer",
+        "description": "Short, critical replies that list risks and open questions first.",
+        "content": "Write like a careful code reviewer.\n\n- Start with risks, bugs and open questions, then the answer.\n- Use short bullet points; quote file paths and line numbers.\n- Say plainly when something is fine.",
+        "keepCodingInstructions": true
+      }
+    ]
+  }
+}

@@ -19,6 +19,11 @@
 // code) whose message names the problem and lists the available skills (the tool error the model reads); a catalog
 // without skills rejects with `SKILLS_UNAVAILABLE_TEXT`. An abort of `signal` rejects with its reason. Skill bodies are
 // never logged (names, sizes and counts at debug only).
+//
+// Phase 11 (ADR-052; W11.6): a skill with `disable-model-invocation: true` (`entry.modelInvocable === false`, checked
+// again on the loaded fields) is only for the user (`/name`): `loadSkill` refuses it (`forbidden`, "only the user can
+// run it"), and the available skills an error lists, like the skills block of the instructions, are the model-invocable
+// ones only (`modelInvocableSkills`); a catalog without any rejects with `SKILLS_UNAVAILABLE_TEXT`.
 import type { CustomizationEntry, SkillOutput } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 import type { CustomizationCatalog } from '../services/customizations/types.ts'
@@ -26,7 +31,7 @@ import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { AppDeps } from '../types.ts'
 import { Buffer } from 'node:buffer'
 import { posix, resolve } from 'node:path'
-import { HarnessError, isHarnessError, LIMITS } from '@harness-forge/shared'
+import { HarnessError, isHarnessError, LIMITS, skillInvocation } from '@harness-forge/shared'
 import { resolveWorkspacePath, toWorkspaceRel } from '../workspace/paths.ts'
 import { isHiddenWorkspacePath, isSecretLookingPath } from '../workspace/sensitive.ts'
 import { walkWorkspace } from '../workspace/walk.ts'
@@ -74,9 +79,18 @@ function quoted(name: string): string {
   return `"${cut}"`
 }
 
-/** " Available skills: a, b." (at most `LIMITS.skillsListedMax` names), or "" when the catalog has none. */
+/**
+ * The skills the model may load (Phase 11, ADR-052): the entries without `modelInvocable: false`
+ * (`disable-model-invocation: true`), in their order. What the skills block lists and what decides whether the `skill`
+ * tool is offered.
+ */
+export function modelInvocableSkills<T extends Pick<CustomizationEntry, 'modelInvocable'>>(skills: readonly T[]): T[] {
+  return skills.filter(entry => entry.modelInvocable !== false)
+}
+
+/** " Available skills: a, b." (at most `LIMITS.skillsListedMax` names), or "" when the model may load none. */
 function availableSuffix(catalog: CustomizationCatalog): string {
-  const names = catalog.skills().map(entry => entry.name)
+  const names = modelInvocableSkills(catalog.skills()).map(entry => entry.name)
   if (names.length === 0)
     return ''
   const listed = names.slice(0, LIMITS.skillsListedMax)
@@ -84,9 +98,15 @@ function availableSuffix(catalog: CustomizationCatalog): string {
   return ` Available skills: ${listed.join(', ')}${more}.`
 }
 
+/** The error of a skill only the user may run (`disable-model-invocation: true`, Phase 11). */
+function userOnlySkill(catalog: CustomizationCatalog, name: string): HarnessError {
+  const message = `The skill ${quoted(name)} can only be run by the user (as /${name}); you cannot load it.${availableSuffix(catalog)}`
+  return new HarnessError({ code: 'forbidden', message, details: { name } })
+}
+
 /** The error of a name the catalog has no active skill for (unknown, turned off, invalid or shadowed by nothing). */
 function unavailableSkill(catalog: CustomizationCatalog, name: string): HarnessError {
-  if (catalog.skills().length === 0)
+  if (modelInvocableSkills(catalog.skills()).length === 0)
     return new HarnessError({ code: 'not_found', message: SKILLS_UNAVAILABLE_TEXT, details: { name } })
   const listed = catalog.entries.filter(entry => entry.kind === 'skill' && entry.name === name)
   const reason = listed.some(entry => entry.state === 'off')
@@ -159,6 +179,10 @@ export async function loadSkill(context: SkillLoadContext, name: string, signal:
     logger.debug('skill not available', { name: wanted.slice(0, QUOTED_NAME_MAX_CHARS) })
     throw unavailableSkill(catalog, wanted)
   }
+  if (entry.modelInvocable === false) {
+    logger.debug('skill not model-invocable', { name: entry.name, source: entry.source })
+    throw userOnlySkill(catalog, entry.name)
+  }
 
   let loaded
   try {
@@ -178,6 +202,11 @@ export async function loadSkill(context: SkillLoadContext, name: string, signal:
   const definition = loaded.definition
   if (definition.kind !== 'skill')
     throw unreadableSkill(catalog, entry, new HarnessError({ code: 'not_found', message: 'It is not a skill.' }))
+  // The file may have changed since the catalog listed it.
+  if (!skillInvocation(definition.fields).modelInvocable) {
+    logger.debug('skill not model-invocable', { name: entry.name, source: entry.source })
+    throw userOnlySkill(catalog, entry.name)
+  }
 
   const body = capUtf8(definition.fields.content, LIMITS.customizationContentBytes)
   const description = (definition.fields.description || entry.description).slice(0, LIMITS.customizationDescriptionMaxChars)

@@ -8,6 +8,9 @@
 //   4. the directory name equals `id`; `id` is not reserved                                 -> error
 //   5. realpath of `main` and of a file `icon` inside the directory; allowed extension      -> error
 // and computes the content hash that trust pins. The trust check (step 6) needs the `plugins` row and runs in the host.
+// Plugin API 1.5.0 (ADR-048, ADR-052): a manifest with command hooks or `!` spans requires trust too; the declarative
+// hash still covers `plugin.json` only (the scripts a hook calls are not pinned, like the other files of a code
+// plugin), and `declaredContributions` counts the declared command hook handlers and lists the output styles.
 import type { PluginManifest } from '@harness-forge/plugin-sdk'
 import type { HarnessErrorInit, PluginContributions, PluginKind } from '@harness-forge/shared'
 import type { PluginDirectoryInspection } from './types.ts'
@@ -204,7 +207,10 @@ export interface PluginDirectoryRead {
   iconVersion: string | null
   /** Trust hash of the files (`contentHash`); null when `plugin.json` (or the entry) is unreadable. */
   hash: string | null
-  /** Code plugin or declares a stdio MCP server. */
+  /**
+   * `manifestRequiresTrust`: a code plugin, or a manifest that declares a stdio MCP server, (plugin API 1.5.0) command
+   * hooks or a `` !`cmd` `` span in a command template.
+   */
   requiresTrust: boolean
 }
 

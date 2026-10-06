@@ -28,8 +28,21 @@
 // (`PrepareRunOptions.origin`, the prompt hooks); `onRunReleased(…, followUp)` receives what a released run asks for
 // (`RunReleaseFollowUp`: a blocking `Stop` hook) and the priority is: a queued item, then the hook turn
 // (`startHookTurn`: `start` with `origin: 'hook'` and `prepareRun(…, { serverMessage: true })` from a carrier user
-// message holding the record; C37 stub: starts nothing), then `background.onChatIdle`.
-import type { ChatRequestBody, HookData, QueueChangedData, RunOrigin } from '@harness-forge/shared'
+// message holding the record), then `background.onChatIdle`.
+// W11.2 (P11-A):
+// - `startHookTurn` builds the carrier (a new user message whose only part is the `Stop` record, outcome `continued`)
+//   and calls `start(body, …, 'hook', { serverMessage: true })` with the ended run's model, effort and mode (request id
+//   `hook_…`, the response body cancelled at once like a queued turn); only a `Stop` record starts a turn. A start that
+//   loses the chat (409 `run-active`) drops the turn (the run that holds the chat goes on); any other failure ends the
+//   chain (logged). `run.started` carries `origin: 'hook'` and the carrier's id; the hook turn's step 0 takes the
+//   background inbox like any turn; its `Stop` hooks get `stop_hook_active`, and the gate stops the chain after
+//   `LIMITS.hookContinuationsMax` hook turns in a row (`hookChainLength`, the notice `hook-continuation-limit`).
+// - A hook turn that fails before its stream starts leaves the chat idle: the queued items start (as before) and, when
+//   none waits, `background.onChatIdle` runs (the turn would have delivered them).
+// - The queue runs `UserPromptSubmit` at enqueue through `runQueuedPromptHooks` (`hooks-prompt.ts`, the runner's
+//   lifecycle signal: shutdown kills the hooks); a queued turn hands the item's records to `prepareRun`
+//   (`PrepareRunOptions.hookRecords`).
+import type { ChatRequestBody, HarnessUIMessage, HookData, QueueChangedData, RunOrigin } from '@harness-forge/shared'
 import type { EventBus } from '../services/events/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { BackgroundTasks, BackgroundTasksFactory } from './background/types.ts'
@@ -38,10 +51,11 @@ import type { PrepareRunOptions } from './prepare.ts'
 import type { ChatQueue, QueueEntry } from './queue.ts'
 import type { Run } from './runs.ts'
 import type { ChatRunner, ChatRunOptions, RunReleaseFollowUp } from './types.ts'
-import { isHarnessError } from '@harness-forge/shared'
+import { createMessageId, HOOK_PART_TYPE, isHarnessError } from '@harness-forge/shared'
 import { assertRunsAllowed } from '../services/maintenance/index.ts'
 import { createBackgroundTasks } from './background/index.ts'
 import { abortReason, preStreamError } from './errors.ts'
+import { runQueuedPromptHooks } from './hooks-prompt.ts'
 import { launchRun, TaskTracker } from './pipeline.ts'
 import { commitHistory, prepareRun, stoppedBeforeStart } from './prepare.ts'
 import { createChatQueue } from './queue.ts'
@@ -107,11 +121,12 @@ export async function startQueuedTurn(input: QueuedTurnInput): Promise<void> {
   // The logger of the request that queued the item, with the id of this turn (and the queuing request's id).
   const logger = entry.options.logger.child({ reqId: requestId, queuedBy: entry.options.requestId, chatId })
   try {
-    const response = await start(
-      { chatId, message: { id: item.message.id, role: 'user', parts: item.message.parts }, trigger: 'submit-message', modelRef: item.modelRef, reasoningEffort: item.reasoningEffort, toolMode: item.toolMode },
-      { logger, requestId },
-      'queue',
-    )
+    const body: ChatRequestBody = { chatId, message: { id: item.message.id, role: 'user', parts: item.message.parts }, trigger: 'submit-message', modelRef: item.modelRef, reasoningEffort: item.reasoningEffort, toolMode: item.toolMode }
+    // Phase 11: the item's `UserPromptSubmit` records (run at enqueue) go onto the turn's user message.
+    const records = entry.hookRecords ?? []
+    const response = records.length === 0
+      ? await start(body, { logger, requestId }, 'queue')
+      : await start(body, { logger, requestId }, 'queue', { hookRecords: records })
     logger.info('next turn started from the queue', { itemId: item.id })
     await response.body?.cancel().catch(() => {})
   }
@@ -150,16 +165,62 @@ export interface HookTurnInput {
   start: QueuedTurnInput['start']
 }
 
+let hookRequestCounter = 0
+
+/** The request id of a hook turn the server starts (`hook_…`). */
+export function hookRequestId(): string {
+  hookRequestCounter += 1
+  return `hook_${Date.now().toString(36)}_${hookRequestCounter.toString(36)}`
+}
+
+/** The carrier of a hook turn: a new user message whose only part is the `Stop` record (Phase 11). */
+export function hookCarrierMessage(data: HookData): HarnessUIMessage {
+  return { id: createMessageId(), role: 'user', parts: [{ type: HOOK_PART_TYPE, data }] as HarnessUIMessage['parts'] }
+}
+
 /**
  * Starts the follow-up turn of a blocking `Stop` hook (Phase 11, ADR-048; W11.2): a carrier user message holding only
  * the `data-hook` record, `start(body, …, 'hook', { serverMessage: true })` (the chat is acquired synchronously, so
  * nothing comes between the run end and this turn); a lost start (409 `run-active`) drops it. True when a turn start
- * was initiated (the background delivery then waits for that turn's end).
- * C37 stub (P11-0b): starts nothing, answers false.
+ * was initiated (the background delivery then waits for that turn's end); false for a record that is not a `Stop`
+ * record (nothing starts).
  */
 export function startHookTurn(input: HookTurnInput): boolean {
-  void input
-  return false
+  const { chatId, data, previous, options, start } = input
+  if (data.event !== 'Stop')
+    return false
+  const requestId = hookRequestId()
+  const logger = options.logger.child({ reqId: requestId, startedBy: options.requestId, chatId })
+  const message = hookCarrierMessage(data)
+  const body: ChatRequestBody = {
+    chatId,
+    message: { id: message.id, role: 'user', parts: message.parts },
+    trigger: 'submit-message',
+    modelRef: previous.modelRef,
+    reasoningEffort: previous.reasoningEffort,
+    toolMode: previous.toolMode,
+  }
+  let started: Promise<Response>
+  try {
+    // `start` acquires the chat before its first await: nothing comes between the run end and this turn.
+    started = start(body, { logger, requestId }, 'hook', { serverMessage: true })
+  }
+  catch (error) {
+    logger.warn('a hook turn could not start', { code: isHarnessError(error) ? error.code : 'internal_error' })
+    return false
+  }
+  void started.then(async (response) => {
+    logger.info('hook turn started', { userMessageId: message.id })
+    await response.body?.cancel().catch(() => {})
+  }, (error: unknown) => {
+    const details = isHarnessError(error) ? error.details as { reason?: unknown } | undefined : undefined
+    if (isHarnessError(error) && error.code === 'conflict' && details?.reason === 'run-active') {
+      logger.debug('the hook turn lost the chat to another request; it is dropped')
+      return
+    }
+    logger.warn('a hook turn could not start; the hook chain ends', { code: isHarnessError(error) ? error.code : 'internal_error' })
+  })
+  return true
 }
 
 export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions = {}): ChatRunnerInternal {
@@ -170,7 +231,20 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
   const stopWaitMs = options.stopWaitMs ?? STOP_WAIT_MS
   const shutdownStopWaitMs = Math.min(stopWaitMs, options.shutdownStopWaitMs ?? SHUTDOWN_STOP_WAIT_MS)
   // The services are read lazily inside the queue's methods (the runner is built inside the deps factory).
-  const queue = createChatQueue(deps, { hasRun: chatId => registry.get(chatId) !== undefined, now })
+  const queue = createChatQueue(deps, {
+    hasRun: chatId => registry.get(chatId) !== undefined,
+    now,
+    // Phase 11 (W11.2): `UserPromptSubmit` at enqueue (shutdown kills the hooks through the lifecycle signal).
+    promptHooks: ({ chat, body, parts, turnOnly, options: runOptions }) => runQueuedPromptHooks({
+      deps,
+      chat,
+      body,
+      parts,
+      turnOnly,
+      signal: lifecycle.signal,
+      logger: runOptions.logger.child({ chatId: chat.id }),
+    }),
+  })
   // The background manager (Phase 10): reads `deps` and its host lazily, like the queue.
   const background = (options.backgroundTasks ?? createBackgroundTasks)(deps, {
     hasRun: chatId => registry.get(chatId) !== undefined,
@@ -252,14 +326,20 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
   /**
    * A run released before its stream started (the request failed while it was prepared) while messages were queued
    * for it: they become the next turn once the chat is idle and waits for no approval (a pending approval keeps them
-   * for the next run).
+   * for the next run). Phase 11: a server-started hook turn that failed this way leaves the chat idle, so the
+   * background results it would have taken are delivered (`onChatIdle`) when nothing is queued.
    */
-  function releasedBeforeLaunch(chatId: string): void {
-    if (queue.list(chatId).length === 0)
+  function releasedBeforeLaunch(chatId: string, origin: RunOrigin): void {
+    const queued = queue.list(chatId).length > 0
+    if (!queued && origin !== 'hook')
       return
     deps.chats.find(chatId).then((chat) => {
-      if (chat !== null && !chat.pendingApproval && registry.get(chatId) === undefined)
+      if (chat === null || chat.pendingApproval || registry.get(chatId) !== undefined || lifecycle.signal.aborted)
+        return
+      if (queue.list(chatId).length > 0)
         onRunReleased(chatId, 'completed', false)
+      else if (origin === 'hook')
+        chatIdle(chatId)
     }).catch((error: unknown) => deps.logger.warn('cannot check the queue of a chat whose request failed', { chatId, err: error }))
   }
 
@@ -308,7 +388,7 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
         onRunReleased(body.chatId, 'failed', false)
       }
       else if (released && !launched) {
-        releasedBeforeLaunch(body.chatId)
+        releasedBeforeLaunch(body.chatId, origin)
       }
       if (!launched && run.signal.aborted && !isHarnessError(error))
         throw stoppedBeforeStart(body.chatId)

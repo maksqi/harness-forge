@@ -7,6 +7,8 @@
 // with the draft parsed from the file) and Export .md (`downloadText`). A file that is gone (404) shows "This file no
 // longer exists." with Close. Opens with focus on its Close button; reka returns focus to the row's `⋯` trigger.
 // Props, emits and the root test id are frozen from Gate P10-0b (C33).
+// Phase 11 (W11.8; docs/UI.md 9.13): a style is titled by its label and lists its name and what it does with the coding
+// instructions; a skill lists the argument hint, whether it is in the slash menu and "Only when you run it".
 import type { CustomizationEntry } from '@harness-forge/shared'
 import type { CustomizationDraft } from './customize'
 import { CopyPlusIcon, DownloadIcon, FileXIcon } from '@lucide/vue'
@@ -23,7 +25,7 @@ import { usePluginsStore } from '~/stores/plugins'
 import { downloadText } from '~/utils/download'
 import { hasErrorCode, toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import { draftFromEntry, sourceLabel } from './customize'
+import { displayName as displayNameOf, draftFromEntry, sourceLabel } from './customize'
 
 const props = defineProps<{ open: boolean, entry: CustomizationEntry | null, projectId: string | null }>()
 
@@ -41,7 +43,7 @@ let request = 0
 
 const pluginName = (id: string): string => plugins.byId(id)?.name ?? id
 
-const displayName = computed(() => (props.entry ? (props.entry.kind === 'command' ? `/${props.entry.name}` : props.entry.name) : ''))
+const displayName = computed(() => (props.entry ? displayNameOf(props.entry) : ''))
 const details = computed(() => {
   const entry = props.entry
   if (!entry)
@@ -59,8 +61,19 @@ const details = computed(() => {
         : entry.kind === 'agent' ? 'Default sub-agent model' : 'The chat\'s model'
     rows.push({ term: 'Model', value: model })
   }
-  if (entry.kind === 'command' && entry.argumentHint)
+  if ((entry.kind === 'command' || entry.kind === 'skill') && entry.argumentHint)
     rows.push({ term: 'Argument hint', value: entry.argumentHint, mono: true })
+  // + Phase 11: the skill and style keys.
+  if (entry.kind === 'skill') {
+    rows.push({ term: 'Slash menu', value: entry.userInvocable === false ? 'Not shown' : `/${entry.name}`, mono: entry.userInvocable !== false })
+    if (entry.modelInvocable === false)
+      rows.push({ term: 'Loading', value: 'Only when you run it' })
+  }
+  if (entry.kind === 'style') {
+    if (displayName.value !== entry.name)
+      rows.push({ term: 'Name', value: entry.name, mono: true })
+    rows.push({ term: 'Coding', value: entry.keepCodingInstructions ? 'Keeps coding instructions' : 'Replaces coding instructions' })
+  }
   if (entry.namespace)
     rows.push({ term: 'Namespace', value: entry.namespace, mono: true })
   rows.push({ term: 'Source', value: sourceLabel(entry, pluginName) })
@@ -131,7 +144,7 @@ function exportFile(): void {
       @open-auto-focus="onOpenAutoFocus"
     >
       <SheetHeader class="border-b pr-14">
-        <SheetTitle class="truncate font-mono">
+        <SheetTitle class="truncate" :class="entry.kind === 'style' && displayName !== entry.name ? undefined : 'font-mono'">
           {{ displayName }}
         </SheetTitle>
         <SheetDescription class="line-clamp-2">

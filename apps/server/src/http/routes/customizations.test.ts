@@ -88,7 +88,13 @@ describe('gET /customizations', () => {
     expect(global.status).toBe(200)
     const list = customizationListSchema.parse(global.body)
     expect(list.project).toBeNull()
-    expect(list.items.map(entry => [entry.kind, entry.name, entry.source])).toEqual([['agent', 'explore', 'builtin'], ['agent', 'general', 'builtin']])
+    expect(list.items.map(entry => [entry.kind, entry.name, entry.source])).toEqual([
+      ['agent', 'explore', 'builtin'],
+      ['agent', 'general', 'builtin'],
+      ['style', 'default', 'builtin'],
+      ['style', 'explanatory', 'builtin'],
+      ['style', 'learning', 'builtin'],
+    ])
 
     const scoped = await send(h.t, 'GET', `/api/customizations?projectId=${h.project.id}&kind=agent`)
     expect(scoped.status).toBe(200)

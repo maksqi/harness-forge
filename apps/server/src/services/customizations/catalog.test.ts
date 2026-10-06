@@ -1,11 +1,12 @@
 // The catalog merge (W10.1-T2, T4): five sources with one name (the `.harness` file wins, four shadowed with
 // `shadowed`), `duplicate-name` within one folder, the same name in two kinds, `invalid` / `off` entries that shadow
 // nothing, the live checks (`unknown-tool`, `invalid-model`), the plugin entries of the registry (safe mode) and the
-// fingerprint of the project part.
+// fingerprint of the project part. Phase 11 (W11.6-T2): plugin output styles (`registry.styles`), a plugin style with a
+// builtin name never wins, and the builtin styles under the precedence.
 import type { CustomizationEntry, CustomizationKind } from '@harness-forge/shared'
 import type { Registry } from '../../registry/types.ts'
 import type { CatalogCheckContext } from './entries.ts'
-import { customizationListSchema, parseDefinition } from '@harness-forge/shared'
+import { customizationEntrySchema, customizationListSchema, parseDefinition } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { builtinCatalogEntries } from './builtins.ts'
 import { mergeCatalog, projectFingerprint } from './catalog.ts'
@@ -131,12 +132,13 @@ function stubRegistry(options: {
   agents?: Array<{ pluginId: string, definition: Record<string, unknown> }>
   skills?: Array<{ pluginId: string, definition: Record<string, unknown> }>
   commands?: Array<{ pluginId: string, definition: Record<string, unknown> }>
+  styles?: Array<{ pluginId: string, definition: Record<string, unknown> }>
 }): Registry {
   const lookup = (list: Array<{ pluginId: string, definition: Record<string, unknown> }> | undefined) => ({
     list: () => list ?? [],
     get: (name: string) => (list ?? []).find(item => item.definition.name === name),
   })
-  return { agents: lookup(options.agents), skills: lookup(options.skills), commands: lookup(options.commands) } as unknown as Registry
+  return { agents: lookup(options.agents), skills: lookup(options.skills), commands: lookup(options.commands), styles: lookup(options.styles) } as unknown as Registry
 }
 
 describe('plugin entries', () => {
@@ -147,14 +149,54 @@ describe('plugin entries', () => {
       { pluginId: 'core-commands', definition: { name: 'review', description: 'Review the code.', template: 'Review {{input}}' } },
       { pluginId: 'acme', definition: { name: 'hello', description: 'Says hello.', run: () => {} } },
     ],
+    styles: [
+      { pluginId: 'acme', definition: { name: 'pirate', description: 'Talks like a pirate.', content: 'Arr.', keepCodingInstructions: true } },
+      { pluginId: 'acme', definition: { name: 'terse', description: 'Short answers.', content: 'Be brief.' } },
+      { pluginId: 'acme', definition: { name: 'learning', description: 'Not the builtin.', content: 'Shadow it.' } },
+    ],
   })
 
-  it('lists the agents, skills and commands of the registry as plugin entries', () => {
+  it('lists the agents, skills, commands and output styles of the registry as plugin entries', () => {
     expect(pluginCatalogEntries(registry, false).map(item => [item.kind, item.name, item.source, item.pluginId, item.state, item.tools ?? null, item.modelRef ?? null])).toEqual([
       ['agent', 'reviewer', 'plugin', 'acme', 'active', ['read_file'], 'inherit'],
       ['skill', 'pdf', 'plugin', 'acme', 'active', null, null],
       ['command', 'review', 'plugin', 'core-commands', 'active', null, null],
       ['command', 'hello', 'plugin', 'acme', 'active', null, null],
+      ['style', 'pirate', 'plugin', 'acme', 'active', null, null],
+      ['style', 'terse', 'plugin', 'acme', 'active', null, null],
+      ['style', 'learning', 'plugin', 'acme', 'invalid', null, null],
+    ])
+    const styles = pluginCatalogEntries(registry, false).filter(item => item.kind === 'style')
+    // A plugin style is labelled with its name; the flag defaults to false.
+    expect(styles.slice(0, 2).map(item => [item.label, item.keepCodingInstructions, item.description])).toEqual([
+      ['pirate', true, 'Talks like a pirate.'],
+      ['terse', false, 'Short answers.'],
+    ])
+    expect(styles[2]!.diagnostics).toEqual([expect.objectContaining({ level: 'error', code: 'reserved-name' })])
+    for (const item of pluginCatalogEntries(registry, false))
+      expect(customizationEntrySchema.safeParse(item).success, item.name).toBe(true)
+  })
+
+  it('a plugin style never shadows a builtin style; a personal or project style shadows a plugin one', () => {
+    const catalog = mergeCatalog({
+      projectId: 'prj_AAAAAAAAAAAAAAAA',
+      global: [...builtinCatalogEntries(), ...pluginCatalogEntries(registry, false), entry('style', 'terse', { source: 'user', id: 'cus_AAAAAAAAAAAAAAAA', label: 'Terse' })],
+      project: { scan: { id: 'prj_AAAAAAAAAAAAAAAA', available: true, folders: [], scannedAt: 1 }, entries: [entry('style', 'pirate', { path: '.claude/output-styles/pirate.md', label: 'Pirate' })], diagnostics: [] },
+      checks: NO_CHECKS,
+      builtAt: 1,
+    })
+    expect(catalog.styles().map(item => [item.name, item.source])).toEqual([
+      ['default', 'builtin'],
+      ['explanatory', 'builtin'],
+      ['learning', 'builtin'],
+      ['pirate', 'project'],
+      ['terse', 'user'],
+    ])
+    expect(catalog.style('learning')).toMatchObject({ source: 'builtin', label: 'Learning', keepCodingInstructions: true })
+    expect(catalog.entries.filter(item => item.kind === 'style' && item.source === 'plugin').map(item => [item.name, item.state, item.shadowedBy?.source ?? null])).toEqual([
+      ['learning', 'invalid', null],
+      ['pirate', 'shadowed', 'project'],
+      ['terse', 'shadowed', 'user'],
     ])
   })
 
@@ -163,6 +205,7 @@ describe('plugin entries', () => {
     expect(pluginListed('core-commands', true)).toBe(true)
     expect(pluginCatalogEntries(registry, true).map(item => item.name)).toEqual(['review'])
     expect(pluginDefinition(registry, 'agent', 'reviewer', 'acme', true)).toBeNull()
+    expect(pluginDefinition(registry, 'style', 'terse', 'acme', true)).toBeNull()
   })
 
   it('gives the definition of a registration (null for another plugin or an unknown name)', () => {
@@ -173,6 +216,13 @@ describe('plugin entries', () => {
     expect(pluginDefinition(registry, 'command', 'review', undefined, false)?.definition.fields).toMatchObject({ body: 'Review {{input}}', allowedTools: null })
     expect(pluginDefinition(registry, 'skill', 'pdf', 'other', false)).toBeNull()
     expect(pluginDefinition(registry, 'skill', 'missing', undefined, false)).toBeNull()
+    expect(pluginDefinition(registry, 'style', 'pirate', 'acme', false)?.definition).toEqual({
+      kind: 'style',
+      fields: { name: 'pirate', label: 'pirate', description: 'Talks like a pirate.', keepCodingInstructions: true, content: 'Arr.' },
+    })
+    expect(pluginDefinition(registry, 'style', 'terse', undefined, false)?.definition.fields).toMatchObject({ keepCodingInstructions: false, content: 'Be brief.' })
+    // A builtin style name never loads from a plugin.
+    expect(pluginDefinition(registry, 'style', 'learning', 'acme', false)).toBeNull()
   })
 
   it('a plugin command shadowed by a personal and a project command shows the winner', () => {

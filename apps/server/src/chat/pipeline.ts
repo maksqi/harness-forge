@@ -107,7 +107,7 @@ import { buildRunParams, offeredAgentTools, providerImageOptions, runMaxSteps } 
 import { savePlan } from './plan-file.ts'
 import { SseReplayBuffer } from './runs.ts'
 import { createRunScope } from './scope.ts'
-import { loadSkill } from './skills.ts'
+import { loadSkill, modelInvocableSkills } from './skills.ts'
 import { createSteerStep, stepInjector } from './steer.ts'
 import { createPrepareStep } from './steps.ts'
 import { createSubagentRunner } from './subagent/index.ts'
@@ -964,7 +964,7 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     continuation: prepared.continued,
     agent,
     allowedTools: prepared.turnRestriction,
-    skillsAvailable: skills.length > 0,
+    skillsAvailable: modelInvocableSkills(skills).length > 0,
     hooks,
     extraTools: projectTools.tools,
     shadowedMcpServers: projectTools.shadowed,

@@ -9,13 +9,21 @@
 // summarizer failure ends the reply as failed (an `error` chunk, the error in the metadata, no marker, no trimming); an
 // abort ends it `aborted`. A regenerate of the reply runs it again (`prepare.ts`); an image model as the run model is
 // refused with a 400 before the stream (`prepare.ts`).
+// Phase 11 (ADR-048, W11.2): before the summary, `PreCompact` runs (`trigger: 'manual'`, `custom_instructions` = the
+// focus, "" without one) over one hook snapshot of the chat's scope taken for the reply (the run itself has no hooks: a
+// command reply; the chat's project folder is opened for it, so approved project hooks run): observe only (`continue:
+// false` changes nothing, logged), its record written into the reply right before the `data-compaction` marker (the
+// marker hides it from the model), the `hooks` activity around it. A failing hook is logged and the compaction goes on.
 import type { CompactionData, HarnessUIMessage, MessageUsage } from '@harness-forge/shared'
-import type { LanguageModelUsage, UIMessageChunk } from 'ai'
-import type { RunSession } from '../pipeline.ts'
+import type { LanguageModelUsage, UIMessageChunk, UIMessageStreamWriter } from 'ai'
+import type { OpenWorkspace } from '../../services/projects/types.ts'
+import type { RunHooks } from '../hooks.ts'
+import type { HarnessDataChunk, RunSession } from '../pipeline.ts'
 import { isContentPart, latestTodos, LIMITS } from '@harness-forge/shared'
 import { convertToModelMessages, createUIMessageStream } from 'ai'
 import { compactNeedsChatModel } from '../commands.ts'
 import { estimateTokens } from '../context.ts'
+import { createRunHooks } from '../hooks.ts'
 import { buildModelHistory } from '../model-history.ts'
 import { conversionTools, replyStream } from '../pipeline.ts'
 import { applyCompaction, compactionSummaryText } from './history.ts'
@@ -82,6 +90,63 @@ function compactUsage(usage: LanguageModelUsage, contextTokens: number): Message
   return result
 }
 
+/** The chat's project folder for the hooks of a `/compact` reply (null without a project or when it does not open). */
+async function compactWorkspace(session: RunSession): Promise<OpenWorkspace | null> {
+  const { deps, prepared, logger } = session.ctx
+  if (prepared.workspace !== null)
+    return prepared.workspace
+  const projectId = prepared.chat.projectId
+  if (projectId === null)
+    return null
+  try {
+    const result = await deps.projects.openWorkspace(projectId)
+    return result.ok ? result.workspace : null
+  }
+  catch (error) {
+    logger.warn('the project folder could not be opened for the PreCompact hooks', { projectId, err: error })
+    return null
+  }
+}
+
+/**
+ * The hooks of a `/compact` reply (Phase 11): one snapshot of the chat's scope; records go straight into the reply
+ * through `write` (no step boundary in a reply without a model call), the activity through the session.
+ */
+export async function compactHooks(session: RunSession, write: (chunk: HarnessDataChunk) => void): Promise<RunHooks> {
+  const { deps, prepared, run, logger } = session.ctx
+  const workspace = await compactWorkspace(session)
+  const snapshot = await deps.hooks.snapshot({
+    chatId: session.chatId,
+    projectId: prepared.chat.projectId,
+    workspace,
+    toolMode: session.ctx.toolMode,
+    origin: session.ctx.origin ?? 'request',
+    modelRef: prepared.resolved.modelRef,
+  }, { signal: run.signal })
+  const host = {
+    stepNumber: -1,
+    inject: (chunk: HarnessDataChunk) => write(chunk),
+    writeTransient: (chunk: HarnessDataChunk) => session.writeTransient(chunk),
+  }
+  return createRunHooks({ snapshot, host, continued: null, messageId: session.assistantId, logger })
+}
+
+/** `PreCompact` of a `/compact` (observe only); rejects only on an abort of the run. */
+async function manualPreCompact(session: RunSession, writer: UIMessageStreamWriter<HarnessUIMessage>, focus: string | null): Promise<void> {
+  const { run, logger } = session.ctx
+  try {
+    const hooks = await compactHooks(session, chunk => writer.write(chunk))
+    const result = await hooks.preCompact({ trigger: 'manual', customInstructions: focus }, run.signal)
+    if (!result.continue)
+      logger.info('a PreCompact hook asked to stop; the compaction goes on (PreCompact only observes)')
+  }
+  catch (error) {
+    if (run.signal.aborted)
+      throw error
+    logger.warn('the PreCompact hooks failed; the compaction goes on', { err: error })
+  }
+}
+
 /**
  * The reply stream of `/compact [focus]` (see the module comment). `focus` is the command input, trimmed (null when
  * empty; at most `LIMITS.compactFocusMaxChars`, checked by `resolveCommand`).
@@ -106,10 +171,12 @@ export async function compactStream(session: RunSession, focus: string | null): 
     execute: async ({ writer }) => {
       session.bindWriter(writer)
       writer.write({ type: 'start', messageId: session.assistantId, messageMetadata: session.startMetadata() })
-      session.writeTransient({ type: 'data-activity', data: { kind: 'compacting' } })
       let data: CompactionData
       let usage: LanguageModelUsage
       try {
+        // Phase 11: `PreCompact` (observe only) before the `compacting` activity.
+        await manualPreCompact(session, writer, focus)
+        session.writeTransient({ type: 'data-activity', data: { kind: 'compacting' } })
         // Tool outputs as their model text (`toModelOutput` of the registered tools), like the model saw them.
         const tools = conversionTools(session.ctx.deps, {}, logger)
         const messages = await convertToModelMessages<HarnessUIMessage>(visible, { tools, ignoreIncompleteToolCalls: true })

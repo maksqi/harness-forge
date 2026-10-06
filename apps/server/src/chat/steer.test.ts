@@ -13,7 +13,7 @@ import type { StepInjectionSource } from './steer.ts'
 import { Buffer } from 'node:buffer'
 import { taskResultText } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { createMemoryLogger } from '../logger.ts'
+import { createMemoryLogger, createSilentLogger } from '../logger.ts'
 import { UNREADABLE_ATTACHMENTS_TEXT } from './files.ts'
 import { createSteerStep, steerChunk as itemSteerChunk, steerUIMessage, stepInjector, taskResultChunk, taskResultModelMessage } from './steer.ts'
 
@@ -159,6 +159,8 @@ function fakeQueue(items: QueueItem[]): ChatQueue & { items: QueueItem[], takes:
       state.items = state.items.filter(entry => entry.turnOnly)
       return taken
     },
+    // Phase 11: the steer step takes the entries (no hook records here).
+    takeSteerableEntries: (chatId: string) => state.takeSteerable(chatId).map(entry => ({ item: entry, options: { logger: createSilentLogger(), requestId: 'req_steer' } })),
   }
   return state as unknown as ChatQueue & { items: QueueItem[], takes: number }
 }

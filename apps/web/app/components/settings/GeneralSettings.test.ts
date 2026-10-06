@@ -9,7 +9,7 @@ import { TOOL_MODE_OPTIONS as PERMISSION_MENU_OPTIONS } from '~/components/chat/
 import { useAuthStore } from '~/stores/auth'
 import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
-import { authStatus } from '~/utils/testing/fixtures'
+import { authStatus, customizationList, styleEntry } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { displayNameError, EFFORT_OPTIONS, instructionsError, parseMaxSteps, sendKeyOptions, TOOL_MODE_OPTIONS } from './general'
 import GeneralSettings from './GeneralSettings.vue'
@@ -279,6 +279,39 @@ describe('generalSettings', () => {
     expect(trigger.attributes('data-value')).toBe('default')
     expect(trigger.text()).toBe('Default')
     expect(wrapper.text()).toContain('How replies are written in chats that don\'t choose one. Projects can choose their own.')
+  })
+
+  it('offers the built-in and the active personal styles of the global catalog and saves the choice (W11.8-T8)', async () => {
+    api.customizations.list.mockResolvedValue(customizationList({
+      project: null,
+      items: [
+        styleEntry({ name: 'terse', label: 'Terse', source: 'user', path: undefined }),
+        styleEntry({ name: 'off-style', label: 'Off style', source: 'user', path: undefined, state: 'off' }),
+      ],
+    }))
+    const wrapper = await mountGeneral()
+    expect(api.customizations.list).toHaveBeenCalledWith({ query: {} })
+    const trigger = wrapper.get(`[data-testid="${testIds.settingsOutputStyle}"]`)
+    trigger.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settle()
+    const items = [...document.body.querySelectorAll<HTMLElement>('[data-slot="select-item"]')]
+    expect(items.map(item => item.dataset.value)).toEqual(['default', 'explanatory', 'learning', 'terse'])
+    items[3]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settle()
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { outputStyle: 'terse' } })
+    expect(wrapper.get(`[data-testid="${testIds.settingsOutputStyle}"]`).attributes('data-value')).toBe('terse')
+    expect(wrapper.get(`[data-testid="${testIds.settingsOutputStyle}"]`).text()).toBe('Terse')
+  })
+
+  it('keeps a stored style that is no longer an option, marked "Not available" (W11.8-T8)', async () => {
+    api.settings.get.mockResolvedValue({ ...saved, outputStyle: 'gone' })
+    const wrapper = await mountGeneral()
+    const trigger = wrapper.get(`[data-testid="${testIds.settingsOutputStyle}"]`)
+    expect(trigger.text()).toBe('gone')
+    trigger.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settle()
+    const missing = [...document.body.querySelectorAll<HTMLElement>('[data-slot="select-item"]')].find(item => item.dataset.value === 'gone')
+    expect(missing?.textContent).toContain('Not available')
   })
 
   it('saves choices at once', async () => {

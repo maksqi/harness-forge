@@ -6,7 +6,7 @@
 // messages (share links are not restored); importing it again skips every chat.
 // Phase 10 (W10.13, ADR-044): the backup holds `customizations.json` with the personal agent and command; delete-all
 // keeps them, so the spec removes them before the import, and "Restore settings from the backup" brings them back ("2
-// agents, commands and skills restored"); the second import keeps the existing ones ("2 kept").
+// personal definitions restored"); the second import keeps the existing ones ("2 kept").
 import type { Locator, Page } from '@playwright/test'
 import type { Buffer } from 'node:buffer'
 import type { PasswordServer } from '../../helpers/index.ts'
@@ -186,7 +186,7 @@ test.describe('data', () => {
     await expect(page.getByTestId(testIds.dataImportRestoreSettings)).toHaveAttribute('data-state', 'checked')
     const imported = await importBackup(page, backup)
     await expect(imported).toContainText('Imported 2 chats')
-    await expect(imported.locator('[data-slot="data-import-customizations"]')).toHaveText('2 agents, commands and skills restored')
+    await expect(imported.locator('[data-slot="data-import-customizations"]')).toHaveText('2 personal definitions restored')
     expect(await listed()).toEqual([definitions.agent, definitions.command].sort())
     await expect(imported.getByTestId(testIds.dataImportItem)).toHaveCount(2)
     for (const chat of chats)
@@ -210,7 +210,7 @@ test.describe('data', () => {
     await page.getByTestId(testIds.dataImportRestoreSettings).click()
     const again = await importBackup(page, backup)
     await expect(again).toContainText('Imported 0 chats · skipped 2')
-    await expect(again.locator('[data-slot="data-import-customizations"]')).toHaveText('0 agents, commands and skills restored · 2 kept')
+    await expect(again.locator('[data-slot="data-import-customizations"]')).toHaveText('0 personal definitions restored · 2 kept')
     await expect(again.getByTestId(testIds.dataImportItem)).toHaveCount(2)
     await expect(byTestId(again, testIds.dataImportItem, { 'data-status': 'skipped' })).toHaveCount(2)
     for (const chat of chats)

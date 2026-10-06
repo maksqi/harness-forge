@@ -221,6 +221,11 @@ describe('chatHeader: project trust chip (Phase 11, P11-0b mount)', () => {
     useProjectTrustStore().applyEvent(createServerEvent('project-trust.changed', { projectId: projectId(1), pending: 2 }, 1))
     await nextTick()
     expect(wrapper.get(`[data-testid="${testIds.projectTrustChip}"]`).attributes('data-count')).toBe('2')
+    // W11.9: the chip is named for screen readers (the project's name once the projects are known).
+    expect(wrapper.get(`[data-testid="${testIds.projectTrustChip}"]`).attributes('aria-label')).toBe('Review 2 items in this project that can run commands')
+    useProjectsStore().items = [projectSummary({ id: projectId(1), name: 'Website' })]
+    await nextTick()
+    expect(wrapper.get(`[data-testid="${testIds.projectTrustChip}"]`).attributes('aria-label')).toBe('Review 2 items in Website that can run commands')
     const order = [...wrapper.get(`[data-testid="${testIds.chatHeader}"]`).element.querySelectorAll('[data-testid]')].map(node => node.getAttribute('data-testid'))
     expect(order.indexOf(testIds.chatProjectChip)).toBeLessThan(order.indexOf(testIds.projectTrustChip))
     expect(order.indexOf(testIds.projectTrustChip)).toBeLessThan(order.indexOf(testIds.chatMenuTrigger))

@@ -25,15 +25,21 @@
 //   this reply) and injects one `data-task-result` part per result for the step, after the steers; the model reads each
 //   as a user message with `taskResultText` (one text part: exactly what `splitTaskResults` makes of the saved part).
 //   Step 0 counts here too: a new turn or an approval continuation takes what waited. Reports are never logged.
-import type { HarnessUIMessage, QueueItem, TaskResultData } from '@harness-forge/shared'
+//   Phase 11 (ADR-048, W11.2): an item queued with `UserPromptSubmit` records (`QueueEntry.hookRecords`, run at enqueue)
+//   gets one `data-hook` part per record right after its `data-steer` part, and the model reads the record's model text
+//   (`hookModelText(record, 'assistant')`: a context) as a user message right after the item's own: exactly what
+//   `splitSteers` + `splitHooks` make of the saved reply (the record lies in the half after the steer). Records without
+//   model text are stored only. Contexts are never logged.
+import type { HarnessUIMessage, HookData, QueueItem, TaskResultData } from '@harness-forge/shared'
 import type { ModelMessage, ToolSet } from 'ai'
 import type { ResolvedModel } from '../providers/types.ts'
 import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { HarnessDataChunk, RunSession } from './pipeline.ts'
 import type { StepPiece } from './steps.ts'
-import { taskResultText } from '@harness-forge/shared'
+import { hookModelText, taskResultText } from '@harness-forge/shared'
 import { convertToModelMessages } from 'ai'
 import { prepareModelFiles } from './files.ts'
+import { hookModelMessage } from './hooks.ts'
 
 /** Where `stepInjector` takes the injected chunks from (`RunSession` implements it). */
 export interface StepInjectionSource {
@@ -121,6 +127,19 @@ export function taskResultModelMessage(data: TaskResultData): ModelMessage {
   return { role: 'user', content: [{ type: 'text', text: taskResultText(data) }] }
 }
 
+/** The `data-hook` chunk of a record delivered with a steered item (Phase 11). */
+export function steerHookChunk(data: HookData): HarnessDataChunk {
+  return { type: 'data-hook', data }
+}
+
+/** The user model messages of the records delivered with a steered item: their model text, when they have one. */
+export function steerHookModelMessages(records: readonly HookData[]): ModelMessage[] {
+  return records.flatMap((record) => {
+    const text = hookModelText(record, 'assistant')
+    return text === null ? [] : [hookModelMessage(text)]
+  })
+}
+
 /** The finished background results waiting for the chat (`[]` when the manager fails: they stay undelivered then). */
 function takeTaskResults(session: RunSession): TaskResultData[] {
   const { ctx } = session
@@ -142,22 +161,27 @@ export function createSteerStep(input: SteerStepInput): StepPiece {
       return undefined
     // Synchronous takes and injections: a `DELETE` either removed the item before or answers 404 now; a background
     // result is either taken here (exactly once) or waits for a later boundary or the run's release.
-    const items = ctx.queue.takeSteerable(session.chatId)
+    const entries = ctx.queue.takeSteerableEntries(session.chatId)
     const results = takeTaskResults(session)
-    if (items.length === 0 && results.length === 0)
+    if (entries.length === 0 && results.length === 0)
       return undefined
     const deliveredAt = ctx.now()
-    for (const item of items)
-      session.inject(steerChunk(item, deliveredAt), stepNumber)
+    for (const entry of entries) {
+      session.inject(steerChunk(entry.item, deliveredAt), stepNumber)
+      for (const record of entry.hookRecords ?? [])
+        session.inject(steerHookChunk(record), stepNumber)
+    }
     for (const result of results)
       session.inject(taskResultChunk(result), stepNumber)
-    if (items.length > 0)
-      ctx.logger.debug('steered queued messages into the run', { stepNumber, count: items.length, itemIds: items.map(item => item.id) })
+    if (entries.length > 0)
+      ctx.logger.debug('steered queued messages into the run', { stepNumber, count: entries.length, itemIds: entries.map(entry => entry.item.id) })
     if (results.length > 0)
       ctx.logger.debug('delivered background task results into the run', { stepNumber, count: results.length, taskIds: results.map(result => result.taskId) })
     const steered: ModelMessage[] = []
-    for (const item of items)
-      steered.push(...await steerModelMessages(item, input))
+    for (const entry of entries) {
+      steered.push(...await steerModelMessages(entry.item, input))
+      steered.push(...steerHookModelMessages(entry.hookRecords ?? []))
+    }
     for (const result of results)
       steered.push(taskResultModelMessage(result))
     return { messages: [...messages, ...steered] }

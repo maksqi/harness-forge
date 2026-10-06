@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, reactive } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
-import { AGENT_MARKDOWN, customizationEntry, definitionDiagnostic, projectId } from '~/utils/testing/fixtures'
+import { AGENT_MARKDOWN, customizationEntry, definitionDiagnostic, projectId, styleEntry } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import CustomizationViewer from './CustomizationViewer.vue'
 
@@ -122,5 +122,25 @@ describe('customizationViewer', () => {
     button('Close').click()
     await flushPromises()
     expect(emitted.open).toEqual([false])
+  })
+
+  it('titles a style by its label and copies it with its label and flag (Phase 11)', async () => {
+    api.customizations.source.mockResolvedValue({ content: '---\nname: Terse Mode\ndescription: Short answers\nkeep-coding-instructions: true\n---\nBe brief.\n', path: '.harness/output-styles/terse-mode.md' })
+    const { emitted } = await mountViewer(styleEntry({ name: 'terse-mode', label: 'Terse Mode', description: 'Short answers', path: '.harness/output-styles/terse-mode.md' }))
+    expect(viewer().dataset.kind).toBe('style')
+    expect(viewer().querySelector('h2')?.textContent?.trim()).toBe('Terse Mode')
+    expect(viewer().textContent).toContain('terse-mode')
+    expect(viewer().textContent).toContain('Keeps coding instructions')
+    expect(viewer().textContent).not.toContain('Model')
+    button('Copy to personal').click()
+    expect(emitted.copy[0]).toMatchObject({ kind: 'style', name: 'terse-mode', label: 'Terse Mode', keepCodingInstructions: true, body: 'Be brief.' })
+  })
+
+  it('lists how a skill runs (Phase 11)', async () => {
+    api.customizations.source.mockResolvedValue({ content: '---\nname: deploy\ndescription: Deploy\ndisable-model-invocation: true\nargument-hint: <env>\n---\nShip it.\n' })
+    await mountViewer(customizationEntry({ kind: 'skill', name: 'deploy', description: 'Deploy', tools: undefined, argumentHint: '<env>', modelInvocable: false, path: '.harness/skills/deploy/SKILL.md' }))
+    expect(viewer().textContent).toContain('/deploy')
+    expect(viewer().textContent).toContain('<env>')
+    expect(viewer().textContent).toContain('Only when you run it')
   })
 })

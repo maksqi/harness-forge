@@ -1,6 +1,10 @@
 // The per-plugin `PluginContext` (PLUGINS.md 9 "PluginContext"). Owner: W1.3 (W1.3-T4); `ctx.images` W6.4 (ADR-028);
-// `ctx.agents` / `ctx.skills` W10.7 (plugin API 1.4.0, ADR-045); `ctx.outputStyles` (plugin API 1.5.0, ADR-051): a
-// P11-0a seam that validates the definition and registers nothing yet (W11.7 wires it to `registry.styles`).
+// `ctx.agents` / `ctx.skills` W10.7 (plugin API 1.4.0, ADR-045); `ctx.outputStyles` W11.7 (plugin API 1.5.0, ADR-051):
+// registered in `registry.styles` (validated there; a name another plugin registered throws `conflict`).
+//
+// Host-only (not part of `ctx`): `PluginRuntime.registerHookCommands(hooks)` registers the manifest's command hooks
+// (`contributes.hooks`, plugin API 1.5.0, ADR-048) in `registry.hookCommands` with the plugin folder as the root, tracked
+// like every other registration (plugin code has no API to add command hooks).
 //
 // Every `register` goes through the registry with the plugin id as owner and is tracked in the plugin's
 // `DisposableStore`; disposing the runtime unregisters everything, and `abort()` aborts `ctx.signal` (disable, reload,
@@ -20,6 +24,7 @@ import type {
   Disposable,
   HookHandler,
   HookName,
+  HooksConfig,
   HostAi,
   ImageGenerateOptions,
   ImageGenerateResult,
@@ -47,7 +52,6 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import {
-  declarativeOutputStyleSchema,
   generateImageToolInputSchema,
   HarnessError,
   mcpServerDeclSchema,
@@ -144,6 +148,12 @@ export interface PluginRuntime {
   readonly settings: () => Record<string, unknown>
   /** Replaces the settings, runs every `onChange` callback and re-registers MCP servers that use `{{settings.*}}`. */
   readonly updateSettings: (values: Record<string, unknown>, run: SettingsCallbackRunner) => Promise<void>
+  /**
+   * Registers the manifest's command hooks (`contributes.hooks`, plugin API 1.5.0) in `registry.hookCommands` with the
+   * plugin folder (`PluginRuntimeOptions.dir`) as the root; owned by the plugin and removed with its other contributions.
+   * Throws after disposal and for an invalid registration (`validation_error`).
+   */
+  readonly registerHookCommands: (hooks: HooksConfig) => Disposable
   /** Unregisters every contribution; later registrations throw. Does not abort `ctx.signal`. */
   readonly disposeContributions: () => void
   /** Aborts `ctx.signal` (after `disposeContributions`). */
@@ -378,16 +388,13 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
         return track(registry.skills.register(pluginId, definition))
       },
     }),
-    // Plugin API 1.5.0 (ADR-051): output styles, validated like `contributes.outputStyles` (`validation_error` naming the
-    // field). P11-0a seam: nothing is registered yet; W11.7 registers them in `registry.styles` (a `conflict` for a name
-    // another plugin registered).
+    // Plugin API 1.5.0 (ADR-051): output styles, validated by the registry like `contributes.outputStyles`
+    // (`validation_error` naming the field, a builtin name refused; a name another plugin registered throws `conflict`)
+    // and owned by this plugin.
     outputStyles: Object.freeze({
       register: (definition: OutputStyleDefinition): Disposable => {
         assertLive()
-        const parsed = declarativeOutputStyleSchema.safeParse(definition)
-        if (!parsed.success)
-          throw validationError(parsed.error)
-        return track(toDisposable(() => {}))
+        return track(registry.styles.register(pluginId, definition))
       },
     }),
     hooks: Object.freeze({
@@ -433,6 +440,10 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
       return store.isDisposed
     },
     settings: () => settings,
+    registerHookCommands: (hooks) => {
+      assertLive()
+      return track(registry.hookCommands.register(pluginId, { root: options.dir, hooks }))
+    },
     updateSettings: async (values, run) => {
       settings = structuredClone(values)
       for (const callback of [...settingsCallbacks])

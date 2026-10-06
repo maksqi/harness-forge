@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { createProjectId, LIMITS, listResponseSchema, projectBrowseSchema, projectSummarySchema } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
-import { chats, projects } from '../../db/schema.ts'
+import { chats, projects, projectTrust } from '../../db/schema.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createFakeChatRunner, createRecordingEventBus } from '../../testing/fakes.ts'
 import {
@@ -255,6 +255,45 @@ describe('project service: update and remove', () => {
     expect(await t.db.select().from(projects).where(eq(projects.id, project.id))).toEqual([])
     await expect(t.deps.projects.remove(project.id)).rejects.toMatchObject({ code: 'not_found' })
     expect((await t.deps.projects.list()).map(item => item.id)).toEqual([other.id])
+  })
+
+  it('outputStyle (Phase 11): null by default, any valid style name stored (unknown ones too), null clears it', async () => {
+    const { t, root, events } = await setup()
+    const project = await t.deps.projects.create({ name: 'Styled', path: await folder(root, 'styled') })
+    expect(project.outputStyle).toBeNull()
+    events.clear()
+    const styled = await t.deps.projects.update(project.id, { outputStyle: 'learning' })
+    expect(projectSummarySchema.parse(styled)).toMatchObject({ outputStyle: 'learning', name: 'Styled' })
+    expect((await t.db.select({ outputStyle: projects.outputStyle }).from(projects).where(eq(projects.id, project.id)))).toEqual([{ outputStyle: 'learning' }])
+    // A style no catalog knows is accepted: it falls back to `default` at run time with a notice.
+    expect((await t.deps.projects.update(project.id, { outputStyle: 'not-installed-yet' })).outputStyle).toBe('not-installed-yet')
+    expect((await t.deps.projects.list()).find(item => item.id === project.id)?.outputStyle).toBe('not-installed-yet')
+    // Other updates keep it; null clears it.
+    expect((await t.deps.projects.update(project.id, { name: 'Styled 2' })).outputStyle).toBe('not-installed-yet')
+    expect((await t.deps.projects.update(project.id, { outputStyle: null })).outputStyle).toBeNull()
+    expect((await t.deps.projects.get(project.id)).outputStyle).toBeNull()
+    expect(events.ofType('project.changed').map(event => event.data.project?.outputStyle)).toEqual(['learning', 'not-installed-yet', 'not-installed-yet', null])
+    // Not a style name: 400, nothing changes.
+    for (const outputStyle of ['Learning', '', 'x'.repeat(65), 'two words'])
+      await expect(t.deps.projects.update(project.id, { outputStyle })).rejects.toMatchObject({ code: 'validation_error' })
+    expect((await t.deps.projects.get(project.id)).outputStyle).toBeNull()
+  })
+
+  it('remove (Phase 11): the trust approvals of the project go with it (foreign key cascade); other projects keep theirs', async () => {
+    const { t, root, events } = await setup()
+    const project = await t.deps.projects.create({ name: 'Trusted', path: await folder(root, 'trusted') })
+    const other = await t.deps.projects.create({ name: 'Other', path: await folder(root, 'other') })
+    const at = Date.now()
+    await t.db.insert(projectTrust).values([
+      { projectId: project.id, sha256: 'a'.repeat(64), kind: 'hook', label: 'PreToolUse: sh check.sh', createdAt: at },
+      { projectId: project.id, sha256: 'b'.repeat(64), kind: 'mcp', label: 'docs', createdAt: at },
+      { projectId: other.id, sha256: 'a'.repeat(64), kind: 'hook', label: 'PreToolUse: sh check.sh', createdAt: at },
+    ])
+    events.clear()
+    await t.deps.projects.remove(project.id)
+    // The event the project MCP manager and the hook service follow (open point 8).
+    expect(events.events.map(event => [event.type, event.data])).toEqual([['project.changed', { id: project.id, project: null }]])
+    expect(await t.db.select({ projectId: projectTrust.projectId, kind: projectTrust.kind }).from(projectTrust)).toEqual([{ projectId: other.id, kind: 'hook' }])
   })
 })
 

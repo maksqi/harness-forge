@@ -8,12 +8,16 @@
 // Phase 10 (ADR-046, W10.6): the report of a background task result (`data-task-result`, in a reply or in the carrier
 // message of a turn the server started) is text of its message, at its place; the rest of the result is not.
 //
+// Phase 11 (ADR-048, W11.7): the context and the reason of a hook record (`data-hook`, in a reply, on a user message or
+// in the carrier message of a Stop continuation) are text of its message, at its place; its other fields (the hooks
+// that ran, their errors and system messages, a rewritten input) are not.
+//
 // Case-insensitive search: SQLite's LIKE folds ASCII letters only, so `search_text` stores the message text
 // NFC-normalized and lowercased with JavaScript's Unicode-aware `toLowerCase()`, and the query is normalized the same
 // way before it becomes a LIKE pattern (`%` and `_` escaped). Titles are matched in JavaScript with the same rule.
 // Snippets are cut from the original (not lowercased) text of the matching message.
 import type { AgentStateMessage } from '@harness-forge/shared'
-import { splitSteers, STEER_PART_TYPE, TASK_RESULT_PART_TYPE } from '@harness-forge/shared'
+import { HOOK_PART_TYPE, splitSteers, STEER_PART_TYPE, TASK_RESULT_PART_TYPE } from '@harness-forge/shared'
 
 /** Maximum length of `ChatSummary.snippet`. */
 export const SNIPPET_MAX_LENGTH = 160
@@ -72,6 +76,14 @@ function taskResultReport(data: unknown): string {
   return typeof report === 'string' ? report.trim() : ''
 }
 
+/** The trimmed context and reason of a `data-hook` part's data (read structurally), in that order, without empty ones. */
+function hookTexts(data: unknown): string[] {
+  if (typeof data !== 'object' || data === null)
+    return []
+  const { context, reason } = data as { context?: unknown, reason?: unknown }
+  return [context, reason].flatMap(value => (typeof value === 'string' && value.trim() !== '' ? [value.trim()] : []))
+}
+
 function collectTexts(parts: readonly unknown[], texts: string[]): void {
   for (const part of parts) {
     if (typeof part !== 'object' || part === null)
@@ -85,13 +97,16 @@ function collectTexts(parts: readonly unknown[], texts: string[]): void {
       if (report !== '')
         texts.push(report)
     }
+    else if (type === HOOK_PART_TYPE) {
+      texts.push(...hookTexts(data))
+    }
   }
 }
 
 /**
  * Plain text of a message: its `text` parts joined with newlines, with the text of each valid steer (`data-steer`,
- * `splitSteers`) and the report of each background task result (`data-task-result`) at its place in the message. Other
- * data parts (compaction summaries, notices) are not text.
+ * `splitSteers`), the report of each background task result (`data-task-result`) and the context and reason of each
+ * hook record (`data-hook`) at its place in the message. Other data parts (compaction summaries, notices) are not text.
  */
 export function messagePlainText(parts: readonly unknown[]): string {
   const texts: string[] = []

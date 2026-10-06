@@ -12,6 +12,11 @@
 // Phase 10 (ADR-046, W10.6): background task results (`data-task-result`, `harnessDataSchemas['task-result']`) are
 // validated the same way and kept as they are, in replies and in the user-role carrier message of a turn the server
 // started; the background task rows themselves are never part of an export, so an imported result is history only.
+//
+// Phase 11 (ADR-048, W11.7): hook records (`data-hook`, `harnessDataSchemas.hook`) are validated the same way and kept as
+// they are: in replies, on user messages (a UserPromptSubmit / SessionStart context) and in the user-role carrier
+// message of a Stop continuation. Nothing runs on import: a record is history (the model reads its context again
+// through `splitHooks`, like in the chat it came from).
 import type { HarnessUIMessage, HarnessUIMessagePart } from '@harness-forge/shared'
 import { createMessageId, harnessDataSchemas, MESSAGE_ID_PATTERN, messageMetadataSchema, validationError } from '@harness-forge/shared'
 import { safeValidateUIMessages } from 'ai'

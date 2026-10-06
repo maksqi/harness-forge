@@ -19,6 +19,8 @@
 // characters) and a background call adds "· in the background"; a `skill` call reads "Loaded skill {name}" (`BookOpen`)
 // with SkillToolBody behind "Raw input and output" when tool details are shared, "Loaded skill" without them. The
 // server drops task results from shares, so no result note reaches this row.
+// Phase 11 (docs/UI.md 7.31): shares carry no hook records, so a call a hook denied reads "Denied" (no hook badge or
+// notes).
 // Contract (docs/UI.md 10.4): `part` is the snapshot's tool part (toolName, status, input?, output?, errorText?).
 import type { TodoItem } from '@harness-forge/shared'
 import type { Component } from 'vue'

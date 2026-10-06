@@ -37,12 +37,42 @@ afterEach(() => {
 })
 
 describe('commandBadge', () => {
-  it('names a skill invocation "Skill" (Phase 11: the invocation\'s kind, or the kind prop)', () => {
+  it('names a skill invocation "Skill" with the BookOpen icon (Phase 11: the invocation\'s kind, or the kind prop)', () => {
     const wrapper = badge(invocation({ name: 'deploy', kind: 'skill' }))
     expect(wrapper.get('[data-slot="command-badge"]').text()).toBe('Skill/deploy')
+    expect(wrapper.get('[data-slot="command-badge"] svg').classes().join(' ')).toMatch(/book-open/)
     wrapper.unmount()
     const explicit = mount(CommandBadge, { props: { name: 'deploy', kind: 'skill' } })
     expect(explicit.get('[data-slot="command-badge"]').text()).toBe('Skill/deploy')
+    expect(explicit.get('svg').classes().join(' ')).toMatch(/book-open/)
+    const command = mount(CommandBadge, { props: { name: 'review' } })
+    expect(command.get('svg').classes().join(' ')).toMatch(/square-terminal/)
+  })
+
+  it('reads the source of a skill and names a plugin skill\'s plugin (Phase 11)', () => {
+    const plugins = usePluginsStore()
+    plugins.items = [pluginSummary({ id: 'docs', name: 'Docs', contributions: { ...pluginSummary().contributions, skills: ['release-notes'] } })]
+    const project = badge(invocation({ name: 'release-notes', kind: 'skill', source: 'project' }))
+    expect(project.get('[data-slot="command-badge"]').text()).toContain(', Project skill')
+    project.unmount()
+    const plugin = badge(invocation({ name: 'release-notes', kind: 'skill', source: 'plugin' }))
+    expect(plugin.get('[data-slot="command-badge"]').text()).toContain(', From Docs')
+  })
+
+  it('lists what a trusted command inlined in its tooltip and screen reader text (Phase 11)', async () => {
+    vi.useFakeTimers()
+    const wrapper = badge(invocation({ name: 'status', source: 'project', inlined: { shell: 2, files: ['README.md', 'docs/a.md'] } }))
+    const root = wrapper.get('[data-slot="command-badge"]')
+    expect(root.attributes('tabindex')).toBe('0')
+    expect(root.text()).toContain(', Project command, Ran 2 shell commands, Included README.md, docs/a.md')
+    await root.trigger('focus')
+    await vi.advanceTimersByTimeAsync(10)
+    await flushPromises()
+    expect([...document.querySelectorAll('[data-slot="command-badge-inlined"]')].map(line => line.textContent)).toEqual([
+      'Ran 2 shell commands',
+      'Included README.md, docs/a.md',
+    ])
+    wrapper.unmount()
   })
 
   it('stays a plain badge without a command (share pages) or a command from before v1.6', () => {

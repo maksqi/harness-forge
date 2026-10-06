@@ -2,10 +2,11 @@
 // 11.8): the options of OutputStyleMenu from the catalog's style entries (built-ins first, then by source), what
 // "Automatic" resolves to (the project's style, else the global default), the `/output-style <query>` lookup, and the
 // refusal of a submit that a hook blocked or that runs unapproved shell lines (409 `hook-blocked` / `untrusted`). No
-// Vue, no stores. Signatures frozen from Gate P11-0b (C39); W11.10 owns the bodies in P11-A (P11-0b: `refusalOf`
-// complete, the rest plain first versions).
+// stores; the only Vue import is the type of `OUTPUT_STYLE_SCOPE`. Signatures frozen from Gate P11-0b (C39); W11.10
+// owns the bodies (P11-A) and adds the display helpers below them.
 import type { CustomizationEntry, CustomizationSource, HookEvent } from '@harness-forge/shared'
-import { BUILTIN_OUTPUT_STYLES, hookDataSchema, isBuiltinOutputStyle } from '@harness-forge/shared'
+import type { InjectionKey, Ref } from 'vue'
+import { BUILTIN_OUTPUT_STYLES, DEFAULT_OUTPUT_STYLE, hookDataSchema, isBuiltinOutputStyle } from '@harness-forge/shared'
 import { toHarnessError } from '~/utils/errors'
 
 /** One style of the menu (docs/UI.md 7.32). */
@@ -48,22 +49,29 @@ export function styleOptions(entries: readonly CustomizationEntry[]): OutputStyl
     available: true,
   }))
   const seen = new Set(options.map(option => option.name))
-  const rest = entries
-    .filter(entry => entry.kind === 'style' && entry.state === 'active' && !seen.has(entry.name) && !isBuiltinOutputStyle(entry.name))
-    .map((entry): OutputStyleOption => ({
+  const rest: OutputStyleOption[] = []
+  for (const entry of entries) {
+    if (entry.kind !== 'style' || entry.state !== 'active' || !entry.enabled || seen.has(entry.name) || isBuiltinOutputStyle(entry.name))
+      continue
+    // The server resolved the precedence (one active entry per name); a second one is a stale or merged answer.
+    seen.add(entry.name)
+    rest.push({
       name: entry.name,
-      label: entry.label ?? entry.name,
+      label: entry.label?.trim() || entry.name,
       description: entry.description,
       source: entry.source,
       available: true,
-    }))
-    .sort((a, b) => SOURCE_ORDER.indexOf(a.source) - SOURCE_ORDER.indexOf(b.source) || a.label.localeCompare(b.label))
+    })
+  }
+  rest.sort((a, b) => SOURCE_ORDER.indexOf(a.source) - SOURCE_ORDER.indexOf(b.source) || a.label.localeCompare(b.label, 'en'))
   return [...options, ...rest]
 }
 
 /** What "Automatic" resolves to: the project's style, else the global default; null when neither is an option. */
 export function automaticStyle(projectStyle: string | null, globalStyle: string, options: readonly OutputStyleOption[]): OutputStyleOption | null {
   const name = projectStyle?.trim() || globalStyle.trim()
+  if (!name)
+    return null
   return options.find(option => option.name === name) ?? null
 }
 
@@ -76,7 +84,9 @@ export function resolveStyleQuery(query: string, options: readonly OutputStyleOp
   const lower = value.toLowerCase()
   if (lower === 'auto' || lower === 'automatic')
     return { style: null }
-  const found = options.find(option => option.name.toLowerCase() === lower || option.label.toLowerCase() === lower)
+  const offered = options.filter(option => option.available)
+  const found = offered.find(option => option.name.toLowerCase() === lower)
+    ?? offered.find(option => option.label.toLowerCase() === lower)
   if (found)
     return { style: found.name }
   return { error: `Unknown output style "${value}". Use auto, default, explanatory, learning or a style from the menu.` }
@@ -106,4 +116,98 @@ export function refusalOf(error: unknown): ComposerRefusalData | null {
     source: record?.hooks[0]?.source ?? null,
     command: null,
   }
+}
+
+// ---------- display helpers (W11.10, P11-A) ----------
+
+/**
+ * What OutputStyleMenu needs beyond its frozen props (provided by ChatComposer): the chat's project, whether that
+ * project chose a style (Automatic then reads "set for {project}") and the plugin names of plugin styles.
+ */
+export interface OutputStyleScope {
+  projectId: string | null
+  /** The project's display name (null without a project or before the projects store knows it). */
+  projectName: string | null
+  /** The project's own style (`projects.outputStyle`), trimmed; null = none (the global default applies). */
+  projectStyle: string | null
+  /** Plugin styles: the contributing plugin's name per style name. */
+  pluginNames: Readonly<Record<string, string>>
+}
+
+/** ChatComposer provides it, OutputStyleMenu injects it (a local adapter; the menu's props stay as frozen). */
+export const OUTPUT_STYLE_SCOPE: InjectionKey<Readonly<Ref<OutputStyleScope>>> = Symbol('hf-output-style-scope')
+
+/** The scope without a project. */
+export const NO_OUTPUT_STYLE_SCOPE: OutputStyleScope = Object.freeze({ projectId: null, projectName: null, projectStyle: null, pluginNames: Object.freeze({}) })
+
+/** True for the built-in Default style (the trigger then shows the icon alone, without the dot). */
+export function isDefaultStyle(name: string): boolean {
+  return name === DEFAULT_OUTPUT_STYLE
+}
+
+/** The muted text on the right of a style row: "Built-in", "Personal", "Project" or the plugin's name ("Plugin"). */
+export function styleSourceText(option: Pick<OutputStyleOption, 'name' | 'source'>, pluginNames: Readonly<Record<string, string>> = {}): string {
+  switch (option.source) {
+    case 'builtin':
+      return 'Built-in'
+    case 'user':
+      return 'Personal'
+    case 'project':
+      return 'Project'
+    case 'plugin':
+      return pluginNames[option.name] ?? 'Plugin'
+  }
+}
+
+/**
+ * The line under "Automatic": "Uses {name}, set for {project}" while the project chose a style, else "Uses {name},
+ * your default in Settings". A style that is not offered reads as Default (the server answers with Default then).
+ */
+export function automaticStyleLine(automatic: OutputStyleOption | null, scope: Pick<OutputStyleScope, 'projectName' | 'projectStyle'>): string {
+  const name = automatic?.label ?? 'Default'
+  if (scope.projectStyle)
+    return `Uses ${name}, set for ${scope.projectName ?? 'this project'}`
+  return `Uses ${name}, your default in Settings`
+}
+
+/** The chosen style that no longer exists or is not active, as a "Not available" option; null when it is offered. */
+export function missingStyle(chosen: string | null, options: readonly OutputStyleOption[]): OutputStyleOption | null {
+  if (chosen === null || options.some(option => option.name === chosen))
+    return null
+  return { name: chosen, label: chosen, description: '', source: 'user', available: false }
+}
+
+/** The trigger's name, tooltip and announcement: "Output style: {name}" plus " (automatic)" without a choice. */
+export function styleTriggerName(label: string, automatic: boolean): string {
+  return `Output style: ${label}${automatic ? ' (automatic)' : ''}`
+}
+
+/** The Customize link of the menu's footer: the Output styles tab, scoped to the chat's project when it has one. */
+export function manageStylesHref(projectId: string | null): string {
+  return projectId
+    ? `/settings/customize?tab=output-styles&project=${encodeURIComponent(projectId)}`
+    : '/settings/customize?tab=output-styles'
+}
+
+const HOOK_SOURCE_TEXT: Readonly<Record<string, string>> = {
+  personal: 'Personal hook',
+  project: 'Project hook',
+  plugin: 'Plugin hook',
+}
+
+/** "{event} · {source}" of a `hook-blocked` refusal ("UserPromptSubmit · Project hook"); null without a record. */
+export function refusalSourceLine(refusal: ComposerRefusalData): string | null {
+  if (refusal.code !== 'hook-blocked' || refusal.event === null)
+    return null
+  const source = refusal.source === null ? null : HOOK_SOURCE_TEXT[refusal.source] ?? null
+  return source ? `${refusal.event} · ${source}` : refusal.event
+}
+
+/** The refusal's first line (docs/UI.md 7.31, 15). */
+export function refusalTitle(refusal: ComposerRefusalData): string {
+  if (refusal.code === 'hook-blocked')
+    return 'A hook blocked this message'
+  return refusal.command
+    ? `/${refusal.command} runs shell lines you haven't approved.`
+    : 'This command runs shell lines you haven\'t approved.'
 }

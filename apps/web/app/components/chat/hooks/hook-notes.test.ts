@@ -1,7 +1,7 @@
 import type { HarnessUIMessage } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { hookCarrier, hookData, hookPart, hookRecordId, taskResultPart, userMessage } from '~/utils/testing/fixtures'
-import { hookAnnouncement, hookDataOf, hookOutcomeText, hookSourceText, isHookCarrierMessage, toolHooksOf } from './hook-notes'
+import { hookAnnouncement, hookDataOf, hookDetailsKind, hookOutcomeText, hookPluginId, hookSourceText, isHookCarrierMessage, toolHooksOf } from './hook-notes'
 
 describe('hookDataOf', () => {
   it('returns the data of a valid data-hook part', () => {
@@ -67,12 +67,81 @@ describe('isHookCarrierMessage', () => {
   })
 })
 
-describe('the P11-0b placeholders', () => {
-  it('type-check and answer plain values', () => {
-    const data = hookData()
-    expect(hookOutcomeText(data)).toContain('PreToolUse')
-    expect(hookSourceText(data.hooks[0]!, null)).toBe('Project hook')
-    expect(hookSourceText({ source: 'plugin', label: 'hook-pack: prompt.submit', pluginId: 'hook-pack', exitCode: null, durationMs: 1 }, 'Hook pack')).toBe('From Hook pack')
-    expect(hookAnnouncement(data, 'write_file')).toBeNull()
+describe('hookOutcomeText', () => {
+  const tool = { toolCallId: 'call_1', toolName: 'write_file' }
+  const message = { toolCallId: undefined, toolName: undefined }
+
+  it('words every outcome of the record (docs/UI.md 7.31)', () => {
+    expect(hookOutcomeText(hookData({ ...tool, event: 'PostToolUse', outcome: 'context', context: 'lint ok', reason: undefined }))).toBe('Hook added context · PostToolUse')
+    expect(hookOutcomeText(hookData({ ...tool, outcome: 'denied', reason: 'Writes to dist/ are not allowed.' }))).toBe('Blocked by a PreToolUse hook: Writes to dist/ are not allowed.')
+    expect(hookOutcomeText(hookData({ ...tool, outcome: 'asked', reason: 'Touches production.' }))).toBe('A hook asked you to confirm this call: Touches production.')
+    expect(hookOutcomeText(hookData({ ...tool, outcome: 'allowed', reason: undefined }))).toBe('Allowed by a PreToolUse hook')
+    expect(hookOutcomeText(hookData({ ...tool, outcome: 'allowed', reason: 'Safe folder.' }))).toBe('Allowed by a PreToolUse hook: Safe folder.')
+    expect(hookOutcomeText(hookData({ ...tool, outcome: 'rewritten', reason: undefined, updatedInput: { path: 'b' } }))).toBe('Input changed by a PreToolUse hook')
+    expect(hookOutcomeText(hookData({ ...tool, event: 'PostToolUse', outcome: 'blocked', reason: 'Lint errors in src/a.ts' }))).toBe('A PostToolUse hook told the agent: Lint errors in src/a.ts')
+    expect(hookOutcomeText(hookData({ ...message, event: 'Stop', outcome: 'continued', reason: 'Run the tests.' }))).toBe('A Stop hook asked the agent to continue')
+    expect(hookOutcomeText(hookData({ ...message, event: 'Stop', outcome: 'stopped', reason: 'Build is red.' }))).toBe('A hook stopped the agent: Build is red.')
+  })
+
+  it('leaves out a missing reason and puts a reason on one line', () => {
+    expect(hookOutcomeText(hookData({ outcome: 'denied', reason: undefined }))).toBe('Blocked by a PreToolUse hook')
+    expect(hookOutcomeText(hookData({ outcome: 'asked', reason: '' }))).toBe('A hook asked you to confirm this call')
+    expect(hookOutcomeText(hookData({ ...message, event: 'Stop', outcome: 'stopped', reason: undefined }))).toBe('A hook stopped the agent')
+    expect(hookOutcomeText(hookData({ outcome: 'denied', reason: '  No writes\n  to dist/.  ' }))).toBe('Blocked by a PreToolUse hook: No writes to dist/.')
+  })
+
+  it('takes a blocked record\'s feedback from the first line of its context when it has no reason', () => {
+    const feedback = hookData({ event: 'PostToolUse', outcome: 'blocked', reason: undefined, context: '\n  nope  \nsecond line' })
+    expect(hookOutcomeText(feedback)).toBe('A PostToolUse hook told the agent: nope')
+    expect(hookOutcomeText(hookData({ event: 'PostToolUse', outcome: 'blocked', reason: undefined, context: undefined }))).toBe('A PostToolUse hook sent the agent feedback')
+  })
+
+  it('names how a failed hook failed: a timeout, an exit code, else "failed"', () => {
+    const timedOut = hookData({ event: 'PostToolUse', outcome: 'error', reason: undefined, hooks: [
+      { source: 'personal', label: 'pnpm lint', exitCode: 0, durationMs: 5 },
+      { source: 'project', label: 'sleep 99', exitCode: null, timedOut: true, durationMs: 60_040, error: 'Timed out after 60s.' },
+    ] })
+    expect(hookOutcomeText(timedOut)).toBe('A PostToolUse hook timed out after 60s')
+    const exited = hookData({ event: 'Stop', outcome: 'error', toolCallId: undefined, hooks: [{ source: 'personal', label: 'pnpm lint', exitCode: 1, durationMs: 300, error: 'Exit code 1.' }] })
+    expect(hookOutcomeText(exited)).toBe('A Stop hook failed: exit 1')
+    const invalid = hookData({ event: 'Stop', outcome: 'error', toolCallId: undefined, hooks: [{ source: 'plugin', pluginId: 'hook-pack', label: 'hook-pack: run.stop', exitCode: null, durationMs: 3, error: 'The hook threw.' }] })
+    expect(hookOutcomeText(invalid)).toBe('A Stop hook failed')
+    expect(hookOutcomeText(hookData({ outcome: 'error', hooks: [] }))).toBe('A PreToolUse hook failed')
+  })
+})
+
+describe('hookSourceText', () => {
+  it('names the source of one hook, a plugin by its name, else its id', () => {
+    expect(hookSourceText({ source: 'personal', label: 'x', exitCode: 0, durationMs: 1 }, null)).toBe('Personal hook')
+    expect(hookSourceText(hookData().hooks[0]!, null)).toBe('Project hook')
+    const plugin = { source: 'plugin', label: 'hook-pack: prompt.submit', pluginId: 'hook-pack', exitCode: null, durationMs: 1 } as const
+    expect(hookSourceText(plugin, 'Hook pack')).toBe('From Hook pack')
+    expect(hookSourceText(plugin, null)).toBe('From hook-pack')
+    expect(hookSourceText({ ...plugin, pluginId: undefined }, null)).toBe('From a plugin')
+  })
+})
+
+describe('hookAnnouncement', () => {
+  it('announces a hook denial by the tool and a continuation; nothing else', () => {
+    expect(hookAnnouncement(hookData(), 'write_file "dist/a.js"')).toBe('A hook blocked write_file "dist/a.js"')
+    expect(hookAnnouncement(hookData(), null)).toBe('A hook blocked write_file')
+    expect(hookAnnouncement(hookData({ toolName: undefined }), ' ')).toBe('A hook blocked a tool call')
+    expect(hookAnnouncement(hookData({ event: 'Stop', outcome: 'continued', toolCallId: undefined, toolName: undefined }), null)).toBe('A hook asked the agent to continue')
+    for (const outcome of ['context', 'asked', 'allowed', 'rewritten', 'blocked', 'stopped', 'error'] as const)
+      expect(hookAnnouncement(hookData({ outcome }), 'write_file')).toBeNull()
+  })
+})
+
+describe('note helpers', () => {
+  it('names what a note\'s toggle shows and the plugin of its first plugin hook', () => {
+    expect(hookDetailsKind(hookData({ outcome: 'context', context: 'x' }))).toBe('context')
+    expect(hookDetailsKind(hookData({ outcome: 'error' }))).toBe('output')
+    expect(hookDetailsKind(hookData())).toBe('details')
+    expect(hookPluginId(hookData())).toBeNull()
+    expect(hookPluginId(hookData({ hooks: [
+      { source: 'personal', label: 'x', exitCode: 0, durationMs: 1 },
+      { source: 'plugin', pluginId: 'hook-pack', label: 'y', exitCode: 0, durationMs: 1 },
+      { source: 'plugin', pluginId: 'other', label: 'z', exitCode: 0, durationMs: 1 },
+    ] }))).toBe('hook-pack')
   })
 })

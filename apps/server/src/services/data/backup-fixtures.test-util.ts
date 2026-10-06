@@ -2,13 +2,24 @@
 // chats service, the real files service, a recording event bus, a fake runner and the fake checkpoint service) with the
 // C30 fake customization service (`createFakeCustomizationService`, personal definitions in memory, `customization.changed`
 // on the app's event bus), plus definition builders. Close the apps with `closeCustomizedApps()` in `afterEach`.
-import type { CustomizationKind } from '@harness-forge/shared'
+//
+// Phase 11 (W11.7-T6): `realDataApp()` runs the real services (chats, customizations, settings, projects, secrets) on a
+// fresh data dir, and `seedPhase11()` writes what a v1.7 server holds besides chats: the settings `outputStyle` /
+// `hooksEnabled`, a personal output style, personal commands with and without `!` spans, a personal hook, a project
+// with an approval and a project MCP variable, and a chat of that project with hook records. Every value that must
+// never reach a backup carries a `*-SENTINEL` marker.
+import type { CustomizationKind, HarnessUIMessage } from '@harness-forge/shared'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import type { FakeCustomizationService } from '../../testing/fake-customizations.ts'
 import type { FakeChatRunner, RecordingEventBus } from '../../testing/fakes.ts'
 import type { AppDeps } from '../../types.ts'
 import type { CustomizationService } from '../customizations/types.ts'
 import type { DataServiceOptions } from './index.ts'
+import { Buffer } from 'node:buffer'
+import { mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { createHookId } from '@harness-forge/shared'
+import { hooks, projectTrust, secrets } from '../../db/schema.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createFakeCheckpointService } from '../../testing/fake-checkpoints.ts'
 import { createFakeCustomizationService } from '../../testing/fake-customizations.ts'
@@ -64,4 +75,77 @@ export function definition(kind: CustomizationKind, name: string, body = `The ${
   if (kind === 'command')
     return `---\nname: ${name}\ndescription: The ${name} command.\n---\n${body} $ARGUMENTS\n`
   return `---\nname: ${name}\ndescription: The ${name} ${kind}.\n---\n${body}\n`
+}
+
+// ---------- Phase 11 (W11.7-T6) ----------
+
+/** An app with the real services on a fresh data dir (no builtins, nothing started). */
+export async function realDataApp(): Promise<TestApp> {
+  const t = await createTestApp({ start: false, builtins: [] })
+  apps.push(t)
+  return t
+}
+
+/** Values that must never leave the server in a backup. */
+export const PHASE11_SENTINELS = {
+  hookCommand: 'sh PERSONAL-HOOK-SENTINEL.sh',
+  trustLabel: 'TRUST-LABEL-SENTINEL',
+  trustSha256: 'a'.repeat(64),
+  variable: 'VARIABLE-VALUE-SENTINEL',
+} as const
+
+/** A personal output style (kind `style`, ADR-051). */
+export const STYLE_CONTENT = '---\nname: terse\ndescription: Short answers.\nkeep-coding-instructions: true\n---\nAnswer in at most three sentences.\n'
+/** A personal command whose body runs a `!` span (ADR-052). */
+export const SPAN_COMMAND_CONTENT = '---\nname: status\ndescription: The git status.\n---\nStatus: !`git status --short` for $ARGUMENTS\n'
+/** A personal command without spans. */
+export const PLAIN_COMMAND_CONTENT = '---\nname: review\ndescription: Review the changes.\n---\nReview $ARGUMENTS\n'
+
+/** A `data-hook` part (ADR-048). */
+export function hookPart(n: number, event: string, outcome: string, extra: Record<string, unknown> = {}): HarnessUIMessage['parts'][number] {
+  return {
+    type: 'data-hook',
+    data: { id: `hev_backuphook00000${n}`, event, outcome, createdAt: 3, hooks: [{ source: 'personal', label: 'sh check.sh', exitCode: 0, durationMs: 7 }], ...extra },
+  } as HarnessUIMessage['parts'][number]
+}
+
+/** A chat path with a prompt context, tool hook records and the carrier of a Stop continuation. */
+export function hookChatMessages(): HarnessUIMessage[] {
+  return [
+    { id: 'msg_backuphook000001', role: 'user', parts: [{ type: 'text', text: 'Write it' }, hookPart(1, 'UserPromptSubmit', 'context', { context: 'Branch: main' })] },
+    {
+      id: 'msg_backuphook000002',
+      role: 'assistant',
+      metadata: { modelRef: 'mock:hooks', startedAt: 2, finishedAt: 3 },
+      parts: [{ type: 'text', text: 'Done', state: 'done' }, hookPart(2, 'PostToolUse', 'context', { toolCallId: 'call_1', toolName: 'write_file', context: 'Run the tests.' })],
+    },
+    { id: 'msg_backuphook000003', role: 'user', parts: [hookPart(3, 'Stop', 'continued', { reason: 'Run the tests first.' })] },
+    { id: 'msg_backuphook000004', role: 'assistant', metadata: { modelRef: 'mock:hooks', startedAt: 4, finishedAt: 5 }, parts: [{ type: 'text', text: 'Tests pass.', state: 'done' }] },
+  ] as HarnessUIMessage[]
+}
+
+export interface Phase11Seed {
+  projectId: string
+  chatId: string
+}
+
+/** Writes the Phase 11 state of a v1.7 server (see the module comment) into `t`. */
+export async function seedPhase11(t: TestApp): Promise<Phase11Seed> {
+  const { deps } = t
+  await deps.settings.update({ outputStyle: 'terse', hooksEnabled: false })
+  await deps.customizations.create({ kind: 'style', content: STYLE_CONTENT })
+  await deps.customizations.create({ kind: 'command', content: SPAN_COMMAND_CONTENT, enabled: true })
+  await deps.customizations.create({ kind: 'command', content: PLAIN_COMMAND_CONTENT, enabled: true })
+  const at = Date.now()
+  await deps.db.insert(hooks).values({ id: createHookId(), event: 'PreToolUse', matcher: 'Bash', command: PHASE11_SENTINELS.hookCommand, timeout: null, enabled: true, createdAt: at, updatedAt: at })
+  const folder = join(t.env.paths.workspaces, 'demo')
+  mkdirSync(folder, { recursive: true })
+  const project = await deps.projects.create({ name: 'Demo', path: folder })
+  await deps.projects.update(project.id, { outputStyle: 'terse' })
+  await deps.db.insert(projectTrust).values({ projectId: project.id, sha256: PHASE11_SENTINELS.trustSha256, kind: 'hook', label: PHASE11_SENTINELS.trustLabel, createdAt: at })
+  // A project MCP variable as the secret store keeps it (scope `project:<projectId>`, name `mcp.var.<NAME>`), written as
+  // a raw row: the backup must never read the `secrets` table, whatever the row holds.
+  await deps.db.insert(secrets).values({ scope: `project:${project.id}`, name: 'mcp.var.MCP_TOKEN', ciphertext: Buffer.from(PHASE11_SENTINELS.variable), hint: PHASE11_SENTINELS.variable, keyVersion: 1, updatedAt: at })
+  const chat = await deps.chats.create({ title: 'Hooks', projectId: project.id, settings: { toolMode: 'ask', outputStyle: 'terse' }, messages: hookChatMessages() })
+  return { projectId: project.id, chatId: chat.id }
 }

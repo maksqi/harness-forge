@@ -136,4 +136,26 @@ describe('gET /api/commands?projectId: command files and personal commands (W10.
     expect((await app.request('/api/commands?projectId=prj_0000000000000000')).status).toBe(404)
     expect((await app.request('/api/commands?projectId=../x')).status).toBe(400)
   })
+
+  it('lists the user-invocable skills of the scope as kind skill (W11.5-T5); a command wins the name', async () => {
+    const fake = app.deps.customizations as FakeCustomizationService
+    const skills = [
+      fakeCatalogEntry('skill', 'ship-it', { argumentHint: '<env>' }),
+      fakeCatalogEntry('skill', 'quiet', { userInvocable: false }),
+      fakeCatalogEntry('skill', 'deploy'),
+      fakeCatalogEntry('skill', `long-${'s'.repeat(50)}`),
+    ]
+    fake.entries.set(projectA, [...(fake.entries.get(projectA) ?? []), ...skills])
+    try {
+      const items = await list(`?projectId=${projectA}`)
+      expect(items.find(item => item.name === 'ship-it')).toEqual({ name: 'ship-it', kind: 'skill', description: 'The ship-it skill.', source: 'project', argumentHint: '<env>' })
+      expect(items.some(item => item.name === `long-${'s'.repeat(50)}` && item.kind === 'skill')).toBe(true)
+      expect(items.some(item => item.name === 'quiet')).toBe(false)
+      expect(items.filter(item => item.name === 'deploy')).toEqual([expect.objectContaining({ kind: 'command', source: 'project' })])
+      expect((await list(`?projectId=${projectB}`)).some(item => item.kind === 'skill')).toBe(false)
+    }
+    finally {
+      fake.entries.set(projectA, (fake.entries.get(projectA) ?? []).filter(entry => entry.kind !== 'skill'))
+    }
+  })
 })

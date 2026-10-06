@@ -1,5 +1,7 @@
 import type { ClientCommandContext } from './slash-commands'
 import { describe, expect, it } from 'vitest'
+import { projectTrustList, styleEntry, trustCommandItem, trustHookItem } from '~/utils/testing/fixtures'
+import { styleOptions } from './output-style'
 import {
   argumentHintAt,
   CLIENT_COMMAND_DESCRIPTIONS,
@@ -8,6 +10,7 @@ import {
   parseClientCommand,
   parseSlashCommand,
   parseToolMode,
+  pendingCommandNames,
   resolveClientCommand,
   serverSlashItems,
   SLASH_GROUPS,
@@ -15,6 +18,7 @@ import {
   slashItemDetail,
   slashItemLabel,
   slashQueryAt,
+  withPendingCommands,
 } from './slash-commands'
 
 const commands = [
@@ -318,5 +322,83 @@ describe('skills and long names (Phase 11, P11-0b types)', () => {
     expect(parseSlashCommand(`/${long}x`)).toBeNull()
     const longItems = serverSlashItems([{ name: long, kind: 'skill', description: 'A long skill', source: 'user', argumentHint: '<env>' }])
     expect(argumentHintAt(`/${long} `, longItems)).toBe('<env>')
+  })
+})
+
+describe('/output-style (Phase 11)', () => {
+  const context: ClientCommandContext = {
+    resolveModel: () => null,
+    efforts: [],
+    toolsAvailable: false,
+    projectChat: false,
+    styles: styleOptions([styleEntry()]),
+  }
+
+  it('is an App command "Set the output style"', () => {
+    expect(clientSlashItems().find(item => item.name === 'output-style')).toEqual({ name: 'output-style', description: 'Set the output style', kind: 'client', group: 'app' })
+    expect(parseClientCommand('/output-style terse')).toEqual({ name: 'output-style', args: 'terse' })
+  })
+
+  it('opens the menu alone and sets a style by name or label, or Automatic', () => {
+    expect(resolveClientCommand('output-style', '', context)).toEqual({ type: 'open', menu: 'style' })
+    expect(resolveClientCommand('output-style', 'Terse', context)).toEqual({ type: 'set-style', style: 'terse' })
+    expect(resolveClientCommand('output-style', 'explanatory', context)).toEqual({ type: 'set-style', style: 'explanatory' })
+    expect(resolveClientCommand('output-style', 'auto', context)).toEqual({ type: 'set-style', style: null })
+    expect(resolveClientCommand('output-style', 'Automatic', context)).toEqual({ type: 'set-style', style: null })
+  })
+
+  it('explains an unknown name; without styles only the built-ins resolve', () => {
+    expect(resolveClientCommand('output-style', 'pirate', context)).toEqual({
+      type: 'error',
+      message: 'Unknown output style "pirate". Use auto, default, explanatory, learning or a style from the menu.',
+    })
+    const { styles: _styles, ...builtinsOnly } = context
+    expect(resolveClientCommand('output-style', 'learning', builtinsOnly)).toEqual({ type: 'set-style', style: 'learning' })
+    expect(resolveClientCommand('output-style', 'terse', builtinsOnly).type).toBe('error')
+  })
+})
+
+describe('the Skills group and Needs approval (Phase 11)', () => {
+  const summaries = [
+    { name: 'deploy', description: 'Deploy the app', source: 'project' as const, namespace: 'ops' },
+    { name: 'status', description: 'Git status', source: 'project' as const },
+    { name: 'standup', description: 'Draft my standup notes', source: 'user' as const },
+    { name: 'release-notes', kind: 'skill' as const, description: 'Write release notes', source: 'project' as const, argumentHint: '<version>' },
+    { name: 'tidy', kind: 'skill' as const, description: 'Tidy imports', source: 'user' as const },
+    { name: 'charts', kind: 'skill' as const, description: 'Draw charts', source: 'plugin' as const, pluginId: 'viz-pack' },
+    { name: 'mystery', kind: 'skill' as const, description: 'Unknown plugin', source: 'plugin' as const },
+    { name: 'basics', kind: 'skill' as const, description: 'Built-in skill', source: 'harness' as const },
+  ]
+  const skillItems = serverSlashItems(summaries, id => (id === 'viz-pack' ? 'Viz pack' : undefined))
+
+  it('shows a skill\'s source on the right and lists the Skills group last', () => {
+    const detail = (name: string) => slashItemDetail(skillItems.find(item => item.name === name)!)
+    expect([detail('release-notes'), detail('tidy'), detail('charts'), detail('mystery'), detail('basics')])
+      .toEqual(['Project', 'Personal', 'Viz pack', 'Plugin', 'Built-in'])
+    expect(detail('deploy')).toBe('ops')
+    expect(detail('standup')).toBeNull()
+    expect(SLASH_GROUPS.at(-1)).toEqual({ value: 'skill', label: 'Skills' })
+    expect(filterSlashItems([...clientSlashItems(), ...skillItems], '').map(item => item.group).at(-1)).toBe('skill')
+    expect(slashItemLabel(skillItems.find(item => item.name === 'release-notes')!)).toBe('/release-notes, Write release notes, arguments <version>')
+  })
+
+  it('marks the project commands whose trust item is pending', () => {
+    expect(pendingCommandNames(null).size).toBe(0)
+    const list = projectTrustList({
+      items: [
+        trustHookItem(),
+        trustCommandItem({ state: 'pending', label: '/deploy', detail: { name: 'deploy', spans: ['./deploy.sh'] } }),
+        trustCommandItem(),
+      ],
+    })
+    const pending = pendingCommandNames(list)
+    expect([...pending]).toEqual(['deploy'])
+    const marked = withPendingCommands(skillItems, pending)
+    expect(marked.filter(item => item.pending).map(item => item.name)).toEqual(['deploy'])
+    expect(slashItemLabel(marked.find(item => item.name === 'deploy')!)).toBe('/deploy, Deploy the app, needs approval')
+    // Nothing pending: the same array.
+    expect(withPendingCommands(skillItems, new Set())).toBe(skillItems)
+    // Only project commands carry the badge (a personal command or a skill with the name never does).
+    expect(withPendingCommands(skillItems, new Set(['standup', 'tidy']))).toBe(skillItems)
   })
 })

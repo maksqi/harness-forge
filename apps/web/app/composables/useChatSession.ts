@@ -52,7 +52,14 @@
 // otherwise and once the stream ended). A turn the server started after a Stop hook blocked (`run.started` with
 // `origin: 'hook'` and a carrier `userMessageId` the shown path lacks) is followed like a task-started turn. A submit
 // refused with 409 `hook-blocked` / `untrusted` stays unstored (`isUnstoredFailure`), so ChatView puts it back into the
-// composer with the refusal.
+// composer with the refusal (`sendInputOf` rebuilds an edit's or a retry's text and files). W11.11: a style picked
+// while a new chat's first request is in flight is saved once the chat exists; a new chat whose first message a prompt
+// hook refused (the server created its row and removed it again: `chat.created`, then `chat.deleted`; open point 14)
+// becomes a new chat again instead of being dropped, so its next send carries the project and the style once more; and
+// the draft id of `/` is released once a first reply streams (also when its page was left meanwhile). W11.16: `accepted`
+// counts the chat requests the server accepted (a 2xx answer to `POST /api/chat`, seen by the transport's `fetch`; every
+// refusal is an error answer before the stream starts), so the chat is known from that answer on, before its first chunk
+// (an image turn streams nothing until its image is ready): ChatView moves a new chat's page then.
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   BackgroundTask,
@@ -81,6 +88,7 @@ import { useChat } from '@ai-sdk/vue'
 import {
   createChatId,
   createMessageId,
+  FILE_ID_PATTERN,
   harnessDataSchemas,
   HarnessError,
   messageMetadataSchema,
@@ -296,6 +304,13 @@ export interface ChatSession {
    */
   outputStyle: WritableComputedRef<string | null>
   /**
+   * + Phase 11 (W11.16): how many chat requests of this session (`POST /api/chat`: a send, an edit, a regenerate, an
+   * approval's continuation) the server accepted: answered with a 2xx status, before anything streamed. Every refusal
+   * (`hook-blocked`, `untrusted`, `disabled`, any other 4xx) is an error answer instead, so from an accepted request on the
+   * chat exists (`persisted`, the draft id of `/` released). ChatView moves a new chat's page on the first one.
+   */
+  accepted: Readonly<Ref<number>>
+  /**
    * + Phase 10 (ADR-046; W10.10): the chat's background agents, newest first (`backgroundTasks.tasks(id)`; fetched when
    * the chat loads, kept current by `task.changed`).
    */
@@ -479,6 +494,22 @@ export function queueMessageParts(input: ChatSendInput): QueueMessage['parts'] {
   return parts
 }
 
+/**
+ * + Phase 11 (W11.11): what a user message sent: its text parts (joined like a retry joins them) and its uploaded files
+ * (`/api/files/<id>` part URLs; the size is not part of a message: 0). ChatView puts a refused edit or retry back into
+ * the composer with it.
+ */
+export function sendInputOf(message: Pick<HarnessUIMessage, 'parts'>): ChatSendInput {
+  const text = message.parts.filter(isTextUIPart).map(part => part.text).join('\n\n').trim()
+  const files: FileRef[] = []
+  for (const part of message.parts.filter(isFileUIPart)) {
+    const id = part.url.split(/[?#]/)[0]!.split('/').pop() ?? ''
+    if (FILE_ID_PATTERN.test(id))
+      files.push({ id, name: part.filename ?? id, mime: part.mediaType, size: 0, url: part.url })
+  }
+  return { text, files }
+}
+
 function summaryOf(chat: ChatDetail): ChatSummary {
   const { settings: _settings, messages: _messages, branches: _branches, totals: _totals, ...summary } = chat
   return summary
@@ -529,6 +560,15 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   const loadError = shallowRef<HarnessError | null>(null)
   const summary = shallowRef<ChatSummary | null>(null)
   const persisted = ref(!isNew)
+  /**
+   * + Phase 11 (open point 14): the chat is known for sure: it loaded, or the server accepted a request of this session
+   * (W11.16; or its reply started streaming). A new chat known only from `chat.created` may still be removed by the
+   * request that created it (a prompt hook refused its first message): its `chat.deleted` makes it a new chat again
+   * instead of dropping the session.
+   */
+  let described = !isNew
+  /** + Phase 11 (W11.16): the chat requests of this session the server accepted (a 2xx answer). */
+  const accepted = ref(0)
 
   // Composer state: the user's pick wins, then what the chat stored, then the global defaults.
   const stored = shallowRef<ChatChoices>({})
@@ -573,14 +613,30 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
    */
   const storedStyle = shallowRef<string | null>(null)
   const pickedStyle = shallowRef<string | null | undefined>(undefined)
+  /**
+   * A style picked while the server did not know the chat, and not sent with a first request since: only the request
+   * that creates the chat carries `outputStyle`, so a pick made while that request runs is saved once the chat exists.
+   */
+  let styleUnsaved = false
+  function saveStyle(value: string | null) {
+    // Best effort, like the other choices.
+    chats.update(id, { settings: { outputStyle: value } }).catch(() => {})
+  }
   const outputStyle = computed<string | null>({
     get: () => (pickedStyle.value !== undefined ? pickedStyle.value : storedStyle.value),
     set: (value) => {
       pickedStyle.value = value
-      // Best effort, like the other choices; a new chat sends it with its first request.
       if (persisted.value)
-        chats.update(id, { settings: { outputStyle: value } }).catch(() => {})
+        saveStyle(value)
+      else
+        styleUnsaved = true
     },
+  })
+  watch(persisted, (value) => {
+    if (!value || !styleUnsaved || pickedStyle.value === undefined)
+      return
+    styleUnsaved = false
+    saveStyle(pickedStyle.value)
   })
 
   /** Requests use the values of the moment they were sent; later default changes must not move this chat. */
@@ -681,7 +737,14 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
 
   const transport = new DefaultChatTransport<HarnessUIMessage>({
     api: CHAT_API,
-    fetch: apiFetch,
+    // + Phase 11 (W11.16): a chat request (`POST`; a resume is a `GET`) answered with a 2xx status was accepted: every
+    // refusal is an error answer before the stream starts. Seen here, before the first chunk arrives.
+    fetch: async (input, init) => {
+      const response = await apiFetch(input, init)
+      if (response.ok && init?.method === 'POST')
+        onAccepted()
+      return response
+    },
     prepareSendMessagesRequest: ({ id: chatId, messages, trigger, messageId }) => {
       const firstRequest = !persisted.value
       const body = buildChatRequestBody({
@@ -700,8 +763,11 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       })
       const kind = chatRequestKind(trigger, body.message)
       request = { kind, userMessageId: kind === 'new' ? body.message.id : null }
-      if (firstRequest && kind === 'new')
+      if (firstRequest && kind === 'new') {
         createdProject.value = body.projectId ?? null
+        // The request that creates the chat carries the style.
+        styleUnsaved = false
+      }
       return { body }
     },
   })
@@ -775,8 +841,25 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   watch(runState, state => chats.setRunState(id, toListRunState(state)))
   watch(() => chat.status.value, (status) => {
     if (status === 'streaming')
-      persisted.value = true
+      markKnown()
   })
+
+  /**
+   * The server has the chat: it accepted a request of this session, or a reply streams. + Phase 11: the next visit of `/`
+   * starts a new draft, also when the page was left before the server answered (the page releases it too when it moves
+   * to the chat).
+   */
+  function markKnown() {
+    persisted.value = true
+    described = true
+    releaseDraftChatId(id)
+  }
+
+  /** + Phase 11 (W11.16): the server accepted a chat request of this session (a 2xx answer, before the first chunk). */
+  function onAccepted() {
+    markKnown()
+    accepted.value += 1
+  }
   watch(runState, () => scheduleTrim())
 
   /**
@@ -810,6 +893,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
         loaded.value = true
         notFound.value = false
         persisted.value = true
+        described = true
         // + Phase 9: the chat's queue (kept current by `queue.changed` from now on, refetched after a reconnect).
         chatQueue.fetch(id).catch(() => {})
         // + Phase 10: the chat's background agents (kept current by `task.changed`, refetched after a reconnect).
@@ -994,9 +1078,26 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     }
   })
   events.on('chat.deleted', (event) => {
-    if (event.data.id === id)
-      queueMicrotask(() => forgetChatSession(id))
+    if (event.data.id !== id)
+      return
+    // + Phase 11 (open point 14): the row of a new chat whose first message a prompt hook refused, removed by the request
+    // that created it: the page stays a new chat (the message goes back into its composer), so the session stays too.
+    if (!described) {
+      becomeNew()
+      return
+    }
+    queueMicrotask(() => forgetChatSession(id))
   })
+
+  /** + Phase 11: the server no longer has the chat it never described: back to a new chat (its picks are kept). */
+  function becomeNew() {
+    persisted.value = false
+    summary.value = null
+    createdProject.value = null
+    reportedProject.value = undefined
+    latestLeaf = undefined
+    unreachableLeaf = undefined
+  }
   // A deleted project detaches its chats on the server without a `chat.updated` per chat (ADR-031).
   events.on('project.changed', (event) => {
     if (event.data.project !== null)
@@ -1480,6 +1581,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     activity: readonly(activity),
     hookActivity: readonly(hookActivity),
     outputStyle,
+    accepted: readonly(accepted),
     backgroundTasks: backgroundTaskList,
     stopBackgroundTask,
   }

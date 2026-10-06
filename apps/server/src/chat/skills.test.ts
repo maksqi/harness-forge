@@ -2,6 +2,8 @@
 // content cap, and for a project skill the base folder and its supporting files (walked through the frozen guards:
 // depth 3, at most 50, no links, hidden or secret-looking names); unknown / turned-off / invalid / unreadable skills
 // are errors that list the available skills; bodies are never logged. Temp project folders: `realpath(mkdtemp())`.
+// Phase 11 (W11.6-T6, ADR-052): a `disable-model-invocation` skill is refused (also when its file changed after the
+// listing) and never listed as available.
 import type { CustomizationEntry, ParsedDefinition } from '@harness-forge/shared'
 import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { FakeCustomizationService } from '../testing/fake-customizations.ts'
@@ -15,7 +17,7 @@ import { LIMITS, skillOutputSchema } from '@harness-forge/shared'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createMemoryLogger, createSilentLogger } from '../logger.ts'
 import { catalogEntryKey, createFakeCustomizationService, fakeCatalogEntry } from '../testing/fake-customizations.ts'
-import { capUtf8, listSkillFiles, loadSkill, skillBaseDir, SKILLS_UNAVAILABLE_TEXT } from './skills.ts'
+import { capUtf8, listSkillFiles, loadSkill, modelInvocableSkills, skillBaseDir, SKILLS_UNAVAILABLE_TEXT } from './skills.ts'
 import { catalogEntry, testCatalog } from './testing.ts'
 
 const PROJECT = 'prj_SKILLSTESTAAAAAA'
@@ -237,6 +239,47 @@ describe('loadSkill: errors', () => {
     const controller = new AbortController()
     controller.abort(new Error('stopped'))
     await expect(loadSkill(await context(), 'pdf', controller.signal)).rejects.toThrow('stopped')
+  })
+})
+
+describe('loadSkill: model invocation (Phase 11)', () => {
+  const INTERNAL_MD = '---\nname: internal\ndescription: Internal notes.\ndisable-model-invocation: true\n---\nINTERNAL-BODY\n'
+
+  it('refuses a disable-model-invocation skill and lists only the model-invocable ones', async () => {
+    projectSkill('pdf')
+    const internal = { ...projectSkill('internal', INTERNAL_MD), modelInvocable: false }
+    fake.entries.set(PROJECT, [...(fake.entries.get(PROJECT) ?? []).filter(entry => entry.name !== 'internal'), internal])
+    const memory = createMemoryLogger()
+    await expect(loadSkill(await context({ logger: memory.logger }), 'internal', signal())).rejects.toMatchObject({
+      code: 'forbidden',
+      message: 'The skill "internal" can only be run by the user (as /internal); you cannot load it. Available skills: pdf.',
+    })
+    // The body was never read.
+    expect(fake.calls.load).toBe(0)
+    await expect(loadSkill(await context(), 'docx', signal())).rejects.toThrow('Unknown skill "docx". Available skills: pdf.')
+    expect(memory.text()).not.toContain('INTERNAL-BODY')
+  })
+
+  it('refuses a skill whose file turned it off for the model after the listing', async () => {
+    const entry = projectSkill('pdf')
+    fake.bodies.set(catalogEntryKey(entry), SKILL_MD.replace('description: Work with PDF files.\n', 'description: Work with PDF files.\ndisable-model-invocation: true\n'))
+    await expect(loadSkill(await context(), 'pdf', signal())).rejects.toMatchObject({ code: 'forbidden', message: expect.stringMatching(/^The skill "pdf" can only be run by the user/) })
+  })
+
+  it('a catalog with only user-invocable skills answers SKILLS_UNAVAILABLE_TEXT for other names', async () => {
+    const catalog = testCatalog([catalogEntry('skill', 'internal', { source: 'user', modelInvocable: false })], PROJECT)
+    await expect(loadSkill(await context({ catalog }), 'pdf', signal())).rejects.toMatchObject({ code: 'not_found', message: SKILLS_UNAVAILABLE_TEXT })
+    await expect(loadSkill(await context({ catalog }), 'internal', signal())).rejects.toThrow('The skill "internal" can only be run by the user (as /internal); you cannot load it.')
+  })
+
+  it('modelInvocableSkills keeps the order and drops modelInvocable: false only', () => {
+    const entries = [
+      catalogEntry('skill', 'b', { modelInvocable: true }),
+      catalogEntry('skill', 'internal', { modelInvocable: false }),
+      catalogEntry('skill', 'a'),
+    ]
+    expect(modelInvocableSkills(entries).map(entry => entry.name)).toEqual(['b', 'a'])
+    expect(modelInvocableSkills([])).toEqual([])
   })
 })
 

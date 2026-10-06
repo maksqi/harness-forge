@@ -46,9 +46,18 @@
 // provides the session's `hookActivity` (HOOK_ACTIVITY: the tool rows' "Running hook…"), passes the chat's own output
 // style to the composer (`session.outputStyle`, never pinned), and puts a submit refused with 409 `hook-blocked` /
 // `untrusted` (`refusalOf`) back into the composer (`restoreInput`, text and files) with its refusal (`showRefusal`),
-// for a new turn (the `error` watcher) and for a queued message (`onSubmitFailed`).
-import type { HarnessError, MessageBranch, ReasoningEffort, RestoreResult, ToolMode } from '@harness-forge/shared'
+// for a new turn (the `error` watcher; also a refusal that arrived while no view showed the chat), for a queued message
+// (`onSubmitFailed`) and for an edit (its text and files go to the composer and the previous version is reloaded). The
+// first send of a new chat moves the page (`created`) only once the server took it (W11.16: it accepted the request,
+// `session.accepted`, before anything streams; else its reply streams, or the request ended with the message still
+// shown): a refused first message leaves `/` as it was (open point 14). An `untrusted`
+// refusal names the command it sent; its Review… opens the trust dialog (the composer calls `openProjectTrust()`). The
+// polite region announces "A hook asked the agent to continue" once per hook carrier (`run.started` with `origin:
+// 'hook'`, once it shows) and "A hook blocked {tool}" once per `denied` record of this tab's stream (`hookAnnouncement`;
+// the records and carriers of a loaded path are never announced).
+import type { HarnessError, HookData, MessageBranch, ReasoningEffort, RestoreResult, ToolMode } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
+import type { ComposerRefusalData } from '~/components/chat/composer/output-style'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
 import { compactionMarkers } from '@harness-forge/shared'
@@ -61,6 +70,7 @@ import { Button } from '@/components/ui/button'
 import ChatComposer from '~/components/chat/composer/ChatComposer.vue'
 import { refusalOf } from '~/components/chat/composer/output-style'
 import { toolModeOption } from '~/components/chat/composer/permission'
+import { parseSlashCommand } from '~/components/chat/composer/slash-commands'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import { toHarnessErrorView } from '~/components/common/harness-error'
 import ProjectMcpDialog from '~/components/projects/mcp/ProjectMcpDialog.vue'
@@ -68,7 +78,7 @@ import ProjectTrustDialog from '~/components/projects/trust/ProjectTrustDialog.v
 import { REWIND_DIALOG_HOST, REWIND_RUN_ACTIVE_MESSAGE, runningChatOf } from '~/components/workspace/rewind/rewind'
 import { useRewindResultToast } from '~/components/workspace/rewind/rewind-toast'
 import RewindDialog from '~/components/workspace/rewind/RewindDialog.vue'
-import { isBusyConflict, isRunActiveConflict, useChatSession } from '~/composables/useChatSession'
+import { isBusyConflict, isRunActiveConflict, sendInputOf, useChatSession } from '~/composables/useChatSession'
 import { useServerEvents } from '~/composables/useServerEvents'
 import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { QUEUE_ITEM_GONE_MESSAGE } from '~/stores/chat-queue'
@@ -94,6 +104,7 @@ import { AGENT_TASK_CONTEXT, BACKGROUND_TASK_INPUT, CHAT_VIEW_ACTIONS, HOOK_ACTI
 import { imageFileParts, isTaskResultMessage, messageText, PLAN_TOOL_NAME, taskResultsOf, toolNameOf } from './chat-format'
 import ChatNotFound from './ChatNotFound.vue'
 import ChatTranscript from './ChatTranscript.vue'
+import { hookAnnouncement, hookDataOf, isHookCarrierMessage } from './hooks/hook-notes'
 import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
 import { toolApprovalLabel } from './parts/tool-row'
 import QueuedMessages from './queue/QueuedMessages.vue'
@@ -362,6 +373,11 @@ watch(pendingApprovals, (pending, previous) => {
  * when it arrives in a stream of this tab ("Conversation compacted"); the markers of a loaded path are only remembered.
  */
 const knownMarkers = new Set<string>()
+/**
+ * + Phase 11 (ADR-048): the `denied` hook records this view has seen (`<message>:<record id>`). One that arrives in a
+ * stream of this tab is announced once ("A hook blocked {tool}"); the records of a loaded path are only remembered.
+ */
+const knownDenials = new Set<string>()
 // A `/compact` reply can arrive and finish within one tick, so the status is already `ready` when the marker shows:
 // remember that this tab streamed (sync, on every status change) until the next marker check consumed it.
 let streamedSinceCheck = false
@@ -385,16 +401,37 @@ watch(() => messages.value.at(-1), (last) => {
   }
   if (arrived && streaming)
     void announce('Conversation compacted')
+  for (const record of deniedRecords(last.parts)) {
+    const key = `${last.id}:${record.id}`
+    if (knownDenials.has(key))
+      continue
+    knownDenials.add(key)
+    const text = streaming ? hookAnnouncement(record, record.toolName ?? null) : null
+    if (text)
+      void announce(text)
+  }
 }, { immediate: true })
+
+/** + Phase 11: the `denied` hook records among a reply's parts (PreToolUse blocks), in part order. */
+function deniedRecords(parts: readonly unknown[]): HookData[] {
+  return parts.flatMap((part) => {
+    const record = hookDataOf(part)
+    return record?.outcome === 'denied' ? [record] : []
+  })
+}
 
 /**
  * + Phase 10 (ADR-046): the carrier messages of turns the server started for finished background agents
  * (`run.started` with `origin: 'task'`) that this view has not shown yet. When its carrier shows, each result whose
  * ending the dock did not announce in this tab (`announcedTasks`) is announced ("Background agent finished:
- * {description}"); carriers of a loaded path are never announced.
+ * {description}"); carriers of a loaded path are never announced. + Phase 11: so is the carrier of a turn a Stop hook
+ * started (`origin: 'hook'`): "A hook asked the agent to continue".
  */
 const pendingCarriers = new Set<string>()
 const announcedCarriers = new Set<string>()
+
+/** + Phase 11: what a hook carrier announces (its records' announcement, "A hook asked the agent to continue"). */
+const HOOK_CONTINUED_ANNOUNCEMENT = 'A hook asked the agent to continue'
 
 function announceCarriers() {
   if (pendingCarriers.size === 0)
@@ -403,7 +440,17 @@ function announceCarriers() {
     if (!pendingCarriers.has(message.id))
       continue
     pendingCarriers.delete(message.id)
-    if (announcedCarriers.has(message.id) || !isTaskResultMessage(message))
+    if (announcedCarriers.has(message.id))
+      continue
+    // + Phase 11 (ADR-048): the carrier of a turn a Stop hook started, once per carrier and tab.
+    if (isHookCarrierMessage(message)) {
+      announcedCarriers.add(message.id)
+      const records = message.parts.flatMap(part => hookDataOf(part) ?? [])
+      const text = records.map(record => hookAnnouncement(record, null)).find(line => line !== null)
+      void announce(text ?? HOOK_CONTINUED_ANNOUNCEMENT)
+      continue
+    }
+    if (!isTaskResultMessage(message))
       continue
     announcedCarriers.add(message.id)
     // Once per tab: only the results whose ending the dock did not announce (e.g. right after a reload).
@@ -416,7 +463,7 @@ function announceCarriers() {
 
 useServerEvents().on('run.started', (event) => {
   const { chatId, origin, userMessageId } = event.data
-  if (chatId !== props.chatId || origin !== 'task' || !userMessageId || announcedCarriers.has(userMessageId))
+  if (chatId !== props.chatId || (origin !== 'task' && origin !== 'hook') || !userMessageId || announcedCarriers.has(userMessageId))
     return
   pendingCarriers.add(userMessageId)
   // A carrier the path never showed (another version is shown) is forgotten after a while.
@@ -441,6 +488,10 @@ onMounted(() => {
   // The project chip, the new-chat picker and "Move to project" (the sidebar may not be mounted, e.g. on mobile).
   if (!projects.loaded && !projects.loading)
     projects.fetchAll().catch(() => {})
+  // + Phase 11: a refusal that arrived while no view showed the chat (the page was left before the server answered).
+  const refusal = refusalOf(error.value)
+  if (refusal)
+    takeBackRefused(refusal)
 })
 
 // A run that starts while the chat is shown (another tab, a continuation elsewhere) is followed live.
@@ -449,27 +500,111 @@ watch(() => chats.runState[props.chatId] === 'running', (running) => {
     void session.resumeIfRunning()
 })
 
-/** + Phase 11: the last input sent from this view (a refused submit goes back into the composer with its files). */
+// ---------- refused and unstored messages ----------
+
+/**
+ * + Phase 11: the composer input of the last send from this view (a refused one goes back with its files as they were);
+ * null after an edit, a retry or a regenerate, whose refused message gives its own text and files (`sendInputOf`).
+ */
 let lastInput: ComposerSubmitInput | null = null
+/** + Phase 11: the last send was an edit: a refused one reloads the path, so the previous version shows again. */
+let editSent = false
+/**
+ * + Phase 11 (open point 14): the first send of a new chat waits for the server: the page moves to the chat once the
+ * server accepted the request (W11.16: its 2xx answer, `session.accepted`, before anything streams: an image turn
+ * streams nothing until its image is ready), else once its reply streams, or once the request ended with the message
+ * still shown (an error the transcript shows with Retry). A message that went back into the composer (a prompt hook
+ * refused it: a 409 before streaming) leaves the page a new chat.
+ */
+let creating = false
+
+function emitCreated() {
+  creating = false
+  emit('created', props.chatId)
+}
+
+watch(session.accepted, () => {
+  if (creating)
+    emitCreated()
+})
+
+watch(status, (next) => {
+  if (!creating || next === 'submitted')
+    return
+  // A fallback: the acceptance normally came first.
+  if (next === 'streaming') {
+    emitCreated()
+    return
+  }
+  // Ended without an accepted answer: decided after the error watcher took a refused or unstored message back.
+  void nextTick(() => {
+    if (!creating)
+      return
+    if (messages.value.length > 0)
+      emitCreated()
+    else
+      creating = false
+  })
+})
+
+/**
+ * An `untrusted` refusal names the command the refused message ran ("/{name} runs shell lines you haven't approved."),
+ * parsed like the composer parses it, when the server's answer did not.
+ */
+function withCommand(refusal: ComposerRefusalData, text: string): ComposerRefusalData {
+  return refusal.code === 'untrusted' && !refusal.command ? { ...refusal, command: parseSlashCommand(text)?.name ?? null } : refusal
+}
+
+function sameInput(a: ComposerSubmitInput, b: ComposerSubmitInput): boolean {
+  return a.text === b.text && a.files.length === b.files.length && a.files.every((file, index) => file.url === b.files[index]!.url)
+}
+
+/** The text of the last user message on the shown path ('' when there is none). */
+function lastUserText(): string {
+  for (let index = messages.value.length - 1; index >= 0; index--) {
+    const message = messages.value[index]!
+    if (message.role === 'user')
+      return messageText(message)
+  }
+  return ''
+}
+
+/**
+ * + Phase 11: a new user message refused with 409 `hook-blocked` / `untrusted` before anything streamed (nothing was
+ * stored): it leaves the transcript, its text and files go back into the composer with the refusal; a refused edit
+ * reloads the path (the previous version shows again). A refused request that sent no new message (a regenerate of a
+ * command whose shell lines are no longer approved) reloads the path too and only shows the refusal.
+ */
+function takeBackRefused(refusal: ComposerRefusalData) {
+  const unsent = session.takeBackUnstored()
+  const sent = unsent ? sendInputOf(unsent) : null
+  // The composer's own input (exact file sizes) when the refused message is the one it sent.
+  const input = lastInput && (!sent || sameInput(lastInput, sent)) ? lastInput : sent
+  const reload = editSent || !unsent
+  lastInput = null
+  editSent = false
+  session.chat.clearError()
+  const shown = withCommand(refusal, input?.text ?? lastUserText())
+  if (reload)
+    void session.refresh()
+  // After the render: on a new chat the empty state (with its own composer) comes back once the message left.
+  void nextTick(() => {
+    if (input && (input.text || input.files.length > 0))
+      composer.value?.restoreInput(input)
+    composer.value?.showRefusal(shown)
+  })
+}
 
 // `409 conflict` (`run-active`): a reply is already running here; show the live run. `404 not_found`: the shown path
 // is stale (the chat changed elsewhere) and the session reloads it. `409 conflict` (`busy`): a master-key rotation
-// holds off new runs. In every case a message the server never stored goes back into the composer.
+// holds off new runs. In every case a message the server never stored goes back into the composer. + Phase 11: a hook
+// blocked the turn, or a command runs unapproved shell lines (`refusalOf`): the input goes back with the refusal.
 watch(error, (value) => {
   if (!value)
     return
-  // + Phase 11: a hook blocked the turn, or a command runs unapproved shell lines: nothing was stored, so the input goes
-  // back into the composer with the refusal.
   const refusal = refusalOf(value)
   if (refusal) {
-    const unsent = session.takeBackUnstored()
-    const text = unsent ? messageText(unsent) : lastInput?.text ?? ''
-    // The composer's own input (with its files) when the refused message is the one it sent; else its text (an edit).
-    const input = lastInput && lastInput.text === text ? lastInput : { text, files: [] }
-    lastInput = null
-    session.chat.clearError()
-    composer.value?.restoreInput(input)
-    composer.value?.showRefusal(refusal)
+    takeBackRefused(refusal)
     return
   }
   const stale = toHarnessError(value).code === 'not_found'
@@ -477,8 +612,9 @@ watch(error, (value) => {
   if (!stale && !busy && !isRunActiveConflict(value))
     return
   const unsent = session.takeBackUnstored()
+  // After the render, like a refusal: a new chat's composer may change once the message left.
   if (unsent)
-    composer.value?.setText(messageText(unsent))
+    void nextTick(() => composer.value?.setText(messageText(unsent)))
   session.chat.clearError()
   if (stale) {
     toast(STALE_CHAT_MESSAGE)
@@ -505,15 +641,16 @@ function onSubmit(input: ComposerSubmitInput) {
     composer.value?.openModelPicker()
     return
   }
-  const first = props.isNew && messages.value.length === 0
+  // + Phase 11: the page moves once the server took the first message (`creating`), not before.
+  if (props.isNew && messages.value.length === 0)
+    creating = true
   lastInput = input
+  editSent = false
   // + Phase 9 (ADR-042): while a run is active the session queues the message (it never enters the transcript).
   const queueing = runActive.value
   const submitting = session.submit(input)
   if (!queueing)
     transcript.value?.scrollToBottom('smooth')
-  if (first)
-    emit('created', props.chatId)
   submitting
     .then((result) => {
       if (result === 'queued')
@@ -524,11 +661,12 @@ function onSubmit(input: ComposerSubmitInput) {
 
 /** A message that was neither sent nor queued: its text goes back into the composer (which cleared itself). */
 function onSubmitFailed(input: ComposerSubmitInput, failure: unknown) {
+  creating = false
   // + Phase 11: a hook refused the queued message at enqueue (or it runs unapproved shell lines).
   const refusal = refusalOf(failure)
   if (refusal) {
     composer.value?.restoreInput(input)
-    composer.value?.showRefusal(refusal)
+    composer.value?.showRefusal(withCommand(refusal, input.text))
     return
   }
   if (input.text)
@@ -589,15 +727,22 @@ function onEditLast() {
 }
 
 function onEdit(messageId: string, text: string, files: FileUIPart[]) {
+  // + Phase 11: an edit re-runs UserPromptSubmit; a refused one goes to the composer and the previous version returns.
+  lastInput = null
+  editSent = true
   session.edit(messageId, text, files).catch(failure => reportFailure('Could not send the message', failure))
   transcript.value?.scrollToBottom('smooth')
 }
 
+// A regenerate or a retry of a message the server never stored sends it again (a prompt hook may refuse it once more:
+// its own text and files go back, and `editSent` still tells whether it was an edit).
 function onRegenerate(messageId: string) {
+  lastInput = null
   session.regenerate(messageId).catch(failure => reportFailure('Could not regenerate the response', failure))
 }
 
 function onRetry() {
+  lastInput = null
   session.regenerate().catch(failure => reportFailure('Could not retry', failure))
 }
 

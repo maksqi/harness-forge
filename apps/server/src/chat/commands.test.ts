@@ -1,7 +1,7 @@
 import type { CommandDefinition } from '@harness-forge/plugin-sdk'
 import type { CommandInvocation, CustomizationEntry, HarnessUIMessage } from '@harness-forge/shared'
 import type { FakeCustomizationService } from '../testing/fake-customizations.ts'
-import type { CommandExpansionHost, CommandResolution, CommandServices } from './commands.ts'
+import type { CommandResolution, CommandServices } from './commands.ts'
 import type { ChatQueueDeps } from './queue.ts'
 import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
@@ -35,7 +35,12 @@ describe('parseSlashCommand', () => {
     expect(parseSlashCommand('/summarize,now')).toBeNull()
     expect(parseSlashCommand('/1abc')).toBeNull()
     expect(parseSlashCommand('/')).toBeNull()
-    expect(parseSlashCommand(`/${'a'.repeat(40)}`)).toBeNull()
+    expect(parseSlashCommand(`/${'a'.repeat(65)}`)).toBeNull()
+  })
+
+  it('reads names of up to 64 characters (Phase 11: user-invocable skills; commands stay at 32)', () => {
+    expect(parseSlashCommand(`/${'a'.repeat(40)} x`)).toEqual({ name: 'a'.repeat(40), input: 'x' })
+    expect(parseSlashCommand(`/${'a'.repeat(64)}`)).toEqual({ name: 'a'.repeat(64), input: '' })
   })
 })
 
@@ -458,31 +463,5 @@ describe('the queue marks queued command files turnOnly (W10.2-T4 through create
     expect((await add('chat-b', 'msg_q000000000000002', '/review a.ts')).turnOnly).toBe(false)
     expect((await add('chat-a', 'msg_q000000000000003', '/model mock:echo')).turnOnly).toBe(false)
     expect((await add('chat-a', 'msg_q000000000000004', 'please /review')).turnOnly).toBe(false)
-  })
-})
-
-describe('commandContext.expansion (Phase 11, C37-T8: accepted, not used yet)', () => {
-  it('resolves exactly as without it: a body stays text and the host is never asked', async () => {
-    const fake = createFakeCustomizationService()
-    await fake.create({ kind: 'command', content: '---\nname: status\ndescription: Status.\n---\nRun !`git status --short` and read @README.md for $ARGUMENTS' })
-    const asked: string[] = []
-    const expansion: CommandExpansionHost = {
-      projectId: null,
-      shellEnabled: true,
-      workspace: async () => {
-        asked.push('workspace')
-        return null
-      },
-      trusted: async () => {
-        asked.push('trusted')
-        return true
-      },
-    }
-    const catalog = await fake.catalog(null)
-    const withHost = await resolveCommand(fileServices(fake, {}), '/status now', { ...context, catalog, expansion })
-    const without = await resolveCommand(fileServices(fake, {}), '/status now', { ...context, catalog })
-    expect(withHost).toEqual(without)
-    expect(expansionOf(withHost)).toBe('Run !`git status --short` and read @README.md for now')
-    expect(asked).toEqual([])
   })
 })

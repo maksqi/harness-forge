@@ -307,6 +307,27 @@ describe('dispatchServerEvent', () => {
     scope.stop()
   })
 
+  it('hands run.started of a hook turn to subscribers after the chats store marked the chat running (Phase 11)', () => {
+    const seen: Array<{ origin: string | undefined, userMessageId: string | undefined, running: string | undefined }> = []
+    const scope = effectScope()
+    scope.run(() => useServerEvents().on('run.started', (event) => {
+      seen.push({ origin: event.data.origin, userMessageId: event.data.userMessageId, running: useChatsStore().runState[event.data.chatId] })
+    }))
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(1), messageId: 'msg_asst000000000004', modelRef: 'mock:hooks', origin: 'hook', userMessageId: 'msg_hookcarrier00001' }, 1))
+    expect(seen).toEqual([{ origin: 'hook', userMessageId: 'msg_hookcarrier00001', running: 'running' }])
+    scope.stop()
+  })
+
+  it('chat.created then chat.deleted of a refused first message leave no row and do not leave the page (Phase 11)', () => {
+    const navigate = vi.fn()
+    dispatchServerEvent(createServerEvent('chat.created', chatSummary({ id: chatId(5) }), 1), { navigate })
+    expect(useChatsStore().byId(chatId(5))).toBeDefined()
+    dispatchServerEvent(createServerEvent('chat.deleted', { id: chatId(5) }, 2), { navigate })
+    expect(useChatsStore().byId(chatId(5))).toBeUndefined()
+    // The `/` page shows no open chat.
+    expect(navigate).not.toHaveBeenCalled()
+  })
+
   it('task.changed reaches subscribers after the store applied it; a deleted chat\'s late event lists nothing (Phase 10)', () => {
     const tasks = useBackgroundTasksStore()
     vi.spyOn(useChatsStore(), 'applyEvent').mockImplementation(() => {})

@@ -1,6 +1,6 @@
 import { parseDefinition } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { AGENT_MARKDOWN, agentCustomization, commandCustomization, commandSummary, customizationEntry, customizationList, definitionDiagnostic } from '~/utils/testing/fixtures'
+import { AGENT_MARKDOWN, agentCustomization, commandCustomization, commandSummary, customizationEntry, customizationList, definitionDiagnostic, projectTrustList, styleCustomization, styleEntry, trustCommandItem, trustSha } from '~/utils/testing/fixtures'
 import {
   argumentHintError,
   bodyDiagnostics,
@@ -11,6 +11,7 @@ import {
   deleteCopy,
   descriptionError,
   diagnosticField,
+  displayName,
   draftContent,
   draftDefinition,
   draftFromDefinition,
@@ -24,10 +25,14 @@ import {
   importDraft,
   importNotes,
   importTooLarge,
+  isScopeDefault,
   kindFolders,
   kindOfTab,
   middleTruncate,
   nameError,
+  pendingCommandTrust,
+  PERSONAL_EMPTY,
+  projectEmpty,
   rowDiagnostics,
   rowMeta,
   rowMetaItems,
@@ -35,6 +40,7 @@ import {
   shadowedTooltip,
   sizeLabel,
   stateBadge,
+  styleDefaultBadges,
   tabOf,
 } from './customize'
 
@@ -302,5 +308,74 @@ describe('customize import (W10.8)', () => {
     expect(importTooLarge(huge)).toEqual({ title: 'huge.md is too large', description: 'Definition files can be up to 64 KB.' })
     expect(importTooLarge(new File(['x'], 'small.md'))).toBeNull()
     await expect(importDraft(huge, 'agent')).rejects.toBeInstanceOf(RangeError)
+  })
+})
+
+describe('customize output styles and skills (W11.8-T6, T7)', () => {
+  it('shows a style by its label with the slug and the coding-instructions meta', () => {
+    const style = styleEntry({ name: 'my-style', label: 'My Style', keepCodingInstructions: false })
+    expect(displayName(style)).toBe('My Style')
+    expect(displayName(styleEntry({ label: undefined }))).toBe('terse')
+    expect(displayName(customizationEntry({ kind: 'command', name: 'deploy' }))).toBe('/deploy')
+    expect(rowMeta(style, pluginName)).toEqual(['Project', 'my-style', '.harness/output-styles/terse.md', 'Replaces coding instructions'])
+    expect(rowMeta(styleEntry({ label: 'terse', source: 'builtin', path: undefined }), pluginName)).toEqual(['Built-in', 'Keeps coding instructions'])
+    expect(rowMetaItems(style, pluginName)[1]).toEqual({ text: 'my-style', mono: true })
+  })
+
+  it('shows how a skill runs: /name in the slash menu, Only when you run it', () => {
+    const skill = customizationEntry({ kind: 'skill', name: 'deploy', source: 'user', path: undefined, tools: undefined, argumentHint: '<env>' })
+    expect(rowMeta(skill, pluginName)).toEqual(['Personal', '/deploy', '<env>'])
+    expect(rowMeta({ ...skill, userInvocable: false, modelInvocable: true }, pluginName)).toEqual(['Personal', '<env>'])
+    expect(rowMeta({ ...skill, argumentHint: undefined, modelInvocable: false }, pluginName)).toEqual(['Personal', '/deploy', 'Only when you run it'])
+  })
+
+  it('badges the global and the project default and knows the scope default', () => {
+    const terse = styleEntry()
+    expect(styleDefaultBadges(terse, { global: 'terse', project: null, projectName: null })).toEqual(['Your default'])
+    expect(styleDefaultBadges(terse, { global: 'default', project: 'terse', projectName: 'website' })).toEqual(['Default in website'])
+    expect(styleDefaultBadges(terse, { global: 'terse', project: 'terse', projectName: 'website' })).toEqual(['Your default', 'Default in website'])
+    expect(styleDefaultBadges({ ...terse, state: 'shadowed' }, { global: 'terse', project: null, projectName: null })).toEqual([])
+    expect(styleDefaultBadges(customizationEntry(), { global: 'reviewer', project: null, projectName: null })).toEqual([])
+    expect(styleDefaultBadges(terse, null)).toEqual([])
+    expect(isScopeDefault(terse, { global: 'terse', project: null, projectName: null })).toBe(true)
+    expect(isScopeDefault(terse, { global: 'terse', project: null, projectName: 'website' })).toBe(false)
+    expect(isScopeDefault(terse, { global: 'default', project: 'terse', projectName: 'website' })).toBe(true)
+  })
+
+  it('finds the pending trust item of a project command with `!` lines', () => {
+    const command = customizationEntry({ kind: 'command', name: 'status', path: '.claude/commands/status.md' })
+    const pending = trustCommandItem({ state: 'pending', sha256: trustSha(5) })
+    expect(pendingCommandTrust(command, projectTrustList({ items: [pending] }))).toEqual(pending)
+    expect(pendingCommandTrust(command, projectTrustList())).toBeNull()
+    expect(pendingCommandTrust({ ...command, source: 'user' }, projectTrustList({ items: [pending] }))).toBeNull()
+    expect(pendingCommandTrust(command, null)).toBeNull()
+  })
+
+  it('keeps a style\'s label on save while the name is its slug', () => {
+    const draft = draftFromUser(styleCustomization())
+    expect(draft).toMatchObject({ kind: 'style', name: 'terse', label: 'Terse', keepCodingInstructions: true })
+    expect(draftContent(draft)).toBe('---\nname: Terse\ndescription: Short answers without preamble\nkeep-coding-instructions: true\n---\n\nAnswer in at most three sentences.\n')
+    const renamed = draftDefinition({ ...draft, name: 'short' })
+    expect(renamed).toMatchObject({ kind: 'style', fields: { name: 'short', label: 'short' } })
+    // The round trip through the shared parser keeps every field.
+    expect(draftFromDefinition(parseDefinition('style', draftContent(draft)).definition!)).toEqual({ ...draft, body: draft.body.trimEnd() })
+  })
+
+  it('round-trips the skill keys through formatDefinition', () => {
+    const skill = { ...emptyDraft('skill'), name: 'deploy', description: 'Deploy the app', argumentHint: '<env>', body: 'Run the deploy.', userInvocable: false, modelInvocable: false }
+    const content = draftContent(skill)
+    expect(content).toContain('user-invocable: false')
+    expect(content).toContain('disable-model-invocation: true')
+    expect(content).toContain('argument-hint: <env>')
+    expect(draftFromDefinition(parseDefinition('skill', content).definition!)).toEqual(skill)
+  })
+
+  it('words the style copy of Phase 11', () => {
+    expect(EDITOR_COPY.style).toMatchObject({ title: 'output style', save: 'Save output style', bodyHelp: 'How the agent writes its replies. They go first in the main agent\'s instructions, never in sub-agents\'.' })
+    expect(deleteCopy('style', 'terse')).toEqual({ title: 'Delete terse?', description: 'Chats that use it fall back to Default.', confirm: 'Delete output style', toast: 'Deleted terse' })
+    expect(PERSONAL_EMPTY.style).toBe('No personal output styles yet. A style changes how the agent writes its replies.')
+    expect(projectEmpty('style', 'website')).toBe('No output styles in website. Add Markdown files to .harness/output-styles/ (or .claude/output-styles/) in the project folder.')
+    expect(nameError('style', 'learning')).toBe('learning is a built-in name.')
+    expect(existsError('style', 'terse')).toBe('You already have an output style named terse.')
   })
 })

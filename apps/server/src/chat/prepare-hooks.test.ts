@@ -1,8 +1,9 @@
-// The Phase 11 seams of `prepareRun` and the C37 stubs (C37-T8): the hook carrier (`carrierParts`), the output style of
-// a new chat (`ensureRunChat`), `PreparedRun.outputStyle` (`resolveRunOutputStyle` stub), the prompt hooks call site
-// (`runPromptHooks` stub: queued records attached; a `hook-blocked` refusal removes the chat row this request created),
-// the command expansion host, `startHookTurn` and `agentBlocks(…, { codingHints })`.
-import type { ChatDetail, ChatRequestBody, HookData } from '@harness-forge/shared'
+// The Phase 11 seams of `prepareRun` (C37-T8, kept by W11.5): the hook carrier (`carrierParts`), the output style of a
+// new chat (`ensureRunChat`), `PreparedRun.outputStyle` (`resolveRunOutputStyle`), the prompt hooks call site
+// (`runPromptHooks`: queued records attached; a `hook-blocked` refusal removes the chat row this request created), the
+// command expansion host and `agentBlocks(…, { codingHints })`. The behavior of the hook and style modules themselves is
+// tested by their owners (`hooks-prompt`, `output-style`); the command extras in `prepare-commands.test.ts`.
+import type { ChatDetail, ChatRequestBody } from '@harness-forge/shared'
 import type { TestApp } from '../testing/create-test-app.ts'
 import type { AppDeps } from '../types.ts'
 import type { PreparedRun, PrepareRunOptions } from './prepare.ts'
@@ -12,8 +13,7 @@ import { createSilentLogger } from '../logger.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { fakeHookRecord } from '../testing/fake-hooks.ts'
 import { hookBlockedError, isHookBlockedError, runPromptHooks } from './hooks-prompt.ts'
-import { startHookTurn } from './index.ts'
-import { DEFAULT_RUN_OUTPUT_STYLE, resolveRunOutputStyle } from './output-style.ts'
+import { DEFAULT_RUN_OUTPUT_STYLE } from './output-style.ts'
 import { agentBlocks, TASK_HINT, TODO_HINT } from './params.ts'
 import { carrierParts, commandExpansionHost, commitHistory, ensureRunChat, prepareRun } from './prepare.ts'
 import { createRunRegistry } from './runs.ts'
@@ -130,31 +130,7 @@ describe('prepareRun: Phase 11 seams', () => {
   })
 })
 
-describe('the C37 stubs', () => {
-  const signal = new AbortController().signal
-
-  it('runPromptHooks answers the precomputed records; resolveRunOutputStyle answers default', async () => {
-    const actual = await vi.importActual<typeof import('./hooks-prompt.ts')>('./hooks-prompt.ts')
-    const record: HookData = fakeHookRecord('UserPromptSubmit', 'context', { context: 'x' })
-    const input = { deps: {} as AppDeps, prepared: {} as PreparedRun, body: chatBody(testChatId(1), 'x'), origin: 'request' as const, serverMessage: false, signal, logger: createSilentLogger() }
-    expect(await actual.runPromptHooks(input)).toEqual({ records: [] })
-    expect(await actual.runPromptHooks({ ...input, precomputed: [record] })).toEqual({ records: [record] })
-    const style = await resolveRunOutputStyle({ deps: {} as AppDeps, catalog: {} as PreparedRun['catalog'], chat: {} as PreparedRun['chat'], settings: {} as PreparedRun['settings'], history: [], modelRef: 'mock:echo', signal, logger: createSilentLogger() })
-    expect(style).toEqual({ style: DEFAULT_RUN_OUTPUT_STYLE, notices: [] })
-    const controller = new AbortController()
-    controller.abort()
-    await expect(actual.runPromptHooks({ ...input, signal: controller.signal })).rejects.toBeDefined()
-  })
-
-  it('hookBlockedError without a reason; startHookTurn starts nothing yet', () => {
-    const record = fakeHookRecord('UserPromptSubmit', 'blocked')
-    expect(hookBlockedError('c', record).message).toBe('A hook blocked this message.')
-    expect(isHookBlockedError(new HarnessError({ code: 'conflict', message: 'x', details: { reason: 'run-active' } }))).toBe(false)
-    const start = vi.fn(async () => new Response(null))
-    expect(startHookTurn({ chatId: 'c', data: record, previous: { modelRef: 'mock:echo', reasoningEffort: 'auto', toolMode: 'ask' }, options: { logger: createSilentLogger(), requestId: 'r' }, events: { emit: () => {} }, start })).toBe(false)
-    expect(start).not.toHaveBeenCalled()
-  })
-
+describe('the C37 seams of prepare (W11.5 keeps them; the hook and style modules are tested by their owners)', () => {
   it('commandExpansionHost opens the project folder once, on first use, and checks trust hashes', async () => {
     const opened: string[] = []
     const workspace = { projectId: 'prj_0123456789abcdef', name: 'P', root: '/srv/p', instructions: null, projectFile: null }

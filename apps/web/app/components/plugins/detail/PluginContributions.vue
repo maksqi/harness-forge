@@ -12,7 +12,8 @@
 // Phase 11 (plugin API 1.5.0; C39 mounts, W11.8 implements): the Hooks section is PluginHookList (the plugin's command
 // hooks from `useHooksStore().list(null)` and its code hooks), shown for code hooks (`contributions.hooks`) or command
 // hooks (`contributions.commandHooks`); an Output styles section ("How the agent writes its replies.") follows Skills
-// as a PluginCustomizationList of kind `style`.
+// as a PluginCustomizationList of kind `style`. W11.8: the global hook listing is fetched (at most HOOKS_MAX_AGE_MS old)
+// whenever the plugin declares command hooks; the section keeps the code hook description only for code hooks.
 import type { PluginDetail } from '@harness-forge/shared'
 import { ArrowRightIcon, SettingsIcon } from '@lucide/vue'
 import { computed, onMounted, ref, watch } from 'vue'
@@ -35,6 +36,8 @@ const props = defineProps<{ plugin: PluginDetail }>()
 
 /** A global catalog younger than this (and not stale) is used as is; a `plugin.changed` event makes it stale. */
 const CATALOG_MAX_AGE_MS = 15_000
+/** The same for the global hook listing (the plugin's command hooks). */
+const HOOKS_MAX_AGE_MS = 15_000
 
 const plugins = usePluginsStore()
 const providers = useProvidersStore()
@@ -134,7 +137,12 @@ const styleCount = computed(() => styles.value.entries.length + styles.value.mis
 
 // ---------- hooks (Phase 11) ----------
 
-/** The plugin's command hooks, from the global hook listing (W11.8 fetches it). */
+watch(() => contributions.value.commandHooks, (count) => {
+  if (count > 0)
+    hooks.fetch(null, { maxAgeMs: HOOKS_MAX_AGE_MS }).catch(() => {})
+}, { immediate: true })
+
+/** The plugin's command hooks, from the global hook listing. */
 const commandHooks = computed(() => (hooks.list(null)?.items ?? [])
   .filter(entry => entry.source === 'plugin' && entry.kind === 'command' && entry.pluginId === props.plugin.id))
 const hookCount = computed(() => Math.max(commandHooks.value.length, contributions.value.commandHooks) + contributions.value.hooks.length)
@@ -261,7 +269,7 @@ const empty = computed(() => !isCoreMcp.value
       v-if="hookCount > 0"
       title="Hooks"
       :count="hookCount"
-      description="Hooks can read and change prompts, messages and tool calls."
+      :description="contributions.hooks.length > 0 ? 'Hooks can read and change prompts, messages and tool calls.' : undefined"
     >
       <PluginHookList :entries="commandHooks" :code-hooks="contributions.hooks" />
     </PluginDetailSection>

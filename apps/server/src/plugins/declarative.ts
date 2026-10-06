@@ -12,11 +12,17 @@
 // declared one. Provider requests go through `rt.fetch` (same-origin redirects only).
 //
 // `registerDeclaredContributions()` registers a manifest's `contributes` through the plugin's own `ctx`: providers
-// (+ their `models`), `models`, MCP server declarations, template commands and (plugin API 1.4.0, ADR-045) agent types
-// and skills. A command, agent or skill whose name another plugin already registered is skipped and logged (`warn`), as
-// PLUGINS.md 6 specifies; every other failure fails the load.
+// (+ their `models`), `models`, MCP server declarations, template commands, (plugin API 1.4.0, ADR-045) agent types
+// and skills, and (plugin API 1.5.0, ADR-051) output styles. A command, agent, skill or output style whose name another
+// plugin already registered is skipped and logged (`warn`), as PLUGINS.md 6 specifies; every other failure fails the
+// load. The command hooks of 1.5.0 (`contributes.hooks`, ADR-048) have no `ctx` API: the host passes
+// `DeclaredContributionHost.registerHookCommands` (its runtime's), which registers them in `registry.hookCommands` with
+// the plugin folder as the root. The host loads such a plugin only while it is trusted (`manifestRequiresTrust`), so an
+// untrusted plugin never gets here; the trust pin covers `plugin.json` only (scripts a hook calls are not pinned).
 import type {
   DeclarativeProvider,
+  Disposable,
+  HooksConfig,
   ModelInfo,
   PluginContext,
   PluginManifest,
@@ -33,6 +39,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { APICallError } from '@ai-sdk/provider'
 import {
   applyDeclarativeProviderDefaults,
+  countHookHandlers,
   declarativeProviderSchema,
   isHarnessError,
   modelInfoSchema,
@@ -419,12 +426,20 @@ function registerOrSkip(ctx: PluginContext, what: string, register: () => void):
   }
 }
 
+/** Host-only registrations of manifest contributions that have no `ctx` API (`PluginRuntime`'s). */
+export interface DeclaredContributionHost {
+  /** Plugin API 1.5.0: registers `contributes.hooks` in `registry.hookCommands` (owned by the plugin). */
+  readonly registerHookCommands: (hooks: HooksConfig) => Disposable
+}
+
 /**
  * Registers `manifest.contributes` through `ctx` (so the plugin's `DisposableStore` removes everything on disable):
- * providers and their models, models for other providers, MCP server declarations, template commands, agent types and
- * skills. A duplicate command, agent or skill is skipped with a `warn` log entry; other failures throw and fail the load.
+ * providers and their models, models for other providers, MCP server declarations, template commands, agent types,
+ * skills and output styles, and through `host` the command hooks (only when it declares at least one handler; without a
+ * `host` they are not registered). A duplicate command, agent, skill or output style is skipped with a `warn` log
+ * entry; other failures throw and fail the load.
  */
-export function registerDeclaredContributions(ctx: PluginContext, manifest: PluginManifest): void {
+export function registerDeclaredContributions(ctx: PluginContext, manifest: PluginManifest, host?: DeclaredContributionHost): void {
   const contributes = manifest.contributes
   if (!contributes)
     return
@@ -460,4 +475,18 @@ export function registerDeclaredContributions(ctx: PluginContext, manifest: Plug
       ctx.skills.register({ name: skill.name, description: skill.description, content: skill.content })
     })
   }
+  // Plugin API 1.5.0 (ADR-048, ADR-051). A manifest without these keys (every plugin written for 1.4.0 or older)
+  // registers exactly what it did before.
+  for (const style of contributes.outputStyles ?? []) {
+    registerOrSkip(ctx, `The output style "${style.name}"`, () => {
+      ctx.outputStyles.register({
+        name: style.name,
+        description: style.description,
+        content: style.content,
+        ...(style.keepCodingInstructions === undefined ? {} : { keepCodingInstructions: style.keepCodingInstructions }),
+      })
+    })
+  }
+  if (host !== undefined && contributes.hooks !== undefined && countHookHandlers(contributes.hooks) > 0)
+    host.registerHookCommands(contributes.hooks as HooksConfig)
 }

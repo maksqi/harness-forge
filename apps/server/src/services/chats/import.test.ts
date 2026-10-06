@@ -1,6 +1,6 @@
 import type { ChatDetail, HarnessUIMessage } from '@harness-forge/shared'
 import type { TestApp } from '../../testing/create-test-app.ts'
-import { chatExportAnySchema, findCompaction, HarnessError, MESSAGE_ID_PATTERN, splitSteers, splitTaskResults } from '@harness-forge/shared'
+import { chatExportAnySchema, findCompaction, HarnessError, isHookCarrier, MESSAGE_ID_PATTERN, splitHooks, splitSteers, splitTaskResults } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { buildChatExport } from './export.ts'
@@ -362,5 +362,80 @@ describe('chat export -> import round trip: background task results (Phase 10)',
     const error = await rejection(validateImportedMessages([bad], ['chat']))
     expect(error.code).toBe('validation_error')
     expect((error.details as { issues: { path: unknown[] }[] }).issues[0]!.path.slice(0, 3)).toEqual(['chat', 'messages', 0])
+  })
+})
+
+// ---------- Phase 11: hook records (W11.7-T5) ----------
+
+function hookPart(n: number, event: string, outcome: string, extra: Record<string, unknown> = {}): HarnessUIMessage['parts'][number] {
+  return {
+    type: 'data-hook',
+    data: {
+      id: `hev_hookimport00000${n}`,
+      event,
+      outcome,
+      createdAt: 3,
+      hooks: [{ source: 'project', label: 'sh .claude/hooks/check.sh', exitCode: 0, durationMs: 9 }],
+      ...extra,
+    },
+  } as HarnessUIMessage['parts'][number]
+}
+
+/** A user message with a prompt context, a reply with tool hook records, then a Stop carrier and its reply. */
+function hookMessages(): HarnessUIMessage[] {
+  return [
+    { id: 'msg_hookimport000001', role: 'user', metadata: META, parts: [{ type: 'text', text: 'Write the file' }, hookPart(1, 'UserPromptSubmit', 'context', { context: 'Branch: GUAVA' })] },
+    {
+      id: 'msg_hookimport000002',
+      role: 'assistant',
+      metadata: { modelRef: 'mock:hooks', startedAt: 2, finishedAt: 3 },
+      parts: [
+        { type: 'step-start' },
+        { type: 'tool-write_file', toolCallId: 'call_h1', state: 'output-available', input: { path: 'a.txt', content: 'x' }, output: { ok: true } },
+        hookPart(2, 'PreToolUse', 'rewritten', { toolCallId: 'call_h1', toolName: 'write_file', updatedInput: { path: 'b.txt', content: 'x' } }),
+        hookPart(3, 'PostToolUse', 'context', { toolCallId: 'call_h1', toolName: 'write_file', context: 'Run the tests.' }),
+        { type: 'step-start' },
+        { type: 'text', text: 'Written', state: 'done' },
+      ],
+    },
+    { id: 'msg_hookimport000003', role: 'user', metadata: META, parts: [hookPart(4, 'Stop', 'continued', { reason: 'Run the tests first.' })] },
+    { id: 'msg_hookimport000004', role: 'assistant', metadata: { modelRef: 'mock:hooks', startedAt: 4, finishedAt: 5 }, parts: [{ type: 'step-start' }, { type: 'text', text: 'Hook continuation: Run the tests first.', state: 'done' }] },
+  ] as HarnessUIMessage[]
+}
+
+describe('chat export -> import round trip: hook records (Phase 11)', () => {
+  it('keeps hook parts on user messages, in replies and in the Stop carrier, under kept or new ids, and indexes their texts', async () => {
+    const t = await testApp()
+    await expect(validateImportedMessages(hookMessages())).resolves.toEqual(hookMessages())
+    const exported = exportOf(agentChat(hookMessages()))
+    const { id } = await t.deps.chats.importChat({ exported, id: 'keep', restore: true })
+    expect((await t.deps.chats.get(id)).messages).toEqual(hookMessages())
+    const again = (await t.deps.chats.export(id, 'json')).body
+    expect(chatExportAnySchema.parse(JSON.parse(again)).chat.messages).toEqual(exported.chat.messages)
+
+    const copy = await t.deps.chats.importChat({ exported: exportOf(agentChat(hookMessages())), id: 'new', restore: false })
+    const path = (await t.deps.chats.get(copy.id)).messages
+    expect(path.map(message => message.parts)).toEqual(hookMessages().map(message => message.parts))
+    expect(isHookCarrier(path[2])).toBe(true)
+    // The model's view of the imported path: the PostToolUse context splits the reply, the carrier keeps its feedback.
+    const model = splitHooks(path)
+    expect(model.map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'assistant'])
+    expect(model[2]).toMatchObject({ id: 'hev_hookimport000003', role: 'user', parts: [{ type: 'text', text: expect.stringContaining('Run the tests.') }] })
+    expect(model[4]!.parts).toEqual([{ type: 'text', text: expect.stringContaining('<hook-feedback event="Stop">') }])
+    // Context and reasons are search text.
+    expect((await t.deps.chats.list({ q: 'guava' })).items.map(chat => chat.id).sort()).toEqual([id, copy.id].sort())
+  })
+
+  it('rejects invalid hook data with the issue path', async () => {
+    const [, reply] = hookMessages()
+    const badOutcome = { ...reply!, parts: [hookPart(5, 'PostToolUse', 'feedback')] } as HarnessUIMessage
+    const badEvent = { ...reply!, parts: [hookPart(6, 'OnSave', 'context')] } as HarnessUIMessage
+    const badId = { ...reply!, parts: [hookPart(7, 'Stop', 'continued', { id: 'not-a-record' })] } as HarnessUIMessage
+    const tooLong = { ...reply!, parts: [hookPart(8, 'PostToolUse', 'context', { context: 'x'.repeat(10_001) })] } as HarnessUIMessage
+    for (const bad of [badOutcome, badEvent, badId, tooLong]) {
+      const error = await rejection(validateImportedMessages([bad], ['chat']))
+      expect(error.code).toBe('validation_error')
+      expect((error.details as { issues: { path: unknown[] }[] }).issues[0]!.path.slice(0, 3)).toEqual(['chat', 'messages', 0])
+    }
   })
 })

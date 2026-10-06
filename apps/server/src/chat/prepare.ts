@@ -30,8 +30,10 @@
 //   `carrierParts`: all `data-task-result` parts or all `data-hook` parts, never mixed);
 // - `ensureChat` saves `ChatRequestBody.outputStyle` as `settings.outputStyle` when the request creates the chat (an
 //   existing chat keeps its style);
-// - the command resolution gets `CommandContext.expansion` (the chat's project folder opened lazily once, the shell
-//   switch, the trust check of project command files: `!` / `@` spans, W11.5);
+// - the command resolution gets `CommandContext.expansion` (the chat's project folder opened lazily, the shell switch,
+//   the trust check of project command files: `!` spans and `@path` references, `chat/inline/`, W11.5) and the logger;
+//   the folder is opened at most once per turn (`TurnWorkspace`: the run reuses what the expansion opened); the
+//   expansion is frozen in `metadata.command` (a regenerate or a continuation resolves no prompt command again);
 // - right after the project folder opened, `runPromptHooks` (`hooks-prompt.ts`, W11.2) runs `SessionStart` and
 //   `UserPromptSubmit` (`PrepareRunOptions.origin`, `.hookRecords` of a queued turn): their records are appended to the
 //   new user message as `data-hook` parts; a block is the 409 `hook-blocked` before anything but the chat row is written,
@@ -57,7 +59,7 @@ import type { ResolvedImageModel, ResolvedModel, ResolvedModelBase } from '../pr
 import type { ChatRecord } from '../services/chats/types.ts'
 import type { CustomizationCatalog } from '../services/customizations/types.ts'
 import type { FilesService } from '../services/files/types.ts'
-import type { OpenWorkspace } from '../services/projects/types.ts'
+import type { OpenWorkspace, OpenWorkspaceResult } from '../services/projects/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { CommandExpansionHost, CommandResolution } from './commands.ts'
 import type { RequestKind } from './history.ts'
@@ -82,6 +84,7 @@ import { normalizeUserParts } from './files.ts'
 import { isGeneratedImageType } from './generated-files.ts'
 import { badRequest, classifyRequest, mergeApprovalDecisions, notFound, supersedeApprovals } from './history.ts'
 import { isHookBlockedError, runPromptHooks } from './hooks-prompt.ts'
+import { isSpanRefusal } from './inline/index.ts'
 import { checkPlanApprovalMode } from './modes.ts'
 import { NOTICES } from './notices.ts'
 import { resolveRunOutputStyle } from './output-style.ts'
@@ -354,6 +357,8 @@ interface PrepareContext {
   catalog: CustomizationCatalog
   /** The request's message is a server-built carrier (`PrepareRunOptions.serverMessage`). */
   serverMessage: boolean
+  /** The chat's project folder of this turn, opened at most once (the command expansion host, then the run). */
+  turnWorkspace: TurnWorkspace
 }
 
 /** The part types a server-built carrier message may hold (one kind per carrier). */
@@ -378,26 +383,52 @@ export function carrierParts(parts: readonly unknown[]): HarnessUIMessagePart[] 
 }
 
 /**
- * The expansion host of a command resolution (Phase 11, ADR-052; `CommandContext.expansion`): the chat's project folder
- * opened once on first use, the shell switch, the trust check of project command files.
+ * The project folder of one turn (Phase 11): `deps.projects.openWorkspace` called at most once, on first use, by the
+ * command expansion host (`!` spans, `@path` references) or the run (`openRunWorkspace`), whichever needs it first.
  */
-export function commandExpansionHost(deps: Pick<AppDeps, 'env' | 'projects' | 'projectTrust'>, projectId: string | null): CommandExpansionHost {
-  let opened: Promise<OpenWorkspace | null> | null = null
+export interface TurnWorkspace {
+  readonly projectId: string | null
+  /** The open result (null without a project); the same promise on every call. */
+  readonly open: () => Promise<OpenWorkspaceResult> | null
+}
+
+/** A `TurnWorkspace` of the chat's project (`projectId` null: nothing to open). */
+export function turnWorkspace(deps: Pick<AppDeps, 'projects'>, projectId: string | null): TurnWorkspace {
+  let result: Promise<OpenWorkspaceResult> | null = null
   return {
     projectId,
+    open: () => {
+      if (projectId === null)
+        return null
+      result ??= deps.projects.openWorkspace(projectId)
+      return result
+    },
+  }
+}
+
+/** The expansion host over a turn's folder (see `commandExpansionHost`). */
+function expansionHost(deps: Pick<AppDeps, 'env' | 'projectTrust'>, turn: TurnWorkspace): CommandExpansionHost {
+  return {
+    projectId: turn.projectId,
     shellEnabled: deps.env.workspaceShell,
-    workspace: () => {
-      opened ??= projectId === null
-        ? Promise.resolve(null)
-        : deps.projects.openWorkspace(projectId).then(result => (result.ok ? result.workspace : null))
-      return opened
+    workspace: async () => {
+      const result = await turn.open()
+      return result?.ok === true ? result.workspace : null
     },
     trusted: async (id, sha256) => (await deps.projectTrust.approved(id)).has(sha256),
   }
 }
 
+/**
+ * The expansion host of a command resolution (Phase 11, ADR-052; `CommandContext.expansion`): the chat's project folder
+ * opened once on first use, the shell switch, the trust check of project command files.
+ */
+export function commandExpansionHost(deps: Pick<AppDeps, 'env' | 'projects' | 'projectTrust'>, projectId: string | null): CommandExpansionHost {
+  return expansionHost(deps, turnWorkspace(deps, projectId))
+}
+
 /** The stored form of the new user message (server metadata, command invocation; a carrier's parts as built). */
-async function buildUserMessage(context: PrepareContext, chat: ChatRecord): Promise<{ message: HarnessUIMessage, command: CommandResolution | null }> {
+async function buildUserMessage(context: PrepareContext): Promise<{ message: HarnessUIMessage, command: CommandResolution | null }> {
   const { deps, run, body, request } = context
   const metadata: MessageMetadata = { modelRef: request.model.modelRef, startedAt: run.acceptedAt }
   if (context.serverMessage)
@@ -407,7 +438,8 @@ async function buildUserMessage(context: PrepareContext, chat: ChatRecord): Prom
     chatId: body.chatId,
     signal: run.signal,
     catalog: context.catalog,
-    expansion: commandExpansionHost(deps, chat.projectId),
+    expansion: expansionHost(deps, context.turnWorkspace),
+    logger: context.logger,
   })
   return { message: { id: body.message.id, role: 'user', parts, metadata: { ...metadata, ...(command === null ? {} : { command: command.invocation }) } }, command }
 }
@@ -467,7 +499,8 @@ export async function ensureRunChat(deps: Pick<AppDeps, 'chats'>, body: ChatRequ
 /**
  * The project folder of a run (Phase 7): opened for a chat-model run of a chat with a project that calls the model (not
  * for image turns or command replies). An unavailable folder or a deleted project gives no workspace and the
- * `workspace-unavailable` notice (the service's message); a database failure rejects.
+ * `workspace-unavailable` notice (the service's message); a database failure rejects. Phase 11: `turn` (the turn's
+ * folder, of the same project) reuses the folder the command expansion already opened, so a turn opens it once.
  */
 export async function openRunWorkspace(
   deps: Pick<AppDeps, 'projects'>,
@@ -475,10 +508,11 @@ export async function openRunWorkspace(
   target: RunTarget,
   command: CommandResolution | null,
   logger: Logger,
+  turn?: TurnWorkspace,
 ): Promise<{ workspace: OpenWorkspace | null, notices: NoticeData[] }> {
   if (chat.projectId === null || target.kind !== 'chat' || command !== null)
     return { workspace: null, notices: [] }
-  const result = await deps.projects.openWorkspace(chat.projectId)
+  const result = await ((turn?.projectId === chat.projectId ? turn.open() : null) ?? deps.projects.openWorkspace(chat.projectId))
   if (result.ok)
     return { workspace: result.workspace, notices: [] }
   logger.info('the project folder of the chat is not available', { projectId: chat.projectId })
@@ -559,8 +593,8 @@ export async function resolveTurnModel(
  * the other resolution errors) before anything but the chat row is written.
  */
 export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger, options: PrepareRunOptions = {}): Promise<PreparedRun> {
-  const { planned, created } = await planRun(deps, run, body, logger, options)
-  const opened = await openRunWorkspace(deps, planned.chat, planned.target, planned.command, logger)
+  const { planned, created, turn } = await planRun(deps, run, body, logger, options)
+  const opened = await openRunWorkspace(deps, planned.chat, planned.target, planned.command, logger, turn)
   const prepared: PreparedRun = {
     ...planned,
     workspace: opened.workspace,
@@ -636,6 +670,8 @@ async function removeCreatedChat(deps: Pick<AppDeps, 'chats'>, chatId: string, l
 interface PlannedRun {
   planned: Omit<PreparedRun, 'workspace' | 'turnRestriction'>
   created: boolean
+  /** The turn's project folder (opened at most once: the command expansion may have opened it). */
+  turn: TurnWorkspace
 }
 
 /** `prepareRun` without the workspace, the tool restriction, the prompt hooks and the output style. */
@@ -653,13 +689,23 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
   if (request.kind === 'image' && kind === 'continuation')
     throw badRequest('An image model cannot continue a tool call. Pick a chat model to answer the pending tool call.', ['modelRef'])
   const settings = await deps.settings.get()
-  const context: PrepareContext = { deps, run, body, request, logger, catalog, serverMessage }
+  const turn = turnWorkspace(deps, chat.projectId)
+  const context: PrepareContext = { deps, run, body, request, logger, catalog, serverMessage, turnWorkspace: turn }
   const turnModel = (override: string | undefined, continued: HarnessUIMessage | null = null): Promise<TurnModel> =>
     resolveTurnModel(deps, { target: request, imageOptions: body.imageOptions }, override, { signal: run.signal, logger, continued })
-  const planned = await planHistory(context, kind, chat, turnModel)
+  let planned: PlannedHistory
+  try {
+    planned = await planHistory(context, kind, chat, turnModel)
+  }
+  catch (error) {
+    // Phase 11: a command whose spans may not run (409 `untrusted` / `disabled`) stores nothing, like a hook block.
+    if (created && isSpanRefusal(error))
+      await removeCreatedChat(deps, body.chatId, logger)
+    throw error
+  }
   const resolved: ResolvedModelBase = planned.target.model
   deps.catalog.markUsed(resolved.providerId, resolved.modelId).catch((error: unknown) => logger.debug('cannot record the model use', { err: error }))
-  return { planned: { ...planned, kind, chat, resolved, settings, catalog, requestModelRef: request.model.modelRef }, created }
+  return { planned: { ...planned, kind, chat, resolved, settings, catalog, requestModelRef: request.model.modelRef }, created, turn }
 }
 
 /** What `planHistory` decides (the rest of `PreparedRun` comes from `planRun`). */
@@ -680,7 +726,7 @@ async function planHistory(
       // The path the message continues: `parentId`, or the active leaf when it is omitted (`not_found` when unknown).
       const parentId = body.parentId === undefined ? chat.activeLeafId : body.parentId
       const path = await deps.chats.listPath(body.chatId, parentId)
-      const { message, command } = await buildUserMessage(context, chat)
+      const { message, command } = await buildUserMessage(context)
       await validateMessage(message)
       // Only the approvals of this path: those of other versions stay pending.
       const superseded = supersedeApprovals(path)

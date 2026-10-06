@@ -8,7 +8,8 @@
 // are name-only rows. The footer link "Open in Customize" opens Settings -> Customize on the kind's tab.
 // Props and the root test id (`plugin-customizations`, `data-kind`, `data-count`) are frozen from Gate P10-0b (C33).
 // Phase 11 (ADR-051, plugin API 1.5.0; C39 widens `kind`, W11.8 implements the rows): `kind` 'style' lists a plugin's
-// output styles; "Open in Customize" opens the Output styles tab.
+// output styles (rows: the mono name, the Shadowed badge and the description; no meta line); "Open in Customize" opens
+// the Output styles tab (`customizeRoute('style')`).
 import type { CustomizationEntry } from '@harness-forge/shared'
 import { ArrowRightIcon, EyeOffIcon } from '@lucide/vue'
 import { computed } from 'vue'
@@ -63,8 +64,7 @@ const rows = computed<Row[]>(() => {
   ].sort((a, b) => a.name.localeCompare(b.name))
 })
 
-// + Phase 11: the Output styles tab (W11.8 moves it into `customizeRoute`).
-const route = computed(() => (props.kind === 'style' ? { path: '/settings/customize', query: { tab: 'output-styles' } } : customizeRoute(props.kind)))
+const route = computed(() => customizeRoute(props.kind))
 </script>
 
 <template>

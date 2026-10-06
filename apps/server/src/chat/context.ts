@@ -22,7 +22,9 @@ export const CHARS_PER_TOKEN = 4
 /**
  * UI messages as sent to the model: a user message that invoked a prompt command has its first text part replaced by
  * the stored expansion (the transcript keeps the original text). Phase 10: command files and personal commands too;
- * the expansion stored with the turn is used, so a definition changed or deleted since does not matter.
+ * the expansion stored with the turn is used, so a definition changed or deleted since does not matter. Phase 11
+ * (ADR-052): the frozen expansions of trusted command files (span outputs and `@path` blocks, `inlined`) and of
+ * user-invocable skills (`kind: 'skill'`) are used the same way, so nothing runs or is read again.
  */
 export function applyCommandExpansions(messages: readonly HarnessUIMessage[]): HarnessUIMessage[] {
   return messages.map((message) => {

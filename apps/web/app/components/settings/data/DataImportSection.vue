@@ -2,7 +2,8 @@
 // Import of Settings -> Data (docs/UI.md 9.8, 7.4; docs/API.md 5.19): a backup zip or a chat exported as JSON (at most
 // 256 MB, checked before the upload), "If a chat already exists" (skip / copy) and "Restore settings from the backup"
 // (zip only) -> `POST /api/data/import` (multipart). Phase 10 (ADR-044): the same switch also restores the personal
-// agents, commands and skills of the backup (`restoreCustomizations`; a definition you already have is kept). The
+// agents, commands and skills of the backup (`restoreCustomizations`; a definition you already have is kept; Phase 11:
+// the output styles too, and commands with shell lines come back turned off). The
 // result panel lists every chat; the chat list reloads, and so do the settings when the backup restored them, and the
 // customizations when it restored any. 409 `busy` and 413 become toasts, other failures show inline.
 import type { DataConflictPolicy, DataImportResult } from '@harness-forge/shared'
@@ -56,7 +57,7 @@ const kind = computed(() => (file.value ? importKindOf(file.value) : null))
 const policyHint = computed(() => POLICY_OPTIONS.find(option => option.value === policy.value)?.hint)
 const restoreHint = computed(() => (kind.value === 'chat'
   ? 'A chat exported as JSON carries no settings.'
-  : 'General and appearance settings, and your personal agents, commands and skills. A personal definition you already have with the same name is kept.'))
+  : 'General and appearance settings, and your personal agents, commands, skills and output styles. A personal definition you already have with the same name is kept; commands with shell lines come back turned off.'))
 
 function chooseFile(): void {
   fileInput.value?.click()

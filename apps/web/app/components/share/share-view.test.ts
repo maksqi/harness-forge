@@ -1,7 +1,12 @@
 import { HarnessError } from '@harness-forge/shared'
-import { describe, expect, it } from 'vitest'
+import { mount } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
+import UserMessageBubble from '~/components/chat/UserMessageBubble.vue'
 import { isShareToken, modelIdOf, shareMessageBlocks, sharePageErrorMessage, toUserMessage } from './share-view'
 import { OTHER_TOKEN, TOKEN } from './testing'
+
+// The bubble's command badge imports the plugins store module (used only for plugin commands, never on a share page).
+vi.mock('~/composables/useApi', () => ({ useApi: () => ({}), useApiFetch: () => vi.fn() }))
 
 describe('share view helpers', () => {
   it('accepts only tokens in the documented format', () => {
@@ -97,6 +102,26 @@ describe('share view helpers', () => {
     // The server drops data-task-result parts (and a carrier holding only them); a stray part is not a snapshot part.
     const stray = shareMessageBlocks([{ type: 'data-task-result', data: {} } as never, { type: 'text', text: 'Hi' }])
     expect(stray.map(block => block.kind)).toEqual(['text'])
+  })
+
+  it('drops hook records: a stray data-hook part is not a snapshot part (Phase 11)', () => {
+    // The server's allowlist drops data-hook parts and a hook carrier holding only them.
+    const blocks = shareMessageBlocks([
+      { type: 'tool', toolName: 'write_file', status: 'denied' },
+      { type: 'data-hook', id: 'hev_sample0000000001', data: { event: 'PreToolUse', outcome: 'denied' } } as never,
+      { type: 'text', text: 'Blocked.' },
+    ])
+    expect(blocks.map(block => block.kind)).toEqual(['tool', 'text'])
+    const carrier = toUserMessage({ role: 'user', parts: [{ type: 'data-hook', data: {} } as never] }, 'share-message-3')
+    expect(carrier.parts).toEqual([])
+  })
+
+  it('keeps the name of a skill the user ran, so its badge shows (Phase 11)', () => {
+    const message = toUserMessage({ role: 'user', command: { name: 'release-notes' }, parts: [{ type: 'text', text: '/release-notes v2' }] }, 'share-message-5')
+    expect(message.metadata?.command).toEqual({ name: 'release-notes' })
+    const bubble = mount(UserMessageBubble, { props: { message } })
+    expect(bubble.get('[data-slot="command-badge"]').text()).toContain('/release-notes')
+    expect(bubble.text()).toContain('/release-notes v2')
   })
 
   it('keeps only the command name of a shared user message: the badge shows no source, model or tools (Phase 10)', () => {

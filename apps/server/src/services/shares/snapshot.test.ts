@@ -400,6 +400,98 @@ describe('sanitizeSnapshot: background task results (Phase 10)', () => {
   })
 })
 
+/** A `data-hook` part (ADR-048) whose texts must never reach a share. */
+function hookRecord(n: number, event: string, outcome: string, extra: Record<string, unknown> = {}): unknown {
+  return {
+    type: 'data-hook',
+    data: {
+      id: `hev_000000000000000${n}`,
+      event,
+      outcome,
+      createdAt: 1,
+      hooks: [{ source: 'project', label: 'sh HOOK-LABEL.sh', exitCode: 2, durationMs: 4, error: 'HOOK-ERROR', systemMessage: 'HOOK-SYSTEM-MESSAGE' }],
+      ...extra,
+    },
+  }
+}
+
+describe('sanitizeSnapshot: hook records (Phase 11)', () => {
+  it('drops hook parts and a Stop carrier; a hook-denied tool reads "denied" without the reason', () => {
+    const path = [
+      // A UserPromptSubmit context on the user message: the text stays, the record goes.
+      message(1, 'user', [{ type: 'text', text: 'Write the file' }, hookRecord(1, 'UserPromptSubmit', 'context', { context: 'HOOK-CONTEXT' })]),
+      message(2, 'assistant', [
+        { type: 'step-start' },
+        // PreToolUse deny: the SDK stores a denied approval with the "Blocked by hook" reason.
+        { type: 'tool-write_file', toolCallId: 'call_h1', state: 'output-denied', input: { path: 'a.txt' }, approval: { id: 'appr_h1', approved: false, reason: 'Blocked by hook: HOOK-REASON' } },
+        hookRecord(2, 'PreToolUse', 'denied', { toolCallId: 'call_h1', toolName: 'write_file', reason: 'HOOK-REASON' }),
+        { type: 'tool-edit_file', toolCallId: 'call_h2', state: 'output-available', input: { path: 'b.txt' }, output: { ok: true } },
+        hookRecord(3, 'PreToolUse', 'rewritten', { toolCallId: 'call_h2', toolName: 'edit_file', updatedInput: { path: 'HOOK-UPDATED-INPUT' } }),
+        hookRecord(4, 'PostToolUse', 'context', { toolCallId: 'call_h2', toolName: 'edit_file', context: 'HOOK-CONTEXT' }),
+        { type: 'text', text: 'Could not write a.txt' },
+      ], { modelRef: 'mock:hooks' }),
+      // The carrier of a Stop continuation (records and parts that are no content).
+      message(3, 'user', [hookRecord(5, 'Stop', 'continued', { reason: 'HOOK-STOP-REASON' }), { type: 'step-start' }]),
+      message(4, 'assistant', [{ type: 'step-start' }, { type: 'text', text: 'Continued' }], { modelRef: 'mock:hooks' }),
+    ]
+    const { snapshot } = sanitizeSnapshot('Hooks', path, fileIdOf)
+    expect(shareSnapshotSchema.parse(snapshot)).toEqual(snapshot)
+    expect(snapshot.messages).toEqual([
+      { role: 'user', parts: [{ type: 'text', text: 'Write the file' }] },
+      {
+        role: 'assistant',
+        modelRef: 'mock:hooks',
+        parts: [
+          { type: 'tool', toolName: 'write_file', status: 'denied', input: { path: 'a.txt' } },
+          { type: 'tool', toolName: 'edit_file', status: 'done', input: { path: 'b.txt' }, output: { ok: true } },
+          { type: 'text', text: 'Could not write a.txt' },
+        ],
+      },
+      { role: 'assistant', modelRef: 'mock:hooks', parts: [{ type: 'text', text: 'Continued' }] },
+    ])
+    expect(shareableMessageCount(path)).toBe(snapshot.messages.length)
+    const json = JSON.stringify(snapshot)
+    for (const leaked of ['HOOK-', 'hev_', 'data-', 'Blocked by hook'])
+      expect(json, leaked).not.toContain(leaked)
+    // Served with every option: still nothing of the hooks.
+    const rendered = JSON.stringify(renderShareMessages(snapshot, renderContext(ALL_OPTIONS)))
+    expect(rendered).not.toContain('HOOK-')
+  })
+})
+
+describe('sanitizeSnapshot: commands and user-invocable skills (Phase 11)', () => {
+  it('keeps the slash name (up to 64 characters) and the invocation kind, never the input, expansion or inlined lines', () => {
+    const skill = 'deploy-to-the-staging-environment-and-run-the-smoke-tests-please'
+    expect(skill).toHaveLength(64)
+    const path = [
+      message(1, 'user', [{ type: 'text', text: `/${skill} prod` }], {
+        modelRef: 'mock:echo',
+        startedAt: 1,
+        command: { name: skill, kind: 'skill', input: 'SKILL-INPUT', type: 'prompt', expansion: 'SKILL-EXPANSION' },
+      }),
+      message(2, 'assistant', [{ type: 'text', text: 'Deployed' }], { modelRef: 'mock:echo' }),
+      message(3, 'user', [{ type: 'text', text: '/status' }], {
+        modelRef: 'mock:echo',
+        startedAt: 2,
+        command: { name: 'status', kind: 'command', input: '', type: 'prompt', expansion: 'INLINED-GIT-OUTPUT', inlined: { shell: 1, files: ['SECRET-FILE.md'] } },
+      }),
+      message(4, 'user', [{ type: 'text', text: '/legacy' }], { modelRef: 'mock:echo', startedAt: 3, command: { name: 'legacy', kind: 'macro', input: '', type: 'prompt' } }),
+      message(5, 'user', [{ type: 'text', text: '/x' }], { modelRef: 'mock:echo', startedAt: 4, command: { name: `${skill}-and-more`, kind: 'skill', input: '', type: 'prompt' } }),
+    ]
+    const { snapshot } = sanitizeSnapshot('Commands', path, fileIdOf)
+    expect(shareSnapshotSchema.parse(snapshot)).toEqual(snapshot)
+    expect(snapshot.messages.map(shared => shared.command)).toEqual([{ name: skill, kind: 'skill' }, undefined, { name: 'status', kind: 'command' }, { name: 'legacy' }, undefined])
+    const json = JSON.stringify(snapshot)
+    for (const leaked of ['SKILL-INPUT', 'SKILL-EXPANSION', 'INLINED-GIT-OUTPUT', 'SECRET-FILE', 'inlined', 'macro'])
+      expect(json, leaked).not.toContain(leaked)
+    // Served: the kind is copied field by field, an unknown stored kind is dropped.
+    const stored = { ...snapshot, messages: [...snapshot.messages, { role: 'user', command: { name: 'odd', kind: 'weird', extra: 'EXTRA-FIELD' }, parts: [] }] }
+    const rendered = renderShareMessages(stored as typeof snapshot, renderContext(NO_OPTIONS))
+    expect(rendered.map(shown => shown.command)).toEqual([{ name: skill, kind: 'skill' }, undefined, { name: 'status', kind: 'command' }, { name: 'legacy' }, undefined, { name: 'odd' }])
+    expect(JSON.stringify(rendered)).not.toContain('EXTRA-FIELD')
+  })
+})
+
 describe('capToolValue', () => {
   it('copies values whose JSON fits, cuts the others with a marker', () => {
     const value = { a: [1, 'two', { three: true }], nothing: null }

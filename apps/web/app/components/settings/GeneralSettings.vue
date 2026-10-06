@@ -10,10 +10,11 @@
 // section and Custom instructions.
 // Phase 11 (ADR-051; C39 adds the field, W11.8 implements it): "Output style" (`settings-output-style`, the setting
 // `outputStyle`) after the default effort: the built-in styles and the active personal and plugin styles of the global
-// catalog (`styleOptions`), saved at once.
+// catalog (`styleOptions`; the catalog is fetched on mount, at most CATALOG_MAX_AGE_MS old), saved at once; a stored
+// style that is no longer an option stays listed as "Not available".
 import type { ReasoningEffort, SendKey, Settings, ToolMode } from '@harness-forge/shared'
 import type { DraftField } from './general'
-import { computed, useId } from 'vue'
+import { computed, onMounted, useId } from 'vue'
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
@@ -98,9 +99,18 @@ function onEffort(value: unknown) {
     void save({ defaultReasoningEffort: value as ReasoningEffort })
 }
 
+/** A global catalog younger than this (and not stale) is used as is. */
+const CATALOG_MAX_AGE_MS = 15_000
+
 /** + Phase 11: the styles of the global catalog (the built-ins before it loads). */
 const outputStyles = computed(() => styleOptions(customizations.entriesOf(null, 'style')))
 const outputStyleLabel = computed(() => outputStyles.value.find(option => option.name === resolved.value.outputStyle)?.label ?? resolved.value.outputStyle)
+/** A stored style that is not an option (deleted, turned off, its plugin removed). */
+const missingOutputStyle = computed(() => (outputStyles.value.some(option => option.name === resolved.value.outputStyle) ? null : resolved.value.outputStyle))
+
+onMounted(() => {
+  customizations.fetchCatalog(null, { maxAgeMs: CATALOG_MAX_AGE_MS }).catch(() => {})
+})
 
 function onOutputStyle(value: unknown) {
   if (typeof value === 'string' && value !== resolved.value.outputStyle)
@@ -275,6 +285,12 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
               <span class="flex flex-col gap-0.5">
                 <span>{{ option.label }}</span>
                 <span class="text-xs text-muted-foreground">{{ option.description }}</span>
+              </span>
+            </SelectItem>
+            <SelectItem v-if="missingOutputStyle" :value="missingOutputStyle" :data-value="missingOutputStyle">
+              <span class="flex flex-col gap-0.5">
+                <span>{{ missingOutputStyle }}</span>
+                <span class="text-xs text-muted-foreground">Not available</span>
               </span>
             </SelectItem>
           </SelectContent>

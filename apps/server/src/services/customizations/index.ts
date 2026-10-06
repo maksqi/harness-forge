@@ -9,14 +9,19 @@
 //   at most `CUSTOMIZATION_CACHE_PROJECTS_MAX` projects); a failed build answers the builtins (not cached).
 // - Invalidation: a project's catalog is dropped on `workspace.changed` that touches its definition folders (or lists
 //   200 paths, possibly cut), on `project.changed` and when a run of one of its chats finishes (`run.finished`: shell
-//   commands write without `workspace.changed`); every catalog is dropped on a registry change of agents, skills or
-//   commands and on every personal create / update / delete / restore. The subscriptions start with the first build.
+//   commands write without `workspace.changed`); every catalog is dropped on a registry change of agents, skills,
+//   commands or (Phase 11) output styles and on every personal create / update / delete / restore. The subscriptions start with the first build.
 // - `customization.changed`: `{ kind, id }` after every personal change, `{}` (coalesced, at most one per second) after
 //   a registry change and a restore, `{ projectId }` (coalesced, at most one per second per project) when a cached
 //   project catalog is dropped or a rebuild finds other files.
 // - `load(entry)`: the body read and validated again (a project file through the discovery guards, ≤ 64 KiB, its name
 //   must still match; a plugin definition from the registry; a personal one from the table; a builtin from
 //   `core-agent`). `source(query)`: the markdown of a project, plugin or builtin entry.
+// - Phase 11 (ADR-051, ADR-052; W11.6): the fourth kind `style` (output styles): the builtins `default` /
+//   `explanatory` / `learning` (`builtins.ts`), the plugin styles of `registry.styles` (`plugins.ts`), personal rows and
+//   the top-level files of `.claude/output-styles` and `.harness/output-styles` (8 project folders); a registry change of
+//   styles drops every catalog like one of agents, skills or commands. Skill entries list `userInvocable` /
+//   `modelInvocable` (the run's skills block, `loadSkill` and the slash commands read them).
 // - Logging: ids, names, kinds, sources, counts and durations only; never a body, a file's content or a description.
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type {
@@ -76,6 +81,8 @@ export interface CustomizationServiceOptions {
 const PROJECT_ISSUE_MAX_CHARS = 500
 const PROJECT_UNAVAILABLE_MESSAGE = 'The project folder is not available; its definitions are not listed.'
 const DEFINITION_PREFIXES = PROJECT_DEFINITION_FOLDERS.map(folder => `${folder.folder}/`)
+/** The registry kinds the catalog lists (a change of one drops every catalog). */
+const CATALOG_REGISTRY_KINDS: ReadonlySet<RegistryChange['kind']> = new Set(['agent', 'skill', 'command', 'style'])
 
 function gone(kind: CustomizationKind, name: string): HarnessError {
   return new HarnessError({ code: 'not_found', message: `The ${kind} "${name}" is no longer available.` })
@@ -201,7 +208,7 @@ export function createCustomizationService(deps: AppDeps, options: Customization
   }
 
   function onRegistryChange(change: RegistryChange): void {
-    if (change.kind !== 'agent' && change.kind !== 'skill' && change.kind !== 'command')
+    if (!CATALOG_REGISTRY_KINDS.has(change.kind))
       return
     invalidateAll()
     notifier.request('')
@@ -300,7 +307,7 @@ export function createCustomizationService(deps: AppDeps, options: Customization
     return createCatalogSnapshot({
       projectId,
       entries: builtinCatalogEntries(),
-      diagnostics: [{ level: 'warning', code: 'read-failed', message: 'The catalog could not be read completely; only the built-in agents are listed.' }],
+      diagnostics: [{ level: 'warning', code: 'read-failed', message: 'The catalog could not be read completely; only the built-in agents and output styles are listed.' }],
       project: projectId === null ? null : { id: projectId, available: false, issue: 'The catalog could not be read.', folders: [], scannedAt: builtAt },
       builtAt,
     })

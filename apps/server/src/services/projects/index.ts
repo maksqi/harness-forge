@@ -9,6 +9,11 @@
 // - The service owns the two cross-table queries on `chats.project_id` (no foreign key): the grouped `chatCount` and the
 //   detach of `remove` (one batch with the delete). The folder of a project is never touched after `create`.
 // - Every write emits `project.changed` (`{ id, project }`, `project: null` after `remove`).
+// - Phase 11 (ADR-049 … ADR-051, W11.7): `outputStyle` is the column `projects.output_style` (read in every summary,
+//   written by `update`; an unknown style name is accepted and null clears it). `remove` deletes the row, so the
+//   project's `project_trust` rows go with it (foreign key `ON DELETE CASCADE`); the project MCP manager (stop the
+//   runtimes, delete the secret scope `project:<id>`) and the hook service (drop the project's cache) follow the
+//   `project.changed { project: null }` event (open point 8): this service never calls them.
 import type { ProjectBrowse, ProjectBrowseEntry, ProjectCreate, ProjectSummary, ProjectUpdate } from '@harness-forge/shared'
 import type { Dirent } from 'node:fs'
 import type { AppDeps, SensitiveOperationOptions } from '../../types.ts'
@@ -165,8 +170,8 @@ export function createProjectService(deps: AppDeps): ProjectService {
       issue,
       instructionsFile: issue === null ? await probeProjectFile(row.path) : null,
       chatCount,
-      // Phase 11 (ADR-051): the column `projects.output_style` arrives with migration 0008 (P11-0b).
-      outputStyle: null,
+      // Phase 11 (ADR-051): the column `projects.output_style` (migration 0008); null = the global setting.
+      outputStyle: row.outputStyle ?? null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     }
@@ -268,6 +273,10 @@ export function createProjectService(deps: AppDeps): ProjectService {
       set.name = parsed.data.name
     if (parsed.data.instructions !== undefined)
       set.instructions = parsed.data.instructions === '' ? null : parsed.data.instructions
+    // Phase 11 (ADR-051): any valid style name is stored (an unknown one falls back to `default` at run time with the
+    // notice `output-style-unavailable`); null clears it (the global setting applies).
+    if (parsed.data.outputStyle !== undefined)
+      set.outputStyle = parsed.data.outputStyle
     const [row] = await guardDb(async () => db.update(projects).set(set).where(eq(projects.id, id)).returning())
     if (row === undefined)
       throw projectNotFound(id)

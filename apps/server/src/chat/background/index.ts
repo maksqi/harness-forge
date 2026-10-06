@@ -36,13 +36,20 @@ import type { Disposable } from '@harness-forge/plugin-sdk'
 //   finished."), undelivered rows fill the inboxes (delivered at each chat's next run; no turn is started from them).
 // - Rows are pruned per chat to `LIMITS.backgroundTasksKeptPerChat` (the oldest delivered ones, when a task starts).
 // Prompts and reports are never logged (ids, types, statuses and counts only). Timers are `unref()`-ed.
+// Phase 11 (ADR-048, W11.2): a launch takes one hook snapshot of the launching chat's scope (the launching run's project
+// folder, mode, origin and model) and gives the detached host `detachedHooks(…)` over it: the child runs `PreToolUse`
+// (an `ask` is denied), `PostToolUse` and `SubagentStop` (a block continues it, `subagent/index.ts`) like a foreground
+// child; nothing of it is stored. A snapshot that cannot be taken runs the child without hooks (logged unless the task
+// was stopped meanwhile).
 import type { BackgroundTask, BackgroundTaskStatus, ChatRequestBody, HarnessUIMessage, ReasoningEffort, TaskOutput, TaskResultData, ToolMode } from '@harness-forge/shared'
 import type { Logger } from '../../logger.ts'
 import type { AppDeps } from '../../types.ts'
+import type { ChildHooksSource } from '../hooks.ts'
 import type { DetachedChildInput } from '../subagent/index.ts'
 import type { BackgroundLaunchInput, BackgroundTasks, BackgroundTasksHost } from './types.ts'
 import { AGENT_TYPE_ALIASES, createBackgroundTaskId, createMessageId, isHarnessError, LIMITS, safeParseModelRef } from '@harness-forge/shared'
 import { abortReason } from '../errors.ts'
+import { detachedHooks } from '../hooks.ts'
 import { createDetachedSession } from '../subagent/host.ts'
 import { runDetachedChild } from '../subagent/index.ts'
 import { roundUsd } from '../usage.ts'
@@ -581,6 +588,27 @@ export function createBackgroundTasks(deps: AppDeps, host: BackgroundTasksHost, 
 
   // ---------- launch ----------
 
+  /** The hooks of a task's child (Phase 11): one snapshot of the launching chat's scope; null when it cannot be taken. */
+  async function taskHooks(input: BackgroundLaunchInput, signal: AbortSignal, logger: Logger): Promise<ChildHooksSource | null> {
+    try {
+      const snapshot = await deps.hooks.snapshot({
+        chatId: input.chatId,
+        projectId: input.workspace?.projectId ?? null,
+        workspace: input.workspace,
+        toolMode: input.toolMode,
+        origin: input.origin,
+        modelRef: input.model.modelRef,
+      }, { signal })
+      return detachedHooks({ snapshot, messageId: input.messageId, logger })
+    }
+    catch (error) {
+      // A stop during the snapshot: the child ends at once anyway (its signal aborted).
+      if (!signal.aborted)
+        logger.warn('the hooks of a background agent could not be read; it runs without them', { err: error })
+      return null
+    }
+  }
+
   async function launch(input: BackgroundLaunchInput): Promise<TaskOutput> {
     const startedAt = now()
     if (closed)
@@ -643,6 +671,8 @@ export function createBackgroundTasks(deps: AppDeps, host: BackgroundTasksHost, 
 
     let child: AsyncIterable<TaskOutput>
     try {
+      const signal = AbortSignal.any([controller.signal, deadline.signal])
+      const hooks = await taskHooks(input, signal, entry.logger)
       const session = createDetachedSession({
         deps,
         chatId: input.chatId,
@@ -650,12 +680,13 @@ export function createBackgroundTasks(deps: AppDeps, host: BackgroundTasksHost, 
         settings: input.settings,
         chatInstructions: input.chatInstructions,
         reasoningEffort: input.reasoningEffort,
-        signal: AbortSignal.any([controller.signal, deadline.signal]),
+        signal,
         logger: entry.logger,
         now,
         onExtraCost: (usd) => {
           entry.extraCostUsd = roundUsd(entry.extraCostUsd + usd)
         },
+        hooks,
       })
       child = runChild({
         session,

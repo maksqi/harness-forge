@@ -12,11 +12,13 @@
 // checked carries `allowRules` (the shell rules the session creates before the approval is sent; Deny ignores it), and
 // Run is disabled while the box is checked with an invalid prefix.
 // Phase 11 (ADR-048; C39 declares the prop, W11.12 implements the banner; frozen from Gate P11-0b): `hookReason` = the
-// reason of a PreToolUse hook that answered `ask` (the call's `asked` hook record): the banner "A hook asks you to
-// confirm this call: {reason}" (`tool-approval-hook`, `Webhook`) above the buttons. The stub shows the plain line.
+// reason of a PreToolUse hook that answered `ask` (the call's `asked` hook record; '' when the hook gave none): the banner
+// "A hook asks you to confirm this call: {reason}" (`tool-approval-hook`, `Webhook`, text inside the card's group) under
+// the card's title, above the arguments and the buttons.
 import type { WorkspaceAccess } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
+import { WebhookIcon } from '@lucide/vue'
 import { computed, inject, ref, useId } from 'vue'
 import {
   Confirmation as AiConfirmation,
@@ -71,6 +73,11 @@ const args = computed(() => formatToolValue(props.part.input) || '{}')
 const previewKind = computed(() => workspaceApprovalKind(props.toolName, props.part.input))
 const isCommand = computed(() => previewKind.value === 'terminal')
 const label = computed(() => toolApprovalLabel(props.toolName, props.part.input))
+/** + Phase 11: the hook banner ("A hook asks you to confirm this call: {reason}"; no colon without a reason). */
+const hookBanner = computed(() => {
+  const reason = props.hookReason?.trim()
+  return reason ? `A hook asks you to confirm this call: ${reason}` : 'A hook asks you to confirm this call'
+})
 
 /** "Always allow commands starting with" (Phase 8): the command card of an `execute` tool (the builtin shell). */
 const offersRule = computed(() => isCommand.value && props.workspace === 'execute')
@@ -128,8 +135,13 @@ function decide(approved: boolean) {
         </p>
         <span v-if="source" class="shrink-0 text-xs text-muted-foreground">from {{ source }}</span>
       </div>
-      <p v-if="hookReason !== null" :data-testid="testIds.toolApprovalHook" class="min-w-0 text-sm break-words">
-        A hook asks you to confirm this call: {{ hookReason }}
+      <p
+        v-if="hookReason !== null"
+        :data-testid="testIds.toolApprovalHook"
+        class="flex min-w-0 items-start gap-2 rounded-md bg-muted/60 px-2.5 py-2 text-sm"
+      >
+        <WebhookIcon aria-hidden="true" class="mt-[3px] size-3.5 shrink-0 text-muted-foreground" />
+        <span class="min-w-0 break-words whitespace-pre-wrap">{{ hookBanner }}</span>
       </p>
       <ToolApprovalPreview v-if="previewKind" :tool-name="toolName" :input="part.input" />
       <AllowRuleOption

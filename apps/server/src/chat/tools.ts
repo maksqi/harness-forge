@@ -313,11 +313,18 @@ async function prepareInput(registered: WrappedTool, context: ToolWrapContext, b
 }
 
 /** `PostToolUse` of a successful call (Phase 11; never rejects). */
-async function postToolUse(context: ToolWrapContext, base: CallBase, input: unknown, output: unknown, signal: AbortSignal): Promise<void> {
+async function postToolUse(context: ToolWrapContext, base: CallBase, input: unknown, after: ToolAfterDraft, signal: AbortSignal): Promise<void> {
   const hooks = context.hooks ?? null
   if (hooks === null)
     return
-  await hooks.postToolUse({ toolName: base.tool, toolCallId: base.toolCallId, input, output }, signal)
+  const pluginContext = typeof after.context === 'string' ? after.context : undefined
+  await hooks.postToolUse({ toolName: base.tool, toolCallId: base.toolCallId, input, output: after.output, ...(pluginContext === undefined ? {} : { pluginContext }) }, signal)
+}
+
+/** The output draft of the plugin `tool.after` hook: the output, and (plugin API 1.5.0) a context for the model. */
+interface ToolAfterDraft {
+  output: unknown
+  context?: string
 }
 
 /** The `ToolCallContext` of one call, with the run scope and the agent scope bound to it (server-internal). */
@@ -384,9 +391,9 @@ async function runToolCall(registered: WrappedTool, context: ToolWrapContext, in
       await recordSettledCall(context, registered, toolCallId, finalInput)
   }
 
-  const after = { output }
+  const after: ToolAfterDraft = { output }
   await context.registry.hooks.run('tool.after', { ...base, input: finalInput }, after)
-  await postToolUse(context, base, finalInput, after.output, signal)
+  await postToolUse(context, base, finalInput, after, signal)
   return capToolOutput(after.output)
 }
 
@@ -528,9 +535,9 @@ async function* streamToolCall(registered: WrappedTool, context: ToolWrapContext
     const settled = state.outcome
     if (!settled.ok)
       throw settledError(settled.error, signal)
-    const after = { output: settled.last }
+    const after: ToolAfterDraft = { output: settled.last }
     await context.registry.hooks.run('tool.after', { ...base, input: finalInput }, after)
-    await postToolUse(context, base, finalInput, after.output, signal)
+    await postToolUse(context, base, finalInput, after, signal)
     yield capToolOutput(after.output)
   }
   finally {

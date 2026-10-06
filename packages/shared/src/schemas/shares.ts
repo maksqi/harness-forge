@@ -1,7 +1,8 @@
 // Share link DTOs (API.md section 4.17, ADR-025): the owner routes `/shares`, the stored snapshot and the public
 // `GET /share/:token` view. A snapshot is an allowlist-sanitized copy of a chat's active path, never a live view.
 import { z } from 'zod'
-import { chatIdSchema, commandNameSchema, modelRefSchema, shareIdSchema, timestampSchema } from '../ids.ts'
+import { invocationKindSchema } from '../enums.ts'
+import { chatIdSchema, modelRefSchema, shareIdSchema, slashNameSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { titleInputSchema } from './chats.ts'
 
@@ -121,7 +122,7 @@ export const shareMessageSchema = z.object({
   /** Assistant messages: the model that answered. */
   modelRef: modelRefSchema.optional(),
   /** User messages that invoked a slash command (never its expansion). */
-  command: z.object({ name: commandNameSchema }).optional(),
+  command: z.object({ name: slashNameSchema, kind: invocationKindSchema.optional() }).optional(),
   /** The reply ended with an error (no details) or was stopped. */
   status: z.enum(['failed', 'stopped']).optional(),
   parts: z.array(sharePartSchema).max(LIMITS.messagePartsMax),

@@ -17,7 +17,15 @@
 //   flight for it) and every queue after a master-key rotation (`key.rotated`: also the chats that wait for an approval,
 //   which the rotation does not stop). No timers.
 // - Message contents are never logged (ids at `debug` only).
-import type { HarnessUIMessagePart, QueueAddBody, QueueChangedData, QueueItem, QueueRemoval, UserMessagePart } from '@harness-forge/shared'
+// Phase 11 (ADR-048, W11.2): `UserPromptSubmit` runs at enqueue (`ChatQueueOptions.promptHooks`, the runner's
+// `runQueuedPromptHooks`): after the checks that read the database and before the synchronous append (the cheap
+// `run-idle` / `queue-full` / `exists` checks also run before the hooks, so a message that cannot be queued runs no
+// hook); a block rejects the add with the 409 `hook-blocked` (nothing queued). The records stay with the entry
+// (`QueueEntry.hookRecords`): `takeNext` hands them to the queued turn (attached to its user message by `prepareRun`),
+// `takeSteerableEntries` to the steer step (a `data-hook` part after the item's `data-steer` part); they are never part
+// of the `QueueItem` the API answers.
+import type { HarnessUIMessagePart, HookData, QueueAddBody, QueueChangedData, QueueItem, QueueRemoval, UserMessagePart } from '@harness-forge/shared'
+import type { ChatRecord } from '../services/chats/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { ChatRunOptions, QueueClearReason } from './types.ts'
 import { HarnessError, isClientCommand, isHarnessCommand, LIMITS } from '@harness-forge/shared'
@@ -29,6 +37,11 @@ import { normalizeUserParts } from './files.ts'
 export interface QueueEntry {
   readonly item: QueueItem
   readonly options: ChatRunOptions
+  /**
+   * The `UserPromptSubmit` records of the item (Phase 11), run at enqueue; absent or empty = nothing to show. Attached
+   * when the item is delivered (the queued turn's user message, or after its steer part).
+   */
+  readonly hookRecords?: readonly HookData[]
 }
 
 export interface ChatQueue {
@@ -43,6 +56,8 @@ export interface ChatQueue {
    * `delivered`; the `turnOnly` items stay queued.
    */
   readonly takeSteerable: (chatId: string) => QueueItem[]
+  /** `takeSteerable` with the entries (Phase 11: the steer step also reads their `hookRecords`). */
+  readonly takeSteerableEntries: (chatId: string) => QueueEntry[]
   /** The run end (synchronous): removes and returns the oldest item (any kind) as the next turn, reported `started`. */
   readonly takeNext: (chatId: string) => QueueEntry | null
   /** Puts a taken entry back at the head of the queue (its next turn lost the race to a user's `POST /chat`). */
@@ -56,11 +71,28 @@ export interface ChatQueue {
 /** What the queue reads (lazily, inside its methods: the runner is built inside the deps factory). */
 export type ChatQueueDeps = Pick<AppDeps, 'chats' | 'files' | 'registry' | 'customizations' | 'events' | 'logger'>
 
+/** What the prompt hooks of a queued message get (`ChatQueueOptions.promptHooks`). */
+export interface QueuePromptHooksInput {
+  readonly chat: ChatRecord
+  readonly body: QueueAddBody
+  /** The normalized parts of the item. */
+  readonly parts: readonly UserMessagePart[]
+  /** The item is a server command (only started as the next turn). */
+  readonly turnOnly: boolean
+  /** The options of the request that queues it. */
+  readonly options: ChatRunOptions
+}
+
 export interface ChatQueueOptions {
   /** The runs registry holds the chat (a run in any phase): `add` accepts items only then or with a pending approval. */
   readonly hasRun: (chatId: string) => boolean
   /** The clock (`createdAt`). */
   readonly now: () => number
+  /**
+   * `UserPromptSubmit` at enqueue (Phase 11; the runner passes `runQueuedPromptHooks`): the records to keep with the
+   * item; a rejection (the 409 `hook-blocked`) fails the add. Absent = no hooks (tests).
+   */
+  readonly promptHooks?: (input: QueuePromptHooksInput) => Promise<readonly HookData[]>
 }
 
 /** `409 conflict` with a queue reason (`run-idle`, `queue-full`, `exists`). */
@@ -160,6 +192,30 @@ export function createChatQueue(deps: ChatQueueDeps, options: ChatQueueOptions):
     })
   }
 
+  /** The synchronous checks of an add (see the module comment); answers the chat's entries. */
+  function check(chatId: string, id: string, chat: ChatRecord, token: PendingAdd): QueueEntry[] {
+    if (token.deleted)
+      throw chatNotFound(chatId)
+    if (!options.hasRun(chatId) && !chat.pendingApproval)
+      throw queueConflict('run-idle', chatId)
+    const entries = queues.get(chatId) ?? []
+    if (entries.some(entry => entry.item.id === id))
+      throw queueConflict('exists', chatId)
+    if (entries.length >= LIMITS.queueItemsMax)
+      throw queueConflict('queue-full', chatId)
+    return entries
+  }
+
+  function takeSteerableEntries(chatId: string): QueueEntry[] {
+    const entries = queues.get(chatId) ?? []
+    const taken = entries.filter(entry => !entry.item.turnOnly)
+    if (taken.length === 0)
+      return []
+    commit(chatId, entries.filter(entry => entry.item.turnOnly), taken.map(entry => ({ id: entry.item.id, reason: 'delivered' })))
+    deps.logger.debug('queued messages steered', { chatId, count: taken.length })
+    return taken
+  }
+
   async function add(chatId: string, body: QueueAddBody, runOptions: ChatRunOptions): Promise<QueueItem> {
     subscribe()
     const token: PendingAdd = { deleted: false }
@@ -175,17 +231,15 @@ export function createChatQueue(deps: ChatQueueDeps, options: ChatQueueOptions):
         throw queueConflict('exists', chatId)
       const parts = toQueueParts(await normalizeUserParts(body.message.parts, deps.files))
       const turnOnly = await isServerCommandFor(deps, chat.projectId, firstText(parts))
+      // Phase 11: `UserPromptSubmit` before the append; the cheap checks first, so a refused add runs no hook.
+      let hookRecords: readonly HookData[] = []
+      if (options.promptHooks !== undefined) {
+        check(chatId, id, chat, token)
+        hookRecords = await options.promptHooks({ chat, body, parts, turnOnly, options: runOptions })
+      }
 
       // Synchronous from here on: the state the checks read cannot change before the item is appended.
-      if (token.deleted)
-        throw chatNotFound(chatId)
-      if (!options.hasRun(chatId) && !chat.pendingApproval)
-        throw queueConflict('run-idle', chatId)
-      const entries = queues.get(chatId) ?? []
-      if (entries.some(entry => entry.item.id === id))
-        throw queueConflict('exists', chatId)
-      if (entries.length >= LIMITS.queueItemsMax)
-        throw queueConflict('queue-full', chatId)
+      const entries = check(chatId, id, chat, token)
       const item: QueueItem = {
         id,
         message: { id, role: 'user', parts },
@@ -195,7 +249,7 @@ export function createChatQueue(deps: ChatQueueDeps, options: ChatQueueOptions):
         createdAt: options.now(),
         turnOnly,
       }
-      commit(chatId, [...entries, { item, options: runOptions }], [])
+      commit(chatId, [...entries, { item, options: runOptions, ...(hookRecords.length === 0 ? {} : { hookRecords }) }], [])
       runOptions.logger.debug('message queued', { chatId, itemId: id, turnOnly, queued: entries.length + 1 })
       return item
     }
@@ -221,16 +275,9 @@ export function createChatQueue(deps: ChatQueueDeps, options: ChatQueueOptions):
       return true
     },
 
-    takeSteerable: (chatId) => {
-      const entries = queues.get(chatId) ?? []
-      const taken = entries.filter(entry => !entry.item.turnOnly)
-      if (taken.length === 0)
-        return []
-      const items = taken.map(entry => entry.item)
-      commit(chatId, entries.filter(entry => entry.item.turnOnly), items.map(item => ({ id: item.id, reason: 'delivered' })))
-      deps.logger.debug('queued messages steered', { chatId, count: items.length })
-      return items
-    },
+    takeSteerable: chatId => takeSteerableEntries(chatId).map(entry => entry.item),
+
+    takeSteerableEntries,
 
     takeNext: (chatId) => {
       const [first, ...rest] = queues.get(chatId) ?? []

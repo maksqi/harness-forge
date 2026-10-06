@@ -20,6 +20,7 @@ import {
   chatId,
   chatSummary,
   hookCarrier,
+  hookData,
   messageBranch,
   messageId,
   projectId,
@@ -41,8 +42,10 @@ import {
   mergePath,
   resetChatSessions,
   samePathIds,
+  sendInputOf,
   useChatSession,
   useChatSessionRegistry,
+  useDraftChatId,
 } from './useChatSession'
 import { useImageOptions } from './useImageOptions'
 import { dispatchServerEvent } from './useServerEvents'
@@ -87,6 +90,11 @@ interface FakeServer {
   fail: (status: number, error: { code: string, message: string, providerId?: string, details?: unknown }) => void
   /** The next POST /api/chat never gets an answer (a network error): the server may or may not have it. */
   disconnect: () => void
+  /**
+   * Answers the next POST /api/chat with `answer()` (e.g. events dispatched while the server handles it; a promise holds
+   * the answer back).
+   */
+  respond: (answer: () => Response | Promise<Response>) => void
 }
 
 function streamResponse(writer: StreamWriter): Response {
@@ -101,7 +109,7 @@ function streamResponse(writer: StreamWriter): Response {
 
 function createFakeServer(): FakeServer {
   const calls: ChatCall[] = []
-  const replies: Array<(() => Response)> = []
+  const replies: Array<(() => Response | Promise<Response>)> = []
   const resumes: Array<StreamWriter | null> = []
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
@@ -132,6 +140,7 @@ function createFakeServer(): FakeServer {
     disconnect: () => replies.push(() => {
       throw new TypeError('fetch failed')
     }),
+    respond: answer => replies.push(answer),
   }
 }
 
@@ -2360,5 +2369,368 @@ describe('useChatSession: hooks and output styles (Phase 11, P11-0b)', () => {
     await until(() => session.chat.messages.value.at(-1)?.id === A2 && session.chat.status.value === 'ready', 'resumed')
     expect(shownAtResume).toEqual([U1, ASSISTANT_ID, CARRIER])
     expect(chatBodies()).toHaveLength(0)
+  })
+})
+
+describe('useChatSession: hooks, refusals and output styles (Phase 11, W11.11)', () => {
+  const U1 = 'msg_user000000000001'
+  const CARRIER = messageId('hookcarrier2')
+  const A2 = 'msg_assistant0000002'
+
+  /** The 409 of a prompt hook that blocked the message (docs/API.md 6.10): nothing was stored. */
+  function hookBlocked(): Response {
+    const hook = hookData({ event: 'UserPromptSubmit', outcome: 'stopped', toolCallId: undefined, toolName: undefined, reason: 'No secrets, please.' })
+    return new Response(JSON.stringify({ error: { code: 'conflict', message: 'No secrets, please.', details: { reason: 'hook-blocked', hook } } }), {
+      status: 409,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+
+  it('sendInputOf: the text parts and the uploaded files of a message', () => {
+    const message: HarnessUIMessage = {
+      id: U1,
+      role: 'user',
+      parts: [
+        { type: 'text', text: 'Fix the parser' },
+        { type: 'text', text: 'and the docs' },
+        { type: 'file', mediaType: 'text/markdown', filename: 'README.md', url: '/api/files/file_readme0000000000' },
+        { type: 'file', mediaType: 'image/png', url: '/api/files/file_image00000000000?download=1' },
+        { type: 'file', mediaType: 'image/png', url: 'https://example.invalid/not-an-upload.png' },
+      ],
+    }
+    expect(sendInputOf(message)).toEqual({
+      text: 'Fix the parser\n\nand the docs',
+      files: [
+        { id: 'file_readme0000000000', name: 'README.md', mime: 'text/markdown', size: 0, url: '/api/files/file_readme0000000000' },
+        { id: 'file_image00000000000', name: 'file_image00000000000', mime: 'image/png', size: 0, url: '/api/files/file_image00000000000?download=1' },
+      ],
+    })
+    expect(sendInputOf({ parts: [] })).toEqual({ text: '', files: [] })
+  })
+
+  it('outputStyle: each chat keeps its own choice across a reload', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const a = await loadedSession(31, { messages: [userMessage(U1, 'q')] })
+    const b = await loadedSession(32, { messages: [userMessage(U1, 'q')], settings: { outputStyle: 'learning' } })
+    expect(a.outputStyle.value).toBeNull()
+    a.outputStyle.value = 'explanatory'
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(31) }, body: { settings: { outputStyle: 'explanatory' } } })
+    expect(b.outputStyle.value).toBe('learning')
+
+    // A reload of the tab: fresh sessions read what the server stored for each chat.
+    resetChatSessions()
+    const reloadedA = await loadedSession(31, { messages: [userMessage(U1, 'q')], settings: { outputStyle: 'explanatory' } })
+    const reloadedB = await loadedSession(32, { messages: [userMessage(U1, 'q')], settings: { outputStyle: 'learning' } })
+    expect(reloadedA).not.toBe(a)
+    expect(reloadedA.outputStyle.value).toBe('explanatory')
+    expect(reloadedB.outputStyle.value).toBe('learning')
+    // Back to Automatic: saved as null, and an Automatic chat reads null after the next reload.
+    reloadedB.outputStyle.value = null
+    expect(api.chats.update).toHaveBeenLastCalledWith({ params: { id: chatId(32) }, body: { settings: { outputStyle: null } } })
+    resetChatSessions()
+    const again = await loadedSession(32, { messages: [userMessage(U1, 'q')] })
+    expect(again.outputStyle.value).toBeNull()
+  })
+
+  it('a style picked while a new chat\'s first request runs is saved once the chat exists', async () => {
+    const session = newSession(34)
+    session.outputStyle.value = 'learning'
+    const gate = deferred()
+    // The server has not answered yet (W11.16: its 2xx answer is the moment the chat exists).
+    server.respond(async () => {
+      await gate.promise
+      return streamResponse(textReply('first', ASSISTANT_ID))
+    })
+    const sending = session.submit({ text: 'hello', files: [] })
+    await until(() => chatBodies().length === 1, 'sent')
+    expect(chatBodies()[0]!.outputStyle).toBe('learning')
+    session.outputStyle.value = 'explanatory'
+    expect(api.chats.update).not.toHaveBeenCalled()
+    gate.resolve()
+    await sending
+    await until(() => api.chats.update.mock.calls.length === 1, 'saved')
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(34) }, body: { settings: { outputStyle: 'explanatory' } } })
+    // Sent with the first request: nothing more to save.
+    const plain = newSession(35)
+    plain.outputStyle.value = 'learning'
+    server.reply(textReply('first', ASSISTANT_ID))
+    await plain.submit({ text: 'hello', files: [] })
+    await nextTick()
+    expect(api.chats.update).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refused first message: chat.created then chat.deleted keep the session as a new chat, and the next send carries the project and the style again', async () => {
+    api.projects.list.mockResolvedValue({ items: [projectSummary({ id: projectId(1), name: 'Website' })] })
+    await useProjectsStore().fetchAll()
+    const registry = useChatSessionRegistry()
+    const session = newSession(36)
+    await session.setProject(projectId(1))
+    session.outputStyle.value = 'learning'
+    // The server created the row, ran the hook, removed the row again and answered 409 (open point 14).
+    server.respond(() => {
+      dispatchServerEvent(createServerEvent('chat.created', chatSummary({ id: chatId(36), projectId: projectId(1) })))
+      dispatchServerEvent(createServerEvent('chat.deleted', { id: chatId(36) }))
+      return hookBlocked()
+    })
+    await session.submit({ text: 'my password is hunter2', files: [] })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(session.chat.status.value).toBe('error')
+    expect(registry.get(chatId(36))).toBe(session)
+    expect(session.persisted.value).toBe(false)
+    expect(session.summary.value).toBeNull()
+    expect(session.projectId.value).toBe(projectId(1))
+    expect(session.outputStyle.value).toBe('learning')
+    expect(useChatsStore().byId(chatId(36))).toBeUndefined()
+    // Unstored: the view takes it back.
+    expect(session.takeBackUnstored()?.parts).toEqual([{ type: 'text', text: 'my password is hunter2' }])
+    session.chat.clearError()
+
+    server.reply(textReply('Hello', ASSISTANT_ID))
+    await session.submit({ text: 'hello', files: [] })
+    expect(chatBodies()[1]).toMatchObject({ parentId: null, projectId: projectId(1), outputStyle: 'learning' })
+    expect(session.persisted.value).toBe(true)
+    expect(session.chat.messages.value.map(message => message.role)).toEqual(['user', 'assistant'])
+  })
+
+  it('the events of a refused first message may come after its 409: the session still ends as a new chat', async () => {
+    const registry = useChatSessionRegistry()
+    const session = newSession(37)
+    server.respond(hookBlocked)
+    await session.submit({ text: 'hello', files: [] })
+    dispatchServerEvent(createServerEvent('chat.created', chatSummary({ id: chatId(37) })))
+    expect(session.persisted.value).toBe(true)
+    dispatchServerEvent(createServerEvent('chat.deleted', { id: chatId(37) }))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(registry.get(chatId(37))).toBe(session)
+    expect(session.persisted.value).toBe(false)
+    session.takeBackUnstored()
+    server.reply(textReply('Hello', ASSISTANT_ID))
+    await session.submit({ text: 'hello', files: [] })
+    expect(chatBodies()[1]).toMatchObject({ parentId: null })
+  })
+
+  it('a chat the server described is still dropped when it is deleted', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const registry = useChatSessionRegistry()
+    const loaded = await loadedSession(38, { messages: [userMessage(U1, 'q')] })
+    const streamed = newSession(39)
+    server.reply(textReply('Hello', ASSISTANT_ID))
+    await streamed.submit({ text: 'hello', files: [] })
+    dispatchServerEvent(createServerEvent('chat.deleted', { id: chatId(38) }))
+    dispatchServerEvent(createServerEvent('chat.deleted', { id: chatId(39) }))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(registry.get(chatId(38))).toBeUndefined()
+    expect(registry.get(chatId(39))).toBeUndefined()
+    expect(loaded.persisted.value).toBe(true)
+  })
+
+  it('the draft id of `/` is released once a first reply streams, not when the first message was refused', async () => {
+    const draft = useDraftChatId()
+    const session = useChatSession(draft, { isNew: true })
+    session.modelRef.value = MODEL
+    server.respond(hookBlocked)
+    await session.submit({ text: 'hello', files: [] })
+    expect(useDraftChatId()).toBe(draft)
+    session.takeBackUnstored()
+    server.reply(textReply('Hello', ASSISTANT_ID))
+    await session.submit({ text: 'hello', files: [] })
+    expect(useDraftChatId()).not.toBe(draft)
+  })
+
+  it('accepted (W11.16): a 2xx answer counts before anything streams; the chat exists from then on (persisted, draft released)', async () => {
+    const draft = useDraftChatId()
+    const session = useChatSession(draft, { isNew: true })
+    session.modelRef.value = MODEL
+    expect(session.accepted.value).toBe(0)
+    // An image turn: `start` (placeholders) and nothing else until the image is ready.
+    const gate = deferred()
+    server.reply(async (write) => {
+      write({ type: 'start', messageId: ASSISTANT_ID, messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'start-step' })
+      await gate.promise
+      write({ type: 'finish-step' })
+      write({ type: 'finish', finishReason: 'stop' })
+    })
+    const sending = session.submit({ text: 'a lighthouse at dusk', files: [] })
+    await until(() => session.accepted.value === 1, 'accepted')
+    expect(session.chat.status.value).toBe('submitted')
+    expect(session.persisted.value).toBe(true)
+    expect(useDraftChatId()).not.toBe(draft)
+    // The chat exists from now on: a style picked while the image is generated is saved at once.
+    session.outputStyle.value = 'learning'
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: draft }, body: { settings: { outputStyle: 'learning' } } })
+    gate.resolve()
+    await sending
+    expect(session.accepted.value).toBe(1)
+  })
+
+  it('accepted (W11.16): a refusal (409) or another error answer is never counted, a resume answer neither', async () => {
+    const session = newSession(42)
+    server.respond(hookBlocked)
+    await session.submit({ text: 'my password is hunter2', files: [] })
+    expect(session.chat.status.value).toBe('error')
+    session.takeBackUnstored()
+    session.chat.clearError()
+    server.fail(400, { code: 'validation_error', message: 'Bad request.' })
+    await session.submit({ text: 'hello', files: [] })
+    expect(session.accepted.value).toBe(0)
+    expect(session.persisted.value).toBe(false)
+    session.takeBackUnstored()
+    session.chat.clearError()
+    server.reply(textReply('Hello', ASSISTANT_ID))
+    await session.submit({ text: 'hello', files: [] })
+    expect(session.accepted.value).toBe(1)
+
+    // A resume (`GET /api/chat/:id/stream`) of a running chat is no new request.
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    api.chats.get
+      .mockResolvedValueOnce(chatDetail({ id: chatId(43), running: true, messages: [userMessage('msg_user000000000001', 'q')] }))
+      .mockResolvedValueOnce(chatDetail({ id: chatId(43), messages: [userMessage('msg_user000000000001', 'q'), assistantMessage(ASSISTANT_ID, 'resumed')] }))
+    server.resume(textReply('resumed'))
+    const loaded = useChatSession(chatId(43))
+    await until(() => server.calls.some(call => call.url === `/api/chat/${chatId(43)}/stream`), 'resume request')
+    await until(() => loaded.chat.messages.value.length === 2 && loaded.chat.status.value === 'ready', 'replay')
+    expect(loaded.accepted.value).toBe(0)
+  })
+
+  it('a refused message at enqueue is thrown as it came (with its hook record) and queues nothing', async () => {
+    const { session, gate, sending } = await streamingSession(40)
+    const hook = hookData({ event: 'UserPromptSubmit', outcome: 'stopped', toolCallId: undefined, toolName: undefined })
+    api.chatQueue.add.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'No secrets, please.', details: { reason: 'hook-blocked', hook } }))
+    await expect(session.submit({ text: 'my password is hunter2', files: [README_FILE] }))
+      .rejects
+      .toSatisfy((error: HarnessError) => (error.details as { reason: string, hook: unknown }).reason === 'hook-blocked' && (error.details as { hook: unknown }).hook !== undefined)
+    expect(session.queue.value).toEqual([])
+    expect(chatBodies()).toHaveLength(1)
+    gate.resolve()
+    await sending
+  })
+
+  it('hook activity: the event and the tool call, null without a call, cleared by compacting and by idle', async () => {
+    const session = newSession(41)
+    const gates = [deferred(), deferred(), deferred(), deferred()]
+    const reached = [deferred(), deferred(), deferred(), deferred()]
+    server.reply(async (write) => {
+      write({ type: 'start', messageId: ASSISTANT_ID, messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'data-activity', data: { kind: 'hooks', event: 'UserPromptSubmit' }, transient: true } as UIMessageChunk)
+      reached[0]!.resolve()
+      await gates[0]!.promise
+      write({ type: 'data-activity', data: { kind: 'compacting' }, transient: true } as UIMessageChunk)
+      reached[1]!.resolve()
+      await gates[1]!.promise
+      write({ type: 'data-activity', data: { kind: 'hooks', event: 'PostToolUse', toolCallId: 'call_7' }, transient: true } as UIMessageChunk)
+      reached[2]!.resolve()
+      await gates[2]!.promise
+      write({ type: 'data-activity', data: { kind: 'idle' }, transient: true } as UIMessageChunk)
+      reached[3]!.resolve()
+      await gates[3]!.promise
+      write({ type: 'finish', finishReason: 'stop' })
+    })
+    const sending = session.submit({ text: 'go', files: [] })
+    await reached[0]!.promise
+    await until(() => session.activity.value === 'hooks', 'message-level hooks')
+    expect(session.hookActivity.value).toEqual({ event: 'UserPromptSubmit', toolCallId: null })
+    gates[0]!.resolve()
+    await reached[1]!.promise
+    await until(() => session.activity.value === 'compacting', 'compacting')
+    expect(session.hookActivity.value).toBeNull()
+    gates[1]!.resolve()
+    await reached[2]!.promise
+    await until(() => session.hookActivity.value?.toolCallId === 'call_7', 'tool hooks')
+    expect(session.hookActivity.value).toEqual({ event: 'PostToolUse', toolCallId: 'call_7' })
+    expect(session.activity.value).toBe('hooks')
+    gates[2]!.resolve()
+    await reached[3]!.promise
+    await until(() => session.activity.value === null, 'idle')
+    expect(session.hookActivity.value).toBeNull()
+    gates[3]!.resolve()
+    await sending
+    expect(session.chat.messages.value.flatMap(message => message.parts).some(part => part.type === 'data-activity')).toBe(false)
+  })
+
+  it('two tabs: the idle tab follows a hook turn at once, the busy one after its own reply', async () => {
+    // Tab A: this module. Tab B: its own copy of the app modules and stores (another browser tab), same server.
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    api.chatTasks.list.mockResolvedValue({ items: [] })
+    const n = 42
+    let phase: 'initial' | 'sent' | 'hook-turn' | 'done' = 'initial'
+    let userId = ''
+    const path = (): HarnessUIMessage[] => {
+      const base = [userMessage(U1, 'q'), assistantMessage('msg_assistant0000000', 'a')]
+      if (phase === 'initial')
+        return base
+      const turn = [...base, userMessage(userId, 'Fix the parser'), assistantMessage(ASSISTANT_ID, 'Done')]
+      if (phase === 'sent')
+        return turn
+      const carried = [...turn, hookCarrier(CARRIER)]
+      return phase === 'done' ? [...carried, assistantMessage(A2, 'The tests pass now')] : carried
+    }
+    api.chats.get.mockImplementation(async () => chatDetail({ id: chatId(n), modelRef: MODEL, running: phase === 'hook-turn', messages: path() }))
+
+    const tabA = useChatSession(chatId(n))
+    await until(() => tabA.loaded.value, 'tab A load')
+    vi.resetModules()
+    const piniaB = createPinia()
+    setActivePinia(piniaB)
+    const tabBSessions = await import('./useChatSession')
+    const tabBEvents = await import('./useServerEvents')
+    const tabB = tabBSessions.useChatSession(chatId(n))
+    await until(() => tabB.loaded.value, 'tab B load')
+    setActivePinia(pinia)
+    const dispatchBoth = (event: Parameters<typeof dispatchServerEvent>[0]) => {
+      dispatchServerEvent(event)
+      setActivePinia(piniaB)
+      tabBEvents.dispatchServerEvent(event)
+      setActivePinia(pinia)
+    }
+    try {
+      // Tab A sends; the server starts the hook turn while tab A still reads its reply's end.
+      const gateR1 = deferred()
+      server.reply(textReply('Done', ASSISTANT_ID, gateR1.promise))
+      const sending = tabA.submit({ text: 'Fix the parser', files: [] })
+      await until(() => tabA.chat.status.value === 'streaming', 'tab A streams')
+      userId = chatBodies()[0]!.message.id
+      phase = 'hook-turn'
+      const gateB = deferred()
+      const gateA = deferred()
+      let tabBAtResume: string[] = []
+      let tabAAtResume: string[] = []
+      server.resume(afterGate(gateB.promise, (write) => {
+        tabBAtResume = ids(tabB.chat.messages.value)
+        return textReply('The tests pass now', A2)(write)
+      }))
+      server.resume(afterGate(gateA.promise, (write) => {
+        tabAAtResume = ids(tabA.chat.messages.value)
+        return textReply('The tests pass now', A2)(write)
+      }))
+      dispatchBoth(createServerEvent('run.started', { chatId: chatId(n), messageId: A2, modelRef: MODEL, origin: 'hook', userMessageId: CARRIER }))
+
+      const streamCalls = () => server.calls.filter(call => call.url === `/api/chat/${chatId(n)}/stream`).length
+      await until(() => streamCalls() === 1, 'tab B resumes')
+      expect(ids(tabB.chat.messages.value)).toEqual([U1, 'msg_assistant0000000', userId, ASSISTANT_ID, CARRIER])
+      expect(tabA.chat.status.value).toBe('streaming')
+      expect(ids(tabA.chat.messages.value)).not.toContain(CARRIER)
+
+      gateR1.resolve()
+      await sending
+      await until(() => streamCalls() === 2, 'tab A resumes')
+      expect(ids(tabA.chat.messages.value)).toEqual([U1, 'msg_assistant0000000', userId, ASSISTANT_ID, CARRIER])
+
+      phase = 'done'
+      gateB.resolve()
+      gateA.resolve()
+      const final = [U1, 'msg_assistant0000000', userId, ASSISTANT_ID, CARRIER, A2]
+      await until(() => tabA.chat.status.value === 'ready' && ids(tabA.chat.messages.value).join() === final.join(), 'tab A done')
+      await until(() => tabB.chat.status.value === 'ready' && ids(tabB.chat.messages.value).join() === final.join(), 'tab B done')
+      expect(tabBAtResume).toEqual(final.slice(0, 5))
+      expect(tabAAtResume).toEqual(final.slice(0, 5))
+      // One POST /chat in all: the hook turn was started by the server.
+      expect(chatBodies()).toHaveLength(1)
+    }
+    finally {
+      tabBSessions.resetChatSessions()
+      disposePinia(piniaB)
+      setActivePinia(pinia)
+    }
   })
 })

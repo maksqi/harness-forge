@@ -12,7 +12,10 @@
 //   every write of the row.
 // - Backups (`customizations.json`, W10.6): `exportBackup` lists every row (kind, name, content, enabled);
 //   `restoreBackup` parses each item like a create, keeps an existing kind and name (skipped) and fails invalid items
-//   and items beyond the per-kind limit (one warning each: kind and name, never the content).
+//   and items beyond the per-kind limit (one warning each: kind and name, never the content). Phase 11 (ADR-051 /
+//   ADR-052, open point 9; W11.6): personal output styles (kind `style`) travel like the other kinds, and a personal
+//   command whose body holds `` !`cmd` `` spans (`planCommandExpansion(body).shellCommands`) is restored turned off
+//   (`enabled: false`, whatever the backup says), so a crafted backup never plants a command that runs shell lines.
 // - Logging: ids, kinds and counts at `info`; never the content or the description.
 import type {
   BackupCustomization,
@@ -23,13 +26,14 @@ import type {
   CustomizationKind,
   CustomizationUpdate,
   DefinitionDiagnostic,
+  ParsedDefinition,
   ParseDefinitionResult,
 } from '@harness-forge/shared'
 import type { CustomizationRow } from '../../db/schema.ts'
 import type { Logger } from '../../logger.ts'
 import type { AppDeps } from '../../types.ts'
 import type { CustomizationRestoreResult, LoadedDefinition } from './types.ts'
-import { createCustomizationId, CUSTOMIZATION_KINDS, HarnessError, LIMITS, parseDefinition } from '@harness-forge/shared'
+import { createCustomizationId, CUSTOMIZATION_KINDS, HarnessError, LIMITS, parseDefinition, planCommandExpansion } from '@harness-forge/shared'
 import { and, count, eq, inArray, ne } from 'drizzle-orm'
 import { customizations } from '../../db/schema.ts'
 import { databaseError, guardDb, sqliteErrorCodes } from '../chats/db-errors.ts'
@@ -90,6 +94,14 @@ function compareText(a: string, b: string): number {
 
 /** Control characters of a name shown in a restore warning (a backup is user data). */
 const CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}]/gu
+
+/**
+ * True for a parsed command whose body holds `` !`cmd` `` spans (Phase 11, ADR-052): restored from a backup, it comes
+ * back turned off.
+ */
+export function runsShellSpans(definition: ParsedDefinition): boolean {
+  return definition.kind === 'command' && planCommandExpansion(definition.fields.body).shellCommands.length > 0
+}
 
 function restoreWarning(item: BackupCustomization, reason: string): string {
   const name = String(item.name).replace(CONTROL_CHARACTERS, '?').slice(0, 64)
@@ -350,6 +362,7 @@ export function createCustomizationStore(deps: Pick<AppDeps, 'db'>, options: Cus
       let imported = 0
       let skipped = 0
       let failed = 0
+      let turnedOff = 0
       const warnings: string[] = []
       for (const item of items) {
         if (!(CUSTOMIZATION_KINDS as readonly string[]).includes(item.kind) || typeof item.content !== 'string') {
@@ -376,8 +389,10 @@ export function createCustomizationStore(deps: Pick<AppDeps, 'db'>, options: Cus
           warnings.push(restoreWarning(item, `the limit of ${LIMITS.customizationsPerKindMax} personal ${item.kind}s is reached.`))
           continue
         }
+        // A command with `!` spans comes back turned off (ADR-052): the user checks it and turns it on.
+        const spans = runsShellSpans(definition)
         try {
-          await insert(item.kind, item.content, item.enabled !== false, name, description)
+          await insert(item.kind, item.content, item.enabled !== false && !spans, name, description)
         }
         catch (error) {
           if (error instanceof HarnessError && error.code === 'conflict') {
@@ -393,8 +408,10 @@ export function createCustomizationStore(deps: Pick<AppDeps, 'db'>, options: Cus
         taken.add(key)
         counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1)
         imported += 1
+        if (spans && item.enabled !== false)
+          turnedOff += 1
       }
-      options.logger().info('customizations restored', { imported, skipped, failed })
+      options.logger().info('customizations restored', { imported, skipped, failed, turnedOff })
       return { imported, skipped, failed, warnings }
     }),
   }

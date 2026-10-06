@@ -9,8 +9,9 @@
 // so a plugin command shadowed by a project command is shadowed only in that project's list; without `projectId` only
 // the global entries (personal and plugin commands). Command files carry `namespace`, `argumentHint` and `modelRef`
 // when they declare them. An unavailable project folder lists no project commands (the catalog reports it).
-// Phase 11 (C37-T9, ADR-052): every item carries `kind` (`command` for the entries above; W11.5 adds the
-// user-invocable skills as `kind: 'skill'` with their `argumentHint`).
+// Phase 11 (C37-T9, W11.5, ADR-052): every item carries `kind`: `command` for the entries above, `skill` for the scope's
+// active user-invocable skills (`argumentHint`, `pluginId` of a plugin skill; names up to 64 characters), listed after
+// the commands own their names (a command wins a name over a skill).
 import type { CommandSummary, ListResponse } from '@harness-forge/shared'
 import type { CustomizationCatalog } from '../../services/customizations/types.ts'
 import type { AppDeps } from '../../types.ts'
@@ -22,7 +23,8 @@ import { validate } from '../validate.ts'
 
 /**
  * The effective server-side commands of a scope, sorted by name: `/compact`, the plugin commands and, with a catalog,
- * its project and personal commands (by precedence). Without a catalog: the harness command and the plugin commands.
+ * its project and personal commands (by precedence) and its user-invocable skills. Without a catalog: the harness
+ * command and the plugin commands.
  */
 export function listCommands(deps: Pick<AppDeps, 'registry'>, catalog: CustomizationCatalog | null = null): CommandSummary[] {
   return listServerCommands(deps.registry, catalog)
