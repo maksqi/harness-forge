@@ -21,6 +21,8 @@ overrides:
   typescript: ~6.0.3
   # GHSA-68fv-2mgg-jv7q (2026-10-06): source-map-js < 1.2.2 (build tooling: vue compiler, magicast, tailwind).
   source-map-js@<1.2.2: ^1.2.2
+  # GHSA-pqg4-j6r4-53mv (2026-10-06): shell-quote < 1.11.0 (only @nuxt/devtools -> launch-editor, which allows ^1.8.4).
+  shell-quote@<1.11.0: ^1.11.0
 
 # Dependency build scripts are blocked unless listed here (true = run, false = skip silently).
 allowBuilds:
