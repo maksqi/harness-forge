@@ -1,12 +1,14 @@
 // Agent tools of the builtin plugin `core-agent` (Phase 9): `todo_write` and `exit_plan_mode` (ADR-041), `task`
 // (sub-agents, ADR-043); Phase 10: `skill` (ADR-045), custom and background sub-agents (ADR-045, ADR-046) and plan files
 // (ADR-047). Input schemas are what the model sends; output schemas are what the tool parts store (the model gets a
-// short text through `toModelOutput`). API.md sections 4.25 and 6.9.
+// short text through `toModelOutput`). API.md sections 4.25 and 6.9. Phase 12 (ADR-053, ADR-058): catalog names may be
+// qualified (`<pluginId>:<name>`), and `skill` reads a supporting file of a skill (`file`).
 import { z } from 'zod'
 import { customizationSourceSchema, todoStatusSchema } from '../enums.ts'
-import { AGENT_NAME_PATTERN, agentNameSchema, backgroundTaskIdSchema, modelRefSchema, pluginIdSchema, timestampSchema } from '../ids.ts'
+import { backgroundTaskIdSchema, CATALOG_NAME_PATTERN, catalogNameSchema, modelRefSchema, pluginIdSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { DEFINITION_LIMITS } from '../util/definitions.ts'
+import { hasControlChars } from '../util/text.ts'
 import { messageUsageSchema } from './usage.ts'
 
 /** The tools of `core-agent` (`skill`: Phase 10, ADR-045). */
@@ -89,9 +91,12 @@ export type ExitPlanModeOutput = z.infer<typeof exitPlanModeOutputSchema>
 
 // ---------- task ----------
 
-/** A catalog name as a model sends it: trimmed, lowercased, then `AGENT_NAME_PATTERN`. */
+/**
+ * A catalog name as a model sends it: trimmed, lowercased, then `CATALOG_NAME_PATTERN` (a bare name, or since Phase 12
+ * a qualified `<pluginId>:<name>` name, ADR-053).
+ */
 function catalogNameInputSchema(message: string) {
-  return z.string().trim().toLowerCase().regex(AGENT_NAME_PATTERN, message)
+  return z.string().trim().toLowerCase().regex(CATALOG_NAME_PATTERN, message)
 }
 
 /**
@@ -100,7 +105,7 @@ function catalogNameInputSchema(message: string) {
  * matches too. Whether the agent exists is checked by the runner (an unknown type ends the call as `failed`, listing the
  * available types).
  */
-export const agentTypeInputSchema = catalogNameInputSchema('Agent types start with a-z and use up to 64 characters of a-z, 0-9 and "-".')
+export const agentTypeInputSchema = catalogNameInputSchema('Agent types start with a-z and use up to 64 characters of a-z, 0-9 and "-" (or are qualified "<pluginId>:<name>").')
 
 /** Input of `task` (policy `safe`): starts one sub-agent with its own context. */
 export const taskInputSchema = z.object({
@@ -168,8 +173,11 @@ export type TaskAgent = z.infer<typeof taskAgentSchema>
  */
 export const taskOutputSchema = z.object({
   status: taskStatusSchema,
-  /** The agent type (Phase 10: any catalog agent name, aliases resolved; v1.5 outputs hold `explore` or `general`). */
-  type: agentNameSchema,
+  /**
+   * The agent type (Phase 10: any catalog agent name, aliases resolved; v1.5 outputs hold `explore` or `general`; Phase
+   * 12: a qualified name of a Claude Code plugin agent).
+   */
+  type: catalogNameSchema,
   description: z.string().max(80),
   /** The model of the sub-agent. */
   modelRef: modelRefSchema,
@@ -196,17 +204,37 @@ export type TaskOutput = z.infer<typeof taskOutputSchema>
 // ---------- skill ----------
 
 /**
- * A skill name as a model sends it (Phase 10, ADR-045): trimmed and lowercased, then `AGENT_NAME_PATTERN`. Whether the
+ * A skill name as a model sends it (Phase 10, ADR-045): trimmed and lowercased, then `CATALOG_NAME_PATTERN`. Whether the
  * skill exists is checked by the tool.
  */
-export const skillNameInputSchema = catalogNameInputSchema('Skill names start with a-z and use up to 64 characters of a-z, 0-9 and "-".')
+export const skillNameInputSchema = catalogNameInputSchema('Skill names start with a-z and use up to 64 characters of a-z, 0-9 and "-" (or are qualified "<pluginId>:<name>").')
+
+/** Characters of the `file` input of `skill` (Phase 12). */
+export const SKILL_FILE_PATH_MAX_CHARS = 512
+
+/**
+ * A supporting file of a skill as the model names it (Phase 12, ADR-053): a relative POSIX path inside the skill folder,
+ * 1..512 characters, no leading `/`, no empty, `.` or `..` segment, no backslash, no control character. The tool still
+ * resolves it inside the folder (no links, regular files, not hidden or secret-looking, at most 64 KiB read).
+ */
+export const skillFilePathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(SKILL_FILE_PATH_MAX_CHARS)
+  .refine(
+    value => !hasControlChars(value) && !value.includes('\\') && value.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..'),
+    'Use a path relative to the skill folder, without "." or ".." segments.',
+  )
 
 /**
  * Input of `skill` (Phase 10, ADR-045; policy `safe`, no workspace access): loads the body of one skill of the catalog.
- * Offered only when the catalog has skills, never inside a sub-agent.
+ * Offered only when the catalog has skills, never inside a sub-agent. Phase 12: `file` reads one supporting file of the
+ * skill instead of its body (plugin skills: inside the plugin's skill folder; project skills: through the workspace).
  */
 export const skillInputSchema = z.object({
   name: skillNameInputSchema,
+  file: skillFilePathSchema.optional(),
 })
 export type SkillInput = z.infer<typeof skillInputSchema>
 
@@ -215,7 +243,8 @@ export type SkillInput = z.infer<typeof skillInputSchema>
  * project-relative) and its supporting files (relative to `baseDir`), which the model reads with `read_file`.
  */
 export const skillOutputSchema = z.object({
-  name: agentNameSchema,
+  /** The skill name (Phase 12: may be qualified, `<pluginId>:<name>`). */
+  name: catalogNameSchema,
   description: z.string().max(DEFINITION_LIMITS.descriptionMaxChars),
   source: customizationSourceSchema,
   /** The SKILL.md body, at most 65 536 characters. */
@@ -226,6 +255,21 @@ export const skillOutputSchema = z.object({
   baseDir: z.string().max(LIMITS.workspacePathMaxChars).optional(),
   /** Project skills: supporting files of the folder, relative to `baseDir` (at most 50, no links, no hidden files). */
   files: z.array(z.string().min(1).max(LIMITS.workspacePathMaxChars)).max(LIMITS.skillFilesListedMax).optional(),
+  /**
+   * Phase 12 (ADR-053): how the model reads the supporting files: `workspace` (a project skill: `read_file` on
+   * `baseDir`) or `skill` (a plugin skill: `skill` with `file`). Absent in v1.7 outputs (= `workspace` with `baseDir`).
+   */
+  fileAccess: z.enum(['workspace', 'skill']).optional(),
+  /** Phase 12: the supporting file a `file` call read (`content` is empty then). */
+  file: z
+    .object({
+      /** Relative to the skill folder. */
+      path: z.string().min(1).max(SKILL_FILE_PATH_MAX_CHARS),
+      /** UTF-8 text, at most 64 KiB. */
+      content: z.string().max(LIMITS.skillFileReadBytes),
+      truncated: z.boolean(),
+    })
+    .optional(),
 })
 export type SkillOutput = z.infer<typeof skillOutputSchema>
 

@@ -136,8 +136,38 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   command hooks, no project MCP). Output styles are the catalog kind `style` (`output-styles` folders, builtins
   `default` / `explanatory` / `learning`; chat ?? project ?? global `outputStyle`). Migration `0008_hooks_trust`;
   SSE `hooks.changed`, `project-trust.changed`, `project-mcp.changed`; mock `mock:hooks`.
-- **Never create `.claude/`, `.harness/` or `.mcp.json` at the repository root**: they would configure the
-  coordinator's own Claude Code session. Test fixtures and seeds live in temp folders or under `.tmp/`.
+- **Plugin API 1.6.0** (Phase 12, additive): `CommandDefinition.{ syntax?: 'template' | 'markdown', argumentHint?, model?,
+  allowedTools? }`, `SkillDefinition.{ baseDir?, argumentHint?, userInvocable?, modelInvocable? }`, agent fields
+  `disallowedTools?` / `maxTurns?` / `color?` / `skills?`, hook events + `PostToolUseFailure`, `PermissionRequest`,
+  `SubagentStart`, `PostCompact`, `SessionEnd`, command hook `args?` / `async?` / `if?` / `statusMessage?`, prompt hook
+  handlers (`type: 'prompt'`; prompt-only hooks need no trust pin), names qualified with the plugin's own id,
+  `PluginSource` `github` / `marketplace`. The template mirror follows.
+- **Claude Code ecosystem** (Phase 12, ADR-053 … ADR-058): Claude Code plugins are a third plugin format
+  (`plugins.format = claude`, files kept byte for byte with exec bits, read in place by `apps/server/src/plugins/claude/**`
+  through the shared parsers; Claude `plugin.json` / `marketplace.json` are parsed **only** by
+  `packages/shared/src/util/claude-plugins.ts`); a plugin that runs anything needs a trust pin over a sha256 of its
+  **whole file tree**; Claude entries use qualified names `<pluginId>:<name>` (`catalogNameSchema`); plugin variables
+  (`${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`, `${user_config.KEY}`, …) are substituted only by
+  `substitutePluginVariables`, never from `process.env`. Marketplaces (table `marketplaces`, `mkt_` ids) and GitHub
+  sources use **HTTPS archives only, never git**: ref → commit via the GitHub API, the commit's zip from codeload, all
+  through `safeFetch`; `HF_OFFLINE=1` refuses them (409 `offline`). The home-folder import reads **only** the allowlist
+  of `packages/shared/src/util/claude-import.ts` (`isClaudeHomeImportPath`) at `HF_CLAUDE_HOME` (default `~/.claude`,
+  `0` = off, the Docker default) or from an upload; the plan (`cip_` ids) is built and kept on the server (contents and
+  env / header values never reach the browser); scan and apply need fresh auth; imported command hooks and `!` commands
+  arrive turned off. Project definition files are edited through `/projects/:id/definitions/file` (path guard, file
+  lock, `expectedSha256` → 409 `stale`, not journaled, `workspace.changed` source `user`); **saving never approves**.
+  Prompt hooks (`type: 'prompt'`, `hookModelRef`, answers `{ ok, reason?, impossible? }` parsed only by
+  `readPromptHookAnswer`; `ok: true` never allows), 13 hook events, `transcript_path`
+  (`<dataDir>/transcripts/<chatId>.jsonl`, 0600, never in backups); trust item v2 only for hooks with the new fields
+  (v1 bytes unchanged). Frontmatter: new keys are kept only when set; `argumentBase` = 0 when a body uses `$0` /
+  `$ARGUMENTS[` or declares `arguments`, else 1; Claude model aliases through `modelAliases`. Tests use a temp
+  `HF_CLAUDE_HOME`, injected `safeFetch` or the test-only `HF_TEST_REMOTE_URL` (only with `HF_MOCK_PROVIDER=1`), and the
+  mock `mock:prompt-hook`. Migration `0009_claude_ecosystem`; SSE `marketplace.changed`; settings `hookModelRef`,
+  `modelAliases`.
+- **Never create `.claude/`, `.harness/`, `.claude-plugin/` or `.mcp.json` anywhere in the repository** (at the root
+  they would configure the coordinator's own Claude Code session, and Claude Code also discovers nested `.claude/`
+  folders). Test fixtures are built at test time in `realpath(mkdtemp())` folders; seeds live under `.tmp/`. The only
+  committed exception is `examples/plugins/claude-review-kit/.claude-plugin/plugin.json`.
 - **vue-tsc 3.3.12** (vuejs/language-tools#6240): a `//` inside a component prop value in a template (a URL literal)
   corrupts the generated code; put URLs into script constants (`apps/web/app/components/template-literals.test.ts`
   guards it).
@@ -181,7 +211,7 @@ data/                                          runtime data (gitignored)
 | `pnpm dev` | server (`tsx watch`, :8787) + web (`nuxt dev`, :3000, proxies `/api`) — coordinator only |
 | `pnpm build` | `nuxt generate` (web) + `tsdown` (server) — coordinator only |
 | `pnpm start` | production server on :8787 serving API + SPA |
-| `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` |
+| `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_CLAUDE_HOME=0 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` |
 | `pnpm test` | Vitest (all projects); `pnpm -F <pkg> test` for one package |
 | `pnpm test:live` | opt-in live provider suite (`*.live.test.ts`; needs `HF_LIVE=1` + provider keys; paid calls) — never in `pnpm test` |
 | `pnpm test:e2e` | Playwright |
@@ -222,10 +252,12 @@ data/                                          runtime data (gitignored)
 `HF_PASSWORD`, `HF_MASTER_KEY`, `HF_MOCK_PROVIDER`, `HF_SAFE_MODE`, `HF_PLUGIN_WATCH`, `HF_OFFLINE`, `HF_INSECURE`,
 `HF_TRUST_PROXY` (trusted reverse proxies, ADR-026), `HF_API_TARGET` (web dev proxy target), `HF_WORKSPACE_ROOTS`
 (folders that may hold projects, default `<dataDir>/workspaces`, ADR-031), `HF_WORKSPACE_SHELL` (`0` removes the
-`shell` tool, ADR-033, and since Phase 11 runs no command hook and no command `!` span), plus provider key
+`shell` tool, ADR-033, and since Phase 11 runs no command hook and no command `!` span), `HF_CLAUDE_HOME` (the
+Claude Code folder the import scan reads, default `~/.claude`, `0` = off, ADR-055), plus provider key
 fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). CLI-only: `HF_NEW_MASTER_KEY` (read by `rotate-key`, ADR-034). Test-only: `HF_LIVE`, `HF_LIVE_PROVIDERS`,
 `HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`, `HF_TEST_FILE_SWEEP_DELAY_MS`
-(only with `HF_MOCK_PROVIDER=1`, ADR-039). See `.env.example` and
+(only with `HF_MOCK_PROVIDER=1`, ADR-039), `HF_TEST_REMOTE_URL` (loopback fake for GitHub / codeload / archive hosts;
+only with `HF_MOCK_PROVIDER=1`, ADR-054). See `.env.example` and
 `docs/DECISIONS.md` (Contract seed).
 
 **Never run `pnpm test:live` unless your task prompt says so** — it makes paid provider calls with real keys.
@@ -282,6 +314,14 @@ server, use your slot `k` from the task prompt: `HF_PORT=879k HF_DATA_DIR=.tmp/<
   agent-state}.ts`, plugin SDK 1.5.0, the props / emits / root test ids of the P11-0b stub components, the `hooks`,
   `project-trust` and `project-mcp` stores, the pure-module signatures, the `useChatSession` additions, the Customize
   tab query and the Phase 11 test ids (see `docs/phases/phase-11-v1-7.md` "FREEZE in Phase 11").
+  Added in Phase 12 (after Gate P12-0b): `plugins/marketplaces/types.ts`, `services/{claude-import,project-definitions}/types.ts`,
+  the P12-0b versions of `types.ts`, `plugins/types.ts`, `registry/types.ts`, `services/{hooks,customizations}/types.ts`
+  and the deps start / stop order, `chat/{hooks,approval,tools,steps,pipeline,model-history,agent-scope}.ts` and
+  `chat/subagent/host.ts` with the P12-0b call sites, the signatures of the P12-0b stubs, the mock models (incl.
+  `mock:prompt-hook`), `testing/{fake-remote,claude-fixtures}.ts`, `packages/shared/src/util/{claude-plugins,claude-import,
+  claude-permissions,hooks,trust,definitions,arguments}.ts`, plugin SDK 1.6.0, the props / emits / root test ids of the
+  P12-0b stub components, the `marketplaces` store, `useClaudeImport`, the pure-module signatures, the Customize import
+  query and the Phase 12 test ids (see `docs/phases/phase-12-v1-8.md` "FREEZE in Phase 12").
 - **CCR (contract change request)**: if a frozen contract blocks you, write a local adapter inside your owned
   paths, keep working, and add a CCR to your report: file, current shape, proposed shape, reason.
 - **DEPENDENCY REQUEST**: never install packages. Use existing dependencies or Node built-ins; if something is truly

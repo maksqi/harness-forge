@@ -108,7 +108,9 @@ export type ValidationErrorDetails = z.infer<typeof validationErrorDetailsSchema
  * instead; ADR-042); `queue-full`: the chat already has `LIMITS.queueItemsMax` queued messages (ADR-042);
  * `hook-blocked` (Phase 11, ADR-048): a `UserPromptSubmit` or `SessionStart` hook refused the turn (exit 2, `decision:
  * block` or `continue: false`; the message is the hook's reason) and nothing was stored; `untrusted` (Phase 11,
- * ADR-049 / ADR-052): a project command file with `` !`cmd` `` spans whose trust hash is not approved for the project.
+ * ADR-049 / ADR-052): a project command file with `` !`cmd` `` spans whose trust hash is not approved for the project;
+ * `offline` (Phase 12, ADR-054): `HF_OFFLINE=1` refuses adding or refreshing a marketplace and installing from a
+ * `github` or `marketplace` source (npm and URL installs are unchanged).
  */
 export const conflictReasonSchema = z.enum([
   'run-active',
@@ -125,6 +127,7 @@ export const conflictReasonSchema = z.enum([
   'queue-full',
   'hook-blocked',
   'untrusted',
+  'offline',
 ])
 export type ConflictReason = z.infer<typeof conflictReasonSchema>
 

@@ -157,7 +157,8 @@ function shownError(field: Field, meta?: { isBlurred: boolean }): string | null 
 function openingDraft(): HookDraft {
   if (props.mode === 'edit' && props.hook) {
     const hook = props.hook
-    return { event: hook.event, matcher: hook.matcher ?? '', command: hook.command, timeout: hook.timeout, enabled: hook.enabled }
+    // Phase 12 (C40 compile fix): prompt hooks (ADR-057) open with an empty command until W12.12 adds the Prompt type.
+    return { event: hook.event, matcher: hook.matcher ?? '', command: hook.type === 'command' ? hook.command : '', timeout: hook.timeout, enabled: hook.enabled }
   }
   return props.draft ? { ...props.draft } : { ...EMPTY_DRAFT }
 }
@@ -217,7 +218,7 @@ function matcherOf(current: FormValues): string | null {
   return current.event === initial.value.event ? initial.value.matcher.trim() || null : null
 }
 
-function bodyOf(current: FormValues): HookCreate & { matcher: string | null, timeout: number | null, enabled: boolean } {
+function bodyOf(current: FormValues): Extract<HookCreate, { command: string }> & { matcher: string | null, timeout: number | null, enabled: boolean } {
   const timeout = parseHookTimeout(current.timeout)
   return {
     event: current.event,
@@ -235,7 +236,7 @@ function patchOf(hook: PersonalHook, body: ReturnType<typeof bodyOf>): HookUpdat
     patch.event = body.event
   if (body.matcher !== (hook.matcher?.trim() || null))
     patch.matcher = body.matcher
-  if (body.command !== hook.command)
+  if (body.command !== (hook.type === 'command' ? hook.command : ''))
     patch.command = body.command
   if (body.timeout !== hook.timeout)
     patch.timeout = body.timeout

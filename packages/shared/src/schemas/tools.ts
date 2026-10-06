@@ -10,11 +10,11 @@ import {
 } from '../enums.ts'
 import { harnessErrorInitSchema } from '../errors.ts'
 import {
+  catalogNameSchema,
   mcpServerIdSchema,
   modelRefSchema,
   pluginIdSchema,
   projectIdSchema,
-  slashNameSchema,
   timestampSchema,
   toolNameSchema,
 } from '../ids.ts'
@@ -165,8 +165,11 @@ export type McpServer = z.infer<typeof mcpServerSchema>
  * 64 characters); a command wins a name over a skill.
  */
 export const commandSummarySchema = z.object({
-  /** A command name (up to 32 characters) or a skill name (up to 64; `slashNameSchema`). */
-  name: slashNameSchema,
+  /**
+   * A command name (up to 32 characters) or a skill name (up to 64); Phase 12 (ADR-053): a qualified name of a Claude
+   * Code plugin entry (`<pluginId>:<name>`, up to 128; `catalogNameSchema`).
+   */
+  name: catalogNameSchema,
   /** Phase 11: `skill` for a user-invocable skill; absent = a command. */
   kind: invocationKindSchema.optional(),
   description: z.string(),

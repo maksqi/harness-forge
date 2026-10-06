@@ -33,6 +33,13 @@ export const HOOK_ID_PATTERN = /^hok_[\dA-Za-z]{16}$/
  * hook run log (`GET /hooks/runs`).
  */
 export const HOOK_RECORD_ID_PATTERN = /^hev_[\dA-Za-z]{16}$/
+/** `mkt_` + 16 characters of `[0-9A-Za-z]`: a plugin marketplace (table `marketplaces`, Phase 12, ADR-054). */
+export const MARKETPLACE_ID_PATTERN = /^mkt_[\dA-Za-z]{16}$/
+/**
+ * `cip_` + 16 characters of `[0-9A-Za-z]`: a Claude Code import plan (Phase 12, ADR-055; held in memory by the server
+ * for 10 minutes, never stored).
+ */
+export const IMPORT_PLAN_ID_PATTERN = /^cip_[\dA-Za-z]{16}$/
 /**
  * Share token (ADR-025): the 16-character suffix of the share id + the first 22 base64url characters of
  * `HMAC-SHA256(subkey 'share', 'harness-forge/share/v1:' + shareId)`. Never stored; the share page is `/share/<token>`.
@@ -53,6 +60,22 @@ export const AGENT_NAME_PATTERN = /^[a-z][\da-z-]{0,63}$/
  * user-invocable skill (`AGENT_NAME_PATTERN`, at most 64 characters). Equal to `AGENT_NAME_PATTERN`.
  */
 export const SLASH_NAME_PATTERN = AGENT_NAME_PATTERN
+/** Characters of a qualified catalog name (Phase 12, ADR-053). */
+export const QUALIFIED_NAME_MAX_CHARS = 128
+/** Segments after the plugin id of a qualified catalog name (Phase 12, ADR-053). */
+export const QUALIFIED_NAME_SEGMENTS_MAX = 3
+/**
+ * A qualified catalog name (Phase 12, ADR-053): `<pluginId>:<segment>[:<segment>…]`, the plugin id
+ * (`PLUGIN_ID_PATTERN`) and 1..3 segments of `^[a-z][a-z0-9-]{0,63}$`, at most 128 characters. The commands, agents,
+ * skills and output styles of Claude Code plugins use it (command subfolders add segments, `review-kit:db:migrate`);
+ * harness plugin entries keep bare names and can also be called `<pluginId>:<name>`.
+ */
+export const QUALIFIED_NAME_PATTERN = /^(?=[\s\S]{1,128}$)[\da-z](?:[\da-z-]{0,38}[\da-z])?(?::[a-z][\da-z-]{0,63}){1,3}$/
+/**
+ * A catalog name (Phase 12, ADR-053): a bare name (`AGENT_NAME_PATTERN`, which also covers command names) or a
+ * qualified name (`QUALIFIED_NAME_PATTERN`). Names of slash commands, skills, `task.type` and output styles.
+ */
+export const CATALOG_NAME_PATTERN = /^(?:[a-z][\da-z-]{0,63}|(?=[\s\S]{1,128}$)[\da-z](?:[\da-z-]{0,38}[\da-z])?(?::[a-z][\da-z-]{0,63}){1,3})$/
 /** MCP server id: 1..32 characters of `[a-z0-9-]`, no leading or trailing `-`. */
 export const MCP_SERVER_ID_PATTERN = /^[\da-z](?:[\da-z-]{0,30}[\da-z])?$/
 /** LobeHub icon slug (variants are separate slugs: `claude`, `claude-color`). */
@@ -113,6 +136,12 @@ export type HookId = z.infer<typeof hookIdSchema>
 export const hookRecordIdSchema = z.string().regex(HOOK_RECORD_ID_PATTERN, 'Expected a hook record id "hev_" + 16 characters.')
 export type HookRecordId = z.infer<typeof hookRecordIdSchema>
 
+export const marketplaceIdSchema = z.string().regex(MARKETPLACE_ID_PATTERN, 'Expected a marketplace id "mkt_" + 16 characters.')
+export type MarketplaceId = z.infer<typeof marketplaceIdSchema>
+
+export const importPlanIdSchema = z.string().regex(IMPORT_PLAN_ID_PATTERN, 'Expected an import plan id "cip_" + 16 characters.')
+export type ImportPlanId = z.infer<typeof importPlanIdSchema>
+
 export const pluginIdSchema = z.string().regex(PLUGIN_ID_PATTERN, 'Plugin ids use 1-40 characters of a-z, 0-9 and "-", without a leading or trailing "-".')
 export type PluginId = z.infer<typeof pluginIdSchema>
 
@@ -135,6 +164,17 @@ export type CommandName = z.infer<typeof commandNameSchema>
 /** A slash name (Phase 11, ADR-052): a command (up to 32 characters) or a user-invocable skill (up to 64). */
 export const slashNameSchema = z.string().regex(SLASH_NAME_PATTERN, 'Slash names start with a-z and use up to 64 characters of a-z, 0-9 and "-".')
 export type SlashName = z.infer<typeof slashNameSchema>
+
+/** A qualified catalog name (Phase 12, ADR-053): `<pluginId>:<segment>[:<segment>…]`, at most 128 characters. */
+export const qualifiedNameSchema = z.string().regex(QUALIFIED_NAME_PATTERN, 'Qualified names are "<pluginId>:<name>" with 1-3 segments of a-z, 0-9 and "-" (at most 128 characters).')
+export type QualifiedName = z.infer<typeof qualifiedNameSchema>
+
+/**
+ * A catalog name (Phase 12, ADR-053): a bare name (up to 64 characters of a-z, 0-9 and "-", starting with a-z) or a
+ * qualified `<pluginId>:<name>` name. Slash commands, skills, agent types (`task.type`) and output styles.
+ */
+export const catalogNameSchema = z.string().regex(CATALOG_NAME_PATTERN, 'Names start with a-z and use up to 64 characters of a-z, 0-9 and "-", or are qualified "<pluginId>:<name>" (at most 128 characters).')
+export type CatalogName = z.infer<typeof catalogNameSchema>
 
 export const mcpServerIdSchema = z.string().regex(MCP_SERVER_ID_PATTERN, 'MCP server ids use 1-32 characters of a-z, 0-9 and "-", without a leading or trailing "-".')
 export type McpServerId = z.infer<typeof mcpServerIdSchema>
@@ -208,9 +248,20 @@ export function isBuiltinProviderId(id: string): id is BuiltinProviderId {
   return BUILTIN_PROVIDER_ID_SET.has(id)
 }
 
-/** Reserved plugin ids: every id starting with `core-`, `mock`, and every builtin provider id. */
+/**
+ * Plugin ids taken by web routes under `/plugins/` (Phase 12): `/plugins/new` (the install dialog) and
+ * `/plugins/marketplaces` (the Marketplaces page).
+ */
+export const RESERVED_PLUGIN_IDS = ['new', 'marketplaces'] as const
+
+const RESERVED_PLUGIN_ID_SET: ReadonlySet<string> = new Set(RESERVED_PLUGIN_IDS)
+
+/**
+ * Reserved plugin ids: every id starting with `core-`, `mock`, every builtin provider id and (Phase 12)
+ * `RESERVED_PLUGIN_IDS` (`new`, `marketplaces`).
+ */
 export function isReservedPluginId(id: string): boolean {
-  return id.startsWith('core-') || id === MOCK_PROVIDER_ID || BUILTIN_PROVIDER_ID_SET.has(id)
+  return id.startsWith('core-') || id === MOCK_PROVIDER_ID || BUILTIN_PROVIDER_ID_SET.has(id) || RESERVED_PLUGIN_ID_SET.has(id)
 }
 
 export function isClientCommand(name: string): name is ClientCommand {
@@ -234,6 +285,41 @@ export function isPluginNamespacedId(pluginId: string, id: string): boolean {
   if (id === pluginId)
     return true
   return id.startsWith(`${pluginId}-`) && /^[\da-z-]+$/.test(id.slice(pluginId.length + 1))
+}
+
+// ---------- qualified catalog names (Phase 12, ADR-053) ----------
+
+/** The parts of a qualified catalog name. */
+export interface QualifiedNameParts {
+  /** The plugin id (the namespace). */
+  pluginId: PluginId
+  /** The segments after the plugin id (1..3; command subfolders add segments). */
+  segments: string[]
+  /** The last segment: the bare name a unique qualified entry also answers to. */
+  name: string
+}
+
+/**
+ * `<pluginId>:<segment>[:<segment>…]`. Throws a `HarnessError` (`validation_error`) when the result is not a valid
+ * qualified name (an invalid plugin id or segment, no segment or more than 3, longer than 128 characters).
+ */
+export function qualifiedName(pluginId: string, ...segments: string[]): QualifiedName {
+  const name = [pluginId, ...segments].join(':')
+  if (segments.length === 0 || !QUALIFIED_NAME_PATTERN.test(name)) {
+    throw new HarnessError({
+      code: 'validation_error',
+      message: `Invalid qualified name "${excerpt(name)}": expected "<pluginId>:<name>" with 1-${QUALIFIED_NAME_SEGMENTS_MAX} segments (at most ${QUALIFIED_NAME_MAX_CHARS} characters).`,
+    })
+  }
+  return name
+}
+
+/** Splits a qualified catalog name; null for a bare name or an invalid one. */
+export function splitQualifiedName(name: string): QualifiedNameParts | null {
+  if (typeof name !== 'string' || !QUALIFIED_NAME_PATTERN.test(name))
+    return null
+  const [pluginId = '', ...segments] = name.split(':')
+  return { pluginId, segments, name: segments[segments.length - 1] ?? '' }
 }
 
 // ---------- model refs ----------
@@ -410,3 +496,19 @@ export function createHookId(): HookId {
 export function createHookRecordId(): HookRecordId {
   return `hev_${randomString(16)}`
 }
+
+/** A new marketplace id: `mkt_` + 16 random characters of `[0-9A-Za-z]` (ADR-054; generated by the server). */
+export function createMarketplaceId(): MarketplaceId {
+  return `mkt_${randomString(16)}`
+}
+
+/** `createMarketplaceId` under the name of the Phase 12 design (ADR-054). */
+export const newMarketplaceId: () => MarketplaceId = createMarketplaceId
+
+/** A new import plan id: `cip_` + 16 random characters of `[0-9A-Za-z]` (ADR-055; generated by the server). */
+export function createImportPlanId(): ImportPlanId {
+  return `cip_${randomString(16)}`
+}
+
+/** `createImportPlanId` under the name of the Phase 12 design (ADR-055). */
+export const newImportPlanId: () => ImportPlanId = createImportPlanId

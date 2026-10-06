@@ -32,8 +32,28 @@
  *   reason shown to the user).
  * - PreCompact / Notification: observe only; exit 2 is a non-blocking error, `continue: false` is ignored.
  * - Every event: `continue: false` (+ `stopReason`), `systemMessage`, `suppressOutput`.
+ *
+ * Phase 12 (ADR-057, C42): five more events (`PostToolUseFailure`, `PermissionRequest`, `SubagentStart`, `PostCompact`,
+ * `SessionEnd`; 13 in all), prompt handlers (`type: 'prompt'`, read only with `{ prompts: true }` into
+ * `ReadHooksResult.prompts`; the model answer is read by `readPromptHookAnswer` and mapped by `promptHookOutcome`, which
+ * never allows anything), the command handler fields `args` (exec form, `execFormCommand`), `async`, `if`
+ * (`matchHookIf`) and `statusMessage`, the payload fields `transcript_path`, `error`, `agent_id` / `agent_type` and
+ * `reason`, and per event:
+ * - PostToolUseFailure: like PostToolUse (exit 2 / `decision: block` → `blocked`, the reason is fed back;
+ *   `additionalContext`).
+ * - PermissionRequest: `hookSpecificOutput.decision.{ behavior: 'allow' | 'deny', updatedInput?, message?, interrupt? }`
+ *   → decision `allow` (with `updatedInput`) or `deny` (`blocked`, `message` as the reason, `interrupt: true` stops);
+ *   exit 2 is a non-blocking error (not honored).
+ * - SubagentStart: `additionalContext` (for the child's first message); observe only otherwise.
+ * - PostCompact / SessionEnd: observe only (like PreCompact).
+ * Handler types `http`, `mcp_tool` and `agent` are `unsupported-type` warnings; unknown events stay `unknown-event`
+ * infos; neither ever invalidates a source.
  */
-import { CLAUDE_TOOL_ALIASES } from './tool-names.ts'
+import { safeParseModelRef } from '../ids.ts'
+import { parseClaudePermissionRule } from './claude-permissions.ts'
+import { claudeModelAlias } from './definitions.ts'
+import { parseShellCommand } from './shell-command.ts'
+import { CLAUDE_AGENT_TOOL_ALIASES, CLAUDE_TOOL_ALIASES, claudeAgentTypeNames, matchToolAllowlist } from './tool-names.ts'
 
 export const HOOK_EVENTS = [
   'PreToolUse',
@@ -44,26 +64,46 @@ export const HOOK_EVENTS = [
   'SubagentStop',
   'PreCompact',
   'SessionStart',
+  // Phase 12 (ADR-057).
+  'PostToolUseFailure',
+  'PermissionRequest',
+  'SubagentStart',
+  'PostCompact',
+  'SessionEnd',
 ] as const
 export type HookEvent = (typeof HOOK_EVENTS)[number]
 
-/** Events whose matcher is matched against tool names (the other events ignore the matcher, except as noted). */
-export const TOOL_HOOK_EVENTS = ['PreToolUse', 'PostToolUse'] as const
+/**
+ * Events whose matcher is matched against tool names (the other events ignore the matcher, except as noted); the
+ * handler field `if` is read only for these.
+ */
+export const TOOL_HOOK_EVENTS = ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest'] as const
+
+/** Events that accept prompt handlers (`type: 'prompt'`; Claude Code parity, ADR-057). */
+export const PROMPT_HOOK_EVENTS = ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'Stop', 'SubagentStop', 'PermissionRequest'] as const
+
+export type HookMatcherSubject = 'tool' | 'source' | 'trigger' | 'notification' | 'agent' | 'reason'
 
 /**
  * What the matcher of an event is tested against (Claude Code parity): tool names (`hookTargetNames`), the
- * SessionStart `source` (`startup` / `compact`), the PreCompact `trigger` (`manual` / `auto`), the Notification type
- * (`permission_prompt`); null = the matcher is ignored (the hook always runs).
+ * SessionStart `source` (`startup` / `compact`), the PreCompact / PostCompact `trigger` (`manual` / `auto`), the
+ * Notification type (`permission_prompt`), the agent type of SubagentStart / SubagentStop (`hookAgentNames`, Claude
+ * Code names included), the SessionEnd `reason` (`other`); null = the matcher is ignored (the hook always runs).
  */
-export const HOOK_MATCHER_SUBJECTS: Readonly<Record<HookEvent, 'tool' | 'source' | 'trigger' | 'notification' | null>> = {
+export const HOOK_MATCHER_SUBJECTS: Readonly<Record<HookEvent, HookMatcherSubject | null>> = {
   PreToolUse: 'tool',
   PostToolUse: 'tool',
   UserPromptSubmit: null,
   Notification: 'notification',
   Stop: null,
-  SubagentStop: null,
+  SubagentStop: 'agent',
   PreCompact: 'trigger',
   SessionStart: 'source',
+  PostToolUseFailure: 'tool',
+  PermissionRequest: 'tool',
+  SubagentStart: 'agent',
+  PostCompact: 'trigger',
+  SessionEnd: 'reason',
 }
 
 /** Where a hook comes from; the combination order of `updatedInput` is personal, then plugin, then project. */
@@ -88,6 +128,19 @@ export const HOOK_LIMITS = {
   reasonMaxChars: 2000,
   systemMessageMaxChars: 2000,
   updatedInputBytes: 65_536,
+  // Phase 12 (ADR-057).
+  /** Entries of an exec-form `args` list (the command and every argument together stay ≤ `commandMaxChars`). */
+  argsMax: 64,
+  /** A prompt hook's prompt (= `LIMITS.promptHookPromptMaxChars`). */
+  promptMaxChars: 16_384,
+  /** Default timeout of a prompt hook, in seconds (= `LIMITS.promptHookTimeoutDefaultMs` / 1000). */
+  promptTimeoutDefaultSec: 30,
+  /** A handler's `statusMessage` (the activity label). */
+  statusMessageMaxChars: 200,
+  /** A handler's `if` rule. */
+  ifMaxChars: 512,
+  /** The PostToolUseFailure `error` of the payload. */
+  errorMaxChars: 16_384,
 } as const
 
 export const HOOK_DIAGNOSTIC_CODES = [
@@ -104,6 +157,10 @@ export const HOOK_DIAGNOSTIC_CODES = [
   'invalid-output',
   'ignored-field',
   'conflict',
+  // Phase 12 (ADR-057).
+  'invalid-prompt',
+  'invalid-if',
+  'invalid-model',
 ] as const
 export type HookDiagnosticCode = (typeof HOOK_DIAGNOSTIC_CODES)[number]
 
@@ -119,21 +176,62 @@ export interface HookDiagnostic {
   readonly position?: readonly [number, number]
 }
 
-/** One command hook handler of a configuration. */
+/** One command hook handler of a configuration. The Phase 12 fields are present only when the handler sets them. */
 export interface HookSpec {
   readonly event: HookEvent
   /** null = every target. */
   readonly matcher: string | null
+  /** The shell command; with `args`, the program of the exec form. */
   readonly command: string
   /** Seconds; null = `HOOK_LIMITS.timeoutDefaultSec`. */
   readonly timeoutSec: number | null
   readonly position: readonly [number, number]
   readonly file?: string
+  /** Exec form (Phase 12): each entry one literal argument of `command` (no shell parsing; see `execFormCommand`). */
+  readonly args?: readonly string[]
+  /** `async: true` (or `asyncRewake: true`) (Phase 12): runs detached and tracked; its output has no effect. */
+  readonly async?: boolean
+  /** The `if` rule (Phase 12, tool events only): a tool name or `Bash(prefix…)`, tested with `matchHookIf`. */
+  readonly if?: string
+  /** The activity label while the hook runs (Phase 12; ≤ `HOOK_LIMITS.statusMessageMaxChars`). */
+  readonly statusMessage?: string
+}
+
+/** One prompt hook handler (`type: 'prompt'`, Phase 12, ADR-057), read only with `{ prompts: true }`. */
+export interface PromptHookSpec {
+  /** One of `PROMPT_HOOK_EVENTS`. */
+  readonly event: HookEvent
+  /** null = every target. */
+  readonly matcher: string | null
+  /** The prompt as written (trimmed; ≤ `HOOK_LIMITS.promptMaxChars`); `$ARGUMENTS` is the payload (`expandHookPrompt`). */
+  readonly prompt: string
+  /** `provider:model`, or a Claude model name (`sonnet`, `claude-…`; lowercased, `[1m]` dropped); null = the hook model. */
+  readonly model: string | null
+  /** Seconds; null = `HOOK_LIMITS.promptTimeoutDefaultSec`. */
+  readonly timeoutSec: number | null
+  /** `continueOnBlock` (default false): a PreToolUse / PostToolUse "no" is fed back instead of ending the turn. */
+  readonly continueOnBlock: boolean
+  readonly position: readonly [number, number]
+  readonly file?: string
+  /** The `if` rule (tool events only), as for command hooks. */
+  readonly if?: string
+  /** The activity label while the hook runs. */
+  readonly statusMessage?: string
 }
 
 export interface ReadHooksResult {
   readonly items: readonly HookSpec[]
+  /** Prompt handlers (Phase 12): always present; empty unless the reading was asked for them (`prompts: true`). */
+  readonly prompts: readonly PromptHookSpec[]
   readonly diagnostics: readonly HookDiagnostic[]
+}
+
+export interface ReadHooksOptions {
+  readonly source: HookSource
+  /** Project-relative settings file, for diagnostics and specs. */
+  readonly file?: string
+  /** Read prompt handlers into `prompts` (Phase 12); without it a prompt handler is an `unsupported-type` warning. */
+  readonly prompts?: boolean
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -147,13 +245,16 @@ const CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}]/gu
 
 const EVENT_SET: ReadonlySet<string> = new Set(HOOK_EVENTS)
 /** Events a hook can block (exit 2 / `decision: block`). */
-const BLOCKING_EVENTS: ReadonlySet<HookEvent> = new Set(['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SubagentStop'])
+const BLOCKING_EVENTS: ReadonlySet<HookEvent> = new Set(['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SubagentStop', 'PostToolUseFailure'])
 /** Events whose plain stdout (exit 0, not JSON) is model-visible context. */
 const PLAIN_CONTEXT_EVENTS: ReadonlySet<HookEvent> = new Set(['UserPromptSubmit', 'SessionStart'])
 /** Events that read `hookSpecificOutput.additionalContext`. */
-const CONTEXT_EVENTS: ReadonlySet<HookEvent> = new Set(['PostToolUse', 'UserPromptSubmit', 'SessionStart'])
+const CONTEXT_EVENTS: ReadonlySet<HookEvent> = new Set(['PostToolUse', 'UserPromptSubmit', 'SessionStart', 'PostToolUseFailure', 'SubagentStart'])
 /** Events that can stop the agent with `continue: false`. */
-const STOPPABLE_EVENTS: ReadonlySet<HookEvent> = new Set(['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SubagentStop', 'SessionStart'])
+const STOPPABLE_EVENTS: ReadonlySet<HookEvent> = new Set(['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SubagentStop', 'SessionStart', 'PostToolUseFailure', 'PermissionRequest'])
+/** Events whose payload describes a tool call (`tool_name`, `tool_input`, `tool_use_id`). */
+const TOOL_EVENTS: ReadonlySet<HookEvent> = new Set(TOOL_HOOK_EVENTS)
+const PROMPT_EVENTS: ReadonlySet<HookEvent> = new Set(PROMPT_HOOK_EVENTS)
 /** Combination order of the sources (`updatedInput`, contexts, reasons). */
 const SOURCE_ORDER: Readonly<Record<string, number>> = { personal: 0, plugin: 1, project: 2 }
 
@@ -245,8 +346,11 @@ function stableStringify(value: unknown): string | null {
 
 interface Collector {
   readonly items: HookSpec[]
+  readonly prompts: PromptHookSpec[]
   readonly diagnostics: HookDiagnostic[]
   readonly file: string | undefined
+  /** Prompt handlers are read (`ReadHooksOptions.prompts`). */
+  readonly readPrompts: boolean
   dropped: number
   overflow: boolean
 }
@@ -296,21 +400,101 @@ function readTimeout(collector: Collector, event: HookEvent, value: unknown, pos
   return Math.ceil(value)
 }
 
-const HANDLER_KEYS: ReadonlySet<string> = new Set(['type', 'command', 'timeout'])
+/** Keys of a command handler (Claude Code's; `asyncRewake`, `once` and `shell` are read for their diagnostics). */
+const COMMAND_HANDLER_KEYS: ReadonlySet<string> = new Set(['type', 'command', 'timeout', 'args', 'async', 'asyncRewake', 'if', 'statusMessage', 'once', 'shell'])
+/** Keys of a prompt handler. */
+const PROMPT_HANDLER_KEYS: ReadonlySet<string> = new Set(['type', 'prompt', 'model', 'timeout', 'continueOnBlock', 'if', 'statusMessage', 'once'])
 const GROUP_KEYS: ReadonlySet<string> = new Set(['matcher', 'hooks'])
+/** Handler types Claude Code has and the harness does not run (an `unsupported-type` warning each). */
+const UNSUPPORTED_TYPE_MESSAGES: Readonly<Record<string, string>> = {
+  http: 'HTTP hooks are not supported; this hook never runs.',
+  mcp_tool: 'MCP tool hooks are not supported; this hook never runs.',
+  agent: 'Agent hooks are not supported; this hook never runs.',
+}
+/** A `${user_config.…}` reference, which shell-form hooks may not use (Claude Code refuses it too). */
+const USER_CONFIG_REFERENCE = /\$\{user_config\./
 
-function readHandler(collector: Collector, event: HookEvent, handler: unknown, matcher: string | null, position: [number, number]): void {
-  if (!isRecord(handler)) {
-    report(collector, { level: 'error', code: 'not-an-object', message: 'A hook must be an object with a type and a command.', event, position })
-    return
+/** Whether the handler holds more hooks than the configuration may keep (reported once). */
+function isFull(collector: Collector, event: HookEvent, position: [number, number]): boolean {
+  if (collector.items.length + collector.prompts.length < HOOK_LIMITS.itemsMax)
+    return false
+  if (!collector.overflow) {
+    collector.overflow = true
+    report(collector, { level: 'warning', code: 'too-many', message: `Only the first ${HOOK_LIMITS.itemsMax} hooks are used.`, event, position })
   }
-  if (handler.type !== 'command') {
-    const message = handler.type === 'prompt'
-      ? 'Prompt hooks are not supported; only command hooks run.'
-      : 'Only hooks of type "command" are supported.'
-    report(collector, { level: 'warning', code: 'unsupported-type', message, event, position })
-    return
+  return true
+}
+
+function reportIgnoredKeys(collector: Collector, event: HookEvent, handler: Record<string, unknown>, known: ReadonlySet<string>, position: [number, number]): void {
+  for (const key of Object.keys(handler)) {
+    if (!known.has(key))
+      report(collector, { level: 'info', code: 'ignored-field', message: `The field "${shownKey(key)}" is ignored.`, event, position })
   }
+  if (Object.hasOwn(handler, 'once'))
+    report(collector, { level: 'info', code: 'ignored-field', message: '"once" is used only by skill hooks; it is ignored.', event, position })
+}
+
+/** The `if` rule of a handler: null (none, or ignored outside tool events), the rule, or false (invalid, reported). */
+function readIf(collector: Collector, event: HookEvent, value: unknown, position: [number, number]): string | null | false {
+  if (value === undefined || value === null)
+    return null
+  if (typeof value !== 'string') {
+    report(collector, { level: 'error', code: 'invalid-if', message: 'The "if" rule must be text; this hook never runs.', event, position })
+    return false
+  }
+  const rule = value.trim()
+  if (rule === '')
+    return null
+  if (!TOOL_EVENTS.has(event)) {
+    report(collector, { level: 'info', code: 'ignored-field', message: `"if" is used only by tool events; it is ignored for ${event} hooks.`, event, position })
+    return null
+  }
+  const reason = checkHookIf(rule)
+  if (reason !== null) {
+    report(collector, { level: 'error', code: 'invalid-if', message: `${reason} This hook never runs.`, event, position })
+    return false
+  }
+  return rule
+}
+
+/** The `statusMessage` of a handler (control characters removed, blanks collapsed, capped), or null. */
+function readStatusMessage(collector: Collector, event: HookEvent, value: unknown, position: [number, number]): string | null {
+  if (value === undefined || value === null)
+    return null
+  if (typeof value !== 'string') {
+    report(collector, { level: 'warning', code: 'ignored-field', message: '"statusMessage" must be text; it is ignored.', event, position })
+    return null
+  }
+  const text = value.replace(CONTROL_CHARACTERS, ' ').replace(/\s+/g, ' ').trim()
+  return text === '' ? null : cutText(text, HOOK_LIMITS.statusMessageMaxChars)
+}
+
+/** The exec-form `args` of a command handler: undefined (shell form), the list, or false (invalid, reported). */
+function readArgs(collector: Collector, event: HookEvent, command: string, value: unknown, position: [number, number]): string[] | undefined | false {
+  if (value === undefined || value === null)
+    return undefined
+  if (!Array.isArray(value) || value.some(entry => typeof entry !== 'string')) {
+    report(collector, { level: 'error', code: 'invalid-command', message: '"args" must be a list of texts.', event, position })
+    return false
+  }
+  const args = value as string[]
+  if (args.length > HOOK_LIMITS.argsMax) {
+    report(collector, { level: 'error', code: 'too-long', message: `The hook has more than ${HOOK_LIMITS.argsMax} arguments.`, event, position })
+    return false
+  }
+  if (args.some(entry => entry.includes('\0'))) {
+    report(collector, { level: 'error', code: 'invalid-command', message: 'An argument contains a NUL character.', event, position })
+    return false
+  }
+  const length = args.reduce((total, entry) => total + entry.length, command.length)
+  if (length > HOOK_LIMITS.commandMaxChars) {
+    report(collector, { level: 'error', code: 'too-long', message: `The command and its arguments are longer than ${HOOK_LIMITS.commandMaxChars} characters.`, event, position })
+    return false
+  }
+  return [...args]
+}
+
+function readCommandHandler(collector: Collector, event: HookEvent, handler: Record<string, unknown>, matcher: string | null, position: [number, number]): void {
   const command = handler.command
   if (typeof command !== 'string' || command.trim() === '') {
     report(collector, { level: 'error', code: 'invalid-command', message: 'The command must be non-empty text.', event, position })
@@ -325,22 +509,140 @@ function readHandler(collector: Collector, event: HookEvent, handler: unknown, m
     report(collector, { level: 'error', code: 'too-long', message: `The command is longer than ${HOOK_LIMITS.commandMaxChars} characters.`, event, position })
     return
   }
-  const timeoutSec = readTimeout(collector, event, handler.timeout, position)
-  for (const key of Object.keys(handler)) {
-    if (!HANDLER_KEYS.has(key))
-      report(collector, { level: 'info', code: 'ignored-field', message: `The field "${shownKey(key)}" is ignored.`, event, position })
-  }
-  if (collector.items.length >= HOOK_LIMITS.itemsMax) {
-    if (!collector.overflow) {
-      collector.overflow = true
-      report(collector, { level: 'warning', code: 'too-many', message: `Only the first ${HOOK_LIMITS.itemsMax} hooks are used.`, event, position })
-    }
+  if (handler.shell !== undefined && handler.shell !== null && handler.shell !== 'bash') {
+    const message = handler.shell === 'powershell' ? 'PowerShell hooks are not supported; this hook never runs.' : 'The shell must be "bash"; this hook never runs.'
+    report(collector, { level: 'error', code: 'invalid-command', message, event, position })
     return
   }
-  const spec: HookSpec = collector.file === undefined
-    ? { event, matcher, command: trimmed, timeoutSec, position }
-    : { event, matcher, command: trimmed, timeoutSec, position, file: collector.file }
-  collector.items.push(spec)
+  const args = readArgs(collector, event, trimmed, handler.args, position)
+  if (args === false)
+    return
+  if (args === undefined && USER_CONFIG_REFERENCE.test(trimmed)) {
+    report(collector, { level: 'error', code: 'invalid-command', message: 'Shell-form hooks cannot use user_config variables; use "args" (exec form). This hook never runs.', event, position })
+    return
+  }
+  const timeoutSec = readTimeout(collector, event, handler.timeout, position)
+  let async = false
+  if (handler.async !== undefined && handler.async !== null) {
+    if (typeof handler.async === 'boolean')
+      async = handler.async
+    else
+      report(collector, { level: 'warning', code: 'ignored-field', message: '"async" must be true or false; it is ignored.', event, position })
+  }
+  if (handler.asyncRewake !== undefined && handler.asyncRewake !== null) {
+    if (handler.asyncRewake === true)
+      async = true
+    report(collector, { level: 'info', code: 'ignored-field', message: '"asyncRewake" is not supported; the hook runs in the background like "async".', event, position })
+  }
+  const rule = readIf(collector, event, handler.if, position)
+  if (rule === false)
+    return
+  const statusMessage = readStatusMessage(collector, event, handler.statusMessage, position)
+  reportIgnoredKeys(collector, event, handler, COMMAND_HANDLER_KEYS, position)
+  if (isFull(collector, event, position))
+    return
+  collector.items.push({
+    event,
+    matcher,
+    command: trimmed,
+    timeoutSec,
+    position,
+    ...(collector.file === undefined ? {} : { file: collector.file }),
+    ...(args === undefined ? {} : { args }),
+    ...(async ? { async: true } : {}),
+    ...(rule === null ? {} : { if: rule }),
+    ...(statusMessage === null ? {} : { statusMessage }),
+  })
+}
+
+/** The `model` of a prompt handler: a `provider:model` ref or a Claude model name (normalized), else null. */
+function readPromptModel(collector: Collector, event: HookEvent, value: unknown, position: [number, number]): string | null {
+  if (value === undefined || value === null)
+    return null
+  const text = typeof value === 'string' ? value.trim() : null
+  if (text === '')
+    return null
+  if (text !== null && text.length <= 256) {
+    if (text.includes(':') && !/\s/.test(text) && safeParseModelRef(text) !== null)
+      return text
+    const alias = claudeModelAlias(text)
+    if (alias !== null)
+      return alias
+  }
+  report(collector, { level: 'warning', code: 'invalid-model', message: 'The model must be "provider:model" or a Claude model name; the hook model is used.', event, position })
+  return null
+}
+
+function readPromptHandler(collector: Collector, event: HookEvent, handler: Record<string, unknown>, matcher: string | null, position: [number, number]): void {
+  if (!collector.readPrompts) {
+    report(collector, { level: 'warning', code: 'unsupported-type', message: 'Prompt hooks are not supported here; only command hooks run.', event, position })
+    return
+  }
+  if (!PROMPT_EVENTS.has(event)) {
+    report(collector, { level: 'warning', code: 'unsupported-type', message: `Prompt hooks do not run for ${event} hooks; use a command hook.`, event, position })
+    return
+  }
+  const prompt = handler.prompt
+  if (typeof prompt !== 'string' || prompt.trim() === '') {
+    report(collector, { level: 'error', code: 'invalid-prompt', message: 'The prompt must be non-empty text.', event, position })
+    return
+  }
+  if (prompt.includes('\0')) {
+    report(collector, { level: 'error', code: 'invalid-prompt', message: 'The prompt contains a NUL character.', event, position })
+    return
+  }
+  const trimmed = prompt.trim()
+  if (trimmed.length > HOOK_LIMITS.promptMaxChars) {
+    report(collector, { level: 'error', code: 'too-long', message: `The prompt is longer than ${HOOK_LIMITS.promptMaxChars} characters.`, event, position })
+    return
+  }
+  const model = readPromptModel(collector, event, handler.model, position)
+  const timeoutSec = readTimeout(collector, event, handler.timeout, position)
+  let continueOnBlock = false
+  if (handler.continueOnBlock !== undefined && handler.continueOnBlock !== null) {
+    if (typeof handler.continueOnBlock === 'boolean')
+      continueOnBlock = handler.continueOnBlock
+    else
+      report(collector, { level: 'warning', code: 'invalid-prompt', message: '"continueOnBlock" must be true or false; false is used.', event, position })
+  }
+  const rule = readIf(collector, event, handler.if, position)
+  if (rule === false)
+    return
+  const statusMessage = readStatusMessage(collector, event, handler.statusMessage, position)
+  reportIgnoredKeys(collector, event, handler, PROMPT_HANDLER_KEYS, position)
+  if (isFull(collector, event, position))
+    return
+  collector.prompts.push({
+    event,
+    matcher,
+    prompt: trimmed,
+    model,
+    timeoutSec,
+    continueOnBlock,
+    position,
+    ...(collector.file === undefined ? {} : { file: collector.file }),
+    ...(rule === null ? {} : { if: rule }),
+    ...(statusMessage === null ? {} : { statusMessage }),
+  })
+}
+
+function readHandler(collector: Collector, event: HookEvent, handler: unknown, matcher: string | null, position: [number, number]): void {
+  if (!isRecord(handler)) {
+    report(collector, { level: 'error', code: 'not-an-object', message: 'A hook must be an object with a type and a command.', event, position })
+    return
+  }
+  if (handler.type === 'command') {
+    readCommandHandler(collector, event, handler, matcher, position)
+    return
+  }
+  if (handler.type === 'prompt') {
+    readPromptHandler(collector, event, handler, matcher, position)
+    return
+  }
+  const message = typeof handler.type === 'string' && Object.hasOwn(UNSUPPORTED_TYPE_MESSAGES, handler.type)
+    ? UNSUPPORTED_TYPE_MESSAGES[handler.type] as string
+    : 'The hook type is not supported; use "command".'
+  report(collector, { level: 'warning', code: 'unsupported-type', message, event, position })
 }
 
 function readEvent(collector: Collector, event: HookEvent, groups: unknown): void {
@@ -369,13 +671,13 @@ function readEvent(collector: Collector, event: HookEvent, groups: unknown): voi
   })
 }
 
-function readUnchecked(value: unknown, file: string | undefined): ReadHooksResult {
-  const collector: Collector = { items: [], diagnostics: [], file, dropped: 0, overflow: false }
+function readUnchecked(value: unknown, file: string | undefined, readPrompts: boolean): ReadHooksResult {
+  const collector: Collector = { items: [], prompts: [], diagnostics: [], file, readPrompts, dropped: 0, overflow: false }
   if (value === undefined || value === null)
-    return { items: [], diagnostics: [] }
+    return { items: [], prompts: [], diagnostics: [] }
   if (!isRecord(value)) {
     report(collector, { level: 'error', code: 'not-an-object', message: 'The hooks must be an object keyed by event name.' })
-    return { items: [], diagnostics: collector.diagnostics }
+    return { items: [], prompts: [], diagnostics: collector.diagnostics }
   }
   for (const key of Object.keys(value)) {
     if (!isHookEvent(key)) {
@@ -388,27 +690,33 @@ function readUnchecked(value: unknown, file: string | undefined): ReadHooksResul
     const entry: HookDiagnostic = { level: 'info', code: 'too-many', message: `${collector.dropped} more problems were found.` }
     collector.diagnostics.push(file === undefined ? entry : { ...entry, file })
   }
-  return { items: collector.items, diagnostics: collector.diagnostics }
+  return { items: collector.items, prompts: collector.prompts, diagnostics: collector.diagnostics }
 }
 
-/** Reads a `hooks` object (the value of a settings file's `hooks` key, a plugin's `contributes.hooks`). */
-export function readHooksConfig(value: unknown, options: { readonly source: HookSource, readonly file?: string }): ReadHooksResult {
+/**
+ * Reads a `hooks` object (the value of a settings file's `hooks` key, a plugin's `contributes.hooks`, a Claude plugin's
+ * `hooks/hooks.json` `hooks`). Prompt handlers are read into `prompts` only with `prompts: true` (Phase 12).
+ */
+export function readHooksConfig(value: unknown, options: ReadHooksOptions): ReadHooksResult {
   const file = typeof options?.file === 'string' && options.file !== '' ? options.file : undefined
   try {
-    return readUnchecked(value, file)
+    return readUnchecked(value, file, options?.prompts === true)
   }
   catch {
     const entry: HookDiagnostic = { level: 'error', code: 'not-an-object', message: 'The hooks could not be read.' }
-    return { items: [], diagnostics: [file === undefined ? entry : { ...entry, file }] }
+    return { items: [], prompts: [], diagnostics: [file === undefined ? entry : { ...entry, file }] }
   }
 }
 
-/** Reads a whole settings file: byte cap, `JSON.parse`, then only its `hooks` key (every other key is ignored). */
-export function readSettingsHooks(text: string, options: { readonly file: string, readonly maxBytes?: number }): ReadHooksResult {
+/**
+ * Reads a whole settings file: byte cap, `JSON.parse`, then only its `hooks` key (every other key is ignored). Prompt
+ * handlers are read only with `prompts: true` (Phase 12).
+ */
+export function readSettingsHooks(text: string, options: { readonly file: string, readonly maxBytes?: number, readonly prompts?: boolean }): ReadHooksResult {
   const file = typeof options?.file === 'string' && options.file !== '' ? options.file : undefined
   const fail = (code: HookDiagnosticCode, message: string): ReadHooksResult => {
     const entry: HookDiagnostic = { level: 'error', code, message }
-    return { items: [], diagnostics: [file === undefined ? entry : { ...entry, file }] }
+    return { items: [], prompts: [], diagnostics: [file === undefined ? entry : { ...entry, file }] }
   }
   const requested = options?.maxBytes
   const maxBytes = typeof requested === 'number' && !Number.isNaN(requested)
@@ -427,8 +735,8 @@ export function readSettingsHooks(text: string, options: { readonly file: string
   if (!isRecord(parsed))
     return fail('not-an-object', 'The settings file must hold a JSON object.')
   if (!Object.hasOwn(parsed, 'hooks'))
-    return { items: [], diagnostics: [] }
-  return readHooksConfig(parsed.hooks, { source: 'project', ...(file === undefined ? {} : { file }) })
+    return { items: [], prompts: [], diagnostics: [] }
+  return readHooksConfig(parsed.hooks, { source: 'project', prompts: options?.prompts === true, ...(file === undefined ? {} : { file }) })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -502,17 +810,19 @@ export function compileMatcher(matcher: string | null | undefined): CompiledMatc
   }
 }
 
-/** Harness tool → Claude Code names (the reverse of `CLAUDE_TOOL_ALIASES`, plus the agent tools Claude Code names). */
+/**
+ * Harness tool → Claude Code names (the reverse of `CLAUDE_TOOL_ALIASES`, then of `CLAUDE_AGENT_TOOL_ALIASES`: `task` is
+ * `Task` and, since Claude Code renamed it, `Agent`).
+ */
 const HOOK_TOOL_ALIASES: ReadonlyMap<string, readonly string[]> = (() => {
   const map = new Map<string, string[]>()
-  for (const [claude, harness] of Object.entries(CLAUDE_TOOL_ALIASES)) {
-    const list = map.get(harness) ?? []
-    list.push(claude)
-    map.set(harness, list)
-  }
-  for (const [harness, claude] of [['task', 'Task'], ['todo_write', 'TodoWrite'], ['exit_plan_mode', 'ExitPlanMode'], ['skill', 'Skill']] as const) {
-    if (!map.has(harness))
-      map.set(harness, [claude])
+  for (const aliases of [CLAUDE_TOOL_ALIASES, CLAUDE_AGENT_TOOL_ALIASES]) {
+    for (const [claude, harness] of Object.entries(aliases)) {
+      const list = map.get(harness) ?? []
+      if (!list.includes(claude))
+        list.push(claude)
+      map.set(harness, list)
+    }
   }
   return map
 })()
@@ -542,6 +852,124 @@ export function claudeToolName(tool: string): string | null {
   if (typeof tool !== 'string')
     return null
   return HOOK_TOOL_ALIASES.get(tool)?.[0] ?? null
+}
+
+/**
+ * The names an agent type is matched under by SubagentStart / SubagentStop matchers (Phase 12): the harness type and
+ * its Claude Code names (`general` → `general`, `general-purpose`; `explore` → `explore`, `Explore`).
+ */
+export function hookAgentNames(type: string): string[] {
+  return claudeAgentTypeNames(type)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// `if` rules (Phase 12)
+
+/** A tool call an `if` rule is tested against. */
+export interface HookIfTarget {
+  /** The harness tool name (`shell`, `write_file`, `mcp__server__tool`). */
+  readonly tool: string
+  /** The tool input; a `Bash(…)` rule reads its `command`. */
+  readonly input?: unknown
+  /** The Claude Code name of a project MCP server (see `hookTargetNames`). */
+  readonly mcpServerName?: string
+}
+
+type CompiledIf
+  = | { readonly kind: 'tool', readonly tool: string }
+    | { readonly kind: 'bash', readonly words: readonly string[], readonly exact: boolean }
+
+/** A bare tool name of an `if` rule: a tool name, or MCP tools (`mcp__server`, `mcp__server__*`, `mcp__*`). */
+const IF_TOOL_NAME = /^(?:[A-Z_a-z][\w-]{0,127}|mcp__(?:[\w-]{1,64}__)?\*)$/
+
+/** The permission rule of `rule` (C41's parser), or null when it is not one or the parser fails. */
+function permissionRule(rule: string): { tool: string, specifier: string | null } | null {
+  try {
+    const parsed = parseClaudePermissionRule(rule)
+    if (parsed === null || typeof parsed !== 'object' || typeof parsed.tool !== 'string')
+      return null
+    return { tool: parsed.tool, specifier: typeof parsed.specifier === 'string' ? parsed.specifier : null }
+  }
+  catch {
+    return null
+  }
+}
+
+function compileIf(rule: unknown): { readonly ok: true, readonly compiled: CompiledIf } | { readonly ok: false, readonly reason: string } {
+  if (typeof rule !== 'string')
+    return { ok: false, reason: 'The "if" rule must be text.' }
+  const trimmed = rule.trim()
+  if (trimmed === '')
+    return { ok: false, reason: 'The "if" rule is empty.' }
+  if (trimmed.length > HOOK_LIMITS.ifMaxChars)
+    return { ok: false, reason: `The "if" rule is longer than ${HOOK_LIMITS.ifMaxChars} characters.` }
+  const parsed = permissionRule(trimmed)
+  if (parsed === null)
+    return { ok: false, reason: 'The "if" rule must be a tool name or a Bash(command prefix) rule.' }
+  if (parsed.specifier === null) {
+    return IF_TOOL_NAME.test(parsed.tool)
+      ? { ok: true, compiled: { kind: 'tool', tool: parsed.tool } }
+      : { ok: false, reason: 'The "if" rule must name one tool.' }
+  }
+  if (parsed.tool !== 'Bash')
+    return { ok: false, reason: 'Only Bash rules may have a pattern in parentheses.' }
+  const specifier = parsed.specifier.trim()
+  let prefix = specifier
+  let exact = true
+  if (specifier.endsWith(':*') || specifier.endsWith(' *')) {
+    prefix = specifier.slice(0, -2).trim()
+    exact = false
+  }
+  if (prefix === '')
+    return { ok: false, reason: 'The Bash rule needs a command prefix.' }
+  if (prefix.includes('*'))
+    return { ok: false, reason: 'A Bash rule may have a wildcard only at its end (":*" or " *").' }
+  const words = parseShellCommand(prefix)
+  if (!words.ok || words.segments.length !== 1 || words.segments[0] === undefined || words.segments[0].words.length === 0)
+    return { ok: false, reason: 'The Bash rule must be one simple command prefix.' }
+  return { ok: true, compiled: { kind: 'bash', words: words.segments[0].words, exact } }
+}
+
+/**
+ * Why an `if` rule is invalid, or null when it is valid (Phase 12, ADR-057): a tool name (`Write`, `mcp__github__*`)
+ * or `Bash(p:*)` / `Bash(p *)` (a command prefix) / `Bash(p)` (the exact command); anything else (other tools'
+ * patterns, inner wildcards, `Bash(*)`) is invalid and the hook never runs.
+ */
+export function checkHookIf(rule: string): string | null {
+  const compiled = compileIf(rule)
+  return compiled.ok ? null : compiled.reason
+}
+
+/**
+ * True when the `if` rule of a hook matches a tool call (no rule = always). A tool name matches the tool's harness or
+ * Claude Code names (`hookTargetNames`); a `Bash(…)` rule matches a `shell` call when any segment of its command (`a &&
+ * b`) starts with the prefix words (`Bash(p)`: equals them); a command that cannot be split (`$`, backticks, …)
+ * matches, so a guarding hook still runs. An invalid rule never matches (the hook never runs).
+ */
+export function matchHookIf(rule: string | null | undefined, target: HookIfTarget): boolean {
+  if (rule === null || rule === undefined || (typeof rule === 'string' && rule.trim() === ''))
+    return true
+  const compiled = compileIf(rule)
+  if (!compiled.ok || typeof target !== 'object' || target === null)
+    return false
+  const names = hookTargetNames(target.tool, typeof target.mcpServerName === 'string' ? { mcpServerName: target.mcpServerName } : undefined)
+  if (compiled.compiled.kind === 'tool') {
+    const tool = compiled.compiled.tool
+    return tool.startsWith('mcp__') ? names.some(name => matchToolAllowlist(name, [tool])) : names.includes(tool)
+  }
+  if (!names.includes('Bash'))
+    return false
+  const input = target.input
+  const command = typeof input === 'object' && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>).command : undefined
+  if (typeof command !== 'string')
+    return true
+  const parsed = parseShellCommand(command)
+  if (!parsed.ok)
+    return true
+  const { words, exact } = compiled.compiled
+  return parsed.segments.some(segment =>
+    (exact ? segment.words.length === words.length : segment.words.length >= words.length)
+    && words.every((word, index) => segment.words[index] === word))
 }
 
 export type HookPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions'
@@ -584,6 +1012,14 @@ export interface HookPayloadInput {
   readonly sessionSource?: 'startup' | 'compact'
   readonly message?: string
   readonly notificationType?: string
+  /** Phase 12: the chat transcript (`transcript_path`, every event); absent when it could not be written. */
+  readonly transcriptPath?: string
+  /** Phase 12: the tool error of PostToolUseFailure (`error`, cut to `HOOK_LIMITS.errorMaxChars`). */
+  readonly error?: string
+  /** Phase 12: the sub-agent of SubagentStart / SubagentStop, or of a hook that runs inside one (`agent_id`, `agent_type`). */
+  readonly agent?: { readonly id: string, readonly type: string }
+  /** Phase 12: why the session ended (SessionEnd `reason`; default `other`). */
+  readonly sessionEndReason?: string
 }
 
 export interface HookPayload {
@@ -604,7 +1040,7 @@ interface PayloadField {
 }
 
 /** Fields cut (in this order) when the payload is too large. */
-const SHRINK_ORDER = ['tool_response', 'tool_input', 'prompt', 'custom_instructions', 'message'] as const
+const SHRINK_ORDER = ['tool_response', 'tool_input', 'error', 'prompt', 'custom_instructions', 'message'] as const
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value : ''
@@ -676,19 +1112,30 @@ function buildUnchecked(event: HookEvent, input: HookPayloadInput, maxBytes: num
     fields.push(empty === undefined ? { key, value: serialize(value, null, 'null') } : { key, value: serialize(value, null, empty), raw: value, empty })
   }
   add('session_id', text(input.chatId))
+  if (typeof input.transcriptPath === 'string' && input.transcriptPath !== '')
+    add('transcript_path', input.transcriptPath)
   add('cwd', text(input.cwd))
   add('permission_mode', hookPermissionMode(text(input.toolMode)))
   add('hook_event_name', event)
+  const agent = isRecord(input.agent) ? input.agent : null
+  if (agent !== null) {
+    add('agent_id', text(agent.id))
+    add('agent_type', text(agent.type))
+  }
   const tool = isRecord(input.tool) ? input.tool : null
   const toolName = tool === null ? '' : text(tool.name)
   switch (event) {
     case 'PreToolUse':
     case 'PostToolUse':
+    case 'PostToolUseFailure':
+    case 'PermissionRequest':
       if (tool !== null) {
         add('tool_name', claudeToolName(toolName) ?? toolName)
         add('tool_input', tool.input ?? {}, '{}')
         if (event === 'PostToolUse')
           add('tool_response', tool.output ?? null, 'null')
+        if (event === 'PostToolUseFailure')
+          add('error', cutText(text(input.error), HOOK_LIMITS.errorMaxChars), '""')
         add('tool_use_id', text(tool.callId))
       }
       break
@@ -711,6 +1158,12 @@ function buildUnchecked(event: HookEvent, input: HookPayloadInput, maxBytes: num
     case 'SessionStart':
       add('source', input.sessionSource === 'compact' ? 'compact' : 'startup')
       break
+    case 'PostCompact':
+      add('trigger', input.trigger === 'manual' ? 'manual' : 'auto')
+      break
+    case 'SessionEnd':
+      add('reason', typeof input.sessionEndReason === 'string' && input.sessionEndReason !== '' ? input.sessionEndReason : 'other')
+      break
   }
   const harness: Record<string, unknown> = {
     version: 1,
@@ -721,7 +1174,7 @@ function buildUnchecked(event: HookEvent, input: HookPayloadInput, maxBytes: num
     harness.messageId = input.messageId
   harness.modelRef = text(input.modelRef)
   harness.origin = text(input.origin)
-  if (tool !== null && (event === 'PreToolUse' || event === 'PostToolUse'))
+  if (tool !== null && TOOL_EVENTS.has(event))
     harness.tool = toolName
   harness.source = text(input.source)
   const harnessField: PayloadField = { key: 'harness', value: serialize(harness, null, '{}') }
@@ -768,15 +1221,18 @@ export type HookPermissionDecision = 'allow' | 'deny' | 'ask'
 
 /** The reading of one hook process for one event. */
 export interface HookOutcome {
-  /** `ok` = exit 0; `blocked` = exit 2 or `decision: block` / `permissionDecision: deny`; `error` = anything else. */
+  /**
+   * `ok` = exit 0; `blocked` = exit 2 or `decision: block` / `permissionDecision: deny` (PermissionRequest:
+   * `behavior: deny`); `error` = anything else.
+   */
   readonly status: 'ok' | 'blocked' | 'error'
-  /** PreToolUse only. */
+  /** PreToolUse and PermissionRequest only (PermissionRequest: `allow` or `deny`). */
   readonly decision: HookPermissionDecision | null
   /** A block or decision reason (≤ `HOOK_LIMITS.reasonMaxChars`). */
   readonly reason: string | null
   /** Model-visible context (`additionalContext`, or plain stdout for UserPromptSubmit / SessionStart). */
   readonly context: string | null
-  /** PreToolUse only; undefined = unchanged. */
+  /** PreToolUse and PermissionRequest (`allow`) only; undefined = unchanged. */
   readonly updatedInput?: unknown
   /** false when the hook asked to stop (`continue: false`). */
   readonly continue: boolean
@@ -809,11 +1265,80 @@ function finish(draft: OutcomeDraft): HookOutcome {
 
 const OUTPUT_KEYS: ReadonlySet<string> = new Set(['continue', 'stopReason', 'systemMessage', 'suppressOutput', 'decision', 'reason', 'hookSpecificOutput'])
 
+type Note = (level: HookDiagnostic['level'], code: HookDiagnosticCode, message: string) => void
+
+/** An `updatedInput` value: the object (keys sorted) when it is one and fits the cap, else undefined (noted). */
+function readUpdatedInput(value: unknown, note: Note): unknown {
+  if (!isRecord(value)) {
+    note('warning', 'invalid-output', 'updatedInput must be an object; it was ignored.')
+    return undefined
+  }
+  const json = stableStringify(value)
+  if (json === null || utf8LengthUpTo(json, HOOK_LIMITS.updatedInputBytes) > HOOK_LIMITS.updatedInputBytes) {
+    note('warning', 'too-large', `updatedInput is larger than ${formatBytes(HOOK_LIMITS.updatedInputBytes)}; it was ignored.`)
+    return undefined
+  }
+  return JSON.parse(json) as unknown
+}
+
+/** The PermissionRequest `decision` object (Phase 12): `{ behavior: 'allow' | 'deny', updatedInput?, message?, interrupt? }`. */
+interface PermissionRequestDecision {
+  readonly behavior: 'allow' | 'deny'
+  readonly updatedInput?: unknown
+  readonly message: string | null
+  readonly interrupt: boolean
+}
+
+const PERMISSION_DECISION_KEYS: ReadonlySet<string> = new Set(['behavior', 'updatedInput', 'message', 'interrupt'])
+
+function readPermissionRequestDecision(value: unknown, note: Note): PermissionRequestDecision | null {
+  if (!isRecord(value)) {
+    note('warning', 'invalid-output', 'hookSpecificOutput.decision must be an object; it was ignored.')
+    return null
+  }
+  if (value.behavior !== 'allow' && value.behavior !== 'deny') {
+    note('warning', 'invalid-output', 'decision.behavior must be "allow" or "deny"; the decision was ignored.')
+    return null
+  }
+  const behavior = value.behavior
+  for (const key of Object.keys(value)) {
+    if (!PERMISSION_DECISION_KEYS.has(key))
+      note('info', 'ignored-field', `decision.${shownKey(key)} is not used.`)
+  }
+  let updatedInput: unknown
+  if (value.updatedInput !== undefined && value.updatedInput !== null) {
+    if (behavior === 'allow')
+      updatedInput = readUpdatedInput(value.updatedInput, note)
+    else
+      note('info', 'ignored-field', 'decision.updatedInput is not used when the hook denies the request.')
+  }
+  let message: string | null = null
+  if (value.message !== undefined && value.message !== null) {
+    if (typeof value.message !== 'string')
+      note('warning', 'invalid-output', 'decision.message must be text; it was ignored.')
+    else if (behavior === 'deny')
+      message = cappedText(value.message, HOOK_LIMITS.reasonMaxChars)
+    else
+      note('info', 'ignored-field', 'decision.message is used only when the hook denies the request.')
+  }
+  let interrupt = false
+  if (value.interrupt !== undefined && value.interrupt !== null) {
+    if (typeof value.interrupt !== 'boolean')
+      note('warning', 'invalid-output', 'decision.interrupt must be true or false; it was ignored.')
+    else if (behavior === 'deny')
+      interrupt = value.interrupt
+    else if (value.interrupt)
+      note('info', 'ignored-field', 'decision.interrupt is used only when the hook denies the request.')
+  }
+  return updatedInput === undefined ? { behavior, message, interrupt } : { behavior, updatedInput, message, interrupt }
+}
+
 /** Reads the `hookSpecificOutput` object of a JSON output. */
-function readSpecific(event: HookEvent, specific: unknown, draft: OutcomeDraft, note: (level: HookDiagnostic['level'], code: HookDiagnosticCode, message: string) => void): {
+function readSpecific(event: HookEvent, specific: unknown, draft: OutcomeDraft, note: Note): {
   permissionDecision?: HookPermissionDecision
   permissionReason?: string | null
   updatedInput?: unknown
+  request?: PermissionRequestDecision | null
 } {
   if (!isRecord(specific)) {
     note('warning', 'invalid-output', 'hookSpecificOutput must be an object; it was ignored.')
@@ -823,7 +1348,7 @@ function readSpecific(event: HookEvent, specific: unknown, draft: OutcomeDraft, 
     note('warning', 'invalid-output', `hookSpecificOutput.hookEventName must be "${event}"; it was ignored.`)
     return {}
   }
-  const result: { permissionDecision?: HookPermissionDecision, permissionReason?: string | null, updatedInput?: unknown } = {}
+  const result: { permissionDecision?: HookPermissionDecision, permissionReason?: string | null, updatedInput?: unknown, request?: PermissionRequestDecision | null } = {}
   for (const key of Object.keys(specific)) {
     const value = specific[key]
     if (key === 'hookEventName')
@@ -843,16 +1368,13 @@ function readSpecific(event: HookEvent, specific: unknown, draft: OutcomeDraft, 
       continue
     }
     if (event === 'PreToolUse' && key === 'updatedInput') {
-      if (!isRecord(value)) {
-        note('warning', 'invalid-output', 'updatedInput must be an object; it was ignored.')
-        continue
-      }
-      const json = stableStringify(value)
-      if (json === null || utf8LengthUpTo(json, HOOK_LIMITS.updatedInputBytes) > HOOK_LIMITS.updatedInputBytes) {
-        note('warning', 'too-large', `updatedInput is larger than ${formatBytes(HOOK_LIMITS.updatedInputBytes)}; it was ignored.`)
-        continue
-      }
-      result.updatedInput = JSON.parse(json) as unknown
+      const updated = readUpdatedInput(value, note)
+      if (updated !== undefined)
+        result.updatedInput = updated
+      continue
+    }
+    if (event === 'PermissionRequest' && key === 'decision') {
+      result.request = readPermissionRequestDecision(value, note)
       continue
     }
     if (CONTEXT_EVENTS.has(event) && key === 'additionalContext') {
@@ -867,7 +1389,7 @@ function readSpecific(event: HookEvent, specific: unknown, draft: OutcomeDraft, 
   return result
 }
 
-function readJsonOutput(event: HookEvent, output: Record<string, unknown>, draft: OutcomeDraft, note: (level: HookDiagnostic['level'], code: HookDiagnosticCode, message: string) => void): void {
+function readJsonOutput(event: HookEvent, output: Record<string, unknown>, draft: OutcomeDraft, note: Note): void {
   for (const key of Object.keys(output)) {
     if (!OUTPUT_KEYS.has(key))
       note('info', 'ignored-field', `The output field "${shownKey(key)}" is not used.`)
@@ -932,6 +1454,24 @@ function readJsonOutput(event: HookEvent, output: Record<string, unknown>, draft
         note('info', 'ignored-field', 'updatedInput is not used when the hook denies the tool call.')
       else
         draft.updatedInput = specific.updatedInput
+    }
+    return
+  }
+  if (event === 'PermissionRequest') {
+    const request = specific.request
+    if (request === undefined || request === null)
+      return
+    draft.decision = request.behavior
+    if (request.behavior === 'allow') {
+      if (request.updatedInput !== undefined)
+        draft.updatedInput = request.updatedInput
+      return
+    }
+    draft.status = 'blocked'
+    draft.reason = request.message
+    if (request.interrupt) {
+      draft.continue = false
+      draft.stopReason ??= request.message
     }
     return
   }
@@ -1117,4 +1657,236 @@ export function combineHookOutcomes(event: HookEvent, outcomes: readonly Sourced
     diagnostics,
   }
   return updatedInput === undefined ? combined : { ...combined, updatedInput }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Prompt hooks (Phase 12, ADR-057)
+
+/** The answer of a prompt hook's model: `{ ok, reason?, impossible? }`. */
+export interface PromptHookAnswer {
+  readonly ok: boolean
+  /** Required when `ok` is false (≤ `HOOK_LIMITS.reasonMaxChars`). */
+  readonly reason: string | null
+  /** Stop / SubagentStop only: the agent may stop although the hook said no (the reason is recorded). */
+  readonly impossible: boolean
+}
+
+export type ReadPromptHookAnswerResult
+  = | { readonly valid: true, readonly answer: PromptHookAnswer }
+    | { readonly valid: false, readonly error: string }
+
+/** Characters of a model answer that are read (the answer is a small JSON object). */
+const ANSWER_SCAN_MAX_CHARS = 65_536
+/** `{` positions tried before the answer counts as unreadable. */
+const ANSWER_OBJECT_ATTEMPTS = 32
+const FENCE = '```'
+
+/** The content of the first Markdown code fence (```json … ```; the info string skipped), or null. */
+function fencedContent(text: string): string | null {
+  const open = text.indexOf(FENCE)
+  if (open === -1)
+    return null
+  const lineEnd = text.indexOf('\n', open + FENCE.length)
+  const start = lineEnd === -1 ? open + FENCE.length : lineEnd + 1
+  const close = text.indexOf(FENCE, start)
+  return close === -1 ? null : text.slice(start, close)
+}
+
+/** The end index of the balanced `{…}` that starts at `start` (string-aware), or -1. */
+function objectEnd(text: string, start: number): number {
+  let depth = 0
+  let inString = false
+  for (let index = start; index < text.length; index++) {
+    const char = text[index]
+    if (inString) {
+      if (char === '\\')
+        index++
+      else if (char === '"')
+        inString = false
+      continue
+    }
+    if (char === '"') {
+      inString = true
+    }
+    else if (char === '{') {
+      depth++
+    }
+    else if (char === '}') {
+      depth--
+      if (depth === 0)
+        return index
+    }
+  }
+  return -1
+}
+
+/** The first JSON object of `text` (tried at up to `ANSWER_OBJECT_ATTEMPTS` `{` positions), or null. */
+function firstJsonObject(text: string): Record<string, unknown> | null {
+  let start = text.indexOf('{')
+  for (let attempt = 0; start !== -1 && attempt < ANSWER_OBJECT_ATTEMPTS; attempt++) {
+    const end = objectEnd(text, start)
+    if (end !== -1) {
+      try {
+        const parsed: unknown = JSON.parse(text.slice(start, end + 1))
+        if (isRecord(parsed))
+          return parsed
+      }
+      catch {
+        // Not JSON (prose with braces): try the next `{`.
+      }
+    }
+    start = text.indexOf('{', start + 1)
+  }
+  return null
+}
+
+/**
+ * Reads the answer of a prompt hook's model: a JSON code fence is unwrapped, the first JSON object is taken; `ok` must
+ * be true or false, `reason` (text) is required when `ok` is false, `impossible` counts only when it is `true` (and `ok`
+ * is false). Anything else is invalid (a non-blocking error; the error never quotes the answer).
+ */
+export function readPromptHookAnswer(text: string): ReadPromptHookAnswerResult {
+  if (typeof text !== 'string' || text.trim() === '')
+    return { valid: false, error: 'The hook model gave no answer.' }
+  try {
+    const source = text.slice(0, ANSWER_SCAN_MAX_CHARS)
+    const fenced = fencedContent(source)
+    const value = (fenced === null ? null : firstJsonObject(fenced)) ?? firstJsonObject(source)
+    if (value === null)
+      return { valid: false, error: 'The hook model did not answer with a JSON object.' }
+    if (typeof value.ok !== 'boolean')
+      return { valid: false, error: 'The hook model\'s answer has no "ok" true or false.' }
+    const reason = cappedText(value.reason, HOOK_LIMITS.reasonMaxChars)
+    if (!value.ok && reason === null)
+      return { valid: false, error: 'The hook model said no without a reason.' }
+    return { valid: true, answer: { ok: value.ok, reason, impossible: !value.ok && value.impossible === true } }
+  }
+  catch {
+    return { valid: false, error: 'The hook model\'s answer could not be read.' }
+  }
+}
+
+/** One pass: `\$` → `$`, `$ARGUMENTS` → the payload. */
+const PROMPT_PLACEHOLDER = /\\\$|\$ARGUMENTS/g
+
+/**
+ * The text a prompt hook's model reads: `$ARGUMENTS` is replaced by the payload JSON (every occurrence; the payload is
+ * appended after a blank line when the prompt has none) and `\$` is a literal `$` (so `\$ARGUMENTS` stays text).
+ */
+export function expandHookPrompt(prompt: string, payloadJson: string): string {
+  const template = typeof prompt === 'string' ? prompt : ''
+  const json = typeof payloadJson === 'string' ? payloadJson : ''
+  let used = false
+  const text = template.replace(PROMPT_PLACEHOLDER, (match: string) => {
+    if (match !== '$ARGUMENTS')
+      return '$'
+    used = true
+    return json
+  })
+  if (used)
+    return text
+  return text === '' ? json : `${text}\n\n${json}`
+}
+
+/**
+ * The outcome of a prompt hook (ADR-057), so the seams apply it like a command hook's. `answer` null (unreadable, timed
+ * out, failed) → a non-blocking error (`options.error` or a generic text). `ok: true` decides nothing (it never allows).
+ * `ok: false`:
+ * - PreToolUse: deny and end the turn (`continue: false`); with `continueOnBlock`, deny only (the reason is the tool
+ *   error);
+ * - PostToolUse: end the turn (`continue: false`); with `continueOnBlock`, block (the reason is fed back);
+ * - PostToolUseFailure, UserPromptSubmit: block;
+ * - Stop / SubagentStop: block (the agent continues with the reason) unless `impossible` (the stop is allowed, the
+ *   reason recorded);
+ * - PermissionRequest and every other event: no effect, the reason is recorded.
+ */
+export function promptHookOutcome(event: HookEvent, answer: PromptHookAnswer | null, options?: { readonly continueOnBlock?: boolean, readonly error?: string }): HookOutcome {
+  const draft: OutcomeDraft = {
+    status: 'ok',
+    decision: null,
+    reason: null,
+    context: null,
+    continue: true,
+    stopReason: null,
+    systemMessage: null,
+    suppressOutput: false,
+    error: null,
+    diagnostics: [],
+  }
+  if (answer === null || !isRecord(answer) || typeof answer.ok !== 'boolean') {
+    draft.status = 'error'
+    draft.error = cappedText(options?.error, HOOK_LIMITS.reasonMaxChars) ?? 'The hook model did not give a valid answer.'
+    return finish(draft)
+  }
+  if (answer.ok)
+    return finish(draft)
+  const reason = cappedText(answer.reason, HOOK_LIMITS.reasonMaxChars) ?? 'A prompt hook said no.'
+  const continueOnBlock = options?.continueOnBlock === true
+  draft.reason = reason
+  switch (event) {
+    case 'PreToolUse':
+      draft.status = 'blocked'
+      draft.decision = 'deny'
+      if (!continueOnBlock) {
+        draft.continue = false
+        draft.stopReason = reason
+      }
+      break
+    case 'PostToolUse':
+      if (continueOnBlock) {
+        draft.status = 'blocked'
+      }
+      else {
+        draft.continue = false
+        draft.stopReason = reason
+      }
+      break
+    case 'PostToolUseFailure':
+    case 'UserPromptSubmit':
+      draft.status = 'blocked'
+      break
+    case 'Stop':
+    case 'SubagentStop':
+      if (answer.impossible !== true)
+        draft.status = 'blocked'
+      break
+    default:
+      break
+  }
+  return finish(draft)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Exec form (Phase 12, ADR-057)
+
+/** A `${NAME}` placeholder (`CLAUDE_PLUGIN_ROOT`, `CLAUDE_PROJECT_DIR`, `user_config.KEY`, …). */
+const EXEC_PLACEHOLDER = /\$\{([a-z_]\w{0,63}(?:\.[\w-]{1,64})?)\}/gi
+
+/** `word` single-quoted for a POSIX shell (`'` → `'\''`); nothing inside single quotes is special. */
+function shellQuote(word: string): string {
+  return `'${word.replace(/'/g, '\'\\\'\'')}'`
+}
+
+/**
+ * The shell text of an exec-form hook (`command` + `args`), for `runShellCommand` (the only shell-string spawn): every
+ * `${NAME}` whose name is a key of `vars` is replaced by its value as plain text (no shell expansion; unknown names stay
+ * as written, never read from the environment), then each word is single-quoted, so no argument is ever parsed by the
+ * shell (spaces, quotes, `$`, backticks, `;` and newlines stay literal). null when the command is empty or a word holds
+ * a NUL character (an argument list cannot carry it).
+ */
+export function execFormCommand(command: string, args: readonly string[], vars?: Readonly<Record<string, string>>): string | null {
+  if (typeof command !== 'string' || command.trim() === '')
+    return null
+  const values = typeof vars === 'object' && vars !== null ? vars : {}
+  const substitute = (word: string): string => word.replace(EXEC_PLACEHOLDER, (match: string, name: string) => {
+    const value = Object.hasOwn(values, name) ? values[name] : undefined
+    return typeof value === 'string' ? value : match
+  })
+  const words = [command.trim(), ...(Array.isArray(args) ? args : [])]
+  if (words.some(word => typeof word !== 'string'))
+    return null
+  const substituted = words.map(substitute)
+  if (substituted.some(word => word.includes('\0')))
+    return null
+  return substituted.map(shellQuote).join(' ')
 }

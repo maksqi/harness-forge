@@ -21,6 +21,16 @@ import { settings as settingsTable } from '../../db/schema.ts'
 
 export type SettingsKey = keyof Settings
 
+/**
+ * Equal setting values: the same primitive, or (Phase 12, C40 compile fix: the object-valued setting `modelAliases`)
+ * objects with the same JSON (a parse always builds a new object).
+ */
+function sameSettingValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b))
+    return true
+  return typeof a === 'object' && a !== null && typeof b === 'object' && b !== null && JSON.stringify(a) === JSON.stringify(b)
+}
+
 /** A committed update that changed at least one public value. */
 export interface SettingsChange {
   /** Keys whose value changed, in `SETTINGS_KEYS` order. */
@@ -180,7 +190,7 @@ export function createSettingsService(deps: AppDeps): ObservableSettingsService 
         })
       const next = settingsSchema.parse({ ...previous, ...Object.fromEntries(entries) })
       cache = next
-      const keys = SETTINGS_KEYS.filter(key => !Object.is(previous[key], next[key]))
+      const keys = SETTINGS_KEYS.filter(key => !sameSettingValue(previous[key], next[key]))
       if (keys.length > 0)
         notify({ keys, previous, current: next })
       return { ...next }

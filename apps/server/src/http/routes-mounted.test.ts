@@ -327,6 +327,72 @@ describe('unknown routes and invalid input', () => {
     }
   })
 
+  const MARKETPLACE = 'mkt_sample0000000001'
+  const PLAN = 'cip_sample0000000001'
+  const DEFINITIONS = `/api/projects/${PROJECT}/definitions/file`
+  it.each([
+    ['POST', '/api/marketplaces', { source: { type: 'github', repo: 'anthropics' } }, ['source', 'repo']],
+    ['POST', '/api/marketplaces', { source: { type: 'github', repo: 'anthropics/claude-plugins-official', ref: '../main' } }, ['source', 'ref']],
+    ['POST', '/api/marketplaces', { source: { type: 'url', url: 'http://example.com/marketplace.json' } }, ['source', 'url']],
+    ['POST', '/api/marketplaces', { source: { type: 'path', path: 'relative/folder' } }, ['source', 'path']],
+    ['POST', '/api/marketplaces', { source: { type: 'git', url: 'https://example.com/r.git' } }, ['source', 'type']],
+    ['POST', '/api/marketplaces', { source: { type: 'path', path: '/srv/marketplace' }, name: 'mine' }, []],
+    ['GET', '/api/marketplaces/mkt_short', undefined, ['id']],
+    ['POST', '/api/marketplaces/plugin-id/refresh', undefined, ['id']],
+    ['DELETE', '/api/marketplaces/mkt_short', undefined, ['id']],
+    ['POST', '/api/claude-import/apply', { planId: 'cip_short', items: [{ key: 'agent:reviewer', action: 'import' }] }, ['planId']],
+    ['POST', '/api/claude-import/apply', { planId: PLAN, items: [] }, ['items']],
+    ['POST', '/api/claude-import/apply', { planId: PLAN, items: [{ key: 'agent:reviewer', action: 'delete' }] }, ['items', 0, 'action']],
+    ['POST', '/api/claude-import/apply', { planId: PLAN, items: [{ key: 'agent:reviewer', action: 'rename' }] }, ['items', 0, 'renameTo']],
+    ['POST', '/api/claude-import/apply', { planId: PLAN, items: [{ key: 'agent:reviewer', action: 'import' }], extra: true }, []],
+    ['GET', '/api/projects/prj_short/definitions/file?path=.claude/agents/reviewer.md', undefined, ['id']],
+    ['GET', `${DEFINITIONS}?path=src/index.ts`, undefined, ['path']],
+    ['GET', `${DEFINITIONS}?path=.claude/../.env`, undefined, ['path']],
+    ['GET', DEFINITIONS, undefined, ['path']],
+    ['PUT', DEFINITIONS, { path: '.claude/settings.json', expectedSha256: null, content: 'x' }, ['path']],
+    ['PUT', DEFINITIONS, { path: '.claude/agents/reviewer.md', expectedSha256: 'ABC', content: 'x' }, ['expectedSha256']],
+    ['DELETE', `${DEFINITIONS}?path=.claude/settings.json&expectedSha256=${SHA}`, undefined, ['path']],
+    ['DELETE', `${DEFINITIONS}?path=.claude/agents/reviewer.md`, undefined, ['expectedSha256']],
+  ] as const)('the Phase 12 routes validate their input first: %s %s -> 400', async (method, path, body, issuePath) => {
+    const init: RequestInit = { method }
+    if (body !== undefined) {
+      init.headers = { 'content-type': 'application/json' }
+      init.body = JSON.stringify(body)
+    }
+    const response = await t.request(path, init)
+    expect(response.status).toBe(400)
+    const envelope = harnessErrorEnvelopeSchema.parse(await response.json())
+    expect(envelope.error.code).toBe('validation_error')
+    expect(envelope.error.details).toMatchObject({ issues: [expect.objectContaining({ path: [...issuePath] })] })
+  })
+
+  it('the Claude Code upload takes multipart only (ADR-055)', async () => {
+    for (const init of [
+      { method: 'POST' },
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ files: [] }) },
+    ] satisfies RequestInit[]) {
+      const response = await t.request('/api/claude-import/upload', init)
+      expect(response.status).toBe(400)
+      expect(harnessErrorEnvelopeSchema.parse(await response.json()).error.code).toBe('validation_error')
+    }
+  })
+
+  it('the marketplace and project definition routes never shadow their neighbors', async () => {
+    for (const [method, path, key] of [
+      ['GET', '/api/marketplaces', 'marketplaces.list'],
+      ['GET', `/api/marketplaces/${MARKETPLACE}`, 'marketplaces.get'],
+      ['POST', `/api/marketplaces/${MARKETPLACE}/refresh`, 'marketplaces.refresh'],
+      ['GET', '/api/claude-import/home', 'claudeImport.home'],
+      ['GET', `${DEFINITIONS}?path=.claude/settings.json`, 'projectDefinitions.read'],
+      ['GET', `/api/projects/${PROJECT}/files`, 'projectFiles.search'],
+    ] as const) {
+      if (!stubRouteKeys().has(key))
+        continue
+      const envelope = harnessErrorEnvelopeSchema.parse(await (await t.request(path, { method })).json())
+      expect(envelope.error.message, key).toContain(`(${key})`)
+    }
+  })
+
   it('/customizations/source is never taken for a customization id (static segment first)', async () => {
     const response = await t.request('/api/customizations/source?kind=skill&name=pdf&source=builtin')
     const envelope = harnessErrorEnvelopeSchema.parse(await response.json())

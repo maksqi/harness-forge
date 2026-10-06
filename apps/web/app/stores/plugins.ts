@@ -79,6 +79,7 @@ function summaryOf(detail: PluginDetail): PluginSummary {
     description: detail.description,
     icon: detail.icon,
     kind: detail.kind,
+    format: detail.format,
     source: detail.source,
     sourceRef: detail.sourceRef,
     builtin: detail.builtin,

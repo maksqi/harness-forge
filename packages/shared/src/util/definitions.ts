@@ -18,6 +18,15 @@
  * raw value starts with `[` or `{` (Claude Code's `[pr-number] [priority]`) is taken as raw text, so it never makes
  * the YAML fail. Messages start with `Line N: ` when the line is known and never quote file contents (only key names
  * and reserved names).
+ *
+ * Phase 12 (ADR-058, C42): Claude Code's newer keys, present in the parsed fields only when the file sets them (so every
+ * earlier definition parses to the same fields): agents `disallowedTools`, `maxTurns` (1–200), `color` (`AGENT_COLORS`),
+ * `skills` (≤ 5 names); commands and skills `when_to_use`, `arguments` (≤ 9 names), `disallowed-tools`, `context: fork`
+ * with `agent`; skills also `allowed-tools` and `model`. A Claude model name (`sonnet`, `opus`, `haiku`, `fable`,
+ * `opusplan`, a `claude-…` id, `[1m]` dropped) leaves `model` null and is kept as `modelAlias` (resolved by the server
+ * through the `modelAliases` setting). Keys Claude Code supports and the harness does not (`permissionMode`, `hooks`,
+ * `mcpServers`, …; `CLAUDE_UNSUPPORTED_DEFINITION_KEYS`) are `ignored-key` infos. `setDefinitionName` inserts or replaces
+ * the `name:` line of a file and keeps every other line byte for byte.
  */
 import { isMap, parseDocument, stringify } from 'yaml'
 import { AGENT_NAME_PATTERN, COMMAND_NAME_PATTERN, isClientCommand, isHarnessCommand, isReservedAgentName, safeParseModelRef } from '../ids.ts'
@@ -49,7 +58,42 @@ export const DEFINITION_LIMITS = {
   argumentHintMaxChars: 100,
   /** Entries of a `tools` / `allowed-tools` list. */
   toolsMax: 64,
+  /** `when_to_use` (Phase 12) is cut to this many characters (warning). */
+  whenToUseMaxChars: 1024,
+  /** Names of an `arguments` list (Phase 12; `$name` placeholders). */
+  argumentsMax: 9,
+  /** Skill names of an agent's `skills` list (Phase 12; preloaded into the child's instructions). */
+  agentSkillsMax: 5,
+  /** Largest agent `maxTurns` (Phase 12). */
+  maxTurnsMax: 200,
 } as const
+
+/** The agent colors of Claude Code's `color` key (Phase 12, ADR-058). */
+export const AGENT_COLORS = ['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'cyan'] as const
+export type AgentColor = (typeof AGENT_COLORS)[number]
+
+/** A named argument of an `arguments` list (Phase 12): `$name` in the body. */
+export const ARGUMENT_NAME_PATTERN = /^[a-z_][\da-z_]{0,31}$/
+
+/**
+ * Frontmatter keys Claude Code supports and the harness reads but does not use (Phase 12, ADR-058): each one is an
+ * `ignored-key` info.
+ */
+export const CLAUDE_UNSUPPORTED_DEFINITION_KEYS = [
+  'permissionMode',
+  'mcpServers',
+  'hooks',
+  'memory',
+  'background',
+  'effort',
+  'isolation',
+  'initialPrompt',
+  'paths',
+  'shell',
+  'metadata',
+  'license',
+  'compatibility',
+] as const
 
 /** `error` = the definition cannot be used (catalog state `invalid`); `warning` = used, something dropped; `info` = ignored. */
 export const DEFINITION_DIAGNOSTIC_LEVELS = ['error', 'warning', 'info'] as const
@@ -90,32 +134,63 @@ export interface DefinitionDiagnostic {
   readonly name?: string
 }
 
+/**
+ * Agent fields. The Phase 12 keys (`disallowedTools`, `maxTurns`, `color`, `skills`, `modelAlias`) are present only when
+ * the file sets them.
+ */
 export interface AgentDefinitionFields {
   readonly name: string
   readonly description: string
   /** Harness tool names (Claude Code names mapped, `mcp__*` kept); null = every tool the parent's mode allows. */
   readonly tools: readonly string[] | null
-  /** `provider:model`, `inherit`, or null (the default sub-agent model). */
+  /** `provider:model`, `inherit`, or null (the default sub-agent model, or `modelAlias`). */
   readonly model: string | null
   /** The markdown body: the child's instructions. */
   readonly instructions: string
+  /** `disallowedTools` (Phase 12): harness tool names removed from the child's tools (applied before `tools`). */
+  readonly disallowedTools?: readonly string[]
+  /** `maxTurns` (Phase 12): 1 … `DEFINITION_LIMITS.maxTurnsMax`; the child runs at most this many steps. */
+  readonly maxTurns?: number
+  /** `color` (Phase 12): the agent's color in the chat. */
+  readonly color?: AgentColor
+  /** `skills` (Phase 12): ≤ `DEFINITION_LIMITS.agentSkillsMax` skill names preloaded into the child's instructions. */
+  readonly skills?: readonly string[]
+  /** A Claude model name (`sonnet`, `opus`, `haiku`, `fable`, `claude-…`), lowercased; `model` is null then (Phase 12). */
+  readonly modelAlias?: string
 }
 
+/**
+ * Command fields. The Phase 12 keys (`whenToUse`, `arguments`, `disallowedTools`, `context`, `agent`, `modelAlias`) are
+ * present only when the file sets them.
+ */
 export interface CommandDefinitionFields {
   readonly name: string
   readonly description: string
   readonly argumentHint: string | null
-  /** `provider:model` or null (the chat's model). */
+  /** `provider:model` or null (the chat's model, or `modelAlias`). */
   readonly model: string | null
   /** Harness tool names that narrow the turn; null = no restriction. */
   readonly allowedTools: readonly string[] | null
-  /** The prompt template (`$ARGUMENTS`, `$1` … `$9`, `{{input}}`). */
+  /** The prompt template (`$ARGUMENTS`, `$1` … `$9`, `{{input}}`; Phase 12: `$ARGUMENTS[N]`, `$name`, `${CLAUDE_…}`). */
   readonly body: string
+  /** `when_to_use` (Phase 12): appended to the description in listings. */
+  readonly whenToUse?: string
+  /** `arguments` (Phase 12): ≤ 9 names (`ARGUMENT_NAME_PATTERN`), `$name` = the word at that position. */
+  readonly arguments?: readonly string[]
+  /** `disallowed-tools` (Phase 12): harness tool names removed from the turn (restrict-only). */
+  readonly disallowedTools?: readonly string[]
+  /** `context: fork` (Phase 12): the definition runs as a sub-agent of type `agent`. */
+  readonly context?: 'fork'
+  /** `agent` (Phase 12, only with `context: fork`): the sub-agent type, lowercased (default `general`). */
+  readonly agent?: string
+  /** A Claude model name, lowercased; `model` is null then (Phase 12). */
+  readonly modelAlias?: string
 }
 
 /**
  * Skill fields. The Phase 11 keys are present only when the file sets a value other than the default (so a Phase 10
- * skill parses to exactly `{ name, description, content }`); read them with `skillInvocation`.
+ * skill parses to exactly `{ name, description, content }`); read them with `skillInvocation`. The Phase 12 keys are
+ * present only when the file sets them.
  */
 export interface SkillDefinitionFields {
   readonly name: string
@@ -128,6 +203,22 @@ export interface SkillDefinitionFields {
   readonly modelInvocable?: boolean
   /** `argument-hint` (Phase 11): absent = none. */
   readonly argumentHint?: string
+  /** `when_to_use` (Phase 12): appended to the description in listings. */
+  readonly whenToUse?: string
+  /** `arguments` (Phase 12): ≤ 9 names (`ARGUMENT_NAME_PATTERN`). */
+  readonly arguments?: readonly string[]
+  /** `allowed-tools` (Phase 12): harness tool names that narrow `/name` (restrict-only, like a command's). */
+  readonly allowedTools?: readonly string[]
+  /** `disallowed-tools` (Phase 12): harness tool names removed (restrict-only). */
+  readonly disallowedTools?: readonly string[]
+  /** `model` (Phase 12): `provider:model` used by `/name`. */
+  readonly model?: string
+  /** A Claude model name, lowercased (Phase 12). */
+  readonly modelAlias?: string
+  /** `context: fork` (Phase 12): the skill runs as a sub-agent of type `agent`. */
+  readonly context?: 'fork'
+  /** `agent` (Phase 12, only with `context: fork`): the sub-agent type, lowercased (default `general`). */
+  readonly agent?: string
 }
 
 /** Output style fields (Phase 11, ADR-051). */
@@ -180,11 +271,18 @@ const KEY_NAME_SHOWN_MAX = 64
 
 /** The frontmatter keys each kind reads; any other key is an `ignored-key` (info). */
 const KIND_KEYS: Readonly<Record<CustomizationKind, readonly string[]>> = {
-  agent: ['name', 'description', 'tools', 'model'],
-  command: ['name', 'description', 'argument-hint', 'model', 'allowed-tools'],
-  skill: ['name', 'description', 'argument-hint', 'user-invocable', 'disable-model-invocation'],
+  agent: ['name', 'description', 'tools', 'model', 'disallowedTools', 'maxTurns', 'color', 'skills'],
+  command: ['name', 'description', 'argument-hint', 'model', 'allowed-tools', 'when_to_use', 'arguments', 'disallowed-tools', 'context', 'agent'],
+  skill: ['name', 'description', 'argument-hint', 'user-invocable', 'disable-model-invocation', 'when_to_use', 'arguments', 'allowed-tools', 'disallowed-tools', 'model', 'context', 'agent'],
   style: ['name', 'description', 'keep-coding-instructions'],
 }
+const UNSUPPORTED_KEYS: ReadonlySet<string> = new Set(CLAUDE_UNSUPPORTED_DEFINITION_KEYS)
+/** A skill or agent name an agent's `skills` or a fork's `agent` names: bare or qualified (`plugin:name`), lowercased. */
+const DEFINITION_REF_PATTERN = /^[\da-z][\da-z-]{0,63}(?::[\da-z][\da-z-]{0,63}){0,3}$/
+/** Longest `skills` entry / fork `agent` (the qualified name limit). */
+const DEFINITION_REF_MAX_CHARS = 128
+/** A cleaned Claude model id (`claude-sonnet-4-5`, `claude-3-5-haiku-20241022`). */
+const CLAUDE_MODEL_ID = /^claude-[\da-z][\d.a-z-]{0,99}$/
 
 /**
  * `yaml` options (verified in `yaml@2.9.1` `dist/options.d.ts`): the YAML 1.2 core schema (a `%YAML 1.1` directive
@@ -225,8 +323,8 @@ const LENIENT_LIST_ITEM = /^[ \t]*-(?:[ \t](.*))?$/s
 const BLOCK_SCALAR_HEADER = /^[>|](?:[+-]?\d?|\d[+-])$/
 /** The raw value of a top-level `argument-hint:` line. */
 const ARGUMENT_HINT_LINE = /^argument-hint[ \t]*:(.*)$/s
-/** Claude Code model names without a provider (`sonnet`, `opus`, `haiku`, `opusplan`, `claude-…`), lowercased. */
-const CLAUDE_MODEL_NAME = /^(?:(?:sonnet|opus|haiku|opusplan)(?:\[1m\])?|claude-.*)$/s
+/** Claude Code model names without a provider (`sonnet`, `opus`, `haiku`, `fable`, `opusplan`, `claude-…`), lowercased. */
+const CLAUDE_MODEL_NAME = /^(?:(?:sonnet|opus|haiku|fable|opusplan)(?:\[1m\])?|claude-.*)$/s
 const MARKDOWN_HEADING = /^#{1,6}[ \t]+/
 const LEADING_BLANK_LINES = /^(?:[ \t]*\n)+/
 const LINE_BREAKS = /\r\n?/g
@@ -681,32 +779,62 @@ function readDescription(kind: CustomizationKind, front: Frontmatter | null, bod
   return text
 }
 
-function readModel(kind: 'agent' | 'command', front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): string | null {
+/**
+ * The Claude model name of `value` (Phase 12, ADR-058), normalized: lowercased, a `[1m]` suffix removed, `opusplan` →
+ * `opus`; `sonnet`, `opus`, `haiku`, `fable` or a `claude-…` id. null when `value` is no Claude model name (a
+ * `provider:model` ref, `inherit`, anything else).
+ */
+export function claudeModelAlias(value: string): string | null {
+  if (typeof value !== 'string')
+    return null
+  const lower = value.trim().toLowerCase()
+  if (lower.length > 128 || !CLAUDE_MODEL_NAME.test(lower))
+    return null
+  const bare = lower.endsWith('[1m]') ? lower.slice(0, -4) : lower
+  if (bare === 'opusplan')
+    return 'opus'
+  if (bare === 'sonnet' || bare === 'opus' || bare === 'haiku' || bare === 'fable')
+    return bare
+  return CLAUDE_MODEL_ID.test(bare) ? bare : null
+}
+
+interface ModelValue {
+  readonly model: string | null
+  readonly alias: string | null
+}
+
+const NO_MODEL: ModelValue = { model: null, alias: null }
+
+function readModel(kind: 'agent' | 'command' | 'skill', front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): ModelValue {
   const field = fieldOf(front, 'model')
   if (field === null || isAbsent(field))
-    return null
+    return NO_MODEL
   const fallback = kind === 'agent' ? 'the default sub-agent model is used' : 'the chat\'s model is used'
-  const invalid = (): null => {
+  const invalid = (): ModelValue => {
     diagnostics.push(diagnostic('warning', 'invalid-model', `The model must be "provider:model"; ${fallback}.`, field.line))
-    return null
+    return NO_MODEL
   }
   if (typeof field.value !== 'string')
     return invalid()
   const value = field.value.trim()
   if (value === '')
-    return null
+    return NO_MODEL
   const lower = value.toLowerCase()
   if (lower === 'inherit') {
     if (kind === 'agent')
-      return 'inherit'
+      return { model: 'inherit', alias: null }
     diagnostics.push(diagnostic('info', 'invalid-model', 'Only agents inherit a model; the chat\'s model is used.', field.line))
-    return null
+    return NO_MODEL
   }
   if (value.includes(':'))
-    return !/\s/.test(value) && safeParseModelRef(value) !== null ? value : invalid()
+    return !/\s/.test(value) && safeParseModelRef(value) !== null ? { model: value, alias: null } : invalid()
   if (CLAUDE_MODEL_NAME.test(lower)) {
-    diagnostics.push(diagnostic('info', 'model-alias', `Claude model names need a provider ("provider:model"); ${fallback}.`, field.line))
-    return null
+    const alias = claudeModelAlias(lower)
+    const message = alias === null
+      ? `Claude model names need a provider ("provider:model"); ${fallback}.`
+      : `Claude model names use the model aliases of the settings; without one, ${fallback}.`
+    diagnostics.push(diagnostic('info', 'model-alias', message, field.line))
+    return { model: null, alias }
   }
   return invalid()
 }
@@ -766,6 +894,167 @@ function readTools(key: 'tools' | 'allowed-tools', front: Frontmatter | null, di
   return normalized.tools
 }
 
+/** A `disallowedTools` / `disallowed-tools` list (Phase 12): absent, invalid or empty → null (nothing removed). */
+function readDisallowedTools(key: 'disallowedTools' | 'disallowed-tools', front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): readonly string[] | null {
+  const field = fieldOf(front, key)
+  if (field === null)
+    return null
+  const normalized = normalizeToolList(field.value, { mode: 'deny' })
+  for (const entry of normalized.diagnostics)
+    diagnostics.push(withLine(entry, field.line))
+  return normalized.tools === null || normalized.tools.length === 0 ? null : normalized.tools
+}
+
+/** The entries of a list value: a YAML list, or a text split on commas and blanks; null when it is neither. */
+function listEntries(value: unknown): unknown[] | null {
+  if (Array.isArray(value))
+    return value
+  if (typeof value === 'string')
+    return value.split(/[\s,]+/).filter(entry => entry !== '')
+  return null
+}
+
+/** `maxTurns` (Phase 12): a whole number from 1 to `DEFINITION_LIMITS.maxTurnsMax`; larger values are lowered. */
+function readMaxTurns(front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): number | null {
+  const field = fieldOf(front, 'maxTurns')
+  if (field === null || isAbsent(field))
+    return null
+  const raw = typeof field.value === 'string' && /^\s*\d{1,9}\s*$/.test(field.value) ? Number(field.value) : field.value
+  const max = DEFINITION_LIMITS.maxTurnsMax
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) {
+    diagnostics.push(diagnostic('warning', 'invalid-field', `"maxTurns" must be a whole number from 1 to ${max}; it was ignored.`, field.line))
+    return null
+  }
+  if (raw > max) {
+    diagnostics.push(diagnostic('warning', 'invalid-field', `"maxTurns" is larger than ${max}; ${max} is used.`, field.line))
+    return max
+  }
+  return raw
+}
+
+function readColor(front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): AgentColor | null {
+  const field = fieldOf(front, 'color')
+  if (field === null || isAbsent(field))
+    return null
+  const value = typeof field.value === 'string' ? field.value.trim().toLowerCase() : null
+  const color = AGENT_COLORS.find(entry => entry === value)
+  if (color === undefined) {
+    diagnostics.push(diagnostic('warning', 'invalid-field', `The color must be one of ${AGENT_COLORS.join(', ')}; it was ignored.`, field.line))
+    return null
+  }
+  return color
+}
+
+/** A skill or agent reference (lowercased, bare or qualified), or null. */
+function definitionRef(value: unknown): string | null {
+  if (typeof value !== 'string')
+    return null
+  const name = value.trim().toLowerCase()
+  return name.length <= DEFINITION_REF_MAX_CHARS && DEFINITION_REF_PATTERN.test(name) ? name : null
+}
+
+/** An agent's `skills` (Phase 12): ≤ `DEFINITION_LIMITS.agentSkillsMax` valid names, deduplicated; empty → null. */
+function readSkillNames(front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): readonly string[] | null {
+  const field = fieldOf(front, 'skills')
+  if (field === null || isAbsent(field))
+    return null
+  const entries = listEntries(field.value)
+  if (entries === null) {
+    diagnostics.push(diagnostic('warning', 'invalid-field', 'The skills must be a list of skill names; they were ignored.', field.line))
+    return null
+  }
+  const names: string[] = []
+  let invalid = 0
+  for (const entry of entries) {
+    const name = definitionRef(entry)
+    if (name === null) {
+      invalid++
+      continue
+    }
+    if (!names.includes(name))
+      names.push(name)
+  }
+  if (invalid > 0)
+    diagnostics.push(diagnostic('warning', 'invalid-field', `${invalid} ${invalid === 1 ? 'entry' : 'entries'} of the skills list ${invalid === 1 ? 'is' : 'are'} not a skill name; dropped.`, field.line))
+  const max = DEFINITION_LIMITS.agentSkillsMax
+  if (names.length > max) {
+    names.length = max
+    diagnostics.push(diagnostic('warning', 'limit', `An agent preloads at most ${max} skills; only the first ${max} are used.`, field.line))
+  }
+  return names.length === 0 ? null : names
+}
+
+function readWhenToUse(front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): string | null {
+  const field = fieldOf(front, 'when_to_use')
+  if (field === null || isAbsent(field))
+    return null
+  if (typeof field.value !== 'string') {
+    diagnostics.push(diagnostic('warning', 'invalid-field', '"when_to_use" must be text; it was ignored.', field.line))
+    return null
+  }
+  let text = field.value.trim()
+  if (text === '')
+    return null
+  const max = DEFINITION_LIMITS.whenToUseMaxChars
+  if (text.length > max) {
+    text = cutText(text, max)
+    diagnostics.push(diagnostic('warning', 'invalid-field', `"when_to_use" is longer than ${max} characters; it was shortened.`, field.line))
+  }
+  return text
+}
+
+/**
+ * Named `arguments` (Phase 12): a list or a text of names (`ARGUMENT_NAME_PATTERN`); a name that is invalid or repeated
+ * drops the whole list (positions would shift); more than `DEFINITION_LIMITS.argumentsMax` keep the first ones.
+ */
+function readArgumentNames(front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): readonly string[] | null {
+  const field = fieldOf(front, 'arguments')
+  if (field === null || isAbsent(field))
+    return null
+  const entries = listEntries(field.value)
+  const names: string[] = []
+  for (const entry of entries ?? [null]) {
+    const name = typeof entry === 'string' ? entry.trim() : null
+    if (name === null || !ARGUMENT_NAME_PATTERN.test(name) || names.includes(name)) {
+      const message = 'The arguments must be distinct names of lowercase letters, digits and "_" (a letter or "_" first, at most 32 characters); they were ignored.'
+      diagnostics.push(diagnostic('warning', 'invalid-field', message, field.line))
+      return null
+    }
+    names.push(name)
+  }
+  const max = DEFINITION_LIMITS.argumentsMax
+  if (names.length > max) {
+    names.length = max
+    diagnostics.push(diagnostic('warning', 'limit', `At most ${max} named arguments are used; the others were dropped.`, field.line))
+  }
+  return names.length === 0 ? null : names
+}
+
+/** `context: fork` and its `agent` (Phase 12); `agent` without `fork` is an info and dropped. */
+function readFork(front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): { context: 'fork' | null, agent: string | null } {
+  const contextField = fieldOf(front, 'context')
+  let context: 'fork' | null = null
+  if (contextField !== null && !isAbsent(contextField)) {
+    if (typeof contextField.value === 'string' && contextField.value.trim().toLowerCase() === 'fork')
+      context = 'fork'
+    else
+      diagnostics.push(diagnostic('warning', 'invalid-field', '"context" must be "fork"; it was ignored.', contextField.line))
+  }
+  const agentField = fieldOf(front, 'agent')
+  if (agentField === null || isAbsent(agentField))
+    return { context, agent: null }
+  if (context === null) {
+    diagnostics.push(diagnostic('info', 'ignored-key', 'The key "agent" is used only with "context: fork"; it is ignored.', agentField.line))
+    return { context, agent: null }
+  }
+  const agent = definitionRef(agentField.value)
+  if (agent === null) {
+    diagnostics.push(diagnostic('warning', 'invalid-field', 'The agent must be an agent name; the general agent is used.', agentField.line))
+    return { context, agent: null }
+  }
+  return { context, agent }
+}
+
 function reportIgnoredKeys(kind: CustomizationKind, front: Frontmatter | null, diagnostics: DefinitionDiagnostic[]): void {
   if (front === null)
     return
@@ -780,8 +1069,14 @@ function reportIgnoredKeys(kind: CustomizationKind, front: Frontmatter | null, d
     let hint = ''
     if (kind === 'agent' && key === 'allowed-tools')
       hint = '; agents use "tools"'
+    else if (kind === 'agent' && key === 'disallowed-tools')
+      hint = '; agents use "disallowedTools"'
     else if (kind === 'command' && key === 'tools')
       hint = '; commands use "allowed-tools"'
+    else if ((kind === 'command' || kind === 'skill') && key === 'disallowedTools')
+      hint = '; use "disallowed-tools"'
+    else if (UNSUPPORTED_KEYS.has(key))
+      hint = '; harness-forge does not support it'
     diagnostics.push(diagnostic('info', 'ignored-key', `The key "${shownKey(key)}" is ignored${hint}.`, front.keyLines.get(key)))
   }
   if (ignored > IGNORED_KEY_DIAGNOSTICS_MAX) {
@@ -824,25 +1119,71 @@ function parseUnchecked(kind: CustomizationKind, text: string, options: ParseDef
   switch (kind) {
     case 'agent': {
       const tools = readTools('tools', front, diagnostics)
-      const model = readModel('agent', front, diagnostics)
-      if (name !== null && description !== null)
-        definition = { kind, fields: { name, description, tools, model, instructions: body } }
+      const disallowedTools = readDisallowedTools('disallowedTools', front, diagnostics)
+      const { model, alias } = readModel('agent', front, diagnostics)
+      const maxTurns = readMaxTurns(front, diagnostics)
+      const color = readColor(front, diagnostics)
+      const skills = readSkillNames(front, diagnostics)
+      if (name !== null && description !== null) {
+        definition = {
+          kind,
+          fields: {
+            name,
+            description,
+            tools,
+            model,
+            instructions: body,
+            ...(disallowedTools !== null ? { disallowedTools } : {}),
+            ...(maxTurns !== null ? { maxTurns } : {}),
+            ...(color !== null ? { color } : {}),
+            ...(skills !== null ? { skills } : {}),
+            ...(alias !== null ? { modelAlias: alias } : {}),
+          },
+        }
+      }
       break
     }
     case 'command': {
+      const whenToUse = readWhenToUse(front, diagnostics)
       const argumentHint = readArgumentHint(front, diagnostics)
-      const model = readModel('command', front, diagnostics)
+      const argumentNames = readArgumentNames(front, diagnostics)
+      const { model, alias } = readModel('command', front, diagnostics)
       const allowedTools = readTools('allowed-tools', front, diagnostics)
+      const disallowedTools = readDisallowedTools('disallowed-tools', front, diagnostics)
+      const fork = readFork(front, diagnostics)
       if (body === '')
         diagnostics.push(diagnostic('error', 'missing-field', 'Add the prompt below the frontmatter.'))
-      if (name !== null && description !== null)
-        definition = { kind, fields: { name, description, argumentHint, model, allowedTools, body } }
+      if (name !== null && description !== null) {
+        definition = {
+          kind,
+          fields: {
+            name,
+            description,
+            argumentHint,
+            model,
+            allowedTools,
+            body,
+            ...(whenToUse !== null ? { whenToUse } : {}),
+            ...(argumentNames !== null ? { arguments: argumentNames } : {}),
+            ...(disallowedTools !== null ? { disallowedTools } : {}),
+            ...(fork.context !== null ? { context: fork.context } : {}),
+            ...(fork.agent !== null ? { agent: fork.agent } : {}),
+            ...(alias !== null ? { modelAlias: alias } : {}),
+          },
+        }
+      }
       break
     }
     case 'skill': {
+      const whenToUse = readWhenToUse(front, diagnostics)
       const argumentHint = readArgumentHint(front, diagnostics)
+      const argumentNames = readArgumentNames(front, diagnostics)
       const userInvocable = readBoolean('user-invocable', front, diagnostics)
       const disableModelInvocation = readBoolean('disable-model-invocation', front, diagnostics)
+      const { model, alias } = readModel('skill', front, diagnostics)
+      const allowedTools = readTools('allowed-tools', front, diagnostics)
+      const disallowedTools = readDisallowedTools('disallowed-tools', front, diagnostics)
+      const fork = readFork(front, diagnostics)
       if (body === '')
         diagnostics.push(diagnostic('warning', 'missing-field', 'The skill has no instructions below the frontmatter.'))
       if (name !== null && description !== null) {
@@ -855,6 +1196,14 @@ function parseUnchecked(kind: CustomizationKind, text: string, options: ParseDef
             ...(userInvocable === false ? { userInvocable: false } : {}),
             ...(disableModelInvocation === true ? { modelInvocable: false } : {}),
             ...(argumentHint !== null ? { argumentHint } : {}),
+            ...(whenToUse !== null ? { whenToUse } : {}),
+            ...(argumentNames !== null ? { arguments: argumentNames } : {}),
+            ...(allowedTools !== null ? { allowedTools } : {}),
+            ...(disallowedTools !== null ? { disallowedTools } : {}),
+            ...(model !== null ? { model } : {}),
+            ...(alias !== null ? { modelAlias: alias } : {}),
+            ...(fork.context !== null ? { context: fork.context } : {}),
+            ...(fork.agent !== null ? { agent: fork.agent } : {}),
           },
         }
       }
@@ -932,7 +1281,11 @@ export function skillInvocation(fields: SkillDefinitionFields): { userInvocable:
  * (commands), `argument-hint`, `user-invocable` (only `false`), `disable-model-invocation` (only `true`) (skills) or
  * `keep-coding-instructions` (only `true`) (styles); a style writes its label as `name` when the label's slug is the
  * name, else the name; null values are omitted; tool lists are YAML lists. The body follows after a blank line (leading
- * blank lines and trailing whitespace removed, as the parser reads it) and ends with a newline.
+ * blank lines and trailing whitespace removed, as the parser reads it) and ends with a newline. Phase 12 keys are
+ * written only when set: agents `disallowedTools` (after `tools`), `maxTurns`, `skills`, `color` (after `model`);
+ * commands and skills `when_to_use` (after `description`), `arguments` (after `argument-hint`), `disallowed-tools`
+ * (after `allowed-tools`), `context` and `agent` (last); skills `model` and `allowed-tools` (after
+ * `disable-model-invocation`). A `modelAlias` is written as `model` when `model` is null.
  */
 export function formatDefinition(definition: ParsedDefinition): string {
   const front: Record<string, unknown> = {}
@@ -940,6 +1293,9 @@ export function formatDefinition(definition: ParsedDefinition): string {
     if (value !== null && value !== undefined)
       front[key] = value
   }
+  /** A non-empty list copy, else null (the key is omitted). */
+  const list = (value: readonly string[] | null | undefined): string[] | null => Array.isArray(value) && value.length > 0 ? [...value] : null
+  const text = (value: unknown): string | null => typeof value === 'string' && value !== '' ? value : null
   let body: string
   switch (definition.kind) {
     case 'agent': {
@@ -947,7 +1303,11 @@ export function formatDefinition(definition: ParsedDefinition): string {
       set('name', fields.name)
       set('description', fields.description)
       set('tools', fields.tools === null ? null : [...fields.tools])
-      set('model', fields.model)
+      set('disallowedTools', list(fields.disallowedTools))
+      set('model', fields.model ?? text(fields.modelAlias))
+      set('maxTurns', typeof fields.maxTurns === 'number' ? fields.maxTurns : null)
+      set('skills', list(fields.skills))
+      set('color', text(fields.color))
       body = fields.instructions
       break
     }
@@ -955,9 +1315,14 @@ export function formatDefinition(definition: ParsedDefinition): string {
       const fields = definition.fields
       set('name', fields.name)
       set('description', fields.description)
+      set('when_to_use', text(fields.whenToUse))
       set('argument-hint', fields.argumentHint)
-      set('model', fields.model)
+      set('arguments', list(fields.arguments))
+      set('model', fields.model ?? text(fields.modelAlias))
       set('allowed-tools', fields.allowedTools === null ? null : [...fields.allowedTools])
+      set('disallowed-tools', list(fields.disallowedTools))
+      set('context', fields.context === 'fork' ? 'fork' : null)
+      set('agent', fields.context === 'fork' ? text(fields.agent) : null)
       body = fields.body
       break
     }
@@ -965,9 +1330,16 @@ export function formatDefinition(definition: ParsedDefinition): string {
       const fields = definition.fields
       set('name', fields.name)
       set('description', fields.description)
+      set('when_to_use', text(fields.whenToUse))
       set('argument-hint', typeof fields.argumentHint === 'string' && fields.argumentHint !== '' ? fields.argumentHint : null)
+      set('arguments', list(fields.arguments))
       set('user-invocable', fields.userInvocable === false ? false : null)
       set('disable-model-invocation', fields.modelInvocable === false ? true : null)
+      set('model', text(fields.model) ?? text(fields.modelAlias))
+      set('allowed-tools', Array.isArray(fields.allowedTools) ? [...fields.allowedTools] : null)
+      set('disallowed-tools', list(fields.disallowedTools))
+      set('context', fields.context === 'fork' ? 'fork' : null)
+      set('agent', fields.context === 'fork' ? text(fields.agent) : null)
       body = fields.content
       break
     }
@@ -982,8 +1354,65 @@ export function formatDefinition(definition: ParsedDefinition): string {
     }
   }
   const frontmatter = stringify(front, YAML_STRINGIFY_OPTIONS)
-  const text = normalizeBody(typeof body === 'string' ? body : '')
-  return text === '' ? `---\n${frontmatter}---\n` : `---\n${frontmatter}---\n\n${text}\n`
+  const content = normalizeBody(typeof body === 'string' ? body : '')
+  return content === '' ? `---\n${frontmatter}---\n` : `---\n${frontmatter}---\n\n${content}\n`
+}
+
+/** The `name:` line of `setDefinitionName` (a YAML scalar on one line). */
+function nameLine(name: string): string {
+  return `name: ${stringify(name, YAML_STRINGIFY_OPTIONS).trimEnd()}`
+}
+
+/** True for a line that may continue the value of the previous key (indented or blank). */
+function isContinuationLine(line: string): boolean {
+  return line.startsWith(' ') || line.startsWith('\t') || line.trim() === ''
+}
+
+/**
+ * Inserts or replaces the `name:` line of a definition file (Phase 12, ADR-055 / ADR-058: imported Claude Code
+ * commands usually have no `name:`, and a renamed import gets `<name>-2`). Every other line is kept byte for byte (the
+ * BOM, line breaks, key order, comments and unknown keys survive): an existing top-level `name:` line (with its
+ * indented continuation lines) is replaced; without one, `name:` becomes the first frontmatter line; a file without a
+ * frontmatter (or with an unclosed one) gets a new `---` block on top, using the file's line break. A name that is not
+ * text leaves the file unchanged.
+ */
+export function setDefinitionName(text: string, name: string): string {
+  if (typeof text !== 'string' || typeof name !== 'string')
+    return typeof text === 'string' ? text : ''
+  const bom = text.startsWith('\uFEFF') ? '\uFEFF' : ''
+  const source = text.slice(bom.length)
+  const newline = /\r\n/.test(source) ? '\r\n' : /\r/.test(source) && !source.includes('\n') ? '\r' : '\n'
+  const line = nameLine(name.replace(LINE_BREAKS, ' ').replace(/\n/g, ' '))
+  // Lines with their own terminators, so joining them gives back the exact text.
+  const lines = source.match(/[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$/g) ?? []
+  const content = (entry: string): string => entry.replace(/(?:\r\n|\r|\n)$/, '')
+  let close = -1
+  if (lines.length > 0 && content(lines[0] as string) === '---') {
+    for (let index = 1; index < lines.length; index++) {
+      const value = content(lines[index] as string)
+      if (value === '---' || value === '...') {
+        close = index
+        break
+      }
+    }
+  }
+  if (close === -1)
+    return `${bom}---${newline}${line}${newline}---${newline}${source}`
+  const first = lines[0] as string
+  const terminator = first.slice(3) || newline
+  for (let index = 1; index < close; index++) {
+    if (topLevelKey(content(lines[index] as string)) !== 'name')
+      continue
+    let end = index + 1
+    while (end < close && isContinuationLine(content(lines[end] as string)))
+      end++
+    // Blank lines after the value are kept.
+    while (end > index + 1 && content(lines[end - 1] as string).trim() === '')
+      end--
+    const own = (lines[index] as string).slice(content(lines[index] as string).length) || terminator
+    return `${bom}${lines.slice(0, index).join('')}${line}${own}${lines.slice(end).join('')}`
+  }
+  return `${bom}${first}${line}${terminator}${lines.slice(1).join('')}`
 }
 
 /** A catalog candidate for the precedence resolver. */

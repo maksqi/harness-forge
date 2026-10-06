@@ -12,7 +12,7 @@ import {
 } from '../enums.ts'
 import { chatIdSchema, customizationIdSchema, modelRefSchema, pluginIdSchema, projectIdSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
-import { CUSTOMIZATION_KINDS, DEFINITION_LIMITS } from '../util/definitions.ts'
+import { AGENT_COLORS, CUSTOMIZATION_KINDS, DEFINITION_LIMITS } from '../util/definitions.ts'
 import { utf8ByteLength } from '../util/text.ts'
 import { queryBooleanSchema } from './common.ts'
 import { projectInstructionsFileSchema, projectSummarySchema } from './projects.ts'
@@ -37,6 +37,9 @@ export const definitionContentSchema = z
   .string()
   .min(1)
   .refine(value => utf8ByteLength(value) <= DEFINITION_LIMITS.contentBytes, 'Definitions are limited to 64 KB.')
+
+/** The color of an agent in the chat (Phase 12, ADR-058; `AGENT_COLORS` of `util/definitions.ts`, type `AgentColor`). */
+export const agentColorSchema = z.enum(AGENT_COLORS)
 
 // ---------- catalog (GET /customizations) ----------
 
@@ -85,10 +88,35 @@ export const customizationEntrySchema = z.object({
    * `skill` tool and `loadSkill`).
    */
   modelInvocable: z.boolean().optional(),
-  /** Agents and commands: the declared `model` (`provider:model`, or `inherit` for agents); absent = the default. */
+  /**
+   * Agents, commands and (Phase 12) skills: the declared `model` (`provider:model`, or `inherit` for agents); absent =
+   * the default.
+   */
   modelRef: z.union([modelRefSchema, z.literal('inherit')]).optional(),
-  /** Agents: `tools`; commands: `allowed-tools` (normalized); absent = no restriction ("All tools"). */
+  /**
+   * Agents: `tools`; commands and (Phase 12) skills: `allowed-tools` (normalized); absent = no restriction ("All
+   * tools").
+   */
   tools: z.array(toolListEntrySchema).max(DEFINITION_LIMITS.toolsMax).optional(),
+  // Phase 12 (ADR-058): Claude Code's newer frontmatter keys, present only when the definition sets them.
+  /** Agents, commands and skills: `disallowedTools` / `disallowed-tools` (normalized; removed from the tools). */
+  disallowedTools: z.array(toolListEntrySchema).max(DEFINITION_LIMITS.toolsMax).optional(),
+  /** Agents: `maxTurns` (the child's steps are at most this many). */
+  maxTurns: z.int().min(1).max(LIMITS.agentMaxTurnsMax).optional(),
+  /** Agents: `color` in the chat (`AGENT_COLORS`). */
+  color: agentColorSchema.optional(),
+  /** Agents: `skills` preloaded into the child's instructions (at most 5 names). */
+  skills: z.array(z.string().min(1).max(128)).max(LIMITS.agentSkillsPreloadMax).optional(),
+  /** Agents, commands and skills: a Claude model name (`sonnet`, `claude-…`) resolved through `modelAliases`. */
+  modelAlias: z.string().min(1).max(128).optional(),
+  /** Commands and skills: `when_to_use` (appended to the description in listings). */
+  whenToUse: z.string().max(1024).optional(),
+  /** Commands and skills: `arguments` (named arguments, `$name` in the body; at most 9). */
+  arguments: z.array(z.string().min(1).max(32)).max(LIMITS.definitionArgumentsMax).optional(),
+  /** Commands and skills: `context: fork` (runs as a sub-agent of type `agent`). */
+  context: z.literal('fork').optional(),
+  /** Commands and skills with `context: fork`: the sub-agent type (default `general`). */
+  agent: z.string().min(1).max(128).optional(),
   /** Personal entries: the `enabled` flag; true for every other source (disable a plugin to remove its entries). */
   enabled: z.boolean(),
   state: customizationStateSchema,
@@ -164,15 +192,28 @@ export type CustomizationSourceResult = z.infer<typeof customizationSourceResult
 
 // ---------- personal definitions (/customizations/:id) ----------
 
-/** The parsed fields of an agent (zod mirror of `AgentDefinitionFields`). */
+/**
+ * The parsed fields of an agent (zod mirror of `AgentDefinitionFields`). The Phase 12 keys are present only when the
+ * definition sets them.
+ */
 export const agentDefinitionFieldsSchema = z.object({
   name: z.string(),
   description: z.string(),
   /** Harness tool names; null = every tool the parent's mode allows. */
   tools: z.array(z.string()).readonly().nullable(),
-  /** `provider:model`, `inherit`, or null (the default sub-agent model). */
+  /** `provider:model`, `inherit`, or null (the default sub-agent model, or `modelAlias`). */
   model: z.string().nullable(),
   instructions: z.string(),
+  /** Phase 12: `disallowedTools` (harness tool names removed before `tools` applies). */
+  disallowedTools: z.array(z.string()).readonly().optional(),
+  /** Phase 12: `maxTurns` (1..200). */
+  maxTurns: z.int().min(1).max(LIMITS.agentMaxTurnsMax).optional(),
+  /** Phase 12: `color`. */
+  color: agentColorSchema.optional(),
+  /** Phase 12: `skills` preloaded into the child's instructions. */
+  skills: z.array(z.string()).readonly().optional(),
+  /** Phase 12: a Claude model name (`model` is null then). */
+  modelAlias: z.string().optional(),
 })
 
 /** The parsed fields of a command (zod mirror of `CommandDefinitionFields`). */
@@ -184,8 +225,20 @@ export const commandDefinitionFieldsSchema = z.object({
   model: z.string().nullable(),
   /** Tool names that narrow the turn; null = no restriction. */
   allowedTools: z.array(z.string()).readonly().nullable(),
-  /** The prompt template (`$ARGUMENTS`, `$1` … `$9`, `{{input}}`). */
+  /** The prompt template (`$ARGUMENTS`, `$1` … `$9`, `{{input}}`; Phase 12: `$ARGUMENTS[N]`, `$name`, `${CLAUDE_…}`). */
   body: z.string(),
+  /** Phase 12: `when_to_use`. */
+  whenToUse: z.string().optional(),
+  /** Phase 12: `arguments` (named arguments). */
+  arguments: z.array(z.string()).readonly().optional(),
+  /** Phase 12: `disallowed-tools`. */
+  disallowedTools: z.array(z.string()).readonly().optional(),
+  /** Phase 12: `context: fork`. */
+  context: z.literal('fork').optional(),
+  /** Phase 12: the sub-agent type of a fork. */
+  agent: z.string().optional(),
+  /** Phase 12: a Claude model name (`model` is null then). */
+  modelAlias: z.string().optional(),
 })
 
 /** The parsed fields of a skill (zod mirror of `SkillDefinitionFields`). */
@@ -199,6 +252,22 @@ export const skillDefinitionFieldsSchema = z.object({
   modelInvocable: z.boolean().optional(),
   /** Phase 11: `argument-hint` of a user-invocable skill; absent = none. */
   argumentHint: z.string().optional(),
+  /** Phase 12: `when_to_use`. */
+  whenToUse: z.string().optional(),
+  /** Phase 12: `arguments` (named arguments). */
+  arguments: z.array(z.string()).readonly().optional(),
+  /** Phase 12: `allowed-tools` (narrows `/name`; restrict-only). */
+  allowedTools: z.array(z.string()).readonly().optional(),
+  /** Phase 12: `disallowed-tools`. */
+  disallowedTools: z.array(z.string()).readonly().optional(),
+  /** Phase 12: `model` (`provider:model`) used by `/name`. */
+  model: z.string().optional(),
+  /** Phase 12: a Claude model name. */
+  modelAlias: z.string().optional(),
+  /** Phase 12: `context: fork`. */
+  context: z.literal('fork').optional(),
+  /** Phase 12: the sub-agent type of a fork. */
+  agent: z.string().optional(),
 })
 
 /** The parsed fields of an output style (Phase 11, ADR-051; zod mirror of `StyleDefinitionFields`). */

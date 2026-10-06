@@ -52,6 +52,8 @@ const SOURCE_LABELS: Readonly<Record<PluginSource, string>> = {
   url: 'a URL',
   link: 'a linked folder',
   copy: 'a copied folder',
+  github: 'GitHub',
+  marketplace: 'a marketplace',
 }
 
 function forbidden(message: string): HarnessError {

@@ -17,15 +17,24 @@ Hooks come from three places that add up: your **personal** hooks (Settings → 
 feature, have their own guide: [output styles](output-styles.md). The `` !`cmd` `` lines of command files are in
 [customizing the agent](customizing-agents.md#commands-harnesscommandsnamemd).
 
+v1.8 (ADR-056, ADR-057) adds **prompt hooks** (a small model judges the event instead of a shell command; section 3),
+five more events (`PostToolUseFailure`, `PermissionRequest`, `SubagentStart`, `PostCompact`, `SessionEnd`), Claude
+Code's handler fields (`args`, `async`, `if`, `statusMessage`), the `transcript_path` file, and editing a project's
+hooks and `.mcp.json` from the UI (section 6). Your hooks from `~/.claude/settings.json` can be copied with
+[Import from Claude Code](claude-code-import.md); the hooks of Claude Code plugins work too
+([Claude Code plugins](claude-code-plugins.md)).
+
 Reference: [ARCHITECTURE.md 6.28 – 6.30](../ARCHITECTURE.md#628-hooks-adr-048) (how hooks, project trust and project MCP
-servers work) and [10.12](../ARCHITECTURE.md) (security), [UI.md 7.31, 7.33, 9.13](../UI.md) (the screens),
+servers work), 6.36 – 6.37 (v1.8: project file editing, prompt hooks, the new events and transcripts) and
+[10.12](../ARCHITECTURE.md) (security), [UI.md 7.31, 7.33, 7.34, 9.13, 9.14](../UI.md) (the screens),
 [PLUGINS.md](../PLUGINS.md#declarative-hooks-plugin-api-150) (hooks in plugins), [API.md](../API.md) (the `hooks`,
 `projectTrust` and `projectMcp` routes).
 
 ## 1. Your first hook
 
 1. Open **Settings → Customize → Hooks** and press **New hook**.
-2. Choose the **Event** (for example **PreToolUse**: before a tool runs).
+2. Choose the **Type** (v1.8): **Command** runs a shell command, **Prompt** asks a model (section 3, "Prompt hooks").
+   Then choose the **Event** (for example **PreToolUse**: before a tool runs).
 3. For a tool event, fill in **Tools**: the tool names the hook is for, separated by `|` (`Bash|Edit`). Claude Code
    names work (section 5). Leave it empty, or write `*`, for every tool. A matcher with regular-expression characters
    cannot be saved ("Use tool names, | and * only.").
@@ -38,8 +47,10 @@ minutes old (a hook runs commands on your server without asking). Turning a hook
 **Run hooks** at the top of the tab turns every command hook off at once, from every source.
 
 **Import…** reads Claude Code settings JSON (a whole `settings.json`, or just its `hooks` object), shows what it found,
-and adds the hooks you keep checked: invalid ones are listed unchecked with the reason, and `prompt` hooks are skipped
-(harness-forge runs `command` hooks only). Each row's menu offers **Copy as JSON** to take a hook back to Claude Code.
+and adds the hooks you keep checked: invalid ones are listed unchecked with the reason; `prompt` hooks were skipped in
+v1.7 and are imported since v1.8 (`http`, `mcp_tool` and `agent` hooks are still skipped). Each row's menu offers
+**Copy as JSON** to take a hook back to Claude Code. To bring over everything of your Claude Code folder at once
+(hooks, agents, commands, MCP servers…), use **Import from Claude Code…** ([guide](claude-code-import.md)).
 
 Personal hooks are kept in harness-forge's database (at most 100). They are **never** part of a backup: copy them as
 JSON if you move servers.
@@ -70,17 +81,22 @@ its command handlers.
 
 | Key | Meaning |
 |---|---|
-| event (`PreToolUse`, …) | one of the eight events (section 3); an unknown event is ignored (Import… lists it in its notes) |
-| `matcher` | optional; tool names for `PreToolUse` and `PostToolUse` (section 5); for `SessionStart` it matches the source (`startup` / `compact`), for `PreCompact` the trigger (`manual` / `auto`), for `Notification` the type (`permission_prompt`); `UserPromptSubmit`, `Stop` and `SubagentStop` ignore it |
-| `type` | `command` (a `prompt` hook is skipped: not supported) |
+| event (`PreToolUse`, …) | one of the thirteen events (section 3; eight in v1.7); an unknown event is ignored (Import… lists it in its notes) |
+| `matcher` | optional; tool names for `PreToolUse`, `PostToolUse`, `PostToolUseFailure` and `PermissionRequest` (section 5); for `SessionStart` it matches the source (`startup` / `compact`), for `PreCompact` and `PostCompact` the trigger (`manual` / `auto`), for `Notification` the type (`permission_prompt`), for `SubagentStart` and `SubagentStop` (v1.8) the agent type (`explore`, `general`, a custom agent's name; `general-purpose` matches `general`), for `SessionEnd` the reason (`other`); `UserPromptSubmit` and `Stop` ignore it |
+| `type` | `command`, or (v1.8) `prompt` (section 3); `http`, `mcp_tool` and `agent` are skipped with a note |
 | `command` | the shell command, at most 4,096 characters |
-| `timeout` | optional, in seconds, 1 – 600; default 60 (in a settings file a larger value is cut to 600 and an invalid one uses 60, each with a note; fractions round up) |
+| `timeout` | optional, in seconds, 1 – 600; default 60 (30 for a prompt hook; in a settings file a larger value is cut to 600 and an invalid one uses the default, each with a note; fractions round up) |
+| `args` (v1.8) | optional, a list: the command runs in **exec form**: each word of `args` is quoted, so a value can never add a command (`{"command": "node", "args": ["scripts/check.mjs", "--strict"]}`) |
+| `async` (v1.8) | optional, `true`: the hook runs in the background; it cannot block or add context (its timeout still applies) |
+| `if` (v1.8) | optional: run only for one tool (`"Write"`) or one kind of shell command (`"Bash(git push *)"`, `"Bash(npm run test:*)"`); any other rule makes the hook invalid (it never runs) |
+| `statusMessage` (v1.8) | optional: shown instead of "Running hook…" while the hook runs |
+| `prompt`, `model`, `continueOnBlock` (v1.8) | the fields of a prompt hook (section 3) |
 
 Every matching handler of an event runs, all of them **in parallel** (at most 20 per event). A hook that finishes
 quietly (exit 0, nothing to report) leaves no trace in the chat; a decision, context, a failure or a message shows as a
 small **hook note** in the reply, or inside the tool's row for tool hooks.
 
-## 3. The eight events
+## 3. The events
 
 | Event | When it runs | What it can do |
 |---|---|---|
@@ -92,10 +108,15 @@ small **hook note** in the reply, or inside the tool's row for tool hooks.
 | `SubagentStop` | when a sub-agent is about to finish | make it **continue** for one more round (at most 2); nothing is stored |
 | `PreCompact` | before the conversation is compacted (`/compact` or automatically) | nothing (observe it) |
 | `SessionStart` | before a chat's first reply, and before the first reply after a compaction (also for a queued message that starts the turn) | **add context** for the agent, or **refuse** the message (only with `continue: false`) |
+| `PostToolUseFailure` (v1.8) | after a tool call failed (not when you stopped it) | give the agent **feedback** about the failure (exit 2, `decision: "block"` or context) |
+| `PermissionRequest` (v1.8) | when harness-forge is about to show you an approval card for a tool call (main agent only) | **allow** the call (only where a `PreToolUse` allow could, section 10) or **deny** it, with `hookSpecificOutput.decision: { "behavior": "allow" \| "deny", "message"?, "updatedInput"? }`; exit 2 decides nothing |
+| `SubagentStart` (v1.8) | when a sub-agent starts, before its first step | **add context** for the sub-agent (`additionalContext` goes into its first message) |
+| `PostCompact` (v1.8) | after the conversation was compacted | nothing (observe it) |
+| `SessionEnd` (v1.8) | when you delete one chat (not on Delete all data, a project delete or a server stop); it runs in the background with a short budget (1.5 s, up to its own timeout of at most 60 s) | nothing (clean up: `reason` is `other`) |
 
 `Stop` hooks never run when the reply was stopped, failed, ended waiting for an approval or the agent stopped because
 of a hook, nor while a queued message is waiting (it goes first). Sub-agents run only `PreToolUse`, `PostToolUse` and
-`SubagentStop` hooks.
+`SubagentStop` hooks; v1.8: `SubagentStart` runs when one starts.
 
 ### What a hook receives (stdin)
 
@@ -117,10 +138,16 @@ The event as one JSON object, with Claude Code's field names plus a `harness` ob
 | `source` | `SessionStart` | `startup` or `compact` |
 | `message`, `notification_type` | `Notification` | "The agent needs your permission to use <tools>." (Claude Code names, at most 3, then "and N more"); `permission_prompt` |
 | `harness` | all | `{ version: 1, chatId, projectId, messageId?, modelRef, origin, tool?, source }`: `origin` is how the run started (`request`, `queue`, `task`, `hook`), `tool` the harness tool name, `source` where this hook comes from (`personal`, `project`, `plugin`) |
+| `transcript_path` (v1.8) | all | the chat as a Claude Code-style JSONL file (below); left out when it could not be written |
+| `error` (v1.8) | `PostToolUseFailure` | the error text of the failed call (at most 16 KiB) |
+| `tool_name`, `tool_input`, `tool_use_id` (v1.8) | `PostToolUseFailure`, `PermissionRequest` | as for `PreToolUse` |
+| `agent_id`, `agent_type` (v1.8) | `SubagentStart`, `SubagentStop`, and every hook that runs inside a sub-agent | the sub-agent's call id and its type |
+| `trigger` (v1.8) | `PostCompact` | `manual` or `auto` |
+| `reason` (v1.8) | `SessionEnd` | `other` |
 
 The payload is at most 256 KiB: a large `tool_response` is cut first, then `tool_input`, `prompt`,
-`custom_instructions` and `message`, and a cut payload carries `harness.truncated: true`. There is no
-`transcript_path`: harness-forge keeps chats in its database, not in transcript files.
+`custom_instructions` and `message`, and a cut payload carries `harness.truncated: true`. v1.7 sent no
+`transcript_path` (chats live in the database); v1.8 writes one when a hook needs it (below).
 
 ### Exit codes
 
@@ -160,6 +187,57 @@ which also wins over a `Stop` block); then a block: "A Stop hook asked the agent
 PostToolUse hook told the agent: …" for `PostToolUse`; then "Hook added context · {event}", then "A {event} hook
 failed: exit {n}". A hook that only sends a `systemMessage` gets a context note with the line "Hook: {message}".
 `SubagentStop` and `Notification` leave no note.
+
+### Prompt hooks (v1.8)
+
+A **prompt hook** asks a model instead of running a command. It is cheaper to write than a script and good at judgment
+calls ("did the tests run?", "does this edit touch secrets?"):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [{ "type": "prompt", "prompt": "Did the agent run the tests and did they pass? $ARGUMENTS", "timeout": 30 }] }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [{ "type": "prompt", "prompt": "Refuse edits that add API keys or passwords to a file.", "continueOnBlock": true }]
+      }
+    ]
+  }
+}
+```
+
+- **Events**: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`, `Stop`, `SubagentStop` and
+  `PermissionRequest` (elsewhere a prompt hook is skipped with a note).
+- **The prompt**: `$ARGUMENTS` is replaced by the event's JSON (the payload above); without `$ARGUMENTS` the JSON is
+  added at the end; `\$` writes a literal `$`. At most 16,384 characters.
+- **The model**: the hook's `model` (a model ref such as `anthropic:claude-haiku-4-5`, or a Claude name such as
+  `haiku`, which uses Settings → General → Agent → Claude model names), else **Settings → General → Agent → Hook model**,
+  else the small model of the chat's provider, else the chat's model. Reasoning is off and the answer is short (512
+  tokens); at most 8 prompt hooks call a model at once on the server; each call is counted in the chat's usage.
+- **The answer** the model must give: `{"ok": true}`, or `{"ok": false, "reason": "…"}` (`"impossible": true` lets a
+  `Stop` / `SubagentStop` end anyway). harness-forge also accepts the object inside a code fence; anything else is a
+  failed hook ("The model's answer could not be read."), which never blocks.
+- **What `ok: false` does**: `PreToolUse` denies the call and ends the reply (with `continueOnBlock`: denies it and the
+  agent goes on with the reason); `PostToolUse` ends the reply (with `continueOnBlock`: the reason goes back to the
+  agent); `PostToolUseFailure` sends the reason to the agent; `UserPromptSubmit` refuses your message; `Stop` and
+  `SubagentStop` make the agent continue (unless `impossible`); `PermissionRequest` only records it. **`ok: true`
+  decides nothing**: it never approves a call.
+- **Switches and trust**: **Run hooks** and safe mode turn prompt hooks off (`HF_WORKSPACE_SHELL=0` does not: they run
+  no shell); a project's prompt hooks need approval like its command hooks; a plugin whose hooks are all prompt hooks
+  needs no trust.
+
+### `transcript_path` (v1.8)
+
+Claude Code hooks often read the conversation from the file named in `transcript_path`. harness-forge writes such a
+file **only when a hook is about to run**: `<data dir>/transcripts/<chat id>.jsonl` (readable by the server user
+only), one JSON line per message of the chat's current path in Claude Code's shape (`type`, `uuid`, `parentUuid`,
+`sessionId`, `timestamp`, `cwd`, `message: { role, content }` with text, `tool_use` and `tool_result` blocks; tool
+results cut at 16 KiB; reasoning and attachments left out; at most 8 MiB, the oldest messages dropped first). It is
+rebuilt when you switch versions, deleted with the chat, and never part of a backup. When it cannot be written, the
+payload has no `transcript_path`. Do not rely on it in a `SessionEnd` hook (the chat is being deleted).
 
 ## 4. Where hooks run
 
@@ -245,6 +323,22 @@ it:
 
 Approvals belong to the project: they are kept by Delete all data, removed with the project, and never part of a
 backup.
+
+### Editing project hooks and files in the UI (v1.8)
+
+Settings → Customize → Hooks (with the project selected) edits a project's hooks in place: **Edit…** on a project hook
+opens the hook editor on it, **New hook** offers **Where** (personal, or one of the project's four settings files) and
+**Delete…** removes the handler. harness-forge rewrites only the `hooks` key of that settings file (every other key and
+their order stay). A project's `.mcp.json` is edited from its **MCP servers** dialog (**Edit .mcp.json…**), and its
+agents, commands, skills and output styles from their Customize tabs ([customizing the agent](customizing-agents.md)).
+
+- **Saving never approves**: a hook, server or command with shell lines you save is **Needs approval** like any other
+  change; the message "Saved {path}. {n} items need your approval." offers **Review**, which opens the review dialog
+  (your password is asked there, not when you save).
+- **Changed on disk**: when the file changed after you opened it (the agent, an editor, `git pull`), saving says
+  "{file} changed on disk after you opened it." — **Load from disk** drops your edit, **Overwrite** saves yours.
+- Saving works while a chat of the project runs (one write at a time per file). UI edits are not part of the
+  agent's rewind history: a later rewind sees them as changes made outside the chat.
 
 ### Stop hooks and continuations
 
@@ -341,10 +435,13 @@ off on this server (HF_WORKSPACE_SHELL=0)." / "… (safe mode).").
 | Claude Code | harness-forge | Why |
 |---|---|---|
 | a `PreToolUse` `allow` skips every permission prompt | `allow` skips the card only for a call that would ask and is neither the shell (or another `execute` tool) nor an always-ask tool, and never in Plan mode (the note still reads "Allowed by a PreToolUse hook" while the card shows) | a repository's hook must not approve shell commands for you; use shell rules or Auto |
-| `transcript_path` in the payload | not sent | chats live in the database |
-| `prompt` hooks | skipped (with a note) | only `command` hooks run |
+| `transcript_path` in the payload | v1.8: sent (a JSONL file written when a hook runs; v1.7 sent none) | chats live in the database; the file is a copy for hooks |
+| `prompt` hooks | v1.8: supported for seven events (v1.7 skipped them); their `ok: true` never approves | a model's answer must not grant a permission |
+| `http`, `mcp_tool` and `agent` hooks | skipped (with a note) | not supported |
+| the 33 Claude Code events | 13 (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `UserPromptSubmit`, `Notification`, `Stop`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`, `SessionStart`, `SessionEnd`); others are ignored | the others have no counterpart here |
+| `SessionEnd` when a session ends | only when you delete one chat | a chat never "ends" otherwise |
 | every key of `settings.json` is read | only `hooks` | `permissions` and `env` must not come from a cloned repository |
-| `~/.claude/settings.json` | not read | personal hooks live in Settings → Customize (use Import…) |
+| `~/.claude/settings.json` | not read by chats; v1.8: copied once with Import from Claude Code | personal hooks live in Settings → Customize |
 | `.mcp.json` variables from the environment | only from values stored for the project | the server's environment holds its own secrets |
 | project hooks run once you trust the folder | each hook, server and `!` command is approved on its own, pinned by hash | per-item consent, re-asked after any change |
 | `UserPromptSubmit` when the agent reads the message | when you send (or queue) it, so a refused message never reaches the chat | the refusal shows in the composer at once |
@@ -390,8 +487,9 @@ that text at the start of every chat of the project.
 
 - **My hook never runs**: check the Hooks tab: **Off**, **Needs approval** (a project hook), the **Run hooks** switch or
   a server alert (`HF_WORKSPACE_SHELL=0`, safe mode). A hook of a settings file or a plugin that the tab does not list
-  at all was dropped: the notes above the list say why ("{file}: …": a matcher with regular-expression characters, a
-  `prompt` hook); an unknown event is not shown anywhere (Import… lists it). For a tool hook, check the matcher against
+  at all was dropped: the notes above the list say why ("{file}: …": a matcher with regular-expression characters, an
+  `http` hook, an unknown event, an `if` rule harness-forge cannot read). An imported hook may be **Off** (Import from
+  Claude Code turns command hooks off). For a tool hook, check the matcher against
   the tool's names (section 5).
 - **The hook ran but nothing happened**: exit 0 without JSON is silent except for `UserPromptSubmit` and `SessionStart`
   (whose stdout is context); JSON must be one object, with `hookSpecificOutput.hookEventName` equal to the event.
@@ -406,3 +504,6 @@ that text at the start of every chat of the project.
   change); move generated files out of the hook's path.
 - **My `.mcp.json` server is missing**: it must be at the project root; it needs approval and its variables; safe mode
   starts none; open the project's **MCP servers** dialog for its status and error, and **Reconnect**.
+- **A prompt hook never blocks**: check the **Hook model** (Settings → General → Agent) and the note under the reply
+  ("A {event} hook failed": the model could not be reached or its answer could not be read); `ok: true` never blocks.
+- **I saved a project hook and it does not run**: saving never approves; review it (the chip **{n} to review**).

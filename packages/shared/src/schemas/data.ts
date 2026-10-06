@@ -180,7 +180,18 @@ export const dataImportResultSchema = z.object({
    * Phase 10: what `restoreCustomizations` did with `customizations.json` (`imported` rows, `skipped` = the kind and
    * name already existed, `failed` = invalid content or the per-kind limit); absent when nothing was restored.
    */
-  customizations: z.object({ imported: countSchema, skipped: countSchema, failed: countSchema }).optional(),
+  customizations: z
+    .object({
+      imported: countSchema,
+      skipped: countSchema,
+      failed: countSchema,
+      /**
+       * Phase 12: restored personal commands with `` !`cmd` `` spans that were turned off (ADR-052); absent in older
+       * results (= 0).
+       */
+      turnedOff: countSchema.optional(),
+    })
+    .optional(),
   items: z.array(dataImportItemSchema),
   /** Unknown entries, missing files, settings keys that failed validation, ... */
   warnings: z.array(z.string().max(300)).max(100),

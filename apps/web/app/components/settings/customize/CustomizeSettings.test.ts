@@ -489,14 +489,15 @@ describe('customizeSettings', () => {
     exposed.import()
     expect(click).toHaveBeenCalledTimes(1)
 
-    const file = new File(['---\nname: reviewer\ndescription: Reviews diffs\ncolor: blue\n---\nReview.\n'], 'reviewer.md', { type: 'text/markdown' })
+    // Phase 12: `color` is read now (ADR-058); `effort` is still ignored.
+    const file = new File(['---\nname: reviewer\ndescription: Reviews diffs\neffort: high\n---\nReview.\n'], 'reviewer.md', { type: 'text/markdown' })
     Object.defineProperty(input, 'files', { value: [file], configurable: true })
     input.dispatchEvent(new Event('change'))
     await settle()
     await vi.waitFor(() => expect(byTestId(testIds.customizationEditor)?.dataset.mode).toBe('import'))
     const notes = byTestId(testIds.customizationImportNotes)!
     expect(notes.textContent).toContain('Imported from reviewer.md. Check the fields, then save.')
-    expect(notes.textContent).toContain('Ignored: color')
+    expect(notes.textContent).toContain('Ignored: effort')
     expect(byTestId<HTMLInputElement>(testIds.customizationName)?.value).toBe('reviewer')
     document.body.querySelector<HTMLElement>('[data-slot="sheet-close"]')!.click()
     await settle()

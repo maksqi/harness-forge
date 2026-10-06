@@ -23,6 +23,7 @@ import {
 } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { BUILTIN_OUTPUT_STYLE_NAMES } from '../util/output-styles.ts'
+import { isSafeRelativePath } from '../util/paths.ts'
 import { compileRegExp, duplicates, hasControlChars, isUnique, utf8ByteLength } from '../util/text.ts'
 import { isHttpUrl, parseHttpUrl } from '../util/url.ts'
 import { modelCapabilitiesSchema, modelCostSchema, reasoningEffortListSchema } from './models.ts'
@@ -222,6 +223,11 @@ export const declarativeSkillSchema = z.strictObject({
   description: z.string().trim().min(1).max(LIMITS.customizationDescriptionMaxChars),
   /** The skill body (Markdown). */
   content: definitionBodySchema,
+  /**
+   * Plugin API 1.6.0 (ADR-053): the plugin-relative folder of the skill's supporting files (`skills/pdf`); the `skill`
+   * tool lists them and reads one with `file` (inside that folder only).
+   */
+  baseDir: z.string().refine(isSafeRelativePath, 'Use a relative folder inside the plugin (segments of A-Z, a-z, 0-9, ".", "_", "-").').optional(),
 })
 export type DeclarativeSkill = z.infer<typeof declarativeSkillSchema>
 

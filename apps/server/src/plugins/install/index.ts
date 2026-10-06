@@ -189,6 +189,10 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
           return stageUrl(input.url, input.integrity)
         case 'path':
           return stageFolder(input.path, input.mode)
+        // Phase 12 (C40 compile fix): the GitHub and marketplace sources are staged by W12.2 (ADR-054).
+        case 'github':
+        case 'marketplace':
+          throw new HarnessError({ code: 'not_implemented', message: `Installing from a ${input.source} source is not implemented yet.` })
       }
     })
   }

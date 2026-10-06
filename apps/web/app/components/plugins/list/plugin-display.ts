@@ -76,6 +76,11 @@ export function pluginSourceLabel(plugin: { source: PluginSource, kind: PluginKi
     case 'link':
     case 'copy':
       return 'Local'
+    // Phase 12 (ADR-054).
+    case 'github':
+      return 'GitHub'
+    case 'marketplace':
+      return 'Marketplace'
   }
 }
 
@@ -97,6 +102,11 @@ export function pluginSourceDescription(plugin: Pick<PluginSummary, 'source' | '
       return `Linked local folder${ref}`
     case 'copy':
       return `Copied from a local folder${ref}`
+    // Phase 12 (ADR-054).
+    case 'github':
+      return `Installed from GitHub${ref}`
+    case 'marketplace':
+      return `Installed from a marketplace${ref}`
   }
 }
 

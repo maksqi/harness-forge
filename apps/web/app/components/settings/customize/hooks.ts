@@ -39,9 +39,15 @@ const EVENT_DESCRIPTIONS: Readonly<Record<HookEvent, string>> = {
   SubagentStop: 'When a sub-agent finishes. It can make it continue.',
   PreCompact: 'Before the conversation is compacted.',
   SessionStart: 'When a chat\'s first reply starts, and again after a compaction. It can add context.',
+  // Phase 12 (ADR-057); C42 compile fix, the final copy is W12.12's.
+  PostToolUseFailure: 'After a tool failed. It can give the agent feedback about the error.',
+  PermissionRequest: 'When a tool call needs your approval. It can allow or deny it for you.',
+  SubagentStart: 'When a sub-agent starts. It can add context for the sub-agent.',
+  PostCompact: 'After the conversation was compacted.',
+  SessionEnd: 'When you delete a chat.',
 }
 
-/** The eight events in `HOOK_EVENTS` order: the label (Claude Code's spelling), the description, a tool matcher. */
+/** The events in `HOOK_EVENTS` order: the label (Claude Code's spelling), the description, a tool matcher. */
 export const HOOK_EVENT_INFO: Readonly<Record<HookEvent, { label: string, description: string, toolMatcher: boolean }>> = Object.fromEntries(
   HOOK_EVENTS.map(event => [event, { label: event, description: EVENT_DESCRIPTIONS[event], toolMatcher: TOOL_EVENTS.has(event) }]),
 ) as Record<HookEvent, { label: string, description: string, toolMatcher: boolean }>

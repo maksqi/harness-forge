@@ -7,6 +7,11 @@ import type {
   ChatChanges,
   ChatDetail,
   ChatSummary,
+  ClaudeImportApplyResult,
+  ClaudeImportHome,
+  ClaudeImportPlan,
+  ClaudeImportPlanItemDto,
+  ClaudePluginInfo,
   CommandSummary,
   CompactionData,
   Customization,
@@ -27,11 +32,19 @@ import type {
   HookList,
   HookRun,
   KeyStatus,
+  MarketplaceDetail,
+  MarketplaceEntry,
+  MarketplaceList,
+  MarketplaceSummary,
   MessageBranch,
   PersonalHook,
   PluginDetail,
   PluginLogEntry,
+  PluginOrigin,
   PluginSummary,
+  PluginUpdate,
+  ProjectDefinitionFile,
+  ProjectDefinitionWriteResult,
   ProjectFileEntry,
   ProjectMcpList,
   ProjectMcpServer,
@@ -196,6 +209,7 @@ export function pluginSummary(overrides: Partial<PluginSummary> = {}): PluginSum
     description: 'Rolls dice',
     icon: null,
     kind: 'code',
+    format: 'harness',
     source: 'created',
     sourceRef: null,
     builtin: false,
@@ -219,6 +233,8 @@ export function pluginDetail(overrides: Partial<PluginDetail> = {}): PluginDetai
     trust: { required: true, trusted: true, hash: 'a'.repeat(64), trustedHash: 'a'.repeat(64) },
     editable: true,
     hasSettings: false,
+    origin: null,
+    claude: null,
     ...overrides,
   }
 }
@@ -754,10 +770,11 @@ export function trustSha(n: number): string {
   return String.fromCharCode(96 + n).repeat(64)
 }
 
-/** A personal `PostToolUse` hook (`GET /hooks` entry source `personal`). */
-export function personalHook(overrides: Partial<PersonalHook> = {}): PersonalHook {
+/** A personal `PostToolUse` command hook (`GET /hooks` entry source `personal`). */
+export function personalHook(overrides: Partial<Extract<PersonalHook, { type: 'command' }>> = {}): PersonalHook {
   return {
     id: hookId(1),
+    type: 'command',
     event: 'PostToolUse',
     matcher: 'Write|Edit',
     command: 'sh .claude/hooks/format.sh',
@@ -952,6 +969,229 @@ export function styleCustomization(overrides: Partial<Extract<Customization, { k
     diagnostics: [],
     createdAt: 1_759_000_000_000,
     updatedAt: 1_759_000_000_000,
+    ...overrides,
+  }
+}
+
+// ---------- Phase 12: marketplaces, Claude Code plugins, the Claude Code import and project definition files ----------
+
+/** A fixed marketplace id with a varying end: marketplaceId(1) -> 'mkt_sample0000000001'. */
+export function marketplaceId(n: number): string {
+  return `mkt_sample${String(n).padStart(10, '0')}`
+}
+
+/** A fixed import plan id with a varying end: importPlanId(1) -> 'cip_sample0000000001'. */
+export function importPlanId(n: number): string {
+  return `cip_sample${String(n).padStart(10, '0')}`
+}
+
+/** A fixed 40-character commit: commitSha(1) -> '1' repeated 40 times. */
+export function commitSha(n: number): string {
+  return String(n % 10).repeat(40)
+}
+
+/** A personal `PreToolUse` prompt hook (ADR-057). */
+export function promptHook(overrides: Partial<Extract<PersonalHook, { type: 'prompt' }>> = {}): PersonalHook {
+  return {
+    id: hookId(2),
+    type: 'prompt',
+    event: 'PreToolUse',
+    matcher: 'Write|Edit',
+    prompt: 'Refuse writes to dist/. Input: $ARGUMENTS',
+    model: null,
+    timeout: null,
+    enabled: true,
+    createdAt: 1_759_000_000_000,
+    updatedAt: 1_759_000_000_000,
+    ...overrides,
+  }
+}
+
+/** The official marketplace, fetched from GitHub at commit 1. */
+export function marketplaceSummary(overrides: Partial<MarketplaceSummary> = {}): MarketplaceSummary {
+  return {
+    id: marketplaceId(1),
+    name: 'claude-plugins-official',
+    description: 'Official Claude Code plugins',
+    owner: 'Anthropic',
+    source: { type: 'github', repo: 'anthropics/claude-plugins-official' },
+    resolvedRef: commitSha(1),
+    plugins: 2,
+    updates: 0,
+    fetchedAt: 1_759_000_000_000,
+    lastError: null,
+    createdAt: 1_759_000_000_000,
+    updatedAt: 1_759_000_000_000,
+    ...overrides,
+  }
+}
+
+/** An installable entry with a relative source (not installed). */
+export function marketplaceEntry(overrides: Partial<MarketplaceEntry> = {}): MarketplaceEntry {
+  return {
+    name: 'review-kit',
+    description: 'Code review commands and agents',
+    version: '1.2.0',
+    category: 'development',
+    tags: ['review'],
+    author: 'Anthropic',
+    source: { kind: 'relative', text: './plugins/review-kit' },
+    supported: true,
+    installedPluginId: null,
+    updateAvailable: false,
+    ...overrides,
+  }
+}
+
+/** The official marketplace with an installable entry and an unsupported one. */
+export function marketplaceDetail(overrides: Partial<MarketplaceDetail> = {}): MarketplaceDetail {
+  return {
+    ...marketplaceSummary(overrides),
+    entries: [
+      marketplaceEntry(),
+      marketplaceEntry({ name: 'gitlab-tools', description: 'GitLab helpers', version: null, category: null, tags: [], source: { kind: 'git', text: 'https://gitlab.example/tools.git' }, supported: false, unsupportedReason: 'Git sources other than GitHub are not supported.' }),
+    ],
+    diagnostics: [],
+    ...overrides,
+  }
+}
+
+/** An installed plugin of marketplace 1 with a newer entry version. */
+export function pluginUpdate(overrides: Partial<PluginUpdate> = {}): PluginUpdate {
+  return {
+    pluginId: 'review-kit',
+    marketplaceId: marketplaceId(1),
+    plugin: 'review-kit',
+    version: '1.1.0',
+    availableVersion: '1.2.0',
+    ...overrides,
+  }
+}
+
+/** `GET /marketplaces`: one marketplace, no suggestion left, no update. */
+export function marketplaceList(overrides: Partial<MarketplaceList> = {}): MarketplaceList {
+  return {
+    items: [marketplaceSummary()],
+    suggestions: [],
+    updates: [],
+    ...overrides,
+  }
+}
+
+/** The origin of a plugin installed from marketplace 1 (a relative entry at commit 1). */
+export function pluginOrigin(overrides: Partial<Extract<PluginOrigin, { kind: 'marketplace' }>> = {}): PluginOrigin {
+  return {
+    kind: 'marketplace',
+    marketplaceId: marketplaceId(1),
+    marketplace: 'claude-plugins-official',
+    plugin: 'review-kit',
+    sourceKind: 'relative',
+    commit: commitSha(1),
+    path: 'plugins/review-kit',
+    version: '1.2.0',
+    ...overrides,
+  }
+}
+
+/** A Claude Code plugin with a hook script, a stdio MCP server and a secret `userConfig` option. */
+export function claudePluginInfo(overrides: Partial<ClaudePluginInfo> = {}): ClaudePluginInfo {
+  return {
+    name: 'review-kit',
+    displayName: 'Review kit',
+    version: '1.2.0',
+    namespace: 'review-kit',
+    components: { commands: 3, agents: 1, skills: 1, outputStyles: 1, hooks: 1, mcpServers: 1 },
+    executables: [
+      { kind: 'hook', label: 'PostToolUse Write|Edit', command: 'sh "$CLAUDE_PLUGIN_ROOT/hooks/format.sh"' },
+      { kind: 'mcp', label: 'review-kit', command: 'node server.mjs' },
+    ],
+    hosts: [],
+    userConfig: [{ key: 'API_TOKEN', title: 'API token', sensitive: true, required: true }],
+    unsupported: [{ component: '.lsp.json', reason: 'LSP servers are not supported.' }],
+    diagnostics: [],
+    ...overrides,
+  }
+}
+
+/** `GET /claude-import/home`: a readable server home folder. */
+export function claudeImportHome(overrides: Partial<ClaudeImportHome> = {}): ClaudeImportHome {
+  return {
+    available: true,
+    path: '/home/ada/.claude',
+    ...overrides,
+  }
+}
+
+/** A new agent of an import plan. */
+export function claudeImportItem(overrides: Partial<ClaudeImportPlanItemDto> = {}): ClaudeImportPlanItemDto {
+  return {
+    key: 'agent:reviewer:agents/reviewer.md',
+    kind: 'agent',
+    name: 'reviewer',
+    source: { file: 'agents/reviewer.md' },
+    status: 'new',
+    actions: ['import', 'skip'],
+    defaultAction: 'import',
+    summary: 'Reviews a diff and reports bugs',
+    warnings: [],
+    diagnostics: [],
+    executable: false,
+    ...overrides,
+  }
+}
+
+/** An upload plan with a new agent and a command hook (imported turned off by default). */
+export function claudeImportPlan(overrides: Partial<ClaudeImportPlan> = {}): ClaudeImportPlan {
+  return {
+    id: importPlanId(1),
+    source: 'upload',
+    root: '.claude',
+    createdAt: 1_759_000_000_000,
+    expiresAt: 1_759_000_600_000,
+    items: [
+      claudeImportItem(),
+      claudeImportItem({ key: 'hook:PostToolUse:settings.json:0:0', kind: 'hook', name: 'PostToolUse Write|Edit', source: { file: 'settings.json' }, summary: 'Runs sh ~/.claude/hooks/format.sh', warnings: ['runs-commands'], executable: true }),
+    ],
+    skipped: [],
+    diagnostics: [],
+    ...overrides,
+  }
+}
+
+/** The result of applying the default selection of `claudeImportPlan()`. */
+export function claudeImportApplyResult(overrides: Partial<ClaudeImportApplyResult> = {}): ClaudeImportApplyResult {
+  return {
+    results: [
+      { key: 'agent:reviewer:agents/reviewer.md', outcome: 'created', id: 'cus_sample0000000001' },
+      { key: 'hook:PostToolUse:settings.json:0:0', outcome: 'created', id: hookId(3) },
+    ],
+    counts: { created: 2, updated: 0, unchanged: 0, skipped: 0, failed: 0 },
+    warnings: [],
+    ...overrides,
+  }
+}
+
+/** `GET /projects/:id/definitions/file`: an existing project agent. */
+export function projectDefinitionFile(overrides: Partial<ProjectDefinitionFile> = {}): ProjectDefinitionFile {
+  return {
+    path: '.claude/agents/reviewer.md',
+    kind: 'agent',
+    exists: true,
+    content: '---\nname: reviewer\ndescription: Reviews a diff and reports bugs\n---\nReview the diff.\n',
+    sha256: trustSha(1),
+    diagnostics: [],
+    ...overrides,
+  }
+}
+
+/** `PUT /projects/:id/definitions/file`: a saved settings file whose hook waits for an approval. */
+export function projectDefinitionWriteResult(overrides: Partial<ProjectDefinitionWriteResult> = {}): ProjectDefinitionWriteResult {
+  return {
+    path: '.claude/settings.json',
+    sha256: trustSha(2),
+    created: false,
+    diagnostics: [],
+    trust: { pending: 1 },
     ...overrides,
   }
 }

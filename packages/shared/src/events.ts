@@ -8,6 +8,7 @@ import { workspaceChangedDataSchema } from './schemas/changes.ts'
 import { chatSummarySchema } from './schemas/chats.ts'
 import { customizationChangedDataSchema } from './schemas/customizations.ts'
 import { hooksChangedDataSchema } from './schemas/hooks.ts'
+import { marketplaceChangedDataSchema } from './schemas/marketplaces.ts'
 import { pluginLogEntrySchema, pluginSummarySchema } from './schemas/plugins.ts'
 import { projectMcpChangedDataSchema, projectTrustChangedDataSchema } from './schemas/project-trust.ts'
 import { projectSummarySchema } from './schemas/projects.ts'
@@ -34,6 +35,7 @@ export const SERVER_EVENT_TYPES = [
   'hooks.changed',
   'project-trust.changed',
   'project-mcp.changed',
+  'marketplace.changed',
 ] as const
 
 export const serverEventTypeSchema = z.enum(SERVER_EVENT_TYPES)
@@ -139,6 +141,11 @@ export const serverEventSchema = z.discriminatedUnion('type', [
   eventSchema('project-trust.changed', projectTrustChangedDataSchema),
   /** The MCP servers of a project changed state (ADR-050): the servers after the change. */
   eventSchema('project-mcp.changed', projectMcpChangedDataSchema),
+  /**
+   * A marketplace was added, refreshed or removed (Phase 12, ADR-054): the summary after the change, null = removed.
+   * Update badges of installed plugins follow `plugin.changed`.
+   */
+  eventSchema('marketplace.changed', marketplaceChangedDataSchema),
 ])
 export type ServerEvent = z.infer<typeof serverEventSchema>
 export type ServerEventType = ServerEvent['type']

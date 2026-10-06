@@ -41,7 +41,8 @@ describe('enums (Phase 8)', () => {
     expect(workspaceChangeKindSchema.options).toEqual(['edit', 'revert', 'rewind', 'undo', 'shell', 'untracked'])
     expect(changeSourceSchema.options).toEqual(['chat', 'git'])
     expect(conflictHandlingSchema.options).toEqual(['skip', 'force'])
-    expect(workspaceChangedSourceSchema.options).toEqual(['tool', 'rewind', 'revert', 'undo'])
+    // Phase 12 (ADR-056): `user`, a project definition file saved from the UI.
+    expect(workspaceChangedSourceSchema.options).toEqual(['tool', 'rewind', 'revert', 'undo', 'user'])
     expect(fileSweepModeSchema.options).toEqual(['off', 'daily', 'weekly'])
     expect(changesUnavailableReasonSchema.options).toEqual(['no-project', 'folder-unavailable'])
     expect(gitUnavailableReasonSchema.options).toEqual(['no-project', 'folder-unavailable', 'git-missing', 'not-a-repo', 'refused', 'timeout', 'failed'])

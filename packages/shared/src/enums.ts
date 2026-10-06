@@ -1,6 +1,7 @@
 // Enumerations of the contract (DECISIONS.md "Enumerations", API.md section 4.1, PLUGINS.md section 9).
 // Error codes and actions live in `errors.ts`.
 import { z } from 'zod'
+import { CLAUDE_ENTRY_SOURCE_KINDS } from './util/claude-plugins.ts'
 import {
   CUSTOMIZATION_KINDS,
   CUSTOMIZATION_SOURCES,
@@ -46,8 +47,19 @@ export type ProviderStatus = z.infer<typeof providerStatusSchema>
 export const pluginKindSchema = z.enum(['declarative', 'code'])
 export type PluginKind = z.infer<typeof pluginKindSchema>
 
-export const pluginSourceSchema = z.enum(['builtin', 'created', 'zip', 'npm', 'url', 'link', 'copy'])
+/**
+ * Where an installed plugin comes from. Phase 12 (ADR-054): `github` (an archive of a resolved commit of a GitHub
+ * repository) and `marketplace` (an entry of a marketplace, `PluginDetail.origin`).
+ */
+export const pluginSourceSchema = z.enum(['builtin', 'created', 'zip', 'npm', 'url', 'link', 'copy', 'github', 'marketplace'])
 export type PluginSource = z.infer<typeof pluginSourceSchema>
+
+/**
+ * The layout of a plugin folder (Phase 12, ADR-053; column `plugins.format`): `harness` (a root `plugin.json`, the
+ * harness manifest) or `claude` (a Claude Code plugin: `.claude-plugin/plugin.json` and / or Claude components).
+ */
+export const pluginFormatSchema = z.enum(['harness', 'claude'])
+export type PluginFormat = z.infer<typeof pluginFormatSchema>
 
 export const pluginStateSchema = z.enum(['disabled', 'untrusted', 'incompatible', 'loading', 'active', 'error'])
 export type PluginState = z.infer<typeof pluginStateSchema>
@@ -93,6 +105,22 @@ export type McpStatus = z.infer<typeof mcpStatusSchema>
 export const logLevelSchema = z.enum(['debug', 'info', 'warn', 'error'])
 export type LogLevel = z.infer<typeof logLevelSchema>
 
+// ---------- marketplaces (Phase 12, ADR-054) ----------
+
+/**
+ * Where a marketplace is read from: `github` (`.claude-plugin/marketplace.json` of a resolved commit of a repository),
+ * `url` (a hosted `marketplace.json`) or `path` (a folder on the server host).
+ */
+export const marketplaceSourceTypeSchema = z.enum(['github', 'url', 'path'])
+export type MarketplaceSourceType = z.infer<typeof marketplaceSourceTypeSchema>
+
+/**
+ * The source kind of a marketplace entry (`CLAUDE_ENTRY_SOURCE_KINDS` of `util/claude-plugins.ts`, type
+ * `ClaudeEntrySourceKind`): installable are `relative`, `github`, `archive` and `npm` (default registry); a github.com
+ * `url` / `git-subdir` entry is classified as `github`; other git hosts, `command` and `unknown` are unsupported.
+ */
+export const marketplaceEntrySourceKindSchema = z.enum(CLAUDE_ENTRY_SOURCE_KINDS)
+
 /** Code plugin templates of `POST /plugins/scaffold`. */
 export const pluginTemplateIdSchema = z.enum(['tool', 'provider', 'mcp-bridge', 'command-pack'])
 export type PluginTemplateId = z.infer<typeof pluginTemplateIdSchema>
@@ -118,8 +146,11 @@ export type ChangeSource = z.infer<typeof changeSourceSchema>
 export const conflictHandlingSchema = z.enum(['skip', 'force'])
 export type ConflictHandling = z.infer<typeof conflictHandlingSchema>
 
-/** What wrote the files of a `workspace.changed` event (ADR-036): an agent tool, or a user rewind, revert or undo. */
-export const workspaceChangedSourceSchema = z.enum(['tool', 'rewind', 'revert', 'undo'])
+/**
+ * What wrote the files of a `workspace.changed` event (ADR-036): an agent tool, or a user rewind, revert or undo; Phase
+ * 12 (ADR-056): `user`, a project definition file saved from the UI (not journaled, `chatId: null`).
+ */
+export const workspaceChangedSourceSchema = z.enum(['tool', 'rewind', 'revert', 'undo', 'user'])
 export type WorkspaceChangedSource = z.infer<typeof workspaceChangedSourceSchema>
 
 /** The automatic orphaned-file sweep (setting `fileSweep`, ADR-039): `off` (default), `daily` or `weekly`. */
@@ -209,10 +240,18 @@ export const definitionDiagnosticSchema = z.object({
 // ---------- hooks, trust, project MCP and output styles (Phase 11) ----------
 
 /**
- * The eight command hook events (ADR-048; Claude Code names, `HOOK_EVENTS` of `util/hooks.ts`, type `HookEvent`):
- * `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionStart`.
+ * The hook events (ADR-048; Claude Code names, `HOOK_EVENTS` of `util/hooks.ts`, type `HookEvent`): `PreToolUse`,
+ * `PostToolUse`, `UserPromptSubmit`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionStart`; Phase 12
+ * (ADR-057): `PostToolUseFailure`, `PermissionRequest`, `SubagentStart`, `PostCompact`, `SessionEnd` (13).
  */
 export const hookEventSchema = z.enum(HOOK_EVENTS)
+
+/**
+ * The type of a hook handler (Phase 12, ADR-057): `command` (a shell command, the Phase 11 handler) or `prompt` (a small
+ * model answers `{ ok, reason?, impossible? }` about the hook input; never a permission grant).
+ */
+export const hookHandlerTypeSchema = z.enum(['command', 'prompt'])
+export type HookHandlerType = z.infer<typeof hookHandlerTypeSchema>
 
 /**
  * Where a command hook comes from (ADR-048; `HOOK_SOURCES`, type `HookSource`): a personal hook (table `hooks`), a
@@ -226,8 +265,9 @@ export type HookKind = z.infer<typeof hookKindSchema>
 
 /**
  * State of a hook in `GET /hooks` (ADR-048): `active` (runs), `pending` (a project hook whose hash is not approved,
- * ADR-049), `off` (a personal hook turned off), `invalid` (an `error` diagnostic, e.g. a regex-like matcher: never runs)
- * or `blocked` (a kill switch is on: the setting `hooksEnabled`, `HF_WORKSPACE_SHELL=0` or `HF_SAFE_MODE`).
+ * ADR-049; Phase 12: also a hook of an untrusted plugin, listed from its manifest), `off` (a personal hook turned
+ * off), `invalid` (an `error` diagnostic, e.g. a regex-like matcher: never runs) or `blocked` (a kill switch is on: the
+ * setting `hooksEnabled`, `HF_WORKSPACE_SHELL=0` or `HF_SAFE_MODE`).
  */
 export const hookStateSchema = z.enum(['active', 'pending', 'off', 'invalid', 'blocked'])
 export type HookState = z.infer<typeof hookStateSchema>

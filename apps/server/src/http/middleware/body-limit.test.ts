@@ -62,6 +62,9 @@ describe('limits by route', () => {
     // Dictation (ADR-029): 25 MB of audio + multipart overhead; read-aloud text is an ordinary JSON body.
     expect(bodyLimitFor('audio.transcribe')).toEqual({ maxBytes: LIMITS.audioUploadBytes + 64 * 1024, limitBytes: LIMITS.audioUploadBytes })
     expect(bodyLimitFor('audio.speech')).toEqual({ maxBytes: LIMITS.jsonBodyBytes, limitBytes: LIMITS.jsonBodyBytes })
+    // Phase 12 (ADR-055): a Claude Code folder or zip of up to 32 MiB; applying a plan is an ordinary JSON body.
+    expect(bodyLimitFor('claudeImport.upload')).toEqual({ maxBytes: LIMITS.claudeImportBytesMax + 64 * 1024, limitBytes: LIMITS.claudeImportBytesMax })
+    expect(bodyLimitFor('claudeImport.apply')).toEqual({ maxBytes: LIMITS.jsonBodyBytes, limitBytes: LIMITS.jsonBodyBytes })
   })
 
   it('a dictation over 25 MB -> 413 before the body is read', async () => {

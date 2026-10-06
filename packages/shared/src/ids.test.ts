@@ -9,6 +9,8 @@ import {
   BUILTIN_AGENT_TYPES,
   BUILTIN_PLUGIN_IDS,
   BUILTIN_PROVIDER_IDS,
+  CATALOG_NAME_PATTERN,
+  catalogNameSchema,
   CHANGE_BATCH_ID_PATTERN,
   changeBatchIdSchema,
   chatIdSchema,
@@ -21,6 +23,7 @@ import {
   createFileId,
   createHookId,
   createHookRecordId,
+  createMarketplaceId,
   createMessageId,
   createProjectId,
   createShareId,
@@ -39,16 +42,24 @@ import {
   isPluginNamespacedId,
   isReservedAgentName,
   isReservedPluginId,
+  MARKETPLACE_ID_PATTERN,
+  marketplaceIdSchema,
   mcpServerIdSchema,
   mcpToolName,
   messageIdSchema,
   modelIdSchema,
   modelRefSchema,
+  newImportPlanId,
+  newMarketplaceId,
   parseModelRef,
   pluginIdSchema,
   PROJECT_ID_PATTERN,
   projectIdSchema,
   providerIdSchema,
+  QUALIFIED_NAME_PATTERN,
+  qualifiedName,
+  qualifiedNameSchema,
+  RESERVED_PLUGIN_IDS,
   safeParseModelRef,
   shareIdSchema,
   shareTokenSchema,
@@ -56,6 +67,7 @@ import {
   shellRuleIdSchema,
   SLASH_NAME_PATTERN,
   slashNameSchema,
+  splitQualifiedName,
   toolNameSchema,
 } from './ids.ts'
 import { fnv1a32Hex } from './util/hash.ts'
@@ -185,6 +197,12 @@ describe('builtin and reserved ids', () => {
   it('reserves core-*, mock and the builtin provider ids', () => {
     for (const id of ['core-providers', 'core-x', 'mock', 'openai', 'ollama', ...BUILTIN_PROVIDER_IDS])
       expect(isReservedPluginId(id)).toBe(true)
+    // Phase 12: the web routes `/plugins/new` and `/plugins/marketplaces`.
+    expect(RESERVED_PLUGIN_IDS).toEqual(['new', 'marketplaces'])
+    for (const id of RESERVED_PLUGIN_IDS)
+      expect(isReservedPluginId(id), id).toBe(true)
+    for (const id of ['news', 'marketplace', 'my-marketplaces'])
+      expect(isReservedPluginId(id), id).toBe(false)
     for (const id of ['core', 'my-openai', 'together-ai', 'mocker'])
       expect(isReservedPluginId(id)).toBe(false)
   })
@@ -317,5 +335,49 @@ describe('id generators', () => {
     const ids = Array.from({ length: 5000 }, () => createChatId())
     expect(new Set(ids).size).toBe(ids.length)
     expect([...ids].sort()).toEqual(ids)
+  })
+})
+
+describe('phase 12 ids and qualified catalog names (ADR-053 / ADR-054)', () => {
+  it('creates and validates marketplace ids', () => {
+    const id = createMarketplaceId()
+    expect(id).toMatch(MARKETPLACE_ID_PATTERN)
+    expect(marketplaceIdSchema.parse(id)).toBe(id)
+    expect(newMarketplaceId()).toMatch(MARKETPLACE_ID_PATTERN)
+    expect(newImportPlanId()).toMatch(/^cip_[\dA-Za-z]{16}$/)
+    for (const bad of ['mkt_short', 'MKT_ABCdef0123456789', 'mkt_ABCdef012345678!'])
+      expect(marketplaceIdSchema.safeParse(bad).success, bad).toBe(false)
+  })
+
+  it('accepts bare and qualified catalog names (1-3 segments, at most 128 characters)', () => {
+    const qualified = ['review-kit:review', 'review-kit:db:migrate', 'a:b:c:d', 'cc-new:x', `${'p'.repeat(40)}:${'n'.repeat(64)}`]
+    for (const name of qualified) {
+      expect(QUALIFIED_NAME_PATTERN.test(name), name).toBe(true)
+      expect(qualifiedNameSchema.safeParse(name).success, name).toBe(true)
+      expect(catalogNameSchema.safeParse(name).success, name).toBe(true)
+    }
+    for (const name of ['reviewer', 'explore', `a${'b'.repeat(63)}`]) {
+      expect(CATALOG_NAME_PATTERN.test(name), name).toBe(true)
+      expect(QUALIFIED_NAME_PATTERN.test(name), name).toBe(false)
+    }
+    // A 41-character id is not a plugin id; 4 segments, upper case, `_`, empty or digit-first segments are refused.
+    const longest = `${'p'.repeat(40)}:${'a'.repeat(43)}:${'b'.repeat(43)}`
+    expect(longest.length).toBe(128)
+    expect(catalogNameSchema.safeParse(longest).success).toBe(true)
+    expect(catalogNameSchema.safeParse(`${longest}x`).success).toBe(false)
+    for (const name of [`${'p'.repeat(41)}:x`, 'a:b:c:d:e', 'Review-kit:x', 'kit:Review', 'kit:clean_gone', 'kit:', ':x', 'kit::x', 'kit:1st', '-kit:x', 'kit-:x', 'a b:c', '', `a${'b'.repeat(64)}`])
+      expect(catalogNameSchema.safeParse(name).success, name).toBe(false)
+  })
+
+  it('builds and splits qualified names', () => {
+    expect(qualifiedName('review-kit', 'review')).toBe('review-kit:review')
+    expect(qualifiedName('review-kit', 'db', 'migrate')).toBe('review-kit:db:migrate')
+    expect(splitQualifiedName('review-kit:db:migrate')).toEqual({ pluginId: 'review-kit', segments: ['db', 'migrate'], name: 'migrate' })
+    expect(splitQualifiedName('review-kit:review')).toEqual({ pluginId: 'review-kit', segments: ['review'], name: 'review' })
+    for (const name of ['reviewer', 'a:b:c:d:e', 'Kit:x', ''])
+      expect(splitQualifiedName(name), name).toBeNull()
+    for (const args of [['review-kit'], ['Review', 'x'], ['kit', 'a', 'b', 'c', 'd'], ['kit', 'clean_gone'], ['kit', 'x'.repeat(130)]] as const) {
+      expect(() => qualifiedName(...(args as unknown as [string, ...string[]])), args.join(':')).toThrow(HarnessError)
+    }
   })
 })

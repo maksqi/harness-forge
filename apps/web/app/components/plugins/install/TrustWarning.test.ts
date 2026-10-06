@@ -22,6 +22,7 @@ function inspection(overrides: Partial<PluginInspection> = {}): PluginInspection
       contributes: { mcpServers: [{ id: 'mcp-echo', name: 'Echo', transport: { type: 'stdio', command: 'npx', args: ['-y', 'echo-server'] } }] },
     },
     kind: 'declarative',
+    format: 'harness',
     source: 'zip',
     sha256: HASH,
     contributions: { providers: [], models: 0, tools: [], mcpServers: ['mcp-echo'], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] },
@@ -33,6 +34,7 @@ function inspection(overrides: Partial<PluginInspection> = {}): PluginInspection
     existing: null,
     files: { count: 1, bytes: 300 },
     warnings: [],
+    claude: null,
     ...overrides,
   }
 }

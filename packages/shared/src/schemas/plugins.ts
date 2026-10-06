@@ -1,10 +1,20 @@
 // Plugin DTOs: list, detail, settings, logs, install and trust, drafts, files and build (API.md sections 4.10-4.13).
+// Phase 12 (ADR-053 / ADR-054): the plugin format, the origin of marketplace and GitHub installs, the Claude Code plugin
+// info of inspections and details, and the `github` / `marketplace` install sources (API.md section 4.33).
 import { z } from 'zod'
-import { logLevelSchema, pluginKindSchema, pluginSourceSchema, pluginStateSchema, pluginTemplateIdSchema } from '../enums.ts'
+import {
+  logLevelSchema,
+  marketplaceEntrySourceKindSchema,
+  pluginFormatSchema,
+  pluginKindSchema,
+  pluginSourceSchema,
+  pluginStateSchema,
+  pluginTemplateIdSchema,
+} from '../enums.ts'
 import { harnessErrorInitSchema } from '../errors.ts'
 import {
-  agentNameSchema,
-  commandNameSchema,
+  catalogNameSchema,
+  marketplaceIdSchema,
   modelIdSchema,
   pluginIdSchema,
   providerIdSchema,
@@ -16,6 +26,7 @@ import { LIMITS } from '../limits.ts'
 import { hasControlChars, utf8ByteLength } from '../util/text.ts'
 import { parseHttpUrl } from '../util/url.ts'
 import { iconRefSchema, queryBooleanSchema, queryIntSchema, secretStateSchema } from './common.ts'
+import { claudeDiagnosticSchema, commitShaSchema, githubRepoSchema, gitRefSchema, marketplaceNameSchema, repoSubpathSchema } from './marketplaces.ts'
 import { declarativeProviderSchema, fieldKeySchema, modelInfoSchema } from './plugin-data.ts'
 import { pluginManifestBaseSchema } from './plugin-manifest.ts'
 import { settingsKeySchema, settingsSchemaSchema } from './plugin-settings.ts'
@@ -23,6 +34,10 @@ import { credentialValuesSchema } from './providers.ts'
 
 // ---------- list and detail (4.10) ----------
 
+/**
+ * What a plugin contributes. Phase 12 (ADR-053): the commands, agents, skills and output styles of Claude Code plugins
+ * have qualified names (`<pluginId>:<name>`, `catalogNameSchema`); harness plugins keep bare names.
+ */
 export const pluginContributionsSchema = z.object({
   providers: z.array(providerIdSchema),
   /** Contributed models (manifest + `ctx.models.register`). */
@@ -30,22 +45,110 @@ export const pluginContributionsSchema = z.object({
   tools: z.array(toolNameSchema),
   /** Declared MCP server ids. */
   mcpServers: z.array(z.string()),
-  commands: z.array(commandNameSchema),
+  commands: z.array(catalogNameSchema),
   /** `HookMap` keys with at least one handler (code hooks, `ctx.hooks.on`). */
   hooks: z.array(z.string()),
   /** Agent types (manifest + `ctx.agents.register`; plugin API 1.4.0). */
-  agents: z.array(agentNameSchema),
+  agents: z.array(catalogNameSchema),
   /** Skills (manifest + `ctx.skills.register`; plugin API 1.4.0). */
-  skills: z.array(agentNameSchema),
+  skills: z.array(catalogNameSchema),
   /**
    * Command hook handlers of `contributes.hooks` (plugin API 1.5.0, ADR-048; `GET /hooks` lists them). Named apart from
    * `hooks`, which lists the code hooks.
    */
   commandHooks: z.int().min(0),
   /** Output styles (manifest + `ctx.outputStyles.register`; plugin API 1.5.0, ADR-051). */
-  outputStyles: z.array(agentNameSchema),
+  outputStyles: z.array(catalogNameSchema),
 })
 export type PluginContributions = z.infer<typeof pluginContributionsSchema>
+
+// ---------- Claude Code plugins and origins (Phase 12, ADR-053 / ADR-054) ----------
+
+/**
+ * Where a `github` or `marketplace` install came from (column `plugins.origin`, without the server-side entry overlay),
+ * discriminated on `kind`: a marketplace entry (the marketplace may since have been removed: the origin then dangles)
+ * or a GitHub repository at a resolved commit.
+ */
+export const pluginOriginSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('marketplace'),
+    marketplaceId: marketplaceIdSchema,
+    /** The marketplace name at install time. */
+    marketplace: marketplaceNameSchema,
+    /** The entry name. */
+    plugin: z.string().min(1).max(128),
+    sourceKind: marketplaceEntrySourceKindSchema,
+    /** `relative` / `github` entries: the commit the files came from. */
+    commit: commitShaSchema.optional(),
+    /** `archive` entries: the SHA-256 of the downloaded archive. */
+    archiveSha256: sha256HexSchema.optional(),
+    /** `npm` entries: the resolved package version. */
+    npmVersion: z.string().max(128).optional(),
+    /** The folder inside the repository or archive, when not its root. */
+    path: z.string().max(512).optional(),
+    /** The entry version at install time (null when the entry has none). */
+    version: z.string().max(128).nullable(),
+  }),
+  z.object({
+    kind: z.literal('github'),
+    repo: githubRepoSchema,
+    /** The ref the user gave (null = the default branch). */
+    ref: gitRefSchema.nullable(),
+    /** The commit it resolved to. */
+    commit: commitShaSchema,
+    /** The folder inside the repository (null = its root). */
+    path: z.string().max(512).nullable(),
+  }),
+])
+export type PluginOrigin = z.infer<typeof pluginOriginSchema>
+
+/** One thing a Claude Code plugin can run, exactly as the trust consent lists it. */
+export const claudePluginExecutableSchema = z.object({
+  /** A command hook handler, a stdio MCP server or a `` !`cmd` `` span of a command. */
+  kind: z.enum(['hook', 'mcp', 'span']),
+  /** Where it is (`PostToolUse Write|Edit`, the server name, the command name). */
+  label: z.string().max(200),
+  /** The command line with its arguments, as written. */
+  command: z.string().max(4096),
+})
+export type ClaudePluginExecutable = z.infer<typeof claudePluginExecutableSchema>
+
+/**
+ * What a Claude Code plugin is (`format: 'claude'`, ADR-053): its `plugin.json` identity, its components, what it can
+ * run (the trust consent), the hosts it talks to, the settings its `userConfig` asks for and what is ignored.
+ */
+export const claudePluginInfoSchema = z.object({
+  /** `name` of `plugin.json` (else the marketplace entry, the folder or the repository name). */
+  name: z.string().min(1).max(128),
+  /** `displayName` of `plugin.json`, when any. */
+  displayName: z.string().max(128).optional(),
+  /** The version as written (any string); null when none is known. */
+  version: z.string().max(128).nullable(),
+  /** The namespace of its qualified names: the plugin id. */
+  namespace: pluginIdSchema,
+  /** Components found (after the `plugin.json` path rules and the marketplace overlay). */
+  components: z.object({
+    commands: z.int().min(0),
+    agents: z.int().min(0),
+    skills: z.int().min(0),
+    outputStyles: z.int().min(0),
+    /** Hook handlers (command and prompt). */
+    hooks: z.int().min(0),
+    mcpServers: z.int().min(0),
+  }),
+  /** Every command hook handler (with its arguments), stdio MCP server and `!` span: what trust approves. */
+  executables: z.array(claudePluginExecutableSchema).max(LIMITS.claudePluginExecutablesMax),
+  /** Hosts of http MCP servers and URLs the plugin declares. */
+  hosts: z.array(z.string().max(253)).max(100),
+  /** The `userConfig` options (the plugin settings form; `sensitive` ones are secret settings). */
+  userConfig: z
+    .array(z.object({ key: z.string().min(1).max(64), title: z.string().max(200), sensitive: z.boolean(), required: z.boolean() }))
+    .max(LIMITS.claudeUserConfigMax),
+  /** Parts that are never used (`.lsp.json`, `bin/`, `themes/`, `monitors/`, an `http` hook handler, …). */
+  unsupported: z.array(z.object({ component: z.string().min(1).max(256), reason: z.string().max(300) })).max(100),
+  diagnostics: z.array(claudeDiagnosticSchema).max(LIMITS.claudePluginDiagnosticsMax),
+})
+export type ClaudePluginInfo = z.infer<typeof claudePluginInfoSchema>
 
 /** A trust pin: lowercase hex SHA-256, or `path:` + SHA-256 of the folder realpath for linked folders. */
 export const trustPinSchema = z.string().regex(/^(?:path:)?[\da-f]{64}$/, 'Expected a SHA-256 pin.')
@@ -73,8 +176,13 @@ export const pluginSummarySchema = z.object({
   description: z.string().nullable(),
   icon: iconRefSchema,
   kind: pluginKindSchema,
+  /** The folder layout (Phase 12, ADR-053): `harness` or `claude` (a Claude Code plugin). */
+  format: pluginFormatSchema,
   source: pluginSourceSchema,
-  /** npm spec, URL, linked path, or zip file name. */
+  /**
+   * npm spec, URL, linked path, or zip file name; Phase 12: `owner/repo@<sha12>[/path]` (`github`) or
+   * `<plugin>@<marketplace>` (`marketplace`).
+   */
   sourceRef: z.string().nullable(),
   builtin: z.boolean(),
   /** False for builtins. */
@@ -99,6 +207,10 @@ export const pluginDetailSchema = pluginSummarySchema.extend({
   editable: z.boolean(),
   /** `manifest.settings` present. */
   hasSettings: z.boolean(),
+  /** Phase 12 (ADR-054): where a `github` or `marketplace` install came from; null for every other source. */
+  origin: pluginOriginSchema.nullable(),
+  /** Phase 12 (ADR-053): the Claude Code plugin info (`format: 'claude'`); null for harness plugins. */
+  claude: claudePluginInfoSchema.nullable(),
 })
 export type PluginDetail = z.infer<typeof pluginDetailSchema>
 
@@ -195,10 +307,36 @@ const pathInstallSourceShape = {
   mode: z.enum(['link', 'copy']),
 }
 
+/**
+ * Phase 12 (ADR-054): a GitHub repository: `ref` (a branch, tag or commit; default: the default branch) is resolved to a
+ * commit, whose zip archive is downloaded over HTTPS (no git); `path` is the plugin folder inside the repository.
+ */
+const githubInstallSourceShape = {
+  source: z.literal('github'),
+  repo: githubRepoSchema,
+  ref: gitRefSchema.optional(),
+  path: repoSubpathSchema.optional(),
+}
+/** Phase 12 (ADR-054): an entry of an added marketplace (`plugin` = the entry name). */
+const marketplaceInstallSourceShape = {
+  source: z.literal('marketplace'),
+  marketplaceId: marketplaceIdSchema,
+  plugin: z.string().min(1).max(128),
+}
+/**
+ * Phase 12 (ADR-053): the plugin format; absent = detected from the layout (a root `plugin.json` is `harness`, else
+ * `.claude-plugin/plugin.json` or a Claude Code component is `claude`).
+ */
+const formatShape = {
+  format: pluginFormatSchema.optional(),
+}
+
 export const pluginInstallSourceSchema = z.discriminatedUnion('source', [
-  z.strictObject(npmInstallSourceShape),
-  z.strictObject(urlInstallSourceShape),
-  z.strictObject(pathInstallSourceShape),
+  z.strictObject({ ...npmInstallSourceShape, ...formatShape }),
+  z.strictObject({ ...urlInstallSourceShape, ...formatShape }),
+  z.strictObject({ ...pathInstallSourceShape, ...formatShape }),
+  z.strictObject({ ...githubInstallSourceShape, ...formatShape }),
+  z.strictObject({ ...marketplaceInstallSourceShape, ...formatShape }),
 ])
 export type PluginInstallSource = z.infer<typeof pluginInstallSourceSchema>
 
@@ -217,9 +355,11 @@ const installOptionsShape = {
 
 /** JSON body of `POST /plugins/install` (multipart: part `file` + `PluginInstallForm`). */
 export const pluginInstallBodySchema = z.discriminatedUnion('source', [
-  z.strictObject({ ...npmInstallSourceShape, ...installOptionsShape }),
-  z.strictObject({ ...urlInstallSourceShape, ...installOptionsShape }),
-  z.strictObject({ ...pathInstallSourceShape, ...installOptionsShape }),
+  z.strictObject({ ...npmInstallSourceShape, ...formatShape, ...installOptionsShape }),
+  z.strictObject({ ...urlInstallSourceShape, ...formatShape, ...installOptionsShape }),
+  z.strictObject({ ...pathInstallSourceShape, ...formatShape, ...installOptionsShape }),
+  z.strictObject({ ...githubInstallSourceShape, ...formatShape, ...installOptionsShape }),
+  z.strictObject({ ...marketplaceInstallSourceShape, ...formatShape, ...installOptionsShape }),
 ])
 export type PluginInstallBody = z.infer<typeof pluginInstallBodySchema>
 
@@ -232,15 +372,29 @@ export const pluginInstallFormSchema = z.object({
   enable: z.enum(['true', 'false']).optional(),
   /** See `sha256` of the JSON body. */
   sha256: sha256HexSchema.optional(),
+  /** Phase 12: see `format` of the JSON body. */
+  format: pluginFormatSchema.optional(),
 })
 export type PluginInstallForm = z.infer<typeof pluginInstallFormSchema>
 
+/** Multipart fields of `POST /plugins/inspect` next to the zip part `file` (Phase 12: the optional `format`). */
+export const pluginInspectFormSchema = z.object({
+  format: pluginFormatSchema.optional(),
+})
+export type PluginInspectForm = z.infer<typeof pluginInspectFormSchema>
+
 export const pluginInspectionSchema = z.object({
+  /** For a Claude Code plugin (Phase 12): a manifest synthesized from `plugin.json` (no `contributes`). */
   manifest: pluginManifestBaseSchema,
   kind: pluginKindSchema,
-  /** `zip`, `npm`, `url`, `link` or `copy`. */
+  /** Phase 12 (ADR-053): the detected (or requested) format. */
+  format: pluginFormatSchema,
+  /** `zip`, `npm`, `url`, `link` or `copy`; Phase 12: `github` or `marketplace`. */
   source: pluginSourceSchema,
-  /** Resolved source reference shown in "I trust <source>" (e.g. `name@1.2.3` for npm, the URL, the folder path). */
+  /**
+   * Resolved source reference shown in "I trust <source>" (e.g. `name@1.2.3` for npm, the URL, the folder path; Phase
+   * 12: `owner/repo@<sha12>[/path]` for GitHub and marketplace entries from GitHub).
+   */
   sourceRef: z.string().optional(),
   /** The hash that trust pins. */
   sha256: sha256HexSchema,
@@ -260,6 +414,8 @@ export const pluginInspectionSchema = z.object({
   files: z.object({ count: z.int().min(0), bytes: z.int().min(0) }),
   /** e.g. "Runs code with full server privileges", "Replaces version 1.2.0". */
   warnings: z.array(z.string()),
+  /** Phase 12 (ADR-053): the Claude Code plugin info (`format: 'claude'`); null for harness plugins. */
+  claude: claudePluginInfoSchema.nullable(),
 })
 export type PluginInspection = z.infer<typeof pluginInspectionSchema>
 

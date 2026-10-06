@@ -24,6 +24,13 @@ import {
   chatSummarySchema,
   chatUpdateSchema,
 } from '../schemas/chats.ts'
+import {
+  claudeImportApplyBodySchema,
+  claudeImportApplyResultSchema,
+  claudeImportHomeSchema,
+  claudeImportPlanSchema,
+  claudeImportUploadFormSchema,
+} from '../schemas/claude-import.ts'
 import { cursorPageSchema, listResponseSchema } from '../schemas/common.ts'
 import {
   customizationCreateSchema,
@@ -60,6 +67,12 @@ import {
 import { lobeIconListSchema } from '../schemas/icons.ts'
 import { keyRotateBodySchema, keyRotationResultSchema, keyStatusSchema } from '../schemas/keys.ts'
 import {
+  marketplaceAddBodySchema,
+  marketplaceDetailSchema,
+  marketplaceListSchema,
+  marketplaceParamsSchema,
+} from '../schemas/marketplaces.ts'
+import {
   catalogModelSchema,
   customModelInputSchema,
   customModelKeySchema,
@@ -95,6 +108,7 @@ import {
   pluginFileEntrySchema,
   pluginFileWriteSchema,
   pluginInspectBodySchema,
+  pluginInspectFormSchema,
   pluginInspectionSchema,
   pluginInstallBodySchema,
   pluginInstallFormSchema,
@@ -108,6 +122,13 @@ import {
   pluginTrustBodySchema,
   scaffoldRequestSchema,
 } from '../schemas/plugins.ts'
+import {
+  projectDefinitionFileSchema,
+  projectDefinitionQuerySchema,
+  projectDefinitionRemoveQuerySchema,
+  projectDefinitionWriteBodySchema,
+  projectDefinitionWriteResultSchema,
+} from '../schemas/project-definitions.ts'
 import { projectFileAttachBodySchema, projectFileSearchSchema, projectFilesQuerySchema } from '../schemas/project-files.ts'
 import {
   projectMcpListSchema,
@@ -202,6 +223,9 @@ export const API_MODULES = [
   'projectTrust',
   'projectMcp',
   'shares',
+  'marketplaces',
+  'claudeImport',
+  'projectDefinitions',
 ] as const
 export type ApiModule = (typeof API_MODULES)[number]
 
@@ -216,8 +240,9 @@ export interface ApiRouteDef {
   /**
    * Always requires fresh auth when a password is set. Conditional cases (`mcp.create` / `mcp.update` with stdio,
    * `pluginInstall.install` of a plugin that requires trust, `pluginDrafts.create` / `pluginDrafts.updateManifest`
-   * with a stdio MCP server, `plugins.reload` and `pluginFiles.write` / `pluginFiles.remove` of code plugins, and since
-   * Phase 11 `hooks.update` unless the body only turns the hook off) are enforced by the server only.
+   * with a stdio MCP server, `plugins.reload` and `pluginFiles.write` / `pluginFiles.remove` of code plugins, since
+   * Phase 11 `hooks.update` unless the body only turns the hook off, and since Phase 12 `pluginInstall.install` of a
+   * Claude Code plugin that runs anything) are enforced by the server only.
    */
   fresh?: true
   /** Path params. */
@@ -235,7 +260,7 @@ export interface ApiRouteDef {
   status?: 200 | 201 | 204
 }
 
-/** Every endpoint of API.md (120 routes), keyed `<module>.<action>`. */
+/** Every endpoint of API.md (132 routes), keyed `<module>.<action>`. */
 export const apiRoutes = {
   // health.ts
   'health.get': { module: 'health', method: 'GET', path: '/health', public: true, response: healthSchema },
@@ -319,7 +344,7 @@ export const apiRoutes = {
   'plugins.logs': { module: 'plugins', method: 'GET', path: '/plugins/:id/logs', params: pluginParamsSchema, query: pluginLogsQuerySchema, response: listResponseSchema(pluginLogEntrySchema) },
 
   // plugin-install.ts
-  'pluginInstall.inspect': { module: 'pluginInstall', method: 'POST', path: '/plugins/inspect', body: pluginInspectBodySchema, form: fileUploadFormSchema, response: pluginInspectionSchema },
+  'pluginInstall.inspect': { module: 'pluginInstall', method: 'POST', path: '/plugins/inspect', body: pluginInspectBodySchema, form: pluginInspectFormSchema, response: pluginInspectionSchema },
   'pluginInstall.install': { module: 'pluginInstall', method: 'POST', path: '/plugins/install', body: pluginInstallBodySchema, form: pluginInstallFormSchema, response: pluginDetailSchema, status: 201 },
   'pluginInstall.trust': { module: 'pluginInstall', method: 'POST', path: '/plugins/:id/trust', fresh: true, params: pluginParamsSchema, body: pluginTrustBodySchema, response: pluginDetailSchema },
   'pluginInstall.export': { module: 'pluginInstall', method: 'GET', path: '/plugins/:id/export', params: pluginParamsSchema, response: 'binary' },
@@ -434,6 +459,29 @@ export const apiRoutes = {
   'shares.remove': { module: 'shares', method: 'DELETE', path: '/shares/:id', params: shareParamsSchema, response: 'empty' },
   'shares.view': { module: 'shares', method: 'GET', path: '/share/:token', public: true, params: sharePublicParamsSchema, response: shareViewSchema },
   'shares.file': { module: 'shares', method: 'GET', path: '/share/:token/files/:fileId', public: true, params: shareFileParamsSchema, response: 'binary' },
+
+  // marketplaces.ts (ADR-054): plugin marketplaces (a GitHub repository, a hosted `marketplace.json` or a server folder);
+  // adding fetches at once (nothing is stored when that fails); removing keeps the installed plugins; installs go
+  // through `pluginInstall` (source `marketplace`)
+  'marketplaces.list': { module: 'marketplaces', method: 'GET', path: '/marketplaces', response: marketplaceListSchema },
+  'marketplaces.add': { module: 'marketplaces', method: 'POST', path: '/marketplaces', body: marketplaceAddBodySchema, response: marketplaceDetailSchema, status: 201 },
+  'marketplaces.get': { module: 'marketplaces', method: 'GET', path: '/marketplaces/:id', params: marketplaceParamsSchema, response: marketplaceDetailSchema },
+  'marketplaces.refresh': { module: 'marketplaces', method: 'POST', path: '/marketplaces/:id/refresh', params: marketplaceParamsSchema, response: marketplaceDetailSchema },
+  'marketplaces.remove': { module: 'marketplaces', method: 'DELETE', path: '/marketplaces/:id', params: marketplaceParamsSchema, response: 'empty' },
+
+  // claude-import.ts (ADR-055): import from a Claude Code home folder; the plan is built and held by the server (an
+  // upload of the picked files or a zip, or a scan of `HF_CLAUDE_HOME`); scanning and applying need fresh auth
+  'claudeImport.home': { module: 'claudeImport', method: 'GET', path: '/claude-import/home', response: claudeImportHomeSchema },
+  'claudeImport.scan': { module: 'claudeImport', method: 'POST', path: '/claude-import/scan', fresh: true, response: claudeImportPlanSchema },
+  'claudeImport.upload': { module: 'claudeImport', method: 'POST', path: '/claude-import/upload', form: claudeImportUploadFormSchema, response: claudeImportPlanSchema },
+  'claudeImport.apply': { module: 'claudeImport', method: 'POST', path: '/claude-import/apply', fresh: true, body: claudeImportApplyBodySchema, response: claudeImportApplyResultSchema },
+
+  // project-definitions.ts (ADR-056): a project's definition files, settings `hooks` and `.mcp.json` `mcpServers` edited
+  // from the UI; no fresh auth and no idle rule (saving never approves anything); differs from `/projects/:id/files...`
+  // in its static third segment
+  'projectDefinitions.read': { module: 'projectDefinitions', method: 'GET', path: '/projects/:id/definitions/file', params: projectParamsSchema, query: projectDefinitionQuerySchema, response: projectDefinitionFileSchema },
+  'projectDefinitions.write': { module: 'projectDefinitions', method: 'PUT', path: '/projects/:id/definitions/file', params: projectParamsSchema, body: projectDefinitionWriteBodySchema, response: projectDefinitionWriteResultSchema },
+  'projectDefinitions.remove': { module: 'projectDefinitions', method: 'DELETE', path: '/projects/:id/definitions/file', params: projectParamsSchema, query: projectDefinitionRemoveQuerySchema, response: 'empty' },
 } as const satisfies Record<string, ApiRouteDef>
 
 export type ApiRoutes = typeof apiRoutes

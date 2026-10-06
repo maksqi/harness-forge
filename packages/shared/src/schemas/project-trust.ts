@@ -6,6 +6,7 @@
 import { z } from 'zod'
 import {
   hookEventSchema,
+  hookHandlerTypeSchema,
   projectMcpStateSchema,
   projectMcpTransportSchema,
   trustItemKindSchema,
@@ -33,13 +34,33 @@ export const trustRefSchema = z.object({
   sha256: sha256HexSchema.nullable(),
 })
 
-/** What a hook item runs: exactly what its settings file says. */
+/**
+ * What a hook item runs: exactly what its settings file says. Phase 12 (ADR-057): a prompt hook (`type: 'prompt'`,
+ * `command` is '') shows its prompt and model; the handler fields are present only when the file sets them (items with
+ * one of them hash as trust item v2, every other item keeps its v1 hash).
+ */
 export const trustHookDetailSchema = z.object({
   event: hookEventSchema,
   matcher: z.string().max(LIMITS.hookMatcherMaxChars).nullable(),
   command: z.string().max(LIMITS.hookCommandMaxChars),
-  /** Seconds; null = the default (60 s). */
+  /** Seconds; null = the default (60 s; prompt hooks 30 s). */
   timeout: z.int().min(1).nullable(),
+  /** Phase 12: the handler type; absent = `command`. */
+  type: hookHandlerTypeSchema.optional(),
+  /** Phase 12: exec-form arguments of a command hook. */
+  args: z.array(z.string().max(LIMITS.hookCommandMaxChars)).max(64).optional(),
+  /** Phase 12: a detached command hook. */
+  async: z.boolean().optional(),
+  /** Phase 12: the `if` rule (tool events). */
+  if: z.string().max(512).optional(),
+  /** Phase 12: the prompt of a prompt hook. */
+  prompt: z.string().max(LIMITS.promptHookPromptMaxChars).optional(),
+  /** Phase 12: the model of a prompt hook, as written. */
+  model: z.string().max(64 + 1 + 256).optional(),
+  /** Phase 12: `continueOnBlock` of a prompt hook. */
+  continueOnBlock: z.boolean().optional(),
+  /** Phase 12: the activity label. */
+  statusMessage: z.string().max(200).optional(),
 })
 export type TrustHookDetail = z.infer<typeof trustHookDetailSchema>
 

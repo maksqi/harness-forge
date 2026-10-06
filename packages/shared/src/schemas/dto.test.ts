@@ -129,10 +129,12 @@ describe('settings', () => {
       planDirectory: '.harness/plans',
       outputStyle: 'default',
       hooksEnabled: true,
+      hookModelRef: null,
+      modelAliases: { sonnet: null, opus: null, haiku: null, fable: null },
     })
     expect(Object.isFrozen(DEFAULT_SETTINGS)).toBe(true)
-    // Phase 11 adds `outputStyle` and `hooksEnabled` (30 keys).
-    expect(SETTINGS_KEYS).toHaveLength(30)
+    // Phase 11 adds `outputStyle` and `hooksEnabled` (30 keys); Phase 12 `hookModelRef` and `modelAliases` (32).
+    expect(SETTINGS_KEYS).toHaveLength(32)
     expect(settingsSchema.parse({ maxSteps: 5, _auth: 'internal' })).toEqual({ ...DEFAULT_SETTINGS, maxSteps: 5 })
   })
 
@@ -171,6 +173,8 @@ describe('settings', () => {
       planDirectory: '.harness/plans',
       outputStyle: 'default',
       hooksEnabled: true,
+      hookModelRef: null,
+      modelAliases: { sonnet: null, opus: null, haiku: null, fable: null },
     })
   })
 
@@ -198,7 +202,7 @@ describe('settings', () => {
       projectMaxSteps: 100,
       fileSweep: 'daily',
     }
-    expect(settingsSchema.parse(v14)).toEqual({ ...v14, autoCompact: true, compactModelRef: null, subagentModelRef: null, subagentMaxSteps: 30, shiftTabModes: true, planFiles: false, planDirectory: '.harness/plans', outputStyle: 'default', hooksEnabled: true })
+    expect(settingsSchema.parse(v14)).toEqual({ ...v14, autoCompact: true, compactModelRef: null, subagentModelRef: null, subagentMaxSteps: 30, shiftTabModes: true, planFiles: false, planDirectory: '.harness/plans', outputStyle: 'default', hooksEnabled: true, hookModelRef: null, modelAliases: { sonnet: null, opus: null, haiku: null, fable: null } })
   })
 
   it('reads settings stored by v1.5 (without the Phase 10 keys) with the new defaults', () => {
@@ -780,9 +784,9 @@ describe('server events', () => {
     expect(serverEventSchema.parse(event)).toEqual({ type: 'chat.updated', data: { ...summary, activeLeafId: MESSAGE_B }, at: 4 })
   })
 
-  it('covers the 18 event types', () => {
-    // Phase 11 adds `hooks.changed`, `project-trust.changed` and `project-mcp.changed`.
-    expect(SERVER_EVENT_TYPES).toHaveLength(18)
+  it('covers the 19 event types', () => {
+    // Phase 11 adds `hooks.changed`, `project-trust.changed` and `project-mcp.changed`; Phase 12 `marketplace.changed`.
+    expect(SERVER_EVENT_TYPES).toHaveLength(19)
     expectTypeOf<ServerEventType>().toEqualTypeOf<z.infer<typeof serverEventTypeSchema>>()
   })
 

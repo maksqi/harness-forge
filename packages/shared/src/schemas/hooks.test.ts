@@ -81,7 +81,22 @@ const record = {
 describe('enums and counts (Phase 11)', () => {
   it('declares the hook enums from the helper constants', () => {
     expect(hookEventSchema.options).toEqual([...HOOK_EVENTS])
-    expect(hookEventSchema.options).toEqual(['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Notification', 'Stop', 'SubagentStop', 'PreCompact', 'SessionStart'])
+    // Phase 12 (ADR-057) adds five events (13).
+    expect(hookEventSchema.options).toEqual([
+      'PreToolUse',
+      'PostToolUse',
+      'UserPromptSubmit',
+      'Notification',
+      'Stop',
+      'SubagentStop',
+      'PreCompact',
+      'SessionStart',
+      'PostToolUseFailure',
+      'PermissionRequest',
+      'SubagentStart',
+      'PostCompact',
+      'SessionEnd',
+    ])
     expect(hookSourceSchema.options).toEqual([...HOOK_SOURCES])
     expect(hookKindSchema.options).toEqual(['command', 'code'])
     expect(hookStateSchema.options).toEqual(['active', 'pending', 'off', 'invalid', 'blocked'])
@@ -92,8 +107,9 @@ describe('enums and counts (Phase 11)', () => {
 
   it('adds 3 notices, 2 conflict reasons and the hook data part', () => {
     expect(noticeCodeSchema.options.slice(8)).toEqual(['output-style-unavailable', 'hook-continuation-limit', 'project-mcp-unavailable'])
-    expect(conflictReasonSchema.options).toHaveLength(14)
-    expect(conflictReasonSchema.options.slice(12)).toEqual(['hook-blocked', 'untrusted'])
+    // Phase 12 adds `offline` (15).
+    expect(conflictReasonSchema.options).toHaveLength(15)
+    expect(conflictReasonSchema.options.slice(12)).toEqual(['hook-blocked', 'untrusted', 'offline'])
     expect(Object.keys(harnessDataSchemas)).toHaveLength(6)
     expect(harnessDataSchemas.hook).toBe(hookDataSchema)
   })
@@ -101,7 +117,8 @@ describe('enums and counts (Phase 11)', () => {
 
 describe('personal hooks (ADR-048)', () => {
   it('parses the DTO and the params', () => {
-    expect(personalHookSchema.parse(hook)).toEqual(hook)
+    // A v1.7 answer (no `type`) is a command hook.
+    expect(personalHookSchema.parse(hook)).toEqual({ ...hook, type: 'command' })
     expect(personalHookSchema.parse({ ...hook, matcher: null, timeout: null })).toMatchObject({ matcher: null, timeout: null })
     for (const change of [{ id: 'hok_short' }, { event: 'BeforeTool' }, { timeout: 0 }, { timeout: 601 }, { timeout: 1.5 }])
       expect(personalHookSchema.safeParse({ ...hook, ...change }).success, JSON.stringify(change)).toBe(false)
@@ -335,7 +352,9 @@ describe('plugin API 1.5.0 manifests', () => {
     for (const bad of [
       { BeforeTool: [] },
       { Stop: [{ hooks: [] }] },
-      { Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] },
+      // Plugin API 1.6.0: prompt handlers only on the prompt events.
+      { SessionStart: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] },
+      { Stop: [{ hooks: [{ type: 'agent', prompt: 'x' }] }] },
       { Stop: [{ hooks: [{ type: 'command', command: 'x', timeout: 0 }] }] },
       { Stop: [{ hooks: [{ type: 'command', command: 'x' }], extra: true }] },
       { PreToolUse: [{ matcher: '^Bash', hooks: [{ type: 'command', command: 'x' }] }] },
@@ -367,5 +386,97 @@ describe('the hook-blocked conflict', () => {
     expect(hookDataSchema.parse(conflictDetailsSchema.parse({ reason: 'hook-blocked', hook: blocked }).hook)).toEqual(blocked)
     expect(conflictDetailsSchema.parse({ reason: 'untrusted' })).toEqual({ reason: 'untrusted' })
     expect(conflictDetailsSchema.safeParse({ reason: 'hook-blocked', hook: 'denied' }).success).toBe(false)
+  })
+})
+
+describe('prompt hooks and the Phase 12 handler fields (ADR-057)', () => {
+  const promptHook = { id: HOOK_ID, type: 'prompt', event: 'PreToolUse', matcher: 'Write', prompt: 'Refuse writes to dist/. $ARGUMENTS', model: 'haiku', timeout: null, continueOnBlock: true, enabled: true, createdAt: 1, updatedAt: 2 } as const
+
+  it('parses command and prompt hook DTOs (discriminated on type)', () => {
+    expect(personalHookSchema.parse(promptHook)).toEqual(promptHook)
+    const command = { ...hook, type: 'command', args: ['--fix'], async: true, if: 'Bash(npm test:*)', statusMessage: 'Formatting' } as const
+    expect(personalHookSchema.parse(command)).toEqual(command)
+    // The fields of the other type are not part of a variant.
+    expect(personalHookSchema.parse({ ...promptHook, command: 'x' })).not.toHaveProperty('command')
+    expect(personalHookSchema.safeParse({ ...promptHook, type: 'http' }).success).toBe(false)
+  })
+
+  it('creates prompt hooks on the prompt events only, and command hooks with the new fields', () => {
+    const body = { type: 'prompt', event: 'Stop', prompt: 'Did the agent run the tests? $ARGUMENTS', model: 'anthropic:claude-haiku-5', continueOnBlock: false } as const
+    expect(hookCreateSchema.parse(body)).toEqual(body)
+    expect(hookCreateSchema.parse({ type: 'prompt', event: 'PermissionRequest', prompt: 'x', model: 'claude-haiku-4-5[1m]' }).type).toBe('prompt')
+    for (const event of ['SessionStart', 'Notification', 'PreCompact', 'PostCompact', 'SubagentStart', 'SessionEnd'])
+      expect(hookCreateSchema.safeParse({ ...body, event }).success, event).toBe(false)
+    for (const change of [{ prompt: '' }, { prompt: '   ' }, { prompt: 'x'.repeat(LIMITS.promptHookPromptMaxChars + 1) }, { model: 'gpt' }, { command: 'sh x.sh' }, { args: ['x'] }])
+      expect(hookCreateSchema.safeParse({ ...body, ...change }).success, JSON.stringify(change).slice(0, 60)).toBe(false)
+    const command = { event: 'PreToolUse', matcher: 'Bash', command: 'node', args: ['scripts/check.mjs', '--strict'], async: false, if: 'Bash(git push:*)', statusMessage: 'Checking the push' } as const
+    expect(hookCreateSchema.parse(command)).toEqual(command)
+    expect(hookCreateSchema.parse({ ...command, type: 'command' }).type).toBe('command')
+    for (const change of [{ if: 'Bash(' }, { if: '1Bash' }, { statusMessage: '' }, { args: ['a\0b'] }, { prompt: 'x' }, { continueOnBlock: true }])
+      expect(hookCreateSchema.safeParse({ ...command, ...change }).success, JSON.stringify(change)).toBe(false)
+    // The new events take command hooks.
+    for (const event of ['PostToolUseFailure', 'PermissionRequest', 'SubagentStart', 'PostCompact', 'SessionEnd'])
+      expect(hookCreateSchema.safeParse({ event, command: 'sh x.sh' }).success, event).toBe(true)
+  })
+
+  it('updates keep command and prompt fields apart', () => {
+    expect(hookUpdateSchema.parse({ prompt: 'New prompt' })).toEqual({ prompt: 'New prompt' })
+    expect(hookUpdateSchema.parse({ type: 'prompt', prompt: 'x', model: null })).toEqual({ type: 'prompt', prompt: 'x', model: null })
+    expect(hookUpdateSchema.parse({ args: null, if: 'Write' })).toEqual({ args: null, if: 'Write' })
+    for (const body of [{ command: 'x', prompt: 'y' }, { type: 'prompt', command: 'x' }, { type: 'command', model: 'haiku' }, { type: 'prompt', event: 'SessionStart' }, { type: 'agent' }])
+      expect(hookUpdateSchema.safeParse(body).success, JSON.stringify(body)).toBe(false)
+    expect(isHookTurnOff({ enabled: false, prompt: 'x' })).toBe(false)
+  })
+
+  it('lists prompt hooks and untrusted plugin hooks', () => {
+    const entry = { key: 'plugin:review-kit:0', source: 'plugin', kind: 'command', type: 'prompt', event: 'Stop', matcher: null, command: '', prompt: 'Check $ARGUMENTS', model: 'haiku', continueOnBlock: false, timeout: null, state: 'pending', pluginId: 'review-kit', diagnostics: [] } as const
+    expect(hookEntrySchema.parse(entry)).toEqual(entry)
+    const command = { key: 'personal:x', source: 'personal', kind: 'command', event: 'SessionEnd', matcher: null, command: 'sh end.sh', args: ['--quiet'], async: true, if: 'Bash', statusMessage: 'Saying goodbye', timeout: 5, state: 'active', diagnostics: [] } as const
+    expect(hookEntrySchema.parse(command)).toEqual(command)
+  })
+
+  it('records prompt hooks and harness-asked allows in data-hook parts', () => {
+    const prompted = { ...record, hooks: [{ source: 'personal', label: 'Refuse writes to dist/', exitCode: null, durationMs: 300, kind: 'prompt', model: 'anthropic:claude-haiku-5' }] } as const
+    expect(hookDataSchema.parse(prompted)).toEqual(prompted)
+    const allowed = { ...record, outcome: 'allowed', reason: undefined, harnessAsked: true } as const
+    expect(hookDataSchema.parse(allowed).harnessAsked).toBe(true)
+    expect(hookDataSchema.safeParse({ ...record, harnessAsked: false }).success).toBe(false)
+    expect(hookDataSchema.safeParse({ ...record, hooks: [{ ...record.hooks[0], kind: 'http' }] }).success).toBe(false)
+    // A v1.7 record (no kind, no harnessAsked) still parses.
+    expect(hookDataSchema.parse(record)).toEqual(record)
+  })
+
+  it('plugin API 1.6.0 manifests: 13 events, prompt handlers without trust, unknown events still refused', () => {
+    const base = { manifestVersion: 1, id: 'judge-pack', name: 'Judge pack', version: '1.0.0', engines: { harness: '^1.6.0' } } as const
+    const prompts = { ...base, contributes: { hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Is the task done? $ARGUMENTS', model: 'haiku' }] }], PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ type: 'prompt', prompt: 'Explain', continueOnBlock: true }] }] } } }
+    const parsed = pluginManifestSchema.parse(prompts)
+    expect(parsed).toEqual(prompts)
+    expect(countHookHandlers(parsed.contributes?.hooks)).toBe(2)
+    expect(declaresCommandHooks(parsed)).toBe(false)
+    expect(manifestRequiresTrust(parsed)).toBe(false)
+    const mixed = { ...base, contributes: { hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: 'sh end.sh', args: ['--quiet'], async: true }] }], Stop: [{ hooks: [{ type: 'prompt', prompt: 'Done?' }] }] } } }
+    expect(manifestRequiresTrust(pluginManifestSchema.parse(mixed))).toBe(true)
+    expect(pluginManifestSchema.safeParse({ ...base, contributes: { hooks: { Elicitation: [{ hooks: [{ type: 'command', command: 'x' }] }] } } }).success).toBe(false)
+  })
+})
+
+describe('the if rule and the model of a hook (ADR-057, checked with the util/hooks.ts helpers)', () => {
+  it('accepts what checkHookIf accepts, on tool events only', () => {
+    for (const rule of ['Write', 'mcp__github__*', 'Bash(npm test:*)', 'Bash(npm test *)', 'Bash(git status)'])
+      expect(hookCreateSchema.safeParse({ event: 'PreToolUse', command: 'sh x.sh', if: rule }).success, rule).toBe(true)
+    for (const rule of ['Bash(*)', 'Bash(npm * test)', 'Read(./.env)', ''])
+      expect(hookCreateSchema.safeParse({ event: 'PreToolUse', command: 'sh x.sh', if: rule }).success, rule).toBe(false)
+    expect(hookCreateSchema.safeParse({ event: 'Stop', command: 'sh x.sh', if: 'Write' }).error?.issues[0]?.path).toEqual(['if'])
+    expect(hookCreateSchema.safeParse({ type: 'prompt', event: 'PostToolUse', prompt: 'x', if: 'Bash(npm test:*)' }).success).toBe(true)
+    const manifestHooks = { Stop: [{ hooks: [{ type: 'command', command: 'sh x.sh', if: 'Write' }] }] }
+    expect(hooksConfigSchema.safeParse(manifestHooks).success).toBe(false)
+    expect(hooksConfigSchema.safeParse({ PreToolUse: [{ hooks: [{ type: 'prompt', prompt: 'x', if: 'Write' }] }] }).success).toBe(true)
+  })
+
+  it('takes a model ref or a Claude model name', () => {
+    for (const model of ['anthropic:claude-haiku-5', 'haiku', 'Sonnet', 'opusplan', 'claude-sonnet-4-5[1m]'])
+      expect(hookCreateSchema.safeParse({ type: 'prompt', event: 'Stop', prompt: 'x', model }).success, model).toBe(true)
+    for (const model of ['gpt-6', 'inherit', ''])
+      expect(hookCreateSchema.safeParse({ type: 'prompt', event: 'Stop', prompt: 'x', model }).success, model).toBe(false)
   })
 })

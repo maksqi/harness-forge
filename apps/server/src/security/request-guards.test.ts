@@ -226,6 +226,10 @@ describe('sEC-B2: GET and HEAD never change stored state', () => {
       'chatTasks.list': { params: { id: chatId } },
       // Phase 11: the hook listing without a project (the run log takes no input; the project routes use the samples).
       'hooks.list': {},
+      // Phase 12: the marketplaces and the home-folder status take no input; an unknown marketplace and project file use
+      // the samples (a GET never fetches a marketplace, scans the home folder or writes a project file).
+      'marketplaces.list': {},
+      'claudeImport.home': {},
     }
     const before = await storedState(t)
     // The baseline really holds state for the routes to touch.

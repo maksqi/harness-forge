@@ -4,6 +4,8 @@
  * files a command names (their sha256 is part of the item's hash, so editing `.claude/hooks/check.sh` makes the hook
  * pending again). The server hashes `trustHashInput(item)` with sha256 (`node:crypto`); this module only canonicalizes.
  * Pure and isomorphic; never throws. Contract skeleton written by the coordinator in P11-0a (K1); implemented by C35.
+ * Phase 12 (ADR-057, C42): hook items may carry `extra` (prompt hooks, `args` / `async` / `if`), hashed in a v2 layout;
+ * items without it keep their v1 bytes (golden tests in `trust.test.ts`).
  *
  * Import note: this module imports `util/shell-command.ts`, which imports `limits.ts`; `limits.ts` must therefore never
  * import this module (an import cycle that fails at load time).
@@ -32,8 +34,15 @@ export type TrustHashItem
     readonly kind: 'hook'
     readonly event: string
     readonly matcher: string | null
-    readonly command: string
+    /** The shell command (the program of an exec-form hook); null for a prompt hook (Phase 12). */
+    readonly command: string | null
     readonly timeoutSec: number | null
+    /**
+     * Phase 12 handler fields (ADR-057): a prompt hook's `{ type: 'prompt', prompt, model, continueOnBlock }`, a command
+     * hook's `{ args, async, if }`. Absent (or an object whose canonical JSON is `{}`) = the v1 layout, so every
+     * approval of a hook without these fields keeps its hash; present = the v2 layout.
+     */
+    readonly extra?: Readonly<Record<string, unknown>> | null
     readonly refs: readonly TrustRef[]
   }
   | {
@@ -53,6 +62,8 @@ export type TrustHashItem
 
 /** Version of the canonical layout (the second element of every `trustHashInput` array). */
 const TRUST_HASH_VERSION = 1
+/** Version of the hook layout with Phase 12 handler fields (`extra`). */
+const TRUST_HOOK_EXTRA_VERSION = 2
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Canonical JSON
@@ -181,10 +192,19 @@ function textOrNull(value: unknown): string | null {
   return typeof value === 'string' ? value : null
 }
 
+/** The `extra` of a hook item when it holds at least one field (its canonical JSON is not `{}`), else null (v1). */
+function hookExtra(extra: unknown): Readonly<Record<string, unknown>> | null {
+  if (typeof extra !== 'object' || extra === null || Array.isArray(extra))
+    return null
+  return canonicalJson(extra) === '{}' ? null : extra as Readonly<Record<string, unknown>>
+}
+
 /**
  * The canonical text of an item: a JSON array `[kind, 1, …fields, refs]` (refs `{ path, sha256 }` sorted by path,
  * duplicates removed):
- * - hook: `['hook', 1, event, matcher, command, timeoutSec, refs]`;
+ * - hook: `['hook', 1, event, matcher, command, timeoutSec, refs]`; with Phase 12 handler fields (`extra`, ADR-057)
+ *   `['hook', 2, event, matcher, command | null, timeoutSec, extra, refs]` (extra's keys sorted, `undefined` dropped);
+ *   an item without `extra` keeps the v1 bytes, so every v1.7 approval stays valid;
  * - mcp: `['mcp', 1, name, server, refs]` (the raw server object, keys sorted);
  * - command: `['command', 1, name, spans, refs]`.
  */
@@ -195,6 +215,9 @@ export function trustHashInput(item: TrustHashItem): string {
   switch (item.kind) {
     case 'hook': {
       const timeout = typeof item.timeoutSec === 'number' && Number.isFinite(item.timeoutSec) ? item.timeoutSec : null
+      const extra = hookExtra((item as { extra?: unknown }).extra)
+      if (extra !== null)
+        return canonicalJson(['hook', TRUST_HOOK_EXTRA_VERSION, textOrNull(item.event), textOrNull(item.matcher), textOrNull(item.command), timeout, extra, refs])
       return canonicalJson(['hook', TRUST_HASH_VERSION, textOrNull(item.event), textOrNull(item.matcher), textOrNull(item.command), timeout, refs])
     }
     case 'mcp':

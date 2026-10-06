@@ -153,7 +153,8 @@ describe('with a password and no session', () => {
     // (ADR-031), the master key (ADR-034) and the file cleanup (ADR-035) too; Phase 8: the changes panel, revert, undo
     // and rewind (ADR-036, ADR-037) and the shell rules (ADR-038); Phase 9: the steer queue and the file mentions
     // (ADR-042); Phase 10: the customizations, Remember and the background tasks (ADR-044 … ADR-047); Phase 11: the
-    // hooks, the project trust and the project MCP servers (ADR-048 … ADR-050).
+    // hooks, the project trust and the project MCP servers (ADR-048 … ADR-050); Phase 12: the marketplaces, the Claude
+    // Code import and the project definition files (ADR-054 … ADR-056).
     expect(PRIVATE_KEYS).toEqual(expect.arrayContaining(['audio.transcribe', 'audio.speech', 'chats.deleteMessage']))
     expect(PRIVATE_KEYS).toEqual(expect.arrayContaining([
       'changes.list',
@@ -191,6 +192,20 @@ describe('with a password and no session', () => {
       'projectMcp.list',
       'projectMcp.setVariables',
       'projectMcp.reconnect',
+    ]))
+    expect(PRIVATE_KEYS).toEqual(expect.arrayContaining([
+      'marketplaces.list',
+      'marketplaces.add',
+      'marketplaces.get',
+      'marketplaces.refresh',
+      'marketplaces.remove',
+      'claudeImport.home',
+      'claudeImport.scan',
+      'claudeImport.upload',
+      'claudeImport.apply',
+      'projectDefinitions.read',
+      'projectDefinitions.write',
+      'projectDefinitions.remove',
     ]))
     expect(PRIVATE_KEYS).toEqual(expect.arrayContaining([
       'projects.list',

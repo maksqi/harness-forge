@@ -18,10 +18,10 @@
 // live `results` / `targets` / `present`, so a test may script them after the run took its snapshot. Personal hooks follow
 // the contract in memory (fresh auth unless the update only turns a hook off, `LIMITS.personalHooksMax`, `not_found`,
 // `hooks.changed`); `runs` answers `runLog`.
-import type { HookData, HookEvent, HookList, HookRecordOutcome, HookRun, HookSwitches, PersonalHook } from '@harness-forge/shared'
+import type { HookCreate, HookData, HookEvent, HookList, HookRecordOutcome, HookRun, HookSwitches, HookUpdate, PersonalHook } from '@harness-forge/shared'
 import type { EventBus } from '../services/events/types.ts'
 import type { HookEventResult, HookRunInput, HookRunOptions, HookScope, HookService, HookSnapshot } from '../services/hooks/types.ts'
-import { createHookId, createHookRecordId, HarnessError, isHookTurnOff, LIMITS } from '@harness-forge/shared'
+import { createHookId, createHookRecordId, HarnessError, isHookTurnOff, LIMITS, personalHookSchema } from '@harness-forge/shared'
 import { NOTHING_RAN, personalHookEntry } from '../services/hooks/index.ts'
 
 /** A scripted result: a value, or a function of the run's input and options. */
@@ -170,6 +170,29 @@ function notFound(id: string): HarnessError {
   return new HarnessError({ code: 'not_found', message: `Hook ${id} not found.` })
 }
 
+/** The fields of a body without its null values (null = unset in a request, absent in the DTO; `model` stays null). */
+function withoutNulls(body: HookCreate | HookUpdate): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(body).filter(([key, value]) => value !== null || key === 'model' || key === 'matcher' || key === 'timeout'))
+}
+
+/**
+ * A personal hook after a create or an update (Phase 12: command or prompt hooks, ADR-057); the DTO schema drops the
+ * fields of the other type.
+ */
+function fakePersonalHook(base: Record<string, unknown>, body: HookCreate | HookUpdate): PersonalHook {
+  const merged: Record<string, unknown> = { ...base, ...withoutNulls(body) }
+  const type = merged.type === 'prompt' ? 'prompt' : 'command'
+  const fields = type === 'prompt' ? ['command', 'args', 'async'] : ['prompt', 'model', 'continueOnBlock']
+  for (const field of fields)
+    delete merged[field]
+  return personalHookSchema.parse({ ...merged, type, ...(type === 'prompt' && merged.model === undefined ? { model: null } : {}) })
+}
+
+/** The listing entry of a fake personal hook (a prompt hook is listed with an empty command). */
+function fakePersonalEntry(hook: PersonalHook, allowed: boolean): ReturnType<typeof personalHookEntry> {
+  return personalHookEntry({ ...hook, command: hook.type === 'command' ? hook.command : '' }, allowed)
+}
+
 export function createFakeHookService(options: FakeHookServiceOptions = {}): FakeHookService {
   const now = options.now ?? Date.now
   const script = createFakeHookScript(options)
@@ -213,7 +236,7 @@ export function createFakeHookService(options: FakeHookServiceOptions = {}): Fak
       const allowed = switches.setting && switches.shell && !switches.safeMode
       const rows = [...personal.values()].sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1))
       return {
-        items: rows.map(row => personalHookEntry(row, allowed)),
+        items: rows.map(row => fakePersonalEntry(row, allowed)),
         diagnostics: [],
         switches: { ...switches },
         ...(query.projectId === undefined ? {} : { project: { id: query.projectId, available: true, files: [], pending: 0, scannedAt: now() } }),
@@ -225,16 +248,7 @@ export function createFakeHookService(options: FakeHookServiceOptions = {}): Fak
       if (personal.size >= LIMITS.personalHooksMax)
         throw new HarnessError({ code: 'conflict', message: `You already have ${LIMITS.personalHooksMax} personal hooks. Remove one first.` })
       const at = now()
-      const hook: PersonalHook = {
-        id: createHookId(),
-        event: body.event,
-        matcher: body.matcher ?? null,
-        command: body.command,
-        timeout: body.timeout ?? null,
-        enabled: body.enabled ?? true,
-        createdAt: at,
-        updatedAt: at,
-      }
+      const hook = fakePersonalHook({ id: createHookId(), matcher: null, timeout: null, enabled: true, createdAt: at, updatedAt: at }, body)
       personal.set(hook.id, hook)
       changed()
       return hook
@@ -243,7 +257,7 @@ export function createFakeHookService(options: FakeHookServiceOptions = {}): Fak
       calls.update += 1
       if (!isHookTurnOff(body))
         sensitive?.requireFreshAuth()
-      const hook: PersonalHook = { ...get(id), ...body, updatedAt: now() }
+      const hook = fakePersonalHook({ ...get(id), updatedAt: now() }, body)
       personal.set(id, hook)
       changed()
       return hook

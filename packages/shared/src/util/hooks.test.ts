@@ -1,19 +1,27 @@
 /* eslint-disable no-template-curly-in-string -- literal shell variables (`${CLAUDE_PLUGIN_ROOT}`) are test data */
-import type { HookEvent, HookOutcome, HookPayloadInput, HookProcessResult, SourcedHookOutcome } from './hooks.ts'
+import type { HookEvent, HookOutcome, HookPayloadInput, HookProcessResult, PromptHookAnswer, SourcedHookOutcome } from './hooks.ts'
 import { describe, expect, it } from 'vitest'
 import {
   buildHookPayload,
+  checkHookIf,
   claudeToolName,
   combineHookOutcomes,
   compileMatcher,
+  execFormCommand,
+  expandHookPrompt,
   HOOK_DIAGNOSTIC_CODES,
   HOOK_EVENTS,
   HOOK_LIMITS,
   HOOK_MATCHER_SUBJECTS,
+  hookAgentNames,
   hookPermissionMode,
   hookTargetNames,
+  matchHookIf,
+  PROMPT_HOOK_EVENTS,
+  promptHookOutcome,
   readHookOutput,
   readHooksConfig,
+  readPromptHookAnswer,
   readSettingsHooks,
   TOOL_HOOK_EVENTS,
 } from './hooks.ts'
@@ -90,9 +98,10 @@ const CLAUDE_SETTINGS = {
 // Constants
 
 describe('constants', () => {
-  it('lists the eight events and the tool events', () => {
-    expect(HOOK_EVENTS).toEqual(['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Notification', 'Stop', 'SubagentStop', 'PreCompact', 'SessionStart'])
-    expect(TOOL_HOOK_EVENTS).toEqual(['PreToolUse', 'PostToolUse'])
+  it('lists the thirteen events and the tool events', () => {
+    // Phase 12 (ADR-057) appends five events; the eight of Phase 11 keep their order.
+    expect(HOOK_EVENTS).toEqual(['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Notification', 'Stop', 'SubagentStop', 'PreCompact', 'SessionStart', 'PostToolUseFailure', 'PermissionRequest', 'SubagentStart', 'PostCompact', 'SessionEnd'])
+    expect(TOOL_HOOK_EVENTS).toEqual(['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest'])
     expect(Object.keys(HOOK_MATCHER_SUBJECTS).sort()).toEqual([...HOOK_EVENTS].sort())
     for (const event of TOOL_HOOK_EVENTS)
       expect(HOOK_MATCHER_SUBJECTS[event]).toBe('tool')
@@ -114,10 +123,13 @@ describe('readSettingsHooks', () => {
       { event: 'UserPromptSubmit', matcher: null, command: 'python3 .claude/hooks/prompt_guard.py', timeoutSec: null, position: [0, 0], file: '.claude/settings.json' },
       { event: 'Stop', matcher: null, command: 'sh .claude/hooks/stop.sh', timeoutSec: null, position: [0, 1], file: '.claude/settings.json' },
       { event: 'SessionStart', matcher: 'startup', command: 'cat .claude/context.md', timeoutSec: null, position: [0, 0], file: '.claude/settings.json' },
+      // Phase 12: SessionEnd is an event now.
+      { event: 'SessionEnd', matcher: null, command: 'echo bye', timeoutSec: null, position: [0, 0], file: '.claude/settings.json' },
     ])
+    // Without `prompts: true` the prompt hook stays an unsupported type.
+    expect(result.prompts).toEqual([])
     expect(result.diagnostics.map(entry => [entry.level, entry.code, entry.event ?? null, entry.position ?? null, entry.file])).toEqual([
       ['warning', 'unsupported-type', 'Stop', [0, 0], '.claude/settings.json'],
-      ['info', 'unknown-event', null, null, '.claude/settings.json'],
     ])
     const text = JSON.stringify(result)
     for (const secret of ['do-not-read', 'Bash(curl:*)', 'claude-sonnet'])
@@ -125,9 +137,9 @@ describe('readSettingsHooks', () => {
   })
 
   it('returns nothing for a settings file without hooks and accepts a BOM', () => {
-    expect(readSettingsHooks('{"permissions":{"allow":[]}}', { file: 'a' })).toEqual({ items: [], diagnostics: [] })
+    expect(readSettingsHooks('{"permissions":{"allow":[]}}', { file: 'a' })).toEqual({ items: [], prompts: [], diagnostics: [] })
     expect(readSettingsHooks('\uFEFF{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"x"}]}]}}', { file: 'a' }).items).toHaveLength(1)
-    expect(readSettingsHooks('{"hooks":null}', { file: 'a' })).toEqual({ items: [], diagnostics: [] })
+    expect(readSettingsHooks('{"hooks":null}', { file: 'a' })).toEqual({ items: [], prompts: [], diagnostics: [] })
   })
 
   it('applies the byte cap before parsing', () => {
@@ -153,8 +165,8 @@ describe('readSettingsHooks', () => {
 describe('readHooksConfig', () => {
   it('reads plugin hooks without a file', () => {
     const result = readHooksConfig({ PostToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: '  sh "${CLAUDE_PLUGIN_ROOT}/fmt.sh"  ' }] }] }, { source: 'plugin' })
-    expect(result).toEqual({ items: [{ event: 'PostToolUse', matcher: 'Write', command: 'sh "${CLAUDE_PLUGIN_ROOT}/fmt.sh"', timeoutSec: null, position: [0, 0] }], diagnostics: [] })
-    expect(readHooksConfig(undefined, { source: 'personal' })).toEqual({ items: [], diagnostics: [] })
+    expect(result).toEqual({ items: [{ event: 'PostToolUse', matcher: 'Write', command: 'sh "${CLAUDE_PLUGIN_ROOT}/fmt.sh"', timeoutSec: null, position: [0, 0] }], prompts: [], diagnostics: [] })
+    expect(readHooksConfig(undefined, { source: 'personal' })).toEqual({ items: [], prompts: [], diagnostics: [] })
   })
 
   it('never runs a group with an invalid matcher and reports every handler', () => {
@@ -211,8 +223,9 @@ describe('readHooksConfig', () => {
       'warning:unsupported-type@0,9',
       'warning:unsupported-type@0,10',
       'error:not-an-object@0,11',
-      'info:ignored-field@0,12',
+      // Phase 12: `async` is a handler field now (no `ignored-field` info).
     ])
+    expect(result.items.at(-1)).toMatchObject({ command: 'extra', async: true })
   })
 
   it('reports malformed shapes', () => {
@@ -221,7 +234,8 @@ describe('readHooksConfig', () => {
     expect(codes(readHooksConfig({ Stop: {} }, { source: 'plugin' }))).toEqual(['error:not-an-object'])
     expect(codes(readHooksConfig({ Stop: [null, { matcher: 'x' }, { hooks: 'x' }] }, { source: 'plugin' }))).toEqual(['error:not-an-object', 'error:not-an-object', 'error:not-an-object'])
     expect(codes(readHooksConfig({ Stop: [{ hooks: [], once: true }] }, { source: 'plugin' }))).toEqual(['info:ignored-field'])
-    expect(codes(readHooksConfig({ stop: [], __proto__x: [], PermissionRequest: [] }, { source: 'plugin' }))).toEqual(['info:unknown-event', 'info:unknown-event', 'info:unknown-event'])
+    // Phase 12: PermissionRequest is an event now; PermissionDenied (a Claude Code event the harness lacks) is not.
+    expect(codes(readHooksConfig({ stop: [], __proto__x: [], PermissionDenied: [] }, { source: 'plugin' }))).toEqual(['info:unknown-event', 'info:unknown-event', 'info:unknown-event'])
   })
 
   it('keeps at most 100 handlers', () => {
@@ -370,7 +384,8 @@ describe('hookTargetNames and claudeToolName', () => {
     expect(hookTargetNames('find_files')).toEqual(['find_files', 'Glob'])
     expect(hookTargetNames('list_directory')).toEqual(['list_directory', 'LS'])
     expect(hookTargetNames('web_fetch')).toEqual(['web_fetch', 'WebFetch'])
-    expect(hookTargetNames('task')).toEqual(['task', 'Task'])
+    // Phase 12: Claude Code renamed Task to Agent; both match.
+    expect(hookTargetNames('task')).toEqual(['task', 'Task', 'Agent'])
     expect(hookTargetNames('todo_write')).toEqual(['todo_write', 'TodoWrite'])
     expect(hookTargetNames('my_tool')).toEqual(['my_tool'])
     expect(hookTargetNames('')).toEqual([])
@@ -736,9 +751,9 @@ describe('fuzzing', () => {
       const result = readHookOutput(event, run({ exitCode: pick([0, 0, 0, 1, 2, null]), timedOut: random() < 0.05, stdout, stderr: pick(['', 'err']) }))
       expect(['ok', 'blocked', 'error']).toContain(result.status)
       if (result.decision !== null)
-        expect(event).toBe('PreToolUse')
+        expect(['PreToolUse', 'PermissionRequest']).toContain(event)
       if (result.status === 'blocked')
-        expect(['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SubagentStop']).toContain(event)
+        expect(['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SubagentStop', 'PostToolUseFailure', 'PermissionRequest']).toContain(event)
       expect((result.reason ?? '').length).toBeLessThanOrEqual(HOOK_LIMITS.reasonMaxChars)
       expect((result.context ?? '').length).toBeLessThanOrEqual(HOOK_LIMITS.contextMaxChars)
       const combined = combineHookOutcomes(event, [{ source: pick(['personal', 'project', 'plugin'] as const), outcome: result }])
@@ -768,6 +783,715 @@ describe('fuzzing', () => {
       const payload = buildHookPayload(pick(HOOK_EVENTS), { ...BASE, prompt: 'p'.repeat(Math.floor(random() * 3000)), tool: { name: pick(['shell', 'x']), callId: 'c', input: value(0), output: value(0) } }, { maxBytes })
       expect(utf8(payload.json)).toBeLessThanOrEqual(Math.max(maxBytes, 2))
       expect(() => JSON.parse(payload.json) as unknown).not.toThrow()
+    }
+  })
+})
+
+// =====================================================================================================================
+// Phase 12 (ADR-057, C42): five events, prompt hooks, handler fields, payload fields, PermissionRequest, `if`, exec form
+
+const P12_FILE = '.claude/settings.json'
+
+function handlerOf(type: string): Record<string, unknown> {
+  switch (type) {
+    case 'command':
+      return { type, command: 'sh .claude/hooks/check.sh' }
+    case 'prompt':
+      return { type, prompt: 'Is this safe? $ARGUMENTS' }
+    case 'http':
+      return { type, url: 'https://hooks.example.invalid/x' }
+    case 'mcp_tool':
+      return { type, server: 'memory', tool: 'record' }
+    case 'agent':
+      return { type, prompt: 'Check the tests.' }
+    default:
+      return { type, command: 'x' }
+  }
+}
+
+describe('phase 12: constants', () => {
+  it('maps every event to its matcher subject', () => {
+    expect(HOOK_MATCHER_SUBJECTS).toEqual({
+      PreToolUse: 'tool',
+      PostToolUse: 'tool',
+      UserPromptSubmit: null,
+      Notification: 'notification',
+      Stop: null,
+      SubagentStop: 'agent',
+      PreCompact: 'trigger',
+      SessionStart: 'source',
+      PostToolUseFailure: 'tool',
+      PermissionRequest: 'tool',
+      SubagentStart: 'agent',
+      PostCompact: 'trigger',
+      SessionEnd: 'reason',
+    })
+    expect(PROMPT_HOOK_EVENTS).toEqual(['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'Stop', 'SubagentStop', 'PermissionRequest'])
+    for (const code of ['invalid-prompt', 'invalid-if', 'invalid-model'])
+      expect(HOOK_DIAGNOSTIC_CODES).toContain(code)
+    expect(HOOK_DIAGNOSTIC_CODES.slice(0, 13)).toEqual(['invalid-json', 'not-an-object', 'too-large', 'unknown-event', 'unsupported-type', 'invalid-matcher', 'invalid-command', 'invalid-timeout', 'too-many', 'too-long', 'invalid-output', 'ignored-field', 'conflict'])
+  })
+})
+
+describe('phase 12: every event × handler type', () => {
+  const types = ['command', 'prompt', 'http', 'mcp_tool', 'agent', 'webhook']
+  const cases = HOOK_EVENTS.flatMap(event => types.flatMap(type => [true, false].map(prompts => [event, type, prompts] as const)))
+
+  it.each(cases)('%s / %s (prompts %s)', (event, type, prompts) => {
+    const result = readHooksConfig({ [event]: [{ hooks: [handlerOf(type)] }] }, { source: 'project', file: P12_FILE, prompts })
+    const promptRuns = type === 'prompt' && prompts && (PROMPT_HOOK_EVENTS as readonly string[]).includes(event)
+    expect(result.items).toHaveLength(type === 'command' ? 1 : 0)
+    expect(result.prompts).toHaveLength(promptRuns ? 1 : 0)
+    if (type === 'command' || promptRuns) {
+      expect(result.diagnostics).toEqual([])
+      return
+    }
+    expect(result.diagnostics).toHaveLength(1)
+    const [entry] = result.diagnostics
+    expect(entry).toMatchObject({ level: 'warning', code: 'unsupported-type', event, position: [0, 0], file: P12_FILE })
+    // The web notes a prompt hook by the word "prompt" (`noteOf` of the hook import); other types never say it.
+    expect(/prompt/i.test(entry?.message ?? '')).toBe(type === 'prompt')
+  })
+
+  it('names the unsupported Claude Code handler types', () => {
+    const messages = ['http', 'mcp_tool', 'agent'].map(type => readHooksConfig({ Stop: [{ hooks: [handlerOf(type)] }] }, { source: 'personal', prompts: true }).diagnostics[0]?.message)
+    expect(messages).toEqual([
+      'HTTP hooks are not supported; this hook never runs.',
+      'MCP tool hooks are not supported; this hook never runs.',
+      'Agent hooks are not supported; this hook never runs.',
+    ])
+  })
+
+  it('keeps unknown events as infos that never invalidate the other hooks', () => {
+    const result = readHooksConfig({
+      Setup: [{ hooks: [handlerOf('command')] }],
+      PostToolBatch: [{ hooks: [handlerOf('prompt')] }],
+      SessionEnd: [{ hooks: [handlerOf('command')] }],
+    }, { source: 'plugin', prompts: true })
+    expect(result.items.map(item => item.event)).toEqual(['SessionEnd'])
+    expect(codes(result)).toEqual(['info:unknown-event', 'info:unknown-event'])
+  })
+})
+
+describe('phase 12: command handler fields', () => {
+  const read = (handler: Record<string, unknown>, event: HookEvent = 'PreToolUse') =>
+    readHooksConfig({ [event]: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node', ...handler }] }] }, { source: 'project', file: P12_FILE })
+
+  it('reads args (exec form), async, if and statusMessage only when set', () => {
+    const result = read({ command: '${CLAUDE_PLUGIN_ROOT}/bin/check', args: ['--file', 'a b.ts', '${user_config.TOKEN}'], async: true, if: 'Bash(git *)', statusMessage: '  Checking\nthe   command…  ' })
+    expect(result.diagnostics).toEqual([])
+    expect(result.items).toEqual([{
+      event: 'PreToolUse',
+      matcher: 'Bash',
+      command: '${CLAUDE_PLUGIN_ROOT}/bin/check',
+      timeoutSec: null,
+      position: [0, 0],
+      file: P12_FILE,
+      args: ['--file', 'a b.ts', '${user_config.TOKEN}'],
+      async: true,
+      if: 'Bash(git *)',
+      statusMessage: 'Checking the command…',
+    }])
+    const plain = read({ async: false, args: null, if: '  ', statusMessage: '' })
+    expect(plain.items).toEqual([{ event: 'PreToolUse', matcher: 'Bash', command: 'node', timeoutSec: null, position: [0, 0], file: P12_FILE }])
+    expect(read({ args: [] }).items[0]?.args).toEqual([])
+    expect(read({ statusMessage: 's'.repeat(500) }).items[0]?.statusMessage).toHaveLength(HOOK_LIMITS.statusMessageMaxChars)
+  })
+
+  it.each([
+    [{ args: 'a b' }, 'error:invalid-command@0,0'],
+    [{ args: ['a', 1] }, 'error:invalid-command@0,0'],
+    [{ args: ['a\0b'] }, 'error:invalid-command@0,0'],
+    [{ args: Array.from({ length: HOOK_LIMITS.argsMax + 1 }).fill('a') }, 'error:too-long@0,0'],
+    [{ args: ['x'.repeat(HOOK_LIMITS.commandMaxChars)] }, 'error:too-long@0,0'],
+    [{ shell: 'powershell' }, 'error:invalid-command@0,0'],
+    [{ shell: 'zsh' }, 'error:invalid-command@0,0'],
+    [{ command: 'echo ${user_config.TOKEN}' }, 'error:invalid-command@0,0'],
+    [{ if: 'Read(./src/**)' }, 'error:invalid-if@0,0'],
+    [{ if: 'Bash(git * main)' }, 'error:invalid-if@0,0'],
+    [{ if: 7 }, 'error:invalid-if@0,0'],
+  ] as const)('never runs %j', (handler, code) => {
+    const result = read(handler)
+    expect(result.items).toEqual([])
+    expect(result.diagnostics.map(entry => `${entry.level}:${entry.code}@${entry.position?.join(',')}`)).toEqual([code])
+  })
+
+  it('reports the fields it reads but does not use', () => {
+    const result = read({ asyncRewake: true, once: true, async: 'yes', statusMessage: 3, shell: 'bash' })
+    expect(result.items[0]).toMatchObject({ command: 'node', async: true })
+    expect(result.items[0]).not.toHaveProperty('statusMessage')
+    expect(codes(result)).toEqual(['warning:ignored-field', 'info:ignored-field', 'warning:ignored-field', 'info:ignored-field'])
+    // `if` is read only for tool events; elsewhere it is an info and the hook runs without it.
+    const stop = read({ if: 'Bash(git *)' }, 'Stop')
+    expect(stop.items[0]).not.toHaveProperty('if')
+    expect(codes(stop)).toEqual(['info:ignored-field'])
+    for (const event of TOOL_HOOK_EVENTS)
+      expect(read({ if: 'Write' }, event).items[0]?.if).toBe('Write')
+  })
+
+  it('never quotes commands, args or rules in messages', () => {
+    const secret = 'SecretToken'
+    const result = read({ args: [`${secret}\0`], if: `Read(${secret})` })
+    const other = read({ if: `Bash(${secret} * x)`, shell: secret })
+    for (const entry of [...result.diagnostics, ...other.diagnostics])
+      expect(entry.message).not.toContain(secret)
+  })
+})
+
+describe('phase 12: prompt handlers', () => {
+  const read = (handler: Record<string, unknown>, event: HookEvent = 'Stop') =>
+    readHooksConfig({ [event]: [{ hooks: [{ type: 'prompt', prompt: 'Did the agent finish every task? $ARGUMENTS', ...handler }] }] }, { source: 'project', file: P12_FILE, prompts: true })
+
+  it('reads a Claude Code prompt hook', () => {
+    const result = read({ model: 'mock:prompt-hook', timeout: 20, continueOnBlock: true, statusMessage: 'Checking' })
+    expect(result).toEqual({
+      items: [],
+      prompts: [{ event: 'Stop', matcher: null, prompt: 'Did the agent finish every task? $ARGUMENTS', model: 'mock:prompt-hook', timeoutSec: 20, continueOnBlock: true, position: [0, 0], file: P12_FILE, statusMessage: 'Checking' }],
+      diagnostics: [],
+    })
+    expect(read({}).prompts[0]).toEqual({ event: 'Stop', matcher: null, prompt: 'Did the agent finish every task? $ARGUMENTS', model: null, timeoutSec: null, continueOnBlock: false, position: [0, 0], file: P12_FILE })
+    const tool = readHooksConfig({ PreToolUse: [{ matcher: 'Bash|Write', hooks: [{ type: 'prompt', prompt: '  Safe?  ', if: 'Bash(rm *)' }] }] }, { source: 'personal', prompts: true })
+    expect(tool.prompts).toEqual([{ event: 'PreToolUse', matcher: 'Bash|Write', prompt: 'Safe?', model: null, timeoutSec: null, continueOnBlock: false, position: [0, 0], if: 'Bash(rm *)' }])
+  })
+
+  it.each([
+    ['sonnet', 'sonnet'],
+    ['Opus', 'opus'],
+    ['opusplan', 'opus'],
+    ['haiku[1m]', 'haiku'],
+    ['fable', 'fable'],
+    ['claude-Sonnet-4-5[1m]', 'claude-sonnet-4-5'],
+    ['ollama:llama3:8b', 'ollama:llama3:8b'],
+    ['openrouter:anthropic/claude-sonnet-5', 'openrouter:anthropic/claude-sonnet-5'],
+    ['', null],
+    [null, null],
+  ] as const)('reads the model %j', (model, expected) => {
+    const result = read({ model })
+    expect(result.prompts[0]?.model).toBe(expected)
+    expect(result.diagnostics).toEqual([])
+  })
+
+  it.each([['gpt-4o'], ['openai:gpt 5'], [5], [':x'], ['claude-x y']])('drops the invalid model %j with a warning', (model) => {
+    const result = read({ model })
+    expect(result.prompts[0]?.model).toBeNull()
+    expect(codes(result)).toEqual(['warning:invalid-model'])
+  })
+
+  it.each([
+    [{ prompt: '' }, 'error:invalid-prompt'],
+    [{ prompt: '   ' }, 'error:invalid-prompt'],
+    [{ prompt: 7 }, 'error:invalid-prompt'],
+    [{ prompt: 'a\0b' }, 'error:invalid-prompt'],
+    [{ prompt: 'p'.repeat(HOOK_LIMITS.promptMaxChars + 1) }, 'error:too-long'],
+    [{ if: 'Edit(src/**)' }, 'info:ignored-field'],
+  ] as const)('checks %j', (handler, code) => {
+    const result = read(handler)
+    expect(codes(result)).toEqual([code])
+  })
+
+  it('reports odd optional fields and keeps the hook', () => {
+    const result = read({ continueOnBlock: 'yes', timeout: 0, once: true, extra: 1 }, 'PreToolUse')
+    expect(result.prompts[0]).toMatchObject({ continueOnBlock: false, timeoutSec: null })
+    expect(codes(result)).toEqual(['warning:invalid-timeout', 'warning:invalid-prompt', 'info:ignored-field', 'info:ignored-field'])
+    expect(read({ if: 'Bash(*)' }, 'PreToolUse').prompts).toEqual([])
+  })
+
+  it('counts prompt and command hooks against one limit', () => {
+    const hooks = Array.from({ length: 120 }, (_, index) => index % 2 === 0 ? { type: 'command', command: `echo ${index}` } : { type: 'prompt', prompt: `p ${index}` })
+    const result = readHooksConfig({ Stop: [{ hooks }] }, { source: 'personal', prompts: true })
+    expect(result.items.length + result.prompts.length).toBe(HOOK_LIMITS.itemsMax)
+    expect(codes(result)).toEqual(['warning:too-many'])
+  })
+
+  it('reads prompt hooks of a settings file only when asked', () => {
+    const text = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Done?' }] }], UserPromptSubmit: [{ hooks: [{ type: 'prompt', prompt: 'Allowed? $ARGUMENTS' }] }] } })
+    const result = readSettingsHooks(text, { file: P12_FILE, prompts: true })
+    expect(result.prompts.map(spec => [spec.event, spec.prompt, spec.file])).toEqual([['Stop', 'Done?', P12_FILE], ['UserPromptSubmit', 'Allowed? $ARGUMENTS', P12_FILE]])
+    expect(readSettingsHooks(text, { file: P12_FILE }).prompts).toEqual([])
+    expect(codes(readSettingsHooks(text, { file: P12_FILE }))).toEqual(['warning:unsupported-type', 'warning:unsupported-type'])
+  })
+})
+
+describe('phase 12: payload', () => {
+  const tool = { name: 'shell', callId: 'call_7', input: { command: 'npm test' } }
+  const parse = (event: HookEvent, input: Partial<HookPayloadInput> = {}): Record<string, unknown> => JSON.parse(buildHookPayload(event, { ...BASE, ...input }).json) as Record<string, unknown>
+  const harness = { version: 1, chatId: BASE.chatId, projectId: BASE.projectId, messageId: BASE.messageId, modelRef: 'mock:hooks', origin: 'request', source: 'project' }
+  const common = { session_id: BASE.chatId, cwd: '/work/project', permission_mode: 'acceptEdits' }
+
+  it('writes the fields of the new events', () => {
+    expect(parse('PostToolUseFailure', { tool, error: 'Exit code 1: tests failed' })).toEqual({ ...common, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command: 'npm test' }, error: 'Exit code 1: tests failed', tool_use_id: 'call_7', harness: { ...harness, tool: 'shell' } })
+    expect(parse('PostToolUseFailure', { tool })).toMatchObject({ error: '' })
+    expect(parse('PermissionRequest', { tool })).toEqual({ ...common, hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'npm test' }, tool_use_id: 'call_7', harness: { ...harness, tool: 'shell' } })
+    expect(parse('SubagentStart', { agent: { id: 'call_task_1', type: 'general' } })).toEqual({ ...common, hook_event_name: 'SubagentStart', agent_id: 'call_task_1', agent_type: 'general', harness })
+    expect(parse('SubagentStop', { agent: { id: 'call_task_1', type: 'explore' } })).toEqual({ ...common, hook_event_name: 'SubagentStop', agent_id: 'call_task_1', agent_type: 'explore', stop_hook_active: false, harness })
+    expect(parse('PostCompact', { trigger: 'manual' })).toEqual({ ...common, hook_event_name: 'PostCompact', trigger: 'manual', harness })
+    expect(parse('PostCompact')).toMatchObject({ trigger: 'auto' })
+    expect(parse('SessionEnd')).toEqual({ ...common, hook_event_name: 'SessionEnd', reason: 'other', harness })
+    expect(parse('SessionEnd', { sessionEndReason: 'clear' })).toMatchObject({ reason: 'clear' })
+  })
+
+  it('adds transcript_path after session_id when known', () => {
+    const json = buildHookPayload('Stop', { ...BASE, transcriptPath: '/data/transcripts/c.jsonl' }).json
+    expect(json.startsWith(`{"session_id":${JSON.stringify(BASE.chatId)},"transcript_path":"/data/transcripts/c.jsonl","cwd":`)).toBe(true)
+    expect(buildHookPayload('Stop', { ...BASE, transcriptPath: '' }).json).not.toContain('transcript_path')
+    // A hook inside a sub-agent gets the agent fields on any event.
+    expect(parse('PreToolUse', { tool, agent: { id: 'a1', type: 'reviewer' } })).toMatchObject({ agent_id: 'a1', agent_type: 'reviewer', tool_name: 'Bash' })
+  })
+
+  it('cuts the error to its cap and then to the payload cap', () => {
+    const long = parse('PostToolUseFailure', { tool, error: 'e'.repeat(HOOK_LIMITS.errorMaxChars + 500) })
+    expect((long.error as string).length).toBe(HOOK_LIMITS.errorMaxChars)
+    const big = { name: 'write_file', callId: 'c', input: { path: 'a.ts', content: 'x'.repeat(3000) } }
+    const payload = buildHookPayload('PostToolUseFailure', { ...BASE, tool: big, error: 'y'.repeat(3000) }, { maxBytes: 2000 })
+    expect(payload.truncated).toBe(true)
+    expect(utf8(payload.json)).toBeLessThanOrEqual(2000)
+    const parsed = JSON.parse(payload.json) as { tool_input: { content: string }, error: string }
+    expect(parsed.tool_input.content).toBe('')
+    expect(parsed.error.length).toBeGreaterThan(0)
+  })
+})
+
+describe('phase 12: readHookOutput of the new events', () => {
+  it('reads exit 2 per event', () => {
+    expect(readHookOutput('PostToolUseFailure', run({ exitCode: 2, stderr: 'Retry with --force.' }))).toEqual(outcome({ status: 'blocked', reason: 'Retry with --force.' }))
+    for (const event of ['PermissionRequest', 'SubagentStart', 'PostCompact', 'SessionEnd'] as const)
+      expect(readHookOutput(event, run({ exitCode: 2, stderr: 'no' }))).toEqual(outcome({ status: 'error', reason: 'no', error: `The hook exited with code 2, but ${event} hooks cannot block.` }))
+  })
+
+  it('reads blocks and contexts', () => {
+    expect(readHookOutput('PostToolUseFailure', json({ decision: 'block', reason: 'Install the deps first.' }))).toEqual(outcome({ status: 'blocked', reason: 'Install the deps first.' }))
+    expect(readHookOutput('PostToolUseFailure', json({ hookSpecificOutput: { hookEventName: 'PostToolUseFailure', additionalContext: 'Known flaky test.' } }))).toEqual(outcome({ context: 'Known flaky test.' }))
+    expect(readHookOutput('SubagentStart', json({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: 'Use pnpm.' } }))).toEqual(outcome({ context: 'Use pnpm.' }))
+    expect(readHookOutput('SubagentStart', run({ stdout: 'plain' })).context).toBeNull()
+    for (const event of ['SubagentStart', 'PostCompact', 'SessionEnd'] as const) {
+      const result = readHookOutput(event, json({ continue: false, decision: 'block' }))
+      expect(result).toMatchObject({ status: 'ok', continue: true })
+      expect(codes(result)).toEqual(['info:ignored-field', 'info:ignored-field'])
+    }
+    expect(readHookOutput('PostToolUseFailure', json({ continue: false, stopReason: 'Stop now.' }))).toMatchObject({ continue: false, stopReason: 'Stop now.' })
+  })
+
+  it('reads the PermissionRequest decision', () => {
+    const request = (decision: unknown, extra: Record<string, unknown> = {}): HookProcessResult => json({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision, ...extra } })
+    expect(readHookOutput('PermissionRequest', request({ behavior: 'allow' }))).toEqual(outcome({ decision: 'allow' }))
+    expect(readHookOutput('PermissionRequest', request({ behavior: 'allow', updatedInput: { command: 'npm run lint', b: { d: 1, c: 2 } } }))).toEqual(outcome({ decision: 'allow', updatedInput: { b: { c: 2, d: 1 }, command: 'npm run lint' } }))
+    expect(readHookOutput('PermissionRequest', request({ behavior: 'deny', message: 'Not on main.' }))).toEqual(outcome({ status: 'blocked', decision: 'deny', reason: 'Not on main.' }))
+    expect(readHookOutput('PermissionRequest', request({ behavior: 'deny', message: 'Stop.', interrupt: true }))).toEqual(outcome({ status: 'blocked', decision: 'deny', reason: 'Stop.', continue: false, stopReason: 'Stop.' }))
+    expect(readHookOutput('PermissionRequest', request({ behavior: 'deny' }))).toEqual(outcome({ status: 'blocked', decision: 'deny' }))
+    const deniedInput = readHookOutput('PermissionRequest', request({ behavior: 'deny', updatedInput: { a: 1 }, interrupt: 'yes' }))
+    expect(deniedInput).toEqual({ ...outcome({ status: 'blocked', decision: 'deny' }), diagnostics: deniedInput.diagnostics })
+    expect(codes(deniedInput)).toEqual(['info:ignored-field', 'warning:invalid-output'])
+    expect(codes(readHookOutput('PermissionRequest', request({ behavior: 'allow', message: 'x', interrupt: true, updatedPermissions: [] })))).toEqual(['info:ignored-field', 'info:ignored-field', 'info:ignored-field'])
+    for (const decision of [{ behavior: 'ask' }, { behavior: 'approve' }, {}, 'allow', null, [1]]) {
+      const result = readHookOutput('PermissionRequest', request(decision))
+      expect(result).toMatchObject({ status: 'ok', decision: null })
+      if (decision !== null)
+        expect(codes(result)).toEqual(['warning:invalid-output'])
+    }
+    expect(codes(readHookOutput('PermissionRequest', request({ behavior: 'allow', updatedInput: 'x' })))).toEqual(['warning:invalid-output'])
+    expect(codes(readHookOutput('PermissionRequest', request({ behavior: 'allow', updatedInput: { content: 'x'.repeat(HOOK_LIMITS.updatedInputBytes) } })))).toEqual(['warning:too-large'])
+    // PreToolUse fields and the legacy decision are not PermissionRequest outputs.
+    expect(readHookOutput('PermissionRequest', json({ decision: 'approve', hookSpecificOutput: { hookEventName: 'PermissionRequest', permissionDecision: 'allow' } }))).toMatchObject({ decision: null, status: 'ok' })
+    expect(readHookOutput('PermissionRequest', request({ behavior: 'deny', message: 'm'.repeat(5000) })).reason?.length).toBe(HOOK_LIMITS.reasonMaxChars)
+  })
+
+  it('combines PermissionRequest decisions deny over allow', () => {
+    const allow = readHookOutput('PermissionRequest', json({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } }))
+    const deny = readHookOutput('PermissionRequest', json({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: 'No.' } } }))
+    expect(combineHookOutcomes('PermissionRequest', [{ source: 'personal', outcome: allow }, { source: 'project', outcome: deny }])).toMatchObject({ decision: 'deny', block: true, reason: 'No.' })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Prompt hooks
+
+describe('readPromptHookAnswer', () => {
+  it.each([
+    ['{"ok": true}', { ok: true, reason: null, impossible: false }],
+    ['{"ok":false,"reason":"Run the tests first."}', { ok: false, reason: 'Run the tests first.', impossible: false }],
+    ['{"ok":false,"reason":"Cannot be done.","impossible":true}', { ok: false, reason: 'Cannot be done.', impossible: true }],
+    ['{"ok":true,"impossible":true,"reason":"fine"}', { ok: true, reason: 'fine', impossible: false }],
+    ['{"ok":false,"reason":"x","impossible":"yes"}', { ok: false, reason: 'x', impossible: false }],
+    ['```json\n{"ok": false, "reason": "Lint fails."}\n```', { ok: false, reason: 'Lint fails.', impossible: false }],
+    ['```\n{"ok": true}\n```', { ok: true, reason: null, impossible: false }],
+    ['Here is my answer:\n```json\n{ "ok": true }\n```\nThanks.', { ok: true, reason: null, impossible: false }],
+    ['I checked it. {"ok": false, "reason": "Uses {braces} and \\"quotes\\"."} Done.', { ok: false, reason: 'Uses {braces} and "quotes".', impossible: false }],
+    ['Use {curly} prose first, then {"ok": true, "meta": {"a": 1}}', { ok: true, reason: null, impossible: false }],
+    ['{"ok": true}\n{"ok": false, "reason": "second"}', { ok: true, reason: null, impossible: false }],
+    ['```json\nnot json\n```\n{"ok": true}', { ok: true, reason: null, impossible: false }],
+    ['  {"ok": false, "reason": "  padded  "}  ', { ok: false, reason: 'padded', impossible: false }],
+    // The first object, even inside other JSON.
+    ['[{"ok": true}]', { ok: true, reason: null, impossible: false }],
+    ['An unclosed { brace, then {"ok": true}', { ok: true, reason: null, impossible: false }],
+  ] as const)('reads %j', (text, answer) => {
+    expect(readPromptHookAnswer(text)).toEqual({ valid: true, answer })
+  })
+
+  it.each([
+    [''],
+    ['   '],
+    ['yes, looks fine'],
+    ['{"ok": "true"}'],
+    ['{"result": true}'],
+    ['{"ok": false}'],
+    ['{"ok": false, "reason": "  "}'],
+    ['{"ok": false, "reason": 42}'],
+    ['[true]'],
+    ['{"ok": true'],
+    ['```json\n{"ok": \n```'],
+  ])('refuses %j', (text) => {
+    const result = readPromptHookAnswer(text)
+    expect(result.valid).toBe(false)
+    if (!result.valid)
+      expect(result.error.length).toBeGreaterThan(0)
+  })
+
+  it('caps the reason, never quotes the answer and survives odd input', () => {
+    const long = readPromptHookAnswer(JSON.stringify({ ok: false, reason: 'r'.repeat(5000) }))
+    expect(long.valid && long.answer.reason?.length).toBe(HOOK_LIMITS.reasonMaxChars)
+    const secret = readPromptHookAnswer('SecretAnswer {"ok": "SecretAnswer"}')
+    expect(!secret.valid && secret.error).not.toContain('SecretAnswer')
+    expect(readPromptHookAnswer(null as unknown as string).valid).toBe(false)
+    expect(readPromptHookAnswer(`${'{'.repeat(100_000)}`).valid).toBe(false)
+    expect(readPromptHookAnswer(`${' '.repeat(70_000)}{"ok": true}`).valid).toBe(false)
+  })
+})
+
+describe('expandHookPrompt', () => {
+  const payload = '{"hook_event_name":"Stop","stop_hook_active":false}'
+  it.each([
+    ['Check: $ARGUMENTS', `Check: ${payload}`],
+    ['$ARGUMENTS\n---\n$ARGUMENTS', `${payload}\n---\n${payload}`],
+    ['Did the agent finish?', `Did the agent finish?\n\n${payload}`],
+    ['Costs \\$5. Input: $ARGUMENTS', `Costs $5. Input: ${payload}`],
+    ['Literal \\$ARGUMENTS only', `Literal $ARGUMENTS only\n\n${payload}`],
+    ['$ARGUMENTSX', `${payload}X`],
+    ['', payload],
+  ])('expands %j', (prompt, text) => {
+    expect(expandHookPrompt(prompt, payload)).toBe(text)
+  })
+
+  it('inserts the payload as is (no replacement patterns) and survives odd input', () => {
+    expect(expandHookPrompt('[$ARGUMENTS]', '$& $1 $$ $`')).toBe('[$& $1 $$ $`]')
+    expect(expandHookPrompt(null as unknown as string, 'x')).toBe('x')
+    expect(expandHookPrompt('p', null as unknown as string)).toBe('p\n\n')
+  })
+})
+
+describe('promptHookOutcome', () => {
+  const no = (impossible: boolean): PromptHookAnswer => ({ ok: false, reason: 'Run the tests.', impossible })
+
+  /** The effect table of ADR-057: [status, decision, continue] of an `ok: false` answer. */
+  function expected(event: HookEvent, continueOnBlock: boolean, impossible: boolean): [HookOutcome['status'], HookOutcome['decision'], boolean] {
+    switch (event) {
+      case 'PreToolUse':
+        return ['blocked', 'deny', continueOnBlock]
+      case 'PostToolUse':
+        return continueOnBlock ? ['blocked', null, true] : ['ok', null, false]
+      case 'PostToolUseFailure':
+      case 'UserPromptSubmit':
+        return ['blocked', null, true]
+      case 'Stop':
+      case 'SubagentStop':
+        return impossible ? ['ok', null, true] : ['blocked', null, true]
+      default:
+        return ['ok', null, true]
+    }
+  }
+
+  const matrix = HOOK_EVENTS.flatMap(event => [false, true].flatMap(continueOnBlock => [false, true].map(impossible => [event, continueOnBlock, impossible] as const)))
+
+  it.each(matrix)('%s, continueOnBlock %s, impossible %s', (event, continueOnBlock, impossible) => {
+    const result = promptHookOutcome(event, no(impossible), { continueOnBlock })
+    const [status, decision, keepGoing] = expected(event, continueOnBlock, impossible)
+    expect(result).toEqual(outcome({ status, decision, continue: keepGoing, stopReason: keepGoing ? null : 'Run the tests.', reason: 'Run the tests.' }))
+    // `ok: true` never decides anything, whatever the options.
+    expect(promptHookOutcome(event, { ok: true, reason: 'Looks fine.', impossible }, { continueOnBlock })).toEqual(outcome())
+  })
+
+  it('never allows and turns a missing answer into a non-blocking error', () => {
+    for (const event of HOOK_EVENTS) {
+      for (const answer of [{ ok: true, reason: null, impossible: false }, no(false), no(true), null]) {
+        const result = promptHookOutcome(event, answer)
+        expect(result.decision === 'allow' || result.decision === 'ask').toBe(false)
+        expect('updatedInput' in result).toBe(false)
+      }
+    }
+    expect(promptHookOutcome('Stop', null)).toEqual(outcome({ status: 'error', error: 'The hook model did not give a valid answer.' }))
+    expect(promptHookOutcome('Stop', null, { error: 'The hook model timed out.' })).toEqual(outcome({ status: 'error', error: 'The hook model timed out.' }))
+    expect(promptHookOutcome('UserPromptSubmit', { ok: false, reason: null, impossible: false })).toMatchObject({ status: 'blocked', reason: 'A prompt hook said no.' })
+    expect(promptHookOutcome('Stop', { ok: 'no' } as unknown as PromptHookAnswer).status).toBe('error')
+  })
+
+  it('combines like command outcomes', () => {
+    const blocked = promptHookOutcome('Stop', no(false))
+    expect(combineHookOutcomes('Stop', [{ source: 'project', outcome: blocked }])).toMatchObject({ block: true, reason: 'Run the tests.', continue: true })
+    const ended = promptHookOutcome('PreToolUse', no(false))
+    expect(combineHookOutcomes('PreToolUse', [{ source: 'personal', outcome: ended }])).toMatchObject({ decision: 'deny', block: true, continue: false, stopReason: 'Run the tests.' })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Exec form
+
+/** Reads the words of a text made only of single-quoted words (`'…'`, `'\''`) separated by one blank; null otherwise. */
+function readQuotedWords(text: string): string[] | null {
+  const words: string[] = []
+  let index = 0
+  while (index < text.length) {
+    let word = ''
+    let quoted = false
+    while (index < text.length && text[index] !== ' ') {
+      if (text[index] === '\'') {
+        const end = text.indexOf('\'', index + 1)
+        if (end === -1)
+          return null
+        word += text.slice(index + 1, end)
+        index = end + 1
+        quoted = true
+      }
+      else if (text.startsWith('\\\'', index)) {
+        word += '\''
+        index += 2
+      }
+      else {
+        return null
+      }
+    }
+    if (!quoted)
+      return null
+    words.push(word)
+    index++
+  }
+  return words
+}
+
+describe('execFormCommand', () => {
+  it.each([
+    ['node', ['a'], 'node', ['a']],
+    ['node', [], 'node', []],
+    ['/opt/my tools/check', ['--file', 'a b.ts'], '/opt/my tools/check', ['--file', 'a b.ts']],
+    ['echo', ['it\'s', '"x"', '$HOME', '`id`', '$(rm -rf /)', 'a;b', 'a && b', 'line1\nline2', '*', '~', '', '\\'], 'echo', ['it\'s', '"x"', '$HOME', '`id`', '$(rm -rf /)', 'a;b', 'a && b', 'line1\nline2', '*', '~', '', '\\']],
+  ])('quotes %j %j', (command, args, program, rest) => {
+    const text = execFormCommand(command, args)
+    expect(text).not.toBeNull()
+    expect(readQuotedWords(text as string)).toEqual([program, ...rest])
+  })
+
+  it('substitutes ${…} variables as plain text before quoting; unknown ones stay as written', () => {
+    const vars = { 'CLAUDE_PLUGIN_ROOT': '/data/plugins/review kit', 'CLAUDE_PROJECT_DIR': '/work/it\'s', 'user_config.TOKEN': 'a$(id)b' }
+    const text = execFormCommand('${CLAUDE_PLUGIN_ROOT}/scripts/check.sh', ['--project=${CLAUDE_PROJECT_DIR}', '${user_config.TOKEN}', '${HOME}', '$CLAUDE_PLUGIN_ROOT', '${CLAUDE_PLUGIN_DATA}'], vars)
+    expect(readQuotedWords(text as string)).toEqual(['/data/plugins/review kit/scripts/check.sh', '--project=/work/it\'s', 'a$(id)b', '${HOME}', '$CLAUDE_PLUGIN_ROOT', '${CLAUDE_PLUGIN_DATA}'])
+    expect(text).toBe('\'/data/plugins/review kit/scripts/check.sh\' \'--project=/work/it\'\\\'\'s\' \'a$(id)b\' \'${HOME}\' \'$CLAUDE_PLUGIN_ROOT\' \'${CLAUDE_PLUGIN_DATA}\'')
+    expect(execFormCommand('x', ['${__proto__}', '${constructor}'], vars)).toBe('\'x\' \'${__proto__}\' \'${constructor}\'')
+  })
+
+  it('refuses what an argument list cannot carry', () => {
+    expect(execFormCommand('', [])).toBeNull()
+    expect(execFormCommand('   ', ['a'])).toBeNull()
+    expect(execFormCommand('node', ['a\0b'])).toBeNull()
+    expect(execFormCommand('node', ['${X}'], { X: 'a\0' })).toBeNull()
+    expect(execFormCommand('node', [1 as unknown as string])).toBeNull()
+    expect(execFormCommand(null as unknown as string, [])).toBeNull()
+    expect(execFormCommand('  node  ', null as unknown as string[])).toBe('\'node\'')
+  })
+
+  it('never lets a random argument escape its quotes', () => {
+    const random = prng(0xE7EC)
+    const units = ['a', ' ', '\'', '"', '\\', '$', '`', '(', ')', ';', '&', '|', '\n', '\t', '*', '?', '~', '#', '!', '{', '}', '${CLAUDE_PLUGIN_ROOT}', 'é', '😀']
+    for (let iteration = 0; iteration < 2000; iteration++) {
+      const word = (): string => Array.from({ length: Math.floor(random() * 12) }, () => units[Math.floor(random() * units.length)]).join('')
+      const command = `c${word()}`
+      const args = Array.from({ length: Math.floor(random() * 5) }, word)
+      const text = execFormCommand(command, args, { CLAUDE_PLUGIN_ROOT: `/r ${word()}` })
+      if (command.trim() === '') {
+        expect(text).toBeNull()
+        continue
+      }
+      const words = readQuotedWords(text as string)
+      expect(words).not.toBeNull()
+      expect(words).toHaveLength(args.length + 1)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// `if` rules and agent names
+
+describe('checkHookIf and matchHookIf', () => {
+  it.each([
+    ['Bash'],
+    ['Write'],
+    ['Edit'],
+    ['Agent'],
+    ['Task'],
+    ['shell'],
+    ['mcp__github__create_issue'],
+    ['mcp__github__*'],
+    ['mcp__github'],
+    ['mcp__*'],
+    ['Bash(git:*)'],
+    ['Bash(git *)'],
+    ['Bash(npm run test)'],
+    ['Bash(npm run test:*)'],
+    ['  Bash( git status )  '],
+  ])('accepts %j', (rule) => {
+    expect(checkHookIf(rule)).toBeNull()
+  })
+
+  it('reads an empty rule as no rule', () => {
+    expect(typeof checkHookIf('')).toBe('string')
+    expect(matchHookIf('', { tool: 'shell' })).toBe(true)
+  })
+
+  it.each([
+    ['Bash(*)'],
+    ['Bash(:*)'],
+    ['Bash( *)'],
+    ['Bash(git * main)'],
+    ['Bash(git *:*)'],
+    ['Bash(echo $(id))'],
+    ['Bash(a && b)'],
+    ['Read(./src/**)'],
+    ['Edit(src/a.ts)'],
+    ['WebFetch(domain:example.com)'],
+    ['Bash(git'],
+    ['not a rule'],
+    ['Write*'],
+    ['x'.repeat(HOOK_LIMITS.ifMaxChars + 1)],
+    [7],
+  ])('refuses %j', (rule) => {
+    expect(typeof checkHookIf(rule as string)).toBe('string')
+    expect(matchHookIf(rule as string, { tool: 'shell', input: { command: 'git status' } })).toBe(false)
+  })
+
+  const shell = (command: unknown) => ({ tool: 'shell', input: { command } })
+  it.each([
+    ['Bash', shell('ls'), true],
+    ['Bash', { tool: 'write_file' }, false],
+    ['shell', shell('ls'), true],
+    ['Write', { tool: 'write_file' }, true],
+    ['Write', { tool: 'edit_file' }, false],
+    ['Edit', { tool: 'edit_file' }, true],
+    ['MultiEdit', { tool: 'edit_file' }, true],
+    ['Agent', { tool: 'task' }, true],
+    ['Task', { tool: 'task' }, true],
+    ['mcp__github__*', { tool: 'mcp__github__create_issue' }, true],
+    ['mcp__github', { tool: 'mcp__github__create_issue' }, true],
+    ['mcp__github__*', { tool: 'mcp__gitlab__x' }, false],
+    ['mcp__*', { tool: 'mcp__gitlab__x' }, true],
+    ['mcp__memory__create', { tool: 'mcp__my-memory__create', mcpServerName: 'memory' }, true],
+    ['mcp__memory__create', { tool: 'mcp__my-memory__create' }, false],
+    ['Bash(git:*)', shell('git status'), true],
+    ['Bash(git:*)', shell('git'), true],
+    ['Bash(git:*)', shell('gitk --all'), false],
+    ['Bash(git:*)', shell('ls && git push'), true],
+    ['Bash(git:*)', shell('ls | grep git'), false],
+    ['Bash(git:*)', shell('echo "$(git status)"'), true],
+    ['Bash(git:*)', shell(undefined), true],
+    ['Bash(git:*)', { tool: 'write_file', input: { command: 'git status' } }, false],
+    ['Bash(git push *)', shell('git push origin main'), true],
+    ['Bash(git push *)', shell('git pull'), false],
+    ['Bash(npm run test)', shell('npm run test'), true],
+    ['Bash(npm run test)', shell('  npm   run test '), true],
+    ['Bash(npm run test)', shell('npm run test -- --watch'), false],
+    ['Bash(rm -rf:*)', shell('rm -rf build'), true],
+    ['Bash(rm -rf:*)', shell('rm build'), false],
+  ] as const)('%j against %j → %s', (rule, target, matches) => {
+    expect(matchHookIf(rule, target)).toBe(matches)
+  })
+
+  it('always runs without a rule and never with a malformed target', () => {
+    expect(matchHookIf(null, { tool: 'x' })).toBe(true)
+    expect(matchHookIf(undefined, { tool: 'x' })).toBe(true)
+    expect(matchHookIf('  ', { tool: 'x' })).toBe(true)
+    expect(matchHookIf('Bash', null as unknown as { tool: string })).toBe(false)
+    expect(matchHookIf('Bash', { tool: 7 as unknown as string })).toBe(false)
+  })
+})
+
+describe('hookAgentNames', () => {
+  it('adds the Claude Code agent names', () => {
+    expect(hookAgentNames('general')).toEqual(['general', 'general-purpose'])
+    expect(hookAgentNames('explore')).toEqual(['explore', 'Explore'])
+    expect(hookAgentNames('reviewer')).toEqual(['reviewer'])
+    expect(hookAgentNames('')).toEqual([])
+    const matcher = compileMatcher('general-purpose|Explore')
+    if (!matcher.ok)
+      throw new Error('the matcher must compile')
+    expect(hookAgentNames('general').some(matcher.test)).toBe(true)
+    expect(hookAgentNames('explore').some(matcher.test)).toBe(true)
+    expect(hookAgentNames('reviewer').some(matcher.test)).toBe(false)
+  })
+
+  it('names the agent tools under their Claude Code names', () => {
+    expect(hookTargetNames('skill')).toEqual(['skill', 'Skill'])
+    expect(hookTargetNames('exit_plan_mode')).toEqual(['exit_plan_mode', 'ExitPlanMode'])
+    expect(claudeToolName('task')).toBe('Task')
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Fuzzing (Phase 12)
+
+describe('phase 12: fuzzing', () => {
+  const random = prng(0xC42)
+  const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T
+  const leaves: unknown[] = [null, true, false, 0, 5, 700, '', 'x', 'command', 'prompt', 'http', 'agent', 'Bash', 'Bash(git *)', 'Bash(*)', 'Read(x)', 'sonnet', 'mock:x', 'gpt', 'powershell', 'bash', '${user_config.X}', '\0', ['a', 'b'], ['a', 1], []]
+  const keys = ['hooks', 'matcher', 'type', 'command', 'prompt', 'model', 'timeout', 'continueOnBlock', 'args', 'async', 'asyncRewake', 'if', 'statusMessage', 'once', 'shell', ...HOOK_EVENTS, 'Setup', '__proto__']
+
+  function value(depth: number): unknown {
+    const roll = random()
+    if (depth > 4 || roll < 0.35)
+      return pick(leaves)
+    if (roll < 0.65)
+      return Array.from({ length: Math.floor(random() * 4) }, () => value(depth + 1))
+    const object: Record<string, unknown> = {}
+    for (let index = Math.floor(random() * 6); index > 0; index--)
+      Object.defineProperty(object, pick(keys), { value: value(depth + 1), enumerable: true, configurable: true, writable: true })
+    return object
+  }
+
+  it('reads random configurations with prompt hooks and keeps its invariants', () => {
+    const started = Date.now()
+    for (let iteration = 0; iteration < 3000; iteration++) {
+      const result = readHooksConfig(value(0), { source: pick(['personal', 'project', 'plugin'] as const), file: 'f', prompts: random() < 0.7 })
+      expect(result.items.length + result.prompts.length).toBeLessThanOrEqual(HOOK_LIMITS.itemsMax)
+      for (const item of [...result.items, ...result.prompts]) {
+        expect(compileMatcher(item.matcher).ok).toBe(true)
+        if (item.if !== undefined) {
+          expect(checkHookIf(item.if)).toBeNull()
+          expect(TOOL_HOOK_EVENTS as readonly string[]).toContain(item.event)
+        }
+      }
+      for (const item of result.items) {
+        expect(item.command.length).toBeGreaterThan(0)
+        if (item.args !== undefined)
+          expect(execFormCommand(item.command, item.args)).not.toBeNull()
+      }
+      for (const spec of result.prompts) {
+        expect(PROMPT_HOOK_EVENTS as readonly string[]).toContain(spec.event)
+        expect(spec.prompt.trim()).toBe(spec.prompt)
+        expect(spec.prompt.length).toBeGreaterThan(0)
+      }
+      for (const entry of result.diagnostics)
+        expect(HOOK_DIAGNOSTIC_CODES).toContain(entry.code)
+    }
+    expect(Date.now() - started).toBeLessThan(10_000)
+  })
+
+  it('reads random model answers without throwing', () => {
+    const units = ['{', '}', '"ok"', ':', 'true', 'false', '"reason"', '"x"', ',', '```', 'json', '\n', ' ', '"impossible"', '[', ']', '\\', '"', 'null', 'é']
+    for (let iteration = 0; iteration < 3000; iteration++) {
+      const text = Array.from({ length: Math.floor(random() * 40) }, () => pick(units)).join('')
+      const result = readPromptHookAnswer(text)
+      if (result.valid) {
+        expect(typeof result.answer.ok).toBe('boolean')
+        if (!result.answer.ok)
+          expect(result.answer.reason).not.toBeNull()
+        const effect = promptHookOutcome(pick(HOOK_EVENTS), result.answer, { continueOnBlock: random() < 0.5 })
+        expect(effect.decision === 'allow').toBe(false)
+      }
     }
   })
 })

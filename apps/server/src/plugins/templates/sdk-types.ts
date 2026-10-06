@@ -22,7 +22,10 @@ declare module '@harness-forge/plugin-sdk' {
   // ---------- enumerations ----------
 
   export type PluginKind = 'declarative' | 'code'
-  export type PluginSource = 'builtin' | 'created' | 'zip' | 'npm' | 'url' | 'link' | 'copy'
+  /** Where a plugin comes from; 'github' and 'marketplace' since plugin API 1.6.0. */
+  export type PluginSource = 'builtin' | 'created' | 'zip' | 'npm' | 'url' | 'link' | 'copy' | 'github' | 'marketplace'
+  /** The folder layout of a plugin (plugin API 1.6.0): a harness plugin.json, or a Claude Code plugin. */
+  export type PluginFormat = 'harness' | 'claude'
   export type PluginState = 'disabled' | 'untrusted' | 'incompatible' | 'loading' | 'active' | 'error'
   export type PluginPermission = 'network' | 'secrets' | 'storage' | 'hooks' | 'process'
   /**
@@ -49,6 +52,8 @@ declare module '@harness-forge/plugin-sdk' {
   export type ImageAspectRatio = '1:1' | '3:2' | '2:3' | '4:3' | '3:4' | '16:9' | '9:16'
   /** What started a run: a request, the queue, finished background tasks, or a Stop hook (plugin API 1.5.0). */
   export type RunOrigin = 'request' | 'queue' | 'task' | 'hook'
+  /** The color of an agent in the chat (plugin API 1.6.0). */
+  export type AgentColor = 'red' | 'blue' | 'green' | 'yellow' | 'purple' | 'orange' | 'pink' | 'cyan'
 
   // ---------- library values (ctx.ai) ----------
 
@@ -180,6 +185,8 @@ declare module '@harness-forge/plugin-sdk' {
     description: string
     /** The skill body (Markdown, at most 64 KB). */
     content: string
+    /** Plugin API 1.6.0: the plugin-relative folder of the skill's supporting files (read with the skill tool). */
+    baseDir?: string
   }
 
   /** An output style (plugin API 1.5.0); default, explanatory and learning are reserved. */
@@ -194,28 +201,64 @@ declare module '@harness-forge/plugin-sdk' {
     keepCodingInstructions?: boolean
   }
 
-  /** The eight command hook events (Claude Code names; plugin API 1.5.0). */
+  /** The hook events (Claude Code names): eight in plugin API 1.5.0, thirteen since 1.6.0. */
   export type HookEventName
     = | 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit' | 'Notification'
       | 'Stop' | 'SubagentStop' | 'PreCompact' | 'SessionStart'
+      | 'PostToolUseFailure' | 'PermissionRequest' | 'SubagentStart' | 'PostCompact' | 'SessionEnd'
 
-  /** One command hook handler; "prompt" handlers are not supported. */
+  /** One command hook handler. */
   export interface CommandHookSpec {
     type: 'command'
     /** Run with sh in the chat's project folder (else a private folder), the event as JSON on stdin; 1..4096 chars. */
     command: string
     /** Seconds, 1..600; default 60. */
     timeout?: number
+    /** Plugin API 1.6.0: exec form, command is the program and each argument is one quoted word (at most 64). */
+    args?: string[]
+    /** Plugin API 1.6.0: run detached (no effect on the run). */
+    async?: boolean
+    /** Plugin API 1.6.0: run only for a matching tool call: a tool name or a rule such as "Bash(npm test:*)". */
+    if?: string
+    /** Plugin API 1.6.0: the activity label while it runs (at most 200 characters). */
+    statusMessage?: string
   }
+
+  /**
+   * A prompt hook handler (plugin API 1.6.0): a small model answers { ok, reason?, impossible? } about the hook input
+   * ($ARGUMENTS); never a permission grant. Only on PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit,
+   * Stop, SubagentStop and PermissionRequest; prompt-only hooks need no trust.
+   */
+  export interface PromptHookSpec {
+    type: 'prompt'
+    /** 1..16384 characters. */
+    prompt: string
+    /** "provider:model" or a Claude model name; omitted: the hook model setting, else the provider's small model. */
+    model?: string
+    /** Seconds, 1..600; default 30. */
+    timeout?: number
+    /** PreToolUse / PostToolUse: a block denies or feeds back instead of ending the turn. */
+    continueOnBlock?: boolean
+    /** Tool events only: run only when the tool call matches (a tool name or a Bash(...) rule). */
+    if?: string
+    /** The activity label while it runs (at most 200 characters). */
+    statusMessage?: string
+  }
+
+  /** One handler of a matcher group. */
+  export type HookHandlerSpec = CommandHookSpec | PromptHookSpec
 
   /** A matcher group: matcher names the tools of PreToolUse / PostToolUse ("Bash|Edit", "mcp__github__*", "*"). */
   export interface HookMatcherGroup {
     /** Names, "|", "*" and ".*" only (no regular expressions); omitted: every tool. */
     matcher?: string
-    hooks: CommandHookSpec[]
+    hooks: HookHandlerSpec[]
   }
 
-  /** The Claude Code "hooks" object of contributes.hooks (at most 50 handlers; the plugin then requires trust). */
+  /**
+   * The Claude Code "hooks" object of contributes.hooks (at most 50 handlers; command handlers make the plugin require
+   * trust, prompt-only hooks do not).
+   */
   export type HooksConfig = Partial<Record<HookEventName, HookMatcherGroup[]>>
 
   export interface DeclarativeProvider {
@@ -271,7 +314,7 @@ declare module '@harness-forge/plugin-sdk' {
       agents?: DeclarativeAgent[]
       /** Plugin API 1.4.0. */
       skills?: DeclarativeSkill[]
-      /** Plugin API 1.5.0: command hooks (the plugin then requires trust). */
+      /** Plugin API 1.5.0: command hooks (the plugin then requires trust); 1.6.0: prompt handlers and 13 events. */
       hooks?: HooksConfig
       /** Plugin API 1.5.0. */
       outputStyles?: DeclarativeOutputStyle[]
@@ -416,11 +459,22 @@ declare module '@harness-forge/plugin-sdk' {
   export type CommandRunResult = { type: 'prompt', text: string } | { type: 'reply', markdown: string }
 
   export interface CommandDefinition {
-    /** ^[a-z][a-z0-9-]{0,31}$; typed as /name. */
+    /** ^[a-z][a-z0-9-]{0,31}$; typed as /name. Plugin API 1.6.0: may be "<plugin id>:<name>" (at most 128 characters). */
     name: string
     description: string
     /** Exactly one of template / run; every {{input}} is replaced with the text after "/name ". */
     template?: string
+    /**
+     * Plugin API 1.6.0: 'markdown' expands template like a command file ($ARGUMENTS, $ARGUMENTS[N], named arguments,
+     * !\`cmd\` spans of a trusted plugin, @path files; at most 64 KB); default 'template' ({{input}} only).
+     */
+    syntax?: 'template' | 'markdown'
+    /** Plugin API 1.6.0: shown after "/name " in the composer. */
+    argumentHint?: string
+    /** Plugin API 1.6.0: "provider:model" (or a Claude model name) the turn runs on. */
+    model?: string
+    /** Plugin API 1.6.0: tool names that narrow the turn (never a grant). */
+    allowedTools?: string[]
     /** Guarded (30 s). */
     run?(i: CommandRunInput): Promise<CommandRunResult>
   }
@@ -429,7 +483,7 @@ declare module '@harness-forge/plugin-sdk' {
 
   /** An agent type for the task tool; its tools only narrow what a sub-agent gets (never widen it). */
   export interface AgentDefinition {
-    /** ^[a-z][a-z0-9-]{0,63}$; explore, general and general-purpose are reserved. */
+    /** ^[a-z][a-z0-9-]{0,63}$; explore, general and general-purpose are reserved; 1.6.0: may be "<plugin id>:<name>". */
     name: string
     /** When to use the agent (1..1024 characters). */
     description: string
@@ -439,23 +493,39 @@ declare module '@harness-forge/plugin-sdk' {
     tools?: string[]
     /** "provider:model", or "inherit" (the parent's model); omitted: the sub-agent model setting. */
     model?: string
+    /** Plugin API 1.6.0: tool names removed from the sub-agent's tools (applied before tools). */
+    disallowedTools?: string[]
+    /** Plugin API 1.6.0: the sub-agent runs at most this many steps (1..200). */
+    maxTurns?: number
+    /** Plugin API 1.6.0: the agent's color in the chat. */
+    color?: AgentColor
+    /** Plugin API 1.6.0: skill names (at most 5) preloaded into the sub-agent's instructions. */
+    skills?: string[]
   }
 
   /** A skill: listed to the model by name and description, its content loaded by the skill tool. */
   export interface SkillDefinition {
-    /** ^[a-z][a-z0-9-]{0,63}$ */
+    /** ^[a-z][a-z0-9-]{0,63}$; plugin API 1.6.0: may be "<plugin id>:<name>". */
     name: string
     /** When to use the skill (1..1024 characters). */
     description: string
     /** The skill body (Markdown, at most 64 KB). */
     content: string
+    /** Plugin API 1.6.0: the plugin-relative folder of its supporting files (the skill tool reads them with "file"). */
+    baseDir?: string
+    /** Plugin API 1.6.0: shown after "/name " when the skill is user-invocable. */
+    argumentHint?: string
+    /** Plugin API 1.6.0: runs as "/name [arguments]" (default true). */
+    userInvocable?: boolean
+    /** Plugin API 1.6.0: the model may load it (default true). */
+    modelInvocable?: boolean
   }
 
   // ---------- output styles (plugin API 1.5.0) ----------
 
   /** How the agent writes its replies: the content goes first in the main agent's instructions while it is active. */
   export interface OutputStyleDefinition {
-    /** ^[a-z][a-z0-9-]{0,63}$; default, explanatory and learning are reserved. */
+    /** ^[a-z][a-z0-9-]{0,63}$; default, explanatory and learning are reserved; 1.6.0: may be "<plugin id>:<name>". */
     name: string
     /** What the style does (1..1024 characters). */
     description: string

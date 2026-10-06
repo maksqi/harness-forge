@@ -125,9 +125,10 @@ describe('customize hooks helpers', () => {
   })
 
   it('imports a bare hooks object and reports unknown events', () => {
-    const result = importHooks(`\uFEFF${JSON.stringify({ PostToolUse: [{ matcher: 'Write|Edit', hooks: [{ type: 'command', command: 'prettier --write .' }] }], PermissionRequest: [] })}`)
+    // Phase 12: PermissionRequest is an event now; PermissionDenied is not.
+    const result = importHooks(`\uFEFF${JSON.stringify({ PostToolUse: [{ matcher: 'Write|Edit', hooks: [{ type: 'command', command: 'prettier --write .' }] }], PermissionDenied: [] })}`)
     expect(result.items.map(item => item.draft.command)).toEqual(['prettier --write .'])
-    expect(result.notes).toEqual(['The event "PermissionRequest" is not supported; its hooks are ignored.'])
+    expect(result.notes).toEqual(['The event "PermissionDenied" is not supported; its hooks are ignored.'])
   })
 
   it('reports invalid JSON, empty texts and files without hooks', () => {

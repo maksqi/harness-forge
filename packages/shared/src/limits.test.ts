@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { LIMITS } from './limits.ts'
+import { CLAUDE_HOME_LIMITS } from './util/claude-import.ts'
+import { CLAUDE_PLUGIN_LIMITS } from './util/claude-plugins.ts'
 import { COMMAND_TEMPLATE_LIMITS } from './util/command-template.ts'
 import { DEFINITION_LIMITS } from './util/definitions.ts'
 import { HOOK_LIMITS } from './util/hooks.ts'
@@ -82,5 +84,53 @@ describe('limits', () => {
     expect(LIMITS.commandShellOutputBytes).toBe(COMMAND_TEMPLATE_LIMITS.shellOutputBytes)
     expect(LIMITS.commandFileRefsMax).toBe(COMMAND_TEMPLATE_LIMITS.fileRefsMax)
     expect(LIMITS.commandFileRefBytes).toBe(COMMAND_TEMPLATE_LIMITS.fileRefBytes)
+  })
+
+  it('declares the Phase 12 group and mirrors CLAUDE_PLUGIN_LIMITS and CLAUDE_HOME_LIMITS', () => {
+    expect(LIMITS).toMatchObject({
+      marketplacesMax: 50,
+      repoArchiveBytes: 52_428_800,
+      skillFileReadBytes: 65_536,
+      claudeImportPlanTtlMs: 600_000,
+      claudeImportPlansMax: 4,
+      claudeImportScanTimeoutMs: 10_000,
+      promptHookTimeoutDefaultMs: 30_000,
+      promptHookPromptMaxChars: 16_384,
+      promptHookMaxOutputTokens: 512,
+      hookModelCallsMax: 8,
+      hookErrorBytes: 16_384,
+      transcriptBytesMax: 8_388_608,
+      transcriptPartBytes: 65_536,
+      transcriptToolResultBytes: 16_384,
+      sessionEndBudgetMs: 1500,
+      sessionEndBudgetMaxMs: 60_000,
+      agentSkillsPreloadMax: 5,
+      agentSkillsPreloadBytes: 32_768,
+      agentMaxTurnsMax: 200,
+      definitionArgumentsMax: 9,
+      qualifiedNameMaxChars: 128,
+    })
+    expect(LIMITS.promptHookPromptMaxChars).toBe(HOOK_LIMITS.promptMaxChars)
+    expect(LIMITS.promptHookTimeoutDefaultMs).toBe(HOOK_LIMITS.promptTimeoutDefaultSec * 1000)
+    expect(LIMITS.hookErrorBytes).toBe(HOOK_LIMITS.errorMaxChars)
+    expect(LIMITS.claudePluginManifestBytes).toBe(CLAUDE_PLUGIN_LIMITS.manifestBytes)
+    expect(LIMITS.marketplaceJsonBytes).toBe(CLAUDE_PLUGIN_LIMITS.marketplaceJsonBytes)
+    expect(LIMITS.marketplaceEntriesMax).toBe(CLAUDE_PLUGIN_LIMITS.marketplaceEntriesMax)
+    expect(LIMITS.claudeComponentsPerKindMax).toBe(CLAUDE_PLUGIN_LIMITS.componentsPerKindMax)
+    expect(LIMITS.claudeOutputStylesMax).toBe(CLAUDE_PLUGIN_LIMITS.outputStylesMax)
+    expect(LIMITS.claudeUserConfigMax).toBe(CLAUDE_PLUGIN_LIMITS.userConfigMax)
+    expect(LIMITS.qualifiedNameMaxChars).toBe(CLAUDE_PLUGIN_LIMITS.qualifiedNameMaxChars)
+    expect(LIMITS.qualifiedNameSegmentsMax).toBe(CLAUDE_PLUGIN_LIMITS.qualifiedSegmentsMax)
+    expect(LIMITS.claudePluginDiagnosticsMax).toBe(CLAUDE_PLUGIN_LIMITS.diagnosticsMax)
+    expect(LIMITS.claudeImportDefinitionBytes).toBe(CLAUDE_HOME_LIMITS.definitionBytes)
+    expect(LIMITS.claudeImportDefinitionsPerKindMax).toBe(CLAUDE_HOME_LIMITS.definitionsPerKindMax)
+    expect(LIMITS.claudeImportCommandDepthMax).toBe(CLAUDE_HOME_LIMITS.commandDepthMax)
+    expect(LIMITS.claudeImportSettingsBytes).toBe(CLAUDE_HOME_LIMITS.settingsBytes)
+    expect(LIMITS.claudeMdBytes).toBe(CLAUDE_HOME_LIMITS.claudeMdBytes)
+    expect(LIMITS.claudeJsonBytes).toBe(CLAUDE_HOME_LIMITS.claudeJsonBytes)
+    expect(LIMITS.claudeImportBytesMax).toBe(CLAUDE_HOME_LIMITS.totalBytes)
+    expect(LIMITS.claudeImportItemsMax).toBe(CLAUDE_HOME_LIMITS.itemsMax)
+    expect(LIMITS.claudeImportSkippedMax).toBe(CLAUDE_HOME_LIMITS.skippedMax)
+    expect(LIMITS.claudeImportSummaryMaxChars).toBe(CLAUDE_HOME_LIMITS.summaryMaxChars)
   })
 })

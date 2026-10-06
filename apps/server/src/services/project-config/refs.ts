@@ -217,7 +217,8 @@ export async function commandTrustSubject(root: string, name: string, spans: rea
 export function refPathsOf(hashItem: TrustHashItem): string[] {
   switch (hashItem.kind) {
     case 'hook':
-      return hookRefPaths(hashItem.command)
+      // A prompt hook (Phase 12) has no command and names no file.
+      return hashItem.command === null ? [] : hookRefPaths(hashItem.command)
     case 'mcp':
       return mcpRefPaths(hashItem.server)
     case 'command':

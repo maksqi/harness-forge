@@ -59,6 +59,8 @@ const settings: Settings = {
   planDirectory: '.harness/plans',
   outputStyle: 'default',
   hooksEnabled: true,
+  hookModelRef: null,
+  modelAliases: { sonnet: null, opus: null, haiku: null, fable: null },
 }
 
 describe('createApiClient', () => {

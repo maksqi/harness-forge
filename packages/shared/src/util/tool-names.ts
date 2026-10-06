@@ -4,7 +4,8 @@
  * list_directory, Bash → shell, WebFetch → web_fetch); `mcp__*` names are kept; patterns such as `Bash(git:*)` keep the
  * tool and add a `tool-pattern` diagnostic; other names that look like tool names are kept for the catalog to check
  * against the live tool list; anything else is dropped with an `unknown-tool` diagnostic. A list only ever narrows a
- * tool set. Pure and isomorphic; never throws.
+ * tool set. Pure and isomorphic; never throws. Phase 12 adds the Claude Code names of the agent tools and agent types
+ * (hook matching only; `CLAUDE_TOOL_ALIASES` is unchanged).
  */
 import type { DefinitionDiagnostic, DefinitionDiagnosticCode, DefinitionDiagnosticLevel } from './definitions.ts'
 import { MCP_TOOL_PREFIX, TOOL_NAME_PATTERN } from '../ids.ts'
@@ -20,6 +21,40 @@ export const CLAUDE_TOOL_ALIASES: Readonly<Record<string, string>> = {
   LS: 'list_directory',
   Bash: 'shell',
   WebFetch: 'web_fetch',
+}
+
+/**
+ * Claude Code names of the `core-agent` tools (Phase 12, ADR-057): hooks match them (`hookTargetNames`; Claude Code
+ * renamed `Task` to `Agent`, both match `task`) and the hook `if` rule accepts them. Never used by `normalizeToolList`
+ * (a definition's `tools: TodoWrite` keeps its Phase 10 meaning).
+ */
+export const CLAUDE_AGENT_TOOL_ALIASES: Readonly<Record<string, string>> = {
+  Task: 'task',
+  Agent: 'task',
+  TodoWrite: 'todo_write',
+  ExitPlanMode: 'exit_plan_mode',
+  Skill: 'skill',
+}
+
+/**
+ * Claude Code agent types → harness agent types (Phase 12, ADR-057): a `SubagentStart` / `SubagentStop` matcher
+ * written for Claude Code (`general-purpose`, `Explore`) matches the harness builtins (`general`, `explore`).
+ */
+export const CLAUDE_AGENT_TYPE_ALIASES: Readonly<Record<string, string>> = {
+  'general-purpose': 'general',
+  'Explore': 'explore',
+}
+
+/** The names an agent type is matched under: the type itself, then its Claude Code names (`general` → `general-purpose`). */
+export function claudeAgentTypeNames(type: string): string[] {
+  if (typeof type !== 'string' || type === '')
+    return []
+  const names = [type]
+  for (const [claude, harness] of Object.entries(CLAUDE_AGENT_TYPE_ALIASES)) {
+    if (harness === type && !names.includes(claude))
+      names.push(claude)
+  }
+  return names
 }
 
 export interface NormalizedToolList {
@@ -78,8 +113,13 @@ function isAcceptedName(name: string): boolean {
   return name.startsWith(MCP_TOOL_PREFIX) && MCP_PREFIX_ENTRY.test(name)
 }
 
-/** Normalizes a frontmatter `tools` / `allowed-tools` value (comma string or list). Never throws. */
-export function normalizeToolList(value: unknown): NormalizedToolList {
+/**
+ * Normalizes a frontmatter `tools` / `allowed-tools` value (comma string or list). Never throws. With `mode: 'deny'`
+ * (Phase 12, `disallowedTools` / `disallowed-tools`) the messages speak of removed tools and a value that is not a list
+ * is ignored (`tools: null`, nothing removed) instead of allowing no tool.
+ */
+export function normalizeToolList(value: unknown, options?: { readonly mode?: 'allow' | 'deny' }): NormalizedToolList {
+  const deny = options?.mode === 'deny'
   if (value === undefined || value === null)
     return { tools: null, diagnostics: [] }
   let entries: readonly unknown[]
@@ -90,8 +130,10 @@ export function normalizeToolList(value: unknown): NormalizedToolList {
     entries = value
   }
   else {
-    const message = 'The tool list must be a comma-separated text or a list; no tool is allowed.'
-    return { tools: [], diagnostics: [diagnostic('warning', 'invalid-field', message)] }
+    const message = deny
+      ? 'The disallowed tool list must be a comma-separated text or a list; it was ignored.'
+      : 'The tool list must be a comma-separated text or a list; no tool is allowed.'
+    return { tools: deny ? null : [], diagnostics: [diagnostic('warning', 'invalid-field', message)] }
   }
 
   const diagnostics: DefinitionDiagnostic[] = []
@@ -125,7 +167,8 @@ export function normalizeToolList(value: unknown): NormalizedToolList {
     }
     if (pattern !== null && !patterned.has(name)) {
       patterned.add(name)
-      diagnostics.push(diagnostic('warning', 'tool-pattern', `Tool patterns are not supported; ${name} is allowed without its pattern.`))
+      const effect = deny ? `${name} is removed entirely` : `${name} is allowed without its pattern`
+      diagnostics.push(diagnostic('warning', 'tool-pattern', `Tool patterns are not supported; ${effect}.`))
     }
     if (!seen.has(name)) {
       seen.add(name)

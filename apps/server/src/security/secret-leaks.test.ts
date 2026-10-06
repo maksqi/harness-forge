@@ -249,6 +249,12 @@ function getInputs(): Partial<Record<ApiRouteKey, Array<{ params?: Record<string
     'hooks.list': [{}, { query: { projectId: 'prj_ABCdef0123456789' } }],
     'projectTrust.list': [{ params: { id: 'prj_ABCdef0123456789' } }],
     'projectMcp.list': [{ params: { id: 'prj_ABCdef0123456789' } }],
+    // Phase 12 (ADR-054 … ADR-056): the marketplaces (none), an unknown marketplace and an unknown project's settings file
+    // (404 once implemented), and the home-folder status (never a file's contents).
+    'marketplaces.list': [{}],
+    'marketplaces.get': [{ params: { id: 'mkt_ABCdef0123456789' } }],
+    'claudeImport.home': [{}],
+    'projectDefinitions.read': [{ params: { id: 'prj_ABCdef0123456789' }, query: { path: '.claude/settings.json' } }],
   }
 }
 

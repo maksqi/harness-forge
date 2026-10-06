@@ -316,9 +316,45 @@ chat / project / global selection); user-invocable skills; `!` spans and `@file`
     reconciliation and the feature e2e)
   - [x] Final gate (e2e ×3, screenshots, audit, v1.6 → v1.7 upgrade, Docker) + checkpoint commit
 
-## Backlog (not in v1.7)
+## Phase 12 — v1.8: Claude Code ecosystem
 
-Multi-user accounts · child-process isolation for code plugins · plugin marketplace/registry index ·
+Details, owned paths and acceptance criteria: `docs/phases/phase-12-v1-8.md`. Decisions: ADR-053 … ADR-058 (and
+amendment notes on ADR-008, ADR-017, ADR-024, ADR-036, ADR-038, ADR-043 … ADR-045, ADR-048 … ADR-050, ADR-052). Plan:
+Claude Code plugins in their own format (whole-tree trust, qualified names, `userConfig`), marketplaces and HTTPS
+archive sources (GitHub without git), import from a Claude Code home folder (browser upload or server scan), editing
+project definition files in the UI, prompt hooks + five more hook events + `transcript_path`, frontmatter
+compatibility, the four Phase 11 leftovers; plugin API 1.6.0.
+
+- [x] P12-00 Stabilization start (coordinator): design reports in `.tmp/p12-designs`, baseline 11787 tests (`git status`
+  unchanged), CI runners pinned to `ubuntu-24.04` (`c89ca97`), shell-quote override for GHSA-pqg4-j6r4-53mv (`bdc9348`;
+  katex < 0.18.2 via mermaid is low and left as is: mermaid pins `^0.16`), the six ignored advisories re-checked (still
+  unpatched), `.tmp/v17` worktree built, old `.tmp` content moved to `.tmp/_archive`
+- [x] P12-0a Decisions, docs, contracts
+  - [x] K1 DECISIONS (ADR-053 … ADR-058, contract seed), ROADMAP, AGENT.md (coordinator); K2 no new dependency
+  - [x] C40 contracts: shared DTOs + plugin SDK 1.6.0, 12 new routes (132), `docs/API.md`, 501 stubs
+  - [x] C41 Claude helpers (`packages/shared/src/util/{claude-plugins,claude-import,claude-permissions}.ts`)
+  - [x] C42 hook + frontmatter helpers (`packages/shared/src/util/{hooks,trust,definitions,arguments,tool-names}.ts`)
+  - [x] D16 phase doc `phase-12-v1-8.md` · [x] D17 docs: UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md, guides, README
+  - [x] K3S v1.7 upgrade seed (`.tmp/upgrade-v17`)
+  - [x] Gate + checkpoint commit
+- [ ] P12-0b Schema, migration `0009`, skeletons, FREEZE
+  - [ ] K3 schema + `pnpm db:generate` (coordinator)
+  - [ ] C43 server skeleton · [ ] C44 chat seams · [ ] C45 mocks, fixtures, fake remote · [ ] C46 web skeleton
+  - [ ] Gate (incl. v1.7 data upgrade probe, by G12B) + FREEZE + checkpoint commit
+- [ ] P12-A Features (13 agents + gate probes)
+  - [ ] W12.1 claude-plugin-server · [ ] W12.2 sources-marketplaces-server · [ ] W12.3 claude-import-server
+  - [ ] W12.4 project-definitions-server · [ ] W12.5 hooks-server · [ ] W12.6 hook-events-server
+  - [ ] W12.7 catalog-frontmatter-server
+  - [ ] W12.8 marketplaces-web · [ ] W12.9 plugins-install-web · [ ] W12.10 claude-import-web
+  - [ ] W12.11 customize-defs-web · [ ] W12.12 hooks-web · [ ] W12.13 chat-web · [ ] G12P gate probes
+  - [ ] Gate + checkpoint commit
+- [ ] P12-B Feature e2e, docs, fix-ups, final gate
+  - [ ] W12.14 e2e-features · [ ] W12.15 docs-final (W12.16 / W12.17 fix-ups only if the P12-A gate is red)
+  - [ ] Final gate (e2e ×3, screenshots, audit, v1.7 → v1.8 upgrade, Docker) + checkpoint commit
+
+## Backlog (not in v1.8)
+
+Multi-user accounts · child-process isolation for code plugins · a harness plugin registry index (Claude Code marketplaces: Phase 12) ·
 knowledge/RAG · desktop/CLI clients · audio attachments to chat models · declarative image and voice providers ·
 provider-native image tools (e.g. the OpenAI Responses image tool) · on-device speech synthesis · video generation ·
 verify Alt+V dictation on Firefox / Windows (Alt+J is the documented fallback) · run the live provider suite with
@@ -330,15 +366,15 @@ advisories (GHSA-86w9-cpqp-85rv node-forge, GHSA-vfj7-8cjw-p6xm braces) once pat
 `search_files`, the `@` file index) off the main thread · a steer queue that survives a server restart · nested
 sub-agents · micro-compaction of
 single large tool outputs · retry a provider context overflow after compaction · `@` mentions of symbols and URLs ·
-run the live provider suite for compaction, plan mode and sub-agents with real models · editing project
-definition files in the UI · importing definitions from the home folder (`~/.claude`) · background
+run the live provider suite for compaction, plan mode and sub-agents with real models · background
 tasks that survive a server restart · a sidebar activity dot for background agents · run the live provider suite for
-custom agents, skills and background agents with real models · prompt-based hooks (`type: prompt`) and hook
-`transcript_path` · an OS-level sandbox for hooks and project MCP servers · importing personal hooks and MCP servers from
-`~/.claude` · run the live provider suite for hooks, project MCP servers and output styles with real models · list the command
-hooks of an untrusted plugin on the Hooks tab ("Plugin not trusted" rows) · a partially-checked "Select all" in the trust
-dialog · keep a hook `allow` record from reading "allowed" when the harness still asks (plan mode, `execute`, `always`)
-· show the turned-off command count after a backup restore.
+custom agents, skills and background agents with real models · an OS-level sandbox for hooks and project MCP servers · run the live provider suite for hooks, project MCP servers and output styles with real models · project plugin recommendations (`enabledPlugins` / `extraKnownMarketplaces` in a project's settings) ·
+git clone plugin and marketplace sources (non-GitHub git hosts, `git-subdir`, sparse checkouts) · a GitHub token for
+private repositories and higher rate limits · Claude Code LSP servers, themes, monitors, workflows and a plugin's `bin/`
+on the shell `PATH` · `http`, `mcp_tool` and `agent` hook handlers · OAuth-only remote MCP servers of Claude Code
+plugins · editing Claude Code plugins in the plugin editor · run the live provider suite for prompt hooks and Claude
+Code plugins with real models · unpin the CI runners (`ubuntu-24.04` → Ubuntu 26) · drop the katex < 0.18.2 path through
+mermaid (GHSA-238p-pmpm-9mq7, low) once mermaid allows katex 0.18.
 
 ## Wave log
 
@@ -392,3 +428,5 @@ dialog · keep a hook `allow` record from reading "allowed" when the harness sti
 | P11-A | W11.1 – W11.12, G11P (gate probes), W11.15 / W11.16 (fix-ups for the red gate items) (+ coordinator: CCRs `pipeline.ts` `skillsAvailable` = model-invocable skills, the share snapshot command `{ name: slashNameSchema, kind? }`, the plugin `tool.after` context recorded and sent to the model, the `project:` secret scope, the customizations route pin; relays: C37 / C36 names, W11.12's `hookAnnouncement`, workspace opens per run; decisions: a hook `allow` never skips the card in plan mode, bare script names are trust references, the `OUTPUT_STYLE_SCOPE` adapter kept; e2e copy of the data spec) | audit ok (249 paths, no frozen file touched beyond the accepted CCRs); 11760 tests, `git status` unchanged; build ok (web entry 49.8 KB gz); CSP 38/38; probes 356/356 after the fix-ups (`.tmp/gates/P11-A/probe.mjs`: hooks per event, trust, project MCP, styles, commands, plugins 1.5.0, kill switches, hygiene, v1.6 upgrade 45/45) + P10-A copy 173/0 + P9-A + P8-A 47/0; e2e 156 passed on a fresh `.tmp/e2e` (the first run found the image-turn navigation regression, fixed by W11.16); `pnpm audit --prod` clean (6 ignored) | (this commit) |
 | P11-B | W11.13, W11.14, W11.17 / W11.18 (bugs found by the docs reconciliation: fresh auth for declarative drafts with hooks or `!` spans, prompt hooks before `!` spans, project MCP shadowing in sub-agents, restore copy, hook note slot, badge tooltip on focus, install summary, bash help text), W11.19 (bugs found by the feature e2e: live hook notes on the user message via `X-Harness-Prompt-Hooks`, the refusal's repeated title, 64-character argument hints, the Customize tab row), G11D (Docker probe) (+ coordinator: the five e2e `fixme`s enabled, the e2e data spec copy, UI.md / API.md notes, four backlog items) | audit ok (83 paths); 25 new e2e tests (suite 197 incl. 6 screenshot tests), 3 green runs on 8891 by W11.13; docs reconciled (API, ARCHITECTURE, UI, PLUGINS, PROVIDERS, guides, README "v1.7") | (final gate commit) |
 | Final gate v1.7 | coordinator | frozen install ok; 11787 tests, `git status` unchanged by `pnpm check`; build ok; CSP 38/38; probes 345/345 on fresh data (incl. the real v1.6 → v1.7 upgrade of a fresh seed made by the `45e974c` build, 45/45: nothing executed before approval) + P10-A copy 173/0 + P9-A + P8-A 47/0; e2e 191 passed ×3 (chromium + mobile + tablet); `@screenshots` dark + light reviewed (11 new Phase 11 screens), README images refreshed + `hooks-dark`; `pnpm audit --prod` clean (6 ignored; node-forge / braces still unpatched, simple-git fixes only in new majors); Docker (Node 24, uid 1000) on the v1.6 seed 49/49: a project hook runs as uid 1000 only after approval, a `.mcp.json` stdio server starts only after approval and stops on revoke, no orphans after `docker stop`, `HF_SAFE_MODE=1` runs no hook | (this commit) |
+| P12-00 | coordinator | baseline 11787 tests, `git status` unchanged; actionlint 1.7.12 clean on the pinned runners; CI on `c89ca97` (Audit red only from GHSA-pqg4-j6r4-53mv, fixed by `bdc9348`); new advisories: shell-quote override, katex via mermaid (low) left as is; six ignores still unpatched; `.tmp/v17` built; `.tmp` archived | `c89ca97`, `bdc9348` |
+| P12-0a | coordinator (K1; SH skeletons `claude-{plugins,import,permissions}`), C40, C41, C42, D16, D17, K3S (+ coordinator: bridges replaced by `SH/index.ts` exports, examples' `harness-forge.d.ts` regenerated for 1.6.0, `activityDataSchema.label` (open point 1), `start:e2e` with `HF_CLAUDE_HOME=0` (open point 12 changed), W12.13 owns `projects/{trust,mcp}` and `chat/background` + `stores/background-tasks`, the customize import e2e pins (`color` read, alias note)) | audit ok (117 paths; C40 / C42 compile fixes accepted); frozen install ok (TypeScript 6.0.3, `yaml` 2.9.1); 12678 tests, `git status` unchanged; build ok (web js +9.5 KB gz vs v1.7); CSP 38/38; `pluginApiVersion` 1.6.0, 12 new routes answer 501 / 400; e2e 191 passed on a fresh `.tmp/e2e` (run 1 found the customize pin and the pre-existing `mobile/agent.spec.ts:191` stop flake, 1/6 on the v1.7 build too → W12.13); `pnpm audit --prod` clean (6 ignored); v1.7 seed `.tmp/upgrade-v17` (30 chats / 160 messages / 14 approvals) | (this commit) |

@@ -171,7 +171,7 @@ describe('plugin API 1.4.0 manifests (ADR-045)', () => {
     expect(read.compatible).toBe(true)
   })
 
-  it.each(['^1.6.0', '^2.0.0', '~1.3.0'])('engines %s is incompatible (needs another plugin API)', async (harness) => {
+  it.each(['^1.7.0', '^2.0.0', '~1.3.0'])('engines %s is incompatible (needs another plugin API)', async (harness) => {
     const read = await readPluginDirectory(plugin('compat', { 'plugin.json': manifest('compat', { engines: { harness } }) }), { expectedId: 'compat' })
     expect(read.compatible).toBe(false)
     expect(read.problem?.state).toBe('incompatible')

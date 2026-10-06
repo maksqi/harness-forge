@@ -48,9 +48,13 @@ describe('fresh routes of the route table', () => {
     // tasks (ADR-046) need it. Phase 11: creating a personal hook (ADR-048), approving project items (ADR-049) and
     // setting project MCP variables (ADR-050) need it; changing a hook needs it unless the body only turns the hook off
     // (checked by the route, like stdio `mcp.update`); listing, the run log, deleting a hook, revoking an approval and
-    // reconnecting a server do not.
+    // reconnecting a server do not. Phase 12: scanning the server's Claude Code folder and applying an import (personal
+    // hooks, stdio MCP servers, shell rules; ADR-055) need it; marketplaces (installs go through the plugin install
+    // review) and project definition files (saving never approves anything, ADR-056) do not.
     expect(FRESH_KEYS.sort()).toEqual([
       'auth.setPassword',
+      'claudeImport.apply',
+      'claudeImport.scan',
       'data.deleteAll',
       'hooks.create',
       'keys.rotate',

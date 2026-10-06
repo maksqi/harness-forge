@@ -6,7 +6,7 @@ values defined here are **contracts**: several agents build components in parall
 
 - Source of truth for shared names: `docs/DECISIONS.md` (wins on conflict). DTO names come from `docs/API.md`.
 - Owners (C3, C5, W2.x, W3.x, W4.x; Phase 5: C9, W5.x; Phase 6: C12, W6.x; Phase 7: C15, W7.x; Phase 8: C20, W8.x;
-  Phase 9: C25, W9.x; Phase 10: C33, W10.x; Phase 11: C39, W11.x) follow the phase tables in `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
+  Phase 9: C25, W9.x; Phase 10: C33, W10.x; Phase 11: C39, W11.x; Phase 12: C46, W12.x) follow the phase tables in `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
 - Everything is English. Every UI string is sentence case (see [Copy guidelines](#15-copy-guidelines)).
 
 Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 Design tokens](#3-design-tokens) ·
@@ -35,7 +35,10 @@ Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 D
      Settings → Customize lists the sub-agents, slash commands and skills of the user, the projects and the plugins,
      9.12; it is a settings page, not a third sidebar mode, and project definition files stay read-only in the UI;
      Phase 11, ADR-048 / ADR-051: it gains the Output styles and Hooks tabs, 9.13, still without a mode or a new nav
-     entry);
+     entry; Phase 12, ADR-055 / ADR-056: it gains the **Import from Claude Code** dialog and edits a project's
+     definition files and hooks through **Edit…** on the project rows (a project's `.mcp.json` from its MCP servers
+     dialog), 9.14, still without a mode or a nav entry; the Plugins mode gains the **Marketplaces** row and page, 5.4,
+     8.13);
    - session filters (status/branch/environment filters above the session list; Phase 7: the project switcher is the
      only filter);
    - diff, terminal and browser panes (no split panes next to the transcript; Phase 7 keeps this: diffs and shell
@@ -1089,6 +1092,172 @@ The composer when a hook refused the message (7.31); at 390px the same card, the
  untrusted variant:  ⛉? /deploy runs shell lines you haven't approved.  [Review…]  data-code=untrusted
 ```
 
+### 2.19 Marketplaces, Claude Code plugins, import from Claude Code and project files (Phase 12)
+
+Legend additions: `⊞` marketplace (`Store`) · `↥` update available (`CircleArrowUp`) · `⟨CC⟩` the "Claude Code plugin"
+format badge · `◇` prompt hook (`MessageSquareText`) · `[–]` a mixed checkbox (`Minus`) · `●p` an agent color dot.
+
+Plugins → Marketplaces (`/plugins/marketplaces`, 8.13), desktop:
+
+```
+┌ Plugins ────────┬─────────────────────────────────────────────────────────────────────────────┐
+│ New plugin ▾    │ Marketplaces                              [↻ Refresh all] [+ Add marketplace…] │ marketplaces-page
+│ ⇩ Install…      │ Browse plugins from Claude Code marketplaces.                               │
+│ ⊞ Marketplaces 2◀│ ┌ Anthropic's official plugins ──────────────────────────────────── × ┐    │ marketplace-suggestion
+│ Browse          │ │ anthropics/claude-plugins-official              [Add marketplace]   │    │ (-add, -dismiss)
+│  All        12  │ └─────────────────────────────────────────────────────────────────────┘    │
+│  …              │ [All 20] [team-tools 14 · ↥2] [acme ⚠ 6]                                  ⋯ │ marketplace-row (data-state)
+│ Installed       │ github.com/acme/team-tools@3f2a9c1 · refreshed 2 h ago                      │ marketplace-row-menu
+│  ✱ Core …       │ [Search plugins…                    ] [Category: All      ▾]                │ marketplace-search, -category
+│  ● review-kit   │ ┌ commit-tools 1.2.0 · Git ───────────── Installed · Update to 1.3.0 [Update…] ┐ entry[data-state=update]
+│                 │ │ Commit helpers and a /commit flow.  git · workflow · GitHub acme/ct      │ │
+│                 │ ├ db-mcp 0.4.0 · Data ────────────────────────────────────────  [Install…] ┤ data-state=available
+│                 │ │ A Postgres MCP server.  database · npm @acme/db-mcp                      │ │
+│                 │ ├ review-kit 2.0.0 · Review ───────────────────────────── Installed  [Open] ┤ data-state=installed
+│                 │ ├ py-lsp · Unsupported source (git)                                         ┤ data-state=unsupported
+│                 │ └──────────────────────────────────────────────────────────────────────────┘ │
+└─────────────────┴─────────────────────────────────────────────────────────────────────────────┘
+  a marketplace that could not refresh:  ⚠ Could not refresh acme: GitHub answered 404.        marketplace-error
+```
+
+At 390px the chips become a `Select` ("Marketplace"), the row's `⋯` sits next to it, the entries stack (name and
+version on line 1, the action button on its own line, 40px tall), the header actions turn icon-only ("Refresh all",
+"Add marketplace…" as accessible names) and the suggestion card wraps its button under the text.
+
+The install dialog, GitHub tab, previewing a Claude Code plugin (8.3, 8.13); at 390px the fields stack and the footer is
+sticky:
+
+```
+┌ Install plugin ──────────────────────────────────────────────────────────── × ┐
+│ [Zip][npm][URL][GitHub][Local folder]                                         │ install-tab-github
+│ Repository [ anthropics/claude-plugins-official           ]                   │ install-github-repo
+│ Branch, tag or commit (optional) [ main ]  Folder in the repository (optional)│ install-github-ref
+│ [ plugins/commit-commands ]                                                   │ install-github-path
+│ Downloads an archive of the exact commit over HTTPS. Nothing runs before you  │
+│ review it.                                                       [Inspect]    │
+├── preview (InstallReview) ────────────────────────────────────────────────────┤
+│ ▣ commit-commands 1.0.0  ⟨CC⟩ Claude Code plugin                             │ data-slot=install-format
+│ GitHub · anthropics/claude-plugins-official@3f2a9c1 · plugins/commit-commands │ data-slot=install-commit
+│ Adds: 3 commands · 1 agent · 2 hooks · 1 MCP server                           │
+│ Commands run as /commit-commands:commit; agents as commit-commands:reviewer.  │ data-slot=install-namespace
+│ Asks for: GITHUB_TOKEN (secret) · Default branch                              │ data-slot=install-user-config
+│ Ignored: .lsp.json (LSP servers aren't supported) · bin/ (never run)          │ data-slot=install-ignored
+│ ┌ ⚠ Runs code on your server with harness-forge's permissions. …           ┐  │ TrustWarning
+│ │ Runs these commands:  PostToolUse hook   sh ${CLAUDE_PLUGIN_ROOT}/hooks/…│  │ trust-run-commands
+│ │                       MCP server github  node ${CLAUDE_PLUGIN_ROOT}/…   │  │
+│ [ ] I trust anthropics/claude-plugins-official                                │
+│ Confirm your password [ •••••••• ]                                            │ trust-password (not fresh)
+│                                                         [Back] [Install]      │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+The Import from Claude Code wizard (`ClaudeImportDialog`, 9.14): a dialog on desktop, full screen at 390px with a
+sticky footer and 40px targets:
+
+```
+┌ Import from Claude Code ───────────────────────────────────────────────── × ┐ claude-import-dialog[data-step=source]
+│ Step 1 of 3                                                                  │
+│ (•) Choose your .claude folder…        [+ .claude.json (MCP servers)]        │ claude-import-source[data-value=folder]
+│ ( ) Upload a zip…                                                            │ data-value=zip
+│ ( ) Scan /home/node/.claude on this server                                   │ data-value=server
+│     Scanning is turned off on this server (HF_CLAUDE_HOME=0).    (disabled)  │
+│ Only agents, commands, skills, output styles, settings.json, CLAUDE.md and   │
+│ the mcpServers of .claude.json are read.                                     │
+│                                                        [Cancel] [Continue]   │ claude-import-continue
+├──────────────────────────────────────────────────────────────────────────────┤ data-step=preview
+│ Step 2 of 3 · Found 23 items                                                 │ claude-import-preview
+│ Agents · 4                                              [–] Select all 4     │ claude-import-group, -select-all
+│  [✓] reviewer   agents/reviewer.md                       New                 │ claude-import-item[data-status=new]
+│  [✓] planner    agents/planner.md                        Replaces yours      │ data-status=update
+│  [ ] explore    agents/explore.md                        Conflict            │ data-status=conflict
+│       [ Import as explore-2 ▾ ]                                              │ claude-import-resolution
+│ Commands · 6                                            [✓] Select all 6     │
+│  [✓] deploy     commands/deploy.md                       New                 │
+│       ⛉! Imported turned off: it runs shell lines.   Turn on after import ○ │
+│ Hooks · 2  ⛉!                                           [✓] Select all 2     │
+│  [✓] PreToolUse · Bash   ~/.claude/hooks/guard.sh        New                 │
+│  [✓] ◇ Stop  Did the tests pass?                         New                 │
+│ MCP servers · 2   Allowed shell commands · 3   Instructions · 1              │
+│  [✓] Bash(npm run test:*) → npm run test                 New                 │
+│  [✓] CLAUDE.md    Add to your instructions [ Append ▾ ]                      │ claude-import-instructions-mode
+│ Unsupported · 2   Read(./secrets/**) · Only allowed Bash commands are        │ data-status=unsupported
+│                   imported.                                                  │
+│ Includes 3 items that run commands on this server.                           │
+│                                                [Back] [Import 19 items]      │ claude-import-submit[data-count]
+├──────────────────────────────────────────────────────────────────────────────┤ data-step=result
+│ Step 3 of 3 · Imported 19 items · 2 skipped · 0 failed                       │ claude-import-result
+│ 1 command turned off (it runs shell lines)                                   │
+│                           [Open Customize] [MCP servers] [Close]             │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+The project file editor (`ProjectFileEditor`, 9.14) after a save that met a change on disk; a right-side sheet, full
+width at 390px with a sticky footer:
+
+```
+┌ Edit reviewer.md ──────────────────────────────────────────────────────── × ┐ project-file-editor
+│ .claude/agents/reviewer.md  ⧉                                                │ (data-kind=agent, data-path)
+│ ┌ ⛉! reviewer.md changed on disk after you opened it. ────────────────────┐ │ project-file-conflict (role=alert)
+│ │ [Load from disk] [Overwrite]   or keep editing                         │ │ project-file-reload, -overwrite
+│ └─────────────────────────────────────────────────────────────────────────┘ │
+│ ┌ ---                                                                   ┐   │ project-file-content
+│ │ name: reviewer                                                        │   │ (MarkdownEditor, raw file)
+│ │ color: purple                                                         │   │
+│ │ disallowedTools: Bash                                                 │   │
+│ │ ---                                                                   │   │
+│ └───────────────────────────────────────────────────────────────────────┘   │
+│ Agent reviewer · Not allowed: Bash · Max turns 12 · ●p Purple                │ parsed summary
+│ Line 5: Unknown tool: Foo                                                    │ diagnostics
+│ Saving never approves hooks or shell lines.                                  │
+│ [Cancel]                                                     [Save file]     │ project-file-save
+└──────────────────────────────────────────────────────────────────────────────┘
+  after a save:  toast "Saved .claude/agents/reviewer.md. 1 item needs your approval." [Review]
+```
+
+The hook editor with the Prompt type (9.14), 390px:
+
+```
+┌ 390 ──────────────────────────┐
+│ New hook                    × │ hook-editor[data-mode=new]
+│ ⚠ A prompt hook asks a model  │ hook-warning
+│ about every matching event,   │
+│ using tokens each time. …     │
+│ Type [ Command | ●Prompt ]    │ hook-type[data-value=prompt]
+│ Event [ Stop              ▾ ] │ hook-event
+│ When the agent finishes a     │
+│ reply. It can make it …       │
+│ Prompt                        │ hook-prompt
+│ ┌───────────────────────────┐ │
+│ │ Did the tests run and     │ │
+│ │ pass? $ARGUMENTS          │ │
+│ └───────────────────────────┘ │
+│ Runs with Claude Haiku 4.5    │
+│ (Settings → General → Hook    │
+│ model). It answers ok, or not │
+│ ok with a reason.             │
+│ Timeout [ 30 ] seconds        │ hook-timeout
+│ On                         ◉  │ hook-editor-enabled
+│ [Cancel]         [Save hook]  │ hook-save (sticky)
+└───────────────────────────────┘
+```
+
+The project trust dialog with a partly selected group (7.33, 7.34): `Hooks · 3   [–] Select all 3`
+(`project-trust-select-all[data-state=indeterminate]`, `aria-checked="mixed"`); clicking it selects the remaining
+items, a second click clears the group.
+
+Settings → General → Agent with the Phase 12 fields (9.11, 9.14); at 390px the labels stack above the selects:
+
+```
+ Hook model            [ Automatic (the provider's small model) ▾ ]   settings-hook-model
+   Answers prompt hooks that don't name a model. Automatic uses the small model of the chat's provider, else the
+   chat's model.
+ Claude model names    sonnet [ Claude Sonnet 5        ▾ ]            settings-model-alias[data-name=sonnet]
+                       opus   [ Not set                ▾ ]            data-name=opus
+                       haiku  [ Claude Haiku 4.5       ▾ ]            data-name=haiku
+                       fable  [ Not set                ▾ ]            data-name=fable
+   Agents, skills and hooks from Claude Code can name a model as sonnet, opus, haiku or fable.
+```
+
 
 ---
 
@@ -1509,6 +1678,12 @@ Clicking the Chat tab goes to `lastRoutes.chat`; Plugins goes to `lastRoutes.plu
 1. "New plugin" row with `ChevronDown` → dropdown: "Provider" (`/plugins/new?type=provider`), "Code plugin"
    (`/plugins/new?type=code`).
 2. "Install…" row (`Download` icon) → `ui.openInstall()` (dialog mounted by `pages/plugins.vue`, see 6).
+   Phase 12: "Marketplaces" row (`Store` icon, `plugins-marketplaces`, a link to `/plugins/marketplaces`, 8.13) right
+   after Install… and before Browse; active on that route; a count badge (`data-count`, hidden at 0, the sr-only text
+   "{n} updates available") with the number of installed plugins that have an update in a marketplace
+   (`useMarketplacesStore().updateCount`, loaded with `fetchAll({ maxAgeMs: 60_000 })` when the nav mounts; no network
+   request: the server answers from the stored catalogs). The Installed group's active row (`activePluginId`) skips the
+   reserved ids `new` and `marketplaces` (`RESERVED_PLUGIN_IDS`), so neither page highlights a plugin.
 3. "Browse" group: All, Providers, Tools, MCP servers, Commands, Agents and skills (Phase 10, `Bot` icon: plugins that
    contribute agents or skills), Disabled — each with a count badge from `plugins.counts`; links to
    `/plugins?filter=all|providers|tools|mcp|commands|agents|disabled` (no param = `all`; DECISIONS "UI query
@@ -1531,7 +1706,8 @@ entry has the key `media` and the test id `settings-nav-media`, the Projects ent
 palette lists them too (`go-settings-projects`; Phase 10: `go-settings-customize`, "Customize", added automatically
 because the palette reads `SETTINGS_LINKS`). The wireframes 2.5, 2.7 and 2.10 predate the Projects entry (2.13 shows
 it); 2.17 shows Customize. Phase 11 adds no entry: Customize gains the Output styles and Hooks tabs (9.13), and
-`/settings/customize?tab=output-styles` / `?tab=hooks` keep Customize active.
+`/settings/customize?tab=output-styles` / `?tab=hooks` keep Customize active. Phase 12 adds no entry either: the Import
+from Claude Code dialog opens on Customize (`/settings/customize?import=claude`, 9.14), which keeps Customize active.
 
 ### 5.6 Main header
 
@@ -1617,13 +1793,14 @@ All pages are `ssr: false` SPA routes. C5 creates every page as a stub in Phase 
 | `/plugins` | `pages/plugins/index.vue` | `PageHeader` "Plugins" (search, Install…, New plugin ▾), filter from `?filter=` and `?q=`, `PluginCard` grid | W3.1 |
 | `/plugins/new?type=provider` | `pages/plugins/new.vue` | `ProviderWizard` (`?edit=<id>` edits an existing declarative plugin); without `type` the page shows a Provider / Code plugin chooser | W3.3 |
 | `/plugins/new?type=code` | `pages/plugins/new.vue` | `CodePluginForm` (W3.4 component) | W3.3 (page), W3.4 (form) |
-| `/plugins/[id]` | `pages/plugins/[id].vue` → `PluginDetailView` | `PluginHeader` + tabs from `?tab=`: Overview · Configuration (only with a settings schema) · Source (`PluginSourceTab`: code plugins, and declarative plugins whose files are editable, 8.7) · Logs; `McpServersPanel` inside Overview for `core-mcp` | W3.1 (page), W3.4, W3.5 |
+| `/plugins/marketplaces` | `pages/plugins/marketplaces.vue` → `MarketplacesView` | Marketplaces (Phase 12, ADR-054): the official suggestion, the added marketplaces as chips (a `Select` below `sm`), the selected marketplace's plugins with search and category, install and update through `MarketplaceInstallDialog` (8.13); `?m=<marketplaceId>` (default: All), `?q=`, `?category=`; the static route wins over `[id].vue`, and `marketplaces` is a reserved plugin id | C46 (stub), W12.8 |
+| `/plugins/[id]` | `pages/plugins/[id].vue` → `PluginDetailView` | `PluginHeader` + tabs from `?tab=`: Overview · Configuration (only with a settings schema) · Source (`PluginSourceTab`: code plugins, and declarative plugins whose files are editable, 8.7) · Logs; `McpServersPanel` inside Overview for `core-mcp`; Phase 12: `PluginUpdateBanner` above the tabs while a marketplace offers another version, and a Claude Code plugin shows its `userConfig` on Configuration and has no Source tab (8.13) | W3.1 (page), W3.4, W3.5; W12.9 (Phase 12) |
 | `/settings` | `pages/settings/index.vue` | redirects to `/settings/providers` | W2.5 |
 | `/settings/providers` | `pages/settings/providers.vue` | provider list, key dialog (`?configure=<providerId>` opens it) | W2.5 |
 | `/settings/models` | `pages/settings/models.vue` | default + title model (chat models only), per-provider model tables | W2.5; W6.10 (Phase 6) |
 | `/settings/media` | `pages/settings/media.vue` → `MediaSettings` | "Images and voice": the Images section (image model of the `generate_image` tool) and the Voice section (speech to text, language, read aloud, voice, speed, test voice), 9.9 | C12 (stub), W6.10 |
 | `/settings/projects` | `pages/settings/projects.vue` → `ProjectsSettings` | Projects (Phase 7): the project list with rename, instructions and delete, and the Add project dialog with the folder browser (`?add=1` opens it), 9.10; Phase 8: "Allowed commands…" per project and the global rules section `GlobalAllowlistSection` below the list; Phase 10: "Agents, commands and skills…" per project (links to `/settings/customize?project=<id>`) | C15 (stub), W7.9; W8.11 (Phase 8); W10.12 (Phase 10 menu item) |
-| `/settings/customize` | `pages/settings/customize.vue` → `CustomizeSettings` | Customize (Phase 10, ADR-044 / ADR-045): the sub-agents, slash commands and skills of the user (editable), of a project (read-only, from `.harness/` and `.claude/`), of the plugins and the built-ins, by source, with the editor, the viewer, import and export (9.12); `?tab=agents\|commands\|skills` (default `agents`), `?project=<id>` (default none) | C33 (stub), W10.8 |
+| `/settings/customize` | `pages/settings/customize.vue` → `CustomizeSettings` | Customize (Phase 10, ADR-044 / ADR-045): the sub-agents, slash commands and skills of the user (editable), of a project (read-only, from `.harness/` and `.claude/`), of the plugins and the built-ins, by source, with the editor, the viewer, import and export (9.12); `?tab=agents\|commands\|skills` (default `agents`), `?project=<id>` (default none); Phase 11: `?tab=output-styles\|hooks` (9.13); Phase 12: `?import=claude` opens the Import from Claude Code dialog (9.14), and project rows gain **Edit…** (`ProjectFileEditor`) | C33 (stub), W10.8; W11.8 (Phase 11); W12.10, W12.11 (Phase 12) |
 | `/settings/general` | `pages/settings/general.vue` | display name, send key, defaults, max steps (Phase 7: also in project chats), Alt shortcuts, instructions, password; Phase 9: the Shift+Tab switch and the Agent section (9.11) | W2.5; W7.12 (Phase 7); W9.12 (Phase 9) |
 | `/settings/appearance` | `pages/settings/appearance.vue` | theme cards, reading font, text size, density, expand thinking | W2.5 |
 | `/settings/about` | `pages/settings/about.vue` | versions, license, copy diagnostics | W2.5 |
@@ -1648,7 +1825,11 @@ disabled`; `agents` = "Agents and skills", Phase 10; not `kind`, which is the pl
 `/plugins/new?type=&edit=`, `/settings/providers?configure=`, `/settings/projects?add=1` (Phase 7: opens the Add
 project dialog), `/settings/customize?tab=&project=` (Phase 10: `tab` = `agents | commands | skills`, an unknown value
 reads as `agents`; `project` = a project id, an unknown id is dropped from the URL and shows "No project"; both are
-written back with `router.replace` when the tab or the project select changes), `/login?redirect=`.
+written back with `router.replace` when the tab or the project select changes; Phase 11: `tab` also takes
+`output-styles | hooks`; Phase 12: `import=claude` opens the Import from Claude Code dialog once the page loaded and is
+removed with `router.replace` when the dialog closes, any other value is dropped), `/plugins/marketplaces?m=&q=&category=`
+(Phase 12: `m` = a marketplace id, an unknown one reads as All and is dropped; `q` = the search text; `category` = an
+entry category, an unknown one reads as All; all three written back with `router.replace`), `/login?redirect=`.
 Model refs and project ids never appear in paths (the project filter lives in `localStorage`, 7.20; the Customize page
 takes its project from the query, never from the sidebar filter).
 
@@ -3589,7 +3770,8 @@ variant is a card (`rounded-lg border bg-muted/30 px-3 py-2`).
   "A hook asks you to confirm this call: {reason}" ("A hook asks you to confirm this call" without a reason;
   `tool-approval-hook`, `Webhook`, above the buttons). A hook's `allow` never skips the card in plan mode, for an
   `execute` tool or an `always` policy; the record (and so the badge) still reads `allowed` while the card shows (a
-  known limitation, ARCHITECTURE.md 6.28). In a sub-agent
+  known limitation, ARCHITECTURE.md 6.28; Phase 12 marks such a record `harnessAsked` and the badge reads "Allowed by
+  hook · still asks", 7.34). In a sub-agent
   a hook's `ask` is a denial (sub-agents never ask), which the task block shows as a denied step.
 - The hook part linked by `toolCallId` is what tells a hook denial from a user denial: without it the row reads "Denied"
   as before.
@@ -3753,7 +3935,7 @@ page and its `HooksPanel`, and nested inside `ProjectMcpDialog`; props `projectI
   **MCP servers**, **Commands with shell lines** (the heading reads "{group} · {n}"); each heading has **Select all
   {n}** (`project-trust-select-all`, a
   checkbox for the group's pending items in the current filter; it sits above the items it selects, so they are on
-  screen when it is used).
+  screen when it is used; Phase 12: a partly selected group shows the mixed state, 7.34).
 - **Items** (`ProjectTrustItem`, `project-trust-item`, an `<article>` named "{kind} {label}, {state}" with the kind
   words "Hook", "MCP server" or "Command", e.g. "MCP server memory, New"; `data-kind`, `data-state` `new | changed |
   approved` (`pending` without / with `changed`, or `approved`), `data-key` = the sha256):
@@ -3825,10 +4007,62 @@ approve them."
 - Empty (`project-mcp-empty`): "This project has no .mcp.json."; errors `project-mcp-error` (`data-code`); while the
   list loads, `data-slot="project-mcp-loading"`; a failed load shows **Retry**.
 - `project-mcp.changed` updates the rows (status, tools) of an open dialog.
+- Phase 12 (ADR-056): the footer gains **Edit .mcp.json…** (`data-action="edit-mcp-json"`; also in the empty state,
+  where it creates the file) → the project file editor with kind `mcp` (9.14); a saved server is pending until it is
+  approved here.
 - **Tool rows** of a project server read its name through the project-mcp store (falling back to the server id).
 
 The two dialogs, the chip and the store calls never read `~/.claude`, never show a variable or header value, and never
 approve without the password prompt (when a password is set).
+
+### 7.34 Claude Code ecosystem in the chat (`TaskBlock` colors, qualified names, prompt hooks, mixed select-all; W12.13; Phase 12)
+
+Phase 12 (ADR-053, ADR-057, ADR-058) changes no layout of the chat; it adds these details. Wireframe of the trust
+dialog's mixed state: 2.19.
+
+- **Qualified names** (ADR-053): the commands and skills of a Claude Code plugin are named `<pluginId>:<name>`, with
+  one more segment per command subfolder (`/review-kit:review`, `/review-kit:db:migrate`, at most 128 characters). The
+  slash menu (7.8) lists them under **Plugins** with the full name (`slash-menu-item[data-value="review-kit:review"]`;
+  a name wider than the row is truncated in the middle, the full name in its `title`); typing filters on every segment
+  (`/migrate` finds `/review-kit:db:migrate`). The composer sends what was typed: a bare `/review` also runs the plugin's
+  command when exactly one active entry ends in `:review` and nothing has the bare name (the server resolves it; the
+  menu never lists the bare alias). `CommandBadge`, the custom task block ("Sub-agent review-kit:code-reviewer: …") and
+  the skill row ("Loaded skill review-kit:pdf") show the qualified name; harness plugins keep their bare names. The
+  name patterns of `slash-commands.ts` widen to `CATALOG_NAME_PATTERN`.
+- **Agent colors** (`TaskBlock`, ADR-058): a custom agent with `color` shows an 8px dot before its name in the trigger
+  and a 2px left rule on the open block (`data-slot="task-agent-color"`, `data-value` = the color; `aria-hidden`: the
+  color is decoration, the agent card names it). Colors map to existing tokens only (no new CSS token): `red` →
+  `destructive`, `orange` → `chart-1`, `yellow` → `warning`, `green` → `success`, `blue` → `info`, `cyan` →
+  `chart-2`, `purple` and `pink` → `chart-5` (`AGENT_COLOR_TOKENS`); an agent without a color shows neither.
+- **Allowed by hook, still asks** (ADR-057, `HookData.harnessAsked`): when a `PreToolUse` hook answered `allow` and
+  harness-forge still showed the card (plan mode, a tool with workspace access `execute`, an `always` policy; 6.28 of
+  ARCHITECTURE.md), the record carries `harnessAsked: true` (the outcome stays `allowed`). `ToolHookBadge` then adds
+  `data-state="still-asks"` with the tooltip "Allowed by hook · still asks" and the sr-only text ", allowed by hook, still
+  asks"; the `HookNote` (`data-state="still-asks"`) reads "Allowed by hook · still asks" with the details line
+  "harness-forge still asks for this call (plan mode, a tool that runs commands, or an Always ask policy)." This
+  replaces the v1.7 known limitation (7.31).
+- **Prompt hooks** (ADR-057): a record's `hooks[]` entry with `kind: 'prompt'` names its source "Personal prompt hook" /
+  "Project prompt hook" / "Prompt hook from {plugin}" and adds the model's name ("· Claude Haiku 4.5", from `model`, else
+  nothing); its label is the prompt's first line. The outcomes and lines are the ones of 7.31 (a prompt hook that
+  answered `ok: false` on `Stop` gives "A Stop hook asked the agent to continue"; an unreadable answer gives "A {event}
+  hook failed", whose details read "The model's answer could not be read."). An answer `ok: true` leaves no note.
+- **The five new events** in records: `PostToolUseFailure` notes sit in the failed tool row's body like `PostToolUse`
+  ones ("A PostToolUseFailure hook told the agent: {reason}"); a `PermissionRequest` hook's decision shows on the tool
+  row like a `PreToolUse` one ("Allowed by a PermissionRequest hook" / "Blocked by a PermissionRequest hook: {reason}";
+  `tool-row-hook[data-value]` = `allowed` / `denied`); `PostCompact` records sit right after the compaction divider and
+  show only errors and system messages; `SubagentStart` and `SessionEnd` leave nothing in the chat (a sub-agent's
+  records are never stored; `SessionEnd` runs when the chat is deleted).
+- **Status messages**: a hook's `statusMessage` replaces "Running hook…" / "Running hooks…" while it runs (the
+  transient activity carries it as `label`; with several running hooks, the first label in source order).
+- **Mixed select-all** (`ProjectTrustDialog`, the Phase 11 leftover): a group's **Select all {n}**
+  (`project-trust-select-all`) is `indeterminate` when some but not all of the group's pending items in the filter are
+  selected: it renders its own `Minus` icon for that state through the frozen `Checkbox`'s default slot (its slot props
+  carry `state`; no CCR on `components/ui`), reka sets `aria-checked="mixed"` and `data-state="indeterminate"`, and a
+  click on a mixed box selects every pending item of the group (a second click clears them). `selectAllState(items,
+  selected)` of `project-trust.ts` computes it.
+- **Prompt hooks in the review**: a project prompt hook is a trust item like a command hook (trust item v2); its
+  item shows the prompt in the `pre` (named "Prompt" instead of "Command"), the model ("Model: {model}", else
+  "Model: Hook model") and the timeout; no script refs.
 
 ---
 
@@ -3845,7 +4079,12 @@ approve without the password prompt (when a password is set).
 | Bottom | source badge · "Runs code" badge (outline warning, `Cpu` icon) when `PluginSummary.runsCode`: `kind === 'code'`, a stdio MCP server or (plugin API 1.5.0) command hooks or `` !`cmd` `` lines in a command template (`manifestRequiresTrust`; never for builtins) · contributions summary ("2 providers · 3 tools · 1 MCP server · 2 commands"; Phase 10: "· 2 agents · 1 skill" from `PluginSummary.contributions.agents` / `skills`; Phase 11: "· 1 output style · 2 hooks", always last, hooks = code hooks + command hook handlers, `contributionsSummary`) |
 
 Source badge labels: `builtin` → Core · `created` + declarative → Declarative · `created` + code → Code · `zip` →
-zip · `npm` → npm · `url` → URL · `link` / `copy` → Local. State overlays: `error` → `border-destructive/60` and
+zip · `npm` → npm · `url` → URL · `link` / `copy` → Local; Phase 12: `github` → GitHub · `marketplace` → the
+marketplace's name (from `PluginDetail.origin`, "Marketplace" when unknown). A Claude Code plugin (`format: 'claude'`)
+adds the badge "Claude Code" (outline) after the source badge, and its contributions summary counts its commands,
+agents, skills, output styles, hooks and MCP servers like any plugin's. An installed plugin with an update in a
+marketplace (8.13) shows the badge `plugin-update-available` (`CircleArrowUp`, "Update {version}", `data-version`)
+after the version. State overlays: `error` → `border-destructive/60` and
 the error message (1 line) + "View logs" link (emits `view-logs`; the list opens `/plugins/<id>?tab=logs`);
 `untrusted` → warning badge "Untrusted" + "Review" button (emits `review`; the list opens `TrustDialog`);
 `incompatible` → badge "Incompatible" with tooltip "Needs harness {range}"; `loading` → `Spinner` next to the name;
@@ -3872,10 +4111,19 @@ Empty filter result: `Empty` "No plugins match" + "Clear filters". Loading: 6 sk
 1. **Source** — `Tabs`: **Zip** (dropzone "Drop a .zip here or choose a file", ≤ 20 MB) · **npm** (package name,
    optional version; placeholder `@scope/harness-plugin-name`) · **URL** (https URL of a zip + required
    integrity `sha256-…`/`sha512-…`) · **Local folder** (absolute path on the server + `ToggleGroup` Link /
-   Copy; hint "Link watches the folder and reloads on change"). Primary button: **Inspect**.
+   Copy; hint "Link watches the folder and reloads on change"). Primary button: **Inspect**. Phase 12 (ADR-054): a
+   **GitHub** tab (`install-tab-github`) between URL and Local folder: **Repository** (`install-github-repo`, `owner/repo`;
+   `owner/repo#ref`, `owner/repo@ref` and a `https://github.com/owner/repo` URL are accepted and split by
+   `parseGithubSpec`), **Branch, tag or commit (optional)** (`install-github-ref`, default: the repository's default
+   branch) and **Folder in the repository (optional)** (`install-github-path`, a relative path such as
+   `plugins/commit-commands`); the hint "Downloads an archive of the exact commit over HTTPS. Nothing runs before you
+   review it." Every tab accepts both formats (a harness `plugin.json` or a Claude Code plugin, detected by the server).
 2. **Preview** (`InspectPreview`, from `PluginInspection`): icon, name, version, id, description, kind badge,
    contributions list, network hosts (base URLs, MCP URLs), requested permissions (advisory chips), declared
-   secrets, sha256 (mono + `CopyButton`), warnings (e.g. "Replaces installed version 1.0.0").
+   secrets, sha256 (mono + `CopyButton`), warnings (e.g. "Replaces installed version 1.0.0"). Phase 12: for a Claude
+   Code plugin the format badge, the namespaced names, "Asks for:", the resolved commit and "Ignored" (8.13). Since
+   Phase 12 the preview, trust, password and install steps are one component, `InstallReview` (10.9), shared with the
+   marketplace install dialog, so the fresh-auth flow exists once.
 3. **Trust** (plugins that require trust only: code, a stdio MCP server and, Phase 11, command hooks or `!` lines):
    `TrustWarning` + required checkbox "I trust {source}" (source =
    the file name, package, URL host or folder). When a password is set (`AuthStatus.enabled`) and the session is
@@ -3917,8 +4165,10 @@ saving a stdio MCP server (8.12), creating or saving a declarative plugin whose 
 server, 1.5.0 command hooks or `!` spans; every such save), changing the password (9.4), creating or updating a share
 link (7.14), deleting all data (9.8) and, since Phase 7, adding a project (9.10) and rotating the master key (9.8);
 Phase 11: saving a hook (creating one, or an update that does more than turn it off; turning it on included, 9.13),
-approving project items (7.33) and saving the variables of a project's MCP servers (7.33). Every component follows the
-same rules:
+approving project items (7.33) and saving the variables of a project's MCP servers (7.33); Phase 12: installing or
+updating a plugin whose inspection says `requiresTrust` from any source (a GitHub repository or a marketplace entry
+included, 8.13), scanning the server's Claude Code folder and applying an import (9.14); saving a project definition
+file needs none (it never approves anything, 9.14). Every component follows the same rules:
 
 - `run(task, { required })`: with `required` (the action is known to need fresh auth) and a session that is not fresh
   (`auth.fresh` false), `ConfirmPasswordDialog` opens **first**; otherwise the request runs, and a `403 forbidden` +
@@ -3940,7 +4190,10 @@ same rules:
   the hook import, turning a personal hook on, the trust dialog's Approve and the MCP servers dialog's Save variables
   (always); the provider wizard runs without `required` (a 403 prompts once, and a second refusal is shown as the error
   instead of prompting again). The hook editor asks first for a create and for every edit except one whose only change
-  turns the hook off (`required: !isHookTurnOff(patch)`); an edit without a change closes without a request.
+  turns the hook off (`required: !isHookTurnOff(patch)`); an edit without a change closes without a request. Phase 12:
+  `InstallReview` (the install dialog and the marketplace install / update dialog) when the inspection says
+  `requiresTrust`, the import wizard's scan and apply (always); the project file editor and the hook editor in project
+  mode never ask (their routes are not fresh).
 - The install and trust dialogs keep their inline "Confirm your password" field (`trust-password`): it calls
   `login(password)` (its error text shows under the field, without a countdown), then the request runs through
   `run(send, { required })`; the error alert's **Log in** action calls `confirm()` (the prompt) and then submits again.
@@ -3954,7 +4207,11 @@ same rules:
   (7.14), "Deleting all data needs your password." (9.8), "Adding a project needs your password." (9.10, Phase 7),
   "Rotating the master key needs your password." (9.8, Phase 7), "Saving a hook needs your password." (9.13, Phase
   11; also for an import and for turning a hook on), "Approving project commands needs your password." (7.33, Phase 11),
-  "Saving the variables of this project's MCP servers needs your password." (7.33, Phase 11).
+  "Saving the variables of this project's MCP servers needs your password." (7.33, Phase 11), "Scanning this server's
+  Claude Code folder needs your password." (9.14, Phase 12), "Importing hooks and commands that run on this server
+  needs your password." (9.14, Phase 12, when the selection holds an item that runs commands) and "Importing from
+  Claude Code needs your password." (9.14, Phase 12, every other import); the install and update of a marketplace
+  entry use the install texts above.
 
 After a fresh-auth save of a `created` code plugin the server re-pins its trust automatically (ADR-017). The v1.1 copies
 of this flow (`plugins/code/fresh-auth.ts`, `plugins/detail/fresh-auth.ts`, `share/fresh-auth.ts` and the helpers in
@@ -4099,6 +4356,126 @@ in scope `mcp:<id>`), HTTP (URL, headers), SSE (URL, headers) — and policy `Se
 (default Ask). stdio shows the note "Runs a local command on your server."; saving a stdio server is a fresh-auth
 action (8.4).
 
+### 8.13 Marketplaces and Claude Code plugins (`MarketplacesView`, `MarketplaceInstallDialog`, `InstallReview`, W12.8 / W12.9, Phase 12)
+
+Claude Code plugins (ADR-053) install like any plugin, from every source of the install dialog, and keep their own
+format; **marketplaces** (ADR-054) are catalogs of them (`.claude-plugin/marketplace.json`) added from a GitHub
+repository, a hosted `marketplace.json` URL or a folder on the server. Nothing is fetched by itself: adding a
+marketplace fetches it once, **Refresh** fetches it again, and an update is installed only when the user reviews it.
+Wireframes: 2.19. User guide: `docs/guides/claude-code-plugins.md`.
+
+**Page** (`MarketplacesView`, `marketplaces-page`; `pages/plugins/marketplaces.vue` only mounts it): `PageHeader`
+"Marketplaces" with the description "Browse plugins from Claude Code marketplaces." and the actions **Refresh all**
+(`marketplace-refresh-all`, `RotateCw`, outline; disabled without marketplaces) and **Add marketplace…**
+(`marketplace-add`, `Plus`). On mount `marketplaces.fetchAll({ maxAgeMs: 15_000 })` (`GET /api/marketplaces` → `{
+items, suggestions, updates }`, answered from the stored catalogs, no network); the selected marketplace's entries come
+from `marketplaces.fetch(id)` (`GET /api/marketplaces/:id`), and **All** loads every marketplace's detail (at most 4
+requests at a time, single-flight per id). A skeleton (three entry rows, sr-only "Loading marketplaces…") while it loads;
+a failure shows "Could not load the marketplaces" with the server message and **Retry**.
+
+- **Suggestion** (`MarketplaceSuggestion`, `marketplace-suggestion`): a card "Anthropic's official plugins" with
+  `anthropics/claude-plugins-official` (mono) and **Add marketplace** (`marketplace-suggestion-add`) and a ×
+  (`marketplace-suggestion-dismiss`, named "Dismiss"). It shows while the list's `suggestions` holds it, no marketplace
+  of that repository is added and it was not dismissed (`localStorage['hf-marketplace-suggestion-dismissed']`, wrapped
+  in try/catch). Rendering it sends **no request**; Add runs the add flow below with `{ type: 'github', repo:
+  'anthropics/claude-plugins-official' }`.
+- **Strip** (`MarketplaceStrip`): chips (a `ToggleGroup` named "Marketplace") **All {n}** and one per marketplace
+  (`marketplace-row`, `data-marketplace-id`, `data-state` `ok | error`) "{name} {n}" plus "· {u} updates" (`↥`) when
+  installed plugins of it have updates, a warning icon when its last refresh failed, a spinner while it refreshes
+  (`busyIds`); below `sm` a `Select` replaces the chips. The selected chip writes `?m=`. Under the strip, for one
+  marketplace: its source (`sourceText`: `github.com/<repo>@<sha7>`, the URL's host and path, or the folder path; mono)
+  · "refreshed {relative time}" · its row menu (`marketplace-row-menu`, named "Actions for {name}"): **Refresh**
+  (`marketplace-refresh`) and **Remove…** (`marketplace-remove`). A marketplace whose last refresh failed shows the
+  alert `marketplace-error` (`data-code`) "Could not refresh {name}: {message}" above its last good entries.
+- **Filters**: **Search plugins…** (`marketplace-search`, filters name, description and tags, synced to `?q=`, debounced
+  200 ms) and **Category** (`marketplace-category`, a `Select`: All and the categories of the shown entries,
+  `categoriesOf`, synced to `?category=`).
+- **Entries** (`MarketplaceEntryRow`, `marketplace-entry`, an `<article>` named "{name}, {state}", `data-name`,
+  `data-state` `available | installed | update | unsupported` from `entryState(entry, plugins)`), sorted by name: line 1
+  the name (mono), the version, the category, then on the right the state and its action: **Install…**
+  (`marketplace-entry-install`, named "Install {name}") for `available`; "Installed" and **Open** (a link to
+  `/plugins/<id>`) for `installed`; "Installed · Update to {version}" and **Update…** (`marketplace-entry-update`, named
+  "Update {name}") for `update`; "Unsupported source ({type})" with the reason as its description for `unsupported`
+  (a non-GitHub git host, a `command` source, an npm entry with its own registry; no button). Line 2: the description,
+  the tags and the source ("GitHub {repo}", "npm {package}", "Archive {host}", "In this marketplace" for a relative
+  path). "All" lists every marketplace's entries with the marketplace name in line 2.
+- **Empty states** (`marketplace-empty`): no marketplace "No marketplaces yet. Add one from GitHub, a marketplace.json
+  URL or a folder on this server." (with **Add marketplace…**, `data-action="add"`); no matching entry "No plugins
+  match" with **Clear filters**; a marketplace without entries "{name} lists no plugins."
+- **Updates**: the list's `updates` (`PluginUpdate`, API.md: the plugin id, its marketplace and the offered version or
+  commit; computed by the server after a refresh: the entry's version differs from the installed one, else the commit)
+  drive the entry
+  state, the chip counts, the nav badge (5.4), the card badge (8.1) and the detail banner (below). `marketplace.changed`
+  and `plugin.changed` events refresh the store (`applyEvent`).
+
+**Add** (`MarketplaceAddDialog`, `marketplace-add-dialog`, a form dialog): title "Add marketplace"; the source
+`ToggleGroup` (`marketplace-add-source`, `data-value` `github | url | folder`: "GitHub", "URL", "Folder on this server");
+the input (`marketplace-add-input`, label "GitHub repository, marketplace.json URL or a folder on this server",
+placeholder `owner/repo#ref`, `https://example.com/marketplace.json` or `/srv/marketplaces/acme`); text that
+`parseMarketplaceInput` recognizes as another kind switches the toggle; an unusable value shows "Enter owner/repo, an
+https URL or an absolute folder path." under the input. **Add** (`marketplace-add-submit`, a spinner while it runs) →
+`marketplaces.add(source)` (`POST /api/marketplaces`: the server fetches it at once and stores nothing on failure; no
+fresh auth, adding reads a catalog and runs nothing) → toast "Added {name}", the dialog closes and the page selects the
+new marketplace. Errors (`marketplace-add-error`, `data-code`, the server message as is): 409 `conflict` reason `exists`
+(the name is already added, or 50 marketplaces exist) or `offline` (`HF_OFFLINE=1` with a GitHub or URL source), 404
+(no repository, ref or `.claude-plugin/marketplace.json` there), 413 (a `marketplace.json` over 1 MiB), 429
+`rate_limited` (GitHub's 60 requests per hour; "Try again in {n} min" from `retryAfterMs`), 502 (the host failed), 400
+(an invalid file, or a reserved name such as `claude-plugins-official` from outside `anthropics/*`).
+
+**Refresh and remove**: **Refresh** (`POST /api/marketplaces/:id/refresh`) and **Refresh all** (one marketplace after
+the other) show a spinner on the chips and a toast only on failure ("Could not refresh {name}: {message}"; offline: the
+server's message). **Remove…** opens a `ConfirmDialog` "Remove {name}?" with "Removing a marketplace keeps the plugins
+you installed from it." and **Remove** (`marketplace-remove-confirm`, destructive) → `DELETE /api/marketplaces/:id` →
+toast "Removed {name}"; the page falls back to All. Plugins installed from it keep working; their card shows the
+marketplace name until they are reinstalled.
+
+**Install and update** (`MarketplaceInstallDialog`, `marketplace-install-dialog`, `data-mode` `install | update`): title
+"Install {name}" / "Update {name}"; it inspects at once (`POST /api/plugins/inspect` with `{ source: 'marketplace',
+marketplaceId, plugin }`; a spinner "Downloading {name}…"), then renders `InstallReview` (10.9) with the inspection:
+the preview, the trust consent and the password field when the plugin runs anything, and **Install** / **Update**.
+`installed(pluginId)` closes it with the toast "Installed {name}" / "Updated {name} to {version}" (a `defaultEnabled:
+false` plugin: "Installed {name}. It's turned off until you turn it on."). An update is a new review: the trust pin is
+renewed only through the consent, and an unchanged file tree reads "{name} is up to date." (no install). A 409 `stale`
+(the files changed between inspect and install) re-inspects once and shows "The plugin changed while you reviewed it.
+Review it again."; errors show inline (`InstallReview`'s alert, `data-code`).
+
+**The Claude Code preview** (`InspectPreview` additions, also in the install dialog of 8.3): for `format: 'claude'`
+the badge "Claude Code plugin" (`data-slot="install-format"`, `data-value="claude"`); the source line with the resolved
+commit for GitHub sources ("Resolved commit {sha7}", `data-slot="install-commit"`, mono; the full sha in its title); the
+namespace line "Commands run as /{plugin}:{command}." ("Agents start as {plugin}:{agent}." when it has agents;
+`data-slot="install-namespace"`); **Asks for:** (`data-slot="install-user-config"`): the `userConfig` titles, "(secret)"
+after a sensitive one and "(required)" after a required one; **Ignored:** (`data-slot="install-ignored"`): each
+unsupported part with its reason ("LSP servers aren't supported", "Never run", "http hook handlers aren't supported",
+"Unknown hook event", "Needs a project folder" for an MCP server that uses `${CLAUDE_PROJECT_DIR}`); "This plugin
+installs turned off." when `defaultEnabled` is false. "Runs these commands" (`trust-run-commands`, 8.4) lists
+`claude.executables` (every command hook, every stdio MCP server and every `!` span, each with its source line:
+"PostToolUse hook", "MCP server {name}", "/{plugin}:{command}"), and the warnings include "The files are pinned as a
+whole: editing any file of the plugin asks for your trust again." when it runs anything. A pure-markdown plugin (only
+commands, agents, skills, styles, prompt hooks or http MCP servers) needs no trust and no password.
+
+**Installed Claude Code plugins** (detail page, 8.7 – 8.9): the header adds the "Claude Code" badge and the origin
+("From {marketplace}", "GitHub · {repo}@{sha7}"); the menu has no Edit in wizard; there is no Source tab (the files are
+not editable in v1.8); **Overview** lists the contributions with their qualified names (`/review-kit:review`,
+`review-kit:code-reviewer`, `review-kit:pdf`), the plugin's hooks (`PluginHookList`, prompt hooks with `data-kind`
+`prompt`) and MCP servers, and a **Claude Code plugin** section (`data-slot="plugin-claude-info"`) with the raw version,
+the ignored parts and the diagnostics; **Configuration** renders the `userConfig` options as the plugin's settings
+(`SchemaForm`: a sensitive option is a secret field, a `directory` / `file` option a text field with the hint "(absolute
+path on the server)"); saving them reloads the plugin so the values reach its MCP servers and hooks. An untrusted Claude
+Code plugin (a file changed, or an update) shows the usual banner and `TrustDialog`, which lists the plugin's
+executables.
+
+**Update banner** (`PluginUpdateBanner`, `data-slot="plugin-update-banner"`, above the tabs while
+`marketplaces.updateOf(pluginId)` is not null): "Version {version} is available from {marketplace}." ("A newer commit is
+available from {marketplace}." without a version) and **Update…** (`plugin-update`) → `MarketplaceInstallDialog` in
+update mode.
+
+**Offline** (`HF_OFFLINE=1`): adding or refreshing a GitHub or URL marketplace and installing from a GitHub or
+marketplace source answer 409 `offline` (a folder marketplace still works); the page still lists the stored catalogs,
+and the errors show the server's message.
+
+**What the pages never do**: fetch anything before a click (the suggestion included), refresh on a timer, install or
+update without a review, read `~/.claude/plugins`, or run anything a plugin brings before its trust pin.
+
 ---
 
 ## 9. Settings UX spec
@@ -4192,7 +4569,7 @@ except dialogs and text fields, which save on blur or Enter.
 | Max steps in project chats | `Input` (`inputmode="numeric"`) 1–200 (Phase 7, `settings-project-max-steps`), help "Agent runs in project chats can take more steps (1–200)." | `projectMaxSteps` |
 | Alt shortcuts | `Switch` "Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate and Alt+C for changes." (Phase 6 added Alt+V, Phase 8 Alt+C) | `altShortcuts` |
 | Shift+Tab switches the permission mode | `Switch` (Phase 9, `settings-shift-tab-modes`), help "In the composer, Shift+Tab cycles Ask, Accept edits and Plan. Off: Shift+Tab moves focus." | `shiftTabModes` |
-| (section) Agent | `AgentSettingsSection` (Phase 9, 9.11): automatic compaction, compaction model, sub-agent model, sub-agent max steps; Phase 10: save approved plans, plan folder; mounted between the Chat fields and Custom instructions | `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps`; Phase 10: `planFiles`, `planDirectory` |
+| (section) Agent | `AgentSettingsSection` (Phase 9, 9.11): automatic compaction, compaction model, sub-agent model, sub-agent max steps; Phase 10: save approved plans, plan folder; Phase 12: hook model, Claude model names; mounted between the Chat fields and Custom instructions | `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps`; Phase 10: `planFiles`, `planDirectory`; Phase 12: `hookModelRef`, `modelAliases` |
 | Custom instructions | `Textarea` ("Sent with every chat"; Phase 10: `/remember` can append a line to it, 7.30, so the field shows the stored value again after a `settings` update from the dialog) | `instructions` |
 
 Both step fields save on blur or Enter and Esc restores the saved value; an invalid value shows "Enter a whole number
@@ -4287,8 +4664,9 @@ one; a failed chat does not stop the others."
   reads "General and appearance settings, and your personal agents, commands, skills and output styles. A personal
   definition you already have with the same name is kept; commands with shell lines come back turned off."); the result
   panel adds "{n} personal definitions restored · {k} kept · {f} failed" ("1 personal definition restored"; zero kept
-  and failed counts left out; Phase 10 read "{n} agents, commands and skills restored"; the result carries no count of
-  the commands that came back turned off; `data-slot="data-import-customizations"`) when the result carries
+  and failed counts left out; Phase 10 read "{n} agents, commands and skills restored"; in v1.7 the result carried no
+  count of the commands that came back turned off; Phase 12 adds it, 9.14; `data-slot="data-import-customizations"`)
+  when the result carries
   `customizations`, and a restore of at least one definition refetches the loaded customization lists
   (`customizations.refreshLoaded()`). The server's import warnings about definitions speak of "personal definitions"
   (output styles included; e.g. "No personal definitions were restored: …");
@@ -4555,7 +4933,7 @@ not load the projects" with **Retry**.
 ### 9.11 Agent settings (`AgentSettingsSection`, W9.12, Phase 9)
 
 `AgentSettingsSection` (`components/settings/agent/`, no props, no emits) is a `SettingsSection` "Agent" with the
-description "Long chats, sub-agents and plans." (Phase 9: "Long chats and sub-agents."), mounted by `GeneralSettings` between the Chat fields and Custom instructions
+description "Long chats, sub-agents and plans." (Phase 9: "Long chats and sub-agents."; Phase 12: "Long chats, sub-agents, plans and hooks."), mounted by `GeneralSettings` between the Chat fields and Custom instructions
 (wireframe 2.16). It reads and writes the settings store through `settings.update` (optimistic, rolled back with an
 error toast like every General field) and loads the model catalog on mount when nothing loaded it yet (the selects
 and the warning read it). The Shift+Tab switch lives in the General list itself (9.4), right after Alt shortcuts.
@@ -4568,6 +4946,8 @@ and the warning read it). The Shift+Tab switch lives in the General list itself 
 | Sub-agent max steps | `Input` (`inputmode="numeric"`) 1–200, the save and validation rules of Max steps (blur or Enter saves, Esc restores, "Enter a whole number from 1 to 200."), help "How many tool calls one sub-agent may chain (1–200)." (Phase 10: it bounds background agents too) | `subagentMaxSteps` (default 30) | `settings-subagent-max-steps` |
 | Save approved plans (Phase 10, ADR-047) | `Switch`, help "When you approve a plan in a project chat, it's saved as a Markdown file in the project." | `planFiles` (default off) | `settings-plan-files` |
 | Plan folder (Phase 10) | mono `Input` (placeholder `.harness/plans`, at most 200 characters), disabled while Save approved plans is off; help "A folder inside the project. Files are named by date and plan title."; saves on blur or Enter, Esc restores the saved value; checked with the shared settings schema (`settingsSchema.shape.planDirectory`: a relative path without `..` segments, without a `.git` segment, not absolute, not empty): "Use a folder inside the project, like .harness/plans." and "Use at most 200 characters."; a 400 from the server shows the same texts inline and keeps the saved value; any other failure restores the saved value with an error toast; turning Save approved plans off drops an unsaved draft and its error | `planDirectory` (default `.harness/plans`) | `settings-plan-directory` |
+| Hook model (Phase 12, ADR-057) | `SettingsModelSelect` (chat models) with `allowNone` "Automatic (the provider's small model)", help "Answers prompt hooks that don't name a model. Automatic uses the small model of the chat's provider, else the chat's model." | `hookModelRef` (null = automatic) | `settings-hook-model` |
+| Claude model names (Phase 12, ADR-058) | four `SettingsModelSelect`s (chat models), labelled `sonnet`, `opus`, `haiku` and `fable` (mono), each with `allowNone` "Not set"; the group's help "Agents, skills and hooks from Claude Code can name a model as sonnet, opus, haiku or fable. Choose the model each name runs. A name that isn't set uses the default model, with a note in the chat."; one write per change, `settings.update({ modelAliases: { …current, [name]: ref } })` | `modelAliases` (`{ sonnet, opus, haiku, fable }`, each null by default) | `settings-model-alias` (`data-name`) |
 
 - A model that no longer exists in the catalog shows the selects' usual unavailable state; the server then falls back
   to the chat's model (the compaction logs a warning; ARCHITECTURE.md 6.18, 6.22).
@@ -4587,7 +4967,8 @@ They come from four **sources**, lowest precedence first: built-in < plugins < p
 database) < the project (`.claude/{agents,commands,skills}`, then `.harness/…`, which wins). A higher source wins a
 name; the losers stay listed as **shadowed**. Wireframes: 2.17. User guide: `docs/guides/customizing-agents.md`.
 Phase 11 adds the **Output styles** and **Hooks** tabs and new skill and command fields (9.13); the built-in command
-rows gain `/output-style`.
+rows gain `/output-style`. Phase 12 adds the Import from Claude Code dialog, **Edit…** on project rows (the project file
+editor), the Prompt hook type, the new events and the new frontmatter fields (9.14).
 
 `CustomizeSettings` (`customize-settings`) in the usual `SettingsPage` frame: the page (`pages/settings/customize.vue`)
 renders the `PageHeader` "Customize" with the description "Sub-agents, slash commands and skills: yours, your projects'
@@ -4751,8 +5132,10 @@ restored row's menu trigger.
 - Plugins: the section is hidden when empty.
 
 **What the page never does**: edit or create files in a project (project definitions are read-only in the UI; edit
-them in the repository), read `~/.claude` or any folder outside the project, or let a definition change the permission
-mode, approve a tool or add a shell rule (a definition's tool list only narrows).
+them in the repository; Phase 12 lifts this: **Edit…** on a project row opens the project file editor, 9.14), read
+`~/.claude` or any folder outside the project (Phase 12: only the Import from Claude Code dialog reads a `.claude`
+folder, the one the user picks or the server's `HF_CLAUDE_HOME`, 9.14), or let a definition change the permission mode,
+approve a tool or add a shell rule (a definition's tool list only narrows).
 
 ### 9.13 Customize: Output styles and Hooks (`/settings/customize?tab=output-styles|hooks`, W11.8, Phase 11)
 
@@ -4840,7 +5223,7 @@ out while the folder is unavailable); `CustomizeSettings` fetches the list with 
   ("Personal", "Project", the plugin name) · "timeout {n}s" · the path (a code hook: "Code hook"), then the state badge
   (`data-slot="hook-row-state"`: project rows **Approved** / **Needs approval**; **Off**; **Invalid**; **Off on this
   server** for `blocked`; the command hooks of a plugin that waits for trust are not listed in v1.7 — the plugin detail
-  page shows them; the "Plugin not trusted" row is backlog). Every row lists its error
+  page shows them; Phase 12 lists them as `pending` plugin rows with **Plugin not trusted**, 9.14). Every row lists its error
   and warning diagnostics under it (`data-slot="hook-row-diagnostics"`, a list named "Problems in this {event} hook",
   errors first). Menu (`hook-row-menu`, "Actions for {event} hook"): personal **Edit…** (`hook-edit`) · **Duplicate**
   (`hook-duplicate`) · **Turn off** / **Turn on** (`hook-toggle`, `data-state`) · **Copy as JSON** (`hook-copy-json`) ·
@@ -4894,8 +5277,187 @@ Errors (`hook-import-error`): "This isn't valid JSON." · "No hooks found." **Ad
 prompt → toast "Added {n} hooks" ("Added 1 hook"). A failure partway shows `data-slot="hook-import-submit-error"`
 (`data-code`) with "Added {n} hooks" so far; a retry skips the ones already created. Mod+Enter adds.
 
-**What the page never does**: write a project's settings files (they are edited in the repository), read `~/.claude`,
-run a hook, or show a hook's output (records live in the chats, 7.31; `GET /api/hooks/runs` has no screen in v1.7).
+**What the page never does**: write a project's settings files (they are edited in the repository; Phase 12: the hook
+editor in project mode writes the `hooks` key of one settings file, 9.14), read `~/.claude`, run a hook, or show a
+hook's output (records live in the chats, 7.31; `GET /api/hooks/runs` has no screen in v1.7 or v1.8).
+
+### 9.14 Import from Claude Code, project files and hook additions (`/settings/customize?import=claude`, W12.10 – W12.12, Phase 12)
+
+Phase 12 (ADR-055 … ADR-058) adds no page and no nav entry. Customize gains the **Import from Claude Code** dialog, an
+editor for a project's definition files and hooks, the Prompt hook type and the five new events, and new frontmatter
+fields; Settings → General → Agent gains the hook model and the Claude model names (9.11); Settings → Data gains a link
+to the import and the turned-off count. Wireframes: 2.19. User guides: `docs/guides/claude-code-import.md`,
+`docs/guides/hooks-and-project-mcp.md`.
+
+**Import from Claude Code** (`ClaudeImportDialog`, `claude-import-dialog`, `data-step` `source | preview | result`;
+mounted by `pages/settings/customize.vue`, which owns the header, so the frozen `create()` / `import()` exposes of the
+tabs stay unchanged). Entry points: the Customize header action **Import from Claude Code…** (`customize-import-claude`,
+`FolderDown`, outline, on every tab, after **Import…**) and Settings → Data's link **Import from Claude Code…**
+(`data-import-claude`, in the Import section, → `/settings/customize?import=claude`). A dialog on desktop (`max-w-2xl`),
+full screen below `sm`, with a sticky footer. The step heading ("Step {n} of 3" as text, then the step's title) takes
+focus on every step change.
+
+1. **Source** (`ClaudeImportSource`, a `RadioGroup` named "Where is your .claude folder?", `claude-import-source`
+   with `data-value` `folder | zip | server`):
+   - **Choose your .claude folder…** (default): a visually hidden folder input (`claude-import-folder-input`,
+     `webkitdirectory`) and the optional **+ .claude.json (MCP servers)** file input (`claude-import-config-input`,
+     `.json`; `~/.claude.json` sits next to the folder, not in it). The browser keeps only the allowlisted paths
+     (`pickClaudeFiles`: the shared `isClaudeHomeImportPath`, relative to the picked folder; per-file and total caps of
+     `CLAUDE_HOME_LIMITS`) and never reads anything else; the line under it reads "{n} files picked" ("Nothing to import
+     in this folder." when none matches).
+   - **Upload a zip…** (`claude-import-zip-input`, `.zip`, at most 32 MiB): the zip of a `.claude` folder; the browser
+     sends it as is (it never opens a zip) and the server reads only the allowlisted entries.
+   - **Scan {path} on this server** (the radio `claude-import-source[data-value=server]`; the line under it is
+     `claude-import-scan`, `data-state`; `{path}` from `GET /api/claude-import/home`): enabled when `available`; else
+     disabled with its reason: "Scanning is turned off on this server (HF_CLAUDE_HOME=0)."
+     (`disabled`), "There is no .claude folder at {path}." (`missing`), "harness-forge can't read {path}."
+     (`unreadable`).
+   - The note "Only agents, commands, skills, output styles, settings.json, CLAUDE.md and the mcpServers of .claude.json
+     are read." and **Continue** (`claude-import-continue`, disabled until the choice has something to send) →
+     `useClaudeImport().planFromFiles(files, claudeJson)` / `planFromZip(file)` (`POST /api/claude-import/upload`,
+     multipart, no side effects) or `scanServer()` (`POST /api/claude-import/scan`, **fresh auth**: "Scanning this
+     server's Claude Code folder needs your password."). Errors show inline (`claude-import-error`, `data-code`: 413
+     "The upload is larger than 32 MiB.", 409 `disabled`, the server message otherwise).
+2. **Preview** (`ClaudeImportPreview`, `claude-import-preview`): "Found {n} items" (a polite live region) and the plan's
+   groups in this order, each a `ClaudeImportGroup` (`claude-import-group`, `data-kind`, `data-count`; heading "{group}
+   · {n}" plus a warning icon when it holds items that run commands) with **Select all {n}**
+   (`claude-import-select-all`, tri-state through `groupState`): Agents, Commands, Skills, Output styles, Hooks, MCP
+   servers, Allowed shell commands (`shell-rule`), Denied tools (`tool-deny`), Instructions, Settings, then
+   **Unsupported** (`unsupported` and `invalid` items, never selectable: the reason as text, e.g. "Read(./secrets/**) ·
+   Only allowed Bash commands are imported.", "apiKeyHelper · Never run.", "enabledPlugins · Install plugins from
+   Plugins → Marketplaces."). Each item (`ClaudeImportItem`, `claude-import-item`, `data-kind`, `data-status`,
+   `data-name`) has a checkbox (`claude-import-select`; checked by `defaultSelection`: `new` items and `update` items
+   whose default is not skip), the name, the source file (mono, "linked" when the scan followed a link), the summary
+   and its status word: **New**, **Replaces yours** (`update`), **Unchanged** (no checkbox), **Conflict**,
+   **Unsupported**, **Invalid** (words, never color alone). `update` and `conflict` items get a resolution `Select`
+   (`claude-import-resolution`): **Keep mine** (skip), **Replace** (overwrite; not for a built-in name) and **Import as
+   {renameTo}** (rename). Items that run commands (command hooks, commands with `!` lines, stdio MCP servers) show
+   "Imported turned off: it runs shell lines." (MCP: "Imported turned off: it starts a program.") and a switch **Turn on
+   after import** (off by default; `enable`). MCP servers that need values show "Needs {names}" and an input per name
+   (values are sent only with the apply and never shown again); a per-project server of `.claude.json` reads "From the
+   project {path}: imported turned off." The **Instructions** item (`CLAUDE.md`) has the select
+   `claude-import-instructions-mode` **Append** (default) / **Replace** / **Skip**; a `CLAUDE.md` already contained in
+   the instructions is Unchanged. The footer: "Includes {n} items that run commands on this server." (when any is
+   selected), **Back** (`claude-import-back`) and **Import {n} items** (`claude-import-submit`, `data-count`; "Import 1
+   item"; never the default button) → `apply(planId, selection)` (`POST /api/claude-import/apply` with the plan id, the
+   item keys, actions, rename targets, `enable` flags, the instructions mode and the variables; **fresh auth**, prompt
+   from `needsFreshAuth`: "Importing hooks and commands that run on this server needs your password." when an item that
+   runs commands is selected, else "Importing from Claude Code needs your password."). A 404 (the plan expired after
+   10 minutes) shows "This preview expired. Start again." with **Start again** (back to step 1).
+3. **Result** (`ClaudeImportResult`, `claude-import-result`): "Imported {n} items · {s} skipped · {f} failed" (zero
+   counts after the first left out), "{t} commands turned off (they run shell lines)" when any, the failed items with
+   their messages, then **Open Customize** (the first imported kind's tab), **MCP servers** (when servers were
+   imported; → Plugins → Core MCP) and **Close**. The page refetches the catalog, the hooks, the shell rules and the
+   settings (one `customization.changed` and one `hooks.changed` arrive anyway); `imported` is emitted.
+
+Closing the dialog drops its state (the server's plan expires by itself); `?import=claude` is removed. The dialog never
+parses a zip, never reads paths outside the allowlist and never receives a file's content or an env / header value
+back (the plan DTO carries names, statuses and summaries only).
+
+**Project files** (ADR-056; `ProjectFileEditor`, `project-file-editor`, `data-kind` `agent | command | skill | style |
+mcp`, `data-path`): a right-side sheet (`w-full sm:max-w-2xl`, sticky footer) titled "Edit {file}" ("New {kind} in
+{project}" for a new file) that edits the **raw** file, so unknown keys survive byte for byte:
+
+- **Opened from**: **Edit…** on project rows of Agents, Commands, Skills and Output styles (`customization-edit` with
+  `data-source="project"`, after Review… in the row menu), **Edit** in the viewer's footer (the new `edit` emit of
+  `CustomizationViewer`), **New file…** in a project section's heading (`data-action="new-project-file"`: the editor
+  in new mode with a **Folder** select `.harness` / `.claude` and a **Name**, the path `<folder>/<kind folder>/<name>.md`
+  or `<folder>/skills/<name>/SKILL.md`), and **Edit .mcp.json…** in the project's MCP servers dialog (7.33,
+  `data-action="edit-mcp-json"`; kind `mcp`, the `mcpServers` object as JSON).
+- **Body**: the path (mono) with **Copy path**, the `MarkdownEditor` (`project-file-content`; plain text for JSON),
+  then the parsed summary ("Agent reviewer · Not allowed: Bash · Max turns 12 · Purple"; for `mcp` "{n} servers") and
+  the diagnostics of the shared parsers as lint markers and a list (errors block saving; warnings and info do not),
+  then the note "Saving never approves hooks or shell lines."
+- **Save file** (`project-file-save`; Mod+Enter) → `customizations.saveProjectFile(projectId, { path, expectedSha256,
+  content | mcpServers })` (`PUT /api/projects/:id/definitions/file`; no fresh auth; allowed while a chat of the
+  project runs). Success: the toast "Saved {path}." or, when the answer's `trust.pending` is above 0, "Saved {path}. {n}
+  items need your approval." ("1 item needs …") with the action **Review** (emits `review(sha256?)`; the page opens
+  `ProjectTrustDialog` focused on the first pending item); the sheet closes and the catalog of the project refreshes
+  (the server's `workspace.changed { source: 'user' }` drops its caches).
+- **Conflict** (409 `conflict` reason `stale`: the file changed on disk after it was opened, or a new file exists now):
+  the alert `project-file-conflict` (`role="alert"`, takes focus) "{file} changed on disk after you opened it." with
+  **Load from disk** (`project-file-reload`: drops the edits and reloads) and **Overwrite** (`project-file-overwrite`:
+  reads the current sha256 and saves the text again with it); keeping on editing is the third choice.
+- **Errors** (`project-file-error`, `data-code`): 400 `validation_error` with diagnostics (shown as above), a refused
+  path (a link on the path, `.git`, a secret-looking name: the server message), 404 (the project or, for an edit, the
+  file is gone: "This file no longer exists." with **Close**). There is no busy state: saving is allowed while the agent
+  runs (the file lock and the sha check protect the write).
+- **Delete…** (project definition rows; `customization-delete` with `data-source="project"`) → `ConfirmDialog`
+  "Delete {path}?" with "The file is removed from the project folder. It can't be undone here." and **Delete file**
+  (`customization-delete-confirm`) → `DELETE /api/projects/:id/definitions/file?path&expectedSha256` (a skill folder
+  left empty is removed; a 409 `stale` shows the conflict text as a toast). Settings files and `.mcp.json` are never
+  deleted.
+- **Closing with changes** asks "Discard changes?" (`project-file-discard-confirm`).
+
+**Hooks tab additions** (`HookEditor`, `HookRow`, ADR-057):
+
+- **Type** (`hook-type`, a `ToggleGroup` named "Type", `data-value` `command | prompt`) above Event: **Command** (the
+  Phase 11 fields) or **Prompt**: the field **Prompt** (`hook-prompt`, a `Textarea`, 2 → 8 rows, at most 16,384
+  characters; help "The model reads this with the event as JSON. $ARGUMENTS marks where the JSON goes; without it, the
+  JSON is added at the end."), an optional **Model** (`SettingsModelSelect`, `allowNone` "Hook model"), the line "Runs
+  with {model} (Settings → General → Hook model). It answers ok, or not ok with a reason.", **Continue on block** (a
+  `Switch`, PreToolUse and PostToolUse only; help "The reason goes back to the agent as feedback instead of ending the
+  turn.") and **Timeout** (default 30 s). The warning reads "A prompt hook asks a model about every matching event,
+  using tokens each time. Its answer can block a call or make the agent continue, never allow one." A prompt hook on
+  an event that does not take one shows "Prompt hooks work only for {events}." (the seven events of ADR-057) and cannot
+  be saved.
+- **Events**: the Event select lists the **13** events in `HOOK_EVENTS` order with their descriptions (15);
+  `PostToolUseFailure` and `PermissionRequest` take the Tools matcher (`HOOK_EVENT_INFO.toolMatcher`), `SubagentStart`
+  and `SubagentStop` an **Agent types** matcher (help "Agent type names separated by |, like explore|general. Leave it
+  empty for every sub-agent."); `PostCompact` keeps a stored trigger matcher (`manual` / `auto`) and `SessionEnd` a
+  reason matcher (always `other` in v1.8) without a field, like the other non-tool events.
+- **Handler fields** (ADR-057): for command hooks **Arguments** (`args`, one per line, at most 64; when set the command
+  runs without a shell string of its own: each word is quoted) and **Run in the background** (`async`, a `Switch`: the
+  hook cannot block or add context); for both types **Only when** (`if`, mono, tool events only, at most 512
+  characters; help "A tool name or a Bash rule such as Bash(npm run *). Other rules never run.") and **Status message**
+  (`statusMessage`, at most 200 characters, shown while the hook runs). They are also shown read-only for project and
+  plugin rows.
+- **Project mode** (`mode: 'project'`, `target: ProjectHookTarget`): **Edit…** on a project hook row (`hook-edit`) opens
+  the editor on that handler of its settings file; **New hook** with a project selected offers **Where** (`Personal` /
+  the project's four settings files); **Delete…** (`hook-delete`) removes the handler. Saving goes through
+  `hooks.saveProjectHook` (`GET` the file, splice the handler into its `hooks` key, `PUT` with `expectedSha256`; other
+  keys and their order are kept); no password; the result is pending until approved ("Saved {path}. {n} items need your
+  approval." with **Review**); a 409 `stale` shows "{file} changed on disk after you opened it." with **Load from disk**
+  / **Overwrite** inside the editor.
+- **Untrusted plugin rows**: the hooks a harness plugin that waits for trust declares (`contributes.hooks`) are listed
+  as `pending` plugin rows (`hook-row[data-source=plugin][data-state=pending]`) with the badge **Plugin not trusted**
+  and the menu item **Review plugin…** (`data-action="trust-plugin"`, opens `TrustDialog` for that plugin); before
+  Phase 12 they were not listed. An untrusted Claude Code plugin's hooks are shown on its plugin page (its
+  executables), not in this list (backlog).
+- **Project diagnostics**: the project section's alert now also lists `unknown-event` and `unsupported-type`
+  (info-level) items ("{file}: The hook event PreModelSwitch isn't supported.", "{file}: http hooks aren't supported.").
+- **Rows**: a prompt hook shows `MessageSquareText` and its prompt's first line instead of the command
+  (`data-kind="prompt"`); `async` rows add "In the background"; a row with `if` adds "Only when {rule}".
+- **Hook import** (9.13): prompt handlers are imported too (no "Ignored: "prompt" hooks aren't supported." note any
+  more), and so are the five new events and the handler fields; `http`, `mcp_tool` and `agent` handlers are listed as
+  "Ignored: {type} hooks aren't supported."
+
+**Customize editor fields** (`CustomizationEditor`, ADR-058; the shared `formatDefinition` writes a key only when it is
+set):
+
+| Field | Kinds | Control and copy |
+|---|---|---|
+| Tools not allowed (`customization-disallowed-tools`) | agents; commands and skills ("Tools not allowed in this turn") | the `ToolMultiSelect` of 9.12, help "Removed after the allowed tools. A rule with arguments, like Bash(rm *), removes the whole tool." |
+| Max turns (`customization-max-turns`) | agents | `Input` (`inputmode="numeric"`, 1–200), help "At most this many steps; the sub-agent step limit still applies." |
+| Color (`customization-color`) | agents | `Select` of the eight colors with their dots, "None" first, help "Marks this agent's runs in the chat." |
+| Skills (`customization-skills`) | agents | a multi-select of the catalog's skills (at most 5), help "Loaded into the sub-agent's instructions when it starts." |
+| When to use (`customization-when-to-use`) | commands, skills | `Textarea`, help "Added to the description the agent reads." |
+| Run in a sub-agent (`customization-fork`) | skills, commands | `Switch` (`context: fork`), help "The skill runs as a sub-agent and only its report comes back." |
+| Agent (`customization-fork-agent`) | skills, commands (with Run in a sub-agent) | `Select` of the agent types, default `general` |
+| Allowed tools, Model | skills | as for commands (9.12) |
+
+The body help adds "$ARGUMENTS[0] or $0 is the first argument when the file uses them or declares arguments; $name
+reads a named argument; ${CLAUDE_SKILL_DIR} is the skill's folder." Row meta adds the color dot for agents and
+"Runs in a sub-agent" for fork skills; ignored keys keep the info diagnostic "Ignored: permissionMode, hooks".
+
+**Settings → Data** (W12.10): the Import section gains the link **Import from Claude Code…** (`data-import-claude`)
+with the line "Agents, commands, skills, hooks and MCP servers from a Claude Code folder."; the result panel adds
+"{t} commands turned off (they run shell lines)" (`data-slot="data-import-turned-off"`, from
+`DataImportResult.customizations.turnedOff`; "1 command turned off …"; nothing when 0).
+
+**What these pages never do**: approve anything when they save (a saved hook, server or `!` command is pending until
+the trust dialog's Approve), read a `.claude` folder the user did not pick or the server's `HF_CLAUDE_HOME`, show a
+file's content or a secret from the import, or write outside `.claude/`, `.harness/` and `.mcp.json` of the project.
 
 ---
 
@@ -5121,6 +5683,18 @@ import sections), W10.9 (`ChatComposer`, `SlashMenu`, `SlashArgumentHint`, `Reme
 `chat/background/**`), W10.11 (`chat/agent/**`, `chat/parts/**`, `ChatMessage`, `ChatTranscript`, `UserMessageBubble`,
 `MessageActions`, `chat-format`, the share rendering files), W10.12 (`settings/agent/**`, `ProjectsSettings`,
 `PluginContributions`, `PluginCustomizationList`, `plugin-display`); see `docs/phases/phase-10-v1-6.md`.
+
+**Claude Code ecosystem** (Phase 12, ADR-053 … ADR-058; C46 ships the stubs, contracts in 10.9, modules in 11.9) —
+`plugins/marketplaces/`: `MarketplacesView` ×, `MarketplaceSuggestion` ×, `MarketplaceStrip` ×, `MarketplaceAddDialog` ×,
+`MarketplaceEntryRow` ×, `MarketplaceInstallDialog` × and `marketplaces.ts`; `plugins/install/InstallReview` × (extracted
+from `InstallDialog`); `plugins/detail/PluginUpdateBanner` ×; `settings/claude-import/`: `ClaudeImportDialog` ×,
+`ClaudeImportSource` ×, `ClaudeImportPreview` ×, `ClaudeImportGroup` ×, `ClaudeImportItem` ×, `ClaudeImportResult` ×
+and `claude-import.ts`; `settings/customize/ProjectFileEditor` ×; the `marketplaces` store and `useClaudeImport`.
+Phase 12 owners: W12.8 (`plugins/marketplaces/**`, the marketplaces store and page, `PluginsNav`), W12.9
+(`plugins/{install,detail,list}/**`, the plugins store), W12.10 (`settings/claude-import/**`, `useClaudeImport`,
+`pages/settings/customize.vue`, `settings/data/**`), W12.11 (the Customize definition files, `ProjectFileEditor`, the
+customizations store), W12.12 (the hook files of `settings/customize/`, the hooks store, `settings/agent/**`), W12.13
+(`projects/trust/**`, `chat/{agent,hooks,parts,composer}/**`, `share/**`); see `docs/phases/phase-12-v1-8.md`.
 
 W4.2 (UX polish) may edit every file above in Phase 4. Phase 8 owners: W8.8 (`ChatWorkspace`, `changes/**`, the
 workspace store, `useChangesPanel`, `useServerEvents`, `CommandPalette` and `chat-nav/palette*`), W8.9 (`rewind/**`,
@@ -6382,6 +6956,148 @@ defineProps<{ entries: readonly HookEntry[]; codeHooks: readonly string[] }>()  
 //                            calls refreshLoaded() of the three stores
 ```
 
+### 10.9 Phase 12 contracts (Claude Code ecosystem: W12.8 – W12.13; C46 ships the stubs)
+
+The components below are created by C46 in P12-0b with exactly these props, emits and root test ids and are frozen
+from Gate P12-0b (a change is a CCR); P12-A implements them behind those contracts. Types from `@harness-forge/shared`
+(names as C40 lands them in API.md): `MarketplaceSummary`, `MarketplaceDetail`, `MarketplaceEntry`, `MarketplaceList`
+(`{ items, suggestions, updates }`), `MarketplaceSource`, `PluginUpdate`, `PluginInspection` (+ `format`, `claude:
+ClaudePluginInfo | null`), `PluginDetail` (+ `format`, `origin`, `claude`), `ClaudeImportHome` (`{ available, reason?:
+'disabled' | 'missing' | 'unreadable', path: string | null }`), `ClaudeImportPlan` (the plan DTO: `{ id, source, root, createdAt,
+expiresAt, items, skipped, diagnostics }`, items without payloads), `ClaudeImportApplyBody`, `ClaudeImportApplyResult`,
+`ProjectDefinitionFile`, `ProjectDefinitionWriteResult` (`{ path, sha256, created, diagnostics, trust: { pending } }`),
+`HookEntry` (+ `type?: 'command' | 'prompt'`, `args?`, `async?`, `if?`, `prompt?`, `model?`, `continueOnBlock?`,
+`statusMessage?`), `PersonalHook` / `HookCreate` / `HookUpdate` (discriminated on `type`), `HookData` (+ `harnessAsked?`, `hooks[].kind?`,
+`hooks[].model?`); `ClaudeImportKind`, `ClaudeImportStatus`, `ClaudeImportAction` from `util/claude-import.ts`. Web types:
+`MarketplaceEntryView`, `MarketplaceInputResult` (`plugins/marketplaces/marketplaces.ts`), `InstallRequest`
+(`plugins/install/install.ts`, + `github`), `ClaudeImportSelection`, `ClaudeImportChoice`, `ClaudeImportGroupView`
+(`settings/claude-import/claude-import.ts`), `ProjectFileTarget` (`customize/customize.ts`), `ProjectHookTarget`
+(`customize/hooks.ts`); 11.9. Every component is imported by path.
+
+```ts
+// MarketplacesView (W12.8; stub; pages/plugins/marketplaces.vue mounts it) — 8.13
+// no props, no emits. Root marketplaces-page; reads ?m=, ?q=, ?category= and writes them with router.replace;
+// mounts MarketplaceSuggestion, MarketplaceStrip, the entries, MarketplaceAddDialog, MarketplaceInstallDialog and a
+// ConfirmDialog (marketplace-remove-confirm); marketplace-refresh-all, marketplace-add, marketplace-search,
+// marketplace-category, marketplace-empty, marketplace-error (data-code).
+
+// MarketplaceSuggestion (W12.8; stub)
+defineProps<{}>()
+defineEmits<{ add: []; dismiss: [] }>()
+// Root marketplace-suggestion; marketplace-suggestion-add, marketplace-suggestion-dismiss. The page hides it after
+// dismiss (localStorage hf-marketplace-suggestion-dismissed) or once the repository is added.
+
+// MarketplaceStrip (W12.8; stub)
+defineProps<{ items: readonly MarketplaceSummary[]; selectedId: string | null; busyIds?: readonly string[] }>()
+defineEmits<{ select: [id: string | null]; refresh: [id: string]; remove: [id: string] }>()
+// Chips (a Select below sm): marketplace-row (data-marketplace-id, data-state = ok | error) per marketplace, the All
+// chip with data-marketplace-id=""; marketplace-row-menu, marketplace-refresh, marketplace-remove.
+
+// MarketplaceAddDialog (W12.8; stub)
+defineProps<{ open: boolean }>()
+defineEmits<{ 'update:open': [open: boolean]; added: [marketplace: MarketplaceDetail] }>()
+// Root marketplace-add-dialog; marketplace-add-source (data-value = github | url | folder), marketplace-add-input,
+// marketplace-add-submit, marketplace-add-error (data-code). Adds through the marketplaces store.
+
+// MarketplaceEntryRow (W12.8; stub)
+defineProps<{ entry: MarketplaceEntryView; busy?: boolean }>()
+defineEmits<{ install: []; update: [] }>()
+// Root marketplace-entry (an <article>, data-name, data-state = available | installed | update | unsupported);
+// marketplace-entry-install, marketplace-entry-update; the Open link of an installed entry data-action="open-plugin".
+
+// MarketplaceInstallDialog (W12.8; stub; mounted by MarketplacesView and PluginDetailView) — 8.13
+defineProps<{ open: boolean; marketplaceId: string | null; entryName: string | null; mode: 'install' | 'update' }>()
+defineEmits<{ 'update:open': [open: boolean]; installed: [pluginId: string] }>()
+// Root marketplace-install-dialog (data-mode); inspects { source: 'marketplace', marketplaceId, plugin: entryName }
+// itself, then renders InstallReview.
+
+// InstallReview (W12.9; extracted from InstallDialog by C46; used by InstallDialog and MarketplaceInstallDialog) — 8.3
+defineProps<{ inspection: PluginInspection; request: InstallRequest; sourceLabel: string }>()
+defineEmits<{ back: []; installed: [plugin: PluginDetail]; stale: [] }>()
+// data-slot install-review (no test id of its own); keeps the existing ids of the preview and trust steps
+// (trust-password, the TrustConsent checkbox, the install button) and runs the one fresh-auth flow of 8.3 / 8.4:
+// useFreshAuth().run(send, { required: inspection.requiresTrust }). `stale` = a 409 stale answer (the parent
+// re-inspects).
+
+// PluginUpdateBanner (W12.9; stub; PluginDetailView renders it above the tabs) — 8.13
+defineProps<{ update: PluginUpdate | null; marketplaceName: string | null }>()
+defineEmits<{ update: [] }>()
+// data-slot plugin-update-banner; plugin-update (the Update… button); renders nothing without an update.
+
+// ClaudeImportDialog (W12.10; stub; pages/settings/customize.vue mounts it) — 9.14
+defineProps<{ open: boolean }>()
+defineEmits<{ 'update:open': [open: boolean]; imported: [result: ClaudeImportApplyResult] }>()
+// Root claude-import-dialog (data-step = source | preview | result); claude-import-continue, claude-import-back,
+// claude-import-submit (data-count), claude-import-error (data-code). Uses useClaudeImport() (no store).
+
+// ClaudeImportSource (W12.10; stub)
+defineProps<{ busy: boolean; serverHome: ClaudeImportHome | null }>()
+defineEmits<{ folder: [files: readonly File[], claudeJson: File | null]; zip: [file: File]; scan: [] }>()
+// claude-import-source (data-value = folder | zip | server), claude-import-folder-input, claude-import-config-input,
+// claude-import-zip-input, claude-import-scan. `folder` carries the files pickClaudeFiles kept.
+
+// ClaudeImportPreview (W12.10; stub)
+defineProps<{ plan: ClaudeImportPlan; selection: ClaudeImportSelection }>()
+defineEmits<{ 'update:selection': [selection: ClaudeImportSelection] }>()
+// Root claude-import-preview; claude-import-instructions-mode; renders ClaudeImportGroup per groupsOf(plan).
+
+// ClaudeImportGroup (W12.10; stub)
+defineProps<{ group: ClaudeImportGroupView; selection: ClaudeImportSelection }>()
+defineEmits<{ 'update:selection': [selection: ClaudeImportSelection] }>()
+// Root claude-import-group (data-kind, data-count); claude-import-select-all (data-state from groupState).
+
+// ClaudeImportItem (W12.10; stub)
+defineProps<{ item: ClaudeImportPlan['items'][number]; choice: ClaudeImportChoice | null }>()
+defineEmits<{ 'update:choice': [choice: ClaudeImportChoice | null] }>()   // null = not selected
+// Root claude-import-item (data-kind, data-status, data-name); claude-import-select, claude-import-resolution;
+// the Turn on after import switch data-action="enable"; variable inputs data-action="variable" (data-name).
+
+// ClaudeImportResult (W12.10; stub)
+defineProps<{ result: ClaudeImportApplyResult }>()
+// Root claude-import-result; lines from resultLines(result).
+
+// ProjectFileEditor (W12.11; stub; CustomizeSettings mounts it; ProjectMcpDialog opens it through the page) — 9.14
+defineProps<{ open: boolean; projectId: string | null; entry: ProjectFileTarget | null }>()
+defineEmits<{
+  'update:open': [open: boolean]
+  saved: [saved: { path: string; pending: number }]
+  review: [sha256?: string]                  // open ProjectTrustDialog (focusKey)
+}>()
+// Root project-file-editor (data-kind, data-path, data-mode = edit | new); project-file-content, project-file-save,
+// project-file-conflict (role=alert), project-file-reload, project-file-overwrite, project-file-error (data-code),
+// project-file-discard-confirm. Writes through the customizations store; never asks for a password.
+
+// Prop, emit and type additions (C46 declares them in P12-0b; the owners use them in P12-A)
+// PluginsNav (W12.8):         the Marketplaces row plugins-marketplaces (data-count); activePluginId skips
+//                             RESERVED_PLUGIN_IDS
+// InstallDialog (W12.9):      InstallTab + 'github' (install-tab-github, install-github-repo, install-github-ref,
+//                             install-github-path); the preview / trust / install steps move into InstallReview
+// InspectPreview (W12.9):     the Claude preview of 8.13 (data-slot install-format, install-commit, install-namespace,
+//                             install-user-config, install-ignored)
+// PluginCard (W12.9):         the badge plugin-update-available (data-version) from useMarketplacesStore().updateOf(id)
+// plugin-display.ts (W12.9):  source labels github → "GitHub", marketplace → the marketplace name; the "Claude Code"
+//                             format badge
+// CustomizationViewer (W12.11 CCR): + emit edit: [] (the footer's Edit for project entries)
+// CustomizationRow (W12.11):  project rows: Edit… (customization-edit) and Delete… (customization-delete), both with
+//                             data-source="project"; the agent color dot (data-slot customization-color-dot)
+// CustomizationEditor (W12.11): the fields of 9.14 (customization-disallowed-tools, -max-turns, -color, -skills,
+//                             -when-to-use, -fork, -fork-agent)
+// CustomizeSettings / customize.vue (W12.10, W12.11): customize-import-claude in the header; ?import=claude;
+//                             New file… (data-action="new-project-file") in project section headings
+// HookEditor (W12.12 CCR):    mode: 'new' | 'edit' | 'copy' | 'project'; + target?: ProjectHookTarget | null;
+//                             hook-type (data-value), hook-prompt
+// HookRow (W12.12):           HookAction + 'trust-plugin' (data-action="trust-plugin"); prompt rows data-kind="prompt"
+// AgentSettingsSection (W12.12): settings-hook-model, settings-model-alias (data-name)
+// DataImportSection, DataImportResultPanel (W12.10): data-import-claude; data-slot data-import-turned-off
+// ProjectTrustDialog (W12.13): the mixed select-all (no prop change)
+// ProjectMcpDialog (W12.13):  Edit .mcp.json… (data-action="edit-mcp-json") → the page's ProjectFileEditor
+// TaskBlock (W12.13):         the agent color (data-slot task-agent-color, data-value)
+// ToolHookBadge, HookNote (W12.13): data-state="still-asks" for HookData.harnessAsked; prompt hook source lines
+// SlashMenu, slash-commands.ts (W12.13): qualified names (CATALOG_NAME_PATTERN, ≤ 128 characters)
+// useServerEvents (C46):      marketplace.changed → marketplaces store; plugin.changed also → marketplaces store; a
+//                             reconnect calls its refreshLoaded()
+```
+
 ---
 
 ## 11. Pinia stores and composables
@@ -7518,6 +8234,141 @@ interface ChatSession {
 The hooks store is the only reader of the hook routes, the project-trust and project-mcp stores the only readers of
 their project routes; the Plugins detail page reads plugin hook rows through `useHooksStore().list(null)`.
 
+### 11.9 Phase 12 modules
+
+C46 creates these in P12-0b with exactly these signatures (frozen from Gate P12-0b) and inert bodies; P12-A implements
+them. Owners: W12.8 the `marketplaces` store and `plugins/marketplaces/marketplaces.ts`; W12.9 the `install.ts` and
+`plugin-display.ts` additions; W12.10 `useClaudeImport` and `settings/claude-import/claude-import.ts`; W12.11 the
+`customizations` store and `customize.ts` additions; W12.12 the `hooks` store and `customize/hooks.ts` additions;
+W12.13 `project-trust.ts`, `hook-notes.ts`, the agent colors and the `slash-commands.ts` additions. The shared helpers
+are the only implementation of their rules on the web: `isClaudeHomeImportPath`, `CLAUDE_HOME_LIMITS`
+(`util/claude-import.ts`), `parseMarketplaceShorthand` (`util/claude-plugins.ts`), `parseDefinition` /
+`formatDefinition` (`util/definitions.ts`), `readHooksConfig` / `readSettingsHooks` / `compileMatcher` / `matchHookIf`
+(`util/hooks.ts`), `catalogNameSchema` / `splitQualifiedName` (`ids.ts`).
+
+```ts
+// stores/marketplaces.ts — useMarketplacesStore (+ Phase 12, ADR-054; 8.13)
+state:   { list: MarketplaceList | null                       // { items, suggestions, updates }
+           details: Record<string, MarketplaceDetail>         // by marketplace id
+           loadedAt: number | null
+           busy: Record<string, true> }                       // ids with a refresh or remove in flight
+getters: items: readonly MarketplaceSummary[]
+         byId(id: string): MarketplaceSummary | null
+         entries(id: string | null): MarketplaceEntryView[]   // null = every loaded marketplace (All)
+         updates: readonly PluginUpdate[]
+         updateOf(pluginId: string): PluginUpdate | null
+         updateCount: number
+actions: fetchAll(opts?: { maxAgeMs?: number }): Promise<MarketplaceList>   // GET /marketplaces; single-flight
+         fetch(id: string, opts?: { maxAgeMs?: number }): Promise<MarketplaceDetail>   // GET /marketplaces/:id
+         add(source: MarketplaceSource): Promise<MarketplaceDetail>  // POST /marketplaces (409 exists / offline,
+                                                                     // 404, 429, 502 are thrown with their codes)
+         refresh(id: string): Promise<MarketplaceDetail>             // POST /marketplaces/:id/refresh
+         refreshAll(): Promise<void>                                 // one after the other; failures are collected
+         remove(id: string): Promise<void>                           // DELETE /marketplaces/:id (a 404 counts as removed)
+         applyEvent(event: ServerEvent): void   // marketplace.changed: replace or drop the summary and the detail;
+                                                // plugin.changed: refetch the list (installed / update states)
+         refreshLoaded(): Promise<void>         // after an event-stream reconnect
+// The store is the only reader of the marketplace routes. No request runs before a page or the nav asks.
+
+// components/plugins/marketplaces/marketplaces.ts — pure (W12.8)
+const OFFICIAL_MARKETPLACE = 'anthropics/claude-plugins-official'
+const SUGGESTION_DISMISSED_KEY = 'hf-marketplace-suggestion-dismissed'
+interface MarketplaceEntryView {
+  marketplaceId: string; marketplaceName: string; entry: MarketplaceEntry
+  state: 'available' | 'installed' | 'update' | 'unsupported'
+  pluginId: string | null; installedVersion: string | null; update: PluginUpdate | null
+}
+type MarketplaceInputResult = { kind: 'github'; repo: string; ref?: string } | { kind: 'url'; url: string }
+  | { kind: 'folder'; path: string } | { error: string }
+function parseMarketplaceInput(text: string): MarketplaceInputResult       // wraps parseMarketplaceShorthand
+function entryState(entry: MarketplaceEntry, marketplaceId: string, plugins: readonly PluginSummary[],
+  updates: readonly PluginUpdate[]): MarketplaceEntryView['state']
+function sourceText(source: MarketplaceSource | MarketplaceEntry['source'], resolvedRef?: string | null): string
+function filterEntries(entries: readonly MarketplaceEntryView[], q: string, category: string | null): MarketplaceEntryView[]
+function categoriesOf(entries: readonly MarketplaceEntryView[]): string[]  // sorted, unique
+
+// components/plugins/install/install.ts — additions (W12.9)
+type InstallTab = 'zip' | 'npm' | 'url' | 'github' | 'folder'      // TAB_LABELS.github = 'GitHub'
+interface InstallDraft { /* … */ githubRepo: string; githubRef: string; githubPath: string }
+type InstallRequest = /* … */ | { source: 'github'; repo: string; ref?: string; path?: string }
+  | { source: 'marketplace'; marketplaceId: string; plugin: string }
+function parseGithubSpec(text: string): { repo: string; ref?: string } | null   // owner/repo[#ref | @ref], github URL
+function claudePreview(inspection: PluginInspection): { namespace: string | null; asksFor: string[]; ignored: string[];
+  commit: string | null } | null                                   // null for a harness plugin
+// runCommands() also reads inspection.claude.executables for a Claude Code plugin
+
+// components/settings/claude-import/claude-import.ts — pure (W12.10)
+type ClaudeImportChoice = { action: ClaudeImportAction; renameTo?: string; enable?: boolean;
+  variables?: Record<string, string> }
+type ClaudeImportSelection = { items: Record<string, ClaudeImportChoice>; instructions: 'append' | 'replace' | 'skip' }
+interface ClaudeImportGroupView { kind: ClaudeImportKind | 'unsupported'; title: string; items: ClaudeImportPlan['items'];
+  executable: boolean }
+function pickClaudeFiles(files: FileList | readonly File[]): { files: File[]; skipped: number; tooLarge: string[] }
+                                     // keeps isClaudeHomeImportPath paths (webkitRelativePath without the picked
+                                     // folder's own name) within CLAUDE_HOME_LIMITS; never reads the files
+function groupsOf(plan: ClaudeImportPlan): ClaudeImportGroupView[]          // the order of 9.14
+function defaultSelection(plan: ClaudeImportPlan): ClaudeImportSelection
+function groupState(group: ClaudeImportGroupView, selection: ClaudeImportSelection): boolean | 'indeterminate'
+function needsFreshAuth(plan: ClaudeImportPlan, selection: ClaudeImportSelection): 'executables' | 'import' | null
+                                     // which prompt text (9.14); null = nothing selected (Import is disabled)
+function applyBody(planId: string, selection: ClaudeImportSelection): ClaudeImportApplyBody
+function resultLines(result: ClaudeImportApplyResult): string[]
+const STATUS_TEXT: Readonly<Record<ClaudeImportStatus, string>>   // New, Replaces yours, Unchanged, Conflict, …
+
+// composables/useClaudeImport.ts (W12.10; no store)
+function useClaudeImport(): {
+  serverHome(): Promise<ClaudeImportHome>                                   // GET /claude-import/home
+  scanServer(): Promise<ClaudeImportPlan>                                   // POST /claude-import/scan (fresh)
+  planFromFiles(files: readonly File[], claudeJson: File | null): Promise<ClaudeImportPlan>   // POST /upload
+  planFromZip(file: File): Promise<ClaudeImportPlan>                        // POST /upload (one zip)
+  apply(planId: string, selection: ClaudeImportSelection): Promise<ClaudeImportApplyResult>  // POST /apply (fresh)
+}
+// Fresh routes throw a 403 with action 'login'; the dialog wraps them in useFreshAuth().run(task, { required: true }).
+// After apply it calls customizations.refreshLoaded(), hooks.refreshLoaded() and settings.fetch().
+
+// stores/customizations.ts — additions (W12.11, CCR)
+actions: readProjectFile(projectId: string, path: string): Promise<ProjectDefinitionFile>   // GET …/definitions/file
+         saveProjectFile(projectId: string, body: ProjectDefinitionWriteBody): Promise<ProjectDefinitionWriteResult>
+                                    // PUT …/definitions/file; marks the project scope stale
+         removeProjectFile(projectId: string, path: string, expectedSha256: string): Promise<void>   // DELETE
+         projectSource(projectId: string, entry: CustomizationEntry): ProjectFileTarget | null      // a getter-like
+                                    // helper: the editable target of a project entry (null for other sources)
+
+// components/settings/customize/customize.ts — additions (W12.11)
+interface ProjectFileTarget { path: string; kind: 'agent' | 'command' | 'skill' | 'style' | 'mcp'; name: string | null;
+  create: boolean }
+// CustomizationDraft + disallowedTools, maxTurns, color, skills, whenToUse, fork, forkAgent (formatDefinition writes a
+// key only when set); CustomizationAction + 'delete' for project rows
+function newProjectFilePath(kind: ProjectFileTarget['kind'], folder: '.harness' | '.claude', name: string): string
+
+// stores/hooks.ts — addition (W12.12, CCR)
+actions: saveProjectHook(projectId: string, target: ProjectHookTarget, draft: HookDraft | null): Promise<ProjectDefinitionWriteResult>
+                                    // read the settings file, splice the handler (null = remove) into its hooks key,
+                                    // PUT with expectedSha256; never approves
+
+// components/settings/customize/hooks.ts — additions (W12.12)
+// HOOK_EVENT_INFO covers the 13 events (+ promptAllowed: boolean, matcher: 'tool' | 'agent' | 'trigger' | 'reason' |
+// 'source' | 'type' | null)
+interface HookDraft { /* … */ type: 'command' | 'prompt'; prompt: string; model: string | null; continueOnBlock: boolean;
+  args: string[]; async: boolean; if: string; statusMessage: string }
+interface ProjectHookTarget { projectId: string; path: string; event: HookEvent; groupIndex: number | null;
+  handlerIndex: number | null }                                     // null indexes = a new handler
+type HookAction = /* … */ | 'trust-plugin'
+function promptError(text: string): string | null                   // empty, too long (16,384), NUL characters
+
+// components/projects/trust/project-trust.ts — addition (W12.13)
+function selectAllState(items: readonly TrustItem[], selected: ReadonlySet<string>): boolean | 'indeterminate'
+
+// components/chat/agent/agent-tools.ts — addition (W12.13)
+const AGENT_COLOR_TOKENS: Readonly<Record<AgentColor, string>>      // red → destructive, … (7.34)
+
+// components/chat/hooks/hook-notes.ts — additions (W12.13)
+// hookOutcomeText / hookSourceText read harnessAsked, kind 'prompt' and model (7.34)
+```
+
+The `marketplaces` store is the only reader of the marketplace routes, `useClaudeImport` the only caller of the import
+routes, and the customizations and hooks stores the only callers of the project definition routes.
+
 ---
 
 ## 12. Keyboard shortcuts
@@ -7623,11 +8474,11 @@ galleries and adds no new attribute name; Phase 7 adds `data-project-id` and `da
 `data-view`, `data-rule-id` and `data-variant`; Phase 9 adds `data-compacted`; Phase 10 adds `data-group`,
 `data-agent-type`, `data-background`, `data-source`, `data-name`, `data-customization-id`, `data-task-id`, `data-mode`,
 `data-target` and `data-total`; Phase 11 adds `data-event`, `data-outcome`, `data-hook-id`, `data-key`, `data-trust`,
-`data-reason` and `data-transport`). Playwright uses `getByTestId()` plus
+`data-reason` and `data-transport`; Phase 12 adds `data-marketplace-id` and `data-version`). Playwright uses `getByTestId()` plus
 attribute filters. Ids are never reused for a different element; removing one is a CCR. The Phase 5 ids are collected
 in 13.6, except the two Settings → Models ids added in P5-B (`model-select-option`, `model-row-menu`, 13.4); the Phase 6
 ids in 13.7; the Phase 7 ids in 13.8; the Phase 8 ids in 13.9; the Phase 9 ids in 13.10; the Phase 10 ids in 13.11; the
-Phase 11 ids in 13.12.
+Phase 11 ids in 13.12; the Phase 12 ids in 13.13.
 
 ### 13.1 Shell and navigation
 
@@ -8317,6 +9168,104 @@ and `data-action="close"`; MCP `project-mcp-status`, `project-mcp-command`, `pro
 `project-mcp-loading`, `data-action="toggle"` (a row's tools toggle) and `data-action="clear-variable"`. Stored in
 `localStorage`: nothing new (the chat's style is server state; the trust dialog's filter is not remembered).
 
+### 13.13 Claude Code ecosystem (Phase 12)
+
+The 70 new ids of Phase 12. C46 copies this table verbatim into `utils/testids.ts` in P12-0b (the key column is the
+`testIds` key) under the comment `// Claude Code ecosystem (Phase 12)`; the file stays frozen through P12-A (a new id is
+a CCR). New attribute names: `data-marketplace-id`, `data-version`. Reused ids with new values: `customization-edit`
+and `customization-delete` on project rows (`data-source="project"`, they open the project file editor and delete the
+file); `hook-edit` and `hook-delete` on project hook rows (the hook editor in project mode); `hook-editor` gains
+`data-mode="project"`; `hook-row` gains `data-kind="prompt"` and the untrusted plugin rows
+`hook-row[data-source=plugin][data-state=pending]` (the server's enum; the badge reads "Plugin not trusted");
+`plugin-hook` gains `data-kind="prompt"`; `tool-row-hook` and `hook-note` gain `data-state="still-asks"` (a record with
+`harnessAsked`); `project-trust-select-all` reports `data-state="indeterminate"`; `hook-event` gains the five new event
+values; `slash-menu-item[data-value]` may hold a qualified name (`review-kit:db:migrate`); `customize-new` is unchanged
+(project files are created from a section heading). The project file editor has **no** run-active state: saving is
+allowed while a chat of the project runs.
+
+| Id | Key (`testIds.*`) | Element | Data attributes |
+|---|---|---|---|
+| `plugins-marketplaces` | `pluginsMarketplaces` | the "Marketplaces" row of `PluginsNav` | `data-count` (updates; absent at 0) |
+| `marketplaces-page` | `marketplacesPage` | `MarketplacesView` root |  |
+| `marketplace-add` | `marketplaceAdd` | "Add marketplace…" (page header) |  |
+| `marketplace-add-dialog` | `marketplaceAddDialog` | `MarketplaceAddDialog` content |  |
+| `marketplace-add-source` | `marketplaceAddSource` | the GitHub / URL / Folder toggle group | `data-value` (`github` / `url` / `folder`) |
+| `marketplace-add-input` | `marketplaceAddInput` | the source input |  |
+| `marketplace-add-submit` | `marketplaceAddSubmit` | "Add" |  |
+| `marketplace-add-error` | `marketplaceAddError` | the dialog's error | `data-code` |
+| `marketplace-suggestion` | `marketplaceSuggestion` | `MarketplaceSuggestion` root (the official marketplace card) |  |
+| `marketplace-suggestion-add` | `marketplaceSuggestionAdd` | the card's "Add marketplace" |  |
+| `marketplace-suggestion-dismiss` | `marketplaceSuggestionDismiss` | the card's × ("Dismiss") |  |
+| `marketplace-row` | `marketplaceRow` | one marketplace chip (or the All chip) | `data-marketplace-id` (`''` = All), `data-state` (`ok` / `error`) |
+| `marketplace-row-menu` | `marketplaceRowMenu` | the selected marketplace's `⋯` trigger |  |
+| `marketplace-refresh` | `marketplaceRefresh` | "Refresh" in the row menu |  |
+| `marketplace-refresh-all` | `marketplaceRefreshAll` | "Refresh all" (page header) |  |
+| `marketplace-remove` | `marketplaceRemove` | "Remove…" in the row menu |  |
+| `marketplace-remove-confirm` | `marketplaceRemoveConfirm` | "Remove" in the confirm dialog |  |
+| `marketplace-search` | `marketplaceSearch` | "Search plugins…" input |  |
+| `marketplace-category` | `marketplaceCategory` | the Category select trigger | `data-value` (`''` = All) |
+| `marketplace-entry` | `marketplaceEntry` | `MarketplaceEntryRow` root (an `<article>`) | `data-name`, `data-state` (`available` / `installed` / `update` / `unsupported`), `data-marketplace-id` |
+| `marketplace-entry-install` | `marketplaceEntryInstall` | an entry's "Install…" |  |
+| `marketplace-entry-update` | `marketplaceEntryUpdate` | an entry's "Update…" |  |
+| `marketplace-empty` | `marketplaceEmpty` | the page's empty states | `data-value` (`none` / `no-match` / `no-entries`) |
+| `marketplace-error` | `marketplaceError` | a marketplace's last refresh error | `data-code` |
+| `marketplace-install-dialog` | `marketplaceInstallDialog` | `MarketplaceInstallDialog` content | `data-mode` (`install` / `update`) |
+| `install-tab-github` | `installTabGithub` | the install dialog's GitHub tab |  |
+| `install-github-repo` | `installGithubRepo` | the Repository input |  |
+| `install-github-ref` | `installGithubRef` | the "Branch, tag or commit" input |  |
+| `install-github-path` | `installGithubPath` | the "Folder in the repository" input |  |
+| `plugin-update-available` | `pluginUpdateAvailable` | the update badge of a plugin card | `data-version` (the offered version, `''` for a commit) |
+| `plugin-update` | `pluginUpdate` | "Update…" of `PluginUpdateBanner` (plugin detail) |  |
+| `customize-import-claude` | `customizeImportClaude` | "Import from Claude Code…" (Customize header) |  |
+| `data-import-claude` | `dataImportClaude` | "Import from Claude Code…" (Settings → Data) |  |
+| `claude-import-dialog` | `claudeImportDialog` | `ClaudeImportDialog` content | `data-step` (`source` / `preview` / `result`) |
+| `claude-import-source` | `claudeImportSource` | one source radio | `data-value` (`folder` / `zip` / `server`) |
+| `claude-import-folder-input` | `claudeImportFolderInput` | the visually hidden folder input |  |
+| `claude-import-config-input` | `claudeImportConfigInput` | the `.claude.json` file input |  |
+| `claude-import-zip-input` | `claudeImportZipInput` | the zip file input |  |
+| `claude-import-scan` | `claudeImportScan` | the server scan line under the "Scan {path} on this server" radio (the path, or why it is disabled) | `data-state` (`available` / `disabled` / `missing` / `unreadable`) |
+| `claude-import-continue` | `claudeImportContinue` | "Continue" (step 1) |  |
+| `claude-import-preview` | `claudeImportPreview` | `ClaudeImportPreview` root | `data-count` (items) |
+| `claude-import-group` | `claudeImportGroup` | `ClaudeImportGroup` root | `data-kind` (an import kind or `unsupported`), `data-count` |
+| `claude-import-select-all` | `claudeImportSelectAll` | a group's "Select all {n}" | `data-state` (reka: `checked` / `unchecked` / `indeterminate`) |
+| `claude-import-item` | `claudeImportItem` | `ClaudeImportItem` root | `data-kind`, `data-status` (`new` / `update` / `unchanged` / `conflict` / `unsupported` / `invalid`), `data-name` |
+| `claude-import-select` | `claudeImportSelect` | an item's checkbox | `data-state` (reka) |
+| `claude-import-resolution` | `claudeImportResolution` | an `update` / `conflict` item's resolution select | `data-value` (`skip` / `overwrite` / `rename`) |
+| `claude-import-instructions-mode` | `claudeImportInstructionsMode` | the `CLAUDE.md` Append / Replace / Skip select | `data-value` (`append` / `replace` / `skip`) |
+| `claude-import-submit` | `claudeImportSubmit` | "Import {n} items" | `data-count` |
+| `claude-import-back` | `claudeImportBack` | "Back" (step 2) |  |
+| `claude-import-error` | `claudeImportError` | the wizard's error | `data-code` |
+| `claude-import-result` | `claudeImportResult` | `ClaudeImportResult` root | `data-count` (imported) |
+| `project-file-editor` | `projectFileEditor` | `ProjectFileEditor` sheet content | `data-kind` (`agent` / `command` / `skill` / `style` / `mcp`), `data-path`, `data-mode` (`edit` / `new`) |
+| `project-file-content` | `projectFileContent` | the raw file editor |  |
+| `project-file-save` | `projectFileSave` | "Save file" |  |
+| `project-file-conflict` | `projectFileConflict` | the "changed on disk" alert |  |
+| `project-file-reload` | `projectFileReload` | "Load from disk" |  |
+| `project-file-overwrite` | `projectFileOverwrite` | "Overwrite" |  |
+| `project-file-error` | `projectFileError` | the editor's error | `data-code` (`validation_error`, `not_found`, …; never `run-active`: there is no busy state) |
+| `project-file-discard-confirm` | `projectFileDiscardConfirm` | "Discard" in the editor's "Discard changes?" dialog |  |
+| `hook-type` | `hookType` | the hook editor's Type toggle group | `data-value` (`command` / `prompt`) |
+| `hook-prompt` | `hookPrompt` | the Prompt textarea |  |
+| `settings-hook-model` | `settingsHookModel` | Settings → General → Agent "Hook model" select trigger | `data-value` (the ref, `''` = automatic) |
+| `settings-model-alias` | `settingsModelAlias` | one "Claude model names" select trigger | `data-name` (`sonnet` / `opus` / `haiku` / `fable`), `data-value` |
+| `customization-disallowed-tools` | `customizationDisallowedTools` | "Tools not allowed" (`ToolMultiSelect` trigger) | `data-count` |
+| `customization-max-turns` | `customizationMaxTurns` | the agent "Max turns" input |  |
+| `customization-color` | `customizationColor` | the agent "Color" select trigger | `data-value` (a color, `''` = none) |
+| `customization-skills` | `customizationSkills` | the agent "Skills" multi-select trigger | `data-count` |
+| `customization-when-to-use` | `customizationWhenToUse` | the "When to use" textarea |  |
+| `customization-fork` | `customizationFork` | "Run in a sub-agent" switch | `data-state` (reka) |
+| `customization-fork-agent` | `customizationForkAgent` | the fork "Agent" select trigger | `data-value` |
+
+E2e hooks that are not test ids (Phase 12, no CCR needed; all `data-slot` unless named otherwise): install preview
+`install-format` (`data-value="claude"`), `install-commit`, `install-namespace`, `install-user-config`,
+`install-ignored`, `install-review` (the extracted review root); plugin detail `plugin-update-banner`,
+`plugin-claude-info`; import `data-import-turned-off`, `data-action="enable"` (Turn on after import),
+`data-action="variable"` (`data-name`); Customize `customization-color-dot`, `data-action` values `new-project-file`
+(a project section heading), `trust-plugin` (Review plugin… of an untrusted plugin hook row), `edit-mcp-json` (the
+project MCP dialog) and `add` (the marketplaces empty state); chat `task-agent-color` (`data-value`); marketplace entries
+`data-action="open-plugin"` (Open). Stored in `localStorage`: `hf-marketplace-suggestion-dismissed` (`'1'` once the
+official suggestion was dismissed).
+
 ---
 
 ## 14. Accessibility and responsiveness
@@ -8415,6 +9364,17 @@ and `data-action="close"`; MCP `project-mcp-status`, `project-mcp-command`, `pro
   badges and the approval banner take no focus by themselves (the notes' toggles are reached with Tab; the tool-row
   hook badge sits inside the row button and is not focusable: its tooltip opens while the row button has keyboard
   focus, and its sr-only text carries it).
+- Phase 12: the Marketplaces page keeps focus on a chip after a pick (arrow keys move between chips; below `sm` the
+  `Select`); the add dialog opens on its input and, after Add, focus moves to the new marketplace's chip; after Remove
+  focus moves to the All chip; the install / update dialog opens on its spinner's status text, then on the trust
+  checkbox (when shown) or Install, and returns focus to the entry's button (or the banner's Update…). The import wizard
+  moves focus to the step heading on every step change ("Step {n} of 3" is text inside it); its group checkboxes come
+  before their items in the tab order; a conflict or rename select follows its item's checkbox; Escape asks nothing on
+  step 1 and "Discard this import?" (**Keep reviewing** focused) on step 2. The project file editor opens on its editor
+  (Tab moves focus out, never indents), the conflict alert takes focus when it appears and Load from disk / Overwrite
+  return it to the editor; after a save focus returns to the opener (the row's `⋯` trigger, the viewer's Edit, New
+  file…). The hook editor's Type toggle comes first; switching it keeps focus on the toggle. **Import**, **Install**,
+  **Update** and **Approve** are never default buttons: Enter in a field does nothing, Space or a click acts.
 
 ### 14.2 Semantics and labels
 
@@ -8534,6 +9494,19 @@ and `data-action="close"`; MCP `project-mcp-status`, `project-mcp-command`, `pro
   `ChatView` announces "A hook blocked {tool}" and "A hook asked the agent to continue" once per part per tab, like
   compaction markers; "Running hook…" / "Running hooks…" are never announced (shimmer text only). The trust chip is
   named "Review {n} items in {project} that can run commands" ("Review 1 item in {project} that can run commands").
+- Phase 12: the Marketplaces page has one `h1` ("Marketplaces"); the chips are a `ToggleGroup` named "Marketplace" whose
+  items are named "{name}, {n} plugins" (", {u} updates", ", last refresh failed"); the entries are a list of
+  `<article>`s named "{name}, {state}" (state words "Available", "Installed", "Update available", "Unsupported"), their
+  buttons "Install {name}" / "Update {name}"; the suggestion card is a `region` named "Anthropic's official plugins";
+  the nav row's badge reads "{n} updates available" (sr-only). The import wizard is a dialog named "Import from Claude
+  Code"; "Found {n} items" and the result line are announced in a polite region; groups are `role="group"` elements
+  labelled by their heading; each item is a list item whose status is a word (never color alone) and whose checkbox
+  is named "{kind} {name}"; a mixed group checkbox reports `aria-checked="mixed"`; "Imported turned off" notes are text
+  linked to the item's switch by `aria-describedby`. The project file editor is a dialog named "Edit {file}"; the raw
+  editor has `aria-label` "File content" and its diagnostics as description; the conflict alert is `role="alert"`; the
+  pending-approval toast's **Review** is a button. The hook editor's Type toggle is named "Type"; the prompt field has a
+  visible label and its help as description. The agent color dot and the format badge's icon are `aria-hidden` (the
+  text says it). The trust dialog's mixed select-all is announced as "mixed" by reka.
 
 ### 14.3 Contrast targets
 
@@ -8614,6 +9587,14 @@ instant scroll instead of smooth, no sheet slide (fade only).
   element causes a horizontal page scroll. On touch screens the hook row menus, the editor's buttons, the import's
   checkboxes and Add, the trust checkboxes, Select all, Approve and Revoke, Reconnect, the variable inputs and Save
   variables, the trust chip, the style trigger and options, and the refusal's × and Review… are at least 40px.
+- Phase 12 screens: at 390px the Marketplaces page has no horizontal scroll (the chips become a `Select`, entries
+  stack with their button on its own line, long sources and commit hashes truncate in the middle, the header actions
+  are icon-only with accessible names); the add, install / update and import dialogs and the project file editor are
+  full width with sticky footers (the import wizard full screen, its groups' Select all under the heading when the row
+  is narrow); the install preview's "Runs these commands" and the raw editor scroll sideways inside their blocks; the
+  hook editor's Type toggle spans the sheet. On touch screens the marketplace chips and the `Select`, the entry
+  buttons, the row menu, Refresh, the suggestion's buttons, the import radios, checkboxes, Select all, resolution
+  selects and switches, the editor's Load from disk / Overwrite / Save file and the Type toggle are at least 40px.
 - Phase 6 screens: galleries keep their two columns at 390px (tiles never overflow the column); the recording composer
   keeps the 390px layout without horizontal scroll (the indicator shows the dot, the timer and Cancel); the Media page
   stacks labels above controls below `sm`.
@@ -8649,7 +9630,10 @@ footer visible, the tabs scroll, the row menus are at least 40px; and `mobile/ag
 strip, the background agents and the queue fitting at 390px, the Remember dialog and the grouped slash menu. Phase 11
 adds `mobile/hooks.spec.ts` (W11.13): the Customize tabs scroll, the hook editor sheet fits with its footer visible, the
 trust and MCP dialogs fit with a sticky footer and no horizontal scroll; and `mobile/agent.spec.ts` gains the composer
-toolbar with the icon-only style trigger at 390px and a refusal that fits.
+toolbar with the icon-only style trigger at 390px and a refusal that fits. Phase 12 adds `mobile/marketplaces.spec.ts`
+and `mobile/claude-import.spec.ts` (W12.14): no horizontal scroll on `/plugins/marketplaces` (a local-folder
+marketplace), the chip `Select`, an install dialog and the import wizard that fit with their footers visible, and the
+project file editor sheet at 390px.
 
 ### 14.7 Tablet e2e and media permissions (Phase 6)
 
@@ -8661,7 +9645,9 @@ switcher, the chip and the approval controls; Phase 8 (W8.12) to the changes tog
 "Rewind files to here", and the allow-rule checkbox and scope; Phase 9 (W9.13) to the queue's Edit and Cancel, the strip
 toggle, the task trigger, the plan buttons and the mention rows; Phase 10 (W10.13) to the dock toggle, a row's Stop,
 Stop all, the Customize row menus, the Remember radios and the editor's footer buttons; Phase 11 (W11.13) to the hook
-row menus, the trust dialog's checkboxes and Approve, Reconnect, the trust chip and the style trigger.
+row menus, the trust dialog's checkboxes and Approve, Reconnect, the trust chip and the style trigger; Phase 12
+(W12.14) to the marketplace chips and entry buttons, the import wizard's checkboxes and Import, the project file
+editor's buttons and the hook editor's Type toggle.
 
 Every project runs with `use.permissions: ['microphone']` and the Chromium flags `--use-fake-ui-for-media-stream`,
 `--use-fake-device-for-media-stream` and `--autoplay-policy=no-user-gesture-required`, so the voice spec records from a
@@ -8727,6 +9713,21 @@ fake device and read-aloud plays without a gesture. If the flags fail in headles
     environment).
   - **shell lines**: the `` !`cmd` `` lines of a command file ("Commands with shell lines", "/{name} runs shell lines you
     haven't approved.").
+- **Terms** (Phase 12):
+  - **Claude Code plugin** (the badge "Claude Code"): a plugin in Claude Code's folder layout; never "CC plugin" or
+    "foreign plugin". **marketplace**: a catalog of Claude Code plugins ("Add marketplace…", "Refresh"); never "store",
+    "registry" or "repo" in UI copy (the source is "GitHub repository", "URL" or "Folder on this server").
+  - **Import from Claude Code** (the wizard; never "sync" or "migrate": it copies once); **turned off**: an imported or
+    restored item that runs commands and waits for the user to turn it on ("Imported turned off: it runs shell
+    lines.").
+  - **qualified name**: docs only; the UI shows the name as it is typed (`/review-kit:review`) and calls the first part
+    the plugin's name ("Commands run as /{plugin}:{command}.").
+  - **prompt hook** (the Type "Prompt"): a hook that asks a model; its result is "ok" or "not ok with a reason"; never
+    "AI hook" or "LLM hook". The model that answers is the **hook model**.
+  - **Claude model names**: `sonnet`, `opus`, `haiku`, `fable` as written in Claude Code files (mono); never "aliases"
+    in UI copy.
+  - **project file**: a definition, settings or `.mcp.json` file of a project edited in the UI ("Edit…", "Save file");
+    "changed on disk" for a stale file; **Review** stays the word for approving what a saved file runs.
 
 Key strings:
 
@@ -8816,3 +9817,11 @@ Key strings:
 | Composer refusal (Phase 11) | "A hook blocked this message" · "{event} · {source}" · "Personal hook" · "Project hook" · "Plugin hook" · "/{name} runs shell lines you haven't approved." · "This command runs shell lines you haven't approved." · "Review…" · "Dismiss" |
 | Plugins (Phase 11) | "Hooks" · "Runs only while you trust this plugin." · "Hooks can read and change prompts, messages and tool calls." · "Code hooks" (list name) · "Runs these commands" · "{event} hook" · "/{name}" (their sources) · "Output styles" · "How the agent writes its replies." · "{n} hooks" ("1 hook") · "{n} output styles" ("1 output style") · "Open in Customize" |
 | Settings → Data (Phase 11) | "Download a zip with every chat, including archived chats and every message version, and your personal agents, commands, skills and output styles. API keys, passwords, plugins, MCP servers, hooks, project approvals and share links are never included." · "General and appearance settings, and your personal agents, commands, skills and output styles. A personal definition you already have with the same name is kept; commands with shell lines come back turned off." · result panel: "{n} personal definitions restored" ("1 personal definition restored") · "{k} kept" · "{f} failed" · Projects: "Style: {name}" |
+| Marketplaces (Phase 12) | "Marketplaces" · "Browse plugins from Claude Code marketplaces." · "Refresh all" · "Add marketplace…" · "Add marketplace" · "GitHub repository, marketplace.json URL or a folder on this server" · "GitHub" · "URL" · "Folder on this server" · "Enter owner/repo, an https URL or an absolute folder path." · "Add" · "Added {name}" · "Anthropic's official plugins" · "Dismiss" · "Marketplace" (chips and select name) · "All {n}" · "{name} {n}" · "· {u} updates" · "{name}, {n} plugins" (chip name) · ", last refresh failed" · "refreshed {relative time}" · "Actions for {name}" · "Refresh" · "Remove…" · "Remove {name}?" · "Removing a marketplace keeps the plugins you installed from it." · "Remove" · "Removed {name}" · "Could not refresh {name}: {message}" · "Search plugins…" · "Category" · "All" · "Install…" · "Install {name}" · "Installed" · "Open" · "Installed · Update to {version}" · "Update…" · "Update {name}" · "Unsupported source ({type})" · state words "Available" · "Installed" · "Update available" · "Unsupported" · "GitHub {repo}" · "npm {package}" · "Archive {host}" · "In this marketplace" · "No marketplaces yet. Add one from GitHub, a marketplace.json URL or a folder on this server." · "No plugins match" · "Clear filters" · "{name} lists no plugins." · "Loading marketplaces…" (sr-only) · "Could not load the marketplaces" · "Retry" · nav: "Marketplaces" · "{n} updates available" (sr-only) |
+| Install and update (Phase 12) | tab "GitHub" · "Repository" · "Branch, tag or commit (optional)" · "Folder in the repository (optional)" · "Downloads an archive of the exact commit over HTTPS. Nothing runs before you review it." · "Claude Code plugin" · "Resolved commit {sha7}" · "Commands run as /{plugin}:{command}." · "Agents start as {plugin}:{agent}." · "Asks for:" · "(secret)" · "(required)" · "Ignored:" · "LSP servers aren't supported" · "Never run" · "http hook handlers aren't supported" · "Unknown hook event" · "Needs a project folder" · "This plugin installs turned off." · "The files are pinned as a whole: editing any file of the plugin asks for your trust again." · "MCP server {name}" · "Install {name}" · "Update {name}" · "Downloading {name}…" · "Installed {name}" · "Installed {name}. It's turned off until you turn it on." · "Updated {name} to {version}" · "{name} is up to date." · "The plugin changed while you reviewed it. Review it again." · banner "Version {version} is available from {marketplace}." · "A newer commit is available from {marketplace}." · "Update…" · card "Update {version}" · "Claude Code" (badge) · "GitHub" / "{marketplace}" (source badges) · detail "From {marketplace}" · "GitHub · {repo}@{sha7}" · "Claude Code plugin" (Overview section) · "(absolute path on the server)" |
+| Import from Claude Code (Phase 12) | "Import from Claude Code" · "Import from Claude Code…" · "Step {n} of 3" · "Where is your .claude folder?" · "Choose your .claude folder…" · "+ .claude.json (MCP servers)" · "{n} files picked" · "Nothing to import in this folder." · "Upload a zip…" · "Scan {path} on this server" · "Scanning is turned off on this server (HF_CLAUDE_HOME=0)." · "There is no .claude folder at {path}." · "harness-forge can't read {path}." · "Only agents, commands, skills, output styles, settings.json, CLAUDE.md and the mcpServers of .claude.json are read." · "Cancel" · "Continue" · "The upload is larger than 32 MiB." · "Scanning this server's Claude Code folder needs your password." · "Found {n} items" ("Found 1 item") · groups "Agents" · "Commands" · "Skills" · "Output styles" · "Hooks" · "MCP servers" · "Allowed shell commands" · "Denied tools" · "Instructions" · "Settings" · "Unsupported" · "{group} · {n}" · "Select all {n}" · statuses "New" · "Replaces yours" · "Unchanged" · "Conflict" · "Unsupported" · "Invalid" · "linked" · resolutions "Keep mine" · "Replace" · "Import as {name}" · "Imported turned off: it runs shell lines." · "Imported turned off: it starts a program." · "Turn on after import" · "Needs {names}" · "{name} value" · "From the project {path}: imported turned off." · "Add to your instructions" · "Append" · "Replace" · "Skip" · reasons "Only allowed Bash commands are imported." · "Never run." · "Install plugins from Plugins → Marketplaces." · "Includes {n} items that run commands on this server." · "Back" · "Import {n} items" ("Import 1 item") · "Importing hooks and commands that run on this server needs your password." · "Importing from Claude Code needs your password." · "This preview expired. Start again." · "Start again" · "Discard this import?" · "Keep reviewing" · "Discard" · result "Imported {n} items · {s} skipped · {f} failed" · "{t} commands turned off (they run shell lines)" ("1 command turned off (it runs shell lines)") · "Open Customize" · "MCP servers" · "Close" |
+| Project files (Phase 12) | "Edit {file}" · "New {kind} in {project}" · "Folder" · "Name" · "Copy path" · "File content" (editor name) · "Saving never approves hooks or shell lines." · "Save file" · "Saved {path}." · "Saved {path}. {n} items need your approval." ("Saved {path}. 1 item needs your approval.") · "Review" · "{file} changed on disk after you opened it." · "Load from disk" · "Overwrite" · "This file no longer exists." · "Close" · "Delete {path}?" · "The file is removed from the project folder. It can't be undone here." · "Delete file" · "Discard changes?" · "Your changes are lost." · "Discard" · "Keep editing" · "New file…" · "Edit .mcp.json…" · "Edit" (viewer footer) · "{n} servers" (summary of `.mcp.json`) |
+| Hooks (Phase 12) | editor: "Type" · "Command" · "Prompt" · "The model reads this with the event as JSON. $ARGUMENTS marks where the JSON goes; without it, the JSON is added at the end." · "Model" · "Hook model" (no model chosen) · "Runs with {model} (Settings → General → Hook model). It answers ok, or not ok with a reason." · "Continue on block" · "The reason goes back to the agent as feedback instead of ending the turn." · "A prompt hook asks a model about every matching event, using tokens each time. Its answer can block a call or make the agent continue, never allow one." · "Prompt hooks work only for {events}." · "Add the prompt." · "Use at most 16,384 characters." · "Agent types" · "Agent type names separated by \|, like explore\|general. Leave it empty for every sub-agent." · "Arguments" · "Run in the background" · "Only when" · "A tool name or a Bash rule such as Bash(npm run *). Other rules never run." · "Status message" · "Where" · rows: "In the background" · "Only when {rule}" · "Plugin not trusted" · "Review plugin…" · "{file}: The hook event {event} isn't supported." · "{file}: {type} hooks aren't supported." · import: "Ignored: {type} hooks aren't supported." · chat: "Allowed by hook · still asks" · "harness-forge still asks for this call (plan mode, a tool that runs commands, or an Always ask policy)." · ", allowed by hook, still asks" (sr-only) · "Personal prompt hook" · "Project prompt hook" · "Prompt hook from {plugin}" · "The model's answer could not be read." · "Allowed by a PermissionRequest hook" · "Blocked by a PermissionRequest hook: {reason}" · trust item "Prompt" · "Model: {model}" · "Model: Hook model" · Settings: "Hook model" · "Automatic (the provider's small model)" · "Answers prompt hooks that don't name a model. Automatic uses the small model of the chat's provider, else the chat's model." · "Claude model names" · "Not set" · "Agents, skills and hooks from Claude Code can name a model as sonnet, opus, haiku or fable. Choose the model each name runs. A name that isn't set uses the default model, with a note in the chat." · "Long chats, sub-agents, plans and hooks." |
+| Hook events (Phase 12) | PostToolUseFailure: "After a tool call failed. It can give the agent feedback." · PermissionRequest: "When harness-forge is about to ask you to approve a tool call. It can allow or deny the call." · SubagentStart: "When a sub-agent starts. It can add context for the sub-agent." · PostCompact: "After the conversation was compacted." · SessionEnd: "When you delete a chat." |
+| Frontmatter fields (Phase 12) | "Tools not allowed" · "Tools not allowed in this turn" · "Removed after the allowed tools. A rule with arguments, like Bash(rm *), removes the whole tool." · "Max turns" · "At most this many steps; the sub-agent step limit still applies." · "Enter a whole number from 1 to 200." · "Color" · "None" · "Red" · "Blue" · "Green" · "Yellow" · "Purple" · "Orange" · "Pink" · "Cyan" · "Marks this agent's runs in the chat." · "Skills" · "Loaded into the sub-agent's instructions when it starts." · "Choose at most 5 skills." · "When to use" · "Added to the description the agent reads." · "Run in a sub-agent" · "The skill runs as a sub-agent and only its report comes back." · "Agent" · row meta "Runs in a sub-agent" · body help "$ARGUMENTS[0] or $0 is the first argument when the file uses them or declares arguments; $name reads a named argument; ${CLAUDE_SKILL_DIR} is the skill's folder." |
+| Settings → Data (Phase 12) | "Import from Claude Code…" · "Agents, commands, skills, hooks and MCP servers from a Claude Code folder." · "{t} commands turned off (they run shell lines)" ("1 command turned off (it runs shell lines)") |

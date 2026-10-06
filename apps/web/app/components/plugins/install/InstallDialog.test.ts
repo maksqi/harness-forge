@@ -26,6 +26,7 @@ function inspection(overrides: Partial<PluginInspection> = {}): PluginInspection
   return {
     manifest: { manifestVersion: 1, id: 'acme', name: 'Acme', version: '1.2.0', description: 'Acme models', engines: { harness: '^1.0.0' } },
     kind: 'declarative',
+    format: 'harness',
     source: 'zip',
     sha256: HASH,
     contributions: { providers: ['acme'], models: 2, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] },
@@ -37,6 +38,7 @@ function inspection(overrides: Partial<PluginInspection> = {}): PluginInspection
     existing: null,
     files: { count: 2, bytes: 1200 },
     warnings: [],
+    claude: null,
     ...overrides,
   }
 }

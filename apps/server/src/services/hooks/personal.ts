@@ -37,6 +37,8 @@ export interface PersonalHookStore {
 export function personalHookOf(row: HookRow): PersonalHook {
   return {
     id: row.id,
+    // Phase 12 (C40 compile fix): every stored row is a command hook until the `hooks.type` column lands (P12-0b).
+    type: 'command',
     event: row.event,
     matcher: row.matcher,
     command: row.command,
@@ -49,6 +51,16 @@ export function personalHookOf(row: HookRow): PersonalHook {
 
 function notFound(id: string): HarnessError {
   return new HarnessError({ code: 'not_found', message: `Hook ${id} not found.` })
+}
+
+/** The Phase 12 hook fields (ADR-057) the `hooks` table cannot store yet (columns of P12-0b, behavior of W12.5). */
+const PHASE_12_FIELDS = ['args', 'async', 'if', 'statusMessage', 'prompt', 'model', 'continueOnBlock'] as const
+
+/** Phase 12 (C40 compile fix): refuses prompt hooks and the new handler fields until they can be stored. */
+function refusePhase12Fields(body: Readonly<Record<string, unknown>>): void {
+  const field = PHASE_12_FIELDS.find(key => body[key] !== undefined)
+  if (body.type === 'prompt' || field !== undefined)
+    throw new HarnessError({ code: 'not_implemented', message: `Prompt hooks and the field "${field ?? 'type'}" are not supported yet.` })
 }
 
 /** A blank matcher is stored as null (every target); otherwise the trimmed matcher. */
@@ -117,6 +129,9 @@ export function createPersonalHookStore(deps: Pick<AppDeps, 'db'>, options: Pers
       const parsed = hookCreateSchema.safeParse(body)
       if (!parsed.success)
         throw validationError(parsed.error)
+      refusePhase12Fields(parsed.data)
+      if (parsed.data.type === 'prompt')
+        throw new HarnessError({ code: 'not_implemented', message: 'Prompt hooks are not supported yet.' })
       const [total] = await guardDb(() => db.select({ value: count() }).from(hooks))
       if ((total?.value ?? 0) >= LIMITS.personalHooksMax)
         throw new HarnessError({ code: 'conflict', message: PERSONAL_HOOKS_FULL_MESSAGE, details: { reason: 'exists' } })
@@ -143,6 +158,7 @@ export function createPersonalHookStore(deps: Pick<AppDeps, 'db'>, options: Pers
       const parsed = hookUpdateSchema.safeParse(body)
       if (!parsed.success)
         throw validationError(parsed.error)
+      refusePhase12Fields(parsed.data)
       const current = await find(id)
       const patch = parsed.data
       const next: HookRow = {

@@ -1,3 +1,4 @@
+/* eslint-disable no-template-curly-in-string -- literal `${CLAUDE_SKILL_DIR}` placeholders are test data */
 import type {
   AgentDefinitionFields,
   CommandDefinitionFields,
@@ -12,6 +13,10 @@ import type {
 import { describe, expect, it } from 'vitest'
 import { AGENT_NAME_PATTERN, CLIENT_COMMANDS, COMMAND_NAME_PATTERN, HARNESS_COMMANDS } from '../ids.ts'
 import {
+  AGENT_COLORS,
+  ARGUMENT_NAME_PATTERN,
+  CLAUDE_UNSUPPORTED_DEFINITION_KEYS,
+  claudeModelAlias,
   CUSTOMIZATION_KINDS,
   DEFINITION_DIAGNOSTIC_CODES,
   DEFINITION_DIAGNOSTIC_LEVELS,
@@ -20,6 +25,7 @@ import {
   formatDefinition,
   parseDefinition,
   resolvePrecedence,
+  setDefinitionName,
   skillInvocation,
   styleNameFromLabel,
 } from './definitions.ts'
@@ -125,15 +131,17 @@ describe('parseDefinition: agents', () => {
       '',
       '1. Run git diff.',
     ]), { fileName: 'code-reviewer.md' })
+    // Phase 12 (ADR-058): `color` is read and the Claude model name is kept as `modelAlias`.
     expect(agent(result)).toEqual({
       name: 'code-reviewer',
       description: 'Expert code reviewer. Use proactively after writing code.',
       tools: ['read_file', 'search_files', 'find_files', 'shell'],
       model: null,
       instructions: 'You are a senior code reviewer.\n\n1. Run git diff.',
+      color: 'blue',
+      modelAlias: 'sonnet',
     })
-    expect(codes(result)).toEqual(['info:model-alias@5', 'info:ignored-key@6'])
-    expect(result.diagnostics[1]?.message).toBe('Line 6: The key "color" is ignored.')
+    expect(codes(result)).toEqual(['info:model-alias@5'])
   })
 
   it('reads tools as a block list or a flow list', () => {
@@ -390,12 +398,14 @@ describe('parseDefinition: skills', () => {
       '',
       'Use pypdf.',
     ]), { folderName: 'pdf' })
+    // Phase 12 (ADR-058): skills read `allowed-tools`.
     expect(skill(result)).toEqual({
       name: 'pdf',
       description: 'Extract text and tables from PDF files.\nUse when the user mentions PDFs.',
       content: '# PDF processing\n\nUse pypdf.',
+      allowedTools: ['read_file', 'shell'],
     })
-    expect(codes(result)).toEqual(['info:ignored-key@6', 'info:ignored-key@7', 'info:ignored-key@8'])
+    expect(codes(result)).toEqual(['info:ignored-key@6', 'info:ignored-key@8'])
   })
 
   it('warns about an empty skill and requires a description', () => {
@@ -1101,6 +1111,402 @@ describe('resolvePrecedence', () => {
     for (const { entry, by } of result.shadowed) {
       expect(definitionRank(by)).toBeGreaterThanOrEqual(definitionRank(entry))
       expect(result.active).toContain(by)
+    }
+  })
+})
+
+// =====================================================================================================================
+// Phase 12 (ADR-058, C42): Claude Code frontmatter keys, model aliases, setDefinitionName
+
+describe('phase 12: agent keys', () => {
+  it('reads a Claude Code agent with every new key', () => {
+    const result = parseDefinition('agent', md([
+      '---',
+      'name: security-reviewer',
+      'description: Reviews code for security problems.',
+      'tools: Read, Grep, Glob, Bash',
+      'disallowedTools: Write, Edit, mcp__github__*',
+      'model: opus',
+      'maxTurns: 12',
+      'color: Purple',
+      'skills:',
+      '  - pr-review',
+      '  - review-kit:security-checklist',
+      'permissionMode: plan',
+      'memory: project',
+      '---',
+      'Review the diff.',
+    ]))
+    expect(agent(result)).toEqual({
+      name: 'security-reviewer',
+      description: 'Reviews code for security problems.',
+      tools: ['read_file', 'search_files', 'find_files', 'shell'],
+      model: null,
+      instructions: 'Review the diff.',
+      disallowedTools: ['write_file', 'edit_file', 'mcp__github__*'],
+      maxTurns: 12,
+      color: 'purple',
+      skills: ['pr-review', 'review-kit:security-checklist'],
+      modelAlias: 'opus',
+    })
+    expect(codes(result)).toEqual(['info:model-alias@6', 'info:ignored-key@12', 'info:ignored-key@13'])
+    expect(result.diagnostics[1]?.message).toBe('Line 12: The key "permissionMode" is ignored; harness-forge does not support it.')
+  })
+
+  it.each([
+    ['1', 1, []],
+    ['200', 200, []],
+    ['"7"', 7, []],
+    ['201', 200, ['warning:invalid-field@4']],
+    ['0', null, ['warning:invalid-field@4']],
+    ['-3', null, ['warning:invalid-field@4']],
+    ['1.5', null, ['warning:invalid-field@4']],
+    ['many', null, ['warning:invalid-field@4']],
+    ['[3]', null, ['warning:invalid-field@4']],
+    ['', null, []],
+  ] as const)('reads maxTurns %j', (raw, maxTurns, expected) => {
+    const result = parseDefinition('agent', md(['---', 'name: a', 'description: d', `maxTurns: ${raw}`, '---']))
+    expect(agent(result).maxTurns).toBe(maxTurns ?? undefined)
+    expect(codes(result)).toEqual(expected)
+  })
+
+  it.each([
+    ['blue', 'blue', []],
+    ['CYAN', 'cyan', []],
+    [' orange ', 'orange', []],
+    ['magenta', null, ['warning:invalid-field@4']],
+    ['5', null, ['warning:invalid-field@4']],
+    ['', null, []],
+  ] as const)('reads color %j', (raw, color, expected) => {
+    const result = parseDefinition('agent', md(['---', 'name: a', 'description: d', `color: ${raw}`, '---']))
+    expect(agent(result).color).toBe(color ?? undefined)
+    expect(codes(result)).toEqual(expected)
+  })
+
+  it('reads skills as a list or a text and caps them', () => {
+    const read = (line: string) => parseDefinition('agent', md(['---', 'name: a', 'description: d', line, '---']))
+    expect(agent(read('skills: pdf, Review-Kit:Checks')).skills).toEqual(['pdf', 'review-kit:checks'])
+    expect(agent(read('skills: [a, b, a]')).skills).toEqual(['a', 'b'])
+    const many = read('skills: [a, b, c, d, e, f, g]')
+    expect(agent(many).skills).toEqual(['a', 'b', 'c', 'd', 'e'])
+    expect(codes(many)).toEqual(['warning:limit@4'])
+    const invalid = read('skills: [ok, "bad name", 5, "a:b:c:d:e"]')
+    expect(agent(invalid).skills).toEqual(['ok'])
+    expect(codes(invalid)).toEqual(['warning:invalid-field@4'])
+    expect(agent(read('skills: []')).skills).toBeUndefined()
+    expect(codes(read('skills: {a: 1}'))).toEqual(['warning:invalid-field@4'])
+  })
+
+  it('reads disallowedTools like tools, with deny wording', () => {
+    const read = (line: string) => parseDefinition('agent', md(['---', 'name: a', 'description: d', line, '---']))
+    expect(agent(read('disallowedTools: [Bash, WebFetch]')).disallowedTools).toEqual(['shell', 'web_fetch'])
+    const pattern = read('disallowedTools: Bash(rm:*)')
+    expect(agent(pattern).disallowedTools).toEqual(['shell'])
+    expect(pattern.diagnostics[0]?.message).toBe('Line 4: Tool patterns are not supported; shell is removed entirely.')
+    const invalid = read('disallowedTools: {a: 1}')
+    expect(agent(invalid).disallowedTools).toBeUndefined()
+    expect(invalid.diagnostics[0]?.message).toBe('Line 4: The disallowed tool list must be a comma-separated text or a list; it was ignored.')
+    expect(agent(read('disallowedTools: []')).disallowedTools).toBeUndefined()
+    const hint = read('disallowed-tools: Bash')
+    expect(hint.diagnostics[0]?.message).toBe('Line 4: The key "disallowed-tools" is ignored; agents use "disallowedTools".')
+  })
+})
+
+describe('phase 12: model aliases', () => {
+  it.each([
+    ['sonnet', 'sonnet'],
+    ['Sonnet', 'sonnet'],
+    ['opus', 'opus'],
+    ['haiku', 'haiku'],
+    ['fable', 'fable'],
+    ['opusplan', 'opus'],
+    ['sonnet[1m]', 'sonnet'],
+    ['opusplan[1m]', 'opus'],
+    ['claude-sonnet-4-5', 'claude-sonnet-4-5'],
+    ['Claude-Opus-4-1-20250805[1m]', 'claude-opus-4-1-20250805'],
+    ['claude-3-5-haiku-20241022', 'claude-3-5-haiku-20241022'],
+    ['claude-x y', null],
+    ['claude-', null],
+    ['anthropic:claude-sonnet-4-5', null],
+    ['inherit', null],
+    ['gpt-4o', null],
+    ['', null],
+  ])('claudeModelAlias(%j) = %j', (value, alias) => {
+    expect(claudeModelAlias(value)).toBe(alias)
+  })
+
+  it('keeps model null and sets modelAlias for every kind that reads a model', () => {
+    const text = md(['---', 'name: a', 'description: d', 'model: "claude-sonnet-4-5[1m]"', '---', 'x'])
+    for (const kind of ['agent', 'command', 'skill'] as const) {
+      const result = parseDefinition(kind, text, { fileName: 'a.md', folderName: 'a' })
+      expect(result.definition?.fields).toMatchObject({ modelAlias: 'claude-sonnet-4-5' })
+      expect((result.definition?.fields as { model?: unknown }).model ?? null).toBeNull()
+      expect(codes(result)).toEqual(['info:model-alias@4'])
+    }
+    // An unusable Claude-looking name keeps the Phase 10 reading (no alias).
+    const odd = parseDefinition('agent', md(['---', 'name: a', 'description: d', 'model: claude-x y', '---']))
+    expect(agent(odd)).not.toHaveProperty('modelAlias')
+    expect(codes(odd)).toEqual(['info:model-alias@4'])
+  })
+})
+
+describe('phase 12: command and skill keys', () => {
+  it('reads a Claude Code command with every new key', () => {
+    const result = parseDefinition('command', md([
+      '---',
+      'description: Fix a GitHub issue',
+      'when_to_use: When the user names an issue number.',
+      'argument-hint: [issue] [branch]',
+      'arguments: issue branch',
+      'model: haiku',
+      'allowed-tools: Bash(gh:*), Read',
+      'disallowed-tools: WebFetch',
+      'context: fork',
+      'agent: Explore',
+      'effort: high',
+      '---',
+      'Fix issue $issue on $branch ($ARGUMENTS[0]).',
+    ]), { fileName: 'fix-issue.md' })
+    expect(command(result)).toEqual({
+      name: 'fix-issue',
+      description: 'Fix a GitHub issue',
+      argumentHint: '[issue] [branch]',
+      model: null,
+      allowedTools: ['shell', 'read_file'],
+      body: 'Fix issue $issue on $branch ($ARGUMENTS[0]).',
+      whenToUse: 'When the user names an issue number.',
+      arguments: ['issue', 'branch'],
+      disallowedTools: ['web_fetch'],
+      context: 'fork',
+      agent: 'explore',
+      modelAlias: 'haiku',
+    })
+    expect(codes(result)).toEqual(['info:model-alias@6', 'warning:tool-pattern@7', 'info:ignored-key@11'])
+  })
+
+  it('reads a Claude Code skill with every new key', () => {
+    const result = parseDefinition('skill', md([
+      '---',
+      'name: deploy',
+      'description: Deploy the app.',
+      'when_to_use: After the tests pass.',
+      'arguments: [environment]',
+      'allowed-tools: Bash, Read',
+      'disallowed-tools: [Write]',
+      'model: mock:echo',
+      'context: fork',
+      'agent: general-purpose',
+      'license: MIT',
+      'paths: ["src/**"]',
+      '---',
+      'Deploy to $environment from ${CLAUDE_SKILL_DIR}.',
+    ]))
+    expect(skill(result)).toEqual({
+      name: 'deploy',
+      description: 'Deploy the app.',
+      content: 'Deploy to $environment from ${CLAUDE_SKILL_DIR}.',
+      whenToUse: 'After the tests pass.',
+      arguments: ['environment'],
+      allowedTools: ['shell', 'read_file'],
+      disallowedTools: ['write_file'],
+      model: 'mock:echo',
+      context: 'fork',
+      agent: 'general-purpose',
+    })
+    expect(codes(result)).toEqual(['info:ignored-key@11', 'info:ignored-key@12'])
+    expect(skill(parseDefinition('skill', md(['---', 'name: a', 'description: d', 'allowed-tools: []', '---', 'x']))).allowedTools).toEqual([])
+    expect(codes(parseDefinition('skill', md(['---', 'name: a', 'description: d', 'model: inherit', '---', 'x'])))).toEqual(['info:invalid-model@4'])
+  })
+
+  it.each([
+    ['arguments: [a, b_2, _c]', ['a', 'b_2', '_c'], []],
+    ['arguments: "issue, branch"', ['issue', 'branch'], []],
+    ['arguments: [Issue]', undefined, ['warning:invalid-field@4']],
+    ['arguments: [a, a]', undefined, ['warning:invalid-field@4']],
+    ['arguments: [a, 2b]', undefined, ['warning:invalid-field@4']],
+    ['arguments: 5', undefined, ['warning:invalid-field@4']],
+    [`arguments: [${'x'.repeat(33)}]`, undefined, ['warning:invalid-field@4']],
+    ['arguments: [a, b, c, d, e, f, g, h, i, j, k]', ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'], ['warning:limit@4']],
+    ['arguments: []', undefined, []],
+  ] as const)('reads %j', (line, names, expected) => {
+    for (const kind of ['command', 'skill'] as const) {
+      const result = parseDefinition(kind, md(['---', 'name: a', 'description: d', line, '---', 'x']))
+      expect((result.definition?.fields as { arguments?: unknown }).arguments).toEqual(names)
+      expect(codes(result)).toEqual(expected)
+    }
+    expect(ARGUMENT_NAME_PATTERN.test('issue_number')).toBe(true)
+  })
+
+  it('reads when_to_use and the fork keys', () => {
+    const read = (lines: string[]) => parseDefinition('command', md(['---', 'name: a', 'description: d', ...lines, '---', 'x']))
+    const long = read([`when_to_use: ${'w'.repeat(1100)}`])
+    expect(command(long).whenToUse).toHaveLength(DEFINITION_LIMITS.whenToUseMaxChars)
+    expect(codes(long)).toEqual(['warning:invalid-field@4'])
+    expect(codes(read(['when_to_use: [a]']))).toEqual(['warning:invalid-field@4'])
+    expect(command(read(['when_to_use: "  "']))).not.toHaveProperty('whenToUse')
+    // `agent` counts only with `context: fork`.
+    const agentOnly = read(['agent: explore'])
+    expect(command(agentOnly)).not.toHaveProperty('agent')
+    expect(codes(agentOnly)).toEqual(['info:ignored-key@4'])
+    const inline = read(['context: inline', 'agent: explore'])
+    expect(command(inline)).not.toHaveProperty('context')
+    expect(codes(inline)).toEqual(['warning:invalid-field@4', 'info:ignored-key@5'])
+    const badAgent = read(['context: FORK', 'agent: "two words"'])
+    expect(command(badAgent)).toMatchObject({ context: 'fork' })
+    expect(command(badAgent)).not.toHaveProperty('agent')
+    expect(codes(badAgent)).toEqual(['warning:invalid-field@5'])
+    expect(command(read(['context: fork']))).toMatchObject({ context: 'fork' })
+    const hint = read(['disallowedTools: Bash'])
+    expect(hint.diagnostics[0]?.message).toBe('Line 4: The key "disallowedTools" is ignored; use "disallowed-tools".')
+  })
+
+  it('reports every unsupported Claude Code key as an info', () => {
+    for (const key of CLAUDE_UNSUPPORTED_DEFINITION_KEYS) {
+      for (const kind of ['agent', 'command', 'skill'] as const) {
+        const result = parseDefinition(kind, md(['---', 'name: a', 'description: d', `${key}: x`, '---', 'x']))
+        expect(result.definition).not.toBeNull()
+        expect(result.diagnostics).toEqual([{ level: 'info', code: 'ignored-key', message: `Line 4: The key "${key}" is ignored; harness-forge does not support it.`, line: 4 }])
+      }
+    }
+    expect(AGENT_COLORS).toEqual(['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'cyan'])
+  })
+
+  it('never quotes the new values in messages', () => {
+    const secret = 'SecretToken'
+    const text = md(['---', 'name: a', 'description: d', `maxTurns: ${secret}`, `color: ${secret}`, `skills: [${secret} x]`, `arguments: [${secret}]`, `when_to_use: [${secret}]`, `context: ${secret}`, `agent: ${secret} x`, `disallowedTools: {${secret}: 1}`, `disallowed-tools: {${secret}: 1}`, `model: claude-${secret} x`, '---', 'x'])
+    for (const kind of CUSTOMIZATION_KINDS) {
+      for (const entry of parseDefinition(kind, text).diagnostics)
+        expect(entry.message).not.toContain(secret)
+    }
+  })
+})
+
+describe('phase 12: formatDefinition writes the new keys', () => {
+  it('writes them in order and round-trips', () => {
+    const agentFields: AgentDefinitionFields = { name: 'r', description: 'd', tools: ['read_file'], model: null, instructions: 'Go.', disallowedTools: ['shell'], maxTurns: 5, color: 'red', skills: ['pdf', 'kit:lint'], modelAlias: 'sonnet' }
+    const agentText = formatDefinition({ kind: 'agent', fields: agentFields })
+    expect(agentText).toBe('---\nname: r\ndescription: d\ntools:\n  - read_file\ndisallowedTools:\n  - shell\nmodel: sonnet\nmaxTurns: 5\nskills:\n  - pdf\n  - kit:lint\ncolor: red\n---\n\nGo.\n')
+    expect(parseDefinition('agent', agentText).definition).toEqual({ kind: 'agent', fields: agentFields })
+    const commandFields: CommandDefinitionFields = { name: 'c', description: 'd', argumentHint: '[a]', model: null, allowedTools: null, body: 'Do $a.', whenToUse: 'Often: always.', arguments: ['a'], disallowedTools: ['web_fetch'], context: 'fork', agent: 'explore', modelAlias: 'claude-haiku-4-5' }
+    const commandText = formatDefinition({ kind: 'command', fields: commandFields })
+    expect(commandText).toBe('---\nname: c\ndescription: d\nwhen_to_use: "Often: always."\nargument-hint: "[a]"\narguments:\n  - a\nmodel: claude-haiku-4-5\ndisallowed-tools:\n  - web_fetch\ncontext: fork\nagent: explore\n---\n\nDo $a.\n')
+    expect(parseDefinition('command', commandText).definition).toEqual({ kind: 'command', fields: commandFields })
+    const skillFields: SkillDefinitionFields = { name: 's', description: 'd', content: 'Body', userInvocable: false, argumentHint: '<x>', whenToUse: 'w', arguments: ['x'], allowedTools: [], disallowedTools: ['shell'], model: 'mock:echo', context: 'fork' }
+    const skillText = formatDefinition({ kind: 'skill', fields: skillFields })
+    expect(skillText).toBe('---\nname: s\ndescription: d\nwhen_to_use: w\nargument-hint: <x>\narguments:\n  - x\nuser-invocable: false\nmodel: mock:echo\nallowed-tools: []\ndisallowed-tools:\n  - shell\ncontext: fork\n---\n\nBody\n')
+    expect(parseDefinition('skill', skillText).definition).toEqual({ kind: 'skill', fields: skillFields })
+    // `agent` without `context: fork` is not written (it would be dropped on reading).
+    expect(formatDefinition({ kind: 'command', fields: { ...commandFields, context: undefined, agent: 'explore' } })).not.toContain('agent:')
+  })
+
+  it('round-trips random definitions with the new keys', () => {
+    const random = prng(0xC42D)
+    const pick = picker(random)
+    const maybe = <T>(value: () => T): T | undefined => (random() < 0.5 ? value() : undefined)
+    const names = ['issue', 'branch', 'pr_number', '_x', 'a1']
+    const refs = ['pdf', 'review-kit:checks', 'a', 'explore', 'general-purpose', 'kit:db:migrate']
+    const tools = ['shell', 'read_file', 'web_fetch', 'mcp__github__*', 'write_file']
+    const aliases = ['sonnet', 'opus', 'haiku', 'fable', 'claude-sonnet-4-5', 'claude-3-5-haiku-20241022']
+    const list = <T>(pool: readonly T[], max: number): T[] => [...new Set(Array.from({ length: 1 + Math.floor(random() * max) }, () => pick(pool)))]
+    const clean = <T extends object>(value: T): T => Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as T
+    for (let iteration = 0; iteration < 400; iteration++) {
+      const alias = maybe(() => pick(aliases))
+      const fork = random() < 0.5
+      const definitions: ParsedDefinition[] = [
+        { kind: 'agent', fields: clean({ name: 'a', description: 'd', tools: random() < 0.5 ? null : list(tools, 3), model: alias === undefined ? pick([null, 'mock:echo', 'inherit']) : null, instructions: 'x', disallowedTools: maybe(() => list(tools, 3)), maxTurns: maybe(() => 1 + Math.floor(random() * 200)), color: maybe(() => pick(AGENT_COLORS)), skills: maybe(() => list(refs, 5)), modelAlias: alias }) },
+        { kind: 'command', fields: clean({ name: 'c', description: 'd', argumentHint: null, model: alias === undefined ? pick([null, 'mock:echo']) : null, allowedTools: random() < 0.5 ? null : list(tools, 3), body: 'Do $issue.', whenToUse: maybe(() => pick(['w', 'When: asked', '[x] y'])), arguments: maybe(() => list(names, 4)), disallowedTools: maybe(() => list(tools, 2)), context: fork ? 'fork' as const : undefined, agent: fork ? maybe(() => pick(refs)) : undefined, modelAlias: alias }) },
+        { kind: 'skill', fields: clean({ name: 's', description: 'd', content: 'Body', whenToUse: maybe(() => 'w'), arguments: maybe(() => list(names, 4)), allowedTools: maybe(() => list(tools, 2)), disallowedTools: maybe(() => list(tools, 2)), model: alias === undefined ? maybe(() => 'mock:echo') : undefined, modelAlias: alias, context: fork ? 'fork' as const : undefined, agent: fork ? maybe(() => pick(refs)) : undefined }) },
+      ]
+      for (const definition of definitions) {
+        const text = formatDefinition(definition)
+        const result = parseDefinition(definition.kind, text)
+        expect({ text, definition: result.definition }).toEqual({ text, definition })
+        expect(result.diagnostics.filter(entry => entry.level !== 'info')).toEqual([])
+        expect(formatDefinition(result.definition as ParsedDefinition)).toBe(text)
+      }
+    }
+  })
+})
+
+describe('setDefinitionName', () => {
+  it.each([
+    ['inserts a frontmatter into a file without one', 'Fix the failing test.\n', '---\nname: fix\n---\nFix the failing test.\n'],
+    ['inserts name as the first frontmatter line', '---\ndescription: d\n# comment\nmodel: haiku\n---\nBody\n', '---\nname: fix\ndescription: d\n# comment\nmodel: haiku\n---\nBody\n'],
+    ['replaces an existing name', '---\ndescription: d\nname: old\nx-unknown: 1\n---\nBody', '---\ndescription: d\nname: fix\nx-unknown: 1\n---\nBody'],
+    ['replaces a quoted name key', '---\n"name": old\ndescription: d\n---\n', '---\nname: fix\ndescription: d\n---\n'],
+    ['replaces a block name with its continuation lines', '---\nname: |\n  old\n  more\n\ndescription: d\n---\nB', '---\nname: fix\n\ndescription: d\n---\nB'],
+    ['keeps CRLF line breaks', '---\r\ndescription: d\r\n---\r\nBody\r\n', '---\r\nname: fix\r\ndescription: d\r\n---\r\nBody\r\n'],
+    ['keeps a BOM', '\uFEFF---\ndescription: d\n---\nB', '\uFEFF---\nname: fix\ndescription: d\n---\nB'],
+    ['adds a block before an unclosed frontmatter', '---\ndescription: d\n', '---\nname: fix\n---\n---\ndescription: d\n'],
+    ['handles an empty file', '', '---\nname: fix\n---\n'],
+    ['handles an empty frontmatter', '---\n---\nB', '---\nname: fix\n---\nB'],
+    ['ignores indented and nested name keys', '---\nmeta:\n  name: inner\ndescription: d\n...\nB', '---\nname: fix\nmeta:\n  name: inner\ndescription: d\n...\nB'],
+    ['keeps a frontmatter that ends the file', '---\ndescription: d\n---', '---\nname: fix\ndescription: d\n---'],
+    ['uses CRLF for a new block', 'Line one\r\nLine two', '---\r\nname: fix\r\n---\r\nLine one\r\nLine two'],
+  ])('%s', (_label, text, expected) => {
+    expect(setDefinitionName(text, 'fix')).toBe(expected)
+  })
+
+  it('quotes names YAML would read otherwise and keeps the parse', () => {
+    expect(setDefinitionName('Body', 'true')).toBe('---\nname: "true"\n---\nBody')
+    expect(setDefinitionName('Body', '123')).toBe('---\nname: "123"\n---\nBody')
+    expect(setDefinitionName('Body', 'a: b')).toBe('---\nname: "a: b"\n---\nBody')
+    expect(setDefinitionName('Body', 'two\nlines')).toBe('---\nname: two lines\n---\nBody')
+    expect(setDefinitionName(5 as unknown as string, 'x')).toBe('')
+    expect(setDefinitionName('keep', 5 as unknown as string)).toBe('keep')
+  })
+
+  it('makes the file parse with the new name and keeps every other line (random files)', () => {
+    const random = prng(0x5E7)
+    const pick = picker(random)
+    // Units of lines (an indented line only after its key, never as a continuation of `name:`).
+    const units = [['description: Review a PR'], ['model: sonnet'], ['allowed-tools: Bash(git:*)'], ['argument-hint: [pr]'], ['# note'], [''], ['name: old-name'], ['tools:', '  - Read'], ['x-custom: 1'], ['"name": quoted']]
+    for (let iteration = 0; iteration < 500; iteration++) {
+      const front = Array.from({ length: Math.floor(random() * 6) }, () => pick(units)).flat()
+      const unique = front.filter(line => !line.includes('name') || front.findIndex(other => other.includes('name')) === front.indexOf(line))
+      const newline = random() < 0.3 ? '\r\n' : '\n'
+      const body = pick(['Review $ARGUMENTS.', '', '# Title\n\nText'])
+      const text = random() < 0.2 ? body : ['---', ...unique, '---', body].join(newline)
+      const named = setDefinitionName(text, 'renamed-2')
+      const result = parseDefinition('command', named)
+      if (result.definition !== null)
+        expect(result.definition.fields.name).toBe('renamed-2')
+      const without = named.split(/\r?\n/).filter(line => !line.startsWith('name: ') && !line.startsWith('"name": ') && !line.startsWith('---'))
+      const original = text.split(/\r?\n/).filter(line => !line.startsWith('name: ') && !line.startsWith('"name": ') && !line.startsWith('---'))
+      expect(without).toEqual(original)
+    }
+  })
+})
+
+describe('phase 12: fuzzing the new keys', () => {
+  it('never throws on random values of the new keys and keeps their invariants', () => {
+    const random = prng(0xC42F)
+    const pick = picker(random)
+    const keys = ['disallowedTools', 'disallowed-tools', 'maxTurns', 'color', 'skills', 'when_to_use', 'arguments', 'context', 'agent', 'model', 'allowed-tools', 'permissionMode', 'hooks']
+    const values = ['', 'a', '0', '7', '999', '-1', '1.5', 'red', 'Blue', 'fork', 'FORK', 'inline', 'sonnet', 'opusplan[1m]', 'claude-x', 'claude-x y', 'mock:echo', '[a, b]', '[A]', '[a, a]', 'a b c', '{x: 1}', '|', '"q"', 'Bash(rm:*)', '[Read, Write]', '~', 'null', 'true', '[1, 2]', 'general-purpose', 'kit:a:b:c:d']
+    for (let iteration = 0; iteration < 1500; iteration++) {
+      const lines = Array.from({ length: 1 + Math.floor(random() * 6) }, () => `${pick(keys)}: ${pick(values)}`)
+      const text = `---\nname: a\ndescription: d\n${lines.join('\n')}\n---\nbody $0 $issue`
+      for (const kind of CUSTOMIZATION_KINDS) {
+        const result = parseDefinition(kind, text, { fileName: 'a.md', folderName: 'a' })
+        checkResult(result, kind)
+        const fields = result.definition?.fields as Record<string, unknown> | undefined
+        if (fields === undefined)
+          continue
+        if (fields.maxTurns !== undefined)
+          expect(Number.isInteger(fields.maxTurns) && (fields.maxTurns as number) >= 1 && (fields.maxTurns as number) <= DEFINITION_LIMITS.maxTurnsMax).toBe(true)
+        if (fields.color !== undefined)
+          expect(AGENT_COLORS).toContain(fields.color)
+        if (fields.skills !== undefined)
+          expect((fields.skills as string[]).length).toBeLessThanOrEqual(DEFINITION_LIMITS.agentSkillsMax)
+        if (fields.arguments !== undefined)
+          expect((fields.arguments as string[]).every(name => ARGUMENT_NAME_PATTERN.test(name))).toBe(true)
+        if (fields.agent !== undefined)
+          expect(fields.context).toBe('fork')
+        if (fields.modelAlias !== undefined)
+          expect(fields.model ?? null).toBeNull()
+        expect(parseDefinition(kind, formatDefinition(result.definition as ParsedDefinition)).definition).toEqual(result.definition)
+      }
     }
   })
 })

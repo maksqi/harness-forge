@@ -18,6 +18,7 @@ import type {
   TranscriptionModelV4,
 } from '@ai-sdk/provider'
 import type {
+  AgentColor,
   CredentialField,
   HarnessErrorInit,
   ImageAspectRatio,
@@ -267,11 +268,30 @@ export interface CommandRunInput {
 export type CommandRunResult = { type: 'prompt', text: string } | { type: 'reply', markdown: string }
 
 export interface CommandDefinition {
-  /** `^[a-z][a-z0-9-]{0,31}$`; not a client-only command. */
+  /**
+   * `^[a-z][a-z0-9-]{0,31}$`; not a client-only command. Plugin API 1.6.0 (ADR-053): may be qualified with the plugin's
+   * own id, `<pluginId>:<name>` (1..3 segments of `^[a-z][a-z0-9-]{0,63}$`, at most 128 characters; typed as
+   * `/<pluginId>:<name>`); a bare name is also callable as `<pluginId>:<name>`.
+   */
   name: string
   description: string
-  /** Exactly one of `template` / `run`; every `{{input}}` is replaced with the text after `/name `. */
+  /**
+   * Exactly one of `template` / `run`. With `syntax: 'template'` (the default) every `{{input}}` is replaced with the
+   * text after `/name ` (at most 16 KiB); with `syntax: 'markdown'` it is a command-file body (at most 64 KiB).
+   */
   template?: string
+  /**
+   * Plugin API 1.6.0 (ADR-053): how `template` is expanded. `template` (default): `{{input}}` only. `markdown`: like a
+   * command file (ADR-045 / ADR-052 / ADR-058): `$ARGUMENTS`, `$ARGUMENTS[N]`, `$N`, `$name` of the named arguments,
+   * `` !`cmd` `` spans (the plugin then requires trust) and `@path` files; `model` and `allowedTools` apply to the turn.
+   */
+  syntax?: 'template' | 'markdown'
+  /** Plugin API 1.6.0: shown after `/name ` in the composer (at most 100 characters). */
+  argumentHint?: string
+  /** Plugin API 1.6.0: `provider:model` (or a Claude model name, resolved through `modelAliases`) the turn runs on. */
+  model?: string
+  /** Plugin API 1.6.0: tool names that narrow the turn (restrict-only: never a grant or a pre-approval). */
+  allowedTools?: string[]
   /** Guarded (30 s). */
   run?(i: CommandRunInput): Promise<CommandRunResult>
 }
@@ -286,7 +306,10 @@ export interface CommandDefinition {
  * reserved, a name another plugin registered throws `conflict`; personal and project agents of the same name win.
  */
 export interface AgentDefinition {
-  /** `^[a-z][a-z0-9-]{0,63}$`; the value of `task.type`. */
+  /**
+   * `^[a-z][a-z0-9-]{0,63}$`; the value of `task.type`. Plugin API 1.6.0 (ADR-053): may be qualified with the plugin's
+   * own id (`<pluginId>:<name>`, at most 128 characters).
+   */
   name: string
   /** When to use the agent (1..1024 characters; listed to the model and in the UI). */
   description: string
@@ -296,6 +319,14 @@ export interface AgentDefinition {
   tools?: string[]
   /** `provider:model`, or `inherit` (the parent run's model); omitted = the sub-agent model setting. */
   model?: string
+  /** Plugin API 1.6.0 (ADR-058): tool names removed from the child's tools (applied before `tools`; restrict-only). */
+  disallowedTools?: string[]
+  /** Plugin API 1.6.0: the child runs at most this many steps (1..200; also capped by the sub-agent step setting). */
+  maxTurns?: number
+  /** Plugin API 1.6.0: the agent's color in the chat. */
+  color?: AgentColor
+  /** Plugin API 1.6.0: skill names (at most 5) whose content is preloaded into the child's instructions. */
+  skills?: string[]
 }
 
 /**
@@ -304,12 +335,23 @@ export interface AgentDefinition {
  * throws `conflict`; personal and project skills of the same name win.
  */
 export interface SkillDefinition {
-  /** `^[a-z][a-z0-9-]{0,63}$`. */
+  /** `^[a-z][a-z0-9-]{0,63}$`; plugin API 1.6.0: may be qualified with the plugin's own id (`<pluginId>:<name>`). */
   name: string
   /** When to use the skill (1..1024 characters). */
   description: string
   /** The skill body (Markdown, at most 64 KiB). */
   content: string
+  /**
+   * Plugin API 1.6.0 (ADR-053): the plugin-relative folder of the skill's supporting files (`skills/pdf`); the `skill`
+   * tool lists them and reads one with its `file` input (inside that folder only, at most 64 KiB).
+   */
+  baseDir?: string
+  /** Plugin API 1.6.0: shown after `/name ` when the skill is user-invocable. */
+  argumentHint?: string
+  /** Plugin API 1.6.0: the user can run the skill as `/name [arguments]` (default true). */
+  userInvocable?: boolean
+  /** Plugin API 1.6.0: the model may load the skill (default true; false leaves it out of the skills listing). */
+  modelInvocable?: boolean
 }
 
 // ---------- output styles and command hooks (plugin API 1.5.0) ----------
@@ -321,7 +363,10 @@ export interface SkillDefinition {
  * are reserved, a name another plugin registered throws `conflict`; personal and project styles of the same name win.
  */
 export interface OutputStyleDefinition {
-  /** `^[a-z][a-z0-9-]{0,63}$`, not a builtin style name. */
+  /**
+   * `^[a-z][a-z0-9-]{0,63}$`, not a builtin style name; plugin API 1.6.0: may be qualified with the plugin's own id
+   * (`<pluginId>:<name>`).
+   */
   name: string
   /** What the style does (1..1024 characters; shown in the style menu). */
   description: string
@@ -331,7 +376,11 @@ export interface OutputStyleDefinition {
   keepCodingInstructions?: boolean
 }
 
-/** The eight command hook events (Claude Code names; plugin API 1.5.0, ADR-048). */
+/**
+ * The hook events (Claude Code names; plugin API 1.5.0, ADR-048): eight, and since plugin API 1.6.0 (ADR-057) also
+ * `PostToolUseFailure`, `PermissionRequest`, `SubagentStart`, `PostCompact` and `SessionEnd` (13). An unknown event is
+ * an error in a harness manifest.
+ */
 export type HookEventName
   = | 'PreToolUse'
     | 'PostToolUse'
@@ -341,26 +390,70 @@ export type HookEventName
     | 'SubagentStop'
     | 'PreCompact'
     | 'SessionStart'
+    | 'PostToolUseFailure'
+    | 'PermissionRequest'
+    | 'SubagentStart'
+    | 'PostCompact'
+    | 'SessionEnd'
 
-/** One command hook handler (Claude Code format); a `prompt` handler is not supported. */
+/** One command hook handler (Claude Code format). */
 export interface CommandHookSpec {
   type: 'command'
-  /** Run with `sh` in the chat's project folder (else a private folder), the event as JSON on stdin; 1..4096 chars. */
+  /**
+   * Run with `sh` in the chat's project folder (else a private folder), the event as JSON on stdin; 1..4096 chars. With
+   * `args` (plugin API 1.6.0) it is the program of an exec-form handler.
+   */
   command: string
   /** Seconds, 1..600; default 60. */
   timeout?: number
+  /** Plugin API 1.6.0 (ADR-057): exec-form arguments (at most 64; each quoted as one word, never split or expanded). */
+  args?: string[]
+  /** Plugin API 1.6.0: run detached (a timeout still applies; the result has no effect on the run). */
+  async?: boolean
+  /**
+   * Plugin API 1.6.0: run only when the tool call matches: a tool name (`Write`) or a `Bash(...)` rule (`Bash(npm
+   * test:*)`, `Bash(npm test *)`, `Bash(npm test)`); anything else never runs.
+   */
+  if?: string
+  /** Plugin API 1.6.0: the activity label while the handler runs (at most 200 characters). */
+  statusMessage?: string
 }
+
+/**
+ * A prompt hook handler (plugin API 1.6.0, ADR-057): a small model answers `{ ok, reason?, impossible? }` about the hook
+ * input (`$ARGUMENTS` in `prompt` is the input as JSON); an answer never grants a permission. Only on `PreToolUse`,
+ * `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`, `Stop`, `SubagentStop` and `PermissionRequest`. Prompt-only
+ * hooks run no command, so they need no trust.
+ */
+export interface PromptHookSpec {
+  type: 'prompt'
+  /** 1..16384 characters. */
+  prompt: string
+  /** `provider:model` or a Claude model name; omitted = the `hookModelRef` setting, else the provider's small model. */
+  model?: string
+  /** Seconds, 1..600; default 30. */
+  timeout?: number
+  /** `PreToolUse` / `PostToolUse`: a block denies the call or feeds the reason back instead of ending the turn. */
+  continueOnBlock?: boolean
+  /** Tool events only: run only when the tool call matches (a tool name or a `Bash(...)` rule, as for command hooks). */
+  if?: string
+  /** The activity label while the handler runs (at most 200 characters). */
+  statusMessage?: string
+}
+
+/** One handler of a matcher group (plugin API 1.6.0: a command or a prompt handler). */
+export type HookHandlerSpec = CommandHookSpec | PromptHookSpec
 
 /** A matcher group: `matcher` names the tools of `PreToolUse` / `PostToolUse` (`Bash|Edit`, `mcp__github__*`, `*`). */
 export interface HookMatcherGroup {
   /** The safe subset: names, `|`, `*` / `.*` wildcards (no regular expressions); omitted = every tool. */
   matcher?: string
-  hooks: CommandHookSpec[]
+  hooks: HookHandlerSpec[]
 }
 
 /**
- * The Claude Code `hooks` object of `contributes.hooks` (at most 50 handlers): a plugin with command hooks requires
- * trust, and its hooks run only while it is active and trusted.
+ * The Claude Code `hooks` object of `contributes.hooks` (at most 50 handlers): a plugin with command handlers requires
+ * trust (prompt-only hooks do not), and its hooks run only while it is active (and trusted).
  */
 export type HooksConfig = Partial<Record<HookEventName, HookMatcherGroup[]>>
 
@@ -555,7 +648,10 @@ export interface PluginContext {
     register(d: McpServerDecl): Disposable
   }
   commands: {
-    /** Exactly one of `template` / `run`; a duplicate name throws `conflict`. */
+    /**
+     * Exactly one of `template` / `run`; a duplicate name throws `conflict`; a qualified name must start with the
+     * plugin's own id (plugin API 1.6.0).
+     */
     register(d: CommandDefinition): Disposable
   }
   /** Plugin API 1.4.0 (ADR-045): agent types for the `task` tool. */

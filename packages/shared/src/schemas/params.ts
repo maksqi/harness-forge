@@ -80,6 +80,9 @@ export const pluginFilePathSchema = z
 export const pluginFileParamsSchema = z.object({ id: pluginIdSchema, path: pluginFilePathSchema })
 export type PluginFileParams = z.infer<typeof pluginFileParamsSchema>
 
-/** Multipart fields of `POST /files` and `POST /plugins/inspect`: only the file part `file` (not part of this schema). */
+/**
+ * Multipart fields of `POST /files`: only the file part `file` (not part of this schema). Phase 12: `POST /plugins/inspect`
+ * takes `pluginInspectFormSchema` (the optional `format`).
+ */
 export const fileUploadFormSchema = z.object({})
 export type FileUploadForm = z.infer<typeof fileUploadFormSchema>

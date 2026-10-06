@@ -58,8 +58,8 @@ describe('enums (Phase 9)', () => {
     // The error codes stay 16; the queue conflicts are reasons.
     expect(HARNESS_ERROR_CODES).toHaveLength(16)
     expect(conflictReasonSchema.options).toEqual(expect.arrayContaining(['run-idle', 'queue-full']))
-    // Phase 11 adds `hook-blocked` and `untrusted` (14).
-    expect(conflictReasonSchema.options).toHaveLength(14)
+    // Phase 11 adds `hook-blocked` and `untrusted` (14); Phase 12 `offline` (15).
+    expect(conflictReasonSchema.options).toHaveLength(15)
   })
 
   it('declares the Phase 9 limits', () => {

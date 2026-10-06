@@ -306,6 +306,8 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       description: entry.manifest.description ?? null,
       icon: iconRefOf(entry),
       kind,
+      // Phase 12 (C40 compile fix): every plugin is a harness plugin until the Claude Code format lands (W12.1).
+      format: 'harness',
       source: entry.record?.source ?? (builtin ? 'builtin' : 'copy'),
       sourceRef: entry.record?.sourceRef ?? null,
       builtin,
@@ -330,6 +332,9 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       trust: trustOf(entry),
       editable: !summary.builtin && (summary.source === 'created' || summary.source === 'copy' || summary.source === 'link'),
       hasSettings: entry.valid && entry.manifest.settings !== undefined,
+      // Phase 12 (C40 compile fix): no origin or Claude Code plugin info until W12.1 / W12.2 fill them.
+      origin: null,
+      claude: null,
     }
   }
 

@@ -188,16 +188,11 @@ function importHooks(): void {
 function hookOf(entry: HookEntry): PersonalHook | null {
   if (entry.kind !== 'command' || entry.source !== 'personal' || !entry.id)
     return null
-  return {
-    id: entry.id,
-    event: entry.event,
-    matcher: entry.matcher,
-    command: entry.command,
-    timeout: entry.timeout,
-    enabled: entry.state !== 'off',
-    createdAt: 0,
-    updatedAt: 0,
-  }
+  const base = { id: entry.id, event: entry.event, matcher: entry.matcher, timeout: entry.timeout, enabled: entry.state !== 'off', createdAt: 0, updatedAt: 0 }
+  // Phase 12 (ADR-057; C40 compile fix): a prompt hook is listed with its prompt and model.
+  if (entry.type === 'prompt')
+    return { ...base, type: 'prompt', prompt: entry.prompt ?? '', model: entry.model ?? null }
+  return { ...base, type: 'command', command: entry.command }
 }
 
 // ---------- row actions ----------

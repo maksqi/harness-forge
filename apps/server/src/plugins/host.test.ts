@@ -118,7 +118,7 @@ describe('loading and states', () => {
     await registry.hooks.run('chat.params', { chatId: 'c', modelRef: 'mock:echo', model: { id: 'echo' }, reasoningEffort: 'auto', toolMode: 'ask' }, output)
     expect(output.instructions).toBe('Be brief.\nDice are available.')
     const logs = await host.logs('word-count')
-    expect(logs.map(entry => entry.message)).toEqual(expect.arrayContaining(['word count ready (plugin API 1.5.0)']))
+    expect(logs.map(entry => entry.message)).toEqual(expect.arrayContaining(['word count ready (plugin API 1.6.0)']))
     const compiled = join(h.t.env.paths.pluginCache, 'word-count')
     expect(existsSync(compiled)).toBe(true)
     // Build output never lands inside the plugin directory.

@@ -9,7 +9,7 @@ import {
   textSizeSchema,
   toolModeSchema,
 } from '../enums.ts'
-import { agentNameSchema, modelRefSchema, timestampSchema } from '../ids.ts'
+import { catalogNameSchema, modelRefSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { hasControlChars } from '../util/text.ts'
 import { speechVoiceSchema, transcriptionLanguageSchema } from './audio.ts'
@@ -84,6 +84,23 @@ export function isSafePlanDirectory(value: string): boolean {
   return value.split(/[/\\]/).every(segment => segment !== '' && segment !== '.' && segment !== '..' && segment.toLowerCase() !== '.git')
 }
 
+/** The Claude model aliases of the setting `modelAliases` (Phase 12, ADR-058). */
+export const MODEL_ALIAS_NAMES = ['sonnet', 'opus', 'haiku', 'fable'] as const
+export type ModelAliasName = (typeof MODEL_ALIAS_NAMES)[number]
+
+/**
+ * The setting `modelAliases` (Phase 12, ADR-058): the model each Claude model alias (`model: sonnet` in an agent, a
+ * command, a skill or a prompt hook) runs on; null = the fallback (a full `claude-…` id on `anthropic`, else the
+ * default model with a notice). Sent whole.
+ */
+export const modelAliasesSchema = z.strictObject({
+  sonnet: modelRefSchema.nullable(),
+  opus: modelRefSchema.nullable(),
+  haiku: modelRefSchema.nullable(),
+  fable: modelRefSchema.nullable(),
+})
+export type ModelAliases = z.infer<typeof modelAliasesSchema>
+
 const settingsFields = {
   displayName: z.string().trim().max(64),
   defaultModelRef: modelRefSchema.nullable(),
@@ -146,9 +163,14 @@ const settingsFields = {
    * The global output style (a style name of the catalog; builtins `default`, `explanatory`, `learning`); a project's
    * and a chat's own choice win over it. An unknown name is not refused: runs use `default` with a notice.
    */
-  outputStyle: agentNameSchema,
+  outputStyle: catalogNameSchema,
   /** Run command hooks (personal, project and plugin); off = no command hook runs (plugin code hooks still run). */
   hooksEnabled: z.boolean(),
+  // Claude Code ecosystem (Phase 12, ADR-057 / ADR-058); neither needs fresh auth.
+  /** The model of prompt hooks without their own `model`; null = the provider's small model, else the run model. */
+  hookModelRef: modelRefSchema.nullable(),
+  /** The models of the Claude model aliases (`sonnet`, `opus`, `haiku`, `fable`); null each = the fallback. */
+  modelAliases: modelAliasesSchema,
 }
 
 /** `GET /settings`: every key always present (defaults applied by `settingsSchema.parse`). */
@@ -183,6 +205,8 @@ export const settingsSchema = z.object({
   planDirectory: settingsFields.planDirectory.default('.harness/plans'),
   outputStyle: settingsFields.outputStyle.default('default'),
   hooksEnabled: settingsFields.hooksEnabled.default(true),
+  hookModelRef: settingsFields.hookModelRef.default(null),
+  modelAliases: settingsFields.modelAliases.default({ sonnet: null, opus: null, haiku: null, fable: null }),
 })
 export type Settings = z.infer<typeof settingsSchema>
 

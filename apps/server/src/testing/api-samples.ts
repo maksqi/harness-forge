@@ -27,6 +27,14 @@ export const SAMPLE_HOOK_ID = 'hok_sample0000000001'
 export const SAMPLE_TRUST_SHA256 = 'a'.repeat(64)
 /** A project `.mcp.json` server id (Phase 11, ADR-050). */
 export const SAMPLE_PROJECT_MCP_SERVER_ID = 'memory'
+/** A marketplace (Phase 12, ADR-054). */
+export const SAMPLE_MARKETPLACE_ID = 'mkt_sample0000000001'
+/** A Claude Code import plan (Phase 12, ADR-055; held in memory by the server). */
+export const SAMPLE_IMPORT_PLAN_ID = 'cip_sample0000000001'
+/** A server folder that holds no marketplace on any test host (the samples never fetch anything). */
+export const SAMPLE_MARKETPLACE_PATH = '/harness-forge-sample/marketplace'
+/** A project definition file (Phase 12, ADR-056; no project folder is ever touched). */
+export const SAMPLE_DEFINITION_PATH = '.claude/agents/reviewer.md'
 /** A project-relative path for the change samples (no project folder is ever touched). */
 export const SAMPLE_CHANGE_PATH = 'src/index.ts'
 /** A folder that does not exist on any test host: the project samples never touch a real folder. */
@@ -285,6 +293,29 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
   'projectMcp.list': { params: { id: SAMPLE_PROJECT_ID } },
   'projectMcp.setVariables': { params: { id: SAMPLE_PROJECT_ID }, body: { values: { MCP_TOKEN: 'sample-token', MCP_PORT: null } } },
   'projectMcp.reconnect': { params: { id: SAMPLE_PROJECT_ID, serverId: SAMPLE_PROJECT_MCP_SERVER_ID } },
+
+  // Phase 12: a folder source (never a GitHub or URL fetch), an upload of one agent file, a definition file path.
+  'marketplaces.list': {},
+  'marketplaces.add': { body: { source: { type: 'path', path: SAMPLE_MARKETPLACE_PATH } } },
+  'marketplaces.get': { params: { id: SAMPLE_MARKETPLACE_ID } },
+  'marketplaces.refresh': { params: { id: SAMPLE_MARKETPLACE_ID } },
+  'marketplaces.remove': { params: { id: SAMPLE_MARKETPLACE_ID } },
+
+  'claudeImport.home': {},
+  'claudeImport.scan': {},
+  'claudeImport.upload': {
+    form: () => {
+      const form = new FormData()
+      form.append('files', new File([SAMPLE_AGENT_MARKDOWN], 'agents/reviewer.md', { type: 'text/markdown' }))
+      form.append('label', '.claude')
+      return form
+    },
+  },
+  'claudeImport.apply': { body: { planId: SAMPLE_IMPORT_PLAN_ID, items: [{ key: 'agent:reviewer:agents/reviewer.md', action: 'import' }] } },
+
+  'projectDefinitions.read': { params: { id: SAMPLE_PROJECT_ID }, query: { path: SAMPLE_DEFINITION_PATH } },
+  'projectDefinitions.write': { params: { id: SAMPLE_PROJECT_ID }, body: { path: SAMPLE_DEFINITION_PATH, expectedSha256: null, content: SAMPLE_AGENT_MARKDOWN } },
+  'projectDefinitions.remove': { params: { id: SAMPLE_PROJECT_ID }, query: { path: SAMPLE_DEFINITION_PATH, expectedSha256: SAMPLE_TRUST_SHA256 } },
 
   'shares.list': { query: { chatId: SAMPLE_CHAT_ID } },
   'shares.create': { body: { chatId: SAMPLE_CHAT_ID, title: 'Sample share', options: { reasoning: true }, expiresAt: null } },

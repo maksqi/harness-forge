@@ -4,7 +4,8 @@
 // (installing / trusting code or stdio-MCP plugins, scaffold, code-file writes and deletes, build, reload of code
 // plugins, stdio MCP create / update, drafts that declare a stdio server, password change, adding a project, rotating
 // the master key; Phase 11: creating a personal hook, changing one unless the body only turns it off, approving project
-// items, setting project MCP variables). Each case runs twice on a
+// items, setting project MCP variables; Phase 12: scanning the server's Claude Code folder, applying an import). Each
+// case runs twice on a
 // fresh app: with a stale session (refused, no side effect), then with a fresh one (succeeds). Negative controls show
 // that the same routes stay usable with a stale session when nothing runs code.
 import type { ApiRouteDef, ApiRouteKey } from '@harness-forge/shared'
@@ -342,6 +343,24 @@ const CASES: FreshCase[] = [
     ok: 404,
     unchanged: async () => {},
   },
+  {
+    // ADR-055: the scan reads the server user's Claude Code folder (the test app's `HF_CLAUDE_HOME` decides whether it
+    // plans or answers `409` `disabled`).
+    name: 'scanning the server\'s Claude Code folder',
+    key: 'claudeImport.scan',
+    attempt: { method: 'POST', path: '/api/claude-import/scan' },
+    ok: [200, 409],
+    unchanged: async () => {},
+  },
+  {
+    // ADR-055: applying creates personal hooks, stdio MCP servers and shell rules. The unknown plan proves the request
+    // reached the route.
+    name: 'applying an import (an unknown plan proves the request reached the route)',
+    key: 'claudeImport.apply',
+    attempt: { method: 'POST', path: '/api/claude-import/apply', json: { planId: 'cip_fresh00000000001', items: [{ key: 'hook:Stop:settings.json', action: 'import', enable: true }] } },
+    ok: 404,
+    unchanged: async () => {},
+  },
 ]
 
 async function cookie(a: InstallTestApp, authAgeMs: number): Promise<string> {
@@ -384,6 +403,8 @@ describe('sEC-A5 fresh auth table', () => {
       expect(covered.has(key), key).toBe(true)
     expect([...ALWAYS_FRESH_KEYS].sort()).toEqual([
       'auth.setPassword',
+      'claudeImport.apply',
+      'claudeImport.scan',
       'data.deleteAll',
       'hooks.create',
       'keys.rotate',
@@ -511,6 +532,36 @@ describe('sEC-A5 negative controls: nothing runs code, a stale session is enough
     for (const json of [{ enabled: true }, { enabled: false, timeout: 5 }]) {
       const refused = await send(a, { method: 'PATCH', path: '/api/hooks/hok_stale00000000001', json }, stale)
       expect(refused.status, JSON.stringify(json)).toBe(403)
+    }
+  })
+
+  it('the marketplace, import and project definition routes (Phase 12, ADR-054 … ADR-056) other than scan and apply take a stale session', async () => {
+    const a = await passwordApp()
+    const stale = await cookie(a, FRESH_AUTH_WINDOW_MS + 60_000)
+    const phase12 = API_ROUTE_KEYS.filter(key => ['marketplaces', 'claudeImport', 'projectDefinitions'].includes(apiRoutes[key].module))
+    expect(phase12).toHaveLength(12)
+    const keys = phase12.filter(key => (apiRoutes[key] as ApiRouteDef).fresh !== true)
+    expect(keys).toEqual([
+      'marketplaces.list',
+      'marketplaces.add',
+      'marketplaces.get',
+      'marketplaces.refresh',
+      'marketplaces.remove',
+      'claudeImport.home',
+      'claudeImport.upload',
+      'projectDefinitions.read',
+      'projectDefinitions.write',
+      'projectDefinitions.remove',
+    ])
+    for (const key of keys) {
+      const { path, init } = sampleRequest(key, { headers: { cookie: stale } })
+      const response = await a.t.request(path, init)
+      const text = await response.text()
+      // The sample marketplace folder, project and definition do not exist: the request reaches the route (501 while
+      // stubbed, else 200, 400, 404 or 409), never the fresh-auth refusal (saving a project file approves nothing).
+      expect([401, 403], `${key}: ${text}`).not.toContain(response.status)
+      if (stubRouteKeys().has(key))
+        expect(response.status, key).toBe(501)
     }
   })
 })

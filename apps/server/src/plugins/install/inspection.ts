@@ -24,6 +24,8 @@ const SOURCE_LABELS: Record<PluginSource, string> = {
   url: 'a URL',
   link: 'a linked folder',
   copy: 'a copied folder',
+  github: 'GitHub',
+  marketplace: 'a marketplace',
 }
 
 /** "a zip upload", "npm", ... (messages). */
@@ -187,6 +189,8 @@ export function buildInspection(input: InspectionInput): PluginInspection {
   return {
     manifest,
     kind: directory.kind,
+    // Phase 12 (C40 compile fix): harness plugins only until the Claude Code format lands (W12.1 / W12.2).
+    format: 'harness',
     source,
     ...(input.sourceRef === undefined || input.sourceRef === '' ? {} : { sourceRef: input.sourceRef }),
     sha256: directory.sha256,
@@ -199,5 +203,6 @@ export function buildInspection(input: InspectionInput): PluginInspection {
     existing,
     files: directory.files,
     warnings,
+    claude: null,
   }
 }

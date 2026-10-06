@@ -212,7 +212,18 @@ the provider docs and models.dev when implementing** (all chat seed ids below ex
 
 `smallModelId` is used for chat titles (when `titleModelRef` is unset) and for the credential ping when the provider
 has no listing; without `smallModelId` the ping takes the first chat seed, else the first visible chat model, never an
-image, transcription or speech model (Phase 6).
+image, transcription or speech model (Phase 6). Phase 12 (ADR-057): it also answers **prompt hooks**: a prompt hook
+uses its handler's `model`, else the setting `hookModelRef` (Settings → General → Agent → "Hook model"), else the run
+provider's `smallModelId`, else the run's own model (the order of title generation); the call has reasoning off, no
+retries and at most 512 output tokens, and writes a usage row with purpose `hook`.
+
+**Claude model names** (Phase 12, ADR-058): agents, skills, commands and hooks from Claude Code may name a model as
+`sonnet`, `opus`, `haiku` or `fable` (also `opusplan`, read as `opus`, and a `[1m]` suffix, dropped) or as a full
+`claude-*` id. They resolve through the setting `modelAliases` (`{ sonnet, opus, haiku, fable }`, each a model ref or
+null; Settings → General → Agent → "Claude model names"); a full `claude-*` id without a setting resolves to
+`anthropic:<id>` when the Anthropic provider can run it; otherwise the existing fallback applies (the chat's or the
+default sub-agent model, with the notice or warning of that path). Nothing is mapped implicitly: an unset `sonnet` never
+picks a model by itself.
 
 | id | Seed models (`reasoningEfforts`) | `smallModelId` |
 |---|---|---|
@@ -322,10 +333,10 @@ errors -> `context_overflow`; `ECONNREFUSED` / `ENOTFOUND` -> `provider_unreacha
 Dev and e2e only: the builtin plugin `mock` registers provider `mock` and tool `mock_approval_tool` when
 `HF_MOCK_PROVIDER=1` (`pnpm start:e2e` sets it). Models are `MockLanguageModelV4` instances from `ai/test` streaming
 through `simulateReadableStream`. The provider has no credentials (status `connected`), no icon (monogram),
-`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its twenty models (the four chat models of v1, the five
-models of Phase 6, `workspace` of Phase 7, `checkpoint` and `shell` of Phase 8, `compact`, `plan`, `todo`, `subagent`
-and `steer` of Phase 9, `agents` and `background` of Phase 10, and `hooks` of Phase 11), and `validate` always
-succeeds. Its
+`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its twenty-one models (the four chat models of v1, the
+five models of Phase 6, `workspace` of Phase 7, `checkpoint` and `shell` of Phase 8, `compact`, `plan`, `todo`,
+`subagent` and `steer` of Phase 9, `agents` and `background` of Phase 10, `hooks` of Phase 11 and `prompt-hook` of
+Phase 12), and `validate` always succeeds. Its
 `reasoning()` maps `off` -> `none`, `low` / `medium` / `high` -> same, `max` -> `xhigh`. Since Phase 6 (manifest
 `engines.harness` `^1.1.0`) it also defines `createImageModel`, `imageParams`, `createTranscriptionModel`,
 `createSpeechModel` and a `transcriptionOptions` that returns nothing (the mock models ignore the language), with models
@@ -337,12 +348,13 @@ id other than the three below rejects with a 404 `APICallError`.
 
 Names: Mock Echo, Mock Reasoning, Mock Tool Approval, Mock Error, Mock Image, Mock Image Chat, Mock Image Tool, Mock
 Transcribe, Mock Speech, Mock Workspace, Mock Checkpoint, Mock Shell, Mock Compact, Mock Plan, Mock Todo, Mock Sub-agent,
-Mock Steer, Mock Agents, Mock Background, Mock Hooks. `GET /api/models` shows eighteen of them (the four chat models,
-`image`, `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, `compact`, `plan`, `todo`, `subagent`, `steer`,
-`agents`, `background`, `hooks`); `transcribe` and `speech` are hidden and chosen in Settings → Media. The provider's
-`modelCount` is 17 (visible chat models; the image model is not counted). A data directory whose cached mock listing
-predates a model (the e2e server's `.tmp/e2e`: `workspace` in Phase 7, `checkpoint` and `shell` in Phase 8, the five
-agent mocks in Phase 9, the two customization mocks in Phase 10, `hooks` in Phase 11) shows the new models only after a
+Mock Steer, Mock Agents, Mock Background, Mock Hooks, Mock Prompt Hook. `GET /api/models` shows nineteen of them (the
+four chat models, `image`, `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, `compact`, `plan`, `todo`,
+`subagent`, `steer`, `agents`, `background`, `hooks`, `prompt-hook`); `transcribe` and `speech` are hidden and chosen in
+Settings → Media. The provider's `modelCount` is 18 (visible chat models; the image model is not counted). A data
+directory whose cached mock listing predates a model (the e2e server's `.tmp/e2e`: `workspace` in Phase 7, `checkpoint`
+and `shell` in Phase 8, the five agent mocks in Phase 9, the two customization mocks in Phase 10, `hooks` in Phase 11,
+`prompt-hook` in Phase 12) shows the new models only after a
 refresh: move it aside before a gate.
 
 Common behavior (deterministic):
@@ -569,6 +581,45 @@ done`) and a SubagentStop block (`Agent report: Child continued: …`), `style?`
 `keep-coding-instructions: false` (`todo-hint: no`), `mcp?` and `tools?` in chats of a project with an approved
 `.mcp.json` fixture (and in other chats), and project commands with `` !`cmd` `` spans and `@README.md` (→ `Hooks
 mock: …` with the output inlined; a regenerate shows the same text without running the span again).
+
+### Prompt hook mock (Phase 12)
+
+One model answers **prompt hooks** (ADR-057) so the probes and e2e specs can drive every outcome without a real
+model. It is complete and frozen from Gate P12-0b; **this subsection is the contract of the Phase 12 gate probes and
+e2e specs** (with the `mock:hooks` chat model above). Model info: `kind: 'chat'`, no capabilities (it never calls a
+tool), listed and visible like the other chat mocks, so it can be chosen as the **Hook model** (`hookModelRef:
+'mock:prompt-hook'`) or named by a handler (`"model": "mock:prompt-hook"`).
+
+**Input**: the text of the call's user messages in order (the prompt-hook runner sends the hook's prompt with
+`$ARGUMENTS` replaced by the hook input JSON, or the JSON appended when the prompt has no `$ARGUMENTS`). The mock looks
+for the **first marker** in that text, so a marker written in the hook's prompt wins over one inside the hook input
+(which follows the prompt unless the prompt places `$ARGUMENTS` before its own marker); the system text is never
+searched.
+
+| Marker | Answer (the whole text of the reply) |
+|---|---|
+| `[[ph:ok]]` | `{"ok":true}` |
+| `[[ph:deny R]]` | `{"ok":false,"reason":"R"}` (`R` = the text between `deny` and `]]`, trimmed; may be empty) |
+| `[[ph:impossible R]]` | `{"ok":false,"reason":"R","impossible":true}` |
+| `[[ph:fenced]]` | the line `Here is my answer:`, then `{"ok":false,"reason":"fenced"}` inside a `json` code fence (proves that `readPromptHookAnswer` strips fences and takes the first object) |
+| `[[ph:invalid]]` | `I cannot decide.` (no JSON: a non-blocking error, "The model's answer could not be read.") |
+| none | `{"ok":true}` |
+
+**Usage** is fixed at 10 input and 5 output tokens (`finishReason: 'stop'`), so a probe can check the `hook` usage row
+and the chat totals. It streams and answers at once: there are **no waits** (timeouts are tested with
+`MockLanguageModelV4` in unit tests), and it ignores the reasoning setting and the output-token cap.
+
+**How the probes use it** (ARCHITECTURE.md 6.37): `mock:hooks` as the chat model of a project chat with a prompt hook
+on `PreToolUse` · `Write` (model `mock:prompt-hook`): `call write_file {"path":"a.txt","content":"[[ph:deny no writes]]"}`
+→ the call is denied (the row reads "Blocked by hook", no file is written; the marker sits in the hook input JSON's
+`tool_input`) and the turn ends after that step; with `continueOnBlock` the agent goes on and replies `Called
+write_file: denied | Blocked by hook: no writes | hooks: none`; `[[ph:ok]]` → `Called write_file: ok | …` (an `ok`
+never approves: in Ask mode the card still shows); `[[ph:fenced]]` → denied with the reason `fenced`;
+`[[ph:invalid]]` → the call runs and the reply's note reads "A PreToolUse hook failed"; a `Stop` prompt hook whose
+prompt holds `[[ph:deny run the tests]]` → a turn with `origin: 'hook'` (`Hook continuation: run the tests`), and
+`[[ph:impossible done]]` → the stop is allowed with the reason recorded; a `UserPromptSubmit` prompt hook and a message
+holding `[[ph:deny no secrets]]` → 409 `hook-blocked`, nothing stored; a handler whose `model` names a missing provider
+→ a non-blocking error; with `hooksEnabled: false` or `HF_SAFE_MODE=1` no prompt hook runs (no usage row).
 
 ## 9. Declarative provider templates (wizard)
 

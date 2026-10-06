@@ -5,6 +5,7 @@ import { z } from 'zod'
 import {
   commandSourceSchema,
   hookEventSchema,
+  hookHandlerTypeSchema,
   hookRecordOutcomeSchema,
   hookSourceSchema,
   invocationKindSchema,
@@ -13,14 +14,13 @@ import {
 } from './enums.ts'
 import { harnessErrorInitSchema } from './errors.ts'
 import {
-  agentNameSchema,
+  catalogNameSchema,
   chatIdSchema,
   hookRecordIdSchema,
   messageIdSchema,
   modelRefSchema,
   pluginIdSchema,
   projectIdSchema,
-  slashNameSchema,
   timestampSchema,
 } from './ids.ts'
 import { LIMITS } from './limits.ts'
@@ -39,8 +39,11 @@ export type { MessageUsage } from './schemas/usage.ts'
 
 /** A slash command (or, since Phase 11, a user-invocable skill) invoked by a user message. */
 export const commandInvocationSchema = z.object({
-  /** A command name (up to 32 characters) or, since Phase 11 (ADR-052), a skill name (up to 64; `slashNameSchema`). */
-  name: slashNameSchema,
+  /**
+   * A command name (up to 32 characters) or, since Phase 11 (ADR-052), a skill name (up to 64); since Phase 12 (ADR-053)
+   * a qualified name of a Claude Code plugin entry (`<pluginId>:<name>`, up to 128; `catalogNameSchema`).
+   */
+  name: catalogNameSchema,
   /** Text after `/name `. */
   input: z.string(),
   /** `compact`: the harness command `/compact [focus]` (Phase 9, ADR-040), run by the server. */
@@ -205,6 +208,8 @@ export const activityDataSchema = z.object({
   event: hookEventSchema.optional(),
   /** `hooks` of `PreToolUse` / `PostToolUse`: the tool call they run for (Phase 11). */
   toolCallId: z.string().min(1).max(256).optional(),
+  /** `hooks`: the `statusMessage` of the first matching handler, shown instead of "Running hook…" (Phase 12, ADR-057). */
+  label: z.string().min(1).max(200).optional(),
 })
 export type ActivityData = z.infer<typeof activityDataSchema>
 
@@ -236,6 +241,10 @@ export const hookResultSchema = z.object({
   error: z.string().max(LIMITS.hookSystemMessageMaxChars).optional(),
   /** The hook's `systemMessage` for the user (never sent to the model). */
   systemMessage: z.string().max(LIMITS.hookSystemMessageMaxChars).optional(),
+  /** Phase 12 (ADR-057): the handler type; absent in v1.7 records (= `command`, or a code hook). */
+  kind: hookHandlerTypeSchema.optional(),
+  /** Phase 12: the model that answered a prompt hook. */
+  model: modelRefSchema.optional(),
 })
 export type HookResult = z.infer<typeof hookResultSchema>
 
@@ -270,6 +279,11 @@ export const hookDataSchema = z.object({
     .unknown()
     .refine(value => value === undefined || isJsonWithin(value, LIMITS.hookUpdatedInputBytes), 'The updated input is limited to 64 KB of JSON.')
     .optional(),
+  /**
+   * Phase 12 (ADR-057): a `PreToolUse` hook allowed the call (`outcome: 'allowed'`) but the harness still asked (plan
+   * mode, an `always` tool, a sub-agent rule); the web labels it "Allowed by hook · still asks". Absent = false.
+   */
+  harnessAsked: z.literal(true).optional(),
 })
 export type HookData = z.infer<typeof hookDataSchema>
 
@@ -374,7 +388,7 @@ export const chatRequestBodySchema = z.strictObject({
    * for an existing chat (change it with `PATCH /chats/:id`). An unknown style is not an error: the run uses `default`
    * with notice `output-style-unavailable`.
    */
-  outputStyle: agentNameSchema.nullable().optional(),
+  outputStyle: catalogNameSchema.nullable().optional(),
 })
 export type ChatRequestBody = z.infer<typeof chatRequestBodySchema>
 

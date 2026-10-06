@@ -2,7 +2,7 @@
 // `GET /share/:token` view. A snapshot is an allowlist-sanitized copy of a chat's active path, never a live view.
 import { z } from 'zod'
 import { invocationKindSchema } from '../enums.ts'
-import { chatIdSchema, modelRefSchema, shareIdSchema, slashNameSchema, timestampSchema } from '../ids.ts'
+import { catalogNameSchema, chatIdSchema, modelRefSchema, shareIdSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { titleInputSchema } from './chats.ts'
 
@@ -121,8 +121,8 @@ export const shareMessageSchema = z.object({
   role: z.enum(['user', 'assistant']),
   /** Assistant messages: the model that answered. */
   modelRef: modelRefSchema.optional(),
-  /** User messages that invoked a slash command (never its expansion). */
-  command: z.object({ name: slashNameSchema, kind: invocationKindSchema.optional() }).optional(),
+  /** User messages that invoked a slash command (never its expansion); Phase 12: the name may be qualified. */
+  command: z.object({ name: catalogNameSchema, kind: invocationKindSchema.optional() }).optional(),
   /** The reply ended with an error (no details) or was stopped. */
   status: z.enum(['failed', 'stopped']).optional(),
   parts: z.array(sharePartSchema).max(LIMITS.messagePartsMax),

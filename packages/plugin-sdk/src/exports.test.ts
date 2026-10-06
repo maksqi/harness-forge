@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import type {
   ImageModelV3,
   ImageModelV4,
@@ -9,7 +10,9 @@ import type {
 } from '@ai-sdk/provider'
 import type { generateImage, Tool } from 'ai'
 import type {
+  AgentColor,
   AgentDefinition,
+  CommandDefinition,
   CommandHookSpec,
   DeclarativeAgent,
   DeclarativeOutputStyle,
@@ -18,6 +21,7 @@ import type {
   GeneratedImageFile,
   HarnessErrorInit,
   HookEventName,
+  HookHandlerSpec,
   HookMap,
   HookMatcherGroup,
   HooksConfig,
@@ -30,9 +34,12 @@ import type {
   ModelKind,
   OutputStyleDefinition,
   PluginContext,
+  PluginFormat,
   PluginImagesApi,
   PluginManifest,
   PluginModule,
+  PluginSource,
+  PromptHookSpec,
   ProviderDefinition,
   ReasoningLevel,
   SettingsSchema,
@@ -45,6 +52,7 @@ import type {
   ToolWorkspaceAccess,
   TranscriptionHints,
 } from './index.ts'
+import { readFileSync } from 'node:fs'
 import * as shared from '@harness-forge/shared'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { z } from 'zod'
@@ -61,6 +69,7 @@ const REEXPORTED_VALUES = [
   'harnessErrorInitSchema',
   'mcpServerDeclSchema',
   'modelInfoSchema',
+  'pluginFormatSchema',
   'pluginKindSchema',
   'pluginManifestBaseSchema',
   'pluginManifestSchema',
@@ -85,8 +94,8 @@ describe('exports', () => {
     expect(Object.keys(sdk).sort()).toEqual([...REEXPORTED_VALUES, 'PLUGIN_API_VERSION', 'definePlugin', 'settingsValuesSchema'].sort())
   })
 
-  it('has plugin API version 1.5.0 (Phase 11: command hooks and output styles)', () => {
-    expect(sdk.PLUGIN_API_VERSION).toBe('1.5.0')
+  it('has plugin API version 1.6.0 (Phase 12: Claude Code plugins, prompt hooks, five hook events)', () => {
+    expect(sdk.PLUGIN_API_VERSION).toBe('1.6.0')
   })
 
   it('definePlugin is the identity', () => {
@@ -178,8 +187,9 @@ describe('exports', () => {
   it('types the additions of plugin API 1.4.0 (ADR-045)', () => {
     expectTypeOf<PluginContext['agents']['register']>().toEqualTypeOf<(d: AgentDefinition) => Disposable>()
     expectTypeOf<PluginContext['skills']['register']>().toEqualTypeOf<(d: SkillDefinition) => Disposable>()
-    expectTypeOf<keyof AgentDefinition>().toEqualTypeOf<'name' | 'description' | 'instructions' | 'tools' | 'model'>()
-    expectTypeOf<keyof SkillDefinition>().toEqualTypeOf<'name' | 'description' | 'content'>()
+    // The 1.4.0 fields (1.6.0 adds optional ones, see below).
+    expectTypeOf<'name' | 'description' | 'instructions' | 'tools' | 'model'>().toExtend<keyof AgentDefinition>()
+    expectTypeOf<'name' | 'description' | 'content'>().toExtend<keyof SkillDefinition>()
     expectTypeOf<DeclarativeAgent>().toEqualTypeOf<shared.DeclarativeAgent>()
     expectTypeOf<DeclarativeSkill>().toEqualTypeOf<shared.DeclarativeSkill>()
     // A manifest entry is a valid code registration, and the manifest declares both lists.
@@ -202,7 +212,7 @@ describe('exports', () => {
     // The command hook events are the shared enum; a manifest `hooks` object is a valid `HooksConfig`.
     expectTypeOf<HookEventName>().toEqualTypeOf<shared.HookEvent>()
     expectTypeOf<CommandHookSpec['type']>().toEqualTypeOf<'command'>()
-    expectTypeOf<HookMatcherGroup['hooks']>().toEqualTypeOf<CommandHookSpec[]>()
+    expectTypeOf<CommandHookSpec>().toExtend<HookMatcherGroup['hooks'][number]>()
     expectTypeOf<HooksConfig>().toEqualTypeOf<Partial<Record<HookEventName, HookMatcherGroup[]>>>()
     expectTypeOf<NonNullable<NonNullable<PluginManifest['contributes']>['hooks']>>().toExtend<HooksConfig>()
     // The new code hook events.
@@ -218,6 +228,68 @@ describe('exports', () => {
     expect(shared.declarativeOutputStyleSchema.parse(style)).toEqual(style)
     const hooks: HooksConfig = { PostToolUse: [{ matcher: 'Write|Edit', hooks: [{ type: 'command', command: 'sh after.sh', timeout: 30 }] }] }
     expect(shared.countHookHandlers(hooks)).toBe(1)
+  })
+
+  it('types the additions of plugin API 1.6.0 (ADR-053, ADR-057, ADR-058)', () => {
+    // Command, skill and agent fields; names may be qualified with the plugin's own id (checked by the host).
+    expectTypeOf<keyof CommandDefinition>().toEqualTypeOf<'name' | 'description' | 'template' | 'syntax' | 'argumentHint' | 'model' | 'allowedTools' | 'run'>()
+    expectTypeOf<CommandDefinition['syntax']>().toEqualTypeOf<'template' | 'markdown' | undefined>()
+    expectTypeOf<keyof SkillDefinition>().toEqualTypeOf<'name' | 'description' | 'content' | 'baseDir' | 'argumentHint' | 'userInvocable' | 'modelInvocable'>()
+    expectTypeOf<keyof AgentDefinition>().toEqualTypeOf<'name' | 'description' | 'instructions' | 'tools' | 'model' | 'disallowedTools' | 'maxTurns' | 'color' | 'skills'>()
+    expectTypeOf<AgentColor>().toEqualTypeOf<shared.AgentColor>()
+    expectTypeOf<AgentColor>().toEqualTypeOf<'red' | 'blue' | 'green' | 'yellow' | 'purple' | 'orange' | 'pink' | 'cyan'>()
+    expectTypeOf<NonNullable<AgentDefinition['color']>>().toEqualTypeOf<AgentColor>()
+    // A declarative skill (with its folder) is a valid code registration.
+    expectTypeOf<DeclarativeSkill['baseDir']>().toEqualTypeOf<string | undefined>()
+    expectTypeOf<DeclarativeSkill>().toExtend<SkillDefinition>()
+    // The plugin sources and formats of marketplaces and Claude Code plugins.
+    expectTypeOf<PluginSource>().toEqualTypeOf<shared.PluginSource>()
+    expectTypeOf<'github' | 'marketplace'>().toExtend<PluginSource>()
+    expectTypeOf<PluginFormat>().toEqualTypeOf<'harness' | 'claude'>()
+    // Thirteen hook events, prompt handlers and the command handler fields.
+    expectTypeOf<HookEventName>().toEqualTypeOf<shared.HookEvent>()
+    expectTypeOf<'PostToolUseFailure' | 'PermissionRequest' | 'SubagentStart' | 'PostCompact' | 'SessionEnd'>().toExtend<HookEventName>()
+    expectTypeOf<HookHandlerSpec>().toEqualTypeOf<CommandHookSpec | PromptHookSpec>()
+    expectTypeOf<HookMatcherGroup['hooks']>().toEqualTypeOf<HookHandlerSpec[]>()
+    expectTypeOf<PromptHookSpec['type']>().toEqualTypeOf<'prompt'>()
+    expectTypeOf<keyof PromptHookSpec>().toEqualTypeOf<'type' | 'prompt' | 'model' | 'timeout' | 'continueOnBlock' | 'if' | 'statusMessage'>()
+    expectTypeOf<keyof CommandHookSpec>().toEqualTypeOf<'type' | 'command' | 'timeout' | 'args' | 'async' | 'if' | 'statusMessage'>()
+    // The shared zod shapes and the SDK types are interchangeable.
+    expectTypeOf<shared.CommandHookSpecInput>().toExtend<CommandHookSpec>()
+    expectTypeOf<shared.PromptHookSpecInput>().toExtend<PromptHookSpec>()
+    expectTypeOf<shared.HooksConfigInput>().toExtend<HooksConfig>()
+    expectTypeOf<NonNullable<NonNullable<PluginManifest['contributes']>['hooks']>>().toExtend<HooksConfig>()
+    const hooks: HooksConfig = {
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node', args: ['guard.mjs', '--strict'], if: 'Bash(git push:*)', statusMessage: 'Checking the push' }] }],
+      Stop: [{ hooks: [{ type: 'prompt', prompt: 'Are the tests green? $ARGUMENTS', model: 'haiku', timeout: 20 }] }],
+      PostToolUseFailure: [{ matcher: 'Bash', hooks: [{ type: 'prompt', prompt: 'Explain the failure.', continueOnBlock: true }] }],
+      SessionEnd: [{ hooks: [{ type: 'command', command: 'sh cleanup.sh', async: true }] }],
+    }
+    expect(shared.hooksConfigSchema.parse(hooks)).toEqual(hooks)
+    expect(shared.countHookHandlers(hooks)).toBe(4)
+    expect(shared.countCommandHookHandlers(hooks)).toBe(2)
+    const command: CommandDefinition = { name: 'review-kit:review', description: 'Reviews.', template: 'Review $ARGUMENTS', syntax: 'markdown', argumentHint: '<files>', model: 'sonnet', allowedTools: ['read_file'] }
+    const skill: SkillDefinition = { name: 'pdf', description: 'PDFs.', content: '# PDF', baseDir: 'skills/pdf', argumentHint: '<file>', userInvocable: true, modelInvocable: false }
+    const agent: AgentDefinition = { name: 'reviewer', description: 'Reviews.', instructions: 'Review.', disallowedTools: ['shell'], maxTurns: 12, color: 'cyan', skills: ['pdf'] }
+    expect([command.syntax, skill.baseDir, agent.color]).toEqual(['markdown', 'skills/pdf', 'cyan'])
+    expect(shared.declarativeSkillSchema.parse({ name: skill.name, description: skill.description, content: skill.content, baseDir: skill.baseDir })).toMatchObject({ baseDir: 'skills/pdf' })
+  })
+
+  it('keeps ^1.5.0 manifests loading under 1.6.0; prompt-only hooks need no trust', () => {
+    // The example hook pack (engines ^1.5.0, one command hook and a style) still parses and still requires trust.
+    const hookPack = JSON.parse(readFileSync(new URL('../../../examples/plugins/hook-pack/plugin.json', import.meta.url), 'utf8')) as unknown
+    const parsed = shared.pluginManifestSchema.parse(hookPack)
+    expect(parsed.engines.harness).toBe('^1.5.0')
+    expect(shared.manifestRequiresTrust(parsed)).toBe(true)
+    const base = { manifestVersion: 1, id: 'prompt-pack', name: 'Prompt pack', version: '1.0.0', engines: { harness: '^1.6.0' } } as const
+    const promptOnly = shared.pluginManifestSchema.parse({ ...base, contributes: { hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Is the task done?' }] }] } } })
+    expect(shared.declaresCommandHooks(promptOnly)).toBe(false)
+    expect(shared.manifestRequiresTrust(promptOnly)).toBe(false)
+    const mixed = shared.pluginManifestSchema.parse({ ...base, contributes: { hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Done?' }, { type: 'command', command: 'sh stop.sh' }] }] } } })
+    expect(shared.manifestRequiresTrust(mixed)).toBe(true)
+    // Unknown events stay errors in a harness manifest; prompt handlers only on the prompt events.
+    expect(shared.pluginManifestSchema.safeParse({ ...base, contributes: { hooks: { BeforeTool: [{ hooks: [{ type: 'command', command: 'x' }] }] } } }).success).toBe(false)
+    expect(shared.pluginManifestSchema.safeParse({ ...base, contributes: { hooks: { SessionStart: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] } } }).success).toBe(false)
   })
 
   it('derives the AI SDK types of PLUGINS.md section 9', () => {

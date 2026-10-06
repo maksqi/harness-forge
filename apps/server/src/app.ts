@@ -26,6 +26,7 @@ import { createChatQueueRoutes } from './http/routes/chat-queue.ts'
 import { createChatTasksRoutes } from './http/routes/chat-tasks.ts'
 import { createChatRoutes } from './http/routes/chat.ts'
 import { createChatsRoutes } from './http/routes/chats.ts'
+import { createClaudeImportRoutes } from './http/routes/claude-import.ts'
 import { createCommandsRoutes } from './http/routes/commands.ts'
 import { createCredentialsRoutes } from './http/routes/credentials.ts'
 import { createCustomizationsRoutes } from './http/routes/customizations.ts'
@@ -36,6 +37,7 @@ import { createHealthRoutes } from './http/routes/health.ts'
 import { createHooksRoutes } from './http/routes/hooks.ts'
 import { createIconsRoutes } from './http/routes/icons.ts'
 import { createKeysRoutes } from './http/routes/keys.ts'
+import { createMarketplacesRoutes } from './http/routes/marketplaces.ts'
 import { createMcpRoutes } from './http/routes/mcp.ts'
 import { createMemoryRoutes } from './http/routes/memory.ts'
 import { createModelsRoutes } from './http/routes/models.ts'
@@ -43,6 +45,7 @@ import { createPluginDraftsRoutes } from './http/routes/plugin-drafts.ts'
 import { createPluginFilesRoutes } from './http/routes/plugin-files.ts'
 import { createPluginInstallRoutes } from './http/routes/plugin-install.ts'
 import { createPluginsRoutes } from './http/routes/plugins.ts'
+import { createProjectDefinitionsRoutes } from './http/routes/project-definitions.ts'
 import { createProjectFilesRoutes } from './http/routes/project-files.ts'
 import { createProjectMcpRoutes } from './http/routes/project-mcp.ts'
 import { createProjectTrustRoutes } from './http/routes/project-trust.ts'
@@ -55,7 +58,7 @@ import { createToolsRoutes } from './http/routes/tools.ts'
 import { createStaticRoutes } from './http/static.ts'
 
 /**
- * The 33 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
+ * The 36 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
  * with static `/plugins/<word>` paths are mounted before `plugins` (`/plugins/:id...`); no route shadows another
  * (they differ in method, segment count or static segments, API.md 8), the order is a second line of defense. `shares`
  * also serves the public `/share/:token` routes; `changes` (Phase 8) serves chat-scoped routes under `/chats/:id/...`;
@@ -64,7 +67,8 @@ import { createStaticRoutes } from './http/static.ts'
  * `memory` (`/memory`) and `chatTasks` (`/chat/:id/tasks...`); Phase 11: `hooks` (`/hooks...`; no `GET /hooks/:id`, so
  * `/hooks/runs` is never taken for an id), `projectTrust` (`/projects/:id/trust...`) and `projectMcp`
  * (`/projects/:id/mcp...`), which differ from `/projects/:id` and `/projects/:id/files...` in their static third segment
- * or their segment count.
+ * or their segment count; Phase 12: `marketplaces` (`/marketplaces...`), `claudeImport` (`/claude-import/...`) and
+ * `projectDefinitions` (`/projects/:id/definitions/file`, a static third segment again).
  */
 export const ROUTE_MODULES = {
   health: createHealthRoutes,
@@ -95,6 +99,9 @@ export const ROUTE_MODULES = {
   hooks: createHooksRoutes,
   projectTrust: createProjectTrustRoutes,
   projectMcp: createProjectMcpRoutes,
+  marketplaces: createMarketplacesRoutes,
+  claudeImport: createClaudeImportRoutes,
+  projectDefinitions: createProjectDefinitionsRoutes,
   shares: createSharesRoutes,
   pluginInstall: createPluginInstallRoutes,
   pluginDrafts: createPluginDraftsRoutes,

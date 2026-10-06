@@ -303,12 +303,13 @@ describe('customize import (W10.8)', () => {
   })
 
   it('starts the notes with the file and ignores keys of a Claude Code agent', async () => {
-    const file = new File(['---\nname: reviewer\ndescription: Reviews diffs\ntools: Read, Grep\nmodel: sonnet\ncolor: blue\n---\nReview.\n'], 'reviewer.md')
+    // Phase 12: `color` is read now (ADR-058); `effort` is still ignored.
+    const file = new File(['---\nname: reviewer\ndescription: Reviews diffs\ntools: Read, Grep\nmodel: sonnet\neffort: high\n---\nReview.\n'], 'reviewer.md')
     const { draft, notes } = await importDraft(file, 'agent')
     expect(draft).toMatchObject({ name: 'reviewer', tools: ['read_file', 'search_files'], model: null, body: 'Review.' })
     expect(notes[0]).toBe('Imported from reviewer.md. Check the fields, then save.')
-    expect(notes).toContain('Ignored: color')
-    expect(notes.some(note => note.includes('provider'))).toBe(true)
+    expect(notes).toContain('Ignored: effort')
+    expect(notes.some(note => note.includes('model alias'))).toBe(true)
   })
 
   it('keeps the fields of a SKILL.md without a name and leaves the name to the user', async () => {

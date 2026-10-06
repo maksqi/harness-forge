@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { harnessUIMessageSchema } from '../chat.ts'
 import { reasoningEffortSchema, titleSourceSchema, toolModeSchema } from '../enums.ts'
-import { agentNameSchema, chatIdSchema, messageIdSchema, modelRefSchema, projectIdSchema, timestampSchema } from '../ids.ts'
+import { catalogNameSchema, chatIdSchema, messageIdSchema, modelRefSchema, projectIdSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { cursorSchema, queryBooleanSchema, queryIntSchema } from './common.ts'
 
@@ -27,7 +27,7 @@ export const chatSettingsSchema = z.strictObject({
    * The chat's output style (Phase 11, ADR-051); absent = automatic (the project's, else the global `outputStyle`).
    * Set by the composer menu and `/output-style`; applies from the next turn.
    */
-  outputStyle: agentNameSchema.optional(),
+  outputStyle: catalogNameSchema.optional(),
 })
 export type ChatSettings = z.infer<typeof chatSettingsSchema>
 
@@ -36,8 +36,8 @@ export const chatSettingsUpdateSchema = z.strictObject({
   toolMode: toolModeSchema.nullable().optional(),
   reasoningEffort: reasoningEffortSchema.nullable().optional(),
   instructions: instructionsSchema.nullable().optional(),
-  /** Phase 11: null = automatic. */
-  outputStyle: agentNameSchema.nullable().optional(),
+  /** Phase 11: null = automatic. Phase 12: a style name may be qualified (`<pluginId>:<name>`). */
+  outputStyle: catalogNameSchema.nullable().optional(),
 })
 export type ChatSettingsUpdate = z.infer<typeof chatSettingsUpdateSchema>
 

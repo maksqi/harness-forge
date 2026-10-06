@@ -2,8 +2,8 @@
 //
 // This module imports nothing: the helper modules under `util/` import `LIMITS` (directly or through `schemas/`), so an
 // import from `util/` here would close a cycle (a TDZ error at load). Values mirrored by a `util/` constant
-// (`DEFINITION_LIMITS`, `HOOK_LIMITS`, `TRUST_LIMITS`, `MCP_CONFIG_LIMITS`, `COMMAND_TEMPLATE_LIMITS`) are literals here,
-// and `limits.test.ts` checks that they are equal.
+// (`DEFINITION_LIMITS`, `HOOK_LIMITS`, `TRUST_LIMITS`, `MCP_CONFIG_LIMITS`, `COMMAND_TEMPLATE_LIMITS`, Phase 12:
+// `CLAUDE_PLUGIN_LIMITS`, `CLAUDE_HOME_LIMITS`) are literals here, and `limits.test.ts` checks that they are equal.
 
 export const LIMITS = {
   /** `POST /files`: bytes per uploaded file. */
@@ -292,6 +292,91 @@ export const LIMITS = {
   commandFileRefsMax: 10,
   /** Bytes inlined per `@path` file. */
   commandFileRefBytes: 32_768,
+
+  // Claude Code ecosystem (Phase 12): Claude Code plugins (ADR-053), marketplaces and archive sources (ADR-054), the
+  // home-folder import (ADR-055), project definition files (ADR-056), prompt hooks, new events and transcripts
+  // (ADR-057), frontmatter compatibility (ADR-058). Mirrors: `CLAUDE_PLUGIN_LIMITS` (`util/claude-plugins.ts`) and
+  // `CLAUDE_HOME_LIMITS` (`util/claude-import.ts`).
+  /** Bytes of a Claude Code `.claude-plugin/plugin.json` (checked before `JSON.parse`). */
+  claudePluginManifestBytes: 262_144,
+  /** Bytes of a `.claude-plugin/marketplace.json` (and of a stored marketplace catalog). */
+  marketplaceJsonBytes: 1_048_576,
+  /** Entries of one marketplace (the rest are dropped with a diagnostic). */
+  marketplaceEntriesMax: 1000,
+  /** Commands, agents or skills of one Claude Code plugin (each kind). */
+  claudeComponentsPerKindMax: 100,
+  /** Output styles of one Claude Code plugin. */
+  claudeOutputStylesMax: 20,
+  /** `userConfig` options of one Claude Code plugin (= the plugin settings properties limit). */
+  claudeUserConfigMax: 50,
+  /** Characters of a qualified catalog name `<pluginId>:<name>` (`QUALIFIED_NAME_PATTERN`). */
+  qualifiedNameMaxChars: 128,
+  /** Segments after the plugin id of a qualified catalog name. */
+  qualifiedNameSegmentsMax: 3,
+  /** Diagnostics of one Claude Code plugin or marketplace (inspection, detail). */
+  claudePluginDiagnosticsMax: 200,
+  /** Executable items listed by a Claude Code plugin inspection (what the trust consent shows). */
+  claudePluginExecutablesMax: 200,
+  /** Marketplaces of one server. */
+  marketplacesMax: 50,
+  /** Compressed bytes of a GitHub repository archive (50 MiB; the plugin subtree still obeys the install caps). */
+  repoArchiveBytes: 52_428_800,
+  /** UTF-8 bytes of one supporting file the `skill` tool reads (`file` input; larger files are cut). */
+  skillFileReadBytes: 65_536,
+  /** Bytes of one definition file read by the import (agent, command, skill, output style). */
+  claudeImportDefinitionBytes: 65_536,
+  /** Definitions of one kind read by the import. */
+  claudeImportDefinitionsPerKindMax: 200,
+  /** Subfolder levels below `commands/` read by the import. */
+  claudeImportCommandDepthMax: 3,
+  /** Bytes of the imported `settings.json`. */
+  claudeImportSettingsBytes: 262_144,
+  /** Bytes of the imported `CLAUDE.md`. */
+  claudeMdBytes: 1_048_576,
+  /** Bytes of `~/.claude.json` (read whole, reduced to its `mcpServers` maps at once). */
+  claudeJsonBytes: 16_777_216,
+  /** Bytes of one import (every file together; also the multipart upload limit of `POST /claude-import/upload`). */
+  claudeImportBytesMax: 33_554_432,
+  /** Items of one import plan. */
+  claudeImportItemsMax: 1000,
+  /** Skipped files listed by one import plan. */
+  claudeImportSkippedMax: 200,
+  /** Characters of the summary of an import plan item (never values). */
+  claudeImportSummaryMaxChars: 300,
+  /** Lifetime of an import plan held by the server (10 min). */
+  claudeImportPlanTtlMs: 600_000,
+  /** Import plans held by the server at the same time (the oldest is dropped). */
+  claudeImportPlansMax: 4,
+  /** Deadline of one home-folder scan (10 s). */
+  claudeImportScanTimeoutMs: 10_000,
+  /** Default timeout of one prompt hook (30 s; a handler's own `timeout` is in seconds, at most `hookTimeoutMaxMs`). */
+  promptHookTimeoutDefaultMs: 30_000,
+  /** Characters of a prompt hook's `prompt`. */
+  promptHookPromptMaxChars: 16_384,
+  /** Output tokens of one prompt hook answer. */
+  promptHookMaxOutputTokens: 512,
+  /** Prompt hook model calls of the whole server that run at the same time (the others wait). */
+  hookModelCallsMax: 8,
+  /** Bytes of the `error` of a `PostToolUseFailure` payload. */
+  hookErrorBytes: 16_384,
+  /** Bytes of one hook transcript (`<dataDir>/transcripts/<chatId>.jsonl`; the oldest messages are dropped above it). */
+  transcriptBytesMax: 8_388_608,
+  /** Bytes of one part of a transcript line (text, tool input). */
+  transcriptPartBytes: 65_536,
+  /** Bytes of one tool result in a transcript line. */
+  transcriptToolResultBytes: 16_384,
+  /** Time the `SessionEnd` hooks of a chat delete get by default (1.5 s; raised by explicit handler timeouts). */
+  sessionEndBudgetMs: 1500,
+  /** Longest `SessionEnd` budget an explicit handler timeout can ask for (60 s). */
+  sessionEndBudgetMaxMs: 60_000,
+  /** Skills an agent definition preloads (`skills` frontmatter key). */
+  agentSkillsPreloadMax: 5,
+  /** Bytes of the preloaded skills added to a child's instructions (32 KiB). */
+  agentSkillsPreloadBytes: 32_768,
+  /** Upper bound of an agent's `maxTurns` (= `stepsMax`). */
+  agentMaxTurnsMax: 200,
+  /** Named `arguments` of a command or skill. */
+  definitionArgumentsMax: 9,
 } as const
 
 /** MIME families accepted by `POST /files` (the server also checks the content). */

@@ -158,8 +158,9 @@ describe('project MCP servers (ADR-050)', () => {
 
 describe('server events (Phase 11)', () => {
   it('adds hooks.changed, project-trust.changed and project-mcp.changed (18 types)', () => {
-    expect(SERVER_EVENT_TYPES).toHaveLength(18)
-    expect(SERVER_EVENT_TYPES.slice(15)).toEqual(['hooks.changed', 'project-trust.changed', 'project-mcp.changed'])
+    // Phase 12 adds `marketplace.changed` (19).
+    expect(SERVER_EVENT_TYPES).toHaveLength(19)
+    expect(SERVER_EVENT_TYPES.slice(15, 18)).toEqual(['hooks.changed', 'project-trust.changed', 'project-mcp.changed'])
     expect(serverEventSchema.parse(createServerEvent('project-trust.changed', { projectId: PROJECT_ID, pending: 3 }, 1)).data).toEqual({ projectId: PROJECT_ID, pending: 3 })
     expect(serverEventSchema.parse(createServerEvent('project-mcp.changed', { projectId: PROJECT_ID, servers: [server] }, 1)).data).toEqual({ projectId: PROJECT_ID, servers: [server] })
     expect(serverEventSchema.safeParse({ type: 'project-trust.changed', data: { projectId: PROJECT_ID, pending: -1 }, at: 1 }).success).toBe(false)

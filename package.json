@@ -13,7 +13,7 @@
     "dev": "pnpm --parallel --filter @harness-forge/server --filter @harness-forge/web run dev",
     "build": "pnpm --filter @harness-forge/web run build && pnpm --filter @harness-forge/server run build",
     "start": "node apps/server/dist/main.mjs",
-    "start:e2e": "HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e node apps/server/dist/main.mjs",
+    "start:e2e": "HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_CLAUDE_HOME=0 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e node apps/server/dist/main.mjs",
     "test": "vitest run",
     "test:live": "vitest run --config apps/server/vitest.live.config.ts",
     "test:e2e": "playwright test --pass-with-no-tests",

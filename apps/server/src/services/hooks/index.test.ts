@@ -530,8 +530,9 @@ describe.skipIf(!posix)('hook service: plugin code hooks', () => {
     ]
     cleanups.push(() => handlers.forEach(handler => handler.dispose()))
     const snapshot = await h.hooks.snapshot(scope(h, { origin: 'hook' }))
+    // The six events with a code hook; the tool events and the Phase 12 events have none.
     for (const event of HOOK_EVENTS)
-      expect(snapshot.has(event), event).toBe(!['PreToolUse', 'PostToolUse'].includes(event))
+      expect(snapshot.has(event), event).toBe(['UserPromptSubmit', 'SessionStart', 'Stop', 'SubagentStop', 'PreCompact', 'Notification'].includes(event))
 
     const prompt = await snapshot.run('UserPromptSubmit', { prompt: '/greet Ada', command: 'greet' }, { signal: signal() })
     expect(prompt).toMatchObject({ ran: true, block: true, reason: 'Not on Fridays.', record: { outcome: 'blocked', hooks: [{ source: 'plugin', label: 'mock: prompt.submit', pluginId: 'mock', exitCode: null }] } })

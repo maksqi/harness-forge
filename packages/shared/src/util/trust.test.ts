@@ -205,3 +205,112 @@ describe('extractArgsFileRefs', () => {
     expect(extractArgsFileRefs('x' as unknown as string[])).toEqual([])
   })
 })
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Phase 12 (ADR-057, C42): golden v1 hashes and the v2 hook layout
+
+/** sha256 of `text` (UTF-8) in lowercase hex, with WebCrypto (the server hashes with `node:crypto`; same bytes). */
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * Representative v1.7 items with the canonical text and sha256 computed by the v1.7 code (C35) before Phase 12 changed
+ * `trust.ts`: every approval of a v1.7 data folder pins one of these layouts, so they must never change.
+ */
+const GOLDEN_V1: ReadonlyArray<{ item: TrustHashItem, text: string, sha256: string }> = (() => {
+  const servers = parseMcpJson(JSON.stringify({ mcpServers: {
+    db: { command: 'node', args: ['tools/mcp-min.mjs', '--port', '3000'], env: { TOKEN: '${API_TOKEN}', MODE: 'dev' } },
+    remote: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: 'Bearer ${API_TOKEN}' } },
+  } })).servers
+  return [
+    {
+      item: { kind: 'hook', event: 'PreToolUse', matcher: 'Bash', command: 'sh .claude/hooks/a.sh', timeoutSec: 30, refs: [{ path: '.claude/hooks/a.sh', sha256: 'a'.repeat(64) }] },
+      text: `["hook",1,"PreToolUse","Bash","sh .claude/hooks/a.sh",30,[{"path":".claude/hooks/a.sh","sha256":"${'a'.repeat(64)}"}]]`,
+      sha256: 'a9b728df0230827e25439863ed5af1b5c501018967a63bfc967fdede1ddb473c',
+    },
+    {
+      item: { kind: 'hook', event: 'Stop', matcher: null, command: '"$CLAUDE_PROJECT_DIR"/.claude/hooks/stop.sh', timeoutSec: null, refs: [{ path: '.claude/hooks/stop.sh', sha256: null }] },
+      text: '["hook",1,"Stop",null,"\\"$CLAUDE_PROJECT_DIR\\"/.claude/hooks/stop.sh",null,[{"path":".claude/hooks/stop.sh","sha256":null}]]',
+      sha256: '6ac2e216f6ca355840ef59e583e7980ba40ee38872acc5f191a4eaa991c19a83',
+    },
+    {
+      item: { kind: 'hook', event: 'SessionStart', matcher: 'startup', command: 'cat .claude/context.md', timeoutSec: null, refs: [] },
+      text: '["hook",1,"SessionStart","startup","cat .claude/context.md",null,[]]',
+      sha256: '284944882d48c062488842ea784b9343f2e320f5703a471b15e117fc2d31d323',
+    },
+    {
+      item: { kind: 'hook', event: 'PostToolUse', matcher: 'Edit|MultiEdit|Write', command: 'npx prettier --write "$(jq -r .tool_input.file_path)"', timeoutSec: 600, refs: [{ path: 'b.sh', sha256: '2'.repeat(64) }, { path: 'a.sh', sha256: '1'.repeat(64) }] },
+      text: `["hook",1,"PostToolUse","Edit|MultiEdit|Write","npx prettier --write \\"$(jq -r .tool_input.file_path)\\"",600,[{"path":"a.sh","sha256":"${'1'.repeat(64)}"},{"path":"b.sh","sha256":"${'2'.repeat(64)}"}]]`,
+      sha256: 'f6df5d05bf0c28053470c7f630b8cf3522f2a652c1f3733b540bd1465a5cbb22',
+    },
+    {
+      item: { kind: 'mcp', name: 'db', server: servers[0]!.raw, refs: [{ path: 'tools/mcp-min.mjs', sha256: 'c'.repeat(64) }] },
+      text: `["mcp",1,"db",{"args":["tools/mcp-min.mjs","--port","3000"],"command":"node","env":{"MODE":"dev","TOKEN":"\${API_TOKEN}"}},[{"path":"tools/mcp-min.mjs","sha256":"${'c'.repeat(64)}"}]]`,
+      sha256: '8da6e04182e690b48e31d2902c473c60c1cdb12f3cfced926f1ff844bde621d0',
+    },
+    {
+      item: { kind: 'mcp', name: 'remote', server: servers[1]!.raw, refs: [] },
+      text: '["mcp",1,"remote",{"headers":{"Authorization":"Bearer ${API_TOKEN}"},"type":"http","url":"https://mcp.example.com/mcp"},[]]',
+      sha256: '5426466b9e7a8cc12ed96920b148c6a3eb437a3a4ceba9c6561f34ee36f29592',
+    },
+    {
+      item: { kind: 'command', name: 'status', spans: ['git status --short', 'git log -1'], refs: [] },
+      text: '["command",1,"status",["git status --short","git log -1"],[]]',
+      sha256: 'd398784e1ca09bf9d8bb02157570e3ff25dbe15b4aae844e4d54becc1f9bfa8e',
+    },
+    {
+      item: { kind: 'command', name: 'lint', spans: ['sh scripts/lint.sh'], refs: [{ path: 'scripts/lint.sh', sha256: 'd'.repeat(64) }] },
+      text: `["command",1,"lint",["sh scripts/lint.sh"],[{"path":"scripts/lint.sh","sha256":"${'d'.repeat(64)}"}]]`,
+      sha256: '24260c76d6f4707a0e06c67620c8f3d108aacef4f36a1b1cf8f50ac6b3d4cbc8',
+    },
+  ]
+})()
+
+describe('trustHashInput: golden v1.7 hashes (Phase 12)', () => {
+  it.each(GOLDEN_V1.map((entry, index) => [index, entry] as const))('item %d keeps its v1.7 text and sha256', async (_index, { item, text, sha256 }) => {
+    expect(trustHashInput(item)).toBe(text)
+    expect(await sha256Hex(trustHashInput(item))).toBe(sha256)
+  })
+
+  it('keeps the v1 layout for a hook without extra fields', () => {
+    const hook = GOLDEN_V1[0]!.item as Extract<TrustHashItem, { kind: 'hook' }>
+    for (const extra of [undefined, null, {}, { args: undefined, async: undefined, if: undefined }])
+      expect(trustHashInput({ ...hook, extra })).toBe(GOLDEN_V1[0]!.text)
+    expect(trustHashInput({ ...hook, extra: [1] as unknown as Record<string, unknown> })).toBe(GOLDEN_V1[0]!.text)
+  })
+})
+
+describe('trustHashInput: v2 hook layout (Phase 12)', () => {
+  const base = { kind: 'hook' as const, event: 'PreToolUse', matcher: 'Bash', timeoutSec: null, refs: [] }
+
+  it('writes [hook, 2, event, matcher, command | null, timeout, extra, refs]', () => {
+    expect(trustHashInput({ ...base, command: null, extra: { type: 'prompt', prompt: 'Safe? $ARGUMENTS', model: 'sonnet', continueOnBlock: false } }))
+      .toBe('["hook",2,"PreToolUse","Bash",null,null,{"continueOnBlock":false,"model":"sonnet","prompt":"Safe? $ARGUMENTS","type":"prompt"},[]]')
+    expect(trustHashInput({ ...base, command: '${CLAUDE_PLUGIN_ROOT}/check', extra: { args: ['--fix', 'a b'], async: true, if: 'Bash(git *)' }, refs: [{ path: 'check', sha256: 'e'.repeat(64) }] }))
+      .toBe(`["hook",2,"PreToolUse","Bash","\${CLAUDE_PLUGIN_ROOT}/check",null,{"args":["--fix","a b"],"async":true,"if":"Bash(git *)"},[{"path":"check","sha256":"${'e'.repeat(64)}"}]]`)
+  })
+
+  it('is stable under the key order of extra and changes with every extra field', () => {
+    const one = trustHashInput({ ...base, command: 'x', extra: { if: 'Write', args: ['a'] } })
+    expect(trustHashInput({ ...base, command: 'x', extra: { args: ['a'], if: 'Write' } })).toBe(one)
+    const v1 = trustHashInput({ ...base, command: 'x' })
+    const variants = [
+      { args: ['a'] },
+      { args: ['b'] },
+      { args: ['a', 'b'] },
+      { args: [] },
+      { async: true },
+      { if: 'Write' },
+      { if: 'Edit' },
+      { type: 'prompt', prompt: 'p' },
+      { type: 'prompt', prompt: 'q' },
+      { type: 'prompt', prompt: 'p', model: 'haiku' },
+      { type: 'prompt', prompt: 'p', continueOnBlock: true },
+    ]
+    const hashes = new Set([v1, ...variants.map(extra => trustHashInput({ ...base, command: 'x', extra }))])
+    expect(hashes.size).toBe(variants.length + 1)
+    expect(trustHashInput({ ...base, command: null, extra: { type: 'prompt', prompt: 'p' } })).not.toBe(trustHashInput({ ...base, command: '', extra: { type: 'prompt', prompt: 'p' } }))
+  })
+})

@@ -1,7 +1,7 @@
 import type { DefinitionDiagnostic } from './definitions.ts'
 import { describe, expect, it } from 'vitest'
 import { DEFINITION_LIMITS } from './definitions.ts'
-import { CLAUDE_TOOL_ALIASES, matchToolAllowlist, normalizeToolList } from './tool-names.ts'
+import { CLAUDE_AGENT_TOOL_ALIASES, CLAUDE_AGENT_TYPE_ALIASES, CLAUDE_TOOL_ALIASES, claudeAgentTypeNames, matchToolAllowlist, normalizeToolList } from './tool-names.ts'
 
 function codes(diagnostics: readonly DefinitionDiagnostic[]): string[] {
   return diagnostics.map(entry => `${entry.level}:${entry.code}`)
@@ -141,5 +141,34 @@ describe('matchToolAllowlist', () => {
     expect(matchToolAllowlist('', ['*'])).toBe(false)
     expect(matchToolAllowlist('shell', null as unknown as string[])).toBe(false)
     expect(matchToolAllowlist('shell', [1, null, 'shell'] as unknown as string[])).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Phase 12 (ADR-057 / ADR-058, C42)
+
+describe('claude agent names (Phase 12)', () => {
+  it('maps the agent tools and agent types without touching CLAUDE_TOOL_ALIASES', () => {
+    expect(CLAUDE_AGENT_TOOL_ALIASES).toEqual({ Task: 'task', Agent: 'task', TodoWrite: 'todo_write', ExitPlanMode: 'exit_plan_mode', Skill: 'skill' })
+    expect(CLAUDE_AGENT_TYPE_ALIASES).toEqual({ 'general-purpose': 'general', 'Explore': 'explore' })
+    expect(claudeAgentTypeNames('general')).toEqual(['general', 'general-purpose'])
+    expect(claudeAgentTypeNames('explore')).toEqual(['explore', 'Explore'])
+    expect(claudeAgentTypeNames('kit:reviewer')).toEqual(['kit:reviewer'])
+    expect(claudeAgentTypeNames(null as unknown as string)).toEqual([])
+    // Tool lists keep their Phase 10 meaning.
+    expect(normalizeToolList('Task, Agent, TodoWrite').tools).toEqual(['Task', 'Agent', 'TodoWrite'])
+  })
+
+  it('words deny lists as removals', () => {
+    expect(normalizeToolList('Bash(rm:*), Read', { mode: 'deny' })).toEqual({
+      tools: ['shell', 'read_file'],
+      diagnostics: [{ level: 'warning', code: 'tool-pattern', message: 'Tool patterns are not supported; shell is removed entirely.' }],
+    })
+    expect(normalizeToolList(5, { mode: 'deny' })).toEqual({
+      tools: null,
+      diagnostics: [{ level: 'warning', code: 'invalid-field', message: 'The disallowed tool list must be a comma-separated text or a list; it was ignored.' }],
+    })
+    expect(normalizeToolList(5, { mode: 'allow' }).tools).toEqual([])
+    expect(normalizeToolList(null, { mode: 'deny' })).toEqual({ tools: null, diagnostics: [] })
   })
 })

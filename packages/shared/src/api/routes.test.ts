@@ -90,8 +90,8 @@ function tableSignatures(): string[] {
 }
 
 describe('route table', () => {
-  it('has 120 routes keyed <module>.<action>', () => {
-    expect(API_ROUTE_KEYS).toHaveLength(120)
+  it('has 132 routes keyed <module>.<action>', () => {
+    expect(API_ROUTE_KEYS).toHaveLength(132)
     for (const key of API_ROUTE_KEYS) {
       const route: ApiRouteDef = apiRoutes[key]
       expect(key.startsWith(`${route.module}.`), key).toBe(true)
@@ -107,7 +107,7 @@ describe('route table', () => {
 
   it('equals the route key index of API.md (key, method, path, module)', () => {
     const index = routeIndex()
-    expect(index).toHaveLength(120)
+    expect(index).toHaveLength(132)
     expect(index.map(row => `${row.key} ${signature(row)}`).sort()).toEqual(
       API_ROUTE_KEYS.map(key => `${key} ${signature(apiRoutes[key])}`).sort(),
     )
@@ -294,8 +294,7 @@ describe('route table', () => {
   })
 
   it('declares the hook, project trust and project MCP routes as the contract says (ADR-048 … ADR-050)', () => {
-    expect(API_MODULES).toHaveLength(33)
-    expect(API_MODULES.slice(-4)).toEqual(['hooks', 'projectTrust', 'projectMcp', 'shares'])
+    expect(API_MODULES.slice(-7, -3)).toEqual(['hooks', 'projectTrust', 'projectMcp', 'shares'])
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'hooks')).toEqual(['hooks.list', 'hooks.runs', 'hooks.create', 'hooks.update', 'hooks.remove'])
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'projectTrust')).toEqual(['projectTrust.list', 'projectTrust.approve', 'projectTrust.revoke'])
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'projectMcp')).toEqual(['projectMcp.list', 'projectMcp.setVariables', 'projectMcp.reconnect'])
@@ -319,6 +318,39 @@ describe('route table', () => {
     expect(apiRoutes['projectMcp.setVariables'].response).toBe(apiRoutes['projectMcp.list'].response)
     expect(apiRoutes['hooks.update'].response).toBe(apiRoutes['hooks.create'].response)
     expect((apiRoutes['hooks.list'] as ApiRouteDef).query).toBeDefined()
+  })
+
+  it('declares the marketplace, Claude Code import and project definition routes as the contract says (ADR-054 … ADR-056)', () => {
+    expect(API_MODULES).toHaveLength(36)
+    expect(API_MODULES.slice(-3)).toEqual(['marketplaces', 'claudeImport', 'projectDefinitions'])
+    const keysOf = (module: string): ApiRouteKey[] => API_ROUTE_KEYS.filter(key => apiRoutes[key].module === module)
+    expect(keysOf('marketplaces')).toEqual(['marketplaces.list', 'marketplaces.add', 'marketplaces.get', 'marketplaces.refresh', 'marketplaces.remove'])
+    expect(keysOf('claudeImport')).toEqual(['claudeImport.home', 'claudeImport.scan', 'claudeImport.upload', 'claudeImport.apply'])
+    expect(keysOf('projectDefinitions')).toEqual(['projectDefinitions.read', 'projectDefinitions.write', 'projectDefinitions.remove'])
+    const phase12 = [...keysOf('marketplaces'), ...keysOf('claudeImport'), ...keysOf('projectDefinitions')]
+    expect(phase12).toHaveLength(12)
+    // Scanning the server's home folder and applying an import need fresh auth; nothing else of Phase 12 does (editing
+    // project files approves nothing; installs from a marketplace go through `pluginInstall.install`).
+    expect(phase12.filter(key => (apiRoutes[key] as ApiRouteDef).fresh === true)).toEqual(['claudeImport.scan', 'claudeImport.apply'])
+    expect(API_ROUTE_KEYS.filter(key => (apiRoutes[key] as ApiRouteDef).fresh === true)).toHaveLength(14)
+    for (const key of phase12)
+      expect((apiRoutes[key] as ApiRouteDef).public, key).toBeUndefined()
+    for (const key of keysOf('projectDefinitions'))
+      expect(apiRoutes[key].path, key).toBe('/projects/:id/definitions/file')
+    expect(routeSuccessStatus(apiRoutes['marketplaces.add'])).toBe(201)
+    expect(routeSuccessStatus(apiRoutes['marketplaces.remove'])).toBe(204)
+    expect(routeSuccessStatus(apiRoutes['projectDefinitions.remove'])).toBe(204)
+    expect(routeSuccessStatus(apiRoutes['claudeImport.upload'])).toBe(200)
+    // The upload is multipart only; the add, refresh and get answers are one shape; scan and upload answer the plan.
+    const upload = apiRoutes['claudeImport.upload'] as ApiRouteDef
+    expect(upload.form).toBeDefined()
+    expect(upload.body).toBeUndefined()
+    expect(apiRoutes['marketplaces.refresh'].response).toBe(apiRoutes['marketplaces.add'].response)
+    expect(apiRoutes['marketplaces.get'].response).toBe(apiRoutes['marketplaces.add'].response)
+    expect(apiRoutes['claudeImport.scan'].response).toBe(apiRoutes['claudeImport.upload'].response)
+    expect((apiRoutes['claudeImport.scan'] as ApiRouteDef).body).toBeUndefined()
+    // `pluginInstall.inspect` keeps its key and takes the format field in its multipart form.
+    expect((apiRoutes['pluginInstall.inspect'] as ApiRouteDef).form).toBeDefined()
   })
 })
 
@@ -512,6 +544,36 @@ describe('matchApiRoute', () => {
       ['POST', `/projects/${project}/mcp`],
       ['GET', `/projects/${project}/mcp/memory/reconnect`],
       ['PUT', `/projects/${project}/mcp/memory/variables`],
+    ] as const)
+      expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
+  })
+
+  it('matches the Phase 12 routes without shadowing their neighbors (ADR-054 … ADR-056)', () => {
+    const marketplace = 'mkt_ABCdef0123456789'
+    const project = 'prj_ABCdef0123456789'
+    expect(matchApiRoute('GET', '/marketplaces')?.key).toBe('marketplaces.list')
+    expect(matchApiRoute('POST', '/marketplaces')?.key).toBe('marketplaces.add')
+    expect(matchApiRoute('GET', `/marketplaces/${marketplace}`)).toMatchObject({ key: 'marketplaces.get', params: { id: marketplace } })
+    expect(matchApiRoute('POST', `/marketplaces/${marketplace}/refresh`)).toMatchObject({ key: 'marketplaces.refresh', params: { id: marketplace } })
+    expect(matchApiRoute('DELETE', `/marketplaces/${marketplace}`)?.key).toBe('marketplaces.remove')
+    expect(matchApiRoute('GET', '/claude-import/home')?.key).toBe('claudeImport.home')
+    expect(matchApiRoute('POST', '/claude-import/scan')?.key).toBe('claudeImport.scan')
+    expect(matchApiRoute('POST', '/claude-import/upload')?.key).toBe('claudeImport.upload')
+    expect(matchApiRoute('POST', '/claude-import/apply')?.key).toBe('claudeImport.apply')
+    for (const method of ['GET', 'PUT', 'DELETE'])
+      expect(matchApiRoute(method, `/projects/${project}/definitions/file`)?.params).toEqual({ id: project })
+    expect(matchApiRoute('GET', `/projects/${project}/definitions/file`)?.key).toBe('projectDefinitions.read')
+    expect(matchApiRoute('PUT', `/projects/${project}/definitions/file`)?.key).toBe('projectDefinitions.write')
+    expect(matchApiRoute('DELETE', `/projects/${project}/definitions/file`)?.key).toBe('projectDefinitions.remove')
+    // The plugin routes keep `/plugins/marketplaces` (the web page) out of the API.
+    expect(matchApiRoute('GET', '/plugins/marketplaces')?.key).toBe('plugins.get')
+    for (const [method, path] of [
+      ['PUT', '/marketplaces'],
+      ['GET', `/marketplaces/${marketplace}/refresh`],
+      ['GET', '/claude-import/scan'],
+      ['POST', '/claude-import/home'],
+      ['POST', `/projects/${project}/definitions/file`],
+      ['GET', `/projects/${project}/definitions`],
     ] as const)
       expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
   })

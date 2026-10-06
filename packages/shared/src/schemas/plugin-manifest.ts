@@ -7,7 +7,7 @@ import { planCommandExpansion } from '../util/command-template.ts'
 import { isSafeRelativePath } from '../util/paths.ts'
 import { isSemver, isSemverRange } from '../util/semver.ts'
 import { duplicates, isUnique } from '../util/text.ts'
-import { countHookHandlers, hooksConfigSchema } from './hooks.ts'
+import { countCommandHookHandlers, hooksConfigSchema } from './hooks.ts'
 import {
   declarativeAgentSchema,
   declarativeCommandSchema,
@@ -64,7 +64,9 @@ export const pluginContributesSchema = z.strictObject({
   skills: z.array(declarativeSkillSchema).max(50).optional(),
   /**
    * Plugin API 1.5.0 (ADR-048): command hooks in the Claude Code `hooks` format (at most 50 handlers). A plugin with
-   * command hooks requires trust (like a stdio MCP server); they run only while the plugin is active and trusted.
+   * command hooks requires trust (like a stdio MCP server); they run only while the plugin is active and trusted. Plugin
+   * API 1.6.0 (ADR-057): 13 events (an unknown event is still an error here), prompt handlers (no trust needed) and the
+   * command handler fields `args`, `async`, `if`, `statusMessage`.
    */
   hooks: hooksConfigSchema.optional(),
   /** Plugin API 1.5.0 (ADR-051): output styles (at most 20). */
@@ -147,7 +149,7 @@ export const pluginManifestBaseSchema = manifestObjectSchema.superRefine((manife
 /** A user plugin manifest: every rule of `pluginManifestBaseSchema` plus "the id is not reserved". */
 export const pluginManifestSchema = pluginManifestBaseSchema.superRefine((manifest, ctx) => {
   if (isReservedPluginId(manifest.id))
-    ctx.addIssue({ code: 'custom', path: ['id'], message: `The plugin id "${manifest.id}" is reserved (core-*, mock and builtin provider ids).` })
+    ctx.addIssue({ code: 'custom', path: ['id'], message: `The plugin id "${manifest.id}" is reserved (core-*, mock, builtin provider ids, new and marketplaces).` })
 })
 export type PluginManifest = z.infer<typeof pluginManifestSchema>
 
@@ -161,9 +163,12 @@ export function declaresStdioMcpServer(manifest: Pick<PluginManifest, 'contribut
   return (manifest.contributes?.mcpServers ?? []).some(server => server.transport.type === 'stdio')
 }
 
-/** True when the manifest declares command hooks (`contributes.hooks` with at least one handler; plugin API 1.5.0). */
+/**
+ * True when the manifest declares command hooks (`contributes.hooks` with at least one command handler; plugin API
+ * 1.5.0). Prompt handlers (plugin API 1.6.0) run no command and need no trust.
+ */
 export function declaresCommandHooks(manifest: Pick<PluginManifest, 'contributes'>): boolean {
-  return countHookHandlers(manifest.contributes?.hooks) > 0
+  return countCommandHookHandlers(manifest.contributes?.hooks) > 0
 }
 
 /**
@@ -176,7 +181,8 @@ export function declaresCommandShellSpans(manifest: Pick<PluginManifest, 'contri
 
 /**
  * Plugins that can run commands require trust (sha256 pinning): code plugins, plugins with a stdio MCP server and, since
- * plugin API 1.5.0, plugins with command hooks or with `` !`cmd` `` spans in a command template.
+ * plugin API 1.5.0, plugins with command hooks or with `` !`cmd` `` spans in a command template (prompt-only hooks of
+ * plugin API 1.6.0 do not).
  */
 export function manifestRequiresTrust(manifest: Pick<PluginManifest, 'main' | 'contributes'>): boolean {
   return isCodePluginManifest(manifest) || declaresStdioMcpServer(manifest) || declaresCommandHooks(manifest) || declaresCommandShellSpans(manifest)

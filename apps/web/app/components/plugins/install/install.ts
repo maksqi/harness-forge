@@ -214,6 +214,11 @@ export function requestSourceLabel(request: InstallRequest): string {
       return urlHost(source.url)
     case 'path':
       return source.path
+    // Phase 12 (C40 compile fix; the GitHub tab and the marketplace install land in W12.8 / W12.9).
+    case 'github':
+      return `${source.repo}${source.ref === undefined ? '' : `#${source.ref}`}${source.path === undefined ? '' : `/${source.path}`}`
+    case 'marketplace':
+      return source.plugin
   }
 }
 
